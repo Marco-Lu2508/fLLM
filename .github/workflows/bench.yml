@@ -1,0 +1,103 @@
+# Streaming benchmark of the CPU server on a SELF-HOSTED runner that has a GGUF model on disk. Manual only (Actions -> streaming-benchmark ->
+# Run workflow): hosted runners have neither the model nor stable timing, and a scheduled run there would only fail.
+#
+# `runner_labels` is a JSON array of runner labels, e.g. ["self-hosted","linux","gpu"]. The model is an absolute path ON THE RUNNER, given
+# as the input `model` or, when empty, as the repository variable BENCH_MODEL (Settings -> Secrets and variables -> Actions -> Variables).
+# If bench/baseline.json exists in the checkout the run is compared with it (regression budget 10 %). See docs/ci.md.
+name: streaming-benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_labels:
+        description: 'Labels of the self-hosted runner as a JSON array'
+        required: true
+        default: '["self-hosted", "linux", "gpu"]'
+        type: string
+      model:
+        description: "Absolute path of a GGUF model on the runner (default: repository variable BENCH_MODEL)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fllm-benchmark
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: CPU streaming benchmark
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    timeout-minutes: 60
+    env:
+      BENCH_MODEL: ${{ inputs.model || vars.BENCH_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          path: bench-src
+          persist-credentials: false
+
+      - name: Build benchmark client and CPU server
+        run: |
+          set -eu
+          cd bench-src
+          case "$BENCH_MODEL" in
+            /*) ;;
+            *) echo 'Set the input model or the variable BENCH_MODEL to an absolute GGUF path on the runner.' >&2; exit 1 ;;
+          esac
+          test -f "$BENCH_MODEL" || { echo "The benchmark model does not exist on the runner: $BENCH_MODEL" >&2; exit 1; }
+          FLLM_GIT_COMMIT=$(git rev-parse HEAD)
+          export FLLM_GIT_COMMIT
+          cargo build --locked --release -p fllm-engine --bin fllm-rs
+
+      - name: Measure and check an existing baseline
+        run: |
+          set -eu
+          cd bench-src
+          mkdir -p bench-results
+          # Reserve this port for the CI concurrency group. A conflicting
+          # listener fails the job instead of benchmarking another process.
+          address=127.0.0.1:18107
+          target/release/fllm-rs serve --model "$BENCH_MODEL" --model-name ci-bench \
+            --device cpu --host 127.0.0.1 --port 18107 --ctx 1024 --threads 2 \
+            --max-seqs 2 --max-batched-tokens 128 >bench-results/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM
+          # Loading must finish before /v1/models is available. Bounded wait.
+          ready=0
+          for _ in $(seq 1 120); do
+            kill -0 "$server_pid" 2>/dev/null || { cat bench-results/server.log >&2; exit 1; }
+            if grep -q 'cannot bind HTTP listener' bench-results/server.log; then
+              cat bench-results/server.log >&2
+              exit 1
+            fi
+            if grep -q "fllm-rs listening on http://$address" bench-results/server.log && curl --silent --fail --max-time 2 "http://$address/v1/models" > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1 || { echo 'Benchmark server did not become ready.' >&2; cat bench-results/server.log >&2; exit 1; }
+          target/release/fllm-rs bench --url "http://$address" --endpoint completions \
+            --prompt-lens 128 --context-lens 256 --concurrency 1,2 --input-len 64 \
+            --gen-len 32 --warmup 1 --repeats 3 --seed 42 --timeout 60 \
+            --length-control none --label 'fLLM CI CPU' --notes 'threads=2 ctx=1024 max-seqs=2' \
+            --json bench-results/current.json >bench-results/table.txt
+          if test -f bench/baseline.json; then
+            target/release/fllm-rs bench-report --baseline bench/baseline.json \
+              --current bench-results/current.json --max-regression 10 >bench-results/comparison.md
+          else
+            echo 'No bench/baseline.json: result retained without a regression verdict.'
+          fi
+
+      - name: Upload measurements and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fllm-benchmark-${{ github.sha }}
+          path: bench-src/bench-results/
+          if-no-files-found: warn

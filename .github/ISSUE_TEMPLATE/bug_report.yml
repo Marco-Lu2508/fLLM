@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Command and model
+      description: The exact command line, the model (Hugging Face link or GGUF name and quantization) and the output.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: devices
+    attributes:
+      label: Output of `fllm-rs devices`
+      description: Shows the CPU, the GPUs and the backends this build can use.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag, or commit if built from source. Also say how you installed it (install script, Docker image, cargo).
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and GPU driver
+      placeholder: "e.g. Windows 11, NVIDIA driver 570; Ubuntu 24.04, Mesa 25.0"
+    validations:
+      required: false

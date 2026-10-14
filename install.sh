@@ -5,7 +5,7 @@
 #   ./install.sh [VERSION] [OPTIONS]
 #
 #   VERSION      release tag to install; "latest" (the default) resolves the newest release
-#                through the Forgejo API of this repository's origin remote.
+#                through the release API of this repository's origin remote (GitHub, Forgejo or Gitea).
 #
 #   --no-verify  install even when the release publishes no <asset>.sha256 file. A checksum
 #                file that does exist is always verified; a mismatch always aborts.
@@ -14,10 +14,19 @@
 #
 # The download URL is derived from `git remote -v` of this checkout, e.g.
 #   https://github.com/Marco-Lu2508/fLLM/releases/download/<tag>/<asset>
-# and falls back to that URL when git or the remote is missing. Assets (built by
-# .github/workflows/release.yml):
+# and falls back to that URL when git or the remote is missing. Assets (built by the
+# release workflow of .github/workflows/release.yml or .github/workflows/release.yml):
 #   fllm-linux-x86_64-musl.tar.gz, fllm-linux-aarch64-musl.tar.gz,
 #   fllm-macos-aarch64.tar.gz, fllm-macos-x86_64.tar.gz, each with <asset>.sha256
+#
+# "latest" on github.com: follows the /releases/latest redirect (no API call, no rate limit);
+# while the repository has only pre-releases (v0.x) that redirect has no target, so the newest
+# release is read from the API (api.github.com, 60 requests per hour without a token).
+# Other hosts use the Forgejo/Gitea API (/api/v1). Environment overrides:
+#   FLLM_REPO_URL  repository URL instead of the git remote (e.g. a mirror)
+#   FLLM_FORGE     github | forgejo, when the host name does not tell
+#   FLLM_API_URL   base URL of the GitHub API (default https://api.github.com)
+#   FLLM_INSTALL_DIR, RUST_FEATURES, as before
 #
 # Requirements: curl or wget to download, sha256sum/shasum/openssl for the checksum check,
 # tar to unpack. No Python is used, and no checksum value is baked into this script - the
@@ -35,7 +44,7 @@ VERSION="latest"
 VERIFY="1"
 BUILD_ONLY="0"
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -eu$/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -112,9 +121,14 @@ to_https() {
         *) return 1 ;;
     esac
 }
-REPO_URL=$(remote_url | to_https) || REPO_URL="$DEFAULT_REPO"
+if [ -n "${FLLM_REPO_URL:-}" ]; then
+    REPO_URL=$FLLM_REPO_URL
+else
+    REPO_URL=$(remote_url | to_https) || REPO_URL="$DEFAULT_REPO"
+fi
 REPO_URL=${REPO_URL%/}
 
+SCHEME=${REPO_URL%%://*}
 rest=${REPO_URL#*://}                 # host/owner/name
 HOST=${rest%%/*}
 path=${rest#*/}                       # owner/name
@@ -122,17 +136,45 @@ name=${path##*/}
 head=${path%/*}
 [ "$head" != "$path" ] || die "cannot derive owner/repository from $REPO_URL"
 SLUG="$head/$name"
-API="https://$HOST/api/v1/repos/$SLUG"
 BASE="$REPO_URL/releases"
+
+case "${FLLM_FORGE:-}" in
+    github|forgejo) FORGE=$FLLM_FORGE ;;
+    "") case "$HOST" in
+            github.com|www.github.com) FORGE="github" ;;
+            *) FORGE="forgejo" ;;
+        esac ;;
+    *) die "FLLM_FORGE must be 'github' or 'forgejo', not '${FLLM_FORGE}'" ;;
+esac
+
+tag_from_json() { # JSON on stdin -> first "tag_name" value
+    grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 |
+        sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
+}
 
 # --------------------------------------------------------------- resolve the tag
 if [ "$BUILD_ONLY" = "0" ] && [ "$VERSION" = "latest" ]; then
-    json=$(fetch "$API/releases/latest") ||
-        die "cannot query $API/releases/latest - is $REPO_URL reachable?"
-    VERSION=$(printf '%s' "$json" |
-        grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 |
-        sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/')
-    [ -n "$VERSION" ] || die "no release found via $API/releases/latest"
+    if [ "$FORGE" = "github" ]; then
+        # /releases/latest redirects to /releases/tag/<tag>; it ignores pre-releases (v0.x), then there is no target
+        VERSION=""
+        if have curl; then
+            final=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest" 2>/dev/null) || final=""
+            case "$final" in */releases/tag/*) VERSION=${final##*/releases/tag/} ;; esac
+        fi
+        if [ -z "$VERSION" ]; then
+            API="${FLLM_API_URL:-https://api.github.com}/repos/$SLUG/releases?per_page=1"
+            json=$(fetch "$API") ||
+                die "cannot query $API - is $REPO_URL reachable? (a tag can be given as an argument, --build compiles instead)"
+            VERSION=$(printf '%s' "$json" | tag_from_json) || VERSION=""
+            [ -n "$VERSION" ] || die "no release found via $API"
+        fi
+    else
+        API="$SCHEME://$HOST/api/v1/repos/$SLUG"
+        json=$(fetch "$API/releases/latest") ||
+            die "cannot query $API/releases/latest - is $REPO_URL reachable?"
+        VERSION=$(printf '%s' "$json" | tag_from_json) || VERSION=""
+        [ -n "$VERSION" ] || die "no release found via $API/releases/latest"
+    fi
     echo "Newest release: $VERSION"
 fi
 

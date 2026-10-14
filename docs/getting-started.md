@@ -8,7 +8,7 @@ and call it. Every command below is the exact CLI of the `fllm-rs` binary
 
 Three routes; pick one.
 
-**Release binary** (downloads from this repository's GitHub releases and installs to
+**Release binary** (downloads from this repository's releases and installs to
 `./.local/bin/fllm-rs`, the path `run.sh` uses):
 
 ```sh

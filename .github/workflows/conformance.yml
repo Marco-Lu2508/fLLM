@@ -1,0 +1,114 @@
+# fLLM on real GPUs, on a SELF-HOSTED runner that has the hardware: the binary is built on that runner, `fllm-rs devices --json` and
+# `fllm-rs selftest-gpu --json` run there, the JSON files are kept as artifacts. That is level L1 of docs/gpu-backends.md for the backend
+# and device of the runner (L2 and L3 need a model and are not part of this).
+#
+# Manual only (Actions -> conformance -> Run workflow): GitHub-hosted runners have no GPU, so a scheduled run would only fail.
+# `runner_labels` is a JSON array of runner labels, e.g. ["self-hosted","linux","gpu"]; `backend` selects what is built and tested.
+# The runner needs Rust (rustup), Git, a C compiler and the toolchain of the backend:
+#   nvidia-cuda  NVIDIA GPU, CUDA toolkit        amd-rocm  AMD GPU, ROCm / HIP SDK (hipcc)      apple-metal  Apple silicon Mac
+#   vulkan       any Vulkan GPU, glslc           intel-sycl  Intel GPU, oneAPI DPC++ (icpx)
+# `only` and `quants` narrow the self test (see `fllm-rs selftest-gpu --help`). See docs/ci.md for the runner setup and its risks.
+name: conformance
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_labels:
+        description: 'Labels of the self-hosted runner as a JSON array'
+        required: true
+        default: '["self-hosted", "linux", "gpu"]'
+        type: string
+      backend:
+        description: "Backend to build and test"
+        required: true
+        default: nvidia-cuda
+        type: choice
+        options:
+          - nvidia-cuda
+          - amd-rocm
+          - apple-metal
+          - vulkan
+          - intel-sycl
+      only:
+        description: "selftest-gpu --only (operation groups, e.g. linear,attention); empty = everything"
+        required: false
+        default: ""
+        type: string
+      quants:
+        description: "selftest-gpu --quants (weight formats, e.g. q4_k,q8_0); empty = all"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: conformance-${{ inputs.backend }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  device:
+    name: ${{ inputs.backend }}
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    timeout-minutes: 240
+    env:
+      BACKEND: ${{ inputs.backend }}
+      SELFTEST_ONLY: ${{ inputs.only }}
+      SELFTEST_QUANTS: ${{ inputs.quants }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Select features and device
+        shell: bash
+        run: |
+          set -eu
+          case "$BACKEND" in
+            nvidia-cuda) features="rust-gpu,cuda";        device=cuda;   hip="" ;;
+            amd-rocm)    features="rust-gpu,hip";         device=hip;    hip=1 ;;
+            apple-metal) features="rust-gpu,metal";       device=metal;  hip="" ;;
+            vulkan)      features="rust-gpu,vulkan";      device=vulkan; hip="" ;;
+            intel-sycl)  features="rust-gpu,vulkan,sycl"; device=sycl;   hip="" ;;
+            *) echo "::error::unknown backend $BACKEND"; exit 1 ;;
+          esac
+          {
+            echo "FEATURES=$features"
+            echo "DEVICE=$device"
+            # FLLM_HIP must not exist at all for the other backends (an empty value counts as set)
+            if [ -n "$hip" ]; then echo "FLLM_HIP=1"; fi
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs
+
+      - name: Devices
+        shell: bash
+        run: cargo run --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs -- devices --json | tee devices.json
+
+      # The step fails when a check fails (non-zero exit); the JSON is kept either way.
+      - name: Self test on the selected device
+        shell: bash
+        run: |
+          set -eu
+          args=(--device "$DEVICE" --json selftest.json)
+          if [ -n "$SELFTEST_ONLY" ]; then args+=(--only "$SELFTEST_ONLY"); fi
+          if [ -n "$SELFTEST_QUANTS" ]; then args+=(--quants "$SELFTEST_QUANTS"); fi
+          cargo run --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs -- selftest-gpu "${args[@]}" | tee selftest.txt
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-${{ inputs.backend }}
+          path: |
+            devices.json
+            selftest.json
+            selftest.txt
+          if-no-files-found: ignore

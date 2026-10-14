@@ -95,7 +95,7 @@ Step by step (prerequisites, cache, context size, quantization): [docs/quickstar
 ```
 
 `install.sh` detects OS and architecture, downloads the matching asset from this repository's
-GitHub releases (`https://github.com/Marco-Lu2508/fLLM`), checks it against the published
+releases (`https://github.com/Marco-Lu2508/fLLM`), checks it against the published
 SHA256 file and installs it as `./.local/bin/fllm-rs` (the path `run.sh` uses). If no matching
 asset exists it prints why and falls back to building the checkout with `cargo`.
 `./install.sh --no-verify` allows an install when the release publishes no checksum file (a

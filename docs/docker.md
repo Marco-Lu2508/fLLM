@@ -110,8 +110,8 @@ are untested.
 
 ### CI
 
-`.github/workflows/docker-cuda.yml` builds this image and pushes `ghcr.io/marco-lu2508/fllm:cuda-<short-sha>`
-and `:cuda`. It is prepared but only runs on manual dispatch; see [ci.md](ci.md) for how to enable it. The build
+The `docker-cuda.yml` workflow builds this image and pushes
+`ghcr.io/marco-lu2508/fllm:cuda` plus a tag per build; see [ci.md](ci.md) for the triggers and tags. The build
 needs no GPU on the runner.
 
 ## CPU-only compose run with a model directory
@@ -190,5 +190,5 @@ FLLM_MODEL_NAME=my-model docker compose up -d
   command and no device mapping for `/dev/dri`. The image does contain `libvulkan1`, so a
   Vulkan run needs both `FLLM_EXTRA_ARGS="--device vulkan"` and extra container device
   access that you add yourself.
-- The image build is also what `.github/workflows/docker.yml` runs on every push to `main`
-  (see [ci.md](ci.md)); release binaries are built by `.github/workflows/release.yml`.
+- The image build is also what the `docker.yml` workflow runs (see [ci.md](ci.md)); release binaries are built by the
+  `release.yml` workflow.

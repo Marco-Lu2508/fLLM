@@ -1,0 +1,79 @@
+# Compile-only checks of the GPU kernel builds (no GPU needed): CUDA (Ampere, Hopper, Blackwell) and AMD ROCm/HIP, each in the vendor's
+# development container. Manual only (Actions -> kernels -> Run workflow): the containers are several GB and the kernels take a while on
+# a 4-core hosted runner. The release images (docker-cuda.yml) compile the CUDA kernels for every tag anyway. See docs/ci.md.
+name: kernels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernels-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  hip-build:
+    name: AMD ROCm build (compile only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container: rocm/dev-ubuntu-24.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe # latest when written; update together with the ROCm version you test
+    steps:
+      - name: Tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates pkg-config cmake clang build-essential git
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Build with the HIP kernels (RDNA2-4, CDNA2/3)
+        env:
+          FLLM_HIP: "1"
+          FLLM_HIP_ARCHS: "gfx1030;gfx1100;gfx1201;gfx942"
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs
+
+  cuda-build:
+    name: CUDA build (no GPU needed to compile)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container: nvidia/cuda:12.8.1-devel-ubuntu22.04
+    steps:
+      - name: Tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates pkg-config cmake clang build-essential git
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: CUTLASS and FlashInfer headers (NVFP4 prompt GEMM and prompt attention for Blackwell)
+        run: |
+          git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
+          git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer
+
+      - name: Build with the CUDA kernels (Ampere, Hopper, Blackwell)
+        env:
+          FLLM_CUDA_ARCHS: "80;90;120"
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs
+
+      - name: Clippy with the CUDA feature
+        env:
+          FLLM_CUDA_ARCHS: "80"
+        run: |
+          . "$HOME/.cargo/env"
+          cargo clippy --locked --features cuda -p fllm-engine --lib --bins -- -D warnings

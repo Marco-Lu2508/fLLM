@@ -22,6 +22,10 @@ https://github.com/Marco-Lu2508/fLLM/releases/download/<tag>/fllm-windows-x86_64
 falls back to that URL when git or the remote is missing. The expected hash always comes from
 the release's .sha256 file - nothing is hardcoded here. A checksum that exists is always
 checked; a mismatch aborts the installation.
+"latest" on github.com follows the /releases/latest redirect (no API call); while the repository has only
+pre-releases (v0.x) that redirect has no target and the newest release is read from api.github.com instead.
+Other hosts use the Forgejo/Gitea API (/api/v1). Environment overrides: FLLM_REPO_URL (repository URL instead of
+the git remote), FLLM_FORGE (github | forgejo), FLLM_API_URL (GitHub API base, default https://api.github.com).
 
 The fallback build (also used when the release has no matching asset) compiles the checkout
 next to this script with scripts\build-windows.ps1 and needs cargo (Rust toolchain) plus the
@@ -71,7 +75,7 @@ if ($IsArm -and $ChosenVariant -ne "default") {
     $ChosenVariant = "default"
 }
 
-# Asset names are part of the contract with .github/workflows/release.yml and scripts\build-windows.ps1.
+# Asset names are part of the contract with the release workflows (.github/workflows/release.yml, .github/workflows/release.yml) and scripts\build-windows.ps1.
 function Get-AssetCandidates {
     $candidates = @()
     if ($IsArm) { $candidates += "fllm-windows-aarch64-msvc.zip" }
@@ -83,18 +87,28 @@ function Get-AssetCandidates {
 
 # --------------------------------------------------------------- repository URL
 $RepoUrl = $DefaultRepo
-try {
-    $line = (& git -C $PSScriptRoot remote -v 2>$null | Select-Object -First 1)
-    if ($line) {
-        $url = ($line -split "\s+")[1]
-        if ($url -match '^(https?://.+?)(\.git)?$') { $RepoUrl = $Matches[1] }
-        elseif ($url -match '^git@([^:]+):(.+?)(\.git)?$') {
-            $RepoUrl = "https://$($Matches[1])/$($Matches[2])"
+if ($env:FLLM_REPO_URL) {
+    $RepoUrl = $env:FLLM_REPO_URL
+} else {
+    try {
+        $line = (& git -C $PSScriptRoot remote -v 2>$null | Select-Object -First 1)
+        if ($line) {
+            $url = ($line -split "\s+")[1]
+            if ($url -match '^(https?://.+?)(\.git)?$') { $RepoUrl = $Matches[1] }
+            elseif ($url -match '^git@([^:]+):(.+?)(\.git)?$') {
+                $RepoUrl = "https://$($Matches[1])/$($Matches[2])"
+            }
         }
-    }
-} catch { }
+    } catch { }
+}
 $RepoUrl = $RepoUrl.TrimEnd("/")
 $ReleaseBase = "$RepoUrl/releases"
+
+# GitHub or Forgejo/Gitea: decides how "latest" is resolved
+$RepoHost = ($RepoUrl -replace '^https?://', '') -replace '/.*$', ''
+$Forge = $env:FLLM_FORGE
+if (-not $Forge) { $Forge = if ($RepoHost -in @("github.com", "www.github.com")) { "github" } else { "forgejo" } }
+if ($Forge -notin @("github", "forgejo")) { Fail "FLLM_FORGE must be 'github' or 'forgejo', not '$Forge'" }
 
 function Show-NextSteps([string]$Binary) {
     Write-Host ""
@@ -149,14 +163,38 @@ if ($Build) { Build-FromSource; exit 0 }
 
 # --------------------------------------------------------------- resolve the tag
 if ($Version -eq "latest") {
-    $api = ($RepoUrl -replace '^https?://', '') -replace '^([^/]+)/(.+)$', 'https://$1/api/v1/repos/$2'
-    try {
-        $release = Invoke-RestMethod -Uri "$api/releases/latest" -TimeoutSec 30
-    } catch {
-        Fail "cannot query $api/releases/latest - is $RepoUrl reachable? (use -Build to compile instead)"
+    if ($Forge -eq "github") {
+        # /releases/latest redirects to /releases/tag/<tag>; it ignores pre-releases (v0.x), then there is no target
+        $Version = ""
+        try {
+            $head = Invoke-WebRequest -Uri "$RepoUrl/releases/latest" -Method Head -UseBasicParsing -TimeoutSec 30
+            $final = ""
+            if ($head.BaseResponse.PSObject.Properties["ResponseUri"]) { $final = $head.BaseResponse.ResponseUri.AbsoluteUri }       # Windows PowerShell 5
+            elseif ($head.BaseResponse.PSObject.Properties["RequestMessage"]) { $final = $head.BaseResponse.RequestMessage.RequestUri.AbsoluteUri }  # PowerShell 7
+            if ($final -match '/releases/tag/(.+)$') { $Version = [System.Uri]::UnescapeDataString($Matches[1]) }
+        } catch { }
+        if (-not $Version) {
+            $apiBase = if ($env:FLLM_API_URL) { $env:FLLM_API_URL.TrimEnd("/") } else { "https://api.github.com" }
+            $slug = ($RepoUrl -replace '^https?://[^/]+/', '')
+            $api = "$apiBase/repos/$slug/releases?per_page=1"
+            try {
+                $releases = @(Invoke-RestMethod -Uri $api -TimeoutSec 30)
+            } catch {
+                Fail "cannot query $api - is $RepoUrl reachable? (give a tag with -Version, or use -Build to compile instead)"
+            }
+            if ($releases.Count -gt 0) { $Version = $releases[0].tag_name }
+            if (-not $Version) { Fail "no release found via $api" }
+        }
+    } else {
+        $api = ($RepoUrl -replace '^(https?)://([^/]+)/(.+)$', '$1://$2/api/v1/repos/$3')
+        try {
+            $release = Invoke-RestMethod -Uri "$api/releases/latest" -TimeoutSec 30
+        } catch {
+            Fail "cannot query $api/releases/latest - is $RepoUrl reachable? (use -Build to compile instead)"
+        }
+        $Version = $release.tag_name
+        if (-not $Version) { Fail "no release found via $api/releases/latest" }
     }
-    $Version = $release.tag_name
-    if (-not $Version) { Fail "no release found via $api/releases/latest" }
     Write-Host "Newest release: $Version"
 }
 

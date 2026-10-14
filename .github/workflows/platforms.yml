@@ -1,0 +1,190 @@
+# fLLM on the platforms people run it on: Windows (MSVC), Apple silicon, Linux on aarch64 and on x86_64, all on GitHub-hosted runners.
+# Compile, unit tests, clippy and the CPU-only parts of the CLI (`devices`, `selftest-cpu`, `selftest-gpu --device cpu`, which runs the
+# CPU backend against itself and so checks the test and the CPU kernels). No job here has a GPU: what passes is level L0/L1-CPU of
+# docs/gpu-backends.md. Real GPUs: conformance.yml (self-hosted runners). Release assets: release.yml.
+#
+# The two manual jobs at the end (windows-cuda, windows-package) are long and run only on workflow_dispatch.
+name: platforms
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platforms-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64 (MSVC)
+            runner: windows-2022
+            features: "rust-gpu,vulkan"
+            vulkan_sdk: true
+          - name: macOS 14 (Apple silicon)
+            runner: macos-14
+            features: "rust-gpu,metal"
+          - name: Linux aarch64
+            runner: ubuntu-24.04-arm
+            features: "rust-gpu,vulkan,arm-simd"
+            glslc: true
+          - name: Linux x86_64
+            runner: ubuntu-24.04
+            features: "rust-gpu,vulkan,avx512"
+            glslc: true
+    env:
+      FEATURES: ${{ matrix.features }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.features }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Shader compiler (Linux)
+        if: matrix.glslc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends glslc
+
+      - name: Vulkan SDK (Windows; provides glslc, sets VULKAN_SDK)
+        if: matrix.vulkan_sdk
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs
+
+      - name: Unit tests
+        shell: bash
+        run: cargo test --release --locked -p fllm-engine --lib --features "$FEATURES"
+
+      - name: Clippy
+        shell: bash
+        run: cargo clippy --release --locked -p fllm-engine --lib --bins --features "$FEATURES" -- -D warnings
+
+      # `cargo run` finds the binary on every platform (no .exe handling); the build above is reused.
+      - name: Devices
+        shell: bash
+        run: cargo run --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs -- devices --json > devices.json
+
+      - name: CPU kernel self test
+        shell: bash
+        run: cargo run --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs -- selftest-cpu
+
+      - name: Self-test harness against the CPU backend
+        shell: bash
+        run: cargo run --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs -- selftest-gpu --device cpu --only norm,rope,kv,attention --json selftest-cpu.json
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: platforms-${{ matrix.runner }}
+          path: |
+            devices.json
+            selftest-cpu.json
+          if-no-files-found: ignore
+
+  # The CUDA kernels on Windows: nvcc with the MSVC host compiler, objects packed by lib.exe (build.rs). Compile and link only (no GPU on
+  # the runner). Long, so manual only; FLLM_CUDA_ARCHS keeps it to two architectures. The Marlin sources are the long part.
+  windows-cuda:
+    name: Windows CUDA kernels (compile only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-cuda
+          save-if: "false"
+
+      - name: CUDA toolkit
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          log-file-suffix: "windows-cuda.txt"
+
+      - name: Build with the CUDA kernels (static C runtime, Ampere and Blackwell)
+        env:
+          FLLM_CUDA_ARCHS: "80;120"
+          FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler"
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release --locked -p fllm-engine --features "rust-gpu,cuda" --bin fllm-rs
+
+  # What the release job does, without the upload: build-windows.ps1 end to end (loads the VS environment, builds, smoke test, zip).
+  windows-package:
+    name: Windows release package
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-package
+          save-if: "false"
+
+      - name: Build and pack
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -NoVulkan
+
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-package
+          path: dist/*
+          if-no-files-found: error

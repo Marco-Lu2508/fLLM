@@ -1,75 +1,72 @@
+# Continuous integration on GitHub-hosted runners: lint and unit tests of the CPU build.
+# The per-OS builds (Windows, macOS, Linux aarch64) are in platforms.yml, the release assets in release.yml.
+# See docs/ci.md.
+#
+# `cargo fmt --check` is not part of this workflow: the tree is not rustfmt-clean yet. Add a `fmt` job (a step
+# `cargo fmt --all -- --check` with the rustfmt component) once `cargo fmt --all` has been run and committed.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  rust:
-    name: build, test, lint (CPU)
-    runs-on: ubuntu-latest
+  clippy:
+    name: clippy (CPU build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --release --locked -p fllm-engine --bin fllm-rs
-      - name: Unit tests
-        run: cargo test --workspace --locked --lib
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Clippy
-        run: cargo clippy --workspace --locked --lib --bins -- -D warnings
-      - name: CPU kernel self test
-        run: ./target/release/fllm-rs selftest-cpu
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-  hip-build:
-    name: AMD ROCm build (compile only)
-    runs-on: ubuntu-latest
-    container: rocm/dev-ubuntu-24.04:latest
+  test:
+    name: unit tests (CPU build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - name: Tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends curl ca-certificates pkg-config cmake clang build-essential git
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-      - uses: actions/checkout@v4
-      - name: Build with the HIP kernels (RDNA2-4, CDNA2/3)
-        env:
-          FLLM_HIP: "1"
-          FLLM_HIP_ARCHS: "gfx1030;gfx1100;gfx1201;gfx942"
-        run: |
-          . "$HOME/.cargo/env"
-          cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-  cuda-build:
-    name: CUDA build (no GPU needed to compile)
-    runs-on: ubuntu-latest
-    container: nvidia/cuda:12.8.1-devel-ubuntu22.04
-    steps:
-      - name: Tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends curl ca-certificates pkg-config cmake clang build-essential git
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
-      - uses: actions/checkout@v4
-      - name: CUTLASS headers (NVFP4 prompt GEMM for Blackwell)
-        run: |
-          git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
-          git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer
-      - name: Build with the CUDA kernels (Ampere, Hopper, Blackwell)
-        env:
-          FLLM_CUDA_ARCHS: "80;90;120"
-        run: |
-          . "$HOME/.cargo/env"
-          cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs
-      - name: Clippy with the CUDA feature
-        env:
-          FLLM_CUDA_ARCHS: "80"
-        run: |
-          . "$HOME/.cargo/env"
-          cargo clippy --locked --features cuda -p fllm-engine --lib --bins -- -D warnings
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Tests
+        run: cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe

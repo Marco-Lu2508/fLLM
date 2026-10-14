@@ -1,0 +1,296 @@
+# Builds the release binaries for a version tag (v*) on GitHub-hosted runners and attaches them to the GitHub release of that tag.
+#
+#   git tag v0.1.0 && git push --tags
+#
+# or Actions -> release -> Run workflow with the tag of an existing release (re-builds and replaces the assets).
+#
+# Asset names are part of the install-script contract (install.sh / install.ps1):
+#   fllm-linux-x86_64-musl.tar.gz, fllm-linux-aarch64-musl.tar.gz,
+#   fllm-macos-aarch64.tar.gz, fllm-macos-x86_64.tar.gz,
+#   fllm-windows-x86_64-msvc.zip, fllm-windows-x86_64-msvc-cuda.zip (optional, see below),
+#   plus <asset>.sha256 (one line: "<hash>  <asset>").
+# Not built here: fllm-windows-x86_64.zip (MinGW cross build; install.ps1 only falls back to it for old releases),
+# the HIP variant fllm-windows-x86_64-msvc-hip.zip and fllm-windows-aarch64-msvc.zip (no hosted runner / SDK).
+#
+# No build cache is used here: a published binary should come from a clean build, not from a cache that a pull request could have written.
+# Flow: `prepare` creates the release as a pre-release (with generated notes) so that it is not "latest" while incomplete;
+# the build jobs upload their assets; `finalize` checks that every required asset is there and then sets the final state
+# (v0.x and tags with a "-" suffix stay pre-releases, anything else becomes a normal release and "latest").
+# The CUDA build of Windows is optional: the job may fail without failing the release (install.ps1 falls back to the plain asset).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Feature set used by make build-rust / install.sh / docker/Dockerfile. The native `metal` and `vulkan` features are not part of the
+  # release assets (wgpu already uses Metal / Vulkan / DirectX 12); see docs/backends.md for their verification level.
+  RUST_FEATURES: rust-gpu
+
+jobs:
+  prepare:
+    name: create release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Resolve and check the tag
+        id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          if [ "$EVENT" = "workflow_dispatch" ]; then TAG="$INPUT_TAG"; else TAG="$REF_NAME"; fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9][0-9A-Za-z._-]*$'; then
+            echo "::error::'$TAG' is not a version tag (expected v<digit>..., e.g. v0.1.0)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create the release (pre-release until finalize)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; assets are replaced."
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes --prerelease --latest=false
+          fi
+
+  build:
+    name: ${{ matrix.asset }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: fllm-linux-x86_64-musl.tar.gz
+            runner: ubuntu-24.04 # static musl build, musl-tools below
+          - target: aarch64-unknown-linux-musl
+            asset: fllm-linux-aarch64-musl.tar.gz
+            runner: ubuntu-24.04-arm # native ARM64 runner, musl-tools below
+          - target: aarch64-apple-darwin
+            asset: fllm-macos-aarch64.tar.gz
+            runner: macos-14 # Apple silicon
+          - target: x86_64-apple-darwin
+            asset: fllm-macos-x86_64.tar.gz
+            runner: macos-15-intel # Intel
+    env:
+      TARGET: ${{ matrix.target }}
+      ASSET: ${{ matrix.asset }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: musl toolchain (Linux)
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          # tokenizers links onig (C): the C compiler of the target is musl-gcc
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          triple_env=$(printf '%s' "$TARGET" | tr '-' '_')
+          echo "CC_${triple_env}=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          cargo build --release --locked -p fllm-engine \
+            --features "$RUST_FEATURES" --bin fllm-rs --target "$TARGET"
+
+      - name: Smoke test
+        run: '"target/$TARGET/release/fllm-rs" --help'
+
+      - name: Package
+        run: |
+          set -e
+          mkdir -p pkg
+          cp LICENSE pkg/LICENSE
+          cp "target/$TARGET/release/fllm-rs" pkg/fllm-rs
+          tar -czf "$ASSET" -C pkg fllm-rs LICENSE
+
+      - name: Checksum
+        run: |
+          set -e
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          else # macOS has shasum, same "<hash>  <file>" format
+            shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          fi
+          cat "$ASSET.sha256"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+
+  # Native Windows builds with the MSVC toolchain. scripts/build-windows.ps1 loads the Visual Studio environment, builds with the static
+  # C runtime (no redistributable needed on the user's machine), runs a smoke test and writes dist/<asset>.zip and dist/<asset>.zip.sha256
+  # in the format install.ps1 verifies. The unit tests run in platforms.yml, so -SkipTests here.
+  windows:
+    name: fllm-windows-x86_64-msvc.zip
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Vulkan SDK (glslc for the native Vulkan backend, sets VULKAN_SDK)
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: Build and pack
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -SkipTests -OutDir dist
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" dist/*.zip dist/*.sha256 --clobber
+
+  # Optional: the plain asset above is what install.ps1 falls back to, so a failure here does not block `finalize`.
+  windows-cuda:
+    name: fllm-windows-x86_64-msvc-cuda.zip
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 360
+    continue-on-error: true
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Vulkan SDK (glslc for the native Vulkan backend, sets VULKAN_SDK)
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: CUDA toolkit
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          log-file-suffix: "release-windows-cuda.txt"
+
+      - name: Build and pack (all GPU architectures of the default list)
+        shell: pwsh
+        env:
+          # a Visual Studio newer than the toolkit knows about would otherwise stop nvcc
+          FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler"
+        run: ./scripts/build-windows.ps1 -Cuda -SkipTests -OutDir dist
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" dist/*.zip dist/*.sha256 --clobber
+
+  finalize:
+    name: publish release
+    needs: [prepare, build, windows, windows-cuda]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.windows.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      CUDA_RESULT: ${{ needs.windows-cuda.result }}
+    steps:
+      - name: Check the assets
+        run: |
+          set -eu
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > assets.txt
+          cat assets.txt
+          missing=0
+          for a in fllm-linux-x86_64-musl.tar.gz fllm-linux-aarch64-musl.tar.gz \
+                   fllm-macos-aarch64.tar.gz fllm-macos-x86_64.tar.gz fllm-windows-x86_64-msvc.zip; do
+            for f in "$a" "$a.sha256"; do
+              grep -qx "$f" assets.txt || { echo "::error::missing release asset $f"; missing=1; }
+            done
+          done
+          [ "$missing" = 0 ]
+          if [ "$CUDA_RESULT" != "success" ]; then
+            echo "::warning::fllm-windows-x86_64-msvc-cuda.zip was not built (job result: $CUDA_RESULT); install.ps1 uses the plain Windows asset"
+          fi
+
+      - name: Set the final state
+        run: |
+          set -eu
+          case "$TAG" in
+            v0.*|*-*) gh release edit "$TAG" --prerelease --latest=false ;;
+            *)        gh release edit "$TAG" --prerelease=false --latest ;;
+          esac
+          gh release view "$TAG" --json url,isPrerelease --jq '"\(.url) prerelease=\(.isPrerelease)"'
