@@ -6,10 +6,24 @@
 # The two manual jobs at the end (windows-cuda, windows-package) are long and run only on workflow_dispatch.
 name: platforms
 
+# The four-OS matrix takes 11-17 minutes, so it only runs when code or the build changes (not for README or docs edits).
+# `ci.yml` (Linux, clippy and unit tests) still runs on every push. Run this one by hand from the Actions tab at any time.
 on:
   push:
     branches: [main]
+    paths:
+      - "rust/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/build-windows.ps1"
+      - ".github/workflows/platforms.yml"
   pull_request:
+    paths:
+      - "rust/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/build-windows.ps1"
+      - ".github/workflows/platforms.yml"
   workflow_dispatch:
 
 permissions:
