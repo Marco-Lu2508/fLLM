@@ -71,7 +71,10 @@ function Enter-DeveloperEnvironment {
     $devShell = Join-Path $installation "Common7\Tools\Launch-VsDevShell.ps1"
     if (Test-Path $devShell) {
         # the official way: the script changes the environment of this process
-        & $devShell -Arch $arch -HostArch $hostArch -SkipAutomaticLocation | Out-Null
+        # Launch-VsDevShell.ps1 names the 64-bit x86 architecture amd64 (ValidateSet x86, amd64, arm, arm64); VsDevCmd.bat below takes x64
+        $shellArch = if ($arch -eq "x64") { "amd64" } else { $arch }
+        $shellHost = if ($hostArch -eq "x64") { "amd64" } else { $hostArch }
+        & $devShell -Arch $shellArch -HostArch $shellHost -SkipAutomaticLocation | Out-Null
         if (Find-Tool "cl.exe") { return "loaded $devShell" }
     }
     $vsDevCmd = Join-Path $installation "Common7\Tools\VsDevCmd.bat"
