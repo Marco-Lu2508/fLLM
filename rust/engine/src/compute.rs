@@ -855,6 +855,21 @@ impl Linear {
             if let Some(Some(out)) = float {
                 return Ok(out);
             }
+            #[cfg(target_arch = "x86_64")]
+            if let Some((kind, packed)) = &self.packed {
+                if crate::cpu_q4z::handles(*kind) {
+                    if let Some(out) = crate::cpu_q4z::linear(
+                        packed,
+                        *kind,
+                        input,
+                        self.rows,
+                        self.cols,
+                        self.bias.as_deref(),
+                    ) {
+                        return Ok(out);
+                    }
+                }
+            }
             if let Some((kind, packed)) = &self.packed {
                 if !matches!(kind, 1 | 8 | 30) {
                     if let Some(out) = crate::cpu_quantized::linear(

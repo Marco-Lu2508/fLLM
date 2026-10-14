@@ -8,12 +8,36 @@ Without a usable SIMD tier the scalar fallbacks run.
 Check a machine with:
 
 ```bash
-fllm-rs selftest-cpu            # every supported tier
-fllm-rs selftest-cpu --tier avx2
+fllm-rs selftest-cpu                     # the tiers up to the FLLM_CPU_ISA cap (all supported ones without a cap)
+fllm-rs selftest-cpu --tier avx2         # one tier, cap ignored
+fllm-rs selftest-cpu --tiers all         # every supported tier, cap ignored, plus the ragged-shape grid
+fllm-rs selftest-cpu --tiers avx2,avx512-vnni --full
+fllm-rs selftest-cpu --tiers all --gguf model.gguf --tensors 400   # real tensors, outlier activations
 ```
 
-It prints the detected features and, per kernel and tier, the largest error relative to a
-scalar reference and the duration, and exits non-zero when a check exceeds its tolerance.
+It prints the detected features, the tiers it runs and why (`running tiers: ...`), per kernel
+and tier the largest error relative to a scalar reference and the duration (the tier is the
+bracketed name in front of every line), a summary per tier, and exits non-zero when a check
+exceeds its tolerance. Projections are compared with the 8-bit activations they consume, at
+1e-5 of the sum of the absolute terms (measured worst case on all tiers: 1.7e-6; the same
+on 197 real tensors of Llama-3.2-3B Q4_K_M: 4e-7); attention and element-wise kernels at 1e-4.
+
+`--tiers` (a list of tier names or `all`) and `--full` add the ragged grid for every quantized
+format (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS, MXFP4, Q4Z and Q4ZP with groups of 32, 64
+and 128) and F32/F16/BF16: 1, 7, 15, 17, 33 and 50 rows, one to ten 256-value blocks (or
+1 to 25 groups) per row, prompts of 1, 4, 9, 17 and 33 tokens, and a saturation stress (every
+payload byte at 0x00, 0x7f, 0x80 or 0xff against activations that quantize to +127, -127 or
+alternate). With the `avx512` feature the 16-row VNNI GEMM and the AMX GEMM are also run
+directly on every format with a decoder (reported as `vnni_gemm ...` and `amx_gemm ...`),
+whatever their default format lists and batch thresholds say. A full run is about 22 000 checks.
+
+Tier support of the machine and of the build: the default release build contains the tiers
+`scalar`, `avx2`, `avx-vnni`, `avx512bw` and `avx512-vnni` (512-bit integer dots for Q8_0, the
+classic formats and the K formats, 512-bit attention and `exp_shifted`). The Cargo feature
+`avx512` adds the tiers `avx512-bf16` and `amx` and the kernels listed in
+[cpu-avx512-amx.md](cpu-avx512-amx.md): the 16-row VNNI prompt GEMM, 512-bit Q2_K, Q3_K, IQ4_XS,
+IQ4_NL and MXFP4 panels, 512-bit float projections and DeltaNet. Both builds pick the kernels at run time
+from CPUID, so the same binary runs on any x86-64 CPU; see "Building with the avx512 feature".
 
 ## Tiers
 
@@ -29,6 +53,8 @@ a warning.
 | x86-64 | `avx-vnni` | `avx2` + AVX-VNNI (VEX `vpdpbusd`) |
 | x86-64 | `avx512bw` | `avx2` + AVX512F, AVX512BW, AVX512VL |
 | x86-64 | `avx512-vnni` | `avx512bw` + AVX512-VNNI |
+| x86-64 | `avx512-bf16` | `avx512-vnni` + AVX512-BF16; only in builds with the `avx512` feature ([cpu-avx512-amx.md](cpu-avx512-amx.md)) |
+| x86-64 | `amx` | `avx512-bf16` + AMX-TILE + AMX-INT8 and OS tile state; only with the `avx512` feature, Linux only |
 | AArch64 (little-endian) | `neon` | Advanced SIMD |
 | AArch64 | `neon-dotprod` | `neon` + FEAT_DotProd (`sdot`) |
 | AArch64 | `neon-i8mm` | `neon-dotprod` + FEAT_I8MM (`smmla`) |
@@ -55,6 +81,7 @@ Order of preference, left to right; the last entry is the fallback.
 | Q4_0, Q4_1, Q5_0, Q5_1, decode | AVX-512 (8 rows); AVX-VNNI and AVX2: direct decode into the dot, 4 rows | NEON decode |
 | Q2_K..Q6_K, prompt (4+ tokens) | AVX-VNNI/AVX2: decoded panels (below); AVX-512: streaming panels (8 rows decode, 4x2 prompt) | Q4_K..Q6_K: W panel with `smmla` or `sdot`; Q2_K, Q3_K: unpacked group panels with `smmla` or `sdot` (L0) |
 | Q4_K, Q5_K, Q6_K, decode and 2-3 tokens | AVX-512 panels; AVX-VNNI; AVX2 (streaming, 4 rows) | NEON decode |
+| Q4Z, Q4ZP (AWQ, GPTQ int4; groups of 32, 64, 128), decode and prompt | AVX-512 VNNI or BW (512-bit, 4 records per step); AVX-VNNI; AVX2 (256-bit, 2 records per step); 4 rows x 1 token for decode, 4 rows x 4 tokens for prompts; see "Q4Z" below | the generic f32 path (slow) |
 | Q2_K, Q3_K, IQ4_XS, decode | AVX-VNNI; AVX-512 VNNI (EVEX, 256-bit); AVX2 | `sdot`, 4 rows, groups decoded into registers (L0) |
 | IQ4_XS, prompt | as decode | unpacked group panels with `smmla` or `sdot` (L0) |
 | IQ4_NL, MXFP4 | AVX2 codebook kernel | `tbl` codebook decode with `sdot` / `smmla` (L0) |
@@ -105,6 +132,69 @@ Used from 4 tokens (Q4_0/Q5_0: from 2) on AVX2 and AVX-VNNI. Not repacked, with 
 - IQ4_NL, IQ4_XS, MXFP4: signed codebook weights would need the sign-trick dot, which saturates
   `maddubs` on unsigned data; left on the streaming kernels.
 
+## Q4Z and Q4ZP (AWQ, GPTQ int4)
+
+`cpu_q4z` computes the 4-bit AWQ/GPTQ tensors of [awq-gptq-marlin.md](awq-gptq-marlin.md) without
+dequantizing a row per output element (the former generic path allocated an f32 row for every
+output element and token: Qwen2.5-3B AWQ decoded at 6 tok/s on 24 Zen 5 threads, nine times slower
+than Q4_K_M of the same size).
+
+- The input of a call is quantized once to 32-value Q8_0-style records (fp16-rounded scale) and
+  split into an even-index and an odd-index plane. The two nibbles of a code byte are adjacent
+  inputs (`2j` low, `2j + 1` high), so `codes & 15` against the even plane plus `codes >> 4` against
+  the odd plane is the whole dot, with no nibble shuffle. One 256-bit load of codes covers two
+  records, one 512-bit load four.
+- Codes are unsigned (0..15), so the integer dot is `vpdpbusd` (AVX-VNNI, AVX-512 VNNI) or
+  `vpmaddubsw` + `vpmaddwd` (AVX2, AVX-512BW); a `maddubs` pair is at most 2 * 15 * 127 and the
+  sum of the even and the odd half 7620, so nothing saturates.
+- The zero point is applied per group from the activation sums:
+  `sum((q - z) a) = sum(q a) - z * sum(a)`; the weight scale times the activation scale of each
+  record scales the converted lanes (per 128-bit half, since a vector spans records of different
+  scales and, with groups of 32, different groups).
+- Decode runs four rows against one token per pass, prompts four rows against four tokens.
+  Groups of 32, 64 and 128 are separate instantiations; a row is never read past its end (odd
+  record counts use zero-padded activations and per-record loads).
+- Q4ZP gathers the input into stored order first (`x_stored[c] = x[perm[c]]`), then runs the same
+  kernels; the activations are therefore quantized in stored order, which differs from the
+  quantization of the original order by ordinary 8-bit noise.
+
+Measured on the AVX2-only test host (AMD EPYC 9255 VM, 10 shared threads), Qwen2.5-3B-Instruct-AWQ:
+decode 2.76 -> 27.5 tok/s, prefill (100 tokens) 1.6 -> 91 tok/s; Llama-3.2-3B Q4_K_M decodes
+27.3 tok/s there. The AVX-512 variants were executed under Intel SDE only (see "What is tested"). A per-kernel throughput
+benchmark (decode weight bandwidth, prompt MAC/s per group size and kernel, one thread by default) is the
+ignored test `cargo test --release -p fllm-engine cpu_q4z -- --ignored --nocapture`; on the AVX2 host it
+shows 15 to 22 GB/s of weights per core at decode (the 2 MB test matrix is cache resident) and 51 to 59
+GMAC/s per core for a 64-token prompt.
+
+## Building with the `avx512` feature
+
+`cargo build --release --features avx512` adds the kernels of [cpu-avx512-amx.md](cpu-avx512-amx.md)
+(16-row VNNI prompt GEMM, AMX tiles, 512-bit Q2_K/Q3_K/IQ4_XS/IQ4_NL/MXFP4 panels, 512-bit float
+projections, BF16 dot products, 512-bit DeltaNet) and the tiers `avx512-bf16` and `amx`. Without
+it the tiers up to `avx512-vnni` still exist, but a prompt on an AVX-512 VNNI CPU runs the
+streaming panels. Measured on a Zen 5 EPYC with the feature built (Colab, Llama-3.2-3B Q4_K_M,
+355-token prompt): 449 tok/s on `avx2`, 417 on `avx512bw`, 661 on `avx512-vnni`, 649 on
+`avx512-bf16`; decode 54 tok/s on all tiers (memory bound). The gain of `avx512-vnni` is the
+16-row GEMM that only the feature contains; the default build has not been measured there.
+
+**The feature does not make the binary less portable.** It only compiles more functions that carry
+`#[target_feature(enable = ...)]` and the AMX inline assembly; nothing in the repository sets
+`-C target-cpu`, a CPU `target-feature` or `cfg(target_feature)` (the Makefile, `docker/Dockerfile`, the
+workflows and `scripts/build-windows.ps1` build for the baseline target), so the compiler never
+emits an AVX/AVX-512 instruction outside those functions. Every call is guarded by CPUID
+(`is_x86_feature_detected!`, the AMX bits read directly) and the `FLLM_CPU_ISA` cap. Checked:
+
+- the same model gives bit-identical logprobs from the default build and the `avx512` build on an
+  AVX2-only CPU (Llama-3.2-3B Q4_K_M and Qwen2.5-3B AWQ, tier `avx2`), and the binary is 0.9 %
+  larger (28.28 MB against 28.03 MB);
+- the `avx512` build runs `selftest-cpu` under Intel SDE as Nehalem and Sandy Bridge (no AVX2:
+  scalar tier; `devices` too), Haswell (`avx2`), Alder Lake (`avx-vnni`), Skylake-X (`avx512bw`),
+  Ice Lake (`avx512-vnni`) and Sapphire Rapids (`avx512-bf16`, `amx`), without an illegal instruction.
+
+What the feature does not give you yet is silicon coverage: the AVX-512 BW/VNNI/BF16 kernels ran on
+a Zen 5 EPYC (Colab, `selftest-cpu` 413 checks on every tier, text and speed of three models), AMX
+and everything on Intel silicon only under SDE.
+
 ## Scheduling on hybrid CPUs
 
 Every projection is one atomic queue of row panels claimed by all rayon workers. A claim is 16
@@ -150,6 +240,53 @@ run the old path.
   scalar packing step for step, and `selftest-cpu` compares them bit for bit) but sum in a
   different order and width, so their outputs differ in the last bits. No tier is
   bit-identical to another.
+- **Tiers do not reproduce each other's logprobs, and that is not a kernel defect.** Every
+  kernel is exact on the integers (for identical inputs the 8-bit activations are bit-identical
+  across tiers, `selftest-cpu` checks it) and sums its float partial results in a tier-specific order, so two
+  tiers differ in the last bit or two of each projection (relative 1e-7). The activations of the
+  next projection are quantized to 8 bits again (and the keys and values go to an f16 cache), and
+  that rounding turns a 1e-7 difference into a flipped quantization step in a few elements per
+  layer: after one layer the hidden states of two tiers differ by 1e-5 to 1e-4, after 24 layers by
+  about 2e-3 (relative L2, the size of the error of the 8-bit activations themselves). That is the
+  noise floor of the method, and it is as large between two *variants of the same tier* as
+  between tiers. Llama-3.2-3B-Instruct
+  Q4_K_M, prompt "The capital of France is", logprobs of the first token (AVX2 default
+  " Paris" -0.322, " located" -2.976):
+
+  | run | " Paris" | " located" |
+  | --- | --- | --- |
+  | avx2, default | -0.322 | -2.976 |
+  | avx2, `FLLM_NO_R8=1` (other panel kernels, same integer math) | -0.346 | -2.911 |
+  | avx2, `FLLM_NO_REPACK=1` | -0.360 | -2.902 |
+  | avx512bw | -0.352 | -2.874 |
+  | avx512-vnni | -0.360 | -2.869 |
+  | scalar tier (f32 activations, no 8-bit rounding) | -0.349 | -2.854 |
+
+  Over the five best candidates the tiers differ by up to 0.16 (avx2 against avx512-vnni, token " a"),
+  and two variants of the same tier (avx2 default against `FLLM_NO_REPACK=1`) by up to 0.22. The
+  greedy continuation forks where the model is undecided: at the position after
+  "The capital of" the top two candidates " France" (-1.702) and " Italy" (-1.721) differ by
+  0.019, less than that noise. With `FLLM_X86_WIDE_INT=0` the 512-bit integer kernels are off and
+  all tiers print bit-identical results to `avx2` (their float code is then the same). To compare
+  tiers use the mean negative log-likelihood over several texts (`fllm-rs ppl`), not single
+  logprobs. Ten texts of 159 tokens (Qwen3-0.6B Q4_K_M, paired per text, difference of the mean
+  NLL against avx2): avx512bw +0.006 on average (standard deviation over the texts 0.015), avx512-vnni
+  -0.002 (0.021); the two avx2 variants `FLLM_NO_R8=1` -0.002 (0.015) and `FLLM_NO_REPACK=1` +0.001
+  (0.020). The means are within their standard error (0.005 to 0.007) of zero, so no tier is better or
+  worse, and the scatter of the tiers equals the scatter of the variants of one tier (the avx512 rows
+  ran under Intel SDE, `scripts/colab/cpu_confirm.py` repeats the comparison on real hardware). Bit-exact agreement across tiers would need one fixed float summation order in every
+  kernel, attention and normalisation; it is not a goal.
+- `fllm-rs selftest-cpu --tiers all --gguf FILE` is the per-tensor check behind that statement: the
+  same quantized rows and the same outlier-heavy activations through every tier against an f64
+  reference on the identical 8-bit activations. Llama-3.2-3B Q4_K_M, all 197 quantized matrices,
+  batches 1, 6 and 17: largest error 1.8e-7 (avx2, avx-vnni), 2.9e-7 (avx512bw), 3.9e-7
+  (avx512-vnni, avx512-bf16), 3.0e-7 (amx) of the sum of the absolute terms. No tier is closer to
+  the reference than the others; there is no saturation (checked also with the worst-case
+  stress of `--tiers all`).
+- Setting `FLLM_DUMP_LAYERS=<dir>` makes the CPU decoder append the hidden state after the
+  attention and the FFN branch (and the projection results) of every layer to `<dir>/l<N>_<tag>.f32`;
+  `scripts/cmpdump.py A B [prefix]` prints the relative L2 difference of two such directories, which is
+  how the layer-by-layer growth above was measured.
 - Q2_K, Q3_K, IQ4_NL, IQ4_XS and MXFP4 used the f32 row decode before they got packed
   kernels; on CPUs with a kernel they now see the 8-bit activation error as well.
 - The SIMD `exp` is a degree-7 polynomial (below f32 rounding on its reduced range); the
@@ -164,16 +301,17 @@ run the old path.
 | Prompt repacking: Q4_0/Q5_0 Q8_0 tiles, Q2_K..Q6_K decoded panels | AVX2 kernels run by us (unit tests against the f64 reference and the streaming kernels, rows of 1 to 11 blocks, 1 to 9 tokens; `selftest-cpu --tier avx2` with batches 1 to 64); the AVX-VNNI instances are compiled and share the code through macros, their unit tests skip unless AVX-VNNI is present; the AVX-512 tile calls are the Q8_0 ones |
 | NEON `sdot` and `smmla` paths (Q8_0, Q4_0..Q6_K) | compiled for aarch64-unknown-linux-gnu and run on hardware by us |
 | NEON Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, float formats, DeltaNet step, SVE Q8_0 decode | compiled (check, clippy, codegen) for aarch64-unknown-linux-gnu; the layout and lane algebra is tested on x86 through scalar models; **not run on ARM hardware** (L0, see [cpu-arm.md](cpu-arm.md)) |
-| AVX-512 BW/VNNI kernels (Q8_0, classic, K panels, attention, `exp_shifted`) | compiled; reviewed line by line against the AVX2 and scalar paths; unit tests written but **not run** (no AVX-512 hardware available) |
-| EVEX VNNI Q2_K/Q3_K/IQ4_XS panels | compiled; unit test written, not run |
-| IQ4_NL/MXFP4 codebook kernel, Q2_K/Q3_K/IQ4_XS AVX2 panels | unit tests written, not run here |
-| `selftest-cpu` | compiled, not run here |
+| AVX-512 BW/VNNI kernels (Q8_0, classic, K panels, attention, `exp_shifted`), the `avx512` feature kernels (16-row VNNI GEMM, 512-bit codebook, Q2_K/Q3_K/IQ4_XS, float, BF16, DeltaNet), AMX tiles | **Real silicon**: AMD EPYC 9B45 (Zen 5, Colab): `selftest-cpu` 413 checks per tier, three models (avx512bw, avx512-vnni, avx512-bf16; no AMX there). **Emulated**: Intel SDE 9.58 executes the whole unit-test suite (`-spr`: 325 tests, including the AVX-512 and AMX ones, which skip themselves on other hardware), `selftest-cpu --tiers all` (`-spr`: 22 101 checks on the tiers avx2 to amx; `-icl`, `-skx`, `-adl` for their tiers; 0 failed) and runs two models end to end (Llama-3.2-3B Q4_K_M and Qwen2.5-3B AWQ on avx512bw and avx512-vnni); SDE is a functional emulator, so alignment, encoding and result bits are checked but speed is not. Intel silicon, AMX silicon and Zen 4 are untested |
+| Q4Z / Q4ZP kernels (`cpu_q4z`) | AVX2 on an AMD EPYC 9255 VM (unit tests, `selftest-cpu`, Qwen2.5-3B AWQ end to end with speed); AVX-VNNI, AVX-512BW and AVX-512 VNNI under SDE; no AVX-512 speed measurement yet |
+| `selftest-cpu` | run on the AVX2 host and under SDE for every tier; `--tiers all --gguf` on 197 real tensors |
 
 The unit tests compare each kernel with an f64 reference built from scalar dequantization
 and the 8-bit activations the kernel consumes, at odd block counts, every panel row count and
 odd token counts; they skip themselves via `is_x86_feature_detected!` when a feature is
-missing. Run `cargo test -p fllm-engine cpu_` and `fllm-rs selftest-cpu` on AVX-512 hardware
-(Ice Lake or later, Zen 4/5, Sapphire Rapids) before relying on the AVX-512 tier.
+missing. Without AVX-512 hardware run the test binary under Intel SDE (`sde64 -spr -- target/release/deps/fllm_engine-<hash>`)
+and `sde64 -spr -- fllm-rs selftest-cpu --tiers all`; both are free to download from Intel. Real hardware runs
+of `cargo test -p fllm-engine cpu_` and `fllm-rs selftest-cpu --tiers all` on Ice Lake or later, Zen 4/5 and
+Sapphire Rapids remain the reference.
 
 ## Not implemented
 

@@ -19,7 +19,13 @@ bytes to the tensor payload.
 
 On NVIDIA GPUs from Turing (sm_75) on, the CUDA backend repacks a `Q4Z` matrix once while it uploads it, with the repack kernel of vLLM,
 and runs every linear layer, decode and prompt, with vLLM's Marlin GEMM (`rust/engine/cuda/marlin_vllm`, see `THIRD_PARTY.md`). Shapes
-must be multiples of 128; others, older GPUs, the CPU and Vulkan dequantize (`compute::dequantize`).
+must be multiples of 128; others, older GPUs and Vulkan dequantize (`compute::dequantize`).
+
+On x86-64 CPUs `cpu_q4z` runs both formats with integer-dot kernels (AVX2, AVX-VNNI, AVX-512 BW and
+VNNI): activations quantized to 8 bits per 32 values, the 4-bit codes used unsigned, the zero point
+applied per group from the activation sums; see "Q4Z and Q4ZP" in [cpu-kernels.md](cpu-kernels.md).
+On a 10-thread AVX2 host Qwen2.5-3B AWQ decodes at 27.5 tok/s (before: 2.8) next to 27.3 tok/s for Llama-3.2-3B Q4_K_M.
+Other CPUs (AArch64, no AVX2) still take the generic f32 path.
 
 The activations of fLLM are FP32, Marlin takes FP16: `marlin_vllm_glue.cu` converts around the call, folds a pending SwiGLU / GeGLU into
 the conversion of the next GEMM and reuses the converted activations of q/k/v and gate/up. For `Q4ZP` tensors, the activation conversion

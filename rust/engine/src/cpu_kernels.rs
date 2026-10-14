@@ -327,6 +327,16 @@ pub fn supported_tiers() -> Vec<CpuTier> {
         .collect()
 }
 
+/// Tiers this CPU supports that the `FLLM_CPU_ISA` cap allows, lowest first (all supported tiers
+/// without a cap). `selftest-cpu` runs these by default.
+pub fn capped_tiers() -> Vec<CpuTier> {
+    let cap = tier_cap();
+    supported_tiers()
+        .into_iter()
+        .filter(|tier| tier.level() <= cap)
+        .collect()
+}
+
 /// Highest tier dispatch currently selects.
 pub fn active_tier() -> CpuTier {
     supported_tiers()

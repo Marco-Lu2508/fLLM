@@ -104,7 +104,9 @@ experts fall back to F16 expansion automatically.
 Execution: on NVIDIA GPUs (Turing/sm_75 and newer, `cuda` backend) Q4Z/Q4ZP
 matrices are repacked once at upload and run with vLLM's Marlin GEMM for
 decode and prompts. Shapes must be multiples of 128 — anything else, older
-GPUs, the CPU and Vulkan dequantize instead. Details and measurements:
+GPUs and Vulkan dequantize instead. On x86-64 CPUs (AVX2 and up, runtime-selected) Q4Z/Q4ZP run on
+own integer-dot kernels (AVX2, AVX-VNNI, AVX-512 BW/VNNI; about the speed of Q4_K_M of the
+same size); other CPUs use the slow generic path. Details and measurements:
 [awq-gptq-marlin.md](../awq-gptq-marlin.md).
 
 ## NVFP4 / MXFP4 notes

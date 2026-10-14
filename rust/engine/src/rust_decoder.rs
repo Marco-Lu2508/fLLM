@@ -5274,6 +5274,7 @@ impl RustDecoder {
                     self.norm(&mut normed, norm);
                 }
                 trace.mark(1);
+                dump_layer("normed", i, &normed);
                 if matches!(layer.attn, Attn::None) {
                     let ffn = self.ffn_forward(layer, &normed, &mut ffn_workspace)?;
                     add_scaled(&mut x, &ffn, residual);
@@ -5432,6 +5433,9 @@ impl RustDecoder {
                         self.write_cache(value, i, slot, &v[r * kv_v..(r + 1) * kv_v], dv, fmt_v);
                     }
                     trace.mark(3);
+                    dump_layer("q", i, q);
+                    dump_layer("k", i, k);
+                    dump_layer("v", i, v);
                     let tiled = layer.window.is_none()
                         && cfg.alibi_slopes.is_none()
                         && layer.chunk.is_none()
@@ -5475,9 +5479,11 @@ impl RustDecoder {
                         }
                     }
                     trace.mark(4);
+                    dump_layer("attnout", i, &attn);
                     layer.out.forward(&attn)?
                 };
                 trace.mark(5);
+                dump_layer("branch", i, &branch);
                 if let Some(norm) = &layer.post_attn_norm {
                     self.post_norm(&mut branch, norm);
                 }
@@ -5497,6 +5503,7 @@ impl RustDecoder {
                     }
                 } else {
                     add_scaled(&mut x, &branch, residual);
+                    dump_layer("attn", i, &x);
                     let mut next = x.clone();
                     if let Some(norm) = &layer.ffn_norm {
                         self.norm(&mut next, norm);
@@ -5515,6 +5522,7 @@ impl RustDecoder {
                     }
                 } else {
                     add_scaled(&mut x, &ffn, residual);
+                    dump_layer("ffn", i, &x);
                 }
             }
             Ok::<(), String>(())
@@ -5909,6 +5917,23 @@ impl RustDecoder {
     }
 }
 
+/// Debug aid (`FLLM_DUMP_LAYERS=dir`): appends the hidden state after the attention branch and
+/// after the FFN branch of every host layer, and the projection results and attention output of
+/// each layer, to `dir/l<layer>_<tag>.f32` (raw little-endian f32). `scripts/cmpdump.py` compares
+/// two such directories (two tiers, thread counts or kernel variants).
+fn dump_layer(tag: &str, layer: usize, x: &[f32]) {
+    use std::io::Write;
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(dir) = DIR.get_or_init(|| std::env::var_os("FLLM_DUMP_LAYERS").map(Into::into)) else {
+        return;
+    };
+    let path = dir.join(format!("l{layer}_{tag}.f32"));
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let _ = file.write_all(&bytes);
+    }
+}
+
 #[cfg(test)]
 mod graph_switch_tests {
     use super::{parse_graph_switch, GraphSwitch};
@@ -6021,4 +6046,3 @@ mod q8_cache_tests {
         assert_eq!(scales, expected_scales);
     }
 }
-

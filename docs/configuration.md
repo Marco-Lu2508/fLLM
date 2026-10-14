@@ -115,7 +115,7 @@ are valid; anything else exits with `invalid number for <flag>`.
 | `FLLM_NVFP4_TUNE` | NVFP4 prompt GEMMs (sm_120, CUTLASS) | `1` times every tile once per shape at first use and keeps the fastest; default off |
 | `FLLM_FUSE_NVFP4_NORM` | NVFP4 prompt GEMMs (sm_120, CUTLASS, more than 64 rows) | RMS norm and the activation quantization of the next CUTLASS GEMM in one kernel. Default off; any value but `0` switches it on |
 | `FLLM_FUSE_NVFP4_ATTN_OUT` | NVFP4 prompt GEMMs (sm_120, FlashInfer) | FP16 attention output quantized directly by the output projection. Default off; any value but `0` switches it on |
-| `FLLM_CPU_ISA` | CPU kernels | Cap kernel dispatch at a tier: `scalar`, `avx2`, `avx-vnni`, `avx512bw`, `avx512-vnni` (x86-64) or `neon`, `neon-dotprod`, `neon-i8mm` (AArch64); see docs/cpu-kernels.md |
+| `FLLM_CPU_ISA` | CPU kernels | Cap kernel dispatch at a tier: `scalar`, `avx2`, `avx-vnni`, `avx512bw`, `avx512-vnni`, `avx512-bf16`, `amx` (x86-64; the last two only in builds with the `avx512` feature) or `neon`, `neon-dotprod`, `neon-i8mm` (AArch64); see docs/cpu-kernels.md |
 | `FLLM_CACHE` | `hub` resolver | Hub cache root; takes precedence over `HF_HUB_CACHE` |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | `hub` resolver | Bearer token for `hf://` downloads (first match wins) |
 | `HF_HUB_CACHE` | `hub` resolver | Hub cache root when `FLLM_CACHE` is unset; default `$HF_HOME/hub` |

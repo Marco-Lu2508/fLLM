@@ -1,9 +1,14 @@
 # x86 extensions: AVX-512, AMX and the CPU-family policy
 
-Package 14 of the multi-backend round. Everything described here is **test level L0**: it compiles
-(`cargo check`, `clippy`, cross targets) and parts of it are unit-tested on an AVX2 machine, but no
-AVX-512 or AMX instruction has been executed and nothing has been measured. The performance
-statements below are design reasons, not results. See "What was run" and "Hardware test plan".
+Package 14 of the multi-backend round. The performance statements below are design reasons, not
+results. See "What was run" and "Hardware test plan".
+
+**Status update.** When this package was written no AVX-512 or AMX instruction had ever been executed (test
+level L0). Since then the kernels have run on a Zen 5 EPYC (Colab: `selftest-cpu`, three models, prefill
++47 % on `avx512-vnni` against `avx512bw`) and, for every tier up to `amx`, under Intel SDE (unit tests, `selftest-cpu --tiers all`; two
+models end to end on `avx512bw` and `avx512-vnni`); that found and fixed one real defect (misaligned `vmovdqa` in the
+Q4_1/Q5_1 W-panel tile). The current status is in "What is tested" of [cpu-kernels.md](cpu-kernels.md). Intel
+silicon and AMX silicon remain unexecuted.
 
 ## Enabling it
 
