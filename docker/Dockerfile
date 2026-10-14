@@ -1,5 +1,5 @@
-# fLLM runtime image: one static-feature Rust binary. The CPU kernels select AVX2 / AVX-VNNI / NEON
-# at run time, so a single image serves every machine.
+# fLLM runtime image: one static-feature Rust binary. The CPU kernels select AVX2 / AVX-VNNI / AVX-512 (VNNI,
+# BF16, AMX; the avx512 feature is a default feature) / NEON at run time, so a single image serves every machine.
 #   docker build -f docker/Dockerfile -t fllm .
 # Limit build parallelism on shared hosts:  --build-arg JOBS=3
 

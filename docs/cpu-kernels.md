@@ -168,7 +168,9 @@ GMAC/s per core for a 64-token prompt.
 
 ## Building with the `avx512` feature
 
-`cargo build --release --features avx512` adds the kernels of [cpu-avx512-amx.md](cpu-avx512-amx.md)
+The feature is on by default (`default = ["avx512"]` in `rust/engine/Cargo.toml`, enabled by the commit
+"build: enable the avx512 feature by default"; `--no-default-features` turns it off, and
+`scripts/colab/cpu_confirm.py` builds both variants to compare). It adds the kernels of [cpu-avx512-amx.md](cpu-avx512-amx.md)
 (16-row VNNI prompt GEMM, AMX tiles, 512-bit Q2_K/Q3_K/IQ4_XS/IQ4_NL/MXFP4 panels, 512-bit float
 projections, BF16 dot products, 512-bit DeltaNet) and the tiers `avx512-bf16` and `amx`. Without
 it the tiers up to `avx512-vnni` still exist, but a prompt on an AVX-512 VNNI CPU runs the

@@ -38,7 +38,9 @@ objc2-foundation = { version = "0.3", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 
 [features]
-default = []
+# The x86-64 AVX-512 / AMX kernels are compiled in by default: they are #[target_feature] functions chosen at run time by CPUID,
+# so the binary still runs on any x86-64 CPU (docs/cpu-kernels.md, "Building with the avx512 feature"). `--no-default-features` leaves them out.
+default = ["avx512"]
 rust-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 cuda = []
 # native backends (all optional; none is in the default set). Verification level of each is in docs/backends.md

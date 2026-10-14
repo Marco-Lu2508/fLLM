@@ -12,10 +12,12 @@ silicon and AMX silicon remain unexecuted.
 
 ## Enabling it
 
-All new kernels sit behind the Cargo feature `avx512` (x86-64 only, off by default):
+All new kernels sit behind the Cargo feature `avx512` (x86-64 only; **on by default since the commit "build: enable the avx512 feature by default"**,
+switch it off with `--no-default-features`):
 
 ```bash
-cargo build --release -p fllm-engine --features avx512
+cargo build --release -p fllm-engine                          # with the feature (default)
+cargo build --release -p fllm-engine --no-default-features    # without it
 ```
 
 Without the feature nothing in this document is compiled and the CPU dispatch is exactly what it
