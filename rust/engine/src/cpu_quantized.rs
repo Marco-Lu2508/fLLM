@@ -1835,12 +1835,12 @@ mod x86 {
                         let wr = [&w[kb], &w[nb + kb], &w[2 * nb + kb], &w[3 * nb + kb]];
                         let weights = [
                             crate::cpu_kernels::x86::join256(
-                                _mm256_load_si256(wr[0].q.as_ptr().cast()),
-                                _mm256_load_si256(wr[1].q.as_ptr().cast()),
+                                _mm256_loadu_si256(wr[0].q.as_ptr().cast()),
+                                _mm256_loadu_si256(wr[1].q.as_ptr().cast()),
                             ),
                             crate::cpu_kernels::x86::join256(
-                                _mm256_load_si256(wr[2].q.as_ptr().cast()),
-                                _mm256_load_si256(wr[3].q.as_ptr().cast()),
+                                _mm256_loadu_si256(wr[2].q.as_ptr().cast()),
+                                _mm256_loadu_si256(wr[3].q.as_ptr().cast()),
                             ),
                         ];
                         for t in 0..2 {
