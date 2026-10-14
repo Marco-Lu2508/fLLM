@@ -211,7 +211,8 @@ kernel void fllm_attn_merge_f32(
     uint3 tgid [[threadgroup_position_in_grid]],
     uint3 tpg [[threadgroups_per_grid]],
     uint tid [[thread_index_in_threadgroup]],
-    uint tg_size [[threads_per_threadgroup]]) {
+    uint3 tg_size3 [[threads_per_threadgroup]]) {  // same vector type as the other grid attributes (MSL rejects a mix of uint and uint3)
+    const uint tg_size = tg_size3.x;               // one-dimensional threadgroups: x is the thread count
     threadgroup float wgt[256];
     threadgroup float s_total;
     const uint h = tgid.x;
