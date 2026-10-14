@@ -90,6 +90,12 @@ __host__ __device__ constexpr bool kind_supported(int kind) {
            kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind);
 }
 
+// One rotation pair of the rotary embedding (rope_kernel in elementwise.cu, rope_kv_f32_kernel in fused.cu).
+__device__ __forceinline__ void rope_pair(float a, float b, float c, float s, float &ra, float &rb) {
+    ra = a * c - b * s;
+    rb = b * c + a * s;
+}
+
 // SwiGLU (mode 0) / GeGLU (mode 1) of one element.
 __device__ __forceinline__ float fllm_glu(float g, float u, int mode) {
     float a;

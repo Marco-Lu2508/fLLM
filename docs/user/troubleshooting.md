@@ -96,6 +96,11 @@ Check what the container sees: `docker run --rm --gpus all <registry>/fllm:cuda 
   misbehaving SIMD path; `fllm-rs selftest-cpu [--tier TIER]` checks kernels
   against scalar references.
 
+- CUDA decode uses CUDA graphs when the model allows it (the startup log says
+  `CUDA graphs for decode steps: on`). If you suspect them for odd output or a
+  failing capture, start with `FLLM_CUDA_GRAPH=0`: same text, slower; please
+  report the difference.
+
 ## Getting help from the binary
 
 ```sh

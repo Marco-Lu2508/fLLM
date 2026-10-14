@@ -130,6 +130,57 @@ extern "C" {
         half_: c_int,
         neox: c_int,
     ) -> c_int;
+    fn fllm_cuda_add_rms_norm(
+        st: *mut RawStream,
+        x: *mut f32,
+        branch: *const f32,
+        scale: f32,
+        w: *const f32,
+        out: *mut f32,
+        rows: c_int,
+        cols: c_int,
+        eps: f32,
+        quant: c_int,
+        kind: c_int,
+    ) -> c_int;
+    fn fllm_cuda_linear_q4z_add_norm(
+        st: *mut RawStream,
+        w: *const c_void,
+        group: c_int,
+        act: *const f32,
+        res: *mut f32,
+        bias: *const f32,
+        rows: c_int,
+        cols: c_int,
+        batch: c_int,
+        perm: *const c_int,
+        scale: f32,
+        nw: *const f32,
+        out: *mut f32,
+        eps: f32,
+        quant: c_int,
+        kind: c_int,
+    ) -> c_int;
+    fn fllm_cuda_rope_kv_f32(
+        st: *mut RawStream,
+        q: *mut f32,
+        k: *const f32,
+        v: *const f32,
+        pool_k_layer: *mut u16,
+        pool_v_layer: *mut u16,
+        positions: *const i32,
+        slots: *const i32,
+        rows: c_int,
+        cs: *const f32,
+        sn: *const f32,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        half_: c_int,
+        neox: c_int,
+    ) -> c_int;
+    fn fllm_cuda_set_fuse(which: c_int, on: c_int) -> c_int;
     fn fllm_cuda_gptq_repack(dev: c_int, words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_linear_fp8_marlin(
         st: *mut RawStream,
@@ -453,6 +504,57 @@ fn check(code: c_int) -> Result<(), BackendError> {
 
 fn invalid(msg: impl Into<String>) -> BackendError {
     BackendError::InvalidShape(msg.into())
+}
+
+/// Answer of a fused kernel entry point: 0 = launched, 3 = declined (nothing was launched), anything else is an error.
+fn fused_result(code: c_int) -> Result<bool, BackendError> {
+    match code {
+        0 => Ok(true),
+        3 => Ok(false),
+        other => check(other).map(|()| true),
+    }
+}
+
+/// What the GEMM of `weight` reads: `(quant, kind)` for the fused norm kernels. 1 = FP16 activations of the Marlin 4-bit GEMM (no
+/// activation permutation), 2 = NVFP4 blocks, 3 = int8 blocks of the K-quant GEMVs (`kind` is the GGUF type), 0 = nothing to prepare.
+fn next_activation_format(weight: Option<&DeviceWeight>) -> (c_int, c_int) {
+    let Some(w) = weight else {
+        return (0, 0);
+    };
+    let kind = w.quant_type.to_gguf_type_id();
+    if kind == 40 {
+        (2, 0)
+    } else if w.quant_type.q4z_group().is_some() {
+        if w.perm.is_some() {
+            (0, 0)
+        } else {
+            (1, 0)
+        }
+    } else if matches!(kind, 12..=14) {
+        (3, kind as c_int)
+    } else {
+        (0, 0)
+    }
+}
+
+/// The fused decode kernels (docs/gpu-backends.md, "Fewer kernels per decode token").
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fusion {
+    /// residual add + RMSNorm (+ activation conversion of the next GEMM), `FLLM_FUSE_ADD_NORM`
+    AddNorm = 0,
+    /// RMSNorm + activation quantization of the next GEMM, `FLLM_FUSE_NORM_QUANT`
+    NormQuant = 1,
+    /// rotary embedding + KV cache write, `FLLM_FUSE_ROPE_KV`
+    RopeKv = 2,
+    /// gated activation + int8 quantization, `FLLM_FUSE_GLU_Q8`
+    GluQ8 = 3,
+}
+
+/// Force a fusion on or off (self test); `None` returns to the environment.
+pub fn set_fusion(which: Fusion, on: Option<bool>) {
+    // SAFETY: plain setter of a process-wide flag.
+    unsafe { fllm_cuda_set_fuse(which as c_int, on.map_or(-1, c_int::from)) };
 }
 
 fn to_c(n: usize, what: &str) -> Result<c_int, BackendError> {
@@ -1930,6 +2032,151 @@ impl Stream for CudaStream {
         // SAFETY: as above.
         unsafe { fllm_cuda_q4z_accumulate(0, 0.0) };
         result.map(|()| true)
+    }
+
+    fn add_rms_norm(
+        &mut self,
+        x: &mut DeviceBuffer,
+        branch: &DeviceBuffer,
+        scale: f32,
+        weight: &DeviceBuffer,
+        eps: f32,
+        out: &mut DeviceBuffer,
+        next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        let cols = weight.size / 4;
+        if cols == 0 || !x.size.is_multiple_of(cols * 4) || branch.size < x.size || out.size < x.size {
+            return Ok(false);
+        }
+        let rows = x.size / (cols * 4);
+        let (quant, kind) = next_activation_format(next);
+        // SAFETY: sizes checked above; the entry point validates alignment and shape and declines (returns 3) without launching.
+        fused_result(unsafe {
+            fllm_cuda_add_rms_norm(
+                self.raw,
+                dev_ptr(x)?.cast(),
+                dev_ptr(branch)?.cast(),
+                scale,
+                dev_ptr(weight)?.cast(),
+                dev_ptr(out)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(cols, "width")?,
+                eps,
+                quant,
+                kind,
+            )
+        })
+    }
+
+    fn quantized_linear_add_norm(
+        &mut self,
+        residual: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceWeight,
+        bias: Option<&DeviceBuffer>,
+        scale: f32,
+        norm: &DeviceBuffer,
+        eps: f32,
+        out: &mut DeviceBuffer,
+        next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        let Some(group) = weight.quant_type.q4z_group() else {
+            return Ok(false);
+        };
+        if scale == 0.0 || std::env::var_os("FLLM_NO_FUSED_ADD").is_some() {
+            return Ok(false);
+        }
+        let (rows, cols) = (weight.rows, weight.cols);
+        if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) || norm.size != rows * 4 {
+            return Ok(false);
+        }
+        let batch = x.size / (cols * 4);
+        if batch == 0 || residual.size < batch * rows * 4 || out.size < batch * rows * 4 || bias.is_some_and(|b| b.size < rows * 4) {
+            return Ok(false);
+        }
+        let bias_ptr = match bias {
+            Some(b) => dev_ptr(b)? as *const f32,
+            None => std::ptr::null(),
+        };
+        let perm_ptr = match &weight.perm {
+            Some(p) => dev_ptr(p)? as *const c_int,
+            None => std::ptr::null(),
+        };
+        let (quant, kind) = next_activation_format(next);
+        // SAFETY: sizes checked above; the weight was uploaded by `upload_q4z`; the entry point declines (returns 3) before launching anything
+        // when the alignment or the width does not suit the fused kernel.
+        fused_result(unsafe {
+            fllm_cuda_linear_q4z_add_norm(
+                self.raw,
+                dev_ptr(&weight.buffer)?.cast(),
+                group as c_int,
+                dev_ptr(x)?.cast(),
+                dev_ptr(residual)?.cast(),
+                bias_ptr,
+                to_c(rows, "rows")?,
+                to_c(cols, "cols")?,
+                to_c(batch, "batch")?,
+                perm_ptr,
+                scale,
+                dev_ptr(norm)?.cast(),
+                dev_ptr(out)?.cast(),
+                eps,
+                quant,
+                kind,
+            )
+        })
+    }
+
+    fn rope_kv_write(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        layer_idx: usize,
+        positions: &[usize],
+        slots: &[usize],
+        params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        if kv.kv_kind != 1 || params.rope_dim == 0 || params.rope_dim > params.dim || positions.len() != slots.len() {
+            return Ok(false);
+        }
+        let rows = positions.len();
+        if rows == 0 {
+            return Ok(true);
+        }
+        let (dk, dv) = (kv.head_dim, kv.value_dim);
+        if dk != params.dim || kv.kv_heads != params.kv_heads {
+            return Ok(false);
+        }
+        params.validate(positions, q.size, k.size)?;
+        validate_kv_write(kv, layer_idx, slots, k.size, v.size)?;
+        let cos = self.table(&params.cos)?;
+        let sin = self.table(&params.sin)?;
+        let pos: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
+        let slot_ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+        // SAFETY: sizes, table coverage and slot ranges validated above; positions and slots are staged by the library before the launch.
+        fused_result(unsafe {
+            fllm_cuda_rope_kv_f32(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(v)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                pos.as_ptr(),
+                slot_ids.as_ptr(),
+                to_c(rows, "rows")?,
+                cos,
+                sin,
+                to_c(params.heads, "heads")?,
+                to_c(kv.kv_heads, "kv heads")?,
+                to_c(dk, "head width")?,
+                to_c(dv, "value width")?,
+                to_c(params.rope_dim / 2, "rope width")?,
+                c_int::from(params.neox),
+            )
+        })
     }
 
     fn graph_supported(&self) -> bool {

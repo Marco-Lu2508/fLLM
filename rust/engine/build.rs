@@ -328,7 +328,7 @@ fn cuda_kernels() {
     if nvcc_major >= 13 {
         extra.push("-static-global-template-stub=false".into());
     }
-    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu"];
+    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu"];
     let mut objects = Vec::new();
     for source in sources {
         if source == "nvfp4_cutlass.cu" && cutlass.is_none() {
@@ -474,7 +474,7 @@ fn hip_kernels() {
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let archs = std::env::var("FLLM_HIP_ARCHS")
         .unwrap_or_else(|_| "gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201".into());
-    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "hip_stubs.cu"];
+    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "hip_stubs.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
     let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
     let mut objects = Vec::new();

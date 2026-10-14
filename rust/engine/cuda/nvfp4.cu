@@ -350,3 +350,29 @@ int fllm_nvfp4_cutlass_ok(const float *X, const float *Y, const float *bias, int
     return 0;
 #endif
 }
+
+// The fused norm kernels (fused.cu) quantize the activations of the next NVFP4 GEMM straight into the scratch that fllm_nvfp4_try reads
+// (batches of up to 64 tokens; larger ones go to CUTLASS, which keeps its own copy).
+bool fllm_nvfp4_prep_ok(int cols, int batch) {
+#ifdef FLLM_NO_FP4
+    (void)cols; (void)batch;
+    return false;
+#else
+    static const bool supported = [] {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceProp p;
+        if (cudaGetDeviceProperties(&p, dev) != cudaSuccess) return false;
+        return p.major == 12 && fllm_cc() >= 120;
+    }();
+    return supported && batch >= 1 && batch <= 64 && (cols & 255) == 0;
+#endif
+}
+void fllm_nvfp4_scratch_filled() {
+#ifndef FLLM_NO_FP4
+    g_scratch_valid = true;
+#ifdef FLLM_HAVE_CUTLASS
+    fllm_nvfp4_cutlass_invalidate();
+#endif
+#endif
+}

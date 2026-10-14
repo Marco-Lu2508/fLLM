@@ -102,13 +102,17 @@ __global__ void rope_kernel(float *q, float *k, const int32_t *pos, const float 
         if (h < heads) {
             float *base = q + ((size_t)r * heads + h) * dim;
             const float a = base[ia], b = base[ib];
-            base[ia] = a * c - b * s;
-            base[ib] = b * c + a * s;
+            float ra, rb;
+            rope_pair(a, b, c, s, ra, rb);
+            base[ia] = ra;
+            base[ib] = rb;
         } else {
             float *base = k + ((size_t)r * kv_heads + (h - heads)) * dim;
             const float a = base[ia], b = base[ib];
-            base[ia] = a * c - b * s;
-            base[ib] = b * c + a * s;
+            float ra, rb;
+            rope_pair(a, b, c, s, ra, rb);
+            base[ia] = ra;
+            base[ib] = rb;
         }
     }
 }

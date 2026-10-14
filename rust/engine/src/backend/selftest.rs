@@ -55,6 +55,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("sampling", "argmax_rows (greedy sampling on the device)"),
     ("host", "host_linear (weights streamed from host memory)"),
     ("moe", "moe_topk, moe_linear, moe_combine, gather_rows / scatter_add_rows"),
+    ("fuse", "fused decode kernels against the unfused sequence: residual add + norm (+ activation conversion), rotary + cache write, gated activation + int8 quantization"),
 ];
 
 /// Groups whose checks depend on a weight format (`--quants` limits them).
@@ -896,6 +897,9 @@ impl<'a> Tester<'a> {
         if self.enter("moe") {
             self.moe_cases();
         }
+        if self.enter("fuse") {
+            self.fuse_cases();
+        }
     }
 
     /// The fast linear kernels per format, the Marlin shapes and the shared-activation cases.
@@ -1424,6 +1428,9 @@ impl<'a> Tester<'a> {
             }
             if self.enter("moe") {
                 self.moe_cases();
+            }
+            if self.enter("fuse") {
+                self.fuse_cases();
             }
         }
     }
@@ -3041,6 +3048,309 @@ impl Tester<'_> {
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
     }
 }
+/// Number of differing bits between two results: 0 when identical, otherwise a value far above any tolerance.
+fn bit_diff(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.iter().zip(b).any(|(x, y)| x.to_bits() != y.to_bits()) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Largest |a - b| relative to the largest |b| (a GEMM that sums in a fixed order gives 0; a quantization that differs does not).
+fn max_relative(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return f64::INFINITY;
+    }
+    let top = b.iter().fold(0.0f64, |m, &v| m.max(f64::from(v).abs())).max(1e-30);
+    let mut worst = 0.0f64;
+    for (&x, &y) in a.iter().zip(b) {
+        let e = (f64::from(x) - f64::from(y)).abs() / top;
+        if e.is_nan() {
+            return f64::INFINITY;
+        }
+        worst = worst.max(e);
+    }
+    worst
+}
+
+/// The fused decode kernels (docs/gpu-backends.md, "Fewer kernels per decode token"). Each check runs the fused operation and the unfused
+/// sequence it replaces on the same device and expects the same bits (the GEMMs that follow: the same values up to the order of a
+/// reduction), and holds the fused result against an f64 reference where the operation has one. A device without the fused operation (or
+/// with it switched off by `FLLM_FUSE*`) is skipped.
+impl<'a> Tester<'a> {
+    /// Tolerance of the GEMM results that follow a fused operation (the order of the reduction is the only difference allowed).
+    const FUSE_GEMM_TOL: f64 = 1e-5;
+
+    fn fuse_cases(&mut self) {
+        for (rows, cols) in [(1usize, 256usize), (1, 2048), (4, 4096), (3, 5120), (2, 260)] {
+            let r = self.fuse_add_norm(rows, cols, None);
+            self.record("add_rms_norm", &format!("{rows}x{cols}"), r);
+        }
+        // the activations of the GEMM that follows are prepared by the same kernel: NVFP4 blocks, int8 blocks, FP16 for Marlin
+        for kind in self.kinds(&[40u32, 12, 13, 14, 0x8000_0010]) {
+            for rows in [1usize, 4] {
+                let r = self.fuse_add_norm(rows, 1024, Some(kind));
+                self.record(&format!("add_rms_norm +{}", format_name(kind)), &format!("{rows}x1024"), r);
+            }
+        }
+        if self.filter.wants_kind(0x8000_0010) {
+            for (batch, bias) in [(1usize, false), (4, true)] {
+                let r = self.fuse_q4z_add_norm(batch, bias);
+                self.record("marlin add_rms_norm", &format!("{batch} rows 1024x1024{}", if bias { " +bias" } else { "" }), r);
+            }
+        }
+        for (rows, dim, rope_dim, neox) in [(1usize, 64usize, 64usize, true), (5, 80, 32, false), (3, 128, 64, false), (2, 128, 128, true)] {
+            let r = self.fuse_rope_kv(rows, dim, rope_dim, neox);
+            self.record(
+                "rope_kv_write",
+                &format!("{rows} rows 4/2 heads d{dim} r{rope_dim} {}", if neox { "neox" } else { "pairs" }),
+                r,
+            );
+        }
+        for kind in self.kinds(&[12u32, 13, 14]) {
+            for (batch, geglu) in [(1usize, false), (3, false), (1, true)] {
+                let r = self.fuse_glu_q8(kind, batch, 1024, geglu);
+                self.record(
+                    &format!("{} + int8 quantization {}", if geglu { "geglu" } else { "swiglu" }, format_name(kind)),
+                    &format!("{batch}x1024"),
+                    r,
+                );
+            }
+        }
+    }
+
+    /// `x += scale * branch; out = rms_norm(x)` (and a GEMM on `out` when `next` names a weight format).
+    fn fuse_add_norm(&mut self, rows: usize, cols: usize, next: Option<u32>) -> Result<Outcome, BackendError> {
+        let x = self.rng.vector(rows * cols, 2.0);
+        let branch = self.rng.vector(rows * cols, 1.0);
+        let w = self.rng.vector(cols, 1.0);
+        let (eps, scale) = (1e-6f32, 0.75f32);
+        let out_rows = 384usize;
+        let raw = match next {
+            Some(kind) => Some(random_kind(&mut self.rng, kind, out_rows, cols)),
+            None => None,
+        };
+        let device = self.device;
+        let mut stream = device.create_stream()?;
+        let s = stream.as_mut();
+        let weight = match (&raw, next) {
+            (Some(raw), Some(kind)) => Some(device.upload_weight_scaled("selftest", raw, QuantType::from_gguf_type_id(kind), out_rows, cols, None, 1.0)?),
+            _ => None,
+        };
+        s.synchronize()?;
+        let branch_buf = put(device, s, &branch)?;
+        let w_buf = put(device, s, &w)?;
+        // the unfused sequence
+        let mut x_a = put(device, s, &x)?;
+        let mut norm_a = device.allocate_buffer(rows * cols * 4)?;
+        s.residual_add(&mut x_a, &branch_buf, scale)?;
+        s.rms_norm(&mut norm_a, &x_a, &w_buf, eps)?;
+        let mut y_a = device.allocate_buffer(rows * out_rows * 4)?;
+        if let Some(weight) = &weight {
+            s.quantized_linear(&mut y_a, &norm_a, weight, None)?;
+        }
+        // the fused kernel
+        let mut x_b = put(device, s, &x)?;
+        let mut norm_b = device.allocate_buffer(rows * cols * 4)?;
+        let mut done = false;
+        let mut ms = 0.0;
+        timed(&mut ms, s, |st| {
+            done = st.add_rms_norm(&mut x_b, &branch_buf, scale, &w_buf, eps, &mut norm_b, weight.as_ref())?;
+            Ok(())
+        })?;
+        if !done {
+            return Err(BackendError::UnsupportedOperation("add_rms_norm".into()));
+        }
+        let mut y_b = device.allocate_buffer(rows * out_rows * 4)?;
+        if let Some(weight) = &weight {
+            s.quantized_linear(&mut y_b, &norm_b, weight, None)?;
+        }
+        let (xa, xb) = (get(s, &x_a, rows * cols)?, get(s, &x_b, rows * cols)?);
+        let (na, nb) = (get(s, &norm_a, rows * cols)?, get(s, &norm_b, rows * cols)?);
+        let mut err = bit_diff(&xa, &xb).max(bit_diff(&na, &nb));
+        if weight.is_some() {
+            err = err.max(max_relative(&get(s, &y_b, rows * out_rows)?, &get(s, &y_a, rows * out_rows)?));
+        }
+        // f64 reference of the norm output
+        let mut want = vec![0.0; rows * cols];
+        let mut scale_of = vec![0.0; rows * cols];
+        for r in 0..rows {
+            let row: Vec<f64> = (0..cols).map(|c| f64::from(x[r * cols + c]) + f64::from(branch[r * cols + c]) * f64::from(scale)).collect();
+            let ms_row: f64 = row.iter().map(|v| v * v).sum::<f64>() / cols as f64;
+            let inv = 1.0 / (ms_row + f64::from(eps)).sqrt();
+            for c in 0..cols {
+                let v = row[c] * inv * f64::from(w[c]);
+                want[r * cols + c] = v;
+                scale_of[r * cols + c] = v.abs();
+            }
+        }
+        Ok(Outcome {
+            device: err,
+            cpu: worst(&nb, &want, &scale_of),
+            tol: Self::FUSE_GEMM_TOL,
+            cpu_tol: gamma(cols) / 2.0 + 128.0 * U,
+            ms,
+        })
+    }
+
+    /// The Marlin output projection with the residual update, the norm and the conversion of the next Marlin GEMM.
+    fn fuse_q4z_add_norm(&mut self, batch: usize, with_bias: bool) -> Result<Outcome, BackendError> {
+        let kind = 0x8000_0010u32;
+        let (rows, cols, next_rows) = (1024usize, 1024usize, 384usize);
+        let raw = random_kind(&mut self.rng, kind, rows, cols);
+        let raw_next = random_kind(&mut self.rng, kind, next_rows, rows);
+        let bias = with_bias.then(|| self.rng.vector(rows, 1.0));
+        let act = self.rng.vector(batch * cols, 1.0);
+        let x = self.rng.vector(batch * rows, 2.0);
+        let w = self.rng.vector(rows, 1.0);
+        let (eps, scale) = (1e-6f32, 1.0f32);
+        let device = self.device;
+        let mut stream = device.create_stream()?;
+        let s = stream.as_mut();
+        let q = QuantType::from_gguf_type_id(kind);
+        let weight = device.upload_weight_scaled("selftest", &raw, q, rows, cols, bias.as_deref(), 1.0)?;
+        let next = device.upload_weight_scaled("selftest", &raw_next, q, next_rows, rows, None, 1.0)?;
+        s.synchronize()?;
+        let act_buf = put(device, s, &act)?;
+        let w_buf = put(device, s, &w)?;
+        // unfused: the product is added to the residual by the Marlin conversion, then norm, then the next GEMM converts its input
+        let mut x_a = put(device, s, &x)?;
+        let mut norm_a = device.allocate_buffer(batch * rows * 4)?;
+        if !s.quantized_linear_add(&mut x_a, &act_buf, &weight, weight.bias.as_ref(), scale)? {
+            return Err(BackendError::UnsupportedOperation("quantized_linear_add".into()));
+        }
+        s.rms_norm(&mut norm_a, &x_a, &w_buf, eps)?;
+        let mut y_a = device.allocate_buffer(batch * next_rows * 4)?;
+        s.quantized_linear(&mut y_a, &norm_a, &next, None)?;
+        // fused
+        let mut x_b = put(device, s, &x)?;
+        let mut norm_b = device.allocate_buffer(batch * rows * 4)?;
+        let mut done = false;
+        let mut ms = 0.0;
+        timed(&mut ms, s, |st| {
+            done = st.quantized_linear_add_norm(&mut x_b, &act_buf, &weight, weight.bias.as_ref(), scale, &w_buf, eps, &mut norm_b, Some(&next))?;
+            Ok(())
+        })?;
+        if !done {
+            return Err(BackendError::UnsupportedOperation("quantized_linear_add_norm".into()));
+        }
+        let mut y_b = device.allocate_buffer(batch * next_rows * 4)?;
+        s.quantized_linear(&mut y_b, &norm_b, &next, None)?;
+        let (xa, xb) = (get(s, &x_a, batch * rows)?, get(s, &x_b, batch * rows)?);
+        let (na, nb) = (get(s, &norm_a, batch * rows)?, get(s, &norm_b, batch * rows)?);
+        let err = bit_diff(&xa, &xb)
+            .max(bit_diff(&na, &nb))
+            .max(max_relative(&get(s, &y_b, batch * next_rows)?, &get(s, &y_a, batch * next_rows)?));
+        Ok(Outcome { device: err, cpu: 0.0, tol: Self::FUSE_GEMM_TOL, cpu_tol: 1.0, ms })
+    }
+
+    /// Rotary embedding of q and the cache write of k and v (f16 cache) in one kernel.
+    fn fuse_rope_kv(&mut self, rows: usize, dim: usize, rope_dim: usize, neox: bool) -> Result<Outcome, BackendError> {
+        let (heads, kv_heads, max_pos) = (4usize, 2usize, 64usize);
+        let (layers, layer, pool_blocks, block_size) = (3usize, 1usize, 33usize, 16usize);
+        let half = rope_dim / 2;
+        let mut cos = Vec::with_capacity(max_pos * half);
+        let mut sin = Vec::with_capacity(max_pos * half);
+        for p in 0..max_pos {
+            for d in 0..half {
+                let angle = p as f64 / 10_000f64.powf(2.0 * d as f64 / rope_dim as f64);
+                cos.push(angle.cos() as f32);
+                sin.push(angle.sin() as f32);
+            }
+        }
+        let positions: Vec<usize> = (0..rows).map(|_| (self.rng.next() % max_pos as u64) as usize).collect();
+        let slots_total = pool_blocks * block_size;
+        let mut slots: Vec<usize> = Vec::new();
+        while slots.len() < rows {
+            let slot = (self.rng.next() % slots_total as u64) as usize;
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+        let q = self.rng.vector(rows * heads * dim, 1.0);
+        let k = self.rng.vector(rows * kv_heads * dim, 1.0);
+        let v = self.rng.vector(rows * kv_heads * dim, 2.0);
+        let params = RopeParams { heads, kv_heads, dim, rope_dim, neox, cos: Arc::new(cos), sin: Arc::new(sin) };
+        let device = self.device;
+        let mut stream = device.create_stream()?;
+        let s = stream.as_mut();
+        let words = kv_layer_words(1, slots_total, kv_heads, dim);
+        // rotate, then write
+        let mut q_a = put(device, s, &q)?;
+        let mut k_a = put(device, s, &k)?;
+        let v_a = put(device, s, &v)?;
+        let cache_a = device.allocate_kv_cache(layers, pool_blocks, block_size, kv_heads, dim, dim, 1)?;
+        s.rope(&mut q_a, &mut k_a, &positions, &params)?;
+        s.kv_cache_write(&cache_a, layer, &slots, &k_a, &v_a)?;
+        // both in one kernel
+        let mut q_b = put(device, s, &q)?;
+        let k_b = put(device, s, &k)?;
+        let v_b = put(device, s, &v)?;
+        let cache_b = device.allocate_kv_cache(layers, pool_blocks, block_size, kv_heads, dim, dim, 1)?;
+        let mut done = false;
+        let mut ms = 0.0;
+        timed(&mut ms, s, |st| {
+            done = st.rope_kv_write(&mut q_b, &k_b, &v_b, &cache_b, layer, &positions, &slots, &params)?;
+            Ok(())
+        })?;
+        if !done {
+            return Err(BackendError::UnsupportedOperation("rope_kv_write".into()));
+        }
+        let mut err = bit_diff(&get(s, &q_a, q.len())?, &get(s, &q_b, q.len())?);
+        for (pool_a, pool_b) in [(&cache_a.key_pool, &cache_b.key_pool), (&cache_a.value_pool, &cache_b.value_pool)] {
+            let (mut bytes_a, mut bytes_b) = (vec![0u8; layers * words * 2], vec![0u8; layers * words * 2]);
+            s.download(&mut bytes_a, pool_a)?;
+            s.download(&mut bytes_b, pool_b)?;
+            if bytes_a != bytes_b {
+                err = err.max(1.0);
+            }
+        }
+        Ok(Outcome { device: err, cpu: 0.0, tol: 0.0, cpu_tol: 1.0, ms })
+    }
+
+    /// A gated activation followed by a K-quant GEMV: the int8 quantization of the GEMV computes the activation itself.
+    #[cfg(feature = "cuda")]
+    fn fuse_glu_q8(&mut self, kind: u32, batch: usize, cols: usize, geglu: bool) -> Result<Outcome, BackendError> {
+        use super::cuda::{set_fusion, Fusion};
+        let out_rows = 384usize;
+        let raw = random_kind(&mut self.rng, kind, out_rows, cols);
+        let gate = self.rng.vector(batch * cols, 4.0);
+        let up = self.rng.vector(batch * cols, 2.0);
+        let device = self.device;
+        let mut stream = device.create_stream()?;
+        let s = stream.as_mut();
+        let weight = device.upload_weight_scaled("selftest", &raw, QuantType::from_gguf_type_id(kind), out_rows, cols, None, 1.0)?;
+        s.synchronize()?;
+        let gate_buf = put(device, s, &gate)?;
+        let up_buf = put(device, s, &up)?;
+        let mut results: Vec<Vec<f32>> = Vec::new();
+        let mut ms = 0.0;
+        for fused in [false, true] {
+            set_fusion(Fusion::GluQ8, Some(fused));
+            let mut act = device.allocate_buffer(batch * cols * 4)?;
+            let mut y = device.allocate_buffer(batch * out_rows * 4)?;
+            let run = timed(&mut ms, s, |st| {
+                if geglu {
+                    st.geglu(&mut act, &gate_buf, &up_buf)?;
+                } else {
+                    st.swiglu(&mut act, &gate_buf, &up_buf)?;
+                }
+                st.quantized_linear(&mut y, &act, &weight, None)
+            });
+            set_fusion(Fusion::GluQ8, None);
+            run?;
+            results.push(get(s, &y, batch * out_rows)?);
+        }
+        Ok(Outcome { device: max_relative(&results[1], &results[0]), cpu: 0.0, tol: Self::FUSE_GEMM_TOL, cpu_tol: 1.0, ms })
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn fuse_glu_q8(&mut self, _kind: u32, _batch: usize, _cols: usize, _geglu: bool) -> Result<Outcome, BackendError> {
+        Err(BackendError::UnsupportedOperation("swiglu + int8 quantization".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

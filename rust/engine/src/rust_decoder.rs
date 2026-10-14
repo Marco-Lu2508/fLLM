@@ -2437,6 +2437,10 @@ impl RustDecoder {
         let mamba_shape = self.mamba_shape();
         let mamba1_shape = self.mamba1_shape();
         let mut delta_plan: Option<Vec<DeltaPlanRun>> = None;
+        // the norm of the next layer (or the final norm), when the residual add of this layer's feed-forward block already computed it
+        let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
+        // the head GEMM reads the final norm output directly when every row's logits are wanted in order
+        let head_direct = head_copy_fused() && logit_rows.len() == rows && logit_rows.iter().enumerate().all(|(j, &r)| j == r);
         for (i, layer) in self.layers.iter().enumerate() {
             let dev_layer = &dev_weights.layers[i];
             if dev_layer.host_layer {
@@ -2460,8 +2464,12 @@ impl RustDecoder {
             // parallel residual: the attention branch joins the residual stream only after the feed-forward input is taken from it
             let parallel = cfg.parallel_residual;
             let mut deferred_branch: Option<crate::backend::DeviceBuffer> = None;
+            // the feed-forward norm of this layer, when the output projection's residual add already computed it
+            let mut ffn_pre: Option<crate::backend::DeviceBuffer> = None;
 
-            if let Some(norm_buf) = &dev_layer.attn_norm {
+            if let Some(carried) = carried_norm.take() {
+                scratch.recycle(std::mem::replace(&mut normed_buf, carried));
+            } else if let Some(norm_buf) = &dev_layer.attn_norm {
                 device_norm(&mut **stream, cfg.norm, &mut normed_buf, &x_buf, norm_buf, dev_layer.attn_norm_b.as_ref(), cfg.eps)?;
             } else {
                 stream.copy_buffer(&mut normed_buf, &x_buf).map_err(err)?;
@@ -2578,6 +2586,8 @@ impl RustDecoder {
                     device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
                     device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
                 }
+                // rotary embedding and the cache write in one kernel (f16 cache, nothing between them)
+                let mut kv_written = false;
                 if cfg.rope.dims > 0 && cfg.layer_rotates(i) {
                     let (cos, sin) = &dev_weights.rope[usize::from(layer.local_rope)];
                     let rope_params = RopeParams {
@@ -2589,9 +2599,16 @@ impl RustDecoder {
                         cos: Arc::clone(cos),
                         sin: Arc::clone(sin),
                     };
-                    stream
-                        .rope(&mut q_buf, &mut k_buf, &positions, &rope_params)
-                        .map_err(err)?;
+                    if !cfg.qk_norm_after_rope && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
+                        kv_written = stream
+                            .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, i, &positions, &slots, &rope_params)
+                            .map_err(err)?;
+                    }
+                    if !kv_written {
+                        stream
+                            .rope(&mut q_buf, &mut k_buf, &positions, &rope_params)
+                            .map_err(err)?;
+                    }
                 }
                 if i == 0 {
                     debug_sum(&mut **stream, "Qcur-0 (rope)", &q_buf);
@@ -2601,9 +2618,11 @@ impl RustDecoder {
                     device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
                     device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
                 }
-                stream
-                    .kv_cache_write(dev_kv, i, &slots, &k_buf, &v_buf)
-                    .map_err(err)?;
+                if !kv_written {
+                    stream
+                        .kv_cache_write(dev_kv, i, &slots, &k_buf, &v_buf)
+                        .map_err(err)?;
+                }
                 }
                 } else if let (Some(dm), Some(mc)) = (&dev_layer.mla, cfg.mla.as_ref()) {
                     // multi-head latent attention, expanded: projections as GEMMs, the data movement in two small kernels, then
@@ -2681,12 +2700,36 @@ impl RustDecoder {
 
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
+                // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
+                let ffn_target = if dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() {
+                    dev_layer
+                        .ffn_norm
+                        .as_ref()
+                        .map(|w| (w, dev_layer.ffn_gate.as_ref().or(dev_layer.ffn_up.as_ref())))
+                } else {
+                    None
+                };
+                let mut fused = false;
+                if let Some((norm_w, first)) = ffn_target {
+                    let mut pre = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    if stream
+                        .quantized_linear_add_norm(&mut x_buf, &attn_buf, out_w, out_w.bias.as_ref(), cfg.residual_scale, norm_w, cfg.eps, &mut pre, first)
+                        .map_err(err)?
+                    {
+                        ffn_pre = Some(pre);
+                        fused = true;
+                    } else {
+                        scratch.recycle(pre);
+                    }
+                }
                 // the output projection is added straight into the residual stream when nothing sits between them
-                let fused = dev_layer.post_attn_norm.is_none()
-                    && !parallel
-                    && stream
-                        .quantized_linear_add(&mut x_buf, &attn_buf, out_w, out_w.bias.as_ref(), cfg.residual_scale)
-                        .map_err(err)?;
+                if !fused {
+                    fused = dev_layer.post_attn_norm.is_none()
+                        && !parallel
+                        && stream
+                            .quantized_linear_add(&mut x_buf, &attn_buf, out_w, out_w.bias.as_ref(), cfg.residual_scale)
+                            .map_err(err)?;
+                }
                 if !fused {
                     stream
                         .quantized_linear(
@@ -2714,9 +2757,24 @@ impl RustDecoder {
                             scratch.acquire(4).map_err(err)?,
                         ));
                     } else {
-                        stream
-                            .residual_add(&mut x_buf, &out_buf, cfg.residual_scale)
-                            .map_err(err)?;
+                        let mut joined = false;
+                        if let Some((norm_w, first)) = ffn_target {
+                            let mut pre = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                            if stream
+                                .add_rms_norm(&mut x_buf, &out_buf, cfg.residual_scale, norm_w, cfg.eps, &mut pre, first)
+                                .map_err(err)?
+                            {
+                                ffn_pre = Some(pre);
+                                joined = true;
+                            } else {
+                                scratch.recycle(pre);
+                            }
+                        }
+                        if !joined {
+                            stream
+                                .residual_add(&mut x_buf, &out_buf, cfg.residual_scale)
+                                .map_err(err)?;
+                        }
                     }
                 }
                 if i == 0 {
@@ -2806,6 +2864,8 @@ impl RustDecoder {
             if matches!(layer.attn, Attn::None) || (parallel && dev_layer.ffn_norm.is_none()) {
                 // feed-forward-only layers (Nemotron-H) and parallel-residual models with one shared norm (Cohere)
                 stream.copy_buffer(&mut ffn_normed, &normed_buf).map_err(err)?;
+            } else if let Some(pre) = ffn_pre.take() {
+                scratch.recycle(std::mem::replace(&mut ffn_normed, pre));
             } else if let Some(ffn_norm_buf) = &dev_layer.ffn_norm {
                 device_norm(&mut **stream, cfg.norm, &mut ffn_normed, &x_buf, ffn_norm_buf, dev_layer.ffn_norm_b.as_ref(), cfg.eps)?;
             } else {
@@ -2872,10 +2932,39 @@ impl RustDecoder {
                 }
 
                 let mut ffn_out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
-                let fused = dev_layer.post_ffn_norm.is_none()
-                    && stream
-                        .quantized_linear_add(&mut x_buf, &act_buf, down_w, down_w.bias.as_ref(), cfg.residual_scale)
-                        .map_err(err)?;
+                // the norm of the next layer (or the final norm) can join the residual add of the down projection
+                let next_target = if dev_layer.post_ffn_norm.is_none() && !parallel && matches!(cfg.norm, NormKind::Rms) {
+                    match dev_weights.layers.get(i + 1) {
+                        Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
+                            let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
+                            (w, first)
+                        }),
+                        Some(_) => None,
+                        None if dev_weights.final_norm_b.is_none() => Some((&dev_weights.final_norm, head_direct.then_some(&dev_weights.head))),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let mut fused = false;
+                if let Some((norm_w, first)) = next_target {
+                    let mut pre = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    if stream
+                        .quantized_linear_add_norm(&mut x_buf, &act_buf, down_w, down_w.bias.as_ref(), cfg.residual_scale, norm_w, cfg.eps, &mut pre, first)
+                        .map_err(err)?
+                    {
+                        carried_norm = Some(pre);
+                        fused = true;
+                    } else {
+                        scratch.recycle(pre);
+                    }
+                }
+                if !fused {
+                    fused = dev_layer.post_ffn_norm.is_none()
+                        && stream
+                            .quantized_linear_add(&mut x_buf, &act_buf, down_w, down_w.bias.as_ref(), cfg.residual_scale)
+                            .map_err(err)?;
+                }
                 if !fused {
                     stream
                         .quantized_linear(&mut ffn_out_buf, &act_buf, down_w, down_w.bias.as_ref())
@@ -2889,9 +2978,24 @@ impl RustDecoder {
                         dev_layer.post_ffn_norm_b.as_ref(),
                         cfg.post_eps,
                     )?;
-                    stream
-                        .residual_add(&mut x_buf, &ffn_out_buf, cfg.residual_scale)
-                        .map_err(err)?;
+                    let mut joined = false;
+                    if let Some((norm_w, first)) = next_target {
+                        let mut pre = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                        if stream
+                            .add_rms_norm(&mut x_buf, &ffn_out_buf, cfg.residual_scale, norm_w, cfg.eps, &mut pre, first)
+                            .map_err(err)?
+                        {
+                            carried_norm = Some(pre);
+                            joined = true;
+                        } else {
+                            scratch.recycle(pre);
+                        }
+                    }
+                    if !joined {
+                        stream
+                            .residual_add(&mut x_buf, &ffn_out_buf, cfg.residual_scale)
+                            .map_err(err)?;
+                    }
                 }
 
                 scratch.recycle(gate_buf);
@@ -2988,15 +3092,19 @@ impl RustDecoder {
         }
 
         let mut final_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
-        device_norm(
-            &mut **stream,
-            cfg.norm,
-            &mut final_normed,
-            &x_buf,
-            &dev_weights.final_norm,
-            dev_weights.final_norm_b.as_ref(),
-            cfg.eps,
-        )?;
+        if let Some(carried) = carried_norm.take() {
+            scratch.recycle(std::mem::replace(&mut final_normed, carried));
+        } else {
+            device_norm(
+                &mut **stream,
+                cfg.norm,
+                &mut final_normed,
+                &x_buf,
+                &dev_weights.final_norm,
+                dev_weights.final_norm_b.as_ref(),
+                cfg.eps,
+            )?;
+        }
 
         if capture.is_some() || embeddings {
             let mut host_out = vec![0.0f32; rows * hidden];
@@ -3022,24 +3130,31 @@ impl RustDecoder {
 
         // Project only the requested rows: gather them into one compact buffer first.
         let selected = logit_rows.len();
-        let picked = scratch.acquire(selected * hidden * 4).map_err(err)?;
-        for (j, &r) in logit_rows.iter().enumerate() {
-            let src = final_normed
-                .slice(r * hidden * 4, hidden * 4)
-                .map_err(err)?;
-            let mut dst = picked.slice(j * hidden * 4, hidden * 4).map_err(err)?;
-            stream.copy_buffer(&mut dst, &src).map_err(err)?;
-        }
+        let picked = if head_direct {
+            None
+        } else {
+            let picked = scratch.acquire(selected * hidden * 4).map_err(err)?;
+            for (j, &r) in logit_rows.iter().enumerate() {
+                let src = final_normed
+                    .slice(r * hidden * 4, hidden * 4)
+                    .map_err(err)?;
+                let mut dst = picked.slice(j * hidden * 4, hidden * 4).map_err(err)?;
+                stream.copy_buffer(&mut dst, &src).map_err(err)?;
+            }
+            Some(picked)
+        };
         let mut head_out = scratch.acquire(selected * cfg.vocab * 4).map_err(err)?;
         let head = &dev_weights.head;
         stream
-            .quantized_linear(&mut head_out, &picked, head, head.bias.as_ref())
+            .quantized_linear(&mut head_out, picked.as_ref().unwrap_or(&final_normed), head, head.bias.as_ref())
             .map_err(err)?;
 
         if let GraphMode::Capture(io) = &mut graph {
             // the logits stay in the graph's buffer; the caller downloads them (or takes their argmax) after every launch
             io.head_out = Some(head_out);
-            scratch.recycle(picked);
+            if let Some(picked) = picked {
+                scratch.recycle(picked);
+            }
             scratch.recycle(final_normed);
             return Ok(Vec::new());
         }
@@ -3048,7 +3163,9 @@ impl RustDecoder {
             if let Ok(ids) = stream.argmax_rows(&head_out, selected, cfg.vocab) {
                 *GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ids);
                 scratch.recycle(head_out);
-                scratch.recycle(picked);
+                if let Some(picked) = picked {
+                    scratch.recycle(picked);
+                }
                 scratch.recycle(x_buf);
                 scratch.recycle(final_normed);
                 return Ok(Vec::new());
@@ -3060,7 +3177,9 @@ impl RustDecoder {
             .map_err(err)?;
 
         scratch.recycle(head_out);
-        scratch.recycle(picked);
+        if let Some(picked) = picked {
+            scratch.recycle(picked);
+        }
         scratch.recycle(x_buf);
         scratch.recycle(final_normed);
 
@@ -5441,10 +5560,43 @@ impl RustDecoder {
     }
 }
 
-/// CUDA graphs for decode steps (`FLLM_CUDA_GRAPH=1`). vLLM records its whole forward pass once per batch size (padded sizes, fixed
-/// input buffers, a null KV block for the padding rows) and replays it; a step of this engine is about 700 small kernel launches.
-/// On the development machine (a fast CPU) they change the speed by less than 2 %, so they are off by default; a slow host CPU is
-/// where they should help.
+/// `FLLM_FUSE_HEAD_COPY` (default on; unset it follows `FLLM_FUSE`): the logits of a decode step come from the final norm output as it
+/// is instead of a copy of the requested rows (all rows are requested, in order).
+fn head_copy_fused() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let value = |name: &str| std::env::var(name).ok().map(|v| v.trim().to_ascii_lowercase()).filter(|v| !v.is_empty());
+        let on = |v: String| !matches!(v.as_str(), "0" | "off" | "false" | "no");
+        value("FLLM_FUSE_HEAD_COPY").or_else(|| value("FLLM_FUSE")).is_none_or(on)
+    })
+}
+
+/// `FLLM_CUDA_GRAPH`: `0`, `off`, `false` or `no` switch the CUDA graphs of decode steps off, `1`, `on` or `true` ask for them (they still
+/// need an eligible model and device, see `graph_eligible`), anything else, or no variable, is the default: on whenever eligible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphSwitch {
+    Auto,
+    Off,
+    On,
+}
+
+fn parse_graph_switch(value: Option<&str>) -> GraphSwitch {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("0" | "off" | "false" | "no") => GraphSwitch::Off,
+        Some("1" | "on" | "true") => GraphSwitch::On,
+        _ => GraphSwitch::Auto,
+    }
+}
+
+fn graph_switch() -> GraphSwitch {
+    static SWITCH: std::sync::OnceLock<GraphSwitch> = std::sync::OnceLock::new();
+    *SWITCH.get_or_init(|| parse_graph_switch(std::env::var("FLLM_CUDA_GRAPH").ok().as_deref()))
+}
+
+/// CUDA graphs for decode steps (on by default where the model and the device allow it, `FLLM_CUDA_GRAPH=0` switches them off). vLLM
+/// records its whole forward pass once per batch size (padded sizes, fixed input buffers, a null KV block for the padding rows) and
+/// replays it; a step of this engine is several hundred small kernel launches. Measured on an RTX PRO 6000 Blackwell (single user,
+/// greedy): +10 to +26 % decode speed, so a graph replay is the default. The text is identical to the ordinary path.
 impl RustDecoder {
     #[allow(clippy::too_many_arguments)]
     fn forward_backend(
@@ -5468,6 +5620,15 @@ impl RustDecoder {
     }
 
     /// Dense decoders whose every layer runs on the device with plain attention: nothing in a step may touch the host.
+    ///
+    /// Not eligible, and why: recurrent mixers (Qwen3.5 / DeltaNet, Mamba 1 and 2, short convolutions) stage a per-step table of state
+    /// slots (`stage` kind 4) that is not one of the four fixed arrays of a graph; multi-head latent attention (MLA) has no q/k/v
+    /// weights and its assemble kernels were never recorded; mixtures of experts download the routed activations to the host
+    /// (`moe_on_device`) or stream experts in; layers or feed-forward blocks that run on the host (`host_layer`, `host_ffn`, host
+    /// values) read and write host memory in the middle of a step; parallel residual and QKV clipping take scratch buffers in the
+    /// middle of a step; MTP speculation runs a second model per step. KV cache formats are not a criterion: the f16 and q8 writes
+    /// and the quantized-format kernels (`kv_quant.cu`) read the staged slot, table and length arrays like the f16 ones and size
+    /// their split-KV launch for the longest context while recording.
     fn graph_eligible(&self) -> bool {
         let (Some(weights), Some(stream)) = (self.backend_weights.as_ref(), self.backend_stream.as_ref()) else {
             return false;
@@ -5576,14 +5737,18 @@ impl RustDecoder {
             || logit_rows.iter().enumerate().any(|(i, &r)| i != r)
             || self.pool_blocks < 2
             || self.graph_failed.load(Relaxed)
-            || std::env::var_os("FLLM_CUDA_GRAPH").is_none()
+            || graph_switch() == GraphSwitch::Off
             || ids.iter().any(|&id| id < 0 || id as usize >= self.embedding.rows)
         {
             return Ok(None);
         }
         if !*self.graph_ok.get_or_init(|| {
             let ok = self.graph_eligible();
-            eprintln!("[fllm-rs] CUDA graphs for decode steps: {}", if ok { "on" } else { "off (model or device not supported)" });
+            let why = if graph_switch() == GraphSwitch::On { "FLLM_CUDA_GRAPH=1 asked for them, but the model or the device is not supported" } else { "model or device not supported" };
+            eprintln!(
+                "[fllm-rs] CUDA graphs for decode steps: {} (FLLM_CUDA_GRAPH=0 switches them off)",
+                if ok { "on" } else { why }
+            );
             ok
         }) {
             return Ok(None);
@@ -5705,6 +5870,25 @@ impl RustDecoder {
         })();
         GREEDY_IDS_REQUEST.store(requested, Relaxed);
         result
+    }
+}
+
+#[cfg(test)]
+mod graph_switch_tests {
+    use super::{parse_graph_switch, GraphSwitch};
+
+    #[test]
+    fn graphs_are_on_by_default_and_the_variable_can_switch_them_off() {
+        assert_eq!(parse_graph_switch(None), GraphSwitch::Auto);
+        assert_eq!(parse_graph_switch(Some("")), GraphSwitch::Auto);
+        assert_eq!(parse_graph_switch(Some("auto")), GraphSwitch::Auto);
+        assert_eq!(parse_graph_switch(Some("2")), GraphSwitch::Auto);
+        for v in ["0", "off", "OFF", "false", "False", "no", " no "] {
+            assert_eq!(parse_graph_switch(Some(v)), GraphSwitch::Off, "{v:?}");
+        }
+        for v in ["1", "on", "On", "true", "TRUE", " 1 "] {
+            assert_eq!(parse_graph_switch(Some(v)), GraphSwitch::On, "{v:?}");
+        }
     }
 }
 

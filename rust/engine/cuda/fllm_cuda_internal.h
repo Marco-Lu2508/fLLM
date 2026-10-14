@@ -69,6 +69,28 @@ int fllm_rope_kv_f16_launch(cudaStream_t s, const uint16_t *q16, const uint16_t 
                             const int32_t *slots, const float *cs, const float *sn, int rows, int heads, int kv_heads, int dk, int dv,
                             int half_, int neox);
 extern thread_local bool fllm_q4z_f16out;  // the next Marlin 4-bit GEMM leaves its FP16 result in y (no conversion, no bias)
+// the next Marlin 4-bit GEMM stops after the product: the FP16 result stays in the io buffer for a fused consumer (fllm_cuda_linear_q4z_add_norm)
+extern thread_local bool fllm_q4z_skip_result;
+
+// ---- fused decode kernels (fused.cu). Each fusion has a switch (FLLM_FUSE, FLLM_FUSE_<NAME>=0|1) and can be forced by the self test.
+enum { FLLM_FUSE_ADD_NORM = 0, FLLM_FUSE_NORM_QUANT = 1, FLLM_FUSE_ROPE_KV = 2, FLLM_FUSE_GLU_Q8 = 3, FLLM_FUSE_COUNT = 4 };
+bool fllm_fuse_enabled(int which);
+void fllm_fuse_force(int which, int on);
+#if !defined(__HIPCC__)
+// x += scale * branch (res_kind 1: FP32; 2: FP16 plus optional bias), out = rms_norm(x), and the activations of the next GEMM quantized
+// (quant 0 none, 1 Marlin FP16 in q0, 2 NVFP4 in q0 / q1, 3 int8 in q0 / q1). Returns 1 without launching when the shape is unsupported.
+int fllm_add_rms_norm_launch(cudaStream_t s, float *x, const void *branch, int res_kind, const float *rbias, float scale, const float *w,
+                             float *out, int rows, int cols, float eps, int quant, void *q0, void *q1);
+int fllm_rope_kv_f32_launch(cudaStream_t s, float *q, const float *k, const float *v, uint16_t *pool_k, uint16_t *pool_v,
+                            const int32_t *pos, const int32_t *slots, const float *cs, const float *sn, int rows, int heads,
+                            int kv_heads, int dk, int dv, int half_, int neox);
+void fllm_quantize_x8_glu_launch(cudaStream_t s, const float *gate, const float *up, int mode, int8_t *xq, float2 *xs, size_t groups);
+// may the NVFP4 GEMM of this batch read activations quantized elsewhere into its scratch? / they now are there (nvfp4.cu)
+bool fllm_nvfp4_prep_ok(int cols, int batch);
+void fllm_nvfp4_scratch_filled();
+#endif
+// would fllm_mmvq_try run this K-quant product (int8 activations) for this batch? (mmvq.cu; always false for HIP)
+bool fllm_mmvq_prep_ok(int kind, int cols, int batch);
 int fllm_residual_launch(cudaStream_t s, float *x, const float *res, size_t count, float scale);
 int fllm_split_q_gate_launch(cudaStream_t s, const float *qg, float *q, float *gate, int rows, int heads, int dk, int per_head);
 int fllm_sigmoid_mul_launch(cudaStream_t s, float *x, const float *g, size_t n);

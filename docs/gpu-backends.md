@@ -294,7 +294,8 @@ fllm-rs serve --model MODEL.gguf --device cuda   # or --device auto (CUDA is pre
 Environment switches: `FLLM_CUDA_EXACT=1` (FP32 only), `FLLM_CUDA_NO_FLASHINFER` (prompt attention through the built-in kernel), `FLLM_CUDA_NO_CUTLASS` (NVFP4 prompts through the built-in kernel), `FLLM_CUDA_NO_TC`, `FLLM_CUDA_NO_QGEMM`,
 `FLLM_CUDA_NO_MMVQ`, `FLLM_CUDA_NO_MMVQ1` (single-token Q4_K/Q5_K/Q6_K), `FLLM_CUDA_NO_MMVQ_LEG` (32-value formats), `FLLM_CUDA_NO_FLASH`,
 `FLLM_CUDA_OLD_GEMV`, `FLLM_CUDA_OLD_ATTN`, `FLLM_CUDA_NO_AUTOTUNE`, `FLLM_CUDA_TUNE_LOG`, `FLLM_CUDA_NO_GLU_FUSE`, `FLLM_CUDA_NO_X16_REUSE`, `FLLM_NO_FUSED_ADD` (output projections added to the residual by a separate kernel), `FLLM_NO_FUSED_QKV` (Marlin q/k/v), `FLLM_NO_F16_FFN` (Marlin and NVFP4 gate/up) and `FLLM_NO_F16_NVFP4` (NVFP4 gate/up) keep FP32 results, `FLLM_FP4_TILE=1..4` (force an NVFP4 prompt tile for tests),
-`FLLM_HEAD_FULL=1` (keep a BF16/F16 output projection at full precision instead of Q6_K).
+`FLLM_HEAD_FULL=1` (keep a BF16/F16 output projection at full precision instead of Q6_K), `FLLM_FUSE=0` and `FLLM_FUSE_ADD_NORM` /
+`FLLM_FUSE_NORM_QUANT` / `FLLM_FUSE_ROPE_KV` / `FLLM_FUSE_GLU_Q8` / `FLLM_FUSE_HEAD_COPY` `=0|1` (the fused decode kernels, see "Fewer kernels per decode token").
 
 The server sizes the KV pool to the free device memory, so `--max-seqs 32` works on a 12 GB card
 (sequences share the pool; the scheduler preempts when it runs out).
@@ -401,11 +402,84 @@ How the numbers come about:
   (vLLM: `Sampler.greedy_sample`, an argmax on the GPU). Qwen2.5-1.5B GPTQ, 32 concurrent users: 2727 -> 5442 tok/s (vLLM 5095), most
   of it from the vectorized argmax and from not copying the logits row once per sequence. `FLLM_CUDA_EXACT`, penalties, grammar or
   logprobs use the ordinary path.
-- **CUDA graphs** (`FLLM_CUDA_GRAPH=1`, off by default). A decode step of a dense model (plain attention, every weight on the device)
-  is recorded once per padded batch size 1, 2, 4 .. 64 and replayed: the per-step arrays (positions, cache slots, block tables, lengths)
-  go through pinned mirrors that copy nodes of the graph upload, the padding rows read and write the last block of the KV pool, which
-  the scheduler never hands out, and attention sizes its splits for the whole context. The text is identical to the ordinary path
-  (3 models, 1 to 20 concurrent users); on the development machine the speed is the same within 2 %.
+- **CUDA graphs** (on by default where the model and the device allow it; `FLLM_CUDA_GRAPH=0|off|false|no` switches them off,
+  `1|on|true` asks for them explicitly, any other value is the default). A decode step of a dense model (plain attention, every weight
+  on the device) is recorded once per padded batch size 1, 2, 4 .. 64 and replayed: the per-step arrays (positions, cache slots, block
+  tables, lengths) go through pinned mirrors that copy nodes of the graph upload, the padding rows read and write the last block of the
+  KV pool, which the scheduler never hands out, and attention sizes its splits for the whole context. The text is identical to the
+  ordinary path (3 models, 1 to 20 concurrent users). On a slow host CPU or a fast GPU the replay is the difference between waiting
+  for ~500 to 700 kernel launches per token and not: RTX PRO 6000 Blackwell, one user, greedy, 128 tokens: Qwen2.5-3B AWQ 205 -> 229
+  tok/s, Llama-3.2-3B Q4_K_M 316 -> 399, Llama-3.1-8B Q4_K_M 190 -> 219, Llama-3.1-8B NVFP4 194 -> 227. (An earlier revision of this
+  switch looked only at whether the variable was *set*, so `FLLM_CUDA_GRAPH=0` turned the graphs on.) On the first decode step the
+  engine prints `[fllm-rs] CUDA graphs for decode steps: on|off (...)` to stderr, and `CUDA graph recorded for N rows` per size.
+  A failed capture falls back to the ordinary path for the rest of the run.
+
+  Not eligible (these decode without graphs): recurrent and convolutional mixers (Qwen3.5 / DeltaNet hybrids, Mamba 1 and 2, LFM
+  short convolutions: they stage a per-step table of state slots that is not one of the four fixed arrays of a graph), multi-head latent
+  attention (MLA; its projections are not the q/k/v weights the check requires and its assemble kernels were never recorded), mixtures
+  of experts (the routed activations are downloaded to the host or the experts are streamed in), models with layers or feed-forward
+  blocks on the host (`--gpu-layers` below the layer count), parallel-residual models (Cohere), QKV clipping, MTP speculation, image
+  or embedding steps, and steps of more than 64 rows or with prompt rows. Not a criterion: the KV cache format (f16, q8_0 and the
+  quantized formats read the same staged slot, table and length arrays and size their split-KV launch for the longest context while
+  recording), sliding-window and soft-capped attention, biases, QK norms and gated attention outputs. Quantized KV caches take part
+  in the graph, but only the f16 cache has the fused rotary-and-cache-write kernels (see "Fewer kernels per decode token").
+
+## Fewer kernels per decode token
+
+A decode step is a chain of small kernels, 500 to 700 launches per generated token. CUDA graphs (above) remove the launch cost from the
+host, but the GPU still pays a gap of about a microsecond between two dependent kernels and every tiny kernel reads and writes the
+activations again. vLLM, SGLang and FlashInfer fuse the obvious chains (`fused_add_rms_norm`, `rotary_embedding` + `reshape_and_cache`,
+`silu_and_mul`); fLLM has four fusions of that kind, each with its own switch (`1` or `0`; a switch that is not set follows `FLLM_FUSE`, which is `1`
+unless set, so `FLLM_FUSE=0` turns all of them off and `FLLM_FUSE=0 FLLM_FUSE_ROPE_KV=1` runs one alone; `FLLM_FUSE_HEAD_COPY` below belongs to the same
+family). The kernels are in `rust/engine/cuda/fused.cu`. They repeat the arithmetic of the
+kernels they replace expression by expression (same residual update, same order of the sum of squares, same quantizers, one shared
+`rope_pair`), so their results are bit-identical to the unfused sequence and all of them are on by default. This is an argument from
+the code and is checked by `selftest-gpu --only fuse`, which compares every fused kernel with the unfused sequence on the device bit for
+bit; the kernels were compiled for sm_75 and sm_120 but have not run on a GPU yet (level L0 until that selftest has been run).
+
+| Switch | What it replaces | Where it applies |
+| --- | --- | --- |
+| `FLLM_FUSE_ADD_NORM` | `residual_add` (or the half-to-float accumulate kernel of the Marlin GEMMs) followed by `rms_norm`: one kernel per boundary (attention output to feed-forward norm, feed-forward output to the next layer's attention norm, last layer to the final norm) | RMS-norm models without post norms and parallel residual; every weight format (f32 branch), Marlin 4-bit as `quantized_linear_add_norm` (the GEMM, then one kernel reading its FP16 result) |
+| `FLLM_FUSE_NORM_QUANT` | the activation conversion of the GEMM that follows the norm: NVFP4 blocks (`nvfp4_quantize_kernel`), int8 blocks of the K-quant GEMVs (`quantize_x8_kernel`), FP16 of the Marlin GEMMs (`f32_to_f16_kernel`) | rides on `FLLM_FUSE_ADD_NORM` (decode batches up to 64 for NVFP4, up to the `mmvq` limit for K-quants; the first GEMM after the norm finds its input prepared and skips its own conversion) |
+| `FLLM_FUSE_ROPE_KV` | `rope` + two `kv_cache_write` launches (k and v) | f16 KV cache, FP32 projections (the Marlin path has had its own fused kernel for FP16 projections, `rope_kv_f16_kernel`, before); not with QK norm after the rotation (Gemma-style) and not for quantized caches |
+| `FLLM_FUSE_GLU_Q8` | the gated activation kernel in front of a K-quant GEMV: the int8 quantization computes `silu(gate) * up` itself (NVFP4 and Marlin already did this) | Q4_K / Q5_K / Q6_K down projections, same batches as `mmvq` |
+| `FLLM_FUSE_HEAD_COPY` (host side) | the copy of the final-norm rows into the head GEMM's input buffer; also lets the final norm prepare the head's int8 activations | every step whose logit rows are all rows in order (decode, graph) |
+
+Launches per layer, counted from the code (decode, one user; attention counted as one kernel; estimates, the nsys totals of the
+Colab run are about 20 % lower than these counts for reasons that are not yet understood, so only the ratios are meant):
+
+| Model class | before | after |
+| --- | --- | --- |
+| Marlin AWQ (Qwen2.5-3B): norm, convert, q, k, v, rope+cache, attention, convert, o, accumulate, norm, convert, gate, up, convert+glu, down, accumulate | 17 | 13 (-24 %) |
+| K-quant GGUF (Llama-3.2-3B / 3.1-8B Q4_K_M): norm, quantize, q, k, v, rope, 2 cache writes, attention, quantize, o, residual, norm, quantize, gate, up, glu, quantize, down, residual | 20 | 13 (-35 %) |
+| NVFP4 (Llama-3.1-8B): the same chain with split-K reduce kernels after the narrow GEMMs | 24 | 18 (-25 %) |
+
+Applied to the measured totals this would be about 497 -> 380 launches per token for the AWQ model and 620 -> 465 for NVFP4. At
+roughly one microsecond of idle time per launch inside a graph that is 0.1 to 0.2 ms of a 4.4 ms token (2 to 5 %); this is an
+estimate, not a measurement. The fusions do not change what the big GEMMs do: Marlin is 76 % of the AWQ model's kernel time and
+`nvfp4_gemm_kernel` 70 % of the NVFP4 model's.
+
+### The Q6_K output projection is at the memory bandwidth
+
+The head GEMV (`mmvq_q6k_kernel`) was measured at 181 us per token for Qwen2.5-3B (vocabulary 151936, width 2048) and 304 us for
+Llama-3.1-8B (128256 x 4096) on the RTX PRO 6000 Blackwell (1792 GB/s by specification). Bytes per weight: 210/256 = 0.820 in the GGUF
+file, 224/256 = 0.875 in the device layout (the Q6_K blocks are padded to 224 bytes so that every 16-byte load is aligned). Streamed bytes
+over time:
+
+| | weights | device bytes | time | device bytes / time | GGUF bytes / time |
+| --- | --- | --- | --- | --- | --- |
+| Qwen2.5-3B | 311.2 M | 272.3 MB | 181 us | 1.50 TB/s (84 % of 1792 GB/s) | 1.41 TB/s (79 %) |
+| Llama-3.1-8B | 525.3 M | 459.7 MB | 304 us | 1.51 TB/s (84 %) | 1.42 TB/s (79 %) |
+
+A streaming read kernel on GDDR7 reaches about 90 to 93 % of the specified bandwidth, so the kernel is within 6 to 9 % (11 to 27 us, 0.3 to
+0.6 % of a token) of what any rewrite could reach; it already loads 16 bytes per instruction, reads two rows per warp and keeps the
+activations in registers. No change was made. The one lever with real size is the padding (6.7 % of the bytes), which needs a different
+device layout of the Q6_K blocks and a 2-byte-aligned load path; that costs more in the load instructions than it saves in bytes.
+
+Left out on purpose: fusing the RMS norm of QK-norm models (Qwen3) with the rotation and the cache write (a per-head kernel, as in
+SGLang's `fused_qk_norm_rope`), the attention output into the quantization of the output projection, and programmatic dependent launch
+between consecutive GEMMs (hides the prologue of each kernel behind the tail of the previous one; needs `griddepcontrol` in the Marlin
+and FP4 kernels).
 
 ---
 

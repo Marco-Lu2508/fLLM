@@ -122,6 +122,14 @@ vLLM's `marlin_utils.py` are reimplemented for fLLM. `bench/test_vllm_marlin.cu`
 The `Q4Z` tensor format that carries AWQ / GPTQ weights to this kernel, the converter, the weight upload and the activation glue
 (`marlin_vllm_glue.cu`) were written for fLLM (docs/awq-gptq-marlin.md).
 
+### Fused decode kernels (`rust/engine/cuda/fused.cu`)
+
+The fusions of residual add + RMSNorm, rotary embedding + KV-cache write and gated activation + quantization follow the design of vLLM
+(`csrc/layernorm_kernels.cu` `fused_add_rms_norm`, `csrc/pos_encoding_kernels.cu` + `csrc/cache_kernels.cu` `reshape_and_cache`,
+`csrc/activation_kernels.cu` `silu_and_mul`; Apache License 2.0), SGLang and FlashInfer (`apply_rope_pos_ids`; Apache License 2.0). No
+source code of these projects was copied: the kernels were written for fLLM on top of its own `rms_norm_vec_kernel`, `residual_kernel`,
+`rope_kernel`, `quantize_x8_kernel` and `nvfp4_quantize_kernel` and repeat their arithmetic, so that the results are bit-identical.
+
 ## CPU prompt kernels (eight-row panels, DeltaNet, sixteen-row float panels)
 
 `cpu_kquant.rs` (eight-row panels), `cpu_float.rs` (sixteen-row float panels) and `cpu_delta.rs`

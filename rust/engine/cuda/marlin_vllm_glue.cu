@@ -171,6 +171,7 @@ int fllm_q4z_launch(cudaStream_t s, int dev, int sms, const void *w, int group, 
                                          nullptr, global, batch, rows, cols, cols, workspace, fp4 ? 3 : 0, group, dev, sms, s);
     if (rc != 0) return -2;
     if (fllm_q4z_f16out) return fllm_check_launch("q4z");
+    if (fllm_q4z_skip_result) return fllm_check_launch("q4z");  // the FP16 result stays in y16 for a fused consumer
     const size_t count4 = (size_t)batch * rows / 4;
     if (fllm_q4z_acc)
         f16_to_f32_acc_kernel<<<(unsigned)((count4 + 255) / 256), 256, 0, s>>>(reinterpret_cast<const __half2 *>(y16), bias,

@@ -28,6 +28,24 @@ with 128-bit loads (`int4`). A device permutation cache in `CudaBackend` dedupli
 `v_proj` and `gate_proj`, `up_proj`), enabling `reuse_x16` across all projections that share activation inputs.
 `FLLM_CUDA_NO_GLU_FUSE=1` and `FLLM_CUDA_NO_X16_REUSE=1` switch those off.
 
+## Thread configuration for decode (`FLLM_MARLIN_CFG`)
+
+`marlin_vllm.cu` is the host code of vLLM's `marlin.cu` (commit 9367d8b9, see THIRD_PARTY.md) and chooses the thread-block configuration
+like vLLM does: for up to 16 rows (`thread_m_blocks == 1`) the list `{thread_k, thread_n, threads}` = `{128,128,256}`, `{64,128,128}`,
+`{128,64,128}` in this order of priority (the first one that divides the shape, fits the shared memory and has a generated kernel), and
+`{128,64,128}` instead whenever the grid would cover at most a quarter of the SMs; larger batches use `{64,256,256}`, `{64,128,128}`,
+`{128,64,128}`. This was compared line by line with the vLLM source and with the call vLLM makes (`gptq_marlin_gemm`: thread_k = thread_n =
+-1, FP32 reduce on, atomic add off): there is no difference to port, for sm_80, sm_89 and sm_120 alike (the 99 KB shared-memory limit
+of sm_120 is read from the device like vLLM does). `FLLM_MARLIN_CFG=vllm|fllm|auto` therefore all mean the same thing, the default.
+
+What decode looks like: a Qwen2.5-3B AWQ layer streams 38.5 MB of int4 weights in seven GEMMs (5.5 MB on average, 3.1 us at 1.79 TB/s);
+the measured average is 12.5 us per call, so Marlin runs at about a quarter of the bandwidth for these small matrices and is 76 % of the
+kernel time of a token. To find out whether another configuration is better for the shapes of a given model, `FLLM_MARLIN_CFG=K,N,T`
+(for example `128,64,128`, `64,128,128`, `128,128,256`, `64,256,256`) makes every call try that configuration first and use it where it is valid
+for the shape and a kernel for it was generated; otherwise vLLM's choice stays. The server prints one line when the variable is
+accepted. Configurations split the sum over K differently, so the results can differ in the last digits; the selftest group `linear` (`fast linear` of
+the q4z formats) is the check. Nothing is changed by default.
+
 ## Measured
 
 Llama-3.1-8B-Instruct AWQ (group 128), RTX PRO 3000 Blackwell Laptop (sm_120), `sb.sh`, greedy text checked:

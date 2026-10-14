@@ -925,6 +925,62 @@ pub trait Stream: Send {
     ) -> Result<bool, BackendError> {
         Ok(false)
     }
+
+    /// Fused residual add and RMSNorm (vLLM's `fused_add_rms_norm`): `x += scale * branch`, then `out = rms_norm(x) * weight`, in one
+    /// pass over the rows of `x`. When `next` is the weight of the GEMM that reads `out` first, the activations are also left in the
+    /// format that GEMM wants (FP16 for Marlin, NVFP4 or int8 blocks), so it skips its own conversion. The result is bit-identical to
+    /// `residual_add` followed by `rms_norm` and the GEMM. Returns `false` (nothing done) when unsupported or switched off
+    /// (`FLLM_FUSE_ADD_NORM=0`).
+    #[allow(clippy::too_many_arguments)]
+    fn add_rms_norm(
+        &mut self,
+        _x: &mut DeviceBuffer,
+        _branch: &DeviceBuffer,
+        _scale: f32,
+        _weight: &DeviceBuffer,
+        _eps: f32,
+        _out: &mut DeviceBuffer,
+        _next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// `quantized_linear_add` and `add_rms_norm` in two kernels for weights whose GEMM leaves a half-precision result (4-bit Marlin): the
+    /// GEMM's result, the residual update, the norm and the conversion for `next` are one kernel. `norm` must be as wide as the weight has
+    /// rows. Returns `false` (nothing done) when unsupported or switched off.
+    #[allow(clippy::too_many_arguments)]
+    fn quantized_linear_add_norm(
+        &mut self,
+        _residual: &mut DeviceBuffer,
+        _x: &DeviceBuffer,
+        _weight: &DeviceWeight,
+        _bias: Option<&DeviceBuffer>,
+        _scale: f32,
+        _norm: &DeviceBuffer,
+        _eps: f32,
+        _out: &mut DeviceBuffer,
+        _next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// Rotary embedding of `q` (in place) and the cache write of the rotated `k` and of `v`, in one kernel (vLLM runs `rotary_embedding` and
+    /// `reshape_and_cache`, FlashInfer `apply_rope_pos_ids` and an append). FP32 inputs, f16 cache only; bit-identical to `rope`
+    /// followed by `kv_cache_write`. Returns `false` (nothing done) when unsupported or switched off (`FLLM_FUSE_ROPE_KV=0`).
+    #[allow(clippy::too_many_arguments)]
+    fn rope_kv_write(
+        &mut self,
+        _q: &mut DeviceBuffer,
+        _k: &DeviceBuffer,
+        _v: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _layer_idx: usize,
+        _positions: &[usize],
+        _slots: &[usize],
+        _params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
     fn graph_begin(&mut self, _id: usize, _sizes: [usize; 4], _max_len: usize) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("graph_begin".into()))
     }

@@ -326,12 +326,38 @@ int fllm_mmvq_try(cudaStream_t s, const void *W, int kind, const float *X, float
     fllm_x8_filled = true;
     if (!fllm_x8_reuse) {
         const size_t groups = (size_t)batch * cols / 32;
-        quantize_x8_kernel<<<(unsigned)((groups * 32 + 255) / 256), 256, 0, s>>>(X, xq, xs, groups);
+#if !defined(__HIPCC__)
+        if (fllm_glu_up) {  // X is the gate of a gated activation that this quantization computes (FLLM_FUSE_GLU_Q8)
+            fllm_quantize_x8_glu_launch(s, X, fllm_glu_up, fllm_glu_mode, xq, xs, groups);
+        } else
+#endif
+        {
+            quantize_x8_kernel<<<(unsigned)((groups * 32 + 255) / 256), 256, 0, s>>>(X, xq, xs, groups);
+        }
     }
     const uint8_t *w = static_cast<const uint8_t *>(W);
     if (kind == KIND_Q5_K) return mmvq_run<KIND_Q5_K>(s, w, xq, xs, Y, bias, rows, cols, batch);
     return kind == KIND_Q4_K ? mmvq_run<KIND_Q4_K>(s, w, xq, xs, Y, bias, rows, cols, batch)
                              : mmvq_run<KIND_Q6_K>(s, w, xq, xs, Y, bias, rows, cols, batch);
+}
+
+// Will fllm_mmvq_try take a K-quant product of this width and batch (the order of the branches in launch_kind, linear.cu)? Used by the
+// kernels that quantize the activations of the next GEMM themselves (fused.cu).
+bool fllm_mmvq_prep_ok(int kind, int cols, int batch) {
+#if defined(__HIPCC__)
+    (void)kind; (void)cols; (void)batch;
+    return false;
+#else
+    if (fllm_exact_math() || (kind != KIND_Q4_K && kind != KIND_Q5_K && kind != KIND_Q6_K) || (cols & 255) != 0 || batch < 1 ||
+        batch > fllm_mmvq_maxb())
+        return false;
+    static const bool no_mmvq = getenv("FLLM_CUDA_NO_MMVQ") != nullptr;
+    static const bool mmvq1 = getenv("FLLM_CUDA_NO_MMVQ1") == nullptr && !no_mmvq;
+    static const bool old_gemv = getenv("FLLM_CUDA_OLD_GEMV") != nullptr;
+    static const int gemv_max_batch = getenv("FLLM_CUDA_GEMV_MAXB") ? atoi(getenv("FLLM_CUDA_GEMV_MAXB")) : 1;
+    if (batch == 1) return mmvq1;
+    return !no_mmvq && !(!old_gemv && batch <= gemv_max_batch);
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -101,6 +101,8 @@ are valid; anything else exits with `invalid number for <flag>`.
 | --- | --- | --- |
 | `FLLM_API_KEY` | `serve` (and the `chat`/`bench` clients as their default `--api-key`) | Initial value of `--api-key`; the flag overrides it |
 | `FLLM_RUST_PROFILE` | Rust decoder | When set (any value), a traced forward call prints one `{"rust_cpu_profile":{"rows":…,"phases_ms":{…}}}` line (total rows plus per-phase milliseconds) to stderr |
+| `FLLM_CUDA_GRAPH` | CUDA decoder | CUDA graphs of decode steps: on by default for eligible models; `0`, `off`, `false` or `no` switch them off, `1`, `on` or `true` ask for them explicitly (an ineligible model still decodes without graphs); any other value is the default. See docs/gpu-backends.md |
+| `FLLM_FUSE`, `FLLM_FUSE_ADD_NORM`, `FLLM_FUSE_NORM_QUANT`, `FLLM_FUSE_ROPE_KV`, `FLLM_FUSE_GLU_Q8`, `FLLM_FUSE_HEAD_COPY` | CUDA decoder | Fused decode kernels (residual add + norm + activation quantization, rotary + cache write, gated activation + int8 quantization, final-norm copy); all on by default, `0`, `off`, `false` or `no` switch one off; a switch that is not set follows `FLLM_FUSE` (`FLLM_FUSE=0` turns all of them off, and `FLLM_FUSE=0 FLLM_FUSE_ROPE_KV=1` runs one alone). See docs/gpu-backends.md |
 | `FLLM_CPU_ISA` | CPU kernels | Cap kernel dispatch at a tier: `scalar`, `avx2`, `avx-vnni`, `avx512bw`, `avx512-vnni` (x86-64) or `neon`, `neon-dotprod`, `neon-i8mm` (AArch64); see docs/cpu-kernels.md |
 | `FLLM_CACHE` | `hub` resolver | Hub cache root; takes precedence over `HF_HUB_CACHE` |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | `hub` resolver | Bearer token for `hf://` downloads (first match wins) |

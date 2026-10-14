@@ -21,6 +21,8 @@
 
 // fLLM: Marlin GEMM host code, taken from vLLM (csrc/libtorch_stable/quantization/marlin/marlin.cu) with the PyTorch tensor glue
 // replaced by the plain C entry point at the end of this file. Kernel choice and thread configuration are vLLM's.
+#include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include "kernel.h"
 
@@ -204,6 +206,23 @@ exec_config_t determine_exec_config(
   return exec_cfg;
 }
 
+// fLLM: FLLM_MARLIN_CFG=K,N,T (thread_k, thread_n, number of threads, e.g. 128,64,128) makes every call try that thread-block
+// configuration before vLLM's choice and use it where it is valid for the shape and a kernel for it was generated (a tuning aid for
+// decode, where the GEMMs have a handful of rows). Unset, "vllm", "fllm" or "auto": vLLM's determine_exec_config, unchanged.
+static thread_config_t fllm_forced_config() {
+  static const thread_config_t cfg = [] {
+    thread_config_t c{-1, -1, -1};
+    const char* v = getenv("FLLM_MARLIN_CFG");
+    int k = 0, n = 0, t = 0;
+    if (v && sscanf(v, "%d,%d,%d", &k, &n, &t) == 3 && k > 0 && n > 0 && t > 0) {
+      c = thread_config_t{k, n, t};
+      fprintf(stderr, "[fllm-rs] Marlin: trying thread configuration %d,%d,%d first (FLLM_MARLIN_CFG)\n", k, n, t);
+    }
+    return c;
+  }();
+  return cfg;
+}
+
 int marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* a_s, void* b_s, void* g_s, void* zp, int prob_m,
                int prob_n, int prob_k, int lda, void* workspace,
@@ -314,6 +333,20 @@ int marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
             exec_cfg = {1, thread_tfg};
           }
         }
+      }
+
+      const thread_config_t forced = fllm_forced_config();
+      if (forced.thread_k > 0 &&
+          is_valid_config(forced, thread_m_blocks, prob_m_split, prob_n, prob_k,
+                          num_bits, group_size, has_zp, is_zp_float, is_a_8bit,
+                          stages, max_shared_mem - 512) &&
+          get_marlin_kernel(a_type, b_type, c_type, s_type, thread_m_blocks,
+                            forced.thread_n / 16, forced.thread_k / 16,
+                            m_block_size_8, has_zp, group_blocks,
+                            forced.num_threads, is_zp_float,
+                            stages) != MarlinDefault) {
+        thread_tfg = forced;
+        exec_cfg = {1, thread_tfg};
       }
 
       if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
