@@ -646,6 +646,87 @@ fn worst(have: &[f32], want: &[f64], scale: &[f64]) -> f64 {
     worst
 }
 
+/// The E2M1 magnitudes 0, .5, 1, 1.5, 2, 3, 4, 6.
+const E2M1_GRID: [f64; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+
+/// Value of an unsigned E4M3 code (the UE4M3 scale of an NVFP4 block).
+fn ue4m3_value(code: u8) -> f64 {
+    let (e, m) = (i32::from(code >> 3) & 15, f64::from(code & 7));
+    if e == 0 { m * 0.125 * 2f64.powi(-6) } else { (1.0 + m * 0.125) * 2f64.powi(e - 7) }
+}
+
+/// Nearest UE4M3 code of `x` (ties to the even code), saturating at 448; 0 for x <= 0.
+fn ue4m3_code(x: f64) -> u8 {
+    if x.is_nan() || x <= 0.0 {
+        return 0;
+    }
+    if x >= 448.0 {
+        return 0x7E;
+    }
+    let mut best = 0u8;
+    for code in 1..=0x7Eu8 {
+        let (d, db) = ((ue4m3_value(code) - x).abs(), (ue4m3_value(best) - x).abs());
+        if d < db || (d == db && code % 2 == 0) {
+            best = code;
+        }
+    }
+    best
+}
+
+/// Index into `E2M1_GRID` of the magnitude nearest to `a`, ties to the even code (cvt.rn.satfinite.e2m1x2.f32): the midpoints 0.25, 1.25, 2.5 and 5 go down,
+/// 0.75, 1.75 and 3.5 go up.
+fn e2m1_index(a: f64) -> usize {
+    let mut best = 0usize;
+    for (i, &g) in E2M1_GRID.iter().enumerate().skip(1) {
+        let (d, db) = ((g - a).abs(), (E2M1_GRID[best] - a).abs());
+        if d < db || (d == db && i % 2 == 0) {
+            best = i;
+        }
+    }
+    best
+}
+
+/// A row of activations as the NVFP4 GEMM sees it after vLLM's `scaled_fp4_quant` / ModelOpt: per 16 values a UE4M3 scale
+/// `round_e4m3(gs * amax / 6)` and E2M1 values `round_rne(x * gs / scale)`. Returns `q * scale` for every value; the GEMM multiplies the dot product
+/// of these with the weights by `weight_scale_2 / gs`. The arithmetic is f32 where the GPU kernel is f32, so the two agree on which grid point a value takes.
+fn nvfp4_activation_reference(x: &[f32], gs: f32) -> Vec<f64> {
+    let mut out = Vec::with_capacity(x.len());
+    for block in x.chunks(16) {
+        let amax = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let code = ue4m3_code(f64::from(amax * gs * (1.0 / 6.0)));
+        let sd = ue4m3_value(code) as f32;
+        let inv = if sd > 0.0 { gs / sd } else { 0.0 };
+        for &v in block {
+            let t = v * inv;
+            let q = E2M1_GRID[e2m1_index(f64::from(t.abs()))] * if t < 0.0 { -1.0 } else { 1.0 };
+            out.push(q * f64::from(sd));
+        }
+    }
+    out
+}
+
+/// The weights of GGUF type 40 (llama.cpp's NVFP4 block: 4 UE4M3 scales + 32 nibble bytes per 64 values, sub-block s byte j holds elements 16 s + j and
+/// 16 s + j + 8) as values without the per-tensor factor.
+fn nvfp4_weight_values(raw: &[u8], rows: usize, cols: usize) -> Vec<f32> {
+    let blocks = cols / 64;
+    let mut out = vec![0.0f32; rows * cols];
+    for r in 0..rows {
+        for b in 0..blocks {
+            let block = &raw[(r * blocks + b) * 36..][..36];
+            for sub in 0..4 {
+                let scale = ue4m3_value(block[sub]);
+                for i in 0..16 {
+                    let byte = block[4 + sub * 8 + i % 8];
+                    let nib = if i < 8 { byte & 15 } else { byte >> 4 };
+                    let v = E2M1_GRID[usize::from(nib & 7)] * if nib & 8 != 0 { -1.0 } else { 1.0 };
+                    out[r * cols + b * 64 + sub * 16 + i] = (v * scale) as f32;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Random weights of GGUF type `kind`: uniform [-1, 1] floats, or valid quant blocks with
 /// moderate scales (`cpu_selftest::random_weights`).
 fn random_kind(rng: &mut Lcg, kind: u32, rows: usize, cols: usize) -> Vec<u8> {
@@ -981,6 +1062,31 @@ impl<'a> Tester<'a> {
                     o
                 });
                 self.record("fast linear nvfp4", &format!("384x1024 batch {batch} (Marlin)"), r);
+            }
+        }
+        // NVFP4 on the FP4 tensor cores (W4A4): the activations are quantized to FP4 with the per-tensor factor of the checkpoint's input_scale, exactly as
+        // vLLM does, and the result is compared with a CPU simulation of that recipe. Skipped (unsupported) where the weights do not stay NVFP4
+        // on the device (no sm_12x GPU, FLLM_NVFP4_MARLIN). `calibrated` tokens span 6 orders of magnitude, so a missing activation factor (FLLM_NVFP4_ACT_SCALE=off) fails.
+        if self.filter.wants_kind(40) && std::env::var_os("FLLM_NVFP4_MARLIN").is_none() && std::env::var_os("FLLM_CUDA_EXACT").is_none() {
+            for (batch, factor, mode) in [
+                (1usize, 1.0f32, 0u8),
+                (8, 1.0, 0),
+                (40, 1.0, 0),
+                (129, 1.0, 0),
+                (356, 1.0, 0),
+                (129, 0.25, 0),  // input_scale smaller than calibrated: activations saturate at 448 * 6 / 4
+                (356, 1.0, 1),   // accumulating epilogue (output projections)
+                (356, 1.0, 2),   // FP16 results (q/k/v, gate/up)
+                (356, 1.0, 3),   // after an RMSNorm (FLLM_FUSE_NVFP4_NORM=1 runs both in one kernel)
+            ] {
+                let r = self.nvfp4_w4a4(384, 1024, batch, factor, mode);
+                let label = match mode {
+                    1 => " +acc",
+                    2 => " f16",
+                    3 => " +rms_norm",
+                    _ => "",
+                };
+                self.record("nvfp4 w4a4", &format!("384x1024 batch {batch} input_scale x{factor}{label}"), r);
             }
         }
         // 32-value formats at a width that is no multiple of 256 (2880 = 90 blocks, like gpt-oss): padded device layout
@@ -1650,6 +1756,121 @@ impl<'a> Tester<'a> {
             cpu_tol: tol,
             ms,
         })
+    }
+
+    /// NVFP4 W4A4 against the CPU simulation of vLLM's recipe (see `nvfp4_activation_reference`). `factor` scales the checkpoint-style
+    /// input_scale (amax / 2688 of the activations) to test saturation; `mode`: 0 = plain result, 1 = added to a residual
+    /// (`quantized_linear_add`), 2 = FP16 result (`linear_f16_out`), 3 = after an RMSNorm.
+    fn nvfp4_w4a4(&mut self, rows: usize, cols: usize, batch: usize, factor: f32, mode: u8) -> Result<Outcome, BackendError> {
+        self.claim = None;
+        if self.device.name() == "CPU" {
+            return Err(BackendError::UnsupportedOperation("the CPU backend does not quantize activations".into()));
+        }
+        let weights = random_kind(&mut self.rng, 40, rows, cols);
+        let weight_scale = 0.37f32;
+        // tokens of very different magnitude: a block scale that is not helped by the per-tensor factor loses most of the small ones
+        let mut x = self.rng.vector(batch * cols, 1.0);
+        for b in 0..batch {
+            let gain = [1.0f32, 1e-2, 3.0, 1e-3, 0.3][b % 5];
+            for v in &mut x[b * cols..(b + 1) * cols] {
+                *v *= gain;
+            }
+        }
+        // mode 3: the GEMM reads the output of an RMSNorm (FLLM_FUSE_NVFP4_NORM fuses the two); the CPU reference normalizes in f32 like the kernels
+        let x_raw = x.clone();
+        let norm_weight: Vec<f32> = self.rng.vector(cols, 1.0).iter().map(|v| 0.5 + v.abs()).collect();
+        let eps = 1e-5f32;
+        if mode == 3 {
+            for row in x.chunks_mut(cols) {
+                let mean = row.iter().map(|v| v * v).sum::<f32>() / cols as f32;
+                let inv = 1.0 / (mean + eps).sqrt();
+                for (v, w) in row.iter_mut().zip(&norm_weight) {
+                    *v *= inv * w;
+                }
+            }
+        }
+        let amax = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let input_scale = amax / 2688.0 * factor;
+        let gs = 1.0 / input_scale;
+        let grid = nvfp4_weight_values(&weights, rows, cols);
+        let residual: Vec<f32> = (0..batch * rows).map(|i| ((i % 17) as f32 - 8.0) * 0.125).collect();
+        let residual_scale = if mode == 1 { 0.75f32 } else { 1.0 };
+        let mut want = vec![0.0f64; batch * rows];
+        let mut scale = vec![0.0f64; batch * rows];
+        let alpha = f64::from(weight_scale) / f64::from(gs);
+        for b in 0..batch {
+            let xq = nvfp4_activation_reference(&x[b * cols..(b + 1) * cols], gs);
+            for r in 0..rows {
+                let (mut sum, mut mag) = (0.0f64, 0.0f64);
+                for (&a, &w) in xq.iter().zip(&grid[r * cols..(r + 1) * cols]) {
+                    let term = a * f64::from(w);
+                    sum += term;
+                    mag += term.abs();
+                }
+                let base = if mode == 1 { f64::from(residual[b * rows + r]) } else { 0.0 };
+                want[b * rows + r] = base + f64::from(residual_scale) * alpha * sum;
+                scale[b * rows + r] = base.abs() + f64::from(residual_scale) * alpha * mag;
+            }
+        }
+        let mut stream = self.device.create_stream()?;
+        crate::backend::set_next_nvfp4_input_scale(input_scale);
+        let uploaded = self.device.upload_weight_scaled("selftest", &weights, QuantType::NvFp4, rows, cols, None, weight_scale);
+        crate::backend::set_next_nvfp4_input_scale(0.0);
+        let weight = uploaded?;
+        if weight.quant_type != QuantType::NvFp4 {
+            return Err(BackendError::UnsupportedOperation("the weights are not kept as NVFP4 on this device (no FP4 tensor cores)".into()));
+        }
+        stream.synchronize()?;
+        let xb = put(self.device, stream.as_mut(), &x)?;
+        let mut ms = 0.0;
+        let have: Vec<f32> = match mode {
+            1 => {
+                let mut res = put(self.device, stream.as_mut(), &residual)?;
+                let mut taken = false;
+                timed(&mut ms, stream.as_mut(), |s| {
+                    taken = s.quantized_linear_add(&mut res, &xb, &weight, None, residual_scale)?;
+                    Ok(())
+                })?;
+                if !taken {
+                    return Err(BackendError::UnsupportedOperation("the accumulating NVFP4 GEMM is not available for this shape".into()));
+                }
+                get(stream.as_mut(), &res, batch * rows)?
+            }
+            2 => {
+                let mut out16 = self.device.allocate_buffer(batch * rows * 2)?;
+                let mut taken = false;
+                timed(&mut ms, stream.as_mut(), |s| {
+                    taken = s.linear_f16_out(&mut out16, &xb, &weight)?;
+                    Ok(())
+                })?;
+                if !taken {
+                    return Err(BackendError::UnsupportedOperation("the FP16-result NVFP4 GEMM is not available for this shape".into()));
+                }
+                let mut bytes = vec![0u8; batch * rows * 2];
+                stream.download(&mut bytes, &out16)?;
+                bytes.as_chunks::<2>().0.iter().map(|c| f16::from_le_bytes(*c).to_f32()).collect()
+            }
+            3 => {
+                let xr = put(self.device, stream.as_mut(), &x_raw)?;
+                let wb = put(self.device, stream.as_mut(), &norm_weight)?;
+                let mut normed = self.device.allocate_buffer(batch * cols * 4)?;
+                let mut out = self.device.allocate_buffer(batch * rows * 4)?;
+                timed(&mut ms, stream.as_mut(), |s| {
+                    s.rms_norm(&mut normed, &xr, &wb, eps)?;
+                    s.quantized_linear(&mut out, &normed, &weight, None)
+                })?;
+                get(stream.as_mut(), &out, batch * rows)?
+            }
+            _ => {
+                let mut out = self.device.allocate_buffer(batch * rows * 4)?;
+                timed(&mut ms, stream.as_mut(), |s| s.quantized_linear(&mut out, &xb, &weight, None))?;
+                get(stream.as_mut(), &out, batch * rows)?
+            }
+        };
+        // FP32 accumulation of the same quantized operands (a different summation order) and, for mode 2, one FP16 rounding of the result
+        let tol = if mode == 2 { 2e-3 } else { 1e-3 };
+        let dev = worst(&have, &want, &scale);
+        Ok(Outcome { device: dev, cpu: 0.0, tol, cpu_tol: tol, ms })
     }
 
     /// Two weights of different formats read the same activations back to back (q, k and v of a layer): the activations that
@@ -3091,14 +3312,21 @@ impl<'a> Tester<'a> {
 
     fn fuse_cases(&mut self) {
         for (rows, cols) in [(1usize, 256usize), (1, 2048), (4, 4096), (3, 5120), (2, 260)] {
-            let r = self.fuse_add_norm(rows, cols, None);
+            let r = self.fuse_add_norm(rows, cols, None, 0.0);
             self.record("add_rms_norm", &format!("{rows}x{cols}"), r);
         }
         // the activations of the GEMM that follows are prepared by the same kernel: NVFP4 blocks, int8 blocks, FP16 for Marlin
         for kind in self.kinds(&[40u32, 12, 13, 14, 0x8000_0010]) {
             for rows in [1usize, 4] {
-                let r = self.fuse_add_norm(rows, 1024, Some(kind));
+                let r = self.fuse_add_norm(rows, 1024, Some(kind), 0.0);
                 self.record(&format!("add_rms_norm +{}", format_name(kind)), &format!("{rows}x1024"), r);
+            }
+            if kind == 40 {
+                // the fused kernel must quantize with the activation factor of the weight that reads the result (checkpoint input_scale)
+                for rows in [1usize, 4] {
+                    let r = self.fuse_add_norm(rows, 1024, Some(kind), 0.0015);
+                    self.record("add_rms_norm +nvfp4", &format!("{rows}x1024 input_scale 0.0015"), r);
+                }
             }
         }
         if self.filter.wants_kind(0x8000_0010) {
@@ -3128,7 +3356,7 @@ impl<'a> Tester<'a> {
     }
 
     /// `x += scale * branch; out = rms_norm(x)` (and a GEMM on `out` when `next` names a weight format).
-    fn fuse_add_norm(&mut self, rows: usize, cols: usize, next: Option<u32>) -> Result<Outcome, BackendError> {
+    fn fuse_add_norm(&mut self, rows: usize, cols: usize, next: Option<u32>, input_scale: f32) -> Result<Outcome, BackendError> {
         let x = self.rng.vector(rows * cols, 2.0);
         let branch = self.rng.vector(rows * cols, 1.0);
         let w = self.rng.vector(cols, 1.0);
@@ -3141,10 +3369,13 @@ impl<'a> Tester<'a> {
         let device = self.device;
         let mut stream = device.create_stream()?;
         let s = stream.as_mut();
+        crate::backend::set_next_nvfp4_input_scale(input_scale);
         let weight = match (&raw, next) {
-            (Some(raw), Some(kind)) => Some(device.upload_weight_scaled("selftest", raw, QuantType::from_gguf_type_id(kind), out_rows, cols, None, 1.0)?),
-            _ => None,
+            (Some(raw), Some(kind)) => device.upload_weight_scaled("selftest", raw, QuantType::from_gguf_type_id(kind), out_rows, cols, None, 1.0).map(Some),
+            _ => Ok(None),
         };
+        crate::backend::set_next_nvfp4_input_scale(0.0);
+        let weight = weight?;
         s.synchronize()?;
         let branch_buf = put(device, s, &branch)?;
         let w_buf = put(device, s, &w)?;
@@ -3360,6 +3591,33 @@ impl<'a> Tester<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn nvfp4_reference_rounds_like_the_hardware() {
+        // ties to even on the E2M1 grid: the midpoints 0.25, 1.25, 2.5 and 5 go down, 0.75, 1.75 and 3.5 go up
+        for (a, want) in [(0.25, 0.0), (0.26, 0.5), (0.75, 1.0), (1.25, 1.0), (1.75, 2.0), (2.5, 2.0), (3.5, 4.0), (5.0, 4.0), (5.1, 6.0), (100.0, 6.0)] {
+            assert_eq!(E2M1_GRID[e2m1_index(a)], want, "{a}");
+        }
+        // every UE4M3 value is its own nearest code; 448 is the largest, anything above saturates
+        for code in 0..=0x7Eu8 {
+            assert_eq!(ue4m3_code(ue4m3_value(code)), code);
+        }
+        assert_eq!(ue4m3_value(0x7E), 448.0);
+        assert_eq!(ue4m3_code(1e9), 0x7E);
+        assert_eq!(ue4m3_code(0.0), 0);
+        // a block whose largest value maps to 6: the scale is amax * gs / 6 rounded to E4M3 and the values follow
+        let mut x = vec![0.0f32; 16];
+        x[0] = 3.0;
+        x[1] = -1.5;
+        x[2] = 0.7;
+        let q = nvfp4_activation_reference(&x, 1.0);
+        assert_eq!((q[0], q[1], q[2], q[3]), (3.0, -1.5, 0.75, 0.0), "scale 0.5: 3.0 -> 6, -1.5 -> -3, 0.7 -> 1.4 -> 1.5, times 0.5");
+        // a per-tensor factor moves small blocks out of the subnormal range of E4M3: the block of 1e-3 values survives with gs = 1000 only (the result is x * gs)
+        let small = vec![1e-3f32; 16];
+        assert_eq!(nvfp4_activation_reference(&small, 1.0)[0], 0.0);
+        let kept = nvfp4_activation_reference(&small, 1000.0)[0];
+        assert!((kept - 1.0).abs() < 0.07, "{kept}");
+    }
     use super::*;
 
     fn outcome(device: f64, tol: f64) -> Result<Outcome, BackendError> {

@@ -6,8 +6,8 @@
 // nibbles; inside a 16-value sub-block byte j holds element j in the low and element j + 8 in the high
 // nibble). `gscale` is the per-tensor weight scale of the ModelOpt checkpoint.
 //
-// The activations are quantized on the fly to the same format (one UE4M3 scale per 16 values, no tensor
-// scale needed because the dynamic range of E4M3 covers activations). `mma.m16n8k64.kind::mxf4nvf4.block_scale`
+// The activations are quantized on the fly to the same format (one UE4M3 scale per 16 values and, as in ModelOpt/vLLM, a per-tensor
+// activation factor, see nvfp4_quant.cuh and FLLM_NVFP4_ACT_SCALE). `mma.m16n8k64.kind::mxf4nvf4.block_scale`
 // then multiplies 64 values per instruction with the scales applied inside the tensor core.
 //
 // The weights are stored pre-arranged for the tensor-core registers (backend/cuda.rs), in tiles of 16 rows: for every
@@ -28,11 +28,48 @@
 #include "nvfp4_quant.cuh"
 
 // xq[token][cols / 2 bytes], xs[token][cols / 16]; one thread per 16-value block.
+// Per-tensor amax of the activations (FLLM_NVFP4_ACT_SCALE=dynamic): g_fp4_amax is zeroed by nvfp4_amax_reset_kernel, every warp adds its maximum
+// (non-negative floats order like their bit patterns), nvfp4_alpha_kernel turns it into the GEMM factor g_fp4_alpha.
+static __device__ float g_fp4_amax;
+static __device__ float g_fp4_alpha;
+__global__ void nvfp4_amax_reset_kernel() { g_fp4_amax = 0.f; }
+// out = mult * amax / 2688 (the weight factor times the inverse of the activation factor)
+__global__ void nvfp4_alpha_kernel(float mult) {
+    const float a = g_fp4_amax;
+    g_fp4_alpha = mult / fp4_dynamic_gs(a);
+}
 template <bool GLU>
+__global__ void nvfp4_amax_kernel(const float *__restrict__ x, const float *__restrict__ up, int mode, size_t blocks) {
+    const size_t bid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    float m = 0.f;
+    if (bid < blocks) {
+        const float4 *p = reinterpret_cast<const float4 *>(x + bid * 16);
+        const float4 *pu = reinterpret_cast<const float4 *>(up ? up + bid * 16 : x);
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const float4 t = __ldg(p + i);
+            if (GLU) {
+                const float4 u = __ldg(pu + i);
+                m = fmaxf(m, fmaxf(fmaxf(fabsf(fllm_glu(t.x, u.x, mode)), fabsf(fllm_glu(t.y, u.y, mode))),
+                                   fmaxf(fabsf(fllm_glu(t.z, u.z, mode)), fabsf(fllm_glu(t.w, u.w, mode)))));
+            } else {
+                m = fmaxf(m, fmaxf(fmaxf(fabsf(t.x), fabsf(t.y)), fmaxf(fabsf(t.z), fabsf(t.w))));
+            }
+        }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+    if ((threadIdx.x & 31) == 0 && m > 0.f) atomicMax(reinterpret_cast<int *>(&g_fp4_amax), __float_as_int(m));
+}
+
+// gs_ptr: static activation factor of the weight (its trailer), dynamic: computed from g_fp4_amax; neither: 1
+template <bool GLU, bool DYN>
 __global__ void nvfp4_quantize_kernel(const float *__restrict__ x, const float *__restrict__ up, int mode,
-                                      uint32_t *__restrict__ xq, uint8_t *__restrict__ xs, size_t blocks) {
+                                      uint32_t *__restrict__ xq, uint8_t *__restrict__ xs, size_t blocks,
+                                      const float *__restrict__ gs_ptr) {
     const size_t bid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (bid >= blocks) return;
+    const float gs = DYN ? fp4_dynamic_gs(g_fp4_amax) : (gs_ptr ? *gs_ptr : 1.f);
     const float4 *p = reinterpret_cast<const float4 *>(x + bid * 16);
     float v[16];
 #pragma unroll
@@ -51,24 +88,8 @@ __global__ void nvfp4_quantize_kernel(const float *__restrict__ x, const float *
             v[4 * i + 3] = fllm_glu(v[4 * i + 3], t.w, mode);
         }
     }
-    float amax = 0.f;
-#pragma unroll
-    for (int i = 0; i < 16; i++) amax = fmaxf(amax, fabsf(v[i]));
-    const uint32_t sb = f_to_ue4m3(amax * (1.f / 6.f));
-    const float sd = ue4m3_to_f(sb);
-    const float inv = sd > 0.f ? 1.f / sd : 0.f;
     uint32_t words[2];
-#pragma unroll
-    for (int h = 0; h < 2; h++) {
-        uint32_t w = 0;
-#pragma unroll
-        for (int q = 0; q < 8; q++) {
-            const float t = v[8 * h + q] * inv;
-            const uint32_t nib = e2m1_idx(fabsf(t)) | (t < 0.f ? 8u : 0u);
-            w |= nib << (4 * q);
-        }
-        words[h] = w;
-    }
+    const uint32_t sb = fp4_quantize_values(v, words, gs);
     // inside a step of 64 values (8 words) the operand registers of one lane are adjacent: word j goes to
     // 2 * j (j < 4, register b0) or 2 * (j - 4) + 1 (register b1)
 #pragma unroll
@@ -91,7 +112,7 @@ __global__ void nvfp4_quantize_kernel(const float *__restrict__ x, const float *
 template <int BM, int BN, int WM, int WN, int STAGES, int SBK>
 __global__ void __launch_bounds__(WM * WN * 32)
 nvfp4_gemm_kernel(const uint8_t *__restrict__ W, const uint8_t *__restrict__ Xq, const uint8_t *__restrict__ Xs,
-                  float *__restrict__ Y, const float *__restrict__ bias, float gscale, int rows, int cols, int batch) {
+                  float *__restrict__ Y, const float *__restrict__ bias, float gscale, const float *__restrict__ alpha_ptr, int rows, int cols, int batch) {
 #ifdef FLLM_FP4_MMA
     constexpr int NT = WM * WN * 32;
     constexpr int MI = BM / WM / 16;
@@ -230,24 +251,24 @@ nvfp4_gemm_kernel(const uint8_t *__restrict__ W, const uint8_t *__restrict__ Xq,
                 const int n = n0 + wn * (BN / WN) + ni * 8 + 2 * t4 + (c & 1);
                 if (m < rows && n < batch) {
                     if (splits > 1) Y[(size_t)blockIdx.z * batch * rows + (size_t)n * rows + m] = acc[mi][ni][c];
-                    else Y[(size_t)n * rows + m] = acc[mi][ni][c] * gscale + (bias ? bias[m] : 0.f);
+                    else Y[(size_t)n * rows + m] = acc[mi][ni][c] * (alpha_ptr ? *alpha_ptr : gscale) + (bias ? bias[m] : 0.f);
                 }
             }
 #endif
 }
 
 __global__ void nvfp4_reduce_kernel(const float *__restrict__ part, float *__restrict__ Y, const float *__restrict__ bias,
-                                    float gscale, int rows, size_t count, int splits) {
+                                    float gscale, const float *__restrict__ alpha_ptr, int rows, size_t count, int splits) {
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < count; i += (size_t)gridDim.x * blockDim.x) {
         float s = 0.f;
         for (int z = 0; z < splits; z++) s += part[(size_t)z * count + i];
-        Y[i] = s * gscale + (bias ? bias[i % rows] : 0.f);
+        Y[i] = s * (alpha_ptr ? *alpha_ptr : gscale) + (bias ? bias[i % rows] : 0.f);
     }
 }
 
 template <int BM, int BN, int WM, int WN, int STAGES, int SBK = 4>
 static int fp4_launch(cudaStream_t s, const uint8_t *W, const uint8_t *xq, const uint8_t *xs, float *Y, const float *bias,
-                      float gscale, int rows, int cols, int batch, float *part, size_t part_bytes) {
+                      float gscale, const float *alpha_ptr, int rows, int cols, int batch, float *part, size_t part_bytes) {
     constexpr size_t smem = (size_t)STAGES * ((size_t)(BM * (SBK * 32 + 16) + SBK * 512 + BN * (SBK * 36 + 16)));
     static_assert(smem <= 99 * 1024, "shared memory budget");
     static bool configured = false;
@@ -264,10 +285,10 @@ static int fp4_launch(cudaStream_t s, const uint8_t *W, const uint8_t *xq, const
         while (splits > 1 && ((cols / (64 * SBK)) / splits < 2 || (size_t)splits * batch * rows * 4 > part_bytes)) splits--;
     }
     const dim3 grid(row_blocks, (batch + BN - 1) / BN, splits), block(WM * WN * 32);
-    nvfp4_gemm_kernel<BM, BN, WM, WN, STAGES, SBK><<<grid, block, smem, s>>>(W, xq, xs, splits > 1 ? part : Y, bias, gscale, rows, cols, batch);
+    nvfp4_gemm_kernel<BM, BN, WM, WN, STAGES, SBK><<<grid, block, smem, s>>>(W, xq, xs, splits > 1 ? part : Y, bias, gscale, alpha_ptr, rows, cols, batch);
     if (splits > 1) {
         const size_t count = (size_t)batch * rows;
-        nvfp4_reduce_kernel<<<(unsigned)((count + 255) / 256), 256, 0, s>>>(part, Y, bias, gscale, rows, count, splits);
+        nvfp4_reduce_kernel<<<(unsigned)((count + 255) / 256), 256, 0, s>>>(part, Y, bias, gscale, alpha_ptr, rows, count, splits);
     }
     return 1;
 }
@@ -306,6 +327,12 @@ int fllm_nvfp4_try(cudaStream_t s, const void *W, const float *X, float *Y, cons
         g_scratch_valid = false;
         return 1;
     }
+    if (fllm_x_half) {
+        // the activations exist only as FP16 so far (FLLM_FUSE_NVFP4_ATTN_OUT) and CUTLASS declined them: expand them for the built-in kernels
+        fllm_flashinfer_expand_half(s, fllm_x_half, const_cast<float *>(X), (size_t)batch * cols);
+        fllm_x_half = nullptr;
+        quantize = 1;
+    }
 #endif
     // the built-in kernels overwrite Y with FP32 results of FP32 activations: a product that has to be added to Y, leave FP16 or read FP16
     // activations is declined (the caller checked fllm_nvfp4_cutlass_ok)
@@ -319,19 +346,44 @@ int fllm_nvfp4_try(cudaStream_t s, const void *W, const float *X, float *Y, cons
     const size_t part_bytes = scratch_bytes - xq_bytes - xs_bytes;
     const size_t blocks = (size_t)batch * (cols >> 4);
     if (!quantize && !g_scratch_valid) quantize = 1;  // the last activations went through the CUTLASS path
+    const uint8_t *w = static_cast<const uint8_t *>(W);
+    // activation factor (see nvfp4_quant.cuh): static = the input_scale stored in the weight, dynamic = amax of this activation tensor
+    const int amode = fllm_nvfp4_act_scale_mode();
+    const Nvfp4Trailer *tr = reinterpret_cast<const Nvfp4Trailer *>(w + fllm_nvfp4_trailer_offset(rows, cols));
+    const float *gs_ptr = amode == 1 ? &tr->gs : nullptr;
+    const float *alpha_ptr = amode == 1 ? &tr->alpha : nullptr;
     if (quantize) {
         g_scratch_valid = true;
 #ifdef FLLM_HAVE_CUTLASS
         fllm_nvfp4_cutlass_invalidate();
 #endif
-        if (fllm_glu_up) nvfp4_quantize_kernel<true><<<(unsigned)((blocks + 127) / 128), 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, reinterpret_cast<uint32_t *>(xq), xs, blocks);
-        else nvfp4_quantize_kernel<false><<<(unsigned)((blocks + 127) / 128), 128, 0, s>>>(X, nullptr, 0, reinterpret_cast<uint32_t *>(xq), xs, blocks);
+        const unsigned grid = (unsigned)((blocks + 127) / 128);
+        uint32_t *xq32 = reinterpret_cast<uint32_t *>(xq);
+        if (amode == 2) {
+            nvfp4_amax_reset_kernel<<<1, 1, 0, s>>>();
+            if (fllm_glu_up) nvfp4_amax_kernel<true><<<grid, 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, blocks);
+            else nvfp4_amax_kernel<false><<<grid, 128, 0, s>>>(X, nullptr, 0, blocks);
+            if (fllm_glu_up) nvfp4_quantize_kernel<true, true><<<grid, 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, xq32, xs, blocks, nullptr);
+            else nvfp4_quantize_kernel<false, true><<<grid, 128, 0, s>>>(X, nullptr, 0, xq32, xs, blocks, nullptr);
+        } else if (fllm_glu_up) {
+            nvfp4_quantize_kernel<true, false><<<grid, 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, xq32, xs, blocks, gs_ptr);
+        } else {
+            nvfp4_quantize_kernel<false, false><<<grid, 128, 0, s>>>(X, nullptr, 0, xq32, xs, blocks, gs_ptr);
+        }
     }
-    const uint8_t *w = static_cast<const uint8_t *>(W);
-    if (batch <= 16) return fp4_launch<64, 16, 4, 1, 3>(s, w, xq, xs, Y, bias, gscale, rows, cols, batch, part, part_bytes);
-    if (batch <= 32) return fp4_launch<64, 32, 4, 1, 2>(s, w, xq, xs, Y, bias, gscale, rows, cols, batch, part, part_bytes);
-    if (batch <= 64) return fp4_launch<64, 64, 4, 1, 2>(s, w, xq, xs, Y, bias, gscale, rows, cols, batch, part, part_bytes);
-    return fp4_launch<FP4_BM, FP4_BN, FP4_WM, FP4_WN, FP4_ST, FP4_SBK>(s, w, xq, xs, Y, bias, gscale, rows, cols, batch, part, part_bytes);
+    if (amode == 2) {
+        nvfp4_alpha_kernel<<<1, 1, 0, s>>>(gscale);
+        void *sym = nullptr;
+        if (cudaGetSymbolAddress(&sym, g_fp4_alpha) != cudaSuccess) {
+            cudaGetLastError();
+            return 0;
+        }
+        alpha_ptr = static_cast<const float *>(sym);
+    }
+    if (batch <= 16) return fp4_launch<64, 16, 4, 1, 3>(s, w, xq, xs, Y, bias, gscale, alpha_ptr, rows, cols, batch, part, part_bytes);
+    if (batch <= 32) return fp4_launch<64, 32, 4, 1, 2>(s, w, xq, xs, Y, bias, gscale, alpha_ptr, rows, cols, batch, part, part_bytes);
+    if (batch <= 64) return fp4_launch<64, 64, 4, 1, 2>(s, w, xq, xs, Y, bias, gscale, alpha_ptr, rows, cols, batch, part, part_bytes);
+    return fp4_launch<FP4_BM, FP4_BN, FP4_WM, FP4_WN, FP4_ST, FP4_SBK>(s, w, xq, xs, Y, bias, gscale, alpha_ptr, rows, cols, batch, part, part_bytes);
 }
 #endif
 
@@ -368,11 +420,35 @@ bool fllm_nvfp4_prep_ok(int cols, int batch) {
     return supported && batch >= 1 && batch <= 64 && (cols & 255) == 0;
 #endif
 }
+bool fllm_nvfp4_prep_scale(const void *w, int rows, int cols, const float **gs) {
+    *gs = nullptr;
+    const int mode = fllm_nvfp4_act_scale_mode();
+    if (mode == 0) return true;  // gs = 1, alpha = weight_scale_2: what the GEMM expects with the switch off
+    if (mode == 2 || w == nullptr || rows <= 0) return false;
+    *gs = &reinterpret_cast<const Nvfp4Trailer *>(static_cast<const uint8_t *>(w) + fllm_nvfp4_trailer_offset(rows, cols))->gs;
+    return true;
+}
 void fllm_nvfp4_scratch_filled() {
 #ifndef FLLM_NO_FP4
     g_scratch_valid = true;
 #ifdef FLLM_HAVE_CUTLASS
     fllm_nvfp4_cutlass_invalidate();
 #endif
+#endif
+}
+
+// RMSNorm fused with the activation quantization of the CUTLASS GEMM (nvfp4_cutlass.cu); 0 without CUTLASS or off sm_12x.
+#ifdef FLLM_HAVE_CUTLASS
+int fllm_nvfp4_norm_quant(cudaStream_t s, const float *x, const float *w, float *out, int rows, int cols, float eps, const void *weight,
+                          int weight_rows, int mode);
+#endif
+int fllm_nvfp4_norm_quant_try(cudaStream_t s, const float *x, const float *w, float *out, int rows, int cols, float eps, const void *weight,
+                              int weight_rows, int mode) {
+#if defined(FLLM_HAVE_CUTLASS) && !defined(FLLM_NO_FP4)
+    if (!fllm_nvfp4_cutlass_ok(out, out, nullptr, weight_rows, cols, rows, mode)) return 0;  // also checks the device
+    return fllm_nvfp4_norm_quant(s, x, w, out, rows, cols, eps, weight, weight_rows, mode);
+#else
+    (void)s; (void)x; (void)w; (void)out; (void)rows; (void)cols; (void)eps; (void)weight; (void)weight_rows; (void)mode;
+    return 0;
 #endif
 }

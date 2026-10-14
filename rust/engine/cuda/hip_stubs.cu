@@ -16,6 +16,8 @@ int fllm_nvfp4_try(cudaStream_t, const void *, const float *, float *, const flo
     return 0;
 }
 int fllm_nvfp4_cutlass_ok(const float *, const float *, const float *, int, int, int, int) { return 0; }
+int fllm_nvfp4_norm_quant_try(cudaStream_t, const float *, const float *, float *, int, int, float, const void *, int, int) { return 0; }
+int fllm_flashinfer_expand_half(cudaStream_t, const void *, float *, size_t) { return 0; }
 int fllm_qgemm4k_try(cudaStream_t, const void *, const float *, float *, const float *, int, int, int, void *, size_t) { return 0; }
 int fllm_qgemm5k_try(cudaStream_t, const void *, const float *, float *, const float *, int, int, int, void *, size_t) { return 0; }
 int fllm_qgemm6k_try(cudaStream_t, const void *, const float *, float *, const float *, int, int, int, void *, size_t) { return 0; }

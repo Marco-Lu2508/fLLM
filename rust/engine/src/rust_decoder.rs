@@ -1912,7 +1912,9 @@ impl RustDecoder {
         let upload_linear =
             |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
                 if let Some((kind, bytes)) = linear.packed_weights() {
-                    backend
+                    // NVFP4: the backend stores the checkpoint's static activation scale next to the weight (read inside upload_weight_scaled)
+                    crate::backend::set_next_nvfp4_input_scale(linear.input_scale);
+                    let uploaded = backend
                         .upload_weight_scaled(
                             name,
                             bytes,
@@ -1922,7 +1924,9 @@ impl RustDecoder {
                             linear.bias.as_deref(),
                             linear.scale,
                         )
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string());
+                    crate::backend::set_next_nvfp4_input_scale(0.0);
+                    uploaded
                 } else {
                     let bytes = cast_f32_to_u8(&linear.weight.data);
                     backend

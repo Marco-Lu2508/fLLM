@@ -65,8 +65,8 @@ __device__ __forceinline__ float norm_block_sum(float v, float *scratch) {
 template <int PER, int RES, int QUANT>
 __global__ void __launch_bounds__(256)
 add_rms_norm_kernel(float *__restrict__ x, const void *__restrict__ branch, const float *__restrict__ rbias, float scale,
-                    const float *__restrict__ w, float *__restrict__ out, void *__restrict__ q0, void *__restrict__ q1, int cols,
-                    float eps, float inv_cols) {
+                    const float *__restrict__ w, float *__restrict__ out, void *__restrict__ q0, void *__restrict__ q1,
+                    const float *__restrict__ gsp, int cols, float eps, float inv_cols) {
     __shared__ float scratch[32];
     const int cols4 = cols >> 2;
     const int lane = threadIdx.x & 31;
@@ -148,9 +148,12 @@ add_rms_norm_kernel(float *__restrict__ x, const void *__restrict__ branch, cons
             float amax = fmaxf(fmaxf(fabsf(o.x), fabsf(o.y)), fmaxf(fabsf(o.z), fabsf(o.w)));
             amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
             amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
-            const uint32_t sb = f_to_ue4m3(amax * (1.f / 6.f));
+            // gs: the static activation factor of the GEMM's weight (its trailer, see nvfp4_quant.cuh); the same arithmetic as
+            // fp4_quantize_values, so the result equals nvfp4_quantize_kernel's
+            const float gs = gsp != nullptr ? *gsp : 1.f;
+            const uint32_t sb = f_to_ue4m3(amax * gs * (1.f / 6.f));
             const float sd = ue4m3_to_f(sb);
-            const float inv4 = sd > 0.f ? 1.f / sd : 0.f;
+            const float inv4 = sd > 0.f ? gs / sd : 0.f;
             const float ov[4] = {o.x, o.y, o.z, o.w};
             uint32_t h16 = 0;
 #pragma unroll
@@ -176,9 +179,9 @@ add_rms_norm_kernel(float *__restrict__ x, const void *__restrict__ branch, cons
 
 template <int PER, int RES>
 static void add_rms_norm_dispatch(cudaStream_t s, int quant, int rows, float *x, const void *branch, const float *rbias, float scale,
-                                  const float *w, float *out, void *q0, void *q1, int cols, float eps) {
+                                  const float *w, float *out, void *q0, void *q1, const float *gsp, int cols, float eps) {
     const float inv_cols = 1.0f / (float)cols;
-#define FLLM_ARN(Q) add_rms_norm_kernel<PER, RES, Q><<<rows, 256, 0, s>>>(x, branch, rbias, scale, w, out, q0, q1, cols, eps, inv_cols)
+#define FLLM_ARN(Q) add_rms_norm_kernel<PER, RES, Q><<<rows, 256, 0, s>>>(x, branch, rbias, scale, w, out, q0, q1, gsp, cols, eps, inv_cols)
     switch (quant) {
         case 1: FLLM_ARN(1); break;
         case 2: FLLM_ARN(2); break;
@@ -190,7 +193,7 @@ static void add_rms_norm_dispatch(cudaStream_t s, int quant, int rows, float *x,
 
 // Returns 1 when the shape or the alignment is not supported (nothing was launched), 0 after the launch.
 int fllm_add_rms_norm_launch(cudaStream_t s, float *x, const void *branch, int res_kind, const float *rbias, float scale, const float *w,
-                             float *out, int rows, int cols, float eps, int quant, void *q0, void *q1) {
+                             float *out, int rows, int cols, float eps, int quant, void *q0, void *q1, const float *gsp) {
     if (rows <= 0 || cols <= 0 || (cols & 3) != 0 || cols > 8192 || (res_kind != 1 && res_kind != 2)) return 1;
     if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) |
          reinterpret_cast<uintptr_t>(out) | reinterpret_cast<uintptr_t>(rbias)) % 16 != 0)
@@ -200,11 +203,11 @@ int fllm_add_rms_norm_launch(cudaStream_t s, float *x, const void *branch, int r
     if (quant == 3 && ((cols & 31) != 0 || (reinterpret_cast<uintptr_t>(q0) & 15) != 0 || (reinterpret_cast<uintptr_t>(q1) & 15) != 0)) return 1;
     const bool wide = cols / 4 > 1024;
     if (res_kind == 1) {
-        if (wide) add_rms_norm_dispatch<8, 1>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, cols, eps);
-        else add_rms_norm_dispatch<4, 1>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, cols, eps);
+        if (wide) add_rms_norm_dispatch<8, 1>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, gsp, cols, eps);
+        else add_rms_norm_dispatch<4, 1>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, gsp, cols, eps);
     } else {
-        if (wide) add_rms_norm_dispatch<8, 2>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, cols, eps);
-        else add_rms_norm_dispatch<4, 2>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, cols, eps);
+        if (wide) add_rms_norm_dispatch<8, 2>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, gsp, cols, eps);
+        else add_rms_norm_dispatch<4, 2>(s, quant, rows, x, branch, rbias, scale, w, out, q0, q1, gsp, cols, eps);
     }
     return 0;
 }

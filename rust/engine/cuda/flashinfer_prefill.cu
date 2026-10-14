@@ -123,6 +123,11 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
 #if defined(FLLM_HAVE_FLASHINFER)
     using namespace fllm_fi;
     static const bool disabled = getenv("FLLM_CUDA_NO_FLASHINFER") != nullptr;
+    if (fllm_pending_attn.o16) {  // never overwrite an unexpanded result (api.cu flushes before every operation)
+        const FllmPendingAttn p = fllm_pending_attn;
+        fllm_pending_attn = FllmPendingAttn();
+        fllm_flashinfer_expand_half(s, p.o16, p.out, p.count);
+    }
     if (disabled || fllm_cc() < 75 || dk != dv || (dk != 64 && dk != 128) || kv_len < rows || heads % kv_heads != 0)
         return -1;
     const size_t row_halves = (size_t)kv_heads * dk;
@@ -228,6 +233,11 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
             half_to_float_copy_kernel<<<grid(q_elems), 256, 0, s>>>(static_cast<const __half *>(st.o16.ptr), out,
                                                                     static_cast<__half *>(fllm_attn_x16), q_elems);
             fllm_attn_x16_written = true;
+        } else if (fllm_fuse_nvfp4_attn_out() && (reinterpret_cast<uintptr_t>(out) & 15) == 0 && (reinterpret_cast<uintptr_t>(st.o16.ptr) & 15) == 0) {
+            // FLLM_FUSE_NVFP4_ATTN_OUT: expanded to FP32 only if something other than an NVFP4 GEMM needs it (flush_glu in api.cu)
+            fllm_pending_attn.o16 = st.o16.ptr;
+            fllm_pending_attn.out = out;
+            fllm_pending_attn.count = q_elems;
         } else {
             half_to_float_kernel<<<grid(q_elems), 256, 0, s>>>(static_cast<const __half *>(st.o16.ptr), out, q_elems);
         }
@@ -241,5 +251,17 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
     (void)s; (void)q; (void)kpool; (void)vpool; (void)out; (void)table; (void)rows; (void)kv_len; (void)heads;
     (void)kv_heads; (void)dk; (void)dv; (void)block_size; (void)scale;
     return -1;
+#endif
+}
+
+// Expands the FP16 attention output left pending by fllm_flashinfer_prefill_try (see FllmPendingAttn) into the FP32 buffer.
+int fllm_flashinfer_expand_half(cudaStream_t s, const void *o16, float *out, size_t count) {
+#if defined(FLLM_HAVE_FLASHINFER)
+    const unsigned grid = (unsigned)((count + 255) / 256 > 4096 ? 4096 : (count + 255) / 256);
+    fllm_fi::half_to_float_kernel<<<grid, 256, 0, s>>>(static_cast<const __half *>(o16), out, count);
+    return fllm_check_launch("flashinfer expand");
+#else
+    (void)s; (void)o16; (void)out; (void)count;
+    return 0;
 #endif
 }

@@ -23,6 +23,21 @@ thread_local bool fllm_fp4_acc = false;
 thread_local float fllm_fp4_acc_scale = 0.f;
 thread_local bool fllm_fp4_f16out = false;
 thread_local bool fllm_glu_half = false;
+// FLLM_FUSE_NVFP4_ATTN_OUT / FLLM_FUSE_NVFP4_NORM (see fllm_cuda_internal.h): off unless set to something other than 0
+thread_local FllmPendingAttn fllm_pending_attn;
+thread_local const void *fllm_x_half = nullptr;
+static bool env_switch(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+bool fllm_fuse_nvfp4_attn_out() {
+    static const bool on = env_switch("FLLM_FUSE_NVFP4_ATTN_OUT");
+    return on;
+}
+bool fllm_fuse_nvfp4_norm() {
+    static const bool on = env_switch("FLLM_FUSE_NVFP4_NORM");
+    return on;
+}
 // state of the Marlin 4-bit path (same rule: the header declares these with C++ linkage, so they must not be defined inside extern "C")
 thread_local bool fllm_q4z_f16out = false;
 thread_local bool fllm_q4z_skip_result = false;
@@ -230,6 +245,14 @@ struct FllmStream {
     int glu_mode = 0;
     bool glu_pending = false;
     bool glu_half = false;  // the pending glu reads FP16 gate and up (cast to float pointers): only an NVFP4 CUTLASS GEMM folds it in
+    // a prompt RMSNorm that has not run yet: the NVFP4 CUTLASS GEMM that reads its result runs it fused with the activation quantization (FLLM_FUSE_NVFP4_NORM)
+    struct {
+        bool pending = false;
+        const float *x = nullptr, *w = nullptr;
+        float *out = nullptr;
+        int rows = 0, cols = 0;
+        float eps = 0.f;
+    } norm;
     // Marlin (Q4Z weights): FP16 activations and result, split-K partials and the lock workspace (zero between calls)
     void *q4z_io = nullptr, *q4z_ctmp = nullptr, *q4z_ws = nullptr;
     size_t q4z_io_bytes = 0, q4z_ctmp_bytes = 0, q4z_ws_bytes = 0;
@@ -282,6 +305,15 @@ static int flush_add(FllmStream *st) {
 }
 static int flush_glu(FllmStream *st) {
     if (int e = flush_add(st)) return e;
+    if (st->norm.pending) {  // a deferred RMSNorm (fllm_cuda_rms_norm): nobody fused it, run it now
+        st->norm.pending = false;
+        if (int e = fllm_rms_norm_launch(st->s, st->norm.x, st->norm.w, st->norm.out, st->norm.rows, st->norm.cols, st->norm.eps)) return e;
+    }
+    if (fllm_pending_attn.o16) {  // FP16 attention output nobody quantized directly
+        const FllmPendingAttn p = fllm_pending_attn;
+        fllm_pending_attn = FllmPendingAttn();
+        if (int e = fllm_flashinfer_expand_half(st->s, p.o16, p.out, p.count)) return e;
+    }
     if (!st->glu_pending) return 0;
     st->glu_pending = false;
     if (st->glu_half) return fllm_glu_launch_f16(st->s, st->glu_gate, st->glu_up, st->glu_out, st->glu_count, st->glu_mode);
@@ -706,6 +738,27 @@ int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float 
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
     if (int e = flush_add(st)) return e;
     st->q4z_ready = false;
+    // a deferred RMSNorm / FP16 attention output whose result this GEMM reads: fused into the activation quantization when the CUTLASS GEMM takes the product
+    const int cutlass_mode = (fllm_fp4_acc ? 1 : 0) | (fllm_fp4_f16out ? 2 : 0);
+    const bool glu_first = st->glu_pending;
+    bool norm_fused = false;
+    const void *attn_half = nullptr;
+    if (!glu_first && st->norm.pending && st->norm.out == x && st->norm.rows == batch && st->norm.cols == cols && bias == nullptr) {
+        st->norm.pending = false;
+        norm_fused = fllm_nvfp4_norm_quant_try(st->s, st->norm.x, st->norm.w, st->norm.out, batch, cols, st->norm.eps, w, rows, cutlass_mode) != 0;
+        if (!norm_fused) {
+            if (int e = fllm_rms_norm_launch(st->s, st->norm.x, st->norm.w, st->norm.out, st->norm.rows, st->norm.cols, st->norm.eps)) return e;
+        } else {
+            st->fp4_ready = true;
+            st->fp4_x = x;
+            st->fp4_batch = batch;
+            st->fp4_cols = cols;
+        }
+    } else if (!glu_first && fllm_pending_attn.o16 && fllm_pending_attn.out == x && fllm_pending_attn.count == (size_t)batch * cols && bias == nullptr &&
+               fllm_nvfp4_cutlass_ok(x, y, bias, rows, cols, batch, cutlass_mode)) {
+        attn_half = fllm_pending_attn.o16;
+        fllm_pending_attn = FllmPendingAttn();
+    }
     bool fuse = glu_fusable(st, 40, w, x, y, cols, batch);
     // an FP16 glu is only folded into the CUTLASS GEMM (the built-in kernels read FP32): any other case computes it first
     if (fuse && st->glu_half && !fllm_nvfp4_cutlass_ok(st->glu_gate, y, bias, rows, cols, batch, fllm_fp4_acc ? 1 : 0)) fuse = false;
@@ -733,7 +786,9 @@ int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float 
         fllm_glu_half = st->glu_half;
         st->glu_pending = false;
     }
+    fllm_x_half = attn_half;
     const bool ok = fllm_nvfp4_try(st->s, w, fuse ? st->glu_gate : x, y, bias, gscale, rows, cols, batch, st->x16, st->x16_bytes, reuse ? 0 : 1) != 0;
+    fllm_x_half = nullptr;
     fllm_glu_up = nullptr;
     fllm_glu_half = false;
     if (!ok)
@@ -889,7 +944,8 @@ int fllm_cuda_rope_kv_f16(FllmStream *st, const uint16_t *q16, const uint16_t *k
 static const int FLLM_DECLINED = 3;
 
 // Where the quantized activations of the GEMM that follows go (q0, q1) and which format: the quant argument if it applies, else 0.
-static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int cols, void **q0, void **q1) {
+static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int cols, void **q0, void **q1, const void *next_w = nullptr,
+                              int next_rows = 0, const float **gs = nullptr) {
     if (quant == 0 || !fllm_fuse_enabled(FLLM_FUSE_NORM_QUANT)) return 0;
     if (quant == 1) {
         if (!st->q4z_io || (size_t)rows * cols * 2 > st->q4z_io_bytes) return 0;
@@ -899,6 +955,10 @@ static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int
     if (!st->x16) return 0;
     if (quant == 2) {
         if (!fllm_nvfp4_prep_ok(cols, rows)) return 0;
+        // the activation factor of the weight that reads the result (FLLM_NVFP4_ACT_SCALE): the fused kernel must quantize exactly like nvfp4_quantize_kernel
+        const float *gs_dev = nullptr;
+        if (gs == nullptr || !fllm_nvfp4_prep_scale(next_w, next_rows, cols, &gs_dev)) return 0;
+        *gs = gs_dev;
         const size_t xq = ((size_t)rows * (cols >> 1) + 255) & ~size_t(255), xs = ((size_t)rows * (cols >> 4) + 255) & ~size_t(255);
         if (xq + xs > st->x16_bytes) return 0;
         *q0 = st->x16;
@@ -939,14 +999,16 @@ static void fused_quant_done(FllmStream *st, int quant, const float *out, int ro
 
 // x += scale * branch; out = rms_norm(x) * w; the activations of the next GEMM quantized (see fused.cu)
 int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float scale, const float *w, float *out, int rows, int cols,
-                           float eps, int quant, int kind) {
-    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
+                           float eps, int quant, int kind, const void *next_w, int next_rows) {
+    // decode batches only: from FLLM_PREFILL_MIN_ROWS rows on, the prompt path (rms_norm_prompt_kernel, FLLM_FUSE_PREFILL_*) owns this fusion
+    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || rows >= FLLM_PREFILL_MIN_ROWS || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
     if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 != 0)
         return FLLM_DECLINED;
     PREP(st);
     void *q0 = nullptr, *q1 = nullptr;
-    const int q = fused_quant_target(st, quant, kind, rows, cols, &q0, &q1);
-    if (fllm_add_rms_norm_launch(st->s, x, branch, 1, nullptr, scale, w, out, rows, cols, eps, q, q0, q1) != 0) return FLLM_DECLINED;
+    const float *gs = nullptr;
+    const int q = fused_quant_target(st, quant, kind, rows, cols, &q0, &q1, next_w, next_rows, &gs);
+    if (fllm_add_rms_norm_launch(st->s, x, branch, 1, nullptr, scale, w, out, rows, cols, eps, q, q0, q1, gs) != 0) return FLLM_DECLINED;
     if (int e = fllm_check_launch("add_rms_norm")) return e;
     fused_quant_done(st, q, out, rows, cols);
     return 0;
@@ -958,7 +1020,9 @@ int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float 
 int fllm_cuda_linear_q4z_add_norm(FllmStream *st, const void *w, int group, const float *act, float *res, const float *bias, int rows,
                                   int cols, int batch, const int *perm, float scale, const float *nw, float *out, float eps, int quant,
                                   int kind) {
-    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || cols <= 0 || batch <= 0 || (rows & 3) != 0 || rows > 8192) return FLLM_DECLINED;
+    // decode batches only (see fllm_cuda_add_rms_norm): prompt batches leave the residual add pending for the prompt RMS norm (PendingAdd)
+    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || cols <= 0 || batch <= 0 || batch >= FLLM_PREFILL_MIN_ROWS || (rows & 3) != 0 || rows > 8192)
+        return FLLM_DECLINED;
     if ((reinterpret_cast<uintptr_t>(res) | reinterpret_cast<uintptr_t>(nw) | reinterpret_cast<uintptr_t>(out) | reinterpret_cast<uintptr_t>(bias)) % 16 != 0)
         return FLLM_DECLINED;
     fllm_q4z_skip_result = true;
@@ -992,7 +1056,9 @@ int fllm_cuda_rope_kv_f32(FllmStream *st, float *q, const float *k, const float 
                                    cs, sn, rows, heads, kv_heads, dk, dv, half_, neox);
 }
 #else
-int fllm_cuda_add_rms_norm(FllmStream *, float *, const float *, float, const float *, float *, int, int, float, int, int) { return 3; }
+int fllm_cuda_add_rms_norm(FllmStream *, float *, const float *, float, const float *, float *, int, int, float, int, int, const void *, int) {
+    return 3;
+}
 int fllm_cuda_linear_q4z_add_norm(FllmStream *, const void *, int, const float *, float *, const float *, int, int, int, const int *, float,
                                   const float *, float *, float, int, int) {
     return 3;
@@ -1051,6 +1117,17 @@ int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *ou
         }
     }
     PREP(st);
+    // prompt-sized batches of NVFP4 models: wait for the GEMM that reads the result, which quantizes it in the same kernel (fllm_nvfp4_norm_quant_try)
+    if (fllm_fuse_nvfp4_norm() && rows > 64 && cols % 256 == 0 && cols <= 8192 && !st->capture) {
+        st->norm.pending = true;
+        st->norm.x = x;
+        st->norm.w = w;
+        st->norm.out = out;
+        st->norm.rows = rows;
+        st->norm.cols = cols;
+        st->norm.eps = eps;
+        return 0;
+    }
     return fllm_rms_norm_launch(st->s, x, w, out, rows, cols, eps);
 }
 int fllm_cuda_layer_norm(FllmStream *st, const float *x, const float *w, const float *b, float *out, int rows, int cols,

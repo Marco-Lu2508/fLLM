@@ -44,6 +44,36 @@ use std::sync::{Arc, Mutex};
 /// Global registry of operations that fell back to CPU, to warn only once per operation.
 static FALLBACK_WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
+thread_local! {
+    /// `(weight_scale_2, input_scale)` of the NVFP4 weight that is about to be uploaded (see `set_next_nvfp4_scales`).
+    static NEXT_NVFP4_SCALES: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((1.0, 0.0)) };
+}
+
+/// The checkpoint's static activation scale (`<name>.input_scale`, ModelOpt) of the NVFP4 weight a backend is asked to upload next on this
+/// thread; 0 = the checkpoint has none. Set by the caller of `Backend::upload_weight_scaled` right before the call and cleared after it, so that
+/// the trait does not grow a parameter only the CUDA backend reads.
+pub fn set_next_nvfp4_input_scale(input_scale: f32) {
+    NEXT_NVFP4_SCALES.with(|c| c.set((c.get().0, input_scale)));
+}
+
+/// Read by the CUDA backend inside `upload_weight_scaled`.
+#[cfg(feature = "cuda")]
+pub(crate) fn take_next_nvfp4_input_scale() -> f32 {
+    NEXT_NVFP4_SCALES.with(|c| c.get().1)
+}
+
+/// Remembers `weight_scale_2` and `input_scale` for the device layout of the weight that `upload_weight` converts next.
+#[cfg(feature = "cuda")]
+pub(crate) fn set_next_nvfp4_scales(weight_scale: f32, input_scale: f32) {
+    NEXT_NVFP4_SCALES.with(|c| c.set((weight_scale, input_scale)));
+}
+
+/// `(weight_scale_2, input_scale)` for the device layout, reset to `(1, 0)` (an unscaled upload) afterwards.
+#[cfg(feature = "cuda")]
+pub(crate) fn take_next_nvfp4_scales() -> (f32, f32) {
+    NEXT_NVFP4_SCALES.with(|c| c.replace((1.0, 0.0)))
+}
+
 /// Warn the user once when an operation or quant type is unsupported by the native backend
 /// and falls back to CPU execution.
 pub fn warn_fallback_once(op_name: &str) {

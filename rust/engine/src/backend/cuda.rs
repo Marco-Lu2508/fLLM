@@ -142,6 +142,8 @@ extern "C" {
         eps: f32,
         quant: c_int,
         kind: c_int,
+        next_w: *const c_void,
+        next_rows: c_int,
     ) -> c_int;
     fn fllm_cuda_linear_q4z_add_norm(
         st: *mut RawStream,
@@ -1044,7 +1046,7 @@ impl Backend for CudaBackend {
                 converted = dual;
                 (&converted, quant_type)
             } else if kind == 40 && cols.is_multiple_of(256) && rows.is_multiple_of(16) {
-                converted = nvfp4_device_layout(raw_bytes, rows, cols);
+                converted = nvfp4_device_layout(raw_bytes, rows, cols, super::take_next_nvfp4_scales());
                 (&converted, quant_type)
             } else {
                 (raw_bytes, quant_type)
@@ -1133,6 +1135,16 @@ impl Backend for CudaBackend {
             }
         }
         if quant_type == QuantType::NvFp4 && self.fp4 && cols.is_multiple_of(256) && rows.is_multiple_of(16) && raw_bytes.len() == rows * (cols / 64) * 36 {
+            let input_scale = super::take_next_nvfp4_input_scale();
+            if input_scale <= 0.0 {
+                log_once(
+                    "cuda-nvfp4-no-input-scale",
+                    &format!(
+                        "NVFP4 weights without an input_scale tensor (first: {name}): activations are quantized without the checkpoint's per-tensor factor (convert with a llama.cpp that keeps <name>.input_scale, or try FLLM_NVFP4_ACT_SCALE=dynamic)"
+                    ),
+                );
+            }
+            super::set_next_nvfp4_scales(scale, input_scale);
             let mut weight = self.upload_weight(name, raw_bytes, quant_type, rows, cols, bias)?;
             weight.scale = scale;
             return Ok(weight);
@@ -2074,6 +2086,11 @@ impl Stream for CudaStream {
         }
         let rows = x.size / (cols * 4);
         let (quant, kind) = next_activation_format(next);
+        // the NVFP4 weight that reads the result: the fused kernel takes its activation factor from the weight trailer
+        let (next_w, next_rows): (*const c_void, usize) = match next {
+            Some(w) if quant == 2 => (dev_ptr(&w.buffer)?.cast(), w.rows),
+            _ => (std::ptr::null(), 0),
+        };
         // SAFETY: sizes checked above; the entry point validates alignment and shape and declines (returns 3) without launching.
         fused_result(unsafe {
             fllm_cuda_add_rms_norm(
@@ -2088,6 +2105,8 @@ impl Stream for CudaStream {
                 eps,
                 quant,
                 kind,
+                next_w,
+                to_c(next_rows, "rows")?,
             )
         })
     }
@@ -3004,15 +3023,18 @@ fn f32_to_f16_bits(v: f32) -> u16 {
 /// same weights serve the small-batch kernel in `nvfp4.cu` and the CUTLASS GEMM for prompts:
 /// `[rows x cols / 2 bytes: element 2i in the low nibble of byte i]`, padded to 256 bytes, then the UE4M3 scales in the
 /// swizzled atom layout (`nvfp4_scale_index`), `ceil(rows / 128) * cols / 64 * 512` bytes. `rows` and `cols` must be
-/// multiples of 16 and 256.
-fn nvfp4_device_layout(raw: &[u8], rows: usize, cols: usize) -> Vec<u8> {
+/// multiples of 16 and 256. The scales are followed (at the next multiple of 256) by the 16-byte trailer of `nvfp4_trailer`.
+fn nvfp4_device_layout(raw: &[u8], rows: usize, cols: usize, (weight_scale, input_scale): (f32, f32)) -> Vec<u8> {
     use rayon::prelude::*;
     let blocks = cols / 64;
     let row_bytes = blocks * 36;
     let nibble_bytes = rows * cols / 2;
     let scale_offset = nibble_bytes.div_ceil(256) * 256;
-    let mut out = vec![0u8; scale_offset + rows.div_ceil(128) * blocks * 512];
-    let (nibbles, scales) = out.split_at_mut(scale_offset);
+    let scales_end = scale_offset + rows.div_ceil(128) * blocks * 512;
+    let trailer_offset = scales_end.div_ceil(256) * 256;
+    let mut out = vec![0u8; trailer_offset + NVFP4_TRAILER_BYTES];
+    let (nibbles, rest) = out.split_at_mut(scale_offset);
+    let scales = &mut rest[..scales_end - scale_offset];
     nibbles[..nibble_bytes].par_chunks_mut(cols / 2).enumerate().for_each(|(r, dst)| {
         for b in 0..blocks {
             let block = &raw[r * row_bytes + b * 36..][..36];
@@ -3032,6 +3054,27 @@ fn nvfp4_device_layout(raw: &[u8], rows: usize, cols: usize) -> Vec<u8> {
                 scales[nvfp4_scale_index(r, b * 4 + i, blocks)] = raw[r * row_bytes + b * 36 + i];
             }
         }
+    }
+    out[trailer_offset..].copy_from_slice(&nvfp4_trailer(weight_scale, input_scale));
+    out
+}
+
+/// Bytes behind the swizzled scales of a device NVFP4 weight (at the next multiple of 256): four little-endian floats
+/// `{gs, alpha, weight_scale_2, valid}` that the kernels read through device pointers (`Nvfp4Trailer` in nvfp4_quant.cuh):
+/// `gs = 1 / input_scale` multiplies the activations before their FP4 quantization (ModelOpt / vLLM `input_global_scale`) and
+/// `alpha = weight_scale_2 * input_scale` is the factor of the GEMM result. A checkpoint without `input_scale` (0) gets `gs = 1`,
+/// `alpha = weight_scale_2`, which is what fLLM computed before the activation factor existed.
+const NVFP4_TRAILER_BYTES: usize = 16;
+
+fn nvfp4_trailer(weight_scale: f32, input_scale: f32) -> [u8; NVFP4_TRAILER_BYTES] {
+    let (gs, alpha, valid) = if input_scale.is_finite() && input_scale > 0.0 {
+        (1.0 / input_scale, weight_scale * input_scale, 1.0)
+    } else {
+        (1.0, weight_scale, 0.0)
+    };
+    let mut out = [0u8; NVFP4_TRAILER_BYTES];
+    for (i, v) in [gs, alpha, weight_scale, valid].into_iter().enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
     }
     out
 }
@@ -3365,9 +3408,15 @@ mod nvfp4_layout_tests {
         let blocks = cols / 64;
         let row_bytes = blocks * 36;
         let raw: Vec<u8> = (0..rows * row_bytes).map(|i: usize| (i.wrapping_mul(2_654_435_761) >> 7) as u8).collect();
-        let out = nvfp4_device_layout(&raw, rows, cols);
+        let out = nvfp4_device_layout(&raw, rows, cols, (0.5, 0.25));
         let scale_offset = (rows * cols / 2).div_ceil(256) * 256;
-        assert_eq!(out.len(), scale_offset + rows.div_ceil(128) * blocks * 512);
+        let scales_end = scale_offset + rows.div_ceil(128) * blocks * 512;
+        let trailer = scales_end.div_ceil(256) * 256;
+        assert_eq!(out.len(), trailer + NVFP4_TRAILER_BYTES);
+        let floats: Vec<f32> = out[trailer..].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        assert_eq!(floats, [4.0, 0.125, 0.5, 1.0]);
+        let none: Vec<f32> = nvfp4_trailer(0.5, 0.0).as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        assert_eq!(none, [1.0, 0.5, 0.5, 0.0]);
         for r in 0..rows {
             for k in 0..cols {
                 let nibble = (out[r * cols / 2 + k / 2] >> (4 * (k % 2))) & 15;
