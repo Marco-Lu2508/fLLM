@@ -30,7 +30,7 @@ kernel void fllm_kv_write_q8(
     device char *pool [[buffer(3)]],
     constant o_kvw_params &p [[buffer(0)]],
     uint2 tgid [[threadgroup_position_in_grid]],
-    uint tid [[thread_position_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],  // scalar like sg/lane; tgid is a vector, and MSL rejects a scalar thread_position_in_threadgroup next to it
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint nsg [[simdgroups_per_threadgroup]]) {
