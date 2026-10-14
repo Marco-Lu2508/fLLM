@@ -422,6 +422,8 @@ pub(crate) struct Probe {
 
 /// Convert a fixed-size, NUL-terminated C string field.
 pub(super) fn c_chars_to_string(chars: &[c_char]) -> String {
+    // `c_char` is `i8` on x86 and `u8` on aarch64 Linux: the cast is a no-op only on the latter
+    #[allow(clippy::unnecessary_cast)]
     let bytes: Vec<u8> = chars.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -1074,6 +1076,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unnecessary_cast)] // c_char is u8 on aarch64 Linux, i8 on x86
     fn c_string_fields() {
         let mut field = [0 as c_char; 8];
         for (i, b) in b"abc".iter().enumerate() {
