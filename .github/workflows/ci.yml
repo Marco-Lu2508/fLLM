@@ -68,5 +68,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Runner CPU
+        run: |
+          lscpu | grep -E 'Model name|Thread|Socket' || true
+          grep -o -E 'avx512[a-z_0-9]*|amx[a-z_0-9]*|avx_vnni|avx2' /proc/cpuinfo | sort -u | tr '\n' ' '
+
       - name: Tests
-        run: cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe
+        run: cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe -- --test-threads=1
