@@ -24,7 +24,7 @@ wgpu = { version = "=30.0.1", optional = true, default-features = false, feature
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true }
 ash = { version = "0.38", optional = true }
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 minijinja = { version = "2", features = ["json", "preserve_order"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
