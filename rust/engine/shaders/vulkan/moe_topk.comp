@@ -1,0 +1,90 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moe_topk | bindings: logits,ids,weights | push: rows,experts,k,normalize_scores,scale | grid: [rows split over x/y (x <= 65535), 1, 1]
+// Softmax routing of mixture-of-experts layers (Stream::moe_topk and Stream::moe_route): for every row of `logits` (rows x experts) the k best experts
+// (ties to the lower index) as ids (int32) with their softmax scores (over ALL experts) as weights, renormalised over the selected ones when
+// `normalize` is set (divided by max(sum, 1e-8) like the CPU `moe_route`) and then multiplied by `scale`. moe_route is normalize = 1, scale = 1.
+// ids[r * k + j] / weights[r * k + j] are in descending order of score. One workgroup per row; experts <= 1024, k <= 32 (the planner checks).
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer LogitBuf { float logits[]; };
+layout(std430, binding = 1) buffer IdBuf { int ids[]; };
+layout(std430, binding = 2) buffer WeightBuf { float weights[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint experts;
+    uint k;
+    uint normalize_scores;
+    float scale;
+} p;
+
+#include "_ops_reduce.glsl"
+
+shared float s_logit[1024];
+shared float s_val[WG];
+shared uint s_idx[WG];
+shared uint s_chosen[32];
+shared float s_score[32];
+
+void main() {
+    const uint row = group_index();
+    if (row >= p.rows) return;
+    const uint lane = gl_LocalInvocationID.x;
+    const uint base = row * p.experts;
+    float m = NEG;
+    for (uint e = lane; e < p.experts; e += WG) {
+        const float v = logits[base + e];
+        s_logit[e] = v;
+        m = max(m, v);
+    }
+    m = wg_max(m);  // its barrier also publishes s_logit
+    float sum = 0.0;
+    for (uint e = lane; e < p.experts; e += WG) sum += exp(s_logit[e] - m);
+    sum = wg_sum(sum);
+
+    for (uint j = 0u; j < p.k; j++) {
+        float best = NEG;
+        uint besti = 0x7FFFFFFFu;
+        for (uint e = lane; e < p.experts; e += WG) {
+            const float v = s_logit[e];
+            if (v > best || (v == best && e < besti)) {
+                best = v;
+                besti = e;
+            }
+        }
+        s_val[lane] = best;
+        s_idx[lane] = besti;
+        barrier();
+        for (uint s = WG / 2u; s > 0u; s >>= 1u) {
+            if (lane < s) {
+                const float ov = s_val[lane + s];
+                const uint oi = s_idx[lane + s];
+                if (ov > s_val[lane] || (ov == s_val[lane] && oi < s_idx[lane])) {
+                    s_val[lane] = ov;
+                    s_idx[lane] = oi;
+                }
+            }
+            barrier();
+        }
+        if (lane == 0u) {
+            uint bi = s_idx[0];
+            if (bi >= p.experts) bi = 0u;  // only for degenerate input (NaN logits)
+            s_chosen[j] = bi;
+            s_score[j] = exp(s_val[0] - m) / sum;
+            s_logit[bi] = -3.4e38;  // below NEG: never selected again
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        float total = 0.0;
+        for (uint j = 0u; j < p.k; j++) total += s_score[j];
+        const float denom = max(total, 1e-8);
+        for (uint j = 0u; j < p.k; j++) {
+            ids[row * p.k + j] = int(s_chosen[j]);
+            const float sc = p.normalize_scores != 0u ? s_score[j] / denom : s_score[j];
+            weights[row * p.k + j] = sc * p.scale;
+        }
+    }
+}

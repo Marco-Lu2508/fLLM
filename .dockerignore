@@ -1,0 +1,9 @@
+bench/
+scripts/
+docs/receipts/
+*.gguf
+*.safetensors
+target/
+.git
+.gitattributes
+docs/release-secrets-report.md

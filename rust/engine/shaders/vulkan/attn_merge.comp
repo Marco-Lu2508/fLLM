@@ -1,0 +1,62 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_merge | bindings: bias,out,part | push: heads,dv,nsplit,flags,row0 | grid: [heads, rows in this dispatch, 1]
+// Second stage of the split-KV attention (attn_decode with nsplit > 1): combines the partial results of the splits of one (row, head):
+//   M = max(m_s of the non-empty splits, sink), L = sum_s l_s exp(m_s - M) (+ exp(sink - M)), out[d] = sum_s exp(m_s - M) acc_s[d] / L.
+// Splits with l_s == 0 are empty and skipped. `bias` = sinks[heads] then ALiBi slopes[heads] (flags bit 0: sinks used). `part` as written by attn_decode
+// (record = (z * heads + head) * nsplit + split, z = workgroup y; `out` rows are global rows row0 + z). nsplit <= 256.
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer BiasBuf { float bias_tab[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(std430, binding = 2) readonly buffer PartBuf { float part[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint dv;
+    uint nsplit;
+    uint flags;
+    uint row0;
+} p;
+
+shared float wgt[256];
+shared float s_total;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint z = gl_WorkGroupID.y;
+    const uint r = p.row0 + z;
+    const uint rec0 = (z * p.heads + h) * p.nsplit;
+    const uint nrec = gl_NumWorkGroups.y * p.heads * p.nsplit;
+    if (lane == 0u) {
+        float mx = NEG;
+        for (uint s = 0u; s < p.nsplit; s++) {
+            if (part[(rec0 + s) * 2u + 1u] > 0.0) mx = max(mx, part[(rec0 + s) * 2u]);
+        }
+        float sink = NEG;
+        if ((p.flags & 1u) != 0u) {
+            sink = bias_tab[h];
+            mx = max(mx, sink);
+        }
+        float total = 0.0;
+        for (uint s = 0u; s < p.nsplit; s++) {
+            float w = 0.0;
+            if (part[(rec0 + s) * 2u + 1u] > 0.0) w = exp(part[(rec0 + s) * 2u] - mx);
+            wgt[s] = w;
+            total += w * part[(rec0 + s) * 2u + 1u];
+        }
+        if ((p.flags & 1u) != 0u) total += exp(sink - mx);
+        s_total = total;
+    }
+    barrier();
+    const float inv = 1.0 / s_total;
+    for (uint d = lane; d < p.dv; d += WG) {
+        float a = 0.0;
+        for (uint s = 0u; s < p.nsplit; s++) {
+            if (wgt[s] != 0.0) a += wgt[s] * part[nrec * 2u + (rec0 + s) * p.dv + d];
+        }
+        outv[(r * p.heads + h) * p.dv + d] = a * inv;
+    }
+}

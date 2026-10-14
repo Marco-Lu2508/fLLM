@@ -1,0 +1,106 @@
+# Variants of the quantized linear shaders (package 2). Format: <output name> <source.comp> [-DNAME=VALUE ...]  ('#' starts a comment).
+# Naming: mv_<format>_<s|i> = matrix-vector for 1..8 activation rows, mm_<format>_<s|i|c> = matrix-matrix for batch > 8,
+#         suffix s = f32 arithmetic (every device), i = int8 activations + integer dot product, c = cooperative matrix (f16 tiles).
+# Act-order GPTQ (Q4ZP32/64/128) uses the Q4Z shaders plus the prepass quant_permute / quant_act_q8_perm. See INTERFACE_QUANT.md.
+# Lines ending in '#optional' may be skipped by build.rs when the compiler rejects them (cooperative matrix needs glslang >= 12.2).
+
+quant_act_q8 quant_act_q8.comp
+quant_act_q8_perm quant_act_q8.comp -DPERM=1
+quant_permute quant_permute.comp
+
+mv_q4_0_s mv_scalar.comp -DFMT_Q4_0=1
+mv_q4_0_i mv_idot.comp -DFMT_Q4_0=1
+mm_q4_0_s mm_scalar.comp -DFMT_Q4_0=1
+mm_q4_0_i mm_idot.comp -DFMT_Q4_0=1
+mm_q4_0_c mm_coopmat.comp -DFMT_Q4_0=1 #optional
+
+mv_q4_1_s mv_scalar.comp -DFMT_Q4_1=1
+mv_q4_1_i mv_idot.comp -DFMT_Q4_1=1
+mm_q4_1_s mm_scalar.comp -DFMT_Q4_1=1
+mm_q4_1_i mm_idot.comp -DFMT_Q4_1=1
+mm_q4_1_c mm_coopmat.comp -DFMT_Q4_1=1 #optional
+
+mv_q5_0_s mv_scalar.comp -DFMT_Q5_0=1
+mv_q5_0_i mv_idot.comp -DFMT_Q5_0=1
+mm_q5_0_s mm_scalar.comp -DFMT_Q5_0=1
+mm_q5_0_i mm_idot.comp -DFMT_Q5_0=1
+mm_q5_0_c mm_coopmat.comp -DFMT_Q5_0=1 #optional
+
+mv_q5_1_s mv_scalar.comp -DFMT_Q5_1=1
+mv_q5_1_i mv_idot.comp -DFMT_Q5_1=1
+mm_q5_1_s mm_scalar.comp -DFMT_Q5_1=1
+mm_q5_1_i mm_idot.comp -DFMT_Q5_1=1
+mm_q5_1_c mm_coopmat.comp -DFMT_Q5_1=1 #optional
+
+mv_q8_0_s mv_scalar.comp -DFMT_Q8_0=1
+mv_q8_0_i mv_idot.comp -DFMT_Q8_0=1
+mm_q8_0_s mm_scalar.comp -DFMT_Q8_0=1
+mm_q8_0_i mm_idot.comp -DFMT_Q8_0=1
+mm_q8_0_c mm_coopmat.comp -DFMT_Q8_0=1 #optional
+
+mv_q2_k_s mv_scalar.comp -DFMT_Q2_K=1
+mv_q2_k_i mv_idot.comp -DFMT_Q2_K=1
+mm_q2_k_s mm_scalar.comp -DFMT_Q2_K=1
+mm_q2_k_i mm_idot.comp -DFMT_Q2_K=1
+mm_q2_k_c mm_coopmat.comp -DFMT_Q2_K=1 #optional
+
+mv_q3_k_s mv_scalar.comp -DFMT_Q3_K=1
+mv_q3_k_i mv_idot.comp -DFMT_Q3_K=1
+mm_q3_k_s mm_scalar.comp -DFMT_Q3_K=1
+mm_q3_k_i mm_idot.comp -DFMT_Q3_K=1
+mm_q3_k_c mm_coopmat.comp -DFMT_Q3_K=1 #optional
+
+mv_q4_k_s mv_scalar.comp -DFMT_Q4_K=1
+mv_q4_k_i mv_idot.comp -DFMT_Q4_K=1
+mm_q4_k_s mm_scalar.comp -DFMT_Q4_K=1
+mm_q4_k_i mm_idot.comp -DFMT_Q4_K=1
+mm_q4_k_c mm_coopmat.comp -DFMT_Q4_K=1 #optional
+
+mv_q5_k_s mv_scalar.comp -DFMT_Q5_K=1
+mv_q5_k_i mv_idot.comp -DFMT_Q5_K=1
+mm_q5_k_s mm_scalar.comp -DFMT_Q5_K=1
+mm_q5_k_i mm_idot.comp -DFMT_Q5_K=1
+mm_q5_k_c mm_coopmat.comp -DFMT_Q5_K=1 #optional
+
+mv_q6_k_s mv_scalar.comp -DFMT_Q6_K=1
+mv_q6_k_i mv_idot.comp -DFMT_Q6_K=1
+mm_q6_k_s mm_scalar.comp -DFMT_Q6_K=1
+mm_q6_k_i mm_idot.comp -DFMT_Q6_K=1
+mm_q6_k_c mm_coopmat.comp -DFMT_Q6_K=1 #optional
+
+mv_iq4_nl_s mv_scalar.comp -DFMT_IQ4_NL=1
+mv_iq4_nl_i mv_idot.comp -DFMT_IQ4_NL=1
+mm_iq4_nl_s mm_scalar.comp -DFMT_IQ4_NL=1
+mm_iq4_nl_i mm_idot.comp -DFMT_IQ4_NL=1
+mm_iq4_nl_c mm_coopmat.comp -DFMT_IQ4_NL=1 #optional
+
+mv_mxfp4_s mv_scalar.comp -DFMT_MXFP4=1
+mv_mxfp4_i mv_idot.comp -DFMT_MXFP4=1
+mm_mxfp4_s mm_scalar.comp -DFMT_MXFP4=1
+mm_mxfp4_i mm_idot.comp -DFMT_MXFP4=1
+mm_mxfp4_c mm_coopmat.comp -DFMT_MXFP4=1 #optional
+
+mv_nvfp4_s mv_scalar.comp -DFMT_NVFP4=1
+mv_nvfp4_i mv_idot.comp -DFMT_NVFP4=1
+mm_nvfp4_s mm_scalar.comp -DFMT_NVFP4=1
+mm_nvfp4_i mm_idot.comp -DFMT_NVFP4=1
+mm_nvfp4_c mm_coopmat.comp -DFMT_NVFP4=1 #optional
+
+mv_q4z32_s mv_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32
+mv_q4z32_i mv_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32
+mm_q4z32_s mm_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32
+mm_q4z32_i mm_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32
+mm_q4z32_c mm_coopmat.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32 #optional
+
+mv_q4z64_s mv_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64
+mv_q4z64_i mv_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64
+mm_q4z64_s mm_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64
+mm_q4z64_i mm_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64
+mm_q4z64_c mm_coopmat.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64 #optional
+
+mv_q4z128_s mv_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
+mv_q4z128_i mv_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
+mm_q4z128_s mm_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
+mm_q4z128_i mm_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
+mm_q4z128_c mm_coopmat.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128 #optional
+

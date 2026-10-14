@@ -1,0 +1,98 @@
+// <metal_stdlib> for the CPU emulation of the p06a kernels: the syntax-check shim of mslcheck.sh (types, vectors, math) with the
+// stand-ins of simd_sum, threadgroup_barrier and simdgroup_matrix replaced by working versions (see emu_runtime.h for the threads).
+// emu_runtime.h must have been included before (it needs <thread>, which the shim's macros would break).
+#pragma once
+#define simd_sum fllm_shim_stub_simd_sum
+#define threadgroup_barrier fllm_shim_stub_threadgroup_barrier
+#define simdgroup_matrix fllm_shim_stub_simdgroup_matrix
+#define simdgroup_load fllm_shim_stub_simdgroup_load
+#define simdgroup_store fllm_shim_stub_simdgroup_store
+#define simdgroup_multiply fllm_shim_stub_simdgroup_multiply
+#define simdgroup_multiply_accumulate fllm_shim_stub_simdgroup_multiply_accumulate
+#define make_filled_simdgroup_matrix fllm_shim_stub_make_filled
+#define simdgroup_half8x8 fllm_shim_stub_half8x8
+#define simdgroup_float8x8 fllm_shim_stub_float8x8
+#define simdgroup_bfloat8x8 fllm_shim_stub_bfloat8x8
+#define simdgroup_int8x8 fllm_shim_stub_int8x8
+#define simdgroup_uint8x8 fllm_shim_stub_uint8x8
+#include "msl_shim.h"
+#undef simd_sum
+#undef threadgroup_barrier
+#undef simdgroup_matrix
+#undef simdgroup_load
+#undef simdgroup_store
+#undef simdgroup_multiply
+#undef simdgroup_multiply_accumulate
+#undef make_filled_simdgroup_matrix
+#undef simdgroup_half8x8
+#undef simdgroup_float8x8
+#undef simdgroup_bfloat8x8
+#undef simdgroup_int8x8
+#undef simdgroup_uint8x8
+
+namespace metal {
+
+// All lanes of a simdgroup call this together (lock-step by barrier); the sum is formed in lane order.
+inline float simd_sum(float x) {
+    emu::Ctx &c = emu::ctx;
+    emu::Group &g = *c.group;
+    g.slots[c.tid] = x;
+    g.sg[c.sg]->arrive_and_wait();
+    float s = 0.0f;
+    for (unsigned l = 0; l < g.simd_width; ++l) s += g.slots[c.sg * g.simd_width + l];
+    g.sg[c.sg]->arrive_and_wait();
+    return s;
+}
+
+inline void threadgroup_barrier(mem_flags) { emu::ctx.group->tg->arrive_and_wait(); }
+
+// Every lane keeps a full copy of the 8x8 matrix: the collective operations (load, multiply, store) are executed identically by all
+// lanes, so no data has to cross lanes. The store is done by lane 0 only.
+template <class T, int Cols, int Rows>
+struct simdgroup_matrix {
+    T m[Rows][Cols];
+};
+
+template <class T, int C, int R>
+inline simdgroup_matrix<T, C, R> make_filled_simdgroup_matrix(T v) {
+    simdgroup_matrix<T, C, R> r;
+    for (int i = 0; i < R; ++i)
+        for (int j = 0; j < C; ++j) r.m[i][j] = v;
+    return r;
+}
+
+// d(i, j) = src[(oy + i) * epr + ox + j]; transposed: d(i, j) = src[(oy + j) * epr + ox + i]
+template <class T, int C, int R, class U>
+inline void simdgroup_load(simdgroup_matrix<T, C, R> &d, const U *src, ulong epr = C, ulong2 origin = ulong2{0, 0}, bool transpose = false) {
+    const U *base = src + origin[1] * epr + origin[0];
+    for (int i = 0; i < R; ++i)
+        for (int j = 0; j < C; ++j) d.m[i][j] = static_cast<T>(transpose ? base[j * epr + i] : base[i * epr + j]);
+}
+
+template <class T, int C, int R, class U>
+inline void simdgroup_store(const simdgroup_matrix<T, C, R> &d, U *dst, ulong epr = C, ulong2 origin = ulong2{0, 0}, bool transpose = false) {
+    if (emu::ctx.lane != 0) return;
+    U *base = dst + origin[1] * epr + origin[0];
+    for (int i = 0; i < R; ++i)
+        for (int j = 0; j < C; ++j) {
+            if (transpose) base[j * epr + i] = static_cast<U>(d.m[i][j]);
+            else base[i * epr + j] = static_cast<U>(d.m[i][j]);
+        }
+}
+
+// d = a * b + c (8x8x8); half products are exact in float, accumulation in float
+template <class Td, class Ta, class Tb, class Tc, int C, int R>
+inline void simdgroup_multiply_accumulate(simdgroup_matrix<Td, C, R> &d, const simdgroup_matrix<Ta, C, R> &a,
+                                          const simdgroup_matrix<Tb, C, R> &b, const simdgroup_matrix<Tc, C, R> &c) {
+    Td r[R][C];
+    for (int i = 0; i < R; ++i)
+        for (int j = 0; j < C; ++j) {
+            float acc = static_cast<float>(c.m[i][j]);
+            for (int k = 0; k < C; ++k) acc += static_cast<float>(a.m[i][k]) * static_cast<float>(b.m[k][j]);
+            r[i][j] = static_cast<Td>(acc);
+        }
+    for (int i = 0; i < R; ++i)
+        for (int j = 0; j < C; ++j) d.m[i][j] = r[i][j];
+}
+
+}  // namespace metal

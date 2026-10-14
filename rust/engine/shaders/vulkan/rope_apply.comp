@@ -1,0 +1,53 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: rope_apply | bindings: q,k,positions,cos,sin | push: rows,heads,kv_heads,dim,half_dim,neox | grid: [min(ceil(rows*(heads+kv_heads)*half_dim/256), 65535), 1, 1]
+// Rotary embedding in place (Stream::rope). Row r has position positions[r]; cos/sin are `positions x half_dim` tables (half_dim = rope_dim / 2).
+// One invocation rotates one pair of one head: (d, d + half_dim) for NeoX, (2d, 2d + 1) otherwise; query heads first, then key heads. The
+// dimensions of a head from rope_dim on (partial rotary) are not touched. q is `rows x heads x dim`, k is `rows x kv_heads x dim`.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer QBuf { float q[]; };
+layout(std430, binding = 1) buffer KBuf { float k[]; };
+layout(std430, binding = 2) readonly buffer PosBuf { uint pos[]; };
+layout(std430, binding = 3) readonly buffer CosBuf { float cs[]; };
+layout(std430, binding = 4) readonly buffer SinBuf { float sn[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint heads;
+    uint kv_heads;
+    uint dim;
+    uint half_dim;
+    uint neox;
+} p;
+
+void main() {
+    const uint per_row = (p.heads + p.kv_heads) * p.half_dim;
+    const uint total = p.rows * per_row;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint r = i / per_row;
+        const uint rem = i - r * per_row;
+        const uint h = rem / p.half_dim;
+        const uint d = rem - h * p.half_dim;
+        const uint at = pos[r] * p.half_dim + d;
+        const float c = cs[at];
+        const float s = sn[at];
+        const uint ia = p.neox != 0u ? d : 2u * d;
+        const uint ib = p.neox != 0u ? d + p.half_dim : 2u * d + 1u;
+        if (h < p.heads) {
+            const uint base = (r * p.heads + h) * p.dim;
+            const float a = q[base + ia];
+            const float b = q[base + ib];
+            q[base + ia] = a * c - b * s;
+            q[base + ib] = b * c + a * s;
+        } else {
+            const uint base = (r * p.kv_heads + (h - p.heads)) * p.dim;
+            const float a = k[base + ia];
+            const float b = k[base + ib];
+            k[base + ia] = a * c - b * s;
+            k[base + ib] = b * c + a * s;
+        }
+    }
+}

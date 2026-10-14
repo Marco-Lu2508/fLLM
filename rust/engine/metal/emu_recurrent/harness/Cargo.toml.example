@@ -1,0 +1,15 @@
+[package]
+name = "p06c-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stand-alone test crate: compiles the two plan files of package p06c (included by #[path] from the worktree) against the real
+# `fllm-engine` crate (BackendError, DeltaShape, QuantType) with the local stand-in of ops.rs, because backend::metal itself is only
+# compiled for Apple targets.
+[dependencies]
+fllm-engine = { path = "../wt-p06c-metal-recurrent/rust/engine" }
+fllm-gguf-probe = { path = "../wt-p06c-metal-recurrent/rust/gguf-probe" }
+half = "2"
+
+[workspace]

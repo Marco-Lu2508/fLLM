@@ -1,0 +1,82 @@
+# fLLM image with the CUDA backend (NVIDIA GPUs from Pascal to Blackwell), CPU and the wgpu paths included.
+#
+#   docker build -f docker/Dockerfile.cuda -t fllm:cuda .
+#   docker run -it --rm --gpus all -v fllm:/home/fllm/.cache fllm:cuda run unsloth/Qwen3.5-9B-GGUF:Q4_K_M
+#   docker run -d --gpus all -v fllm:/home/fllm/.cache -p 8000:8000 fllm:cuda \
+#       serve --model unsloth/Qwen3.5-9B-GGUF:Q4_K_M --host 0.0.0.0 --port 8000
+#
+# The binary links the CUDA runtime statically; libcuda.so.1 is loaded at run time from the NVIDIA driver, which the
+# NVIDIA Container Toolkit mounts into the container (Docker Desktop + WSL2 does the same). The runtime stage therefore
+# holds no CUDA libraries: Ubuntu, curl, CA certificates and one binary. The host needs only the NVIDIA driver
+# (see docs/docker.md for the minimum version).
+#
+# Build arguments
+#   CUDA_VERSION  toolkit used for nvcc. 12.8 covers sm_61 (Pascal) to sm_120 (Blackwell); CUDA 13 dropped Pascal and Volta.
+#   CUDA_ARCHS    GPU architectures compiled in (default: all of them). The newest one is also embedded as PTX.
+#                 A single architecture (e.g. 120 or 86) shortens the build a lot.
+#   JOBS          cargo parallelism (nvcc runs up to 12 parallel jobs on its own)
+#   RUST_FEATURES cargo features; "rust-gpu,cuda" = wgpu (Vulkan/Metal/DX12) + CUDA
+
+ARG CUDA_VERSION=12.8.1
+ARG UBUNTU=ubuntu24.04
+
+# ---------------------------------------------------------------- builder
+FROM nvidia/cuda:${CUDA_VERSION}-devel-${UBUNTU} AS builder
+ARG JOBS=4
+ARG CUDA_ARCHS="61;70;75;80;86;89;90;120"
+ARG RUST_FEATURES="rust-gpu,cuda"
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates pkg-config cmake clang build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:/usr/local/cuda/bin:$PATH
+WORKDIR /build/fLLM
+
+# CUTLASS headers (BSD-3-Clause) for the NVFP4 prompt GEMM of Blackwell GPUs, FlashInfer headers (Apache-2.0) for the
+# prompt attention (see THIRD_PARTY.md). Without these directories the build succeeds silently with slower prefill.
+RUN git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass rust/third_party_placeholder 2>/dev/null; \
+    rm -rf rust/third_party_placeholder; \
+    git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass \
+ && git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer \
+ && test -f third_party/cutlass/include/cutlass/cutlass.h \
+ && test -f third_party/flashinfer/include/flashinfer/attention/prefill.cuh
+
+# Dependency layer: build all crates.io dependencies against stub sources. The CUDA feature is left out here (it does not
+# change the dependencies), so the expensive nvcc step is not run on the stubs and this layer is reused until a
+# Cargo.toml / Cargo.lock changes.
+COPY Cargo.toml Cargo.lock ./
+COPY rust/engine/Cargo.toml rust/engine/build.rs rust/engine/
+COPY rust/gguf-probe/Cargo.toml rust/gguf-probe/
+COPY rust/checkpoint/Cargo.toml rust/checkpoint/
+RUN for c in engine gguf-probe checkpoint; do mkdir -p rust/$c/src && : > rust/$c/src/lib.rs; done \
+ && mkdir -p rust/engine/src/bin rust/engine/cuda && echo 'fn main() {}' > rust/engine/src/bin/serve.rs \
+ && CARGO_BUILD_JOBS=${JOBS} cargo build --release --locked --features "rust-gpu" -p fllm-engine --bin fllm-rs \
+ && rm -rf rust/engine/src rust/gguf-probe/src rust/checkpoint/src
+
+# Real build
+COPY rust ./rust
+RUN touch rust/*/src/lib.rs rust/engine/src/bin/serve.rs rust/engine/build.rs \
+ && FLLM_CUDA_ARCHS="${CUDA_ARCHS}" CARGO_BUILD_JOBS=${JOBS} \
+    cargo build --release --locked --features "${RUST_FEATURES}" -p fllm-engine --bin fllm-rs \
+ && strip target/release/fllm-rs
+
+# ---------------------------------------------------------------- runtime
+FROM nvidia/cuda:${CUDA_VERSION}-base-${UBUNTU} AS runtime
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
+# Unprivileged user (uid 1000, so bind-mounted host directories of the first Linux user work). The cache directory exists
+# in the image and belongs to that user, so a new named volume mounted there inherits the ownership.
+RUN (userdel -r ubuntu 2>/dev/null || true) \
+ && useradd -m -u 1000 fllm \
+ && mkdir -p /home/fllm/.cache && chown fllm:fllm /home/fllm/.cache
+USER fllm
+WORKDIR /home/fllm
+# Models downloaded by `run` / `serve --model owner/repo` land in $HF_HOME/hub (= /home/fllm/.cache/huggingface/hub).
+ENV HF_HOME=/home/fllm/.cache/huggingface
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 CMD curl -fsS http://127.0.0.1:${FLLM_PORT:-8000}/health || exit 1
+ENTRYPOINT ["fllm-rs"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8000", "--device", "auto"]

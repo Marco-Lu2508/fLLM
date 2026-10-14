@@ -1,0 +1,118 @@
+#version 450
+// FLLM-SHADER: mm_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(u32[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/64) x ceil(batch/64) x 1
+// Quantized matrix-matrix product with int8 activations and 4 x int8 dot products (see mv_idot.comp for the extension handling):
+// 64 x 64 output tile per workgroup of 256 invocations, K step 32 (one activation block), weights and activations stay packed int8 in shared memory.
+#extension GL_GOOGLE_include_directive : enable
+#include "_q_ext.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "_q_common.glsl"
+#include "_q_formats.glsl"
+
+#define BM 64
+#define BN 64
+
+layout(std430, set = 0, binding = 1) readonly buffer XQBuf { uint xq[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+shared uint Ap[BM * 8];     // 8 words (32 int8) per weight row of the tile
+shared float Aws[BM * 4];   // scale of each of the 4 chunks
+shared float Awm[BM * 4];   // offset of each chunk
+shared uint Bp[BN * 8];
+shared float Bd[BN];        // activation block scale
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint tx = t & 15u;
+    const uint ty = t >> 4;
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+    const uint xwords = p.cols >> 2;
+    const uint xblocks = p.cols >> 5;
+
+    float acc[4][4];
+    [[unroll]] for (uint i = 0; i < 4; ++i) {
+        [[unroll]] for (uint j = 0; j < 4; ++j) acc[i][j] = 0.0;
+    }
+
+    for (uint k0 = 0; k0 < p.cols; k0 += 32u) {
+        {   // weight tile: one chunk per invocation
+            const uint ml = t >> 2;
+            const uint kc = t & 3u;
+            const uint row = m0 + ml;
+            uint p0 = 0u, p1 = 0u;
+            float ws = 0.0, wm = 0.0;
+            if (row < p.rows) {
+                const uint kk = k0 + kc * 8u;
+                wchunk(row * p.nb + kk / QK, (kk % QK) >> 3, p0, p1, ws, wm);
+            }
+            Ap[ml * 8u + kc * 2u] = p0;
+            Ap[ml * 8u + kc * 2u + 1u] = p1;
+            Aws[ml * 4u + kc] = ws;
+            Awm[ml * 4u + kc] = wm;
+        }
+        {   // activation tile: 512 words, two per invocation
+            [[unroll]] for (uint s = 0; s < 2; ++s) {
+                const uint i = t + s * 256u;
+                const uint nl = i >> 3;
+                const uint token = n0 + nl;
+                Bp[i] = token < p.batch ? xq[token * xwords + (k0 >> 2) + (i & 7u)] : 0u;
+            }
+            if (t < BN) {
+                const uint token = n0 + t;
+                Bd[t] = token < p.batch ? uintBitsToFloat(xq[p.xq_d + token * xblocks + (k0 >> 5)]) : 0.0;
+            }
+        }
+        barrier();
+        [[unroll]] for (uint kc = 0; kc < 4; ++kc) {
+            uint b0[4];
+            uint b1[4];
+            float bd[4];
+#ifdef HAS_WM
+            float bs[4];
+#endif
+            [[unroll]] for (uint j = 0; j < 4; ++j) {
+                const uint nl = ty * 4u + j;
+                b0[j] = Bp[nl * 8u + kc * 2u];
+                b1[j] = Bp[nl * 8u + kc * 2u + 1u];
+                bd[j] = Bd[nl];
+#ifdef HAS_WM
+                bs[j] = bd[j] * float(idot4(0x01010101u, b0[j]) + idot4(0x01010101u, b1[j]));
+#endif
+            }
+            [[unroll]] for (uint i = 0; i < 4; ++i) {
+                const uint ml = tx * 4u + i;
+                const uint a0 = Ap[ml * 8u + kc * 2u];
+                const uint a1 = Ap[ml * 8u + kc * 2u + 1u];
+                const float ws = Aws[ml * 4u + kc];
+#ifdef HAS_WM
+                const float wm = Awm[ml * 4u + kc];
+#endif
+                [[unroll]] for (uint j = 0; j < 4; ++j) {
+                    const int d = idot4(a0, b0[j]) + idot4(a1, b1[j]);
+                    acc[i][j] += ws * bd[j] * float(d);
+#ifdef HAS_WM
+                    acc[i][j] += wm * bs[j];
+#endif
+                }
+            }
+        }
+        barrier();
+    }
+
+    [[unroll]] for (uint j = 0; j < 4; ++j) {
+        const uint token = n0 + ty * 4u + j;
+        if (token < p.batch) {
+            [[unroll]] for (uint i = 0; i < 4; ++i) {
+                const uint row = m0 + tx * 4u + i;
+                if (row < p.rows) {
+                    float v = acc[i][j] * p.scale;
+                    if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+                    outv[token * p.out_stride + p.row_base + row] = v;
+                }
+            }
+        }
+    }
+}

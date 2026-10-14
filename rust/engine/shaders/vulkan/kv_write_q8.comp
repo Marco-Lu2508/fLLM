@@ -1,0 +1,75 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: kv_write_q8 | bindings: src,slots,pool | push: rows,kv,group,base,scale_base | grid: [min(ceil(rows*(kv/group)/128), 65535), 1, 1]
+// Stream::kv_cache_write for a q8_0 cache (kv_kind 2), one pool (keys or values) per dispatch. Layout of DeviceKvCache (all positions in 16-bit units
+// from the start of the layer, `base` = layer start in the bound pool): kv signed bytes per slot (byte slot * kv + c, little endian inside the
+// 16-bit words), then slots * (kv / group) binary16 scales (scale slot * (kv / group) + c / group) starting `scale_base` 16-bit words after the layer
+// start (scale_base = ceil(slots * kv / 2)). One invocation encodes one group of `group` values like the CPU encoder (`encode_q8_cache_group`):
+// d = amax / 127, scale = f16(d), q = round-half-away-from-zero(x / d) clamped to +-127, all zero for d = 0. The division of GLSL is not correctly
+// rounded (2.5 ULP), so a value exactly between two steps may land on the other neighbour. Words shared with other rows or groups are merged with
+// atomicAnd/atomicOr; a word owned entirely by one invocation is stored directly.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer SrcBuf { float src[]; };
+layout(std430, binding = 1) readonly buffer SlotBuf { uint slots[]; };
+layout(std430, binding = 2) buffer PoolBuf { uint pool[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint kv;
+    uint group;
+    uint base;
+    uint scale_base;
+} p;
+
+void store_bits(uint word, uint mask, uint value) {
+    if (mask == 0xFFFFFFFFu) {
+        pool[word] = value;
+    } else {
+        atomicAnd(pool[word], ~mask);
+        atomicOr(pool[word], value & mask);
+    }
+}
+
+void main() {
+    const uint groups = p.kv / p.group;
+    const uint total = p.rows * groups;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint r = i / groups;
+        const uint g = i - r * groups;
+        const uint slot = slots[r];
+        const uint first = r * p.kv + g * p.group;
+        float amax = 0.0;
+        for (uint j = 0u; j < p.group; j++) amax = max(amax, abs(src[first + j]));
+        const float d = amax / 127.0;
+        // scale: one 16-bit position
+        const uint sp = p.base + p.scale_base + slot * groups + g;
+        const uint sshift = (sp & 1u) * 16u;
+        store_bits(sp >> 1, 0xFFFFu << sshift, f16_bits(d) << sshift);
+        // quants: bytes byte0 .. byte0 + group - 1, merged into words
+        const uint byte0 = p.base * 2u + slot * p.kv + g * p.group;
+        uint word = byte0 >> 2;
+        uint mask = 0u;
+        uint value = 0u;
+        for (uint j = 0u; j < p.group; j++) {
+            const uint b = byte0 + j;
+            if ((b >> 2) != word) {
+                store_bits(word, mask, value);
+                word = b >> 2;
+                mask = 0u;
+                value = 0u;
+            }
+            float qv = 0.0;
+            if (d != 0.0) {
+                const float t = src[first + j] / d;
+                qv = clamp(sign(t) * floor(abs(t) + 0.5), -127.0, 127.0);
+            }
+            const uint shift = (b & 3u) * 8u;
+            mask |= 0xFFu << shift;
+            value |= (uint(int(qv)) & 0xFFu) << shift;
+        }
+        store_bits(word, mask, value);
+    }
+}

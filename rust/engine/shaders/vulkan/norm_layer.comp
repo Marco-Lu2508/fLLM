@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: norm_layer | bindings: x,weight,bias,out | push: cols,rows,x_stride,x_off,o_stride,o_off,eps,flags | grid: [rows split over x/y (x <= 65535), 1, 1]
+// LayerNorm (Stream::layer_norm): out = (x - mean) * (1 / sqrt(var + eps)) * weight + bias with the biased variance (CPU backend); one workgroup per row.
+// flags bit 0: bias present (otherwise bias is not read). `out` may be the same buffer range as `x`.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer WBuf { float weight[]; };
+layout(std430, binding = 2) readonly buffer BBuf { float bias[]; };
+layout(std430, binding = 3) buffer OBuf { float o[]; };
+layout(push_constant) uniform P {
+    uint cols;
+    uint rows;
+    uint x_stride;
+    uint x_off;
+    uint o_stride;
+    uint o_off;
+    float eps;
+    uint flags;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint row = group_index();
+    if (row >= p.rows) return;
+    const uint lane = gl_LocalInvocationID.x;
+    const uint xb = p.x_off + row * p.x_stride;
+    const uint ob = p.o_off + row * p.o_stride;
+    float s = 0.0;
+    for (uint c = lane; c < p.cols; c += WG) s += x[xb + c];
+    const float mean = wg_sum(s) / float(p.cols);
+    float q = 0.0;
+    for (uint c = lane; c < p.cols; c += WG) {
+        const float d = x[xb + c] - mean;
+        q += d * d;
+    }
+    const float inv = 1.0 / sqrt(wg_sum(q) / float(p.cols) + p.eps);
+    const bool has_b = (p.flags & 1u) != 0u;
+    for (uint c = lane; c < p.cols; c += WG) {
+        const float bv = has_b ? bias[c] : 0.0;
+        o[ob + c] = (x[xb + c] - mean) * inv * weight[c] + bv;
+    }
+}

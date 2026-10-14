@@ -1,0 +1,87 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: mamba_scan1 | bindings: mixed,dt,split,projected,decay,skip,state,out | push: inner,ns,rank,split_stride,proj_stride,proj_gate_off,row0,n,reset,state_off | grid: [ceil(inner/64), 1, 1] per run
+// Mamba-1 selective scan (reference: `mamba1_forward` in rust_decoder.rs) of one run (n consecutive tokens of one sequence), per channel ch < inner:
+//   step = softplus(dt[t][ch]);  s[k] = s[k] * exp(step * decay[ch * ns + k]) + step * B[k] * xc;  y = (sum_k s[k] * C[k] + skip[ch] * xc) * silu(gate[ch])
+// with xc = mixed[t][ch] (output of mamba_conv, `inner` channels), dt = the output of dt_proj (`inner` per token), B = split[t][rank + k], C = split[t][rank + ns + k]
+// (split = output of x_proj, split_stride = rank + 2 ns floats per token, B and C normalised beforehand when the model asks for it) and
+// gate[ch] = projected[t * proj_stride + proj_gate_off + ch]. The state s of channel ch is state[state_off + ch * ns + k]. NS > 0: the state row stays in
+// registers for the whole run; NS = 0 (generic): read and written in memory per token. ns <= 256.
+#define WG 64
+#ifndef NS
+#define NS 0
+#endif
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer DtBuf { float dt[]; };
+layout(std430, binding = 2) readonly buffer SplitBuf { float split_bc[]; };
+layout(std430, binding = 3) readonly buffer ProjBuf { float projected[]; };
+layout(std430, binding = 4) readonly buffer DecayBuf { float decay[]; };
+layout(std430, binding = 5) readonly buffer SkipBuf { float skip_d[]; };
+layout(std430, binding = 6) buffer StateBuf { float state[]; };
+layout(std430, binding = 7) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint inner;
+    uint ns;
+    uint rank;
+    uint split_stride;
+    uint proj_stride;
+    uint proj_gate_off;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+} p;
+
+shared float sb[256];
+shared float sc[256];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint ch = gl_WorkGroupID.x * WG + lane;
+    const bool ch_ok = ch < p.inner;
+    const uint cbase = p.state_off + ch * p.ns;
+#if NS > 0
+    float cell[NS];
+    [[unroll]] for (uint k = 0u; k < NS; k++) cell[k] = (ch_ok && p.reset == 0u) ? state[cbase + k] : 0.0;
+#else
+    if (ch_ok && p.reset != 0u) {
+        for (uint k = 0u; k < p.ns; k++) state[cbase + k] = 0.0;
+    }
+#endif
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        for (uint k = lane; k < p.ns; k += WG) {
+            sb[k] = split_bc[row * p.split_stride + p.rank + k];
+            sc[k] = split_bc[row * p.split_stride + p.rank + p.ns + k];
+        }
+        barrier();
+        if (ch_ok) {
+            const float step_v = softplus20(dt[row * p.inner + ch]);
+            const float xc = mixed[row * p.inner + ch];
+            float acc = 0.0;
+#if NS > 0
+            [[unroll]] for (uint k = 0u; k < NS; k++) {
+                cell[k] = cell[k] * exp(step_v * decay[ch * p.ns + k]) + step_v * sb[k] * xc;
+                acc += cell[k] * sc[k];
+            }
+#else
+            for (uint k = 0u; k < p.ns; k++) {
+                const float cv = state[cbase + k] * exp(step_v * decay[ch * p.ns + k]) + step_v * sb[k] * xc;
+                state[cbase + k] = cv;
+                acc += cv * sc[k];
+            }
+#endif
+            const float z = projected[row * p.proj_stride + p.proj_gate_off + ch];
+            outv[row * p.inner + ch] = (acc + skip_d[ch] * xc) * silu(z);
+        }
+        barrier();
+    }
+#if NS > 0
+    if (ch_ok) {
+        [[unroll]] for (uint k = 0u; k < NS; k++) state[cbase + k] = cell[k];
+    }
+#endif
+}

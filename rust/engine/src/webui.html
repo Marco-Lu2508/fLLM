@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fLLM Chat</title>
+<style>
+:root{color-scheme:light dark;--paper:#f7f9fc;--surface:#fff;--ink:#172c48;--muted:#52677f;--line:#ccd6e3;--accent:#225bbb;--user:#eaf0fa;--error:#a72f40;font-family:"Segoe UI",system-ui,sans-serif;font-size:16px}
+@media(prefers-color-scheme:dark){:root{--paper:#152236;--surface:#1b2c43;--ink:#e0e9f5;--muted:#acbfd7;--line:#41546c;--accent:#a7c7ff;--user:#263d5c;--error:#ffabb9}}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink)}button,input,textarea{font:inherit}button{cursor:pointer;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:.6rem .9rem}button:disabled{cursor:default;opacity:.55}button.primary{background:var(--accent);color:var(--paper);border-color:var(--accent)}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}input,textarea{width:100%;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--ink);padding:.6rem}textarea{resize:vertical;line-height:1.5}label{display:block;margin-bottom:.4rem;font-weight:600}header{padding:1rem 1.5rem;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:1.5rem;background:var(--surface)}h1{font-size:1.6rem;font-weight:650;letter-spacing:-.04em;margin:0}#model{color:var(--muted);overflow-wrap:anywhere}header button{margin-left:auto}.workspace{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:calc(100dvh - 73px)}aside{padding:1.5rem;border-right:1px solid var(--line)}.field{margin-bottom:1.3rem}.hint{font-size:.82rem;color:var(--muted);line-height:1.5}.key-row{display:flex;gap:.5rem;margin-top:.5rem}main{display:flex;flex-direction:column;min-width:0;height:calc(100dvh - 73px)}#conversation{flex:1;overflow:auto;padding:1.5rem max(1.5rem,calc((100% - 850px)/2))}#empty{padding:3rem 0;max-width:48ch;color:var(--muted);line-height:1.6}article{margin-bottom:1.7rem;overflow-wrap:anywhere}article.user{background:var(--user);padding:1rem 1.2rem;border-radius:6px}article h2{font-size:.86rem;color:var(--muted);margin:0 0 .5rem;font-weight:600}.message{line-height:1.65;max-width:78ch}.message p{margin:.5rem 0 1rem;white-space:pre-wrap}.message li{white-space:pre-wrap}.message pre{white-space:pre;overflow:auto;background:var(--surface);border:1px solid var(--line);padding:1rem;border-radius:4px;line-height:1.5}.message code{font-family:Consolas,"Liberation Mono",monospace;font-size:.9em}.message :not(pre)>code{background:var(--user);padding:.12rem .3rem;border-radius:3px}.message ul,.message ol{padding-left:1.5rem}details{border-left:2px solid var(--line);padding-left:1rem;color:var(--muted);margin:.5rem 0 1rem}summary{cursor:pointer;padding:.3rem 0}footer{padding:1rem max(1.5rem,calc((100% - 850px)/2));border-top:1px solid var(--line);background:var(--paper)}#composer{min-height:80px;max-height:240px}.actions{display:flex;gap:.6rem;align-items:center;margin-top:.6rem}#status{flex:1;font-size:.85rem;color:var(--muted)}#status.error{color:var(--error)}.stats{font-size:.8rem;color:var(--muted);padding-top:.5rem}#announcement{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}[hidden]{display:none!important}
+@media(max-width:760px){header{padding:.9rem 1rem;gap:.75rem;flex-wrap:wrap}.workspace{display:flex;flex-direction:column;min-height:0}aside{border-right:0;border-bottom:1px solid var(--line);padding:1rem}aside .parameters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem}aside .field{margin-bottom:.75rem}main{height:70dvh;min-height:420px}#conversation,footer{padding:1rem}.actions{flex-wrap:wrap}#status{min-width:100%}h1{font-size:1.4rem}}
+</style>
+</head>
+<body>
+<header><h1>fLLM</h1><span id="model">Connecting to model…</span><button id="clear" type="button">New conversation</button></header>
+<div class="workspace">
+<aside aria-label="Chat settings">
+  <div class="field" id="key-field" hidden><label for="api-key">API key</label><input id="api-key" type="password" autocomplete="off" spellcheck="false"><div class="key-row"><button id="connect" type="button">Connect</button></div><p class="hint">Used for this page session. The key is never saved in browser storage.</p></div>
+  <div class="field"><label for="system">System prompt</label><textarea id="system" rows="5" placeholder="Set instructions for the assistant"></textarea></div>
+  <div class="parameters">
+    <div class="field"><label for="temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.05" value="0.7"></div>
+    <div class="field"><label for="top-p">Top p</label><input id="top-p" type="number" min="0" max="1" step="0.05" value="0.9"></div>
+    <div class="field"><label for="max-tokens">Max tokens</label><input id="max-tokens" type="number" min="1" step="1" value="512"></div>
+  </div>
+  <p class="hint">Conversation and settings are saved in this browser. New conversation clears the messages.</p>
+</aside>
+<main>
+  <section id="conversation" aria-label="Conversation"><div id="empty">Start a conversation with your loaded model. Adjust the system prompt and generation settings on the left.</div></section>
+  <footer><form id="chat-form"><label for="composer">Message</label><textarea id="composer" rows="3" required placeholder="Write a message…"></textarea><div class="actions"><span id="status" role="status" aria-live="polite">Ready</span><button id="stop" type="button" hidden>Stop</button><button class="primary" id="send" type="submit" disabled>Send</button></div></form></footer>
+</main>
+</div>
+<div id="announcement" role="status" aria-live="polite"></div>
+<script>
+'use strict';
+const needsKey = __API_KEY_REQUIRED__;
+const $ = id => document.getElementById(id);
+const storageKey = 'fllm-chat-v1';
+let messages = [], model = '', controller = null;
+function status(text, failed=false) { $('status').textContent=text; $('status').classList.toggle('error',failed); }
+function headers() { const h={'Content-Type':'application/json'}; const key=$('api-key').value.trim(); if(key) h.Authorization='Bearer '+key; return h; }
+function save() {
+  const settings={system:$('system').value,temperature:$('temperature').value,top_p:$('top-p').value,max_tokens:$('max-tokens').value};
+  try { localStorage.setItem(storageKey,JSON.stringify({messages,settings,model})); } catch { status('Browser storage is full or unavailable; this conversation remains on this page.'); }
+}
+function inline(text) {
+  const parts=text.split(/(`[^`\n]+`)/g), fragment=document.createDocumentFragment();
+  for(const part of parts) { if(part.startsWith('`')&&part.endsWith('`')) { const code=document.createElement('code'); code.textContent=part.slice(1,-1); fragment.append(code); } else fragment.append(document.createTextNode(part)); }
+  return fragment;
+}
+// Build a small Markdown subset with DOM nodes. Model output is always plain text.
+function markdown(element,text) {
+  element.replaceChildren(); const lines=text.replace(/\r\n/g,'\n').split('\n');
+  let paragraph=[], code=null, list=null, ordered=false;
+  function flush() { if(paragraph.length) { const p=document.createElement('p'); p.append(inline(paragraph.join('\n'))); element.append(p); paragraph=[]; } }
+  for(const line of lines) {
+    if(/^\s*```/.test(line)) { flush(); list=null; if(code!==null) { const pre=document.createElement('pre'), c=document.createElement('code'); c.textContent=code.join('\n'); pre.append(c); element.append(pre); code=null; } else code=[]; continue; }
+    if(code!==null) { code.push(line); continue; }
+    const item=line.match(/^\s*(?:([-*+])\s+|(\d+)\.\s+)(.*)$/);
+    if(item) { flush(); const isOrdered=!!item[2]; if(!list||ordered!==isOrdered) { list=document.createElement(isOrdered?'ol':'ul'); ordered=isOrdered; element.append(list); } const li=document.createElement('li'); li.append(inline(item[3])); list.append(li); continue; }
+    list=null; if(!line.trim()) flush(); else paragraph.push(line);
+  }
+  flush(); if(code!==null) { const pre=document.createElement('pre'), c=document.createElement('code'); c.textContent=code.join('\n'); pre.append(c); element.append(pre); }
+}
+function row(message) {
+  const article=document.createElement('article'); article.className=message.role;
+  const heading=document.createElement('h2'); heading.textContent=message.role==='user'?'You':'Assistant'; article.append(heading);
+  const reasoning=document.createElement('details'), summary=document.createElement('summary'), thought=document.createElement('div');
+  summary.textContent='Reasoning'; thought.className='message'; reasoning.append(summary,thought); article.append(reasoning);
+  const content=document.createElement('div'); content.className='message'; article.append(content);
+  const stats=document.createElement('div'); stats.className='stats'; article.append(stats);
+  $('conversation').append(article);
+  const update=()=>{ const scroll=$('conversation'), atBottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<100; markdown(content,message.content); reasoning.hidden=!message.reasoning; if(message.reasoning) markdown(thought,message.reasoning); stats.textContent=message.stats||''; if(atBottom) scroll.scrollTop=scroll.scrollHeight; };
+  update(); return update;
+}
+function redraw() { $('conversation').replaceChildren(); if(!messages.length) { const empty=document.createElement('div'); empty.id='empty'; empty.textContent='Start a conversation with your loaded model.'; $('conversation').append(empty); } else messages.forEach(row); $('conversation').scrollTop=$('conversation').scrollHeight; }
+try {
+  const saved=JSON.parse(localStorage.getItem(storageKey)||'null');
+  if(saved&&Array.isArray(saved.messages)) messages=saved.messages.filter(m=>m&&['user','assistant'].includes(m.role)&&typeof m.content==='string').slice(-200).map(m=>({role:m.role,content:m.content,reasoning:typeof m.reasoning==='string'?m.reasoning:'',stats:typeof m.stats==='string'?m.stats:''}));
+  if(saved&&saved.settings) for(const [key,id] of Object.entries({system:'system',temperature:'temperature',top_p:'top-p',max_tokens:'max-tokens'})) if(typeof saved.settings[key]==='string') $(id).value=saved.settings[key];
+} catch { status('Saved conversation could not be read. Start a new conversation.'); }
+redraw(); $('key-field').hidden=!needsKey;
+async function connect() {
+  try {
+    const response=await fetch('/v1/models',{headers:headers()}); const data=await response.json();
+    if(!response.ok) throw new Error(data.error?.message||'Cannot load models (HTTP '+response.status+').');
+    const loaded=data.data?.[0]; if(!loaded||typeof loaded.id!=='string') throw new Error('The server returned no model.');
+    model=loaded.id; $('model').textContent=model;
+    if(loaded.architecture==='bert') { $('send').disabled=true; status('This server provides embeddings. Chat requires a generation model.'); return; }
+    $('send').disabled=!!controller; status('Ready');
+  } catch(error) { model=''; $('send').disabled=true; $('model').textContent='Model unavailable'; status(error.message,true); $('key-field').hidden=false; }
+}
+$('connect').addEventListener('click',connect);
+$('clear').addEventListener('click',()=>{ if(controller) return; messages=[]; redraw(); save(); status('New conversation'); $('composer').focus(); });
+for(const id of ['system','temperature','top-p','max-tokens']) $(id).addEventListener('change',save);
+$('stop').addEventListener('click',()=>controller?.abort());
+$('composer').addEventListener('keydown',event=>{ if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)) { event.preventDefault(); if(!$('send').disabled) $('chat-form').requestSubmit(); } });
+$('chat-form').addEventListener('submit',async event=>{
+  event.preventDefault(); if(controller||!model) return;
+  const content=$('composer').value.trim(); if(!content) return;
+  const temperature=Number($('temperature').value), top_p=Number($('top-p').value), max_tokens=Number($('max-tokens').value);
+  if(!Number.isFinite(temperature)||temperature<0||temperature>2||!Number.isFinite(top_p)||top_p<0||top_p>1||!Number.isSafeInteger(max_tokens)||max_tokens<1) { status('Enter valid generation parameters.',true); return; }
+  messages.push({role:'user',content}); redraw(); $('composer').value='';
+  const history=messages.map(m=>({role:m.role,content:m.content})); if($('system').value.trim()) history.unshift({role:'system',content:$('system').value});
+  const reply={role:'assistant',content:'',reasoning:''}; messages.push(reply); const update=row(reply);
+  controller=new AbortController(); $('send').disabled=true; $('clear').disabled=true; $('stop').hidden=false; status('Generating…');
+  const start=performance.now(); let first=null, completed=false, usage=null, timings=null;
+  function consume(block) {
+    const data=block.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).replace(/^ /,'')).join('\n');
+    if(!data) return; if(data==='[DONE]') { completed=true; return; }
+    const obj=JSON.parse(data); if(obj.error) throw new Error(typeof obj.error==='string'?obj.error:obj.error.message||'Generation failed.');
+    for(const choice of obj.choices||[]) if(choice.index===0||choice.index===undefined) {
+      const delta=choice.delta||choice.message||{};
+      if(typeof delta.content==='string') reply.content+=delta.content;
+      if(typeof delta.reasoning_content==='string') reply.reasoning+=delta.reasoning_content;
+      if(first===null&&(delta.content||delta.reasoning_content)) first=performance.now();
+    }
+    if(obj.usage) usage=obj.usage; if(obj.timings) timings=obj.timings;
+    const tokens=usage?.completion_tokens??timings?.predicted_n;
+    const rate=timings?.predicted_per_second??(Number.isFinite(tokens)?Math.max(0,tokens-1)/Math.max(.001,(performance.now()-(first??start))/1000):null);
+    reply.stats=[Number.isFinite(tokens)?tokens+' tokens':'',Number.isFinite(rate)?rate.toFixed(1)+' tokens/s':''].filter(Boolean).join(' / '); update();
+  }
+  try {
+    const response=await fetch('/v1/chat/completions',{method:'POST',headers:headers(),signal:controller.signal,body:JSON.stringify({model,messages:history,temperature,top_p,max_tokens,stream:true,stream_options:{include_usage:true}})});
+    if(!response.ok) { const text=await response.text(); let description=text; try { description=JSON.parse(text).error?.message||text; } catch {} throw new Error('HTTP '+response.status+': '+description); }
+    if(!response.body||!response.headers.get('content-type')?.includes('text/event-stream')) throw new Error('The server did not return an event stream.');
+    const reader=response.body.getReader(), decoder=new TextDecoder(); let pending='';
+    try {
+      while(!completed) {
+        const {value,done}=await reader.read(); pending+=done?decoder.decode():decoder.decode(value,{stream:true});
+        // CRLF can be split across fetch chunks; normalize only the complete buffered text.
+        let match; while((match=/\r?\n\r?\n/.exec(pending))) { const block=pending.slice(0,match.index).replace(/\r\n/g,'\n'); pending=pending.slice(match.index+match[0].length); consume(block); if(completed) break; }
+        if(done) { if(pending.trim()) consume(pending.replace(/\r\n/g,'\n')); break; }
+      }
+    } finally { await reader.cancel().catch(()=>{}); reader.releaseLock(); }
+    if(!completed) throw new Error('The connection closed before generation completed.');
+    status('Complete'); $('announcement').textContent='Assistant response complete.';
+  } catch(error) {
+    const stopped=error.name==='AbortError'; reply.stats=(reply.stats?reply.stats+' / ':'')+(stopped?'Stopped':'Incomplete');
+    status(stopped?'Generation stopped.':error.message,!stopped); $('announcement').textContent=stopped?'Generation stopped.':'Generation failed.';
+  } finally {
+    if(!reply.content&&!reply.reasoning) { messages.pop(); redraw(); } else update();
+    save(); controller=null; $('send').disabled=!model; $('clear').disabled=false; $('stop').hidden=true; $('composer').focus();
+  }
+});
+if(needsKey) { status('Enter your API key, then connect.'); $('model').textContent='API key required'; } else connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: norm_rms | bindings: x,weight,out | push: cols,rows,x_stride,x_off,o_stride,o_off,eps,flags | grid: [rows split over x/y (x <= 65535), 1, 1]
+// RMSNorm (Stream::rms_norm): out[r][c] = x[r][c] * (1 / sqrt(mean(x[r]^2) + eps) * weight[c]); one workgroup per row.
+// x_stride/o_stride: floats between rows, x_off/o_off: first float of row 0 (so a slice of a wider row, e.g. Mamba B/C, can be normalised).
+// flags bit 0: weight present (otherwise weight is not read and 1 is used). `out` may be the same buffer range as `x`.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer WBuf { float weight[]; };
+layout(std430, binding = 2) buffer OBuf { float o[]; };
+layout(push_constant) uniform P {
+    uint cols;
+    uint rows;
+    uint x_stride;
+    uint x_off;
+    uint o_stride;
+    uint o_off;
+    float eps;
+    uint flags;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint row = group_index();
+    if (row >= p.rows) return;  // uniform: the whole workgroup leaves before the first barrier
+    const uint lane = gl_LocalInvocationID.x;
+    const uint xb = p.x_off + row * p.x_stride;
+    const uint ob = p.o_off + row * p.o_stride;
+    float ss = 0.0;
+    for (uint c = lane; c < p.cols; c += WG) {
+        const float v = x[xb + c];
+        ss += v * v;
+    }
+    ss = wg_sum(ss);
+    const float inv = 1.0 / sqrt(ss / float(p.cols) + p.eps);
+    const bool has_w = (p.flags & 1u) != 0u;
+    for (uint c = lane; c < p.cols; c += WG) {
+        const float wv = has_w ? weight[c] : 1.0;
+        o[ob + c] = x[xb + c] * (inv * wv);
+    }
+}

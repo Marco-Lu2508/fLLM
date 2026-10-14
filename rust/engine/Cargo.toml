@@ -1,0 +1,64 @@
+[package]
+name = "fllm-engine"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2021"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+fllm-checkpoint = { path = "../checkpoint" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+ahash = "0.8.12"
+fllm-gguf-probe = { path = "../gguf-probe" }
+tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
+axum = "0.8"
+async-stream = "0.3"
+futures-util = "0.3"
+bytes = "1"
+base64 = "0.22"
+half = "2"
+rayon = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+wgpu = { version = "=30.0.1", optional = true, default-features = false, features = ["std", "wgsl", "vulkan", "metal", "dx12"] }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true }
+ash = { version = "0.38", optional = true }
+libloading = { version = "0.8", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+minijinja = { version = "2", features = ["json", "preserve_order"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+llguidance = { version = "=1.8.0", default-features = false, features = ["lark", "referencing", "ahash"] }
+jsonschema = { version = "=0.29.1", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-metal = { version = "0.3", optional = true }
+
+[features]
+default = []
+rust-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+cuda = []
+# native backends (all optional; none is in the default set). Verification level of each is in docs/backends.md
+vulkan = ["dep:ash"]
+metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+# AMD: the CUDA sources built with hipcc (FLLM_HIP=1) behind the cuda backend; this feature adds the HIP-specific Rust glue
+hip = ["cuda"]
+sycl = []
+npu-openvino = ["dep:libloading"]
+npu-xdna = ["dep:libloading"]
+npu-qnn = ["dep:libloading"]
+npu-ane = []
+tpu-pjrt = ["dep:libloading"]
+arm-simd = []
+avx512 = []
+
+[lib]
+name = "fllm_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fllm-rs"
+path = "src/bin/serve.rs"

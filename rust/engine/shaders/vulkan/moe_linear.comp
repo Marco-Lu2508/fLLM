@@ -1,0 +1,109 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: moe_linear | bindings: table,bias_table,ids,x,out,weights,biases | push: rows,cols,slots,x_div,n_experts,flags,nb,off1,off2,off3 | grid: [rows, min(slots, 65535), ceil(slots / 65535)]
+// Expert-indexed matrix-vector product (Stream::moe_linear):  out[slot][r] = dot(W[ids[slot]][r], x[slot / x_div]) (+ bias[ids[slot]][r]),
+// slot < slots, r < rows, W[e] a rows x cols weight in the planar device layout of its format (see _ops_wq.glsl; one macro FMT_* per
+// variants_ops.list entry). cols is a multiple of QK. An expert id outside 0..n_experts gives zeros (the CPU skips such experts).
+// One workgroup per (row, slot); the lanes stride over the 8-weight chunks of the row and reduce in shared memory.
+// Two ways to find the weights of an expert (macro, one per variant):
+//   MOE_ARENA  all experts of the projection live in ONE storage buffer `weights`; table[e] = word offset of expert e in it (uint32); the
+//              biases (if any) live in ONE buffer `biases`, bias_table[e] = float offset of expert e's bias vector in it.
+//   MOE_BDA    needs bufferDeviceAddress (GL_EXT_buffer_reference); table[e] / bias_table[e] = the 64-bit device address of the expert's weight /
+//              bias buffer as a uvec2 (low word first), like `upload_pointer_table` of the CUDA backend. `weights` and `biases` are unused.
+// Bindings that a variant does not use stay declared so that all variants of the operation share one descriptor layout; bind any small buffer to them.
+// flags bit 0: bias_table present. nb = cols / QK (blocks per row), off1..off3 = word offsets of the planes 1..3 inside one expert (identical for all
+// experts, as they have the same shape and format). x is read as vec4 (its binding offset must be a multiple of 16 bytes; cols is a multiple of 8).
+#define WG 64
+#ifdef MOE_BDA
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#endif
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+#ifdef MOE_BDA
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer WordRef { uint d[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer FloatRef { float d[]; };
+layout(std430, binding = 0) readonly buffer TableBuf { uvec2 table[]; };
+layout(std430, binding = 1) readonly buffer BiasTableBuf { uvec2 bias_table[]; };
+#else
+layout(std430, binding = 0) readonly buffer TableBuf { uint table[]; };
+layout(std430, binding = 1) readonly buffer BiasTableBuf { uint bias_table[]; };
+#endif
+layout(std430, binding = 2) readonly buffer IdBuf { int ids[]; };
+layout(std430, binding = 3) readonly buffer XBuf { vec4 x4[]; };
+layout(std430, binding = 4) buffer OutBuf { float o[]; };
+layout(std430, binding = 5) readonly buffer WeightBuf { uint arena[]; };
+layout(std430, binding = 6) readonly buffer BiasBuf { float biases[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint cols;
+    uint slots;
+    uint x_div;
+    uint n_experts;
+    uint flags;
+    uint nb;
+    uint off1;
+    uint off2;
+    uint off3;
+} p;
+
+#ifdef MOE_BDA
+WordRef g_expert;  // weights of the expert of this workgroup
+#define WQ_W(i) g_expert.d[(i)]
+#else
+uint g_base;  // word offset of the expert of this workgroup inside `arena`
+#define WQ_W(i) arena[g_base + (i)]
+#endif
+#define WQ_OFF1 p.off1
+#define WQ_OFF2 p.off2
+#define WQ_OFF3 p.off3
+#include "_ops_wq.glsl"
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint slot = gl_WorkGroupID.y + gl_WorkGroupID.z * 65535u;
+    if (slot >= p.slots || row >= p.rows) return;
+    const uint lane = gl_LocalInvocationID.x;
+    const int expert = ids[slot];
+    const bool ok = expert >= 0 && uint(expert) < p.n_experts;
+    float acc = 0.0;
+    if (ok) {
+        const uint e = uint(expert);
+#ifdef MOE_BDA
+        g_expert = WordRef(table[e]);
+#else
+        g_base = table[e];
+#endif
+        const uint chunks = p.cols / 8u;
+        const uint per_block = QK / 8;
+        const uint xbase = (slot / p.x_div) * (p.cols / 4u);
+        for (uint ch = lane; ch < chunks; ch += WG) {
+            uint p0, p1;
+            float ws, wm;
+            wchunk(row * p.nb + ch / per_block, ch % per_block, p0, p1, ws, wm);
+            const vec4 xa = x4[xbase + 2u * ch];
+            const vec4 xb = x4[xbase + 2u * ch + 1u];
+            acc += ws * (dot(wq_s8x4(p0), xa) + dot(wq_s8x4(p1), xb));
+#ifdef HAS_WM
+            acc += wm * (xa.x + xa.y + xa.z + xa.w + xb.x + xb.y + xb.z + xb.w);
+#endif
+        }
+    }
+    acc = wg_sum(acc);
+    if (lane == 0u) {
+        float result = 0.0;
+        if (ok) {
+            result = acc;
+            if ((p.flags & 1u) != 0u) {
+#ifdef MOE_BDA
+                result += FloatRef(bias_table[uint(expert)]).d[row];
+#else
+                result += biases[bias_table[uint(expert)] + row];
+#endif
+            }
+        }
+        o[slot * p.rows + row] = result;
+    }
+}

@@ -1,0 +1,529 @@
+//! Dispatch planning of `Stream::quantized_linear` on the Vulkan backend: which shader, specialization constants, push constants, workgroup
+//! counts, bindings and which activation prepass a `rows x cols` weight needs for `batch` activation rows on a device with given
+//! capabilities. Pure CPU code (no Vulkan calls); package 4 turns a [`LinearPlan`] into pipeline creation and `vkCmdDispatch`.
+
+use super::layout::DeviceLayout;
+use crate::backend::{BackendError, QuantType};
+
+/// Size of the push-constant block of the quantized-linear shaders (`QPush` in `_q_common.glsl`).
+pub const PUSH_BYTES: usize = 48;
+/// Largest batch served by the matrix-vector shaders; bigger batches use the tiled matrix-matrix shaders.
+pub const MATVEC_MAX_BATCH: u32 = 8;
+/// `maxComputeWorkGroupCount` that every Vulkan device offers per dimension; larger grids are split over x and y.
+pub const MAX_GROUPS_PER_DIM: u64 = 65535;
+
+/// Shared memory (bytes) the cooperative-matrix shader needs: two f16 tiles of 64 x 40 and four 16 x 16 f32 staging tiles.
+const COOPMAT_SHARED: u32 = 2 * 64 * 40 * 2 + 4 * 256 * 4;
+/// Shared memory of the tiled f32 / int8 matrix-matrix shaders.
+const MM_SCALAR_SHARED: u32 = 2 * 16 * 16 * 16;
+const MM_IDOT_SHARED: u32 = 64 * 8 * 4 * 2 + 64 * 4 * 4 * 2 + 64 * 4;
+
+/// The device properties the planner looks at (a subset of what the Vulkan backend queries; package 4 fills it in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VkCapsLike {
+    /// `VK_KHR_cooperative_matrix` with the 16x16x16 shape (float16 A/B, float32 accumulator, subgroup scope), `vulkanMemoryModel` enabled.
+    pub coop_matrix: bool,
+    /// `shaderIntegerDotProduct` (VK_KHR_shader_integer_dot_product / Vulkan 1.3).
+    pub int_dot: bool,
+    /// Subgroup size the compute pipelines run with (fixed, e.g. through `VK_EXT_subgroup_size_control`); 32 if unknown.
+    pub subgroup_size: u32,
+    /// `shaderFloat16` (needed by the cooperative-matrix shaders).
+    pub fp16: bool,
+    /// `maxComputeSharedMemorySize` in bytes.
+    pub max_shared: u32,
+    /// PCI vendor id (0x10de NVIDIA, 0x1002 AMD, 0x8086 Intel, 0x106b Apple, 0x13b5 ARM, 0x5143 Qualcomm); 0 = unknown.
+    pub vendor: u32,
+}
+
+impl Default for VkCapsLike {
+    /// The weakest device: no optional features, 16 KiB of shared memory.
+    fn default() -> Self {
+        Self {
+            coop_matrix: false,
+            int_dot: false,
+            subgroup_size: 32,
+            fp16: false,
+            max_shared: 16384,
+            vendor: 0,
+        }
+    }
+}
+
+/// Arithmetic flavour of a quantized-linear shader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    /// f32 activations and arithmetic (suffix `_s`): runs everywhere and meets the exact selftest tolerance.
+    Scalar,
+    /// int8 activations and 4 x int8 dot products (suffix `_i`); activations are quantized by a prepass.
+    IntDot,
+    /// cooperative matrices with f16 tiles (suffix `_c`), matrix-matrix only.
+    CoopMat,
+}
+
+impl Variant {
+    pub fn suffix(self) -> char {
+        match self {
+            Variant::Scalar => 's',
+            Variant::IntDot => 'i',
+            Variant::CoopMat => 'c',
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanKind {
+    /// `mv_*`: `columns` (1..=8) activation rows, `columns` is specialization constant 2.
+    MatVec { columns: u32 },
+    /// `mm_*`: tiled, any batch.
+    MatMul,
+}
+
+/// A specialization constant of the pipeline (`layout(constant_id = id)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecConstant {
+    pub id: u32,
+    pub value: u32,
+}
+
+/// What a storage-buffer binding of the main shader holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingRole {
+    /// The weight buffer in device layout (`PackedWeight::bytes`).
+    Weights,
+    /// The f32 activations (`batch x cols`, offset a multiple of 16 bytes).
+    Activations,
+    /// Output of the activation prepass (used instead of `Activations` when the plan has a prepass).
+    PrepassOutput,
+    /// f32 output, `batch x out_stride`.
+    Output,
+    /// f32 bias, `rows` entries; bind any small buffer when the plan has no bias (flag bit 0 is clear then).
+    Bias,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindingSlot {
+    pub binding: u32,
+    pub role: BindingRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepassKind {
+    /// `quant_act_q8[_perm]`: f32 -> int8 blocks of 32 with float scales.
+    QuantizeActivations,
+    /// `quant_permute`: gathers the columns of the activations (act-order GPTQ with f32 shaders).
+    PermuteActivations,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepassRole {
+    /// The f32 activations of the layer.
+    Activations,
+    /// The scratch buffer (`PrepassPlan::output_bytes`) the main shader reads.
+    Output,
+    /// The Q4ZP column permutation (`DeviceWeight::perm`, `PackedWeight::perm` as u32).
+    Perm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrepassBinding {
+    pub binding: u32,
+    pub role: PrepassRole,
+}
+
+/// A small compute pass that must run before the main shader (and after the previous writer of the activations).
+/// Several weights that read the same activations (q, k, v) may share one prepass result when `shader_name`, `kind`, `perm` and the
+/// activation range are the same.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrepassPlan {
+    pub kind: PrepassKind,
+    pub shader_name: String,
+    pub push_constants: Vec<u8>,
+    pub groups: [u32; 3],
+    pub bindings: Vec<PrepassBinding>,
+    /// Size of the scratch buffer the prepass writes.
+    pub output_bytes: usize,
+    /// Whether the prepass reads the permutation table (Q4ZP).
+    pub uses_perm: bool,
+}
+
+/// Everything needed to record one `quantized_linear`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearPlan {
+    pub layout: DeviceLayout,
+    pub variant: Variant,
+    pub kind: PlanKind,
+    pub shader_name: String,
+    pub spec_constants: Vec<SpecConstant>,
+    /// `QPush` of `_q_common.glsl`, 48 bytes little endian.
+    pub push_constants: Vec<u8>,
+    pub groups: [u32; 3],
+    pub bindings: Vec<BindingSlot>,
+    pub activation_prepass: Option<PrepassPlan>,
+}
+
+/// Optional inputs of the planner.
+pub struct PlanOptions<'a> {
+    /// The weight has a bias (flag bit 0 of the push constants).
+    pub has_bias: bool,
+    /// Per-tensor factor of the dot products (`DeviceWeight::scale`).
+    pub scale: f32,
+    /// First output feature of this dispatch (weights split by rows for `maxStorageBufferRange`).
+    pub row_base: u32,
+    /// Floats between two output rows; defaults to `rows`.
+    pub out_stride: Option<u32>,
+    /// Only the f32 shaders (meets the selftest's FP32 error bound); default false.
+    pub exact: bool,
+    /// Use this variant (an error if it is not possible).
+    pub force: Option<Variant>,
+    /// Tells whether a shader name is in the SPIR-V registry; default: look it up in `shaders::SHADERS`.
+    pub available: Option<&'a dyn Fn(&str) -> bool>,
+}
+
+impl Default for PlanOptions<'_> {
+    fn default() -> Self {
+        Self {
+            has_bias: false,
+            scale: 1.0,
+            row_base: 0,
+            out_stride: None,
+            exact: exact_math_from_env(),
+            force: None,
+            available: None,
+        }
+    }
+}
+
+/// `FLLM_VULKAN_EXACT=1`: plan only the f32 shaders (used by `selftest-gpu`, whose tolerance is the f32 worst-case bound). Read once per process.
+pub fn exact_math_from_env() -> bool {
+    static EXACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXACT
+        .get_or_init(|| std::env::var("FLLM_VULKAN_EXACT").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+fn registry_has(name: &str) -> bool {
+    super::super::shaders::SHADERS
+        .iter()
+        .any(|(n, _)| *n == name)
+}
+
+/// Word-exact image of `QPush` in `_q_common.glsl`.
+struct QPush {
+    rows: u32,
+    cols: u32,
+    batch: u32,
+    flags: u32,
+    scale: f32,
+    nb: u32,
+    off: [u32; 3],
+    out_stride: u32,
+    row_base: u32,
+    xq_d: u32,
+}
+
+impl QPush {
+    fn to_bytes(&self) -> Vec<u8> {
+        let words = [
+            self.rows,
+            self.cols,
+            self.batch,
+            self.flags,
+            self.scale.to_bits(),
+            self.nb,
+            self.off[0],
+            self.off[1],
+            self.off[2],
+            self.out_stride,
+            self.row_base,
+            self.xq_d,
+        ];
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+}
+
+fn words(values: &[u32]) -> Vec<u8> {
+    values.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// Workgroup counts for `n` workgroups of a 1-D problem, split over x and y at 65535 (the shaders use `x + y * numWorkGroups.x`).
+pub fn split_groups(n: u64) -> [u32; 3] {
+    let n = n.max(1);
+    if n <= MAX_GROUPS_PER_DIM {
+        [n as u32, 1, 1]
+    } else {
+        [
+            MAX_GROUPS_PER_DIM as u32,
+            n.div_ceil(MAX_GROUPS_PER_DIM) as u32,
+            1,
+        ]
+    }
+}
+
+/// Workgroup size and rows per workgroup of the matrix-vector shaders for a device.
+fn matvec_tuning(caps: &VkCapsLike, columns: u32) -> (u32, u32) {
+    let (mut wg, mut rows) = match caps.vendor {
+        0x10de | 0x1002 => (128u32, 2u32),
+        _ => (64, 2),
+    };
+    let shared = |wg: u32, rows: u32| rows * columns * wg * 4;
+    while shared(wg, rows) > caps.max_shared && wg > 32 {
+        wg /= 2;
+    }
+    if shared(wg, rows) > caps.max_shared {
+        rows = 1;
+    }
+    (wg, rows)
+}
+
+/// Plan with the default options (`exact` from `FLLM_VULKAN_EXACT`, no bias, scale 1).
+pub fn plan_quantized_linear(
+    quant: QuantType,
+    rows: usize,
+    cols: usize,
+    batch: usize,
+    caps: &VkCapsLike,
+) -> Result<LinearPlan, BackendError> {
+    plan_quantized_linear_with(quant, rows, cols, batch, caps, &PlanOptions::default())
+}
+
+/// Plans `out[b][r] = scale * dot(x[b], w[r]) + bias[r]` for a `rows x cols` weight of `quant` and `batch` activation rows.
+pub fn plan_quantized_linear_with(
+    quant: QuantType,
+    rows: usize,
+    cols: usize,
+    batch: usize,
+    caps: &VkCapsLike,
+    options: &PlanOptions<'_>,
+) -> Result<LinearPlan, BackendError> {
+    let layout = DeviceLayout::new(quant, rows, cols)?;
+    if batch == 0 {
+        return Err(BackendError::InvalidShape(
+            "quantized_linear with an empty batch".into(),
+        ));
+    }
+    let (rows32, cols32, batch32) = match (
+        u32::try_from(rows),
+        u32::try_from(cols),
+        u32::try_from(batch),
+    ) {
+        (Ok(r), Ok(c), Ok(b)) => (r, c, b),
+        _ => {
+            return Err(BackendError::InvalidShape(format!(
+                "{rows} x {cols} x {batch} exceeds 32-bit indexing"
+            )))
+        }
+    };
+    if (batch as u64) * (cols as u64) >= (u32::MAX as u64) / 2 {
+        return Err(BackendError::InvalidShape(format!(
+            "{batch} x {cols} activations exceed 32-bit indexing"
+        )));
+    }
+    let tag = layout.info.tag;
+    let perm = quant.is_q4zp();
+    let default_available;
+    let available: &dyn Fn(&str) -> bool = match options.available {
+        Some(f) => f,
+        None => {
+            default_available = registry_has;
+            &default_available
+        }
+    };
+    let matvec = batch32 <= MATVEC_MAX_BATCH;
+    let prefix = if matvec { "mv" } else { "mm" };
+    let prepass_name = |variant: Variant| -> String {
+        match variant {
+            Variant::IntDot if perm => "quant_act_q8_perm".to_string(),
+            Variant::IntDot => "quant_act_q8".to_string(),
+            _ if perm => "quant_permute".to_string(),
+            _ => String::new(),
+        }
+    };
+    let usable = |variant: Variant| -> bool {
+        let name = format!("{prefix}_{tag}_{}", variant.suffix());
+        let needs_prepass = variant == Variant::IntDot || perm;
+        let shared_ok = match (variant, matvec) {
+            (Variant::CoopMat, _) => caps.max_shared >= COOPMAT_SHARED,
+            (Variant::IntDot, false) => caps.max_shared >= MM_IDOT_SHARED,
+            (Variant::Scalar, false) => caps.max_shared >= MM_SCALAR_SHARED,
+            _ => true,
+        };
+        let feature_ok = match variant {
+            Variant::Scalar => true,
+            Variant::IntDot => caps.int_dot,
+            Variant::CoopMat => {
+                !matvec && caps.coop_matrix && caps.fp16 && (8..=128).contains(&caps.subgroup_size)
+            }
+        };
+        feature_ok
+            && shared_ok
+            && available(&name)
+            && (!needs_prepass || available(&prepass_name(variant)))
+    };
+    let variant = match options.force {
+        Some(v) => {
+            if !usable(v) {
+                return Err(BackendError::UnsupportedOperation(format!(
+                    "quantized_linear: variant {v:?} is not usable for {quant:?} (batch {batch})"
+                )));
+            }
+            v
+        }
+        None => {
+            let order: &[Variant] = match (matvec, options.exact) {
+                (_, true) => &[Variant::Scalar],
+                (true, false) => &[Variant::IntDot, Variant::Scalar],
+                (false, false) => &[Variant::CoopMat, Variant::IntDot, Variant::Scalar],
+            };
+            *order.iter().find(|&&v| usable(v)).ok_or_else(|| {
+                BackendError::UnsupportedOperation(format!(
+                    "quantized_linear: no Vulkan shader for {quant:?} (batch {batch})"
+                ))
+            })?
+        }
+    };
+
+    let shader_name = format!("{prefix}_{tag}_{}", variant.suffix());
+    let out_stride = options.out_stride.unwrap_or(rows32);
+    let xq_d = batch32 * cols32 / 4;
+    let push = QPush {
+        rows: rows32,
+        cols: cols32,
+        batch: batch32,
+        flags: u32::from(options.has_bias),
+        scale: options.scale,
+        nb: layout.blocks_per_row as u32,
+        off: [
+            layout.plane_word_offset[1],
+            layout.plane_word_offset[2],
+            layout.plane_word_offset[3],
+        ],
+        out_stride,
+        row_base: options.row_base,
+        xq_d,
+    };
+
+    let (kind, spec_constants, groups) = if matvec {
+        let (wg, per_group) = matvec_tuning(caps, batch32);
+        (
+            PlanKind::MatVec { columns: batch32 },
+            vec![
+                SpecConstant { id: 0, value: wg },
+                SpecConstant {
+                    id: 1,
+                    value: per_group,
+                },
+                SpecConstant {
+                    id: 2,
+                    value: batch32,
+                },
+            ],
+            split_groups((rows as u64).div_ceil(per_group as u64)),
+        )
+    } else {
+        let spec = if variant == Variant::CoopMat {
+            vec![SpecConstant {
+                id: 0,
+                value: 4 * caps.subgroup_size,
+            }]
+        } else {
+            Vec::new()
+        };
+        (
+            PlanKind::MatMul,
+            spec,
+            [
+                (rows as u64).div_ceil(64) as u32,
+                (batch as u64).div_ceil(64) as u32,
+                1,
+            ],
+        )
+    };
+
+    let activation_prepass = if variant == Variant::IntDot {
+        let blocks = (batch as u64) * (cols as u64) / 32;
+        let mut bindings = vec![
+            PrepassBinding {
+                binding: 0,
+                role: PrepassRole::Activations,
+            },
+            PrepassBinding {
+                binding: 1,
+                role: PrepassRole::Output,
+            },
+        ];
+        if perm {
+            bindings.push(PrepassBinding {
+                binding: 2,
+                role: PrepassRole::Perm,
+            });
+        }
+        Some(PrepassPlan {
+            kind: PrepassKind::QuantizeActivations,
+            shader_name: prepass_name(variant),
+            push_constants: words(&[cols32, batch32, xq_d]),
+            groups: split_groups(blocks.div_ceil(128)),
+            bindings,
+            output_bytes: (xq_d as usize + blocks as usize) * 4,
+            uses_perm: perm,
+        })
+    } else if perm {
+        let total = (batch as u64) * (cols as u64);
+        Some(PrepassPlan {
+            kind: PrepassKind::PermuteActivations,
+            shader_name: prepass_name(variant),
+            push_constants: words(&[cols32, total as u32]),
+            groups: split_groups(total.div_ceil(256)),
+            bindings: vec![
+                PrepassBinding {
+                    binding: 0,
+                    role: PrepassRole::Activations,
+                },
+                PrepassBinding {
+                    binding: 1,
+                    role: PrepassRole::Output,
+                },
+                PrepassBinding {
+                    binding: 2,
+                    role: PrepassRole::Perm,
+                },
+            ],
+            output_bytes: total as usize * 4,
+            uses_perm: true,
+        })
+    } else {
+        None
+    };
+
+    let bindings = vec![
+        BindingSlot {
+            binding: 0,
+            role: BindingRole::Weights,
+        },
+        BindingSlot {
+            binding: 1,
+            role: if activation_prepass.is_some() {
+                BindingRole::PrepassOutput
+            } else {
+                BindingRole::Activations
+            },
+        },
+        BindingSlot {
+            binding: 2,
+            role: BindingRole::Output,
+        },
+        BindingSlot {
+            binding: 3,
+            role: BindingRole::Bias,
+        },
+    ];
+    Ok(LinearPlan {
+        layout,
+        variant,
+        kind,
+        shader_name,
+        spec_constants,
+        push_constants: push.to_bytes(),
+        groups,
+        bindings,
+        activation_prepass,
+    })
+}

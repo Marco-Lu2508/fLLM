@@ -1,0 +1,49 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_argmax | bindings: logits,out | push: vocab,rows | grid: [rows split over x/y (x <= 65535), 1, 1]
+// Greedy sampling (Stream::argmax_rows): out[r] = index of the largest of the `vocab` logits of row r (int32); the lowest index wins a tie and a NaN
+// never wins (comparisons use `>`); an all -inf / all NaN row gives 0 (the CPU `sampling_logits` behaves the same). One workgroup per row.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer LogitBuf { float logits[]; };
+layout(std430, binding = 1) buffer OutBuf { int best_index[]; };
+layout(push_constant) uniform P {
+    uint vocab;
+    uint rows;
+} p;
+
+shared float s_val[WG];
+shared uint s_idx[WG];
+
+void main() {
+    const uint row = group_index();
+    if (row >= p.rows) return;
+    const uint lane = gl_LocalInvocationID.x;
+    float best = uintBitsToFloat(0xFF800000u);  // -inf
+    uint besti = 0u;
+    const uint base = row * p.vocab;
+    for (uint i = lane; i < p.vocab; i += WG) {
+        const float v = logits[base + i];
+        if (v > best) {
+            best = v;
+            besti = i;
+        }
+    }
+    s_val[lane] = best;
+    s_idx[lane] = besti;
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1u) {
+        if (lane < s) {
+            const float ov = s_val[lane + s];
+            const uint oi = s_idx[lane + s];
+            if (ov > s_val[lane] || (ov == s_val[lane] && oi < s_idx[lane])) {
+                s_val[lane] = ov;
+                s_idx[lane] = oi;
+            }
+        }
+        barrier();
+    }
+    if (lane == 0u) best_index[row] = int(s_idx[0]);
+}

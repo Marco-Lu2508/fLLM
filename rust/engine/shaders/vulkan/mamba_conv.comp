@@ -1,0 +1,86 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: mamba_conv | bindings: x,convw,convb,state,mixed | push: channels,ksz,in_stride,in_off,row0,n,reset,hist_off,has_bias | grid: [ceil(channels/64), ceil(n/16), 1] per run
+// Mamba (1 and 2) causal depthwise convolution with SiLU over one run (n consecutive tokens of one sequence), reference: the loop over `mixed` in
+// `mamba_forward` / `mamba1_forward` of rust_decoder.rs:
+//   mixed[t][c] = silu( bias[c] + sum_{k < ksz-1} w[c][k] * x[t - (ksz-1) + k][c] + w[c][ksz-1] * x[t][c] )
+// with x before the run taken from the stored history (oldest first), or 0 when reset != 0. x[t][c] = x[(row0 + t) * in_stride + in_off + c] (a slice of
+// the projected row: Mamba-2 xBC = in_off inner, Mamba-1 xs = in_off 0); mixed is dense, mixed[(row0 + t) * channels + c]. The history of channel c is
+// state[hist_off + c * (ksz-1) + k]; the first chunk of 16 tokens (>= ksz - 1) rewrites it at the end. ksz in 2..8, has_bias != 0: convb[c] is added.
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer ConvBuf { float convw[]; };
+layout(std430, binding = 2) readonly buffer BiasBuf { float convb[]; };
+layout(std430, binding = 3) buffer StateBuf { float state[]; };
+layout(std430, binding = 4) buffer MixedBuf { float mixed[]; };
+layout(push_constant) uniform P {
+    uint channels;
+    uint ksz;
+    uint in_stride;
+    uint in_off;
+    uint row0;
+    uint n;
+    uint reset;
+    uint hist_off;
+    uint has_bias;
+} p;
+
+void main() {
+    const uint c = gl_WorkGroupID.x * WG + gl_LocalInvocationID.x;
+    const uint t0 = gl_WorkGroupID.y * 16u;
+    if (c >= p.channels || t0 >= p.n) return;
+    const uint t1 = min(p.n, t0 + 16u);
+    const uint hist_len = p.ksz - 1u;
+    const uint hist = p.hist_off + c * hist_len;
+    const float bias = p.has_bias != 0u ? convb[c] : 0.0;
+
+    float wk[8];
+    float win[8];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        wk[k] = k < p.ksz ? convw[c * p.ksz + k] : 0.0;
+        win[k] = 0.0;
+    }
+    [[unroll]] for (uint j = 0u; j < 7u; j++) {
+        if (j < hist_len) {
+            float v = 0.0;
+            if (t0 + j >= hist_len) {
+                v = x[(p.row0 + t0 + j - hist_len) * p.in_stride + p.in_off + c];
+            } else if (p.reset == 0u) {
+                v = state[hist + t0 + j];
+            }
+            win[j] = v;
+        }
+    }
+    for (uint t = t0; t < t1; t++) {
+        const float cur = x[(p.row0 + t) * p.in_stride + p.in_off + c];
+        float acc = wk[hist_len] * cur + bias;
+        [[unroll]] for (uint k = 0u; k < 7u; k++) {
+            if (k < hist_len) acc += wk[k] * win[k];
+        }
+        mixed[(p.row0 + t) * p.channels + c] = silu(acc);
+        [[unroll]] for (uint k = 0u; k < 6u; k++) {
+            if (k + 1u < hist_len) win[k] = win[k + 1u];
+        }
+        win[hist_len - 1u] = cur;
+    }
+    if (gl_WorkGroupID.y == 0u) {
+        float fresh[7];
+        [[unroll]] for (uint k = 0u; k < 7u; k++) {
+            float v = 0.0;
+            if (k < hist_len) {
+                if (p.n + k >= hist_len) {
+                    v = x[(p.row0 + p.n + k - hist_len) * p.in_stride + p.in_off + c];
+                } else if (p.reset == 0u) {
+                    v = state[hist + p.n + k];
+                }
+            }
+            fresh[k] = v;
+        }
+        [[unroll]] for (uint k = 0u; k < 7u; k++) {
+            if (k < hist_len) state[hist + k] = fresh[k];
+        }
+    }
+}

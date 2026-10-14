@@ -1,0 +1,21 @@
+#version 450
+// FLLM-SHADER: quant_permute | bindings: 0 x(f32[], batch x cols) 1 y(f32[] out, batch x cols) 2 perm(u32[], cols entries) | push: cols, total | grid: ceil(total / 256) x 1 x 1 (x/y split at 65535)
+// Prepass of the f32 quantized-linear shaders for act-order GPTQ weights (Q4ZP): y[b * cols + c] = x[b * cols + perm[c]]; total = batch * cols.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform P {
+    uint cols;
+    uint total;
+} p;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer YBuf { float y[]; };
+layout(std430, set = 0, binding = 2) readonly buffer PermBuf { uint perm[]; };
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (i >= p.total) return;
+    const uint b = i / p.cols;
+    const uint c = i - b * p.cols;
+    y[i] = x[b * p.cols + perm[c]];
+}

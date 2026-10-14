@@ -1,0 +1,67 @@
+version = 1
+
+[[models]]
+name = "qwen3.5:0.8b"
+repo = "unsloth/Qwen3.5-0.8B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3.5:9b"
+repo = "unsloth/Qwen3.5-9B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3.5:35b-a3b"
+repo = "unsloth/Qwen3.5-35B-A3B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3.6:35b-a3b"
+repo = "unsloth/Qwen3.6-35B-A3B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3.1:8b"
+repo = "unsloth/Llama-3.1-8B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3.2:3b"
+repo = "unsloth/Llama-3.2-3B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma3:4b"
+repo = "unsloth/gemma-3-4b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "k2-horizon:4b"
+repo = "IFM/K2-Horizon-3.7B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "minicpm5:2b"
+repo = "openbmb/MiniCPM5-2B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gpt-oss:20b"
+repo = "unsloth/gpt-oss-20b-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "mistral:7b"
+repo = "bartowski/Mistral-7B-Instruct-v0.3-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "phi4:14b"
+repo = "bartowski/phi-4-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-r1:8b"
+repo = "unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF"
+default = "Q4_K_M"
+

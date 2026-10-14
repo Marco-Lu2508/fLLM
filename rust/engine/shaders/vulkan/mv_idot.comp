@@ -1,0 +1,92 @@
+#version 450
+// FLLM-SHADER: mv_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(u32[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/NROWS) workgroups, split x/y at 65535
+// Quantized matrix-vector product for 1..8 activation rows with int8 activations and 4 x int8 dot products
+// (GL_EXT_integer_dot_product when the compiler has it, an exact emulation otherwise; the device feature shaderIntegerDotProduct is
+// required only for the hardware flavour, see INTERFACE_QUANT.md). Activations come from the prepass quant_act_q8 (32 values per block,
+// one float scale each); the result differs from the f32 shader by the int8 rounding of the activations.
+// Specialization constants: 0 = workgroup size (power of two), 1 = NROWS, 2 = NCOLS (= batch, 1..8).
+#extension GL_GOOGLE_include_directive : enable
+#include "_q_ext.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 1) const uint NROWS = 2;
+layout(constant_id = 2) const uint NCOLS = 1;
+
+#include "_q_common.glsl"
+#include "_q_formats.glsl"
+
+layout(std430, set = 0, binding = 1) readonly buffer XQBuf { uint xq[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+shared float red[NROWS * NCOLS * gl_WorkGroupSize.x];
+
+void main() {
+    const uint WG = gl_WorkGroupSize.x;
+    const uint t = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    const uint row0 = group * NROWS;
+    const uint xwords = p.cols >> 2;   // int8 words per activation row
+    const uint xblocks = p.cols >> 5;  // 32-value blocks per activation row
+
+    float acc[NROWS][NCOLS];
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) acc[r][c] = 0.0;
+    }
+
+    const uint chunks = p.cols >> 3;
+    for (uint ch = t; ch < chunks; ch += WG) {
+        const uint kb = ch / (QK / 8);
+        const uint cin = ch % (QK / 8);
+        uint a0[NCOLS];
+        uint a1[NCOLS];
+        float da[NCOLS];
+#ifdef HAS_WM
+        float sa[NCOLS];
+#endif
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+            a0[c] = xq[c * xwords + ch * 2u];
+            a1[c] = xq[c * xwords + ch * 2u + 1u];
+            da[c] = uintBitsToFloat(xq[p.xq_d + c * xblocks + (ch >> 2)]);
+#ifdef HAS_WM
+            sa[c] = da[c] * float(idot4(0x01010101u, a0[c]) + idot4(0x01010101u, a1[c]));
+#endif
+        }
+        [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+            const uint row = row0 + r;
+            if (row < p.rows) {
+                uint p0, p1;
+                float ws, wm;
+                wchunk(row * p.nb + kb, cin, p0, p1, ws, wm);
+                [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+                    const int d = idot4(p0, a0[c]) + idot4(p1, a1[c]);
+                    acc[r][c] += ws * da[c] * float(d);
+#ifdef HAS_WM
+                    acc[r][c] += wm * sa[c];
+#endif
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) red[(r * NCOLS + c) * WG + t] = acc[r][c];
+    }
+    barrier();
+    for (uint s = WG >> 1; s > 0u; s >>= 1) {
+        if (t < s) {
+            [[unroll]] for (uint i = 0; i < NROWS * NCOLS; ++i) red[i * WG + t] += red[i * WG + t + s];
+        }
+        barrier();
+    }
+    if (t < NROWS * NCOLS) {
+        const uint r = t / NCOLS;
+        const uint c = t % NCOLS;
+        const uint row = row0 + r;
+        if (row < p.rows) {
+            float v = red[t * WG] * p.scale;
+            if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+            outv[c * p.out_stride + p.row_base + row] = v;
+        }
+    }
+}

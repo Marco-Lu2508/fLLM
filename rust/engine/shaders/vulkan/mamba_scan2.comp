@@ -1,0 +1,94 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: mamba_scan2 | bindings: mixed,projected,dt_bias,decay,skip,state,out | push: inner,ns,heads,groups,head_dim,conv_dim,proj_stride,proj_dt_off,row0,n,reset,state_off,step_min | grid: [heads, ceil(head_dim/64), 1] per run
+// Mamba-2 selective state update (reference: the scan loop of `mamba_forward` in rust_decoder.rs) of one run (n consecutive tokens of one sequence). Per
+// token, head h, channel p of the head (xp = mixed[t][h * head_dim + p]) and state index k < ns:
+//   dt = max(softplus(dt_raw[t][h] + dt_bias[h]), step_min);  da = exp(dt * decay[h])     (decay = A < 0; dt_raw = projected[t * proj_stride + proj_dt_off + h])
+//   cell[h][p][k] = cell[h][p][k] * da + dt * xp * B[g][k];   out[t][h * head_dim + p] = sum_k cell[h][p][k] * C[g][k] + skip[h] * xp
+// with g = h / (heads / groups); B[g] = mixed[t][inner + g * ns ..], C[g] = mixed[t][inner + groups * ns + g * ns ..] (mixed = output of mamba_conv, conv_dim
+// channels per row: [x (inner) | B | C]). The SSM state is state[state_off + (h * head_dim + p) * ns + k] (float view of the sequence's state buffer; reset != 0
+// ignores the old state). One lane per channel p, the tokens in order. Macro NS = state size: NS > 0 keeps the cell row in registers for the whole run;
+// NS = 0 (generic) reads and writes the state in memory for every token. ns <= 256 (shared staging of B and C).
+#define WG 64
+#ifndef NS
+#define NS 0
+#endif
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer ProjBuf { float projected[]; };
+layout(std430, binding = 2) readonly buffer DtBiasBuf { float dt_bias[]; };
+layout(std430, binding = 3) readonly buffer DecayBuf { float decay[]; };
+layout(std430, binding = 4) readonly buffer SkipBuf { float skip_d[]; };
+layout(std430, binding = 5) buffer StateBuf { float state[]; };
+layout(std430, binding = 6) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint inner;
+    uint ns;
+    uint heads;
+    uint groups;
+    uint head_dim;
+    uint conv_dim;
+    uint proj_stride;
+    uint proj_dt_off;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    float step_min;
+} p;
+
+shared float sb[256];
+shared float sc[256];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint pp = gl_WorkGroupID.y * WG + lane;
+    const bool ch_ok = pp < p.head_dim;
+    const uint g = h / max(p.heads / p.groups, 1u);
+    const uint cbase = p.state_off + (h * p.head_dim + pp) * p.ns;
+#if NS > 0
+    float cell[NS];
+    [[unroll]] for (uint k = 0u; k < NS; k++) cell[k] = (ch_ok && p.reset == 0u) ? state[cbase + k] : 0.0;
+#else
+    if (ch_ok && p.reset != 0u) {
+        for (uint k = 0u; k < p.ns; k++) state[cbase + k] = 0.0;
+    }
+#endif
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        for (uint k = lane; k < p.ns; k += WG) {
+            sb[k] = mixed[row * p.conv_dim + p.inner + g * p.ns + k];
+            sc[k] = mixed[row * p.conv_dim + p.inner + p.groups * p.ns + g * p.ns + k];
+        }
+        barrier();
+        const float raw = projected[row * p.proj_stride + p.proj_dt_off + h] + dt_bias[h];
+        const float dt = max(softplus20(raw), p.step_min);
+        const float da = exp(dt * decay[h]);
+        if (ch_ok) {
+            const float xp = mixed[row * p.conv_dim + h * p.head_dim + pp];
+            float acc = 0.0;
+#if NS > 0
+            [[unroll]] for (uint k = 0u; k < NS; k++) {
+                cell[k] = cell[k] * da + dt * xp * sb[k];
+                acc += cell[k] * sc[k];
+            }
+#else
+            for (uint k = 0u; k < p.ns; k++) {
+                const float cv = state[cbase + k] * da + dt * xp * sb[k];
+                state[cbase + k] = cv;
+                acc += cv * sc[k];
+            }
+#endif
+            outv[row * p.inner + h * p.head_dim + pp] = acc + skip_d[h] * xp;
+        }
+        barrier();  // sb / sc are rewritten by the next token
+    }
+#if NS > 0
+    if (ch_ok) {
+        [[unroll]] for (uint k = 0u; k < NS; k++) state[cbase + k] = cell[k];
+    }
+#endif
+}

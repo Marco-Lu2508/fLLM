@@ -1,0 +1,90 @@
+#version 450
+// FLLM-SHADER: mv_<fmt>_s | bindings: 0 weights(u32[]) 1 x(vec4[], batch x cols f32) 2 out(f32[], batch x out_stride) 3 bias(f32[]) | push: QPush(48 B, _q_common.glsl) | grid: ceil(rows/NROWS) workgroups, split x/y at 65535
+// Quantized matrix-vector product for 1..8 activation rows (decode), plain float arithmetic, no extensions (runs on every Vulkan 1.0 device).
+// Specialization constants: 0 = workgroup size (power of two), 1 = NROWS (weight rows per workgroup), 2 = NCOLS (= batch, 1..8).
+// out[c * out_stride + row_base + r] = scale * dot(x[c], w[r]) (+ bias[row_base + r])
+#extension GL_GOOGLE_include_directive : enable
+#include "_q_ext.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 1) const uint NROWS = 2;
+layout(constant_id = 2) const uint NCOLS = 1;
+
+#include "_q_common.glsl"
+#include "_q_formats.glsl"
+
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { vec4 xv[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+shared float red[NROWS * NCOLS * gl_WorkGroupSize.x];
+
+void main() {
+    const uint WG = gl_WorkGroupSize.x;
+    const uint t = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    const uint row0 = group * NROWS;
+
+    float acc[NROWS][NCOLS];
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) acc[r][c] = 0.0;
+    }
+
+    const uint chunks = p.cols >> 3;
+    for (uint ch = t; ch < chunks; ch += WG) {
+        const uint kb = ch / (QK / 8);
+        const uint cin = ch % (QK / 8);
+        vec4 xa[NCOLS];
+        vec4 xb[NCOLS];
+#ifdef HAS_WM
+        float xs[NCOLS];
+#endif
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+            const uint xi = (c * p.cols + ch * 8u) >> 2;
+            xa[c] = xv[xi];
+            xb[c] = xv[xi + 1u];
+#ifdef HAS_WM
+            xs[c] = dot(xa[c], vec4(1.0)) + dot(xb[c], vec4(1.0));
+#endif
+        }
+        [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+            const uint row = row0 + r;
+            if (row < p.rows) {
+                uint p0, p1;
+                float ws, wm;
+                wchunk(row * p.nb + kb, cin, p0, p1, ws, wm);
+                const vec4 q0 = s8x4(p0);
+                const vec4 q1 = s8x4(p1);
+                [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+                    float d = dot(q0, xa[c]) + dot(q1, xb[c]);
+                    acc[r][c] += ws * d;
+#ifdef HAS_WM
+                    acc[r][c] += wm * xs[c];
+#endif
+                }
+            }
+        }
+    }
+
+    // reduce the partial sums of the workgroup
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) red[(r * NCOLS + c) * WG + t] = acc[r][c];
+    }
+    barrier();
+    for (uint s = WG >> 1; s > 0u; s >>= 1) {
+        if (t < s) {
+            [[unroll]] for (uint i = 0; i < NROWS * NCOLS; ++i) red[i * WG + t] += red[i * WG + t + s];
+        }
+        barrier();
+    }
+    if (t < NROWS * NCOLS) {
+        const uint r = t / NCOLS;
+        const uint c = t % NCOLS;
+        const uint row = row0 + r;
+        if (row < p.rows) {
+            float v = red[t * WG] * p.scale;
+            if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+            outv[c * p.out_stride + p.row_base + row] = v;
+        }
+    }
+}

@@ -1,0 +1,3035 @@
+use crate::reasoning::{Family, ReasoningParser, ReasoningParts};
+use crate::runtime::InferenceRuntime;
+use crate::tokenizer::TokenizerBundle;
+use axum::{
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderMap, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
+    routing::{delete, get, post},
+    Json, Router,
+};
+mod api;
+
+use minijinja::Environment;
+use serde_json::{json, Map, Value};
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc as std_mpsc, Arc,
+    },
+    thread,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::mpsc as tokio_mpsc;
+
+struct Metrics {
+    observability: Arc<crate::metrics::Metrics>,
+    requests: AtomicU64,
+    generated_tokens: AtomicU64,
+    forward_calls: AtomicU64,
+    rows_total: AtomicU64,
+    multi_row_calls: AtomicU64,
+    max_rows: AtomicU64,
+    prefill_rows: AtomicU64,
+    decode_rows: AtomicU64,
+    draft_proposed: AtomicU64,
+    draft_accepted: AtomicU64,
+    scheduler_ns: AtomicU64,
+    batch_build_ns: AtomicU64,
+    model_forward_ns: AtomicU64,
+    slots_running: AtomicU64,
+    slots_waiting: AtomicU64,
+    postprocess_ns: AtomicU64,
+}
+
+struct AppState {
+    model_name: String,
+    model_arch: String,
+    chat_template: String,
+    /// Tool-call format of the model (--tool-parser, else chosen from the chat template).
+    tool_parser: Arc<dyn crate::tool_parsers::ToolParser>,
+    /// Reasoning format of the model (--reasoning-parser, else chosen from the chat template).
+    reasoning_family: Family,
+    tokenizer: Arc<TokenizerBundle>,
+    grammar_factory: Arc<llguidance::ParserFactory>,
+    worker: std_mpsc::Sender<WorkerCommand>,
+    next_request: AtomicU64,
+    metrics: Arc<Metrics>,
+    api_key: Option<String>,
+    max_context: usize,
+    shared_choices: bool,
+    default_temperature: Option<f64>,
+    default_top_p: Option<f64>,
+    default_top_k: Option<usize>,
+    hidden_size: usize,
+    admission: Arc<tokio::sync::Semaphore>,
+    sampling_defaults: crate::sampling::SamplingParams,
+    vision: Option<Arc<crate::vision::VisionEncoder>>,
+    vision_admission: Arc<tokio::sync::Semaphore>,
+}
+
+enum WorkerCommand {
+    Submit {
+        request_id: String,
+        prompt: Vec<i64>,
+        max_tokens: usize,
+        sampling: Box<crate::sampling::SamplingParams>,
+        constraint: Option<Box<llguidance::Matcher>>,
+        images: Box<[(usize, Vec<f32>)]>,
+        output: GenerationTx,
+    },
+    Embed {
+        tokens: Vec<i64>,
+        pooling: String,
+        output: tokio::sync::oneshot::Sender<Result<Vec<f32>, String>>,
+    },
+}
+
+#[derive(Clone)]
+struct GenerationTx {
+    inner: tokio_mpsc::Sender<Result<crate::runtime::TokenEvent, String>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
+}
+impl GenerationTx {
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+    fn send(&self, event: Result<crate::runtime::TokenEvent, String>) -> Result<(), ()> {
+        self.inner.try_send(event).map_err(|error| {
+            if matches!(error, tokio_mpsc::error::TrySendError::Full(_)) {
+                *self.error.lock().unwrap() =
+                    Some("client output buffer is full; generation cancelled".into());
+            }
+        })
+    }
+}
+struct GenerationRx {
+    observation: crate::metrics::Generation,
+    inner: tokio_mpsc::Receiver<Result<crate::runtime::TokenEvent, String>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl GenerationRx {
+    async fn recv(&mut self) -> Option<Result<crate::runtime::TokenEvent, String>> {
+        match self.inner.recv().await {
+            Some(event) => { if event.is_ok() { self.observation.token(); } Some(event) },
+            None => self.error.lock().unwrap().take().map(Err),
+        }
+    }
+}
+
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub model_name: String,
+    pub api_key: Option<String>,
+    /// Sampling defaults used when a request does not set the parameter (`--temp`, `--top-p`, `--top-k`).
+    pub default_temperature: Option<f64>,
+    pub default_top_p: Option<f64>,
+    pub default_top_k: Option<usize>,
+    pub sampling_defaults: crate::sampling::SamplingParams,
+    /// --tool-parser: a parser id, or uto/absent to choose from the chat template.
+    pub tool_parser: Option<String>,
+    /// --reasoning-parser: a reasoning format id, or uto/absent to choose from the chat template.
+    pub reasoning_parser: Option<String>,
+}
+
+pub fn serve(
+    runtime: InferenceRuntime,
+    tokenizer: TokenizerBundle,
+    config: ServerConfig,
+) -> Result<(), String> {
+    let chat_template = normalize_chat_template(runtime.model.chat_template());
+    let max_context = runtime.model.max_context();
+    let model_arch = runtime.model.model_arch().to_owned();
+    let hidden_size = runtime.model.hidden_size();
+    let server_metrics = Arc::new(Metrics {
+        observability: Arc::new(crate::metrics::Metrics::new()),
+        requests: AtomicU64::new(0),
+        generated_tokens: AtomicU64::new(0),
+        forward_calls: AtomicU64::new(0),
+        rows_total: AtomicU64::new(0),
+        multi_row_calls: AtomicU64::new(0),
+        max_rows: AtomicU64::new(0),
+        prefill_rows: AtomicU64::new(0),
+        decode_rows: AtomicU64::new(0),
+        draft_proposed: AtomicU64::new(0),
+        draft_accepted: AtomicU64::new(0),
+        scheduler_ns: AtomicU64::new(0),
+        batch_build_ns: AtomicU64::new(0),
+        model_forward_ns: AtomicU64::new(0),
+        postprocess_ns: AtomicU64::new(0),
+        slots_running: AtomicU64::new(0),
+        slots_waiting: AtomicU64::new(0),
+    });
+    let (worker_tx, worker_rx) = std_mpsc::channel::<WorkerCommand>();
+    let grammar_factory = Arc::new(tokenizer.grammar_factory()?);
+    let tool_parser = crate::tool_parsers::select(&model_arch, &chat_template, config.tool_parser.as_deref())?;
+    let reasoning_family = Family::select(&chat_template, config.reasoning_parser.as_deref())?;
+    eprintln!("[fllm-rs] tool parser: {}, reasoning parser: {:?}", tool_parser.id(), reasoning_family);
+    let state = Arc::new(AppState {
+        model_name: config.model_name,
+        model_arch,
+        chat_template,
+        tool_parser,
+        reasoning_family,
+        tokenizer: Arc::new(tokenizer),
+        grammar_factory,
+        worker: worker_tx,
+        next_request: AtomicU64::new(1),
+        metrics: server_metrics.clone(),
+        api_key: config.api_key,
+        max_context,
+        shared_choices: runtime.supports_shared_choices(),
+        default_temperature: config.default_temperature,
+        default_top_p: config.default_top_p,
+        default_top_k: config.default_top_k,
+        hidden_size,
+        admission: Arc::new(tokio::sync::Semaphore::new(128)),
+        sampling_defaults: config.sampling_defaults,
+        vision: runtime.vision.clone(),
+        vision_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+    });
+    let app = Router::new()
+        .route("/", get(webui).head(api::ollama_extra::head_root))
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/v1/models", get(models))
+        .route("/v1/models/{id}", get(api::model_by_id))
+        .route("/v1/messages", post(api::anthropic::messages))
+        .route("/v1/messages/count_tokens", post(api::anthropic::count_tokens))
+        .route("/v1/responses", post(api::responses::create))
+        .route("/v1/responses/{id}", get(api::responses::get_one).delete(api::responses::delete_one))
+        .route("/v1/completions", post(completions))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/rerank", post(encoder_rerank_required))
+        .route("/rerank", post(encoder_rerank_required))
+        .route("/v1/score", post(encoder_required))
+        .route("/classify", post(encoder_required))
+        .route("/pooling", post(encoder_required))
+        .route(
+            "/v1/files",
+            get(api::batches::list_files)
+                .post(api::batches::upload)
+                .layer(DefaultBodyLimit::max(api::batches::max_upload_bytes())),
+        )
+        .route("/v1/files/{id}", get(api::batches::get_file).delete(api::batches::delete_file))
+        .route("/v1/files/{id}/content", get(api::batches::file_content))
+        .route("/v1/batches", post(api::batches::create_batch).get(api::batches::list_batches))
+        .route("/v1/batches/{id}", get(api::batches::get_batch))
+        .route("/v1/batches/{id}/cancel", post(api::batches::cancel_batch))
+        .route("/v1/images/embeddings", post(image_embeddings))
+        .route("/api/embed", post(api::ollama_extra::embed))
+        .route("/api/embeddings", post(embeddings))
+        .route("/api/show", post(api::ollama_extra::show))
+        .route("/api/ps", get(api::ollama_extra::ps))
+        .route("/api/pull", post(api::ollama_extra::pull))
+        .route("/api/delete", delete(api::ollama_extra::delete_model))
+        .route("/tokenize", post(api::llamacpp::tokenize))
+        .route("/detokenize", post(api::llamacpp::detokenize))
+        .route("/completion", post(api::llamacpp::completion))
+        .route("/infill", post(api::llamacpp::infill))
+        .route("/props", get(api::llamacpp::props))
+        .route("/slots", get(api::llamacpp::slot_list))
+        .route("/apply-template", post(api::llamacpp::apply_template))
+        .route("/embedding", post(api::llamacpp::embedding))
+        .route("/embeddings", post(api::llamacpp::embeddings))
+        .route("/api/tags", get(ollama_tags))
+        .route("/api/version", get(ollama_version))
+        .route("/api/generate", post(ollama_generate))
+        .route("/api/chat", post(ollama_chat))
+        .route("/generate", post(sglang_generate))
+        .route("/generate_stream", post(api::tgi::generate_stream))
+        .route("/info", get(api::tgi::info))
+        .route("/get_model_info", get(sglang_model_info))
+        .route("/get_server_info", get(sglang_server_info))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(server_metrics.observability.clone(), crate::metrics::observe))
+        .with_state(state);
+    let address: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .map_err(|e| format!("invalid listen address: {e}"))?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let http_thread = thread::Builder::new()
+        .name("fllm-http-runtime".into())
+        .spawn(move || {
+            let http_runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("cannot start HTTP runtime: {e}"))?;
+            http_runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind(address)
+                    .await
+                    .map_err(|e| format!("cannot bind HTTP listener: {e}"))?;
+                println!("fllm-rs listening on http://{address}");
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal(shutdown_rx))
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        })
+        .map_err(|e| format!("cannot start HTTP thread: {e}"))?;
+
+    // Keep the native OpenMP model path on the process main thread. Profiling
+    // showed the same model call was 2.5-3x slower from a secondary thread.
+    let worker_result = run_worker_loop(runtime, worker_rx, server_metrics);
+    let _ = shutdown_tx.send(());
+    let http_result = http_thread
+        .join()
+        .map_err(|_| "HTTP runtime thread panicked".to_owned())?;
+    worker_result?;
+    http_result?;
+    Ok(())
+}
+
+async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("register SIGTERM handler");
+        tokio::select! {
+            _ = &mut shutdown => {},
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::select! {
+        _ = &mut shutdown => {},
+        _ = tokio::signal::ctrl_c() => {},
+    }
+}
+
+fn run_worker_loop(
+    mut runtime: InferenceRuntime,
+    rx: std_mpsc::Receiver<WorkerCommand>,
+    metrics: Arc<Metrics>,
+) -> Result<(), String> {
+    let mut outputs = std::collections::HashMap::<String, GenerationTx>::new();
+    runtime.attach_metrics(metrics.observability.clone());
+    let mut previous_stats = crate::runtime::BatchStats::default();
+    loop {
+        let (running, waiting, free, total, hits) = runtime.metrics_snapshot();
+        metrics.observability.snapshot(running, waiting, free, total, hits);
+        metrics.slots_running.store(running as u64, Ordering::Relaxed);
+        metrics.slots_waiting.store(waiting as u64, Ordering::Relaxed);
+        let cancelled = outputs
+            .iter()
+            .filter(|(_, output)| output.is_closed())
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in cancelled {
+            outputs.remove(&request_id);
+            let _ = runtime.cancel_request(&request_id);
+        }
+        if runtime.active_requests() == 0 {
+            match rx.recv() {
+                Ok(command) => { metrics.observability.dequeue(); accept_command(command, &mut runtime, &mut outputs, &metrics.observability); },
+                Err(_) => break,
+            }
+        }
+        while let Ok(command) = rx.try_recv() {
+            metrics.observability.dequeue();
+            accept_command(command, &mut runtime, &mut outputs, &metrics.observability);
+        }
+        if runtime.active_requests() == 0 {
+            continue;
+        }
+        match runtime.step() {
+            Ok(events) => {
+                let stats = runtime.batch_stats();
+                metrics.observability.processed(stats.prefill_rows.saturating_sub(previous_stats.prefill_rows));
+                metrics.forward_calls.fetch_add(
+                    (stats.forward_calls - previous_stats.forward_calls) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.rows_total.fetch_add(
+                    (stats.rows_total - previous_stats.rows_total) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.multi_row_calls.fetch_add(
+                    (stats.calls_with_multiple_rows - previous_stats.calls_with_multiple_rows)
+                        as u64,
+                    Ordering::Relaxed,
+                );
+                metrics
+                    .max_rows
+                    .fetch_max(stats.max_rows as u64, Ordering::Relaxed);
+                metrics.prefill_rows.fetch_add(
+                    (stats.prefill_rows - previous_stats.prefill_rows) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.decode_rows.fetch_add(
+                    (stats.decode_rows - previous_stats.decode_rows) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.draft_proposed.fetch_add(
+                    (stats.draft_proposed - previous_stats.draft_proposed) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.draft_accepted.fetch_add(
+                    (stats.draft_accepted - previous_stats.draft_accepted) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.scheduler_ns.fetch_add(
+                    stats.scheduler_ns - previous_stats.scheduler_ns,
+                    Ordering::Relaxed,
+                );
+                metrics.batch_build_ns.fetch_add(
+                    stats.batch_build_ns - previous_stats.batch_build_ns,
+                    Ordering::Relaxed,
+                );
+                metrics.model_forward_ns.fetch_add(
+                    stats.model_forward_ns - previous_stats.model_forward_ns,
+                    Ordering::Relaxed,
+                );
+                metrics.postprocess_ns.fetch_add(
+                    stats.postprocess_ns - previous_stats.postprocess_ns,
+                    Ordering::Relaxed,
+                );
+                let did_work = stats.rows_total > previous_stats.rows_total;
+                previous_stats = stats;
+                let no_events = events.is_empty();
+                for event in events {
+                    metrics.observability.generated();
+                    let request_id = event.request_id.clone();
+                    let finished = event.request_finished;
+                    if let Some(output) = outputs.get(&request_id) {
+                        if output.send(Ok(event)).is_err() {
+                            let _ = runtime.cancel_request(&request_id);
+                            outputs.remove(&request_id);
+                        } else if finished {
+                            outputs.remove(&request_id);
+                        }
+                    }
+                }
+                if no_events && runtime.active_requests() > 0 && !did_work {
+                    thread::yield_now();
+                }
+            }
+            Err(error) => {
+                for (_, output) in outputs.drain() {
+                    let _ = output.send(Err(error.clone()));
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn accept_command(
+    command: WorkerCommand,
+    runtime: &mut InferenceRuntime,
+    outputs: &mut std::collections::HashMap<String, GenerationTx>,
+    metrics: &Arc<crate::metrics::Metrics>,
+) {
+    match command {
+        WorkerCommand::Embed {
+            tokens,
+            pooling,
+            output,
+        } => {
+            if !output.is_closed() {
+                let _active = metrics.embedding();
+                let result = runtime.embedding(&tokens, &pooling);
+                if result.is_ok() { metrics.processed(tokens.len()); }
+                let _ = output.send(result);
+            }
+        }
+        WorkerCommand::Submit {
+            request_id,
+            prompt,
+            max_tokens,
+            sampling,
+            constraint,
+            images,
+            output,
+        } => match runtime.submit_with_sampling(request_id.clone(), prompt, max_tokens, *sampling) {
+            Ok(sequence_id) => {
+                if let Err(error) = runtime.attach_image_embeddings(sequence_id, images.into_vec())
+                {
+                    let _ = runtime.cancel_request(&request_id);
+                    let _ = output.send(Err(error));
+                    return;
+                }
+                if let Some(constraint) = constraint {
+                    if let Err(error) = runtime.set_constraint(sequence_id, *constraint) {
+                        let _ = runtime.cancel_request(&request_id);
+                        let _ = output.send(Err(error));
+                        return;
+                    }
+                }
+                outputs.insert(request_id, output);
+            }
+            Err(error) => {
+                let _ = output.send(Err(error));
+            }
+        },
+    }
+}
+
+async fn encoder_required(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    api_error(StatusCode::NOT_IMPLEMENTED,"this decoder does not provide encoder classification/pooling; load an encoder with --embeddings")
+}
+async fn encoder_rerank_required(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if authorize(&state, &headers).is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"message":"invalid API key"})),
+        )
+            .into_response();
+    }
+    (StatusCode::NOT_IMPLEMENTED,Json(json!({"message":"decoder reranking is not implemented; load a sequence classification cross-encoder with --embeddings"}))).into_response()
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({"status":"ok"}))
+}
+
+async fn webui(State(state): State<Arc<AppState>>) -> Response {
+    crate::webui::page(state.api_key.is_some())
+}
+
+async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    let mut body = format!(
+        "# HELP fllm_requests_total Requests accepted by the Rust server\n# TYPE fllm_requests_total counter\nfllm_requests_total {}\n# HELP fllm_completion_tokens_total Tokens emitted by the Rust server\n# TYPE fllm_completion_tokens_total counter\nfllm_completion_tokens_total {}\n# HELP fllm_model_forward_calls_total Model forward calls\n# TYPE fllm_model_forward_calls_total counter\nfllm_model_forward_calls_total {}\n# HELP fllm_model_batch_rows_total Rows passed to the model\n# TYPE fllm_model_batch_rows_total counter\nfllm_model_batch_rows_total {}\n# HELP fllm_model_multirow_calls_total Model calls with multiple rows\n# TYPE fllm_model_multirow_calls_total counter\nfllm_model_multirow_calls_total {}\n# HELP fllm_model_batch_max_rows Largest model batch observed\n# TYPE fllm_model_batch_max_rows gauge\nfllm_model_batch_max_rows {}\n# HELP fllm_prefill_rows_total Prefill token rows submitted to the model\n# TYPE fllm_prefill_rows_total counter\nfllm_prefill_rows_total {}\n# HELP fllm_decode_rows_total Decode token rows submitted to the model\n# TYPE fllm_decode_rows_total counter\nfllm_decode_rows_total {}\n# HELP fllm_scheduler_seconds_total Time spent scheduling\n# TYPE fllm_scheduler_seconds_total counter\nfllm_scheduler_seconds_total {:.9}\n# HELP fllm_batch_build_seconds_total Time spent preparing model batches\n# TYPE fllm_batch_build_seconds_total counter\nfllm_batch_build_seconds_total {:.9}\n# HELP fllm_model_forward_seconds_total Time spent in model forward calls\n# TYPE fllm_model_forward_seconds_total counter\nfllm_model_forward_seconds_total {:.9}\n# HELP fllm_postprocess_seconds_total Time spent applying logits and updating sequences\n# TYPE fllm_postprocess_seconds_total counter\nfllm_postprocess_seconds_total {:.9}\n",
+        state.metrics.requests.load(Ordering::Relaxed),
+        state.metrics.generated_tokens.load(Ordering::Relaxed),
+        state.metrics.forward_calls.load(Ordering::Relaxed),
+        state.metrics.rows_total.load(Ordering::Relaxed),
+        state.metrics.multi_row_calls.load(Ordering::Relaxed),
+        state.metrics.max_rows.load(Ordering::Relaxed),
+        state.metrics.prefill_rows.load(Ordering::Relaxed),
+        state.metrics.decode_rows.load(Ordering::Relaxed),
+        state.metrics.scheduler_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        state.metrics.batch_build_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        state.metrics.model_forward_ns.load(Ordering::Relaxed) as f64 / 1e9,
+        state.metrics.postprocess_ns.load(Ordering::Relaxed) as f64 / 1e9,
+    );
+    body.push_str(&format!("# TYPE fllm_draft_proposed_tokens_total counter\nfllm_draft_proposed_tokens_total {}\n# TYPE fllm_draft_accepted_tokens_total counter\nfllm_draft_accepted_tokens_total {}\n",state.metrics.draft_proposed.load(Ordering::Relaxed),state.metrics.draft_accepted.load(Ordering::Relaxed)));
+    body.push_str(&state.metrics.observability.render());
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let headers = api::with_bearer(&headers);
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    if headers.contains_key("anthropic-version") {
+        return api::anthropic::models(&state);
+    }
+    Json(
+        json!({"object":"list","data":[{"id":state.model_name,"object":"model","created":unix_now(),"owned_by":"fllm"}]}),
+    ).into_response()
+}
+
+async fn ollama_tags(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(
+        json!({"models":[{"name":state.model_name,"model":state.model_name,"modified_at":iso_now(),"size":0,"digest":"","details":{"family":state.model_arch,"parameter_size":"","quantization":""}}]}),
+    )
+}
+
+async fn ollama_version() -> Json<Value> {
+    Json(json!({"version":"0.4.1-rust"}))
+}
+
+async fn completions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    let prompt_val = match body.get("prompt") {
+        Some(v) => v,
+        None => return api_error(StatusCode::BAD_REQUEST, "prompt is required"),
+    };
+    let prompt_ids = match prompt_val {
+        Value::String(s) => match state.tokenizer.encode(s) {
+            Ok(ids) => ids.into_iter().map(i64::from).collect::<Vec<_>>(),
+            Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+        },
+        Value::Array(arr) => {
+            let mut ids = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item.as_i64() {
+                    Some(id) => ids.push(id),
+                    None => {
+                        return api_error(
+                            StatusCode::BAD_REQUEST,
+                            "prompt array elements must be integer token IDs",
+                        )
+                    }
+                }
+            }
+            if ids.is_empty() {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "prompt token array cannot be empty",
+                );
+            }
+            ids
+        }
+        _ => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "prompt must be a string or array of integer token IDs",
+            )
+        }
+    };
+    openai_generate(state, body, headers, prompt_ids, false, None, vec![]).await
+}
+
+async fn chat_completions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "messages must be a non-empty array",
+        );
+    };
+    if messages.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "messages must be a non-empty array",
+        );
+    }
+    if state.vision.is_some() {
+        let (prompt, ids, images) = match prepare_vision_chat(&state, messages).await {
+            Ok(p) => p,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        };
+        let vision_tools = match tool_spec_for(&state, &body) {
+            Ok(spec) => spec,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        };
+        let reasoning = ReasoningSpec::for_request(&state, &prompt, &vision_tools);
+        return openai_generate(state, body, headers, ids, true, Some(reasoning), images).await;
+    }
+    let tools = body.get("tools");
+    if tools.is_some_and(|v| !v.is_array()) {
+        return api_error(StatusCode::BAD_REQUEST, "tools must be an array");
+    }
+    let tool_spec = match tool_spec_for(&state, &body) {
+        Ok(s) => s,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let kwargs = body.get("chat_template_kwargs");
+    if kwargs.is_some_and(|v| !v.is_object()) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "chat_template_kwargs must be an object",
+        );
+    }
+    let mut template_kwargs = kwargs
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if tool_spec.forced_schema.is_some()
+        || body
+            .get("response_format")
+            .is_some_and(|f| f["type"] != "text")
+    {
+        template_kwargs.insert("enable_thinking".into(), json!(false));
+    }
+    if let Some(effort) = body.get("reasoning_effort") {
+        if !effort.is_string() {
+            return api_error(StatusCode::BAD_REQUEST, "reasoning_effort must be a string");
+        }
+        template_kwargs.insert("reasoning_effort".into(), effort.clone());
+    }
+    let prompt = match render_messages(
+        &state,
+        Value::Array(messages.clone()),
+        if tool_spec.disabled {
+            None
+        } else {
+            tools.cloned()
+        },
+        Some(template_kwargs),
+    ) {
+        Ok(prompt) => prompt,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    let prompt_ids = match state.tokenizer.encode(&prompt) {
+        Ok(ids) => ids.into_iter().map(i64::from).collect::<Vec<_>>(),
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    let reasoning = ReasoningSpec::for_request(&state, &prompt, &tool_spec);
+    openai_generate(
+        state,
+        body,
+        headers,
+        prompt_ids,
+        true,
+        Some(reasoning),
+        vec![],
+    )
+    .await
+}
+
+async fn encode_images(state: &AppState, urls: Vec<String>) -> Result<Vec<Vec<Vec<f32>>>, String> {
+    if urls.is_empty() {
+        return Ok(vec![]);
+    }
+    if urls.len() > 4 {
+        return Err("native vision accepts at most four images per request".into());
+    }
+    let vision = state
+        .vision
+        .clone()
+        .ok_or("load the matching --mmproj for native image inference")?;
+    let permit = state
+        .vision_admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "image encoder is busy")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        urls.iter()
+            .map(|url| vision.encode_data_url(url))
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+    .map_err(|_| "image encoder worker failed")?
+}
+
+async fn image_embeddings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    let Some(url) = body.get("image_url").and_then(Value::as_str) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "image_url must contain a PNG/JPEG data URL",
+        );
+    };
+    match encode_images(&state, vec![url.to_owned()]).await {
+        Ok(images) => Json(json!({"model":state.model_name,"engine":"fllm-rust","tokens":images[0].len(),"dimensions":state.hidden_size,"data":images[0]})).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+type ImageOverrides = Vec<(usize, Vec<f32>)>;
+async fn prepare_vision_chat(
+    state: &AppState,
+    messages: &[Value],
+) -> Result<(String, Vec<i64>, ImageOverrides), String> {
+    let vision = state.vision.as_ref().ok_or("vision model is not loaded")?;
+    let mut normalized = Vec::new();
+    let mut urls = Vec::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or("missing chat role")?;
+        if !matches!(role, "system" | "user" | "assistant") {
+            return Err(
+                "this vision chat template supports system, user and assistant roles".into(),
+            );
+        }
+        let mut parts = Vec::new();
+        match message.get("content") {
+            Some(Value::String(text)) => parts.push(json!({"type":"text","text":text})),
+            Some(Value::Array(content)) => {
+                for part in content {
+                    match part.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            let text = part
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .ok_or("image chat text part must contain text")?;
+                            parts.push(json!({"type":"text","text":text}));
+                        }
+                        Some("image_url") => {
+                            let url = part
+                                .get("image_url")
+                                .and_then(|v| v.get("url"))
+                                .and_then(Value::as_str)
+                                .ok_or("image_url.url must be a data URL")?;
+                            urls.push(url.to_owned());
+                            parts.push(json!({"type":"image"}));
+                        }
+                        _ => return Err("unsupported vision chat content part".into()),
+                    }
+                }
+            }
+            _ => return Err("vision chat content must be text or content parts".into()),
+        }
+        if parts.is_empty() {
+            parts.push(json!({"type":"text","text":""}));
+        }
+        normalized.push(json!({"role":role,"content":parts}));
+    }
+    if urls.len() > 4 {
+        return Err("native vision accepts at most four images per request".into());
+    }
+    let mut prompt = chat_environment()
+        .render_str(
+            &state.chat_template,
+            json!({"messages":normalized,"add_generation_prompt":true}),
+        )
+        .map_err(|e| format!("vision chat template failed: {e}"))?;
+    if prompt.matches("<image>").count() != urls.len() {
+        return Err("image markers in chat text are reserved for uploaded images".into());
+    }
+    let image_token = state.tokenizer.encode_without_bos("<image>")?;
+    if image_token.len() != 1 {
+        return Err("vision decoder has no atomic image token".into());
+    }
+    let expanded = format!(
+        "<fake_token_around_image><global-img>{}<fake_token_around_image>",
+        "<image>".repeat(vision.tokens)
+    );
+    prompt = prompt.replace("<image>", &expanded);
+    let ids = state
+        .tokenizer
+        .encode(&prompt)?
+        .into_iter()
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    if ids.len() >= state.max_context {
+        return Err("image prompt exceeds model context".into());
+    }
+    let positions = ids
+        .iter()
+        .enumerate()
+        .filter_map(|(p, &id)| (id == i64::from(image_token[0])).then_some(p))
+        .collect::<Vec<_>>();
+    if positions.len() != urls.len() * vision.tokens {
+        return Err("image token positions do not match projector output".into());
+    }
+    let vectors = encode_images(state, urls).await?.into_iter().flatten();
+    let overrides = positions.into_iter().zip(vectors).collect();
+    Ok((prompt, ids, overrides))
+}
+
+fn input_tokens(state: &AppState, input: &Value) -> Result<Vec<i64>, String> {
+    match input {
+        Value::String(s) if !s.is_empty() => state
+            .tokenizer
+            .encode(s)
+            .map(|v| v.into_iter().map(i64::from).collect()),
+        Value::Array(items) if !items.is_empty() => items
+            .iter()
+            .map(|v| {
+                v.as_i64()
+                    .filter(|n| *n >= 0 && (*n as usize) < state.tokenizer.vocab_size())
+                    .ok_or_else(|| {
+                        "token IDs must be integers within the model vocabulary".to_string()
+                    })
+            })
+            .collect(),
+        _ => Err("input must be a non-empty string or token ID array".into()),
+    }
+}
+
+async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    if let Some(model) = body.get("model").and_then(Value::as_str) {
+        if model != state.model_name {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "requested embedding model is not loaded",
+            );
+        }
+    }
+    let encoding = body
+        .get("encoding_format")
+        .and_then(Value::as_str)
+        .unwrap_or("float");
+    if !matches!(encoding, "float" | "base64") {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "encoding_format must be float or base64",
+        );
+    }
+    if body
+        .get("dimensions")
+        .is_some_and(|d| d.as_u64() != Some(state.hidden_size as u64))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "dimensions must equal the loaded model hidden size",
+        );
+    }
+    let input = body
+        .get("input")
+        .or_else(|| body.get("prompt"))
+        .unwrap_or(&Value::Null);
+    let inputs = match input {
+        Value::Array(items) if items.first().is_some_and(|v| v.is_string() || v.is_array()) => {
+            items.clone()
+        }
+        _ => vec![input.clone()],
+    };
+    if inputs.is_empty() || inputs.len() > 32 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "embedding batch must contain 1 to 32 inputs",
+        );
+    }
+    let mut tokenized = Vec::new();
+    for input in &inputs {
+        match input_tokens(&state, input) {
+            Ok(ids) if ids.len() <= state.max_context => tokenized.push(ids),
+            Ok(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "embedding input exceeds model context",
+                )
+            }
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        }
+    }
+    let pooling = body
+        .get("pooling")
+        .and_then(Value::as_str)
+        .unwrap_or("mean");
+    if !matches!(pooling, "mean" | "last") {
+        return api_error(StatusCode::BAD_REQUEST, "pooling must be mean or last");
+    }
+    let _permit = match state.admission.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference request limit reached",
+            )
+        }
+    };
+    let started = Instant::now();
+    let mut data = Vec::new();
+    let mut vectors = Vec::new();
+    let mut count = 0;
+    for (index, tokens) in tokenized.into_iter().enumerate() {
+        count += tokens.len();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.metrics.observability.queue();
+        if state
+            .worker
+            .send(WorkerCommand::Embed {
+                tokens,
+                pooling: pooling.into(),
+                output: tx,
+            })
+            .is_err()
+        {
+            state.metrics.observability.dequeue();
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "model worker unavailable");
+        }
+        let vector = match rx.await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return api_error(StatusCode::SERVICE_UNAVAILABLE, &e),
+            Err(_) => {
+                return api_error(StatusCode::SERVICE_UNAVAILABLE, "embedding worker stopped")
+            }
+        };
+        let encoded = if encoding == "base64" {
+            use base64::Engine;
+            let bytes: Vec<u8> = vector
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            json!(base64::engine::general_purpose::STANDARD.encode(bytes))
+        } else {
+            json!(vector)
+        };
+        data.push(json!({"object":"embedding","index":index,"embedding":encoded}));
+        vectors.push(vector);
+    }
+    // Both standard API surfaces use the same transformer execution and pooling.
+    Json(json!({"object":"list","model":state.model_name,"data":data,"usage":{"prompt_tokens":count,"total_tokens":count},
+                "embeddings":vectors,"embedding":vectors.first(),"prompt_eval_count":count,"total_duration":started.elapsed().as_nanos() as u64})).into_response()
+}
+
+#[derive(Debug)]
+struct StopUpdate {
+    delta: String,
+    matched: bool,
+}
+
+struct StopFilter {
+    stops: Vec<String>,
+    emitted: String,
+    ignore_before: usize,
+}
+
+impl StopFilter {
+    fn new(stops: Vec<String>) -> Self {
+        Self {
+            stops: stops.into_iter().filter(|stop| !stop.is_empty()).collect(),
+            emitted: String::new(),
+            ignore_before: 0,
+        }
+    }
+
+    fn update_with_minimum(&mut self, full_text: &str, final_chunk: bool, allow_stop: bool) -> StopUpdate {
+        if allow_stop { return self.update(full_text, final_chunk); }
+        self.ignore_before = full_text.trim_end_matches('\u{fffd}').len();
+        let stops = std::mem::take(&mut self.stops);
+        let result = self.update(full_text, final_chunk);
+        self.stops = stops;
+        result
+    }
+    fn update(&mut self, full_text: &str, final_chunk: bool) -> StopUpdate {
+        // A byte-level token can end halfway through a UTF-8 code point. The
+        // tokenizer temporarily decodes that suffix as U+FFFD; hold it until
+        // the next token completes the bytes, or generation actually ends.
+        let full_text = if final_chunk {
+            full_text
+        } else {
+            full_text.trim_end_matches('\u{fffd}')
+        };
+        let matched_at = self
+            .stops
+            .iter()
+            .filter_map(|stop| full_text.get(self.ignore_before..)?.find(stop).map(|at| at + self.ignore_before))
+            .min();
+        let visible_end = if let Some(index) = matched_at {
+            index
+        } else if final_chunk {
+            full_text.len()
+        } else {
+            safe_stop_prefix_end(full_text, &self.stops)
+        };
+        let visible = &full_text[..visible_end];
+        let delta = visible
+            .strip_prefix(&self.emitted)
+            .unwrap_or(visible)
+            .to_owned();
+        self.emitted = visible.to_owned();
+        StopUpdate {
+            delta,
+            matched: matched_at.is_some(),
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.emitted
+    }
+}
+
+fn request_constraint(
+    state: &AppState,
+    body: &Value,
+) -> Result<Option<llguidance::Matcher>, String> {
+    crate::structured::request_grammar(body)?
+        .map(|grammar| crate::structured::matcher(&state.grammar_factory, grammar))
+        .transpose()
+}
+
+fn request_sampling(
+    state: &AppState,
+    body: &Value,
+    defaults: crate::sampling::SamplingParams,
+) -> Result<crate::sampling::SamplingParams, String> {
+    let mut merged = state.sampling_defaults.clone();
+    merged.temperature = defaults.temperature;
+    merged.top_p = defaults.top_p;
+    merged.top_k = defaults.top_k;
+    let mut params = crate::parameters::parse_sampling(body, merged, state.tokenizer.vocab_size())?;
+    if params.dry_multiplier > 0.0 {
+        let breakers = match body.get("dry_sequence_breakers") {
+            None => vec!["\n", ":", "\"", "*"],
+            Some(value) => value
+                .as_array()
+                .ok_or("dry_sequence_breakers must be an array of strings")?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .ok_or("dry_sequence_breakers must contain strings")
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        for breaker in breakers {
+            if !breaker.is_empty() {
+                params.dry_breakers.push(
+                    state
+                        .tokenizer
+                        .encode_without_bos(breaker)?
+                        .into_iter()
+                        .map(i64::from)
+                        .collect(),
+                );
+            }
+        }
+    }
+    Ok(params)
+}
+
+fn parse_stop_strings(value: Option<&Value>) -> Result<Vec<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(stop)) => Ok(if stop.is_empty() {
+            Vec::new()
+        } else {
+            vec![stop.clone()]
+        }),
+        Some(Value::Array(values)) => {
+            let mut stops = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(stop) = value.as_str() else {
+                    return Err("stop must be a string or an array of strings".into());
+                };
+                if !stop.is_empty() {
+                    stops.push(stop.to_owned());
+                }
+            }
+            Ok(stops)
+        }
+        _ => Err("stop must be a string or an array of strings".into()),
+    }
+}
+
+fn safe_stop_prefix_end(text: &str, stops: &[String]) -> usize {
+    let max_stop_chars = stops
+        .iter()
+        .map(|stop| stop.chars().count())
+        .max()
+        .unwrap_or(0);
+    if max_stop_chars <= 1 || text.is_empty() {
+        return text.len();
+    }
+    let offsets = text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .collect::<Vec<_>>();
+    let char_count = offsets.len() - 1;
+    let max_suffix = (max_stop_chars - 1).min(char_count);
+    for held_chars in (1..=max_suffix).rev() {
+        let start = offsets[char_count - held_chars];
+        let suffix = &text[start..];
+        if stops.iter().any(|stop| stop.starts_with(suffix)) {
+            return start;
+        }
+    }
+    text.len()
+}
+
+fn openai_sampling_controls(
+    body: &Value,
+    chat: bool,
+    vocab: usize,
+    sampling: &mut crate::sampling::SamplingParams,
+) -> Result<(), String> {
+    let top = body
+        .get("top_logprobs")
+        .map(|v| {
+            v.as_u64()
+                .filter(|v| *v <= 20)
+                .ok_or("top_logprobs must be an integer from 0 to 20")
+        })
+        .transpose()?;
+    sampling.logprobs = if chat {
+        match body.get("logprobs") {
+            None | Some(Value::Null) | Some(Value::Bool(false)) if top.is_none() => None,
+            Some(Value::Bool(true)) => Some(top.unwrap_or(0) as usize),
+            _ => {
+                return Err(
+                    "chat logprobs must be boolean; top_logprobs requires logprobs:true".into(),
+                )
+            }
+        }
+    } else {
+        match body.get("logprobs") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .filter(|n| *n <= 5)
+                    .ok_or("logprobs must be an integer from 0 to 5")? as usize,
+            ),
+        }
+    };
+    if let Some(v) = body.get("min_tokens") {
+        sampling.min_tokens = usize::try_from(
+            v.as_u64()
+                .ok_or("min_tokens must be a non-negative integer")?,
+        )
+        .map_err(|_| "min_tokens is too large")?;
+    }
+    if let Some(v) = body.get("ignore_eos") {
+        sampling.ignore_eos = v.as_bool().ok_or("ignore_eos must be boolean")?;
+    }
+    if let Some(v) = body.get("echo") {
+        v.as_bool().ok_or("echo must be boolean")?;
+    }
+    if let Some(v) = body.get("stop_token_ids") {
+        sampling.stop_token_ids = v
+            .as_array()
+            .filter(|v| v.len() <= 256)
+            .ok_or("stop_token_ids must be an array with at most 256 IDs")?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .filter(|id| *id < vocab as u64)
+                    .map(|id| id as i64)
+                    .ok_or_else(|| "stop_token_ids contains an invalid vocabulary ID".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+    }
+    if let Some(v) = body.get("stream_options") {
+        if !v.is_object() || v.get("include_usage").is_some_and(|v| !v.is_boolean()) {
+            return Err("stream_options must be an object with boolean include_usage".into());
+        }
+    }
+    Ok(())
+}
+
+fn openai_usage(prompt: usize, completion: usize, cached: usize, reasoning: usize) -> Value {
+    json!({"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":prompt+completion,
+        "prompt_tokens_details":{"cached_tokens":cached.min(prompt)},
+        "completion_tokens_details":{"reasoning_tokens":reasoning.min(completion)}})
+}
+
+// llguidance prefixes control-token vocabulary entries with an internal 0xff.
+// That marker is not a byte produced by the model's textual token representation.
+fn probability_token_bytes(trie: &llguidance::toktrie::TokTrie, id: u32) -> &[u8] {
+    let bytes = trie.token(id);
+    if trie.is_special_token(id) {
+        bytes.get(1..).unwrap_or_default()
+    } else {
+        bytes
+    }
+}
+
+fn count_reasoning_tokens(state: &AppState, ids: &[u32], reasoning: &str) -> usize {
+    if reasoning.is_empty() {
+        return 0;
+    }
+    // Match original generated bytes, rather than counting a second tokenization.
+    let trie = state.grammar_factory.tok_env().tok_trie();
+    let raw: Vec<u8> = ids
+        .iter()
+        .flat_map(|id| probability_token_bytes(trie, *id).iter().copied())
+        .collect();
+    let Some(start) = raw
+        .windows(reasoning.len())
+        .position(|w| w == reasoning.as_bytes())
+    else {
+        return 0;
+    };
+    let end = start + reasoning.len();
+    let mut at = 0;
+    ids.iter()
+        .filter(|id| {
+            let a = at;
+            at += probability_token_bytes(trie, **id).len();
+            a < end && at > start
+        })
+        .count()
+}
+fn empty_completion_logprobs() -> Value {
+    json!({"tokens":[],"token_logprobs":[],"top_logprobs":[],"text_offset":[]})
+}
+#[derive(Default)]
+struct VisibleLogprobs {
+    raw: Vec<u8>,
+    records: Vec<(usize, usize, Value, bool)>,
+}
+impl VisibleLogprobs {
+    fn push(&mut self, state: &AppState, event: &crate::runtime::TokenEvent) {
+        let Some(lp) = &event.logprobs else {
+            return;
+        };
+        let trie = state.grammar_factory.tok_env().tok_trie();
+        let bytes = probability_token_bytes(trie, event.token_id as u32);
+        let start = self.raw.len();
+        self.raw.extend_from_slice(bytes);
+        let top: Vec<Value> = lp.top.iter().map(|&(id, logprob)| {
+            let bytes = probability_token_bytes(trie, id);
+            json!({"token":String::from_utf8_lossy(bytes),"logprob":logprob.max(-9999.0),"bytes":bytes})
+        }).collect();
+        self.records.push((start, self.raw.len(), json!({"token":String::from_utf8_lossy(bytes),"logprob":lp.logprob.max(-9999.0),"bytes":bytes,"top_logprobs":top}), false));
+    }
+    fn take(&mut self, visible: &str, chat: bool, echo_offset: usize) -> Value {
+        let mut content = Vec::new();
+        let mut offsets = Vec::new();
+        if !visible.is_empty() {
+            if let Some(start) = self
+                .raw
+                .windows(visible.len())
+                .rposition(|w| w == visible.as_bytes())
+            {
+                let end = start + visible.len();
+                for (a, b, lp, sent) in &mut self.records {
+                    if !*sent && *a >= start && *b <= end && b > a {
+                        content.push(lp.clone());
+                        let mut offset = *a - start;
+                        while !visible.is_char_boundary(offset) {
+                            offset = offset.saturating_sub(1);
+                        }
+                        offsets.push(echo_offset + visible[..offset].chars().count());
+                        *sent = true;
+                    }
+                }
+            }
+        }
+        if chat {
+            return json!({"content":content,"refusal":null});
+        }
+        let tops: Vec<Value> = content
+            .iter()
+            .map(|v| {
+                let mut map = Map::new();
+                if let Some(top) = v["top_logprobs"].as_array() {
+                    for t in top {
+                        if let Some(token) = t["token"].as_str() {
+                            map.insert(token.to_string(), t["logprob"].clone());
+                        }
+                    }
+                }
+                if let Some(token) = v["token"].as_str() {
+                    map.insert(token.to_owned(), v["logprob"].clone());
+                }
+                Value::Object(map)
+            })
+            .collect();
+        json!({"tokens":content.iter().map(|v| v["token"].clone()).collect::<Vec<_>>(),
+            "token_logprobs":content.iter().map(|v| v["logprob"].clone()).collect::<Vec<_>>(),
+            "top_logprobs":tops,"text_offset":offsets})
+    }
+}
+
+struct OpenaiChoice {
+    ids: Vec<u32>,
+    probabilities: VisibleLogprobs,
+    cached_tokens: usize,
+    reasoning_tokens: usize,
+    filter: StopFilter,
+    sent_reasoning: usize,
+    sent_content: usize,
+    sent_tools: usize,
+    done: bool,
+    reason: &'static str,
+}
+impl OpenaiChoice {
+    fn new(stops: &[String]) -> Self {
+        Self {
+            ids: Vec::new(),
+            probabilities: VisibleLogprobs::default(),
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+            filter: StopFilter::new(stops.to_vec()),
+            sent_reasoning: 0,
+            sent_content: 0,
+            sent_tools: 0,
+            done: false,
+            reason: "stop",
+        }
+    }
+}
+
+async fn openai_generate(
+    state: Arc<AppState>,
+    mut body: Value,
+    headers: HeaderMap,
+    prompt: Vec<i64>,
+    is_chat: bool,
+    reasoning: Option<ReasoningSpec>,
+    images: Vec<(usize, Vec<f32>)>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    let empty_tool_request = json!({});
+    let tool_spec = match tool_spec_for(&state, if is_chat {
+        &body
+    } else {
+        &empty_tool_request
+    }) {
+        Ok(spec) => spec,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    if let Some(schema) = &tool_spec.forced_schema {
+        if body.get("response_format").is_some() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "required tool calls and response_format cannot be combined",
+            );
+        }
+        body["response_format"] =
+            json!({"type":"json_schema","json_schema":{"name":"tool_call","schema":schema}});
+    }
+    let n = match body.get("n") {
+        None => 1,
+        Some(v) => match v.as_u64().filter(|n| (1..=16).contains(n)) {
+            Some(n) => n as usize,
+            None => return api_error(StatusCode::BAD_REQUEST, "n must be an integer from 1 to 16"),
+        },
+    };
+    if n > 1
+        && (!state.shared_choices
+            || !images.is_empty()
+            || tool_spec.forced_schema.is_some()
+            || body.get("response_format").is_some()
+            || body.get("grammar").is_some()
+            || body.get("grammar_type").is_some())
+    {
+        return api_error(StatusCode::BAD_REQUEST, "n > 1 requires CPU compute (--device cpu or auto resolving to CPU), a stateless model, no draft/MTP engine, and unconstrained text generation");
+    }
+    let temperature = body
+        .get("temperature")
+        .and_then(Value::as_f64)
+        .unwrap_or(state.default_temperature.unwrap_or(0.0));
+    if !temperature.is_finite() || temperature < 0.0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "temperature must be a non-negative finite number",
+        );
+    }
+    let top_p = body
+        .get("top_p")
+        .and_then(Value::as_f64)
+        .unwrap_or(state.default_top_p.unwrap_or(1.0));
+    if !top_p.is_finite() || !(0.0..=1.0).contains(&top_p) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "top_p must be a finite number between 0.0 and 1.0",
+        );
+    }
+    let top_k = body
+        .get("top_k")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(state.default_top_k.unwrap_or(0));
+    let repetition_penalty = body
+        .get("repetition_penalty")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or(1.0);
+    let sampling = crate::sampling::SamplingParams {
+        temperature,
+        top_p,
+        top_k,
+        repetition_penalty,
+        ..Default::default()
+    };
+    let mut sampling = match request_sampling(&state, &body, sampling) {
+        Ok(params) => params,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    if let Err(error) =
+        openai_sampling_controls(&body, is_chat, state.tokenizer.vocab_size(), &mut sampling)
+    {
+        return api_error(StatusCode::BAD_REQUEST, &error);
+    }
+    if body.get("best_of").is_some() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "best_of is not supported; use n for independent choices",
+        );
+    }
+    sampling.choices = n;
+    let min_tokens = sampling.min_tokens;
+    let logprobs_requested = sampling.logprobs.is_some();
+    let include_usage = body["stream_options"]["include_usage"]
+        .as_bool()
+        .unwrap_or(false);
+    let echo = !is_chat && body["echo"].as_bool().unwrap_or(false);
+    let echo_text = if echo {
+        if let Some(text) = body["prompt"].as_str() {
+            text.to_owned()
+        } else {
+            match state.tokenizer.decode(
+                &prompt.iter().map(|id| *id as u32).collect::<Vec<_>>(),
+                false,
+            ) {
+                Ok(text) => text,
+                Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+            }
+        }
+    } else {
+        String::new()
+    };
+    let stop_strings = match parse_stop_strings(body.get("stop")) {
+        Ok(stops) => stops,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    let max_tokens = match body
+        .get("max_completion_tokens")
+        .or_else(|| body.get("max_tokens"))
+    {
+        None | Some(Value::Null) => 128,
+        Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+            Some(n) => n,
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "max_completion_tokens/max_tokens must be a non-negative integer",
+                )
+            }
+        },
+    };
+    if sampling.min_tokens > max_tokens {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "min_tokens must not exceed max_completion_tokens/max_tokens",
+        );
+    }
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.model_name)
+        .to_owned();
+    let id = state.next_request.fetch_add(1, Ordering::Relaxed);
+    let request_id = format!("req_{id:016x}");
+    let created = unix_now();
+    if max_tokens == 0 {
+        return empty_openai_response(
+            (include_usage, logprobs_requested, &echo_text, n),
+            &request_id,
+            created,
+            &model,
+            is_chat,
+            stream,
+            prompt.len(),
+        );
+    }
+    let mut rx = match submit_constrained(
+        &state,
+        &request_id,
+        prompt.clone(),
+        max_tokens,
+        sampling,
+        match request_constraint(&state, &body) {
+            Ok(c) => c,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        },
+        images,
+    ) {
+        Ok(rx) => rx,
+        Err(response) => return response,
+    };
+    state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    if stream {
+        let state2 = state.clone();
+        let reasoning = reasoning.clone();
+        let stream_body = async_stream::stream! {
+            let mut choice_states = (0..n).map(|_| OpenaiChoice::new(&stop_strings)).collect::<Vec<_>>();
+            if echo {
+              for choice_index in 0..n {
+                let mut choice = json!({"index":choice_index,"text":echo_text,"finish_reason":null,"logprobs":null});
+                if logprobs_requested { choice["logprobs"] = empty_completion_logprobs(); }
+                yield Ok::<Event, Infallible>(Event::default().data(json!({"id":request_id,"object":"text_completion","created":created,"model":model,"choices":[choice],"usage":null}).to_string()));
+              }
+            }
+            while let Some(message) = rx.recv().await {
+                match message {
+                    Ok(event) => {
+                        let choice_index = event.choice_index;
+                        let Some(current) = choice_states.get_mut(choice_index) else {
+                            yield Ok::<Event, Infallible>(Event::default().event("error").data(json!({"error":"invalid runtime choice index"}).to_string())); return;
+                        };
+                        if current.done { continue; }
+                        current.cached_tokens = current.cached_tokens.max(event.cached_prompt_tokens);
+                        if logprobs_requested { current.probabilities.push(&state2, &event); }
+                        current.ids.push(event.token_id as u32);
+                        state2.metrics.generated_tokens.fetch_add(1, Ordering::Relaxed);
+                        let full = match decode_chat_text(&state2.tokenizer, &current.ids, reasoning.as_ref()) {
+                            Ok(full) => full,
+                            Err(error) => {
+                                yield Ok::<Event, Infallible>(Event::default().event("error").data(json!({"error":error}).to_string()));
+                                return;
+                            }
+                        };
+                        let update = current.filter.update_with_minimum(&full, event.finished, current.ids.len() >= min_tokens);
+                        let held_text = hold_incomplete_utf8(current.filter.text(), update.matched || event.finished);
+                        let tool_text = reasoning.as_ref().map(|spec| spec.split_views(held_text, update.matched || event.finished).content).unwrap_or_else(|| held_text.to_string());
+                        let (visible_content, tool_calls) = match tool_spec.parse_reply(&tool_text, update.matched || event.finished, &format!("{request_id}_{choice_index}")) {
+                            Ok(parts) => parts,
+                            Err(error) => { yield Ok::<Event,Infallible>(Event::default().event("error").data(json!({"error":error}).to_string())); return; }
+                        };
+                        if let Some(spec) = reasoning.as_ref() {
+                            let parts = spec.split_views(held_text, update.matched || event.finished);
+                            current.reasoning_tokens = count_reasoning_tokens(&state2, &current.ids, &parts.reasoning);
+                        }
+                        if let (true, Some(spec)) = (is_chat, reasoning.as_ref()) {
+                            let parts = spec.split_views(held_text, update.matched || event.finished);
+                            if parts.reasoning.len() > current.sent_reasoning {
+                                let delta = parts.reasoning.get(current.sent_reasoning..).unwrap_or("").to_owned();
+                                current.sent_reasoning = parts.reasoning.len();
+                                let choice = json!({"index":choice_index,"delta":{"reasoning_content":delta},"finish_reason":null,"logprobs":null});
+                                let obj = json!({"id":request_id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[choice],"usage":null});
+                                yield Ok::<Event, Infallible>(Event::default().data(obj.to_string()));
+                            }
+                            if visible_content.len() > current.sent_content {
+                                let delta = visible_content.get(current.sent_content..).unwrap_or("").to_owned();
+                                current.sent_content = visible_content.len();
+                                let mut choice = json!({"index":choice_index,"delta":{"content":delta},"finish_reason":null,"logprobs":null});
+                                if logprobs_requested { choice["logprobs"] = current.probabilities.take(&visible_content, true, echo_text.chars().count()); }
+                                let obj = json!({"id":request_id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[choice],"usage":null});
+                                yield Ok::<Event, Infallible>(Event::default().data(obj.to_string()));
+                            }
+                        } else if !is_chat && !update.delta.is_empty() || is_chat && visible_content.len() > current.sent_content {
+                            let delta = if is_chat { let delta = visible_content.get(current.sent_content..).unwrap_or("").to_owned(); current.sent_content = visible_content.len(); delta } else { update.delta.clone() };
+                            let mut choice = if is_chat {
+                                json!({"index":choice_index,"delta":{"content":delta},"finish_reason":null,"logprobs":null})
+                            } else {
+                                json!({"index":choice_index,"text":update.delta,"finish_reason":null,"logprobs":null})
+                            };
+                            if logprobs_requested { choice["logprobs"] = current.probabilities.take(if is_chat { &visible_content } else { held_text }, is_chat, echo_text.chars().count()); }
+                            let obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"choices":[choice],"usage":null});
+                            yield Ok::<Event, Infallible>(Event::default().data(obj.to_string()));
+                        }
+                        for (index, call) in tool_calls.iter().enumerate().skip(current.sent_tools) {
+                            let mut call = call.clone(); call["index"] = json!(index);
+                            let obj = json!({"id":request_id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":choice_index,"delta":{"tool_calls":[call]},"finish_reason":null,"logprobs":null}],"usage":null});
+                            yield Ok::<Event,Infallible>(Event::default().data(obj.to_string()));
+                        }
+                        current.sent_tools = current.sent_tools.max(tool_calls.len());
+                        if update.matched || event.finished {
+                            let reason = if current.sent_tools > 0 { "tool_calls" } else if update.matched { "stop" } else { event.finish_reason.unwrap_or("stop") };
+                            let choice = if is_chat {
+                                json!({"index":choice_index,"delta":{},"finish_reason":reason,"logprobs":null})
+                            } else {
+                                json!({"index":choice_index,"text":"","finish_reason":reason,"logprobs":null})
+                            };
+                            let final_obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"choices":[choice],"usage":null,"timings":rx.observation.timings(prompt.len())});
+                            yield Ok::<Event, Infallible>(Event::default().data(final_obj.to_string()));
+                            current.done = true;
+                            if choice_states.iter().all(|choice| choice.done) {
+                                if include_usage {
+                                    let completion = choice_states.iter().map(|c| c.ids.len()).sum();
+                                    let cached = choice_states.iter().map(|c| c.cached_tokens).max().unwrap_or(0);
+                                    let reasoning_count = choice_states.iter().map(|c| c.reasoning_tokens).sum();
+                                    let usage_chunk = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"choices":[],"usage":openai_usage(prompt.len(), completion, cached, reasoning_count)});
+                                    yield Ok::<Event, Infallible>(Event::default().data(usage_chunk.to_string()));
+                                }
+                                yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        yield Ok::<Event, Infallible>(Event::default().event("error").data(json!({"error":error}).to_string()));
+                        return;
+                    }
+                }
+            }
+        };
+        Sse::new(stream_body)
+            .keep_alive(KeepAlive::default())
+            .into_response()
+    } else {
+        let mut choice_states = (0..n)
+            .map(|_| OpenaiChoice::new(&stop_strings))
+            .collect::<Vec<_>>();
+        while let Some(message) = rx.recv().await {
+            let event = match message {
+                Ok(event) => event,
+                Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+            };
+            let Some(current) = choice_states.get_mut(event.choice_index) else {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid runtime choice index",
+                );
+            };
+            if current.done {
+                continue;
+            }
+            current.cached_tokens = current.cached_tokens.max(event.cached_prompt_tokens);
+            if logprobs_requested {
+                current.probabilities.push(&state, &event);
+            }
+            current.ids.push(event.token_id as u32);
+            state
+                .metrics
+                .generated_tokens
+                .fetch_add(1, Ordering::Relaxed);
+            let visible_ids = &current.ids;
+            let full = match decode_chat_text(&state.tokenizer, visible_ids, reasoning.as_ref()) {
+                Ok(full) => full,
+                Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+            };
+            let update = current.filter.update_with_minimum(&full, event.finished, current.ids.len() >= min_tokens);
+            if update.matched || event.finished {
+                current.reason = if update.matched {
+                    "stop"
+                } else {
+                    event.finish_reason.unwrap_or("stop")
+                };
+                current.done = true;
+            }
+            if choice_states.iter().all(|c| c.done) {
+                break;
+            }
+        }
+        if choice_states.iter().any(|c| !c.done) {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "generation ended before all choices completed",
+            );
+        }
+        let completion = choice_states.iter().map(|c| c.ids.len()).sum();
+        let cached = choice_states
+            .iter()
+            .map(|c| c.cached_tokens)
+            .max()
+            .unwrap_or(0);
+        let mut reasoning_count = 0;
+        let mut choices = Vec::with_capacity(n);
+        for (index, current) in choice_states.iter_mut().enumerate() {
+            let text = current.filter.text();
+            let parts = reasoning.as_ref().map(|spec| spec.split_views(text, true));
+            let reasoning_text = parts.as_ref().map(|p| p.reasoning.as_str()).unwrap_or("");
+            reasoning_count += count_reasoning_tokens(&state, &current.ids, reasoning_text);
+            let mut choice = if is_chat {
+                let final_content = parts.as_ref().map(|p| p.content.as_str()).unwrap_or(text);
+                let (content, calls) = match tool_spec.parse_reply(
+                    final_content,
+                    true,
+                    &format!("{request_id}_{index}"),
+                ) {
+                    Ok(parts) => parts,
+                    Err(error) => return api_error(StatusCode::UNPROCESSABLE_ENTITY, &error),
+                };
+                let mut msg = json!({"role":"assistant","content":content});
+                if !calls.is_empty() {
+                    if content.is_empty() {
+                        msg["content"] = Value::Null;
+                    }
+                    msg["tool_calls"] = json!(calls);
+                    current.reason = "tool_calls";
+                }
+                if parts.as_ref().is_some_and(|p| p.reasoning_found) {
+                    msg["reasoning_content"] = json!(reasoning_text);
+                }
+                json!({"index":index,"message":msg,"finish_reason":current.reason,"logprobs":null})
+            } else {
+                json!({"index":index,"text":format!("{echo_text}{text}"),"finish_reason":current.reason,"logprobs":null})
+            };
+            if logprobs_requested {
+                let visible = if is_chat {
+                    choice["message"]["content"].as_str().unwrap_or("")
+                } else {
+                    text
+                };
+                choice["logprobs"] =
+                    current
+                        .probabilities
+                        .take(visible, is_chat, echo_text.chars().count());
+            }
+            choices.push(choice);
+        }
+        Json(json!({"id":request_id,"object":if is_chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"choices":choices,
+            "usage":openai_usage(prompt.len(), completion, cached, reasoning_count),"timings":rx.observation.timings(prompt.len())})).into_response()
+    }
+}
+
+/// Hugging Face chat templates wrap assistant spans in `{% generation %}` ... `{% endgeneration %}`
+/// (training-mask markers). They do not change the rendered text and minijinja does not know them,
+/// so they become `{% if true %}` ... `{% endif %}` with the whitespace-control markers preserved.
+fn normalize_chat_template(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{%") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("%}") else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let inner = &after[..end];
+        let core = inner.trim_matches(|c: char| c == '-' || c == '+' || c.is_whitespace());
+        let replacement = match core {
+            "generation" => Some(" if true "),
+            "endgeneration" => Some(" endif "),
+            _ => None,
+        };
+        if let Some(body) = replacement {
+            let lead = inner.chars().next().filter(|c| *c == '-' || *c == '+');
+            let trail = inner.chars().last().filter(|c| *c == '-');
+            out.push_str("{%");
+            if let Some(c) = lead {
+                out.push(c);
+            }
+            out.push_str(body);
+            if let Some(c) = trail {
+                out.push(c);
+            }
+            out.push_str("%}");
+        } else {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Jinja environment for chat templates: Python string/dict methods (`.split()`, `.rstrip('\n')`,
+/// `.get()`), `raise_exception` and `strftime_now`, as used by Hugging Face templates.
+fn chat_environment() -> Environment<'static> {
+    let mut env = Environment::new();
+    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+    env.add_filter("tojson", crate::template_json::tojson);
+    env.add_function(
+        "raise_exception",
+        |message: String| -> Result<String, minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                message,
+            ))
+        },
+    );
+    env.add_function("strftime_now", |format: String| -> String {
+        chrono::Local::now().format(&format).to_string()
+    });
+    env
+}
+
+/// A token can end in the middle of a multi-byte character (emoji). The decoder shows that as
+/// U+FFFD until the next token completes it; streamed text must only ever grow, so trailing
+/// replacement characters are held back while generation is still running.
+fn hold_incomplete_utf8(text: &str, done: bool) -> &str {
+    if done {
+        text
+    } else {
+        text.trim_end_matches('\u{FFFD}')
+    }
+}
+
+fn decode_chat_text(
+    tokenizer: &TokenizerBundle,
+    ids: &[u32],
+    spec: Option<&ReasoningSpec>,
+) -> Result<String, String> {
+    match spec {
+        Some(spec) if !spec.keep.is_empty() => tokenizer.decode_keeping(ids, &spec.keep),
+        _ => tokenizer.decode(ids, true),
+    }
+}
+
+/// Where chat output switches from reasoning to the answer, plus the marker tokens the chat
+/// decoder keeps visible. The format lives in a [`ReasoningParser`] (see `reasoning.rs`);
+/// `--reasoning-parser` or the chat template chooses it, the prompt decides whether the
+/// thinking block is already open (templates such as K2-Horizon, DeepSeek-R1 or QwQ end the
+/// prompt with `<ifm|think>\n` / `<think>\n`).
+#[derive(Clone)]
+struct ReasoningSpec {
+    parser: Arc<dyn ReasoningParser>,
+    /// Marker tokens that are special tokens: kept as literal text when decoding. Holds the
+    /// reasoning tags and, when the request declares tools, the tool-call markers.
+    keep: Vec<(u32, String)>,
+}
+
+impl ReasoningSpec {
+    fn for_request(state: &AppState, prompt: &str, tools: &crate::tools::ToolSpec) -> Self {
+        let parser = state.reasoning_family.parser(prompt);
+        let mut literals = parser.markers();
+        literals.extend(tools.markers().into_iter().map(str::to_owned));
+        Self {
+            keep: keep_ids(state, literals),
+            parser,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_prompt(prompt: &str) -> Self {
+        Self {
+            parser: Family::Think.parser(prompt),
+            keep: Vec::new(),
+        }
+    }
+
+    /// Splits text produced so far. While generation is running a trailing partial tag is held
+    /// back, and outer whitespace of each part is trimmed so streamed deltas never need undoing.
+    fn split_views(&self, text: &str, complete: bool) -> ReasoningParts {
+        self.parser.split(text, complete)
+    }
+}
+
+/// The token ids of the given literals, for the literals that are special tokens.
+fn keep_ids<S: AsRef<str>>(state: &AppState, literals: impl IntoIterator<Item = S>) -> Vec<(u32, String)> {
+    let mut keep: Vec<(u32, String)> = Vec::new();
+    for literal in literals {
+        let literal = literal.as_ref();
+        if let Some(id) = state.tokenizer.special_token_id(literal) {
+            if !keep.iter().any(|(known, _)| *known == id) {
+                keep.push((id, literal.to_owned()));
+            }
+        }
+    }
+    keep
+}
+
+/// The request's tools, read with the tool-call format of the loaded model.
+fn tool_spec_for(state: &AppState, body: &Value) -> Result<crate::tools::ToolSpec, String> {
+    crate::tools::ToolSpec::from_request(body).map(|spec| spec.with_parser(state.tool_parser.clone()))
+}
+async fn sglang_model_info(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({
+        "model_path": state.model_name,
+        "model_type": state.model_arch,
+        "max_total_num_tokens": state.max_context,
+        "is_generation": true,
+    }))
+}
+
+async fn sglang_server_info(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({
+        "model_path": state.model_name,
+        "model_type": state.model_arch,
+        "version": "0.4.3-fllm-sglang",
+    }))
+}
+
+/// SGLang and Text Generation Inference share `POST /generate`: TGI sends `inputs`, SGLang
+/// sends `prompt`, `text` or `input_ids`, so the body decides which handler runs.
+async fn sglang_generate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if body.get("inputs").is_some() {
+        return api::tgi::generate(State(state), headers, Json(body)).await;
+    }
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    let prompt_text = body
+        .get("prompt")
+        .or_else(|| body.get("text"))
+        .and_then(Value::as_str);
+    let Some(prompt_text) = prompt_text else {
+        return api_error(StatusCode::BAD_REQUEST, "prompt or text is required");
+    };
+    let prompt_ids = match state.tokenizer.encode(prompt_text) {
+        Ok(ids) => ids.into_iter().map(i64::from).collect::<Vec<_>>(),
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let sampling_params = body.get("sampling_params").cloned().unwrap_or(json!({}));
+    let max_tokens = sampling_params
+        .get("max_new_tokens")
+        .or_else(|| body.get("max_new_tokens"))
+        .or_else(|| body.get("max_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(128) as usize;
+    let stop = match parse_stop_strings(sampling_params.get("stop").or_else(|| body.get("stop"))) {
+        Ok(stops) => stops,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    let temperature = sampling_params
+        .get("temperature")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let top_p = sampling_params
+        .get("top_p")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    let top_k = sampling_params
+        .get("top_k")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let repetition_penalty = sampling_params
+        .get("repetition_penalty")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or(1.0);
+    let sampling = crate::sampling::SamplingParams {
+        temperature,
+        top_p,
+        top_k,
+        repetition_penalty,
+        ..Default::default()
+    };
+    let sampling = match request_sampling(&state, &sampling_params, sampling) {
+        Ok(params) => params,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    let id = state.next_request.fetch_add(1, Ordering::Relaxed);
+    let request_id = format!("req_{id:016x}");
+    let mut rx = match submit_constrained(
+        &state,
+        &request_id,
+        prompt_ids.clone(),
+        max_tokens,
+        sampling,
+        match request_constraint(&state, &body) {
+            Ok(c) => c,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        },
+        vec![],
+    ) {
+        Ok(rx) => rx,
+        Err(response) => return response,
+    };
+    state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    let mut ids = Vec::<u32>::new();
+    let mut filter = StopFilter::new(stop);
+    let mut finish_reason = "length";
+    while let Some(message) = rx.recv().await {
+        match message {
+            Ok(event) => {
+                ids.push(event.token_id as u32);
+                state
+                    .metrics
+                    .generated_tokens
+                    .fetch_add(1, Ordering::Relaxed);
+                let full = match state.tokenizer.decode(&ids, true) {
+                    Ok(full) => full,
+                    Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+                };
+                let update = filter.update(&full, event.finished);
+                if update.matched {
+                    finish_reason = "stop";
+                    break;
+                }
+                if event.finished {
+                    finish_reason = event.finish_reason.unwrap_or("stop");
+                    break;
+                }
+            }
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        }
+    }
+    let text = filter.text();
+    Json(json!({
+        "text": text,
+        "meta_info": {
+            "id": request_id,
+            "finish_reason": {"type": finish_reason},
+            "prompt_tokens": prompt_ids.len(),
+            "completion_tokens": ids.len(),
+        }
+    }))
+    .into_response()
+}
+
+async fn ollama_generate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(mut body): Json<Value>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return api::ollama_extra::error_from(response).await;
+    }
+    // Ollama can steer the raw prompt with a system message or a FIM suffix; fLLM answers raw
+    // completions, so the system text is prefixed and the suffix points at /infill.
+    if body
+        .get("suffix")
+        .and_then(Value::as_str)
+        .is_some_and(|suffix| !suffix.is_empty())
+    {
+        return api::ollama_extra::error(
+            StatusCode::BAD_REQUEST,
+            "suffix is only supported by POST /infill",
+        );
+    }
+    if let Some(system) = body.get("system").and_then(Value::as_str) {
+        if !system.is_empty() {
+            let Some(prompt) = body.get("prompt").and_then(Value::as_str).map(str::to_owned) else {
+                return api::ollama_extra::error(StatusCode::BAD_REQUEST, "system requires a text prompt");
+            };
+            body["prompt"] = json!(format!("{system}\n\n{prompt}"));
+        }
+    }
+    let prompt_val = match body.get("prompt") {
+        Some(v) => v,
+        None => return api::ollama_extra::error(StatusCode::BAD_REQUEST, "prompt is required"),
+    };
+    let prompt = match prompt_val {
+        Value::String(s) => match state.tokenizer.encode(s) {
+            Ok(ids) => ids.into_iter().map(i64::from).collect(),
+            Err(e) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &e),
+        },
+        Value::Array(arr) => {
+            let mut ids = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item.as_i64() {
+                    Some(id) => ids.push(id),
+                    None => {
+                        return api::ollama_extra::error(
+                            StatusCode::BAD_REQUEST,
+                            "prompt array elements must be integer token IDs",
+                        )
+                    }
+                }
+            }
+            if ids.is_empty() {
+                return api::ollama_extra::error(
+                    StatusCode::BAD_REQUEST,
+                    "prompt token array cannot be empty",
+                );
+            }
+            ids
+        }
+        _ => {
+            return api::ollama_extra::error(
+                StatusCode::BAD_REQUEST,
+                "prompt must be a string or array of integer token IDs",
+            )
+        }
+    };
+    let images = match body.get("images").and_then(Value::as_array) {
+        Some(images) if !images.is_empty() => {
+            let Some(prompt) = prompt_val.as_str() else {
+                return api::ollama_extra::error(
+                    StatusCode::BAD_REQUEST,
+                    "token ID prompts cannot be combined with images",
+                );
+            };
+            let chat = [json!({"role":"user","content":prompt,"images":images})];
+            let (prompt, overrides) = match ollama_vision_prompt(&state, &chat, None, None).await {
+                Ok(vision) => vision,
+                Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
+            };
+            return ollama_generate_inner(state, body, headers, prompt, false, overrides).await;
+        }
+        _ => Vec::new(),
+    };
+    ollama_generate_inner(state, body, headers, prompt, false, images).await
+}
+
+async fn ollama_chat(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(mut body): Json<Value>,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return api::ollama_extra::error_from(response).await;
+    }
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return api::ollama_extra::error(
+            StatusCode::BAD_REQUEST,
+            "messages must be a non-empty array",
+        );
+    };
+    if messages.is_empty() {
+        return api::ollama_extra::error(
+            StatusCode::BAD_REQUEST,
+            "messages must be a non-empty array",
+        );
+    }
+    let tool_spec = match tool_spec_for(&state, &body) {
+        Ok(spec) => spec,
+        Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let messages = Value::Array(messages.clone());
+    if let Some(schema) = tool_spec.forced_schema {
+        if body.get("format").is_some() {
+            return api::ollama_extra::error(
+                StatusCode::BAD_REQUEST,
+                "required tool calls cannot be combined with format",
+            );
+        }
+        body["format"] = schema;
+    }
+    let tools = if tool_spec.disabled {
+        None
+    } else {
+        body.get("tools").cloned()
+    };
+    let kwargs = api::ollama_extra::thinking_kwargs(&body);
+    let list = messages.as_array().map_or(&[][..], Vec::as_slice);
+    let (prompt, images) = match ollama_vision_prompt(&state, list, tools, kwargs).await {
+        Ok(chat) => chat,
+        Err(e) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &e),
+    };
+    ollama_generate_inner(state, body, headers, prompt, true, images).await
+}
+
+/// Renders Ollama chat messages into prompt tokens. Messages that carry base64 images are
+/// rewritten into the content parts the native vision encoder understands; requests without
+/// images stay on the ordinary chat-template path.
+async fn ollama_vision_prompt(
+    state: &AppState,
+    messages: &[Value],
+    tools: Option<Value>,
+    kwargs: Option<Map<String, Value>>,
+) -> Result<(Vec<i64>, ImageOverrides), String> {
+    if !messages.iter().any(|m| {
+        m.get("images")
+            .and_then(Value::as_array)
+            .is_some_and(|images| !images.is_empty())
+    }) {
+        let prompt = render_messages(
+            state,
+            Value::Array(messages.to_vec()),
+            tools,
+            kwargs,
+        )?;
+        return Ok((state.tokenizer.encode(&prompt)?.into_iter().map(i64::from).collect(), Vec::new()));
+    }
+    if state.vision.is_none() {
+        return Err("images require a vision model, start the server with --mmproj".into());
+    }
+    let mut normalized = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or("missing chat role")?;
+        let mut parts = Vec::new();
+        match message.get("content") {
+            Some(Value::String(text)) if !text.is_empty() => {
+                parts.push(json!({"type":"text","text":text}))
+            }
+            None | Some(Value::Null) => {}
+            Some(_) => return Err("image chat content must be a plain string".into()),
+        }
+        for image in message
+            .get("images")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            let encoded = image
+                .as_str()
+                .ok_or("images must be base64 encoded strings")?;
+            if encoded.is_empty() {
+                return Err("images must be base64 encoded strings".into());
+            }
+            parts.push(json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{encoded}")}}));
+        }
+        if parts.is_empty() {
+            parts.push(json!({"type":"text","text":""}));
+        }
+        normalized.push(json!({"role":role,"content":parts}));
+    }
+    if tools.is_some() {
+        return Err("tool use is not supported together with images".into());
+    }
+    let (_prompt, ids, overrides) = prepare_vision_chat(state, &normalized).await?;
+    Ok((ids, overrides))
+}
+
+async fn ollama_generate_inner(
+    state: Arc<AppState>,
+    body: Value,
+    headers: HeaderMap,
+    prompt: Vec<i64>,
+    is_chat: bool,
+    images: ImageOverrides,
+) -> Response {
+    if let Err(response) = authorize(&state, &headers) {
+        return api::ollama_extra::error_from(response).await;
+    }
+    let tool_spec = match tool_spec_for(&state, &body) {
+        Ok(spec) => spec,
+        Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let tool_keep = keep_ids(&state, tool_spec.markers());
+    let options = body.get("options").and_then(Value::as_object);
+    if body.get("options").is_some_and(|v| !v.is_object()) {
+        return api::ollama_extra::error(StatusCode::BAD_REQUEST, "options must be an object");
+    }
+    let stop_strings = match parse_stop_strings(options.and_then(|opts| opts.get("stop"))) {
+        Ok(stops) => stops,
+        Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let temperature = options
+        .and_then(|o| o.get("temperature"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if !temperature.is_finite() || temperature < 0.0 {
+        return api::ollama_extra::error(
+            StatusCode::BAD_REQUEST,
+            "temperature must be a non-negative finite number",
+        );
+    }
+    let top_p = options
+        .and_then(|o| o.get("top_p"))
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    let top_k = options
+        .and_then(|o| o.get("top_k"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let repetition_penalty = options
+        .and_then(|o| {
+            o.get("repeat_penalty")
+                .or_else(|| o.get("repetition_penalty"))
+        })
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or(1.0);
+    let sampling = crate::sampling::SamplingParams {
+        temperature,
+        top_p,
+        top_k,
+        repetition_penalty,
+        ..Default::default()
+    };
+    let sampling = match request_sampling(
+        &state,
+        &Value::Object(options.cloned().unwrap_or_default()),
+        sampling,
+    ) {
+        Ok(params) => params,
+        Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
+    };
+    let default = 128usize.min(state.max_context.saturating_sub(prompt.len()));
+    let requested = options
+        .and_then(|o| o.get("num_predict"))
+        .and_then(Value::as_i64)
+        .unwrap_or(default as i64);
+    let max_tokens = if requested < 0 {
+        512usize.min(state.max_context.saturating_sub(prompt.len()))
+    } else {
+        requested as usize
+    };
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.model_name)
+        .to_owned();
+    let id = state.next_request.fetch_add(1, Ordering::Relaxed);
+    let request_id = format!("ollama_{id:016x}");
+    if max_tokens == 0 {
+        let mut out = Map::new();
+        out.insert("model".into(), json!(model));
+        out.insert("created_at".into(), json!(iso_now()));
+        if is_chat {
+            out.insert("message".into(), json!({"role":"assistant","content":""}));
+        } else {
+            out.insert("response".into(), json!(""));
+        }
+        out.insert("done".into(), json!(true));
+        out.insert("prompt_eval_count".into(), json!(prompt.len()));
+        out.insert("eval_count".into(), json!(0));
+        out.insert("done_reason".into(), json!("length"));
+        return Json(Value::Object(out)).into_response();
+    }
+    let mut rx = match submit_constrained(
+        &state,
+        &request_id,
+        prompt.clone(),
+        max_tokens,
+        sampling,
+        match request_constraint(&state, &body) {
+            Ok(c) => c,
+            Err(e) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &e),
+        },
+        images,
+    ) {
+        Ok(rx) => rx,
+        Err(response) => return api::ollama_extra::error_from(response).await,
+    };
+    state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    if stream {
+        let state2 = state.clone();
+        let stream_body = async_stream::stream! {
+            let mut ids = Vec::<u32>::new();
+            let mut filter = StopFilter::new(stop_strings.clone());
+            let mut visible_len = 0usize;
+            let mut emitted_calls = 0usize;
+            let started = Instant::now();
+            while let Some(message) = rx.recv().await {
+                match message {
+                    Ok(event) => {
+                        ids.push(event.token_id as u32);
+                        state2.metrics.generated_tokens.fetch_add(1, Ordering::Relaxed);
+                        let full = match state2.tokenizer.decode_keeping(&ids, &tool_keep) {
+                            Ok(full) => full,
+                            Err(error) => {
+                                yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n", json!({"error":error}))));
+                                return;
+                            }
+                        };
+                        let update = filter.update(&full, event.finished);
+                        let (visible, calls) = match tool_spec.parse_reply(filter.text(), update.matched || event.finished, &request_id) {
+                            Ok(result) => result,
+                            Err(error) => { yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n",json!({"error":error})))); return; }
+                        };
+                        let delta = visible.get(visible_len..).unwrap_or("").to_string();
+                        visible_len = visible.len();
+                        if !delta.is_empty() {
+                            let obj = if is_chat {
+                                json!({"model":model,"created_at":iso_now(),"message":{"role":"assistant","content":delta},"done":false})
+                            } else {
+                                json!({"model":model,"created_at":iso_now(),"response":update.delta,"done":false})
+                            };
+                            yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n", obj)));
+                        }
+                        if is_chat && calls.len() > emitted_calls {
+                            let fresh = ollama_tool_calls(&calls[emitted_calls..]);
+                            emitted_calls = calls.len();
+                            yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n",json!({"model":model,"created_at":iso_now(),"message":{"role":"assistant","content":"","tool_calls":fresh},"done":false}))));
+                        }
+                        if update.matched || event.finished {
+                            let reason = if update.matched { "stop" } else { event.finish_reason.unwrap_or("stop") };
+                            let done_obj = if is_chat {
+                                json!({"model":model,"created_at":iso_now(),"message":{"role":"assistant","content":""},"done":true,"total_duration":started.elapsed().as_nanos() as u64,"load_duration":0,"prompt_eval_count":prompt.len(),"eval_count":ids.len(),"done_reason":reason})
+                            } else {
+                                json!({"model":model,"created_at":iso_now(),"response":"","done":true,"total_duration":started.elapsed().as_nanos() as u64,"load_duration":0,"prompt_eval_count":prompt.len(),"eval_count":ids.len(),"done_reason":reason})
+                            };
+                            yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n", done_obj)));
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        yield Ok::<Bytes, Infallible>(Bytes::from(format!("{}\n", json!({"error":error}))));
+                        return;
+                    }
+                }
+            }
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+            .body(Body::from_stream(stream_body))
+            .unwrap()
+    } else {
+        let started = Instant::now();
+        let mut ids = Vec::<u32>::new();
+        let mut filter = StopFilter::new(stop_strings);
+        let mut reason = "stop";
+        while let Some(message) = rx.recv().await {
+            match message {
+                Ok(event) => {
+                    ids.push(event.token_id as u32);
+                    state
+                        .metrics
+                        .generated_tokens
+                        .fetch_add(1, Ordering::Relaxed);
+                    let full = match state.tokenizer.decode_keeping(&ids, &tool_keep) {
+                        Ok(full) => full,
+                        Err(error) => return api::ollama_extra::error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+                    };
+                    let update = filter.update(&full, event.finished);
+                    if update.matched {
+                        reason = "stop";
+                        break;
+                    }
+                    if event.finished {
+                        reason = event.finish_reason.unwrap_or("stop");
+                        break;
+                    }
+                }
+                Err(error) => return api::ollama_extra::error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+            }
+        }
+        let text = filter.text();
+        let (text, calls) = match tool_spec.parse_reply(text, true, &request_id) {
+            Ok(result) => result,
+            Err(error) => return api::ollama_extra::error(StatusCode::UNPROCESSABLE_ENTITY, &error),
+        };
+        let out = if is_chat {
+            let mut message = json!({"role":"assistant","content":text});
+            if !calls.is_empty() {
+                message["tool_calls"] = json!(ollama_tool_calls(&calls));
+            }
+            json!({"model":model,"created_at":iso_now(),"message":message,"done":true,"total_duration":started.elapsed().as_nanos() as u64,"load_duration":0,"prompt_eval_count":prompt.len(),"eval_count":ids.len(),"done_reason":reason})
+        } else {
+            json!({"model":model,"created_at":iso_now(),"response":text,"done":true,"total_duration":started.elapsed().as_nanos() as u64,"load_duration":0,"prompt_eval_count":prompt.len(),"eval_count":ids.len(),"done_reason":reason})
+        };
+        Json(out).into_response()
+    }
+}
+
+fn ollama_tool_calls(calls: &[Value]) -> Vec<Value> {
+    calls.iter().map(|call| json!({"function":{"name":call["function"]["name"],"arguments":serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}))}})).collect()
+}
+
+fn render_messages(
+    state: &AppState,
+    mut messages: Value,
+    tools: Option<Value>,
+    kwargs: Option<Map<String, Value>>,
+) -> Result<String, String> {
+    normalize_messages(&mut messages)?;
+    let list = messages.as_array().unwrap();
+    if state.chat_template.is_empty() {
+        let mut prompt = String::new();
+        for message in list {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user");
+            let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+            prompt.push_str(&format!("{role}: {content}\n"));
+        }
+        prompt.push_str("assistant:");
+        return Ok(prompt);
+    }
+    let mut context = Map::new();
+    context.insert("messages".into(), messages);
+    context.insert("add_generation_prompt".into(), Value::Bool(true));
+    if let Some(tools) = tools {
+        context.insert("tools".into(), tools);
+    }
+    if let Some(bos) = state.tokenizer.bos_ids().first() {
+        if let Ok(token) = state.tokenizer.decode(&[*bos], false) {
+            context.insert("bos_token".into(), Value::String(token));
+        }
+    }
+    if let Some(eos) = state.tokenizer.eos_ids().first() {
+        if let Ok(token) = state.tokenizer.decode(&[*eos], false) {
+            context.insert("eos_token".into(), Value::String(token));
+        }
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs {
+            context.insert(key, value);
+        }
+    }
+    let env = chat_environment();
+    env.render_str(&state.chat_template, Value::Object(context))
+        .map_err(|e| format!("chat template failed: {e}"))
+}
+
+fn normalize_messages(messages: &mut Value) -> Result<(), String> {
+    for message in messages.as_array_mut().ok_or("messages must be an array")? {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or("each message needs a role")?;
+        if !matches!(
+            role,
+            "system" | "developer" | "user" | "assistant" | "tool" | "function"
+        ) {
+            return Err("unsupported message role".into());
+        }
+        match message.get("content") {
+            None | Some(Value::Null)
+                if role == "assistant" && message.get("tool_calls").is_some() =>
+            {
+                message["content"] = json!("");
+            }
+            Some(Value::String(_)) => {}
+            Some(Value::Array(parts)) => {
+                let mut content = String::new();
+                for part in parts {
+                    if part.get("type").and_then(Value::as_str) != Some("text") {
+                        return Err("this fLLM model path supports text content; native image/audio inference is not yet implemented".into());
+                    }
+                    content.push_str(
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .ok_or("text content part needs text")?,
+                    );
+                }
+                message["content"] = json!(content);
+            }
+            _ => return Err("each message needs text content, or assistant tool_calls".into()),
+        }
+        if let Some(calls) = message.get_mut("tool_calls") {
+            for call in calls.as_array_mut().ok_or("tool_calls must be an array")? {
+                if let Some(arguments) = call
+                    .get_mut("function")
+                    .and_then(|f| f.get_mut("arguments"))
+                {
+                    if let Some(raw) = arguments.as_str() {
+                        *arguments = serde_json::from_str(raw)
+                            .map_err(|e| format!("tool arguments must be JSON: {e}"))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Axum responses are intentionally returned directly on this error-only path.
+#[allow(clippy::result_large_err)]
+fn submit_constrained(
+    state: &AppState,
+    request_id: &str,
+    prompt: Vec<i64>,
+    max_tokens: usize,
+    sampling: crate::sampling::SamplingParams,
+    constraint: Option<llguidance::Matcher>,
+    images: Vec<(usize, Vec<f32>)>,
+) -> Result<GenerationRx, Response> {
+    if prompt.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "prompt must encode to at least one token",
+        ));
+    }
+    if prompt.len().saturating_add(max_tokens) > state.max_context {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "prompt plus max_tokens exceeds the configured model context",
+        ));
+    }
+    if prompt
+        .iter()
+        .any(|id| *id < 0 || (*id as usize) >= state.tokenizer.vocab_size())
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "prompt token IDs are outside the model vocabulary",
+        ));
+    }
+    let permit = state.admission.clone().try_acquire_owned().map_err(|_| {
+        api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "inference request limit reached",
+        )
+    })?;
+    let (tx, rx) = tokio_mpsc::channel(256);
+    let observation = state.metrics.observability.generation();
+    let error = Arc::new(std::sync::Mutex::new(None));
+    state.metrics.observability.queue();
+    state
+        .worker
+        .send(WorkerCommand::Submit {
+            request_id: request_id.into(),
+            prompt,
+            max_tokens,
+            sampling: Box::new(sampling),
+            constraint: constraint.map(Box::new),
+            images: images.into_boxed_slice(),
+            output: GenerationTx {
+                inner: tx,
+                error: error.clone(),
+            },
+        })
+        .map_err(|_| {
+            state.metrics.observability.dequeue();
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "model scheduler is unavailable",
+            )
+        })?;
+    Ok(GenerationRx {
+        observation,
+        inner: rx,
+        error,
+        _permit: permit,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(key) = &state.api_key else {
+        return Ok(());
+    };
+    let expected = format!("Bearer {key}");
+    if headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        == Some(&expected)
+    {
+        Ok(())
+    } else {
+        Err(api_error(StatusCode::UNAUTHORIZED, "invalid api key"))
+    }
+}
+
+fn api_error(status: StatusCode, message: &str) -> Response {
+    (status,Json(json!({"error":{"message":message,"type":if status.is_server_error(){"server_error"}else{"invalid_request_error"},"code":"invalid_request_error"}}))).into_response()
+}
+
+fn empty_openai_response(
+    options: (bool, bool, &str, usize),
+    id: &str,
+    created: u64,
+    model: &str,
+    is_chat: bool,
+    stream: bool,
+    prompt_tokens: usize,
+) -> Response {
+    let (include_usage, logprobs, echo_text, n) = options;
+    let mut choices = if is_chat && stream {
+        json!([{"index":0,"delta":{},"finish_reason":"length","logprobs":null}])
+    } else if is_chat {
+        json!([{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"length","logprobs":null}])
+    } else {
+        json!([{"index":0,"text":echo_text,"finish_reason":"length","logprobs":null}])
+    };
+    if logprobs {
+        choices[0]["logprobs"] = if is_chat {
+            json!({"content":[],"refusal":null})
+        } else {
+            empty_completion_logprobs()
+        };
+    }
+    choices = json!((0..n)
+        .map(|index| {
+            let mut choice = choices[0].clone();
+            choice["index"] = json!(index);
+            choice
+        })
+        .collect::<Vec<_>>());
+    let mut result = json!({"id":id,"object":if is_chat{if stream{"chat.completion.chunk"}else{"chat.completion"}}else{"text_completion"},"created":created,"model":model,"choices":choices,"usage":{"prompt_tokens":prompt_tokens,"completion_tokens":0,"total_tokens":prompt_tokens}});
+    result["usage"] = openai_usage(prompt_tokens, 0, 0, 0);
+    if stream {
+        let mut usage_chunk = result.clone();
+        usage_chunk["choices"] = json!([]);
+        result.as_object_mut().map(|v| v.remove("usage"));
+        Sse::new(async_stream::stream!{
+            yield Ok::<Event,Infallible>(Event::default().data(result.to_string()));
+            if include_usage { yield Ok::<Event,Infallible>(Event::default().data(usage_chunk.to_string())); }
+            yield Ok::<Event,Infallible>(Event::default().data("[DONE]"));
+        }).into_response()
+    } else {
+        Json(result).into_response()
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+fn iso_now() -> String {
+    format!(
+        "{}Z",
+        chrono::DateTime::<chrono::Utc>::from(SystemTime::now())
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            .trim_end_matches('Z')
+    )
+}
+
+#[cfg(test)]
+mod stop_filter_tests {
+    use super::{parse_stop_strings, StopFilter};
+    use serde_json::json;
+
+    #[test]
+    fn incomplete_utf8_does_not_leak_replacement_or_duplicate_text() {
+        let mut filter = StopFilter::new(vec![]);
+        assert_eq!(filter.update("Gr\u{fffd}", false).delta, "Gr");
+        assert_eq!(filter.update("Grüße", false).delta, "üße");
+        assert_eq!(filter.update("Grüße\u{fffd}", true).delta, "\u{fffd}");
+    }
+
+    #[test]
+    fn stop_prefix_is_held_across_token_updates_and_never_emitted() {
+        let mut filter = StopFilter::new(vec!["<END>".into()]);
+        let first = filter.update("answer <EN", false);
+        assert_eq!(first.delta, "answer ");
+        assert!(!first.matched);
+        let second = filter.update("answer <END> ignored", false);
+        assert_eq!(second.delta, "");
+        assert_eq!(filter.text(), "answer ");
+        assert!(second.matched);
+    }
+
+    #[test]
+    fn final_chunk_flushes_a_partial_stop_prefix() {
+        let mut filter = StopFilter::new(vec!["<END>".into()]);
+        let first = filter.update("answer <EN", false);
+        assert_eq!(first.delta, "answer ");
+        let final_update = filter.update("answer <EN", true);
+        assert_eq!(final_update.delta, "<EN");
+        assert_eq!(filter.text(), "answer <EN");
+        assert!(!final_update.matched);
+    }
+
+    #[test]
+    fn chooses_the_earliest_of_multiple_stop_strings() {
+        let mut filter = StopFilter::new(vec!["STOP".into(), "END".into()]);
+        let update = filter.update("aENDbSTOP", true);
+        assert_eq!(filter.text(), "a");
+        assert!(update.matched);
+    }
+
+    #[test]
+    fn stop_matching_handles_unicode_boundaries() {
+        let mut filter = StopFilter::new(vec!["✨done".into()]);
+        let first = filter.update("ok✨", false);
+        assert_eq!(first.delta, "ok");
+        let second = filter.update("ok✨done!", false);
+        assert_eq!(filter.text(), "ok");
+        assert!(second.matched);
+    }
+
+    #[test]
+    fn parser_accepts_string_or_string_array_and_rejects_other_values() {
+        assert_eq!(
+            parse_stop_strings(Some(&json!("END"))).unwrap(),
+            vec!["END"]
+        );
+        assert_eq!(
+            parse_stop_strings(Some(&json!(["END", "STOP"]))).unwrap(),
+            vec!["END", "STOP"]
+        );
+        assert!(parse_stop_strings(Some(&json!(["END", 3]))).is_err());
+        assert!(parse_stop_strings(Some(&json!(true))).is_err());
+    }
+}
+
+#[cfg(test)]
+mod chat_template_tests {
+    use super::*;
+
+    #[test]
+    fn tool_history_and_text_parts_are_normalized_without_losing_media() {
+        let mut messages = json!([{"role":"assistant","tool_calls":[{"function":{"name":"weather","arguments":"{\"city\":\"Berlin\"}"}}]},
+            {"role":"user","content":[{"type":"text","text":"Hi"},{"type":"text","text":" there"}]}]);
+        normalize_messages(&mut messages).unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"]["city"],
+            "Berlin"
+        );
+        assert_eq!(messages[1]["content"], "Hi there");
+        assert!(normalize_messages(&mut json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:x"}}]}])).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_output_reports_backpressure_and_disconnect() {
+        let (inner, receiver) = tokio_mpsc::channel(2);
+        let error = Arc::new(std::sync::Mutex::new(None));
+        let sender = GenerationTx {
+            inner,
+            error: error.clone(),
+        };
+        let permit = Arc::new(tokio::sync::Semaphore::new(1))
+            .acquire_owned()
+            .await
+            .unwrap();
+        let mut receiver = GenerationRx {
+            inner: receiver,
+            error,
+            observation: Arc::new(crate::metrics::Metrics::new()).generation(),
+            _permit: permit,
+        };
+        assert!(sender.send(Err("first".into())).is_ok());
+        assert!(sender.send(Err("second".into())).is_ok());
+        assert!(sender.send(Err("overflow".into())).is_err());
+        drop(sender);
+        assert_eq!(receiver.recv().await.unwrap().unwrap_err(), "first");
+        assert_eq!(receiver.recv().await.unwrap().unwrap_err(), "second");
+        assert!(receiver
+            .recv()
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("buffer is full"));
+        assert!(receiver.recv().await.is_none());
+        let (inner, receiver) = tokio_mpsc::channel(1);
+        let sender = GenerationTx {
+            inner,
+            error: Arc::new(std::sync::Mutex::new(None)),
+        };
+        drop(receiver);
+        assert!(sender.is_closed());
+    }
+
+    #[test]
+    fn generation_tags_become_noop_blocks_and_keep_whitespace_control() {
+        let template = "a{%- generation -%}b{% endgeneration %}c{%- endgeneration %}";
+        let normalized = normalize_chat_template(template);
+        assert_eq!(normalized, "a{%- if true -%}b{% endif %}c{%- endif %}");
+        assert_eq!(
+            normalize_chat_template("{% if x %}y{% endif %}"),
+            "{% if x %}y{% endif %}"
+        );
+    }
+
+    #[test]
+    fn python_style_helpers_work_in_templates() {
+        let env = chat_environment();
+        let out = env
+            .render_str(
+                "{{ 'a b  c'.split()|join('-') }}|{{ 'x\n\n'.rstrip('\n') }}|{{ {'k': [1, 2]}|tojson }}",
+                Value::Null,
+            )
+            .unwrap();
+        assert_eq!(out, "a-b-c|x|{\"k\": [1, 2]}");
+        let err = env
+            .render_str("{{ raise_exception('nope') }}", Value::Null)
+            .unwrap_err();
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn incomplete_characters_are_held_back_while_streaming() {
+        assert_eq!(hold_incomplete_utf8("ok \u{FFFD}", false), "ok ");
+        assert_eq!(hold_incomplete_utf8("ok \u{FFFD}", true), "ok \u{FFFD}");
+        let spec = ReasoningSpec::from_prompt("x<ifm|think>\n");
+        let early = spec.split_views(hold_incomplete_utf8("thinking \u{FFFD}", false), false);
+        let late = spec.split_views(
+            hold_incomplete_utf8("thinking \u{1F3AE} done", false),
+            false,
+        );
+        assert!(late.reasoning.starts_with(&early.reasoning));
+    }
+
+    #[test]
+    fn reasoning_split_for_prompts_that_open_the_think_block() {
+        let spec = ReasoningSpec::from_prompt("<|ifm|im_start|>assistant\n<ifm|think>\n");
+        // The prompt opened the block, so the first text already is reasoning.
+        assert!(spec.split_views("so far", false).reasoning_found);
+        let parts = spec.split_views("Let me think.\n</ifm|think>\n391", true);
+        assert_eq!(parts.reasoning, "Let me think.");
+        assert_eq!(parts.content, "391");
+        // still thinking: a partial closing tag is held back
+        let parts = spec.split_views("Step one\n</ifm|th", false);
+        assert_eq!(parts.reasoning, "Step one");
+        assert_eq!(parts.content, "");
+        let parts = spec.split_views("cut off while thinking", true);
+        assert_eq!(parts.reasoning, "cut off while thinking");
+        assert_eq!(parts.content, "");
+    }
+
+    #[test]
+    fn reasoning_split_when_the_model_opens_the_tag_itself() {
+        let spec = ReasoningSpec::from_prompt("<|im_start|>assistant\n");
+        let parts = spec.split_views("<think>\nhmm\n</think>\n\nAnswer", true);
+        assert_eq!(
+            (parts.reasoning.as_str(), parts.content.as_str()),
+            ("hmm", "Answer")
+        );
+        let plain = spec.split_views("No thinking here", true);
+        assert!(!plain.reasoning_found);
+        assert_eq!(plain.content, "No thinking here");
+        let closed = ReasoningSpec::from_prompt("x<think>\n\n</think>\n\n");
+        assert!(!closed.split_views("Answer", true).reasoning_found);
+    }
+}
+
+#[cfg(test)]
+mod openai_field_tests {
+    use super::*;
+    #[test]
+    fn grammar_control_marker_is_not_a_probability_byte() {
+        use llguidance::toktrie::{TokRxInfo, TokTrie};
+        let trie = TokTrie::from(
+            &TokRxInfo::new(3, 2),
+            &[b"a".to_vec(), vec![0xc3], b"\xff</think>".to_vec()],
+        );
+        assert_eq!(probability_token_bytes(&trie, 0), b"a");
+        assert_eq!(probability_token_bytes(&trie, 1), &[0xc3]);
+        assert_eq!(probability_token_bytes(&trie, 2), b"</think>");
+    }
+    #[test]
+    fn stop_strings_before_minimum_do_not_stop_retroactively() {
+        let mut filter = StopFilter::new(vec!["END".into()]);
+        assert!(!filter.update_with_minimum("END", false, false).matched);
+        assert!(!filter.update_with_minimum("END ok", false, true).matched);
+        assert!(
+            filter
+                .update_with_minimum("END ok END", false, true)
+                .matched
+        );
+        assert_eq!(filter.text(), "END ok ");
+    }
+    #[test]
+    fn validate_logprobs_and_stop_controls() {
+        let mut p = crate::sampling::SamplingParams::default();
+        assert!(openai_sampling_controls(
+            &json!({"logprobs":true,"top_logprobs":20,"min_tokens":2,"stop_token_ids":[1,2]}),
+            true,
+            8,
+            &mut p
+        )
+        .is_ok());
+        assert_eq!(p.logprobs, Some(20));
+        for body in [
+            json!({"top_logprobs":21,"logprobs":true}),
+            json!({"top_logprobs":1}),
+            json!({"stop_token_ids":[8]}),
+            json!({"ignore_eos":"yes"}),
+        ] {
+            assert!(openai_sampling_controls(&body, true, 8, &mut p).is_err());
+        }
+    }
+    #[test]
+    fn visible_logprobs_exclude_hidden_and_partial_tokens() {
+        let mut p = VisibleLogprobs {
+            raw: b"secretOKSTOP".to_vec(),
+            records: vec![
+                (
+                    0,
+                    6,
+                    json!({"token":"secret","logprob":-1.0,"top_logprobs":[]}),
+                    false,
+                ),
+                (
+                    6,
+                    8,
+                    json!({"token":"OK","logprob":-2.0,"top_logprobs":[]}),
+                    false,
+                ),
+                (
+                    8,
+                    12,
+                    json!({"token":"STOP","logprob":-3.0,"top_logprobs":[]}),
+                    false,
+                ),
+            ],
+        };
+        let lp = p.take("OK", true, 0);
+        assert_eq!(lp["content"].as_array().unwrap().len(), 1);
+        assert_eq!(lp["content"][0]["token"], "OK");
+        assert_eq!(p.take("OK", true, 0)["content"], json!([]));
+    }
+    #[test]
+    fn completion_offsets_follow_unicode_characters_and_include_sampled_token() {
+        let mut p = VisibleLogprobs {
+            raw: vec![0xc3, 0xa9, b'x'],
+            records: vec![
+                (
+                    0,
+                    1,
+                    json!({"token":"first-byte","logprob":-1.0,"top_logprobs":[]}),
+                    false,
+                ),
+                (
+                    1,
+                    2,
+                    json!({"token":"second-byte","logprob":-2.0,"top_logprobs":[]}),
+                    false,
+                ),
+                (
+                    2,
+                    3,
+                    json!({"token":"x","logprob":-3.0,"top_logprobs":[{"token":"y","logprob":-0.5}]}),
+                    false,
+                ),
+            ],
+        };
+        let lp = p.take("\u{e9}x", false, 4);
+        assert_eq!(lp["text_offset"], json!([4, 4, 5]));
+        assert_eq!(lp["top_logprobs"][2]["x"], -3.0);
+        assert_eq!(lp["top_logprobs"][2]["y"], -0.5);
+        let mut sampling = crate::sampling::SamplingParams::default();
+        assert!(openai_sampling_controls(&json!({"logprobs":6}), false, 8, &mut sampling).is_err());
+    }
+    #[test]
+    fn usage_details_are_bounded_by_totals() {
+        let u = openai_usage(4, 3, 99, 10);
+        assert_eq!(u["prompt_tokens_details"]["cached_tokens"], 4);
+        assert_eq!(u["completion_tokens_details"]["reasoning_tokens"], 3);
+    }
+}

@@ -1,0 +1,52 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: kv_write_f16 | bindings: src,slots,pool | push: rows,kv,base | grid: [min(ceil(rows*(kv/2+1)/256), 65535), 1, 1]
+// Stream::kv_cache_write for an f16 cache (kv_kind 1), one pool (keys or values) per dispatch. Row r of `src` (kv = kv_heads * dim floats) is stored as
+// kv binary16 values at 16-bit positions  base + slots[r] * kv + c  of the pool (layout of DeviceKvCache: base = layer * words_per_layer, or the
+// layer start relative to the bound window). The pool is addressed in 32-bit words; one invocation owns one word:
+//   * both halves belong to the row: plain store; * only one half does (the row starts or ends in the middle of a word, e.g. an odd layer
+//   start or an odd kv): atomicAnd/atomicOr of that half, so neighbouring rows written by other invocations are not disturbed.
+// Slots of one call are distinct (Stream contract). Work items: rows * (kv/2 + 1) (an upper bound of the words of one row; the rest exits).
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer SrcBuf { float src[]; };
+layout(std430, binding = 1) readonly buffer SlotBuf { uint slots[]; };
+layout(std430, binding = 2) buffer PoolBuf { uint pool[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint kv;
+    uint base;
+} p;
+
+void main() {
+    const uint per_row = p.kv / 2u + 1u;
+    const uint total = p.rows * per_row;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint r = i / per_row;
+        const uint j = i - r * per_row;
+        const uint h0 = p.base + slots[r] * p.kv;  // first 16-bit position of the row
+        const uint words = ((h0 + p.kv - 1u) >> 1) - (h0 >> 1) + 1u;
+        if (j >= words) continue;
+        const uint w = (h0 >> 1) + j;
+        const uint lo_pos = 2u * w;
+        const bool lo_ok = lo_pos >= h0 && lo_pos < h0 + p.kv;
+        const bool hi_ok = lo_pos + 1u >= h0 && lo_pos + 1u < h0 + p.kv;
+        const uint lo = lo_ok ? f16_bits(src[r * p.kv + (lo_pos - h0)]) : 0u;
+        const uint hi = hi_ok ? f16_bits(src[r * p.kv + (lo_pos + 1u - h0)]) : 0u;
+        if (lo_ok && hi_ok) {
+            pool[w] = lo | (hi << 16);
+        } else {
+            if (lo_ok) {
+                atomicAnd(pool[w], 0xFFFF0000u);
+                atomicOr(pool[w], lo);
+            }
+            if (hi_ok) {
+                atomicAnd(pool[w], 0x0000FFFFu);
+                atomicOr(pool[w], hi << 16);
+            }
+        }
+    }
+}

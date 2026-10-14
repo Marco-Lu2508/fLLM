@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: act_glu | bindings: gate,up,out | push: n_rows,width,gate_stride,gate_off,up_stride,up_off,out_stride,alpha,limit | grid: [min(ceil(n_rows*width/256), 65535), 1, 1]
+// Gated and plain activations, selected by the macro MODE (one output per entry of variants_ops.list):
+//   0 SWIGLU      out = silu(g) * u                                      (Stream::swiglu)
+//   1 GEGLU       out = gelu_tanh(g) * u                                 (Stream::geglu; CPU: 0.5 g (1 + tanh(..)) u)
+//   2 SWIGLU_OAI  g' = min(g, limit), u' = clamp(u, -limit, limit), out = g' / (1 + exp(-alpha g')) * (u' + 1)   (Stream::swiglu_oai)
+//   3 SILU        out = silu(g)               (u is not read)
+//   4 GELU        out = gelu_tanh(g)          (u is not read)
+//   5 RELU2       out = max(g, 0)^2           (u is not read)
+//   6 RELU        out = max(g, 0)             (u is not read)
+// Element (r, c): gate[gate_off + r * gate_stride + c], up[up_off + r * up_stride + c], out[r * out_stride + c], r < n_rows, c < width. Gate and up may
+// be two ranges of the same buffer (fused gate/up projection). Grid-stride loop over n_rows * width elements.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+#ifndef MODE
+#define MODE 0
+#endif
+
+layout(std430, binding = 0) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 1) readonly buffer UpBuf { float up[]; };
+layout(std430, binding = 2) buffer OutBuf { float o[]; };
+layout(push_constant) uniform P {
+    uint n_rows;
+    uint width;
+    uint gate_stride;
+    uint gate_off;
+    uint up_stride;
+    uint up_off;
+    uint out_stride;
+    float alpha;
+    float limit;
+} p;
+
+void main() {
+    const uint total = p.n_rows * p.width;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint r = i / p.width;
+        const uint c = i - r * p.width;
+        const float g = gate[p.gate_off + r * p.gate_stride + c];
+        float result;
+#if MODE == 0
+        result = silu(g) * up[p.up_off + r * p.up_stride + c];
+#elif MODE == 1
+        result = gelu_tanh(g) * up[p.up_off + r * p.up_stride + c];
+#elif MODE == 2
+        const float gc = min(g, p.limit);
+        const float uc = clamp(up[p.up_off + r * p.up_stride + c], -p.limit, p.limit);
+        result = gc / (1.0 + exp(-p.alpha * gc)) * (uc + 1.0);
+#elif MODE == 3
+        result = silu(g);
+#elif MODE == 4
+        result = gelu_tanh(g);
+#elif MODE == 5
+        const float rl = max(g, 0.0);
+        result = rl * rl;
+#else
+        result = max(g, 0.0);
+#endif
+        o[r * p.out_stride + c] = result;
+    }
+}

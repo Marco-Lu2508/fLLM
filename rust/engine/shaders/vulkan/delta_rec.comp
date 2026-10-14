@@ -1,0 +1,110 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: delta_rec | bindings: mixed,z,beta,alpha,dt_bias,decay,norm,state,out | push: kh,vh,hv,conv_dim,tiled,row0,n,reset,state_off,beta_scale,eps | grid: [vh, 1, 1] per run
+// Gated DeltaNet, part 2 (port of delta_rec_kernel in cuda/deltanet.cu, reference cpu_delta.rs): the delta-rule recurrence of one run (n consecutive tokens of
+// one sequence) for one value head per workgroup, per token t:
+//   forget = exp(decay[j] * softplus(alpha[t][j] + dt_bias[j])),  sigma = beta_scale * sigmoid(beta[t][j])
+//   S = S * forget;  S += k (x) ((v - S^T k) * sigma);  o = S^T q            (q, k: the normalised query / key head of mixed, v: its value channels)
+//   out[t][j][c] = o[c] * (1 / sqrt(mean_c(o^2) + eps)) * norm[c] * silu(z[t][j][c])        (gated RMS norm of the head output)
+// The recurrent state S[j][i][c] (value head j, key row i < HK, value column c < hv) is FP32 at state[state_off + (j * HK + i) * hv + c] of the sequence's
+// state buffer (float view; state_off = state_offset / 4 of the layer). Value column c is handled by two neighbouring lanes (lane = 2 c + half): half 0
+// holds the first HK/2 rows of the column in registers, half 1 the others; the dot products over the key dimension meet in shared memory. Lanes with
+// c >= hv idle but join every barrier. HK is a compile-time macro (64 / 128 ...), hv <= 128 at run time. `mixed` is the output of delta_conv.
+// Key head of value head j: tiled != 0 ? j % kh : j / (vh / kh). reset != 0: the old state is ignored.
+#define WG 256
+#ifndef HK
+#define HK 128
+#endif
+#define HALF (HK / 2)
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer ZBuf { float z[]; };
+layout(std430, binding = 2) readonly buffer BetaBuf { float beta[]; };
+layout(std430, binding = 3) readonly buffer AlphaBuf { float alpha[]; };
+layout(std430, binding = 4) readonly buffer DtBuf { float dt_bias[]; };
+layout(std430, binding = 5) readonly buffer DecayBuf { float decay[]; };
+layout(std430, binding = 6) readonly buffer NormBuf { float norm_w[]; };
+layout(std430, binding = 7) buffer StateBuf { float state[]; };
+layout(std430, binding = 8) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint kh;
+    uint vh;
+    uint hv;
+    uint conv_dim;
+    uint tiled;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    float beta_scale;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+shared float s_qk[2 * HK];
+shared float xch_a[WG];
+shared float xch_b[WG];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint j = gl_WorkGroupID.x;
+    const uint c = lane >> 1;
+    const uint half_id = lane & 1u;
+    const bool col_ok = c < p.hv;
+    const uint key_dim = p.kh * HK;
+    const uint value_dim = p.vh * p.hv;
+    const uint src = p.tiled != 0u ? j % p.kh : j / (p.vh / p.kh);
+    const uint sbase = p.state_off + (j * HK + half_id * HALF) * p.hv + c;
+
+    float s[HALF];
+    [[unroll]] for (uint i = 0u; i < HALF; i++) s[i] = (col_ok && p.reset == 0u) ? state[sbase + i * p.hv] : 0.0;
+
+    const float dtb = dt_bias[j];
+    const float dec = decay[j];
+    const float nw = col_ok ? norm_w[c] : 0.0;
+
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        // the normalised query and key head of the source head, shared by all columns
+        if (lane < 2u * HK) {
+            const uint off = lane < HK ? src * HK + lane : key_dim + src * HK + (lane - HK);
+            s_qk[lane] = mixed[row * p.conv_dim + off];
+        }
+        barrier();
+        const float raw = alpha[row * p.vh + j] + dtb;
+        const float forget = exp(dec * softplus20(raw));
+        const float sigma = p.beta_scale / (1.0 + exp(-beta[row * p.vh + j]));
+        const float v = col_ok ? mixed[row * p.conv_dim + 2u * key_dim + j * p.hv + c] : 0.0;
+
+        float memory = 0.0;
+        [[unroll]] for (uint i = 0u; i < HALF; i++) {
+            s[i] *= forget;
+            memory += s[i] * s_qk[HK + half_id * HALF + i];
+        }
+        xch_a[lane] = memory;
+        barrier();
+        memory += xch_a[lane ^ 1u];
+        const float delta = (v - memory) * sigma;
+        float acc = 0.0;
+        [[unroll]] for (uint i = 0u; i < HALF; i++) {
+            s[i] += s_qk[HK + half_id * HALF + i] * delta;
+            acc += s[i] * s_qk[half_id * HALF + i];
+        }
+        xch_b[lane] = acc;
+        barrier();
+        acc += xch_b[lane ^ 1u];
+        // gated RMS norm of the head output (every column counted once)
+        const float ss = wg_sum((half_id == 0u && col_ok) ? acc * acc : 0.0);
+        const float inv = 1.0 / sqrt(ss / float(p.hv) + p.eps);
+        if (half_id == 0u && col_ok) {
+            const float gate = silu(z[row * value_dim + j * p.hv + c]);
+            outv[row * value_dim + j * p.hv + c] = acc * inv * nw * gate;
+        }
+    }
+    if (col_ok) {
+        [[unroll]] for (uint i = 0u; i < HALF; i++) state[sbase + i * p.hv] = s[i];
+    }
+}

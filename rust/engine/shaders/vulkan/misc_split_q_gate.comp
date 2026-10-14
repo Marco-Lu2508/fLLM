@@ -1,0 +1,35 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_split_q_gate | bindings: projected,q,gate | push: total,heads,dk,per_head | grid: [min(ceil(total/256), 65535), 1, 1]
+// Gated attention (Stream::split_q_gate): the query projection holds query and gate of every head. Row r of `projected` has 2 * heads * dk floats:
+//   per_head != 0: [q_h0 (dk), gate_h0 (dk), q_h1, gate_h1, ...]     otherwise: [q_h0 .. q_h(heads-1), gate_h0 .. gate_h(heads-1)].
+// q and gate are `rows x heads x dk`; total = rows * heads * dk. One invocation per output element.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer ProjBuf { float projected[]; };
+layout(std430, binding = 1) buffer QBuf { float q[]; };
+layout(std430, binding = 2) buffer GateBuf { float gate[]; };
+layout(push_constant) uniform P {
+    uint total;
+    uint heads;
+    uint dk;
+    uint per_head;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    const uint width = p.heads * p.dk;
+    for (uint i = gl_GlobalInvocationID.x; i < p.total; i += grid_items) {
+        const uint r = i / width;
+        const uint rem = i - r * width;
+        const uint h = rem / p.dk;
+        const uint d = rem - h * p.dk;
+        const uint base = r * 2u * width;
+        const uint sq = p.per_head != 0u ? base + h * 2u * p.dk + d : base + h * p.dk + d;
+        const uint sg = p.per_head != 0u ? sq + p.dk : base + width + h * p.dk + d;
+        q[i] = projected[sq];
+        gate[i] = projected[sg];
+    }
+}

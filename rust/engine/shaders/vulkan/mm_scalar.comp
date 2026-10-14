@@ -1,0 +1,87 @@
+#version 450
+// FLLM-SHADER: mm_<fmt>_s | bindings: 0 weights(u32[]) 1 x(vec4[], batch x cols f32) 2 out(f32[], batch x out_stride) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/64) x ceil(batch/64) x 1
+// Quantized matrix-matrix product (prompt processing, batch > 8): 64 x 64 output tile per workgroup of 256 invocations, K step 16,
+// the weight tile is dequantized to f32 in shared memory, 4 x 4 results per invocation. Plain float arithmetic, no extensions.
+// out[t * out_stride + row_base + r] = scale * dot(x[t], w[r]) (+ bias[row_base + r])
+#extension GL_GOOGLE_include_directive : enable
+#include "_q_ext.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "_q_common.glsl"
+#include "_q_formats.glsl"
+
+#define BM 64
+#define BN 64
+#define BK 16
+
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { vec4 xv[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+shared vec4 As[BK * (BM / 4)];   // As[k * 16 + m / 4][m % 4]
+shared vec4 Bs[BK * (BN / 4)];   // Bs[k * 16 + n / 4][n % 4]
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint tx = t & 15u;   // 4 consecutive weight rows
+    const uint ty = t >> 4;    // 4 consecutive activation rows
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+
+    float acc[4][4];
+    [[unroll]] for (uint i = 0; i < 4; ++i) {
+        [[unroll]] for (uint j = 0; j < 4; ++j) acc[i][j] = 0.0;
+    }
+
+    for (uint k0 = 0; k0 < p.cols; k0 += BK) {
+        // weight tile: 128 invocations decode one chunk (8 values) each
+        if (t < 128u) {
+            const uint ml = t >> 1;
+            const uint kc = t & 1u;
+            const uint row = m0 + ml;
+            float vals[8];
+            [[unroll]] for (uint i = 0; i < 8; ++i) vals[i] = 0.0;
+            if (row < p.rows) {
+                const uint kk = k0 + kc * 8u;
+                uint p0, p1;
+                float ws, wm;
+                wchunk(row * p.nb + kk / QK, (kk % QK) >> 3, p0, p1, ws, wm);
+                chunk_floats(p0, p1, ws, wm, vals);
+            }
+            [[unroll]] for (uint i = 0; i < 8; ++i) As[(kc * 8u + i) * 16u + (ml >> 2)][ml & 3u] = vals[i];
+        }
+        // activation tile: one vec4 per invocation
+        {
+            const uint nl = t >> 2;
+            const uint kq = t & 3u;
+            const uint token = n0 + nl;
+            vec4 v = vec4(0.0);
+            if (token < p.batch) v = xv[(token * p.cols + k0 + kq * 4u) >> 2];
+            [[unroll]] for (uint i = 0; i < 4; ++i) Bs[(kq * 4u + i) * 16u + (nl >> 2)][nl & 3u] = v[i];
+        }
+        barrier();
+        [[unroll]] for (uint kk = 0; kk < BK; ++kk) {
+            const vec4 a = As[kk * 16u + tx];
+            const vec4 b = Bs[kk * 16u + ty];
+            [[unroll]] for (uint i = 0; i < 4; ++i) {
+                [[unroll]] for (uint j = 0; j < 4; ++j) acc[i][j] += a[i] * b[j];
+            }
+        }
+        barrier();
+    }
+
+    [[unroll]] for (uint j = 0; j < 4; ++j) {
+        const uint token = n0 + ty * 4u + j;
+        if (token < p.batch) {
+            [[unroll]] for (uint i = 0; i < 4; ++i) {
+                const uint row = m0 + tx * 4u + i;
+                if (row < p.rows) {
+                    float v = acc[i][j] * p.scale;
+                    if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+                    outv[token * p.out_stride + p.row_base + row] = v;
+                }
+            }
+        }
+    }
+}

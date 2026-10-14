@@ -1,0 +1,49 @@
+#version 450
+// FLLM-SHADER: quant_act_q8 / quant_act_q8_perm | bindings: 0 x(f32[], batch x cols) 1 xq(u32[] out: int8 activations then block scales) [2 perm(u32[], PERM only)] | push: cols, batch, xq_d | grid: ceil(batch * cols / 32 / 128) x 1 x 1
+// Prepass of the `_i` (integer dot) quantized-linear shaders: quantizes the activations to int8 in blocks of 32 values with one float scale each.
+//   xq[b * cols/4 + kb * 8 + i] = four int8 (value 4i at the lowest byte) of block kb of row b
+//   xq[xq_d + b * cols/32 + kb]  = float bits of the scale d = amax / 127 (values are round(x / d))
+// With PERM the value k of a block is x[b * cols + perm[kb * 32 + k]] (act-order GPTQ weights, Q4ZP).
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform P {
+    uint cols;   // multiple of 32
+    uint batch;
+    uint xq_d;   // word offset of the scales = batch * cols / 4
+} p;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer XQBuf { uint xq[]; };
+#ifdef PERM
+layout(std430, set = 0, binding = 2) readonly buffer PermBuf { uint perm[]; };
+#endif
+
+void main() {
+    const uint blk = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    const uint per_row = p.cols >> 5;
+    if (blk >= p.batch * per_row) return;
+    const uint b = blk / per_row;
+    const uint kb = blk % per_row;
+
+    float v[32];
+    float amax = 0.0;
+    for (uint k = 0; k < 32u; ++k) {
+#ifdef PERM
+        v[k] = x[b * p.cols + perm[kb * 32u + k]];
+#else
+        v[k] = x[b * p.cols + kb * 32u + k];
+#endif
+        amax = max(amax, abs(v[k]));
+    }
+    const float d = amax / 127.0;
+    const float inv = amax > 0.0 ? 127.0 / amax : 0.0;
+    for (uint i = 0; i < 8u; ++i) {
+        uint word = 0u;
+        for (uint j = 0; j < 4u; ++j) {
+            const int q = clamp(int(roundEven(v[i * 4u + j] * inv)), -127, 127);
+            word |= (uint(q) & 255u) << (8u * j);
+        }
+        xq[b * (p.cols >> 2) + kb * 8u + i] = word;
+    }
+    xq[p.xq_d + blk] = floatBitsToUint(d);
+}

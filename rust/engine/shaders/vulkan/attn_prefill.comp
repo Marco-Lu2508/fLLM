@@ -1,0 +1,244 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_prefill | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [ceil((rows_end - row0) / 16), heads, 1]
+// Paged attention for prompt processing (Stream::attention_paged with one row per token): a workgroup of 128 lanes handles one query head of a BLOCK of
+// 16 consecutive rows and walks the keys in tiles of 32, so each key / value row is decoded once per 16 query rows instead of once per row.
+// Variants (macros): KV_Q8 = 0 / 1 (f16 / q8_0 cache), DVMAX = 128 / 256 / 512 (largest value width dv the accumulators hold; dk is free up to 512).
+//   Lane = (li, jl) with li = lane / 8 the query row inside the block and jl = lane % 8: scoring gives lane the keys jl, jl + 8, jl + 16, jl + 24 of the
+//   tile for its row (K and Q are staged in shared memory in chunks of 32 dimensions), the value accumulation gives it the dimensions jl + 8 e of every
+//   value chunk (V staged in shared memory in chunks of 32 dimensions). Online softmax per row; masks per row (chunk / window / causal length).
+// REQUIREMENT (the planner checks it): all rows of a block read the keys through ONE block table: the rows' tables agree on every block the row needs
+// as the table of the block's longest row. Blocks that do not satisfy it go to attn_decode. Row r attends to start(r) .. lengths[r]-1 like attn_decode.
+// Shared memory: 13.6 KiB. Output: out[(r * heads + head) * dv + d] for the global row r.
+#define WG 128
+#define BR 16
+#define BC 32
+#define DC 32
+#define VC 32
+#include "_ops_common.glsl"
+#include "_ops_kv.glsl"
+#ifndef KV_Q8
+#define KV_Q8 0
+#endif
+#ifndef DVMAX
+#define DVMAX 128
+#endif
+#define NCH (DVMAX / VC)
+#define VPT (VC / 8)
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer KPool { uint kpool[]; };
+layout(std430, binding = 2) readonly buffer VPool { uint vpool[]; };
+layout(std430, binding = 3) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 4) readonly buffer BiasBuf { float bias_tab[]; };
+layout(std430, binding = 5) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint kv_heads;
+    uint dk;
+    uint dv;
+    uint stride;
+    uint block_size;
+    float scale;
+    float softcap;
+    uint window;
+    uint chunk;
+    uint flags;
+    uint rows_total;
+    uint row0;
+    uint rows_end;
+    uint k_base;
+    uint v_base;
+    uint k_scale;
+    uint v_scale;
+    uint k_group;
+    uint v_group;
+} p;
+
+const uint PT_LD = BC + 1u;
+shared float kt[BC * (DC + 1)];
+shared float qt[BR * (DC + 1)];
+shared float pt[BR * (BC + 1)];
+shared float vt[BC * VC];
+shared uint slot_s[BC];
+shared float red_m[BR * 8];
+shared float red_l[BR * 8];
+
+uint g_kvk;  // kv_heads * dk
+uint g_kvv;  // kv_heads * dv
+
+float k_at(uint slot, uint c) {
+#if KV_Q8 == 0
+    return KV_HALF(kpool, p.k_base + slot * g_kvk + c);
+#else
+    return KV_I8(kpool, p.k_base * 2u + slot * g_kvk + c) * KV_HALF(kpool, p.k_base + p.k_scale + slot * (g_kvk / p.k_group) + c / p.k_group);
+#endif
+}
+
+float v_at(uint slot, uint c) {
+#if KV_Q8 == 0
+    return KV_HALF(vpool, p.v_base + slot * g_kvv + c);
+#else
+    return KV_I8(vpool, p.v_base * 2u + slot * g_kvv + c) * KV_HALF(vpool, p.v_base + p.v_scale + slot * (g_kvv / p.v_group) + c / p.v_group);
+#endif
+}
+
+// first position row of length n attends to
+uint row_start(uint n) {
+    if (p.chunk != 0u) return (n - 1u) / p.chunk * p.chunk;
+    if (p.window != 0u && n > p.window) return n - p.window;
+    return 0u;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint li = lane >> 3;
+    const uint jl = lane & 7u;
+    const uint h = gl_WorkGroupID.y;
+    const uint kh = h / (p.heads / p.kv_heads);
+    g_kvk = p.kv_heads * p.dk;
+    g_kvv = p.kv_heads * p.dv;
+    const uint rb0 = p.row0 + gl_WorkGroupID.x * BR;
+    const uint rend = min(rb0 + BR, p.rows_end);
+    const uint r_i = rb0 + li;
+    const bool rvalid = r_i < rend;
+    const uint n_i = rvalid ? uint(meta[r_i]) : 1u;
+    const uint start_i = row_start(n_i);
+
+    // key range of the block and the row whose block table serves it (the longest row)
+    uint n_max = 0u;
+    uint r_tab = rb0;
+    uint kstart = 0xFFFFFFFFu;
+    for (uint ii = 0u; ii < BR; ii++) {
+        const uint rr = rb0 + ii;
+        if (rr < rend) {
+            const uint nn = uint(meta[rr]);
+            if (nn > n_max) {
+                n_max = nn;
+                r_tab = rr;
+            }
+            kstart = min(kstart, row_start(nn));
+        }
+    }
+    const uint tab = p.rows_total + r_tab * p.stride;
+    const bool use_alibi = (p.flags & 2u) != 0u;
+    const float slope = use_alibi ? bias_tab[p.heads + h] : 0.0;
+
+    float m_i = NEG;
+    float l_i = 0.0;
+    float acc[DVMAX / 8];
+    [[unroll]] for (uint i = 0u; i < DVMAX / 8; i++) acc[i] = 0.0;
+
+    for (uint t0 = kstart; t0 < n_max; t0 += BC) {
+        if (lane < BC) {
+            const uint pos = t0 + lane;
+            uint sl = 0u;
+            if (pos < n_max) sl = uint(meta[tab + pos / p.block_size]) * p.block_size + pos % p.block_size;
+            slot_s[lane] = sl;
+        }
+        barrier();
+
+        // scores: S[li][jl + 8 c] = sum_d Q[li][d] K[jl + 8 c][d]
+        float sacc[4];
+        [[unroll]] for (uint c = 0u; c < 4u; c++) sacc[c] = 0.0;
+        for (uint d0 = 0u; d0 < p.dk; d0 += DC) {
+            [[unroll]] for (uint e = 0u; e < (BC * DC) / WG; e++) {
+                const uint idx = lane + e * WG;
+                const uint kk = idx / DC;
+                const uint dd = idx % DC;
+                const uint d = d0 + dd;
+                float val = 0.0;
+                if (d < p.dk && t0 + kk < n_max) val = k_at(slot_s[kk], kh * p.dk + d);
+                kt[kk * (DC + 1) + dd] = val;
+            }
+            [[unroll]] for (uint e = 0u; e < (BR * DC) / WG; e++) {
+                const uint idx = lane + e * WG;
+                const uint ii = idx / DC;
+                const uint dd = idx % DC;
+                const uint d = d0 + dd;
+                const uint rr = rb0 + ii;
+                float val = 0.0;
+                if (rr < rend && d < p.dk) val = q[(rr * p.heads + h) * p.dk + d];
+                qt[ii * (DC + 1) + dd] = val;
+            }
+            barrier();
+            for (uint d = 0u; d < DC; d++) {
+                const float qv = qt[li * (DC + 1) + d];
+                [[unroll]] for (uint c = 0u; c < 4u; c++) sacc[c] += qv * kt[(jl + 8u * c) * (DC + 1) + d];
+            }
+            barrier();
+        }
+
+        // mask, scale, ALiBi, soft cap; row maximum
+        float sm = NEG;
+        [[unroll]] for (uint c = 0u; c < 4u; c++) {
+            const uint pos = t0 + jl + 8u * c;
+            float sc = NEG;
+            if (rvalid && pos >= start_i && pos < n_i) {
+                sc = sacc[c] * p.scale;
+                if (use_alibi) sc += slope * (float(pos) - float(n_i - 1u));
+                if (p.softcap != 0.0) sc = p.softcap * tanh(clamp(sc / p.softcap, -15.0, 15.0));
+            }
+            sacc[c] = sc;
+            sm = max(sm, sc);
+        }
+        red_m[li * 8u + jl] = sm;
+        barrier();
+        float tmax = NEG;
+        [[unroll]] for (uint j = 0u; j < 8u; j++) tmax = max(tmax, red_m[li * 8u + j]);
+        const float m_new = max(m_i, tmax);
+        const float corr = exp(m_i - m_new);
+        float psum = 0.0;
+        [[unroll]] for (uint c = 0u; c < 4u; c++) {
+            const float e = sacc[c] != NEG ? exp(sacc[c] - m_new) : 0.0;
+            pt[li * PT_LD + jl + 8u * c] = e;
+            psum += e;
+        }
+        red_l[li * 8u + jl] = psum;
+        barrier();
+        float tsum = 0.0;
+        [[unroll]] for (uint j = 0u; j < 8u; j++) tsum += red_l[li * 8u + j];
+        l_i = l_i * corr + tsum;
+        m_i = m_new;
+        [[unroll]] for (uint i = 0u; i < DVMAX / 8; i++) acc[i] *= corr;
+
+        // acc[c * VPT + e] (dimension c * VC + jl + 8 e) += sum_kk P[li][kk] V[kk][dimension]
+        [[unroll]] for (uint c = 0u; c < NCH; c++) {
+            if (c * VC < p.dv) {  // uniform
+                [[unroll]] for (uint e = 0u; e < (BC * VC) / WG; e++) {
+                    const uint idx = lane + e * WG;
+                    const uint kk = idx / VC;
+                    const uint dd = idx % VC;
+                    const uint d = c * VC + dd;
+                    float val = 0.0;
+                    if (d < p.dv && t0 + kk < n_max) val = v_at(slot_s[kk], kh * p.dv + d);
+                    vt[kk * VC + dd] = val;
+                }
+                barrier();
+                for (uint kk = 0u; kk < BC; kk++) {
+                    const float pk = pt[li * PT_LD + kk];
+                    [[unroll]] for (uint e = 0u; e < VPT; e++) acc[c * VPT + e] += pk * vt[kk * VC + jl + 8u * e];
+                }
+                barrier();
+            }
+        }
+    }
+
+    if (rvalid) {
+        if ((p.flags & 1u) != 0u) {  // attention sink: exp(sink) in the denominator, no value
+            const float sink = bias_tab[h];
+            const float m2 = max(m_i, sink);
+            const float corr = exp(m_i - m2);
+            l_i = l_i * corr + exp(sink - m2);
+            [[unroll]] for (uint i = 0u; i < DVMAX / 8; i++) acc[i] *= corr;
+        }
+        const float inv = 1.0 / l_i;
+        [[unroll]] for (uint c = 0u; c < NCH; c++) {
+            [[unroll]] for (uint e = 0u; e < VPT; e++) {
+                const uint d = c * VC + jl + 8u * e;
+                if (d < p.dv) outv[(r_i * p.heads + h) * p.dv + d] = acc[c * VPT + e] * inv;
+            }
+        }
+    }
+}

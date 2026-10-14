@@ -1,0 +1,31 @@
+# Generic fLLM server. Any GGUF model, any CPU: the CPU kernels pick AVX2 / AVX-VNNI / NEON at run time.
+#
+#   FLLM_MODELS_DIR=/path/to/models FLLM_MODEL=model.gguf docker compose up -d
+#
+# Tuning examples (pass through FLLM_EXTRA_ARGS):
+#   FLLM_EXTRA_ARGS="--threads 10 -C 0xFF5 --kv-cache-type q8_0"
+services:
+  fllm:
+    image: ${FLLM_IMAGE:-ghcr.io/marco-lu2508/fllm:latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: fllm
+    ports:
+      # Default: localhost only. For other hosts set FLLM_BIND_HOST=0.0.0.0 and FLLM_API_KEY.
+      - "${FLLM_BIND_HOST:-127.0.0.1}:${FLLM_PORT:-8000}:8000"
+    environment:
+      # passed through only when set: an empty FLLM_API_KEY would make the server answer every request with 401
+      - FLLM_API_KEY
+    volumes:
+      - ${FLLM_MODELS_DIR:-./models}:/models:ro
+    command: >
+      serve --host 0.0.0.0 --port 8000
+      --model /models/${FLLM_MODEL:-model.gguf}
+      --model-name ${FLLM_MODEL_NAME:-${FLLM_MODEL:-model.gguf}}
+      --ctx ${FLLM_MAX_MODEL_LEN:-4096}
+      --max-seqs ${FLLM_MAX_SEQS:-16}
+      --max-batched-tokens ${FLLM_MAX_BATCHED_TOKENS:-512}
+      --speculative-lookup ${FLLM_SPECULATIVE_LOOKUP:-0}
+      ${FLLM_EXTRA_ARGS:-}
+    restart: unless-stopped

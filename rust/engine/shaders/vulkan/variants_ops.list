@@ -1,0 +1,81 @@
+# Variants of the non-matmul Vulkan shaders (package 3). Line: <output name> <source.comp> [-DNAME=VALUE ...]; # starts a comment.
+# Sources named here are compiled ONLY under the names listed (build.rs); everything else in this directory is compiled once under its file name.
+
+# activations (act_glu.comp, MODE: 0 swiglu, 1 geglu, 2 swiglu_oai, 3 silu, 4 gelu, 5 relu2, 6 relu)
+act_swiglu act_glu.comp -DMODE=0
+act_geglu act_glu.comp -DMODE=1
+act_swiglu_oai act_glu.comp -DMODE=2
+act_silu act_glu.comp -DMODE=3
+act_gelu act_glu.comp -DMODE=4
+act_relu2 act_glu.comp -DMODE=5
+act_relu act_glu.comp -DMODE=6
+
+# embedding lookup: raw float tables and the planar quantized layouts
+embed_f32 embed.comp -DRAW_F32
+embed_f16 embed.comp -DRAW_F16
+embed_bf16 embed.comp -DRAW_BF16
+embed_q4_0 embed.comp -DFMT_Q4_0
+embed_q4_1 embed.comp -DFMT_Q4_1
+embed_q5_0 embed.comp -DFMT_Q5_0
+embed_q5_1 embed.comp -DFMT_Q5_1
+embed_q8_0 embed.comp -DFMT_Q8_0
+embed_q2_k embed.comp -DFMT_Q2_K
+embed_q3_k embed.comp -DFMT_Q3_K
+embed_q4_k embed.comp -DFMT_Q4_K
+embed_q5_k embed.comp -DFMT_Q5_K
+embed_q6_k embed.comp -DFMT_Q6_K
+embed_iq4_nl embed.comp -DFMT_IQ4_NL
+embed_mxfp4 embed.comp -DFMT_MXFP4
+
+# expert matrix-vector product: weights of all experts in one buffer (_arena) or reached through buffer device addresses (_bda)
+moe_linear_q4_0_arena moe_linear.comp -DMOE_ARENA -DFMT_Q4_0
+moe_linear_q4_1_arena moe_linear.comp -DMOE_ARENA -DFMT_Q4_1
+moe_linear_q5_0_arena moe_linear.comp -DMOE_ARENA -DFMT_Q5_0
+moe_linear_q5_1_arena moe_linear.comp -DMOE_ARENA -DFMT_Q5_1
+moe_linear_q8_0_arena moe_linear.comp -DMOE_ARENA -DFMT_Q8_0
+moe_linear_q2_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q2_K
+moe_linear_q3_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q3_K
+moe_linear_q4_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q4_K
+moe_linear_q5_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q5_K
+moe_linear_q6_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q6_K
+moe_linear_iq4_nl_arena moe_linear.comp -DMOE_ARENA -DFMT_IQ4_NL
+moe_linear_mxfp4_arena moe_linear.comp -DMOE_ARENA -DFMT_MXFP4
+moe_linear_q4_0_bda moe_linear.comp -DMOE_BDA -DFMT_Q4_0
+moe_linear_q4_1_bda moe_linear.comp -DMOE_BDA -DFMT_Q4_1
+moe_linear_q5_0_bda moe_linear.comp -DMOE_BDA -DFMT_Q5_0
+moe_linear_q5_1_bda moe_linear.comp -DMOE_BDA -DFMT_Q5_1
+moe_linear_q8_0_bda moe_linear.comp -DMOE_BDA -DFMT_Q8_0
+moe_linear_q2_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q2_K
+moe_linear_q3_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q3_K
+moe_linear_q4_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q4_K
+moe_linear_q5_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q5_K
+moe_linear_q6_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q6_K
+moe_linear_iq4_nl_bda moe_linear.comp -DMOE_BDA -DFMT_IQ4_NL
+moe_linear_mxfp4_bda moe_linear.comp -DMOE_BDA -DFMT_MXFP4
+
+# paged attention: decode / short batches with split-KV (KV_Q8 = cache format), prompt tiles (DVMAX = largest value width)
+attn_decode_f16 attn_decode.comp -DKV_Q8=0
+attn_decode_q8 attn_decode.comp -DKV_Q8=1
+attn_prefill_f16_d128 attn_prefill.comp -DKV_Q8=0 -DDVMAX=128
+attn_prefill_f16_d256 attn_prefill.comp -DKV_Q8=0 -DDVMAX=256
+attn_prefill_f16_d512 attn_prefill.comp -DKV_Q8=0 -DDVMAX=512
+attn_prefill_q8_d128 attn_prefill.comp -DKV_Q8=1 -DDVMAX=128
+attn_prefill_q8_d256 attn_prefill.comp -DKV_Q8=1 -DDVMAX=256
+attn_prefill_q8_d512 attn_prefill.comp -DKV_Q8=1 -DDVMAX=512
+
+# Gated DeltaNet recurrence per key width HK (value width is a run-time parameter, <= 128)
+delta_rec_hk32 delta_rec.comp -DHK=32
+delta_rec_hk64 delta_rec.comp -DHK=64
+delta_rec_hk96 delta_rec.comp -DHK=96
+delta_rec_hk128 delta_rec.comp -DHK=128
+
+# Mamba selective scans: NS = state size kept in registers, gen = any state size (state in memory)
+mamba_scan2_ns16 mamba_scan2.comp -DNS=16
+mamba_scan2_ns32 mamba_scan2.comp -DNS=32
+mamba_scan2_ns64 mamba_scan2.comp -DNS=64
+mamba_scan2_ns128 mamba_scan2.comp -DNS=128
+mamba_scan2_gen mamba_scan2.comp -DNS=0
+mamba_scan1_ns8 mamba_scan1.comp -DNS=8
+mamba_scan1_ns16 mamba_scan1.comp -DNS=16
+mamba_scan1_ns32 mamba_scan1.comp -DNS=32
+mamba_scan1_gen mamba_scan1.comp -DNS=0

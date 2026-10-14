@@ -1,0 +1,5 @@
+# Variants of the float-weight linear shader (package 4). Line: <output name> <source.comp> [-DNAME=VALUE ...]; # starts a comment.
+# lin_f32 / lin_f16 / lin_bf16 serve Stream::quantized_linear for unquantized weights (row-major as in the file), see lin_float.comp.
+lin_f32 lin_float.comp -DFMT_F32
+lin_f16 lin_float.comp -DFMT_F16
+lin_bf16 lin_float.comp -DFMT_BF16

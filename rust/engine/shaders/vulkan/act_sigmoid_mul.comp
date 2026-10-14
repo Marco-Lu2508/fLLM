@@ -1,0 +1,20 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: act_sigmoid_mul | bindings: x,gate | push: count | grid: [min(ceil(count/256), 65535), 1, 1]
+// Gated attention output (Stream::sigmoid_gate_mul): x[i] = x[i] * sigmoid(gate[i]) in place.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer GateBuf { float gate[]; };
+layout(push_constant) uniform P {
+    uint count;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        x[i] = x[i] * sigmoid1(gate[i]);
+    }
+}

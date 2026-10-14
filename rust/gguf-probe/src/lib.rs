@@ -1,0 +1,668 @@
+pub mod quant_types;
+use memmap2::{Mmap, MmapOptions};
+use serde::Serialize;
+use serde_json::{Map, Number, Value};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+#[derive(Debug)]
+struct Cursor<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
+        let end = self.offset.checked_add(count).ok_or("offset overflow")?;
+        let bytes = self.data.get(self.offset..end).ok_or_else(|| {
+            format!(
+                "truncated GGUF at byte {} (need {count} bytes)",
+                self.offset
+            )
+        })?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> Result<u64, String> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn i8(&mut self) -> Result<i8, String> {
+        Ok(self.u8()? as i8)
+    }
+
+    fn i16(&mut self) -> Result<i16, String> {
+        Ok(i16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+    }
+
+    fn i32(&mut self) -> Result<i32, String> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn i64(&mut self) -> Result<i64, String> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn f32(&mut self) -> Result<f32, String> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn f64(&mut self) -> Result<f64, String> {
+        Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        let len = usize::try_from(self.u64()?).map_err(|_| "string length does not fit usize")?;
+        let bytes = self.take(len)?;
+        let value = std::str::from_utf8(bytes).map_err(|e| format!("invalid GGUF UTF-8: {e}"))?;
+        Ok(value.to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TensorInfo {
+    pub name: String,
+    pub dimensions: Vec<u64>,
+    pub type_id: u32,
+    pub data_offset: u64,
+    pub payload_len: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GgufIndex {
+    pub version: u32,
+    pub metadata: Map<String, Value>,
+    pub tensors: Vec<TensorInfo>,
+    pub data_offset: u64,
+    pub file_len: u64,
+}
+
+fn json_float(v: f64) -> Result<Value, String> {
+    Number::from_f64(v)
+        .map(Value::Number)
+        .ok_or_else(|| format!("non-finite GGUF metadata float {v}"))
+}
+
+fn scalar(c: &mut Cursor<'_>, kind: u32) -> Result<Value, String> {
+    match kind {
+        0 => Ok(Value::from(c.u8()?)),
+        1 => Ok(Value::from(c.i8()?)),
+        2 => Ok(Value::from(u16::from_le_bytes(
+            c.take(2)?.try_into().unwrap(),
+        ))),
+        3 => Ok(Value::from(c.i16()?)),
+        4 => Ok(Value::from(c.u32()?)),
+        5 => Ok(Value::from(c.i32()?)),
+        6 => json_float(c.f32()? as f64),
+        7 => match c.u8()? {
+            0 => Ok(Value::Bool(false)),
+            1 => Ok(Value::Bool(true)),
+            other => Err(format!("invalid GGUF boolean byte {other}")),
+        },
+        8 => Ok(Value::String(c.string()?)),
+        10 => Ok(Value::from(c.u64()?)),
+        11 => Ok(Value::from(c.i64()?)),
+        12 => json_float(c.f64()?),
+        _ => Err(format!("unsupported GGUF metadata scalar type {kind}")),
+    }
+}
+
+fn min_encoded_width(kind: u32) -> Result<usize, String> {
+    match kind {
+        0 | 1 | 7 => Ok(1),
+        2 | 3 => Ok(2),
+        4..=6 => Ok(4),
+        8 | 10 | 11 | 12 => Ok(8),
+        _ => Err(format!("unsupported GGUF array element type {kind}")),
+    }
+}
+
+fn value(c: &mut Cursor<'_>, kind: u32) -> Result<Value, String> {
+    if kind != 9 {
+        return scalar(c, kind);
+    }
+    let element_type = c.u32()?;
+    if element_type == 9 {
+        return Err("nested GGUF arrays are invalid".to_owned());
+    }
+    let count = usize::try_from(c.u64()?).map_err(|_| "array count does not fit usize")?;
+    let min_width = min_encoded_width(element_type)?;
+    if count > c.data.len().saturating_sub(c.offset) / min_width {
+        return Err(format!(
+            "GGUF array count {count} exceeds remaining file data"
+        ));
+    }
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(scalar(c, element_type)?);
+    }
+    Ok(Value::Array(values))
+}
+
+fn checked_count(count: u64, max: u64, label: &str) -> Result<usize, String> {
+    if count > max {
+        return Err(format!("unreasonable GGUF {label}: {count}"));
+    }
+    usize::try_from(count).map_err(|_| format!("GGUF {label} does not fit usize"))
+}
+
+fn align_up(value: usize, alignment: usize) -> Result<usize, String> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return Err(format!("invalid GGUF alignment {alignment}"));
+    }
+    value
+        .checked_add(alignment - 1)
+        .map(|v| v & !(alignment - 1))
+        .ok_or_else(|| "GGUF alignment overflow".to_owned())
+}
+
+/// Group size of the fLLM-specific `Q4Z` tensor types (4-bit AWQ / GPTQ weights): ids 0x8000_0010 + log2(group / 32).
+pub fn q4z_group(type_id: u32) -> Option<u64> {
+    match type_id {
+        0x8000_0010 | 0x8000_0014 => Some(32),
+        0x8000_0011 | 0x8000_0015 => Some(64),
+        0x8000_0012 | 0x8000_0016 => Some(128),
+        _ => None,
+    }
+}
+
+/// Group size of the fLLM-specific `Q4ZP` tensor types (4-bit GPTQ weights with column permutation table): ids 0x8000_0014 + log2(group / 32).
+pub fn q4zp_group(type_id: u32) -> Option<u64> {
+    match type_id {
+        0x8000_0014 => Some(32),
+        0x8000_0015 => Some(64),
+        0x8000_0016 => Some(128),
+        _ => None,
+    }
+}
+
+/// fLLM-specific `FP8M` tensor type (FP8 E4M3 weights with per-channel FP16 scales for Marlin W8A16): id 0x8000_0020.
+pub fn fp8m_type(type_id: u32) -> bool {
+    type_id == 0x8000_0020
+}
+
+fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
+    if let Some(group) = q4z_group(type_id) {
+        // per group: group / 2 code bytes, an fp16 scale and a zero-point byte
+        return Some((group, group / 2 + 3));
+    }
+    if fp8m_type(type_id) {
+        return Some((1, 1));
+    }
+    quant_types::by_id(type_id).map(|ty| (ty.block_elements as u64, ty.bytes_per_block as u64))
+}
+
+fn tensor_payload_len(type_id: u32, dimensions: &[u64]) -> Result<u64, String> {
+    let (block_size, type_size) = ggml_quant_size(type_id)
+        .ok_or_else(|| format!("unsupported GGML tensor type {type_id}"))?;
+    if dimensions.is_empty() || dimensions.contains(&0) {
+        return Err("tensor dimensions must be nonempty and positive".into());
+    }
+    if !dimensions[0].is_multiple_of(block_size) {
+        return Err(format!(
+            "tensor row length {} is not divisible by GGML block size {block_size}",
+            dimensions[0]
+        ));
+    }
+    let elements = dimensions.iter().try_fold(1u64, |total, dim| {
+        total
+            .checked_mul(*dim)
+            .ok_or_else(|| "tensor element count overflow".to_owned())
+    })?;
+    if elements % block_size != 0 {
+        return Err(format!(
+            "tensor has {elements} elements, not divisible by GGML block size {block_size}"
+        ));
+    }
+    let q4z_len = (elements / block_size)
+        .checked_mul(type_size)
+        .ok_or_else(|| "tensor payload length overflow".to_owned())?;
+    if q4zp_group(type_id).is_some() {
+        let perm_len = dimensions[0]
+            .checked_mul(4)
+            .ok_or_else(|| "tensor payload length overflow".to_owned())?;
+        q4z_len
+            .checked_add(perm_len)
+            .ok_or_else(|| "tensor payload length overflow".to_owned())
+    } else if fp8m_type(type_id) {
+        let scale_len = dimensions
+            .get(1)
+            .copied()
+            .unwrap_or(1)
+            .checked_mul(2)
+            .ok_or_else(|| "tensor payload length overflow".to_owned())?;
+        q4z_len
+            .checked_add(scale_len)
+            .ok_or_else(|| "tensor payload length overflow".to_owned())
+    } else {
+        Ok(q4z_len)
+    }
+}
+fn parse(data: &[u8]) -> Result<GgufIndex, String> {
+    let mut c = Cursor::new(data);
+    if c.take(4)? != b"GGUF" {
+        return Err("GGUF magic invalid or byte order unsupported".to_owned());
+    }
+    let version = c.u32()?;
+    if !(2..=3).contains(&version) {
+        return Err(format!("unsupported GGUF version {version}"));
+    }
+    let tensor_count_raw = c.u64()?;
+    let kv_count_raw = c.u64()?;
+    let tensor_count = checked_count(tensor_count_raw, 1_000_000, "tensor count")?;
+    let kv_count = checked_count(kv_count_raw, 1_000_000, "metadata count")?;
+
+    let mut metadata = Map::new();
+    metadata.insert("GGUF.version".to_owned(), Value::from(version));
+    metadata.insert(
+        "GGUF.tensor_count".to_owned(),
+        Value::from(tensor_count_raw),
+    );
+    metadata.insert("GGUF.kv_count".to_owned(), Value::from(kv_count_raw));
+    for _ in 0..kv_count {
+        let key = c.string()?;
+        let kind = c.u32()?;
+        let item = value(&mut c, kind).map_err(|e| format!("metadata {key:?}: {e}"))?;
+        if metadata.insert(key.clone(), item).is_some() {
+            return Err(format!("duplicate GGUF metadata key {key:?}"));
+        }
+    }
+
+    let mut tensor_names = HashSet::with_capacity(tensor_count);
+    let mut tensors = Vec::with_capacity(tensor_count);
+    for _ in 0..tensor_count {
+        let name = c.string()?;
+        if !tensor_names.insert(name.clone()) {
+            return Err(format!("duplicate GGUF tensor {name:?}"));
+        }
+        let dimensions_count = c.u32()?;
+        if dimensions_count > 4 {
+            return Err(format!(
+                "tensor {name:?} has unsupported {dimensions_count} dimensions"
+            ));
+        }
+        let mut dimensions = Vec::with_capacity(dimensions_count as usize);
+        for _ in 0..dimensions_count {
+            dimensions.push(c.u64()?);
+        }
+        let type_id = c.u32()?;
+        let relative_offset = c.u64()?;
+        tensors.push((name, dimensions, type_id, relative_offset));
+    }
+
+    let alignment = match metadata.get("general.alignment") {
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| "general.alignment must be an unsigned integer".to_owned())?,
+        Some(_) => return Err("general.alignment must be an unsigned integer".to_owned()),
+        None => 32,
+    };
+    let data_offset = align_up(c.offset, alignment)?;
+    if data_offset > data.len() {
+        return Err("GGUF tensor data starts past end of file".to_owned());
+    }
+    let data_offset_u64 = data_offset as u64;
+    let mut result_tensors = Vec::with_capacity(tensors.len());
+    for (name, dimensions, type_id, relative_offset) in tensors {
+        let absolute = data_offset_u64
+            .checked_add(relative_offset)
+            .ok_or_else(|| format!("tensor {name:?} data offset overflow"))?;
+        let payload_len = tensor_payload_len(type_id, &dimensions)?;
+        let end = absolute
+            .checked_add(payload_len)
+            .ok_or_else(|| format!("tensor {name:?} payload range overflow"))?;
+        if end > data.len() as u64 {
+            return Err(format!(
+                "tensor {name:?} payload range {absolute}..{end} is outside the file"
+            ));
+        }
+        result_tensors.push(TensorInfo {
+            name,
+            dimensions,
+            type_id,
+            data_offset: absolute,
+            payload_len,
+        });
+    }
+
+    Ok(GgufIndex {
+        version,
+        metadata,
+        tensors: result_tensors,
+        data_offset: data_offset_u64,
+        file_len: data.len() as u64,
+    })
+}
+
+fn tensor_slice<'a>(data: &'a [u8], tensor: &TensorInfo) -> Result<&'a [u8], String> {
+    let start = usize::try_from(tensor.data_offset)
+        .map_err(|_| format!("tensor {:?} offset does not fit usize", tensor.name))?;
+    let len = usize::try_from(tensor.payload_len)
+        .map_err(|_| format!("tensor {:?} length does not fit usize", tensor.name))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| format!("tensor {:?} byte range overflow", tensor.name))?;
+    data.get(start..end)
+        .ok_or_else(|| format!("tensor {:?} byte range is outside the mapping", tensor.name))
+}
+
+/// Read-only, zero-copy GGUF mapping with validated tensor byte ranges.
+pub struct MappedGguf {
+    mapping: Arc<Mmap>,
+    index: GgufIndex,
+    extra_mappings: HashMap<String, Arc<Mmap>>,
+}
+
+impl MappedGguf {
+    /// Make a private tensor-name view sharing every mapped payload, including
+    /// split-file mappings. Entries are `(alias, existing_name)`; collisions and
+    /// missing sources are errors. The original on-disk index remains unchanged.
+    pub fn with_tensor_aliases(&self, aliases: &[(String, String)]) -> Result<Self, String> {
+        let mut index = self.index.clone();
+        let mut extra_mappings = self.extra_mappings.clone();
+        let mut names: HashSet<_> = index.tensors.iter().map(|t| t.name.clone()).collect();
+        for (alias, source) in aliases {
+            if !names.insert(alias.clone()) {
+                return Err(format!("duplicate GGUF tensor alias {alias}"));
+            }
+            let mut info = self
+                .index
+                .tensors
+                .iter()
+                .find(|t| &t.name == source)
+                .cloned()
+                .ok_or_else(|| format!("missing GGUF alias source {source}"))?;
+            info.name.clone_from(alias);
+            index.tensors.push(info);
+            extra_mappings.insert(
+                alias.clone(),
+                Arc::clone(self.extra_mappings.get(source).unwrap_or(&self.mapping)),
+            );
+        }
+        Ok(Self {
+            mapping: Arc::clone(&self.mapping),
+            index,
+            extra_mappings,
+        })
+    }
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let mut model = Self::open_single(path)?;
+        fn invalid(e: impl Into<String>) -> io::Error {
+            io::Error::new(io::ErrorKind::InvalidData, e.into())
+        }
+        let meta = &model.index.metadata;
+        if !meta.contains_key("split.count") {
+            if meta.contains_key("split.no") || meta.contains_key("split.tensors.count") {
+                return Err(invalid("incomplete GGUF split metadata"));
+            }
+            return Ok(model);
+        }
+        let count = meta
+            .get("split.count")
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0 && n <= 99999)
+            .ok_or_else(|| invalid("invalid split.count"))?;
+        if meta.get("split.no").and_then(Value::as_u64) != Some(0) {
+            return Err(invalid("open the first GGUF shard (split.no = 0)"));
+        }
+        let total = meta
+            .get("split.tensors.count")
+            .and_then(Value::as_u64)
+            .filter(|&n| n <= 1_000_000)
+            .ok_or_else(|| invalid("invalid split.tensors.count"))?;
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| invalid("invalid GGUF shard filename"))?;
+        let suffix = format!("-00001-of-{count:05}.gguf");
+        let prefix = filename
+            .strip_suffix(&suffix)
+            .ok_or_else(|| invalid("GGUF shard filename does not match split.count"))?;
+        let mut names: HashSet<String> =
+            model.index.tensors.iter().map(|t| t.name.clone()).collect();
+        for no in 1..count {
+            let shard_path =
+                path.with_file_name(format!("{prefix}-{:05}-of-{count:05}.gguf", no + 1));
+            let shard = Self::open_single(&shard_path)?;
+            if shard.index.version != model.index.version
+                || shard.index.metadata.get("split.no").and_then(Value::as_u64) != Some(no)
+                || shard
+                    .index
+                    .metadata
+                    .get("split.count")
+                    .and_then(Value::as_u64)
+                    != Some(count)
+                || shard
+                    .index
+                    .metadata
+                    .get("split.tensors.count")
+                    .and_then(Value::as_u64)
+                    != Some(total)
+            {
+                return Err(invalid(format!(
+                    "inconsistent split metadata in {}",
+                    shard_path.display()
+                )));
+            }
+            // llama.cpp may put tokenizer metadata in only the first shard.
+            for (key, value) in &shard.index.metadata {
+                if key.starts_with("split.") || key.starts_with("GGUF.") {
+                    continue;
+                }
+                if model.index.metadata.get(key).is_some_and(|v| v != value) {
+                    return Err(invalid(format!("conflicting shard metadata {key}")));
+                }
+                model
+                    .index
+                    .metadata
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            model.index.file_len = model
+                .index
+                .file_len
+                .checked_add(shard.index.file_len)
+                .ok_or_else(|| invalid("GGUF shard file size overflow"))?;
+            for tensor in shard.index.tensors {
+                if !names.insert(tensor.name.clone()) {
+                    return Err(invalid(format!(
+                        "duplicate tensor across shards: {}",
+                        tensor.name
+                    )));
+                }
+                model
+                    .extra_mappings
+                    .insert(tensor.name.clone(), Arc::clone(&shard.mapping));
+                model.index.tensors.push(tensor);
+            }
+        }
+        if model.index.tensors.len() as u64 != total {
+            return Err(invalid(
+                "GGUF split tensor count does not match split.tensors.count",
+            ));
+        }
+        model
+            .index
+            .metadata
+            .insert("GGUF.tensor_count".into(), Value::from(total));
+        Ok(model)
+    }
+
+    /// Map one physical GGUF file without following its split metadata.
+    pub fn open_single(path: impl AsRef<Path>) -> io::Result<Self> {
+        let file = File::open(path)?;
+        // SAFETY: the mapping is read-only and owned for as long as tensor slices are returned.
+        let mapping = unsafe { MmapOptions::new().map(&file)? };
+        let index = parse(&mapping).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(Self {
+            mapping: Arc::new(mapping),
+            index,
+            extra_mappings: HashMap::new(),
+        })
+    }
+
+    pub fn index(&self) -> &GgufIndex {
+        &self.index
+    }
+
+    /// Return the on-disk bytes for a named tensor without copying them.
+    pub fn tensor_bytes(&self, name: &str) -> Result<&[u8], String> {
+        let tensor = self
+            .index
+            .tensors
+            .iter()
+            .find(|tensor| tensor.name == name)
+            .ok_or_else(|| format!("tensor {name:?} not found"))?;
+        let mapping = self.extra_mappings.get(name).unwrap_or(&self.mapping);
+        tensor_slice(mapping, tensor)
+    }
+    /// Shared, zero-copy tensor storage that keeps the read-only map alive.
+    pub fn owned_tensor_bytes(&self, name: &str) -> Result<TensorBytes, String> {
+        let tensor = self
+            .index
+            .tensors
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| format!("tensor {name:?} not found"))?;
+        let mapping = self.extra_mappings.get(name).unwrap_or(&self.mapping);
+        tensor_slice(mapping, tensor)?;
+        let start = tensor.data_offset as usize;
+        Ok(TensorBytes {
+            mapping: Arc::clone(mapping),
+            range: start..start + tensor.payload_len as usize,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct TensorBytes {
+    mapping: Arc<Mmap>,
+    range: std::ops::Range<usize>,
+}
+impl TensorBytes {
+    /// A zero-copy view of `len` bytes starting `start` bytes into this tensor.
+    pub fn slice(&self, start: usize, len: usize) -> Result<TensorBytes, String> {
+        let end = start
+            .checked_add(len)
+            .filter(|&end| end <= self.range.len())
+            .ok_or("tensor slice exceeds the tensor")?;
+        Ok(TensorBytes {
+            mapping: Arc::clone(&self.mapping),
+            range: self.range.start + start..self.range.start + end,
+        })
+    }
+}
+impl std::ops::Deref for TensorBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.mapping[self.range.clone()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put_u32(out: &mut Vec<u8>, v: u32) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    fn put_u64(out: &mut Vec<u8>, v: u64) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    fn put_str(out: &mut Vec<u8>, v: &str) {
+        put_u64(out, v.len() as u64);
+        out.extend_from_slice(v.as_bytes());
+    }
+
+    #[test]
+    fn parses_metadata_arrays_and_validates_tensor_range() {
+        let mut bytes = b"GGUF".to_vec();
+        put_u32(&mut bytes, 3);
+        put_u64(&mut bytes, 1);
+        put_u64(&mut bytes, 2);
+        put_str(&mut bytes, "general.alignment");
+        put_u32(&mut bytes, 4);
+        put_u32(&mut bytes, 32);
+        put_str(&mut bytes, "tokenizer.ggml.tokens");
+        put_u32(&mut bytes, 9);
+        put_u32(&mut bytes, 8);
+        put_u64(&mut bytes, 2);
+        put_str(&mut bytes, "a");
+        put_str(&mut bytes, "b");
+        put_str(&mut bytes, "weight");
+        put_u32(&mut bytes, 2);
+        put_u64(&mut bytes, 2);
+        put_u64(&mut bytes, 3);
+        put_u32(&mut bytes, 1);
+        put_u64(&mut bytes, 0);
+        let data_offset = (bytes.len() + 31) & !31;
+        bytes.resize(data_offset, 0);
+        bytes.extend_from_slice(&[42; 12]);
+
+        let parsed = parse(&bytes).unwrap();
+        assert_eq!(
+            parsed.metadata["tokenizer.ggml.tokens"],
+            serde_json::json!(["a", "b"])
+        );
+        assert_eq!(parsed.tensors[0].payload_len, 12);
+        assert_eq!(tensor_slice(&bytes, &parsed.tensors[0]).unwrap(), &[42; 12]);
+        let mut anonymous = MmapOptions::new().len(bytes.len()).map_anon().unwrap();
+        anonymous.copy_from_slice(&bytes);
+        let mapped = MappedGguf {
+            mapping: Arc::new(anonymous.make_read_only().unwrap()),
+            index: parsed,
+            extra_mappings: HashMap::new(),
+        };
+        let owned = mapped.owned_tensor_bytes("weight").unwrap();
+        assert_eq!(
+            owned.as_ptr(),
+            mapped.tensor_bytes("weight").unwrap().as_ptr()
+        );
+        let aliases = [("nextn.weight".into(), "weight".into())];
+        let view = mapped.with_tensor_aliases(&aliases).unwrap();
+        assert_eq!(
+            view.tensor_bytes("nextn.weight").unwrap().as_ptr(),
+            owned.as_ptr()
+        );
+        assert!(view.with_tensor_aliases(&aliases).is_err());
+        assert!(mapped
+            .with_tensor_aliases(&[("missing_alias".into(), "missing".into())])
+            .is_err());
+        drop(mapped);
+        assert_eq!(&*owned, &[42; 12]);
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert!(parse(&truncated).unwrap_err().contains("payload range"));
+    }
+
+    #[test]
+    fn rejects_truncated_and_nested_array_metadata() {
+        assert!(parse(b"GGUF").unwrap_err().contains("truncated"));
+        let mut bytes = b"GGUF".to_vec();
+        put_u32(&mut bytes, 3);
+        put_u64(&mut bytes, 0);
+        put_u64(&mut bytes, 1);
+        put_str(&mut bytes, "bad");
+        put_u32(&mut bytes, 9);
+        put_u32(&mut bytes, 9);
+        put_u64(&mut bytes, 0);
+        assert!(parse(&bytes).unwrap_err().contains("nested"));
+    }
+}

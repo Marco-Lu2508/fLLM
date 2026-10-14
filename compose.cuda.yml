@@ -1,0 +1,54 @@
+# fLLM server on an NVIDIA GPU. The model is a Hugging Face link and is downloaded on first start into the
+# named volume "fllm-cache" (later starts reuse it).
+#
+#   FLLM_MODEL=unsloth/Qwen3.5-9B-GGUF:Q4_K_M docker compose -f compose.cuda.yml up -d
+#   docker compose -f compose.cuda.yml logs -f        # download and load progress
+#   curl http://127.0.0.1:8000/health
+#
+# Needs an NVIDIA driver on the host plus the NVIDIA Container Toolkit (Linux) or Docker Desktop with the
+# WSL2 backend (Windows); see docs/quickstart-windows-linux.md.
+#
+# Variables
+#   FLLM_MODEL       Hugging Face link or owner/repo[:QUANT]   (required, no default)
+#   FLLM_PORT        port on the host                            (default 8000)
+#   FLLM_BIND_HOST   host address of the port mapping            (default 127.0.0.1; 0.0.0.0 = whole network, set FLLM_API_KEY then)
+#   FLLM_CTX         context size in tokens                      (default 8192)
+#   FLLM_KV_CACHE    KV cache type (f16, bf16, fp8_e4m3, int8, q8_0, ...) (default f16; q8_0 roughly doubles the context per GB)
+#   FLLM_API_KEY     bearer token the server requires            (default none)
+#   HF_TOKEN         Hugging Face token for gated / private repos
+#   FLLM_EXTRA_ARGS  further serve options, e.g. "--max-seqs 4 --gpu-memory-utilization 0.85"
+#   FLLM_IMAGE       image to run                                (default ghcr.io/marco-lu2508/fllm:cuda)
+services:
+  fllm:
+    image: ${FLLM_IMAGE:-ghcr.io/marco-lu2508/fllm:cuda}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cuda
+    container_name: fllm
+    ports:
+      - "${FLLM_BIND_HOST:-127.0.0.1}:${FLLM_PORT:-8000}:8000"
+    # Variables without a value are passed through only when set on the host: an empty FLLM_API_KEY would make the
+    # server demand an empty key and answer every request with 401.
+    environment:
+      - FLLM_API_KEY
+      - HF_TOKEN
+    volumes:
+      - fllm-cache:/home/fllm/.cache
+    command: >
+      serve --host 0.0.0.0 --port 8000
+      --model ${FLLM_MODEL:?set FLLM_MODEL to a Hugging Face link, e.g. unsloth/Qwen3.5-9B-GGUF:Q4_K_M}
+      --device cuda
+      --ctx ${FLLM_CTX:-8192}
+      --kv-cache-type ${FLLM_KV_CACHE:-f16}
+      ${FLLM_EXTRA_ARGS:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  fllm-cache:

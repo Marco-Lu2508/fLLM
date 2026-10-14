@@ -1,0 +1,208 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_decode | bindings: q,kpool,vpool,meta,bias,out,part | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,nsplit,rows_total,row0,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [nsplit, heads, rows in this dispatch]
+// Paged attention for decode and for short batches (Stream::attention_paged), split over the key range (split-KV / flash-decoding), one KV format per
+// variant (macro KV_Q8 = 0: f16 cache, 1: q8_0 cache). One workgroup of 64 lanes per (row, query head, split):
+//   * the lanes score 64 keys at a time (one key per lane: dot(q, key) * scale, ALiBi, soft cap, mask), fold the tile into an online softmax
+//     (running maximum m, denominator l) and accumulate the value rows: lane `l` owns the value dimensions l, l + 64, ... (dv <= 512);
+//   * nsplit == 1: the result is final (sink folded in) and written to `out`; nsplit > 1: the split writes m, l and the unnormalised accumulator to
+//     `part` and attn_merge combines the splits (the sink is added there).
+// Row r (global row index, row0 + z) attends to positions start .. lengths[r]-1 (start: see AttentionParams: chunk, window, or 0) through its block
+// table row; q is `rows x heads x dk`, out `rows x heads x dv` (row index = global row). `meta` = int32: lengths[rows_total] then the block tables
+// (rows_total x stride). `bias` = float: sinks[heads] then ALiBi slopes[heads] (always bound; flags bit 0 = sinks used, bit 1 = ALiBi used).
+// `part`: ml pairs (m, l) for every (row, head, split) record, then the accumulators (dv floats per record); record = (z * heads + head) * nsplit + split.
+// Needs dk, dv <= 512, nsplit <= 256. Empty splits (rows shorter than the split grid) write l = 0 and are skipped by the merge.
+#define WG 64
+#include "_ops_common.glsl"
+#include "_ops_kv.glsl"
+#ifndef KV_Q8
+#define KV_Q8 0
+#endif
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer KPool { uint kpool[]; };
+layout(std430, binding = 2) readonly buffer VPool { uint vpool[]; };
+layout(std430, binding = 3) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 4) readonly buffer BiasBuf { float bias_tab[]; };
+layout(std430, binding = 5) buffer OutBuf { float outv[]; };
+layout(std430, binding = 6) buffer PartBuf { float part[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint kv_heads;
+    uint dk;
+    uint dv;
+    uint stride;
+    uint block_size;
+    float scale;
+    float softcap;
+    uint window;
+    uint chunk;
+    uint flags;
+    uint nsplit;
+    uint rows_total;
+    uint row0;
+    uint k_base;
+    uint v_base;
+    uint k_scale;
+    uint v_scale;
+    uint k_group;
+    uint v_group;
+} p;
+
+shared float qs[512];
+shared float sc_s[WG];
+shared uint slot_s[WG];
+
+// dot(q, key) of kv head `kh` in cache slot `slot`
+float key_dot(uint slot, uint kh) {
+    const uint kvk = p.kv_heads * p.dk;
+    float s = 0.0;
+#if KV_Q8 == 0
+    const uint h0 = p.k_base + slot * kvk + kh * p.dk;
+    if ((h0 & 1u) == 0u) {
+        const uint w0 = h0 >> 1;
+        const uint pairs = p.dk >> 1;
+        for (uint i = 0u; i < pairs; i++) {
+            const vec2 kk = unpackHalf2x16(kpool[w0 + i]);
+            s += qs[2u * i] * kk.x + qs[2u * i + 1u] * kk.y;
+        }
+        if ((p.dk & 1u) != 0u) s += qs[p.dk - 1u] * KV_HALF(kpool, h0 + p.dk - 1u);
+    } else {
+        for (uint d = 0u; d < p.dk; d++) s += qs[d] * KV_HALF(kpool, h0 + d);
+    }
+#else
+    const uint group = p.k_group;
+    const uint b0 = p.k_base * 2u + slot * kvk + kh * p.dk;
+    const uint sc0 = p.k_base + p.k_scale + slot * (kvk / group) + (kh * p.dk) / group;
+    const uint ng = p.dk / group;
+    for (uint g = 0u; g < ng; g++) {
+        float part_sum = 0.0;
+        const uint bg = b0 + g * group;
+        const uint qg = g * group;
+        if ((bg & 3u) == 0u && (group & 3u) == 0u) {
+            for (uint j = 0u; j < group; j += 4u) {
+                const vec4 kk = kv_s8x4(kpool[(bg + j) >> 2]);
+                part_sum += qs[qg + j] * kk.x + qs[qg + j + 1u] * kk.y + qs[qg + j + 2u] * kk.z + qs[qg + j + 3u] * kk.w;
+            }
+        } else {
+            for (uint j = 0u; j < group; j++) part_sum += qs[qg + j] * KV_I8(kpool, bg + j);
+        }
+        s += part_sum * KV_HALF(kpool, sc0 + g);
+    }
+#endif
+    return s;
+}
+
+// value channel c (= kv_head * dv + d) in cache slot `slot`
+float val_at(uint slot, uint c) {
+    const uint kvv = p.kv_heads * p.dv;
+#if KV_Q8 == 0
+    return KV_HALF(vpool, p.v_base + slot * kvv + c);
+#else
+    return KV_I8(vpool, p.v_base * 2u + slot * kvv + c) * KV_HALF(vpool, p.v_base + p.v_scale + slot * (kvv / p.v_group) + c / p.v_group);
+#endif
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint split = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint r = p.row0 + gl_WorkGroupID.z;
+    const uint kh = h / (p.heads / p.kv_heads);
+    const uint n = uint(meta[r]);
+    uint start = 0u;
+    if (p.chunk != 0u) {
+        start = (n - 1u) / p.chunk * p.chunk;
+    } else if (p.window != 0u && n > p.window) {
+        start = n - p.window;
+    }
+    uint lo = start;
+    uint hi = n;
+    if (p.nsplit > 1u) {
+        uint per = (n - start + p.nsplit - 1u) / p.nsplit;
+        per = (per + WG - 1u) / WG * WG;
+        lo = min(n, start + split * per);
+        hi = min(n, lo + per);
+    }
+    const uint rec = (gl_WorkGroupID.z * p.heads + h) * p.nsplit + split;
+    const uint nrec = gl_NumWorkGroups.z * p.heads * p.nsplit;
+    if (lo >= hi) {  // empty split (uniform)
+        if (lane == 0u) {
+            part[rec * 2u] = NEG;
+            part[rec * 2u + 1u] = 0.0;
+        }
+        return;
+    }
+    for (uint d = lane; d < p.dk; d += WG) qs[d] = q[(r * p.heads + h) * p.dk + d];
+    barrier();
+
+    const bool use_alibi = (p.flags & 2u) != 0u;
+    const float slope = use_alibi ? bias_tab[p.heads + h] : 0.0;
+    const uint tab = p.rows_total + r * p.stride;
+    float m = NEG;
+    float l = 0.0;
+    float acc[8];
+    [[unroll]] for (uint i = 0u; i < 8u; i++) acc[i] = 0.0;
+
+    for (uint t0 = lo; t0 < hi; t0 += WG) {
+        const uint pos = t0 + lane;
+        float sc = NEG;
+        if (pos < hi) {
+            const uint slot = uint(meta[tab + pos / p.block_size]) * p.block_size + pos % p.block_size;
+            slot_s[lane] = slot;
+            sc = key_dot(slot, kh) * p.scale;
+            if (use_alibi) sc += slope * (float(pos) - float(n - 1u));
+            if (p.softcap != 0.0) sc = p.softcap * tanh(clamp(sc / p.softcap, -15.0, 15.0));
+        }
+        sc_s[lane] = sc;
+        barrier();
+        const uint count = min(uint(WG), hi - t0);
+        float tmax = NEG;
+        for (uint j = 0u; j < count; j++) tmax = max(tmax, sc_s[j]);
+        const float m_new = max(m, tmax);
+        const float corr = exp(m - m_new);
+        const float e = pos < hi ? exp(sc - m_new) : 0.0;
+        barrier();  // every lane has read the scores
+        sc_s[lane] = e;
+        barrier();
+        float tsum = 0.0;
+        for (uint j = 0u; j < count; j++) tsum += sc_s[j];
+        l = l * corr + tsum;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+            const uint d = lane + i * WG;
+            if (d < p.dv) {
+                float a = acc[i] * corr;
+                for (uint j = 0u; j < count; j++) a += sc_s[j] * val_at(slot_s[j], kh * p.dv + d);
+                acc[i] = a;
+            }
+        }
+        m = m_new;
+        barrier();  // sc_s / slot_s are overwritten by the next tile
+    }
+
+    if (p.nsplit == 1u) {
+        if ((p.flags & 1u) != 0u) {  // attention sink: adds exp(sink) to the denominator, no value
+            const float sink = bias_tab[h];
+            const float m2 = max(m, sink);
+            const float corr = exp(m - m2);
+            l = l * corr + exp(sink - m2);
+            [[unroll]] for (uint i = 0u; i < 8u; i++) acc[i] *= corr;
+        }
+        const float inv = 1.0 / l;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+            const uint d = lane + i * WG;
+            if (d < p.dv) outv[(r * p.heads + h) * p.dv + d] = acc[i] * inv;
+        }
+    } else {
+        if (lane == 0u) {
+            part[rec * 2u] = m;
+            part[rec * 2u + 1u] = l;
+        }
+        const uint abase = nrec * 2u + rec * p.dv;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) {
+            const uint d = lane + i * WG;
+            if (d < p.dv) part[abase + d] = acc[i];
+        }
+    }
+}

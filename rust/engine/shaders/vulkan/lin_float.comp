@@ -1,0 +1,75 @@
+#version 450
+// FLLM-SHADER: lin_<f32|f16|bf16> | bindings: 0 weights(u32[]) 1 x(f32[], batch x cols) 2 out(f32[], batch x out_stride) 3 bias(f32[]) | push: FPush(32 B) | grid: [rows split over x/y at 65535, 1, ceil(batch/8)]
+// Linear projection with unquantized weights (Stream::quantized_linear for F32 / F16 / BF16 weights: routers, small projections, float checkpoints).
+// out[b * out_stride + row_base + r] = scale * dot(x[b], w[r]) (+ bias[row_base + r]) for r < rows and b < batch.
+// The weights are stored row-major exactly as in the file: element (r, k) is element r * cols + k of the buffer (binary32 / binary16 / bfloat16;
+// 16-bit elements are packed two per word, element 2j in the low half). One workgroup computes one weight row for up to 8 activation rows
+// (grid z selects the group of 8), the lanes stride over K and the partial sums are reduced in shared memory. Plain Vulkan 1.0 arithmetic.
+// Prompt processing with float weights re-reads the row once per group of 8 tokens: correct, but not tiled (see INTERFACE notes of package 4).
+//
+// Variants (macro): FMT_F32, FMT_F16, FMT_BF16 (variants_float.list).
+#extension GL_EXT_control_flow_attributes : enable
+
+#define WG 128u
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer WeightBuf { uint w[]; };
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { float xv[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+layout(push_constant) uniform FPush {
+    uint rows;        // weight rows of this dispatch
+    uint cols;        // K
+    uint batch;       // activation rows
+    uint flags;       // bit 0: add bias
+    float scale;      // per-tensor factor (DeviceWeight::scale)
+    uint out_stride;  // floats between two output rows
+    uint row_base;    // first output feature of this dispatch
+    uint pad;
+} p;
+
+shared float red[8][128];
+
+// element i of the weight buffer as a float
+float wval(uint i) {
+#if defined(FMT_F32)
+    return uintBitsToFloat(w[i]);
+#elif defined(FMT_F16)
+    return unpackHalf2x16(w[i >> 1])[i & 1u];
+#else
+    return uintBitsToFloat(((w[i >> 1] >> ((i & 1u) * 16u)) & 0xFFFFu) << 16);
+#endif
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    // the whole workgroup leaves together, so the barriers below stay uniform
+    if (row >= p.rows) return;
+    const uint b0 = gl_WorkGroupID.z * 8u;
+    const uint nb = min(8u, p.batch - b0);
+    const uint base = row * p.cols;
+
+    float acc[8];
+    [[unroll]] for (uint c = 0; c < 8u; ++c) acc[c] = 0.0;
+    for (uint k = t; k < p.cols; k += WG) {
+        const float wv = wval(base + k);
+        [[unroll]] for (uint c = 0; c < 8u; ++c) {
+            if (c < nb) acc[c] += wv * xv[(b0 + c) * p.cols + k];
+        }
+    }
+    [[unroll]] for (uint c = 0; c < 8u; ++c) red[c][t] = acc[c];
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1) {
+        if (t < s) {
+            [[unroll]] for (uint c = 0; c < 8u; ++c) red[c][t] += red[c][t + s];
+        }
+        barrier();
+    }
+    if (t < nb) {
+        float v = red[t][0] * p.scale;
+        if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+        outv[(b0 + t) * p.out_stride + p.row_base + row] = v;
+    }
+}

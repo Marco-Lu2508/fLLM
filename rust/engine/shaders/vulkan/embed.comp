@@ -1,0 +1,86 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: embed | bindings: weights,ids,out | push: n_ids,cols,nb,off1,off2,off3 | grid: [min(ceil(work/256), 65535), 1, 1]  (work = n_ids * cols / 8 for block formats, n_ids * cols for RAW_*)
+// Embedding lookup (Stream::embedding_lookup): out[t][c] = weight[ids[t]][c] for t < n_ids, c < cols (= hidden size); ids are token ids (uint32, checked
+// < vocab on the host). The format is selected by one macro per entry of variants_ops.list:
+//   RAW_F32 / RAW_F16 / RAW_BF16   row-major table of f32 / binary16 / bfloat16, element (row, c) at index row * cols + c
+//   FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4
+//                                  planar device layout of the quantized weights (see _ops_wq.glsl); nb = blocks per row = cols / QK, off1..off3 = word
+//                                  offsets of the planes 1..3. One invocation decodes one chunk of 8 weights (cols is a multiple of QK, so of 8).
+// Table rows must lie inside the bound range (word indices are 32-bit: tables up to 4 GiB / 16 GiB of words).
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer WeightBuf { uint wbuf[]; };
+layout(std430, binding = 1) readonly buffer IdBuf { uint ids[]; };
+layout(std430, binding = 2) buffer OutBuf { float o[]; };
+layout(push_constant) uniform P {
+    uint n_ids;
+    uint cols;
+    uint nb;
+    uint off1;
+    uint off2;
+    uint off3;
+} p;
+
+#if defined(RAW_F32) || defined(RAW_F16) || defined(RAW_BF16)
+
+void main() {
+    const uint total = p.n_ids * p.cols;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint t = i / p.cols;
+        const uint c = i - t * p.cols;
+        const uint e = ids[t] * p.cols + c;
+#if defined(RAW_F32)
+        o[i] = uintBitsToFloat(wbuf[e]);
+#elif defined(RAW_F16)
+        o[i] = unpackHalf2x16(wbuf[e >> 1])[e & 1u];
+#else
+        o[i] = uintBitsToFloat(((wbuf[e >> 1] >> ((e & 1u) * 16u)) & 0xFFFFu) << 16);
+#endif
+    }
+}
+
+#else
+
+#define WQ_W(i) wbuf[(i)]
+#define WQ_OFF1 p.off1
+#define WQ_OFF2 p.off2
+#define WQ_OFF3 p.off3
+#include "_ops_wq.glsl"
+
+void main() {
+    const uint per_block = QK / 8;
+    const uint chunks = p.cols / 8u;
+    const uint total = p.n_ids * chunks;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint t = i / chunks;
+        const uint ch = i - t * chunks;
+        const uint g = ids[t] * p.nb + ch / per_block;
+        const uint cin = ch % per_block;
+        uint p0, p1;
+        float ws, wm;
+        wchunk(g, cin, p0, p1, ws, wm);
+#ifdef HAS_WM
+        const float off = wm;
+#else
+        const float off = 0.0;
+#endif
+        const vec4 a = wq_s8x4(p0) * ws + off;
+        const vec4 b = wq_s8x4(p1) * ws + off;
+        const uint at = t * p.cols + ch * 8u;
+        o[at + 0u] = a.x;
+        o[at + 1u] = a.y;
+        o[at + 2u] = a.z;
+        o[at + 3u] = a.w;
+        o[at + 4u] = b.x;
+        o[at + 5u] = b.y;
+        o[at + 6u] = b.z;
+        o[at + 7u] = b.w;
+    }
+}
+
+#endif

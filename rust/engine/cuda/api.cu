@@ -1,0 +1,1071 @@
+// fLLM CUDA backend: C API used by the Rust side (rust/engine/src/backend/cuda.rs).
+//
+// All functions return 0 on success and a non-zero code on failure; `fllm_cuda_last_error`
+// describes the last failure of the calling thread. The library links the CUDA runtime
+// statically and loads the driver (libcuda) lazily, so a binary built with it still starts on a
+// machine without NVIDIA drivers (device_count then reports an error and fLLM falls back).
+#include <cstdarg>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+#include "common.cuh"
+#include "fllm_cuda.h"
+#include "fllm_cuda_internal.h"
+
+static thread_local char g_error[512] = "";
+
+// state of the NVFP4 / Marlin FP16 paths (declared in fllm_cuda_internal.h; defined outside of extern "C" like fllm_glu_up)
+thread_local bool fllm_fp4_acc = false;
+thread_local float fllm_fp4_acc_scale = 0.f;
+thread_local bool fllm_fp4_f16out = false;
+thread_local bool fllm_glu_half = false;
+// state of the Marlin 4-bit path (same rule: the header declares these with C++ linkage, so they must not be defined inside extern "C")
+thread_local bool fllm_q4z_f16out = false;
+thread_local bool fllm_q4z_acc = false;
+thread_local float fllm_q4z_acc_scale = 0.f;
+
+int fllm_set_error(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_error, sizeof g_error, fmt, ap);
+    va_end(ap);
+    return 1;
+}
+int fllm_check_launch(const char *what) {
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) return fllm_set_error("%s: %s", what, cudaGetErrorString(e));
+    return 0;
+}
+static int fail(const char *what, cudaError_t e) { return fllm_set_error("%s: %s", what, cudaGetErrorString(e)); }
+#define CHECK(call, what)                    \
+    do {                                     \
+        const cudaError_t e_ = (call);       \
+        if (e_ != cudaSuccess) return fail(what, e_); \
+    } while (0)
+
+// Compute capability (major * 10 + minor) of the current device; FLLM_CUDA_FORCE_CC overrides it (testing the fallbacks).
+int fllm_cc() {
+    static int cache[16] = {0};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return 0;
+    if (cache[dev] == 0) {
+        if (const char *forced = getenv("FLLM_CUDA_FORCE_CC")) {
+            cache[dev] = atoi(forced);
+        } else {
+#if defined(__HIPCC__)
+            cache[dev] = 10;  // not an NVIDIA architecture: the tensor-core kernels (cc >= 75) stay off
+#else
+            cudaDeviceProp p;
+            cache[dev] = cudaGetDeviceProperties(&p, dev) == cudaSuccess ? p.major * 10 + p.minor : 1;
+#endif
+        }
+    }
+    return cache[dev];
+}
+
+// Largest dynamic shared memory per block the current device allows (opt-in maximum); FLLM_CUDA_FORCE_SMEM overrides it
+// (testing a smaller device).
+int fllm_smem_limit() {
+    static int cache[16] = {0};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return 48 * 1024;
+    if (cache[dev] == 0) {
+        if (const char *forced = getenv("FLLM_CUDA_FORCE_SMEM")) {
+            cache[dev] = atoi(forced);
+        } else {
+            int v = 0;
+            cache[dev] = cudaDeviceGetAttribute(&v, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) == cudaSuccess && v > 0 ? v : 48 * 1024;
+        }
+    }
+    return cache[dev];
+}
+
+extern "C" {
+
+const char *fllm_cuda_last_error(void) { return g_error; }
+
+int fllm_cuda_device_count(void) {
+    int n = 0;
+    const cudaError_t e = cudaGetDeviceCount(&n);
+    if (e != cudaSuccess) {
+        cudaGetLastError();
+        fllm_set_error("cudaGetDeviceCount: %s", cudaGetErrorString(e));
+        return -1;
+    }
+    return n;
+}
+
+int fllm_cuda_device_info(int dev, char *name, size_t name_len, int *cc_major, int *cc_minor, size_t *free_bytes,
+                          size_t *total_bytes, int *sm_count) {
+    cudaDeviceProp p;
+    CHECK(cudaGetDeviceProperties(&p, dev), "cudaGetDeviceProperties");
+#if defined(__HIPCC__)
+    snprintf(name, name_len, "%s (%s)", p.name, p.gcnArchName);
+    *cc_major = 0;  // the Rust side prints "CUDA/ROCm" for 0
+    *cc_minor = 0;
+#else
+    snprintf(name, name_len, "%s", p.name);
+    *cc_major = p.major;
+    *cc_minor = p.minor;
+#endif
+    *sm_count = p.multiProcessorCount;
+    int prev = 0;
+    cudaGetDevice(&prev);
+    CHECK(cudaSetDevice(dev), "cudaSetDevice");
+    CHECK(cudaMemGetInfo(free_bytes, total_bytes), "cudaMemGetInfo");
+    cudaSetDevice(prev);
+    return 0;
+}
+
+int fllm_cuda_malloc(int dev, void **ptr, size_t bytes) {
+    CHECK(cudaSetDevice(dev), "cudaSetDevice");
+    CHECK(cudaMalloc(ptr, bytes ? bytes : 1), "cudaMalloc");
+    return 0;
+}
+int fllm_cuda_free(void *ptr) { CHECK(cudaFree(ptr), "cudaFree"); return 0; }
+int fllm_cuda_h2d_sync(int dev, void *dst, const void *src, size_t bytes) {
+    CHECK(cudaSetDevice(dev), "cudaSetDevice");
+    CHECK(cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice), "cudaMemcpy");
+    return 0;
+}
+int fllm_cuda_memset(int dev, void *ptr, int value, size_t bytes) {
+    CHECK(cudaSetDevice(dev), "cudaSetDevice");
+    CHECK(cudaMemset(ptr, value, bytes), "cudaMemset");
+    return 0;
+}
+
+// Per-step host data of a captured decode step (positions, cache slots, block tables, lengths): a device buffer the kernels read, and a
+// pinned mirror that a copy node of the graph uploads at every launch.
+struct GraphSlot {
+    void *dev = nullptr, *pinned = nullptr;
+    size_t cap = 0, bytes = 0;
+    bool staged = false;
+};
+struct FllmGraph {
+    void *exec = nullptr;  // cudaGraphExec_t
+    GraphSlot slot[4];
+    int max_len = 0;       // attention sizes its splits for this context length instead of the one in the batch
+    unsigned epoch = 0;
+};
+
+#if !defined(__HIPCC__)
+static void graph_free(FllmGraph *g);
+#endif
+
+struct FllmStream {
+    int dev;
+    cudaStream_t s;
+    void *arena;      // ring of per-call metadata (positions, slots, block tables ...)
+    size_t cap, off;
+    float *ws;        // scratch for split-KV attention partials
+    size_t ws_bytes;
+    void *x16;        // FP16 copy of the activations for the tensor-core GEMM
+    size_t x16_bytes;
+    // recently staged metadata: layers of one step upload identical positions, slots, tables and lengths
+    struct Staged {
+        std::vector<unsigned char> data;
+        void *dev = nullptr;
+    } staged[8];
+    int staged_next = 0;
+    // activations of the last NVFP4 linear are already quantized in `x16` (q, k and v share their input)
+    const float *fp4_x = nullptr;
+    int fp4_batch = 0, fp4_cols = 0;
+    bool fp4_ready = false;
+    // activations of the last linear are already converted in `x16`
+    const float *x16_x = nullptr;
+    int x16_batch = 0, x16_cols = 0;
+    bool x16_ready = false;
+    const float *x8_x = nullptr;
+    int x8_batch = 0, x8_cols = 0;
+    bool x8_ready = false;  // the scratch holds the int8 activations of x8_x (mmvq.cu)
+    // a glu is only launched when something else needs its result: a following GEMM folds it into its activation
+    // conversion (see fllm_cuda_glu)
+    const float *glu_gate = nullptr, *glu_up = nullptr;
+    float *glu_out = nullptr;
+    size_t glu_count = 0;
+    int glu_mode = 0;
+    bool glu_pending = false;
+    bool glu_half = false;  // the pending glu reads FP16 gate and up (cast to float pointers): only an NVFP4 CUTLASS GEMM folds it in
+    // Marlin (Q4Z weights): FP16 activations and result, split-K partials and the lock workspace (zero between calls)
+    void *q4z_io = nullptr, *q4z_ctmp = nullptr, *q4z_ws = nullptr;
+    size_t q4z_io_bytes = 0, q4z_ctmp_bytes = 0, q4z_ws_bytes = 0;
+    int sms = 0;
+    int *argmax_out = nullptr;  // device ids of the last argmax (rows x int)
+    size_t argmax_cap = 0;
+    // CUDA graphs of whole decode steps (see fllm_cuda_graph_begin): the one being captured, and a counter that is bumped whenever a
+    // scratch buffer a captured kernel may point to is freed (a graph captured before that is stale)
+    std::vector<struct FllmGraph *> graphs;
+    struct FllmGraph *capture = nullptr;
+    unsigned epoch = 1;
+    // the FP16 activations in q4z_io are those of q4z_x (q, k and v, and gate and up, share their input)
+    const float *q4z_x = nullptr;
+    int q4z_batch = 0, q4z_cols = 0;
+    const int *q4z_perm = nullptr;
+    bool q4z_ready = false;
+};
+
+static int flush_glu(FllmStream *st) {
+    if (!st->glu_pending) return 0;
+    st->glu_pending = false;
+    if (st->glu_half) return fllm_glu_launch_f16(st->s, st->glu_gate, st->glu_up, st->glu_out, st->glu_count, st->glu_mode);
+    return fllm_glu_launch(st->s, st->glu_gate, st->glu_up, st->glu_out, st->glu_count, st->glu_mode);
+}
+
+FllmStream *fllm_cuda_stream_create(int dev) {
+    if (cudaSetDevice(dev) != cudaSuccess) { fllm_set_error("cudaSetDevice(%d) failed", dev); return nullptr; }
+    auto *st = new FllmStream{dev, nullptr, nullptr, 8u << 20, 0, nullptr, 0, nullptr, 0, {}, 0};
+    if (cudaStreamCreateWithFlags(&st->s, cudaStreamNonBlocking) != cudaSuccess ||
+        cudaMalloc(&st->arena, st->cap) != cudaSuccess) {
+        fllm_set_error("cannot create CUDA stream: %s", cudaGetErrorString(cudaGetLastError()));
+        delete st;
+        return nullptr;
+    }
+    return st;
+}
+void fllm_cuda_stream_destroy(FllmStream *st) {
+    if (!st) return;
+    cudaSetDevice(st->dev);
+    cudaStreamSynchronize(st->s);
+    cudaFree(st->arena);
+    cudaFree(st->ws);
+    cudaFree(st->x16);
+        st->epoch++;
+    cudaFree(st->q4z_io);
+            st->epoch++;
+    cudaFree(st->q4z_ctmp);
+            st->epoch++;
+    cudaFree(st->q4z_ws);
+            st->epoch++;
+    cudaFree(st->argmax_out);
+#if !defined(__HIPCC__)
+    for (auto *g : st->graphs) {
+        if (g) {
+            graph_free(g);
+            delete g;
+        }
+    }
+#endif
+    cudaStreamDestroy(st->s);
+    delete st;
+}
+int fllm_cuda_stream_sync(FllmStream *st) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = flush_glu(st)) return e;
+    CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+    return 0;
+}
+
+// Stage host data for a kernel. The arena is a ring: stream order guarantees that earlier kernels
+// have finished before a later copy overwrites their metadata.
+static int stage(FllmStream *st, int kind, const void *host, size_t bytes, void **dev) {
+    if (st->capture) {
+        // while a graph is captured the data goes through the fixed buffers of the graph (kind: 0 positions, 1 slots, 2 tables, 3 lengths)
+        if (kind < 0 || kind > 3) return fllm_set_error("graph capture: this operation stages data that is not part of a decode step");
+        GraphSlot &sl = st->capture->slot[kind];
+        if (!sl.dev || bytes > sl.cap) return fllm_set_error("graph capture: staged data of kind %d does not fit its buffer", kind);
+        if (!sl.staged) {
+            memcpy(sl.pinned, host, bytes);
+            sl.bytes = bytes;
+            sl.staged = true;
+            CHECK(cudaMemcpyAsync(sl.dev, sl.pinned, bytes, cudaMemcpyHostToDevice, st->s), "cudaMemcpyAsync(graph stage)");
+        } else if (bytes != sl.bytes) {
+            return fllm_set_error("graph capture: staged data of kind %d changes size", kind);
+        }
+        *dev = sl.dev;
+        return 0;
+    }
+    const size_t need = (bytes + 255) & ~size_t(255);
+    // a block larger than half the ring could be overwritten by the next stage of the same call (block tables of a
+    // 512-row batch at 32k context are 8 MB; the lengths staged right after them would wrap onto them)
+    if (need > st->cap / 2) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->arena);
+        st->epoch++;
+        st->cap = need * 4;
+        st->arena = nullptr;
+        CHECK(cudaMalloc(&st->arena, st->cap), "cudaMalloc(arena)");
+        st->off = 0;
+        for (auto &e : st->staged) e.dev = nullptr;
+    }
+    if (st->off + need > st->cap) {
+        st->off = 0;
+        for (auto &e : st->staged) e.dev = nullptr;
+    }
+    for (auto &e : st->staged)
+        if (e.dev && e.data.size() == bytes && memcmp(e.data.data(), host, bytes) == 0) {
+            *dev = e.dev;
+            return 0;
+        }
+    *dev = static_cast<char *>(st->arena) + st->off;
+    st->off += need;
+    CHECK(cudaMemcpyAsync(*dev, host, bytes, cudaMemcpyHostToDevice, st->s), "cudaMemcpyAsync(stage)");
+    auto &e = st->staged[st->staged_next];
+    st->staged_next = (st->staged_next + 1) % 8;
+    e.data.assign(static_cast<const unsigned char *>(host), static_cast<const unsigned char *>(host) + bytes);
+    e.dev = *dev;
+    return 0;
+}
+#define PREP(st) \
+    do { \
+        if (int e_ = flush_glu(st)) return e_; \
+        (st)->fp4_ready = false; \
+        (st)->q4z_ready = false; \
+        (st)->x16_ready = false; \
+        (st)->x8_ready = false; \
+        CHECK(cudaSetDevice((st)->dev), "cudaSetDevice"); \
+    } while (0)
+
+int fllm_cuda_upload(FllmStream *st, void *dst, const void *src, size_t bytes) {
+    PREP(st);
+    CHECK(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, st->s), "upload");
+    return 0;
+}
+int fllm_cuda_download(FllmStream *st, void *dst, const void *src, size_t bytes) {
+    PREP(st);
+    const cudaError_t e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, st->s);
+    if (e != cudaSuccess) {
+        // rare "invalid argument" seen on a Tesla T4 selftest (1 run in 3): say what the two pointers are
+        cudaPointerAttributes a{};
+        const cudaError_t pe = cudaPointerGetAttributes(&a, src);
+        cudaGetLastError();
+        return fllm_set_error("download: %s (src %p: %s type %d device %d, dst %p, %zu bytes, stream device %d)", cudaGetErrorString(e), src,
+                              pe == cudaSuccess ? "known" : cudaGetErrorString(pe), pe == cudaSuccess ? (int)a.type : -1,
+                              pe == cudaSuccess ? a.device : -1, dst, bytes, st->dev);
+    }
+    CHECK(cudaStreamSynchronize(st->s), "download sync");
+    return 0;
+}
+int fllm_cuda_copy(FllmStream *st, void *dst, const void *src, size_t bytes) {
+    PREP(st);
+    CHECK(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, st->s), "copy");
+    return 0;
+}
+
+// Can the GEMM of a (pending) glu's consumer read gate and up itself? Only the tensor-core paths that convert the
+// activations as their first step qualify; everything else needs the glu result in memory.
+static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x, const float *y, int cols, int batch) {
+    if (!st->glu_pending || x != st->glu_out || (const void *)y == (const void *)x || (size_t)batch * cols != st->glu_count)
+        return false;
+    if (st->glu_half && kind != 40) return false;
+    if ((reinterpret_cast<uintptr_t>(st->glu_gate) & 15) != 0 || (reinterpret_cast<uintptr_t>(st->glu_up) & 15) != 0 ||
+        (reinterpret_cast<uintptr_t>(w) & 15) != 0)
+        return false;
+    const bool narrow_ok = kind == 2 || kind == 3 || kind == 6 || kind == 7 || kind == 8 || kind == 20 || kind == 39;
+    if ((cols & (narrow_ok ? 31 : 255)) != 0) return false;
+    if (kind == 40) return true;
+    static const bool no_qgemm = getenv("FLLM_CUDA_NO_QGEMM") != nullptr;
+    if (batch < 16 || no_qgemm || fllm_exact_math() || fllm_cc() < 75) return false;
+    switch (kind) {
+        case 2: case 3: case 6: case 7: case 8: case 12: case 13: case 14: case 20: return true;
+        default: return false;
+    }
+}
+
+int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows,
+                     int cols, int batch) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    st->fp4_ready = false;
+    const bool fuse = glu_fusable(st, kind, w, x, y, cols, batch);
+    if (!fuse) {
+        if (int e = flush_glu(st)) return e;
+    }
+    // activations as FP16 (256-byte aligned) plus room for split-K partials of narrow batches
+    const size_t need = (((size_t)batch * pad256(cols) * 2 + 255) & ~size_t(255)) + (batch <= 64 ? (size_t)4 << 20 : (size_t)16 << 20);
+    if (need > st->x16_bytes && !fllm_exact_math()) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->x16);
+        st->epoch++;
+        st->x16 = nullptr;
+        st->x16_bytes = (need * 2 + 255) & ~size_t(255);
+        CHECK(cudaMalloc(&st->x16, st->x16_bytes), "cudaMalloc(activation scratch)");
+        st->x16_ready = false;
+        st->x8_ready = false;
+    }
+    static const bool no_reuse = getenv("FLLM_CUDA_NO_X16_REUSE") != nullptr;
+    fllm_x16_reuse = !fuse && !no_reuse && st->x16_ready && st->x16_x == x && st->x16_batch == batch && st->x16_cols == cols;
+    fllm_x8_reuse = !fuse && !no_reuse && st->x8_ready && st->x8_x == x && st->x8_batch == batch && st->x8_cols == cols;
+    fllm_x16_filled = false;
+    fllm_x8_filled = false;
+    if (fuse) {
+        fllm_glu_up = st->glu_up;
+        fllm_glu_mode = st->glu_mode;
+        st->glu_pending = false;
+    }
+    const int rc = fllm_linear_launch(st->s, w, kind, fuse ? st->glu_gate : x, y, bias, rows, cols, batch, st->x16, st->x16_bytes);
+    fllm_glu_up = nullptr;
+    fllm_x16_reuse = false;
+    fllm_x8_reuse = false;
+    st->x16_x = x;
+    st->x16_batch = batch;
+    st->x16_cols = cols;
+    st->x16_ready = fllm_x16_filled && (const void *)y != (const void *)x;
+    st->x8_x = x;
+    st->x8_batch = batch;
+    st->x8_cols = cols;
+    st->x8_ready = fllm_x8_filled && (const void *)y != (const void *)x;
+    return rc;
+}
+
+// Switch the accumulate mode of the Marlin 4-bit GEMM on or off (vLLM fuses the residual add into the norm that follows; here it is
+// the conversion of the FP16 result that does it).
+int fllm_cuda_q4z_accumulate(int on, float scale) {
+    fllm_q4z_acc = on != 0;
+    fllm_q4z_acc_scale = scale;
+    return 0;
+}
+// 4-bit group-quantized weights (Q4Z) through the Marlin GEMM; `w` is the device layout built by fllm_q4z_repack and the host
+int fllm_cuda_linear_q4z(FllmStream *st, const void *w, int group, const float *x, float *y, const float *bias, int rows, int cols,
+                         int batch, const int *perm) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    // a pending gated activation feeding this GEMM is folded into the conversion of the activations to FP16
+    static const bool no_glu_fuse = getenv("FLLM_CUDA_NO_GLU_FUSE") != nullptr;
+    // (an FP16 gate and up are folded in only without an activation permutation: that conversion kernel reads FP32)
+    const bool fuse = !no_glu_fuse && st->glu_pending && (!st->glu_half || perm == nullptr) && x == st->glu_out && (const void *)y != (const void *)x &&
+                      (size_t)batch * cols == st->glu_count && (reinterpret_cast<uintptr_t>(st->glu_gate) & 15) == 0 &&
+                      (reinterpret_cast<uintptr_t>(st->glu_up) & 15) == 0;
+    if (!fuse) {
+        if (int e = flush_glu(st)) return e;
+    }
+    st->fp4_ready = false;
+    st->x16_ready = false;
+    st->x8_ready = false;
+    if (!fllm_q4z_supported(rows, cols, group))
+        return fllm_set_error("Marlin 4-bit GEMM unsupported for %d x %d (group %d)", rows, cols, group);
+    if (st->sms == 0) {
+        cudaDeviceProp prop;
+        CHECK(cudaGetDeviceProperties(&prop, st->dev), "cudaGetDeviceProperties");
+        st->sms = prop.multiProcessorCount;
+    }
+    const size_t io = fllm_q4z_io_bytes(rows, cols, batch), ctmp = fllm_q4z_ctmp_bytes(batch, st->sms), ws = fllm_q4z_workspace_bytes(rows);
+    if (io > st->q4z_io_bytes || ctmp > st->q4z_ctmp_bytes || ws > st->q4z_ws_bytes) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        if (io > st->q4z_io_bytes) {
+            cudaFree(st->q4z_io);
+            st->epoch++;
+            st->q4z_io = nullptr;
+            st->q4z_io_bytes = io * 2;
+            st->q4z_ready = false;
+            CHECK(cudaMalloc(&st->q4z_io, st->q4z_io_bytes), "cudaMalloc(Marlin activations)");
+        }
+        if (ctmp > st->q4z_ctmp_bytes) {
+            cudaFree(st->q4z_ctmp);
+            st->epoch++;
+            st->q4z_ctmp = nullptr;
+            st->q4z_ctmp_bytes = ctmp;
+            CHECK(cudaMalloc(&st->q4z_ctmp, ctmp), "cudaMalloc(Marlin partials)");
+        }
+        if (ws > st->q4z_ws_bytes) {
+            cudaFree(st->q4z_ws);
+            st->epoch++;
+            st->q4z_ws = nullptr;
+            st->q4z_ws_bytes = ws * 2;
+            CHECK(cudaMalloc(&st->q4z_ws, st->q4z_ws_bytes), "cudaMalloc(Marlin locks)");
+            CHECK(cudaMemsetAsync(st->q4z_ws, 0, st->q4z_ws_bytes, st->s), "cudaMemset(Marlin locks)");
+        }
+    }
+    static const bool no_reuse = getenv("FLLM_CUDA_NO_X16_REUSE") != nullptr;
+    const bool reuse = !fuse && !no_reuse && st->q4z_ready && st->q4z_x == x && st->q4z_batch == batch && st->q4z_cols == cols && st->q4z_perm == perm;
+    fllm_glu_half = fuse && st->glu_half;
+    const int rc = fllm_q4z_launch(st->s, st->dev, st->sms, w, group, x, y, bias, rows, cols, batch, st->q4z_io, st->q4z_ctmp, st->q4z_ws,
+                                   fuse ? st->glu_gate : nullptr, fuse ? st->glu_up : nullptr, st->glu_mode, reuse, perm);
+    fllm_glu_half = false;
+    if (fuse) st->glu_pending = false;
+    st->q4z_x = x;
+    st->q4z_batch = batch;
+    st->q4z_cols = cols;
+    st->q4z_perm = perm;
+    st->q4z_ready = rc == 0 && (const void *)y != (const void *)x;
+    if (rc == -1 || rc == -2)
+        return fllm_set_error("Marlin 4-bit GEMM rejected %d x %d, batch %d, group %d (alignment or configuration)", rows, cols, batch, group);
+    return rc;
+}
+// Marlin tiles from the AutoAWQ-ordered int4 matrix `awq_words` [k, n / 8] (both device pointers), synchronous
+int fllm_cuda_q4z_repack(int dev, const void *awq_words, void *out, int k, int n) { return fllm_q4z_repack(dev, awq_words, out, k, n); }
+int fllm_cuda_gptq_repack(int dev, const void *words, void *out, int k, int n) { return fllm_q4z_gptq_repack(dev, words, out, k, n); }
+int fllm_cuda_q4z_supported(int rows, int cols, int group) { return fllm_q4z_supported(rows, cols, group) ? 1 : 0; }
+int fllm_cuda_fp8_marlin_supported(int rows, int cols) { return fllm_fp8_marlin_supported(rows, cols) ? 1 : 0; }
+int fllm_cuda_fp8_marlin_repack(int dev, const void *words, void *out, int k, int n) { return fllm_fp8_marlin_repack(dev, words, out, k, n); }
+int fllm_cuda_linear_fp8_marlin(FllmStream *st, const void *w, const float *x, float *y, const float *bias, int rows, int cols, int batch) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    static const bool no_glu_fuse = getenv("FLLM_CUDA_NO_GLU_FUSE") != nullptr;
+    const bool fuse = !no_glu_fuse && st->glu_pending && !st->glu_half && x == st->glu_out && (const void *)y != (const void *)x &&
+                      (size_t)batch * cols == st->glu_count && (reinterpret_cast<uintptr_t>(st->glu_gate) & 15) == 0 &&
+                      (reinterpret_cast<uintptr_t>(st->glu_up) & 15) == 0;
+    if (!fuse) {
+        if (int e = flush_glu(st)) return e;
+    }
+    st->fp4_ready = false;
+    st->x16_ready = false;
+    st->x8_ready = false;
+    if (!fllm_fp8_marlin_supported(rows, cols))
+        return fllm_set_error("Marlin FP8 GEMM unsupported for %d x %d", rows, cols);
+    if (st->sms == 0) {
+        cudaDeviceProp prop;
+        CHECK(cudaGetDeviceProperties(&prop, st->dev), "cudaGetDeviceProperties");
+        st->sms = prop.multiProcessorCount;
+    }
+    const size_t io = fllm_q4z_io_bytes(rows, cols, batch), ctmp = fllm_q4z_ctmp_bytes(batch, st->sms), ws = fllm_q4z_workspace_bytes(rows);
+    if (io > st->q4z_io_bytes || ctmp > st->q4z_ctmp_bytes || ws > st->q4z_ws_bytes) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        if (io > st->q4z_io_bytes) {
+            cudaFree(st->q4z_io);
+            st->epoch++;
+            st->q4z_io = nullptr;
+            st->q4z_io_bytes = io * 2;
+            st->q4z_ready = false;
+            CHECK(cudaMalloc(&st->q4z_io, st->q4z_io_bytes), "cudaMalloc(Marlin activations)");
+        }
+        if (ctmp > st->q4z_ctmp_bytes) {
+            cudaFree(st->q4z_ctmp);
+            st->epoch++;
+            st->q4z_ctmp = nullptr;
+            st->q4z_ctmp_bytes = ctmp;
+            CHECK(cudaMalloc(&st->q4z_ctmp, ctmp), "cudaMalloc(Marlin partials)");
+        }
+        if (ws > st->q4z_ws_bytes) {
+            cudaFree(st->q4z_ws);
+            st->epoch++;
+            st->q4z_ws = nullptr;
+            st->q4z_ws_bytes = ws * 2;
+            CHECK(cudaMalloc(&st->q4z_ws, st->q4z_ws_bytes), "cudaMalloc(Marlin locks)");
+            CHECK(cudaMemsetAsync(st->q4z_ws, 0, st->q4z_ws_bytes, st->s), "cudaMemset(Marlin locks)");
+        }
+    }
+    static const bool no_reuse = getenv("FLLM_CUDA_NO_X16_REUSE") != nullptr;
+    const bool reuse = !fuse && !no_reuse && st->q4z_ready && st->q4z_x == x && st->q4z_batch == batch && st->q4z_cols == cols && st->q4z_perm == nullptr;
+    const int rc = fllm_fp8_marlin_launch(st->s, st->dev, st->sms, w, x, y, bias, rows, cols, batch, st->q4z_io, st->q4z_ctmp, st->q4z_ws,
+                                          fuse ? st->glu_gate : nullptr, fuse ? st->glu_up : nullptr, st->glu_mode, reuse);
+    if (fuse) st->glu_pending = false;
+    st->q4z_x = x;
+    st->q4z_batch = batch;
+    st->q4z_cols = cols;
+    st->q4z_perm = nullptr;
+    st->q4z_ready = rc == 0 && (const void *)y != (const void *)x;
+    if (rc == -1 || rc == -2)
+        return fllm_set_error("Marlin FP8 GEMM rejected %d x %d, batch %d (alignment or configuration)", rows, cols, batch);
+    return rc;
+}
+int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float *y, const float *bias, float gscale,
+                           int rows, int cols, int batch) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    bool fuse = glu_fusable(st, 40, w, x, y, cols, batch);
+    // an FP16 glu is only folded into the CUTLASS GEMM (the built-in kernels read FP32): any other case computes it first
+    if (fuse && st->glu_half && !fllm_nvfp4_cutlass_ok(st->glu_gate, y, bias, rows, cols, batch, fllm_fp4_acc ? 1 : 0)) fuse = false;
+    if (!fuse) {
+        if (int e = flush_glu(st)) return e;
+    }
+    // quantized activations (nibbles + one scale byte per 16 values) and split-K partials of narrow batches
+    const size_t need = (((size_t)batch * (cols >> 1) + 255) & ~size_t(255)) + (((size_t)batch * (cols >> 4) + 255) & ~size_t(255)) +
+                        (batch <= 64 ? (size_t)4 << 20 : (size_t)16 << 20);
+    if (need > st->x16_bytes) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->x16);
+        st->epoch++;
+        st->x16 = nullptr;
+        st->x16_bytes = (need * 2 + 255) & ~size_t(255);
+        CHECK(cudaMalloc(&st->x16, st->x16_bytes), "cudaMalloc(activation scratch)");
+        st->fp4_ready = false;
+    }
+    st->x16_ready = false;
+    st->x8_ready = false;
+    const bool reuse = !fuse && st->fp4_ready && st->fp4_x == x && st->fp4_batch == batch && st->fp4_cols == cols;
+    if (fuse) {
+        fllm_glu_up = st->glu_up;
+        fllm_glu_mode = st->glu_mode;
+        fllm_glu_half = st->glu_half;
+        st->glu_pending = false;
+    }
+    const bool ok = fllm_nvfp4_try(st->s, w, fuse ? st->glu_gate : x, y, bias, gscale, rows, cols, batch, st->x16, st->x16_bytes, reuse ? 0 : 1) != 0;
+    fllm_glu_up = nullptr;
+    fllm_glu_half = false;
+    if (!ok)
+        return fllm_set_error("NVFP4 GEMM unsupported for %d x %d (needs sm_12x and k %% 256 == 0)", rows, cols);
+    st->fp4_x = x;
+    st->fp4_batch = batch;
+    st->fp4_cols = cols;
+    st->fp4_ready = (const void *)y != (const void *)x;
+    return fllm_check_launch("nvfp4");
+}
+int fllm_cuda_embedding(FllmStream *st, const void *w, int kind, const int64_t *ids, int n, float *out, int cols) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, -1, ids, (size_t)n * sizeof(int64_t), &d)) return e;
+    return fllm_embedding_launch(st->s, w, kind, static_cast<const int64_t *>(d), out, cols, n);
+}
+// ---- CUDA graphs: a decode step is captured once per batch size and replayed (vLLM captures its forward the same way, with fixed input
+// buffers; here the buffers are the four staging slots above). The kernels of a step are about 700 small launches; one graph launch
+// replaces them.
+#if !defined(__HIPCC__)
+static void graph_free(FllmGraph *g) {
+    if (g->exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(g->exec));
+    g->exec = nullptr;
+    for (auto &sl : g->slot) {
+        cudaFree(sl.dev);
+        cudaFreeHost(sl.pinned);
+        sl = GraphSlot();
+    }
+}
+int fllm_cuda_graph_supported(FllmStream *st) {
+    int v = 0;
+    return cudaDriverGetVersion(&v) == cudaSuccess && v >= 12000 ? 1 : 0;
+}
+// Start recording the work of the stream into graph `id`. `sizes` are the byte sizes of the four staged arrays; `max_len` is the
+// context length the attention kernels are sized for.
+int fllm_cuda_graph_begin(FllmStream *st, int id, size_t pos_bytes, size_t slot_bytes, size_t table_bytes, size_t len_bytes, int max_len) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (st->capture) return fllm_set_error("a graph capture is already running");
+    if (id < 0) return fllm_set_error("invalid graph id");
+    if (int e = flush_glu(st)) return e;
+    CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+    if ((size_t)id >= st->graphs.size()) st->graphs.resize((size_t)id + 1, nullptr);
+    if (!st->graphs[id]) st->graphs[id] = new FllmGraph();
+    FllmGraph *g = st->graphs[id];
+    graph_free(g);
+    const size_t sizes[4] = {pos_bytes, slot_bytes, table_bytes, len_bytes};
+    for (int k = 0; k < 4; k++) {
+        const size_t n = sizes[k] > 16 ? sizes[k] : 16;
+        CHECK(cudaMalloc(&g->slot[k].dev, n), "cudaMalloc(graph slot)");
+        CHECK(cudaHostAlloc(&g->slot[k].pinned, n, cudaHostAllocDefault), "cudaHostAlloc(graph slot)");
+        g->slot[k].cap = n;
+    }
+    g->max_len = max_len;
+    // nothing cached from earlier calls may be baked into the graph
+    st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    cudaError_t e = cudaStreamBeginCapture(st->s, cudaStreamCaptureModeThreadLocal);
+    if (e != cudaSuccess) {
+        graph_free(g);
+        return fllm_set_error("cudaStreamBeginCapture: %s", cudaGetErrorString(e));
+    }
+    st->capture = g;
+    return 0;
+}
+// Finish (or, with `abort`, drop) the capture and make the graph launchable.
+int fllm_cuda_graph_end(FllmStream *st, int id, int abort) {
+    FllmGraph *g = st->capture;
+    if (!g || id < 0 || (size_t)id >= st->graphs.size() || st->graphs[id] != g) return fllm_set_error("no graph capture is running for id %d", id);
+    int rc = abort ? 0 : flush_glu(st);
+    st->glu_pending = false;
+    cudaGraph_t graph = nullptr;
+    cudaError_t e = cudaStreamEndCapture(st->s, &graph);
+    st->capture = nullptr;
+    st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    if (abort || rc != 0 || e != cudaSuccess) {
+        if (graph) cudaGraphDestroy(graph);
+        graph_free(g);
+        cudaGetLastError();
+        if (abort) return 0;
+        return rc != 0 ? rc : fllm_set_error("graph capture failed: %s", cudaGetErrorString(e));
+    }
+    cudaGraphExec_t exec = nullptr;
+    e = cudaGraphInstantiate(&exec, graph, 0);
+    cudaGraphDestroy(graph);
+    if (e != cudaSuccess) {
+        graph_free(g);
+        return fllm_set_error("cudaGraphInstantiate: %s", cudaGetErrorString(e));
+    }
+    g->exec = exec;
+    g->epoch = st->epoch;
+    return 0;
+}
+// New contents of one staged array for the next launch (same size as during the capture).
+int fllm_cuda_graph_set(FllmStream *st, int id, int kind, const void *data, size_t bytes) {
+    if (id < 0 || (size_t)id >= st->graphs.size() || !st->graphs[id] || !st->graphs[id]->exec || kind < 0 || kind > 3)
+        return fllm_set_error("graph %d is not ready", id);
+    GraphSlot &sl = st->graphs[id]->slot[kind];
+    if (bytes != sl.bytes) return fllm_set_error("graph %d: array %d has %zu bytes, %zu were captured", id, kind, bytes, sl.bytes);
+    memcpy(sl.pinned, data, bytes);
+    return 0;
+}
+// Returns 0 on success and 2 when the graph is stale (a buffer it points to was reallocated): capture it again.
+int fllm_cuda_graph_launch(FllmStream *st, int id) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (id < 0 || (size_t)id >= st->graphs.size() || !st->graphs[id] || !st->graphs[id]->exec) return fllm_set_error("graph %d is not ready", id);
+    FllmGraph *g = st->graphs[id];
+    if (g->epoch != st->epoch) return 2;
+    if (int e = flush_glu(st)) return e;
+    st->fp4_ready = st->x16_ready = st->x8_ready = st->q4z_ready = false;
+    CHECK(cudaGraphLaunch(static_cast<cudaGraphExec_t>(g->exec), st->s), "cudaGraphLaunch");
+    return 0;
+}
+#else
+int fllm_cuda_graph_supported(FllmStream *) { return 0; }
+int fllm_cuda_graph_begin(FllmStream *, int, size_t, size_t, size_t, size_t, int) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
+int fllm_cuda_graph_end(FllmStream *, int, int) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
+int fllm_cuda_graph_set(FllmStream *, int, int, const void *, size_t) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
+int fllm_cuda_graph_launch(FllmStream *, int) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
+#endif
+
+// Switch the accumulate mode of the NVFP4 CUTLASS GEMM on or off: the next product is multiplied by `scale` and added to y (the residual
+// stream) by the epilogue. The caller asks fllm_cuda_nvfp4_cutlass_ok first; a GEMM that cannot do it fails instead of overwriting y.
+int fllm_cuda_nvfp4_accumulate(int on, float scale) {
+    fllm_fp4_acc = on != 0;
+    fllm_fp4_acc_scale = scale;
+    return 0;
+}
+int fllm_cuda_nvfp4_f16out(int on) {
+    fllm_fp4_f16out = on != 0;
+    return 0;
+}
+// mode: bit 0 = the product is added to y, bit 1 = the result is FP16 (see fllm_nvfp4_cutlass_ok)
+int fllm_cuda_nvfp4_cutlass_ok(const float *x, const float *y, const float *bias, int rows, int cols, int batch, int mode) {
+    return fllm_nvfp4_cutlass_ok(x, y, bias, rows, cols, batch, mode);
+}
+int fllm_cuda_q4z_f16out(int on) {
+    fllm_q4z_f16out = on != 0;
+    return 0;
+}
+// Bias, rotation and cache write of the FP16 q/k/v left by three Marlin GEMMs (see rope_kv_f16_kernel).
+int fllm_cuda_rope_kv_f16(FllmStream *st, const uint16_t *q16, const uint16_t *k16, const uint16_t *v16, const float *qb, const float *kb,
+                          const float *vb, float *q_out, uint16_t *pool_k_layer, uint16_t *pool_v_layer, const int32_t *positions,
+                          const int32_t *slots, int rows, const float *cs, const float *sn, int heads, int kv_heads, int dk, int dv,
+                          int half_, int neox) {
+    PREP(st);
+    void *dp = nullptr, *ds = nullptr;
+    if (int e = stage(st, 0, positions, (size_t)rows * sizeof(int32_t), &dp)) return e;
+    if (int e = stage(st, 1, slots, (size_t)rows * sizeof(int32_t), &ds)) return e;
+    return fllm_rope_kv_f16_launch(st->s, q16, k16, v16, qb, kb, vb, q_out, pool_k_layer, pool_v_layer, static_cast<const int32_t *>(dp),
+                                   static_cast<const int32_t *>(ds), cs, sn, rows, heads, kv_heads, dk, dv, half_, neox);
+}
+// The index of the largest logit of each row, copied to `host_out` (rows ints): greedy sampling without moving the logits.
+int fllm_cuda_argmax(FllmStream *st, const float *logits, int rows, int vocab, int *host_out) {
+    PREP(st);
+    if (rows <= 0 || vocab <= 0) return fllm_set_error("argmax: empty input");
+    if ((size_t)rows > st->argmax_cap) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->argmax_out);
+        st->argmax_out = nullptr;
+        st->argmax_cap = (size_t)rows * 2 > 1024 ? (size_t)rows * 2 : 1024;
+        CHECK(cudaMalloc(&st->argmax_out, st->argmax_cap * sizeof(int)), "cudaMalloc(argmax)");
+    }
+    if (int e = fllm_argmax_launch(st->s, logits, rows, vocab, st->argmax_out)) return e;
+    CHECK(cudaMemcpyAsync(host_out, st->argmax_out, (size_t)rows * sizeof(int), cudaMemcpyDeviceToHost, st->s), "argmax download");
+    CHECK(cudaStreamSynchronize(st->s), "argmax sync");
+    return 0;
+}
+int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, float eps) {
+    PREP(st);
+    return fllm_rms_norm_launch(st->s, x, w, out, rows, cols, eps);
+}
+int fllm_cuda_layer_norm(FllmStream *st, const float *x, const float *w, const float *b, float *out, int rows, int cols,
+                         float eps) {
+    PREP(st);
+    return fllm_layer_norm_launch(st->s, x, w, b, out, rows, cols, eps);
+}
+int fllm_cuda_glu(FllmStream *st, const float *gate, const float *up, float *out, size_t count, int mode) {
+    PREP(st);
+    static const bool no_fuse = getenv("FLLM_CUDA_NO_GLU_FUSE") != nullptr;
+    if (no_fuse) return fllm_glu_launch(st->s, gate, up, out, count, mode);
+    st->glu_gate = gate;
+    st->glu_up = up;
+    st->glu_out = out;
+    st->glu_count = count;
+    st->glu_mode = mode;
+    st->glu_half = false;
+    st->glu_pending = true;
+    return 0;
+}
+// glu of FP16 gate and up (the results of NVFP4 GEMMs run with fllm_cuda_nvfp4_f16out): folded into the activation quantization of the CUTLASS GEMM
+// that follows, or computed (FP32 result) when anything else needs it.
+int fllm_cuda_glu_f16(FllmStream *st, const void *gate16, const void *up16, float *out, size_t count, int mode) {
+    PREP(st);
+    static const bool no_fuse = getenv("FLLM_CUDA_NO_GLU_FUSE") != nullptr;
+    if (no_fuse) return fllm_glu_launch_f16(st->s, gate16, up16, out, count, mode);
+    st->glu_gate = static_cast<const float *>(gate16);
+    st->glu_up = static_cast<const float *>(up16);
+    st->glu_out = out;
+    st->glu_count = count;
+    st->glu_mode = mode;
+    st->glu_half = true;
+    st->glu_pending = true;
+    return 0;
+}
+int fllm_cuda_repack(FllmStream *st, void *dst, const void *src, int kind, size_t rows, size_t cols) {
+    PREP(st);
+    return fllm_repack_launch(st->s, dst, src, kind, rows, cols);
+}
+// idx (n int32) and, when `w` is not null, the n row weights travel in one staged block.
+static int stage_rows(FllmStream *st, const int32_t *idx, const float *w, int n, const int32_t **dev_idx, const float **dev_w) {
+    std::vector<int32_t> packed((size_t)n * (w ? 2 : 1));
+    memcpy(packed.data(), idx, (size_t)n * sizeof(int32_t));
+    if (w) memcpy(packed.data() + n, w, (size_t)n * sizeof(float));
+    void *d = nullptr;
+    if (int e = stage(st, -1, packed.data(), packed.size() * sizeof(int32_t), &d)) return e;
+    *dev_idx = static_cast<const int32_t *>(d);
+    *dev_w = w ? reinterpret_cast<const float *>(static_cast<const int32_t *>(d) + n) : nullptr;
+    return 0;
+}
+int fllm_cuda_gather_rows(FllmStream *st, float *dst, const float *src, const int32_t *idx, const float *w, int n, int row_len) {
+    PREP(st);
+    const int32_t *di = nullptr;
+    const float *dw = nullptr;
+    if (int e = stage_rows(st, idx, w, n, &di, &dw)) return e;
+    return fllm_gather_rows_launch(st->s, dst, src, di, dw, n, row_len);
+}
+int fllm_cuda_scatter_add_rows(FllmStream *st, float *dst, const float *src, const int32_t *idx, const float *w, int n, int row_len) {
+    PREP(st);
+    const int32_t *di = nullptr;
+    const float *dw = nullptr;
+    if (int e = stage_rows(st, idx, w, n, &di, &dw)) return e;
+    return fllm_scatter_add_rows_launch(st->s, dst, src, di, dw, n, row_len);
+}
+int fllm_cuda_zero(FllmStream *st, void *ptr, size_t bytes) {
+    PREP(st);
+    CHECK(cudaMemsetAsync(ptr, 0, bytes, st->s), "cudaMemsetAsync");
+    return 0;
+}
+// Page-lock host memory (a read-only file mapping) so host-to-device copies from it run asynchronously at full speed.
+int fllm_cuda_host_register(int dev, void *ptr, size_t bytes) {
+    CHECK(cudaSetDevice(dev), "cudaSetDevice");
+    cudaError_t e = cudaHostRegister(ptr, bytes, cudaHostRegisterReadOnly | cudaHostRegisterPortable);
+    if (e != cudaSuccess) {
+        cudaGetLastError();
+        return fllm_set_error("cudaHostRegister: %s", cudaGetErrorString(e));
+    }
+    return 0;
+}
+int fllm_cuda_host_unregister(void *ptr) {
+    cudaHostUnregister(ptr);
+    cudaGetLastError();
+    return 0;
+}
+int fllm_cuda_moe_route(FllmStream *st, const float *logits, int32_t *ids, float *w, int rows, int experts, int k,
+                        int normalize, float scale) {
+    PREP(st);
+    return fllm_moe_route_launch(st->s, logits, ids, w, rows, experts, k, normalize, scale);
+}
+int fllm_cuda_moe_combine(FllmStream *st, float *out, const float *y, const float *w, int tokens, int k, int hidden) {
+    PREP(st);
+    return fllm_moe_combine_launch(st->s, out, y, w, tokens, k, hidden);
+}
+int fllm_cuda_moe_linear(FllmStream *st, const void *const *tab, const void *const *btab, int kind, const int32_t *ids,
+                         const float *x, float *y, int rows, int cols, int slots, int xdiv) {
+    PREP(st);
+    // the int8 activations live in the same scratch as the FP16 copies of the GEMMs
+    const int inputs = (slots + xdiv - 1) / xdiv;
+    const size_t need = (((size_t)inputs * cols + 255) & ~size_t(255)) + (size_t)inputs * (cols / 32) * 8 + ((size_t)4 << 20);
+    if (need > st->x16_bytes) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->x16);
+        st->epoch++;
+        st->x16 = nullptr;
+        st->x16_bytes = (need * 2 + 255) & ~size_t(255);
+        CHECK(cudaMalloc(&st->x16, st->x16_bytes), "cudaMalloc(activation scratch)");
+    }
+    return fllm_moe_linear_launch(st->s, tab, kind, ids, x, y, rows, cols, slots, xdiv, btab, st->x16, st->x16_bytes);
+}
+int fllm_cuda_swiglu_oai(FllmStream *st, const float *gate, const float *up, float *out, size_t count, float alpha, float limit) {
+    PREP(st);
+    return fllm_swiglu_oai_launch(st->s, gate, up, out, count, alpha, limit);
+}
+int fllm_cuda_residual(FllmStream *st, float *x, const float *res, size_t count, float scale) {
+    PREP(st);
+    return fllm_residual_launch(st->s, x, res, count, scale);
+}
+int fllm_cuda_split_q_gate(FllmStream *st, const float *qg, float *q, float *gate, int rows, int heads, int dk, int per_head) {
+    PREP(st);
+    return fllm_split_q_gate_launch(st->s, qg, q, gate, rows, heads, dk, per_head);
+}
+int fllm_cuda_delta_supported(int kh, int vh, int hk, int hv, int ksz) { return fllm_delta_supported(kh, vh, hk, hv, ksz); }
+// Gated DeltaNet layer: `runs` is nruns DeltaRun records (24 bytes each, see deltanet.cu) in host memory.
+int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
+                          float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
+                          const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay,
+                          const float *norm, float *mixed, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_delta_launch(st->s, d, nruns, max_n, kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z, beta, alpha,
+                             convw, dt_bias, decay, norm, mixed, out);
+}
+int fllm_cuda_act(FllmStream *st, const float *x, float *out, size_t n, int mode) {
+    PREP(st);
+    return fllm_act_launch(st->s, x, out, n, mode);
+}
+int fllm_cuda_act_glu(FllmStream *st, const float *gate, const float *up, float *out, size_t n, int mode) {
+    PREP(st);
+    return fllm_act_glu_launch(st->s, gate, up, out, n, mode);
+}
+int fllm_cuda_softplus_mul(FllmStream *st, float *x, const float *g, size_t n, float beta) {
+    PREP(st);
+    return fllm_softplus_mul_launch(st->s, x, g, n, beta);
+}
+int fllm_cuda_clamp(FllmStream *st, float *x, size_t n, float limit) {
+    PREP(st);
+    return fllm_clamp_launch(st->s, x, n, limit);
+}
+int fllm_cuda_mla_latent(FllmStream *st, const float *kv_a, float *latent, int rows, int kv_lora, int width) {
+    PREP(st);
+    return fllm_mla_latent_launch(st->s, kv_a, latent, rows, kv_lora, width);
+}
+int fllm_cuda_mla_assemble(FllmStream *st, const float *q_full, const float *kv_a, const float *kv, float *q, float *k, float *v, int rows,
+                           int heads, int nope, int rope, int value, int kv_lora) {
+    PREP(st);
+    return fllm_mla_assemble_launch(st->s, q_full, kv_a, kv, q, k, v, rows, heads, nope, rope, value, kv_lora);
+}
+int fllm_cuda_mamba2_supported(int inner, int state, int heads, int groups, int ksz, int norm_groups) {
+    return fllm_mamba2_supported(inner, state, heads, groups, ksz, norm_groups);
+}
+// Mamba-2 layer: `runs` is nruns SsmRun records (24 bytes each, see mamba2.cu) in host memory.
+int fllm_cuda_mamba2_layer(FllmStream *st, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
+                           int norm_groups, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
+                           const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
+                           const float *norm, float *mixed, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_mamba2_launch(st->s, d, nruns, rows, inner, state, heads, groups, ksz, norm_groups, step_min, eps, state_off, rec_bytes, proj,
+                              convw, convb, dt_bias, decay, skip, norm, mixed, out);
+}
+int fllm_cuda_shortconv_supported(int hidden, int ksz) { return fllm_shortconv_supported(hidden, ksz); }
+// ShortConv layer: `runs` is nruns ConvRun records (24 bytes each, see shortconv.cu) in host memory.
+int fllm_cuda_shortconv_layer(FllmStream *st, const void *runs, int nruns, int hidden, int ksz, size_t state_off, const float *proj,
+                              const float *convw, const float *convb, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_shortconv_launch(st->s, d, nruns, hidden, ksz, state_off, proj, convw, convb, out);
+}
+int fllm_cuda_mamba1_supported(int inner, int state, int rank, int ksz) { return fllm_mamba1_supported(inner, state, rank, ksz); }
+// Mamba-1 layer, three launches around the GEMMs of x_proj and dt_proj; `runs` is nruns SsmRun records (24 bytes each) in host memory.
+int fllm_cuda_mamba1_conv(FllmStream *st, const void *runs, int nruns, int inner, int ksz, size_t state_off, size_t rec_bytes, const float *proj,
+                          const float *convw, const float *convb, float *mixed) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_mamba1_conv_launch(st->s, d, nruns, inner, ksz, state_off, rec_bytes, proj, convw, convb, mixed);
+}
+int fllm_cuda_mamba1_prep(FllmStream *st, float *split, float *dt_in, int rows, int rank, int state, float eps) {
+    PREP(st);
+    return fllm_mamba1_prep_launch(st->s, split, dt_in, rows, rank, state, eps);
+}
+int fllm_cuda_mamba1_scan(FllmStream *st, const void *runs, int nruns, int inner, int state, int rank, size_t state_off, const float *split,
+                          const float *dt, const float *mixed, const float *proj, const float *decay, const float *skip, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_mamba1_scan_launch(st->s, d, nruns, inner, state, rank, state_off, split, dt, mixed, proj, decay, skip, out);
+}
+int fllm_cuda_sigmoid_mul(FllmStream *st, float *x, const float *g, size_t n) {
+    PREP(st);
+    return fllm_sigmoid_mul_launch(st->s, x, g, n);
+}
+int fllm_cuda_rope(FllmStream *st, float *q, float *k, const int32_t *positions, int rows, const float *cs,
+                   const float *sn, int heads, int kv_heads, int dim, int half_, int neox) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 0, positions, (size_t)rows * sizeof(int32_t), &d)) return e;
+    return fllm_rope_launch(st->s, q, k, static_cast<const int32_t *>(d), cs, sn, rows, heads, kv_heads, dim, half_, neox);
+}
+int fllm_cuda_kv_write(FllmStream *st, const float *src, uint16_t *pool_layer, const int32_t *slots, int rows, int kv,
+                       int kind, int group, int scale_base_words) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 1, slots, (size_t)rows * sizeof(int32_t), &d)) return e;
+    return fllm_kv_write_launch(st->s, src, pool_layer, static_cast<const int32_t *>(d), rows, kv, kind, group,
+                                scale_base_words);
+}
+int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_layer, const uint16_t *vpool_layer,
+                        float *out, const int64_t *tables_host, size_t tables_len, const int64_t *lengths_host,
+                        int rows, const float *sinks, const float *alibi, int heads, int kv_heads, int dk, int dv,
+                        int stride, int block_size, int kind, int kgroup, int vgroup, int kscale_base,
+                        int vscale_base, float scale, float softcap, int window, int chunk) {
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr;
+    if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    static const bool old_attention = getenv("FLLM_CUDA_OLD_ATTN") != nullptr;
+    if (!old_attention && dk == dv && (kind == 1 || kind == 2)) {
+        if (!st->ws) {
+            st->ws_bytes = 16u << 20;
+            CHECK(cudaMalloc(reinterpret_cast<void **>(&st->ws), st->ws_bytes), "cudaMalloc(attention workspace)");
+        }
+        static const bool no_flash = getenv("FLLM_CUDA_NO_FLASH") != nullptr;
+        if (!st->capture && !no_flash && !alibi && softcap == 0.f && window == 0 && chunk == 0 && rows >= 16 && !fllm_exact_math()) {
+            // rows of one sequence (same block table, lengths growing by one) go to the tensor-core kernel
+            int r0 = 0;
+            bool all = true;
+            while (r0 < rows) {
+                int r1 = r0 + 1;
+                while (r1 < rows && lengths_host[r1] == lengths_host[r1 - 1] + 1 &&
+                       memcmp(tables_host + (size_t)r1 * stride, tables_host + (size_t)r0 * stride,
+                              (size_t)stride * sizeof(int64_t)) == 0)
+                    r1++;
+                const int n = r1 - r0;
+                int rc = -1;
+                if (n >= 16)
+                    rc = fllm_attention3_try(st->s, q + (size_t)r0 * heads * dk, kpool_layer, vpool_layer,
+                                             out + (size_t)r0 * heads * dv,
+                                             static_cast<const int64_t *>(dt) + (size_t)r0 * stride,
+                                             static_cast<const int64_t *>(dl) + r0, sinks, n, heads, kv_heads, dk, dv,
+                                             stride, block_size, kind, scale, kscale_base, vscale_base,
+                                             (int)lengths_host[r1 - 1]);
+                if (rc < 0) {
+                    all = false;
+                    break;
+                }
+                if (rc > 0) return rc;
+                r0 = r1;
+            }
+            if (all) return 0;
+        }
+        int max_len = 1;
+        for (int r = 0; r < rows; r++) max_len = lengths_host[r] > max_len ? (int)lengths_host[r] : max_len;
+        if (st->capture) max_len = st->capture->max_len;  // a graph is replayed with other lengths: size the splits for the longest context
+        const int rc4 = fllm_attention4_try(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
+                                            static_cast<const int64_t *>(dl), max_len, sinks, alibi, rows, heads,
+                                            kv_heads, dk, dv, stride, block_size, kind, scale, softcap, window, chunk,
+                                            st->ws, st->ws_bytes, kscale_base, vscale_base);
+        if (rc4 >= 0) return rc4;
+        const int rc = fllm_attention2_try(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
+                                           static_cast<const int64_t *>(dl), max_len, sinks, alibi, rows, heads,
+                                           kv_heads, dk, dv, stride, block_size, kind, scale, softcap, window, chunk,
+                                           st->ws, st->ws_bytes, kscale_base, vscale_base);
+        if (rc >= 0) return rc;
+    }
+    return fllm_attention_launch(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
+                                 static_cast<const int64_t *>(dl), sinks, alibi, rows, heads, kv_heads, dk, dv, stride,
+                                 block_size, kind, kgroup, vgroup, kscale_base, vscale_base, scale, softcap, window,
+                                 chunk);
+}
+
+int fllm_cuda_kvq_write(FllmStream *st, const float *src, uint16_t *pool_layer, const int32_t *slots, int rows,
+                        const FllmKvDesc *desc) {
+#if defined(__HIPCC__)
+    (void)st; (void)src; (void)pool_layer; (void)slots; (void)rows; (void)desc;
+    return fllm_set_error("the extra KV cache formats are not available in the ROCm build");
+#else
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 1, slots, (size_t)rows * sizeof(int32_t), &d)) return e;
+    return fllm_kvq_write_launch(st->s, src, pool_layer, static_cast<const int32_t *>(d), rows, *desc);
+#endif
+}
+int fllm_cuda_kvq_attention(FllmStream *st, const float *q, const uint16_t *kpool_layer, const uint16_t *vpool_layer,
+                            float *out, const int64_t *tables_host, size_t tables_len, const int64_t *lengths_host,
+                            int rows, const float *sinks, const float *alibi, int heads, int kv_heads, int dk, int dv,
+                            int stride, int block_size, const FllmKvDesc *kd, const FllmKvDesc *vd, float scale,
+                            float softcap, int window, int chunk) {
+#if defined(__HIPCC__)
+    (void)st; (void)q; (void)kpool_layer; (void)vpool_layer; (void)out; (void)tables_host; (void)tables_len; (void)lengths_host;
+    (void)rows; (void)sinks; (void)alibi; (void)heads; (void)kv_heads; (void)dk; (void)dv; (void)stride; (void)block_size;
+    (void)kd; (void)vd; (void)scale; (void)softcap; (void)window; (void)chunk;
+    return fllm_set_error("the extra KV cache formats are not available in the ROCm build");
+#else
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr;
+    if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    if (!st->ws) {
+        st->ws_bytes = 16u << 20;
+        CHECK(cudaMalloc(reinterpret_cast<void **>(&st->ws), st->ws_bytes), "cudaMalloc(attention workspace)");
+    }
+    return fllm_kvq_attention(st->s, st, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
+                              static_cast<const int64_t *>(dl), tables_host, lengths_host, sinks, alibi, rows, heads, kv_heads,
+                              dk, dv, stride, block_size, *kd, *vd, scale, softcap, window, chunk, st->ws, st->ws_bytes,
+                              st->capture != nullptr, st->capture ? st->capture->max_len : 0);
+#endif
+}
+
+}  // extern "C"
