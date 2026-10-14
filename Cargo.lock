@@ -683,7 +683,7 @@ dependencies = [
  "ash",
  "async-stream",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytemuck",
  "bytes",
  "chrono",
