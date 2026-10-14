@@ -128,6 +128,33 @@ are valid; anything else exits with `invalid number for <flag>`.
 The batch variables are read once, on the first upload or batch request. CLI-Flags folgen, sobald
 `serve.rs` frei ist — `--files-dir`, `--max-file-size` and `--batch-concurrency` will replace them.
 
+### Switching the new defaults back
+
+Several CUDA and CPU behaviours are on by default. None of them is proven on every GPU yet, and each one has a one-line switch
+back to the previous behaviour (set it in the environment of `serve`, `chat`, `bench` or `ppl`):
+
+| To turn off | Set |
+| --- | --- |
+| CUDA graphs of decode steps | `FLLM_CUDA_GRAPH=0` |
+| All fused decode kernels (or a single one: `FLLM_FUSE_ADD_NORM`, `FLLM_FUSE_NORM_QUANT`, `FLLM_FUSE_ROPE_KV`, `FLLM_FUSE_GLU_Q8`, `FLLM_FUSE_HEAD_COPY`) | `FLLM_FUSE=0` |
+| Prompt-pass host work (step cache, parallel embeddings) | `FLLM_PREFILL_STEP_CACHE=0 FLLM_PREFILL_PAR_EMBED=0` |
+| Prompt-pass fusions | `FLLM_FUSE_PREFILL_ADD_NORM=0 FLLM_FUSE_PREFILL_NORM_F16=0 FLLM_FUSE_PREFILL_ATTN_F16=0` |
+| Marlin prompt launch layout (`fllm` is opt-in; the default is vLLM's split) | `FLLM_MARLIN_PREFILL_CFG=vllm` |
+| Marlin decode thread configuration (a tuning aid, unset keeps vLLM's choice) | leave `FLLM_MARLIN_CFG` unset |
+| NVFP4 per-tensor activation scale | `FLLM_NVFP4_ACT_SCALE=off` |
+| NVFP4 tile table (`auto` and the tuner are opt-in) | `FLLM_NVFP4_TILE=legacy` (and `FLLM_NVFP4_TUNE=0`) |
+| The `avx512` CPU kernels (a build-time choice, default feature of `fllm-engine`) | build with `--no-default-features`; at run time `FLLM_CPU_ISA=avx512bw` (or lower) caps the tier |
+
+To get exactly the behaviour from before these changes in one go:
+
+```sh
+FLLM_CUDA_GRAPH=0 FLLM_FUSE=0 FLLM_PREFILL_STEP_CACHE=0 FLLM_PREFILL_PAR_EMBED=0 \
+FLLM_FUSE_PREFILL_ADD_NORM=0 FLLM_FUSE_PREFILL_NORM_F16=0 FLLM_FUSE_PREFILL_ATTN_F16=0 \
+FLLM_NVFP4_ACT_SCALE=off FLLM_NVFP4_TILE=legacy fllm-rs serve ...
+```
+
+`scripts/colab/ab_matrix.py` runs these combinations against each other on one GPU (variant V0 is the line above, V8 the defaults).
+
 Interaction rules:
 
 - `--api-key` beats `FLLM_API_KEY`; if neither is set, all routes are open.
