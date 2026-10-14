@@ -7,8 +7,47 @@ dependency; the only non-Rust sources are the optional CUDA kernels in `rust/eng
 (compiled with `nvcc` when the `cuda` feature is on). Python appears only in `scripts/` as development and
 verification tooling; nothing at run time needs it.
 
+## Quick start
+
+```sh
+./install.sh                                        # newest release binary (Linux, macOS; install.ps1 on Windows)
+./run.sh run unsloth/Qwen3.5-9B-GGUF:Q4_K_M         # downloads the model once, then opens a chat in the terminal
+```
+
+`run` accepts a Hugging Face link (`https://huggingface.co/owner/repo`, `hf.co/owner/repo:Q4_K_M`),
+a short `owner/repo[:QUANT]` name or a local `.gguf`. With Docker (NVIDIA GPU):
+`docker run -it --rm --gpus all -v fllm:/home/fllm/.cache ghcr.io/marco-lu2508/fllm:cuda run unsloth/Qwen3.5-9B-GGUF:Q4_K_M`
+(see [Installation](#installation) for the image and its tags).
+
+## Status
+
+fLLM is young. What has actually been run on hardware, and what has not:
+
+| Target | State |
+| --- | --- |
+| CPU x86-64 (AVX2, AVX-VNNI, AVX-512) | Runs. Self test and real models on AVX2 and on an AMD Zen 5 (AVX-512); the AMX kernels have only been run in an emulator |
+| NVIDIA CUDA, Turing (T4), Blackwell (RTX PRO 6000) | Runs. Self test 595 + 395 checks, real models (Llama, Qwen2.5, Qwen3.5 with DeltaNet, AWQ, GPTQ, NVFP4) |
+| NVIDIA Ampere / Ada / Hopper | Builds; the same kernels as the tested cards, not yet measured |
+| Apple Metal | Compiles; the GPU tests run on Apple silicon in CI, results are still being worked through |
+| Vulkan | Ran on a few devices (NVIDIA, Intel); slower than CUDA, some operations are missing |
+| AMD ROCm, Intel SYCL, NPUs, TPU, ARM NEON/SVE | Compile only (test level L0): not run on the hardware |
+
+Measured on Google Colab with a single user, greedy decoding, over HTTP (before the latest performance work):
+
+| Card, model | fLLM decode | fLLM prefill (355 / 1863 tokens) | vLLM on the same card |
+| --- | --- | --- | --- |
+| RTX PRO 6000 Blackwell, Llama-3.1-8B NVFP4 | 194 tok/s | 24,900 / 36,100 tok/s | 195 tok/s, 20,400 / 54,500 tok/s |
+| RTX PRO 6000 Blackwell, Qwen2.5-3B AWQ | 205 tok/s | 18,100 / 29,500 tok/s | 306 tok/s, 23,200 / 39,100 tok/s |
+| RTX PRO 6000 Blackwell, Llama-3.1-8B Q4_K_M | 190 tok/s | 7,400 / 13,800 tok/s | not compared |
+| Tesla T4, Llama-3.1-8B Q4_K_M | 46 tok/s | 910 / 980 tok/s | not compared |
+
+So: on par with vLLM for NVFP4 decoding and faster on short prompts, behind it for long prompts and for small
+quantized models. Closing that gap is the current work. Numbers are one run on a shared machine; treat differences of a few percent as noise.
+
 ## Contents
 
+- [Quick start](#quick-start)
+- [Status](#status)
 - [Features](#features)
 - [Installation](#installation)
 - [Quickstart](#quickstart)
@@ -49,8 +88,8 @@ verification tooling; nothing at run time needs it.
   a quantized KV cache (f16, bf16, fp8, int8, q8_0, q5, q4, nvfp4; keys and values separately), many concurrent users, mixture-of-experts models with the experts on the device, and
   models larger than the card (attention and the leading layers on the GPU, the rest streamed over PCIe for prompts)
   ([CUDA notes](docs/gpu-backends.md#cuda-backend---features-cuda)).
-- **More hardware (experimental, not run on the hardware yet).** Optional native backends for Vulkan, Metal, AMD ROCm/HIP, Intel GPUs (SYCL), Intel NPUs
-  (OpenVINO) and Google TPUs, plus new CPU kernels for ARM (NEON, dotprod, i8mm, SVE) and x86 (AVX-512, AMX). They compile; nothing has run on the target hardware
+- **More hardware (experimental).** Optional native backends for Vulkan, Metal, AMD ROCm/HIP, Intel GPUs (SYCL), Intel NPUs
+  (OpenVINO) and Google TPUs, plus new CPU kernels for ARM (NEON, dotprod, i8mm, SVE) and x86 (AVX-512, AMX). They compile; Metal has been run on Apple silicon in CI, the others have not been run on the target hardware
   (test level L0). Which format and operation exists where, the known gaps and the commands to verify a backend on your machine:
   [docs/backends.md](docs/backends.md), [docs/backends-verify.md](docs/backends-verify.md).
 - **Runtime features:** paged KV cache (f16, bf16, fp8 e4m3/e5m2, int8, q8_0, q5_0, q5_1, q4_0, q4_1, iq4_nl, nvfp4 and f32 on the CPU and CUDA; keys and values may use different formats, see [KV cache formats](docs/gpu-backends.md#kv-cache-formats)), prefix cache, continuous batching with
