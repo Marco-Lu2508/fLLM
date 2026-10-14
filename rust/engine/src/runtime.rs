@@ -37,7 +37,7 @@ struct BatchRow {
     sequence_id: i64,
     token_id: i64,
     length: i64,
-    table: Vec<i64>,
+    table: std::sync::Arc<Vec<i64>>,
     embedding: Option<Vec<f32>>,
 }
 
@@ -721,7 +721,7 @@ impl InferenceRuntime {
             if *count == 0 || end > sequence.prefill_target || end > sequence.tokens.len() {
                 return Err(format!("invalid prefill slice for sequence {sid}"));
             }
-            let table = self.table_row(*sid)?;
+            let table = std::sync::Arc::new(self.table_row(*sid)?);
             for position in *start..end {
                 let completes_prompt = end == sequence.prefill_target && position + 1 == end;
                 let row = rows.len();
@@ -765,7 +765,7 @@ impl InferenceRuntime {
                 sequence_id: *sid,
                 token_id,
                 length: (position + 1) as i64,
-                table: self.table_row(*sid)?,
+                table: std::sync::Arc::new(self.table_row(*sid)?),
                 embedding: None,
             });
             decode_rows += 1;
@@ -825,7 +825,7 @@ impl InferenceRuntime {
             let token_id = *sequence.tokens.get(position).ok_or_else(|| {
                 format!("verify position {position} is missing for sequence {sid}")
             })?;
-            let table = self.table_row(*sid)?;
+            let table = std::sync::Arc::new(self.table_row(*sid)?);
             let base_row = rows.len();
             rows.push(BatchRow {
                 sequence_id: *sid,

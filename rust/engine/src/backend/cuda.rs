@@ -195,6 +195,10 @@ extern "C" {
     fn fllm_cuda_fp8_marlin_repack(dev: c_int, words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_fp8_marlin_supported(rows: c_int, cols: c_int) -> c_int;
     fn fllm_cuda_argmax(st: *mut RawStream, logits: *const f32, rows: c_int, vocab: c_int, host_out: *mut i32) -> c_int;
+    fn fllm_cuda_step_begin(st: *mut RawStream) -> c_int;
+    fn fllm_cuda_step_end(st: *mut RawStream) -> c_int;
+    fn fllm_cuda_get_opt(id: c_int) -> c_int;
+    fn fllm_cuda_set_opt(id: c_int, value: c_int) -> c_int;
     fn fllm_cuda_graph_supported(st: *mut RawStream) -> c_int;
     fn fllm_cuda_graph_begin(st: *mut RawStream, id: c_int, pos: usize, slot: usize, table: usize, len: usize, max_len: c_int) -> c_int;
     fn fllm_cuda_graph_end(st: *mut RawStream, id: c_int, abort: c_int) -> c_int;
@@ -943,6 +947,8 @@ impl Backend for CudaBackend {
             staging_bias: None,
             pinned: std::collections::BTreeMap::new(),
             pin_failed: std::env::var_os("FLLM_NO_HOST_PIN").is_some(),
+            step_open: false,
+            blocks_checked: None,
         }))
     }
 
@@ -1214,6 +1220,10 @@ pub struct CudaStream {
     /// Page ranges (start -> end) of host weight memory that is page-locked for fast copies.
     pinned: std::collections::BTreeMap<usize, usize>,
     pin_failed: bool,
+    /// A forward pass is running (`begin_step`) and the library caches the host data of its attention calls.
+    step_open: bool,
+    /// Block tables (address, length) and lengths (address, length) whose blocks were walked by `attention_paged` in this step.
+    blocks_checked: Option<[usize; 4]>,
 }
 
 // SAFETY: the raw stream is only used through `&mut self`.
@@ -1337,6 +1347,20 @@ impl CudaStream {
 }
 
 impl Stream for CudaStream {
+    fn begin_step(&mut self) {
+        // SAFETY: plain call on a live stream.
+        let ok = unsafe { fllm_cuda_step_begin(self.raw) } == 0;
+        self.step_open = ok && prefill_switch(PrefillSwitch::StepCache) != 0;
+        self.blocks_checked = None;
+    }
+
+    fn end_step(&mut self) {
+        // SAFETY: plain call on a live stream.
+        unsafe { fllm_cuda_step_end(self.raw) };
+        self.step_open = false;
+        self.blocks_checked = None;
+    }
+
     fn synchronize(&mut self) -> Result<(), BackendError> {
         // SAFETY: live stream.
         check(unsafe { fllm_cuda_stream_sync(self.raw) })
@@ -1871,7 +1895,7 @@ impl Stream for CudaStream {
     fn linear_f16_out(&mut self, out16: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight) -> Result<bool, BackendError> {
         if weight.quant_type.to_gguf_type_id() == 40 {
             // NVFP4 prompts: the CUTLASS epilogue writes halves (the decode kernels cannot, they decline)
-            if std::env::var_os("FLLM_NO_F16_NVFP4").is_some() {
+            if super::env_flag_once!("FLLM_NO_F16_NVFP4") {
                 return Ok(false);
             }
             let (rows, cols) = (weight.rows, weight.cols);
@@ -1896,7 +1920,7 @@ impl Stream for CudaStream {
             unsafe { fllm_cuda_nvfp4_f16out(0) };
             return result.map(|()| true);
         }
-        if weight.quant_type.q4z_group().is_none() || weight.perm.is_some() || std::env::var_os("FLLM_NO_FUSED_QKV").is_some() {
+        if weight.quant_type.q4z_group().is_none() || weight.perm.is_some() || super::env_flag_once!("FLLM_NO_FUSED_QKV") {
             return Ok(false);
         }
         // SAFETY: plain setter of a thread-local flag in the CUDA library.
@@ -1998,7 +2022,7 @@ impl Stream for CudaStream {
     ) -> Result<bool, BackendError> {
         if weight.quant_type.to_gguf_type_id() == 40 {
             // NVFP4 prompts: the CUTLASS epilogue adds scale * (product) to the residual stream (the decode kernels cannot, they decline)
-            if bias.is_some() || scale == 0.0 || std::env::var_os("FLLM_NO_FUSED_ADD").is_some() {
+            if bias.is_some() || scale == 0.0 || super::env_flag_once!("FLLM_NO_FUSED_ADD") {
                 return Ok(false);
             }
             let (rows, cols) = (weight.rows, weight.cols);
@@ -2023,7 +2047,7 @@ impl Stream for CudaStream {
             unsafe { fllm_cuda_nvfp4_accumulate(0, 0.0) };
             return result.map(|()| true);
         }
-        if weight.quant_type.q4z_group().is_none() || std::env::var_os("FLLM_NO_FUSED_ADD").is_some() {
+        if weight.quant_type.q4z_group().is_none() || super::env_flag_once!("FLLM_NO_FUSED_ADD") {
             return Ok(false);
         }
         // SAFETY: plain setter of a thread-local flag in the CUDA library.
@@ -2762,7 +2786,13 @@ impl Stream for CudaStream {
         layer_idx: usize,
         params: &AttentionParams,
     ) -> Result<(), BackendError> {
-        params.validate(kv, block_tables, lengths, layer_idx)?;
+        // the blocks of a step are the same for all its layers: they are walked for the first attention call only
+        let key = [block_tables.as_ptr() as usize, block_tables.len(), lengths.as_ptr() as usize, lengths.len()];
+        let walked = self.step_open && self.blocks_checked == Some(key);
+        params.validate_blocks(kv, block_tables, lengths, layer_idx, !walked)?;
+        if self.step_open {
+            self.blocks_checked = Some(key);
+        }
         let (dk, dv, heads) = (params.head_dim, params.value_dim, params.num_heads);
         let rows = lengths.len();
         if rows == 0 {
@@ -3241,6 +3271,32 @@ pub fn is_exact_math() -> bool {
     // FLLM_CUDA_EXACT is also read by the CUDA library itself: both sides must agree, or a dual-layout Q4_K weight is sent to a
     // kernel that the library refuses in exact mode
     EXACT_MATH.load(std::sync::atomic::Ordering::Relaxed) || std::env::var_os("FLLM_CUDA_EXACT").is_some()
+}
+
+/// The switches of the prefill host-work reductions and kernel fusions (docs/performance-notes.md). The environment variables give the start
+/// values; `set_prefill_switch` overrides them at run time (selftest-gpu compares the variants on one device).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefillSwitch {
+    /// `FLLM_PREFILL_STEP_CACHE`
+    StepCache = 0,
+    /// `FLLM_FUSE_PREFILL_ADD_NORM`
+    FuseAddNorm = 1,
+    /// `FLLM_FUSE_PREFILL_NORM_F16`
+    FuseNormF16 = 2,
+    /// `FLLM_FUSE_PREFILL_ATTN_F16`
+    FuseAttnF16 = 3,
+    /// `FLLM_MARLIN_PREFILL_CFG` (0: vllm, 1: fllm)
+    MarlinCfg = 4,
+}
+
+pub fn prefill_switch(which: PrefillSwitch) -> i32 {
+    // SAFETY: plain getter of a process-wide flag.
+    unsafe { fllm_cuda_get_opt(which as c_int) }
+}
+
+pub fn set_prefill_switch(which: PrefillSwitch, value: i32) {
+    // SAFETY: plain setter of a process-wide flag.
+    unsafe { fllm_cuda_set_opt(which as c_int, value) };
 }
 
 pub fn set_marlin_q4k_enabled(enabled: bool) {

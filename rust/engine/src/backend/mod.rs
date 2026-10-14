@@ -26,6 +26,16 @@ pub mod cuda;
 #[cfg(feature = "rust-gpu")]
 pub mod wgpu_backend;
 
+/// `std::env::var_os(name).is_some()`, looked up once per call site: the per-layer paths ask for several switches per layer and step, and every lookup
+/// takes the environment lock. (The value is fixed at the first use; the switches are meant for process start.)
+macro_rules! env_flag_once {
+    ($name:literal) => {{
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os($name).is_some())
+    }};
+}
+pub(crate) use env_flag_once;
+
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
@@ -776,6 +786,19 @@ impl AttentionParams {
         lengths: &[i64],
         layer_idx: usize,
     ) -> Result<(), BackendError> {
+        self.validate_blocks(kv, block_tables, lengths, layer_idx, true)
+    }
+
+    /// [`validate`](Self::validate), with the walk over every row's blocks (cost: rows x blocks per call) only when `check_blocks`. The blocks
+    /// of one forward pass are the same for all its layers, so a stream that knows it has checked them once may skip them.
+    pub fn validate_blocks(
+        &self,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        check_blocks: bool,
+    ) -> Result<(), BackendError> {
         let shape = |msg: String| Err(BackendError::InvalidShape(msg));
         if self.num_kv_heads == 0
             || self.num_heads == 0
@@ -811,6 +834,9 @@ impl AttentionParams {
         }
         if self.chunk == Some(0) || self.window == Some(0) {
             return shape("zero attention chunk or window".into());
+        }
+        if !check_blocks {
+            return Ok(());
         }
         for (r, &n) in lengths.iter().enumerate() {
             if n <= 0 || (n as usize).div_ceil(self.block_size) > self.stride {
@@ -866,6 +892,11 @@ impl BackendCapabilities {
 
 /// Asynchronous stream/command queue for enqueuing operations on a device.
 pub trait Stream: Send {
+    /// A forward pass of the decoder begins / ends on this stream. Between the two the host arrays of its attention calls (block tables, lengths)
+    /// stay unchanged, so a backend may stage and check them once instead of once per layer. Backends without such caches ignore it.
+    fn begin_step(&mut self) {}
+    fn end_step(&mut self) {}
+
     /// Greedy sampling on the device: the index of the largest value of each of `rows` rows of `vocab` f32 logits (first index on a
     /// tie). Backends without it return `UnsupportedOperation` and the caller downloads the logits instead.
     fn argmax_rows(&mut self, _logits: &DeviceBuffer, _rows: usize, _vocab: usize) -> Result<Vec<i32>, BackendError> {

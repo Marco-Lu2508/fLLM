@@ -14,6 +14,26 @@
 int fllm_set_error(const char *fmt, ...);
 int fllm_check_launch(const char *what);
 
+// Switches of the prefill host-work reductions and kernel fusions (docs/performance-notes.md). The environment gives the initial values
+// (FLLM_PREFILL_STEP_CACHE, FLLM_FUSE_PREFILL_ADD_NORM, FLLM_FUSE_PREFILL_NORM_F16, FLLM_FUSE_PREFILL_ATTN_F16, FLLM_MARLIN_PREFILL_CFG);
+// selftest-gpu flips them at run time (fllm_cuda_set_opt) to compare the variants on one device.
+enum FllmOpt {
+    FLLM_OPT_STEP_CACHE = 0,  // host data of one forward pass (block tables, run layout) is staged and checked once, not once per layer
+    FLLM_OPT_FUSE_ADD_NORM,   // the residual add of a Marlin GEMM is folded into the RMS norm that follows
+    FLLM_OPT_FUSE_NORM_F16,   // the RMS norm also writes the FP16 activations that the next Marlin GEMM needs
+    FLLM_OPT_FUSE_ATTN_F16,   // the prompt attention also writes the FP16 activations that the output projection needs
+    FLLM_OPT_MARLIN_CFG,      // 0: Marlin launch configuration as vLLM selects it, 1: fLLM variant (the M tail rides in the last tile)
+    FLLM_OPT_COUNT
+};
+int fllm_opt(int id);
+// the fusions apply from this many rows on (prompt batches); decode steps keep the unfused paths
+constexpr int FLLM_PREFILL_MIN_ROWS = 16;
+
+// RMS norm of prompt batches with the residual add of a pending Marlin result and/or the FP16 copy of the result folded in (elementwise.cu)
+bool fllm_rms_norm_prompt_ok(const float *x, const float *w, const float *out, int cols);
+int fllm_rms_norm_prompt_launch(cudaStream_t s, const void *y16, const float *bias, float scale, float *x, const float *w, float *out,
+                                void *out16, int rows, int cols, float eps);
+
 int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows,
                        int cols, int batch, void *x16, size_t x16_bytes);
 // true when FLLM_CUDA_EXACT is set: only the FP32 kernels may run (used by selftest-gpu)
@@ -196,6 +216,14 @@ int fllm_marlin_q4k_try(cudaStream_t s, const void *W, const float *X, float *Y,
 // set by fllm_cuda_q4z_accumulate: the next Marlin 4-bit GEMM adds scale * (result + bias) to y instead of overwriting it
 extern thread_local bool fllm_q4z_acc;
 extern thread_local float fllm_q4z_acc_scale;
+// prefill: with fllm_q4z_defer_acc set the accumulate mode does not launch its add kernel; fllm_q4z_deferred reports that and fllm_q4z_y16 where the FP16 result sits
+// (the caller adds it later, possibly inside the next RMS norm, see fllm_add_rms_norm_launch)
+extern thread_local bool fllm_q4z_defer_acc, fllm_q4z_deferred;
+extern thread_local const void *fllm_q4z_y16;
+int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, float *out, int rows, int batch, float scale);
+// prompt attention (flashinfer_prefill.cu): see fllm_attn_x16 in api.cu
+extern thread_local void *fllm_attn_x16;
+extern thread_local bool fllm_attn_x16_written;
 // set by fllm_cuda_nvfp4_accumulate: the next NVFP4 GEMM (CUTLASS path only, see fllm_nvfp4_cutlass_ok) adds fllm_fp4_acc_scale * result to y
 extern thread_local bool fllm_fp4_acc;
 extern thread_local float fllm_fp4_acc_scale;

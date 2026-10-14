@@ -17,6 +17,8 @@ use half::{bf16, f16};
 use std::time::Instant;
 
 mod kv;
+#[cfg(feature = "cuda")]
+mod prefill;
 use kv::layout_of;
 
 pub const HELP: &str = "usage: fllm-rs selftest-gpu [--device auto|vulkan|metal|dx12|hip|sycl|npu|tpu|gpu|cpu|BACKEND:N] [--only GROUPS] [--quants LIST]
@@ -56,6 +58,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("host", "host_linear (weights streamed from host memory)"),
     ("moe", "moe_topk, moe_linear, moe_combine, gather_rows / scatter_add_rows"),
     ("fuse", "fused decode kernels against the unfused sequence: residual add + norm (+ activation conversion), rotary + cache write, gated activation + int8 quantization"),
+    ("prefill", "CUDA prompt speed-ups: per-step attention cache, norm and attention FP16 fusions, Marlin M tail (each variant against the plain one)"),
 ];
 
 /// Groups whose checks depend on a weight format (`--quants` limits them).
@@ -899,6 +902,10 @@ impl<'a> Tester<'a> {
         }
         if self.enter("fuse") {
             self.fuse_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("prefill") {
+            self.prefill_cases();
         }
     }
 

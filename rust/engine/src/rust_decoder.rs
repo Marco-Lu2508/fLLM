@@ -469,6 +469,17 @@ pub struct DeviceLayerWeights {
     pub sinks: Option<Arc<Vec<f32>>>,
 }
 
+/// Tells the stream when a forward pass is over (`Stream::end_step`), on every return path of `forward_backend_inner`.
+struct StepScope<'a>(&'a std::sync::Mutex<Box<dyn crate::backend::Stream>>);
+
+impl Drop for StepScope<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut stream) = self.0.lock() {
+            stream.end_step();
+        }
+    }
+}
+
 /// Debug aid (`FLLM_DEBUG_SUMS=1`): prints the sum of a device buffer, to compare layer outputs with a reference.
 fn debug_sum(stream: &mut dyn crate::backend::Stream, name: &str, buf: &crate::backend::DeviceBuffer) {
     if std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
@@ -2369,12 +2380,11 @@ impl RustDecoder {
         }
 
         let not_ready = "accelerator backend is not initialised";
-        let mut stream = self
-            .backend_stream
-            .as_ref()
-            .ok_or(not_ready)?
-            .lock()
-            .map_err(|_| "accelerator stream lock poisoned")?;
+        let stream_lock = self.backend_stream.as_ref().ok_or(not_ready)?;
+        // declared before the lock guard, so that it runs after the guard is released: the stream learns that the pass is over on every way out
+        let _step = StepScope(stream_lock);
+        let mut stream = stream_lock.lock().map_err(|_| "accelerator stream lock poisoned")?;
+        stream.begin_step();
         let dev_weights = self.backend_weights.as_ref().ok_or(not_ready)?;
         let dev_kv = self.backend_kv.as_ref().ok_or(not_ready)?;
         let mut scratch = self
@@ -2392,10 +2402,7 @@ impl RustDecoder {
             GraphMode::Off => scratch.acquire(rows * hidden * 4).map_err(err)?,
         };
 
-        let mut host_x = Vec::with_capacity(rows * hidden);
-        for &id in ids {
-            host_x.extend_from_slice(&self.embedding.row(id as usize)?);
-        }
+        let mut host_x = self.embed_rows(ids)?;
         if cfg.embedding_scale != 1.0 {
             for v in &mut host_x {
                 *v *= cfg.embedding_scale;
@@ -2892,7 +2899,7 @@ impl RustDecoder {
                 let mut half_glu = false;
                 if Self::half_out_weight(gate_w)
                     && matches!(cfg.activation, Activation::Silu | Activation::GeluTanh)
-                    && std::env::var_os("FLLM_NO_F16_FFN").is_none()
+                    && !crate::backend::env_flag_once!("FLLM_NO_F16_FFN")
                     && gate_w.bias.is_none()
                     && up_w.bias.is_none()
                     && gate_w.quant_type == up_w.quant_type
@@ -3081,7 +3088,7 @@ impl RustDecoder {
                     .map_err(err)?;
                 scratch.recycle(ffn_out_buf);
             }
-            if i == 0 || std::env::var_os("FLLM_DEBUG_LAYERS").is_some() {
+            if i == 0 || crate::backend::env_flag_once!("FLLM_DEBUG_LAYERS") {
                 debug_sum(&mut **stream, &format!("l_out-{i}"), &x_buf);
             }
             if let Some(host_in) = check_in {
@@ -5676,6 +5683,31 @@ impl RustDecoder {
             slots.push(table[current] as usize * self.block_size + position % self.block_size);
         }
         Ok((positions, slots))
+    }
+
+    /// The embedding rows of `ids` (rows x hidden values). A prompt chunk dequantizes its rows on all cores: this runs before the first kernel is
+    /// queued, so the device waits for it (`FLLM_PREFILL_PAR_EMBED=0` keeps the single-threaded loop).
+    fn embed_rows(&self, ids: &[i64]) -> Result<Vec<f32>, String> {
+        let hidden = self.cfg.hidden;
+        static PARALLEL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let parallel = *PARALLEL.get_or_init(|| std::env::var("FLLM_PREFILL_PAR_EMBED").map_or(true, |v| v != "0"));
+        if !parallel || ids.len() < 64 {
+            let mut out = Vec::with_capacity(ids.len() * hidden);
+            for &id in ids {
+                out.extend_from_slice(&self.embedding.row(id as usize)?);
+            }
+            return Ok(out);
+        }
+        let mut out = vec![0.0f32; ids.len() * hidden];
+        out.par_chunks_mut(hidden).zip(ids.par_iter()).try_for_each(|(dst, &id)| -> Result<(), String> {
+            let row = self.embedding.row(id as usize)?;
+            if row.len() != dst.len() {
+                return Err("embedding row width differs from the hidden size".into());
+            }
+            dst.copy_from_slice(&row);
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Embeddings of the tokens on the host (what `forward_backend_inner` uploads as the first residual stream).

@@ -53,6 +53,65 @@ __global__ void __launch_bounds__(256) rms_norm_vec_kernel(const float *x, const
     }
 }
 
+// Prompt batches: rms_norm_vec_kernel with two additions that fold the neighbouring elementwise kernels into the norm pass (what vLLM's
+// fused_add_rms_norm does). With ADD the input is the residual stream that a Marlin GEMM leaves pending, x += scale * (y16 + bias)
+// (the arithmetic of f16_to_f32_acc_kernel), and the sum is written back to x before it is normalised. With OUT16 the normalised row
+// is also written as FP16 (the conversion kernel of the next Marlin GEMM, __floats2half2_rn of the stored FP32 value). The reduction
+// order is that of rms_norm_vec_kernel, so the results are bit-identical to the separate kernels.
+template <int PER, bool ADD, bool OUT16>
+__global__ void __launch_bounds__(256) rms_norm_prompt_kernel(const __half2 *__restrict__ y16, const float *__restrict__ bias, float *x,
+                                                              float scale, const float *__restrict__ w, float *out,
+                                                              __half2 *__restrict__ out16, int cols4, float eps, float inv_cols) {
+    __shared__ float scratch[32];
+    float4 *xr = reinterpret_cast<float4 *>(x) + (size_t)blockIdx.x * cols4;
+    float4 *orow = reinterpret_cast<float4 *>(out) + (size_t)blockIdx.x * cols4;
+    const float4 *w4 = reinterpret_cast<const float4 *>(w);
+    float4 v[PER];
+    float sum = 0.f;
+#pragma unroll
+    for (int i = 0; i < PER; i++) {
+        const int c = threadIdx.x + i * 256;
+        if (c < cols4) {
+            v[i] = xr[c];
+            if constexpr (ADD) {
+                const size_t k = (size_t)blockIdx.x * cols4 + c;
+                const float2 a = __half22float2(y16[2 * k]), b = __half22float2(y16[2 * k + 1]);
+                float4 r = make_float4(a.x, a.y, b.x, b.y);
+                if (bias) {
+                    r.x += bias[4 * c];
+                    r.y += bias[4 * c + 1];
+                    r.z += bias[4 * c + 2];
+                    r.w += bias[4 * c + 3];
+                }
+                v[i].x += scale * r.x;
+                v[i].y += scale * r.y;
+                v[i].z += scale * r.z;
+                v[i].w += scale * r.w;
+                xr[c] = v[i];
+            }
+        } else {
+            v[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+        }
+        sum = fmaf(v[i].x, v[i].x, fmaf(v[i].y, v[i].y, fmaf(v[i].z, v[i].z, fmaf(v[i].w, v[i].w, sum))));
+    }
+    const float total = block_sum(sum, scratch);
+    const float inv = 1.0f / sqrtf(total * inv_cols + eps);
+#pragma unroll
+    for (int i = 0; i < PER; i++) {
+        const int c = threadIdx.x + i * 256;
+        if (c < cols4) {
+            const float4 g = __ldg(w4 + c);
+            const float4 o = make_float4(v[i].x * (inv * g.x), v[i].y * (inv * g.y), v[i].z * (inv * g.z), v[i].w * (inv * g.w));
+            orow[c] = o;
+            if constexpr (OUT16) {
+                const size_t k = (size_t)blockIdx.x * cols4 + c;
+                out16[2 * k] = __floats2half2_rn(o.x, o.y);
+                out16[2 * k + 1] = __floats2half2_rn(o.z, o.w);
+            }
+        }
+    }
+}
+
 // out = (x - mean) * rsqrt(var + eps) * weight + bias, biased variance (matches the CPU backend).
 __global__ void layer_norm_kernel(const float *x, const float *w, const float *b, float *out, int cols, float eps) {
     __shared__ float scratch[32];
@@ -170,6 +229,33 @@ int fllm_rms_norm_launch(cudaStream_t s, const float *x, const float *w, float *
         rms_norm_kernel<<<rows, 256, 0, s>>>(x, w, out, cols, eps);
     }
     return fllm_check_launch("rms_norm");
+}
+// Can fllm_rms_norm_prompt_launch run these operands (the vectorised norm kernel's conditions)?
+bool fllm_rms_norm_prompt_ok(const float *x, const float *w, const float *out, int cols) {
+    return (reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 == 0 && cols % 4 == 0 &&
+           cols <= 8192;
+}
+// rms_norm of `rows` rows of x (see rms_norm_prompt_kernel). `y16` != null: x += scale * (y16 + bias) first (written back to x).
+// `out16` != null: the normalised rows are also written as FP16.
+int fllm_rms_norm_prompt_launch(cudaStream_t s, const void *y16, const float *bias, float scale, float *x, const float *w, float *out,
+                                void *out16, int rows, int cols, float eps) {
+    if (rows <= 0) return 0;
+    if (!fllm_rms_norm_prompt_ok(x, w, out, cols)) return fllm_set_error("rms_norm_prompt: unsupported operands");
+    const int c4 = cols / 4;
+    const float inv_cols = 1.0f / (float)cols;
+    const __half2 *yh = static_cast<const __half2 *>(y16);
+    __half2 *oh = static_cast<__half2 *>(out16);
+#define FLLM_NORM_PROMPT(PER, ADD, OUT16) \
+    rms_norm_prompt_kernel<PER, ADD, OUT16><<<rows, 256, 0, s>>>(yh, bias, x, scale, w, out, oh, c4, eps, inv_cols)
+    if (c4 <= 1024) {
+        if (y16) { if (out16) FLLM_NORM_PROMPT(4, true, true); else FLLM_NORM_PROMPT(4, true, false); }
+        else { if (out16) FLLM_NORM_PROMPT(4, false, true); else FLLM_NORM_PROMPT(4, false, false); }
+    } else {
+        if (y16) { if (out16) FLLM_NORM_PROMPT(8, true, true); else FLLM_NORM_PROMPT(8, true, false); }
+        else { if (out16) FLLM_NORM_PROMPT(8, false, true); else FLLM_NORM_PROMPT(8, false, false); }
+    }
+#undef FLLM_NORM_PROMPT
+    return fllm_check_launch("rms_norm_prompt");
 }
 int fllm_layer_norm_launch(cudaStream_t s, const float *x, const float *w, const float *b, float *out, int rows,
                            int cols, float eps) {
