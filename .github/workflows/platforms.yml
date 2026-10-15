@@ -163,11 +163,26 @@ jobs:
           log-file-suffix: "windows-cuda.txt"
 
       - name: Build with the CUDA kernels (static C runtime, Ampere and Blackwell)
+        id: build
+        shell: pwsh
         env:
           FLLM_CUDA_ARCHS: "80;120"
-          FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler"
+          # warning 69-D (integer conversion in the Marlin templates) fills the log; the real error would be cut off
+          FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler -diag-suppress 69"
           RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo build --release --locked -p fllm-engine --features "rust-gpu,cuda" --bin fllm-rs
+        run: |
+          cargo build --release --locked -p fllm-engine --features "rust-gpu,cuda" --bin fllm-rs *> build.log
+          exit $LASTEXITCODE
+
+      - name: Errors of the CUDA build
+        if: failure() && steps.build.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Host "== lines with error / fatal / LNK / undefined (first 80)"
+          Select-String -Path build.log -Pattern 'error|fatal|LNK[0-9]+|undefined|FAILED|could not' |
+            Where-Object { $_.Line -notmatch 'warning' } | Select-Object -First 80 | ForEach-Object { $_.Line }
+          Write-Host "== last 60 lines"
+          Get-Content build.log -Tail 60
 
   # What the release job does, without the upload: build-windows.ps1 end to end (loads the VS environment, builds, smoke test, zip).
   windows-package:
