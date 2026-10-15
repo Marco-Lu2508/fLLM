@@ -105,6 +105,7 @@ are valid; anything else exits with `invalid number for <flag>`.
 | `FLLM_CACHE` | `hub` resolver | Hub cache root; takes precedence over `HF_HUB_CACHE` |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | `hub` resolver | Bearer token for `hf://` downloads (first match wins) |
 | `HF_HUB_CACHE` | `hub` resolver | Hub cache root when `FLLM_CACHE` is unset; default `$HF_HOME/hub` |
+| `HF_ENDPOINT` | `hub` resolver | Base URL of the Hub (a mirror); default `https://huggingface.co` |
 | `HF_HOME` | `hub` resolver | Default `$XDG_CACHE_HOME`/`$HOME/.cache`, then `huggingface` |
 | `XDG_CACHE_HOME`, `HOME`, `USERPROFILE` | `hub` resolver | Fallbacks for the cache location when `HF_HOME` is unset |
 | `FLLM_FILES_DIR` | batch store | Directory for uploaded batch files, results and `store.json`; default `<cache>/fllm-files` (cache root as resolved above) |

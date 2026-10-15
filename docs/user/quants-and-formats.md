@@ -109,7 +109,8 @@ GPUs, the CPU and Vulkan dequantize instead. Details and measurements:
 
 ## NVFP4 / MXFP4 notes
 
-- ModelOpt NVFP4 checkpoints (GGUF type 40) run on Blackwell (sm_12x) FP4
+- ModelOpt NVFP4 safetensors checkpoints are converted to GGUF type 40 by `run`, `serve`, `pull` and `convert`.
+  The converted files run on Blackwell (sm_12x) FP4
   tensor cores; elsewhere the weights expand to F16 at load (the CPU decodes
   them per row, slowly). On pre-Blackwell NVIDIA GPUs they can run through the
   Marlin FP4 path instead (see [awq-gptq-marlin.md](../awq-gptq-marlin.md)).

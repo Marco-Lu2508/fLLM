@@ -60,7 +60,21 @@ Downloads resolve to immutable snapshots in the standard Hub cache, resume inter
 transfers, fetch every shard of a GGUF file, and honour `FLLM_CACHE`, `HF_HOME`, `HF_HUB_CACHE`
 and `HF_TOKEN`.
 
-or convert a local checkpoint. The input must be a checkpoint directory (or a single
+Or let `run`/`serve`/`pull` do the conversion: a repository or directory that holds a safetensors/PyTorch
+checkpoint (plain, AWQ, GPTQ, FP8, compressed-tensors, NVIDIA ModelOpt NVFP4) and no GGUF is downloaded and
+converted to GGUF on first use, and the result is cached next to the other models:
+
+```sh
+./run.sh run owner/some-checkpoint                  # converts once, then chats
+./run.sh run owner/some-checkpoint --quant q4_k_m   # unquantized checkpoint -> Q4_K_M while converting
+./run.sh list                                       # shows the converted file and where it came from
+./run.sh rm owner/some-checkpoint --converted       # drop only the converted GGUF
+```
+
+Quantized checkpoints keep their own quantization. This was verified with tiny synthetic checkpoints on the
+CPU; large real checkpoints and GPU runs of the converted files were not tested.
+
+Or convert a checkpoint yourself, to a file you choose. The input must be a checkpoint directory (or a single
 `.safetensors`/`.bin`/`.pt`/`.pth` file) with `config.json` and the tokenizer files beside the
 weights:
 
@@ -69,7 +83,7 @@ weights:
 ./run.sh convert /models/model.safetensors /models/model.gguf --outtype preserve --overwrite
 ```
 
-`--outtype` accepts `preserve` (default: keep the checkpoint dtypes), `f16`, `f32` or one of
+`--outtype` accepts `preserve` (default: keep the checkpoint dtypes and quantization), `f16`, `f32` or one of
 the quantization presets (`q4_k_m`, `q8_0`, …), which converts and quantizes in a single run.
 Conversion never loads the model into the inference runtime.
 
