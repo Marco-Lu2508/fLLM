@@ -130,6 +130,59 @@ extern "C" {
         half_: c_int,
         neox: c_int,
     ) -> c_int;
+    fn fllm_cuda_add_rms_norm(
+        st: *mut RawStream,
+        x: *mut f32,
+        branch: *const f32,
+        scale: f32,
+        w: *const f32,
+        out: *mut f32,
+        rows: c_int,
+        cols: c_int,
+        eps: f32,
+        quant: c_int,
+        kind: c_int,
+        next_w: *const c_void,
+        next_rows: c_int,
+    ) -> c_int;
+    fn fllm_cuda_linear_q4z_add_norm(
+        st: *mut RawStream,
+        w: *const c_void,
+        group: c_int,
+        act: *const f32,
+        res: *mut f32,
+        bias: *const f32,
+        rows: c_int,
+        cols: c_int,
+        batch: c_int,
+        perm: *const c_int,
+        scale: f32,
+        nw: *const f32,
+        out: *mut f32,
+        eps: f32,
+        quant: c_int,
+        kind: c_int,
+    ) -> c_int;
+    fn fllm_cuda_rope_kv_f32(
+        st: *mut RawStream,
+        q: *mut f32,
+        k: *const f32,
+        v: *const f32,
+        pool_k_layer: *mut u16,
+        pool_v_layer: *mut u16,
+        positions: *const i32,
+        slots: *const i32,
+        rows: c_int,
+        cs: *const f32,
+        sn: *const f32,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        half_: c_int,
+        neox: c_int,
+    ) -> c_int;
+    fn fllm_cuda_set_fuse(which: c_int, on: c_int) -> c_int;
     fn fllm_cuda_gptq_repack(dev: c_int, words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_linear_fp8_marlin(
         st: *mut RawStream,
@@ -144,6 +197,10 @@ extern "C" {
     fn fllm_cuda_fp8_marlin_repack(dev: c_int, words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_fp8_marlin_supported(rows: c_int, cols: c_int) -> c_int;
     fn fllm_cuda_argmax(st: *mut RawStream, logits: *const f32, rows: c_int, vocab: c_int, host_out: *mut i32) -> c_int;
+    fn fllm_cuda_step_begin(st: *mut RawStream) -> c_int;
+    fn fllm_cuda_step_end(st: *mut RawStream) -> c_int;
+    fn fllm_cuda_get_opt(id: c_int) -> c_int;
+    fn fllm_cuda_set_opt(id: c_int, value: c_int) -> c_int;
     fn fllm_cuda_graph_supported(st: *mut RawStream) -> c_int;
     fn fllm_cuda_graph_begin(st: *mut RawStream, id: c_int, pos: usize, slot: usize, table: usize, len: usize, max_len: c_int) -> c_int;
     fn fllm_cuda_graph_end(st: *mut RawStream, id: c_int, abort: c_int) -> c_int;
@@ -453,6 +510,57 @@ fn check(code: c_int) -> Result<(), BackendError> {
 
 fn invalid(msg: impl Into<String>) -> BackendError {
     BackendError::InvalidShape(msg.into())
+}
+
+/// Answer of a fused kernel entry point: 0 = launched, 3 = declined (nothing was launched), anything else is an error.
+fn fused_result(code: c_int) -> Result<bool, BackendError> {
+    match code {
+        0 => Ok(true),
+        3 => Ok(false),
+        other => check(other).map(|()| true),
+    }
+}
+
+/// What the GEMM of `weight` reads: `(quant, kind)` for the fused norm kernels. 1 = FP16 activations of the Marlin 4-bit GEMM (no
+/// activation permutation), 2 = NVFP4 blocks, 3 = int8 blocks of the K-quant GEMVs (`kind` is the GGUF type), 0 = nothing to prepare.
+fn next_activation_format(weight: Option<&DeviceWeight>) -> (c_int, c_int) {
+    let Some(w) = weight else {
+        return (0, 0);
+    };
+    let kind = w.quant_type.to_gguf_type_id();
+    if kind == 40 {
+        (2, 0)
+    } else if w.quant_type.q4z_group().is_some() {
+        if w.perm.is_some() {
+            (0, 0)
+        } else {
+            (1, 0)
+        }
+    } else if matches!(kind, 12..=14) {
+        (3, kind as c_int)
+    } else {
+        (0, 0)
+    }
+}
+
+/// The fused decode kernels (docs/gpu-backends.md, "Fewer kernels per decode token").
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fusion {
+    /// residual add + RMSNorm (+ activation conversion of the next GEMM), `FLLM_FUSE_ADD_NORM`
+    AddNorm = 0,
+    /// RMSNorm + activation quantization of the next GEMM, `FLLM_FUSE_NORM_QUANT`
+    NormQuant = 1,
+    /// rotary embedding + KV cache write, `FLLM_FUSE_ROPE_KV`
+    RopeKv = 2,
+    /// gated activation + int8 quantization, `FLLM_FUSE_GLU_Q8`
+    GluQ8 = 3,
+}
+
+/// Force a fusion on or off (self test); `None` returns to the environment.
+pub fn set_fusion(which: Fusion, on: Option<bool>) {
+    // SAFETY: plain setter of a process-wide flag.
+    unsafe { fllm_cuda_set_fuse(which as c_int, on.map_or(-1, c_int::from)) };
 }
 
 fn to_c(n: usize, what: &str) -> Result<c_int, BackendError> {
@@ -841,6 +949,8 @@ impl Backend for CudaBackend {
             staging_bias: None,
             pinned: std::collections::BTreeMap::new(),
             pin_failed: std::env::var_os("FLLM_NO_HOST_PIN").is_some(),
+            step_open: false,
+            blocks_checked: None,
         }))
     }
 
@@ -936,7 +1046,7 @@ impl Backend for CudaBackend {
                 converted = dual;
                 (&converted, quant_type)
             } else if kind == 40 && cols.is_multiple_of(256) && rows.is_multiple_of(16) {
-                converted = nvfp4_device_layout(raw_bytes, rows, cols);
+                converted = nvfp4_device_layout(raw_bytes, rows, cols, super::take_next_nvfp4_scales());
                 (&converted, quant_type)
             } else {
                 (raw_bytes, quant_type)
@@ -1025,6 +1135,16 @@ impl Backend for CudaBackend {
             }
         }
         if quant_type == QuantType::NvFp4 && self.fp4 && cols.is_multiple_of(256) && rows.is_multiple_of(16) && raw_bytes.len() == rows * (cols / 64) * 36 {
+            let input_scale = super::take_next_nvfp4_input_scale();
+            if input_scale <= 0.0 {
+                log_once(
+                    "cuda-nvfp4-no-input-scale",
+                    &format!(
+                        "NVFP4 weights without an input_scale tensor (first: {name}): activations are quantized without the checkpoint's per-tensor factor (convert with a llama.cpp that keeps <name>.input_scale, or try FLLM_NVFP4_ACT_SCALE=dynamic)"
+                    ),
+                );
+            }
+            super::set_next_nvfp4_scales(scale, input_scale);
             let mut weight = self.upload_weight(name, raw_bytes, quant_type, rows, cols, bias)?;
             weight.scale = scale;
             return Ok(weight);
@@ -1112,6 +1232,10 @@ pub struct CudaStream {
     /// Page ranges (start -> end) of host weight memory that is page-locked for fast copies.
     pinned: std::collections::BTreeMap<usize, usize>,
     pin_failed: bool,
+    /// A forward pass is running (`begin_step`) and the library caches the host data of its attention calls.
+    step_open: bool,
+    /// Block tables (address, length) and lengths (address, length) whose blocks were walked by `attention_paged` in this step.
+    blocks_checked: Option<[usize; 4]>,
 }
 
 // SAFETY: the raw stream is only used through `&mut self`.
@@ -1235,6 +1359,20 @@ impl CudaStream {
 }
 
 impl Stream for CudaStream {
+    fn begin_step(&mut self) {
+        // SAFETY: plain call on a live stream.
+        let ok = unsafe { fllm_cuda_step_begin(self.raw) } == 0;
+        self.step_open = ok && prefill_switch(PrefillSwitch::StepCache) != 0;
+        self.blocks_checked = None;
+    }
+
+    fn end_step(&mut self) {
+        // SAFETY: plain call on a live stream.
+        unsafe { fllm_cuda_step_end(self.raw) };
+        self.step_open = false;
+        self.blocks_checked = None;
+    }
+
     fn synchronize(&mut self) -> Result<(), BackendError> {
         // SAFETY: live stream.
         check(unsafe { fllm_cuda_stream_sync(self.raw) })
@@ -1769,7 +1907,7 @@ impl Stream for CudaStream {
     fn linear_f16_out(&mut self, out16: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight) -> Result<bool, BackendError> {
         if weight.quant_type.to_gguf_type_id() == 40 {
             // NVFP4 prompts: the CUTLASS epilogue writes halves (the decode kernels cannot, they decline)
-            if std::env::var_os("FLLM_NO_F16_NVFP4").is_some() {
+            if super::env_flag_once!("FLLM_NO_F16_NVFP4") {
                 return Ok(false);
             }
             let (rows, cols) = (weight.rows, weight.cols);
@@ -1777,7 +1915,8 @@ impl Stream for CudaStream {
                 return Ok(false);
             }
             let batch = x.size / (cols * 4);
-            if batch == 0 || out16.size < batch * rows * 2 {
+            // the halves are written through quantized_linear, which wants a buffer sized for FP32 results (the decoder's q/k/v and gate/up buffers are)
+            if batch == 0 || out16.size < batch * rows * 4 {
                 return Ok(false);
             }
             // SAFETY: pointers of live device buffers and sizes checked above; the call only inspects its arguments.
@@ -1794,7 +1933,7 @@ impl Stream for CudaStream {
             unsafe { fllm_cuda_nvfp4_f16out(0) };
             return result.map(|()| true);
         }
-        if weight.quant_type.q4z_group().is_none() || weight.perm.is_some() || std::env::var_os("FLLM_NO_FUSED_QKV").is_some() {
+        if weight.quant_type.q4z_group().is_none() || weight.perm.is_some() || super::env_flag_once!("FLLM_NO_FUSED_QKV") {
             return Ok(false);
         }
         // SAFETY: plain setter of a thread-local flag in the CUDA library.
@@ -1896,7 +2035,7 @@ impl Stream for CudaStream {
     ) -> Result<bool, BackendError> {
         if weight.quant_type.to_gguf_type_id() == 40 {
             // NVFP4 prompts: the CUTLASS epilogue adds scale * (product) to the residual stream (the decode kernels cannot, they decline)
-            if bias.is_some() || scale == 0.0 || std::env::var_os("FLLM_NO_FUSED_ADD").is_some() {
+            if bias.is_some() || scale == 0.0 || super::env_flag_once!("FLLM_NO_FUSED_ADD") {
                 return Ok(false);
             }
             let (rows, cols) = (weight.rows, weight.cols);
@@ -1921,7 +2060,7 @@ impl Stream for CudaStream {
             unsafe { fllm_cuda_nvfp4_accumulate(0, 0.0) };
             return result.map(|()| true);
         }
-        if weight.quant_type.q4z_group().is_none() || std::env::var_os("FLLM_NO_FUSED_ADD").is_some() {
+        if weight.quant_type.q4z_group().is_none() || super::env_flag_once!("FLLM_NO_FUSED_ADD") {
             return Ok(false);
         }
         // SAFETY: plain setter of a thread-local flag in the CUDA library.
@@ -1930,6 +2069,158 @@ impl Stream for CudaStream {
         // SAFETY: as above.
         unsafe { fllm_cuda_q4z_accumulate(0, 0.0) };
         result.map(|()| true)
+    }
+
+    fn add_rms_norm(
+        &mut self,
+        x: &mut DeviceBuffer,
+        branch: &DeviceBuffer,
+        scale: f32,
+        weight: &DeviceBuffer,
+        eps: f32,
+        out: &mut DeviceBuffer,
+        next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        let cols = weight.size / 4;
+        if cols == 0 || !x.size.is_multiple_of(cols * 4) || branch.size < x.size || out.size < x.size {
+            return Ok(false);
+        }
+        let rows = x.size / (cols * 4);
+        let (quant, kind) = next_activation_format(next);
+        // the NVFP4 weight that reads the result: the fused kernel takes its activation factor from the weight trailer
+        let (next_w, next_rows): (*const c_void, usize) = match next {
+            Some(w) if quant == 2 => (dev_ptr(&w.buffer)?.cast(), w.rows),
+            _ => (std::ptr::null(), 0),
+        };
+        // SAFETY: sizes checked above; the entry point validates alignment and shape and declines (returns 3) without launching.
+        fused_result(unsafe {
+            fllm_cuda_add_rms_norm(
+                self.raw,
+                dev_ptr(x)?.cast(),
+                dev_ptr(branch)?.cast(),
+                scale,
+                dev_ptr(weight)?.cast(),
+                dev_ptr(out)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(cols, "width")?,
+                eps,
+                quant,
+                kind,
+                next_w,
+                to_c(next_rows, "rows")?,
+            )
+        })
+    }
+
+    fn quantized_linear_add_norm(
+        &mut self,
+        residual: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceWeight,
+        bias: Option<&DeviceBuffer>,
+        scale: f32,
+        norm: &DeviceBuffer,
+        eps: f32,
+        out: &mut DeviceBuffer,
+        next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        let Some(group) = weight.quant_type.q4z_group() else {
+            return Ok(false);
+        };
+        if scale == 0.0 || std::env::var_os("FLLM_NO_FUSED_ADD").is_some() {
+            return Ok(false);
+        }
+        let (rows, cols) = (weight.rows, weight.cols);
+        if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) || norm.size != rows * 4 {
+            return Ok(false);
+        }
+        let batch = x.size / (cols * 4);
+        if batch == 0 || residual.size < batch * rows * 4 || out.size < batch * rows * 4 || bias.is_some_and(|b| b.size < rows * 4) {
+            return Ok(false);
+        }
+        let bias_ptr = match bias {
+            Some(b) => dev_ptr(b)? as *const f32,
+            None => std::ptr::null(),
+        };
+        let perm_ptr = match &weight.perm {
+            Some(p) => dev_ptr(p)? as *const c_int,
+            None => std::ptr::null(),
+        };
+        let (quant, kind) = next_activation_format(next);
+        // SAFETY: sizes checked above; the weight was uploaded by `upload_q4z`; the entry point declines (returns 3) before launching anything
+        // when the alignment or the width does not suit the fused kernel.
+        fused_result(unsafe {
+            fllm_cuda_linear_q4z_add_norm(
+                self.raw,
+                dev_ptr(&weight.buffer)?.cast(),
+                group as c_int,
+                dev_ptr(x)?.cast(),
+                dev_ptr(residual)?.cast(),
+                bias_ptr,
+                to_c(rows, "rows")?,
+                to_c(cols, "cols")?,
+                to_c(batch, "batch")?,
+                perm_ptr,
+                scale,
+                dev_ptr(norm)?.cast(),
+                dev_ptr(out)?.cast(),
+                eps,
+                quant,
+                kind,
+            )
+        })
+    }
+
+    fn rope_kv_write(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        layer_idx: usize,
+        positions: &[usize],
+        slots: &[usize],
+        params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        if kv.kv_kind != 1 || params.rope_dim == 0 || params.rope_dim > params.dim || positions.len() != slots.len() {
+            return Ok(false);
+        }
+        let rows = positions.len();
+        if rows == 0 {
+            return Ok(true);
+        }
+        let (dk, dv) = (kv.head_dim, kv.value_dim);
+        if dk != params.dim || kv.kv_heads != params.kv_heads {
+            return Ok(false);
+        }
+        params.validate(positions, q.size, k.size)?;
+        validate_kv_write(kv, layer_idx, slots, k.size, v.size)?;
+        let cos = self.table(&params.cos)?;
+        let sin = self.table(&params.sin)?;
+        let pos: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
+        let slot_ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+        // SAFETY: sizes, table coverage and slot ranges validated above; positions and slots are staged by the library before the launch.
+        fused_result(unsafe {
+            fllm_cuda_rope_kv_f32(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(v)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                pos.as_ptr(),
+                slot_ids.as_ptr(),
+                to_c(rows, "rows")?,
+                cos,
+                sin,
+                to_c(params.heads, "heads")?,
+                to_c(kv.kv_heads, "kv heads")?,
+                to_c(dk, "head width")?,
+                to_c(dv, "value width")?,
+                to_c(params.rope_dim / 2, "rope width")?,
+                c_int::from(params.neox),
+            )
+        })
     }
 
     fn graph_supported(&self) -> bool {
@@ -2515,7 +2806,13 @@ impl Stream for CudaStream {
         layer_idx: usize,
         params: &AttentionParams,
     ) -> Result<(), BackendError> {
-        params.validate(kv, block_tables, lengths, layer_idx)?;
+        // the blocks of a step are the same for all its layers: they are walked for the first attention call only
+        let key = [block_tables.as_ptr() as usize, block_tables.len(), lengths.as_ptr() as usize, lengths.len()];
+        let walked = self.step_open && self.blocks_checked == Some(key);
+        params.validate_blocks(kv, block_tables, lengths, layer_idx, !walked)?;
+        if self.step_open {
+            self.blocks_checked = Some(key);
+        }
         let (dk, dv, heads) = (params.head_dim, params.value_dim, params.num_heads);
         let rows = lengths.len();
         if rows == 0 {
@@ -2727,15 +3024,18 @@ fn f32_to_f16_bits(v: f32) -> u16 {
 /// same weights serve the small-batch kernel in `nvfp4.cu` and the CUTLASS GEMM for prompts:
 /// `[rows x cols / 2 bytes: element 2i in the low nibble of byte i]`, padded to 256 bytes, then the UE4M3 scales in the
 /// swizzled atom layout (`nvfp4_scale_index`), `ceil(rows / 128) * cols / 64 * 512` bytes. `rows` and `cols` must be
-/// multiples of 16 and 256.
-fn nvfp4_device_layout(raw: &[u8], rows: usize, cols: usize) -> Vec<u8> {
+/// multiples of 16 and 256. The scales are followed (at the next multiple of 256) by the 16-byte trailer of `nvfp4_trailer`.
+fn nvfp4_device_layout(raw: &[u8], rows: usize, cols: usize, (weight_scale, input_scale): (f32, f32)) -> Vec<u8> {
     use rayon::prelude::*;
     let blocks = cols / 64;
     let row_bytes = blocks * 36;
     let nibble_bytes = rows * cols / 2;
     let scale_offset = nibble_bytes.div_ceil(256) * 256;
-    let mut out = vec![0u8; scale_offset + rows.div_ceil(128) * blocks * 512];
-    let (nibbles, scales) = out.split_at_mut(scale_offset);
+    let scales_end = scale_offset + rows.div_ceil(128) * blocks * 512;
+    let trailer_offset = scales_end.div_ceil(256) * 256;
+    let mut out = vec![0u8; trailer_offset + NVFP4_TRAILER_BYTES];
+    let (nibbles, rest) = out.split_at_mut(scale_offset);
+    let scales = &mut rest[..scales_end - scale_offset];
     nibbles[..nibble_bytes].par_chunks_mut(cols / 2).enumerate().for_each(|(r, dst)| {
         for b in 0..blocks {
             let block = &raw[r * row_bytes + b * 36..][..36];
@@ -2755,6 +3055,27 @@ fn nvfp4_device_layout(raw: &[u8], rows: usize, cols: usize) -> Vec<u8> {
                 scales[nvfp4_scale_index(r, b * 4 + i, blocks)] = raw[r * row_bytes + b * 36 + i];
             }
         }
+    }
+    out[trailer_offset..].copy_from_slice(&nvfp4_trailer(weight_scale, input_scale));
+    out
+}
+
+/// Bytes behind the swizzled scales of a device NVFP4 weight (at the next multiple of 256): four little-endian floats
+/// `{gs, alpha, weight_scale_2, valid}` that the kernels read through device pointers (`Nvfp4Trailer` in nvfp4_quant.cuh):
+/// `gs = 1 / input_scale` multiplies the activations before their FP4 quantization (ModelOpt / vLLM `input_global_scale`) and
+/// `alpha = weight_scale_2 * input_scale` is the factor of the GEMM result. A checkpoint without `input_scale` (0) gets `gs = 1`,
+/// `alpha = weight_scale_2`, which is what fLLM computed before the activation factor existed.
+const NVFP4_TRAILER_BYTES: usize = 16;
+
+fn nvfp4_trailer(weight_scale: f32, input_scale: f32) -> [u8; NVFP4_TRAILER_BYTES] {
+    let (gs, alpha, valid) = if input_scale.is_finite() && input_scale > 0.0 {
+        (1.0 / input_scale, weight_scale * input_scale, 1.0)
+    } else {
+        (1.0, weight_scale, 0.0)
+    };
+    let mut out = [0u8; NVFP4_TRAILER_BYTES];
+    for (i, v) in [gs, alpha, weight_scale, valid].into_iter().enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
     }
     out
 }
@@ -2996,6 +3317,32 @@ pub fn is_exact_math() -> bool {
     EXACT_MATH.load(std::sync::atomic::Ordering::Relaxed) || std::env::var_os("FLLM_CUDA_EXACT").is_some()
 }
 
+/// The switches of the prefill host-work reductions and kernel fusions (docs/performance-notes.md). The environment variables give the start
+/// values; `set_prefill_switch` overrides them at run time (selftest-gpu compares the variants on one device).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefillSwitch {
+    /// `FLLM_PREFILL_STEP_CACHE`
+    StepCache = 0,
+    /// `FLLM_FUSE_PREFILL_ADD_NORM`
+    FuseAddNorm = 1,
+    /// `FLLM_FUSE_PREFILL_NORM_F16`
+    FuseNormF16 = 2,
+    /// `FLLM_FUSE_PREFILL_ATTN_F16`
+    FuseAttnF16 = 3,
+    /// `FLLM_MARLIN_PREFILL_CFG` (0: vllm, 1: fllm)
+    MarlinCfg = 4,
+}
+
+pub fn prefill_switch(which: PrefillSwitch) -> i32 {
+    // SAFETY: plain getter of a process-wide flag.
+    unsafe { fllm_cuda_get_opt(which as c_int) }
+}
+
+pub fn set_prefill_switch(which: PrefillSwitch, value: i32) {
+    // SAFETY: plain setter of a process-wide flag.
+    unsafe { fllm_cuda_set_opt(which as c_int, value) };
+}
+
 pub fn set_marlin_q4k_enabled(enabled: bool) {
     MARLIN_Q4K_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
@@ -3062,9 +3409,15 @@ mod nvfp4_layout_tests {
         let blocks = cols / 64;
         let row_bytes = blocks * 36;
         let raw: Vec<u8> = (0..rows * row_bytes).map(|i: usize| (i.wrapping_mul(2_654_435_761) >> 7) as u8).collect();
-        let out = nvfp4_device_layout(&raw, rows, cols);
+        let out = nvfp4_device_layout(&raw, rows, cols, (0.5, 0.25));
         let scale_offset = (rows * cols / 2).div_ceil(256) * 256;
-        assert_eq!(out.len(), scale_offset + rows.div_ceil(128) * blocks * 512);
+        let scales_end = scale_offset + rows.div_ceil(128) * blocks * 512;
+        let trailer = scales_end.div_ceil(256) * 256;
+        assert_eq!(out.len(), trailer + NVFP4_TRAILER_BYTES);
+        let floats: Vec<f32> = out[trailer..].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        assert_eq!(floats, [4.0, 0.125, 0.5, 1.0]);
+        let none: Vec<f32> = nvfp4_trailer(0.5, 0.0).as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        assert_eq!(none, [1.0, 0.5, 0.5, 0.0]);
         for r in 0..rows {
             for k in 0..cols {
                 let nibble = (out[r * cols / 2 + k / 2] >> (4 * (k % 2))) & 15;

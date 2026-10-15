@@ -88,8 +88,13 @@ configured as vLLM and SGLang (through FlashInfer) do it. The file adapts
 - the collective builders of CUTLASS example `79a_blackwell_geforce_nvfp4_bf16_gemm.cu`
   (Copyright (c) 2025 - 2026 NVIDIA CORPORATION & AFFILIATES, BSD-3-Clause, https://github.com/NVIDIA/cutlass), and
 - the epilogue and tile list of FlashInfer `include/flashinfer/gemm/fp4_gemm_template_sm120.h` and `fp4_gemm_cutlass_template_sm120.h`
-  (no source tensor C when the product is only stored, an explicit epilogue schedule, the 128x128x256 tile; Copyright (c) 2020-2023, NVIDIA CORPORATION,
-  Apache License 2.0, https://github.com/flashinfer-ai/flashinfer).
+  (no source tensor C when the product is only stored, an explicit epilogue schedule, the 128x128x256 tile, the 256x128 / 128x256 / 128x64 tiles and the
+  stream-K scheduler of its sm120 list, and the idea of its autotuner: time every candidate once per problem shape and keep the fastest; Copyright (c)
+  2020-2023, NVIDIA CORPORATION, Apache License 2.0, https://github.com/flashinfer-ai/flashinfer), and
+- the activation quantization recipe of vLLM `csrc/quantization/fp4/nvfp4_quant_kernels.cu` (`scaled_fp4_quant`) and the way vLLM's modelopt loader derives
+  `input_global_scale = 1 / input_scale` and the GEMM factor `input_scale * weight_scale_2` (`vllm/model_executor/layers/quantization/modelopt.py`):
+  a per-tensor activation factor, UE4M3 block scales of `gs * amax / 6`, E2M1 round-to-nearest-even (`nvfp4_quant.cuh`; Copyright (c) 2025, NVIDIA CORPORATION,
+  Apache License 2.0, https://github.com/vllm-project/vllm). The kernels themselves were written for fLLM; only the arithmetic of the recipe is shared.
 
 The changes are listed in the header of the file. CUTLASS itself (header-only templates, BSD-3-Clause, text in
 `licenses/CUTLASS-BSD-3-Clause.txt`) is not part of this repository: `build.rs` uses a checkout in `third_party/cutlass`
@@ -121,6 +126,14 @@ output. `marlin_vllm.cu` and `marlin_vllm_{awq,gptq}_repack.cu` are the host and
 vLLM's `marlin_utils.py` are reimplemented for fLLM. `bench/test_vllm_marlin.cu` checks the port against an fp32 reference.
 The `Q4Z` tensor format that carries AWQ / GPTQ weights to this kernel, the converter, the weight upload and the activation glue
 (`marlin_vllm_glue.cu`) were written for fLLM (docs/awq-gptq-marlin.md).
+
+### Fused decode kernels (`rust/engine/cuda/fused.cu`)
+
+The fusions of residual add + RMSNorm, rotary embedding + KV-cache write and gated activation + quantization follow the design of vLLM
+(`csrc/layernorm_kernels.cu` `fused_add_rms_norm`, `csrc/pos_encoding_kernels.cu` + `csrc/cache_kernels.cu` `reshape_and_cache`,
+`csrc/activation_kernels.cu` `silu_and_mul`; Apache License 2.0), SGLang and FlashInfer (`apply_rope_pos_ids`; Apache License 2.0). No
+source code of these projects was copied: the kernels were written for fLLM on top of its own `rms_norm_vec_kernel`, `residual_kernel`,
+`rope_kernel`, `quantize_x8_kernel` and `nvfp4_quantize_kernel` and repeat their arithmetic, so that the results are bit-identical.
 
 ## CPU prompt kernels (eight-row panels, DeltaNet, sixteen-row float panels)
 

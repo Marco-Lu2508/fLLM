@@ -41,6 +41,13 @@ __global__ void half_to_float_kernel(const __half *__restrict__ src, float *__re
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x)
         dst[i] = __half2float(src[i]);
 }
+// The same, and the halves are also copied to `dst16`: the activations the output projection (a Marlin GEMM) would otherwise convert back again.
+__global__ void half_to_float_copy_kernel(const __half *__restrict__ src, float *__restrict__ dst, __half *__restrict__ dst16, size_t n) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+        dst[i] = __half2float(src[i]);
+        dst16[i] = src[i];
+    }
+}
 
 struct DeviceBuffer {
     void *ptr = nullptr;
@@ -67,6 +74,10 @@ struct State {
     // the plan sitting in the integer workspace: it depends on these numbers only, so it serves all layers of a chunk
     bool have_plan = false;
     int plan_rows = 0, plan_kv = 0, plan_heads = 0, plan_kv_heads = 0, plan_dim = 0, plan_block = 0;
+    // the request description in `small` (qo_indptr, kv_indptr, last_page_len) depends on these three numbers only: it is copied once per chunk, not per layer
+    const void *small_ptr = nullptr;
+    cudaStream_t small_stream = nullptr;  // only the stream that wrote it may rely on it
+    int small_rows = -1, small_pages = -1, small_last = -1;
     flashinfer::PrefillPlanInfo plan;
 };
 thread_local State g_state;
@@ -112,6 +123,11 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
 #if defined(FLLM_HAVE_FLASHINFER)
     using namespace fllm_fi;
     static const bool disabled = getenv("FLLM_CUDA_NO_FLASHINFER") != nullptr;
+    if (fllm_pending_attn.o16) {  // never overwrite an unexpanded result (api.cu flushes before every operation)
+        const FllmPendingAttn p = fllm_pending_attn;
+        fllm_pending_attn = FllmPendingAttn();
+        fllm_flashinfer_expand_half(s, p.o16, p.out, p.count);
+    }
     if (disabled || fllm_cc() < 75 || dk != dv || (dk != 64 && dk != 128) || kv_len < rows || heads % kv_heads != 0)
         return -1;
     const size_t row_halves = (size_t)kv_heads * dk;
@@ -131,11 +147,20 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
     // device-side request description: qo_indptr {0, rows}, kv_indptr {0, pages}, last_page_len {n}
     int32_t *small = static_cast<int32_t *>(st.small.ptr);
     const int32_t qo_h[2] = {0, rows}, kv_h[2] = {0, pages}, last_h[1] = {kv_len - (pages - 1) * block_size};
-    if (cudaMemcpyAsync(small, qo_h, sizeof qo_h, cudaMemcpyHostToDevice, s) != cudaSuccess ||
-        cudaMemcpyAsync(small + 4, kv_h, sizeof kv_h, cudaMemcpyHostToDevice, s) != cudaSuccess ||
-        cudaMemcpyAsync(small + 8, last_h, sizeof last_h, cudaMemcpyHostToDevice, s) != cudaSuccess) {
-        cudaGetLastError();
-        return -1;
+    if (!(fllm_opt(FLLM_OPT_STEP_CACHE) && st.small_ptr == st.small.ptr && st.small_stream == s && st.small_rows == rows && st.small_pages == pages &&
+          st.small_last == last_h[0])) {
+        st.small_ptr = nullptr;
+        if (cudaMemcpyAsync(small, qo_h, sizeof qo_h, cudaMemcpyHostToDevice, s) != cudaSuccess ||
+            cudaMemcpyAsync(small + 4, kv_h, sizeof kv_h, cudaMemcpyHostToDevice, s) != cudaSuccess ||
+            cudaMemcpyAsync(small + 8, last_h, sizeof last_h, cudaMemcpyHostToDevice, s) != cudaSuccess) {
+            cudaGetLastError();
+            return -1;
+        }
+        st.small_ptr = st.small.ptr;
+        st.small_stream = s;
+        st.small_rows = rows;
+        st.small_pages = pages;
+        st.small_last = last_h[0];
     }
     table_to_int32_kernel<<<(pages + 255) / 256, 256, 0, s>>>(table, static_cast<int32_t *>(st.indices.ptr), pages);
 
@@ -204,7 +229,18 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
             cudaGetLastError();
             return -1;
         }
-        half_to_float_kernel<<<grid(q_elems), 256, 0, s>>>(static_cast<const __half *>(st.o16.ptr), out, q_elems);
+        if (fllm_attn_x16 != nullptr && (reinterpret_cast<uintptr_t>(fllm_attn_x16) & 15) == 0) {
+            half_to_float_copy_kernel<<<grid(q_elems), 256, 0, s>>>(static_cast<const __half *>(st.o16.ptr), out,
+                                                                    static_cast<__half *>(fllm_attn_x16), q_elems);
+            fllm_attn_x16_written = true;
+        } else if (fllm_fuse_nvfp4_attn_out() && (reinterpret_cast<uintptr_t>(out) & 15) == 0 && (reinterpret_cast<uintptr_t>(st.o16.ptr) & 15) == 0) {
+            // FLLM_FUSE_NVFP4_ATTN_OUT: expanded to FP32 only if something other than an NVFP4 GEMM needs it (flush_glu in api.cu)
+            fllm_pending_attn.o16 = st.o16.ptr;
+            fllm_pending_attn.out = out;
+            fllm_pending_attn.count = q_elems;
+        } else {
+            half_to_float_kernel<<<grid(q_elems), 256, 0, s>>>(static_cast<const __half *>(st.o16.ptr), out, q_elems);
+        }
     } catch (const std::exception &) {
         cudaGetLastError();
         st.have_plan = false;
@@ -215,5 +251,17 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
     (void)s; (void)q; (void)kpool; (void)vpool; (void)out; (void)table; (void)rows; (void)kv_len; (void)heads;
     (void)kv_heads; (void)dk; (void)dv; (void)block_size; (void)scale;
     return -1;
+#endif
+}
+
+// Expands the FP16 attention output left pending by fllm_flashinfer_prefill_try (see FllmPendingAttn) into the FP32 buffer.
+int fllm_flashinfer_expand_half(cudaStream_t s, const void *o16, float *out, size_t count) {
+#if defined(FLLM_HAVE_FLASHINFER)
+    const unsigned grid = (unsigned)((count + 255) / 256 > 4096 ? 4096 : (count + 255) / 256);
+    fllm_fi::half_to_float_kernel<<<grid, 256, 0, s>>>(static_cast<const __half *>(o16), out, count);
+    return fllm_check_launch("flashinfer expand");
+#else
+    (void)s; (void)o16; (void)out; (void)count;
+    return 0;
 #endif
 }

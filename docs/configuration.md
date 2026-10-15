@@ -101,7 +101,21 @@ are valid; anything else exits with `invalid number for <flag>`.
 | --- | --- | --- |
 | `FLLM_API_KEY` | `serve` (and the `chat`/`bench` clients as their default `--api-key`) | Initial value of `--api-key`; the flag overrides it |
 | `FLLM_RUST_PROFILE` | Rust decoder | When set (any value), a traced forward call prints one `{"rust_cpu_profile":{"rows":…,"phases_ms":{…}}}` line (total rows plus per-phase milliseconds) to stderr |
-| `FLLM_CPU_ISA` | CPU kernels | Cap kernel dispatch at a tier: `scalar`, `avx2`, `avx-vnni`, `avx512bw`, `avx512-vnni` (x86-64) or `neon`, `neon-dotprod`, `neon-i8mm` (AArch64); see docs/cpu-kernels.md |
+| `FLLM_CUDA_GRAPH` | CUDA decoder | CUDA graphs of decode steps: on by default for eligible models; `0`, `off`, `false` or `no` switch them off, `1`, `on` or `true` ask for them explicitly (an ineligible model still decodes without graphs); any other value is the default. See docs/gpu-backends.md |
+| `FLLM_FUSE`, `FLLM_FUSE_ADD_NORM`, `FLLM_FUSE_NORM_QUANT`, `FLLM_FUSE_ROPE_KV`, `FLLM_FUSE_GLU_Q8`, `FLLM_FUSE_HEAD_COPY` | CUDA decoder | Fused decode kernels (residual add + norm + activation quantization, rotary + cache write, gated activation + int8 quantization, final-norm copy); all on by default, `0`, `off`, `false` or `no` switch one off; a switch that is not set follows `FLLM_FUSE` (`FLLM_FUSE=0` turns all of them off, and `FLLM_FUSE=0 FLLM_FUSE_ROPE_KV=1` runs one alone). See docs/gpu-backends.md |
+| `FLLM_MARLIN_CFG` | CUDA Marlin | `K,N,T` (thread_k, thread_n, threads, e.g. `128,64,128`): every Marlin call tries that thread-block configuration first and uses it where it is valid for the shape; unset, `vllm`, `fllm` or `auto` keep vLLM's choice. A tuning aid for decode (docs/awq-gptq-marlin.md) |
+| `FLLM_PREFILL_STEP_CACHE` | CUDA prompt pass | Host work once per forward pass instead of once per layer (block tables, row layout, Marlin launch attributes). Default on; `0`, `off` or `false` switch it off. See docs/performance-notes.md |
+| `FLLM_PREFILL_PAR_EMBED` | CUDA prompt pass | Embedding rows of a prompt are looked up on several threads. Default on; `0` switches it off |
+| `FLLM_FUSE_PREFILL_ADD_NORM` | CUDA prompt pass (Marlin 4-bit, 16 rows or more) | Residual add of the output projection done inside the next RMS norm. Default on; `0`, `off` or `false` switch it off |
+| `FLLM_FUSE_PREFILL_NORM_F16` | CUDA prompt pass (Marlin 4-bit, 16 rows or more) | RMS norm also writes the FP16 copy the next Marlin GEMM reads. Default on; `0`, `off` or `false` switch it off |
+| `FLLM_FUSE_PREFILL_ATTN_F16` | CUDA prompt pass (Marlin 4-bit, FlashInfer attention) | Attention output also written as FP16 for the output projection. Default on; `0`, `off` or `false` switch it off |
+| `FLLM_MARLIN_PREFILL_CFG` | CUDA Marlin, prompt batches | `fllm` runs more than 64 rows as whole 64-row tiles in one launch; anything else (default, `vllm`) keeps vLLM's split into launches. Independent of `FLLM_MARLIN_CFG` |
+| `FLLM_NVFP4_ACT_SCALE` | NVFP4 GEMMs (sm_120) | Per-tensor activation factor of the checkpoint: `static` (default, also `auto`) uses `input_scale` stored with the weight, `dynamic` uses amax of each activation tensor, `off` (or any other value) uses 1 as before the switch existed. Also read by the fused decode norm (`dynamic` makes it decline the quantization). See docs/gpu-backends.md |
+| `FLLM_NVFP4_TILE` | NVFP4 prompt GEMMs (sm_120, CUTLASS) | `legacy` (default; 128x128x128 up to 256 tokens, 128x128x256 above), `auto` (cost model) or a tile: `256x128x128`, `128x256x128`, `128x128x128`, `128x128x256`, `128x128x128-sk`, `128x128x256-sk`, `128x128x128-pp`, `128x64x256` |
+| `FLLM_NVFP4_TUNE` | NVFP4 prompt GEMMs (sm_120, CUTLASS) | `1` times every tile once per shape at first use and keeps the fastest; default off |
+| `FLLM_FUSE_NVFP4_NORM` | NVFP4 prompt GEMMs (sm_120, CUTLASS, more than 64 rows) | RMS norm and the activation quantization of the next CUTLASS GEMM in one kernel. Default off; any value but `0` switches it on |
+| `FLLM_FUSE_NVFP4_ATTN_OUT` | NVFP4 prompt GEMMs (sm_120, FlashInfer) | FP16 attention output quantized directly by the output projection. Default off; any value but `0` switches it on |
+| `FLLM_CPU_ISA` | CPU kernels | Cap kernel dispatch at a tier: `scalar`, `avx2`, `avx-vnni`, `avx512bw`, `avx512-vnni`, `avx512-bf16`, `amx` (x86-64; the last two only in builds with the `avx512` feature) or `neon`, `neon-dotprod`, `neon-i8mm` (AArch64); see docs/cpu-kernels.md |
 | `FLLM_CACHE` | `hub` resolver | Hub cache root; takes precedence over `HF_HUB_CACHE` |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | `hub` resolver | Bearer token for `hf://` downloads (first match wins) |
 | `HF_HUB_CACHE` | `hub` resolver | Hub cache root when `FLLM_CACHE` is unset; default `$HF_HOME/hub` |
@@ -113,6 +127,33 @@ are valid; anything else exits with `invalid number for <flag>`.
 
 The batch variables are read once, on the first upload or batch request. CLI-Flags folgen, sobald
 `serve.rs` frei ist — `--files-dir`, `--max-file-size` and `--batch-concurrency` will replace them.
+
+### Switching the new defaults back
+
+Several CUDA and CPU behaviours are on by default. None of them is proven on every GPU yet, and each one has a one-line switch
+back to the previous behaviour (set it in the environment of `serve`, `chat`, `bench` or `ppl`):
+
+| To turn off | Set |
+| --- | --- |
+| CUDA graphs of decode steps | `FLLM_CUDA_GRAPH=0` |
+| All fused decode kernels (or a single one: `FLLM_FUSE_ADD_NORM`, `FLLM_FUSE_NORM_QUANT`, `FLLM_FUSE_ROPE_KV`, `FLLM_FUSE_GLU_Q8`, `FLLM_FUSE_HEAD_COPY`) | `FLLM_FUSE=0` |
+| Prompt-pass host work (step cache, parallel embeddings) | `FLLM_PREFILL_STEP_CACHE=0 FLLM_PREFILL_PAR_EMBED=0` |
+| Prompt-pass fusions | `FLLM_FUSE_PREFILL_ADD_NORM=0 FLLM_FUSE_PREFILL_NORM_F16=0 FLLM_FUSE_PREFILL_ATTN_F16=0` |
+| Marlin prompt launch layout (`fllm` is opt-in; the default is vLLM's split) | `FLLM_MARLIN_PREFILL_CFG=vllm` |
+| Marlin decode thread configuration (a tuning aid, unset keeps vLLM's choice) | leave `FLLM_MARLIN_CFG` unset |
+| NVFP4 per-tensor activation scale | `FLLM_NVFP4_ACT_SCALE=off` |
+| NVFP4 tile table (`auto` and the tuner are opt-in) | `FLLM_NVFP4_TILE=legacy` (and `FLLM_NVFP4_TUNE=0`) |
+| The `avx512` CPU kernels (a build-time choice, default feature of `fllm-engine`) | build with `--no-default-features`; at run time `FLLM_CPU_ISA=avx512bw` (or lower) caps the tier |
+
+To get exactly the behaviour from before these changes in one go:
+
+```sh
+FLLM_CUDA_GRAPH=0 FLLM_FUSE=0 FLLM_PREFILL_STEP_CACHE=0 FLLM_PREFILL_PAR_EMBED=0 \
+FLLM_FUSE_PREFILL_ADD_NORM=0 FLLM_FUSE_PREFILL_NORM_F16=0 FLLM_FUSE_PREFILL_ATTN_F16=0 \
+FLLM_NVFP4_ACT_SCALE=off FLLM_NVFP4_TILE=legacy fllm-rs serve ...
+```
+
+`scripts/colab/ab_matrix.py` runs these combinations against each other on one GPU (variant V0 is the line above, V8 the defaults).
 
 Interaction rules:
 

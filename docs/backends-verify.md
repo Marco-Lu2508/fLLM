@@ -281,7 +281,7 @@ Die Regeln gelten je Zelle (Hardware × Format bzw. Operation) in [backends.md](
 
 | Stufe | Bedingung | Beleg im Ergebnis |
 | --- | --- | --- |
-| **L1** | `selftest-gpu` (bzw. `selftest-cpu`, die Hardwaretests des Pakets) meldet für dieses Format bzw. diese Operationsgruppe `ok` auf der echten Hardware — im exakten Lauf; wo es einen schnellen Lauf mit eigener Toleranz gibt, auch dort. `SKIPPED` und `failed` zählen nicht. | `selftest*.json`: `failed = 0` für die Gruppe; `fllm-rs selftest-gpu --list` nennt die Gruppen (`delta linear embedding norm rope activation kv attention sampling host moe`), `--only`/`--quants` schränken ein |
+| **L1** | `selftest-gpu` (bzw. `selftest-cpu`, die Hardwaretests des Pakets) meldet für dieses Format bzw. diese Operationsgruppe `ok` auf der echten Hardware — im exakten Lauf; wo es einen schnellen Lauf mit eigener Toleranz gibt, auch dort. `SKIPPED` und `failed` zählen nicht. | `selftest*.json`: `failed = 0` für die Gruppe; `fllm-rs selftest-gpu --list` nennt die Gruppen (`delta linear embedding norm rope activation kv attention sampling host moe fuse`), `--only`/`--quants` schränken ein |
 | **L2** | zusätzlich: Greedy-Text mit einem Modell, das die Zelle benutzt, ist im exakten Modus identisch mit der CPU. Weicht nur der schnelle Modus ab, gilt L2 für den exakten Modus, mit Vermerk „schnell: abweichend ab Zeichen N". | `report.json`: `text_vs_cpu` des Falls `exact` = `same`; Server-Log belegt das native Backend |
 | **L3** | zusätzlich: `fllm-rs bench` auf der Hardware, mit Vergleichslauf einer Fremdimplementierung auf derselben Hardware, Messwerte und Versionen dokumentiert | `bench-*.json` beider Läufe, `fllm-rs bench-report` |
 

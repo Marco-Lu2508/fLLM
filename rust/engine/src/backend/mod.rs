@@ -26,6 +26,16 @@ pub mod cuda;
 #[cfg(feature = "rust-gpu")]
 pub mod wgpu_backend;
 
+/// `std::env::var_os(name).is_some()`, looked up once per call site: the per-layer paths ask for several switches per layer and step, and every lookup
+/// takes the environment lock. (The value is fixed at the first use; the switches are meant for process start.)
+macro_rules! env_flag_once {
+    ($name:literal) => {{
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os($name).is_some())
+    }};
+}
+pub(crate) use env_flag_once;
+
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
@@ -33,6 +43,36 @@ use std::sync::{Arc, Mutex};
 
 /// Global registry of operations that fell back to CPU, to warn only once per operation.
 static FALLBACK_WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+thread_local! {
+    /// `(weight_scale_2, input_scale)` of the NVFP4 weight that is about to be uploaded (see `set_next_nvfp4_scales`).
+    static NEXT_NVFP4_SCALES: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((1.0, 0.0)) };
+}
+
+/// The checkpoint's static activation scale (`<name>.input_scale`, ModelOpt) of the NVFP4 weight a backend is asked to upload next on this
+/// thread; 0 = the checkpoint has none. Set by the caller of `Backend::upload_weight_scaled` right before the call and cleared after it, so that
+/// the trait does not grow a parameter only the CUDA backend reads.
+pub fn set_next_nvfp4_input_scale(input_scale: f32) {
+    NEXT_NVFP4_SCALES.with(|c| c.set((c.get().0, input_scale)));
+}
+
+/// Read by the CUDA backend inside `upload_weight_scaled`.
+#[cfg(feature = "cuda")]
+pub(crate) fn take_next_nvfp4_input_scale() -> f32 {
+    NEXT_NVFP4_SCALES.with(|c| c.get().1)
+}
+
+/// Remembers `weight_scale_2` and `input_scale` for the device layout of the weight that `upload_weight` converts next.
+#[cfg(feature = "cuda")]
+pub(crate) fn set_next_nvfp4_scales(weight_scale: f32, input_scale: f32) {
+    NEXT_NVFP4_SCALES.with(|c| c.set((weight_scale, input_scale)));
+}
+
+/// `(weight_scale_2, input_scale)` for the device layout, reset to `(1, 0)` (an unscaled upload) afterwards.
+#[cfg(feature = "cuda")]
+pub(crate) fn take_next_nvfp4_scales() -> (f32, f32) {
+    NEXT_NVFP4_SCALES.with(|c| c.replace((1.0, 0.0)))
+}
 
 /// Warn the user once when an operation or quant type is unsupported by the native backend
 /// and falls back to CPU execution.
@@ -776,6 +816,19 @@ impl AttentionParams {
         lengths: &[i64],
         layer_idx: usize,
     ) -> Result<(), BackendError> {
+        self.validate_blocks(kv, block_tables, lengths, layer_idx, true)
+    }
+
+    /// [`validate`](Self::validate), with the walk over every row's blocks (cost: rows x blocks per call) only when `check_blocks`. The blocks
+    /// of one forward pass are the same for all its layers, so a stream that knows it has checked them once may skip them.
+    pub fn validate_blocks(
+        &self,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        check_blocks: bool,
+    ) -> Result<(), BackendError> {
         let shape = |msg: String| Err(BackendError::InvalidShape(msg));
         if self.num_kv_heads == 0
             || self.num_heads == 0
@@ -811,6 +864,9 @@ impl AttentionParams {
         }
         if self.chunk == Some(0) || self.window == Some(0) {
             return shape("zero attention chunk or window".into());
+        }
+        if !check_blocks {
+            return Ok(());
         }
         for (r, &n) in lengths.iter().enumerate() {
             if n <= 0 || (n as usize).div_ceil(self.block_size) > self.stride {
@@ -866,6 +922,11 @@ impl BackendCapabilities {
 
 /// Asynchronous stream/command queue for enqueuing operations on a device.
 pub trait Stream: Send {
+    /// A forward pass of the decoder begins / ends on this stream. Between the two the host arrays of its attention calls (block tables, lengths)
+    /// stay unchanged, so a backend may stage and check them once instead of once per layer. Backends without such caches ignore it.
+    fn begin_step(&mut self) {}
+    fn end_step(&mut self) {}
+
     /// Greedy sampling on the device: the index of the largest value of each of `rows` rows of `vocab` f32 logits (first index on a
     /// tie). Backends without it return `UnsupportedOperation` and the caller downloads the logits instead.
     fn argmax_rows(&mut self, _logits: &DeviceBuffer, _rows: usize, _vocab: usize) -> Result<Vec<i32>, BackendError> {
@@ -922,6 +983,62 @@ pub trait Stream: Send {
         _weight: &DeviceWeight,
         _bias: Option<&DeviceBuffer>,
         _scale: f32,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// Fused residual add and RMSNorm (vLLM's `fused_add_rms_norm`): `x += scale * branch`, then `out = rms_norm(x) * weight`, in one
+    /// pass over the rows of `x`. When `next` is the weight of the GEMM that reads `out` first, the activations are also left in the
+    /// format that GEMM wants (FP16 for Marlin, NVFP4 or int8 blocks), so it skips its own conversion. The result is bit-identical to
+    /// `residual_add` followed by `rms_norm` and the GEMM. Returns `false` (nothing done) when unsupported or switched off
+    /// (`FLLM_FUSE_ADD_NORM=0`).
+    #[allow(clippy::too_many_arguments)]
+    fn add_rms_norm(
+        &mut self,
+        _x: &mut DeviceBuffer,
+        _branch: &DeviceBuffer,
+        _scale: f32,
+        _weight: &DeviceBuffer,
+        _eps: f32,
+        _out: &mut DeviceBuffer,
+        _next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// `quantized_linear_add` and `add_rms_norm` in two kernels for weights whose GEMM leaves a half-precision result (4-bit Marlin): the
+    /// GEMM's result, the residual update, the norm and the conversion for `next` are one kernel. `norm` must be as wide as the weight has
+    /// rows. Returns `false` (nothing done) when unsupported or switched off.
+    #[allow(clippy::too_many_arguments)]
+    fn quantized_linear_add_norm(
+        &mut self,
+        _residual: &mut DeviceBuffer,
+        _x: &DeviceBuffer,
+        _weight: &DeviceWeight,
+        _bias: Option<&DeviceBuffer>,
+        _scale: f32,
+        _norm: &DeviceBuffer,
+        _eps: f32,
+        _out: &mut DeviceBuffer,
+        _next: Option<&DeviceWeight>,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// Rotary embedding of `q` (in place) and the cache write of the rotated `k` and of `v`, in one kernel (vLLM runs `rotary_embedding` and
+    /// `reshape_and_cache`, FlashInfer `apply_rope_pos_ids` and an append). FP32 inputs, f16 cache only; bit-identical to `rope`
+    /// followed by `kv_cache_write`. Returns `false` (nothing done) when unsupported or switched off (`FLLM_FUSE_ROPE_KV=0`).
+    #[allow(clippy::too_many_arguments)]
+    fn rope_kv_write(
+        &mut self,
+        _q: &mut DeviceBuffer,
+        _k: &DeviceBuffer,
+        _v: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _layer_idx: usize,
+        _positions: &[usize],
+        _slots: &[usize],
+        _params: &RopeParams,
     ) -> Result<bool, BackendError> {
         Ok(false)
     }

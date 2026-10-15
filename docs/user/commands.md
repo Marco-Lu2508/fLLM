@@ -191,9 +191,12 @@ limit.
 
 ```text
 fllm-rs devices            # compiled backends, detected devices, CPU ISA
-fllm-rs selftest-cpu [--tier TIER]
-  # every supported tier (or only TIER) vs scalar references; non-zero exit on excess error.
-  # TIER: scalar, avx2, avx-vnni, avx512bw, avx512-vnni, neon, neon-dotprod, neon-i8mm
+fllm-rs selftest-cpu [--tier TIER | --tiers all|TIER,TIER] [--full] [--gguf FILE [--tensors N]]
+  # the tiers up to the FLLM_CPU_ISA cap (or only TIER) vs scalar references; non-zero exit on excess error.
+  # --tiers all: every supported tier, cap ignored, plus ragged shapes and a saturation stress for every format;
+  # --gguf: real tensors of a model with outlier activations.
+  # TIER: scalar, avx2, avx-vnni, avx512bw, avx512-vnni, avx512-bf16, amx (the last two need a build with the
+  #       avx512 feature), neon, neon-dotprod, neon-i8mm, neon-sve
 fllm-rs selftest-gpu [--device vulkan]   # every GPU op vs CPU reference (see gpu-backends.md §7)
 fllm-rs completions [bash|zsh|fish|powershell]   # shell completions (default bash)
 ```

@@ -51,6 +51,19 @@ int fllm_cuda_rope(FllmStream *st, float *q, float *k, const int32_t *positions,
                    const float *sn, int heads, int kv_heads, int dim, int half_, int neox);
 int fllm_cuda_kv_write(FllmStream *st, const float *src, uint16_t *pool_layer, const int32_t *slots, int rows, int kv,
                        int kind, int group, int scale_base_words);
+// Fused decode kernels (fused.cu). They return 3 without launching anything when the fusion is off or does not apply to the call, 0 after
+// the launch, anything else is an error. quant: what the GEMM that follows reads (0 nothing, 1 Marlin FP16, 2 NVFP4, 3 int8 for a
+// Q4_K / Q5_K / Q6_K weight of type `kind`).
+int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float scale, const float *w, float *out, int rows, int cols,
+                           float eps, int quant, int kind, const void *next_w, int next_rows);
+int fllm_cuda_linear_q4z_add_norm(FllmStream *st, const void *w, int group, const float *act, float *res, const float *bias, int rows,
+                                  int cols, int batch, const int *perm, float scale, const float *nw, float *out, float eps, int quant,
+                                  int kind);
+int fllm_cuda_rope_kv_f32(FllmStream *st, float *q, const float *k, const float *v, uint16_t *pool_k_layer, uint16_t *pool_v_layer,
+                          const int32_t *positions, const int32_t *slots, int rows, const float *cs, const float *sn, int heads,
+                          int kv_heads, int dk, int dv, int half_, int neox);
+// which: 0 add + norm, 1 norm + quantization, 2 rotary + cache write, 3 gated activation + int8 quantization; on 1 / 0 forces, -1 = environment
+int fllm_cuda_set_fuse(int which, int on);
 int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_layer, const uint16_t *vpool_layer,
                         float *out, const int64_t *tables_host, size_t tables_len, const int64_t *lengths_host,
                         int rows, const float *sinks, const float *alibi, int heads, int kv_heads, int dk, int dv,

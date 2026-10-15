@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "common.cuh"
@@ -21,10 +23,32 @@ thread_local bool fllm_fp4_acc = false;
 thread_local float fllm_fp4_acc_scale = 0.f;
 thread_local bool fllm_fp4_f16out = false;
 thread_local bool fllm_glu_half = false;
+// FLLM_FUSE_NVFP4_ATTN_OUT / FLLM_FUSE_NVFP4_NORM (see fllm_cuda_internal.h): off unless set to something other than 0
+thread_local FllmPendingAttn fllm_pending_attn;
+thread_local const void *fllm_x_half = nullptr;
+static bool env_switch(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+bool fllm_fuse_nvfp4_attn_out() {
+    static const bool on = env_switch("FLLM_FUSE_NVFP4_ATTN_OUT");
+    return on;
+}
+bool fllm_fuse_nvfp4_norm() {
+    static const bool on = env_switch("FLLM_FUSE_NVFP4_NORM");
+    return on;
+}
 // state of the Marlin 4-bit path (same rule: the header declares these with C++ linkage, so they must not be defined inside extern "C")
 thread_local bool fllm_q4z_f16out = false;
+thread_local bool fllm_q4z_skip_result = false;
 thread_local bool fllm_q4z_acc = false;
 thread_local float fllm_q4z_acc_scale = 0.f;
+thread_local bool fllm_q4z_defer_acc = false;
+thread_local bool fllm_q4z_deferred = false;
+thread_local const void *fllm_q4z_y16 = nullptr;
+// prompt attention: when fllm_attn_x16 is set the FlashInfer path also writes its result as FP16 there and reports it in fllm_attn_x16_written
+thread_local void *fllm_attn_x16 = nullptr;
+thread_local bool fllm_attn_x16_written = false;
 
 int fllm_set_error(const char *fmt, ...) {
     va_list ap;
@@ -82,9 +106,42 @@ int fllm_smem_limit() {
     return cache[dev];
 }
 
+// Prefill switches (see FllmOpt): the environment gives the start value, fllm_cuda_set_opt overrides it (selftest-gpu compares variants).
+static std::atomic<int> g_opt[FLLM_OPT_COUNT];
+static std::atomic<bool> g_opt_init{false};
+static void opt_init() {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lock(mu);
+    if (g_opt_init.load()) return;
+    auto flag = [](const char *name) {
+        const char *v = getenv(name);
+        return v == nullptr || (strcmp(v, "0") != 0 && strcmp(v, "off") != 0 && strcmp(v, "false") != 0);
+    };
+    g_opt[FLLM_OPT_STEP_CACHE] = flag("FLLM_PREFILL_STEP_CACHE");
+    g_opt[FLLM_OPT_FUSE_ADD_NORM] = flag("FLLM_FUSE_PREFILL_ADD_NORM");
+    g_opt[FLLM_OPT_FUSE_NORM_F16] = flag("FLLM_FUSE_PREFILL_NORM_F16");
+    g_opt[FLLM_OPT_FUSE_ATTN_F16] = flag("FLLM_FUSE_PREFILL_ATTN_F16");
+    const char *cfg = getenv("FLLM_MARLIN_PREFILL_CFG");
+    g_opt[FLLM_OPT_MARLIN_CFG] = cfg != nullptr && strcmp(cfg, "fllm") == 0;
+    g_opt_init.store(true);
+}
+int fllm_opt(int id) {
+    if (id < 0 || id >= FLLM_OPT_COUNT) return 0;
+    if (!g_opt_init.load(std::memory_order_acquire)) opt_init();
+    return g_opt[id].load(std::memory_order_relaxed);
+}
+
 extern "C" {
 
 const char *fllm_cuda_last_error(void) { return g_error; }
+
+int fllm_cuda_get_opt(int id) { return fllm_opt(id); }
+int fllm_cuda_set_opt(int id, int value) {
+    if (id < 0 || id >= FLLM_OPT_COUNT) return fllm_set_error("unknown prefill switch %d", id);
+    if (!g_opt_init.load()) opt_init();
+    g_opt[id] = value;
+    return 0;
+}
 
 int fllm_cuda_device_count(void) {
     int n = 0;
@@ -128,11 +185,16 @@ int fllm_cuda_free(void *ptr) { CHECK(cudaFree(ptr), "cudaFree"); return 0; }
 int fllm_cuda_h2d_sync(int dev, void *dst, const void *src, size_t bytes) {
     CHECK(cudaSetDevice(dev), "cudaSetDevice");
     CHECK(cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice), "cudaMemcpy");
+    // A synchronous copy from pageable memory may return once the data is staged, with the DMA to the device still queued in the legacy default
+    // stream, and the compute streams are non-blocking, so nothing orders their kernels after it: wait for the legacy stream so that a weight (or its
+    // NVFP4 trailer, the last bytes of the buffer) is complete when the first GEMM reads it.
+    CHECK(cudaStreamSynchronize(0), "cudaStreamSynchronize(legacy)");
     return 0;
 }
 int fllm_cuda_memset(int dev, void *ptr, int value, size_t bytes) {
     CHECK(cudaSetDevice(dev), "cudaSetDevice");
     CHECK(cudaMemset(ptr, value, bytes), "cudaMemset");
+    CHECK(cudaStreamSynchronize(0), "cudaStreamSynchronize(legacy)");  // as above: the compute streams are not ordered after the legacy stream
     return 0;
 }
 
@@ -188,6 +250,14 @@ struct FllmStream {
     int glu_mode = 0;
     bool glu_pending = false;
     bool glu_half = false;  // the pending glu reads FP16 gate and up (cast to float pointers): only an NVFP4 CUTLASS GEMM folds it in
+    // a prompt RMSNorm that has not run yet: the NVFP4 CUTLASS GEMM that reads its result runs it fused with the activation quantization (FLLM_FUSE_NVFP4_NORM)
+    struct {
+        bool pending = false;
+        const float *x = nullptr, *w = nullptr;
+        float *out = nullptr;
+        int rows = 0, cols = 0;
+        float eps = 0.f;
+    } norm;
     // Marlin (Q4Z weights): FP16 activations and result, split-K partials and the lock workspace (zero between calls)
     void *q4z_io = nullptr, *q4z_ctmp = nullptr, *q4z_ws = nullptr;
     size_t q4z_io_bytes = 0, q4z_ctmp_bytes = 0, q4z_ws_bytes = 0;
@@ -204,9 +274,51 @@ struct FllmStream {
     int q4z_batch = 0, q4z_cols = 0;
     const int *q4z_perm = nullptr;
     bool q4z_ready = false;
+    // Host data of one forward pass (fllm_cuda_step_begin): block tables and lengths are staged once and the layout of the prompt rows is
+    // computed once, instead of once per layer. A slot is valid while the staging ring has not been wrapped or reallocated (arena_gen).
+    struct StepSlot {
+        const void *host = nullptr;
+        size_t bytes = 0;
+        unsigned gen = 0;
+        void *dev = nullptr;
+    };
+    struct Step {
+        bool open = false;
+        StepSlot tables, lengths, compact;
+        const int64_t *run_tables = nullptr, *run_lengths = nullptr;
+        int run_rows = 0, run_stride = 0;
+        std::vector<std::pair<int, int>> runs;  // rows [first, end) that share one block table and grow by one position per row
+        std::vector<int64_t> compact_tables;    // the block table of the first row of every run, back to back
+    } step;
+    unsigned arena_gen = 1;
+    // The output projection of a Marlin GEMM leaves `x += scale * (y16 + bias)` pending when the RMS norm that follows can do it in its
+    // own pass (FLLM_FUSE_PREFILL_ADD_NORM); anything else that comes first flushes it (flush_add).
+    struct PendingAdd {
+        bool on = false;
+        const void *y16 = nullptr;
+        const float *bias = nullptr;
+        float *x = nullptr;
+        int width = 0, batch = 0, in_cols = 0;
+        float scale = 0.f;
+    } add;
 };
 
+static int flush_add(FllmStream *st) {
+    if (!st->add.on) return 0;
+    st->add.on = false;
+    return fllm_q4z_acc_launch(st->s, st->add.y16, st->add.bias, st->add.x, st->add.width, st->add.batch, st->add.scale);
+}
 static int flush_glu(FllmStream *st) {
+    if (int e = flush_add(st)) return e;
+    if (st->norm.pending) {  // a deferred RMSNorm (fllm_cuda_rms_norm): nobody fused it, run it now
+        st->norm.pending = false;
+        if (int e = fllm_rms_norm_launch(st->s, st->norm.x, st->norm.w, st->norm.out, st->norm.rows, st->norm.cols, st->norm.eps)) return e;
+    }
+    if (fllm_pending_attn.o16) {  // FP16 attention output nobody quantized directly
+        const FllmPendingAttn p = fllm_pending_attn;
+        fllm_pending_attn = FllmPendingAttn();
+        if (int e = fllm_flashinfer_expand_half(st->s, p.o16, p.out, p.count)) return e;
+    }
     if (!st->glu_pending) return 0;
     st->glu_pending = false;
     if (st->glu_half) return fllm_glu_launch_f16(st->s, st->glu_gate, st->glu_up, st->glu_out, st->glu_count, st->glu_mode);
@@ -250,6 +362,17 @@ void fllm_cuda_stream_destroy(FllmStream *st) {
     cudaStreamDestroy(st->s);
     delete st;
 }
+// A forward pass of the decoder: the host arrays that its attention layers receive (block tables, lengths) do not change until fllm_cuda_step_end,
+// so they are staged and analysed once instead of once per layer (FLLM_PREFILL_STEP_CACHE).
+int fllm_cuda_step_begin(FllmStream *st) {
+    st->step = FllmStream::Step{};
+    st->step.open = true;
+    return 0;
+}
+int fllm_cuda_step_end(FllmStream *st) {
+    st->step = FllmStream::Step{};
+    return 0;
+}
 int fllm_cuda_stream_sync(FllmStream *st) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
     if (int e = flush_glu(st)) return e;
@@ -287,10 +410,12 @@ static int stage(FllmStream *st, int kind, const void *host, size_t bytes, void 
         st->arena = nullptr;
         CHECK(cudaMalloc(&st->arena, st->cap), "cudaMalloc(arena)");
         st->off = 0;
+        st->arena_gen++;
         for (auto &e : st->staged) e.dev = nullptr;
     }
     if (st->off + need > st->cap) {
         st->off = 0;
+        st->arena_gen++;
         for (auto &e : st->staged) e.dev = nullptr;
     }
     for (auto &e : st->staged)
@@ -306,6 +431,43 @@ static int stage(FllmStream *st, int kind, const void *host, size_t bytes, void 
     e.data.assign(static_cast<const unsigned char *>(host), static_cast<const unsigned char *>(host) + bytes);
     e.dev = *dev;
     return 0;
+}
+
+// `stage` for host arrays that stay unchanged during one forward pass (the block tables and lengths its attention layers receive): the
+// first layer stages them, the others take the device copy without comparing the (rows x stride) table with the staged one again.
+static bool step_cached(const FllmStream *st) { return st->step.open && !st->capture && fllm_opt(FLLM_OPT_STEP_CACHE) != 0; }
+static int stage_step(FllmStream *st, FllmStream::StepSlot &slot, int kind, const void *host, size_t bytes, void **dev) {
+    if (step_cached(st)) {
+        if (slot.dev && slot.host == host && slot.bytes == bytes && slot.gen == st->arena_gen) {
+            *dev = slot.dev;
+            return 0;
+        }
+        if (int e = stage(st, kind, host, bytes, dev)) return e;
+        slot = FllmStream::StepSlot{host, bytes, st->arena_gen, *dev};
+        return 0;
+    }
+    return stage(st, kind, host, bytes, dev);
+}
+// Rows [first, end) of a prompt that belong to one sequence: same block table, one more position per row. Computed once per forward pass.
+static void step_runs(FllmStream *st, const int64_t *tables, const int64_t *lengths, int rows, int stride) {
+    auto &s = st->step;
+    if (s.run_tables == tables && s.run_lengths == lengths && s.run_rows == rows && s.run_stride == stride) return;
+    s.runs.clear();
+    s.compact_tables.clear();
+    for (int r0 = 0; r0 < rows;) {
+        int r1 = r0 + 1;
+        while (r1 < rows && lengths[r1] == lengths[r1 - 1] + 1 &&
+               memcmp(tables + (size_t)r1 * stride, tables + (size_t)r0 * stride, (size_t)stride * sizeof(int64_t)) == 0)
+            r1++;
+        s.runs.emplace_back(r0, r1);
+        s.compact_tables.insert(s.compact_tables.end(), tables + (size_t)r0 * stride, tables + (size_t)(r0 + 1) * stride);
+        r0 = r1;
+    }
+    s.run_tables = tables;
+    s.run_lengths = lengths;
+    s.run_rows = rows;
+    s.run_stride = stride;
+    s.compact = FllmStream::StepSlot{};
 }
 #define PREP(st) \
     do { \
@@ -363,11 +525,29 @@ static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x,
     }
 }
 
+// A pending gated activation feeding a K-quant GEMV: the int8 quantization of its input computes the activation itself (FLLM_FUSE_GLU_Q8)
+static bool glu_q8_fusable(FllmStream *st, int kind, const void *w, const float *x, const float *y, int cols, int batch) {
+#if defined(__HIPCC__)
+    (void)st; (void)kind; (void)w; (void)x; (void)y; (void)cols; (void)batch;
+    return false;
+#else
+    if (!st->glu_pending || st->glu_half || x != st->glu_out || (const void *)y == (const void *)x || (size_t)batch * cols != st->glu_count)
+        return false;
+    if (!fllm_fuse_enabled(FLLM_FUSE_GLU_Q8)) return false;
+    if ((reinterpret_cast<uintptr_t>(st->glu_gate) & 15) != 0 || (reinterpret_cast<uintptr_t>(st->glu_up) & 15) != 0 ||
+        (reinterpret_cast<uintptr_t>(w) & 15) != 0)
+        return false;
+    return fllm_mmvq_prep_ok(kind, cols, batch);
+#endif
+}
+
 int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows,
                      int cols, int batch) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = flush_add(st)) return e;
+    st->q4z_ready = false;
     st->fp4_ready = false;
-    const bool fuse = glu_fusable(st, kind, w, x, y, cols, batch);
+    const bool fuse = glu_fusable(st, kind, w, x, y, cols, batch) || glu_q8_fusable(st, kind, w, x, y, cols, batch);
     if (!fuse) {
         if (int e = flush_glu(st)) return e;
     }
@@ -419,6 +599,7 @@ int fllm_cuda_q4z_accumulate(int on, float scale) {
 int fllm_cuda_linear_q4z(FllmStream *st, const void *w, int group, const float *x, float *y, const float *bias, int rows, int cols,
                          int batch, const int *perm) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = flush_add(st)) return e;
     // a pending gated activation feeding this GEMM is folded into the conversion of the activations to FP16
     static const bool no_glu_fuse = getenv("FLLM_CUDA_NO_GLU_FUSE") != nullptr;
     // (an FP16 gate and up are folded in only without an activation permutation: that conversion kernel reads FP32)
@@ -468,9 +649,18 @@ int fllm_cuda_linear_q4z(FllmStream *st, const void *w, int group, const float *
     static const bool no_reuse = getenv("FLLM_CUDA_NO_X16_REUSE") != nullptr;
     const bool reuse = !fuse && !no_reuse && st->q4z_ready && st->q4z_x == x && st->q4z_batch == batch && st->q4z_cols == cols && st->q4z_perm == perm;
     fllm_glu_half = fuse && st->glu_half;
+    // the residual add of an output projection waits for the RMS norm that follows (see PendingAdd)
+    const bool defer = fllm_q4z_acc && !fllm_q4z_f16out && batch >= FLLM_PREFILL_MIN_ROWS && !st->capture && !st->add.on && fllm_opt(FLLM_OPT_FUSE_ADD_NORM) != 0;
+    fllm_q4z_defer_acc = defer;
+    fllm_q4z_deferred = false;
     const int rc = fllm_q4z_launch(st->s, st->dev, st->sms, w, group, x, y, bias, rows, cols, batch, st->q4z_io, st->q4z_ctmp, st->q4z_ws,
                                    fuse ? st->glu_gate : nullptr, fuse ? st->glu_up : nullptr, st->glu_mode, reuse, perm);
     fllm_glu_half = false;
+    fllm_q4z_defer_acc = false;
+    if (rc == 0 && fllm_q4z_deferred) {
+        st->add = FllmStream::PendingAdd{true, fllm_q4z_y16, bias, y, rows, batch, cols, fllm_q4z_acc_scale};
+        fllm_q4z_deferred = false;
+    }
     if (fuse) st->glu_pending = false;
     st->q4z_x = x;
     st->q4z_batch = batch;
@@ -489,6 +679,7 @@ int fllm_cuda_fp8_marlin_supported(int rows, int cols) { return fllm_fp8_marlin_
 int fllm_cuda_fp8_marlin_repack(int dev, const void *words, void *out, int k, int n) { return fllm_fp8_marlin_repack(dev, words, out, k, n); }
 int fllm_cuda_linear_fp8_marlin(FllmStream *st, const void *w, const float *x, float *y, const float *bias, int rows, int cols, int batch) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = flush_add(st)) return e;
     static const bool no_glu_fuse = getenv("FLLM_CUDA_NO_GLU_FUSE") != nullptr;
     const bool fuse = !no_glu_fuse && st->glu_pending && !st->glu_half && x == st->glu_out && (const void *)y != (const void *)x &&
                       (size_t)batch * cols == st->glu_count && (reinterpret_cast<uintptr_t>(st->glu_gate) & 15) == 0 &&
@@ -550,6 +741,29 @@ int fllm_cuda_linear_fp8_marlin(FllmStream *st, const void *w, const float *x, f
 int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float *y, const float *bias, float gscale,
                            int rows, int cols, int batch) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = flush_add(st)) return e;
+    st->q4z_ready = false;
+    // a deferred RMSNorm / FP16 attention output whose result this GEMM reads: fused into the activation quantization when the CUTLASS GEMM takes the product
+    const int cutlass_mode = (fllm_fp4_acc ? 1 : 0) | (fllm_fp4_f16out ? 2 : 0);
+    const bool glu_first = st->glu_pending;
+    bool norm_fused = false;
+    const void *attn_half = nullptr;
+    if (!glu_first && st->norm.pending && st->norm.out == x && st->norm.rows == batch && st->norm.cols == cols && bias == nullptr) {
+        st->norm.pending = false;
+        norm_fused = fllm_nvfp4_norm_quant_try(st->s, st->norm.x, st->norm.w, st->norm.out, batch, cols, st->norm.eps, w, rows, cutlass_mode) != 0;
+        if (!norm_fused) {
+            if (int e = fllm_rms_norm_launch(st->s, st->norm.x, st->norm.w, st->norm.out, st->norm.rows, st->norm.cols, st->norm.eps)) return e;
+        } else {
+            st->fp4_ready = true;
+            st->fp4_x = x;
+            st->fp4_batch = batch;
+            st->fp4_cols = cols;
+        }
+    } else if (!glu_first && fllm_pending_attn.o16 && fllm_pending_attn.out == x && fllm_pending_attn.count == (size_t)batch * cols && bias == nullptr &&
+               fllm_nvfp4_cutlass_ok(x, y, bias, rows, cols, batch, cutlass_mode)) {
+        attn_half = fllm_pending_attn.o16;
+        fllm_pending_attn = FllmPendingAttn();
+    }
     bool fuse = glu_fusable(st, 40, w, x, y, cols, batch);
     // an FP16 glu is only folded into the CUTLASS GEMM (the built-in kernels read FP32): any other case computes it first
     if (fuse && st->glu_half && !fllm_nvfp4_cutlass_ok(st->glu_gate, y, bias, rows, cols, batch, fllm_fp4_acc ? 1 : 0)) fuse = false;
@@ -577,7 +791,9 @@ int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float 
         fllm_glu_half = st->glu_half;
         st->glu_pending = false;
     }
+    fllm_x_half = attn_half;
     const bool ok = fllm_nvfp4_try(st->s, w, fuse ? st->glu_gate : x, y, bias, gscale, rows, cols, batch, st->x16, st->x16_bytes, reuse ? 0 : 1) != 0;
+    fllm_x_half = nullptr;
     fllm_glu_up = nullptr;
     fllm_glu_half = false;
     if (!ok)
@@ -728,6 +944,139 @@ int fllm_cuda_rope_kv_f16(FllmStream *st, const uint16_t *q16, const uint16_t *k
     return fllm_rope_kv_f16_launch(st->s, q16, k16, v16, qb, kb, vb, q_out, pool_k_layer, pool_v_layer, static_cast<const int32_t *>(dp),
                                    static_cast<const int32_t *>(ds), cs, sn, rows, heads, kv_heads, dk, dv, half_, neox);
 }
+#if !defined(__HIPCC__)
+// ---- fused decode kernels (fused.cu): 3 = declined (nothing was launched, the caller runs the unfused kernels), 0 = done
+static const int FLLM_DECLINED = 3;
+
+// Where the quantized activations of the GEMM that follows go (q0, q1) and which format: the quant argument if it applies, else 0.
+static int fused_quant_target(FllmStream *st, int quant, int kind, int rows, int cols, void **q0, void **q1, const void *next_w = nullptr,
+                              int next_rows = 0, const float **gs = nullptr) {
+    if (quant == 0 || !fllm_fuse_enabled(FLLM_FUSE_NORM_QUANT)) return 0;
+    if (quant == 1) {
+        if (!st->q4z_io || (size_t)rows * cols * 2 > st->q4z_io_bytes) return 0;
+        *q0 = st->q4z_io;
+        return 1;
+    }
+    if (!st->x16) return 0;
+    if (quant == 2) {
+        if (!fllm_nvfp4_prep_ok(cols, rows)) return 0;
+        // the activation factor of the weight that reads the result (FLLM_NVFP4_ACT_SCALE): the fused kernel must quantize exactly like nvfp4_quantize_kernel
+        const float *gs_dev = nullptr;
+        if (gs == nullptr || !fllm_nvfp4_prep_scale(next_w, next_rows, cols, &gs_dev)) return 0;
+        *gs = gs_dev;
+        const size_t xq = ((size_t)rows * (cols >> 1) + 255) & ~size_t(255), xs = ((size_t)rows * (cols >> 4) + 255) & ~size_t(255);
+        if (xq + xs > st->x16_bytes) return 0;
+        *q0 = st->x16;
+        *q1 = static_cast<char *>(st->x16) + xq;
+        return 2;
+    }
+    if (quant == 3) {
+        if (!fllm_mmvq_prep_ok(kind, cols, rows)) return 0;
+        const size_t xq = ((size_t)rows * cols + 255) & ~size_t(255);
+        if (xq + (size_t)rows * (cols / 32) * sizeof(float2) > st->x16_bytes) return 0;
+        *q0 = st->x16;
+        *q1 = static_cast<char *>(st->x16) + xq;
+        return 3;
+    }
+    return 0;
+}
+// the next GEMM finds its activations prepared when it reads `out`
+static void fused_quant_done(FllmStream *st, int quant, const float *out, int rows, int cols) {
+    if (quant == 1) {
+        st->q4z_x = out;
+        st->q4z_batch = rows;
+        st->q4z_cols = cols;
+        st->q4z_perm = nullptr;
+        st->q4z_ready = true;
+    } else if (quant == 2) {
+        st->fp4_x = out;
+        st->fp4_batch = rows;
+        st->fp4_cols = cols;
+        st->fp4_ready = true;
+        fllm_nvfp4_scratch_filled();
+    } else if (quant == 3) {
+        st->x8_x = out;
+        st->x8_batch = rows;
+        st->x8_cols = cols;
+        st->x8_ready = true;
+    }
+}
+
+// x += scale * branch; out = rms_norm(x) * w; the activations of the next GEMM quantized (see fused.cu)
+int fllm_cuda_add_rms_norm(FllmStream *st, float *x, const float *branch, float scale, const float *w, float *out, int rows, int cols,
+                           float eps, int quant, int kind, const void *next_w, int next_rows) {
+    // decode batches only: from FLLM_PREFILL_MIN_ROWS rows on, the prompt path (rms_norm_prompt_kernel, FLLM_FUSE_PREFILL_*) owns this fusion
+    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || rows >= FLLM_PREFILL_MIN_ROWS || cols <= 0 || (cols & 3) != 0 || cols > 8192) return FLLM_DECLINED;
+    if ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(branch) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 != 0)
+        return FLLM_DECLINED;
+    PREP(st);
+    void *q0 = nullptr, *q1 = nullptr;
+    const float *gs = nullptr;
+    const int q = fused_quant_target(st, quant, kind, rows, cols, &q0, &q1, next_w, next_rows, &gs);
+    if (fllm_add_rms_norm_launch(st->s, x, branch, 1, nullptr, scale, w, out, rows, cols, eps, q, q0, q1, gs) != 0) return FLLM_DECLINED;
+    if (int e = fllm_check_launch("add_rms_norm")) return e;
+    fused_quant_done(st, q, out, rows, cols);
+    return 0;
+}
+
+// Marlin 4-bit output projection and residual update, norm and activation conversion of the next GEMM in two kernels: the GEMM leaves
+// its FP16 result in the io buffer, the norm kernel adds scale * (result + bias) to `res`, normalizes and converts. rows = output width
+// (= the width of the norm), cols = input width.
+int fllm_cuda_linear_q4z_add_norm(FllmStream *st, const void *w, int group, const float *act, float *res, const float *bias, int rows,
+                                  int cols, int batch, const int *perm, float scale, const float *nw, float *out, float eps, int quant,
+                                  int kind) {
+    // decode batches only (see fllm_cuda_add_rms_norm): prompt batches leave the residual add pending for the prompt RMS norm (PendingAdd)
+    if (!fllm_fuse_enabled(FLLM_FUSE_ADD_NORM) || rows <= 0 || cols <= 0 || batch <= 0 || batch >= FLLM_PREFILL_MIN_ROWS || (rows & 3) != 0 || rows > 8192)
+        return FLLM_DECLINED;
+    if ((reinterpret_cast<uintptr_t>(res) | reinterpret_cast<uintptr_t>(nw) | reinterpret_cast<uintptr_t>(out) | reinterpret_cast<uintptr_t>(bias)) % 16 != 0)
+        return FLLM_DECLINED;
+    fllm_q4z_skip_result = true;
+    const int rc = fllm_cuda_linear_q4z(st, w, group, act, res, nullptr, rows, cols, batch, perm);
+    fllm_q4z_skip_result = false;
+    if (rc != 0) return rc;
+    // the FP16 result sits behind the converted activations of the GEMM; the converted activations of the next GEMM (batch x rows halves
+    // from the start of the buffer) must not reach it
+    const size_t y16_off = ((size_t)batch * cols * 2 + 255) & ~size_t(255);
+    const uint8_t *y16 = static_cast<const uint8_t *>(st->q4z_io) + y16_off;
+    void *q0 = nullptr, *q1 = nullptr;
+    int q = (size_t)batch * rows * 2 <= y16_off ? fused_quant_target(st, quant, kind, batch, rows, &q0, &q1) : 0;
+    if (q != 1) q = 0;  // only the Marlin conversion shares this buffer; the other formats would need their own scratch
+    if (fllm_add_rms_norm_launch(st->s, res, y16, 2, bias, scale, nw, out, batch, rows, eps, q, q0, q1) != 0)
+        return fllm_set_error("fused Marlin output projection and norm: unsupported shape after the GEMM ran");
+    if (int e = fllm_check_launch("q4z add_rms_norm")) return e;
+    fused_quant_done(st, q, out, batch, rows);
+    return 0;
+}
+
+// rotary embedding of q (in place) and the KV cache write of k and v in one kernel (f16 cache)
+int fllm_cuda_rope_kv_f32(FllmStream *st, float *q, const float *k, const float *v, uint16_t *pool_k_layer, uint16_t *pool_v_layer,
+                          const int32_t *positions, const int32_t *slots, int rows, const float *cs, const float *sn, int heads,
+                          int kv_heads, int dk, int dv, int half_, int neox) {
+    if (!fllm_fuse_enabled(FLLM_FUSE_ROPE_KV)) return FLLM_DECLINED;
+    PREP(st);
+    void *dp = nullptr, *ds = nullptr;
+    if (int e = stage(st, 0, positions, (size_t)rows * sizeof(int32_t), &dp)) return e;
+    if (int e = stage(st, 1, slots, (size_t)rows * sizeof(int32_t), &ds)) return e;
+    return fllm_rope_kv_f32_launch(st->s, q, k, v, pool_k_layer, pool_v_layer, static_cast<const int32_t *>(dp), static_cast<const int32_t *>(ds),
+                                   cs, sn, rows, heads, kv_heads, dk, dv, half_, neox);
+}
+#else
+int fllm_cuda_add_rms_norm(FllmStream *, float *, const float *, float, const float *, float *, int, int, float, int, int, const void *, int) {
+    return 3;
+}
+int fllm_cuda_linear_q4z_add_norm(FllmStream *, const void *, int, const float *, float *, const float *, int, int, int, const int *, float,
+                                  const float *, float *, float, int, int) {
+    return 3;
+}
+int fllm_cuda_rope_kv_f32(FllmStream *, float *, const float *, const float *, uint16_t *, uint16_t *, const int32_t *, const int32_t *, int,
+                          const float *, const float *, int, int, int, int, int, int) {
+    return 3;
+}
+#endif
+int fllm_cuda_set_fuse(int which, int on) {
+    fllm_fuse_force(which, on);
+    return 0;
+}
 // The index of the largest logit of each row, copied to `host_out` (rows ints): greedy sampling without moving the logits.
 int fllm_cuda_argmax(FllmStream *st, const float *logits, int rows, int vocab, int *host_out) {
     PREP(st);
@@ -745,7 +1094,45 @@ int fllm_cuda_argmax(FllmStream *st, const float *logits, int rows, int vocab, i
     return 0;
 }
 int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, float eps) {
+    // Prompt batches: the residual add that an output projection left pending (FLLM_FUSE_PREFILL_ADD_NORM) and the FP16 copy of the result
+    // that the next Marlin GEMM would convert itself (FLLM_FUSE_PREFILL_NORM_F16) are done in the norm pass. Both are bit-identical to the
+    // separate kernels (see rms_norm_prompt_kernel).
+    if (rows >= FLLM_PREFILL_MIN_ROWS && !st->capture && cudaSetDevice(st->dev) == cudaSuccess && fllm_cc() >= 75 &&
+        fllm_rms_norm_prompt_ok(x, w, out, cols)) {
+        const FllmStream::PendingAdd pend = st->add;
+        const bool add = pend.on && pend.x == x && pend.batch == rows && pend.width == cols && fllm_opt(FLLM_OPT_FUSE_ADD_NORM) != 0;
+        const size_t bytes16 = (size_t)rows * cols * 2;
+        // the FP16 rows go to the start of the Marlin activation scratch, which must not overlap the pending FP16 result
+        bool f16 = fllm_opt(FLLM_OPT_FUSE_NORM_F16) != 0 && st->q4z_io != nullptr && bytes16 <= st->q4z_io_bytes;
+        if (f16 && add) f16 = bytes16 <= (size_t)(static_cast<const char *>(pend.y16) - static_cast<const char *>(st->q4z_io));
+        if (add || f16) {
+            if (add) st->add.on = false;
+            PREP(st);
+            if (int e = fllm_rms_norm_prompt_launch(st->s, add ? pend.y16 : nullptr, pend.bias, pend.scale, const_cast<float *>(x), w, out,
+                                                    f16 ? st->q4z_io : nullptr, rows, cols, eps))
+                return e;
+            if (f16) {
+                st->q4z_x = out;
+                st->q4z_batch = rows;
+                st->q4z_cols = cols;
+                st->q4z_perm = nullptr;
+                st->q4z_ready = true;
+            }
+            return 0;
+        }
+    }
     PREP(st);
+    // prompt-sized batches of NVFP4 models: wait for the GEMM that reads the result, which quantizes it in the same kernel (fllm_nvfp4_norm_quant_try)
+    if (fllm_fuse_nvfp4_norm() && rows > 64 && cols % 256 == 0 && cols <= 8192 && !st->capture) {
+        st->norm.pending = true;
+        st->norm.x = x;
+        st->norm.w = w;
+        st->norm.out = out;
+        st->norm.rows = rows;
+        st->norm.cols = cols;
+        st->norm.eps = eps;
+        return 0;
+    }
     return fllm_rms_norm_launch(st->s, x, w, out, rows, cols, eps);
 }
 int fllm_cuda_layer_norm(FllmStream *st, const float *x, const float *w, const float *b, float *out, int rows, int cols,
@@ -973,8 +1360,14 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
                         int vscale_base, float scale, float softcap, int window, int chunk) {
     PREP(st);
     void *dt = nullptr, *dl = nullptr;
-    if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
-    if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    const bool cached = step_cached(st);
+    // (inside a forward pass the tables are staged once, and only when an attention kernel needs the table of every row)
+    if (!cached) {
+        if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+        if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    } else {
+        if (int e = stage_step(st, st->step.lengths, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    }
     static const bool old_attention = getenv("FLLM_CUDA_OLD_ATTN") != nullptr;
     if (!old_attention && dk == dv && (kind == 1 || kind == 2)) {
         if (!st->ws) {
@@ -984,31 +1377,76 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
         static const bool no_flash = getenv("FLLM_CUDA_NO_FLASH") != nullptr;
         if (!st->capture && !no_flash && !alibi && softcap == 0.f && window == 0 && chunk == 0 && rows >= 16 && !fllm_exact_math()) {
             // rows of one sequence (same block table, lengths growing by one) go to the tensor-core kernel
-            int r0 = 0;
-            bool all = true;
-            while (r0 < rows) {
-                int r1 = r0 + 1;
-                while (r1 < rows && lengths_host[r1] == lengths_host[r1 - 1] + 1 &&
-                       memcmp(tables_host + (size_t)r1 * stride, tables_host + (size_t)r0 * stride,
-                              (size_t)stride * sizeof(int64_t)) == 0)
-                    r1++;
-                const int n = r1 - r0;
-                int rc = -1;
-                if (n >= 16)
-                    rc = fllm_attention3_try(st->s, q + (size_t)r0 * heads * dk, kpool_layer, vpool_layer,
-                                             out + (size_t)r0 * heads * dv,
-                                             static_cast<const int64_t *>(dt) + (size_t)r0 * stride,
-                                             static_cast<const int64_t *>(dl) + r0, sinks, n, heads, kv_heads, dk, dv,
-                                             stride, block_size, kind, scale, kscale_base, vscale_base,
-                                             (int)lengths_host[r1 - 1]);
-                if (rc < 0) {
-                    all = false;
-                    break;
+            if (cached) {
+                // the rows are grouped once per forward pass; a run needs only its first block table, so one table per run is staged
+                step_runs(st, tables_host, lengths_host, rows, stride);
+                const auto &runs = st->step.runs;
+                bool all = true;
+                for (const auto &run : runs)
+                    if (run.second - run.first < 16) all = false;
+                void *dc = nullptr;
+                if (all) {
+                    auto &compact = st->step.compact_tables;
+                    if (int e = stage_step(st, st->step.compact, 2, compact.data(), compact.size() * sizeof(int64_t), &dc)) return e;
                 }
-                if (rc > 0) return rc;
-                r0 = r1;
+                // the FP16 attention result is also left in the Marlin scratch when one run covers all rows and the output projection
+                // comes next (FLLM_FUSE_PREFILL_ATTN_F16)
+                const size_t out16 = (size_t)rows * heads * dv * 2;
+                const bool f16 = all && runs.size() == 1 && fllm_opt(FLLM_OPT_FUSE_ATTN_F16) != 0 && st->q4z_io != nullptr && out16 <= st->q4z_io_bytes;
+                for (size_t i = 0; all && i < runs.size(); i++) {
+                    const int r0 = runs[i].first, r1 = runs[i].second;
+                    fllm_attn_x16 = f16 ? st->q4z_io : nullptr;
+                    fllm_attn_x16_written = false;
+                    const int rc = fllm_attention3_try(st->s, q + (size_t)r0 * heads * dk, kpool_layer, vpool_layer,
+                                                       out + (size_t)r0 * heads * dv, static_cast<const int64_t *>(dc) + i * (size_t)stride,
+                                                       static_cast<const int64_t *>(dl) + r0, sinks, r1 - r0, heads, kv_heads, dk, dv,
+                                                       stride, block_size, kind, scale, kscale_base, vscale_base,
+                                                       (int)lengths_host[r1 - 1]);
+                    fllm_attn_x16 = nullptr;
+                    if (rc < 0) {
+                        all = false;
+                        break;
+                    }
+                    if (rc > 0) return rc;
+                    if (fllm_attn_x16_written) {
+                        st->q4z_x = out;
+                        st->q4z_batch = rows;
+                        st->q4z_cols = heads * dv;
+                        st->q4z_perm = nullptr;
+                        st->q4z_ready = true;
+                    }
+                }
+                if (all) return 0;
+            } else {
+                int r0 = 0;
+                bool all = true;
+                while (r0 < rows) {
+                    int r1 = r0 + 1;
+                    while (r1 < rows && lengths_host[r1] == lengths_host[r1 - 1] + 1 &&
+                           memcmp(tables_host + (size_t)r1 * stride, tables_host + (size_t)r0 * stride,
+                                  (size_t)stride * sizeof(int64_t)) == 0)
+                        r1++;
+                    const int n = r1 - r0;
+                    int rc = -1;
+                    if (n >= 16)
+                        rc = fllm_attention3_try(st->s, q + (size_t)r0 * heads * dk, kpool_layer, vpool_layer,
+                                                 out + (size_t)r0 * heads * dv,
+                                                 static_cast<const int64_t *>(dt) + (size_t)r0 * stride,
+                                                 static_cast<const int64_t *>(dl) + r0, sinks, n, heads, kv_heads, dk, dv,
+                                                 stride, block_size, kind, scale, kscale_base, vscale_base,
+                                                 (int)lengths_host[r1 - 1]);
+                    if (rc < 0) {
+                        all = false;
+                        break;
+                    }
+                    if (rc > 0) return rc;
+                    r0 = r1;
+                }
+                if (all) return 0;
             }
-            if (all) return 0;
+        }
+        if (cached) {
+            if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
         }
         int max_len = 1;
         for (int r = 0; r < rows; r++) max_len = lengths_host[r] > max_len ? (int)lengths_host[r] : max_len;
@@ -1023,6 +1461,9 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
                                            kv_heads, dk, dv, stride, block_size, kind, scale, softcap, window, chunk,
                                            st->ws, st->ws_bytes, kscale_base, vscale_base);
         if (rc >= 0) return rc;
+    }
+    if (cached && !dt) {
+        if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
     }
     return fllm_attention_launch(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
                                  static_cast<const int64_t *>(dl), sinks, alibi, rows, heads, kv_heads, dk, dv, stride,
@@ -1055,8 +1496,8 @@ int fllm_cuda_kvq_attention(FllmStream *st, const float *q, const uint16_t *kpoo
 #else
     PREP(st);
     void *dt = nullptr, *dl = nullptr;
-    if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
-    if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage_step(st, st->step.lengths, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
     if (!st->ws) {
         st->ws_bytes = 16u << 20;
         CHECK(cudaMalloc(reinterpret_cast<void **>(&st->ws), st->ws_bytes), "cudaMalloc(attention workspace)");

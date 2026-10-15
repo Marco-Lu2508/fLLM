@@ -14,6 +14,26 @@
 int fllm_set_error(const char *fmt, ...);
 int fllm_check_launch(const char *what);
 
+// Switches of the prefill host-work reductions and kernel fusions (docs/performance-notes.md). The environment gives the initial values
+// (FLLM_PREFILL_STEP_CACHE, FLLM_FUSE_PREFILL_ADD_NORM, FLLM_FUSE_PREFILL_NORM_F16, FLLM_FUSE_PREFILL_ATTN_F16, FLLM_MARLIN_PREFILL_CFG);
+// selftest-gpu flips them at run time (fllm_cuda_set_opt) to compare the variants on one device.
+enum FllmOpt {
+    FLLM_OPT_STEP_CACHE = 0,  // host data of one forward pass (block tables, run layout) is staged and checked once, not once per layer
+    FLLM_OPT_FUSE_ADD_NORM,   // the residual add of a Marlin GEMM is folded into the RMS norm that follows
+    FLLM_OPT_FUSE_NORM_F16,   // the RMS norm also writes the FP16 activations that the next Marlin GEMM needs
+    FLLM_OPT_FUSE_ATTN_F16,   // the prompt attention also writes the FP16 activations that the output projection needs
+    FLLM_OPT_MARLIN_CFG,      // 0: Marlin launch configuration as vLLM selects it, 1: fLLM variant (the M tail rides in the last tile)
+    FLLM_OPT_COUNT
+};
+int fllm_opt(int id);
+// the fusions apply from this many rows on (prompt batches); decode steps keep the unfused paths
+constexpr int FLLM_PREFILL_MIN_ROWS = 16;
+
+// RMS norm of prompt batches with the residual add of a pending Marlin result and/or the FP16 copy of the result folded in (elementwise.cu)
+bool fllm_rms_norm_prompt_ok(const float *x, const float *w, const float *out, int cols);
+int fllm_rms_norm_prompt_launch(cudaStream_t s, const void *y16, const float *bias, float scale, float *x, const float *w, float *out,
+                                void *out16, int rows, int cols, float eps);
+
 int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows,
                        int cols, int batch, void *x16, size_t x16_bytes);
 // true when FLLM_CUDA_EXACT is set: only the FP32 kernels may run (used by selftest-gpu)
@@ -69,6 +89,31 @@ int fllm_rope_kv_f16_launch(cudaStream_t s, const uint16_t *q16, const uint16_t 
                             const int32_t *slots, const float *cs, const float *sn, int rows, int heads, int kv_heads, int dk, int dv,
                             int half_, int neox);
 extern thread_local bool fllm_q4z_f16out;  // the next Marlin 4-bit GEMM leaves its FP16 result in y (no conversion, no bias)
+// the next Marlin 4-bit GEMM stops after the product: the FP16 result stays in the io buffer for a fused consumer (fllm_cuda_linear_q4z_add_norm)
+extern thread_local bool fllm_q4z_skip_result;
+
+// ---- fused decode kernels (fused.cu). Each fusion has a switch (FLLM_FUSE, FLLM_FUSE_<NAME>=0|1) and can be forced by the self test.
+enum { FLLM_FUSE_ADD_NORM = 0, FLLM_FUSE_NORM_QUANT = 1, FLLM_FUSE_ROPE_KV = 2, FLLM_FUSE_GLU_Q8 = 3, FLLM_FUSE_COUNT = 4 };
+bool fllm_fuse_enabled(int which);
+void fllm_fuse_force(int which, int on);
+#if !defined(__HIPCC__)
+// x += scale * branch (res_kind 1: FP32; 2: FP16 plus optional bias), out = rms_norm(x), and the activations of the next GEMM quantized
+// (quant 0 none, 1 Marlin FP16 in q0, 2 NVFP4 in q0 / q1, 3 int8 in q0 / q1). Returns 1 without launching when the shape is unsupported.
+int fllm_add_rms_norm_launch(cudaStream_t s, float *x, const void *branch, int res_kind, const float *rbias, float scale, const float *w,
+                             float *out, int rows, int cols, float eps, int quant, void *q0, void *q1, const float *gsp = nullptr);
+int fllm_rope_kv_f32_launch(cudaStream_t s, float *q, const float *k, const float *v, uint16_t *pool_k, uint16_t *pool_v,
+                            const int32_t *pos, const int32_t *slots, const float *cs, const float *sn, int rows, int heads,
+                            int kv_heads, int dk, int dv, int half_, int neox);
+void fllm_quantize_x8_glu_launch(cudaStream_t s, const float *gate, const float *up, int mode, int8_t *xq, float2 *xs, size_t groups);
+// may the NVFP4 GEMM of this batch read activations quantized elsewhere into its scratch? / they now are there (nvfp4.cu)
+bool fllm_nvfp4_prep_ok(int cols, int batch);
+// May the fused norm quantize for the NVFP4 GEMM of weight `w` (rows x cols)? *gs: device pointer of the weight's static activation factor
+// (nullptr = 1). False for FLLM_NVFP4_ACT_SCALE=dynamic (the factor needs the amax of the whole tensor) or without the weight.
+bool fllm_nvfp4_prep_scale(const void *w, int rows, int cols, const float **gs);
+void fllm_nvfp4_scratch_filled();
+#endif
+// would fllm_mmvq_try run this K-quant product (int8 activations) for this batch? (mmvq.cu; always false for HIP)
+bool fllm_mmvq_prep_ok(int kind, int cols, int batch);
 int fllm_residual_launch(cudaStream_t s, float *x, const float *res, size_t count, float scale);
 int fllm_split_q_gate_launch(cudaStream_t s, const float *qg, float *q, float *gate, int rows, int heads, int dk, int per_head);
 int fllm_sigmoid_mul_launch(cudaStream_t s, float *x, const float *g, size_t n);
@@ -174,11 +219,35 @@ int fllm_marlin_q4k_try(cudaStream_t s, const void *W, const float *X, float *Y,
 // set by fllm_cuda_q4z_accumulate: the next Marlin 4-bit GEMM adds scale * (result + bias) to y instead of overwriting it
 extern thread_local bool fllm_q4z_acc;
 extern thread_local float fllm_q4z_acc_scale;
+// prefill: with fllm_q4z_defer_acc set the accumulate mode does not launch its add kernel; fllm_q4z_deferred reports that and fllm_q4z_y16 where the FP16 result sits
+// (the caller adds it later, possibly inside the next RMS norm, see fllm_add_rms_norm_launch)
+extern thread_local bool fllm_q4z_defer_acc, fllm_q4z_deferred;
+extern thread_local const void *fllm_q4z_y16;
+int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, float *out, int rows, int batch, float scale);
+// prompt attention (flashinfer_prefill.cu): see fllm_attn_x16 in api.cu
+extern thread_local void *fllm_attn_x16;
+extern thread_local bool fllm_attn_x16_written;
 // set by fllm_cuda_nvfp4_accumulate: the next NVFP4 GEMM (CUTLASS path only, see fllm_nvfp4_cutlass_ok) adds fllm_fp4_acc_scale * result to y
 extern thread_local bool fllm_fp4_acc;
 extern thread_local float fllm_fp4_acc_scale;
 // set by fllm_cuda_nvfp4_f16out: the next NVFP4 GEMM (CUTLASS only) leaves FP16 results in y (batch x rows halves)
 extern thread_local bool fllm_fp4_f16out;
+// FLLM_FUSE_NVFP4_ATTN_OUT: the FP16 result of a FlashInfer prompt attention that has not been expanded to the FP32 buffer `out` yet. The next NVFP4
+// CUTLASS GEMM that reads `out` quantizes the halves directly (fllm_x_half); any other operation expands them first (flush_glu in api.cu).
+struct FllmPendingAttn {
+    const void *o16 = nullptr;
+    float *out = nullptr;
+    size_t count = 0;
+};
+extern thread_local FllmPendingAttn fllm_pending_attn;
+// set by fllm_cuda_linear_nvfp4 around the CUTLASS call: the activations are these FP16 values instead of the FP32 ones in x
+extern thread_local const void *fllm_x_half;
+bool fllm_fuse_nvfp4_attn_out();
+bool fllm_fuse_nvfp4_norm();
+int fllm_flashinfer_expand_half(cudaStream_t s, const void *o16, float *out, size_t count);
+// RMSNorm + activation quantization for the CUTLASS NVFP4 GEMM (nvfp4_cutlass.cu); mode as in fllm_nvfp4_cutlass_check
+int fllm_nvfp4_norm_quant_try(cudaStream_t s, const float *x, const float *w, float *out, int rows, int cols, float eps, const void *weight,
+                          int weight_rows, int mode);
 bool fllm_q4z_supported(int rows, int cols, int group);
 size_t fllm_q4z_io_bytes(int rows, int cols, int batch);
 size_t fllm_q4z_ctmp_bytes(int batch, int sms);

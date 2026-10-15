@@ -178,10 +178,37 @@ pub(crate) fn random_weights(kind: u32, rows: usize, cols: usize, rng: &mut Lcg)
     bytes
 }
 
+/// The input a kernel consumes: `x` itself, or for Q4ZP the gather `x'[c] = x[perm[c]]` into
+/// stored order (the permutation table follows the `rows` rows of `weights`).
+pub(crate) fn stored_order_input(
+    weights: &[u8],
+    kind: u32,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+) -> Vec<f32> {
+    if !matches!(kind, 0x8000_0014..=0x8000_0016) {
+        return x.to_vec();
+    }
+    let (block, width) = layout(kind);
+    let table = &weights[rows * (cols / block * width)..];
+    x.chunks_exact(cols)
+        .flat_map(|token| {
+            table
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|e| token[u32::from_le_bytes(*e) as usize])
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// f64 reference of a packed projection against the activation records the kernels consume
 /// (`cpu_quantized::prepare` output for every token). Returns outputs and error scales, both
 /// indexed `token * rows + row`. Q4_1/Q5_1 apply their offset through the fp16 record sum,
-/// exactly as the kernels do.
+/// exactly as the kernels do. Q4ZP rows are taken in stored order, so `packed` must hold the records
+/// of the gathered input (`stored_order_input`).
 pub(crate) fn reference_packed(
     weights: &[u8],
     kind: u32,
@@ -194,13 +221,6 @@ pub(crate) fn reference_packed(
     let nb = cols / 32;
     let batch = packed.len() / nb;
     let affine = matches!(kind, 3 | 7);
-    let is_q4zp = matches!(kind, 0x8000_0014..=0x8000_0016);
-    let perm = if is_q4zp {
-        let perm_bytes = &weights[rows * row_bytes..];
-        Some((0..cols).map(|c| u32::from_le_bytes(perm_bytes[c * 4..(c + 1) * 4].try_into().unwrap()) as usize).collect::<Vec<_>>())
-    } else {
-        None
-    };
     let dequant_kind = match kind {
         0x8000_0014 => 0x8000_0010,
         0x8000_0015 => 0x8000_0011,
@@ -228,15 +248,8 @@ pub(crate) fn reference_packed(
                 }).collect::<Vec<_>>();
                 return row;
             }
-            let mut row = crate::compute::dequantize(&weights[r * row_bytes..(r + 1) * row_bytes], dequant_kind, cols)
-                .expect("reference dequantization");
-            if let Some(p) = &perm {
-                let permuted = row.clone();
-                for c in 0..cols {
-                    row[p[c]] = permuted[c];
-                }
-            }
-            row
+            crate::compute::dequantize(&weights[r * row_bytes..(r + 1) * row_bytes], dequant_kind, cols)
+                .expect("reference dequantization")
         })
         .collect::<Vec<_>>();
     let mut want = vec![0.0; batch * rows];
@@ -449,6 +462,8 @@ struct Report {
     checks: usize,
     failed: usize,
     skipped: usize,
+    /// (tier name, checks, failed) in order of first use.
+    tiers: Vec<(&'static str, usize, usize)>,
 }
 impl Report {
     fn line(&mut self, tier: CpuTier, name: &str, result: Option<(f64, bool)>, millis: f64) {
@@ -463,6 +478,10 @@ impl Report {
             Some((error, ok)) => {
                 self.checks += 1;
                 self.failed += usize::from(!ok);
+                match self.tiers.iter_mut().find(|t| t.0 == tier.name()) {
+                    Some(t) => (t.1, t.2) = (t.1 + 1, t.2 + usize::from(!ok)),
+                    None => self.tiers.push((tier.name(), 1, usize::from(!ok))),
+                }
                 println!(
                     "[{:<12}] {name:<44} max err {error:9.2e}  {millis:8.3} ms  {}",
                     tier.name(),
@@ -550,7 +569,223 @@ fn delta_pass(
     outputs
 }
 
-fn check_tier(tier: CpuTier, report: &mut Report) {
+/// Allowed error of an integer-dot or float projection, relative to the sum of the absolute
+/// values of its terms. Eight-bit activations are taken from the kernel's own records, so only
+/// float summation order remains (measured: below 1e-6 on every tier); 1e-5 still catches a
+/// wrong scale, offset, sign or index and any lost 16-bit saturation or rounding step.
+pub(crate) const PROJECTION_TOLERANCE: f64 = 1e-5;
+
+/// Like [`compare`] with a caller-chosen tolerance.
+pub(crate) fn compare_with(
+    have: &[f32],
+    want: &[f64],
+    scale: &[f64],
+    tolerance: f64,
+) -> (f64, bool) {
+    assert_eq!(have.len(), want.len());
+    let mut worst = 0.0f64;
+    let mut ok = true;
+    for ((&have, &want), &scale) in have.iter().zip(want).zip(scale) {
+        let error = (f64::from(have) - want).abs();
+        ok &= error <= tolerance * scale + 1e-6;
+        worst = worst.max(error / scale.max(1e-30));
+    }
+    (worst, ok)
+}
+
+/// A packed projection on the CPU kernel of its format; `None` where this tier has none.
+fn project(weights: &[u8], kind: u32, x: &[f32], rows: usize, cols: usize) -> Option<Vec<f32>> {
+    if kind == 8 {
+        cpu_kernels::q8_linear(weights, x, rows, cols, None)
+    } else if fllm_gguf_probe::q4z_group(kind).is_some() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::cpu_q4z::linear(weights, kind, x, rows, cols, None)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            None
+        }
+    } else {
+        crate::cpu_quantized::linear(weights, kind, x, rows, cols, None)
+    }
+}
+
+/// One packed projection `(kind, rows, cols, batch)` through `linear` (or `q8_linear`) at `tier`
+/// against the f64 reference. With `direct` the 16-row VNNI GEMM and the AMX GEMM also run on it,
+/// each reported under its own name.
+fn projection_case(
+    tier: CpuTier,
+    report: &mut Report,
+    rng: &mut Lcg,
+    (kind, rows, cols, batch): (u32, usize, usize, usize),
+    weights: &[u8],
+    direct: bool,
+) {
+    let x = rng.vector(batch * cols, 3.0);
+    let name = format!(
+        "{} rows {rows} cols {cols} batch {batch}",
+        format_name(kind)
+    );
+    let reference = || {
+        if kind == 8 {
+            reference_q8(weights, rows, cols, &x)
+        } else {
+            let records = scalar_records(&stored_order_input(weights, kind, rows, cols, &x), cols, kind, tier);
+            reference_packed(weights, kind, rows, cols, &records)
+        }
+    };
+    let (have, millis) = timed(|| project(weights, kind, &x, rows, cols));
+    let result = have.map(|have| {
+        let (want, scale) = reference();
+        compare_with(&have, &want, &scale, PROJECTION_TOLERANCE)
+    });
+    report.line(tier, &name, result, millis);
+    #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+    if direct {
+        let projections = [crate::cpu_quantized::Projection {
+            weights,
+            rows,
+            bias: None,
+        }];
+        let (paths, millis) = timed(|| {
+            crate::cpu_avx512::direct_prompt_paths(&projections, &[kind], &x, cols, batch)
+        });
+        if !paths.is_empty() {
+            let (want, scale) = reference();
+            for (path, out) in paths {
+                report.line(
+                    tier,
+                    &format!("{path} {name}"),
+                    Some(compare_with(&out[0], &want, &scale, PROJECTION_TOLERANCE)),
+                    millis,
+                );
+            }
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", feature = "avx512")))]
+    let _ = direct;
+}
+
+/// Q4Z and Q4ZP formats (groups of 32, 64 and 128; the second three carry a permutation table).
+const Q4Z_KINDS: [u32; 6] = [
+    0x8000_0010,
+    0x8000_0011,
+    0x8000_0012,
+    0x8000_0014,
+    0x8000_0015,
+    0x8000_0016,
+];
+
+/// A Q4Z / Q4ZP projection against the dense matrix the loader dequantizes (`compute::dequantize`,
+/// permutation included) and the unquantized input: tests the meaning of the format (nibble order,
+/// zero point, direction of the permutation), which the kernel-level references share by
+/// construction. The 8-bit activations add their usual noise, hence the looser tolerance (observed 1.4e-3 at most).
+fn q4z_dense_case(tier: CpuTier, report: &mut Report, rng: &mut Lcg, kind: u32) {
+    let group = layout(kind).0;
+    let (rows, cols, batch) = (13, 5 * group, 3);
+    let weights = random_weights(kind, rows, cols, rng);
+    let x = rng.vector(batch * cols, 2.0);
+    let (have, millis) = timed(|| project(&weights, kind, &x, rows, cols));
+    let result = have.map(|have| {
+        let dense = crate::compute::dequantize(&weights, kind, rows * cols).expect("dequantize");
+        let mut want = vec![0.0f64; batch * rows];
+        let mut scale = vec![0.0f64; batch * rows];
+        for t in 0..batch {
+            for r in 0..rows {
+                for c in 0..cols {
+                    let term = f64::from(dense[r * cols + c]) * f64::from(x[t * cols + c]);
+                    want[t * rows + r] += term;
+                    scale[t * rows + r] += term.abs();
+                }
+            }
+        }
+        compare_with(&have, &want, &scale, 5e-3)
+    });
+    report.line(
+        tier,
+        &format!(
+            "{} rows {rows} cols {cols} batch {batch} vs dense f32 matrix (8-bit input noise)",
+            format_name(kind)
+        ),
+        result,
+        millis,
+    );
+}
+
+/// Byte ranges of a block that hold floating-point scales (everything else may take any value).
+fn scale_fields(kind: u32) -> std::ops::Range<usize> {
+    match kind {
+        2 | 6 | 8 | 20 | 23 => 0..2,
+        3 | 7 | 12 | 13 => 0..4,
+        10 => 80..84,
+        11 => 108..110,
+        14 => 208..210,
+        39 => 0..1,
+        _ => 0..0,
+    }
+}
+
+/// Worst cases for 16-bit saturation in `vpmaddubsw` pipelines: every payload byte set to
+/// `fill` (largest unsigned nibbles and 6-bit values, `-128` and `127` in the signed formats,
+/// largest sub-block scales) against activations that quantize to +127, -127 or alternate. The
+/// products of a `maddubs` pair then reach their maximum, which is where a kernel that
+/// saturates (instead of widening first) loses bits.
+fn saturation_cases(tier: CpuTier, report: &mut Report, rng: &mut Lcg) {
+    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39] {
+        let cols = if layout(kind).0 == 256 { 768 } else { 352 };
+        let width = layout(kind).1;
+        let rows = 9;
+        for fill in [0x00u8, 0x7f, 0x80, 0xff] {
+            let mut weights = random_weights(kind, rows, cols, rng);
+            for chunk in weights.chunks_exact_mut(width) {
+                let keep = scale_fields(kind);
+                for (i, byte) in chunk.iter_mut().enumerate() {
+                    if !keep.contains(&i) {
+                        *byte = fill;
+                    }
+                }
+            }
+            for (label, sign) in [("+", 0usize), ("-", 1), ("+-", 2)] {
+                let batch = 5;
+                let x: Vec<f32> = (0..batch * cols)
+                    .map(|i| match sign {
+                        0 => 1.0,
+                        1 => -1.0,
+                        _ => {
+                            if i % 2 == 0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        }
+                    })
+                    .collect();
+                let (have, millis) = timed(|| project(&weights, kind, &x, rows, cols));
+                let result = have.map(|have| {
+                    let (want, scale) = if kind == 8 {
+                        reference_q8(&weights, rows, cols, &x)
+                    } else {
+                        let records = scalar_records(&x, cols, kind, tier);
+                        reference_packed(&weights, kind, rows, cols, &records)
+                    };
+                    compare_with(&have, &want, &scale, PROJECTION_TOLERANCE)
+                });
+                report.line(
+                    tier,
+                    &format!(
+                        "saturation {} fill {fill:#04x} x {label}1 rows {rows} cols {cols}",
+                        format_name(kind)
+                    ),
+                    result,
+                    millis,
+                );
+            }
+        }
+    }
+}
+
+fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     cpu_kernels::set_tier_cap(Some(tier));
     let mut rng = Lcg(0x5e1f_7e57 ^ tier.name().len() as u64);
 
@@ -570,35 +805,64 @@ fn check_tier(tier: CpuTier, report: &mut Report) {
     // Packed projections: odd block counts, rows that are not a multiple of 4 or 8 (13) and full
     // panels (16), batches around the token-pair and prompt-panel boundaries (the prompt kernels
     // repack the weights of a panel once and run over all tokens from batch 4 on).
-    for (kind, rows) in [8, 2, 3, 6, 7, 20, 39, 10, 11, 12, 13, 14, 23]
+    for (kind, rows) in Q4Z_KINDS
         .into_iter()
+        .chain([8, 2, 3, 6, 7, 20, 39, 10, 11, 12, 13, 14, 23])
         .flat_map(|kind| [(kind, 13), (kind, 16)])
     {
-        let cols = if layout(kind).0 == 256 { 768 } else { 352 };
+        let cols = match layout(kind).0 {
+            256 => 768,
+            32 => 352,
+            group => 3 * group,
+        };
         let weights = random_weights(kind, rows, cols, &mut rng);
         for batch in [1, 2, 3, 5, 17, 64] {
-            let x = rng.vector(batch * cols, 3.0);
-            let name = format!(
-                "{} rows {rows} cols {cols} batch {batch}",
-                format_name(kind)
-            );
-            let (have, millis) = timed(|| {
-                if kind == 8 {
-                    cpu_kernels::q8_linear(&weights, &x, rows, cols, None)
-                } else {
-                    crate::cpu_quantized::linear(&weights, kind, &x, rows, cols, None)
+            projection_case(tier, report, &mut rng, (kind, rows, cols, batch), &weights, false);
+        }
+    }
+
+    for kind in Q4Z_KINDS {
+        q4z_dense_case(tier, report, &mut rng, kind);
+    }
+
+    if full {
+        saturation_cases(tier, report, &mut rng);
+    }
+
+    // Ragged grid (`--tiers`, `--full`): the shapes where panel kernels break. Rows that are not
+    // a multiple of 4, 8 or 16 (including one row and 50 = 3 panels + 2), a single block, an odd
+    // number of blocks and a row longer than the 8-block chunk of the K panels (10 blocks);
+    // prompts from 1 to 33 tokens around the token-pair (2), minimum-batch (4) and AMX (8) steps and
+    // the 16-token tile. Besides `linear`, the 16-row VNNI GEMM and the AMX GEMM run directly on
+    // every format that has a decoder, whatever their default format lists say.
+    if full {
+        for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39]
+            .into_iter()
+            .chain(Q4Z_KINDS)
+        {
+            let group = layout(kind).0;
+            let columns: Vec<usize> = if fllm_gguf_probe::q4z_group(kind).is_some() {
+                [1, 3, 7, 25].map(|blocks| blocks * group).to_vec()
+            } else if group == 256 {
+                vec![256, 768, 2560]
+            } else {
+                vec![32, 96, 352, 1056]
+            };
+            for cols in columns {
+                for rows in [1, 7, 15, 17, 33, 50] {
+                    let weights = random_weights(kind, rows, cols, &mut rng);
+                    for batch in [1, 4, 9, 17, 33] {
+                        projection_case(
+                            tier,
+                            report,
+                            &mut rng,
+                            (kind, rows, cols, batch),
+                            &weights,
+                            true,
+                        );
+                    }
                 }
-            });
-            let result = have.map(|have| {
-                let (want, scale) = if kind == 8 {
-                    reference_q8(&weights, rows, cols, &x)
-                } else {
-                    let records = scalar_records(&x, cols, kind, tier);
-                    reference_packed(&weights, kind, rows, cols, &records)
-                };
-                compare(&have, &want, &scale)
-            });
-            report.line(tier, &name, result, millis);
+            }
         }
     }
 
@@ -612,7 +876,7 @@ fn check_tier(tier: CpuTier, report: &mut Report) {
         let result = have.map(|have| {
             let records = scalar_records(&x, cols, kind, tier);
             let (want, scale) = reference_packed(&weights, kind, rows, cols, &records);
-            compare(&have, &want, &scale)
+            compare_with(&have, &want, &scale, PROJECTION_TOLERANCE)
         });
         report.line(
             tier,
@@ -662,7 +926,7 @@ fn check_tier(tier: CpuTier, report: &mut Report) {
                     have.iter().zip(&kinds).zip(weights.iter().zip(&rows))
                 {
                     let (want, scale) = reference_packed(weights, kind, rows, cols, &records);
-                    let (error, ok) = compare(out, &want, &scale);
+                    let (error, ok) = compare_with(out, &want, &scale, PROJECTION_TOLERANCE);
                     worst = (worst.0.max(error), worst.1 && ok);
                 }
                 worst
@@ -679,9 +943,20 @@ fn check_tier(tier: CpuTier, report: &mut Report) {
     // Float projections (input rounded to the weight type, as the kernels document). Besides the
     // odd width (77), 96 columns with a prompt of 20 tokens reach the sixteen-row panels and the
     // AMX-BF16 tile kernel (columns multiple of 32).
-    for (kind, (rows, cols, batch)) in [0, 1, 30].into_iter().flat_map(|kind| {
-        [(kind, (13, 77, 3)), (kind, (33, 520, 7)), (kind, (5, 40, 1)), (kind, (13, 96, 20))]
-    }) {
+    let mut float_shapes = vec![(13, 77, 3), (33, 520, 7), (5, 40, 1), (13, 96, 20)];
+    if full {
+        for rows in [1, 15, 17, 33] {
+            for cols in [8, 32, 200, 1024] {
+                for batch in [1, 4, 9, 17, 33] {
+                    float_shapes.push((rows, cols, batch));
+                }
+            }
+        }
+    }
+    for (kind, (rows, cols, batch)) in [0, 1, 30]
+        .into_iter()
+        .flat_map(|kind| float_shapes.iter().map(move |&shape| (kind, shape)))
+    {
         let w = rng.vector(rows * cols, 1.0);
         let bytes = w
             .iter()
@@ -710,7 +985,7 @@ fn check_tier(tier: CpuTier, report: &mut Report) {
                     }
                 }
             }
-            compare(&have, &want, &scale)
+            compare_with(&have, &want, &scale, PROJECTION_TOLERANCE)
         });
         report.line(
             tier,
@@ -907,11 +1182,91 @@ fn features() -> Vec<&'static str> {
     found
 }
 
-pub const HELP: &str = "usage: fllm-rs selftest-cpu [--tier TIER]
-Runs every CPU kernel tier this machine supports (or only TIER) on random data against scalar
+/// Activations with the statistics of a transformer hidden state: roughly Gaussian channels
+/// of unit scale, a few channels hundreds of times larger (the "massive activations" that
+/// stretch the 8-bit range of a 256-value block) and some exact zeros.
+fn llama_like_activations(rng: &mut Lcg, tokens: usize, cols: usize) -> Vec<f32> {
+    let outliers = [cols / 7, cols / 3, cols - 3];
+    let mut x = Vec::with_capacity(tokens * cols);
+    for _ in 0..tokens {
+        for c in 0..cols {
+            let mut v = (rng.unit() + rng.unit() + rng.unit() + rng.unit()) * 0.87;
+            if outliers.contains(&c) {
+                v *= 60.0 + 80.0 * rng.unit().abs();
+            }
+            if c % 29 == 0 {
+                v = 0.0;
+            }
+            x.push(v);
+        }
+    }
+    x
+}
+
+/// Real tensors of a GGUF file against the f64 reference at every tier, with activations that
+/// have outliers. Only the first rows of each tensor are used (their bytes are contiguous).
+fn scan_gguf(
+    path: &str,
+    tiers: &[CpuTier],
+    limit: usize,
+    report: &mut Report,
+) -> Result<(), String> {
+    let model = fllm_gguf_probe::MappedGguf::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut picked = Vec::new();
+    for info in &model.index().tensors {
+        let kind = info.type_id;
+        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 20 | 23 | 39);
+        if info.dimensions.len() == 2
+            && supported
+            && (info.dimensions[0] as usize).is_multiple_of(layout(kind).0)
+        {
+            picked.push(info.clone());
+        }
+    }
+    let step = picked.len().div_ceil(limit.max(1)).max(1);
+    let mut rng = Lcg(0x6a6f_6264);
+    for info in picked.iter().step_by(step) {
+        let (kind, cols) = (info.type_id, info.dimensions[0] as usize);
+        let rows = (info.dimensions[1] as usize).min(48);
+        let (block, width) = layout(kind);
+        let bytes = &model.tensor_bytes(&info.name)?[..rows * (cols / block * width)];
+        for batch in [1usize, 6, 17] {
+            let x = llama_like_activations(&mut rng, batch, cols);
+            let name = format!(
+                "{} {} rows {rows} cols {cols} batch {batch}",
+                info.name,
+                format_name(kind)
+            );
+            for &tier in tiers {
+                cpu_kernels::set_tier_cap(Some(tier));
+                let (have, millis) =
+                    timed(|| crate::cpu_quantized::linear(bytes, kind, &x, rows, cols, None));
+                let result = have.map(|have| {
+                    let records = scalar_records(&x, cols, kind, tier);
+                    let (want, scale) = if kind == 8 {
+                        reference_q8(bytes, rows, cols, &x)
+                    } else {
+                        reference_packed(bytes, kind, rows, cols, &records)
+                    };
+                    compare_with(&have, &want, &scale, PROJECTION_TOLERANCE)
+                });
+                report.line(tier, &name, result, millis);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub const HELP: &str = "usage: fllm-rs selftest-cpu [--tier TIER | --tiers all|TIER,TIER,...] [--full] [--gguf FILE [--tensors N]]
+Runs every CPU kernel tier this machine supports and FLLM_CPU_ISA allows (or only TIER) on random data against scalar
 references and prints the largest relative error and the duration per kernel. Projections are
 compared with the 8-bit activations they consume; packing and KV-cache encoding must match the
-scalar code exactly. Exits non-zero when a check exceeds its tolerance.
+scalar code exactly. Exits non-zero when a check exceeds its tolerance (1e-5 of the sum of the absolute
+terms for projections, 1e-4 for attention and element-wise kernels).
+Without options only the tiers up to the FLLM_CPU_ISA cap run. --tiers all (or a list) ignores the cap and
+adds the ragged-shape grid: every quantized format, 1 to 50 rows, 1 to 10 blocks per row, 1 to 33 tokens,
+and the 16-row VNNI GEMM and AMX GEMM run directly on every format with a decoder. --full adds the grid
+to the default tier selection. --gguf FILE checks real tensors of a model with outlier activations.
 TIER: scalar, avx2, avx-vnni, avx512bw, avx512-vnni, avx512-bf16, amx (the last two need a build
 with the `avx512` feature), neon, neon-dotprod, neon-i8mm, neon-sve
 (neon-sve, the SVE Q8_0 decode kernel, is opt-in at run time with FLLM_ARM_SVE=1; this command enables it
@@ -920,6 +1275,10 @@ to check it on SVE CPUs with vectors of 256 bits or more.)";
 /// Entry point of `fllm-rs selftest-cpu`.
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut only = None;
+    let mut tier_list: Option<Vec<String>> = None;
+    let mut full = false;
+    let mut gguf: Option<String> = None;
+    let mut tensor_limit = 64usize;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -932,6 +1291,24 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 let name = args.get(i).ok_or("missing value for --tier")?;
                 only = Some(CpuTier::parse(name).ok_or_else(|| format!("unknown tier {name}"))?);
             }
+            "--tiers" => {
+                i += 1;
+                let list = args.get(i).ok_or("missing value for --tiers")?;
+                tier_list = Some(list.split(',').map(|s| s.trim().to_owned()).collect());
+                full = true;
+            }
+            "--full" => full = true,
+            "--gguf" => {
+                i += 1;
+                gguf = Some(args.get(i).ok_or("missing value for --gguf")?.clone());
+            }
+            "--tensors" => {
+                i += 1;
+                tensor_limit = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--tensors needs a number")?;
+            }
             other => return Err(format!("unknown argument {other}\n{HELP}")),
         }
         i += 1;
@@ -943,13 +1320,32 @@ pub fn run(args: &[String]) -> Result<(), String> {
         any(target_os = "linux", target_os = "android", target_os = "freebsd")
     ))]
     crate::cpu_arm::sve::allow();
+    // The cap must be read before the checks move it.
+    let capped = cpu_kernels::capped_tiers();
     let supported = cpu_kernels::supported_tiers();
-    let tiers = match only {
-        Some(tier) if !supported.contains(&tier) => {
-            return Err(format!("this CPU does not support tier {}", tier.name()));
+    let require = |tier: CpuTier| {
+        if supported.contains(&tier) {
+            Ok(tier)
+        } else {
+            Err(format!("this CPU does not support tier {}", tier.name()))
         }
-        Some(tier) => vec![tier],
-        None => supported.clone(),
+    };
+    let tiers = if let Some(list) = &tier_list {
+        if list.len() == 1 && list[0] == "all" {
+            supported.clone()
+        } else {
+            list.iter()
+                .map(|name| {
+                    CpuTier::parse(name)
+                        .ok_or_else(|| format!("unknown tier {name}"))
+                        .and_then(require)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    } else if let Some(tier) = only {
+        vec![require(tier)?]
+    } else {
+        capped.clone()
     };
     println!(
         "fllm-rs selftest-cpu: {} ({} threads); features: {}",
@@ -965,6 +1361,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(" ")
     );
+    println!(
+        "running tiers: {} ({})",
+        tiers.iter().map(|t| t.name()).collect::<Vec<_>>().join(" "),
+        if tier_list.is_some() {
+            "selected with --tiers, FLLM_CPU_ISA ignored"
+        } else if only.is_some() {
+            "selected with --tier, FLLM_CPU_ISA ignored"
+        } else if capped.len() < supported.len() {
+            "FLLM_CPU_ISA caps the tiers"
+        } else {
+            "no FLLM_CPU_ISA cap"
+        }
+    );
     let arm = crate::cpu_arm::features::detect();
     if arm.sve {
         println!(
@@ -979,11 +1388,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
         checks: 0,
         failed: 0,
         skipped: 0,
+        tiers: Vec::new(),
     };
-    for tier in tiers {
-        check_tier(tier, &mut report);
+    if let Some(path) = gguf {
+        scan_gguf(&path, &tiers, tensor_limit, &mut report)?;
+    } else {
+        for tier in tiers {
+            check_tier(tier, &mut report, full);
+        }
     }
     cpu_kernels::set_tier_cap(None);
+    for (tier, checks, failed) in &report.tiers {
+        println!("tier {tier:<12} {checks:5} checks, {failed} failed");
+    }
     println!(
         "{} checks, {} failed, {} without a kernel at their tier",
         report.checks, report.failed, report.skipped

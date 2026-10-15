@@ -21,8 +21,16 @@
 
 // fLLM: Marlin GEMM host code, taken from vLLM (csrc/libtorch_stable/quantization/marlin/marlin.cu) with the PyTorch tensor glue
 // replaced by the plain C entry point at the end of this file. Kernel choice and thread configuration are vLLM's.
+#include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include "kernel.h"
+#include <map>
+#include <mutex>
+#include <utility>
+
+extern int fllm_opt(int id);
+static const int kFllmOptStepCache = 0;  // FLLM_OPT_STEP_CACHE (fllm_cuda_internal.h): the host-work reductions
 
 #undef STD_TORCH_CHECK
 #define STD_TORCH_CHECK(cond, ...)     do { if (!(cond)) return -1; } while (0)
@@ -204,6 +212,63 @@ exec_config_t determine_exec_config(
   return exec_cfg;
 }
 
+// fLLM: FLLM_MARLIN_CFG=K,N,T (thread_k, thread_n, number of threads, e.g. 128,64,128) makes every call try that thread-block
+// configuration before vLLM's choice and use it where it is valid for the shape and a kernel for it was generated (a tuning aid for
+// decode, where the GEMMs have a handful of rows). Unset, "vllm", "fllm" or "auto": vLLM's determine_exec_config, unchanged.
+static thread_config_t fllm_forced_config() {
+  static const thread_config_t cfg = [] {
+    thread_config_t c{-1, -1, -1};
+    const char* v = getenv("FLLM_MARLIN_CFG");
+    int k = 0, n = 0, t = 0;
+    if (v && sscanf(v, "%d,%d,%d", &k, &n, &t) == 3 && k > 0 && n > 0 && t > 0) {
+      c = thread_config_t{k, n, t};
+      fprintf(stderr, "[fllm-rs] Marlin: trying thread configuration %d,%d,%d first (FLLM_MARLIN_CFG)\n", k, n, t);
+    }
+    return c;
+  }();
+  return cfg;
+}
+
+// fLLM: host-side cost of a launch. vLLM sets the dynamic shared memory limit of the kernel and reads three device attributes before every
+// launch (a prompt batch has about 700 launches per step); the values are the same every time, so they are cached (FLLM_PREFILL_STEP_CACHE).
+static void device_attributes(int dev, int& max_shared_mem, int& major, int& minor) {
+  static std::mutex mu;
+  static int cache[16][3] = {};
+  const bool cached = dev >= 0 && dev < 16 && fllm_opt(kFllmOptStepCache) != 0;
+  if (cached) {
+    std::lock_guard<std::mutex> lock(mu);
+    if (cache[dev][0] != 0) {
+      max_shared_mem = cache[dev][0];
+      major = cache[dev][1];
+      minor = cache[dev][2];
+      return;
+    }
+  }
+  cudaDeviceGetAttribute(&max_shared_mem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+  cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+  if (cached && max_shared_mem > 0) {
+    std::lock_guard<std::mutex> lock(mu);
+    cache[dev][0] = max_shared_mem;
+    cache[dev][1] = major;
+    cache[dev][2] = minor;
+  }
+}
+
+static void set_max_dynamic_smem(const void* kernel, int dev, int bytes) {
+  static std::mutex mu;
+  static std::map<std::pair<const void*, int>, int> set;
+  if (fllm_opt(kFllmOptStepCache) != 0) {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = set.find({kernel, dev});
+    if (it != set.end() && it->second == bytes) return;
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    set[{kernel, dev}] = bytes;
+    return;
+  }
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+}
+
 int marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* a_s, void* b_s, void* g_s, void* zp, int prob_m,
                int prob_n, int prob_k, int lda, void* workspace,
@@ -240,16 +305,11 @@ int marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   const int4* zp_ptr = (const int4*)zp;
   int* locks = (int*)workspace;
 
+  // fLLM: the device attributes never change; they are queried once per device (three driver calls per GEMM otherwise)
   int max_shared_mem = 0;
-  cudaDeviceGetAttribute(&max_shared_mem,
-                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-  STD_TORCH_CHECK(max_shared_mem > 0);
-
   int major_capability, minor_capability;
-  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
-                         dev);
-  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
-                         dev);
+  device_attributes(dev, max_shared_mem, major_capability, minor_capability);
+  STD_TORCH_CHECK(max_shared_mem > 0);
   STD_TORCH_CHECK(major_capability * 10 + minor_capability >= 75,
                   "marlin kernel only support Turing or newer GPUs.");
   int stages = 4;
@@ -316,6 +376,20 @@ int marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         }
       }
 
+      const thread_config_t forced = fllm_forced_config();
+      if (forced.thread_k > 0 &&
+          is_valid_config(forced, thread_m_blocks, prob_m_split, prob_n, prob_k,
+                          num_bits, group_size, has_zp, is_zp_float, is_a_8bit,
+                          stages, max_shared_mem - 512) &&
+          get_marlin_kernel(a_type, b_type, c_type, s_type, thread_m_blocks,
+                            forced.thread_n / 16, forced.thread_k / 16,
+                            m_block_size_8, has_zp, group_blocks,
+                            forced.num_threads, is_zp_float,
+                            stages) != MarlinDefault) {
+        thread_tfg = forced;
+        exec_cfg = {1, thread_tfg};
+      }
+
       if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
         max_thread_m_blocks--;
         continue;
@@ -361,8 +435,7 @@ int marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           ", num_threads = ", num_threads, ", num_bits = ", num_bits);
     }
 
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         max_shared_mem_new);
+    set_max_dynamic_smem(reinterpret_cast<const void*>(kernel), dev, max_shared_mem_new);
 
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;

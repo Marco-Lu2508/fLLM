@@ -259,6 +259,8 @@ pub struct Linear {
     packed: Option<(u32, TensorBytes)>,
     /// Per-tensor output factor of NVFP4 weights (1.0 for every other format).
     pub scale: f32,
+    /// Static activation scale of an NVFP4 weight (ModelOpt `input_scale`, the F32 tensor `x.input_scale` of the GGUF); 0 = the checkpoint has none.
+    pub input_scale: f32,
     fast_cpu: bool,
     #[cfg(feature = "rust-gpu")]
     gpu: Option<Vec<crate::gpu::GpuLinear>>,
@@ -290,6 +292,24 @@ fn nvfp4_tensor_scale(model: &MappedGguf, name: &str) -> Result<f32, String> {
     }
 }
 
+/// The static activation scale of an NVFP4 weight `x.weight`: the F32 tensor `x.input_scale` (written by llama.cpp's converter for ModelOpt
+/// checkpoints unless it is 1). 0 when the tensor is absent or does not hold one positive finite value (the experts of a MoE layer carry one
+/// value per expert); the GPU kernels then quantize activations without a per-tensor factor, as before this tensor was read.
+fn nvfp4_input_scale(model: &MappedGguf, name: &str) -> f32 {
+    let Some(stem) = name.strip_suffix(".weight") else { return 0.0 };
+    let scale_name = format!("{stem}.input_scale");
+    if !model.index().tensors.iter().any(|t| t.name == scale_name) {
+        return 0.0;
+    }
+    match Tensor::load(model, &scale_name) {
+        Ok(t) => match t.data.as_slice() {
+            [v] if v.is_finite() && *v > 0.0 => *v,
+            _ => 0.0,
+        },
+        Err(_) => 0.0,
+    }
+}
+
 impl Linear {
     pub fn packed_weights(&self) -> Option<(u32, &[u8])> {
         self.packed
@@ -317,6 +337,7 @@ impl Linear {
             cols,
             packed: None,
             scale: 1.0,
+            input_scale: 0.0,
             fast_cpu: false,
             #[cfg(feature = "rust-gpu")]
             gpu: None,
@@ -379,6 +400,10 @@ impl Linear {
             scale: match &packed {
                 Some((40, _)) => nvfp4_tensor_scale(model, &name)?,
                 _ => 1.0,
+            },
+            input_scale: match &packed {
+                Some((40, _)) => nvfp4_input_scale(model, &name),
+                _ => 0.0,
             },
             packed,
             fast_cpu: false,
@@ -450,6 +475,7 @@ impl Linear {
                 cols,
                 packed: Some((info.type_id, part)),
                 scale: if info.type_id == 40 { nvfp4_tensor_scale(model, name)? } else { 1.0 },
+                input_scale: if info.type_id == 40 { nvfp4_input_scale(model, name) } else { 0.0 },
                 fast_cpu: false,
                 #[cfg(feature = "rust-gpu")]
                 gpu: None,
@@ -828,6 +854,21 @@ impl Linear {
             };
             if let Some(Some(out)) = float {
                 return Ok(out);
+            }
+            #[cfg(target_arch = "x86_64")]
+            if let Some((kind, packed)) = &self.packed {
+                if crate::cpu_q4z::handles(*kind) {
+                    if let Some(out) = crate::cpu_q4z::linear(
+                        packed,
+                        *kind,
+                        input,
+                        self.rows,
+                        self.cols,
+                        self.bias.as_deref(),
+                    ) {
+                        return Ok(out);
+                    }
+                }
             }
             if let Some((kind, packed)) = &self.packed {
                 if !matches!(kind, 1 | 8 | 30) {

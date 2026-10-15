@@ -88,9 +88,25 @@ static __global__ void f16_to_f32_acc_kernel(const __half2 *__restrict__ y, cons
     out[i] = o;
 }
 
+// y += scale * (result + bias) of an FP16 result [batch, rows] (the accumulate mode of the Marlin GEMM)
+int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, float *out, int rows, int batch, float scale) {
+    const size_t count4 = (size_t)batch * rows / 4;
+    f16_to_f32_acc_kernel<<<(unsigned)((count4 + 255) / 256), 256, 0, s>>>(reinterpret_cast<const __half2 *>(y16), bias,
+                                                                          reinterpret_cast<float4 *>(out), count4, rows, scale);
+    return fllm_check_launch("q4z result");
+}
+
 static size_t align256(size_t v) { return (v + 255) & ~size_t(255); }
 
-size_t fllm_q4z_io_bytes(int rows, int cols, int batch) { return align256((size_t)batch * cols * 2) + align256((size_t)batch * rows * 2); }
+// FLLM_MARLIN_PREFILL_CFG=fllm: a prompt batch of more than 64 rows runs as a whole number of 64-row tiles in one launch (the activation and result
+// scratch has room for the padding rows, whose results are dropped). vLLM's host code (marlin_vllm.cu) launches the largest multiple of 64 rows and then a
+// second kernel for the remaining rows, which streams all weights a second time for as little as one row.
+static int marlin_rows(int batch) { return batch > 64 && fllm_opt(FLLM_OPT_MARLIN_CFG) != 0 ? (batch + 63) / 64 * 64 : batch; }
+
+size_t fllm_q4z_io_bytes(int rows, int cols, int batch) {
+    batch = marlin_rows(batch);
+    return align256((size_t)batch * cols * 2) + align256((size_t)batch * rows * 2);
+}
 size_t fllm_q4z_ctmp_bytes(int batch, int sms) { return fllm_vllm_marlin_ctmp_bytes(batch, sms); }
 size_t fllm_q4z_workspace_bytes(int rows) { return fllm_vllm_marlin_workspace_bytes(rows); }
 
@@ -139,8 +155,9 @@ int fllm_q4z_launch(cudaStream_t s, int dev, int sms, const void *w, int group, 
     const void *scales = base + align256(qbytes);
     const void *zeros = fp4 ? nullptr : base + align256(qbytes) + align256((size_t)(cols / group) * rows * 2);
     const void *global = fp4 ? base + align256(qbytes) + align256((size_t)(cols / group) * rows) : nullptr;
+    const int m = marlin_rows(batch);
     __half *x16 = static_cast<__half *>(io);
-    __half *y16 = reinterpret_cast<__half *>(static_cast<uint8_t *>(io) + align256((size_t)batch * cols * 2));
+    __half *y16 = reinterpret_cast<__half *>(static_cast<uint8_t *>(io) + align256((size_t)m * cols * 2));
     const size_t n4 = (size_t)batch * cols / 4;
     if (!reuse_x16) {
         if (perm) {
@@ -168,17 +185,21 @@ int fllm_q4z_launch(cudaStream_t s, int dev, int sms, const void *w, int group, 
     }
     // fllm_q4z_f16out: the caller wants the FP16 result as it is (y points to a buffer of batch x rows halves)
     const int rc = fllm_vllm_marlin_gemm(x16, w, fllm_q4z_f16out ? static_cast<void *>(y) : static_cast<void *>(y16), ctmp, scales, zeros,
-                                         nullptr, global, batch, rows, cols, cols, workspace, fp4 ? 3 : 0, group, dev, sms, s);
+                                         nullptr, global, m, rows, cols, cols, workspace, fp4 ? 3 : 0, group, dev, sms, s);
     if (rc != 0) return -2;
     if (fllm_q4z_f16out) return fllm_check_launch("q4z");
+    if (fllm_q4z_skip_result) return fllm_check_launch("q4z");  // the FP16 result stays in y16 for a fused consumer
     const size_t count4 = (size_t)batch * rows / 4;
-    if (fllm_q4z_acc)
-        f16_to_f32_acc_kernel<<<(unsigned)((count4 + 255) / 256), 256, 0, s>>>(reinterpret_cast<const __half2 *>(y16), bias,
-                                                                              reinterpret_cast<float4 *>(y), count4, rows,
-                                                                              fllm_q4z_acc_scale);
-    else
-        f16_to_f32_bias_kernel<<<(unsigned)((count4 + 255) / 256), 256, 0, s>>>(reinterpret_cast<const __half2 *>(y16), bias,
-                                                                               reinterpret_cast<float4 *>(y), count4, rows);
+    if (fllm_q4z_acc) {
+        if (fllm_q4z_defer_acc) {
+            fllm_q4z_deferred = true;
+            fllm_q4z_y16 = y16;
+            return fllm_check_launch("q4z");
+        }
+        return fllm_q4z_acc_launch(s, y16, bias, y, rows, batch, fllm_q4z_acc_scale);
+    }
+    f16_to_f32_bias_kernel<<<(unsigned)((count4 + 255) / 256), 256, 0, s>>>(reinterpret_cast<const __half2 *>(y16), bias,
+                                                                           reinterpret_cast<float4 *>(y), count4, rows);
     return fllm_check_launch("q4z result");
 }
 

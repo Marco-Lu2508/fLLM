@@ -92,9 +92,19 @@ Check what the container sees: `docker run --rm --gpus all <registry>/fllm:cuda 
 - Quantized KV caches below 8 bits (and `fp8`) lose accuracy on models with
   large key outliers; keep keys at `q8_0` (`--cache-type-k q8_0`). `nvfp4`
   cache is experimental.
-- `FLLM_CPU_ISA` caps the CPU kernel tier (e.g. `scalar`) to isolate a
-  misbehaving SIMD path; `fllm-rs selftest-cpu [--tier TIER]` checks kernels
-  against scalar references.
+- `FLLM_CPU_ISA` caps the CPU kernel tier (`scalar`, `avx2`, `avx-vnni`, `avx512bw`,
+  `avx512-vnni`, `avx512-bf16`, `amx`; the last two exist only in builds with the `avx512`
+  feature) to isolate a misbehaving SIMD path; `fllm-rs selftest-cpu` checks the tiers up to the
+  cap against scalar references, `fllm-rs selftest-cpu --tiers all` every supported tier.
+- Two CPU tiers (or two thread counts, or `FLLM_NO_REPACK=1`) can give different logprobs in the
+  second decimal and a different greedy text where the model is undecided between two answers.
+  That is the 8-bit activation arithmetic amplifying float rounding differences, not a defect;
+  see "Accuracy" in [cpu-kernels.md](../cpu-kernels.md).
+
+- CUDA decode uses CUDA graphs when the model allows it (the startup log says
+  `CUDA graphs for decode steps: on`). If you suspect them for odd output or a
+  failing capture, start with `FLLM_CUDA_GRAPH=0`: same text, slower; please
+  report the difference.
 
 ## Getting help from the binary
 

@@ -130,3 +130,30 @@ pub(crate) unsafe fn delta_step(
         && delta::supports(dims.1)
         && delta::step_dispatch(s, dims, vectors, scalars, o)
 }
+
+/// The 512-bit prompt GEMMs run directly, whatever their format lists and batch thresholds say,
+/// for `selftest-cpu`: the 16-row VNNI GEMM when the `avx512-vnni` tier is enabled and the AMX
+/// GEMM when the `amx` tier is. One entry per path that applies, with its name; empty when no
+/// path applies or `kinds` has a format without a decoder. The caller has validated shapes.
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+pub(crate) fn direct_prompt_paths(
+    projections: &[crate::cpu_quantized::Projection<'_>],
+    kinds: &[u32],
+    x: &[f32],
+    cols: usize,
+    batch: usize,
+) -> Vec<(&'static str, Vec<Vec<f32>>)> {
+    use crate::cpu_kernels::{tier_enabled, CpuTier};
+    let mut paths = Vec::new();
+    if tier_enabled(CpuTier::Avx512Vnni) && wide_int_allowed() {
+        if let Some(out) = vnni_gemm::linear_group(projections, kinds, x, cols, batch) {
+            paths.push(("vnni_gemm", out));
+        }
+    }
+    if tier_enabled(CpuTier::Amx) {
+        if let Some(out) = amx_gemm::linear_group(projections, kinds, x, cols, batch) {
+            paths.push(("amx_gemm", out));
+        }
+    }
+    paths
+}
