@@ -100,9 +100,10 @@ fn help(command: &str) -> &'static str {
         "gguf-set" => "usage: fllm-rs gguf-set KEY=VALUE ... IN.gguf OUT.gguf\nValues are strings, numbers or booleans; quote strings containing spaces. Tensor payloads are copied unchanged. Merge shards first.",
         "gguf-split" => "usage: fllm-rs gguf-split IN.gguf --max-size 4G OUT-PREFIX\nSplit at tensor boundaries. K/M/G/T use powers of 1024; the cap includes metadata and padding. A tensor larger than the cap is refused.",
         "gguf-merge" => "usage: fllm-rs gguf-merge FIRST-SHARD.gguf OUT.gguf\nMerge consecutive PREFIX-00001-of-0000N.gguf shards and remove split metadata.",
-        "pull" => "usage: fllm-rs pull hf://owner/repo[:QUANT] [--revision REV] [--local-files-only]\n       fllm-rs pull hf://owner/repo/file.gguf [--revision REV] [--local-files-only]\n       fllm-rs pull --list\n       fllm-rs pull --remove hf://owner/repo[:QUANT]\nSelect a quantization or explicit filename; all GGUF shards are downloaded. Interrupted downloads resume. FLLM_CACHE overrides the usual Hub cache.",
-        "run" => "usage: fllm-rs run MODEL [serve options]
-MODEL: a Hugging Face link as pasted from the browser (https://huggingface.co/owner/repo, .../blob/main/file.gguf), hf.co/owner/repo:Q4_K_M, owner/repo, hf://owner/repo[:QUANT] or a local .gguf. Downloads the model on first use, starts a server on a free local port, opens a chat in this terminal and stops the server when you quit (Ctrl-D). Extra options go to serve, e.g. --ctx 8192 or --device cpu.",
+        "pull" => "usage: fllm-rs pull owner/repo[:QUANT] [--revision REV] [--local-files-only]\n       fllm-rs pull owner/repo [--quant TYPE] [--outtype preserve|f16|f32] [--no-convert]\n       fllm-rs pull hf://owner/repo/file.gguf [--revision REV] [--local-files-only]\n       fllm-rs pull --list\n       fllm-rs pull --remove hf://owner/repo[:QUANT]\nSelect a quantization or explicit filename; all GGUF shards are downloaded. A repository without GGUF files but with a checkpoint (safetensors, PyTorch, AWQ, GPTQ, FP8, ModelOpt NVFP4) is downloaded and converted to GGUF once (--quant TYPE re-encodes an unquantized checkpoint, --no-convert only downloads the checkpoint). Prints the path of the GGUF. Interrupted downloads resume. FLLM_CACHE overrides the usual Hub cache.",
+        "run" => "usage: fllm-rs run MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--revision REV] [--local-files-only] [serve options]
+MODEL: a Hugging Face link as pasted from the browser (https://huggingface.co/owner/repo, .../blob/main/file.gguf), hf.co/owner/repo:Q4_K_M, owner/repo, hf://owner/repo[:QUANT], a local .gguf or a local checkpoint directory. Downloads the model on first use, starts a server on a free local port, opens a chat in this terminal and stops the server when you quit (Ctrl-D). Extra options go to serve, e.g. --ctx 8192 or --device cpu.
+A repository or directory without GGUF files but with a checkpoint (safetensors, PyTorch, AWQ, GPTQ, FP8, ModelOpt NVFP4) is converted to GGUF on first use and cached; AWQ/GPTQ/FP8/NVFP4 keep their quantization, --quant TYPE (q4_k_m, q8_0, ...) re-encodes an unquantized bf16/f16/f32 checkpoint while converting. HF_TOKEN is used for gated or private repositories.",
         "convert" => "usage: fllm-rs convert CHECKPOINT_PATH OUTPUT.gguf [--outtype preserve|f16|f32|TYPE] [--overwrite] [--revision REV] [--local-files-only]\nCHECKPOINT_PATH may be a supported checkpoint directory or a .safetensors/.bin/.pt/.pth file with config.json and tokenizer files beside it.",
         "quantize" => "usage: fllm-rs quantize INPUT.gguf OUTPUT.gguf TYPE [--overwrite]
 TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float tensors are re-encoded; norms, routers and already quantized tensors are kept.",
@@ -279,6 +280,7 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let model_arg = args[0].clone();
+    let (import_options, serve_args) = split_run_args(&args[1..])?;
     let memory = crate::catalog::available_memory_bytes();
     let normalized = match crate::catalog::expand_reference(&model_arg, Some(memory))? {
         Some(reference) => {
@@ -287,7 +289,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         None => crate::hub::normalize_reference(&model_arg),
     };
-    let path = crate::hub::resolve(&normalized, None, false)?;
+    let path = crate::import::prepare(&normalized, &import_options)?;
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .map_err(|e| format!("no free local port: {e}"))?
@@ -300,7 +302,7 @@ fn run(args: &[String]) -> Result<(), String> {
         .args(["--model"])
         .arg(&path)
         .args(["--host", "127.0.0.1", "--port", &port.to_string()])
-        .args(&args[1..])
+        .args(&serve_args)
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log)
         .spawn()
@@ -339,6 +341,27 @@ fn run(args: &[String]) -> Result<(), String> {
     result
 }
 
+/// The options of `run` after the model: the import flags (`--quant`, `--outtype`, `--revision`, `--local-files-only`) and
+/// the rest, which goes to the server. The server also gets `--revision` and `--local-files-only`.
+fn split_run_args(args: &[String]) -> Result<(crate::import::ImportOptions, Vec<String>), String> {
+    let mut options = crate::import::ImportOptions::default();
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let start = i;
+        if options.parse_flag(args, &mut i)? {
+            if matches!(args[start].as_str(), "--revision" | "--local-files-only" | "--offline") {
+                rest.extend_from_slice(&args[start..=i]);
+            }
+        } else {
+            rest.push(args[i].clone());
+        }
+        i += 1;
+    }
+    options.validate()?;
+    Ok((options, rest))
+}
+
 fn pull(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{}", help("pull"));
@@ -354,12 +377,13 @@ fn pull(args: &[String]) -> Result<(), String> {
         }
         for entry in entries {
             println!(
-                "{}\t{} bytes ({:.2} GB)\trevision {}\t{}",
+                "{}\t{} bytes ({:.2} GB)\trevision {}\t{}{}",
                 entry.reference,
                 entry.bytes,
                 entry.bytes as f64 / 1_000_000_000.0,
                 entry.revision,
-                entry.path.display()
+                entry.path.display(),
+                note_suffix(&entry.note)
             );
         }
         return Ok(());
@@ -373,18 +397,45 @@ fn pull(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let reference = args.first().ok_or_else(|| help("pull").to_owned())?;
-    if !reference.starts_with("hf://") {
-        return Err("fllm-rs pull expects an hf://owner/repo reference".into());
+    let normalized = crate::hub::normalize_reference(reference);
+    if !normalized.starts_with("hf://") {
+        return Err("fllm-rs pull expects a Hugging Face repository: owner/repo, a huggingface.co link or hf://owner/repo".into());
     }
-    let mut flags = ResolveFlags::default();
-    let mut i = 1;
-    while i < args.len() {
-        parse_resolve_flags(args, &mut i, &mut flags)?;
-        i += 1;
-    }
-    let path = crate::hub::resolve(reference, flags.revision.as_deref(), flags.offline)?;
+    let (options, convert) = parse_pull_flags(&args[1..])?;
+    let path = if convert {
+        crate::import::prepare(&normalized, &options)?
+    } else {
+        if options.quant.is_some() || options.outtype.is_some() {
+            return Err("--quant and --outtype need the conversion; drop --no-convert".into());
+        }
+        crate::hub::resolve(&normalized, options.revision.as_deref(), options.offline)?
+    };
     println!("{}", path.display());
     Ok(())
+}
+
+/// Options of `pull` after the reference: the import flags and `--no-convert`.
+fn parse_pull_flags(args: &[String]) -> Result<(crate::import::ImportOptions, bool), String> {
+    let mut options = crate::import::ImportOptions::default();
+    let mut convert = true;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--no-convert" {
+            convert = false;
+        } else if !options.parse_flag(args, &mut i)? {
+            return Err(format!("unknown option: {}", args[i]));
+        }
+        i += 1;
+    }
+    Ok((options, convert))
+}
+
+fn note_suffix(note: &str) -> String {
+    if note.is_empty() {
+        String::new()
+    } else {
+        format!("\t[{note}]")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -764,22 +815,36 @@ fn list(args: &[String]) -> Result<(), String> {
     }
     for entry in entries {
         println!(
-            "{}\t{} ({:.2} GB)\t{}",
+            "{}\t{} ({:.2} GB)\t{}{}",
             entry.reference,
             entry.bytes,
             entry.bytes as f64 / 1_000_000_000.0,
-            entry.path.display()
+            entry.path.display(),
+            note_suffix(&entry.note)
         );
     }
     Ok(())
 }
 
 fn rm(args: &[String]) -> Result<(), String> {
+    const USAGE: &str = "usage: fllm-rs rm MODEL [--converted]\nMODEL: owner/repo (removes the downloaded files and the converted GGUF), a model with :QUANT or a file name (one GGUF), or a local checkpoint directory (removes its converted GGUF). --converted keeps the downloaded checkpoint and removes only the GGUF made from it.";
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
-        return Err("usage: fllm-rs rm MODEL".into());
+        return Err(USAGE.into());
     }
-    let input = &args[0];
+    let converted_only = args.iter().any(|a| a == "--converted");
+    let input = args.iter().find(|a| !a.starts_with("--")).ok_or(USAGE)?;
+    let normalized = crate::hub::normalize_reference(input);
+    if !normalized.starts_with("hf://") {
+        let count = crate::import::remove_local_conversions(Path::new(&normalized))?;
+        println!("Removed {count} converted files of {normalized}");
+        return Ok(());
+    }
     let base = repository_of_reference(input);
+    if converted_only {
+        let count = crate::hub::remove_converted(&base)?;
+        println!("Removed {count} converted files of {base}");
+        return Ok(());
+    }
     let count = crate::hub::remove_cached(&base)?;
     println!("Removed {count} cached entries for {base}");
     Ok(())
@@ -838,6 +903,12 @@ fn show(args: &[String]) -> Result<(), String> {
     };
     let metadata = std::fs::metadata(&path).map_err(|e| format!("{}", e))?;
     println!("Path: {}", path.display());
+    if path.is_dir() {
+        return show_checkpoint(&path);
+    }
+    if let Some(note) = crate::import::converted_note(&path) {
+        println!("Origin: {note}");
+    }
     println!("Size: {} bytes ({:.2} GB)", metadata.len(), metadata.len() as f64 / 1_000_000_000.0);
     if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
         let mapping = fllm_gguf_probe::MappedGguf::open(&path)
@@ -851,6 +922,50 @@ fn show(args: &[String]) -> Result<(), String> {
                 println!("{key}: {value}");
             }
         }
+    }
+    Ok(())
+}
+
+/// `show` of a checkpoint directory: what it is, and the GGUF files that were converted from it.
+fn show_checkpoint(path: &Path) -> Result<(), String> {
+    println!("Checkpoint directory (not a GGUF file)");
+    match fllm_checkpoint::check_config(path) {
+        Ok(check) => {
+            println!("Architecture: {}", check.architecture);
+            println!("Quantization: {}", check.quantization);
+        }
+        Err(e) => println!("Not convertible: {e}"),
+    }
+    let mut weight_bytes = 0u64;
+    let mut converted = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(|e| e.to_string())?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let len = entry.metadata().map_or(0, |m| m.len());
+        if crate::hub::is_converted_name(&name) {
+            converted.push((entry.path(), len));
+        } else if name.ends_with(".safetensors") || name.ends_with(".bin") || name.ends_with(".pt") || name.ends_with(".pth") {
+            weight_bytes += len;
+        }
+    }
+    println!("Weights: {} bytes ({:.2} GB)", weight_bytes, weight_bytes as f64 / 1_000_000_000.0);
+    // conversions of a local directory live in the cache directory for local models
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for entry in crate::import::list_local_conversions() {
+        if entry.reference == canonical.to_string_lossy() {
+            converted.push((entry.path, entry.bytes));
+        }
+    }
+    if converted.is_empty() {
+        println!("Converted GGUF: none yet (fllm-rs run / serve / pull converts it on first use)");
+    }
+    converted.sort();
+    for (file, len) in converted {
+        println!(
+            "Converted GGUF: {} ({:.2} GB) {}",
+            file.display(),
+            len as f64 / 1_000_000_000.0,
+            crate::import::converted_note(&file).unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -1050,6 +1165,36 @@ mod tests {
         assert!(parsed.resolve.offline);
         assert!(parse_convert_args(&args(&["model"])).is_err());
         assert!(parse_convert_args(&args(&["model", "out", "--outtype", "bf16"])).is_err());
+    }
+
+    #[test]
+    fn run_splits_import_flags_from_server_options() {
+        let (options, rest) = split_run_args(&args(&[
+            "--quant", "q4_k_m", "--ctx", "8192", "--revision", "abc", "--device", "cpu", "--local-files-only",
+        ]))
+        .unwrap();
+        assert_eq!(options.quant.as_deref(), Some("q4_k_m"));
+        assert_eq!(options.revision.as_deref(), Some("abc"));
+        assert!(options.offline && options.outtype.is_none());
+        // the server keeps its own options and sees the Hub flags too, but never --quant
+        assert_eq!(rest, args(&["--ctx", "8192", "--revision", "abc", "--device", "cpu", "--local-files-only"]));
+        let (options, rest) = split_run_args(&args(&["--outtype", "f16"])).unwrap();
+        assert_eq!(options.outtype.as_deref(), Some("f16"));
+        assert!(rest.is_empty());
+        assert!(split_run_args(&args(&["--quant", "q3_nonsense"])).unwrap_err().contains("--quant must be one of"));
+        assert!(split_run_args(&args(&["--quant"])).unwrap_err().contains("missing value"));
+        assert!(split_run_args(&args(&["--quant", "q8_0", "--outtype", "f32"])).is_err());
+    }
+
+    #[test]
+    fn pull_accepts_import_flags_and_no_convert() {
+        let (options, convert) = parse_pull_flags(&args(&["--quant", "Q8_0", "--revision", "v2"])).unwrap();
+        assert!(convert);
+        assert_eq!(options.quant.as_deref(), Some("Q8_0"));
+        assert_eq!(options.revision.as_deref(), Some("v2"));
+        let (_, convert) = parse_pull_flags(&args(&["--no-convert", "--local-files-only"])).unwrap();
+        assert!(!convert);
+        assert!(parse_pull_flags(&args(&["--frobnicate"])).unwrap_err().contains("unknown option"));
     }
 
     #[test]

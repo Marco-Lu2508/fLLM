@@ -20,7 +20,7 @@ mod symint;
 mod torch_zip;
 
 pub use convert::{
-    convert_checkpoint, inspect_checkpoint, CheckpointInventory, ConversionReport, ConvertOptions,
+    check_config, convert_checkpoint, ConfigCheck, inspect_checkpoint, CheckpointInventory, ConversionReport, ConvertOptions,
     OutputDType, TensorSummary,
 };
 

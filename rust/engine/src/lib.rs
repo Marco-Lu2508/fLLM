@@ -138,6 +138,7 @@ pub mod quant_iq;
 
 pub mod cli;
 pub mod hub;
+pub mod import;
 pub mod kv_format;
 pub mod catalog;
 pub mod ppl;

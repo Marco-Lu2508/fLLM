@@ -106,7 +106,7 @@ fn ref_e4m3(byte: u8) -> f32 {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     Nvfp4,
     /// compressed-tensors pack-quantized int4 with this group size
     CtInt4(usize),
@@ -257,7 +257,7 @@ fn write_support_files(dir: &Path, quant: Option<Value>) {
 }
 
 /// Build the same random model twice: quantized (`kind`) in `quant_dir`, dequantized F32 in `ref_dir`.
-fn build_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
+pub(crate) fn build_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
     let mut rng = Rng(seed);
     let mut q_entries = Vec::new();
     let mut r_entries = Vec::new();
@@ -303,7 +303,7 @@ fn build_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
     write_safetensors(&ref_dir.join("model.safetensors"), &r_entries);
 }
 
-fn convert(dir: &Path, dtype: OutputDType) -> PathBuf {
+pub(crate) fn convert(dir: &Path, dtype: OutputDType) -> PathBuf {
     let out = dir.join(format!("out-{dtype:?}.gguf"));
     convert_checkpoint(dir, &out, ConvertOptions { output_dtype: dtype, overwrite: false })
         .unwrap_or_else(|e| panic!("conversion of {} failed: {e}", dir.display()));
@@ -327,7 +327,7 @@ fn logits(gguf: &Path, tokens: &[i64]) -> Vec<f32> {
     decoder.forward(tokens, &lengths, &tables, &mut key, &mut value, &rows, false).unwrap()
 }
 
-fn tensor_types(gguf: &Path) -> std::collections::BTreeMap<String, u32> {
+pub(crate) fn tensor_types(gguf: &Path) -> std::collections::BTreeMap<String, u32> {
     let m = MappedGguf::open(gguf).unwrap();
     m.index().tensors.iter().map(|t| (t.name.clone(), t.type_id)).collect()
 }
@@ -484,4 +484,16 @@ fn the_comparison_detects_a_wrong_model() {
     for d in [quant, reference, other, other_quant] {
         let _ = fs::remove_dir_all(d);
     }
+}
+
+/// Writes the tiny NVFP4 model and its dequantized reference to `$FLLM_FIXTURE_OUT/{nvfp4,reference}` for trying the
+/// command line by hand: `FLLM_FIXTURE_OUT=/tmp/fx cargo test -p fllm-engine --lib write_fixture -- --ignored`.
+#[test]
+#[ignore]
+fn write_fixture_for_manual_runs() {
+    let out = PathBuf::from(std::env::var_os("FLLM_FIXTURE_OUT").expect("set FLLM_FIXTURE_OUT"));
+    let (quant, reference) = (out.join("nvfp4"), out.join("reference"));
+    fs::create_dir_all(&quant).unwrap();
+    fs::create_dir_all(&reference).unwrap();
+    build_pair(Kind::Nvfp4, 1234, &quant, &reference);
 }

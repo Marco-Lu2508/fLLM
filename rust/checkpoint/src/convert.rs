@@ -85,6 +85,54 @@ pub fn inspect_checkpoint(input: &Path) -> Result<CheckpointInventory, Checkpoin
     })
 }
 
+/// What `check_config` found out about a checkpoint without reading any weights.
+#[derive(Clone, Debug)]
+pub struct ConfigCheck {
+    /// GGUF architecture name the checkpoint converts to (`llama`, `qwen3`, ...).
+    pub architecture: String,
+    /// `none` for unquantized checkpoints, else `awq`, `gptq`, `fp8`, `nvfp4`, `int4`, `int8`, `exl2` or `exl3`.
+    pub quantization: String,
+}
+
+/// Read only `config.json` (and `hf_quant_config.json`) of a checkpoint directory and report whether `convert` supports
+/// its architecture and quantization. Fails with the reason when it does not, before any weights are fetched.
+pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
+    let cfg_path = root.join("config.json");
+    let mut cfg: Value =
+        serde_json::from_slice(&fs::read(&cfg_path).map_err(|e| format!("read config.json: {e}"))?)
+            .map_err(|e| format!("invalid config.json: {e}"))?;
+    if let Some(q) = modelopt_quant_config(root)? {
+        if cfg.get("quantization_config").is_none_or(Value::is_null) {
+            cfg["quantization_config"] = q;
+        }
+    }
+    let quantization = match quantization(&cfg)? {
+        Quantization::Dense => "none",
+        Quantization::Exl2 => "exl2",
+        Quantization::Exl3 => "exl3",
+        Quantization::Gptq { .. } => "gptq",
+        Quantization::Awq { .. } => "awq",
+        Quantization::Fp8 => "fp8",
+        Quantization::Nvfp4 => "nvfp4",
+        Quantization::CtPacked { bits: 4, .. } => "int4",
+        Quantization::CtPacked { .. } | Quantization::CtInt8 { .. } => "int8",
+    }
+    .to_owned();
+    let architecture = if crate::bert::supports(&cfg) {
+        "bert".to_owned()
+    } else if crate::modernbert::supports(&cfg) {
+        "modernbert".to_owned()
+    } else if crate::nomic::supports(&cfg) {
+        "nomic-bert".to_owned()
+    } else {
+        Plan::from_config(&flatten_text_config(cfg))?.arch
+    };
+    Ok(ConfigCheck {
+        architecture,
+        quantization,
+    })
+}
+
 pub fn convert_checkpoint(
     input: &Path,
     output: &Path,
@@ -2202,5 +2250,78 @@ fn json_id(v: &Value) -> Option<u64> {
         a.first().and_then(Value::as_u64)
     } else {
         v.get("id").and_then(Value::as_u64)
+    }
+}
+
+#[cfg(test)]
+mod quantization_config_tests {
+    use super::{check_config, compressed_tensors, fp8_block_size, quantization, Quantization};
+    use serde_json::json;
+
+    fn ct(weights: serde_json::Value, format: &str) -> serde_json::Value {
+        json!({"quant_method": "compressed-tensors", "format": format, "config_groups": {"group_0": {"targets": ["Linear"], "weights": weights}}})
+    }
+
+    #[test]
+    fn modelopt_methods_and_algorithms() {
+        let nv = json!({"quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "group_size": 16}});
+        assert_eq!(quantization(&nv).unwrap(), Quantization::Nvfp4);
+        let fp8 = json!({"quantization_config": {"quant_method": "modelopt", "quant_algo": "FP8"}});
+        assert_eq!(quantization(&fp8).unwrap(), Quantization::Fp8);
+        let bad = json!({"quantization_config": {"quant_method": "modelopt", "quant_algo": "INT8_SQ"}});
+        assert!(quantization(&bad).unwrap_err().contains("only NVFP4 and FP8"));
+        let other = json!({"quantization_config": {"quant_method": "bitsandbytes"}});
+        assert!(quantization(&other).unwrap_err().contains("supported: gptq, awq"));
+        assert_eq!(quantization(&json!({})).unwrap(), Quantization::Dense);
+    }
+
+    #[test]
+    fn compressed_tensors_schemes() {
+        let int4 = ct(json!({"num_bits": 4, "type": "int", "symmetric": true, "strategy": "group", "group_size": 128}), "pack-quantized");
+        assert_eq!(compressed_tensors(&int4).unwrap(), Quantization::CtPacked { bits: 4, group: 128 });
+        let w8 = ct(json!({"num_bits": 8, "type": "int", "symmetric": true, "strategy": "channel"}), "int-quantized");
+        assert_eq!(compressed_tensors(&w8).unwrap(), Quantization::CtInt8 { group: 0 });
+        let fp8 = ct(json!({"num_bits": 8, "type": "float", "strategy": "tensor"}), "float-quantized");
+        assert_eq!(compressed_tensors(&fp8).unwrap(), Quantization::Fp8);
+        let asym = ct(json!({"num_bits": 4, "type": "int", "symmetric": false, "strategy": "group", "group_size": 32}), "pack-quantized");
+        assert!(compressed_tensors(&asym).unwrap_err().contains("asymmetric"));
+        let order = ct(json!({"num_bits": 4, "type": "int", "symmetric": true, "strategy": "group", "group_size": 32, "actorder": "group"}), "pack-quantized");
+        assert!(compressed_tensors(&order).unwrap_err().contains("actorder"));
+        let fp4 = ct(json!({"num_bits": 4, "type": "float", "strategy": "tensor_group", "group_size": 16}), "nvfp4-pack-quantized");
+        let err = compressed_tensors(&fp4).unwrap_err();
+        assert!(err.contains("compressed-tensors NVFP4") && err.contains("ModelOpt"), "{err}");
+        let mixed = json!({"quant_method": "compressed-tensors", "config_groups": {
+            "a": {"weights": {"num_bits": 4, "type": "int", "strategy": "group", "group_size": 32}},
+            "b": {"weights": {"num_bits": 8, "type": "int", "strategy": "channel"}}}});
+        assert!(compressed_tensors(&mixed).unwrap_err().contains("mixed-precision"));
+        let sparse = json!({"quant_method": "compressed-tensors", "sparsity_config": {"format": "sparse-24-bitmask"}, "config_groups": {}});
+        assert!(compressed_tensors(&sparse).unwrap_err().contains("sparse"));
+    }
+
+    #[test]
+    fn fp8_block_sizes_come_from_either_convention() {
+        assert_eq!(fp8_block_size(&json!({"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}})), Some((128, 128)));
+        let ctb = json!({"quantization_config": ct(json!({"num_bits": 8, "type": "float", "strategy": "block", "block_structure": [64, 32]}), "float-quantized")});
+        assert_eq!(fp8_block_size(&ctb), Some((64, 32)));
+        let text = json!({"quantization_config": ct(json!({"num_bits": 8, "type": "float", "strategy": "block", "block_structure": "128x128"}), "float-quantized")});
+        assert_eq!(fp8_block_size(&text), Some((128, 128)));
+        assert_eq!(fp8_block_size(&json!({"quantization_config": {"quant_method": "fp8"}})), None);
+    }
+
+    #[test]
+    fn check_config_reports_architecture_quantization_and_unsupported_types() {
+        let dir = std::env::temp_dir().join(format!("fllm-check-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |v: serde_json::Value| std::fs::write(dir.join("config.json"), v.to_string()).unwrap();
+        write(json!({"model_type": "llama", "hidden_size": 64, "num_attention_heads": 4, "num_hidden_layers": 2,
+            "intermediate_size": 128, "vocab_size": 64}));
+        let c = check_config(&dir).unwrap();
+        assert_eq!((c.architecture.as_str(), c.quantization.as_str()), ("llama", "none"));
+        write(json!({"model_type": "llama", "hidden_size": 64, "num_attention_heads": 4, "num_hidden_layers": 2,
+            "intermediate_size": 128, "vocab_size": 64, "quantization_config": {"quant_method": "awq", "bits": 4, "version": "gemm", "zero_point": true, "group_size": 128}}));
+        assert_eq!(check_config(&dir).unwrap().quantization, "awq");
+        write(json!({"model_type": "not_a_model"}));
+        assert!(check_config(&dir).unwrap_err().to_string().contains("unsupported model_type"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
