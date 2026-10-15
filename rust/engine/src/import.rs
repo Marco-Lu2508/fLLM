@@ -169,7 +169,7 @@ pub fn converted_name(stem: &str, label: &str, key: &str) -> String {
     format!("{}-{}-fllm{key}.gguf", clean(stem), clean(label))
 }
 
-/// The model name without the cache key: `Llama-3-8B-preserve-fllm0123456789ab` becomes `Llama-3-8B-preserve`.
+/// The model name without the cache key: `Llama-3-8B-preserve-fllm89abcdef0123` becomes `Llama-3-8B-preserve`.
 pub fn display_name(stem: &str) -> &str {
     if hub::is_converted_name(&format!("{stem}.gguf")) {
         &stem[..stem.len() - 17]
@@ -421,7 +421,10 @@ fn convert_into(input: &Path, final_path: &Path, origin: &Origin<'_>) -> Result<
         .truncate(false)
         .open(lock_path(final_path))
         .map_err(|e| format!("cannot lock the conversion: {e}"))?;
-    lock.lock().map_err(|e| format!("cannot lock the conversion: {e}"))?;
+    if lock.try_lock().is_err() {
+        eprintln!("[fllm-rs] another fllm-rs process is converting this model; waiting for it");
+        lock.lock().map_err(|e| format!("cannot lock the conversion: {e}"))?;
+    }
     if final_path.is_file() {
         return Ok(()); // another process finished it while we waited
     }

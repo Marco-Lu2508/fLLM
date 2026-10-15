@@ -300,6 +300,29 @@ fn interrupted_conversions_are_cleaned_up_and_failures_leave_nothing() {
 }
 
 #[test]
+fn two_starts_of_the_same_conversion_produce_one_file() {
+    let quant = scratch("race-q");
+    let plain = scratch("race-r");
+    build_pair(Kind::Nvfp4, 71, &quant, &plain);
+    let out = scratch("race-out");
+    let final_path = out.join("m-nvfp4-fllm000000000003.gguf");
+    let check = fllm_checkpoint::check_config(&quant).unwrap();
+    let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..3)
+            .map(|_| scope.spawn(|| convert_into(&quant, &final_path, &origin_for(&OutType::Preserve, &check))))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(tensor_types(&final_path).get("blk.0.attn_q.weight"), Some(&40));
+    let files: Vec<String> = fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(files.iter().all(|f| !f.contains(".fllm-part")), "{files:?}");
+    for d in [quant, plain, out] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
 fn local_directories_convert_once_and_follow_their_files() {
     let quant = scratch("local-q");
     let plain = scratch("local-r");

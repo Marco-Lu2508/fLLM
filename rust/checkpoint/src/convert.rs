@@ -1152,7 +1152,14 @@ fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
     {
         return Err(format!("compressed-tensors sparse checkpoints are not supported; {HINT}"));
     }
-    let w = ct_weights(q)?.ok_or_else(|| format!("compressed-tensors config has no weight quantization scheme; {HINT}"))?;
+    let Some(w) = ct_weights(q)? else {
+        // configs without config_groups were read as FP8 before the integer formats were supported
+        return if matches!(format, "" | "float-quantized") {
+            Ok(Quantization::Fp8)
+        } else {
+            Err(format!("compressed-tensors config has no weight quantization scheme; {HINT}"))
+        };
+    };
     let bits = w.get("num_bits").and_then(Value::as_u64).unwrap_or(0);
     let kind = w.get("type").and_then(Value::as_str).unwrap_or("int");
     let strategy = w.get("strategy").and_then(Value::as_str).unwrap_or("tensor");
