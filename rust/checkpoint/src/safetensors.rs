@@ -108,6 +108,7 @@ pub fn read_file(path: &Path) -> Result<Vec<Tensor>, String> {
                 .ok_or_else(|| format!("tensor {name}: shape size overflow"))
         })?;
         let width = match dtype.as_str() {
+            "F64" | "I64" | "U64" => 8,
             "F32" | "I32" | "U32" => 4,
             "F16" | "BF16" | "I16" | "U16" => 2,
             "F8_E4M3" | "F8_E5M2" | "U8" | "I8" => 1,

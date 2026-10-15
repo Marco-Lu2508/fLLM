@@ -112,6 +112,8 @@ pub fn write_to(
             "F16" => 1,
             "BF16" => 30,
             "MXFP4" => 39,
+            "NVFP4" => 40,
+            "Q8_0" => 8,
             "Q4Z32" => 0x8000_0010,
             "Q4Z64" => 0x8000_0011,
             "Q4Z128" => 0x8000_0012,
@@ -304,6 +306,20 @@ fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result
     if t.dtype == "FP8M" || t.dtype == "F8M" {
         return write_packed_fp8m(w, t, p);
     }
+    if t.dtype == "NVFP4" {
+        return write_packed_rows(w, t, |row, buf| {
+            p.nvfp4()
+                .ok_or_else(|| "tensor cannot be stored as NVFP4".to_owned())?
+                .encode_gguf_row(row, buf)
+        });
+    }
+    if t.dtype == "Q8_0" {
+        return write_packed_rows(w, t, |row, buf| {
+            p.sym_int()
+                .ok_or_else(|| "tensor cannot be stored as Q8_0".to_owned())?
+                .encode_q8_0_row(row, buf)
+        });
+    }
     if t.dtype.starts_with("Q4ZP") {
         return write_packed_q4zp(w, t, p);
     }
@@ -369,6 +385,32 @@ fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result
     }
     Ok(expected)
 }
+/// Row-wise encoders (`NVFP4`, `Q8_0`): `encode(source_row, buf)` appends one output row, rows are reordered like the dense path.
+fn write_packed_rows(
+    w: &mut impl Write,
+    t: &OutTensor,
+    encode: impl Fn(usize, &mut Vec<u8>) -> Result<(), String>,
+) -> io::Result<u64> {
+    let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
+    let rows = *t.dims.get(1).ok_or_else(|| bad(format!("{} tensor needs two dimensions", t.dtype)))? as usize;
+    let mut buf = Vec::new();
+    let mut total = 0u64;
+    for i in 0..rows {
+        let src = match &t.source_for_output {
+            Some(order) => *order.get(i).ok_or_else(|| bad("invalid packed row permutation".into()))?,
+            None => i,
+        };
+        buf.clear();
+        encode(src, &mut buf).map_err(bad)?;
+        w.write_all(&buf)?;
+        total += buf.len() as u64;
+    }
+    if total != t.data_len {
+        return Err(bad(format!("{} output length mismatch: wrote {total}, expected {}", t.dtype, t.data_len)));
+    }
+    Ok(total)
+}
+
 /// 4-bit GPTQ weights with act-order as native `Q4ZP` rows followed by column permutation indices.
 fn write_packed_q4zp(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result<u64> {
     let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);

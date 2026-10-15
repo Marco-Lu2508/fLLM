@@ -90,14 +90,15 @@ error otherwise); `--device auto` on the encoder path stays on CPU.
 ## Model cache and catalog
 
 ```text
-fllm-rs pull hf://owner/repo[:QUANT] [--revision REV] [--local-files-only]
+fllm-rs pull owner/repo[:QUANT] [--revision REV] [--local-files-only]
+       fllm-rs pull owner/repo [--quant TYPE] [--outtype preserve|f16|f32] [--no-convert]
        fllm-rs pull hf://owner/repo/file.gguf [--revision REV] [--local-files-only]
        fllm-rs pull --list
        fllm-rs pull --remove hf://owner/repo[:QUANT]
-fllm-rs list        # complete models in the local cache (reference, bytes, path)
-fllm-rs rm MODEL    # usage: fllm-rs rm MODEL — removes cached entries for the repository
+fllm-rs list        # complete models in the local cache (reference, bytes, path; converted files with their origin)
+fllm-rs rm MODEL [--converted]   # removes the cached repository (--converted: only the GGUF files made from a checkpoint); a local directory removes its conversions
 fllm-rs ps          # servers recorded in the status dir (pid, port, model, host)
-fllm-rs show MODEL  # path, size, GGUF architecture + selected metadata
+fllm-rs show MODEL  # path, size, GGUF architecture + selected metadata; a checkpoint: architecture, quantization, converted GGUF files
 fllm-rs search [QUERY]  # catalog names/repos/default quants (empty query lists all)
 ```
 
@@ -105,13 +106,35 @@ fllm-rs search [QUERY]  # catalog names/repos/default quants (empty query lists 
 terminal, and stops the server on quit (Ctrl-D):
 
 ```text
-fllm-rs run MODEL [serve options]
+fllm-rs run MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--revision REV] [--local-files-only] [serve options]
 MODEL: https://huggingface.co/owner/repo, .../blob/main/file.gguf,
-hf.co/owner/repo:Q4_K_M, owner/repo, hf://owner/repo[:QUANT] or a local .gguf.
+hf.co/owner/repo:Q4_K_M, owner/repo, hf://owner/repo[:QUANT], a local .gguf
+or a local checkpoint directory.
 ```
 
-Repos with many files need the `:QUANT` suffix (`GGUF selection is
+Repos with many GGUF files need the `:QUANT` suffix (`GGUF selection is
 ambiguous` otherwise). `FLLM_CACHE` overrides the Hub cache location.
+
+**Checkpoints.** A repository or directory without GGUF files but with a safetensors or
+PyTorch checkpoint (plain, AWQ, GPTQ, FP8, compressed-tensors int4/int8, NVIDIA ModelOpt
+NVFP4) is converted on first use by `run`, `serve --model` and `pull`; the same options
+work for `serve`:
+
+```sh
+fllm-rs run nvidia/Llama-3.1-8B-Instruct-NVFP4            # ModelOpt NVFP4 -> GGUF type 40
+fllm-rs run Qwen/Qwen2.5-7B-Instruct-AWQ                  # stays 4-bit (Q4Z)
+fllm-rs run meta-llama/Llama-3.1-8B-Instruct --quant q4_k_m   # bf16 checkpoint -> Q4_K_M
+fllm-rs serve --model ./my-checkpoint --outtype f16
+fllm-rs pull owner/repo --quant q8_0                      # convert only, print the GGUF path
+```
+
+stderr shows the download size and "converting ... this happens once"; the GGUF is cached
+next to the downloaded files (see `list`), so the next start only loads it. `--quant TYPE`
+(`q4_0 q4_1 q5_0 q5_1 q8_0 q4_k_s q4_k_m q5_k_s q5_k_m q6_k`) applies to unquantized
+checkpoints only, `--outtype` to the 16/32-bit type. An unsupported architecture, a missing
+`tokenizer.json` or a gated repository without `HF_TOKEN` is reported before the weights are
+downloaded. `pull --no-convert` only downloads the checkpoint (the same download as
+`convert hf://owner/repo OUT.gguf`). Details: [rust-formats-and-import.md](../rust-formats-and-import.md).
 
 ## Convert, quantize, inspect, formats
 

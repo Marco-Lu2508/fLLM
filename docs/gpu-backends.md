@@ -348,8 +348,8 @@ NVFP4) are compiled out (`fllm_cc()` reports 10, `hip_stubs.cu` declines the cal
 
 Checkpoints produced with NVIDIA ModelOpt (`quant_algo: NVFP4`, e.g. `nvidia/Llama-3.1-8B-Instruct-NVFP4`)
 run through GGUF type 40 (llama.cpp layout: 4 UE4M3 scales + 32 nibble bytes per 64 values; the per-tensor
-factor `weight_scale_2` is the F32 tensor `<name>.scale`). Convert with llama.cpp's `convert_hf_to_gguf.py`
-until `fllm convert` handles ModelOpt directly. On sm_12x GPUs the FP4 tensor cores are used; elsewhere the
+factor `weight_scale_2` is the F32 tensor `<name>.scale`). `fllm-rs run nvidia/Llama-3.1-8B-Instruct-NVFP4` (or
+`convert`) imports the ModelOpt safetensors directly; llama.cpp's converter is not needed. On sm_12x GPUs the FP4 tensor cores are used; elsewhere the
 weights are expanded to F16 at load. The CPU decodes them to F32 per row (slow).
 
 Device layout: the weights are stored as CUTLASS expects them (row-major packed E2M1, block scales in the swizzled

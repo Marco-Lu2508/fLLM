@@ -72,6 +72,21 @@ Meta-Llama-3.1-8B-Instruct-GPTQ-INT4 (`desc_act = true`, group 128): 5.78 GB fil
 Greedy text is identical/consistent with the reference. `selftest-gpu` covers all group sizes (32, 64, 128) for both `Q4Z` and `Q4ZP`
 across all batch sizes (1 to 356), totaling 330 checks.
 
+## Importing NVFP4 checkpoints
+
+ModelOpt NVFP4 safetensors (`quant_algo: NVFP4`; `hf_quant_config.json` or the `quantization_config` of `config.json`) are read
+by `fllm-rs convert` and converted automatically by `run`, `serve` and `pull`; llama.cpp's converter is not needed. Per quantized
+linear the importer reads `weight` (U8, two E2M1 codes per byte, the even input in the low nibble), `weight_scale` (E4M3, one per
+16 inputs), `weight_scale_2` and `input_scale`, and writes GGUF type 40: the block scale bytes are copied unchanged, the nibbles are
+regrouped into the layout of the type (value `j` of a group of 16 in the low nibble of byte `j`, value `j + 8` in the high nibble),
+`weight_scale_2` becomes the F32 tensor `<name>.scale` and `input_scale` the F32 tensor `<name>.input_scale` (the engine quantizes
+activations itself and does not read it). The Llama Q/K row permutation moves whole rows, so codes and block scales stay together.
+Excluded modules (`lm_head`, anything without `weight_scale`) keep their bf16/f16 weights; the FP8 KV-cache scales are dropped. A
+weight whose input dimension is not a multiple of 64 is expanded to F16. Verified: tiny random Llama-like checkpoints in ModelOpt
+layout run on the CPU with logits identical to a dense F32 model holding the weights dequantized with
+`code * block scale * weight_scale_2` ([docs/rust-formats-and-import.md](rust-formats-and-import.md)). Not verified: a real ModelOpt
+checkpoint, and any GPU run of a converted file.
+
 ## NVFP4 on GPUs without FP4 tensor cores
 
 NVFP4 checkpoints (GGUF type 40) run through the same Marlin kernel as weight-only FP4 (W4A16, group 16, E4M3 scales) on every GPU from

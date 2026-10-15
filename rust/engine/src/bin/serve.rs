@@ -50,8 +50,9 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL.gguf [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative mtp|off] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--host 127.0.0.1] [--port 8000] [--ctx 4096] [--max-seqs 16] [--max-batched-tokens 1024] [--threads N] [--api-key KEY] [--model-name NAME] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative mtp|off] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--host 127.0.0.1] [--port 8000] [--ctx 4096] [--max-seqs 16] [--max-batched-tokens 1024] [--threads N] [--api-key KEY] [--model-name NAME] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
+    eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a checkpoint is converted to GGUF once and cached; --quant ({}) re-encodes an unquantized checkpoint while converting", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
     eprintln!("       (wgpu devices: f16 and q8_0 only; nvfp4 is experimental, keys below 8 bit can break some models, see docs/gpu-backends.md)");
     eprintln!("       fllm-rs devices [--json] [--measure] | formats | inspect PATH | pull hf://org/repo/file.gguf");
@@ -244,6 +245,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model_path = None;
     let mut hub_revision = None;
     let mut hub_offline = false;
+    let mut import_quant: Option<String> = None;
+    let mut import_outtype: Option<String> = None;
     let mut host = "127.0.0.1".to_owned();
     let mut port = 8000u16;
     let mut context = 4096usize;
@@ -320,6 +323,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|_| usage("invalid LoRA scale"));
                 lora_paths.push((path, scale));
             }
+            "--quant" | "--quantize" => import_quant = Some(value(&args, &mut i, "--quant")),
+            "--outtype" => import_outtype = Some(value(&args, &mut i, "--outtype")),
             "--revision" => hub_revision = Some(value(&args, &mut i, "--revision")),
             "--local-files-only" | "--offline" => hub_offline = true,
             "--model" => model_path = Some(value(&args, &mut i, "--model")),
@@ -474,7 +479,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
     let model_path = model_path.unwrap_or_else(|| usage("--model is required"));
-    let mut path = fllm_engine::hub::resolve(&model_path, hub_revision.as_deref(), hub_offline)?;
+    let mut path = fllm_engine::import::prepare(
+        &model_path,
+        &fllm_engine::import::ImportOptions {
+            revision: hub_revision.clone(),
+            offline: hub_offline,
+            quant: import_quant,
+            outtype: import_outtype,
+        },
+    )?;
     if path.is_dir() {
         let mut ggufs = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&path) {
@@ -503,8 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path = chosen.clone();
         } else {
             return Err(format!(
-                "directory '{}' does not contain any .gguf models. If this is a Hugging Face / Safetensors checkpoint, convert it using: fllm convert {} <output.gguf>",
-                path.display(),
+                "directory '{}' contains neither a .gguf model nor a checkpoint (config.json with model.safetensors or pytorch_model.bin)",
                 path.display()
             )
             .into());
@@ -513,6 +525,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inferred_name = path
         .file_stem()
         .and_then(|x| x.to_str())
+        .map(fllm_engine::import::display_name)
         .unwrap_or("fllm-model")
         .to_owned();
 

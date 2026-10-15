@@ -44,6 +44,9 @@ pub use runtime::{BatchStats, InferenceRuntime, TokenEvent};
 
 pub mod tokenizer;
 
+#[cfg(test)]
+mod import_tests;
+
 pub mod devices;
 pub mod lowbit;
 pub mod model;
@@ -137,6 +140,7 @@ pub mod quant_iq;
 
 pub mod cli;
 pub mod hub;
+pub mod import;
 pub mod kv_format;
 pub mod catalog;
 pub mod ppl;

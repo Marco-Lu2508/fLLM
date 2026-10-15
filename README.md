@@ -59,18 +59,26 @@ A repository with several GGUF files needs the `:QUANT` suffix.
 
 ### Models and formats
 
-`serve` and `run` load **GGUF** files. Everything else is converted to GGUF first with
-`fllm-rs convert`; `serve` on a checkpoint directory without `.gguf` files stops and points to `convert`.
+`serve` and `run` load **GGUF** files and, since a Hugging Face repository or a local directory usually holds a
+**checkpoint** instead, convert those automatically on first use: `fllm-rs run owner/repo` on a repository without
+GGUF files downloads the weights, checks the architecture from `config.json` first, converts once and caches the GGUF
+next to the other models (`fllm-rs list` shows it, `fllm-rs rm owner/repo` removes it, `rm owner/repo --converted` keeps
+the downloaded checkpoint and removes only the GGUF; the cache is `FLLM_CACHE`, else `$HF_HOME/hub`, a local directory is
+converted into `fllm-local/` there). The second start finds the file again. `fllm-rs convert` stays available for an
+explicit conversion. What was verified: the conversion of every format below with tiny synthetic checkpoints, run on the
+CPU against a dequantized reference ([docs/rust-formats-and-import.md](docs/rust-formats-and-import.md)); real multi-GB
+checkpoints and GPU runs of converted files were **not** tested.
 
 | Input | How it is handled | Notes |
 | --- | --- | --- |
 | GGUF v2/v3 with F32/F16/BF16, Q4_0 ... Q8_0, Q2_K ... Q6_K, IQ1 ... IQ4, TQ, MXFP4, NVFP4 | loaded directly | `fllm-rs formats` lists the 35 registered types; registration is not a promise of a fast kernel |
-| safetensors (single or sharded) and PyTorch `.bin` / `.pt` / `.pth` | `convert` writes GGUF (`--outtype preserve`, `f16`, `f32` or a quant type) | local directory or file, or a Hub repository; `config.json` and tokenizer files are required |
-| AWQ 4-bit (AutoAWQ GEMM) and GPTQ 4-bit, including act-order | `convert` keeps them 4-bit as fLLM-specific `Q4Z` / `Q4ZP` tensors; nothing is re-quantized | group sizes 32, 64, 128; other sizes, fp32 scales and stacked experts are expanded to F16 |
-| FP8 checkpoints (`quant_method` fp8) | `convert`; stays FP8 with row scales for `--outtype preserve` | |
+| safetensors (single or sharded) and PyTorch `.bin` / `.pt` / `.pth` | `run` / `serve` / `pull` convert on first use, `convert` writes a file you name | Hub repository, local directory or file; `config.json` and `tokenizer.json` are required. Unquantized bf16/f16/f32 stay as they are (`--outtype f16`/`f32` to change) or are re-encoded with `--quant q4_k_m`, `q8_0`, ... |
+| AWQ 4-bit (AutoAWQ GEMM) and GPTQ 4-bit, including act-order | converted automatically, kept 4-bit as fLLM-specific `Q4Z` / `Q4ZP` tensors; nothing is re-quantized | group sizes 32, 64, 128; other sizes, fp32 scales and stacked experts are expanded to F16 |
+| FP8 checkpoints (`quant_method` fp8, ModelOpt FP8, compressed-tensors float) | converted automatically; per-tensor or per-row scales stay FP8, block-wise `weight_scale_inv` is expanded to F16 | |
+| NVIDIA ModelOpt NVFP4 (`quant_algo` NVFP4, `hf_quant_config.json` or `quantization_config`) | converted automatically to GGUF type 40 (the layout of llama.cpp, no llama.cpp needed): block scales copied, `weight_scale_2` stored as `<name>.scale` | dense models; excluded modules (for example `lm_head`) stay bf16/f16; FP8 KV-cache scales are ignored; NVFP4 mixture-of-experts checkpoints are expanded to F16 |
+| compressed-tensors int4 / int8 (`pack-quantized`, `int-quantized`, symmetric) | converted automatically: int4 groups of 32/64/128 become `Q4Z`, int8 becomes `Q8_0` | asymmetric, act-order, other bit widths, sparse and compressed-tensors NVFP4 are refused with a message |
 | gpt-oss MXFP4 | `convert` repacks the MXFP4 blocks | |
 | EXL2 / EXL3 | `convert` expands to F16 (or re-quantizes with `--outtype`) | import only, not native EXL inference ([docs/exl-formats.md](docs/exl-formats.md)) |
-| NVIDIA ModelOpt NVFP4 | runs as GGUF type 40 (llama.cpp layout) | `convert` does not read ModelOpt checkpoints directly; convert them with another tool or use an NVFP4 GGUF |
 
 Where the weight formats run natively ([docs/gpu-backends.md](docs/gpu-backends.md),
 [docs/backends.md](docs/backends.md), [docs/cpu-kernels.md](docs/cpu-kernels.md)):

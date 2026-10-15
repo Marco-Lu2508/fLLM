@@ -164,77 +164,286 @@ fn token() -> Option<String> {
 fn is_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
+/// Base URL of the Hub: `HF_ENDPOINT` (the variable the Hugging Face tools use for mirrors) or huggingface.co.
+fn endpoint() -> String {
+    env::var("HF_ENDPOINT")
+        .ok()
+        .map(|e| e.trim().trim_end_matches('/').to_owned())
+        .filter(|e| e.starts_with("https://") || e.starts_with("http://"))
+        .unwrap_or_else(|| "https://huggingface.co".to_owned())
+}
 fn url(parts: &[&str]) -> Result<reqwest::Url, String> {
-    let mut url = reqwest::Url::parse("https://huggingface.co").map_err(|e| e.to_string())?;
+    let mut url = reqwest::Url::parse(&endpoint()).map_err(|e| e.to_string())?;
     url.path_segments_mut()
         .map_err(|_| "invalid Hub URL")?
         .extend(parts);
     Ok(url)
+}
+/// What to tell the user about an HTTP error status of the Hub.
+pub(crate) fn status_hint(status: reqwest::StatusCode, has_token: bool, repo: &str) -> String {
+    match status.as_u16() {
+        401 if !has_token => format!(
+            "{repo} is private or gated (HTTP 401): create an access token at https://huggingface.co/settings/tokens, set the environment variable HF_TOKEN to it and run again"
+        ),
+        401 => format!(
+            "Hugging Face rejected the token in HF_TOKEN for {repo} (HTTP 401): check that the token is valid and may read this repository"
+        ),
+        403 if !has_token => format!(
+            "{repo} is gated (HTTP 403): accept its license on https://huggingface.co/{repo} while logged in, create an access token at https://huggingface.co/settings/tokens, set the environment variable HF_TOKEN to it and run again"
+        ),
+        403 => format!(
+            "access to {repo} is denied (HTTP 403): accept the model license on https://huggingface.co/{repo} with the account that owns the token in HF_TOKEN, or use a token that may read this repository"
+        ),
+        404 => format!(
+            "{repo} or the requested revision/file was not found (HTTP 404): check the spelling; private repositories need HF_TOKEN"
+        ),
+        429 => format!("Hugging Face is rate limiting requests for {repo} (HTTP 429): wait a moment, or set HF_TOKEN for higher limits"),
+        code => format!("Hub request for {repo} failed with HTTP {code} (check connectivity and HF_TOKEN)"),
+    }
 }
 fn get(
     client: &Client,
     url: reqwest::Url,
     auth: &Option<String>,
 ) -> Result<reqwest::blocking::Response, String> {
+    let repo = url
+        .path_segments()
+        .map(|s| s.skip_while(|p| *p != "models").skip(1).take(2).collect::<Vec<_>>().join("/"))
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "the repository".to_owned());
     let mut request = client.get(url);
     if let Some(token) = auth {
         request = request.bearer_auth(token);
     }
-    request
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| {
-            format!(
-                "Hub request failed (check connectivity, repository/revision and HF_TOKEN): {}",
-                e.without_url()
-            )
+    let response = request.send().map_err(|e| {
+        format!(
+            "Hub request failed (check connectivity, repository/revision and HF_TOKEN): {}",
+            e.without_url()
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(status_hint(response.status(), auth.is_some(), &repo));
+    }
+    Ok(response)
+}
+
+/// A Hub repository pinned to one commit together with its file list: online (the inventory comes from the Hub API and
+/// files are downloaded on demand) or offline (the inventory is the local snapshot, nothing is downloaded).
+pub(crate) struct RepoSession {
+    pub owner: String,
+    pub repo: String,
+    pub commit: String,
+    pub revision: String,
+    pub repository: PathBuf,
+    pub snapshot: PathBuf,
+    files: Vec<(String, FileInfo)>,
+    network: Option<(Client, Option<String>)>,
+    _guard: Option<fs::File>,
+}
+
+impl RepoSession {
+    pub(crate) fn open(reference: &Reference, revision: &str, offline: bool) -> Result<Self, String> {
+        safe_relative(revision)?;
+        let repository = cache_root().join(format!("models--{}--{}", reference.owner, reference.repo));
+        let cached_revision = if is_commit(revision) {
+            Some(revision.to_owned())
+        } else {
+            fs::read_to_string(repository.join("refs").join(revision))
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| is_commit(s))
+        };
+        if offline {
+            let commit = cached_revision.ok_or("model revision is not in the local Hub cache")?;
+            let snapshot = repository.join("snapshots").join(&commit);
+            let files = inventory(&snapshot)?
+                .into_iter()
+                .filter(|name| !name.ends_with(".fllm-part") && !name.ends_with(".fllm-lock"))
+                .map(|name| {
+                    let size = fs::metadata(snapshot.join(&name)).ok().map(|m| m.len());
+                    (name, FileInfo { size, sha256: None })
+                })
+                .collect();
+            return Ok(Self {
+                owner: reference.owner.clone(),
+                repo: reference.repo.clone(),
+                commit,
+                revision: revision.to_owned(),
+                repository,
+                snapshot,
+                files,
+                network: None,
+                _guard: None,
+            });
+        }
+        let guard = repository_lock(&repository, true)?;
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(3600))
+            .user_agent("fllm-rust/0.1")
+            .build()
+            .map_err(|e| e.to_string())?;
+        let auth = token();
+        let mut info_url = url(&[
+            "api",
+            "models",
+            &reference.owner,
+            &reference.repo,
+            "revision",
+            revision,
+        ])?;
+        info_url.query_pairs_mut().append_pair("blobs", "true");
+        let metadata: Value = get(&client, info_url, &auth)?
+            .json()
+            .map_err(|e| e.to_string())?;
+        let commit = metadata
+            .get("sha")
+            .and_then(Value::as_str)
+            .filter(|s| is_commit(s))
+            .ok_or("Hub response has no valid immutable commit")?
+            .to_owned();
+        let snapshot = repository.join("snapshots").join(&commit);
+        fs::create_dir_all(&snapshot).map_err(|e| e.to_string())?;
+        let mut files = Vec::new();
+        for sibling in metadata
+            .get("siblings")
+            .and_then(Value::as_array)
+            .ok_or("Hub response has no file inventory")?
+        {
+            if let Some(name) = sibling.get("rfilename").and_then(Value::as_str) {
+                files.push((name.to_owned(), FileInfo::from_hub(sibling)?));
+            }
+        }
+        Ok(Self {
+            owner: reference.owner.clone(),
+            repo: reference.repo.clone(),
+            commit,
+            revision: revision.to_owned(),
+            repository,
+            snapshot,
+            files,
+            network: Some((client, auth)),
+            _guard: Some(guard),
         })
+    }
+
+    /// File names of the revision. Offline, files this program wrote itself (converted GGUFs, their metadata) are left out.
+    pub(crate) fn names(&self) -> Vec<&str> {
+        self.files
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| self.network.is_some() || !(is_converted_name(n) || n.ends_with(CONVERTED_META_SUFFIX)))
+            .collect()
+    }
+
+    pub(crate) fn size_of(&self, name: &str) -> Option<u64> {
+        self.files.iter().find(|(n, _)| n == name).and_then(|(_, i)| i.size)
+    }
+
+    pub(crate) fn is_cached(&self, name: &str) -> bool {
+        self.snapshot.join(name).is_file()
+    }
+
+    /// Make `name` available in the snapshot (download or verify the cached copy).
+    pub(crate) fn download(&self, name: &str) -> Result<(), String> {
+        safe_relative(name)?;
+        let destination = self.snapshot.join(name);
+        let Some((client, auth)) = &self.network else {
+            return if destination.is_file() {
+                Ok(())
+            } else {
+                Err(format!("{name} is not in the local Hub cache (offline mode)"))
+            };
+        };
+        let parent = destination.parent().ok_or("model filename has no parent")?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        // Existing cache directories must not redirect a write outside this snapshot.
+        if !parent
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            .starts_with(self.snapshot.canonicalize().map_err(|e| e.to_string())?)
+        {
+            return Err("model cache directory escapes its snapshot".into());
+        }
+        let mut parts = vec![
+            self.owner.as_str(),
+            self.repo.as_str(),
+            "resolve",
+            self.commit.as_str(),
+        ];
+        parts.extend(name.split('/'));
+        let info = self
+            .files
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, i)| i.clone())
+            .ok_or("missing Hub file metadata")?;
+        download_file(
+            client,
+            url(&parts)?,
+            auth,
+            &destination,
+            info,
+            name.to_ascii_lowercase().ends_with(".gguf"),
+            &format!("{}/{}", self.owner, self.repo),
+        )
+    }
+
+    /// Remember which commit `revision` meant, so that offline runs find the snapshot.
+    pub(crate) fn record_revision(&self) -> Result<(), String> {
+        if self.network.is_none() {
+            return Ok(());
+        }
+        let refs = self.repository.join("refs").join(&self.revision);
+        if let Some(parent) = refs.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(refs, &self.commit).map_err(|e| e.to_string())
+    }
 }
 
 /// Resolve local paths without networking; HF references use commit-pinned cache directories.
 pub fn resolve(reference: &str, revision: Option<&str>, offline: bool) -> Result<PathBuf, String> {
+    resolve_impl(reference, revision, offline, false)
+}
+
+fn resolve_impl(reference: &str, revision: Option<&str>, offline: bool, prefer_gguf: bool) -> Result<PathBuf, String> {
     let reference = normalize_reference(reference);
     if !reference.starts_with("hf://") {
         return Ok(PathBuf::from(reference));
     }
-    let reference = parse_reference(&reference)?;
-    let revision = revision.unwrap_or("main");
-    safe_relative(revision)?;
-    let repository = cache_root().join(format!("models--{}--{}", reference.owner, reference.repo));
-    let cached_revision = if is_commit(revision) {
-        Some(revision.to_owned())
+    resolve_reference(&parse_reference(&reference)?, revision, offline, prefer_gguf)
+}
+
+fn resolve_reference(reference: &Reference, revision: Option<&str>, offline: bool, prefer_gguf: bool) -> Result<PathBuf, String> {
+    let session = RepoSession::open(reference, revision.unwrap_or("main"), offline)?;
+    resolve_with_session(&session, reference, offline, prefer_gguf)
+}
+
+pub(crate) fn resolve_with_session(
+    session: &RepoSession,
+    reference: &Reference,
+    offline: bool,
+    prefer_gguf: bool,
+) -> Result<PathBuf, String> {
+    let siblings = session.names();
+    let snapshot = session.snapshot.clone();
+    let has_gguf = siblings.iter().any(|s| s.to_ascii_lowercase().ends_with(".gguf"));
+    let selected = if reference.quant.is_some()
+        || reference.file.is_none()
+            && (!siblings.contains(&"config.json") || prefer_gguf && has_gguf)
+    {
+        Some(select_gguf(&siblings, reference.quant.as_deref())?.to_owned())
     } else {
-        fs::read_to_string(repository.join("refs").join(revision))
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| is_commit(s))
+        reference.file.clone()
     };
+    let selected = first_shard(selected, &siblings)?;
     if offline {
-        let commit = cached_revision.ok_or("model revision is not in the local Hub cache")?;
-        let snapshot = repository.join("snapshots").join(commit);
-        let files = inventory(&snapshot)?;
-        let selected = if reference.quant.is_some()
-            || reference.file.is_none() && !snapshot.join("config.json").is_file()
-        {
-            Some(
-                select_gguf(
-                    &files.iter().map(String::as_str).collect::<Vec<_>>(),
-                    reference.quant.as_deref(),
-                )?
-                .to_owned(),
-            )
-        } else {
-            reference.file.clone()
-        };
-        let selected = first_shard(
-            selected,
-            &files.iter().map(String::as_str).collect::<Vec<_>>(),
-        )?;
         if let Some(file) = selected
             .as_ref()
             .filter(|f| f.to_ascii_lowercase().ends_with(".gguf"))
         {
-            for part in gguf_shards(file, &files.iter().map(String::as_str).collect::<Vec<_>>())? {
+            for part in gguf_shards(file, &siblings)? {
                 if !snapshot.join(part).is_file() {
                     return Err("GGUF shard set is not complete in the local cache".into());
                 }
@@ -242,92 +451,16 @@ pub fn resolve(reference: &str, revision: Option<&str>, offline: bool) -> Result
         }
         return cached_result(&snapshot, selected.as_deref());
     }
-    let _repository_guard = repository_lock(&repository, true)?;
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(3600))
-        .user_agent("fllm-rust/0.1")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let auth = token();
-    let mut info_url = url(&[
-        "api",
-        "models",
-        &reference.owner,
-        &reference.repo,
-        "revision",
-        revision,
-    ])?;
-    info_url.query_pairs_mut().append_pair("blobs", "true");
-    let metadata: Value = get(&client, info_url, &auth)?
-        .json()
-        .map_err(|e| e.to_string())?;
-    let commit = metadata
-        .get("sha")
-        .and_then(Value::as_str)
-        .filter(|s| is_commit(s))
-        .ok_or("Hub response has no valid immutable commit")?;
-    let snapshot = repository.join("snapshots").join(commit);
-    fs::create_dir_all(&snapshot).map_err(|e| e.to_string())?;
-    let siblings = metadata
-        .get("siblings")
-        .and_then(Value::as_array)
-        .ok_or("Hub response has no file inventory")?
-        .iter()
-        .filter_map(|s| s.get("rfilename").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    let download = |name: &str| -> Result<(), String> {
-        safe_relative(name)?;
-        let destination = snapshot.join(name);
-        let parent = destination.parent().ok_or("model filename has no parent")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        // Existing cache directories must not redirect a write outside this snapshot.
-        if !parent
-            .canonicalize()
-            .map_err(|e| e.to_string())?
-            .starts_with(snapshot.canonicalize().map_err(|e| e.to_string())?)
-        {
-            return Err("model cache directory escapes its snapshot".into());
-        }
-        let mut parts = vec![
-            reference.owner.as_str(),
-            reference.repo.as_str(),
-            "resolve",
-            commit,
-        ];
-        parts.extend(name.split('/'));
-        let file_meta = metadata["siblings"]
-            .as_array()
-            .and_then(|a| a.iter().find(|v| v["rfilename"].as_str() == Some(name)))
-            .ok_or("missing Hub file metadata")?;
-        let info = FileInfo::from_hub(file_meta)?;
-        download_file(
-            &client,
-            url(&parts)?,
-            &auth,
-            &destination,
-            info,
-            name.to_ascii_lowercase().ends_with(".gguf"),
-        )
-    };
-    let selected = if reference.quant.is_some()
-        || reference.file.is_none() && !siblings.contains(&"config.json")
-    {
-        Some(select_gguf(&siblings, reference.quant.as_deref())?.to_owned())
-    } else {
-        reference.file.clone()
-    };
-    let selected = first_shard(selected, &siblings)?;
     if let Some(file) = &selected {
         if !siblings.contains(&file.as_str()) {
             return Err(format!("model repository contains no file {file}"));
         }
         if file.to_ascii_lowercase().ends_with(".gguf") {
             for part in gguf_shards(file, &siblings)? {
-                download(&part)?;
+                session.download(&part)?;
             }
         } else {
-            download(file)?;
+            session.download(file)?;
             for name in [
                 "config.json",
                 "tokenizer.json",
@@ -337,7 +470,7 @@ pub fn resolve(reference: &str, revision: Option<&str>, offline: bool) -> Result
                 "chat_template.jinja",
             ] {
                 if siblings.contains(&name) {
-                    download(name)?;
+                    session.download(name)?;
                 }
             }
         }
@@ -345,58 +478,63 @@ pub fn resolve(reference: &str, revision: Option<&str>, offline: bool) -> Result
         if !siblings.contains(&"config.json") {
             return Err("checkpoint repository has no config.json; for GGUF select hf://owner/repo/file.gguf".into());
         }
-        for name in [
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "added_tokens.json",
-            "generation_config.json",
-            "chat_template.jinja",
-            "vocab.json",
-            "vocab.txt",
-            "merges.txt",
-            "tokenizer.model",
-            "spiece.model",
-            "1_Pooling/config.json",
-        ] {
+        for name in CHECKPOINT_SUPPORT_FILES {
             if siblings.contains(&name) {
-                download(name)?;
+                session.download(name)?;
             }
         }
-        let indexes = [
-            "model.safetensors.index.json",
-            "pytorch_model.bin.index.json",
-        ]
+        for file in checkpoint_weight_files(session)? {
+            session.download(&file)?;
+        }
+    }
+    session.record_revision()?;
+    cached_result(&snapshot, selected.as_deref())
+}
+
+/// Config, tokenizer and template files that accompany a checkpoint.
+pub(crate) const CHECKPOINT_SUPPORT_FILES: [&str; 14] = [
+    "config.json",
+    "hf_quant_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "generation_config.json",
+    "chat_template.jinja",
+    "vocab.json",
+    "vocab.txt",
+    "merges.txt",
+    "tokenizer.model",
+    "spiece.model",
+    "1_Pooling/config.json",
+];
+
+/// Weight files of a checkpoint repository: the shards listed by the index (the index is downloaded to read it), or the
+/// single unindexed weights file.
+pub(crate) fn checkpoint_weight_files(session: &RepoSession) -> Result<Vec<String>, String> {
+    let siblings = session.names();
+    let indexes = CHECKPOINT_INDEXES
         .into_iter()
         .filter(|name| siblings.contains(name))
         .collect::<Vec<_>>();
-        if indexes.len() > 1 {
-            return Err(
-                "repository has conflicting SafeTensors and PyTorch checkpoint indexes".into(),
-            );
-        }
-        if let Some(index) = indexes.first() {
-            download(index)?;
-            for file in manifest_shards(&snapshot, index)? {
-                if !siblings.contains(&file.as_str()) {
-                    return Err(format!(
-                        "checkpoint index references missing repository file {file}"
-                    ));
-                }
-                download(&file)?;
+    if indexes.len() > 1 {
+        return Err("repository has conflicting SafeTensors and PyTorch checkpoint indexes".into());
+    }
+    if let Some(index) = indexes.first() {
+        session.download(index)?;
+        let mut files = vec![(*index).to_owned()];
+        for file in manifest_shards(&session.snapshot, index)? {
+            if !siblings.contains(&file.as_str()) {
+                return Err(format!(
+                    "checkpoint index references missing repository file {file}"
+                ));
             }
-        } else {
-            let weight = select_unindexed_weight(&siblings)?;
-            download(weight)?;
+            files.push(file);
         }
+        Ok(files)
+    } else {
+        Ok(vec![select_unindexed_weight(&siblings)?.to_owned()])
     }
-    let refs = repository.join("refs").join(revision);
-    if let Some(parent) = refs.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(refs, commit).map_err(|e| e.to_string())?;
-    cached_result(&snapshot, selected.as_deref())
 }
 const CHECKPOINT_INDEXES: [&str; 2] = [
     "model.safetensors.index.json",
@@ -458,6 +596,19 @@ fn gguf_shards(file: &str, inventory: &[&str]) -> Result<Vec<String>, String> {
     }
     Ok(files)
 }
+
+/// Marker of files this program converted from a checkpoint: `<name>-<label>-fllm<12 hex digits>.gguf`.
+pub(crate) fn is_converted_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".gguf") else {
+        return false;
+    };
+    stem.len() > 17
+        && stem
+            .get(stem.len() - 17..)
+            .is_some_and(|tail| tail.starts_with("-fllm") && tail[5..].bytes().all(|b| b.is_ascii_hexdigit()))
+}
+/// Metadata written beside a converted GGUF.
+pub(crate) const CONVERTED_META_SUFFIX: &str = ".gguf.json";
 
 #[derive(Clone, Default)]
 struct FileInfo {
@@ -582,6 +733,7 @@ fn download_file(
     destination: &Path,
     mut info: FileInfo,
     gguf: bool,
+    repo: &str,
 ) -> Result<(), String> {
     if destination.is_file() {
         return checked_file(destination, &info, gguf);
@@ -650,7 +802,10 @@ fn download_file(
             info.size = total;
         } else {
             if !response.status().is_success() {
-                return Err(format!("download failed with HTTP {} (check file name, connectivity and HF_TOKEN); partial file retained", response.status()));
+                return Err(format!(
+                    "{}; partial file retained",
+                    status_hint(response.status(), auth.is_some(), repo)
+                ));
             }
             let mut expected_body = response.content_length();
             if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
@@ -842,6 +997,8 @@ pub struct CacheEntry {
     pub revision: String,
     pub bytes: u64,
     pub path: PathBuf,
+    /// Extra information, e.g. that a GGUF was converted from a checkpoint by this program.
+    pub note: String,
 }
 /// Enumerate complete cached GGUF variants and checkpoint snapshots without networking.
 pub fn list_cache() -> Result<Vec<CacheEntry>, String> {
@@ -890,19 +1047,26 @@ pub fn list_cache() -> Result<Vec<CacheEntry>, String> {
                     )
                     .ok_or_else(|| "cache size overflow".to_owned())
                 })?;
+                let note = if is_converted_name(name) {
+                    crate::import::converted_note(&path.join(name)).unwrap_or_else(|| "converted from a checkpoint".into())
+                } else {
+                    String::new()
+                };
                 entries.push(CacheEntry {
                     reference: format!("hf://{owner}/{repo}/{name}"),
                     revision: revision.clone(),
                     bytes,
                     path: path.join(name),
+                    note,
                 });
             }
             if path.join("config.json").is_file() && cached_result(&path, None).is_ok() {
                 let bytes = files
                     .iter()
                     .filter(|s| {
-                        !s.ends_with(".fllm-part")
+                        !s.contains(".fllm-part")
                             && !s.ends_with(".fllm-lock")
+                            && !s.ends_with(CONVERTED_META_SUFFIX)
                             && !s.to_ascii_lowercase().ends_with(".gguf")
                     })
                     .try_fold(0u64, |n, name| {
@@ -918,10 +1082,12 @@ pub fn list_cache() -> Result<Vec<CacheEntry>, String> {
                     revision,
                     bytes,
                     path,
+                    note: String::new(),
                 });
             }
         }
     }
+    entries.extend(crate::import::list_local_conversions());
     entries.sort_by(|a, b| (&a.reference, &a.revision).cmp(&(&b.reference, &b.revision)));
     Ok(entries)
 }
@@ -1053,8 +1219,55 @@ pub fn remove_cached(reference: &str) -> Result<usize, String> {
         if partial.exists() {
             fs::remove_file(partial).map_err(|e| e.to_string())?;
         }
+        let meta = sidecar(path, ".json");
+        if is_converted_name(&path.file_name().unwrap_or_default().to_string_lossy()) && meta.exists() {
+            fs::remove_file(meta).map_err(|e| e.to_string())?;
+        }
+        crate::import::remove_partial_files(path);
     }
     Ok(targets.len())
+}
+
+/// Remove only the GGUF files this program converted from the checkpoint of `reference`, keeping the downloaded
+/// checkpoint. Returns the number of files removed.
+pub fn remove_converted(reference: &str) -> Result<usize, String> {
+    let reference = parse_reference(reference)?;
+    let root = cache_root()
+        .canonicalize()
+        .map_err(|e| format!("model cache unavailable: {e}"))?;
+    let repository = root.join(format!("models--{}--{}", reference.owner, reference.repo));
+    let _guard = repository_lock(&repository, false)?;
+    let mut removed = 0;
+    for snapshot in fs::read_dir(repository.join("snapshots")).map_err(|e| format!("cached model not found: {e}"))? {
+        let path = snapshot.map_err(|e| e.to_string())?.path();
+        for name in inventory(&path)? {
+            if !is_converted_name(&name) {
+                continue;
+            }
+            let target = path.join(&name);
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(sidecar(&target, ".fllm-lock"))
+                .map_err(|e| e.to_string())?;
+            lock.try_lock().map_err(|e| format!("a conversion is running: {e}"))?;
+            for file in [target.clone(), sidecar(&target, ".json")] {
+                if file.exists() {
+                    fs::remove_file(&file).map_err(|e| format!("cannot remove {}: {e}", file.display()))?;
+                    removed += 1;
+                }
+            }
+            crate::import::remove_partial_files(&target);
+            drop(lock);
+            let _ = fs::remove_file(sidecar(&target, ".fllm-lock"));
+        }
+    }
+    if removed == 0 {
+        return Err("no converted model in the cache for this repository".into());
+    }
+    Ok(removed)
 }
 
 /// Shard file names listed by a checkpoint index, validated, deduplicated and sorted.
