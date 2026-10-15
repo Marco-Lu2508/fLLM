@@ -169,8 +169,13 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   multi-GPU splitting of a single model. See [docs/device-selection.md](docs/device-selection.md).
 - **CUDA.** int8 dot-product and tensor-core GEMMs for quantized weights, Marlin for AWQ/GPTQ/FP4,
   CUTLASS block-scaled NVFP4 GEMM on Blackwell, FlashInfer prompt attention (f16 KV cache), split-KV decode
-  attention, argmax sampling on the device, and CUDA graphs for decode of dense models (opt-in with
-  `FLLM_CUDA_GRAPH=1`).
+  attention, argmax sampling on the device, and, on by default, CUDA graphs for decode of dense models,
+  fused decode kernels (residual add + norm + activation quantization, rotary + cache write) and a prompt
+  pass without per-layer host work. Each has a one-line switch back (`FLLM_CUDA_GRAPH=0`, `FLLM_FUSE=0`,
+  `FLLM_PREFILL_STEP_CACHE=0`, ...), listed with all defaults in
+  [docs/configuration.md](docs/configuration.md#switching-the-new-defaults-back). NVFP4 checkpoints are
+  computed as W4A4 with the checkpoint's per-tensor `input_scale` (`FLLM_NVFP4_ACT_SCALE=static`, the
+  default); `FLLM_NVFP4_ACT_SCALE=off` returns to quantizing the activations without it.
 - **Memory.** Paged KV cache with 13 formats (`f16`, `bf16`, `fp8_e4m3`, `fp8_e5m2`, `int8`, `q8_0`, `q5_0`,
   `q5_1`, `q4_0`, `q4_1`, `iq4_nl`, `nvfp4`, `f32`); keys and values can differ (`--cache-type-k`,
   `--cache-type-v`). wgpu devices keep `f16` and `q8_0` only, and 4-bit and 5-bit keys can break models
@@ -217,6 +222,22 @@ Measured on Google Colab with a single user, greedy decoding, over HTTP (before 
 
 So: on par with vLLM for NVFP4 decoding and faster on short prompts, behind it for long prompts and for small
 quantized models. Closing that gap is the current work. Numbers are one run on a shared machine; treat differences of a few percent as noise.
+
+**With the latest performance work** (this code: CUDA graphs and fused decode kernels on, prompt pass without per-layer host
+work, NVFP4 activation scale and tile table), same RTX PRO 6000 Blackwell Colab machine, same client (single user, greedy,
+HTTP). Arrows show the table above (before) and the new value:
+
+| Model | fLLM decode | fLLM prefill 355 / 1000 / 1863 / 8000 tokens (tok/s) | vLLM, same card and session |
+| --- | --- | --- | --- |
+| Llama-3.1-8B NVFP4 | 194 -> 228 tok/s | 24,700 -> 28,800 / 34,800 -> 43,300 / 35,500 -> 40,700 / 32,700 -> 34,200 | 201 tok/s; 20,400 / 50,300 / 54,700 / 44,900 |
+| Qwen2.5-3B AWQ | 200 -> 238 tok/s | 1863 tokens: 29,000 -> 34,800 | 261 tok/s; 24,000 / 36,100 / 39,400 / 37,800 |
+| Llama-3.1-8B Q4_K_M | 190 -> 225 tok/s | not re-measured | not compared |
+| Llama-3.2-3B Q4_K_M | 315 -> 419 tok/s | not re-measured | not compared |
+
+Read honestly: for NVFP4, fLLM now decodes faster than vLLM (228 vs 201 tok/s) and prefills short prompts faster (355 tokens:
+28.8k vs 20.4k tok/s), but is still about 15 to 25 % behind it for long prompts (1863 tokens 40.7k vs 54.7k; 8000 tokens 34.2k vs
+44.9k). For the AWQ model fLLM is 9 to 17 % behind vLLM (decode 238 vs 261, prefill at 1863 tokens 34.8k vs 39.4k). The machine
+is shared and run-to-run noise is around 15 %, so single percentages mean little. The "before" values in the arrows come from the A/B run of the same session and differ slightly from the first table (a different run).
 
 On an RTX PRO 3000 Blackwell Laptop (12 GB, power-limited), one request at a time, Llama-3.1-8B Q4_K_M decodes at
 96 tok/s and prefills a 1,863-token prompt at 3,410 tok/s (llama.cpp on the same card and client: 85 and 3,145). The
@@ -273,10 +294,11 @@ FLLM_CUDA_ARCHS=120 cargo build --release --locked -p fllm-engine --features cud
 
 | Cargo feature | Adds |
 | --- | --- |
-| (none) | CPU only |
+| (none) | CPU only (plus the default `avx512` feature on x86-64) |
 | `rust-gpu` | wgpu backends: Vulkan, Metal, DirectX 12 (what `make`, `install.sh`, the release binaries and the CPU image use) |
 | `cuda` | NVIDIA kernels, compiled with `nvcc` (architectures from `FLLM_CUDA_ARCHS`) |
-| `hip`, `sycl`, `vulkan`, `metal`, `npu-openvino`, `tpu-pjrt`, `avx512` | optional native backends and kernels, test level L0 ([docs/backends.md](docs/backends.md)) |
+| `avx512` | x86-64 AVX-512 / AMX CPU kernels; **on by default** (`--no-default-features` leaves them out; chosen at run time by CPUID, so the binary still runs on any x86-64 CPU) |
+| `hip`, `sycl`, `vulkan`, `metal`, `npu-openvino`, `tpu-pjrt` | optional native backends, test level L0 ([docs/backends.md](docs/backends.md)) |
 
 `make test` runs the Rust tests. On Windows see [docs/windows.md](docs/windows.md).
 
