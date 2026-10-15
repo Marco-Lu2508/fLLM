@@ -69,6 +69,12 @@ pub enum PackedData {
         rows: usize,
         cols: usize,
     },
+    /// FP8 weights with one scale per tile (block-wise FP8); written as f16.
+    Fp8Block(crate::symint::Fp8Block),
+    /// NVIDIA ModelOpt NVFP4 (GGUF type 40 when the rows fit 64-value blocks).
+    Nvfp4(crate::nvfp4::Nvfp4),
+    /// Symmetric integer weights of `compressed-tensors` checkpoints.
+    SymInt(crate::symint::SymInt),
 }
 
 impl PackedInt4 {
@@ -470,6 +476,7 @@ impl PackedData {
     pub fn q4z_group(&self) -> Option<usize> {
         match self {
             Self::Int4(t) => t.q4z_group(),
+            Self::SymInt(t) => t.q4z_group(),
             _ => None,
         }
     }
@@ -486,6 +493,22 @@ impl PackedData {
     pub fn q4zp_perm(&self) -> Option<Vec<u32>> {
         match self {
             Self::Int4(t) => t.q4zp_perm(),
+            _ => None,
+        }
+    }
+
+    /// The NVFP4 tensor, if this is one.
+    pub fn nvfp4(&self) -> Option<&crate::nvfp4::Nvfp4> {
+        match self {
+            Self::Nvfp4(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The symmetric integer tensor, if this is one.
+    pub fn sym_int(&self) -> Option<&crate::symint::SymInt> {
+        match self {
+            Self::SymInt(t) => Some(t),
             _ => None,
         }
     }
@@ -516,7 +539,8 @@ impl PackedData {
     pub fn encode_q4z_row(&self, out_idx: usize, dst: &mut Vec<u8>) -> Result<(), String> {
         match self {
             Self::Int4(t) => t.encode_q4z_row(out_idx, dst),
-            _ => Err("only 4-bit AWQ / GPTQ tensors can be written as Q4Z".into()),
+            Self::SymInt(t) => t.encode_q4z_row(out_idx, dst),
+            _ => Err("only 4-bit AWQ / GPTQ / compressed-tensors tensors can be written as Q4Z".into()),
         }
     }
 
@@ -536,6 +560,9 @@ impl PackedData {
             Self::Int4(t) => t.element_count(),
             Self::Fp8 { elements, .. } => *elements,
             Self::Fp8Marlin { rows, cols, .. } => rows * cols,
+            Self::Fp8Block(t) => t.element_count(),
+            Self::Nvfp4(t) => t.element_count(),
+            Self::SymInt(t) => t.element_count(),
         }
     }
 
@@ -558,6 +585,9 @@ impl PackedData {
                 Ok(())
             }
             Self::Int4(t) => t.decode_chunk(start, dst),
+            Self::Fp8Block(t) => t.decode_chunk(start, dst),
+            Self::Nvfp4(t) => t.decode_chunk(start, dst),
+            Self::SymInt(t) => t.decode_chunk(start, dst),
             Self::Fp8 {
                 bytes,
                 format,
@@ -606,7 +636,7 @@ pub fn decode_fp8_chunk(
     Ok(())
 }
 
-fn e4m3fn_to_f32(bits: u8) -> f32 {
+pub(crate) fn e4m3fn_to_f32(bits: u8) -> f32 {
     let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
     let exp = (bits >> 3) & 0x0f;
     let mant = bits & 0x07;

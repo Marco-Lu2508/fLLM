@@ -98,9 +98,14 @@ pub fn convert_checkpoint(
             .ok_or("checkpoint file has no parent directory")?
     };
     let cfg_path = root.join("config.json");
-    let cfg: Value =
+    let mut cfg: Value =
         serde_json::from_slice(&fs::read(&cfg_path).map_err(|e| format!("read config.json: {e}"))?)
             .map_err(|e| format!("invalid config.json: {e}"))?;
+    if let Some(q) = modelopt_quant_config(root)? {
+        if cfg.get("quantization_config").is_none_or(Value::is_null) {
+            cfg["quantization_config"] = q;
+        }
+    }
     if crate::bert::supports(&cfg) {
         return crate::bert::convert(input, output, options, &cfg);
     }
@@ -182,7 +187,8 @@ pub fn convert_checkpoint(
     let (_real_token_count, tokenmeta) = tokenizer(root, vocab, &cfg)?;
     meta.extend(tokenmeta);
     let all = safetensors::read_checkpoint(input)?;
-    let (dense, packed_groups) = split_packed(all, quant, &|n| {
+    let fp8_block = fp8_block_size(&cfg);
+    let (dense, packed_groups) = split_packed(all, quant, fp8_block, &|n| {
         Ok(match plan.map(n)? {
             Mapped::Skip => None,
             Mapped::Tensor { name, .. } => Some(name),
@@ -596,13 +602,20 @@ pub fn convert_checkpoint(
         } else {
             None
         };
-        let fp8m = if options.output_dtype == OutputDType::Preserve && q4z.is_none() && q4zp.is_none() {
+        let preserve = options.output_dtype == OutputDType::Preserve;
+        let fp8m = if preserve && q4z.is_none() && q4zp.is_none() {
             packed.is_fp8m()
         } else {
             false
         };
+        // NVFP4 stays GGUF type 40 when the rows fit 64-value blocks, 8-bit integer codes stay Q8_0
+        let nvfp4 = preserve && packed.nvfp4().is_some_and(|t| t.fits_gguf_blocks());
+        let q8_0 = preserve && packed.sym_int().is_some_and(|t| t.q8_0_ok());
         let in_features = dims.get(1).copied().unwrap_or(0) as usize;
+        let rows_out = dims.first().copied().unwrap_or(0) as usize;
         let out_dtype = match (q4z, q4zp, fp8m, options.output_dtype) {
+            _ if nvfp4 => "NVFP4".to_string(),
+            _ if q8_0 => "Q8_0".to_string(),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
             (None, None, true, _) => "FP8M".to_string(),
@@ -610,15 +623,27 @@ pub fn convert_checkpoint(
             (None, None, false, _) => "F16".to_string(),
         };
         let data_len = match (q4z, q4zp, fp8m) {
+            _ if nvfp4 => (rows_out * (in_features / 64 * 36)) as u64,
+            _ if q8_0 => (rows_out * (in_features / 32 * 34)) as u64,
             (Some(g), _, _) => (count / g * (g / 2 + 3)) as u64,
             (None, Some(g), _) => (count / g * (g / 2 + 3) + in_features * 4) as u64,
-            (None, None, true) => {
-                let rows = dims.first().copied().unwrap_or(0) as usize;
-                (count + rows * 2) as u64
-            }
+            (None, None, true) => (count + rows_out * 2) as u64,
             (None, None, false) => (count as u64)
                 .checked_mul(if out_dtype == "F32" { 4 } else { 2 })
                 .ok_or("packed output size overflow")?,
+        };
+        // the per-tensor factor and the activation scale of an NVFP4 weight travel as F32 scalars `<name>.scale`
+        // and `<name>.input_scale` (the llama.cpp names the engine reads)
+        let nvfp4_scalars: Vec<(String, f32)> = match packed.nvfp4().filter(|_| nvfp4) {
+            Some(t) => {
+                let stem = name.strip_suffix(".weight").unwrap_or(&name).to_owned();
+                let mut v = vec![(format!("{stem}.scale"), t.global_scale())];
+                if let Some(i) = t.input_scale() {
+                    v.push((format!("{stem}.input_scale"), i));
+                }
+                v
+            }
+            None => Vec::new(),
         };
         let source_for_output = row_permutation(arch, &name, heads, kv_heads, head_dim)?;
         outs.push(OutTensor {
@@ -634,6 +659,24 @@ pub fn convert_checkpoint(
             owned: None,
             parts: Vec::new(),
         });
+        for (scalar_name, value) in nvfp4_scalars {
+            if !seen.insert(scalar_name.clone()) {
+                return Err(format!("multiple HF tensors map to GGUF name {scalar_name}").into());
+            }
+            outs.push(OutTensor {
+                name: scalar_name,
+                dims: vec![1],
+                source_dtype: "F32".into(),
+                dtype: "F32".into(),
+                data: safetensors::Payload::Owned(std::sync::Arc::new(Vec::new()), 0..0),
+                packed: None,
+                data_len: 4,
+                source_for_output: None,
+                add: 0.0,
+                owned: Some(value.to_le_bytes().to_vec()),
+                parts: Vec::new(),
+            });
+        }
     }
     for (name, _) in &plan.synthesized {
         seen.insert(name.clone());
@@ -984,6 +1027,123 @@ pub(crate) enum Quantization {
     Gptq { group: u64 },
     Awq { group: u64 },
     Fp8,
+    /// NVIDIA ModelOpt `NVFP4` (E2M1 codes, E4M3 block scales per 16 inputs, per-tensor factor).
+    Nvfp4,
+    /// `compressed-tensors` `pack-quantized`, symmetric; `group` inputs per scale (0: one scale per output row).
+    CtPacked { bits: u64, group: u64 },
+    /// `compressed-tensors` `int-quantized` int8, symmetric; `group` as above.
+    CtInt8 { group: u64 },
+}
+
+/// `hf_quant_config.json` of ModelOpt exports as a `quantization_config` object (`quant_method: modelopt`).
+fn modelopt_quant_config(root: &Path) -> Result<Option<Value>, String> {
+    let path = root.join("hf_quant_config.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read(&path).map_err(|e| format!("read hf_quant_config.json: {e}"))?;
+    let v: Value = serde_json::from_slice(&text).map_err(|e| format!("invalid hf_quant_config.json: {e}"))?;
+    let Some(mut q) = v.get("quantization").filter(|q| q.is_object()).cloned() else {
+        return Err("hf_quant_config.json has no quantization object".into());
+    };
+    if q.get("quant_method").is_none() {
+        q["quant_method"] = "modelopt".into();
+    }
+    Ok(Some(q))
+}
+
+/// Tile size of block-wise FP8 weights (`weight_block_size` or compressed-tensors `block_structure`).
+fn fp8_block_size(cfg: &Value) -> Option<(usize, usize)> {
+    let q = cfg.get("quantization_config")?;
+    let from_array = |a: &Value| -> Option<(usize, usize)> {
+        let a = a.as_array()?;
+        match (a.first()?.as_u64()?, a.get(1)?.as_u64()?) {
+            (r, c) if r > 0 && c > 0 && a.len() == 2 => Some((r as usize, c as usize)),
+            _ => None,
+        }
+    };
+    if let Some(b) = q.get("weight_block_size").and_then(from_array) {
+        return Some(b);
+    }
+    let weights = ct_weights(q).ok()??;
+    let b = weights.get("block_structure")?;
+    from_array(b).or_else(|| {
+        let (r, c) = b.as_str()?.split_once('x')?;
+        Some((r.trim().parse().ok()?, c.trim().parse().ok()?))
+    })
+}
+
+/// The `weights` scheme shared by every `config_groups` entry of a compressed-tensors config.
+fn ct_weights(q: &Value) -> Result<Option<&Value>, String> {
+    let Some(groups) = q.get("config_groups").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let mut first: Option<&Value> = None;
+    for group in groups.values() {
+        let Some(w) = group.get("weights").filter(|w| !w.is_null()) else {
+            continue;
+        };
+        match first {
+            None => first = Some(w),
+            Some(f) if f == w => {}
+            Some(_) => {
+                return Err("compressed-tensors config_groups use different weight schemes; mixed-precision checkpoints are not supported".into())
+            }
+        }
+    }
+    Ok(first)
+}
+
+fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
+    const HINT: &str = "supported compressed-tensors checkpoints: FP8 (float-quantized), symmetric int4/int8 weights (pack-quantized) and symmetric int8 (int-quantized); convert other formats to GGUF with llama.cpp or pick another repository";
+    let format = q.get("format").and_then(Value::as_str).unwrap_or("");
+    if q.get("sparsity_config")
+        .and_then(|s| s.get("format"))
+        .and_then(Value::as_str)
+        .is_some_and(|f| f != "dense")
+    {
+        return Err(format!("compressed-tensors sparse checkpoints are not supported; {HINT}"));
+    }
+    let w = ct_weights(q)?.ok_or_else(|| format!("compressed-tensors config has no weight quantization scheme; {HINT}"))?;
+    let bits = w.get("num_bits").and_then(Value::as_u64).unwrap_or(0);
+    let kind = w.get("type").and_then(Value::as_str).unwrap_or("int");
+    let strategy = w.get("strategy").and_then(Value::as_str).unwrap_or("tensor");
+    if format.contains("nvfp4") || (kind == "float" && bits == 4) {
+        return Err(format!(
+            "compressed-tensors NVFP4 (format {format:?}) is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint (quant_algo NVFP4) or a GGUF; {HINT}"
+        ));
+    }
+    if kind == "float" {
+        if bits == 8 {
+            return Ok(Quantization::Fp8);
+        }
+        return Err(format!("compressed-tensors float weights with {bits} bits are not supported; {HINT}"));
+    }
+    if w.get("symmetric").and_then(Value::as_bool) == Some(false) {
+        return Err(format!("compressed-tensors asymmetric (zero-point) integer weights are not supported; {HINT}"));
+    }
+    if w.get("actorder").is_some_and(|a| !a.is_null() && a != "null") {
+        return Err(format!("compressed-tensors weights with activation ordering (actorder) are not supported; {HINT}"));
+    }
+    let group = match strategy {
+        "group" => w
+            .get("group_size")
+            .and_then(Value::as_u64)
+            .filter(|&g| g > 0)
+            .ok_or("compressed-tensors group quantization requires a positive group_size")?,
+        "channel" | "tensor" => 0,
+        other => {
+            return Err(format!("compressed-tensors weight strategy {other:?} is not supported; {HINT}"))
+        }
+    };
+    match (format, bits) {
+        ("int-quantized", 8) => Ok(Quantization::CtInt8 { group }),
+        ("pack-quantized", 4 | 8) | ("", 4) => Ok(Quantization::CtPacked { bits, group }),
+        ("", 8) => Ok(Quantization::CtInt8 { group }),
+        _ => Err(format!(
+            "compressed-tensors format {format:?} with {bits}-bit integer weights is not supported; {HINT}"
+        )),
+    }
 }
 fn quantization(cfg: &Value) -> Result<Quantization, String> {
     let Some(q) = cfg.get("quantization_config").filter(|v| !v.is_null()) else {
@@ -1036,11 +1196,30 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
                 .ok_or("AWQ requires positive group_size")?;
             Ok(Quantization::Awq { group })
         }
-        "fp8" | "compressed-tensors" => {
-            Ok(Quantization::Fp8)
+        "fp8" => Ok(Quantization::Fp8),
+        "compressed-tensors" => compressed_tensors(q),
+        "modelopt" => {
+            let algo = q
+                .get("quant_algo")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            match algo.as_str() {
+                "NVFP4" => {
+                    let group = q.get("group_size").and_then(Value::as_u64).unwrap_or(16);
+                    if group != 16 {
+                        return Err(format!("ModelOpt NVFP4 with group_size {group} is not supported (16 expected)"));
+                    }
+                    Ok(Quantization::Nvfp4)
+                }
+                "FP8" => Ok(Quantization::Fp8),
+                other => Err(format!(
+                    "unsupported ModelOpt quant_algo {other:?}: only NVFP4 and FP8 checkpoints can be imported"
+                )),
+            }
         }
         _ => Err(format!(
-            "unsupported quantization_config quant_method {method:?}"
+            "unsupported quantization_config quant_method {method:?} (supported: gptq, awq, fp8, compressed-tensors, modelopt NVFP4/FP8, exl2, exl3)"
         )),
     }
 }
@@ -1061,7 +1240,6 @@ fn parse_fp8_scales(t: &Tensor, rows: usize) -> Result<Vec<u16>, String> {
             t.name, num_scales
         ));
     }
-    let is_inv = t.name.ends_with(".weight_scale_inv");
     let mut out_f32 = Vec::with_capacity(num_scales);
     match t.dtype.as_str() {
         "BF16" => {
@@ -1070,8 +1248,7 @@ fn parse_fp8_scales(t: &Tensor, rows: usize) -> Result<Vec<u16>, String> {
             }
             for chunk in bytes.as_chunks::<2>().0 {
                 let u = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let mut f = f32::from_bits((u as u32) << 16);
-                if is_inv && f != 0.0 { f = 1.0 / f; }
+                let f = f32::from_bits((u as u32) << 16);
                 out_f32.push(f);
             }
         }
@@ -1081,8 +1258,7 @@ fn parse_fp8_scales(t: &Tensor, rows: usize) -> Result<Vec<u16>, String> {
             }
             for chunk in bytes.as_chunks::<2>().0 {
                 let u = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let mut f = half::f16::from_bits(u).to_f32();
-                if is_inv && f != 0.0 { f = 1.0 / f; }
+                let f = half::f16::from_bits(u).to_f32();
                 out_f32.push(f);
             }
         }
@@ -1092,8 +1268,7 @@ fn parse_fp8_scales(t: &Tensor, rows: usize) -> Result<Vec<u16>, String> {
             }
             for chunk in bytes.as_chunks::<4>().0 {
                 let u = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                let mut f = f32::from_bits(u);
-                if is_inv && f != 0.0 { f = 1.0 / f; }
+                let f = f32::from_bits(u);
                 out_f32.push(f);
             }
         }
@@ -1107,12 +1282,220 @@ fn parse_fp8_scales(t: &Tensor, rows: usize) -> Result<Vec<u16>, String> {
     }
 }
 
-pub(crate) fn split_packed(
+/// All scalars of a float scale tensor as f32.
+fn scale_values(t: &Tensor) -> Result<Vec<f32>, String> {
+    let bytes = t.payload.as_slice();
+    match t.dtype.as_str() {
+        "BF16" => Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f32::from_bits((u16::from_le_bytes([c[0], c[1]]) as u32) << 16))
+            .collect()),
+        "F16" => Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect()),
+        "F32" => Ok(bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()),
+        other => Err(format!("unsupported scale dtype {other} for {}", t.name)),
+    }
+}
+
+fn single_f32(t: &Tensor) -> Result<f32, String> {
+    match scale_values(t)?.as_slice() {
+        [v] => Ok(*v),
+        other => Err(format!("{} must hold one value, found {}", t.name, other.len())),
+    }
+}
+
+fn matrix_dims(t: &Tensor) -> Result<(usize, usize), String> {
+    match t.shape[..] {
+        [r, c] => Ok((
+            usize::try_from(r).map_err(|_| "dimension too large")?,
+            usize::try_from(c).map_err(|_| "dimension too large")?,
+        )),
+        _ => Err(format!("{} must have rank 2, found shape {:?}", t.name, t.shape)),
+    }
+}
+
+/// ModelOpt NVFP4: `U8` weights with `weight_scale` (E4M3), `weight_scale_2` and `input_scale` per linear.
+fn split_nvfp4(
+    all: Vec<Tensor>,
+    map: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<PackedSplit, String> {
+    let mut weights = Vec::new();
+    let mut scales = HashMap::new();
+    let mut globals = HashMap::new();
+    let mut inputs = HashMap::new();
+    let mut dense = Vec::new();
+    for t in all {
+        if let Some(base) = t.name.strip_suffix(".weight_scale_2") {
+            globals.insert(base.to_owned(), t);
+        } else if let Some(base) = t.name.strip_suffix(".weight_scale") {
+            scales.insert(base.to_owned(), t);
+        } else if let Some(base) = t.name.strip_suffix(".input_scale") {
+            inputs.insert(base.to_owned(), t);
+        } else if t.name.ends_with(".k_scale") || t.name.ends_with(".v_scale") {
+            // FP8 KV-cache scales: the engine chooses its own KV format
+        } else if t.name.ends_with(".weight") && t.dtype == "U8" {
+            weights.push(t);
+        } else {
+            dense.push(t);
+        }
+    }
+    let mut packed = Vec::new();
+    for w in weights {
+        let base = w.name.strip_suffix(".weight").unwrap_or(&w.name).to_owned();
+        let scale = scales
+            .remove(&base)
+            .ok_or_else(|| format!("NVFP4 weight {} has no {base}.weight_scale", w.name))?;
+        let global = globals
+            .remove(&base)
+            .ok_or_else(|| format!("NVFP4 weight {} has no {base}.weight_scale_2", w.name))?;
+        let (rows, half_cols) = matrix_dims(&w)?;
+        let cols = half_cols * 2;
+        if scale.dtype != "F8_E4M3" || scale.shape != [rows as u64, (cols / 16) as u64] {
+            return Err(format!(
+                "{} must be F8_E4M3 [{rows}, {}], found {} {:?}",
+                scale.name,
+                cols / 16,
+                scale.dtype,
+                scale.shape
+            ));
+        }
+        if global.dtype != "F32" {
+            return Err(format!("{} must be F32, found {}", global.name, global.dtype));
+        }
+        let input = inputs.remove(&base).map(|t| single_f32(&t)).transpose()?;
+        let t = crate::nvfp4::Nvfp4::new(w.payload.clone(), scale.payload, rows, cols, single_f32(&global)?, input)
+            .map_err(|e| format!("{}: {e}", w.name))?;
+        let mapped = map(&w.name)?
+            .ok_or_else(|| format!("packed tensor {:?} maps to a skipped tensor", w.name))?;
+        packed.push((mapped, PackedData::Nvfp4(t), vec![rows as u64, cols as u64], w.payload));
+    }
+    if let Some(left) = scales.keys().chain(globals.keys()).next() {
+        return Err(format!("NVFP4 scale tensors of {left} have no U8 weight"));
+    }
+    if packed.is_empty() {
+        return Err("quantization_config declares NVFP4 but no U8 weights with weight_scale were found".into());
+    }
+    Ok((dense, packed))
+}
+
+/// compressed-tensors symmetric integer weights: `pack-quantized` (`weight_packed`) or int8 `weight`.
+fn split_ct_int(
     all: Vec<Tensor>,
     quant: Quantization,
     map: &dyn Fn(&str) -> Result<Option<String>, String>,
 ) -> Result<PackedSplit, String> {
+    use crate::symint::{SymCodes, SymInt, SymScale};
+    let packed_format = matches!(quant, Quantization::CtPacked { .. });
+    let mut weights = Vec::new();
+    let mut scales = HashMap::new();
+    let mut shapes = HashMap::new();
+    let mut dense = Vec::new();
+    for t in all {
+        let n = t.name.as_str();
+        if let Some(base) = n.strip_suffix(".weight_scale") {
+            scales.insert(base.to_owned(), t);
+        } else if let Some(base) = n.strip_suffix(".weight_shape") {
+            shapes.insert(base.to_owned(), t);
+        } else if n.ends_with(".weight_zero_point") || n.ends_with(".weight_g_idx") {
+            return Err(format!(
+                "{n}: compressed-tensors asymmetric or activation-ordered weights are not supported"
+            ));
+        } else if n.ends_with(".input_scale") || n.ends_with(".input_zero_point") {
+            // activations are quantized dynamically by the engine
+        } else if (packed_format && n.ends_with(".weight_packed"))
+            || (!packed_format && n.ends_with(".weight") && t.dtype == "I8")
+        {
+            weights.push(t);
+        } else {
+            dense.push(t);
+        }
+    }
+    let mut packed = Vec::new();
+    for w in weights {
+        let base = w
+            .name
+            .strip_suffix(".weight_packed")
+            .or_else(|| w.name.strip_suffix(".weight"))
+            .unwrap_or(&w.name)
+            .to_owned();
+        let scale = scales
+            .remove(&base)
+            .ok_or_else(|| format!("integer weight {} has no {base}.weight_scale", w.name))?;
+        let scale_type = SymScale::from_dtype(&scale.dtype)
+            .ok_or_else(|| format!("{} has unsupported dtype {}", scale.name, scale.dtype))?;
+        let (rows, stored_cols) = matrix_dims(&w)?;
+        let (kind, cols, group_cfg) = match quant {
+            Quantization::CtPacked { bits: 4, group } => {
+                if w.dtype != "I32" {
+                    return Err(format!("{} must be I32, found {}", w.name, w.dtype));
+                }
+                (SymCodes::Packed4, stored_cols * 8, group)
+            }
+            Quantization::CtPacked { bits: 8, group } => {
+                if w.dtype != "I32" {
+                    return Err(format!("{} must be I32, found {}", w.name, w.dtype));
+                }
+                (SymCodes::Packed8, stored_cols * 4, group)
+            }
+            Quantization::CtInt8 { group } => (SymCodes::Int8, stored_cols, group),
+            _ => return Err("not a compressed-tensors integer format".into()),
+        };
+        if let Some(shape) = shapes.remove(&base) {
+            let dims: Vec<u64> = shape
+                .payload
+                .as_slice()
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
+                .collect();
+            if dims != [rows as u64, cols as u64] {
+                return Err(format!(
+                    "{}.weight_shape {dims:?} does not match the packed weight [{rows}, {cols}]",
+                    base
+                ));
+            }
+        }
+        let group = if group_cfg == 0 { cols } else { group_cfg as usize };
+        let t = SymInt::new(w.payload.clone(), kind, scale.payload, scale_type, rows, cols, group)
+            .map_err(|e| format!("{}: {e}", w.name))?;
+        let mapped = map(&format!("{base}.weight"))?
+            .ok_or_else(|| format!("packed tensor {:?} maps to a skipped tensor", w.name))?;
+        packed.push((mapped, PackedData::SymInt(t), vec![rows as u64, cols as u64], w.payload));
+    }
+    if let Some(left) = scales.keys().next() {
+        return Err(format!("{left}.weight_scale has no matching integer weight"));
+    }
+    if packed.is_empty() {
+        return Err("quantization_config declares compressed-tensors integer weights but none were found".into());
+    }
+    Ok((dense, packed))
+}
+
+pub(crate) fn split_packed(
+    all: Vec<Tensor>,
+    quant: Quantization,
+    fp8_block: Option<(usize, usize)>,
+    map: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<PackedSplit, String> {
     use std::collections::BTreeMap;
+    if quant == Quantization::Nvfp4 {
+        return split_nvfp4(all, map);
+    }
+    if matches!(quant, Quantization::CtPacked { .. } | Quantization::CtInt8 { .. }) {
+        return split_ct_int(all, quant, map);
+    }
     let has_exl = all
         .iter()
         .any(|t| t.name.ends_with(".q_weight") || t.name.ends_with(".trellis"));
@@ -1157,6 +1540,22 @@ pub(crate) fn split_packed(
                 }
                 let rows = w.shape[0] as usize;
                 let cols = w.shape[1] as usize;
+                let scale_count = scale_tensor.shape.iter().product::<u64>() as usize;
+                let tile_scales = scale_tensor.shape.len() == 2 && scale_count != 1 && scale_count != rows;
+                if tile_scales {
+                    let (br, bc) = fp8_block.ok_or_else(|| {
+                        format!(
+                            "{} has the 2-D scale shape {:?} but the quantization_config declares no weight_block_size",
+                            w.name, scale_tensor.shape
+                        )
+                    })?;
+                    let t = crate::symint::Fp8Block::new(w.payload.clone(), scale_values(&scale_tensor)?, rows, cols, br, bc)
+                        .map_err(|e| format!("{}: {e}", w.name))?;
+                    let mapped = map(&w.name)?
+                        .ok_or_else(|| format!("packed tensor {:?} maps to a skipped tensor", w.name))?;
+                    packed.push((mapped, PackedData::Fp8Block(t), w.shape.clone(), w.payload));
+                    continue;
+                }
                 let parsed_scales = parse_fp8_scales(&scale_tensor, rows)?;
                 let p = PackedData::Fp8Marlin {
                     weight: w.payload.clone(),

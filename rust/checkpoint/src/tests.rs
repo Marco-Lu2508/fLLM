@@ -184,6 +184,7 @@ fn gptq_group_is_mapped_to_standard_hf_weight_and_decodes_in_bounded_chunks() {
     let (_, mut groups) = crate::convert::split_packed(
         tensors,
         crate::convert::Quantization::Gptq { group: 8 },
+        None,
         &|n| {
             Ok(match plan.map(n)? {
                 crate::plan::Mapped::Tensor { name, .. }

@@ -10,11 +10,13 @@ pub mod gguf_tools;
 mod gptoss;
 mod modernbert;
 mod nomic;
+mod nvfp4;
 mod packed_quant;
 mod plan;
 mod quantize;
 mod requant;
 mod safetensors;
+mod symint;
 mod torch_zip;
 
 pub use convert::{
