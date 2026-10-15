@@ -7,7 +7,7 @@
 //! | `P.weight` | `U8 [out, in/2]` | two E2M1 codes per byte, the even input index in the low nibble |
 //! | `P.weight_scale` | `F8_E4M3 [out, in/16]` | one block scale per 16 inputs |
 //! | `P.weight_scale_2` | `F32` scalar | per-tensor factor |
-//! | `P.input_scale` | `F32` scalar | activation scale (kept as metadata; the engine quantizes activations itself) |
+//! | `P.input_scale` | `F32` scalar | static activation scale (written as `<name>.input_scale`; the CUDA backend quantizes activations with it, see FLLM_NVFP4_ACT_SCALE) |
 //!
 //! `value = e2m1(code) * e4m3(block scale) * weight_scale_2` (ModelOpt's dequantization).
 //!
