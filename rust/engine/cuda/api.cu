@@ -185,11 +185,16 @@ int fllm_cuda_free(void *ptr) { CHECK(cudaFree(ptr), "cudaFree"); return 0; }
 int fllm_cuda_h2d_sync(int dev, void *dst, const void *src, size_t bytes) {
     CHECK(cudaSetDevice(dev), "cudaSetDevice");
     CHECK(cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice), "cudaMemcpy");
+    // A synchronous copy from pageable memory may return once the data is staged, with the DMA to the device still queued in the legacy default
+    // stream, and the compute streams are non-blocking, so nothing orders their kernels after it: wait for the legacy stream so that a weight (or its
+    // NVFP4 trailer, the last bytes of the buffer) is complete when the first GEMM reads it.
+    CHECK(cudaStreamSynchronize(0), "cudaStreamSynchronize(legacy)");
     return 0;
 }
 int fllm_cuda_memset(int dev, void *ptr, int value, size_t bytes) {
     CHECK(cudaSetDevice(dev), "cudaSetDevice");
     CHECK(cudaMemset(ptr, value, bytes), "cudaMemset");
+    CHECK(cudaStreamSynchronize(0), "cudaStreamSynchronize(legacy)");  // as above: the compute streams are not ordered after the legacy stream
     return 0;
 }
 

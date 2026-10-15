@@ -1915,7 +1915,8 @@ impl Stream for CudaStream {
                 return Ok(false);
             }
             let batch = x.size / (cols * 4);
-            if batch == 0 || out16.size < batch * rows * 2 {
+            // the halves are written through quantized_linear, which wants a buffer sized for FP32 results (the decoder's q/k/v and gate/up buffers are)
+            if batch == 0 || out16.size < batch * rows * 4 {
                 return Ok(false);
             }
             // SAFETY: pointers of live device buffers and sizes checked above; the call only inspects its arguments.

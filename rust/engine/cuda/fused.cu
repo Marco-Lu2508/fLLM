@@ -153,7 +153,7 @@ add_rms_norm_kernel(float *__restrict__ x, const void *__restrict__ branch, cons
             const float gs = gsp != nullptr ? *gsp : 1.f;
             const uint32_t sb = f_to_ue4m3(amax * gs * (1.f / 6.f));
             const float sd = ue4m3_to_f(sb);
-            const float inv4 = sd > 0.f ? gs / sd : 0.f;
+            const float inv4 = sd > 0.f ? FLLM_FP4_DIV(gs, sd) : 0.f;
             const float ov[4] = {o.x, o.y, o.z, o.w};
             uint32_t h16 = 0;
 #pragma unroll

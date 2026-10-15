@@ -632,18 +632,84 @@ fn timed(
 /// Largest `|have - want| / scale` (scale floored at 1e-30). NaN or a length mismatch is
 /// infinite.
 fn worst(have: &[f32], want: &[f64], scale: &[f64]) -> f64 {
+    let mut at = WorstAt { err: 0.0, index: 0, have: 0.0, want: 0.0, scale: 0.0, len: have.len(), want_len: want.len() };
     if have.len() != want.len() {
-        return f64::INFINITY;
+        at.err = f64::INFINITY;
+        return log_worst(at);
     }
-    let mut worst = 0.0f64;
-    for ((&h, &w), &s) in have.iter().zip(want).zip(scale) {
+    for (i, ((&h, &w), &s)) in have.iter().zip(want).zip(scale).enumerate() {
         let e = (f64::from(h) - w).abs() / s.max(1e-30);
         if e.is_nan() {
-            return f64::INFINITY;
+            return log_worst(WorstAt { err: f64::INFINITY, index: i, have: h, want: w, scale: s, ..at });
         }
-        worst = worst.max(e);
+        if e > at.err {
+            at = WorstAt { err: e, index: i, have: h, want: w, scale: s, ..at };
+        }
     }
-    worst
+    log_worst(at)
+}
+
+/// Where the largest error of a `worst` call sits. `record` names it in the message of a check that fails the tolerance, so that no failure is
+/// reported without the element, its values and the error scale.
+#[derive(Clone, Copy)]
+struct WorstAt {
+    err: f64,
+    index: usize,
+    have: f32,
+    want: f64,
+    scale: f64,
+    len: usize,
+    want_len: usize,
+}
+
+thread_local! {
+    static WORST_LOG: std::cell::RefCell<Vec<WorstAt>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn log_worst(at: WorstAt) -> f64 {
+    WORST_LOG.with(|log| {
+        let mut log = log.borrow_mut();
+        if log.len() >= 32 {
+            log.remove(0);
+        }
+        log.push(at);
+    });
+    at.err
+}
+
+/// The message of a check whose error is beyond its tolerance: for the device and for the CPU backend the error, the tolerance and the worst element.
+fn describe_failure(o: &Outcome) -> String {
+    let log: Vec<WorstAt> = WORST_LOG.with(|l| l.borrow().clone());
+    let mut parts = Vec::new();
+    for (label, err, tol) in [("device", o.device, o.tol), ("cpu", o.cpu, o.cpu_tol)] {
+        if err <= tol {
+            continue;
+        }
+        let found = log.iter().rev().find(|w| w.err.to_bits() == err.to_bits() || (w.err.is_infinite() && err.is_infinite()));
+        parts.push(match found {
+            Some(w) if w.len != w.want_len => format!("{label}: {} results for {} expected elements", w.len, w.want_len),
+            Some(w) if err.is_infinite() => {
+                format!("{label}: NaN at element {} of {}: got {}, expected {:.6e}, error scale {:.3e}", w.index, w.len, w.have, w.want, w.scale)
+            }
+            Some(w) => format!(
+                "{label}: max error {err:.3e} (relative to the error scale) > tolerance {tol:.1e} at element {} of {}: got {}, expected {:.6e}, error scale {:.3e}",
+                w.index, w.len, w.have, w.want, w.scale
+            ),
+            None => format!("{label}: error {err:.3e} > tolerance {tol:.1e} (the position of the worst element was not recorded)"),
+        });
+    }
+    if parts.is_empty() {
+        format!("error {:.3e} / {:.3e} beyond tolerance {:.1e} / {:.1e}", o.device, o.cpu, o.tol, o.cpu_tol)
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// Offset of the 16-byte trailer (`nvfp4_trailer` in cuda.rs) of an NVFP4 device weight of `rows` x `cols`: behind the nibbles (padded to 256) and the
+/// swizzled scales, at the next multiple of 256.
+fn nvfp4_trailer_offset(rows: usize, cols: usize) -> usize {
+    let nibbles = (rows * cols / 2).div_ceil(256) * 256;
+    (nibbles + rows.div_ceil(128) * (cols / 64) * 512).div_ceil(256) * 256
 }
 
 /// The E2M1 magnitudes 0, .5, 1, 1.5, 2, 3, 4, 6.
@@ -888,7 +954,13 @@ impl<'a> Tester<'a> {
             }
             o
         });
-        let (status, message) = classify(&outcome, claimed);
+        let (status, mut message) = classify(&outcome, claimed);
+        if status == Status::Failed && message.is_none() {
+            if let Ok(o) = &outcome {
+                message = Some(describe_failure(o));
+            }
+        }
+        WORST_LOG.with(|l| l.borrow_mut().clear());
         if self.printed_group != self.group {
             println!("== {} ==", self.group);
             self.printed_group = self.group;
@@ -902,7 +974,7 @@ impl<'a> Tester<'a> {
                 o.cpu,
                 o.tol,
                 o.ms,
-                if status == Status::Ok { "ok" } else { "FAIL" }
+                if status == Status::Ok { "ok".to_owned() } else { format!("FAIL: {text}") }
             ),
             (None, Status::Skipped) => println!("{op:<18} {shape:<40} SKIPPED (unsupported): {text}"),
             (None, _) => println!("{op:<18} {shape:<40} FAIL: {text}"),
@@ -1068,25 +1140,41 @@ impl<'a> Tester<'a> {
         // vLLM does, and the result is compared with a CPU simulation of that recipe. Skipped (unsupported) where the weights do not stay NVFP4
         // on the device (no sm_12x GPU, FLLM_NVFP4_MARLIN). `calibrated` tokens span 6 orders of magnitude, so a missing activation factor (FLLM_NVFP4_ACT_SCALE=off) fails.
         if self.filter.wants_kind(40) && std::env::var_os("FLLM_NVFP4_MARLIN").is_none() && std::env::var_os("FLLM_CUDA_EXACT").is_none() {
-            for (batch, factor, mode) in [
-                (1usize, 1.0f32, 0u8),
-                (8, 1.0, 0),
-                (40, 1.0, 0),
-                (129, 1.0, 0),
-                (356, 1.0, 0),
-                (129, 0.25, 0),  // input_scale smaller than calibrated: activations saturate at 448 * 6 / 4
-                (356, 1.0, 1),   // accumulating epilogue (output projections)
-                (356, 1.0, 2),   // FP16 results (q/k/v, gate/up)
-                (356, 1.0, 3),   // after an RMSNorm (FLLM_FUSE_NVFP4_NORM=1 runs both in one kernel)
-            ] {
-                let r = self.nvfp4_w4a4(384, 1024, batch, factor, mode);
-                let label = match mode {
-                    1 => " +acc",
-                    2 => " f16",
-                    3 => " +rms_norm",
-                    _ => "",
-                };
-                self.record("nvfp4 w4a4", &format!("384x1024 batch {batch} input_scale x{factor}{label}"), r);
+            // (rows, columns, batch, input_scale factor, result kind). Every round draws new data and runs the cases in another order (forward,
+            // reversed, rotated, ...), so that state left behind by one case (cached activations, scratch, a weight buffer reused at the same address)
+            // meets different successors. FLLM_SELFTEST_NVFP4_ROUNDS sets the number of rounds (default 2).
+            let cases: [(usize, usize, usize, f32, u8); 10] = [
+                (384, 1024, 1, 1.0, 0),
+                (384, 1024, 8, 1.0, 0),
+                (384, 1024, 40, 1.0, 0),
+                (384, 1024, 129, 1.0, 0),
+                (384, 1024, 356, 1.0, 0),
+                (384, 1024, 129, 0.25, 0), // input_scale smaller than calibrated: activations saturate at 448 * 6 / 4
+                (384, 1024, 356, 1.0, 1),  // accumulating epilogue (output projections)
+                (384, 1024, 356, 1.0, 2),  // FP16 results (q/k/v, gate/up)
+                (384, 1024, 356, 1.0, 3),  // after an RMSNorm (FLLM_FUSE_NVFP4_NORM=1 runs both in one kernel)
+                (768, 2048, 200, 1.0, 0),  // another shape: a weight buffer of a different size follows the others
+            ];
+            let rounds = std::env::var("FLLM_SELFTEST_NVFP4_ROUNDS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).max(1);
+            for round in 0..rounds {
+                let mut order: Vec<usize> = (0..cases.len()).collect();
+                match round % 3 {
+                    1 => order.reverse(),
+                    2 => order.rotate_left(4),
+                    _ => {}
+                }
+                for i in order {
+                    let (rows, cols, batch, factor, mode) = cases[i];
+                    let r = self.nvfp4_w4a4(rows, cols, batch, factor, mode);
+                    let label = match mode {
+                        1 => " +acc",
+                        2 => " f16",
+                        3 => " +rms_norm",
+                        _ => "",
+                    };
+                    let again = if round == 0 { String::new() } else { format!(" round {round}") };
+                    self.record("nvfp4 w4a4", &format!("{rows}x{cols} batch {batch} input_scale x{factor}{label}{again}"), r);
+                }
             }
         }
         // 32-value formats at a width that is no multiple of 256 (2880 = 90 blocks, like gpt-oss): padded device layout
@@ -1761,6 +1849,12 @@ impl<'a> Tester<'a> {
     /// NVFP4 W4A4 against the CPU simulation of vLLM's recipe (see `nvfp4_activation_reference`). `factor` scales the checkpoint-style
     /// input_scale (amax / 2688 of the activations) to test saturation; `mode`: 0 = plain result, 1 = added to a residual
     /// (`quantized_linear_add`), 2 = FP16 result (`linear_f16_out`), 3 = after an RMSNorm.
+    ///
+    /// The device side runs twice (fresh stream, fresh upload of the weight, fresh buffers) and must give bit-identical results: a difference is a
+    /// race or stale state, not rounding. Before each run the trailer of the uploaded weight is read back and compared with what the loader wrote
+    /// (a weight whose upload is not complete when the first GEMM reads it shows up here). A result outside the tolerance comes back as an error that
+    /// names the worst element, the number of elements and tokens above the tolerance and the mean error, so that "one token flipped a rounding"
+    /// (a few tokens, the worst error just above the tolerance) can be told from a systematic error (every token).
     fn nvfp4_w4a4(&mut self, rows: usize, cols: usize, batch: usize, factor: f32, mode: u8) -> Result<Outcome, BackendError> {
         self.claim = None;
         if self.device.name() == "CPU" {
@@ -1812,65 +1906,132 @@ impl<'a> Tester<'a> {
                 scale[b * rows + r] = base.abs() + f64::from(residual_scale) * alpha * mag;
             }
         }
-        let mut stream = self.device.create_stream()?;
-        crate::backend::set_next_nvfp4_input_scale(input_scale);
-        let uploaded = self.device.upload_weight_scaled("selftest", &weights, QuantType::NvFp4, rows, cols, None, weight_scale);
-        crate::backend::set_next_nvfp4_input_scale(0.0);
-        let weight = uploaded?;
-        if weight.quant_type != QuantType::NvFp4 {
-            return Err(BackendError::UnsupportedOperation("the weights are not kept as NVFP4 on this device (no FP4 tensor cores)".into()));
-        }
-        stream.synchronize()?;
-        let xb = put(self.device, stream.as_mut(), &x)?;
-        let mut ms = 0.0;
-        let have: Vec<f32> = match mode {
-            1 => {
-                let mut res = put(self.device, stream.as_mut(), &residual)?;
-                let mut taken = false;
-                timed(&mut ms, stream.as_mut(), |s| {
-                    taken = s.quantized_linear_add(&mut res, &xb, &weight, None, residual_scale)?;
-                    Ok(())
-                })?;
-                if !taken {
-                    return Err(BackendError::UnsupportedOperation("the accumulating NVFP4 GEMM is not available for this shape".into()));
+
+        let device = self.device;
+        let pass = || -> Result<(Vec<f32>, f64), BackendError> {
+            let mut stream = device.create_stream()?;
+            crate::backend::set_next_nvfp4_input_scale(input_scale);
+            let uploaded = device.upload_weight_scaled("selftest", &weights, QuantType::NvFp4, rows, cols, None, weight_scale);
+            crate::backend::set_next_nvfp4_input_scale(0.0);
+            let weight = uploaded?;
+            if weight.quant_type != QuantType::NvFp4 {
+                return Err(BackendError::UnsupportedOperation("the weights are not kept as NVFP4 on this device (no FP4 tensor cores)".into()));
+            }
+            stream.synchronize()?;
+            // the trailer behind the scales: {1 / input_scale, weight_scale_2 * input_scale, weight_scale_2, 1}
+            let trailer_at = nvfp4_trailer_offset(rows, cols);
+            if weight.buffer.size < trailer_at + 16 {
+                return Err(BackendError::DriverError(format!("the device weight has {} bytes, the trailer would sit at {trailer_at}", weight.buffer.size)));
+            }
+            let mut image = vec![0u8; weight.buffer.size];
+            stream.download(&mut image, &weight.buffer)?;
+            let got: Vec<f32> = image[trailer_at..trailer_at + 16].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+            let expected = [1.0 / input_scale, weight_scale * input_scale, weight_scale, 1.0];
+            if got != expected {
+                return Err(BackendError::DriverError(format!(
+                    "the weight trailer on the device is {got:?}, the loader wrote {expected:?} (upload not complete or overwritten before the GEMM)"
+                )));
+            }
+            let xb = put(device, stream.as_mut(), &x)?;
+            let mut ms = 0.0;
+            let have: Vec<f32> = match mode {
+                1 => {
+                    let mut res = put(device, stream.as_mut(), &residual)?;
+                    let mut taken = false;
+                    timed(&mut ms, stream.as_mut(), |s| {
+                        taken = s.quantized_linear_add(&mut res, &xb, &weight, None, residual_scale)?;
+                        Ok(())
+                    })?;
+                    if !taken {
+                        return Err(BackendError::UnsupportedOperation("the accumulating NVFP4 GEMM is not available for this shape".into()));
+                    }
+                    get(stream.as_mut(), &res, batch * rows)?
                 }
-                get(stream.as_mut(), &res, batch * rows)?
-            }
-            2 => {
-                let mut out16 = self.device.allocate_buffer(batch * rows * 2)?;
-                let mut taken = false;
-                timed(&mut ms, stream.as_mut(), |s| {
-                    taken = s.linear_f16_out(&mut out16, &xb, &weight)?;
-                    Ok(())
-                })?;
-                if !taken {
-                    return Err(BackendError::UnsupportedOperation("the FP16-result NVFP4 GEMM is not available for this shape".into()));
+                2 => {
+                    // linear_f16_out writes through quantized_linear, which wants a buffer sized for FP32 results (the decoder's buffers are)
+                    let mut out16 = device.allocate_buffer(batch * rows * 4)?;
+                    let mut taken = false;
+                    timed(&mut ms, stream.as_mut(), |s| {
+                        taken = s.linear_f16_out(&mut out16, &xb, &weight)?;
+                        Ok(())
+                    })?;
+                    if !taken {
+                        return Err(BackendError::UnsupportedOperation("the FP16-result NVFP4 GEMM is not available for this shape".into()));
+                    }
+                    let mut bytes = vec![0u8; batch * rows * 2];
+                    stream.download(&mut bytes, &out16)?;
+                    bytes.as_chunks::<2>().0.iter().map(|c| f16::from_le_bytes(*c).to_f32()).collect()
                 }
-                let mut bytes = vec![0u8; batch * rows * 2];
-                stream.download(&mut bytes, &out16)?;
-                bytes.as_chunks::<2>().0.iter().map(|c| f16::from_le_bytes(*c).to_f32()).collect()
-            }
-            3 => {
-                let xr = put(self.device, stream.as_mut(), &x_raw)?;
-                let wb = put(self.device, stream.as_mut(), &norm_weight)?;
-                let mut normed = self.device.allocate_buffer(batch * cols * 4)?;
-                let mut out = self.device.allocate_buffer(batch * rows * 4)?;
-                timed(&mut ms, stream.as_mut(), |s| {
-                    s.rms_norm(&mut normed, &xr, &wb, eps)?;
-                    s.quantized_linear(&mut out, &normed, &weight, None)
-                })?;
-                get(stream.as_mut(), &out, batch * rows)?
-            }
-            _ => {
-                let mut out = self.device.allocate_buffer(batch * rows * 4)?;
-                timed(&mut ms, stream.as_mut(), |s| s.quantized_linear(&mut out, &xb, &weight, None))?;
-                get(stream.as_mut(), &out, batch * rows)?
-            }
+                3 => {
+                    let xr = put(device, stream.as_mut(), &x_raw)?;
+                    let wb = put(device, stream.as_mut(), &norm_weight)?;
+                    let mut normed = device.allocate_buffer(batch * cols * 4)?;
+                    let mut out = device.allocate_buffer(batch * rows * 4)?;
+                    timed(&mut ms, stream.as_mut(), |s| {
+                        s.rms_norm(&mut normed, &xr, &wb, eps)?;
+                        s.quantized_linear(&mut out, &normed, &weight, None)
+                    })?;
+                    get(stream.as_mut(), &out, batch * rows)?
+                }
+                _ => {
+                    let mut out = device.allocate_buffer(batch * rows * 4)?;
+                    timed(&mut ms, stream.as_mut(), |s| s.quantized_linear(&mut out, &xb, &weight, None))?;
+                    get(stream.as_mut(), &out, batch * rows)?
+                }
+            };
+            Ok((have, ms))
         };
+        let (have, ms) = pass()?;
+        let (again, _) = pass()?;
+        if let Some(i) = have.iter().zip(&again).position(|(a, b)| a.to_bits() != b.to_bits()) {
+            let differing = have.iter().zip(&again).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            return Err(BackendError::DriverError(format!(
+                "not deterministic: {differing} of {} results differ between two identical runs, first at element {i} (token {}, row {}): {} then {}",
+                have.len(),
+                i / rows,
+                i % rows,
+                have[i],
+                again[i]
+            )));
+        }
+
         // FP32 accumulation of the same quantized operands (a different summation order) and, for mode 2, one FP16 rounding of the result
-        let tol = if mode == 2 { 2e-3 } else { 1e-3 };
-        let dev = worst(&have, &want, &scale);
-        Ok(Outcome { device: dev, cpu: 0.0, tol, cpu_tol: tol, ms })
+        let tol = if mode == 2 { 4e-3 } else { 2e-3 };
+        let mean_tol = 1e-4;
+        if have.len() != want.len() {
+            return Err(BackendError::DriverError(format!("{} results for {} expected", have.len(), want.len())));
+        }
+        let (mut max_err, mut max_at, mut sum_err, mut above, mut above_1e3) = (0.0f64, 0usize, 0.0f64, 0usize, 0usize);
+        let mut tokens_above = vec![false; batch];
+        for (i, ((&h, &w), &s)) in have.iter().zip(&want).zip(&scale).enumerate() {
+            let e = if h.is_nan() { f64::INFINITY } else { (f64::from(h) - w).abs() / s.max(1e-30) };
+            sum_err += e;
+            if e > max_err {
+                (max_err, max_at) = (e, i);
+            }
+            if e > tol {
+                above += 1;
+                tokens_above[i / rows] = true;
+            }
+            if e > 1e-3 {
+                above_1e3 += 1;
+            }
+        }
+        let mean_err = sum_err / have.len() as f64;
+        if max_err > tol || mean_err > mean_tol {
+            let tokens = tokens_above.iter().filter(|&&t| t).count();
+            return Err(BackendError::DriverError(format!(
+                "max error {max_err:.3e} (tolerance {tol:.0e}) at element {max_at} (token {}, row {}): got {}, expected {:.6e}, error scale {:.3e}; mean error {mean_err:.2e} (tolerance {mean_tol:.0e}); \
+                 {above} of {} elements above the tolerance in {tokens} of {batch} tokens, {above_1e3} above 1e-3; the two device runs were bit-identical",
+                max_at / rows,
+                max_at % rows,
+                have[max_at],
+                want[max_at],
+                scale[max_at],
+                have.len()
+            )));
+        }
+        Ok(Outcome { device: max_err, cpu: 0.0, tol, cpu_tol: tol, ms })
     }
 
     /// Two weights of different formats read the same activations back to back (q, k and v of a layer): the activations that

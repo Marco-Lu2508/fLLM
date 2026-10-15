@@ -367,7 +367,7 @@ its scales with `{gs, alpha, weight_scale_2, valid}`, which the kernels read on 
 `off` is the behaviour before this switch existed (no per-tensor factor: block scales below 2^-6 fall into the subnormal range of E4M3 and lose
 precision, blocks above 448 * 6 saturate), `dynamic` takes `gs` from the amax of every activation tensor (extra reduction kernels, not meant for decode; it also
 makes the result depend on the batch). q, k and v (gate and up) share one quantization of their input and use the factor of the first of them.
-`selftest-gpu` checks the fast path against a CPU simulation of this recipe (`nvfp4 w4a4` lines).
+`selftest-gpu` checks the fast path against a CPU simulation of this recipe (`nvfp4 w4a4` lines, `FLLM_SELFTEST_NVFP4_ROUNDS=N` repeats the cases N times, default 2, with new data and a different order each round). Each case runs twice with fresh uploads and must give bit-identical results, reads the weight trailer back from the device before the GEMM, and reports a failure with the worst element, the tolerance, the mean error and how many tokens are affected. The quantizer divides with `__fdiv_rn` (IEEE), so the GPU takes the same E2M1 rounding decisions as the CPU simulation; `-DFLLM_NVFP4_FAST_DIV` restores the approximate division. `scripts/test_nvfp4_quant_host.cpp` checks the quantizer arithmetic on the host (`g++ -O2 -std=c++17 scripts/test_nvfp4_quant_host.cpp`).
 
 **Prompt GEMM tiles.** `FLLM_NVFP4_TILE` selects the CUTLASS tile: unset = 128x128x128 up to 256 tokens and 128x128x256 above (the earlier behaviour),
 `auto` = a wave-quantization cost model (`pick_tile`), or one of `256x128x128`, `128x256x128`, `128x128x128`, `128x128x256`, `128x128x128-sk`,

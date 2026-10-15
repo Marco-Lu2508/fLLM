@@ -43,6 +43,15 @@ __device__ __forceinline__ uint32_t e2m1_idx(float a) {
 // Activation factor of a dynamic per-tensor scale: 2688 / amax (1 for an all-zero tensor).
 __device__ __forceinline__ float fp4_dynamic_gs(float amax) { return amax > 0.f ? FLLM_FP4_ACT_RANGE / amax : 1.f; }
 
+// The division gs / scale: IEEE (__fdiv_rn) so that the quantization is the same f32 arithmetic as a CPU simulation of the recipe (the fast-math
+// division of nvcc is off by up to 2 ulp, which moves an element across an E2M1 rounding threshold now and then and makes selftest-gpu's W4A4
+// comparison depend on the data). A division per 16 values, not per element. -DFLLM_NVFP4_FAST_DIV restores the approximate one.
+#ifdef FLLM_NVFP4_FAST_DIV
+#define FLLM_FP4_DIV(a, b) ((a) / (b))
+#else
+#define FLLM_FP4_DIV(a, b) __fdiv_rn((a), (b))
+#endif
+
 // Quantizes 16 values to one UE4M3 scale (returned) and two words of eight nibbles (nibble q of word h = element 8h + q).
 // gs: activation factor (see above), 1 for none.
 __device__ __forceinline__ uint32_t fp4_quantize_values(const float *v, uint32_t words[2], float gs = 1.f) {
@@ -51,7 +60,7 @@ __device__ __forceinline__ uint32_t fp4_quantize_values(const float *v, uint32_t
     for (int i = 0; i < 16; i++) amax = fmaxf(amax, fabsf(v[i]));
     const uint32_t sb = f_to_ue4m3(amax * gs * (1.f / 6.f));
     const float sd = ue4m3_to_f(sb);
-    const float inv = sd > 0.f ? gs / sd : 0.f;
+    const float inv = sd > 0.f ? FLLM_FP4_DIV(gs, sd) : 0.f;
 #pragma unroll
     for (int h = 0; h < 2; h++) {
         uint32_t w = 0;
