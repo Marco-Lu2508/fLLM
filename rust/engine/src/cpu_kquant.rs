@@ -1077,6 +1077,28 @@ pub(crate) fn token_sums(kind: u32, x: &[X]) -> Vec<KSums> {
 /// Decode one block of `raw` (a Q2_K..Q6_K block) into `out`.
 ///
 /// # Safety
+/// The scale words, minimums and super-block scales of a Q4_K block, as `decode_block` leaves them (without the weights).
+///
+/// # Safety
+/// The CPU must support AVX2/F16C and `raw` hold one Q4_K block.
+#[inline]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn q4k_scales(raw: &[u8], out: &mut KBlock) {
+    out.d = half(raw, 0);
+    out.dmin = half(raw, 2);
+    let (scales, mins_word) = unpack_scales(raw);
+    let scales16 = _mm_cvtepu8_epi16(_mm_cvtsi64_si128(scales as i64));
+    let scale_base = out.scales.as_mut_ptr();
+    for pair in 0..4usize {
+        _mm256_store_si256(
+            scale_base.add(pair * 16).cast::<__m256i>(),
+            _mm256_broadcastsi128_si256(_mm_shuffle_epi8(scales16, scale_selector(pair))),
+        );
+    }
+    let mins = _mm_cvtepu8_epi16(_mm_cvtsi64_si128(mins_word as i64));
+    _mm256_store_si256(out.mins.as_mut_ptr().cast(), _mm256_zextsi128_si256(mins));
+}
+
 /// The CPU must support AVX2/F16C and `raw` hold one block of `KIND`.
 #[inline]
 #[target_feature(enable = "avx2,f16c")]
@@ -1489,12 +1511,51 @@ pub(crate) unsafe fn decode_r8(
     debug_assert!(count <= R8_BLOCKS && rows <= 8 && blk0 + count <= blocks);
     let width = if kind == IQ4NL { 144 } else { block_bytes(kind) };
     let stride = blocks * width;
+    // The rows are separate streams that restart at every chunk; the first touch of a block would otherwise wait for DRAM.
+    // Fetch the chunk after next now (the next one was requested by the previous call).
+    let ahead = blk0 + 2 * R8_BLOCKS;
+    if ahead < blocks {
+        for r in 0..rows {
+            let row = (first + r) * stride;
+            let end = row + (ahead + R8_BLOCKS).min(blocks) * width;
+            for at in (row + ahead * width..end).step_by(64) {
+                _mm_prefetch::<_MM_HINT_T0>(w.as_ptr().add(at).cast());
+            }
+        }
+    }
     let spg = subs(kind);
     let mut decoded: Vec<KBlock> = vec![KBlock::default(); 8];
     let mut group_d = [[0.0f32; 8]; 8];
     let unsigned: [i8; 16] = std::array::from_fn(|i| IQ4_VALUES[i].wrapping_add_unsigned(128));
     let table = _mm_loadu_si128(unsigned.as_ptr().cast());
     for (j, out) in panel.iter_mut().enumerate().take(count) {
+        if kind == Q4K {
+            // the packed nibbles of the eight rows are transposed first and split into the two groups of a pair afterwards:
+            // half the transposes of the generic path and no round trip through a decoded block
+            let low4 = _mm256_set1_epi8(15);
+            for r in 0..rows {
+                let start = (first + r) * stride + (blk0 + j) * width;
+                q4k_scales(&w[start..start + width], &mut decoded[r]);
+            }
+            for pair in 0..4usize {
+                let lines: [__m256i; 8] = std::array::from_fn(|r| {
+                    if r < rows {
+                        let start = (first + r) * stride + (blk0 + j) * width;
+                        let raw = &w[start..start + width];
+                        _mm256_loadu_si256(raw.as_ptr().add(16 + pair * 32).cast())
+                    } else {
+                        _mm256_setzero_si256()
+                    }
+                });
+                let columns = transpose8(lines);
+                for (k, column) in columns.iter().enumerate() {
+                    let lo = _mm256_and_si256(*column, low4);
+                    let hi = _mm256_and_si256(_mm256_srli_epi16::<4>(*column), low4);
+                    _mm256_store_si256(out.q.as_mut_ptr().add((8 * (2 * pair) + k) * 32).cast(), lo);
+                    _mm256_store_si256(out.q.as_mut_ptr().add((8 * (2 * pair + 1) + k) * 32).cast(), hi);
+                }
+            }
+        } else {
         for r in 0..rows {
             let start = (first + r) * stride + (blk0 + j) * width;
             let raw = &w[start..start + width];
@@ -1534,30 +1595,45 @@ pub(crate) unsafe fn decode_r8(
                 _mm256_store_si256(out.q.as_mut_ptr().add((8 * g + k) * 32).cast(), *column);
             }
         }
-        for g in 0..8 {
-            for h in 0..spg {
-                let s = g * spg + h;
-                for r in 0..8 {
-                    if kind == IQ4NL {
-                        out.scale[s * 8 + r] = group_d[r][g];
-                        out.min[s * 8 + r] = 128.0 * group_d[r][g];
-                        continue;
+        }
+        // scales and minimums per row and group, then transposed so that the eight rows of a group share a vector
+        for h in 0..spg {
+            let mut scale = [_mm256_setzero_si256(); 8];
+            let mut min = [_mm256_setzero_si256(); 8];
+            for r in 0..8 {
+                let mut sc_row = [0.0f32; 8];
+                let mut min_row = [0.0f32; 8];
+                if kind == IQ4NL {
+                    for g in 0..8 {
+                        sc_row[g] = group_d[r][g];
+                        min_row[g] = 128.0 * group_d[r][g];
                     }
+                } else {
                     let kb = &decoded[r];
-                    let (scale, min) = if spg == 2 {
-                        let sc = f32::from(kb.scales[(g / 2) * 16 + (g % 2) * 4 + h * 8]);
-                        match kind {
-                            Q2K => (kb.d * sc, kb.dmin * f32::from(kb.mins[s])),
-                            Q3K => (kb.d * sc, 4.0 * kb.d * sc),
-                            _ => (kb.d * sc, 32.0 * kb.d * sc),
-                        }
-                    } else {
-                        let sc = f32::from(kb.scales[(g / 2) * 16 + (g % 2) * 4]);
-                        (kb.d * sc, kb.dmin * f32::from(kb.mins[g]))
-                    };
-                    out.scale[s * 8 + r] = scale;
-                    out.min[s * 8 + r] = min;
+                    for g in 0..8 {
+                        let (sc, mn) = if spg == 2 {
+                            let sc = f32::from(kb.scales[(g / 2) * 16 + (g % 2) * 4 + h * 8]);
+                            match kind {
+                                Q2K => (kb.d * sc, kb.dmin * f32::from(kb.mins[g * spg + h])),
+                                Q3K => (kb.d * sc, 4.0 * kb.d * sc),
+                                _ => (kb.d * sc, 32.0 * kb.d * sc),
+                            }
+                        } else {
+                            let sc = f32::from(kb.scales[(g / 2) * 16 + (g % 2) * 4]);
+                            (kb.d * sc, kb.dmin * f32::from(kb.mins[g]))
+                        };
+                        sc_row[g] = sc;
+                        min_row[g] = mn;
+                    }
                 }
+                scale[r] = _mm256_castps_si256(_mm256_loadu_ps(sc_row.as_ptr()));
+                min[r] = _mm256_castps_si256(_mm256_loadu_ps(min_row.as_ptr()));
+            }
+            let (scale, min) = (transpose8(scale), transpose8(min));
+            for g in 0..8 {
+                let at = (g * spg + h) * 8;
+                _mm256_storeu_si256(out.scale.as_mut_ptr().add(at).cast(), scale[g]);
+                _mm256_storeu_si256(out.min.as_mut_ptr().add(at).cast(), min[g]);
             }
         }
     }
