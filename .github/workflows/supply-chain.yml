@@ -92,7 +92,9 @@ jobs:
 
       - name: Generate CycloneDX SBOM
         run: |
-          scripts/ci/annotate-failure.sh cargo cyclonedx --format json --all --override-filename fllm-sbom
+          # one SBOM for the binary: the engine crate carries the checkpoint and probe crates as dependencies
+          scripts/ci/annotate-failure.sh cargo cyclonedx --manifest-path rust/engine/Cargo.toml --format json --override-filename fllm-sbom
+          cp rust/engine/fllm-sbom.json fllm-sbom.cdx.json
           ls -la fllm-sbom.cdx.json
 
       - name: Trivy vulnerability scan
