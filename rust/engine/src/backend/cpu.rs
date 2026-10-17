@@ -635,6 +635,10 @@ impl Stream for CpuStream {
         weight: &DeviceWeight,
         bias: Option<&DeviceBuffer>,
     ) -> Result<(), BackendError> {
+        // block-scaled FP8 weights are a GPU (Marlin) layout; this backend has no kernel for them
+        if weight.quant_type == QuantType::Fp8Block {
+            return Err(BackendError::UnsupportedQuant(QuantType::Fp8Block));
+        }
         let x_data = read_f32(x)?;
         let b_data = bias.map(read_f32).transpose()?;
         let (rows, cols) = (weight.rows, weight.cols);
