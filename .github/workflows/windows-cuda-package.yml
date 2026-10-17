@@ -59,7 +59,7 @@ jobs:
         run: |
           ./scripts/build-windows.ps1 -Cuda -SkipTests -OutDir dist *>&1 | Tee-Object -FilePath build.log
           if (-not (Test-Path dist/*.zip)) {
-            $tail = ((Get-Content build.log -Tail 40) -join '%0A') -replace '', ''
+            $tail = ((Get-Content build.log -Tail 40) -join '%0A')
             Write-Host "::error title=Windows CUDA build failed::$tail"
             exit 1
           }
