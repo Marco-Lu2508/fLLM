@@ -81,6 +81,7 @@ fn usage(error: &str) -> ! {
     eprintln!("       (wgpu devices: f16 and q8_0 only; nvfp4 is experimental, keys below 8 bit can break some models, see docs/gpu-backends.md)");
     eprintln!("       fllm-rs --version | -V | version");
     eprintln!("       fllm-rs devices [--json] [--measure] | formats | inspect PATH | pull hf://org/repo/file.gguf");
+    eprintln!("       fllm-rs npu-setup   (installs the OpenVINO runtime for the Intel NPU into ~/.fllm/openvino)");
     eprintln!("       fllm-rs selftest-cpu [--tier TIER] | selftest-gpu [--device auto|vulkan|metal|hip|...] [--only GROUPS] [--quants LIST] [--json FILE] [--list]");
     eprintln!("       fllm-rs bench-kernel --op marlin_gemv [--m 1] [--n 2048] [--k 2048] [--iters 200] (CUDA builds; --help)");
     eprintln!("       fllm-rs convert CHECKPOINT OUTPUT.gguf [--outtype preserve|f16|f32]");
@@ -305,6 +306,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.is_empty() {
         usage("");
+    }
+    if args.first().map(String::as_str) == Some("npu-setup") {
+        return npu_setup();
     }
     if args.first().map(String::as_str) == Some("devices") {
         return print_devices(&args[1..]);
@@ -1265,4 +1269,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     Ok(())
+}
+
+/// `fllm-rs npu-setup`: installs the OpenVINO runtime (the pip wheel `openvino`, which carries the C library and the NPU plug-in) into
+/// `~/.fllm/openvino` (`$FLLM_HOME/openvino`), where the NPU backend looks for it. Needs Python 3 with pip and a network connection.
+fn npu_setup() -> Result<(), Box<dyn std::error::Error>> {
+    let base = std::env::var_os("FLLM_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| std::path::PathBuf::from(h).join(".fllm"))
+        })
+        .ok_or("neither FLLM_HOME nor HOME is set")?;
+    let target = base.join("openvino");
+    std::fs::create_dir_all(&target)?;
+    let python = if cfg!(windows) { ["py", "python"] } else { ["python3", "python"] };
+    for exe in python {
+        let status = std::process::Command::new(exe)
+            .args(["-m", "pip", "install", "--upgrade", "--target"])
+            .arg(&target)
+            .arg("openvino")
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("OpenVINO installed in {}; `fllm-rs devices` lists the NPU now.", target.display());
+                if cfg!(target_os = "linux") {
+                    println!("The NPU driver (intel_vpu / amdxdna kernel module and its user-space part) comes from your distribution; the user needs access to /dev/accel (group render).");
+                }
+                return Ok(());
+            }
+            Ok(_) => return Err(format!("`{exe} -m pip install openvino` failed").into()),
+            Err(_) => continue,
+        }
+    }
+    Err("Python 3 with pip was not found (tried python3 / python)".into())
 }

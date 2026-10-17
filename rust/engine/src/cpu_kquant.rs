@@ -256,6 +256,15 @@ macro_rules! kernel {
             let zero = _mm256_setzero_si256();
             let mut acc = [[_mm256_setzero_ps(); T]; R];
             for blk in 0..blocks {
+                // the rows are separate memory streams: request the block `PREFETCH_BLOCKS` ahead of every row
+                if blk + PREFETCH_BLOCKS < blocks {
+                    for r in 0..R {
+                        let at = (first + r) * stride + (blk + PREFETCH_BLOCKS) * width;
+                        for line in (0..width).step_by(64) {
+                            _mm_prefetch::<_MM_HINT_T0>(w.as_ptr().add(at + line).cast());
+                        }
+                    }
+                }
                 let xs: [&[X]; T] = std::array::from_fn(|t| {
                     &x[(token + t) * nb + blk * 8..(token + t) * nb + blk * 8 + 8]
                 });
@@ -1419,6 +1428,9 @@ predecoded_kernel!(
 // horizontal sums, no pack/madd scale step. Each sub-block (32 values, 16 for Q6_K) is converted
 // to float once and scaled there; its minimum (or the Q6_K offset) is subtracted with the
 // activation sum of the sub-block. The accumulators of a token are the eight rows of the panel.
+
+/// Blocks ahead of the one being computed that the streaming kernels request from memory.
+const PREFETCH_BLOCKS: usize = 4;
 
 /// Blocks decoded at a time by the eight-row kernel (a row of eight rows x four blocks, 12 KB).
 pub(crate) const R8_BLOCKS: usize = 4;

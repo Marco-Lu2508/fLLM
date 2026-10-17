@@ -453,7 +453,7 @@ fn linear_x86(
     let wide = crate::cpu_kernels::avx512();
     if activation(kind) == Some(Activation::Q8K) {
         // Prompts through Q4_K, Q5_K and Q6_K: eight-row panels with the rows in the vector lanes.
-        if batch >= PREDECODE_MIN_BATCH
+        if batch >= r8_min_batch()
             && wide.is_none()
             && crate::cpu_kernels::repack_enabled()
             && !r8_disabled()
@@ -670,6 +670,20 @@ fn linear_x86(
         },
     );
     output
+}
+
+/// Smallest batch for the eight-row kernels. Below it (a few sequences decoding together) the four-row predecoded panels are faster:
+/// the eight-row transposition pays off only when many tokens reuse it. `FLLM_R8_MIN_BATCH` overrides it (for tuning).
+#[cfg(target_arch = "x86_64")]
+fn r8_min_batch() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("FLLM_R8_MIN_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+            .max(PREDECODE_MIN_BATCH)
+    })
 }
 
 /// `FLLM_NO_R8` turns the eight-row prompt kernels off (for comparisons).

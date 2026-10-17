@@ -580,6 +580,37 @@ fn library_candidates() -> Vec<PathBuf> {
             );
         }
     }
+    // the copy `fllm-rs npu-setup` installs (pip --target), and pip wheels in the user and system Python site directories
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    let fllm_home = std::env::var_os("FLLM_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".fllm")));
+    if let Some(base) = fllm_home {
+        runtime_files_in(&base.join("openvino").join("openvino").join("libs"))
+            .into_iter()
+            .for_each(&mut push);
+    }
+    if !cfg!(windows) {
+        let mut python_roots: Vec<PathBuf> = Vec::new();
+        if let Some(h) = &home {
+            python_roots.push(h.join(".local").join("lib"));
+        }
+        python_roots.extend(["/usr/local/lib", "/usr/lib"].map(PathBuf::from));
+        for base in python_roots {
+            let Ok(entries) = std::fs::read_dir(&base) else { continue };
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name();
+                if name.to_str().is_some_and(|n| n.starts_with("python3")) {
+                    for site in ["site-packages", "dist-packages"] {
+                        runtime_files_in(&entry.path().join(site).join("openvino").join("libs"))
+                            .into_iter()
+                            .for_each(&mut push);
+                    }
+                }
+            }
+        }
+    }
     roots.sort();
     roots.reverse();
     for root in roots {
