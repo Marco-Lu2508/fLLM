@@ -1,0 +1,66 @@
+# The Windows package with the CUDA kernels (fllm-windows-x86_64-msvc-cuda.zip) as a downloadable workflow artifact, without a release or a tag:
+# runs on a push to the branch `windows-cuda` and by hand (Actions -> windows-cuda-package -> Run workflow). The release build of the same
+# archive is the windows-cuda job of release.yml. Long (nvcc builds every architecture): up to a few hours.
+name: windows-cuda-package
+
+on:
+  push:
+    branches: [windows-cuda]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-cuda-package
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Windows CUDA package
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Vulkan SDK (glslc for the native Vulkan backend, sets VULKAN_SDK)
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: CUDA toolkit
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          log-file-suffix: "windows-cuda-package.txt"
+
+      - name: CUTLASS and FlashInfer headers
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
+          git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer
+
+      - name: Build and pack (all GPU architectures of the default list)
+        shell: pwsh
+        env:
+          FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler -diag-suppress 69"
+        run: ./scripts/build-windows.ps1 -Cuda -SkipTests -OutDir dist
+
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fllm-windows-x86_64-msvc-cuda
+          path: dist/*
+          retention-days: 30
