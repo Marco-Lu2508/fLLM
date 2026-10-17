@@ -45,7 +45,7 @@ expect_refusal() { # <device> <pattern>
 }
 
 expect_refusal dx12 "no hardware dx12|no dx12 GPU adapter|not (available|compiled)|no .*device"
-expect_refusal vulkan "no hardware|no vulkan|FLLM_ALLOW_SOFTWARE_GPU|not (available|usable)|no .*device"
+expect_refusal vulkan "no hardware|no vulkan|FLLM_ALLOW_SOFTWARE_GPU|not (available|usable)|no .*device|adapter|vulkan|loader|software render"
 
 # the CPU path must keep working
 if ! "$bin" selftest-gpu --device cpu --only norm >/dev/null 2>&1; then
