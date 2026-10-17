@@ -227,3 +227,14 @@ otherwise `FLLM_NPU` stays off by default and the feature remains an experiment.
 * OpenVINO, `src/frontends/ir/tests/frontend_test_basic.cpp` (IR example with a u4 constant), `src/core/dev_api/openvino/core/type/element_iterator.hpp` (packing order of the 4-bit types).
 * Chips and Cheese, "Intel Meteor Lake's NPU" (April 2024); TechPowerUp, "Intel Lunar Lake Technical Deep Dive".
 * OpenVINO GitHub Discussion #36484 (NPU draft model on Lunar Lake); arXiv 2607.05475 (mobile NPU study, prefill/decode phase split - Qualcomm hardware, only as a pointer).
+
+## Setting up the runtime: `fllm-rs npu-setup`
+
+`fllm-rs npu-setup` installs the OpenVINO runtime (the pip wheel `openvino`, which carries `libopenvino_c` and the NPU plug-in) into
+`~/.fllm/openvino` (`$FLLM_HOME/openvino`). The backend finds it there without further settings, as it finds a virtual environment
+(`VIRTUAL_ENV`), the user and system Python site directories (`~/.local/lib/python3.*/site-packages/openvino/libs`), `/opt/intel/openvino*`
+and `FLLM_OPENVINO_C_LIB` / `FLLM_OPENVINO_DIR`. It needs Python 3 with pip and a network connection. The kernel driver (`intel_vpu`, with its
+user-space part `intel-level-zero-npu` / `libze_intel_npu`) comes from the distribution, and the user needs access to `/dev/accel/accel0`
+(group `render`). Then `fllm-rs devices` lists the NPU and `fllm-rs selftest-gpu --device npu` checks it; select it with `--device npu`.
+Measured on a Core Ultra 5 235U (Meteor Lake NPU) with a 1.5B Q4_K_M model: the selftest passes (606 checks, 0 failed) and the answers are
+correct, but the hybrid path is far slower than the CPU (the CPU part of the work runs through the generic backend interface on one thread).
