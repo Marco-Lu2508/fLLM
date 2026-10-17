@@ -135,8 +135,8 @@ repository setting **Actions -> General -> Fork pull request workflows** should 
 
 ## Security notes
 
-- Every third-party action is pinned to a full commit SHA with the version in a comment; Dependabot (`.github/dependabot.yml`,
-  `open-pull-requests-limit: 5`) proposes weekly updates for the Cargo dependencies and the GitHub Actions.
+- Every third-party action is pinned to a full commit SHA with the version in a comment. Dependencies and actions are updated by hand
+  (automated update pull requests are switched off).
 - The default `GITHUB_TOKEN` permission of every workflow is `contents: read`. Jobs that publish get more, and only they:
   `contents: write` in `release` (create the release, upload assets), `packages: write` in the Docker workflows.
 - Checkouts use `persist-credentials: false`. Values that come from outside (the tag name, workflow inputs) are passed to scripts
@@ -163,4 +163,4 @@ repository setting **Actions -> General -> Fork pull request workflows** should 
 The workflow files pass `actionlint` and `yamllint`. The workflows `ci`, `platforms`, `release`, `docker-image`, `docker-image-cuda`,
 `docs`, `msrv`, `supply-chain`, `coverage`, `codeql`, `kernels`, `conformance` and `streaming-benchmark` exist. `ci`, `platforms`, `release` and the two Docker workflows run on GitHub-hosted runners (the v0.1.0 release was produced by them);
 `kernels` is a manual compile check; `conformance` and `streaming-benchmark` need a self-hosted runner with a GPU (or a model) and are run on demand. The optional
-`windows-cuda` and `windows-package` jobs of `platforms` are manual. Dependabot is configured in `.github/dependabot.yml` with `open-pull-requests-limit: 5`.
+`windows-cuda` and `windows-package` jobs of `platforms` are manual.
