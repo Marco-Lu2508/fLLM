@@ -43,7 +43,7 @@ jobs:
         with:
           cuda: "12.8.0"
           method: network
-          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
           log-file-suffix: "windows-cuda-package.txt"
 
       - name: CUTLASS headers (FlashInfer is left out, its headers do not compile with the MSVC host compiler)
@@ -58,7 +58,7 @@ jobs:
         run: |
           ./scripts/build-windows.ps1 -Cuda -SkipTests -OutDir dist *>&1 | Tee-Object -FilePath build.log
           if (-not (Test-Path dist/*.zip)) {
-            $tail = ((Select-String -Path build.log -Pattern 'error' | Select-Object -First 25 | ForEach-Object { $_.Line.Trim() }) -join '%0A')
+            $tail = ((Select-String -Path build.log -Pattern 'error [A-Z]*[0-9]+|fatal error|error:|LNK[0-9]+|Write-Error' | Select-Object -First 25 | ForEach-Object { $_.Line.Trim() }) -join '%0A')
             Write-Host "::error title=Windows CUDA build failed::$tail"
             exit 1
           }
