@@ -74,4 +74,4 @@ jobs:
           grep -o -E 'avx512[a-z_0-9]*|amx[a-z_0-9]*|avx_vnni|avx2' /proc/cpuinfo | sort -u | tr '\n' ' '
 
       - name: Tests
-        run: cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe
+        run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe

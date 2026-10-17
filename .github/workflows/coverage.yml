@@ -77,4 +77,4 @@ jobs:
       - name: Check and test with nightly
         run: |
           cargo check --locked --workspace --all-targets --features rust-gpu
-          cargo test --release --locked -p fllm-checkpoint -p fllm-gguf-probe
+          scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-checkpoint -p fllm-gguf-probe

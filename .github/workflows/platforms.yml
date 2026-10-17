@@ -102,7 +102,7 @@ jobs:
 
       - name: Unit tests
         shell: bash
-        run: cargo test --release --locked -p fllm-engine --lib --features "$FEATURES"
+        run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES"
 
       # Tiny random models (dense, quantized, MoE, hybrid) on the Apple GPU against the host path; --nocapture prints one result line per model
       # (see docs/changes/metal.md for the expected lines). The same tests also ran in the step above, where their output is hidden.
@@ -131,7 +131,7 @@ jobs:
         run: |
           bin=target/release/fllm-rs
           [ -f "$bin.exe" ] && bin="$bin.exe"
-          scripts/no-gpu-smoke.sh "$bin"
+          scripts/ci/annotate-failure.sh scripts/no-gpu-smoke.sh "$bin"
 
       - name: Self-test harness against the CPU backend
         shell: bash

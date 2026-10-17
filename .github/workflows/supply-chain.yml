@@ -41,7 +41,7 @@ jobs:
           tool: cargo-deny
 
       - name: Licences, bans, sources and advisories
-        run: cargo deny --locked check
+        run: scripts/ci/annotate-failure.sh cargo deny --locked check
 
   audit:
     name: cargo-audit
@@ -64,7 +64,7 @@ jobs:
           tool: cargo-audit
 
       - name: Advisories for Cargo.lock
-        run: cargo audit --deny warnings
+        run: scripts/ci/annotate-failure.sh cargo audit --deny warnings
 
   sbom:
     name: CycloneDX SBOM and Trivy scan
@@ -92,7 +92,7 @@ jobs:
 
       - name: Generate CycloneDX SBOM
         run: |
-          cargo cyclonedx --format json --all --override-filename fllm-sbom
+          scripts/ci/annotate-failure.sh cargo cyclonedx --format json --all --override-filename fllm-sbom
           ls -la fllm-sbom.cdx.json
 
       - name: Trivy vulnerability scan
