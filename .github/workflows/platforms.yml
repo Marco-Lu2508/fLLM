@@ -109,7 +109,7 @@ jobs:
       - name: Metal whole-model tests (Apple GPU)
         if: always() && matrix.runner == 'macos-14'
         shell: bash
-        run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" whole_model device_arch_ops -- --nocapture --test-threads=1
+        run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- whole_model device_arch_ops --nocapture --test-threads=1
 
       - name: Clippy
         shell: bash
