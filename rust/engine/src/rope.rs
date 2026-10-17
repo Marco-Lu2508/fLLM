@@ -123,6 +123,7 @@ mod tests {
             dims: 8,
             base: 10_000.0,
             local_base: None,
+            local_dims: None,
             neox: true,
             scaling,
             factors: None,

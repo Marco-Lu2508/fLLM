@@ -17,17 +17,32 @@ use half::{bf16, f16};
 use std::time::Instant;
 
 mod kv;
+mod moe;
 #[cfg(feature = "cuda")]
 mod prefill;
+#[cfg(feature = "cuda")]
+mod smallm;
+#[cfg(feature = "cuda")]
+mod actdtype;
+#[cfg(feature = "cuda")]
+mod fp4sm100;
+#[cfg(feature = "cuda")]
+mod w8a8;
+#[cfg(feature = "cuda")]
+mod hgemm;
+#[cfg(feature = "cuda")]
+mod hattn;
+#[cfg(feature = "cuda")]
+mod hmla;
 use kv::layout_of;
 
 pub const HELP: &str = "usage: fllm-rs selftest-gpu [--device auto|vulkan|metal|dx12|hip|sycl|npu|tpu|gpu|cpu|BACKEND:N] [--only GROUPS] [--quants LIST]
-                           [--json FILE] [--strict] [--list]
+                           [--json FILE] [--strict] [--expect-skips FILE] [--list]
 Runs every backend operation on random data on the chosen backend and on the CPU backend, compares both with an f64
 reference and prints the largest error of each check relative to its error scale, the tolerance and the device time.
 The output is grouped by operation (linear, embedding, norm, rope, activation, kv, attention, moe, delta, sampling,
 host; --list says what each covers).
-  --device D     auto (default): the best GPU of this machine (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL); a backend name;
+  --device D     auto (default): the best GPU of this machine (CUDA > ROCm > Metal > Vulkan > DX12); a backend name;
                  BACKEND:N for device N of that backend (vulkan:1; the number counts the devices of one backend, see
                  `fllm-rs devices`); gpu = any wgpu adapter; wgpu-vulkan, wgpu-metal, wgpu-dx12 = the wgpu path of that API;
                  cpu = the CPU backend against itself (checks the test, not a device)
@@ -36,6 +51,8 @@ host; --list says what each covers).
                  limits the run to the groups that depend on a format (linear, embedding, moe, host)
   --json FILE    write every check and the summary as JSON
   --strict       count checks the backend reports as unsupported as failures
+  --expect-skips FILE  compare the skipped checks (per group and op) with the `expected-skips` block of FILE (the backend's
+                 EXPECTED_SKIPS.md) and fail on any difference, in either direction
   --list         print the groups and formats and exit
 Verdict per check: ok; FAIL (wrong result, or an error); SKIPPED (unsupported): the backend reports the operation or the
 format as unsupported (BackendError::UnsupportedOperation / UnsupportedQuant) and does not list the format in its
@@ -46,6 +63,7 @@ FLLM_ALLOW_SOFTWARE_GPU=1.";
 /// Operation groups of the self test, in the order they run: (name, what the group covers).
 pub const GROUPS: &[(&str, &str)] = &[
     ("delta", "delta_layer (Gated DeltaNet): prefill, decode and mixed calls"),
+    ("kda", "kda_layer (Kimi Delta Attention): prefill, decode and mixed calls"),
     ("arch", "LayerNorm, activations beyond SiLU, clamp, MLA data movement, Mamba-1/2, ShortConv, softplus gate"),
     ("linear", "quantized_linear for every weight format (exact and fast kernels, batches, bias, shared activations)"),
     ("embedding", "embedding_lookup for the formats that can hold an embedding table"),
@@ -54,11 +72,20 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("activation", "swiglu, geglu, residual_add"),
     ("kv", "kv_cache_write for the f16 and q8_0 caches"),
     ("attention", "attention_paged: decode, prefill, window, chunks, softcap, sinks, ALiBi, f16 and q8_0 caches"),
-    ("sampling", "argmax_rows (greedy sampling on the device)"),
+    ("sampling", "argmax_rows (greedy sampling on the device) and sample_rows (penalties, bias, grammar mask, temperature, top-k / min-p / typical-p / top-p, seeded draws, log-probabilities)"),
     ("host", "host_linear (weights streamed from host memory)"),
-    ("moe", "moe_topk, moe_linear, moe_combine, gather_rows / scatter_add_rows"),
+    ("moe", "moe_topk, moe_linear, moe_combine, gather_rows / scatter_add_rows; device routing variants, expert-major sort, grouped expert GEMM per format, whole layers (moe_route_ex, moe_align, moe_grouped_linear, moe_combine_ex, moe_gate_scale)"),
+    ("moebench", "timing of the device MoE operations in microseconds per call at the shapes of real models (only when asked for: --only moebench)"),
     ("fuse", "fused decode kernels against the unfused sequence: residual add + norm (+ activation conversion), rotary + cache write, gated activation + int8 quantization"),
+    ("encoder", "bidirectional variable-length encoder attention, ModernBERT local/global window, pooling"),
     ("prefill", "CUDA prompt speed-ups: per-step attention cache, norm and attention FP16 fusions, Marlin M tail (each variant against the plain one)"),
+    ("actdtype", "CUDA narrow activations (FLLM_ACT_DTYPE f16/bf16): norm, residual, GLU, rope, KV write, Marlin GEMM, FFN chain, attention against the FP32 pipeline"),
+    ("smallm", "CUDA Marlin small-M GEMV (1 to 4 rows) against the Marlin GEMM and the reference; prints us per call of both"),
+    ("w8a8", "CUDA FP8 and int8 W8A8 tensor-core GEMMs with activation quantization (FLLM_SELFTEST_BENCH=1 adds timings against the W8A16 paths)"),
+    ("hattn", "CUDA Hopper and FlashInfer attention: FA3 prefill, sliding window / soft cap / sinks, ragged batches, tensor-core decode, cascade"),
+    ("hmla", "CUDA latent-cache MLA (DeepSeek-V2/V3): absorbed up-projections, 576-value cache, tensor cores"),
+    ("hgemm", "CUDA cuBLASLt GEMMs (runtime-loaded) and Hopper CUTLASS WGMMA FP8"),
+    ("fp4sm100", "CUDA NVFP4 block-scaled GEMM on datacenter Blackwell (sm_100 tcgen05)")
 ];
 
 /// Groups whose checks depend on a weight format (`--quants` limits them).
@@ -67,7 +94,7 @@ const QUANT_GROUPS: &[&str] = &["linear", "embedding", "moe", "host"];
 /// Weight formats the self test knows (GGUF type ids; `format_name` gives the names).
 const KINDS: &[u32] = &[
     0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
-    0x8000_0015, 0x8000_0016, 0x8000_0020,
+    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021,
 ];
 
 /// Lower case without separators: `Q4_K` and `q4-k` are the same name.
@@ -133,7 +160,7 @@ impl Filter {
                 let mut groups = Vec::new();
                 for name in list.split(',').map(|g| g.trim().to_lowercase()).filter(|g| !g.is_empty()) {
                     if name == "all" {
-                        groups.extend(GROUPS.iter().map(|g| g.0.to_owned()));
+                        groups.extend(GROUPS.iter().filter(|g| g.0 != "moebench").map(|g| g.0.to_owned()));
                     } else if GROUPS.iter().any(|g| g.0 == name) {
                         groups.push(name);
                     } else {
@@ -163,6 +190,11 @@ impl Filter {
             (None, Some(_)) => QUANT_GROUPS.contains(&group),
             (None, None) => true,
         }
+    }
+
+    /// Was the group named in `--only`? (`moebench` runs only then.)
+    pub fn asked_for(&self, group: &str) -> bool {
+        self.groups.as_ref().is_some_and(|groups| groups.iter().any(|g| g == group))
     }
 
     /// Does the weight format run?
@@ -209,6 +241,7 @@ struct Options {
     json: Option<String>,
     filter: Filter,
     strict: bool,
+    expect_skips: Option<String>,
 }
 
 #[derive(Debug)]
@@ -220,7 +253,7 @@ enum Command {
 
 fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut device = "auto".to_string();
-    let (mut json, mut only, mut quants) = (None, None, None);
+    let (mut json, mut only, mut quants, mut expect_skips) = (None, None, None, None);
     let (mut strict, mut list) = (false, false);
     let mut i = 0;
     let value = |i: &mut usize, flag: &str| -> Result<String, String> {
@@ -235,6 +268,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--only" => only = Some(value(&mut i, "--only")?),
             "--quants" => quants = Some(value(&mut i, "--quants")?),
             "--strict" => strict = true,
+            "--expect-skips" => expect_skips = Some(value(&mut i, "--expect-skips")?),
             "--list" => list = true,
             other => return Err(format!("unknown argument {other}\n{HELP}")),
         }
@@ -243,7 +277,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     if list {
         return Ok(Command::List);
     }
-    Ok(Command::Run(Options { device, json, filter: Filter::parse(only.as_deref(), quants.as_deref())?, strict }))
+    Ok(Command::Run(Options { device, json, filter: Filter::parse(only.as_deref(), quants.as_deref())?, strict, expect_skips }))
 }
 
 /// `--list`: the groups and the weight formats.
@@ -278,8 +312,73 @@ pub fn run(args: &[String]) -> Result<(), String> {
             verdict = Err(format!("{skipped} checks were skipped as unsupported and --strict is set"));
         }
     }
+    if verdict.is_ok() {
+        if let Some(path) = options.expect_skips.as_deref() {
+            verdict = check_expected_skips(path, &records());
+        }
+    }
     write_json(&options, &ran, &verdict)?;
     verdict
+}
+
+/// Skipped checks per (group, op): the report of `skipped_ops` and the quantity `--expect-skips` compares.
+fn skipped_ops(records: &[CheckRecord]) -> std::collections::BTreeMap<(String, String), (usize, String)> {
+    let mut map = std::collections::BTreeMap::new();
+    for r in records.iter().filter(|r| r.status == Status::Skipped) {
+        let entry = map.entry((r.group.to_owned(), r.op.clone())).or_insert((0usize, r.message.clone().unwrap_or_default()));
+        entry.0 += 1;
+    }
+    map
+}
+
+/// The lines `group | op | count` of the fenced block ```` ```expected-skips ```` of `text` (`#` starts a comment).
+fn parse_expected_skips(text: &str) -> Result<std::collections::BTreeMap<(String, String), usize>, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let mut inside = false;
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.starts_with("```") {
+            inside = line.trim_start_matches('`').trim() == "expected-skips" && !inside;
+            continue;
+        }
+        let line = line.split('#').next().unwrap_or("").trim();
+        if !inside || line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        let count = parts.get(2).and_then(|c| c.parse::<usize>().ok());
+        let (Some(group), Some(op), Some(count)) = (parts.first(), parts.get(1), count) else {
+            return Err(format!("line {}: expected `group | op | count`, found `{line}`", number + 1));
+        };
+        map.insert(((*group).to_owned(), (*op).to_owned()), count);
+    }
+    Ok(map)
+}
+
+/// `--expect-skips FILE`: the skipped checks of this run must be exactly the expected ones.
+fn check_expected_skips(path: &str, records: &[CheckRecord]) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let expected = parse_expected_skips(&text).map_err(|e| format!("{path}: {e}"))?;
+    let actual: std::collections::BTreeMap<(String, String), usize> = skipped_ops(records).into_iter().map(|(k, v)| (k, v.0)).collect();
+    let mut problems = Vec::new();
+    for (key, &want) in &expected {
+        match actual.get(key) {
+            None => problems.push(format!("{} / {}: expected {want} skipped, none skipped", key.0, key.1)),
+            Some(&have) if have != want => problems.push(format!("{} / {}: expected {want} skipped, found {have}", key.0, key.1)),
+            _ => {}
+        }
+    }
+    for (key, have) in &actual {
+        if !expected.contains_key(key) {
+            problems.push(format!("{} / {}: {have} skipped, not listed in {path}", key.0, key.1));
+        }
+    }
+    if problems.is_empty() {
+        println!("skipped checks match {path} ({} entries)", expected.len());
+        Ok(())
+    } else {
+        Err(format!("skipped checks differ from {path}:\n  {}", problems.join("\n  ")))
+    }
 }
 
 /// Run the checks on the device `--device` names. `auto` tries the devices of the chain in turn (see `devices::device_candidates`).
@@ -337,6 +436,26 @@ fn run_device(name: &str, index: usize, filter: &Filter) -> Result<Result<(), St
                 super::cuda::set_exact_math(true);
                 let exact = run_backend_pass(&*backend, filter, true);
                 super::cuda::set_exact_math(false);
+                println!();
+                let fast = run_backend_fast_filtered(&*backend, filter);
+                return Ok(exact.and(fast));
+            }
+            // vulkan: like cuda, the exact FP32 shaders against the FP32 error bound, then the fast variants (cooperative-matrix and
+            // integer dot-product kernels, fp16 / int8 activations) against the error their approximations allow
+            #[cfg(feature = "vulkan")]
+            if matches!(name, "vulkan" | "vulkan-native") {
+                super::vulkan::backend::set_exact_math(true);
+                println!("kernel variant: exact (FP32 shaders only; tolerance = FP32 worst-case bound; FLLM_VULKAN_EXACT is overridden)");
+                let exact = run_backend_pass(&*backend, filter, true);
+                super::vulkan::backend::set_exact_math(false);
+                println!();
+                println!("kernel variant: fast (the shaders a normal run picks for this device: cooperative matrices / int8 dot products / f16; tolerance = FAST_TOL)");
+                let fast = run_backend_fast_filtered(&*backend, filter);
+                return Ok(exact.and(fast));
+            }
+            // npu: the projections of 64 or more rows go through the NPU (fp16 compute), so the second pass checks those batch sizes
+            if name == "npu" {
+                let exact = run_backend_pass(&*backend, filter, true);
                 println!();
                 let fast = run_backend_fast_filtered(&*backend, filter);
                 return Ok(exact.and(fast));
@@ -479,6 +598,12 @@ fn write_json(options: &Options, ran: &(String, usize), verdict: &Result<(), Str
             })
         })
         .collect();
+    let mut passes: Vec<&str> = Vec::new();
+    for r in &all {
+        if !passes.contains(&r.pass) {
+            passes.push(r.pass);
+        }
+    }
     let doc = serde_json::json!({
         "tool": "fllm-rs selftest-gpu",
         "requested_device": options.device,
@@ -491,6 +616,11 @@ fn write_json(options: &Options, ran: &(String, usize), verdict: &Result<(), Str
         "ok_count": count(Status::Ok),
         "failed": count(Status::Failed),
         "skipped": count(Status::Skipped),
+        "passes": passes,
+        "skipped_ops": skipped_ops(&all)
+            .into_iter()
+            .map(|((group, op), (count, reason))| serde_json::json!({ "group": group, "op": op, "count": count, "reason": reason }))
+            .collect::<Vec<_>>(),
         "groups": groups,
         "ok": verdict.is_ok(),
         "error": verdict.as_ref().err(),
@@ -949,7 +1079,8 @@ impl<'a> Tester<'a> {
         // `--device cpu` checks the test with the CPU backend as the device: its kernels are held to the CPU tolerance, which allows for
         // what the tiled CPU kernels do on purpose (Q8 query packing, polynomial exp)
         let outcome = outcome.map(|mut o| {
-            if self.device.name() == "CPU" {
+            // the hybrid NPU backend runs everything but the large prompt projections on the CPU backend
+            if matches!(self.device.name(), "CPU" | "npu") {
                 o.tol = o.tol.max(o.cpu_tol);
             }
             o
@@ -1053,12 +1184,43 @@ impl<'a> Tester<'a> {
         if self.enter("moe") {
             self.moe_cases();
         }
+        if self.filter.asked_for("moebench") && self.enter("moebench") {
+            self.moe_bench_cases();
+        }
         if self.enter("fuse") {
             self.fuse_cases();
         }
         #[cfg(feature = "cuda")]
         if self.enter("prefill") {
             self.prefill_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("smallm") {
+            self.smallm_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("actdtype") {
+            self.actdtype_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("w8a8") {
+            self.w8a8_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("hattn") {
+            self.hattn_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("hmla") {
+            self.hmla_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("hgemm") {
+            self.hgemm_cases();
+        }
+        #[cfg(feature = "cuda")]
+        if self.enter("fp4sm100") {
+            self.fp4sm100_cases();
         }
     }
 
@@ -1111,7 +1273,7 @@ impl<'a> Tester<'a> {
             }
         }
         // 8-bit FP8 weights (Marlin GEMM): rows and columns multiples of 128
-        for kind in self.kinds(&[0x8000_0020u32]) {
+        for kind in self.kinds(&[0x8000_0020u32, 0x8000_0021]) {
             for batch in [1usize, 2, 3, 4, 5, 8, 16, 17, 40, 129, 356] {
                 let with_bias = batch == 3 || batch == 129;
                 let r = self.linear(kind, 384, 1024, batch, with_bias).map(|mut o| {
@@ -1238,6 +1400,221 @@ impl<'a> Tester<'a> {
             let r = self.argmax(rows, vocab);
             self.record("argmax", &format!("{rows} rows x {vocab}"), r);
         }
+        for (rows, vocab) in [(6usize, 1000usize), (5, 32_003), (3, 151_936)] {
+            let r = self.sample_controls(rows, vocab);
+            self.record("sample_rows controls", &format!("{rows} rows x {vocab}: greedy with penalties, bias and grammar mask"), r);
+            let r = self.sample_filters(rows.max(6), vocab);
+            self.record("sample_rows filters", &format!("{} rows x {vocab}: top-k, top-p, min-p, typical-p, seeded draws", rows.max(6)), r);
+            let r = self.sample_alternatives(vocab);
+            self.record("sample_rows logprobs", &format!("{vocab} vocabulary: raw and processed log-probabilities, top alternatives"), r);
+        }
+        let r = self.sample_independent_of_the_batch(4000);
+        self.record("sample_rows batch independence", "the same seeded row at other batch positions and sizes", r);
+        let r = self.sample_distribution(40);
+        self.record("sample_rows distribution", "8192 draws from one row against the host sampler's distribution", r);
+    }
+
+    /// The mismatches (rows whose token differs) between the device and the host reference of `sample_rows`.
+    #[allow(clippy::too_many_arguments)]
+    fn sample_compare(&mut self, logits: &[f32], vocab: usize, rows: &[crate::backend::SampleRowParams], pen: &[(i32, i32)], bias: &[(i32, f32)], mask: &[u32], mask_words: usize, top_stride: usize) -> Result<(usize, crate::backend::SampleOutput, Vec<crate::sampling::DeviceSample>, f64), BackendError> {
+        let mut stream = self.device.create_stream()?;
+        let buf = put(self.device, stream.as_mut(), logits)?;
+        let batch = crate::backend::SampleBatch { rows, pen, bias, mask, mask_words, top_stride };
+        let start = Instant::now();
+        let got = stream.sample_rows(&buf, vocab, &batch)?;
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        if got.ids.len() != rows.len() {
+            return Err(BackendError::DriverError(format!("sample_rows returned {} ids for {} rows", got.ids.len(), rows.len())));
+        }
+        let mut want = Vec::new();
+        let mut wrong = 0;
+        for (r, p) in rows.iter().enumerate() {
+            let pens = &pen[p.pen_off as usize..(p.pen_off + p.pen_len) as usize];
+            let biases = &bias[p.bias_off as usize..(p.bias_off + p.bias_len) as usize];
+            let m = (p.mask_row >= 0).then(|| &mask[p.mask_row as usize * mask_words..(p.mask_row as usize + 1) * mask_words]);
+            let reference = crate::sampling::device_sample_reference(&logits[r * vocab..(r + 1) * vocab], p, pens, biases, m, top_stride);
+            if reference.id != got.ids[r] {
+                wrong += 1;
+            }
+            want.push(reference);
+        }
+        Ok((wrong, got, want, ms))
+    }
+
+    /// Greedy rows with a repetition / presence / frequency penalty window, a logit bias and a grammar bitmask: the device and the host must
+    /// pick the same token on every row (these steps are exact, there is no random draw).
+    fn sample_controls(&mut self, rows: usize, vocab: usize) -> Result<Outcome, BackendError> {
+        let logits = self.rng.vector(rows * vocab, 4.0);
+        let words = vocab.div_ceil(32);
+        let (mut params, mut pen, mut bias, mut mask) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for r in 0..rows {
+            let pen_off = pen.len();
+            for k in 0..9 {
+                let id = ((self.rng.next() % vocab as u64) as i32).max(0);
+                if !pen[pen_off..].iter().any(|e: &(i32, i32)| e.0 == id) {
+                    pen.push((id, 1 + (k % 3)));
+                }
+            }
+            let bias_off = bias.len();
+            let top = (self.rng.next() % vocab as u64) as i32;
+            bias.push((top, 3.0 + r as f32));
+            let mut mask_row = -1;
+            if r % 2 == 1 {
+                mask_row = (mask.len() / words) as i32;
+                // allow about 60 % of the tokens
+                for _w in 0..words {
+                    mask.push((self.rng.next() as u32) | (self.rng.next() as u32));
+                }
+            }
+            params.push(crate::backend::SampleRowParams {
+                pen_off: pen_off as i32,
+                pen_len: (pen.len() - pen_off) as i32,
+                repetition_penalty: 1.0 + 0.3 * (r % 3) as f32,
+                presence_penalty: 0.5 * (r % 2) as f32,
+                frequency_penalty: 0.25 * (r % 4) as f32,
+                bias_off: bias_off as i32,
+                bias_len: 1,
+                mask_row,
+                ..Default::default()
+            });
+        }
+        let (wrong, _, _, ms) = self.sample_compare(&logits, vocab, &params, &pen, &bias, &mask, words, 0)?;
+        Ok(Outcome { device: wrong as f64, cpu: 0.0, tol: 0.0, cpu_tol: 1.0, ms })
+    }
+
+    /// Stochastic rows (cycling through the filter combinations) with their own seeds and draw numbers: the same tokens as the host
+    /// reference, apart from a few rows at most whose threshold decision sits within rounding of a boundary.
+    fn sample_filters(&mut self, rows: usize, vocab: usize) -> Result<Outcome, BackendError> {
+        let logits = self.rng.vector(rows * vocab, 3.0);
+        let mut params = Vec::new();
+        for r in 0..rows {
+            let mut p = crate::backend::SampleRowParams { temperature: 0.6 + 0.2 * (r % 5) as f32, seed: 1000 + r as u64, draw: (r * 7) as u64, ..Default::default() };
+            match r % 6 {
+                0 => {}
+                1 => p.top_k = 40,
+                2 => p.top_p = 0.85,
+                3 => p.min_p = 0.05,
+                4 => p.typical_p = 0.8,
+                _ => {
+                    p.top_k = 200;
+                    p.top_p = 0.9;
+                    p.min_p = 0.01;
+                }
+            }
+            params.push(p);
+        }
+        let (wrong, _, _, ms) = self.sample_compare(&logits, vocab, &params, &[], &[], &[], 0, 0)?;
+        Ok(Outcome { device: wrong as f64, cpu: 0.0, tol: (rows / 100) as f64, cpu_tol: 1.0, ms })
+    }
+
+    /// Log-probabilities of the raw and of the sampled distribution and the best alternatives.
+    fn sample_alternatives(&mut self, vocab: usize) -> Result<Outcome, BackendError> {
+        let rows = 4;
+        let logits = self.rng.vector(rows * vocab, 3.0);
+        let stride = 8;
+        let mut params = Vec::new();
+        for r in 0..rows {
+            params.push(crate::backend::SampleRowParams {
+                temperature: 0.9,
+                top_k: if r >= 2 { 6 } else { 0 },
+                seed: 5 + r as u64,
+                logprobs_mode: 1 + (r % 2) as i32,
+                top_n: stride as i32,
+                ..Default::default()
+            });
+        }
+        let (wrong, got, want, ms) = self.sample_compare(&logits, vocab, &params, &[], &[], &[], 0, stride)?;
+        let mut worst = wrong as f64 * 1e3;
+        for (r, reference) in want.iter().enumerate() {
+            if got.ids[r] == reference.id {
+                worst = worst.max(f64::from((got.logprobs[r] - reference.logprob).abs()));
+            }
+            for j in 0..stride {
+                let (gi, gl) = (got.top_ids[r * stride + j], got.top_logprobs[r * stride + j]);
+                match reference.top.get(j) {
+                    Some(&(wi, wl)) => {
+                        if gi != wi {
+                            worst = worst.max(1e3);
+                        } else {
+                            worst = worst.max(f64::from((gl - wl).abs()));
+                        }
+                    }
+                    None => {
+                        if gi != -1 {
+                            worst = worst.max(1e3);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Outcome { device: worst, cpu: 0.0, tol: 2e-4, cpu_tol: 1.0, ms })
+    }
+
+    /// The token of a seeded row must not depend on the batch it runs in: the same logits, seed and draw at other positions and in
+    /// batches of other sizes give the same token.
+    fn sample_independent_of_the_batch(&mut self, vocab: usize) -> Result<Outcome, BackendError> {
+        let one = self.rng.vector(vocab, 3.0);
+        let other = self.rng.vector(vocab, 3.0);
+        let row = crate::backend::SampleRowParams { temperature: 1.0, top_p: 0.9, seed: 42, draw: 17, ..Default::default() };
+        let mut ids = Vec::new();
+        let mut total_ms = 0.0;
+        for (position, size) in [(0usize, 1usize), (0, 3), (2, 3), (5, 9), (8, 9)] {
+            let mut logits = Vec::new();
+            let mut params = Vec::new();
+            for r in 0..size {
+                if r == position {
+                    logits.extend_from_slice(&one);
+                    params.push(row);
+                } else {
+                    logits.extend_from_slice(&other);
+                    params.push(crate::backend::SampleRowParams { seed: 9 + r as u64, ..row });
+                }
+            }
+            let (_, got, _, ms) = self.sample_compare(&logits, vocab, &params, &[], &[], &[], 0, 0)?;
+            total_ms += ms;
+            ids.push(got.ids[position]);
+        }
+        let differing = ids.iter().filter(|&&i| i != ids[0]).count();
+        Ok(Outcome { device: differing as f64, cpu: 0.0, tol: 0.0, cpu_tol: 1.0, ms: total_ms })
+    }
+
+    /// Statistical check of the draw: 8192 rows hold the same logits and differ only in their draw number. The frequencies must match the
+    /// distribution of the host sampler (`processed_distribution`) for a top-k / top-p / min-p combination.
+    fn sample_distribution(&mut self, vocab: usize) -> Result<Outcome, BackendError> {
+        let trials = 8192usize;
+        let one = self.rng.vector(vocab, 2.0);
+        let mut logits = Vec::with_capacity(trials * vocab);
+        let mut params = Vec::with_capacity(trials);
+        let host = crate::sampling::SamplingParams { temperature: 0.9, top_k: 20, top_p: 0.92, min_p: 0.01, ..Default::default() };
+        for t in 0..trials {
+            logits.extend_from_slice(&one);
+            params.push(crate::backend::SampleRowParams { temperature: 0.9, top_k: 20, top_p: 0.92, min_p: 0.01, seed: 2024, draw: t as u64, ..Default::default() });
+        }
+        let (_, got, _, ms) = self.sample_compare(&logits, vocab, &params, &[], &[], &[], 0, 0)?;
+        let expected = crate::sampling::processed_distribution(&one, &[], &host, 0.0);
+        let mut counts = vec![0u32; vocab];
+        for &id in &got.ids {
+            if id < 0 || id as usize >= vocab {
+                return Err(BackendError::DriverError(format!("sample_rows returned the invalid token {id}")));
+            }
+            counts[id as usize] += 1;
+        }
+        let (mut chi, mut cells, mut outside) = (0.0f64, 0, 0u32);
+        for (id, &count) in counts.iter().enumerate() {
+            match expected.iter().find(|e| e.0 == id) {
+                None => outside += count,
+                Some(&(_, p)) => {
+                    let e = f64::from(p) * trials as f64;
+                    if e > 5.0 {
+                        chi += (f64::from(count) - e).powi(2) / e;
+                        cells += 1;
+                    }
+                }
+            }
+        }
+        // tokens outside the support must never be drawn; inside, chi-square far above its mean (cells - 1) is a failure
+        let device = if outside > 0 { f64::INFINITY } else { chi };
+        Ok(Outcome { device, cpu: 0.0, tol: 12.0 + 3.0 * f64::from(cells), cpu_tol: 1.0, ms })
     }
 
     /// Weights streamed from host memory: Q4_K / Q5_K / Q6_K / Q8_0 and the 32-value formats at an unaligned width.
@@ -1280,6 +1657,7 @@ impl<'a> Tester<'a> {
         }
         let r = self.moe_combine(2, 3, 70);
         self.record("moe combine", "2 tokens k3 x70", r);
+        self.moe_device_cases();
         self.run_kv_formats_fast();
     }
 
@@ -1497,6 +1875,132 @@ impl<'a> Tester<'a> {
         }
     }
 
+    fn kda_cases(&mut self) {
+        let shapes = [
+            KdaShape { heads: 2, head_dim: 16, conv_kernel: 4, eps: 1e-6, lower_bound: None },
+            KdaShape { heads: 2, head_dim: 32, conv_kernel: 4, eps: 1e-6, lower_bound: None },
+            KdaShape { heads: 2, head_dim: 64, conv_kernel: 4, eps: 1e-6, lower_bound: None },
+            KdaShape { heads: 2, head_dim: 128, conv_kernel: 4, eps: 1e-6, lower_bound: None },
+            KdaShape { heads: 2, head_dim: 32, conv_kernel: 4, eps: 1e-6, lower_bound: Some(0.5) },
+        ];
+        for shape in shapes {
+            let label = format!("{} heads {}x{} ksz={}{}", shape.heads, shape.head_dim, shape.head_dim, shape.conv_kernel, if shape.lower_bound.is_some() { " bounded" } else { "" });
+            match self.device.create_stream() {
+                Ok(s) if s.supports_kda(&shape) => {}
+                Ok(_) => {
+                    self.record_skip("kda", &label, "kda_layer for this shape (supports_kda is false)");
+                    continue;
+                }
+                Err(e) => {
+                    self.record("kda", &label, Err(e));
+                    continue;
+                }
+            }
+            let r = self.kda(&shape);
+            self.record("kda", &label, r);
+        }
+    }
+
+    fn kda(&mut self, shape: &KdaShape) -> Result<Outcome, BackendError> {
+        let (heads, hd, ksz) = (shape.heads, shape.head_dim, shape.conv_kernel);
+        let conv_dim = shape.conv_dim();
+        let width = heads * hd;
+        let conv = self.rng.vector(conv_dim * ksz, 0.6);
+        let dt_bias = self.rng.vector(width, 1.0);
+        let rate: Vec<f32> = (0..heads).map(|_| 0.5 + self.rng.unit().abs() * 1.5).collect();
+        let norm: Vec<f32> = (0..hd).map(|_| 1.0 + 0.25 * self.rng.unit()).collect();
+        let params = crate::cpu_kda::Layer {
+            heads,
+            k_dim: hd,
+            v_dim: hd,
+            conv_kernel: ksz,
+            eps: shape.eps,
+            lower_bound: shape.lower_bound,
+            conv: &conv,
+            dt_bias: &dt_bias,
+            rate: &rate,
+            norm: &norm,
+        };
+        let calls: [&[(usize, usize)]; 6] = [
+            &[(0, 37), (1, 5), (2, 2)],
+            &[(0, 1), (1, 1), (2, 1)],
+            &[(0, 1), (1, 1), (2, 1)],
+            &[(0, 20), (1, 1)],
+            &[(2, 6), (0, 1), (1, 3)],
+            &[(1, 1), (0, 1), (2, 1)],
+        ];
+        let mut stream = self.device.create_stream()?;
+        let conv_buf = put(self.device, stream.as_mut(), &conv)?;
+        let dt_buf = put(self.device, stream.as_mut(), &dt_bias)?;
+        let rate_buf = put(self.device, stream.as_mut(), &rate)?;
+        let norm_buf = put(self.device, stream.as_mut(), &norm)?;
+        let weights = KdaWeights { conv: &conv_buf, dt_bias: &dt_buf, rate: &rate_buf, norm: &norm_buf };
+        let offset = 256;
+        let states: Vec<DeviceBuffer> = (0..3)
+            .map(|_| self.device.allocate_buffer(offset + shape.layer_state_bytes()))
+            .collect::<Result<_, _>>()?;
+        let mut cpu_history = vec![vec![0.0f32; conv_dim * (ksz - 1)]; 3];
+        let mut cpu_state = vec![vec![0.0f32; heads * hd * hd]; 3];
+        let mut seen = [false; 3];
+        let mut worst_err = 0.0f64;
+        let mut total_ms = 0.0;
+        for call in calls {
+            let rows: usize = call.iter().map(|&(_, n)| n).sum();
+            let qkv = self.rng.vector(rows * conv_dim, 1.0);
+            let forget = self.rng.vector(rows * width, 1.0);
+            let beta = self.rng.vector(rows * heads, 1.0);
+            let gate = self.rng.vector(rows * width, 1.0);
+            let mut want = vec![0.0f32; rows * width];
+            let mut row = 0;
+            let mut runs = Vec::with_capacity(call.len());
+            for &(seq, n) in call {
+                let reset = !seen[seq];
+                seen[seq] = true;
+                if reset {
+                    cpu_history[seq].fill(0.0);
+                    cpu_state[seq].fill(0.0);
+                }
+                crate::cpu_kda::run(
+                    &params,
+                    &mut cpu_history[seq],
+                    &mut cpu_state[seq],
+                    (
+                        &qkv[row * conv_dim..(row + n) * conv_dim],
+                        &forget[row * width..(row + n) * width],
+                        &beta[row * heads..(row + n) * heads],
+                        &gate[row * width..(row + n) * width],
+                    ),
+                    &mut want[row * width..(row + n) * width],
+                    n,
+                );
+                runs.push(DeltaRun {
+                    state: &states[seq],
+                    first_row: row,
+                    rows: n,
+                    reset,
+                });
+                row += n;
+            }
+            let qkv_buf = put(self.device, stream.as_mut(), &qkv)?;
+            let forget_buf = put(self.device, stream.as_mut(), &forget)?;
+            let beta_buf = put(self.device, stream.as_mut(), &beta)?;
+            let gate_buf = put(self.device, stream.as_mut(), &gate)?;
+            let mut mixed = self.device.allocate_buffer(rows * conv_dim * 4)?;
+            let mut out = self.device.allocate_buffer(rows * width * 4)?;
+            let mut ms = 0.0;
+            timed(&mut ms, stream.as_mut(), |s| {
+                s.kda_layer(
+                    shape, &weights, &runs, offset, &qkv_buf, &forget_buf, &beta_buf, &gate_buf, &mut mixed, &mut out,
+                )
+            })?;
+            total_ms += ms;
+            let have = get(stream.as_mut(), &out, rows * width)?;
+            let want64: Vec<f64> = want.iter().map(|&v| f64::from(v)).collect();
+            worst_err = worst_err.max(worst(&have, &want64, &vec![1.0; want.len()]));
+        }
+        Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-3, cpu_tol: 1.0, ms: total_ms })
+    }
+
     fn delta(&mut self, shape: &DeltaShape) -> Result<Outcome, BackendError> {
         let (kh, vh, hk, hv, ksz) = (shape.k_heads, shape.v_heads, shape.k_dim, shape.v_dim, shape.conv_kernel);
         let (conv_dim, value_dim) = (shape.conv_dim(), shape.value_dim());
@@ -1594,6 +2098,9 @@ impl<'a> Tester<'a> {
         if self.enter("delta") {
             self.delta_cases();
         }
+        if self.enter("kda") {
+            self.kda_cases();
+        }
         if self.enter("arch") {
             self.arch_cases();
         }
@@ -1618,6 +2125,9 @@ impl<'a> Tester<'a> {
         if self.enter("attention") {
             self.attention_run();
         }
+        if self.enter("encoder") {
+            self.encoder_cases();
+        }
         // These groups use the operations of the fast pass (device sampling, expert products, weights from host memory). A backend without a
         // second pass meets them here and reports SKIPPED where it does not implement them.
         if self.extra_groups {
@@ -1629,6 +2139,9 @@ impl<'a> Tester<'a> {
             }
             if self.enter("moe") {
                 self.moe_cases();
+            }
+            if self.filter.asked_for("moebench") && self.enter("moebench") {
+                self.moe_bench_cases();
             }
             if self.enter("fuse") {
                 self.fuse_cases();
@@ -1741,6 +2254,161 @@ impl<'a> Tester<'a> {
         }
     }
 
+
+    fn encoder_cases(&mut self) {
+        // Full bidirectional attention over variable-length sequences
+        for (batch_size, seq_len, heads, kv_heads, head_dim) in [
+            (1, 16, 4, 4, 32),
+            (2, 24, 6, 2, 64),
+            (3, 12, 8, 8, 64),
+        ] {
+            let r = self.encoder_attention(batch_size, seq_len, heads, kv_heads, head_dim, None, None);
+            self.record(
+                "encoder_attn",
+                &format!("b{batch_size} s{seq_len} h{heads}/{kv_heads} d{head_dim} full"),
+                r,
+            );
+        }
+
+        // Local sliding-window bidirectional attention (ModernBERT style)
+        for (batch_size, seq_len, heads, kv_heads, head_dim, window) in [
+            (1, 32, 4, 4, 64, 8),
+            (2, 48, 6, 6, 64, 16),
+        ] {
+            let r = self.encoder_attention(batch_size, seq_len, heads, kv_heads, head_dim, Some(window), Some(&[0]));
+            self.record(
+                "encoder_attn",
+                &format!("b{batch_size} s{seq_len} h{heads}/{kv_heads} d{head_dim} win{window}"),
+                r,
+            );
+        }
+
+        // Encoder GeGLU feed-forward
+        for count in [64, 256, 1024] {
+            let r = self.glu(count, true);
+            self.record("encoder_geglu", &format!("{count}"), r);
+        }
+    }
+
+
+    #[allow(clippy::too_many_arguments)]
+    fn encoder_attention(
+        &mut self,
+        batch_size: usize,
+        seq_len: usize,
+        heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        window: Option<usize>,
+        global_tokens: Option<&[i32]>,
+    ) -> Result<Outcome, BackendError> {
+        let total_tokens = batch_size * seq_len;
+        let mut cu_seqlens = Vec::with_capacity(batch_size + 1);
+        for b in 0..=batch_size {
+            cu_seqlens.push((b * seq_len) as i32);
+        }
+        let q = self.rng.vector(total_tokens * heads * head_dim, 1.0);
+        let k = self.rng.vector(total_tokens * kv_heads * head_dim, 1.0);
+        let v = self.rng.vector(total_tokens * kv_heads * head_dim, 1.0);
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        // Reference CPU f64 computation
+        let gqa = heads / kv_heads;
+        let mut want = vec![0.0f64; total_tokens * heads * head_dim];
+        for b in 0..batch_size {
+            let start = cu_seqlens[b] as usize;
+            let end = cu_seqlens[b + 1] as usize;
+            let slen = end - start;
+            for i in 0..slen {
+                let tok_i = start + i;
+                let i_global = global_tokens.is_some_and(|g| g.contains(&(tok_i as i32)));
+                for h in 0..heads {
+                    let kh = h / gqa;
+                    let q_offset = tok_i * heads * head_dim + h * head_dim;
+                    let q_slice = &q[q_offset..q_offset + head_dim];
+                    let mut scores = Vec::with_capacity(slen);
+                    let mut max_s = -1e38f64;
+                    for j in 0..slen {
+                        let tok_j = start + j;
+                        let mut vis = true;
+                        if let Some(win) = window {
+                            if win > 0 && win < slen {
+                                let j_global = global_tokens.is_some_and(|g| g.contains(&(tok_j as i32)));
+                                if !i_global && !j_global {
+                                    let dist = (i as isize - j as isize).unsigned_abs();
+                                    if dist > (win / 2) {
+                                        vis = false;
+                                    }
+                                }
+                            }
+                        }
+                        if vis {
+                            let k_offset = tok_j * kv_heads * head_dim + kh * head_dim;
+                            let k_slice = &k[k_offset..k_offset + head_dim];
+                            let dot: f64 = q_slice.iter().zip(k_slice).map(|(&a, &b)| f64::from(a) * f64::from(b)).sum();
+                            let s = dot * f64::from(scale);
+                            scores.push((tok_j, s));
+                            if s > max_s { max_s = s; }
+                        }
+                    }
+                    let mut sum_e = 0.0f64;
+                    let mut exps = Vec::with_capacity(scores.len());
+                    for &(tok_j, s) in &scores {
+                        let e = (s - max_s).exp();
+                        exps.push((tok_j, e));
+                        sum_e += e;
+                    }
+                    let inv_sum = if sum_e > 0.0 { 1.0 / sum_e } else { 0.0 };
+                    let out_offset = tok_i * heads * head_dim + h * head_dim;
+                    for &(tok_j, e) in &exps {
+                        let w = e * inv_sum;
+                        let v_offset = tok_j * kv_heads * head_dim + kh * head_dim;
+                        let v_slice = &v[v_offset..v_offset + head_dim];
+                        for d in 0..head_dim {
+                            want[out_offset + d] += w * f64::from(v_slice[d]);
+                        }
+                    }
+                }
+            }
+        }
+        let err_scale: Vec<f64> = want.iter().map(|&x| x.abs().max(1.0)).collect();
+
+        let op = |backend: &dyn Backend, stream: &mut dyn Stream, ms: &mut f64| -> Result<Vec<f32>, BackendError> {
+            let q_buf = put(backend, stream, &q)?;
+            let k_buf = put(backend, stream, &k)?;
+            let v_buf = put(backend, stream, &v)?;
+            let mut out_buf = backend.allocate_buffer(want.len() * 4)?;
+            timed(ms, stream, |s| {
+                s.attn_encoder(
+                    &mut out_buf,
+                    &q_buf,
+                    &k_buf,
+                    &v_buf,
+                    &cu_seqlens,
+                    batch_size,
+                    total_tokens,
+                    heads,
+                    kv_heads,
+                    head_dim,
+                    scale,
+                    window,
+                    global_tokens,
+                )
+            })?;
+            get(stream, &out_buf, want.len())
+        };
+
+        let (device, cpu, ms) = self.both(&op)?;
+        let tol = gamma(head_dim + 1) + 1e-4;
+        Ok(Outcome {
+            device: worst(&device, &want, &err_scale),
+            cpu: worst(&cpu, &want, &err_scale),
+            tol,
+            cpu_tol: tol,
+            ms,
+        })
+    }
+
     fn kv_cases(&mut self) {
         // KV writes: f16 and q8, head widths with and without 32-value groups, 1/5/13 rows,
         // block size 5 so q8 layers start on odd 16-bit words.
@@ -1836,7 +2504,7 @@ impl<'a> Tester<'a> {
             && cols.is_multiple_of(256)
             && !matches!(kind, 20 | 23 | 39) // run natively through the shared 16-entry grid kernels
             && self.device.name() != "CPU";
-        let device_tol = if converted { 0.02 } else { tol };
+        let device_tol = if converted { 0.02 } else { tol }.max(self.npu_requant_tol(kind));
         Ok(Outcome {
             device: worst(&device, &want, &scale),
             cpu: worst(&cpu, &want, &scale),
@@ -1921,7 +2589,11 @@ impl<'a> Tester<'a> {
             // the trailer behind the scales: {1 / input_scale, weight_scale_2 * input_scale, weight_scale_2, 1}
             let trailer_at = nvfp4_trailer_offset(rows, cols);
             if weight.buffer.size < trailer_at + 16 {
-                return Err(BackendError::DriverError(format!("the device weight has {} bytes, the trailer would sit at {trailer_at}", weight.buffer.size)));
+                // a backend that keeps NVFP4 in its own planar layout (Vulkan) has no activation-quantizing W4A4 path: nothing to compare
+                return Err(BackendError::UnsupportedOperation(format!(
+                    "NVFP4 W4A4 (this device stores NVFP4 weights in {} bytes without the {trailer_at}-byte tensor-core layout and trailer)",
+                    weight.buffer.size
+                )));
             }
             let mut image = vec![0u8; weight.buffer.size];
             stream.download(&mut image, &weight.buffer)?;
@@ -2082,7 +2754,8 @@ impl<'a> Tester<'a> {
             worst(&device[..half], &want[..half], &scale[..half]),
             worst(&device[half..], &want[half..], &scale[half..]),
         ];
-        if halves.iter().any(|h| h.is_nan() || h.abs() > Self::FAST_TOL) {
+        let shared_tol = Self::FAST_TOL.max(self.npu_requant_tol(kinds[0])).max(self.npu_requant_tol(kinds[1]));
+        if halves.iter().any(|h| h.is_nan() || h.abs() > shared_tol) {
             let nan = device.iter().filter(|v| v.is_nan()).count();
             return Err(BackendError::DriverError(format!(
                 "first weight {:.2e}, second weight {:.2e}, {nan} NaN of {}",
@@ -2094,10 +2767,24 @@ impl<'a> Tester<'a> {
         Ok(Outcome {
             device: halves[0].max(halves[1]),
             cpu: worst(&cpu, &want, &scale),
-            tol: Self::FAST_TOL,
+            tol: shared_tol,
             cpu_tol: gamma(cols + 3),
             ms,
         })
+    }
+
+    /// Bound for the formats the NPU provider re-quantizes before its fp16 matrix multiplication (OPENVINO.md: Q4_0, Q8_0 and f16 / f32 weights are
+    /// carried over exactly, every other format becomes symmetric int4, or int8 above 4.5 bits, in groups of 128). That conversion error is the
+    /// design of the backend, not a kernel defect, and shows in the fast pass only (projections of 64 or more rows). 0: no extra allowance.
+    fn npu_requant_tol(&self, kind: u32) -> f64 {
+        if self.device.name() != "npu" || self.pass != "fast" {
+            return 0.0;
+        }
+        match kind {
+            0 | 1 | 2 | 8 | 30 => 0.0,
+            6 | 7 | 13 | 14 => 1e-2,
+            _ => 3e-2,
+        }
     }
 
     /// Greedy sampling on the device: the index of the largest logit of every row, the first one on a tie, NaN ignored.
@@ -2519,13 +3206,14 @@ impl<'a> Tester<'a> {
             let j = (self.rng.next() % (i as u64 + 1)) as usize;
             free.swap(i, j);
         }
+        let shared: Vec<i64> = (0..case.shared_blocks).map(|_| free.pop().unwrap_or(0) as i64).collect();
         let mut lengths = Vec::new();
         let mut tables = Vec::new();
         let mut cached = Vec::new();
         for (s, &n) in case.sequences.iter().enumerate() {
             let mut table = vec![-1i64; case.stride];
-            for entry in table.iter_mut().take(n.div_ceil(case.block_size)) {
-                *entry = free.pop().unwrap_or(0) as i64;
+            for (i, entry) in table.iter_mut().take(n.div_ceil(case.block_size)).enumerate() {
+                *entry = shared.get(i).copied().unwrap_or_else(|| free.pop().unwrap_or(0) as i64);
             }
             for p in 0..n {
                 cached.push((
@@ -2809,6 +3497,8 @@ struct AttnCase {
     sinks: bool,
     alibi: bool,
     scale: Option<f32>,
+    /// Leading blocks that all sequences share (a common prompt prefix in the prefix cache).
+    shared_blocks: usize,
 }
 
 impl AttnCase {
@@ -2830,6 +3520,7 @@ impl AttnCase {
             sinks: false,
             alibi: false,
             scale: None,
+            shared_blocks: 0,
         }
     }
 
@@ -2867,6 +3558,9 @@ impl AttnCase {
         }
         if self.scale.is_some() {
             s += " scale";
+        }
+        if self.shared_blocks > 0 {
+            s += &format!(" shared{}", self.shared_blocks);
         }
         s
     }
@@ -2946,6 +3640,7 @@ impl Tester<'_> {
     fn arch_cases(&mut self) {
         let ops = self.device.create_stream().map(|s| s.supports_arch_ops()).unwrap_or(false);
         if !ops {
+            self.record_skip("arch ops", "LayerNorm, activations, clamp, MLA, Mamba, ShortConv", "supports_arch_ops is false");
             return;
         }
         for (rows, cols, bias) in [(3usize, 64usize, true), (5, 300, true), (2, 1536, false)] {
@@ -3894,6 +4589,53 @@ mod tests {
     }
 
     #[test]
+    fn expected_skips_are_parsed_and_compared() {
+        let text = "intro
+```expected-skips
+# comment
+attention | attention bf16 | 2  # why
+fuse | add_rms_norm | 1
+```
+ignored | line | 9
+";
+        let expected = parse_expected_skips(text).unwrap();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(expected[&("attention".to_owned(), "attention bf16".to_owned())], 2);
+        assert!(parse_expected_skips("```expected-skips
+broken line
+```").is_err());
+        let record = |group: &'static str, op: &str, status| CheckRecord {
+            pass: "exact",
+            group,
+            op: op.to_owned(),
+            shape: String::new(),
+            status,
+            device_error: None,
+            cpu_error: None,
+            tolerance: None,
+            cpu_tolerance: None,
+            device_ms: None,
+            message: Some("reason".into()),
+        };
+        let records = [
+            record("attention", "attention bf16", Status::Skipped),
+            record("attention", "attention bf16", Status::Skipped),
+            record("fuse", "add_rms_norm", Status::Skipped),
+            record("norm", "rms_norm", Status::Ok),
+        ];
+        let dir = std::env::temp_dir().join(format!("fllm-expected-skips-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("EXPECTED_SKIPS.md");
+        std::fs::write(&path, text).unwrap();
+        assert!(check_expected_skips(path.to_str().unwrap(), &records).is_ok());
+        let error = check_expected_skips(path.to_str().unwrap(), &records[..2]).unwrap_err();
+        assert!(error.contains("fuse / add_rms_norm: expected 1 skipped, none skipped"), "{error}");
+        let error = check_expected_skips(path.to_str().unwrap(), &records[1..]).unwrap_err();
+        assert!(error.contains("attention bf16: expected 2 skipped, found 1"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn records_count_skips_apart_from_failures() {
         let cpu = CpuBackend::new();
         let filter = Filter::all();
@@ -4043,4 +4785,7 @@ mod extra_group_tests {
         with_fast_pass.run_fast();
         assert!(!with_fast_pass.records.is_empty());
     }
+
+    
+    
 }

@@ -140,6 +140,29 @@ inline float o_gelu_tanh(float x) {
     return 0.5f * x * (1.0f + tanh(t));
 }
 
+// erfc(z) for z >= 0: Chebyshev fit of Numerical Recipes with a fractional error below 1.2e-7, the same constants as `erf` in rust_decoder.rs
+// (the Metal standard library has no erf). Callers clamp z to <= 12 so that z * z stays finite; erfc(12) is below the float range anyway.
+inline float o_erfc_pos(float z) {
+    const float t = 1.0f / (1.0f + 0.5f * z);
+    const float poly = -z * z - 1.26551223f
+        + t * (1.00002368f
+        + t * (0.37409196f
+        + t * (0.09678418f
+        + t * (-0.18628806f
+        + t * (0.27886807f
+        + t * (-1.13520398f
+        + t * (1.48851587f
+        + t * (-0.82215223f + t * 0.17087277f))))))));
+    return t * exp(poly);
+}
+
+// GELU with the exact erf, 0.5 x (1 + erf(x / sqrt(2))) = 0.5 x erfc(-x / sqrt(2)); written with erfc so that 1 + erf does not cancel for negative x.
+inline float o_gelu_erf(float x) {
+    const float z = x * 0.70710678f;
+    const float e = o_erfc_pos(min(fabs(z), 12.0f));
+    return 0.5f * x * (z >= 0.0f ? 2.0f - e : e);
+}
+
 // Logit soft cap: cap * tanh(s / cap)
 inline float o_softcap(float s, float cap) { return cap * tanh(clamp(s / cap, -15.0f, 15.0f)); }
 

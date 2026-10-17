@@ -1,0 +1,53 @@
+# Minimum supported Rust version: the workspace must build with the rust-version of the root Cargo.toml.
+# The MSRV is the lowest toolchain that builds the locked dependency set (the newest requirement among them, see
+# docs/releasing.md). When a dependency update raises it, raise `rust-version` and `toolchain` below together.
+name: msrv
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: msrv-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  msrv:
+    name: build with the MSRV toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          set -eu
+          v=$(tr -d '\r' < Cargo.toml | awk '/^\[workspace\.package\]/{on=1; next} /^\[/{on=0} on && /^rust-version[[:space:]]*=/{gsub(/^[^"]*"|".*$/, ""); print; exit}')
+          if [ -z "$v" ]; then echo "::error::no rust-version in [workspace.package]"; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check (default features, all targets)
+        run: cargo check --locked --workspace --all-targets

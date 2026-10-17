@@ -9,10 +9,25 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{delete, get, post},
+    routing::{delete, get, head, post},
     Json, Router,
 };
 mod api;
+pub(crate) mod errors;
+pub mod gencfg;
+pub(crate) mod http;
+pub mod logging;
+pub mod model_facts;
+pub mod options;
+mod remote_image;
+pub(crate) mod security;
+mod tls;
+#[cfg(test)]
+mod tests;
+
+pub use model_facts::ModelFacts;
+use options::HttpOptions;
+mod media;
 
 use minijinja::Environment;
 use serde_json::{json, Map, Value};
@@ -20,7 +35,7 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc, Arc,
     },
     thread,
@@ -30,6 +45,19 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 struct Metrics {
     observability: Arc<crate::metrics::Metrics>,
+    started: Instant,
+    /// Milliseconds since `started` at which the worker loop last made progress (it also wakes once a second when idle).
+    heartbeat_ms: AtomicU64,
+    worker_panics: AtomicU64,
+    queue_rejections: AtomicU64,
+    /// How long the worker may go without progress before `/ready` reports 503 (`WORKER_STALL_MS`).
+    stall_ms: AtomicU64,
+    /// Test hook: the next worker step panics (see `tests.rs`).
+    #[cfg(test)]
+    inject_panic: AtomicU64,
+    /// Test hook: every worker step sleeps this many milliseconds first.
+    #[cfg(test)]
+    inject_delay_ms: AtomicU64,
     requests: AtomicU64,
     generated_tokens: AtomicU64,
     forward_calls: AtomicU64,
@@ -52,6 +80,8 @@ struct AppState {
     model_name: String,
     model_arch: String,
     chat_template: String,
+    /// `tool_use` template, used instead of `chat_template` when a request carries tools (empty: none)
+    tool_chat_template: String,
     /// Tool-call format of the model (--tool-parser, else chosen from the chat template).
     tool_parser: Arc<dyn crate::tool_parsers::ToolParser>,
     /// Reasoning format of the model (--reasoning-parser, else chosen from the chat template).
@@ -61,7 +91,16 @@ struct AppState {
     worker: std_mpsc::Sender<WorkerCommand>,
     next_request: AtomicU64,
     metrics: Arc<Metrics>,
-    api_key: Option<String>,
+    /// Authentication, rate limits and the other HTTP-layer settings.
+    http: Arc<http::HttpContext>,
+    /// Further names a request may put in its `model` field.
+    aliases: std::sync::RwLock<Vec<String>>,
+    facts: ModelFacts,
+    /// `false` while the server is starting or shutting down (`/ready`).
+    ready: Arc<AtomicBool>,
+    /// Last Ollama `keep_alive` the clients asked for. HOOK(multi-model): unloading idle models is not implemented
+    /// here, the single resident model only reports the expiry in `/api/ps`.
+    keep_alive: std::sync::Mutex<Option<(SystemTime, api::ollama_extra::KeepAlive)>>,
     max_context: usize,
     shared_choices: bool,
     default_temperature: Option<f64>,
@@ -70,7 +109,7 @@ struct AppState {
     hidden_size: usize,
     admission: Arc<tokio::sync::Semaphore>,
     sampling_defaults: crate::sampling::SamplingParams,
-    vision: Option<Arc<crate::vision::VisionEncoder>>,
+    vision: Option<Arc<dyn crate::vision::MultimodalEncoder>>,
     vision_admission: Arc<tokio::sync::Semaphore>,
 }
 
@@ -81,7 +120,7 @@ enum WorkerCommand {
         max_tokens: usize,
         sampling: Box<crate::sampling::SamplingParams>,
         constraint: Option<Box<llguidance::Matcher>>,
-        images: Box<[(usize, Vec<f32>)]>,
+        images: Box<ImageOverrides>,
         output: GenerationTx,
     },
     Embed {
@@ -95,6 +134,8 @@ enum WorkerCommand {
 struct GenerationTx {
     inner: tokio_mpsc::Sender<Result<crate::runtime::TokenEvent, String>>,
     error: Arc<std::sync::Mutex<Option<String>>>,
+    /// When the request was handed to the worker, for the queue-time histogram.
+    submitted: Instant,
 }
 impl GenerationTx {
     fn is_closed(&self) -> bool {
@@ -103,7 +144,7 @@ impl GenerationTx {
     fn send(&self, event: Result<crate::runtime::TokenEvent, String>) -> Result<(), ()> {
         self.inner.try_send(event).map_err(|error| {
             if matches!(error, tokio_mpsc::error::TrySendError::Full(_)) {
-                *self.error.lock().unwrap() =
+                *security::lock(&self.error) =
                     Some("client output buffer is full; generation cancelled".into());
             }
         })
@@ -114,12 +155,28 @@ struct GenerationRx {
     inner: tokio_mpsc::Receiver<Result<crate::runtime::TokenEvent, String>>,
     error: Arc<std::sync::Mutex<Option<String>>>,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    /// Token budget and counters of the calling API key / HTTP request.
+    caller: Option<security::Caller>,
 }
 impl GenerationRx {
     async fn recv(&mut self) -> Option<Result<crate::runtime::TokenEvent, String>> {
         match self.inner.recv().await {
-            Some(event) => { if event.is_ok() { self.observation.token(); } Some(event) },
-            None => self.error.lock().unwrap().take().map(Err),
+            Some(event) => {
+                if let Ok(token) = &event {
+                    self.observation.token();
+                    if let Some(caller) = &self.caller {
+                        caller.stats.completion_tokens.fetch_add(1, Ordering::Relaxed);
+                        if let Some(limiter) = &caller.limiter {
+                            limiter.charge_tokens(1);
+                        }
+                    }
+                    if token.request_finished {
+                        self.observation.finish(token.finish_reason.unwrap_or("stop"));
+                    }
+                }
+                Some(event)
+            }
+            None => security::lock(&self.error).take().map(Err),
         }
     }
 }
@@ -128,29 +185,61 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub model_name: String,
-    pub api_key: Option<String>,
+    /// Authentication, limits, timeouts, CORS, TLS, logging (see `options.rs`).
+    pub http: HttpOptions,
+    pub facts: ModelFacts,
     /// Sampling defaults used when a request does not set the parameter (`--temp`, `--top-p`, `--top-k`).
     pub default_temperature: Option<f64>,
     pub default_top_p: Option<f64>,
     pub default_top_k: Option<usize>,
     pub sampling_defaults: crate::sampling::SamplingParams,
-    /// --tool-parser: a parser id, or uto/absent to choose from the chat template.
+    /// --tool-parser: a parser id, or auto/absent to choose from the chat template.
     pub tool_parser: Option<String>,
-    /// --reasoning-parser: a reasoning format id, or uto/absent to choose from the chat template.
+    /// --reasoning-parser: a reasoning format id, or auto/absent to choose from the chat template.
     pub reasoning_parser: Option<String>,
 }
 
-pub fn serve(
-    runtime: InferenceRuntime,
-    tokenizer: TokenizerBundle,
-    config: ServerConfig,
-) -> Result<(), String> {
+/// Temperature of an OpenAI-style request that sets none and whose model ships no `generation_config.json` sampling
+/// values: the OpenAI and vLLM default (the engine used to answer greedily).
+const OPENAI_DEFAULT_TEMPERATURE: f64 = 1.0;
+
+/// Ollama built-in sampling defaults, used on `/api/chat` and `/api/generate` when neither the request, the command
+/// line nor the model sets a value.
+const OLLAMA_DEFAULT_TEMPERATURE: f64 = 0.8;
+const OLLAMA_DEFAULT_TOP_P: f64 = 0.9;
+const OLLAMA_DEFAULT_TOP_K: usize = 40;
+
+/// What a worker that has not made progress for this long counts as: stuck. `/ready` answers 503 then.
+const WORKER_STALL_MS: u64 = 120_000;
+
+/// A router and worker channel for `state`, without any socket (the unit tests drive them directly).
+struct Built {
+    state: Arc<AppState>,
+    router: Router,
+    worker_rx: std_mpsc::Receiver<WorkerCommand>,
+    metrics: Arc<Metrics>,
+}
+
+fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerConfig) -> Result<Built, String> {
+    validate_chat_template(runtime.model.chat_template())?;
     let chat_template = normalize_chat_template(runtime.model.chat_template());
+    let tool_chat_template = normalize_chat_template(runtime.model.tool_chat_template());
     let max_context = runtime.model.max_context();
     let model_arch = runtime.model.model_arch().to_owned();
     let hidden_size = runtime.model.hidden_size();
+    let max_sequences = runtime.model.max_sequences();
+    let queue = config.http.max_queue.unwrap_or(8 * max_sequences);
     let server_metrics = Arc::new(Metrics {
         observability: Arc::new(crate::metrics::Metrics::new()),
+        started: Instant::now(),
+        heartbeat_ms: AtomicU64::new(0),
+        worker_panics: AtomicU64::new(0),
+        queue_rejections: AtomicU64::new(0),
+        stall_ms: AtomicU64::new(WORKER_STALL_MS),
+        #[cfg(test)]
+        inject_panic: AtomicU64::new(0),
+        #[cfg(test)]
+        inject_delay_ms: AtomicU64::new(0),
         requests: AtomicU64::new(0),
         generated_tokens: AtomicU64::new(0),
         forward_calls: AtomicU64::new(0),
@@ -168,15 +257,19 @@ pub fn serve(
         slots_running: AtomicU64::new(0),
         slots_waiting: AtomicU64::new(0),
     });
+    server_metrics.observability.set_model_name(&config.model_name);
     let (worker_tx, worker_rx) = std_mpsc::channel::<WorkerCommand>();
     let grammar_factory = Arc::new(tokenizer.grammar_factory()?);
-    let tool_parser = crate::tool_parsers::select(&model_arch, &chat_template, config.tool_parser.as_deref())?;
+    let tool_parser = crate::tool_parsers::select(&model_arch, &format!("{chat_template}\n{tool_chat_template}"), config.tool_parser.as_deref())?;
     let reasoning_family = Family::select(&chat_template, config.reasoning_parser.as_deref())?;
-    eprintln!("[fllm-rs] tool parser: {}, reasoning parser: {:?}", tool_parser.id(), reasoning_family);
+    tracing::info!("tool parser: {}, reasoning parser: {:?}", tool_parser.id(), reasoning_family);
+    let http_context = http::HttpContext::new(config.http.clone());
+    let ready = Arc::new(AtomicBool::new(false));
     let state = Arc::new(AppState {
         model_name: config.model_name,
         model_arch,
         chat_template,
+        tool_chat_template,
         tool_parser,
         reasoning_family,
         tokenizer: Arc::new(tokenizer),
@@ -184,22 +277,31 @@ pub fn serve(
         worker: worker_tx,
         next_request: AtomicU64::new(1),
         metrics: server_metrics.clone(),
-        api_key: config.api_key,
+        http: http_context.clone(),
+        aliases: std::sync::RwLock::new(config.http.model_aliases.clone()),
+        facts: config.facts,
+        ready,
+        keep_alive: std::sync::Mutex::new(None),
         max_context,
         shared_choices: runtime.supports_shared_choices(),
         default_temperature: config.default_temperature,
         default_top_p: config.default_top_p,
         default_top_k: config.default_top_k,
         hidden_size,
-        admission: Arc::new(tokio::sync::Semaphore::new(128)),
+        // requests running plus requests waiting for a sequence slot; a request beyond that gets 429 with Retry-After
+        admission: Arc::new(tokio::sync::Semaphore::new(max_sequences + queue)),
         sampling_defaults: config.sampling_defaults,
         vision: runtime.vision.clone(),
-        vision_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+        vision_admission: Arc::new(tokio::sync::Semaphore::new(crate::vision::preprocess::MediaLimits::get().concurrency)),
     });
-    let app = Router::new()
+    let upload_limit = api::batches::max_upload_bytes();
+    let router = Router::new()
         .route("/", get(webui).head(api::ollama_extra::head_root))
         .route("/health", get(health))
+        .route("/ready", get(ready_check))
         .route("/metrics", get(metrics))
+        .route("/version", get(api::vllm::version))
+        .route("/is_sleeping", get(api::vllm::is_sleeping))
         .route("/v1/models", get(models))
         .route("/v1/models/{id}", get(api::model_by_id))
         .route("/v1/messages", post(api::anthropic::messages))
@@ -208,17 +310,18 @@ pub fn serve(
         .route("/v1/responses/{id}", get(api::responses::get_one).delete(api::responses::delete_one))
         .route("/v1/completions", post(completions))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/chat/completions/render", post(api::vllm::render_chat))
         .route("/v1/embeddings", post(embeddings))
-        .route("/v1/rerank", post(encoder_rerank_required))
-        .route("/rerank", post(encoder_rerank_required))
-        .route("/v1/score", post(encoder_required))
-        .route("/classify", post(encoder_required))
-        .route("/pooling", post(encoder_required))
+        .route("/v1/rerank", post(rerank))
+        .route("/rerank", post(rerank))
+        .route("/v1/score", post(score))
+        .route("/classify", post(classify))
+        .route("/pooling", post(pooling))
         .route(
             "/v1/files",
             get(api::batches::list_files)
                 .post(api::batches::upload)
-                .layer(DefaultBodyLimit::max(api::batches::max_upload_bytes())),
+                .layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/v1/files/{id}", get(api::batches::get_file).delete(api::batches::delete_file))
         .route("/v1/files/{id}/content", get(api::batches::file_content))
@@ -226,18 +329,32 @@ pub fn serve(
         .route("/v1/batches/{id}", get(api::batches::get_batch))
         .route("/v1/batches/{id}/cancel", post(api::batches::cancel_batch))
         .route("/v1/images/embeddings", post(image_embeddings))
+        .route(
+            "/v1/audio/transcriptions",
+            post(audio_transcriptions).layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/audio/translations",
+            post(audio_translations).layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/embed", post(api::ollama_extra::embed))
         .route("/api/embeddings", post(embeddings))
         .route("/api/show", post(api::ollama_extra::show))
         .route("/api/ps", get(api::ollama_extra::ps))
         .route("/api/pull", post(api::ollama_extra::pull))
+        .route("/api/push", post(api::ollama_extra::push))
+        .route("/api/create", post(api::ollama_extra::create))
+        .route("/api/copy", post(api::ollama_extra::copy))
         .route("/api/delete", delete(api::ollama_extra::delete_model))
+        .route("/api/blobs/{digest}", head(api::ollama_extra::head_blob).post(api::ollama_extra::post_blob))
         .route("/tokenize", post(api::llamacpp::tokenize))
         .route("/detokenize", post(api::llamacpp::detokenize))
         .route("/completion", post(api::llamacpp::completion))
         .route("/infill", post(api::llamacpp::infill))
-        .route("/props", get(api::llamacpp::props))
+        .route("/props", get(api::llamacpp::props).post(api::llamacpp::set_props))
         .route("/slots", get(api::llamacpp::slot_list))
+        .route("/slots/{id}", post(api::llamacpp::slot_action))
+        .route("/lora-adapters", get(api::llamacpp::lora_adapters).post(api::llamacpp::set_lora_adapters))
         .route("/apply-template", post(api::llamacpp::apply_template))
         .route("/embedding", post(api::llamacpp::embedding))
         .route("/embeddings", post(api::llamacpp::embeddings))
@@ -250,12 +367,28 @@ pub fn serve(
         .route("/info", get(api::tgi::info))
         .route("/get_model_info", get(sglang_model_info))
         .route("/get_server_info", get(sglang_server_info))
-        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(config.http.max_body_bytes))
         .layer(axum::middleware::from_fn_with_state(server_metrics.observability.clone(), crate::metrics::observe))
-        .with_state(state);
-    let address: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| format!("invalid listen address: {e}"))?;
+        .layer(axum::middleware::from_fn_with_state(http_context, http::layer))
+        .with_state(state.clone());
+    Ok(Built { state, router, worker_rx, metrics: server_metrics })
+}
+
+pub fn serve(
+    runtime: InferenceRuntime,
+    tokenizer: TokenizerBundle,
+    config: ServerConfig,
+) -> Result<(), String> {
+    let address = listen_address(&config.host, config.port)?;
+    let tls = config.http.tls_cert.is_some();
+    let Built { state, router, worker_rx, metrics } = build(&runtime, tokenizer, config)?;
+    let ready = state.ready.clone();
+    let context = state.http.clone();
+    // the router owns the last sender of the worker channel; the worker must see it disconnect to stop
+    drop(state);
+    if !context.security.auth_required() && !address.ip().is_loopback() {
+        tracing::warn!("listening on {address} without an API key: anyone who can reach this port can use the model (--api-key)");
+    }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let http_thread = thread::Builder::new()
         .name("fllm-http-runtime".into())
@@ -268,18 +401,18 @@ pub fn serve(
                 let listener = tokio::net::TcpListener::bind(address)
                     .await
                     .map_err(|e| format!("cannot bind HTTP listener: {e}"))?;
-                println!("fllm-rs listening on http://{address}");
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(shutdown_signal(shutdown_rx))
-                    .await
-                    .map_err(|e| e.to_string())
+                println!("{}", crate::version::long_version());
+                println!("fllm-rs listening on http{}://{address}", if tls { "s" } else { "" });
+                ready.store(true, Ordering::Relaxed);
+                // the router (and with it the sender of the worker channel) lives until the last connection is gone
+                http::serve(listener, router, context, ready.clone(), shutdown_signal(shutdown_rx)).await
             })
         })
         .map_err(|e| format!("cannot start HTTP thread: {e}"))?;
 
     // Keep the native OpenMP model path on the process main thread. Profiling
     // showed the same model call was 2.5-3x slower from a secondary thread.
-    let worker_result = run_worker_loop(runtime, worker_rx, server_metrics);
+    let worker_result = run_worker_loop(runtime, worker_rx, metrics);
     let _ = shutdown_tx.send(());
     let http_result = http_thread
         .join()
@@ -289,6 +422,19 @@ pub fn serve(
     Ok(())
 }
 
+/// `--host` as an address: IPv4, IPv6 (with or without brackets) or a name that resolves to one.
+fn listen_address(host: &str, port: u16) -> Result<SocketAddr, String> {
+    let bare = host.trim_matches(['[', ']']);
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    std::net::ToSocketAddrs::to_socket_addrs(&(bare, port))
+        .ok()
+        .and_then(|mut found| found.next())
+        .ok_or_else(|| format!("invalid listen address: {host}"))
+}
+
+/// Completes on the first SIGINT/SIGTERM (or when the worker has stopped); a second SIGINT ends the process at once.
 async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
     #[cfg(unix)]
     {
@@ -296,16 +442,42 @@ async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("register SIGTERM handler");
         tokio::select! {
-            _ = &mut shutdown => {},
+            _ = &mut shutdown => return,
             _ = tokio::signal::ctrl_c() => {},
             _ = terminate.recv() => {},
         }
     }
     #[cfg(not(unix))]
     tokio::select! {
-        _ = &mut shutdown => {},
+        _ = &mut shutdown => return,
         _ = tokio::signal::ctrl_c() => {},
     }
+    tracing::info!("shutdown requested; finishing requests in flight (press Ctrl-C again to stop immediately)");
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        std::process::exit(130);
+    });
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_owned())
+}
+
+/// Identifier that ties the 500 response of a client to the log line with the panic.
+fn new_error_id() -> String {
+    api::new_id("err")
+}
+
+/// Logs a panic of model code, counts it, and returns the message the affected request fails with.
+fn record_panic(metrics: &Metrics, what: &str, payload: &(dyn std::any::Any + Send)) -> String {
+    let id = new_error_id();
+    metrics.worker_panics.fetch_add(1, Ordering::Relaxed);
+    tracing::error!(error_id = %id, "panic while {what}: {}", panic_message(payload));
+    format!("internal error while {what} (error id {id}); the failure was logged by the server")
 }
 
 fn run_worker_loop(
@@ -313,10 +485,18 @@ fn run_worker_loop(
     rx: std_mpsc::Receiver<WorkerCommand>,
     metrics: Arc<Metrics>,
 ) -> Result<(), String> {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     let mut outputs = std::collections::HashMap::<String, GenerationTx>::new();
     runtime.attach_metrics(metrics.observability.clone());
     let mut previous_stats = crate::runtime::BatchStats::default();
+    let mut consecutive_panics = 0u32;
+    let beat = |metrics: &Metrics| {
+        metrics
+            .heartbeat_ms
+            .store(metrics.started.elapsed().as_millis() as u64, Ordering::Relaxed)
+    };
     loop {
+        beat(&metrics);
         let (running, waiting, free, total, hits) = runtime.metrics_snapshot();
         metrics.observability.snapshot(running, waiting, free, total, hits);
         metrics.slots_running.store(running as u64, Ordering::Relaxed);
@@ -330,20 +510,62 @@ fn run_worker_loop(
             outputs.remove(&request_id);
             let _ = runtime.cancel_request(&request_id);
         }
+        for request_id in runtime.expire_requests() {
+            if let Some(output) = outputs.remove(&request_id) {
+                let _ = output.send(Err("the request exceeded its timeout".to_owned()));
+            }
+        }
         if runtime.active_requests() == 0 {
-            match rx.recv() {
-                Ok(command) => { metrics.observability.dequeue(); accept_command(command, &mut runtime, &mut outputs, &metrics.observability); },
-                Err(_) => break,
+            // wake once a second while idle so that /ready can tell an idle worker from a stuck one
+            match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(command) => { metrics.observability.dequeue(); accept_command(command, &mut runtime, &mut outputs, &metrics); },
+                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         while let Ok(command) = rx.try_recv() {
             metrics.observability.dequeue();
-            accept_command(command, &mut runtime, &mut outputs, &metrics.observability);
+            accept_command(command, &mut runtime, &mut outputs, &metrics);
         }
         if runtime.active_requests() == 0 {
             continue;
         }
-        match runtime.step() {
+        let stepped = catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(test)]
+            {
+                let delay = metrics.inject_delay_ms.load(Ordering::Relaxed);
+                if delay > 0 {
+                    thread::sleep(std::time::Duration::from_millis(delay));
+                }
+            }
+            #[cfg(test)]
+            if metrics.inject_panic.swap(0, Ordering::Relaxed) > 0 {
+                panic!("injected test panic");
+            }
+            runtime.step()
+        }));
+        let stepped = match stepped {
+            Ok(result) => {
+                consecutive_panics = 0;
+                result
+            }
+            Err(payload) => {
+                // The batch that was running is in an unknown state: fail all requests in flight with an error id and
+                // drop their sequences, then keep serving. Repeated panics without a good step in between stop the
+                // server (a supervisor restarts it) instead of looping forever.
+                let message = record_panic(&metrics, "running the model", payload.as_ref());
+                for (request_id, output) in outputs.drain() {
+                    let _ = output.send(Err(message.clone()));
+                    let _ = catch_unwind(AssertUnwindSafe(|| runtime.cancel_request(&request_id)));
+                }
+                consecutive_panics += 1;
+                if consecutive_panics >= 3 {
+                    return Err("the model panicked in three consecutive steps; stopping".into());
+                }
+                continue;
+            }
+        };
+        match stepped {
             Ok(events) => {
                 let stats = runtime.batch_stats();
                 metrics.observability.processed(stats.prefill_rows.saturating_sub(previous_stats.prefill_rows));
@@ -430,8 +652,9 @@ fn accept_command(
     command: WorkerCommand,
     runtime: &mut InferenceRuntime,
     outputs: &mut std::collections::HashMap<String, GenerationTx>,
-    metrics: &Arc<crate::metrics::Metrics>,
+    metrics: &Metrics,
 ) {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     match command {
         WorkerCommand::Embed {
             tokens,
@@ -439,9 +662,10 @@ fn accept_command(
             output,
         } => {
             if !output.is_closed() {
-                let _active = metrics.embedding();
-                let result = runtime.embedding(&tokens, &pooling);
-                if result.is_ok() { metrics.processed(tokens.len()); }
+                let _active = metrics.observability.embedding();
+                let result = catch_unwind(AssertUnwindSafe(|| runtime.embedding(&tokens, &pooling)))
+                    .unwrap_or_else(|payload| Err(record_panic(metrics, "computing an embedding", payload.as_ref())));
+                if result.is_ok() { metrics.observability.processed(tokens.len()); }
                 let _ = output.send(result);
             }
         }
@@ -453,60 +677,462 @@ fn accept_command(
             constraint,
             images,
             output,
-        } => match runtime.submit_with_sampling(request_id.clone(), prompt, max_tokens, *sampling) {
-            Ok(sequence_id) => {
-                if let Err(error) = runtime.attach_image_embeddings(sequence_id, images.into_vec())
-                {
+        } => {
+            metrics.observability.queue_time(output.submitted.elapsed().as_secs_f64());
+            // A panic in model code while a request is set up fails this request only.
+            let admitted = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+                let sequence_id = runtime.submit_with_sampling(request_id.clone(), prompt, max_tokens, *sampling)?;
+                let attached = runtime
+                    .attach_media(sequence_id, *images)
+                    .and_then(|()| match constraint {
+                        Some(constraint) => runtime.set_constraint(sequence_id, *constraint),
+                        None => Ok(()),
+                    });
+                if let Err(error) = attached {
                     let _ = runtime.cancel_request(&request_id);
+                    return Err(error);
+                }
+                Ok(())
+            }));
+            match admitted {
+                Ok(Ok(())) => {
+                    outputs.insert(request_id, output);
+                }
+                Ok(Err(error)) => {
                     let _ = output.send(Err(error));
-                    return;
                 }
-                if let Some(constraint) = constraint {
-                    if let Err(error) = runtime.set_constraint(sequence_id, *constraint) {
-                        let _ = runtime.cancel_request(&request_id);
-                        let _ = output.send(Err(error));
-                        return;
-                    }
+                Err(payload) => {
+                    let message = record_panic(metrics, "starting a request", payload.as_ref());
+                    let _ = catch_unwind(AssertUnwindSafe(|| runtime.cancel_request(&request_id)));
+                    let _ = output.send(Err(message));
                 }
-                outputs.insert(request_id, output);
             }
-            Err(error) => {
-                let _ = output.send(Err(error));
-            }
-        },
+        }
     }
 }
 
-async fn encoder_required(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    api_error(StatusCode::NOT_IMPLEMENTED,"this decoder does not provide encoder classification/pooling; load an encoder with --embeddings")
-}
-async fn encoder_rerank_required(
+async fn pooling(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Json(body): Json<Value>,
 ) -> Response {
-    if authorize(&state, &headers).is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"message":"invalid API key"})),
-        )
-            .into_response();
+    let input = body
+        .get("input")
+        .or_else(|| body.get("prompt"))
+        .unwrap_or(&Value::Null);
+    let inputs = match input {
+        Value::Array(items) if items.first().is_some_and(|v| v.is_string() || v.is_array()) => {
+            items.clone()
+        }
+        _ => vec![input.clone()],
+    };
+    if inputs.is_empty() || inputs.len() > 32 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "pooling batch must contain 1 to 32 inputs",
+        );
     }
-    (StatusCode::NOT_IMPLEMENTED,Json(json!({"message":"decoder reranking is not implemented; load a sequence classification cross-encoder with --embeddings"}))).into_response()
+    let mut tokenized = Vec::new();
+    for item in &inputs {
+        match input_tokens(&state, item) {
+            Ok(ids) if ids.len() <= state.max_context => tokenized.push(ids),
+            Ok(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "pooling input exceeds model context",
+                )
+            }
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        }
+    }
+    let task = body.get("task").and_then(Value::as_str).unwrap_or("embed");
+    let pooling_mode = match task {
+        "token_embed" | "last" => "last",
+        _ => body.get("pooling").and_then(Value::as_str).unwrap_or("mean"),
+    };
+    let mode = if matches!(pooling_mode, "last" | "mean") { pooling_mode } else { "mean" };
+
+    let _permit = match state.admission.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference request limit reached",
+            )
+        }
+    };
+    let mut data = Vec::new();
+    let mut total_tokens = 0;
+    for (index, tokens) in tokenized.into_iter().enumerate() {
+        total_tokens += tokens.len();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if state
+            .worker
+            .send(WorkerCommand::Embed {
+                tokens,
+                pooling: mode.into(),
+                output: tx,
+            })
+            .is_err()
+        {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "model worker unavailable");
+        }
+        let vector = match rx.await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return api_error(StatusCode::SERVICE_UNAVAILABLE, &e),
+            Err(_) => {
+                return api_error(StatusCode::SERVICE_UNAVAILABLE, "embedding worker stopped")
+            }
+        };
+        data.push(json!({
+            "object": "embedding",
+            "index": index,
+            "embedding": vector,
+        }));
+    }
+    Json(json!({
+        "object": "list",
+        "data": data,
+        "model": state.model_name,
+        "usage": {
+            "prompt_tokens": total_tokens,
+            "total_tokens": total_tokens
+        }
+    }))
+    .into_response()
 }
 
+async fn score(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let (t1, t2s) = if let (Some(t1), Some(t2)) = (
+        body.get("text_1").and_then(Value::as_str),
+        body.get("text_2"),
+    ) {
+        let docs = match t2 {
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            Value::String(s) => vec![s.clone()],
+            _ => return api_error(StatusCode::BAD_REQUEST, "text_2 must be string or string array"),
+        };
+        (t1.to_string(), docs)
+    } else {
+        return api_error(StatusCode::BAD_REQUEST, "request must include text_1 and text_2");
+    };
+
+    let _permit = match state.admission.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference request limit reached",
+            )
+        }
+    };
+
+    let embed_one = |text: String| {
+        let st = state.clone();
+        async move {
+            let ids = input_tokens(&st, &Value::String(text))
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let tokens_len = ids.len();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            st.worker
+                .send(WorkerCommand::Embed {
+                    tokens: ids,
+                    pooling: "mean".into(),
+                    output: tx,
+                })
+                .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "model worker unavailable".into()))?;
+            let vec = rx.await
+                .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "embedding worker stopped".into()))?
+                .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+            Ok::<_, (StatusCode, String)>((vec, tokens_len))
+        }
+    };
+
+    let (v1, t1_tokens) = match embed_one(t1).await {
+        Ok(v) => v,
+        Err((sc, msg)) => return api_error(sc, &msg),
+    };
+
+    let mut scores = Vec::new();
+    let mut total_tokens = t1_tokens;
+    for (index, doc) in t2s.into_iter().enumerate() {
+        let (v2, d_tokens) = match embed_one(doc).await {
+            Ok(v) => v,
+            Err((sc, msg)) => return api_error(sc, &msg),
+        };
+        total_tokens += d_tokens;
+        let dot: f32 = v1.iter().zip(&v2).map(|(&a, &b)| a * b).sum();
+        let n1: f32 = v1.iter().map(|a| a * a).sum::<f32>().sqrt();
+        let n2: f32 = v2.iter().map(|a| a * a).sum::<f32>().sqrt();
+        let sim = if n1 > 0.0 && n2 > 0.0 { dot / (n1 * n2) } else { 0.0 };
+        scores.push(json!({
+            "index": index,
+            "object": "score",
+            "score": sim,
+        }));
+    }
+
+    Json(json!({
+        "object": "list",
+        "model": state.model_name,
+        "data": scores,
+        "usage": {
+            "prompt_tokens": total_tokens,
+            "total_tokens": total_tokens
+        }
+    }))
+    .into_response()
+}
+
+async fn rerank(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let query = match body.get("query").and_then(Value::as_str) {
+        Some(q) => q.to_string(),
+        None => return api_error(StatusCode::BAD_REQUEST, "missing query"),
+    };
+    let documents = match body.get("documents").and_then(Value::as_array) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<Vec<_>>(),
+        None => return api_error(StatusCode::BAD_REQUEST, "missing documents array"),
+    };
+    let top_n = body
+        .get("top_n")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(documents.len())
+        .min(documents.len());
+    let return_docs = body
+        .get("return_documents")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let _permit = match state.admission.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference request limit reached",
+            )
+        }
+    };
+
+    let embed_one = |text: String| {
+        let st = state.clone();
+        async move {
+            let ids = input_tokens(&st, &Value::String(text))
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let tokens_len = ids.len();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            st.worker
+                .send(WorkerCommand::Embed {
+                    tokens: ids,
+                    pooling: "mean".into(),
+                    output: tx,
+                })
+                .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "model worker unavailable".into()))?;
+            let vec = rx.await
+                .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "embedding worker stopped".into()))?
+                .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+            Ok::<_, (StatusCode, String)>((vec, tokens_len))
+        }
+    };
+
+    let (q_vec, q_tokens) = match embed_one(query).await {
+        Ok(v) => v,
+        Err((sc, msg)) => return api_error(sc, &msg),
+    };
+
+    let mut ranked = Vec::new();
+    let mut total_tokens = q_tokens;
+    for (index, doc) in documents.into_iter().enumerate() {
+        let (d_vec, d_tokens) = match embed_one(doc.clone()).await {
+            Ok(v) => v,
+            Err((sc, msg)) => return api_error(sc, &msg),
+        };
+        total_tokens += d_tokens;
+        let dot: f32 = q_vec.iter().zip(&d_vec).map(|(&a, &b)| a * b).sum();
+        let n1: f32 = q_vec.iter().map(|a| a * a).sum::<f32>().sqrt();
+        let n2: f32 = d_vec.iter().map(|a| a * a).sum::<f32>().sqrt();
+        let sim = if n1 > 0.0 && n2 > 0.0 { dot / (n1 * n2) } else { 0.0 };
+        ranked.push((index, sim, doc));
+    }
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(top_n);
+
+    let results: Vec<Value> = ranked
+        .into_iter()
+        .map(|(index, score, doc)| {
+            if return_docs {
+                json!({
+                    "index": index,
+                    "relevance_score": score,
+                    "document": { "text": doc }
+                })
+            } else {
+                json!({
+                    "index": index,
+                    "relevance_score": score,
+                })
+            }
+        })
+        .collect();
+
+    let id = format!(
+        "rerank_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    Json(json!({
+        "id": id,
+        "results": results,
+        "model": state.model_name,
+        "usage": {
+            "prompt_tokens": total_tokens,
+            "total_tokens": total_tokens
+        },
+        "meta": {
+            "api_version": { "version": "2" },
+            "billed_units": { "search_units": 0, "input_tokens": total_tokens }
+        }
+    }))
+    .into_response()
+}
+
+async fn classify(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let input = body.get("input").unwrap_or(&Value::Null);
+    let inputs = match input {
+        Value::Array(items) => items.clone(),
+        _ => vec![input.clone()],
+    };
+    if inputs.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "input must not be empty");
+    }
+    let _permit = match state.admission.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference request limit reached",
+            )
+        }
+    };
+    let mut results = Vec::new();
+    for item in inputs {
+        let text = match item.as_str() {
+            Some(s) => s.to_string(),
+            None => return api_error(StatusCode::BAD_REQUEST, "each input must be a string"),
+        };
+        let ids = match input_tokens(&state, &Value::String(text)) {
+            Ok(t) => t,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if state
+            .worker
+            .send(WorkerCommand::Embed {
+                tokens: ids,
+                pooling: "last".into(),
+                output: tx,
+            })
+            .is_err()
+        {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "model worker unavailable");
+        }
+        let vec = match rx.await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return api_error(StatusCode::SERVICE_UNAVAILABLE, &e),
+            Err(_) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "worker stopped"),
+        };
+        let max_val = vec.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp_sum: f32 = vec.iter().map(|&x| (x - max_val).exp()).sum();
+        let probs: Vec<f32> = vec.iter().map(|&x| if exp_sum > 0.0 { (x - max_val).exp() / exp_sum } else { 0.0 }).collect();
+        results.push(json!({
+            "label": "label_0",
+            "probs": probs,
+            "logits": vec,
+        }));
+    }
+    Json(json!({
+        "object": "list",
+        "model": state.model_name,
+        "data": results,
+    }))
+    .into_response()
+}
+
+/// Liveness: the process answers HTTP. It stays `ok` while the model loads or drains so that orchestrators do not
+/// restart a healthy process; `/ready` says whether requests can be served.
 async fn health() -> Json<Value> {
     Json(json!({"status":"ok"}))
 }
 
+/// Readiness: 200 only while the listener is up, the model is loaded and the worker thread keeps making progress
+/// (it wakes at least once a second when idle); 503 during start-up, shutdown or when the worker is stuck.
+async fn ready_check(State(state): State<Arc<AppState>>) -> Response {
+    let now = state.metrics.started.elapsed().as_millis() as u64;
+    let idle_ms = now.saturating_sub(state.metrics.heartbeat_ms.load(Ordering::Relaxed));
+    let serving = state.ready.load(Ordering::Relaxed);
+    let responsive = idle_ms < state.metrics.stall_ms.load(Ordering::Relaxed);
+    let status = if serving && responsive { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let reason = if !serving { "starting or shutting down" } else if !responsive { "worker not responding" } else { "ready" };
+    (
+        status,
+        Json(json!({
+            "status": if status == StatusCode::OK { "ready" } else { "not_ready" },
+            "reason": reason,
+            "model": state.model_name,
+            "worker_idle_ms": idle_ms,
+            "worker_panics": state.metrics.worker_panics.load(Ordering::Relaxed),
+        })),
+    )
+        .into_response()
+}
+
 async fn webui(State(state): State<Arc<AppState>>) -> Response {
-    crate::webui::page(state.api_key.is_some())
+    crate::webui::page(state.http.security.auth_required())
+}
+
+/// Counters of the HTTP layer and the worker that are not part of the inference metrics.
+fn server_health_metrics(state: &AppState) -> String {
+    let counters = &state.http.counters;
+    format!(
+        "# HELP fllm_worker_panics_total Panics in model code that were contained and failed the affected requests\n# TYPE fllm_worker_panics_total counter\nfllm_worker_panics_total {}\n\
+         # HELP fllm_queue_rejections_total Requests answered with 429 because the admission queue was full\n# TYPE fllm_queue_rejections_total counter\nfllm_queue_rejections_total {}\n\
+         # HELP fllm_rate_limited_total Requests answered with 429 because an API key exceeded --rate-limit\n# TYPE fllm_rate_limited_total counter\nfllm_rate_limited_total {}\n\
+         # HELP fllm_http_connections Open client connections\n# TYPE fllm_http_connections gauge\nfllm_http_connections {}\n\
+         # HELP fllm_http_connections_rejected_total Connections refused because --max-connections was reached\n# TYPE fllm_http_connections_rejected_total counter\nfllm_http_connections_rejected_total {}\n\
+         # HELP fllm_http_request_timeouts_total Requests cancelled by --request-timeout\n# TYPE fllm_http_request_timeouts_total counter\nfllm_http_request_timeouts_total {}\n",
+        state.metrics.worker_panics.load(Ordering::Relaxed),
+        state.metrics.queue_rejections.load(Ordering::Relaxed),
+        state.http.security.rejected_total(),
+        counters.connections_open.load(Ordering::Relaxed),
+        counters.connections_rejected.load(Ordering::Relaxed),
+        counters.request_timeouts.load(Ordering::Relaxed),
+    )
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
-    let mut body = format!(
+    use options::MetricsStyle;
+    let style = state.http.options.metrics_style;
+    let mut body = String::new();
+    if style != MetricsStyle::Vllm {
+        body = format!(
         "# HELP fllm_requests_total Requests accepted by the Rust server\n# TYPE fllm_requests_total counter\nfllm_requests_total {}\n# HELP fllm_completion_tokens_total Tokens emitted by the Rust server\n# TYPE fllm_completion_tokens_total counter\nfllm_completion_tokens_total {}\n# HELP fllm_model_forward_calls_total Model forward calls\n# TYPE fllm_model_forward_calls_total counter\nfllm_model_forward_calls_total {}\n# HELP fllm_model_batch_rows_total Rows passed to the model\n# TYPE fllm_model_batch_rows_total counter\nfllm_model_batch_rows_total {}\n# HELP fllm_model_multirow_calls_total Model calls with multiple rows\n# TYPE fllm_model_multirow_calls_total counter\nfllm_model_multirow_calls_total {}\n# HELP fllm_model_batch_max_rows Largest model batch observed\n# TYPE fllm_model_batch_max_rows gauge\nfllm_model_batch_max_rows {}\n# HELP fllm_prefill_rows_total Prefill token rows submitted to the model\n# TYPE fllm_prefill_rows_total counter\nfllm_prefill_rows_total {}\n# HELP fllm_decode_rows_total Decode token rows submitted to the model\n# TYPE fllm_decode_rows_total counter\nfllm_decode_rows_total {}\n# HELP fllm_scheduler_seconds_total Time spent scheduling\n# TYPE fllm_scheduler_seconds_total counter\nfllm_scheduler_seconds_total {:.9}\n# HELP fllm_batch_build_seconds_total Time spent preparing model batches\n# TYPE fllm_batch_build_seconds_total counter\nfllm_batch_build_seconds_total {:.9}\n# HELP fllm_model_forward_seconds_total Time spent in model forward calls\n# TYPE fllm_model_forward_seconds_total counter\nfllm_model_forward_seconds_total {:.9}\n# HELP fllm_postprocess_seconds_total Time spent applying logits and updating sequences\n# TYPE fllm_postprocess_seconds_total counter\nfllm_postprocess_seconds_total {:.9}\n",
         state.metrics.requests.load(Ordering::Relaxed),
         state.metrics.generated_tokens.load(Ordering::Relaxed),
@@ -520,9 +1146,14 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         state.metrics.batch_build_ns.load(Ordering::Relaxed) as f64 / 1e9,
         state.metrics.model_forward_ns.load(Ordering::Relaxed) as f64 / 1e9,
         state.metrics.postprocess_ns.load(Ordering::Relaxed) as f64 / 1e9,
-    );
-    body.push_str(&format!("# TYPE fllm_draft_proposed_tokens_total counter\nfllm_draft_proposed_tokens_total {}\n# TYPE fllm_draft_accepted_tokens_total counter\nfllm_draft_accepted_tokens_total {}\n",state.metrics.draft_proposed.load(Ordering::Relaxed),state.metrics.draft_accepted.load(Ordering::Relaxed)));
-    body.push_str(&state.metrics.observability.render());
+        );
+        body.push_str(&format!("# TYPE fllm_draft_proposed_tokens_total counter\nfllm_draft_proposed_tokens_total {}\n# TYPE fllm_draft_accepted_tokens_total counter\nfllm_draft_accepted_tokens_total {}\n",state.metrics.draft_proposed.load(Ordering::Relaxed),state.metrics.draft_accepted.load(Ordering::Relaxed)));
+        body.push_str(&state.metrics.observability.render());
+        body.push_str(&server_health_metrics(&state));
+    }
+    if style != MetricsStyle::Fllm {
+        body.push_str(&state.metrics.observability.render_vllm());
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -533,35 +1164,87 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
-async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let headers = api::with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
+impl AppState {
+    /// Whether a request's `model` field names this server's model: the served name, an alias (`*` at the end of an
+    /// alias matches any suffix), or nothing at all. HOOK(multi-model): the lookup in a model registry goes here.
+    fn knows_model(&self, requested: &str) -> bool {
+        let requested = requested.trim();
+        let aliases = self.aliases.read().unwrap();
+        requested.is_empty()
+            || requested == self.model_name
+            || aliases.iter().any(|alias| match alias.strip_suffix('*') {
+                Some(prefix) => requested.starts_with(prefix),
+                None => alias == requested,
+            })
     }
-    if headers.contains_key("anthropic-version") {
-        return api::anthropic::models(&state);
+
+    /// The `model` of an OpenAI/Anthropic-style request body. `Ok` carries the name to echo back.
+    #[allow(clippy::result_large_err)]
+    fn resolve_model(&self, body: &Value) -> Result<String, Response> {
+        match body.get("model") {
+            None | Some(Value::Null) => Ok(self.model_name.clone()),
+            Some(Value::String(name)) if name.trim().is_empty() => Ok(self.model_name.clone()),
+            Some(Value::String(name)) if self.knows_model(name) => Ok(name.clone()),
+            Some(Value::String(name)) => Err(model_not_found(name)),
+            Some(_) => Err(api_error_with(StatusCode::BAD_REQUEST, "model must be a string", None, Some("model"))),
+        }
     }
-    Json(
-        json!({"object":"list","data":[{"id":state.model_name,"object":"model","created":unix_now(),"owned_by":"fllm"}]}),
-    ).into_response()
 }
 
-async fn ollama_tags(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(
-        json!({"models":[{"name":state.model_name,"model":state.model_name,"modified_at":iso_now(),"size":0,"digest":"","details":{"family":state.model_arch,"parameter_size":"","quantization":""}}]}),
+/// OpenAI's reply for an unknown model.
+fn model_not_found(name: &str) -> Response {
+    api_error_with(
+        StatusCode::NOT_FOUND,
+        &format!("The model `{name}` does not exist or you do not have access to it."),
+        Some("model_not_found"),
+        Some("model"),
     )
 }
 
-async fn ollama_version() -> Json<Value> {
-    Json(json!({"version":"0.4.1-rust"}))
+async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if headers.contains_key("anthropic-version") {
+        return api::anthropic::models(&state);
+    }
+    let created = unix_now();
+    // capabilities let clients discover media input; they mirror what the loaded encoder accepts
+    let vision = state.vision.as_ref().is_some_and(|v| v.marker(crate::vision::MediaKind::Image).is_some());
+    let video = state.vision.as_ref().is_some_and(|v| v.marker(crate::vision::MediaKind::Video).is_some());
+    let audio = state.vision.as_ref().is_some_and(|v| v.family() == "whisper");
+    let mut modalities = vec!["text"];
+    modalities.extend(vision.then_some("image"));
+    modalities.extend(video.then_some("video"));
+    modalities.extend(audio.then_some("audio"));
+    let aliases = state.aliases.read().unwrap();
+    let data: Vec<Value> = std::iter::once(&state.model_name)
+        .chain(aliases.iter().filter(|alias| !alias.ends_with('*')))
+        .map(|id| {
+            json!({"id":id,"object":"model","created":created,"owned_by":"fllm","root":state.model_name,
+                   "parent":null,"max_model_len":state.max_context,
+                   "capabilities":{"vision":vision,"video":video,"audio":audio},"modalities":modalities})
+        })
+        .collect();
+    Json(json!({"object":"list","data":data})).into_response()
 }
 
-async fn completions(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+async fn ollama_tags(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let aliases = state.aliases.read().unwrap();
+    let base = api::ollama_extra::model_entry(&state);
+    let mut models = vec![base.clone()];
+    for alias in aliases.iter().filter(|a| !a.ends_with('*')) {
+        let mut entry = base.clone();
+        entry["name"] = json!(alias);
+        entry["model"] = json!(alias);
+        models.push(entry);
+    }
+    Json(json!({"models": models}))
+}
+
+async fn ollama_version() -> Json<Value> {
+    Json(json!({"version":"0.4.1-rust", "fllm_version": env!("CARGO_PKG_VERSION"), "build": crate::version::long_version()}))
+}
+
+async fn completions(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    if let Err(response) = state.resolve_model(&body) {
         return response;
     }
     let prompt_val = match body.get("prompt") {
@@ -601,15 +1284,11 @@ async fn completions(
             )
         }
     };
-    openai_generate(state, body, headers, prompt_ids, false, None, vec![]).await
+    openai_generate(state, body, prompt_ids, false, None, ImageOverrides::default()).await
 }
 
-async fn chat_completions(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    if let Err(response) = state.resolve_model(&body) {
         return response;
     }
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
@@ -624,8 +1303,8 @@ async fn chat_completions(
             "messages must be a non-empty array",
         );
     }
-    if state.vision.is_some() {
-        let (prompt, ids, images) = match prepare_vision_chat(&state, messages).await {
+    if state.vision.is_some() && media::request_has_media(messages) {
+        let (prompt, ids, images) = match media::prepare_media_chat(&state, messages).await {
             Ok(p) => p,
             Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
         };
@@ -634,7 +1313,7 @@ async fn chat_completions(
             Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
         };
         let reasoning = ReasoningSpec::for_request(&state, &prompt, &vision_tools);
-        return openai_generate(state, body, headers, ids, true, Some(reasoning), images).await;
+        return openai_generate(state, body, ids, true, Some(reasoning), images).await;
     }
     let tools = body.get("tools");
     if tools.is_some_and(|v| !v.is_array()) {
@@ -689,155 +1368,31 @@ async fn chat_completions(
     openai_generate(
         state,
         body,
-        headers,
         prompt_ids,
         true,
         Some(reasoning),
-        vec![],
+        ImageOverrides::default(),
     )
     .await
 }
 
-async fn encode_images(state: &AppState, urls: Vec<String>) -> Result<Vec<Vec<Vec<f32>>>, String> {
-    if urls.is_empty() {
-        return Ok(vec![]);
-    }
-    if urls.len() > 4 {
-        return Err("native vision accepts at most four images per request".into());
-    }
-    let vision = state
-        .vision
-        .clone()
-        .ok_or("load the matching --mmproj for native image inference")?;
-    let permit = state
-        .vision_admission
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| "image encoder is busy")?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        urls.iter()
-            .map(|url| vision.encode_data_url(url))
-            .collect::<Result<Vec<_>, _>>()
-    })
-    .await
-    .map_err(|_| "image encoder worker failed")?
-}
-
 async fn image_embeddings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     let Some(url) = body.get("image_url").and_then(Value::as_str) else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "image_url must contain a PNG/JPEG data URL",
         );
     };
-    match encode_images(&state, vec![url.to_owned()]).await {
-        Ok(images) => Json(json!({"model":state.model_name,"engine":"fllm-rust","tokens":images[0].len(),"dimensions":state.hidden_size,"data":images[0]})).into_response(),
+    match media::encode_single_image(&state, url).await {
+        Ok(rows) => Json(json!({"model":state.model_name,"engine":"fllm-rust","tokens":rows.len(),"dimensions":state.hidden_size,"data":rows})).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, &e),
     }
 }
 
-type ImageOverrides = Vec<(usize, Vec<f32>)>;
-async fn prepare_vision_chat(
-    state: &AppState,
-    messages: &[Value],
-) -> Result<(String, Vec<i64>, ImageOverrides), String> {
-    let vision = state.vision.as_ref().ok_or("vision model is not loaded")?;
-    let mut normalized = Vec::new();
-    let mut urls = Vec::new();
-    for message in messages {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or("missing chat role")?;
-        if !matches!(role, "system" | "user" | "assistant") {
-            return Err(
-                "this vision chat template supports system, user and assistant roles".into(),
-            );
-        }
-        let mut parts = Vec::new();
-        match message.get("content") {
-            Some(Value::String(text)) => parts.push(json!({"type":"text","text":text})),
-            Some(Value::Array(content)) => {
-                for part in content {
-                    match part.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            let text = part
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .ok_or("image chat text part must contain text")?;
-                            parts.push(json!({"type":"text","text":text}));
-                        }
-                        Some("image_url") => {
-                            let url = part
-                                .get("image_url")
-                                .and_then(|v| v.get("url"))
-                                .and_then(Value::as_str)
-                                .ok_or("image_url.url must be a data URL")?;
-                            urls.push(url.to_owned());
-                            parts.push(json!({"type":"image"}));
-                        }
-                        _ => return Err("unsupported vision chat content part".into()),
-                    }
-                }
-            }
-            _ => return Err("vision chat content must be text or content parts".into()),
-        }
-        if parts.is_empty() {
-            parts.push(json!({"type":"text","text":""}));
-        }
-        normalized.push(json!({"role":role,"content":parts}));
-    }
-    if urls.len() > 4 {
-        return Err("native vision accepts at most four images per request".into());
-    }
-    let mut prompt = chat_environment()
-        .render_str(
-            &state.chat_template,
-            json!({"messages":normalized,"add_generation_prompt":true}),
-        )
-        .map_err(|e| format!("vision chat template failed: {e}"))?;
-    if prompt.matches("<image>").count() != urls.len() {
-        return Err("image markers in chat text are reserved for uploaded images".into());
-    }
-    let image_token = state.tokenizer.encode_without_bos("<image>")?;
-    if image_token.len() != 1 {
-        return Err("vision decoder has no atomic image token".into());
-    }
-    let expanded = format!(
-        "<fake_token_around_image><global-img>{}<fake_token_around_image>",
-        "<image>".repeat(vision.tokens)
-    );
-    prompt = prompt.replace("<image>", &expanded);
-    let ids = state
-        .tokenizer
-        .encode(&prompt)?
-        .into_iter()
-        .map(i64::from)
-        .collect::<Vec<_>>();
-    if ids.len() >= state.max_context {
-        return Err("image prompt exceeds model context".into());
-    }
-    let positions = ids
-        .iter()
-        .enumerate()
-        .filter_map(|(p, &id)| (id == i64::from(image_token[0])).then_some(p))
-        .collect::<Vec<_>>();
-    if positions.len() != urls.len() * vision.tokens {
-        return Err("image token positions do not match projector output".into());
-    }
-    let vectors = encode_images(state, urls).await?.into_iter().flatten();
-    let overrides = positions.into_iter().zip(vectors).collect();
-    Ok((prompt, ids, overrides))
-}
-
+type ImageOverrides = crate::vision::pipeline::MediaInputs;
 fn input_tokens(state: &AppState, input: &Value) -> Result<Vec<i64>, String> {
     match input {
         Value::String(s) if !s.is_empty() => state
@@ -860,19 +1415,10 @@ fn input_tokens(state: &AppState, input: &Value) -> Result<Vec<i64>, String> {
 
 async fn embeddings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
+    if let Err(response) = state.resolve_model(&body) {
         return response;
-    }
-    if let Some(model) = body.get("model").and_then(Value::as_str) {
-        if model != state.model_name {
-            return api_error(
-                StatusCode::NOT_FOUND,
-                "requested embedding model is not loaded",
-            );
-        }
     }
     let encoding = body
         .get("encoding_format")
@@ -909,14 +1455,22 @@ async fn embeddings(
             "embedding batch must contain 1 to 32 inputs",
         );
     }
+    // Ollama (`truncate`, default true) cuts inputs that are too long; OpenAI and vLLM reject them
+    let truncate = body.get("truncate").and_then(Value::as_bool).unwrap_or(false);
     let mut tokenized = Vec::new();
     for input in &inputs {
         match input_tokens(&state, input) {
             Ok(ids) if ids.len() <= state.max_context => tokenized.push(ids),
+            Ok(mut ids) if truncate => {
+                ids.truncate(state.max_context);
+                tokenized.push(ids);
+            }
             Ok(_) => {
-                return api_error(
+                return api_error_with(
                     StatusCode::BAD_REQUEST,
-                    "embedding input exceeds model context",
+                    "embedding input exceeds the model context; shorten it or send truncate:true (Ollama API)",
+                    Some("context_length_exceeded"),
+                    Some("input"),
                 )
             }
             Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
@@ -931,13 +1485,16 @@ async fn embeddings(
     }
     let _permit = match state.admission.clone().try_acquire_owned() {
         Ok(p) => p,
-        Err(_) => {
-            return api_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "inference request limit reached",
-            )
-        }
+        Err(_) => return queue_full(&state),
     };
+    if let Some(caller) = security::current_caller() {
+        let total: usize = tokenized.iter().map(Vec::len).sum();
+        caller.stats.prompt_tokens.fetch_add(total as u64, Ordering::Relaxed);
+        if let Some(limiter) = &caller.limiter {
+            limiter.charge_tokens(total);
+        }
+        state.metrics.observability.prompt_tokens(total);
+    }
     let started = Instant::now();
     let mut data = Vec::new();
     let mut vectors = Vec::new();
@@ -1069,6 +1626,25 @@ fn request_sampling(
     merged.top_p = defaults.top_p;
     merged.top_k = defaults.top_k;
     let mut params = crate::parameters::parse_sampling(body, merged, state.tokenizer.vocab_size())?;
+    if let Some(words) = body.get("bad_words") {
+        let words = words
+            .as_array()
+            .filter(|w| w.len() <= 64)
+            .ok_or("bad_words must be an array of at most 64 strings")?;
+        for word in words {
+            let word = word.as_str().ok_or("bad_words must contain strings")?;
+            // a word is blocked both at the start of a text and after a space, as the tokenizer splits them differently
+            for variant in [word.to_owned(), format!(" {word}")] {
+                if variant.trim().is_empty() {
+                    continue;
+                }
+                let ids: Vec<i64> = state.tokenizer.encode_without_bos(&variant)?.into_iter().map(i64::from).collect();
+                if !ids.is_empty() && !params.bad_word_ids.contains(&ids) {
+                    params.bad_word_ids.push(ids);
+                }
+            }
+        }
+    }
     if params.dry_multiplier > 0.0 {
         let breakers = match body.get("dry_sequence_breakers") {
             None => vec!["\n", ":", "\"", "*"],
@@ -1343,6 +1919,8 @@ struct OpenaiChoice {
     sent_tools: usize,
     done: bool,
     reason: &'static str,
+    /// Cumulative log-probability of the generated tokens (ranks the candidates of best_of).
+    score: f64,
 }
 impl OpenaiChoice {
     fn new(stops: &[String]) -> Self {
@@ -1357,6 +1935,7 @@ impl OpenaiChoice {
             sent_tools: 0,
             done: false,
             reason: "stop",
+            score: 0.0,
         }
     }
 }
@@ -1364,15 +1943,11 @@ impl OpenaiChoice {
 async fn openai_generate(
     state: Arc<AppState>,
     mut body: Value,
-    headers: HeaderMap,
     prompt: Vec<i64>,
     is_chat: bool,
     reasoning: Option<ReasoningSpec>,
-    images: Vec<(usize, Vec<f32>)>,
+    images: ImageOverrides,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     let empty_tool_request = json!({});
     let tool_spec = match tool_spec_for(&state, if is_chat {
         &body
@@ -1399,7 +1974,21 @@ async fn openai_generate(
             None => return api_error(StatusCode::BAD_REQUEST, "n must be an integer from 1 to 16"),
         },
     };
-    if n > 1
+    // best_of: sample `best_of` candidates, return the `n` with the highest cumulative log-probability (not with streaming)
+    let best_of = match body.get("best_of") {
+        None | Some(Value::Null) => n,
+        Some(v) => match v.as_u64().filter(|b| (n as u64..=16).contains(b)) {
+            Some(b) => b as usize,
+            None => return api_error(StatusCode::BAD_REQUEST, "best_of must be an integer from n to 16"),
+        },
+    };
+    if best_of > n && body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+        return api_error(StatusCode::BAD_REQUEST, "best_of cannot be combined with stream");
+    }
+    if body.get("use_beam_search").and_then(Value::as_bool).unwrap_or(false) {
+        return api_error(StatusCode::BAD_REQUEST, "use_beam_search is not supported; use best_of");
+    }
+    if best_of > 1
         && (!state.shared_choices
             || !images.is_empty()
             || tool_spec.forced_schema.is_some()
@@ -1407,12 +1996,12 @@ async fn openai_generate(
             || body.get("grammar").is_some()
             || body.get("grammar_type").is_some())
     {
-        return api_error(StatusCode::BAD_REQUEST, "n > 1 requires CPU compute (--device cpu or auto resolving to CPU), a stateless model, no draft/MTP engine, and unconstrained text generation");
+        return api_error(StatusCode::BAD_REQUEST, "n > 1 and best_of need a stateless model on a backend with KV block copy, no draft/MTP engine, and unconstrained text generation");
     }
     let temperature = body
         .get("temperature")
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_temperature.unwrap_or(0.0));
+        .unwrap_or(state.default_temperature.unwrap_or(OPENAI_DEFAULT_TEMPERATURE));
     if !temperature.is_finite() || temperature < 0.0 {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1455,15 +2044,13 @@ async fn openai_generate(
     {
         return api_error(StatusCode::BAD_REQUEST, &error);
     }
-    if body.get("best_of").is_some() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "best_of is not supported; use n for independent choices",
-        );
-    }
-    sampling.choices = n;
+    sampling.choices = best_of;
     let min_tokens = sampling.min_tokens;
     let logprobs_requested = sampling.logprobs.is_some();
+    if best_of > n && sampling.logprobs.is_none() {
+        // the ranking needs the log-probability of every sampled token
+        sampling.logprobs = Some(0);
+    }
     let include_usage = body["stream_options"]["include_usage"]
         .as_bool()
         .unwrap_or(false);
@@ -1491,7 +2078,14 @@ async fn openai_generate(
         .get("max_completion_tokens")
         .or_else(|| body.get("max_tokens"))
     {
-        None | Some(Value::Null) => 128,
+        // OpenAI and vLLM: without a limit the reply may use the rest of the context window
+        None | Some(Value::Null) => {
+            let remaining = state.max_context.saturating_sub(prompt.len());
+            if remaining == 0 {
+                return context_length_error(state.max_context, prompt.len(), 0);
+            }
+            remaining
+        }
         Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
             Some(n) => n,
             None => {
@@ -1509,10 +2103,14 @@ async fn openai_generate(
         );
     }
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let model = body
-        .get("model")
+    let model = match state.resolve_model(&body) {
+        Ok(model) => model,
+        Err(response) => return response,
+    };
+    let service_tier = body
+        .get("service_tier")
         .and_then(Value::as_str)
-        .unwrap_or(&state.model_name)
+        .map_or("default", |tier| if tier == "auto" { "default" } else { tier })
         .to_owned();
     let id = state.next_request.fetch_add(1, Ordering::Relaxed);
     let request_id = format!("req_{id:016x}");
@@ -1627,7 +2225,7 @@ async fn openai_generate(
                             } else {
                                 json!({"index":choice_index,"text":"","finish_reason":reason,"logprobs":null})
                             };
-                            let final_obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"choices":[choice],"usage":null,"timings":rx.observation.timings(prompt.len())});
+                            let final_obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":[choice],"usage":null,"timings":rx.observation.timings(prompt.len())});
                             yield Ok::<Event, Infallible>(Event::default().data(final_obj.to_string()));
                             current.done = true;
                             if choice_states.iter().all(|choice| choice.done) {
@@ -1654,7 +2252,7 @@ async fn openai_generate(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let mut choice_states = (0..n)
+        let mut choice_states = (0..best_of)
             .map(|_| OpenaiChoice::new(&stop_strings))
             .collect::<Vec<_>>();
         while let Some(message) = rx.recv().await {
@@ -1676,6 +2274,7 @@ async fn openai_generate(
                 current.probabilities.push(&state, &event);
             }
             current.ids.push(event.token_id as u32);
+            current.score += event.logprobs.as_ref().map_or(0.0, |l| l.logprob.max(-9999.0));
             state
                 .metrics
                 .generated_tokens
@@ -1710,6 +2309,11 @@ async fn openai_generate(
             .map(|c| c.cached_tokens)
             .max()
             .unwrap_or(0);
+        if best_of > n {
+            // keep the candidates with the highest cumulative log-probability, best first
+            choice_states.sort_by(|a, b| b.score.total_cmp(&a.score));
+            choice_states.truncate(n);
+        }
         let mut reasoning_count = 0;
         let mut choices = Vec::with_capacity(n);
         for (index, current) in choice_states.iter_mut().enumerate() {
@@ -1755,70 +2359,91 @@ async fn openai_generate(
             }
             choices.push(choice);
         }
-        Json(json!({"id":request_id,"object":if is_chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"choices":choices,
+        Json(json!({"id":request_id,"object":if is_chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":choices,
             "usage":openai_usage(prompt.len(), completion, cached, reasoning_count),"timings":rx.observation.timings(prompt.len())})).into_response()
     }
 }
 
-/// Hugging Face chat templates wrap assistant spans in `{% generation %}` ... `{% endgeneration %}`
-/// (training-mask markers). They do not change the rendered text and minijinja does not know them,
-/// so they become `{% if true %}` ... `{% endif %}` with the whitespace-control markers preserved.
+/// See [`crate::chat_template::normalize`].
 fn normalize_chat_template(template: &str) -> String {
-    let mut out = String::with_capacity(template.len());
+    crate::chat_template::normalize(template)
+}
+
+/// Instructions one template render may execute. Chat templates come from model repositories; the limit keeps a
+/// looping template from stalling a request thread (a normal template needs thousands, a long conversation millions).
+const TEMPLATE_FUEL: u64 = 50_000_000;
+
+/// Renders a chat template over a message list with the server's Jinja environment, as the fuzz target `chat_template`
+/// does.
+#[doc(hidden)]
+/// Validates a chat template before rendering to reject malformed or adversarial templates
+/// that could trigger infinite recursion or stack overflows.
+pub fn validate_chat_template(template: &str) -> Result<(), String> {
+    let mut depth = 0usize;
+    for c in template.chars() {
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth > 64 {
+                    return Err("chat template exceeds maximum nesting depth of 64".into());
+                }
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
     let mut rest = template;
     while let Some(start) = rest.find("{%") {
-        out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        let Some(end) = after.find("%}") else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let inner = &after[..end];
-        let core = inner.trim_matches(|c: char| c == '-' || c == '+' || c.is_whitespace());
-        let replacement = match core {
-            "generation" => Some(" if true "),
-            "endgeneration" => Some(" endif "),
-            _ => None,
-        };
-        if let Some(body) = replacement {
-            let lead = inner.chars().next().filter(|c| *c == '-' || *c == '+');
-            let trail = inner.chars().last().filter(|c| *c == '-');
-            out.push_str("{%");
-            if let Some(c) = lead {
-                out.push(c);
+        let Some(end) = after.find("%}") else { break; };
+        let tag = after[..end].trim_matches(|c: char| c == '-' || c == '+' || c.is_whitespace());
+        if let Some(set_stmt) = tag.strip_prefix("set ") {
+            if let Some((lhs, rhs)) = set_stmt.split_once('=') {
+                let lhs = lhs.trim();
+                let rhs = rhs.trim();
+                if let Some((obj, _)) = lhs.split_once(['.', '[']) {
+                    let obj = obj.trim();
+                    if !obj.is_empty() {
+                        let is_ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+                        let mut tokens = Vec::new();
+                        let mut current = String::new();
+                        for c in rhs.chars() {
+                            if is_ident_char(c) {
+                                current.push(c);
+                            } else if !current.is_empty() {
+                                tokens.push(std::mem::take(&mut current));
+                            }
+                        }
+                        if !current.is_empty() {
+                            tokens.push(current);
+                        }
+                        if tokens.iter().any(|t| t == obj) {
+                            return Err("chat template contains cyclic self-referential assignment".into());
+                        }
+                    }
+                }
             }
-            out.push_str(body);
-            if let Some(c) = trail {
-                out.push(c);
-            }
-            out.push_str("%}");
-        } else {
-            out.push_str(&rest[start..start + 2 + end + 2]);
         }
         rest = &after[end + 2..];
     }
-    out.push_str(rest);
-    out
+
+    Ok(())
 }
 
-/// Jinja environment for chat templates: Python string/dict methods (`.split()`, `.rstrip('\n')`,
-/// `.get()`), `raise_exception` and `strftime_now`, as used by Hugging Face templates.
+pub fn render_template_for_fuzz(template: &str, messages: &Value) -> Result<String, String> {
+    validate_chat_template(template)?;
+    chat_environment()
+        .render_str(&normalize_chat_template(template), json!({"messages": messages, "add_generation_prompt": true}))
+        .map_err(|e| e.to_string())
+}
+
+/// See [`crate::chat_template::environment`]; the fuel limit bounds the work of one render.
 fn chat_environment() -> Environment<'static> {
-    let mut env = Environment::new();
-    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-    env.add_filter("tojson", crate::template_json::tojson);
-    env.add_function(
-        "raise_exception",
-        |message: String| -> Result<String, minijinja::Error> {
-            Err(minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                message,
-            ))
-        },
-    );
-    env.add_function("strftime_now", |format: String| -> String {
-        chrono::Local::now().format(&format).to_string()
-    });
+    let mut env = crate::chat_template::environment();
+    env.set_fuel(Some(TEMPLATE_FUEL));
     env
 }
 
@@ -1922,14 +2547,10 @@ async fn sglang_server_info(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// sends `prompt`, `text` or `input_ids`, so the body decides which handler runs.
 async fn sglang_generate(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     if body.get("inputs").is_some() {
-        return api::tgi::generate(State(state), headers, Json(body)).await;
-    }
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
+        return api::tgi::generate(State(state), Json(body)).await;
     }
     let prompt_text = body
         .get("prompt")
@@ -1956,15 +2577,16 @@ async fn sglang_generate(
     let temperature = sampling_params
         .get("temperature")
         .and_then(Value::as_f64)
-        .unwrap_or(0.0);
+        .unwrap_or(state.default_temperature.unwrap_or(OPENAI_DEFAULT_TEMPERATURE));
     let top_p = sampling_params
         .get("top_p")
         .and_then(Value::as_f64)
-        .unwrap_or(1.0);
+        .unwrap_or(state.default_top_p.unwrap_or(1.0));
     let top_k = sampling_params
         .get("top_k")
         .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+        .map(|k| k as usize)
+        .unwrap_or(state.default_top_k.unwrap_or(0));
     let repetition_penalty = sampling_params
         .get("repetition_penalty")
         .and_then(Value::as_f64)
@@ -1993,7 +2615,7 @@ async fn sglang_generate(
             Ok(c) => c,
             Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
         },
-        vec![],
+        ImageOverrides::default(),
     ) {
         Ok(rx) => rx,
         Err(response) => return response,
@@ -2042,11 +2664,17 @@ async fn sglang_generate(
 
 async fn ollama_generate(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return api::ollama_extra::error_from(response).await;
+    if let Err(response) = api::ollama_extra::resolve_model(&state, &body) {
+        return response;
+    }
+    if let Err(response) = api::ollama_extra::note_keep_alive(&state, &body) {
+        return response;
+    }
+    // an empty prompt only loads (or, with keep_alive 0, unloads) the model
+    if body.get("prompt").and_then(Value::as_str) == Some("") && body.get("images").is_none() {
+        return api::ollama_extra::load_response(&state, &body, false);
     }
     // Ollama can steer the raw prompt with a system message or a FIM suffix; fLLM answers raw
     // completions, so the system text is prefixed and the suffix points at /infill.
@@ -2118,20 +2746,22 @@ async fn ollama_generate(
                 Ok(vision) => vision,
                 Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
             };
-            return ollama_generate_inner(state, body, headers, prompt, false, overrides).await;
+            return ollama_generate_inner(state, body, prompt, false, overrides).await;
         }
-        _ => Vec::new(),
+        _ => ImageOverrides::default(),
     };
-    ollama_generate_inner(state, body, headers, prompt, false, images).await
+    ollama_generate_inner(state, body, prompt, false, images).await
 }
 
 async fn ollama_chat(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return api::ollama_extra::error_from(response).await;
+    if let Err(response) = api::ollama_extra::resolve_model(&state, &body) {
+        return response;
+    }
+    if let Err(response) = api::ollama_extra::note_keep_alive(&state, &body) {
+        return response;
     }
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
         return api::ollama_extra::error(
@@ -2140,10 +2770,7 @@ async fn ollama_chat(
         );
     };
     if messages.is_empty() {
-        return api::ollama_extra::error(
-            StatusCode::BAD_REQUEST,
-            "messages must be a non-empty array",
-        );
+        return api::ollama_extra::load_response(&state, &body, true);
     }
     let tool_spec = match tool_spec_for(&state, &body) {
         Ok(spec) => spec,
@@ -2170,7 +2797,7 @@ async fn ollama_chat(
         Ok(chat) => chat,
         Err(e) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &e),
     };
-    ollama_generate_inner(state, body, headers, prompt, true, images).await
+    ollama_generate_inner(state, body, prompt, true, images).await
 }
 
 /// Renders Ollama chat messages into prompt tokens. Messages that carry base64 images are
@@ -2193,10 +2820,10 @@ async fn ollama_vision_prompt(
             tools,
             kwargs,
         )?;
-        return Ok((state.tokenizer.encode(&prompt)?.into_iter().map(i64::from).collect(), Vec::new()));
+        return Ok((state.tokenizer.encode(&prompt)?.into_iter().map(i64::from).collect(), ImageOverrides::default()));
     }
     if state.vision.is_none() {
-        return Err("images require a vision model, start the server with --mmproj".into());
+        return Err("images require a vision model (a GGUF with an imported vision tower, or --mmproj)".into());
     }
     let mut normalized = Vec::with_capacity(messages.len());
     for message in messages {
@@ -2233,21 +2860,17 @@ async fn ollama_vision_prompt(
     if tools.is_some() {
         return Err("tool use is not supported together with images".into());
     }
-    let (_prompt, ids, overrides) = prepare_vision_chat(state, &normalized).await?;
+    let (_prompt, ids, overrides) = media::prepare_media_chat(state, &normalized).await?;
     Ok((ids, overrides))
 }
 
 async fn ollama_generate_inner(
     state: Arc<AppState>,
     body: Value,
-    headers: HeaderMap,
     prompt: Vec<i64>,
     is_chat: bool,
     images: ImageOverrides,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return api::ollama_extra::error_from(response).await;
-    }
     let tool_spec = match tool_spec_for(&state, &body) {
         Ok(spec) => spec,
         Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
@@ -2264,7 +2887,7 @@ async fn ollama_generate_inner(
     let temperature = options
         .and_then(|o| o.get("temperature"))
         .and_then(Value::as_f64)
-        .unwrap_or(0.0);
+        .unwrap_or(state.default_temperature.unwrap_or(OLLAMA_DEFAULT_TEMPERATURE));
     if !temperature.is_finite() || temperature < 0.0 {
         return api::ollama_extra::error(
             StatusCode::BAD_REQUEST,
@@ -2274,11 +2897,12 @@ async fn ollama_generate_inner(
     let top_p = options
         .and_then(|o| o.get("top_p"))
         .and_then(Value::as_f64)
-        .unwrap_or(1.0);
+        .unwrap_or(state.default_top_p.unwrap_or(OLLAMA_DEFAULT_TOP_P));
     let top_k = options
         .and_then(|o| o.get("top_k"))
         .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+        .map(|k| k as usize)
+        .unwrap_or(state.default_top_k.unwrap_or(OLLAMA_DEFAULT_TOP_K));
     let repetition_penalty = options
         .and_then(|o| {
             o.get("repeat_penalty")
@@ -2302,22 +2926,17 @@ async fn ollama_generate_inner(
         Ok(params) => params,
         Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
     };
-    let default = 128usize.min(state.max_context.saturating_sub(prompt.len()));
-    let requested = options
-        .and_then(|o| o.get("num_predict"))
-        .and_then(Value::as_i64)
-        .unwrap_or(default as i64);
-    let max_tokens = if requested < 0 {
-        512usize.min(state.max_context.saturating_sub(prompt.len()))
-    } else {
-        requested as usize
+    // Ollama: num_predict -1 (the default) generates until the model stops or the context is full, -2 fills the context
+    let remaining = state.max_context.saturating_sub(prompt.len());
+    let max_tokens = match options.and_then(|o| o.get("num_predict")).and_then(Value::as_i64) {
+        Some(n) if n >= 0 => n as usize,
+        _ => remaining,
     };
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(&state.model_name)
-        .to_owned();
+    let model = match api::ollama_extra::resolve_model(&state, &body) {
+        Ok(model) => model,
+        Err(response) => return response,
+    };
     let id = state.next_request.fetch_add(1, Ordering::Relaxed);
     let request_id = format!("ollama_{id:016x}");
     if max_tokens == 0 {
@@ -2466,6 +3085,15 @@ fn ollama_tool_calls(calls: &[Value]) -> Vec<Value> {
     calls.iter().map(|call| json!({"function":{"name":call["function"]["name"],"arguments":serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}))}})).collect()
 }
 
+/// transformers picks the named `tool_use` template when tools are passed and the checkpoint has one.
+fn select_chat_template<'a>(default: &'a str, tool_use: &'a str, has_tools: bool) -> &'a str {
+    if has_tools && !tool_use.is_empty() {
+        tool_use
+    } else {
+        default
+    }
+}
+
 fn render_messages(
     state: &AppState,
     mut messages: Value,
@@ -2508,8 +3136,10 @@ fn render_messages(
             context.insert(key, value);
         }
     }
+    let has_tools = context.get("tools").is_some_and(|t| t.as_array().is_some_and(|a| !a.is_empty()));
+    let template = select_chat_template(&state.chat_template, &state.tool_chat_template, has_tools);
     let env = chat_environment();
-    env.render_str(&state.chat_template, Value::Object(context))
+    env.render_str(template, Value::Object(context))
         .map_err(|e| format!("chat template failed: {e}"))
 }
 
@@ -2565,6 +3195,45 @@ fn normalize_messages(messages: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// OpenAI's `context_length_exceeded` reply, with the numbers a client needs to fix the request.
+fn context_length_error(max_context: usize, prompt: usize, max_tokens: usize) -> Response {
+    let (message, param) = if prompt >= max_context {
+        (
+            format!(
+                "This model's maximum context length is {max_context} tokens. However, your prompt has {prompt} tokens. Please reduce the length of the messages or prompt."
+            ),
+            "messages",
+        )
+    } else {
+        (
+            format!(
+                "This model's maximum context length is {max_context} tokens. However, you requested {} tokens ({prompt} in the prompt, {max_tokens} in the completion). Please reduce the length of the prompt or the number of completion tokens.",
+                prompt + max_tokens
+            ),
+            "max_tokens",
+        )
+    };
+    api_error_with(StatusCode::BAD_REQUEST, &message, Some("context_length_exceeded"), Some(param))
+}
+
+/// The admission queue (`--max-queue`) is full: 429 with a Retry-After that grows with the backlog.
+fn queue_full(state: &AppState) -> Response {
+    state.metrics.queue_rejections.fetch_add(1, Ordering::Relaxed);
+    let waiting = state.metrics.slots_waiting.load(Ordering::Relaxed);
+    let running = state.metrics.slots_running.load(Ordering::Relaxed).max(1);
+    let retry_after = (1 + waiting / running).min(30);
+    let mut response = api_error_with(
+        StatusCode::TOO_MANY_REQUESTS,
+        "the request queue is full (--max-queue); retry later",
+        Some("queue_full"),
+        None,
+    );
+    if let Ok(value) = retry_after.to_string().parse() {
+        response.headers_mut().insert(axum::http::header::RETRY_AFTER, value);
+    }
+    response
+}
+
 // Axum responses are intentionally returned directly on this error-only path.
 #[allow(clippy::result_large_err)]
 fn submit_constrained(
@@ -2574,7 +3243,7 @@ fn submit_constrained(
     max_tokens: usize,
     sampling: crate::sampling::SamplingParams,
     constraint: Option<llguidance::Matcher>,
-    images: Vec<(usize, Vec<f32>)>,
+    images: ImageOverrides,
 ) -> Result<GenerationRx, Response> {
     if prompt.is_empty() {
         return Err(api_error(
@@ -2583,10 +3252,7 @@ fn submit_constrained(
         ));
     }
     if prompt.len().saturating_add(max_tokens) > state.max_context {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "prompt plus max_tokens exceeds the configured model context",
-        ));
+        return Err(context_length_error(state.max_context, prompt.len(), max_tokens));
     }
     if prompt
         .iter()
@@ -2597,12 +3263,23 @@ fn submit_constrained(
             "prompt token IDs are outside the model vocabulary",
         ));
     }
-    let permit = state.admission.clone().try_acquire_owned().map_err(|_| {
-        api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "inference request limit reached",
-        )
-    })?;
+    let permit = state
+        .admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| queue_full(state))?;
+    let caller = security::current_caller();
+    if let Some(caller) = &caller {
+        // prompt tokens count against --rate-limit's token budget when the request is admitted, generated ones as they appear
+        caller.stats.prompt_tokens.fetch_add(prompt.len() as u64, Ordering::Relaxed);
+        if let Some(limiter) = &caller.limiter {
+            limiter.charge_tokens(prompt.len());
+        }
+    }
+    state.metrics.observability.prompt_tokens(prompt.len());
+    if let Some(caller) = &caller {
+        tracing::debug!(request_id = %caller.request_id, engine_request = request_id, prompt_tokens = prompt.len(), max_tokens, "request admitted");
+    }
     let (tx, rx) = tokio_mpsc::channel(256);
     let observation = state.metrics.observability.generation();
     let error = Arc::new(std::sync::Mutex::new(None));
@@ -2615,10 +3292,11 @@ fn submit_constrained(
             max_tokens,
             sampling: Box::new(sampling),
             constraint: constraint.map(Box::new),
-            images: images.into_boxed_slice(),
+            images: Box::new(images),
             output: GenerationTx {
                 inner: tx,
                 error: error.clone(),
+                submitted: Instant::now(),
             },
         })
         .map_err(|_| {
@@ -2633,28 +3311,17 @@ fn submit_constrained(
         inner: rx,
         error,
         _permit: permit,
+        caller,
     })
 }
 
-#[allow(clippy::result_large_err)]
-fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
-    let Some(key) = &state.api_key else {
-        return Ok(());
-    };
-    let expected = format!("Bearer {key}");
-    if headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        == Some(&expected)
-    {
-        Ok(())
-    } else {
-        Err(api_error(StatusCode::UNAUTHORIZED, "invalid api key"))
-    }
+fn api_error(status: StatusCode, message: &str) -> Response {
+    errors::openai(status, message, None, None)
 }
 
-fn api_error(status: StatusCode, message: &str) -> Response {
-    (status,Json(json!({"error":{"message":message,"type":if status.is_server_error(){"server_error"}else{"invalid_request_error"},"code":"invalid_request_error"}}))).into_response()
+/// An OpenAI error object with a machine-readable `code` and the offending request `param`.
+fn api_error_with(status: StatusCode, message: &str, code: Option<&str>, param: Option<&str>) -> Response {
+    errors::openai(status, message, code, param)
 }
 
 fn empty_openai_response(
@@ -2812,6 +3479,7 @@ mod chat_template_tests {
         let sender = GenerationTx {
             inner,
             error: error.clone(),
+            submitted: Instant::now(),
         };
         let permit = Arc::new(tokio::sync::Semaphore::new(1))
             .acquire_owned()
@@ -2822,6 +3490,7 @@ mod chat_template_tests {
             error,
             observation: Arc::new(crate::metrics::Metrics::new()).generation(),
             _permit: permit,
+            caller: None,
         };
         assert!(sender.send(Err("first".into())).is_ok());
         assert!(sender.send(Err("second".into())).is_ok());
@@ -2840,6 +3509,7 @@ mod chat_template_tests {
         let sender = GenerationTx {
             inner,
             error: Arc::new(std::sync::Mutex::new(None)),
+            submitted: Instant::now(),
         };
         drop(receiver);
         assert!(sender.is_closed());
@@ -2854,6 +3524,25 @@ mod chat_template_tests {
             normalize_chat_template("{% if x %}y{% endif %}"),
             "{% if x %}y{% endif %}"
         );
+    }
+
+    #[test]
+    fn tool_use_template_is_chosen_only_with_tools() {
+        assert_eq!(select_chat_template("D", "T", true), "T");
+        assert_eq!(select_chat_template("D", "T", false), "D");
+        assert_eq!(select_chat_template("D", "", true), "D");
+    }
+
+    #[test]
+    fn hostile_chat_template_returns_err_cleanly() {
+        let hostile = "{% set ns = namespace(n=0) %}{% for fm in messages %}{% set ns.n = ns %}{{ ns.n }}{% endfor %}";
+        let res = render_template_for_fuzz(hostile, &json!([{"role": "user", "content": "hello"}]));
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("cyclic") || err.contains("self-referential"));
+
+        let deep = "(".repeat(65) + &")".repeat(65);
+        assert!(validate_chat_template(&deep).is_err());
     }
 
     #[test]
@@ -3032,4 +3721,101 @@ mod openai_field_tests {
         assert_eq!(u["prompt_tokens_details"]["cached_tokens"], 4);
         assert_eq!(u["completion_tokens_details"]["reasoning_tokens"], 3);
     }
+}
+
+async fn audio_transcriptions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    handle_audio_request(state, headers, body).await
+}
+
+async fn audio_translations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    handle_audio_request(state, headers, body).await
+}
+
+async fn handle_audio_request(
+    _state: Arc<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let audio_bytes = if content_type.contains("multipart/form-data") {
+        extract_file_from_multipart(&body, content_type).unwrap_or_else(|| body.to_vec())
+    } else if content_type.contains("application/json") {
+        if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+            if let Some(s) = v.get("file").and_then(Value::as_str) {
+                if let Some(b64) = s.strip_prefix("data:audio/wav;base64,").or_else(|| s.strip_prefix("data:audio/x-wav;base64,")) {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap_or_default()
+                } else {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).unwrap_or_default()
+                }
+            } else {
+                body.to_vec()
+            }
+        } else {
+            body.to_vec()
+        }
+    } else {
+        body.to_vec()
+    };
+
+    if audio_bytes.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "audio file is required");
+    }
+
+    match crate::vision::audio::transcribe_audio(&audio_bytes, None) {
+        Ok(text) => Json(json!({"text": text})).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+fn extract_file_from_multipart(body: &[u8], content_type: &str) -> Option<Vec<u8>> {
+    let boundary = content_type
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("boundary="))?
+        .trim_matches('"');
+    let delim = format!("--{boundary}").into_bytes();
+
+    let mut start = 0;
+    while let Some(idx) = find_subsequence(&body[start..], &delim) {
+        let part_start = start + idx + delim.len();
+        if part_start + 2 <= body.len() && &body[part_start..part_start + 2] == b"--" {
+            break;
+        }
+        let header_start = if part_start + 2 <= body.len() && &body[part_start..part_start + 2] == b"\r\n" {
+            part_start + 2
+        } else {
+            part_start
+        };
+        if let Some(header_end) = find_subsequence(&body[header_start..], b"\r\n\r\n") {
+            let data_start = header_start + header_end + 4;
+            if let Some(next_b) = find_subsequence(&body[data_start..], &delim) {
+                let data_end = if next_b >= 2 && &body[data_start + next_b - 2..data_start + next_b] == b"\r\n" {
+                    data_start + next_b - 2
+                } else {
+                    data_start + next_b
+                };
+                let headers_text = String::from_utf8_lossy(&body[header_start..header_start + header_end]);
+                if headers_text.contains("name=\"file\"") || headers_text.contains("filename=") {
+                    return Some(body[data_start..data_end].to_vec());
+                }
+            }
+        }
+        start = part_start;
+    }
+    None
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

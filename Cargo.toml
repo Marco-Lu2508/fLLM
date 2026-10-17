@@ -2,3 +2,10 @@
 resolver = "2"
 members = ["rust/engine", "rust/gguf-probe", "rust/checkpoint"]
 default-members = ["rust/engine"]
+
+[workspace.package]
+version = "0.1.2"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Marco-Lu2508/fLLM"
+rust-version = "1.89"

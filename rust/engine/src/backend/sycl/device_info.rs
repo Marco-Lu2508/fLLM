@@ -53,7 +53,10 @@ pub fn list(first_index: usize) -> Vec<DeviceInfo> {
                 index: first_index + dev,
                 name: p.name_text(),
                 description: describe(&p),
-                dev_type: if p.is_integrated != 0 {
+                // a CPU device (FLLM_SYCL_ALLOW_CPU=1, OpenCL CPU runtime) is not a GPU: `auto` never takes it
+                dev_type: if p.is_gpu == 0 {
+                    DeviceType::Cpu
+                } else if p.is_integrated != 0 {
                     DeviceType::IntegratedGpu
                 } else {
                     DeviceType::Gpu

@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "err": "TemplateError: Conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "err": "TemplateError: Conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/documents": {
+  "ok": "<bos><start_of_turn>user\nSummarize.<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/image_parts": {
+  "ok": "<bos><start_of_turn>user\nWhat is in this picture?<start_of_image><end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<bos><start_of_turn>user\n  padded system with trailing newline\n\n\n\npadded user<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/multi_turn": {
+  "ok": "<bos><start_of_turn>user\nBe brief.\n\nHi<end_of_turn>\n<start_of_turn>model\nHello! How can I help?<end_of_turn>\n<start_of_turn>user\nTell me a joke.<end_of_turn>\n<start_of_turn>model\nWhy did the chicken cross the road?<end_of_turn>\n<start_of_turn>user\nWhy?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<bos><start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\nHello!<end_of_turn>\n"
+ },
+ "default/reasoning_effort": {
+  "ok": "<bos><start_of_turn>user\nThink hard: 13*17<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/reasoning_history": {
+  "ok": "<bos><start_of_turn>user\n2+2?<end_of_turn>\n<start_of_turn>model\n<think>\nsimple\n</think>\n\n4<end_of_turn>\n<start_of_turn>user\nAnd 3+3?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/system_not_first": {
+  "ok": "<bos><start_of_turn>user\na<end_of_turn>\n<start_of_turn>system\nlate system<end_of_turn>\n<start_of_turn>user\nb<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/system_user": {
+  "ok": "<bos><start_of_turn>user\nYou are a terse assistant.\n\nCapital of France?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/text_parts": {
+  "ok": "<bos><start_of_turn>user\nSys part.\n\nPart one.Part two.<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/thinking_disabled": {
+  "ok": "<bos><start_of_turn>user\n2+2?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/thinking_enabled": {
+  "ok": "<bos><start_of_turn>user\n2+2?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/tool_call_roundtrip": {
+  "err": "TemplateError: Conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/tool_call_then_answer": {
+  "err": "TemplateError: Invalid content type"
+ },
+ "default/tools_system_user": {
+  "ok": "<bos><start_of_turn>user\nYou can call tools.\n\nWeather in Berlin?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/tools_user": {
+  "ok": "<bos><start_of_turn>user\nWeather in München?<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/two_users_in_a_row": {
+  "err": "TemplateError: Conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/unicode": {
+  "ok": "<bos><start_of_turn>user\nGrüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<end_of_turn>\n<start_of_turn>model\n"
+ },
+ "default/user_only": {
+  "ok": "<bos><start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n"
+ }
+}

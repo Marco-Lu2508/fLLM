@@ -8,6 +8,8 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+mod moe;
+
 static CPU_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Internal CPU buffer backing store. The bytes live in `u64` words so every 2-, 4- and
@@ -111,6 +113,27 @@ fn read_bytes(buf: &DeviceBuffer) -> Result<Vec<u8>, BackendError> {
     with_buffer_slice(buf, <[u8]>::to_vec)
 }
 
+fn read_f32_range(buf: &DeviceBuffer, offset_bytes: usize, count: usize) -> Result<Vec<f32>, BackendError> {
+    with_typed_mut::<f32, _>(buf, |dst| {
+        let start = offset_bytes / 4;
+        if dst.len() < start + count {
+            return Err(BackendError::InvalidShape("read_f32_range out of bounds".into()));
+        }
+        Ok(dst[start..start + count].to_vec())
+    })?
+}
+
+fn write_f32_range(buf: &DeviceBuffer, offset_bytes: usize, src: &[f32]) -> Result<(), BackendError> {
+    with_typed_mut::<f32, _>(buf, |dst| {
+        let start = offset_bytes / 4;
+        if dst.len() < start + src.len() {
+            return Err(BackendError::InvalidShape("write_f32_range out of bounds".into()));
+        }
+        dst[start..start + src.len()].copy_from_slice(src);
+        Ok(())
+    })?
+}
+
 /// Copy `src` to the front of `buf`, which must be large enough.
 fn write_f32(buf: &DeviceBuffer, src: &[f32], op: &str) -> Result<(), BackendError> {
     with_typed_mut::<f32, _>(buf, |dst| {
@@ -187,6 +210,7 @@ impl CpuBackend {
                 supports_kv_cache_write: true,
                 supports_embedding_lookup: true,
                 supports_device_sampling: true,
+                sample_on_device: true,
                 supports_residual_add: true,
                 supports_moe: true,
                 max_batch_size: 1024,
@@ -226,6 +250,19 @@ impl Backend for CpuBackend {
     fn free_buffer(&self, _buffer: DeviceBuffer) -> Result<(), BackendError> {
         // Drop cleans up memory automatically
         Ok(())
+    }
+
+    fn upload_pointer_table(&self, weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {
+        let buffers: Vec<&DeviceBuffer> = weights.iter().map(|w| &w.buffer).collect();
+        moe::buffer_table(self, &buffers)
+    }
+
+    fn upload_bias_table(&self, weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {
+        let buffers: Vec<&DeviceBuffer> = weights
+            .iter()
+            .map(|w| w.bias.as_ref().ok_or_else(|| invalid("upload_bias_table: weight without a bias")))
+            .collect::<Result<_, _>>()?;
+        moe::buffer_table(self, &buffers)
     }
 
     fn upload_weight(
@@ -301,6 +338,51 @@ impl Backend for CpuBackend {
             value_dim,
             words_per_layer_k,
             words_per_layer_v,
+            layout: None,
+            layer_geoms: None,
+        })
+    }
+
+    fn allocate_kv_cache_layered(
+        &self,
+        layers: usize,
+        pool_blocks: usize,
+        block_size: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        kv_kind: i32,
+        layout: Option<crate::kv_geometry::KvPoolLayout>,
+        layer_geoms: Option<Vec<crate::config::LayerGeom>>,
+    ) -> Result<DeviceKvCache, BackendError> {
+        let (words_per_layer_k, words_per_layer_v) = DeviceKvCache::geometry(
+            layers,
+            pool_blocks,
+            block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+            kv_kind,
+        )?;
+        let key_words = layout.as_ref().map_or(layers * words_per_layer_k, |l| l.key_total);
+        let value_words = layout.as_ref().map_or(layers * words_per_layer_v, |l| l.value_total);
+        let key_pool = self.allocate_buffer(key_words * 2)?;
+        let value_pool = self.allocate_buffer(value_words * 2)?;
+
+        Ok(DeviceKvCache {
+            key_pool,
+            value_pool,
+            kv_kind,
+            layers,
+            pool_blocks,
+            block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+            words_per_layer_k,
+            words_per_layer_v,
+            layout,
+            layer_geoms,
         })
     }
 }
@@ -692,6 +774,82 @@ impl Stream for CpuStream {
         write_f32(out, &values, "geglu")
     }
 
+    fn supports_kda(&self, s: &crate::backend::KdaShape) -> bool {
+        s.heads > 0 && s.head_dim > 0 && s.conv_kernel >= 2
+    }
+
+    fn kda_layer(
+        &mut self,
+        s: &crate::backend::KdaShape,
+        w: &crate::backend::KdaWeights<'_>,
+        runs: &[crate::backend::DeltaRun<'_>],
+        state_offset: usize,
+        qkv: &DeviceBuffer,
+        forget: &DeviceBuffer,
+        beta: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        _mixed: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let width = s.heads * s.head_dim;
+        let conv_dim = s.conv_dim();
+        let conv_f32 = read_f32(w.conv)?;
+        let dt_bias_f32 = read_f32(w.dt_bias)?;
+        let rate_f32 = read_f32(w.rate)?;
+        let norm_f32 = read_f32(w.norm)?;
+        let qkv_f32 = read_f32(qkv)?;
+        let forget_f32 = read_f32(forget)?;
+        let beta_f32 = read_f32(beta)?;
+        let gate_f32 = read_f32(gate)?;
+        let layer_params = crate::cpu_kda::Layer {
+            heads: s.heads,
+            k_dim: s.head_dim,
+            v_dim: s.head_dim,
+            conv_kernel: s.conv_kernel,
+            eps: s.eps,
+            lower_bound: s.lower_bound,
+            conv: &conv_f32,
+            dt_bias: &dt_bias_f32,
+            rate: &rate_f32,
+            norm: &norm_f32,
+        };
+        let mut out_f32 = vec![0.0f32; rows * width];
+        let rec_len = s.heads * s.head_dim * s.head_dim;
+        let conv_len = conv_dim * (s.conv_kernel.saturating_sub(1));
+        for run in runs {
+            if run.rows == 0 {
+                continue;
+            }
+            let start = run.first_row;
+            let end = start + run.rows;
+            let mut state_floats = read_f32_range(run.state, state_offset, rec_len + conv_len)?;
+            if run.reset {
+                state_floats.fill(0.0);
+            }
+            let (rec_state, conv_history) = state_floats.split_at_mut(rec_len);
+            crate::cpu_kda::run(
+                &layer_params,
+                conv_history,
+                rec_state,
+                (
+                    &qkv_f32[start * conv_dim..end * conv_dim],
+                    &forget_f32[start * width..end * width],
+                    &beta_f32[start * s.heads..end * s.heads],
+                    &gate_f32[start * width..end * width],
+                ),
+                &mut out_f32[start * width..end * width],
+                run.rows,
+            );
+            write_f32_range(run.state, state_offset, &state_floats)?;
+        }
+        write_f32(out, &out_f32, "kda_layer out")?;
+        Ok(())
+    }
+
     fn residual_add(
         &mut self,
         x: &mut DeviceBuffer,
@@ -711,7 +869,89 @@ impl Stream for CpuStream {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn attention_paged(
+        #[allow(clippy::too_many_arguments)]
+    fn attn_encoder(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        cu_seqlens: &[i32],
+        batch_size: usize,
+        total_tokens: usize,
+        heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        scale: f32,
+        window: Option<usize>,
+        global_tokens: Option<&[i32]>,
+    ) -> Result<(), BackendError> {
+        let q_f32 = read_f32(q)?;
+        let k_f32 = read_f32(k)?;
+        let v_f32 = read_f32(v)?;
+        let mut out_f32 = vec![0.0f32; total_tokens * heads * head_dim];
+
+        let gqa_ratio = heads / kv_heads;
+        for b in 0..batch_size {
+            let start = cu_seqlens[b] as usize;
+            let end = cu_seqlens[b + 1] as usize;
+            let seq_len = end - start;
+            for i in 0..seq_len {
+                let token_idx = start + i;
+                let i_global = global_tokens.is_some_and(|g| g.contains(&(token_idx as i32)));
+                for h in 0..heads {
+                    let kh = h / gqa_ratio;
+                    let q_vec = &q_f32[token_idx * heads * head_dim + h * head_dim..token_idx * heads * head_dim + (h + 1) * head_dim];
+                    let mut scores = Vec::with_capacity(seq_len);
+                    let mut max_score = -1e38f32;
+                    for j in 0..seq_len {
+                        let key_idx = start + j;
+                        let mut visible = true;
+                        if let Some(win) = window {
+                            if win > 0 && win < seq_len {
+                                let j_global = global_tokens.is_some_and(|g| g.contains(&(key_idx as i32)));
+                                if !i_global && !j_global {
+                                    let dist = (i as isize - j as isize).unsigned_abs();
+                                    if dist > (win / 2) {
+                                        visible = false;
+                                    }
+                                }
+                            }
+                        }
+                        if visible {
+                            let k_vec = &k_f32[key_idx * kv_heads * head_dim + kh * head_dim..key_idx * kv_heads * head_dim + (kh + 1) * head_dim];
+                            let dot: f32 = q_vec.iter().zip(k_vec).map(|(&a, &b)| a * b).sum();
+                            let s = dot * scale;
+                            scores.push((j, s));
+                            if s > max_score {
+                                max_score = s;
+                            }
+                        }
+                    }
+                    let mut sum_exp = 0.0f32;
+                    let mut exps = Vec::with_capacity(scores.len());
+                    for &(j, s) in &scores {
+                        let e = (s - max_score).exp();
+                        exps.push((j, e));
+                        sum_exp += e;
+                    }
+                    let inv_sum = if sum_exp > 0.0 { 1.0 / sum_exp } else { 0.0 };
+                    let out_slice = &mut out_f32[token_idx * heads * head_dim + h * head_dim..token_idx * heads * head_dim + (h + 1) * head_dim];
+                    for &(j, e) in &exps {
+                        let weight = e * inv_sum;
+                        let key_idx = start + j;
+                        let v_vec = &v_f32[key_idx * kv_heads * head_dim + kh * head_dim..key_idx * kv_heads * head_dim + (kh + 1) * head_dim];
+                        for d in 0..head_dim {
+                            out_slice[d] += weight * v_vec[d];
+                        }
+                    }
+                }
+            }
+        }
+        write_f32(out, &out_f32, "attn_encoder")
+    }
+
+fn attention_paged(
         &mut self,
         out: &mut DeviceBuffer,
         q: &DeviceBuffer,
@@ -733,12 +973,13 @@ impl Stream for CpuStream {
         let q_data = &q_data[..rows * heads * dk];
         let key_words = with_typed_mut::<u16, _>(&kv.key_pool, |s| s.to_vec())?;
         let value_words = with_typed_mut::<u16, _>(&kv.value_pool, |s| s.to_vec())?;
-        let (words_k, words_v) = (kv.words_per_layer_k, kv.words_per_layer_v);
-        if key_words.len() < kv.layers * words_k || value_words.len() < kv.layers * words_v {
+        let (k_off, v_off) = (kv.layer_key_offset(layer_idx), kv.layer_value_offset(layer_idx));
+        let (words_k, words_v) = (kv.layer_key_words(layer_idx), kv.layer_value_words(layer_idx));
+        if key_words.len() < k_off + words_k || value_words.len() < v_off + words_v {
             return Err(invalid("KV pools smaller than their layer geometry"));
         }
-        let key_layer = &key_words[layer_idx * words_k..(layer_idx + 1) * words_k];
-        let value_layer = &value_words[layer_idx * words_v..(layer_idx + 1) * words_v];
+        let key_layer = &key_words[k_off..k_off + words_k];
+        let value_layer = &value_words[v_off..v_off + words_v];
 
         // The tiled kernel computes exactly softmax(q k / sqrt(dk)) v; it declines (None)
         // head widths it has no tiles for, which then take the scalar path.
@@ -800,15 +1041,20 @@ impl Stream for CpuStream {
         validate_kv_write(kv, layer_idx, slots, k.size, v.size)?;
         let k_data = read_f32(k)?;
         let v_data = read_f32(v)?;
-        let (key_layout, value_layout) = kv.layouts();
-        for (pool, data, dim, words, layout) in [
-            (&kv.key_pool, &k_data, kv.head_dim, kv.words_per_layer_k, key_layout),
-            (&kv.value_pool, &v_data, kv.value_dim, kv.words_per_layer_v, value_layout),
+        let kh = kv.layer_kv_heads(layer_idx);
+        let kd = kv.layer_head_dim(layer_idx);
+        let vd = kv.layer_value_dim(layer_idx);
+        let (fmt_k, fmt_v) = kv.formats();
+        let key_layout = crate::kv_format::KvLayout::new(fmt_k, kv.slots(), kh, kd);
+        let value_layout = crate::kv_format::KvLayout::new(fmt_v, kv.slots(), kh, vd);
+        for (pool, data, dim, off, words, layout) in [
+            (&kv.key_pool, &k_data, kd, kv.layer_key_offset(layer_idx), kv.layer_key_words(layer_idx), key_layout),
+            (&kv.value_pool, &v_data, vd, kv.layer_value_offset(layer_idx), kv.layer_value_words(layer_idx), value_layout),
         ] {
-            let width = kv.kv_heads * dim;
+            let width = kh * dim;
             with_typed_mut::<u16, _>(pool, |all| {
                 let layer = all
-                    .get_mut(layer_idx * words..(layer_idx + 1) * words)
+                    .get_mut(off..off + words)
                     .ok_or_else(|| invalid("KV pool smaller than its layer geometry"))?;
                 for (r, &slot) in slots.iter().enumerate() {
                     layout.encode_slot(layer, slot, &data[r * width..(r + 1) * width]);
@@ -817,6 +1063,46 @@ impl Stream for CpuStream {
             })??;
         }
         Ok(())
+    }
+
+    fn moe_route_ex(
+        &mut self,
+        logits: &DeviceBuffer,
+        bias: Option<&DeviceBuffer>,
+        ids: &mut DeviceBuffer,
+        weights: &mut DeviceBuffer,
+        rows: usize,
+        experts: usize,
+        k: usize,
+        route: &MoeRoute,
+    ) -> Result<(), BackendError> {
+        moe::route_ex(logits, bias, ids, weights, rows, experts, k, route)
+    }
+
+    fn moe_align(&mut self, ids: &DeviceBuffer, sort: &mut MoeSort, expert_offset: usize, num_local: usize) -> Result<(), BackendError> {
+        moe::align(ids, sort, expert_offset, num_local)
+    }
+
+    fn moe_grouped_linear(&mut self, call: MoeGrouped<'_>) -> Result<(), BackendError> {
+        moe::grouped(call)
+    }
+
+    fn moe_combine_ex(
+        &mut self,
+        out: &mut DeviceBuffer,
+        y: &DeviceBuffer,
+        weights: Option<&DeviceBuffer>,
+        shared: Option<&DeviceBuffer>,
+        gate: Option<&DeviceBuffer>,
+        tokens: usize,
+        k: usize,
+        hidden: usize,
+    ) -> Result<(), BackendError> {
+        moe::combine_ex(out, y, weights, shared, gate, tokens, k, hidden)
+    }
+
+    fn moe_gate_scale(&mut self, gate: &mut DeviceBuffer, x: &DeviceBuffer, g: &DeviceBuffer, tokens: usize, hidden: usize) -> Result<(), BackendError> {
+        moe::gate_scale(gate, x, g, tokens, hidden)
     }
 
     fn moe_route(
@@ -922,6 +1208,35 @@ impl Stream for CpuStream {
             }
         }
         write_f32(out, &out_data, "moe_expert_gemm")
+    }
+
+    fn sample_rows(&mut self, logits: &DeviceBuffer, vocab: usize, batch: &SampleBatch) -> Result<SampleOutput, BackendError> {
+        batch.validate(vocab)?;
+        let data = read_f32(logits)?;
+        let rows = batch.rows.len();
+        if vocab == 0 || data.len() < rows * vocab {
+            return Err(invalid("sample_rows: the logits buffer is smaller than rows x vocab"));
+        }
+        let stride = batch.top_stride;
+        let mut out = SampleOutput {
+            ids: vec![0; rows],
+            logprobs: vec![0.0; rows],
+            top_ids: vec![-1; rows * stride],
+            top_logprobs: vec![f32::NEG_INFINITY; rows * stride],
+        };
+        for (r, p) in batch.rows.iter().enumerate() {
+            let pens = &batch.pen[p.pen_off as usize..(p.pen_off + p.pen_len) as usize];
+            let bias = &batch.bias[p.bias_off as usize..(p.bias_off + p.bias_len) as usize];
+            let mask = (p.mask_row >= 0).then(|| &batch.mask[p.mask_row as usize * batch.mask_words..(p.mask_row as usize + 1) * batch.mask_words]);
+            let sample = crate::sampling::device_sample_reference(&data[r * vocab..(r + 1) * vocab], p, pens, bias, mask, stride);
+            out.ids[r] = sample.id;
+            out.logprobs[r] = sample.logprob;
+            for (j, (id, lp)) in sample.top.iter().enumerate() {
+                out.top_ids[r * stride + j] = *id;
+                out.top_logprobs[r * stride + j] = *lp;
+            }
+        }
+        Ok(out)
     }
 
     fn sampling_logits(

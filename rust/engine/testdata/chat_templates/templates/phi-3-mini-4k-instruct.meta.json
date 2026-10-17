@@ -1,0 +1,6 @@
+{
+ "bos": "<s>",
+ "eos": "<|endoftext|>",
+ "pad": "<|endoftext|>",
+ "unk": "<unk>"
+}

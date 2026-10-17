@@ -109,14 +109,10 @@ impl MemoryPlan {
         // KV cache calculations per layer:
         let block_size = model.block_size();
         let (key_format, value_format) = model.kv_formats();
-        let kv_heads = model.config().kv_heads;
-        let head_dim = model.config().head_dim;
-        let value_dim = model.config().value_dim;
-        let bytes_per_token =
-            key_format.bytes_per_slot(kv_heads, head_dim) + value_format.bytes_per_slot(kv_heads, value_dim);
-        let kv_block_bytes_per_layer = (block_size as u64) * bytes_per_token;
+        // bytes of all layers together: layers differ in KV heads / head width and layers that share a cache add nothing
+        let bytes_per_token = crate::kv_geometry::bytes_per_token(model.config(), key_format, value_format);
         // Every layer keeps its KV cache on the device, also when its feed-forward runs on the host
-        let kv_block_bytes = kv_block_bytes_per_layer * total_layers as u64;
+        let kv_block_bytes = (block_size as u64) * bytes_per_token;
 
         // Backend workspaces, the driver context and padded weight layouts
         let overhead_bytes = (768u64 << 20) + (layer_attn + layer_ffn) / 20;
@@ -229,4 +225,37 @@ impl MemoryPlan {
             marlin_q4k_extra_bytes: marlin_q4k_extra,
         })
     }
+
+    /// Compute a per-device memory plan for tensor and pipeline parallel configurations.
+    /// Each rank only accounts for its share of attention / FFN weights and pipeline layers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_sharded(
+        model: &GgufModel,
+        free_vram: u64,
+        total_vram: u64,
+        utilization: f64,
+        gpu_layers_arg: Option<&str>,
+        max_tokens: usize,
+        tp: usize,
+        pp: usize,
+        stage: usize,
+    ) -> Result<Self, String> {
+        let tp = tp.max(1);
+        let pp = pp.max(1);
+        let mut plan = Self::plan(model, free_vram, total_vram, utilization, gpu_layers_arg, max_tokens)?;
+        
+        // Scale layer weights by TP (each rank holds 1/TP of attention and FFN projection columns/rows)
+        plan.bytes_per_layer /= tp as u64;
+        
+        // Pipeline stages divide the model layers
+        let stage_layers = (plan.total_layers / pp) + usize::from(stage < (plan.total_layers % pp));
+        plan.total_layers = stage_layers;
+        plan.offload_layers = plan.offload_layers.min(stage_layers);
+        plan.estimated_model_bytes = (plan.non_layer_bytes / tp as u64) + (plan.bytes_per_layer * plan.offload_layers as u64);
+
+        // KV cache budget per rank: KV heads are sharded by TP
+        plan.kv_cache_bytes /= tp as u64;
+        Ok(plan)
+    }
+
 }

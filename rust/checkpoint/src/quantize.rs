@@ -9,9 +9,13 @@ pub enum QType {
     Q5_0,
     Q5_1,
     Q8_0,
+    Q2K,
+    Q3K,
     Q4K,
     Q5K,
     Q6K,
+    Mxfp4,
+    Nvfp4,
 }
 
 impl QType {
@@ -22,6 +26,10 @@ impl QType {
             "q5_0" => Self::Q5_0,
             "q5_1" => Self::Q5_1,
             "q8_0" => Self::Q8_0,
+            "q2_k" | "q2k" => Self::Q2K,
+            "q3_k" | "q3k" => Self::Q3K,
+            "mxfp4" => Self::Mxfp4,
+            "nvfp4" => Self::Nvfp4,
             "q4_k" => Self::Q4K,
             "q5_k" => Self::Q5K,
             "q6_k" => Self::Q6K,
@@ -36,14 +44,20 @@ impl QType {
             Self::Q5_0 => 6,
             Self::Q5_1 => 7,
             Self::Q8_0 => 8,
+            Self::Q2K => 10,
+            Self::Q3K => 11,
             Self::Q4K => 12,
             Self::Q5K => 13,
             Self::Q6K => 14,
+            Self::Mxfp4 => 39,
+            Self::Nvfp4 => 40,
         }
     }
     pub fn block_elements(self) -> usize {
         match self {
-            Self::Q4K | Self::Q5K | Self::Q6K => 256,
+            Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K => 256,
+            Self::Nvfp4 => 64,
+            Self::Mxfp4 => 32,
             _ => 32,
         }
     }
@@ -54,9 +68,13 @@ impl QType {
             Self::Q5_0 => 22,
             Self::Q5_1 => 24,
             Self::Q8_0 => 34,
+            Self::Q2K => 84,
+            Self::Q3K => 110,
             Self::Q4K => 144,
             Self::Q5K => 176,
             Self::Q6K => 210,
+            Self::Mxfp4 => 17,
+            Self::Nvfp4 => 36,
         }
     }
     /// Bytes of a row with `elements` values.
@@ -86,9 +104,13 @@ pub fn quantize_row(kind: QType, x: &[f32], out: &mut Vec<u8>) {
             QType::Q5_0 => q5_0(block, out),
             QType::Q5_1 => q5_1(block, out),
             QType::Q8_0 => q8_0(block, out),
+            QType::Q2K => q2_k(block, out),
+            QType::Q3K => q3_k(block, out),
             QType::Q4K => q45_k(block, out, false),
             QType::Q5K => q45_k(block, out, true),
             QType::Q6K => q6_k(block, out),
+            QType::Mxfp4 => mxfp4(block, out),
+            QType::Nvfp4 => nvfp4(block, out),
         }
     }
 }
@@ -460,6 +482,266 @@ fn q6_k(x: &[f32], out: &mut Vec<u8>) {
     out.extend_from_slice(&d_h.to_bits().to_le_bytes());
 }
 
+
+fn q2_k(x: &[f32], out: &mut Vec<u8>) {
+    let mut l = [0u8; 256];
+    let mut laux = [0u8; 16];
+    let mut weights = [0.0f32; 16];
+    let mut scales = [0.0f32; 16];
+    let mut mins = [0.0f32; 16];
+    for j in 0..16 {
+        let part = &x[16 * j..16 * j + 16];
+        let av = (part.iter().map(|v| v * v).sum::<f32>() / 16.0).sqrt();
+        for (w, v) in weights.iter_mut().zip(part) {
+            *w = av + v.abs();
+        }
+        let (s, m) = make_qkx2_quants(
+            3,
+            part,
+            &weights,
+            &mut l[16 * j..16 * j + 16],
+            &mut laux,
+            -1.0,
+            0.1,
+            20,
+        );
+        scales[j] = s;
+        mins[j] = m;
+    }
+    let max_scale = scales.iter().copied().fold(0.0f32, f32::max);
+    let max_min = mins.iter().copied().fold(0.0f32, f32::max);
+    let inv_scale = if max_scale > 0.0 {
+        15.0 / max_scale
+    } else {
+        0.0
+    };
+    let inv_min = if max_min > 0.0 { 15.0 / max_min } else { 0.0 };
+    let mut packed = [0u8; 16];
+    for j in 0..16 {
+        let ls = nearest_int(inv_scale * scales[j]).min(15) as u8;
+        let lm = nearest_int(inv_min * mins[j]).min(15) as u8;
+        packed[j] = (ls & 0xF) | ((lm & 0xF) << 4);
+    }
+    let d_h = f16::from_f32(max_scale / 15.0);
+    let dmin_h = f16::from_f32(max_min / 15.0);
+    let (d_all, dmin_all) = (d_h.to_f32(), dmin_h.to_f32());
+    for j in 0..16 {
+        let sc = packed[j] & 0xF;
+        let m = (packed[j] >> 4) & 0xF;
+        let d = d_all * f32::from(sc);
+        let dm = dmin_all * f32::from(m);
+        if d == 0.0 {
+            for ii in 0..16 {
+                l[16 * j + ii] = 0;
+            }
+            continue;
+        }
+        for ii in 0..16 {
+            let q = nearest_int((x[16 * j + ii] + dm) / d).clamp(0, 3);
+            l[16 * j + ii] = q as u8;
+        }
+    }
+    out.extend_from_slice(&packed);
+    let mut qs = [0u8; 64];
+    for half in 0..2 {
+        let group_base = half * 4;
+        let out_base = half * 32;
+        for g in 0..4 {
+            let grp = group_base + g;
+            let shift = 2 * g;
+            for i in 0..32 {
+                let q = l[grp * 32 + i] & 3;
+                qs[out_base + i] |= q << shift;
+            }
+        }
+    }
+    out.extend_from_slice(&qs);
+    out.extend_from_slice(&d_h.to_bits().to_le_bytes());
+    out.extend_from_slice(&dmin_h.to_bits().to_le_bytes());
+}
+
+fn q3_k(x: &[f32], out: &mut Vec<u8>) {
+    let mut l = [0u8; 256];
+    let mut scales = [0.0f32; 16];
+    let (mut max_scale, mut max_abs) = (0.0f32, 0.0f32);
+    for ib in 0..16 {
+        let s = make_qx_quants(4, &x[16 * ib..16 * ib + 16], &mut l[16 * ib..16 * ib + 16]);
+        scales[ib] = s;
+        if s.abs() > max_abs {
+            max_abs = s.abs();
+            max_scale = s;
+        }
+    }
+    if max_abs == 0.0 {
+        out.extend_from_slice(&[0u8; 110]);
+        return;
+    }
+    let iscale = -32.0 / max_scale;
+    let d_h = f16::from_f32(1.0 / iscale);
+    let mut sc = [0i8; 16];
+    for ib in 0..16 {
+        sc[ib] = nearest_int(iscale * scales[ib]).clamp(-32, 31) as i8;
+    }
+    let d_all = d_h.to_f32();
+    for j in 0..16 {
+        let d = d_all * f32::from(sc[j]);
+        if d == 0.0 {
+            for ii in 0..16 {
+                l[16 * j + ii] = 4;
+            }
+            continue;
+        }
+        for ii in 0..16 {
+            let q = nearest_int(x[16 * j + ii] / d).clamp(-4, 3);
+            l[16 * j + ii] = (q + 4) as u8;
+        }
+    }
+    let mut hmask = [0u8; 32];
+    let mut qs = [0u8; 64];
+    for g in 0..8 {
+        let half = g / 4;
+        let shift = 2 * (g % 4);
+        for i in 0..32 {
+            let q = l[g * 32 + i];
+            hmask[i] |= ((q >> 2) & 1) << g;
+            qs[half * 32 + i] |= (q & 3) << shift;
+        }
+    }
+    out.extend_from_slice(&hmask);
+    out.extend_from_slice(&qs);
+    let mut packed_scales = [0u8; 12];
+    for i in 0..4 {
+        let s0 = (sc[i] + 32) as u8;
+        let s4 = (sc[i + 4] + 32) as u8;
+        let s8 = (sc[i + 8] + 32) as u8;
+        let s12 = (sc[i + 12] + 32) as u8;
+        packed_scales[i] = (s0 & 15) | ((s8 & 15) << 4);
+        packed_scales[4 + i] = (s4 & 15) | ((s12 & 15) << 4);
+        packed_scales[8 + i] = ((s0 >> 4) & 3)
+            | (((s4 >> 4) & 3) << 2)
+            | (((s8 >> 4) & 3) << 4)
+            | (((s12 >> 4) & 3) << 6);
+    }
+    out.extend_from_slice(&packed_scales);
+    out.extend_from_slice(&d_h.to_bits().to_le_bytes());
+}
+
+#[cfg(test)]
+const E2M1_TABLE: [f32; 16] = [
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+];
+
+fn quantize_e2m1(v: f32, inv_scale: f32) -> u8 {
+    let sign = if v.is_sign_negative() && v != 0.0 { 8u8 } else { 0u8 };
+    let m = v.abs() * inv_scale;
+    let mag = if m < 0.25 {
+        0
+    } else if m < 0.75 {
+        1
+    } else if m < 1.25 {
+        2
+    } else if m < 1.75 {
+        3
+    } else if m < 2.5 {
+        4
+    } else if m < 3.5 {
+        5
+    } else if m < 5.0 {
+        6
+    } else {
+        7
+    };
+    sign | mag
+}
+
+fn e8m0_val(e: u8) -> f32 {
+    if e == 0 {
+        f32::from_bits(1 << 22)
+    } else {
+        f32::from_bits(u32::from(e) << 23)
+    }
+}
+
+fn mxfp4(x: &[f32], out: &mut Vec<u8>) {
+    let amax = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    if amax == 0.0 {
+        out.extend_from_slice(&[0u8; 17]);
+        return;
+    }
+    let target = amax / 6.0;
+    let bits = target.to_bits();
+    let raw_exp = ((bits >> 23) & 0xFF) as i32;
+    let mantissa = bits & 0x7FFFFF;
+    let mut e = raw_exp;
+    if mantissa != 0 {
+        e += 1;
+    }
+    let e_clamped = e.clamp(1, 254) as u8;
+    let scale = e8m0_val(e_clamped);
+    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+    out.push(e_clamped);
+    for j in 0..16 {
+        let c0 = quantize_e2m1(x[j], inv_scale);
+        let c1 = quantize_e2m1(x[j + 16], inv_scale);
+        out.push((c0 & 0xF) | ((c1 & 0xF) << 4));
+    }
+}
+
+fn e4m3_val(byte: u8) -> f32 {
+    let exp = ((byte >> 3) & 0x0f) as i32;
+    let mant = (byte & 7) as f32;
+    if exp == 0 {
+        mant * 2f32.powi(-9)
+    } else {
+        (1.0 + mant / 8.0) * 2f32.powi(exp - 7)
+    }
+}
+
+fn quantize_ue4m3(amax: f32) -> (u8, f32) {
+    if amax <= 0.0 {
+        return (0, 0.0);
+    }
+    let target = amax / 6.0;
+    let mut best_b = 126u8;
+    let mut best_val = e4m3_val(126);
+    for b in 0..=126 {
+        let v = e4m3_val(b);
+        if v >= target {
+            best_b = b;
+            best_val = v;
+            break;
+        }
+    }
+    (best_b, best_val)
+}
+
+fn nvfp4(x: &[f32], out: &mut Vec<u8>) {
+    let mut scales = [0u8; 4];
+    let mut scale_vals = [0.0f32; 4];
+    for (g, (scale_slot, val_slot)) in scales.iter_mut().zip(&mut scale_vals).enumerate() {
+        let sub = &x[16 * g..16 * g + 16];
+        let amax = sub.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let (b, val) = quantize_ue4m3(amax);
+        *scale_slot = b;
+        *val_slot = val;
+    }
+    out.extend_from_slice(&scales);
+    for (g, &scale_val) in scale_vals.iter().enumerate() {
+        let base = 16 * g;
+        let inv_scale = if scale_val > 0.0 {
+            1.0 / scale_val
+        } else {
+            0.0
+        };
+        for j in 0..8 {
+            let c0 = quantize_e2m1(x[base + j], inv_scale);
+            let c1 = quantize_e2m1(x[base + j + 8], inv_scale);
+            out.push((c0 & 0xF) | ((c1 & 0xF) << 4));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +820,79 @@ mod tests {
                         }
                     }
                 }
+                QType::Q2K => {
+                    let d = h(&b[80..82]);
+                    let dmin = h(&b[82..84]);
+                    let qs = &b[16..80];
+                    for g in 0..8 {
+                        let half = g / 4;
+                        let shift = 2 * (g % 4);
+                        for sub in 0..2 {
+                            let idx = 2 * g + sub;
+                            let sc = f32::from(b[idx] & 0xF);
+                            let m = f32::from((b[idx] >> 4) & 0xF);
+                            for i in 0..16 {
+                                let byte = qs[half * 32 + i];
+                                let q = f32::from((byte >> shift) & 3);
+                                if sub == 0 {
+                                    out.push(d * sc * q - dmin * m);
+                                }
+                            }
+                            for i in 0..16 {
+                                let byte = qs[half * 32 + 16 + i];
+                                let q = f32::from((byte >> shift) & 3);
+                                if sub == 1 {
+                                    out.push(d * sc * q - dmin * m);
+                                }
+                            }
+                        }
+                    }
+                }
+                QType::Q3K => {
+                    let mut sc = [0i32; 16];
+                    for i in 0..4 {
+                        let (hi, lo, packed) = (b[96 + i], b[100 + i], b[104 + i]);
+                        sc[i] = i32::from((hi & 15) | ((packed & 3) << 4)) - 32;
+                        sc[i + 4] = i32::from((lo & 15) | (((packed >> 2) & 3) << 4)) - 32;
+                        sc[i + 8] = i32::from((hi >> 4) | (((packed >> 4) & 3) << 4)) - 32;
+                        sc[i + 12] = i32::from((lo >> 4) | (((packed >> 6) & 3) << 4)) - 32;
+                    }
+                    let d = h(&b[108..110]);
+                    let hmask = &b[0..32];
+                    let qs = &b[32..96];
+                    for g in 0..8 {
+                        let half = g / 4;
+                        let shift = 2 * (g % 4);
+                        for sub in 0..2 {
+                            let scale = d * sc[2 * g + sub] as f32;
+                            for i in 0..16 {
+                                let idx = sub * 16 + i;
+                                let high = (hmask[idx] >> g) & 1;
+                                let low = (qs[half * 32 + idx] >> shift) & 3;
+                                let q = low | (high << 2);
+                                out.push(scale * (q as f32 - 4.0));
+                            }
+                        }
+                    }
+                }
+                QType::Mxfp4 => {
+                    let scale = e8m0_val(b[0]);
+                    out.extend((0..16).map(|j| E2M1_TABLE[(b[1 + j] & 0xF) as usize] * scale));
+                    out.extend((0..16).map(|j| E2M1_TABLE[(b[1 + j] >> 4) as usize] * scale));
+                }
+                QType::Nvfp4 => {
+                    for g in 0..4 {
+                        let scale = e4m3_val(b[g]);
+                        for j in 0..8 {
+                            let byte = b[4 + g * 8 + j];
+                            out.push(E2M1_TABLE[(byte & 0xF) as usize] * scale);
+                        }
+                        for j in 0..8 {
+                            let byte = b[4 + g * 8 + j];
+                            out.push(E2M1_TABLE[(byte >> 4) as usize] * scale);
+                        }
+                    }
+                }
                 QType::Q6K => {
                     let (ql, qh, sc) = (&b[0..128], &b[128..192], &b[192..208]);
                     let d = h(&b[208..]);
@@ -588,6 +943,10 @@ mod tests {
             (QType::Q4K, 0.09),
             (QType::Q4_1, 0.09),
             (QType::Q4_0, 0.11),
+            (QType::Nvfp4, 0.20),
+            (QType::Mxfp4, 0.20),
+            (QType::Q3K, 0.25),
+            (QType::Q2K, 0.35),
         ];
         for (kind, limit) in limits {
             let e = rms(kind) / signal;
@@ -604,6 +963,10 @@ mod tests {
             QType::Q4K,
             QType::Q5K,
             QType::Q6K,
+            QType::Q2K,
+            QType::Q3K,
+            QType::Mxfp4,
+            QType::Nvfp4,
         ] {
             let mut bytes = Vec::new();
             quantize_row(kind, &vec![0.0; 256], &mut bytes);

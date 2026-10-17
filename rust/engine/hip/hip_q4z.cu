@@ -74,7 +74,8 @@ struct Q4zView {
 
     __device__ __forceinline__ void scale_zero(int n, int g, float &scale, float &zero) const {
         const int pos = slot(n);
-        const size_t flat = (size_t)g * rows + pos;
+        const size_t scale_rows = (size_t)((rows + 63) & ~63);
+        const size_t flat = (size_t)g * scale_rows + pos;
         scale = h2f_bits(scales[flat]);
         const int s = pos & 7;  // rows % 8 == 0, so flat % 8 == pos % 8
         const int nib = (s & 1) ? 4 + (s >> 1) : (s >> 1);
@@ -103,7 +104,8 @@ struct Q4zView {
 Q4zView view_of(const void *w, int rows, int cols, int group) {
     const size_t groups = (size_t)cols / group;
     const size_t scale_at = align256((size_t)rows * cols / 2);
-    const size_t zero_at = scale_at + align256(groups * rows * 2);
+    const size_t scale_rows = (size_t)((rows + 63) & ~63);
+    const size_t zero_at = scale_at + align256(groups * scale_rows * 2);
     const uint8_t *base = static_cast<const uint8_t *>(w);
     return Q4zView{reinterpret_cast<const uint32_t *>(base), reinterpret_cast<const uint16_t *>(base + scale_at),
                    reinterpret_cast<const uint32_t *>(base + zero_at), rows, cols, group};
@@ -447,7 +449,7 @@ bool fllm_q4z_supported(int rows, int cols, int group) {
     if (!enabled || fllm_hip_device().arch == FLLM_HIP_ARCH_OTHER) return false;
     if (group != 32 && group != 64 && group != 128) return false;
     // the host-side rearrangement (backend/q4z.rs) works in blocks of 64 rows and 64 inputs
-    return rows > 0 && cols > 0 && rows % 64 == 0 && cols % 64 == 0 && cols % group == 0;
+    return rows > 0 && cols > 0 && rows % 8 == 0 && cols % 32 == 0 && cols % group == 0;
 }
 // FP16 copy of the activations for the vLLM kernel; no split-K partials or lock workspace
 size_t fllm_q4z_io_bytes(int, int cols, int batch) { return ((size_t)batch * cols * 2 + 255) & ~size_t(255); }
@@ -488,5 +490,33 @@ int fllm_q4z_repack(int dev, const void *awq_words, void *out, int k, int n) {
     if (int e = fllm_check_launch("q4z repack")) return e;
     const hipError_t e = hipDeviceSynchronize();
     if (e != hipSuccess) return fllm_set_error("q4z repack: %s", hipGetErrorString(e));
+    return 0;
+}
+
+__global__ void q4z_gptq_repack_kernel(const uint32_t *__restrict__ words, uint32_t *__restrict__ out, int k, int n) {
+    const size_t k_words = (size_t)(k / 8);
+    const size_t total = (size_t)n * k_words;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (size_t)gridDim.x * blockDim.x) {
+        const int row = (int)(i / k_words), w = (int)(i % k_words);
+        const uint32_t src = words[(size_t)w * n + row];
+        uint32_t word = 0;
+#pragma unroll
+        for (int t = 0; t < 8; t++) {
+            const uint32_t code = (src >> (4 * t)) & 15u;
+            word |= code << (4 * nib_of(t));
+        }
+        out[i] = word;
+    }
+}
+
+int fllm_q4z_gptq_repack(int dev, const void *words, void *out, int k, int n) {
+    if (hipSetDevice(dev) != hipSuccess) return fllm_set_error("hipSetDevice(%d) failed", dev);
+    if (k <= 0 || n <= 0 || (k & 7) || (n & 7)) return fllm_set_error("Q4Z GPTQ repack: bad shape k=%d n=%d", k, n);
+    const size_t total = (size_t)n * (k / 8);
+    const unsigned grid = (unsigned)((total + 255) / 256 < 65535 ? (total + 255) / 256 : 65535);
+    q4z_gptq_repack_kernel<<<grid, 256>>>(static_cast<const uint32_t *>(words), static_cast<uint32_t *>(out), k, n);
+    if (int e = fllm_check_launch("q4z gptq repack")) return e;
+    const hipError_t e = hipDeviceSynchronize();
+    if (e != hipSuccess) return fllm_set_error("q4z gptq repack: %s", hipGetErrorString(e));
     return 0;
 }

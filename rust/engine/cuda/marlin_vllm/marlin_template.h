@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  * Modified by Neural Magic
  * Copyright (C) Marlin.2024 Elias Frantar
  *

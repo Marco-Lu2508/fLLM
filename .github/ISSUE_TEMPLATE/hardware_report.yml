@@ -1,0 +1,78 @@
+name: Hardware report
+description: Report what you ran on your hardware (success or failure)
+labels: [hardware]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Results on hardware the maintainers do not own are the most useful reports. See docs/test-levels.md for what the levels
+        L0 to L3 mean and CONTRIBUTING.md for the procedure.
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. Windows 11 24H2, Ubuntu 24.04, macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU / NPU / TPU / CPU
+      placeholder: "e.g. AMD RX 7900 XTX, Intel Arc A770, Apple M3, Snapdragon X Elite NPU"
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: Driver and runtime versions
+      placeholder: "e.g. ROCm 6.2, NVIDIA driver 570, Mesa 25.0, oneAPI 2025.1"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: fLLM version
+      description: Release tag or commit, and how you installed or built it (features used).
+    validations:
+      required: true
+  - type: textarea
+    id: devices
+    attributes:
+      label: Output of `fllm-rs devices`
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Summary of `fllm-rs selftest-gpu --device <name>` (or `selftest-cpu`)
+      description: The last lines with the number of checks passed, failed and skipped. Attach the JSON file if it is small.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and quantization
+      placeholder: "e.g. Qwen2.5-0.5B-Instruct Q8_0"
+    validations:
+      required: false
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Did the text match the CPU (the scripts/verify-<backend> script does the comparison)? Speed only with the command and prompt length. What failed, with the error text?
+    validations:
+      required: true
+  - type: dropdown
+    id: level
+    attributes:
+      label: Highest level reached
+      options:
+        - L0 (builds only)
+        - L1 (self test passes)
+        - L2 (same text as the CPU)
+        - L3 (speed measured)
+        - Nothing worked
+    validations:
+      required: true

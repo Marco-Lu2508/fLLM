@@ -19,12 +19,16 @@ asset the release has: the CUDA asset when an NVIDIA driver is present (`nvcuda.
 the choice. On ARM64 it takes the ARM64 asset and otherwise the x86_64 one, which runs in Windows' x64 emulation, slowly.
 
 ```powershell
-.\install.ps1                  # newest release, verified against its .sha256
-.\install.ps1 -Variant cuda
-.\install.ps1 -Build           # no download: build this checkout (scripts\build-windows.ps1)
-.\.local\bin\fllm-rs.exe devices
-.\.local\bin\fllm-rs.exe run unsloth/Qwen3.5-9B-GGUF:Q4_K_M       # --device auto: the best GPU, else the CPU
+irm https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.ps1 | iex   # newest release -> %LOCALAPPDATA%\fllm\bin, verified against its .sha256
+.\install.ps1 -Variant cuda -AddToPath    # from a clone: force a variant, add the folder to the user PATH
+.\install.ps1 -Uninstall                  # removes fllm-rs.exe and the PATH entry
+.\install.ps1 -Build                      # no download: build this checkout (scripts\build-windows.ps1)
+fllm-rs devices                           # before the PATH change: & "$env:LOCALAPPDATA\fllm\bin\fllm-rs.exe" devices
+fllm-rs run unsloth/Qwen3.5-9B-GGUF:Q4_K_M       # --device auto: the best GPU, else the CPU
 ```
+
+The binary is not code-signed. A file that the installer downloads carries no "downloaded from the internet" mark, but a zip saved from the browser does: unblock it
+(`Unblock-File`) before extracting, or expect a SmartScreen prompt. Defender may scan the first start. The installer never changes Defender or SmartScreen settings.
 
 ## Building from source
 

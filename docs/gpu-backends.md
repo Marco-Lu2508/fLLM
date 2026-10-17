@@ -7,8 +7,8 @@ This document outlines the architecture of the backend system, describes the ope
 > **Native backends of the multi-backend round.** Besides the CPU, wgpu and CUDA backends the tree has native Vulkan (`vulkan`), Metal (`metal`), AMD HIP (`hip`),
 > Intel SYCL (`sycl`), NPU (`npu-*`) and TPU (`tpu-pjrt`) backends and new CPU kernels for ARM and AVX-512/AMX. All of them are test level **L0**: compiled and checked
 > without the hardware, nothing has run on it. The table of hardware x format x level, the known gaps and the commands for verifying them on foreign hardware are in
-> [backends.md](backends.md) and [backends-verify.md](backends-verify.md) (German); the section [Native backends](#native-backends-of-the-multi-backend-round) below lists features and prerequisites.
-> Device numbering, `--device auto` and the extended self test are described in `device-selection.md` (package p15).
+> [backends.md](backends.md) and [backends-verify.md](backends-verify.md); the section [Native backends](#native-backends-of-the-multi-backend-round) below lists features and prerequisites.
+> Device numbering, `--device auto` and the extended self test are described in [device-selection.md](device-selection.md).
 
 ---
 
@@ -185,7 +185,7 @@ Create `rust/engine/src/backend/cuda.rs`.
 The native Vulkan backend provides high-performance vendor-independent acceleration on Linux, Windows, and embedded hardware using `ash`.
 
 ### Step 1: Create Files
-Create `rust/engine/src/backend/vulkan.rs`.
+Create `rust/engine/src/backend/vulkan/`.
 
 ### Step 2: Implement Traits
 1. Implement `Backend` for `VulkanBackend`:
@@ -223,7 +223,7 @@ Check a backend change in this order; each step assumes the previous one passed.
 2. **Shader validation without a device**: `cargo test -p fllm-engine --features rust-gpu shaders_parse_and_validate` parses and validates every WGSL module with naga.
 3. **Device inventory**: `fllm-rs devices` must list the adapter. Its capability lines come from runtime detection (CPU kernel tier and SIMD extensions) and from the kernel set of this build.
 4. **CPU reference**: `fllm-rs selftest-cpu`. `selftest-gpu` compares against the CPU backend, so the CPU kernels must pass first.
-5. **Every GPU operation**: `fllm-rs selftest-gpu [--device vulkan]` runs each backend operation on random data on the device and on the CPU backend and compares both with an f64 reference: linear for every weight format (13 rows, batches 1/2/5, odd widths, a bias, more than 65535 rows), embedding, RMSNorm, RoPE, SwiGLU/GeGLU, residual add, KV-cache writes (f16/q8, head widths 16/32/64/80/128, layers starting on odd 16-bit words, untouched slots must stay zero) and paged attention (decode and prefill, f16 and q8 caches, head widths 16/32/64/80/128, GQA and MHA, window, chunks, soft cap, sinks, ALiBi, key width != value width). Each line prints the largest error of device and CPU relative to the element's error scale, the tolerance (a worst-case f32 rounding bound plus WGSL's accuracy for `exp`/`sqrt`/division and f16 conversion), the device time and ok/FAIL; the exit code is non-zero when any check fails. The extended harness (`--only GROUP`, `--quants a,b`, `--list`, `--strict`, `SKIPPED (unsupported)` for operations a backend does not offer, one JSON entry per check) is described in `device-selection.md` (package p15).
+5. **Every GPU operation**: `fllm-rs selftest-gpu [--device vulkan]` runs each backend operation on random data on the device and on the CPU backend and compares both with an f64 reference: linear for every weight format (13 rows, batches 1/2/5, odd widths, a bias, more than 65535 rows), embedding, RMSNorm, RoPE, SwiGLU/GeGLU, residual add, KV-cache writes (f16/q8, head widths 16/32/64/80/128, layers starting on odd 16-bit words, untouched slots must stay zero) and paged attention (decode and prefill, f16 and q8 caches, head widths 16/32/64/80/128, GQA and MHA, window, chunks, soft cap, sinks, ALiBi, key width != value width). Each line prints the largest error of device and CPU relative to the element's error scale, the tolerance (a worst-case f32 rounding bound plus WGSL's accuracy for `exp`/`sqrt`/division and f16 conversion), the device time and ok/FAIL; the exit code is non-zero when any check fails. The extended harness (`--only GROUP`, `--quants a,b`, `--list`, `--strict`, `SKIPPED (unsupported)` for operations a backend does not offer, one JSON entry per check) is described in [device-selection.md](device-selection.md).
 6. **A model**: only then compare a short greedy generation (or the first-token logits) of `--device cpu` and `--device vulkan`.
 
 Software adapters (lavapipe, WARP) are refused by default because they are slower than the CPU path; set `FLLM_ALLOW_SOFTWARE_GPU=1` to use one for steps 3 to 6 on machines without a GPU:
@@ -320,12 +320,12 @@ device. The experts of a mixture-of-experts layer count as feed-forward weights 
   from pageable memory (half the speed). Streaming covers Q4_K, Q5_K, Q6_K and Q8_0 weights without bias and SwiGLU/GeGLU
   experts; everything else stays on the CPU.
 
-Formats without a CUDA decoder (Q2_K, Q3_K, the IQ family except IQ4_NL/IQ4_XS) are re-quantized to Q5_K when they are uploaded.
+Q2_K, Q3_K and the IQ family are decoded natively (generic decoders in `iq_decode.cuh`; the list in the `quantized_linear` row above is `NATIVE_KINDS` of `backend/cuda.rs` plus the IQ4 and FP4 formats with their own kernels). Only tensor types outside that list and unusual shapes are converted once on upload (the conversion is logged).
 
 ### Older GPUs
 
-The tensor-core kernels need compute capability 8.0 (Ampere) or newer. The same binary also contains code for Pascal
-(6.x), Volta (7.0) and Turing (7.5): there the dispatcher uses the FP32/`dp4a` kernels (single-token decode runs at
+The tensor-core kernels (FP16 prompt GEMMs, FlashInfer/CUTLASS paths, the Marlin Q4Z GEMM) need compute capability 7.5 (Turing) or newer; a few paths need 8.0 (Ampere), for example the Marlin Q4_K layout, and the FP4 kernels need sm_12x. The same binary also contains code for Pascal
+(6.x) and Volta (7.0): there the dispatcher uses the FP32/`dp4a` kernels (single-token decode runs at
 the same bandwidth-bound speed, prompt processing is much slower). `FLLM_CUDA_FORCE_CC=61` forces that path for testing.
 
 ### AMD GPUs (ROCm / HIP)

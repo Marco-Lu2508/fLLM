@@ -1,229 +1,227 @@
-# Backend-Matrix: Hardware × Format × Prüfstufe
+# Backend matrix: hardware x format x test level
 
-Stand: Berichte der Mega-Runde (Welle 1 und 2), Branches auf Basis `247fb37`. Quelle jeder Zelle ist der Bericht des Pakets
-(Berichte der einzelnen Pakete, Kürzel `p02` usw.) oder die bestehende Doku (`docs/gpu-backends.md`,
-`docs/cpu-kernels.md`, `README.md`). **Alles Neue ist L0: nichts davon ist auf der Zielhardware gelaufen.** Wo diese Seite
-„Backend X kann Y" schreibt, heißt das „der Code dafür existiert und wurde übersetzt bzw. syntaxgeprüft", nie „es läuft".
+Every cell states the test level reached (defined in [test-levels.md](test-levels.md)). **Unless a cell says otherwise, a backend
+other than CPU and CUDA is L0: the code exists and compiles, but its kernels have not run on the target hardware.** Where this page
+says "backend X can do Y", it means "the code for it exists and was compiled or syntax-checked", never "it runs" - except where the
+README Status table or this page names a run.
 
-Anleitung zum Prüfen auf fremder Hardware: [backends-verify.md](backends-verify.md). Gerätewahl, `--device auto` und Selbsttest:
-`docs/device-selection.md` (Paket p15, noch nicht auf `master`).
+How to verify on other hardware: [backends-verify.md](backends-verify.md). Device selection, `--device auto` and the self test:
+[device-selection.md](device-selection.md).
 
-## 1. Prüfstufen und Zellen-Kürzel
+## 1. Test levels and cell abbreviations
 
-| Stufe | Bedeutung | Wie man sie erreicht |
+| Level | Meaning | How to reach it |
 | --- | --- | --- |
-| **L0** | übersetzt und/oder syntaxgeprüft; ggf. zusätzlich Unit-Tests ohne Hardware oder CPU-Emulation des Kerneltexts (bleibt L0) | `cargo check/clippy`, `xcheck.sh`, `hipcheck.sh`, `syclcheck.sh`, `mslcheck.sh`, `glslc` + `spirv-val` |
-| **L1** | Selbsttest auf echter Hardware bestanden | `fllm-rs selftest-gpu --device <name> --json out.json` mit `failed = 0` (bzw. `selftest-cpu`, die `#[ignore]`-Hardwaretests des Pakets) |
-| **L2** | Greedy-Text (Temperatur 0) eines Modells ist auf dieser Hardware identisch mit der CPU-Referenz | Textvergleich aus [backends-verify.md](backends-verify.md) |
-| **L3** | Geschwindigkeit gemessen und mit einer Vergleichsimplementierung auf derselben Hardware verglichen | `fllm-rs bench` plus Vergleichslauf |
+| **L0** | compiled and/or syntax-checked; possibly also unit tests without hardware or a CPU emulation of the kernel text (stays L0) | `cargo check/clippy`, cross-check scripts for HIP, SYCL and MSL, `glslc` + `spirv-val` |
+| **L1** | self test passes on real hardware | `fllm-rs selftest-gpu --device <name> --json out.json` with `failed = 0` (or `selftest-cpu`, or the `#[ignore]` hardware tests of the backend) |
+| **L2** | greedy text (temperature 0) of a model on this hardware is identical to the CPU reference | text comparison from [backends-verify.md](backends-verify.md) |
+| **L3** | speed measured and compared with a reference implementation on the same hardware | `fllm-rs bench` plus a comparison run |
 
-Der Cross-Check (`xcheck.sh`, t00) beweist nur die Übersetzbarkeit des Rust-Codes, nicht Linkbarkeit oder Lauf.
+A cross-compile check only proves that the Rust code compiles, not that it links or runs.
 
-| Kürzel | Bedeutung |
+| Abbreviation | Meaning |
 | --- | --- |
-| **B** | Bestand: Code vor dieser Runde, laut bestehender Doku auf Hardware gelaufen; in dieser Runde nicht erneut geprüft |
-| **B‡** | Bestand, aber laut `docs/cpu-kernels.md` „not run" (kompiliert, Tests geschrieben, nie auf passender Hardware ausgeführt); effektiv L0 |
-| **L0** | neu, native Kernel/Pfad vorhanden |
-| **L0†** | neu, nur über Umwandlung beim Upload (Host dequantisiert oder quantisiert neu); kein eigener Kernel für das Format |
-| **–** | nicht vorhanden; die Operation läuft auf dem Host/der CPU oder meldet `Unsupported` |
-| **?** | der Bericht sagt dazu nichts; nicht geraten |
+| **B** | Established: code that, according to the existing docs, has run on hardware |
+| **B‡** | Established, but `docs/cpu-kernels.md` says "not run" (compiles, tests written, never executed on matching hardware); effectively L0 |
+| **L0** | native kernel/path present, compiled only |
+| **L0†** | works only through a conversion at upload (the host dequantises or requantises); no kernel of its own for the format |
+| **–** | not present; the operation runs on the host/CPU or reports `Unsupported` |
+| **?** | not determined; not guessed |
 
-## 2. Gewichtsformate
+## 2. Weight formats
 
-Spalten: **L** = Q4_0 Q4_1 Q5_0 Q5_1 Q8_0; **K** = Q2_K Q3_K Q4_K Q5_K Q6_K; **IQ4** = IQ4_NL; **MX** = MXFP4; **NV** = NVFP4;
-**Q4Z** = AWQ/GPTQ-4-Bit (Q4Z32/64/128, Q4ZP mit act-order); **F** = F16/BF16 (F32).
-Zahlen in eckigen Klammern verweisen auf die Anmerkungen unter der Tabelle.
+Columns: **L** = Q4_0 Q4_1 Q5_0 Q5_1 Q8_0; **K** = Q2_K Q3_K Q4_K Q5_K Q6_K; **IQ4** = IQ4_NL; **MX** = MXFP4; **NV** = NVFP4;
+**Q4Z** = AWQ/GPTQ 4-bit (Q4Z32/64/128, Q4ZP with act-order); **F** = F16/BF16 (F32).
+Numbers in square brackets refer to the notes below the table.
 
 | Hardware | L | K | IQ4 | MX | NV | Q4Z | F |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| CPU x86 AVX2 / AVX-VNNI | B [1] | Q4_K–Q6_K: B; Q2_K, Q3_K: B‡ [1] | B‡ [1] | B‡ [1] | – [2] | – [2] | B [1] |
-| CPU x86 AVX-512 (BW/VNNI/BF16) | B‡ [1] + L0 (16-Zeilen-VNNI-GEMM) [p14] | Q4_K–Q6_K: B‡; Q2_K, Q3_K, IQ4_XS: L0 [p14] | L0 [p14] | L0 [p14] | – [2] | – [2] | L0 (F32/F16/BF16, BF16 mit `vdpbf16ps`) [p14] |
-| CPU x86 AMX (INT8/BF16-Tiles) | L0 (Q8_0 Q4_0 Q5_0 Q4_1 Q5_1) [p14] | L0 (Q2_K–Q6_K, IQ4_XS) [p14] | L0 [p14] | L0 [p14] | – | – | BF16: L0 (`cols % 32 == 0`); F16 nicht über AMX [p14] |
-| CPU ARM NEON | B [3] | Q4_K–Q6_K: B; Q2_K, Q3_K: L0 [p13] | L0 (`tbl`) [p13] | L0 [p13] | – [2] | – [2] | L0 (F32/F16/BF16) [p13] |
-| CPU ARM dotprod (`sdot`) | B [3] | wie NEON | L0 [p13] | L0 [p13] | – | – | L0 [p13] |
-| CPU ARM i8mm (`smmla`, `bfdot`) | B [3] | wie NEON | L0 [p13] | L0 [p13] | – | – | L0, BF16 mit `bfdot` [p13] |
-| CPU ARM SVE (opt-in `FLLM_ARM_SVE=1`) | nur Q8_0-Decode: L0 [p13]; sonst NEON-Tier | – | – | – | – | – | – |
-| CUDA | B [4] | B (auch IQ1–IQ3, IQ4_XS) [4] | B [4] | B [4] | B (FP4-Kerne ab Blackwell) [4] | B (Marlin, ab sm_75) [4] | B [4] |
-| wgpu (Vulkan/Metal/DX12) | B [5] | Q4_K, Q5_K, Q6_K: B; Q2_K, Q3_K: F32-Expansion beim Upload [5] | F32-Expansion [5] | F32-Expansion [5] | F32-Expansion [5] | F32-Expansion [5] | B [5] |
-| Vulkan nativ | L0 [p02, p04] | L0 [p02, p04] | L0 [p02, p04] | L0 [p02, p04] | L0 [p02, p04] | L0 (Q4Z32/64/128; Q4ZP mit Vorschritt) [p02] | L0 (`lin_float`, p04) [p04] |
-| Metal nativ | L0 [p06a] | L0 [p06a] | L0 [p06a] | L0 (planares Layout) [p06a] | L0 [p06a] | L0 (Q4ZP mit Vorschritt) [p06a] | L0 (F32/F16/BF16, FP8) [p06a] |
-| ROCm/HIP RDNA3 (gfx11) | L0 [p08] [6] | L0 [p08] [6] | L0 [p08] [6] | L0 [p08] [6] | ? [7] | L0 (`hip_q4z.cu`, Int4-Skinny) [p08] | L0 (Skinny 1–4 Token + WMMA) [p08] |
-| ROCm/HIP RDNA4 (gfx12) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (Int4-Skinny + WMMA-gfx12) | L0 |
-| ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (eigener GEMV + MFMA-GEMM; Int4-Skinny nur RDNA3/4) | L0 (Skinny + MFMA) |
-| Intel SYCL (Level Zero, Arc/Xe) | L0 [p09] | L0 [p09] | L0 [p09] | L0 [p09] | L0† (→ f16) [p09] | L0† (→ f16) [p09] | L0 [p09] |
-| Intel NPU (OpenVINO) | Q4_0, Q8_0: L0 exakt (i4/i8, Gruppe 32); Q4_1, Q5_x: L0† (neu quantisiert) [p10] | L0† [p10] | L0† | L0† | L0† | L0† (Q4ZP nicht registriert) | L0 (→ FP16) [p10] |
-| AMD XDNA NPU | nur Probe (ein MatMul über ONNX Runtime/VitisAI) [p11] | – | – | – | – | – | – |
-| Qualcomm Hexagon NPU | nur Probe (FP16-MatMul über QNN HTP; Genie-Wrapper) [p11] | – | – | – | – | – | – |
-| Apple Neural Engine | nur Probe (Linear über Core ML) [p11] | – | – | – | – | – | – |
-| Google TPU (PJRT/StableHLO) | L0† (Host-Dekodierung, Upload als bf16/f32/int8) [p12] | L0† | L0† | L0† | L0† | L0† (Q4Z/Q4ZP/FP8M über `compute::dequantize`) | L0 [p12] |
+| CPU x86 AVX2 / AVX-VNNI | B [1] | Q4_K-Q6_K: B; Q2_K, Q3_K: B‡ [1] | B‡ [1] | B‡ [1] | – [2] | – [2] | B [1] |
+| CPU x86 AVX-512 (BW/VNNI/BF16) | B‡ [1] + L0 (16-row VNNI GEMM) | Q4_K-Q6_K: B‡; Q2_K, Q3_K, IQ4_XS: L0 | L0 | L0 | – [2] | – [2] | L0 (F32/F16/BF16, BF16 with `vdpbf16ps`) |
+| CPU x86 AMX (INT8/BF16 tiles) | L0 (Q8_0 Q4_0 Q5_0 Q4_1 Q5_1); run only in an emulator | L0 (Q2_K-Q6_K, IQ4_XS) | L0 | L0 | – | – | BF16: L0 (`cols % 32 == 0`); F16 does not use AMX |
+| CPU ARM NEON | B [3] | Q4_K-Q6_K: B; Q2_K, Q3_K: L0 | L0 (`tbl`) | L0 | – [2] | – [2] | L0 (F32/F16/BF16) |
+| CPU ARM dotprod (`sdot`) | B [3] | as NEON | L0 | L0 | – | – | L0 |
+| CPU ARM i8mm (`smmla`, `bfdot`) | B [3] | as NEON | L0 | L0 | – | – | L0, BF16 with `bfdot` |
+| CPU ARM SVE (opt-in `FLLM_ARM_SVE=1`) | Q8_0 decode only: L0; otherwise the NEON tier | – | – | – | – | – | – |
+| CUDA | B [4] | B (also IQ1-IQ3, IQ4_XS; see note 4) | B | B | B (FP4 kernels from Blackwell) | B (Marlin, from sm_75) | B |
+| wgpu (Vulkan/Metal/DX12) | B [5] | Q4_K, Q5_K, Q6_K: B; Q2_K, Q3_K: F32 expansion at upload [5] | F32 expansion | F32 expansion | F32 expansion | F32 expansion | B |
+| Vulkan native | L0; ran on a few devices (NVIDIA, Intel) according to the README Status table | L0 | L0 | L0 | L0 | L0 (Q4Z32/64/128; Q4ZP with a pre-step) | L0 (`lin_float`) |
+| Metal native | L1 for the kernel checks on the Apple-silicon CI runner (see [ci.md](ci.md)); no whole model run | same | same | L0 (planar layout) | same | L0 (Q4ZP with a pre-step) | L1 (F32/F16/BF16, FP8) |
+| ROCm/HIP RDNA3 (gfx11) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (`hip_q4z.cu`, Int4 skinny) | L0 (skinny 1-4 tokens + WMMA) |
+| ROCm/HIP RDNA4 (gfx12) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (Int4 skinny + WMMA gfx12) | L0 |
+| ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
+| Intel SYCL (Level Zero, Arc/Xe) | L0 | L0 | L0 | L0 | L0† (-> f16) | L0† (-> f16) | L0 |
+| Intel NPU (OpenVINO) | Q4_0, Q8_0: L0 exact (i4/i8, group 32); Q4_1, Q5_x: L0† (requantised) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
+| AMD XDNA NPU | probe only (one MatMul through ONNX Runtime/VitisAI) | – | – | – | – | – | – |
+| Qualcomm Hexagon NPU | probe only (FP16 MatMul through QNN HTP; Genie wrapper) | – | – | – | – | – | – |
+| Apple Neural Engine | probe only (linear through Core ML) | – | – | – | – | – | – |
+| Google TPU (PJRT/StableHLO) | L0† (host decoding, upload as bf16/f32/int8) | L0† | L0† | L0† | L0† | L0† (Q4Z/Q4ZP/FP8M through `compute::dequantize`) | L0 |
 
-Anmerkungen:
+Notes:
 
-1. **x86-CPU:** `docs/cpu-kernels.md` („What is tested") führt AVX2-/AVX-VNNI-Projektionen als „run on hardware by us"; die Kerne für IQ4_NL, MXFP4
-   und Q2_K/Q3_K/IQ4_XS stehen dort als „unit tests written, not run here" (daher B‡), die AVX-512-BW/VNNI-Kerne als „not run" (B‡). Die
-   neuen Kerne aus p14 sind L0; p14 hat auf einer CPU-Maschine (nur AVX2/AVX-VNNI) die Unit-Tests ausgeführt (247 bestanden mit Feature `avx512`) und
-   `selftest-cpu` über die dort vorhandenen Tiers; AVX-512 und AMX selbst sind nie gelaufen. Das AMX-Modell (`EmuTiles`) stammt vom selben Autor wie die Treiber.
-2. NVFP4 und Q4Z haben auf der CPU keinen SIMD-Kern (Zeilen-Dekodierung in `compute.rs`, `docs/cpu-kernels.md`).
-3. **ARM-CPU:** `docs/cpu-kernels.md`: „NEON `sdot` and `smmla` paths: compiled for aarch64-unknown-linux-gnu and run on hardware by us" (Q8_0, Q4_0/1, Q5_0/1,
-   Q4_K, Q5_K, Q6_K). Vor p13 hatten Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4 und die Float-Formate auf ARM keinen Kern (f32-Zeilen-Dekodierung bzw. skalar).
-4. **CUDA:** `docs/gpu-backends.md` führt die nativen Formate (`F32 F16 BF16 Q4_0 … Q6_K IQ1_S … IQ3_S IQ4_NL IQ4_XS MXFP4 NVFP4`); Q4Z über die
-   Marlin-Kerne aus vLLM ab Compute-Capability 7.5 (`rust/engine/src/backend/cuda.rs`). Die Messungen im `README.md` stammen von einer Blackwell-Karte;
-   `docs/device-selection.md` (p15) nennt Blackwell, Ada und Turing als die Hardware, auf der CUDA gelaufen ist.
-5. **wgpu:** native WGSL-Kernel für `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K`, alles andere wird beim Upload auf F32 expandiert
-   (`docs/gpu-backends.md` §1). Physisch getestet ist nur Intel Arrow Lake über Vulkan; NVIDIA, AMD, Apple/Metal und DX12 sind nicht validiert
-   (`docs/inference-features.md`).
-6. **HIP:** das Backend ist `CudaBackend` mit der HIP-Übersetzung der CUDA-Kernel (`hip_kernels()` in `build.rs`, 10 Quellen plus die neuen `hip/*.cu`).
-   p08 berichtet `hip_gemm.cu` (Decode-in-LDS-GEMM) „für alle GGUF-Kinds"; welche Formate im Einzelnen über welchen Pfad laufen, ist nicht Einzelfall für
-   Einzelfall berichtet. Geprüft wurde Syntax und Codegen bis GCN-Assembler für gfx908, gfx90a, gfx942, gfx950, gfx1030, gfx1100, gfx1151, gfx1201 — keine Ausführung.
-   Q4Z auf AMD verlangt `rows % 64 == 0` und `cols % 64 == 0` und den `cuda.rs`-Patch aus dem p08-Bericht (sonst Expansion nach F32).
-7. HIP-NVFP4: der Build läuft mit `-DFLLM_NO_FP4`; „NVFP4/FP8-Marlin bleiben Stubs" (p08). Ob NVFP4-Gewichte auf AMD über den allgemeinen Pfad laufen, steht nicht im Bericht.
+1. **x86 CPU:** `docs/cpu-kernels.md` ("What is tested") lists the AVX2 and AVX-VNNI projections as "run on hardware by us"; the kernels
+   for IQ4_NL, MXFP4 and Q2_K/Q3_K/IQ4_XS are listed there as "unit tests written, not run here" (hence B‡), the AVX-512 BW/VNNI kernels as
+   "not run" (B‡). The unit tests of the AVX-512 kernels were run on a CPU machine with only AVX2/AVX-VNNI (247 passed with the
+   `avx512` feature) together with `selftest-cpu` over the tiers present there; AVX-512 and AMX themselves have not run in that setup (the
+   README Status table reports AVX-512 runs on an AMD Zen 5 machine, and AMX only in an emulator). The AMX model (`EmuTiles`) was written
+   by the same author as the drivers.
+2. NVFP4 and Q4Z have no SIMD kernel on the CPU (row decoding in `compute.rs`, `docs/cpu-kernels.md`).
+3. **ARM CPU:** `docs/cpu-kernels.md`: "NEON `sdot` and `smmla` paths: compiled for aarch64-unknown-linux-gnu and run on hardware by us" (Q8_0,
+   Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K). CI additionally runs the CPU self tests (`selftest-cpu`, `selftest-gpu --device cpu`) on the
+   `ubuntu-24.04-arm` runner ([ci.md](ci.md)). Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4 and the float formats had no ARM kernel before the ARM kernel
+   set was added (f32 row decoding or scalar code).
+4. **CUDA:** the native formats are those listed in `NATIVE_KINDS` in `rust/engine/src/backend/cuda.rs`; see [gpu-backends.md](gpu-backends.md)
+   for the exact list. Q4Z runs through the Marlin kernels from vLLM from compute capability 7.5. The README measurements come from a
+   Blackwell card; [device-selection.md](device-selection.md) names Blackwell, Ada and Turing as hardware on which CUDA has run.
+5. **wgpu:** native WGSL kernels for `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q4_K Q5_K Q6_K`; everything else is expanded to F32 at upload
+   ([gpu-backends.md](gpu-backends.md) section 1). Physically tested is only Intel Arrow Lake through Vulkan; NVIDIA, AMD, Apple/Metal and
+   DX12 through wgpu are not validated.
+6. **HIP:** the backend is `CudaBackend` with the HIP translation of the CUDA kernels (`hip_kernels()` in `build.rs`: 10 sources plus the
+   `hip/*.cu` files). `hip_gemm.cu` (decode-in-LDS GEMM) is stated to cover all GGUF kinds; which format runs through which path is not
+   established case by case. Syntax and code generation down to GCN assembler were checked for gfx908, gfx90a, gfx942, gfx950, gfx1030,
+   gfx1100, gfx1151, gfx1201 - no execution. Q4Z on AMD requires `rows % 64 == 0` and `cols % 64 == 0` (otherwise expansion to F32).
+7. HIP NVFP4: the build runs with `-DFLLM_NO_FP4`; NVFP4/FP8 Marlin remain stubs. Whether NVFP4 weights run on AMD through the generic path
+   is not established.
 
-## 3. Operationen
+## 3. Operations
 
-Spalten: **Attention** = `attention_paged` und `kv_cache_write` (KV-Cache f16 und q8_0 hinter `DeviceKvCache`); **MoE** = Routing, expert-indiziertes Matvec,
-Combine, Gather/Scatter; **DeltaNet** = Gated DeltaNet (`delta_layer`, Qwen3.5/3.6); **Mamba** = Mamba-1/-2 (`mamba_layer`, derzeit nirgends Teil des `Stream`-Traits).
+Columns: **Attention** = `attention_paged` and `kv_cache_write` (f16 and q8_0 KV cache behind `DeviceKvCache`); **MoE** = routing,
+expert-indexed matvec, combine, gather/scatter; **DeltaNet** = Gated DeltaNet (`delta_layer`, Qwen3.5/3.6); **Mamba** = Mamba-1/-2.
 
 | Hardware | Attention | MoE | DeltaNet | Mamba |
 | --- | --- | --- | --- | --- |
-| CPU x86 AVX2 / AVX-VNNI | B (f16 und q8_0) | B (fusioniertes `linear_experts`, nur x86) [p13] | B (`cpu_delta.rs`) | B (Host-Pfad `mamba_forward`) |
-| CPU x86 AVX-512 | B‡ (Decode-Attention 512 Bit) | L0 (Prompts je Experte über die neuen 512-Bit-Kerne) [p14] | L0 (512-Bit-Zustandsupdate, bitgleich zu AVX2) [p14] | – (kein neuer Kern) |
-| CPU x86 AMX | – | – (MoE-Prompts nicht über AMX) [p14] | – | – |
-| CPU ARM NEON / dotprod / i8mm | B (`sdot` + NEON) | Einzelpfad; kein fusioniertes `linear_experts` [p13] | L0 (NEON-Schritt, bitgleich zum Skalar) [p13] | B (Host-Pfad) |
+| CPU x86 AVX2 / AVX-VNNI | B (f16 and q8_0) | B (fused `linear_experts`, x86 only) | B (`cpu_delta.rs`) | B (host path `mamba_forward`) |
+| CPU x86 AVX-512 | B‡ (512-bit decode attention) | L0 (per-expert prompts through the 512-bit kernels) | L0 (512-bit state update, bit-identical to AVX2) | – (no new kernel) |
+| CPU x86 AMX | – | – (MoE prompts do not use AMX) | – | – |
+| CPU ARM NEON / dotprod / i8mm | B (`sdot` + NEON) | single path; no fused `linear_experts` | L0 (NEON step, bit-identical to scalar) | B (host path) |
 | CPU ARM SVE | – | – | – | – |
-| CUDA | B (Kopfbreite ≤ 512, breitere → CPU) | Experten auf dem Gerät, `moe_route`/`moe_expert_gemm` auf dem Host (`supports_moe: false`) | vorhanden (`deltanet.cu`, `supports_delta`); Stufe nicht berichtet | Host |
-| wgpu | B (Kopfbreite ≤ 512) | Host-Fallback | Host (`docs/gpu-backends.md` §2) | Host |
-| Vulkan nativ | L0 (Decode mit Split-KV, Prompt mit Kacheln; Kopfbreite ≤ 512) [p03] | L0 (`moe_topk`, `moe_linear` in 12 Formaten, Combine, Gather/Scatter; `moe_route` auf der CPU; `moe_expert_gemm` = `Unsupported`) [p03, p04] | L0 (HK 32/64/96/128, HV ≤ 128) [p03, p04] | Shader und Pläne L0 [p03]; `VulkanStream::mamba2_layer` fertig, aber ohne Trait-Hook ungenutzt [p04] |
-| Metal nativ | L0 (Decode Split-KV, Prompt mit `simdgroup_matrix`; Prefill-Kopfbreite ≤ 256) [p06b] | L0 (`moe_linear` in 10 Formaten, Matvec ohne gruppierten GEMM) [p06c, p07] | L0 [p06c, p07] | Kernel und Pläne L0, keine Stream-Methode [p06c, p07] |
-| ROCm/HIP (RDNA3/RDNA4/CDNA) | L0 (CUDA-Attention-Kerne unter hipcc; DPP-Reduktion in `attention4.cu`; vLLM-Paged-Attention nicht portiert) [p08] | CUDA-Pfad unter hipcc; nicht einzeln berichtet | – (`deltanet.cu` wird für AMD nicht gebaut, `fllm_delta_supported` liefert 0, Host-Pfad) | Host |
-| Intel SYCL | L0 (skalar FP32, Split-KV; Kopfbreite ≤ 512) [p09] | L0 (`moe_linear`, Top-k, Combine, Gather/Scatter; `moe_route` auf der CPU) [p09] | – (`supports_delta` = false) [p09] | – |
-| Intel NPU (OpenVINO) | CPU-Referenz-Stream (Hybrid-Backend, nur dichte Modelle) [p10] | CPU | CPU | CPU |
-| AMD XDNA / Qualcomm Hexagon / Apple ANE | – (nur Probe) [p11] | – | – | – |
-| Google TPU | L0 (StableHLO, nur f16-KV, **kein q8_0**) [p12] | L0 (Top-k, Combine, Gather/Scatter); `moe_linear`, `upload_pointer_table`, `moe_expert_gemm` = `Unsupported` [p12] | – (Host) [p12] | – |
+| CUDA | B (head width <= 512, wider goes to the CPU) | experts on the device, `moe_route`/`moe_expert_gemm` on the host (`supports_moe: false`) | present (`deltanet.cu`, `supports_delta`); level not stated here | Mamba-1 and Mamba-2 kernels (`mamba1.cu`, `mamba2.cu`, `supports_mamba1/2`) |
+| wgpu | B (head width <= 512) | host fallback | host ([gpu-backends.md](gpu-backends.md) section 2) | host |
+| Vulkan native | L0 (decode with split-KV, prompt with tiles; head width <= 512) | L0 (`moe_topk`, `moe_linear` in 12 formats, combine, gather/scatter; `moe_route` on the CPU; `moe_expert_gemm` = `Unsupported`) | L0 (HK 32/64/96/128, HV <= 128) | shaders and plans L0; `VulkanStream::mamba2_layer` exists but is not reachable through the `Stream` trait |
+| Metal native | L1 for the CI kernel checks (decode split-KV, prompt with `simdgroup_matrix`; prefill head width <= 256) | L0 (`moe_linear` in 10 formats, matvec without grouped GEMM) | L0 | kernels and plans L0, no `Stream` method |
+| ROCm/HIP (RDNA3/RDNA4/CDNA) | L0 (CUDA attention kernels under hipcc; DPP reduction in `attention4.cu`; vLLM paged attention not ported) | CUDA path under hipcc; not reported individually | – (`deltanet.cu` is not built for AMD, `fllm_delta_supported` returns 0, host path) | host (Mamba kernels are built from the CUDA sources only where they compile under hipcc; not verified) |
+| Intel SYCL | L0 (scalar FP32, split-KV; head width <= 512) | L0 (`moe_linear`, top-k, combine, gather/scatter; `moe_route` on the CPU) | – (`supports_delta` = false) | – |
+| Intel NPU (OpenVINO) | CPU reference stream (hybrid backend, dense models only) | CPU | CPU | CPU |
+| AMD XDNA / Qualcomm Hexagon / Apple ANE | – (probe only) | – | – | – |
+| Google TPU | L0 (StableHLO, f16 KV only, **no q8_0**) | L0 (top-k, combine, gather/scatter); `moe_linear`, `upload_pointer_table`, `moe_expert_gemm` = `Unsupported` | – (host) | – |
 
-Alle Spalten gelten als L0, sofern nicht „B" dasteht. Die Metal-Kernel sind zusätzlich als C++ auf der CPU emuliert worden (160 + 139 + 2436 Fälle gegen das CPU-Backend bzw. die f64-Referenz,
-[p06a, p06b, p06c]), die Vulkan-Shader-Teile (`emu/`, `ops/mirror.rs`) ebenfalls (175 Fälle [p02], Spiegeltests [p03]). Das belegt Index-/Layout-Logik, nicht Compiler-, Treiber- oder GPU-Verhalten.
+All columns are L0 unless "B" or another level is stated. The Metal kernels have additionally been emulated in C++ on the CPU
+(160 + 139 + 2436 cases against the CPU backend or the f64 reference), and so have the Vulkan shader parts (`emu/`, `ops/mirror.rs`;
+175 cases plus mirror tests). That proves index and layout logic, not compiler, driver or GPU behaviour. The Metal kernel checks that run on the
+Apple-silicon CI runner are the exception: they execute on a GPU.
 
-## 4. Plattformen und Build (p15, t00)
+## 4. Platforms and build
 
-| Ziel | Stand |
+| Target | State |
 | --- | --- |
-| Linux x86-64 (CPU, CUDA, wgpu) | Bestand |
-| `x86_64-pc-windows-gnu` | Cross-Check (`check`/`clippy`) für alle neuen Features grün [t00, p01–p15]; MinGW + CUDA bricht in `build.rs` mit Meldung ab [p15] |
-| Windows MSVC (CPU, wgpu, nativ Vulkan, CUDA, HIP) | `build.rs`-Zweig, `scripts/build-windows.ps1`, `install.ps1`, Workflows: L0; `x86_64-pc-windows-msvc` ist auf der CPU-Maschine nicht prüfbar, nichts lief auf Windows [p15] |
-| `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` | `check`/`clippy` grün; ARM-Codegen nur für Linux geprüft (kein Apple-SDK) [t00, p13] |
-| `aarch64-pc-windows-msvc` | nicht übersetzt [p13, p15] |
-| Workflows (`.github/`) | geparst, nie gelaufen [p15] |
-| `--device auto`, Gerätenummern (`vulkan:N` = N-tes Gerät des Backends), `devices --json` | Auswahllogik durch Unit-Tests und Läufe ohne GPU abgedeckt; auf Hardware L0 [p15] |
-| Selbsttest-Harness (Gruppen, `--only`, `--quants`, `--list`, `--strict`, `--json`) | L1 nur für die CPU gegen sich selbst (`selftest-gpu --device cpu`: 220 Prüfungen, 0 fehlgeschlagen, 35 übersprungen); das prüft den Test, kein GPU-Backend [p15] |
-| Autotuner (`src/autotune.rs`) | L0, wird von nichts aufgerufen, nichts gemessen [p15] |
+| Linux x86-64 (CPU, CUDA, wgpu) | established; CI builds, tests and runs the CPU self tests ([ci.md](ci.md)) |
+| `x86_64-pc-windows-gnu` | cross-check (`check`/`clippy`) green for all features; MinGW + CUDA aborts in `build.rs` with a message |
+| Windows MSVC (CPU, wgpu, native Vulkan, CUDA, HIP) | CI builds, runs unit tests and the CPU self tests on `windows-2022`; the CUDA build is compile-only; no GPU run on Windows |
+| `aarch64-unknown-linux-gnu` | CI builds, runs unit tests and the CPU self tests on `ubuntu-24.04-arm` |
+| `aarch64-apple-darwin` | CI builds and runs unit tests, the CPU self tests and the Metal kernel checks on `macos-14` (Apple silicon) |
+| `aarch64-pc-windows-msvc` | not built |
+| `--device auto`, device numbers (`vulkan:N` = N-th device of the backend), `devices --json` | selection logic covered by unit tests and by runs without a GPU; L0 on hardware |
+| Self-test harness (groups, `--only`, `--quants`, `--list`, `--strict`, `--json`) | the CPU against itself (`selftest-gpu --device cpu`: 220 checks, 0 failed, 35 skipped); this checks the harness, not a GPU backend. CUDA: see the README Status table |
+| Autotuner (`src/autotune.rs`) | L0: called by nothing, nothing measured |
 
-## 5. Bekannte Lücken
+## 5. Known gaps
 
-Nach Gebiet geordnet. „Integrator" meint die Besitzer der gemeinsamen Dateien (`Cargo.toml`, `build.rs`, `lib.rs`, `backend/mod.rs`, `devices.rs`, `bin/serve.rs`,
-`selftest.rs`, `rust_decoder.rs`).
+Ordered by area.
 
-### 5.1 Indexsemantik der Geräte
+### 5.1 Device index semantics
 
-* **Regel (p15):** `--device <backend>:<N>` zählt die Geräte *dieses Backends* ab 0, nicht die Nummer `[n]` aus `fllm-rs devices`. `VkContext::new(i)` [p01],
-  `SYCL create(i)` [p09] und `metal::device_info::open(i)` [p05, p07] erwarten genau diese Zählung.
-* **Vor p15** liefert `select_device("auto")` für Vulkan und Metal den *globalen* Inventarindex, `create(N)` erwartet die Nummer unter den nativen Geräten [p01, p04, p09]. Auf einem Rechner mit
-  CPU-/CUDA-/wgpu-Einträgen wählt `auto` dann das falsche Gerät oder fällt auf wgpu zurück. p15 behebt das in `devices.rs`/`select_device` (auf dem p15-Branch, ohne Konflikt mit den anderen Paketen
-  gemerged); **ungeprüft** ist es mit mehr als einem Adapter derselben API (Nummern > 0 nie ausgeführt [p15]).
-* **Metal-Heuristik (p05):** `metal::device_info::open(n)` liest `n` als *globale* Nummer, wenn sie in `[first_index, first_index + Anzahl)` liegt, sonst als Position. Mit p15 wird immer die lokale Nummer übergeben;
-  bei zwei Metal-GPUs (Intel-Mac mit eGPU) würde `metal:1` falsch gelesen. p15 empfiehlt, die Heuristik zu streichen. Die Empfehlung aus p05/p07, in `auto` das native Metal vor den wgpu-Adapter zu ziehen, ist mit p15 überflüssig.
-* `auto` wählt SYCL, NPU und TPU nie (nur ausdrücklich) [p09, p15].
+* **Rule:** `--device <backend>:<N>` counts the devices *of this backend* from 0, not the number `[n]` from `fllm-rs devices`. `VkContext::new(i)`,
+  SYCL `create(i)` and `metal::device_info::open(i)` expect exactly this count.
+* Selection with more than one adapter of the same API (numbers > 0) has never been executed.
+* **Metal heuristic:** `metal::device_info::open(n)` reads `n` as a *global* number if it lies in `[first_index, first_index + count)`, otherwise as a
+  position. The selection code always passes the local number; with two Metal GPUs (Intel Mac with an eGPU) `metal:1` could be read wrongly. The
+  heuristic should be removed.
+* `auto` never chooses SYCL, NPU or TPU (explicit selection only).
 
-### 5.2 Doppelte native/wgpu-Einträge in `devices`
+### 5.2 Duplicate native/wgpu entries in `devices`
 
-* Mit `--features rust-gpu,vulkan` (oder `metal`) steht dieselbe GPU zweimal im Inventar: als wgpu-Adapter und als nativer Eintrag. Native Einträge beginnen mit `native, Vulkan x.y.z, …` [p01] bzw. `Metal (native), …` [p05].
-* p15 etikettiert jedes Gerät mit Backend und API (`native`/`wgpu`) und listet die wgpu-Adapter als `wgpu-vulkan:N`, `wgpu-metal:N`, `wgpu-dx12:N`; erzwingen lässt sich ein Weg mit `vulkan-native`/`metal-native` bzw.
-  `wgpu-<api>`. Diese Ausgabe wurde nur auf einer Maschine (ein Adapter) gesehen [p15].
-* Unter `--features hip` zeigt die CUDA-Liste die AMD-Karten bereits (Beschreibung „CUDA/ROCm"); es gibt keinen zweiten Eintrag [p08].
-* `fllm-rs devices` und `serve` öffnen unter `tpu-pjrt` schon beim Auflisten den PJRT-Client; die TPU gehört dem Prozess bis zum Ende, ein zweiter Prozess scheitert [p12].
+* With `--features rust-gpu,vulkan` (or `metal`) the same GPU appears twice in the inventory: as a wgpu adapter and as a native entry. Native
+  entries start with `native, Vulkan x.y.z, ...` or `Metal (native), ...`.
+* Every device is labelled with backend and API (`native`/`wgpu`) and the wgpu adapters are listed as `wgpu-vulkan:N`, `wgpu-metal:N`,
+  `wgpu-dx12:N`; one path can be forced with `vulkan-native`/`metal-native` or `wgpu-<api>`. This output has been seen on one machine (one adapter) only.
+* With `--features hip` the CUDA list already shows the AMD cards (description "CUDA/ROCm"); there is no second entry.
+* `fllm-rs devices` and `serve` under `tpu-pjrt` open the PJRT client already when listing; the TPU belongs to the process until it ends, and a
+  second process fails.
 
-### 5.3 Mamba: es fehlt die `Stream`-Methode
+### 5.3 Mamba without a `Stream` hook outside CUDA
 
-* Mamba-1/-2 laufen auf **keinem** Gerätebackend im Decoder, weil `trait Stream` keinen Hook hat; der Decoder rechnet Mamba-Schichten auf dem Host.
-* Vorhanden, aber ungenutzt: Shader und Pläne für Vulkan (`plan_mamba2_mixer`, `plan_mamba_conv`, `plan_mamba1_scan`, `plan_mamba1_bc_norms`) [p03], `VulkanStream::mamba2_layer` [p04],
-  MSL-Kernel und Pläne für Metal (`mamba_conv`, `mamba_scan1/2`, `mamba_gate_norm`, `mamba_bc_norm`) [p06c].
-* Der Vorschlag steht im p03-Bericht (Typen `MambaShape`, `MambaWeights`, Methoden `supports_mamba`, `mamba_layer` in `backend/mod.rs`). Dazu müsste `rust_decoder.rs` Gerätezustände für Mamba-Schichten anlegen
-  und `mamba_forward` auf den Hook umleiten. Der `impl`-Block für Vulkan ist wegen der fehlenden Trait-Typen nicht kompiliert [p04]. Mamba-1 braucht zwischen den Teilen zwei Linears (`x_proj`, `dt_proj`) [p03].
+* Mamba-1/-2 run on devices through the `Stream` trait only on CUDA (`supports_mamba1`, `supports_mamba2`, `mamba2_layer`). On every other
+  backend the decoder runs Mamba layers on the host.
+* Present but unused: shaders and plans for Vulkan (`plan_mamba2_mixer`, `plan_mamba_conv`, `plan_mamba1_scan`, `plan_mamba1_bc_norms`),
+  `VulkanStream::mamba2_layer` (an inherent method, not part of the trait implementation), and MSL kernels and plans for Metal (`mamba_conv`,
+  `mamba_scan1/2`, `mamba_gate_norm`, `mamba_bc_norm`). Wiring them in means implementing the trait methods `supports_mamba1/2`, `mamba2_layer`
+  and the Mamba-1 steps for these backends. Mamba-1 needs two linears between its parts (`x_proj`, `dt_proj`).
 
-### 5.4 Konflikte p13 (ARM) ↔ p14 (x86)
+### 5.4 ARM and x86 CPU tier ladders
 
-* Beide ändern `rust/engine/src/cpu_kernels.rs` und `rust/engine/src/cpu_selftest.rs`; p15 fand beim Probe-Merge genau diesen einen Konflikt (alle anderen Zweige mergen einzeln und zusammen) [p15].
-* `cpu_kernels.rs`: Enum `CpuTier`, `ALL`, `level()`, `native()`, `name()`, `supported()`. p13 fügt `NeonSve` hinzu (`ALL: [CpuTier; 9]`, Stufe 4), p14 fügt `Avx512Bf16` (Stufe 5) und `Amx` (Stufe 6) hinzu (`ALL` 8 → 10).
-  Nach beiden Änderungen hätte `ALL` 11 Einträge (aus den Berichten gerechnet, nicht gebaut). Die Leitern sind je Architektur getrennt; Stufe 4 darf doppelt vorkommen [p13, p14].
-* `cpu_selftest.rs`: `check_tier` (p13: Schleifen für K-Gruppe und Float-Formen, DeltaNet-Block; p14: Float-Fälle 96 Spalten/20 Token, neue Tiers), `run`, Feature-Liste, Hilfetext.
-* `devices.rs` (`cpu_features`/`cpu_capabilities`): p13 ergänzt die ARM-Probe um `bf16`, `fhm`; p14 gibt Klasse/Policy aus. Beides sind kleine, getrennte Hunks.
-* Außerdem: `scripts/check-arm-cpu.sh` (p13) und `scripts/check_x86_ext.sh` (p14) setzen voraus, dass der jeweilige Zweig gemerged ist.
+* `cpu_kernels.rs`: enum `CpuTier`, `ALL`, `level()`, `native()`, `name()`, `supported()`. The ARM side adds `NeonSve` (level 4), the x86 side adds
+  `Avx512Bf16` (level 5) and `Amx` (level 6). The ladders are separate per architecture; level 4 may occur twice.
+* `devices.rs` (`cpu_features`/`cpu_capabilities`): the ARM probe reports `bf16`, `fhm`; the x86 side prints class and policy.
+* `scripts/check-arm-cpu.sh` and `scripts/check_x86_ext.sh` run the architecture-specific checks on matching hardware.
 
-### 5.5 Nicht portierte HIP-Kernel und HIP-Lücken [p08]
+### 5.5 HIP kernels not ported, and HIP gaps
 
-* **Nicht portiert:** vLLM `attention.cu` (Paged Attention; erwartet vLLMs Cache-Layout, der `DeviceKvCache` hat ein anderes), `q_gemm_rdna3.cu`, `q_gemm_rdna3_wmma.cu`, `moe_q_gemm_rdna3.cu` (GPTQ-Layout vs. Marlin-permutiertes Q4Z-Layout;
-  fLLM hat keinen Q4Z-MoE-Pfad), LLMM1, `wvSplitK_hf_big_`, `wvSplitKrc`, `wvSplitKQ` (FP8), die MFMA-bf16-Variante für gfx94x. Als Ersatz dienen `hip_q4z.cu` (MMA-GEMM + Int4-Skinny) und DPP in `attention4.cu`.
-* DeltaNet wird für AMD nicht gebaut (`hip_stubs.cu`: `fllm_delta_supported` liefert 0); `fllm_cuda_graph_*` sind Platzhalter, NVFP4/FP8-Marlin und `fllm_q4z_gptq_repack` sind Stubs.
-* **Ohne die Patches der GEMEINSAMEN Dateien fehlen Symbole:** `build.rs` muss die Quellen aus `rust/engine/hip/` bauen (angepasst an p15: `~/fllm-tools/patches/p15-p08-build-rs-adapted.patch`), `cuda.rs` den Q4Z-Pfad für ROCm zulassen
-  (`~/fllm-tools/patches/p08-rocm-hip-common.patch`, nur der `cuda.rs`-Teil; der `selftest.rs`-Teil ist in p15 schon enthalten) [p08, p15].
-* Alle Lane-Layouts (MFMA/WMMA) und DPP-Kontrollcodes stammen aus Dokumentation und rocWMMA-Headern; die Python-Emulation prüft nur die Kernel-Indizes gegen diese Layouts [p08].
+* **Not ported:** vLLM `attention.cu` (paged attention; expects vLLM's cache layout, `DeviceKvCache` has another), `q_gemm_rdna3.cu`,
+  `q_gemm_rdna3_wmma.cu`, `moe_q_gemm_rdna3.cu` (GPTQ layout vs. the Marlin-permuted Q4Z layout; fLLM has no Q4Z MoE path), LLMM1,
+  `wvSplitK_hf_big_`, `wvSplitKrc`, `wvSplitKQ` (FP8), the MFMA bf16 variant for gfx94x. `hip_q4z.cu` (MMA GEMM + Int4 skinny) and DPP in
+  `attention4.cu` take their place.
+* DeltaNet is not built for AMD (`hip_stubs.cu`: `fllm_delta_supported` returns 0); `fllm_cuda_graph_*` are placeholders, NVFP4/FP8 Marlin and
+  `fllm_q4z_gptq_repack` are stubs.
+* All lane layouts (MFMA/WMMA) and DPP control codes come from documentation and rocWMMA headers; the Python emulation checks only the kernel
+  indices against these layouts (`scripts/hip_mma_layout_check.py`, `scripts/hip_q4z_layout_check.py`).
 
-### 5.6 Fehlende Metal-Teile [p05, p06a–c, p07]
+### 5.6 Missing Metal parts
 
-* Mamba: keine `Stream`-Methode (siehe 5.3).
-* Nicht vorhanden: `linear_f16_out`, `glu_f16`, `rope_kv_write_f16`, Graph-Capture, `host_linear`; GPU-Sampling (`supports_device_sampling` = false, Temperatur über das CPU-Backend); `quantized_linear_add` nur mit `scale == 1.0`.
-* Embedding läuft für IQ4_XS, NVFP4, Q4Z, FP8 und skalierte Tabellen auf dem Host (langsam bei langen Prompts).
-* Formate ohne Kernel (IQ1/IQ2/IQ3, Q8_1, Q8_K) werden beim Upload auf dem Host nach F16 gewandelt; `moe_linear` kennt nur 10 Formate (kein Q2_K, Q3_K, NVFP4, Q4Z, F16/BF16).
-* Gewichte über `maxBufferLength` werden nicht in Zeilenscheiben zerlegt. Der Decoder ruft `register_host_mapping` nicht auf (kein No-Copy-GGUF; jedes Gewicht wird einmal kopiert).
-* `x` und `out` dürfen sich bei `quantized_linear` nicht überlappen. Die Hazard-Deklarationen der Pläne sind gegen keine GPU geprüft (`FLLM_METAL_SERIAL=1` als erster Test).
-* Der Metal-Compiler hat die Kernel nie gesehen: `mslcheck.sh` ist ein C++-Frontend mit selbst geschriebenem Shim und kennt keine Adressraum-, Attribut- oder Threadgroup-Speicher-Regeln; im Verzeichnismodus gibt es Fehlalarme [t00, p07].
-* Alle Bandbreitenzahlen der Chips M1–M5 sind Schätzwerte, besonders M3 Max, M4 Max und M5 [p07].
+* Mamba: no `Stream` method (see 5.3).
+* Not present: `linear_f16_out`, `glu_f16`, `rope_kv_write_f16`, graph capture, `host_linear`; GPU sampling (`supports_device_sampling` =
+  false, temperature through the CPU backend); `quantized_linear_add` only with `scale == 1.0`.
+* Embedding for IQ4_XS, NVFP4, Q4Z, FP8 and scaled tables runs on the host (slow for long prompts).
+* Formats without a kernel (IQ1/IQ2/IQ3, Q8_1, Q8_K) are converted to F16 on the host at upload; `moe_linear` knows only 10 formats (no Q2_K, Q3_K,
+  NVFP4, Q4Z, F16/BF16).
+* Weights larger than `maxBufferLength` are not split into row slices. The decoder does not call `register_host_mapping` (no no-copy GGUF; each
+  weight is copied once).
+* `x` and `out` must not overlap in `quantized_linear`. The hazard declarations of the plans are checked against no GPU beyond the CI kernel
+  checks (`FLLM_METAL_SERIAL=1` is the first thing to try when results are wrong).
+* The Metal compiler check script is a C++ front end with a hand-written shim and does not know address-space, attribute or threadgroup-memory
+  rules; in directory mode it gives false alarms. The CI runner compiles the real shaders.
+* All bandwidth figures for the M1-M5 chips are estimates, especially M3 Max, M4 Max and M5.
 
-### 5.7 Fehlende Vulkan-Teile [p01–p04]
+### 5.7 Missing Vulkan parts
 
-* Mamba: siehe 5.3. `moe_expert_gemm` = `Unsupported`; `moe_linear` ist ein Matvec (kein gruppierter GEMM); `lin_float` ist nicht gekachelt.
-* Embedding für NVFP4, Q4Z, IQ1–IQ3, IQ4_XS, Q8_K, FP8 hat keinen Shader (Host-Dekodierung); `sampling_logits` mit Temperatur, `moe_route` und Attention mit Kopfbreite > 512 laufen auf der CPU [p03, p04].
-* MoE-Experten liegen doppelt im Speicher (Arena plus Einzelgewichte); Arena und `host_linear`-Scratch stehen nicht im `MemoryPlan`, bei fast vollem Speicher ist OOM möglich [p04].
-* Gesplittete KV-Pools (über `maxBufferSize`) funktionieren nur für Attention und KV-Schreiben, nicht für `upload`, `download`, `copy_buffer`, `zero_buffer` oder CPU-Attention [p04].
-* Cooperative Matrix wird nur bei 16×16×16 f16/f32 geplant und nur mit pinnbarer Subgruppengröße [p02, p04]; `VK_NV_cooperative_matrix` und bf16-/FP8-Shader-Erweiterungen werden nicht genutzt [p01].
-* Eine Queue, kein asynchroner Transfer, keine Buffer-Device-Address (die `_bda`-Varianten sind fertig, aber ungenutzt), kein Descriptor-Indexing [p01, p03].
-* Der Selftest-Patch `p04-selftest-vulkan.patch` (exakter Durchlauf, dann schneller) liegt nur als Patch vor; ohne ihn besteht `selftest-gpu` nur mit `FLLM_VULKAN_EXACT=1` (die schnellen Varianten `_i`/`_c` runden Aktivierungen auf int8 bzw. rechnen Kacheln in f16) [p02, p04].
-* Standardmäßig laufen die schnellen Varianten, Greedy-Text kann von der CPU abweichen; für Vergleiche `FLLM_VULKAN_EXACT=1` [p04].
+* Mamba: see 5.3. `moe_expert_gemm` = `Unsupported`; `moe_linear` is a matvec (no grouped GEMM); `lin_float` is not tiled.
+* Embedding for NVFP4, Q4Z, IQ1-IQ3, IQ4_XS, Q8_K, FP8 has no shader (host decoding); `sampling_logits` with temperature, `moe_route` and
+  attention with head width > 512 run on the CPU.
+* MoE experts are held twice in memory (arena plus individual weights); the arena and the `host_linear` scratch are not part of the
+  `MemoryPlan`, so OOM is possible when memory is almost full.
+* Split KV pools (beyond `maxBufferSize`) work only for attention and KV writes, not for `upload`, `download`, `copy_buffer`, `zero_buffer` or
+  CPU attention.
+* Cooperative matrix is planned only for 16x16x16 f16/f32 and only with a pinnable subgroup size; `VK_NV_cooperative_matrix` and bf16/FP8
+  shader extensions are not used.
+* One queue, no asynchronous transfer, no buffer device address (the `_bda` variants are ready but unused), no descriptor indexing.
+* By default the fast variants run (`_i`/`_c` round activations to int8 or compute tiles in f16), so greedy text can differ from the CPU. Use
+  `FLLM_VULKAN_EXACT=1` for comparisons; the Vulkan self test passes only with it.
 
-### 5.8 Weitere Lücken
+### 5.8 Other gaps
 
-* **SYCL:** kein DeltaNet, kein `host_linear`, keine Graphen, keine fused Operationen; Attention skalar FP32; nativ nur nach `git apply rust/engine/sycl/build_rs.patch` auf `build.rs` (ohne den Patch ein Stub, der „kein SYCL-Gerät" meldet);
-  `sycl:N` zählt die SYCL-Geräte. Verifiziert nur mit dem Open-Source-DPC++-Nightly, nicht mit dem Release-`icpx`; `joint_matrix`-Namen können abweichen [p09].
-  p09 empfiehlt Vulkan als Intel-Standard und SYCL als Option (Begründung und Messplan in `rust/engine/sycl/EVALUATION.md`; von p16 nicht nachgeprüft).
-* **NPU (OpenVINO):** kein Decode-Gewinn erwartet (bandbreitengebunden); der Hybrid-Stream rechnet alles außer `quantized_linear` einkernig auf der Referenz-CPU, Gewichte liegen doppelt; der Host-Haken (`p10-npu-openvino-host-hook.patch`
-  für `compute.rs`, aktiv mit `FLLM_NPU_HOST=1`) ist der brauchbarere Weg, aber nur als Patch übersetzt; Raten des Kostenmodells sind Platzhalter [p10].
-* **XDNA/Hexagon/ANE:** nur Proben, kein Rechenpfad; `create()` scheitert immer mit einer Zustandsmeldung [p11]. Die Qualcomm-QAIRT-Header sind „Confidential and Proprietary" und nicht im Repository.
-* **TPU:** kein q8_0-KV, kein DeltaNet, jede neue Form kompiliert ~12 Programme, kein Persistent-Cache; `model.rs` (ganzer Decoderblock als ein Programm) wird vom Decoder nicht aufgerufen (kein Hook); die Selbsttestschranken setzen f32-Genauigkeit voraus,
-  erwartet sind einzelne FAIL-Zeilen bei `swiglu`, `geglu`, `attention`, `rms_norm` [p12].
-* **Selbsttest (p15):** `SKIPPED (unsupported)` ändert die Zählung bei Backends, die Operationen nicht anbieten; der Standard von `selftest-gpu --device` ist jetzt `auto`. Das CPU-Backend selbst meldet im Selbsttest 7 fehlgeschlagene q8-Attention-Prüfungen (schon vor dieser Runde) [p10, p15].
-* **Autotuner (p15):** `src/autotune.rs` wird von nichts aufgerufen.
-* **Zahlen:** alle Geschwindigkeitsangaben in den Berichten sind Erwartungen, keine Messungen; die L3-Spalte ist für alle neuen Backends leer.
-
-## 6. Berichtsstand (Branch-Köpfe)
-
-| Paket | Branch | Kopf | Inhalt |
-| --- | --- | --- | --- |
-| t00 | `t00-toolchain` | `247fb37` (kein Commit; Werkzeuge liegen in `~/fllm-tools`) | `xcheck.sh`, `hipcheck.sh`, `syclcheck.sh`, `mslcheck.sh` |
-| p01 | `p01-vulkan-core` | `bc07dd0` | Vulkan-Kern (ash) |
-| p02 | `p02-vulkan-shader-a` | `df9971f` | quantisierte Matvec/Matmul-Shader |
-| p03 | `p03-vulkan-shader-b` | `75c43f8` | Nicht-Matmul-Shader und Pläne |
-| p04 | `p04-vulkan-integration` | `b5e3386` | `VulkanBackend`/`VulkanStream` (enthält p01–p03) |
-| p05 | `p05-metal-core` | `cbe9b93` | Metal-Kern (objc2-metal) |
-| p06a | `p06a-metal-quant` | `886e567` | MSL-Quantkernel, Layouts, Planer |
-| p06b | `p06b-metal-ops` | `998de62` | MSL Attention/Norm/RoPE/Aktivierung/Embedding/KV |
-| p06c | `p06c-metal-recurrent` | `8a85a94` | MSL MoE/Gating/DeltaNet/Mamba |
-| p07 | `p07-metal-integration` | `0f1468e` | `MetalBackend`/`MetalStream` (enthält p05–p06c) |
-| p08 | `p08-rocm-hip` | `17b5c96` | HIP: MFMA/WMMA-GEMM, Skinny, Q4Z, `HipBackend` |
-| p09 | `p09-sycl-intel` | `d9f3552` | SYCL-Backend |
-| p10 | `p10-npu-openvino` | `e496f89` | Intel-NPU über OpenVINO |
-| p11 | `p11-npu-other` | `a957552` | XDNA/Hexagon/ANE (Studien und Proben) |
-| p12 | `p12-tpu-pjrt` | `7dd23d1` | TPU über PJRT/StableHLO |
-| p13 | `p13-arm-cpu` | `3594818` | ARM-CPU-Kerne |
-| p14 | `p14-x86-ext` | `d58ebb0` | AVX-512, AMX, CPU-Familien-Policy |
-| p15 | `p15-windows-conformance` | `a893644` | Windows, Konformanz, `auto`, Selbsttest |
-
-Alle Berichte lagen beim Schreiben vor; kein Bericht fehlt. Der Branch `p06-metal-shaders` (das ursprüngliche, zu große Paket) ist durch p06a/b/c ersetzt und wird hier nicht ausgewertet.
+* **SYCL:** no DeltaNet, no `host_linear`, no graphs, no fused operations; attention is scalar FP32; native only after
+  `git apply rust/engine/sycl/build_rs.patch` on `build.rs` (without the patch a stub that reports "no SYCL device");
+  `sycl:N` counts the SYCL devices. Verified only with the open-source DPC++ nightly, not with the release `icpx`; `joint_matrix` names may
+  differ. Vulkan is the recommended Intel default and SYCL an option (reasoning and a measurement plan in
+  [research/README.md](research/README.md)).
+* **NPU (OpenVINO):** no decode gain expected (bandwidth bound); the hybrid stream computes everything except `quantized_linear` single-threaded
+  on the reference CPU, and weights are held twice; the host hook (a patch to `compute.rs`, active with `FLLM_NPU_HOST=1`) is the more usable
+  route but has only been compiled as a patch; the rates of the cost model are placeholders.
+* **XDNA/Hexagon/ANE:** probes only, no compute path; `create()` always fails with a state message. The Qualcomm QAIRT headers are "Confidential
+  and Proprietary" and are not in the repository. Notes: [research/](research/README.md).
+* **TPU:** no q8_0 KV, no DeltaNet, each new shape compiles about 12 programs, no persistent cache; `model.rs` (a whole decoder block as one
+  program) is not called by the decoder (no hook); the self-test tolerances assume f32 accuracy, and single FAIL lines are expected for
+  `swiglu`, `geglu`, `attention`, `rms_norm`.
+* **Self test:** `SKIPPED (unsupported)` changes the count for backends that do not offer operations; the default of `selftest-gpu --device` is `auto`.
+  The CPU backend itself reports 7 failed q8 attention checks in the self test.
+* **Autotuner:** `src/autotune.rs` is called by nothing.
+* **Numbers:** all speed figures for backends other than CPU and CUDA are expectations, not measurements; the L3 column is empty for them.

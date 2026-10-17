@@ -1,6 +1,6 @@
 //! NPU backends (Intel OpenVINO, AMD XDNA, Qualcomm QNN, Apple Neural Engine): xdna. Owner: package 11.
 //!
-//! AMD XDNA (Ryzen AI) through ONNX Runtime with the VitisAI execution provider. Study: `STUDY_XDNA.md` next to this file.
+//! AMD XDNA (Ryzen AI) through ONNX Runtime with the VitisAI execution provider. Study: `docs/research/npu-study-xdna.md`.
 //! What exists: the run-time binding of the ONNX Runtime C API (`ort.rs`, feature `npu-xdna`), detection of the device
 //! (`pci.rs`, library + provider check), a minimal ONNX emitter for a single `MatMul` (`onnx.rs`) and the probe that runs it
 //! (`probe_matmul`). What does not exist: any LLM compute path; `create` reports that and the study explains why.
@@ -69,7 +69,7 @@ mod enabled {
         let rt = usable_runtime()?;
         StubBackend::new("npu-xdna", index).map(|b| Arc::new(b) as Arc<dyn Backend>).map_err(|e| {
             format!(
-                "{e}; ONNX Runtime {} with the VitisAI EP is present, but fLLM has no XDNA compute path (see src/backend/npu/STUDY_XDNA.md)",
+                "{e}; ONNX Runtime {} with the VitisAI EP is present, but fLLM has no XDNA compute path (see docs/research/npu-study-xdna.md)",
                 rt.version
             )
         })

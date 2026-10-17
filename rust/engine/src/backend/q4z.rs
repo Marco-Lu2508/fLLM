@@ -24,40 +24,98 @@ fn scale_perm() -> [usize; 64] {
 
 /// `raw`: `rows` output rows of `cols / group` blocks of `group / 2` code bytes (input `2j` in the low nibble), an fp16 scale and a
 /// zero-point byte. Returns `(awq_words [cols, rows / 8], scales [cols / group, rows] as fp16 bits, zeros [cols / group, rows / 8])`.
+/// Nibble of a packed Q4Z code word that holds offset `t` (`0..8`) of its 8-input group.
+#[inline]
+pub const fn q4z_nib_of(t: usize) -> usize {
+    ((t & 1) << 2) | ((t & 7) >> 1)
+}
+
+/// Host implementation of `fllm_q4z_gptq_repack` for non-CUDA builds: repacks GPTQ-ordered int4 words `[k / 8, n]`
+/// (8 consecutive `k` in nibbles `0..8`) into row-major `[n, k / 8]` words with nibble `q4z_nib_of(t)`.
+pub fn fllm_q4z_gptq_repack(words: &[u32], k: usize, n: usize) -> Vec<u32> {
+    let k_words = k.div_ceil(8);
+    let mut out = vec![0u32; n * k_words];
+    for w in 0..k_words {
+        for row in 0..n {
+            let src = words.get(w * n + row).copied().unwrap_or(0);
+            let mut word = 0u32;
+            for t in 0..8 {
+                let code = (src >> (4 * t)) & 15;
+                word |= code << (4 * q4z_nib_of(t));
+            }
+            out[row * k_words + w] = word;
+        }
+    }
+    out
+}
+
+/// Host implementation of `fllm_q4z_repack` for non-CUDA builds: repacks AutoAWQ-ordered int4 words `[k, ceil(n / 8)]`
+/// into row-major `[n, ceil(k / 8)]` words with nibble `q4z_nib_of(t)`.
+pub fn fllm_q4z_awq_repack(awq: &[u32], k: usize, n: usize) -> Vec<u32> {
+    let k_words = k.div_ceil(8);
+    let n_words = n.div_ceil(8);
+    let mut out = vec![0u32; n * k_words];
+    for row in 0..n {
+        let shift = 4 * AWQ_SLOT[row & 7];
+        for w in 0..k_words {
+            let mut word = 0u32;
+            for t in 0..8 {
+                let kk = 8 * w + t;
+                let code = if kk < k {
+                    (awq[kk * n_words + row / 8] >> shift) & 15
+                } else {
+                    0
+                };
+                word |= code << (4 * q4z_nib_of(t));
+            }
+            out[row * k_words + w] = word;
+        }
+    }
+    out
+}
+
 pub fn marlin_arrays(raw: &[u8], rows: usize, cols: usize, group: usize) -> (Vec<u32>, Vec<u16>, Vec<u32>) {
-    let groups = cols / group;
+    let groups = cols.div_ceil(group);
     let block = group / 2 + 3;
     let row_bytes = groups * block;
-    let words_per_k = rows / 8;
+    let words_per_k = rows.div_ceil(8);
+    let rows_pad = rows.div_ceil(64) * 64;
     let mut awq = vec![0u32; cols * words_per_k];
-    awq.par_chunks_mut(64 * words_per_k).enumerate().for_each(|(chunk_index, chunk)| {
-        let k0 = chunk_index * 64;
-        for n in 0..rows {
-            let row = &raw[n * row_bytes..(n + 1) * row_bytes];
-            let (word, shift) = (n / 8, 4 * AWQ_SLOT[n % 8]);
-            for kk in (0..64).step_by(2) {
-                let k = k0 + kk;
-                let byte = row[(k / group) * block + (k % group) / 2];
-                chunk[kk * words_per_k + word] |= ((byte & 15) as u32) << shift;
-                chunk[(kk + 1) * words_per_k + word] |= ((byte >> 4) as u32) << shift;
+    if words_per_k > 0 && cols > 0 {
+        awq.par_chunks_mut(64 * words_per_k).enumerate().for_each(|(chunk_index, chunk)| {
+            let k0 = chunk_index * 64;
+            let chunk_k = chunk.len() / words_per_k;
+            for n in 0..rows {
+                let row = &raw[n * row_bytes..(n + 1) * row_bytes];
+                let (word, shift) = (n / 8, 4 * AWQ_SLOT[n % 8]);
+                for kk in (0..chunk_k).step_by(2) {
+                    let k = k0 + kk;
+                    let byte = row[(k / group) * block + (k % group) / 2];
+                    chunk[kk * words_per_k + word] |= ((byte & 15) as u32) << shift;
+                    if kk + 1 < chunk_k {
+                        chunk[(kk + 1) * words_per_k + word] |= ((byte >> 4) as u32) << shift;
+                    }
+                }
             }
-        }
-    });
+        });
+    }
     let perm = scale_perm();
     let at = |g: usize, n: usize| n * row_bytes + g * block + group / 2;
-    let mut scales = vec![0u16; groups * rows];
-    let mut plain_zeros = vec![0u8; groups * rows];
+    let mut scales = vec![0u16; groups * rows_pad];
+    let mut plain_zeros = vec![8u8; groups * rows_pad];
     for g in 0..groups {
-        for blk in 0..rows / 64 {
+        for blk in 0..rows_pad / 64 {
             for j in 0..64 {
                 let n = blk * 64 + perm[j];
-                let i = at(g, n);
-                scales[g * rows + blk * 64 + j] = u16::from_le_bytes([raw[i], raw[i + 1]]);
-                plain_zeros[g * rows + blk * 64 + j] = raw[i + 2] & 15;
+                if n < rows {
+                    let i = at(g, n);
+                    scales[g * rows_pad + blk * 64 + j] = u16::from_le_bytes([raw[i], raw[i + 1]]);
+                    plain_zeros[g * rows_pad + blk * 64 + j] = raw[i + 2] & 15;
+                }
             }
         }
     }
-    let mut zeros = vec![0u32; groups * rows / 8];
+    let mut zeros = vec![0u32; groups * rows_pad / 8];
     for (w, word) in zeros.iter_mut().enumerate() {
         for (i, &src) in INTERLEAVE.iter().enumerate() {
             *word |= (plain_zeros[w * 8 + src] as u32) << (4 * i);
@@ -84,29 +142,36 @@ fn e4m3(x: u8) -> f32 {
 /// repack kernel of vLLM and the scales Marlin reads: `(words [cols / 8, rows], scales [cols / 16, rows])`. The scales are permuted
 /// like `marlin_permute_scales` and then turned into the S0E5M3 form of `nvfp4_marlin_process_scales` (half scales, FP16 activations).
 pub fn nvfp4_marlin_arrays(raw: &[u8], rows: usize, cols: usize) -> (Vec<u32>, Vec<u8>) {
-    let blocks = cols / 64;
+    let blocks = cols.div_ceil(64);
     let row_bytes = blocks * 36;
-    let mut words = vec![0u32; cols / 8 * rows];
-    words.par_chunks_mut(rows).enumerate().for_each(|(kw, dst)| {
-        let (block, within) = (kw / 8, kw % 8);
-        let (sub, high) = (within / 2, within % 2 == 1);
-        for (n, out) in dst.iter_mut().enumerate() {
-            let bytes = &raw[n * row_bytes + block * 36 + 4 + sub * 8..][..8];
-            let mut word = 0u32;
-            for (i, &b) in bytes.iter().enumerate() {
-                word |= ((if high { b >> 4 } else { b & 15 }) as u32) << (4 * i);
+    let k_words = cols.div_ceil(8);
+    let rows_pad = rows.div_ceil(64) * 64;
+    let mut words = vec![0u32; k_words * rows];
+    if rows > 0 && k_words > 0 {
+        words.par_chunks_mut(rows).enumerate().for_each(|(kw, dst)| {
+            let (block, within) = (kw / 8, kw % 8);
+            let (sub, high) = (within / 2, within % 2 == 1);
+            for (n, out) in dst.iter_mut().enumerate() {
+                let off = n * row_bytes + block * 36 + 4 + sub * 8;
+                let mut word = 0u32;
+                for i in 0..8 {
+                    let b = raw.get(off + i).copied().unwrap_or(0);
+                    word |= ((if high { b >> 4 } else { b & 15 }) as u32) << (4 * i);
+                }
+                *out = word;
             }
-            *out = word;
-        }
-    });
-    let groups = cols / 16;
+        });
+    }
+    let groups = cols.div_ceil(16).div_ceil(4) * 4;
     let perm = scale_perm();
-    let mut permuted = vec![0f32; groups * rows];
-    for g in 0..groups {
-        for blk in 0..rows / 64 {
+    let mut permuted = vec![0f32; groups * rows_pad];
+    for g in 0..cols.div_ceil(16) {
+        for blk in 0..rows_pad / 64 {
             for j in 0..64 {
                 let n = blk * 64 + perm[j];
-                permuted[g * rows + blk * 64 + j] = e4m3(raw[n * row_bytes + (g / 4) * 36 + g % 4]);
+                if n < rows {
+                    permuted[g * rows_pad + blk * 64 + j] = e4m3(raw[n * row_bytes + (g / 4) * 36 + g % 4]);
+                }
             }
         }
     }
@@ -246,5 +311,33 @@ mod tests {
             })
             .collect();
         assert_eq!(nibbles(&plain), nibbles(&zeros));
+    }
+
+    #[test]
+    fn unaligned_dimensions_and_gptq_repack_round_trip() {
+        let (rows, cols, group) = (40, 96, 32);
+        let raw = sample(rows, cols, group);
+        let (awq, scales, zeros) = marlin_arrays(&raw, rows, cols, group);
+        assert_eq!(awq.len(), cols * (rows / 8));
+        assert_eq!(scales.len(), (cols / group) * 64);
+        assert_eq!(zeros.len(), (cols / group) * 8);
+        let repacked_awq = fllm_q4z_awq_repack(&awq, cols, rows);
+        let mut gptq = vec![0u32; (cols / 8) * rows];
+        let block = group / 2 + 3;
+        let row_bytes = (cols / group) * block;
+        for n in 0..rows {
+            for w in 0..cols / 8 {
+                let mut word = 0u32;
+                for t in 0..8 {
+                    let k = 8 * w + t;
+                    let byte = raw[n * row_bytes + (k / group) * block + (k % group) / 2];
+                    let code = if k % 2 == 0 { byte & 15 } else { byte >> 4 } as u32;
+                    word |= code << (4 * t);
+                }
+                gptq[w * rows + n] = word;
+            }
+        }
+        let repacked_gptq = fllm_q4z_gptq_repack(&gptq, cols, rows);
+        assert_eq!(repacked_awq, repacked_gptq);
     }
 }

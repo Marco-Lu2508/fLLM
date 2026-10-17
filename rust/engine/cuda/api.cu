@@ -15,6 +15,12 @@
 #include "common.cuh"
 #include "fllm_cuda.h"
 #include "fllm_cuda_internal.h"
+#if !defined(__HIPCC__)
+#include "fp8_gemm.h"
+void fllm_cublaslt_set_mode(int mode);
+#endif
+
+#include "mla_latent.h"
 
 static thread_local char g_error[512] = "";
 
@@ -212,9 +218,7 @@ struct FllmGraph {
     unsigned epoch = 0;
 };
 
-#if !defined(__HIPCC__)
 static void graph_free(FllmGraph *g);
-#endif
 
 struct FllmStream {
     int dev;
@@ -264,6 +268,8 @@ struct FllmStream {
     int sms = 0;
     int *argmax_out = nullptr;  // device ids of the last argmax (rows x int)
     size_t argmax_cap = 0;
+    void *sample_scratch = nullptr;  // parameters, lists and results of the last sample call, and the work copy of the logits
+    size_t sample_cap = 0;
     // CUDA graphs of whole decode steps (see fllm_cuda_graph_begin): the one being captured, and a counter that is bumped whenever a
     // scratch buffer a captured kernel may point to is freed (a graph captured before that is stale)
     std::vector<struct FllmGraph *> graphs;
@@ -301,6 +307,11 @@ struct FllmStream {
         int width = 0, batch = 0, in_cols = 0;
         float scale = 0.f;
     } add;
+    // FLLM_ACT_DTYPE (act_api.inc): scratch for the conversions around operations without a narrow kernel and for the narrow Marlin result, and the device
+    // counters of FLLM_ACT_CHECK
+    void *act_tmp[3] = {nullptr, nullptr, nullptr};
+    size_t act_tmp_bytes[3] = {0, 0, 0};
+    int *act_check = nullptr;
 };
 
 static int flush_add(FllmStream *st) {
@@ -351,14 +362,15 @@ void fllm_cuda_stream_destroy(FllmStream *st) {
     cudaFree(st->q4z_ws);
             st->epoch++;
     cudaFree(st->argmax_out);
-#if !defined(__HIPCC__)
+    for (void *p : st->act_tmp) cudaFree(p);
+    cudaFree(st->act_check);
+    cudaFree(st->sample_scratch);
     for (auto *g : st->graphs) {
         if (g) {
             graph_free(g);
             delete g;
         }
     }
-#endif
     cudaStreamDestroy(st->s);
     delete st;
 }
@@ -378,6 +390,21 @@ int fllm_cuda_stream_sync(FllmStream *st) {
     if (int e = flush_glu(st)) return e;
     CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
     return 0;
+}
+int fllm_cuda_stream_wait_stream(FllmStream *waiter, FllmStream *target) {
+    if (!waiter || !target) return 0;
+    if (waiter == target) return 0;
+    CHECK(cudaSetDevice(waiter->dev), "cudaSetDevice");
+    if (int e = flush_glu(waiter)) return e;
+    if (int e = flush_glu(target)) return e;
+    cudaEvent_t ev;
+    if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
+        return fllm_set_error("cudaEventCreate failed");
+    }
+    cudaEventRecord(ev, target->s);
+    cudaStreamWaitEvent(waiter->s, ev, 0);
+    cudaEventDestroy(ev);
+    return fllm_check_launch("stream_wait_stream");
 }
 
 // Stage host data for a kernel. The arena is a ring: stream order guarantees that earlier kernels
@@ -510,7 +537,7 @@ int fllm_cuda_copy(FllmStream *st, void *dst, const void *src, size_t bytes) {
 static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x, const float *y, int cols, int batch) {
     if (!st->glu_pending || x != st->glu_out || (const void *)y == (const void *)x || (size_t)batch * cols != st->glu_count)
         return false;
-    if (st->glu_half && kind != 40) return false;
+    if (st->glu_half && kind != 40 && kind != 8) return false;
     if ((reinterpret_cast<uintptr_t>(st->glu_gate) & 15) != 0 || (reinterpret_cast<uintptr_t>(st->glu_up) & 15) != 0 ||
         (reinterpret_cast<uintptr_t>(w) & 15) != 0)
         return false;
@@ -531,7 +558,7 @@ static bool glu_q8_fusable(FllmStream *st, int kind, const void *w, const float 
     (void)st; (void)kind; (void)w; (void)x; (void)y; (void)cols; (void)batch;
     return false;
 #else
-    if (!st->glu_pending || st->glu_half || x != st->glu_out || (const void *)y == (const void *)x || (size_t)batch * cols != st->glu_count)
+    if (!st->glu_pending || x != st->glu_out || (const void *)y == (const void *)x || (size_t)batch * cols != st->glu_count)
         return false;
     if (!fllm_fuse_enabled(FLLM_FUSE_GLU_Q8)) return false;
     if ((reinterpret_cast<uintptr_t>(st->glu_gate) & 15) != 0 || (reinterpret_cast<uintptr_t>(st->glu_up) & 15) != 0 ||
@@ -738,6 +765,68 @@ int fllm_cuda_linear_fp8_marlin(FllmStream *st, const void *w, const float *x, f
         return fllm_set_error("Marlin FP8 GEMM rejected %d x %d, batch %d (alignment or configuration)", rows, cols, batch);
     return rc;
 }
+// ---- FP8 / int8 W8A8 GEMMs (fp8_gemm.cu, int8_gemm.cu) ----
+// 1 when an FP8M weight of rows x cols on device `dev` is to be uploaded in the W8A8 layout (row-major E4M3 bytes, FP32 scales)
+int fllm_cuda_fp8_gemm_enabled(int dev, int rows, int cols) {
+#if defined(__HIPCC__)
+    (void)dev; (void)rows; (void)cols;
+    return 0;
+#else
+    if (cudaSetDevice(dev) != cudaSuccess) return 0;
+    return fllm_fp8_w8a8_enabled(rows, cols) ? 1 : 0;
+#endif
+}
+// mode: -1 environment (FLLM_FP8_GEMM), 0 off, 1 mma.sync, 2 CUTLASS; the self test flips it before it uploads a weight
+int fllm_cuda_fp8_gemm_set_mode(int mode) {
+#if !defined(__HIPCC__)
+    fllm_fp8_gemm_set_mode(mode);
+#else
+    (void)mode;
+#endif
+    return 0;
+}
+int fllm_cuda_int8_gemm_set_mode(int mode) {
+#if !defined(__HIPCC__)
+    fllm_int8_gemm_set_mode(mode);
+#else
+    (void)mode;
+#endif
+    return 0;
+}
+int fllm_cuda_cublaslt_set_mode(int mode) {
+#if !defined(__HIPCC__)
+    fllm_cublaslt_set_mode(mode);
+#else
+    (void)mode;
+#endif
+    return 0;
+}
+// W8A8 product of FP8 weights in the W8A8 layout; wblock, amode: see fllm_fp8_w8a8_gemm
+int fllm_cuda_linear_fp8_w8a8(FllmStream *st, const void *w, const float *wscale, int wblock, const float *x, float *y, const float *bias, int rows,
+                              int cols, int batch, int amode, float static_scale) {
+#if defined(__HIPCC__)
+    (void)st; (void)w; (void)wscale; (void)wblock; (void)x; (void)y; (void)bias; (void)rows; (void)cols; (void)batch; (void)amode; (void)static_scale;
+    return fllm_set_error("FP8 W8A8 GEMM is not available in the ROCm build");
+#else
+    PREP(st);
+    const int rc = fllm_fp8_w8a8_gemm(st->s, w, wscale, wblock, x, y, bias, rows, cols, batch, amode, static_scale);
+    if (rc < 0) return fllm_set_error("FP8 W8A8 GEMM rejected %d x %d, batch %d (device, alignment or scale mode)", rows, cols, batch);
+    return rc;
+#endif
+}
+// int8 weights [rows][cols] with one FP32 scale per row, per-token activations (the SmoothQuant / compressed-tensors layout)
+int fllm_cuda_linear_int8_plain(FllmStream *st, const void *w, const float *wscale, const float *x, float *y, const float *bias, int rows, int cols,
+                                int batch) {
+#if defined(__HIPCC__)
+    (void)st; (void)w; (void)wscale; (void)x; (void)y; (void)bias; (void)rows; (void)cols; (void)batch;
+    return fllm_set_error("int8 W8A8 GEMM is not available in the ROCm build");
+#else
+    PREP(st);
+    const int rc = fllm_int8_plain_gemm(st->s, w, wscale, x, y, bias, rows, cols, batch);
+    if (rc < 0) return fllm_set_error("int8 W8A8 GEMM rejected %d x %d, batch %d (device or alignment)", rows, cols, batch);
+    return rc;
+#endif
+}
 int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float *y, const float *bias, float gscale,
                            int rows, int cols, int batch) {
     CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
@@ -774,6 +863,9 @@ int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float 
     const size_t need = (((size_t)batch * (cols >> 1) + 255) & ~size_t(255)) + (((size_t)batch * (cols >> 4) + 255) & ~size_t(255)) +
                         (batch <= 64 ? (size_t)4 << 20 : (size_t)16 << 20);
     if (need > st->x16_bytes) {
+        if (st->capture) {
+            return fllm_set_error("cuda_moe_linear: scratch buffer must not reallocate during graph capture (needs %zu, has %zu)", need, st->x16_bytes);
+        }
         CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
         cudaFree(st->x16);
         st->epoch++;
@@ -813,7 +905,6 @@ int fllm_cuda_embedding(FllmStream *st, const void *w, int kind, const int64_t *
 // ---- CUDA graphs: a decode step is captured once per batch size and replayed (vLLM captures its forward the same way, with fixed input
 // buffers; here the buffers are the four staging slots above). The kernels of a step are about 700 small launches; one graph launch
 // replaces them.
-#if !defined(__HIPCC__)
 static void graph_free(FllmGraph *g) {
     if (g->exec) cudaGraphExecDestroy(static_cast<cudaGraphExec_t>(g->exec));
     g->exec = nullptr;
@@ -825,7 +916,14 @@ static void graph_free(FllmGraph *g) {
 }
 int fllm_cuda_graph_supported(FllmStream *st) {
     int v = 0;
+#if defined(__HIPCC__)
+    // hipGraph capture of the decode step has never run on an AMD GPU (test level L0): opt in with FLLM_HIP_GRAPH=1 (the Rust side then
+    // follows the rules of the CUDA graphs, FLLM_CUDA_GRAPH=0 still switches them off)
+    const char *opt = getenv("FLLM_HIP_GRAPH");
+    return opt && opt[0] == '1' && hipRuntimeGetVersion(&v) == hipSuccess && v >= 60000000 ? 1 : 0;
+#else
     return cudaDriverGetVersion(&v) == cudaSuccess && v >= 12000 ? 1 : 0;
+#endif
 }
 // Start recording the work of the stream into graph `id`. `sizes` are the byte sizes of the four staged arrays; `max_len` is the
 // context length the attention kernels are sized for.
@@ -905,13 +1003,6 @@ int fllm_cuda_graph_launch(FllmStream *st, int id) {
     CHECK(cudaGraphLaunch(static_cast<cudaGraphExec_t>(g->exec), st->s), "cudaGraphLaunch");
     return 0;
 }
-#else
-int fllm_cuda_graph_supported(FllmStream *) { return 0; }
-int fllm_cuda_graph_begin(FllmStream *, int, size_t, size_t, size_t, size_t, int) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
-int fllm_cuda_graph_end(FllmStream *, int, int) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
-int fllm_cuda_graph_set(FllmStream *, int, int, const void *, size_t) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
-int fllm_cuda_graph_launch(FllmStream *, int) { return fllm_set_error("CUDA graphs need an NVIDIA GPU"); }
-#endif
 
 // Switch the accumulate mode of the NVFP4 CUTLASS GEMM on or off: the next product is multiplied by `scale` and added to y (the residual
 // stream) by the epilogue. The caller asks fllm_cuda_nvfp4_cutlass_ok first; a GEMM that cannot do it fails instead of overwriting y.
@@ -1093,6 +1184,72 @@ int fllm_cuda_argmax(FllmStream *st, const float *logits, int rows, int vocab, i
     CHECK(cudaStreamSynchronize(st->s), "argmax sync");
     return 0;
 }
+// Sampling a batch of rows on the device (sampling.cu). `params` is `rows` FllmSampleRow structs on the host; the lists are host arrays
+// that the call uploads. The logits stay unchanged: the kernel works on a copy, a few rows at a time (at most 64 MiB of work space).
+// Results are copied back.
+int fllm_cuda_sample(FllmStream *st, const float *logits, int rows, int vocab, const void *params, const int32_t *pen_ids,
+                     const int32_t *pen_counts, int pen_total, const int32_t *bias_ids, const float *bias_vals, int bias_total,
+                     const uint32_t *mask, int mask_total, int mask_words, int top_stride, int32_t *ids_out, float *logprob_out,
+                     int32_t *top_ids_out, float *top_logprob_out) {
+    PREP(st);
+    if (rows <= 0 || vocab <= 0) return fllm_set_error("sample: empty input");
+    if (st->capture) return fllm_set_error("sample: not allowed while a CUDA graph is recorded");
+    auto up = [](size_t n) { return (n + 255) & ~(size_t)255; };
+    const size_t params_b = up((size_t)rows * 80), pen_b = up((size_t)(pen_total > 0 ? pen_total : 1) * 4),
+                 bias_b = up((size_t)(bias_total > 0 ? bias_total : 1) * 4), mask_b = up((size_t)(mask_total > 0 ? mask_total : 1) * 4),
+                 ids_b = up((size_t)rows * 4), lp_b = up((size_t)rows * 4), top_b = up((size_t)rows * (top_stride > 0 ? top_stride : 1) * 4);
+    size_t chunk = (size_t)64 << 20;
+    chunk = chunk / ((size_t)vocab * 4);
+    if (chunk < 1) chunk = 1;
+    if (chunk > (size_t)rows) chunk = (size_t)rows;
+    const size_t work_b = up(chunk * (size_t)vocab * 4);
+    const size_t total = params_b + 2 * pen_b + 2 * bias_b + mask_b + ids_b + lp_b + 2 * top_b + work_b;
+    if (total > st->sample_cap) {
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->sample_scratch);
+        st->sample_scratch = nullptr;
+        st->sample_cap = total + total / 4;
+        CHECK(cudaMalloc(&st->sample_scratch, st->sample_cap), "cudaMalloc(sample)");
+    }
+    char *d_params = static_cast<char *>(st->sample_scratch);
+    int32_t *d_pen_ids = reinterpret_cast<int32_t *>(d_params + params_b);
+    int32_t *d_pen_counts = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(d_pen_ids) + pen_b);
+    int32_t *d_bias_ids = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(d_pen_counts) + pen_b);
+    float *d_bias_vals = reinterpret_cast<float *>(reinterpret_cast<char *>(d_bias_ids) + bias_b);
+    uint32_t *d_mask = reinterpret_cast<uint32_t *>(reinterpret_cast<char *>(d_bias_vals) + bias_b);
+    int32_t *d_ids = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(d_mask) + mask_b);
+    float *d_lp = reinterpret_cast<float *>(reinterpret_cast<char *>(d_ids) + ids_b);
+    int32_t *d_top_ids = reinterpret_cast<int32_t *>(reinterpret_cast<char *>(d_lp) + lp_b);
+    float *d_top_lp = reinterpret_cast<float *>(reinterpret_cast<char *>(d_top_ids) + top_b);
+    float *d_work = reinterpret_cast<float *>(reinterpret_cast<char *>(d_top_lp) + top_b);
+    CHECK(cudaMemcpyAsync(d_params, params, (size_t)rows * 80, cudaMemcpyHostToDevice, st->s), "sample params upload");
+    if (pen_total > 0) {
+        CHECK(cudaMemcpyAsync(d_pen_ids, pen_ids, (size_t)pen_total * 4, cudaMemcpyHostToDevice, st->s), "sample penalties upload");
+        CHECK(cudaMemcpyAsync(d_pen_counts, pen_counts, (size_t)pen_total * 4, cudaMemcpyHostToDevice, st->s), "sample penalties upload");
+    }
+    if (bias_total > 0) {
+        CHECK(cudaMemcpyAsync(d_bias_ids, bias_ids, (size_t)bias_total * 4, cudaMemcpyHostToDevice, st->s), "sample bias upload");
+        CHECK(cudaMemcpyAsync(d_bias_vals, bias_vals, (size_t)bias_total * 4, cudaMemcpyHostToDevice, st->s), "sample bias upload");
+    }
+    if (mask_total > 0) CHECK(cudaMemcpyAsync(d_mask, mask, (size_t)mask_total * 4, cudaMemcpyHostToDevice, st->s), "sample mask upload");
+    for (size_t first = 0; first < (size_t)rows; first += chunk) {
+        const int n = (int)(((size_t)rows - first) < chunk ? ((size_t)rows - first) : chunk);
+        if (int e = fllm_sample_launch(st->s, logits + first * (size_t)vocab, d_work, n, vocab, d_params + first * 80, d_pen_ids, d_pen_counts,
+                                       d_bias_ids, d_bias_vals, d_mask, mask_words, d_ids + first, d_lp + first,
+                                       d_top_ids + first * (size_t)(top_stride > 0 ? top_stride : 1),
+                                       d_top_lp + first * (size_t)(top_stride > 0 ? top_stride : 1), top_stride > 0 ? top_stride : 1))
+            return e;
+    }
+    CHECK(cudaMemcpyAsync(ids_out, d_ids, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+    CHECK(cudaMemcpyAsync(logprob_out, d_lp, (size_t)rows * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+    if (top_stride > 0) {
+        CHECK(cudaMemcpyAsync(top_ids_out, d_top_ids, (size_t)rows * top_stride * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+        CHECK(cudaMemcpyAsync(top_logprob_out, d_top_lp, (size_t)rows * top_stride * 4, cudaMemcpyDeviceToHost, st->s), "sample download");
+    }
+    CHECK(cudaStreamSynchronize(st->s), "sample sync");
+    return 0;
+}
+
 int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, float eps) {
     // Prompt batches: the residual add that an output projection left pending (FLLM_FUSE_PREFILL_ADD_NORM) and the FP16 copy of the result
     // that the next Marlin GEMM would convert itself (FLLM_FUSE_PREFILL_NORM_F16) are done in the norm pass. Both are bit-identical to the
@@ -1233,6 +1390,9 @@ int fllm_cuda_moe_linear(FllmStream *st, const void *const *tab, const void *con
     const int inputs = (slots + xdiv - 1) / xdiv;
     const size_t need = (((size_t)inputs * cols + 255) & ~size_t(255)) + (size_t)inputs * (cols / 32) * 8 + ((size_t)4 << 20);
     if (need > st->x16_bytes) {
+        if (st->capture) {
+            return fllm_set_error("cuda_moe_linear: scratch buffer must not reallocate during graph capture (needs %zu, has %zu)", need, st->x16_bytes);
+        }
         CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
         cudaFree(st->x16);
         st->epoch++;
@@ -1241,6 +1401,34 @@ int fllm_cuda_moe_linear(FllmStream *st, const void *const *tab, const void *con
         CHECK(cudaMalloc(&st->x16, st->x16_bytes), "cudaMalloc(activation scratch)");
     }
     return fllm_moe_linear_launch(st->s, tab, kind, ids, x, y, rows, cols, slots, xdiv, btab, st->x16, st->x16_bytes);
+}
+int fllm_cuda_moe_route2(FllmStream *st, const float *logits, const float *bias, int32_t *ids, float *w, int rows, int experts, int k,
+                         int sigmoid, int normalize, float scale, float eps, int groups, int groups_used, int top2) {
+    PREP(st);
+    return fllm_moe_route2_launch(st->s, logits, bias, ids, w, rows, experts, k, sigmoid, normalize, scale, eps, groups, groups_used, top2);
+}
+int fllm_cuda_moe_align(FllmStream *st, const int32_t *ids, int32_t *sorted, int32_t *block_expert, int32_t *num_post, int pairs,
+                        int expert_offset, int num_local, int block) {
+    PREP(st);
+    return fllm_moe_align_launch(st->s, ids, sorted, block_expert, num_post, pairs, expert_offset, num_local, block);
+}
+int fllm_cuda_moe_grouped_supported(int kind, int cols, int block) { return fllm_moe_grouped_supported((uint32_t)kind, cols, block); }
+int fllm_cuda_moe_grouped(FllmStream *st, int kind, int glu, const void *const *wtab, const void *const *wtab2, const void *const *btab,
+                          const void *const *btab2, const float *x, const float *pw, float *y, const int32_t *sorted,
+                          const int32_t *block_expert, const int32_t *num_post, int rows, int cols, int pairs, int xdiv, int block,
+                          int max_blocks, int glu_mode, float alpha, float limit) {
+    PREP(st);
+    return fllm_moe_grouped_launch(st->s, (uint32_t)kind, glu, wtab, wtab2, btab, btab2, x, pw, y, sorted, block_expert, num_post, rows, cols, pairs,
+                                   xdiv, block, max_blocks, glu_mode, alpha, limit);
+}
+int fllm_cuda_moe_combine2(FllmStream *st, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
+                           int k, int hidden) {
+    PREP(st);
+    return fllm_moe_combine2_launch(st->s, out, y, w, shared, gate, tokens, k, hidden);
+}
+int fllm_cuda_moe_gate_scale(FllmStream *st, float *gate, const float *x, const float *g, int tokens, int hidden) {
+    PREP(st);
+    return fllm_moe_gate_scale_launch(st->s, gate, x, g, tokens, hidden);
 }
 int fllm_cuda_swiglu_oai(FllmStream *st, const float *gate, const float *up, float *out, size_t count, float alpha, float limit) {
     PREP(st);
@@ -1254,7 +1442,22 @@ int fllm_cuda_split_q_gate(FllmStream *st, const float *qg, float *q, float *gat
     PREP(st);
     return fllm_split_q_gate_launch(st->s, qg, q, gate, rows, heads, dk, per_head);
 }
-int fllm_cuda_delta_supported(int kh, int vh, int hk, int hv, int ksz) { return fllm_delta_supported(kh, vh, hk, hv, ksz); }
+// AMD build: SSM / DeltaNet / Mamba / ShortConv layers stay on the host path by default until verified on AMD hardware;
+// FLLM_HIP_SSM=1 enables them on the device, and FLLM_HIP_NO_SSM=1 explicitly disables them.
+static bool ssm_kernels_off() {
+#if defined(__HIPCC__)
+    static const bool off = [] {
+        const char *no_ssm = getenv("FLLM_HIP_NO_SSM");
+        if (no_ssm && no_ssm[0] == '1') return true;
+        const char *ssm = getenv("FLLM_HIP_SSM");
+        return !(ssm && ssm[0] == '1');
+    }();
+    return off;
+#else
+    return false;
+#endif
+}
+int fllm_cuda_delta_supported(int kh, int vh, int hk, int hv, int ksz) { return !ssm_kernels_off() && fllm_delta_supported(kh, vh, hk, hv, ksz); }
 // Gated DeltaNet layer: `runs` is nruns DeltaRun records (24 bytes each, see deltanet.cu) in host memory.
 int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
                           float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
@@ -1265,6 +1468,19 @@ int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
     return fllm_delta_launch(st->s, d, nruns, max_n, kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z, beta, alpha,
                              convw, dt_bias, decay, norm, mixed, out);
+}
+int fllm_cuda_kda_supported(int heads, int head_dim, int ksz) { return fllm_kda_supported(heads, head_dim, ksz); }
+// Kimi Delta Attention (KDA) layer: `runs` is nruns DeltaRun records in host memory.
+int fllm_cuda_kda_layer(FllmStream *st, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
+                        float lower_bound, float eps, size_t state_off, size_t rec_bytes,
+                        const float *qkv, const float *forget, const float *beta, const float *gate,
+                        const float *convw, const float *dt_bias, const float *rate, const float *norm,
+                        float *mixed, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_kda_launch(st->s, d, nruns, max_n, heads, head_dim, ksz, lower_bound, eps, state_off, rec_bytes,
+                           qkv, forget, beta, gate, convw, dt_bias, rate, norm, mixed, out);
 }
 int fllm_cuda_act(FllmStream *st, const float *x, float *out, size_t n, int mode) {
     PREP(st);
@@ -1292,7 +1508,7 @@ int fllm_cuda_mla_assemble(FllmStream *st, const float *q_full, const float *kv_
     return fllm_mla_assemble_launch(st->s, q_full, kv_a, kv, q, k, v, rows, heads, nope, rope, value, kv_lora);
 }
 int fllm_cuda_mamba2_supported(int inner, int state, int heads, int groups, int ksz, int norm_groups) {
-    return fllm_mamba2_supported(inner, state, heads, groups, ksz, norm_groups);
+    return !ssm_kernels_off() && fllm_mamba2_supported(inner, state, heads, groups, ksz, norm_groups);
 }
 // Mamba-2 layer: `runs` is nruns SsmRun records (24 bytes each, see mamba2.cu) in host memory.
 int fllm_cuda_mamba2_layer(FllmStream *st, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
@@ -1305,7 +1521,7 @@ int fllm_cuda_mamba2_layer(FllmStream *st, const void *runs, int nruns, int rows
     return fllm_mamba2_launch(st->s, d, nruns, rows, inner, state, heads, groups, ksz, norm_groups, step_min, eps, state_off, rec_bytes, proj,
                               convw, convb, dt_bias, decay, skip, norm, mixed, out);
 }
-int fllm_cuda_shortconv_supported(int hidden, int ksz) { return fllm_shortconv_supported(hidden, ksz); }
+int fllm_cuda_shortconv_supported(int hidden, int ksz) { return !ssm_kernels_off() && fllm_shortconv_supported(hidden, ksz); }
 // ShortConv layer: `runs` is nruns ConvRun records (24 bytes each, see shortconv.cu) in host memory.
 int fllm_cuda_shortconv_layer(FllmStream *st, const void *runs, int nruns, int hidden, int ksz, size_t state_off, const float *proj,
                               const float *convw, const float *convb, float *out) {
@@ -1314,7 +1530,7 @@ int fllm_cuda_shortconv_layer(FllmStream *st, const void *runs, int nruns, int h
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
     return fllm_shortconv_launch(st->s, d, nruns, hidden, ksz, state_off, proj, convw, convb, out);
 }
-int fllm_cuda_mamba1_supported(int inner, int state, int rank, int ksz) { return fllm_mamba1_supported(inner, state, rank, ksz); }
+int fllm_cuda_mamba1_supported(int inner, int state, int rank, int ksz) { return !ssm_kernels_off() && fllm_mamba1_supported(inner, state, rank, ksz); }
 // Mamba-1 layer, three launches around the GEMMs of x_proj and dt_proj; `runs` is nruns SsmRun records (24 bytes each) in host memory.
 int fllm_cuda_mamba1_conv(FllmStream *st, const void *runs, int nruns, int inner, int ksz, size_t state_off, size_t rec_bytes, const float *proj,
                           const float *convw, const float *convb, float *mixed) {
@@ -1373,6 +1589,12 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
         if (!st->ws) {
             st->ws_bytes = 16u << 20;
             CHECK(cudaMalloc(reinterpret_cast<void **>(&st->ws), st->ws_bytes), "cudaMalloc(attention workspace)");
+        }
+        // sliding window / soft cap / sinks, ragged batches, tensor-core decode and cascade attention through FlashInfer (fi_attn.cu; off by default)
+        if (!st->capture) {
+            const int rcf = fllm_fi_attention_try(st->s, q, kpool_layer, vpool_layer, out, tables_host, lengths_host, rows, sinks, alibi != nullptr, heads,
+                                                  kv_heads, dk, dv, stride, block_size, kind, scale, softcap, window, chunk);
+            if (rcf >= 0) return rcf;
         }
         static const bool no_flash = getenv("FLLM_CUDA_NO_FLASH") != nullptr;
         if (!st->capture && !no_flash && !alibi && softcap == 0.f && window == 0 && chunk == 0 && rows >= 16 && !fllm_exact_math()) {
@@ -1473,27 +1695,16 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
 
 int fllm_cuda_kvq_write(FllmStream *st, const float *src, uint16_t *pool_layer, const int32_t *slots, int rows,
                         const FllmKvDesc *desc) {
-#if defined(__HIPCC__)
-    (void)st; (void)src; (void)pool_layer; (void)slots; (void)rows; (void)desc;
-    return fllm_set_error("the extra KV cache formats are not available in the ROCm build");
-#else
     PREP(st);
     void *d = nullptr;
     if (int e = stage(st, 1, slots, (size_t)rows * sizeof(int32_t), &d)) return e;
     return fllm_kvq_write_launch(st->s, src, pool_layer, static_cast<const int32_t *>(d), rows, *desc);
-#endif
 }
 int fllm_cuda_kvq_attention(FllmStream *st, const float *q, const uint16_t *kpool_layer, const uint16_t *vpool_layer,
                             float *out, const int64_t *tables_host, size_t tables_len, const int64_t *lengths_host,
                             int rows, const float *sinks, const float *alibi, int heads, int kv_heads, int dk, int dv,
                             int stride, int block_size, const FllmKvDesc *kd, const FllmKvDesc *vd, float scale,
                             float softcap, int window, int chunk) {
-#if defined(__HIPCC__)
-    (void)st; (void)q; (void)kpool_layer; (void)vpool_layer; (void)out; (void)tables_host; (void)tables_len; (void)lengths_host;
-    (void)rows; (void)sinks; (void)alibi; (void)heads; (void)kv_heads; (void)dk; (void)dv; (void)stride; (void)block_size;
-    (void)kd; (void)vd; (void)scale; (void)softcap; (void)window; (void)chunk;
-    return fllm_set_error("the extra KV cache formats are not available in the ROCm build");
-#else
     PREP(st);
     void *dt = nullptr, *dl = nullptr;
     if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
@@ -1506,7 +1717,82 @@ int fllm_cuda_kvq_attention(FllmStream *st, const float *q, const uint16_t *kpoo
                               static_cast<const int64_t *>(dl), tables_host, lengths_host, sinks, alibi, rows, heads, kv_heads,
                               dk, dv, stride, block_size, *kd, *vd, scale, softcap, window, chunk, st->ws, st->ws_bytes,
                               st->capture != nullptr, st->capture ? st->capture->max_len : 0);
+}
+
+#if !defined(__HIPCC__)
+#include "act_api.inc"
 #endif
+
+// ---- latent-cache MLA (mla_latent.cu, mla_decode.cu; docs/changes/hopper-mla.md) ----
+int fllm_cuda_mla_latent_supported(int dev, int kv_lora, int rope, int nope, int value, int kv_fmt) {
+    if (cudaSetDevice(dev) != cudaSuccess) {
+        cudaGetLastError();
+        return 0;
+    }
+    return fllm_mla_latent_supported(kv_lora, rope, nope, value, kv_fmt);
+}
+int fllm_cuda_mla_kv(FllmStream *st, const float *kv_a, const float *latent, const int32_t *positions, const float *cs, const float *sn, float *k_row,
+                     int rows, int kv_lora, int rope, int neox) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 0, positions, (size_t)rows * sizeof(int32_t), &d)) return e;
+    return fllm_mla_kv_launch(st->s, kv_a, latent, static_cast<const int32_t *>(d), cs, sn, k_row, rows, kv_lora, rope, neox);
+}
+int fllm_cuda_mla_query(FllmStream *st, const float *q_full, const uint16_t *w, const int32_t *positions, const float *cs, const float *sn, uint16_t *q_lat,
+                        int rows, int heads, int nope, int rope, int value, int kv_lora, int neox) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 0, positions, (size_t)rows * sizeof(int32_t), &d)) return e;
+    return fllm_mla_query_launch(st->s, q_full, w, static_cast<const int32_t *>(d), cs, sn, q_lat, rows, heads, nope, rope, value, kv_lora, neox);
+}
+int fllm_cuda_mla_output(FllmStream *st, const uint16_t *o_lat, const uint16_t *w, float *out, int rows, int heads, int nope, int value, int kv_lora) {
+    PREP(st);
+    return fllm_mla_output_launch(st->s, o_lat, w, out, rows, heads, nope, value, kv_lora);
+}
+int fllm_cuda_mla_attention(FllmStream *st, const uint16_t *q_lat, const uint16_t *pool, uint16_t *o_lat, const int64_t *tables_host, size_t tables_len,
+                            const int64_t *lengths_host, int rows, int heads, int kv_lora, int rope, int stride, int block_size, const FllmKvDesc *kd,
+                            float scale, int mode) {
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr;
+    if (int e = stage(st, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, 3, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    const int rc = fllm_mla_attention_launch(st->s, q_lat, pool, o_lat, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), tables_host,
+                                             lengths_host, rows, heads, kv_lora, rope, stride, block_size, kd, scale, mode);
+    if (rc < 0) return fllm_set_error("latent MLA attention does not cover %d + %d values per token in cache format %d", kv_lora, rope, kd->fmt);
+    return rc;
+}
+int fllm_cuda_tree_attention(FllmStream *st, const float *q, const uint16_t *kpool_layer,
+                             const uint16_t *vpool_layer, float *out, const int64_t *tables,
+                             const int64_t *lengths, const uint8_t *tree_mask, int prefix_len,
+                             int num_nodes, int rows, int heads, int kv_heads, int dk, int dv,
+                             int stride, int block_size, int kind, float scale, float softcap) {
+    PREP(st);
+    return fllm_tree_attention_launch(st->s, q, kpool_layer, vpool_layer, out, tables, lengths,
+                                      tree_mask, prefix_len, num_nodes, rows, heads, kv_heads,
+                                      dk, dv, stride, block_size, kind, scale, softcap);
+}
+
+int fllm_cuda_spec_verify(FllmStream *st, const int32_t *draft, const int32_t *target,
+                          int num_draft, int32_t *out_accepted, int32_t *out_next,
+                          int64_t *seq_length) {
+    PREP(st);
+    return fllm_spec_verify_launch(st->s, draft, target, num_draft, out_accepted, out_next, seq_length);
 }
 
 }  // extern "C"
+
+int fllm_cuda_attn_encoder(FllmStream *st, const float *q, const float *k, const float *v, float *out,
+                           const int32_t *cu_seqlens_host, int batch_size, int total_tokens,
+                           int heads, int kv_heads, int head_dim, float scale, int window,
+                           const int32_t *global_tokens_host, int num_global) {
+    PREP(st);
+    void *d_cu = nullptr;
+    if (int e = stage(st, 4, cu_seqlens_host, (size_t)(batch_size + 1) * sizeof(int32_t), &d_cu)) return e;
+    void *d_globals = nullptr;
+    if (num_global > 0 && global_tokens_host != nullptr) {
+        if (int e = stage(st, 4, global_tokens_host, (size_t)num_global * sizeof(int32_t), &d_globals)) return e;
+    }
+    return fllm_attn_encoder_launch(st->s, q, k, v, out, static_cast<const int32_t *>(d_cu), batch_size,
+                                    total_tokens, heads, kv_heads, head_dim, scale, window,
+                                    static_cast<const int32_t *>(d_globals), num_global);
+}

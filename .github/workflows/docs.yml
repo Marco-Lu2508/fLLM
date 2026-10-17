@@ -1,0 +1,32 @@
+# Documentation checks: relative links and anchors, referenced repository paths, English-only text, internal wording, YAML syntax.
+# The same script runs locally: `python3 scripts/check_docs.py` (or `make docs-check`). See CONTRIBUTING.md.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/*.md", "scripts/check_docs.py", ".github/**", "docs/**"]
+  pull_request:
+    paths: ["**/*.md", "scripts/check_docs.py", ".github/**", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: documentation checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Check links, paths, language and wording
+        run: python3 scripts/check_docs.py

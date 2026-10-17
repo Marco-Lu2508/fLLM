@@ -243,14 +243,13 @@ fn has_stop_words(body: &Value) -> bool {
 /// stream) into llama.cpp's shape.
 async fn run_completion(
     state: Arc<AppState>,
-    headers: HeaderMap,
     body: &Value,
     chat: Value,
     model: String,
 ) -> Response {
     let stream = chat["stream"] == true;
     let stops = has_stop_words(body);
-    let response = completions(State(state), headers, Json(chat)).await;
+    let response = completions(State(state), Json(chat)).await;
     if !response.status().is_success() {
         return convert_error(response).await;
     }
@@ -269,19 +268,14 @@ async fn run_completion(
 
 pub(in crate::server) async fn completion(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let model = body["model"].as_str().unwrap_or(&state.model_name).to_owned();
     let chat = match to_completion_body(&state, &body) {
         Ok(chat) => chat,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
-    run_completion(state, headers, &body, chat, model).await
+    run_completion(state, &body, chat, model).await
 }
 
 /// Literal text of a FIM control token, so families with custom markers still render correctly.
@@ -350,7 +344,6 @@ fn to_infill_body(state: &AppState, body: &Value) -> Result<Value, String> {
 
 pub(in crate::server) async fn infill(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let fim_missing = state.tokenizer.fim().is_none()
@@ -369,11 +362,7 @@ pub(in crate::server) async fn infill(
             return error(status, &message);
         }
     };
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
-    run_completion(state, headers, &body, chat, model).await
+    run_completion(state, &body, chat, model).await
 }
 
 /// Sequences the scheduler currently runs, with idle slots filled up to the observed capacity.
@@ -385,12 +374,7 @@ fn slots(state: &AppState) -> (usize, usize) {
 
 pub(in crate::server) async fn props(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let defaults = &state.sampling_defaults;
     let token = |ids: &[u32]| {
         ids.first()
@@ -415,19 +399,46 @@ pub(in crate::server) async fn props(
         "chat_template": state.chat_template,
         "bos_token": token(state.tokenizer.bos_ids()),
         "eos_token": token(state.tokenizer.eos_ids()),
-        "build_info": format!("fllm-rs {}", env!("CARGO_PKG_VERSION")),
+        "build_info": crate::version::long_version(),
     }))
     .into_response()
 }
 
+/// `POST /props` changes server-wide settings in llama.cpp (with `--props`); fLLM has none to change at run time, so
+/// the request is accepted and ignored.
+pub(in crate::server) async fn set_props(Json(_body): Json<Value>) -> Response {
+    Json(json!({"success": true, "note": "runtime properties are not adjustable; the request was ignored"})).into_response()
+}
+
+/// `POST /slots/{id}?action=save|restore|erase`: prompt-cache files of single slots are not implemented.
+pub(in crate::server) async fn slot_action(
+    axum::extract::Path(id): axum::extract::Path<usize>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    match query.get("action").map(String::as_str) {
+        Some(action @ ("save" | "restore" | "erase")) => error(
+            StatusCode::NOT_IMPLEMENTED,
+            &format!("slot {id}: action '{action}' is not implemented; the prefix cache is managed automatically"),
+        ),
+        _ => error(StatusCode::BAD_REQUEST, "invalid action; use save, restore or erase"),
+    }
+}
+
+/// `GET /lora-adapters`: adapters are merged into the weights at start-up (`--lora`), so none can be switched here.
+pub(in crate::server) async fn lora_adapters() -> Response {
+    Json(json!([])).into_response()
+}
+
+pub(in crate::server) async fn set_lora_adapters(Json(_body): Json<Value>) -> Response {
+    error(
+        StatusCode::NOT_IMPLEMENTED,
+        "LoRA adapters are merged at start-up (--lora); changing their scale at run time is not implemented",
+    )
+}
+
 pub(in crate::server) async fn slot_list(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let (running, total) = slots(&state);
     let list: Vec<Value> = (0..total)
         .map(|id| {
@@ -445,13 +456,8 @@ pub(in crate::server) async fn slot_list(
 
 pub(in crate::server) async fn apply_template(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let messages = body
         .get("messages")
         .cloned()
@@ -472,11 +478,7 @@ pub(in crate::server) async fn apply_template(
 }
 
 /// llama.cpp sends `{"content": "…"}` and expects `[{index, embedding:[[floats]]}]`.
-async fn embedding_request(state: Arc<AppState>, headers: HeaderMap, body: Value) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
+async fn embedding_request(state: Arc<AppState>, body: Value) -> Response {
     let content = body
         .get("content")
         .or_else(|| body.get("input"))
@@ -494,7 +496,7 @@ async fn embedding_request(state: Arc<AppState>, headers: HeaderMap, body: Value
             inner[field] = value.clone();
         }
     }
-    let response = super::embeddings(State(state), headers, Json(inner)).await;
+    let response = super::embeddings(State(state), Json(inner)).await;
     if !response.status().is_success() {
         return convert_error(response).await;
     }
@@ -519,34 +521,39 @@ async fn embedding_request(state: Arc<AppState>, headers: HeaderMap, body: Value
 
 pub(in crate::server) async fn embedding(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    embedding_request(state, headers, body).await
+    embedding_request(state, body).await
 }
 
 pub(in crate::server) async fn embeddings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    embedding_request(state, headers, body).await
+    embedding_request(state, body).await
 }
 
 pub(in crate::server) async fn tokenize(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
-    let Some(text) = body.get("content").and_then(Value::as_str) else {
-        return error(StatusCode::BAD_REQUEST, "content must be a string");
+    // llama.cpp sends `content`; vLLM sends `prompt`, or chat `messages` that are rendered with the chat template
+    let rendered;
+    let text = if let Some(messages) = body.get("messages") {
+        let kwargs = body.get("chat_template_kwargs").and_then(Value::as_object).cloned();
+        rendered = match render_messages(&state, messages.clone(), body.get("tools").cloned(), kwargs) {
+            Ok(prompt) => prompt,
+            Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+        };
+        rendered.as_str()
+    } else if let Some(text) = body.get("content").or_else(|| body.get("prompt")).and_then(Value::as_str) {
+        text
+    } else {
+        return error(StatusCode::BAD_REQUEST, "content, prompt or messages is required");
     };
     let add_special = body
         .get("add_special")
+        .or_else(|| body.get("add_special_tokens"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let ids = if add_special {
@@ -571,18 +578,13 @@ pub(in crate::server) async fn tokenize(
     } else {
         ids.iter().map(|id| json!(id)).collect::<Vec<_>>()
     };
-    Json(json!({"tokens": tokens, "count": ids.len()})).into_response()
+    Json(json!({"tokens": tokens, "count": ids.len(), "max_model_len": state.max_context})).into_response()
 }
 
 pub(in crate::server) async fn detokenize(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let skip_special = body
         .get("skip_special")
         .and_then(Value::as_bool)
@@ -591,7 +593,7 @@ pub(in crate::server) async fn detokenize(
         Ok(ids) => {
             let ids: Vec<u32> = ids.into_iter().filter_map(|id| u32::try_from(id).ok()).collect();
             match state.tokenizer.decode(&ids, skip_special) {
-                Ok(content) => Json(json!({"content": content})).into_response(),
+                Ok(content) => Json(json!({"content": content, "prompt": content})).into_response(),
                 Err(message) => error(StatusCode::BAD_REQUEST, &message),
             }
         }

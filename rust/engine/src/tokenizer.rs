@@ -671,7 +671,11 @@ fn warn_unknown_pre(pre_type: &str) {
     let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
     let mut warned = warned.lock().unwrap_or_else(|error| error.into_inner());
     if warned.insert(pre_type.to_owned()) {
-        eprintln!("unknown tokenizer.ggml.pre '{pre_type}': using GPT-2 splitting");
+        eprintln!(
+            "WARNING: unknown tokenizer.ggml.pre '{pre_type}': falling back to GPT-2 splitting. Token ids can differ from the model's \
+             reference tokenizer (digits, whitespace, punctuation); convert the checkpoint with fllm-rs convert (it stores the exact \
+             tokenizer) or report the name"
+        );
     }
 }
 
@@ -733,12 +737,17 @@ fn build_unigram(
                 .ok_or_else(|| "tokenizer.ggml.precompiled_charsmap must be an array".to_owned())
         })
         .transpose()?;
-    if charsmap.is_some_and(|charsmap| !charsmap.is_empty()) {
-        return Err(
-            "GGUF Unigram precompiled_charsmap normalization is unsupported; include tokenizer.huggingface.json"
-                .into(),
-        );
-    }
+    // SentencePiece's normalization table (nmt_nfkc): T5-style models (llama.cpp's UGM tokenizer) apply it; the
+    // `llama` model name is tokenized like llama.cpp's SPM tokenizer, which ignores the table.
+    let charsmap_bytes: Vec<u8> = charsmap
+        .map(|values| {
+            values
+                .iter()
+                .map(|v| v.as_u64().and_then(|b| u8::try_from(b).ok()).ok_or_else(|| "tokenizer.ggml.precompiled_charsmap must hold bytes".to_owned()))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     let scores = if let Some(values) = metadata.get("tokenizer.ggml.scores") {
         let values = values
@@ -848,6 +857,20 @@ fn build_unigram(
             false,
         )?,
     };
+    if model_name == "t5" && !charsmap_bytes.is_empty() {
+        use base64::Engine as _;
+        let table = serde_json::json!({
+            "type": "Precompiled",
+            "precompiled_charsmap": base64::engine::general_purpose::STANDARD.encode(&charsmap_bytes),
+        });
+        // the tokenizers crate panics instead of failing on a malformed table
+        let normalizer = std::panic::catch_unwind(|| serde_json::from_value::<tokenizers::NormalizerWrapper>(table))
+            .map_err(|_| "tokenizer.ggml.precompiled_charsmap is not a valid SentencePiece normalization table".to_owned())?
+            .map_err(|error| format!("invalid tokenizer.ggml.precompiled_charsmap: {error}"))?;
+        tokenizer
+            .with_normalizer(Some(normalizer))
+            .map_err(|error| format!("cannot use tokenizer.ggml.precompiled_charsmap: {error}"))?;
+    }
     // Whitespace cleanup and the initial prefix are applied in
     // encode_plain; Never here prevents the pre-tokenizer adding it twice.
     tokenizer.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Never, true)));
@@ -1284,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn gguf_unigram_rejects_unimplemented_precompiled_normalizer() {
+    fn gguf_unigram_rejects_a_malformed_precompiled_normalizer() {
         let tokens = vec!["<unk>".to_owned(), "▁hi".to_owned()];
         let mut metadata = unigram_metadata(&tokens, vec![0.0, 1.0]);
         metadata.insert(
@@ -1292,8 +1315,28 @@ mod tests {
             json!([0, 1, 2]),
         );
         match build_unigram(&metadata, &tokens, "t5") {
-            Err(error) => assert!(error.contains("precompiled_charsmap")),
-            Ok(_) => panic!("expected unsupported precompiled normalizer to be rejected"),
+            Err(error) => assert!(error.contains("precompiled_charsmap"), "{error}"),
+            Ok(_) => panic!("expected a malformed normalization table to be rejected"),
         }
+        // the llama.cpp SPM tokenizer behind the `llama` model name ignores the table
+        assert!(build_unigram(&metadata, &tokens, "llama").is_ok());
+    }
+
+    #[test]
+    fn gguf_unigram_applies_the_precompiled_normalizer_of_t5_models() {
+        use base64::Engine as _;
+        // the nmt_nfkc table of a SentencePiece model trained for the converter tests
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/tokenizers/spm_unigram_nfkc");
+        let converted: Value = serde_json::from_str(&fllm_checkpoint::tokenizer_json_from_dir(&dir).unwrap()).unwrap();
+        let table = converted["normalizer"]["normalizers"][0]["precompiled_charsmap"].as_str().expect("precompiled normalizer");
+        let bytes = base64::engine::general_purpose::STANDARD.decode(table).unwrap();
+        let tokens = ["<unk>", "▁", "f", "i", "▁fi"].map(str::to_owned).to_vec();
+        let mut metadata = unigram_metadata(&tokens, vec![0.0, -2.0, -3.0, -3.0, -1.0]);
+        metadata.insert("tokenizer.ggml.precompiled_charsmap".into(), json!(bytes));
+        let (tokenizer, ..) = build_unigram(&metadata, &tokens, "t5").unwrap();
+        // U+FB01 (the "fi" ligature) normalizes to "fi", the one-piece token
+        assert_eq!(tokenizer.encode(" \u{fb01}", false).unwrap().get_ids(), &[4]);
+        let (plain, ..) = build_unigram(&unigram_metadata(&tokens, vec![0.0, -2.0, -3.0, -3.0, -1.0]), &tokens, "t5").unwrap();
+        assert_ne!(plain.encode(" \u{fb01}", false).unwrap().get_ids(), &[4]);
     }
 }

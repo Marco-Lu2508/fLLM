@@ -23,12 +23,75 @@ pub struct Catalog {
     pub models: Vec<CatalogEntry>,
 }
 
+pub const DEFAULT_QUANTS: &[&str] = &[
+    "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "IQ4_XS", "Q3_K_M", "Q2_K",
+];
+
+/// Default tag for a family when the user gives a bare family name (e.g. `llama3.1` -> `llama3.1:8b`).
+const FAMILY_DEFAULTS: &[(&str, &str)] = &[
+    ("llama3", "llama3:8b"),
+    ("llama3.1", "llama3.1:8b"),
+    ("llama3.2", "llama3.2:3b"),
+    ("llama3.3", "llama3.3:70b"),
+    ("llama4", "llama4:scout"),
+    ("qwen2.5", "qwen2.5:7b"),
+    ("qwen2.5-coder", "qwen2.5-coder:7b"),
+    ("qwq", "qwq:32b"),
+    ("qwen3", "qwen3:8b"),
+    ("qwen3.5", "qwen3.5:9b"),
+    ("qwen3.6", "qwen3.6:35b-a3b"),
+    ("gemma2", "gemma2:9b"),
+    ("gemma3", "gemma3:4b"),
+    ("gemma4", "gemma4:9b"),
+    ("mistral", "mistral:7b"),
+    ("mistral-nemo", "mistral-nemo:12b"),
+    ("mistral-small", "mistral-small:24b"),
+    ("mistral-large", "mistral-large:123b"),
+    ("mixtral", "mixtral:8x7b"),
+    ("codestral", "codestral:22b"),
+    ("devstral", "devstral:24b"),
+    ("ministral", "ministral:8b"),
+    ("deepseek-r1", "deepseek-r1:8b"),
+    ("deepseek-v3", "deepseek-v3:671b"),
+    ("deepseek-coder-v2", "deepseek-coder-v2:16b"),
+    ("phi3", "phi3:3.8b"),
+    ("phi3.5", "phi3.5:3.8b"),
+    ("phi4", "phi4:14b"),
+    ("phi4-mini", "phi4-mini:3.8b"),
+    ("phi4-reasoning", "phi4-reasoning:14b"),
+    ("smollm2", "smollm2:1.7b"),
+    ("granite3", "granite3:8b"),
+    ("granite3.1", "granite3.1:8b"),
+    ("granite3.2", "granite3.2:8b"),
+    ("command-r", "command-r:35b"),
+    ("command-r-plus", "command-r-plus:104b"),
+    ("command-r7b", "command-r7b:7b"),
+    ("aya-expanse", "aya-expanse:8b"),
+    ("internlm2.5", "internlm2.5:7b"),
+    ("internlm", "internlm3:8b"),
+    ("internlm3", "internlm3:8b"),
+    ("starcoder2", "starcoder2:7b"),
+    ("yi", "yi:9b"),
+    ("yi-coder", "yi-coder:9b"),
+    ("olmo2", "olmo2:7b"),
+    ("glm4", "glm4:9b"),
+    ("nemotron-mini", "nemotron-mini:4b"),
+];
+
 pub fn catalog() -> Vec<CatalogEntry> {
     load().models
 }
 
 pub fn find(name: &str) -> Option<CatalogEntry> {
-    catalog().into_iter().find(|entry| entry.name == name)
+    let normalized = name.trim().to_ascii_lowercase();
+    let stripped = normalized.strip_suffix(":latest").unwrap_or(&normalized);
+    let target = FAMILY_DEFAULTS
+        .iter()
+        .find_map(|(family, canonical)| (*family == stripped).then_some(*canonical))
+        .unwrap_or(stripped);
+    catalog()
+        .into_iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(target) || entry.name.eq_ignore_ascii_case(&normalized))
 }
 
 pub fn available_memory_bytes() -> u64 {
@@ -168,6 +231,76 @@ fn parse_string_array(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Infers approximate total parameter count (in billions) from a catalog model tag such as `llama3.1:8b`, `smollm2:135m`,
+/// `mixtral:8x7b`, `qwen3.5:35b-a3b`, or `llama4:scout`.
+pub fn infer_parameters_billion(name: &str) -> Option<f64> {
+    let tag = name.split_once(':').map_or(name, |(_, t)| t).to_ascii_lowercase();
+    match tag.as_str() {
+        "scout" => return Some(109.0),
+        "maverick" => return Some(400.0),
+        _ => {}
+    }
+    let primary = tag.split('-').next().unwrap_or(&tag);
+    if let Some((experts, per_expert)) = primary.split_once('x') {
+        if let Ok(e) = experts.parse::<f64>() {
+            if let Some(b) = per_expert.strip_suffix('b').and_then(|v| v.parse::<f64>().ok()) {
+                // MoE shared parameters reduce total slightly below e * b
+                return Some(e * b * 0.85);
+            }
+        }
+    }
+    if let Some(b) = primary.strip_suffix('b') {
+        if let Ok(val) = b.parse::<f64>() {
+            return Some(val);
+        }
+    }
+    if let Some(m) = primary.strip_suffix('m') {
+        if let Ok(val) = m.parse::<f64>() {
+            return Some(val / 1000.0);
+        }
+    }
+    None
+}
+
+/// Estimates GGUF file size in bytes for a model of `params_billion` billion parameters at `quant`.
+pub fn estimate_quant_bytes(params_billion: f64, quant: &str) -> u64 {
+    let bytes_per_param = match quant.to_ascii_uppercase().as_str() {
+        "F32" => 4.0,
+        "F16" | "BF16" => 2.0,
+        "Q8_0" => 1.08,
+        "Q6_K" => 0.82,
+        "Q5_K_M" | "Q5_K_S" | "Q5_0" | "Q5_1" => 0.70,
+        "Q4_K_M" | "Q4_K_S" | "Q4_0" | "Q4_1" => 0.58,
+        "IQ4_XS" | "IQ4_NL" => 0.53,
+        "Q3_K_L" | "Q3_K_M" | "Q3_K_S" | "IQ3_M" | "IQ3_XS" => 0.45,
+        "Q2_K" | "IQ2_M" | "IQ2_S" | "IQ2_XS" => 0.36,
+        _ => 0.60,
+    };
+    let overhead = 256.0 * 1024.0 * 1024.0; // tokenizer + metadata + unquantized norms/embeddings margin
+    ((params_billion * 1e9 * bytes_per_param) + overhead) as u64
+}
+
+/// Offline VRAM-aware quantization recommendation for `entry` given `available_memory` bytes.
+pub fn recommend_quant(entry: &CatalogEntry, available_memory: u64) -> String {
+    let Some(params_b) = infer_parameters_billion(&entry.name) else {
+        return entry.default_quant.clone();
+    };
+    let budget = available_memory.saturating_sub(1024 * 1024 * 1024) / 10 * 8;
+    let pool: Vec<String> = if entry.quants.is_empty() {
+        DEFAULT_QUANTS.iter().map(|q| (*q).to_owned()).collect()
+    } else {
+        entry.quants.clone()
+    };
+    let variants: Vec<(String, u64)> = pool
+        .into_iter()
+        .map(|q| {
+            let est = estimate_quant_bytes(params_b, &q);
+            (q, est)
+        })
+        .collect();
+    choose_from_variants(&variants, budget).unwrap_or_else(|| entry.default_quant.clone())
+}
+
 /// Returns `Some(normalized hf:// reference)` when `input` is a catalog alias.
 pub fn expand_reference(input: &str, memory: Option<u64>) -> Result<Option<String>, String> {
     let input = input.trim();
@@ -182,7 +315,7 @@ pub fn expand_reference(input: &str, memory: Option<u64>) -> Result<Option<Strin
     }
     let quant = match memory {
         Some(bytes) if bytes > 0 => choose_quant(&entry.repo, bytes)
-            .unwrap_or_else(|_| entry.default_quant.clone()),
+            .unwrap_or_else(|_| recommend_quant(&entry, bytes)),
         _ => entry.default_quant.clone(),
     };
     if !quant.is_empty() && memory.is_some() {
@@ -343,7 +476,36 @@ quants = ["Q8_0", "Q4_K_M"]
 
     #[test]
     fn expands_catalog_alias_to_default() {
-        // Use an in-memory parsed entry by inserting into global? Instead test find against embedded catalog may be empty until catalog.toml exists.
+        let all = catalog();
+        assert!(all.len() >= 60, "expected rich model catalog, got {}", all.len());
+        for family in [
+            "llama3:8b", "llama3.1:8b", "llama3.2:3b", "llama3.3:70b", "llama4:scout",
+            "qwen2.5:7b", "qwen3:8b", "qwen3.5:9b", "gemma2:9b", "gemma3:4b", "gemma4:9b",
+            "mistral:7b", "mixtral:8x7b", "devstral:24b", "codestral:22b",
+            "deepseek-r1:8b", "deepseek-v3:671b", "phi3:3.8b", "phi4:14b",
+            "smollm2:1.7b", "granite3:8b", "command-r:35b", "internlm3:8b",
+        ] {
+            assert!(find(family).is_some(), "missing catalog family {family}");
+        }
+        assert_eq!(
+            expand_reference("llama3.1:8b", None).unwrap(),
+            Some("hf://unsloth/Llama-3.1-8B-Instruct-GGUF:Q4_K_M".to_owned())
+        );
+        assert_eq!(
+            expand_reference("llama3.1", None).unwrap(),
+            Some("hf://unsloth/Llama-3.1-8B-Instruct-GGUF:Q4_K_M".to_owned())
+        );
+    }
+
+    #[test]
+    fn vram_aware_quantization_recommendations() {
+        let entry = find("llama3.1:8b").expect("llama3.1:8b");
+        // 24 GiB VRAM easily fits Q8_0 for an 8B model
+        assert_eq!(recommend_quant(&entry, 24 * (1 << 30)), "Q8_0");
+        // 8 GiB VRAM (budget ~5.6 GiB) fits Q4_K_M / Q5_K_M for an 8B model
+        let q8g = recommend_quant(&entry, 8 * (1 << 30));
+        assert!(matches!(q8g.as_str(), "Q4_K_M" | "Q5_K_M"), "got {q8g}");
+        // 4 GiB VRAM (budget ~2.4 GiB) picks Q2_K for an 8B model
+        assert_eq!(recommend_quant(&entry, 4 * (1 << 30)), "Q2_K");
     }
 }
-

@@ -1,5 +1,10 @@
 // fLLM CUDA backend: declarations shared between the kernel files and the C API.
 #pragma once
+int fllm_attn_encoder_launch(cudaStream_t s, const float *q, const float *k, const float *v, float *out,
+                             const int32_t *cu_seqlens, int batch_size, int total_tokens,
+                             int heads, int kv_heads, int head_dim, float scale, int window,
+                             const int32_t *global_tokens, int num_global);
+
 #if defined(__HIPCC__)
 #include "hip_compat.h"
 #else
@@ -77,6 +82,19 @@ int fllm_moe_linear_launch(cudaStream_t s, const void *const *tab, int kind, con
 int fllm_moe_route_launch(cudaStream_t s, const float *logits, int32_t *ids, float *w, int rows, int experts, int k,
                           int normalize, float scale);
 int fllm_moe_combine_launch(cudaStream_t s, float *out, const float *y, const float *w, int tokens, int k, int hidden);
+// Device-side mixture-of-experts (moe.cu): general routing, expert-major sort, grouped tensor-core GEMM, combination with the shared expert
+int fllm_moe_route2_launch(cudaStream_t s, const float *logits, const float *bias, int32_t *ids, float *w, int rows, int experts, int k,
+                           int sigmoid, int normalize, float scale, float eps, int groups, int groups_used, int top2);
+int fllm_moe_align_launch(cudaStream_t s, const int32_t *ids, int32_t *sorted, int32_t *block_expert, int32_t *num_post, int pairs,
+                          int expert_offset, int num_local, int block);
+int fllm_moe_grouped_supported(uint32_t kind, int cols, int block);
+int fllm_moe_grouped_launch(cudaStream_t s, uint32_t kind, int glu, const void *const *wtab, const void *const *wtab2, const void *const *btab,
+                            const void *const *btab2, const float *X, const float *pw, float *Y, const int32_t *sorted,
+                            const int32_t *block_expert, const int32_t *num_post, int rows, int cols, int pairs, int xdiv, int block,
+                            int max_blocks, int glu_mode, float alpha, float limit);
+int fllm_moe_combine2_launch(cudaStream_t s, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
+                             int k, int hidden);
+int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, const float *g, int tokens, int hidden);
 int fllm_swiglu_oai_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t count, float alpha, float limit);
 void fllm_convert_x16_pad(cudaStream_t s, const float *X, void *x16, int batch, int cols, int cols_pad);
 int fllm_repack_launch(cudaStream_t s, void *dst, const void *src, int kind, size_t rows, size_t cols);
@@ -104,7 +122,7 @@ int fllm_add_rms_norm_launch(cudaStream_t s, float *x, const void *branch, int r
 int fllm_rope_kv_f32_launch(cudaStream_t s, float *q, const float *k, const float *v, uint16_t *pool_k, uint16_t *pool_v,
                             const int32_t *pos, const int32_t *slots, const float *cs, const float *sn, int rows, int heads,
                             int kv_heads, int dk, int dv, int half_, int neox);
-void fllm_quantize_x8_glu_launch(cudaStream_t s, const float *gate, const float *up, int mode, int8_t *xq, float2 *xs, size_t groups);
+void fllm_quantize_x8_glu_launch(cudaStream_t s, const void *gate, const void *up, int mode, int8_t *xq, float2 *xs, size_t groups, bool half_in = false);
 // may the NVFP4 GEMM of this batch read activations quantized elsewhere into its scratch? / they now are there (nvfp4.cu)
 bool fllm_nvfp4_prep_ok(int cols, int batch);
 // May the fused norm quantize for the NVFP4 GEMM of weight `w` (rows x cols)? *gs: device pointer of the weight's static activation factor
@@ -123,6 +141,13 @@ int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, in
                       float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
                       const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
                       float *out);
+// Kimi Delta Attention (KDA) layer (kda.cu)
+int fllm_kda_supported(int heads, int head_dim, int ksz);
+int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
+                    float lower_bound, float eps, size_t state_off, size_t rec_bytes,
+                    const float *qkv, const float *forget, const float *beta, const float *gate,
+                    const float *convw, const float *dt_bias, const float *rate, const float *norm,
+                    float *mixed, float *out);
 int fllm_rope_launch(cudaStream_t s, float *q, float *k, const int32_t *pos, const float *cs, const float *sn, int rows,
                      int heads, int kv_heads, int dim, int half_, int neox);
 int fllm_kv_write_launch(cudaStream_t s, const float *src, uint16_t *pool, const int32_t *slots, int rows, int kv,
@@ -144,6 +169,20 @@ int fllm_attention3_try(cudaStream_t s, const float *q, const uint16_t *kpool, c
 int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out,
                                 const int64_t *table, int rows, int kv_len, int heads, int kv_heads, int dk, int dv,
                                 int block_size, float scale);
+// Hopper / FlashInfer attention variants (fa3_prefill.cu, fi_attn.cu): -1 = not covered, the caller continues with the next path
+bool fllm_fa3_enabled();
+bool fllm_fa3_built();
+int fllm_attn_mode(int which);
+extern thread_local int fllm_attn_last_path;
+int fllm_fa3_prefill_try(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int64_t *table, int rows, int kv_len,
+                         int heads, int kv_heads, int dk, int dv, int block_size, float scale, int window,
+                         float softcap = 0.f, const float *sinks = nullptr, int kind = 1);
+int fllm_fa3_prefill_runs(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, int nreq, const int32_t *qo,
+                          const int32_t *kvp, const int32_t *kv_len, const int32_t *pages, int heads, int kv_heads, int dk, int dv, int block_size,
+                          float scale, int window);
+int fllm_fi_attention_try(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int64_t *tables_host,
+                          const int64_t *lengths_host, int rows, const float *sinks, bool has_alibi, int heads, int kv_heads, int dk, int dv, int stride,
+                          int block_size, int kind, float scale, float softcap, int window, int chunk);
 int fllm_qgemm6k_try(cudaStream_t s, const void *W, const float *X, float *Y, const float *bias, int rows, int cols,
                      int batch, void *x16, size_t x16_bytes);
 void fllm_convert_x16(cudaStream_t s, const float *X, void *x16, int batch, int cols);
@@ -227,6 +266,10 @@ int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, floa
 // prompt attention (flashinfer_prefill.cu): see fllm_attn_x16 in api.cu
 extern thread_local void *fllm_attn_x16;
 extern thread_local bool fllm_attn_x16_written;
+// FLLM_ACT_DTYPE=f16: the q and out pointers of fllm_attention3_try / fllm_flashinfer_prefill_try are FP16 arrays (flashinfer_prefill.cu)
+extern thread_local bool fllm_attn_half_io;
+// FLLM_ACT_DTYPE: activation type (0 FP32, 1 FP16, 2 BF16) of the q and out arrays of the next fllm_attention4_try (attention4.cu)
+extern thread_local int fllm_attn_act_dt;
 // set by fllm_cuda_nvfp4_accumulate: the next NVFP4 GEMM (CUTLASS path only, see fllm_nvfp4_cutlass_ok) adds fllm_fp4_acc_scale * result to y
 extern thread_local bool fllm_fp4_acc;
 extern thread_local float fllm_fp4_acc_scale;
@@ -302,7 +345,50 @@ int fllm_mamba1_conv_launch(cudaStream_t s, const void *runs, int nruns, int inn
 int fllm_mamba1_prep_launch(cudaStream_t s, float *split, float *dt_in, int rows, int rank, int state, float eps);
 int fllm_mamba1_scan_launch(cudaStream_t s, const void *runs, int nruns, int inner, int state, int rank, size_t state_off, const float *split,
                             const float *dt, const float *mixed, const float *proj, const float *decay, const float *skip, float *out);
+#if !defined(__HIPCC__)
+// Activations in FP16 / BF16 (act_narrow.cu, FLLM_ACT_DTYPE). dt: 0 FP32, 1 FP16, 2 BF16. Buffers are arrays of that type; weights, norm weights, biases
+// and rotary tables stay FP32.
+int fllm_na_convert_launch(cudaStream_t s, const void *src, int src_dt, void *dst, int dst_dt, size_t n);
+int fllm_na_add_rms_norm_launch(cudaStream_t s, int dt, void *x, const void *branch, float scale, const float *w, void *out, int rows, int cols, float eps);
+int fllm_na_residual_launch(cudaStream_t s, int dt, void *x, const void *res, size_t count, float scale);
+int fllm_na_glu_launch(cudaStream_t s, int dt, const void *gate, const void *up, void *out, size_t count, int mode);
+int fllm_na_bias_launch(cudaStream_t s, int dt, void *y, const float *bias, int rows, int batch);
+int fllm_na_rope_launch(cudaStream_t s, int dt, void *q, void *k, const int32_t *pos, const float *cs, const float *sn, int rows, int heads, int kv_heads,
+                         int dim, int half_, int neox);
+int fllm_na_kv_write_launch(cudaStream_t s, int dt, const void *src, uint16_t *pool, const int32_t *slots, int rows, int kv);
+int fllm_na_rope_kv_launch(cudaStream_t s, int dt, void *q, const void *k, const void *v, uint16_t *pool_k, uint16_t *pool_v, const int32_t *pos,
+                            const int32_t *slots, const float *cs, const float *sn, const float *qw, const float *kw, float eps, int rows, int heads,
+                            int kv_heads, int dk, int dv, int half_, int neox);
+int fllm_na_rope_kv_strided_launch(cudaStream_t s, int dt, void *q_dst, const void *q_src, int q_stride, const void *k, int k_stride, const void *v, int v_stride,
+                                   uint16_t *pool_k, uint16_t *pool_v, const int32_t *pos, const int32_t *slots, const float *cs, const float *sn, const float *qw,
+                                   const float *kw, const float *qb, const float *kb, const float *vb, float eps, int rows, int heads, int kv_heads, int dk,
+                                   int dv, int half_, int neox);
+int fllm_na_split3_launch(cudaStream_t s, int dt, const void *src, void *d0, void *d1, void *d2, int rows, int n0, int n1, int n2);
+int fllm_na_glu_merged_launch(cudaStream_t s, int dt, const void *gu, void *out, int rows, int ff, int mode);
+int fllm_na_quantize_x8_launch(cudaStream_t s, int dt, const void *x, int8_t *xq, float2 *xs, size_t groups);
+int fllm_na_check_launch(cudaStream_t s, int dt, const void *x, size_t count, int *out);
+// Marlin GEMM with FP16 (bf16 = 0) or BF16 activations, scales and result (marlin_vllm/marlin_vllm.cu); -1 when no kernel of that type was built
+extern "C" int fllm_vllm_marlin_gemm_t(const void *A, const void *B, void *C, void *C_tmp, const void *scales, const void *zeros, const void *bias,
+                                       const void *global_scale, int m, int n, int k, int lda, void *workspace, int kind, int group_size, int dev, int sms,
+                                       cudaStream_t stream, int bf16);
+#endif
 #if defined(__HIPCC__)
 // AMD-only kernels (matrix-core GEMM, skinny GEMM, decode attention, Q4Z): rust/engine/hip/
 #include "../hip/fllm_hip.h"
 #endif
+
+// Sampling on the device (sampling.cu): `params` is an array of `rows` FllmSampleRow (80 bytes each) in device memory; the lists they
+// index (penalty tokens and counts, bias, grammar bitmask) and the outputs are device arrays. `work` receives the processed logits
+// (it may equal `logits` to work in place).
+int fllm_sample_launch(cudaStream_t s, const float *logits, float *work, int rows, int vocab, const void *params, const int32_t *pen_ids,
+                       const int32_t *pen_counts, const int32_t *bias_ids, const float *bias_vals, const uint32_t *mask, int mask_words,
+                       int32_t *out_ids, float *out_logprob, int32_t *top_ids, float *top_logprob, int top_stride);
+
+int fllm_tree_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool_layer,
+                               const uint16_t *vpool_layer, float *out, const int64_t *tables,
+                               const int64_t *lengths, const uint8_t *tree_mask, int prefix_len,
+                               int num_nodes, int rows, int heads, int kv_heads, int dk, int dv,
+                               int stride, int block_size, int kind, float scale, float softcap);
+int fllm_spec_verify_launch(cudaStream_t s, const int32_t *draft, const int32_t *target,
+                            int num_draft, int32_t *out_accepted, int32_t *out_next,
+                            int64_t *seq_length);

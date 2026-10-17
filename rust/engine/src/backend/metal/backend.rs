@@ -192,6 +192,8 @@ impl Backend for MetalBackend {
             value_dim,
             words_per_layer_k,
             words_per_layer_v,
+            layout: None,
+            layer_geoms: None,
         })
     }
 }

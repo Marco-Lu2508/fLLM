@@ -6,6 +6,11 @@ repo = "unsloth/Qwen3.5-0.8B-GGUF"
 default = "Q4_K_M"
 
 [[models]]
+name = "qwen3.5:4b"
+repo = "unsloth/Qwen3.5-4B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
 name = "qwen3.5:9b"
 repo = "unsloth/Qwen3.5-9B-GGUF"
 default = "Q4_K_M"
@@ -21,8 +26,133 @@ repo = "unsloth/Qwen3.6-35B-A3B-GGUF"
 default = "Q4_K_M"
 
 [[models]]
+name = "qwen3:0.6b"
+repo = "unsloth/Qwen3-0.6B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:1.7b"
+repo = "unsloth/Qwen3-1.7B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:4b"
+repo = "unsloth/Qwen3-4B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:8b"
+repo = "unsloth/Qwen3-8B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:14b"
+repo = "unsloth/Qwen3-14B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:30b-a3b"
+repo = "unsloth/Qwen3-30B-A3B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:32b"
+repo = "unsloth/Qwen3-32B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen3:235b-a22b"
+repo = "unsloth/Qwen3-235B-A22B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:0.5b"
+repo = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:1.5b"
+repo = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:3b"
+repo = "Qwen/Qwen2.5-3B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:7b"
+repo = "Qwen/Qwen2.5-7B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:14b"
+repo = "Qwen/Qwen2.5-14B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:32b"
+repo = "Qwen/Qwen2.5-32B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5:72b"
+repo = "Qwen/Qwen2.5-72B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5-coder:1.5b"
+repo = "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5-coder:7b"
+repo = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5-coder:14b"
+repo = "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwen2.5-coder:32b"
+repo = "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "qwq:32b"
+repo = "unsloth/QwQ-32B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3:8b"
+repo = "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3:70b"
+repo = "QuantFactory/Meta-Llama-3-70B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
 name = "llama3.1:8b"
 repo = "unsloth/Llama-3.1-8B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3.1:70b"
+repo = "unsloth/Llama-3.1-70B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3.1:405b"
+repo = "bartowski/Meta-Llama-3.1-405B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3.2:1b"
+repo = "unsloth/Llama-3.2-1B-Instruct-GGUF"
 default = "Q4_K_M"
 
 [[models]]
@@ -31,8 +161,73 @@ repo = "unsloth/Llama-3.2-3B-Instruct-GGUF"
 default = "Q4_K_M"
 
 [[models]]
+name = "llama3.2:11b-vision"
+repo = "bartowski/Llama-3.2-11B-Vision-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama3.3:70b"
+repo = "unsloth/Llama-3.3-70B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama4:scout"
+repo = "unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "llama4:maverick"
+repo = "unsloth/Llama-4-Maverick-17B-128E-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma2:2b"
+repo = "bartowski/gemma-2-2b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma2:9b"
+repo = "bartowski/gemma-2-9b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma2:27b"
+repo = "bartowski/gemma-2-27b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma3:1b"
+repo = "unsloth/gemma-3-1b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
 name = "gemma3:4b"
 repo = "unsloth/gemma-3-4b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma3:12b"
+repo = "unsloth/gemma-3-12b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma3:27b"
+repo = "unsloth/gemma-3-27b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma4:4b"
+repo = "unsloth/gemma-4-4b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma4:9b"
+repo = "unsloth/gemma-4-9b-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "gemma4:27b"
+repo = "unsloth/gemma-4-27b-it-GGUF"
 default = "Q4_K_M"
 
 [[models]]
@@ -56,8 +251,83 @@ repo = "bartowski/Mistral-7B-Instruct-v0.3-GGUF"
 default = "Q4_K_M"
 
 [[models]]
+name = "mistral-nemo:12b"
+repo = "bartowski/Mistral-Nemo-Instruct-2407-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "mistral-small:24b"
+repo = "unsloth/Mistral-Small-24B-Instruct-2501-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "mistral-large:123b"
+repo = "bartowski/Mistral-Large-Instruct-2407-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "mixtral:8x7b"
+repo = "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "mixtral:8x22b"
+repo = "bartowski/Mixtral-8x22B-Instruct-v0.1-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "codestral:22b"
+repo = "bartowski/Codestral-22B-v0.1-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "devstral:24b"
+repo = "unsloth/Devstral-Small-2505-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "ministral:8b"
+repo = "bartowski/Ministral-8B-Instruct-2410-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "phi3:3.8b"
+repo = "bartowski/Phi-3.1-mini-4k-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "phi3:14b"
+repo = "bartowski/Phi-3-medium-4k-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "phi3.5:3.8b"
+repo = "bartowski/Phi-3.5-mini-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
 name = "phi4:14b"
 repo = "bartowski/phi-4-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "phi4-mini:3.8b"
+repo = "unsloth/Phi-4-mini-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "phi4-reasoning:14b"
+repo = "unsloth/Phi-4-reasoning-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-r1:1.5b"
+repo = "unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-r1:7b"
+repo = "unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF"
 default = "Q4_K_M"
 
 [[models]]
@@ -65,3 +335,147 @@ name = "deepseek-r1:8b"
 repo = "unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF"
 default = "Q4_K_M"
 
+[[models]]
+name = "deepseek-r1:14b"
+repo = "unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-r1:32b"
+repo = "unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-r1:70b"
+repo = "unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-r1:671b"
+repo = "unsloth/DeepSeek-R1-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-v3:671b"
+repo = "unsloth/DeepSeek-V3-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "deepseek-coder-v2:16b"
+repo = "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "smollm2:135m"
+repo = "bartowski/SmolLM2-135M-Instruct-GGUF"
+default = "Q8_0"
+
+[[models]]
+name = "smollm2:360m"
+repo = "bartowski/SmolLM2-360M-Instruct-GGUF"
+default = "Q8_0"
+
+[[models]]
+name = "smollm2:1.7b"
+repo = "bartowski/SmolLM2-1.7B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "granite3:2b"
+repo = "bartowski/granite-3.0-2b-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "granite3:8b"
+repo = "bartowski/granite-3.0-8b-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "granite3.1:2b"
+repo = "bartowski/granite-3.1-2b-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "granite3.1:8b"
+repo = "bartowski/granite-3.1-8b-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "granite3.2:8b"
+repo = "bartowski/granite-3.2-8b-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "command-r:35b"
+repo = "bartowski/c4ai-command-r-v01-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "command-r-plus:104b"
+repo = "bartowski/c4ai-command-r-plus-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "command-r7b:7b"
+repo = "bartowski/c4ai-command-r7b-12-2024-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "aya-expanse:8b"
+repo = "bartowski/aya-expanse-8b-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "internlm2.5:7b"
+repo = "bartowski/internlm2_5-7b-chat-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "internlm2.5:20b"
+repo = "bartowski/internlm2_5-20b-chat-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "internlm3:8b"
+repo = "bartowski/internlm3-8b-instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "starcoder2:7b"
+repo = "bartowski/starcoder2-7b-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "starcoder2:15b"
+repo = "bartowski/starcoder2-15b-instruct-v0.1-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "yi:9b"
+repo = "bartowski/Yi-1.5-9B-Chat-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "yi-coder:9b"
+repo = "bartowski/Yi-Coder-9B-Chat-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "olmo2:7b"
+repo = "bartowski/OLMo-2-1124-7B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "olmo2:13b"
+repo = "bartowski/OLMo-2-1124-13B-Instruct-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "glm4:9b"
+repo = "bartowski/glm-4-9b-chat-GGUF"
+default = "Q4_K_M"
+
+[[models]]
+name = "nemotron-mini:4b"
+repo = "bartowski/Nemotron-Mini-4B-Instruct-GGUF"
+default = "Q4_K_M"

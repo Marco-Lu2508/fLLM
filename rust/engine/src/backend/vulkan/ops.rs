@@ -431,6 +431,16 @@ pub enum GluMode {
     Relu2,
     /// `max(g, 0)`.
     Relu,
+    /// `gelu_erf(g)` (`Stream::activation` mode 2).
+    GeluErf,
+    /// `gelu_erf(g) * u`.
+    GeluErfGated,
+    /// `max(g, 0) * u`.
+    ReluGated,
+    /// `max(g, 0)^2 * u`.
+    Relu2Gated,
+    /// `g` (strided copy).
+    Copy,
 }
 
 impl GluMode {
@@ -444,12 +454,20 @@ impl GluMode {
             Self::Gelu => "act_gelu",
             Self::Relu2 => "act_relu2",
             Self::Relu => "act_relu",
+            Self::GeluErf => "act_gelu_erf",
+            Self::GeluErfGated => "act_geglu_erf",
+            Self::ReluGated => "act_reglu",
+            Self::Relu2Gated => "act_reglu2",
+            Self::Copy => "act_copy",
         }
     }
 
     /// Whether the `up` operand is read.
     pub fn gated(self) -> bool {
-        matches!(self, Self::Swiglu | Self::Geglu | Self::SwigluOai { .. })
+        matches!(
+            self,
+            Self::Swiglu | Self::Geglu | Self::SwigluOai { .. } | Self::GeluErfGated | Self::ReluGated | Self::Relu2Gated
+        )
     }
 }
 
@@ -526,6 +544,56 @@ pub fn plan_residual_add(count: usize, scale: f32) -> Result<OpPlan, BackendErro
         Push::new().u("count", count).f("scale", scale),
         groups_1d(count, 256),
         Slots::new().rw("x").read("residual"),
+    )
+}
+
+/// `Stream::clamp` (`ewise_clamp`: `x = clamp(x, -limit, limit)`) and `Stream::softplus_gate_mul` (`ewise_softplus`: `x *= softplus(beta g) / beta`).
+pub fn plan_ewise(softplus: bool, count: usize, param: f32) -> Result<OpPlan, BackendError> {
+    if count == 0 {
+        return Err(invalid("element-wise operation on an empty tensor"));
+    }
+    plan(
+        if softplus { "ewise_softplus" } else { "ewise_clamp" },
+        Push::new().u("count", count).f("param", param),
+        groups_1d(count, 256),
+        Slots::new().rw("x").read_opt("gate", softplus),
+    )
+}
+
+/// Which output `mla_move` produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MlaPart {
+    Q,
+    K,
+    V,
+    Latent,
+}
+
+/// `Stream::mla_assemble` / `mla_latent` (`mla_move_*`): one dispatch per part. Operands: `a`, `b`, `dst` as in the header of `mla_move.comp`.
+pub fn plan_mla_move(part: MlaPart, rows: usize, heads: usize, nope: usize, rope: usize, value: usize, kv_lora: usize) -> Result<OpPlan, BackendError> {
+    let dk = nope + rope;
+    let (name, count) = match part {
+        MlaPart::Q => ("mla_move_q", rows * heads * dk),
+        MlaPart::K => ("mla_move_k", rows * heads * dk),
+        MlaPart::V => ("mla_move_v", rows * heads * value),
+        MlaPart::Latent => ("mla_move_latent", rows * kv_lora),
+    };
+    if count == 0 {
+        return Err(invalid("MLA data movement of an empty tensor"));
+    }
+    let push = Push::new()
+        .u("count", count)
+        .u("rows", rows)
+        .u("heads", heads)
+        .u("nope", nope)
+        .u("rope", rope)
+        .u("value", value)
+        .u("kv_lora", kv_lora);
+    plan(
+        name,
+        push,
+        groups_1d(count, 256),
+        Slots::new().read("a").read_opt("b", part == MlaPart::K).write("dst"),
     )
 }
 

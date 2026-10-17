@@ -1,10 +1,10 @@
-# Vulkan core API (package 1)
+# Vulkan core API
 
 Level of verification: **L0** (compiles with `--features vulkan`, clippy clean, 47 hardware-free unit tests pass; nothing here has
 ever run on a driver). Smoke tests for the first hardware run are in `instance/smoke.rs` (`--ignored`).
 
-The core wraps `ash` 0.38 and knows nothing about models. Package 4 (integration) builds `Backend`/`Stream`, the weight/KV layouts
-and the operations on top of it; packages 2/3 deliver SPIR-V (`shaders::spirv(name)`) that is turned into pipelines here.
+The core wraps `ash` 0.38 and knows nothing about models. The integration layer (`INTEGRATION.md`) builds `Backend`/`Stream`, the weight/KV layouts
+and the operations on top of it; the shader crates deliver SPIR-V (`shaders::spirv(name)`) that is turned into pipelines here.
 
 ## Objects at a glance
 
@@ -117,7 +117,7 @@ free_memory(), total_memory(), stats()      // AllocStats { live_bytes, live_buf
   `aligned_view(offset, len, caps.min_storage_buffer_offset_alignment)`; it returns a view starting at the aligned-down offset and the
   `skew` in bytes the data starts at inside that view - pass the skew to the shader (push constant). Cut weight tensors that exceed
   `max_storage_buffer_range` into several bindings or rows ranges.
-- `DeviceBuffer` mapping for package 4: keep `Arc<Buffer>` (or `Buffer`, it is cheap) in `DeviceBuffer.handle`
+- `DeviceBuffer` mapping for the integration layer: keep `Arc<Buffer>` (or `Buffer`, it is cheap) in `DeviceBuffer.handle`
   (`Arc::new(buffer) as Arc<dyn Any + Send + Sync>`), `DeviceBuffer.size/offset` as the view, `slice()` of `DeviceBuffer` -> `Buffer::slice`.
 - Lifetime: dropping the last clone returns the memory immediately. The `Recorder` keeps every buffer it recorded alive until the GPU
   finished the submission, so dropping a `Buffer` right after `submit()` is safe. Outside the recorder (your own `ash` calls) keep the

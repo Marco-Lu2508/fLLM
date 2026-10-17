@@ -10,12 +10,22 @@
 //! word layout. `fllm-rs selftest-gpu --device cuda` checks every operation against the CPU
 //! reference.
 
+use super::act_dtype::ActDtype;
 use super::cpu::{CpuBackend, CpuStream};
 use super::*;
 use crate::devices::{DeviceInfo, DeviceType};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod hopper_arch;
+pub use hopper_arch::device_report;
+pub(crate) mod hopper_attn;
+pub mod hopper_fp8;
+pub mod hopper_gemm;
+mod hopper_mla;
+pub use hopper_mla::latent_supported as mla_latent_supported;
+mod moe;
 
 #[repr(C)]
 struct RawStream {
@@ -54,6 +64,37 @@ impl KvDesc {
 }
 
 extern "C" {
+    fn fllm_cuda_tree_attention(
+        st: *mut RawStream,
+        q: *const f32,
+        kpool_layer: *const u16,
+        vpool_layer: *const u16,
+        out: *mut f32,
+        tables: *const i64,
+        lengths: *const i64,
+        tree_mask: *const u8,
+        prefix_len: c_int,
+        num_nodes: c_int,
+        rows: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        stride: c_int,
+        block_size: c_int,
+        kind: c_int,
+        scale: f32,
+        softcap: f32,
+    ) -> c_int;
+    fn fllm_cuda_spec_verify(
+        st: *mut RawStream,
+        draft: *const i32,
+        target: *const i32,
+        num_draft: c_int,
+        out_accepted: *mut i32,
+        out_next: *mut i32,
+        seq_length: *mut i64,
+    ) -> c_int;
     fn fllm_cuda_last_error() -> *const c_char;
     fn fllm_cuda_device_count() -> c_int;
     fn fllm_cuda_device_info(
@@ -73,6 +114,7 @@ extern "C" {
     fn fllm_cuda_stream_create(dev: c_int) -> *mut RawStream;
     fn fllm_cuda_stream_destroy(st: *mut RawStream);
     fn fllm_cuda_stream_sync(st: *mut RawStream) -> c_int;
+    fn fllm_cuda_stream_wait_stream(waiter: *mut RawStream, target: *mut RawStream) -> c_int;
     fn fllm_cuda_upload(st: *mut RawStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> c_int;
     fn fllm_cuda_download(st: *mut RawStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> c_int;
     fn fllm_cuda_copy(st: *mut RawStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> c_int;
@@ -197,6 +239,28 @@ extern "C" {
     fn fllm_cuda_fp8_marlin_repack(dev: c_int, words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_fp8_marlin_supported(rows: c_int, cols: c_int) -> c_int;
     fn fllm_cuda_argmax(st: *mut RawStream, logits: *const f32, rows: c_int, vocab: c_int, host_out: *mut i32) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_sample(
+        st: *mut RawStream,
+        logits: *const f32,
+        rows: c_int,
+        vocab: c_int,
+        params: *const c_void,
+        pen_ids: *const i32,
+        pen_counts: *const i32,
+        pen_total: c_int,
+        bias_ids: *const i32,
+        bias_vals: *const f32,
+        bias_total: c_int,
+        mask: *const u32,
+        mask_total: c_int,
+        mask_words: c_int,
+        top_stride: c_int,
+        ids_out: *mut i32,
+        logprob_out: *mut f32,
+        top_ids_out: *mut i32,
+        top_logprob_out: *mut f32,
+    ) -> c_int;
     fn fllm_cuda_step_begin(st: *mut RawStream) -> c_int;
     fn fllm_cuda_step_end(st: *mut RawStream) -> c_int;
     fn fllm_cuda_get_opt(id: c_int) -> c_int;
@@ -371,6 +435,31 @@ extern "C" {
     fn fllm_cuda_act_glu(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
+    fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_kda_layer(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        max_n: c_int,
+        heads: c_int,
+        head_dim: c_int,
+        ksz: c_int,
+        lower_bound: f32,
+        eps: f32,
+        state_off: usize,
+        rec_bytes: usize,
+        qkv: *const f32,
+        forget: *const f32,
+        beta: *const f32,
+        gate: *const f32,
+        convw: *const f32,
+        dt_bias: *const f32,
+        rate: *const f32,
+        norm: *const f32,
+        mixed: *mut f32,
+        out: *mut f32,
+    ) -> c_int;
     fn fllm_cuda_delta_supported(kh: c_int, vh: c_int, hk: c_int, hv: c_int, ksz: c_int) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_delta_layer(
@@ -457,7 +546,25 @@ extern "C" {
         window: c_int,
         chunk: c_int,
     ) -> c_int;
-    fn fllm_cuda_attention(
+        fn fllm_cuda_attn_encoder(
+        st: *mut RawStream,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        out: *mut f32,
+        cu_seqlens_host: *const i32,
+        batch_size: c_int,
+        total_tokens: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        head_dim: c_int,
+        scale: f32,
+        window: c_int,
+        global_tokens_host: *const i32,
+        num_global: c_int,
+    ) -> c_int;
+
+fn fllm_cuda_attention(
         st: *mut RawStream,
         q: *const f32,
         kpool_layer: *const u16,
@@ -484,6 +591,109 @@ extern "C" {
         softcap: f32,
         window: c_int,
         chunk: c_int,
+    ) -> c_int;
+}
+
+// Narrow activations (cuda/act_api.inc, FLLM_ACT_DTYPE). dt: 0 FP32, 1 FP16, 2 BF16.
+extern "C" {
+    fn fllm_cuda_na_convert(st: *mut RawStream, src: *const c_void, src_dt: c_int, dst: *mut c_void, dst_dt: c_int, n: usize) -> c_int;
+    fn fllm_cuda_na_rms_norm(
+        st: *mut RawStream,
+        dt: c_int,
+        x: *mut c_void,
+        branch: *const c_void,
+        scale: f32,
+        w: *const f32,
+        out: *mut c_void,
+        rows: c_int,
+        cols: c_int,
+        eps: f32,
+    ) -> c_int;
+    fn fllm_cuda_na_residual(st: *mut RawStream, dt: c_int, x: *mut c_void, res: *const c_void, count: usize, scale: f32) -> c_int;
+    fn fllm_cuda_na_glu(st: *mut RawStream, dt: c_int, gate: *const c_void, up: *const c_void, out: *mut c_void, count: usize, mode: c_int) -> c_int;
+    fn fllm_cuda_na_rope(
+        st: *mut RawStream,
+        dt: c_int,
+        q: *mut c_void,
+        k: *mut c_void,
+        positions: *const i32,
+        rows: c_int,
+        cs: *const f32,
+        sn: *const f32,
+        heads: c_int,
+        kv_heads: c_int,
+        dim: c_int,
+        half_: c_int,
+        neox: c_int,
+    ) -> c_int;
+    fn fllm_cuda_na_kv_write(st: *mut RawStream, dt: c_int, src: *const c_void, pool: *mut u16, slots: *const i32, rows: c_int, kv: c_int) -> c_int;
+    fn fllm_cuda_na_rope_kv(
+        st: *mut RawStream,
+        dt: c_int,
+        q: *mut c_void,
+        k: *const c_void,
+        v: *const c_void,
+        pool_k: *mut u16,
+        pool_v: *mut u16,
+        positions: *const i32,
+        slots: *const i32,
+        rows: c_int,
+        cs: *const f32,
+        sn: *const f32,
+        qw: *const f32,
+        kw: *const f32,
+        eps: f32,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        half_: c_int,
+        neox: c_int,
+    ) -> c_int;
+    fn fllm_cuda_na_linear_q4z(
+        st: *mut RawStream,
+        dt: c_int,
+        w: *const c_void,
+        group: c_int,
+        x: *const c_void,
+        y: *mut c_void,
+        res: *mut c_void,
+        res_scale: f32,
+        bias: *const f32,
+        rows: c_int,
+        cols: c_int,
+        batch: c_int,
+        norm_w: *const f32,
+        norm_out: *mut c_void,
+        eps: f32,
+    ) -> c_int;
+    fn fllm_cuda_na_check(st: *mut RawStream, dt: c_int, x: *const c_void, count: usize, max_abs: *mut f32, bad: *mut c_int) -> c_int;
+    fn fllm_cuda_na_linear_kquant(st: *mut RawStream, dt: c_int, w: *const c_void, kind: c_int, x: *const c_void, y: *mut f32, bias: *const f32, rows: c_int, cols: c_int, batch: c_int) -> c_int;
+    fn fllm_cuda_reserve_workspace(st: *mut RawStream, rows: c_int, cols: c_int, out_cols: c_int) -> c_int;
+    fn fllm_cuda_na_split3(st: *mut RawStream, dt: c_int, src: *const c_void, d0: *mut c_void, d1: *mut c_void, d2: *mut c_void, rows: c_int, n0: c_int, n1: c_int, n2: c_int) -> c_int;
+    fn fllm_cuda_na_glu_merged(st: *mut RawStream, dt: c_int, gu: *const c_void, out: *mut c_void, rows: c_int, ff: c_int, mode: c_int) -> c_int;
+    fn fllm_cuda_na_rope_kv_qkv(
+        st: *mut RawStream,
+        dt: c_int,
+        q_dst: *mut c_void,
+        qkv: *const c_void,
+        pool_k: *mut u16,
+        pool_v: *mut u16,
+        positions: *const i32,
+        slots: *const i32,
+        rows: c_int,
+        cs: *const f32,
+        sn: *const f32,
+        qw: *const f32,
+        kw: *const f32,
+        bias: *const f32,
+        eps: f32,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        half_: c_int,
+        neox: c_int,
     ) -> c_int;
 }
 
@@ -640,6 +850,8 @@ pub struct CudaBackend {
     capabilities: BackendCapabilities,
     next_id: AtomicU64,
     perm_cache: std::sync::Mutex<std::collections::HashMap<Vec<u8>, DeviceBuffer>>,
+    /// `ActDtype::code()` of the activation type streams and 4-bit weights are created for (`set_activation_dtype`).
+    act: std::sync::atomic::AtomicU8,
 }
 
 impl CudaBackend {
@@ -669,7 +881,7 @@ impl CudaBackend {
         let rocm = info.description.starts_with("CUDA/ROCm");
         if cc >= 75 || rocm {
             // 4-bit AWQ / GPTQ weights run through the Marlin GEMM of vLLM
-            supported_quants.extend([QuantType::Q4Z32, QuantType::Q4Z64, QuantType::Q4Z128]);
+            supported_quants.extend([QuantType::Q4Z32, QuantType::Q4Z64, QuantType::Q4Z128, QuantType::Fp8Block]);
         }
         let capabilities = BackendCapabilities {
             name: info.name.clone(),
@@ -683,21 +895,34 @@ impl CudaBackend {
             supports_kv_cache_write: true,
             supports_embedding_lookup: true,
             supports_device_sampling: false, // host fallback
+            sample_on_device: true,
             supports_residual_add: true,
-            supports_moe: false, // host fallback
+            supports_moe: !rocm && cc >= 75 && moe::moe_enabled(), // device routing, sorting and grouped GEMM (FLLM_CUDA_MOE=0 switches them off)
             max_batch_size: 4096,
             max_context: 1 << 20,
         };
         Ok(Self {
             device: device as i32,
-            fp4: info.description.starts_with("CUDA, sm_12"),
+            // sm_120 always (the FP4 kernels are in every binary that has the target); other 12.x (sm_121: DGX Spark) only when this binary has the cubin
+            fp4: info.description.starts_with("CUDA, sm_120,")
+                || (info.description.starts_with("CUDA, sm_12") && hopper_arch::nvfp4_mma_native(device as i32))
+                || hopper_arch::nvfp4_sm100_native(device as i32),
             cc,
             rocm,
             name: info.name,
             capabilities,
             next_id: AtomicU64::new(1),
             perm_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            act: std::sync::atomic::AtomicU8::new(0),
         })
+    }
+
+    fn act(&self) -> ActDtype {
+        match self.act.load(Ordering::Relaxed) {
+            1 => ActDtype::F16,
+            2 => ActDtype::Bf16,
+            _ => ActDtype::F32,
+        }
     }
 
     fn alloc(&self, size: usize) -> Result<DeviceBuffer, BackendError> {
@@ -757,10 +982,11 @@ impl CudaBackend {
         }
         let (awq, scales, zeros) = super::q4z::marlin_arrays(blocks_bytes, rows, cols, group);
         let align = |v: usize| v.div_ceil(256) * 256;
-        let qbytes = rows * cols / 2;
+        let scale_rows = rows.div_ceil(64) * 64;
+        let qbytes = rows.div_ceil(8) * 8 * cols.div_ceil(8) * 4;
         let scale_at = align(qbytes);
-        let zero_at = scale_at + align(groups * rows * 2);
-        let buffer = self.alloc(zero_at + groups * rows / 2)?;
+        let zero_at = scale_at + align(groups * scale_rows * 2);
+        let buffer = self.alloc(zero_at + groups * scale_rows / 2)?;
         {
             let staging = self.alloc(qbytes)?;
             // SAFETY: little-endian host; the u32 words are reinterpreted as their bytes.
@@ -771,7 +997,12 @@ impl CudaBackend {
                 fllm_cuda_q4z_repack(self.device, dev_ptr(&staging)?.cast(), dev_ptr(&buffer)?.cast(), to_c(cols, "cols")?, to_c(rows, "rows")?)
             })?;
         }
-        let scale_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+        // BF16 activations: the Marlin kernels of that type read BF16 scales (same order, same positions)
+        let bf16_scales = self.act() == ActDtype::Bf16;
+        let scale_bytes: Vec<u8> = scales
+            .iter()
+            .flat_map(|&v| if bf16_scales { half::bf16::from_f32(half::f16::from_bits(v).to_f32()).to_bits() } else { v }.to_le_bytes())
+            .collect();
         self.upload_sync(&buffer.slice(scale_at, scale_bytes.len())?, &scale_bytes)?;
         // SAFETY: little-endian host; the u32 words are reinterpreted as their bytes.
         let zero_bytes = unsafe { std::slice::from_raw_parts(zeros.as_ptr().cast::<u8>(), zeros.len() * 4) };
@@ -931,6 +1162,24 @@ impl Backend for CudaBackend {
         &self.capabilities
     }
 
+    fn set_activation_dtype(&self, dtype: ActDtype) -> bool {
+        // narrow activations need the Marlin kernels of that type and a GPU with them (sm_75 for FP16, sm_80 for BF16)
+        let ok = match dtype {
+            ActDtype::F32 => true,
+            ActDtype::F16 => self.cc >= 75,
+            ActDtype::Bf16 => self.cc >= 80,
+        };
+        if ok {
+            self.act.store(dtype.code() as u8, Ordering::Relaxed);
+        }
+        ok
+    }
+
+    fn supports_merged_projections(&self) -> bool {
+        // the merged results are read by the narrow-activation kernels (cuda/act_narrow.cu); sm_75 is the floor of the Marlin GEMM
+        self.cc >= 75
+    }
+
     fn create_stream(&self) -> Result<Box<dyn Stream>, BackendError> {
         // SAFETY: plain constructor.
         let raw = unsafe { fllm_cuda_stream_create(self.device) };
@@ -940,6 +1189,7 @@ impl Backend for CudaBackend {
         Ok(Box::new(CudaStream {
             raw,
             device: self.device,
+            cc: self.cc,
             tables: HashMap::new(),
             cpu: CpuBackend::new(),
             cpu_stream: CpuStream,
@@ -951,6 +1201,8 @@ impl Backend for CudaBackend {
             pin_failed: std::env::var_os("FLLM_NO_HOST_PIN").is_some(),
             step_open: false,
             blocks_checked: None,
+            act: self.act(),
+            wide: [None, None, None],
         }))
     }
 
@@ -972,7 +1224,15 @@ impl Backend for CudaBackend {
         bias: Option<&[f32]>,
     ) -> Result<DeviceWeight, BackendError> {
         let kind = quant_type.to_gguf_type_id();
+        if quant_type == QuantType::Fp8Block {
+            if let Some(weight) = hopper_fp8::try_upload_fp8_block(self, name, raw_bytes, rows, cols, bias)? {
+                return Ok(weight);
+            }
+        }
         if quant_type == QuantType::Fp8Marlin {
+            if let Some(weight) = hopper_fp8::try_upload_w8a8(self, name, raw_bytes, rows, cols, bias)? {
+                return Ok(weight);
+            }
             let ok = unsafe { fllm_cuda_fp8_marlin_supported(to_c(rows, "rows")?, to_c(cols, "cols")?) } != 0;
             if self.cc >= 75 && ok {
                 return self.upload_fp8_marlin(name, raw_bytes, rows, cols, bias);
@@ -1160,6 +1420,14 @@ impl Backend for CudaBackend {
         self.upload_weight(name, &bytes, QuantType::F16, rows, cols, bias)
     }
 
+    fn moe_device_available(&self) -> bool {
+        !self.rocm && self.cc >= 75 && moe::moe_enabled()
+    }
+
+    fn moe_grouped_supported(&self, quant_type: QuantType, cols: usize, block: usize) -> bool {
+        self.moe_device_available() && moe::grouped_supported(self.cc, quant_type, cols, block)
+    }
+
     fn upload_bias_table(&self, weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {
         let mut table = Vec::with_capacity(weights.len() * 8);
         for w in weights {
@@ -1212,6 +1480,47 @@ impl Backend for CudaBackend {
             value_dim,
             words_per_layer_k,
             words_per_layer_v,
+            layout: None,
+            layer_geoms: None,
+        })
+    }
+
+    fn allocate_kv_cache_layered(
+        &self,
+        layers: usize,
+        pool_blocks: usize,
+        block_size: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        kv_kind: i32,
+        layout: Option<crate::kv_geometry::KvPoolLayout>,
+        layer_geoms: Option<Vec<crate::config::LayerGeom>>,
+    ) -> Result<DeviceKvCache, BackendError> {
+        let (words_per_layer_k, words_per_layer_v) =
+            DeviceKvCache::geometry(layers, pool_blocks, block_size, kv_heads, head_dim, value_dim, kv_kind)?;
+        let key_words = layout.as_ref().map_or(layers * words_per_layer_k, |l| l.key_total);
+        let value_words = layout.as_ref().map_or(layers * words_per_layer_v, |l| l.value_total);
+        let key_pool = self.alloc((key_words * 2).div_ceil(4) * 4)?;
+        let value_pool = self.alloc((value_words * 2).div_ceil(4) * 4)?;
+        for pool in [&key_pool, &value_pool] {
+            // SAFETY: the pool is a live allocation of `pool.size` bytes.
+            check(unsafe { fllm_cuda_memset(self.device, dev_ptr(pool)? as *mut c_void, 0, pool.size) })?;
+        }
+        Ok(DeviceKvCache {
+            key_pool,
+            value_pool,
+            kv_kind,
+            layers,
+            pool_blocks,
+            block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+            words_per_layer_k,
+            words_per_layer_v,
+            layout,
+            layer_geoms,
         })
     }
 }
@@ -1219,6 +1528,8 @@ impl Backend for CudaBackend {
 pub struct CudaStream {
     raw: *mut RawStream,
     device: i32,
+    /// Compute capability times ten of the device (0 when unknown, or AMD).
+    cc: u32,
     /// Device copies of constant host tables (rope cos/sin, sinks, ALiBi slopes), by `Arc` address.
     tables: HashMap<usize, (Arc<Vec<f32>>, DeviceBuffer)>,
     cpu: CpuBackend,
@@ -1236,6 +1547,10 @@ pub struct CudaStream {
     step_open: bool,
     /// Block tables (address, length) and lengths (address, length) whose blocks were walked by `attention_paged` in this step.
     blocks_checked: Option<[usize; 4]>,
+    /// Type of the activation buffers (`FLLM_ACT_DTYPE`). Operations without a narrow kernel run on FP32 copies (`bridge`).
+    act: ActDtype,
+    /// Persistent FP32 copies for those operations (grown on demand, never per call once warm).
+    wide: [Option<DeviceBuffer>; 3],
 }
 
 // SAFETY: the raw stream is only used through `&mut self`.
@@ -1347,9 +1662,139 @@ impl CudaStream {
         self.upload(dst, &bytes)
     }
 
+    /// Persistent FP32 scratch `slot` of at least `bytes` (a clone of the handle: the buffer is shared).
+    fn wide_slot(&mut self, slot: usize, bytes: usize) -> Result<DeviceBuffer, BackendError> {
+        if self.wide[slot].as_ref().is_none_or(|b| b.size < bytes) {
+            self.wide[slot] = None;
+            self.wide[slot] = Some(self.alloc((bytes * 5 / 4).max(256))?);
+        }
+        Ok(self.wide[slot].clone().expect("allocated above"))
+    }
+
+    /// `dst` (FP32) = the first `count` values of the activation buffer `src`.
+    fn widen_into(&mut self, dst: &DeviceBuffer, src: &DeviceBuffer, count: usize) -> Result<(), BackendError> {
+        // SAFETY: both buffers hold `count` values of their types (activation buffers are sized for FP32).
+        check(unsafe { fllm_cuda_na_convert(self.raw, dev_ptr(src)?.cast(), self.act.code(), dev_ptr(dst)?.cast(), 0, count) })
+    }
+
+    /// The activation buffer `dst` = the first `count` values of `src` (FP32).
+    fn narrow_into(&mut self, dst: &DeviceBuffer, src: &DeviceBuffer, count: usize) -> Result<(), BackendError> {
+        // SAFETY: as above.
+        check(unsafe { fllm_cuda_na_convert(self.raw, dev_ptr(src)?.cast(), 0, dev_ptr(dst)?.cast(), self.act.code(), count) })
+    }
+
+    /// Run `f` as an FP32 stream (the operations of this file then read and write FP32 buffers).
+    fn bridge<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.act;
+        self.act = ActDtype::F32;
+        let r = f(self);
+        self.act = saved;
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn tree_attention_paged(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        tree_mask: &[u8],
+        prefix_len: usize,
+        num_nodes: usize,
+        layer_idx: usize,
+        params: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        let (dk, dv, heads) = (params.head_dim, params.value_dim, params.num_heads);
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let tbl_bytes = unsafe { std::slice::from_raw_parts(block_tables.as_ptr().cast::<u8>(), block_tables.len() * 8) };
+        let len_bytes = unsafe { std::slice::from_raw_parts(lengths.as_ptr().cast::<u8>(), lengths.len() * 8) };
+        let mut dev_tables = self.alloc(tbl_bytes.len())?;
+        self.upload(&mut dev_tables, tbl_bytes)?;
+        let mut dev_lengths = self.alloc(len_bytes.len())?;
+        self.upload(&mut dev_lengths, len_bytes)?;
+        let mut dev_mask = self.alloc(tree_mask.len().max(1))?;
+        self.upload(&mut dev_mask, tree_mask)?;
+        check(unsafe {
+            fllm_cuda_tree_attention(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(out)?.cast(),
+                dev_ptr(&dev_tables)?.cast(),
+                dev_ptr(&dev_lengths)?.cast(),
+                dev_ptr(&dev_mask)?.cast(),
+                to_c(prefix_len, "prefix_len")?,
+                to_c(num_nodes, "num_nodes")?,
+                to_c(rows, "rows")?,
+                to_c(heads, "heads")?,
+                to_c(params.num_kv_heads, "kv heads")?,
+                to_c(dk, "key width")?,
+                to_c(dv, "value width")?,
+                to_c(params.stride, "stride")?,
+                to_c(params.block_size, "block size")?,
+                kv.kv_kind,
+                params.scale,
+                params.softcap.unwrap_or(0.0),
+            )
+        })
+    }
+
+    pub fn spec_verify_device(
+        &mut self,
+        draft: &[i32],
+        target: &[i32],
+        seq_length: i64,
+    ) -> Result<(i32, i32, i64), BackendError> {
+        let draft_bytes = unsafe { std::slice::from_raw_parts(draft.as_ptr().cast::<u8>(), draft.len() * 4) };
+        let target_bytes = unsafe { std::slice::from_raw_parts(target.as_ptr().cast::<u8>(), target.len() * 4) };
+        let seq_len_bytes = seq_length.to_ne_bytes();
+        let mut dev_draft = self.alloc(draft_bytes.len())?;
+        self.upload(&mut dev_draft, draft_bytes)?;
+        let mut dev_target = self.alloc(target_bytes.len())?;
+        self.upload(&mut dev_target, target_bytes)?;
+        let dev_accepted = self.alloc(4)?;
+        let dev_next = self.alloc(4)?;
+        let mut dev_len = self.alloc(8)?;
+        self.upload(&mut dev_len, &seq_len_bytes)?;
+        check(unsafe {
+            fllm_cuda_spec_verify(
+                self.raw,
+                dev_ptr(&dev_draft)?.cast(),
+                dev_ptr(&dev_target)?.cast(),
+                to_c(draft.len(), "num_draft")?,
+                dev_ptr(&dev_accepted)?.cast(),
+                dev_ptr(&dev_next)?.cast(),
+                dev_ptr(&dev_len)?.cast(),
+            )
+        })?;
+        let mut host_acc = [0u8; 4];
+        let mut host_next = [0u8; 4];
+        let mut host_len = [0u8; 8];
+        self.download(&mut host_acc, &dev_accepted)?;
+        self.download(&mut host_next, &dev_next)?;
+        self.download(&mut host_len, &dev_len)?;
+        Ok((
+            i32::from_ne_bytes(host_acc),
+            i32::from_ne_bytes(host_next),
+            i64::from_ne_bytes(host_len),
+        ))
+    }
+
     fn glu(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer, mode: c_int) -> Result<(), BackendError> {
         if gate.size != up.size || !gate.size.is_multiple_of(4) || out.size < gate.size {
             return Err(invalid("gated activation operands differ in size"));
+        }
+        if self.act.is_narrow() {
+            // SAFETY: sizes checked above (buffers are sized for FP32, the narrow values fill the first half).
+            return check(unsafe {
+                fllm_cuda_na_glu(self.raw, self.act.code(), dev_ptr(gate)?.cast(), dev_ptr(up)?.cast(), dev_ptr(out)?.cast(), gate.size / 4, mode)
+            });
         }
         // SAFETY: sizes checked above.
         check(unsafe {
@@ -1358,7 +1803,439 @@ impl CudaStream {
     }
 }
 
+impl CudaStream {
+    /// `out = x * weight + bias` on narrow activations: the Marlin 4-bit GEMM reads and writes them as they are; every other weight format runs on FP32
+    /// copies.
+    fn narrow_linear(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight, bias: Option<&DeviceBuffer>) -> Result<(), BackendError> {
+        let (rows, cols) = (weight.rows, weight.cols);
+        if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) {
+            return Err(invalid("linear input dimensions do not match"));
+        }
+        let batch = x.size / (cols * 4);
+        if batch == 0 {
+            return Ok(());
+        }
+        if out.size < batch * rows * 4 || bias.is_some_and(|b| b.size < rows * 4) {
+            return Err(invalid("linear output or bias smaller than batch x rows"));
+        }
+        if let Some(group) = self.narrow_q4z_group(weight) {
+            let bias_ptr = match bias {
+                Some(b) => dev_ptr(b)? as *const f32,
+                None => std::ptr::null(),
+            };
+            // SAFETY: sizes checked above; the weight was uploaded by `upload_q4z` with scales of this activation type.
+            let rc = unsafe {
+                fllm_cuda_na_linear_q4z(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(&weight.buffer)?.cast(),
+                    group as c_int,
+                    dev_ptr(x)?.cast(),
+                    dev_ptr(out)?.cast(),
+                    std::ptr::null_mut(),
+                    0.0,
+                    bias_ptr,
+                    to_c(rows, "rows")?,
+                    to_c(cols, "cols")?,
+                    to_c(batch, "batch")?,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0.0,
+                )
+            };
+            match rc {
+                0 => return Ok(()),
+                3 => {
+                    if self.act == ActDtype::Bf16 {
+                        return Err(invalid(format!(
+                            "{}: BF16 activations need the Marlin GEMM for 4-bit weights, which cannot take {rows}x{cols}; use FLLM_ACT_DTYPE=f32",
+                            weight.name
+                        )));
+                    }
+                }
+                _ => return check(rc),
+            }
+        }
+        let (xn, on) = (batch * cols, batch * rows);
+        // K-quant weights at decode batch sizes: the int8 quantization of the integer dot-product kernel reads the narrow activations itself
+        let kind = weight.quant_type.to_gguf_type_id();
+        if matches!(kind, 12..=14) {
+            let of = self.wide_slot(1, on * 4)?;
+            let bias_ptr = match bias {
+                Some(b) => dev_ptr(b)? as *const f32,
+                None => std::ptr::null(),
+            };
+            // SAFETY: sizes checked above; `of` holds `on` floats.
+            let rc = unsafe {
+                fllm_cuda_na_linear_kquant(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(&weight.buffer)?.cast(),
+                    kind as c_int,
+                    dev_ptr(x)?.cast(),
+                    dev_ptr(&of)?.cast(),
+                    bias_ptr,
+                    to_c(rows, "rows")?,
+                    to_c(cols, "cols")?,
+                    to_c(batch, "batch")?,
+                )
+            };
+            match rc {
+                0 => return self.narrow_into(out, &of, on),
+                3 => {}
+                _ => return check(rc),
+            }
+        }
+        let xf = self.wide_slot(0, xn * 4)?;
+        let mut of = self.wide_slot(1, on * 4)?;
+        self.widen_into(&xf, x, xn)?;
+        self.bridge(|s| s.quantized_linear(&mut of, &xf, weight, bias))?;
+        self.narrow_into(out, &of, on)
+    }
+
+    /// The group size when `weight` is a Marlin 4-bit weight the narrow GEMM takes (group 32, 64 or 128, no activation permutation).
+    fn narrow_q4z_group(&self, weight: &DeviceWeight) -> Option<usize> {
+        weight.quant_type.q4z_group().filter(|g| matches!(g, 32 | 64 | 128) && weight.perm.is_none() && weight.quant_type != QuantType::Nvfp4Marlin)
+    }
+
+    /// `residual += scale * (x * weight + bias)`; `false` when this weight needs the caller's linear + add.
+    fn narrow_linear_add(&mut self, residual: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight, bias: Option<&DeviceBuffer>, scale: f32) -> Result<bool, BackendError> {
+        let Some(group) = self.narrow_q4z_group(weight) else {
+            return Ok(false);
+        };
+        let (rows, cols) = (weight.rows, weight.cols);
+        if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) || scale == 0.0 {
+            return Ok(false);
+        }
+        let batch = x.size / (cols * 4);
+        if batch == 0 || residual.size < batch * rows * 4 || bias.is_some_and(|b| b.size < rows * 4) {
+            return Ok(false);
+        }
+        let bias_ptr = match bias {
+            Some(b) => dev_ptr(b)? as *const f32,
+            None => std::ptr::null(),
+        };
+        // SAFETY: sizes checked above.
+        let rc = unsafe {
+            fllm_cuda_na_linear_q4z(
+                self.raw,
+                self.act.code(),
+                dev_ptr(&weight.buffer)?.cast(),
+                group as c_int,
+                dev_ptr(x)?.cast(),
+                std::ptr::null_mut(),
+                dev_ptr(residual)?.cast(),
+                scale,
+                bias_ptr,
+                to_c(rows, "rows")?,
+                to_c(cols, "cols")?,
+                to_c(batch, "batch")?,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0.0,
+            )
+        };
+        match rc {
+            0 => Ok(true),
+            3 => Ok(false),
+            _ => check(rc).map(|()| true),
+        }
+    }
+
+    /// `residual += scale * (x * weight + bias)` and `out = rms_norm(residual) * norm` in two kernels (the add rides in the norm); `false` when this
+    /// weight needs the caller's separate operations.
+    #[allow(clippy::too_many_arguments)]
+    fn narrow_linear_add_norm(
+        &mut self,
+        residual: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceWeight,
+        bias: Option<&DeviceBuffer>,
+        scale: f32,
+        norm: &DeviceBuffer,
+        eps: f32,
+        out: &mut DeviceBuffer,
+    ) -> Result<bool, BackendError> {
+        let Some(group) = self.narrow_q4z_group(weight) else {
+            return Ok(false);
+        };
+        let (rows, cols) = (weight.rows, weight.cols);
+        if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) || scale == 0.0 || norm.size != rows * 4 {
+            return Ok(false);
+        }
+        let batch = x.size / (cols * 4);
+        if batch == 0 || residual.size < batch * rows * 4 || out.size < batch * rows * 4 || bias.is_some_and(|b| b.size < rows * 4) {
+            return Ok(false);
+        }
+        let bias_ptr = match bias {
+            Some(b) => dev_ptr(b)? as *const f32,
+            None => std::ptr::null(),
+        };
+        // SAFETY: sizes checked above.
+        let rc = unsafe {
+            fllm_cuda_na_linear_q4z(
+                self.raw,
+                self.act.code(),
+                dev_ptr(&weight.buffer)?.cast(),
+                group as c_int,
+                dev_ptr(x)?.cast(),
+                std::ptr::null_mut(),
+                dev_ptr(residual)?.cast(),
+                scale,
+                bias_ptr,
+                to_c(rows, "rows")?,
+                to_c(cols, "cols")?,
+                to_c(batch, "batch")?,
+                dev_ptr(norm)?.cast(),
+                dev_ptr(out)?.cast(),
+                eps,
+            )
+        };
+        match rc {
+            0 => Ok(true),
+            3 => Ok(false),
+            _ => check(rc).map(|()| true),
+        }
+    }
+
+    /// Rotary embedding (with the per-head RMS norm of q and k in front when the weights are given) and the f16 KV cache write of narrow q, k and v.
+    #[allow(clippy::too_many_arguments)]
+    fn narrow_rope_kv(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        q_norm: Option<&DeviceBuffer>,
+        k_norm: Option<&DeviceBuffer>,
+        eps: f32,
+        kv: &DeviceKvCache,
+        layer_idx: usize,
+        positions: &[usize],
+        slots: &[usize],
+        params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        if kv.kv_kind != 1 || params.rope_dim == 0 || params.rope_dim > params.dim || positions.len() != slots.len() {
+            return Ok(false);
+        }
+        let rows = positions.len();
+        if rows == 0 {
+            return Ok(true);
+        }
+        let (dk, dv) = (kv.head_dim, kv.value_dim);
+        if dk != params.dim || kv.kv_heads != params.kv_heads {
+            return Ok(false);
+        }
+        params.validate(positions, q.size, k.size)?;
+        validate_kv_write(kv, layer_idx, slots, k.size, v.size)?;
+        let cos = self.table(&params.cos)?;
+        let sin = self.table(&params.sin)?;
+        let pos: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
+        let slot_ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+        let norm_ptr = |w: Option<&DeviceBuffer>| -> Result<*const f32, BackendError> {
+            Ok(match w {
+                Some(w) if w.size == dk * 4 => dev_ptr(w)? as *const f32,
+                Some(_) => return Err(invalid("the fused QK norm needs per-head norm weights")),
+                None => std::ptr::null(),
+            })
+        };
+        // SAFETY: sizes, table coverage and slot ranges validated above; positions and slots are staged by the library before the launch.
+        let rc = unsafe {
+            fllm_cuda_na_rope_kv(
+                self.raw,
+                self.act.code(),
+                dev_ptr(q)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(v)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                pos.as_ptr(),
+                slot_ids.as_ptr(),
+                to_c(rows, "rows")?,
+                cos,
+                sin,
+                norm_ptr(q_norm)?,
+                norm_ptr(k_norm)?,
+                eps,
+                to_c(params.heads, "heads")?,
+                to_c(kv.kv_heads, "kv heads")?,
+                to_c(dk, "head width")?,
+                to_c(dv, "value width")?,
+                to_c(params.rope_dim / 2, "rope width")?,
+                c_int::from(params.neox),
+            )
+        };
+        fused_result(rc)
+    }
+}
+
 impl Stream for CudaStream {
+    fn act_dtype(&self) -> ActDtype {
+        self.act
+    }
+
+    fn set_act_dtype(&mut self, dtype: ActDtype) -> bool {
+        let ok = match dtype {
+            ActDtype::F32 => true,
+            ActDtype::F16 => self.cc >= 75,
+            ActDtype::Bf16 => self.cc >= 80,
+        };
+        if ok {
+            self.act = dtype;
+        }
+        ok
+    }
+
+    fn upload_activations(&mut self, dst: &mut DeviceBuffer, src: &[f32]) -> Result<(), BackendError> {
+        use rayon::prelude::*;
+        let bits: Vec<u16> = match self.act {
+            ActDtype::F32 => {
+                // SAFETY: an f32 slice is plain bytes.
+                let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), std::mem::size_of_val(src)) };
+                return self.upload(dst, bytes);
+            }
+            ActDtype::F16 => src.par_iter().map(|&v| half::f16::from_f32(v).to_bits()).collect(),
+            ActDtype::Bf16 => src.par_iter().map(|&v| half::bf16::from_f32(v).to_bits()).collect(),
+        };
+        // SAFETY: a u16 slice is plain bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(bits.as_ptr().cast::<u8>(), bits.len() * 2) };
+        self.upload(dst, bytes)
+    }
+
+    fn widen_activations(&mut self, dst: &mut DeviceBuffer, src: &DeviceBuffer) -> Result<(), BackendError> {
+        if !self.act.is_narrow() {
+            return self.copy_buffer(dst, src);
+        }
+        let count = dst.size.min(src.size) / 4;
+        self.widen_into(dst, src, count)
+    }
+
+    fn check_activations(&mut self, buf: &DeviceBuffer, count: usize) -> Result<Option<(f32, u32)>, BackendError> {
+        let (mut max_abs, mut bad) = (0f32, 0 as c_int);
+        // SAFETY: `buf` holds at least `count` values of the stream's activation type (callers pass rows x width).
+        check(unsafe { fllm_cuda_na_check(self.raw, self.act.code(), dev_ptr(buf)?.cast(), count, &mut max_abs, &mut bad) })?;
+        Ok(Some((max_abs, bad.max(0) as u32)))
+    }
+
+    fn split_columns(&mut self, dst: [&mut DeviceBuffer; 3], src: &DeviceBuffer, rows: usize, widths: [usize; 3]) -> Result<bool, BackendError> {
+        let total = rows * widths.iter().sum::<usize>();
+        let [d0, d1, d2] = dst;
+        if rows == 0 || src.size < total * 4 || d0.size < rows * widths[0] * 4 || d1.size < rows * widths[1] * 4 || d2.size < rows * widths[2] * 4 {
+            return Err(invalid("column split: buffers smaller than rows x widths"));
+        }
+        // SAFETY: sizes checked above (narrow arrays fill the first half of FP32-sized buffers).
+        check(unsafe {
+            fllm_cuda_na_split3(
+                self.raw,
+                self.act.code(),
+                dev_ptr(src)?.cast(),
+                dev_ptr(d0)?.cast(),
+                dev_ptr(d1)?.cast(),
+                dev_ptr(d2)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(widths[0], "width")?,
+                to_c(widths[1], "width")?,
+                to_c(widths[2], "width")?,
+            )
+        })?;
+        Ok(true)
+    }
+
+    fn glu_merged(&mut self, out: &mut DeviceBuffer, gu: &DeviceBuffer, rows: usize, ff: usize, geglu: bool) -> Result<bool, BackendError> {
+        if rows == 0 || gu.size < rows * 2 * ff * 4 || out.size < rows * ff * 4 {
+            return Err(invalid("merged gated activation: buffers smaller than rows x ff"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_na_glu_merged(self.raw, self.act.code(), dev_ptr(gu)?.cast(), dev_ptr(out)?.cast(), to_c(rows, "rows")?, to_c(ff, "ff")?, c_int::from(geglu)) })?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rope_kv_write_qkv(
+        &mut self,
+        q_out: &mut DeviceBuffer,
+        qkv: &DeviceBuffer,
+        widths: [usize; 3],
+        bias: Option<&DeviceBuffer>,
+        q_norm: Option<&DeviceBuffer>,
+        k_norm: Option<&DeviceBuffer>,
+        eps: f32,
+        kv: &DeviceKvCache,
+        layer_idx: usize,
+        positions: &[usize],
+        slots: &[usize],
+        params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        if kv.kv_kind != 1 || params.rope_dim == 0 || params.rope_dim > params.dim || positions.len() != slots.len() {
+            return Ok(false);
+        }
+        let rows = positions.len();
+        if rows == 0 {
+            return Ok(true);
+        }
+        let (dk, dv) = (kv.head_dim, kv.value_dim);
+        let total: usize = widths.iter().sum();
+        if dk != params.dim
+            || kv.kv_heads != params.kv_heads
+            || widths != [params.heads * dk, kv.kv_heads * dk, kv.kv_heads * dv]
+            || qkv.size < rows * total * 4
+            || q_out.size < rows * widths[0] * 4
+            || bias.is_some_and(|b| b.size < total * 4)
+        {
+            return Ok(false);
+        }
+        let k_bytes = rows * widths[1] * 4;
+        validate_kv_write(kv, layer_idx, slots, k_bytes, rows * widths[2] * 4)?;
+        let cos = self.table(&params.cos)?;
+        let sin = self.table(&params.sin)?;
+        let pos: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
+        let slot_ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+        let ptr_or_null = |w: Option<&DeviceBuffer>| -> Result<*const f32, BackendError> {
+            Ok(match w {
+                Some(w) => dev_ptr(w)? as *const f32,
+                None => std::ptr::null(),
+            })
+        };
+        if q_norm.is_some_and(|w| w.size != dk * 4) || k_norm.is_some_and(|w| w.size != dk * 4) {
+            return Ok(false);
+        }
+        // SAFETY: sizes, table coverage and slot ranges validated above; positions and slots are staged by the library before the launch.
+        let rc = unsafe {
+            fllm_cuda_na_rope_kv_qkv(
+                self.raw,
+                self.act.code(),
+                dev_ptr(q_out)?.cast(),
+                dev_ptr(qkv)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                pos.as_ptr(),
+                slot_ids.as_ptr(),
+                to_c(rows, "rows")?,
+                cos,
+                sin,
+                ptr_or_null(q_norm)?,
+                ptr_or_null(k_norm)?,
+                ptr_or_null(bias)?,
+                eps,
+                to_c(params.heads, "heads")?,
+                to_c(kv.kv_heads, "kv heads")?,
+                to_c(dk, "head width")?,
+                to_c(dv, "value width")?,
+                to_c(params.rope_dim / 2, "rope width")?,
+                c_int::from(params.neox),
+            )
+        };
+        fused_result(rc)
+    }
+
+    fn reserve_workspace(&mut self, rows: usize, cols: usize, out_cols: usize) -> Result<(), BackendError> {
+        // SAFETY: plain call on a live stream.
+        check(unsafe { fllm_cuda_reserve_workspace(self.raw, to_c(rows, "rows")?, to_c(cols, "cols")?, to_c(out_cols, "out cols")?) })
+    }
+
+    fn quantized_linear_wide(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight, bias: Option<&DeviceBuffer>) -> Result<(), BackendError> {
+        self.bridge(|s| s.quantized_linear(out, x, weight, bias))
+    }
+
     fn begin_step(&mut self) {
         // SAFETY: plain call on a live stream.
         let ok = unsafe { fllm_cuda_step_begin(self.raw) } == 0;
@@ -1376,6 +2253,19 @@ impl Stream for CudaStream {
     fn synchronize(&mut self) -> Result<(), BackendError> {
         // SAFETY: live stream.
         check(unsafe { fllm_cuda_stream_sync(self.raw) })
+    }
+
+    fn raw_stream_ptr(&mut self) -> *mut std::ffi::c_void {
+        self.raw.cast()
+    }
+
+    fn wait_stream(&mut self, other: &mut dyn Stream) -> Result<(), BackendError> {
+        let other_ptr = other.raw_stream_ptr() as *mut RawStream;
+        if !other_ptr.is_null() {
+            // SAFETY: both streams are live.
+            check(unsafe { fllm_cuda_stream_wait_stream(self.raw, other_ptr) })?;
+        }
+        Ok(())
     }
 
     fn upload(&mut self, dst: &mut DeviceBuffer, src: &[u8]) -> Result<(), BackendError> {
@@ -1442,6 +2332,23 @@ impl Stream for CudaStream {
             return Err(invalid("rms_norm input is not rows of the weight width"));
         }
         let rows = x.size / (cols * 4);
+        if self.act.is_narrow() {
+            // SAFETY: sizes checked above; activation buffers are sized for FP32, the narrow rows fill the first half.
+            return check(unsafe {
+                fllm_cuda_na_rms_norm(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(x)?.cast(),
+                    std::ptr::null(),
+                    0.0,
+                    dev_ptr(weight)?.cast(),
+                    dev_ptr(out)?.cast(),
+                    to_c(rows, "rows")?,
+                    to_c(cols, "width")?,
+                    eps,
+                )
+            });
+        }
         // SAFETY: sizes checked above.
         check(unsafe {
             fllm_cuda_rms_norm(self.raw, dev_ptr(x)?.cast(), dev_ptr(weight)?.cast(), dev_ptr(out)?.cast(), to_c(rows, "rows")?, to_c(cols, "width")?, eps)
@@ -1482,6 +2389,26 @@ impl Stream for CudaStream {
         let cos = self.table(&params.cos)?;
         let sin = self.table(&params.sin)?;
         let pos: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
+        if self.act.is_narrow() {
+            // SAFETY: `validate` checked table coverage and buffer sizes (narrow rows fill the first half of FP32-sized buffers).
+            return check(unsafe {
+                fllm_cuda_na_rope(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(q)?.cast(),
+                    dev_ptr(k)?.cast(),
+                    pos.as_ptr(),
+                    to_c(positions.len(), "rows")?,
+                    cos,
+                    sin,
+                    to_c(params.heads, "heads")?,
+                    to_c(params.kv_heads, "kv heads")?,
+                    to_c(params.dim, "head width")?,
+                    to_c(params.rope_dim / 2, "rope width")?,
+                    c_int::from(params.neox),
+                )
+            });
+        }
         // SAFETY: `validate` checked table coverage and buffer sizes.
         check(unsafe {
             fllm_cuda_rope(
@@ -1616,6 +2543,46 @@ impl Stream for CudaStream {
                 to_c(hidden, "hidden")?,
             )
         })
+    }
+
+    fn moe_route_ex(
+        &mut self,
+        logits: &DeviceBuffer,
+        bias: Option<&DeviceBuffer>,
+        ids: &mut DeviceBuffer,
+        weights: &mut DeviceBuffer,
+        rows: usize,
+        experts: usize,
+        k: usize,
+        route: &MoeRoute,
+    ) -> Result<(), BackendError> {
+        moe::route_ex(self.raw, logits, bias, ids, weights, rows, experts, k, route)
+    }
+
+    fn moe_align(&mut self, ids: &DeviceBuffer, sort: &mut MoeSort, expert_offset: usize, num_local: usize) -> Result<(), BackendError> {
+        moe::align(self.raw, ids, sort, expert_offset, num_local)
+    }
+
+    fn moe_grouped_linear(&mut self, call: MoeGrouped<'_>) -> Result<(), BackendError> {
+        moe::grouped(self.raw, self.cc, call)
+    }
+
+    fn moe_combine_ex(
+        &mut self,
+        out: &mut DeviceBuffer,
+        y: &DeviceBuffer,
+        weights: Option<&DeviceBuffer>,
+        shared: Option<&DeviceBuffer>,
+        gate: Option<&DeviceBuffer>,
+        tokens: usize,
+        k: usize,
+        hidden: usize,
+    ) -> Result<(), BackendError> {
+        moe::combine_ex(self.raw, out, y, weights, shared, gate, tokens, k, hidden)
+    }
+
+    fn moe_gate_scale(&mut self, gate: &mut DeviceBuffer, x: &DeviceBuffer, g: &DeviceBuffer, tokens: usize, hidden: usize) -> Result<(), BackendError> {
+        moe::gate_scale(self.raw, gate, x, g, tokens, hidden)
     }
 
     fn gather_rows(
@@ -1770,8 +2737,17 @@ impl Stream for CudaStream {
     }
 
     fn quantized_linear(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight, bias: Option<&DeviceBuffer>) -> Result<(), BackendError> {
+        if self.act.is_narrow() {
+            return self.narrow_linear(out, x, weight, bias);
+        }
+        if weight.quant_type == QuantType::Fp8Block {
+            return hopper_fp8::linear_w8a8(self, out, x, weight, bias);
+        }
         let kind = weight.quant_type.to_gguf_type_id();
         if weight.quant_type == QuantType::Fp8Marlin {
+            if weight.perm.is_some() {
+                return hopper_fp8::linear_w8a8(self, out, x, weight, bias);
+            }
             let (rows, cols) = (weight.rows, weight.cols);
             if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) {
                 return Err(invalid("linear input dimensions do not match"));
@@ -1905,6 +2881,9 @@ impl Stream for CudaStream {
     }
 
     fn linear_f16_out(&mut self, out16: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight) -> Result<bool, BackendError> {
+        if self.act.is_narrow() {
+            return Ok(false);
+        }
         if weight.quant_type.to_gguf_type_id() == 40 {
             // NVFP4 prompts: the CUTLASS epilogue writes halves (the decode kernels cannot, they decline)
             if super::env_flag_once!("FLLM_NO_F16_NVFP4") {
@@ -2007,8 +2986,8 @@ impl Stream for CudaStream {
                 bias_ptr(biases[1])?,
                 bias_ptr(biases[2])?,
                 dev_ptr(q_out)?.cast(),
-                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                 pos.as_ptr(),
                 slot_ids.as_ptr(),
                 to_c(rows, "rows")?,
@@ -2033,6 +3012,10 @@ impl Stream for CudaStream {
         bias: Option<&DeviceBuffer>,
         scale: f32,
     ) -> Result<bool, BackendError> {
+        if self.act.is_narrow() {
+            // Marlin GEMM into scratch, then the residual add; other weight formats: the caller runs the linear and the add
+            return self.narrow_linear_add(residual, x, weight, bias, scale);
+        }
         if weight.quant_type.to_gguf_type_id() == 40 {
             // NVFP4 prompts: the CUTLASS epilogue adds scale * (product) to the residual stream (the decode kernels cannot, they decline)
             if bias.is_some() || scale == 0.0 || super::env_flag_once!("FLLM_NO_FUSED_ADD") {
@@ -2086,6 +3069,25 @@ impl Stream for CudaStream {
             return Ok(false);
         }
         let rows = x.size / (cols * 4);
+        if self.act.is_narrow() {
+            // x = round(x + scale * branch); out = rms_norm(x) (the activation format of the next GEMM does not matter: narrow Marlin reads these rows as they are)
+            // SAFETY: sizes checked above.
+            check(unsafe {
+                fllm_cuda_na_rms_norm(
+                    self.raw,
+                    self.act.code(),
+                    dev_ptr(x)?.cast(),
+                    dev_ptr(branch)?.cast(),
+                    scale,
+                    dev_ptr(weight)?.cast(),
+                    dev_ptr(out)?.cast(),
+                    to_c(rows, "rows")?,
+                    to_c(cols, "width")?,
+                    eps,
+                )
+            })?;
+            return Ok(true);
+        }
         let (quant, kind) = next_activation_format(next);
         // the NVFP4 weight that reads the result: the fused kernel takes its activation factor from the weight trailer
         let (next_w, next_rows): (*const c_void, usize) = match next {
@@ -2124,6 +3126,9 @@ impl Stream for CudaStream {
         out: &mut DeviceBuffer,
         next: Option<&DeviceWeight>,
     ) -> Result<bool, BackendError> {
+        if self.act.is_narrow() {
+            return self.narrow_linear_add_norm(residual, x, weight, bias, scale, norm, eps, out);
+        }
         let Some(group) = weight.quant_type.q4z_group() else {
             return Ok(false);
         };
@@ -2182,6 +3187,9 @@ impl Stream for CudaStream {
         slots: &[usize],
         params: &RopeParams,
     ) -> Result<bool, BackendError> {
+        if self.act.is_narrow() {
+            return self.narrow_rope_kv(q, k, v, None, None, 0.0, kv, layer_idx, positions, slots, params);
+        }
         if kv.kv_kind != 1 || params.rope_dim == 0 || params.rope_dim > params.dim || positions.len() != slots.len() {
             return Ok(false);
         }
@@ -2206,8 +3214,8 @@ impl Stream for CudaStream {
                 dev_ptr(q)?.cast(),
                 dev_ptr(k)?.cast(),
                 dev_ptr(v)?.cast(),
-                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                 pos.as_ptr(),
                 slot_ids.as_ptr(),
                 to_c(rows, "rows")?,
@@ -2221,6 +3229,25 @@ impl Stream for CudaStream {
                 c_int::from(params.neox),
             )
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rope_kv_write_qknorm(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        q_norm: Option<&DeviceBuffer>,
+        k_norm: Option<&DeviceBuffer>,
+        eps: f32,
+        kv: &DeviceKvCache,
+        layer_idx: usize,
+        positions: &[usize],
+        slots: &[usize],
+        params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        // the same kernel serves the FP32 pipeline (code 0) and the narrow ones
+        self.narrow_rope_kv(q, k, v, q_norm, k_norm, eps, kv, layer_idx, positions, slots, params)
     }
 
     fn graph_supported(&self) -> bool {
@@ -2262,6 +3289,59 @@ impl Stream for CudaStream {
         Ok(ids)
     }
 
+    fn sample_rows(&mut self, logits: &DeviceBuffer, vocab: usize, batch: &SampleBatch) -> Result<SampleOutput, BackendError> {
+        batch.validate(vocab)?;
+        let rows = batch.rows.len();
+        if rows == 0 || vocab == 0 || logits.size < rows * vocab * 4 {
+            return Err(invalid("sample_rows: the logits buffer is smaller than rows x vocab"));
+        }
+        let pen_ids: Vec<i32> = batch.pen.iter().map(|p| p.0).collect();
+        let pen_counts: Vec<i32> = batch.pen.iter().map(|p| p.1).collect();
+        let bias_ids: Vec<i32> = batch.bias.iter().map(|p| p.0).collect();
+        let bias_vals: Vec<f32> = batch.bias.iter().map(|p| p.1).collect();
+        let stride = batch.top_stride;
+        let mut out = SampleOutput {
+            ids: vec![0; rows],
+            logprobs: vec![0.0; rows],
+            top_ids: vec![-1; rows * stride],
+            top_logprobs: vec![f32::NEG_INFINITY; rows * stride],
+        };
+        // SAFETY: `SampleRowParams` is repr(C) with the 80-byte layout of FllmSampleRow; every array has the length the call is given, the
+        // outputs have room for rows (and rows x stride) values, and the call returns after the results were copied back.
+        check(unsafe {
+            fllm_cuda_sample(
+                self.raw,
+                dev_ptr(logits)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(vocab, "vocab")?,
+                batch.rows.as_ptr().cast(),
+                pen_ids.as_ptr(),
+                pen_counts.as_ptr(),
+                to_c(pen_ids.len(), "penalty list")?,
+                bias_ids.as_ptr(),
+                bias_vals.as_ptr(),
+                to_c(bias_ids.len(), "bias list")?,
+                batch.mask.as_ptr(),
+                to_c(batch.mask.len(), "grammar bitmask")?,
+                to_c(batch.mask_words, "bitmask words")?,
+                to_c(stride, "top stride")?,
+                out.ids.as_mut_ptr(),
+                out.logprobs.as_mut_ptr(),
+                out.top_ids.as_mut_ptr(),
+                out.top_logprobs.as_mut_ptr(),
+            )
+        })?;
+        // the kernel writes only the alternatives a row asked for
+        for (r, p) in batch.rows.iter().enumerate() {
+            let wanted = if p.logprobs_mode == 0 { 0 } else { p.top_n as usize };
+            for j in wanted..stride {
+                out.top_ids[r * stride + j] = -1;
+                out.top_logprobs[r * stride + j] = f32::NEG_INFINITY;
+            }
+        }
+        Ok(out)
+    }
+
     fn swiglu(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer) -> Result<(), BackendError> {
         self.glu(out, gate, up, 0)
     }
@@ -2273,6 +3353,10 @@ impl Stream for CudaStream {
     fn residual_add(&mut self, x: &mut DeviceBuffer, residual: &DeviceBuffer, scale: f32) -> Result<(), BackendError> {
         if !x.size.is_multiple_of(4) || residual.size < x.size {
             return Err(invalid("residual shorter than its target"));
+        }
+        if self.act.is_narrow() {
+            // SAFETY: sizes checked above (narrow values fill the first half of FP32-sized buffers).
+            return check(unsafe { fllm_cuda_na_residual(self.raw, self.act.code(), dev_ptr(x)?.cast(), dev_ptr(residual)?.cast(), x.size / 4, scale) });
         }
         // SAFETY: sizes checked above.
         check(unsafe { fllm_cuda_residual(self.raw, dev_ptr(x)?.cast(), dev_ptr(residual)?.cast(), x.size / 4, scale) })
@@ -2376,7 +3460,58 @@ impl Stream for CudaStream {
         })
     }
 
+    fn supports_mla_latent(&self, shape: &MlaShape, key_format: crate::kv_format::KvFormat) -> bool {
+        let m = crate::config::MlaConfig { q_lora: None, kv_lora: shape.kv_lora, nope: shape.nope, rope: shape.rope, value: shape.value, rotary: true };
+        hopper_mla::latent_supported(self.device as usize, &m, key_format)
+    }
+
+    fn mla_latent_kv(
+        &mut self,
+        k_row: &mut DeviceBuffer,
+        kv_a: &DeviceBuffer,
+        latent: &DeviceBuffer,
+        positions: &[usize],
+        shape: &MlaShape,
+        rope: &RopeParams,
+    ) -> Result<(), BackendError> {
+        hopper_mla::kv(self, k_row, kv_a, latent, positions, shape, rope)
+    }
+
+    fn mla_latent_query(
+        &mut self,
+        q_lat: &mut DeviceBuffer,
+        q_full: &DeviceBuffer,
+        w_kvb: &DeviceBuffer,
+        positions: &[usize],
+        shape: &MlaShape,
+        rope: &RopeParams,
+    ) -> Result<(), BackendError> {
+        hopper_mla::query(self, q_lat, q_full, w_kvb, positions, shape, rope)
+    }
+
+    fn mla_latent_attention(
+        &mut self,
+        o_lat: &mut DeviceBuffer,
+        q_lat: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        params: &AttentionParams,
+        shape: &MlaShape,
+        reference: bool,
+    ) -> Result<(), BackendError> {
+        hopper_mla::attention(self, o_lat, q_lat, kv, block_tables, lengths, layer_idx, params, shape, reference)
+    }
+
+    fn mla_latent_output(&mut self, out: &mut DeviceBuffer, o_lat: &DeviceBuffer, w_kvb: &DeviceBuffer, rows: usize, shape: &MlaShape) -> Result<(), BackendError> {
+        hopper_mla::output(self, out, o_lat, w_kvb, rows, shape)
+    }
+
     fn supports_mamba2(&self, s: &MambaShape) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
         let dims = [s.inner, s.state, s.heads, s.groups, s.conv_kernel, s.norm_groups].map(|n| c_int::try_from(n).unwrap_or(0));
         // SAFETY: plain arithmetic on the arguments.
         unsafe { fllm_cuda_mamba2_supported(dims[0], dims[1], dims[2], dims[3], dims[4], dims[5]) != 0 }
@@ -2470,6 +3605,9 @@ impl Stream for CudaStream {
     }
 
     fn supports_shortconv(&self, hidden: usize, kernel: usize) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
         // SAFETY: plain arithmetic on the arguments.
         unsafe {
             fllm_cuda_shortconv_supported(c_int::try_from(hidden).unwrap_or(0), c_int::try_from(kernel).unwrap_or(0)) != 0
@@ -2545,6 +3683,9 @@ impl Stream for CudaStream {
     }
 
     fn supports_mamba1(&self, s: &Mamba1Shape) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
         let dims = [s.inner, s.state, s.rank, s.conv_kernel].map(|n| c_int::try_from(n).unwrap_or(0));
         // SAFETY: plain arithmetic on the arguments.
         unsafe { fllm_cuda_mamba1_supported(dims[0], dims[1], dims[2], dims[3]) != 0 }
@@ -2671,6 +3812,14 @@ impl Stream for CudaStream {
     }
 
     fn activation(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
+        if self.act.is_narrow() {
+            let n = x.size.min(out.size) / 4;
+            let xf = self.wide_slot(0, n * 4)?;
+            let mut of = self.wide_slot(1, n * 4)?;
+            self.widen_into(&xf, x, n)?;
+            self.bridge(|s| s.activation(&mut of, &xf, mode))?;
+            return self.narrow_into(out, &of, n);
+        }
         if !x.size.is_multiple_of(4) || out.size < x.size {
             return Err(invalid("activation output smaller than its input"));
         }
@@ -2679,6 +3828,16 @@ impl Stream for CudaStream {
     }
 
     fn activation_glu(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
+        if self.act.is_narrow() {
+            let n = gate.size.min(up.size).min(out.size) / 4;
+            let gf = self.wide_slot(0, n * 4)?;
+            let uf = self.wide_slot(1, n * 4)?;
+            let mut of = self.wide_slot(2, n * 4)?;
+            self.widen_into(&gf, gate, n)?;
+            self.widen_into(&uf, up, n)?;
+            self.bridge(|s| s.activation_glu(&mut of, &gf, &uf, mode))?;
+            return self.narrow_into(out, &of, n);
+        }
         if !gate.size.is_multiple_of(4) || up.size < gate.size || out.size < gate.size {
             return Err(invalid("gated activation buffers differ in size"));
         }
@@ -2702,6 +3861,9 @@ impl Stream for CudaStream {
     }
 
     fn supports_delta(&self, s: &DeltaShape) -> bool {
+        if !ssm_enabled_on_build() {
+            return false;
+        }
         let dims = [s.k_heads, s.v_heads, s.k_dim, s.v_dim, s.conv_kernel].map(|n| c_int::try_from(n).unwrap_or(0));
         // SAFETY: plain arithmetic on the arguments.
         unsafe { fllm_cuda_delta_supported(dims[0], dims[1], dims[2], dims[3], dims[4]) != 0 }
@@ -2795,8 +3957,136 @@ impl Stream for CudaStream {
         })
     }
 
+    fn supports_kda(&self, s: &KdaShape) -> bool {
+        let dims = [s.heads, s.head_dim, s.conv_kernel].map(|n| c_int::try_from(n).unwrap_or(0));
+        unsafe { fllm_cuda_kda_supported(dims[0], dims[1], dims[2]) != 0 }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn attention_paged(
+    fn kda_layer(
+        &mut self,
+        s: &KdaShape,
+        w: &KdaWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        qkv: &DeviceBuffer,
+        forget: &DeviceBuffer,
+        beta: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        mixed: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_kda(s) {
+            return Err(BackendError::UnsupportedOperation("kda_layer for this shape".into()));
+        }
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let width = s.heads * s.head_dim;
+        let conv_dim = s.conv_dim();
+        let state_end = state_offset + s.layer_state_bytes();
+        if qkv.size < rows * conv_dim * 4
+            || mixed.size < rows * conv_dim * 4
+            || forget.size < rows * width * 4
+            || beta.size < rows * s.heads * 4
+            || gate.size < rows * width * 4
+            || out.size < rows * width * 4
+            || w.conv.size < conv_dim * s.conv_kernel * 4
+            || w.dt_bias.size < width * 4
+            || w.rate.size < s.heads * 4
+            || w.norm.size < s.head_dim * 4
+            || runs.iter().any(|r| r.state.size < state_end || r.first_row + r.rows > rows)
+        {
+            return Err(invalid("KDA buffers smaller than the layer needs"));
+        }
+        #[repr(C)]
+        struct RunC {
+            state: u64,
+            row0: i32,
+            n: i32,
+            reset: i32,
+            pad: i32,
+        }
+        let mut list = Vec::with_capacity(runs.len());
+        for r in runs {
+            list.push(RunC {
+                state: dev_ptr(r.state)? as u64,
+                row0: to_c(r.first_row, "run start")?,
+                n: to_c(r.rows, "run length")?,
+                reset: i32::from(r.reset),
+                pad: 0,
+            });
+        }
+        let max_n = runs.iter().map(|r| r.rows).max().unwrap_or(0);
+        let lower_bound = s.lower_bound.unwrap_or(-1.0);
+        check(unsafe {
+            fllm_cuda_kda_layer(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(max_n, "run length")?,
+                to_c(s.heads, "heads")?,
+                to_c(s.head_dim, "head_dim")?,
+                to_c(s.conv_kernel, "conv_kernel")?,
+                lower_bound,
+                s.eps,
+                state_offset,
+                s.rec_bytes(),
+                dev_ptr(qkv)?.cast(),
+                dev_ptr(forget)?.cast(),
+                dev_ptr(beta)?.cast(),
+                dev_ptr(gate)?.cast(),
+                dev_ptr(w.conv)?.cast(),
+                dev_ptr(w.dt_bias)?.cast(),
+                dev_ptr(w.rate)?.cast(),
+                dev_ptr(w.norm)?.cast(),
+                dev_ptr(mixed)?.cast(),
+                dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+        #[allow(clippy::too_many_arguments)]
+    fn attn_encoder(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        cu_seqlens: &[i32],
+        batch_size: usize,
+        total_tokens: usize,
+        heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        scale: f32,
+        window: Option<usize>,
+        global_tokens: Option<&[i32]>,
+    ) -> Result<(), BackendError> {
+        check(unsafe {
+            fllm_cuda_attn_encoder(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(v)?.cast(),
+                dev_ptr(out)?.cast(),
+                cu_seqlens.as_ptr(),
+                to_c(batch_size, "batch_size")?,
+                to_c(total_tokens, "total_tokens")?,
+                to_c(heads, "heads")?,
+                to_c(kv_heads, "kv_heads")?,
+                to_c(head_dim, "head_dim")?,
+                scale,
+                window.map_or(0, |w| w as c_int),
+                global_tokens.map_or(std::ptr::null(), |g| g.as_ptr()),
+                global_tokens.map_or(0, |g| g.len() as c_int),
+            )
+        })
+    }
+
+fn attention_paged(
         &mut self,
         out: &mut DeviceBuffer,
         q: &DeviceBuffer,
@@ -2820,6 +4110,15 @@ impl Stream for CudaStream {
         }
         if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 {
             return Err(invalid("attention q/out smaller than rows x heads x dim"));
+        }
+        if self.act.is_narrow() {
+            // the attention kernels read FP32 queries and write FP32: widen q, narrow the result
+            let (qn, on) = (rows * heads * dk, rows * heads * dv);
+            let qf = self.wide_slot(0, qn * 4)?;
+            let mut of = self.wide_slot(1, on * 4)?;
+            self.widen_into(&qf, q, qn)?;
+            self.bridge(|s| s.attention_paged(&mut of, &qf, kv, block_tables, lengths, layer_idx, params))?;
+            return self.narrow_into(out, &of, on);
         }
         if dk > MAX_ATTENTION_DIM || dv > MAX_ATTENTION_DIM {
             warn_fallback_reason(
@@ -2884,8 +4183,8 @@ impl Stream for CudaStream {
             fllm_cuda_attention(
                 self.raw,
                 dev_ptr(q)?.cast(),
-                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                 dev_ptr(out)?.cast(),
                 block_tables.as_ptr(),
                 block_tables.len(),
@@ -2917,15 +4216,48 @@ impl Stream for CudaStream {
         if slots.is_empty() {
             return Ok(());
         }
+        if self.act.is_narrow() {
+            if kv.kv_kind == 1 {
+                let ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+                let rows = to_c(slots.len(), "rows")?;
+                for (src, pool, words, width) in [(k, &kv.key_pool, kv.words_per_layer_k, kv.head_dim), (v, &kv.value_pool, kv.words_per_layer_v, kv.value_dim)] {
+                    // SAFETY: `validate_kv_write` checked sources and slot ranges.
+                    check(unsafe {
+                        fllm_cuda_na_kv_write(
+                            self.raw,
+                            self.act.code(),
+                            dev_ptr(src)?.cast(),
+                            dev_ptr(pool)?.add(layer_idx * words * 2).cast(),
+                            ids.as_ptr(),
+                            rows,
+                            to_c(kv.kv_heads * width, "kv width")?,
+                        )
+                    })?;
+                }
+                return Ok(());
+            }
+            // other cache formats: their writers read FP32
+            let (kn, vn) = (slots.len() * kv.kv_heads * kv.head_dim, slots.len() * kv.kv_heads * kv.value_dim);
+            let kf = self.wide_slot(0, kn * 4)?;
+            let vf = self.wide_slot(1, vn * 4)?;
+            self.widen_into(&kf, k, kn)?;
+            self.widen_into(&vf, v, vn)?;
+            return self.bridge(|s| s.kv_cache_write(kv, layer_idx, slots, &kf, &vf));
+        }
         let ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
         let total = kv.slots();
         let rows = to_c(slots.len(), "rows")?;
-        let (key_layout, value_layout) = kv.layouts();
-        for (src, pool, words, width, layout) in [
-            (k, &kv.key_pool, kv.words_per_layer_k, kv.head_dim, key_layout),
-            (v, &kv.value_pool, kv.words_per_layer_v, kv.value_dim, value_layout),
+        let kh = kv.layer_kv_heads(layer_idx);
+        let kd = kv.layer_head_dim(layer_idx);
+        let vd = kv.layer_value_dim(layer_idx);
+        let (fmt_k, fmt_v) = kv.formats();
+        let key_layout = crate::kv_format::KvLayout::new(fmt_k, kv.slots(), kh, kd);
+        let value_layout = crate::kv_format::KvLayout::new(fmt_v, kv.slots(), kh, vd);
+        for (src, pool, offset, width, layout) in [
+            (k, &kv.key_pool, kv.layer_key_offset(layer_idx), kd, key_layout),
+            (v, &kv.value_pool, kv.layer_value_offset(layer_idx), vd, value_layout),
         ] {
-            let kvw = kv.kv_heads * width;
+            let kvw = kh * width;
             if !layout.fmt.is_legacy() {
                 let desc = KvDesc::new(&layout);
                 // SAFETY: `validate_kv_write` checked sources and slot ranges; the descriptor matches the pool.
@@ -2933,7 +4265,7 @@ impl Stream for CudaStream {
                     fllm_cuda_kvq_write(
                         self.raw,
                         dev_ptr(src)?.cast(),
-                        dev_ptr(pool)?.add(layer_idx * words * 2).cast(),
+                        dev_ptr(pool)?.add(offset * 2).cast(),
                         ids.as_ptr(),
                         rows,
                         &desc,
@@ -2946,7 +4278,7 @@ impl Stream for CudaStream {
                 fllm_cuda_kv_write(
                     self.raw,
                     dev_ptr(src)?.cast(),
-                    dev_ptr(pool)?.add(layer_idx * words * 2).cast(),
+                    dev_ptr(pool)?.add(offset * 2).cast(),
                     ids.as_ptr(),
                     rows,
                     to_c(kvw, "kv width")?,
@@ -2960,7 +4292,14 @@ impl Stream for CudaStream {
     }
 
     fn moe_route(&mut self, weights_out: &mut DeviceBuffer, indices_out: &mut DeviceBuffer, router_logits: &DeviceBuffer, num_experts: usize, top_k: usize) -> Result<(), BackendError> {
-        warn_fallback_reason("moe_route", "no CUDA router kernel yet");
+        if moe::moe_enabled() && self.cc >= 75 && num_experts > 0 && top_k > 0 && top_k <= num_experts && router_logits.size >= num_experts * 4 {
+            // softmax, best `top_k`, renormalised: the semantics of the CPU reference
+            let rows = router_logits.size / (num_experts * 4);
+            if rows * top_k * 4 <= indices_out.size && rows * top_k * 4 <= weights_out.size {
+                return moe::route_ex(self.raw, router_logits, None, indices_out, weights_out, rows, num_experts, top_k, &MoeRoute::softmax(true, 1.0));
+            }
+        }
+        warn_fallback_reason("moe_route", "device routing is off (FLLM_CUDA_MOE=0), not available for this shape or GPU");
         let cl = self.copy_to_host(router_logits)?;
         let mut cw = self.cpu.allocate_buffer(weights_out.size)?;
         let mut ci = self.cpu.allocate_buffer(indices_out.size)?;
@@ -2978,7 +4317,10 @@ impl Stream for CudaStream {
         expert_weights_buf: &DeviceBuffer,
         top_k: usize,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason("moe_expert_gemm", "no CUDA expert kernel yet; expert weights are copied every call");
+        if self.expert_gemm_device(out, x, expert_weights, expert_indices, expert_weights_buf, top_k)? {
+            return Ok(());
+        }
+        warn_fallback_reason("moe_expert_gemm", "no grouped kernel for this weight type or GPU (or FLLM_CUDA_MOE=0); expert weights are copied every call");
         let cx = self.copy_to_host(x)?;
         let cidx = self.copy_to_host(expert_indices)?;
         let cwts = self.copy_to_host(expert_weights_buf)?;
@@ -3390,6 +4732,29 @@ fn ssm_runs(runs: &[DeltaRun<'_>]) -> Result<Vec<SsmRunC>, BackendError> {
         .collect()
 }
 
+/// Whether the SSM / DeltaNet / Mamba-1/2 / ShortConv device paths are enabled on HIP/ROCm given `FLLM_HIP_SSM` and `FLLM_HIP_NO_SSM`.
+/// Off by default on HIP until verified on AMD hardware; `FLLM_HIP_SSM=1` enables them unless `FLLM_HIP_NO_SSM=1` overrides.
+#[cfg_attr(not(feature = "hip"), allow(dead_code))]
+pub(crate) fn hip_ssm_enabled_for_env(hip_ssm: Option<&str>, hip_no_ssm: Option<&str>) -> bool {
+    if hip_no_ssm.is_some_and(|v| v.starts_with('1')) {
+        return false;
+    }
+    hip_ssm.is_some_and(|v| v.starts_with('1'))
+}
+
+#[inline]
+fn ssm_enabled_on_build() -> bool {
+    #[cfg(feature = "hip")]
+    {
+        let ssm = std::env::var("FLLM_HIP_SSM").ok();
+        let no_ssm = std::env::var("FLLM_HIP_NO_SSM").ok();
+        if !hip_ssm_enabled_for_env(ssm.as_deref(), no_ssm.as_deref()) {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod nvfp4_layout_tests {
     use super::*;
@@ -3432,5 +4797,14 @@ mod nvfp4_layout_tests {
                 assert_eq!(out[scale_offset + at], raw[r * row_bytes + (kb / 4) * 36 + kb % 4], "scale of row {r} block {kb}");
             }
         }
+    }
+
+    #[test]
+    fn hip_ssm_is_off_by_default_and_controlled_by_env_switches() {
+        assert!(!hip_ssm_enabled_for_env(None, None));
+        assert!(!hip_ssm_enabled_for_env(Some("0"), None));
+        assert!(hip_ssm_enabled_for_env(Some("1"), None));
+        assert!(!hip_ssm_enabled_for_env(Some("1"), Some("1")));
+        assert!(!hip_ssm_enabled_for_env(None, Some("1")));
     }
 }

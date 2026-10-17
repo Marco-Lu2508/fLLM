@@ -1,7 +1,7 @@
 # Variants of the non-matmul Vulkan shaders (package 3). Line: <output name> <source.comp> [-DNAME=VALUE ...]; # starts a comment.
 # Sources named here are compiled ONLY under the names listed (build.rs); everything else in this directory is compiled once under its file name.
 
-# activations (act_glu.comp, MODE: 0 swiglu, 1 geglu, 2 swiglu_oai, 3 silu, 4 gelu, 5 relu2, 6 relu)
+# activations (act_glu.comp, MODE: 0 swiglu, 1 geglu, 2 swiglu_oai, 3 silu, 4 gelu, 5 relu2, 6 relu, 7 gelu_erf, 8 geglu_erf, 9 reglu, 10 reglu2)
 act_swiglu act_glu.comp -DMODE=0
 act_geglu act_glu.comp -DMODE=1
 act_swiglu_oai act_glu.comp -DMODE=2
@@ -9,6 +9,19 @@ act_silu act_glu.comp -DMODE=3
 act_gelu act_glu.comp -DMODE=4
 act_relu2 act_glu.comp -DMODE=5
 act_relu act_glu.comp -DMODE=6
+act_gelu_erf act_glu.comp -DMODE=7
+act_geglu_erf act_glu.comp -DMODE=8
+act_reglu act_glu.comp -DMODE=9
+act_reglu2 act_glu.comp -DMODE=10
+act_copy act_glu.comp -DMODE=11
+
+# in-place element-wise operations (ewise.comp, MODE: 0 clamp, 1 softplus gate) and MLA data movement (mla_move.comp, MODE: 0 q, 1 k, 2 v, 3 latent)
+ewise_clamp ewise.comp -DMODE=0
+ewise_softplus ewise.comp -DMODE=1
+mla_move_q mla_move.comp -DMODE=0
+mla_move_k mla_move.comp -DMODE=1
+mla_move_v mla_move.comp -DMODE=2
+mla_move_latent mla_move.comp -DMODE=3
 
 # embedding lookup: raw float tables and the planar quantized layouts
 embed_f32 embed.comp -DRAW_F32

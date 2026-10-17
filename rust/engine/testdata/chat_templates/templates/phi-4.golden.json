@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|im_start|>assistant<|im_sep|>I start.<|im_end|><|im_start|>user<|im_sep|>ok<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|im_start|>user<|im_sep|>Compute 17*3<|im_end|><|im_start|>assistant<|im_sep|>Let me compute that.<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/documents": {
+  "ok": "<|im_start|>user<|im_sep|>Summarize.<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|im_start|>system<|im_sep|>  padded system with trailing newline\n\n<|im_end|><|im_start|>user<|im_sep|>  padded user \n<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/multi_turn": {
+  "ok": "<|im_start|>system<|im_sep|>Be brief.<|im_end|><|im_start|>user<|im_sep|>Hi<|im_end|><|im_start|>assistant<|im_sep|>Hello! How can I help?<|im_end|><|im_start|>user<|im_sep|>Tell me a joke.<|im_end|><|im_start|>assistant<|im_sep|>Why did the chicken cross the road?<|im_end|><|im_start|>user<|im_sep|>Why?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|im_start|>user<|im_sep|>Hi<|im_end|><|im_start|>assistant<|im_sep|>Hello!<|im_end|>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|im_start|>user<|im_sep|>Think hard: 13*17<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/reasoning_history": {
+  "ok": "<|im_start|>user<|im_sep|>2+2?<|im_end|><|im_start|>assistant<|im_sep|><think>\nsimple\n</think>\n\n4<|im_end|><|im_start|>user<|im_sep|>And 3+3?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/system_not_first": {
+  "ok": "<|im_start|>user<|im_sep|>a<|im_end|><|im_start|>system<|im_sep|>late system<|im_end|><|im_start|>user<|im_sep|>b<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/system_user": {
+  "ok": "<|im_start|>system<|im_sep|>You are a terse assistant.<|im_end|><|im_start|>user<|im_sep|>Capital of France?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|im_start|>user<|im_sep|>2+2?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|im_start|>user<|im_sep|>2+2?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|im_start|>user<|im_sep|>Weather in Berlin and 2+2?<|im_end|><|im_start|>assistant<|im_sep|><|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/tool_call_then_answer": {
+  "err": "TypeError: can only concatenate str (not \"NoneType\") to str"
+ },
+ "default/tools_system_user": {
+  "ok": "<|im_start|>system<|im_sep|>You can call tools.<|im_end|><|im_start|>user<|im_sep|>Weather in Berlin?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/tools_user": {
+  "ok": "<|im_start|>user<|im_sep|>Weather in München?<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|im_start|>user<|im_sep|>a<|im_end|><|im_start|>user<|im_sep|>b<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/unicode": {
+  "ok": "<|im_start|>user<|im_sep|>Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|im_end|><|im_start|>assistant<|im_sep|>"
+ },
+ "default/user_only": {
+  "ok": "<|im_start|>user<|im_sep|>Hello<|im_end|><|im_start|>assistant<|im_sep|>"
+ }
+}

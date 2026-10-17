@@ -86,6 +86,12 @@ pub struct RunSpec {
 ///
 /// The stream additionally needs the 9 weight/activation buffers of [`plan_delta_layer`] to be f32 device buffers and the state buffer of every run to
 /// hold `state_offset + layer_state_bytes()` bytes (not checkable here).
+pub fn kda_supported(shape: &crate::backend::KdaShape) -> bool {
+    matches!(shape.head_dim, 16 | 32 | 64 | 128)
+        && shape.heads > 0
+        && (2..=8).contains(&shape.conv_kernel)
+}
+
 pub fn delta_supported(shape: &DeltaShape) -> bool {
     matches!(shape.k_dim, 32 | 64 | 96 | 128)
         && (1..=128).contains(&shape.v_dim)
@@ -272,6 +278,12 @@ impl Mamba2Shape {
         }
         Ok(())
     }
+}
+
+/// Basis of `Stream::supports_mamba2` for the Metal stream: the kernels take a Mamba-2 layer when the shape is consistent, the convolution kernel is
+/// 2..=8 and the state size is at most 256 (see [`Mamba2Shape`]).
+pub fn mamba2_supported(shape: &Mamba2Shape) -> bool {
+    shape.check().is_ok() && shape.conv_dim() <= u32::MAX as usize / 4
 }
 
 /// Shape of a Mamba-1 mixer.

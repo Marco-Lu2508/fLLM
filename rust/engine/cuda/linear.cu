@@ -3,6 +3,10 @@
 
 #include "common.cuh"
 #include "fllm_cuda_internal.h"
+#if !defined(__HIPCC__)
+#include "fp8_gemm.h"
+int fllm_cublaslt_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch);
+#endif
 
 // ---------------------------------------------------------------------------------------------
 // GEMV for small batches: one warp per output row, every lane decodes runs of 16 weights and
@@ -40,7 +44,7 @@ gemv_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
     const int runs = (cols + 15) / 16;
     for (int run = lane; run < runs; run += FLLM_WARP) {
         float w[16];
-        decode16<KIND>(rp, run, cols, w);
+        decode16<(uint32_t)KIND>(rp, run, cols, w);
 #pragma unroll
         for (int b = 0; b < NB; b++) {
             if (b0 + b < batch) {
@@ -86,7 +90,7 @@ gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
             const int m = m0 + ld_row;
             if (m < rows) {
                 const uint8_t *rp = W + (size_t)m * kind_row_bytes(KIND, cols);
-                decode16<KIND>(rp, k0 / 16 + ld_q, cols, w);
+                decode16<(uint32_t)KIND>(rp, k0 / 16 + ld_q, cols, w);
             } else {
 #pragma unroll
                 for (int i = 0; i < 16; i++) w[i] = 0.f;
@@ -179,6 +183,18 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
     if (!no_mmvq && (KIND == KIND_Q4_K || KIND == KIND_Q5_K || KIND == KIND_Q6_K) && batch >= 2 && batch <= fllm_mmvq_maxb() && !fllm_exact_math() &&
         fllm_mmvq_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
+#if !defined(__HIPCC__)
+    // dense 16-bit weights, prompt batches: cuBLASLt loaded at run time (cublaslt_gemm.cu; Hopper / Blackwell kernels), else the built-in GEMM below
+    if ((KIND == KIND_F16 || KIND == KIND_BF16) && batch >= 16) {
+        const int rc = fllm_cublaslt_gemm_try(s, W, KIND, X, Y, bias, rows, cols, batch);
+        if (rc >= 0) return rc;
+    }
+    // Q8_0 prompts on the int8 tensor cores (int8_gemm.cu, FLLM_INT8_GEMM=1)
+    if (KIND == KIND_Q8_0 && batch >= 16) {
+        const int rc = fllm_int8_q8_try(s, W, X, Y, bias, rows, cols, batch);
+        if (rc >= 0) return rc;
+    }
+#endif
     if (KIND == KIND_Q4_K && batch >= 2 && !fllm_exact_math() &&
         fllm_qgemm4k_try(s, W, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");

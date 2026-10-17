@@ -11,6 +11,9 @@
 
 #include "common.cuh"
 #include "fllm_cuda_internal.h"
+#if !defined(__HIPCC__)
+#include <cuda_bf16.h>
+#endif
 #if defined(__HIPCC__)
 #include "../hip/hip_dpp.cuh"
 #endif
@@ -20,9 +23,9 @@
 #define A4_FLOOR (-3.0e38f)
 
 struct Attn4Args {
-    const float *q;
+    const void *q;  // FP32, or FP16 / BF16 when adt != 0 (FLLM_ACT_DTYPE)
     const uint16_t *kpool, *vpool;
-    float *out;
+    void *out;
     float *ws;
     const int64_t *tables, *lengths;
     const float *sinks;
@@ -30,7 +33,30 @@ struct Attn4Args {
     float scale, softcap;
     int window, chunk;
     int kscale_base, vscale_base;  // q8_0 cache: first scale (16-bit words) of the layer's key / value pool
+    int adt = 0;                   // activation type of q and out: 0 FP32, 1 FP16, 2 BF16
 };
+
+// q and the result in the activation type of the pipeline (FP32 unless FLLM_ACT_DTYPE says otherwise)
+__device__ __forceinline__ float a4_load(const void *p, size_t i, int adt) {
+#if defined(__HIPCC__)
+    (void)adt;
+    return static_cast<const float *>(p)[i];
+#else
+    if (adt == 1) return __half2float(static_cast<const __half *>(p)[i]);
+    if (adt == 2) return __bfloat162float(static_cast<const __nv_bfloat16 *>(p)[i]);
+    return static_cast<const float *>(p)[i];
+#endif
+}
+__device__ __forceinline__ void a4_store(void *p, size_t i, float v, int adt) {
+#if defined(__HIPCC__)
+    (void)adt;
+    static_cast<float *>(p)[i] = v;
+#else
+    if (adt == 1) static_cast<__half *>(p)[i] = __float2half_rn(v);
+    else if (adt == 2) static_cast<__nv_bfloat16 *>(p)[i] = __float2bfloat16_rn(v);
+    else static_cast<float *>(p)[i] = v;
+#endif
+}
 
 __device__ __forceinline__ void a4_unpack(const uint4 &v, float f[8]) {
     const uint32_t w[4] = {v.x, v.y, v.z, v.w};
@@ -62,10 +88,10 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
     float qv[G][8], acc[G][8], m[G], l[G];
 #pragma unroll
     for (int g = 0; g < G; g++) {
-        const float *qp = a.q + ((size_t)r * a.heads + (size_t)kh * G + g) * D + sub * 8;
+        const size_t qi = ((size_t)r * a.heads + (size_t)kh * G + g) * D + sub * 8;
 #pragma unroll
         for (int i = 0; i < 8; i++) {
-            qv[g][i] = qp[i] * a.scale;
+            qv[g][i] = a4_load(a.q, qi + i, a.adt) * a.scale;
             acc[g][i] = 0.f;
         }
         m[g] = A4_FLOOR;
@@ -180,7 +206,7 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
                     v *= rescale;
                     L = L * rescale + __expf(a.sinks[h] - Mf);
                 }
-                a.out[((size_t)r * a.heads + h) * D + d] = v / L;
+                a4_store(a.out, ((size_t)r * a.heads + h) * D + d, v / L, a.adt);
             } else {
                 float *dst = a.ws + (((size_t)r * a.heads + h) * a.splits + sp) * (D + 2);
                 dst[d] = v;
@@ -206,7 +232,7 @@ __global__ void __launch_bounds__(D) attn4_merge_kernel(Attn4Args a) {
         L += p[D + 1] * f;
         v += p[threadIdx.x] * f;
     }
-    a.out[((size_t)r * a.heads + h) * D + threadIdx.x] = v / L;
+    a4_store(a.out, ((size_t)r * a.heads + h) * D + threadIdx.x, v / L, a.adt);
 }
 
 template <int D, int G, bool Q8>
@@ -231,6 +257,9 @@ static int launch4(cudaStream_t st, Attn4Args a, int rows, int max_len, float *w
     return fllm_check_launch("attention4");
 }
 
+// FLLM_ACT_DTYPE: the activation type of q and out for the next call (act_api.inc sets it around fllm_attention4_try; 0 = FP32)
+thread_local int fllm_attn_act_dt = 0;
+
 // Returns -1 when the shape is not covered.
 int fllm_attention4_try(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out,
                         const int64_t *tables, const int64_t *lengths, int max_len, const float *sinks,
@@ -242,6 +271,7 @@ int fllm_attention4_try(cudaStream_t s, const float *q, const uint16_t *kpool, c
     if ((reinterpret_cast<uintptr_t>(kpool) & 15) != 0 || (reinterpret_cast<uintptr_t>(vpool) & 15) != 0) return -1;
     Attn4Args a{q, kpool, vpool, out, ws, tables, lengths, sinks, heads, kv_heads, stride, block_size, 1, 1, scale,
                 softcap, window, chunk, kscale_base, vscale_base};
+    a.adt = fllm_attn_act_dt;
     auto run = [&](auto dim) -> int {
         constexpr int D = decltype(dim)::value;
         const int g = heads / kv_heads;

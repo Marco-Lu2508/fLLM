@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|assistant|>\nI start.<|end|>\n<|user|>\nok<|end|>\n<|assistant|>\n"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|user|>\nCompute 17*3<|end|>\n<|assistant|>\nLet me compute that.<|end|>\n<|assistant|>\n"
+ },
+ "default/documents": {
+  "ok": "<|user|>\nSummarize.<|end|>\n<|assistant|>\n"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|system|>\n  padded system with trailing newline\n\n<|end|>\n<|user|>\n  padded user \n<|end|>\n<|assistant|>\n"
+ },
+ "default/multi_turn": {
+  "ok": "<|system|>\nBe brief.<|end|>\n<|user|>\nHi<|end|>\n<|assistant|>\nHello! How can I help?<|end|>\n<|user|>\nTell me a joke.<|end|>\n<|assistant|>\nWhy did the chicken cross the road?<|end|>\n<|user|>\nWhy?<|end|>\n<|assistant|>\n"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|user|>\nHi<|end|>\n<|assistant|>\nHello!<|end|>\n<|endoftext|>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|user|>\nThink hard: 13*17<|end|>\n<|assistant|>\n"
+ },
+ "default/reasoning_history": {
+  "ok": "<|user|>\n2+2?<|end|>\n<|assistant|>\n<think>\nsimple\n</think>\n\n4<|end|>\n<|user|>\nAnd 3+3?<|end|>\n<|assistant|>\n"
+ },
+ "default/system_not_first": {
+  "ok": "<|user|>\na<|end|>\n<|system|>\nlate system<|end|>\n<|user|>\nb<|end|>\n<|assistant|>\n"
+ },
+ "default/system_user": {
+  "ok": "<|system|>\nYou are a terse assistant.<|end|>\n<|user|>\nCapital of France?<|end|>\n<|assistant|>\n"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|user|>\n2+2?<|end|>\n<|assistant|>\n"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|user|>\n2+2?<|end|>\n<|assistant|>\n"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|user|>\nWeather in Berlin and 2+2?<|end|>\n<|assistant|>\n<|end|>\n<|assistant|>\n"
+ },
+ "default/tool_call_then_answer": {
+  "err": "TypeError: can only concatenate str (not \"NoneType\") to str"
+ },
+ "default/tools_system_user": {
+  "ok": "<|system|>\nYou can call tools.<|end|>\n<|user|>\nWeather in Berlin?<|end|>\n<|assistant|>\n"
+ },
+ "default/tools_user": {
+  "ok": "<|user|>\nWeather in München?<|end|>\n<|assistant|>\n"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|user|>\na<|end|>\n<|user|>\nb<|end|>\n<|assistant|>\n"
+ },
+ "default/unicode": {
+  "ok": "<|user|>\nGrüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|end|>\n<|assistant|>\n"
+ },
+ "default/user_only": {
+  "ok": "<|user|>\nHello<|end|>\n<|assistant|>\n"
+ }
+}

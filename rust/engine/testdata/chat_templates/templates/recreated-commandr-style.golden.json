@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>I start.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>ok<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<bos>## calc\n\n```python\ndef calc(expression: string, precision: integer = None) -> List[Dict]:\n    \"\"\"Evaluate an arithmetic expression.\n    \"\"\"\n```\n<|START_OF_TURN_TOKEN|><|USER_TOKEN|>Compute 17*3<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>Let me compute that.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/documents": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Summarize.<|END_OF_TURN_TOKEN|>Document: 0\ntext: Alpha text.\ntitle: Doc A\nDocument: 1\ntext: Beta text.\ntitle: Doc B\n<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/image_parts": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>[{'type': 'text', 'text': 'What is in this picture?'}, {'type': 'image'}]<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>padded system with trailing newline<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>padded user<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/multi_turn": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>Be brief.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Hi<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>Hello! How can I help?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Tell me a joke.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>Why did the chicken cross the road?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Why?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Hi<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>Hello!<|END_OF_TURN_TOKEN|>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Think hard: 13*17<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/reasoning_history": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>2+2?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><think>\nsimple\n</think>\n\n4<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>And 3+3?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/system_not_first": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>a<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>late system<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>b<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/system_user": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>You are a terse assistant.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Capital of France?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/text_parts": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>[{'type': 'text', 'text': 'Sys part.'}]<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>[{'type': 'text', 'text': 'Part one. '}, {'type': 'text', 'text': 'Part two.'}]<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/thinking_disabled": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>2+2?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/thinking_enabled": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>2+2?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<bos>## get_weather\n\n```python\ndef get_weather(city: string, unit: string = None) -> List[Dict]:\n    \"\"\"Get the current weather for a city.\n    \"\"\"\n```\n## calc\n\n```python\ndef calc(expression: string, precision: integer = None) -> List[Dict]:\n    \"\"\"Evaluate an arithmetic expression.\n    \"\"\"\n```\n<|START_OF_TURN_TOKEN|><|USER_TOKEN|>Weather in Berlin and 2+2?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/tool_call_then_answer": {
+  "ok": "<bos>## get_weather\n\n```python\ndef get_weather(city: string, unit: string = None) -> List[Dict]:\n    \"\"\"Get the current weather for a city.\n    \"\"\"\n```\n<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>Use tools when helpful.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Weather in Berlin?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>It is 21 C and sunny in Berlin.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>And Paris?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/tools_system_user": {
+  "ok": "<bos>## get_weather\n\n```python\ndef get_weather(city: string, unit: string = None) -> List[Dict]:\n    \"\"\"Get the current weather for a city.\n    \"\"\"\n```\n<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>You can call tools.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Weather in Berlin?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/tools_user": {
+  "ok": "<bos>## get_weather\n\n```python\ndef get_weather(city: string, unit: string = None) -> List[Dict]:\n    \"\"\"Get the current weather for a city.\n    \"\"\"\n```\n## calc\n\n```python\ndef calc(expression: string, precision: integer = None) -> List[Dict]:\n    \"\"\"Evaluate an arithmetic expression.\n    \"\"\"\n```\n<|START_OF_TURN_TOKEN|><|USER_TOKEN|>Weather in München?<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>a<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>b<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/unicode": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ },
+ "default/user_only": {
+  "ok": "<bos><|START_OF_TURN_TOKEN|><|USER_TOKEN|>Hello<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+ }
+}

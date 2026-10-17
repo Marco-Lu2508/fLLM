@@ -1,4 +1,4 @@
-# Vulkan backend: integration (package 4)
+# Vulkan backend: integration
 
 Level of verification: **L0** (compiles, clippy clean, unit-tested without a device; nothing here has ever run on a Vulkan driver).
 `API.md` describes the core (instance, memory, pipelines, recorder), `shaders/vulkan/INTERFACE_QUANT.md` and `INTERFACE_OPS.md` the shaders and their
@@ -21,7 +21,7 @@ planners. This file describes what sits on top of them: `backend.rs` (+ `backend
 | `stream/ring.rs` | scratch rings (device and host-visible) |
 | `stream/linear.rs` | `quantized_linear`, `host_linear`, float-weight plans, barrier-free projections of the same input |
 | `stream/fallback.rs` | CPU fallbacks (`moe_route`, sampling with temperature, attention with head width > 512) |
-| `stream/mamba.rs` | Mamba-2 mixer, ready for the trait method proposed in the package-3 report |
+| `stream/mamba.rs` | Mamba-2 mixer, ready for the trait method proposed for the Backend trait |
 | `shaders/vulkan/lin_float.comp`, `variants_float.list` | linear projection for F32 / F16 / BF16 weights |
 | `shaders/vulkan/check_all.sh` | compiles and validates *every* shader of the registry |
 
@@ -119,13 +119,13 @@ has to match the CPU token for token.
 ## The Mamba hook
 
 `VulkanStream::mamba2_layer(shape, weights, runs, state_offset, projected, mixed, out)` plans and records the Mamba-2 mixer (`plan_mamba2_mixer`). After the
-trait gains `MambaShape`, `MambaWeights`, `supports_mamba` and `mamba_layer` (proposal in the package-3 report) the implementation is a conversion of the
-arguments and one call; see the package-4 report for the glue.
+trait gains `MambaShape`, `MambaWeights`, `supports_mamba` and `mamba_layer` (proposed) the implementation is a conversion of the
+arguments and one call..
 
 ## First run on hardware
 
 1. `rust/engine/shaders/vulkan/check_all.sh` (does the local `glslc` build all modules?).
-2. `FLLM_VULKAN_VALIDATE=1 cargo test --release -p fllm-engine --features vulkan --lib backend::vulkan::instance::smoke -- --ignored --nocapture --test-threads=1` (core, package 1).
+2. `FLLM_VULKAN_VALIDATE=1 cargo test --release -p fllm-engine --features vulkan --lib backend::vulkan::instance::smoke -- --ignored --nocapture --test-threads=1` (core).
 3. `FLLM_VULKAN_VALIDATE=1 cargo test --release -p fllm-engine --features vulkan --lib backend::vulkan::backend::hw_tests -- --ignored --nocapture --test-threads=1`.
 4. `fllm-rs devices`, then `FLLM_VULKAN_VALIDATE=1 FLLM_VULKAN_EXACT=1 fllm-rs selftest-gpu --device vulkan`.
 5. A small model (Q4_0 / Q8_0) with `--device vulkan` against `--device cpu` (greedy), first with `FLLM_VULKAN_EXACT=1`, then without.

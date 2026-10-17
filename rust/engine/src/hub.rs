@@ -468,6 +468,7 @@ pub(crate) fn resolve_with_session(
                 "special_tokens_map.json",
                 "generation_config.json",
                 "chat_template.jinja",
+                "chat_template.json",
             ] {
                 if siblings.contains(&name) {
                     session.download(name)?;
@@ -483,6 +484,11 @@ pub(crate) fn resolve_with_session(
                 session.download(name)?;
             }
         }
+        for name in &siblings {
+            if name.starts_with("additional_chat_templates/") && name.ends_with(".jinja") {
+                session.download(name)?;
+            }
+        }
         for file in checkpoint_weight_files(session)? {
             session.download(&file)?;
         }
@@ -492,7 +498,7 @@ pub(crate) fn resolve_with_session(
 }
 
 /// Config, tokenizer and template files that accompany a checkpoint.
-pub(crate) const CHECKPOINT_SUPPORT_FILES: [&str; 14] = [
+pub(crate) const CHECKPOINT_SUPPORT_FILES: [&str; 20] = [
     "config.json",
     "hf_quant_config.json",
     "tokenizer.json",
@@ -501,11 +507,17 @@ pub(crate) const CHECKPOINT_SUPPORT_FILES: [&str; 14] = [
     "added_tokens.json",
     "generation_config.json",
     "chat_template.jinja",
+    "chat_template.json",
     "vocab.json",
     "vocab.txt",
     "merges.txt",
     "tokenizer.model",
     "spiece.model",
+    "sentencepiece.bpe.model",
+    "tiktoken.model",
+    "qwen.tiktoken",
+    "tekken.json",
+    "params.json",
     "1_Pooling/config.json",
 ];
 
@@ -513,6 +525,19 @@ pub(crate) const CHECKPOINT_SUPPORT_FILES: [&str; 14] = [
 /// single unindexed weights file.
 pub(crate) fn checkpoint_weight_files(session: &RepoSession) -> Result<Vec<String>, String> {
     let siblings = session.names();
+    if !siblings.contains(&"config.json") && siblings.contains(&"params.json") {
+        // Mistral's own layout: params.json and consolidated*.safetensors
+        let mut files: Vec<String> = siblings
+            .iter()
+            .filter(|n| n.starts_with("consolidated") && n.ends_with(".safetensors"))
+            .map(|n| (*n).to_owned())
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err("repository has params.json but no consolidated*.safetensors weights".into());
+        }
+        return Ok(files);
+    }
     let indexes = CHECKPOINT_INDEXES
         .into_iter()
         .filter(|name| siblings.contains(name))

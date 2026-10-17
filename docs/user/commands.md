@@ -24,9 +24,7 @@ Key code defaults: `--host 127.0.0.1`, `--port 8000`, `--ctx 4096`,
 `--kv-cache-type f16`, `--speculative-lookup 0`, `--speculative-window 32`,
 `--draft-tokens 5`, `--tool-parser auto`, `--reasoning-parser auto`.
 
-Stale usage line: `usage()` prints `[--max-batched-tokens 1024]`, but the
-code default is **512** (`serve.rs`: `let mut max_batched_tokens =
-512usize`). Trust 512 when the flag is omitted. Other serve flags
+Other serve flags
 (`--gpu-layers`, `--speculative mtp|off`, `--pin-cores`, `--no-repack`,
 sampling `--temp`/`--top-p`/`--top-k`/`--min-p`/…, `--lora`,
 `--draft-model`, `--embeddings`/`--pooling`, `--mmproj`, `--api-key`,

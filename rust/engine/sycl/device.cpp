@@ -144,7 +144,13 @@ uint64_t free_memory(const sycl::device& dev) {
 Registry build_registry() {
     Registry r;
     try {
-        std::vector<sycl::device> gpus = sycl::device::get_devices(sycl::info::device_type::gpu);
+        // FLLM_SYCL_ALLOW_CPU=1 also lists SYCL CPU devices (OpenCL CPU runtime): for running the selftest on a machine without an
+        // Intel GPU, never faster than the native CPU backend
+        const bool allow_cpu = std::getenv("FLLM_SYCL_ALLOW_CPU") != nullptr;
+        std::vector<sycl::device> gpus;
+        for (const sycl::device& d : sycl::device::get_devices(allow_cpu ? sycl::info::device_type::all : sycl::info::device_type::gpu)) {
+            if (d.is_gpu() || (allow_cpu && d.is_cpu())) gpus.push_back(d);
+        }
         std::vector<sycl::device> l0, other;
         for (const sycl::device& d : gpus) (d.get_backend() == sycl::backend::ext_oneapi_level_zero ? l0 : other).push_back(d);
         // Level Zero is the native Intel path; the OpenCL devices are the same GPUs again. FLLM_SYCL_ALL_BACKENDS=1 lists both.

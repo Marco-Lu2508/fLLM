@@ -1,4 +1,4 @@
-# CPU emulation of the quantized linear kernels (package p06a)
+# CPU emulation of the quantized linear kernels
 
 **No GPU and no Metal compiler are involved.** The MSL text of `common.metal`, `common_q_gemm.metal`, `common_q_gemv.metal` and
 `q_prepass.metal` is turned into C++ by a mechanical `sed` (the same attribute/literal clean-up as `~/fllm-tools/mslcheck.sh`, plus the function
@@ -21,7 +21,7 @@ constant `q_fc_nb` becoming a global that the driver sets), compiled together wi
 ## Run
 
 ```sh
-# 1. dump the vectors (needs the host harness of the p06a package, or any build of the unit tests with FLLM_METAL_DUMP_DIR set)
+# 1. dump the vectors (needs a host harness, or any build of the unit tests with FLLM_METAL_DUMP_DIR set)
 FLLM_METAL_DUMP_DIR=/tmp/fllm-metal-emu/dump cargo test --release <harness> dump_vectors
 # 2. build the emulation and run all formats (JOBS in parallel)
 rust/engine/metal/emu/run_emu.sh            # or: run_emu.sh q4_0 q6_k ...

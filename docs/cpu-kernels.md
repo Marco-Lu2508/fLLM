@@ -317,11 +317,10 @@ Sapphire Rapids remain the reference.
 
 ## Not implemented
 
-- **AMX-INT8** (Sapphire Rapids and later): the tile intrinsics (`_tile_loadd`,
-  `_tile_dpbssd`, ...) are nightly-only in Rust 1.98 (`x86_amx_intrinsics`), and Linux
-  requires `arch_prctl(ARCH_REQ_XCOMP_PERM)` before the first tile instruction. An AMX
-  prompt kernel would need inline assembly plus a repacked 16x64-byte weight layout; it is
-  a candidate for prefill on Xeon, not for decode.
+- **AMX decode kernels**: the AMX-INT8 and AMX-BF16 prompt GEMMs exist (tier `amx`, built with the
+  `avx512` feature, inline assembly because the tile intrinsics are nightly-only; see
+  [cpu-avx512-amx.md](cpu-avx512-amx.md)), but they have so far run only in an emulator, and AMX is
+  not used for single-token decode, which is memory-bound.
 - **AVX-VNNI-INT8** (`vpdpbssd`, Arrow Lake, Lunar Lake; intrinsics stable since Rust 1.89):
   a signed-by-signed dot would replace the sign-transfer `maddubs` sequence in the IQ4_NL,
   IQ4_XS and MXFP4 kernels and the bias trick of Q8_0. Not implemented.

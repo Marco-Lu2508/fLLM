@@ -11,9 +11,9 @@
 # (see docs/docker.md for the minimum version).
 #
 # Build arguments
-#   CUDA_VERSION  toolkit used for nvcc. 12.8 covers sm_61 (Pascal) to sm_120 (Blackwell); CUDA 13 dropped Pascal and Volta.
-#   CUDA_ARCHS    GPU architectures compiled in (default: all of them). The newest one is also embedded as PTX.
-#                 A single architecture (e.g. 120 or 86) shortens the build a lot.
+#   CUDA_VERSION  toolkit used for nvcc. 12.8 covers sm_61 (Pascal) to sm_120/sm_121 (Blackwell / DGX Spark); CUDA 13 dropped Pascal and Volta.
+#   CUDA_ARCHS    GPU architectures compiled in ("auto" picks 61;70;75;80;86;89;90;100;120 on amd64 and 87;90;121 on arm64 for Grace Hopper,
+#                 Jetson Orin, and DGX Spark when CUDA >= 12.8). The newest one is also embedded as PTX.
 #   JOBS          cargo parallelism (nvcc runs up to 12 parallel jobs on its own)
 #   RUST_FEATURES cargo features; "rust-gpu,cuda" = wgpu (Vulkan/Metal/DX12) + CUDA
 
@@ -23,7 +23,7 @@ ARG UBUNTU=ubuntu24.04
 # ---------------------------------------------------------------- builder
 FROM nvidia/cuda:${CUDA_VERSION}-devel-${UBUNTU} AS builder
 ARG JOBS=4
-ARG CUDA_ARCHS="61;70;75;80;86;89;90;120"
+ARG CUDA_ARCHS="auto"
 ARG RUST_FEATURES="rust-gpu,cuda"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -56,8 +56,14 @@ RUN for c in engine gguf-probe checkpoint; do mkdir -p rust/$c/src && : > rust/$
 
 # Real build
 COPY rust ./rust
+COPY LICENSE NOTICE THIRD_PARTY.md ./
+COPY licenses ./licenses
 RUN touch rust/*/src/lib.rs rust/engine/src/bin/serve.rs rust/engine/build.rs \
- && FLLM_CUDA_ARCHS="${CUDA_ARCHS}" CARGO_BUILD_JOBS=${JOBS} \
+ && ARCHS="${CUDA_ARCHS}"; \
+    if [ -z "$ARCHS" ] || [ "$ARCHS" = "auto" ]; then \
+      if [ "$(uname -m)" = "aarch64" ]; then ARCHS="87;90;121"; else ARCHS="61;70;75;80;86;89;90;100;120"; fi; \
+    fi \
+ && FLLM_CUDA_ARCHS="$ARCHS" CARGO_BUILD_JOBS=${JOBS} \
     cargo build --release --locked --features "${RUST_FEATURES}" -p fllm-engine --bin fllm-rs \
  && strip target/release/fllm-rs
 
@@ -67,6 +73,8 @@ ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
+COPY --from=builder /build/fLLM/LICENSE /build/fLLM/NOTICE /build/fLLM/THIRD_PARTY.md /usr/share/doc/fllm/
+COPY --from=builder /build/fLLM/licenses /usr/share/doc/fllm/licenses
 # Unprivileged user (uid 1000, so bind-mounted host directories of the first Linux user work). The cache directory exists
 # in the image and belongs to that user, so a new named volume mounted there inherits the ownership.
 RUN (userdel -r ubuntu 2>/dev/null || true) \

@@ -1,0 +1,20 @@
+{%- macro fmt(tool) -%}{{ {"name": tool.function.name, "parameters": tool.function.parameters} | tojson(ensure_ascii=False, sort_keys=true, separators=(",", ":")) }}{%- endmacro -%}
+<|im_start|>system
+Tools:
+{% for tool in tools %}{{ fmt(tool) }}
+{% endfor %}
+{%- for message in messages if message.role != "system" %}
+{%- if message.role == "assistant" and message.tool_calls is defined %}
+<|im_start|>assistant
+{% for call in message.tool_calls %}<tool_call>{{ call.function | tojson }}</tool_call>
+{% endfor %}<|im_end|>
+{%- elif message.role == "tool" %}
+<|im_start|>tool
+<tool_response>{{ message.content }}</tool_response><|im_end|>
+{%- else %}
+<|im_start|>{{ message.role }}
+{{ message.content }}<|im_end|>
+{%- endif %}
+{%- endfor %}
+{% if add_generation_prompt %}<|im_start|>assistant
+{% endif %}

@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nI start.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nok<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, respond with a JSON for a function call.\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"calc\",\n        \"description\": \"Evaluate an arithmetic expression.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"expression\": {\n                    \"type\": \"string\"\n                },\n                \"precision\": {\n                    \"type\": \"integer\"\n                }\n            },\n            \"required\": [\n                \"expression\"\n            ]\n        }\n    }\n}\n\nCompute 17*3<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n{\"name\": \"calc\", \"parameters\": {\"expression\": \"17*3\"}}<|eot_id|><|start_header_id|>ipython<|end_header_id|>\n\n51<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/documents": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nSummarize.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/image_parts": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n[{'type': 'text', 'text': 'What is in this picture?'}, {'type': 'image'}]<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\npadded system with trailing newline<|eot_id|><|start_header_id|>user<|end_header_id|>\n\npadded user<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/multi_turn": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\nBe brief.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nHello! How can I help?<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nTell me a joke.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nWhy did the chicken cross the road?<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWhy?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nHello!<|eot_id|>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nThink hard: 13*17<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/reasoning_history": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<think>\nsimple\n</think>\n\n4<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nAnd 3+3?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/system_not_first": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\na<|eot_id|><|start_header_id|>system<|end_header_id|>\n\nlate system<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nb<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/system_user": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\nYou are a terse assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nCapital of France?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/text_parts": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n[{'type': 'text', 'text': 'Sys part.'}]<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n[{'type': 'text', 'text': 'Part one. '}, {'type': 'text', 'text': 'Part two.'}]<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/thinking_disabled": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/thinking_enabled": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/tool_call_roundtrip": {
+  "err": "TemplateError: This model only supports single tool-calls at once!"
+ },
+ "default/tool_call_then_answer": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nToday Date: year-4\n\nUse tools when helpful.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, respond with a JSON for a function call.\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Get the current weather for a city.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"city\": {\n                    \"type\": \"string\",\n                    \"description\": \"City name, e.g. München\"\n                },\n                \"unit\": {\n                    \"type\": \"string\",\n                    \"enum\": [\n                        \"celsius\",\n                        \"fahrenheit\"\n                    ]\n                }\n            },\n            \"required\": [\n                \"city\"\n            ]\n        }\n    }\n}\n\nWeather in Berlin?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Berlin\"}}<|eot_id|><|start_header_id|>ipython<|end_header_id|>\n\n21 C, sunny<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nIt is 21 C and sunny in Berlin.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nAnd Paris?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/tools_system_user": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nToday Date: year-4\n\nYou can call tools.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, respond with a JSON for a function call.\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Get the current weather for a city.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"city\": {\n                    \"type\": \"string\",\n                    \"description\": \"City name, e.g. München\"\n                },\n                \"unit\": {\n                    \"type\": \"string\",\n                    \"enum\": [\n                        \"celsius\",\n                        \"fahrenheit\"\n                    ]\n                }\n            },\n            \"required\": [\n                \"city\"\n            ]\n        }\n    }\n}\n\nWeather in Berlin?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/tools_user": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, respond with a JSON for a function call.\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Get the current weather for a city.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"city\": {\n                    \"type\": \"string\",\n                    \"description\": \"City name, e.g. München\"\n                },\n                \"unit\": {\n                    \"type\": \"string\",\n                    \"enum\": [\n                        \"celsius\",\n                        \"fahrenheit\"\n                    ]\n                }\n            },\n            \"required\": [\n                \"city\"\n            ]\n        }\n    }\n}\n\n{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"calc\",\n        \"description\": \"Evaluate an arithmetic expression.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"expression\": {\n                    \"type\": \"string\"\n                },\n                \"precision\": {\n                    \"type\": \"integer\"\n                }\n            },\n            \"required\": [\n                \"expression\"\n            ]\n        }\n    }\n}\n\nWeather in München?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\na<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nb<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/unicode": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGrüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ },
+ "default/user_only": {
+  "ok": "<bos><|start_header_id|>system<|end_header_id|>\n\nToday Date: year-4\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+ }
+}

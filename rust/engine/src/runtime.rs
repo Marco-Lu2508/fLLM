@@ -55,9 +55,31 @@ pub struct InferenceRuntime {
     constraints: std::collections::HashMap<i64, llguidance::Matcher>,
     draft: Option<crate::draft::DraftEngine>,
     mtp: Option<crate::draft::MtpEngine>,
+    suffix: Option<crate::speculative::SuffixCache>,
+    spec_head: Option<crate::draft::SpecHeadEngine>,
+    /// Distributions the draft model drew this step's draft tokens from (only for sequences with a draft model proposal).
+    draft_q: std::collections::HashMap<i64, Vec<Option<crate::speculative::Dist>>>,
+    spec_method: crate::speculative::SpeculativeMethod,
+    /// Largest number of draft tokens per verification (`--num-speculative-tokens`).
+    spec_tokens: usize,
+    spec_stats: crate::speculative::SpecStats,
+    /// Statistics since the last flush to the metrics.
+    spec_delta: crate::speculative::SpecStats,
     decoder: Option<crate::rust_decoder::RustDecoder>,
+    /// KV data of the sequences preempted by swap, one export per block in table order.
+    swap_store: std::collections::HashMap<i64, Vec<Vec<u8>>>,
+    /// n > 1 can fork sequences on this backend (host arrays, or device pools whose block copy passed its self check).
+    fork_ok: bool,
+    swap_out_blocks: u64,
+    swap_in_blocks: u64,
     image_embeddings: std::collections::HashMap<i64, std::collections::HashMap<usize, Vec<f32>>>,
-    pub vision: Option<std::sync::Arc<crate::vision::VisionEncoder>>,
+    /// Three-axis (M-RoPE) position ids of sequences whose prompt holds images or video.
+    mrope_positions: std::collections::HashMap<i64, crate::vision::mrope::MropePositions>,
+    /// DeepStack features of sequences with media: per prompt index, one row per decoder layer.
+    deepstack: std::collections::HashMap<i64, std::collections::HashMap<usize, Vec<Vec<f32>>>>,
+    /// Custom visible lengths for attention (bidirectional image attention, prefix-LM mask).
+    visible_lengths: std::collections::HashMap<i64, Vec<usize>>,
+    pub vision: Option<std::sync::Arc<dyn crate::vision::MultimodalEncoder>>,
     eos_ids: Vec<i64>,
     next_sequence_id: i64,
     batch_stats: BatchStats,
@@ -104,7 +126,6 @@ impl InferenceRuntime {
             bm.allocator.refcounts[null_block] = 1;
         }
         let stateful = model.is_stateful();
-        let speculative_lookup = if stateful { 0 } else { speculative_lookup };
         let pc = PrefixCache::new(pool_blocks as i64, true, true).map_err(|e| e.to_string())?;
         let config = SchedulerConfig {
             block_size,
@@ -118,6 +139,8 @@ impl InferenceRuntime {
             } else {
                 speculative_window
             },
+            speculative_adaptive: !matches!(std::env::var("FLLM_SPEC_ADAPTIVE").as_deref(), Ok("0")),
+            ..SchedulerConfig::default()
         };
         let scheduler = Scheduler::new(config, bm, Some(pc), model.max_context());
         let key_len = model.key_buffer_len()?;
@@ -133,8 +156,26 @@ impl InferenceRuntime {
             constraints: std::collections::HashMap::new(),
             draft: None,
             mtp: None,
+            suffix: None,
+            spec_head: None,
+            draft_q: Default::default(),
+            spec_method: if speculative_lookup > 0 {
+                crate::speculative::SpeculativeMethod::Ngram
+            } else {
+                crate::speculative::SpeculativeMethod::Off
+            },
+            spec_tokens: speculative_lookup,
+            spec_stats: Default::default(),
+            spec_delta: Default::default(),
             decoder: None,
+            swap_store: Default::default(),
+            fork_ok: false,
+            swap_out_blocks: 0,
+            swap_in_blocks: 0,
             image_embeddings: Default::default(),
+            mrope_positions: Default::default(),
+            deepstack: Default::default(),
+            visible_lengths: Default::default(),
             vision: None,
             eos_ids,
             next_sequence_id: 1,
@@ -182,7 +223,7 @@ impl InferenceRuntime {
         }
         if sampling.choices > 1 && (!self.supports_shared_choices() || self.model.is_stateful()) {
             return Err(
-                "n > 1 requires a stateless model with CPU compute and no draft/MTP engine".into(),
+                "n > 1 requires a stateless model on a backend with KV block copy and no draft/MTP engine".into(),
             );
         }
         if sampling.choices > 1
@@ -211,6 +252,11 @@ impl InferenceRuntime {
             max_tokens,
             sampling,
         );
+        let mut sequence = sequence;
+        sequence.deadline = sequence
+            .sampling
+            .timeout_secs
+            .map(|secs| Instant::now() + std::time::Duration::from_secs_f64(secs));
         let mut followers = Vec::new();
         for index in 1..sequence.sampling.choices {
             let id = self.next_sequence_id;
@@ -227,6 +273,7 @@ impl InferenceRuntime {
                 params,
             );
             follower.choice_index = index;
+            follower.deadline = sequence.deadline;
             self.scheduler.bm.new_table(id).map_err(|e| e.to_string())?;
             self.scheduler
                 .bm
@@ -242,7 +289,7 @@ impl InferenceRuntime {
     }
 
     pub fn supports_shared_choices(&self) -> bool {
-        self.shared_choices_cpu
+        self.fork_ok
             && !self.model.is_stateful()
             && self.draft.is_none()
             && self.mtp.is_none()
@@ -352,7 +399,39 @@ impl InferenceRuntime {
         }
         Ok(())
     }
+    /// `copy_prompt_block` for models whose layers differ in KV geometry: every layer that owns a cache is copied with its own layout.
+    fn copy_prompt_block_layered(&mut self, src: usize, dst: usize) -> Result<(), String> {
+        let cfg = self.model.config().clone();
+        let (fmt_k, fmt_v) = self.model.kv_formats();
+        let layout = self.model.kv_pool_layout();
+        let slots = self.model.pool_blocks() * self.model.block_size();
+        let (pool_blocks, block_size) = (self.model.pool_blocks(), self.model.block_size());
+        if src >= pool_blocks || dst >= pool_blocks {
+            return Err("invalid shared KV block geometry".into());
+        }
+        for l in (0..cfg.layers).filter(|&l| cfg.layer_kv_source(l).is_none()) {
+            let heads = cfg.layer_kv_heads(l);
+            for (cache, fmt, dim, offset, words) in [
+                (&mut self.key, fmt_k, cfg.layer_head_dim(l), layout.key_offsets[l], layout.key_words[l]),
+                (&mut self.value, fmt_v, cfg.layer_value_dim(l), layout.value_offsets[l], layout.value_words[l]),
+            ] {
+                let regions = crate::kv_format::KvLayout::new(fmt, slots, heads, dim)
+                    .block_regions(block_size)
+                    .ok_or_else(|| format!("shared choices need KV blocks of whole words for {}", fmt.name()))?;
+                let region = cache.get_mut(offset..offset + words).ok_or("shared KV buffer does not match layer geometry")?;
+                copy_cache_regions(region, src, dst, pool_blocks, 1, words, &regions)?;
+            }
+        }
+        Ok(())
+    }
+
     fn copy_prompt_block(&mut self, src: usize, dst: usize) -> Result<(), String> {
+        if !self.model.config().uniform_geometry() {
+            return self.copy_prompt_block_layered(src, dst);
+        }
+        if let Some(result) = self.decoder.as_ref().and_then(|d| d.device_kv_copy(src, dst)) {
+            return result;
+        }
         let generic = !matches!(self.model.kv_kind(), 1 | 2);
         let region_sets = if generic {
             [self.kv_block_regions(true)?, self.kv_block_regions(false)?]
@@ -395,6 +474,86 @@ impl InferenceRuntime {
         Ok(())
     }
 
+    /// The pieces of block `block` in the host arrays.
+    fn host_block_pieces(&self, block: usize) -> Result<crate::kv_blocks::BlockPieces, String> {
+        let cfg = self.model.config();
+        let (fmt_k, fmt_v) = self.model.kv_formats();
+        let slots = self.model.pool_blocks() * self.model.block_size();
+        Ok(crate::kv_blocks::BlockPieces::new(
+            cfg.layers,
+            fmt_k.layer_words(slots, cfg.kv_heads, cfg.head_dim),
+            &self.kv_block_regions(true)?,
+            fmt_v.layer_words(slots, cfg.kv_heads, cfg.value_dim),
+            &self.kv_block_regions(false)?,
+            block,
+        ))
+    }
+    /// Export the KV data of a block (all layers, keys and values) to host memory.
+    fn kv_export_block(&mut self, block: usize) -> Result<Vec<u8>, String> {
+        if let Some(result) = self.decoder.as_ref().and_then(|d| d.device_kv_export(block)) {
+            return result;
+        }
+        crate::kv_blocks::host_export(&self.key, &self.value, &self.host_block_pieces(block)?)
+    }
+    fn kv_import_block(&mut self, block: usize, data: &[u8]) -> Result<(), String> {
+        if let Some(result) = self.decoder.as_ref().and_then(|d| d.device_kv_import(block, data)) {
+            return result;
+        }
+        let pieces = self.host_block_pieces(block)?;
+        crate::kv_blocks::host_import(&mut self.key, &mut self.value, &pieces, data)
+    }
+    /// Carry out the swap traffic of the scheduler: exports first (the freed blocks may be rewritten by this step's forward pass), then
+    /// imports into the newly allocated blocks.
+    fn carry_out_swaps(&mut self) -> Result<(), String> {
+        let work = self.scheduler.take_swaps();
+        for (sid, blocks) in work.out {
+            let mut data = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                data.push(self.kv_export_block(block)?);
+            }
+            self.swap_out_blocks += data.len() as u64;
+            self.swap_store.insert(sid, data);
+        }
+        for sid in work.dropped {
+            self.swap_store.remove(&sid);
+        }
+        for (sid, blocks) in work.into {
+            let data = self.swap_store.remove(&sid).ok_or("swapped KV data is missing")?;
+            if data.len() != blocks.len() {
+                return Err("swapped KV data does not match the new blocks".into());
+            }
+            self.swap_in_blocks += data.len() as u64;
+            for (block, bytes) in blocks.into_iter().zip(data) {
+                self.kv_import_block(block, &bytes)?;
+            }
+        }
+        Ok(())
+    }
+    /// Block copy on an accelerator is verified once on the device itself: copy block 0 to block 1 and compare the exports. A failure
+    /// (or a backend without the operations) keeps n > 1 and swapping off for this run.
+    fn device_fork_self_check(&mut self) -> bool {
+        if self.model.pool_blocks() < 3 {
+            return false;
+        }
+        let check = (|| -> Result<bool, String> {
+            let Some(copied) = self.decoder.as_ref().and_then(|d| d.device_kv_copy(0, 1)) else { return Ok(false) };
+            copied?;
+            let a = self.kv_export_block(0)?;
+            let b = self.kv_export_block(1)?;
+            let c = self.kv_export_block(2)?;
+            self.kv_import_block(2, &a)?;
+            Ok(a == b && self.kv_export_block(2)? == a && c.len() == a.len())
+        })();
+        match check {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(e) => {
+                eprintln!("[fllm-rs] KV block copy is not available on this device ({e}); n > 1 and swap preemption stay off");
+                false
+            }
+        }
+    }
+
     /// `(offset, words per block)` of the regions of a key (`true`) or value pool block.
     fn kv_block_regions(&self, key: bool) -> Result<Vec<(usize, usize)>, String> {
         let cfg = self.model.config();
@@ -404,6 +563,32 @@ impl InferenceRuntime {
         crate::kv_format::KvLayout::new(fmt, slots, cfg.kv_heads, dim)
             .block_regions(self.model.block_size())
             .ok_or_else(|| format!("shared choices need KV blocks of whole words for {}", fmt.name()))
+    }
+
+    /// Whether KV blocks can be copied and exported on this backend, which `n > 1` and preemption by swap need.
+    pub fn kv_block_ops_available(&self) -> bool {
+        self.fork_ok
+    }
+    /// Sequences preempted so far, and the KV blocks swapped out to and back in from host memory.
+    pub fn preemption_stats(&self) -> (u64, u64, u64) {
+        (self.scheduler.preemptions, self.swap_out_blocks, self.swap_in_blocks)
+    }
+
+    /// Scheduler settings (policy, watermark, prefill limits); change them before the first request.
+    pub fn scheduler_config_mut(&mut self) -> &mut SchedulerConfig {
+        &mut self.scheduler.cfg
+    }
+
+    /// Abort the requests whose `timeout` has passed and return their ids; their KV blocks are released.
+    pub fn expire_requests(&mut self) -> Vec<String> {
+        let expired = self.scheduler.expired_requests(Instant::now());
+        for id in &expired {
+            let _ = self.cancel_request(id);
+            if let Some(metrics) = &self.metrics {
+                metrics.timeout();
+            }
+        }
+        expired
     }
 
     pub fn active_requests(&self) -> usize {
@@ -441,6 +626,7 @@ impl InferenceRuntime {
             .map_err(|e| e.to_string())?;
         for sequence_id in sequence_ids {
             self.scheduler.sequences.remove(&sequence_id);
+            self.swap_store.remove(&sequence_id);
             self.pending_logits.remove(&sequence_id);
             if let Some(followers) = self.pending_choices.remove(&sequence_id) {
                 for follower in followers {
@@ -547,16 +733,35 @@ impl InferenceRuntime {
         self.batch_stats
     }
 
+    /// Speculation method in use, the draft length it was configured with and the cumulative statistics.
+    pub fn speculative_status(&self) -> (crate::speculative::SpeculativeMethod, usize, crate::speculative::SpecStats) {
+        (self.spec_method, self.spec_tokens, self.spec_stats)
+    }
+
+    /// Suffix-match speculation across the conversation and recent generations (`--speculative suffix`).
+    pub fn enable_suffix(&mut self, tokens: usize, config: crate::speculative::SuffixConfig) -> Result<(), String> {
+        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+            return Err("speculative methods are mutually exclusive".into());
+        }
+        if tokens == 0 || tokens > 32 {
+            return Err("the number of speculative tokens must be between 1 and 32".into());
+        }
+        self.suffix = Some(crate::speculative::SuffixCache::new(config));
+        self.spec_method = crate::speculative::SpeculativeMethod::Suffix;
+        self.spec_tokens = tokens;
+        Ok(())
+    }
+
     pub fn enable_mtp(&mut self) -> Result<(), String> {
-        if self.draft.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
-            return Err(
-                "MTP, an external draft model and lookup speculation are mutually exclusive".into(),
-            );
+        if self.draft.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+            return Err("speculative methods are mutually exclusive".into());
         }
         if self.decoder.is_some() {
             return Err("enable MTP before attaching compute".into());
         }
         self.mtp = Some(crate::draft::MtpEngine::new(&self.model)?);
+        self.spec_method = crate::speculative::SpeculativeMethod::Mtp;
+        self.spec_tokens = 1;
         // Main-model prefix hits cannot restore the corresponding MTP KV and
         // residual states. Warm both paths from the prompt until that is supported.
         self.scheduler.cfg.prefix_cache = false;
@@ -577,10 +782,31 @@ impl InferenceRuntime {
                 ));
             }
         }
-        if self.mtp.is_some() {
-            return Err("MTP and an external draft model are mutually exclusive".into());
+        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+            return Err("speculative methods are mutually exclusive".into());
         }
         self.draft = Some(crate::draft::DraftEngine::new(model, tokens)?);
+        self.spec_method = crate::speculative::SpeculativeMethod::Draft;
+        self.spec_tokens = tokens;
+        Ok(())
+    }
+
+    /// Enable Medusa, EAGLE, or EAGLE-3 speculative draft head.
+    pub fn enable_spec_head(
+        &mut self,
+        model: GgufModel,
+        method: crate::speculative::SpeculativeMethod,
+        tokens: usize,
+    ) -> Result<(), String> {
+        if self.draft.is_some() || self.mtp.is_some() || self.suffix.is_some() || self.spec_head.is_some() || self.scheduler.cfg.speculative_lookup > 0 {
+            return Err("speculative methods are mutually exclusive".into());
+        }
+        if tokens == 0 || tokens > 32 {
+            return Err("the number of speculative tokens must be between 1 and 32".into());
+        }
+        self.spec_head = Some(crate::draft::SpecHeadEngine::new(&model, method)?);
+        self.spec_method = method;
+        self.spec_tokens = tokens;
         Ok(())
     }
     /// Load the decoder weights for `device` ("cpu" or a GPU backend). Must be called once before
@@ -589,11 +815,17 @@ impl InferenceRuntime {
         let Some((key_format, value_format)) = crate::kv_format::unpack_kind(self.model.kv_kind()) else {
             return Err("unknown KV cache format".into());
         };
-        key_format.check_dim(self.model.config().head_dim)?;
-        value_format.check_dim(self.model.config().value_dim)?;
+        for l in 0..self.model.config().layers {
+            key_format.check_dim(self.model.config().layer_head_dim(l))?;
+            value_format.check_dim(self.model.config().layer_value_dim(l))?;
+        }
         self.decoder = Some(crate::rust_decoder::RustDecoder::load(&self.model, device)?);
         // the host CPU runs the model unless an accelerator backend took it (`auto` falls back to the CPU on machines without a usable GPU)
         self.shared_choices_cpu = self.decoder.as_ref().is_some_and(|decoder| !decoder.uses_accelerator());
+        if self.model.mla_latent() && self.shared_choices_cpu {
+            return Err("FLLM_MLA=latent runs on the CUDA backend only, and the model is on the host; unset FLLM_MLA or use FLLM_MLA=expanded".into());
+        }
+        self.fork_ok = self.shared_choices_cpu || self.device_fork_self_check();
         if let Some(draft) = &mut self.draft {
             draft.attach_compute(device)?;
         }
@@ -639,26 +871,104 @@ impl InferenceRuntime {
         Ok(())
     }
 
+    /// Attaches the embeddings and position ids of a prompt with media to a submitted sequence.
+    pub fn attach_media(
+        &mut self,
+        sid: i64,
+        inputs: crate::vision::pipeline::MediaInputs,
+    ) -> Result<(), String> {
+        if let Some(positions) = &inputs.mrope {
+            if !Self::decoder(&self.decoder)?.supports_mrope() {
+                return Err("this model has no multimodal rotary (M-RoPE) sections; re-convert the checkpoint with this version of fllm-rs".into());
+            }
+            let length = self.scheduler.sequences.get(&sid).map(|s| s.prefill_target);
+            if length != Some(positions.prompt.len()) {
+                return Err("multimodal positions do not match the prompt".into());
+            }
+        }
+        if !inputs.deepstack.is_empty() {
+            let layers = Self::decoder(&self.decoder)?.layer_count();
+            let hidden = self.model.hidden_size();
+            if inputs.deepstack.len() > layers
+                || inputs.deepstack.iter().flatten().any(|(_, v)| v.len() != hidden || v.iter().any(|x| !x.is_finite()))
+            {
+                return Err("invalid DeepStack features".into());
+            }
+        }
+        self.attach_image_embeddings(sid, inputs.overrides)?;
+        if let Some(positions) = inputs.mrope {
+            self.mrope_positions.insert(sid, positions);
+        }
+        if let Some(vis) = inputs.visible_lengths {
+            self.visible_lengths.insert(sid, vis);
+        }
+        if !inputs.deepstack.is_empty() {
+            let mut by_position: std::collections::HashMap<usize, Vec<Vec<f32>>> = Default::default();
+            for (level, rows) in inputs.deepstack.into_iter().enumerate() {
+                for (position, values) in rows {
+                    let entry = by_position.entry(position).or_default();
+                    entry.resize(level + 1, Vec::new());
+                    entry[level] = values;
+                }
+            }
+            self.deepstack.insert(sid, by_position);
+        }
+        Ok(())
+    }
+
     pub fn step(&mut self) -> Result<Vec<TokenEvent>, String> {
         self.image_embeddings
             .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
+        self.draft_q.clear();
+        let adaptive = self.scheduler.cfg.speculative_adaptive;
+        self.mrope_positions
+            .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
+        self.deepstack
+            .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
+        self.visible_lengths
+            .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
         if let Some(draft) = &mut self.draft {
+            let started = Instant::now();
             let active = self.scheduler.sequences.keys().copied().collect();
             draft.retain(&active)?;
             self.scheduler.external_drafts.clear();
             for &sid in &self.scheduler.running {
                 let sequence = &self.scheduler.sequences[&sid];
                 if sequence.num_computed >= sequence.prefill_target
-                    && sequence.sampling.is_greedy()
-                    && !sequence.constrained
+                    && sequence.can_speculate()
                     && !self.pending_logits.contains_key(&sid)
                 {
-                    let tokens = draft.propose(sid, &sequence.tokens, sequence.remaining_max())?;
+                    let limit = if adaptive { sequence.adaptive.length() } else { usize::MAX };
+                    let (tokens, q) = draft.propose(sid, &sequence.tokens, sequence.remaining_max(), limit, &sequence.sampling)?;
+                    if !tokens.is_empty() {
+                        self.scheduler.external_drafts.insert(sid, tokens);
+                        self.draft_q.insert(sid, q);
+                    }
+                }
+            }
+            self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
+        }
+        if let Some(suffix) = &mut self.suffix {
+            let started = Instant::now();
+            let live = self.scheduler.sequences.keys().copied().collect();
+            suffix.retain_live(&live);
+            self.scheduler.external_drafts.clear();
+            for &sid in &self.scheduler.running {
+                let sequence = &self.scheduler.sequences[&sid];
+                suffix.observe(sid, &sequence.tokens);
+                if sequence.num_computed >= sequence.prefill_target
+                    && sequence.can_speculate()
+                    && !self.pending_logits.contains_key(&sid)
+                {
+                    let limit = if adaptive { sequence.adaptive.length() } else { usize::MAX };
+                    let count = self.spec_tokens.min(limit).min(sequence.remaining_max().saturating_sub(1));
+                    let tokens = suffix.propose(sid, &sequence.tokens, count);
                     if !tokens.is_empty() {
                         self.scheduler.external_drafts.insert(sid, tokens);
                     }
                 }
             }
+            self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
         }
         let schedule_started = Instant::now();
         if let Some(mtp) = &mut self.mtp {
@@ -668,8 +978,7 @@ impl InferenceRuntime {
             for &sid in &self.scheduler.running {
                 let sequence = &self.scheduler.sequences[&sid];
                 if sequence.num_computed >= sequence.prefill_target
-                    && sequence.sampling.is_greedy()
-                    && !sequence.constrained
+                    && sequence.can_speculate()
                     && !self.pending_logits.contains_key(&sid)
                 {
                     let tokens = mtp.propose(sid, &sequence.tokens, sequence.remaining_max());
@@ -679,15 +988,52 @@ impl InferenceRuntime {
                 }
             }
         }
+        if let Some(spec_head) = &mut self.spec_head {
+            let started = Instant::now();
+            let active = self.scheduler.sequences.keys().copied().collect();
+            spec_head.retain(&active)?;
+            self.scheduler.external_drafts.clear();
+            for &sid in &self.scheduler.running {
+                let sequence = &self.scheduler.sequences[&sid];
+                if sequence.num_computed >= sequence.prefill_target
+                    && sequence.can_speculate()
+                    && !self.pending_logits.contains_key(&sid)
+                {
+                    let limit = if adaptive { sequence.adaptive.length() } else { usize::MAX };
+                    let count = self.spec_tokens.min(limit).min(sequence.remaining_max().saturating_sub(1));
+                    let tokens = spec_head.propose(sid, count);
+                    if !tokens.is_empty() {
+                        self.scheduler.external_drafts.insert(sid, tokens);
+                    }
+                }
+            }
+            self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
+        }
         let scheduled = self.scheduler.schedule().map_err(|e| e.to_string())?;
+        self.carry_out_swaps()?;
         if let Some(metrics) = &self.metrics {
             let (running, waiting, free, total, hits) = self.metrics_snapshot();
             metrics.snapshot(running, waiting, free, total, hits);
         }
         self.batch_stats.scheduler_ns += schedule_started.elapsed().as_nanos() as u64;
-        let Some(step) = scheduled else {
+        if let Some(metrics) = &self.metrics {
+            for wait in self.scheduler.wait_times.drain(..) {
+                metrics.queue_wait(wait);
+            }
+            metrics.set_preemptions(self.scheduler.preemptions);
+        } else {
+            self.scheduler.wait_times.clear();
+        }
+        let Some(mut step) = scheduled else {
             return Ok(Vec::new());
         };
+        // A sequence whose prompt logits are still pending takes its next token from them: it is a plain decode step, whatever draft
+        // the lookup source attached.
+        let pending: Vec<i64> = step.verify.iter().map(|v| v.0).filter(|sid| self.pending_logits.contains_key(sid)).collect();
+        if !pending.is_empty() {
+            step.verify.retain(|v| !pending.contains(&v.0));
+            step.decode.extend(pending);
+        }
         let cached_counts: std::collections::HashMap<_, _> = self
             .scheduler
             .sequences
@@ -698,8 +1044,14 @@ impl InferenceRuntime {
         struct VerifyCandidate {
             sid: i64,
             draft: Vec<i64>,
+            q: Vec<Option<crate::speculative::Dist>>,
             base_row: usize,
             draft_rows: Vec<usize>,
+            token_id: i64,
+            position: usize,
+            table: std::sync::Arc<Vec<i64>>,
+            state_snapshot: Option<crate::rust_decoder::SequenceSnapshot>,
+            first_block: Option<i64>,
         }
         let mut verify_candidates = Vec::<VerifyCandidate>::new();
         let mut rows = Vec::<BatchRow>::new();
@@ -773,49 +1125,7 @@ impl InferenceRuntime {
             logit_rows.push(row);
         }
 
-        let mut pending_verify_events = Vec::new();
         for (sid, draft) in &step.verify {
-            if let Some(logits) = self.pending_logits.remove(sid) {
-                let token = argmax(&logits) as i64;
-                let sequence = self
-                    .scheduler
-                    .sequences
-                    .get_mut(sid)
-                    .ok_or_else(|| format!("unknown sequence {sid}"))?;
-                let request_id = sequence.req_id.clone();
-                sequence.append_token(token);
-                let hit_eos = self.eos_ids.contains(&token);
-                let hit_limit = sequence.remaining_max() == 0;
-                self.scheduler
-                    .commit_decode(*sid)
-                    .map_err(|e| e.to_string())?;
-                let finished = hit_eos || hit_limit;
-                let finish_reason = if hit_eos {
-                    Some("stop")
-                } else if hit_limit {
-                    Some("length")
-                } else {
-                    None
-                };
-                pending_verify_events.push(TokenEvent {
-                    request_id: request_id.clone(),
-                    sequence_id: *sid,
-                    token_id: token,
-                    finished,
-                    finish_reason,
-                    logprobs: None,
-                    cached_prompt_tokens: 0,
-                    choice_index: 0,
-                    request_finished: finished,
-                });
-                if finished {
-                    self.scheduler
-                        .free_request(&request_id)
-                        .map_err(|e| e.to_string())?;
-                    self.scheduler.sequences.remove(sid);
-                }
-                continue;
-            }
             let sequence = self
                 .scheduler
                 .sequences
@@ -851,11 +1161,23 @@ impl InferenceRuntime {
                 d_rows.push(d_row);
                 decode_rows += 1;
             }
+            let first_block = sequence.blocks.first().copied().map(|b| b as i64);
+            let state_snapshot = first_block.and_then(|first| {
+                self.decoder.as_ref().and_then(|d| d.snapshot_state(first).ok().flatten())
+            });
+            let mut q = self.draft_q.remove(sid).unwrap_or_default();
+            q.resize(draft.len(), None);
             verify_candidates.push(VerifyCandidate {
                 sid: *sid,
                 draft: draft.clone(),
+                q,
                 base_row,
                 draft_rows: d_rows,
+                token_id,
+                position,
+                table: table.clone(),
+                state_snapshot,
+                first_block,
             });
             self.batch_stats.draft_proposed += draft.len();
             if self.mtp.is_some() {
@@ -891,8 +1213,28 @@ impl InferenceRuntime {
                         s.sampling.argmax_only() && s.sampling.logprobs.is_none() && s.output_len >= s.sampling.min_tokens
                     })
             });
+        // Sampled decode rows can be sampled on the device as well (FLLM_DEVICE_SAMPLING=1, CUDA): the same eligibility as above, but any
+        // sampler setting except mirostat / DRY is allowed, because the penalties, bias, controls and log-probabilities run on the device.
+        let device_job = if !use_greedy_ids
+            && crate::rust_decoder::device_sampling_enabled()
+            && !rows.is_empty()
+            && !logit_rows.is_empty()
+            && verify_candidates.is_empty()
+            && self.mtp.is_none()
+            && logit_rows.len() == decode_row.len()
+            && prefill_commits.iter().all(|(_, _, final_row)| final_row.is_none())
+            && step.decode.iter().all(|sid| !self.pending_logits.contains_key(sid) && !self.constraints.contains_key(sid))
+        {
+            self.device_sample_job(&step.decode)
+        } else {
+            None
+        };
         if use_greedy_ids {
             crate::rust_decoder::RustDecoder::request_greedy_ids();
+        }
+        let device_job_rows = device_job.as_ref().map(|j| j.rows.len());
+        if let Some(job) = device_job {
+            crate::rust_decoder::RustDecoder::request_device_sample(job);
         }
         let batch_logits = if rows.is_empty() {
             Vec::new()
@@ -910,7 +1252,55 @@ impl InferenceRuntime {
                 .enumerate()
                 .filter_map(|(r, row)| row.embedding.as_ref().map(|x| (r, x.clone())))
                 .collect::<Vec<_>>();
-            Self::decoder(&self.decoder)?.forward_with_hidden(
+            // sequences with media use three-axis positions; the other rows of the batch get the ordinary ones on every axis
+            let positions3 = (!self.mrope_positions.is_empty()
+                && rows.iter().any(|row| self.mrope_positions.contains_key(&row.sequence_id)))
+            .then(|| {
+                rows.iter()
+                    .map(|row| {
+                        let index = (row.length - 1) as usize;
+                        self.mrope_positions
+                            .get(&row.sequence_id)
+                            .map_or([index as u32; 3], |m| m.at(index))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // DeepStack features of the rows of this batch, grouped by decoder layer
+            let mut levels: Vec<Vec<(usize, Vec<f32>)>> = Vec::new();
+            if !self.deepstack.is_empty() {
+                for (r, row) in rows.iter().enumerate() {
+                    if let Some(per_level) = self
+                        .deepstack
+                        .get(&row.sequence_id)
+                        .and_then(|m| m.get(&(row.length as usize - 1)))
+                    {
+                        for (level, values) in per_level.iter().enumerate().filter(|(_, v)| !v.is_empty()) {
+                            if levels.len() <= level {
+                                levels.resize(level + 1, Vec::new());
+                            }
+                            levels[level].push((r, values.clone()));
+                        }
+                    }
+                }
+            }
+            let visible_lengths = (!self.visible_lengths.is_empty()
+                && rows.iter().any(|row| self.visible_lengths.contains_key(&row.sequence_id)))
+            .then(|| {
+                rows.iter()
+                    .map(|row| {
+                        let index = (row.length - 1) as usize;
+                        self.visible_lengths
+                            .get(&row.sequence_id)
+                            .and_then(|v| v.get(index).copied())
+                            .unwrap_or(row.length as usize)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let decoder = Self::decoder(&self.decoder)?;
+            decoder.set_row_positions3(positions3);
+            decoder.set_row_deepstack((!levels.is_empty()).then_some(levels));
+            decoder.set_row_visible_lengths(visible_lengths);
+            let forwarded = decoder.forward_with_hidden(
                 &ids,
                 &lengths,
                 &table,
@@ -919,15 +1309,24 @@ impl InferenceRuntime {
                 &logit_rows,
                 false,
                 &overrides,
-                if self.mtp.is_some() {
+                if self.mtp.is_some() || self.spec_head.is_some() {
                     Some(&mut hidden_capture)
                 } else {
                     None
                 },
-            )?
+            );
+            decoder.set_row_positions3(None);
+            decoder.set_row_deepstack(None);
+            decoder.set_row_visible_lengths(None);
+            forwarded?
         };
         let greedy_ids = if use_greedy_ids {
             crate::rust_decoder::RustDecoder::take_greedy_ids()
+        } else {
+            None
+        };
+        let device_sampled = if device_job_rows.is_some() {
+            crate::rust_decoder::RustDecoder::take_device_sample()
         } else {
             None
         };
@@ -949,7 +1348,7 @@ impl InferenceRuntime {
         }
 
         let vocab = self.model.vocab_size();
-        let mut events = pending_verify_events;
+        let mut events = Vec::new();
         for sid in step.decode {
             let (sampling, tokens_history) = self
                 .scheduler
@@ -962,7 +1361,25 @@ impl InferenceRuntime {
                 let compact_row = logit_rows.binary_search(row).ok()?;
                 ids.get(compact_row).map(|&id| i64::from(id))
             });
-            let (token, original_logits) = if let Some(token) = greedy_token {
+            let device_pick = device_sampled.as_ref().and_then(|out| {
+                let row = decode_row.get(&sid)?;
+                let compact = logit_rows.binary_search(row).ok()?;
+                Some((out, compact))
+            });
+            let mut processed_dist: Option<Vec<(usize, f32)>> = None;
+            let (token, original_logits) = if let Some((out, compact)) = device_pick {
+                let id = out.ids[compact];
+                if id < 0 {
+                    return Err("generation controls leave no valid next token".into());
+                }
+                if let Some(sequence) = self.scheduler.sequences.get_mut(&sid) {
+                    // the device draws number `draws` of the request's stream for every sampled (non-greedy) row
+                    if sampling.temperature > 1e-5 {
+                        sequence.sampling_state.draws += 1;
+                    }
+                }
+                (i64::from(id), None)
+            } else if let Some(token) = greedy_token {
                 (token, None)
             } else {
             // borrowed from the batch result unless a stop-token, grammar or logprob step has to change or keep a copy
@@ -984,18 +1401,14 @@ impl InferenceRuntime {
                 }
                 std::borrow::Cow::Borrowed(&batch_logits[offset..offset + vocab])
             };
-            let original_logits = sampling.logprobs.map(|_| logits.to_vec());
+            let original_logits = sampling.logprobs.filter(|_| !sampling.logprobs_processed).map(|_| logits.to_vec());
             let generated = self
                 .scheduler
                 .sequences
                 .get(&sid)
                 .map_or(0, |s| s.output_len);
-            if generated < sampling.min_tokens {
-                for &id in self.eos_ids.iter().chain(&sampling.stop_token_ids) {
-                    if let Some(value) = logits.to_mut().get_mut(id as usize) {
-                        *value = f32::NEG_INFINITY;
-                    }
-                }
+            if generated < sampling.min_tokens || !sampling.allowed_token_ids.is_empty() || !sampling.bad_word_ids.is_empty() {
+                crate::sampling::apply_generation_controls(logits.to_mut(), &sampling, &self.eos_ids, generated, &tokens_history);
             }
             if !logits.iter().any(|v| v.is_finite()) {
                 return Err("generation controls leave no valid next token".into());
@@ -1018,6 +1431,14 @@ impl InferenceRuntime {
                 .sequences
                 .get_mut(&sid)
                 .ok_or("missing sampling sequence")?;
+            if sampling.logprobs.is_some() && sampling.logprobs_processed {
+                processed_dist = Some(crate::sampling::processed_distribution(
+                    &logits,
+                    &tokens_history,
+                    &sampling,
+                    sequence.sampling_state.mirostat_mu,
+                ));
+            }
             let token = crate::sampling::sample_with_state(
                 &logits,
                 &tokens_history,
@@ -1045,16 +1466,36 @@ impl InferenceRuntime {
             sequence.append_token(token);
             let hit_eos = sampling.stops_on_token(token, &self.eos_ids);
             let cached_prompt_tokens = sequence.cached_prompt_tokens;
-            let logprobs = original_logits
-                .as_ref()
-                .map(|logits| {
-                    crate::sampling::raw_logprobs(
-                        logits,
-                        token as usize,
-                        sampling.logprobs.unwrap_or(0),
-                    )
-                })
-                .transpose()?;
+            let logprobs = if let (Some(out), Some(row)) = (device_sampled.as_ref(), decode_row.get(&sid)) {
+                // log-probabilities computed on the device, from the raw logits
+                match (sampling.logprobs, logit_rows.binary_search(row)) {
+                    (Some(_), Ok(compact)) => {
+                        let stride = out.top_ids.len() / out.ids.len().max(1);
+                        Some(crate::sampling::TokenLogprobs {
+                            logprob: f64::from(out.logprobs[compact]),
+                            top: (0..stride)
+                                .map(|j| (out.top_ids[compact * stride + j], out.top_logprobs[compact * stride + j]))
+                                .filter(|(id, _)| *id >= 0)
+                                .map(|(id, lp)| (id as u32, f64::from(lp)))
+                                .collect(),
+                        })
+                    }
+                    _ => None,
+                }
+            } else if let Some(dist) = &processed_dist {
+                Some(crate::sampling::processed_logprobs(dist, token as usize, sampling.logprobs.unwrap_or(0)))
+            } else {
+                original_logits
+                    .as_ref()
+                    .map(|logits| {
+                        crate::sampling::raw_logprobs(
+                            logits,
+                            token as usize,
+                            sampling.logprobs.unwrap_or(0),
+                        )
+                    })
+                    .transpose()?
+            };
             let hit_limit = sequence.remaining_max() == 0;
             self.scheduler
                 .commit_decode(sid)
@@ -1083,132 +1524,203 @@ impl InferenceRuntime {
             });
         }
 
+        let had_verify = !verify_candidates.is_empty();
         for cand in verify_candidates {
             let sid = cand.sid;
+            let (sampling, mut sstate, history, generated, request_id, choice_index) = {
+                let s = self
+                    .scheduler
+                    .sequences
+                    .get(&sid)
+                    .ok_or_else(|| format!("unknown sequence {sid}"))?;
+                (s.sampling.clone(), s.sampling_state.clone(), s.tokens.clone(), s.output_len, s.req_id.clone(), s.choice_index)
+            };
+            let logits_at = |i: usize| -> Result<&[f32], String> {
+                let row = if i == 0 { cand.base_row } else { cand.draft_rows[i - 1] };
+                let compact = logit_rows
+                    .binary_search(&row)
+                    .map_err(|_| format!("missing verify LM-head result for {sid}"))?;
+                batch_logits
+                    .get(compact * vocab..(compact + 1) * vocab)
+                    .ok_or_else(|| "LM head returned an invalid vocabulary row".to_owned())
+            };
+            // The target distribution at draft position i is the one plain decoding would sample from after the accepted draft
+            // tokens: same hard controls, grammar mask, penalties and filters. The grammar advances with every accepted token.
+            let mut failure: Option<String> = None;
+            // the processed distributions per position, kept when the request wants processed log-probabilities
+            let capture = sampling.logprobs.is_some() && sampling.logprobs_processed;
+            let mut captured: Vec<Vec<(usize, f32)>> = Vec::new();
+            let mut hist = history;
+            let mut matcher = self.constraints.get_mut(&sid);
+            let eos_ids = &self.eos_ids;
+            let outcome = crate::speculative::verify_chain(
+                &cand.draft,
+                &cand.q,
+                |i| {
+                    if i > 0 {
+                        let token = cand.draft[i - 1];
+                        hist.push(token);
+                        if let Some(m) = matcher.as_mut() {
+                            if !eos_ids.contains(&token) {
+                                if let Err(e) = m.consume_token(token as u32) {
+                                    failure.get_or_insert(format!("grammar token rejected: {e}"));
+                                }
+                            }
+                        }
+                    }
+                    let mut logits = match logits_at(i) {
+                        Ok(row) => row.to_vec(),
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                            return vec![(0, 1.0)];
+                        }
+                    };
+                    crate::sampling::apply_generation_controls(&mut logits, &sampling, eos_ids, generated + i, &hist);
+                    if let Some(m) = matcher.as_mut() {
+                        match m.compute_mask_or_eos() {
+                            Ok(mask) => {
+                                for (id, logit) in logits.iter_mut().enumerate() {
+                                    if !mask.is_allowed(id as u32) {
+                                        *logit = f32::NEG_INFINITY;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                failure.get_or_insert(format!("grammar mask failed: {e}"));
+                            }
+                        }
+                    }
+                    if !logits.iter().any(|v| v.is_finite()) {
+                        failure.get_or_insert("generation controls leave no valid next token".to_owned());
+                        return vec![(0, 1.0)];
+                    }
+                    let dist = crate::sampling::processed_distribution(&logits, &hist, &sampling, 0.0);
+                    if capture {
+                        captured.push(dist.clone());
+                    }
+                    dist
+                },
+                || sstate.next_uniform(),
+            );
+            if let Some(e) = failure {
+                return Err(e);
+            }
+            if let Some(m) = matcher.as_mut() {
+                if !eos_ids.contains(&outcome.next) {
+                    m.consume_token(outcome.next as u32)
+                        .map_err(|e| format!("grammar token rejected: {e}"))?;
+                }
+            }
+            let accepted = outcome.accepted;
+            self.batch_stats.draft_accepted += accepted;
+            if self.mtp.is_some() {
+                if let Some(metrics) = &self.metrics {
+                    metrics.mtp_accepted(accepted);
+                }
+            }
+            self.spec_delta.record(cand.draft.len(), accepted);
             let sequence = self
                 .scheduler
                 .sequences
                 .get_mut(&sid)
                 .ok_or_else(|| format!("unknown sequence {sid}"))?;
-            let request_id = sequence.req_id.clone();
-
-            let compact_base = logit_rows
-                .binary_search(&cand.base_row)
-                .map_err(|_| format!("missing verify base LM-head result for {sid}"))?;
-            let offset = compact_base * vocab;
-            if offset + vocab > batch_logits.len() {
-                return Err("LM head returned an invalid vocabulary row".into());
-            }
-            let mut pred_token = argmax(&batch_logits[offset..offset + vocab]) as i64;
-
-            let mut all_drafts_accepted = true;
+            sequence.sampling_state = sstate;
+            sequence.adaptive.update(cand.draft.len(), accepted);
+            let mut emitted: Vec<i64> = cand.draft[..accepted].to_vec();
+            emitted.push(outcome.next);
             let mut finished = false;
-
-            for (idx, &draft_tok) in cand.draft.iter().enumerate() {
-                if pred_token == draft_tok {
-                    self.batch_stats.draft_accepted += 1;
-                    if self.mtp.is_some() {
-                        if let Some(metrics) = &self.metrics {
-                            metrics.mtp_accepted(1);
-                        }
-                    }
-                    sequence.append_token(draft_tok);
-                    let hit_eos = self.eos_ids.contains(&draft_tok);
-                    let hit_limit = sequence.remaining_max() == 0;
-                    finished = hit_eos || hit_limit;
-                    let finish_reason = if hit_eos {
-                        Some("stop")
-                    } else if hit_limit {
-                        Some("length")
-                    } else {
-                        None
-                    };
-                    events.push(TokenEvent {
-                        request_id: request_id.clone(),
-                        sequence_id: sid,
-                        token_id: draft_tok,
-                        finished,
-                        finish_reason,
-                        logprobs: None,
-                        cached_prompt_tokens: 0,
-                        choice_index: 0,
-                        request_finished: finished,
-                    });
-                    if finished {
-                        all_drafts_accepted = false;
-                        break;
-                    }
-                    let compact_d = logit_rows
-                        .binary_search(&cand.draft_rows[idx])
-                        .map_err(|_| format!("missing verify draft LM-head result for {sid}"))?;
-                    let d_offset = compact_d * vocab;
-                    if d_offset + vocab > batch_logits.len() {
-                        return Err("LM head returned an invalid vocabulary row".into());
-                    }
-                    pred_token = argmax(&batch_logits[d_offset..d_offset + vocab]) as i64;
-                } else {
-                    sequence.append_token(pred_token);
-                    let hit_eos = self.eos_ids.contains(&pred_token);
-                    let hit_limit = sequence.remaining_max() == 0;
-                    finished = hit_eos || hit_limit;
-                    let finish_reason = if hit_eos {
-                        Some("stop")
-                    } else if hit_limit {
-                        Some("length")
-                    } else {
-                        None
-                    };
-                    events.push(TokenEvent {
-                        request_id: request_id.clone(),
-                        sequence_id: sid,
-                        token_id: pred_token,
-                        finished,
-                        finish_reason,
-                        logprobs: None,
-                        cached_prompt_tokens: 0,
-                        choice_index: 0,
-                        request_finished: finished,
-                    });
-                    all_drafts_accepted = false;
-                    break;
-                }
-            }
-
-            if all_drafts_accepted && !finished {
-                sequence.append_token(pred_token);
-                let hit_eos = self.eos_ids.contains(&pred_token);
+            for (j, &token) in emitted.iter().enumerate() {
+                sequence.append_token(token);
+                let hit_eos = sampling.stops_on_token(token, eos_ids);
                 let hit_limit = sequence.remaining_max() == 0;
-                finished = hit_eos || hit_limit;
-                let finish_reason = if hit_eos {
-                    Some("stop")
-                } else if hit_limit {
-                    Some("length")
-                } else {
-                    None
+                // logprobs describe the target model at the emitted token's position, never the draft
+                let logprobs = match sampling.logprobs {
+                    Some(top) if sampling.logprobs_processed => {
+                        captured.get(j).map(|dist| crate::sampling::processed_logprobs(dist, token as usize, top))
+                    }
+                    Some(top) => Some(crate::sampling::raw_logprobs(logits_at(j)?, token as usize, top)?),
+                    None => None,
                 };
+                finished = hit_eos || hit_limit;
                 events.push(TokenEvent {
                     request_id: request_id.clone(),
                     sequence_id: sid,
-                    token_id: pred_token,
+                    token_id: token,
                     finished,
-                    finish_reason,
-                    logprobs: None,
+                    finish_reason: if hit_eos {
+                        Some("stop")
+                    } else if hit_limit {
+                        Some("length")
+                    } else {
+                        None
+                    },
+                    logprobs,
                     cached_prompt_tokens: 0,
-                    choice_index: 0,
-                    request_finished: finished,
+                    choice_index,
+                    request_finished: false,
                 });
+                if finished {
+                    break;
+                }
             }
-
+            if accepted < cand.draft.len() {
+                if let (Some(snap), Some(first)) = (&cand.state_snapshot, cand.first_block) {
+                    if let Some(decoder) = &self.decoder {
+                        decoder.restore_state(first, snap)?;
+                        let mut adv_ids = Vec::with_capacity(1 + accepted);
+                        let mut adv_lens = Vec::with_capacity(1 + accepted);
+                        adv_ids.push(cand.token_id);
+                        adv_lens.push((cand.position + 1) as i64);
+                        for (idx, &d_tok) in cand.draft[..accepted].iter().enumerate() {
+                            adv_ids.push(d_tok);
+                            adv_lens.push((cand.position + 2 + idx) as i64);
+                        }
+                        let adv_table = cand.table.repeat(adv_ids.len());
+                        let _ = decoder.forward_with_hidden(
+                            &adv_ids,
+                            &adv_lens,
+                            &adv_table,
+                            &mut self.key,
+                            &mut self.value,
+                            &[],
+                            false,
+                            &[],
+                            None,
+                        );
+                    }
+                }
+            }
             self.scheduler
                 .commit_verify(sid)
                 .map_err(|e| e.to_string())?;
-
             if finished {
-                self.scheduler
-                    .free_request(&request_id)
-                    .map_err(|e| e.to_string())?;
-                self.scheduler.sequences.remove(&sid);
-                self.pending_logits.remove(&sid);
+                self.finish_choice(&request_id, sid)?;
+                let done = !self.scheduler.requests.contains_key(&request_id);
+                if let Some(last) = events.last_mut() {
+                    last.request_finished = done;
+                }
+            }
+        }
+        if had_verify {
+            self.spec_delta.verify_ns += forward_started.elapsed().as_nanos() as u64;
+        }
+        if let Some(spec_head) = &mut self.spec_head {
+            let width = spec_head.hidden_size;
+            if hidden_capture.len() == rows.len() * width {
+                for (index, row) in rows.iter().enumerate().rev() {
+                    if let Some(sequence) = self.scheduler.sequences.get(&row.sequence_id) {
+                        let position = row.length as usize - 1;
+                        if position < sequence.num_computed
+                            && sequence.tokens.get(position) == Some(&row.token_id)
+                        {
+                            spec_head.observe(
+                                row.sequence_id,
+                                &hidden_capture[index * width..(index + 1) * width],
+                            );
+                            break;
+                        }
+                    }
+                }
             }
         }
         if let Some(mtp) = &mut self.mtp {
@@ -1240,6 +1752,13 @@ impl InferenceRuntime {
                 )?;
             }
         }
+        if self.spec_delta != crate::speculative::SpecStats::default() {
+            self.spec_stats.add(&self.spec_delta);
+            if let Some(metrics) = &self.metrics {
+                metrics.speculative(&self.spec_delta);
+            }
+            self.spec_delta = Default::default();
+        }
         self.batch_stats.postprocess_ns += postprocess_started.elapsed().as_nanos() as u64;
         self.image_embeddings
             .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
@@ -1262,6 +1781,69 @@ impl InferenceRuntime {
             }
         }
         Ok(tokens)
+    }
+
+    /// The device sampling job of a decode-only step, or `None` when a sequence needs something the device does not do (mirostat, DRY, the
+    /// xorshift generator). Rows follow the order of `decode`, which is the order of the logit rows.
+    pub(crate) fn device_sample_job(&self, decode: &[i64]) -> Option<crate::rust_decoder::DeviceSampleJob> {
+        let vocab = self.model.vocab_size();
+        let words = vocab.div_ceil(32);
+        let mut job = crate::rust_decoder::DeviceSampleJob { mask_words: words, ..Default::default() };
+        for sid in decode {
+            let s = self.scheduler.sequences.get(sid)?;
+            let p = &s.sampling;
+            if !p.device_samplable() || s.sampling_state.kind != crate::sampling::RngKind::Philox {
+                return None;
+            }
+            let mut row = p.device_row(s.sampling_state.rng, s.sampling_state.draws);
+            row.pen_off = job.pen.len() as i32;
+            if (p.repetition_penalty - 1.0).abs() >= 1e-5 || p.presence_penalty != 0.0 || p.frequency_penalty != 0.0 {
+                job.pen.extend(crate::sampling::penalty_pairs(&s.tokens, p.repeat_last_n, vocab));
+            }
+            row.pen_len = job.pen.len() as i32 - row.pen_off;
+            // bias, the controls that forbid tokens (as -inf) and single-token bad words, merged per token
+            let mut bias = std::collections::BTreeMap::<i32, f32>::new();
+            for &(id, value) in &p.logit_bias {
+                if id < vocab {
+                    *bias.entry(id as i32).or_default() += value;
+                }
+            }
+            let mut forbid = |id: i64| {
+                if id >= 0 && (id as usize) < vocab {
+                    bias.insert(id as i32, f32::NEG_INFINITY);
+                }
+            };
+            if s.output_len < p.min_tokens {
+                self.eos_ids.iter().chain(&p.stop_token_ids).for_each(|&id| forbid(id));
+            }
+            for word in &p.bad_word_ids {
+                if let Some((&last, prefix)) = word.split_last() {
+                    if s.tokens.len() >= prefix.len() && s.tokens[s.tokens.len() - prefix.len()..] == *prefix {
+                        forbid(last);
+                    }
+                }
+            }
+            row.bias_off = job.bias.len() as i32;
+            job.bias.extend(bias);
+            row.bias_len = job.bias.len() as i32 - row.bias_off;
+            if !p.allowed_token_ids.is_empty() {
+                row.mask_row = (job.mask.len() / words) as i32;
+                let mut bits = vec![0u32; words];
+                for &id in &p.allowed_token_ids {
+                    if id < vocab {
+                        bits[id >> 5] |= 1 << (id & 31);
+                    }
+                }
+                job.mask.extend(bits);
+            }
+            if let Some(top) = p.logprobs {
+                row.logprobs_mode = if p.logprobs_processed { 2 } else { 1 };
+                row.top_n = top.min(20) as i32;
+                job.top_stride = job.top_stride.max(top.min(20));
+            }
+            job.rows.push(row);
+        }
+        Some(job)
     }
 
     fn table_row(&self, sid: i64) -> Result<Vec<i64>, String> {
@@ -1362,6 +1944,7 @@ fn copy_cache_regions(
     Ok(())
 }
 
+#[cfg(test)]
 fn argmax(logits: &[f32]) -> usize {
     crate::sampling::argmax(logits)
 }
@@ -1439,6 +2022,8 @@ mod tests {
             preemption: "recompute".into(),
             speculative_lookup: 3,
             speculative_window: 32,
+            speculative_adaptive: false,
+            ..SchedulerConfig::default()
         };
         assert_eq!(cfg.speculative_lookup, 3);
         assert_eq!(cfg.speculative_window, 32);

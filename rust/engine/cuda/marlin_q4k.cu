@@ -1,4 +1,5 @@
 /*
+ * SPDX-License-Identifier: Apache-2.0
  * Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");

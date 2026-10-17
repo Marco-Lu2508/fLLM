@@ -196,12 +196,17 @@ pub fn fp8m_type(type_id: u32) -> bool {
     type_id == 0x8000_0020
 }
 
+/// fLLM-specific `FP8B` tensor type (FP8 E4M3 weights with tile scales): id 0x8000_0021.
+pub fn fp8b_type(type_id: u32) -> bool {
+    type_id == 0x8000_0021
+}
+
 fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
     if let Some(group) = q4z_group(type_id) {
         // per group: group / 2 code bytes, an fp16 scale and a zero-point byte
         return Some((group, group / 2 + 3));
     }
-    if fp8m_type(type_id) {
+    if fp8m_type(type_id) || fp8b_type(type_id) {
         return Some((1, 1));
     }
     quant_types::by_id(type_id).map(|ty| (ty.block_elements as u64, ty.bytes_per_block as u64))
@@ -401,6 +406,27 @@ impl MappedGguf {
             extra_mappings,
         })
     }
+    /// A view of a file written for architecture `from` as one of architecture `to`: `general.architecture` and
+    /// every `<from>.` metadata key are renamed, tensors and payloads are shared. For llama.cpp architecture names
+    /// whose layout equals one this program implements under another name.
+    pub fn with_architecture_alias(&self, from: &str, to: &str) -> Self {
+        let mut index = self.index.clone();
+        let prefix = format!("{from}.");
+        let renamed: Vec<(String, Value)> = index
+            .metadata
+            .iter()
+            .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|rest| (format!("{to}.{rest}"), v.clone())))
+            .collect();
+        index.metadata.retain(|k, _| !k.starts_with(&prefix));
+        index.metadata.extend(renamed);
+        index.metadata.insert("general.architecture".into(), Value::String(to.into()));
+        Self {
+            mapping: Arc::clone(&self.mapping),
+            index,
+            extra_mappings: self.extra_mappings.clone(),
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let mut model = Self::open_single(path)?;
@@ -506,6 +532,24 @@ impl MappedGguf {
     }
 
     /// Map one physical GGUF file without following its split metadata.
+    /// Create a MappedGguf directly from an in-memory index and per-tensor mappings.
+    pub fn from_index_and_mappings(
+        index: GgufIndex,
+        extra_mappings: HashMap<String, Arc<Mmap>>,
+    ) -> io::Result<Self> {
+        let mapping = if let Some(first) = extra_mappings.values().next() {
+            Arc::clone(first)
+        } else {
+            let anon = MmapOptions::new().len(1).map_anon()?;
+            Arc::new(anon.make_read_only()?)
+        };
+        Ok(Self {
+            mapping,
+            index,
+            extra_mappings,
+        })
+    }
+
     pub fn open_single(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = File::open(path)?;
         // SAFETY: the mapping is read-only and owned for as long as tensor slices are returned.
@@ -520,6 +564,14 @@ impl MappedGguf {
 
     pub fn index(&self) -> &GgufIndex {
         &self.index
+    }
+
+    pub fn extra_mappings(&self) -> &HashMap<String, Arc<Mmap>> {
+        &self.extra_mappings
+    }
+
+    pub fn mapping(&self) -> &Arc<Mmap> {
+        &self.mapping
     }
 
     /// Return the on-disk bytes for a named tensor without copying them.
@@ -545,34 +597,59 @@ impl MappedGguf {
         tensor_slice(mapping, tensor)?;
         let start = tensor.data_offset as usize;
         Ok(TensorBytes {
-            mapping: Arc::clone(mapping),
-            range: start..start + tensor.payload_len as usize,
+            inner: TensorBytesInner::Mmap(Arc::clone(mapping), start..start + tensor.payload_len as usize),
         })
     }
 }
 
 #[derive(Clone)]
+enum TensorBytesInner {
+    Mmap(Arc<Mmap>, std::ops::Range<usize>),
+    Owned(Arc<Vec<u8>>, std::ops::Range<usize>),
+}
+
+#[derive(Clone)]
 pub struct TensorBytes {
-    mapping: Arc<Mmap>,
-    range: std::ops::Range<usize>,
+    inner: TensorBytesInner,
 }
 impl TensorBytes {
+    pub fn from_vec(v: Vec<u8>) -> Self {
+        let len = v.len();
+        Self {
+            inner: TensorBytesInner::Owned(Arc::new(v), 0..len),
+        }
+    }
+
     /// A zero-copy view of `len` bytes starting `start` bytes into this tensor.
     pub fn slice(&self, start: usize, len: usize) -> Result<TensorBytes, String> {
+        let cur_len = self.len();
         let end = start
             .checked_add(len)
-            .filter(|&end| end <= self.range.len())
+            .filter(|&end| end <= cur_len)
             .ok_or("tensor slice exceeds the tensor")?;
-        Ok(TensorBytes {
-            mapping: Arc::clone(&self.mapping),
-            range: self.range.start + start..self.range.start + end,
-        })
+        let inner = match &self.inner {
+            TensorBytesInner::Mmap(m, r) => {
+                TensorBytesInner::Mmap(Arc::clone(m), r.start + start..r.start + end)
+            }
+            TensorBytesInner::Owned(o, r) => {
+                TensorBytesInner::Owned(Arc::clone(o), r.start + start..r.start + end)
+            }
+        };
+        Ok(TensorBytes { inner })
     }
 }
 impl std::ops::Deref for TensorBytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.mapping[self.range.clone()]
+        match &self.inner {
+            TensorBytesInner::Mmap(m, r) => &m[r.clone()],
+            TensorBytesInner::Owned(o, r) => &o[r.clone()],
+        }
+    }
+}
+impl AsRef<[u8]> for TensorBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
     }
 }
 
@@ -650,6 +727,36 @@ mod tests {
         let mut truncated = bytes.clone();
         truncated.pop();
         assert!(parse(&truncated).unwrap_err().contains("payload range"));
+    }
+
+    #[test]
+    fn architecture_alias_renames_the_key_prefix() {
+        let mut bytes = b"GGUF".to_vec();
+        put_u32(&mut bytes, 3);
+        put_u64(&mut bytes, 0);
+        put_u64(&mut bytes, 3);
+        put_str(&mut bytes, "general.architecture");
+        put_u32(&mut bytes, 8);
+        put_str(&mut bytes, "exaone");
+        put_str(&mut bytes, "exaone.block_count");
+        put_u32(&mut bytes, 4);
+        put_u32(&mut bytes, 7);
+        put_str(&mut bytes, "tokenizer.ggml.model");
+        put_u32(&mut bytes, 8);
+        put_str(&mut bytes, "gpt2");
+        bytes.resize((bytes.len() + 31) & !31, 0);
+        let parsed = parse(&bytes).unwrap();
+        let mut anonymous = MmapOptions::new().len(bytes.len()).map_anon().unwrap();
+        anonymous.copy_from_slice(&bytes);
+        let mapped = MappedGguf { mapping: Arc::new(anonymous.make_read_only().unwrap()), index: parsed, extra_mappings: HashMap::new() };
+        let view = mapped.with_architecture_alias("exaone", "llama");
+        let meta = &view.index().metadata;
+        assert_eq!(meta["general.architecture"], "llama");
+        assert_eq!(meta["llama.block_count"], 7);
+        assert!(!meta.contains_key("exaone.block_count"));
+        assert_eq!(meta["tokenizer.ggml.model"], "gpt2");
+        // the original view is untouched
+        assert_eq!(mapped.index().metadata["general.architecture"], "exaone");
     }
 
     #[test]

@@ -19,7 +19,7 @@
 //!
 //! # `auto`
 //!
-//! `auto` takes the first backend of `CUDA > ROCm (hip) > Metal > Vulkan > DX12 > SYCL > CPU` that has a hardware GPU (override the
+//! `auto` takes the first backend of `CUDA > ROCm (hip) > Metal > Vulkan > DX12 > CPU` that has a hardware GPU (override the
 //! order with `FLLM_AUTO_ORDER=cuda,vulkan,cpu`; `FLLM_AUTO_IGPU=0` leaves integrated GPUs other than Apple's to an explicit
 //! `--device`), and there the best device (discrete before integrated, then the larger memory).
 //! `metal` and `vulkan` prefer the native backend and use wgpu where no native device is listed. NPUs and TPUs are never chosen
@@ -92,7 +92,18 @@ pub struct InventoryEntry {
 impl InventoryEntry {
     /// Capabilities of this device; see [`DeviceCaps`].
     pub fn caps(&self) -> DeviceCaps {
-        caps_for(self.backend, self.api, &self.info)
+        #[cfg_attr(not(feature = "cuda"), allow(unused_mut))]
+        let mut caps = caps_for(self.backend, self.api, &self.info);
+        #[cfg(feature = "cuda")]
+        if self.backend == "cuda" && self.api == Api::Native {
+            if let Some(cc) = number_after(&self.info.description.to_lowercase(), "sm_") {
+                caps.compute_capability = Some(format!("{}.{}", cc / 10, cc % 10));
+            }
+            let (kernels, paths) = crate::backend::cuda::device_report(self.local_index);
+            caps.kernels = Some(kernels).filter(|k| !k.is_empty());
+            caps.fast_paths = paths;
+        }
+        caps
     }
 }
 
@@ -122,8 +133,10 @@ pub fn is_backend_available(name: &str) -> bool {
 // Specification and resolution
 // ---------------------------------------------------------------------------------------------------------------------------
 
-/// Default order of `--device auto` (backends without a hardware device are skipped; `cpu` is the end of the chain).
-pub const DEFAULT_AUTO_ORDER: &[&str] = &["cuda", "hip", "metal", "vulkan", "dx12", "sycl", "cpu"];
+/// Default order of `--device auto` (backends without a hardware device are skipped; `cpu` is the end of the chain). `sycl`, `npu` and
+/// `tpu` are not part of it: they are chosen by name (`--device sycl`) or put into `FLLM_AUTO_ORDER` (`sycl` only; the NPU and TPU never
+/// take part in `auto`). An Intel GPU is reached through Vulkan.
+pub const DEFAULT_AUTO_ORDER: &[&str] = &["cuda", "hip", "metal", "vulkan", "dx12", "cpu"];
 
 /// How `auto` chooses: the backends in the order tried, and whether integrated GPUs take part.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,6 +576,11 @@ pub struct DeviceCaps {
     pub bandwidth_gbs: Option<f64>,
     /// `true` when `bandwidth_gbs` was measured by this process instead of read from the description.
     pub bandwidth_measured: bool,
+    /// CUDA: compute capability (`9.0`), the cubin of this binary the device loads, and the fast paths this binary has for it
+    /// (`compute_capability`, `kernels`, `fast_paths` stay empty for other backends).
+    pub compute_capability: Option<String>,
+    pub kernels: Option<String>,
+    pub fast_paths: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -607,6 +625,9 @@ impl DeviceCaps {
             "free_memory_bytes": self.free_memory_bytes,
             "bandwidth_gbs": self.bandwidth_gbs,
             "bandwidth_measured": self.bandwidth_measured,
+            "compute_capability": self.compute_capability,
+            "kernels": self.kernels,
+            "fast_paths": self.fast_paths,
             "notes": self.notes,
         })
     }
@@ -711,7 +732,9 @@ fn caps_for(backend: &str, api: Api, info: &DeviceInfo) -> DeviceCaps {
                         70..=74 => "tensor cores (FP16)",
                         75..=79 => "tensor cores (FP16, INT8)",
                         80..=88 => "tensor cores (TF32, BF16)",
-                        89..=99 => "tensor cores (FP8)",
+                        89 => "tensor cores (FP8)",
+                        90..=99 => "tensor cores (FP8, wgmma, TMA)",
+                        100..=119 => "tensor cores (FP8, FP4, tcgen05)",
                         _ => "tensor cores (FP8, FP4)",
                     }
                     .to_owned(),
@@ -985,7 +1008,10 @@ mod tests {
             ("tpu", Api::Native, info("T", "tpu pjrt", DeviceType::Accelerator, 16)),
         ]);
         let chain = resolve_over("auto", &inv, &default_order()).unwrap();
-        assert_eq!(chain, vec![pair("cuda", 0), pair("vulkan", 0), pair("dx12", 0), pair("sycl", 0), pair("cpu", 0)]);
+        assert_eq!(chain, vec![pair("cuda", 0), pair("vulkan", 0), pair("dx12", 0), pair("cpu", 0)]);
+        // SYCL takes part only when the order names it
+        let policy = AutoPolicy::from_values(Some("vulkan,sycl,cpu"), None);
+        assert_eq!(resolve_over("auto", &inv, &policy).unwrap(), vec![pair("vulkan", 0), pair("sycl", 0), pair("cpu", 0)]);
     }
 
     #[test]
@@ -1084,6 +1110,8 @@ mod tests {
         assert_eq!(ada.unified_memory, Some(false));
         let blackwell = device_caps(&gpu("RTX 5090", "CUDA, sm_120, 170 SMs", 32));
         assert_eq!(blackwell.matrix_cores.as_deref(), Some("tensor cores (FP8, FP4)"));
+        assert_eq!(device_caps(&gpu("H100", "CUDA, sm_90, 132 SMs", 80)).matrix_cores.as_deref(), Some("tensor cores (FP8, wgmma, TMA)"));
+        assert_eq!(device_caps(&gpu("B200", "CUDA, sm_100, 148 SMs", 180)).matrix_cores.as_deref(), Some("tensor cores (FP8, FP4, tcgen05)"));
         let pascal = device_caps(&gpu("GTX 1080", "CUDA, sm_61, 20 SMs", 8));
         assert_eq!((pascal.fp16, pascal.bf16, pascal.int8_dot), (Some(true), Some(false), Some(true)));
         assert_eq!(pascal.matrix_cores.as_deref(), Some("none"));

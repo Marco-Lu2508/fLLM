@@ -13,7 +13,7 @@ machine:
 
 | Level | Meaning |
 | --- | --- |
-| L0 | compiles (`cargo check`, `cargo clippy -D warnings`, and a full release codegen of the library) for `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` (check/clippy); unit-tested where the logic is platform independent |
+| L0 | (see [test levels](test-levels.md)) compiles (`cargo check`, `cargo clippy -D warnings`, and a full release codegen of the library) for `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` (check/clippy); unit-tested where the logic is platform independent |
 | L1 | `fllm-rs selftest-cpu` passes on real ARM hardware |
 | L2 | a real model produces the same greedy text as the scalar reference |
 | L3 | measured against the best engine on the same CPU |

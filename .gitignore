@@ -3,6 +3,8 @@ target/
 /models/
 *.gguf
 *.safetensors
+# tiny synthetic fixtures of the checkpoint importer tests
+!rust/checkpoint/testdata/**/*.safetensors
 *.bin
 *.pt
 *.pth

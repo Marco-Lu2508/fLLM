@@ -25,6 +25,7 @@ pub fn capabilities(info: &MetalDeviceInfo) -> BackendCapabilities {
         supports_kv_cache_write: true,
         supports_embedding_lookup: true,
         supports_device_sampling: false,
+        sample_on_device: false,
         supports_residual_add: true,
         supports_moe: true,
         max_batch_size: 4096,

@@ -12,6 +12,7 @@ pub(super) mod llamacpp;
 pub(super) mod ollama_extra;
 pub(super) mod responses;
 pub(super) mod tgi;
+pub(super) mod vllm;
 
 /// One parsed event of the internal chat-completions SSE stream.
 pub(super) enum Chunk {
@@ -20,18 +21,6 @@ pub(super) enum Chunk {
 }
 
 pub(super) type ChunkStream = Pin<Box<dyn futures_util::Stream<Item = Chunk> + Send>>;
-
-/// Lets clients that send `x-api-key` (Anthropic SDKs) authenticate like bearer clients.
-pub(super) fn with_bearer(headers: &HeaderMap) -> HeaderMap {
-    let mut out = headers.clone();
-    if !out.contains_key(axum::http::header::AUTHORIZATION) {
-        let key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
-        if let Some(value) = key.and_then(|k| format!("Bearer {k}").parse().ok()) {
-            out.insert(axum::http::header::AUTHORIZATION, value);
-        }
-    }
-    out
-}
 
 /// Fresh identifier such as `msg_0123456789abcdef`.
 pub(super) fn new_id(prefix: &str) -> String {
@@ -153,16 +142,12 @@ pub(super) async fn model_by_id(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    if id != state.model_name {
-        return api_error(StatusCode::NOT_FOUND, &format!("model {id} not found"));
+    if id.is_empty() || !state.knows_model(&id) {
+        return model_not_found(&id);
     }
     if headers.contains_key("anthropic-version") {
         return Json(anthropic::model_object(&state)).into_response();
     }
-    Json(json!({"id":state.model_name,"object":"model","created":unix_now(),"owned_by":"fllm"}))
+    Json(json!({"id":id,"object":"model","created":unix_now(),"owned_by":"fllm","root":state.model_name,"parent":null,"max_model_len":state.max_context}))
         .into_response()
 }

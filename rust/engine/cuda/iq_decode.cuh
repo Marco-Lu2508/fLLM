@@ -33,7 +33,7 @@ __device__ __forceinline__ void iq_put8_1(float *w, uint64_t grid, float delta, 
     for (int j = 0; j < 8; j++) w[j] = scale * ((float)(int8_t)((grid >> (8 * j)) & 0xffu) + delta);
 }
 
-template <int KIND>
+template <uint32_t KIND>
 __device__ __forceinline__ void decode16_iq(const uint8_t *rp, int run, float *w) {
     const uint8_t *b = rp + (size_t)(run >> 4) * kind_iq_block_bytes(KIND);
     const int local = (run & 15) * 16;  // first value inside the 256-value block

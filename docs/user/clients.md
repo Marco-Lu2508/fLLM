@@ -53,7 +53,7 @@ see [troubleshooting](troubleshooting.md)). Structured output via
 
 ## Verified SDK clients
 
-The matrix below is the task-provided test environment (library versions
+The matrix below is the tested environment (library versions
 `openai 3.29`, `anthropic 1.13`, `ollama 0.6.3`). Reproduce it with
 `scripts/api-tests/` (see below) — the versions name the tested environment,
 not a minimum requirement.

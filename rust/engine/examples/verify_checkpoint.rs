@@ -19,7 +19,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("empty reference token sequence".into());
     }
     let mut model = GgufModel::load(args.first().ok_or("model required")?, 128, 1, 2)?;
-    model.set_kv_kind(1);
+    // FLLM_VERIFY_KV=f32 keeps the cache in single precision (the default f16 cache alone costs about 1e-3 of relative logit error)
+    if std::env::var("FLLM_VERIFY_KV").is_ok_and(|v| v.eq_ignore_ascii_case("f32")) {
+        model.set_kv_formats(fllm_engine::kv_format::KvFormat::F32, fllm_engine::kv_format::KvFormat::F32);
+    } else {
+        model.set_kv_kind(1);
+    }
     let decoder = RustDecoder::load(&model, "cpu")?;
     let table = (0..model.table_stride())
         .map(|n| n as i64)

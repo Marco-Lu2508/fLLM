@@ -20,7 +20,7 @@ fLLM is young. Read [Status](#status) for what has actually run on which hardwar
 
 ```sh
 git clone https://github.com/Marco-Lu2508/fLLM && cd fLLM
-./install.sh                                          # newest release -> ./.local/bin/fllm-rs, checksum verified
+curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh | sh        # Linux, macOS -> ~/.local/bin/fllm-rs
 ./run.sh run unsloth/Qwen3.5-9B-GGUF:Q4_K_M           # downloads the model once, then chats in the terminal
 ```
 
@@ -104,7 +104,7 @@ an unknown `model_type`.
 `transformers`. Most real checkpoints were not available for testing. The coverage against the open
 models shown on artificialanalysis.ai (2026-10-13 snapshot: 43 models, 25 verified, 2 partly, 16 not
 supported) is in [docs/model-coverage.md](docs/model-coverage.md); the checklist against vLLM and SGLang
-architecture names (German) is in [docs/model-coverage-vllm.md](docs/model-coverage-vllm.md).
+architecture names is in [docs/model-coverage-vllm.md](docs/model-coverage-vllm.md).
 
 Image input: `--mmproj` loads a SigLIP/Idefics3 projector (SmolVLM). Other vision families, audio and
 speech are not supported; for multimodal checkpoints only the text model is converted.
@@ -207,7 +207,7 @@ What has actually been run on hardware, and what has not:
 | AMD ROCm, Intel SYCL, NPUs, TPU | Compile only (test level L0): not run on the hardware |
 
 The test levels (L0 compiles, L1 self test passes on the device, L2 same greedy text as the CPU, L3 speed
-measured) are defined in [docs/backends.md](docs/backends.md) (German).
+measured) are defined in [docs/test-levels.md](docs/test-levels.md).
 
 ## Measurements
 
@@ -247,10 +247,10 @@ concurrent requests are in [docs/gpu-backends.md](docs/gpu-backends.md).
 
 ## Documentation
 
-Some pages are in German or contain development notes; the code and `--help` are authoritative.
+The code and `--help` are authoritative where a page and the program disagree.
 
 **Start here**
-- [docs/getting-started.md](docs/getting-started.md): install, get weights, quantize, serve, curl, chat, embeddings
+- [docs/index.md](docs/index.md), [docs/getting-started.md](docs/getting-started.md): documentation index, install, get weights, quantize, serve, curl, chat, embeddings
 - [docs/quickstart-windows-linux.md](docs/quickstart-windows-linux.md): Docker with an NVIDIA GPU, step by step
 - [docs/user/commands.md](docs/user/commands.md): every `fllm-rs` subcommand
 - [docs/configuration.md](docs/configuration.md): every `serve` flag and environment variable
@@ -258,8 +258,8 @@ Some pages are in German or contain development notes; the code and `--help` are
 
 **Models and formats**
 - [docs/architectures.md](docs/architectures.md): supported and unsupported architectures, verification method
-- [docs/model-coverage.md](docs/model-coverage.md), [docs/model-coverage-vllm.md](docs/model-coverage-vllm.md): coverage against popular open models and against vLLM/SGLang (German)
-- [docs/adding-a-model.md](docs/adding-a-model.md): how to add an architecture
+- [docs/model-coverage.md](docs/model-coverage.md), [docs/model-coverage-vllm.md](docs/model-coverage-vllm.md): coverage against popular open models and against vLLM/SGLang
+- [docs/architecture.md](docs/architecture.md), [docs/adding-a-model.md](docs/adding-a-model.md), [docs/adding-a-backend.md](docs/adding-a-backend.md): engine structure, adding an architecture or backend
 - [docs/rust-formats-and-import.md](docs/rust-formats-and-import.md): ggml storage types and checkpoint containers
 - [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-formats.md](docs/user/quants-and-formats.md): quantizer, GGUF tools, KV cache formats
 - [docs/awq-gptq-marlin.md](docs/awq-gptq-marlin.md): AWQ/GPTQ and NVFP4 through Marlin
@@ -273,15 +273,15 @@ Some pages are in German or contain development notes; the code and `--help` are
 **Hardware**
 - [docs/device-selection.md](docs/device-selection.md): `--device`, `devices`, `auto`, self test
 - [docs/gpu-backends.md](docs/gpu-backends.md): backend design, CUDA kernels, offload, KV cache formats, measurements
-- [docs/backends.md](docs/backends.md), [docs/backends-verify.md](docs/backends-verify.md): hardware by format matrix, verification steps (German)
+- [docs/backends.md](docs/backends.md), [docs/backends-verify.md](docs/backends-verify.md): hardware by format matrix, verification steps
 - [docs/cpu-kernels.md](docs/cpu-kernels.md), [docs/cpu-arm.md](docs/cpu-arm.md), [docs/cpu-avx512-amx.md](docs/cpu-avx512-amx.md): CPU kernels
 - [docs/cuda-qgemm4k.md](docs/cuda-qgemm4k.md): Q4_K prompt GEMM
-- [docs/windows.md](docs/windows.md): Windows builds
+- [docs/windows.md](docs/windows.md), [docs/test-levels.md](docs/test-levels.md), [docs/benchmarking.md](docs/benchmarking.md), [docs/roadmap.md](docs/roadmap.md), [docs/research/README.md](docs/research/README.md): Windows builds, test levels, benchmarking, roadmap, and research notes
 
 **Deployment and project**
 - [docs/docker.md](docs/docker.md), [compose.yml](compose.yml), [compose.cuda.yml](compose.cuda.yml): images and compose files
-- [docs/ci.md](docs/ci.md): workflows, release assets, image tags
-- [SECURITY.md](SECURITY.md), [THIRD_PARTY.md](THIRD_PARTY.md), [docs/release-license-report.md](docs/release-license-report.md): security policy, third-party code and licenses
+- [docs/ci.md](docs/ci.md), [scripts/README.md](scripts/README.md), [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md): workflows, verification scripts, contributing, and changelog
+- [SECURITY.md](SECURITY.md), [THIRD_PARTY.md](THIRD_PARTY.md), [docs/releasing.md](docs/releasing.md): security policy, third-party code, licenses, and release procedure
 
 ## Building from source
 
@@ -289,7 +289,7 @@ Some pages are in German or contain development notes; the code and `--help` are
 cargo build --release --locked -p fllm-engine --features rust-gpu --bin fllm-rs           # CPU + wgpu
 cargo build --release --locked -p fllm-engine --features "rust-gpu,cuda" --bin fllm-rs    # plus CUDA, needs nvcc
 FLLM_CUDA_ARCHS=120 cargo build --release --locked -p fllm-engine --features cuda          # one GPU generation, faster
-./install.sh --build                                                                       # build and install into ./.local/bin
+./install.sh --build                                                                       # build and install into ~/.local/bin
 ```
 
 | Cargo feature | Adds |
@@ -298,7 +298,7 @@ FLLM_CUDA_ARCHS=120 cargo build --release --locked -p fllm-engine --features cud
 | `rust-gpu` | wgpu backends: Vulkan, Metal, DirectX 12 (what `make`, `install.sh`, the release binaries and the CPU image use) |
 | `cuda` | NVIDIA kernels, compiled with `nvcc` (architectures from `FLLM_CUDA_ARCHS`) |
 | `avx512` | x86-64 AVX-512 / AMX CPU kernels; **on by default** (`--no-default-features` leaves them out; chosen at run time by CPUID, so the binary still runs on any x86-64 CPU) |
-| `hip`, `sycl`, `vulkan`, `metal`, `npu-openvino`, `tpu-pjrt` | optional native backends, test level L0 ([docs/backends.md](docs/backends.md)) |
+| `hip`, `sycl`, `vulkan`, `metal`, `npu-openvino`, `tpu-pjrt` | optional native backends; the test level differs per backend (Metal: kernel checks in CI, others L0), see [docs/backends.md](docs/backends.md) |
 
 `make test` runs the Rust tests. On Windows see [docs/windows.md](docs/windows.md).
 

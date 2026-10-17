@@ -121,6 +121,7 @@ pub fn write_to(
             "Q4ZP64" => 0x8000_0015,
             "Q4ZP128" => 0x8000_0016,
             "FP8M" | "F8M" => 0x8000_0020,
+            "FP8B" | "F8B" => 0x8000_0021,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -167,7 +168,7 @@ pub fn write_to(
     }
     Ok(written)
 }
-fn type_width(t: &str) -> io::Result<usize> {
+pub(crate) fn type_width(t: &str) -> io::Result<usize> {
     match t {
         "F32" => Ok(4),
         "F16" | "BF16" => Ok(2),
@@ -177,7 +178,7 @@ fn type_width(t: &str) -> io::Result<usize> {
         )),
     }
 }
-fn write_tensor(w: &mut impl Write, t: &OutTensor) -> io::Result<u64> {
+pub(crate) fn write_tensor(w: &mut impl Write, t: &OutTensor) -> io::Result<u64> {
     if let Some(packed) = &t.packed {
         return write_packed(w, t, packed);
     }
@@ -302,14 +303,64 @@ fn write_packed_fp8m(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::R
     Ok(total as u64)
 }
 
+fn write_packed_fp8b(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result<u64> {
+    match p {
+        PackedData::Fp8Block(b) => {
+            let weight = b.weight_bytes();
+            let scales = b.scales();
+            w.write_all(weight)?;
+            for &s in scales {
+                w.write_all(&half::f16::from_f32(s).to_bits().to_le_bytes())?;
+            }
+            let total = weight.len() + scales.len() * 2;
+            if total as u64 != t.data_len {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "FP8B length mismatch"));
+            }
+            Ok(total as u64)
+        }
+        PackedData::Concat { parts, .. } => {
+            let mut total_w = 0usize;
+            let mut total_s = 0usize;
+            for part in parts {
+                let b = part.fp8_block().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "non-FP8B part in stacked FP8B tensor")
+                })?;
+                w.write_all(b.weight_bytes())?;
+                total_w += b.weight_bytes().len();
+            }
+            for part in parts {
+                let b = part.fp8_block().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "non-FP8B part in stacked FP8B tensor")
+                })?;
+                for &s in b.scales() {
+                    w.write_all(&half::f16::from_f32(s).to_bits().to_le_bytes())?;
+                }
+                total_s += b.scales().len() * 2;
+            }
+            let total = total_w + total_s;
+            if total as u64 != t.data_len {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "FP8B length mismatch"));
+            }
+            Ok(total as u64)
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "tensor cannot be stored as FP8B")),
+    }
+}
+
 fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result<u64> {
     if t.dtype == "FP8M" || t.dtype == "F8M" {
         return write_packed_fp8m(w, t, p);
     }
+    if t.dtype == "FP8B" || t.dtype == "F8B" {
+        return write_packed_fp8b(w, t, p);
+    }
     if t.dtype == "NVFP4" {
+        return write_packed_rows(w, t, |row, buf| p.encode_nvfp4_row(row, buf));
+    }
+    if t.dtype == "MXFP4" {
         return write_packed_rows(w, t, |row, buf| {
-            p.nvfp4()
-                .ok_or_else(|| "tensor cannot be stored as NVFP4".to_owned())?
+            p.mxfp4()
+                .ok_or_else(|| "tensor cannot be stored as MXFP4".to_owned())?
                 .encode_gguf_row(row, buf)
         });
     }
@@ -392,7 +443,8 @@ fn write_packed_rows(
     encode: impl Fn(usize, &mut Vec<u8>) -> Result<(), String>,
 ) -> io::Result<u64> {
     let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
-    let rows = *t.dims.get(1).ok_or_else(|| bad(format!("{} tensor needs two dimensions", t.dtype)))? as usize;
+    // (stacked experts have a third dimension: all rows of all experts are written one after the other)
+    let rows = t.dims.get(1..).filter(|d| !d.is_empty()).ok_or_else(|| bad(format!("{} tensor needs two dimensions", t.dtype)))?.iter().product::<u64>() as usize;
     let mut buf = Vec::new();
     let mut total = 0u64;
     for i in 0..rows {
@@ -442,7 +494,7 @@ fn write_packed_q4zp(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::R
 fn write_packed_q4z(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result<u64> {
     let bad = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
     let group = p.q4z_group().ok_or_else(|| bad("tensor cannot be stored as Q4Z".into()))?;
-    let rows = *t.dims.get(1).ok_or_else(|| bad("Q4Z tensor needs two dimensions".into()))? as usize;
+    let rows = t.dims.get(1..).filter(|d| !d.is_empty()).ok_or_else(|| bad("Q4Z tensor needs two dimensions".into()))?.iter().product::<u64>() as usize;
     let row_bytes = p.element_count() / rows / group * (group / 2 + 3);
     if (row_bytes * rows) as u64 != t.data_len {
         return Err(bad("Q4Z output length mismatch".into()));

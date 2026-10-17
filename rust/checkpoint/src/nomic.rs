@@ -21,7 +21,7 @@ use std::{
 };
 
 pub(crate) fn supports(cfg: &Value) -> bool {
-    cfg["model_type"].as_str() == Some("nomic_bert")
+    matches!(cfg["model_type"].as_str(), Some("nomic_bert" | "nomic_bert_moe"))
 }
 
 fn number(cfg: &Value, key: &str) -> Result<u32, CheckpointError> {
@@ -32,32 +32,9 @@ fn number(cfg: &Value, key: &str) -> Result<u32, CheckpointError> {
         .ok_or_else(|| format!("config.json requires positive {key}").into())
 }
 
-fn json(path: &Path) -> Result<Value, CheckpointError> {
-    serde_json::from_slice(&fs::read(path)?)
-        .map_err(|e| format!("invalid {}: {e}", path.display()).into())
-}
-
 fn pooling(root: &Path) -> Result<u32, CheckpointError> {
-    let path = root.join("1_Pooling/config.json");
-    if path.is_file() {
-        let pool = json(&path)?;
-        let cls = pool["pooling_mode_cls_token"].as_bool().unwrap_or(false);
-        let mean = pool["pooling_mode_mean_tokens"].as_bool().unwrap_or(false);
-        let unsupported = [
-            "pooling_mode_max_tokens",
-            "pooling_mode_mean_sqrt_len_tokens",
-            "pooling_mode_weightedmean_tokens",
-            "pooling_mode_lasttoken",
-        ]
-        .iter()
-        .any(|k| pool[*k].as_bool() == Some(true));
-        if unsupported || cls == mean {
-            return Err("encoder conversion requires exactly one CLS or mean pooling mode".into());
-        }
-        return Ok(if cls { 2 } else { 1 });
-    }
     // Nomic embedding checkpoints use mean pooling.
-    Ok(1)
+    crate::st::pooling_or(root, || crate::st::MEAN)
 }
 
 fn theta(cfg: &Value) -> Result<f32, CheckpointError> {
@@ -79,12 +56,12 @@ fn strip(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-pub(crate) fn convert(
+#[allow(clippy::type_complexity)]
+pub(crate) fn prepare(
     input: &Path,
-    output: &Path,
     options: ConvertOptions,
     cfg: &Value,
-) -> Result<ConversionReport, CheckpointError> {
+) -> Result<(Vec<(String, Meta)>, Vec<OutTensor>, Vec<String>), CheckpointError> {
     let root = if input.is_dir() {
         input
     } else {
@@ -162,6 +139,11 @@ pub(crate) fn convert(
         ("pooling_type", pooling(root)?),
     ] {
         meta.push((format!("bert.{key}"), Meta::U32(n)));
+    }
+    if let Some(experts) = cfg["num_experts"].as_u64().or_else(|| cfg["num_local_experts"].as_u64()) {
+        meta.push(("bert.expert_count".into(), Meta::U32(experts as u32)));
+        let used = cfg["num_experts_per_tok"].as_u64().or_else(|| cfg["num_selected_experts"].as_u64()).unwrap_or(1);
+        meta.push(("bert.expert_used_count".into(), Meta::U32(used as u32)));
     }
     meta.push(("bert.rope_theta".into(), Meta::F32(rope_theta)));
     meta.extend(bert::tokenizer(root, vocab, cfg, true)?);
@@ -386,7 +368,19 @@ pub(crate) fn convert(
             return Err(format!("missing required encoder tensor {name}").into());
         }
     }
+    crate::st::extend(root, hidden, &options, &mut meta, &mut tensors)?;
     tensors.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok((meta, tensors, skipped))
+}
+
+#[allow(dead_code)]
+pub(crate) fn convert(
+    input: &Path,
+    output: &Path,
+    options: ConvertOptions,
+    cfg: &Value,
+) -> Result<ConversionReport, CheckpointError> {
+    let (meta, tensors, skipped) = prepare(input, options, cfg)?;
     if output.exists() && !options.overwrite {
         return Err(format!("output already exists: {}", output.display()).into());
     }

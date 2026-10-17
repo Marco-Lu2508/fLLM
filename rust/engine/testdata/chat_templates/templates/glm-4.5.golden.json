@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "[gMASK]<sop><|assistant|>\n<think></think>\nI start.<|user|>\nok<|assistant|>"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"calc\", \"description\": \"Evaluate an arithmetic expression.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}, \"precision\": {\"type\": \"integer\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|user|>\nCompute 17*3<|assistant|>\n<think></think>\nLet me compute that.\n<tool_call>calc\n<arg_key>expression</arg_key>\n<arg_value>17*3</arg_value>\n</tool_call><|observation|>\n<tool_response>\n51\n</tool_response><|assistant|>"
+ },
+ "default/documents": {
+  "ok": "[gMASK]<sop><|user|>\nSummarize.<|assistant|>"
+ },
+ "default/image_parts": {
+  "ok": "[gMASK]<sop><|user|>\nWhat is in this picture?<|assistant|>"
+ },
+ "default/long_system_whitespace": {
+  "ok": "[gMASK]<sop><|system|>\n  padded system with trailing newline\n\n<|user|>\n  padded user \n<|assistant|>"
+ },
+ "default/multi_turn": {
+  "ok": "[gMASK]<sop><|system|>\nBe brief.<|user|>\nHi<|assistant|>\n<think></think>\nHello! How can I help?<|user|>\nTell me a joke.<|assistant|>\n<think></think>\nWhy did the chicken cross the road?<|user|>\nWhy?<|assistant|>"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "[gMASK]<sop><|user|>\nHi<|assistant|>\n<think></think>\nHello!"
+ },
+ "default/reasoning_effort": {
+  "ok": "[gMASK]<sop><|user|>\nThink hard: 13*17<|assistant|>"
+ },
+ "default/reasoning_history": {
+  "ok": "[gMASK]<sop><|user|>\n2+2?<|assistant|>\n<think></think>\n<think>\nsimple\n</think>\n\n4<|user|>\nAnd 3+3?<|assistant|>"
+ },
+ "default/system_not_first": {
+  "ok": "[gMASK]<sop><|user|>\na<|system|>\nlate system<|user|>\nb<|assistant|>"
+ },
+ "default/system_user": {
+  "ok": "[gMASK]<sop><|system|>\nYou are a terse assistant.<|user|>\nCapital of France?<|assistant|>"
+ },
+ "default/text_parts": {
+  "ok": "[gMASK]<sop><|system|>\nSys part.<|user|>\nPart one. Part two.<|assistant|>"
+ },
+ "default/thinking_disabled": {
+  "ok": "[gMASK]<sop><|user|>\n2+2?/nothink<|assistant|>\n<think></think>"
+ },
+ "default/thinking_enabled": {
+  "ok": "[gMASK]<sop><|user|>\n2+2?<|assistant|>"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"calc\", \"description\": \"Evaluate an arithmetic expression.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}, \"precision\": {\"type\": \"integer\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|user|>\nWeather in Berlin and 2+2?<|assistant|>\n<think></think>\n<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Berlin</arg_value>\n<arg_key>unit</arg_key>\n<arg_value>celsius</arg_value>\n</tool_call>\n<tool_call>calc\n<arg_key>expression</arg_key>\n<arg_value>2+2</arg_value>\n<arg_key>precision</arg_key>\n<arg_value>2</arg_value>\n</tool_call><|observation|>\n<tool_response>\n{\"temp\": 21.5, \"sky\": \"clear\"}\n</tool_response>\n<tool_response>\n4\n</tool_response><|assistant|>"
+ },
+ "default/tool_call_then_answer": {
+  "ok": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nUse tools when helpful.<|user|>\nWeather in Berlin?<|assistant|>\n<think></think>\nNone\n<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Berlin</arg_value>\n</tool_call><|observation|>\n<tool_response>\n21 C, sunny\n</tool_response><|assistant|>\n<think></think>\nIt is 21 C and sunny in Berlin.<|user|>\nAnd Paris?<|assistant|>"
+ },
+ "default/tools_system_user": {
+  "ok": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nYou can call tools.<|user|>\nWeather in Berlin?<|assistant|>"
+ },
+ "default/tools_user": {
+  "ok": "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"calc\", \"description\": \"Evaluate an arithmetic expression.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}, \"precision\": {\"type\": \"integer\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|user|>\nWeather in München?<|assistant|>"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "[gMASK]<sop><|user|>\na<|user|>\nb<|assistant|>"
+ },
+ "default/unicode": {
+  "ok": "[gMASK]<sop><|user|>\nGrüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|assistant|>"
+ },
+ "default/user_only": {
+  "ok": "[gMASK]<sop><|user|>\nHello<|assistant|>"
+ }
+}

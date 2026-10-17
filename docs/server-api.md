@@ -1,9 +1,10 @@
 # HTTP API
 
 `fllm-rs serve` exposes one router for decoder models and a smaller one for BERT encoders.
-This page lists every route, the request fields the handlers actually read and the response
-fields the handlers actually emit. Field names and defaults come from
-`rust/engine/src/server.rs`, `rust/engine/src/encoder_server.rs` and
+This page lists every route of the decoder and the encoder server. The OpenAI, Ollama and SGLang
+routes are specified in detail below; the Anthropic, OpenAI Responses/Files/Batches, llama.cpp and TGI
+routes are specified in [api-compat.md](api-compat.md). Field names and defaults come from
+`rust/engine/src/server.rs`, `rust/engine/src/server/api/*.rs`, `rust/engine/src/encoder_server.rs` and
 `rust/engine/src/parameters.rs`.
 
 - Getting started with curl: [getting-started.md](getting-started.md)
@@ -13,31 +14,58 @@ fields the handlers actually emit. Field names and defaults come from
 
 Decoder server (`serve --model …gguf`):
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/` | Self-contained browser chat page (static, no build step) |
-| GET | `/health` | Liveness probe |
-| GET | `/metrics` | Prometheus text metrics |
-| GET | `/v1/models` | The loaded model id |
-| POST | `/v1/completions` | OpenAI text completion |
-| POST | `/v1/chat/completions` | OpenAI chat completion (tools, streaming, reasoning) |
-| POST | `/v1/embeddings` | OpenAI embeddings |
-| POST | `/v1/images/embeddings` | Projected image tokens (diagnostic, needs `--mmproj`) |
-| POST | `/api/embed`, `/api/embeddings` | Same handler as `/v1/embeddings` |
-| POST | `/tokenize` | Text → token ids |
-| POST | `/detokenize` | Token ids → text |
-| GET | `/api/tags` | Ollama model list |
-| GET | `/api/version` | Ollama version string |
-| POST | `/api/generate` | Ollama completion |
-| POST | `/api/chat` | Ollama chat |
-| POST | `/generate` | SGLang completion |
-| GET | `/get_model_info` | SGLang model info |
-| GET | `/get_server_info` | SGLang server info |
+| Method | Path | Family | Purpose |
+| --- | --- | --- | --- |
+| GET | `/` | fLLM | Self-contained browser chat page (static, no build step); `HEAD /` answers for Ollama clients |
+| GET | `/health` | fLLM | Liveness probe |
+| GET | `/metrics` | fLLM | Prometheus text metrics |
+| GET | `/v1/models`, `/v1/models/{id}` | OpenAI | The loaded model id |
+| POST | `/v1/completions` | OpenAI | Text completion |
+| POST | `/v1/chat/completions` | OpenAI | Chat completion (tools, streaming, reasoning) |
+| POST | `/v1/embeddings` | OpenAI | Embeddings |
+| POST | `/v1/images/embeddings` | fLLM | Projected image tokens (diagnostic, needs `--mmproj`) |
+| POST | `/v1/messages` | Anthropic | Messages API (streaming, tools, images, `thinking`) |
+| POST | `/v1/messages/count_tokens` | Anthropic | Token count of the rendered prompt |
+| POST | `/v1/responses` | OpenAI | Responses API |
+| GET, DELETE | `/v1/responses/{id}` | OpenAI | Stored responses |
+| GET, POST | `/v1/files` | OpenAI | List and upload files (`multipart/form-data`) |
+| GET, DELETE | `/v1/files/{id}` | OpenAI | File metadata and deletion |
+| GET | `/v1/files/{id}/content` | OpenAI | File content |
+| GET, POST | `/v1/batches` | OpenAI | List and create batches (background execution) |
+| GET | `/v1/batches/{id}` | OpenAI | Batch status |
+| POST | `/v1/batches/{id}/cancel` | OpenAI | Cancel a batch |
+| POST | `/v1/rerank`, `/rerank`, `/v1/score`, `/classify`, `/pooling` | vLLM/Cohere | Answer `501` on a decoder; only an encoder server implements them (see below) |
+| POST | `/api/embed`, `/api/embeddings` | Ollama | Embeddings (`/api/embeddings` shares the `/v1/embeddings` handler) |
+| GET | `/api/tags` | Ollama | Model list |
+| GET | `/api/version` | Ollama | Version string |
+| POST | `/api/generate` | Ollama | Completion |
+| POST | `/api/chat` | Ollama | Chat |
+| POST | `/api/show` | Ollama | Model details |
+| GET | `/api/ps` | Ollama | Loaded models |
+| POST | `/api/pull` | Ollama | Answers `501` (one model per process; start the server with `--model`) |
+| DELETE | `/api/delete` | Ollama | Answers `501` (the model is part of the running process) |
+| POST | `/tokenize` | llama.cpp | Text → token ids (`with_pieces` supported) |
+| POST | `/detokenize` | llama.cpp | Token ids → text |
+| POST | `/completion` | llama.cpp | Completion |
+| POST | `/infill` | llama.cpp | Fill-in-the-middle completion |
+| POST | `/apply-template` | llama.cpp | Render the chat template |
+| POST | `/embedding`, `/embeddings` | llama.cpp | Embeddings |
+| GET | `/props` | llama.cpp | Server properties |
+| GET | `/slots` | llama.cpp | Slot list |
+| POST | `/generate` | SGLang | Completion |
+| GET | `/get_model_info` | SGLang | Model info |
+| GET | `/get_server_info` | SGLang | Server info |
+| POST | `/generate_stream` | TGI | Streaming completion |
+| GET | `/info` | TGI | Model info |
 
-Encoder server (`serve --model bge….gguf`): `/health`, `/metrics`, `/v1/models`,
-`/v1/embeddings`, `/api/embed`, `/api/embeddings`, `/tokenize`, `/detokenize`,
-`/v1/rerank`, `/rerank`, `/v1/score`, `/classify`, `/pooling`. Generation
-routes do not exist there.
+Request bodies up to 16 MiB are accepted (`/v1/files` has its own upload limit).
+
+Encoder server (`serve --model bge….gguf`, a BERT-style encoder): `/health`, `/metrics`,
+`/v1/models`, `/v1/embeddings`, `/api/embed`, `/api/embeddings`, `/tokenize`, `/detokenize`,
+`/v1/rerank`, `/rerank`, `/v1/score`, `/classify`, `/pooling`. Generation routes do not exist
+there. The rerank, score, classify and pooling routes are implemented only by the encoder server:
+a decoder answers them with `501 Not Implemented` (rerank in the Cohere-style `{"message": …}`
+shape, the others as an OpenAI error object).
 
 ## Cross-cutting behaviour
 
@@ -287,7 +315,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
          "required":["name","age"],"additionalProperties":false}}}}'
 ```
 
-## Tools und Reasoning
+## Tools and reasoning
 
 Models write tool calls and reasoning in family-specific formats. The server reads them with a
 *tool parser* (`rust/engine/src/tool_parsers.rs`) and a *reasoning parser*

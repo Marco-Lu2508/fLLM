@@ -9,6 +9,7 @@ import sys
 import jinja2
 
 FLLM_B_TYPES = ("kU4", "kU4B8", "kFE2M1f", "kFE4M3fn")
+FLLM_BF16_B_TYPES = ("kU4", "kU4B8")
 ARCHS = []
 SUPPORT_FP8 = False
 SUPPORT_SM75 = False
@@ -185,8 +186,11 @@ def generate_new_kernels():
         all_thread_configs = quant_config["thread_configs"]
 
         for a_type, c_type in itertools.product(a_types, c_types):
-            # fLLM: FP16 activations and FP16 output only; int4 weights (AWQ with zero points, symmetric GPTQ)
-            if a_type != "kFloat16" or c_type != "kFloat16" or b_type not in FLLM_B_TYPES:
+            # fLLM: FP16 activations and FP16 output; int4 weights (AWQ with zero points, symmetric GPTQ) also with BF16 activations and output
+            # (FLLM_ACT_DTYPE=bf16; sm_80 and newer only, see the sm_75 dictionary below). NVFP4 and FP8 weights stay FP16.
+            fp16 = a_type == "kFloat16" and c_type == "kFloat16" and b_type in FLLM_B_TYPES
+            bf16 = a_type == "kBFloat16" and c_type == "kBFloat16" and b_type in FLLM_BF16_B_TYPES
+            if not (fp16 or bf16):
                 continue
             if not SUPPORT_FP8 and a_type == "kFE4M3fn":
                 continue
@@ -304,7 +308,7 @@ def generate_new_kernels():
             with open(os.path.join(os.path.dirname(__file__), filename), "w") as f:
                 f.write(file_content)
 
-    # fLLM: vLLM appends a STD_TORCH_CHECK for FP8 activations here; this build has FP16 activations only
+    # fLLM: vLLM appends a STD_TORCH_CHECK for FP8 activations here; this build has FP16 and BF16 activations only
 
     with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"), "w") as f:
         f.write(kernel_selector_str)

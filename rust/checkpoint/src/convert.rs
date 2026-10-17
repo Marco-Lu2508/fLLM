@@ -5,7 +5,8 @@ use crate::{
     safetensors::{self, Tensor},
     CheckpointError,
 };
-use serde_json::Value;
+use fllm_gguf_probe::{GgufIndex, MappedGguf, TensorInfo};
+use serde_json::{Map, Value};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
@@ -19,16 +20,43 @@ pub enum OutputDType {
     F16,
     F32,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecHeadKind {
+    Eagle,
+    Eagle3,
+    Medusa,
+}
+
+impl SpecHeadKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "eagle" => Some(Self::Eagle),
+            "eagle3" | "eagle-3" => Some(Self::Eagle3),
+            "medusa" => Some(Self::Medusa),
+            _ => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Eagle => "eagle",
+            Self::Eagle3 => "eagle3",
+            Self::Medusa => "medusa",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct ConvertOptions {
     pub output_dtype: OutputDType,
     pub overwrite: bool,
+    pub spec_head: Option<SpecHeadKind>,
 }
 impl Default for ConvertOptions {
     fn default() -> Self {
         Self {
             output_dtype: OutputDType::Preserve,
             overwrite: false,
+            spec_head: None,
         }
     }
 }
@@ -97,10 +125,7 @@ pub struct ConfigCheck {
 /// Read only `config.json` (and `hf_quant_config.json`) of a checkpoint directory and report whether `convert` supports
 /// its architecture and quantization. Fails with the reason when it does not, before any weights are fetched.
 pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
-    let cfg_path = root.join("config.json");
-    let mut cfg: Value =
-        serde_json::from_slice(&fs::read(&cfg_path).map_err(|e| format!("read config.json: {e}"))?)
-            .map_err(|e| format!("invalid config.json: {e}"))?;
+    let mut cfg: Value = crate::mistral_native::read_config(root)?;
     if let Some(q) = modelopt_quant_config(root)? {
         if cfg.get("quantization_config").is_none_or(Value::is_null) {
             cfg["quantization_config"] = q;
@@ -116,14 +141,24 @@ pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
         Quantization::Nvfp4 => "nvfp4",
         Quantization::CtPacked { bits: 4, .. } => "int4",
         Quantization::CtPacked { .. } | Quantization::CtInt8 { .. } => "int8",
+        Quantization::Mxfp4 | Quantization::CtMxfp4 => "mxfp4",
+        Quantization::Bnb => "bitsandbytes",
+        Quantization::GptqBits { .. } => "gptq",
+        Quantization::Mlx => "mlx",
     }
     .to_owned();
-    let architecture = if crate::bert::supports(&cfg) {
+    let architecture = if crate::jina_xlmr::supports(&cfg) {
+        "jina-xlmr".to_owned()
+    } else if crate::bert::supports(&cfg) {
         "bert".to_owned()
     } else if crate::modernbert::supports(&cfg) {
         "modernbert".to_owned()
     } else if crate::nomic::supports(&cfg) {
         "nomic-bert".to_owned()
+    } else if crate::gte::supports(&cfg) {
+        "gte-new".to_owned()
+    } else if crate::decoder_enc::supports(root, &cfg) {
+        "decoder-encoder".to_owned()
     } else {
         Plan::from_config(&flatten_text_config(cfg))?.arch
     };
@@ -133,11 +168,14 @@ pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
     })
 }
 
-pub fn convert_checkpoint(
+#[allow(clippy::type_complexity)]
+pub fn prepare_checkpoint(
     input: &Path,
-    output: &Path,
     options: ConvertOptions,
-) -> Result<ConversionReport, CheckpointError> {
+) -> Result<(String, Vec<(String, Meta)>, Vec<OutTensor>, Vec<String>), CheckpointError> {
+    if options.spec_head.is_some() {
+        return Err("draft heads (--spec-head) are written to a file; they cannot be loaded directly".into());
+    }
     let root = if input.is_dir() {
         input
     } else {
@@ -145,25 +183,38 @@ pub fn convert_checkpoint(
             .parent()
             .ok_or("checkpoint file has no parent directory")?
     };
-    let cfg_path = root.join("config.json");
-    let mut cfg: Value =
-        serde_json::from_slice(&fs::read(&cfg_path).map_err(|e| format!("read config.json: {e}"))?)
-            .map_err(|e| format!("invalid config.json: {e}"))?;
+    let mut cfg: Value = crate::mistral_native::read_config(root)?;
     if let Some(q) = modelopt_quant_config(root)? {
         if cfg.get("quantization_config").is_none_or(Value::is_null) {
             cfg["quantization_config"] = q;
         }
     }
+    if crate::jina_xlmr::supports(&cfg) {
+        let (meta, tensors, skipped) = crate::jina_xlmr::prepare(input, options, &cfg)?;
+        return Ok(("bert".into(), meta, tensors, skipped));
+    }
     if crate::bert::supports(&cfg) {
-        return crate::bert::convert(input, output, options, &cfg);
+        let (meta, tensors, skipped) = crate::bert::prepare(input, options, &cfg)?;
+        return Ok(("bert".into(), meta, tensors, skipped));
     }
     if crate::modernbert::supports(&cfg) {
-        return crate::modernbert::convert(input, output, options, &cfg);
+        let (meta, tensors, skipped) = crate::modernbert::prepare(input, options, &cfg)?;
+        return Ok(("bert".into(), meta, tensors, skipped));
     }
     if crate::nomic::supports(&cfg) {
-        return crate::nomic::convert(input, output, options, &cfg);
+        let (meta, tensors, skipped) = crate::nomic::prepare(input, options, &cfg)?;
+        return Ok(("nomic-bert".into(), meta, tensors, skipped));
+    }
+    if crate::gte::supports(&cfg) {
+        let (meta, tensors, skipped) = crate::gte::prepare(input, options, &cfg)?;
+        return Ok(("bert".into(), meta, tensors, skipped));
+    }
+    if crate::decoder_enc::supports(root, &cfg) {
+        let (meta, tensors, skipped) = crate::decoder_enc::prepare(input, options, &cfg)?;
+        return Ok(("bert".into(), meta, tensors, skipped));
     }
     let quant = quantization(&cfg)?;
+    let vision = crate::vision_plan::VisionPlan::from_config(&cfg, root)?;
     let cfg = flatten_text_config(cfg);
     let plan = Plan::from_config(&cfg)?;
     let arch = plan.arch.as_str();
@@ -178,8 +229,19 @@ pub fn convert_checkpoint(
         merged
     } else if matches!(arch, "lfm2" | "lfm2moe") {
         crate::plan::lfm2_config(&cfg)?
+    } else if arch == "gemma3n" {
+        // per-layer feed-forward widths: the shape checks need one number
+        let mut patched = cfg.clone();
+        if let Some(first) = cfg.get("intermediate_size").and_then(Value::as_array).and_then(|a| a.first()).cloned() {
+            patched["intermediate_size"] = first;
+        }
+        patched
     } else if arch == "dbrx" {
         crate::plan::dbrx_config(&cfg)?
+    } else if arch == "zamba2" {
+        crate::zamba2::config(&cfg)?
+    } else if arch == "kimi-linear" {
+        crate::kimi_linear::config(&cfg)?
     } else if matches!(plan.family, Family::Mamba | Family::Nemotron) {
         // no attention or feed-forward sizes: give the shape checks harmless values
         let mut patched = cfg.clone();
@@ -222,6 +284,9 @@ pub fn convert_checkpoint(
         return Err("config dimension vocab_size exceeds GGUF's u32 metadata range".into());
     }
     let mut meta = plan.meta.clone();
+    if let Some(vision) = &vision {
+        meta.extend(vision.meta.iter().cloned());
+    }
     if let Some(q) = cfg.get("quantization_config").filter(|q| !q.is_null()) {
         meta.push((
             "fllm.source.quantization_config".into(),
@@ -234,9 +299,32 @@ pub fn convert_checkpoint(
         .unwrap_or(false);
     let (_real_token_count, tokenmeta) = tokenizer(root, vocab, &cfg)?;
     meta.extend(tokenmeta);
+    let native_layout = crate::mistral_native::is_native(root);
+    let rowperm = |name: &str| -> Result<Option<Vec<usize>>, String> {
+        if native_layout {
+            crate::mistral_native::native_row_permutation(arch, name, heads, kv_heads, head_dim)
+        } else {
+            row_permutation(arch, name, heads, kv_heads, head_dim)
+        }
+    };
+    meta.extend(sampling_defaults(root));
     let all = safetensors::read_checkpoint(input)?;
+    let all = if native_layout {
+        // Mistral's own layout: Hugging Face names, vision tensors dropped
+        let mut renamed = Vec::with_capacity(all.len());
+        for mut t in all {
+            if let Some(name) = crate::mistral_native::rename(&t.name)? {
+                t.name = name;
+                renamed.push(t);
+            }
+        }
+        renamed
+    } else {
+        all
+    };
+    let scales = crate::hybrid::weight_scales(&cfg)?;
     let fp8_block = fp8_block_size(&cfg);
-    let (dense, packed_groups) = split_packed(all, quant, fp8_block, &|n| {
+    let (dense, packed_groups) = split_packed_cfg(all, quant, fp8_block, cfg.get("quantization").unwrap_or(&Value::Null), &|n| {
         Ok(match plan.map(n)? {
             Mapped::Skip => None,
             Mapped::Tensor { name, .. } => Some(name),
@@ -249,8 +337,20 @@ pub fn convert_checkpoint(
             Mapped::Fused { .. } => None,
         })
     })?;
+    // formats without a compact fLLM type are expanded when written; say what that costs
+    let expanded: u64 = packed_groups.iter().filter(|g| matches!(g.1, PackedData::Dyn(_))).map(|g| g.1.element_count() as u64).sum();
+    if expanded > 0 {
+        let width = if options.output_dtype == OutputDType::F32 { 4.0 } else { 2.0 };
+        eprintln!(
+            "warning: {} weights of this {:?} checkpoint have no compact fLLM type and are written as {} ({:.1} GiB); convert with --outtype q4_k_m (or q8_0, q6_k) to get a small file",
+            expanded,
+            quant,
+            if width == 4.0 { "F32" } else { "F16" },
+            expanded as f64 * width / (1u64 << 30) as f64
+        );
+    }
     let expected = |name: &str| {
-        if plan.family == Family::Classic {
+        if plan.family == Family::Classic || name.starts_with("shared.") {
             return Ok(None);
         }
         // Phi-3 fuses gate and up into one `ffn_up`
@@ -260,10 +360,17 @@ pub fn convert_checkpoint(
         if name.contains(".nextn.") {
             return Ok(None);
         }
+        // layers of Gemma 4 differ in head width and KV heads; the engine checks the shapes against the per-layer metadata
+        if matches!(arch, "laguna" | "mimo_v2") && name.contains(".attn_") {
+            return Ok(None);
+        }
+        if matches!(arch, "gemma4" | "gemma3n") && (name.contains(".attn_") || name.contains(".ffn_") || !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight")) {
+            return Ok(None);
+        }
         // MLA attention has its own projection shapes
         if matches!(
             arch,
-            "deepseek2" | "minicpm3" | "qwen3next" | "g9v3" | "mamba2" | "nemotron_h" | "nemotron_h_moe"
+            "deepseek2" | "minicpm3" | "qwen3next" | "g9v3" | "mamba2" | "nemotron_h" | "nemotron_h_moe" | "kimi-linear"
         ) && name.contains(".attn_")
         {
             return Ok(None);
@@ -276,6 +383,9 @@ pub fn convert_checkpoint(
     let mut experts: std::collections::BTreeMap<String, Vec<(usize, Tensor)>> = Default::default();
     let mut fused: std::collections::BTreeMap<u64, Vec<(String, Tensor)>> = Default::default();
     for mut t in dense {
+        if let Some(scales) = &scales {
+            scales.apply(&mut t)?;
+        }
         if arch == "lfm2moe"
             && t.name.contains(".feed_forward.experts.")
             && (t.name.ends_with("gate_up_proj") || t.name.ends_with("down_proj"))
@@ -328,6 +438,13 @@ pub fn convert_checkpoint(
             }
             // Safetensors [E*F,H] is contiguous [E,F,H]; w2 is transposed by split_chunked.
             t.shape = vec![experts, inter, hidden];
+        }
+        if let Some(name) = vision.as_ref().and_then(|v| v.tensor_name(&t.name)) {
+            if !seen.insert(name.clone()) {
+                return Err(format!("multiple HF tensors map to GGUF name {name}").into());
+            }
+            outs.push(vision_tensor(name, t, options.output_dtype)?);
+            continue;
         }
         let (name, add) = match plan.map(&t.name)? {
             Mapped::Skip => {
@@ -426,7 +543,7 @@ pub fn convert_checkpoint(
             let bytes = (count as u64)
                 .checked_mul(if out_dtype == "F32" { 4 } else { 2 })
                 .ok_or("FP8 output size overflow")?;
-            let source_for_output = row_permutation(arch, &name, heads, kv_heads, head_dim)?;
+            let source_for_output = rowperm(&name)?;
             let dims = t.shape.iter().rev().copied().collect();
             outs.push(OutTensor {
                 name,
@@ -480,7 +597,7 @@ pub fn convert_checkpoint(
                 kv_heads as usize,
                 head_dim as usize,
             ),
-            _ => row_permutation(arch, &name, heads, kv_heads, head_dim)?,
+            _ => rowperm(&name)?,
         };
         let mut dims: Vec<u64> = t.shape.iter().rev().copied().collect();
         if name.ends_with("exp_probs_b.bias") {
@@ -611,6 +728,7 @@ pub fn convert_checkpoint(
             .iter()
             .try_fold(0usize, |n, p| n.checked_add(p.1.element_count()))
             .ok_or("packed expert size overflow")?;
+        let part_rows = dims.first().copied().unwrap_or(1) as usize;
         dims.insert(0, parts.len() as u64);
         let payload = parts[0].3.clone();
         regular.push((
@@ -618,6 +736,7 @@ pub fn convert_checkpoint(
             PackedData::Concat {
                 parts: parts.into_iter().map(|p| p.1).collect(),
                 elements,
+                part_rows,
             },
             dims,
             payload,
@@ -657,13 +776,23 @@ pub fn convert_checkpoint(
             false
         };
         // NVFP4 stays GGUF type 40 when the rows fit 64-value blocks, 8-bit integer codes stay Q8_0
-        let nvfp4 = preserve && packed.nvfp4().is_some_and(|t| t.fits_gguf_blocks());
+        // (stacked experts: every expert must fit, and either all carry an input_scale or none does)
+        let nvfp4 = preserve
+            && packed.nvfp4_parts().is_some_and(|parts| {
+                let with_input = parts.iter().filter(|t| t.input_scale().is_some()).count();
+                parts.iter().all(|t| t.fits_gguf_blocks()) && (with_input == 0 || with_input == parts.len())
+            });
         let q8_0 = preserve && packed.sym_int().is_some_and(|t| t.q8_0_ok());
-        let in_features = dims.get(1).copied().unwrap_or(0) as usize;
-        let rows_out = dims.first().copied().unwrap_or(0) as usize;
+        let mxfp4 = preserve && packed.mxfp4().is_some();
+        let fp8b = preserve && packed.is_fp8b();
+        // (stacked experts have a leading expert dimension: their rows are all rows of all experts)
+        let in_features = dims.last().copied().unwrap_or(0) as usize;
+        let rows_out = dims[..dims.len().saturating_sub(1)].iter().product::<u64>() as usize;
         let out_dtype = match (q4z, q4zp, fp8m, options.output_dtype) {
             _ if nvfp4 => "NVFP4".to_string(),
             _ if q8_0 => "Q8_0".to_string(),
+            _ if mxfp4 => "MXFP4".to_string(),
+            _ if fp8b => "FP8B".to_string(),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
             (None, None, true, _) => "FP8M".to_string(),
@@ -673,6 +802,19 @@ pub fn convert_checkpoint(
         let data_len = match (q4z, q4zp, fp8m) {
             _ if nvfp4 => (rows_out * (in_features / 64 * 36)) as u64,
             _ if q8_0 => (rows_out * (in_features / 32 * 34)) as u64,
+            _ if mxfp4 => (rows_out * (in_features / 32 * 17)) as u64,
+            _ if fp8b => {
+                let num_scales = match &packed {
+                    PackedData::Fp8Block(b) => b.scales().len(),
+                    PackedData::Concat { parts, .. } => parts
+                        .iter()
+                        .filter_map(|p| p.fp8_block())
+                        .map(|b| b.scales().len())
+                        .sum::<usize>(),
+                    _ => 0,
+                };
+                (count + num_scales * 2) as u64
+            }
             (Some(g), _, _) => (count / g * (g / 2 + 3)) as u64,
             (None, Some(g), _) => (count / g * (g / 2 + 3) + in_features * 4) as u64,
             (None, None, true) => (count + rows_out * 2) as u64,
@@ -682,18 +824,19 @@ pub fn convert_checkpoint(
         };
         // the per-tensor factor and the activation scale of an NVFP4 weight travel as F32 scalars `<name>.scale`
         // and `<name>.input_scale` (the llama.cpp names the engine reads)
-        let nvfp4_scalars: Vec<(String, f32)> = match packed.nvfp4().filter(|_| nvfp4) {
-            Some(t) => {
+        // (one value per expert for stacked experts, in expert order; the engine reads the value of the rows it loads)
+        let nvfp4_scalars: Vec<(String, Vec<f32>)> = match packed.nvfp4_parts().filter(|_| nvfp4) {
+            Some(parts) => {
                 let stem = name.strip_suffix(".weight").unwrap_or(&name).to_owned();
-                let mut v = vec![(format!("{stem}.scale"), t.global_scale())];
-                if let Some(i) = t.input_scale() {
-                    v.push((format!("{stem}.input_scale"), i));
+                let mut v = vec![(format!("{stem}.scale"), parts.iter().map(|t| t.global_scale()).collect())];
+                if parts[0].input_scale().is_some() {
+                    v.push((format!("{stem}.input_scale"), parts.iter().map(|t| t.input_scale().unwrap_or(0.0)).collect()));
                 }
                 v
             }
             None => Vec::new(),
         };
-        let source_for_output = row_permutation(arch, &name, heads, kv_heads, head_dim)?;
+        let source_for_output = rowperm(&name)?;
         outs.push(OutTensor {
             name,
             dims: dims.iter().rev().copied().collect(),
@@ -707,21 +850,21 @@ pub fn convert_checkpoint(
             owned: None,
             parts: Vec::new(),
         });
-        for (scalar_name, value) in nvfp4_scalars {
+        for (scalar_name, values) in nvfp4_scalars {
             if !seen.insert(scalar_name.clone()) {
                 return Err(format!("multiple HF tensors map to GGUF name {scalar_name}").into());
             }
             outs.push(OutTensor {
                 name: scalar_name,
-                dims: vec![1],
+                dims: vec![values.len() as u64],
                 source_dtype: "F32".into(),
                 dtype: "F32".into(),
                 data: safetensors::Payload::Owned(std::sync::Arc::new(Vec::new()), 0..0),
                 packed: None,
-                data_len: 4,
+                data_len: 4 * values.len() as u64,
                 source_for_output: None,
                 add: 0.0,
-                owned: Some(value.to_le_bytes().to_vec()),
+                owned: Some(values.iter().flat_map(|v| v.to_le_bytes()).collect()),
                 parts: Vec::new(),
             });
         }
@@ -759,6 +902,12 @@ pub fn convert_checkpoint(
         let mut required = vec!["attn_output.weight"];
         let moe_here = plan.moe && plan.moe_layers[i as usize];
         if plan.family == Family::Classic {
+            continue;
+        }
+        if let Some(need) = crate::hybrid::layer_requirements(arch, i, &cfg) {
+            if let Some(missing) = need.iter().find(|n| !byname.contains_key(n.as_str())) {
+                return Err(format!("missing required tensor {missing}").into());
+            }
             continue;
         }
         if plan.family == Family::Nemotron {
@@ -930,6 +1079,9 @@ pub fn convert_checkpoint(
             } else {
                 required.push("attn_q.weight");
             }
+        } else if matches!(arch, "gemma4" | "gemma3n") {
+            // keys and values are absent in layers that share a cache, values in layers with K = V
+            required.push("attn_q.weight");
         } else if arch == "k2_horizon" && moe_here && plan.meta.iter().any(|(k, _)| k.ends_with(".attention.value_expert_count")) {
             required.extend(["attn_q.weight", "attn_k.weight", "attn_v_exps.weight", "attn_v_gate.weight"]);
         } else {
@@ -1000,6 +1152,18 @@ pub fn convert_checkpoint(
             }
         }
     }
+    Ok((arch.into(), meta, outs, skipped))
+}
+
+pub fn convert_checkpoint(
+    input: &Path,
+    output: &Path,
+    options: ConvertOptions,
+) -> Result<ConversionReport, CheckpointError> {
+    if let Some(spec_head) = options.spec_head {
+        return convert_spec_head(input, output, options, spec_head);
+    }
+    let (arch, meta, outs, skipped) = prepare_checkpoint(input, options)?;
     if output.exists() && !options.overwrite {
         return Err(format!("output already exists: {}", output.display()).into());
     }
@@ -1023,11 +1187,223 @@ pub fn convert_checkpoint(
         }
     };
     Ok(ConversionReport {
-        architecture: arch.into(),
+        architecture: arch,
         tensors_written: outs.len(),
         bytes_written: size,
         skipped_tensors: skipped,
         output: output.to_path_buf(),
+    })
+}
+
+fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
+    Ok(match dtype {
+        "F32" => 0,
+        "F16" => 1,
+        "Q4_0" => 2,
+        "Q4_1" => 3,
+        "Q5_0" => 6,
+        "Q5_1" => 7,
+        "Q8_0" => 8,
+        "Q8_1" => 9,
+        "Q2_K" => 10,
+        "Q3_K" => 11,
+        "Q4_K" => 12,
+        "Q5_K" => 13,
+        "Q6_K" => 14,
+        "Q8_K" => 15,
+        "IQ2_XXS" => 16,
+        "IQ2_XS" => 17,
+        "IQ3_XXS" => 18,
+        "IQ1_S" => 19,
+        "IQ4_NL" => 20,
+        "IQ3_S" => 21,
+        "IQ2_S" => 22,
+        "IQ4_XS" => 23,
+        "I8" => 24,
+        "I16" => 25,
+        "I32" => 26,
+        "I64" => 27,
+        "F64" => 28,
+        "IQ1_M" => 29,
+        "BF16" => 30,
+        "MXFP4" => 39,
+        "NVFP4" => 40,
+        "Q4Z32" => 0x8000_0010,
+        "Q4Z64" => 0x8000_0011,
+        "Q4Z128" => 0x8000_0012,
+        "Q4ZP32" => 0x8000_0014,
+        "Q4ZP64" => 0x8000_0015,
+        "Q4ZP128" => 0x8000_0016,
+        "FP8M" | "F8M" => 0x8000_0020,
+        "FP8B" => 0x8000_0021,
+        _ => return Err(CheckpointError::Invalid(format!("unsupported GGUF tensor dtype {dtype}"))),
+    })
+}
+
+fn is_untouched(t: &OutTensor) -> bool {
+    match &t.data {
+        safetensors::Payload::Mapped(_, range) => {
+            t.packed.is_none()
+                && t.owned.is_none()
+                && t.parts.is_empty()
+                && t.source_for_output.is_none()
+                && t.source_dtype == t.dtype
+                && t.add == 0.0
+                && (range.end - range.start) as u64 == t.data_len
+        }
+        _ => false,
+    }
+}
+
+pub fn materialize_mapped_gguf(
+    meta: &[(String, Meta)],
+    tensors: &[OutTensor],
+) -> Result<MappedGguf, CheckpointError> {
+    let mut index_metadata = serde_json::Map::new();
+    index_metadata.insert("GGUF.version".into(), Value::from(3u32));
+    index_metadata.insert("GGUF.tensor_count".into(), Value::from(tensors.len() as u64));
+    index_metadata.insert("GGUF.kv_count".into(), Value::from(meta.len() as u64));
+    index_metadata.insert("general.alignment".into(), Value::from(32u32));
+    for (k, v) in meta {
+        let val = match v {
+            Meta::U32(x) => Value::from(*x),
+            Meta::F32(x) => serde_json::Number::from_f64(*x as f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            Meta::Bool(x) => Value::Bool(*x),
+            Meta::Str(x) => Value::String(x.clone()),
+            Meta::Strs(xs) => Value::Array(xs.iter().map(|s| Value::String(s.clone())).collect()),
+            Meta::U32s(xs) => Value::Array(xs.iter().map(|&x| Value::from(x)).collect()),
+            Meta::F32s(xs) => Value::Array(
+                xs.iter()
+                    .filter_map(|&x| serde_json::Number::from_f64(x as f64).map(Value::Number))
+                    .collect(),
+            ),
+            Meta::Bools(xs) => Value::Array(xs.iter().map(|&b| Value::Bool(b)).collect()),
+        };
+        index_metadata.insert(k.clone(), val);
+    }
+
+    let mut total_anon_size: usize = 0;
+    for t in tensors {
+        if !is_untouched(t) {
+            let len = usize::try_from(t.data_len)
+                .map_err(|_| CheckpointError::Invalid("tensor length overflow".into()))?;
+            total_anon_size = (total_anon_size + 31) & !31;
+            total_anon_size = total_anon_size
+                .checked_add(len)
+                .ok_or_else(|| CheckpointError::Invalid("anon mmap size overflow".into()))?;
+        }
+    }
+
+    let mut modified_offsets = HashMap::new();
+    let anon_ro = if total_anon_size > 0 {
+        let mut anon_mmap = memmap2::MmapOptions::new()
+            .len(total_anon_size)
+            .map_anon()?;
+        let mut cursor = 0usize;
+        for t in tensors {
+            if !is_untouched(t) {
+                cursor = (cursor + 31) & !31;
+                let start = cursor;
+                let len = usize::try_from(t.data_len)
+                    .map_err(|_| CheckpointError::Invalid("tensor length overflow".into()))?;
+                let end = start + len;
+                let mut slice = std::io::Cursor::new(&mut anon_mmap[start..end]);
+                let written = gguf::write_tensor(&mut slice, t)?;
+                if written != t.data_len {
+                    return Err(CheckpointError::Invalid(format!(
+                        "tensor {} wrote {written} bytes, expected {}",
+                        t.name, t.data_len
+                    )));
+                }
+                modified_offsets.insert(t.name.clone(), start as u64);
+                cursor = end;
+            }
+        }
+        Some(std::sync::Arc::new(anon_mmap.make_read_only()?))
+    } else {
+        None
+    };
+
+    let mut extra_mappings = HashMap::new();
+    let mut result_tensors = Vec::with_capacity(tensors.len());
+
+    for t in tensors {
+        let type_id = gguf_type_id(&t.dtype)?;
+        let dimensions = t.dims.clone();
+
+        let (mapping, data_offset) = if is_untouched(t) {
+            match &t.data {
+                safetensors::Payload::Mapped(arc_mmap, range) => {
+                    (std::sync::Arc::clone(arc_mmap), range.start as u64)
+                }
+                _ => unreachable!(),
+            }
+        } else {
+            let offset = *modified_offsets
+                .get(&t.name)
+                .ok_or_else(|| CheckpointError::Invalid(format!("missing offset for {}", t.name)))?;
+            let ro = anon_ro
+                .as_ref()
+                .ok_or_else(|| CheckpointError::Invalid("missing anon mmap".into()))?;
+            (std::sync::Arc::clone(ro), offset)
+        };
+
+        extra_mappings.insert(t.name.clone(), mapping);
+        result_tensors.push(TensorInfo {
+            name: t.name.clone(),
+            dimensions,
+            type_id,
+            data_offset,
+            payload_len: t.data_len,
+        });
+    }
+
+    let index = GgufIndex {
+        version: 3,
+        metadata: index_metadata,
+        tensors: result_tensors,
+        data_offset: 0,
+        file_len: 0,
+    };
+
+    MappedGguf::from_index_and_mappings(index, extra_mappings)
+        .map_err(CheckpointError::Io)
+}
+
+pub fn load_checkpoint_as_gguf(
+    input: &Path,
+    options: ConvertOptions,
+) -> Result<MappedGguf, CheckpointError> {
+    let (_arch, meta, outs, _skipped) = prepare_checkpoint(input, options)?;
+    materialize_mapped_gguf(&meta, &outs)
+}
+/// A vision tower tensor: kept in its source layout (rank above two flattened to `[out, rest]`), converted only in dtype.
+fn vision_tensor(name: String, t: Tensor, requested: OutputDType) -> Result<OutTensor, CheckpointError> {
+    if !matches!(t.dtype.as_str(), "F32" | "F16" | "BF16") {
+        return Err(format!("vision tensor {} has unsupported dtype {}", t.name, t.dtype).into());
+    }
+    let dtype = output_dtype(&t.dtype, requested)?;
+    let count = element_count(&t.shape, &t.name)?;
+    let dims: Vec<u64> = if t.shape.len() > 2 {
+        vec![t.shape[1..].iter().product(), t.shape[0]]
+    } else {
+        t.shape.iter().rev().copied().collect()
+    };
+    let width = if dtype == "F32" { 4 } else { 2 };
+    Ok(OutTensor {
+        name,
+        dims,
+        source_dtype: t.dtype,
+        dtype,
+        data: t.payload,
+        packed: None,
+        data_len: count * width,
+        source_for_output: None,
+        add: 0.0,
+        owned: None,
+        parts: Vec::new(),
     })
 }
 fn temp_path(out: &Path) -> PathBuf {
@@ -1081,6 +1457,16 @@ pub(crate) enum Quantization {
     CtPacked { bits: u64, group: u64 },
     /// `compressed-tensors` `int-quantized` int8, symmetric; `group` as above.
     CtInt8 { group: u64 },
+    /// Hugging Face `mxfp4` (gpt-oss): expert weights as `_blocks`/`_scales`, rebuilt by `gptoss.rs`; other tensors dense.
+    Mxfp4,
+    /// `compressed-tensors` `mxfp4-pack-quantized`: OCP MXFP4 linear weights.
+    CtMxfp4,
+    /// bitsandbytes 4-bit (NF4/FP4, optionally double-quantized) or 8-bit (LLM.int8) weights.
+    Bnb,
+    /// GPTQ with 2, 3 or 8 bits, a whole-column group (`group == 0`) or `gptq_v2` zero points; expanded to F16.
+    GptqBits { bits: u64, group: u64, v2: bool },
+    /// MLX affine quantization (`quantization: {bits, group_size}` in config.json); expanded to F16.
+    Mlx,
 }
 
 /// `hf_quant_config.json` of ModelOpt exports as a `quantization_config` object (`quant_method: modelopt`).
@@ -1143,7 +1529,7 @@ fn ct_weights(q: &Value) -> Result<Option<&Value>, String> {
 }
 
 fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
-    const HINT: &str = "supported compressed-tensors checkpoints: FP8 (float-quantized), symmetric int4/int8 weights (pack-quantized) and symmetric int8 (int-quantized); convert other formats to GGUF with llama.cpp or pick another repository";
+    const HINT: &str = "supported compressed-tensors checkpoints: FP8 (float-quantized), NVFP4 and MXFP4 (nvfp4-pack-quantized, mxfp4-pack-quantized), symmetric int4/int8 weights (pack-quantized) and symmetric int8 (int-quantized); convert other formats to GGUF with llama.cpp or pick another repository";
     let format = q.get("format").and_then(Value::as_str).unwrap_or("");
     if q.get("sparsity_config")
         .and_then(|s| s.get("format"))
@@ -1163,10 +1549,14 @@ fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
     let bits = w.get("num_bits").and_then(Value::as_u64).unwrap_or(0);
     let kind = w.get("type").and_then(Value::as_str).unwrap_or("int");
     let strategy = w.get("strategy").and_then(Value::as_str).unwrap_or("tensor");
+    if format.contains("mxfp4") || (kind == "float" && bits == 4 && w.get("group_size").and_then(Value::as_u64) == Some(32)) {
+        return Ok(Quantization::CtMxfp4);
+    }
     if format.contains("nvfp4") || (kind == "float" && bits == 4) {
-        return Err(format!(
-            "compressed-tensors NVFP4 (format {format:?}) is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint (quant_algo NVFP4) or a GGUF; {HINT}"
-        ));
+        if w.get("group_size").and_then(Value::as_u64).is_some_and(|g| g != 16) {
+            return Err(format!("compressed-tensors FP4 with group_size {:?} is not supported (NVFP4 uses 16, MXFP4 32); {HINT}", w.get("group_size")));
+        }
+        return Ok(Quantization::Nvfp4);
     }
     if kind == "float" {
         if bits == 8 {
@@ -1201,6 +1591,17 @@ fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
     }
 }
 fn quantization(cfg: &Value) -> Result<Quantization, String> {
+    // mlx-lm writes `"quantization": {"group_size": 64, "bits": 4}` (and the same dict as `quantization_config`)
+    let mlx = cfg
+        .get("quantization")
+        .filter(|q| q.get("bits").is_some() && q.get("group_size").is_some())
+        .or_else(|| cfg.get("quantization_config").filter(|q| q.get("quant_method").is_none() && q.get("bits").is_some() && q.get("group_size").is_some()));
+    if let Some(q) = mlx {
+        return match q.get("mode").and_then(Value::as_str).unwrap_or("affine") {
+            "affine" => Ok(Quantization::Mlx),
+            other => Err(format!("MLX quantization mode {other:?} is not supported (only affine); convert the original model instead")),
+        };
+    }
     let Some(q) = cfg.get("quantization_config").filter(|v| !v.is_null()) else {
         return Ok(Quantization::Dense);
     };
@@ -1213,21 +1614,31 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
         "exl2" => Ok(Quantization::Exl2),
         "exl3" => Ok(Quantization::Exl3),
         "gptq" => {
-            if q.get("bits").and_then(Value::as_u64) != Some(4) {
-                return Err("only GPTQ 4-bit legacy packing is supported".into());
+            let bits = q.get("bits").and_then(Value::as_u64).unwrap_or(0);
+            if !matches!(bits, 2 | 3 | 4 | 8) {
+                return Err(format!("GPTQ with {bits} bits is not supported (2, 3, 4 and 8 are)"));
             }
-            let group = q
-                .get("group_size")
-                .and_then(Value::as_u64)
-                .filter(|&x| x > 0)
-                .ok_or("GPTQ requires positive group_size")?;
-            if q.get("checkpoint_format")
-                .and_then(Value::as_str)
-                .is_some_and(|x| !x.eq_ignore_ascii_case("gptq"))
-            {
-                return Err("only GPTQ checkpoint_format is supported".into());
+            // a group size of -1 means one group per output column
+            let group = match q.get("group_size").and_then(Value::as_i64) {
+                Some(-1) => 0,
+                Some(g) if g > 0 => g as u64,
+                _ => return Err("GPTQ requires a positive group_size or -1".into()),
+            };
+            let format = q.get("checkpoint_format").or_else(|| q.get("format")).and_then(Value::as_str).unwrap_or("gptq").to_ascii_lowercase();
+            let v2 = match format.as_str() {
+                "gptq" => false,
+                "gptq_v2" => true,
+                other => {
+                    return Err(format!(
+                        "GPTQ checkpoint_format {other:?} is not supported (gptq and gptq_v2 are); Marlin/BitBLAS/IPEX repacked checkpoints need the original GPTQ files"
+                    ))
+                }
+            };
+            if bits == 4 && !v2 && group > 0 {
+                Ok(Quantization::Gptq { group })
+            } else {
+                Ok(Quantization::GptqBits { bits, group, v2 })
             }
-            Ok(Quantization::Gptq { group })
         }
         "awq" => {
             if q.get("bits").and_then(Value::as_u64) != Some(4) {
@@ -1251,7 +1662,14 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
                 .ok_or("AWQ requires positive group_size")?;
             Ok(Quantization::Awq { group })
         }
-        "fp8" => Ok(Quantization::Fp8),
+        "fp8" | "fbgemm_fp8" => Ok(Quantization::Fp8),
+        "mxfp4" => Ok(Quantization::Mxfp4),
+        "bitsandbytes" | "bnb" => {
+            if q.get("load_in_4bit").and_then(Value::as_bool) != Some(true) && q.get("load_in_8bit").and_then(Value::as_bool) != Some(true) {
+                return Err("bitsandbytes quantization_config declares neither load_in_4bit nor load_in_8bit".into());
+            }
+            Ok(Quantization::Bnb)
+        }
         "compressed-tensors" => compressed_tensors(q),
         "modelopt" => {
             let algo = q
@@ -1273,9 +1691,24 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
                 )),
             }
         }
-        _ => Err(format!(
-            "unsupported quantization_config quant_method {method:?} (supported: gptq, awq, fp8, compressed-tensors, modelopt NVFP4/FP8, exl2, exl3)"
+        other => Err(format!(
+            "unsupported quantization_config quant_method {other:?} (supported: gptq, awq, fp8, fbgemm_fp8, mxfp4, bitsandbytes, compressed-tensors, modelopt NVFP4/FP8, \
+             MLX affine, exl2, exl3); {}",
+            unsupported_hint(other)
         )),
+    }
+}
+
+/// What to do with a quantization method the converter cannot read.
+fn unsupported_hint(method: &str) -> &'static str {
+    match method {
+        "hqq" => "HQQ: dequantize with the hqq library (model.dequantize()) and save as safetensors, or use the original weights",
+        "torchao" => "torchao checkpoints are pickled torch tensor subclasses: load the model with torchao, dequantize, save as safetensors, or use the original weights",
+        "quark" | "quark-fp8" => "AMD Quark: export the model to GPTQ/AWQ/compressed-tensors/ModelOpt format with Quark, or use the original weights",
+        "eetq" | "bitnet" | "aqlm" | "quip#" | "quipsharp" | "spqr" | "vptq" | "higgs" | "fp_quant" | "fine-grained-fp8" | "auto-round" | "autoround" | "gptqmodel" => {
+            "this method has no reader; use the original (unquantized) weights or a GPTQ/AWQ/compressed-tensors/bitsandbytes/MLX export of the model"
+        }
+        _ => "use the original weights or a repository in one of the supported formats",
     }
 }
 fn element_count(shape: &[u64], name: &str) -> Result<u64, String> {
@@ -1380,6 +1813,16 @@ fn matrix_dims(t: &Tensor) -> Result<(usize, usize), String> {
     }
 }
 
+/// A one-element float tensor holding `1 / value` (compressed-tensors `*_global_scale` to ModelOpt `*_scale`).
+fn reciprocal(t: &Tensor) -> Result<Tensor, String> {
+    let value = single_f32(t)?;
+    if !value.is_finite() || value == 0.0 {
+        return Err(format!("{} must be finite and nonzero, found {value}", t.name));
+    }
+    let bytes = (1.0 / value).to_le_bytes().to_vec();
+    Ok(Tensor { name: t.name.clone(), dtype: "F32".into(), shape: vec![1], payload: safetensors::Payload::Owned(std::sync::Arc::new(bytes), 0..4) })
+}
+
 /// ModelOpt NVFP4: `U8` weights with `weight_scale` (E4M3), `weight_scale_2` and `input_scale` per linear.
 fn split_nvfp4(
     all: Vec<Tensor>,
@@ -1391,7 +1834,12 @@ fn split_nvfp4(
     let mut inputs = HashMap::new();
     let mut dense = Vec::new();
     for t in all {
-        if let Some(base) = t.name.strip_suffix(".weight_scale_2") {
+        if let Some(base) = t.name.strip_suffix(".weight_global_scale") {
+            // compressed-tensors stores the reciprocal of ModelOpt's per-tensor factors
+            globals.insert(base.to_owned(), reciprocal(&t)?);
+        } else if let Some(base) = t.name.strip_suffix(".input_global_scale") {
+            inputs.insert(base.to_owned(), reciprocal(&t)?);
+        } else if let Some(base) = t.name.strip_suffix(".weight_scale_2") {
             globals.insert(base.to_owned(), t);
         } else if let Some(base) = t.name.strip_suffix(".weight_scale") {
             scales.insert(base.to_owned(), t);
@@ -1399,7 +1847,7 @@ fn split_nvfp4(
             inputs.insert(base.to_owned(), t);
         } else if t.name.ends_with(".k_scale") || t.name.ends_with(".v_scale") {
             // FP8 KV-cache scales: the engine chooses its own KV format
-        } else if t.name.ends_with(".weight") && t.dtype == "U8" {
+        } else if (t.name.ends_with(".weight") || t.name.ends_with(".weight_packed")) && t.dtype == "U8" {
             weights.push(t);
         } else {
             dense.push(t);
@@ -1407,7 +1855,7 @@ fn split_nvfp4(
     }
     let mut packed = Vec::new();
     for w in weights {
-        let base = w.name.strip_suffix(".weight").unwrap_or(&w.name).to_owned();
+        let base = w.name.strip_suffix(".weight_packed").or_else(|| w.name.strip_suffix(".weight")).unwrap_or(&w.name).to_owned();
         let scale = scales
             .remove(&base)
             .ok_or_else(|| format!("NVFP4 weight {} has no {base}.weight_scale", w.name))?;
@@ -1431,7 +1879,7 @@ fn split_nvfp4(
         let input = inputs.remove(&base).map(|t| single_f32(&t)).transpose()?;
         let t = crate::nvfp4::Nvfp4::new(w.payload.clone(), scale.payload, rows, cols, single_f32(&global)?, input)
             .map_err(|e| format!("{}: {e}", w.name))?;
-        let mapped = map(&w.name)?
+        let mapped = map(&format!("{base}.weight"))?
             .ok_or_else(|| format!("packed tensor {:?} maps to a skipped tensor", w.name))?;
         packed.push((mapped, PackedData::Nvfp4(t), vec![rows as u64, cols as u64], w.payload));
     }
@@ -1538,15 +1986,39 @@ fn split_ct_int(
     Ok((dense, packed))
 }
 
+#[cfg(test)]
 pub(crate) fn split_packed(
     all: Vec<Tensor>,
     quant: Quantization,
     fp8_block: Option<(usize, usize)>,
     map: &dyn Fn(&str) -> Result<Option<String>, String>,
 ) -> Result<PackedSplit, String> {
+    split_packed_cfg(all, quant, fp8_block, &Value::Null, map)
+}
+
+/// [`split_packed`] with the checkpoint's `quantization` config object (MLX reads bits and group sizes from it).
+pub(crate) fn split_packed_cfg(
+    all: Vec<Tensor>,
+    quant: Quantization,
+    fp8_block: Option<(usize, usize)>,
+    mlx_config: &Value,
+    map: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<PackedSplit, String> {
     use std::collections::BTreeMap;
+    if quant == Quantization::Mlx {
+        return crate::dequant_bits::split_mlx(all, mlx_config, map);
+    }
+    if let Quantization::GptqBits { bits, group, v2 } = quant {
+        return crate::dequant_bits::split_gptq_bits(all, bits as usize, group as usize, v2, map);
+    }
     if quant == Quantization::Nvfp4 {
         return split_nvfp4(all, map);
+    }
+    if quant == Quantization::Bnb {
+        return crate::dequant::split_bnb(all, map);
+    }
+    if quant == Quantization::CtMxfp4 {
+        return crate::dequant::split_ct_mxfp4(all, map);
     }
     if matches!(quant, Quantization::CtPacked { .. } | Quantization::CtInt8 { .. }) {
         return split_ct_int(all, quant, map);
@@ -1568,7 +2040,7 @@ pub(crate) fn split_packed(
         let mut fp8_weights = Vec::new();
         let mut dense = Vec::new();
         for t in all {
-            if t.name.ends_with(".input_scale") {
+            if t.name.ends_with(".input_scale") || t.name.ends_with(".input_scale_ub") || t.name.ends_with(".activation_scale") {
                 continue;
             }
             if t.name.ends_with(".weight_scale") {
@@ -1996,10 +2468,27 @@ pub(crate) fn tokenizer(
     model_config: &Value,
 ) -> Result<(usize, Vec<(String, Meta)>), String> {
     let p = dir.join("tokenizer.json");
-    if !p.is_file() {
-        return Err("tokenizer.json is required for tokenizer import".into());
-    }
-    let raw = fs::read(p).map_err(|e| format!("read tokenizer.json: {e}"))?;
+    let mut imported = None;
+    let raw = if p.is_file() {
+        fs::read(p).map_err(|e| format!("read tokenizer.json: {e}"))?
+    } else {
+        let config_tc = {
+            let cfgp = dir.join("tokenizer_config.json");
+            if cfgp.is_file() {
+                serde_json::from_slice::<Value>(&fs::read(cfgp).map_err(|e| format!("read tokenizer_config.json: {e}"))?)
+                    .map_err(|e| format!("invalid tokenizer_config.json: {e}"))?
+            } else {
+                Value::Null
+            }
+        };
+        let found = crate::tokenizer_import::load(dir, model_config, &config_tc)?.ok_or(
+            "no tokenizer found: expected tokenizer.json, tekken.json, a tiktoken rank file (tiktoken.model, qwen.tiktoken, *.tiktoken)              or a SentencePiece model (tokenizer.model, spiece.model, sentencepiece.bpe.model)",
+        )?;
+        eprintln!("tokenizer: converted {}", found.source);
+        let raw = found.json.clone().into_bytes();
+        imported = Some(found);
+        raw
+    };
     let raw_text =
         String::from_utf8(raw.clone()).map_err(|e| format!("tokenizer.json is not UTF-8: {e}"))?;
     let t: Value =
@@ -2074,6 +2563,17 @@ pub(crate) fn tokenizer(
     } else {
         Value::Null
     };
+    if let Some(found) = &imported {
+        // values the tokenizer file itself defines apply where tokenizer_config.json is silent
+        if tc.is_null() {
+            tc = Value::Object(Map::new());
+        }
+        if let Some(dst) = tc.as_object_mut() {
+            for (k, v) in &found.defaults {
+                dst.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
     let smp = dir.join("special_tokens_map.json");
     if smp.is_file() {
         let sm: Value = serde_json::from_slice(
@@ -2164,10 +2664,10 @@ pub(crate) fn tokenizer(
             scores.push(-1.0e9);
         }
     }
-    let ggml_model = if model_type == "Unigram" {
-        "llama"
-    } else {
-        "gpt2"
+    let ggml_model = match &imported {
+        Some(found) => found.ggml_model,
+        None if model_type == "Unigram" => "llama",
+        None => "gpt2",
     };
     let mut meta = vec![
         ("tokenizer.huggingface.json".into(), Meta::Str(raw_text)),
@@ -2233,22 +2733,124 @@ pub(crate) fn tokenizer(
     if let Some(v) = tc.get("add_eos_token").and_then(Value::as_bool) {
         meta.push(("tokenizer.ggml.add_eos_token".into(), Meta::Bool(v)));
     }
-    if let Some(chat) = tc.get("chat_template") {
-        let s = if let Some(s) = chat.as_str() {
-            Some(s)
-        } else {
-            chat.as_array().and_then(|a| {
-                a.iter()
-                    .find(|v| v.get("name").and_then(Value::as_str) == Some("default"))
-                    .and_then(|v| v.get("template"))
-                    .and_then(Value::as_str)
-            })
-        };
-        if let Some(s) = s {
-            meta.push(("tokenizer.chat_template".into(), Meta::Str(s.into())));
+    meta.extend(chat_template_meta(dir, &tc)?);
+    Ok((real_vocab, meta))
+}
+/// Chat templates of a checkpoint as `tokenizer.chat_template` (default) and `tokenizer.chat_template.<name>` (named,
+/// for example `tool_use`), in the precedence `transformers` uses: `chat_template.jinja`, then `chat_template.json`
+/// (`{"chat_template": ...}`), then `tokenizer_config.json` (a string, or a list of `{"name", "template"}`), plus
+/// the named files in `additional_chat_templates/`.
+pub(crate) fn chat_template_meta(dir: &Path, tc: &Value) -> Result<Vec<(String, Meta)>, String> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut add = |name: &str, text: &str| {
+        if !found.iter().any(|(n, _)| n == name) {
+            found.push((name.to_owned(), text.to_owned()));
+        }
+    };
+    let jinja = dir.join("chat_template.jinja");
+    if jinja.is_file() {
+        let text = fs::read_to_string(&jinja).map_err(|e| format!("read chat_template.jinja: {e}"))?;
+        add("default", &text);
+    }
+    let extra = dir.join("additional_chat_templates");
+    if extra.is_dir() {
+        let mut names: Vec<_> = fs::read_dir(&extra)
+            .map_err(|e| format!("read additional_chat_templates: {e}"))?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "jinja"))
+            .collect();
+        names.sort();
+        for p in names {
+            if let Some(name) = p.file_stem().and_then(|s| s.to_str()) {
+                let text = fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
+                add(name, &text);
+            }
         }
     }
-    Ok((real_vocab, meta))
+    let mut add_value = |value: Option<&Value>| match value {
+        Some(Value::String(s)) => add("default", s),
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let (Some(name), Some(text)) = (
+                    item.get("name").and_then(Value::as_str),
+                    item.get("template").and_then(Value::as_str),
+                ) {
+                    add(name, text);
+                }
+            }
+        }
+        Some(Value::Object(map)) => {
+            for (name, text) in map {
+                if let Some(text) = text.as_str() {
+                    add(name, text);
+                }
+            }
+        }
+        _ => {}
+    };
+    let json_path = dir.join("chat_template.json");
+    if json_path.is_file() {
+        let v: Value = serde_json::from_slice(
+            &fs::read(&json_path).map_err(|e| format!("read chat_template.json: {e}"))?,
+        )
+        .map_err(|e| format!("invalid chat_template.json: {e}"))?;
+        add_value(v.get("chat_template"));
+    }
+    add_value(tc.get("chat_template"));
+    let mut out = Vec::new();
+    for (name, text) in found {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let key = if name == "default" {
+            "tokenizer.chat_template".to_owned()
+        } else if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            format!("tokenizer.chat_template.{name}")
+        } else {
+            eprintln!("warning: ignoring chat template with unsupported name {name:?}");
+            continue;
+        };
+        out.push((key, Meta::Str(text)));
+    }
+    Ok(out)
+}
+/// The sampling defaults of a Hugging Face checkpoint (`generation_config.json`) as `general.sampling.*` metadata,
+/// the key family GGUF files use for sampling defaults. The server applies them to requests that leave the parameter out
+/// (`--generation-config`). A missing or unreadable file, and values a sampler cannot use, add nothing.
+pub(crate) fn sampling_defaults(dir: &Path) -> Vec<(String, Meta)> {
+    let Some(config) = fs::read(dir.join("generation_config.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+    else {
+        return Vec::new();
+    };
+    let number = |key: &str, min: f64, max: f64| {
+        config
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v >= min && *v <= max)
+            .map(|v| v as f32)
+    };
+    let mut meta = Vec::new();
+    for (key, name, min, max) in [
+        ("temperature", "temp", 0.0, 100.0),
+        ("top_p", "top_p", 0.0, 1.0),
+        ("min_p", "min_p", 0.0, 1.0),
+        ("repetition_penalty", "penalty_repeat", 0.0001, 100.0),
+    ] {
+        if let Some(v) = number(key, min, max) {
+            meta.push((format!("general.sampling.{name}"), Meta::F32(v)));
+        }
+    }
+    if let Some(k) = config
+        .get("top_k")
+        .and_then(Value::as_u64)
+        .and_then(|k| u32::try_from(k).ok())
+    {
+        meta.push(("general.sampling.top_k".into(), Meta::U32(k)));
+    }
+    meta
 }
 fn json_id(v: &Value) -> Option<u64> {
     if let Some(x) = v.as_u64() {
@@ -2257,6 +2859,229 @@ fn json_id(v: &Value) -> Option<u64> {
         a.first().and_then(Value::as_u64)
     } else {
         v.get("id").and_then(Value::as_u64)
+    }
+}
+
+
+fn pack_spec_out_tensor(t: &safetensors::Tensor, name: String, target_dtype: OutputDType) -> Result<OutTensor, CheckpointError> {
+    let dtype = match target_dtype {
+        OutputDType::Preserve => {
+            if t.dtype == "BF16" { "BF16".to_string() }
+            else if t.dtype == "F32" { "F32".to_string() }
+            else { "F16".to_string() }
+        }
+        OutputDType::F32 => "F32".to_string(),
+        OutputDType::F16 => "F16".to_string(),
+    };
+    if dtype == t.dtype {
+        Ok(OutTensor {
+            name,
+            dims: t.shape.clone(),
+            source_dtype: t.dtype.clone(),
+            dtype,
+            data: t.payload.clone(),
+            packed: None,
+            data_len: t.payload.as_slice().len() as u64,
+            source_for_output: None,
+            add: 0.0,
+            owned: None,
+            parts: Vec::new(),
+        })
+    } else {
+        let num_elements = t.shape.iter().product::<u64>() as usize;
+        let mut bytes = Vec::with_capacity(num_elements * if dtype == "F32" { 4 } else { 2 });
+        let src_bytes = t.payload.as_slice();
+        let src_elem_size = match t.dtype.as_str() {
+            "F32" => 4,
+            "F16" | "BF16" => 2,
+            _ => 2,
+        };
+        for i in 0..num_elements {
+            let at = i * src_elem_size;
+            if at + src_elem_size <= src_bytes.len() {
+                let v = crate::gguf::to_f32(&t.dtype, &src_bytes[at..at + src_elem_size])
+                    .map_err(|e| CheckpointError::Invalid(e.to_string()))?;
+                crate::gguf::append_converted(&mut bytes, &dtype, v)
+                    .map_err(|e| CheckpointError::Invalid(e.to_string()))?;
+            }
+        }
+        let data_len = bytes.len() as u64;
+        Ok(OutTensor {
+            name,
+            dims: t.shape.clone(),
+            source_dtype: t.dtype.clone(),
+            dtype,
+            data: safetensors::Payload::Owned(std::sync::Arc::new(Vec::new()), 0..0),
+            packed: None,
+            data_len,
+            source_for_output: None,
+            add: 0.0,
+            owned: Some(bytes),
+            parts: Vec::new(),
+        })
+    }
+}
+
+fn convert_spec_head(
+    input: &Path,
+    output: &Path,
+    options: ConvertOptions,
+    kind: SpecHeadKind,
+) -> Result<ConversionReport, CheckpointError> {
+    if output.exists() && !options.overwrite {
+        return Err(format!("output already exists: {}", output.display()).into());
+    }
+    let root = if input.is_dir() {
+        input
+    } else {
+        input
+            .parent()
+            .ok_or("checkpoint file has no parent directory")?
+    };
+    let cfg_path = root.join("config.json");
+    let cfg: Value = if cfg_path.is_file() {
+        serde_json::from_slice(&fs::read(&cfg_path).map_err(|e| format!("read config.json: {e}"))?)
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+
+    let all = safetensors::read_checkpoint(input)?;
+    let mut meta: Vec<(String, Meta)> = Vec::new();
+    meta.push(("general.architecture".to_string(), Meta::Str("spec_head".to_string())));
+    meta.push(("spec_head.kind".to_string(), Meta::Str(kind.name().to_string())));
+
+    let mut outs = Vec::new();
+    let mut skipped = Vec::new();
+
+    match kind {
+        SpecHeadKind::Medusa => {
+            let num_heads_cfg = cfg.get("medusa_num_heads")
+                .or_else(|| cfg.get("num_heads"))
+                .and_then(Value::as_u64);
+            let mut detected_heads = 0usize;
+            for t in &all {
+                if t.name.contains("medusa") {
+                    let out_name = if t.name.starts_with("medusa_heads.") || t.name.starts_with("medusa_head.") {
+                        format!("spec_head.{}", t.name)
+                    } else {
+                        format!("spec_head.medusa.{}", t.name)
+                    };
+                    for part in t.name.split('.') {
+                        if let Ok(idx) = part.parse::<usize>() {
+                            detected_heads = detected_heads.max(idx + 1);
+                            break;
+                        }
+                    }
+                    let out_t = pack_spec_out_tensor(t, out_name, options.output_dtype)?;
+                    outs.push(out_t);
+                } else {
+                    skipped.push(t.name.clone());
+                }
+            }
+            let num_heads = num_heads_cfg.unwrap_or(detected_heads as u64).max(1);
+            meta.push(("spec_head.num_heads".to_string(), Meta::U32(num_heads as u32)));
+        }
+        SpecHeadKind::Eagle | SpecHeadKind::Eagle3 => {
+            let hidden_cfg = cfg.get("hidden_size").and_then(Value::as_u64);
+            let mut detected_hidden = 0u64;
+            for t in &all {
+                let name = &t.name;
+                let mapped_name = if name.contains("fc.") {
+                    if let Some(&dim) = t.shape.first() {
+                        detected_hidden = detected_hidden.max(dim);
+                    }
+                    Some(format!("spec_head.fc.{}", name.rsplit('.').next().unwrap_or("weight")))
+                } else if name.contains("layers.") || name.contains("model.layers.") {
+                    let suffix = if let Some(pos) = name.find("layers.") {
+                        &name[pos..]
+                    } else {
+                        name.as_str()
+                    };
+                    Some(format!("spec_head.{}", suffix))
+                } else if name.contains("lm_head") || name.contains("head.") {
+                    Some("spec_head.head.weight".to_string())
+                } else {
+                    None
+                };
+                if let Some(out_name) = mapped_name {
+                    let out_t = pack_spec_out_tensor(t, out_name, options.output_dtype)?;
+                    outs.push(out_t);
+                } else {
+                    skipped.push(t.name.clone());
+                }
+            }
+            let hidden = hidden_cfg.unwrap_or(detected_hidden);
+            if hidden > 0 {
+                meta.push(("spec_head.hidden_size".to_string(), Meta::U32(hidden as u32)));
+            }
+            meta.push(("spec_head.num_layers".to_string(), Meta::U32(1u32)));
+            if kind == SpecHeadKind::Eagle3 {
+                if let Some(layers) = cfg.get("eagle_layers").or_else(|| cfg.get("feature_layers")).and_then(Value::as_array) {
+                    let layer_indices: Vec<u32> = layers.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect();
+                    meta.push(("spec_head.feature_layers".to_string(), Meta::U32s(layer_indices)));
+                }
+            }
+        }
+    }
+
+    if outs.is_empty() {
+        return Err(CheckpointError::Invalid(format!("no tensors matched for spec-head kind {}", kind.name())));
+    }
+
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = temp_path(output);
+    let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = (|| -> std::io::Result<u64> {
+        let size = gguf::write_to(&mut f, &meta, &outs)?;
+        f.sync_all()?;
+        drop(f);
+        commit_output(&tmp, output, options.overwrite)?;
+        Ok(size)
+    })();
+    let bytes_written = match result {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    };
+
+    Ok(ConversionReport {
+        architecture: format!("spec_head_{}", kind.name()),
+        tensors_written: outs.len(),
+        bytes_written,
+        skipped_tensors: skipped,
+        output: output.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod sampling_defaults_tests {
+    use super::{sampling_defaults, Meta};
+
+    #[test]
+    fn generation_config_becomes_sampling_metadata() {
+        let dir = std::env::temp_dir().join(format!("fllm-sampling-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(sampling_defaults(&dir).is_empty(), "no file, no metadata");
+        std::fs::write(
+            dir.join("generation_config.json"),
+            r#"{"do_sample": true, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "repetition_penalty": 1.1, "min_p": 3.5, "eos_token_id": 2}"#,
+        )
+        .unwrap();
+        let meta = sampling_defaults(&dir);
+        let find = |name: &str| meta.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        assert!(matches!(find("general.sampling.temp"), Some(Meta::F32(v)) if (*v - 0.6).abs() < 1e-6));
+        assert!(matches!(find("general.sampling.top_p"), Some(Meta::F32(v)) if (*v - 0.95).abs() < 1e-6));
+        assert!(matches!(find("general.sampling.top_k"), Some(Meta::U32(20))));
+        assert!(matches!(find("general.sampling.penalty_repeat"), Some(Meta::F32(_))));
+        assert!(find("general.sampling.min_p").is_none(), "min_p above 1 is dropped");
+        std::fs::write(dir.join("generation_config.json"), "not json").unwrap();
+        assert!(sampling_defaults(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -2277,8 +3102,14 @@ mod quantization_config_tests {
         assert_eq!(quantization(&fp8).unwrap(), Quantization::Fp8);
         let bad = json!({"quantization_config": {"quant_method": "modelopt", "quant_algo": "INT8_SQ"}});
         assert!(quantization(&bad).unwrap_err().contains("only NVFP4 and FP8"));
-        let other = json!({"quantization_config": {"quant_method": "bitsandbytes"}});
+        let other = json!({"quantization_config": {"quant_method": "some_new_method"}});
         assert!(quantization(&other).unwrap_err().contains("supported: gptq, awq"));
+        let bnb_flags = json!({"quantization_config": {"quant_method": "bitsandbytes"}});
+        assert!(quantization(&bnb_flags).unwrap_err().contains("neither load_in_4bit nor load_in_8bit"));
+        let bnb = json!({"quantization_config": {"quant_method": "bitsandbytes", "load_in_4bit": true, "bnb_4bit_quant_type": "nf4"}});
+        assert_eq!(quantization(&bnb).unwrap(), Quantization::Bnb);
+        let oss = json!({"quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": ["self_attn"]}});
+        assert_eq!(quantization(&oss).unwrap(), Quantization::Mxfp4);
         assert_eq!(quantization(&json!({})).unwrap(), Quantization::Dense);
     }
 
@@ -2295,8 +3126,11 @@ mod quantization_config_tests {
         let order = ct(json!({"num_bits": 4, "type": "int", "symmetric": true, "strategy": "group", "group_size": 32, "actorder": "group"}), "pack-quantized");
         assert!(compressed_tensors(&order).unwrap_err().contains("actorder"));
         let fp4 = ct(json!({"num_bits": 4, "type": "float", "strategy": "tensor_group", "group_size": 16}), "nvfp4-pack-quantized");
-        let err = compressed_tensors(&fp4).unwrap_err();
-        assert!(err.contains("compressed-tensors NVFP4") && err.contains("ModelOpt"), "{err}");
+        assert_eq!(compressed_tensors(&fp4).unwrap(), Quantization::Nvfp4);
+        let mx = ct(json!({"num_bits": 4, "type": "float", "strategy": "group", "group_size": 32, "scale_dtype": "torch.uint8"}), "mxfp4-pack-quantized");
+        assert_eq!(compressed_tensors(&mx).unwrap(), Quantization::CtMxfp4);
+        let odd = ct(json!({"num_bits": 4, "type": "float", "strategy": "group", "group_size": 64}), "pack-quantized");
+        assert!(compressed_tensors(&odd).unwrap_err().contains("group_size"));
         let mixed = json!({"quant_method": "compressed-tensors", "config_groups": {
             "a": {"weights": {"num_bits": 4, "type": "int", "strategy": "group", "group_size": 32}},
             "b": {"weights": {"num_bits": 8, "type": "int", "strategy": "channel"}}}});
@@ -2330,5 +3164,53 @@ mod quantization_config_tests {
         write(json!({"model_type": "not_a_model"}));
         assert!(check_config(&dir).unwrap_err().to_string().contains("unsupported model_type"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod chat_template_meta_tests {
+    use super::{chat_template_meta, Meta};
+    use serde_json::json;
+    use std::fs;
+
+    fn text(meta: &[(String, Meta)], key: &str) -> Option<String> {
+        meta.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            Meta::Str(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn jinja_file_wins_over_config_and_named_templates_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("chat_template.jinja"), "FROM-FILE").unwrap();
+        let tc = json!({"chat_template": [
+            {"name": "default", "template": "FROM-CONFIG"},
+            {"name": "tool_use", "template": "TOOLS"},
+            {"name": "bad name", "template": "X"}]});
+        let meta = chat_template_meta(dir.path(), &tc).unwrap();
+        assert_eq!(text(&meta, "tokenizer.chat_template").as_deref(), Some("FROM-FILE"));
+        assert_eq!(text(&meta, "tokenizer.chat_template.tool_use").as_deref(), Some("TOOLS"));
+        assert_eq!(meta.len(), 2);
+    }
+
+    #[test]
+    fn json_file_and_additional_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("chat_template.json"), r#"{"chat_template": "FROM-JSON"}"#).unwrap();
+        fs::create_dir(dir.path().join("additional_chat_templates")).unwrap();
+        fs::write(dir.path().join("additional_chat_templates").join("rag.jinja"), "RAG").unwrap();
+        let meta = chat_template_meta(dir.path(), &json!({"chat_template": "FROM-CONFIG"})).unwrap();
+        assert_eq!(text(&meta, "tokenizer.chat_template").as_deref(), Some("FROM-JSON"));
+        assert_eq!(text(&meta, "tokenizer.chat_template.rag").as_deref(), Some("RAG"));
+    }
+
+    #[test]
+    fn config_string_and_empty_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = chat_template_meta(dir.path(), &json!({"chat_template": "ONLY"})).unwrap();
+        assert_eq!(text(&meta, "tokenizer.chat_template").as_deref(), Some("ONLY"));
+        assert!(chat_template_meta(dir.path(), &json!({"chat_template": "  \n"})).unwrap().is_empty());
+        assert!(chat_template_meta(dir.path(), &json!({})).unwrap().is_empty());
     }
 }

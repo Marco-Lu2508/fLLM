@@ -56,15 +56,16 @@ accelerator request is rejected until its LayerNorm, clipping and router normali
 implemented in the accelerator path. Its tiny reference fixture includes the Transformers 5.19
 `attn_config.rope_theta` compatibility workaround. The tiny fixture agrees with Transformers 5.19 (relative logit difference 1.3e-4, no arg-max mismatch).
 
-LFM2 also selects CPU under `auto` and rejects explicit accelerators until ShortConv and its
-per-head Q/K norms are integrated there. The importer applies the reference FFN width adjustment
+Dense LFM2 runs on the CUDA backend (the ShortConv has CUDA kernels; everything else is attention and a dense FFN) and
+selects the GPU under `auto` like other decoders; LFM2-MoE is CPU-only (see below). The importer applies the reference FFN width adjustment
 (including truncation, multiplier and rounding to `block_multiple_of`) and maps the final
 `embedding_norm` to the output RMS norm. ShortConv caches `L_cache - 1` products `B*x` per channel;
 the current token participates in the last convolution tap, and `C` gates the result without
 an additional activation. Sequence restart and position mismatch use the existing recurrent
 state rules. Cached and batched numerical comparisons remain pending.
 
-LFM2-MoE uses the same CPU and state rules, preserves the dense FFN width, and imports the
+LFM2-MoE selects CPU under `auto` and rejects explicit accelerators until its expert routing is integrated there.
+It uses the same recurrent state rules, preserves the dense FFN width, and imports the
 stacked expert gate/up and down matrices.
 Its router normalizes selected sigmoid scores with `sum + 1e-6`, then applies the routing scale;
 the bias affects selection only. Unlike LFM2, the installed LFM2-MoE configuration does not infer
@@ -77,11 +78,11 @@ speculative decoding are switched off for them.
 
 | `model_type` | Layers |
 | --- | --- |
-| `lfm2_moe` | ShortConv/attention with leading dense FFNs, sigmoid top-k routing, selection bias and epsilon normalization; CPU implementation; tiny fixture agrees with transformers 5.19 (2.9e-4) |
-| `lfm2` | gated ShortConv with per-sequence history + Q/K-normalized attention; CPU implementation; tiny fixture agrees with transformers 5.19 (1.8e-4) |
+| `lfm2_moe` | ShortConv/attention with leading dense FFNs, sigmoid top-k routing, selection bias and epsilon normalization; CPU only; tiny fixture agrees with transformers 5.19 (2.9e-4) |
+| `lfm2` | gated ShortConv with per-sequence history + Q/K-normalized attention; CPU and CUDA; tiny fixture agrees with transformers 5.19 (1.8e-4) |
 | `mamba`, `falcon_mamba`, `mamba2` | selective state-space mixers |
 | `qwen3_next`, `qwen3_5`, `qwen3_5_moe` | gated DeltaNet + gated attention (+ MoE) |
-| GGUF `qwen35`, `qwen35moe` (llama.cpp / unsloth files) | same layers; llama.cpp stores each head's query and gate side by side, the value heads of the DeltaNet layers tiled (value head `j` belongs to key head `j % key heads`) and the MoE experts as one `ffn_gate_up_exps` tensor with `[gate; up]` rows per expert. Loaded as such (checked against fLLM's own conversion of Qwen3.5-0.8B: identical text; Qwen3.6-35B-A3B Q4_K_S runs). The DeltaNet recurrence runs on the CPU between device layers. |
+| GGUF `qwen35`, `qwen35moe` (llama.cpp / unsloth files) | same layers; llama.cpp stores each head's query and gate side by side, the value heads of the DeltaNet layers tiled (value head `j` belongs to key head `j % key heads`) and the MoE experts as one `ffn_gate_up_exps` tensor with `[gate; up]` rows per expert. Loaded as such (checked against fLLM's own conversion of Qwen3.5-0.8B: identical text; Qwen3.6-35B-A3B Q4_K_S runs). The DeltaNet recurrence runs on the device with the CUDA backend (`deltanet.cu`); on the other backends it runs on the CPU between device layers. |
 | `olmo_hybrid` | gated DeltaNet with separate projections + attention |
 | `granitemoehybrid`, `bamba`, `nemotron_h` | Mamba-2 + attention (+ MLP / experts). Nemotron-H with `moe_latent_size` (Nemotron 3 Super / Ultra) is supported: router on the hidden state, routed experts on a latent projection (`ffn_latent_down` / `ffn_latent_up`), shared expert on the hidden state. Expert variants are written as GGUF architecture `nemotron_h_moe` like llama.cpp; both names load, per-layer `head_count_kv` / `feed_forward_length` arrays are read, attention has no rope |
 

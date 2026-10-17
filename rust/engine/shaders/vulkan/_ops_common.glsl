@@ -18,6 +18,15 @@ float gelu_tanh(float x) {
     return 0.5 * x * (1.0 + tanh(t));
 }
 // ln(1 + exp(x)), the value itself above 20 (CPU: `if raw > 20 { raw } else { raw.exp().ln_1p() }`)
+// erf as the CPU decoder computes it (`erf` of rust_decoder.rs): Chebyshev fit of erfc (Numerical Recipes), fractional error below 1.2e-7
+float erf_fit(float x) {
+    float t = 1.0 / (1.0 + 0.5 * abs(x));
+    float poly = -1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806
+        + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277))))))));
+    float tau = t * exp(-x * x + poly);
+    return x >= 0.0 ? 1.0 - tau : tau - 1.0;
+}
+float gelu_erf(float x) { return 0.5 * x * (1.0 + erf_fit(x * 0.70710678)); }
 float softplus20(float x) { return x > 20.0 ? x : log(1.0 + exp(x)); }
 
 // binary16 bits of x (round mode of packHalf2x16 is implementation defined: RTE on every driver known to the author)

@@ -64,6 +64,8 @@ pub struct RopeConfig {
     pub base: f32,
     /// Alternative base for sliding-window layers (Gemma3).
     pub local_base: Option<f32>,
+    /// Rotating dimensions of the sliding-window layers when they differ from `dims` (Gemma 4: 256 of 512).
+    pub local_dims: Option<usize>,
     /// Pair `(i, i + dims/2)` (NeoX) instead of `(2i, 2i + 1)`.
     pub neox: bool,
     pub scaling: RopeScaling,
@@ -139,6 +141,8 @@ pub struct MoeConfig {
     pub swiglu_oai: Option<(f32, f32)>,
     /// Nemotron-H latent MoE: the routed experts work on a `latent`-wide projection of the hidden state.
     pub latent: Option<usize>,
+    /// Router logits go through `cap * tanh(logit / cap)` before the gating function (Laguna).
+    pub router_softcap: Option<f32>,
 }
 
 /// Gated DeltaNet layers (Qwen3-Next, Qwen3.5): a recurrent state replaces the KV cache.
@@ -166,6 +170,23 @@ pub struct MambaConfig {
     /// Groups of the gated RMS norm over the inner width (1 = one norm over everything).
     pub norm_groups: usize,
     pub step_min: f32,
+    /// Upper clamp of the time step after the softplus (infinite: none).
+    pub step_max: f32,
+    /// Epsilon of the gated norm when it differs from the model's (Zamba2: 1e-5).
+    pub norm_eps: Option<f32>,
+    /// How the scan output meets the gate branch.
+    pub norm: MambaNorm,
+}
+
+/// Order of the gate and the RMS norm behind a Mamba-2 scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MambaNorm {
+    /// `norm(y * silu(z))` (Mamba-2, Bamba, Nemotron-H).
+    GateThenNorm,
+    /// `y * silu(z)` without a norm (Falcon-H1 with `mamba_rms_norm = false`).
+    NoNorm,
+    /// `norm(y) * silu(z)` (Falcon-H1 with `mamba_norm_before_gate`).
+    NormThenGate,
 }
 
 /// LFM2 gated depthwise convolution, with an independent history for each sequence/layer.
@@ -197,6 +218,23 @@ pub struct MlaConfig {
     /// Rotary part, shared by all heads on the key side.
     pub rope: usize,
     pub value: usize,
+    /// Rotary embeddings on the `rope` part of queries and keys (Kimi-Linear's attention layers use none).
+    pub rotary: bool,
+}
+
+/// Attention geometry of one layer. A model whose layers differ in head count, head width, KV heads or
+/// KV sharing carries one entry per layer in `ModelConfig::layer_geoms`; the scalar fields of
+/// `ModelConfig` then describe the first layer that owns a cache.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerGeom {
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub value_dim: usize,
+    /// The layer reads (and does not write) the cache of this earlier layer.
+    pub kv_source: Option<usize>,
+    /// Feed-forward width of the layer.
+    pub ff: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +293,8 @@ pub struct ModelConfig {
     pub shortconv: Option<ShortConvConfig>,
     /// Layers that skip rotary embeddings (`None`: all rotate).
     pub rope_layers: Option<Vec<bool>>,
+    /// Rotary base of every layer (Granite SWA); `0` marks a layer without rotary embeddings.
+    pub layer_rope_bases: Option<Vec<f32>>,
     /// Query/key norms run after the rotary embedding (Hunyuan).
     pub qk_norm_after_rope: bool,
     /// Queries are scaled by `1 + beta * ln(1 + floor((position + offset) / context))`.
@@ -265,7 +305,37 @@ pub struct ModelConfig {
     /// Layers that rotate attend within aligned chunks of this many positions (Llama 4).
     pub attention_chunk: Option<usize>,
     pub attn_gate: AttnGate,
+    pub gate_per_element: bool,
+    pub num_loops: usize,
     pub value_experts: Option<ValueExperts>,
+    /// Shared transformer blocks (Zamba2), Kimi Delta Attention layers and other hybrid-family settings.
+    pub hybrid: crate::hybrid_config::HybridConfig,
+    /// Per-layer attention geometry (`None`: every layer uses `heads`, `kv_heads`, `head_dim`, `value_dim`, `ff`).
+    pub layer_geoms: Option<Vec<LayerGeom>>,
+    /// Values go through a weightless RMS norm per head (Gemma 4).
+    pub value_norm: bool,
+    /// Values are multiplied by this constant after the projection (MiMo-V2: 0.707).
+    pub value_scale: f32,
+    /// Gemma 4 / Gemma 3n extensions (per-layer embeddings, layer scalars, AltUp ...).
+    pub gemma: Option<GemmaConfig>,
+}
+
+/// Features of the Gemma 4 and Gemma 3n text models beyond the common decoder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GemmaConfig {
+    /// Width of the per-layer embedding / input (0: none).
+    pub ple_dim: usize,
+    /// Each layer's output is multiplied by `blk.N.layer_output_scale.weight` (Gemma 4).
+    pub layer_scalar: bool,
+    /// Gemma 3n: number of parallel residual streams (0: ordinary residual).
+    pub altup_inputs: usize,
+    pub altup_active: usize,
+    pub altup_coef_clip: Option<f32>,
+    pub altup_correct_scale: bool,
+    /// Gemma 3n: rank of the LAuReL low-rank residual (0: none).
+    pub laurel_rank: usize,
+    /// Gemma 3n: fraction of the first feed-forward activations that are zeroed per layer (0: dense).
+    pub sparsity: Vec<f32>,
 }
 
 fn key<'a>(meta: &'a Map<String, Value>, arch: &str, name: &str) -> Option<&'a Value> {
@@ -383,6 +453,7 @@ impl ModelConfig {
             base: float(meta, a, "rope.freq_base").unwrap_or(1_000_000.0),
             // Gemma 3 GGUFs do not store the sliding-window layers' base; llama.cpp hardcodes 10000 for them
             local_base: float(meta, a, "rope.freq_base_swa").or((a == "gemma3").then_some(10_000.0)),
+            local_dims: uint(meta, a, "rope.dimension_count_swa"),
             neox: !matches!(
                 a,
                 "llama"
@@ -479,13 +550,15 @@ impl ModelConfig {
             .max(1);
         let gated_ffn =
             has(mapping, "blk.0.ffn_gate.weight") || has(mapping, "blk.0.ffn_gate_exps.weight") || has(mapping, "blk.0.ffn_gate_up_exps.weight");
-        let mla = if has(mapping, "blk.0.attn_kv_a_mqa.weight") {
+        // hybrids may start with a layer of another kind (Kimi-Linear: KDA), so look for the first layer with latent attention
+        let mla_layer = (0..layers).find(|i| has(mapping, &format!("blk.{i}.attn_kv_a_mqa.weight")));
+        let mla = if let Some(first_mla) = mla_layer {
             let rope = rope_dims;
             let key_width = uint(meta, a, "attention.key_length_mla")
                 .or_else(|| uint(meta, a, "attention.key_length"))
                 .ok_or("MLA model needs attention.key_length")?;
             Some(MlaConfig {
-                q_lora: has(mapping, "blk.0.attn_q_a.weight")
+                q_lora: has(mapping, &format!("blk.{first_mla}.attn_q_a.weight"))
                     .then(|| uint(meta, a, "attention.q_lora_rank"))
                     .flatten(),
                 kv_lora: uint(meta, a, "attention.kv_lora_rank").ok_or("missing kv_lora_rank")?,
@@ -497,6 +570,7 @@ impl ModelConfig {
                 value: uint(meta, a, "attention.value_length_mla")
                     .or_else(|| uint(meta, a, "attention.value_length"))
                     .ok_or("MLA model needs attention.value_length")?,
+                rotary: !key(meta, a, "attention.mla_no_rope").and_then(Value::as_bool).unwrap_or(false),
             })
         } else {
             None
@@ -505,6 +579,24 @@ impl ModelConfig {
             Some(m) => (heads, m.nope + m.rope, m.value),
             None => (kv_heads, head_dim, value_dim),
         };
+        let swa_flag = |l: usize| {
+            sliding_window.is_some()
+                && match &window_flags {
+                    Some(flags) => flags.get(l).copied().unwrap_or(false),
+                    None => window_pattern <= 1 || l % window_pattern < window_pattern - 1,
+                }
+        };
+        let layer_geoms = if mla.is_none() {
+            parse_geometry(meta, a, layers, (heads, kv_heads, head_dim, value_dim, ff), swa_flag)?
+        } else {
+            None
+        };
+        // the scalar fields describe the first layer
+        let (heads, kv_heads, head_dim, value_dim, ff) = match layer_geoms.as_ref().and_then(|g| g.first()) {
+            Some(g) => (g.heads, g.kv_heads, g.head_dim, g.value_dim, g.ff),
+            None => (heads, kv_heads, head_dim, value_dim, ff),
+        };
+        let gemma_cfg = parse_gemma(meta, a, mapping, layers);
         let mut attention_scale = float(meta, a, "attention.scale");
         if mla.is_some() {
             // ggml folds the YaRN magnitude into the softmax scale for DeepSeek models
@@ -540,7 +632,7 @@ impl ModelConfig {
                 "starcoder2" | "gpt2" | "starcoder" | "gpt_neo" | "gptj" | "bloom" | "phi" => {
                     Activation::GeluTanh
                 }
-                "falcon" | "mpt" => Activation::GeluErf,
+                "falcon" | "mpt" | "zamba2" => Activation::GeluErf,
                 "opt" => Activation::Relu,
                 "arcee" | "nemotron" | "nemotron_h" | "nemotron_h_moe" | "jais2" | "nanochat"
                 | "persimmon" => Activation::ReluSquared,
@@ -588,7 +680,7 @@ impl ModelConfig {
             shortconv: parse_shortconv(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
-            mamba1: (a == "mamba")
+            mamba1: matches!(a, "mamba" | "jamba")
                 .then(|| {
                     Some(Mamba1Config {
                         conv_kernel: uint(meta, a, "ssm.conv_kernel")?,
@@ -605,6 +697,10 @@ impl ModelConfig {
                 }
                 _ => None,
             },
+            layer_rope_bases: match key(meta, a, "rope.layer_bases") {
+                Some(Value::Array(values)) if values.len() == layers => values.iter().map(|v| v.as_f64().map(|f| f as f32)).collect(),
+                _ => None,
+            },
             qk_norm_after_rope: key(meta, a, "attention.qk_norm_after_rope")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
@@ -615,9 +711,16 @@ impl ModelConfig {
             attention_chunk: uint(meta, a, "attention.chunk_size"),
             attn_gate: if is_k2(a) {
                 AttnGate::Softplus(std::f32::consts::LN_2)
+            } else if a == "laguna" {
+                AttnGate::Softplus(1.0)
             } else {
                 AttnGate::Sigmoid
             },
+            gate_per_element: key(meta, a, "attention.gate_per_element")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            num_loops: uint(meta, a, "num_loops").unwrap_or(1).max(1),
+            hybrid: crate::hybrid_config::parse(meta, a, layers)?,
             value_experts: uint(meta, a, "attention.value_expert_count")
                 .filter(|&n| n > 0)
                 .map(|count| ValueExperts {
@@ -630,7 +733,54 @@ impl ModelConfig {
                     uint(meta, a, "attention.temperature_context").unwrap_or(8192),
                 )
             }),
+            layer_geoms,
+            value_norm: matches!(a, "gemma4" | "gemma3n"),
+            value_scale: float(meta, a, "attention.value_scale").unwrap_or(1.0),
+            gemma: gemma_cfg,
         })
+    }
+
+    /// Query heads of `layer`.
+    pub fn layer_heads(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.heads, |g| g.heads)
+    }
+
+    /// Key / value heads of `layer` (the geometry of the cache it reads).
+    pub fn layer_kv_heads(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.kv_heads, |g| g.kv_heads)
+    }
+
+    /// Per-head query / key width of `layer`.
+    pub fn layer_head_dim(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.head_dim, |g| g.head_dim)
+    }
+
+    /// Per-head value width of `layer`.
+    pub fn layer_value_dim(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.value_dim, |g| g.value_dim)
+    }
+
+    /// Feed-forward width of `layer`.
+    pub fn layer_ff(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.ff, |g| g.ff)
+    }
+
+    /// The earlier layer whose cache `layer` reads instead of writing its own.
+    pub fn layer_kv_source(&self, layer: usize) -> Option<usize> {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).and_then(|g| g.kv_source)
+    }
+
+    /// Rotating head dimensions of `layer`.
+    pub fn layer_rope_dims(&self, layer: usize) -> usize {
+        match (self.rope.local_dims, self.layer_window(layer)) {
+            (Some(dims), Some(_)) => dims,
+            _ => self.rope.dims,
+        }
+    }
+
+    /// Every layer has the same attention geometry and owns its cache (the original single-geometry layout).
+    pub fn uniform_geometry(&self) -> bool {
+        self.layer_geoms.is_none()
     }
 
     /// Chunked attention applies to the layers that rotate.
@@ -665,6 +815,103 @@ impl ModelConfig {
         (self.window_pattern <= 1 || layer % self.window_pattern < self.window_pattern - 1)
             .then_some(window)
     }
+}
+
+/// One value per layer when the key holds an array of exactly `layers` unsigned integers.
+fn per_layer(meta: &Map<String, Value>, arch: &str, name: &str, layers: usize) -> Option<Vec<usize>> {
+    match key(meta, arch, name)? {
+        Value::Array(values) if values.len() == layers => {
+            values.iter().map(|v| v.as_u64().map(|n| n as usize)).collect()
+        }
+        _ => None,
+    }
+}
+
+/// Per-layer attention geometry.
+///
+/// Keys (llama.cpp names where they exist): `attention.head_count` / `attention.head_count_kv` /
+/// `feed_forward_length` as arrays with one entry per layer; `attention.key_length` and
+/// `attention.value_length` for the global layers and `attention.key_length_swa` /
+/// `attention.value_length_swa` for the sliding-window layers; `attention.shared_kv_layers`: the last n
+/// layers reuse the cache of the last earlier layer of the same kind. Returns `None` when all layers agree.
+fn parse_geometry(
+    meta: &Map<String, Value>,
+    arch: &str,
+    layers: usize,
+    base: (usize, usize, usize, usize, usize),
+    sliding: impl Fn(usize) -> bool,
+) -> Result<Option<Vec<LayerGeom>>, String> {
+    let (heads, kv_heads, head_dim, value_dim, ff) = base;
+    let heads_l = per_layer(meta, arch, "attention.head_count", layers);
+    let kv_l = per_layer(meta, arch, "attention.head_count_kv", layers);
+    let ff_l = per_layer(meta, arch, "feed_forward_length", layers);
+    let key_swa = uint(meta, arch, "attention.key_length_swa");
+    let value_swa = uint(meta, arch, "attention.value_length_swa");
+    let shared = uint(meta, arch, "attention.shared_kv_layers").unwrap_or(0);
+    let differs = |values: &Option<Vec<usize>>| {
+        values.as_ref().is_some_and(|v| v.iter().all(|&n| n > 0) && v.iter().any(|&n| n != v[0]))
+    };
+    let gemma = matches!(arch, "gemma4" | "gemma3n");
+    if !(gemma || key_swa.is_some() || value_swa.is_some() || shared > 0 || differs(&heads_l) || differs(&kv_l) || differs(&ff_l)) {
+        return Ok(None);
+    }
+    if shared >= layers {
+        return Err(format!("{arch}: shared_kv_layers {shared} leaves no layer with its own cache"));
+    }
+    let own = layers - shared;
+    let mut geoms: Vec<LayerGeom> = Vec::with_capacity(layers);
+    for l in 0..layers {
+        let swa = sliding(l);
+        let mut g = LayerGeom {
+            heads: heads_l.as_ref().map_or(heads, |v| v[l]),
+            kv_heads: kv_l.as_ref().map_or(kv_heads, |v| v[l]),
+            head_dim: if swa { key_swa.unwrap_or(head_dim) } else { head_dim },
+            value_dim: if swa { value_swa.or(key_swa).unwrap_or(value_dim) } else { value_dim },
+            kv_source: None,
+            ff: ff_l.as_ref().map_or(ff, |v| v[l]),
+        };
+        if l >= own {
+            let source = (0..own)
+                .rev()
+                .find(|&s| sliding(s) == swa)
+                .ok_or_else(|| format!("{arch}: layer {l} has no earlier layer of its kind to share a cache with"))?;
+            g.kv_heads = geoms[source].kv_heads;
+            g.head_dim = geoms[source].head_dim;
+            g.value_dim = geoms[source].value_dim;
+            g.kv_source = Some(source);
+        }
+        if g.heads == 0 || g.kv_heads == 0 || g.head_dim == 0 || g.value_dim == 0 || !g.heads.is_multiple_of(g.kv_heads) {
+            return Err(format!(
+                "{arch}: layer {l} has invalid attention geometry ({} heads, {} KV heads, key {}, value {})",
+                g.heads, g.kv_heads, g.head_dim, g.value_dim
+            ));
+        }
+        geoms.push(g);
+    }
+    Ok(Some(geoms))
+}
+
+/// Gemma 4 / Gemma 3n extras: `embedding_length_per_layer_input`, `altup.num_inputs`, `altup.active_idx`,
+/// `altup.coef_clip`, `altup.correct_scale`, `laurel_rank`, `activation_sparsity_scale` (per layer).
+fn parse_gemma(meta: &Map<String, Value>, arch: &str, mapping: &MappedGguf, layers: usize) -> Option<GemmaConfig> {
+    if !matches!(arch, "gemma4" | "gemma3n") {
+        return None;
+    }
+    Some(GemmaConfig {
+        ple_dim: uint(meta, arch, "embedding_length_per_layer_input").unwrap_or(0),
+        layer_scalar: has(mapping, "blk.0.layer_output_scale.weight"),
+        altup_inputs: uint(meta, arch, "altup.num_inputs").unwrap_or(0),
+        altup_active: uint(meta, arch, "altup.active_idx").unwrap_or(0),
+        altup_coef_clip: float(meta, arch, "altup.coef_clip"),
+        altup_correct_scale: key(meta, arch, "altup.correct_scale").and_then(Value::as_bool).unwrap_or(true),
+        laurel_rank: uint(meta, arch, "laurel_rank").unwrap_or(0),
+        sparsity: match key(meta, arch, "activation_sparsity_scale") {
+            Some(Value::Array(values)) if values.len() == layers => {
+                values.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()
+            }
+            _ => Vec::new(),
+        },
+    })
 }
 
 pub(crate) fn is_k2(arch: &str) -> bool {
@@ -703,7 +950,7 @@ fn parse_shortconv(
 }
 
 fn parse_mamba(meta: &Map<String, Value>, arch: &str) -> Option<MambaConfig> {
-    if !matches!(arch, "mamba2" | "granitehybrid" | "bamba" | "nemotron_h" | "nemotron_h_moe") {
+    if !matches!(arch, "mamba2" | "granitehybrid" | "bamba" | "nemotron_h" | "nemotron_h_moe" | "falcon-h1" | "zamba2") {
         return None;
     }
     let groups = uint(meta, arch, "ssm.group_count").unwrap_or(1).max(1);
@@ -715,6 +962,13 @@ fn parse_mamba(meta: &Map<String, Value>, arch: &str) -> Option<MambaConfig> {
         groups,
         norm_groups: uint(meta, arch, "ssm.norm_groups").unwrap_or(groups),
         step_min: float(meta, arch, "ssm.time_step_min").unwrap_or(0.0),
+        step_max: float(meta, arch, "ssm.time_step_max").unwrap_or(f32::INFINITY),
+        norm_eps: float(meta, arch, "ssm.norm_eps"),
+        norm: match uint(meta, arch, "ssm.norm_mode") {
+            Some(1) => MambaNorm::NoNorm,
+            Some(2) => MambaNorm::NormThenGate,
+            _ => MambaNorm::GateThenNorm,
+        },
     })
 }
 
@@ -795,6 +1049,7 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
             .and_then(Value::as_bool)
             .unwrap_or(false),
         latent: uint(meta, arch, "moe_latent_size").filter(|&n| n > 0),
+        router_softcap: float(meta, arch, "router_logit_softcapping").filter(|c| *c > 0.0),
         swiglu_oai: match (arch, float(meta, arch, "expert_swiglu_limit")) {
             (_, Some(limit)) => Some((
                 float(meta, arch, "expert_swiglu_alpha").unwrap_or(1.702),
@@ -849,4 +1104,78 @@ fn rope_factors(mapping: &MappedGguf, dims: usize, name: &str) -> Result<Option<
         ));
     }
     Ok(Some(tensor.data))
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// A two-head, one-KV-head, 16-wide dense configuration with every optional feature off.
+    pub(crate) fn minimal() -> ModelConfig {
+        ModelConfig {
+            arch: "llama".into(),
+            hidden: 32,
+            layers: 2,
+            vocab: 16,
+            heads: 2,
+            kv_heads: 1,
+            head_dim: 16,
+            value_dim: 16,
+            ff: 64,
+            eps: 1e-6,
+            post_eps: 1e-6,
+            norm: NormKind::Rms,
+            rope: RopeConfig {
+                dims: 16,
+                base: 10_000.0,
+                local_base: None,
+                local_dims: None,
+                neox: true,
+                scaling: RopeScaling::None,
+                factors: None,
+                flipped: false,
+            },
+            qk_norm: QkNorm::None,
+            activation: Activation::Silu,
+            gated_ffn: true,
+            parallel_residual: false,
+            post_norms: false,
+            attention_scale: None,
+            attention_softcap: None,
+            logit_softcap: None,
+            sliding_window: None,
+            window_pattern: 1,
+            window_flags: None,
+            embedding_scale: 1.0,
+            logit_scale: 1.0,
+            residual_scale: 1.0,
+            tied_embeddings: true,
+            moe: None,
+            embedding_norm: false,
+            position_offset: 0,
+            alibi_slopes: None,
+            qkv_clip: None,
+            mla: None,
+            delta: None,
+            mamba: None,
+            mamba1: None,
+            shortconv: None,
+            rope_layers: None,
+            layer_rope_bases: None,
+            qk_norm_after_rope: false,
+            attn_temperature: None,
+            temperature_offset: 0,
+            temperature_nope_only: false,
+            attention_chunk: None,
+            attn_gate: AttnGate::Sigmoid,
+            gate_per_element: false,
+            num_loops: 1,
+            value_experts: None,
+            layer_geoms: None,
+            value_norm: false,
+            value_scale: 1.0,
+            gemma: None,
+            hybrid: Default::default(),
+        }
+    }
 }

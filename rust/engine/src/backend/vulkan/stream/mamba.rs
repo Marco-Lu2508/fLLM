@@ -11,7 +11,6 @@ use crate::backend::vulkan::ops::recurrent::{plan_mamba2_mixer, Mamba2Shape, Run
 use crate::backend::{BackendError, DeviceBuffer};
 
 /// Device-resident parameters of a Mamba-2 layer (all FP32).
-#[allow(dead_code)]
 pub struct MambaBufs<'a> {
     /// `conv_dim x conv_kernel`
     pub conv: &'a DeviceBuffer,
@@ -29,8 +28,8 @@ impl VulkanStream {
     /// Mamba-2 mixer after the input projection: `projected` (`rows x proj_width`: gate, xBC, dt) of the runs; `out` (`rows x inner`) receives the
     /// gated, normalised scan output (the caller applies the output projection). The layer's state (convolution history, then recurrent state) starts
     /// `state_offset` bytes into each run's state buffer (`runs[i].1`). `mixed` is scratch of `rows x conv_dim` floats.
-    #[allow(dead_code, clippy::too_many_arguments)]
-    pub fn mamba2_layer(
+    #[allow(clippy::too_many_arguments)]
+    pub fn mamba2_mixer(
         &mut self,
         shape: &Mamba2Shape,
         weights: &MambaBufs<'_>,

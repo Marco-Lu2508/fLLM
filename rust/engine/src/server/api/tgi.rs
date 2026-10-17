@@ -184,14 +184,14 @@ fn stream_generation(stream: ChunkStream, prompt: String, params: Parameters) ->
 }
 
 /// Runs a TGI body through `/v1/completions` and rewrites the reply into TGI's shape.
-async fn run(state: Arc<AppState>, headers: HeaderMap, body: &Value, stream: bool) -> Response {
+async fn run(state: Arc<AppState>, body: &Value, stream: bool) -> Response {
     let params = parameters_of(&state, body);
     let prompt = match input_value(body.get("inputs").unwrap_or(&Value::Null)) {
         Ok(prompt) => prompt,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
     let chat = to_completion_body(prompt.clone(), &params, body, stream);
-    let response = completions(State(state), headers, Json(chat)).await;
+    let response = completions(State(state), Json(chat)).await;
     if !response.status().is_success() {
         return convert_error(response).await;
     }
@@ -214,43 +214,30 @@ async fn run(state: Arc<AppState>, headers: HeaderMap, body: &Value, stream: boo
 /// `POST /generate` with a TGI body; also reached through the SGLang dispatch.
 pub(in crate::server) async fn generate(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
-    run(state, headers, &body, false).await
+    run(state, &body, false).await
 }
 
 /// `POST /generate_stream`.
 pub(in crate::server) async fn generate_stream(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
-    run(state, headers, &body, true).await
+    run(state, &body, true).await
 }
 
 /// `GET /info`.
 pub(in crate::server) async fn info(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     Json(json!({
         "model_id": state.model_name,
         "max_input_tokens": state.max_context,
         "max_total_tokens": state.max_context,
         "version": env!("CARGO_PKG_VERSION"),
+        "sha": crate::version::GIT_SHORT,
+        "build": crate::version::long_version(),
     }))
     .into_response()
 }

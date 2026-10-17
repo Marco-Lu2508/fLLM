@@ -1,0 +1,17 @@
+# Python packages for the proof scripts in this directory (tested with Python 3.12).
+#
+#   python3 -m venv .venv && . .venv/bin/activate
+#   pip install --extra-index-url https://download.pytorch.org/whl/cpu -r scripts/requirements.txt
+#
+# The extra index gives the CPU-only torch wheel (about 200 MB instead of several GB with CUDA libraries). On macOS and Windows the
+# default index already has CPU wheels. Versions are the ones the scripts were last run with; newer ones usually work.
+torch==2.14.1
+transformers==5.19.0
+tokenizers==0.23.3
+numpy==2.5.4
+safetensors==0.8.0
+gguf==0.19.0
+requests==2.34.2
+openai==3.31.0
+anthropic==1.14.0
+ollama==0.6.3

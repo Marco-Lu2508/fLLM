@@ -268,8 +268,22 @@ fn all_op_plans() -> Vec<OpPlan> {
         GluMode::Gelu,
         GluMode::Relu2,
         GluMode::Relu,
+        GluMode::GeluErf,
+        GluMode::GeluErfGated,
+        GluMode::ReluGated,
+        GluMode::Relu2Gated,
+        GluMode::Copy,
     ] {
         plans.push(plan_glu(mode, 1000).unwrap());
+    }
+    for softplus in [false, true] {
+        plans.push(crate::backend::vulkan::ops::plan_ewise(softplus, 1000, 0.7).unwrap());
+    }
+    {
+        use crate::backend::vulkan::ops::{plan_mla_move, MlaPart};
+        for part in [MlaPart::Q, MlaPart::K, MlaPart::V, MlaPart::Latent] {
+            plans.push(plan_mla_move(part, 3, 4, 16, 8, 16, 32).unwrap());
+        }
     }
     plans.push(plan_residual_add(1000, 0.5).unwrap());
     plans.push(plan_sigmoid_gate_mul(1000).unwrap());

@@ -1,5 +1,10 @@
 //! A separate, cached draft model proposes tokens; the target verifies every proposal.
-use crate::{mem::block_allocator::BlockManager, sampling::argmax, GgufModel};
+use crate::{
+    mem::block_allocator::BlockManager,
+    sampling::{argmax, philox_uniform, processed_distribution, select_from, SamplingParams},
+    speculative::Dist,
+    GgufModel,
+};
 use std::collections::{HashMap, HashSet};
 
 struct DraftSequence {
@@ -12,6 +17,8 @@ pub struct DraftEngine {
     key: Vec<u16>,
     value: Vec<u16>,
     sequences: HashMap<i64, DraftSequence>,
+    /// Number of uniform draws taken from the draft's own random stream, per target sequence.
+    draws: HashMap<i64, u64>,
     pub tokens: usize,
     decoder: Option<crate::rust_decoder::RustDecoder>,
 }
@@ -31,6 +38,7 @@ impl DraftEngine {
             key: vec![0; key_len],
             value: vec![0; value_len],
             sequences: HashMap::new(),
+            draws: HashMap::new(),
             tokens,
             decoder: None,
         })
@@ -49,23 +57,30 @@ impl DraftEngine {
             .collect();
         for id in expired {
             self.sequences.remove(&id);
+            self.draws.remove(&id);
             self.blocks.drop_table(id).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
+    /// Draft up to `limit` (at most `self.tokens`) tokens. The tokens are drawn from the draft model's distribution after the same
+    /// filters the request applies to the target (`sampling`), and that distribution is returned with each token (`None` for a point
+    /// mass, i.e. a greedy request) so the verification can use the speculative sampling rule.
     pub fn propose(
         &mut self,
         sid: i64,
         history: &[i64],
         remaining: usize,
-    ) -> Result<Vec<i64>, String> {
+        limit: usize,
+        sampling: &SamplingParams,
+    ) -> Result<(Vec<i64>, Vec<Option<Dist>>), String> {
         let count = self
             .tokens
+            .min(limit)
             .min(remaining.saturating_sub(1))
             .min(self.model.max_context().saturating_sub(history.len()));
         if count == 0 || history.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         if !self.sequences.contains_key(&sid) {
             self.blocks.new_table(sid).map_err(|e| e.to_string())?;
@@ -124,9 +139,28 @@ impl DraftEngine {
                 .extend_from_slice(&history[chunk_start..end]);
         }
         let mut draft = Vec::with_capacity(count);
+        let mut q = Vec::with_capacity(count);
+        let mut context = history.to_vec();
+        let key = sampling.seed.unwrap_or(0x2545_f491_4f6c_dd1d ^ sid as u64) ^ 0xd6e8_feb8_6659_fd93;
         for _ in 0..count {
-            let token = argmax(&sequence.logits) as i64;
+            let token = if sampling.is_greedy() {
+                q.push(None);
+                argmax(&sequence.logits) as i64
+            } else {
+                let dist = processed_distribution(&sequence.logits, &context, sampling, 0.0);
+                let token = if dist.len() == 1 {
+                    dist[0].0
+                } else {
+                    let draws = self.draws.entry(sid).or_default();
+                    let u = philox_uniform(key, *draws, 0);
+                    *draws += 1;
+                    select_from(&dist, u).0
+                };
+                q.push(if dist.len() == 1 { None } else { Some(dist) });
+                token as i64
+            };
             draft.push(token);
+            context.push(token);
             let length = sequence.tokens.len() + 1;
             sequence.logits = decoder.forward(
                 &[token],
@@ -139,7 +173,7 @@ impl DraftEngine {
             )?;
             sequence.tokens.push(token);
         }
-        Ok(draft)
+        Ok((draft, q))
     }
 }
 
@@ -299,6 +333,107 @@ impl MtpEngine {
     }
 }
 
+
+/// Speculative draft engine for Medusa, EAGLE, and EAGLE-3 heads.
+pub struct SpecHeadEngine {
+    pub method: crate::speculative::SpeculativeMethod,
+    pub hidden_size: usize,
+    pub vocab_size: usize,
+    pub heads: Vec<crate::compute::Linear>,
+    pub sequences: HashMap<i64, Vec<f32>>,
+}
+
+impl SpecHeadEngine {
+    pub fn new(model: &GgufModel, method: crate::speculative::SpeculativeMethod) -> Result<Self, String> {
+        let mapping = model.mapping();
+        let meta = &mapping.index().metadata;
+        let hidden_size = meta
+            .get("spec_head.hidden_size")
+            .and_then(serde_json::Value::as_u64)
+            .map(|x| x as usize)
+            .unwrap_or_else(|| model.hidden_size());
+        let vocab_size = meta
+            .get("spec_head.vocab_size")
+            .and_then(serde_json::Value::as_u64)
+            .map(|x| x as usize)
+            .unwrap_or_else(|| model.vocab_size());
+        let mut heads = Vec::new();
+        match method {
+            crate::speculative::SpeculativeMethod::Medusa => {
+                let num_heads = meta
+                    .get("spec_head.num_heads")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|x| x as usize)
+                    .unwrap_or(4);
+                for i in 0..num_heads {
+                    let name = format!("spec_head.medusa.{i}");
+                    if let Ok(l) = crate::compute::Linear::load(mapping, &name, vocab_size, hidden_size) {
+                        heads.push(l);
+                    } else if let Ok(l) = crate::compute::Linear::load(mapping, &format!("spec_head.{i}"), vocab_size, hidden_size) {
+                        heads.push(l);
+                    } else if let Ok(l) = crate::compute::Linear::load(mapping, &format!("medusa_heads.{i}"), vocab_size, hidden_size) {
+                        heads.push(l);
+                    }
+                }
+            }
+            crate::speculative::SpeculativeMethod::Eagle | crate::speculative::SpeculativeMethod::Eagle3 => {
+                let num_heads = meta
+                    .get("spec_head.num_heads")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|x| x as usize)
+                    .unwrap_or(1);
+                for i in 0..num_heads {
+                    let name = format!("spec_head.eagle.{i}");
+                    if let Ok(l) = crate::compute::Linear::load(mapping, &name, vocab_size, hidden_size) {
+                        heads.push(l);
+                    }
+                }
+                if heads.is_empty() {
+                    if let Ok(l) = crate::compute::Linear::load(mapping, "spec_head.head", vocab_size, hidden_size) {
+                        heads.push(l);
+                    } else if let Ok(l) = crate::compute::Linear::load(mapping, "lm_head", vocab_size, hidden_size) {
+                        heads.push(l);
+                    }
+                }
+            }
+            _ => return Err("unsupported spec-head method".into()),
+        }
+        Ok(Self {
+            method,
+            hidden_size,
+            vocab_size,
+            heads,
+            sequences: HashMap::new(),
+        })
+    }
+
+    pub fn retain(&mut self, active: &HashSet<i64>) -> Result<(), String> {
+        self.sequences.retain(|sid, _| active.contains(sid));
+        Ok(())
+    }
+
+    pub fn observe(&mut self, sid: i64, hidden: &[f32]) {
+        self.sequences.insert(sid, hidden.to_vec());
+    }
+
+    pub fn propose(&self, sid: i64, max_tokens: usize) -> Vec<i64> {
+        let Some(h) = self.sequences.get(&sid) else {
+            return Vec::new();
+        };
+        if self.heads.is_empty() || h.is_empty() {
+            return Vec::new();
+        }
+        let mut tokens = Vec::new();
+        let limit = max_tokens.min(self.heads.len());
+        for head in &self.heads[..limit] {
+            if let Ok(logits) = head.forward(h) {
+                tokens.push(argmax(&logits) as i64);
+            }
+        }
+        tokens
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +491,21 @@ mod tests {
         assert!(engine.propose(1, &[4, 5, 8], 3).is_empty());
         assert!(engine.propose(1, &[4, 5, 9], 1).is_empty());
         assert!(engine.propose(1, &[4, 5, 9, 2], 3).is_empty());
+    }
+
+    #[test]
+    fn spec_head_engine_propose_returns_expected_tokens() {
+        let mut sequences = HashMap::new();
+        sequences.insert(1, vec![1.0, 2.0]);
+        // Engine with no heads should safely return empty
+        let engine = SpecHeadEngine {
+            method: crate::speculative::SpeculativeMethod::Medusa,
+            hidden_size: 2,
+            vocab_size: 10,
+            heads: Vec::new(),
+            sequences,
+        };
+        assert!(engine.propose(1, 4).is_empty());
+        assert!(engine.propose(2, 4).is_empty());
     }
 }

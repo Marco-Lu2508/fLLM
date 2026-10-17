@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest a feature, model architecture, format or backend
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: Describe the use case, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Command line, API route or model you would expect. For a model, give the Hugging Face link and the architecture name from its config.json.
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Model architecture
+        - Quantization or file format
+        - CPU kernels
+        - GPU backend (CUDA, Vulkan, Metal, ROCm, SYCL, NPU, TPU)
+        - Server API
+        - Command line
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+    validations:
+      required: false
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contribution
+      options:
+        - label: I can help to implement or to test this on my hardware.

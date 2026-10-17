@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.fllm.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/fllm-rs</string>
+        <string>serve</string>
+        <string>--config</string>
+        <string>/usr/local/etc/fllm/fllm.toml</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FLLM_CACHE</key>
+        <string>/usr/local/var/cache/fllm</string>
+        <key>FLLM_CONFIG</key>
+        <string>/usr/local/etc/fllm/fllm.toml</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/lib/fllm</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/fllm/server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/fllm/server.err.log</string>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+</dict>
+</plist>

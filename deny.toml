@@ -1,0 +1,44 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/). Run: cargo deny check
+# CI: .github/workflows/supply-chain.yml. Policy and the current dependency licence summary: THIRD_PARTY.md, docs/releasing.md.
+
+[graph]
+# Check the dependencies of every feature, including the optional GPU / NPU / TPU backends.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# An advisory is ignored only with a reason.
+ignore = [
+    # `paste` (unmaintained, no vulnerability) is a compile-time proc-macro dependency of tokenizers, which is pinned to =0.23.2
+    # (rust/engine/Cargo.toml). A newer tokenizers release would be needed; revisit when the pin is moved.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled by the pinned tokenizers =0.23.2; no runtime code" },
+]
+
+[licenses]
+version = 2
+# Licences of crates that end up in a release binary. Copyleft licences (GPL, LGPL, AGPL) are deliberately absent.
+# Add a licence here only after reading its terms, and record the crate that needs it in docs/changes or THIRD_PARTY.md.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MIT-0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

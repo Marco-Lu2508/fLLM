@@ -261,14 +261,9 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 pub(in crate::server) async fn upload(
-    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -326,10 +321,7 @@ pub(in crate::server) async fn upload(
         &purpose,
         file.data.len() as u64,
     );
-    let mut store = match store().lock() {
-        Ok(store) => store,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "file store is poisoned"),
-    };
+    let mut store = security::lock(store());
     store.files.insert(id.clone(), record.clone());
     store.persist();
     (StatusCode::OK, Json(record)).into_response()
@@ -339,38 +331,20 @@ pub(in crate::server) async fn upload(
 // Files
 
 pub(in crate::server) async fn list_files(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let store = match store().lock() {
-        Ok(store) => store,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "file store is poisoned"),
-    };
+    let store = security::lock(store());
     let mut data: Vec<Value> = store.files.values().cloned().collect();
     data.sort_by_key(|file| std::cmp::Reverse(file["created_at"].as_u64().unwrap_or(0)));
     (StatusCode::OK, Json(json!({"object": "list", "data": data}))).into_response()
 }
 
 pub(in crate::server) async fn get_file(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     if !safe_id(&id) {
         return detail(StatusCode::BAD_REQUEST, "invalid file id", "id");
     }
-    match store()
-        .lock()
-        .ok()
-        .and_then(|store| store.files.get(&id).cloned())
+    match security::with_lock(store(), |store| store.files.get(&id).cloned())
     {
         Some(file) => (StatusCode::OK, Json(file)).into_response(),
         None => error(StatusCode::NOT_FOUND, "no such file"),
@@ -378,21 +352,12 @@ pub(in crate::server) async fn get_file(
 }
 
 pub(in crate::server) async fn file_content(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     if !safe_id(&id) {
         return detail(StatusCode::BAD_REQUEST, "invalid file id", "id");
     }
-    let record = match store()
-        .lock()
-        .ok()
-        .and_then(|store| store.files.get(&id).cloned())
+    let record = match security::with_lock(store(), |store| store.files.get(&id).cloned())
     {
         Some(record) => record,
         None => return error(StatusCode::NOT_FOUND, "no such file"),
@@ -419,21 +384,12 @@ pub(in crate::server) async fn file_content(
 }
 
 pub(in crate::server) async fn delete_file(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     if !safe_id(&id) {
         return detail(StatusCode::BAD_REQUEST, "invalid file id", "id");
     }
-    let mut store = match store().lock() {
-        Ok(store) => store,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "file store is poisoned"),
-    };
+    let mut store = security::lock(store());
     if store.files.remove(&id).is_none() {
         return error(StatusCode::NOT_FOUND, "no such file");
     }
@@ -582,13 +538,8 @@ fn batch_object(lines: usize) -> Value {
 
 pub(in crate::server) async fn create_batch(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     let input_file_id = match body.get("input_file_id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_owned(),
         _ => {
@@ -633,10 +584,7 @@ pub(in crate::server) async fn create_batch(
             )
         }
     };
-    let record = match store()
-        .lock()
-        .ok()
-        .and_then(|store| store.files.get(&input_file_id).cloned())
+    let record = match security::with_lock(store(), |store| store.files.get(&input_file_id).cloned())
     {
         Some(record) => record,
         None => return detail(StatusCode::NOT_FOUND, "no such input file", "input_file_id"),
@@ -665,10 +613,7 @@ pub(in crate::server) async fn create_batch(
     batch["in_progress_at"] = json!(unix_now());
     batch["expires_at"] = json!(unix_now() + 24 * 3600);
     {
-        let mut store = match store().lock() {
-            Ok(store) => store,
-            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "file store is poisoned"),
-        };
+        let mut store = security::lock(store());
         store.batches.insert(id.clone(), batch.clone());
         store.persist();
     }
@@ -677,38 +622,20 @@ pub(in crate::server) async fn create_batch(
 }
 
 pub(in crate::server) async fn list_batches(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let store = match store().lock() {
-        Ok(store) => store,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "file store is poisoned"),
-    };
+    let store = security::lock(store());
     let mut data: Vec<Value> = store.batches.values().cloned().collect();
     data.sort_by_key(|batch| std::cmp::Reverse(batch["created_at"].as_u64().unwrap_or(0)));
     (StatusCode::OK, Json(json!({"object": "list", "data": data}))).into_response()
 }
 
 pub(in crate::server) async fn get_batch(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     if !safe_id(&id) {
         return detail(StatusCode::BAD_REQUEST, "invalid batch id", "id");
     }
-    match store()
-        .lock()
-        .ok()
-        .and_then(|store| store.batches.get(&id).cloned())
+    match security::with_lock(store(), |store| store.batches.get(&id).cloned())
     {
         Some(batch) => (StatusCode::OK, Json(batch)).into_response(),
         None => error(StatusCode::NOT_FOUND, "no such batch"),
@@ -716,25 +643,13 @@ pub(in crate::server) async fn get_batch(
 }
 
 pub(in crate::server) async fn cancel_batch(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     if !safe_id(&id) {
         return detail(StatusCode::BAD_REQUEST, "invalid batch id", "id");
     }
-    let flag = cancel_flags()
-        .lock()
-        .ok()
-        .and_then(|flags| flags.get(&id).cloned());
-    let mut store = match store().lock() {
-        Ok(store) => store,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "file store is poisoned"),
-    };
+    let flag = security::with_lock(cancel_flags(), |flags| flags.get(&id).cloned());
+    let mut store = security::lock(store());
     let Some(batch) = store.batches.get(&id).cloned() else {
         return error(StatusCode::NOT_FOUND, "no such batch");
     };
@@ -780,26 +695,13 @@ pub(in crate::server) async fn cancel_batch(
 // ---------------------------------------------------------------------------------------------
 // Runner
 
-/// Headers for an in-process request; the batch was authorized once already, but the handlers
-/// themselves still check the key.
-fn internal_headers(key: &Option<String>) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    if let Some(key) = key {
-        if let Ok(value) = format!("Bearer {key}").parse() {
-            headers.insert(axum::http::header::AUTHORIZATION, value);
-        }
-    }
-    headers
-}
-
 /// Runs one batch line in process and returns the OpenAI batch result object.
-async fn run_line(state: Arc<AppState>, key: &Option<String>, line: &BatchLine, index: usize) -> Value {
-    let headers = internal_headers(key);
+async fn run_line(state: Arc<AppState>, line: &BatchLine, index: usize) -> Value {
     let body = Json(line.body.clone());
     let response = match endpoint_of(&line.url).unwrap_or("chat") {
-        "chat" => chat_completions(State(state), headers, body).await,
-        "completions" => completions(State(state), headers, body).await,
-        _ => embeddings(State(state), headers, body).await,
+        "chat" => chat_completions(State(state), body).await,
+        "completions" => completions(State(state), body).await,
+        _ => embeddings(State(state), body).await,
     };
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 256 << 20)
@@ -831,7 +733,8 @@ async fn run_line(state: Arc<AppState>, key: &Option<String>, line: &BatchLine, 
 }
 
 fn count_results(id: &str, completed: usize, failed: usize) {
-    if let Ok(mut store) = store().lock() {
+    {
+        let mut store = security::lock(store());
         if let Some(batch) = store.batches.get_mut(id) {
             batch["request_counts"]["completed"] = json!(completed);
             batch["request_counts"]["failed"] = json!(failed);
@@ -850,10 +753,7 @@ fn finish(
     failed: usize,
 ) {
     let now = unix_now();
-    let mut store = match store().lock() {
-        Ok(store) => store,
-        Err(_) => return,
-    };
+    let mut store = security::lock(store());
     let mut output_id = Value::Null;
     let mut output_lines = 0usize;
     if let Some((file_id, bytes, lines)) = output {
@@ -904,7 +804,8 @@ fn finish(
 
 fn spawn_runner(state: Arc<AppState>, id: String, lines: Vec<BatchLine>) {
     let flag = Arc::new(AtomicBool::new(false));
-    if let Ok(mut flags) = cancel_flags().lock() {
+    {
+        let mut flags = security::lock(cancel_flags());
         flags.insert(id.clone(), flag.clone());
     }
     tokio::spawn(async move {
@@ -913,7 +814,6 @@ fn spawn_runner(state: Arc<AppState>, id: String, lines: Vec<BatchLine>) {
 }
 
 async fn run_batch(state: Arc<AppState>, id: String, lines: Vec<BatchLine>, flag: Arc<AtomicBool>) {
-    let key = state.api_key.clone();
     let output_id = new_id("file");
     let error_id = new_id("file");
     let (mut out, mut err) = match (
@@ -942,7 +842,7 @@ async fn run_batch(state: Arc<AppState>, id: String, lines: Vec<BatchLine>, flag
         let results = join_all(
             lines[index..end]
                 .iter()
-                .map(|line| run_line(Arc::clone(&state), &key, line, index)),
+                .map(|line| run_line(Arc::clone(&state), line, index)),
         )
         .await;
         for result in results {
@@ -966,7 +866,8 @@ async fn run_batch(state: Arc<AppState>, id: String, lines: Vec<BatchLine>, flag
     }
     let _ = out.flush();
     let _ = err.flush();
-    if let Ok(mut flags) = cancel_flags().lock() {
+    {
+        let mut flags = security::lock(cancel_flags());
         flags.remove(&id);
     }
     let output = (out_lines > 0).then_some((output_id, out_bytes, out_lines));

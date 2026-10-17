@@ -1,1 +1,11 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation index
+    url: https://github.com/Marco-Lu2508/fLLM/blob/main/docs/index.md
+    about: Guides, command reference, backends and troubleshooting.
+  - name: Troubleshooting
+    url: https://github.com/Marco-Lu2508/fLLM/blob/main/docs/user/troubleshooting.md
+    about: Common problems (memory, drivers, model formats) and their fixes.
+  - name: Report a security problem
+    url: https://github.com/Marco-Lu2508/fLLM/security/advisories/new
+    about: Private report. Do not open a public issue for security problems.

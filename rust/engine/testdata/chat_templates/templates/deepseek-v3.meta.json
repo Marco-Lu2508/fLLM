@@ -1,0 +1,6 @@
+{
+ "bos": "<\uff5cbegin\u2581of\u2581sentence\uff5c>",
+ "eos": "<\uff5cend\u2581of\u2581sentence\uff5c>",
+ "pad": "<\uff5cend\u2581of\u2581sentence\uff5c>",
+ "unk": null
+}

@@ -1,0 +1,66 @@
+{
+  "activation_sparsity_pattern": [
+    0.9,
+    0.9,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "altup_active_idx": 0,
+  "altup_coef_clip": 120.0,
+  "altup_correct_scale": true,
+  "altup_num_inputs": 4,
+  "architectures": [
+    "Gemma3nForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 2,
+  "dtype": "float32",
+  "eos_token_id": 1,
+  "final_logit_softcapping": 30.0,
+  "head_dim": 8,
+  "hidden_activation": "gelu_pytorch_tanh",
+  "hidden_size": 16,
+  "hidden_size_per_layer_input": 4,
+  "initializer_range": 0.02,
+  "intermediate_size": [
+    16,
+    16,
+    16,
+    24,
+    24
+  ],
+  "laurel_rank": 3,
+  "layer_types": [
+    "sliding_attention",
+    "sliding_attention",
+    "full_attention",
+    "sliding_attention",
+    "full_attention"
+  ],
+  "max_position_embeddings": 64,
+  "model_type": "gemma3n_text",
+  "num_attention_heads": 2,
+  "num_hidden_layers": 5,
+  "num_key_value_heads": 1,
+  "num_kv_shared_layers": 2,
+  "pad_token_id": 0,
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": {
+    "full_attention": {
+      "rope_theta": 1000000.0,
+      "rope_type": "default"
+    },
+    "sliding_attention": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    }
+  },
+  "sliding_window": 3,
+  "tie_word_embeddings": true,
+  "transformers_version": "5.19.0",
+  "use_cache": true,
+  "vocab_size": 32,
+  "vocab_size_per_layer_input": 32
+}

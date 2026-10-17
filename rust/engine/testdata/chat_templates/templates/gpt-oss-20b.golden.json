@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>assistant<|channel|>final<|message|>I start.<|end|><|start|>user<|message|>ok<|end|><|start|>assistant"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Evaluate an arithmetic expression.\ntype calc = (_: {\nexpression: string,\nprecision?: number,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Compute 17*3<|end|><|start|>assistant<|channel|>analysis<|message|>Let me compute that.<|end|><|start|>assistant to=functions.calc<|channel|>commentary json<|message|>{\"expression\": \"17*3\"}<|call|><|start|>functions.calc to=assistant<|channel|>commentary<|message|>\"51\"<|end|><|start|>assistant"
+ },
+ "default/documents": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>Summarize.<|end|><|start|>assistant"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\n  padded system with trailing newline\n\n\n\n<|end|><|start|>user<|message|>  padded user \n<|end|><|start|>assistant"
+ },
+ "default/multi_turn": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nBe brief.\n\n<|end|><|start|>user<|message|>Hi<|end|><|start|>assistant<|channel|>final<|message|>Hello! How can I help?<|end|><|start|>user<|message|>Tell me a joke.<|end|><|start|>assistant<|channel|>final<|message|>Why did the chicken cross the road?<|end|><|start|>user<|message|>Why?<|end|><|start|>assistant"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>Hi<|end|><|start|>assistant<|channel|>final<|message|>Hello!<|return|>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: high\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>Think hard: 13*17<|end|><|start|>assistant"
+ },
+ "default/reasoning_history": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>2+2?<|end|><|start|>assistant<|channel|>final<|message|><think>\nsimple\n</think>\n\n4<|end|><|start|>user<|message|>And 3+3?<|end|><|start|>assistant"
+ },
+ "default/system_not_first": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>a<|end|><|start|>user<|message|>b<|end|><|start|>assistant"
+ },
+ "default/system_user": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nYou are a terse assistant.\n\n<|end|><|start|>user<|message|>Capital of France?<|end|><|start|>assistant"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>2+2?<|end|><|start|>assistant"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>2+2?<|end|><|start|>assistant"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather for a city.\ntype get_weather = (_: {\n// City name, e.g. München\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\",\n}) => any;\n\n// Evaluate an arithmetic expression.\ntype calc = (_: {\nexpression: string,\nprecision?: number,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Berlin and 2+2?<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Berlin\", \"unit\": \"celsius\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"{\\\"temp\\\": 21.5, \\\"sky\\\": \\\"clear\\\"}\"<|end|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"4\"<|end|><|start|>assistant"
+ },
+ "default/tool_call_then_answer": {
+  "err": "TypeError: argument of type 'NoneType' is not iterable"
+ },
+ "default/tools_system_user": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Instructions\n\nYou can call tools.\n\n# Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather for a city.\ntype get_weather = (_: {\n// City name, e.g. München\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\",\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Berlin?<|end|><|start|>assistant"
+ },
+ "default/tools_user": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather for a city.\ntype get_weather = (_: {\n// City name, e.g. München\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\",\n}) => any;\n\n// Evaluate an arithmetic expression.\ntype calc = (_: {\nexpression: string,\nprecision?: number,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in München?<|end|><|start|>assistant"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>a<|end|><|start|>user<|message|>b<|end|><|start|>assistant"
+ },
+ "default/unicode": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|end|><|start|>assistant"
+ },
+ "default/user_only": {
+  "ok": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-15\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>Hello<|end|><|start|>assistant"
+ }
+}

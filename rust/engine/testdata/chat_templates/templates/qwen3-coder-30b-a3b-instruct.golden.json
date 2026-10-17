@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|im_start|>assistant\nI start.<|im_end|>\n<|im_start|>user\nok<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>calc</name>\n<description>Evaluate an arithmetic expression.</description>\n<parameters>\n<parameter>\n<name>expression</name>\n<type>string</type>\n</parameter>\n<parameter>\n<name>precision</name>\n<type>integer</type>\n</parameter>\n<required>[\"expression\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nCompute 17*3<|im_end|>\n<|im_start|>assistant\nLet me compute that.\n\n<tool_call>\n<function=calc>\n<parameter=expression>\n17*3\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n51\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/documents": {
+  "ok": "<|im_start|>user\nSummarize.<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|im_start|>system\n  padded system with trailing newline\n\n<|im_end|>\n<|im_start|>user\n  padded user \n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/multi_turn": {
+  "ok": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello! How can I help?<|im_end|>\n<|im_start|>user\nTell me a joke.<|im_end|>\n<|im_start|>assistant\nWhy did the chicken cross the road?<|im_end|>\n<|im_start|>user\nWhy?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello!<|im_end|>\n"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|im_start|>user\nThink hard: 13*17<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/reasoning_history": {
+  "ok": "<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nsimple\n</think>\n\n4<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/system_not_first": {
+  "ok": "<|im_start|>user\na<|im_end|>\n<|im_start|>system\nlate system<|im_end|>\n<|im_start|>user\nb<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/system_user": {
+  "ok": "<|im_start|>system\nYou are a terse assistant.<|im_end|>\n<|im_start|>user\nCapital of France?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Get the current weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n<description>City name, e.g. München</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<enum>[\"celsius\", \"fahrenheit\"]</enum>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n<function>\n<name>calc</name>\n<description>Evaluate an arithmetic expression.</description>\n<parameters>\n<parameter>\n<name>expression</name>\n<type>string</type>\n</parameter>\n<parameter>\n<name>precision</name>\n<type>integer</type>\n</parameter>\n<required>[\"expression\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Berlin and 2+2?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=unit>\ncelsius\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=calc>\n<parameter=expression>\n2+2\n</parameter>\n<parameter=precision>\n2\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temp\": 21.5, \"sky\": \"clear\"}\n</tool_response>\n<tool_response>\n4\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tool_call_then_answer": {
+  "ok": "<|im_start|>system\nUse tools when helpful.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Get the current weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n<description>City name, e.g. München</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<enum>[\"celsius\", \"fahrenheit\"]</enum>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Berlin?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n21 C, sunny\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\nIt is 21 C and sunny in Berlin.<|im_end|>\n<|im_start|>user\nAnd Paris?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tools_system_user": {
+  "ok": "<|im_start|>system\nYou can call tools.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Get the current weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n<description>City name, e.g. München</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<enum>[\"celsius\", \"fahrenheit\"]</enum>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Berlin?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tools_user": {
+  "ok": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>get_weather</name>\n<description>Get the current weather for a city.</description>\n<parameters>\n<parameter>\n<name>city</name>\n<type>string</type>\n<description>City name, e.g. München</description>\n</parameter>\n<parameter>\n<name>unit</name>\n<type>string</type>\n<enum>[\"celsius\", \"fahrenheit\"]</enum>\n</parameter>\n<required>[\"city\"]</required>\n</parameters>\n</function>\n<function>\n<name>calc</name>\n<description>Evaluate an arithmetic expression.</description>\n<parameters>\n<parameter>\n<name>expression</name>\n<type>string</type>\n</parameter>\n<parameter>\n<name>precision</name>\n<type>integer</type>\n</parameter>\n<required>[\"expression\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in München?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|im_start|>user\na<|im_end|>\n<|im_start|>user\nb<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/unicode": {
+  "ok": "<|im_start|>user\nGrüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/user_only": {
+  "ok": "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+ }
+}

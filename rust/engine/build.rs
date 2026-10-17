@@ -12,11 +12,48 @@ fn git(args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
+/// Civil date (UTC) of a Unix time in seconds, `YYYY-MM-DD` (days-to-civil algorithm of H. Hinnant).
+fn utc_date(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Version plumbing for `fllm-rs --version`: short commit, build date and the enabled cargo features.
+fn version_info(commit: &str) {
+    let short = if commit == "unknown" { "unknown".to_owned() } else { commit[..commit.len().min(7)].to_owned() };
+    println!("cargo:rustc-env=FLLM_GIT_SHORT={short}");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let secs = env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()))
+        .unwrap_or(0);
+    println!("cargo:rustc-env=FLLM_BUILD_DATE={}", utc_date(secs));
+    let mut features: Vec<String> = env::vars()
+        .filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(|f| f.to_lowercase().replace('_', "-")))
+        .filter(|f| f != "default")
+        .collect();
+    features.sort();
+    let features = if features.is_empty() { "none".to_owned() } else { features.join(",") };
+    println!("cargo:rustc-env=FLLM_FEATURES={features}");
+}
+
 fn provenance() {
     println!("cargo:rerun-if-env-changed=FLLM_GIT_COMMIT");
     let supplied = env::var("FLLM_GIT_COMMIT").ok();
+    // A source tarball unpacked inside some other git checkout must not report that checkout's commit: ask git only when
+    // this package's own manifest is tracked.
+    let tracked = git(&["ls-files", "--error-unmatch", "Cargo.toml"]).is_some();
     let commit = supplied
-        .or_else(|| git(&["rev-parse", "HEAD"]))
+        .or_else(|| if tracked { git(&["rev-parse", "HEAD"]) } else { None })
         .unwrap_or_else(|| "unknown".into());
     let commit = if commit.len() >= 7 && commit.bytes().all(|b| b.is_ascii_hexdigit()) {
         commit
@@ -24,6 +61,7 @@ fn provenance() {
         "unknown".into()
     };
     println!("cargo:rustc-env=FLLM_GIT_COMMIT={commit}");
+    version_info(&commit);
     let dirty =
         git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
     println!("cargo:rustc-env=FLLM_GIT_DIRTY={dirty}");
@@ -95,7 +133,7 @@ impl Target {
     /// the one rustc links (`/MD`, or `/MT` for a `crt-static` build), exception handling, and big object files (the Marlin instances).
     fn nvcc_host_flags(&self) -> String {
         if self.msvc {
-            format!("{},/EHsc,/bigobj,/Zc:__cplusplus", if self.crt_static { "/MT" } else { "/MD" })
+            format!("{},/EHsc,/bigobj,/Zc:__cplusplus,/std:c++17", if self.crt_static { "/MT" } else { "/MD" })
         } else {
             "-fPIC".to_owned()
         }
@@ -244,9 +282,166 @@ fn archive(target: &Target, library: &Path, objects: &[PathBuf]) {
     }
 }
 
+/// The GPU architectures one build is made for, derived from what the CUDA toolkit can compile and from `FLLM_CUDA_ARCHS`.
+///
+/// `generic` are plain targets (`arch=compute_N,code=sm_N`, plus the PTX of the newest one). A plain cubin runs on every GPU of the same
+/// major version with an equal or higher minor version (sm_100 on a 10.3 GPU, sm_120 on a 12.1 GPU), so GB300 and DGX Spark run the generic
+/// kernels without extra targets. The architecture-specific targets (suffix `a`: tcgen05 / UMMA, wgmma, FP4 `mma.sync`) run on exactly one
+/// compute capability and are listed separately, one per capability, for the few kernel files that need them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ArchPlan {
+    generic: Vec<u32>,
+    /// sm_120a (FP4 mma.sync, CUTLASS Sm120) and sm_121a (DGX Spark GB10)
+    fp4_sm120: Vec<u32>,
+    /// sm_100a (B200, GB200), sm_103a (B300, GB300), sm_110a (Thor): tcgen05 / UMMA, CUTLASS Sm100
+    sm100: Vec<u32>,
+    /// sm_90a: wgmma, TMA
+    hopper: bool,
+}
+
+/// Architectures an nvcc output (`nvcc --list-gpu-code`: `sm_75 sm_80 ...`, one per line or separated by blanks) lists.
+fn parse_gpu_codes(text: &str) -> Vec<u32> {
+    let mut codes: Vec<u32> = text
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("sm_"))
+        .filter_map(|n| n.parse::<u32>().ok())
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+}
+
+/// What a toolkit of this version compiles when nvcc cannot be asked: CUDA 12.8 knows Pascal .. sm_120 and sm_101 (the old name of
+/// Thor), CUDA 12.9 adds sm_103 and sm_121, CUDA 13 drops Pascal and Volta and calls Thor sm_110.
+fn toolkit_codes(major: u32, minor: u32) -> Vec<u32> {
+    match (major, minor) {
+        (0, _) => Vec::new(),
+        (12, 0..=7) => vec![50, 52, 53, 60, 61, 62, 70, 72, 75, 80, 86, 87, 89, 90],
+        (12, 8) => vec![50, 52, 53, 60, 61, 62, 70, 72, 75, 80, 86, 87, 89, 90, 100, 101, 120],
+        (12, _) => vec![50, 52, 53, 60, 61, 62, 70, 72, 75, 80, 86, 87, 89, 90, 100, 101, 103, 120, 121],
+        (m, _) if m < 12 => vec![50, 52, 53, 60, 61, 62, 70, 72, 75, 80, 86, 87, 89],
+        _ => vec![75, 80, 86, 87, 88, 89, 90, 100, 103, 110, 120, 121],
+    }
+}
+
+/// Default list of `FLLM_CUDA_ARCHS`: Pascal .. Hopper as before, datacenter Blackwell (sm_100: B200 / GB200, also run by sm_103), Thor
+/// (sm_110, CUDA 13 only) and Blackwell GeForce / RTX PRO (sm_120, also run by sm_121). What the toolkit does not know is left out.
+const DEFAULT_ARCHS: &[u32] = &[61, 70, 75, 80, 86, 89, 90, 100, 110, 120];
+
+/// `requested`: the value of `FLLM_CUDA_ARCHS` (`None` = the default list). Entries are numbers, an `a` / `f` suffix is accepted and ignored
+/// (the architecture-specific targets follow from the number). Entries the toolkit does not know are dropped (the caller warns).
+fn arch_plan(supported: &[u32], requested: Option<&str>) -> (ArchPlan, Vec<u32>) {
+    let mut wanted: Vec<u32> = match requested {
+        Some(list) => list
+            .split(';')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .filter_map(|a| a.trim_end_matches(['a', 'f']).parse::<u32>().ok())
+            .collect(),
+        None => DEFAULT_ARCHS.to_vec(),
+    };
+    wanted.sort_unstable();
+    wanted.dedup();
+    // an unknown toolkit (supported empty) keeps every requested entry, as the builds before this logic did
+    let known = |n: u32| supported.is_empty() || supported.contains(&n);
+    let dropped: Vec<u32> = wanted.iter().copied().filter(|&n| !known(n)).collect();
+    let generic: Vec<u32> = wanted.iter().copied().filter(|&n| known(n)).collect();
+    let has = |n: u32| generic.contains(&n);
+    let mut fp4_sm120 = Vec::new();
+    if has(120) {
+        fp4_sm120.push(120);
+    }
+    // sm_121 needs its own architecture-specific cubin: the sm_120a one does not load there
+    if (has(120) || has(121)) && (supported.is_empty() && has(121) || supported.contains(&121)) {
+        fp4_sm120.push(121);
+    }
+    let mut sm100 = Vec::new();
+    for n in [100u32, 103, 110] {
+        // the datacenter generic cubin (sm_100) stands for 10.3 as well
+        let wanted_here = has(n) || (n == 103 && has(100));
+        if wanted_here && (supported.is_empty() && has(n) || supported.contains(&n)) {
+            sm100.push(n);
+        }
+    }
+    let hopper = has(90);
+    (ArchPlan { generic, fp4_sm120, sm100, hopper }, dropped)
+}
+
+fn gencode_flags(generic: &[u32]) -> Vec<String> {
+    let mut flags = Vec::new();
+    for arch in generic {
+        flags.push("-gencode".into());
+        flags.push(format!("arch=compute_{arch},code=sm_{arch}"));
+    }
+    // PTX of the newest architecture keeps the binary usable on GPUs released later
+    if let Some(newest) = generic.last() {
+        flags.push("-gencode".into());
+        flags.push(format!("arch=compute_{newest},code=compute_{newest}"));
+    }
+    flags
+}
+
+/// `-gencode` options of architecture-specific cubins (`sm_90a`); no PTX, it could not be compiled further for other devices.
+fn gencode_flags_a(archs: &[u32]) -> Vec<String> {
+    archs.iter().flat_map(|arch| ["-gencode".to_string(), format!("arch=compute_{arch}a,code=sm_{arch}a")]).collect()
+}
+
+/// Which headers and targets a kernel file of the Hopper / Blackwell work needs. A file that does not exist is skipped, so the files can be
+/// added one by one (see `EXTRA_SOURCES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flavor {
+    /// the generic targets, fast math
+    Generic,
+    /// the targets from Turing on and the FlashInfer headers (`-DFLLM_HAVE_FLASHINFER`; `-DFLLM_HAVE_CUTLASS` too when CUTLASS is found)
+    FlashInfer,
+    /// sm_90a only (wgmma, TMA): CUTLASS headers (FlashInfer headers too when found: `-DFLLM_HAVE_FLASHINFER`); without them or without sm_90 in the list a stub for the generic targets
+    /// (`-DFLLM_NO_HOPPER`), with them `-DFLLM_HOPPER`
+    Hopper,
+    /// sm_100a / sm_103a / sm_110a only (tcgen05): CUTLASS headers; otherwise a stub (`-DFLLM_NO_SM100`), with them `-DFLLM_SM100`
+    Sm100,
+}
+
+/// Kernel files compiled in addition to `sources` in `cuda_kernels`: new files of the Hopper / Blackwell work, with what they need.
+const EXTRA_SOURCES: &[(&str, Flavor)] = &[
+    ("nvfp4_cutlass_sm100.cu", Flavor::Sm100),
+    ("fp8_gemm.cu", Flavor::Generic),
+    ("fp8_cutlass_sm90.cu", Flavor::Hopper),
+    ("int8_gemm.cu", Flavor::Generic),
+    ("cublaslt_gemm.cu", Flavor::Generic),
+    ("fa3_prefill.cu", Flavor::Hopper),
+    ("fi_attn.cu", Flavor::FlashInfer),
+    ("fi_decode.cu", Flavor::FlashInfer),
+    ("cascade_attn.cu", Flavor::Generic),
+    ("mla_latent.cu", Flavor::Generic),
+    ("mla_decode.cu", Flavor::Generic),
+];
+
+/// The version `(major, minor)` nvcc reports (`release 12.8`), (0, 0) when it cannot be run.
+fn nvcc_version(nvcc: &Path) -> (u32, u32) {
+    let text = Command::new(nvcc).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let release = text.split("release ").nth(1).unwrap_or("");
+    let mut numbers = release.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse::<u32>().ok());
+    (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0))
+}
+
+/// The architectures the toolkit compiles: `nvcc --list-gpu-code`, else a table by version.
+fn toolkit_architectures(nvcc: &Path) -> Vec<u32> {
+    let listed = Command::new(nvcc)
+        .arg("--list-gpu-code")
+        .output()
+        .map(|o| parse_gpu_codes(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    if listed.len() >= 3 {
+        return listed;
+    }
+    let (major, minor) = nvcc_version(nvcc);
+    toolkit_codes(major, minor)
+}
+
 /// Builds the CUDA kernels into a static library when the `cuda` feature is on.
 ///
-/// `FLLM_CUDA_ARCHS` selects the GPU architectures (default: Ampere, Ada, Hopper, Blackwell);
+/// `FLLM_CUDA_ARCHS` selects the GPU architectures (default: Pascal to Hopper, datacenter and GeForce Blackwell, Thor; what the toolkit
+/// knows, see `arch_plan`; the architecture-specific variants for FP4 / tcgen05 / wgmma follow from it);
 /// e.g. `FLLM_CUDA_ARCHS=120` for a fast development build. `CUDA_HOME` / `CUDA_PATH` point at
 /// the toolkit (default `/usr/local/cuda`, on Windows the newest `Program Files\NVIDIA GPU Computing Toolkit\CUDA\vX.Y`).
 /// The CUDA runtime is linked statically, so the result needs only the NVIDIA driver at run time.
@@ -280,26 +475,27 @@ fn cuda_kernels() {
     let ccbin = nvcc_ccbin(&target);
     let host_flags = target.nvcc_host_flags();
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    let archs = std::env::var("FLLM_CUDA_ARCHS").unwrap_or_else(|_| "61;70;75;80;86;89;90;120".into());
-    let archs: Vec<&str> = archs.split(';').map(str::trim).filter(|a| !a.is_empty()).collect();
-    let mut flags: Vec<String> = Vec::new();
-    for arch in &archs {
-        flags.push("-gencode".into());
-        flags.push(format!("arch=compute_{arch},code=sm_{arch}"));
+    let (nvcc_major, _) = nvcc_version(&nvcc);
+    // aarch64 targets Grace Hopper, Jetson Orin and DGX Spark; the list for them is short
+    let requested = std::env::var("FLLM_CUDA_ARCHS")
+        .ok()
+        .or_else(|| (env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")).then(|| "87;90;121".to_owned()));
+    let (plan, dropped) = arch_plan(&toolkit_architectures(&nvcc), requested.as_deref());
+    for arch in &dropped {
+        println!("cargo:warning=this CUDA toolkit cannot compile for sm_{arch}: dropped from the architecture list");
     }
-    // PTX of the newest architecture keeps the binary usable on GPUs released later.
-    if let Some(newest) = archs.last() {
-        flags.push("-gencode".into());
-        flags.push(format!("arch=compute_{newest},code=compute_{newest}"));
-    }
+    assert!(!plan.generic.is_empty(), "no usable GPU architecture in FLLM_CUDA_ARCHS={requested:?} for this CUDA toolkit");
+    let archs_owned: Vec<String> = plan.generic.iter().map(u32::to_string).collect();
+    let archs: Vec<&str> = archs_owned.iter().map(String::as_str).collect();
+    let flags: Vec<String> = gencode_flags(&plan.generic);
     // Optional: CUTLASS headers (BSD-3-Clause) enable the large-batch NVFP4 GEMM for Blackwell GeForce. Found through
     // FLLM_CUTLASS_DIR or third_party/cutlass; without them the built-in NVFP4 kernel is used for every batch size.
     println!("cargo:rerun-if-env-changed=FLLM_CUTLASS_DIR");
     let cutlass = std::env::var_os("FLLM_CUTLASS_DIR")
         .map(PathBuf::from)
         .or_else(|| Some(PathBuf::from("../../third_party/cutlass")))
-        .filter(|dir| dir.join("include/cutlass/cutlass.h").exists() && archs.contains(&"120"));
-    if cutlass.is_none() && archs.contains(&"120") {
+        .filter(|dir| dir.join("include/cutlass/cutlass.h").exists() && (!plan.fp4_sm120.is_empty() || !plan.sm100.is_empty() || plan.hopper));
+    if cutlass.is_none() && !plan.fp4_sm120.is_empty() {
         println!("cargo:warning=CUTLASS headers not found (third_party/cutlass or FLLM_CUTLASS_DIR): NVFP4 prompts use the built-in kernel, see THIRD_PARTY.md");
     }
     // Optional: FlashInfer headers (Apache-2.0) give the prompt attention a faster kernel on Turing and newer GPUs. Found
@@ -318,27 +514,20 @@ fn cuda_kernels() {
         .collect();
     // CUDA 13 gives the host stubs of __global__ function templates internal linkage by default: a kernel instantiated explicitly in
     // one file (the generated Marlin instances) is then invisible to the file that launches it and the link fails.
-    let nvcc_major = Command::new(&nvcc)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).split("release ").nth(1).map(str::to_owned))
-        .and_then(|r| r.split('.').next().and_then(|m| m.trim().parse::<u32>().ok()))
-        .unwrap_or(0);
     if nvcc_major >= 13 {
         extra.push("-static-global-template-stub=false".into());
     }
-    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu"];
+    let sources = ["api.cu", "kda.cu", "sampling.cu", "attn_tree.cu", "comm_kernels.cu", "moe.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu", "attn_encoder.cu"];
     let mut objects = Vec::new();
     for source in sources {
-        if source == "nvfp4_cutlass.cu" && cutlass.is_none() {
+        if source == "nvfp4_cutlass.cu" && (cutlass.is_none() || plan.fp4_sm120.is_empty()) {
             continue;
         }
         let object = out.join(target.object_name(source));
-        // The FP4 tensor-core instructions exist only in the architecture-specific sm_120a target.
+        // The FP4 tensor-core instructions exist only in the architecture-specific sm_120a / sm_121a targets.
         let fp4 = source == "nvfp4.cu" || source == "nvfp4_cutlass.cu";
-        let fp4_flags: Vec<String> = if archs.contains(&"120") {
-            vec!["-gencode".into(), "arch=compute_120a,code=sm_120a".into()]
+        let fp4_flags: Vec<String> = if !plan.fp4_sm120.is_empty() {
+            gencode_flags_a(&plan.fp4_sm120)
         } else {
             // no FP4 target: the file still has to compile for the other architectures (stub that declines every call)
             let mut f = flags.clone();
@@ -349,7 +538,7 @@ fn cuda_kernels() {
         let flashinfer_build = source == "flashinfer_prefill.cu" && flashinfer.is_some();
         command.args(["-c", "-O3", "--std=c++17", "-lineinfo", "-Xcompiler", &host_flags]).args(&ccbin);
         // kv_quant.cu needs IEEE division and denormals: its encoders must match the Rust ones bit for bit
-        if !flashinfer_build && source != "kv_quant.cu" {
+        if !flashinfer_build && source != "kv_quant.cu" && source != "sampling.cu" {
             command.arg("--use_fast_math");
         }
         if let Some(dir) = &cutlass {
@@ -377,8 +566,128 @@ fn cuda_kernels() {
             fi_flags.push("--expt-relaxed-constexpr".into());
             fi_flags.push(format!("-I{}", dir.join("include").display()));
         }
-        let status = command
+        command
             .args(if flashinfer_build { &fi_flags } else if fp4 { &fp4_flags } else { &flags })
+            .args(&extra)
+            .arg("-o")
+            .arg(&object)
+            .arg(PathBuf::from("cuda").join(source));
+        let output = command.output().unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
+        if !output.status.success() {
+            eprintln!("nvcc failed on {source} (host_flags={host_flags}):
+command: {command:?}
+stdout:
+{}
+stderr:
+{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            panic!("nvcc failed on {source}");
+        }
+        objects.push(object);
+    }
+    // Kernel files of the Hopper / Blackwell work (EXTRA_SOURCES), compiled when the file exists. Their targets and headers follow from the
+    // flavor; without the headers or the architecture a file is built as a stub that declines every call (its -DFLLM_NO_* switch).
+    println!("cargo:rerun-if-env-changed=FLLM_NO_HOPPER");
+    println!("cargo:rerun-if-env-changed=FLLM_NO_SM100");
+    let arch_a_ok = |list_ok: bool, off: &str| list_ok && std::env::var_os(off).is_none();
+    let hopper_ok = arch_a_ok(plan.hopper, "FLLM_NO_HOPPER") && cutlass.is_some();
+    let sm100_ok = arch_a_ok(!plan.sm100.is_empty(), "FLLM_NO_SM100") && cutlass.is_some();
+    let fi_arch_flags = gencode_flags(&flashinfer_archs.iter().filter_map(|a| a.parse::<u32>().ok()).collect::<Vec<_>>());
+    let mut built: Vec<String> = Vec::new();
+    for (source, flavor) in EXTRA_SOURCES {
+        let path = PathBuf::from("cuda").join(source);
+        if !path.exists() {
+            continue;
+        }
+        let object = out.join(target.object_name(source));
+        let mut target_flags = flags.clone();
+        let mut defines: Vec<String> = Vec::new();
+        let mut includes: Vec<PathBuf> = Vec::new();
+        let mut fast_math = true;
+        let mut with_cutlass = false;
+        match flavor {
+            Flavor::Generic => {}
+            Flavor::FlashInfer => {
+                with_cutlass = cutlass.is_some();
+                if let Some(dir) = &flashinfer {
+                    target_flags = fi_arch_flags.clone();
+                    defines.push("-DFLLM_HAVE_FLASHINFER".into());
+                    includes.push(dir.join("include"));
+                    fast_math = false;
+                }
+            }
+            Flavor::Hopper => {
+                if hopper_ok {
+                    target_flags = gencode_flags_a(&[90]);
+                    defines.push("-DFLLM_HOPPER".into());
+                    with_cutlass = true;
+                    if let Some(dir) = &flashinfer {
+                        defines.push("-DFLLM_HAVE_FLASHINFER".into());
+                        includes.push(dir.join("include"));
+                    }
+                    fast_math = false;
+                } else {
+                    defines.push("-DFLLM_NO_HOPPER".into());
+                }
+            }
+            Flavor::Sm100 => {
+                if sm100_ok {
+                    target_flags = gencode_flags_a(&plan.sm100);
+                    defines.push("-DFLLM_SM100".into());
+                    with_cutlass = true;
+                } else {
+                    defines.push("-DFLLM_NO_SM100".into());
+                }
+            }
+        }
+        if with_cutlass {
+            let dir = cutlass.as_ref().expect("checked above");
+            defines.push("-DFLLM_HAVE_CUTLASS".into());
+            includes.push(dir.join("include"));
+            includes.push(dir.join("tools/util/include"));
+        }
+        let mut command = Command::new(&nvcc);
+        command.args(["-c", "-O3", "--std=c++17", "-lineinfo", "--expt-relaxed-constexpr", "-Xcompiler", &host_flags]).args(&ccbin);
+        if fast_math {
+            command.arg("--use_fast_math");
+        }
+        for dir in &includes {
+            command.arg(format!("-I{}", dir.display()));
+        }
+        let status = command
+            .args(&target_flags)
+            .args(&defines)
+            .args(&extra)
+            .arg("-o")
+            .arg(&object)
+            .arg(&path)
+            .status()
+            .unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
+        assert!(status.success(), "nvcc failed on {source}");
+        // a file built as a stub (no headers / architecture) does not count as a feature of this binary
+        let stub = defines.iter().any(|d| d.starts_with("-DFLLM_NO_")) || (*flavor == Flavor::FlashInfer && flashinfer.is_none());
+        if !stub {
+            built.push(source.strip_suffix(".cu").unwrap_or(source).to_owned());
+        }
+        objects.push(object);
+    }
+    // arch_report.cu (fllm-rs devices): what this binary was built for, as a string of plain tokens (no blanks, quotes or semicolons)
+    {
+        let list = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
+        let mut report = format!("archs={}/fp4a={}/sm100a={}/hopper={}", list(&plan.generic), list(&plan.fp4_sm120), list(&plan.sm100), u8::from(hopper_ok));
+        if cutlass.is_some() {
+            report.push_str("/cutlass");
+        }
+        if flashinfer.is_some() {
+            report.push_str("/flashinfer");
+        }
+        report.push_str(&format!("/files={}", built.join("+")));
+        let source = "arch_report.cu";
+        let object = out.join(target.object_name(source));
+        let status = Command::new(&nvcc)
+            .args(["-c", "-O2", "--std=c++17", "-Xcompiler", &host_flags])
+            .args(&ccbin)
+            .args(&flags)
+            .arg(format!("-DFLLM_BUILT={report}"))
             .args(&extra)
             .arg("-o")
             .arg(&object)
@@ -411,6 +720,17 @@ fn cuda_kernels() {
     if marlin_archs.is_empty() {
         marlin_flags = flags.clone();
     }
+    // The BF16 instances (FLLM_ACT_DTYPE=bf16) exist for Ampere and newer: the BF16 scalar type of the Marlin template has no members below sm_80. With no such
+    // target in the list the files are still compiled, for the PTX of compute_80, so that the kernel selector links; nothing launches them on an older GPU.
+    let mut bf16_flags: Vec<String> = Vec::new();
+    let bf16_archs: Vec<&str> = marlin_archs.iter().copied().filter(|a| a.parse::<u32>().is_ok_and(|v| v >= 80)).collect();
+    for arch in &bf16_archs {
+        bf16_flags.push("-gencode".into());
+        bf16_flags.push(format!("arch=compute_{arch},code=sm_{arch}"));
+    }
+    let bf16_newest = bf16_archs.last().copied().unwrap_or("80");
+    bf16_flags.push("-gencode".into());
+    bf16_flags.push(format!("arch=compute_{bf16_newest},code=compute_{bf16_newest}"));
     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(12);
     let queue = std::sync::Mutex::new(marlin_sources.clone());
     let marlin_objects: Vec<PathBuf> = marlin_sources
@@ -422,18 +742,25 @@ fn cuda_kernels() {
             scope.spawn(|| loop {
                 let Some(source) = queue.lock().expect("queue").pop() else { return };
                 let object = out.join(target.object_name(&format!("marlin_{}.cu", source.file_stem().expect("file name").to_string_lossy())));
-                let status = Command::new(&nvcc)
-                    .args(["-c", "-O3", "--std=c++17", "-lineinfo", "--use_fast_math", "--expt-relaxed-constexpr", "-Xcompiler", &host_flags])
+                let mut cmd = Command::new(&nvcc);
+                cmd.args(["-c", "-O3", "--std=c++17", "-lineinfo", "--use_fast_math", "--expt-relaxed-constexpr", "-Xcompiler", &host_flags])
                     .args(&ccbin)
                     .arg(format!("-I{}", marlin_dir.display()))
-                    .args(&marlin_flags)
+                    .args(if source.file_name().is_some_and(|n| n.to_string_lossy().contains("bfloat16")) { &bf16_flags } else { &marlin_flags })
                     .args(&extra)
                     .arg("-o")
                     .arg(&object)
-                    .arg(&source)
-                    .status()
-                    .unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
-                assert!(status.success(), "nvcc failed on {}", source.display());
+                    .arg(&source);
+                let output = cmd.output().unwrap_or_else(|e| panic!("cannot run {}: {e} (set CUDA_HOME)", nvcc.display()));
+                if !output.status.success() {
+                    eprintln!("nvcc failed on {} (host_flags={host_flags}):
+command: {cmd:?}
+stdout:
+{}
+stderr:
+{}", source.display(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                    panic!("nvcc failed on {}", source.display());
+                }
             });
         }
     });
@@ -473,15 +800,16 @@ fn hip_kernels() {
     let hipcc = rocm.join("bin").join(host_exe("hipcc"));
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let archs = std::env::var("FLLM_HIP_ARCHS")
-        .unwrap_or_else(|_| "gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201".into());
-    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "hip_stubs.cu"];
+        .unwrap_or_else(|_| "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201".into());
+    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
     let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
     let mut objects = Vec::new();
     for (dir, source) in sources.iter().map(|s| ("cuda", *s)).chain(hip_sources.iter().map(|s| ("hip", *s))) {
         let object = out.join(target.object_name(source));
         let mut command = Command::new(&hipcc);
-        command.args(["-x", "hip", "-c", "-O3", "-std=c++17", "-ffast-math", "-DFLLM_NO_FP4", "-Wno-unused-value", "-Wno-unused-result"]);
+        command.args(["-x", "hip", "-c", "-O3", "-std=c++17", "-DFLLM_NO_FP4", "-Wno-unused-value", "-Wno-unused-result"]);
+        if source != "kv_quant.cu" { command.arg("-ffast-math"); }
         command.args(target.hipcc_platform_flags());
         for arch in archs.split(';').map(str::trim).filter(|a| !a.is_empty()) {
             command.arg(format!("--offload-arch={arch}"));
@@ -597,8 +925,9 @@ fn metal_sources() {
 /// together with the SYCL runtime. Without a compiler this only warns: no cfg is set, `src/backend/sycl/ffi.rs` then uses Rust stubs
 /// (the crate builds, `--device sycl` reports that the runtime is missing), so `cargo check --features sycl` works everywhere.
 ///
-/// The compiler is `FLLM_SYCL_CXX` (explicit path), `$ONEAPI_ROOT/compiler/latest/bin/icpx` (`icx.exe` on Windows), `icpx` / `icx` in
-/// PATH, or `/opt/intel/oneapi/compiler/latest/bin/icpx`. `FLLM_SYCL_AOT=acm-g10,pvc,bmg-g21` compiles ahead of time for these GPUs
+/// The compiler is `FLLM_SYCL_CXX` (explicit path), `$DPCPP_HOME/bin/clang++` (the open-source intel/llvm release or nightly tarball,
+/// `sycl_linux.tar.gz`), `$ONEAPI_ROOT/compiler/latest/bin/icpx` (`icx.exe` on Windows), `icpx` / `icx` in PATH, or
+/// `/opt/intel/oneapi/compiler/latest/bin/icpx`. The SYCL runtime is taken from `lib/` next to the compiler's `bin/`. `FLLM_SYCL_AOT=acm-g10,pvc,bmg-g21` compiles ahead of time for these GPUs
 /// (needs ocloc; default: SPIR-V, compiled by the driver on first use), `FLLM_SYCL_EXTRA_FLAGS` adds flags to every compiler call.
 /// `FLLM_SKIP_GPU_KERNELS=1` skips the build like it does for CUDA / HIP (cargo check on a machine with oneAPI).
 /// The steps are those of `sycl/build_sycl.sh`: compile every file, pre-link the device images with `-fsycl-link` (so that the final
@@ -607,7 +936,7 @@ fn metal_sources() {
 fn sycl_kernels() {
     println!("cargo:rustc-check-cfg=cfg(fllm_sycl_native)");
     println!("cargo:rerun-if-changed=sycl");
-    for var in ["FLLM_SYCL_CXX", "ONEAPI_ROOT", "FLLM_SYCL_AOT", "FLLM_SYCL_EXTRA_FLAGS", "FLLM_SKIP_GPU_KERNELS"] {
+    for var in ["FLLM_SYCL_CXX", "DPCPP_HOME", "ONEAPI_ROOT", "FLLM_SYCL_AOT", "FLLM_SYCL_EXTRA_FLAGS", "FLLM_SKIP_GPU_KERNELS"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     if env::var_os("FLLM_SKIP_GPU_KERNELS").is_some() {
@@ -618,6 +947,9 @@ fn sycl_kernels() {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(path) = env::var_os("FLLM_SYCL_CXX") {
         candidates.push(PathBuf::from(path));
+    }
+    if let Some(root) = env::var_os("DPCPP_HOME") {
+        candidates.push(PathBuf::from(root).join("bin").join(if windows { "clang++.exe" } else { "clang++" }));
     }
     if let Some(root) = env::var_os("ONEAPI_ROOT") {
         candidates.push(PathBuf::from(root).join("compiler").join("latest").join("bin").join(exe));
@@ -760,7 +1092,7 @@ mod tests {
         assert_eq!(msvc.object_name("api.cu"), "api.obj");
         assert_eq!(msvc.object_name("marlin_x.cu"), "marlin_x.obj");
         assert_eq!(msvc.library_name("fllmcuda"), "fllmcuda.lib");
-        assert_eq!(msvc.nvcc_host_flags(), "/MD,/EHsc,/bigobj,/Zc:__cplusplus");
+        assert_eq!(msvc.nvcc_host_flags(), "/MD,/EHsc,/bigobj,/Zc:__cplusplus,/std:c++17");
         assert_eq!(msvc.hipcc_platform_flags(), ["-fms-runtime-lib=dll"]);
         // no -fPIC for a Windows target: neither cl.exe nor clang for msvc accept it
 
@@ -799,6 +1131,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+
+    #[test]
+    fn architectures_follow_the_toolkit() {
+        // CUDA 12.8: Pascal .. Hopper, B200 (sm_100), sm_120; no sm_103 / sm_110 / sm_121 yet
+        let (p, dropped) = arch_plan(&toolkit_codes(12, 8), None);
+        assert_eq!(p.generic, [61, 70, 75, 80, 86, 89, 90, 100, 120]);
+        assert_eq!(dropped, [110]);
+        assert_eq!((p.fp4_sm120.clone(), p.sm100.clone(), p.hopper), (vec![120], vec![100], true));
+        // CUDA 13.0: Pascal and Volta are gone, Thor is sm_110, DGX Spark and the GB300 get their own architecture-specific targets
+        let (p, dropped) = arch_plan(&toolkit_codes(13, 0), None);
+        assert_eq!(p.generic, [75, 80, 86, 89, 90, 100, 110, 120]);
+        assert_eq!(dropped, [61, 70]);
+        assert_eq!((p.fp4_sm120.clone(), p.sm100.clone(), p.hopper), (vec![120, 121], vec![100, 103, 110], true));
+        // CUDA 12.9 knows sm_103 and sm_121 but not sm_110
+        let (p, _) = arch_plan(&toolkit_codes(12, 9), None);
+        assert_eq!((p.fp4_sm120, p.sm100), (vec![120, 121], vec![100, 103]));
+    }
+
+    #[test]
+    fn a_requested_list_is_filtered_and_sorted() {
+        let supported = toolkit_codes(12, 8);
+        let (p, dropped) = arch_plan(&supported, Some("120; 80;89a ;61;121"));
+        assert_eq!(p.generic, [61, 80, 89, 120]);
+        assert_eq!(dropped, [121]);
+        assert_eq!((p.fp4_sm120.clone(), p.sm100.clone(), p.hopper), (vec![120], Vec::<u32>::new(), false));
+        let (p, _) = arch_plan(&supported, Some("75"));
+        assert_eq!((p.generic, p.fp4_sm120.is_empty(), p.sm100.is_empty(), p.hopper), (vec![75], true, true, false));
+        // a toolkit that cannot be asked keeps what was requested
+        let (p, dropped) = arch_plan(&[], Some("121;90"));
+        assert_eq!((p.generic, p.fp4_sm120, dropped), (vec![90, 121], vec![121], Vec::<u32>::new()));
+        // sm_103 on request only runs on its own cubins: the sm_100a and sm_103a ones
+        let (p, _) = arch_plan(&toolkit_codes(13, 0), Some("100;120"));
+        assert_eq!(p.sm100, [100, 103]);
+        assert_eq!(gencode_flags_a(&[100, 103]), ["-gencode", "arch=compute_100a,code=sm_100a", "-gencode", "arch=compute_103a,code=sm_103a"]);
+        assert_eq!(gencode_flags(&[89, 120]).last().map(String::as_str), Some("arch=compute_120,code=compute_120"));
+    }
+
+    #[test]
+    fn nvcc_listings_parse() {
+        assert_eq!(parse_gpu_codes("sm_75\nsm_80 sm_100\nsm_75\ncompute_90"), [75, 80, 100]);
+        assert!(parse_gpu_codes("").is_empty());
+    }
     #[test]
     fn the_lib_response_file_quotes_every_path() {
         let text = lib_response_file(Path::new(r"C:\out dir\fllmcuda.lib"), &[PathBuf::from(r"C:\out dir\api.obj"), PathBuf::from(r"C:\out dir\marlin_a.obj")]);

@@ -91,7 +91,9 @@ pub(crate) fn derive_caps(caps: &VkCaps) -> (VkCapsLike, Option<u32>) {
         && !env_on("FLLM_VULKAN_NO_COOP");
     let like = VkCapsLike {
         coop_matrix: coop_ok,
-        int_dot: caps.int_dot.int8_accelerated() && !env_on("FLLM_VULKAN_NO_IDOT"),
+        // FLLM_VULKAN_FORCE_IDOT=1 also plans the int8 dot-product shaders where the device has the feature but does not accelerate it
+        // (lavapipe): only for checking the shaders with `selftest-gpu` on a machine without a GPU, slower than the f32 shaders
+        int_dot: (caps.int_dot.int8_accelerated() || (caps.int_dot.enabled && env_on("FLLM_VULKAN_FORCE_IDOT"))) && !env_on("FLLM_VULKAN_NO_IDOT"),
         subgroup_size: coop.map_or(caps.subgroup_size.max(1), |c| c.0),
         fp16: caps.fp16,
         max_shared: caps.max_shared_memory,

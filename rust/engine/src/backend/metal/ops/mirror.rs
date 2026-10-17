@@ -499,6 +499,10 @@ fn activation_cases(fx: &mut dyn Sink) {
         (GluMode::Gelu, "gelu"),
         (GluMode::Relu2, "relu2"),
         (GluMode::Relu, "relu"),
+        (GluMode::GeluErf, "gelu_erf"),
+        (GluMode::GegluErf, "geglu_erf"),
+        (GluMode::Reglu, "reglu"),
+        (GluMode::Relu2Glu, "relu2glu"),
     ];
     for (mode, tag) in modes {
         let mut want = vec![0.0f32; n_rows * width];
@@ -518,6 +522,10 @@ fn activation_cases(fx: &mut dyn Sink) {
                     GluMode::Gelu => gelu_tanh(g),
                     GluMode::Relu2 => g.max(0.0) * g.max(0.0),
                     GluMode::Relu => g.max(0.0),
+                    GluMode::GeluErf => gelu_erf(g),
+                    GluMode::GegluErf => gelu_erf(g) * u,
+                    GluMode::Reglu => g.max(0.0) * u,
+                    GluMode::Relu2Glu => g.max(0.0) * g.max(0.0) * u,
                 };
             }
         }
@@ -537,6 +545,23 @@ fn activation_cases(fx: &mut dyn Sink) {
             &[("out", f32s(&want), "f32", 3e-5, 3e-5)],
         );
     }
+}
+
+/// GELU with the exact erf: `0.5 x (1 + erf(x / sqrt 2))`, erf by the Chebyshev fit of Numerical Recipes in double (fractional error 1.2e-7).
+fn gelu_erf(x: f32) -> f32 {
+    let z = f64::from(x) * std::f64::consts::FRAC_1_SQRT_2;
+    let t = 1.0 / (1.0 + 0.5 * z.abs());
+    let tau = t
+        * (-z * z - 1.265_512_23
+            + t * (1.000_023_68
+                + t * (0.374_091_96
+                    + t * (0.096_784_18
+                        + t * (-0.186_288_06
+                            + t * (0.278_868_07
+                                + t * (-1.135_203_98 + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
+            .exp();
+    let erf = if z >= 0.0 { 1.0 - tau } else { tau - 1.0 };
+    (0.5 * f64::from(x) * (1.0 + erf)) as f32
 }
 
 fn elementwise_cases(fx: &mut dyn Sink) {

@@ -8,18 +8,35 @@ and call it. Every command below is the exact CLI of the `fllm-rs` binary
 
 Three routes; pick one.
 
-**Release binary** (downloads from this repository's releases and installs to
-`./.local/bin/fllm-rs`, the path `run.sh` uses):
+**Release binary** (no clone needed; installs to `~/.local/bin/fllm-rs`):
 
 ```sh
-./install.sh              # newest release
-./install.sh v0.1.0       # a specific tag
+curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh | sh -s -- --version v0.1.2 --modify-path
 ```
 
-The script detects OS/architecture, verifies the asset against the published `.sha256` file
-(a release without that file is a hard error unless you pass `--no-verify`) and, when no asset
-exists for the platform, prints a clear message and builds the checkout with `cargo` instead.
-That fallback needs a Rust toolchain, a C compiler, CMake and Git.
+Options: `--version TAG` (default: newest release), `--prefix DIR` (installs to `DIR/bin`; `FLLM_INSTALL_DIR` names the exact directory),
+`--variant cpu|cuda`, `--modify-path` (appends a guarded `PATH` line to the rc file of bash, zsh or fish, or `~/.profile`; running it again adds nothing),
+`--uninstall` (removes the binary and the `PATH` line it added), `--build` (from a clone: compile instead of downloading), `--no-verify`.
+Without `--modify-path` the script prints the line to add. On macOS it clears the quarantine attribute of the installed file, because Gatekeeper refuses an unsigned
+binary that a browser downloaded (`curl` does not set the attribute; the binary is not signed or notarized).
+
+The script detects OS and architecture and verifies the asset against the release's `.sha256` file and, when the release notes contain a `<sha256>  <asset>` list,
+against that too; a mismatch aborts, and a release with neither is refused unless you pass `--no-verify`. This catches damaged, truncated or mismatched downloads; it is
+not a signature (whoever can replace the asset can replace its checksum), the HTTPS connection to GitHub is what authenticates the source. `--variant cuda` needs the
+release asset `fllm-linux-x86_64-cuda.tar.gz`; releases without it get the Docker command for CUDA instead. From a clone, `./install.sh` with a missing asset builds the
+checkout (needs a Rust toolchain, a C compiler, CMake and Git). `./run.sh` finds the binary in `$FLLM_INSTALL_DIR`, `./.local/bin`, the `PATH` and `~/.local/bin`.
+
+**Windows** (PowerShell 5.1 or 7):
+
+```powershell
+irm https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.ps1 | iex
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.ps1))) -Variant cuda -AddToPath
+```
+
+Installs to `%LOCALAPPDATA%\fllm\bin\fllm-rs.exe`. The user `PATH` (not the machine `PATH`) changes only with `-AddToPath` or after you answer the prompt of an interactive
+session; `-Uninstall` removes the file and the entry. With an NVIDIA GPU (driver, `nvidia-smi` or the display adapter list) the CUDA asset is chosen when the release has it. The binary
+is not code-signed, so SmartScreen or Defender may warn; see [windows.md](windows.md).
 
 **Docker** (CPU by default, model directory mounted read-only):
 

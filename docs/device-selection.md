@@ -39,11 +39,11 @@ the two implementations of one GPU can be compared (`selftest-gpu --device vulka
 `auto` (the default of `serve`, `run` and `selftest-gpu`) takes the first backend of
 
 ```text
-CUDA > ROCm (hip) > Metal > Vulkan (native, else wgpu) > DX12 > SYCL > CPU
+CUDA > ROCm (hip) > Metal > Vulkan (native, else wgpu) > DX12 > CPU
 ```
 
 that has a hardware GPU, and there the best device: a discrete GPU before an integrated one, then the larger memory. NPUs and TPUs are never
-chosen automatically (`--device npu` / `--device tpu`). The chain is printed by `fllm-rs devices` ("Auto selection") and at server start.
+chosen automatically (`--device npu` / `--device tpu`), and SYCL only when `FLLM_AUTO_ORDER` names it (`--device sycl`; an Intel GPU is reached through Vulkan by default). The chain is printed by `fllm-rs devices` ("Auto selection") and at server start.
 
 If the chosen device cannot be created, or cannot run the model (a feature the backend lacks), `serve` says why and tries the next device of
 the chain, ending on the CPU. An *explicit* device is never replaced silently: if `--device cuda:0` cannot be created that is an error. (`vulkan` and

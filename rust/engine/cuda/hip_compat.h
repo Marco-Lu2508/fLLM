@@ -51,6 +51,19 @@
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEventElapsedTime hipEventElapsedTime
 #define cudaEventDestroy hipEventDestroy
+// graph capture of a decode step (api.cu, fllm_cuda_graph_*)
+#define cudaGraph_t hipGraph_t
+#define cudaGraphExec_t hipGraphExec_t
+#define cudaStreamBeginCapture hipStreamBeginCapture
+#define cudaStreamEndCapture hipStreamEndCapture
+#define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+#define cudaGraphInstantiate hipGraphInstantiateWithFlags
+#define cudaGraphLaunch hipGraphLaunch
+#define cudaGraphDestroy hipGraphDestroy
+#define cudaGraphExecDestroy hipGraphExecDestroy
+#define cudaHostAlloc(p, n, f) hipHostMalloc(p, n, f)
+#define cudaHostAllocDefault hipHostMallocDefault
+#define cudaFreeHost hipHostFree
 // api.cu (fllm_cuda_download) asks what a failing pointer is; hipPointerAttribute_t has the same `type` and `device` fields
 #define cudaPointerAttributes hipPointerAttribute_t
 #define cudaPointerGetAttributes hipPointerGetAttributes
@@ -73,15 +86,15 @@
 
 // HIP wants 64-bit lane masks for the _sync variants; the unmasked forms are equivalent for the full-warp uses here
 template <class T>
-__device__ __forceinline__ T __shfl_xor_sync(unsigned int, T var, int lane_mask, int width = warpSize) {
+__device__ __forceinline__ T __shfl_xor_sync(unsigned int, T var, int lane_mask, int width = 32) {
     return __shfl_xor(var, lane_mask, width);
 }
 template <class T>
-__device__ __forceinline__ T __shfl_down_sync(unsigned int, T var, unsigned int delta, int width = warpSize) {
+__device__ __forceinline__ T __shfl_down_sync(unsigned int, T var, unsigned int delta, int width = 32) {
     return __shfl_down(var, delta, width);
 }
 template <class T>
-__device__ __forceinline__ T __shfl_sync(unsigned int, T var, int src_lane, int width = warpSize) {
+__device__ __forceinline__ T __shfl_sync(unsigned int, T var, int src_lane, int width = 32) {
     return __shfl(var, src_lane, width);
 }
 

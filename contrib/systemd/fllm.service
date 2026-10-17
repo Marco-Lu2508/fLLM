@@ -1,0 +1,31 @@
+[Unit]
+Description=fLLM High-Performance Inference Server
+Documentation=https://github.com/Marco-Lu2508/fLLM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fllm
+Group=fllm
+WorkingDirectory=/var/lib/fllm
+Environment="FLLM_CACHE=/var/cache/fllm"
+Environment="FLLM_CONFIG=/etc/fllm/fllm.toml"
+EnvironmentFile=-/etc/default/fllm
+ExecStart=/usr/local/bin/fllm-rs serve --config /etc/fllm/fllm.toml $FLLM_EXTRA_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=35s
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fllm /var/cache/fllm
+
+[Install]
+WantedBy=multi-user.target

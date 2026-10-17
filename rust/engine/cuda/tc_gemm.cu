@@ -130,7 +130,7 @@ tc_gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float
             const int m = m0 + run / TC_RPK;
             const int k = kt * TC_BK + (run % TC_RPK) * 16;
             if (m < rows) {
-                decode16<KIND>(W + (size_t)m * row_bytes, k >> 4, cols, wv[i]);
+                decode16<(uint32_t)KIND>(W + (size_t)m * row_bytes, k >> 4, cols, wv[i]);
             } else {
 #pragma unroll
                 for (int j = 0; j < 16; j++) wv[i][j] = 0.f;
@@ -240,7 +240,7 @@ tc_gemm_wmma_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, 
             const int m = m0 + run / TC_RPK;
             const int k = kt * TC_BK + (run % TC_RPK) * 16;
             if (m < rows) {
-                decode16<KIND>(W + (size_t)m * row_bytes, k >> 4, cols, wv[i]);
+                decode16<(uint32_t)KIND>(W + (size_t)m * row_bytes, k >> 4, cols, wv[i]);
             } else {
 #pragma unroll
                 for (int j = 0; j < 16; j++) wv[i][j] = 0.f;
@@ -386,4 +386,19 @@ int fllm_tc_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, fl
         case KIND_IQ1_M: return run<KIND_IQ1_M>(s, w, X, Y, bias, rows, cols, batch);
         default: return 0;
     }
+}
+
+// Grouped execution of up to seven projections in a layer
+extern "C" int fllm_cuda_tc_grouped_gemm(cudaStream_t s, const void *const *W, const int *kinds, const float *const *X,
+                                         float *const *Y, const float *const *bias, const int *rows, const int *cols,
+                                         int count, int batch) {
+    if (count <= 0 || !W || !X || !Y || !kinds || !rows || !cols) return -1;
+    for (int i = 0; i < count; i++) {
+        if (!W[i]) continue;
+        const float *b = bias ? bias[i] : nullptr;
+        if (!fllm_tc_gemm_try(s, W[i], kinds[i], X[i], Y[i], b, rows[i], cols[i], batch)) {
+            return -1;
+        }
+    }
+    return 0;
 }

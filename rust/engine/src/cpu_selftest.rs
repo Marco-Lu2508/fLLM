@@ -63,7 +63,7 @@ pub(crate) fn layout(kind: u32) -> (usize, usize) {
         20 => (32, 18),
         23 => (256, 136),
         39 => (32, 17),
-        0x8000_0020 => (1, 1),
+        0x8000_0020 | 0x8000_0021 => (1, 1),
         _ => panic!("no self-test layout for GGUF type {kind}"),
     }
 }
@@ -101,6 +101,7 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
         0x8000_0015 => "q4zp64",
         0x8000_0016 => "q4zp128",
         0x8000_0020 => "fp8m",
+        0x8000_0021 => "fp8b",
         _ => "?",
     }
 }
@@ -108,6 +109,20 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
 /// Random packed rows. Payload bytes are uniform; every scale field holds a finite, moderate
 /// value so products stay far from overflow.
 pub(crate) fn random_weights(kind: u32, rows: usize, cols: usize, rng: &mut Lcg) -> Vec<u8> {
+    if kind == 0x8000_0021 {
+        let tiles = rows.div_ceil(128) * cols.div_ceil(128);
+        let mut bytes = Vec::with_capacity(rows * cols + tiles * 2);
+        for _ in 0..rows * cols {
+            let b = 1 + (rng.next() % 126) as u8;
+            let sign = if rng.next().is_multiple_of(2) { 0 } else { 0x80 };
+            bytes.push(b | sign);
+        }
+        for _ in 0..tiles {
+            let d = f16::from_f32(0.001 + (rng.next() % 100) as f32 / 4000.0).to_le_bytes();
+            bytes.extend_from_slice(&d);
+        }
+        return bytes;
+    }
     if kind == 0x8000_0020 {
         let mut bytes = Vec::with_capacity(rows * cols + rows * 2);
         for _ in 0..rows * cols {

@@ -53,9 +53,11 @@ enum Int4Layout {
 pub enum PackedData {
     Exl2(crate::exl2::Exl2),
     Exl3(crate::exl3::Exl3),
+    /// The experts of a layer stacked in index order (`[experts, rows, cols]`): `part_rows` rows each.
     Concat {
         parts: Vec<PackedData>,
         elements: usize,
+        part_rows: usize,
     },
     Int4(PackedInt4),
     Fp8 {
@@ -75,6 +77,10 @@ pub enum PackedData {
     Nvfp4(crate::nvfp4::Nvfp4),
     /// Symmetric integer weights of `compressed-tensors` checkpoints.
     SymInt(crate::symint::SymInt),
+    /// OCP MXFP4 weights (GGUF type MXFP4 when written compactly).
+    Mxfp4(crate::dequant::Mxfp4),
+    /// Formats the engine has no kernel for (bitsandbytes, ...): expanded to F16/F32 when written.
+    Dyn(std::sync::Arc<dyn crate::dequant::Dequant>),
 }
 
 impl PackedInt4 {
@@ -477,6 +483,11 @@ impl PackedData {
         match self {
             Self::Int4(t) => t.q4z_group(),
             Self::SymInt(t) => t.q4z_group(),
+            // stacked experts: all of them must agree
+            Self::Concat { parts, .. } => {
+                let group = parts.first()?.q4z_group()?;
+                parts.iter().all(|p| p.q4z_group() == Some(group)).then_some(group)
+            }
             _ => None,
         }
     }
@@ -497,11 +508,38 @@ impl PackedData {
         }
     }
 
-    /// The NVFP4 tensor, if this is one.
-    pub fn nvfp4(&self) -> Option<&crate::nvfp4::Nvfp4> {
+    /// The NVFP4 tensors this tensor is made of: itself, or one per expert of a stacked group (`None` when any part is another format).
+    pub fn nvfp4_parts(&self) -> Option<Vec<&crate::nvfp4::Nvfp4>> {
         match self {
-            Self::Nvfp4(t) => Some(t),
+            Self::Nvfp4(t) => Some(vec![t]),
+            Self::Concat { parts, .. } => parts
+                .iter()
+                .map(|p| match p {
+                    Self::Nvfp4(t) => Some(t),
+                    _ => None,
+                })
+                .collect(),
             _ => None,
+        }
+    }
+
+    /// The MXFP4 tensor, if this is one.
+    pub fn mxfp4(&self) -> Option<&crate::dequant::Mxfp4> {
+        match self {
+            Self::Mxfp4(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Append the GGUF type 40 blocks of output row `row` of an NVFP4 tensor or of a stacked group of them.
+    pub fn encode_nvfp4_row(&self, row: usize, dst: &mut Vec<u8>) -> Result<(), String> {
+        match self {
+            Self::Nvfp4(t) => t.encode_gguf_row(row, dst),
+            Self::Concat { parts, part_rows, .. } => parts
+                .get(row / (*part_rows).max(1))
+                .ok_or_else(|| format!("NVFP4 row {row} out of range"))?
+                .encode_nvfp4_row(row % (*part_rows).max(1), dst),
+            _ => Err("tensor cannot be stored as NVFP4".into()),
         }
     }
 
@@ -535,11 +573,32 @@ impl PackedData {
         }
     }
 
+    /// Whether this tensor is in the block-wise FP8 format (`Fp8Block`).
+    pub fn is_fp8b(&self) -> bool {
+        match self {
+            Self::Fp8Block(b) => b.is_128x128(),
+            Self::Concat { parts, .. } => !parts.is_empty() && parts.iter().all(|p| p.is_fp8b()),
+            _ => false,
+        }
+    }
+
+    /// The Fp8Block tensor if this is one.
+    pub fn fp8_block(&self) -> Option<&crate::symint::Fp8Block> {
+        match self {
+            Self::Fp8Block(t) => Some(t),
+            _ => None,
+        }
+    }
+
     /// Append the `Q4Z` blocks of output row `out_idx` (see `PackedInt4::encode_q4z_row`).
     pub fn encode_q4z_row(&self, out_idx: usize, dst: &mut Vec<u8>) -> Result<(), String> {
         match self {
             Self::Int4(t) => t.encode_q4z_row(out_idx, dst),
             Self::SymInt(t) => t.encode_q4z_row(out_idx, dst),
+            Self::Concat { parts, part_rows, .. } => parts
+                .get(out_idx / (*part_rows).max(1))
+                .ok_or_else(|| format!("output row {out_idx} out of range"))?
+                .encode_q4z_row(out_idx % (*part_rows).max(1), dst),
             _ => Err("only 4-bit AWQ / GPTQ / compressed-tensors tensors can be written as Q4Z".into()),
         }
     }
@@ -563,6 +622,8 @@ impl PackedData {
             Self::Fp8Block(t) => t.element_count(),
             Self::Nvfp4(t) => t.element_count(),
             Self::SymInt(t) => t.element_count(),
+            Self::Mxfp4(t) => t.element_count(),
+            Self::Dyn(t) => t.element_count(),
         }
     }
 
@@ -571,7 +632,7 @@ impl PackedData {
         match self {
             Self::Exl2(t) => t.decode_chunk(start, dst),
             Self::Exl3(t) => t.decode_chunk(start, dst),
-            Self::Concat { parts, elements } => {
+            Self::Concat { parts, elements, .. } => {
                 checked_range(start, dst.len(), *elements)?;
                 let mut offset = 0;
                 for part in parts {
@@ -588,6 +649,8 @@ impl PackedData {
             Self::Fp8Block(t) => t.decode_chunk(start, dst),
             Self::Nvfp4(t) => t.decode_chunk(start, dst),
             Self::SymInt(t) => t.decode_chunk(start, dst),
+            Self::Mxfp4(t) => t.decode_chunk(start, dst),
+            Self::Dyn(t) => t.decode_chunk(start, dst),
             Self::Fp8 {
                 bytes,
                 format,
@@ -880,6 +943,49 @@ mod tests {
             }
         }
       }
+
+    #[test]
+    fn stacked_experts_encode_the_rows_of_every_expert_as_q4z() {
+        let (inp, out, group, experts) = (64usize, 8usize, 32usize, 3usize);
+        let mut seed = 5u32;
+        let mut bytes = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (seed >> 24) as u8
+                })
+                .collect()
+        };
+        let mut scales = Vec::new();
+        for i in 0..inp / group * out {
+            scales.extend_from_slice(&half::f16::from_f32(0.01 * (1 + i % 5) as f32).to_bits().to_le_bytes());
+        }
+        let parts: Vec<PackedData> = (0..experts)
+            .map(|_| {
+                PackedData::Int4(
+                    PackedInt4::awq_gemm(owned(bytes(inp * out / 2)), owned(bytes(inp / group * out / 2)), owned(scales.clone()), inp, out, group, ScaleType::F16)
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let stacked = PackedData::Concat { parts: parts.clone(), elements: experts * inp * out, part_rows: out };
+        assert_eq!(stacked.q4z_group(), Some(group));
+        for (e, part) in parts.iter().enumerate() {
+            for r in 0..out {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                stacked.encode_q4z_row(e * out + r, &mut a).unwrap();
+                part.encode_q4z_row(r, &mut b).unwrap();
+                assert_eq!(a, b, "expert {e} row {r}");
+            }
+        }
+        assert!(stacked.encode_q4z_row(experts * out, &mut Vec::new()).is_err());
+        // experts that disagree on the group size cannot be stored together
+        let other = PackedData::Int4(
+            PackedInt4::awq_gemm(owned(bytes(inp * out / 2)), owned(bytes(inp / 64 * out / 2)), owned(scales[..out * 2].to_vec()), inp, out, 64, ScaleType::F16).unwrap(),
+        );
+        let mixed = PackedData::Concat { parts: vec![parts[0].clone(), other], elements: 2 * inp * out, part_rows: out };
+        assert_eq!(mixed.q4z_group(), None);
+    }
 
     #[test]
     fn q4zp_rows_with_act_order_dequantize_to_dense_decode() {

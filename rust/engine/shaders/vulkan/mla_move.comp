@@ -1,0 +1,53 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: mla_move | bindings: a,b,dst | push: count,rows,heads,nope,rope,value,kv_lora | grid: [min(ceil(count/256), 65535), 1, 1]
+// Data movement of multi-head latent attention (expanded cache), one output element per invocation (grid-stride loop over count floats).
+// Layouts as `mla_qkv` of the decoder; dk = nope + rope, width = kv_lora + rope; "at" = row * heads + head. MODE:
+//   0 Q       count = rows*heads*dk    dst[at*dk + d] = d < rope ? a[at*dk + nope + d] : a[at*dk + d - rope]            a = q_full
+//   1 K       count = rows*heads*dk    dst[at*dk + d] = d < rope ? a[row*width + kv_lora + d] : b[at*(nope+value) + d - rope]   a = kv_a, b = kv
+//   2 V       count = rows*heads*value dst[at*value + e] = a[at*(nope+value) + nope + e]                                a = kv
+//   3 LATENT  count = rows*kv_lora     dst[row*kv_lora + c] = a[row*width + c]                                          a = kv_a
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+#ifndef MODE
+#define MODE 0
+#endif
+
+layout(std430, binding = 0) readonly buffer ABuf { float a[]; };
+layout(std430, binding = 1) readonly buffer BBuf { float b[]; };
+layout(std430, binding = 2) writeonly buffer DstBuf { float dst[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint rows;
+    uint heads;
+    uint nope;
+    uint rope;
+    uint value;
+    uint kv_lora;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    const uint dk = p.nope + p.rope;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+#if MODE == 0
+        const uint at = i / dk;
+        const uint d = i - at * dk;
+        dst[i] = d < p.rope ? a[at * dk + p.nope + d] : a[at * dk + d - p.rope];
+#elif MODE == 1
+        const uint at = i / dk;
+        const uint d = i - at * dk;
+        dst[i] = d < p.rope ? a[(at / p.heads) * (p.kv_lora + p.rope) + p.kv_lora + d] : b[at * (p.nope + p.value) + d - p.rope];
+#elif MODE == 2
+        const uint at = i / p.value;
+        const uint e = i - at * p.value;
+        dst[i] = a[at * (p.nope + p.value) + p.nope + e];
+#else
+        const uint row = i / p.kv_lora;
+        const uint c = i - row * p.kv_lora;
+        dst[i] = a[row * (p.kv_lora + p.rope) + c];
+#endif
+    }
+}

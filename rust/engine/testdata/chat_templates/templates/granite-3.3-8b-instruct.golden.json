@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>I start.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>ok<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful assistant with access to the following tools. When a tool is required to answer the user's query, respond only with <|tool_call|> followed by a JSON list of tools used. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.<|end_of_text|>\n<|start_of_role|>available_tools<|end_of_role|>[\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"calc\",\n            \"description\": \"Evaluate an arithmetic expression.\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"expression\": {\n                        \"type\": \"string\"\n                    },\n                    \"precision\": {\n                        \"type\": \"integer\"\n                    }\n                },\n                \"required\": [\n                    \"expression\"\n                ]\n            }\n        }\n    }\n]<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Compute 17*3<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Let me compute that.<|end_of_text|>\n<|start_of_role|>tool<|end_of_role|>51<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/documents": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. Write the response to the user's input by strictly aligning with the facts in the provided documents. If the information needed to answer the question is not available in the documents, inform the user that the question cannot be answered based on the available data.<|end_of_text|>\n<|start_of_role|>document {\"document_id\": \"\"}<|end_of_role|>\nAlpha text.<|end_of_text|>\n<|start_of_role|>document {\"document_id\": \"\"}<|end_of_role|>\nBeta text.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Summarize.<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|start_of_role|>system<|end_of_role|>  padded system with trailing newline\n\n<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>  padded user \n<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/multi_turn": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Be brief.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Hi<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Hello! How can I help?<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Tell me a joke.<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Why did the chicken cross the road?<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Why?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Hi<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>Hello!<|end_of_text|>\n"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Think hard: 13*17<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/reasoning_history": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>2+2?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|><think>\nsimple\n</think>\n\n4<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>And 3+3?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/system_not_first": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>a<|end_of_text|>\n<|start_of_role|>system<|end_of_role|>late system<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>b<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/system_user": {
+  "ok": "<|start_of_role|>system<|end_of_role|>You are a terse assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Capital of France?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>2+2?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>2+2?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful assistant with access to the following tools. When a tool is required to answer the user's query, respond only with <|tool_call|> followed by a JSON list of tools used. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.<|end_of_text|>\n<|start_of_role|>available_tools<|end_of_role|>[\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_weather\",\n            \"description\": \"Get the current weather for a city.\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"city\": {\n                        \"type\": \"string\",\n                        \"description\": \"City name, e.g. München\"\n                    },\n                    \"unit\": {\n                        \"type\": \"string\",\n                        \"enum\": [\n                            \"celsius\",\n                            \"fahrenheit\"\n                        ]\n                    }\n                },\n                \"required\": [\n                    \"city\"\n                ]\n            }\n        }\n    },\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"calc\",\n            \"description\": \"Evaluate an arithmetic expression.\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"expression\": {\n                        \"type\": \"string\"\n                    },\n                    \"precision\": {\n                        \"type\": \"integer\"\n                    }\n                },\n                \"required\": [\n                    \"expression\"\n                ]\n            }\n        }\n    }\n]<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Weather in Berlin and 2+2?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|><|end_of_text|>\n<|start_of_role|>tool<|end_of_role|>{\"temp\": 21.5, \"sky\": \"clear\"}<|end_of_text|>\n<|start_of_role|>tool<|end_of_role|>4<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/tool_call_then_answer": {
+  "err": "TypeError: can only concatenate str (not \"NoneType\") to str"
+ },
+ "default/tools_system_user": {
+  "ok": "<|start_of_role|>system<|end_of_role|>You can call tools.<|end_of_text|>\n<|start_of_role|>available_tools<|end_of_role|>[\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_weather\",\n            \"description\": \"Get the current weather for a city.\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"city\": {\n                        \"type\": \"string\",\n                        \"description\": \"City name, e.g. München\"\n                    },\n                    \"unit\": {\n                        \"type\": \"string\",\n                        \"enum\": [\n                            \"celsius\",\n                            \"fahrenheit\"\n                        ]\n                    }\n                },\n                \"required\": [\n                    \"city\"\n                ]\n            }\n        }\n    }\n]<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Weather in Berlin?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/tools_user": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful assistant with access to the following tools. When a tool is required to answer the user's query, respond only with <|tool_call|> followed by a JSON list of tools used. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.<|end_of_text|>\n<|start_of_role|>available_tools<|end_of_role|>[\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_weather\",\n            \"description\": \"Get the current weather for a city.\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"city\": {\n                        \"type\": \"string\",\n                        \"description\": \"City name, e.g. München\"\n                    },\n                    \"unit\": {\n                        \"type\": \"string\",\n                        \"enum\": [\n                            \"celsius\",\n                            \"fahrenheit\"\n                        ]\n                    }\n                },\n                \"required\": [\n                    \"city\"\n                ]\n            }\n        }\n    },\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"calc\",\n            \"description\": \"Evaluate an arithmetic expression.\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"expression\": {\n                        \"type\": \"string\"\n                    },\n                    \"precision\": {\n                        \"type\": \"integer\"\n                    }\n                },\n                \"required\": [\n                    \"expression\"\n                ]\n            }\n        }\n    }\n]<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Weather in München?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>a<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>b<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/unicode": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ },
+ "default/user_only": {
+  "ok": "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: October 15, 2026.\nYou are Granite, developed by IBM. You are a helpful AI assistant.<|end_of_text|>\n<|start_of_role|>user<|end_of_role|>Hello<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+ }
+}

@@ -305,7 +305,7 @@ pub(crate) fn build_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path
 
 pub(crate) fn convert(dir: &Path, dtype: OutputDType) -> PathBuf {
     let out = dir.join(format!("out-{dtype:?}.gguf"));
-    convert_checkpoint(dir, &out, ConvertOptions { output_dtype: dtype, overwrite: false })
+    convert_checkpoint(dir, &out, ConvertOptions { output_dtype: dtype, overwrite: false, spec_head: None })
         .unwrap_or_else(|e| panic!("conversion of {} failed: {e}", dir.display()));
     out
 }
@@ -450,12 +450,13 @@ fn unsupported_quantization_configs_fail_with_actionable_messages() {
         (json!({"quant_method": "modelopt", "quant_algo": "W4A8_AWQ"}), "unsupported ModelOpt quant_algo"),
         (json!({"quant_method": "modelopt", "quant_algo": "NVFP4", "group_size": 32}), "group_size 32"),
         (json!({"quant_method": "compressed-tensors", "format": "nvfp4-pack-quantized", "config_groups":
-            {"g": {"weights": {"num_bits": 4, "type": "float", "strategy": "tensor_group", "group_size": 16}}}}), "ModelOpt NVFP4"),
+            {"g": {"weights": {"num_bits": 4, "type": "float", "strategy": "tensor_group", "group_size": 8}}}}), "group_size"),
         (json!({"quant_method": "compressed-tensors", "format": "pack-quantized", "config_groups":
             {"g": {"weights": {"num_bits": 4, "type": "int", "symmetric": false, "strategy": "group", "group_size": 32}}}}), "asymmetric"),
         (json!({"quant_method": "compressed-tensors", "format": "pack-quantized", "config_groups":
             {"g": {"weights": {"num_bits": 3, "type": "int", "symmetric": true, "strategy": "group", "group_size": 32}}}}), "3-bit"),
-        (json!({"quant_method": "bitsandbytes"}), "unsupported quantization_config quant_method"),
+        (json!({"quant_method": "some_new_method"}), "unsupported quantization_config quant_method"),
+        (json!({"quant_method": "bitsandbytes"}), "neither load_in_4bit nor load_in_8bit"),
     ];
     for (q, expect) in cases {
         let mut cfg: Value = serde_json::from_slice(&fs::read(dir.join("config.json")).unwrap()).unwrap();
@@ -486,6 +487,59 @@ fn the_comparison_detects_a_wrong_model() {
     }
 }
 
+#[test]
+fn direct_safetensors_loader_zero_copy_and_logit_parity() {
+    let quant = scratch("direct-q");
+    let reference = scratch("direct-r");
+    build_pair(Kind::Nvfp4, 42, &quant, &reference);
+
+    // 1. Direct model load without converting to GGUF file
+    let direct_model = GgufModel::load(reference.to_str().unwrap(), 64, 1, 2).unwrap();
+    let direct_mapping = direct_model.mapping();
+
+    // 2. Reference model converted to GGUF file
+    let r_gguf = convert(&reference, OutputDType::Preserve);
+    let r_mapped = MappedGguf::open(&r_gguf).unwrap();
+
+    // 3. Verify zero-copy: untouched tensors (like token_embd.weight) are mapped directly from safetensors
+    assert!(direct_mapping.extra_mappings().contains_key("token_embd.weight"), "token_embd.weight must be in extra_mappings");
+    let embd_bytes = direct_mapping.tensor_bytes("token_embd.weight").unwrap();
+    let mmap = direct_mapping.extra_mappings().get("token_embd.weight").unwrap();
+    let mmap_start = mmap.as_ptr() as usize;
+    let mmap_end = mmap_start + mmap.len();
+    let embd_ptr = embd_bytes.as_ptr() as usize;
+    assert!(
+        embd_ptr >= mmap_start && embd_ptr + embd_bytes.len() <= mmap_end,
+        "token_embd.weight ({:#x}) must reside inside safetensors mmap ({:#x}..{:#x})",
+        embd_ptr,
+        mmap_start,
+        mmap_end
+    );
+
+    // 4. Verify bit-for-bit parity of every tensor in the model
+    assert_eq!(direct_mapping.index().tensors.len(), r_mapped.index().tensors.len());
+    for t in direct_mapping.index().tensors.iter() {
+        let direct_b = direct_mapping.tensor_bytes(&t.name).unwrap();
+        let ref_b = r_mapped.tensor_bytes(&t.name).unwrap();
+        assert_eq!(
+            direct_b,
+            ref_b,
+            "tensor byte mismatch for tensor {}",
+            t.name
+        );
+    }
+
+    // 5. Verify exact logit parity from forward pass
+    let direct_logits = logits(&reference, &PROMPT);
+    let gguf_logits = logits(&r_gguf, &PROMPT);
+    assert_close(&direct_logits, &gguf_logits, 1e-6, "direct vs gguf forward pass");
+    assert_eq!(direct_logits, gguf_logits, "forward pass logits must match bit-for-bit");
+
+    for d in [quant, reference] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
 /// Writes the tiny NVFP4 model and its dequantized reference to `$FLLM_FIXTURE_OUT/{nvfp4,reference}` for trying the
 /// command line by hand: `FLLM_FIXTURE_OUT=/tmp/fx cargo test -p fllm-engine --lib write_fixture -- --ignored`.
 #[test]
@@ -496,4 +550,121 @@ fn write_fixture_for_manual_runs() {
     fs::create_dir_all(&quant).unwrap();
     fs::create_dir_all(&reference).unwrap();
     build_pair(Kind::Nvfp4, 1234, &quant, &reference);
+}
+
+// ---- mixture-of-experts checkpoints: the experts of a layer stay in their compact format as one stacked tensor ----
+
+const EXPERTS: usize = 4;
+const EXPERTS_USED: usize = 2;
+
+/// The tiny Mixtral-style model: the attention linears and the experts (`w1` gate, `w3` up, `w2` down) in `kind`, the router in BF16.
+/// The reference has the same values dequantized to F32.
+fn build_moe_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
+    let mut rng = Rng(seed);
+    let mut q_entries = Vec::new();
+    let mut r_entries = Vec::new();
+    let both = |e: Entry, q: &mut Vec<Entry>, r: &mut Vec<Entry>| {
+        r.push(Entry { name: e.name.clone(), dtype: e.dtype, shape: e.shape.clone(), bytes: e.bytes.clone() });
+        q.push(e);
+    };
+    let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
+    both(bf16_entry("model.embed_tokens.weight", &[VOCAB, HIDDEN], &embed), &mut q_entries, &mut r_entries);
+    let head: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| 0.3 * rng.unit()).collect();
+    both(bf16_entry("lm_head.weight", &[VOCAB, HIDDEN], &head), &mut q_entries, &mut r_entries);
+    let norm: Vec<f32> = (0..HIDDEN).map(|_| 1.0 + 0.1 * rng.unit()).collect();
+    both(bf16_entry("model.norm.weight", &[HIDDEN], &norm), &mut q_entries, &mut r_entries);
+    for layer in 0..LAYERS {
+        for n in ["input_layernorm", "post_attention_layernorm"] {
+            let w: Vec<f32> = (0..HIDDEN).map(|_| 1.0 + 0.1 * rng.unit()).collect();
+            both(bf16_entry(&format!("model.layers.{layer}.{n}.weight"), &[HIDDEN], &w), &mut q_entries, &mut r_entries);
+        }
+        let router: Vec<f32> = (0..EXPERTS * HIDDEN).map(|_| rng.unit()).collect();
+        both(bf16_entry(&format!("model.layers.{layer}.block_sparse_moe.gate.weight"), &[EXPERTS, HIDDEN], &router), &mut q_entries, &mut r_entries);
+        let mut linears = vec![
+            (format!("model.layers.{layer}.self_attn.q_proj"), HEADS * HEAD_DIM, HIDDEN),
+            (format!("model.layers.{layer}.self_attn.k_proj"), KV_HEADS * HEAD_DIM, HIDDEN),
+            (format!("model.layers.{layer}.self_attn.v_proj"), KV_HEADS * HEAD_DIM, HIDDEN),
+            (format!("model.layers.{layer}.self_attn.o_proj"), HIDDEN, HEADS * HEAD_DIM),
+        ];
+        for e in 0..EXPERTS {
+            let base = format!("model.layers.{layer}.block_sparse_moe.experts.{e}");
+            linears.push((format!("{base}.w1"), INTER, HIDDEN));
+            linears.push((format!("{base}.w3"), INTER, HIDDEN));
+            linears.push((format!("{base}.w2"), HIDDEN, INTER));
+        }
+        for (prefix, out, inp) in linears {
+            let (entries, dense) = quantized_linear(&mut rng, kind, &prefix, out, inp);
+            q_entries.extend(entries);
+            r_entries.push(f32_entry(&format!("{prefix}.weight"), &[out, inp], &dense));
+        }
+        if let Kind::Nvfp4 = kind {
+            q_entries.push(f32_entry(&format!("model.layers.{layer}.self_attn.k_proj.k_scale"), &[], &[0.5]));
+        }
+    }
+    for (dir, quant) in [(quant_dir, Some(quantization_config(kind))), (ref_dir, None)] {
+        write_support_files(dir, quant);
+        let mut cfg: Value = serde_json::from_slice(&fs::read(dir.join("config.json")).unwrap()).unwrap();
+        cfg["model_type"] = json!("mixtral");
+        cfg["architectures"] = json!(["MixtralForCausalLM"]);
+        cfg["num_local_experts"] = json!(EXPERTS);
+        cfg["num_experts_per_tok"] = json!(EXPERTS_USED);
+        fs::write(dir.join("config.json"), cfg.to_string()).unwrap();
+    }
+    write_safetensors(&quant_dir.join("model.safetensors"), &q_entries);
+    write_safetensors(&ref_dir.join("model.safetensors"), &r_entries);
+}
+
+fn tensor_dims(gguf: &Path) -> std::collections::BTreeMap<String, Vec<u64>> {
+    let m = MappedGguf::open(gguf).unwrap();
+    m.index().tensors.iter().map(|t| (t.name.clone(), t.dimensions.clone())).collect()
+}
+
+/// Convert the quantized and the reference MoE model, check the compact types of the stacked experts and compare the logits.
+fn check_moe(kind: Kind, seed: u64, expert_type: u32, tolerance: f32) -> std::collections::BTreeMap<String, Vec<u64>> {
+    let quant = scratch("moe-q");
+    let reference = scratch("moe-r");
+    build_moe_pair(kind, seed, &quant, &reference);
+    let q_gguf = convert(&quant, OutputDType::Preserve);
+    let r_gguf = convert(&reference, OutputDType::Preserve);
+    let types = tensor_types(&q_gguf);
+    for t in ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"] {
+        for layer in 0..LAYERS {
+            assert_eq!(types.get(&format!("blk.{layer}.{t}.weight")), Some(&expert_type), "{kind:?}: type of blk.{layer}.{t}");
+        }
+    }
+    let got = logits(&q_gguf, &PROMPT);
+    let want = logits(&r_gguf, &PROMPT);
+    assert_close(&got, &want, tolerance, &format!("MoE {kind:?}"));
+    // the expanded conversion (`--outtype f16`) agrees as well
+    let expanded = convert(&quant, OutputDType::F16);
+    assert_eq!(tensor_types(&expanded).get("blk.0.ffn_gate_exps.weight"), Some(&1), "{kind:?}: f16 expansion");
+    assert_close(&logits(&expanded, &PROMPT), &want, tolerance.max(2e-2), &format!("MoE {kind:?} as f16"));
+    let dims = tensor_dims(&q_gguf);
+    let _ = fs::remove_dir_all(quant);
+    let _ = fs::remove_dir_all(reference);
+    dims
+}
+
+#[test]
+fn nvfp4_experts_stay_4_bit_with_one_scale_per_expert() {
+    let dims = check_moe(Kind::Nvfp4, 21, 40, 1e-4);
+    // stacked: [inputs, rows, experts]; the per-tensor factor and the activation scale come once per expert
+    assert_eq!(dims["blk.0.ffn_gate_exps.weight"], vec![HIDDEN as u64, INTER as u64, EXPERTS as u64]);
+    assert_eq!(dims["blk.0.ffn_down_exps.weight"], vec![INTER as u64, HIDDEN as u64, EXPERTS as u64]);
+    for t in ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"] {
+        assert_eq!(dims[&format!("blk.1.{t}.scale")], vec![EXPERTS as u64], "{t}.scale");
+        assert_eq!(dims[&format!("blk.1.{t}.input_scale")], vec![EXPERTS as u64], "{t}.input_scale");
+    }
+}
+
+#[test]
+fn int4_experts_stay_q4z() {
+    let dims = check_moe(Kind::CtInt4(32), 23, 0x8000_0010, 5e-3);
+    assert_eq!(dims["blk.0.ffn_up_exps.weight"], vec![HIDDEN as u64, INTER as u64, EXPERTS as u64]);
+}
+
+#[test]
+fn block_wise_fp8_experts_convert_to_f16() {
+    // no compact device format for the 128x128 tiles yet (docs/moe-formats.md): the experts are expanded, and must still be right
+    check_moe(Kind::Fp8Block(32), 29, 1, 5e-3);
 }

@@ -28,21 +28,41 @@ use crate::backend::vulkan::ops::attention::{plan_attention, plan_kv_write, Atte
 use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
-use crate::backend::vulkan::ops::recurrent::{delta_supported, plan_delta_layer, RunSpec};
+use crate::backend::vulkan::ops::recurrent::{
+    delta_supported, plan_delta_layer, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
+    Mamba2Shape, RunSpec,
+};
 use crate::backend::vulkan::ops::{
-    plan_argmax, plan_embedding, plan_glu, plan_layer_norm, plan_residual_add, plan_rms_norm, plan_rope, plan_sigmoid_gate_mul,
-    plan_split_q_gate, EmbeddingTable, GluMode,
+    plan_argmax, plan_embedding, plan_ewise, plan_glu, plan_glu_strided, plan_layer_norm, plan_mla_move, plan_residual_add, plan_rms_norm,
+    plan_rope, plan_sigmoid_gate_mul, plan_split_q_gate, EmbeddingTable, GluLayout, GluMode, MlaPart,
 };
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
 use crate::backend::{
     validate_kv_write, AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer, DeviceKvCache, DeviceWeight,
-    QuantType, RopeParams, SamplingParams, Stream,
+    Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, Stream,
 };
 use exec::Arg;
 use linear::LinTrace;
 use ring::{Ring, RingKind};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+fn mamba2_shape(s: &MambaShape) -> Mamba2Shape {
+    Mamba2Shape {
+        inner: s.inner,
+        state: s.state,
+        heads: s.heads,
+        groups: s.groups,
+        conv_kernel: s.conv_kernel,
+        norm_groups: s.norm_groups,
+        step_min: s.step_min,
+        eps: s.eps,
+    }
+}
+
+fn mamba1_shape(s: &Mamba1Shape) -> VkMamba1 {
+    VkMamba1 { inner: s.inner, state: s.state, rank: s.rank, conv_kernel: s.conv_kernel, bc_rms_eps: s.bc_rms_eps }
+}
 
 pub struct VulkanStream {
     sh: Arc<Shared>,
@@ -165,19 +185,29 @@ impl VulkanStream {
         self.run_plans(&[plan], &[Arg::r("gate", gate), Arg::r("up", up), Arg::w("out", out)], &[], false)
     }
 
+    /// Plain (ungated) activation of `x` into `out`.
+    fn plain_glu(&mut self, mode: GluMode, out: &DeviceBuffer, x: &DeviceBuffer) -> Result<(), BackendError> {
+        let count = x.size / 4;
+        if count == 0 || out.size < x.size {
+            return Err(invalid("activation operands differ in size"));
+        }
+        let plan = plan_glu(mode, count)?;
+        self.run_plans(&[plan], &[Arg::r("gate", x), Arg::w("out", out)], &[], false)
+    }
+
     /// The layout of layer `layer_idx` of both pools of `kv` and the windows that bind them.
     fn kv_windows(&self, kv: &DeviceKvCache, layer_idx: usize) -> Result<(KvLayout, Buffer, Buffer), BackendError> {
         if layer_idx >= kv.layers {
             return Err(invalid(format!("layer {layer_idx} >= {} cached layers", kv.layers)));
         }
         let align = self.sh.caps().min_storage_buffer_offset_alignment;
-        let (keys, key_base) = pool_window(&kv.key_pool, layer_idx, kv.words_per_layer_k, align)?;
-        let (values, value_base) = pool_window(&kv.value_pool, layer_idx, kv.words_per_layer_v, align)?;
+        let (keys, key_base) = pool_window(&kv.key_pool, layer_idx, kv.layer_key_words(layer_idx), align)?;
+        let (values, value_base) = pool_window(&kv.value_pool, layer_idx, kv.layer_value_words(layer_idx), align)?;
         let layout = KvLayout {
             kind: kv.kv_kind,
-            kv_heads: kv.kv_heads,
-            head_dim: kv.head_dim,
-            value_dim: kv.value_dim,
+            kv_heads: kv.layer_kv_heads(layer_idx),
+            head_dim: kv.layer_head_dim(layer_idx),
+            value_dim: kv.layer_value_dim(layer_idx),
             block_size: kv.block_size,
             pool_blocks: kv.pool_blocks,
             key_base,
@@ -445,6 +475,259 @@ impl Stream for VulkanStream {
 
     fn supports_attention_gate(&self) -> bool {
         true
+    }
+
+    fn supports_kda(&self, shape: &crate::backend::KdaShape) -> bool {
+        crate::backend::vulkan::ops::recurrent::kda_supported(shape)
+    }
+
+    fn supports_arch_ops(&self) -> bool {
+        true
+    }
+
+    fn activation(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
+        let mode = match mode {
+            0 => GluMode::Silu,
+            1 => GluMode::Gelu,
+            2 => GluMode::GeluErf,
+            3 => GluMode::Relu,
+            4 => GluMode::Relu2,
+            _ => return Err(invalid(format!("unknown activation mode {mode}"))),
+        };
+        self.plain_glu(mode, out, x)
+    }
+
+    fn activation_glu(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
+        let mode = match mode {
+            0 => GluMode::Swiglu,
+            1 => GluMode::Geglu,
+            2 => GluMode::GeluErfGated,
+            3 => GluMode::ReluGated,
+            4 => GluMode::Relu2Gated,
+            _ => return Err(invalid(format!("unknown activation mode {mode}"))),
+        };
+        self.glu(mode, out, gate, up)
+    }
+
+    fn softplus_gate_mul(&mut self, x: &mut DeviceBuffer, gate: &DeviceBuffer, beta: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) || gate.size < x.size || beta <= 0.0 {
+            return Err(invalid("attention gate shorter than its target"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = plan_ewise(true, x.size / 4, beta)?;
+        self.run_plans(&[plan], &[Arg::w("x", x), Arg::r("gate", gate)], &[], false)
+    }
+
+    fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("clamp target is not a whole number of floats"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = plan_ewise(false, x.size / 4, limit)?;
+        self.run_plans(&[plan], &[Arg::w("x", x)], &[], false)
+    }
+
+    fn mla_latent(&mut self, latent: &mut DeviceBuffer, kv_a: &DeviceBuffer, rows: usize, kv_lora: usize, width: usize) -> Result<(), BackendError> {
+        if width < kv_lora || kv_a.size < rows * width * 4 || latent.size < rows * kv_lora * 4 {
+            return Err(invalid("mla_latent buffers are smaller than rows x width"));
+        }
+        if rows * kv_lora == 0 {
+            return Ok(());
+        }
+        let plan = plan_mla_move(MlaPart::Latent, rows, 1, 0, width - kv_lora, 1, kv_lora)?;
+        self.run_plans(&[plan], &[Arg::r("a", kv_a), Arg::w("dst", latent)], &[], false)
+    }
+
+    fn mla_assemble(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &mut DeviceBuffer,
+        v: &mut DeviceBuffer,
+        q_full: &DeviceBuffer,
+        kv_a: &DeviceBuffer,
+        kv: &DeviceBuffer,
+        rows: usize,
+        shape: &MlaShape,
+    ) -> Result<(), BackendError> {
+        let (dk, width) = (shape.nope + shape.rope, shape.kv_lora + shape.rope);
+        let items = rows * shape.heads;
+        if q_full.size < items * dk * 4
+            || kv_a.size < rows * width * 4
+            || kv.size < items * (shape.nope + shape.value) * 4
+            || q.size < items * dk * 4
+            || k.size < items * dk * 4
+            || v.size < items * shape.value * 4
+        {
+            return Err(invalid("mla_assemble buffers are smaller than rows x heads x width"));
+        }
+        if items == 0 {
+            return Ok(());
+        }
+        let part = |p| plan_mla_move(p, rows, shape.heads, shape.nope, shape.rope, shape.value, shape.kv_lora);
+        self.run_plans(&[part(MlaPart::Q)?], &[Arg::r("a", q_full), Arg::w("dst", q)], &[], false)?;
+        self.run_plans(&[part(MlaPart::K)?], &[Arg::r("a", kv_a), Arg::r("b", kv), Arg::w("dst", k)], &[], false)?;
+        self.run_plans(&[part(MlaPart::V)?], &[Arg::r("a", kv), Arg::w("dst", v)], &[], false)
+    }
+
+    fn supports_mamba2(&self, shape: &MambaShape) -> bool {
+        // mamba_scan2 binds up to nine storage buffers
+        plan_mamba2_mixer(&mamba2_shape(shape), &[RunSpec { first_row: 0, rows: 1, reset: true }], 1, 0).is_ok()
+            && self.sh.caps().max_per_stage_storage_buffers >= 9
+    }
+
+    fn mamba2_layer(
+        &mut self,
+        shape: &MambaShape,
+        weights: &MambaWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        projected: &DeviceBuffer,
+        mixed: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_mamba2(shape) {
+            return Err(BackendError::UnsupportedOperation("mamba2_layer for this shape".into()));
+        }
+        let bufs = MambaBufs {
+            conv: weights.conv,
+            conv_bias: weights.conv_bias,
+            dt_bias: weights.dt_bias,
+            decay: weights.decay,
+            skip: weights.skip,
+            norm: weights.norm,
+        };
+        let runs: Vec<(RunSpec, &DeviceBuffer)> =
+            runs.iter().map(|r| (RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset }, r.state)).collect();
+        self.mamba2_mixer(&mamba2_shape(shape), &bufs, &runs, state_offset, projected, mixed, out)
+    }
+
+    fn supports_mamba1(&self, shape: &Mamba1Shape) -> bool {
+        let s = mamba1_shape(shape);
+        plan_mamba1_scan(0, &RunSpec { first_row: 0, rows: 1, reset: true }, &s, 2 * s.inner, s.inner, 0).is_ok()
+            && self.sh.caps().max_per_stage_storage_buffers >= 8
+    }
+
+    fn mamba1_conv(
+        &mut self,
+        shape: &Mamba1Shape,
+        conv: &DeviceBuffer,
+        conv_bias: Option<&DeviceBuffer>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        proj: &DeviceBuffer,
+        mixed: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let s = mamba1_shape(shape);
+        let state_end = state_offset + shape.layer_state_bytes();
+        if proj.size < rows * 2 * s.inner * 4
+            || mixed.size < rows * s.inner * 4
+            || conv.size < s.inner * s.conv_kernel * 4
+            || conv_bias.is_some_and(|b| b.size < s.inner * 4)
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("Mamba-1 buffers are smaller than the layer needs"));
+        }
+        // state layout of the trait: recurrent state first, then the convolution history
+        let hist_off = (state_offset + shape.rec_bytes()) / 4;
+        let zeros = match conv_bias {
+            Some(_) => None,
+            None => {
+                let buffer = self.dev.alloc(&self.sh, (s.inner * 4) as u64)?;
+                self.rec.fill(&buffer, 0, (s.inner * 4).next_multiple_of(4) as u64, 0)?;
+                Some(buffer)
+            }
+        };
+        let mut plans = Vec::new();
+        for (i, r) in runs.iter().enumerate() {
+            if r.rows == 0 {
+                continue;
+            }
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(plan_mamba_conv(i, &spec, s.inner, s.conv_kernel, 2 * s.inner, 0, hist_off, true, None)?);
+        }
+        let mut args = vec![Arg::r("x", proj), Arg::r("convw", conv), Arg::w("mixed", mixed)];
+        match (conv_bias, zeros) {
+            (Some(bias), _) => args.push(Arg::r("convb", bias)),
+            (None, Some(buffer)) => args.push(Arg::view("convb", buffer)),
+            (None, None) => {}
+        }
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, false)
+    }
+
+    fn mamba1_prep(&mut self, shape: &Mamba1Shape, split: &mut DeviceBuffer, dt_in: &mut DeviceBuffer, rows: usize) -> Result<(), BackendError> {
+        let s = mamba1_shape(shape);
+        if rows == 0 {
+            return Ok(());
+        }
+        if split.size < rows * s.split_width() * 4 || dt_in.size < rows * s.rank * 4 {
+            return Err(invalid("Mamba-1 prep buffers are smaller than rows x width"));
+        }
+        for plan in plan_mamba1_bc_norms(&s, rows)? {
+            self.run_plans(&[plan], &[Arg::w("x", split), Arg::w("out", split)], &[], false)?;
+        }
+        let layout = GluLayout { gate_stride: s.split_width(), gate_off: 0, up_stride: 0, up_off: 0, out_stride: s.rank };
+        let plan = plan_glu_strided(GluMode::Copy, rows, s.rank, layout)?;
+        self.run_plans(&[plan], &[Arg::r("gate", split), Arg::w("out", dt_in)], &[], false)
+    }
+
+    fn mamba1_scan(
+        &mut self,
+        shape: &Mamba1Shape,
+        decay: &DeviceBuffer,
+        skip: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        split: &DeviceBuffer,
+        dt: &DeviceBuffer,
+        mixed: &DeviceBuffer,
+        proj: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let s = mamba1_shape(shape);
+        let state_end = state_offset + shape.layer_state_bytes();
+        if split.size < rows * s.split_width() * 4
+            || dt.size < rows * s.inner * 4
+            || mixed.size < rows * s.inner * 4
+            || proj.size < rows * 2 * s.inner * 4
+            || out.size < rows * s.inner * 4
+            || decay.size < s.inner * s.state * 4
+            || skip.size < s.inner * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("Mamba-1 buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::new();
+        for (i, r) in runs.iter().enumerate() {
+            if r.rows == 0 {
+                continue;
+            }
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(plan_mamba1_scan(i, &spec, &s, 2 * s.inner, s.inner, state_offset / 4)?);
+        }
+        let args = [
+            Arg::r("mixed", mixed),
+            Arg::r("dt", dt),
+            Arg::r("split", split),
+            Arg::r("projected", proj),
+            Arg::r("decay", decay),
+            Arg::r("skip", skip),
+            Arg::w("out", out),
+        ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, false)
     }
 
     fn supports_delta(&self, shape: &DeltaShape) -> bool {

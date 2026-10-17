@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 // fLLM: AWQ -> Marlin weight repack, kernel taken from vLLM (csrc/libtorch_stable/quantization/marlin/awq_marlin_repack.cu,
 // Apache-2.0, derived from IST-DASLab/marlin); the PyTorch tensor glue is replaced by the C entry point at the end of the file.
 #include <cuda_runtime.h>

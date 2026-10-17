@@ -38,22 +38,32 @@ __global__ void nvfp4_alpha_kernel(float mult) {
     const float a = g_fp4_amax;
     g_fp4_alpha = mult / fp4_dynamic_gs(a);
 }
-template <bool GLU>
-__global__ void nvfp4_amax_kernel(const float *__restrict__ x, const float *__restrict__ up, int mode, size_t blocks) {
+template <bool GLU, bool HALF_IN = false>
+__global__ void nvfp4_amax_kernel(const void *__restrict__ x, const void *__restrict__ up, int mode, size_t blocks) {
     const size_t bid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     float m = 0.f;
     if (bid < blocks) {
-        const float4 *p = reinterpret_cast<const float4 *>(x + bid * 16);
-        const float4 *pu = reinterpret_cast<const float4 *>(up ? up + bid * 16 : x);
+        if constexpr (HALF_IN) {
+            const __half *p = reinterpret_cast<const __half *>(x) + bid * 16;
+            const __half *pu = reinterpret_cast<const __half *>(up ? up : x) + bid * 16;
+            for (int i = 0; i < 16; i++) {
+                float val = __half2float(p[i]);
+                if (GLU) val = fllm_glu(val, __half2float(pu[i]), mode);
+                m = fmaxf(m, fabsf(val));
+            }
+        } else {
+            const float4 *p = reinterpret_cast<const float4 *>(reinterpret_cast<const float *>(x) + bid * 16);
+            const float4 *pu = reinterpret_cast<const float4 *>(up ? reinterpret_cast<const float *>(up) + bid * 16 : reinterpret_cast<const float *>(x) + bid * 16);
 #pragma unroll
-        for (int i = 0; i < 4; i++) {
-            const float4 t = __ldg(p + i);
-            if (GLU) {
-                const float4 u = __ldg(pu + i);
-                m = fmaxf(m, fmaxf(fmaxf(fabsf(fllm_glu(t.x, u.x, mode)), fabsf(fllm_glu(t.y, u.y, mode))),
-                                   fmaxf(fabsf(fllm_glu(t.z, u.z, mode)), fabsf(fllm_glu(t.w, u.w, mode)))));
-            } else {
-                m = fmaxf(m, fmaxf(fmaxf(fabsf(t.x), fabsf(t.y)), fmaxf(fabsf(t.z), fabsf(t.w))));
+            for (int i = 0; i < 4; i++) {
+                const float4 t = __ldg(p + i);
+                if (GLU) {
+                    const float4 u = __ldg(pu + i);
+                    m = fmaxf(m, fmaxf(fmaxf(fabsf(fllm_glu(t.x, u.x, mode)), fabsf(fllm_glu(t.y, u.y, mode))),
+                                       fmaxf(fabsf(fllm_glu(t.z, u.z, mode)), fabsf(fllm_glu(t.w, u.w, mode)))));
+                } else {
+                    m = fmaxf(m, fmaxf(fmaxf(fabsf(t.x), fabsf(t.y)), fmaxf(fabsf(t.z), fabsf(t.w))));
+                }
             }
         }
     }
@@ -63,29 +73,38 @@ __global__ void nvfp4_amax_kernel(const float *__restrict__ x, const float *__re
 }
 
 // gs_ptr: static activation factor of the weight (its trailer), dynamic: computed from g_fp4_amax; neither: 1
-template <bool GLU, bool DYN>
-__global__ void nvfp4_quantize_kernel(const float *__restrict__ x, const float *__restrict__ up, int mode,
+template <bool GLU, bool DYN, bool HALF_IN = false>
+__global__ void nvfp4_quantize_kernel(const void *__restrict__ x, const void *__restrict__ up, int mode,
                                       uint32_t *__restrict__ xq, uint8_t *__restrict__ xs, size_t blocks,
                                       const float *__restrict__ gs_ptr) {
     const size_t bid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (bid >= blocks) return;
     const float gs = DYN ? fp4_dynamic_gs(g_fp4_amax) : (gs_ptr ? *gs_ptr : 1.f);
-    const float4 *p = reinterpret_cast<const float4 *>(x + bid * 16);
     float v[16];
-#pragma unroll
-    for (int i = 0; i < 4; i++) {
-        const float4 t = __ldg(p + i);
-        v[4 * i] = t.x; v[4 * i + 1] = t.y; v[4 * i + 2] = t.z; v[4 * i + 3] = t.w;
-    }
-    if (GLU) {
-        const float4 *pu = reinterpret_cast<const float4 *>(up + bid * 16);
+    if constexpr (HALF_IN) {
+        const __half *p = reinterpret_cast<const __half *>(x) + bid * 16;
+        for (int i = 0; i < 16; i++) v[i] = __half2float(p[i]);
+        if (GLU) {
+            const __half *pu = reinterpret_cast<const __half *>(up ? up : x) + bid * 16;
+            for (int i = 0; i < 16; i++) v[i] = fllm_glu(v[i], __half2float(pu[i]), mode);
+        }
+    } else {
+        const float4 *p = reinterpret_cast<const float4 *>(reinterpret_cast<const float *>(x) + bid * 16);
 #pragma unroll
         for (int i = 0; i < 4; i++) {
-            const float4 t = __ldg(pu + i);
-            v[4 * i] = fllm_glu(v[4 * i], t.x, mode);
-            v[4 * i + 1] = fllm_glu(v[4 * i + 1], t.y, mode);
-            v[4 * i + 2] = fllm_glu(v[4 * i + 2], t.z, mode);
-            v[4 * i + 3] = fllm_glu(v[4 * i + 3], t.w, mode);
+            const float4 t = __ldg(p + i);
+            v[4 * i] = t.x; v[4 * i + 1] = t.y; v[4 * i + 2] = t.z; v[4 * i + 3] = t.w;
+        }
+        if (GLU) {
+            const float4 *pu = reinterpret_cast<const float4 *>(reinterpret_cast<const float *>(up ? up : x) + bid * 16);
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const float4 t = __ldg(pu + i);
+                v[4 * i] = fllm_glu(v[4 * i], t.x, mode);
+                v[4 * i + 1] = fllm_glu(v[4 * i + 1], t.y, mode);
+                v[4 * i + 2] = fllm_glu(v[4 * i + 2], t.z, mode);
+                v[4 * i + 3] = fllm_glu(v[4 * i + 3], t.w, mode);
+            }
         }
     }
     uint32_t words[2];
@@ -302,15 +321,18 @@ void fllm_nvfp4_cutlass_invalidate();
 // true while the scratch buffer holds activations quantized by the built-in kernels
 static thread_local bool g_scratch_valid = false;
 
+// Datacenter Blackwell (sm_100 / sm_103 / sm_110): CUTLASS tcgen05 GEMM, nvfp4_cutlass_sm100.cu; 0 on every other device
+int fllm_nvfp4_sm100_try(cudaStream_t s, const void *W, const float *X, float *Y, const float *bias, float gscale, int rows, int cols, int batch);
 // Scratch layout: [xq: batch * cols / 2 bytes][xs: batch * cols / 16 bytes][split-K partials].
 // Returns 1 when handled, 0 when the device or shape is not supported.
 #ifdef FLLM_NO_FP4
-int fllm_nvfp4_try(cudaStream_t, const void *, const float *, float *, const float *, float, int, int, int, void *, size_t, int) {
-    return 0;
+int fllm_nvfp4_try(cudaStream_t s, const void *W, const float *X, float *Y, const float *bias, float gscale, int rows, int cols, int batch, void *, size_t, int) {
+    return fllm_nvfp4_sm100_try(s, W, X, Y, bias, gscale, rows, cols, batch);
 }
 #else
 int fllm_nvfp4_try(cudaStream_t s, const void *W, const float *X, float *Y, const float *bias, float gscale, int rows,
                    int cols, int batch, void *scratch, size_t scratch_bytes, int quantize) {
+    if (const int r = fllm_nvfp4_sm100_try(s, W, X, Y, bias, gscale, rows, cols, batch)) return r;
     static const bool supported = [] {
         int dev = 0;
         cudaGetDevice(&dev);
@@ -334,9 +356,9 @@ int fllm_nvfp4_try(cudaStream_t s, const void *W, const float *X, float *Y, cons
         quantize = 1;
     }
 #endif
-    // the built-in kernels overwrite Y with FP32 results of FP32 activations: a product that has to be added to Y, leave FP16 or read FP16
-    // activations is declined (the caller checked fllm_nvfp4_cutlass_ok)
-    if (fllm_fp4_acc || fllm_fp4_f16out || (fllm_glu_up && fllm_glu_half)) return 0;
+    const bool glu_half = fllm_glu_up && fllm_glu_half;
+    const bool half_in = (fllm_x_half != nullptr) || glu_half;
+    if (fllm_fp4_acc || fllm_fp4_f16out) return 0;
     const size_t xq_bytes = ((size_t)batch * (cols >> 1) + 255) & ~size_t(255);
     const size_t xs_bytes = ((size_t)batch * (cols >> 4) + 255) & ~size_t(255);
     if (xq_bytes + xs_bytes > scratch_bytes) return 0;
@@ -359,16 +381,27 @@ int fllm_nvfp4_try(cudaStream_t s, const void *W, const float *X, float *Y, cons
 #endif
         const unsigned grid = (unsigned)((blocks + 127) / 128);
         uint32_t *xq32 = reinterpret_cast<uint32_t *>(xq);
+        const void *src_x = half_in && fllm_x_half ? fllm_x_half : X;
+        const void *src_up = fllm_glu_up;
         if (amode == 2) {
             nvfp4_amax_reset_kernel<<<1, 1, 0, s>>>();
-            if (fllm_glu_up) nvfp4_amax_kernel<true><<<grid, 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, blocks);
-            else nvfp4_amax_kernel<false><<<grid, 128, 0, s>>>(X, nullptr, 0, blocks);
-            if (fllm_glu_up) nvfp4_quantize_kernel<true, true><<<grid, 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, xq32, xs, blocks, nullptr);
-            else nvfp4_quantize_kernel<false, true><<<grid, 128, 0, s>>>(X, nullptr, 0, xq32, xs, blocks, nullptr);
-        } else if (fllm_glu_up) {
-            nvfp4_quantize_kernel<true, false><<<grid, 128, 0, s>>>(X, fllm_glu_up, fllm_glu_mode, xq32, xs, blocks, gs_ptr);
+            if (half_in) {
+                if (fllm_glu_up) nvfp4_amax_kernel<true, true><<<grid, 128, 0, s>>>(src_x, src_up, fllm_glu_mode, blocks);
+                else nvfp4_amax_kernel<false, true><<<grid, 128, 0, s>>>(src_x, nullptr, 0, blocks);
+                if (fllm_glu_up) nvfp4_quantize_kernel<true, true, true><<<grid, 128, 0, s>>>(src_x, src_up, fllm_glu_mode, xq32, xs, blocks, nullptr);
+                else nvfp4_quantize_kernel<false, true, true><<<grid, 128, 0, s>>>(src_x, nullptr, 0, xq32, xs, blocks, nullptr);
+            } else {
+                if (fllm_glu_up) nvfp4_amax_kernel<true, false><<<grid, 128, 0, s>>>(src_x, src_up, fllm_glu_mode, blocks);
+                else nvfp4_amax_kernel<false, false><<<grid, 128, 0, s>>>(src_x, nullptr, 0, blocks);
+                if (fllm_glu_up) nvfp4_quantize_kernel<true, true, false><<<grid, 128, 0, s>>>(src_x, src_up, fllm_glu_mode, xq32, xs, blocks, nullptr);
+                else nvfp4_quantize_kernel<false, true, false><<<grid, 128, 0, s>>>(src_x, nullptr, 0, xq32, xs, blocks, nullptr);
+            }
+        } else if (half_in) {
+            if (fllm_glu_up) nvfp4_quantize_kernel<true, false, true><<<grid, 128, 0, s>>>(src_x, src_up, fllm_glu_mode, xq32, xs, blocks, gs_ptr);
+            else nvfp4_quantize_kernel<false, false, true><<<grid, 128, 0, s>>>(src_x, nullptr, 0, xq32, xs, blocks, gs_ptr);
         } else {
-            nvfp4_quantize_kernel<false, false><<<grid, 128, 0, s>>>(X, nullptr, 0, xq32, xs, blocks, gs_ptr);
+            if (fllm_glu_up) nvfp4_quantize_kernel<true, false, false><<<grid, 128, 0, s>>>(src_x, src_up, fllm_glu_mode, xq32, xs, blocks, gs_ptr);
+            else nvfp4_quantize_kernel<false, false, false><<<grid, 128, 0, s>>>(src_x, nullptr, 0, xq32, xs, blocks, gs_ptr);
         }
     }
     if (amode == 2) {
@@ -450,5 +483,26 @@ int fllm_nvfp4_norm_quant_try(cudaStream_t s, const float *x, const float *w, fl
 #else
     (void)s; (void)x; (void)w; (void)out; (void)rows; (void)cols; (void)eps; (void)weight; (void)weight_rows; (void)mode;
     return 0;
+#endif
+}
+
+// 1 when this binary holds the NVFP4 tensor-core kernels for device `dev`: their architecture-specific cubin (sm_120a, sm_121a) exists only if
+// the toolkit that built the binary could compile it (CUDA 12.8 has no sm_121a: a DGX Spark then keeps the Marlin FP4 weights). cudaFuncGetAttributes
+// fails with cudaErrorNoKernelImageForDevice when the device has no matching cubin in this file.
+extern "C" int fllm_cuda_nvfp4_mma_native(int dev) {
+#ifdef FLLM_NO_FP4
+    (void)dev;
+    return 0;
+#else
+    int prev = 0;
+    if (cudaGetDevice(&prev) != cudaSuccess || cudaSetDevice(dev) != cudaSuccess) {
+        cudaGetLastError();
+        return 0;
+    }
+    cudaFuncAttributes attr;
+    const bool ok = cudaFuncGetAttributes(&attr, nvfp4_alpha_kernel) == cudaSuccess;
+    cudaGetLastError();
+    cudaSetDevice(prev);
+    return ok ? 1 : 0;
 #endif
 }

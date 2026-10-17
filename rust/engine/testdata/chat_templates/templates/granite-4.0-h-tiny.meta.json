@@ -1,0 +1,6 @@
+{
+ "bos": "<|end_of_text|>",
+ "eos": "<|end_of_text|>",
+ "pad": "<|pad|>",
+ "unk": "<|unk|>"
+}

@@ -1,0 +1,26 @@
+{
+  "version": "0.1.2",
+  "description": "Standalone Rust LLM and encoder inference server and CLI",
+  "homepage": "https://github.com/Marco-Lu2508/fLLM",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Marco-Lu2508/fLLM/releases/download/v0.1.2/fllm-windows-x86_64-msvc.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "bin": "fllm-rs.exe",
+  "checkver": {
+    "github": "https://github.com/Marco-Lu2508/fLLM"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Marco-Lu2508/fLLM/releases/download/v$version/fllm-windows-x86_64-msvc.zip",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      }
+    }
+  }
+}

@@ -42,31 +42,43 @@ __device__ __forceinline__ float warp_max(float v) {
 }
 
 // GGUF tensor type ids (ggml).
-enum FllmKind {
+enum FllmKind : uint32_t {
     KIND_F32 = 0, KIND_F16 = 1, KIND_Q4_0 = 2, KIND_Q4_1 = 3, KIND_Q5_0 = 6, KIND_Q5_1 = 7,
     KIND_Q8_0 = 8, KIND_IQ4_NL = 20, KIND_MXFP4 = 39, KIND_Q4_K = 12, KIND_Q4_K_MARLIN = 41, KIND_Q5_K = 13, KIND_Q6_K = 14, KIND_BF16 = 30,
     // 256-value formats decoded by iq_decode.cuh
     KIND_Q2_K = 10, KIND_Q3_K = 11, KIND_IQ2_XXS = 16, KIND_IQ2_XS = 17, KIND_IQ3_XXS = 18, KIND_IQ1_S = 19,
-    KIND_IQ3_S = 21, KIND_IQ2_S = 22, KIND_IQ1_M = 29
+    KIND_IQ3_S = 21, KIND_IQ2_S = 22, KIND_IQ1_M = 29,
+    KIND_NVFP4 = 40,
+    KIND_Q4Z32 = 0x80000010, KIND_Q4Z64 = 0x80000011, KIND_Q4Z128 = 0x80000012,
+    KIND_Q4ZP32 = 0x80000014, KIND_Q4ZP64 = 0x80000015, KIND_Q4ZP128 = 0x80000016,
+    KIND_FP8M = 0x80000020, KIND_FP8B = 0x80000021
 };
 
-__host__ __device__ constexpr bool kind_is_iq_or_kextra(int kind) {
+__host__ __device__ constexpr bool kind_is_iq_or_kextra(uint32_t kind) {
     return kind == KIND_Q2_K || kind == KIND_Q3_K || kind == KIND_IQ2_XXS || kind == KIND_IQ2_XS || kind == KIND_IQ3_XXS ||
            kind == KIND_IQ1_S || kind == KIND_IQ3_S || kind == KIND_IQ2_S || kind == KIND_IQ1_M;
 }
-__host__ __device__ constexpr int kind_iq_block_bytes(int kind) {
+__host__ __device__ constexpr int kind_iq_block_bytes(uint32_t kind) {
     return kind == KIND_Q2_K ? 84 : kind == KIND_Q3_K ? 110 : kind == KIND_IQ2_XXS ? 66 : kind == KIND_IQ2_XS ? 74
          : kind == KIND_IQ3_XXS ? 98 : kind == KIND_IQ1_S ? 50 : kind == KIND_IQ3_S ? 110 : kind == KIND_IQ2_S ? 82
          : kind == KIND_IQ1_M ? 56 : 0;
 }
-__host__ __device__ constexpr int kind_block_elems(int kind) {
-    return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 ? 1
+__host__ __device__ constexpr int kind_block_elems(uint32_t kind) {
+    return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_FP8M || kind == KIND_FP8B ? 1
+           : kind == KIND_Q4Z64 || kind == KIND_Q4ZP64 ? 64
+           : kind == KIND_Q4Z128 || kind == KIND_Q4ZP128 ? 128
+           : kind == KIND_NVFP4 ? 64
            : kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind) ? 256 : 32;
 }
-__host__ __device__ constexpr int kind_block_bytes(int kind) {
+__host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
     switch (kind) {
         case KIND_F32: return 4;
         case KIND_F16: case KIND_BF16: return 2;
+        case KIND_FP8M: case KIND_FP8B: return 1;
+        case KIND_Q4Z32: case KIND_Q4ZP32: return 19;
+        case KIND_Q4Z64: case KIND_Q4ZP64: return 35;
+        case KIND_Q4Z128: case KIND_Q4ZP128: return 67;
+        case KIND_NVFP4: return 36;
         case KIND_Q4_0: case KIND_IQ4_NL: case KIND_MXFP4: return 18;
         case KIND_Q4_1: return 20;
         case KIND_Q5_0: return 22;
@@ -81,10 +93,10 @@ __host__ __device__ constexpr int kind_block_bytes(int kind) {
 // Rows of the 32-value formats (Q4_0 ... Q8_0, IQ4_NL, MXFP4) are stored for a width rounded up to a multiple of 256
 // (the padding blocks are zero), so that every array of the device layout starts on a 16-byte boundary.
 __host__ __device__ constexpr int pad256(int cols) { return (cols + 255) & ~255; }
-__host__ __device__ constexpr size_t kind_row_bytes(int kind, int cols) {
+__host__ __device__ constexpr size_t kind_row_bytes(uint32_t kind, int cols) {
     return (size_t)((kind_block_elems(kind) == 32 ? pad256(cols) : cols) / kind_block_elems(kind)) * kind_block_bytes(kind);
 }
-__host__ __device__ constexpr bool kind_supported(int kind) {
+__host__ __device__ constexpr bool kind_supported(uint32_t kind) {
     return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_Q4_0 || kind == KIND_IQ4_NL || kind == KIND_MXFP4 ||
            kind == KIND_Q4_1 || kind == KIND_Q5_0 || kind == KIND_Q5_1 || kind == KIND_Q8_0 ||
            kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind);
@@ -109,7 +121,7 @@ __device__ __forceinline__ float fllm_glu(float g, float u, int mode) {
 #define FLLM_LUT_KIND(K) ((K) == KIND_IQ4_NL || (K) == KIND_MXFP4)
 // 16-entry value grid of the formats that decode through a table: IQ4_NL (ggml kvalues_iq4nl) and MXFP4 (E2M1 times two;
 // the block scale then carries the remaining factor 2^(e-128)).
-template <int KIND>
+template <uint32_t KIND>
 __host__ __device__ constexpr uint32_t lut_word(int i, int bias) {
     constexpr int iq[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
     constexpr int mx[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
@@ -120,7 +132,7 @@ __host__ __device__ constexpr uint32_t lut_word(int i, int bias) {
 }
 // Four 4-bit indices (the low nibbles of the four bytes of `n`) -> four bytes of grid value + BIAS (128: unsigned
 // bytes for the fp16 tensor-core path; 0: signed int8 for dp4a).
-template <int KIND, int BIAS>
+template <uint32_t KIND, int BIAS>
 __device__ __forceinline__ uint32_t lut4t(uint32_t n) {
     const uint32_t t = n & 0x07070707u, h = (n >> 1) & 0x04040404u;
     const uint32_t sel = __byte_perm(t | (t >> 4), 0u, 0x4420u);
@@ -148,7 +160,7 @@ __device__ __forceinline__ void scale_min_k4(const uint8_t *scales, int g, float
 // `rp` points at the first byte of the row. Elements at or beyond `cols` decode to zero.
 // Byte layouts match the WGSL decoder (backend/wgpu_backend.rs), which is checked against the
 // CPU reference by `fllm-rs selftest-gpu`.
-template <int KIND>
+template <uint32_t KIND>
 __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, float *w) {
     const int e0 = run * 16;
     if (KIND == KIND_F32) {
@@ -182,8 +194,7 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         constexpr bool affine = KIND == KIND_Q4_1 || KIND == KIND_Q5_1;
         constexpr bool five = KIND == KIND_Q5_0 || KIND == KIND_Q5_1;
         constexpr int hdr = affine ? 4 : 2;
-        constexpr int qoff = hdr + (five ? 4 : 0);
-        constexpr int bytes = kind_block_bytes(KIND);
+        // Device layout uses split arrays, qoff/bytes not needed
         const int half_ = run & 1;  // 0: low nibbles of the 16 bytes, 1: high nibbles
         float d, m;
         uint32_t qh = 0;
@@ -236,6 +247,54 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         }
         return;
     }
+    if (KIND == KIND_Q4Z32 || KIND == KIND_Q4Z64 || KIND == KIND_Q4Z128) {
+        constexpr int group = KIND == KIND_Q4Z32 ? 32 : (KIND == KIND_Q4Z64 ? 64 : 128);
+        constexpr int width = group / 2 + 3;
+        const int blk = (run * 16) / group;
+        const uint8_t *b = rp + (size_t)blk * width;
+        const float scale = h2f_bits(ld16(b + group / 2));
+        const float zero = (float)(b[group / 2 + 2] & 15);
+        const int off = (run * 16) % group;
+        const uint8_t *qs = b + off / 2;
+#pragma unroll
+        for (int i = 0; i < 16; i += 2) {
+            uint8_t q = qs[i / 2];
+            w[i] = ((float)(q & 15) - zero) * scale;
+            w[i + 1] = ((float)(q >> 4) - zero) * scale;
+        }
+        return;
+    }
+    if (KIND == KIND_NVFP4) {
+        const int blk = (run * 16) / 64;
+        const int grp = ((run * 16) % 64) / 16;
+        const uint8_t *b = rp + (size_t)blk * 36;
+        const uint32_t sb = b[grp];
+        const uint32_t se = (sb >> 3) & 15u, sm = sb & 7u;
+        const float scale = se == 0 ? (float)sm * (1.f / 512.f) : __uint_as_float(((se + 120u) << 23) | (sm << 20));
+        const uint8_t *qs = b + 4 + grp * 8;
+        const float lut[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            uint8_t q = qs[j];
+            uint8_t c0 = q & 15, c1 = q >> 4;
+            float v0 = lut[c0 & 7];
+            float v1 = lut[c1 & 7];
+            w[j] = ((c0 & 8) ? -v0 : v0) * scale;
+            w[j + 8] = ((c1 & 8) ? -v1 : v1) * scale;
+        }
+        return;
+    }
+    if (KIND == KIND_FP8M || KIND == KIND_FP8B) {
+        const uint8_t *qs = rp + (run * 16);
+#pragma unroll
+        for (int i = 0; i < 16; i++) {
+            uint32_t b = qs[i];
+            uint32_t e = (b >> 3) & 15u, m = b & 7u;
+            float v = e == 0 ? (float)m * (1.0f / 512.0f) : __uint_as_float(((e + 120u) << 23) | (m << 20));
+            w[i] = (b & 0x80u) ? -v : v;
+        }
+        return;
+    }
     if (KIND == KIND_Q6_K) {
         const uint8_t *b = rp + (size_t)(run >> 4) * 224;
         const int local = (run & 15) * 16;
@@ -256,7 +315,7 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
 
 // One element of a row-major weight (index counted over the whole tensor). Used by embedding
 // lookups and the up-front conversion kernels, where speed does not matter.
-__device__ __forceinline__ float weight_at(const uint8_t *w, int kind, size_t index, int row_cols) {
+__device__ __forceinline__ float weight_at(const uint8_t *w, uint32_t kind, size_t index, int row_cols) {
     const int be = kind_block_elems(kind);
     if (kind == KIND_F32) return reinterpret_cast<const float *>(w)[index];
     if (kind == KIND_F16) return h2f_bits(reinterpret_cast<const uint16_t *>(w)[index]);
@@ -287,6 +346,12 @@ __device__ __forceinline__ float weight_at(const uint8_t *w, int kind, size_t in
         case KIND_IQ3_S: decode16<KIND_IQ3_S>(rp, (int)run, cols, v); break;
         case KIND_IQ2_S: decode16<KIND_IQ2_S>(rp, (int)run, cols, v); break;
         case KIND_IQ1_M: decode16<KIND_IQ1_M>(rp, (int)run, cols, v); break;
+        case KIND_NVFP4: decode16<KIND_NVFP4>(rp, (int)run, cols, v); break;
+        case KIND_Q4Z32: decode16<KIND_Q4Z32>(rp, (int)run, cols, v); break;
+        case KIND_Q4Z64: decode16<KIND_Q4Z64>(rp, (int)run, cols, v); break;
+        case KIND_Q4Z128: decode16<KIND_Q4Z128>(rp, (int)run, cols, v); break;
+        case KIND_FP8M: decode16<KIND_FP8M>(rp, (int)run, cols, v); break;
+        case KIND_FP8B: decode16<KIND_FP8B>(rp, (int)run, cols, v); break;
         default: decode16<KIND_Q6_K>(rp, (int)run, cols, v); break;
     }
     (void)be;

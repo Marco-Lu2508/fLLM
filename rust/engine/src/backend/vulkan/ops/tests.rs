@@ -939,8 +939,19 @@ fn sample_plans() -> Vec<OpPlan> {
         GluMode::Gelu,
         GluMode::Relu2,
         GluMode::Relu,
+        GluMode::GeluErf,
+        GluMode::GeluErfGated,
+        GluMode::ReluGated,
+        GluMode::Relu2Gated,
+        GluMode::Copy,
     ] {
         v.push(plan_glu(mode, 64).unwrap());
+    }
+    for softplus in [false, true] {
+        v.push(super::plan_ewise(softplus, 64, 0.5).unwrap());
+    }
+    for part in [super::MlaPart::Q, super::MlaPart::K, super::MlaPart::V, super::MlaPart::Latent] {
+        v.push(super::plan_mla_move(part, 3, 4, 16, 8, 16, 32).unwrap());
     }
     for quant in [
         QuantType::F32,

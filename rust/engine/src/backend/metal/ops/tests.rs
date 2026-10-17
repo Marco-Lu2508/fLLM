@@ -401,6 +401,10 @@ fn every_source_kernel_is_reachable_from_a_plan_table() {
         "fllm_act_gelu",
         "fllm_act_relu2",
         "fllm_act_relu",
+        "fllm_act_gelu_erf",
+        "fllm_act_geglu_erf",
+        "fllm_act_reglu",
+        "fllm_act_relu2glu",
         "fllm_sigmoid_mul_f32",
         "fllm_residual_add_f32",
         "fllm_split_q_gate_f32",
@@ -625,6 +629,10 @@ fn activation_plans() {
         GluMode::Gelu,
         GluMode::Relu2,
         GluMode::Relu,
+        GluMode::GeluErf,
+        GluMode::GegluErf,
+        GluMode::Reglu,
+        GluMode::Relu2Glu,
     ];
     for mode in modes {
         let p = plan_glu(mode, 11008).unwrap();

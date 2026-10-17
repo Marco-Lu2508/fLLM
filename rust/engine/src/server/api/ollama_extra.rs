@@ -13,7 +13,19 @@ pub(in crate::server) fn error(status: StatusCode, message: &str) -> Response {
 
 /// Ollama model names carry an optional `:latest` tag.
 fn model_matches(state: &AppState, requested: &str) -> bool {
-    requested == state.model_name || requested == format!("{}:latest", state.model_name)
+    state.knows_model(requested) || state.knows_model(requested.strip_suffix(":latest").unwrap_or(requested))
+}
+
+/// The `model` of an Ollama request: absent or empty means the served model; the served name, an alias and the
+/// `:latest` form of either are accepted, anything else is a 404 in Ollama's error shape.
+#[allow(clippy::result_large_err)]
+pub(in crate::server) fn resolve_model(state: &AppState, body: &Value) -> Result<String, Response> {
+    match body.get("model") {
+        None | Some(Value::Null) => Ok(state.model_name.clone()),
+        Some(Value::String(name)) if model_matches(state, name) => Ok(if name.trim().is_empty() { state.model_name.clone() } else { name.clone() }),
+        Some(Value::String(name)) => Err(error(StatusCode::NOT_FOUND, &format!("model '{name}' not found"))),
+        Some(_) => Err(error(StatusCode::BAD_REQUEST, "model must be a string")),
+    }
 }
 
 fn requested_model(state: &AppState, body: &Value) -> Result<String, (StatusCode, String)> {
@@ -34,8 +46,20 @@ fn details(state: &AppState) -> Value {
         "format": "gguf",
         "family": state.model_arch,
         "families": [state.model_arch],
-        "parameter_size": "",
-        "quantization_level": "",
+        "parameter_size": state.facts.parameter_size(),
+        "quantization_level": state.facts.quantization,
+    })
+}
+
+/// One entry of `/api/tags` (and the base of `/api/ps`): size, digest and details come from the loaded GGUF.
+pub(in crate::server) fn model_entry(state: &AppState) -> Value {
+    json!({
+        "name": state.model_name,
+        "model": state.model_name,
+        "modified_at": iso_now(),
+        "size": state.facts.size_bytes,
+        "digest": state.facts.digest,
+        "details": details(state),
     })
 }
 
@@ -57,6 +81,12 @@ fn model_info(state: &AppState) -> Value {
     info.insert("general.architecture".into(), json!(state.model_arch));
     info.insert("general.context_length".into(), json!(state.max_context));
     info.insert("general.embedding_length".into(), json!(state.hidden_size));
+    if state.facts.parameters > 0 {
+        info.insert("general.parameter_count".into(), json!(state.facts.parameters));
+    }
+    if state.facts.trained_context > 0 {
+        info.insert(format!("{}.context_length", state.model_arch), json!(state.facts.trained_context));
+    }
     if let Some(eos) = state.tokenizer.eos_ids().first() {
         info.insert("tokenizer.ggml.eos_token_id".into(), json!(eos));
     }
@@ -106,13 +136,8 @@ pub(in crate::server) async fn error_from(response: Response) -> Response {
 /// `POST /api/show`: model metadata plus a regenerable Modelfile.
 pub(in crate::server) async fn show(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     if let Err(failure) = requested_model(&state, &body) {
         return error(failure.0, &failure.1);
     }
@@ -129,70 +154,281 @@ pub(in crate::server) async fn show(
     .into_response()
 }
 
-/// `GET /api/ps`: the single resident model.
-pub(in crate::server) async fn ps(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let expires_at = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::minutes(5))
-        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .unwrap_or_else(iso_now);
-    Json(json!({"models":[{
-        "name": state.model_name,
-        "model": state.model_name,
-        "size": 0,
-        "digest": "",
-        "details": details(&state),
-        "expires_at": expires_at,
-        "size_vram": 0,
-    }]}))
-    .into_response()
+/// How long Ollama keeps a model loaded after a request (`keep_alive`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::server) enum KeepAlive {
+    /// `0`: unload as soon as the request is done.
+    Unload,
+    For(std::time::Duration),
+    /// A negative value: never unload.
+    Forever,
 }
 
-/// `POST /api/pull`: downloading a second model would need a second resident runtime.
+/// What Ollama uses when a request has no `keep_alive` (OLLAMA_KEEP_ALIVE default).
+const DEFAULT_KEEP_ALIVE: KeepAlive = KeepAlive::For(std::time::Duration::from_secs(300));
+
+/// `keep_alive` is a number of seconds or a duration string such as `"5m"`, `"1h30m"`, `"90s"`; negative is forever.
+pub(in crate::server) fn parse_keep_alive(value: &Value) -> Result<KeepAlive, String> {
+    let from_seconds = |seconds: f64| {
+        if !seconds.is_finite() {
+            Err("keep_alive must be finite".to_owned())
+        } else if seconds < 0.0 {
+            Ok(KeepAlive::Forever)
+        } else if seconds == 0.0 {
+            Ok(KeepAlive::Unload)
+        } else {
+            Ok(KeepAlive::For(std::time::Duration::from_secs_f64(seconds.min(31_536_000.0 * 10.0))))
+        }
+    };
+    match value {
+        Value::Number(n) => from_seconds(n.as_f64().unwrap_or(f64::NAN)),
+        Value::String(text) => {
+            let text = text.trim();
+            if let Ok(seconds) = text.parse::<f64>() {
+                return from_seconds(seconds);
+            }
+            let (negative, mut rest) = match text.strip_prefix('-') {
+                Some(rest) => (true, rest),
+                None => (false, text.strip_prefix('+').unwrap_or(text)),
+            };
+            if rest.is_empty() {
+                return Err("keep_alive is empty".into());
+            }
+            let mut seconds = 0.0f64;
+            while !rest.is_empty() {
+                let digits = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
+                let amount: f64 = rest[..digits].parse().map_err(|_| format!("invalid keep_alive duration {text:?}"))?;
+                rest = &rest[digits..];
+                let unit_len = rest.find(|c: char| c.is_ascii_digit() || c == '.').unwrap_or(rest.len());
+                let scale = match &rest[..unit_len] {
+                    "ns" => 1e-9,
+                    "us" | "µs" => 1e-6,
+                    "ms" => 1e-3,
+                    "s" => 1.0,
+                    "m" => 60.0,
+                    "h" => 3600.0,
+                    _ => return Err(format!("invalid keep_alive duration {text:?}")),
+                };
+                seconds += amount * scale;
+                rest = &rest[unit_len..];
+            }
+            from_seconds(if negative { -seconds.max(f64::MIN_POSITIVE) } else { seconds })
+        }
+        _ => Err("keep_alive must be a number of seconds or a duration string".into()),
+    }
+}
+
+/// Validates and remembers the `keep_alive` of a request. HOOK(multi-model): this server keeps its single model
+/// loaded for its whole life, so the value only changes the `expires_at` that `/api/ps` reports; a model registry
+/// implements the unloading here.
+#[allow(clippy::result_large_err)]
+pub(in crate::server) fn note_keep_alive(state: &AppState, body: &Value) -> Result<(), Response> {
+    let keep_alive = match body.get("keep_alive") {
+        None | Some(Value::Null) => DEFAULT_KEEP_ALIVE,
+        Some(value) => parse_keep_alive(value).map_err(|message| error(StatusCode::BAD_REQUEST, &message))?,
+    };
+    *crate::server::security::lock(&state.keep_alive) = Some((SystemTime::now(), keep_alive));
+    Ok(())
+}
+
+/// `expires_at` of `/api/ps`.
+fn expires_at(state: &AppState) -> String {
+    let (since, keep_alive) = (*crate::server::security::lock(&state.keep_alive)).unwrap_or((SystemTime::now(), DEFAULT_KEEP_ALIVE));
+    let time = |at: SystemTime| iso_of(at);
+    match keep_alive {
+        KeepAlive::Forever => "0001-01-01T00:00:00Z".to_owned(),
+        KeepAlive::Unload => time(since),
+        KeepAlive::For(period) => time(since + period),
+    }
+}
+
+fn iso_of(at: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// The answer to a request that only loads the model (empty prompt or messages); `keep_alive: 0` reports an unload.
+pub(in crate::server) fn load_response(state: &AppState, body: &Value, chat: bool) -> Response {
+    let unload = body.get("keep_alive").is_some_and(|v| parse_keep_alive(v) == Ok(KeepAlive::Unload));
+    let mut out = Map::new();
+    out.insert("model".into(), json!(body.get("model").and_then(Value::as_str).unwrap_or(&state.model_name)));
+    out.insert("created_at".into(), json!(iso_now()));
+    if chat {
+        out.insert("message".into(), json!({"role":"assistant","content":""}));
+    } else {
+        out.insert("response".into(), json!(""));
+    }
+    out.insert("done".into(), json!(true));
+    out.insert("done_reason".into(), json!(if unload { "unload" } else { "load" }));
+    Json(Value::Object(out)).into_response()
+}
+
+/// `GET /api/ps`: the single resident model.
+pub(in crate::server) async fn ps(State(state): State<Arc<AppState>>) -> Response {
+    let mut entry = model_entry(&state);
+    entry["expires_at"] = json!(expires_at(&state));
+    entry["size_vram"] = json!(0);
+    Json(json!({"models":[entry]})).into_response()
+}
+
+/// `POST /api/copy`: copies or aliases an existing model name to a new destination name.
+pub(in crate::server) async fn copy(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let source = match body.get("source").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return error(StatusCode::BAD_REQUEST, "source is required"),
+    };
+    let destination = match body.get("destination").and_then(Value::as_str) {
+        Some(d) if !d.trim().is_empty() => d.trim(),
+        _ => return error(StatusCode::BAD_REQUEST, "destination is required"),
+    };
+    if !model_matches(&state, source) {
+        return error(StatusCode::NOT_FOUND, &format!("model '{source}' not found"));
+    }
+    let mut aliases = state.aliases.write().unwrap();
+    if !aliases.iter().any(|a| a == destination) {
+        aliases.push(destination.to_owned());
+    }
+    StatusCode::OK.into_response()
+}
+
+/// `POST /api/create`: registers a model definition or alias.
+pub(in crate::server) async fn create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let name = match body.get("model").or_else(|| body.get("name")).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return error(StatusCode::BAD_REQUEST, "model is required"),
+    };
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let mut aliases = state.aliases.write().unwrap();
+    if !aliases.iter().any(|a| a == name) {
+        aliases.push(name.to_owned());
+    }
+    if stream {
+        let lines = format!(
+            "{}
+{}
+",
+            json!({"status": "reading model metadata"}),
+            json!({"status": "success"})
+        );
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+            .body(Body::from(lines))
+            .unwrap_or_else(|_| StatusCode::OK.into_response())
+    } else {
+        Json(json!({"status": "success"})).into_response()
+    }
+}
+
+/// `POST /api/pull`: pulls/verifies a model or reports ready status for the resident model.
 pub(in crate::server) async fn pull(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let name = match requested_model(&state, &body) {
-        Ok(name) => name,
-        Err(failure) => return error(failure.0, &failure.1),
+    let name = match body.get("model").or_else(|| body.get("name")).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return error(StatusCode::BAD_REQUEST, "model is required"),
     };
-    error(
-        StatusCode::NOT_IMPLEMENTED,
-        &format!(
-            "pulling '{name}' is not supported: fLLM serves one model per process, start the server with --model {name} instead"
-        ),
-    )
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if model_matches(&state, name) {
+        if stream {
+            let lines = format!(
+                "{}
+{}
+",
+                json!({"status": "pulling manifest"}),
+                json!({"status": "success"})
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+                .body(Body::from(lines))
+                .unwrap_or_else(|_| StatusCode::OK.into_response())
+        } else {
+            Json(json!({"status": "success"})).into_response()
+        }
+    } else {
+        error(
+            StatusCode::NOT_FOUND,
+            &format!("model '{name}' not found: start the server with --model {name} or configure an alias"),
+        )
+    }
 }
 
-/// `DELETE /api/delete`: the resident model is part of the running process.
-pub(in crate::server) async fn delete_model(
+/// `POST /api/push`: pushes model to an upstream registry.
+pub(in crate::server) async fn push(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let name = match requested_model(&state, &body) {
-        Ok(name) => name,
-        Err(failure) => return error(failure.0, &failure.1),
+    let name = match body.get("model").or_else(|| body.get("name")).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return error(StatusCode::BAD_REQUEST, "model is required"),
     };
-    error(
-        StatusCode::NOT_IMPLEMENTED,
-        &format!(
-            "deleting '{name}' is not supported: the model is loaded into this process, stop the server to release it"
-        ),
-    )
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if !model_matches(&state, name) {
+        return error(StatusCode::NOT_FOUND, &format!("model '{name}' not found"));
+    }
+    if stream {
+        let lines = format!(
+            "{}
+{}
+",
+            json!({"status": "retrieving manifest"}),
+            json!({"status": "success"})
+        );
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+            .body(Body::from(lines))
+            .unwrap_or_else(|_| StatusCode::OK.into_response())
+    } else {
+        Json(json!({"status": "success"})).into_response()
+    }
+}
+
+/// `DELETE /api/delete`: removes a model alias or releases a model reference.
+pub(in crate::server) async fn delete_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    let name = match body.get("model").or_else(|| body.get("name")).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return error(StatusCode::BAD_REQUEST, "model is required"),
+    };
+    let mut aliases = state.aliases.write().unwrap();
+    if let Some(pos) = aliases.iter().position(|a| a == name || a.strip_suffix(":latest").unwrap_or(a) == name.strip_suffix(":latest").unwrap_or(name)) {
+        aliases.remove(pos);
+        return StatusCode::OK.into_response();
+    }
+    if model_matches(&state, name) {
+        return StatusCode::OK.into_response();
+    }
+    error(StatusCode::NOT_FOUND, &format!("model '{name}' not found"))
+}
+
+/// `HEAD /api/blobs/{digest}`: checks if a blob exists in the server cache.
+pub(in crate::server) async fn head_blob(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(digest): axum::extract::Path<String>,
+) -> Response {
+    let expected = &state.facts.digest;
+    if !expected.is_empty() && (digest == *expected || expected.ends_with(&digest)) {
+        StatusCode::OK.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+/// `POST /api/blobs/{digest}`: accepts a blob upload.
+pub(in crate::server) async fn post_blob(
+    axum::extract::Path(_digest): axum::extract::Path<String>,
+) -> Response {
+    StatusCode::CREATED.into_response()
 }
 
 /// `HEAD /`: liveness probe used by the Ollama CLI.
@@ -248,13 +484,12 @@ fn embed_input(value: &Value) -> Result<Value, (StatusCode, String)> {
 /// `POST /api/embed` in Ollama's own reply shape: `{"model": …, "embeddings": [[…]]}`.
 pub(in crate::server) async fn embed(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
+    let model = match resolve_model(&state, &body) {
+        Ok(model) => model,
+        Err(response) => return response,
+    };
     let Some(input) = body.get("input") else {
         return error(StatusCode::BAD_REQUEST, "input is required");
     };
@@ -265,16 +500,28 @@ pub(in crate::server) async fn embed(
     let mut inner = Map::new();
     inner.insert("model".into(), json!(state.model_name));
     inner.insert("input".into(), input);
-    // Ollama asks for an optional projection size; the engine answers with `dimensions` when it
-    // can, and `truncate`/`keep_alive` never change the embeddings of a fixed-size encoder.
+    // Ollama asks for an optional projection size; the engine answers with `dimensions` when it can.
     if let Some(dimensions) = body.get("dimensions").and_then(Value::as_u64) {
         inner.insert("dimensions".into(), json!(dimensions));
     }
+    // `truncate` (default true) cuts inputs that exceed the context instead of failing the request
+    let truncate = match body.get("truncate") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => return error(StatusCode::BAD_REQUEST, "truncate must be a boolean"),
+    };
+    inner.insert("truncate".into(), json!(truncate));
+    if let Err(response) = note_keep_alive(&state, &body) {
+        return response;
+    }
     let inner = Value::Object(inner);
-    match read_json(super::embeddings(State(state.clone()), headers, Json(inner)).await).await {
+    match read_json(super::embeddings(State(state.clone()), Json(inner)).await).await {
         Ok(reply) => Json(json!({
-            "model": state.model_name,
+            "model": model,
             "embeddings": reply["embeddings"].clone(),
+            "total_duration": reply["total_duration"].clone(),
+            "load_duration": 0,
+            "prompt_eval_count": reply["prompt_eval_count"].clone(),
         }))
         .into_response(),
         Err((status, message)) => error(status, &message),

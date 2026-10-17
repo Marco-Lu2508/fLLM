@@ -1,0 +1,140 @@
+# HTTP API checks on GitHub-hosted runners, CPU only, no model download:
+#  - the in-process tests of the HTTP layer (routes of every dialect, auth, CORS, limits, timeouts, panic isolation),
+#  - the official OpenAI, Anthropic and Ollama Python SDKs against a running server on a tiny random model that
+#    `fllm-rs make-tiny-model` writes in a few seconds,
+#  - actionlint over all workflow files.
+# See docs/changes/server.md and scripts/api-tests/.
+name: api
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust/engine/**"
+      - "rust/checkpoint/**"
+      - "rust/gguf-probe/**"
+      - "scripts/api-tests/**"
+      - ".github/workflows/api.yml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - "rust/engine/**"
+      - "rust/checkpoint/**"
+      - "rust/gguf-probe/**"
+      - "scripts/api-tests/**"
+      - ".github/workflows/api.yml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  http-tests:
+    name: HTTP layer tests (in process)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Server tests
+        run: |
+          cargo test --locked --release -p fllm-engine --lib -- server:: metrics:: tiny_model::
+          cargo test --locked --release -p fllm-checkpoint sampling_defaults
+
+  sdk-tests:
+    name: SDK tests (OpenAI, Anthropic, Ollama)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FLLM_API_KEY: ci-sdk-test-key
+      FLLM_BASE_URL: http://127.0.0.1:18200
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build the CPU binary
+        run: cargo build --locked --release -p fllm-engine --bin fllm-rs
+
+      - name: Write the tiny test model
+        run: target/release/fllm-rs make-tiny-model "$RUNNER_TEMP/tiny.gguf"
+
+      - name: Start the server
+        run: |
+          set -eu
+          target/release/fllm-rs serve --model "$RUNNER_TEMP/tiny.gguf" --model-name tiny --device cpu \
+            --host 127.0.0.1 --port 18200 --threads 2 --max-seqs 4 --tool-parser hermes \
+            --api-key "$FLLM_API_KEY" >"$RUNNER_TEMP/server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/server.pid"
+          for _ in $(seq 1 60); do
+            if curl --silent --fail --max-time 2 "$FLLM_BASE_URL/ready" >/dev/null; then
+              exit 0
+            fi
+            kill -0 "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || { cat "$RUNNER_TEMP/server.log" >&2; exit 1; }
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.log" >&2
+          echo 'the server did not become ready' >&2
+          exit 1
+
+      - name: Run the SDK tests
+        run: scripts/api-tests/run_all.sh
+
+      - name: Stop the server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/server.pid" ]; then kill "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || true; fi
+
+      - name: Upload the server log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: server-log
+          path: ${{ runner.temp }}/server.log
+          if-no-files-found: ignore
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Lint the workflow files
+        run: docker run --rm --volume "$PWD:/repo" --workdir /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color

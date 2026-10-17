@@ -55,6 +55,8 @@ pub struct ImportOptions {
     pub quant: Option<String>,
     /// `--outtype preserve|f16|f32`.
     pub outtype: Option<String>,
+    /// `--direct` / `--zero-copy`: load safetensors directly without converting to GGUF on disk.
+    pub direct: bool,
 }
 
 impl ImportOptions {
@@ -70,6 +72,7 @@ impl ImportOptions {
             "--outtype" => self.outtype = Some(value(i)?),
             "--revision" => self.revision = Some(value(i)?),
             "--local-files-only" | "--offline" => self.offline = true,
+            "--direct" | "--zero-copy" => self.direct = true,
             _ => return Ok(false),
         }
         Ok(true)
@@ -88,6 +91,12 @@ impl ImportOptions {
         }
         if self.quant.is_some() && self.outtype.is_some() {
             return Err("--quant and --outtype cannot be combined".into());
+        }
+        if self.direct && self.quant.is_some() {
+            return Err("--quant and --direct cannot be combined".into());
+        }
+        if self.direct && self.outtype.is_some() {
+            return Err("--outtype and --direct cannot be combined".into());
         }
         Ok(())
     }
@@ -114,6 +123,10 @@ pub fn classify_repo(names: &[&str]) -> RepoKind {
         || has("pytorch_model.bin")
         || has("pytorch_model.bin.index.json");
     if has("config.json") && weights {
+        return RepoKind::Checkpoint;
+    }
+    // Mistral's own layout: params.json and consolidated*.safetensors
+    if !has("config.json") && has("params.json") && names.iter().any(|n| n.starts_with("consolidated") && n.ends_with(".safetensors")) {
         return RepoKind::Checkpoint;
     }
     let reason = if has("adapter_config.json") {
@@ -271,8 +284,7 @@ fn print_memory_hint(model_bytes: u64, outtype: &OutType, quantization: &str) {
 }
 
 fn read_config(root: &Path) -> Result<Value, String> {
-    let text = fs::read(root.join("config.json")).map_err(|e| format!("cannot read config.json: {e}"))?;
-    serde_json::from_slice(&text).map_err(|e| format!("invalid config.json: {e}"))
+    fllm_checkpoint::read_checkpoint_config(root)
 }
 
 /// Check architecture and quantization from `config.json` alone; the error says what to do.
@@ -293,12 +305,22 @@ fn check_architecture(root: &Path, what: &str) -> Result<fllm_checkpoint::Config
     })
 }
 
-fn require_tokenizer(has_tokenizer_json: bool, what: &str) -> Result<(), String> {
-    if has_tokenizer_json {
+/// Tokenizer files the conversion can build the GGUF vocabulary from.
+pub(crate) fn has_tokenizer_source(names: &[&str]) -> bool {
+    names.iter().any(|n| {
+        matches!(
+            *n,
+            "tokenizer.json" | "tekken.json" | "tiktoken.model" | "qwen.tiktoken" | "tokenizer.model" | "spiece.model" | "sentencepiece.bpe.model"
+        ) || n.ends_with(".tiktoken")
+    })
+}
+
+fn require_tokenizer(has_tokenizer: bool, what: &str) -> Result<(), String> {
+    if has_tokenizer {
         Ok(())
     } else {
         Err(format!(
-            "{what} has no tokenizer.json, which the conversion needs to build the GGUF vocabulary (SentencePiece-only repositories are not supported). Use a repository or directory that contains tokenizer.json (and tokenizer_config.json)"
+            "{what} has no tokenizer the conversion can use to build the GGUF vocabulary: expected tokenizer.json, tekken.json, a tiktoken rank file (tiktoken.model, qwen.tiktoken, *.tiktoken) or a SentencePiece model (tokenizer.model, spiece.model, sentencepiece.bpe.model)"
         ))
     }
 }
@@ -440,7 +462,7 @@ fn convert_into(input: &Path, final_path: &Path, origin: &Origin<'_>) -> Result<
         let started = Instant::now();
         let _beat = Heartbeat::start(format!("still converting {}", origin.source));
         let stage = if preset.is_some() { part_path(final_path, ".f16") } else { partial.clone() };
-        let report = fllm_checkpoint::convert_checkpoint(input, &stage, ConvertOptions { output_dtype: dtype, overwrite: true })
+        let report = fllm_checkpoint::convert_checkpoint(input, &stage, ConvertOptions { output_dtype: dtype, overwrite: true, spec_head: None })
             .map_err(|e| format!("checkpoint conversion failed: {e}"))?;
         if let Some(preset) = preset {
             eprintln!("[fllm-rs] quantizing the converted model to {}", origin.outtype.label());
@@ -455,7 +477,7 @@ fn convert_into(input: &Path, final_path: &Path, origin: &Origin<'_>) -> Result<
             "architecture": report.architecture,
             "source_quantization": origin.check.quantization,
             "import_version": IMPORT_VERSION,
-            "converter": format!("fllm-rs {}", env!("CARGO_PKG_VERSION")),
+            "converter": crate::version::long_version(),
             "created": now_secs(),
         });
         let _ = fs::write(sidecar_path(final_path), meta.to_string());
@@ -510,12 +532,12 @@ fn prepare_hub(reference: &Reference, opts: &ImportOptions) -> Result<PathBuf, S
         RepoKind::Checkpoint => {}
     }
     // 1. architecture and quantization from config.json, before any weights are fetched
-    session.download("config.json")?;
+    session.download(if name_refs.contains(&"config.json") { "config.json" } else { "params.json" })?;
     if name_refs.contains(&"hf_quant_config.json") {
         session.download("hf_quant_config.json")?;
     }
     let check = check_architecture(&session.snapshot, &repo_name)?;
-    require_tokenizer(name_refs.contains(&"tokenizer.json"), &repo_name)?;
+    require_tokenizer(has_tokenizer_source(&name_refs), &repo_name)?;
     let outtype = choose_outtype(&check.quantization, opts.quant.as_deref(), opts.outtype.as_deref())?;
     let cfg = read_config(&session.snapshot)?;
     // 2. the files that make up the checkpoint
@@ -594,7 +616,7 @@ fn is_checkpoint_file(path: &Path) -> bool {
 fn local_checkpoint_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
     if path.is_file() && is_checkpoint_file(path) {
         let root = path.parent()?.to_path_buf();
-        return root.join("config.json").is_file().then(|| (root, path.to_path_buf()));
+        return (root.join("config.json").is_file() || root.join("params.json").is_file()).then(|| (root, path.to_path_buf()));
     }
     if !path.is_dir() {
         return None;
@@ -605,7 +627,7 @@ fn local_checkpoint_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
         let n = e.file_name().to_string_lossy().into_owned();
         n.ends_with(".safetensors") || n.ends_with(".safetensors.index.json") || n == "pytorch_model.bin" || n == "pytorch_model.bin.index.json"
     });
-    (!has_gguf && has_weights && path.join("config.json").is_file()).then(|| (path.to_path_buf(), path.to_path_buf()))
+    (!has_gguf && has_weights && (path.join("config.json").is_file() || path.join("params.json").is_file())).then(|| (path.to_path_buf(), path.to_path_buf()))
 }
 
 /// Size and modification time of the files that decide what a local conversion contains.
@@ -622,7 +644,8 @@ fn local_fingerprint(root: &Path) -> Result<(Vec<String>, u64), String> {
     for path in names {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let weight = name.ends_with(".safetensors") || name.ends_with(".bin") || name.ends_with(".pt") || name.ends_with(".pth");
-        let relevant = weight || matches!(name.as_str(), "config.json" | "hf_quant_config.json" | "tokenizer.json" | "tokenizer_config.json" | "generation_config.json" | "chat_template.jinja")
+        let relevant = weight || matches!(name.as_str(), "config.json" | "hf_quant_config.json" | "tokenizer.json" | "tokenizer_config.json" | "generation_config.json" | "chat_template.jinja" | "chat_template.json" | "params.json" | "tekken.json" | "tokenizer.model" | "tiktoken.model" | "qwen.tiktoken" | "spiece.model" | "sentencepiece.bpe.model")
+            || name.ends_with(".tiktoken")
             || name.ends_with(".index.json");
         if !relevant {
             continue;
@@ -646,8 +669,16 @@ fn prepare_local(path: &Path, opts: &ImportOptions) -> Result<PathBuf, String> {
     };
     let what = root.display().to_string();
     let check = check_architecture(&root, &what)?;
-    require_tokenizer(root.join("tokenizer.json").is_file(), &what)?;
+    let local_names: Vec<String> = fs::read_dir(&root)
+        .map(|entries| entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect())
+        .unwrap_or_default();
+    let local_refs: Vec<&str> = local_names.iter().map(String::as_str).collect();
+    require_tokenizer(has_tokenizer_source(&local_refs), &what)?;
     let outtype = choose_outtype(&check.quantization, opts.quant.as_deref(), opts.outtype.as_deref())?;
+    if opts.direct || std::env::var("FLLM_DIRECT_SAFETENSORS").is_ok_and(|v| v != "0") {
+        eprintln!("[fllm-rs] loading {what} directly via zero-copy safetensors");
+        return Ok(input);
+    }
     let cfg = read_config(&root)?;
     let canonical = fs::canonicalize(&input).unwrap_or_else(|_| input.clone());
     let (files, weight_bytes) = local_fingerprint(&root)?;

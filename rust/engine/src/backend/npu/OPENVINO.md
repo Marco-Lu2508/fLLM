@@ -1,229 +1,229 @@
-# Intel-NPU über OpenVINO in fLLM
+# Intel NPU via OpenVINO in fLLM
 
-Forschung, Entwurf, Grenzen und Messplan für Feature `npu-openvino` (Paket 10). **Prüfstufe L0**: alles hier ist übersetzt und mit
-hardwarefreien Tests geprüft; es lief nie auf einer NPU, nie gegen ein Modell, und nichts davon wurde gemessen. Wo Zahlen stehen,
-sind sie entweder zitiert (mit Quelle) oder als *Annahme* gekennzeichnet.
+Research, design, limits and measurement plan for the `npu-openvino` feature. **Test level L0** (see [test-levels.md](../../../../../docs/test-levels.md)):
+everything here compiles and is covered by hardware-free tests; it has never run on an NPU, never against a model, and nothing in it has
+been measured. Where numbers appear they are either quoted (with a source) or marked as an *assumption*.
 
-## 1. Kurzfassung
+## 1. Summary
 
-* Die Intel-NPU ist ein Matrixmultiplizierer mit niedriger Leistungsaufnahme (Meteor Lake / Arrow Lake-U: ca. 9,5 TOPS INT8, halb so
-  viel FP16; Lunar Lake: 48 TOPS). Sie teilt sich den Arbeitsspeicher mit CPU und iGPU und braucht **statische Shapes**.
-* Sie lohnt sich für fLLM **nur für das Prefill** (viele Prompt-Zeilen pro gelesenem Gewicht, rechenbegrenzt). Für **Decode**
-  (eine Zeile pro Gewicht, speicherbandbreitenbegrenzt) bringt sie nichts und ist durch die Aufrufkosten eher langsamer als die CPU.
-* Gegenüber der **iGPU** (Xe) ist kein Geschwindigkeitsgewinn zu erwarten, sondern Energie- und Entlastungsvorteile (die NPU nahm in einer
-  Messung ≤ 7 W auf, die iGPU bis 20 W). Wer auf Intel-Laptops Tempo will, bekommt es eher über die iGPU-Backends (Vulkan, SYCL).
-* Gebaut wurde deshalb **kein ganzes Modell auf der NPU**, sondern ein *Matmul-Offload*: `y = x·Wᵀ` für große Projektionen ab einer
-  Mindestzeilenzahl, Gewichte als INT4/INT8 (symmetrisch, gruppenweise) oder FP16 im OpenVINO-Graphen; alles andere bleibt auf der CPU.
-* Zwei Wege in den Decoder: (a) `--device npu`: ein Hybrid-Backend (CPU-Backend + NPU für `quantized_linear`), vollständig vorhanden, aber
-  mit der langsamen Referenz-CPU für alles andere; (b) ein Haken im Host-Decoder (`Linear::forward`), der die schnellen CPU-Kerne behält und nur
-  die Prompt-Matmuls an die NPU gibt. (b) ist der sinnvollere Weg; sein Patch liegt bei (Abschnitt 7), ist übersetzt, aber nicht angewendet.
+* The Intel NPU is a low-power matrix multiplier (Meteor Lake / Arrow Lake-U: about 9.5 TOPS INT8, half of that in FP16; Lunar Lake: 48 TOPS).
+  It shares main memory with the CPU and the iGPU and needs **static shapes**.
+* For fLLM it is worthwhile **only for prefill** (many prompt rows per weight read, compute bound). For **decode**
+  (one row per weight, memory-bandwidth bound) it gains nothing and, because of the per-call cost, is more likely slower than the CPU.
+* Compared with the **iGPU** (Xe) no speed gain is expected, only energy and offload benefits (in one measurement the NPU drew at most 7 W, the iGPU up to 20 W).
+  Anyone who wants speed on an Intel laptop is better served by the iGPU backends (Vulkan, SYCL).
+* Therefore **no whole model runs on the NPU**; the implementation is a *matmul offload*: `y = x·Wᵀ` for large projections above a minimum
+  row count, with weights as INT4/INT8 (symmetric, group-wise) or FP16 in the OpenVINO graph; everything else stays on the CPU.
+* Two ways into the decoder: (a) `--device npu`: a hybrid backend (CPU backend plus the NPU for `quantized_linear`), fully present, but
+  using the slow reference CPU path for everything else; (b) a hook in the host decoder (`Linear::forward`) that keeps the fast CPU kernels and hands
+  only the prompt matmuls to the NPU. (b) is the more sensible route; `NpuEngine::offload_host` for it exists, but the hook in the decoder is **not wired in this tree** (Section 7).
 
 ## 2. Hardware
 
-| NPU (Intel-Name) | Plattformcode im Treiber | Prozessoren | INT8-Spitze | Quelle / Status |
+| NPU (Intel name) | Platform code in the driver | Processors | INT8 peak | Source / status |
 |---|---|---|---|---|
-| NPU 3720 | `3720` | Core Ultra Serie 1 (Meteor Lake), mutmaßlich auch Core Ultra 200U/200H-Refreshes mit „13 TOPS" | 2 NCE-Tiles × 2048 INT8-MAC je Takt, 1,16 GHz → 9,5 TOPS (Marketing: 11–13) | Chips and Cheese, „Intel Meteor Lake's NPU" (2024) |
-| NPU 4 | `4000` | Core Ultra Serie 2 (Lunar Lake) | 48 TOPS (laut Hersteller; die Tile-Zahl ist hier nicht nachgeprüft) | TechPowerUp, Lunar-Lake-Deep-Dive |
-| NPU 5 / 5020 / 6 | `5010`, `5020`, `6010` | spätere Generationen | nicht untersucht | Liste der Plattformen in `src/plugins/intel_npu/README.md` (OpenVINO master) |
+| NPU 3720 | `3720` | Core Ultra series 1 (Meteor Lake), presumably also the Core Ultra 200U/200H refreshes with "13 TOPS" | 2 NCE tiles x 2048 INT8 MACs per clock, 1.16 GHz -> 9.5 TOPS (marketing: 11-13) | Chips and Cheese, "Intel Meteor Lake's NPU" (2024) |
+| NPU 4 | `4000` | Core Ultra series 2 (Lunar Lake) | 48 TOPS (per the vendor; the tile count was not verified here) | TechPowerUp, Lunar Lake deep dive |
+| NPU 5 / 5020 / 6 | `5010`, `5020`, `6010` | later generations | not investigated | platform list in `src/plugins/intel_npu/README.md` (OpenVINO master) |
 
-Die Zielhardware (Core Ultra, Intel NPU der 3720-Klasse) ist **nicht auf der NPU geprüft**. Ob und welche NPU vorhanden ist, zeigt
-`fllm-rs devices` (mit `--features npu-openvino`; nur wenn Treiber und OpenVINO-Laufzeit installiert sind) und
+The target hardware (Core Ultra, Intel NPU of the 3720 class) is **not verified on the NPU**. Whether and which NPU is present is shown by
+`fllm-rs devices` (with `--features npu-openvino`; only when the driver and the OpenVINO runtime are installed) and by
 `cargo test --features npu-openvino -- --ignored npu_hardware_selfcheck`.
 
-Aufbau der 3720 laut Chips and Cheese: zwei *Neural Compute Engines* (Tiles), jede mit MAC-Array (FP16 mit halber INT8-Rate → ca. 4,7 TFLOPS
-FP16-Spitze) und **2 MB softwareverwaltetem SRAM**, daneben Movidius-**SHAVE**-DSPs für alles, was nicht auf das MAC-Array passt (FP32,
-Transzendente, Typumwandlung). Die NPU hängt am Scalable Fabric und teilt sich den LPDDR/DDR-Speicher mit allem anderen; der
-OpenCL-Kopierdurchsatz lag unter 10 GB/s (iGPU: > 19 GB/s). Gemessener FP16-MatMul-Durchsatz über die NPU-Beschleunigungsbibliothek:
-**1,35 TFLOPS** (28 % der Spitze); bei sehr großen Matrizen (7168²) brach er ein, und der iGPU-Wert war bei großen Größen ähnlich.
+Layout of the 3720 according to Chips and Cheese: two *Neural Compute Engines* (tiles), each with a MAC array (FP16 at half the INT8 rate -> about 4.7 TFLOPS
+FP16 peak) and **2 MB of software-managed SRAM**, plus Movidius **SHAVE** DSPs for everything that does not fit the MAC array (FP32,
+transcendentals, type conversion). The NPU hangs off the scalable fabric and shares the LPDDR/DDR memory with everything else; the
+OpenCL copy throughput was below 10 GB/s (iGPU: > 19 GB/s). Measured FP16 matmul throughput through the NPU acceleration library:
+**1.35 TFLOPS** (28 % of peak); for very large matrices (7168^2) it collapsed, and the iGPU value was similar at large sizes.
 
-## 3. Was die NPU rechnet und was wir davon nutzen
+## 3. What the NPU computes and what we use
 
-Der NPU-Compiler (im Treiber oder im Plugin) übersetzt einen OpenVINO-Graphen in statische Kommandostränge. Die MAC-Arrays (DPU) rechnen
-**MatMul/Convolution in INT8 oder FP16**; Elementweises, Softmax, Normalisierung, Typumwandlungen laufen auf den SHAVE-DSPs. Offiziell
-unterstützte Datentypen für die Berechnung: FP32 (wird nach FP16 gewandelt), FP16, U8-Quantisierung; die Rechenpräzision der Hardware ist FP16
-(OpenVINO-Dokumentation „NPU Device"). Für LLMs verlangt OpenVINO GenAI **symmetrische** 4-Bit-Gewichte (INT4 oder NF4, NF4 erst ab NPU 4),
-kanalweise oder in Gruppen von 128, FP16-Aktivierungen.
+The NPU compiler (in the driver or the plugin) translates an OpenVINO graph into static command streams. The MAC arrays (DPU) compute
+**matmul/convolution in INT8 or FP16**; element-wise operations, softmax, normalisation and type conversions run on the SHAVE DSPs. Officially
+supported data types for computation: FP32 (converted to FP16), FP16, U8 quantisation; the hardware's compute precision is FP16
+(OpenVINO documentation, "NPU Device"). For LLMs, OpenVINO GenAI requires **symmetric** 4-bit weights (INT4 or NF4, NF4 only from NPU 4),
+per channel or in groups of 128, and FP16 activations.
 
-Wir nutzen genau ein Muster, das NNCF/OpenVINO für komprimierte Gewichte schreibt:
+We use exactly one pattern, the one NNCF/OpenVINO write for compressed weights:
 
 ```
-Const(i4|i8 [N, G, GS]) → Convert(f16) → Multiply(Const f16 [N, G, 1]) → Reshape [N, K] ─┐
-Parameter x f16 [B, K] ─────────────────────────────────────────────────────────────────┴→ MatMul(transpose_b) → Result y f16 [B, N]
+Const(i4|i8 [N, G, GS]) -> Convert(f16) -> Multiply(Const f16 [N, G, 1]) -> Reshape [N, K] -+
+Parameter x f16 [B, K] ---------------------------------------------------------------------+-> MatMul(transpose_b) -> Result y f16 [B, N]
 ```
 
-(kanalweise: ohne Reshape, Skalen `[N, 1]`; FP16-Gewichte: eine einzige Konstante). Aktivierungen und Ergebnis sind f16; die Umwandlung
-von und nach f32, Bias und der Tensor-Skalierungsfaktor bleiben auf dem Host.
+(per channel: no reshape, scales `[N, 1]`; FP16 weights: a single constant). Activations and result are f16; the conversion
+to and from f32, the bias and the tensor scale factor stay on the host.
 
-## 4. Grenzen
+## 4. Limits
 
-* **Statische Shapes.** Jedes kompilierte Modell hat feste Zeilenzahl `B` (Standard 128, `FLLM_NPU_CHUNK`). Ein Prompt wird in volle
-  Blöcke zerlegt; ein Rest wird mit Nullen aufgefüllt, wenn er mindestens `FLLM_NPU_MIN_BATCH` (64) Zeilen hat, sonst rechnet ihn die CPU.
-* **Kompilierzeit.** Jede Projektion ist ein eigenes Modell (Gewichte als Konstanten). Ein Modell mit 32 Schichten hat über 200 davon.
-  Die Kompilierzeit je Modell ist **nicht gemessen**, und ich kenne keine belastbare Zahl für diese Modellform; sie ist der wichtigste Messpunkt (Abschnitt 8). `CACHE_DIR` (Standard `~/.cache/fllm/npu`, abschaltbar mit `FLLM_NPU_CACHE_DIR=`) macht den zweiten Start billiger. Die
-  Kompilierung geschieht beim ersten großen Prompt, nicht beim Laden; ein Vorwärmen ist nicht eingebaut.
-* **Speicher.** Das kompilierte Modell enthält die Gewichte (komprimiert) im NPU-zugänglichen Speicher; dazu kommt die Host-Kopie. Im Hybrid-Backend
-  existieren die Gewichte außerdem doppelt (CPU-Puffer und Registrierung). Eine Budgetgrenze gibt es (`FLLM_NPU_BUDGET_MB`, sonst 75 % von
-  `NPU_DEVICE_TOTAL_MEM_SIZE`); Projektionen über dem Budget bleiben auf der CPU.
-* **Genauigkeit.** Die NPU rechnet in FP16 (Akkumulation intern nicht dokumentiert). Aktivierungen mit |x| > 65504 (außerhalb von f16) oder NaN/Inf und f16-Überläufe im
-  Ergebnis führen zum CPU-Fallback für diesen Aufruf. Q4_0 und Q8_0 werden **exakt** umgerechnet (gleiche Werte wie die CPU-Dequantisierung);
-  alle anderen Formate werden aus den entquantisierten Werten **neu quantisiert** (INT4 für ≤ 4,5 bit, sonst INT8; Gruppe 128, `FLLM_NPU_GROUP`).
-  Asymmetrische K-Quant-Anteile (Minima) gehen dabei verloren; die asymmetrische u4-Form wäre in OpenVINO möglich, wird aber bewusst nicht
-  erzeugt, weil der NPU-Compiler symmetrische Gewichte bevorzugt.
-* **Formate.** Nicht umgerechnet werden gerätespezifische Layouts (`Nvfp4Marlin`, `Q4_K_Marlin`, `Fp8E4m3/E5m2` ohne Rust-Dequantisierer, `Other`). Die
-  Q4ZP-Formate (GPTQ mit Permutation) werden im Hybrid-Backend nicht registriert.
-* **Stateful-KV / Attention.** OpenVINO GenAI bringt LLMs auf die NPU, indem es Prefill und Decode als statische Graphen mit eingebautem KV-Cache
-  kompiliert (`MAX_PROMPT_LEN`, `MIN_RESPONSE_LEN`, Prefill in Blöcken `NPUW_LLM_PREFILL_CHUNK_SIZE`). Das passt nicht zu fLLMs geteiltem,
-  seitenweisem KV-Cache (`DeviceKvCache`): er müsste in einen statischen NPU-Graphen kopiert werden. Wir lassen Attention deshalb auf der CPU.
-* **Versionen.** `ov_element_type_e` wurde in OpenVINO 2025.2 neu nummeriert; die Nummern werden zur Laufzeit ermittelt (Abschnitt 6). Die C-API wird ab 2024.0
-  vorausgesetzt (`ov_core_read_model_from_memory_buffer`); mit älteren Laufzeiten geht der Weg über temporäre Dateien. NPU-Treiber:
-  OpenVINO empfiehlt 32.0.100.3104 oder neuer (GenAI-Hinweis); Kompatibilität zwischen OpenVINO- und Treiberversion ist nicht garantiert.
-* **Ein Gerät.** Das NPU-Plugin unterstützt nach seiner Dokumentation derzeit ein einziges Gerät (`NPU`).
+* **Static shapes.** Every compiled model has a fixed row count `B` (default 128, `FLLM_NPU_CHUNK`). A prompt is split into full
+  blocks; a remainder is zero-padded if it has at least `FLLM_NPU_MIN_BATCH` (64) rows, otherwise the CPU computes it.
+* **Compile time.** Every projection is its own model (weights as constants). A model with 32 layers has more than 200 of them.
+  The compile time per model is **not measured**, and no reliable figure is known for this model shape; it is the most important measurement point (Section 8). `CACHE_DIR` (default `~/.cache/fllm/npu`, disabled with `FLLM_NPU_CACHE_DIR=`) makes the second start cheaper. Compilation
+  happens at the first large prompt, not at load time; there is no warm-up.
+* **Memory.** The compiled model holds the (compressed) weights in NPU-accessible memory; the host copy comes on top. In the hybrid backend
+  the weights also exist twice (CPU buffer and registration). There is a budget limit (`FLLM_NPU_BUDGET_MB`, otherwise 75 % of
+  `NPU_DEVICE_TOTAL_MEM_SIZE`); projections above the budget stay on the CPU.
+* **Accuracy.** The NPU computes in FP16 (internal accumulation is not documented). Activations with |x| > 65504 (outside f16) or NaN/Inf, and f16 overflows in the
+  result, cause a CPU fallback for that call. Q4_0 and Q8_0 are converted **exactly** (same values as the CPU dequantisation);
+  all other formats are **re-quantised** from the dequantised values (INT4 for <= 4.5 bit, otherwise INT8; group 128, `FLLM_NPU_GROUP`).
+  Asymmetric K-quant parts (minima) are lost in the process; the asymmetric u4 form would be possible in OpenVINO but is deliberately not
+  produced, because the NPU compiler prefers symmetric weights.
+* **Formats.** Device-specific layouts are not converted (`Nvfp4Marlin`, `Q4_K_Marlin`, `Fp8E4m3/E5m2` without a Rust dequantiser, `Other`). The
+  Q4ZP formats (GPTQ with permutation) are not registered in the hybrid backend.
+* **Stateful KV / attention.** OpenVINO GenAI puts LLMs on the NPU by compiling prefill and decode as static graphs with a built-in KV cache
+  (`MAX_PROMPT_LEN`, `MIN_RESPONSE_LEN`, prefill in blocks of `NPUW_LLM_PREFILL_CHUNK_SIZE`). That does not fit fLLM's shared,
+  paged KV cache (`DeviceKvCache`): it would have to be copied into a static NPU graph. Attention therefore stays on the CPU.
+* **Versions.** `ov_element_type_e` was renumbered in OpenVINO 2025.2; the numbers are determined at run time (Section 6). The C API is assumed from 2024.0
+  on (`ov_core_read_model_from_memory_buffer`); with older runtimes the path goes through temporary files. NPU driver:
+  OpenVINO recommends 32.0.100.3104 or newer (GenAI note); compatibility between OpenVINO and driver versions is not guaranteed.
+* **One device.** According to its documentation, the NPU plugin currently supports a single device (`NPU`).
 
-## 5. Erwarteter Gewinn: Prefill gegen Decode
+## 5. Expected gain: prefill versus decode
 
-*Alles Folgende ist eine Abschätzung aus Spezifikationen und fremden Messungen, keine Messung von fLLM.*
+*Everything below is an estimate from specifications and third-party measurements, not a measurement of fLLM.*
 
-**Decode.** Je Token wird jedes Gewicht einmal gelesen: 7 Mrd. Parameter in Q4 sind ≈ 3,8 GB. Bei 60–90 GB/s nutzbarer Speicherbandbreite
-(Laptop-DDR5/LPDDR5) ist die Obergrenze 15–25 Token/s, egal welcher Rechenkern die Summe bildet. Die NPU kann die Bandbreite nicht besser nutzen
-als die CPU (Kopierdurchsatz < 10 GB/s, siehe oben), und jeder Aufruf kostet feste Startzeit; bei 7 Projektionen × 32 Schichten wären das > 200
-Aufrufe je Token. Fremde Messungen zeigen dasselbe Bild: in einer OpenVINO-Diskussion (Lunar Lake, Discussion #36484) ist ein kleines Draft-Modell
-auf der NPU 3,6× langsamer pro Token als auf der CPU; eine Mobil-Studie (Qualcomm, nicht Intel) beschreibt eine „Phasenteilung": NPUs
-sind im rechenbegrenzten Prefill vorn, die CPU im speicherbegrenzten Decode. **Erwartung für fLLM: kein Gewinn, vermutlich Verlust → Decode bleibt auf der CPU.**
+**Decode.** Per token every weight is read once: 7 billion parameters in Q4 are about 3.8 GB. At 60-90 GB/s of usable memory bandwidth
+(laptop DDR5/LPDDR5) the upper bound is 15-25 tokens/s, regardless of which compute unit forms the sum. The NPU cannot use the bandwidth better
+than the CPU (copy throughput < 10 GB/s, see above), and every call has a fixed start-up cost; with 7 projections x 32 layers that would be more than 200
+calls per token. Third-party measurements show the same picture: in an OpenVINO discussion (Lunar Lake, Discussion #36484) a small draft model
+on the NPU is 3.6x slower per token than on the CPU; a mobile study (Qualcomm, not Intel) describes a "phase split": NPUs
+lead in compute-bound prefill, the CPU in memory-bound decode. **Expectation for fLLM: no gain, probably a loss -> decode stays on the CPU.**
 
-**Prefill.** Rechnerisch 2·Parameter FLOP je Token (7 Mrd. → 14 GFLOP). Bei der gemessenen 1,35 TFLOPS (NPU 3720, FP16-MatMul, große Matrizen) wären das
-höchstens ≈ 95 Token/s für die Matmuls; bei der Spitze 4,7 TFLOPS ≈ 330 Token/s; NPU 4 hat die vierfache Spitzenleistung. Die CPU
-(AVX2/AVX-VNNI-INT8-Kerne von fLLM, `docs/cpu-kernels.md`) liegt auf Laptop-Prozessoren je nach Kernzahl in einer ähnlichen oder niedrigeren
-Größenordnung; ob der Unterschied Faktor 1 oder 3 ist, lässt sich nicht aus der Literatur ablesen. Die Standardannahmen des Planers
-(`CPU 400 GOPS`, `NPU 1500 GOPS`, `500 µs je Aufruf`) sind **Platzhalter**, die der Messplan (Abschnitt 8) ersetzen soll. Gegenüber der iGPU
-(Xe-LPG/Xe2 mit eigenen Matrixeinheiten) ist beim Prefill kein Gewinn zu erwarten: Chips and Cheese fand die iGPU bei großen MatMuls ähnlich schnell
-und bei der Stable-Diffusion-Last 62 % schneller als die NPU (FP32-Modell der iGPU gegen INT8-Blob der NPU).
+**Prefill.** Arithmetically 2 x parameters FLOP per token (7 billion -> 14 GFLOP). At the measured 1.35 TFLOPS (NPU 3720, FP16 matmul, large matrices) that is
+at most about 95 tokens/s for the matmuls; at the 4.7 TFLOPS peak about 330 tokens/s; NPU 4 has four times the peak. The CPU
+(fLLM's AVX2/AVX-VNNI INT8 kernels, `docs/cpu-kernels.md`) lies, on laptop processors and depending on core count, in a similar or lower
+order of magnitude; whether the difference is a factor of 1 or 3 cannot be read from the literature. The planner's default assumptions
+(`CPU 400 GOPS`, `NPU 1500 GOPS`, `500 us per call`) are **placeholders** that the measurement plan (Section 8) is meant to replace. Compared with the iGPU
+(Xe-LPG/Xe2 with their own matrix units) no prefill gain is expected: Chips and Cheese found the iGPU similarly fast on large matmuls
+and 62 % faster than the NPU on the Stable Diffusion workload (FP32 model on the iGPU against an INT8 blob on the NPU).
 
-**Fazit.** Ein Gewinn gegenüber der CPU ist für große Prompts (≥ 128 Token) und NPU 4 plausibel, auf der NPU 3720 unsicher; gegenüber der
-iGPU gibt es höchstens Energie- und Entlastungsvorteile (die CPU bleibt frei für den Rest). Die Entscheidung über „bauen oder lassen" sollte erst
-nach der Messung in Abschnitt 8 fallen. Die Implementierung ist so geschnitten, dass sie ohne Eingriff in die CPU-Pfade zuschaltbar ist
-(`FLLM_NPU=0` schaltet jeden Offload ab, der Standardbuild enthält nichts davon).
+**Conclusion.** A gain over the CPU is plausible for large prompts (>= 128 tokens) and NPU 4, uncertain on the NPU 3720; compared with the
+iGPU there are at most energy and offload benefits (the CPU stays free for the rest). The decision to build or not should only be made
+after the measurement in Section 8. The implementation is cut so that it can be switched on without touching the CPU paths
+(`FLLM_NPU=0` disables every offload; the default build contains none of it).
 
-## 6. Aufbau der Implementierung
+## 6. Structure of the implementation
 
-Dateien (alle unter `rust/engine/src/backend/npu/`, nur mit Feature `npu-openvino`):
+Files (all under `rust/engine/src/backend/npu/`, only with the `npu-openvino` feature):
 
-| Datei | Inhalt |
+| File | Contents |
 |---|---|
-| `openvino/ffi.rs` | `dlopen`/`LoadLibrary` von `libopenvino_c.so` / `openvino_c.dll` (kein Link), Bindungen der benötigten C-Funktionen, Suche der Bibliothek (`FLLM_OPENVINO_C_LIB`, `FLLM_OPENVINO_DIR`, `INTEL_OPENVINO_DIR`, `LD_LIBRARY_PATH`, `PATH`, `VIRTUAL_ENV`, `/opt/intel/openvino*`), Ermittlung der Element-Typ-Nummern |
-| `openvino/session.rs` | RAII-Hüllen: Core, Tensor, kompiliertes Modell + Inferenzanfrage; IR aus dem Speicher lesen (Fallback über Dateien), `compile_model` mit Eigenschaften (variadisch) |
-| `openvino/ir.rs` | Schreiber für OpenVINO-IR v11 (XML + BIN), nur eigene Testparser, keine Abhängigkeit |
-| `openvino/model.rs` | der Matmul-Graph (Abschnitt 3) |
-| `openvino/quant.rs` | Umrechnung aus fLLM-Formaten in INT4/INT8/FP16 für die NPU |
-| `openvino/plan.rs` | `OffloadPlan`, `should_offload`, `plan` (Auswahl der Projektionen unter einem Speicherbudget) |
-| `openvino/engine.rs` | `NpuEngine`: Registrierung, verzögertes Kompilieren, Ausführung in Blöcken, CPU-Fallback, `offload_host`, `selfcheck` |
-| `openvino/devices.rs` | Geräteliste (`FULL_DEVICE_NAME`, `DEVICE_ARCHITECTURE`, `NPU_DRIVER_VERSION`, `NPU_DEVICE_TOTAL_MEM_SIZE`) |
-| `backend.rs`, `backend/hybrid.rs` | Anbieterwahl (`--device npu[:N]`) und das Hybrid-Backend |
-| `device_info.rs` | Geräteinventar aller Anbieter |
+| `openvino/ffi.rs` | `dlopen`/`LoadLibrary` of `libopenvino_c.so` / `openvino_c.dll` (no linking), bindings of the required C functions, library search (`FLLM_OPENVINO_C_LIB`, `FLLM_OPENVINO_DIR`, `INTEL_OPENVINO_DIR`, `LD_LIBRARY_PATH`, `PATH`, `VIRTUAL_ENV`, `/opt/intel/openvino*`), determination of the element type numbers |
+| `openvino/session.rs` | RAII wrappers: core, tensor, compiled model + inference request; reading IR from memory (fallback via files), `compile_model` with properties (variadic) |
+| `openvino/ir.rs` | writer for OpenVINO IR v11 (XML + BIN), only our own test parsers, no dependency |
+| `openvino/model.rs` | the matmul graph (Section 3) |
+| `openvino/quant.rs` | conversion from fLLM formats to INT4/INT8/FP16 for the NPU |
+| `openvino/plan.rs` | `OffloadPlan`, `should_offload`, `plan` (selection of projections under a memory budget) |
+| `openvino/engine.rs` | `NpuEngine`: registration, deferred compilation, block-wise execution, CPU fallback, `offload_host`, `selfcheck` |
+| `openvino/devices.rs` | device list (`FULL_DEVICE_NAME`, `DEVICE_ARCHITECTURE`, `NPU_DRIVER_VERSION`, `NPU_DEVICE_TOTAL_MEM_SIZE`) |
+| `backend.rs`, `backend/hybrid.rs` | provider selection (`--device npu[:N]`) and the hybrid backend |
+| `device_info.rs` | device inventory of all providers |
 
-**Umrechnung der Formate.**
+**Format conversion.**
 
-| fLLM-Format | NPU-Form | Genauigkeit |
+| fLLM format | NPU form | Accuracy |
 |---|---|---|
-| Q4_0 | INT4 symmetrisch, Gruppe 32, f16-Skala | exakt (bitgleich zur CPU-Dequantisierung, getestet) |
-| Q8_0 | INT8 symmetrisch, Gruppe 32 | exakt (getestet) |
-| Q4_1, Q2_K, Q3_K, Q4_K, IQ*, MXFP4, NVFP4, Q4Z* | INT4 symmetrisch, Gruppe `FLLM_NPU_GROUP` (128), RTN | neu quantisiert |
-| Q5_0, Q5_1, Q5_K, Q6_K, Q8_1, Q8_K, FP8M | INT8 symmetrisch, Gruppe 128 | neu quantisiert, Fehler ≈ ½ INT8-Schritt |
-| F16, BF16, F32 | FP16 | Wertebereich geprüft (Inf → Ablehnung) |
-| ungerade Spaltenzahl bei 4-Bit-Formaten | INT8 statt INT4 | wie oben |
+| Q4_0 | INT4 symmetric, group 32, f16 scale | exact (bit-identical to the CPU dequantisation, tested) |
+| Q8_0 | INT8 symmetric, group 32 | exact (tested) |
+| Q4_1, Q2_K, Q3_K, Q4_K, IQ*, MXFP4, NVFP4, Q4Z* | INT4 symmetric, group `FLLM_NPU_GROUP` (128), RTN | re-quantised |
+| Q5_0, Q5_1, Q5_K, Q6_K, Q8_1, Q8_K, FP8M | INT8 symmetric, group 128 | re-quantised, error about half an INT8 step |
+| F16, BF16, F32 | FP16 | value range checked (Inf -> rejection) |
+| odd column count with 4-bit formats | INT8 instead of INT4 | as above |
 
-**Entscheidung je Aufruf** (`OffloadPlan::should_offload`): Projektion ≥ `FLLM_NPU_MIN_ELEMS` (1 Mi) Gewichte und konvertierbar; mindestens
-`FLLM_NPU_MIN_BATCH` Zeilen in einem Block oder Rest; geschätzte NPU-Zeit (Aufrufzeit + Rechenzeit bei `FLLM_NPU_GOPS`) unter der CPU-Zeit
-(`FLLM_NPU_CPU_GOPS`). Fehler (Kompilierung, Ausführung, Wertebereich) fallen still auf die CPU zurück (einmal protokolliert); drei Kompilierfehler
-in Folge schalten die NPU für den Prozess ab.
+**Decision per call** (`OffloadPlan::should_offload`): projection >= `FLLM_NPU_MIN_ELEMS` (1 Mi) weights and convertible; at least
+`FLLM_NPU_MIN_BATCH` rows in a block or remainder; estimated NPU time (call time + compute time at `FLLM_NPU_GOPS`) below the CPU time
+(`FLLM_NPU_CPU_GOPS`). Errors (compilation, execution, value range) fall back silently to the CPU (logged once); three compile errors
+in a row switch the NPU off for the process.
 
-**Umgebungsvariablen.**
+**Environment variables.**
 
-| Variable | Wirkung |
+| Variable | Effect |
 |---|---|
-| `FLLM_NPU=0` | Offload aus |
-| `FLLM_NPU_HOST=1` | Host-Decoder-Haken aktiv (Abschnitt 7) |
-| `FLLM_NPU_MIN_BATCH`, `FLLM_NPU_CHUNK`, `FLLM_NPU_MIN_ELEMS`, `FLLM_NPU_BUDGET_MB` | Planer, Abschnitt 6 |
-| `FLLM_NPU_GROUP` | Gruppengröße neu quantisierter Gewichte (0 = kanalweise); schaltet auch die exakte Q4_0/Q8_0-Umrechnung ab |
-| `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_GOPS`, `FLLM_NPU_OVERHEAD_US` | Raten des Kostenmodells (Platzhalter) |
-| `FLLM_NPU_CACHE_DIR` | Verzeichnis für `CACHE_DIR` von OpenVINO (leer = aus) |
-| `FLLM_NPU_PROPS` | zusätzliche Compile-Eigenschaften `KEY=VAL,KEY=VAL` (höchstens zwei; z. B. `NPU_TILES=2`) |
-| `FLLM_NPU_DEVICE` | anderer OpenVINO-Gerätename statt `NPU` (nur zum Üben des Ablaufs, z. B. `CPU`) |
-| `FLLM_NPU_DUMP_IR` | Verzeichnis, in das jede kompilierte IR als `.xml`/`.bin` geschrieben wird |
-| `FLLM_OPENVINO_C_LIB`, `FLLM_OPENVINO_DIR` | Ort der Laufzeit |
+| `FLLM_NPU=0` | offload off |
+| `FLLM_NPU_HOST=1` | host-decoder hook active (Section 7) |
+| `FLLM_NPU_MIN_BATCH`, `FLLM_NPU_CHUNK`, `FLLM_NPU_MIN_ELEMS`, `FLLM_NPU_BUDGET_MB` | planner, Section 6 |
+| `FLLM_NPU_GROUP` | group size of re-quantised weights (0 = per channel); also disables the exact Q4_0/Q8_0 conversion |
+| `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_GOPS`, `FLLM_NPU_OVERHEAD_US` | rates of the cost model (placeholders) |
+| `FLLM_NPU_CACHE_DIR` | directory for OpenVINO's `CACHE_DIR` (empty = off) |
+| `FLLM_NPU_PROPS` | additional compile properties `KEY=VAL,KEY=VAL` (at most two; e.g. `NPU_TILES=2`) |
+| `FLLM_NPU_DEVICE` | another OpenVINO device name instead of `NPU` (only for exercising the flow, e.g. `CPU`) |
+| `FLLM_NPU_DUMP_IR` | directory into which every compiled IR is written as `.xml`/`.bin` |
+| `FLLM_OPENVINO_C_LIB`, `FLLM_OPENVINO_DIR` | location of the runtime |
 
-**Was ohne Hardware geprüft wurde** (alle Ausgaben stehen im Bericht):
-* `cargo check`/`clippy -D warnings` ohne Feature und mit `npu-openvino`, `cargo check` für `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`,
-  `aarch64-apple-darwin` (mit `npu-openvino`) und mit allen vier NPU-Features gegen Ersatz-Dateien von Paket 11;
-* 39 Unit-Tests (IR-XML wohlgeformt und konsistent, Offsets im BIN, Umrechnung Q4_0/Q8_0 exakt, Planer, Hybrid-Backend gegen das CPU-Backend);
-* **IR-Parser-Prüfung mit der echten OpenVINO-Laufzeit (pip-Paket `openvino==2026.4.1`, nur CPU-Plugin)**: `read_model` akzeptiert alle fünf
-  Beispielgraphen; nach `ConstantFolding` (OpenVINOs eigener Code, kein Gerät) stimmen die entfalteten f16-Gewichte elementweise mit der
-  Rust-Dequantisierung überein (größter Abstand = f16-Rundung). Das belegt Nibble-Reihenfolge, Skalen-Layout, Reshape und Gruppierung.
-  Der Test `openvino_reader_accepts_generated_ir` (ignoriert, braucht die Bibliothek) lädt dazu die C-API über unseren `dlopen`-Pfad,
-  ermittelt die Typ-Nummern (2026.4.1: f16 = 3, f32 = 4), zählt Geräte (`CPU`) und lässt den Leser die Graphen und einen absichtlich kaputten prüfen.
-  **Nicht** geprüft: `compile_model` (auch nicht auf dem CPU-Plugin), Inferenz, NPU-Compiler.
+**What was verified without hardware:**
+* `cargo check`/`clippy -D warnings` without the feature and with `npu-openvino`, `cargo check` for `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`,
+  `aarch64-apple-darwin` (with `npu-openvino`) and with all four NPU features;
+* 39 unit tests (IR XML well-formed and consistent, offsets in the BIN, Q4_0/Q8_0 conversion exact, planner, hybrid backend against the CPU backend);
+* **IR parser check with the real OpenVINO runtime (pip package `openvino==2026.4.1`, CPU plugin only)**: `read_model` accepts all five
+  example graphs; after `ConstantFolding` (OpenVINO's own code, no device) the unfolded f16 weights match the Rust dequantisation
+  element by element (largest difference = f16 rounding). This proves nibble order, scale layout, reshape and grouping.
+  For this the test `openvino_reader_accepts_generated_ir` (ignored, needs the library) loads the C API through our `dlopen` path,
+  determines the type numbers (2026.4.1: f16 = 3, f32 = 4), counts devices (`CPU`) and lets the reader check the graphs and one deliberately broken one.
+  **Not** verified: `compile_model` (not even on the CPU plugin), inference, the NPU compiler.
 
-## 7. Einbindung in den Decoder
+## 7. Integration into the decoder
 
-**Was `rust_decoder.rs` kann:** `init_backend` nimmt *ein* vollständiges `Backend`; ein Mechanismus, einzelne Operationen auf ein anderes Gerät
-auszulagern, existiert nicht (`docs/gpu-backends.md` beschreibt einen Fallback mit `warn_fallback_once`; im Decoder habe ich keinen Aufrufer davon gefunden; nur
-einzelne Pfade — rekurrente Schichten, `host_linear` für gestreamte Gewichte — laufen auf dem Host). Zwei Wege:
+**What `rust_decoder.rs` can do:** `init_backend` takes *one* complete `Backend`; there is no mechanism to move individual operations to another device
+(`docs/gpu-backends.md` describes a fallback with `warn_fallback_once`; no caller of it was found in the decoder; only
+individual paths, such as recurrent layers and `host_linear` for streamed weights, run on the host). Two routes:
 
-1. **`--device npu` (fertig, Hybrid-Backend).** `create_native_backend("npu", N)` liefert `NpuHybridBackend`: das Referenz-CPU-Backend (`backend/cpu.rs`) mit
-   `quantized_linear` über die NPU-Engine. Der Rest (Normen, RoPE, Attention, KV-Schreiben, Sampling) ist die Referenzimplementierung des CPU-Backends —
-   **einkernig und nicht optimiert**; Decode ist deshalb deutlich langsamer als `--device cpu`. Zeilen unterhalb der Schwelle rechnen die schnellen CPU-Kerne
-   (`cpu_quantized::linear`) aus der Registrierungskopie der Gewichte. Einschränkungen: nur dichte Modelle (CPU-Stream hat weder Delta-, noch Gate-Kernel, noch
-   `argmax_rows`; `backend_unsupported` weist sie ab), doppelter Gewichtsspeicher, keine MoE-Beschleunigung. `selftest-gpu --device npu` prüft das Backend
-   gegen das CPU-Backend (Hinweis: schon das CPU-Backend selbst meldet dabei 7 fehlgeschlagene q8-Attention-Prüfungen, weil die Toleranz enger ist als der q8-Cache-Fehler; der Unit-Test des Hybrid-Backends verlangt dasselbe Urteil wie für das CPU-Backend); mit `FLLM_NPU_MIN_BATCH=1 FLLM_NPU_MIN_ELEMS=1` läuft jede Prüfung über die NPU (jede Form kompiliert ein eigenes Modell).
-2. **Haken im Host-Decoder (empfohlen, als Patch beigelegt).** `NpuEngine::offload_host(quant, raw, rows, cols, x, batch)` nimmt die gemappten GGUF-Bytes, kopiert nichts und
-   liefert die ersten `rows_done` Zeilen; der Rest läuft wie bisher auf den schnellen CPU-Kernen. Eingefügt wird er in `Linear::forward` (`compute.rs`) vor dem
-   `fast_cpu`-Zweig und in `Linear::forward_group` (die gruppierten Q8-/K-Kerne teilen eine Aktivierungs-Packung; bei NPU-tauglichen Batches wird
-   projektionsweise gerechnet). Aktivierung: `FLLM_NPU_HOST=1`. Der Patch ist mit `--features npu-openvino` und ohne Feature übersetzt und clippy-sauber, aber nicht
-   angewendet worden (gemeinsame Datei); siehe Bericht „GEMEINSAME-ZEILEN". Offene Punkte: der Haken sitzt in Layer-Schleifen, die Bias/Skala berücksichtigen
-   müssen (im Patch enthalten); MoE-Experten (`forward_experts`) und der Ausgabekopf (`head`) sind nicht erfasst.
+1. **`--device npu` (done, hybrid backend).** `create_native_backend("npu", N)` returns `NpuHybridBackend`: the reference CPU backend (`backend/cpu.rs`) with
+   `quantized_linear` going through the NPU engine. The rest (norms, RoPE, attention, KV write, sampling) is the reference implementation of the CPU backend and
+   **single-threaded and not optimised**; decode is therefore much slower than with `--device cpu`. Rows below the threshold are computed by the fast CPU kernel
+   (`cpu_quantized::linear`) from the registration copy of the weights. Restrictions: dense models only (the CPU stream has neither delta nor gate kernels nor
+   `argmax_rows`; `backend_unsupported` rejects them), doubled weight memory, no MoE acceleration. `selftest-gpu --device npu` checks the backend
+   against the CPU backend (note: the CPU backend itself already reports 7 failed q8 attention checks there, because the tolerance is tighter than the q8 cache error; the unit test of the hybrid backend asks for the same verdict as for the CPU backend); with `FLLM_NPU_MIN_BATCH=1 FLLM_NPU_MIN_ELEMS=1` every check runs on the NPU (every shape compiles its own model).
+2. **Hook in the host decoder (built in, off by default).** `NpuEngine::offload_host(quant, raw, rows, cols, x, batch)` takes the mapped GGUF bytes, copies nothing and
+   returns the first `rows_done` rows; the rest runs as before on the fast CPU kernels. It sits in `Linear::forward` (`compute.rs`) before the
+   `fast_cpu` branch and in `Linear::forward_group` and `forward_group_with_workspace` (the grouped Q8/K kernels share one activation packing; for NPU-suitable batches the computation goes
+   projection by projection). Activation: the feature and `FLLM_NPU_HOST=1`.
+   Checked on an OpenVINO CPU device (`FLLM_NPU_DEVICE=CPU`), never on the NPU. Open points: the hook sits in layer loops that must take bias and scale into account
+   (included); MoE experts (`forward_experts`) and the output head (`head`) are not covered.
 
-## 8. Prüf- und Messplan (für die Testrunde)
+## 8. Verification and measurement plan
 
-**L1 (läuft sie?)** — Voraussetzung: NPU-Treiber (Linux: intel/linux-npu-driver; Windows: Intel-NPU-Treiber), OpenVINO ≥ 2025 mit NPU-Plugin
-(`pip install openvino` oder Archiv).
-1. `python3 -c "import openvino as ov; print(ov.Core().available_devices)"` muss `NPU` enthalten.
-2. `FLLM_OPENVINO_C_LIB=…/libopenvino_c.so… cargo test --release -p fllm-engine --features npu-openvino -- --ignored --nocapture` (zwei ignorierte Tests:
-   Leser-Prüfung ohne Gerät, `npu_hardware_selfcheck` mit Gerät: kompiliert eine 192×512-Q4_0-Projektion, vergleicht mit der Host-Rechnung, Schwelle 2 %).
-3. `fllm-rs devices` (Eintrag „OpenVINO NPU, platform …").
+**L1 (does it run?)** - Prerequisites: NPU driver (Linux: intel/linux-npu-driver; Windows: Intel NPU driver), OpenVINO >= 2025 with the NPU plugin
+(`pip install openvino` or an archive).
+1. `python3 -c "import openvino as ov; print(ov.Core().available_devices)"` must contain `NPU`.
+2. `FLLM_OPENVINO_C_LIB=.../libopenvino_c.so... cargo test --release -p fllm-engine --features npu-openvino -- --ignored --nocapture` (two ignored tests:
+   the reader check without a device, and `npu_hardware_selfcheck` with a device: compiles a 192x512 Q4_0 projection, compares with the host computation, threshold 2 %).
+3. `fllm-rs devices` (entry "OpenVINO NPU, platform ...").
 4. `FLLM_NPU_MIN_BATCH=1 FLLM_NPU_MIN_ELEMS=1 fllm-rs selftest-gpu --device npu --json npu.json`.
-5. Bei Fehlern: `FLLM_NPU_DUMP_IR=/tmp/ir` und die Dateien mit `benchmark_app -m x.xml -d NPU` und `ov.Core().compile_model(model, "NPU")` prüfen; `OV_NPU_LOG_LEVEL=LOG_INFO`.
+5. On errors: `FLLM_NPU_DUMP_IR=/tmp/ir` and check the files with `benchmark_app -m x.xml -d NPU` and `ov.Core().compile_model(model, "NPU")`; `OV_NPU_LOG_LEVEL=LOG_INFO`.
 
-**L2 (richtiger Text?)** — Greedy-Text eines kleinen Q4_0-Modells (z. B. 1–3 B) mit `FLLM_NPU=0` und mit `FLLM_NPU_HOST=1` (bzw. `--device npu`)
-vergleichen; Abweichungen im Logit-Bereich durch f16-Rechnung sind zu erwarten (Argmax darf nur im Rauschbereich kippen). Zusätzlich je Projektion die Abweichung NPU gegen CPU protokollieren.
+**L2 (correct text?)** - Compare the greedy text of a small Q4_0 model (e.g. 1-3 B) with `FLLM_NPU=0` and with `FLLM_NPU_HOST=1` (or `--device npu`);
+deviations in the logit range from the f16 computation are expected (the argmax may only flip within the noise range). In addition log the NPU-versus-CPU deviation per projection.
 
-**L3 (schneller?)** — Messungen in dieser Reihenfolge; die Ergebnisse ersetzen die drei Platzhalter des Planers:
-1. *Mikrobenchmark Matmul*: 4096×4096 und 14336×4096, Q4_0, Batch 16/32/64/128/256/512, auf NPU (`engine.run`), CPU (`cpu_quantized::linear`) und iGPU
-   (Vulkan/SYCL-Backend, falls vorhanden): Zeit je Aufruf, GOPS; daraus `FLLM_NPU_GOPS`, `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_OVERHEAD_US`.
-2. *Kompilierzeit* je Projektionsform ohne und mit Cache, sowie Gesamtzeit bis zum ersten Token für ein 7B-Modell; Speicherbedarf (RSS und
-   `NPU_DEVICE_ALLOC_MEM_SIZE`); größte Zahl gleichzeitig geladener Modelle, bevor der Treiber ablehnt.
-3. *Prefill-Durchsatz* (Token/s) für Prompts von 128/512/2048 Token: CPU allein, CPU + NPU, iGPU allein; dazu Energie (RAPL / `powertop` / Windows-Leistungsmesser).
-4. *Decode* mit und ohne Offload (muss gleich bleiben; Beweis, dass die Schwelle den Decode nicht berührt).
-5. *Genauigkeit*: Perplexität auf einem festen Text und Logit-Abstand (Max/RMS) gegen die CPU, für Q4_0 (exakte Gewichte, nur f16-Rechnung) und Q4_K_M
-   (neu quantisiert).
-6. *Gruppengröße*: Gruppe 32 (exakt) gegen 128 und kanalweise: Geschwindigkeit und Genauigkeit.
-Go/No-Go: Der Offload bleibt nur, wenn (3) bei Prompts ≥ 512 Token mindestens 1,3× gegenüber CPU allein zeigt oder bei gleicher Geschwindigkeit deutlich weniger
-Energie braucht; sonst bleibt `FLLM_NPU` standardmäßig aus und das Feature ein Experiment.
+**L3 (faster?)** - Measurements in this order; the results replace the planner's three placeholders:
+1. *Matmul microbenchmark*: 4096x4096 and 14336x4096, Q4_0, batch 16/32/64/128/256/512, on the NPU (`engine.run`), the CPU (`cpu_quantized::linear`) and the iGPU
+   (Vulkan/SYCL backend, if present): time per call, GOPS; from this `FLLM_NPU_GOPS`, `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_OVERHEAD_US`.
+2. *Compile time* per projection shape without and with the cache, and total time to the first token for a 7B model; memory use (RSS and
+   `NPU_DEVICE_ALLOC_MEM_SIZE`); the largest number of simultaneously loaded models before the driver refuses.
+3. *Prefill throughput* (tokens/s) for prompts of 128/512/2048 tokens: CPU alone, CPU + NPU, iGPU alone; plus energy (RAPL / `powertop` / Windows power meter).
+4. *Decode* with and without offload (must stay the same; proof that the threshold does not touch decode).
+5. *Accuracy*: perplexity on a fixed text and logit distance (max/RMS) against the CPU, for Q4_0 (exact weights, only the f16 computation) and Q4_K_M
+   (re-quantised).
+6. *Group size*: group 32 (exact) against 128 and per channel: speed and accuracy.
+Go/no-go: the offload stays only if (3) shows at least 1.3x over the CPU alone for prompts >= 512 tokens, or needs clearly less energy at equal speed;
+otherwise `FLLM_NPU` stays off by default and the feature remains an experiment.
 
-## 9. Ungeprüfte Annahmen und Risiken
+## 9. Unverified assumptions and risks
 
-* Der NPU-Compiler erkennt das Dekompressionsmuster bei **Gruppe 32** und bei **FP16-Eingang/-Ausgang** genauso wie bei Gruppe 128 (NNCF-Standard); Gruppe 32 könnte langsam sein.
-* `Reshape` nach `Multiply` auf der NPU: dieses Muster erzeugt NNCF ebenfalls; die Unterstützung durch alle Treiberversionen ist ungeprüft.
-* Eigenschaften beim Kompilieren: nur `CACHE_DIR` (und die Nutzerliste); `PERFORMANCE_HINT`, `NPU_TILES`, `NPU_COMPILATION_MODE_PARAMS` (z. B. `optimization-level=2`)
-  sind nicht gesetzt, weil ihre Wirkung unbekannt ist.
-* Gleichzeitiger Zugriff: pro Projektion gibt es genau eine Inferenzanfrage unter Mutex; der Scheduler ruft Prefill-Projektionen nacheinander auf, eine Parallelisierung
-  über Projektionen wurde nicht versucht.
-* Die Windows-Pfadbehandlung (`LOAD_WITH_ALTERED_SEARCH_PATH`, TBB-Verzeichnis im `PATH`) ist nur für `x86_64-pc-windows-gnu` übersetzt, nicht für MSVC und nicht ausgeführt.
-* Das Hybrid-Backend wurde nie mit einem Modell betrieben; welche Modelle `init_backend` akzeptiert, ergibt sich aus `backend_unsupported` und der Ausstattung des CPU-Streams.
-* Die Annahmen über die Leistungszahlen in Abschnitt 5 beruhen auf Spezifikationen und fremden Messungen anderer Software-Stacks.
+* The NPU compiler recognises the decompression pattern at **group 32** and with **FP16 input/output** just as at group 128 (NNCF default); group 32 may be slow.
+* `Reshape` after `Multiply` on the NPU: NNCF also produces this pattern; support by all driver versions is unverified.
+* Properties at compile time: only `CACHE_DIR` (and the user list); `PERFORMANCE_HINT`, `NPU_TILES`, `NPU_COMPILATION_MODE_PARAMS` (e.g. `optimization-level=2`)
+  are not set because their effect is unknown.
+* Concurrent access: there is exactly one inference request per projection under a mutex; the scheduler calls prefill projections one after another, and parallelising
+  across projections has not been attempted.
+* The Windows path handling (`LOAD_WITH_ALTERED_SEARCH_PATH`, TBB directory in `PATH`) only compiles for `x86_64-pc-windows-gnu`, not for MSVC, and has not been executed.
+* The hybrid backend has never been run with a model; which models `init_backend` accepts follows from `backend_unsupported` and the capabilities of the CPU stream.
+* The assumptions about the performance figures in Section 5 rest on specifications and third-party measurements of other software stacks.
 
-## 10. Quellen
+## 10. Sources
 
-* OpenVINO, `src/bindings/c/include/openvino/c/*.h` (master 2026.x; Tags 2023.3, 2024.0, 2025.0, 2025.2, 2025.4 für die Nummerierung von `ov_element_type_e` und die Lese-Funktionen).
-* OpenVINO, `src/plugins/intel_npu/README.md` (Eigenschaften, Plattformcodes), Dokumentation „NPU Device" und „OpenVINO GenAI on NPU" (docs.openvino.ai/2025).
-* OpenVINO, `src/frontends/ir/tests/frontend_test_basic.cpp` (IR-Beispiel mit u4-Konstante), `src/core/dev_api/openvino/core/type/element_iterator.hpp` (Packreihenfolge der 4-Bit-Typen).
-* Chips and Cheese, „Intel Meteor Lake's NPU" (April 2024); TechPowerUp, „Intel Lunar Lake Technical Deep Dive".
-* OpenVINO GitHub Discussion #36484 (NPU-Draft-Modell auf Lunar Lake); arXiv 2607.05475 (Mobil-NPU-Studie, Phasenteilung Prefill/Decode — Qualcomm-Hardware, nur als Hinweis).
+* OpenVINO, `src/bindings/c/include/openvino/c/*.h` (master 2026.x; tags 2023.3, 2024.0, 2025.0, 2025.2, 2025.4 for the numbering of `ov_element_type_e` and the read functions).
+* OpenVINO, `src/plugins/intel_npu/README.md` (properties, platform codes), documentation "NPU Device" and "OpenVINO GenAI on NPU" (docs.openvino.ai/2025).
+* OpenVINO, `src/frontends/ir/tests/frontend_test_basic.cpp` (IR example with a u4 constant), `src/core/dev_api/openvino/core/type/element_iterator.hpp` (packing order of the 4-bit types).
+* Chips and Cheese, "Intel Meteor Lake's NPU" (April 2024); TechPowerUp, "Intel Lunar Lake Technical Deep Dive".
+* OpenVINO GitHub Discussion #36484 (NPU draft model on Lunar Lake); arXiv 2607.05475 (mobile NPU study, prefill/decode phase split - Qualcomm hardware, only as a pointer).

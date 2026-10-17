@@ -28,6 +28,7 @@ pub fn empty_capabilities(name: &str) -> BackendCapabilities {
         supports_kv_cache_write: false,
         supports_embedding_lookup: false,
         supports_device_sampling: false,
+        sample_on_device: false,
         supports_residual_add: false,
         supports_moe: false,
         max_batch_size: 0,

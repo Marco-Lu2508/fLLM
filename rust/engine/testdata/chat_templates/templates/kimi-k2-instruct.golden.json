@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_assistant|>assistant<|im_middle|>I start.<|im_end|><|im_user|>user<|im_middle|>ok<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"calc\",\"description\":\"Evaluate an arithmetic expression.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"},\"precision\":{\"type\":\"integer\"}},\"required\":[\"expression\"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Compute 17*3<|im_end|><|im_assistant|>assistant<|im_middle|>Let me compute that.<|tool_calls_section_begin|><|tool_call_begin|>call_0007<|tool_call_argument_begin|>{\"expression\": \"17*3\"}<|tool_call_end|><|tool_calls_section_end|><|im_end|><|im_system|>tool<|im_middle|>## Return of call_0007\n51<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/documents": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Summarize.<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/image_parts": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>What is in this picture?<|media_start|>image<|media_content|><|media_pad|><|media_end|>\n<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|im_system|>system<|im_middle|>  padded system with trailing newline\n\n<|im_end|><|im_user|>user<|im_middle|>  padded user \n<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/multi_turn": {
+  "ok": "<|im_system|>system<|im_middle|>Be brief.<|im_end|><|im_user|>user<|im_middle|>Hi<|im_end|><|im_assistant|>assistant<|im_middle|>Hello! How can I help?<|im_end|><|im_user|>user<|im_middle|>Tell me a joke.<|im_end|><|im_assistant|>assistant<|im_middle|>Why did the chicken cross the road?<|im_end|><|im_user|>user<|im_middle|>Why?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Hi<|im_end|><|im_assistant|>assistant<|im_middle|>Hello!<|im_end|>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Think hard: 13*17<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/reasoning_history": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>2+2?<|im_end|><|im_assistant|>assistant<|im_middle|><think>\nsimple\n</think>\n\n4<|im_end|><|im_user|>user<|im_middle|>And 3+3?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/system_not_first": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>a<|im_end|><|im_system|>system<|im_middle|>late system<|im_end|><|im_user|>user<|im_middle|>b<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/system_user": {
+  "ok": "<|im_system|>system<|im_middle|>You are a terse assistant.<|im_end|><|im_user|>user<|im_middle|>Capital of France?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/text_parts": {
+  "ok": "<|im_system|>system<|im_middle|>Sys part.<|im_end|><|im_user|>user<|im_middle|>Part one. Part two.<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>2+2?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>2+2?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name, e.g. München\"},\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]}},\"required\":[\"city\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"calc\",\"description\":\"Evaluate an arithmetic expression.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"},\"precision\":{\"type\":\"integer\"}},\"required\":[\"expression\"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Weather in Berlin and 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|><|tool_calls_section_begin|><|tool_call_begin|>call_0001<|tool_call_argument_begin|>{\"city\": \"Berlin\", \"unit\": \"celsius\"}<|tool_call_end|><|tool_call_begin|>call_0002<|tool_call_argument_begin|>{\"expression\": \"2+2\", \"precision\": 2}<|tool_call_end|><|tool_calls_section_end|><|im_end|><|im_system|>get_weather<|im_middle|>## Return of call_0001\n{\"temp\": 21.5, \"sky\": \"clear\"}<|im_end|><|im_system|>calc<|im_middle|>## Return of call_0002\n4<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/tool_call_then_answer": {
+  "ok": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name, e.g. München\"},\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]}},\"required\":[\"city\"]}}}]<|im_end|><|im_system|>system<|im_middle|>Use tools when helpful.<|im_end|><|im_user|>user<|im_middle|>Weather in Berlin?<|im_end|><|im_assistant|>assistant<|im_middle|><|tool_calls_section_begin|><|tool_call_begin|>call_0001<|tool_call_argument_begin|>{\"city\": \"Berlin\"}<|tool_call_end|><|tool_calls_section_end|><|im_end|><|im_system|>tool<|im_middle|>## Return of call_0001\n21 C, sunny<|im_end|><|im_assistant|>assistant<|im_middle|>It is 21 C and sunny in Berlin.<|im_end|><|im_user|>user<|im_middle|>And Paris?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/tools_system_user": {
+  "ok": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name, e.g. München\"},\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]}},\"required\":[\"city\"]}}}]<|im_end|><|im_system|>system<|im_middle|>You can call tools.<|im_end|><|im_user|>user<|im_middle|>Weather in Berlin?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/tools_user": {
+  "ok": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name, e.g. München\"},\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]}},\"required\":[\"city\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"calc\",\"description\":\"Evaluate an arithmetic expression.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"},\"precision\":{\"type\":\"integer\"}},\"required\":[\"expression\"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Weather in München?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>a<|im_end|><|im_user|>user<|im_middle|>b<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/unicode": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ },
+ "default/user_only": {
+  "ok": "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>\n<|im_user|>user<|im_middle|>Hello<|im_end|><|im_assistant|>assistant<|im_middle|>"
+ }
+}

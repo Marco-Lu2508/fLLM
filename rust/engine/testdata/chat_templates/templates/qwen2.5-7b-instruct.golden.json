@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>assistant\nI start.<|im_end|>\n<|im_start|>user\nok<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"calc\", \"description\": \"Evaluate an arithmetic expression.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}, \"precision\": {\"type\": \"integer\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nCompute 17*3<|im_end|>\n<|im_start|>assistant\nLet me compute that.\n<tool_call>\n{\"name\": \"calc\", \"arguments\": {\"expression\": \"17*3\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n51\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/documents": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nSummarize.<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<|im_start|>system\n  padded system with trailing newline\n\n<|im_end|>\n<|im_start|>user\n  padded user \n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/multi_turn": {
+  "ok": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello! How can I help?<|im_end|>\n<|im_start|>user\nTell me a joke.<|im_end|>\n<|im_start|>assistant\nWhy did the chicken cross the road?<|im_end|>\n<|im_start|>user\nWhy?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello!<|im_end|>\n"
+ },
+ "default/reasoning_effort": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nThink hard: 13*17<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/reasoning_history": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nsimple\n</think>\n\n4<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/system_not_first": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\na<|im_end|>\n<|im_start|>system\nlate system<|im_end|>\n<|im_start|>user\nb<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/system_user": {
+  "ok": "<|im_start|>system\nYou are a terse assistant.<|im_end|>\n<|im_start|>user\nCapital of France?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/thinking_enabled": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"calc\", \"description\": \"Evaluate an arithmetic expression.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}, \"precision\": {\"type\": \"integer\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Berlin and 2+2?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Berlin\", \"unit\": \"celsius\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"calc\", \"arguments\": {\"expression\": \"2+2\", \"precision\": 2}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temp\": 21.5, \"sky\": \"clear\"}\n</tool_response>\n<tool_response>\n4\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tool_call_then_answer": {
+  "ok": "<|im_start|>system\nUse tools when helpful.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Berlin?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Berlin\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n21 C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\nIt is 21 C and sunny in Berlin.<|im_end|>\n<|im_start|>user\nAnd Paris?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tools_system_user": {
+  "ok": "<|im_start|>system\nYou can call tools.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Berlin?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/tools_user": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. München\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"calc\", \"description\": \"Evaluate an arithmetic expression.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}, \"precision\": {\"type\": \"integer\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in München?<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\na<|im_end|>\n<|im_start|>user\nb<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/unicode": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nGrüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<|im_end|>\n<|im_start|>assistant\n"
+ },
+ "default/user_only": {
+  "ok": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+ }
+}

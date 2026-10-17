@@ -21,6 +21,7 @@
 //!
 //! Level of verification: **L0** (compiles; unit-tested on the CPU; no kernel has ever run on a device).
 
+pub mod arch_plan;
 pub mod attention;
 pub mod embedding;
 pub mod moe_plan;
@@ -556,6 +557,14 @@ pub enum GluMode {
     Relu2,
     /// `max(g, 0)`.
     Relu,
+    /// `gelu_erf(g)` (exact erf).
+    GeluErf,
+    /// `gelu_erf(g) * u`.
+    GegluErf,
+    /// `max(g, 0) * u`.
+    Reglu,
+    /// `max(g, 0)^2 * u`.
+    Relu2Glu,
 }
 
 impl GluMode {
@@ -569,12 +578,37 @@ impl GluMode {
             Self::Gelu => "fllm_act_gelu",
             Self::Relu2 => "fllm_act_relu2",
             Self::Relu => "fllm_act_relu",
+            Self::GeluErf => "fllm_act_gelu_erf",
+            Self::GegluErf => "fllm_act_geglu_erf",
+            Self::Reglu => "fllm_act_reglu",
+            Self::Relu2Glu => "fllm_act_relu2glu",
         }
     }
 
     /// Whether the `up` operand is read.
     pub fn gated(self) -> bool {
-        matches!(self, Self::Swiglu | Self::Geglu | Self::SwigluOai { .. })
+        matches!(
+            self,
+            Self::Swiglu | Self::Geglu | Self::SwigluOai { .. } | Self::GegluErf | Self::Reglu | Self::Relu2Glu
+        )
+    }
+
+    /// The mode of `Stream::activation` (`gated = false`) or `Stream::activation_glu` (`gated = true`): 0 SiLU, 1 GELU (tanh), 2 GELU (erf), 3 ReLU,
+    /// 4 ReLU squared.
+    pub fn from_activation(mode: i32, gated: bool) -> Option<Self> {
+        Some(match (mode, gated) {
+            (0, false) => Self::Silu,
+            (1, false) => Self::Gelu,
+            (2, false) => Self::GeluErf,
+            (3, false) => Self::Relu,
+            (4, false) => Self::Relu2,
+            (0, true) => Self::Swiglu,
+            (1, true) => Self::Geglu,
+            (2, true) => Self::GegluErf,
+            (3, true) => Self::Reglu,
+            (4, true) => Self::Relu2Glu,
+            _ => return None,
+        })
     }
 }
 

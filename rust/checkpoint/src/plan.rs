@@ -132,6 +132,14 @@ fn llama4_rope_flags(cfg: &Value, layers: u64) -> Vec<bool> {
     }
 }
 
+/// Replace the metadata entry `key` (or add it).
+fn set_meta(meta: &mut Vec<(String, Meta)>, key: &str, value: Meta) {
+    match meta.iter_mut().find(|(k, _)| k == key) {
+        Some(entry) => entry.1 = value,
+        None => meta.push((key.to_owned(), value)),
+    }
+}
+
 fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
     Some(match model_type {
         "llama" => (Family::Llama, "llama"),
@@ -147,11 +155,15 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "gemma" => (Family::Gemma, "gemma"),
         "gemma2" => (Family::Gemma, "gemma2"),
         "gemma3_text" | "gemma3" => (Family::Gemma, "gemma3"),
+        "gemma4_text" | "gemma4" => (Family::Gemma, "gemma4"),
+        "gemma3n_text" | "gemma3n" => (Family::Gemma, "gemma3n"),
         "muse_glimmer" | "muse_glimmer_text" => (Family::Gemma, "muse-glimmer"),
         "olmo2" => (Family::Olmo2, "olmo2"),
         "phi3" => (Family::Phi3, "phi3"),
         "phimoe" => (Family::Llama, "phimoe"),
         "granite" => (Family::Llama, "granite"),
+        "granite_swa" => (Family::Llama, "granite"),
+        "granitemoe_swa" => (Family::Llama, "granitemoe"),
         "deepseek_v2" | "deepseek_v3" | "kimi_k2" | "glm4_moe_lite" | "bailing_moe" | "bailing_hybrid" | "sarvam_mla" => (Family::Deepseek, "deepseek2"),
         "sarvam_moe" => (Family::Qwen, "qwen2moe"),
         "trinity" => (Family::Llama, "afmoe"),
@@ -185,15 +197,25 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "mamba2" => (Family::Mamba, "mamba2"),
         "mamba" | "falcon_mamba" => (Family::Mamba, "mamba"),
         "nemotron_h" => (Family::Nemotron, "nemotron_h"),
-        "granitemoehybrid" => (Family::Llama, "granitehybrid"),
+        "granitemoehybrid" | "granite4" | "granite_4" => (Family::Llama, "granitehybrid"),
+        "jetnemotron" => (Family::Nemotron, "nemotron_h"),
         "bamba" => (Family::Llama, "bamba"),
+        "rwkv6" | "rwkv7" | "rwkv_6" | "rwkv_7" => (Family::Mamba, "rwkv"),
+        "xlstm" | "xlstm_lm" => (Family::Mamba, "xlstm"),
+        "hrm_text" | "hrm" => (Family::Llama, "hrm"),
+        "zaya1" => (Family::Llama, "zaya1"),
+        "falcon_h1" => (Family::Llama, "falcon-h1"),
+        "jamba" => (Family::Llama, "jamba"),
         "solar_open" => (Family::Qwen, "glm4moe"),
         "jais2" => (Family::Llama, "jais2"),
         "nemotron" => (Family::Llama, "nemotron"),
         "internlm2" => (Family::Llama, "internlm2"),
         "cwm" => (Family::Llama, "cwm"),
         "hy_v3" => (Family::Llama, "hy_v3"),
-        "minicpm3" => (Family::Deepseek, "minicpm3"),
+        "minicpm3" | "minicpm_sala" => (Family::Deepseek, "minicpm3"),
+        "kimi_linear" | "kimi_k3" => (Family::Deepseek, "kimi-linear"),
+        "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" => (Family::Deepseek, "kimi-linear"),
+        "glm5_flash" | "glm_5_3_flash" | "glm5_next" => (Family::Deepseek, "kimi-linear"),
         "apertus" => (Family::Llama, "apertus"),
         "llama4_text" | "llama4" => (Family::Llama, "llama4"),
         "olmo_hybrid" => (Family::Llama, "olmo_hybrid"),
@@ -219,6 +241,30 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "minimax_m2" => (Family::Qwen, "minimax-m2"),
         "ernie4_5_moe" => (Family::Llama, "ernie4_5moe"),
         "hunyuan_v1_moe" => (Family::Llama, "hunyuan-moe"),
+        "deepseek" => (Family::Llama, "deepseek"),
+        "deepseek_moe" => (Family::Qwen, "deepseek_moe"),
+        "baichuan" | "baichuan2" => (Family::Llama, "baichuan"),
+        "qwen" => (Family::Qwen, "qwen"),
+        "exaone" | "exaone3" => (Family::Olmo2, "exaone"),
+        "chatglm" => (Family::Glm, "glm4"),
+        "minicpm" => (Family::Llama, "minicpm"),
+        "telechat" | "telechat2" | "teleflm" => (Family::Llama, "telechat"),
+        "step1" => (Family::Llama, "step1"),
+        "step3" | "step3_moe" => (Family::Qwen, "step3"),
+        "plamo" | "plamo3" | "plamo_3" => (Family::Llama, "plamo"),
+        "grok" | "grok1" | "grok_1" | "grok-1" => (Family::Llama, "grok"),
+        "xverse_moe" => (Family::Qwen, "xverse_moe"),
+        "cohere2_moe" => (Family::Cohere, "cohere2_moe"),
+        "jetmoe" => (Family::Qwen, "jetmoe"),
+        "gigachat" | "gigachat3_5" => (Family::Llama, "gigachat"),
+        "ax_k1" | "ax_k2" | "a_x" => (Family::Llama, "ax"),
+        "hy_v4" => (Family::Llama, "hy_v4"),
+        "pangu" => (Family::Llama, "pangu"),
+        "param2_moe" => (Family::Qwen, "param2_moe"),
+        "ling_moe" | "bailing" | "bailing_v2" => (Family::Deepseek, "deepseek2"),
+        "mellum" => (Family::Qwen, "qwen3moe"),
+        "laguna" => (Family::Qwen, "laguna"),
+        "mimo_v2_flash" => (Family::Qwen, "mimo_v2"),
         _ => return None,
     })
 }
@@ -700,12 +746,28 @@ impl Plan {
             }
             return Ok(plan);
         }
+        if raw == "zamba2" {
+            return crate::zamba2::plan(cfg);
+        }
+        if matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
+            return crate::kimi_linear::plan(cfg);
+        }
         if let Some(plan) = crate::classic::plan_for(&raw, cfg)? {
             return Ok(plan);
         }
-        let (family, arch) = family_for(&raw).ok_or_else(|| {
-            format!("unsupported model_type {raw:?}; refusing fallback architecture mapping")
-        })?;
+        if matches!(raw.as_str(), "gemma4" | "gemma4_text") {
+            return crate::gemma::plan(cfg);
+        }
+        if matches!(raw.as_str(), "gemma3n" | "gemma3n_text") {
+            return crate::gemma3n::plan(cfg);
+        }
+        let (family, arch) = if matches!(raw.as_str(), "bailing_moe" | "bailing_hybrid" | "ling" | "ling_moe" | "bailing" | "bailing_v2") && num(cfg, "kv_lora_rank").is_none() {
+            (Family::Qwen, "bailing_moe")
+        } else {
+            family_for(&raw).ok_or_else(|| {
+                format!("unsupported model_type {raw:?}; refusing fallback architecture mapping")
+            })?
+        };
         if family == Family::Mamba {
             return Self::from_mamba(cfg, arch);
         }
@@ -744,6 +806,9 @@ impl Plan {
                         | "minimax_m2"
                         | "ernie4_5_moe"
                         | "hunyuan_v1_moe"
+                        | "mellum"
+                        | "laguna"
+                        | "mimo_v2_flash"
                         | "gpt_oss"
                         | "qwen3_next"
                         | "qwen3_5_moe"
@@ -757,12 +822,26 @@ impl Plan {
                         | "llama4"
                         | "granitemoe"
                         | "granitemoeshared"
+                        | "granitemoe_swa"
                         | "glm4v_moe_text"
                         | "mistral4"
                         | "qwen3_vl_moe_text"
                         | "phimoe"
                         | "k2_horizon"
                         | "g9v3"
+                        | "deepseek_moe"
+                        | "step3"
+                        | "step3_moe"
+                        | "grok"
+                        | "grok1"
+                        | "grok_1"
+                        | "grok-1"
+                        | "xverse_moe"
+                        | "cohere2_moe"
+                        | "jetmoe"
+                        | "param2_moe"
+                        | "ling_moe"
+                        | "jamba"
                 )
         {
             return Err(format!(
@@ -1044,7 +1123,7 @@ impl Plan {
             theta *= alpha.powf(dim / (dim - 2.0));
         }
         f!("rope.freq_base", theta);
-        if arch == "olmo3" {
+        if arch == "olmo3" || raw == "mellum" {
             f!("rope.freq_base_swa", local.theta.unwrap_or(theta));
         }
         if let Some(beta) = flt(&global.raw, "llama_4_scaling_beta") {
@@ -1063,6 +1142,7 @@ impl Plan {
         }
         let partial = flt(&global.raw, "partial_rotary_factor")
             .or_else(|| flt(cfg, "partial_rotary_factor"))
+            .or_else(|| num(cfg, "rope_head_dim").map(|d| d as f64 / head_dim as f64))
             .or_else(|| num(cfg, "rotary_dim").map(|d| d as f64 / head_dim as f64))
             .or_else(|| flt(cfg, "rotary_pct"))
             .filter(|_| !mla); // MLA states its rotary width explicitly
@@ -1076,6 +1156,51 @@ impl Plan {
             "dynamic" if flt(&global.raw, "alpha").is_some() => {}
             // InternLM2/3: dynamic NTK scaling is the identity up to max_position_embeddings
             "dynamic" if arch == "internlm2" || raw == "internlm3" => {}
+            "dynamic" | "dynamic-ntk" | "dynamic_ntk" => {
+                meta.push((
+                    format!("{arch}.rope.scaling.type"),
+                    Meta::Str("dynamic".into()),
+                ));
+                if let Some(factor) = flt(&global.raw, "factor") {
+                    f!("rope.scaling.factor", factor);
+                }
+                if let Some(orig) = num(&global.raw, "original_max_position_embeddings")
+                    .or_else(|| num(cfg, "original_max_position_embeddings"))
+                {
+                    u!("rope.scaling.original_context_length", orig);
+                }
+            }
+            "llama4" => {
+                meta.push((
+                    format!("{arch}.rope.scaling.type"),
+                    Meta::Str("llama4".into()),
+                ));
+                if let Some(factor) = flt(&global.raw, "factor") {
+                    f!("rope.scaling.factor", factor);
+                }
+                if let Some(orig) = num(&global.raw, "original_max_position_embeddings")
+                    .or_else(|| num(cfg, "original_max_position_embeddings"))
+                {
+                    u!("rope.scaling.original_context_length", orig);
+                }
+                if let Some(beta) = flt(&global.raw, "llama_4_scaling_beta").or_else(|| flt(&global.raw, "beta")) {
+                    f!("attention.temperature_beta", beta);
+                }
+            }
+            "proportional" => {
+                meta.push((
+                    format!("{arch}.rope.scaling.type"),
+                    Meta::Str("proportional".into()),
+                ));
+                if let Some(factor) = flt(&global.raw, "factor") {
+                    f!("rope.scaling.factor", factor);
+                }
+                if let Some(orig) = num(&global.raw, "original_max_position_embeddings")
+                    .or_else(|| num(cfg, "original_max_position_embeddings"))
+                {
+                    u!("rope.scaling.original_context_length", orig);
+                }
+            }
             "linear" => {
                 let factor =
                     flt(&global.raw, "factor").ok_or("linear rope_scaling requires factor")?;
@@ -1328,9 +1453,11 @@ impl Plan {
                         | "minimax_m2"
                         | "ernie4_5_moe"
                         | "hunyuan_v1_moe"
+                        | "laguna"
                         | "gpt_oss"
                         | "granitemoe"
                         | "granitemoeshared"
+                        | "granitemoe_swa"
                         | "granitemoehybrid"
                         | "qwen3_5_moe"
                         | "qwen3_5_moe_text"
@@ -1387,6 +1514,12 @@ impl Plan {
                     Meta::Bools(vec![false; layers as usize]),
                 ));
             }
+        }
+        if arch == "falcon-h1" {
+            crate::hybrid::falcon_h1_meta(cfg, hidden, &mut meta)?;
+        }
+        if arch == "jamba" {
+            crate::hybrid::jamba_meta(cfg, hidden, layers, &mut meta)?;
         }
         if family == Family::Qwen3Next || arch == "olmo_hybrid" {
             if arch == "olmo_hybrid" {
@@ -1459,7 +1592,50 @@ impl Plan {
                     }
                 }
             }
-            "minicpm3" => {
+            "mimo_v2" => {
+                let swa = |l: usize| layer_types.get(l).map(String::as_str) == Some("sliding_attention");
+                let kv_per_layer: Vec<u32> = (0..layers as usize).map(|l| (kv_heads * if swa(l) { 2 } else { 1 }) as u32).collect();
+                set_meta(&mut meta, &format!("{arch}.attention.head_count_kv"), Meta::U32s(kv_per_layer));
+                let v_dim = num(cfg, "v_head_dim").unwrap_or(128);
+                set_meta(&mut meta, &format!("{arch}.attention.value_length"), Meta::U32(v_dim as u32));
+                let rotary = |raw: &Value| (head_dim as f64 * flt(raw, "partial_rotary_factor").unwrap_or(0.334)).floor() as u32;
+                set_meta(&mut meta, &format!("{arch}.rope.dimension_count"), Meta::U32(rotary(&global.raw)));
+                set_meta(&mut meta, &format!("{arch}.rope.dimension_count_swa"), Meta::U32(rotary(&local.raw)));
+                f!("rope.freq_base_swa", local.theta.unwrap_or(10_000.0));
+                f!("attention.value_scale", flt(cfg, "attention_value_scale").unwrap_or(1.0));
+                u!("expert_gating_func", 2);
+                f!("expert_weights_scale", flt(cfg, "routed_scaling_factor").unwrap_or(1.0));
+                if let Some(g) = num(cfg, "n_group").filter(|&g| g > 1) {
+                    u!("expert_group_count", g);
+                    u!("expert_group_used_count", num(cfg, "topk_group").unwrap_or(g));
+                }
+            }
+            "laguna" => {
+                if cfg.get("moe_apply_router_weight_on_input").and_then(Value::as_bool) == Some(true) {
+                    return Err("Laguna with moe_apply_router_weight_on_input is unsupported".into());
+                }
+                let per_layer: Vec<u32> = match cfg.get("num_attention_heads_per_layer").and_then(Value::as_array) {
+                    Some(list) if list.len() == layers as usize => list.iter().map(|v| v.as_u64().unwrap_or(heads) as u32).collect(),
+                    Some(_) => return Err("num_attention_heads_per_layer does not match num_hidden_layers".into()),
+                    None => vec![heads as u32; layers as usize],
+                };
+                if let Some(entry) = meta.iter_mut().find(|(k, _)| k.ends_with(".attention.head_count")) {
+                    entry.1 = Meta::U32s(per_layer);
+                }
+                u!("rope.dimension_count_swa", (head_dim as f64 * flt(&local.raw, "partial_rotary_factor").unwrap_or(1.0)).round() as u64);
+                f!("rope.freq_base_swa", local.theta.unwrap_or(10_000.0));
+                u!("expert_gating_func", 2);
+                f!("expert_weights_scale", flt(cfg, "moe_routed_scaling_factor").unwrap_or(1.0));
+                let cap = flt(cfg, "moe_router_logit_softcapping").unwrap_or(0.0);
+                if cap > 0.0 {
+                    f!("router_logit_softcapping", cap);
+                }
+                match cfg.get("gating") {
+                    Some(Value::String(s)) if s == "per-element" => meta.push((format!("{arch}.attention.gate_per_element"), Meta::Bool(true))),
+                    _ => {}
+                }
+            }
+            "minicpm" | "minicpm3" => {
                 f!("embedding_scale", flt(cfg, "scale_emb").unwrap_or(1.0));
                 f!(
                     "residual_scale",
@@ -1572,6 +1748,24 @@ impl Plan {
                     synthesized.push((format!("blk.{i}.attn_k_norm.weight"), ones(head_dim)));
                 }
             }
+            "granite" | "granitehybrid" | "granitemoe" | "hyperclovax" if matches!(raw.as_str(), "granite_swa" | "granitemoe_swa") => {
+                // every layer has its own rotary base; 0 means no position encoding
+                if let Some(list) = cfg.get("layer_rope_theta").and_then(Value::as_array).filter(|l| l.len() == layers as usize) {
+                    let bases: Vec<f32> = list.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect();
+                    meta.push((format!("{arch}.rope.layer_flags"), Meta::Bools(bases.iter().map(|b| *b != 0.0).collect())));
+                    meta.push((format!("{arch}.rope.layer_bases"), Meta::F32s(bases)));
+                }
+                for (src, dst) in [
+                    ("embedding_multiplier", "embedding_scale"),
+                    ("attention_multiplier", "attention.scale"),
+                    ("residual_multiplier", "residual_scale"),
+                    ("logits_scaling", "logit_scale"),
+                ] {
+                    if let Some(v) = flt(cfg, src) {
+                        f!(dst, v);
+                    }
+                }
+            }
             "granite" | "granitehybrid" | "granitemoe" | "hyperclovax" => {
                 for (src, dst) in [
                     ("embedding_multiplier", "embedding_scale"),
@@ -1585,6 +1779,36 @@ impl Plan {
                 }
             }
             _ => {}
+        }
+        if let Some(blocks) = cfg.get("block_configs").and_then(Value::as_array) {
+            if blocks.len() == layers as usize {
+                let mut heads_l = Vec::with_capacity(blocks.len());
+                let mut kv_l = Vec::with_capacity(blocks.len());
+                let mut ff_l = Vec::with_capacity(blocks.len());
+                for b in blocks {
+                    let h = num(b, "attention_heads").or_else(|| num(b, "num_attention_heads")).unwrap_or(heads);
+                    let k = num(b, "kv_heads").or_else(|| num(b, "num_key_value_heads")).unwrap_or(kv_heads);
+                    let f = num(b, "ffn_hidden_size").or_else(|| num(b, "intermediate_size")).unwrap_or(inter);
+                    heads_l.push(h as u32);
+                    kv_l.push(k as u32);
+                    ff_l.push(f as u32);
+                }
+                set_meta(&mut meta, &format!("{arch}.attention.head_count"), Meta::U32s(heads_l));
+                set_meta(&mut meta, &format!("{arch}.attention.head_count_kv"), Meta::U32s(kv_l));
+                set_meta(&mut meta, &format!("{arch}.feed_forward_length"), Meta::U32s(ff_l));
+            }
+        }
+        if let Some(list) = cfg.get("num_attention_heads_per_layer").and_then(Value::as_array) {
+            let heads_l: Vec<u32> = list.iter().map(|v| v.as_u64().unwrap_or(heads) as u32).collect();
+            if heads_l.len() == layers as usize {
+                set_meta(&mut meta, &format!("{arch}.attention.head_count"), Meta::U32s(heads_l));
+            }
+        }
+        if let Some(nl) = num(cfg, "num_loops") {
+            meta.push((format!("{arch}.num_loops"), Meta::U32(nl as u32)));
+        }
+        if let Some(bs) = num(cfg, "blocksparse_block_size") {
+            meta.push((format!("{arch}.blocksparse_block_size"), Meta::U32(bs as u32)));
         }
         Ok(Self {
             arch: arch.to_owned(),
@@ -1637,12 +1861,12 @@ impl Plan {
                 .map(|i| match raw.as_str() {
                     "deepseek_v2" | "deepseek_v3" | "kimi_k2" | "glm4_moe" | "dots1"
                     | "mistral4" | "g9v3" => i >= num(cfg, "first_k_dense_replace").unwrap_or(0),
-                    "hy_v3" | "exaone_moe" | "glm4_moe_lite" => cfg
+                    "hy_v3" | "exaone_moe" | "glm4_moe_lite" | "mellum" | "laguna" | "mimo_v2_flash" => cfg
                         .get("mlp_layer_types")
                         .and_then(Value::as_array)
                         .and_then(|a| a.get(i as usize))
                         .and_then(Value::as_str)
-                        .map_or(i >= num(cfg, "first_k_dense_replace").unwrap_or(0), |t| {
+                        .map_or(i >= num(cfg, "first_k_dense_replace").unwrap_or(u64::from(matches!(raw.as_str(), "laguna" | "mimo_v2_flash"))), |t| {
                             t == "sparse"
                         }),
                     "afmoe" => i >= num(cfg, "num_dense_layers").unwrap_or(1),
@@ -1660,6 +1884,7 @@ impl Plan {
                             }
                         }
                     }
+                    "jamba" => crate::hybrid::jamba_expert_layer(cfg, i),
                     "ernie4_5_moe" => {
                         let interval = num(cfg, "moe_layer_interval").unwrap_or(1).max(1);
                         (i + 1) % interval == 0
@@ -1711,6 +1936,9 @@ impl Plan {
             "mlp.experts.down_proj" => return fused("experts_output"),
             _ => {}
         }
+        if suf == "mlp.experts.e_score_correction_bias" {
+            return plain("exp_probs_b.bias");
+        }
         if let Some(rest) = suf.strip_prefix(experts) {
             let (index, kind) = rest.split_once('.')?;
             let index = index.parse().ok()?;
@@ -1732,6 +1960,7 @@ impl Plan {
             "mlp.gate.e_score_correction_bias"
             | "mlp.expert_bias"
             | "mlp.e_score_correction_bias"
+            | "mlp.experts.e_score_correction_bias"
             | "mlp.moe_statics.e_score_correction_bias"
             | "block_sparse_moe.e_score_correction_bias" => plain("exp_probs_b.bias"),
             "mlp.shared_mlp.gate_proj.weight" => plain("ffn_gate_shexp.weight"),
@@ -1768,8 +1997,14 @@ impl Plan {
             "feed_forward.gate_proj.weight" => plain("ffn_gate.weight"),
             "feed_forward.up_proj.weight" => plain("ffn_up.weight"),
             "feed_forward.down_proj.weight" => plain("ffn_down.weight"),
+            "feed_forward.gate_proj.bias" => plain("ffn_gate.bias"),
+            "feed_forward.up_proj.bias" => plain("ffn_up.bias"),
+            "feed_forward.down_proj.bias" => plain("ffn_down.bias"),
             "pre_ff_layernorm.weight" => plain("ffn_norm.weight"),
             "block_sparse_moe.router.layer.weight" => plain("ffn_gate_inp.weight"),
+            "block_sparse_moe.router.weight" => plain("ffn_gate_inp.weight"),
+            "block_sparse_moe.experts.gate_up_proj" => fused("experts_input"),
+            "block_sparse_moe.experts.down_proj" => fused("experts_output"),
             "block_sparse_moe.input_linear.weight" => fused("experts_input"),
             "block_sparse_moe.output_linear.weight" => fused("experts_output"),
             "shared_mlp.input_linear.weight" => fused(if self.moe {
@@ -1783,6 +2018,8 @@ impl Plan {
                 "ffn_down.weight"
             }),
             "mamba.in_proj.weight" => plain("ssm_in.weight"),
+            "mamba.in_proj.bias" => plain("ssm_in.bias"),
+            "mamba.out_proj.bias" => plain("ssm_out.bias"),
             "mamba.conv1d.weight" => plain("ssm_conv1d.weight"),
             "mamba.conv1d.bias" => plain("ssm_conv1d.bias"),
             "mamba.dt_bias" => plain("ssm_dt.bias"),
@@ -2173,6 +2410,12 @@ impl Plan {
         {
             return Ok(Mapped::Skip);
         }
+        if self.arch == "gemma4" {
+            return crate::gemma::map(self, n);
+        }
+        if self.arch == "gemma3n" {
+            return crate::gemma3n::map(self, n);
+        }
         if let Some(rest) = n.strip_prefix("mtp.") {
             return self.map_mtp(rest);
         }
@@ -2225,6 +2468,9 @@ impl Plan {
         if self.family == Family::Classic {
             return crate::classic::map(self, n);
         }
+        if self.arch == "zamba2" {
+            return crate::zamba2::map(self, n);
+        }
         if self.arch == "internlm2" {
             return self.map_internlm2(n);
         }
@@ -2241,17 +2487,24 @@ impl Plan {
             "model.embedding_norm.weight" if matches!(self.arch.as_str(), "lfm2" | "lfm2moe") => {
                 return Ok(plain("output_norm.weight"))
             }
-            "model.embed_tokens.weight" => return Ok(plain("token_embd.weight")),
+            "model.embed_tokens.weight"
+            | "transformer.wte.weight"
+            | "transformer.embedding.word_embeddings.weight" => return Ok(plain("token_embd.weight")),
             "model.norm.weight" if self.arch == "muse-glimmer" => return Ok(plain("output_norm.weight")),
-            "model.norm.weight" => return Ok(norm("output_norm.weight")),
-            "model.norm.bias" => return Ok(plain("output_norm.bias")),
+            "model.norm.weight"
+            | "transformer.ln_f.weight"
+            | "transformer.final_layernorm.weight" => return Ok(norm("output_norm.weight")),
+            "model.norm.bias" | "transformer.ln_f.bias" => return Ok(plain("output_norm.bias")),
             "model.final_layernorm.weight" => return Ok(plain("output_norm.weight")),
             "model.final_layernorm.bias" => return Ok(plain("output_norm.bias")),
             "lm_head.bias" => return Ok(plain("output.bias")),
-            "lm_head.weight" => return Ok(plain("output.weight")),
+            "lm_head.weight" | "transformer.output_layer.weight" => return Ok(plain("output.weight")),
             _ => {}
         }
-        if let Some(rest) = n.strip_prefix("model.layers.") {
+        let layer_rest = n.strip_prefix("model.layers.")
+            .or_else(|| n.strip_prefix("transformer.layers."))
+            .or_else(|| n.strip_prefix("transformer.h."));
+        if let Some(rest) = layer_rest {
             let (i, suf) = rest
                 .split_once('.')
                 .ok_or_else(|| format!("malformed layer tensor name {n:?}"))?;
@@ -2324,11 +2577,21 @@ impl Plan {
                     return Ok(plain(&format!("blk.{i}.{name}")));
                 }
             }
+            if self.arch == "jamba" {
+                if let Some(m) = crate::hybrid::map_jamba(i, suf) {
+                    return Ok(m);
+                }
+            }
+            if self.arch == "kimi-linear" {
+                if let Some(m) = crate::kimi_linear::map(i, suf) {
+                    return Ok(m);
+                }
+            }
             let sandwich = matches!(self.family, Family::Gemma) && self.arch != "gemma";
             let post_norm_family = sandwich || self.family == Family::Olmo2 || self.arch == "afmoe";
             if matches!(
                 self.arch.as_str(),
-                "granitehybrid" | "bamba" | "llama4" | "granitemoe"
+                "granitehybrid" | "bamba" | "llama4" | "granitemoe" | "falcon-h1" | "jamba"
             ) {
                 if let Some(m) = self.map_hybrid(i, suf) {
                     return Ok(m);
@@ -2386,6 +2649,24 @@ impl Plan {
                 "post_attention_layernorm.weight" => Some(("ffn_norm.weight", true)),
                 "pre_feedforward_layernorm.weight" => Some(("ffn_norm.weight", true)),
                 "post_feedforward_layernorm.weight" => Some(("post_ffw_norm.weight", true)),
+                "self_attn.W_pack.weight" => Some(("attn_qkv.weight", false)),
+                "self_attn.W_pack.bias" => Some(("attn_qkv.bias", false)),
+                "attn.c_attn.weight" => Some(("attn_qkv.weight", false)),
+                "attn.c_attn.bias" => Some(("attn_qkv.bias", false)),
+                "attn.c_proj.weight" => Some(("attn_output.weight", false)),
+                "attn.c_proj.bias" => Some(("attn_output.bias", false)),
+                "ln_1.weight" => Some(("attn_norm.weight", true)),
+                "ln_1.bias" => Some(("attn_norm.bias", false)),
+                "ln_2.weight" => Some(("ffn_norm.weight", true)),
+                "ln_2.bias" => Some(("ffn_norm.bias", false)),
+                "mlp.w1.weight" => Some(("ffn_gate.weight", false)),
+                "mlp.w2.weight" => Some(("ffn_up.weight", false)),
+                "attention.query_key_value.weight" => Some(("attn_qkv.weight", false)),
+                "attention.query_key_value.bias" => Some(("attn_qkv.bias", false)),
+                "attention.dense.weight" => Some(("attn_output.weight", false)),
+                "attention.dense.bias" => Some(("attn_output.bias", false)),
+                "mlp.dense_h_to_4h.weight" => Some(("ffn_up.weight", false)),
+                "mlp.dense_4h_to_h.weight" => Some(("ffn_down.weight", false)),
                 "self_attn.q_proj.weight" => Some(("attn_q.weight", false)),
                 "self_attn.k_proj.weight" => Some(("attn_k.weight", false)),
                 "self_attn.v_proj.weight" => Some(("attn_v.weight", false)),
@@ -2406,7 +2687,8 @@ impl Plan {
                 "post_mlp_layernorm.weight" if self.arch == "afmoe" => {
                     Some(("post_ffw_norm.weight", false))
                 }
-                "self_attn.gate_proj.weight" => Some(("attn_gate.weight", false)),
+                "self_attn.gate_proj.weight" | "self_attn.g_proj.weight" => Some(("attn_gate.weight", false)),
+                "self_attn.sinks" | "self_attn.attention_sink_bias" => Some(("attn_sinks.weight", false)),
                 "post_norm1.weight" => Some(("post_attention_norm.weight", false)),
                 "post_norm2.weight" => Some(("post_ffw_norm.weight", false)),
                 "mlp.fc1.weight" => Some(("ffn_up.weight", false)),
@@ -2651,5 +2933,88 @@ mod tests {
             Mapped::Tensor { name: "blk.2.attn_v_gate.bias".into(), add: 0.0 }
         );
         assert_eq!(plan.moe_layers, vec![false, true, true, true]);
+    }
+
+    #[test]
+    fn bailing_moe_gqa_vs_mla_mapping() {
+        // GQA variant (no kv_lora_rank) maps to Qwen family (bailing_moe)
+        let mut cfg_gqa = base("bailing_moe");
+        cfg_gqa["num_experts"] = json!(8);
+        cfg_gqa["num_experts_per_tok"] = json!(2);
+        let plan_gqa = Plan::from_config(&cfg_gqa).unwrap();
+        assert_eq!(plan_gqa.family, Family::Qwen);
+        assert_eq!(plan_gqa.arch, "bailing_moe");
+
+        // MLA variant (with kv_lora_rank) maps to Deepseek family
+        let mut cfg_mla = base("bailing_moe");
+        cfg_mla["num_experts"] = json!(8);
+        cfg_mla["num_experts_per_tok"] = json!(2);
+        cfg_mla["kv_lora_rank"] = json!(32);
+        cfg_mla["qk_nope_head_dim"] = json!(16);
+        cfg_mla["qk_rope_head_dim"] = json!(16);
+        cfg_mla["v_head_dim"] = json!(16);
+        let plan_mla = Plan::from_config(&cfg_mla).unwrap();
+        assert_eq!(plan_mla.family, Family::Deepseek);
+        assert_eq!(plan_mla.arch, "deepseek2");
+    }
+
+    #[test]
+    fn baichuan_qwen_chatglm_tensor_mappings() {
+        let baichuan = Plan::from_config(&base("baichuan2")).unwrap();
+        assert_eq!(
+            baichuan.map("model.layers.0.self_attn.W_pack.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_qkv.weight".into(), add: 0.0 }
+        );
+
+        let qwen = Plan::from_config(&base("qwen")).unwrap();
+        assert_eq!(
+            qwen.map("transformer.h.0.attn.c_attn.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_qkv.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            qwen.map("transformer.h.0.attn.c_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_output.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            qwen.map("transformer.wte.weight").unwrap(),
+            Mapped::Tensor { name: "token_embd.weight".into(), add: 0.0 }
+        );
+
+        let chatglm = Plan::from_config(&base("chatglm")).unwrap();
+        assert_eq!(
+            chatglm.map("transformer.layers.0.attention.query_key_value.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_qkv.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            chatglm.map("transformer.output_layer.weight").unwrap(),
+            Mapped::Tensor { name: "output.weight".into(), add: 0.0 }
+        );
+    }
+
+    #[test]
+    fn rope_extensions_dynamic_llama4_proportional() {
+        let mut cfg_dyn = base("llama");
+        cfg_dyn["rope_scaling"] = json!({"rope_type": "dynamic", "factor": 4.0, "original_max_position_embeddings": 2048});
+        let plan_dyn = Plan::from_config(&cfg_dyn).unwrap();
+        assert!(plan_dyn.meta.iter().any(|(k, v)| k == "llama.rope.scaling.type" && matches!(v, Meta::Str(s) if s == "dynamic")));
+        assert!(plan_dyn.meta.iter().any(|(k, v)| k == "llama.rope.scaling.factor" && matches!(v, Meta::F32(f) if *f == 4.0)));
+
+        let mut cfg_l4 = base("llama");
+        cfg_l4["rope_scaling"] = json!({"rope_type": "llama4", "factor": 8.0, "beta": 0.25});
+        let plan_l4 = Plan::from_config(&cfg_l4).unwrap();
+        assert!(plan_l4.meta.iter().any(|(k, v)| k == "llama.rope.scaling.type" && matches!(v, Meta::Str(s) if s == "llama4")));
+        assert!(plan_l4.meta.iter().any(|(k, v)| k == "llama.attention.temperature_beta" && matches!(v, Meta::F32(f) if *f == 0.25)));
+
+        let mut cfg_prop = base("llama");
+        cfg_prop["rope_scaling"] = json!({"rope_type": "proportional", "factor": 2.0});
+        let plan_prop = Plan::from_config(&cfg_prop).unwrap();
+        assert!(plan_prop.meta.iter().any(|(k, v)| k == "llama.rope.scaling.type" && matches!(v, Meta::Str(s) if s == "proportional")));
+
+        // Partial rotary via rope_head_dim < head_dim
+        let mut cfg_part = base("llama");
+        cfg_part["head_dim"] = json!(128);
+        cfg_part["rope_head_dim"] = json!(64);
+        let plan_part = Plan::from_config(&cfg_part).unwrap();
+        assert!(plan_part.meta.iter().any(|(k, v)| k == "llama.rope.dimension_count" && matches!(v, Meta::U32(64))));
     }
 }

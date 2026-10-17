@@ -1,0 +1,3 @@
+[advisories]
+# See deny.toml: unmaintained proc-macro of the pinned tokenizers crate, no runtime code.
+ignore = ["RUSTSEC-2024-0436"]

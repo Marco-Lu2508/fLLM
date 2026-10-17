@@ -78,6 +78,18 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             chat(&args[1..])?;
             Ok(true)
         }
+        "cp" => {
+            cp(&args[1..])?;
+            Ok(true)
+        }
+        "create" => {
+            create(&args[1..])?;
+            Ok(true)
+        }
+        "push" => {
+            push(&args[1..])?;
+            Ok(true)
+        }
         "bench-report" => {
             crate::bench::report(&args[1..])?;
             Ok(true)
@@ -88,6 +100,14 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
         }
         "selftest-cpu" => {
             crate::cpu_selftest::run(&args[1..])?;
+            Ok(true)
+        }
+        "selftest-parallel" => {
+            crate::parallel::selftest::run(&args[1..])?;
+            Ok(true)
+        }
+        "selftest-comm" => {
+            crate::comm::selftest::run(&args[1..])?;
             Ok(true)
         }
         _ => Ok(false),
@@ -104,14 +124,19 @@ fn help(command: &str) -> &'static str {
         "run" => "usage: fllm-rs run MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--revision REV] [--local-files-only] [serve options]
 MODEL: a Hugging Face link as pasted from the browser (https://huggingface.co/owner/repo, .../blob/main/file.gguf), hf.co/owner/repo:Q4_K_M, owner/repo, hf://owner/repo[:QUANT], a local .gguf or a local checkpoint directory. Downloads the model on first use, starts a server on a free local port, opens a chat in this terminal and stops the server when you quit (Ctrl-D). Extra options go to serve, e.g. --ctx 8192 or --device cpu.
 A repository or directory without GGUF files but with a checkpoint (safetensors, PyTorch, AWQ, GPTQ, FP8, ModelOpt NVFP4) is converted to GGUF on first use and cached; AWQ/GPTQ/FP8/NVFP4 keep their quantization, --quant TYPE (q4_k_m, q8_0, ...) re-encodes an unquantized bf16/f16/f32 checkpoint while converting. HF_TOKEN is used for gated or private repositories.",
-        "convert" => "usage: fllm-rs convert CHECKPOINT_PATH OUTPUT.gguf [--outtype preserve|f16|f32|TYPE] [--overwrite] [--revision REV] [--local-files-only]\nCHECKPOINT_PATH may be a supported checkpoint directory or a .safetensors/.bin/.pt/.pth file with config.json and tokenizer files beside it.",
+        "convert" => "usage: fllm-rs convert CHECKPOINT_PATH OUTPUT.gguf [--outtype preserve|f16|f32|TYPE] [--spec-head eagle|eagle3|medusa] [--overwrite] [--revision REV] [--local-files-only]\nCHECKPOINT_PATH may be a supported checkpoint directory or a .safetensors/.bin/.pt/.pth file with config.json and tokenizer files beside it.",
         "quantize" => "usage: fllm-rs quantize INPUT.gguf OUTPUT.gguf TYPE [--overwrite]
 TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float tensors are re-encoded; norms, routers and already quantized tensors are kept.",
         "inspect" => "usage: fllm-rs inspect PATH [--revision REV] [--local-files-only]\nPATH may be a GGUF file or a supported dense checkpoint directory.",
         "formats" => "usage: fllm-rs formats\nLists registered GGML storage types and the Rust decoder class; registration does not promise inference support.",
         "chat" => "usage: fllm-rs chat [--url http://127.0.0.1:8000] [--model MODEL_ID] [--api-key KEY] [--max-new N] [--temperature T] [--top-p P]\nConnects to an already running OpenAI-compatible chat-completions server.",
+        "cp" => "usage: fllm-rs cp SOURCE DEST\nCopy or alias a model in the local server catalog or registry.",
+        "create" => "usage: fllm-rs create MODEL [-f Modelfile]\nCreate a model definition or alias from a Modelfile.",
+        "push" => "usage: fllm-rs push MODEL\nPush a model to an upstream registry.",
         "bench" => crate::bench::HELP,
         "selftest-cpu" => crate::cpu_selftest::HELP,
+        "selftest-parallel" => crate::parallel::selftest::HELP,
+        "selftest-comm" => crate::comm::selftest::HELP,
         _ => "",
     }
 }
@@ -445,6 +470,7 @@ struct ConvertArgs {
     outtype: String,
     overwrite: bool,
     resolve: ResolveFlags,
+    spec_head: Option<fllm_checkpoint::SpecHeadKind>,
 }
 
 fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, String> {
@@ -452,11 +478,18 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, String> {
     let mut outtype = "preserve".to_owned();
     let mut overwrite = false;
     let mut resolve = ResolveFlags::default();
+    let mut spec_head = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--outtype" => outtype = option_value(args, &mut i, "--outtype")?,
             "--overwrite" => overwrite = true,
+            "--spec-head" => {
+                let s = option_value(args, &mut i, "--spec-head")?;
+                spec_head = Some(fllm_checkpoint::SpecHeadKind::parse(&s).ok_or_else(|| {
+                    format!("--spec-head expects eagle, eagle3 or medusa, got {s}")
+                })?);
+            }
             "--revision" | "--local-files-only" | "--offline" => {
                 parse_resolve_flags(args, &mut i, &mut resolve)?
             }
@@ -485,6 +518,7 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, String> {
         outtype,
         overwrite,
         resolve,
+        spec_head,
     })
 }
 
@@ -516,6 +550,7 @@ fn convert(args: &[String]) -> Result<(), String> {
         fllm_checkpoint::ConvertOptions {
             output_dtype: dtype,
             overwrite: args.overwrite,
+            spec_head: args.spec_head,
         },
     )
     .map_err(|e| format!("checkpoint conversion failed: {e}"))?;
@@ -988,7 +1023,7 @@ fn completions(args: &[String]) -> Result<(), String> {
     let commands = [
         "serve", "run", "pull", "list", "rm", "ps", "show", "search", "convert", "quantize",
         "inspect", "formats", "chat", "bench", "bench-report", "devices", "completions",
-        "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu",
+        "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu", "selftest-parallel", "selftest-comm",
     ];
     match shell {
         "bash" | "zsh" => {
@@ -1029,12 +1064,106 @@ fn repository_of_reference(input: &str) -> String {
 }
 
 
+fn cp(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 || args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", help("cp"));
+        return Ok(());
+    }
+    let source = &args[0];
+    let dest = &args[1];
+    let base_url = std::env::var("FLLM_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned());
+    let url = format!("{}/api/copy", base_url.trim_end_matches('/'));
+    let client = http_client()?;
+    let mut req = client.post(&url).json(&serde_json::json!({
+        "source": source,
+        "destination": dest,
+    }));
+    if let Ok(key) = std::env::var("FLLM_API_KEY") {
+        req = req.bearer_auth(key);
+    }
+    let res = req.send().map_err(|e| format!("cannot connect to server at {url}: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().unwrap_or_default();
+        return Err(format!("copy failed (HTTP {status}): {text}"));
+    }
+    println!("copied '{source}' to '{dest}'");
+    Ok(())
+}
+
+fn create(args: &[String]) -> Result<(), String> {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", help("create"));
+        return Ok(());
+    }
+    let model = &args[0];
+    let mut file_path = PathBuf::from("Modelfile");
+    let mut i = 1;
+    while i < args.len() {
+        if (args[i] == "-f" || args[i] == "--file") && i + 1 < args.len() {
+            file_path = PathBuf::from(&args[i + 1]);
+            i += 1;
+        }
+        i += 1;
+    }
+    let modelfile = if file_path.is_file() {
+        std::fs::read_to_string(&file_path).map_err(|e| format!("cannot read {}: {e}", file_path.display()))?
+    } else {
+        format!("FROM {model}\n")
+    };
+    let base_url = std::env::var("FLLM_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned());
+    let url = format!("{}/api/create", base_url.trim_end_matches('/'));
+    let client = http_client()?;
+    let mut req = client.post(&url).json(&serde_json::json!({
+        "model": model,
+        "modelfile": modelfile,
+        "stream": false,
+    }));
+    if let Ok(key) = std::env::var("FLLM_API_KEY") {
+        req = req.bearer_auth(key);
+    }
+    let res = req.send().map_err(|e| format!("cannot connect to server at {url}: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().unwrap_or_default();
+        return Err(format!("create failed (HTTP {status}): {text}"));
+    }
+    println!("created model '{model}'");
+    Ok(())
+}
+
+fn push(args: &[String]) -> Result<(), String> {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", help("push"));
+        return Ok(());
+    }
+    let model = &args[0];
+    let base_url = std::env::var("FLLM_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned());
+    let url = format!("{}/api/push", base_url.trim_end_matches('/'));
+    let client = http_client()?;
+    let mut req = client.post(&url).json(&serde_json::json!({
+        "model": model,
+        "stream": false,
+    }));
+    if let Ok(key) = std::env::var("FLLM_API_KEY") {
+        req = req.bearer_auth(key);
+    }
+    let res = req.send().map_err(|e| format!("cannot connect to server at {url}: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().unwrap_or_default();
+        return Err(format!("push failed (HTTP {status}): {text}"));
+    }
+    println!("pushed model '{model}'");
+    Ok(())
+}
+
 fn chat(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{}", help("chat"));
         return Ok(());
     }
-    let options = parse_chat_args(args)?;
+    let mut options = parse_chat_args(args)?;
     let url = endpoint(&options.base_url)?;
     let client = http_client()?;
     let stdin = io::stdin();
@@ -1043,17 +1172,47 @@ fn chat(args: &[String]) -> Result<(), String> {
     println!("fLLM chat (Ctrl-D to exit; connects to {url})");
     let mut system: Option<String> = None;
     loop {
-        print!("
-> ");
+        print!("\n> ");
         io::stdout().flush().map_err(|e| e.to_string())?;
         let mut line = String::new();
         if input.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
             break;
         }
-        let message = line.trim();
-        if message.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
+
+        // Multiline support with triple quotes """
+        let message = if let Some(after) = trimmed.strip_prefix("\"\"\"") {
+            let mut multiline = String::new();
+            if let Some(inner) = after.strip_suffix("\"\"\"") {
+                inner.trim().to_owned()
+            } else {
+                if !after.is_empty() {
+                    multiline.push_str(after);
+                    multiline.push('\n');
+                }
+                loop {
+                    print!("... ");
+                    io::stdout().flush().map_err(|e| e.to_string())?;
+                    let mut next_line = String::new();
+                    if input.read_line(&mut next_line).map_err(|e| e.to_string())? == 0 {
+                        break;
+                    }
+                    let next_trimmed = next_line.trim_end();
+                    if let Some(before) = next_trimmed.strip_suffix("\"\"\"") {
+                        multiline.push_str(before);
+                        break;
+                    }
+                    multiline.push_str(&next_line);
+                }
+                multiline.trim().to_owned()
+            }
+        } else {
+            trimmed.to_owned()
+        };
+
         if message == "/exit" || message == "/quit" {
             break;
         }
@@ -1069,11 +1228,99 @@ fn chat(args: &[String]) -> Result<(), String> {
             println!("[system set]");
             continue;
         }
-        if let Some(rest) = message.strip_prefix("/set temperature ") {
-            // accepted for UX parity; the value is not re-applied mid-session beyond a note.
-            println!("[temperature {} acknowledged]", rest);
+        if let Some(rest) = message.strip_prefix("/set ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 2 {
+                match parts[0] {
+                    "temperature" | "temp" => {
+                        if let Ok(v) = parts[1].parse::<f64>() {
+                            options.temperature = v;
+                            println!("[temperature set to {v}]");
+                        } else {
+                            println!("[invalid temperature value]");
+                        }
+                    }
+                    "top_p" => {
+                        if let Ok(v) = parts[1].parse::<f64>() {
+                            options.top_p = v;
+                            println!("[top_p set to {v}]");
+                        } else {
+                            println!("[invalid top_p value]");
+                        }
+                    }
+                    "max_tokens" | "max_new" => {
+                        if let Ok(v) = parts[1].parse::<usize>() {
+                            options.max_new = v;
+                            println!("[max_tokens set to {v}]");
+                        } else {
+                            println!("[invalid max_tokens value]");
+                        }
+                    }
+                    "system" => {
+                        let sys = parts[1..].join(" ");
+                        system = Some(sys.clone());
+                        history.retain(|m| m["role"] != "system");
+                        history.insert(0, serde_json::json!({"role":"system","content":sys}));
+                        println!("[system set]");
+                    }
+                    other => {
+                        println!("[unknown parameter: {other}]");
+                    }
+                }
+            } else {
+                println!("[usage: /set <param> <value>]");
+            }
             continue;
         }
+        if message == "/show" || message.starts_with("/show ") {
+            let sub = message.strip_prefix("/show ").unwrap_or("").trim();
+            match sub {
+                "system" => {
+                    println!("[system]: {}", system.as_deref().unwrap_or("<none>"));
+                }
+                "history" => {
+                    println!("[history: {} messages]", history.len());
+                    for (i, msg) in history.iter().enumerate() {
+                        println!("  {}: {}: {}", i, msg["role"].as_str().unwrap_or(""), msg["content"].as_str().unwrap_or(""));
+                    }
+                }
+                _ => {
+                    println!("[settings]");
+                    println!("  url: {}", options.base_url);
+                    println!("  model: {}", options.model);
+                    println!("  temperature: {}", options.temperature);
+                    println!("  top_p: {}", options.top_p);
+                    println!("  max_new: {}", options.max_new);
+                    println!("  system: {}", system.as_deref().unwrap_or("<none>"));
+                    println!("  messages in history: {}", history.len());
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = message.strip_prefix("/save ") {
+            let path = rest.trim();
+            match std::fs::write(path, serde_json::to_string_pretty(&history).unwrap_or_default()) {
+                Ok(_) => println!("[history saved to {path}]"),
+                Err(e) => println!("[cannot save history: {e}]"),
+            }
+            continue;
+        }
+        if let Some(rest) = message.strip_prefix("/load ") {
+            let path = rest.trim();
+            match std::fs::read_to_string(path) {
+                Ok(content) => match serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                    Ok(msgs) => {
+                        let count = msgs.len();
+                        history = msgs;
+                        println!("[loaded {count} messages from {path}]");
+                    }
+                    Err(e) => println!("[invalid JSON history: {e}]"),
+                },
+                Err(e) => println!("[cannot read file: {e}]"),
+            }
+            continue;
+        }
+
         history.push(serde_json::json!({"role":"user","content":message}));
         let mut body = serde_json::json!({
             "model": options.model,
@@ -1097,16 +1344,23 @@ fn chat(args: &[String]) -> Result<(), String> {
         }
         let response = match request.send() {
             Ok(r) => r,
-            Err(e) => { history.pop(); return Err(format!("chat request failed: {e}")); }
+            Err(e) => {
+                history.pop();
+                eprintln!("[chat request failed: {e}]");
+                continue;
+            }
         };
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().unwrap_or_default();
             history.pop();
-            return Err(format!("server returned HTTP {}: {text}", text));
+            eprintln!("[server returned HTTP {status}: {text}]");
+            continue;
         }
         use std::io::BufRead;
         let reader = std::io::BufReader::new(response);
         let mut assistant = String::new();
+        let mut in_thinking = false;
         for line in reader.lines() {
             let line = match line { Ok(l) => l, Err(_) => break };
             let line = line.trim();
@@ -1115,10 +1369,24 @@ fn chat(args: &[String]) -> Result<(), String> {
             let rest = rest.trim();
             if rest == "[DONE]" { break; }
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(rest) {
-                if let Some(content) = value.pointer("/choices/0/delta/content").and_then(serde_json::Value::as_str) {
-                    print!("{}", content);
-                    io::stdout().flush().ok();
-                    assistant.push_str(content);
+                if let Some(delta) = value.pointer("/choices/0/delta") {
+                    if let Some(reasoning) = delta.get("reasoning_content").or_else(|| delta.get("reasoning")).and_then(serde_json::Value::as_str) {
+                        if !in_thinking {
+                            println!("[thinking]");
+                            in_thinking = true;
+                        }
+                        print!("{reasoning}");
+                        io::stdout().flush().ok();
+                    }
+                    if let Some(content) = delta.get("content").and_then(serde_json::Value::as_str) {
+                        if in_thinking {
+                            print!("\n[answer]\n");
+                            in_thinking = false;
+                        }
+                        print!("{content}");
+                        io::stdout().flush().ok();
+                        assistant.push_str(content);
+                    }
                 }
             }
         }
@@ -1127,7 +1395,6 @@ fn chat(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1165,6 +1432,11 @@ mod tests {
         assert!(parsed.resolve.offline);
         assert!(parse_convert_args(&args(&["model"])).is_err());
         assert!(parse_convert_args(&args(&["model", "out", "--outtype", "bf16"])).is_err());
+        let parsed = parse_convert_args(&args(&["model", "out.gguf", "--spec-head", "medusa"])).unwrap();
+        assert_eq!(parsed.spec_head, Some(fllm_checkpoint::SpecHeadKind::Medusa));
+        let parsed = parse_convert_args(&args(&["model", "out.gguf", "--spec-head", "eagle3"])).unwrap();
+        assert_eq!(parsed.spec_head, Some(fllm_checkpoint::SpecHeadKind::Eagle3));
+        assert!(parse_convert_args(&args(&["model", "out.gguf", "--spec-head", "unknown"])).is_err());
     }
 
     #[test]
@@ -1235,5 +1507,15 @@ mod tests {
         assert!(parse_chat_args(&args(&["--max-new", "0"])).is_err());
         assert!(parse_chat_args(&args(&["--top-p", "1.5"])).is_err());
         assert!(parse_chat_args(&args(&["--url", "ftp://localhost"])).is_err());
+    }
+
+    #[test]
+    fn dispatch_handles_cp_create_and_push() {
+        assert!(dispatch(&args(&["cp", "--help"])).unwrap());
+        assert!(dispatch(&args(&["create", "--help"])).unwrap());
+        assert!(dispatch(&args(&["push", "--help"])).unwrap());
+        assert!(!help("cp").is_empty());
+        assert!(!help("create").is_empty());
+        assert!(!help("push").is_empty());
     }
 }

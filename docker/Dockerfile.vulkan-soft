@@ -1,0 +1,13 @@
+# Software Vulkan (Mesa lavapipe) test image for the native Vulkan backend: no GPU needed.
+# Build: docker build -f docker/Dockerfile.vulkan-soft -t fllm-vulkan-soft .
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential pkg-config git python3 \
+      glslc glslang-tools spirv-tools \
+      mesa-vulkan-drivers vulkan-tools libvulkan1 \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+# lavapipe is the only ICD; llvmpipe threads are limited by LP_NUM_THREADS at run time
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json

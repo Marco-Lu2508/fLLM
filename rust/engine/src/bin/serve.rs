@@ -25,7 +25,7 @@ fn pin_threads_to_cores(spec: &str) {
 
     let rc = unsafe { sched_setaffinity(0, std::mem::size_of_val(&mask), mask.as_ptr()) };
     if rc == 0 {
-        eprintln!("[fllm-rs] Pinned inference process to CPU affinity mask: {spec_trimmed}");
+        tracing::info!("Pinned inference process to CPU affinity mask: {spec_trimmed}");
     }
 }
 #[cfg(not(target_os = "linux"))]
@@ -39,6 +39,30 @@ use fllm_engine::{
 use fllm_gguf_probe::MappedGguf;
 use std::{env, process, thread};
 
+/// A draft model given as a file, a Hugging Face reference or a directory: resolved to one GGUF file (checkpoints are converted).
+fn resolve_gguf(spec: &str, offline: bool) -> Result<std::path::PathBuf, String> {
+    let path = fllm_engine::import::prepare(
+        spec,
+        &fllm_engine::import::ImportOptions { revision: None, offline, quant: None, outtype: None, direct: false },
+    )?;
+    if !path.is_dir() {
+        return Ok(path);
+    }
+    let mut ggufs: Vec<_> = std::fs::read_dir(&path)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("gguf")))
+        .collect();
+    ggufs.sort();
+    ggufs
+        .iter()
+        .find(|p| p.to_string_lossy().to_lowercase().contains("q4_k_m"))
+        .or_else(|| ggufs.first())
+        .cloned()
+        .ok_or_else(|| format!("directory '{}' contains no .gguf file", path.display()))
+}
+
 fn value(args: &[String], index: &mut usize, flag: &str) -> String {
     *index += 1;
     args.get(*index)
@@ -50,20 +74,26 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative mtp|off] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--host 127.0.0.1] [--port 8000] [--ctx 4096] [--max-seqs 16] [--max-batched-tokens 1024] [--threads N] [--api-key KEY] [--model-name NAME] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
     eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a checkpoint is converted to GGUF once and cached; --quant ({}) re-encodes an unquantized checkpoint while converting", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
     eprintln!("       (wgpu devices: f16 and q8_0 only; nvfp4 is experimental, keys below 8 bit can break some models, see docs/gpu-backends.md)");
+    eprintln!("       fllm-rs --version | -V | version");
     eprintln!("       fllm-rs devices [--json] [--measure] | formats | inspect PATH | pull hf://org/repo/file.gguf");
     eprintln!("       fllm-rs selftest-cpu [--tier TIER] | selftest-gpu [--device auto|vulkan|metal|hip|...] [--only GROUPS] [--quants LIST] [--json FILE] [--list]");
+    eprintln!("       fllm-rs bench-kernel --op marlin_gemv [--m 1] [--n 2048] [--k 2048] [--iters 200] (CUDA builds; --help)");
     eprintln!("       fllm-rs convert CHECKPOINT OUTPUT.gguf [--outtype preserve|f16|f32]");
     eprintln!("       fllm-rs chat | bench --url http://127.0.0.1:8000 [--model MODEL_ID]");
     eprintln!(
         "       sampling: --min-p P --typical-p P --mirostat 0|1|2 --dry-multiplier M --seed S"
     );
+    eprintln!("       --ctx auto (default) = the trained context of the model: at most 32768 tokens on a GPU (the memory planner lowers it to what fits), at most 8192 on the CPU");
+    eprintln!("       --generation-config auto|vllm|PATH (default auto): sampling defaults shipped with the model (GGUF metadata, generation_config.json) for requests that omit them; vllm or --no-generation-config uses none");
+    eprintln!("{}", fllm_engine::server::options::USAGE);
     eprintln!("       adapters/draft: --lora FILE --lora-scaled FILE SCALE --draft-model FILE --draft-tokens N");
     eprintln!("       Rust encoder: --model BERT.gguf --embeddings [--pooling cls|mean|last]");
+    eprintln!("       vision: --mmproj FILE | --no-vision | --max-image-pixels N | --limit-mm-per-prompt N | --vision-concurrency N");
     process::exit(if error.is_empty() { 0 } else { 2 })
 }
 
@@ -75,7 +105,7 @@ fn print_devices_help() {
     println!("  --measure   measure the host memory bandwidth (about a second); GPU bandwidth is shown only where the backend reports it");
     println!("Device numbers: the [n] in front of a device is its position in this list. `--device <backend>:<N>` counts the devices of that");
     println!("backend from 0 (vulkan:1 is the second Vulkan device); see the `Select` line of each device.");
-    println!("`--device auto` takes the first of CUDA > ROCm > Metal > Vulkan > DX12 > SYCL > CPU that has a GPU (FLLM_AUTO_ORDER changes the order,");
+    println!("`--device auto` takes the first of CUDA > ROCm > Metal > Vulkan > DX12 > CPU that has a GPU (FLLM_AUTO_ORDER changes the order,");
     println!("FLLM_AUTO_IGPU=0 leaves integrated GPUs other than Apple's out).");
 }
 
@@ -127,6 +157,7 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let document = serde_json::json!({
             "tool": "fllm-rs devices",
             "version": env!("CARGO_PKG_VERSION"),
+            "version_long": fllm_engine::version::long_version(),
             "compiled_backends": compiled_backends(),
             "devices": devices,
             "auto_order": policy.order,
@@ -173,8 +204,20 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 "Only with an explicit --device; never chosen by auto",
             ),
         };
+        let caps = caps_of(entry);
+        // CUDA: the compute capability and what this binary has for it (cuda/arch_report.cu)
+        let mut cuda_lines = String::new();
+        if let Some(cc) = &caps.compute_capability {
+            cuda_lines.push_str(&format!("\n      Compute:      capability {cc}"));
+            if let Some(kernels) = &caps.kernels {
+                cuda_lines.push_str(&format!("; kernels of this binary: {kernels}"));
+            }
+        }
+        if !caps.fast_paths.is_empty() {
+            cuda_lines.push_str(&format!("\n      Fast paths:   {}", caps.fast_paths.join("; ")));
+        }
         println!(
-            "  [{}] {} ({})\n      Backend:      {}\n      Select:       --device {}\n      Type:         {}\n      Memory:       {} MB free / {} MB total\n      Features:     {}\n      Capabilities: {}\n      Recommended:  {}",
+            "  [{}] {} ({})\n      Backend:      {}\n      Select:       --device {}\n      Type:         {}\n      Memory:       {} MB free / {} MB total\n      Features:     {}\n      Capabilities: {}{}\n      Recommended:  {}",
             dev.index,
             dev.name,
             dev.description,
@@ -183,8 +226,9 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             dev.dev_type.as_str(),
             free_mb,
             total_mb,
-            caps_of(entry).summary(),
+            caps.summary(),
             capabilities,
+            cuda_lines,
             role,
         );
     }
@@ -213,6 +257,32 @@ impl Drop for StatusGuard {
 }
 
 /// The device whose memory the planner budgets for `--device`: `None` when the model runs on the CPU.
+/// Why the latent MLA cache cannot be used with this backend, device and cache format (`None`: it can).
+fn latent_mla_unavailable(model: &GgufModel, backend: &str, index: usize, key: KvFormat, value: KvFormat) -> Option<String> {
+    if backend != "cuda" {
+        return Some(format!("the {backend} backend has no latent MLA kernels"));
+    }
+    if !fllm_engine::mla_latent::format_supported(key) {
+        return Some(format!("the {} key cache format is not covered", key.name()));
+    }
+    if value.check_dim(fllm_engine::mla_latent::LATENT_VALUE_DIM).is_err() {
+        return Some(format!("the {} value cache format cannot hold the placeholder value pool", value.name()));
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let m = model.config().mla.as_ref()?;
+        if !fllm_engine::backend::cuda::mla_latent_supported(index, m, key) {
+            return Some("the CUDA kernels do not cover this model's dimensions on this GPU".to_owned());
+        }
+        None
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (model, index);
+        Some("this build has no CUDA backend".to_owned())
+    }
+}
+
 fn plan_target(selected_backend: &str, selected_index: usize) -> Option<fllm_engine::DeviceInfo> {
     if selected_backend == "cpu" {
         return None;
@@ -222,6 +292,14 @@ fn plan_target(selected_backend: &str, selected_index: usize) -> Option<fllm_eng
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V" | "version")) {
+        println!("{}", fllm_engine::version::long_version());
+        return Ok(());
+    }
+    // hidden: writes a tiny random model for the HTTP API tests (scripts/api-tests, .github/workflows/api.yml)
+    if args.first().map(String::as_str) == Some("make-tiny-model") {
+        return fllm_engine::tiny_model::run(&args[1..]).map_err(Into::into);
+    }
     if fllm_engine::cli::dispatch(&args)? {
         return Ok(());
     }
@@ -233,6 +311,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("selftest-gpu") {
         return Ok(fllm_engine::backend::selftest::run(&args[1..])?);
+    }
+    if args.first().map(String::as_str) == Some("bench-kernel") {
+        return Ok(fllm_engine::bench_kernel::run(&args[1..])?);
     }
     let mut i = if args.first().map(String::as_str) == Some("serve") {
         1usize
@@ -247,16 +328,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hub_offline = false;
     let mut import_quant: Option<String> = None;
     let mut import_outtype: Option<String> = None;
+    let mut import_direct = false;
     let mut host = "127.0.0.1".to_owned();
     let mut port = 8000u16;
-    let mut context = 4096usize;
+    // None: --ctx auto
+    let mut context_request: Option<usize> = None;
     let mut max_sequences = 16usize;
+    let mut max_seqs_auto = false;
+    let mut scheduling_policy = fllm_engine::scheduler::SchedulingPolicy::Fcfs;
+    let mut sched_watermark: Option<usize> = None;
+    let mut max_partial_prefills = 0usize;
+    let mut long_prefill_threshold = 0usize;
+    let mut max_long_partial_prefills = 1usize;
+    let mut decode_first = false;
+    let mut preemption_swap = false;
+    let mut swap_space_gib = 0.0f64;
     let mut max_batched_tokens = 512usize;
     let mut batch_explicit = false;
     let mut threads = thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(1);
-    let mut api_key = env::var("FLLM_API_KEY").ok();
+    let mut http = fllm_engine::server::options::HttpOptions::default();
+    let mut generation_source = fllm_engine::server::gencfg::Source::Auto;
     let mut default_temperature: Option<f64> = None;
     let mut default_top_p: Option<f64> = None;
     let mut default_top_k: Option<usize> = None;
@@ -274,15 +367,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut speculative_window = 32usize;
     let mut draft_model = None;
     let mut draft_tokens = 5usize;
+    let mut speculative_method: Option<fllm_engine::speculative::SpeculativeMethod> = None;
+    let mut num_speculative_tokens: Option<usize> = None;
+    let mut speculative_suffix = false;
+    let mut speculative_min_match = 3usize;
+    let mut speculative_cache_tokens = 1usize << 20;
     let mut lora_paths = Vec::new();
     let mut sampling_options = serde_json::Map::new();
     let mut pin_cores = None;
     let mut embeddings = false;
     let mut pooling = None;
     let mut mmproj = None;
+    let mut parallel = fllm_engine::parallel::ParallelConfig::default();
+    let mut no_vision = false;
+    let mut media_limits = fllm_engine::vision::preprocess::MediaLimits::get();
 
     while i < args.len() {
         match args[i].as_str() {
+            flag if fllm_engine::parallel::ParallelConfig::is_flag(flag) => {
+                let flag = flag.to_owned();
+                let given = fllm_engine::parallel::ParallelConfig::takes_value(&flag).then(|| value(&args, &mut i, &flag));
+                parallel.apply_flag(&flag, given.as_deref()).unwrap_or_else(|e| usage(&e));
+            }
             "--min-p"
             | "--typical-p"
             | "--presence-penalty"
@@ -327,6 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--outtype" => import_outtype = Some(value(&args, &mut i, "--outtype")),
             "--revision" => hub_revision = Some(value(&args, &mut i, "--revision")),
             "--local-files-only" | "--offline" => hub_offline = true,
+            "--direct" | "--zero-copy" => import_direct = true,
             "--model" => model_path = Some(value(&args, &mut i, "--model")),
             "--engine" => {
                 let engine = value(&args, &mut i, "--engine");
@@ -336,6 +443,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--embeddings" => embeddings = true,
             "--mmproj" => mmproj = Some(value(&args, &mut i, "--mmproj")),
+            "--no-vision" => no_vision = true,
+            "--max-image-pixels" => {
+                media_limits.max_image_pixels = value(&args, &mut i, "--max-image-pixels")
+                    .parse()
+                    .ok()
+                    .filter(|&n| n >= 784)
+                    .unwrap_or_else(|| usage("--max-image-pixels needs a pixel count of at least 784"));
+            }
+            "--limit-mm-per-prompt" => {
+                media_limits.max_media_per_prompt = value(&args, &mut i, "--limit-mm-per-prompt")
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .unwrap_or_else(|| usage("--limit-mm-per-prompt needs a positive count"));
+            }
+            "--vision-concurrency" => {
+                media_limits.concurrency = value(&args, &mut i, "--vision-concurrency")
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=16).contains(n))
+                    .unwrap_or_else(|| usage("--vision-concurrency needs a count from 1 to 16"));
+            }
             "--compute" => {
                 // Kept for older command lines: Rust is the only compute path.
                 let compute = value(&args, &mut i, "--compute");
@@ -352,9 +481,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--ctx" | "--ctx-size" | "--max-model-len" => {
                 let flag = args[i].clone();
-                context = value(&args, &mut i, &flag)
+                let text = value(&args, &mut i, &flag);
+                context_request = if text.eq_ignore_ascii_case("auto") {
+                    None
+                } else {
+                    Some(text.parse().ok().filter(|n| *n > 0).unwrap_or_else(|| usage("invalid context length (a positive number, or auto)")))
+                }
+            }
+            "--preemption-mode" => match value(&args, &mut i, "--preemption-mode").as_str() {
+                "recompute" => preemption_swap = false,
+                "swap" => preemption_swap = true,
+                _ => usage("--preemption-mode expects recompute or swap"),
+            },
+            "--swap-space" => {
+                swap_space_gib = value(&args, &mut i, "--swap-space")
                     .parse()
-                    .unwrap_or_else(|_| usage("invalid context length"))
+                    .ok()
+                    .filter(|g: &f64| g.is_finite() && *g >= 0.0)
+                    .unwrap_or_else(|| usage("--swap-space expects a number of GiB"));
+            }
+            "--scheduling-policy" => {
+                scheduling_policy = fllm_engine::scheduler::SchedulingPolicy::parse(&value(&args, &mut i, "--scheduling-policy"))
+                    .unwrap_or_else(|| usage("--scheduling-policy expects fcfs or priority"));
+            }
+            "--kv-watermark-blocks" => {
+                sched_watermark = Some(
+                    value(&args, &mut i, "--kv-watermark-blocks")
+                        .parse()
+                        .unwrap_or_else(|_| usage("invalid --kv-watermark-blocks")),
+                );
+            }
+            "--max-num-partial-prefills" => {
+                max_partial_prefills = value(&args, &mut i, "--max-num-partial-prefills")
+                    .parse()
+                    .unwrap_or_else(|_| usage("invalid --max-num-partial-prefills"));
+            }
+            "--long-prefill-token-threshold" => {
+                long_prefill_threshold = value(&args, &mut i, "--long-prefill-token-threshold")
+                    .parse()
+                    .unwrap_or_else(|_| usage("invalid --long-prefill-token-threshold"));
+            }
+            "--max-long-partial-prefills" => {
+                max_long_partial_prefills = value(&args, &mut i, "--max-long-partial-prefills")
+                    .parse()
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .unwrap_or_else(|| usage("invalid --max-long-partial-prefills"));
+            }
+            "--chunked-prefill-policy" => match value(&args, &mut i, "--chunked-prefill-policy").as_str() {
+                "prefill-first" => decode_first = false,
+                "decode-first" => decode_first = true,
+                _ => usage("--chunked-prefill-policy expects prefill-first or decode-first"),
+            },
+            "--max-seqs" if args.get(i + 1).is_some_and(|v| v == "auto") => {
+                i += 1;
+                max_seqs_auto = true;
             }
             "--max-seqs" => {
                 max_sequences = value(&args, &mut i, "--max-seqs")
@@ -382,7 +563,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let flag = args[i].clone();
                 gpu_layers = value(&args, &mut i, &flag);
             }
-            "--api-key" => api_key = Some(value(&args, &mut i, "--api-key")),
+            "--generation-config" => {
+                generation_source = fllm_engine::server::gencfg::Source::parse(&value(&args, &mut i, "--generation-config"))
+            }
+            "--no-generation-config" => generation_source = fllm_engine::server::gencfg::Source::Vllm,
             "--no-repack" => fllm_engine::cpu_kernels::set_repack(false),
             "--tool-parser" => {
                 let name = value(&args, &mut i, "--tool-parser");
@@ -445,17 +629,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--speculative" => {
                 let source = value(&args, &mut i, "--speculative");
                 match source.as_str() {
-                    "mtp" => speculative_mtp = true,
                     "off" => {
                         speculative_mtp = false;
                         speculative_lookup = 0;
+                        speculative_method = Some(fllm_engine::speculative::SpeculativeMethod::Off);
                     }
                     _ => {
-                        speculative_lookup = source.parse().unwrap_or_else(|_| {
-                            usage("--speculative expects mtp, off or a lookup length")
-                        })
+                        if let Some(method) = fllm_engine::speculative::SpeculativeMethod::parse(&source) {
+                            if let Some(reason) = method.unsupported_reason() {
+                                usage(reason);
+                            }
+                            speculative_method = Some(method);
+                        } else {
+                            // a bare number is the lookup length of the older syntax
+                            speculative_lookup = source.parse().unwrap_or_else(|_| {
+                                usage("--speculative expects off, ngram, draft, mtp, suffix or a lookup length")
+                            });
+                        }
                     }
                 }
+            }
+            "--speculative-model" => {
+                draft_model = Some(value(&args, &mut i, "--speculative-model"));
+            }
+            "--num-speculative-tokens" => {
+                num_speculative_tokens = Some(
+                    value(&args, &mut i, "--num-speculative-tokens")
+                        .parse()
+                        .ok()
+                        .filter(|n| (1..=32).contains(n))
+                        .unwrap_or_else(|| usage("--num-speculative-tokens expects 1 to 32")),
+                );
+            }
+            "--speculative-tree" => {
+                let shape = value(&args, &mut i, "--speculative-tree");
+                if !matches!(shape.as_str(), "off" | "none" | "0") {
+                    usage("--speculative-tree: tree verification needs a tree-attention pass that this engine does not have yet; draft chains are verified (see docs/speculative-decoding.md)");
+                }
+            }
+            "--speculative-min-match" => {
+                speculative_min_match = value(&args, &mut i, "--speculative-min-match")
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=32).contains(n))
+                    .unwrap_or_else(|| usage("--speculative-min-match expects 1 to 32"));
+            }
+            "--speculative-cache-tokens" => {
+                speculative_cache_tokens = value(&args, &mut i, "--speculative-cache-tokens")
+                    .parse()
+                    .ok()
+                    .filter(|n| *n >= 1024)
+                    .unwrap_or_else(|| usage("--speculative-cache-tokens expects at least 1024"));
             }
             "--speculative-lookup" | "-sp" => {
                 let flag = args[i].clone();
@@ -474,11 +698,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pin_cores = Some(value(&args, &mut i, &flag));
             }
             "--help" | "-h" => usage(""),
-            other => usage(&format!("unknown option: {other}")),
+            other => match http.parse_flag(&args, &mut i) {
+                Ok(true) => {}
+                Ok(false) => usage(&format!("unknown option: {other}")),
+                Err(message) => usage(&message),
+            },
         }
         i += 1;
     }
+    http.apply_environment();
+    if let Some(list) = model_name.take() {
+        // --model-name NAME[,ALIAS...]: the first is the served name, the others are accepted in the `model` field
+        let mut names = list.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_owned);
+        model_name = names.next();
+        http.model_aliases.extend(names);
+    }
+    http.validate()?;
+    fllm_engine::server::logging::init(&http);
+    {
+        use fllm_engine::speculative::SpeculativeMethod as Method;
+        match speculative_method {
+            Some(Method::Ngram) => {
+                if speculative_lookup == 0 {
+                    speculative_lookup = num_speculative_tokens.unwrap_or(5);
+                }
+            }
+            Some(Method::Draft) => {
+                if draft_model.is_none() {
+                    usage("--speculative draft needs --speculative-model (or --draft-model)");
+                }
+            }
+            Some(Method::Mtp) => speculative_mtp = true,
+            Some(Method::Suffix) => speculative_suffix = true,
+            Some(Method::Off) | None => {}
+            Some(other) => usage(other.unsupported_reason().unwrap_or("unsupported speculation method")),
+        }
+        if let Some(n) = num_speculative_tokens {
+            draft_tokens = n;
+        }
+        if speculative_method == Some(Method::Off) {
+            draft_model = None;
+        }
+    }
     let model_path = model_path.unwrap_or_else(|| usage("--model is required"));
+    if let Err(e) = parallel.validate() {
+        usage(&e);
+    }
+    if parallel.is_parallel() {
+        fllm_engine::parallel::config::set_global(parallel);
+    }
     let mut path = fllm_engine::import::prepare(
         &model_path,
         &fllm_engine::import::ImportOptions {
@@ -486,6 +754,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             offline: hub_offline,
             quant: import_quant,
             outtype: import_outtype,
+            direct: import_direct,
         },
     )?;
     if path.is_dir() {
@@ -508,8 +777,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .find(|p| p.to_string_lossy().to_lowercase().contains("q4_k_m"))
             .or_else(|| ggufs.first())
         {
-            eprintln!(
-                "[fllm-rs] Resolved checkpoint directory '{}' to GGUF model '{}'",
+            tracing::info!(
+                "Resolved checkpoint directory '{}' to GGUF model '{}'",
                 path.display(),
                 chosen.display()
             );
@@ -530,6 +799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_owned();
 
     let mapping = MappedGguf::open(&path)?;
+    let facts = fllm_engine::server::ModelFacts::from_gguf(&path, &mapping);
     let is_encoder = mapping
         .index()
         .metadata
@@ -539,7 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // fail early on a malformed or impossible --device, before the model is read; `vulkan:1` counts the devices of that backend
     let device_chain = fllm_engine::devices::device_candidates(&device)?;
     if device == "cpu" {
-        eprintln!("[fllm-rs] Using explicit CPU runtime.");
+        tracing::info!("Using explicit CPU runtime.");
     }
 
     if is_encoder {
@@ -559,8 +829,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pooling,
         )?;
         encoder.set_device(&device)?;
-        eprintln!(
-            "[fllm-rs] Independent Rust BERT encoder: {} dimensions, {} token context, pooling={}",
+        if batch_explicit {
+            fllm_engine::encoder_server::set_max_batched_tokens(max_batched_tokens);
+        }
+        tracing::info!(
+            "Independent Rust BERT encoder: {} dimensions, {} token context, pooling={}",
             encoder.hidden, encoder.context, encoder.default_pooling
         );
         return fllm_engine::encoder_server::serve(
@@ -569,7 +842,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 host,
                 port,
                 model_name: model_name.unwrap_or(inferred_name),
-                api_key,
+                http,
+                facts,
                 default_temperature,
                 default_top_p,
                 default_top_k,
@@ -585,10 +859,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (selected_backend, selected_index) = device_chain[0].clone();
     if fllm_engine::devices::is_auto(&device) {
-        eprintln!("[fllm-rs] --device auto: {}", fllm_engine::devices::describe_chain(&device_chain));
+        tracing::info!("--device auto: {}", fllm_engine::devices::describe_chain(&device_chain));
     }
     let plan_device = plan_target(&selected_backend, selected_index);
     let tokenizer = TokenizerBundle::from_gguf(&mapping)?;
+    // sampling defaults of the model (--generation-config) sit below the command line: --temp, --top-p, --top-k, --min-p
+    // and --repeat-penalty win over them, a request field wins over everything
+    let (model_defaults, model_defaults_origin) = fllm_engine::server::gencfg::GenerationDefaults::resolve(
+        &generation_source,
+        &mapping.index().metadata,
+        &path,
+    )?;
+    if model_defaults.is_empty() {
+        tracing::info!("sampling defaults of the model: {model_defaults_origin}; requests without temperature use the OpenAI default (temperature 1.0)");
+    } else {
+        tracing::info!("sampling defaults of the model ({model_defaults_origin}): {}", model_defaults.describe());
+    }
+    default_temperature = default_temperature.or(model_defaults.temperature);
+    default_top_p = default_top_p.or(model_defaults.top_p);
+    default_top_k = default_top_k.or(model_defaults.top_k);
+    if let Some(v) = model_defaults.min_p {
+        sampling_options.entry("min_p".to_owned()).or_insert(serde_json::json!(v));
+    }
+    if let Some(v) = model_defaults.repetition_penalty {
+        if !sampling_options.contains_key("repeat_penalty") {
+            sampling_options.insert("repeat_penalty".to_owned(), serde_json::json!(v));
+        }
+    }
     let sampling_defaults = fllm_engine::parameters::parse_sampling(
         &serde_json::Value::Object(sampling_options),
         Default::default(),
@@ -602,10 +899,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref cores) = pin_cores {
         pin_threads_to_cores(cores);
     }
+    // --ctx auto: the model's trained context, capped where it cannot be planned. A GPU run starts from the trained
+    // context (at most 32768; the block tables grow with it) and the memory planner below lowers it to what fits; on the
+    // CPU nothing plans the KV cache, so the cap is 8192.
+    let on_gpu = plan_device.as_ref().is_some_and(|d| d.dev_type != DeviceType::Cpu);
+    let (mut context, context_origin) = match context_request {
+        Some(n) => (n, "--ctx".to_owned()),
+        None => {
+            let cap = if on_gpu { 32768 } else { 8192 };
+            let trained = facts.trained_context;
+            (if trained == 0 { cap.min(8192) } else { trained.min(cap) }, format!("auto: trained context {}, cap {cap}", if trained == 0 { "unknown".to_owned() } else { trained.to_string() }))
+        }
+    };
+    let requested_context = context;
+    if max_seqs_auto {
+        // GPU pools are cut to the device's memory below; the CPU keeps the default pool
+        max_sequences = if selected_backend == "cpu" { 16 } else { 256 };
+    }
     let mut model = GgufModel::load(path.to_str().unwrap(), context, max_sequences, threads)?;
+    if context_request.is_none() {
+        // --ctx auto lets a single sequence grow to the trained length; it does not enlarge the memory: the KV pool keeps the
+        // size of the former default (max-seqs x 4096 tokens), never below one full-length sequence
+        let former_default = (max_sequences * 4096).div_ceil(model.block_size());
+        if model.pool_blocks() > former_default {
+            model.set_pool_blocks(former_default);
+        }
+    }
     for (adapter, scale) in lora_paths {
         let count = model.apply_lora(&adapter, scale)?;
-        eprintln!("[fllm-rs] Merged LoRA {adapter} at scale {scale}: {count} F32 projections");
+        tracing::info!("Merged LoRA {adapter} at scale {scale}: {count} F32 projections");
     }
     let parse_format = |flag: &str, name: &Option<String>| -> Result<KvFormat, String> {
         match name {
@@ -632,27 +954,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (kh, hd, vd) = (model.config().kv_heads, model.config().head_dim, model.config().value_dim);
         let ratio = (key_format.bytes_per_slot(kh, hd) + value_format.bytes_per_slot(kh, vd)) as f64
             / (KvFormat::F16.bytes_per_slot(kh, hd) + KvFormat::F16.bytes_per_slot(kh, vd)) as f64;
-        eprintln!("[fllm-rs] Activated {kv_description} KV cache ({:.0}% of the FP16 KV memory)", ratio * 100.0);
+        tracing::info!("Activated {kv_description} KV cache ({:.0}% of the FP16 KV memory)", ratio * 100.0);
         for format in [key_format, value_format] {
             if let Some(note) = format.experimental_note() {
-                eprintln!("[fllm-rs] WARNING: {} KV cache is experimental: {note}", format.name());
+                tracing::warn!("{} KV cache is experimental: {note}", format.name());
             }
         }
         if let Some(note) = key_format.key_accuracy_note() {
-            eprintln!("[fllm-rs] WARNING: {} keys: {note}", key_format.name());
+            tracing::warn!("{} keys: {note}", key_format.name());
         }
     } else if key_format == KvFormat::F16 {
-        eprintln!("[fllm-rs] Using standard FP16 KV cache");
+        tracing::info!("Using standard FP16 KV cache");
     } else {
-        eprintln!("[fllm-rs] Activated quantized Q8_0 KV cache (47% memory reduction)");
+        tracing::info!("Activated quantized Q8_0 KV cache (47% memory reduction)");
     }
     model.set_kv_formats(key_format, value_format);
+    // FLLM_MLA=latent: cache the compressed latents of multi-head latent attention instead of the rebuilt per-head keys and values (CUDA only)
+    if model.config().mla.is_some() && fllm_engine::mla_latent::mode_from_env() == fllm_engine::mla_latent::MlaMode::Latent {
+        match latent_mla_unavailable(&model, &selected_backend, selected_index, key_format, value_format) {
+            None => {
+                model.enable_mla_latent()?;
+                eprintln!("[fllm-rs] Activated the latent MLA cache (FLLM_MLA=latent): {} values per token and layer, pages of {} tokens", model.config().head_dim, model.block_size());
+            }
+            Some(why) => eprintln!("[fllm-rs] warning: FLLM_MLA=latent is not used ({why}); keeping the expanded MLA cache"),
+        }
+    }
     if speculative_lookup > 0 {
-        eprintln!(
-            "[fllm-rs] Activated speculative lookahead (k={}, window={})",
+        tracing::info!(
+            "Activated speculative lookahead (k={}, window={}; stochastic and grammar-constrained requests speculate too)",
             speculative_lookup, speculative_window
         );
     }
+    // A draft model lives on the same device as the target and has its own weights and KV pool: take its memory out of the budget
+    // the target's plan may use.
+    let draft_path = match &draft_model {
+        Some(spec) => Some(resolve_gguf(spec, hub_offline)?),
+        None => None,
+    };
+    let draft_reserve: u64 = if device == "cpu" {
+        0
+    } else {
+        draft_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map_or(0, |m| m.len() + m.len() / 16 + (256 << 20))
+    };
     if device != "cpu" {
         // Size the KV pool to the device: every sequence gets its full context only if it fits
         let target_dev = plan_device.as_ref();
@@ -661,7 +1007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let plan_for = |m: &GgufModel, tokens: usize| {
                     fllm_engine::backend::memory::MemoryPlan::plan(
                         m,
-                        d.free_memory_bytes,
+                        d.free_memory_bytes.saturating_sub(draft_reserve),
                         d.total_memory_bytes,
                         gpu_memory_utilization,
                         Some(&gpu_layers),
@@ -675,8 +1021,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // keep every layer on the device (decode speed) when that still leaves a usable window
                         let blocks = if p.all_on_device_kv_blocks >= 256 { p.all_on_device_kv_blocks } else { p.kv_block_count };
                         let fit = blocks * model.block_size();
-                        eprintln!(
-                            "[fllm-rs] warning: a context of {} tokens needs more KV cache than the device has left; using {} tokens (--ctx; --kv-cache-type q8_0 or fp8_e4m3 roughly doubles it)",
+                        tracing::warn!(
+                            "a context of {} tokens needs more KV cache than the device has left; using {} tokens (--ctx; --kv-cache-type q8_0 or fp8_e4m3 roughly doubles it)",
                             model.max_context(),
                             fit
                         );
@@ -705,8 +1051,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         first
                     };
                     if plan.kv_block_count < model.pool_blocks() {
-                        eprintln!(
-                            "[fllm-rs] KV pool limited to {} of {} blocks to fit the device ({} tokens)",
+                        tracing::info!(
+                            "KV pool limited to {} of {} blocks to fit the device ({} tokens)",
                             plan.kv_block_count,
                             model.pool_blocks(),
                             plan.kv_block_count * model.block_size()
@@ -714,8 +1060,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model.set_pool_blocks(plan.kv_block_count);
                     }
                     if plan.offload_layers < plan.total_layers {
-                        eprintln!(
-                            "[fllm-rs] {} of {} layers fit on the device completely; the feed-forward weights of the other {} stay in host memory",
+                        tracing::info!(
+                            "{} of {} layers fit on the device completely; the feed-forward weights of the other {} stay in host memory",
                             plan.offload_layers,
                             plan.total_layers,
                             plan.total_layers - plan.offload_layers
@@ -726,6 +1072,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    if max_seqs_auto {
+        // as many sequences as the KV pool can hold at a typical 512 tokens each, at most 256
+        let pool_tokens = model.pool_blocks() * model.block_size();
+        max_sequences = (pool_tokens / 512).clamp(1, model.max_sequences().min(256));
+        eprintln!("[fllm-rs] --max-seqs auto: {max_sequences} sequences ({pool_tokens} KV tokens in the pool)");
+    }
+    let runtime_pool_blocks = model.pool_blocks();
     let mut runtime = InferenceRuntime::with_speculative(
         model,
         max_sequences,
@@ -734,6 +1087,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         speculative_lookup,
         speculative_window,
     )?;
+    {
+        let cfg = runtime.scheduler_config_mut();
+        cfg.policy = scheduling_policy;
+        cfg.max_partial_prefills = max_partial_prefills;
+        cfg.long_prefill_threshold = long_prefill_threshold;
+        cfg.max_long_partial_prefills = max_long_partial_prefills;
+        cfg.decode_first = decode_first;
+        // keep about 1 % of the pool free for the running sequences to grow into (vLLM's default watermark)
+        cfg.watermark_blocks = sched_watermark.unwrap_or_else(|| (runtime_pool_blocks / 100).min(64));
+        if preemption_swap {
+            cfg.preemption = "swap".into();
+        }
+        eprintln!(
+            "[fllm-rs] Scheduler: policy {:?}, prefill {}, partial prefills {}, watermark {} blocks",
+            cfg.policy,
+            if cfg.decode_first { "decode-first" } else { "prefill-first" },
+            if cfg.max_partial_prefills == 0 { "unlimited".to_owned() } else { cfg.max_partial_prefills.to_string() },
+            cfg.watermark_blocks
+        );
+    }
     if speculative_mtp {
         if draft_model.is_some() || speculative_lookup > 0 {
             return Err(
@@ -742,12 +1115,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         runtime.enable_mtp()?;
-        eprintln!("[fllm-rs] MTP enabled: first NextN block, one target-verified candidate; prefix reuse disabled");
+        tracing::info!("MTP enabled: first NextN block, one target-verified candidate; prefix reuse disabled");
     }
-    if let Some(path) = draft_model {
-        let draft = GgufModel::load(&path, context, max_sequences, threads)?;
+    if let Some(path) = draft_path {
+        let draft = GgufModel::load(path.to_str().ok_or("invalid draft model path")?, context, max_sequences, threads)?;
         runtime.enable_draft(draft, draft_tokens)?;
-        eprintln!("[fllm-rs] Draft-model verification enabled ({draft_tokens} candidate tokens)");
+        eprintln!(
+            "[fllm-rs] Draft-model speculation enabled: {} ({draft_tokens} candidate tokens per step, adaptive length unless FLLM_SPEC_ADAPTIVE=0, same device as the target)",
+            path.display()
+        );
+    }
+    if speculative_suffix {
+        let tokens = num_speculative_tokens.unwrap_or(6);
+        runtime.enable_suffix(
+            tokens,
+            fllm_engine::speculative::SuffixConfig { min_match: speculative_min_match, token_budget: speculative_cache_tokens },
+        )?;
+        eprintln!("[fllm-rs] Suffix speculation enabled: up to {tokens} tokens, matches of at least {speculative_min_match} tokens across the conversation and recent generations (cache {speculative_cache_tokens} tokens)");
     }
     if device != "cpu" {
         let target_dev = plan_device.as_ref();
@@ -764,16 +1148,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if selected_backend == "cuda" {
                     fllm_engine::backend::cuda::set_marlin_q4k_enabled(plan.marlin_q4k_dual);
                 }
-                eprintln!(
-                    "[fllm-rs] Memory plan: target device [{}] {} (budget: {:.2} GB / {:.2} GB total, util: {:.0}%)",
+                tracing::info!(
+                    "Memory plan: target device [{}] {} (budget: {:.2} GB / {:.2} GB total, util: {:.0}%)",
                     d.index,
                     d.name,
                     plan.budget_bytes as f64 / 1e9,
                     plan.total_vram_bytes as f64 / 1e9,
                     plan.utilization * 100.0
                 );
-                eprintln!(
-                    "[fllm-rs] Memory split: {}/{} layers offloaded | Model weights: {:.2} GB{} | KV Cache: {:.2} GB ({} blocks) | Scratchpad: {:.2} MB",
+                tracing::info!(
+                    "Memory split: {}/{} layers offloaded | Model weights: {:.2} GB{} | KV Cache: {:.2} GB ({} blocks) | Scratchpad: {:.2} MB",
                     plan.offload_layers,
                     plan.total_layers,
                     plan.estimated_model_bytes as f64 / 1e9,
@@ -786,14 +1170,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     runtime.attach_compute(&device)?;
+    if preemption_swap {
+        let c = runtime.model.config();
+        let (key_fmt, value_fmt) = runtime.model.kv_formats();
+        let block_bytes = c.layers * runtime.model.block_size() * (key_fmt.bytes_per_slot(c.kv_heads, c.head_dim) + value_fmt.bytes_per_slot(c.kv_heads, c.value_dim)) as usize;
+        let blocks = ((swap_space_gib * (1u64 << 30) as f64) / block_bytes.max(1) as f64) as usize;
+        if !runtime.kv_block_ops_available() {
+            eprintln!("[fllm-rs] --preemption-mode swap: this backend cannot copy KV blocks (the device self check failed or the operation is missing); preempted sequences are recomputed");
+            runtime.scheduler_config_mut().preemption = "recompute".into();
+        } else if blocks == 0 {
+            eprintln!("[fllm-rs] --preemption-mode swap needs --swap-space GiB; preempted sequences are recomputed");
+            runtime.scheduler_config_mut().preemption = "recompute".into();
+        } else {
+            runtime.scheduler_config_mut().swap_blocks = blocks;
+            eprintln!("[fllm-rs] Preemption by swap: {blocks} blocks ({swap_space_gib} GiB) of host memory for preempted sequences");
+        }
+    }
     #[cfg(feature = "cuda")]
     if selected_backend == "cuda" {
         let ms = fllm_engine::backend::cuda::total_repack_ms();
         if ms > 0.0 {
-            eprintln!("[fllm-rs] Q4_K Marlin CPU repacking total time: {:.1} ms ({:.3} s)", ms, ms / 1000.0);
+            tracing::info!("Q4_K Marlin CPU repacking total time: {:.1} ms ({:.3} s)", ms, ms / 1000.0);
         }
     }
-    eprintln!("[fllm-rs] Rust decoder forward pass enabled (packed quantized weights, paged {kv_description} KV)");
+    tracing::info!("Rust decoder forward pass enabled (packed quantized weights, paged {kv_description} KV)");
+    fllm_engine::vision::preprocess::MediaLimits::set(media_limits);
+    if mmproj.is_none() && !no_vision {
+        // a GGUF written by `fllm-rs convert` carries the vision tower of a multimodal checkpoint
+        // the tower runs on the CPU unless a wgpu build can take its projections (CUDA builds keep it on the host)
+        let tower = match fllm_engine::vision::load_from_model(runtime.model.mapping(), threads.max(1) as usize, &device) {
+            Err(error) if !matches!(device.as_str(), "cpu" | "auto") => {
+                eprintln!("[fllm-rs] vision tower on {device} unavailable ({error}); running it on the CPU");
+                fllm_engine::vision::load_from_model(runtime.model.mapping(), threads.max(1) as usize, "cpu")?
+            }
+            other => other?,
+        };
+        if let Some(vision) = tower {
+            if vision.output_hidden() != runtime.model.hidden_size() {
+                return Err("the vision tower in the model file does not match its language model".into());
+            }
+            eprintln!("[fllm-rs] Own Rust {} vision encoder enabled (tower from the model file; --no-vision turns it off)", vision.family());
+            runtime.vision = Some(vision);
+        }
+    }
     if let Some(projector) = mmproj {
         let vision =
             fllm_engine::vision::VisionEncoder::load(&projector, threads.max(1) as usize, &device)?;
@@ -802,15 +1221,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             return Err("projector does not match this multimodal decoder/template".into());
         }
-        eprintln!(
-            "[fllm-rs] Own Rust SigLIP/Idefics3 vision encoder enabled: {} image tokens",
+        tracing::info!(
+            "Own Rust SigLIP/Idefics3 vision encoder enabled: {} image tokens",
             vision.tokens
         );
         runtime.vision = Some(std::sync::Arc::new(vision));
     }
-    eprintln!(
-        "model={} context={} max_sequences={} max_batched_tokens={} threads={}",
-        inferred_name, context, max_sequences, max_batched_tokens, threads
+    let context_note = if context != requested_context { format!("{context_origin}; lowered from {requested_context} to fit the device memory") } else { context_origin };
+    tracing::info!(
+        "model={} context={} ({}) max_sequences={} max_batched_tokens={} threads={}",
+        inferred_name, context, context_note, max_sequences, max_batched_tokens, threads
     );
     let status_model = model_name.clone().unwrap_or_else(|| inferred_name.clone());
     let status_dir = fllm_engine::hub::status_dir();
@@ -834,7 +1254,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             host,
             port,
             model_name: model_name.unwrap_or(inferred_name),
-            api_key,
+            http,
+            facts,
             default_temperature,
             default_top_p,
             default_top_k,

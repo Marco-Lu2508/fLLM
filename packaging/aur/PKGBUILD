@@ -1,0 +1,51 @@
+# Maintainer: Marco-Lu2508 <Marco-Lu2508@users.noreply.github.com>
+pkgname=fllm
+pkgver=0.1.2
+pkgrel=1
+pkgdesc="Standalone Rust LLM and encoder inference server and CLI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Marco-Lu2508/fLLM"
+license=('Apache-2.0')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'shaderc')
+optdepends=(
+  'vulkan-icd-loader: Vulkan GPU backend'
+  'cuda: NVIDIA CUDA GPU backend'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "fLLM-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "fLLM-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  local features="rust-gpu,vulkan"
+  if [[ "$CARCH" == "x86_64" ]]; then
+    features="$features,avx512"
+  elif [[ "$CARCH" == "aarch64" ]]; then
+    features="$features,arm-simd"
+  fi
+  cargo build --release --frozen -p fllm-engine --features "$features" --bin fllm-rs
+}
+
+check() {
+  cd "fLLM-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --release --frozen -p fllm-checkpoint -p fllm-gguf-probe
+}
+
+package() {
+  cd "fLLM-$pkgver"
+  install -Dm755 "target/release/fllm-rs" "$pkgdir/usr/bin/fllm-rs"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+  install -Dm644 THIRD_PARTY.md "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY.md"
+  install -dm755 "$pkgdir/usr/share/licenses/$pkgname/licenses"
+  install -Dm644 licenses/* "$pkgdir/usr/share/licenses/$pkgname/licenses/"
+}

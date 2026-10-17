@@ -1,4 +1,4 @@
-// FLLM-KERNEL: fllm_act_swiglu, fllm_act_geglu, fllm_act_swiglu_oai, fllm_act_silu, fllm_act_gelu, fllm_act_relu2, fllm_act_relu | buffers: gate, up, out | params: o_act_params | grid: [ceil(width / threads), n_rows, 1] x [threads, 1, 1]
+// FLLM-KERNEL: fllm_act_swiglu, fllm_act_geglu, fllm_act_swiglu_oai, fllm_act_silu, fllm_act_gelu, fllm_act_relu2, fllm_act_relu, fllm_act_gelu_erf, fllm_act_geglu_erf, fllm_act_reglu, fllm_act_relu2glu | buffers: gate, up, out | params: o_act_params | grid: [ceil(width / threads), n_rows, 1] x [threads, 1, 1]
 // Gated and plain activations, selected by the template parameter MODE (one kernel name per mode):
 //   0 SWIGLU      out = silu(g) * u                                      (Stream::swiglu)
 //   1 GEGLU       out = gelu_tanh(g) * u                                 (Stream::geglu; CPU: 0.5 g (1 + tanh(..)) u)
@@ -7,6 +7,10 @@
 //   4 GELU        out = gelu_tanh(g)          (u is not read)
 //   5 RELU2       out = max(g, 0)^2           (u is not read)
 //   6 RELU        out = max(g, 0)             (u is not read)
+//   7 GELU_ERF    out = gelu_erf(g)           (u is not read)          Stream::activation mode 2
+//   8 GEGLU_ERF   out = gelu_erf(g) * u                                Stream::activation_glu mode 2
+//   9 REGLU       out = max(g, 0) * u                                  Stream::activation_glu mode 3
+//  10 RELU2GLU    out = max(g, 0)^2 * u                                Stream::activation_glu mode 4
 // Element (r, c) with r = grid y, c = grid x: gate[gate_off + r * gate_stride + c], up[up_off + r * up_stride + c], out[r * out_stride + c],
 // r < n_rows, c < width. Gate and up may be two ranges of the same buffer (fused gate/up projection); `out` may alias `gate`.
 #include <metal_stdlib>
@@ -39,8 +43,17 @@ template <int MODE>
     } else if (MODE == 5) {
         const float rl = max(g, 0.0f);
         result = rl * rl;
-    } else {
+    } else if (MODE == 6) {
         result = max(g, 0.0f);
+    } else if (MODE == 7) {
+        result = o_gelu_erf(g);
+    } else if (MODE == 8) {
+        result = o_gelu_erf(g) * up[p.up_off + r * p.up_stride + c];
+    } else if (MODE == 9) {
+        result = max(g, 0.0f) * up[p.up_off + r * p.up_stride + c];
+    } else {
+        const float rl = max(g, 0.0f);
+        result = rl * rl * up[p.up_off + r * p.up_stride + c];
     }
     out[r * p.out_stride + c] = result;
 }
@@ -52,3 +65,7 @@ template [[host_name("fllm_act_silu")]] [[kernel]] decltype(o_act_glu<3>) o_act_
 template [[host_name("fllm_act_gelu")]] [[kernel]] decltype(o_act_glu<4>) o_act_glu<4>;
 template [[host_name("fllm_act_relu2")]] [[kernel]] decltype(o_act_glu<5>) o_act_glu<5>;
 template [[host_name("fllm_act_relu")]] [[kernel]] decltype(o_act_glu<6>) o_act_glu<6>;
+template [[host_name("fllm_act_gelu_erf")]] [[kernel]] decltype(o_act_glu<7>) o_act_glu<7>;
+template [[host_name("fllm_act_geglu_erf")]] [[kernel]] decltype(o_act_glu<8>) o_act_glu<8>;
+template [[host_name("fllm_act_reglu")]] [[kernel]] decltype(o_act_glu<9>) o_act_glu<9>;
+template [[host_name("fllm_act_relu2glu")]] [[kernel]] decltype(o_act_glu<10>) o_act_glu<10>;

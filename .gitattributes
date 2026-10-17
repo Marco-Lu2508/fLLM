@@ -1,8 +1,2 @@
 benchmarks/20260929/q4-gemv-unroll.patch whitespace=-blank-at-eol
 *.rs linguist-language=Rust
-bench/ export-ignore
-scripts/* export-ignore
-scripts/build-windows.ps1 -export-ignore
-scripts/cmpdump.py -export-ignore
-scripts/colab/ -export-ignore
-docs/receipts/ export-ignore

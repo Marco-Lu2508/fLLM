@@ -6,10 +6,15 @@ the GPU and benchmark workflows are manual and need a self-hosted runner (see th
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci` | push to `main`, pull requests, manual | `cargo clippy --locked --workspace --all-targets -- -D warnings` and `cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe` on `ubuntu-24.04`, CPU build, no CUDA |
-| `platforms` | push to `main`, pull requests, manual | build, unit tests, clippy, `devices --json`, `selftest-cpu` and `selftest-gpu --device cpu` on **Windows 2022 (MSVC)**, **macOS 14 (Apple silicon)**, **Linux aarch64** and **Linux x86_64**. No GPU: compile and CPU level (L0 / L1-CPU of [gpu-backends.md](gpu-backends.md)). Manual only: `windows-cuda` (nvcc with the MSVC host compiler, compile and link) and `windows-package` (`scripts/build-windows.ps1` end to end) |
+| `platforms` | push to `main`, pull requests, manual | build, unit tests, clippy, `devices --json`, `selftest-cpu` and `selftest-gpu --device cpu` on **Windows 2022 (MSVC)**, **macOS 14 (Apple silicon)**, **Linux aarch64** and **Linux x86_64**. The Linux and Windows runners have no GPU (compile and CPU level, L0 / L1-CPU of [test-levels.md](test-levels.md)); the Apple-silicon runner also runs the unit tests of the native Metal backend (`--features rust-gpu,metal`), whose GPU kernel checks give the Metal backend its L1 statement. Manual only: `windows-cuda` (nvcc with the MSVC host compiler, compile and link) and `windows-package` (`scripts/build-windows.ps1` end to end) |
 | `release` | tag `v*`, manual with a tag | builds the release binaries on hosted runners and attaches them to the GitHub release of the tag |
 | `docker-image` | tag `v*`, manual | CPU image for `linux/amd64` and `linux/arm64` to `ghcr.io/<owner>/fllm` |
-| `docker-image-cuda` | tag `v*`, manual | CUDA image (`linux/amd64`) to `ghcr.io/<owner>/fllm:cuda` |
+| `docker-image-cuda` | tag `v*`, manual | CUDA image (`linux/amd64` and `linux/arm64`) to `ghcr.io/<owner>/fllm:cuda` |
+| `docs` | push to `main`, pull requests, manual | `python3 scripts/check_docs.py` (links, anchors, paths, language, wording, YAML syntax) |
+| `msrv` | push to `main`, pull requests, manual | checks the workspace with the minimum supported Rust version (`Cargo.toml` `rust-version`) |
+| `supply-chain` | push to `main`, pull requests, weekly, manual | `cargo deny`, `cargo audit`, CycloneDX SBOM (`cargo-cyclonedx`), Cosign signing, provenance attestation, and Trivy vulnerability scan |
+| `coverage` | push to `main`, weekly, manual | `cargo llvm-cov` workspace coverage report and a weekly Rust nightly compiler check |
+| `codeql` | push to `main`, pull requests, weekly, manual | CodeQL static analysis for Rust and GitHub Actions |
 | `kernels` | manual | compile-only builds of the CUDA and ROCm/HIP kernels in the vendor containers |
 | `conformance` | manual, **self-hosted runner** | `fllm-rs devices --json` and `fllm-rs selftest-gpu --json` on a runner with a real GPU |
 | `streaming-benchmark` | manual, **self-hosted runner** | starts the CPU server with a GGUF model on the runner and runs `fllm-rs bench` against it |
@@ -90,10 +95,10 @@ evicted.
 | --- | --- |
 | `windows-2022` | `rust-gpu,vulkan` (Vulkan SDK installed for `glslc`) |
 | `macos-14` | `rust-gpu,metal` |
-| `ubuntu-24.04-arm` | `rust-gpu,vulkan,arm-simd` (`glslc` from apt) |
+| `ubuntu-24.04-arm` | `rust-gpu,vulkan,arm-simd` (`glslc` from apt); the CPU self tests (`selftest-cpu`) run on the ARM hardware, so the NEON kernels are exercised, the opt-in SVE kernel is not |
 | `ubuntu-24.04` | `rust-gpu,vulkan,avx512` (`glslc` from apt) |
 
-Nothing here has a GPU; `devices --json` and the self-test JSON are kept as artifacts of the run.
+Only the macOS row has a usable GPU (Apple silicon); `devices --json` and the self-test JSON are kept as artifacts of the run.
 
 `kernels.yml` (manual) compiles the CUDA kernels (Ampere, Hopper, Blackwell, plus clippy with the `cuda` feature) in the
 `nvidia/cuda` development container and the HIP kernels in the `rocm/dev-ubuntu` container. The containers are large; if a hosted
@@ -130,8 +135,8 @@ repository setting **Actions -> General -> Fork pull request workflows** should 
 
 ## Security notes
 
-- Every third-party action is pinned to a full commit SHA with the version in a comment; Dependabot (`.github/dependabot.yml`)
-  proposes updates for the actions, the Cargo dependencies and the base images.
+- Every third-party action is pinned to a full commit SHA with the version in a comment; Dependabot (`.github/dependabot.yml`,
+  `open-pull-requests-limit: 5`) proposes weekly updates for the Cargo dependencies and the GitHub Actions.
 - The default `GITHUB_TOKEN` permission of every workflow is `contents: read`. Jobs that publish get more, and only they:
   `contents: write` in `release` (create the release, upload assets), `packages: write` in the Docker workflows.
 - Checkouts use `persist-credentials: false`. Values that come from outside (the tag name, workflow inputs) are passed to scripts
@@ -155,6 +160,7 @@ repository setting **Actions -> General -> Fork pull request workflows** should 
 
 ## Verification status
 
-The workflow files pass `actionlint` and `yamllint`; the install scripts were run against a local fake release server. No workflow has
-run on GitHub yet: the macOS, Windows and ARM builds, the third-party actions (`jakoch/install-vulkan-sdk-action`,
-`Jimver/cuda-toolkit`), the registry push and the release upload are untested until the first tag.
+The workflow files pass `actionlint` and `yamllint`. The workflows `ci`, `platforms`, `release`, `docker-image`, `docker-image-cuda`,
+`docs`, `msrv`, `supply-chain`, `coverage`, `codeql`, `kernels`, `conformance` and `streaming-benchmark` exist. `ci`, `platforms`, `release` and the two Docker workflows run on GitHub-hosted runners (the v0.1.0 release was produced by them);
+`kernels` is a manual compile check; `conformance` and `streaming-benchmark` need a self-hosted runner with a GPU (or a model) and are run on demand. The optional
+`windows-cuda` and `windows-package` jobs of `platforms` are manual. Dependabot is configured in `.github/dependabot.yml` with `open-pull-requests-limit: 5`.

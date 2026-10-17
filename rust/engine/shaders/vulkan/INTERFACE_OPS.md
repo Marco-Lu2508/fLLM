@@ -1,17 +1,17 @@
-# Non-matmul Vulkan shaders (package 3) — interface contract
+# Non-matmul Vulkan shaders — interface contract
 
 Verification level: **L0**. Every shader compiles with `glslc --target-env=vulkan1.2 -O` and passes `spirv-val --target-env vulkan1.2`
-(84 modules, all variants of `variants_ops.list`; the output of that run is in the package report). The Rust side
+(84 modules, all variants of `variants_ops.list`). The Rust side
 (`src/backend/vulkan/ops.rs`, `ops/`) is unit-tested on the CPU, and the trickiest shaders (KV write, attention decode / merge / prompt tiles, MoE
 routing, DeltaNet, Mamba) were transcribed to Rust lane by lane and compared with the CPU backend (`ops/mirror.rs`; these transcriptions check the
 algorithm and the index arithmetic, not the GLSL text). **No shader has ever run on a GPU.**
 
 Everything here is dispatched through *plans*: `ops::plan_*` turns the arguments of one `Stream` operation into `OpPlan`s (shader name, push
-constants, workgroup counts, bindings by name). The stream (package 4) resolves the names to buffers, uploads the host arrays, binds, pushes,
+constants, workgroup counts, bindings by name). The stream resolves the names to buffers, uploads the host arrays, binds, pushes,
 dispatches and puts a barrier between two dependent plans. The reference below was extracted from the shader sources (their headers, comments, `layout(...)` lines and push blocks); the unit tests compare every plan with
 the header and the push block of its shader, so the plans cannot drift from the sources (the prose of this file can).
 
-## Conventions (the same as package 2)
+## Conventions (the same as the quantized-linear shaders)
 
 - GLSL 450, entry `main`, descriptor set 0, storage buffers `std430` numbered `0..n` in the order of the tables below, one `push_constant` block of
   32-bit scalars only (`uint`, `int`, `float`; offsets are 4 bytes apart; at most 128 bytes). Activations and outputs are f32 arrays, one row per token.
@@ -57,23 +57,23 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | *(no Stream method yet)* Mamba-1 mixer | `plan_mamba_conv`, `plan_mamba1_bc_norms`, `plan_mamba1_scan` | `mamba_conv`, `norm_rms`, `mamba_scan1_{ns8,ns16,ns32,gen}` |
 | `zero_buffer`, `copy_buffer` | *(not a shader)* | `vkCmdFillBuffer` / `vkCmdCopyBuffer` (`Recorder::fill`, `copy_buffer`) |
 
-Not covered by a shader: `quantized_linear` and the other matrix products (package 2), `sampling_logits` (the CPU backend path is used; `argmax_rows` covers
+Not covered by a shader: `quantized_linear` and the other matrix products (`INTERFACE_QUANT.md`), `sampling_logits` (the CPU backend path is used; `argmax_rows` covers
 greedy decoding), `rope_kv_write_f16` and the other fused FP16 paths (they return "not done" and the caller takes the unfused path).
 
 ## Weight layouts that `embed_*` and `moe_linear_*` expect
 
 The embedding table and the expert weights are `DeviceWeight`s that the stream also uses for `quantized_linear` (tied embeddings share the LM-head
-weight), so they are in the **planar device layout of package 2** (`INTERFACE_QUANT.md`, `weights/layout.rs`): the planes of a weight, each at a word
-offset, plane 0 at word 0. The decoders in `_ops_wq.glsl` repeat that layout (they are not shared with package 2's files, so that this package builds
+weight), so they are in the **planar device layout of the quantized-linear shaders** (`INTERFACE_QUANT.md`, `weights/layout.rs`): the planes of a weight, each at a word
+offset, plane 0 at word 0. The decoders in `_ops_wq.glsl` repeat that layout (they are not shared with the quantized-linear shader files, so that the op shaders build
 alone); the plane word offsets (`DeviceLayout::plane_word_offset[1..4]`) are passed in the push constants (`off1..off3`; `EmbeddingTable::planes`,
-`MoeLinear::planes`). F32 / F16 / BF16 tables are stored row-major as in the file (`embed_f32/f16/bf16`; package 2 has no shader for those weights, so
-package 4 decides how they are uploaded — if it packs them differently, tell package 3). Formats without an `embed_*` shader (IQ1/IQ2/IQ3, IQ4_XS, Q8_K,
+`MoeLinear::planes`). F32 / F16 / BF16 tables are stored row-major as in the file (`embed_f32/f16/bf16`; the quantized-linear shaders have none for those weights, so
+the weight uploader decides how they are uploaded; if it packs them differently, the embed shaders must follow). Formats without an `embed_*` shader (IQ1/IQ2/IQ3, IQ4_XS, Q8_K,
 NVFP4, Q4Z, FP8) return `UnsupportedQuant`: the stream dequantizes the rows on the host like the CPU backend does and uploads them.
 
 ## `moe_linear`: how the experts are reached
 
-The Stream contract passes `table` = "the device addresses of the experts' weights" (`upload_pointer_table`). Package 1's core does not offer buffer device
-addresses, so there are two variants and package 4 chooses (`ExpertAccess`):
+The Stream contract passes `table` = "the device addresses of the experts' weights" (`upload_pointer_table`). The Vulkan core does not offer buffer device
+addresses, so there are two variants and the stream chooses (`ExpertAccess`):
 
 - `Arena` (`moe_linear_<fmt>_arena`): the experts of a projection are laid out back to back in **one storage buffer** (each in its planar layout, starting
   at a word offset that is a multiple of 4); `table` is `uint32[n_experts]` of word offsets, biases (optional) are `float`s in a second buffer
@@ -132,9 +132,9 @@ correctly rounded).
   of a group per key row would cut the traffic by the group size.
 - `moe_linear` decodes 8-weight chunks with the generic planar decoders and does no tensor-core / cooperative-matrix or integer-dot work; it is a matrix-vector
   kernel (one workgroup per output row and slot), not a grouped GEMM: prompt processing of MoE layers should group tokens per expert (`gather_rows` + the
-  quantized linear of package 2 + `scatter_add_rows`) as the CPU decoder does.
+  quantized linear shaders + `scatter_add_rows`) as the CPU decoder does.
 - The DeltaNet recurrence keeps one value column per lane pair with HK/2 registers each (`HK` 64 / 128: 32 / 64 registers); a long run of one head is serial by nature.
-- Mamba has no `Stream` method: see the report for the proposed trait method; until then the plans are only exercised by the unit tests.
+- Mamba has no `Stream` method: a trait method is not yet defined; until then the plans are only exercised by the unit tests.
 
 ---
 

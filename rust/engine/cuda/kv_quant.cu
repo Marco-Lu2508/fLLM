@@ -14,6 +14,7 @@
 #include "common.cuh"
 #include "fllm_cuda.h"
 #include "fllm_cuda_internal.h"
+#include <cstring>
 #include <map>
 #include <mutex>
 
@@ -90,7 +91,20 @@ __device__ __forceinline__ float kvq_at(const uint16_t *w, const FllmKvDesc &d, 
 
 // Prefetch the code word and the scale word of value `e` of the head `r` into L1 (the decode loops below are otherwise
 // latency bound: one dependent global load per iteration and few resident warps).
+__device__ __forceinline__ unsigned kvq_ballot32(unsigned full, int pred) {
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
+    return kvq_ballot32(full, pred);
+#else
+    (void)full;
+    unsigned bits = pred ? (1u << (threadIdx.x & 31)) : 0u;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) bits |= __shfl_xor(bits, o, 32);
+    return bits;
+#endif
+}
+
 __device__ __forceinline__ void kvq_prefetch(const uint16_t *w, const FllmKvDesc &d, const KvqRow &r, int e) {
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
     const size_t i = r.i0 + e;
     const int bits = d.fmt == KVQ_F32 ? 32
                      : (d.fmt == KVQ_F16 || d.fmt == KVQ_BF16) ? 16
@@ -103,6 +117,9 @@ __device__ __forceinline__ void kvq_prefetch(const uint16_t *w, const FllmKvDesc
         const uint16_t *sp = w + d.scale_off + (d.fmt == KVQ_NVFP4 ? (g >> 1) : g);
         asm volatile("prefetch.global.L1 [%0];" ::"l"(sp));
     }
+#else
+    (void)w; (void)d; (void)r; (void)e;
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -379,7 +396,7 @@ __global__ void __launch_bounds__(128) kvq_write_warp_kernel(const float *src, u
             bool found = false;
 #pragma unroll
             for (int k = 0; k < NK; k++) {
-                const unsigned mask = __ballot_sync(full, ok[k] && fabsf(v[k]) == amax);
+                const unsigned mask = kvq_ballot32(full, ok[k] && fabsf(v[k]) == amax);
                 const float cand = __shfl_sync(full, v[k], mask ? __ffs(mask) - 1 : 0);
                 if (!found && mask && amax > 0.f) {
                     vmax = cand;
@@ -448,7 +465,7 @@ __global__ void __launch_bounds__(128) kvq_write_warp_kernel(const float *src, u
                                c3 = __shfl_down_sync(full, c0, 3);
                 if ((lane & 3) == 0 && ok[k]) pool[idx0 >> 2] = (uint16_t)(c0 | (c1 << 4) | (c2 << 8) | (c3 << 12));
                 if (five) {
-                    const unsigned bits = __ballot_sync(full, ok[k] && ((code[k] >> 4) & 1u));
+                    const unsigned bits = kvq_ballot32(full, ok[k] && ((code[k] >> 4) & 1u));
                     const size_t w0 = d.hi_off + ((first + 32 * k) >> 4);
                     if (lane == 0 && 32 * k < unit) pool[w0] = (uint16_t)(bits & 0xffffu);
                     if (lane == 0 && 32 * k + 16 < unit) pool[w0 + 1] = (uint16_t)(bits >> 16);

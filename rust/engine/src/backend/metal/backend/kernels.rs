@@ -20,7 +20,7 @@ use crate::backend::metal::ops::recurrent_plan::{
 use crate::backend::metal::ops::{self, GluMode, OpPlan};
 use crate::backend::metal::pipelines::source::scan_kernel_names;
 use crate::backend::metal::weights::{self, MetalCapsLike};
-use crate::backend::{AttentionParams, BackendError, DeltaShape, QuantType};
+use crate::backend::{AttentionParams, BackendError, DeltaShape, MlaShape, QuantType};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A kernel some planner asks for.
@@ -203,9 +203,29 @@ fn basic_ops(c: &mut Collector) {
         GluMode::Gelu,
         GluMode::Relu2,
         GluMode::Relu,
+        GluMode::GeluErf,
+        GluMode::GegluErf,
+        GluMode::Reglu,
+        GluMode::Relu2Glu,
     ] {
         c.plan("ops::plan_glu", ops::plan_glu(mode, 64));
     }
+    c.plan("arch_plan::plan_clamp", ops::arch_plan::plan_clamp(64, 6.0));
+    c.plan(
+        "arch_plan::plan_softplus_gate_mul",
+        ops::arch_plan::plan_softplus_gate_mul(64, 1.0),
+    );
+    c.plan(
+        "arch_plan::plan_mla_latent",
+        ops::arch_plan::plan_mla_latent(2, 16, 24),
+    );
+    c.plan(
+        "arch_plan::plan_mla_assemble",
+        ops::arch_plan::plan_mla_assemble(
+            2,
+            &MlaShape { heads: 2, nope: 16, rope: 8, value: 16, kv_lora: 16 },
+        ),
+    );
     c.plan("ops::plan_residual_add", ops::plan_residual_add(64, 1.0));
     c.plan(
         "ops::plan_sigmoid_gate_mul",

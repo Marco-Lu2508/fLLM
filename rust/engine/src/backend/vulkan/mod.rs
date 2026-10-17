@@ -9,6 +9,8 @@ pub mod commands;
 pub mod device_info;
 pub mod instance;
 pub mod memory;
+#[cfg(test)]
+mod model_tests;
 pub mod ops;
 pub mod pipeline;
 pub mod shaders;

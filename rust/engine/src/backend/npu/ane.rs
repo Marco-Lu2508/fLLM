@@ -1,6 +1,6 @@
 //! NPU backends (Intel OpenVINO, AMD XDNA, Qualcomm QNN, Apple Neural Engine): ane. Owner: package 11.
 //!
-//! Apple Neural Engine through Core ML ML Programs. Study: `STUDY_ANE.md` next to this file. What exists: an emitter for a one-layer
+//! Apple Neural Engine through Core ML ML Programs. Study: `docs/research/npu-study-ane.md`. What exists: an emitter for a one-layer
 //! fp16 ML Program (`mil.rs` text, `mlpackage.rs` protobuf + weight blob + manifest; pure Rust, compiled and unit-tested on every host)
 //! and, on Apple platforms with the feature `npu-ane`, a small Objective-C runtime layer (`objc.rs`) and the Core ML probe
 //! (`coreml.rs`) that compiles, loads (computeUnits = cpuAndNeuralEngine) and runs that package. What does not exist: any LLM compute
@@ -49,7 +49,7 @@ mod enabled {
             "npu-ane: no Apple Neural Engine found (Apple Silicon Mac required)".to_owned()
         })?;
         StubBackend::new("npu-ane", index).map(|b| Arc::new(b) as Arc<dyn Backend>).map_err(|e| {
-            format!("{e}; the Neural Engine of {} is present, but fLLM has no Core ML compute path (see src/backend/npu/STUDY_ANE.md)", info.chip)
+            format!("{e}; the Neural Engine of {} is present, but fLLM has no Core ML compute path (see docs/research/npu-study-ane.md)", info.chip)
         })
     }
 

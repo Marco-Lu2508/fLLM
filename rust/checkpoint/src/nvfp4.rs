@@ -260,6 +260,39 @@ mod tests {
     }
 
     #[test]
+    fn stacked_experts_keep_their_own_scales_and_rows() {
+        use crate::packed_quant::PackedData;
+        let (rows, cols) = (3usize, 128usize);
+        let make = |seed0: u32, global: f32, input: f32| {
+            let mut seed = seed0;
+            let weight: Vec<u8> = (0..rows * cols / 2).map(|_| pseudo(&mut seed)).collect();
+            let scales: Vec<u8> = (0..rows * cols / 16).map(|_| (pseudo(&mut seed) % 0x78).max(1)).collect();
+            Nvfp4::new(owned(weight), owned(scales), rows, cols, global, Some(input)).unwrap()
+        };
+        let experts = [make(1, 0.5, 0.25), make(2, 0.125, 0.5), make(3, 2.0, 1.0)];
+        let stacked = PackedData::Concat {
+            parts: experts.iter().cloned().map(PackedData::Nvfp4).collect(),
+            elements: experts.len() * rows * cols,
+            part_rows: rows,
+        };
+        let parts = stacked.nvfp4_parts().unwrap();
+        assert_eq!(parts.iter().map(|t| t.global_scale()).collect::<Vec<_>>(), vec![0.5, 0.125, 2.0]);
+        assert_eq!(parts.iter().map(|t| t.input_scale()).collect::<Vec<_>>(), vec![Some(0.25), Some(0.5), Some(1.0)]);
+        for (e, expert) in experts.iter().enumerate() {
+            for r in 0..rows {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                stacked.encode_nvfp4_row(e * rows + r, &mut a).unwrap();
+                expert.encode_gguf_row(r, &mut b).unwrap();
+                assert_eq!(a, b, "expert {e} row {r}");
+            }
+        }
+        assert!(stacked.encode_nvfp4_row(experts.len() * rows, &mut Vec::new()).is_err());
+        // a group that is not NVFP4 throughout has no NVFP4 parts
+        let mixed = PackedData::Concat { parts: vec![PackedData::Nvfp4(experts[0].clone()), PackedData::Fp8 { bytes: owned(vec![0; 4]), format: crate::packed_quant::Fp8Format::E4M3Fn, elements: 4 }], elements: 4 + rows * cols, part_rows: rows };
+        assert!(mixed.nvfp4_parts().is_none());
+    }
+
+    #[test]
     fn scales_are_copied_and_nibbles_are_regrouped() {
         // one row of 64 inputs, codes 0..15 repeating, scales 1..4
         let codes: Vec<u8> = (0..64).map(|i| (i % 16) as u8).collect();

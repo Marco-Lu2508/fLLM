@@ -1,4 +1,4 @@
-# CPU emulator of the non-matmul MSL kernels (package p06b)
+# CPU emulator of the non-matmul MSL kernels
 
 Runs the **real** `.metal` sources of `norm_*`, `rope_*`, `act_*`, `misc_*`, `kv_*`, `embed_*`, `attn_*` on a host without a Mac and compares them with the
 engine's CPU backend. It is a test aid, not a Metal implementation: it finds logic errors (index arithmetic, masks, softmax bookkeeping, layouts, planner/kernel
@@ -17,15 +17,15 @@ not have) and writes everything to `$FLLM_EMU_DIR`. The module `ops` is only bui
 includes the files by symlink and uses the real engine types through a path dependency:
 
 ```
-H=~/fllm-tools/p06b-harness ; WT=~/fllm-tools/wt-p06b-metal-ops        # any directories
+H=~/tools/ops-harness ; WT=/path/to/fllm        # any directories
 mkdir -p $H/src/backend/metal
 cat > $H/Cargo.toml <<'EOF'
 [package]
-name = "p06b-harness"
+name = "ops-harness"
 version = "0.0.0"
 edition = "2021"
 [dependencies]
-fllm-engine = { path = "../wt-p06b-metal-ops/rust/engine" }
+fllm-engine = { path = "/path/to/fllm/rust/engine" }
 half = "2"
 [workspace]
 EOF
@@ -38,9 +38,9 @@ HARNESS=$H bash $WT/rust/engine/metal/emu_ops/run_emu.sh /tmp/fix   # writes the
 bash $WT/rust/engine/metal/emu_ops/run_emu.sh /tmp/fix prefill_q8   # again with a name filter (reuses the cases)
 ```
 
-Needs `python3`, a clang++ with C++23 (`CXX=...`) and the syntax shim `msl-shim` of the toolchain package (`SHIM=...`; see `~/fllm-tools/TOOLS.md`).
+Needs `python3`, a clang++ with C++23 (`CXX=...`) and a C++ syntax shim for MSL (`SHIM=...`, path to the shim header directory).
 
-## Mutation check (package report)
+## Mutation check
 
 17 hand-made mutations of the kernels (wrong ALiBi offset, `exp(s - m)` instead of `exp(s - new_m)`, sink correction dropped, accumulator rescale of the prompt
 kernel skipped, wrong mask comparison, off-by-one in the q8 encoder / the Q6_K decoder, wrong scale index, missing RMSNorm factor, argmax tie order, RoPE pair index,

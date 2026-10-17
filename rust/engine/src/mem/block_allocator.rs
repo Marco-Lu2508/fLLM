@@ -278,11 +278,106 @@ impl BlockManager {
         self.block_hashes.remove(&old);
         Ok(())
     }
+
+    /// Free blocks that fall completely before the sliding window of size `window`.
+    ///
+    /// If `num_tokens > window`, blocks holding tokens strictly before `num_tokens - window`
+    /// are released back to the allocator.
+    pub fn prune_sliding_window(&mut self, seq_id: i64, window: usize) -> Result<usize, AllocatorError> {
+        if window == 0 {
+            return Ok(0);
+        }
+        let block_size = self.block_size;
+        let table = self.get_table_mut(seq_id)?;
+        let num_tokens = table.num_tokens as usize;
+        if num_tokens <= window {
+            return Ok(0);
+        }
+        let cutoff = num_tokens - window;
+        let blocks_before_cutoff = cutoff / block_size;
+        if blocks_before_cutoff == 0 {
+            return Ok(0);
+        }
+        let to_free = blocks_before_cutoff.min(table.blocks.len().saturating_sub(1));
+        if to_free == 0 {
+            return Ok(0);
+        }
+        let freed_blocks: Vec<usize> = table.blocks.drain(0..to_free).collect();
+        for &bid in &freed_blocks {
+            self.block_hashes.remove(&bid);
+            self.allocator.dec_ref(bid as i64)?;
+        }
+        Ok(freed_blocks.len())
+    }
+}
+
+/// Hybrid KV Cache Manager (vLLM style):
+/// Manages separate block tables and allocators per geometry/cache group (e.g. full attention vs sliding window).
+#[derive(Debug)]
+pub struct HybridBlockManager {
+    pub groups: Vec<BlockManager>,
+    pub layer_to_group: Vec<usize>,
+}
+
+impl HybridBlockManager {
+    pub fn new(
+        group_capacities: &[i64],
+        block_size: i64,
+        layer_to_group: Vec<usize>,
+    ) -> Result<Self, AllocatorError> {
+        let mut groups = Vec::with_capacity(group_capacities.len());
+        for &cap in group_capacities {
+            groups.push(BlockManager::new(cap, block_size)?);
+        }
+        Ok(Self {
+            groups,
+            layer_to_group,
+        })
+    }
+
+    pub fn new_table(&mut self, seq_id: i64) -> Result<(), AllocatorError> {
+        for bm in &mut self.groups {
+            bm.new_table(seq_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn drop_table(&mut self, seq_id: i64) -> Result<(), AllocatorError> {
+        for bm in &mut self.groups {
+            bm.drop_table(seq_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn ensure_blocks(
+        &mut self,
+        seq_id: i64,
+        extra_tokens: i64,
+    ) -> Result<Vec<Vec<usize>>, AllocatorError> {
+        let mut result = Vec::with_capacity(self.groups.len());
+        for bm in &mut self.groups {
+            result.push(bm.ensure_blocks(seq_id, extra_tokens)?);
+        }
+        Ok(result)
+    }
+
+    pub fn prune_sliding_window(
+        &mut self,
+        seq_id: i64,
+        group_idx: usize,
+        window: usize,
+    ) -> Result<usize, AllocatorError> {
+        if let Some(bm) = self.groups.get_mut(group_idx) {
+            bm.prune_sliding_window(seq_id, window)
+        } else {
+            Ok(0)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AllocatorError, BlockAllocator, BlockManager};
+    use super::{AllocatorError, BlockAllocator, BlockManager, HybridBlockManager};
 
     #[test]
     fn allocation_is_lifo_and_refs_recycle_in_release_order() {
@@ -345,6 +440,38 @@ mod tests {
         assert_eq!(manager.get_table(1).unwrap().blocks, vec![dst]);
         assert_eq!(manager.allocator.refcounts[shared], 1);
         assert!(!manager.block_hashes.contains_key(&shared));
+    }
+
+    #[test]
+    fn sliding_window_pruning_releases_blocks_outside_window() {
+        let mut manager = BlockManager::new(10, 4).unwrap();
+        manager.new_table(1).unwrap();
+        for _ in 0..6 {
+            manager.append_block(1).unwrap();
+        }
+        manager.get_table_mut(1).unwrap().num_tokens = 24;
+        assert_eq!(manager.allocator.available(), 4);
+        assert_eq!(manager.get_table(1).unwrap().blocks.len(), 6);
+
+        // Window = 8: last 8 tokens are covered by last 2 blocks (tokens 16..24)
+        // Tokens 0..16 (cutoff 16) -> 4 blocks can be pruned
+        let freed = manager.prune_sliding_window(1, 8).unwrap();
+        assert_eq!(freed, 4);
+        assert_eq!(manager.allocator.available(), 8);
+        assert_eq!(manager.get_table(1).unwrap().blocks.len(), 2);
+    }
+
+    #[test]
+    fn hybrid_block_manager_tracks_independent_geometry_groups() {
+        let mut hybrid = HybridBlockManager::new(&[5, 5], 4, vec![0, 1, 0, 1]).unwrap();
+        hybrid.new_table(42).unwrap();
+        let allocated = hybrid.ensure_blocks(42, 8).unwrap();
+        assert_eq!(allocated.len(), 2);
+        assert_eq!(allocated[0].len(), 2);
+        assert_eq!(allocated[1].len(), 2);
+        hybrid.drop_table(42).unwrap();
+        assert_eq!(hybrid.groups[0].allocator.available(), 5);
+        assert_eq!(hybrid.groups[1].allocator.available(), 5);
     }
 
     #[test]

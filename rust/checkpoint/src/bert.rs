@@ -31,36 +31,20 @@ fn json(path: &Path) -> Result<Value, CheckpointError> {
 }
 
 fn pooling(root: &Path, cfg: &Value) -> Result<u32, CheckpointError> {
-    let path = root.join("1_Pooling/config.json");
-    if path.is_file() {
-        let pool = json(&path)?;
-        let cls = pool["pooling_mode_cls_token"].as_bool().unwrap_or(false);
-        let mean = pool["pooling_mode_mean_tokens"].as_bool().unwrap_or(false);
-        let unsupported = [
-            "pooling_mode_max_tokens",
-            "pooling_mode_mean_sqrt_len_tokens",
-            "pooling_mode_weightedmean_tokens",
-            "pooling_mode_lasttoken",
-        ]
-        .iter()
-        .any(|k| pool[*k].as_bool() == Some(true));
-        if unsupported || cls == mean {
-            return Err("encoder conversion requires exactly one CLS or mean pooling mode".into());
+    crate::st::pooling_or(root, || {
+        let name = format!(
+            "{} {}",
+            root.display(),
+            cfg["_name_or_path"].as_str().unwrap_or_default()
+        )
+        .to_lowercase();
+        if name.contains("bge") {
+            crate::st::CLS
+        } else if ["e5", "gte", "minilm"].iter().any(|s| name.contains(s)) {
+            crate::st::MEAN
+        } else {
+            crate::st::CLS
         }
-        return Ok(if cls { 2 } else { 1 });
-    }
-    let name = format!(
-        "{} {}",
-        root.display(),
-        cfg["_name_or_path"].as_str().unwrap_or_default()
-    )
-    .to_lowercase();
-    Ok(if name.contains("bge") {
-        2
-    } else if ["e5", "gte", "minilm"].iter().any(|s| name.contains(s)) {
-        1
-    } else {
-        2
     })
 }
 
@@ -243,12 +227,12 @@ fn special_tokens(
     Ok(())
 }
 
-pub(crate) fn convert(
+#[allow(clippy::type_complexity)]
+pub(crate) fn prepare(
     input: &Path,
-    output: &Path,
     options: ConvertOptions,
     cfg: &Value,
-) -> Result<ConversionReport, CheckpointError> {
+) -> Result<(Vec<(String, Meta)>, Vec<OutTensor>, Vec<String>), CheckpointError> {
     let root = if input.is_dir() {
         input
     } else {
@@ -370,7 +354,19 @@ pub(crate) fn convert(
     }
     meta.extend(tokenizer(root, vocab, cfg, !roberta)?);
     meta.push(("bert.model_type".into(), Meta::Str(model_type.into())));
-    let sources = safetensors::read_checkpoint(input)?;
+    let mut sources = safetensors::read_checkpoint(input)?;
+    let mut head_tensors = Vec::new();
+    crate::enc_heads::collect(
+        root,
+        cfg,
+        model_type,
+        &mut sources,
+        hidden,
+        vocab,
+        &options,
+        &mut meta,
+        &mut head_tensors,
+    )?;
     let head_name = if roberta {
         "classifier.out_proj.weight"
     } else {
@@ -637,7 +633,20 @@ pub(crate) fn convert(
             return Err(format!("missing required encoder tensor {name}").into());
         }
     }
+    tensors.extend(head_tensors);
+    crate::st::extend(root, hidden, &options, &mut meta, &mut tensors)?;
     tensors.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok((meta, tensors, skipped))
+}
+
+#[allow(dead_code)]
+pub(crate) fn convert(
+    input: &Path,
+    output: &Path,
+    options: ConvertOptions,
+    cfg: &Value,
+) -> Result<ConversionReport, CheckpointError> {
+    let (meta, tensors, skipped) = prepare(input, options, cfg)?;
     if output.exists() && !options.overwrite {
         return Err(format!("output already exists: {}", output.display()).into());
     }

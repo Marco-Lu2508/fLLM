@@ -1,0 +1,6 @@
+{
+ "bos": "[BOS]",
+ "eos": "[EOS]",
+ "pad": "[PAD]",
+ "unk": "[UNK]"
+}

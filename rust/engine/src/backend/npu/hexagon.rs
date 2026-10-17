@@ -1,7 +1,7 @@
 //! NPU backends (Intel OpenVINO, AMD XDNA, Qualcomm QNN, Apple Neural Engine): hexagon. Owner: package 11.
 //!
 //! Qualcomm Hexagon NPU (HTP) through the Qualcomm AI Engine Direct SDK (QNN), loaded at run time from `libQnnHtp.so` / `QnnHtp.dll`.
-//! Study: `STUDY_HEXAGON.md` next to this file. What exists: the layout of the QNN structures (`qnn.rs`, always compiled and
+//! Study: `docs/research/npu-study-hexagon.md`. What exists: the layout of the QNN structures (`qnn.rs`, always compiled and
 //! size-checked), the run-time binding and device query (`runtime.rs`), a single-MatMul fp16 graph (`graph.rs`) and a wrapper for the
 //! Genie LLM runtime (`genie.rs`), all behind the feature `npu-qnn`. What does not exist: any LLM compute path from fLLM's own ops.
 //! Verification level: L0 (compiles; never run on a Snapdragon device).
@@ -66,7 +66,7 @@ mod enabled {
     pub fn create(index: usize) -> Result<Arc<dyn Backend>, String> {
         let q = runtime::qnn()?;
         StubBackend::new("npu-qnn", index).map(|b| Arc::new(b) as Arc<dyn Backend>).map_err(|e| {
-            format!("{e}; the QNN HTP library ({}) is present, but fLLM has no Hexagon compute path (see src/backend/npu/STUDY_HEXAGON.md)", q.path)
+            format!("{e}; the QNN HTP library ({}) is present, but fLLM has no Hexagon compute path (see docs/research/npu-study-hexagon.md)", q.path)
         })
     }
 

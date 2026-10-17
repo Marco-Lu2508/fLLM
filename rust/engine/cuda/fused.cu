@@ -282,12 +282,21 @@ int fllm_rope_kv_f32_launch(cudaStream_t s, float *q, const float *k, const floa
 
 // ---- GLU + int8 quantization -----------------------------------------------------------------------------------------------------------
 // quantize_x8_kernel of mmvq.cu with x = glu(gate, up): one warp per group of 32 values.
-__global__ void quantize_x8_glu_kernel(const float *__restrict__ gate, const float *__restrict__ up, int mode, int8_t *__restrict__ xq,
+template <bool HALF_IN>
+__global__ void quantize_x8_glu_kernel(const void *__restrict__ gate, const void *__restrict__ up, int mode, int8_t *__restrict__ xq,
                                        float2 *__restrict__ xs, size_t groups) {
     const size_t gid = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
     const int lane = threadIdx.x & 31;
     if (gid >= groups) return;
-    const float v = fllm_glu(gate[gid * 32 + lane], up[gid * 32 + lane], mode);
+    float g, u;
+    if constexpr (HALF_IN) {
+        g = __half2float(reinterpret_cast<const __half *>(gate)[gid * 32 + lane]);
+        u = __half2float(reinterpret_cast<const __half *>(up)[gid * 32 + lane]);
+    } else {
+        g = reinterpret_cast<const float *>(gate)[gid * 32 + lane];
+        u = reinterpret_cast<const float *>(up)[gid * 32 + lane];
+    }
+    const float v = fllm_glu(g, u, mode);
     float amax = fabsf(v);
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
@@ -299,7 +308,11 @@ __global__ void quantize_x8_glu_kernel(const float *__restrict__ gate, const flo
     xq[gid * 32 + lane] = (int8_t)q;
     if (lane == 0) xs[gid] = make_float2(dx, dx * (float)s);
 }
-void fllm_quantize_x8_glu_launch(cudaStream_t s, const float *gate, const float *up, int mode, int8_t *xq, float2 *xs, size_t groups) {
-    quantize_x8_glu_kernel<<<(unsigned)((groups * 32 + 255) / 256), 256, 0, s>>>(gate, up, mode, xq, xs, groups);
+void fllm_quantize_x8_glu_launch(cudaStream_t s, const void *gate, const void *up, int mode, int8_t *xq, float2 *xs, size_t groups, bool half_in) {
+    if (half_in) {
+        quantize_x8_glu_kernel<true><<<(unsigned)((groups * 32 + 255) / 256), 256, 0, s>>>(gate, up, mode, xq, xs, groups);
+    } else {
+        quantize_x8_glu_kernel<false><<<(unsigned)((groups * 32 + 255) / 256), 256, 0, s>>>(gate, up, mode, xq, xs, groups);
+    }
 }
 #endif  // !__HIPCC__

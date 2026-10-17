@@ -85,6 +85,42 @@ pub fn parse_sampling(
             p.logit_bias.push((id, value as f32));
         }
     }
+    if let Some(value) = body.get("logprobs_mode") {
+        p.logprobs_processed = match value.as_str() {
+            Some("raw_logprobs") => false,
+            Some("processed_logprobs") => true,
+            _ => return Err("logprobs_mode must be raw_logprobs or processed_logprobs".into()),
+        };
+    }
+    p.priority = integer("priority", i64::from(p.priority), -1_000_000, 1_000_000)? as i32;
+    if let Some(value) = body.get("timeout") {
+        p.timeout_secs = match value {
+            Value::Null => None,
+            v => Some(
+                v.as_f64()
+                    .filter(|t| t.is_finite() && *t > 0.0 && *t <= 86_400.0)
+                    .ok_or("timeout must be a number of seconds between 0 and 86400")?,
+            ),
+        };
+    }
+    if let Some(value) = body.get("speculative") {
+        p.speculative = value.as_bool().ok_or("speculative must be boolean")?;
+    }
+    if let Some(value) = body.get("allowed_token_ids") {
+        let ids = value
+            .as_array()
+            .filter(|ids| !ids.is_empty() && ids.len() <= 1_000_000)
+            .ok_or("allowed_token_ids must be a non-empty array of token IDs")?;
+        p.allowed_token_ids = ids
+            .iter()
+            .map(|id| {
+                id.as_u64()
+                    .filter(|id| *id < vocab as u64)
+                    .map(|id| id as usize)
+                    .ok_or_else(|| "allowed_token_ids contains an ID outside the vocabulary".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+    }
     Ok(p)
 }
 
@@ -106,6 +142,30 @@ mod tests {
                 parse_sampling(&value, SamplingParams::default(), 8).is_err(),
                 "{value}"
             );
+        }
+    }
+    #[test]
+    fn scheduling_and_speculation_fields_are_validated() {
+        let p = parse_sampling(
+            &json!({"priority":-3,"timeout":2.5,"speculative":false,"allowed_token_ids":[1,2],"logprobs_mode":"processed_logprobs"}),
+            SamplingParams::default(),
+            8,
+        )
+        .unwrap();
+        assert_eq!((p.priority, p.timeout_secs, p.speculative), (-3, Some(2.5), false));
+        assert_eq!(p.allowed_token_ids, vec![1, 2]);
+        assert!(p.logprobs_processed);
+        assert!(!p.is_greedy(), "an allow list changes the logits");
+        for value in [
+            json!({"timeout":0}),
+            json!({"timeout":"soon"}),
+            json!({"speculative":"no"}),
+            json!({"allowed_token_ids":[]}),
+            json!({"allowed_token_ids":[8]}),
+            json!({"priority":1.5}),
+            json!({"logprobs_mode":"raw_logits"}),
+        ] {
+            assert!(parse_sampling(&value, SamplingParams::default(), 8).is_err(), "{value}");
         }
     }
     #[test]

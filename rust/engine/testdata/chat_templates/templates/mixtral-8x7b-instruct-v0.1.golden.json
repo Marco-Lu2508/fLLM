@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "err": "TemplateError: After the optional system message, conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "err": "TemplateError: After the optional system message, conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/documents": {
+  "ok": "<s> [INST] Summarize. [/INST]"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<s> [INST]   padded system with trailing newline\n\n\n\n  padded user \n [/INST]"
+ },
+ "default/multi_turn": {
+  "ok": "<s> [INST] Be brief.\n\nHi [/INST] Hello! How can I help?</s> [INST] Tell me a joke. [/INST] Why did the chicken cross the road?</s> [INST] Why? [/INST]"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<s> [INST] Hi [/INST] Hello!</s>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<s> [INST] Think hard: 13*17 [/INST]"
+ },
+ "default/reasoning_history": {
+  "ok": "<s> [INST] 2+2? [/INST] <think>\nsimple\n</think>\n\n4</s> [INST] And 3+3? [/INST]"
+ },
+ "default/system_not_first": {
+  "err": "TemplateError: Only user and assistant roles are supported, with the exception of an initial optional system message!"
+ },
+ "default/system_user": {
+  "ok": "<s> [INST] You are a terse assistant.\n\nCapital of France? [/INST]"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<s> [INST] 2+2? [/INST]"
+ },
+ "default/thinking_enabled": {
+  "ok": "<s> [INST] 2+2? [/INST]"
+ },
+ "default/tool_call_roundtrip": {
+  "err": "TemplateError: After the optional system message, conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/tool_call_then_answer": {
+  "err": "TypeError: can only concatenate str (not \"NoneType\") to str"
+ },
+ "default/tools_system_user": {
+  "ok": "<s> [INST] You can call tools.\n\nWeather in Berlin? [/INST]"
+ },
+ "default/tools_user": {
+  "ok": "<s> [INST] Weather in München? [/INST]"
+ },
+ "default/two_users_in_a_row": {
+  "err": "TemplateError: After the optional system message, conversation roles must alternate user/assistant/user/assistant/..."
+ },
+ "default/unicode": {
+  "ok": "<s> [INST] Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x' [/INST]"
+ },
+ "default/user_only": {
+  "ok": "<s> [INST] Hello [/INST]"
+ }
+}

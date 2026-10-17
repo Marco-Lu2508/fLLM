@@ -9,6 +9,11 @@
 //   4 GELU        out = gelu_tanh(g)          (u is not read)
 //   5 RELU2       out = max(g, 0)^2           (u is not read)
 //   6 RELU        out = max(g, 0)             (u is not read)
+//   7 GELU_ERF    out = gelu_erf(g)           (u is not read; Stream::activation mode 2)
+//   8 GEGLU_ERF   out = gelu_erf(g) * u       (Stream::activation_glu mode 2)
+//   9 REGLU       out = max(g, 0) * u         (Stream::activation_glu mode 3)
+//  10 REGLU2      out = max(g, 0)^2 * u       (Stream::activation_glu mode 4)
+//  11 COPY        out = g                     (strided copy; u is not read)
 // Element (r, c): gate[gate_off + r * gate_stride + c], up[up_off + r * up_stride + c], out[r * out_stride + c], r < n_rows, c < width. Gate and up may
 // be two ranges of the same buffer (fused gate/up projection). Grid-stride loop over n_rows * width elements.
 #define WG 256
@@ -57,6 +62,17 @@ void main() {
 #elif MODE == 5
         const float rl = max(g, 0.0);
         result = rl * rl;
+#elif MODE == 7
+        result = gelu_erf(g);
+#elif MODE == 8
+        result = gelu_erf(g) * up[p.up_off + r * p.up_stride + c];
+#elif MODE == 9
+        result = max(g, 0.0) * up[p.up_off + r * p.up_stride + c];
+#elif MODE == 10
+        const float rl2 = max(g, 0.0);
+        result = rl2 * rl2 * up[p.up_off + r * p.up_stride + c];
+#elif MODE == 11
+        result = g;
 #else
         result = max(g, 0.0);
 #endif

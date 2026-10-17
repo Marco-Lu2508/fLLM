@@ -1,62 +1,64 @@
-# Intel-GPU-Backend über SYCL / oneAPI (Cargo-Feature `sycl`)
+# Intel GPU backend through SYCL / oneAPI (Cargo feature `sycl`)
 
-**Prüfstufe: L0.** Der Code ist geschrieben und von Front-End und SPIR-V-Codegenerierung des DPC++-Compilers sowie von `cargo check/clippy`
-akzeptiert. Er ist **nie auf einer Intel-GPU gelaufen**. Kein Satz in diesem Ordner behauptet, das Backend „laufe“ oder sei schnell; die
-Zahlen in `EVALUATION.md` sind Erwartungen, keine Messungen. Besitzer: Paket 9 (`p09-sycl-intel`).
+**Test level: L0 for Intel GPUs; L1 only on the OpenCL CPU device (see [intel.md](../../../docs/changes/intel.md)).** The code is written and is accepted by the front end and SPIR-V code generation of the DPC++ compiler and by `cargo check/clippy`.
+It has **never run on an Intel GPU**. Nothing in this folder claims that the backend "runs" or is fast; the
+numbers in [the evaluation](../../../docs/research/sycl-evaluation.md) are expectations, not measurements.
 
-## Dateien
+## Files
 
-| Datei | Inhalt |
+| File | Contents |
 |---|---|
-| `fllm_sycl.h` | C-Schnittstelle von `libfllmsycl` (38 Funktionen `fllm_sycl_*`, rohe USM-Zeiger); Spiegel in `src/backend/sycl/ffi.rs` |
-| `common.hpp` | Geräte-/Stream-Typen, Fehlerbehandlung, Weitergabe der Startfunktionen |
-| `device.cpp` | Geräteaufzählung (Level Zero zuerst), XMX-Erkennung (`matrix_combinations`), USM-Speicher, In-Order-Queues, Staging-Arena für kleine Host-Arrays |
-| `weights.cpp` | Gerätelayouts der Gewichte und Umpacken der GGUF-Bytes (Host, parallel); `fllm_sycl_pack_weight` |
-| `formats.hpp` | Gerätedecoder je Format (`F::decode`, `F::pos`); eine Einheit = 8–32 Werte pro Work-Item |
-| `linear_kernels.hpp`, `linear_small.cpp`, `linear_tiled.cpp`, `linear_xmx.cpp`, `linear_api.cpp` | Linear-Kernel: Sub-Group-Matvec (Batch ≤ 8, Decode, auch MoE), Shared-Memory-Kachel in FP32 (ab Batch 9), `joint_matrix`/XMX in fp16 (ab Batch 16 auf XMX-Geräten) |
-| `attention.cpp` | Paged Attention (f16- und q8_0-Cache, GQA, Softcap, Fenster/Chunk, Sinks, ALiBi), Split-KV in zwei Stufen |
-| `elementwise.cpp` | RMSNorm, LayerNorm, RoPE, SwiGLU/GeGLU/OAI-SwiGLU, Residual, KV-Schreiben, Argmax, MoE-Routing/-Combine, Gather/Scatter, Q/Gate-Split |
-| `build_sycl.sh` | Baut `libfllmsycl.a` ohne cargo (Übersetzen, `-fsycl-link`, `ar`) |
-| `build_rs.patch` | Fertiger Patch für `rust/engine/build.rs` (Funktion `sycl_kernels`); gehört dem Integrator, siehe unten |
-| `tests/decode_check.cpp`, `tests/run_decode_check.sh` | Host-Test (kein Gerät): packt zufällige GGUF-Blöcke und vergleicht die Gerätedecoder mit einer Referenz nach dem CPU-Decoder des Engines |
-| `EVALUATION.md` | Bewertung Vulkan gegen SYCL für Intel-GPUs, Empfehlung, Messplan |
+| `fllm_sycl.h` | C interface of `libfllmsycl` (38 `fllm_sycl_*` functions, raw USM pointers); mirrored in `src/backend/sycl/ffi.rs` |
+| `common.hpp` | device/stream types, error handling, forwarding of the launch functions |
+| `device.cpp` | device enumeration (Level Zero first), XMX detection (`matrix_combinations`), USM memory, in-order queues, staging arena for small host arrays |
+| `weights.cpp` | device layouts of the weights and repacking of the GGUF bytes (host, parallel); `fllm_sycl_pack_weight` |
+| `formats.hpp` | device decoder per format (`F::decode`, `F::pos`); one unit = 8-32 values per work-item |
+| `linear_kernels.hpp`, `linear_small.cpp`, `linear_tiled.cpp`, `linear_xmx.cpp`, `linear_api.cpp` | linear kernels: sub-group matvec (batch <= 8, decode, also MoE), shared-memory tile in FP32 (from batch 9), `joint_matrix`/XMX in fp16 (from batch 16 on XMX devices) |
+| `attention.cpp` | paged attention (f16 and q8_0 cache, GQA, softcap, window/chunk, sinks, ALiBi), split-KV in two stages |
+| `elementwise.cpp` | RMSNorm, LayerNorm, RoPE, SwiGLU/GeGLU/OAI-SwiGLU, residual, KV write, argmax, MoE routing/combine, gather/scatter, Q/gate split |
+| `build_sycl.sh` | builds `libfllmsycl.a` without cargo (compile, `-fsycl-link`, `ar`) |
+| `build_rs.patch` | historical patch for `rust/engine/build.rs`; its content (function `sycl_kernels`) is already part of `build.rs`, so it does not need to be applied |
+| `tests/decode_check.cpp`, `tests/run_decode_check.sh` | host test (no device): packs random GGUF blocks and compares the device decoders with a reference following the engine's CPU decoder |
 
-## Formate
+The evaluation of Vulkan versus SYCL for Intel GPUs, the recommendation and the measurement plan are in [docs/research/sycl-evaluation.md](../../../docs/research/sycl-evaluation.md).
 
-Nativ gelesen (15 Decoder, 16 GGUF-Typen): F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS
-(beim Umpacken zu IQ4_NL-Blöcken), MXFP4. Alles andere wird beim Hochladen auf dem Host umgewandelt und meldet es einmalig:
-FP8, NVFP4 und die 4-Bit-Gruppenformate (Q4Z/Q4ZP, AWQ/GPTQ) werden zu f16, die übrigen Formate mit 256 breiten Zeilen (IQ1/IQ2/IQ3,
-Q8_K ...) zu Q5_K, der Rest zu f32 (wie im CUDA-Backend). **Nicht** vorhanden: DeltaNet (`delta_layer`), `host_linear`, CUDA-Graphen,
-`linear_f16_out`-Familie, Device-Sampling (läuft auf der CPU).
+## Formats
 
-Gerätelayout (alles 16-Byte-ausgerichtet, damit die Kernel 8/16-Byte-Blöcke laden): Skalen und Quants einer Zeile getrennt
-(`[d][m][qh][qs]`, Blockzahl auf Vielfache von 8 aufgefüllt), Q6_K 224, Q2_K 96, Q3_K 112 Byte je Superblock, Float-Zeilen auf 8
-Werte aufgefüllt. Siehe Kopf von `weights.cpp`.
+Read natively (15 decoders, 16 GGUF types): F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS
+(repacked into IQ4_NL blocks), MXFP4. Everything else is converted on the host during upload, and this is reported once:
+FP8, NVFP4 and the 4-bit group formats (Q4Z/Q4ZP, AWQ/GPTQ) become f16, the other formats with 256-wide rows (IQ1/IQ2/IQ3,
+Q8_K ...) become Q5_K, the rest becomes f32 (as in the CUDA backend). **Not** present: DeltaNet (`delta_layer`), `host_linear`, CUDA graphs, the
+`linear_f16_out` family, device sampling (runs on the CPU).
 
-## Bauen
+Device layout (everything 16-byte aligned so that the kernels load 8/16-byte blocks): scales and quants of a row separate
+(`[d][m][qh][qs]`, block count padded to a multiple of 8), Q6_K 224, Q2_K 96, Q3_K 112 bytes per super-block, float rows padded to 8
+values. See the head of `weights.cpp`.
 
-Voraussetzung: oneAPI-DPC++-Compiler (`icpx`; Windows `icx`) mit Level-Zero-Laufzeit. `cargo build --release --features sycl` findet den
-Compiler über `FLLM_SYCL_CXX`, `ONEAPI_ROOT`, `PATH` oder `/opt/intel/oneapi`. Ohne Compiler **warnt** `build.rs` nur: dann gibt es kein
-`libfllmsycl`, `ffi.rs` benutzt Rust-Stubs, die Crate baut, `--device sycl` meldet „kein SYCL-Laufzeit im Build“ und `fllm-rs devices`
-zeigt kein SYCL-Gerät. `FLLM_SYCL_AOT=acm-g10,pvc,bmg-g21` übersetzt vorab für Intel-GPUs (braucht `ocloc`; Standard: SPIR-V, der Treiber
-übersetzt beim ersten Aufruf), `FLLM_SYCL_EXTRA_FLAGS` hängt Flags an, `FLLM_SKIP_GPU_KERNELS=1` überspringt den Bau.
-Wichtig: Die Bibliothek wird **als Ganzes** gelinkt (`static:+whole-archive`), denn das vorgelinkte Geräteobjekt enthält nur einen
-Konstruktor, den ein normaler Archiv-Link verwerfen würde (dann fehlten die Kernel zur Laufzeit).
+## Building
 
-Der Patch für `build.rs` ist noch nicht eingespielt (gemeinsame Datei): `git apply rust/engine/sycl/build_rs.patch`. Ohne ihn setzt
-niemand die cfg `fllm_sycl_native`; das Backend baut dann immer als Stub.
+Prerequisite: the oneAPI DPC++ compiler (`icpx`; on Windows `icx`) with the Level Zero runtime, or the open-source DPC++ build. `build.rs` is built in (function
+`sycl_kernels`; `build_rs.patch` is no longer needed). `cargo build --release --features sycl` finds the compiler through `FLLM_SYCL_CXX`,
+`DPCPP_HOME/bin/clang++` (open-source DPC++ from `github.com/intel/llvm/releases`, file `sycl_linux.tar.gz`, tested with `nightly-2026-10-14`),
+`ONEAPI_ROOT`, `PATH` (`icpx`) or `/opt/intel/oneapi`. Without a compiler `build.rs` only **warns**: there is then no
+`libfllmsycl`, `ffi.rs` uses Rust stubs, the crate builds, `--device sycl` reports "no SYCL runtime in this build", and `fllm-rs devices`
+shows no SYCL device. `FLLM_SYCL_AOT=acm-g10,pvc,bmg-g21` compiles ahead of time for Intel GPUs (needs `ocloc`; default: SPIR-V, the driver
+compiles on the first call), `FLLM_SYCL_EXTRA_FLAGS` appends flags, `FLLM_SKIP_GPU_KERNELS=1` skips the build.
+Important: the library is linked **as a whole** (`static:+whole-archive`), because the pre-linked device object contains only a
+constructor that an ordinary archive link would discard (the kernels would then be missing at run time).
 
-## Laufzeit
+`build.rs` sets the cfg `fllm_sycl_native` itself when the library was built; without it the backend builds as a stub.
 
-`libsycl` (aus dem oneAPI-Verzeichnis, `RUNPATH` wird gesetzt), Level-Zero-Lader (`libze_loader.so.1`, im Linux-Paket `libze1`) und der
-Intel-Compute-Runtime-Treiber. `ONEAPI_DEVICE_SELECTOR=level_zero:0` wählt wie bei jedem SYCL-Programm; `FLLM_SYCL_ALL_BACKENDS=1` listet auch
-die OpenCL-Duplikate. Einzelallokationen sind auf Level Zero standardmäßig auf ca. 4 GiB begrenzt: für größere Gewichte oder KV-Pools
-`UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1` setzen. `FLLM_SYCL_EXACT=1` schaltet die fp16-Matrixengine-Kernel ab (alles in FP32).
+## Run time
 
-## Prüfen
+`libsycl` (from the oneAPI directory, `RUNPATH` is set), the Level Zero loader (`libze_loader.so.1`, in the Linux package `libze1`) and the
+Intel Compute Runtime driver. `ONEAPI_DEVICE_SELECTOR=level_zero:0` selects as in any SYCL program; `FLLM_SYCL_ALL_BACKENDS=1` also lists
+the OpenCL duplicates. Single allocations are limited to about 4 GiB on Level Zero by default: for larger weights or KV pools
+set `UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1`. `FLLM_SYCL_EXACT=1` disables the fp16 matrix-engine kernels (everything in FP32).
 
-* Host-Test der Decoder (kein Gerät, ca. 30 s): `tests/run_decode_check.sh` (`CXX` und `LD_LIBRARY_PATH` auf den DPC++-Compiler setzen).
-* Frontend + SPIR-V ohne Gerät: `~/fllm-tools/syclcheck.sh rust/engine/sycl/<datei>.cpp` mit `SYCLCHECK_INC=-I<dieser Ordner>`.
-* Auf einer Intel-GPU: `fllm-rs selftest-gpu --device sycl --json out.json` (Batch ≤ 5, FP32-exakt), danach
-  `cargo test --release -p fllm-engine --features sycl --lib linear_matches_cpu` (deckt alle Batch-Pfade inkl. XMX ab), dann ein echtes
-  Modell gegen den Greedy-Text der CPU (L2) und der Messplan aus `EVALUATION.md` (L3).
+## Verification
+
+* Host test of the decoders (no device, about 30 s): `tests/run_decode_check.sh` (point `CXX` and `LD_LIBRARY_PATH` at the DPC++ compiler).
+* Front end + SPIR-V without a device: compile the file with the DPC++ compiler using `-fsycl -fsycl-device-only -I<this folder>`.
+* On an Intel GPU: `fllm-rs selftest-gpu --device sycl --json out.json` (batch <= 5, FP32 exact), then
+  `cargo test --release -p fllm-engine --features sycl --lib linear_matches_cpu` (covers all batch paths including XMX), then a real
+  model against the greedy text of the CPU (L2) and the measurement plan from the evaluation (L3).

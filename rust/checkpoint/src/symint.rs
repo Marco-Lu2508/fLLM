@@ -262,6 +262,38 @@ impl Fp8Block {
         }
         Ok(())
     }
+
+    pub fn weight_bytes(&self) -> &[u8] {
+        self.weight.as_slice()
+    }
+
+    pub fn scales(&self) -> &[f32] {
+        &self.scales
+    }
+
+    #[allow(dead_code)]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[allow(dead_code)]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[allow(dead_code)]
+    pub fn block_rows(&self) -> usize {
+        self.block_rows
+    }
+
+    #[allow(dead_code)]
+    pub fn block_cols(&self) -> usize {
+        self.block_cols
+    }
+
+    pub fn is_128x128(&self) -> bool {
+        self.block_rows == 128 && self.block_cols == 128
+    }
 }
 
 #[cfg(test)]

@@ -1,8 +1,11 @@
 [package]
 name = "fllm-engine"
-version = "0.1.0"
-license = "Apache-2.0"
-edition = "2021"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
 
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -19,30 +22,43 @@ bytes = "1"
 base64 = "0.22"
 half = "2"
 rayon = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 wgpu = { version = "=30.0.1", optional = true, default-features = false, features = ["std", "wgsl", "vulkan", "metal", "dx12"] }
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true }
 ash = { version = "0.38", optional = true }
 libloading = { version = "0.8", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-minijinja = { version = "2", features = ["json", "preserve_order"] }
+minijinja = { version = "2", features = ["json", "preserve_order", "loop_controls", "fuel"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 llguidance = { version = "=1.8.0", default-features = false, features = ["lark", "referencing", "ahash"] }
 jsonschema = { version = "=0.29.1", default-features = false }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body = "1"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+# optional TLS for the HTTP listener (--tls-cert): rustls with the ring provider the HTTP client already links
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json", "ansi"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 
+[dev-dependencies]
+# self-signed certificate for the TLS listener test
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+
 [features]
 # The x86-64 AVX-512 / AMX kernels are compiled in by default: they are #[target_feature] functions chosen at run time by CPUID,
 # so the binary still runs on any x86-64 CPU (docs/cpu-kernels.md, "Building with the avx512 feature"). `--no-default-features` leaves them out.
 default = ["avx512"]
 rust-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
-cuda = []
+cuda = ["dep:libloading"]
 # native backends (all optional; none is in the default set). Verification level of each is in docs/backends.md
 vulkan = ["dep:ash"]
 metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]

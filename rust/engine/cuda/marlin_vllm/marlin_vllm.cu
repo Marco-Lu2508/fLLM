@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  * Modified by Neural Magic
  * Copyright (C) Marlin.2024 Elias Frantar
  *
@@ -25,8 +27,11 @@
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include "kernel.h"
+#include <atomic>
+#include <cstring>
 #include <map>
 #include <mutex>
+#include <tuple>
 #include <utility>
 
 extern int fllm_opt(int id);
@@ -471,15 +476,145 @@ extern "C" size_t fllm_vllm_marlin_ctmp_bytes(int m, int sms) {
 // marlin_vllm_prep.h). kind: 0 = AWQ (uint4 with zero points), 1 = GPTQ symmetric (uint4b8), 2 = uint8b128, 3 = NVFP4 (e2m1 weights,
 // e4m3 scales per 16 values, `global_scale` is the per-tensor factor in the form of vLLM's nvfp4_marlin_process_global_scale).
 // Returns 0 on success, -1 when a shape or a configuration is not supported.
+static int fllm_marlin_gemm_plain(const void* A, const void* B, void* C, void* C_tmp, const void* scales, const void* zeros,
+                                  const void* bias, const void* global_scale, int m, int n, int k, int lda, void* workspace, int kind,
+                                  int group_size, int dev, int sms, cudaStream_t stream, int bf16 = 0) {
+    const vllm::ScalarType b_type =
+        kind == 0 ? vllm::kU4 : (kind == 1 ? vllm::kU4B8 : (kind == 3 ? vllm::kFE2M1f : (kind == 4 ? vllm::kFE4M3fn : vllm::kU8B128)));
+    // bf16: BF16 activations, scales and result (the kernels exist only if generate_kernels.py was run with them, see FLLM_B_TYPES / A_C_TYPES there)
+    const vllm::ScalarType ac_type = bf16 ? vllm::kBFloat16 : vllm::kFloat16;
+    const vllm::ScalarType s_type = kind == 3 ? vllm::kFE4M3fn : ac_type;
+    const bool has_zp = kind == 0;
+    const int num_groups = group_size == -1 ? 1 : k / group_size;
+    static const bool use_atomic_add = [] {
+        const char* v = getenv("FLLM_MARLIN_USE_ATOMIC_ADD");
+        if (!v) v = getenv("VLLM_MARLIN_USE_ATOMIC_ADD");
+        return v && (!strcmp(v, "1") || !strcmp(v, "true") || !strcmp(v, "on"));
+    }();
+    return marlin::marlin_mm(A, B, C, C_tmp, (void*)bias, nullptr, (void*)scales, (void*)global_scale, (void*)zeros, m, n, k, lda,
+                             workspace, ac_type, b_type, ac_type, s_type, bias != nullptr, has_zp, num_groups,
+                             group_size, dev, stream, -1, -1, sms, use_atomic_add, C_tmp != nullptr, false);
+}
+
+// ---- small M ------------------------------------------------------------------------------------------------------------------------------
+// FLLM_MARLIN_SMALL_M=auto|0|1 (default auto): products of 1 to 4 rows with AWQ / GPTQ weights run through the GEMV of fllm_marlin_gemv.cu instead
+// of the Marlin GEMM. 0: never. 1: whenever the shape is supported. auto: the first call of every (device, n, k, m, kind, group) runs both,
+// compares the results (the GEMV is dropped for the shape when they differ by more than 1 % of the largest value) and times them (the GEMV is kept when
+// it is at least 5 % faster); the decision is cached. During CUDA graph capture a shape without a decision uses Marlin. The first call of a shape
+// therefore costs a few launches and one stream synchronisation.
+extern "C" int fllm_marlin_gemv_supported(int m, int n, int k, int kind, int group);
+extern "C" int fllm_marlin_gemv(const void* A, const void* B, void* C, void* part, size_t part_bytes, void* tickets, const void* scales,
+                                const void* zeros, int m, int n, int k, int lda, int kind, int group, int bf16, int sms, cudaStream_t stream);
+extern "C" int fllm_marlin_gemv_diff(const void* a, const void* b, size_t count, float* host_out, cudaStream_t s, int bf16);
+
+static std::atomic<int> g_small_m_override{-1};
+// 0 off, 1 on, 2 auto
+static int small_m_mode() {
+  const int o = g_small_m_override.load(std::memory_order_relaxed);
+  if (o >= 0) return o;
+  static const int env = [] {
+    const char* v = getenv("FLLM_MARLIN_SMALL_M");
+    if (!v || !*v || !strcmp(v, "auto")) return 2;
+    if (!strcmp(v, "0") || !strcmp(v, "off") || !strcmp(v, "false") || !strcmp(v, "no")) return 0;
+    return 1;
+  }();
+  return env;
+}
+// selftest-gpu: mode 0, 1 or 2 (auto); negative returns to the environment
+extern "C" void fllm_marlin_small_m_set(int mode) { g_small_m_override.store(mode > 2 ? 2 : mode, std::memory_order_relaxed); }
+
+static int run_gemv(const void* A, const void* B, void* C, void* C_tmp, const void* scales, const void* zeros, int m, int n, int k, int lda,
+                    void* workspace, int kind, int group, int sms, cudaStream_t stream, int bf16) {
+  return fllm_marlin_gemv(A, B, C, C_tmp, C_tmp ? fllm_vllm_marlin_ctmp_bytes(m, sms) : 0, workspace, scales, zeros, m, n, k, lda, kind, group,
+                          bf16, sms, stream);
+}
+
+extern "C" int fllm_vllm_marlin_gemm_t(const void* A, const void* B, void* C, void* C_tmp, const void* scales, const void* zeros,
+                                      const void* bias, const void* global_scale, int m, int n, int k, int lda, void* workspace, int kind,
+                                      int group_size, int dev, int sms, cudaStream_t stream, int bf16) {
+  auto marlin = [&] {
+    return fllm_marlin_gemm_plain(A, B, C, C_tmp, scales, zeros, bias, global_scale, m, n, k, lda, workspace, kind, group_size, dev, sms, stream, bf16);
+  };
+  auto gemv = [&](void* out) {
+    return run_gemv(A, B, out, C_tmp, scales, zeros, m, n, k, lda, workspace, kind, group_size, sms, stream, bf16);
+  };
+  const int mode = (m <= 4 && bias == nullptr && (kind == 0 || kind == 1)) ? small_m_mode() : 0;
+  if (mode == 0 || !fllm_marlin_gemv_supported(m, n, k, kind, group_size)) return marlin();
+  if (mode == 1) return gemv(C) == 0 ? 0 : marlin();
+  // auto
+  static std::mutex mu;
+  static std::map<std::tuple<int, int, int, int, int>, int> decided;  // 1 GEMV, 0 Marlin
+  const auto key = std::make_tuple(dev, n, k, m * 4 + kind * 2 + bf16, group_size);
+  int known = -1;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = decided.find(key);
+    if (it != decided.end()) known = it->second;
+  }
+  if (known == 1) return gemv(C) == 0 ? 0 : marlin();
+  if (known == 0) return marlin();
+  cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+  cudaStreamIsCapturing(stream, &cap);
+  if (cap != cudaStreamCaptureStatusNone) return marlin();
+  // decide: Marlin's result is the reference, the GEMV runs last when it is kept (C then holds its result)
+  static void* ref = nullptr;
+  static size_t ref_bytes = 0;
+  const size_t cbytes = (size_t)m * n * 2;  // FP16 and BF16 are both two bytes
+  int rc = marlin();
+  if (rc != 0) return rc;
+  bool keep = false, same = false;
+  double t_marlin = 0, t_gemv = 0;
+  float h[2] = {0.f, 0.f};
+  void* reference = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (ref_bytes < cbytes) {
+      cudaFree(ref);
+      ref = nullptr;
+      ref_bytes = 0;
+      if (cudaMalloc(&ref, cbytes * 2) == cudaSuccess) ref_bytes = cbytes * 2;
+      cudaGetLastError();
+    }
+    reference = ref_bytes >= cbytes ? ref : nullptr;
+  }
+  // `reference` receives the GEMV result; it is compared with Marlin's (in C)
+  if (reference && gemv(reference) == 0 && fllm_marlin_gemv_diff(C, reference, (size_t)m * n, h, stream, bf16) == 0) {
+    same = h[0] <= 0.01f * h[1] + 1e-6f;
+    if (same) {
+      cudaEvent_t e[3];
+      for (auto& ev : e) cudaEventCreate(&ev);
+      for (int i = 0; i < 2; i++) {
+        marlin();
+        gemv(C);
+      }
+      cudaEventRecord(e[0], stream);
+      for (int i = 0; i < 8; i++) marlin();
+      cudaEventRecord(e[1], stream);
+      for (int i = 0; i < 8; i++) gemv(C);
+      cudaEventRecord(e[2], stream);
+      cudaEventSynchronize(e[2]);
+      float a = 0.f, b = 0.f;
+      cudaEventElapsedTime(&a, e[0], e[1]);
+      cudaEventElapsedTime(&b, e[1], e[2]);
+      t_marlin = a * 1000.0 / 8;
+      t_gemv = b * 1000.0 / 8;
+      keep = t_gemv < 0.95 * t_marlin;
+      for (auto& ev : e) cudaEventDestroy(ev);
+    }
+    if (getenv("FLLM_CUDA_TUNE_LOG") || getenv("FLLM_MARLIN_SMALL_M_LOG"))
+      fprintf(stderr, "[fllm-rs] Marlin small M: m=%d n=%d k=%d kind=%d group=%d: marlin %.1f us, gemv %.1f us, max diff %.3g of %.3g -> %s\n", m, n,
+              k, kind, group_size, t_marlin, t_gemv, h[0], h[1], keep ? "gemv" : (same ? "marlin" : "marlin (results differ)"));
+  }
+  cudaGetLastError();
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    decided[key] = keep ? 1 : 0;
+  }
+  return keep ? 0 : marlin();
+}
+
 extern "C" int fllm_vllm_marlin_gemm(const void* A, const void* B, void* C, void* C_tmp, const void* scales, const void* zeros,
                                     const void* bias, const void* global_scale, int m, int n, int k, int lda, void* workspace, int kind,
                                     int group_size, int dev, int sms, cudaStream_t stream) {
-    const vllm::ScalarType b_type =
-        kind == 0 ? vllm::kU4 : (kind == 1 ? vllm::kU4B8 : (kind == 3 ? vllm::kFE2M1f : (kind == 4 ? vllm::kFE4M3fn : vllm::kU8B128)));
-    const vllm::ScalarType s_type = kind == 3 ? vllm::kFE4M3fn : vllm::kFloat16;
-    const bool has_zp = kind == 0;
-    const int num_groups = group_size == -1 ? 1 : k / group_size;
-    return marlin::marlin_mm(A, B, C, C_tmp, (void*)bias, nullptr, (void*)scales, (void*)global_scale, (void*)zeros, m, n, k, lda,
-                             workspace, vllm::kFloat16, b_type, vllm::kFloat16, s_type, bias != nullptr, has_zp, num_groups,
-                             group_size, dev, stream, -1, -1, sms, false, C_tmp != nullptr, false);
+  return fllm_vllm_marlin_gemm_t(A, B, C, C_tmp, scales, zeros, bias, global_scale, m, n, k, lda, workspace, kind, group_size, dev, sms, stream, 0);
 }

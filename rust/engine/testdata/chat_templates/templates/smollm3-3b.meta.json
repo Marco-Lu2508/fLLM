@@ -1,0 +1,6 @@
+{
+ "bos": null,
+ "eos": "<|im_end|>",
+ "pad": "<|im_end|>",
+ "unk": null
+}

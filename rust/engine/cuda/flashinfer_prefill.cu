@@ -114,6 +114,10 @@ cudaError_t run(cudaStream_t s, State &st, Params &p, int32_t *int_ws_base, void
 }  // namespace fllm_fi
 #endif  // FLLM_HAVE_FLASHINFER
 
+// FLLM_ACT_DTYPE=f16: q and the result are FP16 arrays already (act_api.inc sets this around the call): the conversions to and from FP32 are skipped. Declared in
+// fllm_cuda_internal.h; a call that cannot run FlashInfer then returns -1 and the caller falls back (the other kernels read FP32).
+thread_local bool fllm_attn_half_io = false;
+
 // `rows` consecutive query rows of one sequence whose last row sees `kv_len` positions (`table`: its block table on the
 // device, one entry per page). Returns 0 when the kernel ran, -1 when the shape or the build is not covered (the caller
 // uses the built-in attention), > 0 on a launch error.
@@ -133,10 +137,12 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
     const size_t row_halves = (size_t)kv_heads * dk;
     if (row_halves % 8 != 0 || (reinterpret_cast<uintptr_t>(kpool) & 15) != 0 || (reinterpret_cast<uintptr_t>(vpool) & 15) != 0)
         return -1;
+    const bool half_io = fllm_attn_half_io;
+    if (half_io && ((reinterpret_cast<uintptr_t>(q) | reinterpret_cast<uintptr_t>(out)) & 15) != 0) return -1;
     State &st = g_state;
     const int pages = (kv_len + block_size - 1) / block_size;
     const size_t q_bytes = (size_t)rows * heads * dk * 2;
-    if (!st.q16.reserve(q_bytes) || !st.o16.reserve(q_bytes) || !st.indices.reserve((size_t)pages * 4 + 256) ||
+    if ((!half_io && (!st.q16.reserve(q_bytes) || !st.o16.reserve(q_bytes))) || !st.indices.reserve((size_t)pages * 4 + 256) ||
         !st.small.reserve(256) || !st.float_ws.reserve(kFloatWorkspace) || !st.int_ws.reserve(kIntWorkspace))
         return -1;
     if (!st.pinned && cudaMallocHost(&st.pinned, kIntWorkspace) != cudaSuccess) {
@@ -191,17 +197,17 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
         }
         const size_t q_elems = (size_t)rows * heads * dk;
         auto grid = [](size_t n) { return (unsigned)((n + 255) / 256 > 4096 ? 4096 : (n + 255) / 256); };
-        float_to_half_kernel<<<grid(q_elems), 256, 0, s>>>(q, static_cast<__half *>(st.q16.ptr), q_elems);
+        if (!half_io) float_to_half_kernel<<<grid(q_elems), 256, 0, s>>>(q, static_cast<__half *>(st.q16.ptr), q_elems);
 
         Params p;
-        p.q = static_cast<__half *>(st.q16.ptr);
+        p.q = half_io ? const_cast<__half *>(reinterpret_cast<const __half *>(q)) : static_cast<__half *>(st.q16.ptr);
         p.paged_kv = flashinfer::paged_kv_t<__half, int32_t>(
             kv_heads, block_size, dk, /*batch_size=*/1, flashinfer::QKVLayout::kNHD,
             const_cast<__half *>(reinterpret_cast<const __half *>(kpool)),
             const_cast<__half *>(reinterpret_cast<const __half *>(vpool)), static_cast<int32_t *>(st.indices.ptr),
             small + 4, small + 8);
         p.q_indptr = small;
-        p.o = static_cast<__half *>(st.o16.ptr);
+        p.o = half_io ? reinterpret_cast<__half *>(out) : static_cast<__half *>(st.o16.ptr);
         p.lse = nullptr;
         p.num_qo_heads = heads;
         p.group_size = flashinfer::uint_fastdiv(heads / kv_heads);
@@ -229,7 +235,9 @@ int fllm_flashinfer_prefill_try(cudaStream_t s, const float *q, const uint16_t *
             cudaGetLastError();
             return -1;
         }
-        if (fllm_attn_x16 != nullptr && (reinterpret_cast<uintptr_t>(fllm_attn_x16) & 15) == 0) {
+        if (half_io) {
+            // the result is already where the caller wants it
+        } else if (fllm_attn_x16 != nullptr && (reinterpret_cast<uintptr_t>(fllm_attn_x16) & 15) == 0) {
             half_to_float_copy_kernel<<<grid(q_elems), 256, 0, s>>>(static_cast<const __half *>(st.o16.ptr), out,
                                                                     static_cast<__half *>(fllm_attn_x16), q_elems);
             fllm_attn_x16_written = true;

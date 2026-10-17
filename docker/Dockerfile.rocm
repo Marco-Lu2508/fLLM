@@ -1,0 +1,84 @@
+# fLLM image with the AMD ROCm / HIP backend (CDNA, RDNA2-4), CPU and the wgpu paths included.
+#
+#   docker build -f docker/Dockerfile.rocm -t fllm:rocm .
+#   docker run -it --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-add render --security-opt seccomp=unconfined \
+#       -v fllm:/home/fllm/.cache fllm:rocm run unsloth/Qwen3.5-9B-GGUF:Q4_K_M --device hip
+#   docker run -d --device=/dev/kfd --device=/dev/dri --group-add video --group-add render -v fllm:/home/fllm/.cache -p 8000:8000 \
+#       fllm:rocm serve --model unsloth/Qwen3.5-9B-GGUF:Q4_K_M --host 0.0.0.0 --port 8000 --device hip
+#
+# The builder compiles the CUDA sources and rust/engine/hip/*.cu with hipcc (FLLM_HIP=1, see docs/gpu-backends.md). The device code of every
+# architecture in HIP_ARCHS is embedded in the binary; the HIP runtime (libamdhip64) is linked dynamically and comes from the runtime stage.
+# The host needs the amdgpu kernel driver (/dev/kfd) only, not ROCm. Test level of the HIP kernels: L0 (compiled; see docs/changes/hip.md).
+#
+# Build arguments
+#   BASE_IMAGE        ROCm development image of the builder. The default is the digest that .github/workflows/kernels.yml compiles with
+#                     (ROCm 7.x core SDK layout, /opt/rocm, packages amdrocm-*). For the classic layout use e.g.
+#                     rocm/dev-ubuntu-24.04:6.4.3 together with RUNTIME_PACKAGES=hip-runtime-amd.
+#   HIP_ARCHS         offload architectures, separated by semicolons (gfx906 is Vega 20, gfx90a MI200, gfx942 MI300, gfx950 MI350,
+#                     gfx1030 RDNA2, gfx1100-1102 RDNA3, gfx1151 Strix Halo, gfx1200/1201 RDNA4). A single one shortens the build a lot.
+#   RUNTIME_PACKAGES  apt package(s) of the runtime stage that provide libamdhip64 and the libraries it loads. The repository definition and
+#                     key are taken from the builder image, so builder and runtime come from the same ROCm repository.
+#   JOBS              cargo parallelism
+#   RUST_FEATURES     cargo features; "rust-gpu,hip" = wgpu (Vulkan/DX12) + HIP
+
+ARG BASE_IMAGE=rocm/dev-ubuntu-24.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
+ARG UBUNTU=24.04
+
+# ---------------------------------------------------------------- builder
+FROM ${BASE_IMAGE} AS builder
+ARG JOBS=4
+ARG HIP_ARCHS="gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
+ARG RUST_FEATURES="rust-gpu,hip"
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates pkg-config cmake clang build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:/opt/rocm/bin:$PATH ROCM_PATH=/opt/rocm FLLM_HIP=1
+WORKDIR /build/fLLM
+
+# Dependency layer: build all crates.io dependencies against stub sources (the hip feature is left out here, it does not change the
+# dependencies), so this layer is reused until a Cargo.toml / Cargo.lock changes.
+COPY Cargo.toml Cargo.lock ./
+COPY rust/engine/Cargo.toml rust/engine/build.rs rust/engine/
+COPY rust/gguf-probe/Cargo.toml rust/gguf-probe/
+COPY rust/checkpoint/Cargo.toml rust/checkpoint/
+RUN for c in engine gguf-probe checkpoint; do mkdir -p rust/$c/src && : > rust/$c/src/lib.rs; done \
+ && mkdir -p rust/engine/src/bin rust/engine/cuda && echo 'fn main() {}' > rust/engine/src/bin/serve.rs \
+ && CARGO_BUILD_JOBS=${JOBS} cargo build --release --locked --features "rust-gpu" -p fllm-engine --bin fllm-rs \
+ && rm -rf rust/engine/src rust/gguf-probe/src rust/checkpoint/src
+
+# Real build
+COPY rust ./rust
+RUN touch rust/*/src/lib.rs rust/engine/src/bin/serve.rs rust/engine/build.rs \
+ && FLLM_HIP_ARCHS="${HIP_ARCHS}" CARGO_BUILD_JOBS=${JOBS} \
+    cargo build --release --locked --features "${RUST_FEATURES}" -p fllm-engine --bin fllm-rs \
+ && strip target/release/fllm-rs \
+ && (ldd target/release/fllm-rs | grep -E "amdhip64|not found" || true)
+
+# ---------------------------------------------------------------- runtime
+FROM ubuntu:${UBUNTU} AS runtime
+ARG RUNTIME_PACKAGES="amdrocm-runtime10.1"
+ENV DEBIAN_FRONTEND=noninteractive
+# the ROCm repository of the builder (source list + signing key) provides the runtime libraries
+COPY --from=builder /etc/apt/keyrings /etc/apt/keyrings
+COPY --from=builder /etc/apt/sources.list.d/rocm.list /etc/apt/sources.list.d/rocm.list
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates ${RUNTIME_PACKAGES} \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo /opt/rocm/lib > /etc/ld.so.conf.d/rocm.conf && ldconfig
+COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
+# Unprivileged user (uid 1000, so bind-mounted host directories of the first Linux user work); video / render give access to /dev/kfd and
+# /dev/dri (the group ids of the host differ: pass --group-add with the numeric ids if the names do not match).
+RUN (userdel -r ubuntu 2>/dev/null || true) \
+ && useradd -m -u 1000 -G video,render fllm \
+ && mkdir -p /home/fllm/.cache && chown fllm:fllm /home/fllm/.cache
+USER fllm
+WORKDIR /home/fllm
+# Models downloaded by `run` / `serve --model owner/repo` land in $HF_HOME/hub (= /home/fllm/.cache/huggingface/hub).
+ENV HF_HOME=/home/fllm/.cache/huggingface
+# Cards the ROCm release does not list officially can sometimes run the kernels of a close relative, e.g. HSA_OVERRIDE_GFX_VERSION=11.0.0
+# for gfx1101/gfx1102 or 10.3.0 for gfx1031/gfx1032 (see docs/changes/hip.md). Unset by default.
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 CMD curl -fsS http://127.0.0.1:${FLLM_PORT:-8000}/health || exit 1
+ENTRYPOINT ["fllm-rs"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8000", "--device", "auto"]

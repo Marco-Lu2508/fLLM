@@ -1,0 +1,641 @@
+{
+ "comment": {
+  "ok": "abd"
+ },
+ "concat_bool_none": {
+  "ok": "aTrueNone"
+ },
+ "concat_numbers": {
+  "ok": "a1b2.5"
+ },
+ "dash_whitespace": {
+  "ok": "abc"
+ },
+ "e_adjacent_literals": {
+  "ok": "ab"
+ },
+ "e_and_or": {
+  "ok": "False True dflt z b None"
+ },
+ "e_attr_on_str": {
+  "ok": ""
+ },
+ "e_auto_escape_off": {
+  "ok": "<b>& <b>&"
+ },
+ "e_bool_arith": {
+  "ok": "2 2"
+ },
+ "e_bool_literals_py": {
+  "ok": "True False None tn"
+ },
+ "e_compare_chain": {
+  "ok": "True False True False"
+ },
+ "e_content_blocks_join": {
+  "ok": "A<img>B"
+ },
+ "e_content_is_string_check": {
+  "ok": "SSS"
+ },
+ "e_cycler": {
+  "ok": "aba"
+ },
+ "e_dict_attr_vs_item": {
+  "ok": "1 2"
+ },
+ "e_dict_func": {
+  "ok": "{'a': 1} {'a': 1}"
+ },
+ "e_dict_get_nested": {
+  "ok": "q 1"
+ },
+ "e_dict_get_variants": {
+  "ok": "textANoneD"
+ },
+ "e_dict_iter": {
+  "ok": "b=2;a=1;c=M;"
+ },
+ "e_dict_iter_plain": {
+  "ok": "b;a;c;"
+ },
+ "e_dict_literal": {
+  "ok": "{'a': 1, 'b': [1, 2]} 1 [1, 2] none 1 ['a', 'b'] [1, [1, 2]]"
+ },
+ "e_dict_pop_setdefault": {
+  "err": "SecurityError: access to attribute 'pop' of 'dict' object is unsafe."
+ },
+ "e_dict_update": {
+  "err": "SecurityError: access to attribute 'update' of 'dict' object is unsafe."
+ },
+ "e_dictsort_in_for": {
+  "ok": "abc"
+ },
+ "e_do": {
+  "err": "TemplateSyntaxError: Encountered unknown tag 'do'."
+ },
+ "e_expression_statement_lstrip": {
+  "ok": "line\n  x\nend"
+ },
+ "e_filter_block": {
+  "ok": "ABC 7"
+ },
+ "e_float_format": {
+  "ok": "2.50 2.50     a"
+ },
+ "e_global_functions": {
+  "ok": "[0, 1] True {'a': 1, 'b': 2} True True"
+ },
+ "e_if_elif": {
+  "ok": "seven"
+ },
+ "e_if_in": {
+  "ok": "has a no zz"
+ },
+ "e_if_is_defined": {
+  "ok": "no tc"
+ },
+ "e_if_is_defined_nested": {
+  "err": "UndefinedError: 'dict object' has no attribute 'x'"
+ },
+ "e_in_dict_keys": {
+  "ok": "True True"
+ },
+ "e_include_fail": {
+  "err": "TypeError: no loader for this environment specified"
+ },
+ "e_inline_dict_key_access_num": {
+  "ok": "a"
+ },
+ "e_inline_if_whitespace": {
+  "ok": "start A end"
+ },
+ "e_int_division_zero": {
+  "err": "ZeroDivisionError: integer division or modulo by zero"
+ },
+ "e_is_in_ops": {
+  "ok": "ok"
+ },
+ "e_joiner": {
+  "ok": "3, 1, 2, 3"
+ },
+ "e_list_append": {
+  "err": "SecurityError: access to attribute 'append' of 'list' object is unsafe."
+ },
+ "e_list_eq": {
+  "ok": "True True"
+ },
+ "e_list_extend_insert": {
+  "err": "SecurityError: access to attribute 'extend' of 'list' object is unsafe."
+ },
+ "e_list_ops": {
+  "ok": "[3, 1, 2, 3, 9] [1, 2, 1, 2] 3 3 [1, 2] [3, 2, 1, 3] [1, 2, 3] [3, 1, 2] True"
+ },
+ "e_list_pop": {
+  "err": "SecurityError: access to attribute 'pop' of 'list' object is unsafe."
+ },
+ "e_loop_break": {
+  "ok": "3"
+ },
+ "e_loop_changed": {
+  "ok": "True;True;True;True;"
+ },
+ "e_loop_continue": {
+  "ok": "323"
+ },
+ "e_loop_cycle": {
+  "ok": "abab"
+ },
+ "e_loop_depth": {
+  "ok": "10"
+ },
+ "e_loop_else": {
+  "ok": "none"
+ },
+ "e_loop_filter": {
+  "ok": "31;22;33;"
+ },
+ "e_loop_in_macro": {
+  "ok": "1234"
+ },
+ "e_loop_index_scoping": {
+  "ok": "1"
+ },
+ "e_loop_length_after_filter": {
+  "ok": "2False;2True;"
+ },
+ "e_loop_over_string": {
+  "ok": "a-b-c-"
+ },
+ "e_loop_prev_next": {
+  "ok": "/1;3/2;1/3;2/;"
+ },
+ "e_loop_recursive": {
+  "ok": "k(deep)"
+ },
+ "e_loop_slice": {
+  "ok": "assistant;user;3;2;1;"
+ },
+ "e_loop_unpack_tuple": {
+  "ok": "3;7;"
+ },
+ "e_loop_var_after_if": {
+  "ok": "FML"
+ },
+ "e_loop_vars": {
+  "ok": "10TrueFalse443;21FalseFalse432;32FalseFalse421;43FalseTrue410;"
+ },
+ "e_lstrip_tab": {
+  "ok": "a"
+ },
+ "e_lstrip_with_text_before_block": {
+  "ok": "abc  x"
+ },
+ "e_macro": {
+  "err": "TemplateSyntaxError: expected token 'name', got '*'"
+ },
+ "e_macro_caller": {
+  "ok": "[inner]"
+ },
+ "e_macro_in_loop_scope": {
+  "ok": "<3><1><2><3>"
+ },
+ "e_macro_recursion": {
+  "ok": "120"
+ },
+ "e_math": {
+  "ok": "8 6 14 3.5 3 1 -7 49 7"
+ },
+ "e_mixed_numeric_compare": {
+  "ok": "True True"
+ },
+ "e_msgs_length_minus": {
+  "ok": "2 2"
+ },
+ "e_namespace_in_loop": {
+  "ok": "True again"
+ },
+ "e_negative_index_msgs": {
+  "ok": "again user "
+ },
+ "e_nested_loops_loop_var": {
+  "ok": "121;122;"
+ },
+ "e_none_attr": {
+  "ok": ""
+ },
+ "e_none_compare": {
+  "ok": "True True False"
+ },
+ "e_not_in": {
+  "ok": "True"
+ },
+ "e_ops_precedence_filter": {
+  "ok": "1 33 a7 4 4"
+ },
+ "e_raise_exception": {
+  "err": "TemplateError: custom failure 7"
+ },
+ "e_raise_exception_not_reached": {
+  "ok": "ok"
+ },
+ "e_raise_in_if": {
+  "err": "TemplateError: bad role"
+ },
+ "e_range": {
+  "ok": "[0, 1, 2] [1, 2, 3] [0, 3, 6, 9] [3, 2, 1]"
+ },
+ "e_set_block": {
+  "ok": "[captured 7]"
+ },
+ "e_set_filter_block": {
+  "ok": "ABC"
+ },
+ "e_set_in_for_not_leaking": {
+  "ok": "[]"
+ },
+ "e_set_multi": {
+  "ok": "12 34"
+ },
+ "e_set_namespace": {
+  "ok": "2 []"
+ },
+ "e_set_ns_list_concat": {
+  "ok": "['a', 'b']"
+ },
+ "e_strftime_now_len": {
+  "ok": "4"
+ },
+ "e_strftime_now_month_name": {
+  "ok": "True"
+ },
+ "e_string_compare": {
+  "ok": "True True True"
+ },
+ "e_string_escapes": {
+  "ok": "a\nb|tab\there|quote's|\\"
+ },
+ "e_string_methods_on_nonstring": {
+  "err": "UndefinedError: 'int object' has no attribute 'upper'"
+ },
+ "e_string_unicode_escape": {
+  "ok": "é你"
+ },
+ "e_syntax_error": {
+  "err": "TemplateSyntaxError: Expected an expression, got 'end of statement block'"
+ },
+ "e_ternary": {
+  "ok": "a b |"
+ },
+ "e_ternary_chain": {
+  "ok": "b"
+ },
+ "e_trim_after_endfor": {
+  "ok": "1\n2\nend"
+ },
+ "e_tuple": {
+  "ok": "(1, 2, 3) 2 3"
+ },
+ "e_tuple_unpack_swap": {
+  "ok": "21"
+ },
+ "e_undefined_attr": {
+  "err": "UndefinedError: 'missing' is undefined"
+ },
+ "e_undefined_for": {
+  "ok": "empty"
+ },
+ "e_undefined_in_if": {
+  "ok": "no n"
+ },
+ "e_undefined_item": {
+  "ok": "|||"
+ },
+ "e_undefined_len": {
+  "ok": "0"
+ },
+ "e_unknown_filter": {
+  "err": "TemplateAssertionError: No filter named 'nosuchfilter'."
+ },
+ "e_unknown_function": {
+  "err": "UndefinedError: 'nosuchfunc' is undefined"
+ },
+ "e_unknown_test": {
+  "err": "TemplateAssertionError: No test named 'nosuchtest'."
+ },
+ "e_whitespace_for_lines": {
+  "ok": "user: hi\nassistant: yo\nuser: again\ndone"
+ },
+ "e_whitespace_if_chain": {
+  "ok": "  A\n"
+ },
+ "e_with": {
+  "ok": "3"
+ },
+ "f_abs_round_int_float": {
+  "ok": "3 2.6 2.0 2.56 5 9 2.5 3.0 7"
+ },
+ "f_attr": {
+  "ok": ""
+ },
+ "f_batch": {
+  "ok": "[[3, 1, 2], [3]] [[3, 1, 2], [3, 'x', 'x']]"
+ },
+ "f_capitalize_title": {
+  "ok": "Hello world Hello World-X abc ABC"
+ },
+ "f_default": {
+  "ok": "dflt None dflt e x"
+ },
+ "f_dictsort_by_value": {
+  "ok": "[('b', 1), ('a', 3)]"
+ },
+ "f_filesizeformat": {
+  "ok": "1.2 MB 1.5 KiB"
+ },
+ "f_first_last": {
+  "ok": "3 3 apple a c "
+ },
+ "f_forceescape": {
+  "ok": "&lt;"
+ },
+ "f_format_filter": {
+  "ok": "a=1"
+ },
+ "f_groupby": {
+  "ok": "assistant=1;user=2;"
+ },
+ "f_indent": {
+  "ok": "a\n  b\n  c|  a\n  b\n  c|  a\n  \n  c"
+ },
+ "f_int_of_bool": {
+  "ok": "1 0"
+ },
+ "f_items_dictsort": {
+  "ok": "[('a', 1), ('b', 2), ('c', {'x': [1, 2.5, 'y', None, True]})] [('c', {'x': [1, 2.5, 'y', None, True]}), ('b', 2), ('a', 1)] [('b', 2), ('a', 1), ('c', {'x': [1, 2.5, 'y', None, True]})]"
+ },
+ "f_join_attr": {
+  "ok": "hi, yo, again"
+ },
+ "f_length_count": {
+  "ok": "4 3 4"
+ },
+ "f_list": {
+  "ok": "['a', 'b', 'c'] ['b', 'a', 'c'] [0, 1, 2]"
+ },
+ "f_map_attribute": {
+  "ok": "['user', 'assistant', 'user'] 6"
+ },
+ "f_map_filter": {
+  "ok": "['APPLE', 'BANANA', 'CHERRY'] [5, 6, 6] apple,banana,cherry"
+ },
+ "f_pprint": {
+  "ok": "{'a': 1, 'b': 2, 'c': {'x': [1, 2.5, 'y', None, True]}}"
+ },
+ "f_rejectattr_none": {
+  "ok": "3"
+ },
+ "f_replace_nonstr": {
+  "ok": "1x3"
+ },
+ "f_reverse": {
+  "ok": "[3, 2, 1, 3] cba"
+ },
+ "f_safe_striptags": {
+  "ok": "x <b>"
+ },
+ "f_select": {
+  "ok": "[3, 1, 3] [2] [1, 'a'] [2] [3, 2, 3]"
+ },
+ "f_selectattr": {
+  "ok": "2 3 ['yo', 'again'] ['yo'] 0 1"
+ },
+ "f_slice": {
+  "ok": "[[3, 1], [2, 3]]"
+ },
+ "f_sort": {
+  "ok": "[1, 2, 3, 3] ['apple', 'Banana', 'cherry'] ['Banana', 'apple', 'cherry'] [3, 3, 2, 1]"
+ },
+ "f_sum_min_max": {
+  "ok": "9 1 3 3.5"
+ },
+ "f_tojson_empty": {
+  "ok": "[] {} [] {}"
+ },
+ "f_tojson_ensure_ascii": {
+  "ok": "\"Gr\\u00fc\\u00dfe \\u4f60\\u597d \\ud83d\\ude00\" \"Grüße 你好 😀\" \"Grüße 你好 😀\""
+ },
+ "f_tojson_floats": {
+  "ok": "[1.0, 2.5, 1e+20, 1e-07, 100000.0, 123456789.12345679, 0.1]"
+ },
+ "f_tojson_html_chars": {
+  "ok": "\"<a href=\\\"x\\\">&'</a>\""
+ },
+ "f_tojson_indent": {
+  "ok": "{\n  \"b\": 2,\n  \"a\": 1,\n  \"c\": {\n    \"x\": [\n      1,\n      2.5,\n      \"y\",\n      null,\n      true\n    ]\n  }\n}"
+ },
+ "f_tojson_indent4": {
+  "ok": "{\n    \"b\": 2,\n    \"a\": 1,\n    \"c\": {\n        \"x\": [\n            1,\n            2.5,\n            \"y\",\n            null,\n            true\n        ]\n    }\n}"
+ },
+ "f_tojson_message_list": {
+  "ok": "[{\"role\": \"user\", \"content\": \"hi\", \"n\": 1}, {\"role\": \"assistant\", \"content\": \"yo\", \"n\": 2}, {\"role\": \"user\", \"content\": \"again\", \"n\": 3}]"
+ },
+ "f_tojson_nested_indent": {
+  "ok": "{\n  \"k\": {\n    \"deep\": [\n      1,\n      {\n        \"z\": \"q\"\n      }\n    ]\n  }\n}"
+ },
+ "f_tojson_plain": {
+  "ok": "{\"b\": 2, \"a\": 1, \"c\": {\"x\": [1, 2.5, \"y\", null, true]}} [3, 1, 2, 3] \"  Hello, World  \" \"Grüße 你好 😀\" null true 2.5"
+ },
+ "f_tojson_separators": {
+  "ok": "{\"b\":2,\"a\":1,\"c\":{\"x\":[1,2.5,\"y\",null,true]}} {\"b\":2,\"a\":1,\"c\":{\"x\":[1,2.5,\"y\",null,true]}}"
+ },
+ "f_tojson_sort_keys": {
+  "ok": "{\"a\": 1, \"b\": 2, \"c\": {\"x\": [1, 2.5, \"y\", null, true]}} {\n \"a\": 1,\n \"b\": 2,\n \"c\": {\n  \"x\": [\n   1,\n   2.5,\n   \"y\",\n   null,\n   true\n  ]\n }\n}"
+ },
+ "f_tojson_specials": {
+  "ok": "\"line1\\nline2\\ttab \\\\ \\\"q\\\" \\u0001\""
+ },
+ "f_trim": {
+  "ok": "[Hello, World] [hi]"
+ },
+ "f_trim_chain": {
+  "ok": "HEllO, WORlD"
+ },
+ "f_truncate": {
+  "ok": "The... The qui... short"
+ },
+ "f_unique": {
+  "ok": "[3, 1, 2] ['a', 'b']"
+ },
+ "f_urlencode_escape": {
+  "ok": "a%20b%26c/%C3%BC &lt;b&gt;&amp;&#34;&#39; &lt;b&gt;"
+ },
+ "f_wordcount_center": {
+  "ok": "3   ab  |"
+ },
+ "f_xmlattr": {
+  "ok": " a=\"1\" b=\"x y\""
+ },
+ "lstrip_blocks": {
+  "ok": "x\n    A\ny"
+ },
+ "print_bool": {
+  "ok": "True False None True False None"
+ },
+ "print_dict": {
+  "ok": "{'b': 2, 'a': 1, 'c': {'x': [1, 2.5, 'y', None, True]}}"
+ },
+ "print_float": {
+  "ok": "2.5 1.0 3.14159 1000.0 0.30000000000000004 2.5 2 1 1024"
+ },
+ "print_int_big": {
+  "ok": "12345678901234 -5"
+ },
+ "print_list": {
+  "ok": "[3, 1, 2, 3] ['apple', 'Banana', 'cherry']"
+ },
+ "print_str_in_list_quotes": {
+  "ok": "[\"it's\", 'say \"x\"', 'back\\\\slash', 'tab\\t']"
+ },
+ "print_undefined": {
+  "ok": "[]"
+ },
+ "raw_block": {
+  "ok": "{{ not }}"
+ },
+ "str_capitalize": {
+  "ok": "  hello, world  |Grüße 你好 😀"
+ },
+ "str_casefold": {
+  "ok": "  hello, world  |grüsse 你好 😀"
+ },
+ "str_encode": {
+  "ok": "3"
+ },
+ "str_expandtabs": {
+  "ok": "a   b"
+ },
+ "str_find": {
+  "ok": "2 3 -1 2 2"
+ },
+ "str_format": {
+  "ok": "a and b xyx n"
+ },
+ "str_in": {
+  "ok": "True False False"
+ },
+ "str_index": {
+  "ok": "H   😀"
+ },
+ "str_isalpha": {
+  "ok": "False|False"
+ },
+ "str_isdigit": {
+  "ok": "False|False"
+ },
+ "str_islower": {
+  "ok": "False|False"
+ },
+ "str_isspace": {
+  "ok": "True False"
+ },
+ "str_istitle": {
+  "ok": "True"
+ },
+ "str_isupper": {
+  "ok": "False|False"
+ },
+ "str_join": {
+  "ok": "apple,Banana,cherry apple-Banana-cherry appleBananacherry"
+ },
+ "str_len": {
+  "ok": "16 10 16"
+ },
+ "str_lower": {
+  "ok": "  hello, world  |grüße 你好 😀"
+ },
+ "str_lstrip": {
+  "ok": "Hello, World  |Grüße 你好 😀"
+ },
+ "str_mul": {
+  "ok": "ababab "
+ },
+ "str_partition": {
+  "ok": "('a', '=', 'b=c') ('a=b', '=', 'c')"
+ },
+ "str_percent": {
+  "ok": "a-b 5"
+ },
+ "str_removeprefix": {
+  "ok": "x x"
+ },
+ "str_replace": {
+  "ok": "  HeLLo, WorLd     HeLlo, World     Hell0, W0rld  "
+ },
+ "str_rstrip": {
+  "ok": "  Hello, World|Grüße 你好 😀"
+ },
+ "str_slice": {
+  "ok": "Hello d     H   dlroW ,olleH   rüß  Hlo ol "
+ },
+ "str_split": {
+  "ok": "['a', 'b', '', 'c'] ['a', 'b', 'c'] ['a', 'b,c'] ['a,b', 'c']"
+ },
+ "str_splitlines": {
+  "ok": "['a', 'b', 'c']"
+ },
+ "str_startswith": {
+  "ok": "True True True True"
+ },
+ "str_strip": {
+  "ok": "Hello, World|Grüße 你好 😀"
+ },
+ "str_strip_chars": {
+  "ok": "hi hixx xxhi"
+ },
+ "str_swapcase": {
+  "ok": "  hELLO, wORLD  |gRÜSSE 你好 😀"
+ },
+ "str_title": {
+  "ok": "  Hello, World  |Grüße 你好 😀"
+ },
+ "str_upper": {
+  "ok": "  HELLO, WORLD  |GRÜSSE 你好 😀"
+ },
+ "str_zfill_ljust": {
+  "ok": "005 ab...|    ab| **ab**"
+ },
+ "string_filter": {
+  "ok": "{'b': 2, 'a': 1, 'c': {'x': [1, 2.5, 'y', None, True]}} [3, 1, 2, 3] True None 7"
+ },
+ "string_of_str_in_dict": {
+  "ok": "{'k': 'v'}"
+ },
+ "t_basic": {
+  "ok": "True True True True True True False True True True True True True True"
+ },
+ "t_callable_string": {
+  "ok": "True True False"
+ },
+ "t_comparison": {
+  "ok": "True True True True True True True True True"
+ },
+ "t_mapping_undefined": {
+  "ok": "False True False"
+ },
+ "t_not": {
+  "ok": "True True False True"
+ },
+ "t_true_false": {
+  "ok": "True True False"
+ },
+ "trailing_newline": {
+  "ok": "text"
+ },
+ "trim_blocks": {
+  "ok": "A\nB"
+ },
+ "two_trailing_newlines": {
+  "ok": "text\n"
+ }
+}

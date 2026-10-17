@@ -3,7 +3,8 @@
 # CPU backend against itself and so checks the test and the CPU kernels). No job here has a GPU: what passes is level L0/L1-CPU of
 # docs/gpu-backends.md. Real GPUs: conformance.yml (self-hosted runners). Release assets: release.yml.
 #
-# The two manual jobs at the end (windows-cuda, windows-package) are long and run only on workflow_dispatch.
+# The two manual jobs at the end (windows-cuda: compile check, keeps build.log; windows-package: the release zip without the upload) are long
+# and run only on workflow_dispatch.
 name: platforms
 
 # The four-OS matrix takes 11-17 minutes, so it only runs when code or the build changes (not for README or docs edits).
@@ -103,6 +104,13 @@ jobs:
         shell: bash
         run: cargo test --release --locked -p fllm-engine --lib --features "$FEATURES"
 
+      # Tiny random models (dense, quantized, MoE, hybrid) on the Apple GPU against the host path; --nocapture prints one result line per model
+      # (see docs/changes/metal.md for the expected lines). The same tests also ran in the step above, where their output is hidden.
+      - name: Metal whole-model tests (Apple GPU)
+        if: always() && matrix.runner == 'macos-14'
+        shell: bash
+        run: cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" whole_model device_arch_ops -- --nocapture --test-threads=1
+
       - name: Clippy
         shell: bash
         run: cargo clippy --release --locked -p fllm-engine --lib --bins --features "$FEATURES" -- -D warnings
@@ -115,6 +123,15 @@ jobs:
       - name: CPU kernel self test
         shell: bash
         run: cargo run --release --locked -p fllm-engine --features "$FEATURES" --bin fllm-rs -- selftest-cpu
+
+      # The runners have no GPU (Windows: WARP / SwiftShader only): the GPU choices must be refused with a clear message, not crash.
+      - name: No hardware GPU adapter (clear refusal, CPU keeps working)
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          bin=target/release/fllm-rs
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          scripts/no-gpu-smoke.sh "$bin"
 
       - name: Self-test harness against the CPU backend
         shell: bash
@@ -131,7 +148,8 @@ jobs:
           if-no-files-found: ignore
 
   # The CUDA kernels on Windows: nvcc with the MSVC host compiler, objects packed by lib.exe (build.rs). Compile and link only (no GPU on
-  # the runner). Long, so manual only; FLLM_CUDA_ARCHS keeps it to two architectures. The Marlin sources are the long part.
+  # the runner). This job produces no package; only build.log is kept as an artifact. Long, so manual only; FLLM_CUDA_ARCHS keeps it to two
+  # architectures. The Marlin sources are the long part. The packaged variant of this build is the windows-cuda job in release.yml.
   windows-cuda:
     name: Windows CUDA kernels (compile only)
     if: github.event_name == 'workflow_dispatch'
@@ -162,7 +180,13 @@ jobs:
           sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
           log-file-suffix: "windows-cuda.txt"
 
-      - name: Build with the CUDA kernels (static C runtime, Ampere and Blackwell)
+      - name: CUTLASS and FlashInfer headers (Blackwell NVFP4 and Turing+ prefill attention)
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
+          git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer
+
+      - name: Build with the CUDA kernels (MSVC host flags /Zc:__cplusplus /std:c++17 /EHsc, static C runtime, Ampere and Blackwell)
         id: build
         shell: pwsh
         env:
@@ -171,6 +195,7 @@ jobs:
           FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler -diag-suppress 69"
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
+          nvcc --version
           cargo build --release --locked -p fllm-engine --features "rust-gpu,cuda" --bin fllm-rs *> build.log
           exit $LASTEXITCODE
 
@@ -184,7 +209,17 @@ jobs:
           Write-Host "== last 60 lines"
           Get-Content build.log -Tail 60
 
-  # What the release job does, without the upload: build-windows.ps1 end to end (loads the VS environment, builds, smoke test, zip).
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-cuda-buildlog
+          path: build.log
+          if-no-files-found: ignore
+
+  # The release build of Windows minus the upload, plus the unit tests: build-windows.ps1 end to end (loads the VS
+  # environment, Vulkan SDK like in release.yml, builds, runs the unit tests, smoke test, writes dist/*.zip and
+  # dist/*.zip.sha256). release.yml skips the tests because the matrix job above already runs them.
   windows-package:
     name: Windows release package
     if: github.event_name == 'workflow_dispatch'
@@ -207,9 +242,16 @@ jobs:
           key: windows-package
           save-if: "false"
 
+      - name: Vulkan SDK (glslc for the native Vulkan backend, sets VULKAN_SDK - same step as in release.yml)
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
       - name: Build and pack
         shell: pwsh
-        run: ./scripts/build-windows.ps1 -NoVulkan
+        run: ./scripts/build-windows.ps1
 
       - name: Keep the package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

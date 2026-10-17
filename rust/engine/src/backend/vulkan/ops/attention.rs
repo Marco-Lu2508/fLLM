@@ -39,13 +39,13 @@ impl KvLayout {
         }
         let layout = Self {
             kind: kv.kv_kind,
-            kv_heads: kv.kv_heads,
-            head_dim: kv.head_dim,
-            value_dim: kv.value_dim,
+            kv_heads: kv.layer_kv_heads(layer_idx),
+            head_dim: kv.layer_head_dim(layer_idx),
+            value_dim: kv.layer_value_dim(layer_idx),
             block_size: kv.block_size,
             pool_blocks: kv.pool_blocks,
-            key_base: layer_idx * kv.words_per_layer_k,
-            value_base: layer_idx * kv.words_per_layer_v,
+            key_base: kv.layer_key_offset(layer_idx),
+            value_base: kv.layer_value_offset(layer_idx),
         };
         layout.check()?;
         Ok(layout)

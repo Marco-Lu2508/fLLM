@@ -1,4 +1,4 @@
-# CPU checks of the quantized-linear shaders (package 2)
+# CPU checks of the quantized-linear shaders
 
 No GPU is involved. These scripts check the shader **text** on the CPU; the verification level of the shaders stays **L0** (never run on a Vulkan device).
 

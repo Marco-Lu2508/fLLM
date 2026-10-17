@@ -558,6 +558,10 @@ pub(crate) mod testkit {
     /// All sources of the package (file name, text).
     pub(crate) const SOURCES: &[(&str, &str)] = &[
         (
+            "arch_ops.metal",
+            include_str!("../../../../metal/arch_ops.metal"),
+        ),
+        (
             "moe_route.metal",
             include_str!("../../../../metal/moe_route.metal"),
         ),

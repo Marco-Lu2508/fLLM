@@ -328,7 +328,7 @@ int fllm_mmvq_try(cudaStream_t s, const void *W, int kind, const float *X, float
         const size_t groups = (size_t)batch * cols / 32;
 #if !defined(__HIPCC__)
         if (fllm_glu_up) {  // X is the gate of a gated activation that this quantization computes (FLLM_FUSE_GLU_Q8)
-            fllm_quantize_x8_glu_launch(s, X, fllm_glu_up, fllm_glu_mode, xq, xs, groups);
+            fllm_quantize_x8_glu_launch(s, X, fllm_glu_up, fllm_glu_mode, xq, xs, groups, fllm_glu_half);
         } else
 #endif
         {

@@ -1,148 +1,148 @@
-# Metal-Kern: API für Paket 6 (Shader) und Paket 7 (Integration)
+# Metal core: API for the shader and integration layers
 
-Stand: **L0** – kompiliert für `aarch64-apple-darwin` (`--features metal`), clippy-sauber, die reinen Teile haben
-Unit-Tests auf dem Linux-Host. Nichts davon ist je auf einem Mac gelaufen. Ein Selbsttest für die erste Hardwarerunde
-ist eingebaut (Abschnitt 9).
+Status: **L0** (see [test levels](../../../../../docs/test-levels.md)) - compiles for `aarch64-apple-darwin` (`--features metal`), clippy-clean, the pure parts
+have unit tests on a Linux host. None of it has run on a Mac yet. A self test for the first hardware run
+is built in (section 9).
 
-Das Modul `backend::metal` wird nur bei `cfg(all(feature = "metal", target_vendor = "apple"))` kompiliert.
-Die vier Kern-Dateien gehören Paket 5; `ops.rs`, `weights.rs`, `shaders.rs` (Paket 6) und `backend.rs`, `stream.rs`
-(Paket 7) bauen darauf auf.
+The module `backend::metal` is only compiled under `cfg(all(feature = "metal", target_vendor = "apple"))`.
+The four core files form the Metal core; `ops.rs`, `weights.rs`, `shaders.rs` (kernels) and `backend.rs`, `stream.rs`
+(integration) build on it.
 
-| Datei | Inhalt |
+| File | Contents |
 | --- | --- |
-| `device_info.rs` (+ `device_info/{platform,config,error}.rs`) | Geräteliste, `MetalDevice`, `MetalDeviceInfo`, `MetalConfig` (Umgebungsvariablen), `MetalError`, Chip-Erkennung |
-| `buffers.rs` (+ `buffers/plan.rs`) | `MetalBuffer`, `BufferRef`, `MemoryManager`, `MappedRegion`/`MappedRegistry` (No-Copy-GGUF), `AddressTable`, `Arena` |
-| `pipelines.rs` (+ `pipelines/{key,source}.rs`) | `PipelineCache`, `Pipeline`, `FunctionConstant`, MSL-Quellaufbereitung |
-| `commands.rs` (+ `commands/{hazard,geometry,residency,smoke}.rs`) | `CommandQueue`, `Recorder`, `DispatchBuilder`, `MetalContext`, Hazard-Tracking, Selbsttest |
+| `device_info.rs` (+ `device_info/{platform,config,error}.rs`) | Device list, `MetalDevice`, `MetalDeviceInfo`, `MetalConfig` (environment variables), `MetalError`, chip detection |
+| `buffers.rs` (+ `buffers/plan.rs`) | `MetalBuffer`, `BufferRef`, `MemoryManager`, `MappedRegion`/`MappedRegistry` (no-copy GGUF), `AddressTable`, `Arena` |
+| `pipelines.rs` (+ `pipelines/{key,source}.rs`) | `PipelineCache`, `Pipeline`, `FunctionConstant`, MSL source preparation |
+| `commands.rs` (+ `commands/{hazard,geometry,residency,smoke}.rs`) | `CommandQueue`, `Recorder`, `DispatchBuilder`, `MetalContext`, hazard tracking, self test |
 
-## 1. Einstieg
+## 1. Getting started
 
 ```rust
 use crate::backend::metal::commands::{Access, MetalContext};
 
-let ctx = MetalContext::new(index)?;            // Gerät, Speicherverwaltung, Pipeline-Cache, Queue, Residency
-let mut rec = ctx.recorder();                   // ein Recorder pro Stream
+let ctx = MetalContext::new(index)?;            // device, memory manager, pipeline cache, queue, residency
+let mut rec = ctx.recorder();                   // one recorder per stream
 ```
 
-`MetalContext` hat die öffentlichen Felder `device`, `config`, `memory` (`Arc<MemoryManager>`), `pipelines`
+`MetalContext` has the public fields `device`, `config`, `memory` (`Arc<MemoryManager>`), `pipelines`
 (`Arc<PipelineCache>`), `queue`, `mapped` (`Arc<MappedRegistry>`), `residency` (`Option<Arc<ResidencyManager>>`).
 
-**Geräteindex.** `device_info::list(first_index)` meldet die Geräte mit globalen Nummern ab `first_index` und merkt sich
-`first_index`. `device_info::open(n)` und `MetalContext::new(n)` lesen `n` als globale Nummer, wenn sie in
-`[first_index, first_index + Anzahl)` liegt, sonst als Position unter den Metal-Geräten (0 = Standardgerät). Auf
-Macs mit nur einer GPU ist beides dasselbe Gerät. `--device auto` reicht allerdings die globale Nummer des *ersten*
-Eintrags mit „metal“ in der Beschreibung durch; sind wgpu und natives Metal gleichzeitig gebaut, steht der
-wgpu-Adapter davor – das löst der Integrator in `devices.rs` (siehe Bericht).
+**Device index.** `device_info::list(first_index)` reports the devices with global numbers starting at `first_index` and remembers
+`first_index`. `device_info::open(n)` and `MetalContext::new(n)` read `n` as a global number if it lies in
+`[first_index, first_index + count)`, otherwise as a position among the Metal devices (0 = default device). On
+Macs with a single GPU both are the same device. `--device auto` passes on the global number of the *first*
+entry with "metal" in its description; if wgpu and native Metal are built at the same time, the
+wgpu adapter comes first - the device enumeration in `devices.rs` resolves that.
 
-`MetalDeviceInfo` (aus `ctx.device.info()`): Name, `chip: Option<AppleChip>` (M1..M5, A-Serie, Pro/Max/Ultra – nur
-Namensmuster), `apple_family: Option<u8>` (höchste `MTLGPUFamilyAppleN`), `metal3`, `metal4`, `mac_family2`,
+`MetalDeviceInfo` (from `ctx.device.info()`): name, `chip: Option<AppleChip>` (M1..M5, A series, Pro/Max/Ultra - name
+patterns only), `apple_family: Option<u8>` (highest `MTLGPUFamilyAppleN`), `metal3`, `metal4`, `mac_family2`,
 `has_unified_memory`, `recommended_max_working_set_bytes`, `max_buffer_length_bytes`, `max_threadgroup_memory_bytes`,
 `max_threads_per_threadgroup`, `argument_buffers_tier2`, `simdgroup_matrix`, `simdgroup_reduction`, `bfloat`
-(letzteres drei sind Faustregeln aus Apples Feature-Set-Tabellen, nicht gemessen), `msl_version`, `page_size`.
+(the last three are rules of thumb from Apple's feature-set tables, not measured), `msl_version`, `page_size`.
 
-## 2. Umgebungsvariablen (`MetalConfig::from_env()`)
+## 2. Environment variables (`MetalConfig::from_env()`)
 
-| Variable | Wirkung |
+| Variable | Effect |
 | --- | --- |
-| `FLLM_METAL_SERIAL=1` | serieller Encoder (Treiber ordnet jeden Dispatch); **erste Maßnahme bei falschen Ergebnissen**, schließt Barrierefehler aus |
-| `FLLM_METAL_CB_DISPATCHES=N` | Command Buffer nach N Dispatches committen (Standard 160, 0 = nur bei `flush`) |
-| `FLLM_METAL_MEM_LIMIT_MB=N` | Speicherbudget (Standard `recommendedMaxWorkingSetSize`) |
-| `FLLM_METAL_LIB=pfad` | vorkompilierte `.metallib` statt eingebetteter Quellen |
-| `FLLM_METAL_SINGLE_LIB=1` | alle Quellen in *eine* Bibliothek (Standard: eine pro Datei, lazy) |
-| `FLLM_METAL_FAST_MATH=0\|1` | Compiler-Fast-Math (Standard 1) |
-| `FLLM_METAL_NO_NOCOPY=1` | GGUF nie ohne Kopie einbinden |
-| `FLLM_METAL_RESIDENCY=0\|1` | Residency-Set (macOS 15) benutzen (Standard 1) |
-| `FLLM_METAL_DEBUG=1` | Labels und Debug-Gruppen für GPU-Captures |
-| `FLLM_METAL_MSL=3.1` | MSL-Version erzwingen (Standard: neueste, die das OS kann, höchstens 3.2; `4.0` nur so) |
+| `FLLM_METAL_SERIAL=1` | serial encoder (the driver orders every dispatch); **first measure for wrong results**, rules out barrier errors |
+| `FLLM_METAL_CB_DISPATCHES=N` | commit the command buffer after N dispatches (default 160, 0 = only on `flush`) |
+| `FLLM_METAL_MEM_LIMIT_MB=N` | memory budget (default `recommendedMaxWorkingSetSize`) |
+| `FLLM_METAL_LIB=path` | precompiled `.metallib` instead of the embedded sources |
+| `FLLM_METAL_SINGLE_LIB=1` | all sources in *one* library (default: one per file, lazy) |
+| `FLLM_METAL_FAST_MATH=0\|1` | compiler fast math (default 1) |
+| `FLLM_METAL_NO_NOCOPY=1` | never bind GGUF without a copy |
+| `FLLM_METAL_RESIDENCY=0\|1` | use a residency set (macOS 15) (default 1) |
+| `FLLM_METAL_DEBUG=1` | labels and debug groups for GPU captures |
+| `FLLM_METAL_MSL=3.1` | force the MSL version (default: the newest the OS supports, at most 3.2; `4.0` only this way) |
 
-## 3. Speicher (`buffers.rs`)
+## 3. Memory (`buffers.rs`)
 
-Alle Puffer sind `MTLStorageModeShared` (Unified Memory: Upload = `memcpy`, Download = Lesen, kein Staging).
+All buffers are `MTLStorageModeShared` (unified memory: upload = `memcpy`, download = read, no staging).
 
 ```rust
-let buf: Arc<MetalBuffer> = ctx.memory.alloc(bytes, BufferUsage::Activations)?;   // Inhalt unbestimmt
+let buf: Arc<MetalBuffer> = ctx.memory.alloc(bytes, BufferUsage::Activations)?;   // contents undefined
 let zero = ctx.memory.alloc_zeroed(bytes, BufferUsage::KvCache)?;
-let w    = ctx.memory.from_bytes(&host, BufferUsage::Weights)?;                    // Kopie
-let r    = BufferRef::whole(buf.clone());                                           // Bindungseinheit
+let w    = ctx.memory.from_bytes(&host, BufferUsage::Weights)?;                    // copy
+let r    = BufferRef::whole(buf.clone());                                           // binding unit
 let part = r.slice(offset, len)?;
 buf.write(off, &bytes)?; buf.read(off, &mut out)?; buf.fill(off, len, 0)?;
 ```
 
-* `BufferUsage::Weights` ist *untracked* (kein Hazard-Tracking-Aufwand): Gewichte dürfen nach dem Hochladen von
-  keinem Kernel mehr geschrieben werden. `Activations`/`KvCache`/`Staging` sind tracked.
-* `write`/`read`/`fill` greifen direkt auf den Speicher zu: nur nach `synchronize()` und vor dem nächsten Dispatch, der
-  den Bereich nutzt.
-* `MetalBuffer` ist `Send + Sync` und passt als `DeviceBuffer.handle` (`Arc<dyn Any + Send + Sync>`):
-  `Arc::downcast::<MetalBuffer>(handle.clone())`. `DeviceBuffer { offset, size }` entspricht `BufferRef { offset, len }`.
-* **Ausrichtung.** `Arena` und `AddressTable` richten auf 256 Byte aus. Gebundene Offsets sollten durch 4 teilbar
-  sein (Apple-GPUs), 256 für `constant`-Argumente auf Intel/AMD-Macs. Kernels binden Gewichte deshalb als
-  `device const …*`, nicht als `constant`.
-* Pro `MTLBuffer` reserviert Metal mindestens eine Seite (16 KiB auf Apple Silicon). Kleine Zwischenpuffer deshalb
-  aus einer `Arena` (`Arena::new(&ctx.memory, kapazität, usage)`, `alloc(len) -> BufferRef`, `reset()` pro Schritt)
-  oder dem vorhandenen `BufferPool` schneiden, nicht einzeln anlegen.
-* Überschreiten von `maxBufferLength` oder des Budgets ergibt `MetalError::OutOfMemory { requested, limit }`.
+* `BufferUsage::Weights` is *untracked* (no hazard-tracking cost): weights must not be written by any kernel after
+  the upload. `Activations`/`KvCache`/`Staging` are tracked.
+* `write`/`read`/`fill` access the memory directly: only after `synchronize()` and before the next dispatch that
+  uses the range.
+* `MetalBuffer` is `Send + Sync` and fits as `DeviceBuffer.handle` (`Arc<dyn Any + Send + Sync>`):
+  `Arc::downcast::<MetalBuffer>(handle.clone())`. `DeviceBuffer { offset, size }` corresponds to `BufferRef { offset, len }`.
+* **Alignment.** `Arena` and `AddressTable` align to 256 bytes. Bound offsets should be divisible by 4
+  (Apple GPUs), 256 for `constant` arguments on Intel/AMD Macs. Kernels therefore bind weights as
+  `device const ...*`, not as `constant`.
+* Metal reserves at least one page per `MTLBuffer` (16 KiB on Apple silicon). Cut small intermediate buffers from an `Arena`
+  (`Arena::new(&ctx.memory, capacity, usage)`, `alloc(len) -> BufferRef`, `reset()` per step)
+  or the existing `BufferPool` instead of allocating them individually.
+* Exceeding `maxBufferLength` or the budget yields `MetalError::OutOfMemory { requested, limit }`.
 
-### GGUF ohne Kopie
+### GGUF without a copy
 
 ```rust
-unsafe { ctx.register_host_mapping(owner /* Arc<Mmap> o.ä. */, base_ptr, len, größtes_tensor_in_bytes)?; }
-// beim Hochladen eines Gewichts:
-let weight: BufferRef = ctx.memory.buffer_for_host_slice(&ctx.mapped, raw_bytes)?;   // Fenster oder Kopie
+unsafe { ctx.register_host_mapping(owner /* Arc<Mmap> or similar */, base_ptr, len, largest_tensor_in_bytes)?; }
+// when uploading a weight:
+let weight: BufferRef = ctx.memory.buffer_for_host_slice(&ctx.mapped, raw_bytes)?;   // window or copy
 ```
 
-`register_host_mapping` zerlegt den Bereich in seitenausgerichtete, überlappende Fenster (≤ `maxBufferLength`), so dass
-jedes Objekt bis `max_item_len` ganz in einem Fenster liegt (`buffers/plan.rs`, mit Tests). `buffer_for_host_slice`
-findet die Scheibe über ihre Adresse; liegt sie nicht in einem registrierten Bereich (oder ist No-Copy
-abgeschaltet), wird sie in einen neuen `Weights`-Puffer kopiert. Voraussetzung für Paket 7: Der Decoder muss die
-GGUF-Datei per `mmap` halten und denselben Speicher an `upload_weight` weiterreichen (heute liest der Loader
-womöglich in `Vec`s – dann greift die Kopie, ohne Fehler). Der `owner` hält das Mapping am Leben. Das Mapping
-wird auch in das Residency-Set aufgenommen, wenn das OS eines hat.
+`register_host_mapping` splits the range into page-aligned, overlapping windows (<= `maxBufferLength`) so that
+every object up to `max_item_len` lies entirely in one window (`buffers/plan.rs`, with tests). `buffer_for_host_slice`
+finds the slice by its address; if it is not in a registered range (or no-copy is
+disabled), it is copied into a new `Weights` buffer. Requirement for the integration layer: the decoder must hold the
+GGUF file via `mmap` and hand the same memory to `upload_weight` (if the loader reads into `Vec`s
+the copy path is used, without error). The `owner` keeps the mapping alive. The mapping
+is also added to the residency set if the OS has one.
 
-### GPU-Adresstabelle („Argument Buffer“)
+### GPU address table ("argument buffer")
 
-`AddressTable::build(&ctx.memory, &[BufferRef])` legt einen Puffer mit den 64-Bit-GPU-Adressen an (für
-`upload_pointer_table` der MoE-Experten). Im Kernel: `device const ulong *table`, `(device const T *)table[i]`.
-Beim Dispatch `builder.table(index, &table, Access::Read)`: bindet die Tabelle, macht die Ziele mit `useResource`
-resident und zählt den Zugriff für die Barrierelogik als „alles“. Braucht Argument-Buffers-Tier 2
-(`argument_buffers_tier2`, alle Apple-GPUs).
+`AddressTable::build(&ctx.memory, &[BufferRef])` creates a buffer with the 64-bit GPU addresses (for
+`upload_pointer_table` of the MoE experts). In the kernel: `device const ulong *table`, `(device const T *)table[i]`.
+At dispatch time `builder.table(index, &table, Access::Read)` binds the table, makes the targets
+resident with `useResource` and counts the access as "everything" for the barrier logic. Needs argument-buffers tier 2
+(`argument_buffers_tier2`, all Apple GPUs).
 
 ## 4. Pipelines (`pipelines.rs`)
 
 ```rust
 let p = ctx.pipelines.get("rms_norm_f32", &[])?;                                   // Arc<Pipeline>
 let q = ctx.pipelines.get("gemv_q4_0", &[FunctionConstant::u32(0, 4), FunctionConstant::bool(1, true)])?;
-ctx.pipelines.prewarm_libraries()?;               // alle Bibliotheken parallel kompilieren (sonst lazy beim ersten Zugriff)
-ctx.pipelines.prewarm(&[("rms_norm_f32", &[]), …])?;
+ctx.pipelines.prewarm_libraries()?;               // compile all libraries in parallel (otherwise lazy on first use)
+ctx.pipelines.prewarm(&[("rms_norm_f32", &[]), ...])?;
 p.max_threads(); p.simd_width(); p.static_threadgroup_memory();
 ```
 
-* `get` hasht den Schlüssel bei jedem Aufruf: Pipelines **einmal beim Start** auflösen und den `Arc` in der Op halten.
-* Function Constants: `[[function_constant(i)]]` in MSL; `FunctionConstant::{bool,i32,u32,f32}(index, wert)`.
-  Jede Wertemenge ist eine eigene Pipeline. Falsche Typen/Indizes melden `MetalError::Pipeline` mit dem Metal-Text.
+* `get` hashes the key on every call: resolve pipelines **once at start-up** and keep the `Arc` in the op.
+* Function constants: `[[function_constant(i)]]` in MSL; `FunctionConstant::{bool,i32,u32,f32}(index, value)`.
+  Every set of values is its own pipeline. Wrong types or indices report `MetalError::Pipeline` with the Metal text.
 
-### Layout der Shader-Quellen (für Paket 6 verbindlich)
+### Layout of the shader sources (binding for kernel authors)
 
-`build.rs` bettet `rust/engine/metal/*.metal` ein (`common.metal` zuerst, Rest alphabetisch).
+`build.rs` embeds `rust/engine/metal/*.metal` (`common.metal` first, the rest alphabetically).
 
-* Dateien, deren Name mit `common` oder `_` beginnt, **und Dateien, in denen kein Kernel gefunden wird** (reine
-  Hilfsdateien), sind *geteilter Code*: Sie werden jeder anderen Datei vorangestellt (in Quellreihenfolge).
-* Jede übrige Datei (mit mindestens einem Kernel) ist eine eigene Bibliothek, lazy kompiliert. Sie darf also nur
-  Hilfscode aus geteilten Dateien und ihrem eigenen Text benutzen. Braucht ein Kernel Code aus einer anderen
-  Kerneldatei, in eine `common_*.metal` auslagern (oder `FLLM_METAL_SINGLE_LIB=1` setzen).
-* Kernel-Namen findet ein kleiner Scanner: `kernel void NAME(`, `[[kernel]] void NAME(` und
-  `[[host_name("NAME")]]` bei Template-Instanziierungen. Makro-erzeugte Namen (`host_name("a_" #T)`) sieht er nicht;
-  der Cache fragt dann alle Bibliotheken ab (langsamer erster Zugriff, funktioniert).
-* Kein `#include "…"` auf Projektdateien (gibt es zur Laufzeit nicht); nur `<metal_stdlib>` & Co.
-* Jede Einheit beginnt mit `#define`-Zeilen (immer 0/1 bzw. Zahlen): `FLLM_METAL`, `FLLM_APPLE_GPU_FAMILY` (0 = keine
-  Apple-GPU), `FLLM_HAS_SIMDGROUP_MATRIX`, `FLLM_HAS_SIMDGROUP_REDUCTION`, `FLLM_HAS_BFLOAT`, `FLLM_UNIFIED_MEMORY`,
-  `FLLM_SIMD_WIDTH_HINT`, `FLLM_MAX_THREADGROUP_MEMORY`. `#line`-Direktiven halten Compilerfehler auf den echten
-  Dateinamen und Zeilen.
-* Sprachversion: neueste, die das OS kann (macOS 13 → 3.0, 14 → 3.1, 15+ → 3.2), `bfloat` braucht 3.1.
-* Vorkompiliert (optional, auf dem Mac): `xcrun -sdk macosx metal -c -I… datei.metal -o datei.air` für jede Datei
-  mit vorangestelltem Gemeinsamen (`cat common.metal datei.metal > …`), dann `xcrun -sdk macosx metallib *.air -o
-  fllm.metallib` und `FLLM_METAL_LIB=fllm.metallib`. Die `FLLM_*`-Defines fehlen dann; Paket 6 setzt sie ggf. per `-D`.
+* Files whose name begins with `common` or `_`, **and files in which no kernel is found** (pure helper files),
+  are *shared code*: they are prepended to every other file (in source order).
+* Every other file (with at least one kernel) is its own library, compiled lazily. It may therefore only use
+  helper code from shared files and its own text. If a kernel needs code from another
+  kernel file, move it to a `common_*.metal` (or set `FLLM_METAL_SINGLE_LIB=1`).
+* A small scanner finds kernel names: `kernel void NAME(`, `[[kernel]] void NAME(` and
+  `[[host_name("NAME")]]` on template instantiations. It does not see macro-generated names (`host_name("a_" #T)`);
+  the cache then queries all libraries (slower first access, but works).
+* No `#include "..."` of project files (there are none at run time); only `<metal_stdlib>` and the like.
+* Every unit starts with `#define` lines (always 0/1 or numbers): `FLLM_METAL`, `FLLM_APPLE_GPU_FAMILY` (0 = no
+  Apple GPU), `FLLM_HAS_SIMDGROUP_MATRIX`, `FLLM_HAS_SIMDGROUP_REDUCTION`, `FLLM_HAS_BFLOAT`, `FLLM_UNIFIED_MEMORY`,
+  `FLLM_SIMD_WIDTH_HINT`, `FLLM_MAX_THREADGROUP_MEMORY`. `#line` directives keep compiler errors pointing at the real
+  file names and lines.
+* Language version: the newest the OS supports (macOS 13 -> 3.0, 14 -> 3.1, 15+ -> 3.2); `bfloat` needs 3.1.
+* Precompiled (optional, on the Mac): `xcrun -sdk macosx metal -c -I... file.metal -o file.air` for each file
+  with the shared files prepended (`cat common.metal file.metal > ...`), then `xcrun -sdk macosx metallib *.air -o
+  fllm.metallib` and `FLLM_METAL_LIB=fllm.metallib`. The `FLLM_*` defines are then missing; set them with `-D` if needed.
 
-## 5. Befehle (`commands.rs`)
+## 5. Commands (`commands.rs`)
 
 ```rust
 let mut rec = ctx.recorder();
@@ -150,77 +150,77 @@ rec.begin(&pipeline)?
     .read(0, &x)               // BufferRef, Access::Read
     .write(1, &y)              // Access::Write
     .read_write(2, &acc)       // Access::ReadWrite
-    .bytes(3, &params)         // #[repr(C)]-Struct ohne Padding, <= 4096 Byte, setBytes
+    .bytes(3, &params)         // #[repr(C)] struct without padding, <= 4096 bytes, setBytes
     .threadgroup_memory(0, 4096)
-    .threadgroups([groups, 1, 1], [threads, 1, 1])?;      // oder .threads([gesamt,1,1], [pro_gruppe,1,1])?
-rec.synchronize()?;            // Commit + auf die GPU warten; danach dürfen CPU-Zugriffe auf die Puffer erfolgen
+    .threadgroups([groups, 1, 1], [threads, 1, 1])?;      // or .threads([total,1,1], [per_group,1,1])?
+rec.synchronize()?;            // commit and wait for the GPU; CPU access to the buffers is allowed afterwards
 ```
 
-* **Barrieren.** Der Encoder ist `MTLDispatchTypeConcurrent`. Jede Bindung deklariert, wie der Kernel den Bereich
-  benutzt; der `HazardTracker` setzt vor einem Dispatch ein `memoryBarrierWithScope(Buffers)`, wenn er etwas liest,
-  was ein früherer Dispatch desselben Fensters schrieb (oder schreibt, was gelesen/geschrieben wurde). Überlappungen
-  werden bytegenau geprüft (Teilbereiche desselben Puffers stören sich nicht). **Wer falsch deklariert, bekommt
-  Rennen**: ein als `read` gebundener Puffer, den der Kernel schreibt, ist ein Fehler. Notfalls `rec.barrier()?`.
-* `FLLM_METAL_SERIAL=1` schaltet das ab (kein Tracking, Treiber serialisiert).
-* **Command Buffer.** Nach `FLLM_METAL_CB_DISPATCHES` Dispatches wird committed und in einen neuen Buffer weiter
-  kodiert (GPU startet früh). `flush()` committed ohne zu warten. `synchronize()` ist der einzige Ort, an dem auf die
-  GPU gewartet wird (außer bei > 40 Buffern in der Luft). Fehler eines Buffers kommen als `MetalError::Gpu` zurück.
-* `copy_buffer(&src, &dst, len)` und `fill_zero(&dst)` sind Blits (beenden den Compute-Encoder, ein neuer öffnet bei
-  Bedarf); sie funktionieren nur auf tracked Puffern ohne weitere Fences, weil Metal dort über Encoder hinweg ordnet.
-* `Recorder` ist `Send` (wandert mit dem Stream), aber nicht `Sync`; alle Methoden nehmen `&mut self`.
-* Hilfen in `commands::geometry`: `elementwise_threads(n, simd, max)`, `ceil_div`, `validate_dispatch` (wird intern
-  geprüft: Gruppengröße 0, über Pipeline- oder Gerätelimit → `MetalError::InvalidDispatch` statt Abbruch im Treiber).
-* Bindungsplätze `0..=30` (Metal erlaubt 31). Konstanten über `bytes` belegen ebenfalls einen Platz.
+* **Barriers.** The encoder is `MTLDispatchTypeConcurrent`. Every binding declares how the kernel uses the range;
+  before a dispatch the `HazardTracker` inserts a `memoryBarrierWithScope(Buffers)` if it reads something that
+  an earlier dispatch of the same window wrote (or writes something that was read or written). Overlaps
+  are checked byte-exactly (sub-ranges of the same buffer do not interfere). **Declaring wrongly causes
+  races**: a buffer bound as `read` that the kernel writes is an error. If necessary use `rec.barrier()?`.
+* `FLLM_METAL_SERIAL=1` switches this off (no tracking, the driver serialises).
+* **Command buffers.** After `FLLM_METAL_CB_DISPATCHES` dispatches the buffer is committed and encoding continues in a new
+  one (the GPU starts early). `flush()` commits without waiting. `synchronize()` is the only place that waits for the
+  GPU (except with more than 40 buffers in flight). Errors of a buffer are returned as `MetalError::Gpu`.
+* `copy_buffer(&src, &dst, len)` and `fill_zero(&dst)` are blits (they end the compute encoder, a new one opens when
+  needed); they only work on tracked buffers without further fences, because Metal orders those across encoders.
+* `Recorder` is `Send` (moves with the stream) but not `Sync`; all methods take `&mut self`.
+* Helpers in `commands::geometry`: `elementwise_threads(n, simd, max)`, `ceil_div`, `validate_dispatch` (checked
+  internally: group size 0, or above the pipeline or device limit -> `MetalError::InvalidDispatch` instead of an abort in the driver).
+* Binding slots `0..=30` (Metal allows 31). Constants passed through `bytes` also occupy a slot.
 
-## 6. Vorschlag für `backend.rs` / `stream.rs` (Paket 7)
+## 6. Mapping for `backend.rs` / `stream.rs`
 
 | `Backend`/`Stream` | Metal |
 | --- | --- |
-| `Backend::create_stream` | `ctx.recorder()` in ein `MetalStream` legen |
+| `Backend::create_stream` | put `ctx.recorder()` into a `MetalStream` |
 | `allocate_buffer(size)` | `ctx.memory.alloc(size, Activations)`; `DeviceBuffer::new(id, size, device_id, arc as Arc<dyn Any + Send + Sync>)` |
-| `Stream::upload(dst, src)` | `BufferRef.write` (nach `synchronize`, falls der Puffer von der GPU benutzt wird) |
-| `Stream::download(dst, src)` | `synchronize()`, dann `BufferRef.read` |
+| `Stream::upload(dst, src)` | `BufferRef.write` (after `synchronize` if the GPU uses the buffer) |
+| `Stream::download(dst, src)` | `synchronize()`, then `BufferRef.read` |
 | `Stream::synchronize` | `Recorder::synchronize` |
 | `copy_buffer` | `Recorder::copy_buffer` |
 | `zero_buffer` | `Recorder::fill_zero` |
-| `upload_weight` | `buffer_for_host_slice` (No-Copy) bzw. nach Umpacken (Paket 6) `from_bytes(.., Weights)` |
+| `upload_weight` | `buffer_for_host_slice` (no-copy) or, after repacking, `from_bytes(.., Weights)` |
 | `upload_pointer_table` | `AddressTable` |
-| `allocate_kv_cache` | `alloc_zeroed(.., KvCache)` (Zugriff nur über `DeviceKvCache`) |
-| `BackendError` | `impl From<MetalError> for BackendError` ist vorhanden |
+| `allocate_kv_cache` | `alloc_zeroed(.., KvCache)` (access only through `DeviceKvCache`) |
+| `BackendError` | `impl From<MetalError> for BackendError` exists |
 
-## 7. Garantien und Grenzen
+## 7. Guarantees and limits
 
-* Metal-Objekte, die Apple als threadsicher dokumentiert (Gerät, Queue, Puffer, Pipelines, Bibliotheken), sind
-  `Send + Sync`; Command Buffer und Encoder liegen nur im `Recorder`.
-* Jeder Aufruf, der Metal-Objekte erzeugt, läuft in einem `autoreleasepool` (Rust-Threads haben keinen).
-* Nicht enthalten: Texturen, Indirect Command Buffer, MTL4 (Metal 4: Command-Allocators, Tensor-API für M5). Die
-  neuesten Fähigkeiten (`metal4`, Apple10) werden gemeldet, aber nicht genutzt.
-* Mehrere Recorder gleichzeitig auf derselben Queue sind möglich; Abhängigkeiten *zwischen* Recordern regelt nur der
-  Tracking-Modus der Puffer (Aktivierungen/KV tracked → Metal ordnet über Buffer hinweg). Explizite Events/Fences
-  gibt es nicht.
+* Metal objects that Apple documents as thread-safe (device, queue, buffers, pipelines, libraries) are
+  `Send + Sync`; command buffers and encoders live only in the `Recorder`.
+* Every call that creates Metal objects runs inside an `autoreleasepool` (Rust threads have none).
+* Not included: textures, indirect command buffers, MTL4 (Metal 4: command allocators, tensor API for M5). The
+  newest capabilities (`metal4`, Apple10) are reported but not used.
+* Several recorders on the same queue at once are possible; dependencies *between* recorders are governed only by the
+  tracking mode of the buffers (activations/KV tracked -> Metal orders across buffers). There are no explicit
+  events/fences.
 
-## 8. Ungeprüfte Annahmen (für die Testrunde)
+## 8. Unverified assumptions (to check on hardware)
 
-1. `newBufferWithBytesNoCopy` akzeptiert Fenster aus einem `PROT_READ`-`mmap` und ein Seitenende, das über das Dateiende
-   hinaus reicht (Seitenpuffer des Mappings).
-2. Untracked + CPU-beschriebene Gewichtspuffer: der erste Kernel sieht die Daten ohne zusätzliche Synchronisation, weil
-   `commit` danach folgt.
-3. `memoryBarrierWithScope(Buffers)` reicht als Ordnung zwischen Compute-Dispatches im selben Encoder (so nutzt es
-   auch MLX).
-4. Blits zwischen Compute-Encodern auf tracked Puffern brauchen kein Fence.
-5. `useResource` auf den Zielen einer Adresstabelle genügt, damit die GPU sie lesen darf.
-6. Die Residency-Set-API (macOS 15) wird über `respondsToSelector` erkannt; auf älteren Systemen entfällt sie.
-7. SIMD-Gruppen-Fähigkeiten aus der Familie abgeleitet (Apple7+/Mac2); `Pipeline::simd_width` ist der echte Wert.
+1. `newBufferWithBytesNoCopy` accepts windows from a `PROT_READ` `mmap` and a page end that extends beyond the end of
+   the file (the page padding of the mapping).
+2. Untracked weight buffers written by the CPU: the first kernel sees the data without extra synchronisation because
+   a `commit` follows.
+3. `memoryBarrierWithScope(Buffers)` suffices as ordering between compute dispatches in the same encoder (MLX uses it
+   the same way).
+4. Blits between compute encoders on tracked buffers need no fence.
+5. `useResource` on the targets of an address table is enough for the GPU to be allowed to read them.
+6. The residency-set API (macOS 15) is detected through `respondsToSelector`; on older systems it is skipped.
+7. SIMD-group capabilities are derived from the family (Apple7+/Mac2); `Pipeline::simd_width` is the real value.
 
-## 9. Selbsttest für die erste Hardwarerunde
+## 9. Self test for the first hardware run
 
 ```
 cargo test --release -p fllm-engine --features metal metal_core_smoke -- --nocapture
 ```
 
-führt `commands::smoke::run` aus (Funktion auch direkt aufrufbar: `smoke::run_default(0)`): Geräteinfo, Puffer und
-Budget, Function Constants (zwei Spezialisierungen, Cache-Treffer), Dispatch-Kette mit Barrieren (erwartet ≥ 2
-Barrieren im konkurrenten Modus), unabhängige Dispatches (erwartet 0 Barrieren), Threadgroup-Speicher-Reduktion,
-Blit-Kopie/-Fill, Adresstabelle und No-Copy-Einbindung eines seitenausgerichteten Heap-Blocks. Die Kernels stehen im
-Test selbst (`SMOKE_MSL`), unabhängig von den Shadern des Backends. Jede Zeile nennt Teil und Befund; schlägt eine fehl,
-zuerst `FLLM_METAL_SERIAL=1` und `FLLM_METAL_NO_NOCOPY=1` ausprobieren, um die Ursache einzukreisen.
+runs `commands::smoke::run` (the function can also be called directly: `smoke::run_default(0)`): device info, buffers and
+budget, function constants (two specialisations, cache hit), dispatch chain with barriers (expects >= 2
+barriers in concurrent mode), independent dispatches (expects 0 barriers), threadgroup-memory reduction,
+blit copy/fill, address table and no-copy binding of a page-aligned heap block. The kernels are in the
+test itself (`SMOKE_MSL`), independent of the backend's shaders. Each line names the part and the finding; if one fails,
+first try `FLLM_METAL_SERIAL=1` and `FLLM_METAL_NO_NOCOPY=1` to narrow down the cause.

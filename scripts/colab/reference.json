@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "note": "Decode throughput references for scripts/colab/verify_all.py, per card. Values are documented measurements from docs/ (see each entry's source). They are a hint, not a gate: run-to-run noise is around 15 percent, so the script only warns when a measurement is more than 10 percent below a value. Cards without models are left empty until somebody measured them.",
+  "source": "docs/gpu-backends.md",
+  "cards": [
+    {
+      "match": ["RTX PRO 6000", "G4"],
+      "source": "docs/gpu-backends.md, CUDA graphs section: one user, greedy decoding, 128 generated tokens, decode tok/s with CUDA graphs off (decode_tok_s_short_ctx) and on (decode_tok_s_cuda_graph_on)",
+      "models": {
+        "Llama-3.2-3B-Instruct-Q4_K_M.gguf": {
+          "decode_tok_s_short_ctx": 316,
+          "decode_tok_s_cuda_graph_on": 399
+        },
+        "Qwen2.5-3B-Instruct-AWQ": {
+          "decode_tok_s_short_ctx": 205,
+          "decode_tok_s_cuda_graph_on": 229
+        },
+        "Llama-3.1-8B-Instruct-Q4_K_M.gguf": {
+          "decode_tok_s_short_ctx": 190,
+          "decode_tok_s_cuda_graph_on": 219
+        },
+        "Llama-3.1-8B-Instruct-NVFP4": {
+          "decode_tok_s_short_ctx": 194,
+          "decode_tok_s_cuda_graph_on": 227
+        }
+      }
+    },
+    {
+      "match": ["A100"],
+      "source": "no reference values recorded yet; the script prints the measurements without comparing them",
+      "models": {}
+    },
+    {
+      "match": ["H100"],
+      "source": "no reference values recorded yet; the script prints the measurements without comparing them",
+      "models": {}
+    },
+    {
+      "match": ["L4"],
+      "source": "no reference values recorded yet; the script prints the measurements without comparing them",
+      "models": {}
+    },
+    {
+      "match": ["T4"],
+      "source": "no reference values recorded yet; the script prints the measurements without comparing them",
+      "models": {}
+    }
+  ]
+}

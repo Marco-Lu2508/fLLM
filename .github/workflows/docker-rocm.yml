@@ -1,0 +1,90 @@
+# Builds the ROCm image (docker/Dockerfile.rocm) for linux/amd64 and publishes it to the GitHub Container Registry as
+#   ghcr.io/<owner>/fllm:rocm, :rocm-<tag> (rocm-v0.1.0), :rocm-sha-<short>
+# Runs on version tags (v*) and manually, never on pushes to branches: the build is heavy. hipcc compiles the kernels without a GPU, so a
+# hosted runner is enough. A hosted runner has 4 cores: the full build (all architectures) takes several hours; the input `hip_archs` of a
+# manual run narrows it, e.g. gfx1100 for a quick build. A manual run on a branch only pushes the :rocm-sha-<short> tag. The kernels have
+# never run on an AMD GPU (test level L0, docs/changes/hip.md): the image is a convenience for testers. See docs/ci.md.
+name: docker-image-rocm
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      hip_archs:
+        description: "GPU architectures, separated by semicolons"
+        default: "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-rocm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image-rocm:
+    name: build and push the ROCm image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free disk space (the ROCm development image is about 30 GB unpacked)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Image name (the registry needs lower case)
+        id: img
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=ghcr.io/${OWNER,,}/fllm" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.img.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=rocm,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=ref,event=tag,prefix=rocm-
+            type=sha,prefix=rocm-sha-,format=short
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile.rocm
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          build-args: |
+            JOBS=3
+            HIP_ARCHS=${{ inputs.hip_archs || 'gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201' }}
+          cache-from: type=gha,scope=rocm
+          cache-to: type=gha,mode=max,scope=rocm

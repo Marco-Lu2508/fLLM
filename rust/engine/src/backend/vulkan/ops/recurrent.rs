@@ -18,6 +18,12 @@ pub struct RunSpec {
 }
 
 /// Whether the DeltaNet shaders take a layer of this shape (key width 32 / 64 / 96 / 128 with an `delta_rec_hk*` variant, value width up to 128, kernel 2..8).
+pub fn kda_supported(shape: &crate::backend::KdaShape) -> bool {
+    matches!(shape.head_dim, 16 | 32 | 64 | 128)
+        && shape.heads > 0
+        && (2..=8).contains(&shape.conv_kernel)
+}
+
 pub fn delta_supported(shape: &DeltaShape) -> bool {
     matches!(shape.k_dim, 32 | 64 | 96 | 128)
         && (1..=128).contains(&shape.v_dim)

@@ -2,12 +2,24 @@
 mod bert;
 mod classic;
 mod convert;
+mod dequant;
+mod dequant_bits;
 mod exl2;
 mod exl3;
+mod decoder_enc;
 mod deltanet;
-mod gguf;
+mod enc_heads;
+mod enc_out;
+mod gemma;
+mod gemma3n;
+pub mod gguf;
 pub mod gguf_tools;
+mod gte;
+mod jina_xlmr;
 mod gptoss;
+mod mistral_native;
+mod hybrid;
+mod kimi_linear;
 mod modernbert;
 mod nomic;
 mod nvfp4;
@@ -15,16 +27,26 @@ mod packed_quant;
 mod plan;
 mod quantize;
 mod requant;
-mod safetensors;
+pub mod safetensors;
+mod st;
 mod symint;
+mod tokenizer_import;
 mod torch_zip;
+mod zamba2;
+mod vision_plan;
 
 pub use convert::{
-    check_config, convert_checkpoint, ConfigCheck, inspect_checkpoint, CheckpointInventory, ConversionReport, ConvertOptions,
-    OutputDType, TensorSummary,
+    check_config, convert_checkpoint, inspect_checkpoint, load_checkpoint_as_gguf, CheckpointInventory, ConversionReport,
+    ConvertOptions, ConfigCheck, OutputDType, SpecHeadKind, TensorSummary,
 };
 
 pub use quantize::{quantize_row, QType};
+pub use tokenizer_import::tokenizer_json_from_dir;
+
+/// `config.json` of a checkpoint directory, or the one derived from Mistral's `params.json` for the native layout.
+pub fn read_checkpoint_config(root: &std::path::Path) -> Result<serde_json::Value, String> {
+    mistral_native::read_config(root)
+}
 pub use requant::{quantize_gguf, Preset, QuantizeReport};
 
 use std::{fmt, io};

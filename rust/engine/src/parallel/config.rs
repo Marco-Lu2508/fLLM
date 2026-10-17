@@ -1,0 +1,272 @@
+//! Command-line / environment description of the parallel layout.
+use crate::comm::tcp::RendezvousConfig;
+use crate::comm::BackendKind;
+use std::ops::Range;
+use std::sync::Mutex;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpDispatch {
+    /// Every rank computes its own experts for all tokens it holds; the partial outputs are summed with the all-reduce of the layer.
+    AllReduce,
+    /// Tokens are routed to the ranks that own their experts with an all-to-all and the results come back the same way.
+    AllToAll,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParallelConfig {
+    pub tp: usize,
+    pub pp: usize,
+    /// Experts are distributed over the tensor-parallel group instead of every expert being split.
+    pub expert_parallel: bool,
+    pub ep_dispatch: EpDispatch,
+    /// Device ordinals of this node's ranks (`--devices 0,1,2,3`); empty = the first `local_world_size()` visible ones.
+    pub devices: Vec<usize>,
+    /// `None`: NCCL when a GPU backend runs and libnccl is installed, otherwise the peer-to-peer fallback; `local` on the CPU.
+    pub backend: Option<BackendKind>,
+    pub rendezvous: RendezvousConfig,
+    /// Micro-batches of a pipeline step (0 = one per stage when the batch has enough sequences).
+    pub microbatches: usize,
+    /// Split the embedding table by vocabulary rows and sum the lookups (`FLLM_VOCAB_PARALLEL_EMBED`); off by default because the
+    /// table is memory-mapped and shared by all ranks of the process anyway.
+    pub vocab_parallel_embedding: bool,
+}
+
+impl Default for ParallelConfig {
+    fn default() -> Self {
+        Self {
+            tp: 1,
+            pp: 1,
+            expert_parallel: false,
+            ep_dispatch: EpDispatch::AllReduce,
+            devices: Vec::new(),
+            backend: None,
+            rendezvous: RendezvousConfig::single_node(),
+            microbatches: 0,
+            vocab_parallel_embedding: std::env::var("FLLM_VOCAB_PARALLEL_EMBED").is_ok_and(|v| matches!(v.trim(), "1" | "on" | "true")),
+        }
+    }
+}
+
+impl ParallelConfig {
+    pub fn world_size(&self) -> usize {
+        self.tp * self.pp
+    }
+
+    pub fn is_parallel(&self) -> bool {
+        self.world_size() > 1
+    }
+
+    /// Ranks hosted by this process.
+    pub fn local_world_size(&self) -> usize {
+        self.world_size() / self.rendezvous.nnodes.max(1)
+    }
+
+    /// World rank of local rank `local`.
+    pub fn world_rank(&self, local: usize) -> usize {
+        self.rendezvous.node_rank * self.local_world_size() + local
+    }
+
+    /// Device ordinal of local rank `local`.
+    pub fn device_of(&self, local: usize) -> usize {
+        self.devices.get(local).copied().unwrap_or(local)
+    }
+
+    /// Pipeline stage of a world rank (stage-major numbering keeps a tensor-parallel group on neighbouring devices).
+    pub fn stage_of(&self, rank: usize) -> usize {
+        rank / self.tp
+    }
+
+    pub fn tp_rank_of(&self, rank: usize) -> usize {
+        rank % self.tp
+    }
+
+    /// The layers of pipeline stage `stage`: contiguous ranges; the first stages take the remainder, so the last stage, which also
+    /// computes the logits, never holds more layers than the others.
+    pub fn stage_layers(&self, layers: usize, stage: usize) -> Range<usize> {
+        let base = layers / self.pp;
+        let extra = layers % self.pp;
+        let start = stage * base + stage.min(extra);
+        let len = base + usize::from(stage < extra);
+        start..start + len
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.tp == 0 || self.pp == 0 {
+            return Err("--tensor-parallel-size and --pipeline-parallel-size must be at least 1".into());
+        }
+        self.rendezvous.validate()?;
+        let nodes = self.rendezvous.nnodes.max(1);
+        if !self.world_size().is_multiple_of(nodes) {
+            return Err(format!(
+                "tensor x pipeline size {} x {} = {} ranks cannot be spread evenly over --nnodes {}",
+                self.tp,
+                self.pp,
+                self.world_size(),
+                nodes
+            ));
+        }
+        if !self.devices.is_empty() {
+            if self.devices.len() != self.local_world_size() {
+                return Err(format!(
+                    "--devices lists {} devices but this node hosts {} ranks (tensor {} x pipeline {} over {} node(s))",
+                    self.devices.len(),
+                    self.local_world_size(),
+                    self.tp,
+                    self.pp,
+                    nodes
+                ));
+            }
+            let mut seen = std::collections::HashSet::new();
+            if let Some(dup) = self.devices.iter().find(|d| !seen.insert(**d)) {
+                return Err(format!("--devices lists device {dup} twice"));
+            }
+        }
+        if self.expert_parallel && self.tp == 1 {
+            return Err("--expert-parallel distributes experts over the tensor-parallel group: it needs --tensor-parallel-size of 2 or more".into());
+        }
+        Ok(())
+    }
+
+    /// Whether `flag` is one of ours.
+    pub fn is_flag(flag: &str) -> bool {
+        matches!(
+            flag,
+            "--tensor-parallel-size"
+                | "-tp"
+                | "--pipeline-parallel-size"
+                | "-pp"
+                | "--expert-parallel"
+                | "--enable-expert-parallel"
+                | "--ep-dispatch"
+                | "--devices"
+                | "--distributed-backend"
+                | "--nnodes"
+                | "--node-rank"
+                | "--master-addr"
+                | "--master-port"
+                | "--pipeline-microbatches"
+        )
+    }
+
+    /// Whether `flag` is followed by a value.
+    pub fn takes_value(flag: &str) -> bool {
+        !matches!(flag, "--expert-parallel" | "--enable-expert-parallel")
+    }
+
+    /// Apply one command-line flag (`value` is `None` for the switches).
+    pub fn apply_flag(&mut self, flag: &str, value: Option<&str>) -> Result<(), String> {
+        let number = |what: &str| -> Result<usize, String> {
+            value.ok_or_else(|| format!("{what} needs a value"))?.trim().parse::<usize>().map_err(|_| format!("invalid value for {what}"))
+        };
+        match flag {
+            "--tensor-parallel-size" | "-tp" => self.tp = number(flag)?,
+            "--pipeline-parallel-size" | "-pp" => self.pp = number(flag)?,
+            "--expert-parallel" | "--enable-expert-parallel" => self.expert_parallel = true,
+            "--ep-dispatch" => {
+                self.ep_dispatch = match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+                    "allreduce" | "all-reduce" => EpDispatch::AllReduce,
+                    "alltoall" | "all-to-all" => EpDispatch::AllToAll,
+                    other => return Err(format!("unknown --ep-dispatch '{other}' (use allreduce or alltoall)")),
+                }
+            }
+            "--devices" => {
+                let list = value.ok_or("--devices needs a list such as 0,1,2,3")?;
+                self.devices = list
+                    .split(',')
+                    .map(|part| part.trim().parse::<usize>().map_err(|_| format!("invalid device '{part}' in --devices")))
+                    .collect::<Result<_, _>>()?;
+            }
+            "--distributed-backend" => self.backend = Some(BackendKind::parse(value.unwrap_or(""))?),
+            "--nnodes" => self.rendezvous.nnodes = number(flag)?,
+            "--node-rank" => self.rendezvous.node_rank = number(flag)?,
+            "--master-addr" => self.rendezvous.master_addr = value.ok_or("--master-addr needs an address")?.to_owned(),
+            "--master-port" => {
+                self.rendezvous.master_port = value
+                    .ok_or("--master-port needs a port")?
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| "invalid --master-port".to_owned())?
+            }
+            "--pipeline-microbatches" => self.microbatches = number(flag)?,
+            other => return Err(format!("unknown parallel option {other}")),
+        }
+        Ok(())
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "tensor-parallel {} x pipeline-parallel {} = {} ranks{}{}",
+            self.tp,
+            self.pp,
+            self.world_size(),
+            if self.expert_parallel { ", expert-parallel" } else { "" },
+            if self.rendezvous.nnodes > 1 { format!(", node {} of {}", self.rendezvous.node_rank, self.rendezvous.nnodes) } else { String::new() }
+        )
+    }
+}
+
+static GLOBAL: Mutex<Option<ParallelConfig>> = Mutex::new(None);
+
+/// The layout the server was started with (set once by the command line before the model is attached).
+pub fn set_global(config: ParallelConfig) {
+    *GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+}
+
+pub fn global() -> Option<ParallelConfig> {
+    GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().filter(ParallelConfig::is_parallel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_are_parsed_and_validated() {
+        let mut c = ParallelConfig::default();
+        c.apply_flag("-tp", Some("4")).unwrap();
+        c.apply_flag("--pipeline-parallel-size", Some("2")).unwrap();
+        c.apply_flag("--enable-expert-parallel", None).unwrap();
+        c.apply_flag("--devices", Some("0, 1,2,3,4,5,6,7")).unwrap();
+        c.apply_flag("--distributed-backend", Some("p2p")).unwrap();
+        c.apply_flag("--ep-dispatch", Some("alltoall")).unwrap();
+        assert_eq!((c.world_size(), c.local_world_size()), (8, 8));
+        assert_eq!(c.backend, Some(BackendKind::P2p));
+        assert!(c.validate().is_ok());
+        c.devices.pop();
+        assert!(c.validate().unwrap_err().contains("--devices lists 7"));
+        c.devices = vec![0, 1, 1, 3, 4, 5, 6, 7];
+        assert!(c.validate().unwrap_err().contains("twice"));
+        assert!(c.apply_flag("-tp", Some("x")).is_err());
+        assert!(c.apply_flag("--distributed-backend", Some("mpi")).is_err());
+    }
+
+    #[test]
+    fn expert_parallel_needs_a_tensor_group_and_nodes_must_divide_the_world() {
+        let mut c = ParallelConfig { expert_parallel: true, ..Default::default() };
+        assert!(c.validate().unwrap_err().contains("--expert-parallel"));
+        c.tp = 2;
+        assert!(c.validate().is_ok());
+        c.rendezvous.nnodes = 3;
+        c.rendezvous.master_addr = "x".into();
+        assert!(c.validate().unwrap_err().contains("--nnodes"));
+    }
+
+    #[test]
+    fn ranks_are_stage_major_and_layers_are_split_contiguously() {
+        let c = ParallelConfig { tp: 2, pp: 3, ..Default::default() };
+        assert_eq!((c.stage_of(5), c.tp_rank_of(5)), (2, 1));
+        let ranges: Vec<_> = (0..3).map(|s| c.stage_layers(8, s)).collect();
+        assert_eq!(ranges, vec![0..3, 3..6, 6..8]);
+        let all: usize = ranges.iter().map(ExactSizeIterator::len).sum();
+        assert_eq!(all, 8);
+    }
+
+    #[test]
+    fn two_nodes_each_host_half_of_the_ranks() {
+        let mut c = ParallelConfig { tp: 4, pp: 2, ..Default::default() };
+        c.rendezvous = RendezvousConfig { nnodes: 2, node_rank: 1, master_addr: "10.0.0.1".into(), master_port: 29500 };
+        assert!(c.validate().is_ok());
+        assert_eq!(c.local_world_size(), 4);
+        assert_eq!(c.world_rank(2), 6);
+    }
+}

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 AND MIT
+// Copyright (c) The fLLM Authors (Apache-2.0); codebook constants Portions Copyright (c) The ggml authors (MIT).
+// See THIRD_PARTY.md, NOTICE, and licenses/ggml-MIT.txt.
 // fLLM CUDA backend: codebooks of the GGML IQ formats (IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S/IQ1_M).
 //
 // Generated from rust/engine/src/quant_iq_tables.rs, which holds the integer codebooks of ggml-common.h (llama.cpp commit

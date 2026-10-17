@@ -403,8 +403,21 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
 }
 "#;
 
-/// hdr: 0 count, 1 mode (0 SiLU, 1 GELU tanh approximation). tanh's argument is clamped to
-/// +-15, where it is 1 in f32 already, so drivers computing tanh via exp cannot return NaN.
+/// erf as the decoder's host code computes it (Chebyshev fit of erfc, Numerical Recipes, fractional error below 1.2e-7).
+const ERF: &str = r#"
+fn erf_fit(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.5 * abs(x));
+    let poly = -1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806
+        + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277))))))));
+    let tau = t * exp(-x * x + poly);
+    if (x >= 0.0) { return 1.0 - tau; }
+    return tau - 1.0;
+}
+"#;
+
+/// hdr: 0 count, 1 mode (0 SiLU, 1 GELU tanh approximation, 2 GELU erf, 3 ReLU, 4 ReLU squared), 2 plain (1: `up` is not
+/// applied, `output = act(gate)`). tanh's argument is clamped to +-15, where it is 1 in f32 already, so drivers computing
+/// tanh via exp cannot return NaN.
 const GLU: &str = r#"
 @group(0) @binding(2) var<storage, read> gate: array<f32>;
 @group(0) @binding(3) var<storage, read> up: array<f32>;
@@ -415,12 +428,108 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     for (var i = gid.x; i < count; i += nwg.x * 64u) {
         let g = gate[i];
         var a: f32;
-        if (hdr[1] == 0u) {
-            a = g / (1.0 + exp(-g));
-        } else {
-            a = 0.5 * g * (1.0 + tanh(clamp(0.7978846 * (g + 0.044715 * g * g * g), -15.0, 15.0)));
+        switch (hdr[1]) {
+            case 0u: { a = g / (1.0 + exp(-g)); }
+            case 1u: { a = 0.5 * g * (1.0 + tanh(clamp(0.7978846 * (g + 0.044715 * g * g * g), -15.0, 15.0))); }
+            case 2u: { a = 0.5 * g * (1.0 + erf_fit(g * 0.70710678)); }
+            case 3u: { a = max(g, 0.0); }
+            default: { let r = max(g, 0.0); a = r * r; }
         }
-        output[i] = a * up[i];
+        if (hdr[2] == 0u) { a = a * up[i]; }
+        output[i] = a;
+    }
+}
+"#;
+
+/// hdr: 0 count, 1 mode (0: `x = clamp(x, -limit, limit)`, 1: `x *= softplus(beta * gate) / beta`), 2 parameter (f32 bits).
+const EWISE: &str = r#"
+@group(0) @binding(2) var<storage, read_write> x: array<f32>;
+@group(0) @binding(3) var<storage, read> gate: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let count = hdr[0]; let param = hdr_f32(2u);
+    for (var i = gid.x; i < count; i += nwg.x * 64u) {
+        if (hdr[1] == 0u) {
+            x[i] = clamp(x[i], -param, param);
+        } else {
+            let scaled = param * gate[i];
+            var factor = gate[i];
+            if (scaled <= 20.0) { factor = log(1.0 + exp(scaled)) / param; }
+            x[i] = x[i] * factor;
+        }
+    }
+}
+"#;
+
+/// hdr: 0 count, 1 mode, 2 rows, 3 heads, 4 nope, 5 rope, 6 value, 7 kv_lora. One invocation per output element. Modes:
+/// 0 queries `[rotary | content]` from a = q_full; 1 keys `[shared rotary | content]` from a = kv_a, b = kv;
+/// 2 values from a = kv; 3 latent from a = kv_a. (Layouts as `mla_qkv` of the decoder.)
+const MLA_MOVE: &str = r#"
+@group(0) @binding(2) var<storage, read> src_a: array<f32>;
+@group(0) @binding(3) var<storage, read> src_b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let count = hdr[0]; let mode = hdr[1];
+    let heads = hdr[3]; let nope = hdr[4]; let rope = hdr[5]; let value = hdr[6]; let kv_lora = hdr[7];
+    let dk = nope + rope;
+    for (var i = gid.x; i < count; i += nwg.x * 64u) {
+        if (mode == 0u) {
+            let at = i / dk; let d = i % dk;
+            if (d < rope) { dst[i] = src_a[at * dk + nope + d]; } else { dst[i] = src_a[at * dk + d - rope]; }
+        } else if (mode == 1u) {
+            let at = i / dk; let d = i % dk;
+            if (d < rope) { dst[i] = src_a[(at / heads) * (kv_lora + rope) + kv_lora + d]; }
+            else { dst[i] = src_b[at * (nope + value) + d - rope]; }
+        } else if (mode == 2u) {
+            let at = i / value; let e = i % value;
+            dst[i] = src_a[at * (nope + value) + nope + e];
+        } else {
+            let r = i / kv_lora; let c = i % kv_lora;
+            dst[i] = src_a[r * (kv_lora + rope) + c];
+        }
+    }
+}
+"#;
+
+/// hdr: 0 rows, 1 cols, 2 eps (f32 bits), 3 has_bias. One workgroup per row; mean and variance in two passes (biased variance,
+/// eps inside the square root, like the CPU backend).
+const LAYER_NORM: &str = r#"
+@group(0) @binding(2) var<storage, read> input: array<f32>;
+@group(0) @binding(3) var<storage, read> weight: array<f32>;
+@group(0) @binding(4) var<storage, read> bias: array<f32>;
+@group(0) @binding(5) var<storage, read_write> output: array<f32>;
+var<workgroup> partial: array<f32, 64>;
+fn reduce_sum(lane: u32, value: f32) -> f32 {
+    partial[lane] = value;
+    workgroupBarrier();
+    for (var s = 32u; s > 0u; s = s / 2u) {
+        if (lane < s) { partial[lane] += partial[lane + s]; }
+        workgroupBarrier();
+    }
+    let total = partial[0];
+    workgroupBarrier();
+    return total;
+}
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lane: u32) {
+    let rows = hdr[0]; let cols = hdr[1];
+    let r = wid.x + wid.y * nwg.x;
+    if (r >= rows) { return; }
+    var sum = 0.0;
+    for (var c = lane; c < cols; c += 64u) { sum += input[r * cols + c]; }
+    let mean = reduce_sum(lane, sum) / f32(cols);
+    var sq = 0.0;
+    for (var c = lane; c < cols; c += 64u) {
+        let d = input[r * cols + c] - mean;
+        sq += d * d;
+    }
+    let inv = 1.0 / sqrt(reduce_sum(lane, sq) / f32(cols) + hdr_f32(2u));
+    for (var c = lane; c < cols; c += 64u) {
+        var v = (input[r * cols + c] - mean) * inv * weight[c];
+        if (hdr[3] != 0u) { v += bias[c]; }
+        output[r * cols + c] = v;
     }
 }
 "#;
@@ -672,10 +781,13 @@ enum KernelId {
     LinearTiled,
     LinearKq,
     LinearQ6,
+    LayerNorm,
+    Ewise,
+    MlaMove,
 }
 
 impl KernelId {
-    const ALL: [KernelId; 11] = [
+    const ALL: [KernelId; 14] = [
         KernelId::Linear,
         KernelId::Embedding,
         KernelId::RmsNorm,
@@ -687,6 +799,9 @@ impl KernelId {
         KernelId::LinearTiled,
         KernelId::LinearKq,
         KernelId::LinearQ6,
+        KernelId::LayerNorm,
+        KernelId::Ewise,
+        KernelId::MlaMove,
     ];
 
     fn label(self) -> &'static str {
@@ -702,6 +817,9 @@ impl KernelId {
             KernelId::LinearTiled => "fllm-linear-tiled",
             KernelId::LinearKq => "fllm-linear-kq",
             KernelId::LinearQ6 => "fllm-linear-q6",
+            KernelId::LayerNorm => "fllm-layer-norm",
+            KernelId::Ewise => "fllm-ewise",
+            KernelId::MlaMove => "fllm-mla-move",
         }
     }
 
@@ -711,7 +829,10 @@ impl KernelId {
             KernelId::Linear => [WEIGHT_DECODE, LINEAR].concat(),
             KernelId::Embedding => [WEIGHT_DECODE, EMBEDDING].concat(),
             KernelId::RmsNorm => RMS_NORM.to_string(),
-            KernelId::Glu => GLU.to_string(),
+            KernelId::Glu => [ERF, GLU].concat(),
+            KernelId::LayerNorm => LAYER_NORM.to_string(),
+            KernelId::Ewise => EWISE.to_string(),
+            KernelId::MlaMove => MLA_MOVE.to_string(),
             KernelId::Residual => RESIDUAL.to_string(),
             KernelId::Rope => ROPE.to_string(),
             KernelId::KvWrite => KV_WRITE.to_string(),
@@ -737,6 +858,9 @@ impl KernelId {
             KernelId::LinearTiled => &[false, false, true, false],
             KernelId::LinearKq => &[false, false, true, false],
             KernelId::LinearQ6 => &[false, false, true, false],
+            KernelId::LayerNorm => &[false, false, false, true],
+            KernelId::Ewise => &[true, false],
+            KernelId::MlaMove => &[false, false, true],
         }
     }
 }
@@ -776,6 +900,61 @@ fn round4(n: u64) -> u64 {
     n.div_ceil(4) * 4
 }
 
+/// Environment switch that admits a software renderer (lavapipe, SwiftShader, WARP) as a GPU.
+const SOFTWARE_ENV: &str = "FLLM_ALLOW_SOFTWARE_GPU";
+
+/// What kind of adapter wgpu found; software renderers are refused unless [`SOFTWARE_ENV`] is set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdapterClass {
+    Discrete,
+    Integrated,
+    Virtual,
+    Software,
+}
+
+impl AdapterClass {
+    fn of(kind: wgpu::DeviceType) -> Self {
+        match kind {
+            wgpu::DeviceType::DiscreteGpu => Self::Discrete,
+            wgpu::DeviceType::IntegratedGpu => Self::Integrated,
+            wgpu::DeviceType::VirtualGpu => Self::Virtual,
+            wgpu::DeviceType::Cpu | wgpu::DeviceType::Other => Self::Software,
+        }
+    }
+}
+
+/// Which of `adapters` (all adapters of the requested API, in wgpu's order) `<api>:index` means. Index 0 is the first discrete GPU, else the
+/// first hardware adapter; index N is the N-th hardware adapter in the order `fllm-rs devices` lists them. Software renderers (WARP on
+/// Windows, lavapipe and SwiftShader on Vulkan) are used only when no hardware adapter exists and `allow_software` is set. The errors say
+/// what was found and what to do about it.
+pub(crate) fn choose_adapter(api: &str, adapters: &[(AdapterClass, String)], index: usize, allow_software: bool) -> Result<usize, String> {
+    let hardware: Vec<usize> = (0..adapters.len()).filter(|&i| adapters[i].0 != AdapterClass::Software).collect();
+    let software: Vec<usize> = (0..adapters.len()).filter(|&i| adapters[i].0 == AdapterClass::Software).collect();
+    let api_label = if matches!(api, "gpu" | "wgpu" | "auto") { "GPU".to_owned() } else { format!("{api} GPU") };
+    if hardware.is_empty() {
+        if software.is_empty() {
+            let hint = if cfg!(windows) {
+                " (install the graphics driver of the GPU vendor; a remote-desktop session or a virtual machine without GPU passthrough only offers the software renderer)"
+            } else {
+                " (is a graphics driver / Vulkan ICD installed?)"
+            };
+            return Err(format!("no {api_label} adapter found{hint}"));
+        }
+        let names: Vec<&str> = software.iter().map(|&i| adapters[i].1.as_str()).collect();
+        if allow_software && index == 0 {
+            return Ok(software[0]);
+        }
+        return Err(format!(
+            "no hardware {api_label} adapter found; only software renderers are present ({}), which are refused because they are far too slow              for inference; set {SOFTWARE_ENV}=1 to use one anyway (testing), or run on the CPU with --device cpu",
+            names.join(", ")
+        ));
+    }
+    if index == 0 {
+        return Ok(hardware.iter().copied().find(|&i| adapters[i].0 == AdapterClass::Discrete).unwrap_or(hardware[0]));
+    }
+    hardware.get(index).copied().ok_or_else(|| format!("no {api_label} adapter number {index} ({} hardware adapters found)", hardware.len()))
+}
+
 impl GpuContext {
     pub fn new(backend_name: &str, device_id: usize) -> Result<Arc<Self>, BackendError> {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -795,40 +974,19 @@ impl GpuContext {
 
         let backends = descriptor.backends;
         let instance = wgpu::Instance::new(descriptor);
-        let adapter = if device_id == 0 {
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-                ..Default::default()
-            }))
-            .map_err(|e| BackendError::DeviceNotFound(format!("no native GPU adapter: {e}")))?
-        } else {
-            // `<api>:N` is the N-th hardware adapter of that API, in the order `gpu::list_adapters` lists them (`fllm-rs devices`)
-            let mut hardware: Vec<wgpu::Adapter> = pollster::block_on(instance.enumerate_adapters(backends))
-                .into_iter()
-                .filter(|a| !matches!(a.get_info().device_type, wgpu::DeviceType::Cpu | wgpu::DeviceType::Other))
-                .collect();
-            if device_id >= hardware.len() {
-                return Err(BackendError::DeviceNotFound(format!(
-                    "no {backend_name} GPU adapter number {device_id} ({} found)",
-                    hardware.len()
-                )));
-            }
-            hardware.swap_remove(device_id)
-        };
-
+        let mut adapters: Vec<wgpu::Adapter> = pollster::block_on(instance.enumerate_adapters(backends));
+        let candidates: Vec<(AdapterClass, String)> = adapters
+            .iter()
+            .map(|a| {
+                let info = a.get_info();
+                (AdapterClass::of(info.device_type), format!("{} ({:?})", info.name, info.backend))
+            })
+            .collect();
+        let allow_software = std::env::var_os(SOFTWARE_ENV).is_some_and(|v| !v.is_empty() && v != "0");
+        let chosen = choose_adapter(backend_name, &candidates, device_id, allow_software).map_err(BackendError::DeviceNotFound)?;
+        let adapter = adapters.swap_remove(chosen);
         let info = adapter.get_info();
-        let software = matches!(
-            info.device_type,
-            wgpu::DeviceType::Cpu | wgpu::DeviceType::Other
-        );
-        if software && std::env::var_os("FLLM_ALLOW_SOFTWARE_GPU").is_none() {
-            return Err(BackendError::DeviceNotFound(format!(
-                "{} is not a hardware GPU (set FLLM_ALLOW_SOFTWARE_GPU=1 to use it anyway)",
-                info.name
-            )));
-        }
+        let software = AdapterClass::of(info.device_type) == AdapterClass::Software;
 
         // The defaults cap storage bindings at 128 MiB, less than an LM head or a KV pool;
         // take whatever the adapter offers for buffer sizes and keep the rest at defaults.
@@ -1016,7 +1174,7 @@ impl WgpuBackend {
             name: context.name.clone(),
             supported_quants,
             supports_rms_norm: true,
-            supports_layer_norm: false, // host fallback
+            supports_layer_norm: true,
             supports_rope: true,
             supports_swiglu: true,
             supports_geglu: true,
@@ -1024,6 +1182,7 @@ impl WgpuBackend {
             supports_kv_cache_write: true,
             supports_embedding_lookup: true,
             supports_device_sampling: false, // host fallback
+            sample_on_device: false,
             supports_residual_add: true,
             supports_moe: false, // host fallback
             max_batch_size: 512,
@@ -1205,6 +1364,8 @@ impl Backend for WgpuBackend {
             value_dim,
             words_per_layer_k,
             words_per_layer_v,
+            layout: None,
+            layer_geoms: None,
         })
     }
 }
@@ -1592,6 +1753,7 @@ impl WgpuStream {
         gate: &DeviceBuffer,
         up: &DeviceBuffer,
         mode: u32,
+        plain: bool,
     ) -> Result<(), BackendError> {
         let count = gate.size / 4;
         if up.size != gate.size || out.size < gate.size || !gate.size.is_multiple_of(4) {
@@ -1603,10 +1765,68 @@ impl WgpuStream {
         let (h, _, _) = self.reserve(1, 0)?;
         self.host[h] = count as u32;
         self.host[h + 1] = mode;
+        self.host[h + 2] = u32::from(plain);
         let binds = [self.bind(gate)?, self.bind(up)?, self.bind(out)?];
         let groups = self.stride_groups(count);
         self.dispatch(KernelId::Glu, h, &binds, (groups, 1, 1))
     }
+
+    /// In-place element-wise kernel (`mode` 0 clamp to +-`param`, 1 softplus gate with beta `param`).
+    fn ewise(&mut self, x: &mut DeviceBuffer, gate: Option<&DeviceBuffer>, mode: u32, param: f32) -> Result<(), BackendError> {
+        let count = x.size / 4;
+        if count == 0 {
+            return Ok(());
+        }
+        fits_u32(count, "element-wise operand")?;
+        let (h, _, _) = self.reserve(1, 0)?;
+        self.host[h..h + 3].copy_from_slice(&[count as u32, mode, param.to_bits()]);
+        let context = Arc::clone(&self.context);
+        let gate_bind = match gate {
+            Some(g) => self.bind(g)?,
+            None => Self::dummy_bind(&context),
+        };
+        let binds = [self.bind(x)?, gate_bind];
+        let groups = self.stride_groups(count);
+        self.dispatch(KernelId::Ewise, h, &binds, (groups, 1, 1))
+    }
+
+    /// One MLA data-movement pass (`MLA_MOVE` modes).
+    #[allow(clippy::too_many_arguments)]
+    fn mla_move(
+        &mut self,
+        mode: u32,
+        count: usize,
+        rows: usize,
+        shape: &MlaShape,
+        a: &DeviceBuffer,
+        b: &DeviceBuffer,
+        dst: &DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if count == 0 {
+            return Ok(());
+        }
+        fits_u32(count, "MLA operand")?;
+        fits_u32(rows * (shape.kv_lora + shape.rope), "MLA latent rows")?;
+        let (h, _, _) = self.reserve(1, 0)?;
+        self.host[h..h + 8].copy_from_slice(&[
+            count as u32,
+            mode,
+            rows as u32,
+            shape.heads as u32,
+            shape.nope as u32,
+            shape.rope as u32,
+            shape.value as u32,
+            shape.kv_lora as u32,
+        ]);
+        let binds = [self.bind(a)?, self.bind(b)?, self.bind(dst)?];
+        let groups = self.stride_groups(count);
+        self.dispatch(KernelId::MlaMove, h, &binds, (groups, 1, 1))
+    }
+}
+
+/// Trait activation mode (0 SiLU, 1 GELU tanh, 2 GELU erf, 3 ReLU, 4 ReLU squared) to the kernel's.
+fn activation_mode(mode: i32) -> Result<u32, BackendError> {
+    u32::try_from(mode).ok().filter(|m| *m <= 4).ok_or_else(|| invalid(format!("unknown activation mode {mode}")))
 }
 
 fn fits_u32(n: usize, what: &str) -> Result<u32, BackendError> {
@@ -1836,14 +2056,103 @@ impl Stream for WgpuStream {
         bias: Option<&DeviceBuffer>,
         eps: f32,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason("layer_norm", "no WGSL LayerNorm kernel yet");
-        let cx = self.copy_to_host(x)?;
-        let cw = self.copy_to_host(weight)?;
-        let cb = bias.map(|b| self.copy_to_host(b)).transpose()?;
-        let mut co = self.cpu.allocate_buffer(out.size)?;
-        self.cpu_stream
-            .layer_norm(&mut co, &cx, &cw, cb.as_ref(), eps)?;
-        self.copy_from_host(&co, out)
+        let cols = weight.size / 4;
+        if cols == 0 || !x.size.is_multiple_of(cols * 4) || out.size < x.size {
+            return Err(invalid("layer_norm input is not rows of the weight width"));
+        }
+        if bias.is_some_and(|b| b.size < weight.size) {
+            return Err(invalid("layer_norm bias is shorter than its weight"));
+        }
+        let rows = x.size / (cols * 4);
+        if rows == 0 {
+            return Ok(());
+        }
+        fits_u32(rows * cols, "layer_norm input")?;
+        let (gx, gy) = self.grid(rows)?;
+        let (h, _, _) = self.reserve(1, 0)?;
+        self.host[h..h + 4].copy_from_slice(&[rows as u32, cols as u32, eps.to_bits(), u32::from(bias.is_some())]);
+        let context = Arc::clone(&self.context);
+        let bias_bind = match bias {
+            Some(b) => self.bind(b)?,
+            None => Self::dummy_bind(&context),
+        };
+        let binds = [self.bind(x)?, self.bind(weight)?, bias_bind, self.bind(out)?];
+        self.dispatch(KernelId::LayerNorm, h, &binds, (gx, gy, 1))
+    }
+
+    fn supports_arch_ops(&self) -> bool {
+        true
+    }
+
+    fn activation(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
+        self.glu(out, x, x, activation_mode(mode)?, true)
+    }
+
+    fn activation_glu(
+        &mut self,
+        out: &mut DeviceBuffer,
+        gate: &DeviceBuffer,
+        up: &DeviceBuffer,
+        mode: i32,
+    ) -> Result<(), BackendError> {
+        self.glu(out, gate, up, activation_mode(mode)?, false)
+    }
+
+    fn softplus_gate_mul(&mut self, x: &mut DeviceBuffer, gate: &DeviceBuffer, beta: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) || gate.size < x.size || beta <= 0.0 {
+            return Err(invalid("attention gate shorter than its target"));
+        }
+        self.ewise(x, Some(gate), 1, beta)
+    }
+
+    fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("clamp target is not a whole number of floats"));
+        }
+        self.ewise(x, None, 0, limit)
+    }
+
+    fn mla_latent(
+        &mut self,
+        latent: &mut DeviceBuffer,
+        kv_a: &DeviceBuffer,
+        rows: usize,
+        kv_lora: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        if width < kv_lora || kv_a.size < rows * width * 4 || latent.size < rows * kv_lora * 4 {
+            return Err(invalid("mla_latent buffers are smaller than rows x width"));
+        }
+        let shape = MlaShape { heads: 1, nope: 0, rope: width - kv_lora, value: 1, kv_lora };
+        self.mla_move(3, rows * kv_lora, rows, &shape, kv_a, kv_a, latent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mla_assemble(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &mut DeviceBuffer,
+        v: &mut DeviceBuffer,
+        q_full: &DeviceBuffer,
+        kv_a: &DeviceBuffer,
+        kv: &DeviceBuffer,
+        rows: usize,
+        shape: &MlaShape,
+    ) -> Result<(), BackendError> {
+        let (dk, width) = (shape.nope + shape.rope, shape.kv_lora + shape.rope);
+        let items = rows * shape.heads;
+        if q_full.size < items * dk * 4
+            || kv_a.size < rows * width * 4
+            || kv.size < items * (shape.nope + shape.value) * 4
+            || q.size < items * dk * 4
+            || k.size < items * dk * 4
+            || v.size < items * shape.value * 4
+        {
+            return Err(invalid("mla_assemble buffers are smaller than rows x heads x width"));
+        }
+        self.mla_move(0, items * dk, rows, shape, q_full, q_full, q)?;
+        self.mla_move(1, items * dk, rows, shape, kv_a, kv, k)?;
+        self.mla_move(2, items * shape.value, rows, shape, kv, kv, v)
     }
 
     fn rope(
@@ -1958,7 +2267,7 @@ impl Stream for WgpuStream {
         gate: &DeviceBuffer,
         up: &DeviceBuffer,
     ) -> Result<(), BackendError> {
-        self.glu(out, gate, up, 0)
+        self.glu(out, gate, up, 0, false)
     }
 
     fn geglu(
@@ -1967,7 +2276,7 @@ impl Stream for WgpuStream {
         gate: &DeviceBuffer,
         up: &DeviceBuffer,
     ) -> Result<(), BackendError> {
-        self.glu(out, gate, up, 1)
+        self.glu(out, gate, up, 1, false)
     }
 
     fn residual_add(
@@ -2240,7 +2549,43 @@ pub fn shader_sources() -> Vec<(&'static str, String)> {
 
 #[cfg(test)]
 mod tests {
+    use super::{choose_adapter, AdapterClass};
     use wgpu::naga;
+
+    fn adapters(list: &[(AdapterClass, &str)]) -> Vec<(AdapterClass, String)> {
+        list.iter().map(|(c, n)| (*c, (*n).to_owned())).collect()
+    }
+
+    #[test]
+    fn index_zero_prefers_a_discrete_gpu_and_ignores_software() {
+        use AdapterClass::*;
+        let list = adapters(&[(Software, "WARP"), (Integrated, "iGPU"), (Discrete, "dGPU")]);
+        assert_eq!(choose_adapter("dx12", &list, 0, false), Ok(2));
+        assert_eq!(choose_adapter("dx12", &list, 0, true), Ok(2));
+        assert_eq!(choose_adapter("dx12", &list, 1, false), Ok(2));
+        assert!(choose_adapter("dx12", &list, 2, false).unwrap_err().contains("adapter number 2 (2 hardware adapters found)"));
+        let only_integrated = adapters(&[(Integrated, "iGPU")]);
+        assert_eq!(choose_adapter("vulkan", &only_integrated, 0, false), Ok(0));
+    }
+
+    #[test]
+    fn software_only_is_refused_with_an_actionable_message() {
+        use AdapterClass::*;
+        let list = adapters(&[(Software, "Microsoft Basic Render Driver (Dx12)")]);
+        let error = choose_adapter("dx12", &list, 0, false).unwrap_err();
+        assert!(error.contains("no hardware dx12 GPU adapter") && error.contains("Basic Render Driver"), "{error}");
+        assert!(error.contains("FLLM_ALLOW_SOFTWARE_GPU=1") && error.contains("--device cpu"), "{error}");
+        assert_eq!(choose_adapter("dx12", &list, 0, true), Ok(0));
+        // a software renderer is only ever number 0
+        assert!(choose_adapter("dx12", &list, 1, true).is_err());
+    }
+
+    #[test]
+    fn no_adapter_at_all_says_so() {
+        let error = choose_adapter("vulkan", &[], 0, true).unwrap_err();
+        assert!(error.starts_with("no vulkan GPU adapter found"), "{error}");
+        assert!(choose_adapter("gpu", &[], 0, false).unwrap_err().starts_with("no GPU adapter found"));
+    }
 
     #[test]
     fn shaders_parse_and_validate() {

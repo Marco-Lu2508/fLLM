@@ -3,7 +3,7 @@
 //! `y[m, n] = x[m, k] . w[n, k]^T` with fp16 tensors: `x` is an application-write input, `w` a static (constant) tensor, `y` an
 //! application-read output; the HTP graph precision is set to fp16. The graph is built at run time with `QnnGraph_addNode` (the QNN way
 //! to build a model without an offline conversion), compiled by `QnnGraph_finalize` (this is the slow step on the device), and executed once
-//! with `QnnGraph_execute`. It proves that the backend accepts and runs a linear layer; it is not an LLM path (see `STUDY_HEXAGON.md`: the
+//! with `QnnGraph_execute`. It proves that the backend accepts and runs a linear layer; it is not an LLM path (see `docs/research/npu-study-hexagon.md`: the
 //! HTP wants static shapes, 4-bit blockwise weights and whole-model context binaries). Verification level: L0.
 
 use super::qnn::{

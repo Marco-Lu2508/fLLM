@@ -1,0 +1,5 @@
+# Official client SDKs, pinned: the tests check that fllm-rs works with the clients people really use.
+openai==3.31.0
+anthropic==1.14.0
+ollama==0.6.3
+pytest==9.1.1

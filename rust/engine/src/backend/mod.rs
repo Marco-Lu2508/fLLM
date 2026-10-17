@@ -4,8 +4,10 @@
 //! with non-blocking stream execution, device-resident quantized weights, paged KV caching,
 //! and layer-level operator fusion.
 
+pub mod act_dtype;
 pub mod cpu;
 pub mod memory;
+pub mod moe;
 pub mod q4z;
 pub mod selftest;
 pub mod stub;
@@ -36,6 +38,7 @@ macro_rules! env_flag_once {
 }
 pub(crate) use env_flag_once;
 
+pub use moe::{MoeGlu, MoeGrouped, MoeRoute, MoeSort};
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
@@ -279,6 +282,43 @@ pub struct DeltaWeights<'a> {
     pub norm: &'a DeviceBuffer,
 }
 
+/// Shape and constants of a Kimi Delta Attention (KDA) layer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KdaShape {
+    pub heads: usize,
+    pub head_dim: usize,
+    pub conv_kernel: usize,
+    pub eps: f32,
+    pub lower_bound: Option<f32>,
+}
+
+impl KdaShape {
+    /// Channels of the convolution: `[q | k | v]`.
+    pub fn conv_dim(&self) -> usize {
+        3 * self.heads * self.head_dim
+    }
+
+    /// Bytes of the recurrent matrices of one layer of one sequence (`heads x head_dim x head_dim`, FP32).
+    pub fn rec_bytes(&self) -> usize {
+        self.heads * self.head_dim * self.head_dim * 4
+    }
+
+    /// Bytes one layer of one sequence occupies in a state buffer: recurrent matrices, then convolution history,
+    /// rounded up to 256 bytes.
+    pub fn layer_state_bytes(&self) -> usize {
+        (self.rec_bytes() + self.conv_dim() * (self.conv_kernel.saturating_sub(1)) * 4).next_multiple_of(256)
+    }
+}
+
+/// Device-resident parameters of a KDA layer (all FP32).
+pub struct KdaWeights<'a> {
+    pub conv: &'a DeviceBuffer,
+    pub dt_bias: &'a DeviceBuffer,
+    /// Decay rate `rate` per head (`exp(A_log)`).
+    pub rate: &'a DeviceBuffer,
+    pub norm: &'a DeviceBuffer,
+}
+
 /// Quantization format of weights stored resident on the device.
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -324,6 +364,7 @@ pub enum QuantType {
     Nvfp4Marlin,
     Q4_K_Marlin,
     Fp8Marlin,
+    Fp8Block,
     Other(u32),
 }
 
@@ -366,6 +407,7 @@ impl QuantType {
             0x8000_0015 => Self::Q4ZP64,
             0x8000_0016 => Self::Q4ZP128,
             0x8000_0020 => Self::Fp8Marlin,
+            0x8000_0021 => Self::Fp8Block,
             other => Self::Other(other),
         }
     }
@@ -409,6 +451,7 @@ impl QuantType {
             Self::Q4ZP128 => 0x8000_0016,
             Self::Nvfp4Marlin => 0x8000_0013,
             Self::Fp8Marlin => 0x8000_0020,
+            Self::Fp8Block => 0x8000_0021,
             Self::Other(other) => *other,
         }
     }
@@ -439,7 +482,7 @@ impl QuantType {
             }
             Self::IQ4_NL => 32,
             Self::IQ4_XS => 256,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
             Self::Mxfp4 => 32,
             Self::NvFp4 => 64,
             Self::Q4Z32 | Self::Q4ZP32 => 32,
@@ -476,7 +519,7 @@ impl QuantType {
             Self::IQ4_NL => 18,
             Self::IQ3_S => 110,
             Self::IQ4_XS => 136,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
             Self::Mxfp4 => 17,
             Self::NvFp4 => 36,
             Self::Q4Z32 | Self::Q4ZP32 => 19,
@@ -642,6 +685,8 @@ pub struct DeviceKvCache {
     pub value_dim: usize,
     pub words_per_layer_k: usize,
     pub words_per_layer_v: usize,
+    pub layout: Option<crate::kv_geometry::KvPoolLayout>,
+    pub layer_geoms: Option<Vec<crate::config::LayerGeom>>,
 }
 
 /// Values sharing one f16 scale in a q8 KV cache: 32 when `dim` is a multiple of 32,
@@ -678,6 +723,42 @@ impl DeviceKvCache {
 
     pub fn slots(&self) -> usize {
         self.pool_blocks * self.block_size
+    }
+
+    pub fn layer_key_offset(&self, layer: usize) -> usize {
+        self.layout.as_ref().map_or(layer * self.words_per_layer_k, |l| {
+            l.key_offsets.get(layer).copied().unwrap_or(layer * self.words_per_layer_k)
+        })
+    }
+
+    pub fn layer_value_offset(&self, layer: usize) -> usize {
+        self.layout.as_ref().map_or(layer * self.words_per_layer_v, |l| {
+            l.value_offsets.get(layer).copied().unwrap_or(layer * self.words_per_layer_v)
+        })
+    }
+
+    pub fn layer_key_words(&self, layer: usize) -> usize {
+        self.layout.as_ref().map_or(self.words_per_layer_k, |l| {
+            l.key_words.get(layer).copied().unwrap_or(self.words_per_layer_k)
+        })
+    }
+
+    pub fn layer_value_words(&self, layer: usize) -> usize {
+        self.layout.as_ref().map_or(self.words_per_layer_v, |l| {
+            l.value_words.get(layer).copied().unwrap_or(self.words_per_layer_v)
+        })
+    }
+
+    pub fn layer_kv_heads(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.kv_heads, |g| g.kv_heads)
+    }
+
+    pub fn layer_head_dim(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.head_dim, |g| g.head_dim)
+    }
+
+    pub fn layer_value_dim(&self, layer: usize) -> usize {
+        self.layer_geoms.as_ref().and_then(|g| g.get(layer)).map_or(self.value_dim, |g| g.value_dim)
     }
 
     /// Validate the geometry and compute the per-layer sizes; pools are allocated by the caller.
@@ -775,8 +856,11 @@ pub fn validate_kv_write(
         return shape(format!("KV slot {s} >= {} pool slots", kv.slots()));
     }
     let rows = slots.len();
-    if k_bytes < rows * kv.kv_heads * kv.head_dim * 4
-        || v_bytes < rows * kv.kv_heads * kv.value_dim * 4
+    let kh = kv.layer_kv_heads(layer_idx);
+    let kd = kv.layer_head_dim(layer_idx);
+    let vd = kv.layer_value_dim(layer_idx);
+    if k_bytes < rows * kh * kd * 4
+        || v_bytes < rows * kh * vd * 4
     {
         return shape("kv_cache_write sources smaller than rows x kv_heads x dim".into());
     }
@@ -839,9 +923,12 @@ impl AttentionParams {
                 self.num_heads, self.num_kv_heads
             ));
         }
-        if kv.kv_heads != self.num_kv_heads
-            || kv.head_dim != self.head_dim
-            || kv.value_dim != self.value_dim
+        let kh = kv.layer_kv_heads(layer_idx);
+        let kd = kv.layer_head_dim(layer_idx);
+        let vd = kv.layer_value_dim(layer_idx);
+        if kh != self.num_kv_heads
+            || kd != self.head_dim
+            || vd != self.value_dim
             || kv.block_size != self.block_size
         {
             return shape("attention parameters do not match the KV cache".into());
@@ -894,6 +981,119 @@ pub struct SamplingParams {
     pub vocab_size: usize,
 }
 
+/// One row of a `Stream::sample_rows` batch: what the sampler does to the logits of one sequence. The layout is shared with the CUDA
+/// kernel (`FllmSampleRow` in cuda/sampling.cu): 80 bytes, 8-byte aligned.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleRowParams {
+    /// At most 1e-5: greedy.
+    pub temperature: f32,
+    /// 0 or 1: off.
+    pub top_p: f32,
+    pub min_p: f32,
+    /// 1: off.
+    pub typical_p: f32,
+    /// 0: off.
+    pub top_k: i32,
+    /// 1: off.
+    pub repetition_penalty: f32,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
+    /// Philox key of the request and the number of the draw (see `sampling::philox_uniform`).
+    pub seed: u64,
+    pub draw: u64,
+    /// Slice `pen_off .. pen_off + pen_len` of `SampleBatch::pen`: the distinct tokens of the penalty window and their counts.
+    pub pen_off: i32,
+    pub pen_len: i32,
+    /// Slice of `SampleBatch::bias`.
+    pub bias_off: i32,
+    pub bias_len: i32,
+    /// Row of `SampleBatch::mask` (a bit per token, set = allowed), -1: no grammar mask.
+    pub mask_row: i32,
+    /// 0: no log-probabilities, 1: of the raw logits (before bias, penalties and temperature), 2: of the sampled distribution.
+    pub logprobs_mode: i32,
+    /// Alternatives to report (at most 20; at most `SampleBatch::top_stride`).
+    pub top_n: i32,
+    pub pad: i32,
+}
+
+impl Default for SampleRowParams {
+    fn default() -> Self {
+        Self {
+            temperature: 0.0,
+            top_p: 1.0,
+            min_p: 0.0,
+            typical_p: 1.0,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            seed: 0,
+            draw: 0,
+            pen_off: 0,
+            pen_len: 0,
+            bias_off: 0,
+            bias_len: 0,
+            mask_row: -1,
+            logprobs_mode: 0,
+            top_n: 0,
+            pad: 0,
+        }
+    }
+}
+
+/// The rows to sample and the per-row lists they point into.
+#[derive(Debug, Clone, Copy)]
+pub struct SampleBatch<'a> {
+    pub rows: &'a [SampleRowParams],
+    /// `(token, count)` pairs of the penalty windows.
+    pub pen: &'a [(i32, i32)],
+    pub bias: &'a [(i32, f32)],
+    /// `mask_rows x mask_words` words, a bit per token.
+    pub mask: &'a [u32],
+    pub mask_words: usize,
+    /// Alternatives stored per row in `SampleOutput::top_*` (0 = none, at most 20).
+    pub top_stride: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SampleOutput {
+    /// The sampled token of each row; -1 when the controls left no token.
+    pub ids: Vec<i32>,
+    /// Log-probability of the sampled token (0 without `logprobs_mode`).
+    pub logprobs: Vec<f32>,
+    /// `rows x top_stride` alternatives, best first; id -1 and -inf where there are fewer.
+    pub top_ids: Vec<i32>,
+    pub top_logprobs: Vec<f32>,
+}
+
+impl SampleBatch<'_> {
+    /// Check the offsets, lengths and sizes that both the CUDA kernel and the host reference rely on.
+    pub fn validate(&self, vocab: usize) -> Result<(), BackendError> {
+        let bad = |what: String| Err(BackendError::InvalidShape(what));
+        if self.top_stride > 20 {
+            return bad(format!("sample_rows: top_stride {} exceeds 20", self.top_stride));
+        }
+        for (r, p) in self.rows.iter().enumerate() {
+            let pen_end = p.pen_off.checked_add(p.pen_len);
+            let bias_end = p.bias_off.checked_add(p.bias_len);
+            if p.pen_off < 0 || p.pen_len < 0 || pen_end.is_none_or(|e| e as usize > self.pen.len()) {
+                return bad(format!("sample_rows: row {r} penalty range outside the list"));
+            }
+            if p.bias_off < 0 || p.bias_len < 0 || bias_end.is_none_or(|e| e as usize > self.bias.len()) {
+                return bad(format!("sample_rows: row {r} bias range outside the list"));
+            }
+            if p.mask_row >= 0 && ((p.mask_row as usize + 1) * self.mask_words > self.mask.len() || self.mask_words < vocab.div_ceil(32)) {
+                return bad(format!("sample_rows: row {r} mask row outside the bitmask"));
+            }
+            if !(0..=2).contains(&p.logprobs_mode) || p.top_n < 0 || (p.logprobs_mode != 0 && p.top_n as usize > self.top_stride) {
+                return bad(format!("sample_rows: row {r} logprobs mode or top_n invalid"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Capabilities and hardware features advertised by a backend.
 #[derive(Debug, Clone)]
 pub struct BackendCapabilities {
@@ -908,6 +1108,9 @@ pub struct BackendCapabilities {
     pub supports_kv_cache_write: bool,
     pub supports_embedding_lookup: bool,
     pub supports_device_sampling: bool,
+    /// `Stream::sample_rows` runs the whole sampler (penalties, bias, grammar mask, temperature, top-k / min-p / typical-p / top-p, a seeded
+    /// draw, log-probabilities) on the device; backends without it return logits to the host.
+    pub sample_on_device: bool,
     pub supports_residual_add: bool,
     pub supports_moe: bool,
     pub max_batch_size: usize,
@@ -922,6 +1125,108 @@ impl BackendCapabilities {
 
 /// Asynchronous stream/command queue for enqueuing operations on a device.
 pub trait Stream: Send {
+    /// Type of the activation buffers of this stream (`FLLM_ACT_DTYPE`, see `act_dtype`). Buffers are still sized for FP32; a narrow stream
+    /// fills the first half. Backends without narrow activations are FP32.
+    fn act_dtype(&self) -> act_dtype::ActDtype {
+        act_dtype::ActDtype::F32
+    }
+
+    /// Host FP32 activations (the embeddings of a step) into an activation buffer of the stream's type.
+    fn upload_activations(&mut self, dst: &mut DeviceBuffer, src: &[f32]) -> Result<(), BackendError> {
+        // SAFETY: an f32 slice is plain bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr().cast::<u8>(), std::mem::size_of_val(src)) };
+        self.upload(dst, bytes)
+    }
+
+    /// `FLLM_WORKSPACE_ROWS`: size the persistent scratch of the stream once for batches of up to `rows` rows (layers up to `cols` wide at the input,
+    /// `out_cols` at the output), so that nothing is allocated later in a run of that size. Backends without such scratch ignore it.
+    fn reserve_workspace(&mut self, _rows: usize, _cols: usize, _out_cols: usize) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// `quantized_linear` for an input and output that are FP32 whatever the stream's activation type (the logits head reads the widened final
+    /// norm output and writes the logits).
+    fn quantized_linear_wide(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceWeight, bias: Option<&DeviceBuffer>) -> Result<(), BackendError> {
+        self.quantized_linear(out, x, weight, bias)
+    }
+
+    /// Per-head RMS norm of q and k (weights of the head width; `None` = no norm of that tensor), rotary embedding and f16 KV-cache write in one kernel
+    /// (`FLLM_FUSE_QK_NORM_ROPE`, norm before the rotation). Returns `false` when it did nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn rope_kv_write_qknorm(
+        &mut self,
+        _q: &mut DeviceBuffer,
+        _k: &DeviceBuffer,
+        _v: &DeviceBuffer,
+        _q_norm: Option<&DeviceBuffer>,
+        _k_norm: Option<&DeviceBuffer>,
+        _eps: f32,
+        _kv: &DeviceKvCache,
+        _layer_idx: usize,
+        _positions: &[usize],
+        _slots: &[usize],
+        _params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// The three column blocks (`widths`) of the row-major activation array `src` (`rows` rows) into three dense arrays. Returns `false` when unsupported.
+    fn split_columns(&mut self, _dst: [&mut DeviceBuffer; 3], _src: &DeviceBuffer, _rows: usize, _widths: [usize; 3]) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// `out = glu(gu[:, :ff], gu[:, ff:])` for the merged gate/up result `gu` (`rows x 2 ff`). Returns `false` when unsupported.
+    fn glu_merged(&mut self, _out: &mut DeviceBuffer, _gu: &DeviceBuffer, _rows: usize, _ff: usize, _geglu: bool) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// Bias, optional per-head norm of q and k, rotary embedding and f16 KV-cache write for the merged q/k/v result `qkv` (`rows x (q + k + v)`, widths in
+    /// `widths`): the rotated queries go to the dense `q_out`. Returns `false` when it did nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn rope_kv_write_qkv(
+        &mut self,
+        _q_out: &mut DeviceBuffer,
+        _qkv: &DeviceBuffer,
+        _widths: [usize; 3],
+        _bias: Option<&DeviceBuffer>,
+        _q_norm: Option<&DeviceBuffer>,
+        _k_norm: Option<&DeviceBuffer>,
+        _eps: f32,
+        _kv: &DeviceKvCache,
+        _layer_idx: usize,
+        _positions: &[usize],
+        _slots: &[usize],
+        _params: &RopeParams,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// `dst` (FP32, same element count) = the activation buffer `src` of the stream's type. For FP32 streams a copy.
+    fn widen_activations(&mut self, dst: &mut DeviceBuffer, src: &DeviceBuffer) -> Result<(), BackendError> {
+        self.copy_buffer(dst, src)
+    }
+
+    /// `FLLM_ACT_CHECK`: largest finite |value| and the number of NaN / Inf values among the first `count` values of an activation buffer.
+    /// `None` when the backend cannot say.
+    fn check_activations(&mut self, _buf: &DeviceBuffer, _count: usize) -> Result<Option<(f32, u32)>, BackendError> {
+        Ok(None)
+    }
+
+    /// Raw backend pointer of the underlying stream, if any.
+    fn raw_stream_ptr(&mut self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
+
+    /// Wait for another stream's enqueued operations to complete before proceeding on this stream.
+    fn wait_stream(&mut self, _other: &mut dyn Stream) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Dynamically update activation dtype (e.g. on overflow fallback).
+    fn set_act_dtype(&mut self, _dtype: act_dtype::ActDtype) -> bool {
+        false
+    }
+
     /// A forward pass of the decoder begins / ends on this stream. Between the two the host arrays of its attention calls (block tables, lengths)
     /// stay unchanged, so a backend may stage and check them once instead of once per layer. Backends without such caches ignore it.
     fn begin_step(&mut self) {}
@@ -931,6 +1236,12 @@ pub trait Stream: Send {
     /// tie). Backends without it return `UnsupportedOperation` and the caller downloads the logits instead.
     fn argmax_rows(&mut self, _logits: &DeviceBuffer, _rows: usize, _vocab: usize) -> Result<Vec<i32>, BackendError> {
         Err(BackendError::UnsupportedOperation("argmax_rows".into()))
+    }
+
+    /// The whole sampler on the device for `batch.rows.len()` rows of `vocab` f32 logits (see `SampleRowParams`). The logits buffer is
+    /// left unchanged. Backends without it return `UnsupportedOperation` (`BackendCapabilities::sample_on_device` says which).
+    fn sample_rows(&mut self, _logits: &DeviceBuffer, _vocab: usize, _batch: &SampleBatch) -> Result<SampleOutput, BackendError> {
+        Err(BackendError::UnsupportedOperation("sample_rows".into()))
     }
 
     /// CUDA graphs of whole decode steps. `graph_begin` starts recording the operations issued on this stream into graph `id`:
@@ -1190,6 +1501,70 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("moe_combine".into()))
     }
 
+    /// Routing of a mixture-of-experts layer with every gating variant (`MoeRoute`): softmax or sigmoid scores, optional selection
+    /// `bias` (one f32 per expert), group-limited selection, renormalisation and scale. Writes `ids` (i32) and `weights` (f32), `k` per row.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_route_ex(
+        &mut self,
+        _logits: &DeviceBuffer,
+        _bias: Option<&DeviceBuffer>,
+        _ids: &mut DeviceBuffer,
+        _weights: &mut DeviceBuffer,
+        _rows: usize,
+        _experts: usize,
+        _k: usize,
+        _route: &MoeRoute,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_route_ex".into()))
+    }
+
+    /// Sort the `pairs` token-expert pairs of `ids` by expert (local experts `expert_offset..expert_offset + num_local`), every expert
+    /// padded to a multiple of `block` (see `MoeSort`; the buffers have the sizes of `moe_sort_bytes`). Nothing is read back.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_align(
+        &mut self,
+        _ids: &DeviceBuffer,
+        _sort: &mut MoeSort,
+        _expert_offset: usize,
+        _num_local: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_align".into()))
+    }
+
+    /// One product of all experts in one launch (see `MoeGrouped`).
+    fn moe_grouped_linear(&mut self, _call: MoeGrouped<'_>) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_grouped_linear".into()))
+    }
+
+    /// `out[t] = sum_j weights[t * k + j] * y[t * k + j] + gate[t] * shared[t]` over rows of `hidden` floats; `weights` and `gate` are
+    /// optional (1), `shared` is the output of the shared expert.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_combine_ex(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _y: &DeviceBuffer,
+        _weights: Option<&DeviceBuffer>,
+        _shared: Option<&DeviceBuffer>,
+        _gate: Option<&DeviceBuffer>,
+        _tokens: usize,
+        _k: usize,
+        _hidden: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_combine_ex".into()))
+    }
+
+    /// `gate[t] = sigmoid(g . x[t])` for the gated shared expert.
+    fn moe_gate_scale(
+        &mut self,
+        _gate: &mut DeviceBuffer,
+        _x: &DeviceBuffer,
+        _g: &DeviceBuffer,
+        _tokens: usize,
+        _hidden: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_gate_scale".into()))
+    }
+
     /// `dst[i] = src[idx[i]] * weights[i]` for `idx.len()` rows of `row_len` floats (weights optional).
     fn gather_rows(
         &mut self,
@@ -1333,6 +1708,69 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("mla_assemble".into()))
     }
 
+    /// Can this stream run multi-head latent attention with the latent cache (`FLLM_MLA=latent`) for these dimensions and cache format?
+    fn supports_mla_latent(&self, _shape: &MlaShape, _key_format: crate::kv_format::KvFormat) -> bool {
+        false
+    }
+
+    /// Latent-cache MLA, step 1 (CUDA only, `FLLM_MLA=latent`): the row the cache stores for each token, `k_row[r] = [latent[r] | rotary(kv_a[r][kv_lora..])]`
+    /// (`latent` is the normalized latent, `kv_a` the output of the down projection, `rope` the rotary tables of the layer).
+    fn mla_latent_kv(
+        &mut self,
+        _k_row: &mut DeviceBuffer,
+        _kv_a: &DeviceBuffer,
+        _latent: &DeviceBuffer,
+        _positions: &[usize],
+        _shape: &MlaShape,
+        _rope: &RopeParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("mla_latent_kv".into()))
+    }
+
+    /// Latent-cache MLA, step 2: the absorbed queries `q_lat[r][h] = [q_nope[r][h] W_UK[h] | rotary(q_pe[r][h])]` as FP16 (`kv_lora + rope` per head) from the
+    /// query projection `q_full` ([content | rotary] per head) and the dense FP16 kv_b matrix `w_kvb`.
+    fn mla_latent_query(
+        &mut self,
+        _q_lat: &mut DeviceBuffer,
+        _q_full: &DeviceBuffer,
+        _w_kvb: &DeviceBuffer,
+        _positions: &[usize],
+        _shape: &MlaShape,
+        _rope: &RopeParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("mla_latent_query".into()))
+    }
+
+    /// Latent-cache MLA, step 3: attention of every row over the latent cache of `layer_idx` (`params`: heads = query heads, one KV head, key width
+    /// `kv_lora + rope`); `o_lat` receives FP16 `kv_lora` values per head. `reference` runs the CUDA-core reference kernel instead of the tensor cores.
+    #[allow(clippy::too_many_arguments)]
+    fn mla_latent_attention(
+        &mut self,
+        _o_lat: &mut DeviceBuffer,
+        _q_lat: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _layer_idx: usize,
+        _params: &AttentionParams,
+        _shape: &MlaShape,
+        _reference: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("mla_latent_attention".into()))
+    }
+
+    /// Latent-cache MLA, step 4: `out[r][h * value + v] = sum_c o_lat[r][h][c] W_UV[h][v][c]` (FP32), the input of the output projection.
+    fn mla_latent_output(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _o_lat: &DeviceBuffer,
+        _w_kvb: &DeviceBuffer,
+        _rows: usize,
+        _shape: &MlaShape,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("mla_latent_output".into()))
+    }
+
     /// Does this stream implement the Mamba-1 steps ([`Stream::mamba1_conv`], [`Stream::mamba1_prep`], [`Stream::mamba1_scan`])?
     fn supports_mamba1(&self, _shape: &Mamba1Shape) -> bool {
         false
@@ -1452,6 +1890,29 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("delta_layer".into()))
     }
 
+    /// Does this stream implement [`Stream::kda_layer`] for layers of this shape?
+    fn supports_kda(&self, _shape: &KdaShape) -> bool {
+        false
+    }
+
+    /// Kimi Delta Attention (KDA) mixer of one layer for `runs`.
+    #[allow(clippy::too_many_arguments)]
+    fn kda_layer(
+        &mut self,
+        _shape: &KdaShape,
+        _weights: &KdaWeights<'_>,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _qkv: &DeviceBuffer,
+        _forget: &DeviceBuffer,
+        _beta: &DeviceBuffer,
+        _gate: &DeviceBuffer,
+        _mixed: &mut DeviceBuffer,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("kda_layer".into()))
+    }
+
     /// In-place residual addition: x = x + residual * scale
     fn residual_add(
         &mut self,
@@ -1462,6 +1923,27 @@ pub trait Stream: Send {
 
     /// Paged Attention across multiple ragged sequences in a continuous batch.
     ///
+    /// Bidirectional variable-length encoder attention with sequence packing.
+    #[allow(clippy::too_many_arguments)]
+    fn attn_encoder(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _k: &DeviceBuffer,
+        _v: &DeviceBuffer,
+        _cu_seqlens: &[i32],
+        _batch_size: usize,
+        _total_tokens: usize,
+        _heads: usize,
+        _kv_heads: usize,
+        _head_dim: usize,
+        _scale: f32,
+        _window: Option<usize>,
+        _global_tokens: Option<&[i32]>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("attn_encoder".into()))
+    }
+
     /// Row `r` reads the keys and values of positions `..lengths[r]` through block table row
     /// `r` of `block_tables`; the caller has already stored the current position with
     /// [`Stream::kv_cache_write`]. Prefill passes one row per token with increasing lengths.
@@ -1533,6 +2015,18 @@ pub trait Backend: Send + Sync {
     /// Create an asynchronous execution stream for this device.
     fn create_stream(&self) -> Result<Box<dyn Stream>, BackendError>;
 
+    /// Switch the activation type of the streams created from now on (and of the weights uploaded from now on: BF16 needs BF16 scales for the 4-bit
+    /// GEMMs). Returns whether the backend supports it; the default (FP32 only) answers `false`.
+    fn set_activation_dtype(&self, _dtype: act_dtype::ActDtype) -> bool {
+        false
+    }
+
+    /// Whether the streams of this backend implement the merged-projection operations (`split_columns`, `rope_kv_write_qkv`, `glu_merged`):
+    /// q/k/v and gate/up uploaded as one matrix each (`FLLM_MERGE_PROJ`).
+    fn supports_merged_projections(&self) -> bool {
+        false
+    }
+
     /// Allocate raw memory on the device.
     fn allocate_buffer(&self, size: usize) -> Result<DeviceBuffer, BackendError>;
 
@@ -1573,6 +2067,17 @@ pub trait Backend: Send + Sync {
         self.upload_weight(name, &bytes, QuantType::F32, rows, cols, bias)
     }
 
+    /// Whether the device mixture-of-experts operations (`moe_route_ex`, `moe_align`, `moe_grouped_linear`, `moe_combine_ex`,
+    /// `moe_gate_scale`) are available on this device.
+    fn moe_device_available(&self) -> bool {
+        false
+    }
+
+    /// Whether `Stream::moe_grouped_linear` runs weights of `quant_type` with `cols` inputs in tiles of `block` pairs.
+    fn moe_grouped_supported(&self, _quant_type: QuantType, _cols: usize, _block: usize) -> bool {
+        false
+    }
+
     /// A device array holding the device addresses of `weights` (the experts of one mixture-of-experts projection) for
     /// kernels that pick their weights by expert index. The weights must outlive the table.
     fn upload_pointer_table(&self, _weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {
@@ -1596,6 +2101,25 @@ pub trait Backend: Send + Sync {
         value_dim: usize,
         kv_kind: i32,
     ) -> Result<DeviceKvCache, BackendError>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn allocate_kv_cache_layered(
+        &self,
+        layers: usize,
+        pool_blocks: usize,
+        block_size: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        kv_kind: i32,
+        layout: Option<crate::kv_geometry::KvPoolLayout>,
+        layer_geoms: Option<Vec<crate::config::LayerGeom>>,
+    ) -> Result<DeviceKvCache, BackendError> {
+        let mut cache = self.allocate_kv_cache(layers, pool_blocks, block_size, kv_heads, head_dim, value_dim, kv_kind)?;
+        cache.layout = layout;
+        cache.layer_geoms = layer_geoms;
+        Ok(cache)
+    }
 }
 
 /// Names of the native backends compiled into this binary (`--device <name>`).
@@ -1663,5 +2187,28 @@ pub fn create_native_backend(name: &str, index: usize) -> Result<Option<Arc<dyn 
         #[cfg(feature = "tpu-pjrt")]
         "tpu" => tpu::create(index).map(Some),
         _ => Ok(None),
+    }
+}
+
+/// Whether the SSM / DeltaNet / Mamba-1/2 / ShortConv device paths are enabled on HIP/ROCm given `FLLM_HIP_SSM` and `FLLM_HIP_NO_SSM`.
+/// Off by default on HIP until verified on AMD hardware; `FLLM_HIP_SSM=1` enables them unless `FLLM_HIP_NO_SSM=1` overrides.
+pub fn hip_ssm_enabled_for_env(hip_ssm: Option<&str>, hip_no_ssm: Option<&str>) -> bool {
+    if hip_no_ssm.is_some_and(|v| v.starts_with('1')) {
+        return false;
+    }
+    hip_ssm.is_some_and(|v| v.starts_with('1'))
+}
+
+#[cfg(test)]
+mod hip_ssm_tests {
+    use super::hip_ssm_enabled_for_env;
+
+    #[test]
+    fn hip_ssm_default_is_off_and_respects_overrides() {
+        assert!(!hip_ssm_enabled_for_env(None, None));
+        assert!(!hip_ssm_enabled_for_env(Some("0"), None));
+        assert!(hip_ssm_enabled_for_env(Some("1"), None));
+        assert!(!hip_ssm_enabled_for_env(Some("1"), Some("1")));
+        assert!(!hip_ssm_enabled_for_env(None, Some("1")));
     }
 }

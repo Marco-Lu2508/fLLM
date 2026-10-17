@@ -1,0 +1,65 @@
+{
+ "default/assistant_first": {
+  "ok": "<｜begin▁of▁sentence｜><｜Assistant｜>I start.<｜end▁of▁sentence｜><｜User｜>ok<｜Assistant｜>"
+ },
+ "default/assistant_with_text_and_tool_call": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Compute 17*3<｜Assistant｜>Let me compute that.<｜end▁of▁sentence｜><｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>51<｜tool▁output▁end｜><｜tool▁outputs▁end｜>"
+ },
+ "default/documents": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Summarize.<｜Assistant｜>"
+ },
+ "default/image_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/long_system_whitespace": {
+  "ok": "<｜begin▁of▁sentence｜>  padded system with trailing newline\n\n<｜User｜>  padded user \n<｜Assistant｜>"
+ },
+ "default/multi_turn": {
+  "ok": "<｜begin▁of▁sentence｜>Be brief.<｜User｜>Hi<｜Assistant｜>Hello! How can I help?<｜end▁of▁sentence｜><｜User｜>Tell me a joke.<｜Assistant｜>Why did the chicken cross the road?<｜end▁of▁sentence｜><｜User｜>Why?<｜Assistant｜>"
+ },
+ "default/multi_turn_no_generation_prompt": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Hi<｜Assistant｜>Hello!<｜end▁of▁sentence｜>"
+ },
+ "default/reasoning_effort": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Think hard: 13*17<｜Assistant｜>"
+ },
+ "default/reasoning_history": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>2+2?<｜Assistant｜><think>\nsimple\n</think>\n\n4<｜end▁of▁sentence｜><｜User｜>And 3+3?<｜Assistant｜>"
+ },
+ "default/system_not_first": {
+  "ok": "<｜begin▁of▁sentence｜>late system<｜User｜>a<｜User｜>b<｜Assistant｜>"
+ },
+ "default/system_user": {
+  "ok": "<｜begin▁of▁sentence｜>You are a terse assistant.<｜User｜>Capital of France?<｜Assistant｜>"
+ },
+ "default/text_parts": {
+  "err": "TypeError: can only concatenate str (not \"list\") to str"
+ },
+ "default/thinking_disabled": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>2+2?<｜Assistant｜>"
+ },
+ "default/thinking_enabled": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>2+2?<｜Assistant｜>"
+ },
+ "default/tool_call_roundtrip": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Weather in Berlin and 2+2?<｜Assistant｜><｜end▁of▁sentence｜><｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>{\"temp\": 21.5, \"sky\": \"clear\"}<｜tool▁output▁end｜>\n<｜tool▁output▁begin｜>4<｜tool▁output▁end｜><｜tool▁outputs▁end｜>"
+ },
+ "default/tool_call_then_answer": {
+  "err": "TypeError: can only concatenate str (not \"dict\") to str"
+ },
+ "default/tools_system_user": {
+  "ok": "<｜begin▁of▁sentence｜>You can call tools.<｜User｜>Weather in Berlin?<｜Assistant｜>"
+ },
+ "default/tools_user": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Weather in München?<｜Assistant｜>"
+ },
+ "default/two_users_in_a_row": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>a<｜User｜>b<｜Assistant｜>"
+ },
+ "default/unicode": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Grüße à tous — 你好 😀 \"quotes\" <b>&amp;</b> 'x'<｜Assistant｜>"
+ },
+ "default/user_only": {
+  "ok": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜>"
+ }
+}

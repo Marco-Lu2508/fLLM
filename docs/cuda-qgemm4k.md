@@ -73,7 +73,7 @@ sm_80.
 
 ## Measuring
 
-`bench/bench_qgemm.cu` prints, per batch, the time, the TFLOPS, the weight bandwidth and the
+The Q4_K GEMM micro-benchmark harness prints, per batch, the time, the TFLOPS, the weight bandwidth and the
 maximum relative difference against the fused-decode kernel in `tc_gemm.cu`; batches 512 and
 1864 additionally get a `M=...` summary line. To compare two builds:
 
@@ -123,5 +123,5 @@ directly and remove the nibble shuffling from the inner loop.
 That repack is deliberately **not** part of this round. It touches `mmvq.cu` (which reads the
 same buffer for batches 2 to 16), `decode16`/`weight_at` in `common.cuh`, `upload_weight` in
 `rust/engine/src/backend/cuda.rs` and the bench reference, so it cannot be validated without a
-GPU and would make the variant comparison ambiguous. It is round 2, once the numbers say which
+GPU and would make the variant comparison ambiguous. It is a follow-up step, once the numbers say which
 of the three costs above dominates.

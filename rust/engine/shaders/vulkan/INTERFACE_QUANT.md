@@ -1,4 +1,4 @@
-# Quantized linear shaders (package 2) — interface contract
+# Quantized linear shaders — interface contract
 
 Verification level: **L0** (every shader compiles with `glslc --target-env=vulkan1.2 -O` and passes `spirv-val`; the layouts are checked by CPU unit tests
 against `compute::dequantize`; the shader text was additionally executed as C++ on the CPU against an f64 reference, see `emu/README.md`; no shader has ever run on a GPU).
@@ -33,7 +33,7 @@ matrix tile would waste at least half of the math and the decode is memory bound
 Precision: `_s` meets the FP32 worst-case bound of `selftest-gpu`'s exact pass (`FLLM_VULKAN_EXACT=1` / `PlanOptions::exact` makes the planner use only `_s`). `_i` adds the rounding of
 the activations to 8 bit (relative error ~ 0.4 % of the largest value of each 32-block), `_c` rounds weights and activations to f16; both belong to the "fast" tolerance.
 
-Build: all 83 variants are compiled by `build.rs` when feature `vulkan` is on (about 20 s with glslc). The `_c` lines end in `#optional`; see the build.rs note in the package report.
+Build: all 83 variants are compiled by `build.rs` when feature `vulkan` is on (about 20 s with glslc). The `_c` lines end in `#optional`; see the notes in `build.rs`.
 
 ## Bindings (descriptor set 0, all `std430` storage buffers)
 

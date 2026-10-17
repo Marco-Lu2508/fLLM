@@ -325,3 +325,155 @@ fn empty_token_is_present_and_duplicate_empty_token_id_is_rejected() {
         .contains("duplicate tokenizer vocabulary id"));
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn load_checkpoint_as_gguf_zero_copy_and_exact_parity() {
+    let dir = scratch();
+    let config = serde_json::json!({
+        "model_type": "llama",
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": 4,
+        "intermediate_size": 4,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 1,
+        "vocab_size": 4,
+    });
+    fs::write(dir.join("config.json"), config.to_string()).unwrap();
+    fs::write(
+        dir.join("tokenizer.json"),
+        r#"{"model":{"type":"BPE","vocab":{"a":0,"b":1,"c":2,"d":3},"merges":[]}}"#,
+    )
+    .unwrap();
+
+    let tensors = [
+        ("model.embed_tokens.weight", vec![4, 4]),
+        ("model.layers.0.input_layernorm.weight", vec![4]),
+        ("model.layers.0.self_attn.q_proj.weight", vec![4, 4]),
+        ("model.layers.0.self_attn.k_proj.weight", vec![4, 4]),
+        ("model.layers.0.self_attn.v_proj.weight", vec![4, 4]),
+        ("model.layers.0.self_attn.o_proj.weight", vec![4, 4]),
+        ("model.layers.0.post_attention_layernorm.weight", vec![4]),
+        ("model.layers.0.mlp.gate_proj.weight", vec![4, 4]),
+        ("model.layers.0.mlp.up_proj.weight", vec![4, 4]),
+        ("model.layers.0.mlp.down_proj.weight", vec![4, 4]),
+        ("model.norm.weight", vec![4]),
+        ("lm_head.weight", vec![4, 4]),
+    ];
+    let mut header_map = serde_json::Map::new();
+    let mut payload = Vec::new();
+    let mut offset = 0usize;
+    for (name, shape) in tensors {
+        let num_elements: usize = shape.iter().product();
+        let num_bytes = num_elements * 2;
+        let tensor_bytes: Vec<u8> = (0..num_bytes).map(|i| ((offset + i) % 251 + 1) as u8).collect();
+        header_map.insert(
+            name.to_string(),
+            serde_json::json!({
+                "dtype": "F16",
+                "shape": shape,
+                "data_offsets": [offset, offset + num_bytes]
+            }),
+        );
+        payload.extend_from_slice(&tensor_bytes);
+        offset += num_bytes;
+    }
+    write_safe(
+        &dir.join("model.safetensors"),
+        &serde_json::Value::Object(header_map).to_string(),
+        &payload,
+    );
+
+    let gguf_path = dir.join("converted.gguf");
+    crate::convert_checkpoint(&dir, &gguf_path, crate::ConvertOptions::default()).unwrap();
+    let ref_mapped = fllm_gguf_probe::MappedGguf::open(&gguf_path).unwrap();
+
+    let direct_mapped =
+        crate::load_checkpoint_as_gguf(&dir, crate::ConvertOptions::default()).unwrap();
+
+    // Verify metadata parity
+    assert_eq!(
+        direct_mapped.index().metadata.get("general.architecture"),
+        ref_mapped.index().metadata.get("general.architecture")
+    );
+    assert_eq!(direct_mapped.index().tensors.len(), ref_mapped.index().tensors.len());
+
+    // Verify zero-copy for untouched tensor
+    assert!(direct_mapped.extra_mappings().contains_key("token_embd.weight"));
+    let mmap = direct_mapped.extra_mappings().get("token_embd.weight").unwrap();
+    let embd_slice = direct_mapped.tensor_bytes("token_embd.weight").unwrap();
+    let mmap_start = mmap.as_ptr() as usize;
+    let mmap_end = mmap_start + mmap.len();
+    let embd_start = embd_slice.as_ptr() as usize;
+    assert!(embd_start >= mmap_start && embd_start + embd_slice.len() <= mmap_end);
+
+    // Verify permuted tensor is in anon read-only memory, NOT inside safetensors file mmap
+    let q_mmap = direct_mapped.extra_mappings().get("blk.0.attn_q.weight").unwrap();
+    assert!(!std::sync::Arc::ptr_eq(mmap, q_mmap));
+    let q_slice = direct_mapped.tensor_bytes("blk.0.attn_q.weight").unwrap();
+    let q_start = q_slice.as_ptr() as usize;
+    assert!(q_start < mmap_start || q_start >= mmap_end);
+
+    // Verify bit-for-bit parity of all tensor bytes
+    for t in direct_mapped.index().tensors.iter() {
+        let b1 = direct_mapped.tensor_bytes(&t.name).unwrap();
+        let b2 = ref_mapped.tensor_bytes(&t.name).unwrap();
+        assert_eq!(b1, b2, "tensor byte mismatch for {}", t.name);
+    }
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn spec_head_conversion_medusa_and_eagle() {
+    use crate::{convert_checkpoint, ConvertOptions, OutputDType, SpecHeadKind};
+
+    // 1. Test Medusa
+    let dir = scratch();
+    let p = dir.join("model.safetensors");
+    let header = r#"{"medusa_heads.0.0.weight":{"dtype":"F16","shape":[2,2],"data_offsets":[0,8]},"medusa_heads.1.0.weight":{"dtype":"F16","shape":[2,2],"data_offsets":[8,16]}}"#;
+    let payload = vec![0u8; 16];
+    write_safe(&p, header, &payload);
+    fs::write(dir.join("config.json"), r#"{"medusa_num_heads": 2}"#).unwrap();
+
+    let out_medusa = dir.join("medusa.gguf");
+    let rep = convert_checkpoint(
+        &dir,
+        &out_medusa,
+        ConvertOptions {
+            output_dtype: OutputDType::Preserve,
+            overwrite: true,
+            spec_head: Some(SpecHeadKind::Medusa),
+        },
+    )
+    .unwrap();
+    assert_eq!(rep.architecture, "spec_head_medusa");
+    assert_eq!(rep.tensors_written, 2);
+    assert!(out_medusa.is_file());
+
+    // 2. Test Eagle / Eagle3
+    let dir_eagle = scratch();
+    let p_eagle = dir_eagle.join("model.safetensors");
+    let header_eagle = r#"{"fc.weight":{"dtype":"F16","shape":[4,8],"data_offsets":[0,64]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"F16","shape":[4,4],"data_offsets":[64,96]}}"#;
+    let payload_eagle = vec![0u8; 96];
+    write_safe(&p_eagle, header_eagle, &payload_eagle);
+    fs::write(dir_eagle.join("config.json"), r#"{"hidden_size": 4, "eagle_layers": [2, 4]}"#).unwrap();
+
+    let out_eagle = dir_eagle.join("eagle.gguf");
+    let rep_eagle = convert_checkpoint(
+        &dir_eagle,
+        &out_eagle,
+        ConvertOptions {
+            output_dtype: OutputDType::Preserve,
+            overwrite: true,
+            spec_head: Some(SpecHeadKind::Eagle3),
+        },
+    )
+    .unwrap();
+    assert_eq!(rep_eagle.architecture, "spec_head_eagle3");
+    assert_eq!(rep_eagle.tensors_written, 2);
+    assert!(out_eagle.is_file());
+
+    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(dir_eagle).unwrap();
+}

@@ -13,6 +13,19 @@ use rayon::prelude::*;
 use serde_json::Value;
 use std::sync::Arc;
 
+mod mla_latent;
+mod moe_device;
+mod gemma;
+use gemma::{AltupGlobal, GemmaLayer, PleGlobal};
+// Tensor / pipeline / expert parallelism: sharding of the loaded layers and the collectives (docs/multi-gpu.md).
+#[path = "parallel/decoder_shard.rs"]
+mod par_shard;
+mod hybrid;
+mod kda;
+mod state_api;
+mod zamba;
+pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
+
 /// Learned scale (and, for LayerNorm, shift) of one normalisation.
 struct Norm {
     weight: Vec<f32>,
@@ -129,7 +142,10 @@ struct DeviceMla {
     q: crate::backend::DeviceWeight,
     kv_a: crate::backend::DeviceWeight,
     kv_a_norm: crate::backend::DeviceBuffer,
-    kv_b: crate::backend::DeviceWeight,
+    /// Expanded cache: the up projection; absent with the latent cache.
+    kv_b: Option<crate::backend::DeviceWeight>,
+    /// Latent cache (`FLLM_MLA=latent`): the dense FP16 kv_b matrix, `heads * (nope + value)` rows of `kv_lora` values.
+    kv_b_dense: Option<crate::backend::DeviceBuffer>,
 }
 
 /// Device copy of a Mamba-2 layer (the input projection as a quantized weight, small tensors as FP32 buffers).
@@ -227,6 +243,8 @@ struct Mamba1 {
     /// `inner x state`, already negated (`-exp(A_log)`).
     decay: Vec<f32>,
     skip: Vec<f32>,
+    /// Learned weights of the RMS norms behind `x_proj` for the time step, B and C (Jamba).
+    norms: Option<Box<[Vec<f32>; 3]>>,
 }
 
 struct ShortConv {
@@ -243,6 +261,8 @@ enum Attn {
     None,
     Mamba(Box<Mamba>),
     Linear(Box<DeltaNet>),
+    /// Kimi Delta Attention (gated delta rule with a decay per key channel).
+    Kda(Box<kda::Kda>),
     Std {
         q: Linear,
         k: Linear,
@@ -264,12 +284,18 @@ struct Mla {
 
 struct Layer {
     attn: Attn,
+    /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
+    parallel: Option<Box<hybrid::ParallelMixer>>,
+    /// Zamba2: this layer starts with a call of a shared transformer block whose output joins the input of its Mamba mixer.
+    zamba: Option<Box<zamba::ZambaCall>>,
     /// The query projection also yields a sigmoid gate for the attention output.
     output_gate: bool,
     /// Attention is limited to aligned chunks of this many positions (Llama 4).
     chunk: Option<usize>,
     /// Separate projection of the input that gates the attention output (AFMoE).
     attn_gate: Option<Linear>,
+    /// `attn_gate` yields one value per head (Laguna) instead of one per output channel.
+    gate_per_head: bool,
     value_moe: Option<ValueMoe>,
     /// xIELU parameters `[alpha_p, alpha_n, beta, eps]` of a plain feed-forward (Apertus).
     xielu: Option<[f32; 4]>,
@@ -287,8 +313,14 @@ struct Layer {
     q_norm_bias: Option<Vec<f32>>,
     k_norm_bias: Option<Vec<f32>>,
     window: Option<usize>,
-    /// Use the sliding-window rotary table.
-    local_rope: bool,
+    /// Index of the rotary table of this layer (see `GgufModel::rope_index`).
+    rope_table: usize,
+    /// The layer reads the cache of an earlier layer (`ModelConfig::layer_kv_source`) and has no key / value projections.
+    kv_shared: bool,
+    /// The value projection is the key projection (Gemma 4 global layers).
+    k_eq_v: bool,
+    /// Gemma 4 / Gemma 3n additions of this layer.
+    gemma: Option<Box<GemmaLayer>>,
 }
 
 impl Layer {
@@ -299,6 +331,7 @@ impl Layer {
         match &mut self.attn {
             Attn::Std { q, k, v } => all.extend([q, k, v]),
             Attn::Linear(d) => all.extend([&mut d.qkv, &mut d.gate, &mut d.beta, &mut d.alpha]),
+            Attn::Kda(k) => all.extend(k.linears_mut()),
             Attn::ShortConv(m) => all.push(&mut m.input),
             Attn::Mamba(m) => all.push(&mut m.input),
             Attn::Mamba1(m) => all.extend([&mut m.input, &mut m.x_proj, &mut m.dt_proj]),
@@ -312,6 +345,9 @@ impl Layer {
         }
         if has_attention {
             all.push(&mut self.out);
+        }
+        if let Some(p) = &mut self.parallel {
+            all.extend([&mut p.mamba.input, &mut p.out]);
         }
         match &mut self.ffn {
             Ffn::None => {}
@@ -339,9 +375,16 @@ struct Embedding {
     row_bytes: usize,
     rows: usize,
     cols: usize,
+    /// Vocabulary-parallel embedding: this rank stores the rows `first_row..first_row + held` (all rows otherwise).
+    first_row: usize,
+    held: usize,
 }
 impl Embedding {
     fn load_named(model: &GgufModel, name: &str) -> Result<Self, String> {
+        Self::load_with_cols(model, name, model.hidden_size())
+    }
+    /// Embedding table whose rows are `cols` wide (the per-layer embeddings of Gemma are wider than the hidden size).
+    fn load_with_cols(model: &GgufModel, name: &str, cols: usize) -> Result<Self, String> {
         let map = model.mapping();
         let info = map
             .index()
@@ -349,7 +392,6 @@ impl Embedding {
             .iter()
             .find(|t| t.name == name)
             .ok_or_else(|| format!("missing token embeddings {name}"))?;
-        let cols = model.hidden_size();
         let rows = *info
             .dimensions
             .get(1)
@@ -370,9 +412,16 @@ impl Embedding {
             row_bytes,
             rows,
             cols,
+            first_row: 0,
+            held: rows,
         })
     }
     fn row(&self, id: usize) -> Result<Vec<f32>, String> {
+        if id < self.first_row || id >= self.first_row + self.held {
+            // a row another tensor-parallel rank holds: contributes zeros to the sum over the group
+            return Ok(vec![0.0; self.cols]);
+        }
+        let id = id - self.first_row;
         let values = compute::dequantize(
             &self.data[id * self.row_bytes..(id + 1) * self.row_bytes],
             self.kind,
@@ -389,6 +438,11 @@ impl Embedding {
 /// memory planner when the model does not fit the device). `(layers, first)`: only applied to a decoder with
 /// exactly that many layers, so draft models are unaffected.
 static FFN_HOST_FROM: std::sync::Mutex<Option<(usize, usize)>> = std::sync::Mutex::new(None);
+
+/// Forget the host-offload plan (tensor / pipeline parallelism keeps every rank's share on its device). `true` when there was one.
+pub fn clear_ffn_host_from() -> bool {
+    FFN_HOST_FROM.lock().map(|mut slot| slot.take().is_some()).unwrap_or(false)
+}
 
 pub fn set_ffn_host_from(layers: usize, first: usize) {
     if let Ok(mut slot) = FFN_HOST_FROM.lock() {
@@ -422,6 +476,22 @@ pub struct DeviceMoeFast {
     pub down_bias: Option<crate::backend::DeviceBuffer>,
     pub kinds: [crate::backend::QuantType; 3],
     pub ff: usize,
+    /// Every expert weight is a format of the int8 dot-product decode kernels (`moe_linear`).
+    pub dp4a: bool,
+    /// The device MoE operations (`Backend::moe_device_available`) serve this layer: general routing, grouped products for any number
+    /// of rows, the shared expert and the combination without host work. `None`: the earlier softmax-only decode path.
+    pub device: Option<DeviceMoeDevice>,
+}
+
+/// What the device MoE operations need besides the expert tables (see `rust_decoder/moe_device.rs`).
+pub struct DeviceMoeDevice {
+    pub route: crate::backend::MoeRoute,
+    /// Selection bias of the router (DeepSeek `e_score_correction_bias`).
+    pub bias: Option<crate::backend::DeviceBuffer>,
+    /// Gate vector of the shared expert (`sigmoid(g . x)`), when it has one.
+    pub shared_gate: Option<crate::backend::DeviceBuffer>,
+    /// The grouped GEMM runs the formats and widths of this layer (both pair tiles).
+    pub grouped: bool,
 }
 
 pub struct DeviceLayerWeights {
@@ -467,6 +537,16 @@ pub struct DeviceLayerWeights {
     mamba1: Option<DeviceMamba1>,
     /// Per-head attention sink logits (GPT-OSS).
     pub sinks: Option<Arc<Vec<f32>>>,
+    /// q, k and v as one matrix (`FLLM_MERGE_PROJ`, narrow activations, Marlin 4-bit): `q`, `k` and `v` are `None` then.
+    pub qkv: Option<DeviceMergedProj>,
+    /// gate and up as one matrix: `ffn_gate` and `ffn_up` are `None` then, `ffn_down` is set.
+    pub gate_up: Option<DeviceMergedProj>,
+}
+
+/// Several projections of a layer uploaded as one matrix (`FLLM_MERGE_PROJ`): rows of the parts in `parts` (q, k, v or gate, up, 0).
+pub struct DeviceMergedProj {
+    pub weight: crate::backend::DeviceWeight,
+    pub parts: [usize; 3],
 }
 
 /// Tells the stream when a forward pass is over (`Stream::end_step`), on every return path of `forward_backend_inner`.
@@ -502,6 +582,66 @@ fn debug_sum(stream: &mut dyn crate::backend::Stream, name: &str, buf: &crate::b
 }
 
 /// RMS-normalizes `buf` in place over `weight.len()` values (through a pooled temporary); no-op without weights.
+/// `FLLM_MERGE_PROJ=1`: q/k/v and gate/up uploaded as one matrix each. Needs narrow activations and a backend with the merged-projection operations (with FP32
+/// activations the existing norm / GLU / conversion fusions of the separate projections are better). Default off: the merged GEMM has another reduction
+/// order than the separate ones, so results can differ in the last bits.
+fn merge_proj_requested(narrow: bool, supported: bool) -> bool {
+    let asked = matches!(std::env::var("FLLM_MERGE_PROJ").ok().map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "on" | "true" | "yes"));
+    if asked && !(narrow && supported) {
+        eprintln!("[fllm-rs] FLLM_MERGE_PROJ=1 needs FLLM_ACT_DTYPE=f16|bf16 and a CUDA GPU; projections stay separate");
+        return false;
+    }
+    asked
+}
+
+/// `FLLM_FUSE_QK_NORM_ROPE=1`: per-head RMS norm of q and k, rotary embedding and KV cache write in one kernel (default off until measured).
+fn qk_norm_rope_fusion() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("FLLM_FUSE_QK_NORM_ROPE").ok().map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "on" | "true" | "yes")))
+}
+
+/// `FLLM_ACT_CHECK=1`: true for the first two forward passes of the process.
+fn act_check_pass() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static PASSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    *ON.get_or_init(|| matches!(std::env::var("FLLM_ACT_CHECK").ok().map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "on" | "true" | "yes")))
+        && PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2
+}
+
+/// The per-layer statistics of `FLLM_ACT_CHECK`: largest residual value per layer, first layer with NaN / Inf, and how far the largest value is
+/// from the FP16 limit.
+fn report_act_check(stream: &mut dyn crate::backend::Stream, rows: usize, stats: &[(f32, u32)]) {
+    let dtype = stream.act_dtype();
+    if stats.is_empty() {
+        eprintln!("[fllm-rs] FLLM_ACT_CHECK: this backend cannot inspect its activations");
+        return;
+    }
+    let (mut worst, mut worst_layer) = (0f32, 0usize);
+    for (i, (m, _)) in stats.iter().enumerate() {
+        if *m > worst {
+            worst = *m;
+            worst_layer = i;
+        }
+    }
+    let bad: Vec<(usize, u32)> = stats.iter().enumerate().filter(|(_, (_, b))| *b > 0).map(|(i, (_, b))| (i, *b)).collect();
+    let headroom = if worst > 0.0 { 65504.0 / worst } else { f32::INFINITY };
+    eprintln!(
+        "[fllm-rs] FLLM_ACT_CHECK ({dtype}, {rows} rows, {} layers): largest |residual| {worst:.4e} after layer {worst_layer}; FP16 headroom {headroom:.1}x{}",
+        stats.len(),
+        match bad.first() {
+            Some((layer, count)) => format!("; NaN/Inf first after layer {layer} ({count} values), {} layers affected", bad.len()),
+            None => "; no NaN/Inf".to_owned(),
+        }
+    );
+    if headroom < 4.0 || !bad.is_empty() {
+        eprintln!("[fllm-rs] FLLM_ACT_CHECK: the residual stream is close to or beyond the FP16 range; use FLLM_ACT_DTYPE=bf16 (or f32) for this model");
+    }
+    if dtype == crate::backend::act_dtype::ActDtype::F16 && (headroom <= 1.0 || !bad.is_empty()) {
+        eprintln!("[fllm-rs] FLLM_ACT_CHECK: FP16 overflow encountered (worst {worst:.4e}); falling back from FP16 to BF16 at runtime");
+        let _ = stream.set_act_dtype(crate::backend::act_dtype::ActDtype::Bf16);
+    }
+}
+
 fn device_rms_inplace(
     stream: &mut dyn crate::backend::Stream,
     scratch: &mut crate::backend::BufferPool,
@@ -584,7 +724,25 @@ pub struct DeviceModelWeights {
 pub type SharedRopeTable = (Arc<Vec<f32>>, Arc<Vec<f32>>);
 
 /// Batch sizes a decode step is padded to when it runs as a CUDA graph.
-const GRAPH_BUCKETS: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
+const GRAPH_BUCKETS: [usize; 9] = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+
+/// Largest batch a decode step may have to run as a CUDA graph: `FLLM_CUDA_GRAPH_MAX_ROWS` (default 64, at most 256, in the buckets).
+fn graph_max_rows() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        let asked = std::env::var("FLLM_CUDA_GRAPH_MAX_ROWS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64);
+        GRAPH_BUCKETS.iter().copied().filter(|b| *b <= asked.max(1)).max().unwrap_or(1)
+    })
+}
+
+/// Buckets for prompt chunk CUDA graphs (`FLLM_CUDA_GRAPH_PREFILL`).
+pub const PREFILL_GRAPH_BUCKETS: [usize; 5] = [128, 256, 512, 1024, 2048];
+
+/// `FLLM_CUDA_GRAPH_PREFILL`: piecewise CUDA graphs around attention for prompt chunks (default off).
+pub fn graph_prefill_switch() -> bool {
+    static SWITCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SWITCH.get_or_init(|| matches!(std::env::var("FLLM_CUDA_GRAPH_PREFILL").ok().map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "on" | "true" | "yes")))
+}
 
 /// A decode step recorded for one padded batch size: the persistent input (residual stream) and output (logits) buffers.
 struct DecodeGraph {
@@ -607,6 +765,51 @@ enum GraphMode<'a> {
 static GREEDY_IDS_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GREEDY_IDS: std::sync::Mutex<Option<Vec<i32>>> = std::sync::Mutex::new(None);
 
+/// The rows of the next forward pass that the device should sample (`FLLM_DEVICE_SAMPLING=1`, see docs/speculative-decoding.md), and the
+/// result. Like the greedy ids they travel through statics because the decoder is shared by the runtime and the draft engines.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeviceSampleJob {
+    pub rows: Vec<crate::backend::SampleRowParams>,
+    pub pen: Vec<(i32, i32)>,
+    pub bias: Vec<(i32, f32)>,
+    pub mask: Vec<u32>,
+    pub mask_words: usize,
+    pub top_stride: usize,
+}
+impl DeviceSampleJob {
+    fn batch(&self) -> crate::backend::SampleBatch<'_> {
+        crate::backend::SampleBatch { rows: &self.rows, pen: &self.pen, bias: &self.bias, mask: &self.mask, mask_words: self.mask_words, top_stride: self.top_stride }
+    }
+}
+static SAMPLE_JOB: std::sync::Mutex<Option<DeviceSampleJob>> = std::sync::Mutex::new(None);
+static SAMPLE_RESULT: std::sync::Mutex<Option<crate::backend::SampleOutput>> = std::sync::Mutex::new(None);
+
+/// `FLLM_DEVICE_SAMPLING`: `1`, `on` or `true` sample decode steps on the device (default: off until the kernels were run on a GPU).
+pub(crate) fn device_sampling_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("FLLM_DEVICE_SAMPLING").ok().as_deref(), Some("1" | "on" | "true")))
+}
+
+/// Run the job on the device if the backend can; `None` leaves the logits to the caller.
+fn run_device_sample(stream: &mut dyn crate::backend::Stream, logits: &crate::backend::DeviceBuffer, vocab: usize, rows: usize) -> bool {
+    let mut job_slot = SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(job) = job_slot.take() else { return false };
+    if job.rows.len() != rows {
+        return false;
+    }
+    match stream.sample_rows(logits, vocab, &job.batch()) {
+        Ok(out) => {
+            *SAMPLE_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(out);
+            true
+        }
+        Err(e) => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("[fllm-rs] device sampling unavailable, sampling on the host: {e}"));
+            false
+        }
+    }
+}
+
 pub struct RustDecoder {
     mtp: Option<MtpProjection>,
     cfg: ModelConfig,
@@ -615,12 +818,20 @@ pub struct RustDecoder {
     layers: Vec<Layer>,
     head: Linear,
     final_norm: Norm,
+    /// Per-layer embeddings (Gemma 4 E2B / E4B).
+    ple: Option<PleGlobal>,
+    /// Gemma 3n stream projections.
+    altup: Option<AltupGlobal>,
     rope: Arc<Vec<RopeTables>>,
     groups: usize,
     stride: usize,
     block_size: usize,
     pool_blocks: usize,
     kv_kind: i32,
+    /// The KV cache holds MLA latents (`FLLM_MLA=latent`, `GgufModel::enable_mla_latent`); the layers run `device_mla_latent`.
+    mla_latent: bool,
+    /// Offsets of every layer's region in the key and value pools.
+    kvl: crate::kv_geometry::KvPoolLayout,
     pool: rayon::ThreadPool,
     /// Learned absolute position embeddings, `positions x hidden`.
     position_table: Option<Vec<f32>>,
@@ -633,6 +844,7 @@ pub struct RustDecoder {
     state_capacity: usize,
     backend: Option<Arc<dyn crate::backend::Backend>>,
     backend_stream: Option<std::sync::Mutex<Box<dyn crate::backend::Stream>>>,
+    backend_stream2: Option<std::sync::Mutex<Box<dyn crate::backend::Stream>>>,
     backend_weights: Option<Arc<DeviceModelWeights>>,
     backend_kv: Option<crate::backend::DeviceKvCache>,
     backend_scratch: Option<std::sync::Mutex<crate::backend::BufferPool>>,
@@ -640,6 +852,35 @@ pub struct RustDecoder {
     graphs: std::sync::Mutex<std::collections::HashMap<usize, DecodeGraph>>,
     graph_ok: std::sync::OnceLock<bool>,
     graph_failed: std::sync::atomic::AtomicBool,
+    /// The embedding / output tensors of the file are BF16: `FLLM_ACT_DTYPE=auto` then picks BF16 (the GGUF does not record the config dtype).
+    act_source_bf16: bool,
+    /// This decoder is one rank of a tensor / pipeline / expert parallel group.
+    par: Option<Arc<crate::parallel::ParCtx>>,
+    /// Embedding output of the current pass (Zamba2's shared blocks read it again at every call).
+    embed_stash: hybrid::EmbedStash,
+    pub tree_mask: Option<Vec<bool>>,
+    pub tree_prefix_len: usize,
+    pub tree_num_nodes: usize,
+    /// Multimodal rotary layout (Qwen2-VL family): which position axis each rotary lane reads.
+    mrope: Option<MropeState>,
+    /// Three-axis position ids of the rows of the next forward pass; set by the runtime for batches that hold a sequence with media.
+    row_positions3: std::sync::Mutex<Option<Vec<[u32; 3]>>>,
+    /// DeepStack features (Qwen3-VL) of the next forward pass: per decoder layer, (row, values) added to the hidden state after that layer.
+    row_deepstack: std::sync::Mutex<Option<Arc<DeepstackLevels>>>,
+    /// Custom visible lengths per row in attention (bidirectional image attention, prefix-LM mask).
+    row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
+}
+
+/// DeepStack features: per decoder layer, (row, values) pairs.
+type DeepstackLevels = Vec<Vec<(usize, Vec<f32>)>>;
+/// Per position axis, the (cos, sin) rotary tables of the device path.
+type AxisTables = Vec<(Arc<Vec<f32>>, Arc<Vec<f32>>)>;
+
+/// Multimodal rotary embedding of a model: lane-to-axis map and (built on first use by the device path) one pair of rotary tables per axis
+/// that rotate only the lanes of that axis and leave the others unchanged, so three plain rope calls compose to the three-axis rotation.
+struct MropeState {
+    axes: Vec<u8>,
+    axis_tables: std::sync::OnceLock<AxisTables>,
 }
 
 fn rms(x: &mut [f32], weight: &[f32], eps: f32) {
@@ -955,9 +1196,14 @@ impl RustDecoder {
         Self::load_layers(model, device, None)
     }
 
+    /// One rank of a parallel group: only this rank's pipeline stage is loaded, and every projection is cut to this rank's share.
+    pub(crate) fn load_sharded(model: &GgufModel, device: &str, par: Arc<crate::parallel::ParCtx>) -> Result<Self, String> {
+        Self::load_layers_ex(model, device, None, Some(par))
+    }
+
     pub(crate) fn load_mtp(model: &GgufModel, device: &str) -> Result<Self, String> {
-        if !matches!(device, "auto" | "cpu") {
-            return Err("MTP currently requires --device cpu; GPU hidden-state capture is not integrated with the parallel backend work".into());
+        if !matches!(device, "auto" | "cpu") && !device.starts_with("cuda") {
+            return Err("MTP currently requires --device cpu or cuda; GPU hidden-state capture is not integrated with the other backends".into());
         }
         if model.is_stateful() {
             return Err(
@@ -1006,6 +1252,18 @@ impl RustDecoder {
         device: &str,
         mtp_prefix: Option<&str>,
     ) -> Result<Self, String> {
+        Self::load_layers_ex(model, device, mtp_prefix, None)
+    }
+
+    fn load_layers_ex(
+        model: &GgufModel,
+        device: &str,
+        mtp_prefix: Option<&str>,
+        par: Option<Arc<crate::parallel::ParCtx>>,
+    ) -> Result<Self, String> {
+        if par.is_some() && mtp_prefix.is_some() {
+            return Err("MTP speculative decoding is not available with tensor / pipeline parallelism".into());
+        }
         let state_capacity = model.max_sequences().max(1) * 2;
         let mapping = model.mapping();
         let cfg = model.config().clone();
@@ -1025,8 +1283,15 @@ impl RustDecoder {
         };
         let meta = &mapping.index().metadata;
         let hidden = cfg.hidden;
-        let (heads, kv_heads, dk, dv) = (cfg.heads, cfg.kv_heads, cfg.head_dim, cfg.value_dim);
-        if !dk.is_multiple_of(2) || !cfg.rope.dims.is_multiple_of(2) || cfg.rope.dims > dk {
+        // the projections of an MLA layer have the per-head widths of the model, also when the cache geometry is the latent one
+        let dk = match &cfg.mla {
+            Some(m) => m.nope + m.rope,
+            None => cfg.head_dim,
+        };
+        if (0..cfg.layers).any(|l| {
+            let (d, r) = if cfg.mla.is_some() { (dk, cfg.rope.dims) } else { (cfg.layer_head_dim(l), cfg.layer_rope_dims(l)) };
+            !d.is_multiple_of(2) || !r.is_multiple_of(2) || r > d
+        }) {
             return Err("the decoder requires even head and rotary dimensions".into());
         }
         if !cfg.eps.is_finite() || cfg.eps <= 0.0 {
@@ -1057,7 +1322,16 @@ impl RustDecoder {
         };
         let mut layers = Vec::with_capacity(layer_range.len());
         for i in layer_range {
+            if par.as_ref().is_some_and(|ctx| !ctx.layer_range(cfg.layers).contains(&i)) {
+                // another pipeline stage runs this layer
+                layers.push(par_shard::placeholder_layer());
+                continue;
+            }
             let p = mtp_prefix.map_or_else(|| format!("blk.{i}"), str::to_owned);
+            let (heads, kv_heads, dk, dv) = (cfg.layer_heads(i), cfg.layer_kv_heads(i), cfg.layer_head_dim(i), cfg.layer_value_dim(i));
+            let ff_i = cfg.layer_ff(i);
+            let kv_shared = mtp_prefix.is_none() && cfg.layer_kv_source(i).is_some();
+            let k_eq_v = !kv_shared && has_tensor(mapping, &format!("{p}.attn_k.weight")) && !has_tensor(mapping, &format!("{p}.attn_v.weight")) && cfg.arch == "gemma4";
             let (qr, kr, vr) = (heads * dk, kv_heads * dk, kv_heads * dv);
             let q_rows = tensor_rows(mapping, &format!("{p}.attn_q.weight"));
             let output_gate = q_rows == Some(2 * qr) && cfg.mla.is_none();
@@ -1107,10 +1381,11 @@ impl RustDecoder {
                     dt_proj: linear(&format!("{p}.ssm_dt"), m.inner, m.rank)?,
                     decay: vector(mapping, &format!("{p}.ssm_a"), m.inner * m.state)?,
                     skip: vector(mapping, &format!("{p}.ssm_d"), m.inner)?,
+                    norms: hybrid::load_inner_norms(mapping, &p, m)?,
                 }))
             } else if let (Some(m), true) = (
                 &cfg.mamba,
-                has_tensor(mapping, &format!("{p}.ssm_in.weight")),
+                has_tensor(mapping, &format!("{p}.ssm_in.weight")) && !has_tensor(mapping, &format!("{p}.attn_q.weight")),
             ) {
                 let conv_dim = m.inner + 2 * m.groups * m.state;
                 let conv = Tensor::load(mapping, &format!("{p}.ssm_conv1d.weight"))?.data;
@@ -1151,6 +1426,8 @@ impl RustDecoder {
                     decay: vector(mapping, &format!("{p}.ssm_a"), d.v_heads)?,
                     norm: vector(mapping, &format!("{p}.ssm_norm.weight"), d.v_dim)?,
                 }))
+            } else if let Some(kda) = kda::Kda::load(&cfg, mapping, &p, i, &linear)? {
+                Attn::Kda(Box::new(kda))
             } else if let Some(m) = &cfg.mla {
                 let q_a = match m.q_lora {
                     Some(rank) => Some((
@@ -1224,14 +1501,17 @@ impl RustDecoder {
                     }
                 }
             } else {
+                let unused = || Linear::from_parts(Tensor { shape: vec![1, 1], data: vec![0.0] }, 1, 1, None);
                 Attn::Std {
                     q: linear(
                         &format!("{p}.attn_q"),
                         if output_gate { 2 * qr } else { qr },
                         hidden,
                     )?,
-                    k: linear(&format!("{p}.attn_k"), kr, hidden)?,
-                    v: if has_tensor(mapping, &format!("{p}.attn_v_exps.weight")) {
+                    k: if kv_shared { unused()? } else { linear(&format!("{p}.attn_k"), kr, hidden)? },
+                    v: if kv_shared || k_eq_v {
+                        unused()?
+                    } else if has_tensor(mapping, &format!("{p}.attn_v_exps.weight")) {
                         // MoVA layers compute their values from routed experts
                         Linear::from_parts(Tensor { shape: vec![1, 1], data: vec![0.0] }, 1, 1, None)?
                     } else {
@@ -1243,7 +1523,7 @@ impl RustDecoder {
                 && !has_tensor(mapping, &format!("{p}.ffn_gate_inp.weight"))
             {
                 Ffn::None
-            } else if has_tensor(mapping, &format!("{p}.ffn_gate_inp.weight")) {
+            } else if has_tensor(mapping, &format!("{p}.ffn_gate_inp.weight")) && !has_tensor(mapping, &format!("{p}.pre_ffw_norm_2.weight")) {
                 let moe = cfg
                     .moe
                     .as_ref()
@@ -1290,7 +1570,18 @@ impl RustDecoder {
                         })
                     };
                 let experts = (0..moe.experts)
-                    .map(|e| expert(&p, "exps", e, moe.expert_ff))
+                    .map(|e| {
+                        // expert parallelism loads only the experts of this rank
+                        if let Some(ctx) = &par {
+                            if ctx.cfg.expert_parallel
+                                && ctx.tp_size() > 1
+                                && !crate::parallel::ParCtx::expert_range(moe.experts, ctx.tp_size(), ctx.tp_rank).contains(&e)
+                            {
+                                return Ok(par_shard::placeholder_expert());
+                            }
+                        }
+                        expert(&p, "exps", e, moe.expert_ff)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let shared = if has_tensor(mapping, &format!("{p}.ffn_up_shexp.weight")) {
                     let gate_name = format!("{p}.ffn_gate_inp_shexp.weight");
@@ -1329,23 +1620,23 @@ impl RustDecoder {
                 }))
             } else if has_tensor(mapping, &format!("{p}.ffn_gate.weight")) {
                 Ffn::Gated {
-                    gate: linear(&format!("{p}.ffn_gate"), cfg.ff, hidden)?,
-                    up: linear(&format!("{p}.ffn_up"), cfg.ff, hidden)?,
-                    down: linear(&format!("{p}.ffn_down"), hidden, cfg.ff)?,
+                    gate: linear(&format!("{p}.ffn_gate"), ff_i, hidden)?,
+                    up: linear(&format!("{p}.ffn_up"), ff_i, hidden)?,
+                    down: linear(&format!("{p}.ffn_down"), hidden, ff_i)?,
                 }
-            } else if tensor_rows(mapping, &format!("{p}.ffn_up.weight")) == Some(2 * cfg.ff) {
+            } else if tensor_rows(mapping, &format!("{p}.ffn_up.weight")) == Some(2 * ff_i) {
                 // fused [gate; up]
                 let name = format!("{p}.ffn_up.weight");
                 let bias = format!("{p}.ffn_up.bias");
                 Ffn::Gated {
-                    gate: part(&name, &bias, 0, cfg.ff, hidden)?,
-                    up: part(&name, &bias, cfg.ff, cfg.ff, hidden)?,
-                    down: linear(&format!("{p}.ffn_down"), hidden, cfg.ff)?,
+                    gate: part(&name, &bias, 0, ff_i, hidden)?,
+                    up: part(&name, &bias, ff_i, ff_i, hidden)?,
+                    down: linear(&format!("{p}.ffn_down"), hidden, ff_i)?,
                 }
             } else {
                 Ffn::Plain {
-                    up: linear(&format!("{p}.ffn_up"), cfg.ff, hidden)?,
-                    down: linear(&format!("{p}.ffn_down"), hidden, cfg.ff)?,
+                    up: linear(&format!("{p}.ffn_up"), ff_i, hidden)?,
+                    down: linear(&format!("{p}.ffn_down"), hidden, ff_i)?,
                 }
             };
             let qk = |name: &str, width| -> Result<Option<Vec<f32>>, String> {
@@ -1393,16 +1684,20 @@ impl RustDecoder {
                     linear(&format!("{p}.ssm_out"), hidden, d.v_heads * d.v_dim)?
                 }
                 (Attn::Mamba(_), _, Some(m)) => linear(&format!("{p}.ssm_out"), hidden, m.inner)?,
+                (Attn::Kda(_), _, _) => {
+                    let k = cfg.hybrid.kda.as_ref().ok_or("missing KDA configuration")?;
+                    linear(&format!("{p}.attn_output"), hidden, k.heads * k.head_dim)?
+                }
                 (Attn::Mamba1(_), _, _) => {
                     let inner = cfg.mamba1.as_ref().map_or(0, |m| m.inner);
                     linear(&format!("{p}.ssm_out"), hidden, inner)?
                 }
                 _ => linear(&format!("{p}.attn_output"), hidden, heads * dv)?,
             };
-            let attn_gate = if has_tensor(mapping, &format!("{p}.attn_gate.weight"))
-                && matches!(attn, Attn::Std { .. })
-            {
-                Some(linear(&format!("{p}.attn_gate"), heads * dv, hidden)?)
+            let gate_rows = tensor_rows(mapping, &format!("{p}.attn_gate.weight"));
+            let gate_per_head = !cfg.gate_per_element && gate_rows == Some(heads) && heads != heads * dv;
+            let attn_gate = if gate_rows.is_some() && matches!(attn, Attn::Std { .. }) {
+                Some(linear(&format!("{p}.attn_gate"), if gate_per_head { heads } else { heads * dv }, hidden)?)
             } else {
                 None
             };
@@ -1462,11 +1757,15 @@ impl RustDecoder {
             if ffn_norm.is_none() && post_ffn_norm.is_none() && post_attn_norm.is_some() {
                 ffn_norm = post_attn_norm.take();
             }
-            layers.push(Layer {
+            let gemma_layer = gemma::load_layer(model, &cfg, &p)?;
+            let mut layer = Layer {
+                parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
+                zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
                 attn,
                 chunk: cfg.layer_chunk(i),
                 output_gate,
                 attn_gate,
+                gate_per_head,
                 value_moe,
                 xielu,
                 sinks,
@@ -1481,10 +1780,15 @@ impl RustDecoder {
                 q_norm_bias: qk_bias("attn_q_norm", q_width)?,
                 k_norm_bias: qk_bias("attn_k_norm", k_width)?,
                 window: cfg.layer_window(i),
-                local_rope: cfg.sliding_window.is_some()
-                    && cfg.layer_window(i).is_some()
-                    && model.rope_tables().len() > 1,
-            });
+                rope_table: model.rope_index(i),
+                kv_shared,
+                k_eq_v,
+                gemma: gemma_layer,
+            };
+            if let Some(ctx) = &par {
+                par_shard::shard_layer(ctx, &mut layer, i, &cfg)?;
+            }
+            layers.push(layer);
         }
         let head_name = if has_tensor(mapping, "output.weight") {
             "output"
@@ -1503,7 +1807,28 @@ impl RustDecoder {
             .map(|p| format!("{p}.embed_tokens.weight"))
             .filter(|p| has_tensor(mapping, p))
             .unwrap_or_else(|| "token_embd.weight".into());
-        let embedding = Embedding::load_named(model, &embedding_name)?;
+        let mut embedding = Embedding::load_named(model, &embedding_name)?;
+        if let Some(ctx) = &par {
+            par_shard::shard_embedding(ctx, &mut embedding)?;
+        }
+        let head = match &par {
+            // the output head lives on the last pipeline stage, cut by vocabulary rows over the tensor-parallel group
+            Some(ctx) if !ctx.is_last_stage() => par_shard::dummy_linear(),
+            Some(ctx) => par_shard::shard_head(ctx, linear(&head_name, cfg.vocab, hidden)?, cfg.vocab)?,
+            None => linear(&head_name, cfg.vocab, hidden)?,
+        };
+        let cfg = match &par {
+            Some(ctx) => par_shard::localize_cfg(ctx, &cfg)?,
+            None => cfg,
+        };
+        let cfg_rope_half = cfg.rope.dims / 2;
+        let mrope = match crate::vision::mrope::MropeLayout::from_metadata(meta)? {
+            Some(layout) if cfg_rope_half > 0 => {
+                layout.check(cfg.rope.dims)?;
+                Some(MropeState { axes: layout.axes(cfg_rope_half), axis_tables: std::sync::OnceLock::new() })
+            }
+            _ => None,
+        };
         let mtp = mtp_prefix
             .map(|p| -> Result<MtpProjection, String> {
                 Ok(MtpProjection {
@@ -1518,15 +1843,31 @@ impl RustDecoder {
             profile: std::env::var_os("FLLM_RUST_PROFILE").is_some(),
             embedding,
             layers,
-            head: linear(&head_name, cfg.vocab, hidden)?,
+            head,
             final_norm: load_norm(mapping, &final_norm_name, hidden)?
                 .ok_or("missing output_norm.weight")?,
+            ple: gemma::load_global(model, &cfg)?,
+            altup: gemma::load_altup(model, &cfg)?,
             rope: model.rope_shared(),
             groups,
             stride: model.table_stride(),
             block_size: model.block_size(),
             pool_blocks: model.pool_blocks(),
             kv_kind: model.kv_kind(),
+            mla_latent: model.mla_latent(),
+            kvl: {
+                let mut kvl = model.kv_pool_layout_for(&cfg);
+                if mtp_prefix.is_some() {
+                    // the MTP block owns one layer of cache
+                    kvl.key_offsets.truncate(1);
+                    kvl.value_offsets.truncate(1);
+                    kvl.key_words.truncate(1);
+                    kvl.value_words.truncate(1);
+                    kvl.key_total = kvl.key_words[0];
+                    kvl.value_total = kvl.value_words[0];
+                }
+                kvl
+            },
             pool: rayon::ThreadPoolBuilder::new()
                 .num_threads(model.threads().max(1) as usize)
                 .build()
@@ -1543,15 +1884,113 @@ impl RustDecoder {
             cfg,
             backend: None,
             backend_stream: None,
+            backend_stream2: None,
             backend_weights: None,
             backend_kv: None,
             backend_scratch: None,
             graphs: std::sync::Mutex::new(std::collections::HashMap::new()),
             graph_ok: std::sync::OnceLock::new(),
             graph_failed: std::sync::atomic::AtomicBool::new(false),
+            act_source_bf16: mapping.index().tensors.iter().any(|t| matches!(t.name.as_str(), "token_embd.weight" | "output.weight") && t.type_id == 30),
+            par,
+            embed_stash: Default::default(),
+            tree_mask: None,
+            tree_prefix_len: 0,
+            tree_num_nodes: 0,
+            mrope,
+            row_positions3: std::sync::Mutex::new(None),
+            row_deepstack: std::sync::Mutex::new(None),
+            row_visible_lengths: std::sync::Mutex::new(None),
         };
         decoder.set_device(device)?;
         Ok(decoder)
+    }
+
+    pub fn set_tree_mask(&mut self, mask: Option<Vec<bool>>, prefix_len: usize, num_nodes: usize) {
+        self.tree_mask = mask;
+        self.tree_prefix_len = prefix_len;
+        self.tree_num_nodes = num_nodes;
+    }
+
+    /// Number of decoder layers.
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Whether the model carries multimodal rotary sections (`fllm.rope.mrope_sections`).
+    pub fn supports_mrope(&self) -> bool {
+        self.mrope.is_some()
+    }
+
+    /// Three-axis position ids (time, height, width) for the rows of the next forward pass, or `None` for the ordinary positions. The
+    /// caller clears them after the pass. Rows of text carry the same id on every axis.
+    pub fn set_row_positions3(&self, positions: Option<Vec<[u32; 3]>>) {
+        *self.row_positions3.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = positions;
+    }
+
+    /// DeepStack features for the next forward pass (see `row_deepstack`); the caller clears them afterwards.
+    pub fn set_row_deepstack(&self, features: Option<DeepstackLevels>) {
+        *self.row_deepstack.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = features.map(Arc::new);
+    }
+
+    /// Visible lengths per row for the next forward pass (see `row_visible_lengths`); the caller clears them afterwards.
+    pub fn set_row_visible_lengths(&self, lengths: Option<Vec<usize>>) {
+        *self.row_visible_lengths.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = lengths;
+    }
+
+    fn row_visible_lengths(&self) -> Option<Vec<usize>> {
+        self.row_visible_lengths.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn row_deepstack(&self) -> Option<Arc<DeepstackLevels>> {
+        self.row_deepstack.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// The DeepStack features after the checks of a batch of `rows` rows.
+    fn checked_deepstack(&self, rows: usize) -> Result<Option<Arc<DeepstackLevels>>, String> {
+        let Some(levels) = self.row_deepstack() else { return Ok(None) };
+        if levels.len() > self.layers.len()
+            || levels.iter().flatten().any(|(r, v)| *r >= rows || v.len() != self.cfg.hidden || v.iter().any(|x| !x.is_finite()))
+        {
+            return Err("invalid DeepStack features".into());
+        }
+        Ok(Some(levels))
+    }
+
+    fn row_positions3(&self) -> Option<Vec<[u32; 3]>> {
+        self.row_positions3.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// The batch's three-axis positions after checks: the model must have M-RoPE sections, one entry per row, ids inside the rotary tables.
+    fn checked_positions3(&self, rows: usize) -> Result<Option<Vec<[u32; 3]>>, String> {
+        let Some(p3) = self.row_positions3() else { return Ok(None) };
+        if self.mrope.is_none() {
+            return Err("multimodal positions were given to a model without M-RoPE sections".into());
+        }
+        let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
+        if p3.len() != rows || p3.iter().flatten().any(|&p| p as usize >= max_position) {
+            return Err("invalid multimodal position ids".into());
+        }
+        Ok(Some(p3))
+    }
+
+    /// Per-axis rotary tables of the device path (see `MropeState`).
+    fn mrope_axis_tables(&self) -> Option<&AxisTables> {
+        let state = self.mrope.as_ref()?;
+        let table = &self.rope[0];
+        Some(state.axis_tables.get_or_init(|| {
+            (0..3u8)
+                .map(|axis| {
+                    let (mut cos, mut sin) = (table.cos.clone(), table.sin.clone());
+                    for (i, (c, s)) in cos.iter_mut().zip(sin.iter_mut()).enumerate() {
+                        if state.axes[i % table.half] != axis {
+                            (*c, *s) = (1.0, 0.0);
+                        }
+                    }
+                    (Arc::new(cos), Arc::new(sin))
+                })
+                .collect()
+        }))
     }
 
     fn norm(&self, x: &mut [f32], norm: &Norm) {
@@ -1574,47 +2013,52 @@ impl RustDecoder {
         crate::kv_format::unpack_kind(self.kv_kind)
             .unwrap_or((crate::kv_format::KvFormat::F16, crate::kv_format::KvFormat::F16))
     }
-    /// 16-bit words of one layer's cache of `kv_heads x dim` values per slot.
-    fn layer_words(&self, format: crate::kv_format::KvFormat, dim: usize) -> usize {
-        format.layer_words(self.pool_blocks * self.block_size, self.cfg.kv_heads, dim)
+    /// Key cache region of the layer whose cache `layer` uses: `(first word, kv heads, head width)`.
+    fn key_region(&self, layer: usize) -> (usize, usize, usize) {
+        let owner = crate::kv_geometry::KvPoolLayout::owner(&self.cfg, layer);
+        (self.kvl.key_offsets[owner], self.cfg.layer_kv_heads(owner), self.cfg.layer_head_dim(owner))
     }
+    /// Value cache region, see `key_region`.
+    fn value_region(&self, layer: usize) -> (usize, usize, usize) {
+        let owner = crate::kv_geometry::KvPoolLayout::owner(&self.cfg, layer);
+        (self.kvl.value_offsets[owner], self.cfg.layer_kv_heads(owner), self.cfg.layer_value_dim(owner))
+    }
+    /// Write one slot (`kv_heads x dim` values) of the region `(offset, kv_heads, dim)`.
     fn write_cache(
         &self,
         cache: &mut [u16],
-        layer: usize,
+        region: (usize, usize, usize),
         slot: usize,
         row: &[f32],
-        dim: usize,
         format: crate::kv_format::KvFormat,
     ) {
+        let (offset, kv_heads, dim) = region;
         if format == crate::kv_format::KvFormat::Q8_0 {
             // the original q8_0 writer (also used by the unit tests below)
-            let kv = self.cfg.kv_heads * dim;
+            let kv = kv_heads * dim;
             let group = if dim.is_multiple_of(32) { 32 } else { dim };
             let slots = self.pool_blocks * self.block_size;
-            let words = format.layer_words(slots, self.cfg.kv_heads, dim);
+            let words = format.layer_words(slots, kv_heads, dim);
             let q_words = (slots * kv).div_ceil(2);
             let scale_words = slots * (kv / group);
-            let (q_cache, cache_scales) = cache[layer * words..(layer + 1) * words].split_at_mut(q_words);
+            let (q_cache, cache_scales) = cache[offset..offset + words].split_at_mut(q_words);
             write_q8_cache_row(q_cache, &mut cache_scales[..scale_words], slot, kv, group, row);
             return;
         }
-        let layout = crate::kv_format::KvLayout::new(format, self.pool_blocks * self.block_size, self.cfg.kv_heads, dim);
-        let offset = layer * layout.words;
+        let layout = crate::kv_format::KvLayout::new(format, self.pool_blocks * self.block_size, kv_heads, dim);
         layout.encode_slot(&mut cache[offset..offset + layout.words], slot, row);
     }
-    /// Decode one cache slot (`kv_heads x dim` values) into `out`.
+    /// Decode one cache slot (`kv_heads x dim` values) of the region `(offset, kv_heads, dim)` into `out`.
     fn read_slot(
         &self,
         cache: &[u16],
-        layer: usize,
+        region: (usize, usize, usize),
         slot: usize,
-        dim: usize,
         format: crate::kv_format::KvFormat,
         out: &mut [f32],
     ) {
-        let layout = crate::kv_format::KvLayout::new(format, self.pool_blocks * self.block_size, self.cfg.kv_heads, dim);
-        let offset = layer * layout.words;
+        let (offset, kv_heads, dim) = region;
+        let layout = crate::kv_format::KvLayout::new(format, self.pool_blocks * self.block_size, kv_heads, dim);
         layout.decode_slot(&cache[offset..offset + layout.words], slot, out);
     }
     /// Pick the compute device for `device` (a `--device` value, see `devices`) and load the model onto it.
@@ -1651,6 +2095,16 @@ impl RustDecoder {
     /// Whether an accelerator backend (not the host CPU path) runs the model.
     pub fn uses_accelerator(&self) -> bool {
         self.backend.is_some()
+    }
+
+    /// Work the accelerator path leaves to the host reference code: `(whole layers, feed-forward blocks of otherwise device layers)`.
+    pub fn host_fallbacks(&self) -> (usize, usize) {
+        self.backend_weights.as_ref().map_or((0, 0), |w| {
+            (
+                w.layers.iter().filter(|l| l.host_layer).count(),
+                w.layers.iter().filter(|l| !l.host_layer && l.host_ffn).count(),
+            )
+        })
     }
 
     /// Create the backend `selected_backend` (number `selected_dev_id` within that backend) and move the model onto it.
@@ -1726,6 +2180,13 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok`: the stream has the attention-gate / element-wise kernels.
     fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, conv_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        if layer.parallel.is_some() {
+            // the Mamba-2 branch keeps its state on the host; the layer is computed by the host reference code
+            return Some("a Mamba-2 branch next to the attention");
+        }
+        if layer.zamba.is_some() {
+            return Some("a shared transformer block in front of the Mamba-2 mixer");
+        }
         match &layer.attn {
             Attn::Std { .. } => {
                 // routed value experts (MoVA) are computed by the host reference inside an otherwise device layer
@@ -1741,6 +2202,7 @@ impl RustDecoder {
                 }
                 None
             }
+            Attn::Mamba1(m) if m.norms.is_some() => Some("Mamba-1 with learned dt/B/C norms"),
             // Recurrent mixers keep their state on the host (or in their own device buffers) and handle the residual add themselves.
             Attn::Linear(_) | Attn::Mamba(_) | Attn::Mamba1(_) => {
                 if cfg.parallel_residual {
@@ -1750,8 +2212,19 @@ impl RustDecoder {
                 }
             }
             Attn::None => None,
+            Attn::Kda(_) => {
+                if let Some(_shape) = self.kda_shape() {
+                    if conv_ok && !cfg.parallel_residual {
+                        None
+                    } else {
+                        Some("Kimi Delta Attention")
+                    }
+                } else {
+                    Some("Kimi Delta Attention")
+                }
+            }
             Attn::Mla(_) => {
-                if arch_ok && cfg.mla.is_some() && cfg.kv_heads == cfg.heads && !cfg.parallel_residual {
+                if arch_ok && cfg.mla.as_ref().is_some_and(|m| m.rotary) && (cfg.kv_heads == cfg.heads || self.mla_latent) && !cfg.parallel_residual {
                     None
                 } else {
                     Some("multi-head latent attention")
@@ -1846,6 +2319,52 @@ impl RustDecoder {
             .map_err(|e| e.to_string())
     }
 
+    /// First reason the narrow-activation pipeline cannot run this model (`act_dtype::eligibility`).
+    fn narrow_blocker(&self, layer_reasons: &[Option<&'static str>]) -> Option<&'static str> {
+        use crate::backend::act_dtype::{eligibility, ModelShape};
+        let cfg = &self.cfg;
+        let shape = ModelShape {
+            all_layers_standard_attention: self.layers.iter().all(|l| matches!(l.attn, Attn::Std { .. })),
+            host_layers: layer_reasons.iter().any(Option::is_some)
+                || self.layers.iter().any(|l| l.value_moe.is_some() || self.ffn_host_reason(l, true).is_some())
+                || FFN_HOST_FROM.lock().ok().and_then(|slot| *slot).is_some_and(|(layers, _)| layers == self.layers.len()),
+            moe: self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe(_))),
+            mla: cfg.mla.is_some(),
+            gated_attention: self.layers.iter().any(|l| l.output_gate || l.attn_gate.is_some()),
+            qkv_clip: cfg.qkv_clip.is_some(),
+            parallel_residual: cfg.parallel_residual,
+            layer_norm: !matches!(cfg.norm, NormKind::Rms) || self.layers.iter().any(|l| l.q_norm_bias.is_some() || l.k_norm_bias.is_some()),
+            mtp: self.mtp.is_some(),
+            recurrent: false,
+        };
+        eligibility(&shape).or_else(|| self.layers.iter().any(|l| l.xielu.is_some()).then_some("xIELU activation"))
+    }
+
+    /// `FLLM_ACT_DTYPE`: decide the activation type of the device pipeline and tell the backend before any weight is uploaded (BF16 needs BF16 scales
+    /// for the 4-bit GEMMs). The default is f32, which leaves everything as it was.
+    fn choose_activation_dtype(&self, backend: &dyn crate::backend::Backend, layer_reasons: &[Option<&'static str>]) -> crate::backend::act_dtype::ActDtype {
+        use crate::backend::act_dtype::{decide, request_from_env, ActDtype, ModelFacts};
+        let marlin_weights = self.layers.iter().any(|l| {
+            matches!(&l.attn, Attn::Std { q, .. } if q.packed_weights().is_some_and(|(kind, _)| crate::backend::QuantType::from_gguf_type_id(kind).q4z_group().is_some_and(|g| g != 16)))
+        });
+        let facts = ModelFacts { arch: self.cfg.arch.clone(), source_bf16: self.act_source_bf16, blocker: self.narrow_blocker(layer_reasons), marlin_weights };
+        let decision = decide(request_from_env(), &facts);
+        let mut dtype = decision.dtype;
+        if let Some(note) = &decision.note {
+            eprintln!("[fllm-rs] {note}");
+        }
+        if dtype.is_narrow() && !backend.set_activation_dtype(dtype) {
+            eprintln!("[fllm-rs] {} does not support {dtype} activations on this device; activations stay f32", backend.name());
+            dtype = ActDtype::F32;
+        }
+        if !dtype.is_narrow() {
+            backend.set_activation_dtype(ActDtype::F32);
+        } else {
+            eprintln!("[fllm-rs] activations on the device: {dtype} (FLLM_ACT_DTYPE; sums, residual adds and rotations still run in f32 registers)");
+        }
+        dtype
+    }
+
     pub fn init_backend(
         &mut self,
         backend: Arc<dyn crate::backend::Backend>,
@@ -1881,6 +2400,9 @@ impl RustDecoder {
                 }
             })
             .collect();
+        if self.mla_latent {
+            self.check_latent_mla(&*backend, &layer_reasons)?;
+        }
         if forced.is_none() && missing.is_empty() && !layer_reasons.is_empty() && layer_reasons.iter().all(Option::is_some) {
             for r in layer_reasons.iter().flatten() {
                 if !missing.contains(r) {
@@ -1896,9 +2418,11 @@ impl RustDecoder {
                 missing.join(", ")
             ));
         }
+        let act_dtype = self.choose_activation_dtype(&*backend, &layer_reasons);
+        let merge_on = merge_proj_requested(act_dtype.is_narrow(), backend.supports_merged_projections());
         let stream = backend.create_stream().map_err(|e| e.to_string())?;
         let kv = backend
-            .allocate_kv_cache(
+            .allocate_kv_cache_layered(
                 self.layers.len(),
                 self.pool_blocks,
                 self.block_size,
@@ -1906,6 +2430,8 @@ impl RustDecoder {
                 self.cfg.head_dim,
                 self.cfg.value_dim,
                 self.kv_kind,
+                Some(self.kvl.clone()),
+                self.cfg.layer_geoms.clone(),
             )
             .map_err(|e| e.to_string())?;
 
@@ -1941,6 +2467,56 @@ impl RustDecoder {
                         .map_err(|e| e.to_string())
                 }
             };
+
+        // Linears whose packed rows are one after the other in memory (the Marlin 4-bit formats without activation permutation,
+        // NVFP4, and K-quants) as one device matrix: concatenated along the output dimension.
+        // `None` when the parts differ in format or width, or have only some biases.
+        let upload_merged = |name: &str, parts: &[&Linear]| -> Result<Option<DeviceMergedProj>, String> {
+            let Some((kind, _)) = parts[0].packed_weights() else {
+                return Ok(None);
+            };
+            let quant = crate::backend::QuantType::from_gguf_type_id(kind);
+            let is_supported = (quant.q4z_group().is_some() && !quant.is_q4zp() && quant != crate::backend::QuantType::Nvfp4Marlin)
+                || quant == crate::backend::QuantType::NvFp4
+                || quant == crate::backend::QuantType::Nvfp4Marlin
+                || matches!(quant, crate::backend::QuantType::Q4_K | crate::backend::QuantType::Q5_K | crate::backend::QuantType::Q6_K | crate::backend::QuantType::Q8_0);
+            if !is_supported {
+                return Ok(None);
+            }
+            let same = parts.iter().all(|p| p.packed_weights().is_some_and(|(k, _)| k == kind) && p.cols == parts[0].cols && p.scale == 1.0)
+                && parts.iter().all(|p| p.bias.is_some() == parts[0].bias.is_some());
+            if !same {
+                return Ok(None);
+            }
+            if quant == crate::backend::QuantType::NvFp4 || quant == crate::backend::QuantType::Nvfp4Marlin {
+                let s0 = parts[0].input_scale;
+                if !parts.iter().all(|p| (p.input_scale - s0).abs() < 1e-6) {
+                    return Ok(None);
+                }
+            }
+            let mut bytes = Vec::new();
+            let mut bias: Option<Vec<f32>> = parts[0].bias.as_ref().map(|_| Vec::new());
+            let mut rows = 0;
+            let mut sizes = [0usize; 3];
+            for (n, p) in parts.iter().enumerate() {
+                bytes.extend_from_slice(p.packed_weights().map(|(_, b)| b).unwrap_or_default());
+                if let (Some(all), Some(b)) = (bias.as_mut(), p.bias.as_ref()) {
+                    all.extend_from_slice(b);
+                }
+                rows += p.rows;
+                sizes[n] = p.rows;
+            }
+            if quant == crate::backend::QuantType::NvFp4 || quant == crate::backend::QuantType::Nvfp4Marlin {
+                crate::backend::set_next_nvfp4_input_scale(parts[0].input_scale);
+            }
+            let weight = backend
+                .upload_weight_scaled(name, &bytes, quant, rows, parts[0].cols, bias.as_deref(), parts[0].scale)
+                .map_err(|e| e.to_string())?;
+            if quant == crate::backend::QuantType::NvFp4 || quant == crate::backend::QuantType::Nvfp4Marlin {
+                crate::backend::set_next_nvfp4_input_scale(0.0);
+            }
+            Ok(Some(DeviceMergedProj { weight, parts: sizes }))
+        };
 
         let upload_norm =
             |_name: &str, norm: &Norm| -> Result<crate::backend::DeviceBuffer, String> {
@@ -2014,6 +2590,8 @@ impl RustDecoder {
                     shortconv: None,
                     mamba1: None,
                     sinks: None,
+                    qkv: None,
+                    gate_up: None,
                 });
                 continue;
             }
@@ -2023,7 +2601,15 @@ impl RustDecoder {
                 .as_ref()
                 .map(|n| upload_norm(&format!("blk.{i}.attn_norm"), n))
                 .transpose()?;
+            // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
+            let merged_qkv = match &layer.attn {
+                Attn::Std { q, k, v } if merge_on && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() => {
+                    upload_merged(&format!("blk.{i}.attn_qkv"), &[q, k, v])?
+                }
+                _ => None,
+            };
             let (q, k, v) = match &layer.attn {
+                Attn::Std { .. } if merged_qkv.is_some() => (None, None, None),
                 Attn::Std { q, k, v } => (
                     Some(upload_linear(&format!("blk.{i}.attn_q"), q)?),
                     Some(upload_linear(&format!("blk.{i}.attn_k"), k)?),
@@ -2113,7 +2699,13 @@ impl RustDecoder {
                     q: upload_linear(&format!("blk.{i}.attn_q_b"), &m.q)?,
                     kv_a: upload_linear(&format!("blk.{i}.attn_kv_a"), &m.kv_a)?,
                     kv_a_norm: upload_vec(&m.kv_a_norm)?,
-                    kv_b: upload_linear(&format!("blk.{i}.attn_kv_b"), &m.kv_b)?,
+                    // the latent cache needs the dense FP16 kv_b matrix (absorbed into the queries, applied to the attention output) instead
+                    kv_b: if self.mla_latent { None } else { Some(upload_linear(&format!("blk.{i}.attn_kv_b"), &m.kv_b)?) },
+                    kv_b_dense: if self.mla_latent {
+                        Some(mla_latent::upload_f16(&*backend, &crate::mla_latent::dense_kv_b_f16(&m.kv_b)?)?)
+                    } else {
+                        None
+                    },
                 }),
                 _ => None,
             };
@@ -2132,8 +2724,15 @@ impl RustDecoder {
                     .ok()
                     .and_then(|slot| *slot)
                     .is_some_and(|(layers, first)| layers == self.layers.len() && i >= first);
+            let merged_gate_up = match &layer.ffn {
+                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) => {
+                    upload_merged(&format!("blk.{i}.ffn_gate_up"), &[gate, up])?
+                }
+                _ => None,
+            };
             let (ffn_gate, ffn_up, ffn_down) = match &layer.ffn {
                 Ffn::Gated { .. } | Ffn::Plain { .. } if host_ffn => (None, None, None),
+                Ffn::Gated { down, .. } if merged_gate_up.is_some() => (None, None, Some(upload_linear(&format!("blk.{i}.ffn_down"), down)?)),
                 Ffn::Gated { gate, up, down } => (
                     Some(upload_linear(&format!("blk.{i}.ffn_gate"), gate)?),
                     Some(upload_linear(&format!("blk.{i}.ffn_up"), up)?),
@@ -2166,7 +2765,8 @@ impl RustDecoder {
                         Some((e, _)) => up_expert(e, "shared")?,
                         None => None,
                     };
-                    let fast = if self.device_routing_ok(moe) {
+                    let device_moe = backend.moe_device_available();
+                    let fast = if self.device_routing_ok(moe, device_moe) && (moe.shared.is_none() || shared.is_some()) {
                         let all: Option<Vec<&DeviceExpert>> = experts.iter().map(|e| e.as_ref()).collect();
                         match all {
                             Some(list) if !list.is_empty() => {
@@ -2174,18 +2774,32 @@ impl RustDecoder {
                                 let same = list.iter().all(|e| {
                                     e.gate.quant_type == kinds[0] && e.up.quant_type == kinds[1] && e.down.quant_type == kinds[2]
                                 });
-                                let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 2 | 3 | 6 | 7 | 8 | 12..=14 | 20 | 39);
+                                let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012 | 0x8000_0020 | 0x8000_0021);
                                 let (ff, hid) = (list[0].gate.rows, list[0].gate.cols);
                                 let dims = list[0].down.rows == hid
                                     && list[0].down.cols == ff
-                                    && hid.is_multiple_of(32)
-                                    && ff.is_multiple_of(32)
-                                    && kinds.iter().all(|q| !matches!(q.to_gguf_type_id(), 12..=14) || (hid.is_multiple_of(256) && ff.is_multiple_of(256)))
+                                    && hid.is_multiple_of(16)
+                                    && ff.is_multiple_of(16)
+                                    && kinds.iter().all(|q| {
+                                        let id = q.to_gguf_type_id();
+                                        if matches!(id, 10..=14 | 16..=19 | 21 | 22 | 29) {
+                                            hid.is_multiple_of(256) && ff.is_multiple_of(256)
+                                        } else {
+                                            true
+                                        }
+                                    })
                                     && {
                                         let ok = |sel: fn(&DeviceExpert) -> bool| list.iter().all(|e| sel(e)) || list.iter().all(|e| !sel(e));
                                         ok(|e| e.gate.bias.is_some()) && ok(|e| e.up.bias.is_some()) && ok(|e| e.down.bias.is_some())
                                     };
-                                if same && dims && kinds.iter().all(|&q| ok_kind(q)) {
+                                let dp4a = kinds.iter().all(|&q| ok_kind(q));
+                                let grouped = device_moe
+                                    && [16usize, 64].iter().all(|&b| {
+                                        backend.moe_grouped_supported(kinds[0], hid, b)
+                                            && backend.moe_grouped_supported(kinds[1], hid, b)
+                                            && backend.moe_grouped_supported(kinds[2], ff, b)
+                                    });
+                                if same && dims && (dp4a || grouped) {
                                     let gates: Vec<&crate::backend::DeviceWeight> = list.iter().map(|e| &e.gate).collect();
                                     let ups: Vec<&crate::backend::DeviceWeight> = list.iter().map(|e| &e.up).collect();
                                     let downs: Vec<&crate::backend::DeviceWeight> = list.iter().map(|e| &e.down).collect();
@@ -2213,6 +2827,17 @@ impl RustDecoder {
                                             down_bias,
                                             kinds,
                                             ff,
+                                            dp4a,
+                                            device: if device_moe {
+                                                Some(DeviceMoeDevice {
+                                                    route: self.device_route(moe),
+                                                    bias: moe.bias.as_ref().map(upload_vec).transpose()?,
+                                                    shared_gate: moe.shared.as_ref().and_then(|(_, g)| g.as_ref()).map(upload_vec).transpose()?,
+                                                    grouped,
+                                                })
+                                            } else {
+                                                None
+                                            },
                                         }),
                                         _ => None,
                                     }
@@ -2258,6 +2883,8 @@ impl RustDecoder {
                 shortconv,
                 mamba1,
                 sinks: layer.sinks.clone().map(Arc::new),
+                qkv: merged_qkv,
+                gate_up: merged_gate_up,
             });
         }
 
@@ -2293,7 +2920,9 @@ impl RustDecoder {
         };
 
         let mut pool = crate::backend::BufferPool::new(Arc::clone(&backend));
-        let max_tokens = 512;
+        // FLLM_WORKSPACE_ROWS=N (default 0 = off): the buffer pool and the library scratch are sized once for batches of N rows
+        let reserve_rows = std::env::var("FLLM_WORKSPACE_ROWS").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0).min(16384);
+        let max_tokens = reserve_rows.max(512);
         let hidden_bytes = max_tokens * self.cfg.hidden * 4;
         let ffn_bytes = max_tokens * self.cfg.ff * 4;
         pool.preallocate(&[
@@ -2306,8 +2935,16 @@ impl RustDecoder {
         ])
         .map_err(|e| e.to_string())?;
 
+        let mut stream = stream;
+        if reserve_rows > 0 {
+            let wide = self.cfg.hidden.max(self.cfg.ff);
+            stream.reserve_workspace(reserve_rows, wide, 2 * wide).map_err(|e| e.to_string())?;
+            eprintln!("[fllm-rs] workspace reserved for batches of {reserve_rows} rows (FLLM_WORKSPACE_ROWS)");
+        }
+        let stream2 = backend.create_stream().ok();
         self.backend = Some(backend);
         self.backend_stream = Some(std::sync::Mutex::new(stream));
+        self.backend_stream2 = stream2.map(std::sync::Mutex::new);
         self.backend_weights = Some(Arc::new(dev_weights));
         self.backend_kv = Some(kv);
         self.backend_scratch = Some(std::sync::Mutex::new(pool));
@@ -2336,7 +2973,6 @@ impl RustDecoder {
         let rows = ids.len();
         let cfg = &self.cfg;
         let hidden = cfg.hidden;
-        let (dk, dv) = (cfg.head_dim, cfg.value_dim);
         let mtp = usize::from(self.mtp.is_some());
         let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
         // The CPU path's batch checks, minus the host cache sizes.
@@ -2356,6 +2992,8 @@ impl RustDecoder {
         {
             return Err("invalid image embedding overrides".into());
         }
+        let positions3 = self.checked_positions3(rows)?;
+        let deepstack = self.checked_deepstack(rows)?;
         let mut positions = Vec::with_capacity(rows);
         let mut slots = Vec::with_capacity(rows);
         for (r, &length) in lengths.iter().enumerate() {
@@ -2436,9 +3074,10 @@ impl RustDecoder {
         if cfg.embedding_norm {
             rms(&mut host_x, &vec![1.0; hidden], cfg.eps);
         }
+        self.stash_embeddings(&host_x);
         if !recording {
             stream
-                .upload(&mut x_buf, cast_f32_to_u8(&host_x))
+                .upload_activations(&mut x_buf, &host_x)
                 .map_err(err)?;
             debug_sum(&mut **stream, "embd", &x_buf);
         }
@@ -2452,14 +3091,21 @@ impl RustDecoder {
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
         // the head GEMM reads the final norm output directly when every row's logits are wanted in order
         let head_direct = head_copy_fused() && logit_rows.len() == rows && logit_rows.iter().enumerate().all(|(j, &r)| j == r);
+        // FLLM_ACT_CHECK=1: the residual stream is inspected after every layer of the first passes (largest value, NaN / Inf)
+        let act_check = !recording && act_check_pass();
+        let mut act_stats: Vec<(f32, u32)> = Vec::new();
         for (i, layer) in self.layers.iter().enumerate() {
             let dev_layer = &dev_weights.layers[i];
+            let layer_heads = cfg.layer_heads(i);
+            let layer_kv_heads = cfg.layer_kv_heads(i);
+            let dk = cfg.layer_head_dim(i);
+            let dv = cfg.layer_value_dim(i);
             if dev_layer.host_layer {
                 // no kernels for this layer: the host reference code runs it (host KV cache, host recurrent state)
                 let mut host_x = vec![0.0f32; rows * hidden];
                 stream.download(cast_f32_to_u8_mut(&mut host_x), &x_buf).map_err(err)?;
                 let mut trace = crate::cpu_profile::Trace::new(false, rows);
-                self.host_layers(i..i + 1, &mut host_x, &positions, tables, lengths, key, value, &mut trace)?;
+                self.host_layers(i..i + 1, &mut host_x, &positions, tables, lengths, key, value, &mut trace, None, &mut Vec::new())?;
                 stream.upload(&mut x_buf, cast_f32_to_u8(&host_x)).map_err(err)?;
                 continue;
             }
@@ -2492,12 +3138,22 @@ impl RustDecoder {
             let std_qkv = match (&dev_layer.q, &dev_layer.k, &dev_layer.v) {
                 (Some(q), Some(k), Some(v)) => Some((q, k, Some(v))),
                 (Some(q), Some(k), None) if dev_layer.host_values => Some((q, k, None)),
+                // one matrix for all three: the merged path below replaces the individual projections
+                _ if dev_layer.qkv.is_some() => dev_layer.qkv.as_ref().map(|m| (&m.weight, &m.weight, Some(&m.weight))),
                 _ => None,
             };
             if std_qkv.is_some() || dev_layer.mla.is_some() {
-                let mut q_buf = scratch.acquire(rows * cfg.heads * dk * 4).map_err(err)?;
-                let mut k_buf = scratch.acquire(rows * cfg.kv_heads * dk * 4).map_err(err)?;
-                let mut v_buf = scratch.acquire(rows * cfg.kv_heads * dv * 4).map_err(err)?;
+                // the latent cache has its own buffers (device_mla_latent); these stay placeholders there
+                let lat = self.mla_latent && dev_layer.mla.is_some();
+                let (q_bytes, k_bytes, v_bytes) = if lat {
+                    (4, 4, 4)
+                } else {
+                    (rows * layer_heads * dk * 4, rows * layer_kv_heads * dk * 4, rows * layer_kv_heads * dv * 4)
+                };
+                let mut q_buf = scratch.acquire(q_bytes).map_err(err)?;
+                let mut k_buf = scratch.acquire(k_bytes).map_err(err)?;
+                let mut v_buf = scratch.acquire(v_bytes).map_err(err)?;
+                let mut latent_attn: Option<crate::backend::DeviceBuffer> = None;
 
                 let mut gate_buf = None;
                 if let Some((q_w, k_w, v_w)) = std_qkv {
@@ -2508,6 +3164,7 @@ impl RustDecoder {
                     && self.kv_kind == 1
                     && dev_layer.q_norm.is_none()
                     && dev_layer.k_norm.is_none()
+                    && dev_layer.qkv.is_none()
                     && !layer.output_gate
                     && cfg.qkv_clip.is_none()
                     && q_w.quant_type.q4z_group().is_some()
@@ -2519,7 +3176,7 @@ impl RustDecoder {
                         && stream.linear_f16_out(&mut k_buf, &normed_buf, k_w).map_err(err)?
                         && stream.linear_f16_out(&mut v_buf, &normed_buf, v_w).map_err(err)?;
                     if ok {
-                        let (cos, sin) = &dev_weights.rope[usize::from(layer.local_rope)];
+                        let (cos, sin) = &dev_weights.rope[layer.rope_table];
                         let rope_params = RopeParams {
                             heads: cfg.heads,
                             kv_heads: cfg.kv_heads,
@@ -2551,9 +3208,65 @@ impl RustDecoder {
                         scratch.recycle(std::mem::replace(&mut q_buf, q_rot));
                     }
                 }
+                // merged q/k/v (FLLM_MERGE_PROJ): one GEMM; the blocks are rotated and cached by one kernel when it covers the layer, else split into dense arrays
+                let mut merged_done = false;
+                let mut merged_fused = false;
+                if let Some(mq) = &dev_layer.qkv {
+                    let (nq, nk, nv) = (mq.parts[0], mq.parts[1], mq.parts[2]);
+                    let can_fuse = cfg.rope.dims > 0
+                        && cfg.layer_rotates(i)
+                        && self.kv_kind == 1
+                        && !cfg.qk_norm_after_rope
+                        && (qk_norm_rope_fusion() || (dev_layer.q_norm.is_none() && dev_layer.k_norm.is_none()))
+                        && dev_layer.q_norm.as_ref().is_none_or(|w| w.size == dk * 4)
+                        && dev_layer.k_norm.as_ref().is_none_or(|w| w.size == dk * 4)
+                        && dev_layer.q_norm.is_some() == dev_layer.k_norm.is_some()
+                        && std::env::var_os("FLLM_DEBUG_SUMS").is_none();
+                    let mut qkv = scratch.acquire(rows * (nq + nk + nv) * 4).map_err(err)?;
+                    stream
+                        .quantized_linear(&mut qkv, &normed_buf, &mq.weight, if can_fuse { None } else { mq.weight.bias.as_ref() })
+                        .map_err(err)?;
+                    if can_fuse {
+                        let (cos, sin) = &dev_weights.rope[layer.rope_table];
+                        let rope_params = RopeParams {
+                            heads: cfg.heads,
+                            kv_heads: cfg.kv_heads,
+                            dim: dk,
+                            rope_dim: cfg.rope.dims,
+                            neox: cfg.rope.neox,
+                            cos: Arc::clone(cos),
+                            sin: Arc::clone(sin),
+                        };
+                        merged_fused = stream
+                            .rope_kv_write_qkv(
+                                &mut q_buf,
+                                &qkv,
+                                [nq, nk, nv],
+                                mq.weight.bias.as_ref(),
+                                dev_layer.q_norm.as_ref(),
+                                dev_layer.k_norm.as_ref(),
+                                cfg.eps,
+                                dev_kv,
+                                i,
+                                &positions,
+                                &slots,
+                                &rope_params,
+                            )
+                            .map_err(err)?;
+                        if !merged_fused {
+                            return Err("the fused rope and cache write declined after the merged q/k/v GEMM".into());
+                        }
+                    } else if !stream.split_columns([&mut q_buf, &mut k_buf, &mut v_buf], &qkv, rows, [nq, nk, nv]).map_err(err)? {
+                        return Err("the backend cannot split a merged q/k/v result".into());
+                    }
+                    scratch.recycle(qkv);
+                    merged_done = true;
+                }
                 // gated attention: the projection holds queries and gates; attention runs on the queries
                 if !fused_qkv {
-                if layer.output_gate {
+                if merged_done {
+                    // q, k and v are ready
+                } else if layer.output_gate {
                     let mut projected = scratch.acquire(rows * cfg.heads * dk * 8).map_err(err)?;
                     let mut gate = scratch.acquire(rows * cfg.heads * dk * 4).map_err(err)?;
                     stream
@@ -2569,10 +3282,13 @@ impl RustDecoder {
                     .quantized_linear(&mut q_buf, &normed_buf, q_w, q_w.bias.as_ref())
                     .map_err(err)?;
                 }
+                if !merged_done {
                 stream
                     .quantized_linear(&mut k_buf, &normed_buf, k_w, k_w.bias.as_ref())
                     .map_err(err)?;
-                if let Some(v_w) = v_w {
+                }
+                if merged_done {
+                } else if let Some(v_w) = v_w {
                     stream
                         .quantized_linear(&mut v_buf, &normed_buf, v_w, v_w.bias.as_ref())
                         .map_err(err)?;
@@ -2593,14 +3309,20 @@ impl RustDecoder {
                     debug_sum(&mut **stream, "Kcur-0 (proj+bias)", &k_buf);
                     debug_sum(&mut **stream, "Vcur-0 (proj+bias)", &v_buf);
                 }
-                if !cfg.qk_norm_after_rope {
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
-                }
-                // rotary embedding and the cache write in one kernel (f16 cache, nothing between them)
-                let mut kv_written = false;
-                if cfg.rope.dims > 0 && cfg.layer_rotates(i) {
-                    let (cos, sin) = &dev_weights.rope[usize::from(layer.local_rope)];
+                // QK norm, rotary embedding and cache write in one kernel (FLLM_FUSE_QK_NORM_ROPE; per-head norm weights, norm before the rotation)
+                let mut qk_fused = merged_fused;
+                if qk_norm_rope_fusion()
+                    && !qk_fused
+                    && !cfg.qk_norm_after_rope
+                    && cfg.rope.dims > 0
+                    && cfg.layer_rotates(i)
+                    && (dev_layer.q_norm.is_some() || dev_layer.k_norm.is_some())
+                    && dev_layer.q_norm.as_ref().is_none_or(|w| w.size == dk * 4)
+                    && dev_layer.k_norm.as_ref().is_none_or(|w| w.size == dk * 4)
+                    && dev_layer.q_norm.is_some() == dev_layer.k_norm.is_some()
+                    && std::env::var_os("FLLM_DEBUG_SUMS").is_none()
+                {
+                    let (cos, sin) = &dev_weights.rope[layer.rope_table];
                     let rope_params = RopeParams {
                         heads: cfg.heads,
                         kv_heads: cfg.kv_heads,
@@ -2610,15 +3332,57 @@ impl RustDecoder {
                         cos: Arc::clone(cos),
                         sin: Arc::clone(sin),
                     };
-                    if !cfg.qk_norm_after_rope && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
-                        kv_written = stream
-                            .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, i, &positions, &slots, &rope_params)
-                            .map_err(err)?;
-                    }
-                    if !kv_written {
-                        stream
-                            .rope(&mut q_buf, &mut k_buf, &positions, &rope_params)
-                            .map_err(err)?;
+                    qk_fused = stream
+                        .rope_kv_write_qknorm(
+                            &mut q_buf,
+                            &k_buf,
+                            &v_buf,
+                            dev_layer.q_norm.as_ref(),
+                            dev_layer.k_norm.as_ref(),
+                            cfg.eps,
+                            dev_kv,
+                            i,
+                            &positions,
+                            &slots,
+                            &rope_params,
+                        )
+                        .map_err(err)?;
+                }
+                if !cfg.qk_norm_after_rope && !qk_fused {
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
+                }
+                // rotary embedding and the cache write in one kernel (f16 cache, nothing between them)
+                let mut kv_written = qk_fused;
+                if cfg.rope.dims > 0 && cfg.layer_rotates(i) && !qk_fused {
+                    let (cos, sin) = &dev_weights.rope[layer.rope_table];
+                    let rope_params = RopeParams {
+                        heads: cfg.heads,
+                        kv_heads: cfg.kv_heads,
+                        dim: dk,
+                        rope_dim: cfg.rope.dims,
+                        neox: cfg.rope.neox,
+                        cos: Arc::clone(cos),
+                        sin: Arc::clone(sin),
+                    };
+                    if let (Some(p3), Some(axis_tables)) = (&positions3, self.mrope_axis_tables()) {
+                        // M-RoPE: one rope call per position axis, each rotating only the lanes of its axis
+                        for (axis, (cos, sin)) in axis_tables.iter().enumerate() {
+                            let axis_positions: Vec<usize> = p3.iter().map(|p| p[axis] as usize).collect();
+                            let axis_params = RopeParams { cos: Arc::clone(cos), sin: Arc::clone(sin), ..rope_params.clone() };
+                            stream.rope(&mut q_buf, &mut k_buf, &axis_positions, &axis_params).map_err(err)?;
+                        }
+                    } else {
+                        if !cfg.qk_norm_after_rope && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
+                            kv_written = stream
+                                .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, i, &positions, &slots, &rope_params)
+                                .map_err(err)?;
+                        }
+                        if !kv_written {
+                            stream
+                                .rope(&mut q_buf, &mut k_buf, &positions, &rope_params)
+                                .map_err(err)?;
+                        }
                     }
                 }
                 if i == 0 {
@@ -2629,12 +3393,28 @@ impl RustDecoder {
                     device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
                     device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
                 }
-                if !kv_written {
+                if !kv_written && cfg.layer_kv_source(i).is_none() {
                     stream
                         .kv_cache_write(dev_kv, i, &slots, &k_buf, &v_buf)
                         .map_err(err)?;
                 }
                 }
+                } else if let (true, Some(dm), Some(mc)) = (lat, &dev_layer.mla, cfg.mla.as_ref()) {
+                    latent_attn = Some(self.device_mla_latent(
+                        &mut **stream,
+                        &mut scratch,
+                        dm,
+                        mc,
+                        layer,
+                        i,
+                        dev_weights,
+                        dev_kv,
+                        &normed_buf,
+                        &positions,
+                        &slots,
+                        tables,
+                        lengths,
+                    )?);
                 } else if let (Some(dm), Some(mc)) = (&dev_layer.mla, cfg.mla.as_ref()) {
                     // multi-head latent attention, expanded: projections as GEMMs, the data movement in two small kernels, then
                     // rotary embedding, cache write and attention like any other layer
@@ -2656,12 +3436,13 @@ impl RustDecoder {
                     stream.mla_latent(&mut latent, &kv_a, rows, mc.kv_lora, width).map_err(err)?;
                     device_rms_inplace(&mut **stream, &mut scratch, &mut latent, Some(&dm.kv_a_norm), cfg.eps)?;
                     let mut kv = scratch.acquire(rows * cfg.heads * (mc.nope + mc.value) * 4).map_err(err)?;
-                    stream.quantized_linear(&mut kv, &latent, &dm.kv_b, dm.kv_b.bias.as_ref()).map_err(err)?;
+                    let kv_b = dm.kv_b.as_ref().ok_or("the up projection of the expanded MLA cache is not on the device")?;
+                    stream.quantized_linear(&mut kv, &latent, kv_b, kv_b.bias.as_ref()).map_err(err)?;
                     stream.mla_assemble(&mut q_buf, &mut k_buf, &mut v_buf, &q_full, &kv_a, &kv, rows, &shape).map_err(err)?;
                     for buf in [q_full, kv_a, latent, kv] {
                         scratch.recycle(buf);
                     }
-                    let (cos, sin) = &dev_weights.rope[usize::from(layer.local_rope)];
+                    let (cos, sin) = &dev_weights.rope[layer.rope_table];
                     let rope_params = RopeParams {
                         heads: cfg.heads,
                         kv_heads: cfg.kv_heads,
@@ -2676,14 +3457,17 @@ impl RustDecoder {
                 }
 
                 if let Some(g_w) = &dev_layer.attn_gate {
-                    let mut gate = scratch.acquire(rows * cfg.heads * dv * 4).map_err(err)?;
+                    let mut gate = scratch.acquire(rows * layer_heads * dv * 4).map_err(err)?;
                     stream.quantized_linear(&mut gate, &normed_buf, g_w, g_w.bias.as_ref()).map_err(err)?;
                     gate_buf = Some(gate);
                 }
-                let mut attn_buf = scratch.acquire(rows * cfg.heads * dv * 4).map_err(err)?;
+                let mut attn_buf = match latent_attn.take() {
+                    Some(buf) => buf,
+                    None => scratch.acquire(rows * layer_heads * dv * 4).map_err(err)?,
+                };
                 let attn_params = AttentionParams {
-                    num_heads: cfg.heads,
-                    num_kv_heads: cfg.kv_heads,
+                    num_heads: layer_heads,
+                    num_kv_heads: layer_kv_heads,
                     head_dim: dk,
                     value_dim: dv,
                     stride: self.stride,
@@ -2695,9 +3479,12 @@ impl RustDecoder {
                     sinks: dev_layer.sinks.clone(),
                     alibi_slopes: dev_weights.alibi.clone(),
                 };
-                stream
-                    .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, i, &attn_params)
-                    .map_err(err)?;
+                if !lat {
+                    let read_layer = crate::kv_geometry::KvPoolLayout::owner(cfg, i);
+                    stream
+                        .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
+                        .map_err(err)?;
+                }
                 if let Some(gate) = gate_buf.take() {
                     match cfg.attn_gate {
                         crate::config::AttnGate::Sigmoid => stream.sigmoid_gate_mul(&mut attn_buf, &gate).map_err(err)?,
@@ -2869,6 +3656,8 @@ impl RustDecoder {
             }
             let dev_ffn = match (&dev_layer.ffn_gate, &dev_layer.ffn_up, &dev_layer.ffn_down) {
                 (g, Some(u), Some(d)) => Some((g.as_ref(), u, d)),
+                // gate and up as one matrix: the merged branch below replaces the two projections
+                (None, None, Some(d)) if dev_layer.gate_up.is_some() => dev_layer.gate_up.as_ref().map(|m| (Some(&m.weight), &m.weight, d)),
                 _ => None,
             };
             let mut ffn_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
@@ -2891,13 +3680,21 @@ impl RustDecoder {
             }
 
             if let Some((gate_w, up_w, down_w)) = dev_ffn {
-                let ff = up_w.rows;
+                let ff = dev_layer.gate_up.as_ref().map_or(up_w.rows, |m| m.parts[0]);
                 let mut gate_buf = scratch.acquire(rows * ff * 4).map_err(err)?;
                 let mut up_buf = scratch.acquire(rows * ff * 4).map_err(err)?;
                 let mut act_buf = scratch.acquire(rows * ff * 4).map_err(err)?;
                 let act = act_code(cfg.activation);
 
-                if let Some(gate_w) = gate_w {
+                if let Some(mg) = &dev_layer.gate_up {
+                    // gate and up from one GEMM, the gated activation reads both blocks
+                    let mut gu = scratch.acquire(rows * 2 * ff * 4).map_err(err)?;
+                    stream.quantized_linear(&mut gu, &ffn_normed, &mg.weight, mg.weight.bias.as_ref()).map_err(err)?;
+                    if !stream.glu_merged(&mut act_buf, &gu, rows, ff, cfg.activation == Activation::GeluTanh).map_err(err)? {
+                        return Err("the backend cannot apply the gated activation to a merged gate/up result".into());
+                    }
+                    scratch.recycle(gu);
+                } else if let Some(gate_w) = gate_w {
                 // NVFP4 prompts and 4-bit Marlin: both GEMMs leave FP16 and the gated activation reads it (folded into the activation
                 // quantization / conversion of the down projection)
                 let mut half_glu = false;
@@ -2944,7 +3741,9 @@ impl RustDecoder {
 
                 let mut ffn_out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 // the norm of the next layer (or the final norm) can join the residual add of the down projection
-                let next_target = if dev_layer.post_ffn_norm.is_none() && !parallel && matches!(cfg.norm, NormKind::Rms) {
+                // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
+                let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
+                let next_target = if dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -3092,14 +3891,32 @@ impl RustDecoder {
                     .map_err(err)?;
                 scratch.recycle(ffn_out_buf);
             }
+            if let Some(level) = deepstack.as_ref().and_then(|d| d.get(i)).filter(|level| !level.is_empty()) {
+                let mut added = vec![0.0f32; rows * hidden];
+                for (row, values) in level {
+                    added[row * hidden..(row + 1) * hidden].copy_from_slice(values);
+                }
+                let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                stream.upload(&mut buf, cast_f32_to_u8(&added)).map_err(err)?;
+                stream.residual_add(&mut x_buf, &buf, 1.0).map_err(err)?;
+                scratch.recycle(buf);
+            }
             if i == 0 || crate::backend::env_flag_once!("FLLM_DEBUG_LAYERS") {
                 debug_sum(&mut **stream, &format!("l_out-{i}"), &x_buf);
+            }
+            if act_check {
+                if let Some(stat) = stream.check_activations(&x_buf, rows * hidden).map_err(err)? {
+                    act_stats.push(stat);
+                }
             }
             if let Some(host_in) = check_in {
                 self.layer_check(&mut **stream, i, &x_buf, host_in, &positions, tables, lengths, key, value)?;
             }
             scratch.recycle(ffn_normed);
             scratch.recycle(normed_buf);
+        }
+        if act_check {
+            report_act_check(&mut **stream, rows, &act_stats);
         }
 
         let mut final_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
@@ -3115,6 +3932,13 @@ impl RustDecoder {
                 dev_weights.final_norm_b.as_ref(),
                 cfg.eps,
             )?;
+        }
+
+        // narrow activations: the hidden-state capture, the embeddings API and the output head work on FP32 rows
+        if stream.act_dtype().is_narrow() && (capture.is_some() || embeddings || !logit_rows.is_empty()) {
+            let mut wide = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            stream.widen_activations(&mut wide, &final_normed).map_err(err)?;
+            scratch.recycle(std::mem::replace(&mut final_normed, wide));
         }
 
         if capture.is_some() || embeddings {
@@ -3157,7 +3981,7 @@ impl RustDecoder {
         let mut head_out = scratch.acquire(selected * cfg.vocab * 4).map_err(err)?;
         let head = &dev_weights.head;
         stream
-            .quantized_linear(&mut head_out, picked.as_ref().unwrap_or(&final_normed), head, head.bias.as_ref())
+            .quantized_linear_wide(&mut head_out, picked.as_ref().unwrap_or(&final_normed), head, head.bias.as_ref())
             .map_err(err)?;
 
         if let GraphMode::Capture(io) = &mut graph {
@@ -3166,6 +3990,15 @@ impl RustDecoder {
             if let Some(picked) = picked {
                 scratch.recycle(picked);
             }
+            scratch.recycle(final_normed);
+            return Ok(Vec::new());
+        }
+        if cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none() && run_device_sample(&mut **stream, &head_out, cfg.vocab, selected) {
+            scratch.recycle(head_out);
+            if let Some(picked) = picked {
+                scratch.recycle(picked);
+            }
+            scratch.recycle(x_buf);
             scratch.recycle(final_normed);
             return Ok(Vec::new());
         }
@@ -3220,17 +4053,19 @@ impl RustDecoder {
         lengths: &[i64],
     ) -> Vec<f32> {
         let cfg = &self.cfg;
-        let (dk, dv, heads, kv_heads) = (cfg.head_dim, cfg.value_dim, cfg.heads, cfg.kv_heads);
+        let (dk, dv, heads, kv_heads) = (cfg.layer_head_dim(layer), cfg.layer_value_dim(layer), cfg.layer_heads(layer), cfg.layer_kv_heads(layer));
         let group = heads / kv_heads;
         let scale = cfg.attention_scale.unwrap_or(1.0 / (dk as f32).sqrt());
         let (fmt_k, fmt_v) = self.kv_formats();
+        let (key_region, value_region) = (self.key_region(layer), self.value_region(layer));
         let window = self.layers[layer].window;
         let chunk = self.layers[layer].chunk;
+        let vis_override = self.row_visible_lengths();
         let mut out = vec![0.0f32; lengths.len() * heads * dv];
         out.par_chunks_mut(heads * dv)
             .enumerate()
             .for_each(|(r, output)| {
-                let n = lengths[r] as usize;
+                let n = vis_override.as_ref().and_then(|v| v.get(r).copied()).unwrap_or(lengths[r] as usize);
                 let start = match chunk {
                     Some(c) => (n - 1) / c * c,
                     None => window.map_or(0, |w| n.saturating_sub(w)),
@@ -3243,17 +4078,15 @@ impl RustDecoder {
                     let slot = block * self.block_size + p % self.block_size;
                     self.read_slot(
                         key,
-                        layer,
+                        key_region,
                         slot,
-                        dk,
                         fmt_k,
                         &mut k_rows[i * kv_heads * dk..(i + 1) * kv_heads * dk],
                     );
                     self.read_slot(
                         value,
-                        layer,
+                        value_region,
                         slot,
-                        dv,
                         fmt_v,
                         &mut v_rows[i * kv_heads * dv..(i + 1) * kv_heads * dv],
                     );
@@ -3263,6 +4096,17 @@ impl RustDecoder {
                     let kh = h / group;
                     let query = &q[(r * heads + h) * dk..(r * heads + h + 1) * dk];
                     for (i, score) in scores.iter_mut().enumerate() {
+                        let p = start + i;
+                        if let Some(mask) = &self.tree_mask {
+                            if p >= self.tree_prefix_len && r >= self.tree_prefix_len {
+                                let qi = r - self.tree_prefix_len;
+                                let ki = p - self.tree_prefix_len;
+                                if qi < self.tree_num_nodes && ki < self.tree_num_nodes && !mask[qi * self.tree_num_nodes + ki] {
+                                    *score = f32::NEG_INFINITY;
+                                    continue;
+                                }
+                            }
+                        }
                         let k = &k_rows[(i * kv_heads + kh) * dk..(i * kv_heads + kh + 1) * dk];
                         let mut s = compute::dot(query, k) * scale;
                         if let Some(slopes) = &cfg.alibi_slopes {
@@ -3348,8 +4192,10 @@ impl RustDecoder {
                 v[at * value..(at + 1) * value].copy_from_slice(&content[nope..]);
             }
         }
-        apply_rope(&mut q, heads, dk, rope, cfg.rope.neox, positions, table);
-        apply_rope(&mut k, heads, dk, rope, cfg.rope.neox, positions, table);
+        if mc.rotary {
+            apply_rope(&mut q, heads, dk, rope, cfg.rope.neox, positions, table);
+            apply_rope(&mut k, heads, dk, rope, cfg.rope.neox, positions, table);
+        }
         Ok([q, k, v])
     }
 
@@ -3370,7 +4216,7 @@ impl RustDecoder {
         value: &mut [u16],
     ) -> Result<(), String> {
         let mut trace = crate::cpu_profile::Trace::new(false, positions.len());
-        self.host_layers(i..i + 1, &mut host_x, positions, tables, lengths, key, value, &mut trace)?;
+        self.host_layers(i..i + 1, &mut host_x, positions, tables, lengths, key, value, &mut trace, None, &mut Vec::new())?;
         let mut dev = vec![0.0f32; host_x.len()];
         stream.download(cast_f32_to_u8_mut(&mut dev), x).map_err(|e| e.to_string())?;
         let rms = (host_x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / host_x.len().max(1) as f64).sqrt();
@@ -3588,6 +4434,17 @@ impl RustDecoder {
             scratch.recycle(buf);
         }
         Ok(())
+    }
+
+    fn kda_shape(&self) -> Option<crate::backend::KdaShape> {
+        let kc = self.cfg.hybrid.kda.as_ref()?;
+        self.layers.iter().any(|l| matches!(l.attn, Attn::Kda(_))).then_some(crate::backend::KdaShape {
+            heads: kc.heads,
+            head_dim: kc.head_dim,
+            conv_kernel: kc.conv_kernel,
+            eps: self.cfg.eps,
+            lower_bound: kc.lower_bound,
+        })
     }
 
     fn delta_shape(&self) -> Option<crate::backend::DeltaShape> {
@@ -4120,11 +4977,14 @@ impl RustDecoder {
             if let Some(eps) = mc.bc_rms_eps {
                 let (dt_part, rest) = split.split_at_mut(rank);
                 let (b_part, c_part) = rest.split_at_mut(n);
-                for part in [dt_part, b_part, c_part] {
+                for (k, part) in [dt_part, b_part, c_part].into_iter().enumerate() {
                     let inv = (part.iter().map(|v| v * v).sum::<f32>() / part.len() as f32 + eps)
                         .sqrt()
                         .recip();
-                    part.iter_mut().for_each(|v| *v *= inv);
+                    match &m.norms {
+                        Some(weights) => part.iter_mut().zip(&weights[k]).for_each(|(v, w)| *v *= inv * w),
+                        None => part.iter_mut().for_each(|v| *v *= inv),
+                    }
                 }
             }
             let dt_input = &split[..rank];
@@ -4240,7 +5100,7 @@ impl RustDecoder {
                 .enumerate()
                 .for_each(|(h, (y, s))| {
                     let raw = dt_raw[h] + m.dt_bias[h];
-                    let dt = (if raw > 20.0 { raw } else { raw.exp().ln_1p() }).max(step_min);
+                    let dt = (if raw > 20.0 { raw } else { raw.exp().ln_1p() }).max(step_min).min(mc.step_max);
                     let da = (dt * m.decay[h]).exp();
                     let g = h / per_group.max(1);
                     let b = &b_all[g * state_size..(g + 1) * state_size];
@@ -4256,19 +5116,8 @@ impl RustDecoder {
                         *y = acc + m.skip[h] * xp;
                     }
                 });
-            // gated RMS norm over `norm_groups` groups of the inner width
-            for (v, g) in scan.iter_mut().zip(gate) {
-                *v *= g / (1.0 + (-g).exp());
-            }
-            let size = inner / mc.norm_groups.max(1);
-            for (chunk, weight) in scan.chunks_mut(size).zip(m.norm.chunks(size)) {
-                let inv = (chunk.iter().map(|v| v * v).sum::<f32>() / size as f32 + cfg.eps)
-                    .sqrt()
-                    .recip();
-                for (v, w) in chunk.iter_mut().zip(weight) {
-                    *v *= inv * w;
-                }
-            }
+            // gate and RMS norm over `norm_groups` groups of the inner width (order and presence per `mc.norm`)
+            hybrid::gate_and_norm(mc, &m.norm, mc.norm_eps.unwrap_or(cfg.eps), scan, gate);
         }
         drop(store);
         out_projection.forward(&out)
@@ -4409,12 +5258,22 @@ impl RustDecoder {
         Self::gated_weights(stream, gate, &e.up, &e.down).map(ExpertSrc::Host)
     }
 
-    /// Whether the routing of this layer is what the device kernel implements: softmax over all experts, the best `used`,
-    /// optionally renormalised, no bias, groups or shared expert.
-    fn device_routing_ok(&self, moe: &Moe) -> bool {
+    /// Whether the routing of this layer is what the device kernels implement. Without `device` (the grouped operations): softmax over all
+    /// experts, the best `used`, optionally renormalised, no bias, groups or shared expert. With it: softmax or sigmoid scores, selection
+    /// bias, group-limited selection, shared expert, scores applied to the expert input (see `Backend::moe_device_available`).
+    fn device_routing_ok(&self, moe: &Moe, device: bool) -> bool {
         let Some(cfg) = self.cfg.moe.as_ref() else {
             return false;
         };
+        if device {
+            return moe.latent.is_none()
+                && matches!(cfg.gating, Gating::Softmax | Gating::Sigmoid)
+                && cfg.weight_norm_p.is_none()
+                && (1..=32).contains(&cfg.used)
+                && cfg.experts >= cfg.used
+                && cfg.experts <= 1024
+                && (cfg.groups <= 1 || (cfg.groups <= 64 && cfg.experts.is_multiple_of(cfg.groups)));
+        }
         matches!(cfg.gating, Gating::Softmax)
             && !cfg.input_scaled
             && cfg.groups <= 1
@@ -4439,6 +5298,9 @@ impl RustDecoder {
         let (Some(fast), Some(cfg), Some(mode)) = (dm.fast.as_ref(), self.cfg.moe.as_ref(), self.device_glu_mode()) else {
             return Ok(None);
         };
+        if let Some(device) = fast.device.as_ref() {
+            return self.moe_device(stream, scratch, dm, fast, device, x, rows);
+        }
         if rows == 0 || rows > 4 {
             return Ok(None);
         }
@@ -4669,7 +5531,10 @@ impl RustDecoder {
             .ok_or("MoE layer without MoE configuration")?;
         let hidden = self.cfg.hidden;
         let tokens = input.len() / hidden;
-        let logits = moe.router.forward(input)?;
+        let mut logits = moe.router.forward(input)?;
+        if let Some(cap) = cfg.router_softcap {
+            logits.iter_mut().for_each(|l| *l = cap * (*l / cap).tanh());
+        }
         let experts = cfg.experts;
         // (token, weight) per expert
         let mut routed: Vec<Vec<(usize, f32)>> = vec![Vec::new(); experts];
@@ -4861,7 +5726,8 @@ impl RustDecoder {
             .ok_or("MoE layer without MoE configuration")?;
         let hidden = self.cfg.hidden;
         let tokens = input.len() / hidden;
-        let routed = self.moe_route(moe, input)?;
+        let mut routed = self.moe_route(moe, input)?;
+        self.par_filter_routes(&mut routed);
         let latent_in;
         let (expert_input, width): (&[f32], usize) = match &moe.latent {
             Some((down, _)) => {
@@ -5013,7 +5879,9 @@ impl RustDecoder {
         Ok(out)
     }
 
-    fn ffn_forward(
+    /// The feed-forward of a layer on this rank's share of the weights (`ffn_forward` in `parallel/decoder_shard.rs` adds the sum
+    /// over the tensor-parallel group).
+    fn ffn_forward_local(
         &self,
         layer: &Layer,
         input: &[f32],
@@ -5026,6 +5894,10 @@ impl RustDecoder {
                 let [g, u] = projected else {
                     return Err("invalid FFN projection group".into());
                 };
+                if let Some(factor) = layer.gemma.as_ref().map(|g| g.sparsity()).filter(|f| *f != 0.0) {
+                    let width = g.len() / (input.len() / self.cfg.hidden).max(1);
+                    gemma::gaussian_top_k(g, width, factor);
+                }
                 if self.cfg.activation == Activation::Silu {
                     crate::cpu_elementwise::swiglu(g, u);
                 } else {
@@ -5104,6 +5976,35 @@ impl RustDecoder {
         GREEDY_IDS_REQUEST.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whole-block operations on the accelerator's KV pools (`kv_blocks`): `None` when the model runs on the host.
+    pub(crate) fn device_kv_copy(&self, src: usize, dst: usize) -> Option<Result<(), String>> {
+        let kv = self.backend_kv.as_ref()?;
+        let mut stream = self.backend_stream.as_ref()?.lock().ok()?;
+        Some(crate::kv_blocks::device_copy(&mut **stream, kv, src, dst))
+    }
+    pub(crate) fn device_kv_export(&self, block: usize) -> Option<Result<Vec<u8>, String>> {
+        let kv = self.backend_kv.as_ref()?;
+        let mut stream = self.backend_stream.as_ref()?.lock().ok()?;
+        Some(crate::kv_blocks::device_export(&mut **stream, kv, block))
+    }
+    pub(crate) fn device_kv_import(&self, block: usize, data: &[u8]) -> Option<Result<(), String>> {
+        let kv = self.backend_kv.as_ref()?;
+        let mut stream = self.backend_stream.as_ref()?.lock().ok()?;
+        Some(crate::kv_blocks::device_import(&mut **stream, kv, block, data))
+    }
+
+    /// Ask the next forward pass to sample the rows of `job` on the device (see `DeviceSampleJob`).
+    pub(crate) fn request_device_sample(job: DeviceSampleJob) {
+        *SAMPLE_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+    }
+
+    /// The result of the last device sampling job, if the backend ran it; clears the request in any case.
+    pub(crate) fn take_device_sample() -> Option<crate::backend::SampleOutput> {
+        *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        SAMPLE_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
+
     /// The ids of the last greedy forward pass, if it produced them; clears the request in any case.
     pub(crate) fn take_greedy_ids() -> Option<Vec<i32>> {
         GREEDY_IDS_REQUEST.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -5123,6 +6024,26 @@ impl RustDecoder {
         logit_rows: &[usize],
         embeddings: bool,
         overrides: &[(usize, Vec<f32>)],
+        capture: Option<&mut Vec<f32>>,
+    ) -> Result<Vec<f32>, String> {
+        if let Some(par) = self.par.clone() {
+            return self.par_forward(&par, ids, lengths, tables, key, value, logit_rows, embeddings, overrides, capture);
+        }
+        self.forward_batch(ids, lengths, tables, key, value, logit_rows, embeddings, overrides, capture)
+    }
+
+    /// One batch through this decoder's stage (the whole model when it is not part of a parallel group).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_batch(
+        &self,
+        ids: &[i64],
+        lengths: &[i64],
+        tables: &[i64],
+        key: &mut [u16],
+        value: &mut [u16],
+        logit_rows: &[usize],
+        embeddings: bool,
+        overrides: &[(usize, Vec<f32>)],
         mut capture: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>, String> {
         if self.backend.is_some() {
@@ -5132,15 +6053,12 @@ impl RustDecoder {
         }
         let cfg = &self.cfg;
         let rows = ids.len();
-        let (dk, dv) = (cfg.head_dim, cfg.value_dim);
-        let (fmt_k, fmt_v) = self.kv_formats();
-        let (words_k, words_v) = (self.layer_words(fmt_k, dk), self.layer_words(fmt_v, dv));
         let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
         if rows == 0
             || lengths.len() != rows
             || tables.len() != rows * self.stride
-            || key.len() < words_k * self.layers.len()
-            || value.len() < words_v * self.layers.len()
+            || key.len() < self.kvl.key_total
+            || value.len() < self.kvl.value_total
             || ids
                 .iter()
                 .any(|&id| id < 0 || id as usize >= self.embedding.rows)
@@ -5170,25 +6088,36 @@ impl RustDecoder {
         {
             return Err("invalid image embedding overrides".into());
         }
+        self.checked_positions3(rows)?;
+        self.checked_deepstack(rows)?;
         let positions: Vec<usize> = lengths
             .iter()
             .map(|&n| n as usize - 1 + usize::from(self.mtp.is_some()))
             .collect();
         self.pool.install(|| {
             let mut trace = crate::cpu_profile::Trace::new(self.profile, rows);
+            let first_stage = self.par.as_ref().is_none_or(|p| p.is_first_stage());
+            let last_stage = self.par.as_ref().is_none_or(|p| p.is_last_stage());
             let mut x = Vec::with_capacity(rows * cfg.hidden);
-            for &id in ids {
+            if !first_stage {
+                // the embedding and the position tables belong to the first stage: continue from its activations
+                x = self.par_recv_activations(rows)?;
+            }
+            for &id in ids.iter().filter(|_| first_stage) {
                 x.extend_from_slice(&self.embedding.row(id as usize)?);
             }
-            if cfg.embedding_scale != 1.0 {
+            if first_stage {
+                self.par_embed_reduce(&mut x)?;
+            }
+            if first_stage && cfg.embedding_scale != 1.0 {
                 for v in &mut x {
                     *v *= cfg.embedding_scale;
                 }
             }
-            for (r, embedding) in overrides {
+            for (r, embedding) in overrides.iter().filter(|_| first_stage) {
                 x[*r * cfg.hidden..(*r + 1) * cfg.hidden].copy_from_slice(embedding);
             }
-            if let Some(table) = &self.position_table {
+            if let Some(table) = self.position_table.as_ref().filter(|_| first_stage) {
                 let rows = table.len() / cfg.hidden;
                 for (r, &position) in positions.iter().enumerate() {
                     let index = position + cfg.position_offset;
@@ -5203,14 +6132,25 @@ impl RustDecoder {
                     }
                 }
             }
-            if let Some(norm) = &self.embd_norm {
+            if let Some(norm) = self.embd_norm.as_ref().filter(|_| first_stage) {
                 self.norm(&mut x, norm);
             }
-            if cfg.embedding_norm {
+            if first_stage && cfg.embedding_norm {
                 rms(&mut x, &vec![1.0; cfg.hidden], cfg.eps);
             }
             trace.mark(0);
-            self.host_layers(0..self.layers.len(), &mut x, &positions, tables, lengths, key, value, &mut trace)?;
+            let ple_inputs = self.ple_inputs(ids, &x)?;
+            let mut streams = self.altup_expand(&x)?;
+            self.stash_embeddings(&x);
+            let stage_layers = self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()));
+            self.host_layers(stage_layers, &mut x, &positions, tables, lengths, key, value, &mut trace, ple_inputs.as_deref(), &mut streams)?;
+            if !last_stage {
+                self.par_send_activations(&x)?;
+                return Ok(Vec::new());
+            }
+            if self.altup.is_some() {
+                x = self.altup_merge(&streams)?;
+            }
             self.norm(&mut x, &self.final_norm);
             if let Some(capture) = &mut capture {
                 capture.clear();
@@ -5227,6 +6167,7 @@ impl RustDecoder {
                 return Ok(Vec::new());
             }
             let mut logits = self.head.forward(&selected)?;
+            logits = self.par_head_gather(logits, logit_rows.len())?;
             trace.mark(9);
             if cfg.logit_scale != 1.0 {
                 for l in &mut logits {
@@ -5255,25 +6196,44 @@ impl RustDecoder {
         key: &mut [u16],
         value: &mut [u16],
         trace: &mut crate::cpu_profile::Trace,
+        ple: Option<&[f32]>,
+        streams: &mut Vec<f32>,
     ) -> Result<(), String> {
         let cfg = &self.cfg;
         let rows = positions.len();
-        let (dk, dv) = (cfg.head_dim, cfg.value_dim);
-        let kv_k = cfg.kv_heads * dk;
-        let kv_v = cfg.kv_heads * dv;
+        let positions3 = self.row_positions3().filter(|p| p.len() == rows);
+        let deepstack = self.row_deepstack();
         let (fmt_k, fmt_v) = self.kv_formats();
-        let (words_k, words_v) = (self.layer_words(fmt_k, dk), self.layer_words(fmt_v, dv));
         let mut x = std::mem::take(x_io);
         let done = self.pool.install(|| {
             let mut qkv_workspace = compute::ProjectionGroupWorkspace::default();
             let mut ffn_workspace = compute::ProjectionGroupWorkspace::default();
             let residual = cfg.residual_scale;
             for (i, layer) in self.layers.iter().enumerate().skip(range.start).take(range.len()) {
+                let (dk, dv) = (cfg.layer_head_dim(i), cfg.layer_value_dim(i));
+                let (heads, kv_heads) = (cfg.layer_heads(i), cfg.layer_kv_heads(i));
+                let (kv_k, kv_v) = (kv_heads * dk, kv_heads * dv);
+                let rope_dims = cfg.layer_rope_dims(i);
+                let mut altup_pred: Option<Vec<f32>> = None;
+                if let (Some(alt_layer), Some(alt)) = (layer.gemma.as_ref().and_then(|g| g.altup()), self.altup.as_ref()) {
+                    let predictions = self.altup_predict(alt_layer, streams, rows)?;
+                    let len = rows * cfg.hidden;
+                    x = predictions[alt.active() * len..(alt.active() + 1) * len].to_vec();
+                    altup_pred = Some(predictions);
+                }
                 let mut normed = x.clone();
+                if let Some(call) = &layer.zamba {
+                    let shared = self.zamba_call(call, i, &x, positions, tables, lengths, key, value)?;
+                    normed.iter_mut().zip(&shared).for_each(|(n, s)| *n += s);
+                }
                 if let Some(norm) = &layer.attn_norm {
                     self.norm(&mut normed, norm);
                 }
                 trace.mark(1);
+                let laurel_out = match layer.gemma.as_ref().and_then(|g| g.laurel()) {
+                    Some(laurel) => Some(self.laurel_forward(laurel, &normed)?),
+                    None => None,
+                };
                 dump_layer("normed", i, &normed);
                 if matches!(layer.attn, Attn::None) {
                     let ffn = self.ffn_forward(layer, &normed, &mut ffn_workspace)?;
@@ -5288,11 +6248,15 @@ impl RustDecoder {
                     self.mamba_forward(mixer, &layer.out, i, &normed, tables, lengths)?
                 } else if let Attn::Mamba1(mixer) = &layer.attn {
                     self.mamba1_forward(mixer, &layer.out, i, &normed, tables, lengths)?
+                } else if let Attn::Kda(mixer) = &layer.attn {
+                    self.kda_forward(mixer, &layer.out, i, &normed, tables, lengths)?
                 } else {
-                    let table = &self.rope[usize::from(layer.local_rope)];
+                    let table = &self.rope[layer.rope_table];
                     let mut gate_values: Option<Vec<f32>> = None;
                     let mut latent_qkv: [Vec<f32>; 3];
                     let mut moe_values: Vec<f32>;
+                    let mut shared_kv: Vec<f32> = Vec::new();
+                    let mut shared_v: Vec<f32> = Vec::new();
                     let (q, k, v) = match &layer.attn {
                         Attn::Std { q, k, v } => {
                             let (q, k, v) = if let Some(value_moe) = &layer.value_moe {
@@ -5306,6 +6270,19 @@ impl RustDecoder {
                                 };
                                 moe_values = self.value_moe_forward(value_moe, &normed)?;
                                 (q, k, &mut moe_values)
+                            } else if layer.kv_shared {
+                                let qs = Linear::forward_group_with_workspace(&[q], &normed, &mut qkv_workspace)?;
+                                let [q] = qs else {
+                                    return Err("invalid query projection".into());
+                                };
+                                (q, &mut shared_kv, &mut shared_v)
+                            } else if layer.k_eq_v {
+                                let qk = Linear::forward_group_with_workspace(&[q, k], &normed, &mut qkv_workspace)?;
+                                let [q, k] = qk else {
+                                    return Err("invalid QK projection group".into());
+                                };
+                                moe_values = k.clone();
+                                (q, k, &mut moe_values)
                             } else {
                                 let qkv = Linear::forward_group_with_workspace(
                                     &[q, k, v],
@@ -5317,6 +6294,12 @@ impl RustDecoder {
                                 };
                                 (q, k, v)
                             };
+                            if cfg.value_scale != 1.0 && !layer.kv_shared {
+                                v.iter_mut().for_each(|x| *x *= cfg.value_scale);
+                            }
+                            if cfg.value_norm && !layer.kv_shared {
+                                rms(v, &vec![1.0; dv], cfg.eps);
+                            }
                             trace.mark(2);
                             if let Some(clip) = cfg.qkv_clip {
                                 for tensor in [&mut *q, &mut *k, &mut *v] {
@@ -5327,7 +6310,7 @@ impl RustDecoder {
                                 gate_values = Some(gate.forward(&normed)?);
                             }
                             if layer.output_gate {
-                                let width = cfg.heads * dk;
+                                let width = heads * dk;
                                 let mut plain = Vec::with_capacity(rows * width);
                                 let mut gate = Vec::with_capacity(rows * width);
                                 // llama.cpp's Qwen3.5 files store each head's query and gate side by side
@@ -5336,7 +6319,7 @@ impl RustDecoder {
                                 for r in 0..rows {
                                     let row = &q[r * 2 * width..(r + 1) * 2 * width];
                                     if per_head {
-                                        for h in 0..cfg.heads {
+                                        for h in 0..heads {
                                             plain.extend_from_slice(&row[h * 2 * dk..h * 2 * dk + dk]);
                                             gate.extend_from_slice(&row[h * 2 * dk + dk..(h + 1) * 2 * dk]);
                                         }
@@ -5363,24 +6346,17 @@ impl RustDecoder {
                                 );
                             }
                             if cfg.layer_rotates(i) {
-                                apply_rope(
-                                    q,
-                                    cfg.heads,
-                                    dk,
-                                    cfg.rope.dims,
-                                    cfg.rope.neox,
-                                    positions,
-                                    table,
-                                );
-                                apply_rope(
-                                    k,
-                                    cfg.kv_heads,
-                                    dk,
-                                    cfg.rope.dims,
-                                    cfg.rope.neox,
-                                    positions,
-                                    table,
-                                );
+                                if let (Some(p3), Some(state)) = (&positions3, &self.mrope) {
+                                    crate::vision::mrope::apply_rope_mrope(q, heads, dk, rope_dims, cfg.rope.neox, p3, &state.axes, table);
+                                    if !layer.kv_shared {
+                                        crate::vision::mrope::apply_rope_mrope(k, kv_heads, dk, rope_dims, cfg.rope.neox, p3, &state.axes, table);
+                                    }
+                                } else {
+                                    apply_rope(q, heads, dk, rope_dims, cfg.rope.neox, positions, table);
+                                    if !layer.kv_shared {
+                                        apply_rope(k, kv_heads, dk, rope_dims, cfg.rope.neox, positions, table);
+                                    }
+                                }
                             }
                             if cfg.qk_norm_after_rope {
                                 qk_norm_cpu(
@@ -5404,7 +6380,7 @@ impl RustDecoder {
                                     let steps = (position + cfg.temperature_offset) / context;
                                     let scale = 1.0 + beta * (1.0 + steps as f32).ln();
                                     for value in
-                                        &mut q[r * cfg.heads * dk..(r + 1) * cfg.heads * dk]
+                                        &mut q[r * heads * dk..(r + 1) * heads * dk]
                                     {
                                         *value *= scale;
                                     }
@@ -5416,6 +6392,7 @@ impl RustDecoder {
                         | Attn::Linear(_)
                         | Attn::Mamba(_)
                         | Attn::Mamba1(_)
+                        | Attn::Kda(_)
                         | Attn::None => {
                             unreachable!("handled above")
                         }
@@ -5426,11 +6403,14 @@ impl RustDecoder {
                             (q, k, v)
                         }
                     };
-                    for (r, &position) in positions.iter().enumerate() {
-                        let block = tables[r * self.stride + position / self.block_size] as usize;
-                        let slot = block * self.block_size + position % self.block_size;
-                        self.write_cache(key, i, slot, &k[r * kv_k..(r + 1) * kv_k], dk, fmt_k);
-                        self.write_cache(value, i, slot, &v[r * kv_v..(r + 1) * kv_v], dv, fmt_v);
+                    let (key_region, value_region) = (self.key_region(i), self.value_region(i));
+                    if !layer.kv_shared {
+                        for (r, &position) in positions.iter().enumerate() {
+                            let block = tables[r * self.stride + position / self.block_size] as usize;
+                            let slot = block * self.block_size + position % self.block_size;
+                            self.write_cache(key, key_region, slot, &k[r * kv_k..(r + 1) * kv_k], fmt_k);
+                            self.write_cache(value, value_region, slot, &v[r * kv_v..(r + 1) * kv_v], fmt_v);
+                        }
                     }
                     trace.mark(3);
                     dump_layer("q", i, q);
@@ -5443,17 +6423,18 @@ impl RustDecoder {
                         && cfg.attention_softcap.is_none()
                         && cfg.attention_scale.is_none()
                         && dk == dv
-                        && matches!(self.kv_kind, 1 | 2);
+                        && matches!(self.kv_kind, 1 | 2)
+                        && self.row_visible_lengths().is_none();
                     let attn = if tiled {
                         let key_cache = crate::cpu_attention::Cache {
-                            data: &key[i * words_k..(i + 1) * words_k],
+                            data: &key[key_region.0..key_region.0 + self.kvl.key_words[crate::kv_geometry::KvPoolLayout::owner(cfg, i)]],
                             slots: self.pool_blocks * self.block_size,
-                            kv_heads: cfg.kv_heads,
+                            kv_heads,
                             dim: dk,
                             q8: self.kv_kind == 2,
                         };
                         let value_cache = crate::cpu_attention::Cache {
-                            data: &value[i * words_v..(i + 1) * words_v],
+                            data: &value[value_region.0..value_region.0 + self.kvl.value_words[crate::kv_geometry::KvPoolLayout::owner(cfg, i)]],
                             ..key_cache
                         };
                         crate::cpu_attention::attention(
@@ -5462,7 +6443,7 @@ impl RustDecoder {
                             value_cache,
                             tables,
                             lengths,
-                            cfg.heads,
+                            heads,
                             self.block_size,
                             self.stride,
                         )
@@ -5474,15 +6455,31 @@ impl RustDecoder {
                         None => self.attention_reference(i, q, key, value, tables, lengths),
                     };
                     if let Some(gate) = &gate_values {
-                        for (a, g) in attn.iter_mut().zip(gate) {
-                            *a *= cfg.attn_gate.apply(*g);
+                        if layer.gate_per_head {
+                            for (r, row) in attn.chunks_mut(heads * dv).enumerate() {
+                                for (h, head) in row.chunks_mut(dv).enumerate() {
+                                    let scale = cfg.attn_gate.apply(gate[r * heads + h]);
+                                    head.iter_mut().for_each(|a| *a *= scale);
+                                }
+                            }
+                        } else {
+                            for (a, g) in attn.iter_mut().zip(gate) {
+                                *a *= cfg.attn_gate.apply(*g);
+                            }
                         }
                     }
                     trace.mark(4);
                     dump_layer("attnout", i, &attn);
                     layer.out.forward(&attn)?
                 };
+                if let Some(parallel) = &layer.parallel {
+                    for (b, m) in branch.iter_mut().zip(self.parallel_branch(parallel, i, &normed, tables, lengths)?) {
+                        *b += m;
+                    }
+                }
                 trace.mark(5);
+                // row-parallel output projection: sum the partial results of the tensor-parallel group
+                self.par_tp_reduce(&mut branch)?;
                 dump_layer("branch", i, &branch);
                 if let Some(norm) = &layer.post_attn_norm {
                     self.post_norm(&mut branch, norm);
@@ -5502,7 +6499,13 @@ impl RustDecoder {
                         None => normed,
                     }
                 } else {
-                    add_scaled(&mut x, &branch, residual);
+                    if let Some(laurel) = &laurel_out {
+                        for ((x, b), l) in x.iter_mut().zip(&branch).zip(laurel) {
+                            *x = (*x + b + l) * std::f32::consts::FRAC_1_SQRT_2;
+                        }
+                    } else {
+                        add_scaled(&mut x, &branch, residual);
+                    }
                     dump_layer("attn", i, &x);
                     let mut next = x.clone();
                     if let Some(norm) = &layer.ffn_norm {
@@ -5512,6 +6515,9 @@ impl RustDecoder {
                 };
                 trace.mark(1);
                 let mut ffn = self.ffn_forward(layer, &ffn_input, &mut ffn_workspace)?;
+                if let Some(moe) = layer.gemma.as_ref().and_then(|g| g.has_moe()) {
+                    self.gemma_moe_branch(moe, &x, &mut ffn, &mut ffn_workspace)?;
+                }
                 trace.mark(8);
                 if let Some(norm) = &layer.post_ffn_norm {
                     self.post_norm(&mut ffn, norm);
@@ -5523,6 +6529,19 @@ impl RustDecoder {
                 } else {
                     add_scaled(&mut x, &ffn, residual);
                     dump_layer("ffn", i, &x);
+                }
+                if let Some(g) = &layer.gemma {
+                    match &altup_pred {
+                        Some(predictions) => self.altup_tail(i, g, &x, predictions, streams, ple)?,
+                        None => self.gemma_tail(i, g, &mut x, ple)?,
+                    }
+                }
+                if let Some(level) = deepstack.as_ref().and_then(|d| d.get(i)) {
+                    for (row, values) in level {
+                        for (a, b) in x[row * cfg.hidden..(row + 1) * cfg.hidden].iter_mut().zip(values) {
+                            *a += b;
+                        }
+                    }
                 }
             }
             Ok::<(), String>(())
@@ -5630,7 +6649,7 @@ impl RustDecoder {
         overrides: &[(usize, Vec<f32>)],
         capture: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>, String> {
-        if capture.is_none() {
+        if capture.is_none() && self.row_positions3().is_none() && self.row_deepstack().is_none() && self.row_visible_lengths().is_none() {
             if let Some(out) = self.try_graph_decode(ids, lengths, tables, logit_rows, embeddings, overrides)? {
                 return Ok(out);
             }
@@ -5661,12 +6680,11 @@ impl RustDecoder {
             && self.layers.len() == weights.layers.len()
             && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| {
                 matches!(layer.attn, Attn::Std { .. })
-                    && dev.q.is_some()
-                    && dev.k.is_some()
-                    && dev.v.is_some()
-                    && dev.moe.is_none()
-                    && (matches!(layer.ffn, Ffn::None)
-                        || (dev.ffn_gate.is_some() && dev.ffn_up.is_some() && dev.ffn_down.is_some()))
+                    && ((dev.q.is_some() && dev.k.is_some() && dev.v.is_some()) || dev.qkv.is_some())
+                    && (dev.moe.is_some()
+                        || matches!(layer.ffn, Ffn::None)
+                        || (dev.ffn_gate.is_some() && dev.ffn_up.is_some() && dev.ffn_down.is_some())
+                        || (dev.gate_up.is_some() && dev.ffn_down.is_some()))
             })
     }
 
@@ -5774,7 +6792,7 @@ impl RustDecoder {
             || !overrides.is_empty()
             || self.mtp.is_some()
             || rows == 0
-            || rows > GRAPH_BUCKETS[GRAPH_BUCKETS.len() - 1]
+            || rows > graph_max_rows()
             || lengths.len() != rows
             || tables.len() != rows * stride
             || logit_rows.len() != rows
@@ -5839,7 +6857,7 @@ impl RustDecoder {
             .lock()
             .map_err(|_| "accelerator stream lock poisoned")?;
         let mut x_in = graph.x_in.clone();
-        stream.upload(&mut x_in, cast_f32_to_u8(&host_x)).map_err(err)?;
+        stream.upload_activations(&mut x_in, &host_x).map_err(err)?;
         let pos32: Vec<u8> = positions.iter().flat_map(|&p| (p as i32).to_ne_bytes()).collect();
         let slot32: Vec<u8> = slots.iter().flat_map(|&p| (p as i32).to_ne_bytes()).collect();
         let table64: Vec<u8> = tables_p.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -5852,6 +6870,10 @@ impl RustDecoder {
             drop(stream);
             graphs.remove(&bucket);
             return Ok(None);
+        }
+        if cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none() && run_device_sample(&mut **stream, &graph.head_out, cfg.vocab, rows) {
+            GREEDY_IDS_REQUEST.store(false, Relaxed);
+            return Ok(Some(Vec::new()));
         }
         if GREEDY_IDS_REQUEST.load(Relaxed) && cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none() {
             if let Ok(mut picked) = stream.argmax_rows(&graph.head_out, bucket, cfg.vocab) {
@@ -5894,6 +6916,8 @@ impl RustDecoder {
         let logit_rows: Vec<usize> = (0..bucket).collect();
         // the request for greedy ids belongs to the real step, not to these passes
         let requested = GREEDY_IDS_REQUEST.swap(false, Relaxed);
+        // so does the device sampling job
+        let sample_job = SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         let result = (|| {
             self.forward_backend_inner(ids, lengths, tables, &mut [], &mut [], &logit_rows, false, &[], None, GraphMode::Off)?;
             let id = bucket;
@@ -5913,6 +6937,7 @@ impl RustDecoder {
             Ok::<DecodeGraph, String>(DecodeGraph { id, x_in: x_in.clone(), head_out })
         })();
         GREEDY_IDS_REQUEST.store(requested, Relaxed);
+        *SAMPLE_JOB.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = sample_job;
         result
     }
 }

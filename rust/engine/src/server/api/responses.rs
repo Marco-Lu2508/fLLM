@@ -34,9 +34,7 @@ fn remember(response: &Value, history: Vec<Value>) {
     let Some(id) = response["id"].as_str() else {
         return;
     };
-    let Ok(mut store) = store().lock() else {
-        return;
-    };
+    let mut store = security::lock(store());
     store.order.push_back(id.to_owned());
     store.items.insert(
         id.to_owned(),
@@ -492,18 +490,11 @@ fn stream_events(
 
 pub(in crate::server) async fn create(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
     let mut history: Vec<Value> = Vec::new();
     if let Some(previous) = body["previous_response_id"].as_str() {
-        let found = store()
-            .lock()
-            .ok()
-            .and_then(|s| s.items.get(previous).map(|stored| stored.history.clone()));
+        let found = security::with_lock(store(), |s| s.items.get(previous).map(|stored| stored.history.clone()));
         match found {
             Some(h) => history = h,
             None => {
@@ -522,7 +513,7 @@ pub(in crate::server) async fn create(
     full_history.extend(input_messages);
     let id = new_id("resp");
     let created = unix_now();
-    let response = chat_completions(State(state), headers, Json(chat)).await;
+    let response = chat_completions(State(state), Json(chat)).await;
     if !response.status().is_success() {
         let (status, message) = error_message(response).await;
         return error(status, &message);
@@ -547,14 +538,9 @@ pub(in crate::server) async fn create(
 }
 
 pub(in crate::server) async fn get_one(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let found = store().lock().ok().and_then(|s| s.items.get(&id).map(|s| s.response.clone()));
+    let found = security::with_lock(store(), |s| s.items.get(&id).map(|s| s.response.clone()));
     match found {
         Some(response) => Json(response).into_response(),
         None => error(StatusCode::NOT_FOUND, &format!("response {id} not found")),
@@ -562,14 +548,9 @@ pub(in crate::server) async fn get_one(
 }
 
 pub(in crate::server) async fn delete_one(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    if let Err(response) = authorize(&state, &headers) {
-        return response;
-    }
-    let removed = store().lock().ok().is_some_and(|mut s| {
+    let removed = security::with_lock(store(), |s| {
         s.order.retain(|o| o != &id);
         s.items.remove(&id).is_some()
     });

@@ -46,7 +46,7 @@ impl Tensor {
 fn read_half(bytes: &[u8]) -> f32 {
     f16::from_le_bytes([bytes[0], bytes[1]]).to_f32()
 }
-fn quant_layout(kind: u32) -> Option<(usize, usize)> {
+pub(crate) fn quant_layout(kind: u32) -> Option<(usize, usize)> {
     match kind {
         0 => None,
         1 | 30 => Some((1, 2)),
@@ -61,7 +61,7 @@ fn quant_layout(kind: u32) -> Option<(usize, usize)> {
         0x8000_0010 | 0x8000_0014 => Some((32, 19)),
         0x8000_0011 | 0x8000_0015 => Some((64, 35)),
         0x8000_0012 | 0x8000_0016 => Some((128, 67)),
-        0x8000_0020 => Some((1, 1)),
+        0x8000_0020 | 0x8000_0021 => Some((1, 1)),
         _ => fllm_gguf_probe::quant_types::by_id(kind)
             .map(|ty| (ty.block_elements, ty.bytes_per_block)),
     }
@@ -156,9 +156,70 @@ fn dequantize_fp8m(bytes: &[u8], count: usize) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
+fn dequantize_fp8b(bytes: &[u8], count: usize) -> Result<Vec<f32>, String> {
+    if bytes.len() <= count {
+        return Err("missing scales in FP8B tensor".into());
+    }
+    let scale_bytes = bytes.len() - count;
+    let (br, bc) = (128usize, 128usize);
+    let (is_f32, num_tiles) = if scale_bytes.is_multiple_of(4) && scale_bytes > 0 {
+        (true, scale_bytes / 4)
+    } else if scale_bytes.is_multiple_of(2) && scale_bytes > 0 {
+        (false, scale_bytes / 2)
+    } else {
+        return Err("invalid scale length in FP8B tensor".into());
+    };
+    let cols = if count.is_multiple_of(bc) {
+        let mut found_cols = None;
+        for c in (bc..=count).step_by(bc) {
+            if count.is_multiple_of(c) {
+                let r = count / c;
+                if r.div_ceil(br) * c.div_ceil(bc) == num_tiles {
+                    found_cols = Some(c);
+                    break;
+                }
+            }
+        }
+        found_cols.unwrap_or(bc)
+    } else {
+        bc
+    };
+    let rows = count / cols;
+    let tiles_x = cols.div_ceil(bc);
+    let mut out = vec![0.0f32; count];
+    for r in 0..rows {
+        let tr = r / br;
+        for c in 0..cols {
+            let tc = c / bc;
+            let tile_idx = (tr * tiles_x + tc).min(num_tiles.saturating_sub(1));
+            let scale = if is_f32 {
+                let s_bytes = [
+                    bytes[count + tile_idx * 4],
+                    bytes[count + tile_idx * 4 + 1],
+                    bytes[count + tile_idx * 4 + 2],
+                    bytes[count + tile_idx * 4 + 3],
+                ];
+                f32::from_le_bytes(s_bytes)
+            } else {
+                let s_bytes = [
+                    bytes[count + tile_idx * 2],
+                    bytes[count + tile_idx * 2 + 1],
+                ];
+                half::f16::from_le_bytes(s_bytes).to_f32()
+            };
+            let idx = r * cols + c;
+            out[idx] = e4m3fn_to_f32(bytes[idx]) * scale;
+        }
+    }
+    Ok(out)
+}
+
 pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, String> {
     if fllm_gguf_probe::fp8m_type(kind) {
         return dequantize_fp8m(bytes, count);
+    }
+    if fllm_gguf_probe::fp8b_type(kind) {
+        return dequantize_fp8b(bytes, count);
     }
     if let Some(group) = fllm_gguf_probe::q4zp_group(kind) {
         return dequantize_q4zp(bytes, group as usize, count);
@@ -276,8 +337,20 @@ pub(crate) struct ProjectionGroupWorkspace {
     experts: crate::cpu_quantized::ExpertScratch,
 }
 
-/// The per-tensor scale of an NVFP4 weight `x.weight` is stored as the F32 tensor `x.scale` (llama.cpp convention).
-fn nvfp4_tensor_scale(model: &MappedGguf, name: &str) -> Result<f32, String> {
+/// The value of a per-tensor scale for the rows `first..` of a tensor of `total_rows` rows: the one value of a plain tensor, or, for `n`
+/// values, entry `first / (total_rows / n)` (one value per expert in a stacked expert tensor; a fused gate/up tensor has the two halves of
+/// an expert in one slice).
+fn scale_for_rows(values: &[f32], first: usize, total_rows: usize) -> Option<f32> {
+    match values {
+        [v] => Some(*v),
+        v if !v.is_empty() && total_rows.is_multiple_of(v.len()) => v.get(first / (total_rows / v.len())).copied(),
+        _ => None,
+    }
+}
+
+/// The per-tensor scale of an NVFP4 weight `x.weight` is stored as the F32 tensor `x.scale` (llama.cpp convention): one value, or one per
+/// expert for stacked experts (`first` and `total_rows` pick the expert, see `scale_for_rows`).
+fn nvfp4_tensor_scale(model: &MappedGguf, name: &str, first: usize, total_rows: usize) -> Result<f32, String> {
     let scale_name = match name.strip_suffix(".weight") {
         Some(stem) => format!("{stem}.scale"),
         None => return Ok(1.0),
@@ -286,24 +359,24 @@ fn nvfp4_tensor_scale(model: &MappedGguf, name: &str) -> Result<f32, String> {
         return Ok(1.0);
     }
     let t = Tensor::load(model, &scale_name)?;
-    match t.data.as_slice() {
-        [v] if v.is_finite() => Ok(*v),
-        _ => Err(format!("{scale_name} must hold one finite value")),
+    match scale_for_rows(&t.data, first, total_rows) {
+        Some(v) if v.is_finite() => Ok(v),
+        _ => Err(format!("{scale_name} must hold one finite value, or one per expert for stacked experts")),
     }
 }
 
 /// The static activation scale of an NVFP4 weight `x.weight`: the F32 tensor `x.input_scale` (written by llama.cpp's converter for ModelOpt
-/// checkpoints unless it is 1). 0 when the tensor is absent or does not hold one positive finite value (the experts of a MoE layer carry one
-/// value per expert); the GPU kernels then quantize activations without a per-tensor factor, as before this tensor was read.
-fn nvfp4_input_scale(model: &MappedGguf, name: &str) -> f32 {
+/// checkpoints unless it is 1; for stacked experts one value per expert, picked like `nvfp4_tensor_scale`). 0 when the tensor is absent or
+/// does not hold a positive finite value for these rows; the GPU kernels then quantize activations without a per-tensor factor.
+fn nvfp4_input_scale(model: &MappedGguf, name: &str, first: usize, total_rows: usize) -> f32 {
     let Some(stem) = name.strip_suffix(".weight") else { return 0.0 };
     let scale_name = format!("{stem}.input_scale");
     if !model.index().tensors.iter().any(|t| t.name == scale_name) {
         return 0.0;
     }
     match Tensor::load(model, &scale_name) {
-        Ok(t) => match t.data.as_slice() {
-            [v] if v.is_finite() && *v > 0.0 => *v,
+        Ok(t) => match scale_for_rows(&t.data, first, total_rows) {
+            Some(v) if v.is_finite() && v > 0.0 => v,
             _ => 0.0,
         },
         Err(_) => 0.0,
@@ -315,6 +388,42 @@ impl Linear {
         self.packed
             .as_ref()
             .map(|(kind, bytes)| (*kind, bytes.as_ref()))
+    }
+
+    /// The packed storage itself (shared, so that a row range of it can be viewed without a copy).
+    pub fn packed_storage(&self) -> Option<(u32, &TensorBytes)> {
+        self.packed.as_ref().map(|(kind, bytes)| (*kind, bytes))
+    }
+
+    /// A projection over packed bytes of GGUF type `kind` (`rows x cols`, the layout `Linear::load` expects, extras included).
+    /// Used for the shards of a tensor-parallel layer.
+    pub fn from_packed(
+        kind: u32,
+        bytes: TensorBytes,
+        rows: usize,
+        cols: usize,
+        bias: Option<Vec<f32>>,
+        scale: f32,
+        input_scale: f32,
+    ) -> Result<Self, String> {
+        if rows == 0 || cols == 0 || rows.checked_mul(cols).is_none() {
+            return Err("invalid projection dimensions".into());
+        }
+        if bias.as_ref().is_some_and(|b| b.len() != rows) {
+            return Err("invalid projection bias".into());
+        }
+        Ok(Self {
+            weight: Tensor { shape: vec![cols, rows], data: Vec::new() },
+            bias,
+            rows,
+            cols,
+            packed: Some((kind, bytes)),
+            scale,
+            input_scale,
+            fast_cpu: false,
+            #[cfg(feature = "rust-gpu")]
+            gpu: None,
+        })
     }
 
     pub fn from_parts(
@@ -361,6 +470,13 @@ impl Linear {
             let perm_bytes = if is_q4zp { cols.checked_mul(4).ok_or("cols overflow")? } else { 0 };
             let extra_bytes = if fllm_gguf_probe::fp8m_type(info.type_id) {
                 rows.checked_mul(2).ok_or("rows overflow")?
+            } else if fllm_gguf_probe::fp8b_type(info.type_id) {
+                let tiles = rows.div_ceil(128) * cols.div_ceil(128);
+                if raw.len() == (count / block) * bytes + tiles * 4 {
+                    tiles * 4
+                } else {
+                    tiles * 2
+                }
             } else {
                 perm_bytes
             };
@@ -398,11 +514,11 @@ impl Linear {
             rows,
             cols,
             scale: match &packed {
-                Some((40, _)) => nvfp4_tensor_scale(model, &name)?,
+                Some((40, _)) => nvfp4_tensor_scale(model, &name, 0, rows)?,
                 _ => 1.0,
             },
             input_scale: match &packed {
-                Some((40, _)) => nvfp4_input_scale(model, &name),
+                Some((40, _)) => nvfp4_input_scale(model, &name, 0, rows),
                 _ => 0.0,
             },
             packed,
@@ -459,12 +575,49 @@ impl Linear {
             let raw = model.owned_tensor_bytes(name)?;
             let is_q4zp = fllm_gguf_probe::q4zp_group(info.type_id).is_some();
             let is_fp8m = fllm_gguf_probe::fp8m_type(info.type_id);
+            let is_fp8b = fllm_gguf_probe::fp8b_type(info.type_id);
             let perm_bytes = if is_q4zp { cols.checked_mul(4).ok_or("cols overflow")? } else { 0 };
-            let extra_bytes = if is_fp8m { total_rows.checked_mul(2).ok_or("total_rows overflow")? } else { perm_bytes };
+            let extra_bytes = if is_fp8m {
+                total_rows.checked_mul(2).ok_or("total_rows overflow")?
+            } else if is_fp8b {
+                let tiles = total_rows.div_ceil(128) * cols.div_ceil(128);
+                if raw.len() == row_bytes * total_rows + tiles * 4 {
+                    tiles * 4
+                } else {
+                    tiles * 2
+                }
+            } else {
+                perm_bytes
+            };
             if raw.len() != row_bytes * total_rows + extra_bytes {
                 return Err(format!("invalid packed tensor {name}"));
             }
-            let part = raw.slice(first * row_bytes, rows * row_bytes + extra_bytes)?;
+            let part = if is_q4zp && (first > 0 || rows < total_rows) {
+                let mut buf = Vec::with_capacity(rows * row_bytes + perm_bytes);
+                buf.extend_from_slice(&raw[first * row_bytes..(first + rows) * row_bytes]);
+                buf.extend_from_slice(&raw[total_rows * row_bytes..total_rows * row_bytes + perm_bytes]);
+                TensorBytes::from_vec(buf)
+            } else if is_fp8m && (first > 0 || rows < total_rows) {
+                let mut buf = Vec::with_capacity(rows * row_bytes + rows * 2);
+                buf.extend_from_slice(&raw[first * row_bytes..(first + rows) * row_bytes]);
+                buf.extend_from_slice(&raw[total_rows * row_bytes + first * 2..total_rows * row_bytes + (first + rows) * 2]);
+                TensorBytes::from_vec(buf)
+            } else if is_fp8b && (first > 0 || rows < total_rows) {
+                let scale_unit = if extra_bytes == total_rows.div_ceil(128) * cols.div_ceil(128) * 4 { 4 } else { 2 };
+                let tiles_x = cols.div_ceil(128);
+                let first_tile = (first / 128) * tiles_x;
+                let num_tiles = rows.div_ceil(128) * tiles_x;
+                let mut buf = Vec::with_capacity(rows * row_bytes + num_tiles * scale_unit);
+                buf.extend_from_slice(&raw[first * row_bytes..(first + rows) * row_bytes]);
+                let scale_start = total_rows * row_bytes + first_tile * scale_unit;
+                let scale_end = scale_start + num_tiles * scale_unit;
+                if scale_end <= raw.len() {
+                    buf.extend_from_slice(&raw[scale_start..scale_end]);
+                }
+                TensorBytes::from_vec(buf)
+            } else {
+                raw.slice(first * row_bytes, rows * row_bytes + extra_bytes)?
+            };
             Ok(Self {
                 weight: Tensor {
                     shape: vec![cols, rows],
@@ -474,8 +627,8 @@ impl Linear {
                 rows,
                 cols,
                 packed: Some((info.type_id, part)),
-                scale: if info.type_id == 40 { nvfp4_tensor_scale(model, name)? } else { 1.0 },
-                input_scale: if info.type_id == 40 { nvfp4_input_scale(model, name) } else { 0.0 },
+                scale: if info.type_id == 40 { nvfp4_tensor_scale(model, name, first, total_rows)? } else { 1.0 },
+                input_scale: if info.type_id == 40 { nvfp4_input_scale(model, name, first, total_rows) } else { 0.0 },
                 fast_cpu: false,
                 #[cfg(feature = "rust-gpu")]
                 gpu: None,
@@ -538,6 +691,11 @@ impl Linear {
             workspace.q8_output.clear();
             return Ok(&mut workspace.q8_output);
         };
+        #[cfg(feature = "npu-openvino")]
+        if first.npu_host_wants(input) {
+            workspace.q8_output = projections.iter().map(|p| p.forward(input)).collect::<Result<_, _>>()?;
+            return Ok(&mut workspace.q8_output);
+        }
         let cols = first.cols;
         let reusable_q8 = cols > 0
             && crate::cpu_kernels::packed_simd()
@@ -671,10 +829,37 @@ impl Linear {
         )
     }
 
+    /// `FLLM_NPU_HOST=1` (feature `npu-openvino`): the host decoder hands the large prompt projections to the NPU engine. True when a
+    /// prompt of this many rows is big enough for it; the sibling projections of a group are then computed one by one.
+    #[cfg(feature = "npu-openvino")]
+    fn npu_host_wants(&self, input: &[f32]) -> bool {
+        self.cols != 0
+            && self.packed.is_some()
+            && crate::backend::npu::openvino::host_engine().is_some_and(|e| input.len() / self.cols >= e.plan.min_batch)
+    }
+
+    /// The first rows of `input` computed by the NPU engine (`FLLM_NPU_HOST=1`): `(rows done, values without bias)`.
+    #[cfg(feature = "npu-openvino")]
+    fn npu_rows(&self, input: &[f32]) -> Option<(usize, Vec<f32>)> {
+        if self.scale != 1.0 || !self.npu_host_wants(input) {
+            return None;
+        }
+        let engine = crate::backend::npu::openvino::host_engine()?;
+        let (kind, packed) = self.packed.as_ref()?;
+        let quant = crate::backend::QuantType::from_gguf_type_id(*kind);
+        let batch = input.len() / self.cols;
+        let done = engine.offload_host(quant, packed, self.rows, self.cols, input, batch)?;
+        (done.rows_done > 0).then_some((done.rows_done, done.values))
+    }
+
     pub fn forward_group(projections: &[&Self], input: &[f32]) -> Result<Vec<Vec<f32>>, String> {
         let Some(first) = projections.first() else {
             return Ok(Vec::new());
         };
+        #[cfg(feature = "npu-openvino")]
+        if first.npu_host_wants(input) {
+            return projections.iter().map(|p| p.forward(input)).collect();
+        }
         let cols = first.cols;
         let reusable = crate::cpu_kernels::packed_simd()
             && projections.iter().all(|p| {
@@ -824,6 +1009,17 @@ impl Linear {
         if input.is_empty() {
             return Ok(Vec::new());
         }
+        #[cfg(feature = "npu-openvino")]
+        if let Some((done, mut out)) = self.npu_rows(input) {
+            if let Some(bias) = &self.bias {
+                for row in out.chunks_exact_mut(self.rows) {
+                    add(row, bias);
+                }
+            }
+            // the rows the NPU did not take (fewer than a full block) run on the CPU kernels
+            out.extend(self.forward(&input[done * self.cols..])?);
+            return Ok(out);
+        }
         if self.fast_cpu {
             let float = if let Some((kind @ (1 | 30), packed)) = &self.packed {
                 Some(crate::cpu_float::linear(
@@ -905,7 +1101,46 @@ impl Linear {
                     let i = index % self.rows;
                     let x = &input[b * self.cols..(b + 1) * self.cols];
                     let sum = if let Some((kind, packed)) = &self.packed {
-                        if fllm_gguf_probe::fp8m_type(*kind) {
+                        if fllm_gguf_probe::fp8b_type(*kind) {
+                            let br = 128;
+                            let bc = 128;
+                            let tiles_x = self.cols.div_ceil(bc);
+                            let tr = i / br;
+                            let row_w = &packed[i * self.cols..(i + 1) * self.cols];
+                            let scale_start = self.rows * self.cols;
+                            let scale_len = packed.len().saturating_sub(scale_start);
+                            let is_f32 = scale_len >= tiles_x * 4;
+                            let mut row_sum = 0.0f32;
+                            for (c, &b) in row_w.iter().enumerate() {
+                                let tc = c / bc;
+                                let tile_idx = tr * tiles_x + tc;
+                                let scale = if is_f32 {
+                                    if scale_start + (tile_idx + 1) * 4 <= packed.len() {
+                                        let s_bytes = [
+                                            packed[scale_start + tile_idx * 4],
+                                            packed[scale_start + tile_idx * 4 + 1],
+                                            packed[scale_start + tile_idx * 4 + 2],
+                                            packed[scale_start + tile_idx * 4 + 3],
+                                        ];
+                                        f32::from_le_bytes(s_bytes)
+                                    } else {
+                                        1.0f32
+                                    }
+                                } else {
+                                    if scale_start + (tile_idx + 1) * 2 <= packed.len() {
+                                        let s_bytes = [
+                                            packed[scale_start + tile_idx * 2],
+                                            packed[scale_start + tile_idx * 2 + 1],
+                                        ];
+                                        half::f16::from_le_bytes(s_bytes).to_f32()
+                                    } else {
+                                        1.0f32
+                                    }
+                                };
+                                row_sum += x[c] * (e4m3fn_to_f32(b) * scale);
+                            }
+                            row_sum
+                        } else if fllm_gguf_probe::fp8m_type(*kind) {
                             let s_bytes = [
                                 packed[self.rows * self.cols + i * 2],
                                 packed[self.rows * self.cols + i * 2 + 1],
@@ -1120,11 +1355,14 @@ pub fn add(a: &mut [f32], b: &[f32]) {
 }
 
 pub struct LayerNorm {
-    weight: Vec<f32>,
-    bias: Vec<f32>,
-    eps: f32,
+    pub weight: Vec<f32>,
+    pub bias: Vec<f32>,
+    pub eps: f32,
 }
 impl LayerNorm {
+    pub fn from_parts(weight: Vec<f32>, bias: Vec<f32>, eps: f32) -> Self {
+        Self { weight, bias, eps }
+    }
     pub fn load(model: &MappedGguf, base: &str, hidden: usize, eps: f32) -> Result<Self, String> {
         let weight = Tensor::load(model, &format!("{base}.weight"))?;
         let bias = Tensor::load(model, &format!("{base}.bias"))?;
@@ -1207,6 +1445,18 @@ pub fn normalize(x: &mut [f32]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn per_expert_scales_are_picked_by_the_rows_they_cover() {
+        // one value: every row; four experts of 8 rows (gate and up of an expert share a slice when the tensor is fused)
+        assert_eq!(scale_for_rows(&[0.5], 24, 32), Some(0.5));
+        let per_expert = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(scale_for_rows(&per_expert, 0, 32), Some(1.0));
+        assert_eq!(scale_for_rows(&per_expert, 8, 32), Some(2.0));
+        assert_eq!(scale_for_rows(&per_expert, 31, 32), Some(4.0));
+        assert_eq!(scale_for_rows(&per_expert, 16, 32), Some(3.0));
+        assert_eq!(scale_for_rows(&per_expert, 4, 30), None, "30 rows do not split into 4 slices");
+        assert_eq!(scale_for_rows(&[], 0, 8), None);
+    }
     #[test]
     fn signed_quantization_and_validation() {
         let mut block = vec![0; 34];

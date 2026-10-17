@@ -10,12 +10,15 @@
 //! * `basic`: embedding, norms, RoPE, activations, residual, gating, argmax, sampling; `linear`: quantized / float projections;
 //! * `attention`: KV-cache write and paged attention; `moe`: routing, expert products, row gather / scatter; `recurrent`: DeltaNet.
 //!
+//! * `arch`: plain and gated activations, clamping, the softplus gate and the data movement of expanded MLA.
+//!
 //! Not implemented (the trait defaults answer "unsupported" / "not done", the decoder takes its fallback): the fused FP16 paths
-//! (`linear_f16_out`, `glu_f16`, `rope_kv_write_f16`), graph capture, `host_linear` (unified memory needs no weight streaming), and Mamba layers
-//! (the planners exist, no `Stream` method calls them yet).
+//! (`linear_f16_out`, `glu_f16`, `rope_kv_write_f16`), graph capture, `host_linear` (unified memory needs no weight streaming), Mamba-1 and the
+//! LFM2 short convolution (Mamba-2 and DeltaNet are in `recurrent`).
 //!
 //! Level of verification: L0 (compiles for `aarch64-apple-darwin`; nothing has run on a Mac).
 
+mod arch;
 mod arena;
 mod attention;
 mod basic;
@@ -31,8 +34,8 @@ use super::pipelines::Pipeline;
 use super::weights::PlanConstant;
 use crate::backend::cpu::{CpuBackend, CpuStream};
 use crate::backend::{
-    AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer,
-    DeviceKvCache, DeviceWeight, QuantType, RopeParams, SamplingParams, Stream,
+    AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer, MambaShape, MambaWeights,
+    DeviceKvCache, DeviceWeight, MlaShape, QuantType, RopeParams, SamplingParams, Stream,
 };
 use arena::StepArena;
 use std::collections::HashMap;
@@ -304,6 +307,67 @@ impl Stream for MetalStream {
         recurrent_plan::attention_gate_supported()
     }
 
+    fn supports_kda(&self, shape: &crate::backend::KdaShape) -> bool {
+        crate::backend::metal::ops::recurrent_plan::kda_supported(shape)
+    }
+
+    fn supports_arch_ops(&self) -> bool {
+        true
+    }
+
+    fn activation(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, mode: i32) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_activation(out, x, mode)
+    }
+
+    fn activation_glu(
+        &mut self,
+        out: &mut DeviceBuffer,
+        gate: &DeviceBuffer,
+        up: &DeviceBuffer,
+        mode: i32,
+    ) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_activation_glu(out, gate, up, mode)
+    }
+
+    fn softplus_gate_mul(&mut self, x: &mut DeviceBuffer, gate: &DeviceBuffer, beta: f32) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_softplus_gate_mul(x, gate, beta)
+    }
+
+    fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_clamp(x, limit)
+    }
+
+    fn mla_latent(
+        &mut self,
+        latent: &mut DeviceBuffer,
+        kv_a: &DeviceBuffer,
+        rows: usize,
+        kv_lora: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_mla_latent(latent, kv_a, rows, kv_lora, width)
+    }
+
+    fn mla_assemble(
+        &mut self,
+        q: &mut DeviceBuffer,
+        k: &mut DeviceBuffer,
+        v: &mut DeviceBuffer,
+        q_full: &DeviceBuffer,
+        kv_a: &DeviceBuffer,
+        kv: &DeviceBuffer,
+        rows: usize,
+        shape: &MlaShape,
+    ) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_mla_assemble(q, k, v, q_full, kv_a, kv, rows, shape)
+    }
+
     fn supports_delta(&self, shape: &DeltaShape) -> bool {
         recurrent_plan::delta_supported(shape)
     }
@@ -331,6 +395,24 @@ impl Stream for MetalStream {
             mixed,
             out,
         )
+    }
+
+    fn supports_mamba2(&self, shape: &MambaShape) -> bool {
+        recurrent_plan::mamba2_supported(&recurrent::mamba2_shape(shape))
+    }
+
+    fn mamba2_layer(
+        &mut self,
+        shape: &MambaShape,
+        weights: &MambaWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        projected: &DeviceBuffer,
+        mixed: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        self.ensure_headroom()?;
+        self.op_mamba2_layer(shape, weights, runs, state_offset, projected, mixed, out)
     }
 
     fn residual_add(

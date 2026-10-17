@@ -1,4 +1,4 @@
-# Non-matmul Metal kernels (package p06b) — interface contract
+# Non-matmul Metal kernels — interface contract
 
 Verification level: **L0**. The sources pass `mslcheck.sh` (a C++ syntax shim, not Apple's compiler), and — more than a syntax check — they were
 **executed on the CPU** by the emulator in `emu_ops/` (below) against the engine's CPU backend: 139 cases, all within 3e-5 absolute / 3e-4 relative
@@ -7,7 +7,7 @@ The emulator replaces the GPU only for the *logic*: it cannot see address-space 
 rules that C++ does not have, fast-math effects, or performance.
 
 The Rust side (`src/backend/metal/ops.rs`, `ops/`) plans the dispatches without touching Metal: every `plan_*` function turns the arguments of one
-`Stream` operation into `OpPlan`s (kernel name, parameter bytes, grid, buffer slots). The stream (package p07) resolves slot names to buffers,
+`Stream` operation into `OpPlan`s (kernel name, parameter bytes, grid, buffer slots). The stream resolves slot names to buffers,
 uploads the host arrays, binds, dispatches and declares the accesses to the hazard tracker. The tests of `ops/tests.rs` compare every plan with the
 MSL source (kernel exists, `[[buffer(n)]]` indices, fields and size of the parameter struct), so the two sides cannot drift apart silently.
 
@@ -26,7 +26,7 @@ MSL source (kernel exists, `[[buffer(n)]]` indices, fields and size of the param
   4 KiB, so the stream must upload it into a small arena buffer rather than `setBytes` it. `SlotSource::Dummy`: an absent optional input
   (weight, bias, up, ...): bind any buffer of 16 bytes. `SlotSource::Scratch { id, bytes }`: same id within the plans of one operation = one buffer.
 - No kernel assumes anything about alignment beyond the element size, except where noted (the attention kernels need SIMD width 32; see Limits).
-- The Rust types: `OpPlan`, `BufferSlot`, `Access`, `SlotSource`, `PlanConstant`, `Params`, `Slots`, `plan(..)` in `ops.rs` are shared with package p06c.
+- The Rust types: `OpPlan`, `BufferSlot`, `Access`, `SlotSource`, `PlanConstant`, `Params`, `Slots`, `plan(..)` in `ops.rs` are shared with the recurrent-kernel planner.
 
 ## Kernels
 
@@ -45,7 +45,7 @@ MSL source (kernel exists, `[[buffer(n)]]` indices, fields and size of the param
 | `attention_paged` | `attention::plan_attention` | `fllm_attn_decode_{f16,q8}_e{1,2,3,4,5,6,8,12,16,18}` (+ `fllm_attn_merge_f32`), `fllm_attn_prefill_{f16,q8}_k{DKF}v{DVF}` |
 | `zero_buffer`, `copy_buffer` | — | blits of the command recorder, not kernels |
 
-Not covered here: `quantized_linear` and the other matrix products (p06a), `moe_*`, `gather_rows`, `scatter_add_rows`, `delta_layer`, Mamba (p06c),
+Not covered here: `quantized_linear` and the other matrix products (see `INTERFACE_QUANT.md`), `moe_*`, `gather_rows`, `scatter_add_rows`, `delta_layer`, Mamba (see `INTERFACE_RECURRENT.md`),
 `sampling_logits` (the CPU path is used; `argmax_rows` covers greedy decoding), `rope_kv_write_f16` and the other fused FP16 paths (the stream returns
 "not done" and the caller takes the unfused path). `split_q_gate`/`sigmoid_gate_mul` need `supports_attention_gate() == true`.
 
@@ -79,7 +79,7 @@ Semantics (equal to the CPU backend unless noted):
   * (clamp(u, -limit, limit) + 1)`; plain `silu`, `gelu`, `relu`, `relu2` do not read `up`. Fused gate/up projections bind the same buffer to `gate` and `up`.
 - Argmax: lowest index wins a tie, NaN never wins, all -inf/NaN row gives 0. Compares integer sort keys, so fast math cannot change it.
 - Embedding: the table is in the **GGUF layout of the file** (float rows or rows of the block formats of `QuantType`); one thread decodes one element
-  (`o_deq_*`, a transcription of `compute::dequantize`). If package p06a repacks its weights for the matrix kernels, the embedding table (which doubles as
+  (`o_deq_*`, a transcription of `compute::dequantize`). If the quantized-linear path repacks its weights for the matrix kernels, the embedding table (which doubles as
   the tied LM head in many models) must stay available in the file layout, or the stream dequantizes rows on the host. Formats without a kernel
   (IQ1/IQ2/IQ3, IQ4_XS, Q8_K, NVFP4, Q4Z, FP8) return `UnsupportedQuant`.
 - KV write and the layout of the pools: see below. q8 encoding is `d = amax/127`, `scale = half(d)`, `q = round_half_away(x / d)` clamped to +-127
@@ -124,7 +124,7 @@ multiplication with a diagonal 8x8 matrix (documented API only, no use of `threa
 `(DKF + DVF) * 2` registers for the fragments. Instantiated for (DKF, DVF) in (8,8) (10,10) (12,12) (14,14) (16,16) (24,16) (24,24) (32,32): widths 64, 80, 96, 112,
 128, 192/128, 192, 256 (and everything in between by zero padding).
 
-## Limits and assumptions the stream (p07) must respect
+## Limits and assumptions the stream must respect
 
 1. **SIMD width 32** for all attention kernels (`AttentionTuning::simd_width` must be `Pipeline::simd_width()`; the planner refuses anything else). The reduction
    kernels (norms, kv_write_q8) work for any width; they keep one partial per simdgroup in 32 entries (threads <= 512).
@@ -141,7 +141,7 @@ multiplication with a diagonal 8x8 matrix (documented API only, no use of `threa
 `emu_ops/run_emu.sh` compiles the real `.metal` sources as C++ against the syntax shim of `mslcheck.sh` plus `emu_ops/msl_emu.h`, which runs a threadgroup as one OS
 thread per Metal thread with real barriers, `simd_sum/max/min/shuffle*/any/all` between 32 lanes and `simdgroup_matrix` (held replicated in every lane), and
 executes the **plans of the Rust planner** (grid, threads, parameter bytes) over fixtures that the harness test `emu_fixtures` writes with the engine's CPU
-backend as reference (`ops/mirror.rs`). Usage and what it can and cannot find: see the header of `emu_ops/msl_emu.h` and the report of package p06b.
+backend as reference (`ops/mirror.rs`). Usage and what it can and cannot find: see the header of `emu_ops/msl_emu.h`.
 
 ## Known weaknesses (L0)
 

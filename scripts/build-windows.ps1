@@ -186,6 +186,9 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 try {
     Copy-Item $Binary (Join-Path $stage "fllm-rs.exe")
     Copy-Item (Join-Path $Root "LICENSE") (Join-Path $stage "LICENSE")
+    if (Test-Path (Join-Path $Root "NOTICE")) { Copy-Item (Join-Path $Root "NOTICE") (Join-Path $stage "NOTICE") }
+    if (Test-Path (Join-Path $Root "THIRD_PARTY.md")) { Copy-Item (Join-Path $Root "THIRD_PARTY.md") (Join-Path $stage "THIRD_PARTY.md") }
+    if (Test-Path (Join-Path $Root "licenses")) { Copy-Item -Recurse (Join-Path $Root "licenses") (Join-Path $stage "licenses") }
     $zip = Join-Path $dist $Asset
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip

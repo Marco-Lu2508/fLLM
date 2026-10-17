@@ -198,7 +198,15 @@ fn import_flags_are_parsed_and_validated() {
     assert!(options.parse_flag(&a, &mut i).unwrap());
     i += 1;
     assert!(!options.parse_flag(&a, &mut i).unwrap(), "--ctx belongs to the server");
-    assert_eq!(options, ImportOptions { revision: Some("v1".into()), offline: true, quant: Some("q4_k_m".into()), outtype: None });
+    assert_eq!(options, ImportOptions { revision: Some("v1".into()), offline: true, quant: Some("q4_k_m".into()), outtype: None, direct: false });
+    let mut direct_opts = ImportOptions::default();
+    assert!(direct_opts.parse_flag(&args(&["--direct"]), &mut 0).unwrap());
+    assert!(direct_opts.direct);
+    let mut zc_opts = ImportOptions::default();
+    assert!(zc_opts.parse_flag(&args(&["--zero-copy"]), &mut 0).unwrap());
+    assert!(zc_opts.direct);
+    assert!(ImportOptions { direct: true, quant: Some("q4_0".into()), ..Default::default() }.validate().is_err());
+    assert!(ImportOptions { direct: true, outtype: Some("f16".into()), ..Default::default() }.validate().is_err());
     assert!(options.validate().is_ok());
     assert!(ImportOptions { quant: Some("q9".into()), ..Default::default() }.validate().is_err());
     assert!(ImportOptions { quant: Some("q8_0".into()), outtype: Some("f16".into()), ..Default::default() }.validate().is_err());
@@ -491,7 +499,7 @@ fn missing_tokenizer_is_reported_before_the_weights_are_downloaded() {
     let (cache, home) = (scratch("tok-cache"), scratch("tok-home"));
     let _env = hub_env(&stub, &cache, &home);
     let err = prepare("acme/no-tokenizer", &ImportOptions::default()).unwrap_err();
-    assert!(err.contains("no tokenizer.json"), "{err}");
+    assert!(err.contains("has no tokenizer the conversion can use"), "{err}");
     assert!(position(&stub.paths(), "/model.safetensors").is_none(), "{:?}", stub.paths());
     for d in [quant, plain, cache, home] {
         let _ = fs::remove_dir_all(d);
@@ -547,6 +555,22 @@ fn repositories_with_ggufs_keep_resolving_to_the_gguf() {
     assert_eq!(selected, path);
     assert!(prepare("acme/both:Q4_K_M", &ImportOptions { outtype: Some("f16".into()), ..Default::default() }).is_err());
     for d in [cache, home] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn prepare_local_with_direct_flag_bypasses_conversion() {
+    let quant = scratch("direct-q");
+    let plain = scratch("direct-p");
+    build_pair(Kind::Nvfp4, 88, &quant, &plain);
+    let cache = scratch("direct-cache");
+    let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str())]);
+    let dir = plain.to_str().unwrap();
+    let path = prepare(dir, &ImportOptions { direct: true, ..Default::default() }).unwrap();
+    assert_eq!(path, plain, "direct mode should return input directory directly");
+    assert!(fs::read_dir(&cache).unwrap().next().is_none(), "cache must remain empty in direct mode");
+    for d in [quant, plain, cache] {
         let _ = fs::remove_dir_all(d);
     }
 }

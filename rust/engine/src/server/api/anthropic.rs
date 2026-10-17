@@ -58,7 +58,9 @@ fn image_url(block: &Value) -> Option<String> {
     }
 }
 
-/// Rewrites a Messages request into a chat-completions body.
+/// Rewrites a Messages request into a chat-completions body. Fields without an equivalent are accepted and ignored:
+/// `cache_control` on system, message and tool blocks (there is no prompt-cache API; prefix reuse is automatic),
+/// `metadata`, `service_tier`, `container` and `mcp_servers`.
 pub(super) fn to_chat_body(body: &Value) -> Result<Value, String> {
     let mut messages: Vec<Value> = Vec::new();
     let system = plain_text(body.get("system").unwrap_or(&Value::Null));
@@ -244,13 +246,13 @@ enum Open {
 }
 
 /// Rewrites the chat-completions stream into Messages events.
-fn stream_events(chunks: ChunkStream, model: String) -> Response {
+fn stream_events(chunks: ChunkStream, model: String, input_tokens: usize) -> Response {
     let events = async_stream::stream! {
         let mut chunks = chunks;
         yield Ok::<Event, Infallible>(event("message_start", json!({"message":{
             "id": new_id("msg"), "type": "message", "role": "assistant", "model": model,
             "content": [], "stop_reason": Value::Null, "stop_sequence": Value::Null,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": {"input_tokens": input_tokens, "output_tokens": 1},
         }})));
         yield Ok(event("ping", json!({})));
         let mut open = Open::None;
@@ -332,15 +334,20 @@ fn stream_events(chunks: ChunkStream, model: String) -> Response {
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
+/// Tokens of the rendered prompt of a Messages request (`count_tokens`, and `input_tokens` of `message_start`).
+fn prompt_token_count(state: &AppState, chat: &Value) -> Result<usize, String> {
+    let kwargs = chat
+        .get("chat_template_kwargs")
+        .and_then(Value::as_object)
+        .cloned();
+    let prompt = render_messages(state, chat["messages"].clone(), chat.get("tools").cloned(), kwargs)?;
+    state.tokenizer.encode(&prompt).map(|ids| ids.len())
+}
+
 pub(in crate::server) async fn messages(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let chat = match to_chat_body(&body) {
         Ok(chat) => chat,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
@@ -350,12 +357,15 @@ pub(in crate::server) async fn messages(
         .as_str()
         .unwrap_or(&state.model_name)
         .to_owned();
-    let response = chat_completions(State(state), headers, Json(chat)).await;
+    // `message_start` reports the prompt size before any token exists; images cannot be counted by the template
+    // renderer, so such prompts report 0 there and the real count arrives with `message_delta`
+    let input_tokens = if stream { prompt_token_count(&state, &chat).unwrap_or(0) } else { 0 };
+    let response = chat_completions(State(state), Json(chat)).await;
     if !response.status().is_success() {
         return convert_error(response).await;
     }
     if stream {
-        return stream_events(chunks(response), model);
+        return stream_events(chunks(response), model, input_tokens);
     }
     match read_json(response).await {
         Ok(chat) => Json(to_message(&chat, &model)).into_response(),
@@ -365,32 +375,17 @@ pub(in crate::server) async fn messages(
 
 pub(in crate::server) async fn count_tokens(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let headers = with_bearer(&headers);
-    if let Err(response) = authorize(&state, &headers) {
-        return convert_error(response).await;
-    }
     let chat = match to_chat_body(&body) {
         Ok(chat) => chat,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
-    let kwargs = chat
-        .get("chat_template_kwargs")
-        .and_then(Value::as_object)
-        .cloned();
-    let prompt = match render_messages(
-        &state,
-        chat["messages"].clone(),
-        chat.get("tools").cloned(),
-        kwargs,
-    ) {
-        Ok(prompt) => prompt,
-        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
-    };
-    match state.tokenizer.encode(&prompt) {
-        Ok(ids) => Json(json!({"input_tokens": ids.len()})).into_response(),
+    if let Err(response) = state.resolve_model(&body) {
+        return convert_error(response).await;
+    }
+    match prompt_token_count(&state, &chat) {
+        Ok(count) => Json(json!({"input_tokens": count})).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, &message),
     }
 }

@@ -1,0 +1,291 @@
+{
+ "bnb_fp4_bs128": {
+  "blocksize": 128,
+  "double_quant": false,
+  "format": "bnb4",
+  "quant_type": "fp4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_fp4_bs64": {
+  "blocksize": 64,
+  "double_quant": false,
+  "format": "bnb4",
+  "quant_type": "fp4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_fp4_dq_bs128": {
+  "blocksize": 128,
+  "double_quant": true,
+  "format": "bnb4",
+  "quant_type": "fp4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_fp4_dq_bs64": {
+  "blocksize": 64,
+  "double_quant": true,
+  "format": "bnb4",
+  "quant_type": "fp4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_int8": {
+  "format": "bnb8",
+  "shape": [
+   12,
+   96
+  ]
+ },
+ "bnb_nf4_bs128": {
+  "blocksize": 128,
+  "double_quant": false,
+  "format": "bnb4",
+  "quant_type": "nf4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_nf4_bs64": {
+  "blocksize": 64,
+  "double_quant": false,
+  "format": "bnb4",
+  "quant_type": "nf4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_nf4_dq_bs128": {
+  "blocksize": 128,
+  "double_quant": true,
+  "format": "bnb4",
+  "quant_type": "nf4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "bnb_nf4_dq_bs64": {
+  "blocksize": 64,
+  "double_quant": true,
+  "format": "bnb4",
+  "quant_type": "nf4",
+  "shape": [
+   16,
+   256
+  ]
+ },
+ "ct_mxfp4": {
+  "format": "ct_mxfp4",
+  "shape": [
+   8,
+   128
+  ]
+ },
+ "ct_nvfp4": {
+  "format": "ct_nvfp4",
+  "shape": [
+   8,
+   128
+  ]
+ },
+ "gptq_2bit_asym_desc_v1": {
+  "bits": 2,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_2bit_asym_desc_v2": {
+  "bits": 2,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_2bit_sym_v1": {
+  "bits": 2,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_2bit_sym_v2": {
+  "bits": 2,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_3bit_asym_desc_v1": {
+  "bits": 3,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_3bit_asym_desc_v2": {
+  "bits": 3,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_3bit_sym_v1": {
+  "bits": 3,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_3bit_sym_v2": {
+  "bits": 3,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_4bit_asym_desc_v1": {
+  "bits": 4,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_4bit_asym_desc_v2": {
+  "bits": 4,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_4bit_sym_v1": {
+  "bits": 4,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_4bit_sym_v2": {
+  "bits": 4,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_8bit_asym_desc_v1": {
+  "bits": 8,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_8bit_asym_desc_v2": {
+  "bits": 8,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "gptq_8bit_sym_v1": {
+  "bits": 8,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": false
+ },
+ "gptq_8bit_sym_v2": {
+  "bits": 8,
+  "format": "gptq",
+  "group_size": 32,
+  "in_features": 128,
+  "out_features": 32,
+  "v2": true
+ },
+ "mlx_2bit_g32": {
+  "bits": 2,
+  "format": "mlx",
+  "group_size": 32
+ },
+ "mlx_2bit_g64": {
+  "bits": 2,
+  "format": "mlx",
+  "group_size": 64
+ },
+ "mlx_3bit_g32": {
+  "bits": 3,
+  "format": "mlx",
+  "group_size": 32
+ },
+ "mlx_3bit_g64": {
+  "bits": 3,
+  "format": "mlx",
+  "group_size": 64
+ },
+ "mlx_4bit_g32": {
+  "bits": 4,
+  "format": "mlx",
+  "group_size": 32
+ },
+ "mlx_4bit_g64": {
+  "bits": 4,
+  "format": "mlx",
+  "group_size": 64
+ },
+ "mlx_5bit_g32": {
+  "bits": 5,
+  "format": "mlx",
+  "group_size": 32
+ },
+ "mlx_5bit_g64": {
+  "bits": 5,
+  "format": "mlx",
+  "group_size": 64
+ },
+ "mlx_6bit_g32": {
+  "bits": 6,
+  "format": "mlx",
+  "group_size": 32
+ },
+ "mlx_6bit_g64": {
+  "bits": 6,
+  "format": "mlx",
+  "group_size": 64
+ },
+ "mlx_8bit_g32": {
+  "bits": 8,
+  "format": "mlx",
+  "group_size": 32
+ },
+ "mlx_8bit_g64": {
+  "bits": 8,
+  "format": "mlx",
+  "group_size": 64
+ }
+}

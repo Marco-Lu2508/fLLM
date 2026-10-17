@@ -42,9 +42,11 @@ struct AttnPartial {
         auto sg = it.get_sub_group();
         const int lane = static_cast<int>(sg.get_local_linear_id());
         const int sgid = static_cast<int>(sg.get_group_linear_id());
-        const int lid = static_cast<int>(it.get_local_id(0));
-        const int item = static_cast<int>(it.get_group(0));
-        const int split = static_cast<int>(it.get_group(1));
+        // dimension 1 is the fastest one and holds the work-items of the sub-groups (SYCL: the local range of the last dimension must be a
+        // multiple of the sub-group size; the OpenCL CPU runtime crashes when it is 1)
+        const int lid = static_cast<int>(it.get_local_id(1));
+        const int item = static_cast<int>(it.get_group(1));
+        const int split = static_cast<int>(it.get_group(0));
         const int r = item / heads, h = item % heads;
         const int kh = h / (heads / kv_heads);
         const int n = static_cast<int>(lengths[r]);
@@ -174,7 +176,7 @@ void run_attention(Stream& s, const float* q, const uint16_t* kpool, const uint1
         const K kernel{q,        kpool,   vpool,        part,        tables, lengths,    alibi,  heads, kv_heads, dk,
                        dv,       stride,  block_size,   kgroup,      vgroup, kscale_base, vscale_base, window, chunk,
                        splits,   scale,   softcap,      wacc,        wml};
-        h.parallel_for(sycl::nd_range<2>(sycl::range<2>(items * AWG, static_cast<size_t>(splits)), sycl::range<2>(AWG, 1)), kernel);
+        h.parallel_for(sycl::nd_range<2>(sycl::range<2>(static_cast<size_t>(splits), items * AWG), sycl::range<2>(1, AWG)), kernel);
     });
     constexpr int MWG = 64;
     s.q.parallel_for(sycl::nd_range<1>(sycl::range<1>(items * MWG), sycl::range<1>(MWG)),

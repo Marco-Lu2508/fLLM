@@ -1,8 +1,10 @@
 //! Native Metal backend (objc2-metal, Apple platforms only).
 //!
-//! Scaffold: the module layout is fixed so that the packages can fill in their files without touching this one. Until a
-//! package implements `backend::create`, `--device metal` reports that the backend is not implemented.
-//! Level of verification: L0 (compiles; never run on hardware).
+//! Layout: `device_info` (devices, configuration), `buffers` (unified-memory buffers, no-copy GGUF windows), `pipelines` (MSL
+//! libraries and function constants), `commands` (command recorder, hazard tracking), `ops` / `weights` (dispatch plans of the
+//! kernels in `rust/engine/metal/*.metal`), `stream` / `backend` (the `Stream` and `Backend` of the engine).
+//! Level of verification: the kernels pass their GPU self-checks on the Apple-silicon CI runner; the whole-model tests in
+//! `whole_model_tests.rs` run there too (see docs/changes/metal.md for what was and was not observed).
 
 pub mod backend;
 pub mod buffers;
@@ -27,3 +29,10 @@ pub fn list_devices(first_index: usize) -> Vec<DeviceInfo> {
 pub fn create(index: usize) -> Result<Arc<dyn Backend>, String> {
     backend::create(index)
 }
+
+#[cfg(test)]
+mod device_arch_tests;
+
+#[cfg(test)]
+mod whole_model_tests;
+

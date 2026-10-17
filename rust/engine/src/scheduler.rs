@@ -51,6 +51,15 @@ pub struct Sequence {
     pub choice_index: usize,
     pub blocks: Vec<usize>,
     pub block_hashes: Vec<Option<u64>>,
+    /// Draft length controller of this sequence (see `SchedulerConfig::speculative_adaptive`).
+    pub adaptive: crate::speculative::AdaptiveDraft,
+    /// Order of arrival in the scheduler (ties of equal priority are served first come, first served).
+    pub arrival: u64,
+    pub enqueued: std::time::Instant,
+    /// The request is aborted when it has not finished by then.
+    pub deadline: Option<std::time::Instant>,
+    /// Blocks of this sequence that wait in host memory (preemption by swap); 0 when its KV is on the device or was dropped.
+    pub swapped_blocks: usize,
     ngram_index: Option<HashMap<Vec<i64>, Vec<usize>>>,
     ngram_upto: usize,
 }
@@ -101,9 +110,23 @@ impl Sequence {
             choice_index: 0,
             blocks: vec![],
             block_hashes: vec![],
+            adaptive: crate::speculative::AdaptiveDraft::new(1, 16),
+            arrival: 0,
+            enqueued: std::time::Instant::now(),
+            deadline: None,
+            swapped_blocks: 0,
             ngram_index: None,
             ngram_upto: 0,
         }
+    }
+    /// Speculative decoding applies: not opted out, no mirostat (its state depends on the sampled sequence), a single choice and no
+    /// image embeddings. Stochastic and grammar-constrained requests qualify (see `speculative::verify_chain`).
+    pub fn can_speculate(&self) -> bool {
+        self.sampling.speculative && self.sampling.mirostat == 0 && self.sampling.choices == 1 && !self.has_media
+    }
+    /// Smaller values are scheduled first (vLLM's convention).
+    pub fn priority(&self) -> i32 {
+        self.sampling.priority
     }
     pub fn num_tokens(&self) -> usize {
         self.tokens.len()
@@ -140,6 +163,63 @@ pub struct SchedulerConfig {
     pub preemption: String,
     pub speculative_lookup: usize,
     pub speculative_window: usize,
+    /// Shrink and grow the draft length per sequence from the acceptance rate.
+    pub speculative_adaptive: bool,
+    pub policy: SchedulingPolicy,
+    /// A new sequence is admitted only when this many blocks stay free for the running ones to grow (0 when nothing runs).
+    pub watermark_blocks: usize,
+    /// At most this many sequences prefill in one step (0 = no limit).
+    pub max_partial_prefills: usize,
+    /// Prompts longer than this count as long (0 = no distinction) ...
+    pub long_prefill_threshold: usize,
+    /// ... and at most this many long prompts prefill in one step, so shorter prompts interleave with them.
+    pub max_long_partial_prefills: usize,
+    /// Blocks of host memory for preemption by swap (`preemption == "swap"`); a preempted sequence that does not fit is recomputed.
+    pub swap_blocks: usize,
+    /// Reserve one token of every step's budget per decoding sequence before prompt chunks are scheduled, so a long prompt cannot
+    /// starve the running sequences (inter-token latency); false = the prompt chunks come first.
+    pub decode_first: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingPolicy {
+    /// First come, first served.
+    Fcfs,
+    /// Lower `priority` first; equal priorities first come, first served. A waiting request of better priority preempts the
+    /// worst running sequence when all slots are taken or the KV pool is full.
+    Priority,
+}
+
+impl SchedulingPolicy {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "fcfs" => Some(Self::Fcfs),
+            "priority" => Some(Self::Priority),
+            _ => None,
+        }
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            block_size: 16,
+            max_num_seqs: 16,
+            max_num_batched_tokens: 512,
+            prefix_cache: true,
+            preemption: "recompute".into(),
+            speculative_lookup: 0,
+            speculative_window: 0,
+            speculative_adaptive: false,
+            policy: SchedulingPolicy::Fcfs,
+            watermark_blocks: 0,
+            max_partial_prefills: 0,
+            long_prefill_threshold: 0,
+            max_long_partial_prefills: 1,
+            swap_blocks: 0,
+            decode_first: false,
+        }
+    }
 }
 
 pub struct Scheduler {
@@ -154,6 +234,26 @@ pub struct Scheduler {
     pub prefix_cache_hits: u64,
     next_offset: HashMap<i64, usize>,
     pub external_drafts: HashMap<i64, Vec<i64>>,
+    next_arrival: u64,
+    /// Number of sequences preempted (their KV blocks dropped, to be recomputed) since the start.
+    pub preemptions: u64,
+    /// Seconds each admitted sequence waited in the queue; the owner drains it into its metrics.
+    pub wait_times: Vec<f64>,
+    /// Swap traffic the owner of the KV pool has to carry out before the next forward pass: blocks to export (their owner no longer holds
+    /// them), blocks to import into, and sequences whose swapped data can be discarded.
+    pending_swap_out: Vec<(i64, Vec<usize>)>,
+    pending_swap_in: Vec<(i64, Vec<usize>)>,
+    dropped_swaps: Vec<i64>,
+    /// Blocks of host swap space in use.
+    pub swap_used: usize,
+}
+
+/// Swap work for the KV pool's owner (see `Scheduler::take_swaps`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SwapWork {
+    pub out: Vec<(i64, Vec<usize>)>,
+    pub into: Vec<(i64, Vec<usize>)>,
+    pub dropped: Vec<i64>,
 }
 impl Scheduler {
     pub fn new(
@@ -174,11 +274,20 @@ impl Scheduler {
             prefix_cache_hits: 0,
             next_offset: HashMap::new(),
             external_drafts: HashMap::new(),
+            next_arrival: 0,
+            preemptions: 0,
+            wait_times: Vec::new(),
+            pending_swap_out: Vec::new(),
+            pending_swap_in: Vec::new(),
+            dropped_swaps: Vec::new(),
+            swap_used: 0,
         }
     }
     pub fn add_request(&mut self, req_id: String, sequences: Vec<Sequence>) {
         let ids = sequences.iter().map(|s| s.seq_id).collect::<Vec<_>>();
-        for s in sequences {
+        for mut s in sequences {
+            s.arrival = self.next_arrival;
+            self.next_arrival += 1;
             self.waiting.push_back(s.seq_id);
             self.sequences.insert(s.seq_id, s);
         }
@@ -195,8 +304,23 @@ impl Scheduler {
                 return Ok(None);
             }
             let mut budget = self.cfg.max_num_batched_tokens;
-            for sid in self.running.clone() {
-                if budget == 0 {
+            let decoders = self
+                .running
+                .iter()
+                .filter(|sid| self.sequences.get(sid).is_some_and(|s| s.num_computed >= s.prefill_target && s.remaining_max() > 0))
+                .count();
+            // decode-first keeps one token of the budget per running decoder out of the prompt chunks' reach
+            let mut prefill_budget = if self.cfg.decode_first {
+                budget.saturating_sub(decoders).max(1)
+            } else {
+                budget
+            };
+            let mut long_prefills = 0;
+            for sid in self.ordered_running() {
+                if prefill_budget == 0 || budget == 0 {
+                    break;
+                }
+                if self.cfg.max_partial_prefills > 0 && step.prefill.len() >= self.cfg.max_partial_prefills {
                     break;
                 }
                 let Some(seq) = self.sequences.get(&sid) else {
@@ -210,7 +334,11 @@ impl Scheduler {
                 if todo == 0 {
                     continue;
                 }
-                let chunk = todo.min(budget);
+                let long = self.cfg.long_prefill_threshold > 0 && seq.prefill_target > self.cfg.long_prefill_threshold;
+                if long && long_prefills >= self.cfg.max_long_partial_prefills.max(1) {
+                    continue;
+                }
+                let chunk = todo.min(prefill_budget);
                 let table = self.bm.get_table(sid)?;
                 let need = (start + chunk).div_ceil(self.cfg.block_size);
                 let need = need.saturating_sub(table.blocks.len());
@@ -220,8 +348,10 @@ impl Scheduler {
                 step.prefill.push((sid, start, chunk));
                 self.next_offset.insert(sid, start + chunk);
                 budget -= chunk;
+                prefill_budget -= chunk;
+                long_prefills += usize::from(long);
             }
-            for sid in self.running.clone() {
+            for sid in self.ordered_running() {
                 let Some(seq) = self.sequences.get(&sid) else {
                     continue;
                 };
@@ -232,7 +362,7 @@ impl Scheduler {
                     continue;
                 }
                 let remaining = seq.remaining_max();
-                let mut draft = if seq.sampling.is_greedy() && !seq.constrained {
+                let mut draft = if seq.can_speculate() {
                     self.external_drafts.remove(&sid).or_else(|| {
                         if self.cfg.speculative_lookup > 0 {
                             self.lookup_draft(sid)
@@ -255,10 +385,10 @@ impl Scheduler {
                 let extra = 1 + draft.as_ref().map_or(0, Vec::len);
                 if self.bm.allocator.available() < self.bm.num_blocks_needed(sid, extra as i64)? {
                     if self.evict_cache(extra)? == 0
-                        && self.cfg.preemption == "recompute"
+                        && matches!(self.cfg.preemption.as_str(), "recompute" | "swap")
                         && self.running.len() > 1
                     {
-                        let victim = *self.running.last().unwrap();
+                        let victim = self.preemption_victim(sid);
                         if victim != sid {
                             self.preempt(victim)?;
                             step.decode.retain(|x| *x != victim);
@@ -292,7 +422,32 @@ impl Scheduler {
         }
         Ok(None)
     }
+    /// Re-admit a sequence whose KV blocks wait in host memory: fresh blocks for the same number of tokens, filled by the owner of the pool
+    /// from the swapped data. The sequence continues where it stopped.
+    fn try_admit_swapped(&mut self, sid: i64) -> Result<bool, SchedulerError> {
+        let blocks_needed = self.sequences[&sid].swapped_blocks;
+        let watermark = if self.running.is_empty() { 0 } else { self.cfg.watermark_blocks };
+        if self.bm.allocator.available() < blocks_needed + watermark {
+            return Ok(false);
+        }
+        self.bm.new_table(sid)?;
+        let mut blocks = Vec::with_capacity(blocks_needed);
+        for _ in 0..blocks_needed {
+            blocks.push(self.bm.append_block(sid)?);
+        }
+        let seq = self.sequences.get_mut(&sid).unwrap();
+        self.bm.get_table_mut(sid)?.num_tokens = seq.num_tokens() as i64;
+        seq.blocks = blocks.clone();
+        seq.block_hashes = vec![None; blocks.len()];
+        seq.swapped_blocks = 0;
+        self.swap_used = self.swap_used.saturating_sub(blocks_needed);
+        self.pending_swap_in.push((sid, blocks));
+        Ok(true)
+    }
     fn try_admit(&mut self, sid: i64) -> Result<bool, SchedulerError> {
+        if self.sequences.get(&sid).is_some_and(|s| s.swapped_blocks > 0) {
+            return self.try_admit_swapped(sid);
+        }
         // Group followers already own a shared prompt table and copied final logits.
         if self
             .sequences
@@ -336,7 +491,8 @@ impl Scheduler {
         }
         let fresh = prompt.len().saturating_sub(reused * self.cfg.block_size);
         let need = (fresh + 1).div_ceil(self.cfg.block_size);
-        if self.bm.allocator.available() < need {
+        let watermark = if self.running.is_empty() { 0 } else { self.cfg.watermark_blocks };
+        if self.bm.allocator.available() < need + watermark {
             self.bm.drop_table(sid)?;
             return Ok(false);
         }
@@ -365,9 +521,50 @@ impl Scheduler {
             .collect();
         Ok(true)
     }
+    /// Scheduling key: the sequence with the smaller key goes first.
+    fn key(&self, sid: i64) -> (i32, u64) {
+        match self.cfg.policy {
+            SchedulingPolicy::Fcfs => (0, self.sequences.get(&sid).map_or(u64::MAX, |s| s.arrival)),
+            SchedulingPolicy::Priority => self.sequences.get(&sid).map_or((i32::MAX, u64::MAX), |s| (s.priority(), s.arrival)),
+        }
+    }
+    /// Running sequences in scheduling order (arrival order under FCFS).
+    fn ordered_running(&self) -> Vec<i64> {
+        let mut ids = self.running.clone();
+        if self.cfg.policy == SchedulingPolicy::Priority {
+            ids.sort_by_key(|sid| self.key(*sid));
+        }
+        ids
+    }
+    fn pick_waiting(&self) -> Option<i64> {
+        match self.cfg.policy {
+            SchedulingPolicy::Fcfs => self.waiting.front().copied(),
+            SchedulingPolicy::Priority => self.waiting.iter().copied().min_by_key(|sid| self.key(*sid)),
+        }
+    }
+    /// The sequence to preempt for `needy`: the last arrival under FCFS, the worst-priority newest sequence otherwise.
+    fn preemption_victim(&self, needy: i64) -> i64 {
+        match self.cfg.policy {
+            SchedulingPolicy::Fcfs => *self.running.last().unwrap(),
+            SchedulingPolicy::Priority => self
+                .running
+                .iter()
+                .copied()
+                .filter(|sid| *sid != needy)
+                .max_by_key(|sid| self.key(*sid))
+                .unwrap_or(needy),
+        }
+    }
     fn admit_waiting(&mut self) -> Result<(), SchedulerError> {
-        while !self.waiting.is_empty() && self.running.len() < self.cfg.max_num_seqs {
-            let sid = *self.waiting.front().unwrap();
+        while let Some(sid) = self.pick_waiting() {
+            if self.running.len() >= self.cfg.max_num_seqs {
+                // all slots taken: a waiting request of better priority takes the slot of the worst running sequence
+                let victim = (self.cfg.policy == SchedulingPolicy::Priority)
+                    .then(|| self.preemption_victim(sid))
+                    .filter(|v| self.key(*v).0 > self.key(sid).0);
+                let Some(victim) = victim else { break };
+                self.preempt(victim)?;
+            }
             let mut ok = self.try_admit(sid)?;
             if !ok {
                 let target = self.sequences[&sid].prefill_target;
@@ -376,14 +573,47 @@ impl Scheduler {
                     ok = self.try_admit(sid)?
                 }
             }
+            if !ok && self.cfg.policy == SchedulingPolicy::Priority && !self.running.is_empty() {
+                // the pool is full: free the blocks of a running sequence of worse priority
+                let victim = self.preemption_victim(sid);
+                if self.key(victim).0 > self.key(sid).0 {
+                    self.preempt(victim)?;
+                    ok = self.try_admit(sid)?;
+                }
+            }
             if !ok {
                 break;
             }
-            self.waiting.pop_front();
-            self.sequences.get_mut(&sid).unwrap().state = "running".into();
+            if let Some(position) = self.waiting.iter().position(|x| *x == sid) {
+                self.waiting.remove(position);
+            }
+            let seq = self.sequences.get_mut(&sid).unwrap();
+            seq.state = "running".into();
+            self.wait_times.push(seq.enqueued.elapsed().as_secs_f64());
             self.running.push(sid);
         }
         Ok(())
+    }
+    /// The swap traffic accumulated by `schedule` since the last call. It must be carried out (exports first) before the forward pass of the
+    /// step, even when `schedule` returned no work: the freed blocks may be rewritten by that pass.
+    pub fn take_swaps(&mut self) -> SwapWork {
+        SwapWork {
+            out: std::mem::take(&mut self.pending_swap_out),
+            into: std::mem::take(&mut self.pending_swap_in),
+            dropped: std::mem::take(&mut self.dropped_swaps),
+        }
+    }
+    /// Request ids with a sequence whose deadline has passed.
+    pub fn expired_requests(&self, now: std::time::Instant) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .sequences
+            .values()
+            .filter(|s| s.deadline.is_some_and(|d| d <= now) && s.state != "finished")
+            .map(|s| s.req_id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
     fn evict_cache(&mut self, need: usize) -> Result<usize, SchedulerError> {
         let Some(pc) = self.pc.as_mut() else {
@@ -404,6 +634,26 @@ impl Scheduler {
     fn preempt(&mut self, sid: i64) -> Result<(), SchedulerError> {
         let seq = self.sequences.get_mut(&sid).unwrap();
         seq.preempted = true;
+        self.preemptions += 1;
+        if self.cfg.preemption == "swap" && seq.num_computed > 0 && !seq.has_media {
+            let blocks = self.bm.get_table(sid)?.blocks.clone();
+            if !blocks.is_empty() && self.swap_used + blocks.len() <= self.cfg.swap_blocks {
+                // keep the progress: the data leaves with the owner's export, the blocks are freed for others
+                self.swap_used += blocks.len();
+                seq.swapped_blocks = blocks.len();
+                self.pending_swap_out.push((sid, blocks));
+                self.bm.drop_table(sid)?;
+                seq.blocks.clear();
+                seq.block_hashes.clear();
+                self.next_offset.remove(&sid);
+                seq.state = "waiting".into();
+                if let Some(i) = self.running.iter().position(|x| *x == sid) {
+                    self.running.remove(i);
+                }
+                self.waiting.push_front(sid);
+                return Ok(());
+            }
+        }
         self.bm.drop_table(sid)?;
         seq.blocks.clear();
         seq.block_hashes.clear();
@@ -525,7 +775,18 @@ impl Scheduler {
         for sid in ids {
             if self.bm.tables.contains_key(&sid) {
                 self.release(sid)?
+            } else {
+                // never admitted (still queued): take it out of the queues, or the next step finds an id without a sequence
+                self.finish(sid);
             }
+            if let Some(seq) = self.sequences.get_mut(&sid) {
+                if seq.swapped_blocks > 0 {
+                    self.swap_used = self.swap_used.saturating_sub(seq.swapped_blocks);
+                    seq.swapped_blocks = 0;
+                    self.dropped_swaps.push(sid);
+                }
+            }
+            self.waiting.retain(|x| *x != sid);
         }
         Ok(())
     }
@@ -551,7 +812,10 @@ impl Scheduler {
         Ok(())
     }
     fn lookup_draft(&mut self, sid: i64) -> Option<Vec<i64>> {
-        let k = self.cfg.speculative_lookup;
+        let mut k = self.cfg.speculative_lookup;
+        if self.cfg.speculative_adaptive {
+            k = k.min(self.sequences[&sid].adaptive.length());
+        }
         let wmax = self.cfg.speculative_window;
         let (tokens, index_init) = {
             let s = &self.sequences[&sid];
@@ -620,8 +884,7 @@ mod shared_prompt_tests {
             max_num_batched_tokens: 8,
             prefix_cache: true,
             preemption: "recompute".into(),
-            speculative_lookup: 0,
-            speculative_window: 0,
+            ..SchedulerConfig::default()
         };
         let mut scheduler = Scheduler::new(cfg, BlockManager::new(8, 4).unwrap(), None, 32);
         let mut sequence = Sequence::new(2, "group".into(), vec![1, 2, 3], 2, 0.0);
@@ -635,5 +898,145 @@ mod shared_prompt_tests {
         assert!(step.prefill.is_empty());
         assert_eq!(step.decode, vec![2]);
         assert_eq!(scheduler.bm.get_table(2).unwrap().blocks, vec![block]);
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::sampling::SamplingParams;
+
+    fn scheduler(cfg: SchedulerConfig, blocks: i64) -> Scheduler {
+        Scheduler::new(cfg, BlockManager::new(blocks, 4).unwrap(), None, 256)
+    }
+    fn request(s: &mut Scheduler, id: i64, prompt: usize, priority: i32) {
+        let sampling = SamplingParams { priority, ..Default::default() };
+        let seq = Sequence::new_with_sampling(id, format!("r{id}"), (0..prompt as i64).collect(), 8, sampling);
+        s.add_request(format!("r{id}"), vec![seq]);
+    }
+    fn cfg() -> SchedulerConfig {
+        SchedulerConfig { block_size: 4, max_num_seqs: 2, max_num_batched_tokens: 16, prefix_cache: false, ..SchedulerConfig::default() }
+    }
+
+    #[test]
+    fn fcfs_serves_in_arrival_order_and_priority_serves_the_smaller_value_first() {
+        let mut s = scheduler(cfg(), 64);
+        request(&mut s, 1, 4, 5);
+        request(&mut s, 2, 4, 1);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![1, 2]);
+        let mut s = scheduler(SchedulerConfig { max_num_seqs: 1, policy: SchedulingPolicy::Priority, ..cfg() }, 64);
+        request(&mut s, 1, 4, 5);
+        request(&mut s, 2, 4, 1);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![2], "the smaller priority value runs first");
+    }
+
+    #[test]
+    fn a_better_priority_request_preempts_the_worst_running_sequence() {
+        let mut s = scheduler(SchedulerConfig { max_num_seqs: 1, policy: SchedulingPolicy::Priority, ..cfg() }, 64);
+        request(&mut s, 1, 4, 5);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![1]);
+        request(&mut s, 2, 4, 0);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![2]);
+        assert!(s.waiting.contains(&1));
+        assert_eq!(s.preemptions, 1);
+        assert_eq!(s.sequences[&1].num_computed, 0, "recompute preemption drops the progress");
+        // an equal or worse priority never preempts
+        request(&mut s, 3, 4, 0);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![2]);
+        assert_eq!(s.preemptions, 1);
+    }
+
+    #[test]
+    fn fcfs_never_preempts_for_a_waiting_request() {
+        let mut s = scheduler(SchedulerConfig { max_num_seqs: 1, ..cfg() }, 64);
+        request(&mut s, 1, 4, 9);
+        s.schedule().unwrap();
+        request(&mut s, 2, 4, -9);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![1]);
+        assert_eq!(s.preemptions, 0);
+    }
+
+    #[test]
+    fn a_full_pool_admits_by_priority_through_preemption() {
+        // 4 blocks of 4 tokens: one 12-token prompt (3 blocks + 1) fills the pool
+        let mut s = scheduler(SchedulerConfig { max_num_seqs: 4, policy: SchedulingPolicy::Priority, ..cfg() }, 4);
+        request(&mut s, 1, 12, 5);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![1]);
+        request(&mut s, 2, 12, 0);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![2]);
+        assert_eq!(s.preemptions, 1);
+    }
+
+    #[test]
+    fn the_watermark_keeps_blocks_free_for_running_sequences() {
+        let mut s = scheduler(SchedulerConfig { max_num_seqs: 4, watermark_blocks: 3, ..cfg() }, 8);
+        request(&mut s, 1, 8, 0); // 3 blocks
+        s.schedule().unwrap();
+        request(&mut s, 2, 8, 0); // needs 3 + watermark 3 > 5 free
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![1]);
+        assert_eq!(s.waiting.len(), 1);
+        // with nothing running the watermark does not block admission
+        let mut s = scheduler(SchedulerConfig { watermark_blocks: 100, ..cfg() }, 8);
+        request(&mut s, 1, 8, 0);
+        s.schedule().unwrap();
+        assert_eq!(s.running, vec![1]);
+    }
+
+    #[test]
+    fn decode_first_leaves_budget_for_running_decoders() {
+        let base = SchedulerConfig { max_num_seqs: 4, max_num_batched_tokens: 8, ..cfg() };
+        for (decode_first, expected_chunk) in [(false, 8), (true, 6)] {
+            let mut s = scheduler(SchedulerConfig { decode_first, ..base.clone() }, 64);
+            request(&mut s, 1, 4, 0);
+            request(&mut s, 2, 4, 0);
+            s.schedule().unwrap();
+            for sid in [1, 2] {
+                s.commit_chunk(sid, 4).unwrap();
+            }
+            request(&mut s, 3, 40, 0);
+            let step = s.schedule().unwrap().unwrap();
+            let chunk = step.prefill.iter().find(|p| p.0 == 3).map(|p| p.2).unwrap();
+            assert_eq!(chunk, expected_chunk, "decode_first = {decode_first}");
+            assert_eq!(step.decode.len(), if decode_first { 2 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn partial_prefill_limits_and_long_prompt_throttling() {
+        let base = SchedulerConfig { max_num_seqs: 8, max_num_batched_tokens: 64, ..cfg() };
+        let mut s = scheduler(SchedulerConfig { max_partial_prefills: 2, ..base.clone() }, 128);
+        for id in 1..=4 {
+            request(&mut s, id, 8, 0);
+        }
+        assert_eq!(s.schedule().unwrap().unwrap().prefill.len(), 2);
+        // two long prompts and a short one: only one long prompt prefills, the short one interleaves
+        let mut s = scheduler(SchedulerConfig { long_prefill_threshold: 16, max_long_partial_prefills: 1, ..base }, 128);
+        request(&mut s, 1, 40, 0);
+        request(&mut s, 2, 40, 0);
+        request(&mut s, 3, 6, 0);
+        let step = s.schedule().unwrap().unwrap();
+        let ids: Vec<i64> = step.prefill.iter().map(|p| p.0).collect();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn deadlines_are_reported_per_request_and_waits_are_recorded() {
+        let mut s = scheduler(cfg(), 64);
+        request(&mut s, 1, 4, 0);
+        request(&mut s, 2, 4, 0);
+        s.sequences.get_mut(&1).unwrap().deadline = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        s.sequences.get_mut(&2).unwrap().deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert_eq!(s.expired_requests(std::time::Instant::now()), vec!["r1".to_string()]);
+        s.schedule().unwrap();
+        assert_eq!(s.wait_times.len(), 2);
     }
 }

@@ -17,11 +17,15 @@ pub enum Preset {
     Q5_0,
     Q5_1,
     Q8_0,
+    Q2K,
+    Q3K,
     Q4KS,
     Q4KM,
     Q5KS,
     Q5KM,
     Q6K,
+    Mxfp4,
+    Nvfp4,
 }
 
 impl Preset {
@@ -32,6 +36,10 @@ impl Preset {
             "q5_0" => Self::Q5_0,
             "q5_1" => Self::Q5_1,
             "q8_0" => Self::Q8_0,
+            "q2_k" | "q2k" => Self::Q2K,
+            "q3_k" | "q3k" => Self::Q3K,
+            "mxfp4" => Self::Mxfp4,
+            "nvfp4" => Self::Nvfp4,
             "q4_k_s" => Self::Q4KS,
             "q4_k_m" | "q4_k" => Self::Q4KM,
             "q5_k_s" => Self::Q5KS,
@@ -41,7 +49,7 @@ impl Preset {
         })
     }
     pub const NAMES: &'static str =
-        "q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k";
+        "q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k, mxfp4, nvfp4";
 
     fn base(self) -> QType {
         match self {
@@ -50,6 +58,10 @@ impl Preset {
             Self::Q5_0 => QType::Q5_0,
             Self::Q5_1 => QType::Q5_1,
             Self::Q8_0 => QType::Q8_0,
+            Self::Q2K => QType::Q2K,
+            Self::Q3K => QType::Q3K,
+            Self::Mxfp4 => QType::Mxfp4,
+            Self::Nvfp4 => QType::Nvfp4,
             Self::Q4KS | Self::Q4KM => QType::Q4K,
             Self::Q5KS | Self::Q5KM => QType::Q5K,
             Self::Q6K => QType::Q6K,
@@ -58,7 +70,7 @@ impl Preset {
     fn is_k(self) -> bool {
         matches!(
             self,
-            Self::Q4KS | Self::Q4KM | Self::Q5KS | Self::Q5KM | Self::Q6K
+            Self::Q2K | Self::Q3K | Self::Q4KS | Self::Q4KM | Self::Q5KS | Self::Q5KM | Self::Q6K
         )
     }
 }
@@ -102,7 +114,7 @@ fn choose(preset: Preset, name: &str, dims: &[u64], layers: usize) -> Option<QTy
     let cols = dims[0] as usize;
     if !cols.is_multiple_of(kind.block_elements()) {
         kind = match kind {
-            QType::Q4K => QType::Q5_0,
+            QType::Q2K | QType::Q3K | QType::Q4K => QType::Q5_0,
             QType::Q5K => QType::Q5_1,
             QType::Q6K => QType::Q8_0,
             other => other,

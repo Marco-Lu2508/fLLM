@@ -1,23 +1,24 @@
 # Independent Rust inference
 
 fLLM runs its own inference engine, written in Rust. Model layers execute with
-fLLM's Rust tensor operations and independently authored WGSL GPU kernels.
+fLLM's Rust tensor operations, its own CPU SIMD kernels and independently authored GPU kernels
+(CUDA, WGSL, and the native Vulkan, Metal, HIP and SYCL backends).
 There is no llama.cpp mode, libllama inference, GGML dependency, upstream server
 process or silent switch to an external runtime.
 
 | Feature | Own implementation and current boundaries |
 | --- | --- |
-| Decoder | Rust embedding lookup, RMSNorm/grouped RMSNorm, GQA, model-specific RoPE, attention, residuals, SwiGLU and LM head. Dense separate Q/K/V and gate/up projections; Qwen3 and SmolVLM's Llama decoder tested. K2-Horizon-4B Q8 with grouped RMSNorm and Q8 KV has also passed a real-model CPU generation/embedding smoke check. MoE, MLA, recurrent and arbitrary architecture variants are not covered. |
-| Quantization | Rust readers for F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K and Q6_K. Eight quantized formats remain packed during projection. Own CPU kernels are chosen at runtime (AVX2/FMA/F16C, AVX-VNNI, AVX-512 BW/VNNI, NEON dotprod/i8mm) and also cover Q2_K, Q3_K, IQ4_NL, IQ4_XS and MXFP4 on x86-64; they quantize activations to 8 bits, see docs/cpu-kernels.md. Own WGSL projection kernels handle all eight quantized formats. Formats without a packed kernel decode rows on demand. Per-format throughput and full-model parity gates remain open. |
+| Decoder | Rust embedding lookup, RMSNorm/grouped RMSNorm, GQA, model-specific RoPE, attention, residuals, SwiGLU and LM head. Dense and fused Q/K/V and gate/up projections, MoE (softmax and sigmoid routing, shared experts), MLA, and recurrent mixers (gated DeltaNet, Mamba 1/2, LFM2 short convolution). The architecture families, each checked against `transformers` on a tiny random checkpoint (`scripts/verify_architectures.py`), are listed in [architectures.md](architectures.md); real-model results are in [model-coverage.md](model-coverage.md). Where a backend lacks a kernel for a layer, that layer runs on the host (CPU) while the rest stays on the device. |
+| Quantization | Rust readers for the GGUF tensor types listed by `fllm-rs formats` (F32, F16, BF16, the Q4/Q5/Q8 and K-quant families, the IQ family, TQ, MXFP4, NVFP4) plus fLLM's own AWQ/GPTQ-derived Q4Z formats. Weights stay packed during projection. Own CPU kernels are chosen at runtime (AVX2/FMA/F16C, AVX-VNNI, AVX-512 BW/VNNI/BF16, AMX, NEON dotprod/i8mm); they quantize activations to 8 bits, see [cpu-kernels.md](cpu-kernels.md). The CUDA backend decodes the K-quant, IQ, MXFP4, NVFP4 and Q4Z formats natively ([gpu-backends.md](gpu-backends.md)); the wgpu backend has WGSL projection kernels for eight quantized formats. Formats without a packed kernel on a backend decode rows on demand or are converted once on upload. |
 | KV cache | Own paged storage and attention in FP16, BF16, FP8, INT8, Q8_0, Q5, Q4, IQ4_NL, NVFP4 and FP32 (keys and values separately, CPU and CUDA; wgpu: FP16 and Q8_0). Prefix reuse, continuous batching, chunked prefill, admission limits, cancellation and bounded output buffers. |
 | Sampling | Temperature, top_p/top_k, min_p, typical_p, repetition/presence/frequency penalties and history windows, DRY/breakers, Mirostat 1/2, logit bias and per-sequence seeds. |
 | Structured output | Sampler masks enforce JSON Schema, JSON objects, Lark, regex and a common GBNF CFG subset. Unsupported grammar constructs reject before generation. |
 | Tools | OpenAI/Ollama declarations, required/named choices, Qwen tags/Mistral arrays, argument-schema validation and streaming. Tool execution stays with the client. |
 | Encoders | Own Rust WordPiece tokenizer and bidirectional BERT layers. CLS/mean/last pooling and L2 normalization; BGE-small tested against PyTorch. Causal decoder embeddings remain available separately. BGE is English trained; tokenizer handling of other text is not a claim of multilingual retrieval quality. |
-| Vision | Own Rust SigLIP encoder, patch convolution, normalization, attention, GELU, pixel shuffle and Idefics3 projector. Matching SmolVLM model/projector supports OpenAI image chat and a diagnostic image-feature endpoint. One resized global image view; no high-resolution crop splitting or audio. |
+| Vision | Own Rust SigLIP encoder, patch convolution, normalization, attention, GELU, pixel shuffle and Idefics3 projector. The SmolVLM (Idefics3) family is the only supported one; it supports OpenAI image chat and a diagnostic image-feature endpoint. One resized global image view; no high-resolution crop splitting or audio. |
 | LoRA | Load-time projection merge, multiple adapters/scales. Applied weights transfer to own Rust compute. Adapted matrices use F32 RAM. Embedding adapters, activated LoRA and request-time switching remain unsupported. |
 | Speculative decoding | Own cached draft model or prompt lookup, target verification and KV rollback. Target and draft use own Rust compute by default. Greedy requests only; stochastic/constrained requests use ordinary decoding. |
-| Hardware | CPU and own Rust/wgpu quantized projections. Intel Arrow Lake Vulkan physically tested for decoder, BERT and vision. Vulkan/Metal/DX12 are compile paths; NVIDIA, AMD, Apple/Metal and DX12 hardware have not been validated. LayerNorm, attention, activation and cache handling currently stay on the Rust CPU; full GPU residency/fused attention is future optimization. |
+| Hardware | CPU (x86-64, AArch64), NVIDIA CUDA (full device-resident decoder: norms, attention with paged KV cache, MLP, sampling; run on Turing T4 and Blackwell RTX PRO 6000, other generations build but are not measured), wgpu (Vulkan, Metal, DX12), and the native Vulkan, Metal, HIP, SYCL, NPU and TPU backends. Vulkan ran on a few devices (NVIDIA, Intel Arrow Lake); the native Metal kernel checks run on an Apple-silicon CI runner; ROCm, SYCL, NPUs and TPU are compile-only. The per-target state is the Status table of the README; the test levels are defined in [test-levels.md](test-levels.md). |
 
 ## Build and run
 
@@ -32,7 +33,8 @@ fllm-rs serve --model bge-small.gguf --embeddings --pooling cls
 fllm-rs serve --model SmolVLM.gguf --mmproj mmproj-SmolVLM.gguf --device vulkan
 ```
 
-`--device auto` chooses CPU. Explicit GPU requests fail if the requested backend
+`--device auto` chooses the best GPU (CUDA, then ROCm, Metal, Vulkan, DX12, SYCL) and falls back to the CPU when no GPU is
+found; see [device-selection.md](device-selection.md). Explicit GPU requests fail if the requested backend
 is unavailable or only a software adapter exists. GPU weights are uploaded once;
 large projections are split to respect device buffer/dispatch limits. Input and
 output transfers between projections are currently retained for correctness,
@@ -102,6 +104,6 @@ outside Git. CPU/GPU quantization fixtures exercise high bits, signed scales, ro
 boundaries, multiple input rows and dequantization against gguf/PyTorch.
 
 The earlier upstream runtime measurements are not evidence for these paths.
-Remaining work includes MoE/MLA and additional architectures, Q2/Q3/IQ kernels,
-full SentencePiece, stochastic exact speculation, dynamic adapters, other image
-families/audio, GPU-resident attention and physical validation on other devices.
+Remaining work is listed in [roadmap.md](roadmap.md): more architectures, full SentencePiece,
+stochastic exact speculation, dynamic adapters, other image families and audio, and
+physical validation on more devices.

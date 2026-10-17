@@ -67,6 +67,7 @@ impl VulkanBackend {
             supports_embedding_lookup: true,
             // greedy sampling runs on the device (argmax_rows); sampling_logits goes through the host
             supports_device_sampling: false,
+            sample_on_device: false,
             supports_residual_add: true,
             // moe_topk / moe_linear / moe_combine run on the device; moe_route / moe_expert_gemm use the host path
             supports_moe: false,
@@ -191,6 +192,8 @@ impl Backend for VulkanBackend {
             value_dim,
             words_per_layer_k,
             words_per_layer_v,
+            layout: None,
+            layer_geoms: None,
         })
     }
 }

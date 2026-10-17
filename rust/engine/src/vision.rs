@@ -1,8 +1,116 @@
-//! Native Rust SigLIP image encoder and Idefics3 modality projector.
+//! Native Rust image encoders: the [`MultimodalEncoder`] interface, the SigLIP/Idefics3 projector
+//! of SmolVLM and (in the submodules) the Qwen-VL tower, M-RoPE positions and shared image
+//! preprocessing.
 use crate::compute::{self, LayerNorm, Linear, Tensor};
-use base64::Engine;
 use fllm_gguf_probe::MappedGguf;
 use serde_json::Value;
+
+pub mod audio;
+pub mod mrope;
+pub mod pipeline;
+pub mod preprocess;
+pub mod qwen_vl;
+pub mod siglip;
+
+use mrope::MropePositions;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
+/// The embeddings of one image or clip and the token grid they occupy.
+#[derive(Clone, Debug)]
+pub struct EncodedMedia {
+    /// One embedding per placeholder token, in grid order.
+    pub embeddings: Vec<Vec<f32>>,
+    /// Token grid (time, height, width) after merging; the product is `embeddings.len()`.
+    pub grid: [usize; 3],
+    pub kind: MediaKind,
+    /// Frame rate of a clip (some families use it for time positions).
+    pub fps: Option<f32>,
+    /// DeepStack features (Qwen3-VL): per level, one row per placeholder token, added to the hidden
+    /// state of decoder layer `level` at the placeholder positions.
+    pub deepstack: Vec<Vec<Vec<f32>>>,
+    /// Lengths of the runs of placeholder tokens when the item is split by text (Qwen3-VL video
+    /// frames); empty means one run holding every embedding.
+    pub runs: Vec<usize>,
+    /// Seconds announced before each run of a clip (Qwen3-VL).
+    pub timestamps: Vec<f32>,
+}
+
+impl EncodedMedia {
+    pub fn new(embeddings: Vec<Vec<f32>>, grid: [usize; 3], kind: MediaKind) -> Self {
+        Self { embeddings, grid, kind, fps: None, deepstack: Vec::new(), runs: Vec::new(), timestamps: Vec::new() }
+    }
+}
+
+/// A vision (or audio) tower with its preprocessing: bytes in, embeddings plus the prompt text
+/// that reserves their positions out. The chat template renders one `marker` per media item; the
+/// server replaces it with `expand` and the decoder overwrites the token embeddings at the
+/// resulting `token_id` positions.
+pub trait MultimodalEncoder: Send + Sync {
+    fn family(&self) -> &'static str;
+    /// Width of the embeddings (must equal the hidden size of the language model).
+    fn output_hidden(&self) -> usize;
+    /// Text the chat template emits for one item of this kind; `None` when unsupported.
+    fn marker(&self, kind: MediaKind) -> Option<&str>;
+    /// Text that replaces the marker once the number of tokens is known.
+    fn expand(&self, media: &EncodedMedia) -> String;
+    /// Vocabulary id whose positions receive the embeddings.
+    fn token_id(&self, kind: MediaKind) -> Option<i64>;
+    fn encode_image(&self, bytes: &[u8]) -> Result<EncodedMedia, String>;
+    /// A clip given as encoded frames (PNG/JPEG/GIF) at `fps`.
+    fn encode_video(&self, _frames: &[Vec<u8>], _fps: f32) -> Result<EncodedMedia, String> {
+        Err(format!("{} models do not accept video", self.family()))
+    }
+    /// Whether the language model needs three-axis (M-RoPE) position ids for media prompts.
+    fn mrope_layout(&self) -> bool {
+        false
+    }
+    /// Position ids for a prompt of `total` tokens. Every span is (index of its first placeholder
+    /// token, its token grid, the item it belongs to); an item split into several runs of tokens
+    /// contributes one span per run.
+    fn positions(&self, _total: usize, _spans: &[(usize, [usize; 3], &EncodedMedia)]) -> Result<Option<MropePositions>, String> {
+        Ok(None)
+    }
+    /// Custom visible lengths per token for bidirectional attention (Gemma 3 image tokens or PaliGemma prefix-LM).
+    fn visible_lengths(&self, _total: usize, _spans: &[(usize, [usize; 3], &EncodedMedia)]) -> Result<Option<Vec<usize>>, String> {
+        Ok(None)
+    }
+}
+
+/// The vision tower stored in a model GGUF by `fllm-rs convert` (`fllm.vision.*` metadata and
+/// `v.hf.*` tensors), or `None` when the file has none or its family has no encoder in this build.
+pub fn load_from_model(
+    mapping: &MappedGguf,
+    threads: usize,
+    device: &str,
+) -> Result<Option<std::sync::Arc<dyn MultimodalEncoder>>, String> {
+    let meta = &mapping.index().metadata;
+    let Some(family) = meta.get("fllm.vision.family").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let config: Value = serde_json::from_str(
+        meta.get("fllm.vision.config")
+            .and_then(Value::as_str)
+            .ok_or("model has fllm.vision.family but no fllm.vision.config")?,
+    )
+    .map_err(|e| format!("invalid fllm.vision.config: {e}"))?;
+    match family {
+        "qwen2_vl" | "qwen2_5_vl" | "qwen3_vl" => Ok(Some(std::sync::Arc::new(qwen_vl::QwenVlEncoder::load(
+            mapping, family, &config, threads, device,
+        )?))),
+        "paligemma" | "gemma3" | "mllama" | "llava" => Ok(Some(std::sync::Arc::new(siglip::SiglipEncoder::load(
+            mapping, family, &config, threads, device,
+        )?))),
+        "whisper" => Ok(Some(std::sync::Arc::new(audio::WhisperMultimodalEncoder::load(
+            mapping, family, &config, threads, device,
+        )?))),
+        other => Err(format!("unsupported vision family {other:?} in the model file")),
+    }
+}
 
 struct VisionLayer {
     q: Linear,
@@ -179,28 +287,12 @@ impl VisionEncoder {
         Err("vision GPU projections require --features rust-gpu".into())
     }
     pub fn encode_data_url(&self, url: &str) -> Result<Vec<Vec<f32>>, String> {
-        let (header, encoded) = url
-            .split_once(',')
-            .ok_or("image must be a PNG/JPEG base64 data URL")?;
-        if !matches!(header, "data:image/png;base64" | "data:image/jpeg;base64")
-            || encoded.len() > 12 * 1024 * 1024
-        {
-            return Err("image must be a PNG/JPEG base64 data URL up to 9 MiB".into());
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|_| "invalid image base64")?;
-        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(8192);
-        limits.max_image_height = Some(8192);
-        limits.max_alloc = Some(128 * 1024 * 1024);
-        reader.limits(limits);
-        let rgb = reader
-            .decode()
-            .map_err(|e| format!("cannot decode image: {e}"))?
+        self.encode_bytes(&preprocess::resolve_image(url, None)?)
+    }
+    /// Decodes an image (any format the `image` crate was built with), scales it to the square
+    /// input of the tower and encodes it.
+    pub fn encode_bytes(&self, bytes: &[u8]) -> Result<Vec<Vec<f32>>, String> {
+        let rgb = image::DynamicImage::ImageRgb8(preprocess::decode_image(bytes)?)
             .resize_exact(
                 self.size as u32,
                 self.size as u32,
@@ -288,6 +380,33 @@ fn pixel_shuffle(x: &[f32], grid: usize, hidden: usize, scale: usize) -> Result<
     }
     Ok(out)
 }
+impl MultimodalEncoder for VisionEncoder {
+    fn family(&self) -> &'static str {
+        "idefics3"
+    }
+    fn output_hidden(&self) -> usize {
+        self.output_hidden
+    }
+    fn marker(&self, kind: MediaKind) -> Option<&str> {
+        (kind == MediaKind::Image).then_some("<image>")
+    }
+    fn expand(&self, media: &EncodedMedia) -> String {
+        format!(
+            "<fake_token_around_image><global-img>{}<fake_token_around_image>",
+            "<image>".repeat(media.embeddings.len())
+        )
+    }
+    fn token_id(&self, _kind: MediaKind) -> Option<i64> {
+        None
+    }
+    fn encode_image(&self, bytes: &[u8]) -> Result<EncodedMedia, String> {
+        let embeddings = self.encode_bytes(bytes)?;
+        let side = (embeddings.len() as f64).sqrt() as usize;
+        let grid = [1, side, embeddings.len() / side.max(1)];
+        Ok(EncodedMedia::new(embeddings, grid, MediaKind::Image))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

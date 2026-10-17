@@ -16,6 +16,8 @@
 //! | `minimax_m3` | `<mm:think>` … `</mm:think>` | MiniMax-M3 template |
 //! | `gemma4` | `<|channel>thought` … `<channel|>` | Gemma 4 template |
 //! | `gpt_oss` | Harmony channels: `analysis` is reasoning, `final` the answer | gpt-oss template |
+//! | `granite` | `Here is my thought process:` ... `Here is my response:` | Granite 3.2/3.3 template |
+//! | `hunyuan` | `<think>` ... `</think>` then the answer inside `<answer>` ... `</answer>` | Hunyuan-A13B |
 
 use std::sync::Arc;
 
@@ -182,6 +184,53 @@ impl ReasoningParser for TagReasoning {
             content,
             reasoning_found,
         }
+    }
+}
+
+/// Reasoning in `<think>` tags followed by an answer wrapped in `<answer>` tags (Hunyuan-A13B). The answer tags are not
+/// part of the content; a model that skips them still has its text returned.
+pub struct AnswerTagged {
+    inner: TagReasoning,
+}
+
+impl AnswerTagged {
+    const OPEN: &'static str = "<answer>";
+    const CLOSE: &'static str = "</answer>";
+
+    pub fn new(starts_open: bool) -> Self {
+        Self {
+            inner: TagReasoning::new("hunyuan", &["<think>"], &["</think>"], &["<think>", "</think>", Self::OPEN, Self::CLOSE], starts_open),
+        }
+    }
+}
+
+impl ReasoningParser for AnswerTagged {
+    fn id(&self) -> &'static str {
+        "hunyuan"
+    }
+
+    fn markers(&self) -> Vec<String> {
+        self.inner.markers()
+    }
+
+    fn split(&self, text: &str, complete: bool) -> ReasoningParts {
+        let mut parts = self.inner.split(text, complete);
+        let lead = parts.content.trim_start();
+        let tagged = lead.starts_with(Self::OPEN);
+        let mut content = lead.strip_prefix(Self::OPEN).unwrap_or(lead).to_owned();
+        if !complete && Self::OPEN.starts_with(lead) && !lead.is_empty() {
+            // `<ans` of a tag that is still being written
+            content.clear();
+        }
+        let trimmed = content.trim_end();
+        if let Some(body) = trimmed.strip_suffix(Self::CLOSE) {
+            content = body.to_owned();
+        } else if !complete {
+            content.truncate(safe_prefix_end(&content, &[Self::CLOSE]));
+        }
+        // inside answer tags the whitespace before `</answer>` is dropped at the end, so it is not streamed early
+        parts.content = if complete || tagged { content.trim().to_owned() } else { content.trim_start().to_owned() };
+        parts
     }
 }
 
@@ -415,6 +464,8 @@ pub enum Family {
     MiniMaxM3,
     Gemma4,
     GptOss,
+    Granite,
+    Hunyuan,
     None,
 }
 
@@ -438,6 +489,8 @@ const NAMES: &[(&str, Family, &[&str])] = &[
         Family::GptOss,
         &["gpt-oss", "gptoss", "harmony", "openai"],
     ),
+    ("granite", Family::Granite, &["granite3", "granite-3.3", "granite3.3"]),
+    ("hunyuan", Family::Hunyuan, &["hunyuan_a13b", "hunyuan-a13b"]),
     ("none", Family::None, &["off", "disabled"]),
 ];
 
@@ -481,6 +534,7 @@ impl Family {
             ("<seed:think>", Family::Seed),
             ("<mm:think>", Family::MiniMaxM3),
             ("[THINK]", Family::Mistral),
+            ("Here is my thought process:", Family::Granite),
         ];
         for (marker, family) in BY_TEMPLATE {
             if chat_template.contains(marker) {
@@ -540,6 +594,14 @@ impl Family {
                 ))
             }
             Family::Mistral => tags("mistral", "[THINK]", "[/THINK]", tail),
+            Family::Granite => Arc::new(TagReasoning::new(
+                "granite",
+                &["Here is my thought process:"],
+                &["Here is my response:"],
+                &[],
+                false,
+            )),
+            Family::Hunyuan => Arc::new(AnswerTagged::new(tail.ends_with("<think>"))),
             Family::Seed => tags("seed", "<seed:think>", "</seed:think>", tail),
             Family::MiniMaxM3 => tags("minimax_m3", "<mm:think>", "</mm:think>", tail),
             Family::Gemma4 => {
@@ -596,6 +658,57 @@ mod tests {
         assert!(last.reasoning.starts_with(&previous.reasoning));
         assert!(last.content.starts_with(&previous.content));
         last
+    }
+
+    #[test]
+    fn granite_thought_process_and_response_markers() {
+        let parser = Family::Granite.parser("<|start_of_role|>assistant<|end_of_role|>");
+        let text = "Here is my thought process: The user wants 6*7, which is 42. Here is my response: 6 times 7 is 42.";
+        let parts = stream(parser.as_ref(), text);
+        assert_eq!(parts.reasoning, "The user wants 6*7, which is 42.");
+        assert_eq!(parts.content, "6 times 7 is 42.");
+        assert!(parts.reasoning_found);
+        // no thinking requested: the answer stays untouched
+        let plain = stream(parser.as_ref(), "6 times 7 is 42.");
+        assert_eq!((plain.reasoning.as_str(), plain.content.as_str(), plain.reasoning_found), ("", "6 times 7 is 42.", false));
+        // cut off while thinking
+        let cut = parser.split("Here is my thought process: still thi", true);
+        assert_eq!((cut.reasoning.as_str(), cut.content.as_str()), ("still thi", ""));
+        let selected = Family::select("... write your response after 'Here is my thought process:' ...", None).unwrap();
+        assert_eq!(selected, Family::Granite);
+    }
+
+    #[test]
+    fn hunyuan_think_then_answer_tags() {
+        let parser = Family::Hunyuan.parser("<|startoftext|>user<|extra_0|>");
+        let text = "<think>
+Compute 6*7.
+</think>
+<answer>
+42
+</answer>";
+        let parts = stream(parser.as_ref(), text);
+        assert_eq!((parts.reasoning.as_str(), parts.content.as_str()), ("Compute 6*7.", "42"));
+        // a model without answer tags
+        let bare = stream(parser.as_ref(), "<think>x</think>
+plain answer");
+        assert_eq!(bare.content, "plain answer");
+        // no reasoning at all, with answer tags
+        let only = stream(parser.as_ref(), "<answer>
+hi
+</answer>");
+        assert_eq!((only.reasoning.as_str(), only.content.as_str()), ("", "hi"));
+        // a prompt that already opened the block
+        let open = Family::Hunyuan.parser("...<think>");
+        let parts = stream(open.as_ref(), "thinking</think><answer>done</answer>");
+        assert_eq!((parts.reasoning.as_str(), parts.content.as_str()), ("thinking", "done"));
+        // incomplete answer tag is never shown
+        let streamed = parser.split("<think>a</think>
+<ans", false);
+        assert_eq!(streamed.content, "");
+        let streamed = parser.split("<think>a</think>
+<answer>text</ans", false);
+        assert_eq!(streamed.content, "text");
     }
 
     #[test]

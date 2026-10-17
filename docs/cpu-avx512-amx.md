@@ -3,7 +3,7 @@
 Package 14 of the multi-backend round. The performance statements below are design reasons, not
 results. See "What was run" and "Hardware test plan".
 
-**Status update.** When this package was written no AVX-512 or AMX instruction had ever been executed (test
+**Status update.** When these kernels were written no AVX-512 or AMX instruction had ever been executed (test
 level L0). Since then the kernels have run on a Zen 5 EPYC (Colab: `selftest-cpu`, three models, prefill
 +47 % on `avx512-vnni` against `avx512bw`) and, for every tier up to `amx`, under Intel SDE (unit tests, `selftest-cpu --tiers all`; two
 models end to end on `avx512bw` and `avx512-vnni`); that found and fixed one real defect (misaligned `vmovdqa` in the
@@ -76,7 +76,7 @@ the extra features and the policy in one line.
 
 ## Kernels and dispatch (with `--features avx512`)
 
-Added to the table of `cpu-kernels.md`; "(new)" marks what this package adds.
+Added to the table of `cpu-kernels.md`; "(new)" marks the kernels added with the AVX-512/AMX tiers.
 
 | Kernel | Choice, left to right |
 | --- | --- |
@@ -206,7 +206,7 @@ in, in this order: the AMX tile configuration (shapes rejected as `#UD`/SIGILL),
 orders of `codebook`/`kextra` (wrong values, not crashes), the `vdpbf16ps` pair order, the permission
 request in a container or VM that filters `arch_prctl`. For A/B timings use
 `FLLM_CPU_ISA=<tier>`, `FLLM_X86_WIDE_FLOAT`, `FLLM_VNNI_GEMM`, `FLLM_AMX_MIN_BATCH` and the existing
-`--no-repack`. L1 means `selftest-cpu` passes, L2 means the greedy text of a real model equals the
+`--no-repack`. L1 means `selftest-cpu` passes (see [test levels](test-levels.md)), L2 means the greedy text of a real model equals the
 `avx2` run, L3 a comparison against llama.cpp on the same machine.
 
 ## Not implemented

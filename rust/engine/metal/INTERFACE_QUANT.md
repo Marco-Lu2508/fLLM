@@ -1,4 +1,4 @@
-# Quantized linear kernels for Metal (package p06a) - interface contract
+# Quantized linear kernels for Metal - interface contract
 
 Verification level: **L0**. The MSL text was (1) parsed with the clang-based syntax shim of `mslcheck.sh`, (2) compiled as C++ with an
 emulation of `simd_sum`, `threadgroup_barrier` and `simdgroup_matrix` and **executed on the CPU** (`emu/`, one C++ thread per Metal thread)
@@ -110,20 +110,19 @@ the largest error relative to `sum |w x|`:
 cargo test --release -p fllm-engine --features metal metal_quant_kernels -- --nocapture
 ```
 
-The file is **not wired into `weights.rs`**: it uses the Metal core of package p05, which the branch of this package does not contain. After merging p05 add
-`pub mod gpu_check;` to `weights.rs` (above `pub mod sample;`). It was type-checked and passes clippy `-D warnings` for `aarch64-apple-darwin` in an overlay of
-p05 + p06a (`--features metal --tests`). `gpu_check::run(&MetalContext)` can also be called from a `selftest-gpu` check. If a format fails, run the same shape
+The file is **not wired into `weights.rs`**: it uses the Metal core (`MetalContext`) and is therefore not part of the standalone kernel set. When the Metal core is built, add
+`pub mod gpu_check;` to `weights.rs` (above `pub mod sample;`). It was type-checked and passes clippy `-D warnings` for `aarch64-apple-darwin` together with the Metal core (`--features metal --tests`). `gpu_check::run(&MetalContext)` can also be called from a `selftest-gpu` check. If a format fails, run the same shape
 with `FLLM_METAL_SERIAL=1` first (rules out missing barriers; there are none between the prepass and the main kernel except the declared buffer access), then
 compare the `[ok]`/`[FAIL]` pattern: only `_h` kernels failing points at the half tiles, only one format failing at its decoder (`emu/` runs the same decoder on the CPU).
 
-## Reusing the bodies (packages p06b / p06c)
+## Reusing the bodies (non-matmul and recurrent kernels)
 
 `q_fmt_<fmt>::dec8(w, g, c, plane1, out)` (common.metal) decodes 8 weights of any format from a `device const uchar*` base pointer; `q_mv_body<F, NR>` and
 `q_mm_body<F, T>` take that base pointer, so an expert-wise matrix-vector product (MoE, base pointer from an `AddressTable`) or a quantized embedding
 lookup (`dec8` of the row's chunks) can call them with another `w` (and `p.plane1` of that expert) instead of re-implementing the formats. All symbols are
 prefixed `q_` / `Q_`; function constant 500 is reserved.
 
-## Using the plan (sketch for package p07)
+## Using the plan (sketch for the stream)
 
 ```rust
 let caps = MetalCapsLike::new(info.simdgroup_matrix, info.bfloat, 32 /* or pipeline.simd_width() */, info.max_threads_per_threadgroup, info.has_unified_memory);

@@ -300,6 +300,14 @@ int fllm_attention3_try(cudaStream_t s, const float *q, const uint16_t *kpool, c
     if ((reinterpret_cast<uintptr_t>(kpool) & 15) != 0 || (reinterpret_cast<uintptr_t>(vpool) & 15) != 0 ||
         ((size_t)kv_heads * dk * (kind == 1 ? 2 : 1)) % 16 != 0)
         return -1;
+    // FP16 q and result (FLLM_ACT_DTYPE=f16, act_api.inc): only FlashInfer reads and writes those
+    if (fllm_attn_half_io)
+        return kind == 1 && sinks == nullptr ? fllm_flashinfer_prefill_try(s, q, kpool, vpool, out, tables, rows, kv_len, heads, kv_heads, dk, dv, block_size, scale) : -1;
+    // FlashAttention-3 kernel (FlashInfer's Hopper port) on sm_90, FLLM_ATTN_BACKEND=auto|fa2|fa3
+    if (kind == 1 && sinks == nullptr) {
+        const int rc3 = fllm_fa3_prefill_try(s, q, kpool, vpool, out, tables, rows, kv_len, heads, kv_heads, dk, dv, block_size, scale, 0);
+        if (rc3 >= 0) return rc3;
+    }
     // FlashInfer's prefill kernel (Apache-2.0) is faster where it applies: f16 cache, no attention sinks
     if (kind == 1 && sinks == nullptr) {
         const int rc = fllm_flashinfer_prefill_try(s, q, kpool, vpool, out, tables, rows, kv_len, heads, kv_heads, dk, dv,

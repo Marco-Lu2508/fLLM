@@ -6,7 +6,7 @@ All `fllm-rs serve` options with their exact flag names and defaults, taken from
 arguments prints the usage summary.
 
 ```sh
-fllm-rs serve --model MODEL.gguf [--device auto|cpu|vulkan|metal|dx12] ...
+fllm-rs serve --model MODEL.gguf [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] ...
 fllm-rs devices            # compiled backends, detected devices, CPU ISA
 fllm-rs selftest-cpu       # check every CPU kernel tier against scalar references (docs/cpu-kernels.md)
 fllm-rs --help             # usage summary
@@ -21,14 +21,14 @@ fllm-rs --help             # usage summary
 | `--port` | integer | `8000` | Listen port |
 | `--model-name`, `--served-name` | string | model file stem | Model id reported by `/v1/models`, `/api/tags` and responses |
 | `--api-key` | string | value of `FLLM_API_KEY`, if set | Requires `Authorization: Bearer <key>` on all routes except `/health`, `/metrics`, `/api/tags`, `/api/version`, `/get_model_info`, `/get_server_info` |
-| `--tool-parser` | `auto` or a parser id | `auto` | How tool calls are read from the reply: `hermes`, `qwen3_coder`, `glm`, `minicpm`, `llama3`, `mistral`, `deepseek`, `deepseek_v32`, `deepseek_v4`, `kimi`, `gpt_oss`, `gemma4`, `functiongemma`, `minimax`, `minimax_m1`, `granite3`, `phi4`, `lfm2`, `k2horizon`, `none`. `auto` picks from the chat template and architecture; see [Tools und Reasoning](server-api.md#tools-und-reasoning) |
+| `--tool-parser` | `auto` or a parser id | `auto` | How tool calls are read from the reply: `hermes`, `qwen3_coder`, `glm`, `minicpm`, `llama3`, `mistral`, `deepseek`, `deepseek_v32`, `deepseek_v4`, `kimi`, `gpt_oss`, `gemma4`, `functiongemma`, `minimax`, `minimax_m1`, `granite3`, `phi4`, `lfm2`, `k2horizon`, `none`. `auto` picks from the chat template and architecture; see [Tools and reasoning](server-api.md#tools-and-reasoning) |
 | `--reasoning-parser` | `auto` or a format id | `auto` | How reasoning is split from the answer: `think`, `ifm`, `mistral`, `seed`, `minimax_m3`, `gemma4`, `gpt_oss`, `none`. `auto` picks from the chat template, default `think` |
 | `--no-repack` | flag | off | CPU only: prompts use the streaming kernels instead of the prompt-time repacking (Q4_0/Q5_0 into Q8_0 tiles, K formats on decoded panels). Nothing is stored either way; the switch exists for A/B measurements. `FLLM_NO_REPACK=1` does the same |
 | `--ctx`, `--ctx-size`, `--max-model-len` | integer | `4096` | Context window; `prompt + max_tokens` must fit into it |
 | `--max-seqs` | integer | `16` | Sequences scheduled concurrently |
 | `--max-batched-tokens` | integer | `512` | Token budget per model call (also the prefill chunk size) |
 | `--threads` | integer | all available cores | CPU worker threads (`std::thread::available_parallelism`) |
-| `--device` | string (lowercased) | `auto` | `auto` and `cpu` select the CPU. `vulkan`, `metal`, `dx12` (also `gpu`/`wgpu` = all compiled backends) need the `rust-gpu` feature; a software adapter is refused. Any other value fails with `unsupported Rust GPU backend …` (or, without the feature, `rebuild with --features rust-gpu …`) — including `cuda`, which the built-in usage line mentions but the parser does not accept |
+| `--device` | string (lowercased) | `auto` | `auto` takes the best GPU of the build in the order CUDA > ROCm > Metal > Vulkan > DX12 > SYCL (`FLLM_AUTO_ORDER` changes the order) and falls back to the CPU when there is none; `cpu` forces the CPU. `cuda`, `hip` (ROCm), `metal`, `vulkan`, `dx12`, `sycl`, `npu`, `tpu` select that backend when it was compiled in; `BACKEND:N` picks device N of a backend (`vulkan:1` is the second Vulkan device; `fllm-rs devices` prints the value to use); `gpu`/`wgpu` mean any wgpu adapter and need the `rust-gpu` feature. An explicit GPU request fails if the backend is unavailable or only a software adapter exists. See [device-selection.md](device-selection.md) |
 | `-C`, `--pin-cores`, `--p-cores`, `--pin-mask` | string | none | Linux only: pin the process to a CPU affinity mask — `8` (first 8 cores), `0,2,3` (core list) or `0xFF5` (hex mask) |
 
 `--revision REV`, `--local-files-only` and `--offline` apply to `hf://` model references:

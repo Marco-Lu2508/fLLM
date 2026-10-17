@@ -133,6 +133,7 @@ impl SyclBackend {
             supports_kv_cache_write: true,
             supports_embedding_lookup: true,
             supports_device_sampling: false, // host fallback
+            sample_on_device: false,
             supports_residual_add: true,
             supports_moe: false, // routing and expert projections run through moe_topk / moe_linear, not moe_expert_gemm
             max_batch_size: 4096,
@@ -399,6 +400,8 @@ impl Backend for SyclBackend {
             value_dim,
             words_per_layer_k,
             words_per_layer_v,
+            layout: None,
+            layer_geoms: None,
         })
     }
 }
@@ -947,6 +950,7 @@ impl Stream for SyclStream {
         params: &AttentionParams,
     ) -> Result<(), BackendError> {
         params.validate(kv, block_tables, lengths, layer_idx)?;
+        check_kv_kind(kv)?;
         let (dk, dv, heads) = (params.head_dim, params.value_dim, params.num_heads);
         let rows = lengths.len();
         if rows == 0 {
@@ -1024,6 +1028,7 @@ impl Stream for SyclStream {
         v: &DeviceBuffer,
     ) -> Result<(), BackendError> {
         validate_kv_write(kv, layer_idx, slots, k.size, v.size)?;
+        check_kv_kind(kv)?;
         if slots.is_empty() {
             return Ok(());
         }
@@ -1087,6 +1092,16 @@ impl Stream for SyclStream {
         warn_fallback_reason("sampling_logits", "no SYCL sampling kernel yet");
         let cl = self.copy_to_host(logits)?;
         self.cpu_stream.sampling_logits(token_ids_out, &cl, params)
+    }
+}
+
+/// The kernels read and write the f16 (1) and q8_0 (2) caches only; the other kinds (bf16, fp8, int8, q4, nvfp4 ...) would be
+/// misread as f16, so they are reported as unsupported (the caller falls back or skips).
+fn check_kv_kind(kv: &DeviceKvCache) -> Result<(), BackendError> {
+    if matches!(kv.kv_kind, 1 | 2) {
+        Ok(())
+    } else {
+        Err(BackendError::UnsupportedOperation(format!("KV cache kind {} (expected 1 = f16 or 2 = q8_0)", kv.kv_kind)))
     }
 }
 

@@ -1,6 +1,9 @@
 pub mod autotune;
 pub mod backend;
+pub mod chat_template;
 pub mod bench;
+pub mod bench_kernel;
+pub mod comm;
 pub mod compute;
 pub mod config;
 pub mod cpu_arm;
@@ -8,6 +11,7 @@ pub mod cpu_attention;
 pub mod cpu_avx512;
 pub mod cpu_elementwise;
 pub(crate) mod cpu_delta;
+pub(crate) mod cpu_kda;
 pub mod cpu_float;
 pub mod cpu_kernels;
 #[cfg(target_arch = "x86_64")]
@@ -19,13 +23,19 @@ pub mod cpu_quantized;
 pub mod cpu_selftest;
 mod cpu_schedule;
 pub mod draft;
+pub(crate) mod kv_blocks;
+pub mod speculative;
 pub mod encoder;
+pub mod encoder_decoder;
+pub mod encoder_heads;
+pub mod encoder_lora;
 pub mod encoder_server;
 pub mod metrics;
 pub mod webui;
 #[cfg(feature = "rust-gpu")]
 pub mod gpu;
 pub mod mem;
+pub mod parallel;
 pub mod parameters;
 pub mod reasoning;
 pub mod rope;
@@ -40,15 +50,37 @@ pub mod vision;
 pub mod runtime;
 pub mod scheduler;
 pub mod server;
+pub mod tiny_model;
 pub use runtime::{BatchStats, InferenceRuntime, TokenEvent};
 
 pub mod tokenizer;
 
 #[cfg(test)]
 mod import_tests;
+#[cfg(test)]
+mod tokenizer_convert_tests;
+
+#[cfg(test)]
+mod gemma_tests;
+#[cfg(test)]
+mod spec_tests;
+
+pub mod hybrid_config;
+
+#[cfg(test)]
+mod hybrid_tests;
+#[cfg(test)]
+mod device_fallback_tests;
+
+#[cfg(test)]
+mod msl_check;
+
+#[cfg(test)]
+mod tiny_models;
 
 pub mod devices;
 pub mod lowbit;
+pub mod mla_latent;
 pub mod model;
 pub use devices::{compiled_backends, device_caps, is_backend_available, list_devices, DeviceCaps, DeviceInfo, DeviceType};
 pub use lowbit::{
@@ -140,7 +172,10 @@ pub mod quant_iq;
 
 pub mod cli;
 pub mod hub;
+pub mod version;
 pub mod import;
 pub mod kv_format;
+pub mod kv_geometry;
 pub mod catalog;
 pub mod ppl;
+pub use rust_decoder::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};

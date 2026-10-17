@@ -1402,6 +1402,214 @@ const K2HORIZON: SimpleParser = simple(
     body_k2horizon,
 );
 
+// --- more families ----------------------------------------------------------------------------
+
+/// InternLM2/2.5: `<|action_start|><|plugin|>\n{"name":…,"parameters":…}<|action_end|>` (vLLM `internlm2`).
+const INTERNLM_PAIRS: &[MarkerPair] = &[("<|action_start|>", Some("<|action_end|>"))];
+const INTERNLM_EXTRA: &[&str] = &["<|plugin|>"];
+
+fn body_internlm(payload: &str) -> Result<Vec<RawCall>, String> {
+    let body = payload.trim().strip_prefix("<|plugin|>").unwrap_or(payload).trim();
+    // `<|interpreter|>` blocks carry code, not a function call
+    json_calls(body)
+}
+
+/// Granite-20B-FC: `<function_call> {"name":…,"arguments":…}`, the marker repeated for every call.
+const GRANITE20B_PAIRS: &[MarkerPair] = &[("<function_call>", None)];
+/// Seed-OSS: the Qwen3-Coder XML inside `<seed:tool_call>` tags.
+const SEED_PAIRS: &[MarkerPair] = &[("<seed:tool_call>", Some("</seed:tool_call>"))];
+/// Step-3: calls inside `<｜tool_calls_begin｜>` (note the plain underscores, unlike DeepSeek's `▁`).
+const STEP3_PAIRS: &[MarkerPair] = &[
+    ("<｜tool_calls_begin｜>", Some("<｜tool_calls_end｜>")),
+    ("<｜tool_call_begin｜>", Some("<｜tool_call_end｜>")),
+];
+const STEP3_EXTRA: &[&str] = &["<｜tool_sep｜>"];
+
+/// `function<｜tool_sep｜><steptml:invoke name="F"><steptml:parameter name="K">V</steptml:parameter></steptml:invoke>`.
+fn body_step3(payload: &str) -> Result<Vec<RawCall>, String> {
+    invoke_calls(payload, "steptml:")
+}
+
+/// Llama 4 and other Pythonic models may wrap the list in `<|python_start|>` … `<|python_end|>`.
+const LLAMA4_PAIRS: &[MarkerPair] = &[("<|python_start|>", Some("<|python_end|>"))];
+/// OLMo-3: one Python call per line between `<function_calls>` tags.
+const OLMO3_PAIRS: &[MarkerPair] = &[("<function_calls>", Some("</function_calls>"))];
+/// Gemma 3 function calling (and ToolACE-style prompts): a ```` ```tool_code ```` block with one call per line.
+const TOOL_CODE_PAIRS: &[MarkerPair] = &[("```tool_code", Some("```"))];
+
+/// Calls written one per line (`get_weather(city="Köln")`), without the surrounding list.
+fn body_call_lines(payload: &str) -> Result<Vec<RawCall>, String> {
+    let lines: Vec<&str> = payload.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return Err("no call in the block".into());
+    }
+    body_lfm2(&format!("[{}]", lines.join(",")))
+}
+
+const INTERNLM: SimpleParser = simple("internlm", INTERNLM_PAIRS, INTERNLM_EXTRA, body_internlm);
+const GRANITE20B: SimpleParser = SimpleParser {
+    id: "granite20b",
+    pairs: GRANITE20B_PAIRS,
+    extra: &[],
+    body: json_calls,
+    requires_json: true,
+};
+const SEED_OSS: SimpleParser = simple("seed_oss", SEED_PAIRS, &[], body_tool_call);
+const STEP3: SimpleParser = simple("step3_steptml", STEP3_PAIRS, STEP3_EXTRA, body_step3);
+const LLAMA4_PYTHONIC: SimpleParser = simple("llama4_pythonic", LLAMA4_PAIRS, &[], body_lfm2);
+const OLMO3: SimpleParser = simple("olmo3", OLMO3_PAIRS, &[], body_call_lines);
+const TOOL_CODE: SimpleParser = simple("tool_code", TOOL_CODE_PAIRS, &[], body_call_lines);
+
+/// A bare Python call list as the whole reply or a whole line: `[get_weather(city="SF"), other(x=1)]`
+/// (Llama 4, ToolACE, Gemma-3 prompts; vLLM `pythonic`). Prose with brackets (`[1]`, `[note]`) stays content:
+/// the bracket must open a line and be followed by `name(`.
+pub struct PythonicParser;
+
+impl PythonicParser {
+    /// `Some(true)` once `[ name (` is complete, `None` while the text ends before the decision is possible.
+    fn looks_like_calls(text: &str, open: usize) -> Option<bool> {
+        let rest = text[open + 1..].trim_start();
+        let first = rest.chars().next()?;
+        if !(first.is_alphabetic() || first == '_') {
+            return Some(false);
+        }
+        for (index, ch) in rest.char_indices() {
+            if ch.is_alphanumeric() || matches!(ch, '_' | '.') {
+                continue;
+            }
+            let after = rest[index..].trim_start();
+            return if after.is_empty() { None } else { Some(after.starts_with('(')) };
+        }
+        None
+    }
+}
+
+impl ToolParser for PythonicParser {
+    fn id(&self) -> &'static str {
+        "pythonic"
+    }
+    fn pairs(&self) -> &'static [MarkerPair] {
+        &[("[", None)]
+    }
+    fn lenient_end(&self) -> bool {
+        false
+    }
+    fn find_open(&self, text: &str, from: usize) -> Option<usize> {
+        let mut at = from;
+        while let Some(offset) = text[at..].find('[') {
+            let start = at + offset;
+            let opens_line = text[..start].rsplit('\n').next().is_none_or(|line| line.trim().is_empty());
+            if opens_line && Self::looks_like_calls(text, start) != Some(false) {
+                return Some(start);
+            }
+            at = start + 1;
+        }
+        None
+    }
+    fn span_end(&self, text: &str, start: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut quote: Option<u8> = None;
+        let mut escaped = false;
+        for (index, byte) in text.bytes().enumerate().skip(start) {
+            if let Some(q) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(index + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    fn payload<'t>(&self, text: &'t str, start: usize, end: usize) -> &'t str {
+        &text[start..end]
+    }
+    fn decode(&self, payload: &str) -> Result<Vec<RawCall>, String> {
+        body_lfm2(payload)
+    }
+}
+
+/// xLAM (Salesforce): a JSON array of calls, bare (`[{"name":…,"arguments":…}]`), in a ```` ```json ```` fence
+/// or after `[TOOL_CALLS]`; the array may follow reasoning (`</think>`).
+pub struct XlamParser;
+
+impl XlamParser {
+    const FENCE: &'static str = "```json";
+    const TAG: &'static str = "[TOOL_CALLS]";
+
+    /// `[` followed by `{`, or by nothing yet.
+    fn bare_start(text: &str, open: usize) -> bool {
+        let opens_line = text[..open].rsplit('\n').next().is_none_or(|line| line.trim().is_empty());
+        opens_line && matches!(text[open + 1..].trim_start().chars().next(), Some('{') | None)
+    }
+}
+
+impl ToolParser for XlamParser {
+    fn id(&self) -> &'static str {
+        "xlam"
+    }
+    fn pairs(&self) -> &'static [MarkerPair] {
+        &[(Self::FENCE, Some("```")), (Self::TAG, None)]
+    }
+    fn find_open(&self, text: &str, from: usize) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for marker in [Self::FENCE, Self::TAG] {
+            if let Some(at) = text[from..].find(marker) {
+                best = Some(best.map_or(from + at, |b: usize| b.min(from + at)));
+            }
+        }
+        let mut at = from;
+        while let Some(offset) = text[at..].find('[') {
+            let start = at + offset;
+            if text[start..].starts_with(Self::TAG) {
+                at = start + 1;
+                continue;
+            }
+            if Self::bare_start(text, start) {
+                best = Some(best.map_or(start, |b| b.min(start)));
+                break;
+            }
+            at = start + 1;
+        }
+        best
+    }
+    fn span_end(&self, text: &str, start: usize) -> Option<usize> {
+        if text[start..].starts_with(Self::FENCE) {
+            let after = start + Self::FENCE.len();
+            return text[after..].find("```").map(|o| after + o + 3);
+        }
+        let json_from = if text[start..].starts_with(Self::TAG) { start + Self::TAG.len() } else { start };
+        json_span_end(text, json_from)
+    }
+    fn payload<'t>(&self, text: &'t str, start: usize, end: usize) -> &'t str {
+        if text[start..].starts_with(Self::FENCE) {
+            let inner = &text[start + Self::FENCE.len()..end];
+            return inner.strip_suffix("```").unwrap_or(inner);
+        }
+        if text[start..].starts_with(Self::TAG) {
+            return &text[start + Self::TAG.len()..end];
+        }
+        &text[start..end]
+    }
+    fn decode(&self, payload: &str) -> Result<Vec<RawCall>, String> {
+        json_calls(payload)
+    }
+}
+
 /// Mistral: `[TOOL_CALLS]` followed by either a JSON array of calls (Mistral 7B v0.3, Nemo)
 /// or `NAME[ARGS]{json}` with an optional `[CALL_ID]xxxxxxxxx` (Mistral Small 3.x, Devstral,
 /// Ministral); several calls repeat the marker.
@@ -1652,7 +1860,7 @@ const NAMES: &[(&str, &[&str])] = &[
         "hermes",
         &[
             "qwen", "qwen2", "qwen2_5", "qwen3", "nous", "granite", "granite4", "hermes2",
-            "hermes3",
+            "hermes3", "hermes_2_pro", "hermes-2-pro", "ernie", "ernie45", "ernie4_5", "qwen3_omni",
         ],
     ),
     (
@@ -1687,7 +1895,16 @@ const NAMES: &[(&str, &[&str])] = &[
     ("gemma4", &["gemma", "gemma-4"]),
     ("functiongemma", &["function_gemma", "function-gemma"]),
     ("minimax", &["minimax_m2", "minimax-m2"]),
-    ("minimax_m1", &["minimax-m1", "apriel"]),
+    ("minimax_m1", &["minimax-m1", "apriel", "hunyuan", "hunyuan_a13b", "jamba"]),
+    ("pythonic", &["toolace", "python"]),
+    ("llama4_pythonic", &["llama4", "llama-4"]),
+    ("olmo3", &["olmo-3"]),
+    ("tool_code", &["gemma3", "gemma-3"]),
+    ("xlam", &["salesforce"]),
+    ("internlm", &["internlm2", "internlm2.5", "internlm3"]),
+    ("granite20b", &["granite-20b-fc", "granite_20b_fc"]),
+    ("seed_oss", &["seed-oss", "seed"]),
+    ("step3_steptml", &["step-3", "step3_v1"]),
     ("granite3", &["granite-3", "granite3.3"]),
     (
         "phi4",
@@ -1745,6 +1962,15 @@ pub fn by_name(name: &str) -> Result<std::sync::Arc<dyn ToolParser>, String> {
         "phi4" => Arc::new(PHI4),
         "lfm2" => Arc::new(LFM2),
         "k2horizon" => Arc::new(K2HORIZON),
+        "pythonic" => Arc::new(PythonicParser),
+        "llama4_pythonic" => Arc::new(LLAMA4_PYTHONIC),
+        "olmo3" => Arc::new(OLMO3),
+        "tool_code" => Arc::new(TOOL_CODE),
+        "xlam" => Arc::new(XlamParser),
+        "internlm" => Arc::new(INTERNLM),
+        "granite20b" => Arc::new(GRANITE20B),
+        "seed_oss" => Arc::new(SEED_OSS),
+        "step3_steptml" => Arc::new(STEP3),
         _ => Arc::new(PlainParser),
     };
     Ok(parser)
@@ -1780,6 +2006,13 @@ pub fn select(
         ("<start_function_call>", "functiongemma"),
         ("<minimax:tool_call>", "minimax"),
         ("<|tool_call_start|>", "lfm2"),
+        ("<seed:tool_call>", "seed_oss"),
+        ("<|action_start|>", "internlm"),
+        ("<｜tool_calls_begin｜>", "step3_steptml"),
+        ("<function_call>", "granite20b"),
+        ("<|python_start|>", "llama4_pythonic"),
+        ("```tool_code", "tool_code"),
+        ("<function_calls>", "olmo3"),
         ("[TOOL_CALLS]", "mistral"),
         ("<|python_tag|>", "llama3"),
         ("<arg_key>", "glm"),
@@ -1805,6 +2038,8 @@ pub fn select(
         ("gpt-oss", "gpt_oss"),
         ("gptoss", "gpt_oss"),
         ("minicpm", "minicpm"),
+        ("internlm", "internlm"),
+        ("seed_oss", "seed_oss"),
         ("kimi", "kimi"),
         ("glm", "glm"),
         ("minimax", "minimax"),
@@ -2364,6 +2599,161 @@ mod tests {
                     let _ = extract(p.as_ref(), &text[..cut], false);
                 }
             }
+        }
+    }
+
+    // --- pythonic, xLAM, InternLM, Granite-20B-FC, Seed-OSS, Step-3, OLMo-3, tool_code, Hunyuan/Jamba ------------
+    // Model outputs follow the examples in vLLM's parser tests (tests/entrypoints/openai/tool_parsers).
+
+    #[test]
+    fn pythonic_single_multiple_and_nested_arguments() {
+        let p = parser("pythonic");
+        let out = run(p.as_ref(), "[get_weather(city='San Francisco', metric='celsius')]");
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(args(&out.calls[0]), json!({"city": "San Francisco", "metric": "celsius"}));
+        assert_eq!(out.content, "");
+
+        let text = "[get_weather(city='San Francisco', metric='celsius'), register_user(name='John Doe', age=37, address={'city': 'San Francisco', 'state': 'CA'}, role=None, passed_test=True, aliases=['John', 'Johnny'])]";
+        let out = run(p.as_ref(), text);
+        assert_eq!(names(&out), ["get_weather", "register_user"]);
+        assert_eq!(
+            args(&out.calls[1]),
+            json!({"name": "John Doe", "age": 37, "address": {"city": "San Francisco", "state": "CA"}, "role": null, "passed_test": true, "aliases": ["John", "Johnny"]})
+        );
+        let out = run(p.as_ref(), "[get_current_time()]");
+        assert_eq!(args(&out.calls[0]), json!({}));
+    }
+
+    #[test]
+    fn pythonic_text_before_quotes_with_brackets_and_prose_brackets() {
+        let p = parser("pythonic");
+        let out = run(p.as_ref(), "Let me check.\n[search(query=\"a ] b ) c\", tags=['x', \"y'z\"])]");
+        assert_eq!(out.content, "Let me check.\n");
+        assert_eq!(args(&out.calls[0]), json!({"query": "a ] b ) c", "tags": ["x", "y'z"]}));
+        // brackets in prose are not calls
+        let prose = "See [1] and [note] or [a, b] and arr[0](x).";
+        let out = run(p.as_ref(), prose);
+        assert_eq!(out.content, prose);
+        assert!(out.calls.is_empty());
+    }
+
+    #[test]
+    fn pythonic_malformed_and_truncated_stay_content() {
+        let p = parser("pythonic");
+        for bad in ["[get_weather(city=", "[get_weather('x')]", "[get_weather(city='x'", "[f(a=1) g(b=2)]"] {
+            let streamed = run(p.as_ref(), bad);
+            assert!(streamed.calls.is_empty(), "{bad}: {:?}", streamed.calls);
+            assert_eq!(streamed.content, bad, "{bad}");
+        }
+    }
+
+    #[test]
+    fn pythonic_text_after_the_list_stays_content() {
+        let out = run(parser("pythonic").as_ref(), "[get_weather(city='x')] trailing");
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(out.content, " trailing");
+    }
+
+    #[test]
+    fn llama4_python_tags_olmo3_lines_and_tool_code_blocks() {
+        let out = run(parser("llama4_pythonic").as_ref(), "<|python_start|>[get_weather(city=\"SF\")]<|python_end|>");
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(out.content, "");
+        let out = run(parser("olmo3").as_ref(), "Checking.\n<function_calls>\nget_weather(city='SF')\nget_time(zone=\"UTC\", fmt='24h')\n</function_calls>");
+        assert_eq!(names(&out), ["get_weather", "get_time"]);
+        assert_eq!(args(&out.calls[1]), json!({"zone": "UTC", "fmt": "24h"}));
+        assert_eq!(out.content, "Checking.\n");
+        let out = run(parser("tool_code").as_ref(), "```tool_code\nget_weather(city='SF')\n```\nDone.");
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(out.content, "\nDone.");
+        // truncated and empty blocks come back unchanged
+        let cut = "<function_calls>\nget_weather(city=";
+        assert_eq!(run(parser("olmo3").as_ref(), cut).content, cut);
+        let empty = "<function_calls>\n</function_calls>";
+        assert_eq!(run(parser("olmo3").as_ref(), empty).content, empty);
+    }
+
+    #[test]
+    fn xlam_bare_fenced_and_tagged_arrays() {
+        let p = parser("xlam");
+        let out = run(p.as_ref(), "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"SF\"}}, {\"name\": \"calc\", \"arguments\": {\"expr\": \"2+2\"}}]");
+        assert_eq!(names(&out), ["get_weather", "calc"]);
+        assert_eq!(out.content, "");
+        let out = run(p.as_ref(), "I will look it up.\n```json\n[{\"name\": \"f\", \"arguments\": {\"a\": 1}}]\n```");
+        assert_eq!(names(&out), ["f"]);
+        assert_eq!(out.content, "I will look it up.\n");
+        let out = run(p.as_ref(), "</think>\n[TOOL_CALLS][{\"name\": \"g\", \"arguments\": {}}]");
+        assert_eq!(names(&out), ["g"]);
+        assert_eq!(out.content, "</think>\n");
+        let prose = "The list [1, 2] and [x] stay.";
+        assert_eq!(run(p.as_ref(), prose).content, prose);
+        let bad = "[{\"name\": \"f\", \"arguments\": ";
+        assert_eq!(run(p.as_ref(), bad).content, bad);
+    }
+
+    #[test]
+    fn internlm_plugin_calls() {
+        let p = parser("internlm");
+        let text = "I need the weather.<|action_start|><|plugin|>\n{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Berlin\"}}<|action_end|>";
+        let out = run(p.as_ref(), text);
+        assert_eq!(out.content, "I need the weather.");
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(args(&out.calls[0]), json!({"city": "Berlin"}));
+        // the code interpreter block is not a function call
+        let code = "<|action_start|><|interpreter|>\nprint(1)<|action_end|>";
+        assert_eq!(run(p.as_ref(), code).content, code);
+    }
+
+    #[test]
+    fn granite20b_repeated_function_call_markers() {
+        let p = parser("granite20b");
+        let text = "<function_call> {\"name\": \"get_weather\", \"arguments\": {\"city\": \"SF\"}}\n<function_call> {\"name\": \"calc\", \"arguments\": {\"expr\": \"2+2\"}}";
+        let out = run(p.as_ref(), text);
+        assert_eq!(names(&out), ["get_weather", "calc"]);
+        assert_eq!(out.content.trim(), "");
+        // prose that merely mentions the marker is not buffered forever
+        assert_eq!(run(p.as_ref(), "use <function_call> like this").content, "use <function_call> like this");
+    }
+
+    #[test]
+    fn seed_oss_and_step3_xml_calls() {
+        let text = "<seed:think>need weather</seed:think>\n<seed:tool_call>\n<function=get_weather>\n<parameter=location>Barcelona, Spain</parameter>\n<parameter=days>3</parameter>\n</function>\n</seed:tool_call>";
+        let out = run(parser("seed_oss").as_ref(), text);
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(args(&out.calls[0]), json!({"location": "Barcelona, Spain", "days": 3}));
+        assert!(out.content.starts_with("<seed:think>"));
+
+        let text = "Checking.<｜tool_calls_begin｜>\n<｜tool_call_begin｜>function<｜tool_sep｜><steptml:invoke name=\"get_weather\">\n<steptml:parameter name=\"location\">Paris</steptml:parameter>\n<steptml:parameter name=\"unit\">celsius</steptml:parameter>\n</steptml:invoke><｜tool_call_end｜>\n<｜tool_calls_end｜>";
+        let out = run(parser("step3_steptml").as_ref(), text);
+        assert_eq!(names(&out), ["get_weather"]);
+        assert_eq!(args(&out.calls[0]), json!({"location": "Paris", "unit": "celsius"}));
+        assert_eq!(out.content, "Checking.");
+    }
+
+    #[test]
+    fn hunyuan_jamba_and_ernie_reuse_existing_formats() {
+        for id in ["hunyuan", "jamba"] {
+            let out = run(parser(id).as_ref(), "<tool_calls>[{\"name\": \"f\", \"arguments\": {\"a\": 1}}]</tool_calls>");
+            assert_eq!(names(&out), ["f"], "{id}");
+        }
+        for id in ["ernie", "qwen3_omni", "hermes-2-pro"] {
+            let out = run(parser(id).as_ref(), "<tool_call>\n{\"name\": \"f\", \"arguments\": {\"a\": 1}}\n</tool_call>");
+            assert_eq!(names(&out), ["f"], "{id}");
+        }
+    }
+
+    #[test]
+    fn new_parsers_are_picked_from_their_templates() {
+        for (template, id) in [
+            ("{{ '<seed:tool_call>' }}<function=", "seed_oss"),
+            ("<|action_start|><|plugin|>", "internlm"),
+            ("<｜tool_calls_begin｜><steptml:invoke", "step3_steptml"),
+            ("<function_call> {", "granite20b"),
+            ("<|python_start|>[", "llama4_pythonic"),
+            ("```tool_code", "tool_code"),
+            ("<function_calls>", "olmo3"),
+        ] {
+            assert_eq!(select("llama", template, None).unwrap().id(), id, "{template}");
         }
     }
 
