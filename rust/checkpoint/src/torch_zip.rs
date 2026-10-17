@@ -50,7 +50,7 @@ pub fn read(path: &Path) -> Result<Vec<Tensor>, String> {
         let f = zip
             .by_index(i)
             .map_err(|e| format!("invalid ZIP entry: {e}"))?;
-        let name = f.name().to_owned();
+        let name = f.name().map_err(|e| format!("invalid ZIP member name: {e}"))?.into_owned();
         if names.insert(name.clone(), i).is_some() {
             return Err(format!("duplicate PyTorch ZIP member {name:?}"));
         }
@@ -541,7 +541,7 @@ impl<'a, 'z> Pickle<'a, 'z> {
             && self.little
         {
             let start =
-                usize::try_from(f.data_start()).map_err(|_| "ZIP storage offset overflow")?;
+                usize::try_from(f.data_start().ok_or("ZIP storage offset unknown")?).map_err(|_| "ZIP storage offset overflow")?;
             let end = start
                 .checked_add(usize::try_from(wanted).map_err(|_| "Torch storage too large")?)
                 .ok_or("ZIP storage range overflow")?;
