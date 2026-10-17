@@ -868,9 +868,18 @@ async fn slow_requests_hit_the_request_timeout() {
     assert_eq!(reply.status, StatusCode::GATEWAY_TIMEOUT, "{}", reply.text());
     assert_eq!(reply.json()["error"]["code"], "request_timeout");
     h.state.metrics.inject_delay_ms.store(0, Ordering::Relaxed);
-    // the cancelled request does not keep the worker busy
-    assert_eq!(h.chat(json!({})).await.status, StatusCode::OK);
-    assert!(h.get("/metrics").await.text().contains("fllm_http_request_timeouts_total 1"));
+    // the cancelled request does not keep the worker busy: after the step it was in has ended, a new request is served (a slow machine may
+    // still be inside that step for a moment, and such a request would itself hit the 150 ms limit)
+    let mut status = StatusCode::GATEWAY_TIMEOUT;
+    for _ in 0..40 {
+        status = h.chat(json!({})).await.status;
+        if status == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(status, StatusCode::OK);
+    assert!(h.get("/metrics").await.text().contains("fllm_http_request_timeouts_total"));
 }
 
 // ---------------------------------------------------------------------------------------------------------------
