@@ -1,2 +1,4 @@
 benchmarks/20260929/q4-gemv-unroll.patch whitespace=-blank-at-eol
 *.rs linguist-language=Rust
+# the chat-template corpus is compared byte for byte with the Python renderings: no line-ending conversion on Windows checkouts
+rust/engine/testdata/chat_templates/** text eol=lf

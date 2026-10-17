@@ -1428,3 +1428,110 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod attention_layout_tests {
+    use super::*;
+
+    /// Paged decode attention for the head layouts the engine produces (a tensor-parallel shard halves the heads), on the best tier of
+    /// this CPU against the f64 reference.
+    #[test]
+    fn attention_matches_the_reference_for_engine_head_layouts() {
+        let mut rng = Lcg(0xa77e_0001);
+        for q8 in [false, true] {
+            for &(heads, kv_heads, dim) in &[(16usize, 4usize, 128usize), (8, 2, 128), (4, 1, 128), (2, 1, 128), (8, 2, 64), (4, 1, 32)] {
+                let (block_size, stride) = (16usize, 3usize);
+                let lengths = [1i64, 2, 17, 33];
+                let slots = lengths.len() * stride * block_size;
+                let tables = (0..lengths.len())
+                    .flat_map(|b| (0..stride).map(move |i| (b * stride + i) as i64))
+                    .collect::<Vec<_>>();
+                let keys = random_cache(slots, kv_heads, dim, q8, &mut rng);
+                let values = random_cache(slots, kv_heads, dim, q8, &mut rng);
+                let key = crate::cpu_attention::Cache { data: &keys, slots, kv_heads, dim, q8 };
+                let value = crate::cpu_attention::Cache { data: &values, ..key };
+                let q = rng.vector(lengths.len() * heads * dim, 1.0);
+                let have = crate::cpu_attention::attention(&q, key, value, &tables, &lengths, heads, block_size, stride)
+                    .expect("shape is supported");
+                let (want, scale) = reference_attention(&q, &key, &value, &tables, &lengths, heads, block_size, stride);
+                let (worst, ok) = compare(&have, &want, &scale);
+                assert!(ok, "attention {} cache, {heads}/{kv_heads} heads, dim {dim}: error {worst:e}", if q8 { "q8" } else { "f16" });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod batch_composition_tests {
+    use super::*;
+
+    /// A row of a prompt batch must not depend on the rows computed next to it: the pipeline- and tensor-parallel runs cut a batch into
+    /// micro-batches of other sizes than the single-device run.
+    #[test]
+    fn a_projection_row_does_not_depend_on_its_batch_companions() {
+        let mut rng = Lcg(0xba7c_0001);
+        let batch = 15usize;
+        for (kind, rows, cols) in [8u32, 12, 14, 13, 11, 10, 0, 1, 30].into_iter().flat_map(|k| [(40usize, 512usize), (2048, 256), (256, 2048), (520, 256), (1000, 512)].map(move |(r, c)| (k, r, c))) {
+            let float = matches!(kind, 0 | 1 | 30);
+            let weights = if float {
+                rng.vector(rows * cols, 1.0)
+                    .iter()
+                    .flat_map(|&v| match kind {
+                        0 => v.to_le_bytes().to_vec(),
+                        1 => f16::from_f32(v).to_le_bytes().to_vec(),
+                        _ => bf16::from_f32(v).to_le_bytes().to_vec(),
+                    })
+                    .collect::<Vec<u8>>()
+            } else {
+                random_weights(kind, rows, cols, &mut rng)
+            };
+            let project = |w: &[u8], x: &[f32]| if float { crate::cpu_float::linear(w, kind, x, rows, cols, None) } else { project(w, kind, x, rows, cols) };
+            // activations of a real model have a few large outliers in a block
+            let x: Vec<f32> = rng.vector(batch * cols, 3.0).into_iter().enumerate().map(|(i, v)| if i % 37 == 0 { v * 40.0 } else { v }).collect();
+            let Some(whole) = project(&weights, &x) else { continue };
+            let scale = whole.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+            for cuts in [vec![8usize, 7], vec![1; batch], vec![4, 4, 4, 3], vec![2, 13]] {
+                let mut start = 0;
+                let mut worst = 0f32;
+                for n in cuts {
+                    let part = project(&weights, &x[start * cols..(start + n) * cols]).expect("same kernel");
+                    for (a, b) in part.iter().zip(&whole[start * rows..(start + n) * rows]) {
+                        worst = worst.max((a - b).abs() / scale);
+                    }
+                    start += n;
+                }
+                eprintln!("[batch-diag] kind {kind} {rows}x{cols}: largest difference {worst:e}");
+                assert!(worst < 1e-5, "kind {}: a row changed by {worst:e} when the batch was cut differently", format_name(kind));
+            }
+        }
+    }
+
+    /// The same for sibling Q8 projections evaluated together (Q, K and V, or gate and up), as the decoder does.
+    #[test]
+    fn a_q8_projection_group_does_not_depend_on_its_batch_companions() {
+        let mut rng = Lcg(0xba7c_0002);
+        let batch = 15usize;
+        for (cols, row_counts) in [(512usize, [64usize, 16, 16]), (256, [2048, 512, 512]), (256, [1000, 36, 20]), (2048, [256, 256, 256])] {
+        let sets: Vec<Vec<u8>> = row_counts.iter().map(|&r| random_weights(8, r, cols, &mut rng)).collect();
+        let projections: Vec<cpu_kernels::Q8Projection<'_>> =
+            sets.iter().zip(row_counts).map(|(w, rows)| cpu_kernels::Q8Projection { weights: w, rows, bias: None }).collect();
+        let x: Vec<f32> = rng.vector(batch * cols, 3.0).into_iter().enumerate().map(|(i, v)| if i % 37 == 0 { v * 40.0 } else { v }).collect();
+        let whole = cpu_kernels::q8_linear_group(&projections, &cpu_kernels::Q8Input::new(&x, cols));
+        let Some(whole) = whole else { return };
+        for cuts in [vec![8usize, 7], vec![1; batch], vec![2, 13], vec![14, 1]] {
+            let mut start = 0;
+            for n in cuts {
+                let input = cpu_kernels::Q8Input::new(&x[start * cols..(start + n) * cols], cols);
+                let part = cpu_kernels::q8_linear_group(&projections, &input).expect("same kernel");
+                for (p, rows) in row_counts.iter().enumerate() {
+                    let scale = whole[p].iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+                    let worst = part[p].iter().zip(&whole[p][start * rows..(start + n) * rows]).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+                    eprintln!("[group-diag] cols {cols} projection {p} rows {rows} start {start} n {n}: largest difference {worst:e}");
+                    assert!(worst < 1e-5, "projection {p}: a row changed by {worst:e} when the batch was cut at {start}+{n}");
+                }
+                start += n;
+            }
+        }
+        }
+    }
+}
