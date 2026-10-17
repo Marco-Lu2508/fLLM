@@ -134,7 +134,16 @@ impl VkInstance {
             .enabled_layer_names(&layers)
             .flags(flags);
         // SAFETY: `info` and everything it points to (`app`, `enabled`, `layers`) outlive the call.
-        let instance = unsafe { entry.create_instance(&info, None) }.map_err(vk_call("vkCreateInstance"))?;
+        let instance = match unsafe { entry.create_instance(&info, None) } {
+            Ok(instance) => instance,
+            // the loader is present but no installed driver is usable (a machine without a GPU, a container)
+            Err(vk::Result::ERROR_INCOMPATIBLE_DRIVER | vk::Result::ERROR_INITIALIZATION_FAILED) => {
+                return Err(VkError::NoDevice(
+                    "no hardware GPU adapter: the Vulkan loader has no usable driver (is a graphics driver / Vulkan ICD installed?)".to_owned(),
+                ))
+            }
+            Err(e) => return Err(vk_call("vkCreateInstance")(e)),
+        };
         Ok(Arc::new(Self {
             entry,
             instance,
