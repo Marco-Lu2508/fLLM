@@ -273,7 +273,8 @@ def generate_new_kernels():
                 if kernel_selector_str == FILE_HEAD_COMMENT:
                     kernel_selector_str += f"if ({conditions})\n  kernel = "
                 else:
-                    kernel_selector_str += f"else if ({conditions})\n  kernel = "
+                    # independent ifs: MSVC rejects an else-if chain this long (C1061, blocks nested too deeply)
+                    kernel_selector_str += f"if (kernel == MarlinDefault && ({conditions}))\n  kernel = "
 
                 kernel_template2 = (
                     "Marlin<{{a_type_id}}, {{b_type_id}}, {{c_type_id}}, "
