@@ -19,6 +19,7 @@ convert to their text model; vision towers are not imported.
 | `llama`, `mistral`, `mistral_large`, `granite`, `k2_horizon`, `intellect_3` | GQA, sliding window, linear/YaRN/Llama-3 rope scaling |
 | `qwen2`, `qwen3` (+ `*_vl_text`) | Q/K bias, per-head Q/K norm |
 | `gemma`, `gemma2`, `gemma3_text` | `1+w` norms, sandwich norms, soft-capping, local/global rope |
+| `gemma4`, `gemma4_text`, `gemma3n` | sliding and global layers with heterogeneous head width, K = V on global layers, proportional rope, value norm, AltUp, LAuReL, per-layer embeddings, shared KV layers, layer output scale; verified against transformers 5.19 |
 | `muse_glimmer` (text model of Muse Glimmer) | Gemma-style sandwich norms with a silu MLP, per-head sigmoid output gate (`attn_gate`), weightless QK norm (queries scaled by `qk_scale_factor`), NoPE global layers, embedding RMS norm, `output_multiplier` before the tanh soft cap, separate epsilon for the post norms. llama.cpp GGUFs use interleaved rope with permuted Q/K rows; checked against an unsloth GGUF and llama.cpp. Vision tower not imported |
 | `olmo`, `olmo2`, `olmo3` | non-parametric LN (v1), post norms, sliding layers with own rope |
 | `phi`, `phi3` | parallel block + biases (phi-2), LongRoPE (phi-3) |
@@ -50,6 +51,7 @@ convert to their text model; vision towers are not imported.
 | `phimoe` | LongRoPE, separate Q/K/V/O, fused expert gate/up, SparseMixer thresholded routing |
 | `k2_horizon` (MoE and MoVA variants) | sigmoid routing with selection bias, shared expert, leading dense layers (`mlp_only_layers` prefix), grouped RMSNorm, softplus attention gate and, for MoVA, routed value experts (`attn_v_exps`, `attn_v_gate`); verified against the model's remote code on tiny checkpoints. Not supported: `query_key_norm`, `rope_head_dim` < `head_dim` (375B A23B) |
 | `g9v3` | DeepSeek-V3-style sigmoid MoE with shared expert and per-head sigmoid-gated attention (`q_proj` holds `[q; gate]` per head, converted to llama.cpp's separate-gate layout); verified against the model's remote code on a tiny checkpoint |
+| `gemma4` (26B-A4B) | dense MLP and routed expert block side by side, normalized router with top-k experts; verified against transformers 5.19 |
 
 DBRX currently uses the CPU decoder (`auto` selects CPU for this architecture); an explicit
 accelerator request is rejected until its LayerNorm, clipping and router normalization are
@@ -88,9 +90,7 @@ speculative decoding are switched off for them.
 
 ## Not supported
 
-* Gemma 4 (26B A4B, 31B: different head width / KV heads for sliding and global layers, K = V on global layers, proportional rope; the E2B/E4B models add per-layer embeddings and KV sharing), Gemma 3n, MiMo-V2 (Flash and Pro),
-  Laguna and Mellum (per-layer head counts), Kimi-Linear (KDA), DeepSeek V3.2/V4 and GLM-5
-  (sparse attention indexer), Zamba2, JetMoE, Inkling, ZAYA.
+* DeepSeek V3.2/V4 and GLM-5 (sparse attention indexer), MiMo-V2-Pro, Zamba2, JetMoE, Inkling, ZAYA.
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
 * Step 3.5 / Step 3.7: heterogeneous per-layer attention head counts (`num_attention_heads_per_layer`).
 * A.X-K2: Gated RMSNorm wrapper (`AXK2GatedRMSNorm`) with internal `gate_mlp` projection.

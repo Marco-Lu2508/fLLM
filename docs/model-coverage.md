@@ -26,9 +26,9 @@ into the 30 GB test machine.
 | | count |
 | --- | --- |
 | open models visible on AA (distinct) | 43 |
-| V verified (architecture, tiny checkpoint vs `transformers` or the model's remote code) | 25 |
+| V verified (architecture, tiny checkpoint vs `transformers` or the model's remote code) | 26 |
 | U supported, but not fully verified or with a documented gap | 2 (LFM2.5, K2 Horizon 375B) |
-| N not supported | 16 |
+| N not supported | 15 |
 
 Newly supported by this work: Muse Glimmer, K2 Horizon MoE/MoVA (36B A4B, and the 375B A23B text model except its
 partial rope), G9v3, Nemotron-H with latent experts (Nemotron 3 Super / Ultra), llama.cpp `nemotron_h_moe`
@@ -44,7 +44,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | K2 Horizon 7B / 3.7B / 0.9B (small/tiny) | dense | `K2HorizonForCausalLM` | `k2-horizon` | V | The converter writes `attention.group_norm_groups` and converts dense checkpoints. Grouped RMSNorm is implemented on CPU, CUDA (compiled) and Vulkan (verified with software rasterizer). |
 | Muse Glimmer 30B (small #9) | 30B dense | `MuseGlimmerForConditionalGeneration` | `muse-glimmer` | V +GGUF | New. Gemma-style sandwich norms with `1+w` folded in the GGUF, silu MLP, per-head sigmoid gate, weightless QK norm (q scaled by 3.87), NoPE global layers, embedding RMSNorm, logits * 0.196 then tanh cap 20. Unsloth Q4_K_XL produces the same 40 tokens as llama.cpp. Vision tower not imported. |
 | Qwen3.6 35B A3B (small) | 35B / 3B | `Qwen3_5MoeForConditionalGeneration` | `qwen35moe` | V (+GGUF runs) | Previously supported. |
-| Gemma 4 26B A4B, Gemma 4 31B (small) | 26B / 31B | `Gemma4ForConditionalGeneration` | `gemma4` | **N** | Different head width and KV head count for sliding (256 x 8) and global (512 x 2) layers, K = V on global layers, proportional partial rope, an MoE block next to a dense MLP in the 26B. fLLM has one head geometry per model: needs per-layer KV geometry in the paged cache (estimated > 3 h with verification). **Biggest remaining gap for home users.** |
+| Gemma 4 26B A4B, Gemma 4 31B (small) | 26B / 31B | `Gemma4ForConditionalGeneration` | `gemma4` | V | Supported and verified against transformers 5.19: heterogeneous sliding (256 x 8) and global (512 x 2) layers, K = V, proportional rope, dense + MoE block, per-layer embeddings and shared KV layers (E2B/E4B). Layered KV cache layout across CPU and accelerator traits. |
 | MiniCPM5 2B / 1B, G9v3-3B, Nanbeige4.1-3B (tiny) | dense | `LlamaForCausalLM` | `llama` | V | Tokenizer `minicpm5` exists. |
 | Granite 4.2 3B (tiny) | dense | `GraniteForCausalLM` | `granite` | V | |
 | Phi-4 Mini (tiny) | 3.8B | `Phi3ForCausalLM` | `phi3` | V | LongRoPE. |
@@ -85,11 +85,9 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 
 ## Priority of the gaps
 
-1. **Gemma 4 (26B A4B, 31B)** - most downloaded gap (11 M and 9.5 M downloads) and the only one that fits 24 GB.
-   Needs per-layer KV geometry, K = V sharing, proportional rope and the dense + MoE block.
-2. Ling-3.0-flash (124B, 5 GB active at 4-bit with CPU offload) - KDA layers, which are also needed by Kimi-Linear/K3 and GLM-5.3-Flash.
-3. LongCat Flash Lite, Qwen3.8-Flash-Next (n-gram embeddings, hyper-connections): small active size but exotic layers.
-4. The 300B+ models (MiMo, GLM, DeepSeek V4, Kimi K3, MiniMax-M3, Inkling, Motif): not usable on a home machine, and each
+1. Ling-3.0-flash (124B, 5 GB active at 4-bit with CPU offload) - KDA layers, which are also needed by Kimi-Linear/K3 and GLM-5.3-Flash.
+2. LongCat Flash Lite, Qwen3.8-Flash-Next (n-gram embeddings, hyper-connections): small active size but exotic layers.
+3. The 300B+ models (MiMo, GLM, DeepSeek V4, Kimi K3, MiniMax-M3, Inkling, Motif): not usable on a home machine, and each
    adds sparse attention indexers or multi-stream residuals; worth doing only after the above.
 
 ## Real GGUF runs (CPU, 10 cores)
