@@ -11,7 +11,7 @@ use crate::backend::vulkan::ops::recurrent::{
     plan_delta_layer, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape, Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
-    plan_argmax, plan_embedding, plan_glu, plan_layer_norm, plan_residual_add, plan_rms_norm, plan_rope, plan_sigmoid_gate_mul,
+    plan_argmax, plan_embedding, plan_glu, plan_layer_norm, plan_residual_add, plan_rms_norm, plan_rms_norm_grouped, plan_rope, plan_sigmoid_gate_mul,
     plan_split_q_gate, EmbeddingTable, GluMode, OpPlan, SlotSource,
 };
 use crate::backend::vulkan::shaders;
@@ -224,6 +224,7 @@ fn all_op_plans() -> Vec<OpPlan> {
     for has_weight in [true, false] {
         plans.push(plan_rms_norm(4, 256, 1e-6, has_weight).unwrap());
     }
+    plans.push(plan_rms_norm_grouped(4, 256, 4, 1e-6, true).unwrap());
     for has_bias in [true, false] {
         plans.push(plan_layer_norm(4, 256, 1e-5, has_bias).unwrap());
     }

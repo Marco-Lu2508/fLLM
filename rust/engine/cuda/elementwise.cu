@@ -52,6 +52,51 @@ __global__ void __launch_bounds__(256) rms_norm_vec_kernel(const float *x, const
         }
     }
 }
+// One block per (row, group).
+__global__ void rms_norm_grouped_kernel(const float *x, const float *w, float *out, int cols, int groups, int group_size, float eps) {
+    __shared__ float scratch[32];
+    const int r = blockIdx.x / groups;
+    const int g = blockIdx.x % groups;
+    const float *xr = x + (size_t)r * cols + (size_t)g * group_size;
+    const float *wr = w + (size_t)g * group_size;
+    float *orow = out + (size_t)r * cols + (size_t)g * group_size;
+    float sum = 0.f;
+    for (int c = threadIdx.x; c < group_size; c += blockDim.x) sum = fmaf(xr[c], xr[c], sum);
+    const float total = block_sum(sum, scratch);
+    const float inv = 1.0f / sqrtf(total / (float)group_size + eps);
+    for (int c = threadIdx.x; c < group_size; c += blockDim.x) orow[c] = xr[c] * (inv * wr[c]);
+}
+
+template <int PER>
+__global__ void __launch_bounds__(256) rms_norm_grouped_vec_kernel(const float *x, const float *w, float *out,
+                                                                   int cols4, int groups, int group_size4,
+                                                                   float eps, float inv_group_size) {
+    __shared__ float scratch[32];
+    const int r = blockIdx.x / groups;
+    const int g = blockIdx.x % groups;
+    const float4 *xr = reinterpret_cast<const float4 *>(x) + (size_t)r * cols4 + (size_t)g * group_size4;
+    const float4 *wr = reinterpret_cast<const float4 *>(w) + (size_t)g * group_size4;
+    float4 *orow = reinterpret_cast<float4 *>(out) + (size_t)r * cols4 + (size_t)g * group_size4;
+    float4 v[PER];
+    float sum = 0.f;
+#pragma unroll
+    for (int i = 0; i < PER; i++) {
+        const int c = threadIdx.x + i * 256;
+        v[i] = c < group_size4 ? xr[c] : make_float4(0.f, 0.f, 0.f, 0.f);
+        sum = fmaf(v[i].x, v[i].x, fmaf(v[i].y, v[i].y, fmaf(v[i].z, v[i].z, fmaf(v[i].w, v[i].w, sum))));
+    }
+    const float total = block_sum(sum, scratch);
+    const float inv = 1.0f / sqrtf(total * inv_group_size + eps);
+#pragma unroll
+    for (int i = 0; i < PER; i++) {
+        const int c = threadIdx.x + i * 256;
+        if (c < group_size4) {
+            const float4 gw = __ldg(wr + c);
+            orow[c] = make_float4(v[i].x * (inv * gw.x), v[i].y * (inv * gw.y), v[i].z * (inv * gw.z), v[i].w * (inv * gw.w));
+        }
+    }
+}
+
 
 // Prompt batches: rms_norm_vec_kernel with two additions that fold the neighbouring elementwise kernels into the norm pass (what vLLM's
 // fused_add_rms_norm does). With ADD the input is the residual stream that a Marlin GEMM leaves pending, x += scale * (y16 + bias)
@@ -230,6 +275,26 @@ int fllm_rms_norm_launch(cudaStream_t s, const float *x, const float *w, float *
     }
     return fllm_check_launch("rms_norm");
 }
+int fllm_rms_norm_grouped_launch(cudaStream_t s, const float *x, const float *w, float *out, int rows, int cols, int groups, float eps) {
+    if (rows <= 0) return 0;
+    if (groups <= 0 || cols <= 0 || cols % groups != 0) return fllm_set_error("rms_norm_grouped: invalid dimensions");
+    if (groups == 1) return fllm_rms_norm_launch(s, x, w, out, rows, cols, eps);
+    const int group_size = cols / groups;
+    const unsigned total_blocks = (unsigned)(rows * groups);
+    const bool aligned = (reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(w) |
+                          reinterpret_cast<uintptr_t>(out)) % 16 == 0;
+    if (aligned && cols % 4 == 0 && group_size % 4 == 0 && group_size <= 8192) {
+        const int gs4 = group_size / 4;
+        const int cols4 = cols / 4;
+        const float inv_gs = 1.0f / (float)group_size;
+        if (gs4 <= 1024) rms_norm_grouped_vec_kernel<4><<<total_blocks, 256, 0, s>>>(x, w, out, cols4, groups, gs4, eps, inv_gs);
+        else rms_norm_grouped_vec_kernel<8><<<total_blocks, 256, 0, s>>>(x, w, out, cols4, groups, gs4, eps, inv_gs);
+    } else {
+        rms_norm_grouped_kernel<<<total_blocks, 256, 0, s>>>(x, w, out, cols, groups, group_size, eps);
+    }
+    return fllm_check_launch("rms_norm_grouped");
+}
+
 // Can fllm_rms_norm_prompt_launch run these operands (the vectorised norm kernel's conditions)?
 bool fllm_rms_norm_prompt_ok(const float *x, const float *w, const float *out, int cols) {
     return (reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(w) | reinterpret_cast<uintptr_t>(out)) % 16 == 0 && cols % 4 == 0 &&

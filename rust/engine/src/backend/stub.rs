@@ -20,6 +20,7 @@ pub fn empty_capabilities(name: &str) -> BackendCapabilities {
         name: name.to_owned(),
         supported_quants: Vec::<QuantType>::new(),
         supports_rms_norm: false,
+        supports_grouped_rms_norm: false,
         supports_layer_norm: false,
         supports_rope: false,
         supports_swiglu: false,

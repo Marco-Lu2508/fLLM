@@ -33,7 +33,7 @@ use crate::backend::vulkan::ops::recurrent::{
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
-    plan_argmax, plan_embedding, plan_ewise, plan_glu, plan_glu_strided, plan_layer_norm, plan_mla_move, plan_residual_add, plan_rms_norm,
+    plan_argmax, plan_embedding, plan_ewise, plan_glu, plan_glu_strided, plan_layer_norm, plan_mla_move, plan_residual_add, plan_rms_norm, plan_rms_norm_grouped,
     plan_rope, plan_sigmoid_gate_mul, plan_split_q_gate, EmbeddingTable, GluLayout, GluMode, MlaPart,
 };
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
@@ -334,6 +334,28 @@ impl Stream for VulkanStream {
     fn rms_norm(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, weight: &DeviceBuffer, eps: f32) -> Result<(), BackendError> {
         let (rows, cols) = norm_geometry(x, weight, out)?;
         let plan = plan_rms_norm(rows, cols, eps, true)?;
+        self.run_plans(&[plan], &[Arg::r("x", x), Arg::r("weight", weight), Arg::w("out", out)], &[], false)
+    }
+
+    fn rms_norm_grouped(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceBuffer,
+        eps: f32,
+        groups: usize,
+    ) -> Result<(), BackendError> {
+        if groups == 0 {
+            return Err(invalid("rms_norm_grouped requires groups > 0"));
+        }
+        if groups == 1 {
+            return self.rms_norm(out, x, weight, eps);
+        }
+        let (rows, cols) = norm_geometry(x, weight, out)?;
+        if !cols.is_multiple_of(groups) {
+            return Err(invalid("rms_norm_grouped weight width is not divisible by groups"));
+        }
+        let plan = plan_rms_norm_grouped(rows, cols, groups, eps, true)?;
         self.run_plans(&[plan], &[Arg::r("x", x), Arg::r("weight", weight), Arg::w("out", out)], &[], false)
     }
 

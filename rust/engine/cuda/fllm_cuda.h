@@ -32,6 +32,7 @@ int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float 
                            int rows, int cols, int batch);
 int fllm_cuda_embedding(FllmStream *st, const void *w, int kind, const int64_t *ids, int n, float *out, int cols);
 int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, float eps);
+int fllm_cuda_rms_norm_grouped(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, int groups, float eps);
 int fllm_cuda_layer_norm(FllmStream *st, const float *x, const float *w, const float *b, float *out, int rows, int cols,
                          float eps);
 int fllm_cuda_repack(FllmStream *st, void *dst, const void *src, int kind, size_t rows, size_t cols);

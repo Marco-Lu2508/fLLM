@@ -1100,6 +1100,7 @@ pub struct BackendCapabilities {
     pub name: String,
     pub supported_quants: Vec<QuantType>,
     pub supports_rms_norm: bool,
+    pub supports_grouped_rms_norm: bool,
     pub supports_layer_norm: bool,
     pub supports_rope: bool,
     pub supports_swiglu: bool,
@@ -1398,6 +1399,25 @@ pub trait Stream: Send {
         weight: &DeviceBuffer,
         eps: f32,
     ) -> Result<(), BackendError>;
+
+    /// Grouped RMSNorm: the row is divided into `groups` independent chunks of size `H / groups`.
+    /// Each group is normalized against its own mean-square and multiplied with its slice of `weight`.
+    fn rms_norm_grouped(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceBuffer,
+        eps: f32,
+        groups: usize,
+    ) -> Result<(), BackendError> {
+        if groups == 1 {
+            return self.rms_norm(out, x, weight, eps);
+        }
+        let _ = (out, x, weight, eps, groups);
+        Err(BackendError::UnsupportedOperation(
+            "grouped RMSNorm is not supported by this backend".to_string(),
+        ))
+    }
 
     /// LayerNorm: out = (x - mean) / sqrt(var + eps) * weight + bias
     fn layer_norm(

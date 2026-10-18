@@ -17,6 +17,7 @@ pub fn capabilities(info: &MetalDeviceInfo) -> BackendCapabilities {
         name: format!("Metal ({})", info.name),
         supported_quants: supported_formats(),
         supports_rms_norm: true,
+        supports_grouped_rms_norm: false,
         supports_layer_norm: true,
         supports_rope: true,
         supports_swiglu: true,

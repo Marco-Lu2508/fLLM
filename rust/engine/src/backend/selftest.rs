@@ -2218,6 +2218,14 @@ impl<'a> Tester<'a> {
             let r = self.rms_norm(rows, cols);
             self.record("rms_norm", &format!("{rows}x{cols}"), r);
         }
+        for rows in [1, 3, 17] {
+            for cols in [256, 1024, 3584] {
+                for groups in [1, 2, 4, 8] {
+                    let r = self.rms_norm_grouped(rows, cols, groups);
+                    self.record("rms_norm_grouped", &format!("{rows}x{cols} g={groups}"), r);
+                }
+            }
+        }
     }
 
     fn rope_cases(&mut self) {
@@ -2893,6 +2901,57 @@ impl<'a> Tester<'a> {
         // mean, eps, 1/sqrt (WGSL: 2.5 ULP division of a 2 ULP inverseSqrt) and two products
         // stay below 32 units.
         let tol = gamma(cols) / 2.0 + 32.0 * U;
+        Ok(Outcome {
+            device: worst(&device, &want, &scale),
+            cpu: worst(&cpu, &want, &scale),
+            tol,
+            cpu_tol: tol,
+            ms,
+        })
+    }
+
+    fn rms_norm_grouped(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        groups: usize,
+    ) -> Result<Outcome, BackendError> {
+        let x = self.rng.vector(rows * cols, 2.0);
+        let w = self.rng.vector(cols, 1.0);
+        let eps = 1e-6f32;
+        let mut want = vec![0.0; rows * cols];
+        let mut scale = vec![0.0; rows * cols];
+        let group_size = cols / groups;
+        for r in 0..rows {
+            let row = &x[r * cols..(r + 1) * cols];
+            for g in 0..groups {
+                let grp = &row[g * group_size..(g + 1) * group_size];
+                let ms: f64 = grp
+                    .iter()
+                    .map(|&v| f64::from(v) * f64::from(v))
+                    .sum::<f64>()
+                    / group_size as f64;
+                let inv = 1.0 / (ms + f64::from(eps)).sqrt();
+                for i in 0..group_size {
+                    let idx = g * group_size + i;
+                    let v = f64::from(row[idx]) * inv * f64::from(w[idx]);
+                    want[r * cols + idx] = v;
+                    scale[r * cols + idx] = v.abs();
+                }
+            }
+        }
+        let op = |backend: &dyn Backend,
+                  stream: &mut dyn Stream,
+                  ms: &mut f64|
+         -> Result<Vec<f32>, BackendError> {
+            let xb = put(backend, stream, &x)?;
+            let wb = put(backend, stream, &w)?;
+            let mut out = backend.allocate_buffer(rows * cols * 4)?;
+            timed(ms, stream, |s| s.rms_norm_grouped(&mut out, &xb, &wb, eps, groups))?;
+            get(stream, &out, rows * cols)
+        };
+        let (device, cpu, ms) = self.both(&op)?;
+        let tol = gamma(group_size) / 2.0 + 32.0 * U;
         Ok(Outcome {
             device: worst(&device, &want, &scale),
             cpu: worst(&cpu, &want, &scale),

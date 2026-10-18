@@ -1292,6 +1292,10 @@ int fllm_cuda_rms_norm(FllmStream *st, const float *x, const float *w, float *ou
     }
     return fllm_rms_norm_launch(st->s, x, w, out, rows, cols, eps);
 }
+int fllm_cuda_rms_norm_grouped(FllmStream *st, const float *x, const float *w, float *out, int rows, int cols, int groups, float eps) {
+    PREP(st);
+    return fllm_rms_norm_grouped_launch(st->s, x, w, out, rows, cols, groups, eps);
+}
 int fllm_cuda_layer_norm(FllmStream *st, const float *x, const float *w, const float *b, float *out, int rows, int cols,
                          float eps) {
     PREP(st);

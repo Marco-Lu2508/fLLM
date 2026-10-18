@@ -95,7 +95,7 @@ Models featuring linear recurrent components (Qwen3.5 Gated DeltaNet, Mamba-1/2,
 device has what it needs; a layer that does not runs on the host (`host_layers`, the CPU reference code, with the host KV cache and the
 host recurrent state): the residual stream is downloaded, the layer runs, the stream is uploaded again. Start-up logs
 `N of M layers run on the host between the device layers (reasons)`. A model in which no layer can use the device, or whose norm
-cannot be done by the device at all (grouped RMSNorm), is refused with the list of reasons (`--device cpu` then). `FLLM_HOST_LAYERS=all|3,4`
+cannot be done by the device at all (for backends without grouped RMSNorm), is refused with the list of reasons (`--device cpu` then). Grouped RMSNorm is supported on CUDA (`rust/engine/cuda/elementwise.cu`) and Vulkan (`rust/engine/shaders/vulkan/norm_rms_grouped.comp`). `FLLM_HOST_LAYERS=all|3,4`
 forces layers onto the host (the output must then match `--device cpu`); `FLLM_LAYER_CHECK=1` runs every device layer a second time on
 the host from the same input and prints the deviation of the residual stream (max, mean, relative to the rms).
 

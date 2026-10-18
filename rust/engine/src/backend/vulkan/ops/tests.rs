@@ -141,6 +141,24 @@ fn norm_plans() {
     assert_eq!(l.shader_name, "norm_layer");
     assert_eq!(l.slot("bias").unwrap().source, SlotSource::Buffer);
     assert!(plan_rms_norm(0, 8, 1e-6, true).is_err());
+    let g = plan_rms_norm_grouped(3, 256, 4, 1e-6, true).unwrap();
+    assert_eq!(g.shader_name, "norm_rms_grouped");
+    assert_eq!(g.groups, [12, 1, 1]);
+    assert_eq!(g.push_constants.len(), 24);
+    assert_eq!(
+        (
+            field(&g, "group_size"),
+            field(&g, "groups"),
+            field(&g, "total_groups"),
+            field(&g, "cols_total"),
+            field(&g, "flags"),
+        ),
+        (64, 4, 12, 256, 1)
+    );
+    assert_eq!(ffield(&g, "eps"), 1e-6);
+    assert!(plan_rms_norm_grouped(0, 64, 4, 1e-6, true).is_err());
+    assert!(plan_rms_norm_grouped(2, 64, 0, 1e-6, true).is_err());
+    assert!(plan_rms_norm_grouped(2, 64, 3, 1e-6, true).is_err());
 }
 
 #[test]
@@ -916,6 +934,8 @@ fn sample_plans() -> Vec<OpPlan> {
     let mut v = vec![
         plan_rms_norm(2, 64, 1e-6, true).unwrap(),
         plan_rms_norm(2, 64, 1e-6, false).unwrap(),
+        plan_rms_norm_grouped(2, 64, 4, 1e-6, true).unwrap(),
+        plan_rms_norm_grouped(2, 64, 4, 1e-6, false).unwrap(),
         plan_layer_norm(2, 64, 1e-6, true).unwrap(),
         plan_rope(&[0, 1], 4, 2, 64, 32, false, 8).unwrap(),
         plan_residual_add(10, 1.0).unwrap(),

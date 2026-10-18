@@ -37,6 +37,7 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | Stream operation | plan function (`ops::`) | shaders |
 |---|---|---|
 | `rms_norm` | `plan_rms_norm`, `plan_rms_norm_strided` | `norm_rms` |
+| `rms_norm_grouped` | `plan_rms_norm_grouped` | `norm_rms_grouped` |
 | `layer_norm` | `plan_layer_norm` | `norm_layer` |
 | `rope` | `plan_rope` | `rope_apply` |
 | `embedding_lookup` | `plan_embedding` | `embed_{f32,f16,bf16,q4_0,q4_1,q5_0,q5_1,q8_0,q2_k,q3_k,q4_k,q5_k,q6_k,iq4_nl,mxfp4}` |
@@ -168,6 +169,32 @@ flags bit 0: weight present (otherwise weight is not read and 1 is used). `out` 
 | 28 | `uint` | `flags` |
 
 Push block: 32 bytes. Grid: `[rows split over x/y (x <= 65535), 1, 1]`.
+
+
+### `norm_rms_grouped.comp`
+
+Compiled as `norm_rms_grouped`.
+
+```text
+Grouped RMSNorm (Stream::rms_norm_grouped): row is split into groups of group_size floats.
+One workgroup per (row, group). out[r*cols_total + g*group_size + i] = x[...] * (1 / sqrt(mean(group^2) + eps) * weight[g*group_size + i]).
+flags bit 0: weight present (otherwise weight is not read and 1 is used). out may be the same buffer range as x.
+```
+
+| binding | name | access | type |
+|---|---|---|---|
+| 0 | `x` | readonly | `float x[];` |
+| 1 | `weight` | readonly | `float weight[];` |
+| 2 | `out` | read/write | `float o[];` |
+
+| push offset | type | field |
+|---|---|---|
+| 0 | `uint` | `group_size` |
+| 4 | `uint` | `groups` |
+| 8 | `uint` | `total_groups` |
+| 12 | `uint` | `cols_total` |
+| 16 | `float` | `eps` |
+| 20 | `uint` | `flags` |
 
 ### `norm_layer.comp`
 

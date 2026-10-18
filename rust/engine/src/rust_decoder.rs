@@ -648,12 +648,17 @@ fn device_rms_inplace(
     buf: &mut crate::backend::DeviceBuffer,
     weight: Option<&crate::backend::DeviceBuffer>,
     eps: f32,
+    groups: usize,
 ) -> Result<(), String> {
     let Some(weight) = weight else {
         return Ok(());
     };
     let mut out = scratch.acquire(buf.size).map_err(|e| e.to_string())?;
-    stream.rms_norm(&mut out, buf, weight, eps).map_err(|e| e.to_string())?;
+    if groups > 1 {
+        stream.rms_norm_grouped(&mut out, buf, weight, eps, groups).map_err(|e| e.to_string())?;
+    } else {
+        stream.rms_norm(&mut out, buf, weight, eps).map_err(|e| e.to_string())?;
+    }
     std::mem::swap(buf, &mut out);
     scratch.recycle(out);
     Ok(())
@@ -669,9 +674,16 @@ fn device_norm(
     weight: &crate::backend::DeviceBuffer,
     bias: Option<&crate::backend::DeviceBuffer>,
     eps: f32,
+    groups: usize,
 ) -> Result<(), String> {
     match kind {
-        NormKind::Rms => stream.rms_norm(out, x, weight, eps),
+        NormKind::Rms => {
+            if groups > 1 {
+                stream.rms_norm_grouped(out, x, weight, eps, groups)
+            } else {
+                stream.rms_norm(out, x, weight, eps)
+            }
+        }
         NormKind::Layer => stream.layer_norm(out, x, weight, bias, eps),
     }
     .map_err(|e| e.to_string())
@@ -687,12 +699,13 @@ fn device_post_norm_inplace(
     weight: Option<&crate::backend::DeviceBuffer>,
     bias: Option<&crate::backend::DeviceBuffer>,
     eps: f32,
+    groups: usize,
 ) -> Result<(), String> {
     let Some(weight) = weight else {
         return Ok(());
     };
     let mut out = scratch.acquire(buf.size).map_err(|e| e.to_string())?;
-    device_norm(stream, kind, &mut out, buf, weight, bias, eps)?;
+    device_norm(stream, kind, &mut out, buf, weight, bias, eps, groups)?;
     std::mem::swap(buf, &mut out);
     scratch.recycle(out);
     Ok(())
@@ -2163,13 +2176,13 @@ impl RustDecoder {
 
     /// Model features `forward_backend` does not implement. The device path refuses such
     /// models instead of silently computing something else.
-    fn backend_unsupported(&self, layer_norm_ok: bool) -> Vec<&'static str> {
+    fn backend_unsupported(&self, layer_norm_ok: bool, grouped_rms_norm_ok: bool) -> Vec<&'static str> {
         let cfg = &self.cfg;
         let mut missing = Vec::new();
         if matches!(cfg.norm, NormKind::Layer) && !layer_norm_ok {
             missing.push("LayerNorm");
         }
-        if self.groups != 1 {
+        if self.groups != 1 && !grouped_rms_norm_ok {
             missing.push("grouped RMSNorm");
         }
         missing
@@ -2373,7 +2386,8 @@ impl RustDecoder {
             .create_stream()
             .map(|s| (s.supports_attention_gate(), s.supports_arch_ops()))
             .unwrap_or((false, false));
-        let mut missing = self.backend_unsupported(backend.capabilities().supports_layer_norm);
+        let caps = backend.capabilities();
+        let mut missing = self.backend_unsupported(caps.supports_layer_norm, caps.supports_grouped_rms_norm);
         // Layers without device kernels run on the host between the device layers (`host_layers`); a model in which no layer can
         // use the device gains nothing from it.
         // the short convolution keeps its history in a device state buffer, like the other recurrent mixers (one kind per model)
@@ -3127,7 +3141,7 @@ impl RustDecoder {
             if let Some(carried) = carried_norm.take() {
                 scratch.recycle(std::mem::replace(&mut normed_buf, carried));
             } else if let Some(norm_buf) = &dev_layer.attn_norm {
-                device_norm(&mut **stream, cfg.norm, &mut normed_buf, &x_buf, norm_buf, dev_layer.attn_norm_b.as_ref(), cfg.eps)?;
+                device_norm(&mut **stream, cfg.norm, &mut normed_buf, &x_buf, norm_buf, dev_layer.attn_norm_b.as_ref(), cfg.eps, self.groups)?;
             } else {
                 stream.copy_buffer(&mut normed_buf, &x_buf).map_err(err)?;
             }
@@ -3349,8 +3363,8 @@ impl RustDecoder {
                         .map_err(err)?;
                 }
                 if !cfg.qk_norm_after_rope && !qk_fused {
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps, 1)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps, 1)?;
                 }
                 // rotary embedding and the cache write in one kernel (f16 cache, nothing between them)
                 let mut kv_written = qk_fused;
@@ -3390,8 +3404,8 @@ impl RustDecoder {
                     debug_sum(&mut **stream, "Kcur-0 (rope)", &k_buf);
                 }
                 if cfg.qk_norm_after_rope {
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps)?;
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut q_buf, dev_layer.q_norm.as_ref(), cfg.eps, 1)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut k_buf, dev_layer.k_norm.as_ref(), cfg.eps, 1)?;
                 }
                 if !kv_written && cfg.layer_kv_source(i).is_none() {
                     stream
@@ -3423,7 +3437,7 @@ impl RustDecoder {
                     if let Some((down, norm)) = &dm.q_a {
                         let mut low = scratch.acquire(rows * down.rows * 4).map_err(err)?;
                         stream.quantized_linear(&mut low, &normed_buf, down, down.bias.as_ref()).map_err(err)?;
-                        device_rms_inplace(&mut **stream, &mut scratch, &mut low, Some(norm), cfg.eps)?;
+                        device_rms_inplace(&mut **stream, &mut scratch, &mut low, Some(norm), cfg.eps, 1)?;
                         stream.quantized_linear(&mut q_full, &low, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
                         scratch.recycle(low);
                     } else {
@@ -3434,7 +3448,7 @@ impl RustDecoder {
                     stream.quantized_linear(&mut kv_a, &normed_buf, &dm.kv_a, dm.kv_a.bias.as_ref()).map_err(err)?;
                     let mut latent = scratch.acquire(rows * mc.kv_lora * 4).map_err(err)?;
                     stream.mla_latent(&mut latent, &kv_a, rows, mc.kv_lora, width).map_err(err)?;
-                    device_rms_inplace(&mut **stream, &mut scratch, &mut latent, Some(&dm.kv_a_norm), cfg.eps)?;
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut latent, Some(&dm.kv_a_norm), cfg.eps, 1)?;
                     let mut kv = scratch.acquire(rows * cfg.heads * (mc.nope + mc.value) * 4).map_err(err)?;
                     let kv_b = dm.kv_b.as_ref().ok_or("the up projection of the expanded MLA cache is not on the device")?;
                     stream.quantized_linear(&mut kv, &latent, kv_b, kv_b.bias.as_ref()).map_err(err)?;
@@ -3499,7 +3513,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() {
+                let ffn_target = if dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -3548,6 +3562,7 @@ impl RustDecoder {
                         dev_layer.post_attn_norm.as_ref(),
                         dev_layer.post_attn_norm_b.as_ref(),
                         cfg.post_eps,
+                        self.groups,
                     )?;
                     if parallel {
                         deferred_branch = Some(std::mem::replace(
@@ -3667,7 +3682,7 @@ impl RustDecoder {
             } else if let Some(pre) = ffn_pre.take() {
                 scratch.recycle(std::mem::replace(&mut ffn_normed, pre));
             } else if let Some(ffn_norm_buf) = &dev_layer.ffn_norm {
-                device_norm(&mut **stream, cfg.norm, &mut ffn_normed, &x_buf, ffn_norm_buf, dev_layer.ffn_norm_b.as_ref(), cfg.eps)?;
+                device_norm(&mut **stream, cfg.norm, &mut ffn_normed, &x_buf, ffn_norm_buf, dev_layer.ffn_norm_b.as_ref(), cfg.eps, self.groups)?;
             } else {
                 stream.copy_buffer(&mut ffn_normed, &x_buf).map_err(err)?;
             }
@@ -3743,7 +3758,7 @@ impl RustDecoder {
                 // the norm of the next layer (or the final norm) can join the residual add of the down projection
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
-                let next_target = if dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) {
+                let next_target = if dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -3787,6 +3802,7 @@ impl RustDecoder {
                         dev_layer.post_ffn_norm.as_ref(),
                         dev_layer.post_ffn_norm_b.as_ref(),
                         cfg.post_eps,
+                        self.groups,
                     )?;
                     let mut joined = false;
                     if let Some((norm_w, first)) = next_target {
@@ -3885,6 +3901,7 @@ impl RustDecoder {
                     dev_layer.post_ffn_norm.as_ref(),
                     dev_layer.post_ffn_norm_b.as_ref(),
                     cfg.post_eps,
+                    self.groups,
                 )?;
                 stream
                     .residual_add(&mut x_buf, &ffn_out_buf, cfg.residual_scale)
@@ -3931,6 +3948,7 @@ impl RustDecoder {
                 &dev_weights.final_norm,
                 dev_weights.final_norm_b.as_ref(),
                 cfg.eps,
+                self.groups,
             )?;
         }
 
@@ -4274,6 +4292,7 @@ impl RustDecoder {
                 dev_layer.post_attn_norm.as_ref(),
                 dev_layer.post_attn_norm_b.as_ref(),
                 self.cfg.post_eps,
+                self.groups,
             )?;
             stream.residual_add(x, &branch, residual_scale).map_err(err)?;
             scratch.recycle(branch);
@@ -4346,6 +4365,7 @@ impl RustDecoder {
                 dev_layer.post_attn_norm.as_ref(),
                 dev_layer.post_attn_norm_b.as_ref(),
                 self.cfg.post_eps,
+                self.groups,
             )?;
             stream.residual_add(x, &branch, residual_scale).map_err(err)?;
             scratch.recycle(branch);
@@ -4426,6 +4446,7 @@ impl RustDecoder {
                 dev_layer.post_attn_norm.as_ref(),
                 dev_layer.post_attn_norm_b.as_ref(),
                 self.cfg.post_eps,
+                self.groups,
             )?;
             stream.residual_add(x, &branch, residual_scale).map_err(err)?;
             scratch.recycle(branch);
@@ -4699,6 +4720,7 @@ impl RustDecoder {
                 dev_layer.post_attn_norm.as_ref(),
                 dev_layer.post_attn_norm_b.as_ref(),
                 self.cfg.post_eps,
+                self.groups,
             )?;
             stream.residual_add(x, &branch, residual_scale).map_err(err)?;
             scratch.recycle(branch);
@@ -7069,5 +7091,95 @@ mod q8_cache_tests {
 
         assert_eq!(as_le_bytes(&q_words), expected_q);
         assert_eq!(scales, expected_scales);
+    }
+}
+
+
+#[cfg(test)]
+mod grouped_rms_norm_tests {
+    use super::*;
+    use crate::backend::cpu::CpuBackend;
+    use crate::backend::Backend;
+
+    #[test]
+    fn test_device_norm_grouped_matches_grouped_rms() {
+        let backend = std::sync::Arc::new(CpuBackend::new());
+        let mut stream = backend.create_stream().expect("cpu stream");
+        let mut pool = crate::backend::BufferPool::new(backend.clone());
+        let eps = 1e-5;
+
+        for &(rows, hidden, groups) in &[(1, 256, 4), (3, 1024, 2), (17, 3584, 8)] {
+            let mut x_host = vec![0.0f32; rows * hidden];
+            for (i, v) in x_host.iter_mut().enumerate() {
+                *v = ((i % 100) as f32 - 50.0) * 0.05;
+            }
+            let mut w_host = vec![0.0f32; hidden];
+            for (i, v) in w_host.iter_mut().enumerate() {
+                *v = 0.5 + ((i % 50) as f32) * 0.02;
+            }
+
+            let mut want = x_host.clone();
+            grouped_rms(&mut want, &w_host, eps, groups);
+
+            let mut x_buf = backend.allocate_buffer(rows * hidden * 4).expect("alloc x");
+            let mut w_buf = backend.allocate_buffer(hidden * 4).expect("alloc w");
+            let mut out_buf = backend.allocate_buffer(rows * hidden * 4).expect("alloc out");
+
+            stream.upload(&mut x_buf, cast_f32_to_u8(&x_host)).expect("upload x");
+            stream.upload(&mut w_buf, cast_f32_to_u8(&w_host)).expect("upload w");
+
+            device_norm(
+                &mut *stream,
+                NormKind::Rms,
+                &mut out_buf,
+                &x_buf,
+                &w_buf,
+                None,
+                eps,
+                groups,
+            )
+            .expect("device_norm");
+
+            let mut got = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut got), &out_buf).expect("download");
+
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() <= 1e-6,
+                    "mismatch at row {} col {}: got {g}, want {w}",
+                    i / hidden,
+                    i % hidden
+                );
+            }
+
+            // Also test device_rms_inplace
+            let mut inplace_buf = backend.allocate_buffer(rows * hidden * 4).expect("alloc inplace");
+            stream.upload(&mut inplace_buf, cast_f32_to_u8(&x_host)).expect("upload inplace");
+            device_rms_inplace(&mut *stream, &mut pool, &mut inplace_buf, Some(&w_buf), eps, groups)
+                .expect("device_rms_inplace");
+
+            let mut got_inplace = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut got_inplace), &inplace_buf).expect("download");
+            assert_eq!(got, got_inplace);
+
+            // Also test device_post_norm_inplace
+            let mut post_buf = backend.allocate_buffer(rows * hidden * 4).expect("alloc post");
+            stream.upload(&mut post_buf, cast_f32_to_u8(&x_host)).expect("upload post");
+            device_post_norm_inplace(
+                &mut *stream,
+                &mut pool,
+                NormKind::Rms,
+                &mut post_buf,
+                Some(&w_buf),
+                None,
+                eps,
+                groups,
+            )
+            .expect("device_post_norm_inplace");
+
+            let mut got_post = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut got_post), &post_buf).expect("download");
+            assert_eq!(got, got_post);
+        }
     }
 }

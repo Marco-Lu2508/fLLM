@@ -53,7 +53,7 @@ impl RustDecoder {
         if let Some((down, norm)) = &dm.q_a {
             let mut low = scratch.acquire(rows * down.rows * 4).map_err(err)?;
             stream.quantized_linear(&mut low, normed, down, down.bias.as_ref()).map_err(err)?;
-            device_rms_inplace(stream, scratch, &mut low, Some(norm), cfg.eps)?;
+            device_rms_inplace(stream, scratch, &mut low, Some(norm), cfg.eps, 1)?;
             stream.quantized_linear(&mut q_full, &low, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
             scratch.recycle(low);
         } else {
@@ -65,7 +65,7 @@ impl RustDecoder {
         stream.quantized_linear(&mut kv_a, normed, &dm.kv_a, dm.kv_a.bias.as_ref()).map_err(err)?;
         let mut latent = scratch.acquire(rows * mc.kv_lora * 4).map_err(err)?;
         stream.mla_latent(&mut latent, &kv_a, rows, mc.kv_lora, width).map_err(err)?;
-        device_rms_inplace(stream, scratch, &mut latent, Some(&dm.kv_a_norm), cfg.eps)?;
+        device_rms_inplace(stream, scratch, &mut latent, Some(&dm.kv_a_norm), cfg.eps, 1)?;
         let mut k_row = scratch.acquire(rows * width * 4).map_err(err)?;
         stream.mla_latent_kv(&mut k_row, &kv_a, &latent, positions, &shape, &rope_params).map_err(err)?;
         // the value pool is a placeholder (the values are the first kv_lora values of the key row)

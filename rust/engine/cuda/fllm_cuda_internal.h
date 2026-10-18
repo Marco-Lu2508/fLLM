@@ -73,6 +73,7 @@ int fllm_qgemm4k_try(cudaStream_t s, const void *W, const float *X, float *Y, co
                      int batch, void *x16, size_t x16_bytes);
 int fllm_embedding_launch(cudaStream_t s, const void *W, int kind, const int64_t *ids_dev, float *out, int cols, int n);
 int fllm_rms_norm_launch(cudaStream_t s, const float *x, const float *w, float *out, int rows, int cols, float eps);
+int fllm_rms_norm_grouped_launch(cudaStream_t s, const float *x, const float *w, float *out, int rows, int cols, int groups, float eps);
 int fllm_layer_norm_launch(cudaStream_t s, const float *x, const float *w, const float *b, float *out, int rows,
                            int cols, float eps);
 int fllm_gather_rows_launch(cudaStream_t s, float *dst, const float *src, const int32_t *idx, const float *w, int n, int row_len);

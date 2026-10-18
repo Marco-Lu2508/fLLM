@@ -39,6 +39,7 @@ pub(crate) enum Arch {
     Qwen3Moe,
     /// Qwen3.5 style hybrid: layer 0 gated DeltaNet, layer 1 full attention with an output gate, dense feed-forward
     Qwen35,
+    K2Horizon,
 }
 
 // Gated DeltaNet geometry of the Qwen35 fixture
@@ -199,6 +200,12 @@ fn config_json(arch: Arch) -> Value {
             cfg["decoder_sparse_step"] = 1.into();
             cfg["mlp_only_layers"] = json!([]);
         }
+        Arch::K2Horizon => {
+            cfg["model_type"] = "k2_horizon".into();
+            cfg["architectures"] = json!(["K2HorizonForCausalLM"]);
+            cfg["layernorm_num_groups"] = 2.into();
+            cfg["query_key_norm"] = false.into();
+        }
     }
     cfg
 }
@@ -253,7 +260,7 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
         }
         match arch {
             Arch::Qwen35 => unreachable!("handled by qwen35_layer"),
-            Arch::Llama | Arch::Qwen3 => {
+            Arch::Llama | Arch::Qwen3 | Arch::K2Horizon => {
                 entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
                 entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
                 entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
@@ -477,6 +484,11 @@ mod tests {
     #[test]
     fn cpu_backend_matches_host_path_llama_f32() {
         run("llama-f32", Arch::Llama, Encoding::F32, 1e-3);
+    }
+
+    #[test]
+    fn cpu_backend_matches_host_path_k2_horizon() {
+        run("k2-horizon", Arch::K2Horizon, Encoding::F32, 1e-3);
     }
 
     #[test]

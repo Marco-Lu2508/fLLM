@@ -125,6 +125,7 @@ impl SyclBackend {
             name: name.clone(),
             supported_quants: NATIVE_KINDS.iter().map(|&k| QuantType::from_gguf_type_id(k)).collect(),
             supports_rms_norm: true,
+            supports_grouped_rms_norm: false,
             supports_layer_norm: true,
             supports_rope: true,
             supports_swiglu: true,

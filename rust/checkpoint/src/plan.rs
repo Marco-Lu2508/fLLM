@@ -784,7 +784,7 @@ impl Plan {
         .find_map(|k| num(cfg, k))
         .unwrap_or(0);
         let moe = experts > 0;
-        if raw != "granitemoehybrid"
+        if raw != "granitemoehybrid" && raw != "k2_horizon"
             && moe
                 != matches!(
                     raw.as_str(),

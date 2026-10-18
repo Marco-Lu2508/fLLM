@@ -202,6 +202,7 @@ impl CpuBackend {
                 name: "CPU".to_string(),
                 supported_quants: all_quants,
                 supports_rms_norm: true,
+                supports_grouped_rms_norm: true,
                 supports_layer_norm: true,
                 supports_rope: true,
                 supports_swiglu: true,
@@ -563,6 +564,40 @@ impl Stream for CpuStream {
             }
         }
         write_f32(out, &values, "rms_norm")
+    }
+
+    fn rms_norm_grouped(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceBuffer,
+        eps: f32,
+        groups: usize,
+    ) -> Result<(), BackendError> {
+        if groups == 0 {
+            return Err(invalid("rms_norm_grouped requires groups > 0"));
+        }
+        let w = read_f32(weight)?;
+        let width = w.len();
+        if width == 0 || !width.is_multiple_of(groups) {
+            return Err(invalid("rms_norm_grouped weight width is not divisible by groups"));
+        }
+        let mut values = read_f32(x)?;
+        if !values.len().is_multiple_of(width) {
+            return Err(invalid("rms_norm_grouped input is not rows of the weight width"));
+        }
+        let size = width / groups;
+        for row in values.chunks_exact_mut(width) {
+            for (chunk_x, chunk_w) in row.chunks_exact_mut(size).zip(w.chunks_exact(size)) {
+                let inv = (chunk_x.iter().map(|v| v * v).sum::<f32>() / size as f32 + eps)
+                    .sqrt()
+                    .recip();
+                for (val, &weight_val) in chunk_x.iter_mut().zip(chunk_w) {
+                    *val *= inv * weight_val;
+                }
+            }
+        }
+        write_f32(out, &values, "rms_norm_grouped")
     }
 
     fn layer_norm(

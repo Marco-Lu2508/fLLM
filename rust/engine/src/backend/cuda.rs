@@ -299,6 +299,16 @@ extern "C" {
         cols: c_int,
         eps: f32,
     ) -> c_int;
+    fn fllm_cuda_rms_norm_grouped(
+        st: *mut RawStream,
+        x: *const f32,
+        w: *const f32,
+        out: *mut f32,
+        rows: c_int,
+        cols: c_int,
+        groups: c_int,
+        eps: f32,
+    ) -> c_int;
     fn fllm_cuda_layer_norm(
         st: *mut RawStream,
         x: *const f32,
@@ -887,6 +897,7 @@ impl CudaBackend {
             name: info.name.clone(),
             supported_quants,
             supports_rms_norm: true,
+            supports_grouped_rms_norm: true,
             supports_layer_norm: true,
             supports_rope: true,
             supports_swiglu: true,
@@ -2352,6 +2363,43 @@ impl Stream for CudaStream {
         // SAFETY: sizes checked above.
         check(unsafe {
             fllm_cuda_rms_norm(self.raw, dev_ptr(x)?.cast(), dev_ptr(weight)?.cast(), dev_ptr(out)?.cast(), to_c(rows, "rows")?, to_c(cols, "width")?, eps)
+        })
+    }
+
+    fn rms_norm_grouped(
+        &mut self,
+        out: &mut DeviceBuffer,
+        x: &DeviceBuffer,
+        weight: &DeviceBuffer,
+        eps: f32,
+        groups: usize,
+    ) -> Result<(), BackendError> {
+        if groups == 0 {
+            return Err(invalid("rms_norm_grouped requires groups > 0"));
+        }
+        if groups == 1 {
+            return self.rms_norm(out, x, weight, eps);
+        }
+        let cols = weight.size / 4;
+        if cols == 0 || !x.size.is_multiple_of(cols * 4) || out.size < x.size {
+            return Err(invalid("rms_norm_grouped input is not rows of the weight width"));
+        }
+        if !cols.is_multiple_of(groups) {
+            return Err(invalid("rms_norm_grouped weight width is not divisible by groups"));
+        }
+        let rows = x.size / (cols * 4);
+        // SAFETY: sizes checked above.
+        check(unsafe {
+            fllm_cuda_rms_norm_grouped(
+                self.raw,
+                dev_ptr(x)?.cast(),
+                dev_ptr(weight)?.cast(),
+                dev_ptr(out)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(cols, "width")?,
+                to_c(groups, "groups")?,
+                eps,
+            )
         })
     }
 

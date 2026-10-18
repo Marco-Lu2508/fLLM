@@ -1,0 +1,46 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: norm_rms_grouped | bindings: x,weight,out | push: group_size,groups,total_groups,cols_total,eps,flags | grid: [total_groups split over x/y (x <= 65535), 1, 1]
+// Grouped RMSNorm (Stream::rms_norm_grouped): row is split into groups of group_size floats.
+// One workgroup per (row, group). out[r*cols_total + g*group_size + i] = x[...] * (1 / sqrt(mean(group^2) + eps) * weight[g*group_size + i]).
+// flags bit 0: weight present (otherwise weight is not read and 1 is used). out may be the same buffer range as x.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer WBuf { float weight[]; };
+layout(std430, binding = 2) buffer OBuf { float o[]; };
+layout(push_constant) uniform P {
+    uint group_size;
+    uint groups;
+    uint total_groups;
+    uint cols_total;
+    float eps;
+    uint flags;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint idx = group_index();
+    if (idx >= p.total_groups) return;
+    const uint lane = gl_LocalInvocationID.x;
+    const uint r = idx / p.groups;
+    const uint g = idx % p.groups;
+    const uint xb = r * p.cols_total + g * p.group_size;
+    const uint wb = g * p.group_size;
+    const uint ob = xb;
+    float ss = 0.0;
+    for (uint c = lane; c < p.group_size; c += WG) {
+        const float v = x[xb + c];
+        ss += v * v;
+    }
+    ss = wg_sum(ss);
+    const float inv = 1.0 / sqrt(ss / float(p.group_size) + p.eps);
+    const bool has_w = (p.flags & 1u) != 0u;
+    for (uint c = lane; c < p.group_size; c += WG) {
+        const float wv = has_w ? weight[wb + c] : 1.0;
+        o[ob + c] = x[xb + c] * (inv * wv);
+    }
+}

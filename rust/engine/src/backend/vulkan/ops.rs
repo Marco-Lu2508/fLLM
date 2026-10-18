@@ -331,6 +331,40 @@ pub fn plan_rms_norm_strided(
     )
 }
 
+/// `Stream::rms_norm_grouped` (`shader norm_rms_grouped`): `rows` rows of `cols` floats divided into `groups` groups.
+pub fn plan_rms_norm_grouped(
+    rows: usize,
+    cols: usize,
+    groups: usize,
+    eps: f32,
+    has_weight: bool,
+) -> Result<OpPlan, BackendError> {
+    if rows == 0 || cols == 0 {
+        return Err(invalid("rms_norm_grouped of an empty tensor"));
+    }
+    if groups == 0 || !cols.is_multiple_of(groups) {
+        return Err(invalid("rms_norm_grouped requires groups > 0 and cols divisible by groups"));
+    }
+    let group_size = cols / groups;
+    let total_groups = rows * groups;
+    let push = Push::new()
+        .u("group_size", group_size)
+        .u("groups", groups)
+        .u("total_groups", total_groups)
+        .u("cols_total", cols)
+        .f("eps", eps)
+        .u("flags", usize::from(has_weight));
+    plan(
+        "norm_rms_grouped",
+        push,
+        groups_rows(total_groups),
+        Slots::new()
+            .read("x")
+            .read_opt("weight", has_weight)
+            .write("out"),
+    )
+}
+
 /// `Stream::layer_norm` (`norm_layer`): `rows` rows of `cols` floats with weight and optional bias.
 pub fn plan_layer_norm(
     rows: usize,
