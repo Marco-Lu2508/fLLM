@@ -48,7 +48,7 @@ jobs:
 
       - name: Run workspace tests under llvm-cov
         run: |
-          cargo llvm-cov --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe --lcov --output-path lcov.info
+          scripts/ci/annotate-failure.sh cargo llvm-cov --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe --lcov --output-path lcov.info
           cargo llvm-cov report --summary-only
 
       - name: Upload coverage report
