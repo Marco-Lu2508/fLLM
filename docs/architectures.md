@@ -90,7 +90,8 @@ speculative decoding are switched off for them.
 
 ## Not supported
 
-* DeepSeek V3.2/V4 and GLM-5 (sparse attention indexer), MiMo-V2-Pro, Zamba2, JetMoE, Inkling, ZAYA.
+* MiMo-V2 (Flash and Pro), Laguna and Mellum (per-layer head counts), Kimi-Linear (KDA), DeepSeek V3.2/V4 and GLM-5
+  (sparse attention indexer), Zamba2, JetMoE, Inkling, ZAYA.
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
 * Step 3.5 / Step 3.7: heterogeneous per-layer attention head counts (`num_attention_heads_per_layer`).
 * A.X-K2: Gated RMSNorm wrapper (`AXK2GatedRMSNorm`) with internal `gate_mlp` projection.
