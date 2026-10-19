@@ -51,6 +51,7 @@
  */
 #include <cstdlib>
 
+#include "../cuda/common.cuh"
 #include "../cuda/fllm_cuda_internal.h"
 #include "hip_gemm.cuh"
 

@@ -10,6 +10,7 @@
 // Level of verification: L0 (compiles; never run on hardware).
 #include <cstdlib>
 
+#include "../cuda/common.cuh"
 #include "../cuda/fllm_cuda_internal.h"
 #include "hip_gemm.cuh"
 
