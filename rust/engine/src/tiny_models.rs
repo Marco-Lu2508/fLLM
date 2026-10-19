@@ -43,6 +43,14 @@ pub(crate) enum Arch {
     Deepseek,
     Exaone,
     ChatGLM,
+    Cohere2Moe,
+    Laguna,
+    Mellum,
+    VaultGemma,
+    XverseMoe,
+    MiniCPM,
+    Qwen,
+    Baichuan,
 }
 
 // Gated DeltaNet geometry of the Qwen35 fixture
@@ -225,6 +233,105 @@ fn config_json(arch: Arch) -> Value {
             cfg["architectures"] = json!(["ExaoneForCausalLM"]);
             cfg["num_layers"] = LAYERS.into();
         }
+        Arch::Qwen => {
+            cfg["model_type"] = "qwen".into();
+            cfg["architectures"] = json!(["QWenLMHeadModel"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["num_hidden_layers"] = LAYERS.into();
+            cfg["kv_channels"] = HEAD_DIM.into();
+            cfg["intermediate_size"] = (2 * INTER).into();
+            cfg["no_bias"] = true.into();
+        }
+        Arch::Baichuan => {
+            cfg["model_type"] = "baichuan".into();
+            cfg["architectures"] = json!(["BaiChuanForCausalLM"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["num_hidden_layers"] = LAYERS.into();
+        }
+        Arch::VaultGemma => {
+            cfg["model_type"] = "vaultgemma".into();
+            cfg["architectures"] = json!(["VaultGemmaForCausalLM"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["num_hidden_layers"] = LAYERS.into();
+            cfg["layer_types"] = json!(["sliding_attention", "full_attention"]);
+            cfg["sliding_window"] = 5.into();
+            cfg["query_pre_attn_scalar"] = HEAD_DIM.into();
+            cfg["attn_logit_softcapping"] = 50.0.into();
+            cfg["final_logit_softcapping"] = 30.0.into();
+            cfg["hidden_activation"] = "gelu_pytorch_tanh".into();
+        }
+        Arch::Mellum => {
+            cfg["model_type"] = "mellum".into();
+            cfg["architectures"] = json!(["MellumForCausalLM"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["num_hidden_layers"] = LAYERS.into();
+            cfg["layer_types"] = json!(["sliding_attention", "full_attention"]);
+            cfg["mlp_layer_types"] = json!(["dense", "sparse"]);
+            cfg["num_experts"] = EXPERTS.into();
+            cfg["num_experts_per_tok"] = TOP_K.into();
+            cfg["moe_intermediate_size"] = MOE_INTER.into();
+            cfg["norm_topk_prob"] = true.into();
+            cfg["sliding_window"] = 5.into();
+            cfg["rope_parameters"] = json!({
+                "full_attention": {"rope_type": "default", "rope_theta": 500000.0},
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+            });
+        }
+        Arch::Laguna => {
+            cfg["model_type"] = "laguna".into();
+            cfg["architectures"] = json!(["LagunaForCausalLM"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["num_hidden_layers"] = LAYERS.into();
+            cfg["num_attention_heads_per_layer"] = json!([HEADS, HEADS]);
+            cfg["layer_types"] = json!(["sliding_attention", "full_attention"]);
+            cfg["mlp_layer_types"] = json!(["dense", "sparse"]);
+            cfg["num_experts"] = EXPERTS.into();
+            cfg["num_experts_per_tok"] = TOP_K.into();
+            cfg["moe_intermediate_size"] = MOE_INTER.into();
+            cfg["shared_expert_intermediate_size"] = INTER.into();
+            cfg["gating"] = true.into();
+            cfg["sliding_window"] = 5.into();
+            cfg["rope_parameters"] = json!({
+                "full_attention": {"rope_type": "default", "rope_theta": 500000.0, "partial_rotary_factor": 0.5},
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0},
+            });
+        }
+        Arch::Cohere2Moe => {
+            cfg["model_type"] = "cohere2_moe".into();
+            cfg["architectures"] = json!(["Cohere2MoeForCausalLM"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["num_experts"] = EXPERTS.into();
+            cfg["num_experts_per_tok"] = TOP_K.into();
+            cfg["intermediate_size"] = MOE_INTER.into();
+            cfg["norm_topk_prob"] = true.into();
+            cfg["sliding_window"] = 5.into();
+            cfg["sliding_window_pattern"] = 2.into();
+            cfg["layer_types"] = json!(["sliding_attention", "full_attention"]);
+            cfg["logit_scale"] = 0.0625.into();
+            cfg["layer_norm_eps"] = 1e-5.into();
+        }
+        Arch::XverseMoe => {
+            cfg["model_type"] = "xverse_moe".into();
+            cfg["architectures"] = json!(["XverseForCausalLM"]);
+            cfg["num_hidden_layers"] = LAYERS.into();
+            cfg["num_experts"] = EXPERTS.into();
+            cfg["moe_top_k"] = TOP_K.into();
+            cfg["num_shared_experts"] = 1.into();
+            cfg["intermediate_size"] = MOE_INTER.into();
+            cfg["norm_topk_prob"] = true.into();
+            cfg["rms_norm_eps"] = 1e-6.into();
+            cfg["rope_theta"] = 10000.0.into();
+        }
+        Arch::MiniCPM => {
+            cfg["model_type"] = "minicpm".into();
+            cfg["architectures"] = json!(["MiniCPMForCausalLM"]);
+            cfg["num_hidden_layers"] = LAYERS.into();
+            cfg["intermediate_size"] = INTER.into();
+            cfg["rms_norm_eps"] = 1e-5.into();
+            cfg["scale_emb"] = 12.0.into();
+            cfg["scale_depth"] = 1.4.into();
+            cfg["dim_model_base"] = 256.0.into();
+        }
         Arch::ChatGLM => {
             cfg["model_type"] = "chatglm".into();
             cfg["architectures"] = json!(["ChatGLMForConditionalGeneration"]);
@@ -266,19 +373,32 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
     let mut rng = Rng(seed | 1);
     let mut entries = Vec::new();
     let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
-    let emb_name = match arch { Arch::Exaone => "transformer.wte.weight", Arch::ChatGLM => "transformer.embedding.word_embeddings.weight", _ => "model.embed_tokens.weight" };
+    let emb_name = match arch { Arch::Exaone | Arch::Qwen => "transformer.wte.weight", Arch::ChatGLM => "transformer.embedding.word_embeddings.weight", _ => "model.embed_tokens.weight" };
     entries.push(Entry { name: emb_name.into(), shape: vec![VOCAB, HIDDEN], values: embed });
     let head_name = if arch == Arch::ChatGLM { "transformer.output_layer.weight" } else { "lm_head.weight" };
     entries.push(linear(&mut rng, head_name, VOCAB, HIDDEN, 1.5));
-    let norm_name = match arch { Arch::Exaone => "transformer.ln_f.weight", Arch::ChatGLM => "transformer.encoder.final_layernorm.weight", _ => "model.norm.weight" };
+    let norm_name = match arch { Arch::Exaone | Arch::Qwen => "transformer.ln_f.weight", Arch::ChatGLM => "transformer.encoder.final_layernorm.weight", _ => "model.norm.weight" };
     entries.push(norm(&mut rng, norm_name, HIDDEN));
     let qwen_style = matches!(arch, Arch::Qwen3 | Arch::Qwen3Moe | Arch::Qwen35);
-    if arch == Arch::Qwen35 {
+    if arch == Arch::Qwen35 || arch == Arch::VaultGemma {
         // zero-centred norm weights (the model computes x * (1 + w))
         entries.pop();
         entries.push(zero_norm(&mut rng, "model.norm.weight", HIDDEN));
     }
     for layer in 0..LAYERS {
+        if arch == Arch::VaultGemma {
+            let p = format!("model.layers.{layer}");
+            entries.push(zero_norm(&mut rng, &format!("{p}.input_layernorm.weight"), HIDDEN));
+            entries.push(zero_norm(&mut rng, &format!("{p}.pre_feedforward_layernorm.weight"), HIDDEN));
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.q_proj.weight"), HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.k_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.v_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.o_proj.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+            continue;
+        }
         if arch == Arch::ChatGLM {
             let p = format!("transformer.encoder.layers.{layer}");
             entries.push(norm(&mut rng, &format!("{p}.input_layernorm.weight"), HIDDEN));
@@ -308,25 +428,112 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
             entries.push(linear(&mut rng, &format!("{p}.mlp.c_proj.weight"), HIDDEN, INTER, 1.0));
             continue;
         }
+        if arch == Arch::Qwen {
+            let p = format!("transformer.h.{layer}");
+            entries.push(norm(&mut rng, &format!("{p}.ln_1.weight"), HIDDEN));
+            entries.push(norm(&mut rng, &format!("{p}.ln_2.weight"), HIDDEN));
+            entries.push(linear(&mut rng, &format!("{p}.attn.c_attn.weight"), 3 * HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(Entry {
+                name: format!("{p}.attn.c_attn.bias"),
+                shape: vec![3 * HEADS * HEAD_DIM],
+                values: (0..3 * HEADS * HEAD_DIM).map(|_| 0.01 * rng.unit()).collect(),
+            });
+            entries.push(linear(&mut rng, &format!("{p}.attn.c_proj.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.w1.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.w2.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.c_proj.weight"), HIDDEN, INTER, 1.0));
+            continue;
+        }
+        if arch == Arch::Baichuan {
+            let p = format!("model.layers.{layer}");
+            entries.push(norm(&mut rng, &format!("{p}.input_layernorm.weight"), HIDDEN));
+            entries.push(norm(&mut rng, &format!("{p}.post_attention_layernorm.weight"), HIDDEN));
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.W_pack.weight"), 3 * HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.o_proj.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+            continue;
+        }
         let p = format!("model.layers.{layer}");
         if arch == Arch::Qwen35 {
             qwen35_layer(&mut rng, &mut entries, &p, layer == 0);
             continue;
         }
         entries.push(norm(&mut rng, &format!("{p}.input_layernorm.weight"), HIDDEN));
-        entries.push(norm(&mut rng, &format!("{p}.post_attention_layernorm.weight"), HIDDEN));
+        if arch != Arch::Cohere2Moe {
+            entries.push(norm(&mut rng, &format!("{p}.post_attention_layernorm.weight"), HIDDEN));
+        }
         entries.push(linear(&mut rng, &format!("{p}.self_attn.q_proj.weight"), HEADS * HEAD_DIM, HIDDEN, 1.0));
         entries.push(linear(&mut rng, &format!("{p}.self_attn.k_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
         entries.push(linear(&mut rng, &format!("{p}.self_attn.v_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
         entries.push(linear(&mut rng, &format!("{p}.self_attn.o_proj.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
-        if qwen_style {
+        if qwen_style || arch == Arch::Laguna || arch == Arch::Mellum {
             entries.push(norm(&mut rng, &format!("{p}.self_attn.q_norm.weight"), HEAD_DIM));
             entries.push(norm(&mut rng, &format!("{p}.self_attn.k_norm.weight"), HEAD_DIM));
         }
+        if arch == Arch::Laguna {
+            entries.push(linear(&mut rng, &format!("{p}.self_attn.g_proj.weight"), HEADS, HIDDEN, 1.0));
+        }
         match arch {
             Arch::Qwen35 => unreachable!("handled by qwen35_layer"),
-            Arch::Exaone | Arch::ChatGLM => unreachable!("handled above"),
-            Arch::Llama | Arch::Qwen3 | Arch::K2Horizon => {
+            Arch::Exaone | Arch::ChatGLM | Arch::VaultGemma | Arch::Qwen | Arch::Baichuan => unreachable!("handled above"),
+            Arch::Mellum => {
+                if layer < 1 {
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+                } else {
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.gate.weight"), EXPERTS, HIDDEN, 2.0));
+                    for e in 0..EXPERTS {
+                        let q = format!("{p}.mlp.experts.{e}");
+                        entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                        entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                        entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+                    }
+                }
+            }
+            Arch::Laguna => {
+                if layer < 1 {
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+                } else {
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.shared_experts.gate_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.shared_experts.up_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.shared_experts.down_proj.weight"), HIDDEN, INTER, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.gate.weight"), EXPERTS, HIDDEN, 2.0));
+                    for e in 0..EXPERTS {
+                        let q = format!("{p}.mlp.experts.{e}");
+                        entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                        entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                        entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+                    }
+                }
+            }
+            Arch::Cohere2Moe => {
+                entries.push(linear(&mut rng, &format!("{p}.mlp.gate.weight"), EXPERTS, HIDDEN, 2.0));
+                for e in 0..EXPERTS {
+                    let q = format!("{p}.mlp.experts.{e}");
+                    entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+                }
+            }
+            Arch::XverseMoe => {
+                entries.push(linear(&mut rng, &format!("{p}.mlp.router.weight"), EXPERTS, HIDDEN, 2.0));
+                for e in 0..EXPERTS {
+                    let q = format!("{p}.mlp.experts.{e}");
+                    entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+                }
+                let q = format!("{p}.mlp.shared_experts");
+                entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+            }
+            Arch::Llama | Arch::Qwen3 | Arch::K2Horizon | Arch::MiniCPM => {
                 entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
                 entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
                 entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
@@ -582,6 +789,16 @@ mod tests {
     }
 
     #[test]
+    fn cpu_backend_matches_host_path_qwen_f32() {
+        run("qwen-f32", Arch::Qwen, Encoding::F32, 1e-3);
+    }
+
+    #[test]
+    fn cpu_backend_matches_host_path_baichuan_f32() {
+        run("baichuan-f32", Arch::Baichuan, Encoding::F32, 1e-3);
+    }
+
+    #[test]
     fn cpu_backend_matches_host_path_k2_horizon() {
         run("k2-horizon", Arch::K2Horizon, Encoding::F32, 1e-3);
     }
@@ -605,6 +822,36 @@ mod tests {
         let top = run.logits.iter().flatten().fold(0f32, |m, v| m.max(v.abs()));
         assert!(top > 1e-3 && run.logits.iter().flatten().all(|v| v.is_finite()), "{label}: degenerate logits");
         assert!(run.tokens.iter().any(|t| *t != run.tokens[0]), "{label}: constant output {:?}", run.tokens);
+    }
+
+    #[test]
+    fn minicpm_fixture_runs_on_the_host() {
+        host_only("minicpm-f32", Arch::MiniCPM, Encoding::F32);
+    }
+
+    #[test]
+    fn xverse_moe_fixture_runs_on_the_host() {
+        host_only("xverse_moe-f32", Arch::XverseMoe, Encoding::F32);
+    }
+
+    #[test]
+    fn vaultgemma_fixture_runs_on_the_host() {
+        host_only("vaultgemma-f32", Arch::VaultGemma, Encoding::F32);
+    }
+
+    #[test]
+    fn mellum_fixture_runs_on_the_host() {
+        host_only("mellum-f32", Arch::Mellum, Encoding::F32);
+    }
+
+    #[test]
+    fn laguna_fixture_runs_on_the_host() {
+        host_only("laguna-f32", Arch::Laguna, Encoding::F32);
+    }
+
+    #[test]
+    fn cohere2_moe_fixture_runs_on_the_host() {
+        host_only("cohere2moe-f32", Arch::Cohere2Moe, Encoding::F32);
     }
 
     #[test]

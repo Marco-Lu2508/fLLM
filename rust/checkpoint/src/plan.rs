@@ -158,6 +158,7 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "gemma4_text" | "gemma4" => (Family::Gemma, "gemma4"),
         "gemma3n_text" | "gemma3n" => (Family::Gemma, "gemma3n"),
         "muse_glimmer" | "muse_glimmer_text" => (Family::Gemma, "muse-glimmer"),
+        "vaultgemma" => (Family::Gemma, "vaultgemma"),
         "olmo2" => (Family::Olmo2, "olmo2"),
         "phi3" => (Family::Phi3, "phi3"),
         "phimoe" => (Family::Llama, "phimoe"),
@@ -253,7 +254,7 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "step3" | "step3_moe" => (Family::Qwen, "step3"),
         "plamo" | "plamo3" | "plamo_3" => (Family::Llama, "plamo"),
         "grok" | "grok1" | "grok_1" | "grok-1" => (Family::Llama, "grok"),
-        "xverse_moe" => (Family::Qwen, "xverse_moe"),
+        "xverse_moe" => (Family::Llama, "xverse_moe"),
         "cohere2_moe" => (Family::Cohere, "cohere2_moe"),
         "jetmoe" => (Family::Qwen, "jetmoe"),
         "gigachat" | "gigachat3_5" => (Family::Llama, "gigachat"),
@@ -763,6 +764,8 @@ impl Plan {
         }
         let (family, arch) = if matches!(raw.as_str(), "bailing_moe" | "bailing_hybrid" | "ling" | "ling_moe" | "bailing" | "bailing_v2") && num(cfg, "kv_lora_rank").is_none() {
             (Family::Qwen, "bailing_moe")
+        } else if raw == "xverse" && num(cfg, "num_experts").unwrap_or(0) > 0 {
+            (Family::Llama, "xverse_moe")
         } else {
             family_for(&raw).ok_or_else(|| {
                 format!("unsupported model_type {raw:?}; refusing fallback architecture mapping")
@@ -811,6 +814,9 @@ impl Plan {
                         | "qwen3_next"
                         | "qwen3_5_moe"
                         | "qwen3_5_moe_text"
+                        | "cohere2_moe"
+                        | "xverse_moe"
+                        | "xverse"
                         | "solar_open"
                         | "hy_v3"
                         | "exaone_moe"
@@ -834,9 +840,7 @@ impl Plan {
                         | "grok1"
                         | "grok_1"
                         | "grok-1"
-                        | "xverse_moe"
-                        | "cohere2_moe"
-                        | "jetmoe"
+                                                | "jetmoe"
                         | "param2_moe"
                         | "ling_moe"
                         | "jamba"
@@ -865,6 +869,7 @@ impl Plan {
         let inter = num(cfg, "intermediate_size")
             .or_else(|| num(cfg, "ffn_hidden_size"))
             .ok_or("config.json requires valid intermediate_size")?;
+        let inter = if arch == "qwen" { inter / 2 } else { inter };
         // Persimmon is multi-head only: the HF reference ignores `num_key_value_heads`.
         let kv_heads = if raw == "persimmon" {
             heads
@@ -1083,7 +1088,7 @@ impl Plan {
                         .map(|v| v.as_u64() != Some(0) && v.as_bool() != Some(false))
                         .collect()
                 }),
-            "exaone4" | "exaone_moe" | "cohere2" => sliding_layers.clone(),
+            "exaone4" | "exaone_moe" | "cohere2" | "cohere2_moe" => sliding_layers.clone(),
             "muse-glimmer" => cfg
                 .get("layer_rope_theta")
                 .and_then(Value::as_array)
@@ -1108,7 +1113,7 @@ impl Plan {
         let local = rope_params(cfg, Some("sliding_attention"));
         let default_theta = if matches!(
             raw.as_str(),
-            "llama" | "mistral" | "granite" | "phi3" | "gpt_neox" | "xverse"
+            "llama" | "mistral" | "granite" | "phi3" | "gpt_neox" | "xverse" | "xverse_moe" | "minicpm"
         ) {
             10_000.0
         } else if raw == "chatglm" {
@@ -1335,6 +1340,7 @@ impl Plan {
         if moe {
             let used = num(cfg, "num_experts_per_tok")
                 .or_else(|| num(cfg, "moe_topk"))
+                .or_else(|| num(cfg, "moe_top_k"))
                 .or_else(|| num(cfg, "moe_k"))
                 .ok_or("MoE config requires num_experts_per_tok")?;
             if used == 0 || used > experts {
@@ -1382,7 +1388,7 @@ impl Plan {
             if mla
                 || matches!(
                     raw.as_str(),
-                    "glm4_moe" | "dots1" | "solar_open" | "exaone_moe" | "g9v3" | "deepseek"
+                    "glm4_moe" | "dots1" | "solar_open" | "exaone_moe" | "g9v3" | "deepseek" | "xverse_moe" | "xverse"
                 )
             {
                 let per = num(cfg, "moe_intermediate_size").unwrap_or(inter);
@@ -1400,7 +1406,7 @@ impl Plan {
                 let gating = match cfg.get("scoring_func").and_then(Value::as_str) {
                     Some("sigmoid") => 2,
                     Some(_) => 1,
-                    None if !matches!(raw.as_str(), "deepseek_v2" | "mistral4" | "deepseek") => 2,
+                    None if !matches!(raw.as_str(), "deepseek_v2" | "mistral4" | "deepseek" | "xverse_moe" | "xverse") => 2,
                     None => 1,
                 };
                 u!("expert_gating_func", gating);
@@ -1465,6 +1471,9 @@ impl Plan {
                         | "granitemoehybrid"
                         | "qwen3_5_moe"
                         | "qwen3_5_moe_text"
+                        | "cohere2_moe"
+                        | "xverse_moe"
+                        | "xverse"
                 ),
             };
             meta.push((format!("{arch}.expert_weights_norm"), Meta::Bool(normalize)));
@@ -1550,7 +1559,7 @@ impl Plan {
 
         // family specifics
         match arch {
-            "command-r" | "cohere2" => {
+            "command-r" | "cohere2" | "cohere2_moe" => {
                 if cfg.get("use_qk_norm").and_then(Value::as_bool) == Some(true) {
                     return Err("Cohere models with use_qk_norm are unsupported".into());
                 }
@@ -1581,7 +1590,7 @@ impl Plan {
                     synthesized.push((format!("blk.{i}.attn_k_norm.weight"), vec![1.0; head_dim as usize]));
                 }
             }
-            "gemma" | "gemma2" | "gemma3" => {
+            "gemma" | "gemma2" | "gemma3" | "vaultgemma" => {
                 f!("embedding_scale", (hidden as f64).sqrt());
                 if arch != "gemma" {
                     let scalar = flt(cfg, "query_pre_attn_scalar").unwrap_or(head_dim as f64);
@@ -2596,7 +2605,7 @@ impl Plan {
                     return Ok(m);
                 }
             }
-            let sandwich = matches!(self.family, Family::Gemma) && self.arch != "gemma";
+            let sandwich = matches!(self.family, Family::Gemma) && self.arch != "gemma" && self.arch != "vaultgemma";
             let post_norm_family = sandwich || self.family == Family::Olmo2 || self.arch == "afmoe";
             if matches!(
                 self.arch.as_str(),
@@ -2680,8 +2689,10 @@ impl Plan {
                 "attn.attention.out_proj.bias" | "attn.out_proj.bias" => Some(("attn_output.bias", false)),
                 "mlp.c_fc_0.bias" => Some(("ffn_gate.bias", false)),
                 "mlp.c_fc_1.bias" => Some(("ffn_up.bias", false)),
-                "mlp.w1.weight" => Some(("ffn_gate.weight", false)),
-                "mlp.w2.weight" => Some(("ffn_up.weight", false)),
+                "mlp.w1.weight" => Some(("ffn_up.weight", false)),
+                "mlp.w1.bias" => Some(("ffn_up.bias", false)),
+                "mlp.w2.weight" => Some(("ffn_gate.weight", false)),
+                "mlp.w2.bias" => Some(("ffn_gate.bias", false)),
                 "attention.query_key_value.weight" | "self_attention.query_key_value.weight" => Some(("attn_qkv.weight", false)),
                 "attention.query_key_value.bias" | "self_attention.query_key_value.bias" => Some(("attn_qkv.bias", false)),
                 "attention.dense.weight" | "self_attention.dense.weight" => Some(("attn_output.weight", false)),

@@ -17,19 +17,20 @@ convert to their text model; vision towers are not imported.
 | `model_type` | Notes |
 | --- | --- |
 | `llama`, `mistral`, `mistral_large`, `granite`, `k2_horizon`, `intellect_3` | GQA, sliding window, linear/YaRN/Llama-3 rope scaling |
-| `qwen2`, `qwen3` (+ `*_vl_text`) | Q/K bias, per-head Q/K norm |
-| `gemma`, `gemma2`, `gemma3_text` | `1+w` norms, sandwich norms, soft-capping, local/global rope |
+| `baichuan`, `qwen`, `qwen2`, `qwen3` (+ `*_vl_text`) | Q/K bias, per-head Q/K norm, fused QKV (baichuan, qwen) |
+| `gemma`, `gemma2`, `gemma3_text`, `vaultgemma` | `1+w` norms, soft-capping, local/global rope, sandwich norms (Gemma 2/3) |
 | `gemma4`, `gemma4_text`, `gemma3n` | sliding and global layers with heterogeneous head width, K = V on global layers, proportional rope, value norm, AltUp, LAuReL, per-layer embeddings, shared KV layers, layer output scale; verified against transformers 5.19 |
 | `muse_glimmer` (text model of Muse Glimmer) | Gemma-style sandwich norms with a silu MLP, per-head sigmoid output gate (`attn_gate`), weightless QK norm (queries scaled by `qk_scale_factor`), NoPE global layers, embedding RMS norm, `output_multiplier` before the tanh soft cap, separate epsilon for the post norms. llama.cpp GGUFs use interleaved rope with permuted Q/K rows; checked against an unsloth GGUF and llama.cpp. Vision tower not imported |
 | `olmo`, `olmo2`, `olmo3` | non-parametric LN (v1), post norms, sliding layers with own rope |
 | `phi`, `phi3` | parallel block + biases (phi-2), LongRoPE (phi-3) |
-| `cohere`, `cohere2` | bias-free LayerNorm, parallel residual, logit scale, sliding/NoPE layers |
+| `cohere`, `cohere2`, `cohere2_moe` | bias-free LayerNorm, parallel residual, logit scale, sliding/NoPE layers |
 | `starcoder2`, `gpt_neox`, `stablelm`, `gptj`, `gpt2`, `gpt_bigcode`, `gpt_neo`, `opt` | LayerNorm families, learned positions, parallel residual |
 | `falcon`, `bloom`, `mpt` | multi-query/GQA fused qkv layouts, ALiBi (Falcon-RW's reference rounds the bias to bfloat16, so only the maths is implemented) |
 | `glm`, `glm4`, `glm4v_text` | partial interleaved rope, fused gate/up, sandwich norms |
 | `nemotron` | LayerNorm1p (`weight + 1`, folded at conversion), ReLU² MLP without gate, partial NeoX rope (Nemotron-4-Minitron, Nemotron-Mini-4B; also compared with the real Nemotron-Mini-4B weights) |
 | `internlm2` | InternLM2/2.5: fused `wqkv` (rows grouped per KV head) reordered into q/k/v with interleaved rotary pairs, `w1/w2/w3` MLP; dynamic NTK scaling is ignored within `max_position_embeddings`; verified against the model remote code |
 | `seed_oss`, `smollm3`, `arcee`, `ernie4_5`, `exaone4`, `hunyuan_v1_dense`, `ministral3`, `jais2`, `cwm`, `hyperclovax`, `nanochat`, `apertus` | per-layer NoPE, post-rope QK norm, query temperature, ReLU², xIELU, weightless norms, flipped rope |
+| `minicpm` | muP scaling: `scale_emb` on embeddings, `residual_scale` (`scale_depth / sqrt(layers)`), `logit_scale` (`dim_model_base / hidden`); verified against transformers 5.19 (4.3e-5) |
 | `internlm3` | Llama tensor layout; dynamic NTK rope is the identity within `max_position_embeddings` (as for `internlm2`); checked against transformers 5.19 (relative logit difference 1.4e-4) |
 | `mimo` | Qwen2 layout with Q/K/V biases; `model.mtp_layers.*` (NextN heads) are dropped on import; checked against transformers 5.19 (1.9e-4) |
 | `solar` (Solar-Pro) | Llama layout; `bskcn_*` config fields carry no tensors and are ignored; a `sliding_window` key is present but attention is dense, so no window pattern is written; checked against transformers 5.19 with that key present (1.7e-4) |
@@ -43,9 +44,9 @@ convert to their text model; vision towers are not imported.
 
 | `model_type` | Router |
 | --- | --- |
-| `mixtral`, `qwen2_moe`, `qwen3_moe`, `sarvam_moe`, `olmoe`, `flex_olmo`, `granitemoe(shared)` | softmax, top-k, optional renormalisation, shared experts (sigmoid-gated for Qwen2-MoE) |
+| `mixtral`, `qwen2_moe`, `qwen3_moe`, `mellum`, `sarvam_moe`, `olmoe`, `flex_olmo`, `granitemoe(shared)`, `xverse_moe` | softmax, top-k, optional renormalisation, shared experts (sigmoid-gated for Qwen2-MoE), sliding/NoPE layers for Mellum |
 | `deepseek_v2`, `deepseek_v3`, `kimi_k2`, `glm4_moe_lite`, `bailing_moe`, `sarvam_mla`, `mistral4`, `youtu`, `minicpm3` | multi-head latent attention (the cache holds the rebuilt per-head keys/values), sigmoid or softmax routing, selection bias, group-limited experts, shared experts |
-| `glm4_moe`, `dots1`, `exaone_moe`, `solar_open`, `hy_v3`, `afmoe`, `trinity`, `minimax_m2`, `ernie4_5_moe`, `hunyuan_v1_moe` | DeepSeek-style sigmoid routing with bias and dense/sparse layer patterns |
+| `glm4_moe`, `dots1`, `exaone_moe`, `solar_open`, `hy_v3`, `afmoe`, `trinity`, `minimax_m2`, `ernie4_5_moe`, `hunyuan_v1_moe`, `laguna` | DeepSeek-style sigmoid routing with bias, softplus attention gate, per-layer head counts, and dense/sparse layer patterns |
 | `dbrx` | flat experts with transposed down weights, clipped fused QKV, bias-free LayerNorm, selected-weight p-norm; CPU implementation; logits agree with transformers 5.19 on a tiny checkpoint (relative difference 1.3e-4) |
 | `gpt_oss` | attention sinks, clamped SwiGLU, biased experts, MXFP4 import, untruncated YaRN |
 | `llama4` | chunked attention, NoPE layers, router score scales the expert input |
@@ -97,7 +98,7 @@ speculative decoding are switched off for them.
 
 ## Not supported
 
-* MiMo-V2 (Flash and Pro), Laguna and Mellum (per-layer head counts), Kimi-Linear (KDA), DeepSeek V3.2/V4 and GLM-5
+* MiMo-V2 (Flash and Pro), Kimi-Linear (KDA), DeepSeek V3.2/V4 and GLM-5
   (sparse attention indexer), JetMoE, Inkling, ZAYA.
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
 * Step 3.5 / Step 3.7: heterogeneous per-layer attention head counts (`num_attention_heads_per_layer`).

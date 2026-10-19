@@ -20,6 +20,19 @@ from pathlib import Path
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, decoders, trainers, processors, normalizers
 
+import types
+if "bitsandbytes" not in sys.modules:
+    sys.modules["bitsandbytes"] = types.ModuleType("bitsandbytes")
+
+if "transformers_stream_generator" not in sys.modules:
+    _d_tsg = types.ModuleType("transformers_stream_generator")
+    _d_tsg_main = types.ModuleType("transformers_stream_generator.main")
+    _d_tsg_main.NewGenerationMixin = type("NewGenerationMixin", (), {})
+    _d_tsg_main.StreamGenerationConfig = type("StreamGenerationConfig", (), {})
+    _d_tsg.main = _d_tsg_main
+    sys.modules["transformers_stream_generator"] = _d_tsg
+    sys.modules["transformers_stream_generator.main"] = _d_tsg_main
+
 from transformers import DynamicCache
 if not hasattr(DynamicCache, "from_legacy_cache"):
     DynamicCache.from_legacy_cache = staticmethod(lambda p=None: DynamicCache() if p is None else p)
@@ -40,6 +53,25 @@ CONFIG_PATCH = {
     "orion": {"model_type": "orion"},
     "iquestcoder": {"model_type": "iquestcoder"},
     "xverse": {"model_type": "xverse", "pop": ["rope_parameters"]},
+    "xverse_moe": {
+        "model_type": "xverse_moe",
+        "set": {
+            "num_experts": 4,
+            "moe_top_k": 2,
+            "num_shared_experts": 1,
+            "intermediate_size": 128,
+        },
+        "pop": ["rope_parameters"],
+    },
+    "minicpm": {
+        "model_type": "minicpm",
+        "set": {
+            "scale_emb": 12.0,
+            "scale_depth": 1.4,
+            "dim_model_base": 256.0,
+        },
+        "pop": ["rope_parameters"],
+    },
 }
 CORPUS = [
     "The quick brown fox jumps over the lazy dog.",
@@ -177,6 +209,39 @@ def _g9_config(vocab):
     )
 
 
+def _baichuan_config(vocab: int):
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained("baichuan-inc/baichuan-7B", trust_remote_code=True)
+    cfg.vocab_size = vocab
+    cfg.hidden_size = 64
+    cfg.num_hidden_layers = 2
+    cfg.num_attention_heads = 4
+    cfg.intermediate_size = 128
+    cfg.max_position_embeddings = 256
+    return cfg
+
+
+def _qwen_config(vocab: int):
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained("Qwen/Qwen-1_8B", trust_remote_code=True)
+    cfg.vocab_size = vocab
+    cfg.hidden_size = 64
+    cfg.num_hidden_layers = 3
+    cfg.num_attention_heads = 4
+    cfg.kv_channels = 16
+    cfg.intermediate_size = 128
+    cfg.seq_length = 256
+    cfg.max_position_embeddings = 256
+    cfg.use_dynamic_ntk = False
+    cfg.use_logn_attn = False
+    cfg.use_flash_attn = False
+    cfg.rotary_pct = 1.0
+    cfg.rotary_emb_base = 10000.0
+    cfg.no_bias = True
+    cfg.tie_word_embeddings = False
+    return cfg
+
+
 def config_for(arch: str, vocab: int):
     """Smallest configuration that still exercises every code path of the architecture."""
     import transformers as T
@@ -245,6 +310,8 @@ def config_for(arch: str, vocab: int):
         "orion": lambda: T.LlamaConfig(**common, **dense, rms_norm_eps=1e-5, rope_theta=10000.0),
         "iquestcoder": lambda: T.LlamaConfig(**common, **dense, rms_norm_eps=1e-5, rope_theta=500_000.0),
         "xverse": lambda: T.LlamaConfig(**common, **dense, rms_norm_eps=1e-6),
+        "xverse_moe": lambda: T.LlamaConfig(**common, **dense, rms_norm_eps=1e-6),
+        "minicpm": lambda: T.LlamaConfig(**common, **dense, rms_norm_eps=1e-5),
         "persimmon": lambda: T.PersimmonConfig(
             **common,
             **{**dense, "num_key_value_heads": 4},
@@ -763,6 +830,49 @@ def config_for(arch: str, vocab: int):
             embedding_multiplier=2.0, logits_scaling=3.0, residual_multiplier=0.5,
             attention_multiplier=0.1,
         ),
+        "vaultgemma": lambda: T.VaultGemmaConfig(
+            vocab_size=vocab, hidden_size=64, intermediate_size=96, num_hidden_layers=4,
+            num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+            sliding_window=4, query_pre_attn_scalar=16,
+            attn_logit_softcapping=50.0, final_logit_softcapping=30.0,
+            max_position_embeddings=256, initializer_range=0.1,
+            layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+            pad_token_id=0, eos_token_id=1, bos_token_id=2, tie_word_embeddings=True,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        ),
+        "mellum": lambda: T.MellumConfig(
+            vocab_size=vocab, hidden_size=64, intermediate_size=96, num_hidden_layers=4, num_attention_heads=4,
+            num_key_value_heads=2, head_dim=16, sliding_window=4, num_experts=6, num_experts_per_tok=2,
+            moe_intermediate_size=32, norm_topk_prob=True, max_position_embeddings=256, initializer_range=0.1,
+            layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+            mlp_layer_types=["dense", "sparse", "sparse", "dense"], pad_token_id=0, eos_token_id=1, bos_token_id=2,
+            tie_word_embeddings=False,
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 500000.0},
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+            },
+        ),
+        "laguna": lambda: T.LagunaConfig(
+            vocab_size=vocab, hidden_size=64, intermediate_size=96, num_hidden_layers=4, num_attention_heads=4,
+            num_attention_heads_per_layer=[4, 6, 2, 4], num_key_value_heads=2, head_dim=16, sliding_window=4,
+            num_experts=6, num_experts_per_tok=3, moe_intermediate_size=32, shared_expert_intermediate_size=48,
+            moe_routed_scaling_factor=1.7, moe_router_logit_softcapping=5.0, max_position_embeddings=256,
+            initializer_range=0.1, gating=True,
+            layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+            mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
+            pad_token_id=0, eos_token_id=1, bos_token_id=2, tie_word_embeddings=False,
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 500000.0, "partial_rotary_factor": 0.5},
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0},
+            },
+        ),
+        "cohere2_moe": lambda: T.Cohere2MoeConfig(
+            **common, num_attention_heads=4, num_key_value_heads=2,
+            intermediate_size=96, num_experts=4, num_experts_per_tok=2,
+            layer_norm_eps=1e-5, logit_scale=0.0625, sliding_window=5, sliding_window_pattern=3,
+            layer_types=["sliding_attention", "sliding_attention", "full_attention"],
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        ),
         "cohere2": lambda: T.Cohere2Config(
             **common, **dense, layer_norm_eps=1e-5, logit_scale=0.0625, sliding_window=5,
             layer_types=["sliding_attention", "sliding_attention", "full_attention"],
@@ -803,6 +913,8 @@ def config_for(arch: str, vocab: int):
             mlp_layer_types=["dense", "sparse", "sparse"],
         ),
         "olmo2": lambda: T.Olmo2Config(**common, **dense, rms_norm_eps=1e-6, rope_theta=500000.0),
+        "qwen": lambda: _qwen_config(vocab),
+        "baichuan": lambda: _baichuan_config(vocab),
         "granite": lambda: T.GraniteConfig(
             **common, **dense, rms_norm_eps=1e-5, rope_theta=10000.0, embedding_multiplier=3.0,
             attention_multiplier=0.07, residual_multiplier=0.4, logits_scaling=4.0,
@@ -1013,16 +1125,34 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     cfg = config_for(arch, vocab)
     torch.manual_seed(seed)
     try:
-        model = T.AutoModelForCausalLM.from_config(cfg, dtype=torch.float32, attn_implementation="eager")
-    except ValueError:
+        model = T.AutoModelForCausalLM.from_config(cfg, dtype=torch.float32, attn_implementation="eager", trust_remote_code=True)
+    except (ValueError, TypeError):
         # newer architectures that the Auto mapping does not know yet
         base = type(cfg).__name__.replace("Config", "")
-        cls = getattr(T, base + "ForCausalLM", None) or getattr(T, base + "ForConditionalGeneration", None)
+        cls = (
+            getattr(T, base + "ForCausalLM", None)
+            or getattr(T, base + "ForConditionalGeneration", None)
+            or getattr(T, base + "LMHeadModel", None)
+        )
         if cls is None:  # remote-code model that lives next to its configuration module
             import importlib
             mod = importlib.import_module(type(cfg).__module__.replace("configuration_", "modeling_"))
-            cls = getattr(mod, base + "ForCausalLM", None) or getattr(mod, base + "ForConditionalGeneration", None)
+            cls = (
+                getattr(mod, base + "ForCausalLM", None)
+                or getattr(mod, base + "ForConditionalGeneration", None)
+                or getattr(mod, base + "LMHeadModel", None)
+                or getattr(mod, "BaiChuanForCausalLM", None)
+                or getattr(mod, "BaichuanForCausalLM", None)
+            )
         model = cls._from_config(cfg, dtype=torch.float32, attn_implementation="eager")
+    if arch == "qwen":
+        import inspect
+        mod = inspect.getmodule(type(model))
+        mod.QWenPreTrainedModel.get_head_mask = (
+            lambda self, head_mask, n, is_attention_chunked=False: [None] * n
+            if head_mask is None
+            else head_mask
+        )
     if arch == "orion":
         # Orion uses biased LayerNorms (input/post-attention/final) on top of Llama.
         import torch.nn as nn
@@ -1030,6 +1160,107 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
             layer.input_layernorm = nn.LayerNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
             layer.post_attention_layernorm = nn.LayerNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
         model.model.norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
+    if arch == "xverse_moe":
+        import torch.nn as nn
+        import torch.nn.functional as F
+
+        class XverseMLP(nn.Module):
+            def __init__(self, hidden_size, intermediate_size):
+                super().__init__()
+                self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+                self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+                self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+                self.act_fn = nn.SiLU()
+
+            def forward(self, x):
+                return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        class XverseMoEMLP(nn.Module):
+            def __init__(self, hidden_size, intermediate_size, num_experts=4, top_k=2, num_shared_experts=1):
+                super().__init__()
+                self.hidden_size = hidden_size
+                self.top_k = top_k
+                self.num_experts = num_experts
+                self.router = nn.Linear(hidden_size, num_experts, bias=False)
+                self.experts = nn.ModuleList([XverseMLP(hidden_size, intermediate_size) for _ in range(num_experts)])
+                if num_shared_experts:
+                    self.shared_experts = XverseMLP(hidden_size, num_shared_experts * intermediate_size)
+                else:
+                    self.shared_experts = None
+
+            def forward(self, hidden_states):
+                batch_size, seq_len, hidden_dim = hidden_states.shape
+                flat = hidden_states.view(-1, hidden_dim)
+                router_logits = self.router(flat)
+                weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
+                routing_weights, selected = torch.topk(weights, self.top_k, dim=-1)
+                routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-6)
+                routing_weights = routing_weights.to(hidden_states.dtype)
+
+                out = torch.zeros_like(flat)
+                for k in range(self.top_k):
+                    exp_idx = selected[:, k]
+                    w = routing_weights[:, k : k + 1]
+                    for e in range(self.num_experts):
+                        mask = exp_idx == e
+                        if mask.any():
+                            out[mask] += w[mask] * self.experts[e](flat[mask])
+                if self.shared_experts is not None:
+                    out += self.shared_experts(flat)
+                return out.view(batch_size, seq_len, hidden_dim)
+
+        for layer in model.model.layers:
+            layer.mlp = XverseMoEMLP(cfg.hidden_size, cfg.intermediate_size, num_experts=4, top_k=2, num_shared_experts=1)
+    if arch == "minicpm":
+        import torch.nn as nn
+        import torch.nn.functional as F
+        import math
+
+        class ScaledEmbedding(nn.Module):
+            def __init__(self, orig, scale):
+                super().__init__()
+                self.weight = orig.weight
+                self.scale = scale
+
+            def forward(self, x):
+                return F.embedding(x, self.weight) * self.scale
+
+        class ScaledHead(nn.Module):
+            def __init__(self, orig, scale):
+                super().__init__()
+                self.weight = orig.weight
+                self.bias = orig.bias
+                self.scale = scale
+
+            def forward(self, x):
+                return F.linear(x / self.scale, self.weight, self.bias)
+
+        class MiniCPMDecoderLayer(nn.Module):
+            def __init__(self, layer, scale_depth, num_layers):
+                super().__init__()
+                self.self_attn = layer.self_attn
+                self.mlp = layer.mlp
+                self.input_layernorm = layer.input_layernorm
+                self.post_attention_layernorm = layer.post_attention_layernorm
+                self.residual_scale = scale_depth / math.sqrt(num_layers)
+
+            def forward(self, hidden_states, **kwargs):
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+                hidden_states = self.self_attn(hidden_states, **kwargs)
+                if isinstance(hidden_states, tuple):
+                    hidden_states = hidden_states[0]
+                hidden_states = residual + hidden_states * self.residual_scale
+                residual = hidden_states
+                hidden_states = self.post_attention_layernorm(hidden_states)
+                hidden_states = self.mlp(hidden_states)
+                hidden_states = residual + hidden_states * self.residual_scale
+                return hidden_states
+
+        model.model.embed_tokens = ScaledEmbedding(model.model.embed_tokens, 12.0)
+        model.lm_head = ScaledHead(model.lm_head, cfg.hidden_size / 256.0)
+        for i in range(len(model.model.layers)):
+            model.model.layers[i] = MiniCPMDecoderLayer(model.model.layers[i], 1.4, len(model.model.layers))
     # keep the norm weights away from the trivial 1.0 so that missing norms are visible
     with torch.no_grad():
         if arch == "lfm2_moe":

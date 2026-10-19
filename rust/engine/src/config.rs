@@ -441,7 +441,7 @@ impl ModelConfig {
             || has(mapping, "output_norm.bias")
             || matches!(
                 a,
-                "command-r" | "cohere" | "cohere2" | "jais2" | "nemotron" | "mpt" | "olmo" | "stablelm" | "dbrx"
+                "command-r" | "cohere" | "cohere2" | "cohere2_moe" | "jais2" | "nemotron" | "mpt" | "olmo" | "stablelm" | "dbrx"
             ) {
             NormKind::Layer
         } else {
@@ -473,6 +473,7 @@ impl ModelConfig {
                     | "internlm2"
                     | "command-r"
                     | "cohere2"
+                    | "cohere2_moe"
                     | "cohere"
             ),
             scaling: {
@@ -541,10 +542,10 @@ impl ModelConfig {
                 .collect::<Option<Vec<bool>>>(),
             _ => None,
         };
-        let gemma = a.starts_with("gemma");
+        let gemma = a.starts_with("gemma") || a == "vaultgemma";
         let window_pattern = uint(meta, a, "attention.sliding_window_pattern")
             .unwrap_or(match a {
-                "gemma2" => 2,
+                "gemma2" | "vaultgemma" => 2,
                 "gemma3" => 6,
                 _ => 1,
             })
@@ -643,7 +644,7 @@ impl ModelConfig {
             gated_ffn,
             parallel_residual: key(meta, a, "use_parallel_residual")
                 .and_then(Value::as_bool)
-                .unwrap_or(matches!(a, "command-r" | "cohere" | "cohere2")),
+                .unwrap_or(matches!(a, "command-r" | "cohere" | "cohere2" | "cohere2_moe")),
             post_norms,
             attention_scale,
             attention_softcap: float(meta, a, "attn_logit_softcapping"),
@@ -799,7 +800,7 @@ impl ModelConfig {
                 "nemotron_h" | "nemotron_h_moe" => false,
                 // Muse Glimmer: the global-attention layers have no position encoding
                 "muse-glimmer" if self.sliding_window.is_some() => self.layer_window(layer).is_some(),
-                "exaone4" | "exaone_moe" | "cohere2" if self.sliding_window.is_some() => {
+                "exaone4" | "exaone_moe" | "cohere2" | "cohere2_moe" if self.sliding_window.is_some() => {
                     self.layer_window(layer).is_some()
                 }
                 _ => true,

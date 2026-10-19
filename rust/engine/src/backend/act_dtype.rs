@@ -91,7 +91,7 @@ pub fn request_from_env() -> ActRequest {
 /// the residual stream; their reference implementations run in BF16). `auto` never picks FP16 for them.
 pub fn overflow_prone(arch: &str) -> bool {
     let a = arch.to_ascii_lowercase();
-    a.starts_with("gemma")
+    a.starts_with("gemma") || a == "vaultgemma"
 }
 
 /// The type `auto` picks: BF16 when the file's float tensors are BF16 (the config dtype of the checkpoint was bfloat16) or the family is

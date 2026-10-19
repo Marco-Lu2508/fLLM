@@ -117,6 +117,35 @@ mixer weights on the device (their memory is counted by the planner like attenti
 
 ---
 
+
+### 3b. Architecture Execution Matrix (CUDA, Vulkan, and Host Fallbacks)
+
+The table below summarizes the layer-by-layer execution path across device backends (CUDA and Vulkan) and the exact fallback reasons returned by `RustDecoder::layer_host_reason()` and `RustDecoder::ffn_host_reason()`. Read from the code of those two functions; the layers were checked with tiny models only with the CPU backend standing in for the device (`cpu_backend_matches_host_path_*` in `tiny_models.rs`). No row was run on a CUDA or Vulkan device.
+
+| Architecture / Family | Mixer / Layer Components | CUDA Backend | Vulkan Backend | Host Fallback / Condition (`layer_host_reason` / `ffn_host_reason`) |
+| :--- | :--- | :--- | :--- | :--- |
+| `llama`, `mistral`, `granite`, `olmo2`, `phi3`, `starcoder2` | Standard GQA + RMSNorm + SiLU/GELU-tanh | Device | Device | None (full device execution) |
+| `qwen`, `baichuan` | Fused QKV (`attn_qkv.weight`), GPT-NeoX / RoPE, RMSNorm, SiLU FFN | Device | Device | None (fused QKV sliced/merged on upload) |
+| `qwen2`, `qwen3` | GQA + RMSNorm + Q/K bias + per-head Q/K norm | Device | Device | None (device Q/K norm & fused bias) |
+| `gemma`, `gemma2`, `vaultgemma` | Sandwich norms, 1+w scale, logit soft-capping, sliding window | Device | Device | None (device soft-capping & sliding window) |
+| `chatglm`, `exaone` | Fused QKV / custom projection names, RMSNorm | Device | Device | None (device execution) |
+| `minicpm` | muP scaling (`scale_emb`, `scale_depth`, `dim_model_base`) | Device | Device | None (weights pre-scaled on upload) |
+| `laguna` | Attention output gate (`attn_gate`), GQA, RMSNorm | Device | Device | Host fallback on backends without attention gate (`"an attention output gate"`) |
+| `mixtral`, `deepseek` (v1), `xverse_moe` | Standard Attention + Top-k routed MoE FFN | Device | Device | Host fallback when backend lacks MoE kernels (e.g. CPU-as-device) |
+| `mellum` | Mixed dense/sparse MoE layers, sliding window | Device | Device | MoE layers fall back to host reference on backends without MoE kernels |
+| `cohere2`, `cohere2_moe` | LayerNorm with bias, sliding window, MoE (cohere2_moe) | Device | Device | Native backends support LayerNorm with bias; wgpu falls back to host |
+| `qwen35`, `qwen35moe`, `qwen3next` | Hybrid Gated DeltaNet + Full Attention | Device | Device | Device where DeltaNet kernel exists (CUDA, Vulkan, Metal); host between device layers otherwise |
+| `k2_horizon` | Grouped RMSNorm + softplus output gate + routed value experts (MoVA) | Device / Host values | Device / Host values | Value experts evaluated on host reference (`host_values`), mixer on device |
+| `deepseek2`, `deepseek` (v2/v3), `minicpm3` | Multi-head Latent Attention (MLA) + MoE | Device | Device / Host | CUDA uses `cuda/mla.cu`; Vulkan uses `mla_move.comp` or falls back to host when KV head count differs (`"multi-head latent attention"`) |
+| `mamba`, `mamba2`, `bamba` | Recurrent SSM (Mamba-1 / Mamba-2) | Device | Device (Mamba-2) / Host | Mamba-1 with learned norms falls back (`"Mamba-1 with learned dt/B/C norms"`) |
+| `lfm2`, `lfm2moe` | ShortConv recurrent mixer | Device | Device | Requires ShortConv kernel; falls back if `parallel_residual` (`"the ShortConv mixer"`) |
+| `nemotron_h`, `nemotron_h_moe` | Mamba-2 / FFN-only / Latent-MoE | Device / Host FFN | Device / Host FFN | Latent-space MoE experts run on host reference (`"latent-space expert projections"`) |
+| `falcon-h1` | Parallel Mamba-2 + Attention in every layer, muP multipliers | Host layers | Host layers | Always host reference: `"a Mamba-2 branch next to the attention"` |
+| `jamba` | Mamba-1 + Full Attention + MoE | Device (CUDA) / Host (Vulkan) | Host layers | CUDA has native Mamba-1 scan; Vulkan falls back Mamba-1 layers to host |
+| `zamba2` | Shared transformer block preceding Mamba-2 mixer | Host layers | Host layers | Always host reference: `"a shared transformer block in front of the Mamba-2 mixer"` |
+
+---
+
 ## 4. VRAM Memory Planning & Offloading (`backend::memory`)
 
 fLLM includes an automated VRAM memory planner (`MemoryPlan`) configured via:

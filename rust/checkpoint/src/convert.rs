@@ -269,6 +269,8 @@ pub fn prepare_checkpoint(
         .or_else(|_| num(&cfg, "ffn_hidden_size", None))?;
     let inter = if arch == "llama4" {
         num(&cfg, "intermediate_size_mlp", Some(inter))?
+    } else if arch == "qwen" {
+        inter / 2
     } else {
         inter
     };
@@ -904,7 +906,7 @@ pub fn prepare_checkpoint(
         });
     }
     let byname: HashMap<_, _> = outs.iter().map(|t| (t.name.as_str(), t)).collect();
-    let sandwich = plan.family == Family::Gemma && arch != "gemma";
+    let sandwich = plan.family == Family::Gemma && arch != "gemma" && arch != "vaultgemma";
     for i in 0..layers {
         let mut required = vec!["attn_output.weight"];
         let moe_here = plan.moe && plan.moe_layers[i as usize];
@@ -1072,7 +1074,7 @@ pub fn prepare_checkpoint(
                 "ssm_out.weight",
             ]);
         } else if matches!(plan.family, Family::Phi3 | Family::Neox)
-            || matches!(arch, "dbrx" | "internlm2" | "persimmon" | "chatglm")
+            || matches!(arch, "dbrx" | "internlm2" | "persimmon" | "chatglm" | "qwen" | "baichuan")
         {
             required.push("attn_qkv.weight");
         } else if plan.family == Family::Deepseek {
@@ -2438,7 +2440,7 @@ pub(crate) fn row_permutation(
         }
         return Ok(Some(order));
     }
-    if !matches!(arch, "llama" | "mistral" | "granite" | "muse-glimmer" | "deepseek" | "exaone") {
+    if !matches!(arch, "llama" | "mistral" | "granite" | "muse-glimmer" | "deepseek" | "exaone" | "minicpm") {
         return Ok(None);
     }
     let count = if name.ends_with("attn_q.weight") || name.ends_with("attn_q.bias") {
