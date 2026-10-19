@@ -51,6 +51,9 @@
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEventElapsedTime hipEventElapsedTime
 #define cudaEventDestroy hipEventDestroy
+#define cudaEventDisableTiming hipEventDisableTiming
+#define cudaEventCreateWithFlags hipEventCreateWithFlags
+#define cudaStreamWaitEvent hipStreamWaitEvent
 // graph capture of a decode step (api.cu, fllm_cuda_graph_*)
 #define cudaGraph_t hipGraph_t
 #define cudaGraphExec_t hipGraphExec_t
