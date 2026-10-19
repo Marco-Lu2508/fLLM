@@ -82,7 +82,6 @@ int fllm_mla_attention_launch(cudaStream_t, const uint16_t *, const uint16_t *, 
     return -1;
 }
 extern "C" int fllm_cuda_nvfp4_sm100_moe_gemm(cudaStream_t, const void *const *, const float *, float *, const int *, int, int, int) { return -1; }
-extern "C" int fllm_cuda_tc_grouped_gemm(cudaStream_t, const void *const *, const int *, const float *const *, float *const *, const float *const *, const int *, const int *, int, int) { return -1; }
 // Device-side mixture-of-experts (moe.cu) is not built for AMD: the MoE decoder paths stay on the existing moe_topk / moe_linear kernels
 int fllm_moe_route2_launch(cudaStream_t, const float *, const float *, int32_t *, float *, int, int, int, int, int, float, float, int, int,
                            int) {
