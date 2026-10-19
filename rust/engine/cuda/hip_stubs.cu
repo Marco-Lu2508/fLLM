@@ -102,3 +102,52 @@ int fllm_moe_combine2_launch(cudaStream_t, float *, const float *, const float *
 int fllm_moe_gate_scale_launch(cudaStream_t, float *, const float *, const float *, int, int) {
     return fllm_set_error("device MoE gate needs an NVIDIA GPU");
 }
+
+// Kernels that exist only in the NVIDIA build (sampling, tree attention, speculative verification, encoder attention, Q4Z accumulate).
+int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, float *out, int rows, int batch, float scale) {
+    return fllm_set_error("this kernel needs an NVIDIA GPU");
+}
+int fllm_sample_launch(cudaStream_t s, const float *logits, float *work, int rows, int vocab, const void *params, const int32_t *pen_ids,
+                       const int32_t *pen_counts, const int32_t *bias_ids, const float *bias_vals, const uint32_t *mask, int mask_words,
+                       int32_t *out_ids, float *out_logprob, int32_t *top_ids, float *top_logprob, int top_stride) {
+    return fllm_set_error("this kernel needs an NVIDIA GPU");
+}
+int fllm_tree_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool_layer,
+                               const uint16_t *vpool_layer, float *out, const int64_t *tables,
+                               const int64_t *lengths, const uint8_t *tree_mask, int prefix_len,
+                               int num_nodes, int rows, int heads, int kv_heads, int dk, int dv,
+                               int stride, int block_size, int kind, float scale, float softcap) {
+    return fllm_set_error("this kernel needs an NVIDIA GPU");
+}
+int fllm_spec_verify_launch(cudaStream_t s, const int32_t *draft, const int32_t *target,
+                            int num_draft, int32_t *out_accepted, int32_t *out_next,
+                            int64_t *seq_length) {
+    return fllm_set_error("this kernel needs an NVIDIA GPU");
+}
+int fllm_attn_encoder_launch(cudaStream_t s, const float *q, const float *k, const float *v, float *out,
+                             const int32_t *cu_seqlens, int batch_size, int total_tokens,
+                             int heads, int kv_heads, int head_dim, float scale, int window,
+                             const int32_t *global_tokens, int num_global) {
+    return fllm_set_error("this kernel needs an NVIDIA GPU");
+}
+
+// C entry points of the NVIDIA-only paths (narrow activations, Marlin small-m, PDL) that the Rust backend declares; AMD builds answer "unsupported".
+extern "C" {
+int fllm_cuda_na_check() { return -1; }
+int fllm_cuda_na_convert() { return -1; }
+int fllm_cuda_na_glu() { return -1; }
+int fllm_cuda_na_glu_merged() { return -1; }
+int fllm_cuda_na_kv_write() { return -1; }
+int fllm_cuda_na_linear_kquant() { return -1; }
+int fllm_cuda_na_linear_q4z() { return -1; }
+int fllm_cuda_na_residual() { return -1; }
+int fllm_cuda_na_rms_norm() { return -1; }
+int fllm_cuda_na_rope() { return -1; }
+int fllm_cuda_na_rope_kv() { return -1; }
+int fllm_cuda_na_rope_kv_qkv() { return -1; }
+int fllm_cuda_na_split3() { return -1; }
+int fllm_cuda_reserve_workspace() { return -1; }
+int fllm_marlin_gemv_bench() { return -1; }
+void fllm_marlin_small_m_set() {}
+void fllm_pdl_force() {}
+}
