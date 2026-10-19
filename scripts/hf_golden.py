@@ -20,6 +20,15 @@ from pathlib import Path
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, decoders, trainers, processors, normalizers
 
+from transformers import DynamicCache
+if not hasattr(DynamicCache, "from_legacy_cache"):
+    DynamicCache.from_legacy_cache = staticmethod(lambda p=None: DynamicCache() if p is None else p)
+if not hasattr(DynamicCache, "get_usable_length"):
+    DynamicCache.get_usable_length = lambda self, seq_length=0, layer_idx=0: self.get_seq_length(layer_idx) if hasattr(self, "get_seq_length") else 0
+if not hasattr(DynamicCache, "to_legacy_cache"):
+    DynamicCache.to_legacy_cache = lambda self: ()
+
+
 TOKENS = int(__import__("os").environ.get("TOKENS", "12"))
 SPECIALS = ["<unk>", "<s>", "</s>", "<pad>", "<|im_start|>", "<|im_end|>"]
 # Fixtures for aliased architectures are built with the closest native config; the
@@ -97,6 +106,60 @@ def _il2_config(vocab):
         num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=256,
         rope_theta=10000.0, rms_norm_eps=1e-5, bias=False, rope_scaling=None, initializer_range=0.08, use_cache=False,
         bos_token_id=1, eos_token_id=2, pad_token_id=3, tie_word_embeddings=False,
+    )
+
+
+def _ds_config(vocab):
+    import importlib
+    for p in [os.environ.get("DSPKG_DIR"), "/home/marco/dspkg", os.path.expanduser("~/dspkg")]:
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+    mod = importlib.import_module("deepseek.configuration_deepseek")
+    return mod.DeepseekConfig(
+        vocab_size=vocab, hidden_size=64, intermediate_size=128, moe_intermediate_size=32,
+        num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
+        n_routed_experts=4, num_experts_per_tok=2, n_shared_experts=1,
+        first_k_dense_replace=1, scoring_func="softmax", norm_topk_prob=False,
+        max_position_embeddings=256, rope_theta=10000.0, rms_norm_eps=1e-6,
+        initializer_range=0.08, bos_token_id=1, eos_token_id=2, pad_token_id=3,
+        tie_word_embeddings=False,
+    )
+
+
+
+def _chatglm_config(vocab):
+    import importlib
+    for p in [os.environ.get("CHATGLM_DIR"), "/home/marco/chatglmpkg", os.path.expanduser("~/chatglmpkg"), "/chatglmpkg"]:
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+    for parent in ["/home/marco", os.path.expanduser("~"), "/"]:
+        if parent and parent not in sys.path:
+            sys.path.insert(0, parent)
+    try:
+        mod = importlib.import_module("chatglmpkg.configuration_chatglm")
+    except ImportError:
+        mod = importlib.import_module("configuration_chatglm")
+    return mod.ChatGLMConfig(
+        num_layers=3, padded_vocab_size=vocab, hidden_size=64, ffn_hidden_size=128,
+        num_attention_heads=4, multi_query_attention=True, multi_query_group_num=2,
+        kv_channels=16, add_qkv_bias=True, rmsnorm=True, seq_length=2048,
+        layernorm_epsilon=1e-5, rope_ratio=1, original_rope=True,
+    )
+
+def _exaone_config(vocab):
+    import importlib
+    for p in [os.environ.get("EXAONE_DIR"), "/home/marco/expkg", os.path.expanduser("~/expkg")]:
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+    mod = importlib.import_module("exaone.configuration_exaone")
+    return mod.ExaoneConfig(
+        vocab_size=vocab, hidden_size=64, intermediate_size=128,
+        num_layers=3, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=256, rope_theta=10000.0,
+        rope_scaling={"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0, "original_max_position_embeddings": 128},
+        layer_norm_epsilon=1e-5, initializer_range=0.02,
+        bos_token_id=1, eos_token_id=2, pad_token_id=0,
+        tie_word_embeddings=False,
     )
 
 
@@ -466,6 +529,78 @@ def config_for(arch: str, vocab: int):
             attention_gate_func="softplus", layernorm_num_groups=2,
         ),
         # G9v3 is remote code too: put it in a package named g9v3 (G9V3_DIR, default ~/g9pkg)
+        "deepseek": lambda: _ds_config(vocab),
+        "exaone": lambda: _exaone_config(vocab),
+        "chatglm": lambda: _chatglm_config(vocab),
+        "zamba2": lambda: T.Zamba2Config(
+            **{**common, "num_hidden_layers": 6, "tie_word_embeddings": True},
+            intermediate_size=96,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            rms_norm_eps=1e-5,
+            layers_block_type=["mamba", "hybrid", "mamba", "hybrid", "mamba", "hybrid"],
+            mamba_d_state=16,
+            mamba_d_conv=4,
+            mamba_expand=2,
+            mamba_ngroups=2,
+            n_mamba_heads=8,
+            chunk_size=8,
+            num_mem_blocks=2,
+            use_shared_attention_adapter=True,
+            adapter_rank=8,
+            use_mem_rope=False,
+            time_step_min=0.001,
+            hidden_act="gelu",
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        ),
+        "jamba": lambda: T.JambaConfig(
+            **{**common, "num_hidden_layers": 4},
+            intermediate_size=96,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            rms_norm_eps=1e-6,
+            num_experts=4,
+            num_experts_per_tok=2,
+            expert_layer_period=2,
+            expert_layer_offset=1,
+            attn_layer_period=4,
+            attn_layer_offset=2,
+            mamba_d_state=8,
+            mamba_d_conv=4,
+            mamba_expand=2,
+            mamba_dt_rank=8,
+            mamba_conv_bias=True,
+            mamba_proj_bias=False,
+        ),
+        "falcon_h1": lambda: T.FalconH1Config(
+            **common,
+            intermediate_size=96,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            rms_norm_eps=1e-5,
+            mamba_d_ssm=64,
+            mamba_n_heads=8,
+            mamba_d_head=8,
+            mamba_n_groups=2,
+            mamba_d_state=16,
+            mamba_d_conv=4,
+            mamba_chunk_size=8,
+            mamba_conv_bias=True,
+            mamba_proj_bias=False,
+            mamba_norm_before_gate=True,
+            mamba_rms_norm=False,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+            lm_head_multiplier=0.7,
+            embedding_multiplier=1.5,
+            mlp_multipliers=[0.8, 1.3],
+            key_multiplier=0.9,
+            attention_out_multiplier=1.2,
+            attention_in_multiplier=0.6,
+            ssm_multipliers=[1.1, 0.9, 1.3, 0.7, 1.2],
+            ssm_in_multiplier=0.8,
+            ssm_out_multiplier=1.4,
+        ),
         "g9v3": lambda: _g9_config(vocab),
         "internlm2": lambda: _il2_config(vocab),
         "nemotron_h_latent": lambda: T.NemotronHConfig(
@@ -752,7 +887,7 @@ def build_modernbert(out: Path, vocab: int, seed: int) -> dict:
     model = T.AutoModel.from_config(cfg, attn_implementation="eager")
     with torch.no_grad():
         for name, parameter in model.named_parameters():
-            if name.endswith("norm.weight"):
+            if name.endswith("norm.weight") or name.endswith("ln_1.weight") or name.endswith("ln_2.weight") or name.endswith("ln_f.weight"):
                 parameter.copy_(0.8 + 0.4 * torch.rand_like(parameter))
     model.eval()
     model.save_pretrained(out, safe_serialization=True)
@@ -801,7 +936,7 @@ def build_nomicbert(out: Path, vocab: int, seed: int) -> dict:
     model = T.AutoModel.from_config(cfg, attn_implementation="eager")
     with torch.no_grad():
         for name, parameter in model.named_parameters():
-            if name.endswith("norm.weight"):
+            if name.endswith("norm.weight") or name.endswith("ln_1.weight") or name.endswith("ln_2.weight") or name.endswith("ln_f.weight"):
                 parameter.copy_(0.8 + 0.4 * torch.rand_like(parameter))
     model.eval()
     model.save_pretrained(out, safe_serialization=True)
@@ -885,7 +1020,8 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
         cls = getattr(T, base + "ForCausalLM", None) or getattr(T, base + "ForConditionalGeneration", None)
         if cls is None:  # remote-code model that lives next to its configuration module
             import importlib
-            cls = getattr(importlib.import_module(type(cfg).__module__.replace("configuration_", "modeling_")), base + "ForCausalLM")
+            mod = importlib.import_module(type(cfg).__module__.replace("configuration_", "modeling_"))
+            cls = getattr(mod, base + "ForCausalLM", None) or getattr(mod, base + "ForConditionalGeneration", None)
         model = cls._from_config(cfg, dtype=torch.float32, attn_implementation="eager")
     if arch == "orion":
         # Orion uses biased LayerNorms (input/post-attention/final) on top of Llama.
@@ -901,7 +1037,7 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 if name.endswith("expert_bias"):
                     buffer.copy_(torch.linspace(-0.2, 0.2, buffer.numel()).reshape_as(buffer))
         for name, p in model.named_parameters():
-            if name.endswith("norm.weight"):
+            if name.endswith("norm.weight") or name.endswith("ln_1.weight") or name.endswith("ln_2.weight") or name.endswith("ln_f.weight"):
                 p.copy_(0.8 + 0.4 * torch.rand_like(p))
             if not bool(torch.isfinite(p).all()):
                 p.normal_(std=0.2)
@@ -911,8 +1047,14 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 p.normal_(std=1.0)
             if name.endswith("dt_bias"):
                 p.normal_(std=0.5)
+            if "adapter_list" in name:
+                p.normal_(std=0.25)
             if arch in ("nemotron", "orion", "persimmon") and name.endswith("norm.bias"):
                 p.normal_(std=0.2)  # LayerNorm biases must matter
+            if arch == "chatglm" and p.dim() >= 2:
+                p.normal_(std=0.05)  # the remote-code model leaves its weights uninitialised (NaN or garbage)
+            if arch == "chatglm" and p.dim() == 1 and name.endswith(".bias"):
+                p.normal_(std=0.01)
             if name.endswith("alpha_p") or name.endswith("alpha_n"):
                 p.normal_(std=0.5)
             if name.endswith("sinks"):

@@ -37,6 +37,7 @@ convert to their text model; vision towers are not imported.
 | `iquestcoder` | Plain Llama tensor layout (GQA); checked against transformers 5.19 (1.3e-4) |
 | `xverse` | Llama layout (MHA, no `num_key_value_heads`, no `rope_theta` -> default 10000); the persistent `rotary_emb.inv_freq` buffer is dropped; checked against transformers 5.19 (1.8e-4) |
 | `persimmon` | MHA with biased LayerNorm instead of RMSNorm; fused `query_key_value` is head-interleaved (`[q_h, k_h, v_h]` per head) and split in the loader; per-head Q/K LayerNorm *with* bias applied before rope; gapless ReLU² MLP (`dense_h_to_4h`/`dense_4h_to_h`); partial rope 0.5 (only the first `head_dim/2` dims, Llama `rotate_half`); checked against transformers 5.19 (2.1e-4) |
+| `exaone` (EXAONE 3.x) | Llama layout with `transformer.h.N` prefix, `attn.attention` / `mlp.c_fc_0/1/c_proj` tensor names, Llama-3 RoPE scaling; canonicalized to `llama` in loader; verified against remote code via EXAONE_DIR (9.4e-5) |
 
 ## Mixture of experts
 
@@ -52,6 +53,12 @@ convert to their text model; vision towers are not imported.
 | `k2_horizon` (MoE and MoVA variants) | sigmoid routing with selection bias, shared expert, leading dense layers (`mlp_only_layers` prefix), grouped RMSNorm, softplus attention gate and, for MoVA, routed value experts (`attn_v_exps`, `attn_v_gate`); verified against the model's remote code on tiny checkpoints. Not supported: `query_key_norm`, `rope_head_dim` < `head_dim` (375B A23B) |
 | `g9v3` | DeepSeek-V3-style sigmoid MoE with shared expert and per-head sigmoid-gated attention (`q_proj` holds `[q; gate]` per head, converted to llama.cpp's separate-gate layout); verified against the model's remote code on a tiny checkpoint |
 | `gemma4` (26B-A4B) | dense MLP and routed expert block side by side, normalized router with top-k experts; verified against transformers 5.19 |
+| `deepseek` | DeepSeek-MoE v1 (16B): MHA + MoE with shared experts and first layer dense (`first_k_dense_replace`), softmax routing; verified against remote code via DSPKG_DIR (2.7e-4) |
+| `chatglm` | ChatGLM2/3, GLM-4-9B-chat: fused QKV (multi-query), 2D/partial RoPE (adjacent pairs), fused SwiGLU dense_h_to_4h, RMSNorm; verified against remote code via CHATGLMPKG_DIR (3.2e-4) |
+| `falcon-h1` | Falcon-H1: concurrent Mamba-2 and attention branches in parallel in every layer, mu-P multipliers folded into weights; verified against transformers 5.19 (1.8e-4) |
+| `jamba` | Jamba: interleaved Mamba-1 with inner dt/B/C RMSNorms and attention, MoE with per-layer allocation; verified against transformers 5.19 (1.3e-4) |
+| `zamba2` | Zamba2: Mamba-2 backbone with shared transformer blocks (per-call LoRA adapters, `[x, embeddings]` input); verified against transformers 5.19 (1.6e-3) |
+
 
 DBRX currently uses the CPU decoder (`auto` selects CPU for this architecture); an explicit
 accelerator request is rejected until its LayerNorm, clipping and router normalization are
@@ -91,12 +98,10 @@ speculative decoding are switched off for them.
 ## Not supported
 
 * MiMo-V2 (Flash and Pro), Laguna and Mellum (per-layer head counts), Kimi-Linear (KDA), DeepSeek V3.2/V4 and GLM-5
-  (sparse attention indexer), Zamba2, JetMoE, Inkling, ZAYA.
+  (sparse attention indexer), JetMoE, Inkling, ZAYA.
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
 * Step 3.5 / Step 3.7: heterogeneous per-layer attention head counts (`num_attention_heads_per_layer`).
 * A.X-K2: Gated RMSNorm wrapper (`AXK2GatedRMSNorm`) with internal `gate_mlp` projection.
-* Jamba: interleaved Mamba-1 and attention with inner per-channel layer norms (`dt_layernorm`, `b_layernorm`, `c_layernorm`) and per-layer expert allocation (`layers_num_experts`).
-* Falcon-H1: concurrent Mamba-2 and attention branches executed in parallel inside the same layer with branch multipliers.
 * Encoder families beyond the BERT GGUF layout (ModernBERT and NomicBERT are supported (NomicBERT verified 2026-10-14 against transformers 5.19, fixture + nomic-embed-text-v1.5); BGE-M3 dense verified via the XLM-R path; still open: GTE-new, Jina, SPLADE, ColBERT),
   and classification heads outside BERT/RoBERTa/XLM-R.
 * Vision, audio and speech towers of multimodal checkpoints.
@@ -119,7 +124,7 @@ GPT-4o, DeepSeek-V3, K2); other values fall back to the GPT-2 split. Check a new
 
 ```sh
 python scripts/verify_architectures.py --fllm target/release/fllm-rs \
-    --example target/release/examples/verify_checkpoint llama qwen3 gemma3 deepseek_v3
+    --example target/release/examples/verify_checkpoint llama qwen3 gemma3 deepseek exaone deepseek_v3
 python scripts/verify_generation.py --fllm target/release/fllm-rs qwen3_5 mamba2
 python scripts/verify_tokenizer.py MODEL.gguf HF_TOKENIZER_DIR target/release/examples/tokenize
 ```

@@ -195,7 +195,7 @@ pub(crate) fn exercise_state(config: Value, specs: &[Spec], seed: u64) {
 }
 
 /// Tensor list of a Falcon-H1 model: every layer has attention and Mamba-2 side by side.
-fn falcon_h1_specs(norm: bool) -> (Value, Vec<Spec>) {
+pub(crate) fn falcon_h1_specs(norm: bool) -> (Value, Vec<Spec>) {
     let (hidden, layers, heads, kv, head_dim, inter) = (32usize, 2usize, 4usize, 2usize, 8usize, 48usize);
     let (inner, mheads, groups, state, kernel) = (32usize, 4usize, 2usize, 8usize, 4usize);
     let conv_dim = inner + 2 * groups * state;
@@ -250,7 +250,7 @@ fn falcon_h1_decodes_incrementally_and_rolls_back() {
 }
 
 /// Tensor list of a Jamba model: Mamba-1 layers with dt/B/C norms, one attention layer, experts on every second layer.
-fn jamba_specs() -> (Value, Vec<Spec>) {
+pub(crate) fn jamba_specs() -> (Value, Vec<Spec>) {
     let (hidden, layers, heads, kv, head_dim, inter) = (32usize, 4usize, 4usize, 2usize, 8usize, 48usize);
     let (experts, state, kernel, rank) = (4usize, 8usize, 4usize, 4usize);
     let inner = 2 * hidden;
@@ -324,7 +324,7 @@ fn jamba_decodes_incrementally_and_rolls_back() {
 
 /// Tensor list of a Zamba2 model with three shared-block calls over two blocks (the third call repeats block 0, whose
 /// weights the checkpoint stores once).
-fn zamba2_specs() -> (Value, Vec<Spec>) {
+pub(crate) fn zamba2_specs() -> (Value, Vec<Spec>) {
     let (hidden, layers, heads, inter, rank) = (32usize, 6usize, 4usize, 48usize, 4usize);
     let (inner, mheads, groups, state, kernel) = (64usize, 4usize, 2usize, 8usize, 4usize);
     let conv_dim = inner + 2 * groups * state;

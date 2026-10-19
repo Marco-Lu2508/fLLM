@@ -264,8 +264,9 @@ pub fn prepare_checkpoint(
     };
     let hidden = num(&cfg, "hidden_size", None)?;
     let heads = num(&cfg, "num_attention_heads", None)?;
-    let layers = num(&cfg, "num_hidden_layers", None)?;
-    let inter = num(&cfg, "intermediate_size", None)?;
+    let layers = num(&cfg, "num_hidden_layers", Some(plan.layers))?;
+    let inter = num(&cfg, "intermediate_size", None)
+        .or_else(|_| num(&cfg, "ffn_hidden_size", None))?;
     let inter = if arch == "llama4" {
         num(&cfg, "intermediate_size_mlp", Some(inter))?
     } else {
@@ -277,9 +278,15 @@ pub fn prepare_checkpoint(
     } else {
         inter
     };
-    let kv_heads = num(&cfg, "num_key_value_heads", Some(heads))?;
-    let vocab = num(&cfg, "vocab_size", Some(32000))?;
-    let head_dim = num(&cfg, "head_dim", Some(hidden / heads))?;
+    let kv_heads = num(&cfg, "num_key_value_heads", None)
+        .or_else(|_| num(&cfg, "multi_query_group_num", None))
+        .unwrap_or(heads);
+    let vocab = num(&cfg, "vocab_size", None)
+        .or_else(|_| num(&cfg, "padded_vocab_size", None))
+        .unwrap_or(32000);
+    let head_dim = num(&cfg, "head_dim", None)
+        .or_else(|_| num(&cfg, "kv_channels", None))
+        .unwrap_or(hidden / heads);
     if vocab > u32::MAX as u64 {
         return Err("config dimension vocab_size exceeds GGUF's u32 metadata range".into());
     }
@@ -354,7 +361,7 @@ pub fn prepare_checkpoint(
             return Ok(None);
         }
         // Phi-3 fuses gate and up into one `ffn_up`
-        if matches!(arch, "phi3" | "glm" | "glm4") && name.ends_with(".ffn_up.weight") {
+        if matches!(arch, "phi3" | "glm" | "glm4" | "chatglm") && (name.ends_with(".ffn_up.weight") || name.ends_with(".ffn_up.bias")) {
             return Ok(None);
         }
         if name.contains(".nextn.") {
@@ -1065,7 +1072,7 @@ pub fn prepare_checkpoint(
                 "ssm_out.weight",
             ]);
         } else if matches!(plan.family, Family::Phi3 | Family::Neox)
-            || matches!(arch, "dbrx" | "internlm2" | "persimmon")
+            || matches!(arch, "dbrx" | "internlm2" | "persimmon" | "chatglm")
         {
             required.push("attn_qkv.weight");
         } else if plan.family == Family::Deepseek {
@@ -1107,6 +1114,10 @@ pub fn prepare_checkpoint(
                 "post_attention_norm.weight",
                 "ffn_norm.weight",
                 "post_ffw_norm.weight",
+            ]),
+            Family::Glm if arch == "chatglm" => required.extend([
+                "attn_norm.weight",
+                "ffn_norm.weight",
             ]),
             Family::Olmo2 => {
                 required.extend(["post_attention_norm.weight", "post_ffw_norm.weight"])
@@ -2427,7 +2438,7 @@ pub(crate) fn row_permutation(
         }
         return Ok(Some(order));
     }
-    if !matches!(arch, "llama" | "mistral" | "granite" | "muse-glimmer") {
+    if !matches!(arch, "llama" | "mistral" | "granite" | "muse-glimmer" | "deepseek" | "exaone") {
         return Ok(None);
     }
     let count = if name.ends_with("attn_q.weight") || name.ends_with("attn_q.bias") {

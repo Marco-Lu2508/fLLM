@@ -245,8 +245,8 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "deepseek_moe" => (Family::Qwen, "deepseek_moe"),
         "baichuan" | "baichuan2" => (Family::Llama, "baichuan"),
         "qwen" => (Family::Qwen, "qwen"),
-        "exaone" | "exaone3" => (Family::Olmo2, "exaone"),
-        "chatglm" => (Family::Glm, "glm4"),
+        "exaone" | "exaone3" => (Family::Llama, "exaone"),
+        "chatglm" => (Family::Glm, "chatglm"),
         "minicpm" => (Family::Llama, "minicpm"),
         "telechat" | "telechat2" | "teleflm" => (Family::Llama, "telechat"),
         "step1" => (Family::Llama, "step1"),
@@ -480,8 +480,8 @@ impl Plan {
         // llama.cpp names the expert variants (Nemotron 3 Nano/Super/Ultra) `nemotron_h_moe`
         let arch = if kinds.contains(&b'E') { "nemotron_h_moe" } else { arch };
         let heads = get("num_attention_heads")?;
-        let kv = num(cfg, "num_key_value_heads").unwrap_or(heads);
-        let head_dim = num(cfg, "head_dim").unwrap_or(hidden / heads.max(1));
+        let kv = num(cfg, "num_key_value_heads").or_else(|| num(cfg, "multi_query_group_num")).unwrap_or(heads);
+        let head_dim = num(cfg, "head_dim").or_else(|| num(cfg, "kv_channels")).unwrap_or(hidden / heads.max(1));
         let (m_heads, m_dim) = (get("mamba_num_heads")?, get("mamba_head_dim")?);
         let eps = flt(cfg, "layer_norm_epsilon").unwrap_or(1e-5) as f32;
         let u = |k: &str, v: u64| (format!("{arch}.{k}"), Meta::U32(v as u32));
@@ -784,9 +784,7 @@ impl Plan {
         .find_map(|k| num(cfg, k))
         .unwrap_or(0);
         let moe = experts > 0;
-        if raw != "granitemoehybrid" && raw != "k2_horizon"
-            && moe
-                != matches!(
+        let known_moe = matches!(
                     raw.as_str(),
                     "mixtral"
                         | "qwen2_moe"
@@ -842,14 +840,15 @@ impl Plan {
                         | "param2_moe"
                         | "ling_moe"
                         | "jamba"
-                )
-        {
+                ) || (raw == "deepseek" && moe);
+        if raw != "granitemoehybrid" && raw != "k2_horizon" && moe != known_moe {
             return Err(format!(
                 "{raw}: expert configuration does not match the architecture"
             ));
         }
         if moe
             && raw != "k2_horizon"
+            && raw != "deepseek"
             && (num(cfg, "decoder_sparse_step").unwrap_or(1) != 1
                 || cfg
                     .get("mlp_only_layers")
@@ -862,16 +861,17 @@ impl Plan {
         let heads = num(cfg, "num_attention_heads")
             .ok_or("config.json requires valid num_attention_heads")?;
         let layers =
-            num(cfg, "num_hidden_layers").ok_or("config.json requires valid num_hidden_layers")?;
-        let inter =
-            num(cfg, "intermediate_size").ok_or("config.json requires valid intermediate_size")?;
+            num(cfg, "num_hidden_layers").or_else(|| num(cfg, "num_layers")).ok_or("config.json requires valid num_hidden_layers")?;
+        let inter = num(cfg, "intermediate_size")
+            .or_else(|| num(cfg, "ffn_hidden_size"))
+            .ok_or("config.json requires valid intermediate_size")?;
         // Persimmon is multi-head only: the HF reference ignores `num_key_value_heads`.
         let kv_heads = if raw == "persimmon" {
             heads
         } else {
-            num(cfg, "num_key_value_heads").unwrap_or(heads)
+            num(cfg, "num_key_value_heads").or_else(|| num(cfg, "multi_query_group_num")).unwrap_or(heads)
         };
-        let ctx = num(cfg, "max_position_embeddings").unwrap_or(40960);
+        let ctx = num(cfg, "max_position_embeddings").or_else(|| num(cfg, "seq_length")).unwrap_or(40960);
         let (nope, rope_dims, value_dim) = (
             num(cfg, "qk_nope_head_dim").unwrap_or(0),
             num(cfg, "qk_rope_head_dim").unwrap_or(0),
@@ -888,7 +888,7 @@ impl Plan {
         let head_dim = if mla {
             nope + rope_dims
         } else {
-            num(cfg, "head_dim").unwrap_or(hidden / heads.max(1))
+            num(cfg, "head_dim").or_else(|| num(cfg, "kv_channels")).unwrap_or(hidden / heads.max(1))
         };
         let value_dim = if mla { value_dim } else { head_dim };
         if hidden == 0 || heads == 0 || layers == 0 || inter == 0 || kv_heads == 0 {
@@ -1009,6 +1009,7 @@ impl Plan {
             "norm_epsilon",
             "layer_norm_epsilon",
             "norm_eps",
+            "layernorm_epsilon",
         ]
         .iter()
         .find_map(|k| flt(cfg, k))
@@ -1110,6 +1111,8 @@ impl Plan {
             "llama" | "mistral" | "granite" | "phi3" | "gpt_neox" | "xverse"
         ) {
             10_000.0
+        } else if raw == "chatglm" {
+            10_000.0 * flt(cfg, "rope_ratio").unwrap_or(1.0)
         } else {
             1_000_000.0
         };
@@ -1144,6 +1147,7 @@ impl Plan {
             .or_else(|| flt(cfg, "partial_rotary_factor"))
             .or_else(|| num(cfg, "rope_head_dim").map(|d| d as f64 / head_dim as f64))
             .or_else(|| num(cfg, "rotary_dim").map(|d| d as f64 / head_dim as f64))
+            .or_else(|| (arch == "chatglm").then_some(0.5))
             .or_else(|| flt(cfg, "rotary_pct"))
             .filter(|_| !mla); // MLA states its rotary width explicitly
         if let Some(p) = partial.filter(|p| (*p - 1.0).abs() > 1e-9) {
@@ -1378,7 +1382,7 @@ impl Plan {
             if mla
                 || matches!(
                     raw.as_str(),
-                    "glm4_moe" | "dots1" | "solar_open" | "exaone_moe" | "g9v3"
+                    "glm4_moe" | "dots1" | "solar_open" | "exaone_moe" | "g9v3" | "deepseek"
                 )
             {
                 let per = num(cfg, "moe_intermediate_size").unwrap_or(inter);
@@ -1396,7 +1400,7 @@ impl Plan {
                 let gating = match cfg.get("scoring_func").and_then(Value::as_str) {
                     Some("sigmoid") => 2,
                     Some(_) => 1,
-                    None if !matches!(raw.as_str(), "deepseek_v2" | "mistral4") => 2,
+                    None if !matches!(raw.as_str(), "deepseek_v2" | "mistral4" | "deepseek") => 2,
                     None => 1,
                 };
                 u!("expert_gating_func", gating);
@@ -1860,7 +1864,7 @@ impl Plan {
             moe_layers: (0..layers)
                 .map(|i| match raw.as_str() {
                     "deepseek_v2" | "deepseek_v3" | "kimi_k2" | "glm4_moe" | "dots1"
-                    | "mistral4" | "g9v3" => i >= num(cfg, "first_k_dense_replace").unwrap_or(0),
+                    | "mistral4" | "g9v3" | "deepseek" => i >= num(cfg, "first_k_dense_replace").unwrap_or(0),
                     "hy_v3" | "exaone_moe" | "glm4_moe_lite" | "mellum" | "laguna" | "mimo_v2_flash" => cfg
                         .get("mlp_layer_types")
                         .and_then(Value::as_array)
@@ -2493,16 +2497,21 @@ impl Plan {
             "model.norm.weight" if self.arch == "muse-glimmer" => return Ok(plain("output_norm.weight")),
             "model.norm.weight"
             | "transformer.ln_f.weight"
-            | "transformer.final_layernorm.weight" => return Ok(norm("output_norm.weight")),
-            "model.norm.bias" | "transformer.ln_f.bias" => return Ok(plain("output_norm.bias")),
+            | "transformer.final_layernorm.weight"
+            | "transformer.encoder.final_layernorm.weight" => return Ok(norm("output_norm.weight")),
+            "model.norm.bias"
+            | "transformer.ln_f.bias"
+            | "transformer.encoder.final_layernorm.bias" => return Ok(plain("output_norm.bias")),
             "model.final_layernorm.weight" => return Ok(plain("output_norm.weight")),
             "model.final_layernorm.bias" => return Ok(plain("output_norm.bias")),
             "lm_head.bias" => return Ok(plain("output.bias")),
             "lm_head.weight" | "transformer.output_layer.weight" => return Ok(plain("output.weight")),
+            "transformer.rotary_pos_emb.inv_freq" => return Ok(Mapped::Skip),
             _ => {}
         }
         let layer_rest = n.strip_prefix("model.layers.")
             .or_else(|| n.strip_prefix("transformer.layers."))
+            .or_else(|| n.strip_prefix("transformer.encoder.layers."))
             .or_else(|| n.strip_prefix("transformer.h."));
         if let Some(rest) = layer_rest {
             let (i, suf) = rest
@@ -2659,12 +2668,24 @@ impl Plan {
                 "ln_1.bias" => Some(("attn_norm.bias", false)),
                 "ln_2.weight" => Some(("ffn_norm.weight", true)),
                 "ln_2.bias" => Some(("ffn_norm.bias", false)),
+                "attn.attention.q_proj.weight" | "attn.q_proj.weight" => Some(("attn_q.weight", false)),
+                "attn.attention.k_proj.weight" | "attn.k_proj.weight" => Some(("attn_k.weight", false)),
+                "attn.attention.v_proj.weight" | "attn.v_proj.weight" => Some(("attn_v.weight", false)),
+                "attn.attention.out_proj.weight" | "attn.out_proj.weight" => Some(("attn_output.weight", false)),
+                "mlp.c_fc_0.weight" => Some(("ffn_gate.weight", false)),
+                "mlp.c_fc_1.weight" => Some(("ffn_up.weight", false)),
+                "attn.attention.q_proj.bias" | "attn.q_proj.bias" => Some(("attn_q.bias", false)),
+                "attn.attention.k_proj.bias" | "attn.k_proj.bias" => Some(("attn_k.bias", false)),
+                "attn.attention.v_proj.bias" | "attn.v_proj.bias" => Some(("attn_v.bias", false)),
+                "attn.attention.out_proj.bias" | "attn.out_proj.bias" => Some(("attn_output.bias", false)),
+                "mlp.c_fc_0.bias" => Some(("ffn_gate.bias", false)),
+                "mlp.c_fc_1.bias" => Some(("ffn_up.bias", false)),
                 "mlp.w1.weight" => Some(("ffn_gate.weight", false)),
                 "mlp.w2.weight" => Some(("ffn_up.weight", false)),
-                "attention.query_key_value.weight" => Some(("attn_qkv.weight", false)),
-                "attention.query_key_value.bias" => Some(("attn_qkv.bias", false)),
-                "attention.dense.weight" => Some(("attn_output.weight", false)),
-                "attention.dense.bias" => Some(("attn_output.bias", false)),
+                "attention.query_key_value.weight" | "self_attention.query_key_value.weight" => Some(("attn_qkv.weight", false)),
+                "attention.query_key_value.bias" | "self_attention.query_key_value.bias" => Some(("attn_qkv.bias", false)),
+                "attention.dense.weight" | "self_attention.dense.weight" => Some(("attn_output.weight", false)),
+                "attention.dense.bias" | "self_attention.dense.bias" => Some(("attn_output.bias", false)),
                 "mlp.dense_h_to_4h.weight" => Some(("ffn_up.weight", false)),
                 "mlp.dense_4h_to_h.weight" => Some(("ffn_down.weight", false)),
                 "self_attn.q_proj.weight" => Some(("attn_q.weight", false)),
@@ -2989,6 +3010,46 @@ mod tests {
             chatglm.map("transformer.output_layer.weight").unwrap(),
             Mapped::Tensor { name: "output.weight".into(), add: 0.0 }
         );
+        assert_eq!(
+            chatglm.map("transformer.encoder.layers.0.self_attention.query_key_value.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_qkv.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            chatglm.map("transformer.encoder.layers.0.mlp.dense_h_to_4h.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.ffn_up.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            chatglm.map("transformer.encoder.final_layernorm.weight").unwrap(),
+            Mapped::Tensor { name: "output_norm.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            chatglm.map("transformer.rotary_pos_emb.inv_freq").unwrap(),
+            Mapped::Skip
+        );
+    }
+
+    #[test]
+    fn chatglm_plan() {
+        let cfg = json!({
+            "model_type": "chatglm",
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "num_layers": 2,
+            "ffn_hidden_size": 128,
+            "multi_query_group_num": 2,
+            "kv_channels": 16,
+            "seq_length": 2048,
+            "layernorm_epsilon": 1e-5,
+            "rope_ratio": 1
+        });
+        let plan = Plan::from_config(&cfg).unwrap();
+        assert_eq!(plan.arch, "chatglm");
+        assert_eq!(plan.layers, 2);
+        assert_eq!(plan.family, Family::Glm);
+        assert!(plan.meta.iter().any(|(k, v)| k == "chatglm.feed_forward_length" && matches!(v, Meta::U32(128))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "chatglm.attention.head_count_kv" && matches!(v, Meta::U32(2))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "chatglm.rope.dimension_count" && matches!(v, Meta::U32(8))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "chatglm.attention.layer_norm_rms_epsilon" && matches!(v, Meta::F32(e) if (*e - 1e-5).abs() < 1e-8)));
     }
 
     #[test]
@@ -3016,5 +3077,106 @@ mod tests {
         cfg_part["rope_head_dim"] = json!(64);
         let plan_part = Plan::from_config(&cfg_part).unwrap();
         assert!(plan_part.meta.iter().any(|(k, v)| k == "llama.rope.dimension_count" && matches!(v, Meta::U32(64))));
+    }
+
+    #[test]
+    fn deepseek_v1_moe_plan() {
+        let mut config = base("deepseek");
+        config["n_routed_experts"] = json!(4);
+        config["num_experts_per_tok"] = json!(2);
+        config["n_shared_experts"] = json!(1);
+        config["moe_intermediate_size"] = json!(16);
+        config["first_k_dense_replace"] = json!(1);
+        let plan = Plan::from_config(&config).unwrap();
+        assert_eq!(plan.family, Family::Llama);
+        assert_eq!(plan.arch, "deepseek");
+        assert_eq!(plan.moe_layers, vec![false, true, true, true]);
+        assert_eq!(
+            plan.map("model.layers.0.mlp.gate_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.ffn_gate.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("model.layers.1.mlp.gate.weight").unwrap(),
+            Mapped::Tensor { name: "blk.1.ffn_gate_inp.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("model.layers.1.mlp.experts.0.gate_proj.weight").unwrap(),
+            Mapped::Expert { name: "blk.1.ffn_gate_exps.weight".into(), index: 0 }
+        );
+        assert_eq!(
+            plan.map("model.layers.1.mlp.shared_experts.gate_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.1.ffn_gate_shexp.weight".into(), add: 0.0 }
+        );
+        assert!(plan.meta.iter().any(|(k, v)| k == "deepseek.expert_count" && matches!(v, Meta::U32(4))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "deepseek.expert_used_count" && matches!(v, Meta::U32(2))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "deepseek.expert_shared_count" && matches!(v, Meta::U32(1))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "deepseek.leading_dense_block_count" && matches!(v, Meta::U32(1))));
+        assert!(plan.meta.iter().any(|(k, v)| k == "deepseek.expert_gating_func" && matches!(v, Meta::U32(1))));
+    }
+
+    #[test]
+    fn exaone_3_plan() {
+        let config = json!({
+            "model_type": "exaone",
+            "hidden_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_layers": 4,
+            "intermediate_size": 64,
+            "activation_function": "silu",
+            "layer_norm_epsilon": 1e-5,
+            "rope_theta": 10000.0,
+        });
+        let plan = Plan::from_config(&config).unwrap();
+        assert_eq!(plan.family, Family::Llama);
+        assert_eq!(plan.arch, "exaone");
+        assert_eq!(
+            plan.map("transformer.wte.weight").unwrap(),
+            Mapped::Tensor { name: "token_embd.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.ln_f.weight").unwrap(),
+            Mapped::Tensor { name: "output_norm.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("lm_head.weight").unwrap(),
+            Mapped::Tensor { name: "output.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.ln_1.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_norm.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.attn.attention.q_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_q.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.attn.attention.k_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_k.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.attn.attention.v_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_v.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.attn.attention.out_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.attn_output.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.ln_2.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.ffn_norm.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.mlp.c_fc_0.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.ffn_gate.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.mlp.c_fc_1.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.ffn_up.weight".into(), add: 0.0 }
+        );
+        assert_eq!(
+            plan.map("transformer.h.0.mlp.c_proj.weight").unwrap(),
+            Mapped::Tensor { name: "blk.0.ffn_down.weight".into(), add: 0.0 }
+        );
     }
 }

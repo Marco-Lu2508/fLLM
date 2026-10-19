@@ -40,6 +40,9 @@ pub(crate) enum Arch {
     /// Qwen3.5 style hybrid: layer 0 gated DeltaNet, layer 1 full attention with an output gate, dense feed-forward
     Qwen35,
     K2Horizon,
+    Deepseek,
+    Exaone,
+    ChatGLM,
 }
 
 // Gated DeltaNet geometry of the Qwen35 fixture
@@ -206,6 +209,36 @@ fn config_json(arch: Arch) -> Value {
             cfg["layernorm_num_groups"] = 2.into();
             cfg["query_key_norm"] = false.into();
         }
+        Arch::Deepseek => {
+            cfg["model_type"] = "deepseek".into();
+            cfg["architectures"] = json!(["DeepseekForCausalLM"]);
+            cfg["n_routed_experts"] = EXPERTS.into();
+            cfg["num_experts_per_tok"] = TOP_K.into();
+            cfg["n_shared_experts"] = 1.into();
+            cfg["moe_intermediate_size"] = MOE_INTER.into();
+            cfg["first_k_dense_replace"] = 1.into();
+            cfg["scoring_func"] = "softmax".into();
+            cfg["norm_topk_prob"] = false.into();
+        }
+        Arch::Exaone => {
+            cfg["model_type"] = "exaone".into();
+            cfg["architectures"] = json!(["ExaoneForCausalLM"]);
+            cfg["num_layers"] = LAYERS.into();
+        }
+        Arch::ChatGLM => {
+            cfg["model_type"] = "chatglm".into();
+            cfg["architectures"] = json!(["ChatGLMForConditionalGeneration"]);
+            cfg["num_layers"] = LAYERS.into();
+            cfg["ffn_hidden_size"] = INTER.into();
+            cfg["multi_query_attention"] = true.into();
+            cfg["multi_query_group_num"] = KV_HEADS.into();
+            cfg["kv_channels"] = HEAD_DIM.into();
+            cfg["layernorm_epsilon"] = 1e-5.into();
+            cfg["rmsnorm"] = true.into();
+            cfg["add_qkv_bias"] = true.into();
+            cfg["seq_length"] = 2048.into();
+            cfg["original_rope"] = true.into();
+        }
     }
     cfg
 }
@@ -233,9 +266,12 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
     let mut rng = Rng(seed | 1);
     let mut entries = Vec::new();
     let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
-    entries.push(Entry { name: "model.embed_tokens.weight".into(), shape: vec![VOCAB, HIDDEN], values: embed });
-    entries.push(linear(&mut rng, "lm_head.weight", VOCAB, HIDDEN, 1.5));
-    entries.push(norm(&mut rng, "model.norm.weight", HIDDEN));
+    let emb_name = match arch { Arch::Exaone => "transformer.wte.weight", Arch::ChatGLM => "transformer.embedding.word_embeddings.weight", _ => "model.embed_tokens.weight" };
+    entries.push(Entry { name: emb_name.into(), shape: vec![VOCAB, HIDDEN], values: embed });
+    let head_name = if arch == Arch::ChatGLM { "transformer.output_layer.weight" } else { "lm_head.weight" };
+    entries.push(linear(&mut rng, head_name, VOCAB, HIDDEN, 1.5));
+    let norm_name = match arch { Arch::Exaone => "transformer.ln_f.weight", Arch::ChatGLM => "transformer.encoder.final_layernorm.weight", _ => "model.norm.weight" };
+    entries.push(norm(&mut rng, norm_name, HIDDEN));
     let qwen_style = matches!(arch, Arch::Qwen3 | Arch::Qwen3Moe | Arch::Qwen35);
     if arch == Arch::Qwen35 {
         // zero-centred norm weights (the model computes x * (1 + w))
@@ -243,6 +279,35 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
         entries.push(zero_norm(&mut rng, "model.norm.weight", HIDDEN));
     }
     for layer in 0..LAYERS {
+        if arch == Arch::ChatGLM {
+            let p = format!("transformer.encoder.layers.{layer}");
+            entries.push(norm(&mut rng, &format!("{p}.input_layernorm.weight"), HIDDEN));
+            entries.push(norm(&mut rng, &format!("{p}.post_attention_layernorm.weight"), HIDDEN));
+            let qkv_rows = (HEADS + 2 * KV_HEADS) * HEAD_DIM;
+            entries.push(linear(&mut rng, &format!("{p}.self_attention.query_key_value.weight"), qkv_rows, HIDDEN, 1.0));
+            entries.push(Entry {
+                name: format!("{p}.self_attention.query_key_value.bias"),
+                shape: vec![qkv_rows],
+                values: (0..qkv_rows).map(|_| rng.unit() * 0.01).collect(),
+            });
+            entries.push(linear(&mut rng, &format!("{p}.self_attention.dense.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.dense_h_to_4h.weight"), 2 * INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.dense_4h_to_h.weight"), HIDDEN, INTER, 1.0));
+            continue;
+        }
+        if arch == Arch::Exaone {
+            let p = format!("transformer.h.{layer}");
+            entries.push(norm(&mut rng, &format!("{p}.ln_1.weight"), HIDDEN));
+            entries.push(norm(&mut rng, &format!("{p}.ln_2.weight"), HIDDEN));
+            entries.push(linear(&mut rng, &format!("{p}.attn.attention.q_proj.weight"), HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.attn.attention.k_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.attn.attention.v_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.attn.attention.out_proj.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.c_fc_0.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.c_fc_1.weight"), INTER, HIDDEN, 1.0));
+            entries.push(linear(&mut rng, &format!("{p}.mlp.c_proj.weight"), HIDDEN, INTER, 1.0));
+            continue;
+        }
         let p = format!("model.layers.{layer}");
         if arch == Arch::Qwen35 {
             qwen35_layer(&mut rng, &mut entries, &p, layer == 0);
@@ -260,6 +325,7 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
         }
         match arch {
             Arch::Qwen35 => unreachable!("handled by qwen35_layer"),
+            Arch::Exaone | Arch::ChatGLM => unreachable!("handled above"),
             Arch::Llama | Arch::Qwen3 | Arch::K2Horizon => {
                 entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
                 entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
@@ -281,6 +347,25 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
                     entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
                     entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
                     entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+                }
+            }
+            Arch::Deepseek => {
+                if layer < 1 {
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+                } else {
+                    entries.push(linear(&mut rng, &format!("{p}.mlp.gate.weight"), EXPERTS, HIDDEN, 2.0));
+                    for e in 0..EXPERTS {
+                        let q = format!("{p}.mlp.experts.{e}");
+                        entries.push(linear(&mut rng, &format!("{q}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                        entries.push(linear(&mut rng, &format!("{q}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                        entries.push(linear(&mut rng, &format!("{q}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
+                    }
+                    let s = format!("{p}.mlp.shared_experts");
+                    entries.push(linear(&mut rng, &format!("{s}.gate_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{s}.up_proj.weight"), MOE_INTER, HIDDEN, 1.0));
+                    entries.push(linear(&mut rng, &format!("{s}.down_proj.weight"), HIDDEN, MOE_INTER, 1.0));
                 }
             }
         }
@@ -487,6 +572,16 @@ mod tests {
     }
 
     #[test]
+    fn cpu_backend_matches_host_path_chatglm_f32() {
+        run("chatglm-f32", Arch::ChatGLM, Encoding::F32, 1e-3);
+    }
+
+    #[test]
+    fn cpu_backend_matches_host_path_exaone_f32() {
+        run("exaone-f32", Arch::Exaone, Encoding::F32, 1e-3);
+    }
+
+    #[test]
     fn cpu_backend_matches_host_path_k2_horizon() {
         run("k2-horizon", Arch::K2Horizon, Encoding::F32, 1e-3);
     }
@@ -530,5 +625,30 @@ mod tests {
     #[test]
     fn qwen35_fixture_runs_on_the_host_quantized() {
         host_only("qwen35-q8", Arch::Qwen35, Encoding::Quant("q8_0"));
+    }
+
+    #[test]
+    fn deepseek_fixture_runs_on_the_host() {
+        host_only("deepseek-f32", Arch::Deepseek, Encoding::F32);
+    }
+
+    #[test]
+    fn falcon_h1_fixture_runs_on_the_host() {
+        for norm in [false, true] {
+            let (config, specs) = crate::hybrid_tests::falcon_h1_specs(norm);
+            crate::hybrid_tests::exercise_state(config, &specs, 0x5eed_0001);
+        }
+    }
+
+    #[test]
+    fn jamba_fixture_runs_on_the_host() {
+        let (config, specs) = crate::hybrid_tests::jamba_specs();
+        crate::hybrid_tests::exercise_state(config, &specs, 0x5eed_0002);
+    }
+
+    #[test]
+    fn zamba2_fixture_runs_on_the_host() {
+        let (config, specs) = crate::hybrid_tests::zamba2_specs();
+        crate::hybrid_tests::exercise_state(config, &specs, 0x5eed_0003);
     }
 }

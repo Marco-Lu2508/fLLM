@@ -466,6 +466,7 @@ impl ModelConfig {
                     | "llama4"
                     | "glm"
                     | "glm4"
+                    | "chatglm"
                     | "granite"
                     | "minicpm"
                     | "gptj"

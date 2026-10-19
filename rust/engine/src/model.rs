@@ -77,6 +77,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "hunyuan-moe",
     "glm",
     "glm4",
+    "chatglm",
     "seed_oss",
     "smollm3",
     "arcee",
