@@ -1,11 +1,17 @@
 # The Windows package with the CUDA kernels (fllm-windows-x86_64-msvc-cuda.zip) as a downloadable workflow artifact, without a release or a tag:
-# runs on a push to the branch `windows-cuda` and by hand (Actions -> windows-cuda-package -> Run workflow). The release build of the same
+# runs on a push to `main` that touches the CUDA sources or this build, and by hand (Actions -> windows-cuda-package -> Run workflow). The release build of the same
 # archive is the windows-cuda job of release.yml. Long (nvcc builds every architecture): up to a few hours.
 name: windows-cuda-package
 
 on:
   push:
-    branches: [windows-cuda]
+    branches: [main]
+    # only when something changes that the Windows CUDA build depends on (a full build takes hours)
+    paths:
+      - "rust/engine/cuda/**"
+      - "rust/engine/build.rs"
+      - "scripts/build-windows.ps1"
+      - ".github/workflows/windows-cuda-package.yml"
   workflow_dispatch:
 
 permissions:
