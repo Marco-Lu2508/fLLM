@@ -3197,7 +3197,9 @@ impl<'a> Tester<'a> {
             let all = words_of(pools);
             let (kw, vw) = all.split_at(layers * words);
             let mut err = 0.0f64;
-            for (pool, src) in [(kw, &k), (vw, &v)] {
+            // where the largest error sits (pool, row, column, value found, value expected): named in the failure message
+            let mut at = (0usize, 0usize, 0usize, 0.0f64, 0.0f64);
+            for (pool_index, (pool, src)) in [(kw, &k), (vw, &v)].into_iter().enumerate() {
                 let view = PoolView {
                     words: pool,
                     layer_words: words,
@@ -3232,13 +3234,16 @@ impl<'a> Tester<'a> {
                             (have - x).abs() / x.abs().max(1.0 / 16384.0)
                         };
                         if e.is_nan() {
-                            return f64::INFINITY;
+                            return log_worst(WorstAt { err: f64::INFINITY, index: (pool_index * rows + r) * kv + c, have: have as f32, want: x, scale: 1.0, len: 2 * rows * kv, want_len: 2 * rows * kv });
                         }
-                        err = err.max(e);
+                        if e > err {
+                            err = e;
+                            at = (pool_index, r, c, have, x);
+                        }
                     }
                 }
             }
-            err
+            log_worst(WorstAt { err, index: (at.0 * rows + at.1) * kv + at.2, have: at.3 as f32, want: at.4, scale: 1.0, len: 2 * rows * kv, want_len: 2 * rows * kv })
         };
         // f16: either neighbour of x is a correct conversion, 2^-10 relative. q8: rounding to
         // the nearest step (0.5) plus the f16 scale (127 steps x 2^-10 = 0.124), plus one
