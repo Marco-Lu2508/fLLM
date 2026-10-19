@@ -69,3 +69,11 @@ By hand: `cargo build --release --locked -p fllm-engine --features "rust-gpu,cud
 | `cannot run glslc` | install the Vulkan SDK (sets `VULKAN_SDK`) or set `GLSLC`; `build-windows.ps1` drops the native Vulkan backend when it cannot find `glslc` |
 | `fllm-rs devices` lists no GPU | install the vendor driver; wgpu uses DirectX 12 and Vulkan, the CUDA build needs `nvcuda.dll` from the NVIDIA driver |
 | first GPU test | `fllm-rs selftest-gpu --json out.json` (see [device-selection.md](device-selection.md)) and send `out.json` |
+
+## Known issues from the first runs on an AMD handheld (Ryzen Z1 Extreme, Windows 11, `fllm-rs selftest-gpu`)
+
+* Native Vulkan on the Radeon: the f16 KV cache write checks failed on the first run (AMD drivers round `packHalf2x16` toward zero; the shaders now
+  convert to binary16 with their own round-to-nearest-even code). Not confirmed on the AMD driver yet, see the next run.
+* DirectX 12 (`--device dx12`, wgpu): the block-32 formats Q4_0, Q4_1, Q5_0, Q5_1 and Q8_0 produced wrong values or NaN (K-quants were correct). `--device auto`
+  picks native Vulkan before DirectX 12, so a normal run does not use that path; the cause is not found.
+* Measured with Qwen2.5-1.5B Q4_K_M on that machine: CPU 28 tokens/s decode and 344 prompt tokens/s, Vulkan 46 to 50 decode and 1140 to 1240 prompt tokens/s.

@@ -29,8 +29,33 @@ float erf_fit(float x) {
 float gelu_erf(float x) { return 0.5 * x * (1.0 + erf_fit(x * 0.70710678)); }
 float softplus20(float x) { return x > 20.0 ? x : log(1.0 + exp(x)); }
 
-// binary16 bits of x (round mode of packHalf2x16 is implementation defined: RTE on every driver known to the author)
-uint f16_bits(float x) { return packHalf2x16(vec2(x, 0.0)) & 0xFFFFu; }
+// binary16 bits of x, rounded to nearest even. packHalf2x16 is not used: its rounding mode is implementation defined and AMD drivers round
+// toward zero (an error of up to one unit in the last place that the KV cache write test of the Radeon Z1 Extreme showed).
+uint f16_bits(float x) {
+    const uint f = floatBitsToUint(x);
+    const uint sign = (f >> 16) & 0x8000u;
+    const uint e = (f >> 23) & 0xFFu;
+    uint m = f & 0x7FFFFFu;
+    if (e == 0xFFu) {  // infinity or NaN (a NaN keeps a non-zero payload)
+        return sign | 0x7C00u | (m != 0u ? (0x200u | (m >> 13)) : 0u);
+    }
+    const int ex = int(e) - 112;  // exponent re-biased from 127 to 15
+    if (ex >= 31) return sign | 0x7C00u;
+    if (ex <= 0) {  // subnormal binary16 or zero
+        if (ex < -10) return sign;
+        m |= 0x800000u;
+        const uint shift = uint(14 - ex);
+        uint h = m >> shift;
+        const uint rem = m & ((1u << shift) - 1u);
+        const uint half_way = 1u << (shift - 1u);
+        if (rem > half_way || (rem == half_way && (h & 1u) != 0u)) h += 1u;
+        return sign | h;
+    }
+    uint h = (uint(ex) << 10) | (m >> 13);
+    const uint rem = m & 0x1FFFu;
+    if (rem > 0x1000u || (rem == 0x1000u && (h & 1u) != 0u)) h += 1u;  // a carry into the exponent is the correct result (up to infinity)
+    return sign | h;
+}
 
 // Index of the workgroup in a 1-D logical grid that was split over x and y (count > 65535): x + y * numGroupsX.
 uint group_index() { return gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x; }
