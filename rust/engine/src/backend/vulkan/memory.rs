@@ -747,7 +747,19 @@ impl AllocShared {
         self.note_freed(block.heap, block.memory_size);
     }
 
+    /// [`Self::allocate_from`] with a fallback: when the device-local heap of a unified-memory device (an APU: a small dedicated part
+    /// plus a large part of the host RAM) is full, the buffer is placed in the host-visible memory the GPU can reach as well.
     fn allocate(self: &Arc<Self>, kind: MemoryKind, size: u64, usage: BufferUsage) -> VkResult<Buffer> {
+        match self.allocate_from(kind, kind, size, usage) {
+            Err(VkError::OutOfMemory { .. }) if self.unified && kind == MemoryKind::DeviceLocal => {
+                self.allocate_from(kind, MemoryKind::Staging, size, usage)
+            }
+            other => other,
+        }
+    }
+
+    /// Allocate `size` bytes served as `kind`, with the memory type chosen by the rules of `choice_kind`.
+    fn allocate_from(self: &Arc<Self>, kind: MemoryKind, choice_kind: MemoryKind, size: u64, usage: BufferUsage) -> VkResult<Buffer> {
         if size == 0 {
             return Err(VkError::InvalidArgument("cannot allocate a buffer of 0 bytes".into()));
         }
@@ -759,7 +771,7 @@ impl AllocShared {
         }
         let reserved = align_up(size, self.align);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let choice = self.choice(&mut state, kind, usage)?;
+        let choice = self.choice(&mut state, choice_kind, usage)?;
         self.check_allocation_budget(&state, size)?;
 
         // the memory kind that actually got served (DeviceMapped may fall back to staging memory)
