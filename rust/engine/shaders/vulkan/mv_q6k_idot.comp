@@ -1,0 +1,104 @@
+#version 450
+// FLLM-SHADER: mv_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(u32[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/NROWS) workgroups, split x/y at 65535
+// Q6_K matrix-vector product for 1..8 activation rows with int8 activations: same contract and results as mv_idot.comp with FMT_Q6_K, laid out
+// for memory bandwidth like mv_q4k_idot.comp. Eight invocations share one 256-value block; invocation `it` takes half n = it / 4 of the block and
+// the 8 consecutive j positions jq * 8 .. +7 (jq = it % 4) of all four groups of 32 values, so it reads 16 contiguous bytes of ql and 8 of qh
+// once (32 weights) and the scale words once.
+// Specialization constants: 0 = workgroup size (multiple of 8), 1 = NROWS, 2 = NCOLS (= batch, 1..8).
+// Device layout of a block (see _q_fmt_q6_k.glsl): plane 0 = ql (128 bytes), plane 1 = qh (64 bytes), plane 2 = 16 int8 scales, plane 3 = f32 d.
+#extension GL_GOOGLE_include_directive : enable
+#include "_q_ext.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 1) const uint NROWS = 2;
+layout(constant_id = 2) const uint NCOLS = 1;
+
+#include "_q_common.glsl"
+
+layout(std430, set = 0, binding = 1) readonly buffer XQBuf { uint xq[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+shared float red[NROWS * NCOLS * gl_WorkGroupSize.x];
+
+void main() {
+    const uint WG = gl_WorkGroupSize.x;
+    const uint t = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    const uint row0 = group * NROWS;
+    const uint xwords = p.cols >> 2;
+    const uint xblocks = p.cols >> 5;
+
+    const uint it = t & 7u;
+    const uint ix = t >> 3;
+    const uint n = it >> 2;        // half of the block (128 values)
+    const uint jq = it & 3u;       // 8 j positions jq * 8 .. +7
+    const uint step = WG >> 3;
+    const uint lane0 = (jq >> 1) << 3;  // bit position of the scale of group 0 / 2 inside its word; groups 1 / 3 are 16 bits above
+
+    float acc[NROWS][NCOLS];
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) acc[r][c] = 0.0;
+    }
+
+    for (uint b = ix; b < p.nb; b += step) {
+        uvec2 x[NCOLS][4];
+        float da[NCOLS][4];
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+            [[unroll]] for (uint grp = 0; grp < 4u; ++grp) {
+                const uint xi = c * xwords + b * 64u + n * 32u + grp * 8u + jq * 2u;
+                x[c][grp] = uvec2(xq[xi], xq[xi + 1u]);
+                da[c][grp] = uintBitsToFloat(xq[p.xq_d + c * xblocks + b * 8u + n * 4u + grp]);
+            }
+        }
+        [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+            const uint row = row0 + r;
+            if (row < p.rows) {
+                const uint g = row * p.nb + b;
+                const uint q0 = g * 32u + n * 16u + jq * 2u;
+                const uvec2 lo0 = uvec2(w[q0], w[q0 + 1u]);          // ql bytes of groups 0 (low nibbles) and 2 (high nibbles)
+                const uvec2 lo1 = uvec2(w[q0 + 8u], w[q0 + 9u]);     // groups 1 and 3
+                const uint h0 = p.off1 + g * 16u + n * 8u + jq * 2u;
+                const uvec2 qh = uvec2(w[h0], w[h0 + 1u]);
+                const uint s0 = p.off2 + g * 4u + n * 2u;
+                const uint swa = w[s0];
+                const uint swb = w[s0 + 1u];
+                const float d = uintBitsToFloat(w[p.off3 + g]);
+                [[unroll]] for (uint grp = 0; grp < 4u; ++grp) {
+                    const uvec2 ql = (grp & 1u) == 0u ? lo0 : lo1;
+                    const uint sh = (grp >> 1) << 2;
+                    const uint hs = grp << 1;
+                    const uint p0 = sub8(((ql.x >> sh) & 0x0F0F0F0Fu) | (((qh.x >> hs) & 0x03030303u) << 4), 32u);
+                    const uint p1 = sub8(((ql.y >> sh) & 0x0F0F0F0Fu) | (((qh.y >> hs) & 0x03030303u) << 4), 32u);
+                    const int sc = bitfieldExtract(int(grp < 2u ? swa : swb), int(lane0 + (grp & 1u) * 16u), 8);
+                    const float ws = d * float(sc);
+                    [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+                        const int dot = idot4(p0, x[c][grp].x) + idot4(p1, x[c][grp].y);
+                        acc[r][c] += ws * da[c][grp] * float(dot);
+                    }
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) red[(r * NCOLS + c) * WG + t] = acc[r][c];
+    }
+    barrier();
+    for (uint s = WG >> 1; s > 0u; s >>= 1) {
+        if (t < s) {
+            [[unroll]] for (uint i = 0; i < NROWS * NCOLS; ++i) red[i * WG + t] += red[i * WG + t + s];
+        }
+        barrier();
+    }
+    if (t < NROWS * NCOLS) {
+        const uint r = t / NCOLS;
+        const uint c = t % NCOLS;
+        const uint row = row0 + r;
+        if (row < p.rows) {
+            float v = red[t * WG] * p.scale;
+            if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+            outv[c * p.out_stride + p.row_base + row] = v;
+        }
+    }
+}

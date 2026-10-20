@@ -1,0 +1,106 @@
+#version 450
+// FLLM-SHADER: mv_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(u32[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/NROWS) workgroups, split x/y at 65535
+// Q4_K matrix-vector product for 1..8 activation rows with int8 activations, same contract and results as mv_idot.comp with FMT_Q4_K but
+// laid out for memory bandwidth: eight invocations share one 256-value block and each reads 16 bytes of it with one wide load (32 weights, both
+// nibble halves), so every weight byte is fetched once and the scale words are read once per 32 weights instead of once per 8.
+// Specialization constants: 0 = workgroup size (multiple of 8), 1 = NROWS, 2 = NCOLS (= batch, 1..8).
+// Device layout of a Q4_K block (see _q_fmt_q4_k.glsl): plane 0 = 128 qs bytes (bytes (g/2)*32.. hold group g low nibbles for even g, high
+// nibbles for odd g), plane 1 = 16 bytes (8 scales, 8 mins), plane 2 = d | dmin << 16.
+#extension GL_GOOGLE_include_directive : enable
+#include "_q_ext.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 1) const uint NROWS = 2;
+layout(constant_id = 2) const uint NCOLS = 1;
+
+#include "_q_common.glsl"
+
+layout(std430, set = 0, binding = 1) readonly buffer XQBuf { uint xq[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+shared float red[NROWS * NCOLS * gl_WorkGroupSize.x];
+
+void main() {
+    const uint WG = gl_WorkGroupSize.x;
+    const uint t = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    const uint row0 = group * NROWS;
+    const uint xwords = p.cols >> 2;
+    const uint xblocks = p.cols >> 5;
+
+    const uint it = t & 7u;        // which 16 bytes of the block
+    const uint ix = t >> 3;        // which block of the current step
+    const uint pair = it >> 1;     // byte rows pair*32 .. +31: groups 2*pair (low nibbles) and 2*pair+1 (high nibbles)
+    const uint half_ = it & 1u;    // first or second half of those 32 bytes
+    const uint ga = pair * 2u;
+    const uint lane = (ga & 3u) << 3;  // bit position of the scale of group ga inside its plane-1 word; group ga+1 is 8 bits above
+    const uint step = WG >> 3;
+
+    float acc[NROWS][NCOLS];
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) acc[r][c] = 0.0;
+    }
+
+    for (uint b = ix; b < p.nb; b += step) {
+        uvec4 xa[NCOLS];
+        uvec4 xb[NCOLS];
+        float da[NCOLS];
+        float db[NCOLS];
+        float sa[NCOLS];
+        float sb[NCOLS];
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+            const uint xa0 = c * xwords + b * 64u + ga * 8u + half_ * 4u;
+            xa[c] = uvec4(xq[xa0], xq[xa0 + 1u], xq[xa0 + 2u], xq[xa0 + 3u]);
+            xb[c] = uvec4(xq[xa0 + 8u], xq[xa0 + 9u], xq[xa0 + 10u], xq[xa0 + 11u]);
+            da[c] = uintBitsToFloat(xq[p.xq_d + c * xblocks + b * 8u + ga]);
+            db[c] = uintBitsToFloat(xq[p.xq_d + c * xblocks + b * 8u + ga + 1u]);
+            sa[c] = da[c] * float(idot4(0x01010101u, xa[c].x) + idot4(0x01010101u, xa[c].y) + idot4(0x01010101u, xa[c].z) + idot4(0x01010101u, xa[c].w));
+            sb[c] = db[c] * float(idot4(0x01010101u, xb[c].x) + idot4(0x01010101u, xb[c].y) + idot4(0x01010101u, xb[c].z) + idot4(0x01010101u, xb[c].w));
+        }
+        [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+            const uint row = row0 + r;
+            if (row < p.rows) {
+                const uint g = row * p.nb + b;
+                const uint q0 = g * 32u + pair * 8u + half_ * 4u;
+                const uvec4 qs = uvec4(w[q0], w[q0 + 1u], w[q0 + 2u], w[q0 + 3u]);
+                const uvec4 lo = qs & 0x0F0F0F0Fu;
+                const uvec4 hi = (qs >> 4) & 0x0F0F0F0Fu;
+                const uint q1 = p.off1 + g * 4u + (pair >> 1);
+                const uint scw = w[q1] >> lane;
+                const uint mnw = w[q1 + 2u] >> lane;
+                const float sca = float(scw & 255u);
+                const float scb = float((scw >> 8) & 255u);
+                const float mna = float(mnw & 255u);
+                const float mnb = float((mnw >> 8) & 255u);
+                const vec2 dm = unpackHalf2x16(w[p.off2 + g]);
+                [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
+                    const int d_a = idot4(lo.x, xa[c].x) + idot4(lo.y, xa[c].y) + idot4(lo.z, xa[c].z) + idot4(lo.w, xa[c].w);
+                    const int d_b = idot4(hi.x, xb[c].x) + idot4(hi.y, xb[c].y) + idot4(hi.z, xb[c].z) + idot4(hi.w, xb[c].w);
+                    acc[r][c] += dm.x * (sca * da[c] * float(d_a) + scb * db[c] * float(d_b)) - dm.y * (mna * sa[c] + mnb * sb[c]);
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+        [[unroll]] for (uint c = 0; c < NCOLS; ++c) red[(r * NCOLS + c) * WG + t] = acc[r][c];
+    }
+    barrier();
+    for (uint s = WG >> 1; s > 0u; s >>= 1) {
+        if (t < s) {
+            [[unroll]] for (uint i = 0; i < NROWS * NCOLS; ++i) red[i * WG + t] += red[i * WG + t + s];
+        }
+        barrier();
+    }
+    if (t < NROWS * NCOLS) {
+        const uint r = t / NCOLS;
+        const uint c = t % NCOLS;
+        const uint row = row0 + r;
+        if (row < p.rows) {
+            float v = red[t * WG] * p.scale;
+            if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+            outv[c * p.out_stride + p.row_base + row] = v;
+        }
+    }
+}

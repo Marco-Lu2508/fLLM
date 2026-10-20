@@ -190,7 +190,7 @@ impl Default for AttentionTuning {
         Self {
             target_groups: 512,
             max_splits: 64,
-            min_split_keys: 256,
+            min_split_keys: 64,
             use_prefill_kernel: true,
             prefill_min_rows: 4,
         }

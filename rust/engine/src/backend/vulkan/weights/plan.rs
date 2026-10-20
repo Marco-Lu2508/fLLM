@@ -261,9 +261,21 @@ pub fn split_groups(n: u64) -> [u32; 3] {
 /// Workgroup size and rows per workgroup of the matrix-vector shaders for a device.
 fn matvec_tuning(caps: &VkCapsLike, columns: u32) -> (u32, u32) {
     let (mut wg, mut rows) = match caps.vendor {
-        0x10de | 0x1002 => (128u32, 2u32),
+        0x1002 => (64u32, 1u32),
+        0x10de => (128u32, 2u32),
         _ => (64, 2),
     };
+    // tuning knobs for measuring a device: FLLM_VK_MV_WG (power of two, 32..=256) and FLLM_VK_MV_ROWS (1..=8)
+    static KNOBS: std::sync::OnceLock<(Option<u32>, Option<u32>)> = std::sync::OnceLock::new();
+    let (knob_wg, knob_rows) = *KNOBS.get_or_init(|| {
+        let read = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<u32>().ok());
+        (
+            read("FLLM_VK_MV_WG").filter(|v| v.is_power_of_two() && (32..=256).contains(v)),
+            read("FLLM_VK_MV_ROWS").filter(|v| (1..=8).contains(v)),
+        )
+    });
+    wg = knob_wg.unwrap_or(wg);
+    rows = knob_rows.unwrap_or(rows);
     let shared = |wg: u32, rows: u32| rows * columns * wg * 4;
     while shared(wg, rows) > caps.max_shared && wg > 32 {
         wg /= 2;

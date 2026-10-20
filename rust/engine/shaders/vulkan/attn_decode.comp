@@ -63,7 +63,17 @@ float key_dot(uint slot, uint kh) {
     if ((h0 & 1u) == 0u) {
         const uint w0 = h0 >> 1;
         const uint pairs = p.dk >> 1;
-        for (uint i = 0u; i < pairs; i++) {
+        uint i = 0u;
+        // eight independent loads per step: the loads of one step are in flight together instead of one after the other
+        for (; i + 8u <= pairs; i += 8u) {
+            uint kw[8];
+            [[unroll]] for (uint u = 0u; u < 8u; u++) kw[u] = kpool[w0 + i + u];
+            [[unroll]] for (uint u = 0u; u < 8u; u++) {
+                const vec2 kk = unpackHalf2x16(kw[u]);
+                s += qs[2u * (i + u)] * kk.x + qs[2u * (i + u) + 1u] * kk.y;
+            }
+        }
+        for (; i < pairs; i++) {
             const vec2 kk = unpackHalf2x16(kpool[w0 + i]);
             s += qs[2u * i] * kk.x + qs[2u * i + 1u] * kk.y;
         }
@@ -173,7 +183,13 @@ void main() {
             const uint d = lane + i * WG;
             if (d < p.dv) {
                 float a = acc[i] * corr;
-                for (uint j = 0u; j < count; j++) a += sc_s[j] * val_at(slot_s[j], kh * p.dv + d);
+                uint j = 0u;
+                for (; j + 4u <= count; j += 4u) {  // four independent loads per step
+                    float vv[4];
+                    [[unroll]] for (uint u = 0u; u < 4u; u++) vv[u] = val_at(slot_s[j + u], kh * p.dv + d);
+                    a += sc_s[j] * vv[0] + sc_s[j + 1u] * vv[1] + sc_s[j + 2u] * vv[2] + sc_s[j + 3u] * vv[3];
+                }
+                for (; j < count; j++) a += sc_s[j] * val_at(slot_s[j], kh * p.dv + d);
                 acc[i] = a;
             }
         }

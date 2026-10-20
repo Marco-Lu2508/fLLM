@@ -51,7 +51,7 @@ mm_q3_k_i mm_idot.comp -DFMT_Q3_K=1
 mm_q3_k_c mm_coopmat.comp -DFMT_Q3_K=1 #optional
 
 mv_q4_k_s mv_scalar.comp -DFMT_Q4_K=1
-mv_q4_k_i mv_idot.comp -DFMT_Q4_K=1
+mv_q4_k_i mv_q4k_idot.comp
 mm_q4_k_s mm_scalar.comp -DFMT_Q4_K=1
 mm_q4_k_i mm_idot.comp -DFMT_Q4_K=1
 mm_q4_k_c mm_coopmat.comp -DFMT_Q4_K=1 #optional
@@ -63,7 +63,7 @@ mm_q5_k_i mm_idot.comp -DFMT_Q5_K=1
 mm_q5_k_c mm_coopmat.comp -DFMT_Q5_K=1 #optional
 
 mv_q6_k_s mv_scalar.comp -DFMT_Q6_K=1
-mv_q6_k_i mv_idot.comp -DFMT_Q6_K=1
+mv_q6_k_i mv_q6k_idot.comp
 mm_q6_k_s mm_scalar.comp -DFMT_Q6_K=1
 mm_q6_k_i mm_idot.comp -DFMT_Q6_K=1
 mm_q6_k_c mm_coopmat.comp -DFMT_Q6_K=1 #optional

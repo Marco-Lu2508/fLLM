@@ -13,6 +13,7 @@
 //!
 //! Level of verification: L0 (compiles; the pure parts are unit tested, the Vulkan calls never ran).
 
+pub mod profile;
 pub mod transfer;
 
 use super::instance::error::{vk_call, VkError, VkResult};
@@ -26,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use transfer::Transfer;
+use profile::{Profiler, Recorded};
 
 /// Most storage buffers one pipeline can bind (descriptor arrays are on the stack).
 pub const MAX_BINDINGS: u32 = 32;
@@ -200,6 +202,7 @@ impl DescriptorRing {
 /// What a submission keeps alive until the GPU has finished it.
 struct Parked {
     value: u64,
+    prof: Option<Recorded>,
     _buffers: Vec<Arc<BufferInner>>,
     _pipelines: Vec<Arc<ComputePipeline>>,
 }
@@ -234,6 +237,9 @@ pub struct Recorder {
     pipeline: Option<Arc<ComputePipeline>>,
     buffers_bound: bool,
     stats: RecorderStats,
+    /// GPU timing per shader (`FLLM_VK_PROFILE`); `cur_prof` holds the timestamps of the open command buffer.
+    prof: Option<Profiler>,
+    cur_prof: Option<Recorded>,
 }
 
 impl Recorder {
@@ -263,6 +269,8 @@ impl Recorder {
             pipeline: None,
             buffers_bound: false,
             stats: RecorderStats::default(),
+            prof: Profiler::new(ctx),
+            cur_prof: None,
         })
     }
 
@@ -288,7 +296,11 @@ impl Recorder {
     fn reclaim(&mut self) -> VkResult<()> {
         let completed = self.ctx.timeline().completed()?;
         while self.parked.front().is_some_and(|p| p.value <= completed) {
-            self.parked.pop_front();
+            if let Some(p) = self.parked.pop_front() {
+                if let (Some(pr), Some(rec)) = (&mut self.prof, &p.prof) {
+                    pr.collect(&self.ctx.core().device, rec)?;
+                }
+            }
         }
         if self.current.is_none() && self.next_cb > 0 && self.last_value <= completed {
             // SAFETY: every command buffer of the pool has completed (timeline), none is recording.
@@ -335,6 +347,13 @@ impl Recorder {
         self.pending_writes = false;
         self.pipeline = None;
         self.buffers_bound = false;
+        self.cur_prof = None;
+        if let Some(pr) = &mut self.prof {
+            if self.parked.iter().filter(|p| p.prof.is_some()).count() < 3 {
+                let base = pr.start(device, cb);
+                self.cur_prof = Some(Recorded { base, used: 1, names: Vec::new() });
+            }
+        }
         self.stats.barriers += 1;
         Ok(())
     }
@@ -519,6 +538,17 @@ impl Recorder {
         Ok(())
     }
 
+    /// Timestamp after the dispatch just recorded (profiling only).
+    fn stamp(&mut self, cb: vk::CommandBuffer) {
+        if let (Some(pr), Some(rec)) = (&self.prof, &mut self.cur_prof) {
+            if rec.used < profile::SLOTS {
+                pr.stamp(&self.ctx.core().device, cb, rec.base + rec.used);
+                rec.used += 1;
+                rec.names.push(self.pipeline.as_ref().map_or_else(String::new, |p| p.name().to_string()));
+            }
+        }
+    }
+
     fn check_ready(&self) -> VkResult<()> {
         match &self.pipeline {
             None => Err(VkError::InvalidArgument("dispatch before bind_pipeline".into())),
@@ -563,6 +593,7 @@ impl Recorder {
         }
         // SAFETY: `cb` is recording with a pipeline and descriptors bound.
         unsafe { self.device().cmd_dispatch(cb, x, y, z) };
+        self.stamp(cb);
         self.pending_writes = true;
         self.stats.dispatches += 1;
         Ok(())
@@ -581,6 +612,7 @@ impl Recorder {
         self.retain(args);
         // SAFETY: `cb` is recording; the buffer is retained.
         unsafe { self.device().cmd_dispatch_indirect(cb, args.handle(), args.offset() + offset) };
+        self.stamp(cb);
         self.pending_writes = true;
         self.stats.dispatches += 1;
         Ok(())
@@ -692,6 +724,7 @@ impl Recorder {
         self.stats.submits += 1;
         self.parked.push_back(Parked {
             value,
+            prof: self.cur_prof.take(),
             _buffers: std::mem::take(&mut self.retained_buffers),
             _pipelines: std::mem::take(&mut self.retained_pipelines),
         });
@@ -724,6 +757,9 @@ impl Drop for Recorder {
         }
         let device = &self.ctx.core().device;
         self.ring.destroy(device);
+        if let Some(pr) = &mut self.prof {
+            pr.destroy(device);
+        }
         // SAFETY: all submissions of this recorder are complete; destroying the pool frees its command buffers (also a half-recorded one).
         unsafe { device.destroy_command_pool(self.pool, None) };
     }

@@ -205,6 +205,11 @@ Ordered by area.
 * One queue, no asynchronous transfer, no buffer device address (the `_bda` variants are ready but unused), no descriptor indexing.
 * By default the fast variants run (`_i`/`_c` round activations to int8 or compute tiles in f16), so greedy text can differ from the CPU. Use
   `FLLM_VULKAN_EXACT=1` for comparisons; the Vulkan self test passes only with it.
+* Tuning and measuring a device: `FLLM_VK_PROFILE=1` times every dispatch with GPU timestamps and prints a table of the biggest shaders to stderr
+  every 256 submissions; `FLLM_VK_MV_WG` (32..256, power of two) and `FLLM_VK_MV_ROWS` (1..8) override the work-group size and the rows per
+  work group of the matrix-vector shaders. On an AMD integrated GPU (Ryzen Z1 Extreme) the dedicated Q4_K / Q6_K matrix-vector shaders
+  (`mv_q4k_idot`, `mv_q6k_idot`), 64 invocations with one row and the split of the key range from 64 keys on raised decode of a 1.5B Q4_K_M
+  model from 49 to 64 tokens/s.
 
 ### 5.8 Other gaps
 

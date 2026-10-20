@@ -462,7 +462,9 @@ fn attention_prefill_segments() {
     );
     assert_eq!(names[1], "attn_decode_f16");
     assert_eq!(field(&plans[1], "row0"), 40);
-    assert_eq!(names.len(), 2, "{names:?}");
+    // the decode row (300 keys) is split over the key range: decode kernel plus merge
+    assert_eq!(names[2], "attn_merge");
+    assert_eq!(names.len(), 3, "{names:?}");
     // rows of different sequences are never tiled together
     let lens = [20i64, 21, 22, 23, 24, 25];
     let mut tb = vec![0i64; 6 * 64];
