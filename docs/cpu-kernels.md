@@ -110,6 +110,14 @@ instead of once per token pair, and the scratch is gone when the projection retu
 use is unchanged, there is no load-time step and the unpacked panel adapts to any core count.
 `--no-repack` (or `FLLM_NO_REPACK=1`) selects the previous streaming kernels for A/B runs.
 
+A single-token decode step is about a hundred short projections, so the cost per projection
+matters as much as the kernel: the worker threads poll for the next projection for two
+milliseconds before they park (`cpu_spin`; rayon's own workers sleep within microseconds and
+every wake-up costs tens of microseconds on a virtual machine), the row queue hands out
+256-row claims at batch one (16 rows when several tokens run together), and the plain AVX2 tier
+has a dedicated batch-one Q4_K / Q6_K kernel (`gemv_avx2`) that prefetches the following panels.
+`FLLM_NO_SPIN=1` switches the polling workers off (rayon dispatch) for A/B runs.
+
 | Format | Panel layout | Kernel |
 | --- | --- | --- |
 | Q4_0, Q5_0 | `WPanel`: four rows of 32 signed weights plus 128 as bytes and one scale each (a Q4_0 weight `d * (q - 8)` is a Q8_0 weight after the offset) | the Q8_0 prompt tiles: 4x2 on AVX2/AVX-VNNI, row pairs on AVX-512; activations are the Q8_0 pairs of `Q8Input` |

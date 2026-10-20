@@ -1,7 +1,6 @@
 //! Tiled grouped-query attention with online softmax and deterministic split-KV.
 //! Each key/value row is read once for a tile of query positions and GQA heads.
 use half::f16;
-use rayon::prelude::*;
 
 #[derive(Clone)]
 struct Tile {
@@ -224,144 +223,138 @@ pub fn attention(
         .max(1)
         .min((max_len / 256).max(1));
     let scale = (dim as f32).sqrt().recip();
-    let parts = (0..base * segments)
-        .into_par_iter()
-        .map(|it| {
-            let ti = tiles.len() - 1 - it / (kv_heads * segments);
-            let kh = (it / segments) % kv_heads;
-            let seg = it % segments;
-            let tile = &tiles[ti];
-            let span = tile.length.div_ceil(segments).div_ceil(64) * 64;
-            let end = tile.length.min((seg + 1) * span);
-            let nr = tile.rows * g;
-            let mut p = Partial {
-                max: vec![f32::NEG_INFINITY; nr],
-                sum: vec![0.0; nr],
-                acc: vec![0.0; nr * dim],
-            };
-            let mut q8_scratch = key.q8.then(Q8AttentionScratch::take);
-            let mut scores_local = if key.q8 {
-                Vec::new()
-            } else {
-                vec![0.0; nr * 64]
-            };
-            let mut values_local = if key.q8 {
-                Vec::new()
-            } else {
-                vec![0.0; 64 * dim]
-            };
-            let (scores, values) = if let Some(scratch) = q8_scratch.as_mut() {
-                scratch.0.scores.resize(nr * 64, 0.0);
-                scratch.0.values.resize(64 * dim, 0.0);
-                (&mut scratch.0.scores, &mut scratch.0.values)
-            } else {
-                (&mut scores_local, &mut values_local)
-            };
-            let mut query_rows = [&[][..]; 16];
-            if key.q8 {
-                debug_assert!(nr <= query_rows.len());
-                for (r, query_row) in query_rows.iter_mut().take(nr).enumerate() {
-                    let b = tile.first + r / g;
-                    let h = kh * g + r % g;
-                    *query_row = &packed[(b * heads + h) * blocks..][..blocks];
-                }
+    let parts = crate::cpu_spin::collect(base * segments, |it| {
+        let ti = tiles.len() - 1 - it / (kv_heads * segments);
+        let kh = (it / segments) % kv_heads;
+        let seg = it % segments;
+        let tile = &tiles[ti];
+        let span = tile.length.div_ceil(segments).div_ceil(64) * 64;
+        let end = tile.length.min((seg + 1) * span);
+        let nr = tile.rows * g;
+        let mut p = Partial {
+            max: vec![f32::NEG_INFINITY; nr],
+            sum: vec![0.0; nr],
+            acc: vec![0.0; nr * dim],
+        };
+        let mut q8_scratch = key.q8.then(Q8AttentionScratch::take);
+        let mut scores_local = if key.q8 {
+            Vec::new()
+        } else {
+            vec![0.0; nr * 64]
+        };
+        let mut values_local = if key.q8 {
+            Vec::new()
+        } else {
+            vec![0.0; 64 * dim]
+        };
+        let (scores, values) = if let Some(scratch) = q8_scratch.as_mut() {
+            scratch.0.scores.resize(nr * 64, 0.0);
+            scratch.0.values.resize(64 * dim, 0.0);
+            (&mut scratch.0.scores, &mut scratch.0.values)
+        } else {
+            (&mut scores_local, &mut values_local)
+        };
+        let mut query_rows = [&[][..]; 16];
+        if key.q8 {
+            debug_assert!(nr <= query_rows.len());
+            for (r, query_row) in query_rows.iter_mut().take(nr).enumerate() {
+                let b = tile.first + r / g;
+                let h = kh * g + r % g;
+                *query_row = &packed[(b * heads + h) * blocks..][..blocks];
             }
-            for kb in (seg * span..end).step_by(64) {
-                let nk = (end - kb).min(64);
-                for j in 0..nk {
-                    let t = kb + j;
-                    let slot = tables[tile.first * stride + t / block_size] as usize * block_size
-                        + t % block_size;
-                    let (kq, ks) = if key.q8 {
-                        key.quant_row(slot, kh)
-                    } else {
-                        (&[][..], &[][..])
-                    };
-                    if key.q8 {
-                        score_q8_tile(&query_rows[..nr], kq, ks, &mut scores[j..], scale, path);
-                    }
-                    for r in 0..nr {
-                        let b = tile.first + r / g;
-                        let h = kh * g + r % g;
-                        scores[r * 64 + j] = if t >= lengths[b] as usize {
-                            f32::NEG_INFINITY
-                        } else if key.q8 {
-                            scores[r * 64 + j]
-                        } else {
-                            score_half(
-                                &q[(b * heads + h) * dim..][..dim],
-                                key.half_row(slot, kh),
-                                path,
-                            ) * scale
-                        };
-                    }
-                    let dst = &mut values[j * dim..(j + 1) * dim];
-                    if value.q8 {
-                        let (v, s) = value.quant_row(slot, kh);
-                        decode_q8(v, s, dst, path);
-                    } else {
-                        decode_half(value.half_row(slot, kh), dst, path);
-                    }
+        }
+        for kb in (seg * span..end).step_by(64) {
+            let nk = (end - kb).min(64);
+            for j in 0..nk {
+                let t = kb + j;
+                let slot = tables[tile.first * stride + t / block_size] as usize * block_size
+                    + t % block_size;
+                let (kq, ks) = if key.q8 {
+                    key.quant_row(slot, kh)
+                } else {
+                    (&[][..], &[][..])
+                };
+                if key.q8 {
+                    score_q8_tile(&query_rows[..nr], kq, ks, &mut scores[j..], scale, path);
                 }
                 for r in 0..nr {
-                    let row = &mut scores[r * 64..r * 64 + nk];
-                    let bmax = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    if bmax == f32::NEG_INFINITY {
-                        row.fill(0.0);
-                        continue;
-                    }
-                    let m = p.max[r].max(bmax);
-                    let correction = (p.max[r] - m).exp();
-                    // Masked positions must stay zero even after the exponent clamp.
-                    let valid = (lengths[tile.first + r / g] as usize)
-                        .saturating_sub(kb)
-                        .min(nk);
-                    let denominator = crate::cpu_elementwise::exp_shifted(&mut row[..valid], m);
-                    row[valid..].fill(0.0);
-                    p.sum[r] = p.sum[r] * correction + denominator;
-                    p.max[r] = m;
-                    let dst = &mut p.acc[r * dim..(r + 1) * dim];
-                    for a in dst.iter_mut() {
-                        *a *= correction;
-                    }
-                    accumulate(dst, row, &values[..nk * dim], path);
+                    let b = tile.first + r / g;
+                    let h = kh * g + r % g;
+                    scores[r * 64 + j] = if t >= lengths[b] as usize {
+                        f32::NEG_INFINITY
+                    } else if key.q8 {
+                        scores[r * 64 + j]
+                    } else {
+                        score_half(
+                            &q[(b * heads + h) * dim..][..dim],
+                            key.half_row(slot, kh),
+                            path,
+                        ) * scale
+                    };
+                }
+                let dst = &mut values[j * dim..(j + 1) * dim];
+                if value.q8 {
+                    let (v, s) = value.quant_row(slot, kh);
+                    decode_q8(v, s, dst, path);
+                } else {
+                    decode_half(value.half_row(slot, kh), dst, path);
                 }
             }
-            p
-        })
-        .collect::<Vec<_>>();
-    let mut output = vec![0.0; q.len()];
-    output
-        .par_chunks_mut(dim)
-        .enumerate()
-        .for_each(|(bh, out)| {
-            let b = bh / heads;
-            let h = bh % heads;
-            let ti = row_tiles[b];
-            let tile = &tiles[ti];
-            let r = (b - tile.first) * g + h % g;
-            let base = ((tiles.len() - 1 - ti) * kv_heads + h / g) * segments;
-            let max = parts[base..base + segments]
-                .iter()
-                .map(|p| p.max[r])
-                .fold(f32::NEG_INFINITY, f32::max);
-            let mut total = 0.0;
-            for p in &parts[base..base + segments] {
-                if p.sum[r] == 0.0 {
+            for r in 0..nr {
+                let row = &mut scores[r * 64..r * 64 + nk];
+                let bmax = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                if bmax == f32::NEG_INFINITY {
+                    row.fill(0.0);
                     continue;
                 }
-                let w = (p.max[r] - max).exp();
-                total += w * p.sum[r];
-                for (o, &a) in out.iter_mut().zip(&p.acc[r * dim..(r + 1) * dim]) {
-                    *o += a * w;
+                let m = p.max[r].max(bmax);
+                let correction = (p.max[r] - m).exp();
+                // Masked positions must stay zero even after the exponent clamp.
+                let valid = (lengths[tile.first + r / g] as usize)
+                    .saturating_sub(kb)
+                    .min(nk);
+                let denominator = crate::cpu_elementwise::exp_shifted(&mut row[..valid], m);
+                row[valid..].fill(0.0);
+                p.sum[r] = p.sum[r] * correction + denominator;
+                p.max[r] = m;
+                let dst = &mut p.acc[r * dim..(r + 1) * dim];
+                for a in dst.iter_mut() {
+                    *a *= correction;
                 }
+                accumulate(dst, row, &values[..nk * dim], path);
             }
-            if total > 0.0 {
-                for x in out {
-                    *x /= total;
-                }
+        }
+        p
+    });
+    let mut output = vec![0.0; q.len()];
+    crate::cpu_spin::chunks_mut(&mut output, dim, |bh, out| {
+        let b = bh / heads;
+        let h = bh % heads;
+        let ti = row_tiles[b];
+        let tile = &tiles[ti];
+        let r = (b - tile.first) * g + h % g;
+        let base = ((tiles.len() - 1 - ti) * kv_heads + h / g) * segments;
+        let max = parts[base..base + segments]
+            .iter()
+            .map(|p| p.max[r])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut total = 0.0;
+        for p in &parts[base..base + segments] {
+            if p.sum[r] == 0.0 {
+                continue;
             }
-        });
+            let w = (p.max[r] - max).exp();
+            total += w * p.sum[r];
+            for (o, &a) in out.iter_mut().zip(&p.acc[r * dim..(r + 1) * dim]) {
+                *o += a * w;
+            }
+        }
+        if total > 0.0 {
+            for x in out {
+                *x /= total;
+            }
+        }
+    });
     Some(output)
 }
 

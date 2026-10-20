@@ -88,6 +88,12 @@ const GUIDE: usize = 4;
 /// Rows a worker claims at once while plenty of work is left (64 bytes of f32 outputs).
 const DEFAULT_CLAIM_ROWS: usize = 16;
 
+/// The same at batch one, where the outputs of a claim are one contiguous run and a claim costs
+/// an atomic read-modify-write on a line every worker hits: with 16-row claims the queue itself
+/// was a third of a decode step on a fast machine. The guided claim size still shrinks the last
+/// claims, so the tail of a projection stays balanced.
+const DECODE_CLAIM_ROWS: usize = 256;
+
 /// Exclusive columns of one projection across all token rows. Only the
 /// scheduler can construct this view; its atomic claim never repeats a tile.
 pub(crate) struct Rows<'a> {
@@ -120,13 +126,12 @@ pub(crate) fn row_panels<S, I, F>(
     I: Fn() -> S + Sync,
     F: Fn(&mut S, usize, usize, &mut Rows<'_>) + Sync,
 {
-    row_panels_impl(output, rows, (batch, None),
-        size,
-        DEFAULT_CLAIM_ROWS,
-        init,
-        body,
-        false,
-    );
+    let claim = if batch == 1 {
+        DECODE_CLAIM_ROWS
+    } else {
+        DEFAULT_CLAIM_ROWS
+    };
+    row_panels_impl(output, rows, (batch, None), size, claim, init, body, false);
 }
 
 /// Like [`row_panels`] but claims up to `claim_rows` rows at a time while plenty of work is
@@ -186,13 +191,12 @@ pub(crate) fn q8_decode_row_panels<S, I, F>(
     I: Fn() -> S + Sync,
     F: Fn(&mut S, usize, usize, &mut Rows<'_>) + Sync,
 {
-    row_panels_impl(output, rows, (batch, None),
-        size,
-        DEFAULT_CLAIM_ROWS,
-        init,
-        body,
-        batch == 1,
-    );
+    let claim = if batch == 1 {
+        DECODE_CLAIM_ROWS
+    } else {
+        DEFAULT_CLAIM_ROWS
+    };
+    row_panels_impl(output, rows, (batch, None), size, claim, init, body, batch == 1);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,6 +301,10 @@ fn dispatch_workers<F>(scoped: bool, body: F)
 where
     F: Fn() + Sync,
 {
+    // Decode runs a hundred short projections per token: keep the workers awake between them.
+    if crate::cpu_spin::run(&body) {
+        return;
+    }
     if scoped {
         let workers = rayon::current_num_threads();
         rayon::scope(|scope| {

@@ -1,11 +1,10 @@
 //! Own SIMD exponential and parallel SwiGLU; no native math ABI calls.
-use rayon::prelude::*;
 
 pub fn swiglu(gate: &mut [f32], up: &[f32]) {
     assert_eq!(gate.len(), up.len());
-    gate.par_chunks_mut(SWIGLU_CHUNK)
-        .zip(up.par_chunks(SWIGLU_CHUNK))
-        .for_each(|(g, u)| swiglu_chunk(g, u));
+    crate::cpu_spin::chunks_mut(gate, SWIGLU_CHUNK, |index, g| {
+        swiglu_chunk(g, &up[index * SWIGLU_CHUNK..][..g.len()])
+    });
 }
 
 /// Same arithmetic as [`swiglu`] on the calling thread. Chunks match the parallel version, so
