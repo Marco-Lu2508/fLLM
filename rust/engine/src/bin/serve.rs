@@ -1008,10 +1008,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let target_dev = plan_device.as_ref();
         if let Some(d) = target_dev {
             if d.dev_type != DeviceType::Cpu {
+                // an integrated GPU has no memory of its own: what it may use is what the system has left, not what the driver reports
+                let unified = d.dev_type == DeviceType::IntegratedGpu;
+                let device_free = if unified { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
                 let plan_for = |m: &GgufModel, tokens: usize| {
                     fllm_engine::backend::memory::MemoryPlan::plan(
                         m,
-                        d.free_memory_bytes.saturating_sub(draft_reserve),
+                        device_free.saturating_sub(draft_reserve),
                         d.total_memory_bytes,
                         gpu_memory_utilization,
                         Some(&gpu_layers),
@@ -1019,6 +1022,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 };
                 let mut planned = plan_for(&model, max_batched_tokens);
+                if let Err(e) = &planned {
+                    tracing::warn!("memory plan for the device failed: {e}");
+                }
                 if let Ok(p) = &planned {
                     // the pool must hold one sequence of the full context: otherwise lower the context instead of failing
                     if p.kv_block_count < model.table_stride() {
@@ -1038,7 +1044,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(first) = planned {
                     // weights in host memory are streamed to the device per batch: bigger batches amortise the transfer
                     // (the activations of such a batch are part of the plan)
-                    let plan = if first.offload_layers < first.total_layers && !batch_explicit && max_batched_tokens < 2048 {
+                    // (an integrated GPU reads host memory directly: nothing is streamed, so the large batches would only cost scratch memory)
+                    let plan = if first.offload_layers < first.total_layers && !batch_explicit && !unified && max_batched_tokens < 2048 {
                         max_batched_tokens = 2048;
                         plan_for(&model, max_batched_tokens).unwrap_or(first)
                     } else if !batch_explicit && max_batched_tokens < 1024 {

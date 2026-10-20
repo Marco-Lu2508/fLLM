@@ -396,6 +396,11 @@ fn cpu_info() -> DeviceInfo {
     }
 }
 
+/// Physical memory of the host that is free right now (what an integrated GPU can still be given).
+pub fn host_free_memory_bytes() -> u64 {
+    host_memory(true)
+}
+
 /// Free (`available`) or total physical memory of the host: `/proc/meminfo` on Linux, the system call of the platform elsewhere.
 fn host_memory(available: bool) -> u64 {
     let from_proc = meminfo(if available { "MemAvailable:" } else { "MemTotal:" });
