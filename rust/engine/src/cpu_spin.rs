@@ -66,7 +66,7 @@ fn worker(shared: &Shared, index: usize) {
                 break generation;
             }
             polls = polls.wrapping_add(1);
-            if polls % 256 != 0 || since.elapsed() < SPIN {
+            if !polls.is_multiple_of(256) || since.elapsed() < SPIN {
                 std::hint::spin_loop();
                 continue;
             }

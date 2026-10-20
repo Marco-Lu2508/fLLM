@@ -399,7 +399,7 @@ kernel!(panel_avx2, panel_body_avx2, "avx2,fma,f16c", dot_avx2);
 #[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn word_selector(word: usize) -> __m256i {
-    _mm256_set1_epi16((2 * word | (2 * word + 1) << 8) as i16)
+    _mm256_set1_epi16(((2 * word) | ((2 * word + 1) << 8)) as i16)
 }
 
 /// Byte shuffle control that gives the low lane word `2 * pair` and the high lane word
@@ -408,8 +408,8 @@ unsafe fn word_selector(word: usize) -> __m256i {
 #[target_feature(enable = "avx2")]
 unsafe fn half_selector(pair: usize) -> __m256i {
     _mm256_set_m128i(
-        _mm_set1_epi16(((4 * pair + 2) | (4 * pair + 3) << 8) as i16),
-        _mm_set1_epi16((4 * pair | (4 * pair + 1) << 8) as i16),
+        _mm_set1_epi16(((4 * pair + 2) | ((4 * pair + 3) << 8)) as i16),
+        _mm_set1_epi16(((4 * pair) | ((4 * pair + 1) << 8)) as i16),
     )
 }
 
