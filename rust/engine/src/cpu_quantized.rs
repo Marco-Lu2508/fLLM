@@ -1006,6 +1006,7 @@ unsafe fn k_stream_panel(
         (12..=14, Some(Avx512::Vnni)) => k::panel512_vnni(w, kind, first, valid, x, nb, batch, out),
         (12..=14, Some(Avx512::Bw)) => k::panel512_bw(w, kind, first, valid, x, nb, batch, out),
         (12..=14, None) if vnni => k::panel_vnni(w, kind, first, valid, x, nb, batch, out),
+        (12 | 14, None) if batch == 1 => k::gemv_avx2(w, kind, first, valid, x, nb, out),
         (12..=14, None) => k::panel_avx2(w, kind, first, valid, x, nb, batch, out),
         _ if vnni => k::panel_extra_vnni(w, kind, first, valid, x, nb, batch, out),
         (_, Some(Avx512::Vnni)) => k::panel_extra_vnni512(w, kind, first, valid, x, nb, batch, out),

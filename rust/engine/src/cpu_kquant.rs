@@ -395,6 +395,232 @@ kernel!(
 );
 kernel!(panel_avx2, panel_body_avx2, "avx2,fma,f16c", dot_avx2);
 
+/// Byte shuffle control that copies 16-bit word `word` of each 128-bit lane to every word of it.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn word_selector(word: usize) -> __m256i {
+    _mm256_set1_epi16((2 * word | (2 * word + 1) << 8) as i16)
+}
+
+/// Byte shuffle control that gives the low lane word `2 * pair` and the high lane word
+/// `2 * pair + 1` of a broadcast scale vector (the two 16-value halves of a Q6_K group).
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn half_selector(pair: usize) -> __m256i {
+    _mm256_set_m128i(
+        _mm_set1_epi16(((4 * pair + 2) | (4 * pair + 3) << 8) as i16),
+        _mm_set1_epi16((4 * pair | (4 * pair + 1) << 8) as i16),
+    )
+}
+
+/// Batch-one Q4_K / Q6_K rows on plain AVX2, in the reference organisation: the sub-block scale
+/// multiplies each `maddubs` result directly (one `madd` per 32 values) and the per-block sum is
+/// converted to float once. That is fewer integer operations per weight byte than the panel
+/// kernels, which serve several tokens at once; with one token the latter are compute bound.
+///
+/// # Safety
+/// The CPU must support AVX2, FMA and F16C; `w` must hold `first + rows` complete rows of
+/// `nb / 8` blocks and `x` must hold `nb` activation records; `rows` is 1..=4.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub(crate) unsafe fn gemv_avx2(
+    w: &[u8],
+    kind: u32,
+    first: usize,
+    rows: usize,
+    x: &[X],
+    nb: usize,
+    out: &mut Rows<'_>,
+) {
+    macro_rules! by_rows {
+        ($kind:literal) => {
+            match rows {
+                1 => gemv_body_avx2::<$kind, 1>(w, first, x, nb, out),
+                2 => gemv_body_avx2::<$kind, 2>(w, first, x, nb, out),
+                3 => gemv_body_avx2::<$kind, 3>(w, first, x, nb, out),
+                4 => gemv_body_avx2::<$kind, 4>(w, first, x, nb, out),
+                _ => unreachable!("panel has 1 to 4 rows"),
+            }
+        };
+    }
+    match kind {
+        Q4K => by_rows!(12),
+        Q6K => by_rows!(14),
+        _ => unreachable!("only Q4_K and Q6_K have a batch-one AVX2 kernel"),
+    }
+}
+
+#[inline]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn gemv_body_avx2<const KIND: u32, const R: usize>(
+    w: &[u8],
+    first: usize,
+    x: &[X],
+    nb: usize,
+    out: &mut Rows<'_>,
+) {
+    let blocks = nb / 8;
+    let width = block_bytes(KIND);
+    let stride = blocks * width;
+    let low4 = _mm256_set1_epi8(15);
+    let three = _mm256_set1_epi8(3);
+    let word_selectors: [__m256i; 8] = std::array::from_fn(|j| word_selector(j));
+    let half_selectors: [__m256i; 4] = std::array::from_fn(|j| half_selector(j));
+    let mut acc = [_mm256_setzero_ps(); R];
+    let mut acc_min = [_mm_setzero_ps(); R];
+    // The panels of a claim follow each other in memory and a row is only a few blocks long, so
+    // the hardware prefetcher never ramps up: request the following panels while this one runs.
+    let ahead = (first + R) * stride;
+    let ahead_end = ((first + R + PREFETCH_PANELS * R) * stride).min(w.len());
+    for at in (ahead..ahead_end).step_by(64) {
+        _mm_prefetch::<_MM_HINT_T0>(w.as_ptr().add(at).cast());
+    }
+    for blk in 0..blocks {
+        if blk + PREFETCH_BLOCKS < blocks {
+            for r in 0..R {
+                let at = (first + r) * stride + (blk + PREFETCH_BLOCKS) * width;
+                for line in (0..width).step_by(64) {
+                    _mm_prefetch::<_MM_HINT_T0>(w.as_ptr().add(at + line).cast());
+                }
+            }
+        }
+        let xs = &x[blk * 8..blk * 8 + 8];
+        let xd = xs[0].d;
+        // Q4_K: the group sums for the minimums. Q6_K: -32 times the sum of every 16 values (the
+        // offset the weights carry) as two vectors of eight 32-bit words.
+        let group_sums = if KIND == Q6K {
+            _mm_setzero_si128()
+        } else {
+            group_sums16(xs)
+        };
+        let (bias_lo, bias_hi) = if KIND == Q6K {
+            (
+                _mm256_setr_epi32(
+                    xs[0].init[0],
+                    xs[0].init[1],
+                    xs[1].init[0],
+                    xs[1].init[1],
+                    xs[2].init[0],
+                    xs[2].init[1],
+                    xs[3].init[0],
+                    xs[3].init[1],
+                ),
+                _mm256_setr_epi32(
+                    xs[4].init[0],
+                    xs[4].init[1],
+                    xs[5].init[0],
+                    xs[5].init[1],
+                    xs[6].init[0],
+                    xs[6].init[1],
+                    xs[7].init[0],
+                    xs[7].init[1],
+                ),
+            )
+        } else {
+            (_mm256_setzero_si256(), _mm256_setzero_si256())
+        };
+        for r in 0..R {
+            let start = (first + r) * stride + blk * width;
+            let raw = &w[start..start + width];
+            let mut sumi = _mm256_setzero_si256();
+            if KIND == Q6K {
+                let d = half(raw, 208);
+                let scales_lo = _mm256_cvtepi8_epi32(_mm_loadl_epi64(raw.as_ptr().add(192).cast()));
+                let scales_hi = _mm256_cvtepi8_epi32(_mm_loadl_epi64(raw.as_ptr().add(200).cast()));
+                sumi = _mm256_add_epi32(
+                    _mm256_mullo_epi32(scales_lo, bias_lo),
+                    _mm256_mullo_epi32(scales_hi, bias_hi),
+                );
+                for n in 0..2usize {
+                    let ql0 = _mm256_loadu_si256(raw.as_ptr().add(n * 64).cast());
+                    let ql1 = _mm256_loadu_si256(raw.as_ptr().add(n * 64 + 32).cast());
+                    let qh = _mm256_loadu_si256(raw.as_ptr().add(128 + n * 32).cast());
+                    let high = |shifted: __m256i| {
+                        _mm256_slli_epi16::<4>(_mm256_and_si256(shifted, three))
+                    };
+                    let q = [
+                        _mm256_or_si256(_mm256_and_si256(ql0, low4), high(qh)),
+                        _mm256_or_si256(
+                            _mm256_and_si256(ql1, low4),
+                            high(_mm256_srli_epi16::<2>(qh)),
+                        ),
+                        _mm256_or_si256(
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(ql0), low4),
+                            high(_mm256_srli_epi16::<4>(qh)),
+                        ),
+                        _mm256_or_si256(
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(ql1), low4),
+                            high(_mm256_srli_epi16::<6>(qh)),
+                        ),
+                    ];
+                    let scales = _mm256_broadcastsi128_si256(_mm_cvtepi8_epi16(_mm_loadl_epi64(
+                        raw.as_ptr().add(192 + n * 8).cast(),
+                    )));
+                    let mut part = [_mm256_setzero_si256(); 4];
+                    for g in 0..4 {
+                        let xv = _mm256_load_si256(xs[4 * n + g].q.as_ptr().cast());
+                        part[g] = _mm256_madd_epi16(
+                            _mm256_shuffle_epi8(scales, half_selectors[g]),
+                            _mm256_maddubs_epi16(q[g], xv),
+                        );
+                    }
+                    sumi = _mm256_add_epi32(
+                        sumi,
+                        _mm256_add_epi32(
+                            _mm256_add_epi32(part[0], part[1]),
+                            _mm256_add_epi32(part[2], part[3]),
+                        ),
+                    );
+                }
+                acc[r] = _mm256_fmadd_ps(
+                    _mm256_cvtepi32_ps(sumi),
+                    _mm256_set1_ps(d * xd),
+                    acc[r],
+                );
+            } else {
+                let d = half(raw, 0);
+                let dmin = half(raw, 2);
+                let (scales, mins_word) = unpack_scales(raw);
+                let scales = _mm256_broadcastsi128_si256(_mm_cvtepu8_epi16(_mm_cvtsi64_si128(
+                    scales as i64,
+                )));
+                for pair in 0..4usize {
+                    let packed = _mm256_loadu_si256(raw.as_ptr().add(16 + pair * 32).cast());
+                    let lo = _mm256_and_si256(packed, low4);
+                    let hi = _mm256_and_si256(_mm256_srli_epi16::<4>(packed), low4);
+                    let x_lo = _mm256_load_si256(xs[2 * pair].q.as_ptr().cast());
+                    let x_hi = _mm256_load_si256(xs[2 * pair + 1].q.as_ptr().cast());
+                    // 4-bit weights: a pair of products is at most 2 * 15 * 127, no saturation.
+                    let p_lo = _mm256_madd_epi16(
+                        _mm256_shuffle_epi8(scales, word_selectors[2 * pair]),
+                        _mm256_maddubs_epi16(lo, x_lo),
+                    );
+                    let p_hi = _mm256_madd_epi16(
+                        _mm256_shuffle_epi8(scales, word_selectors[2 * pair + 1]),
+                        _mm256_maddubs_epi16(hi, x_hi),
+                    );
+                    sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p_lo, p_hi));
+                }
+                acc[r] = _mm256_fmadd_ps(
+                    _mm256_cvtepi32_ps(sumi),
+                    _mm256_set1_ps(d * xd),
+                    acc[r],
+                );
+                let mins = _mm_cvtepu8_epi16(_mm_cvtsi64_si128(mins_word as i64));
+                acc_min[r] = _mm_fmadd_ps(
+                    _mm_cvtepi32_ps(_mm_madd_epi16(mins, group_sums)),
+                    _mm_set1_ps(dmin * xd),
+                    acc_min[r],
+                );
+            }
+        }
+    }
+    for (r, y) in out.row(0).iter_mut().take(R).enumerate() {
+        let min = _mm_add_ps(acc_min[r], _mm_movehl_ps(acc_min[r], acc_min[r]));
+        let min = _mm_cvtss_f32(_mm_add_ss(min, _mm_shuffle_ps(min, min, 0x55)));
+        *y = hsum(acc[r]) - min;
+    }
+}
+
 /// Unsigned-by-signed 8-bit dot on 512-bit vectors (AVX-512 VNNI).
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
@@ -1431,6 +1657,10 @@ predecoded_kernel!(
 
 /// Blocks ahead of the one being computed that the streaming kernels request from memory.
 const PREFETCH_BLOCKS: usize = 4;
+
+
+/// Panels ahead of the current one that the batch-one AVX2 kernel requests from memory.
+const PREFETCH_PANELS: usize = 2;
 
 /// Blocks decoded at a time by the eight-row kernel (a row of eight rows x four blocks, 12 KB).
 pub(crate) const R8_BLOCKS: usize = 4;
