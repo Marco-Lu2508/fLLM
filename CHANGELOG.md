@@ -6,6 +6,14 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- `install.sh --variant auto|rocm`: the installer picks cuda, rocm, gnu (Vulkan) or cpu from the hardware; `release.yml` builds the optional `fllm-linux-x86_64-rocm.tar.gz` (HIP kernels, untested on AMD GPUs).
+
+### Fixed
+- Vulkan on integrated GPUs with a small dedicated heap (AMD APUs): a full device-local heap falls back to host-visible memory instead of failing with "Out of memory".
+- Vulkan: conversion to binary16 rounds to nearest even on every driver (AMD rounded toward zero).
+- `serve` plans the memory of an integrated GPU with the free system memory.
+
 ## [0.1.1] - 2026-10-15
 
 ### Added

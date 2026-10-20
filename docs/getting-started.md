@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh |
 ```
 
 Options: `--version TAG` (default: newest release), `--prefix DIR` (installs to `DIR/bin`; `FLLM_INSTALL_DIR` names the exact directory),
-`--variant cpu|cuda`, `--modify-path` (appends a guarded `PATH` line to the rc file of bash, zsh or fish, or `~/.profile`; running it again adds nothing),
+`--variant auto|cpu|gnu|cuda|rocm` (default `auto`: NVIDIA driver → cuda, `/dev/kfd` → rocm, a GPU → gnu with Vulkan, else cpu; a missing asset falls back to the next simpler one), `--modify-path` (appends a guarded `PATH` line to the rc file of bash, zsh or fish, or `~/.profile`; running it again adds nothing),
 `--uninstall` (removes the binary and the `PATH` line it added), `--build` (from a clone: compile instead of downloading), `--no-verify`.
 Without `--modify-path` the script prints the line to add. On macOS it clears the quarantine attribute of the installed file, because Gatekeeper refuses an unsigned
 binary that a browser downloaded (`curl` does not set the attribute; the binary is not signed or notarized).

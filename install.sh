@@ -10,8 +10,10 @@
 # Options:
 #   --version TAG    release tag to install, e.g. v0.1.2 (default: the newest release). A bare TAG argument works too.
 #   --prefix DIR     install to DIR/bin instead (FLLM_INSTALL_DIR names the exact directory and wins over the default).
-#   --variant V      cpu (default) or cuda. Linux CUDA needs the release asset fllm-linux-x86_64-cuda.tar.gz; when the
-#                    release has none the script says so and points to the Docker image. Windows: use install.ps1.
+#   --variant V      auto (default), cpu, gnu, cuda or rocm. auto picks cuda for an NVIDIA driver, rocm for an AMD compute driver
+#                    (/dev/kfd), gnu (Vulkan through the system driver) when there is a GPU (/dev/dri), else cpu; a pick whose asset
+#                    the release does not have falls back to the next simpler one. An explicit cuda or rocm without an asset says so
+#                    and points to the Docker image. Windows: use install.ps1.
 #   --modify-path    append a guarded PATH line to the rc file of your shell (bash, zsh, fish, otherwise ~/.profile).
 #                    Without it the script only prints the line to add. Running it again does not add a second line.
 #   --uninstall      remove the binary and the PATH line this script added.
@@ -29,7 +31,7 @@
 #
 # Assets (built by .github/workflows/release.yml), each with <asset>.sha256:
 #   fllm-linux-x86_64-musl.tar.gz, fllm-linux-aarch64-musl.tar.gz, fllm-macos-aarch64.tar.gz, fllm-macos-x86_64.tar.gz
-#   (optional, not published yet: fllm-linux-x86_64-cuda.tar.gz)
+#   (optional: fllm-linux-x86_64-cuda.tar.gz, fllm-linux-x86_64-rocm.tar.gz)
 #
 # Environment overrides:
 #   FLLM_INSTALL_DIR   install directory (exact)
@@ -55,19 +57,19 @@ VERIFY="1"
 BUILD_ONLY="0"
 UNINSTALL="0"
 MODIFY_PATH="0"
-VARIANT="cpu"
+VARIANT="auto"
 PREFIX=""
 
 usage() {
     cat <<'EOF'
-usage: install.sh [--version TAG] [--prefix DIR] [--variant cpu|cuda] [--modify-path] [--uninstall] [--build] [--no-verify]
+usage: install.sh [--version TAG] [--prefix DIR] [--variant auto|cpu|gnu|cuda|rocm] [--modify-path] [--uninstall] [--build] [--no-verify]
 
   curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh | sh
   curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh | sh -s -- --modify-path
 
 Installs fllm-rs to ${FLLM_INSTALL_DIR:-$HOME/.local/bin} (--prefix DIR: DIR/bin).
   --version TAG    release tag (default: newest release)
-  --variant V      cpu (default) or cuda (Linux x86_64 asset; Docker alternative is printed when the release has none)
+  --variant V      auto (default), cpu, gnu, cuda or rocm (cuda and rocm: Linux x86_64 asset; Docker alternative is printed when the release has none)
   --modify-path    add the install directory to PATH in your shell rc file (guarded, idempotent)
   --uninstall      remove the binary and the PATH line added by --modify-path
   --build          build this checkout with cargo instead of downloading
@@ -89,7 +91,7 @@ while [ $# -gt 0 ]; do
         --version=*) VERSION=${1#--version=} ;;
         --prefix) [ $# -ge 2 ] || die "--prefix needs a directory"; PREFIX=$2; shift ;;
         --prefix=*) PREFIX=${1#--prefix=} ;;
-        --variant) [ $# -ge 2 ] || die "--variant needs cpu or cuda"; VARIANT=$2; shift ;;
+        --variant) [ $# -ge 2 ] || die "--variant needs auto, cpu, gnu, cuda or rocm"; VARIANT=$2; shift ;;
         --variant=*) VARIANT=${1#--variant=} ;;
         -h|--help) usage; exit 0 ;;
         -*) echo "install.sh: unknown option $1 (see --help)" >&2; exit 2 ;;
@@ -97,7 +99,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-case "$VARIANT" in cpu|cuda) ;; *) die "--variant must be cpu or cuda, not '$VARIANT'" ;; esac
+case "$VARIANT" in auto|cpu|gnu|cuda|rocm) ;; *) die "--variant must be auto, cpu, gnu, cuda or rocm, not '$VARIANT'" ;; esac
 
 [ -n "${HOME:-}" ] || die "HOME is not set"
 if [ -n "$PREFIX" ]; then
@@ -324,9 +326,34 @@ docker_hint() {
     echo "  docker run -it --rm --gpus all -v fllm:/home/fllm/.cache ghcr.io/marco-lu2508/fllm:cuda run unsloth/Qwen3.5-9B-GGUF:Q4_K_M --device cuda" >&2
     echo "  (compose.cuda.yml and docs/docker.md describe the server setup)" >&2
 }
+docker_hint_rocm() {
+    echo "Docker alternative with ROCm (no install needed, needs the amdgpu kernel driver, /dev/kfd):" >&2
+    echo "  docker run -it --rm --device=/dev/kfd --device=/dev/dri --group-add video --group-add render -v fllm:/home/fllm/.cache ghcr.io/marco-lu2508/fllm:rocm run unsloth/Qwen3.5-9B-GGUF:Q4_K_M --device hip" >&2
+    echo "  (the ROCm kernels have not been run on an AMD GPU yet; docs/docker.md)" >&2
+}
+# auto: the best asset for this machine; FALLBACK lists the simpler assets to try when the release has none of the better one
+AUTO="0"
+FALLBACK=""
+if [ "$VARIANT" = "auto" ]; then
+    AUTO="1"
+    VARIANT="cpu"
+    if [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ] && { have nvidia-smi || [ -e /dev/nvidiactl ]; }; then
+        VARIANT="cuda"; FALLBACK="gnu"
+        echo "NVIDIA GPU found: variant cuda"
+    elif [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ] && [ -e /dev/kfd ]; then
+        VARIANT="rocm"; FALLBACK="gnu"
+        echo "AMD compute driver (/dev/kfd) found: variant rocm"
+    elif [ "$OS" = "linux" ] && [ -e /dev/dri ]; then
+        VARIANT="gnu"
+        echo "GPU found: variant gnu (Vulkan through the system driver)"
+    fi
+fi
 if [ "$VARIANT" = "cuda" ]; then
     [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ] || die "the cuda variant exists for Linux x86_64 only (Windows: install.ps1 -Variant cuda)"
     ASSET="fllm-linux-x86_64-cuda.tar.gz"
+elif [ "$VARIANT" = "rocm" ]; then
+    [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ] || die "the rocm variant exists for Linux x86_64 only (Windows: install.ps1 -Variant hip)"
+    ASSET="fllm-linux-x86_64-rocm.tar.gz"
 elif [ "$VARIANT" = "gnu" ]; then
     [ "$OS" = "linux" ] || die "the gnu variant exists for Linux only"
     ASSET="fllm-linux-$ARCH-gnu.tar.gz"
@@ -424,11 +451,28 @@ trap 'rm -rf "$TMP"' EXIT
 echo "Fetching $URL"
 status=0
 download "$URL" "$TMP/$ASSET" || status=$?
+if [ "$status" = "44" ] && [ "$AUTO" = "1" ]; then
+    # the release lacks the best asset for this machine: go down to the next simpler one (gnu, then the static cpu build)
+    for VARIANT in $FALLBACK cpu; do
+        case "$VARIANT" in
+            gnu) ASSET="fllm-linux-$ARCH-gnu.tar.gz" ;;
+            *)   ASSET="fllm-$OS-$ARCH-musl.tar.gz"; [ "$OS" = "macos" ] && ASSET="fllm-macos-$ARCH.tar.gz" ;;
+        esac
+        echo "The release '$VERSION' has no asset for the better variant; trying $ASSET"
+        URL="$BASE/download/$VERSION/$ASSET"
+        status=0
+        download "$URL" "$TMP/$ASSET" || status=$?
+        [ "$status" = "44" ] || break
+    done
+fi
 if [ "$status" = "44" ]; then
     echo "install.sh: the release '$VERSION' has no asset '$ASSET'." >&2
     if [ "$VARIANT" = "cuda" ]; then
         echo "A Linux CUDA binary is not published for every release." >&2
         docker_hint
+    elif [ "$VARIANT" = "rocm" ]; then
+        echo "A Linux ROCm binary is not published for every release." >&2
+        docker_hint_rocm
     elif [ -n "$SCRIPT_DIR" ]; then
         echo "Building from this checkout instead." >&2
         build_from_source
