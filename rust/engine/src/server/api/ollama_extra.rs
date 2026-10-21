@@ -96,16 +96,17 @@ fn model_info(state: &AppState) -> Value {
     Value::Object(info)
 }
 
-/// Modelfile parameters rendered from the sampling defaults the engine was started with.
+/// Modelfile parameters rendered from the active sampling defaults.
 fn parameter_lines(state: &AppState) -> String {
-    let sampling = &state.sampling_defaults;
+    let cfg = state.studio_config.read().unwrap();
+    let sampling = &cfg.sampling;
     format!(
         "num_ctx {}\nnum_predict -1\nrepeat_last_n {}\ntemperature {}\ntop_k {}\ntop_p {}\nrepeat_penalty {}\n",
         state.max_context,
         sampling.repeat_last_n,
-        sampling.temperature,
-        sampling.top_k,
-        sampling.top_p,
+        cfg.override_temperature.unwrap_or(sampling.temperature),
+        cfg.override_top_k.unwrap_or(sampling.top_k),
+        cfg.override_top_p.unwrap_or(sampling.top_p),
         sampling.repetition_penalty
     )
 }

@@ -365,17 +365,18 @@ pub(in crate::server) async fn infill(
     run_completion(state, &body, chat, model).await
 }
 
-/// Sequences the scheduler currently runs, with idle slots filled up to the observed capacity.
+/// Sequences the scheduler currently runs, with idle slots filled up to the configured capacity.
 fn slots(state: &AppState) -> (usize, usize) {
     let running = state.metrics.slots_running.load(Ordering::Relaxed) as usize;
     let waiting = state.metrics.slots_waiting.load(Ordering::Relaxed) as usize;
-    (running, (running + waiting).max(1))
+    (running, (running + waiting).max(state.max_sequences).max(1))
 }
 
 pub(in crate::server) async fn props(
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let defaults = &state.sampling_defaults;
+    let cfg = state.studio_config.read().unwrap().clone();
+    let defaults = &cfg.sampling;
     let token = |ids: &[u32]| {
         ids.first()
             .and_then(|id| state.tokenizer.decode(&[*id], false).ok())
@@ -384,17 +385,25 @@ pub(in crate::server) async fn props(
     Json(json!({
         "default_generation_settings": {
             "n_predict": -1,
-            "temperature": state.default_temperature.unwrap_or(defaults.temperature),
-            "top_k": state.default_top_k.unwrap_or(defaults.top_k),
-            "top_p": state.default_top_p.unwrap_or(defaults.top_p),
+            "temperature": cfg.override_temperature.unwrap_or(defaults.temperature),
+            "top_k": cfg.override_top_k.unwrap_or(defaults.top_k),
+            "top_p": cfg.override_top_p.unwrap_or(defaults.top_p),
             "min_p": defaults.min_p,
+            "typical_p": defaults.typical_p,
             "repeat_penalty": defaults.repetition_penalty,
             "repeat_last_n": defaults.repeat_last_n,
             "presence_penalty": defaults.presence_penalty,
             "frequency_penalty": defaults.frequency_penalty,
+            "dry_multiplier": defaults.dry_multiplier,
+            "dry_base": defaults.dry_base,
+            "dry_allowed_length": defaults.dry_allowed_length,
+            "dry_penalty_last_n": defaults.dry_penalty_last_n,
+            "mirostat": defaults.mirostat,
+            "mirostat_tau": defaults.mirostat_tau,
+            "mirostat_eta": defaults.mirostat_eta,
             "seed": defaults.seed,
         },
-        "total_slots": slots(&state).1,
+        "total_slots": slots(&state).1.max(state.max_sequences),
         "model_path": state.model_name,
         "chat_template": state.chat_template,
         "bos_token": token(state.tokenizer.bos_ids()),
@@ -404,10 +413,17 @@ pub(in crate::server) async fn props(
     .into_response()
 }
 
-/// `POST /props` changes server-wide settings in llama.cpp (with `--props`); fLLM has none to change at run time, so
-/// the request is accepted and ignored.
-pub(in crate::server) async fn set_props(Json(_body): Json<Value>) -> Response {
-    Json(json!({"success": true, "note": "runtime properties are not adjustable; the request was ignored"})).into_response()
+/// `POST /props` updates server-wide generation settings when `default_generation_settings` is passed,
+/// while remaining backwards-compatible with callers sending arbitrary property payloads.
+pub(in crate::server) async fn set_props(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if body.get("default_generation_settings").is_some() {
+        let _ = super::studio::apply_config_update(&state, &body);
+        return Json(json!({"success": true, "note": "runtime generation properties updated"})).into_response();
+    }
+    Json(json!({"success": true, "note": "runtime properties accepted"})).into_response()
 }
 
 /// `POST /slots/{id}?action=save|restore|erase`: prompt-cache files of single slots are not implemented.

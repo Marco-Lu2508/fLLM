@@ -1429,6 +1429,59 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs the CPU kernel self-test and returns a structured JSON summary for the Studio WebUI.
+pub fn run_json(tier_filter: Option<&str>) -> Result<serde_json::Value, String> {
+    let started = Instant::now();
+    let capped = cpu_kernels::capped_tiers();
+    let supported = cpu_kernels::supported_tiers();
+    let tiers: Vec<CpuTier> = match tier_filter.map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        Some(name) => {
+            let tier = CpuTier::parse(name).ok_or_else(|| format!("unknown CPU tier: {name}"))?;
+            if !supported.contains(&tier) {
+                return Err(format!("this CPU does not support tier {}", tier.name()));
+            }
+            vec![tier]
+        }
+        None => capped.clone(),
+    };
+    let mut report = Report {
+        checks: 0,
+        failed: 0,
+        skipped: 0,
+        tiers: Vec::new(),
+    };
+    for tier in &tiers {
+        check_tier(*tier, &mut report, false);
+    }
+    cpu_kernels::set_tier_cap(None);
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let tier_items: Vec<serde_json::Value> = report
+        .tiers
+        .iter()
+        .map(|(tier, checks, failed)| {
+            serde_json::json!({
+                "tier": tier,
+                "checks": checks,
+                "failed": failed,
+                "passed": checks.saturating_sub(*failed),
+                "ok": *failed == 0,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "ok": report.failed == 0,
+        "arch": std::env::consts::ARCH,
+        "threads": rayon::current_num_threads(),
+        "features": features(),
+        "supported_tiers": supported.iter().map(|t| t.name()).collect::<Vec<_>>(),
+        "tested_tiers": tier_items,
+        "checks": report.checks,
+        "failed": report.failed,
+        "skipped": report.skipped,
+        "duration_ms": elapsed_ms,
+    }))
+}
+
 #[cfg(test)]
 mod attention_layout_tests {
     use super::*;

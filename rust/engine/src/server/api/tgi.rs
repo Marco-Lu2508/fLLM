@@ -67,7 +67,7 @@ fn parameters_of(state: &AppState, body: &Value) -> Parameters {
             .max(1) as usize,
         temperature: parameter(body, "temperature")
             .and_then(Value::as_f64)
-            .unwrap_or_else(|| state.default_temperature.unwrap_or(0.0)),
+            .unwrap_or_else(|| state.studio_config.read().unwrap().override_temperature.unwrap_or(0.0)),
         return_full_text: parameter(body, "return_full_text")
             .and_then(Value::as_bool)
             .unwrap_or(false),

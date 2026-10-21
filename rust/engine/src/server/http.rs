@@ -224,6 +224,16 @@ impl<F: FnOnce() + Unpin> Drop for Watched<F> {
     }
 }
 
+/// The Studio routes that change something (settings, model downloads and deletions, API keys) are
+/// administration. Without a configured API key they are only open to a client on the same machine:
+/// otherwise anybody who can reach the port could delete models or register a key and lock the owner out.
+pub fn studio_admin_blocked(auth_required: bool, method: &Method, path: &str, peer: Option<SocketAddr>) -> bool {
+    !auth_required
+        && path.starts_with("/api/studio/")
+        && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        && !peer.is_some_and(|addr| addr.ip().to_canonical().is_loopback())
+}
+
 /// The middleware of every route. Order: request id, CORS preflight, authentication and rate limit, handler
 /// under the request timeout, error normalisation, CORS and id headers, access log.
 pub async fn layer(State(ctx): State<Arc<HttpContext>>, request: Request, next: Next) -> Response {
@@ -244,6 +254,14 @@ pub async fn layer(State(ctx): State<Arc<HttpContext>>, request: Request, next: 
         && request.headers().contains_key("access-control-request-method")
     {
         preflight(&ctx.options, request.headers(), origin.as_deref().unwrap_or_default(), &id, &path)
+    } else if studio_admin_blocked(ctx.security.auth_required(), &method, &path, peer) {
+        errors::for_path(
+            &path,
+            StatusCode::FORBIDDEN,
+            "the Studio administration needs an API key when the request does not come from this machine; start the server with --api-key",
+            Some("studio_admin_forbidden"),
+            &id,
+        )
     } else {
         match ctx.security.check(&method, &path, request.headers()) {
             Verdict::Allowed(limiter) => {
@@ -579,4 +597,34 @@ pub async fn serve(
         tasks.abort_all();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod studio_gate_tests {
+    use super::*;
+
+    fn addr(text: &str) -> Option<SocketAddr> {
+        Some(text.parse().unwrap())
+    }
+
+    #[test]
+    fn studio_administration_is_local_without_an_api_key() {
+        let post = Method::POST;
+        let path = "/api/studio/models/pull";
+        assert!(!studio_admin_blocked(false, &post, path, addr("127.0.0.1:5000")));
+        assert!(!studio_admin_blocked(false, &post, path, addr("[::1]:5000")));
+        assert!(!studio_admin_blocked(false, &post, path, addr("[::ffff:127.0.0.1]:5000")));
+        assert!(studio_admin_blocked(false, &post, path, addr("192.168.1.20:5000")));
+        assert!(studio_admin_blocked(false, &Method::DELETE, "/api/studio/keys/key-1", addr("10.7.0.4:1")));
+        assert!(studio_admin_blocked(false, &post, path, None), "an unknown peer counts as remote");
+    }
+
+    #[test]
+    fn studio_reading_and_other_routes_are_not_gated() {
+        let remote = addr("192.168.1.20:5000");
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/status", remote));
+        assert!(!studio_admin_blocked(false, &Method::POST, "/v1/chat/completions", remote));
+        // with an API key configured the normal key check decides
+        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/keys", remote));
+    }
 }

@@ -102,13 +102,11 @@ struct AppState {
     /// here, the single resident model only reports the expiry in `/api/ps`.
     keep_alive: std::sync::Mutex<Option<(SystemTime, api::ollama_extra::KeepAlive)>>,
     max_context: usize,
+    max_sequences: usize,
     shared_choices: bool,
-    default_temperature: Option<f64>,
-    default_top_p: Option<f64>,
-    default_top_k: Option<usize>,
     hidden_size: usize,
     admission: Arc<tokio::sync::Semaphore>,
-    sampling_defaults: crate::sampling::SamplingParams,
+    studio_config: std::sync::RwLock<api::studio::StudioRuntimeConfig>,
     vision: Option<Arc<dyn crate::vision::MultimodalEncoder>>,
     vision_admission: Arc<tokio::sync::Semaphore>,
 }
@@ -283,14 +281,19 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         ready,
         keep_alive: std::sync::Mutex::new(None),
         max_context,
+        max_sequences,
         shared_choices: runtime.supports_shared_choices(),
-        default_temperature: config.default_temperature,
-        default_top_p: config.default_top_p,
-        default_top_k: config.default_top_k,
         hidden_size,
         // requests running plus requests waiting for a sequence slot; a request beyond that gets 429 with Retry-After
         admission: Arc::new(tokio::sync::Semaphore::new(max_sequences + queue)),
-        sampling_defaults: config.sampling_defaults,
+        studio_config: std::sync::RwLock::new(api::studio::StudioRuntimeConfig {
+            sampling: config.sampling_defaults,
+            override_temperature: config.default_temperature,
+            override_top_p: config.default_top_p,
+            override_top_k: config.default_top_k,
+            system_prompt: String::new(),
+            cpu_tier_cap: None,
+        }),
         vision: runtime.vision.clone(),
         vision_admission: Arc::new(tokio::sync::Semaphore::new(crate::vision::preprocess::MediaLimits::get().concurrency)),
     });
@@ -302,6 +305,16 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/metrics", get(metrics))
         .route("/version", get(api::vllm::version))
         .route("/is_sleeping", get(api::vllm::is_sleeping))
+        .route("/api/studio/status", get(api::studio::status))
+        .route("/api/studio/config", post(api::studio::update_config))
+        .route("/api/studio/hardware", get(api::studio::hardware))
+        .route("/api/studio/selftest-cpu", post(api::studio::selftest_cpu))
+        .route("/api/studio/models", get(api::studio::models_hub))
+        .route("/api/studio/hf-files", get(api::studio::hf_files))
+        .route("/api/studio/models/pull", post(api::studio::pull_model))
+        .route("/api/studio/models/cache", delete(api::studio::delete_cached_model))
+        .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
+        .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
         .route("/v1/models", get(models))
         .route("/v1/models/{id}", get(api::model_by_id))
         .route("/v1/messages", post(api::anthropic::messages))
@@ -1621,7 +1634,7 @@ fn request_sampling(
     body: &Value,
     defaults: crate::sampling::SamplingParams,
 ) -> Result<crate::sampling::SamplingParams, String> {
-    let mut merged = state.sampling_defaults.clone();
+    let mut merged = state.studio_config.read().unwrap().sampling.clone();
     merged.temperature = defaults.temperature;
     merged.top_p = defaults.top_p;
     merged.top_k = defaults.top_k;
@@ -1998,10 +2011,11 @@ async fn openai_generate(
     {
         return api_error(StatusCode::BAD_REQUEST, "n > 1 and best_of need a stateless model on a backend with KV block copy, no draft/MTP engine, and unconstrained text generation");
     }
+    let studio_cfg = state.studio_config.read().unwrap().clone();
     let temperature = body
         .get("temperature")
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_temperature.unwrap_or(OPENAI_DEFAULT_TEMPERATURE));
+        .unwrap_or(studio_cfg.override_temperature.unwrap_or(OPENAI_DEFAULT_TEMPERATURE));
     if !temperature.is_finite() || temperature < 0.0 {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -2011,7 +2025,7 @@ async fn openai_generate(
     let top_p = body
         .get("top_p")
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_top_p.unwrap_or(1.0));
+        .unwrap_or(studio_cfg.override_top_p.unwrap_or(1.0));
     if !top_p.is_finite() || !(0.0..=1.0).contains(&top_p) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -2022,12 +2036,12 @@ async fn openai_generate(
         .get("top_k")
         .and_then(Value::as_u64)
         .map(|v| v as usize)
-        .unwrap_or(state.default_top_k.unwrap_or(0));
+        .unwrap_or(studio_cfg.override_top_k.unwrap_or(0));
     let repetition_penalty = body
         .get("repetition_penalty")
         .and_then(Value::as_f64)
         .map(|v| v as f32)
-        .unwrap_or(1.0);
+        .unwrap_or(studio_cfg.sampling.repetition_penalty);
     let sampling = crate::sampling::SamplingParams {
         temperature,
         top_p,
@@ -2574,19 +2588,20 @@ async fn sglang_generate(
         Ok(stops) => stops,
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
     };
+    let studio_cfg = state.studio_config.read().unwrap().clone();
     let temperature = sampling_params
         .get("temperature")
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_temperature.unwrap_or(OPENAI_DEFAULT_TEMPERATURE));
+        .unwrap_or(studio_cfg.override_temperature.unwrap_or(OPENAI_DEFAULT_TEMPERATURE));
     let top_p = sampling_params
         .get("top_p")
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_top_p.unwrap_or(1.0));
+        .unwrap_or(studio_cfg.override_top_p.unwrap_or(1.0));
     let top_k = sampling_params
         .get("top_k")
         .and_then(Value::as_u64)
         .map(|k| k as usize)
-        .unwrap_or(state.default_top_k.unwrap_or(0));
+        .unwrap_or(studio_cfg.override_top_k.unwrap_or(0));
     let repetition_penalty = sampling_params
         .get("repetition_penalty")
         .and_then(Value::as_f64)
@@ -2884,10 +2899,11 @@ async fn ollama_generate_inner(
         Ok(stops) => stops,
         Err(error) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &error),
     };
+    let studio_cfg = state.studio_config.read().unwrap().clone();
     let temperature = options
         .and_then(|o| o.get("temperature"))
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_temperature.unwrap_or(OLLAMA_DEFAULT_TEMPERATURE));
+        .unwrap_or(studio_cfg.override_temperature.unwrap_or(OLLAMA_DEFAULT_TEMPERATURE));
     if !temperature.is_finite() || temperature < 0.0 {
         return api::ollama_extra::error(
             StatusCode::BAD_REQUEST,
@@ -2897,12 +2913,12 @@ async fn ollama_generate_inner(
     let top_p = options
         .and_then(|o| o.get("top_p"))
         .and_then(Value::as_f64)
-        .unwrap_or(state.default_top_p.unwrap_or(OLLAMA_DEFAULT_TOP_P));
+        .unwrap_or(studio_cfg.override_top_p.unwrap_or(OLLAMA_DEFAULT_TOP_P));
     let top_k = options
         .and_then(|o| o.get("top_k"))
         .and_then(Value::as_u64)
         .map(|k| k as usize)
-        .unwrap_or(state.default_top_k.unwrap_or(OLLAMA_DEFAULT_TOP_K));
+        .unwrap_or(studio_cfg.override_top_k.unwrap_or(OLLAMA_DEFAULT_TOP_K));
     let repetition_penalty = options
         .and_then(|o| {
             o.get("repeat_penalty")
@@ -2910,7 +2926,7 @@ async fn ollama_generate_inner(
         })
         .and_then(Value::as_f64)
         .map(|v| v as f32)
-        .unwrap_or(1.0);
+        .unwrap_or(studio_cfg.sampling.repetition_penalty);
     let sampling = crate::sampling::SamplingParams {
         temperature,
         top_p,

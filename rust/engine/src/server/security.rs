@@ -95,22 +95,62 @@ impl Bucket {
     }
 }
 
+/// Masks a secret key for display without revealing the middle bytes.
+fn mask_secret(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    if chars.len() <= 8 {
+        format!("{}•••", chars.first().copied().unwrap_or('*'))
+    } else {
+        let prefix: String = chars[..6].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{prefix}••••{suffix}")
+    }
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// The limits and counters of one API key (or of everybody, when no key is configured).
 pub struct KeyState {
+    pub id: String,
     pub label: String,
+    pub masked: String,
+    pub created_at: u64,
+    pub rpm_limit: Option<f64>,
+    pub tpm_limit: Option<f64>,
     requests: Option<Bucket>,
     tokens: Option<Bucket>,
+    pub accepted: AtomicU64,
+    pub tokens_used: AtomicU64,
     pub rejected: AtomicU64,
 }
 
 impl KeyState {
     fn new(label: String, spec: &RateLimitSpec) -> Self {
+        Self::with_meta(label.clone(), label, "cli••••key".into(), spec)
+    }
+
+    fn with_meta(id: String, label: String, masked: String, spec: &RateLimitSpec) -> Self {
         Self {
+            id,
             label,
+            masked,
+            created_at: unix_secs(),
+            rpm_limit: spec.requests_per_minute,
+            tpm_limit: spec.tokens_per_minute,
             requests: spec.requests_per_minute.map(Bucket::new),
             tokens: spec.tokens_per_minute.map(Bucket::new),
+            accepted: AtomicU64::new(0),
+            tokens_used: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
         }
+    }
+
+    fn has_limits(&self) -> bool {
+        self.requests.is_some() || self.tokens.is_some()
     }
 
     /// Admission of one request; `Err` carries the Retry-After hint.
@@ -126,6 +166,7 @@ impl KeyState {
 
     /// Prompt and generated tokens count against the token budget as they are produced.
     pub fn charge_tokens(&self, count: usize) {
+        self.tokens_used.fetch_add(count as u64, Ordering::Relaxed);
         if let Some(tokens) = &self.tokens {
             tokens.charge(count as f64);
         }
@@ -164,10 +205,11 @@ pub enum Verdict {
 }
 
 pub struct Security {
-    keys: Vec<([u8; 32], Arc<KeyState>)>,
-    open: Arc<KeyState>,
+    keys: Mutex<Vec<([u8; 32], Arc<KeyState>)>>,
+    open: Mutex<Arc<KeyState>>,
     public: Vec<String>,
-    limited: bool,
+    default_rate_limit: Mutex<RateLimitSpec>,
+    next_id: AtomicU64,
 }
 
 fn presented_key(headers: &HeaderMap) -> Option<&str> {
@@ -191,19 +233,115 @@ impl Security {
         for (index, key) in options.api_keys.iter().enumerate() {
             let d = digest(key);
             if !keys.iter().any(|(known, _)| ct_eq(known, &d)) {
-                keys.push((d, Arc::new(KeyState::new(format!("key-{}", index + 1), &options.rate_limit))));
+                let id = format!("key-{}", index + 1);
+                keys.push((
+                    d,
+                    Arc::new(KeyState::with_meta(
+                        id.clone(),
+                        id,
+                        mask_secret(key),
+                        &options.rate_limit,
+                    )),
+                ));
             }
         }
+        let count = keys.len() as u64 + 1;
         Self {
-            keys,
-            open: Arc::new(KeyState::new("anonymous".into(), &options.rate_limit)),
+            keys: Mutex::new(keys),
+            open: Mutex::new(Arc::new(KeyState::new("anonymous".into(), &options.rate_limit))),
             public: options.public_routes.clone(),
-            limited: options.rate_limit != RateLimitSpec::default(),
+            default_rate_limit: Mutex::new(options.rate_limit),
+            next_id: AtomicU64::new(count),
         }
     }
 
     pub fn auth_required(&self) -> bool {
-        !self.keys.is_empty()
+        !lock(&self.keys).is_empty()
+    }
+
+    pub fn rate_limit_spec(&self) -> RateLimitSpec {
+        *lock(&self.default_rate_limit)
+    }
+
+    pub fn set_rate_limit(&self, spec: RateLimitSpec) {
+        *lock(&self.default_rate_limit) = spec;
+        *lock(&self.open) = Arc::new(KeyState::new("anonymous".into(), &spec));
+    }
+
+    pub fn list_keys(&self) -> Vec<serde_json::Value> {
+        let guard = lock(&self.keys);
+        guard
+            .iter()
+            .map(|(_, state)| {
+                serde_json::json!({
+                    "id": state.id,
+                    "label": state.label,
+                    "masked": state.masked,
+                    "created_at": state.created_at,
+                    "rpm_limit": state.rpm_limit,
+                    "tpm_limit": state.tpm_limit,
+                    "requests_accepted": state.accepted.load(Ordering::Relaxed),
+                    "tokens_used": state.tokens_used.load(Ordering::Relaxed),
+                    "rejected": state.rejected.load(Ordering::Relaxed),
+                })
+            })
+            .collect()
+    }
+
+    pub fn add_key(
+        &self,
+        raw_key: &str,
+        label: &str,
+        rpm: Option<f64>,
+        tpm: Option<f64>,
+    ) -> Result<serde_json::Value, String> {
+        let raw_key = raw_key.trim();
+        if raw_key.is_empty() {
+            return Err("API key secret must not be empty".into());
+        }
+        let d = digest(raw_key);
+        let mut guard = lock(&self.keys);
+        if guard.iter().any(|(known, _)| ct_eq(known, &d)) {
+            return Err("this API key is already registered".into());
+        }
+        let defaults = *lock(&self.default_rate_limit);
+        let spec = RateLimitSpec {
+            requests_per_minute: rpm.or(defaults.requests_per_minute),
+            tokens_per_minute: tpm.or(defaults.tokens_per_minute),
+        };
+        let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = format!("key-{seq}");
+        let clean_label = if label.trim().is_empty() {
+            id.clone()
+        } else {
+            label.trim().to_owned()
+        };
+        let state = Arc::new(KeyState::with_meta(
+            id.clone(),
+            clean_label.clone(),
+            mask_secret(raw_key),
+            &spec,
+        ));
+        let info = serde_json::json!({
+            "id": state.id,
+            "label": state.label,
+            "masked": state.masked,
+            "created_at": state.created_at,
+            "rpm_limit": state.rpm_limit,
+            "tpm_limit": state.tpm_limit,
+            "requests_accepted": 0,
+            "tokens_used": 0,
+            "rejected": 0,
+        });
+        guard.push((d, state));
+        Ok(info)
+    }
+
+    pub fn remove_key(&self, id_or_label: &str) -> bool {
+        let mut guard = lock(&self.keys);
+        let before = guard.len();
+        guard.retain(|(_, state)| state.id != id_or_label && state.label != id_or_label);
+        guard.len() < before
     }
 
     fn is_public(&self, method: &Method, path: &str) -> bool {
@@ -225,40 +363,44 @@ impl Security {
         if self.is_public(method, path) {
             return Verdict::Allowed(None);
         }
-        let limiter = if self.keys.is_empty() {
-            self.open.clone()
+        let guard = lock(&self.keys);
+        let limiter = if guard.is_empty() {
+            drop(guard);
+            lock(&self.open).clone()
         } else {
             let Some(key) = presented_key(headers) else {
                 return Verdict::Missing;
             };
             let presented = digest(key);
             let mut found = None;
-            for (known, state) in &self.keys {
+            for (known, state) in guard.iter() {
                 // no early exit: every configured key is visited
                 if ct_eq(known, &presented) & found.is_none() {
                     found = Some(state.clone());
                 }
             }
+            drop(guard);
             match found {
                 Some(state) => state,
                 None => return Verdict::Invalid,
             }
         };
-        if self.limited && Self::counted(method) {
+        if limiter.has_limits() && Self::counted(method) {
             if let Err(retry_after) = limiter.admit() {
                 limiter.rejected.fetch_add(1, Ordering::Relaxed);
                 return Verdict::RateLimited { retry_after, label: limiter.label.clone() };
             }
         }
+        limiter.accepted.fetch_add(1, Ordering::Relaxed);
         Verdict::Allowed(Some(limiter))
     }
 
     pub fn rejected_total(&self) -> u64 {
-        self.keys
+        let keys_rejected: u64 = lock(&self.keys)
             .iter()
             .map(|(_, state)| state.rejected.load(Ordering::Relaxed))
-            .sum::<u64>()
-            + self.open.rejected.load(Ordering::Relaxed)
+            .sum();
+        keys_rejected + lock(&self.open).rejected.load(Ordering::Relaxed)
     }
 }
 

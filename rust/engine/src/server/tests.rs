@@ -150,7 +150,11 @@ impl Harness {
     }
 
     async fn call(&self, method: Method, path: &str, body: Option<Value>, headers: &[(&str, &str)]) -> Reply {
-        let mut builder = Request::builder().method(method).uri(path);
+        // the requests of the tests come from this machine, like a local browser or script
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .extension(crate::server::http::ClientAddr("127.0.0.1:50000".parse().unwrap()));
         for (name, value) in headers {
             builder = builder.header(*name, *value);
         }
@@ -1512,4 +1516,103 @@ fn listen_addresses_accept_ipv4_ipv6_and_names() {
     assert!(listen_address("[::]", 1).unwrap().is_ipv6());
     assert!(listen_address("localhost", 1).is_ok());
     assert!(listen_address("no such host", 1).is_err());
+}
+
+#[tokio::test]
+async fn studio_administration_from_another_machine_needs_an_api_key() {
+    let h = start(Settings::default());
+    let remote = |method: Method, path: &str, body: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(crate::server::http::ClientAddr("192.168.1.20:50000".parse().unwrap()))
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    // reading is open, every change is refused and nothing was registered
+    assert_eq!(h.send(remote(Method::GET, "/api/studio/status", "")).await.status, StatusCode::OK);
+    for (method, path) in [
+        (Method::POST, "/api/studio/keys"),
+        (Method::POST, "/api/studio/config"),
+        (Method::POST, "/api/studio/models/pull"),
+        (Method::DELETE, "/api/studio/models/cache"),
+        (Method::DELETE, "/api/studio/keys/key-1"),
+    ] {
+        let reply = h.send(remote(method, path, "{}")).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{path}");
+    }
+    assert_eq!(h.get("/api/studio/keys").await.json()["auth_required"], false);
+}
+
+#[tokio::test]
+async fn studio_control_plane_manages_config_hardware_models_and_keys() {
+    let h = start(Settings::default());
+    let status = h.get("/api/studio/status").await;
+    assert_eq!(status.status, StatusCode::OK);
+    assert_eq!(status.json()["model"]["name"], "tiny");
+    assert_eq!(status.json()["http"]["auth_required"], false);
+
+    // Update runtime sampling defaults & aliases
+    let updated = h
+        .post(
+            "/api/studio/config",
+            json!({
+                "temperature": 0.42,
+                "top_p": 0.88,
+                "top_k": 15,
+                "system_prompt": "Du bist ein Rust-Assistent.",
+                "aliases": ["gpt-4o-local"]
+            }),
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::OK);
+    assert_eq!(updated.json()["config"]["temperature"], 0.42);
+    assert_eq!(updated.json()["model"]["aliases"], json!(["gpt-4o-local"]));
+
+    // Hardware & Models Hub
+    let hw = h.get("/api/studio/hardware").await;
+    assert_eq!(hw.status, StatusCode::OK);
+    assert!(!hw.json()["devices"].as_array().unwrap().is_empty());
+
+    let models = h.get("/api/studio/models").await;
+    assert_eq!(models.status, StatusCode::OK);
+    assert!(!models.json()["catalog"].as_array().unwrap().is_empty());
+
+    // Create a runtime API key: server now requires Bearer auth!
+    let created = h
+        .post(
+            "/api/studio/keys",
+            json!({"label": "Cursor IDE", "key": "fllm-sk-test123456", "rpm": 120.0}),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK);
+    assert_eq!(created.json()["auth_required"], true);
+
+    // Unauthenticated call to /v1/models is now rejected with 401
+    assert_eq!(h.get("/v1/models").await.status, StatusCode::UNAUTHORIZED);
+    // Authenticated call with the newly created key succeeds
+    let authed = h
+        .call(
+            Method::GET,
+            "/v1/models",
+            None,
+            &[("authorization", "Bearer fllm-sk-test123456")],
+        )
+        .await;
+    assert_eq!(authed.status, StatusCode::OK);
+
+    // Revoke the key: server returns to open access
+    let key_id = created.json()["key"]["id"].as_str().unwrap().to_owned();
+    let revoked = h
+        .call(
+            Method::DELETE,
+            &format!("/api/studio/keys/{key_id}"),
+            None,
+            &[("authorization", "Bearer fllm-sk-test123456")],
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::OK);
+    assert_eq!(revoked.json()["auth_required"], false);
+    assert_eq!(h.get("/v1/models").await.status, StatusCode::OK);
 }
