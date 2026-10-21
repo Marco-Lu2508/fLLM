@@ -507,6 +507,16 @@ fn glob_regex(pattern: &str) -> Result<Regex, String> {
     Regex::new(&out).map_err(|e| format!("bad glob pattern: {e}"))
 }
 
+/// `FLLM_NO_AGENT=1` switches the agent routes off (for servers that must never run commands or touch files).
+fn agent_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("FLLM_NO_AGENT").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+fn disabled_reply() -> Response {
+    api_error(StatusCode::FORBIDDEN, "the coding agent is switched off on this server (FLLM_NO_AGENT)")
+}
+
 fn result_json(result: ToolResult) -> Value {
     match result {
         Ok(output) => json!({"ok": true, "output": output}),
@@ -521,13 +531,16 @@ fn workspace_json(state: &AppState) -> Value {
             let head = fs::read_to_string(root.join(".git").join("HEAD")).ok();
             let branch = head.as_deref().and_then(|h| h.trim().strip_prefix("ref: refs/heads/")).map(str::to_owned);
             let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
-            json!({"root": root.display().to_string(), "name": name, "git_branch": branch})
+            json!({"root": root.display().to_string(), "name": name, "git_branch": branch, "os": std::env::consts::OS, "shell": if cfg!(windows) { "cmd.exe" } else { "sh" }})
         }
     }
 }
 
 /// `POST /api/studio/agent/workspace`: `{path}` chooses the folder, an empty body reports the current one.
 pub(in crate::server) async fn workspace(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    if agent_disabled() {
+        return disabled_reply();
+    }
     if let Some(path) = body.get("path").and_then(Value::as_str) {
         if let Err(error) = state.agent.set_root(path) {
             return api_error(StatusCode::BAD_REQUEST, &error);
@@ -538,6 +551,9 @@ pub(in crate::server) async fn workspace(State(state): State<Arc<AppState>>, Jso
 
 /// `POST /api/studio/agent/tool`: `{name, args}` runs one tool and returns `{ok, output}` or `{ok: false, error}`.
 pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    if agent_disabled() {
+        return disabled_reply();
+    }
     let Some(name) = body.get("name").and_then(Value::as_str).map(str::to_owned) else {
         return api_error(StatusCode::BAD_REQUEST, "the tool name is missing");
     };
@@ -551,6 +567,9 @@ pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(bod
 
 /// `POST /api/studio/agent/undo`: reverts the latest file change of the agent.
 pub(in crate::server) async fn undo(State(state): State<Arc<AppState>>) -> Response {
+    if agent_disabled() {
+        return disabled_reply();
+    }
     Json(result_json(state.agent.undo())).into_response()
 }
 

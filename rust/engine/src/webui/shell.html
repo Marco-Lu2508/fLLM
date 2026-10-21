@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>fLLM Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%23121a21%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%268%27 fill=%27%2343c0aa%27/%3E%3C/svg%3E">
   <style>/*__STYLE__*/</style>
 </head>
 <body class="colored-user-bubble">
@@ -30,11 +31,11 @@
 
           <!-- NavTabs: Chat vs Playground -->
           <div class="nav-tabs" id="sidebarModeTabs">
-            <button class="nav-tab active" data-playmode="chat">
+            <button class="nav-tab active" data-tab="chat">
               <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
               <span>Chat</span>
             </button>
-            <button class="nav-tab" data-playmode="infill" title="Code-Vervollstaendigung (Fill-in-the-Middle): Du gibst Code vor und nach einer Luecke an, das Modell fuellt die Mitte.">
+            <button class="nav-tab" data-tab="code" title="Coding-Agent: liest, ändert und startet Programme in einem Ordner deines Rechners.">
               <svg viewBox="0 0 24 24" class="icon icon-sm"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               <span>Code</span>
             </button>
@@ -66,9 +67,13 @@
         <!-- SidebarContent: Chats List (NavChats.tsx) -->
         <div class="sidebar-content">
           <div class="sidebar-group-header">
-            <span>Chats</span>
-            <div style="display:flex;gap:2px;">
-              <button class="btn-icon btn-icon-xs" id="btnExportThreads" title="Chats exportieren (JSON)">
+            <span id="threadGroupTitle">Chats</span>
+            <div class="chats-only" style="display:flex;gap:2px;">
+              <input type="file" id="fileImportThreads" accept="application/json,.json" style="display:none;">
+              <button class="btn-icon btn-icon-xs" id="btnImportThreads" title="Chats importieren (JSON)">
+                <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+              </button>
+              <button class="btn-icon btn-icon-xs" id="btnExportThreads" title="Alle Chats exportieren (JSON)">
                 <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
               </button>
               <button class="btn-icon btn-icon-xs" id="btnDeleteAllThreads" title="Alle Chats löschen">
@@ -76,7 +81,8 @@
               </button>
             </div>
           </div>
-          <div class="thread-list" id="threadList"></div>
+          <input type="search" class="thread-search chats-only" id="threadSearch" placeholder="Chats durchsuchen" aria-label="Chats durchsuchen">
+<div class="thread-list" id="threadList"></div>
         </div>
 
         <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
@@ -111,10 +117,24 @@
               </button>
               <div class="popover-panel" id="modelDropdownMenu" style="top:calc(100% + 6px);bottom:auto;width:300px;">
                 <div class="popover-head">
-                  <span>Active Model & Aliases</span>
-                  <button class="btn btn-xs btn-ghost" id="btnModelMenuGoHub">Open Hub →</button>
+                  <span>Geladenes Modell und Aliase</span>
+                  <button class="btn btn-xs btn-ghost" id="btnModelMenuGoHub">Modelle öffnen</button>
                 </div>
                 <div class="popover-body" id="modelDropdownItems"></div>
+              </div>
+            </div>
+            <div style="position:relative;">
+              <button class="model-pill" id="btnPresets" title="Voreinstellungen: Systemprompt und Sampling zusammen speichern">
+                <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>
+                <span id="presetLabel">Standard</span>
+                <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--muted-foreground);"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="popover-panel" id="presetMenu" style="top:calc(100% + 6px);bottom:auto;width:330px;">
+                <div class="popover-head">
+                  <span>Voreinstellungen</span>
+                  <button class="btn btn-xs btn-ghost" id="btnPresetSave">Aktuelle speichern</button>
+                </div>
+                <div class="popover-body" id="presetItems"></div>
               </div>
             </div>
           </div>
@@ -124,17 +144,28 @@
               <svg viewBox="0 0 600 64" preserveAspectRatio="none"><polyline id="headerTraceLine" points="0,63 600,63"></polyline></svg>
               <span class="tabular" id="headerTps">0</span>
             </div>
-            <span class="quant-chip" id="modeIndicatorBadge">Chat</span>
-            <button class="btn-icon" id="btnClearCurrentChat" title="Aktuellen Chat leeren">
-              <svg viewBox="0 0 24 24" class="icon"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
-            </button>
-            <button class="btn-icon" id="btnQuickLocalServer" title="Local API Server & Keys">
-              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
-            </button>
+            <div class="ctx-meter" id="ctxMeter" title="Wie voll der Kontext dieses Chats ist">
+              <span class="ctx-bar"><i id="ctxFill"></i></span>
+              <span class="tabular" id="ctxText">0 / 4096</span>
+            </div>
+            <div style="position:relative;">
+              <button class="btn-icon" id="btnChatMenu" title="Mehr zu diesem Chat" aria-haspopup="true">
+                <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></svg>
+              </button>
+              <div class="popover-panel menu-panel" id="chatMenu" style="top:calc(100% + 6px);bottom:auto;left:auto;right:0;width:230px;">
+                <button class="menu-item" data-chat-action="rename">Umbenennen</button>
+                <button class="menu-item" data-chat-action="pin" id="menuPin">Anpinnen</button>
+                <button class="menu-item" data-chat-action="duplicate">Duplizieren</button>
+                <button class="menu-item" data-chat-action="export-md">Als Markdown exportieren</button>
+                <button class="menu-item" data-chat-action="export-json">Als JSON exportieren</button>
+                <button class="menu-item danger" data-chat-action="delete">Chat löschen</button>
+              </div>
+            </div>
           </div>
         </header>
 
         <div class="chat-container is-empty" id="chatContainer">
+          <div class="drop-overlay" id="dropOverlay"><span>Dateien hier ablegen</span></div>
           <!-- Messages Scroll Area -->
           <div class="chat-messages-scroll" id="chatMessagesScroll">
             <div class="messages-column" id="messagesColumn"></div>
@@ -158,15 +189,15 @@
               <!-- Sampling Parameters Popover (containers/SamplerPopover.tsx) -->
               <div class="popover-panel" id="samplerPopover">
                 <div class="popover-head">
-                  <span>Sampling — Model Parameters</span>
+                  <span>Sampling: Parameter des Modells</span>
                   <div style="display:flex;gap:4px;">
-                    <button class="btn btn-xs btn-ghost" id="btnResetSampler">Reset</button>
-                    <button class="btn btn-xs btn-primary" id="btnSaveSamplerToRust" title="Speichert Parameter live als Server-Default in Rust">Save to Rust</button>
+                    <button class="btn btn-xs btn-ghost" id="btnResetSampler">Zurücksetzen</button>
+                    <button class="btn btn-xs btn-primary" id="btnSaveSamplerToRust" title="Speichert die Parameter als Standard des Servers">Als Standard speichern</button>
                   </div>
                 </div>
                 <div class="popover-body">
                   <div class="param-item">
-                    <div class="param-row-top"><span>Temperature</span><input type="number" step="0.05" min="0" max="2" id="numTemp" class="param-val-input" value="0.7"></div>
+                    <div class="param-row-top"><span>Temperatur</span><input type="number" step="0.05" min="0" max="2" id="numTemp" class="param-val-input" value="0.7"></div>
                     <input type="range" min="0" max="2" step="0.05" id="rngTemp" value="0.7">
                   </div>
                   <div class="param-item">
@@ -182,20 +213,20 @@
                     <input type="range" min="0" max="1" step="0.01" id="rngMinP" value="0.0">
                   </div>
                   <div class="param-item">
-                    <div class="param-row-top"><span>Max Tokens</span><input type="number" step="16" min="1" max="8192" id="numMaxTokens" class="param-val-input" value="256"></div>
+                    <div class="param-row-top"><span>Maximale Länge</span><input type="number" step="16" min="1" max="8192" id="numMaxTokens" class="param-val-input" value="256"></div>
                     <input type="range" min="16" max="2048" step="16" id="rngMaxTokens" value="256">
                   </div>
                   <div class="param-item">
-                    <div class="param-row-top"><span>Repeat Penalty</span><input type="number" step="0.05" min="1" max="2" id="numRepeatPen" class="param-val-input" value="1.0"></div>
+                    <div class="param-row-top"><span>Wiederholungsstrafe</span><input type="number" step="0.05" min="1" max="2" id="numRepeatPen" class="param-val-input" value="1.0"></div>
                     <input type="range" min="1" max="2" step="0.05" id="rngRepeatPen" value="1.0">
                   </div>
                   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:4px;">
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Presence Pen.</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Presence-Strafe</label>
                       <input type="number" step="0.1" min="-2" max="2" id="numPresencePen" class="ui-input mono" style="width:100%;" value="0.0">
                     </div>
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Frequency Pen.</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Frequency-Strafe</label>
                       <input type="number" step="0.1" min="-2" max="2" id="numFreqPen" class="ui-input mono" style="width:100%;" value="0.0">
                     </div>
                     <div>
@@ -205,29 +236,29 @@
                     <div>
                       <label style="font-size:11px;color:var(--muted-foreground);">Mirostat (0/1/2)</label>
                       <select id="selMirostat" class="ui-select mono" style="width:100%;">
-                        <option value="0">0 (Off)</option>
+                        <option value="0">0 (aus)</option>
                         <option value="1">1 (Mirostat v1)</option>
                         <option value="2">2 (Mirostat v2)</option>
                       </select>
                     </div>
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Seed (-1 = rand)</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Seed (-1 = zufällig)</label>
                       <input type="number" step="1" id="numSeed" class="ui-input mono" style="width:100%;" value="-1">
                     </div>
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Constraint</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Ausgabeformat</label>
                       <select id="selConstraint" class="ui-select mono" style="width:100%;">
-                        <option value="none">Free Text</option>
-                        <option value="json_object">JSON Object</option>
-                        <option value="json_schema">JSON Schema</option>
-                        <option value="gbnf">GBNF Grammar</option>
-                        <option value="regex">Regex</option>
+                        <option value="none">Freier Text</option>
+                        <option value="json_object">JSON-Objekt</option>
+                        <option value="json_schema">JSON-Schema</option>
+                        <option value="gbnf">GBNF-Grammatik</option>
+                        <option value="regex">Regulärer Ausdruck</option>
                       </select>
                     </div>
                   </div>
-                  <textarea id="txtConstraintSpec" class="ui-textarea mono" rows="3" style="display:none;font-size:11.5px;" placeholder="JSON Schema / GBNF / Regex..."></textarea>
+                  <textarea id="txtConstraintSpec" class="ui-textarea mono" rows="3" style="display:none;font-size:11.5px;" placeholder="JSON-Schema, GBNF oder regulärer Ausdruck"></textarea>
                   <div style="display:flex;align-items:center;justify-content:space-between;padding-top:4px;">
-                    <span style="font-size:12px;">Speculative Decoding</span>
+                    <span style="font-size:12px;">Spekulatives Decoding</span>
                     <label class="ui-switch"><input type="checkbox" id="chkSpeculative" checked><span class="ui-switch-track"></span></label>
                   </div>
                   <div style="display:flex;align-items:center;justify-content:space-between;">
@@ -240,13 +271,13 @@
               <!-- Assistant / System Prompt Popover -->
               <div class="popover-panel" id="assistantPopover" style="width:360px;">
                 <div class="popover-head">
-                  <span>Assistant & System Instructions</span>
-                  <button class="btn btn-xs btn-primary" id="btnSaveSystemPromptRust">Save Default</button>
+                  <span>Systemprompt dieses Chats</span>
+                  <button class="btn btn-xs btn-primary" id="btnSaveSystemPromptRust">Als Standard speichern</button>
                 </div>
                 <div class="popover-body">
-                  <label style="font-size:12px;color:var(--muted-foreground);">System Prompt</label>
+                  <label style="font-size:12px;color:var(--muted-foreground);">Systemprompt</label>
                   <textarea id="txtSystemPrompt" class="ui-textarea" rows="4" placeholder="Du bist ein präziser, hilfreicher KI-Assistent..."></textarea>
-                  <label style="font-size:12px;color:var(--muted-foreground);">Stop Sequences (comma-separated)</label>
+                  <label style="font-size:12px;color:var(--muted-foreground);">Stop-Sequenzen (mit Komma getrennt)</label>
                   <input type="text" id="inpStopWords" class="ui-input mono" placeholder="</s>, <|im_end|>">
                 </div>
               </div>
@@ -254,19 +285,6 @@
               <!-- Rounded-3XL ChatInput Card -->
               <div class="chat-input-box">
                 <div class="attachments-row" id="attachmentsRow"></div>
-
-                <div class="fim-grid" id="fimGrid">
-                  <div class="fim-box">
-                    <label>Code VOR dem Cursor</label>
-                    <textarea id="fimPrefixInput">fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| </textarea>
-                  </div>
-                  <div class="fim-box">
-                    <label>Code NACH dem Cursor</label>
-                    <textarea id="fimSuffixInput">).sum()
-}</textarea>
-                  </div>
-                </div>
 
                 <textarea
                   id="chatTextarea"
@@ -277,41 +295,36 @@
 
                 <div class="chat-input-toolbar">
                   <div class="toolbar-left">
-                    <input type="file" id="fileImageInput" accept="image/*" multiple style="display:none;">
-                    <button class="btn-icon btn-icon-xs" id="btnAttachImg" title="Bild anhängen (Vision)">
+                    <input type="file" id="fileAttachInput" multiple style="display:none;" accept="image/*,.txt,.md,.markdown,.json,.csv,.tsv,.log,.rs,.py,.js,.mjs,.ts,.tsx,.jsx,.c,.h,.cpp,.hpp,.cc,.cs,.java,.kt,.go,.rb,.php,.swift,.toml,.yaml,.yml,.ini,.html,.css,.scss,.sh,.ps1,.bat,.sql,.xml,.tex">
+                    <button class="btn-icon btn-icon-xs" id="btnAttach" title="Bild oder Datei anhängen (auch per Ziehen oder Einfügen)">
                       <svg viewBox="0 0 24 24" class="icon"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
                     </button>
 
                     <!-- Assistant Switcher Chip -->
                     <button class="composer-chip" id="btnToggleAssistantPop" title="System Prompt & Assistant">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
-                      <span>Assistant</span>
+                      <span>Systemprompt</span>
                     </button>
 
                     <!-- SamplerPopover Trigger (IconAdjustmentsHorizontal) -->
-                    <button class="composer-chip" id="btnToggleSamplerPop" title="Sampling Parameters">
+                    <button class="composer-chip" id="btnToggleSamplerPop" title="Sampling-Parameter">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
                       <span>Sampling</span>
                     </button>
 
                     <!-- Thinking / Reasoning Toggle -->
-                    <button class="composer-chip" id="btnToggleThinking" title="Reasoning / Chain-of-Thought">
+                    <button class="composer-chip" id="btnToggleThinking" title="Das Modell erst nachdenken lassen (wenn es das kann)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/></svg>
-                      <span>Thinking</span>
+                      <span>Denken</span>
                     </button>
 
-                    <!-- Tools Toggle -->
-                    <button class="composer-chip" id="btnToggleTools" title="Function Calling / Tools aktivieren">
-                      <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                      <span>Tools</span>
-                    </button>
                   </div>
 
                   <div class="toolbar-right">
                     <!-- TokenCounter -->
                     <span class="mono tabular" style="font-size:11px;color:var(--muted-foreground);margin-right:4px;" id="liveTokenCounter">0 / 512 tok</span>
 
-                    <button class="send-circle-btn" id="btnSendChat" title="Senden (Enter)">
+                    <button class="send-circle-btn" id="btnSendChat" title="Senden (Eingabe)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
                     </button>
                   </div>
@@ -338,6 +351,63 @@
         </div>
       </section>
 
+      <!-- ====================================================================
+           SURFACE: CODE (coding agent: reads, changes and runs things inside one folder)
+           ==================================================================== -->
+      <section class="surface-view" id="surface-code">
+        <header class="header-page">
+          <div class="header-left">
+            <button class="btn-icon" id="btnExpandSidebarCode" style="display:none;" title="Seitenleiste öffnen">
+              <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+            </button>
+            <button class="model-pill" id="btnWorkspace" title="Arbeitsordner wählen">
+              <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              <span id="wsName">Ordner wählen</span>
+              <span class="quant-chip" id="wsBranch" style="display:none;"></span>
+            </button>
+            <div class="seg" id="permSeg" role="group" aria-label="Was der Agent allein darf">
+              <button data-perm="ask" class="active" title="Vor jeder Änderung und jedem Befehl fragen">Fragen</button>
+              <button data-perm="edit" title="Änderungen an Dateien erlauben, Befehle erfragen">Auto-Edit</button>
+              <button data-perm="plan" title="Nur lesen: der Agent macht einen Plan und ändert nichts">Plan</button>
+            </div>
+          </div>
+          <div class="header-right">
+            <div class="header-trace" id="codeTrace" title="Erzeugte Token pro Sekunde" aria-hidden="true">
+              <svg viewBox="0 0 600 64" preserveAspectRatio="none"><polyline id="codeTraceLine" points="0,63 600,63"></polyline></svg>
+              <span class="tabular" id="codeTps">0</span>
+            </div>
+            <div class="ctx-meter" id="codeCtxMeter" title="Wie voll der Kontext dieser Sitzung ist">
+              <span class="ctx-bar"><i id="codeCtxFill"></i></span>
+              <span class="tabular" id="codeCtxText">0 / 4096</span>
+            </div>
+            <button class="btn-icon" id="btnCodeUndo" title="Letzte Dateiänderung rückgängig machen">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+            </button>
+            <button class="btn-icon" id="btnCodeNew" title="Neue Sitzung">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            </button>
+          </div>
+        </header>
+        <div class="code-body">
+          <div class="code-main">
+            <div class="code-scroll" id="codeScroll"><div class="code-column" id="codeColumn"></div></div>
+            <div class="code-composer">
+              <div class="code-todos" id="codeTodos" style="display:none;"></div>
+              <div class="code-input-box">
+                <div class="mention-pop" id="mentionPop"></div>
+                <textarea id="codeTextarea" rows="1" placeholder="Beschreibe die Aufgabe. @ nennt eine Datei, / zeigt Befehle."></textarea>
+                <div class="code-input-bar">
+                  <span class="code-hint" id="codeHint">Eingabe sendet, Umschalt+Eingabe macht eine neue Zeile</span>
+                  <button class="send-circle-btn" id="btnCodeSend" title="Senden (Eingabe)">
+                    <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <aside class="code-side" id="codeSide"></aside>
+        </div>
+      </section>
       <!-- ====================================================================
            SURFACE B: MODEL HUB (routes/hub/index.tsx)
            ==================================================================== -->
@@ -467,11 +537,20 @@
                 </div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Reset Local Chat History</div>
-                    <div class="app-item-desc">Clears all saved conversation threads in this browser.</div>
+                    <div class="app-item-title">Alle Chats löschen</div>
+                    <div class="app-item-desc">Löscht alle gespeicherten Chats in diesem Browser.</div>
                   </div>
                   <div class="app-item-actions">
-                    <button class="btn btn-sm btn-destructive" id="btnFactoryResetThreads">Clear Chats</button>
+                    <button class="btn btn-sm btn-destructive" id="btnFactoryResetThreads">Chats löschen</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Titel automatisch vergeben</div>
+                    <div class="app-item-desc">Das Modell gibt neuen Chats nach der ersten Antwort einen kurzen Titel.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <label class="ui-switch"><input type="checkbox" id="chkAutoTitle" checked><span class="ui-switch-track"></span></label>
                   </div>
                 </div>
               </div>
@@ -506,8 +585,8 @@
                 <div class="app-card-title">Appearance</div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Theme</div>
-                    <div class="app-item-desc">Match the OS theme or switch between Dark and Light mode.</div>
+                    <div class="app-item-title">Farbschema</div>
+                    <div class="app-item-desc">Dunkel oder hell.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selThemeMode" class="ui-select">
@@ -519,8 +598,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Accent Color</div>
-                    <div class="app-item-desc">Personalize the sidebar gradient and primary controls.</div>
+                    <div class="app-item-title">Akzentfarbe</div>
+                    <div class="app-item-desc">Färbt Seitenleiste und Bedienelemente.</div>
                   </div>
                   <div class="app-item-actions">
                     <div class="accent-picker-row" id="accentPickerRow"></div>
@@ -529,8 +608,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Font Size</div>
-                    <div class="app-item-desc">Adjust the application base font size.</div>
+                    <div class="app-item-title">Schriftgröße</div>
+                    <div class="app-item-desc">Grundgröße der Schrift in der ganzen Oberfläche.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selFontSize" class="ui-select">
@@ -544,8 +623,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Colored User Message Bubble</div>
-                    <div class="app-item-desc">Tint your chat messages with the active primary accent color.</div>
+                    <div class="app-item-title">Eigene Nachrichten einfärben</div>
+                    <div class="app-item-desc">Tönt deine Nachrichten in der gewählten Akzentfarbe.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkColoredBubble" checked><span class="ui-switch-track"></span></label>
@@ -554,8 +633,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Show Token Generation Speed</div>
-                    <div class="app-item-desc">Display live tok/s and TTFT below assistant responses.</div>
+                    <div class="app-item-title">Geschwindigkeit anzeigen</div>
+                    <div class="app-item-desc">Zeigt unter jeder Antwort Token pro Sekunde und die Zeit bis zum ersten Token.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkShowSpeed" checked><span class="ui-switch-track"></span></label>
@@ -826,13 +905,45 @@
   <!-- Search Dialog Modal (Ctrl+K — containers/dialogs/SearchDialog.tsx) -->
   <div class="modal-backdrop" id="searchModal">
     <div class="search-dialog">
-      <input type="text" class="search-dialog-input" id="searchModalInput" placeholder="Search chats, models, or settings... (Esc to close)">
+      <input type="text" class="search-dialog-input" id="searchModalInput" placeholder="Chats, Modelle und Einstellungen durchsuchen (Esc schließt)">
       <div class="search-results" id="searchModalResults"></div>
     </div>
   </div>
 
-  <!-- Toasts -->
-  <div class="toast-stack" id="toastStack"></div>
+  <!-- Dialog (replaces confirm and prompt) -->
+  <div class="modal-backdrop" id="dialogModal">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+      <h3 id="dialogTitle"></h3>
+      <p id="dialogText"></p>
+      <input type="text" class="ui-input" id="dialogInput" style="display:none;">
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" id="dialogCancel">Abbrechen</button>
+        <button class="btn btn-primary" id="dialogOk">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Keyboard shortcuts -->
+  <div class="modal-backdrop" id="helpModal">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="helpTitle" style="width:min(520px,92vw);">
+      <h3 id="helpTitle">Tastenkürzel</h3>
+      <table class="app-table shortcuts">
+        <tbody>
+          <tr><td>Neuer Chat</td><td class="mono">Strg N</td></tr>
+          <tr><td>Suche</td><td class="mono">Strg K</td></tr>
+          <tr><td>Seitenleiste ein- und ausblenden</td><td class="mono">Strg B</td></tr>
+          <tr><td>Senden</td><td class="mono">Eingabe</td></tr>
+          <tr><td>Neue Zeile</td><td class="mono">Umschalt Eingabe</td></tr>
+          <tr><td>Antwort abbrechen</td><td class="mono">Esc</td></tr>
+          <tr><td>Letzte eigene Nachricht bearbeiten</td><td class="mono">Pfeil hoch (bei leerem Feld)</td></tr>
+          <tr><td>Diese Übersicht</td><td class="mono">Strg /</td></tr>
+        </tbody>
+      </table>
+      <div class="dialog-actions"><button class="btn btn-primary" id="helpClose">Schließen</button></div>
+    </div>
+  </div>
+
+  <!-- Toasts -->  <div class="toast-stack" id="toastStack"></div>
 
   <script>/*__SCRIPT__*/</script>
 </body>

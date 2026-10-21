@@ -8,16 +8,25 @@ use axum::{
 use std::sync::OnceLock;
 
 const SHELL: &str = include_str!("webui/shell.html");
-const STYLE: &str = include_str!("webui/style.css");
+const STYLE: [&str; 3] = [include_str!("webui/style.css"), include_str!("webui/chat.css"), include_str!("webui/code.css")];
 /// The script parts, joined in this order inside one function scope.
-const SCRIPT: [&str; 1] = [include_str!("webui/script.js")];
+const SCRIPT: [&str; 8] = [
+    include_str!("webui/core.js"),
+    include_str!("webui/markdown.js"),
+    include_str!("webui/sampler.js"),
+    include_str!("webui/chat.js"),
+    include_str!("webui/code.js"),
+    include_str!("webui/panels.js"),
+    include_str!("webui/listeners-panels.js"),
+    include_str!("webui/boot.js"),
+];
 
 fn built() -> &'static str {
     static PAGE: OnceLock<String> = OnceLock::new();
     PAGE.get_or_init(|| {
         SHELL
-            .replace("/*__STYLE__*/", STYLE)
-            .replace("/*__SCRIPT__*/", &SCRIPT.concat())
+            .replace("/*__STYLE__*/", &STYLE.concat())
+            .replace("/*__SCRIPT__*/", &format!("(() => {{\n'use strict';\n{}\n}})();", SCRIPT.concat()))
     })
 }
 
