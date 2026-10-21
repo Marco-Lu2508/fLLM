@@ -104,7 +104,7 @@ impl Profiler {
             e.1 += ticks as f64 * self.period_ns;
         }
         self.reads += 1;
-        if self.reads % REPORT_EVERY == 0 {
+        if self.reads.is_multiple_of(REPORT_EVERY) {
             self.report();
         }
         Ok(())
