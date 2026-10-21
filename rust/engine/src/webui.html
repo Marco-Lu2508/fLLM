@@ -6,64 +6,71 @@
   <title>fLLM Studio</title>
   <style>
     /* ==========================================================================
-       Design tokens (OKLCH)
+       Design tokens
        ========================================================================== */
     :root {
+      /* Kalkstein: light theme. Slate-and-patina palette: the green of oxidised copper, a quiet reference to Rust. */
       color-scheme: light;
-      --radius: 0.625rem;
+      --radius: 0.5rem;
       --font-size-base: 15px;
       --message-zoom: 1;
-      --background: oklch(0.985 0 0);
-      --foreground: oklch(0.145 0 0);
-      --card: oklch(1 0 0);
-      --card-foreground: oklch(0.145 0 0);
-      --popover: oklch(1 0 0);
-      --popover-foreground: oklch(0.145 0 0);
-      --primary: #f17455;
-      --primary-foreground: oklch(0.985 0 0);
-      --secondary: oklch(0.955 0 0);
-      --secondary-foreground: oklch(0.205 0 0);
-      --muted: oklch(0.955 0 0);
-      --muted-foreground: oklch(0.50 0 0);
-      --accent: oklch(0.955 0 0);
-      --accent-foreground: oklch(0.205 0 0);
-      --destructive: oklch(0.577 0.245 27.325);
-      --border: oklch(0.905 0 0);
-      --input: oklch(0.89 0 0);
-      --ring: oklch(0.708 0 0);
-      --sidebar: #C4F3CE;
-      --sidebar-foreground: oklch(0.145 0 0);
-      --sidebar-border: oklch(0.89 0 0);
-      --success: #38AB51;
-      --warning: #E9A23F;
-      --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
-      --sidebar-width: 236px;
+      --background: #eef2f0;
+      --foreground: #14211f;
+      --card: #f8faf9;
+      --card-foreground: #14211f;
+      --popover: #fbfcfb;
+      --popover-foreground: #14211f;
+      --primary: #17806f;
+      --primary-foreground: #f2fbf8;
+      --secondary: #e0e8e5;
+      --secondary-foreground: #14211f;
+      --muted: #e5ebe8;
+      --muted-foreground: #53665f;
+      --accent: #e0e8e5;
+      --accent-foreground: #14211f;
+      --destructive: #b83a3a;
+      --border: rgba(20, 33, 31, 0.13);
+      --input: rgba(20, 33, 31, 0.22);
+      --ring: #17806f;
+      --sidebar: #e3eae7;
+      --sidebar-foreground: #14211f;
+      --sidebar-border: rgba(20, 33, 31, 0.12);
+      --success: #1f8f5a;
+      --warning: #a8691f;
+      --copper: #b4672b;
+      --font-sans: "Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Inter", system-ui, -apple-system, Roboto, sans-serif;
+      --font-display: "Bahnschrift", "DIN Alternate", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+      --font-mono: "Cascadia Mono", "JetBrains Mono", "SF Mono", "Fira Code", Consolas, monospace;
+      --sidebar-width: 232px;
     }
 
     html.dark {
+      /* Schiefer: dark theme (default) */
       color-scheme: dark;
-      --background: oklch(0.18 0 0);
-      --foreground: oklch(0.985 0 0);
-      --card: oklch(0.205 0 0);
-      --card-foreground: oklch(0.985 0 0);
-      --popover: oklch(0.215 0 0);
-      --popover-foreground: oklch(0.985 0 0);
-      --primary: #38AB51;
-      --primary-foreground: oklch(0.985 0 0);
-      --secondary: oklch(0.269 0 0);
-      --secondary-foreground: oklch(0.985 0 0);
-      --muted: oklch(0.255 0 0);
-      --muted-foreground: oklch(0.708 0 0);
-      --accent: oklch(0.269 0 0);
-      --accent-foreground: oklch(0.985 0 0);
-      --destructive: oklch(0.704 0.191 22.216);
-      --border: oklch(1 0 0 / 9%);
-      --input: oklch(1 0 0 / 14%);
-      --ring: oklch(0.556 0 0);
-      --sidebar: #194D24;
-      --sidebar-foreground: oklch(0.985 0 0);
-      --sidebar-border: oklch(1 0 0 / 10%);
+      --background: #10171d;
+      --foreground: #e6edf0;
+      --card: #161f26;
+      --card-foreground: #e6edf0;
+      --popover: #1a2630;
+      --popover-foreground: #e6edf0;
+      --primary: #43c0aa;
+      --primary-foreground: #05201a;
+      --secondary: #1e2b35;
+      --secondary-foreground: #e6edf0;
+      --muted: #1b2730;
+      --muted-foreground: #8da1ad;
+      --accent: #1e2b35;
+      --accent-foreground: #e6edf0;
+      --destructive: #ee7a74;
+      --border: rgba(190, 215, 225, 0.10);
+      --input: rgba(190, 215, 225, 0.18);
+      --ring: #43c0aa;
+      --sidebar: #0b1116;
+      --sidebar-foreground: #e6edf0;
+      --sidebar-border: rgba(190, 215, 225, 0.08);
+      --success: #52c28a;
+      --warning: #e0a458;
+      --copper: #e0955c;
     }
 
     *, *::before, *::after {
@@ -1361,6 +1368,141 @@
       .settings-menu { width: 170px; }
       .fim-grid { grid-template-columns: 1fr; }
     }
+
+    /* ==========================================================================
+       Patina: the look of the Studio. Flat rail, one display face for names and
+       numbers, patina for what you can act on, copper only for live activity.
+       ========================================================================== */
+    :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+    input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
+    .chat-textarea:focus-visible { outline: none; } /* the composer around it shows the focus */
+
+    /* Rail instead of a floating card */
+    .sidebar-outer, .app-shell.sidebar-collapsed .sidebar-outer { padding: 0; }
+    .sidebar-floating {
+      border-radius: 0;
+      border: 0;
+      border-right: 1px solid var(--sidebar-border);
+      background: var(--sidebar);
+      box-shadow: none;
+    }
+    .sidebar-header { padding: 14px 10px 6px; }
+    .brand-title { font-family: var(--font-display); font-size: 20px; font-weight: 600; letter-spacing: 0.01em; gap: 10px; }
+    .brand-dot { width: 9px; height: 9px; background: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent); }
+    .nav-tabs { background: transparent; border: 1px solid var(--sidebar-border); border-radius: 7px; }
+    .nav-tab { border-radius: 5px; }
+    .nav-tab.active { background: color-mix(in srgb, var(--primary) 16%, transparent); box-shadow: none; }
+    .nav-item { position: relative; border-radius: 6px; }
+    .nav-item.active { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+    .nav-item.active::before {
+      content: "";
+      position: absolute;
+      left: -10px;
+      top: 6px;
+      bottom: 6px;
+      width: 3px;
+      border-radius: 0 3px 3px 0;
+      background: var(--primary);
+    }
+    .thread-row { border-radius: 6px; }
+    .thread-row.active { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+    .sidebar-footer { padding: 10px 14px; font-family: var(--font-mono); font-size: 11px; }
+
+    /* Header */
+    .header-page { height: 52px; padding: 0 20px; }
+    .model-pill { border-color: var(--border); background: var(--card); border-radius: 6px; padding: 4px 10px; }
+    .quant-chip { border-radius: 4px; background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); }
+    .btn { border-radius: 6px; }
+    .btn-primary:hover { filter: brightness(1.1); }
+    .popover-panel { border-radius: 10px; }
+
+    /* Start screen: left-aligned readout of the engine, then the composer */
+    .chat-container.is-empty .chat-composer-region { align-items: stretch; padding: 0 28px 9vh; }
+    .chat-container.is-empty .chat-empty-hero,
+    .chat-container.is-empty .chat-input-shell,
+    .chat-container.is-empty .chat-starter-pills {
+      width: 100%;
+      max-width: 760px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .chat-empty-hero { text-align: left; margin-bottom: 24px; }
+    .chat-empty-hero h1 {
+      font-family: var(--font-display);
+      font-size: clamp(34px, 5vw, 54px);
+      font-weight: 600;
+      line-height: 1.04;
+      letter-spacing: -0.015em;
+      overflow-wrap: anywhere;
+    }
+    .chat-empty-hero p { max-width: 58ch; margin-top: 10px; font-size: 15px; line-height: 1.55; }
+    .hero-trace { margin-top: 22px; }
+    .hero-trace svg { display: block; width: 100%; height: 64px; overflow: visible; animation: trace-in 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+    .hero-trace-base { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .hero-trace-line {
+      fill: none;
+      stroke: var(--muted-foreground);
+      stroke-width: 1.5;
+      stroke-linejoin: round;
+      opacity: 0.65;
+      vector-effect: non-scaling-stroke;
+    }
+    .hero-trace.is-busy .hero-trace-line { stroke: var(--copper); stroke-width: 2; opacity: 1; }
+    .hero-trace-read { margin-top: 8px; font-size: 13px; color: var(--muted-foreground); }
+    .hero-trace-read b { margin-right: 4px; font-family: var(--font-display); font-size: 22px; font-weight: 600; color: var(--foreground); }
+    .header-trace { display: inline-flex; align-items: center; gap: 8px; margin-right: 6px; font-family: var(--font-display); font-size: 13px; color: var(--muted-foreground); }
+    .header-trace svg { width: 84px; height: 20px; overflow: visible; }
+    .header-trace polyline { fill: none; stroke: var(--muted-foreground); stroke-width: 1.4; stroke-linejoin: round; opacity: 0.7; vector-effect: non-scaling-stroke; }
+    .header-trace.is-busy polyline { stroke: var(--copper); opacity: 1; }
+    .header-trace.is-busy { color: var(--foreground); }
+    #surface-chat:has(.chat-container.is-empty) .header-trace { display: none; }
+    @keyframes trace-in { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+
+    /* Composer */
+    .chat-input-box { border-radius: 12px; background: var(--card); box-shadow: none; }
+    .chat-input-box:focus-within {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+    }
+    .chat-textarea { padding: 16px 18px 8px; font-size: 15px; }
+    .composer-chip { border-radius: 6px; }
+    .composer-chip.active { border-color: color-mix(in srgb, var(--primary) 40%, transparent); }
+    .send-circle-btn { width: 32px; height: 32px; border-radius: 8px; }
+    .send-circle-btn:not(:disabled):hover { transform: translateY(-1px); }
+    .chat-starter-pills { justify-content: flex-start; gap: 6px 22px; margin-top: 18px; }
+    .starter-pill {
+      padding: 2px 0;
+      border: 0;
+      border-bottom: 1px solid transparent;
+      border-radius: 0;
+      background: none;
+      font-size: 13px;
+    }
+    .starter-pill:hover { background: none; border-bottom-color: var(--primary); }
+
+    /* Messages */
+    .msg-user-bubble { border-radius: 12px 12px 3px 12px; }
+    body.colored-user-bubble .msg-user-bubble {
+      background: color-mix(in srgb, var(--primary) 15%, var(--card));
+      color: var(--foreground);
+      border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+    }
+    .msg-assistant-prose { line-height: 1.7; }
+    .code-card { border-radius: 8px; }
+
+    @media (max-width: 760px) {
+      .app-shell:not(.sidebar-collapsed) .sidebar-outer {
+        position: fixed;
+        inset: 0 auto 0 0;
+        z-index: 50;
+        box-shadow: 12px 0 40px rgba(0, 0, 0, 0.45);
+      }
+      .chat-container.is-empty .chat-composer-region { padding: 0 16px 6vh; }
+      .header-page { padding: 0 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
+    }
   </style>
 </head>
 <body class="colored-user-bubble">
@@ -1389,7 +1531,7 @@
           <div class="nav-tabs" id="sidebarModeTabs">
             <button class="nav-tab active" data-playmode="chat">
               <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-              <span>Home</span>
+              <span>Chat</span>
             </button>
             <button class="nav-tab" data-playmode="infill" title="Code-Vervollstaendigung (Fill-in-the-Middle): Du gibst Code vor und nach einer Luecke an, das Modell fuellt die Mitte.">
               <svg viewBox="0 0 24 24" class="icon icon-sm"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -1401,21 +1543,21 @@
           <nav class="nav-main">
             <button class="nav-item" id="navNewChat">
               <svg viewBox="0 0 24 24" class="icon"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
-              <span>New Chat</span>
+              <span>Neuer Chat</span>
               <span class="kbd-group">Ctrl N</span>
             </button>
             <button class="nav-item" id="navOpenSearch">
               <svg viewBox="0 0 24 24" class="icon"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-              <span>Search</span>
+              <span>Suche</span>
               <span class="kbd-group">Ctrl K</span>
             </button>
             <button class="nav-item" data-surface="hub" id="navHub">
               <svg viewBox="0 0 24 24" class="icon"><rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3"/></svg>
-              <span>Hub</span>
+              <span>Modelle</span>
             </button>
             <button class="nav-item" data-surface="settings" id="navSettings">
               <svg viewBox="0 0 24 24" class="icon"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-              <span>Settings</span>
+              <span>Einstellungen</span>
             </button>
           </nav>
         </div>
@@ -1439,7 +1581,7 @@
         <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
         <div class="sidebar-footer">
           <span class="mono" id="footerSimdLabel">CPU · avx-vnni</span>
-          <span class="mono tabular" id="footerSlotsLabel">0/8 slots</span>
+          <span class="mono tabular" id="footerSlotsLabel">0/8 Plätze</span>
         </div>
       </div>
     </aside>
@@ -1477,6 +1619,10 @@
           </div>
 
           <div class="header-right">
+            <div class="header-trace" id="headerTrace" title="Erzeugte Token pro Sekunde" aria-hidden="true">
+              <svg viewBox="0 0 600 64" preserveAspectRatio="none"><polyline id="headerTraceLine" points="0,63 600,63"></polyline></svg>
+              <span class="tabular" id="headerTps">0</span>
+            </div>
             <span class="quant-chip" id="modeIndicatorBadge">Chat</span>
             <button class="btn-icon" id="btnClearCurrentChat" title="Aktuellen Chat leeren">
               <svg viewBox="0 0 24 24" class="icon"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
@@ -1496,8 +1642,15 @@
           <!-- Composer Region (Centered when empty, bottom when chatting) -->
           <div class="chat-composer-region">
             <div class="chat-empty-hero">
-              <h1 id="welcomeHeading">How can I help you today?</h1>
-              <p id="welcomeSub">Running locally on fLLM Rust Engine · Zero cloud latency</p>
+              <h1 id="welcomeHeading">Bereit</h1>
+              <p id="welcomeSub">Das Modell wird geladen.</p>
+              <div class="hero-trace" id="heroTrace" role="img" aria-label="Erzeugte Token pro Sekunde, letzte zwei Minuten">
+                <svg viewBox="0 0 600 64" preserveAspectRatio="none" aria-hidden="true">
+                  <line class="hero-trace-base" x1="0" y1="63" x2="600" y2="63"></line>
+                  <polyline class="hero-trace-line" id="heroTraceLine" points="0,63 600,63"></polyline>
+                </svg>
+                <div class="hero-trace-read"><b class="tabular" id="heroTps">0</b> <span id="heroTpsLabel">Token pro Sekunde</span></div>
+              </div>
             </div>
 
             <div class="chat-input-shell">
@@ -1618,7 +1771,7 @@
                   id="chatTextarea"
                   class="chat-textarea"
                   rows="1"
-                  placeholder="Ask anything..."
+                  placeholder="Schreib eine Frage oder einen Auftrag"
                 ></textarea>
 
                 <div class="chat-input-toolbar">
@@ -1667,17 +1820,17 @@
 
             <!-- Subtle quick-start pills on empty chat -->
             <div class="chat-starter-pills" id="starterPills">
-              <button class="starter-pill" data-prompt="Erkläre kurz, wie das lokale Rust-Backend Anfragen verarbeitet.">
-                <span>Rust-Engine Architektur</span>
+              <button class="starter-pill" data-prompt="Erkläre in einfachen Worten, wie ein Sprachmodell Wort für Wort einen Text erzeugt.">
+                <span>Wie erzeugt ein Sprachmodell Text?</span>
               </button>
-              <button class="starter-pill" data-prompt="Schreibe eine schnelle Rust-Funktion für ein Skalarprodukt.">
-                <span>Rust Code-Beispiel</span>
+              <button class="starter-pill" data-prompt="Schreibe eine schnelle Rust-Funktion für ein Skalarprodukt zweier f32-Slices.">
+                <span>Skalarprodukt in Rust schreiben</span>
               </button>
               <button class="starter-pill" data-action="open-keys">
-                <span>API-Key erstellen</span>
+                <span>API-Schlüssel anlegen</span>
               </button>
               <button class="starter-pill" data-action="open-hub">
-                <span>GGUF-Modelle im Hub öffnen</span>
+                <span>Modelle verwalten</span>
               </button>
             </div>
           </div>
@@ -1693,10 +1846,10 @@
             <button class="btn-icon" id="btnExpandSidebarHub" style="display:none;">
               <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
             </button>
-            <span style="font-weight:600;font-size:15px;">Hub</span>
+            <span style="font-weight:600;font-size:15px;">Modelle</span>
           </div>
           <div class="header-right">
-            <input type="text" id="hubSearchInput" class="ui-input" style="width:260px;" placeholder="Search catalog or architecture...">
+            <input type="text" id="hubSearchInput" class="ui-input" style="width:260px;" placeholder="Katalog oder Architektur durchsuchen">
             <button class="btn btn-sm btn-outline" id="btnRefreshHub">Refresh</button>
           </div>
         </header>
@@ -1707,22 +1860,22 @@
             <div class="app-card">
               <div class="app-card-header">
                 <div>
-                  <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Download from Hugging Face</h2>
-                  <p class="app-item-desc">Inspect any Hugging Face GGUF repository or pull a model directly into <code>~/.cache/fllm/models</code>.</p>
+                  <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Von Hugging Face laden</h2>
+                  <p class="app-item-desc">Sieh dir ein GGUF-Repository auf Hugging Face an oder lade ein Modell direkt in den Modell-Cache.</p>
                 </div>
               </div>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="hfRepoInput" class="ui-input mono" style="flex:2;min-width:240px;" placeholder="e.g. Qwen/Qwen3-8B-GGUF or bartowski/Llama-3.2-3B-Instruct-GGUF">
+                <input type="text" id="hfRepoInput" class="ui-input mono" style="flex:2;min-width:240px;" placeholder="z. B. Qwen/Qwen3-8B-GGUF oder bartowski/Llama-3.2-3B-Instruct-GGUF">
                 <input type="text" id="hfQuantInput" class="ui-input mono" style="width:140px;" placeholder="Quant (Q4_K_M)">
-                <button class="btn btn-secondary" id="btnInspectHfRepo">Inspect Files</button>
-                <button class="btn btn-primary" id="btnPullHfModel">Download GGUF</button>
+                <button class="btn btn-secondary" id="btnInspectHfRepo">Dateien ansehen</button>
+                <button class="btn btn-primary" id="btnPullHfModel">GGUF laden</button>
               </div>
               <div id="hfFilesBox" style="display:none;margin-top:12px;"></div>
             </div>
 
             <!-- Currently Loaded Model & Local Cache -->
             <div class="app-card">
-              <div class="app-card-title">Loaded & Downloaded Models</div>
+              <div class="app-card-title">Geladene und heruntergeladene Modelle</div>
               <div id="loadedModelHubItem"></div>
               <div id="cachedModelsHubList" style="margin-top:8px;"></div>
             </div>
@@ -1960,7 +2113,7 @@
                   <input type="text" id="inpKeyCustom" class="ui-input mono" style="flex:1;min-width:150px;" placeholder="Optional secret (leave empty to generate)">
                   <input type="number" id="inpKeyRpm" class="ui-input mono" style="width:95px;" placeholder="RPM">
                   <input type="number" id="inpKeyTpm" class="ui-input mono" style="width:95px;" placeholder="TPM">
-                  <button class="btn btn-primary" id="btnCreateKey">+ Create Key</button>
+                  <button class="btn btn-primary" id="btnCreateKey">Schlüssel anlegen</button>
                 </div>
 
                 <div id="newKeyBanner" style="display:none;padding:10px 12px;border-radius:8px;border:1px solid var(--primary);background:color-mix(in srgb, var(--primary) 12%, transparent);margin-bottom:12px;align-items:center;justify-content:space-between;gap:10px;">
@@ -2186,8 +2339,9 @@
 
     // Accent palette
     const ACCENT_COLORS = [
+      { name: 'Patina',  value: 'patina',  thumb: '#43c0aa', primary: '#43c0aa', primaryLight: '#17806f', sidebar: { light: '#e3eae7', dark: '#0b1116' } },
+      { name: 'Kupfer',  value: 'kupfer',  thumb: '#d9925a', primary: '#e0955c', primaryLight: '#b4672b', sidebar: { light: '#ece6df', dark: '#150f0b' } },
       { name: 'Emerald', value: 'emerald', thumb: '#38AB51', primary: '#38AB51', sidebar: { light: '#C4F3CE', dark: '#194D24' } },
-      { name: 'Gray',    value: 'gray',    thumb: '#3F3F46', primary: '#f17455', sidebar: { light: '#f1f1f1', dark: '#171717' } },
       { name: 'Teal',    value: 'teal',    thumb: '#38AB8D', primary: '#38AB8D', sidebar: { light: '#C4F3E6', dark: '#194D3F' } },
       { name: 'Cyan',    value: 'cyan',    thumb: '#45BBDE', primary: '#45BBDE', sidebar: { light: '#C4E8F3', dark: '#0F4657' } },
       { name: 'Blue',    value: 'blue',    thumb: '#456BDE', primary: '#456BDE', sidebar: { light: '#C4D0F3', dark: '#0F2157' } },
@@ -2225,7 +2379,7 @@
       selectedModel: '',
       apiKey: localStorage.getItem(STORAGE.apiKey) || '',
       theme: localStorage.getItem(STORAGE.theme) || 'dark',
-      accent: localStorage.getItem(STORAGE.accent) || 'emerald',
+      accent: localStorage.getItem(STORAGE.accent) || 'patina',
       fontSize: localStorage.getItem(STORAGE.fontSize) || '15px',
       coloredBubble: localStorage.getItem(STORAGE.coloredBubble) !== 'false',
       showSpeed: localStorage.getItem(STORAGE.showSpeed) !== 'false',
@@ -2279,7 +2433,12 @@
       document.body.classList.toggle('colored-user-bubble', state.coloredBubble);
 
       const c = ACCENT_COLORS.find((x) => x.value === state.accent) || ACCENT_COLORS[0];
-      document.documentElement.style.setProperty('--primary', c.primary);
+      const primary = isDark ? c.primary : (c.primaryLight || c.primary);
+      // text on the accent: dark on light accents, light on dark ones
+      const lum = [1, 3, 5].map((i) => parseInt(primary.slice(i, i + 2), 16) / 255).reduce((s, v, k) => s + v * [0.2126, 0.7152, 0.0722][k], 0);
+      document.documentElement.style.setProperty('--primary', primary);
+      document.documentElement.style.setProperty('--ring', primary);
+      document.documentElement.style.setProperty('--primary-foreground', lum > 0.45 ? '#06161a' : '#f6fbfa');
       document.documentElement.style.setProperty('--sidebar', isDark ? c.sidebar.dark : c.sidebar.light);
 
       $('selThemeMode').value = state.theme;
@@ -2392,7 +2551,7 @@
     function renderThreadList() {
       const container = $('threadList');
       if (!state.threads.length) {
-        container.innerHTML = `<div style="padding:8px 6px;font-size:12px;color:var(--muted-foreground);">No conversations yet</div>`;
+        container.innerHTML = `<div style="padding:8px 6px;font-size:12px;color:var(--muted-foreground);">Noch keine Chats</div>`;
         return;
       }
       container.innerHTML = state.threads.map((t) => `
@@ -2759,6 +2918,46 @@
       }
     }
 
+    // --- Start screen: what the engine is doing right now ---
+    const heroTrace = { samples: [], lastTokens: null, lastUptime: null, size: 60 };
+
+    function updateHero(data) {
+      const m = data.model || {};
+      const mt = data.metrics || {};
+      const nf = (value, digits = 1) => value.toLocaleString('de-DE', { maximumFractionDigits: digits });
+      const params = Number(m.parameters || 0);
+      const size = params >= 1e9 ? `${nf(params / 1e9)} Milliarden Parameter` : params > 0 ? `${nf(params / 1e6, 0)} Millionen Parameter` : '';
+      const facts = [size, m.quantization, m.max_context ? `${nf(m.max_context, 0)} Token Kontext` : ''].filter(Boolean);
+      $('welcomeHeading').textContent = state.selectedModel || m.name || 'Bereit';
+      $('welcomeSub').textContent = `Läuft lokal auf diesem Rechner${facts.length ? ': ' + facts.join(', ') : ''}.`;
+
+      // tokens per second from the counters of the server (its own clock, so a slow poll does not skew it)
+      const tokens = Number(mt.generated_tokens_total || 0);
+      const uptime = Number(mt.uptime_secs || 0);
+      let rate = 0;
+      if (heroTrace.lastTokens !== null && uptime > heroTrace.lastUptime && tokens >= heroTrace.lastTokens) {
+        rate = (tokens - heroTrace.lastTokens) / (uptime - heroTrace.lastUptime);
+      }
+      heroTrace.lastTokens = tokens;
+      heroTrace.lastUptime = uptime;
+      heroTrace.samples.push(rate);
+      if (heroTrace.samples.length > heroTrace.size) heroTrace.samples.shift();
+
+      const top = Math.max(10, ...heroTrace.samples);
+      const step = 600 / (heroTrace.size - 1);
+      const offset = heroTrace.size - heroTrace.samples.length;
+      const points = heroTrace.samples.map((v, i) => `${((offset + i) * step).toFixed(1)},${(63 - Math.min(1, v / top) * 58).toFixed(1)}`);
+      const trace = `0,63 ${points.join(' ')}`;
+      $('heroTraceLine').setAttribute('points', trace);
+      $('headerTraceLine').setAttribute('points', trace);
+      const busy = Number(mt.slots_running || 0) > 0;
+      $('heroTrace').classList.toggle('is-busy', busy);
+      $('heroTps').textContent = busy ? nf(rate, 1) : '0';
+      $('headerTps').textContent = busy ? nf(rate, 0) : '0';
+      $('headerTrace').classList.toggle('is-busy', busy);
+      $('heroTpsLabel').textContent = busy ? 'Token pro Sekunde, das Modell antwortet gerade' : 'Token pro Sekunde, das Modell wartet auf eine Frage';
+    }
+
     // --- Studio Status Sync ---
     async function refreshStudioStatus() {
       try {
@@ -2766,13 +2965,14 @@
         if (!res.ok) return;
         const data = await res.json();
         state.status = data;
+        updateHero(data);
 
         const m = data.model || {};
         if (!state.selectedModel) state.selectedModel = m.name || 'tiny';
         $('activeModelLabel').textContent = state.selectedModel;
         $('activeQuantChip').textContent = m.quantization || 'GGUF';
         $('footerSimdLabel').textContent = `CPU · ${data.config?.active_cpu_tier || 'simd'}`;
-        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} slots`;
+        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} Plätze`;
         $('settingsVersionBadge').textContent = `fllm-rs ${data.version || '0.1.2'}`;
         $('genBuildInfoText').textContent = data.build_info || '';
         $('serverEndpointUrlText').textContent = `${window.location.origin}/v1`;
@@ -2803,6 +3003,11 @@
         $('chkCpuRepack').checked = Boolean(data.config?.cpu_repack);
         $('selSimdTierCap').value = data.config?.cpu_tier_cap || 'auto';
         updateCliAndSdkSnippets();
+        if (!state._routeSampleLoaded) {
+          // the route tester starts with the name of the model that is really loaded
+          state._routeSampleLoaded = true;
+          updateRouteTesterSample();
+        }
       } catch {}
     }
 
@@ -2821,7 +3026,7 @@
       $('loadedModelHubItem').innerHTML = `
         <div class="app-card-item">
           <div class="app-item-info">
-            <div class="app-item-title">${escapeHtml(m.name || 'Loaded Model')} <span class="quant-chip" style="color:var(--primary);">Active in Engine</span></div>
+            <div class="app-item-title">${escapeHtml(m.name || 'Loaded Model')} <span class="quant-chip" style="color:var(--primary);">In der Engine aktiv</span></div>
             <div class="app-item-desc mono">${escapeHtml(m.arch || 'llama')} · ${escapeHtml(m.parameter_size || '')} · ${formatBytes(m.size_bytes)} · ${m.max_context || 512} ctx</div>
           </div>
           <div class="app-item-actions">
@@ -2838,7 +3043,7 @@
             <div class="app-item-desc mono">${formatBytes(c.size_bytes)} · ${escapeHtml(c.path)}</div>
           </div>
           <div class="app-item-actions">
-            <button class="btn btn-xs btn-destructive" data-del-cache="${escapeHtml(c.name)}">Delete</button>
+            <button class="btn btn-xs btn-destructive" data-del-cache="${escapeHtml(c.name)}">Löschen</button>
           </div>
         </div>
       `).join('');
@@ -2859,11 +3064,11 @@
                 <span class="quant-chip">${entry.context_length} ctx</span>
                 ${entry.vision ? '<span class="quant-chip">Vision</span>' : ''}
               </div>
-              <p class="app-item-desc mono" style="margin-top:3px;">${escapeHtml(entry.hf_repo)} · Recommended for your RAM: <strong>${escapeHtml(entry.recommended_quant)}</strong> (~${entry.estimated_size_gb?.toFixed(1) || '?'} GB)</p>
+              <p class="app-item-desc mono" style="margin-top:3px;">${escapeHtml(entry.default_repo || entry.gguf_repo || '')}: für deinen Arbeitsspeicher empfohlen ist <strong>${escapeHtml(entry.recommended_quant)}</strong>, etwa ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB</p>
             </div>
             <div style="display:flex;gap:6px;">
-              <button class="btn btn-sm btn-outline" data-inspect-hf="${escapeHtml(entry.hf_repo)}">Show Files</button>
-              <button class="btn btn-sm btn-primary" data-pull-cat="${escapeHtml(entry.id)}" data-pull-q="${escapeHtml(entry.recommended_quant)}">Download ${escapeHtml(entry.recommended_quant)}</button>
+              <button class="btn btn-sm btn-outline" data-inspect-hf="${escapeHtml(entry.default_repo || entry.gguf_repo || '')}">Dateien</button>
+              <button class="btn btn-sm btn-primary" data-pull-cat="${escapeHtml(entry.id)}" data-pull-q="${escapeHtml(entry.recommended_quant)}">${escapeHtml(entry.recommended_quant)} laden</button>
             </div>
           </div>
         </div>
@@ -2881,7 +3086,7 @@
         $('inpGlobalTpm').value = rl.tokens_per_minute || '';
         const keys = state.keysData.keys || [];
         if (!keys.length) {
-          $('apiKeysTableContainer').innerHTML = `<div class="app-item-desc">No API keys configured — server is currently open on localhost. Create a key above to enable Bearer authentication.</div>`;
+          $('apiKeysTableContainer').innerHTML = `<div class="app-item-desc">Es ist kein API-Schlüssel eingerichtet. Der Server ist offen und nimmt Änderungen nur von diesem Rechner an. Lege oben einen Schlüssel an, um Anfragen mit Bearer-Token zu verlangen.</div>`;
           return;
         }
         $('apiKeysTableContainer').innerHTML = `
@@ -2892,12 +3097,12 @@
                 <tr>
                   <td class="mono">${escapeHtml(k.id)}</td>
                   <td><strong>${escapeHtml(k.label)}</strong></td>
-                  <td class="mono">${escapeHtml(k.masked_key)}</td>
-                  <td class="mono">${k.requests_per_minute ? k.requests_per_minute + ' RPM' : 'Global'}</td>
-                  <td class="mono tabular">${k.requests_total}</td>
-                  <td class="mono tabular">${k.tokens_total}</td>
-                  <td class="mono tabular">${k.rate_limited_total}</td>
-                  <td><button class="btn btn-xs btn-destructive" data-revoke-key="${escapeHtml(k.id)}">Revoke</button></td>
+                  <td class="mono">${escapeHtml(k.masked)}</td>
+                  <td class="mono">${k.rpm_limit ? k.rpm_limit + ' pro Minute' : 'Standard'}</td>
+                  <td class="mono tabular">${k.requests_accepted}</td>
+                  <td class="mono tabular">${k.tokens_used}</td>
+                  <td class="mono tabular">${k.rejected}</td>
+                  <td><button class="btn btn-xs btn-destructive" data-revoke-key="${escapeHtml(k.id)}">Widerrufen</button></td>
                 </tr>
               `).join('')}
             </tbody>
@@ -3168,7 +3373,7 @@
         },
       });
       if (res.ok) {
-        toast('Saved live to Rust Engine defaults');
+        toast('Als Standard der Engine gespeichert');
         refreshStudioStatus();
       }
     };
@@ -3250,14 +3455,14 @@
       const copyCode = e.target.closest('[data-copy-code]');
       if (copyCode) {
         const pre = $(copyCode.dataset.copyCode);
-        if (pre) { await navigator.clipboard.writeText(pre.textContent); toast('Code copied'); }
+        if (pre) { await navigator.clipboard.writeText(pre.textContent); toast('Code kopiert'); }
         return;
       }
       const copyMsg = e.target.closest('[data-msg-copy]');
       if (copyMsg) {
         const t = currentThread();
         const m = t?.messages?.[Number(copyMsg.dataset.msgCopy)];
-        if (m) { await navigator.clipboard.writeText(m.content || ''); toast('Message copied'); }
+        if (m) { await navigator.clipboard.writeText(m.content || ''); toast('Nachricht kopiert'); }
         return;
       }
       const delMsg = e.target.closest('[data-msg-del]');
@@ -3290,7 +3495,7 @@
       saveThreads();
       renderThreadList();
       renderChatArea();
-      toast('All chats cleared');
+      toast('Alle Chats gelöscht');
     });
     $('btnFactoryResetThreads').addEventListener('click', () => $('btnDeleteAllThreads').click());
     $('btnExportThreads').addEventListener('click', () => {
@@ -3350,7 +3555,7 @@
     $('btnRefreshHub').addEventListener('click', refreshHub);
     $('btnInspectHfRepo').addEventListener('click', async () => {
       const repo = $('hfRepoInput').value.trim();
-      if (!repo) { toast('Enter a Hugging Face repo ID first'); return; }
+      if (!repo) { toast('Gib zuerst ein Hugging-Face-Repository an'); return; }
       const box = $('hfFilesBox');
       box.style.display = 'block';
       box.innerHTML = `<div class="app-item-desc">Fetching files from ${escapeHtml(repo)}...</div>`;
@@ -3371,10 +3576,10 @@
       const model = $('hfRepoInput').value.trim();
       const quant = $('hfQuantInput').value.trim();
       if (!model) return;
-      toast(`Downloading ${model}...`);
+      toast(`${model} wird geladen ...`);
       const res = await apiFetch('/api/studio/models/pull', { method: 'POST', body: { model, quant } });
       const d = await res.json();
-      if (res.ok) { toast(`Downloaded: ${d.model_path}`); refreshHub(); }
+      if (res.ok) { toast(`Geladen: ${d.model_path}`); refreshHub(); }
       else toast(d.error?.message || 'Download failed');
     });
     $('surface-hub').addEventListener('click', async (e) => {
@@ -3389,7 +3594,7 @@
       const delCache = e.target.closest('[data-del-cache]');
       if (delCache) {
         const res = await apiFetch('/api/studio/models/cache', { method: 'DELETE', body: { name: delCache.dataset.delCache } });
-        if (res.ok) { toast('Deleted from cache'); refreshHub(); }
+        if (res.ok) { toast('Aus dem Cache gelöscht'); refreshHub(); }
       }
     });
 
@@ -3401,7 +3606,7 @@
       const tpm = parseFloat($('inpKeyTpm').value) || null;
       const res = await apiFetch('/api/studio/keys', { method: 'POST', body: { label, key, rpm, tpm } });
       const data = await res.json();
-      if (!res.ok) { toast(data.error?.message || 'Failed to create key'); return; }
+      if (!res.ok) { toast(data.error?.message || 'Schlüssel konnte nicht angelegt werden'); return; }
       state.apiKey = data.secret;
       localStorage.setItem(STORAGE.apiKey, state.apiKey);
       $('newKeySecretText').textContent = data.secret;
@@ -3410,27 +3615,27 @@
       $('inpKeyCustom').value = '';
       refreshApiKeys();
       updateCliAndSdkSnippets();
-      toast(`API Key "${data.key.label}" created in Rust`);
+      toast(`API-Schlüssel "${data.key.label}" angelegt`);
     });
     $('btnCopyNewKey').addEventListener('click', async () => {
       await navigator.clipboard.writeText($('newKeySecretText').textContent);
-      toast('API Key copied');
+      toast('API-Schlüssel kopiert');
     });
     $('apiKeysTableContainer').addEventListener('click', async (e) => {
       const rev = e.target.closest('[data-revoke-key]');
       if (!rev) return;
       const res = await apiFetch(`/api/studio/keys/${encodeURIComponent(rev.dataset.revokeKey)}`, { method: 'DELETE' });
-      if (res.ok) { toast('API Key revoked'); refreshApiKeys(); }
+      if (res.ok) { toast('API-Schlüssel widerrufen'); refreshApiKeys(); }
     });
     $('btnSaveGlobalRate').addEventListener('click', async () => {
       const rpm = parseFloat($('inpGlobalRpm').value) || null;
       const tpm = parseFloat($('inpGlobalTpm').value) || null;
       const res = await apiFetch('/api/studio/config', { method: 'POST', body: { rate_limit: { requests_per_minute: rpm, tokens_per_minute: tpm } } });
-      if (res.ok) { toast('Global rate limit updated in Rust'); refreshApiKeys(); }
+      if (res.ok) { toast('Allgemeines Limit gespeichert'); refreshApiKeys(); }
     });
     $('btnCopyServerUrl').addEventListener('click', async () => {
       await navigator.clipboard.writeText($('serverEndpointUrlText').textContent);
-      toast('Server URL copied');
+      toast('Adresse kopiert');
     });
     $('selRouteTest').addEventListener('change', updateRouteTesterSample);
     $('btnRunRouteTest').addEventListener('click', async () => {
@@ -3447,18 +3652,18 @@
     // Hardware & SIMD events
     $('selSimdTierCap').addEventListener('change', async () => {
       const res = await apiFetch('/api/studio/config', { method: 'POST', body: { cpu_tier_cap: $('selSimdTierCap').value } });
-      if (res.ok) { toast('Rust CPU SIMD tier updated'); refreshStudioStatus(); refreshHardware(false); }
+      if (res.ok) { toast('CPU-Stufe geändert'); refreshStudioStatus(); refreshHardware(false); }
     });
     $('chkCpuRepack').addEventListener('change', async () => {
       const res = await apiFetch('/api/studio/config', { method: 'POST', body: { cpu_repack: $('chkCpuRepack').checked } });
-      if (res.ok) { toast('CPU prompt weight repacking updated'); refreshStudioStatus(); }
+      if (res.ok) { toast('Umpacken der Gewichte geändert'); refreshStudioStatus(); }
     });
     $('btnMeasureBandwidth').addEventListener('click', () => {
-      toast('Measuring RAM bandwidth in Rust...');
+      toast('Speicherbandbreite wird gemessen ...');
       refreshHardware(true);
     });
     $('btnRunSimdSelftest').addEventListener('click', async () => {
-      toast('Self-Test laeuft (ca. 5 s)...');
+      toast('Selbsttest läuft, etwa 5 Sekunden ...');
       const res = await apiFetch('/api/studio/selftest-cpu', { method: 'POST', body: {} });
       const data = await res.json();
       $('simdSelftestCard').style.display = 'block';
@@ -3494,13 +3699,13 @@
       if (!dest) return;
       const src = state.status?.model?.name || 'tiny';
       const res = await apiFetch('/api/copy', { method: 'POST', body: { source: src, destination: dest } });
-      if (res.ok) { $('inpNewAlias').value = ''; toast(`Alias "${dest}" added`); refreshStudioStatus(); }
+      if (res.ok) { $('inpNewAlias').value = ''; toast(`Alias "${dest}" hinzugefügt`); refreshStudioStatus(); }
     });
     $('providerAliasesList').addEventListener('click', async (e) => {
       const del = e.target.closest('[data-del-alias]');
       if (!del) return;
       const res = await apiFetch('/api/delete', { method: 'DELETE', body: { model: del.dataset.delAlias } });
-      if (res.ok) { toast('Alias removed'); refreshStudioStatus(); }
+      if (res.ok) { toast('Alias entfernt'); refreshStudioStatus(); }
     });
 
     // SDK & CLI copy
@@ -3515,19 +3720,19 @@
     });
     $('btnCopySdkSnippet').addEventListener('click', async () => {
       await navigator.clipboard.writeText($('preSdkSnippet').textContent);
-      toast('Snippet copied');
+      toast('Beispiel kopiert');
     });
     $('btnCopyCliCmd').addEventListener('click', async () => {
       await navigator.clipboard.writeText($('genCliPre').textContent);
-      toast('CLI command copied');
+      toast('Befehl kopiert');
     });
     $('btnCopyTomlCmd').addEventListener('click', async () => {
       await navigator.clipboard.writeText($('genTomlPre').textContent);
-      toast('fllm.toml copied');
+      toast('fllm.toml kopiert');
     });
     $('btnRefreshAllStatus').addEventListener('click', () => {
       refreshStudioStatus();
-      toast('Refreshed from Rust server');
+      toast('Vom Server aktualisiert');
     });
 
     // Search Modal (Ctrl+K)
@@ -3598,7 +3803,9 @@
     renderChatArea();
     updateRouteTesterSample();
     refreshStudioStatus();
-    setInterval(refreshStudioStatus, 3000);
+    // on a phone the rail would cover the page: start with it closed
+    if (window.matchMedia('(max-width: 760px)').matches) toggleSidebar();
+    setInterval(refreshStudioStatus, 2000);
   })();
   </script>
 </body>

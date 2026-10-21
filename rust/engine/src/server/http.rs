@@ -227,11 +227,39 @@ impl<F: FnOnce() + Unpin> Drop for Watched<F> {
 /// The Studio routes that change something (settings, model downloads and deletions, API keys) are
 /// administration. Without a configured API key they are only open to a client on the same machine:
 /// otherwise anybody who can reach the port could delete models or register a key and lock the owner out.
-pub fn studio_admin_blocked(auth_required: bool, method: &Method, path: &str, peer: Option<SocketAddr>) -> bool {
-    !auth_required
-        && path.starts_with("/api/studio/")
-        && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-        && !peer.is_some_and(|addr| addr.ip().to_canonical().is_loopback())
+/// A web page in the owner's own browser reaches the port from this machine as well, so the request must
+/// also address the server by `localhost` or an IP address (a DNS-rebinding name is refused) and, when the
+/// browser names an origin, come from the page of this very server.
+pub fn studio_admin_blocked(
+    auth_required: bool,
+    method: &Method,
+    path: &str,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+) -> bool {
+    if auth_required
+        || !path.starts_with("/api/studio/")
+        || matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+    {
+        return false;
+    }
+    if !peer.is_some_and(|addr| addr.ip().to_canonical().is_loopback()) {
+        return true;
+    }
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    if !(name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::IpAddr>().is_ok()) {
+        return true;
+    }
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        None => false,
+        Some(origin) => origin
+            .split_once("://")
+            .is_none_or(|(_, authority)| !authority.eq_ignore_ascii_case(host)),
+    }
 }
 
 /// The middleware of every route. Order: request id, CORS preflight, authentication and rate limit, handler
@@ -254,7 +282,7 @@ pub async fn layer(State(ctx): State<Arc<HttpContext>>, request: Request, next: 
         && request.headers().contains_key("access-control-request-method")
     {
         preflight(&ctx.options, request.headers(), origin.as_deref().unwrap_or_default(), &id, &path)
-    } else if studio_admin_blocked(ctx.security.auth_required(), &method, &path, peer) {
+    } else if studio_admin_blocked(ctx.security.auth_required(), &method, &path, peer, request.headers()) {
         errors::for_path(
             &path,
             StatusCode::FORBIDDEN,
@@ -607,24 +635,51 @@ mod studio_gate_tests {
         Some(text.parse().unwrap())
     }
 
+    fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        map.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+        if let Some(origin) = origin {
+            map.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+        }
+        map
+    }
+
+    const PULL: &str = "/api/studio/models/pull";
+
     #[test]
     fn studio_administration_is_local_without_an_api_key() {
+        let local = headers("127.0.0.1:8000", None);
         let post = Method::POST;
-        let path = "/api/studio/models/pull";
-        assert!(!studio_admin_blocked(false, &post, path, addr("127.0.0.1:5000")));
-        assert!(!studio_admin_blocked(false, &post, path, addr("[::1]:5000")));
-        assert!(!studio_admin_blocked(false, &post, path, addr("[::ffff:127.0.0.1]:5000")));
-        assert!(studio_admin_blocked(false, &post, path, addr("192.168.1.20:5000")));
-        assert!(studio_admin_blocked(false, &Method::DELETE, "/api/studio/keys/key-1", addr("10.7.0.4:1")));
-        assert!(studio_admin_blocked(false, &post, path, None), "an unknown peer counts as remote");
+        assert!(!studio_admin_blocked(false, &post, PULL, addr("127.0.0.1:5000"), &local));
+        assert!(!studio_admin_blocked(false, &post, PULL, addr("[::1]:5000"), &local));
+        assert!(!studio_admin_blocked(false, &post, PULL, addr("[::ffff:127.0.0.1]:5000"), &local));
+        assert!(studio_admin_blocked(false, &post, PULL, addr("192.168.1.20:5000"), &local));
+        assert!(studio_admin_blocked(false, &Method::DELETE, "/api/studio/keys/key-1", addr("10.7.0.4:1"), &local));
+        assert!(studio_admin_blocked(false, &post, PULL, None, &local), "an unknown peer counts as remote");
+    }
+
+    #[test]
+    fn studio_administration_refuses_pages_of_other_sites_and_rebinding_names() {
+        let post = Method::POST;
+        let peer = addr("127.0.0.1:5000");
+        // the page of this server itself, by name or address
+        assert!(!studio_admin_blocked(false, &post, PULL, peer, &headers("localhost:8000", Some("http://localhost:8000"))));
+        assert!(!studio_admin_blocked(false, &post, PULL, peer, &headers("[::1]:8000", Some("http://[::1]:8000"))));
+        // another site's page talking to the local server
+        assert!(studio_admin_blocked(false, &post, PULL, peer, &headers("127.0.0.1:8000", Some("https://evil.example"))));
+        assert!(studio_admin_blocked(false, &post, PULL, peer, &headers("localhost:8000", Some("http://localhost:3000"))));
+        // a name that resolves to 127.0.0.1 (DNS rebinding), even with a matching origin
+        assert!(studio_admin_blocked(false, &post, PULL, peer, &headers("rebind.example:8000", Some("http://rebind.example:8000"))));
+        assert!(studio_admin_blocked(false, &post, PULL, peer, &headers("rebind.example:8000", None)));
     }
 
     #[test]
     fn studio_reading_and_other_routes_are_not_gated() {
         let remote = addr("192.168.1.20:5000");
-        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/status", remote));
-        assert!(!studio_admin_blocked(false, &Method::POST, "/v1/chat/completions", remote));
+        let h = headers("192.168.1.5:8000", None);
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/status", remote, &h));
+        assert!(!studio_admin_blocked(false, &Method::POST, "/v1/chat/completions", remote, &h));
         // with an API key configured the normal key check decides
-        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/keys", remote));
+        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/keys", remote, &h));
     }
 }

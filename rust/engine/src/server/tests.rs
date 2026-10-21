@@ -154,6 +154,7 @@ impl Harness {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
+            .header(header::HOST, "127.0.0.1:8000")
             .extension(crate::server::http::ClientAddr("127.0.0.1:50000".parse().unwrap()));
         for (name, value) in headers {
             builder = builder.header(*name, *value);
@@ -1526,6 +1527,7 @@ async fn studio_administration_from_another_machine_needs_an_api_key() {
             .method(method)
             .uri(path)
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::HOST, "192.168.1.5:8000")
             .extension(crate::server::http::ClientAddr("192.168.1.20:50000".parse().unwrap()))
             .body(Body::from(body.to_owned()))
             .unwrap()
@@ -1542,6 +1544,17 @@ async fn studio_administration_from_another_machine_needs_an_api_key() {
         let reply = h.send(remote(method, path, "{}")).await;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{path}");
     }
+    // a page of another site in the owner's own browser comes from this machine too, but names its own origin
+    let foreign_page = Request::builder()
+        .method(Method::POST)
+        .uri("/api/studio/keys")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "127.0.0.1:8000")
+        .header(header::ORIGIN, "https://evil.example")
+        .extension(crate::server::http::ClientAddr("127.0.0.1:50001".parse().unwrap()))
+        .body(Body::from("{}"))
+        .unwrap();
+    assert_eq!(h.send(foreign_page).await.status, StatusCode::FORBIDDEN);
     assert_eq!(h.get("/api/studio/keys").await.json()["auth_required"], false);
 }
 

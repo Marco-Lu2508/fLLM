@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Studio: a browser control room at `/` with chat, live throughput, model hub (list, download and delete cached models), API key management, run-time sampling defaults and a CPU self test, backed by `/api/studio/*`. Changes (settings, downloads, deletions, keys) are accepted without an API key only from the same machine, from this server's own page, addressed by `localhost` or an IP address; generated keys come from the operating system random source.
 - `install.sh --variant auto|rocm`: the installer picks cuda, rocm, gnu (Vulkan) or cpu from the hardware; `release.yml` builds the optional `fllm-linux-x86_64-rocm.tar.gz` (HIP kernels, untested on AMD GPUs).
 
 ### Fixed
