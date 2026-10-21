@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="de" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fLLM Studio</title>
+  <style>/*__STYLE__*/</style>
+</head>
+<body class="colored-user-bubble">
+  <div class="app-shell" id="appShell">
+
+    <!-- ======================================================================
+         1. FLOATING LEFT SIDEBAR (components/left-sidebar/index.tsx)
+         ====================================================================== -->
+    <aside class="sidebar-outer">
+      <div class="sidebar-floating">
+        <div class="sidebar-header">
+          <!-- Top Brand Row -->
+          <div class="sidebar-brand-row">
+            <div class="brand-title">
+              <span class="brand-dot" id="sidebarStatusDot"></span>
+              <span>fLLM</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:2px;">
+              <button class="btn-icon btn-icon-xs" id="btnCollapseSidebar" title="Sidebar einklappen (Ctrl+B)">
+                <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- NavTabs: Chat vs Playground -->
+          <div class="nav-tabs" id="sidebarModeTabs">
+            <button class="nav-tab active" data-playmode="chat">
+              <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              <span>Chat</span>
+            </button>
+            <button class="nav-tab" data-playmode="infill" title="Code-Vervollstaendigung (Fill-in-the-Middle): Du gibst Code vor und nach einer Luecke an, das Modell fuellt die Mitte.">
+              <svg viewBox="0 0 24 24" class="icon icon-sm"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              <span>Code</span>
+            </button>
+          </div>
+
+          <!-- NavMain (components/left-sidebar/NavMain.tsx) -->
+          <nav class="nav-main">
+            <button class="nav-item" id="navNewChat">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
+              <span>Neuer Chat</span>
+              <span class="kbd-group">Ctrl N</span>
+            </button>
+            <button class="nav-item" id="navOpenSearch">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <span>Suche</span>
+              <span class="kbd-group">Ctrl K</span>
+            </button>
+            <button class="nav-item" data-surface="hub" id="navHub">
+              <svg viewBox="0 0 24 24" class="icon"><rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3"/></svg>
+              <span>Modelle</span>
+            </button>
+            <button class="nav-item" data-surface="settings" id="navSettings">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span>Einstellungen</span>
+            </button>
+          </nav>
+        </div>
+
+        <!-- SidebarContent: Chats List (NavChats.tsx) -->
+        <div class="sidebar-content">
+          <div class="sidebar-group-header">
+            <span>Chats</span>
+            <div style="display:flex;gap:2px;">
+              <button class="btn-icon btn-icon-xs" id="btnExportThreads" title="Chats exportieren (JSON)">
+                <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+              </button>
+              <button class="btn-icon btn-icon-xs" id="btnDeleteAllThreads" title="Alle Chats löschen">
+                <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="thread-list" id="threadList"></div>
+        </div>
+
+        <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
+        <div class="sidebar-footer">
+          <span class="mono" id="footerSimdLabel">CPU · avx-vnni</span>
+          <span class="mono tabular" id="footerSlotsLabel">0/8 Plätze</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ======================================================================
+         2. MAIN CONTENT INSET (SidebarInset)
+         ====================================================================== -->
+    <main class="main-inset">
+
+      <!-- ====================================================================
+           SURFACE A: CHAT / HOME (routes/index.tsx & routes/threads/$threadId.tsx)
+           ==================================================================== -->
+      <section class="surface-view active" id="surface-chat">
+        <header class="header-page">
+          <div class="header-left">
+            <button class="btn-icon" id="btnExpandSidebarChat" style="display:none;" title="Sidebar öffnen">
+              <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+            </button>
+            <!-- DropdownModelProvider -->
+            <div style="position:relative;">
+              <button class="model-pill" id="btnModelDropdown">
+                <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                <span id="activeModelLabel">fllm-studio-demo</span>
+                <span class="quant-chip" id="activeQuantChip">F32</span>
+                <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--muted-foreground);"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="popover-panel" id="modelDropdownMenu" style="top:calc(100% + 6px);bottom:auto;width:300px;">
+                <div class="popover-head">
+                  <span>Active Model & Aliases</span>
+                  <button class="btn btn-xs btn-ghost" id="btnModelMenuGoHub">Open Hub →</button>
+                </div>
+                <div class="popover-body" id="modelDropdownItems"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="header-right">
+            <div class="header-trace" id="headerTrace" title="Erzeugte Token pro Sekunde" aria-hidden="true">
+              <svg viewBox="0 0 600 64" preserveAspectRatio="none"><polyline id="headerTraceLine" points="0,63 600,63"></polyline></svg>
+              <span class="tabular" id="headerTps">0</span>
+            </div>
+            <span class="quant-chip" id="modeIndicatorBadge">Chat</span>
+            <button class="btn-icon" id="btnClearCurrentChat" title="Aktuellen Chat leeren">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
+            </button>
+            <button class="btn-icon" id="btnQuickLocalServer" title="Local API Server & Keys">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="chat-container is-empty" id="chatContainer">
+          <!-- Messages Scroll Area -->
+          <div class="chat-messages-scroll" id="chatMessagesScroll">
+            <div class="messages-column" id="messagesColumn"></div>
+          </div>
+
+          <!-- Composer Region (Centered when empty, bottom when chatting) -->
+          <div class="chat-composer-region">
+            <div class="chat-empty-hero">
+              <h1 id="welcomeHeading">Bereit</h1>
+              <p id="welcomeSub">Das Modell wird geladen.</p>
+              <div class="hero-trace" id="heroTrace" role="img" aria-label="Erzeugte Token pro Sekunde, letzte zwei Minuten">
+                <svg viewBox="0 0 600 64" preserveAspectRatio="none" aria-hidden="true">
+                  <line class="hero-trace-base" x1="0" y1="63" x2="600" y2="63"></line>
+                  <polyline class="hero-trace-line" id="heroTraceLine" points="0,63 600,63"></polyline>
+                </svg>
+                <div class="hero-trace-read"><b class="tabular" id="heroTps">0</b> <span id="heroTpsLabel">Token pro Sekunde</span></div>
+              </div>
+            </div>
+
+            <div class="chat-input-shell">
+              <!-- Sampling Parameters Popover (containers/SamplerPopover.tsx) -->
+              <div class="popover-panel" id="samplerPopover">
+                <div class="popover-head">
+                  <span>Sampling — Model Parameters</span>
+                  <div style="display:flex;gap:4px;">
+                    <button class="btn btn-xs btn-ghost" id="btnResetSampler">Reset</button>
+                    <button class="btn btn-xs btn-primary" id="btnSaveSamplerToRust" title="Speichert Parameter live als Server-Default in Rust">Save to Rust</button>
+                  </div>
+                </div>
+                <div class="popover-body">
+                  <div class="param-item">
+                    <div class="param-row-top"><span>Temperature</span><input type="number" step="0.05" min="0" max="2" id="numTemp" class="param-val-input" value="0.7"></div>
+                    <input type="range" min="0" max="2" step="0.05" id="rngTemp" value="0.7">
+                  </div>
+                  <div class="param-item">
+                    <div class="param-row-top"><span>Top P</span><input type="number" step="0.01" min="0" max="1" id="numTopP" class="param-val-input" value="0.95"></div>
+                    <input type="range" min="0" max="1" step="0.01" id="rngTopP" value="0.95">
+                  </div>
+                  <div class="param-item">
+                    <div class="param-row-top"><span>Top K</span><input type="number" step="1" min="0" max="200" id="numTopK" class="param-val-input" value="20"></div>
+                    <input type="range" min="0" max="200" step="1" id="rngTopK" value="20">
+                  </div>
+                  <div class="param-item">
+                    <div class="param-row-top"><span>Min P</span><input type="number" step="0.01" min="0" max="1" id="numMinP" class="param-val-input" value="0.0"></div>
+                    <input type="range" min="0" max="1" step="0.01" id="rngMinP" value="0.0">
+                  </div>
+                  <div class="param-item">
+                    <div class="param-row-top"><span>Max Tokens</span><input type="number" step="16" min="1" max="8192" id="numMaxTokens" class="param-val-input" value="256"></div>
+                    <input type="range" min="16" max="2048" step="16" id="rngMaxTokens" value="256">
+                  </div>
+                  <div class="param-item">
+                    <div class="param-row-top"><span>Repeat Penalty</span><input type="number" step="0.05" min="1" max="2" id="numRepeatPen" class="param-val-input" value="1.0"></div>
+                    <input type="range" min="1" max="2" step="0.05" id="rngRepeatPen" value="1.0">
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:4px;">
+                    <div>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Presence Pen.</label>
+                      <input type="number" step="0.1" min="-2" max="2" id="numPresencePen" class="ui-input mono" style="width:100%;" value="0.0">
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Frequency Pen.</label>
+                      <input type="number" step="0.1" min="-2" max="2" id="numFreqPen" class="ui-input mono" style="width:100%;" value="0.0">
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--muted-foreground);">DRY Multiplier</label>
+                      <input type="number" step="0.1" min="0" max="5" id="numDryMult" class="ui-input mono" style="width:100%;" value="0.0">
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Mirostat (0/1/2)</label>
+                      <select id="selMirostat" class="ui-select mono" style="width:100%;">
+                        <option value="0">0 (Off)</option>
+                        <option value="1">1 (Mirostat v1)</option>
+                        <option value="2">2 (Mirostat v2)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Seed (-1 = rand)</label>
+                      <input type="number" step="1" id="numSeed" class="ui-input mono" style="width:100%;" value="-1">
+                    </div>
+                    <div>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Constraint</label>
+                      <select id="selConstraint" class="ui-select mono" style="width:100%;">
+                        <option value="none">Free Text</option>
+                        <option value="json_object">JSON Object</option>
+                        <option value="json_schema">JSON Schema</option>
+                        <option value="gbnf">GBNF Grammar</option>
+                        <option value="regex">Regex</option>
+                      </select>
+                    </div>
+                  </div>
+                  <textarea id="txtConstraintSpec" class="ui-textarea mono" rows="3" style="display:none;font-size:11.5px;" placeholder="JSON Schema / GBNF / Regex..."></textarea>
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding-top:4px;">
+                    <span style="font-size:12px;">Speculative Decoding</span>
+                    <label class="ui-switch"><input type="checkbox" id="chkSpeculative" checked><span class="ui-switch-track"></span></label>
+                  </div>
+                  <div style="display:flex;align-items:center;justify-content:space-between;">
+                    <span style="font-size:12px;">Token Logprobs anzeigen</span>
+                    <label class="ui-switch"><input type="checkbox" id="chkLogprobs"><span class="ui-switch-track"></span></label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Assistant / System Prompt Popover -->
+              <div class="popover-panel" id="assistantPopover" style="width:360px;">
+                <div class="popover-head">
+                  <span>Assistant & System Instructions</span>
+                  <button class="btn btn-xs btn-primary" id="btnSaveSystemPromptRust">Save Default</button>
+                </div>
+                <div class="popover-body">
+                  <label style="font-size:12px;color:var(--muted-foreground);">System Prompt</label>
+                  <textarea id="txtSystemPrompt" class="ui-textarea" rows="4" placeholder="Du bist ein präziser, hilfreicher KI-Assistent..."></textarea>
+                  <label style="font-size:12px;color:var(--muted-foreground);">Stop Sequences (comma-separated)</label>
+                  <input type="text" id="inpStopWords" class="ui-input mono" placeholder="</s>, <|im_end|>">
+                </div>
+              </div>
+
+              <!-- Rounded-3XL ChatInput Card -->
+              <div class="chat-input-box">
+                <div class="attachments-row" id="attachmentsRow"></div>
+
+                <div class="fim-grid" id="fimGrid">
+                  <div class="fim-box">
+                    <label>Code VOR dem Cursor</label>
+                    <textarea id="fimPrefixInput">fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| </textarea>
+                  </div>
+                  <div class="fim-box">
+                    <label>Code NACH dem Cursor</label>
+                    <textarea id="fimSuffixInput">).sum()
+}</textarea>
+                  </div>
+                </div>
+
+                <textarea
+                  id="chatTextarea"
+                  class="chat-textarea"
+                  rows="1"
+                  placeholder="Schreib eine Frage oder einen Auftrag"
+                ></textarea>
+
+                <div class="chat-input-toolbar">
+                  <div class="toolbar-left">
+                    <input type="file" id="fileImageInput" accept="image/*" multiple style="display:none;">
+                    <button class="btn-icon btn-icon-xs" id="btnAttachImg" title="Bild anhängen (Vision)">
+                      <svg viewBox="0 0 24 24" class="icon"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                    </button>
+
+                    <!-- Assistant Switcher Chip -->
+                    <button class="composer-chip" id="btnToggleAssistantPop" title="System Prompt & Assistant">
+                      <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+                      <span>Assistant</span>
+                    </button>
+
+                    <!-- SamplerPopover Trigger (IconAdjustmentsHorizontal) -->
+                    <button class="composer-chip" id="btnToggleSamplerPop" title="Sampling Parameters">
+                      <svg viewBox="0 0 24 24" class="icon icon-sm"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
+                      <span>Sampling</span>
+                    </button>
+
+                    <!-- Thinking / Reasoning Toggle -->
+                    <button class="composer-chip" id="btnToggleThinking" title="Reasoning / Chain-of-Thought">
+                      <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/></svg>
+                      <span>Thinking</span>
+                    </button>
+
+                    <!-- Tools Toggle -->
+                    <button class="composer-chip" id="btnToggleTools" title="Function Calling / Tools aktivieren">
+                      <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                      <span>Tools</span>
+                    </button>
+                  </div>
+
+                  <div class="toolbar-right">
+                    <!-- TokenCounter -->
+                    <span class="mono tabular" style="font-size:11px;color:var(--muted-foreground);margin-right:4px;" id="liveTokenCounter">0 / 512 tok</span>
+
+                    <button class="send-circle-btn" id="btnSendChat" title="Senden (Enter)">
+                      <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Subtle quick-start pills on empty chat -->
+            <div class="chat-starter-pills" id="starterPills">
+              <button class="starter-pill" data-prompt="Erkläre in einfachen Worten, wie ein Sprachmodell Wort für Wort einen Text erzeugt.">
+                <span>Wie erzeugt ein Sprachmodell Text?</span>
+              </button>
+              <button class="starter-pill" data-prompt="Schreibe eine schnelle Rust-Funktion für ein Skalarprodukt zweier f32-Slices.">
+                <span>Skalarprodukt in Rust schreiben</span>
+              </button>
+              <button class="starter-pill" data-action="open-keys">
+                <span>API-Schlüssel anlegen</span>
+              </button>
+              <button class="starter-pill" data-action="open-hub">
+                <span>Modelle verwalten</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           SURFACE B: MODEL HUB (routes/hub/index.tsx)
+           ==================================================================== -->
+      <section class="surface-view" id="surface-hub">
+        <header class="header-page">
+          <div class="header-left">
+            <button class="btn-icon" id="btnExpandSidebarHub" style="display:none;">
+              <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+            </button>
+            <span style="font-weight:600;font-size:15px;">Modelle</span>
+          </div>
+          <div class="header-right">
+            <input type="text" id="hubSearchInput" class="ui-input" style="width:260px;" placeholder="Katalog oder Architektur durchsuchen">
+            <button class="btn btn-sm btn-outline" id="btnRefreshHub">Refresh</button>
+          </div>
+        </header>
+
+        <div class="hub-scroll">
+          <div class="hub-container">
+            <!-- HuggingFace Direct Repo Inspector & Downloader -->
+            <div class="app-card">
+              <div class="app-card-header">
+                <div>
+                  <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Von Hugging Face laden</h2>
+                  <p class="app-item-desc">Sieh dir ein GGUF-Repository auf Hugging Face an oder lade ein Modell direkt in den Modell-Cache.</p>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <input type="text" id="hfRepoInput" class="ui-input mono" style="flex:2;min-width:240px;" placeholder="z. B. Qwen/Qwen3-8B-GGUF oder bartowski/Llama-3.2-3B-Instruct-GGUF">
+                <input type="text" id="hfQuantInput" class="ui-input mono" style="width:140px;" placeholder="Quant (Q4_K_M)">
+                <button class="btn btn-secondary" id="btnInspectHfRepo">Dateien ansehen</button>
+                <button class="btn btn-primary" id="btnPullHfModel">GGUF laden</button>
+              </div>
+              <div id="hfFilesBox" style="display:none;margin-top:12px;"></div>
+            </div>
+
+            <!-- Currently Loaded Model & Local Cache -->
+            <div class="app-card">
+              <div class="app-card-title">Geladene und heruntergeladene Modelle</div>
+              <div id="loadedModelHubItem"></div>
+              <div id="cachedModelsHubList" style="margin-top:8px;"></div>
+            </div>
+
+            <!-- Curated Catalog Models (routes/hub/index.tsx style) -->
+            <div id="hubCatalogCards" style="display:flex;flex-direction:column;gap:12px;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           SURFACE C: SETTINGS (SettingsMenu.tsx + routes/settings/*)
+           ==================================================================== -->
+      <section class="surface-view" id="surface-settings">
+        <header class="header-page" style="border-bottom:1px solid var(--border);">
+          <div class="header-left">
+            <button class="btn-icon" id="btnExpandSidebarSettings" style="display:none;">
+              <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+            </button>
+            <span style="font-weight:600;font-size:15px;">Settings</span>
+          </div>
+          <div class="header-right">
+            <span class="mono" style="font-size:11.5px;color:var(--muted-foreground);" id="settingsVersionBadge">fllm-rs 0.1.2</span>
+          </div>
+        </header>
+
+        <div class="settings-shell">
+          <!-- SettingsMenu Left Column (containers/SettingsMenu.tsx) -->
+          <nav class="settings-menu" id="settingsMenuNav">
+            <button class="settings-nav-btn active" data-spane="general">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" x2="2" y1="8" y2="22"/><line x1="17.5" x2="9" y1="15" y2="15"/></svg>
+              <span>General</span>
+            </button>
+            <button class="settings-nav-btn" data-spane="appearance">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+              <span>Appearance</span>
+            </button>
+            <button class="settings-nav-btn" data-spane="local-api-server">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/></svg>
+              <span>Local API Server</span>
+            </button>
+            <button class="settings-nav-btn" data-spane="hardware">
+              <svg viewBox="0 0 24 24" class="icon"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
+              <span>Hardware & SIMD</span>
+            </button>
+            <button class="settings-nav-btn" data-spane="tokenizer">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
+              <span>Tokenizer & Jinja</span>
+            </button>
+
+            <div class="settings-section-label">Integrations</div>
+            <button class="settings-nav-btn" data-spane="claude-code">
+              <svg viewBox="0 0 24 24" class="icon"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              <span>Claude Code & SDKs</span>
+            </button>
+
+            <div class="settings-section-label">Model Providers</div>
+            <button class="settings-nav-btn" data-spane="provider-fllm">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+              <span>fllm.rs (GGUF)</span>
+            </button>
+          </nav>
+
+          <!-- Settings Right Content Area -->
+          <div class="settings-content-scroll">
+
+            <!-- 1. GENERAL (routes/settings/general.tsx) -->
+            <div class="settings-pane active" id="spane-general">
+              <div class="app-card">
+                <div class="app-card-title">General</div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">App Version & Rust Build</div>
+                    <div class="app-item-desc mono" id="genBuildInfoText">fllm-rs 0.1.2</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-outline" id="btnRefreshAllStatus">Refresh Status</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Hugging Face Cache Folder</div>
+                    <div class="app-item-desc mono">~/.cache/fllm/models</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-secondary" id="btnGenGoHub">Manage Models</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Reset Local Chat History</div>
+                    <div class="app-item-desc">Clears all saved conversation threads in this browser.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-destructive" id="btnFactoryResetThreads">Clear Chats</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">CLI & <code>fllm.toml</code> Configuration Generator</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Reproducible <code>fllm-rs serve</code> Command</div>
+                    <div class="app-item-desc">Generated from your current model, context, aliases, and API key settings.</div>
+                  </div>
+                  <div class="code-card" style="width:100%;margin:0;">
+                    <div class="code-card-header"><span>bash</span><button class="btn btn-xs btn-ghost" id="btnCopyCliCmd">Copy</button></div>
+                    <pre id="genCliPre"></pre>
+                  </div>
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title"><code>fllm.toml</code> Server Manifest</div>
+                  </div>
+                  <div class="code-card" style="width:100%;margin:0;">
+                    <div class="code-card-header"><span>toml</span><button class="btn btn-xs btn-ghost" id="btnCopyTomlCmd">Copy</button></div>
+                    <pre id="genTomlPre"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 2. APPEARANCE (routes/settings/interface.tsx) -->
+            <div class="settings-pane" id="spane-appearance">
+              <div class="app-card">
+                <div class="app-card-title">Appearance</div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Theme</div>
+                    <div class="app-item-desc">Match the OS theme or switch between Dark and Light mode.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <select id="selThemeMode" class="ui-select">
+                      <option value="dark">Dark</option>
+                      <option value="light">Light</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Accent Color</div>
+                    <div class="app-item-desc">Personalize the sidebar gradient and primary controls.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <div class="accent-picker-row" id="accentPickerRow"></div>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Font Size</div>
+                    <div class="app-item-desc">Adjust the application base font size.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <select id="selFontSize" class="ui-select">
+                      <option value="14px">Small (14px)</option>
+                      <option value="15px" selected>Medium (15px)</option>
+                      <option value="16px">Large (16px)</option>
+                      <option value="18px">Extra Large (18px)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Colored User Message Bubble</div>
+                    <div class="app-item-desc">Tint your chat messages with the active primary accent color.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <label class="ui-switch"><input type="checkbox" id="chkColoredBubble" checked><span class="ui-switch-track"></span></label>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Show Token Generation Speed</div>
+                    <div class="app-item-desc">Display live tok/s and TTFT below assistant responses.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <label class="ui-switch"><input type="checkbox" id="chkShowSpeed" checked><span class="ui-switch-track"></span></label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. LOCAL API SERVER (routes/settings/local-api-server.tsx) -->
+            <div class="settings-pane" id="spane-local-api-server">
+              <div class="app-card">
+                <div class="app-card-header">
+                  <div>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Local API Server</h2>
+                    <p class="app-item-desc">Run an OpenAI, Anthropic (<code>/v1/messages</code>), and Ollama (<code>/api/chat</code>) compatible local server powered by Rust.</p>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <span class="backend-chip"><span class="backend-chip-dot"></span>Running</span>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Server Endpoint URL</div>
+                    <div class="app-item-desc mono" id="serverEndpointUrlText">http://127.0.0.1:8000/v1</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-outline" id="btnCopyServerUrl">Copy URL</button>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Global Rate Limits (Token Bucket)</div>
+                    <div class="app-item-desc">Enforced directly in Rust <code>server::security::Security</code> across all endpoints.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <input type="number" id="inpGlobalRpm" class="ui-input mono" style="width:110px;" placeholder="RPM (∞)">
+                    <input type="number" id="inpGlobalTpm" class="ui-input mono" style="width:110px;" placeholder="TPM (∞)">
+                    <button class="btn btn-sm btn-secondary" id="btnSaveGlobalRate">Apply</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- API Keys Card -->
+              <div class="app-card">
+                <div class="app-card-header">
+                  <div>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">API Keys (Bearer & <code>x-api-key</code>)</h2>
+                    <p class="app-item-desc">Create and revoke API keys at runtime in the Rust server. Keys use constant-time SHA-256 verification and per-key rate buckets.</p>
+                  </div>
+                </div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                  <input type="text" id="inpKeyLabel" class="ui-input" style="flex:1;min-width:140px;" placeholder="Key label (e.g. Cursor IDE, Claude Code)">
+                  <input type="text" id="inpKeyCustom" class="ui-input mono" style="flex:1;min-width:150px;" placeholder="Optional secret (leave empty to generate)">
+                  <input type="number" id="inpKeyRpm" class="ui-input mono" style="width:95px;" placeholder="RPM">
+                  <input type="number" id="inpKeyTpm" class="ui-input mono" style="width:95px;" placeholder="TPM">
+                  <button class="btn btn-primary" id="btnCreateKey">Schlüssel anlegen</button>
+                </div>
+
+                <div id="newKeyBanner" style="display:none;padding:10px 12px;border-radius:8px;border:1px solid var(--primary);background:color-mix(in srgb, var(--primary) 12%, transparent);margin-bottom:12px;align-items:center;justify-content:space-between;gap:10px;">
+                  <div>
+                    <div style="font-size:11.5px;font-weight:600;color:var(--primary);">New API Key Created & Activated in Browser:</div>
+                    <code class="mono" style="font-size:13px;" id="newKeySecretText"></code>
+                  </div>
+                  <button class="btn btn-sm btn-secondary" id="btnCopyNewKey">Copy Key</button>
+                </div>
+
+                <div id="apiKeysTableContainer"></div>
+              </div>
+
+              <!-- Live Endpoint Tester -->
+              <div class="app-card">
+                <div class="app-card-title">Interactive Route Tester</div>
+                <div style="display:flex;gap:8px;margin-bottom:10px;">
+                  <select id="selRouteTest" class="ui-select mono" style="flex:1;">
+                    <option value="POST:/v1/chat/completions">POST /v1/chat/completions (OpenAI Chat)</option>
+                    <option value="POST:/v1/messages">POST /v1/messages (Anthropic Messages)</option>
+                    <option value="POST:/v1/responses">POST /v1/responses (OpenAI Responses)</option>
+                    <option value="POST:/api/chat">POST /api/chat (Ollama Chat)</option>
+                    <option value="POST:/v1/embeddings">POST /v1/embeddings (Embeddings)</option>
+                    <option value="POST:/v1/rerank">POST /v1/rerank (Document Reranker)</option>
+                    <option value="GET:/v1/models">GET /v1/models (Models List)</option>
+                    <option value="GET:/props">GET /props (llama.cpp Server Properties)</option>
+                  </select>
+                  <button class="btn btn-primary" id="btnRunRouteTest">Send Request</button>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                  <textarea id="txtRouteReq" class="ui-textarea mono" rows="7" style="font-size:11.5px;"></textarea>
+                  <pre id="preRouteRes" class="ui-textarea mono" style="font-size:11.5px;overflow:auto;max-height:175px;">// Click "Send Request" to inspect response</pre>
+                </div>
+              </div>
+
+              <!-- Collapsible Server Metrics / Prometheus Log (routes/settings/local-api-server.tsx bottom card) -->
+              <div class="app-card">
+                <details id="detailsPrometheusLog">
+                  <summary style="cursor:pointer;font-weight:500;font-size:13.5px;display:flex;align-items:center;justify-content:space-between;">
+                    <span>Server Telemetry & Prometheus <code>/metrics</code></span>
+                    <button type="button" class="btn btn-xs btn-outline" id="btnRefreshMetrics">Refresh</button>
+                  </summary>
+                  <div class="code-card" style="margin-top:10px;">
+                    <pre id="prePrometheusMetrics" style="max-height:220px;">Loading /metrics...</pre>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            <!-- 4. HARDWARE & SIMD (routes/settings/hardware.tsx) -->
+            <div class="settings-pane" id="spane-hardware">
+              <div class="app-card">
+                <div class="app-card-header">
+                  <div>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Hardware & Rust CPU SIMD Engine</h2>
+                    <p class="app-item-desc">Sieh, welche Geräte fLLM nutzt, begrenze die CPU-Befehlssätze und prüfe die Rechenkerne mit einem Selbsttest.</p>
+                  </div>
+                  <div style="display:flex;gap:6px;">
+                    <button class="btn btn-sm btn-outline" id="btnMeasureBandwidth">Measure RAM Bandwidth</button>
+                    <button class="btn btn-sm btn-primary" id="btnRunSimdSelftest">Run SIMD Self-Test (21 Kernels)</button>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Höchste CPU-Befehlssatz-Stufe</div>
+                    <div class="app-item-desc">Begrenzt, welche Befehlssätze (AVX2, AVX-512 ...) der Prozessor benutzen darf. Nützlich zum Vergleichen und Testen.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <select id="selSimdTierCap" class="ui-select mono">
+                      <option value="auto">Auto (Highest Supported)</option>
+                      <option value="avx512-vnni">avx512-vnni</option>
+                      <option value="avx512f">avx512f</option>
+                      <option value="avx-vnni">avx-vnni</option>
+                      <option value="avx2-fma">avx2-fma</option>
+                      <option value="neon-dotprod">neon-dotprod</option>
+                      <option value="scalar">scalar (Reference)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Gewichte für das Lesen von Prompts umpacken</div>
+                    <div class="app-item-desc">Ordnet die Gewichte so an, dass lange Prompts schneller gelesen werden. Kostet etwas Arbeitsspeicher.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <label class="ui-switch"><input type="checkbox" id="chkCpuRepack" checked><span class="ui-switch-track"></span></label>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Arbeitsspeicher</div>
+                    <div class="app-item-desc" id="hwRamDesc">Wird gemessen ...</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <div class="ui-progress"><div class="ui-progress-bar" id="hwRamProgress" style="width:35%;"></div></div>
+                    <span class="mono tabular" style="font-size:12px;" id="hwRamText">—</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Detected Devices List (GpuGroupCard style) -->
+              <div class="app-card">
+                <div class="app-card-title">Erkannte Rechengeräte</div>
+                <div id="hwDevicesGrid" style="display:flex;flex-direction:column;gap:10px;"></div>
+              </div>
+
+              <!-- Live Scheduler Slots -->
+              <div class="app-card">
+                <div class="app-card-title">Gleichzeitige Anfragen (Plätze)</div>
+                <div id="hwSlotsTableWrap"></div>
+              </div>
+
+              <!-- SIMD Kernel Self-Test Report -->
+              <div class="app-card" id="simdSelftestCard" style="display:none;">
+                <div class="app-card-title" id="simdSelftestTitle">SIMD Kernel Self-Test Results</div>
+                <div id="simdSelftestTableWrap"></div>
+              </div>
+            </div>
+
+            <!-- 5. TOKENIZER & JINJA (Tokenizer & Chat Templates) -->
+            <div class="settings-pane" id="spane-tokenizer">
+              <div class="app-card">
+                <div class="app-card-title">Live GGUF Tokenizer (<code>POST /tokenize</code>)</div>
+                <textarea id="tokTextInput" class="ui-textarea" style="width:100%;" rows="3">Hallo! Wie tokenisiert die Rust-Engine von fLLM diesen Satz?</textarea>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin:10px 0;">
+                  <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
+                    <input type="checkbox" id="chkTokSpecial" checked> Include BOS/Special Tokens
+                  </label>
+                  <span class="mono" style="font-size:12px;color:var(--muted-foreground);" id="tokStatsLabel">0 tokens</span>
+                </div>
+                <div class="token-wall" id="tokVisualWall"></div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">Jinja2 Chat-Template Renderer (<code>POST /apply-template</code>)</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                  <textarea id="jinjaMessagesInput" class="ui-textarea mono" rows="7" style="font-size:11.5px;">[
+  {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+  {"role": "user", "content": "Erkläre SIMD in einem Satz."}
+]</textarea>
+                  <pre id="jinjaOutputPre" class="ui-textarea mono" style="font-size:11.5px;white-space:pre-wrap;overflow:auto;"></pre>
+                </div>
+                <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+                  <button class="btn btn-sm btn-primary" id="btnRenderJinja">Render Template</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 6. CLAUDE CODE & SDKS (routes/settings/claude-code.tsx) -->
+            <div class="settings-pane" id="spane-claude-code">
+              <div class="app-card">
+                <div class="app-card-title">Claude Code & External SDK Integration</div>
+                <p class="app-item-desc" style="margin-bottom:12px;">Because fLLM implements both the Anthropic Messages API (<code>/v1/messages</code>) and the OpenAI API (<code>/v1/chat/completions</code>), you can connect Claude Code, Cursor, Continue, or the official SDKs directly to your local Rust server.</p>
+                <div style="display:flex;gap:6px;margin-bottom:10px;" id="sdkSnippetTabs">
+                  <button class="btn btn-sm btn-secondary" data-sdk="claude">Claude Code CLI</button>
+                  <button class="btn btn-sm btn-ghost" data-sdk="python">OpenAI Python</button>
+                  <button class="btn btn-sm btn-ghost" data-sdk="ts">OpenAI TypeScript</button>
+                  <button class="btn btn-sm btn-ghost" data-sdk="curl">cURL</button>
+                </div>
+                <div class="code-card" style="margin:0;">
+                  <div class="code-card-header"><span id="sdkSnippetLang">bash</span><button class="btn btn-xs btn-ghost" id="btnCopySdkSnippet">Copy</button></div>
+                  <pre id="preSdkSnippet"></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- 7. MODEL PROVIDER: fllm.rs (routes/settings/providers/$providerName.tsx) -->
+            <div class="settings-pane" id="spane-provider-fllm">
+              <div class="app-card">
+                <div class="app-card-header">
+                  <div>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">fllm.rs Local GGUF Provider</h2>
+                    <p class="app-item-desc">Inspect the active GGUF model metadata, manage model aliases, and view the embedded Jinja2 chat template.</p>
+                  </div>
+                </div>
+                <div id="providerModelFacts"></div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Model Aliases (<code>/api/copy</code> & <code>/api/delete</code>)</div>
+                    <div class="app-item-desc">Map names like <code>gpt-4o-mini</code> or <code>claude-3-5-sonnet</code> to your local GGUF model.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <input type="text" id="inpNewAlias" class="ui-input mono" style="width:160px;" placeholder="e.g. claude-3-sonnet">
+                    <button class="btn btn-sm btn-primary" id="btnAddAlias">Add Alias</button>
+                  </div>
+                </div>
+                <div id="providerAliasesList" style="padding-top:8px;display:flex;gap:6px;flex-wrap:wrap;"></div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">Embedded GGUF Chat Template & Modelfile</div>
+                <div class="code-card" style="margin:0;">
+                  <pre id="preProviderTemplate" style="max-height:220px;white-space:pre-wrap;"></pre>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Search Dialog Modal (Ctrl+K — containers/dialogs/SearchDialog.tsx) -->
+  <div class="modal-backdrop" id="searchModal">
+    <div class="search-dialog">
+      <input type="text" class="search-dialog-input" id="searchModalInput" placeholder="Search chats, models, or settings... (Esc to close)">
+      <div class="search-results" id="searchModalResults"></div>
+    </div>
+  </div>
+
+  <!-- Toasts -->
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script>/*__SCRIPT__*/</script>
+</body>
+</html>

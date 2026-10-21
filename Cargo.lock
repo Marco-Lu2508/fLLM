@@ -699,6 +699,7 @@ dependencies = [
  "pollster",
  "rayon",
  "rcgen",
+ "regex",
  "reqwest",
  "rustls",
  "serde_json",

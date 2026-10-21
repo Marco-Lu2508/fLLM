@@ -1559,6 +1559,50 @@ async fn studio_administration_from_another_machine_needs_an_api_key() {
 }
 
 #[tokio::test]
+async fn studio_agent_tools_work_inside_one_workspace_and_only_on_this_machine() {
+    let h = start(Settings::default());
+    let dir = std::env::temp_dir().join(format!("fllm-agent-http-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_text = dir.to_str().unwrap().to_owned();
+
+    // no folder chosen yet
+    let early = h.post("/api/studio/agent/tool", json!({"name": "list_dir", "args": {}})).await;
+    assert_eq!(early.json()["ok"], false);
+    assert!(early.json()["error"].as_str().unwrap().contains("workspace"));
+
+    let chosen = h.post("/api/studio/agent/workspace", json!({"path": dir_text})).await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.text());
+    assert!(chosen.json()["root"].as_str().is_some());
+    let bad = h.post("/api/studio/agent/workspace", json!({"path": "relative"})).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+
+    let written = h
+        .post("/api/studio/agent/tool", json!({"name": "write_file", "args": {"path": "hello.txt", "content": "hi\n"}}))
+        .await;
+    assert_eq!(written.json()["ok"], true, "{}", written.text());
+    assert_eq!(std::fs::read_to_string(dir.join("hello.txt")).unwrap(), "hi\n");
+    let escape = h
+        .post("/api/studio/agent/tool", json!({"name": "read_file", "args": {"path": "../secret.txt"}}))
+        .await;
+    assert_eq!(escape.json()["ok"], false);
+    let undone = h.post("/api/studio/agent/undo", json!({})).await;
+    assert_eq!(undone.json()["ok"], true);
+    assert!(!dir.join("hello.txt").exists());
+
+    // the same call from another machine is refused, whether or not a key exists
+    let remote = Request::builder()
+        .method(Method::POST)
+        .uri("/api/studio/agent/tool")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "192.168.1.5:8000")
+        .extension(crate::server::http::ClientAddr("192.168.1.20:50000".parse().unwrap()))
+        .body(Body::from(r#"{"name":"bash","args":{"command":"echo no"}}"#))
+        .unwrap();
+    assert_eq!(h.send(remote).await.status, StatusCode::FORBIDDEN);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn studio_control_plane_manages_config_hardware_models_and_keys() {
     let h = start(Settings::default());
     let status = h.get("/api/studio/status").await;

@@ -107,6 +107,7 @@ struct AppState {
     hidden_size: usize,
     admission: Arc<tokio::sync::Semaphore>,
     studio_config: std::sync::RwLock<api::studio::StudioRuntimeConfig>,
+    agent: api::agent::AgentSession,
     vision: Option<Arc<dyn crate::vision::MultimodalEncoder>>,
     vision_admission: Arc<tokio::sync::Semaphore>,
 }
@@ -286,6 +287,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         hidden_size,
         // requests running plus requests waiting for a sequence slot; a request beyond that gets 429 with Retry-After
         admission: Arc::new(tokio::sync::Semaphore::new(max_sequences + queue)),
+        agent: api::agent::AgentSession::default(),
         studio_config: std::sync::RwLock::new(api::studio::StudioRuntimeConfig {
             sampling: config.sampling_defaults,
             override_temperature: config.default_temperature,
@@ -315,6 +317,9 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models/cache", delete(api::studio::delete_cached_model))
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
         .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
+        .route("/api/studio/agent/workspace", post(api::agent::workspace))
+        .route("/api/studio/agent/tool", post(api::agent::tool))
+        .route("/api/studio/agent/undo", post(api::agent::undo))
         .route("/v1/models", get(models))
         .route("/v1/models/{id}", get(api::model_by_id))
         .route("/v1/messages", post(api::anthropic::messages))

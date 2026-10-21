@@ -227,6 +227,7 @@ impl<F: FnOnce() + Unpin> Drop for Watched<F> {
 /// The Studio routes that change something (settings, model downloads and deletions, API keys) are
 /// administration. Without a configured API key they are only open to a client on the same machine:
 /// otherwise anybody who can reach the port could delete models or register a key and lock the owner out.
+/// The agent tools (files and shell) additionally refuse every other machine even when a key is configured.
 /// A web page in the owner's own browser reaches the port from this machine as well, so the request must
 /// also address the server by `localhost` or an IP address (a DNS-rebinding name is refused) and, when the
 /// browser names an origin, come from the page of this very server.
@@ -237,7 +238,9 @@ pub fn studio_admin_blocked(
     peer: Option<SocketAddr>,
     headers: &HeaderMap,
 ) -> bool {
-    if auth_required
+    // the agent tools read and write files and run programs: never from another machine, with or without a key
+    let agent = path.starts_with("/api/studio/agent/");
+    if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
     {
@@ -681,5 +684,9 @@ mod studio_gate_tests {
         assert!(!studio_admin_blocked(false, &Method::POST, "/v1/chat/completions", remote, &h));
         // with an API key configured the normal key check decides
         assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/keys", remote, &h));
+        // ... except for the agent tools, which never leave this machine
+        assert!(studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", remote, &h));
+        let local = headers("127.0.0.1:8000", None);
+        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", addr("127.0.0.1:1"), &local));
     }
 }

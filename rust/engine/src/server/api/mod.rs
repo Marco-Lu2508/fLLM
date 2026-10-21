@@ -11,6 +11,7 @@ pub(super) mod batches;
 pub(super) mod llamacpp;
 pub(super) mod ollama_extra;
 pub(super) mod responses;
+pub(super) mod agent;
 pub(super) mod studio;
 pub(super) mod tgi;
 pub(super) mod vllm;
