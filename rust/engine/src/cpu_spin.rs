@@ -279,11 +279,20 @@ mod tests {
             for round in 0..200 {
                 let next = AtomicUsize::new(0);
                 let done = AtomicUsize::new(0);
-                assert!(super::run(&|| {
-                    while next.fetch_add(1, Ordering::Relaxed) < 1000 {
-                        done.fetch_add(1, Ordering::Relaxed);
+                // other tests of the process share the pool: wait until it takes the job
+                let mut accepted = false;
+                for _ in 0..5000 {
+                    accepted = super::run(&|| {
+                        while next.fetch_add(1, Ordering::Relaxed) < 1000 {
+                            done.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                    if accepted {
+                        break;
                     }
-                }));
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                assert!(accepted, "round {round}: the pool never took the job");
                 assert_eq!(done.load(Ordering::Relaxed), 1000, "round {round}");
                 if round % 50 == 0 {
                     // let the workers park, then wake them again
