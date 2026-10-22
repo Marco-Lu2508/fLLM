@@ -261,7 +261,7 @@ jobs:
         run: |
           set -e
           mkdir -p pkg
-          cp dist-cuda/fllm-rs pkg/fllm-rs
+          cp "target/$TARGET/release/fllm-rs" pkg/fllm-rs
           cp LICENSE NOTICE THIRD_PARTY.md pkg/
           cp -r licenses pkg/licenses
           tar -czf "$ASSET" -C pkg fllm-rs LICENSE NOTICE THIRD_PARTY.md licenses
