@@ -2,6 +2,7 @@
 resolver = "2"
 members = ["rust/engine", "rust/gguf-probe", "rust/checkpoint"]
 default-members = ["rust/engine"]
+exclude = ["desktop"]
 
 [workspace.package]
 version = "0.1.2"

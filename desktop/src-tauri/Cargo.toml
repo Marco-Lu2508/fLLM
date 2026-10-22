@@ -1,0 +1,18 @@
+[package]
+name = "fllm-desktop"
+version = "0.1.2"
+description = "fLLM desktop app: the Studio in its own window, with the server built in"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Marco-Lu2508/fLLM"
+rust-version = "1.89"
+publish = false
+
+# not part of the engine workspace: the desktop shell has its own dependencies and lock file
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

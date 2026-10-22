@@ -334,6 +334,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("make-tiny-model") {
         return fllm_engine::tiny_model::run(&args[1..]).map_err(Into::into);
     }
+    // a program that starts the server (the desktop app) closes the pipe on stdin when it ends, which stops the server too
+    if env::var_os("FLLM_EXIT_ON_STDIN_EOF").is_some() {
+        std::thread::spawn(|| {
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+            std::process::exit(0);
+        });
+    }
     let args = if args.first().map(String::as_str) == Some("studio") { studio_args(&args[1..]) } else { args };
     if fllm_engine::cli::dispatch(&args)? {
         return Ok(());

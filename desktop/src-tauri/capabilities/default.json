@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The window only shows the local server; it needs no access to the app itself.",
+  "windows": ["main"],
+  "permissions": []
+}

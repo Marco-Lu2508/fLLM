@@ -19,3 +19,6 @@ build/
 target-*/
 /third_party/cutlass/
 /third_party/flashinfer/
+/desktop/src-tauri/binaries/fllm-rs-*
+/desktop/src-tauri/icons/
+/desktop/src-tauri/gen/

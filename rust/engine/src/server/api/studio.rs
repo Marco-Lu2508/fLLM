@@ -623,7 +623,8 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
     let started = std::process::Command::new(exe)
         .args(relaunch_args(&model))
         .env("FLLM_REPLACE_SERVER", "1")
-        .stdin(std::process::Stdio::null())
+        // the desktop app watches its server through this pipe, so the new server keeps it
+        .stdin(if std::env::var_os("FLLM_EXIT_ON_STDIN_EOF").is_some() { std::process::Stdio::inherit() } else { std::process::Stdio::null() })
         .spawn();
     if let Err(e) = started {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot start the new server: {e}"));

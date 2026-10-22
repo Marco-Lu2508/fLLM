@@ -13,6 +13,7 @@ Start with the [README](../README.md) for what fLLM is and its current status. T
 
 * [HTTP API reference](server-api.md) and [compatibility with other APIs](api-compat.md)
 * [Studio: the browser app (chat, coding agent, models)](user/studio.md)
+* [Desktop app (installer for Windows and Linux)](user/desktop.md)
 * [Clients: SDKs, editors, chat front-ends](user/clients.md)
 * [Configuration: flags and environment variables](configuration.md)
 * [Inference features: sampling, structured output, tools, LoRA, speculation, vision](inference-features.md)
