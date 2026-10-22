@@ -7,7 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
-- Studio: a browser control room at `/` with chat, live throughput, model hub (list, download and delete cached models), API key management, run-time sampling defaults and a CPU self test, backed by `/api/studio/*`. Changes (settings, downloads, deletions, keys) are accepted without an API key only from the same machine, from this server's own page, addressed by `localhost` or an IP address; generated keys come from the operating system random source.
+- Studio, the built-in browser app (`fllm-rs studio`, or `GET /` of any server; [docs/user/studio.md](docs/user/studio.md)): chat with branching message history, Markdown and code highlighting, file and image attachments, presets and chat management; a coding agent that reads, searches and changes files and runs commands inside one folder, with diffs, permission questions (ask, auto-edit, plan), a task list and `@file`; a model manager with Hugging Face search, download progress and switching the loaded model (the server restarts itself); settings, API keys, hardware and tool pages. Backed by `/api/studio/*`. Changes through these routes are accepted without an API key only from the same machine, from the page of this server, addressed by `localhost` or an IP address; the agent tools never leave the machine, also with a key, and `FLLM_NO_AGENT=1` switches them off. Generated keys come from the operating system random source.
 - `install.sh --variant auto|rocm`: the installer picks cuda, rocm, gnu (Vulkan) or cpu from the hardware; `release.yml` builds the optional `fllm-linux-x86_64-rocm.tar.gz` (HIP kernels, untested on AMD GPUs).
 
 ### Fixed

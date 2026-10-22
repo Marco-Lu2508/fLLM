@@ -76,7 +76,7 @@
           speculative: p.speculative, system_prompt: p.system_prompt,
         },
       });
-      if (res.ok) { toast('Als Standard der Engine gespeichert'); refreshStudioStatus(); }
+      if (res.ok) { toast('Saved as the engine default'); refreshStudioStatus(); }
     };
     $('btnSaveSamplerToRust').addEventListener('click', saveConfigToRust);
     $('btnSaveSystemPromptRust').addEventListener('click', saveConfigToRust);
@@ -99,12 +99,12 @@
     function renderSearchResults(q) {
       const query = q.toLowerCase().trim();
       const places = [
-        { type: 'Ort', title: 'Coding-Agent (Code)', run: () => switchSurface('code') },
-        { type: 'Ort', title: 'Modelle und Hugging Face', run: () => switchSurface('hub') },
-        { type: 'Ort', title: 'Einstellungen: Lokaler API-Server und Schlüssel', run: () => switchSurface('settings', 'local-api-server') },
-        { type: 'Ort', title: 'Einstellungen: Hardware', run: () => switchSurface('settings', 'hardware') },
-        { type: 'Ort', title: 'Einstellungen: Aussehen und Farben', run: () => switchSurface('settings', 'appearance') },
-        { type: 'Ort', title: 'Einstellungen: Tokenizer und Jinja-Vorlagen', run: () => switchSurface('settings', 'tokenizer') },
+        { type: 'Page', title: 'Coding agent (Code)', run: () => switchSurface('code') },
+        { type: 'Page', title: 'Models and Hugging Face', run: () => switchSurface('hub') },
+        { type: 'Page', title: 'Settings: local API server and keys', run: () => switchSurface('settings', 'local-api-server') },
+        { type: 'Page', title: 'Settings: hardware', run: () => switchSurface('settings', 'hardware') },
+        { type: 'Page', title: 'Settings: appearance and colors', run: () => switchSurface('settings', 'appearance') },
+        { type: 'Page', title: 'Settings: tokenizer and Jinja templates', run: () => switchSurface('settings', 'tokenizer') },
       ];
       const chats = state.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt).map((t) => {
         const hit = query && !t.title.toLowerCase().includes(query) ? snippet(threadText(t), query) : '';
@@ -115,7 +115,7 @@
         <button class="nav-item" data-sres="${i}">
           <span class="search-title">${escapeHtml(it.title)}${it.sub ? `<small>${escapeHtml(it.sub)}</small>` : ''}</span>
           <span class="quant-chip" style="margin-left:auto;">${it.type}</span>
-        </button>`).join('') : '<div class="thread-empty">Nichts gefunden</div>';
+        </button>`).join('') : '<div class="thread-empty">Nothing found</div>';
       $('searchModalResults')._items = items;
     }
     $('navOpenSearch').addEventListener('click', openSearchModal);

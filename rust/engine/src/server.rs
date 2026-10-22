@@ -314,6 +314,9 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models", get(api::studio::models_hub))
         .route("/api/studio/hf-files", get(api::studio::hf_files))
         .route("/api/studio/models/pull", post(api::studio::pull_model))
+        .route("/api/studio/models/load", post(api::studio::load_model))
+        .route("/api/studio/models/search", get(api::studio::search_models))
+        .route("/api/studio/models/progress", get(api::studio::model_progress))
         .route("/api/studio/models/cache", delete(api::studio::delete_cached_model))
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
         .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
@@ -416,11 +419,24 @@ pub fn serve(
                 .build()
                 .map_err(|e| format!("cannot start HTTP runtime: {e}"))?;
             http_runtime.block_on(async move {
-                let listener = tokio::net::TcpListener::bind(address)
-                    .await
-                    .map_err(|e| format!("cannot bind HTTP listener: {e}"))?;
+                // a server that replaces the one running before (model change in the Studio) waits until the old one has let go of the port
+                let patient = std::env::var_os("FLLM_REPLACE_SERVER").is_some();
+                let waiting_since = std::time::Instant::now();
+                let listener = loop {
+                    match tokio::net::TcpListener::bind(address).await {
+                        Ok(listener) => break listener,
+                        Err(_) if patient && waiting_since.elapsed() < std::time::Duration::from_secs(90) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                        Err(e) => return Err(format!("cannot bind HTTP listener: {e}")),
+                    }
+                };
                 println!("{}", crate::version::long_version());
                 println!("fllm-rs listening on http{}://{address}", if tls { "s" } else { "" });
+                if std::env::var_os("FLLM_OPEN_BROWSER").is_some() && !patient {
+                    let host = if address.ip().is_unspecified() { "127.0.0.1".to_owned() } else { address.ip().to_string() };
+                    open_browser(&format!("http{}://{}:{}/", if tls { "s" } else { "" }, if host.contains(':') { format!("[{host}]") } else { host }, address.port()));
+                }
                 ready.store(true, Ordering::Relaxed);
                 // the router (and with it the sender of the worker channel) lives until the last connection is gone
                 http::serve(listener, router, context, ready.clone(), shutdown_signal(shutdown_rx)).await
@@ -440,7 +456,21 @@ pub fn serve(
     Ok(())
 }
 
-/// `--host` as an address: IPv4, IPv6 (with or without brackets) or a name that resolves to one.
+/// Opens a page in the default browser (best effort; llm-rs studio uses it).
+fn open_browser(url: &str) {
+    let result = if cfg!(windows) {
+        std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if result.is_err() {
+        println!("Open {url} in your browser.");
+    }
+}
+
+/// --host as an address: IPv4, IPv6 (with or without brackets) or a name that resolves to one.
 fn listen_address(host: &str, port: u16) -> Result<SocketAddr, String> {
     let bare = host.trim_matches(['[', ']']);
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {

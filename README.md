@@ -190,6 +190,8 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 ### Tools and clients
 
 `fllm-rs chat` and `bench` talk to any running OpenAI-compatible server. [docs/user/clients.md](docs/user/clients.md)
+
+`fllm-rs studio` starts the server and opens the Studio, the built-in browser app with chat, a coding agent and a model manager. [docs/user/studio.md](docs/user/studio.md)
 covers curl, the OpenAI, Anthropic and Ollama SDKs and program integrations.
 
 ## Status

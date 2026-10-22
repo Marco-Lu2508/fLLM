@@ -70,7 +70,7 @@
     async function setWorkspace(path) {
       const res = await apiFetch('/api/studio/agent/workspace', { method: 'POST', body: { path } });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { toast(data.error?.message || 'Der Ordner konnte nicht geöffnet werden.'); return false; }
+      if (!res.ok) { toast(data.error?.message || 'The folder could not be opened.'); return false; }
       adoptWorkspace(data);
       const recent = [data.root, ...recentWorkspaces().filter((p) => p !== data.root)].slice(0, 6);
       localStorage.setItem(CODE_RECENT_KEY, JSON.stringify(recent));
@@ -83,7 +83,7 @@
     function adoptWorkspace(data) {
       code.workspace = data.root ? data : null;
       if (data.root) localStorage.setItem(CODE_RECENT_KEY, JSON.stringify([data.root, ...recentWorkspaces().filter((p) => p !== data.root)].slice(0, 6)));
-      $('wsName').textContent = data.root ? data.name : 'Ordner wählen';
+      $('wsName').textContent = data.root ? data.name : 'Choose folder';
       const branch = $('wsBranch');
       branch.style.display = data.git_branch ? 'inline' : 'none';
       branch.textContent = data.git_branch || '';
@@ -98,7 +98,7 @@
           code.disabled = null;
           if (data.root) { await loadInstructions(); restoreCodeSession(); }
         } else {
-          code.disabled = (await res.json().catch(() => ({}))).error?.message || 'Der Coding-Agent ist nicht verfügbar.';
+          code.disabled = (await res.json().catch(() => ({}))).error?.message || 'The coding agent is not available.';
         }
         renderCode();
       } catch { /* the page is opened before the server is ready: the next visit asks again */ }
@@ -108,7 +108,7 @@
       const res = await apiFetch('/api/studio/agent/tool', { method: 'POST', body: { name, args }, signal });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        return { ok: false, error: err.error?.message || `Fehler ${res.status}` };
+        return { ok: false, error: err.error?.message || `Error ${res.status}` };
       }
       return res.json();
     }
@@ -124,10 +124,10 @@
     async function pickWorkspace() {
       const recent = recentWorkspaces();
       const where = await askDialog({
-        title: 'Arbeitsordner wählen',
-        text: `Der Agent darf nur in diesem Ordner lesen, ändern und Befehle ausführen. Gib den vollständigen Pfad ein, zum Beispiel ${code.workspace?.os === 'windows' || /Windows/.test(navigator.userAgent) ? 'C:\\Users\\du\\projekt' : '/home/du/projekt'}.${recent.length ? ` Zuletzt: ${recent[0]}` : ''}`,
+        title: 'Choose the workspace folder',
+        text: `The agent may read, change and run commands only inside this folder. Enter the full path, for example ${code.workspace?.os === 'windows' || /Windows/.test(navigator.userAgent) ? 'C:\\Users\\you\\project' : '/home/you/project'}.${recent.length ? ` Last used: ${recent[0]}` : ''}`,
         input: code.workspace?.root || recent[0] || '',
-        ok: 'Öffnen',
+        ok: 'Open',
       });
       if (where) await setWorkspace(where);
     }
@@ -140,8 +140,8 @@
         <div class="thread-row ${p === here && state.surface === 'code' ? 'active' : ''}" data-ws-row="${escapeHtml(p)}" title="${escapeHtml(p)}">
           <span class="thread-row-title">${escapeHtml(p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p)}</span>
         </div>`).join('');
-      $('threadList').innerHTML = `${rows || '<div class="thread-empty">Noch kein Ordner geöffnet</div>'}
-        <div class="thread-row" data-ws-open><span class="thread-row-title">Ordner öffnen …</span></div>`;
+      $('threadList').innerHTML = `${rows || '<div class="thread-empty">No folder opened yet</div>'}
+        <div class="thread-row" data-ws-open><span class="thread-row-title">Open folder ...</span></div>`;
     }
     $('threadList').addEventListener('click', async (e) => {
       if (state.tab !== 'code') return;
@@ -166,7 +166,7 @@
         const s = JSON.parse(localStorage.getItem(CODE_SESSION_KEY) || '{}')[code.workspace.root];
         if (s) {
           code.messages = s.messages || [];
-          code.view = (s.view || []).map((i) => (i.status === 'running' || i.status === 'pending' ? { ...i, status: 'error', output: 'Unterbrochen.' } : { ...i, streaming: false }));
+          code.view = (s.view || []).map((i) => (i.status === 'running' || i.status === 'pending' ? { ...i, status: 'error', output: 'Interrupted.' } : { ...i, streaming: false }));
           code.todos = s.todos || [];
           code.used = s.used || 0;
         }
@@ -175,14 +175,14 @@
 
     // ---- rendering ---------------------------------------------------------------------------
     const TOOL_LABEL = {
-      list_dir: (a) => ['Ordner ansehen', a.path || '.'],
-      read_file: (a) => ['Datei lesen', `${a.path || ''}${a.offset ? ` ab Zeile ${a.offset}` : ''}`],
-      write_file: (a) => ['Datei schreiben', a.path || ''],
-      edit_file: (a) => ['Datei ändern', a.path || ''],
-      glob: (a) => ['Dateien suchen', a.pattern || ''],
-      grep: (a) => ['Text suchen', `${a.pattern || ''}${a.glob ? `  in ${a.glob}` : ''}`],
-      bash: (a) => ['Befehl', a.command || ''],
-      todo_write: () => ['Aufgabenliste', ''],
+      list_dir: (a) => ['List folder', a.path || '.'],
+      read_file: (a) => ['Read file', `${a.path || ''}${a.offset ? ` from line ${a.offset}` : ''}`],
+      write_file: (a) => ['Write file', a.path || ''],
+      edit_file: (a) => ['Edit file', a.path || ''],
+      glob: (a) => ['Find files', a.pattern || ''],
+      grep: (a) => ['Search text', `${a.pattern || ''}${a.glob ? `  in ${a.glob}` : ''}`],
+      bash: (a) => ['Command', a.command || ''],
+      todo_write: () => ['Task list', ''],
     };
     const STATUS_ICON = {
       pending: '<svg viewBox="0 0 24 24" class="icon icon-sm"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>',
@@ -191,7 +191,7 @@
       error: '<svg viewBox="0 0 24 24" class="icon icon-sm"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>',
       denied: '<svg viewBox="0 0 24 24" class="icon icon-sm"><circle cx="12" cy="12" r="9"/><path d="m5 5 14 14"/></svg>',
     };
-    const STATUS_TEXT = { pending: 'wartet auf dich', running: 'läuft', ok: 'fertig', error: 'Fehler', denied: 'abgelehnt' };
+    const STATUS_TEXT = { pending: 'waiting for you', running: 'running', ok: 'done', error: 'error', denied: 'denied' };
 
     function diffHtml(item) {
       const a = item.args || {};
@@ -233,11 +233,11 @@
 
     function permissionHtml(item) {
       const key = alwaysKey(item);
-      const label = item.name === 'bash' ? 'Befehl ausführen?' : item.name === 'edit_file' ? 'Diese Änderung übernehmen?' : 'Datei schreiben?';
+      const label = item.name === 'bash' ? 'Run this command?' : item.name === 'edit_file' ? 'Apply this change?' : 'Write this file?';
       return `<div class="perm-ask"><span>${label}</span>
-        <button class="btn btn-sm btn-primary" data-perm-answer="allow">Erlauben</button>
-        ${key ? `<button class="btn btn-sm btn-secondary" data-perm-answer="always" title="${escapeHtml(item.name === 'bash' ? `Weitere „${key}“-Befehle in dieser Sitzung ohne Frage erlauben` : 'Änderungen an Dateien in dieser Sitzung ohne Frage erlauben')}">Immer${item.name === 'bash' ? ` (${escapeHtml(key)})` : ''}</button>` : ''}
-        <button class="btn btn-sm btn-ghost" data-perm-answer="deny">Ablehnen</button></div>`;
+        <button class="btn btn-sm btn-primary" data-perm-answer="allow">Allow</button>
+        ${key ? `<button class="btn btn-sm btn-secondary" data-perm-answer="always" title="${escapeHtml(item.name === 'bash' ? `Allow more "${key}" commands in this session without asking` : 'Allow file changes in this session without asking')}">Always${item.name === 'bash' ? ` (${escapeHtml(key)})` : ''}</button>` : ''}
+        <button class="btn btn-sm btn-ghost" data-perm-answer="deny">Deny</button></div>`;
     }
 
     function todoListHtml(todos) {
@@ -251,9 +251,9 @@
         const parsed = splitReasoning(item.content || '');
         const reasoning = item.reasoning || parsed.reasoning;
         const answer = item.reasoning ? item.content : parsed.answer;
-        const thinking = reasoning ? `<details class="cot-box"><summary>${svgIcon('brain')}<span>${item.streaming && !answer ? 'Denkt nach' : 'Gedankengang'}</span></summary><div class="cot-body">${escapeHtml(reasoning)}</div></details>` : '';
+        const thinking = reasoning ? `<details class="cot-box"><summary>${svgIcon('brain')}<span>${item.streaming && !answer ? 'Thinking' : 'Thought process'}</span></summary><div class="cot-body">${escapeHtml(reasoning)}</div></details>` : '';
         const body = answer ? MD.render(answer) : (item.streaming && !reasoning ? '<span class="typing"><i></i><i></i><i></i></span>' : '');
-        const plan = item.planDone ? '<div class="plan-actions"><button class="btn btn-sm btn-primary" data-run-plan>Plan ausführen</button><span>Der Agent fragt weiter vor jeder Änderung.</span></div>' : '';
+        const plan = item.planDone ? '<div class="plan-actions"><button class="btn btn-sm btn-primary" data-run-plan>Run the plan</button><span>The agent keeps asking before every change.</span></div>' : '';
         return `<div class="code-assistant" data-item="${item.id}">${thinking}<div class="msg-assistant-prose">${body}</div>${item.error ? `<div class="msg-error">${escapeHtml(item.error)}</div>` : ''}${plan}</div>`;
       }
       if (item.kind === 'tool') return toolHtml(item);
@@ -266,23 +266,23 @@
         const recent = recentWorkspaces();
         return `<div class="code-empty">
           <h1>Code</h1>
-          <p>Ein Agent, der in einem Ordner deines Rechners liest, sucht, Dateien ändert und Befehle ausführt. Du siehst jeden Schritt und bestätigst Änderungen.</p>
-          <div class="code-open"><input type="text" class="ui-input mono" id="wsPathInput" placeholder="Ordnerpfad, z. B. ${/Windows/.test(navigator.userAgent) ? 'C:\\Users\\du\\projekt' : '/home/du/projekt'}" value="${escapeHtml(recent[0] || '')}"><button class="btn btn-primary" id="wsOpenBtn">Ordner öffnen</button></div>
+          <p>An agent that reads, searches and changes files and runs commands inside one folder of this computer. You see every step and confirm changes.</p>
+          <div class="code-open"><input type="text" class="ui-input mono" id="wsPathInput" placeholder="Folder path, e.g. ${/Windows/.test(navigator.userAgent) ? 'C:\\Users\\you\\project' : '/home/you/project'}" value="${escapeHtml(recent[0] || '')}"><button class="btn btn-primary" id="wsOpenBtn">Open folder</button></div>
           ${recent.length > 1 ? `<div class="code-recent">${recent.map((r) => `<button class="starter-pill" data-ws="${escapeHtml(r)}">${escapeHtml(r)}</button>`).join('')}</div>` : ''}
-          <p class="code-fine">Der Agent kann nur in diesem Ordner arbeiten. Er ist nur von diesem Rechner aus erreichbar, auch wenn der Server einen API-Schlüssel hat.</p>
+          <p class="code-fine">The agent can only work inside this folder. It can only be reached from this computer, even when the server has an API key.</p>
         </div>`;
       }
-      const modes = { ask: 'fragt vor jeder Änderung und jedem Befehl', edit: 'ändert Dateien selbst, fragt vor Befehlen', plan: 'liest nur und macht einen Plan' };
+      const modes = { ask: 'asks before every change and every command', edit: 'changes files on its own and asks before commands', plan: 'only reads and makes a plan' };
       return `<div class="code-empty">
         <h1>${escapeHtml(code.workspace.name)}</h1>
-        <p>${escapeHtml(code.workspace.root)}${code.workspace.git_branch ? `, Branch ${escapeHtml(code.workspace.git_branch)}` : ''}</p>
-        <p>Der Agent ${modes[code.perm]}. Beschreibe die Aufgabe unten.</p>
+        <p>${escapeHtml(code.workspace.root)}${code.workspace.git_branch ? `, branch ${escapeHtml(code.workspace.git_branch)}` : ''}</p>
+        <p>The agent ${modes[code.perm]}. Describe the task below.</p>
         <div class="code-recent">
-          <button class="starter-pill" data-code-prompt="Erkläre mir den Aufbau dieses Projekts: die wichtigsten Ordner, Dateien und wie sie zusammenhängen.">Aufbau des Projekts erklären</button>
-          <button class="starter-pill" data-code-prompt="Suche alle TODO- und FIXME-Kommentare und fasse sie nach Dateien zusammen.">TODOs einsammeln</button>
-          <button class="starter-pill" data-code-prompt="Finde heraus, wie man dieses Projekt baut und seine Tests ausführt, und führe die Tests aus.">Tests ausführen</button>
+          <button class="starter-pill" data-code-prompt="Explain the structure of this project: the most important folders and files and how they fit together.">Explain the project</button>
+          <button class="starter-pill" data-code-prompt="Find all TODO and FIXME comments and summarize them by file.">Collect the TODOs</button>
+          <button class="starter-pill" data-code-prompt="Find out how this project is built and tested, and run the tests.">Run the tests</button>
         </div>
-        ${code.instructions ? `<p class="code-fine">Projektanweisungen gelesen: ${escapeHtml(code.instructions.split('\n')[0].replace(/[()]/g, ''))}</p>` : ''}
+        ${code.instructions ? `<p class="code-fine">Project instructions read: ${escapeHtml(code.instructions.split('\n')[0].replace(/[()]/g, ''))}</p>` : ''}
       </div>`;
     }
 
@@ -326,10 +326,10 @@
       const files = [...code.changed.entries()];
       const done = code.todos.filter((t) => t.status === 'completed').length;
       side.innerHTML = `
-        <section class="side-block"><h4>Aufgaben${code.todos.length ? `<span class="side-count">${done}/${code.todos.length}</span>` : ''}</h4>
-          ${code.todos.length ? todoListHtml(code.todos) : '<p class="side-empty">Bei größeren Aufträgen legt der Agent hier eine Liste an.</p>'}</section>
-        <section class="side-block"><h4>Geänderte Dateien${files.length ? `<span class="side-count">${files.length}</span>` : ''}</h4>
-          ${files.length ? `<ul class="changed-list">${files.map(([p, n]) => `<li><span class="mono">${escapeHtml(p)}</span>${n > 1 ? `<span class="side-count">${n}×</span>` : ''}</li>`).join('')}</ul>` : '<p class="side-empty">Noch nichts geändert.</p>'}</section>`;
+        <section class="side-block"><h4>Tasks${code.todos.length ? `<span class="side-count">${done}/${code.todos.length}</span>` : ''}</h4>
+          ${code.todos.length ? todoListHtml(code.todos) : '<p class="side-empty">For bigger jobs the agent keeps a task list here.</p>'}</section>
+        <section class="side-block"><h4>Changed files${files.length ? `<span class="side-count">${files.length}</span>` : ''}</h4>
+          ${files.length ? `<ul class="changed-list">${files.map(([p, n]) => `<li><span class="mono">${escapeHtml(p)}</span>${n > 1 ? `<span class="side-count">${n}×</span>` : ''}</li>`).join('')}</ul>` : '<p class="side-empty">Nothing changed yet.</p>'}</section>`;
     }
 
     function updateCodeMeter() {
@@ -341,11 +341,11 @@
       code.running = busy;
       const btn = $('btnCodeSend');
       btn.classList.toggle('stop', busy);
-      btn.title = busy ? 'Anhalten (Esc)' : 'Senden (Eingabe)';
+      btn.title = busy ? 'Stop (Esc)' : 'Send (Enter)';
       btn.innerHTML = busy
         ? '<svg viewBox="0 0 24 24" class="icon icon-sm"><rect width="10" height="10" x="7" y="7" rx="1" fill="currentColor"/></svg>'
         : '<svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
-      $('codeHint').textContent = busy ? 'Der Agent arbeitet. Esc hält ihn an.' : 'Eingabe sendet, Umschalt+Eingabe macht eine neue Zeile';
+      $('codeHint').textContent = busy ? 'The agent is working. Esc stops it.' : 'Enter sends, Shift+Enter adds a new line';
     }
 
     // ---- permissions ----------------------------------------------------------------------------------
@@ -422,7 +422,7 @@
       const res = await apiFetch('/v1/chat/completions', { method: 'POST', body, signal: code.abort.signal });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error?.message || `Der Server antwortet mit Fehler ${res.status}`);
+        throw new Error(err.error?.message || `The server answered with error ${res.status}`);
       }
       const calls = [];
       let finish = '';
@@ -466,7 +466,7 @@
     const clipOutput = (text) => {
       const max = Math.max(3000, Math.floor((state.status?.model?.max_context || 4096) * 3.4 * 0.22));
       const s = String(text ?? '');
-      return s.length > max ? `${s.slice(0, max)}\n... [${s.length - max} Zeichen gekürzt]` : s;
+      return s.length > max ? `${s.slice(0, max)}\n... [${s.length - max} characters cut]` : s;
     };
 
     async function runToolCall(call) {
@@ -475,19 +475,19 @@
       code.view.push(item);
       const reply = (content) => code.messages.push({ role: 'tool', tool_call_id: call.id, content: clipOutput(content) });
       if (args === null) {
-        item.status = 'error'; item.output = 'Die Argumente sind kein gültiges JSON.';
+        item.status = 'error'; item.output = 'The arguments are not valid JSON.';
         paintItem(item);
         reply('Error: the arguments were not valid JSON. Call the tool again with a valid JSON object.');
         return;
       }
       if (!TOOL_DEFS[call.name]) {
-        item.status = 'error'; item.output = `Unbekanntes Werkzeug ${call.name}`;
+        item.status = 'error'; item.output = `Unknown tool ${call.name}`;
         paintItem(item);
         reply(`Error: unknown tool '${call.name}'. Available tools: ${Object.keys(TOOL_DEFS).join(', ')}.`);
         return;
       }
       if (code.perm === 'plan' && !READ_ONLY_TOOLS.has(call.name)) {
-        item.status = 'denied'; item.output = 'Im Plan-Modus ist nur Lesen erlaubt.';
+        item.status = 'denied'; item.output = 'Plan mode only allows reading.';
         paintItem(item);
         reply('Denied: plan mode only allows reading. Describe the change in your plan instead.');
         return;
@@ -503,7 +503,7 @@
         paintItem(item);
         const verdict = await askPermission(item);
         if (verdict === 'deny' || !code.running) {
-          item.status = 'denied'; item.output = code.running ? 'Du hast abgelehnt.' : 'Angehalten.';
+          item.status = 'denied'; item.output = code.running ? 'You denied this.' : 'Stopped.';
           paintItem(item);
           reply('The user denied this action. Do not try it again unchanged; ask what they want instead.');
           return;
@@ -522,7 +522,7 @@
         paintItem(item);
         reply(r.ok ? r.output : `Error: ${r.error}`);
       } catch (e) {
-        item.status = 'error'; item.output = e.name === 'AbortError' ? 'Angehalten.' : e.message;
+        item.status = 'error'; item.output = e.name === 'AbortError' ? 'Stopped.' : e.message;
         paintItem(item);
         reply(`Error: ${item.output}`);
       }
@@ -534,7 +534,7 @@
       const limit = Math.floor(max * 0.72);
       if (codeEstimate() <= limit) return;
       code.messages.forEach((m, i) => {
-        if (m.role === 'tool' && i < code.messages.length - 6 && m.content.length > 400) m.content = `${m.content.slice(0, 300)}\n... [gekürzt, um Platz zu sparen]`;
+        if (m.role === 'tool' && i < code.messages.length - 6 && m.content.length > 400) m.content = `${m.content.slice(0, 300)}\n... [shortened to save space]`;
       });
       let dropped = 0;
       // first whole earlier tasks (everything before the next user message), then single steps of the current task
@@ -551,7 +551,7 @@
         dropped++;
       }
       if (dropped) {
-        const notice = { kind: 'notice', id: cid(), text: 'Ältere Schritte wurden aus dem Kontext des Modells entfernt, damit das Modell nicht überläuft. Du siehst sie hier weiter.' };
+        const notice = { kind: 'notice', id: cid(), text: 'Older steps were removed from the context of the model so that it does not overflow. You still see them here.' };
         code.view.push(notice);
         paintItem(notice);
       }
@@ -581,7 +581,7 @@
           if (item.content || result.calls.length) code.messages.push(message);
           if (!result.calls.length) {
             if (code.perm === 'plan' && item.content) item.planDone = true;
-            if (!item.content) item.error = result.finish === 'length' ? 'Die Antwort wurde vom Längenlimit abgeschnitten.' : 'Das Modell hat nichts geantwortet.';
+            if (!item.content) item.error = result.finish === 'length' ? 'The answer was cut off by the length limit.' : 'The model did not answer.';
             paintItem(item);
             break;
           }
@@ -595,7 +595,7 @@
             if (!code.running) break;
             await runToolCall(call);
           }
-          if (turn === CODE_MAX_TURNS - 1) code.view.push({ kind: 'notice', id: cid(), text: `Nach ${CODE_MAX_TURNS} Schritten angehalten. Schreibe „weiter“, wenn der Agent fortfahren soll.` });
+          if (turn === CODE_MAX_TURNS - 1) code.view.push({ kind: 'notice', id: cid(), text: `Stopped after ${CODE_MAX_TURNS} steps. Write "continue" if the agent should go on.` });
         }
       } catch (e) {
         if (e.name !== 'AbortError') {
@@ -657,7 +657,7 @@
 
     async function undoChange() {
       const r = await apiFetch('/api/studio/agent/undo', { method: 'POST', body: {} }).then((x) => x.json()).catch((e) => ({ ok: false, error: e.message }));
-      codeNotice(r.ok ? `Rückgängig gemacht: ${r.output}` : (r.error || 'Nichts zum Rückgängigmachen.'));
+      codeNotice(r.ok ? `Undone: ${r.output}` : (r.error || 'Nothing to undo.'));
     }
 
     function newCodeSession() {
@@ -670,14 +670,14 @@
     async function runCodeCommand(text) {
       const [cmd, ...rest] = text.slice(1).split(/\s+/);
       switch (cmd.toLowerCase()) {
-        case 'clear': case 'neu': newCodeSession(); return true;
+        case 'clear': case 'new': newCodeSession(); return true;
         case 'undo': await undoChange(); return true;
-        case 'plan': case 'ask': case 'edit': setPerm(cmd.toLowerCase()); codeNotice({ plan: 'Plan-Modus: der Agent liest nur.', ask: 'Der Agent fragt vor jeder Änderung und jedem Befehl.', edit: 'Auto-Edit: Dateien ändert der Agent selbst, Befehle erfragt er.' }[cmd.toLowerCase()]); return true;
+        case 'plan': case 'ask': case 'edit': setPerm(cmd.toLowerCase()); codeNotice({ plan: 'Plan mode: the agent only reads.', ask: 'The agent asks before every change and every command.', edit: 'Auto-edit: the agent changes files itself and asks before commands.' }[cmd.toLowerCase()]); return true;
         case 'diff': await userRun('git diff --stat && git diff'); return true;
         case 'status': await userRun('git status -sb'); return true;
-        case 'cd': case 'ordner': if (rest.length) await setWorkspace(rest.join(' ')); else await pickWorkspace(); return true;
-        case 'hilfe': case 'help':
-          codeNotice('Befehle: /plan, /ask, /edit (was der Agent allein darf), /undo (letzte Dateiänderung), /diff, /status (git), /cd Pfad (anderer Ordner), /clear (neue Sitzung). Mit @datei hängst du eine Datei an.');
+        case 'cd': case 'folder': if (rest.length) await setWorkspace(rest.join(' ')); else await pickWorkspace(); return true;
+        case 'help':
+          codeNotice('Commands: /plan, /ask, /edit (what the agent may do on its own), /undo (last file change), /diff, /status (git), /cd path (another folder), /clear (new session). Use @file to attach a file.');
           return true;
         default: return false;
       }
@@ -758,7 +758,7 @@
     $('codeColumn').addEventListener('click', async (e) => {
       const answer = e.target.closest('[data-perm-answer]');
       if (answer) { answerPermission(answer.dataset.permAnswer); return; }
-      if (e.target.closest('[data-run-plan]')) { setPerm('ask'); await agentRun('Führe den Plan jetzt aus.'); return; }
+      if (e.target.closest('[data-run-plan]')) { setPerm('ask'); await agentRun('Carry out the plan now.'); return; }
       const prompt = e.target.closest('[data-code-prompt]');
       if (prompt) { await agentRun(prompt.dataset.codePrompt); return; }
       const ws = e.target.closest('[data-ws]');

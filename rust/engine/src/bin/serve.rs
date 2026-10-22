@@ -80,6 +80,7 @@ fn usage(error: &str) -> ! {
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
     eprintln!("       (wgpu devices: f16 and q8_0 only; nvfp4 is experimental, keys below 8 bit can break some models, see docs/gpu-backends.md)");
     eprintln!("       fllm-rs --version | -V | version");
+    eprintln!("       fllm-rs studio [--model MODEL] [--no-open] [serve options]   (the browser app; reuses the last model)");
     eprintln!("       fllm-rs devices [--json] [--measure] | formats | inspect PATH | pull hf://org/repo/file.gguf");
     eprintln!("       fllm-rs npu-setup   (installs the OpenVINO runtime for the Intel NPU into ~/.fllm/openvino)");
     eprintln!("       fllm-rs selftest-cpu [--tier TIER] | selftest-gpu [--device auto|vulkan|metal|hip|...] [--only GROUPS] [--quants LIST] [--json FILE] [--list]");
@@ -291,6 +292,42 @@ fn plan_target(selected_backend: &str, selected_index: usize) -> Option<fllm_eng
     fllm_engine::devices::find_entry(selected_backend, selected_index).map(|entry| entry.info)
 }
 
+/// `fllm-rs studio [--model M] [serve options]`: the server for the browser app. Starts with the last model when none is given
+/// and opens the page in the default browser (`--no-open` keeps it closed).
+fn studio_args(rest: &[String]) -> Vec<String> {
+    let mut args = vec!["serve".to_owned()];
+    let mut open = true;
+    for a in rest {
+        if a == "--no-open" {
+            open = false;
+        } else {
+            args.push(a.clone());
+        }
+    }
+    let given = args.iter().position(|a| a == "--model" || a == "-m").and_then(|i| args.get(i + 1).cloned()).or_else(|| {
+        args.iter().find_map(|a| a.strip_prefix("--model=").map(str::to_owned))
+    });
+    match given {
+        Some(model) => fllm_engine::hub::remember_studio_model(&model),
+        None => match fllm_engine::hub::last_studio_model() {
+            Some(model) => {
+                args.push("--model".into());
+                args.push(model);
+            }
+            None => {
+                eprintln!(
+                    "fllm-rs studio: no model yet. Start it once with a model, for example\n  fllm-rs studio --model owner/repo:Q4_K_M\nor with the path of a .gguf file. Later starts reuse the last model, and the Studio can switch models."
+                );
+                std::process::exit(2);
+            }
+        },
+    }
+    if open {
+        env::set_var("FLLM_OPEN_BROWSER", "1");
+    }
+    args
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if matches!(args.first().map(String::as_str), Some("--version" | "-V" | "version")) {
@@ -301,6 +338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("make-tiny-model") {
         return fllm_engine::tiny_model::run(&args[1..]).map_err(Into::into);
     }
+    let args = if args.first().map(String::as_str) == Some("studio") { studio_args(&args[1..]) } else { args };
     if fllm_engine::cli::dispatch(&args)? {
         return Ok(());
     }

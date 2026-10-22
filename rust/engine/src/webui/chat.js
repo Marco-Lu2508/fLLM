@@ -11,7 +11,7 @@
     function newThread(title) {
       const now = Date.now();
       return {
-        id: uid('thr'), title: title || 'Neuer Chat', autoTitle: true, createdAt: now, updatedAt: now, pinned: false, system: null,
+        id: uid('thr'), title: title || 'New chat', autoTitle: true, createdAt: now, updatedAt: now, pinned: false, system: null,
         nodes: { [ROOT]: { id: ROOT, role: 'root', children: [], active: 0 } },
       };
     }
@@ -64,7 +64,7 @@
       } catch {
         if (!quotaWarned) {
           quotaWarned = true;
-          toast('Der Browser-Speicher ist voll. Exportiere oder lösche alte Chats, sonst gehen neue Nachrichten verloren.');
+          toast('The browser storage is full. Export or delete old chats, or new messages will be lost.');
         }
       }
     }
@@ -129,7 +129,7 @@
     function ensureActiveThread(firstText) {
       let t = currentThread();
       if (!t) {
-        t = newThread((firstText || 'Neuer Chat').replace(/\s+/g, ' ').slice(0, 48));
+        t = newThread((firstText || 'New chat').replace(/\s+/g, ' ').slice(0, 48));
         t.system = $('txtSystemPrompt').value.trim() || null;
         t.preset = state.preset || null;
         state.threads.unshift(t);
@@ -158,10 +158,10 @@
     function dayGroup(ts) {
       const day = (d) => new Date(d).setHours(0, 0, 0, 0);
       const diff = Math.round((day(Date.now()) - day(ts)) / 86400000);
-      if (diff <= 0) return 'Heute';
-      if (diff === 1) return 'Gestern';
-      if (diff < 8) return 'Letzte 7 Tage';
-      return 'Älter';
+      if (diff <= 0) return 'Today';
+      if (diff === 1) return 'Yesterday';
+      if (diff < 8) return 'Last 7 days';
+      return 'Older';
     }
 
     function renderThreadList() {
@@ -171,12 +171,12 @@
       let list = state.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt);
       if (q) list = list.filter((t) => t.title.toLowerCase().includes(q) || threadText(t).includes(q));
       if (!list.length) {
-        container.innerHTML = `<div class="thread-empty">${q ? 'Kein Chat passt zur Suche' : 'Noch keine Chats'}</div>`;
+        container.innerHTML = `<div class="thread-empty">${q ? 'No chat matches the search' : 'No chats yet'}</div>`;
         return;
       }
       const groups = [];
       const pinned = list.filter((t) => t.pinned);
-      if (pinned.length) groups.push(['Angepinnt', pinned]);
+      if (pinned.length) groups.push(['Pinned', pinned]);
       for (const t of list.filter((x) => !x.pinned)) {
         const name = dayGroup(t.updatedAt);
         const g = groups.find((x) => x[0] === name);
@@ -189,9 +189,9 @@
           <div class="thread-row ${t.id === state.activeThreadId && state.surface === 'chat' ? 'active' : ''}" data-tid="${t.id}">
             <span class="thread-row-title">${t.pinned ? icon('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>') : ''}${escapeHtml(t.title)}</span>
             <div class="thread-row-actions">
-              <button class="btn-icon btn-icon-xs" data-pin-tid="${t.id}" title="${t.pinned ? 'Nicht mehr anpinnen' : 'Anpinnen'}">${icon('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>')}</button>
-              <button class="btn-icon btn-icon-xs" data-ren-tid="${t.id}" title="Umbenennen">${icon('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>')}</button>
-              <button class="btn-icon btn-icon-xs" data-del-tid="${t.id}" title="Löschen">${icon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>')}</button>
+              <button class="btn-icon btn-icon-xs" data-pin-tid="${t.id}" title="${t.pinned ? 'Unpin' : 'Pin'}">${icon('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>')}</button>
+              <button class="btn-icon btn-icon-xs" data-ren-tid="${t.id}" title="Rename">${icon('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>')}</button>
+              <button class="btn-icon btn-icon-xs" data-del-tid="${t.id}" title="Delete">${icon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>')}</button>
             </div>
           </div>`).join('')}
       `).join('');
@@ -249,13 +249,13 @@
       const parent = t.nodes[node.parent];
       if (!parent || parent.children.length < 2) return '';
       const i = parent.children.indexOf(node.id);
-      return `<span class="branch-nav"><button class="btn-icon btn-icon-xs" data-branch="${node.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Vorherige Version">${svgIcon('prev')}</button>` +
+      return `<span class="branch-nav"><button class="btn-icon btn-icon-xs" data-branch="${node.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Previous version">${svgIcon('prev')}</button>` +
         `<span class="tabular">${i + 1} / ${parent.children.length}</span>` +
-        `<button class="btn-icon btn-icon-xs" data-branch="${node.id}" data-dir="1" ${i === parent.children.length - 1 ? 'disabled' : ''} title="Nächste Version">${svgIcon('next')}</button></span>`;
+        `<button class="btn-icon btn-icon-xs" data-branch="${node.id}" data-dir="1" ${i === parent.children.length - 1 ? 'disabled' : ''} title="Next version">${svgIcon('next')}</button></span>`;
     }
 
     function attachmentsHtml(m) {
-      const imgs = (m.images || []).map((src) => `<img src="${src}" alt="Bild" class="msg-img">`).join('');
+      const imgs = (m.images || []).map((src) => `<img src="${src}" alt="Image" class="msg-img">`).join('');
       const files = (m.files || []).map((f) => `<span class="file-chip" title="${escapeHtml(f.name)}">${svgIcon('file')}<span>${escapeHtml(f.name)}</span></span>`).join('');
       return imgs || files ? `<div class="msg-attachments">${imgs}${files}</div>` : '';
     }
@@ -264,11 +264,11 @@
       if (!state.showSpeed || !m.telemetry) return '';
       const tel = m.telemetry;
       const bits = [];
-      if (tel.tokPerSec) bits.push(`${tel.tokPerSec} Token/s`);
-      if (tel.tokens) bits.push(`${tel.tokens} Token`);
-      if (tel.ttftMs) bits.push(`erstes Token nach ${tel.ttftMs} ms`);
-      if (tel.promptPerSec) bits.push(`Prompt ${tel.promptPerSec} Token/s`);
-      if (m.finish === 'length') bits.push('abgebrochen: Längenlimit');
+      if (tel.tokPerSec) bits.push(`${tel.tokPerSec} tokens/s`);
+      if (tel.tokens) bits.push(`${tel.tokens} tokens`);
+      if (tel.ttftMs) bits.push(`first token after ${tel.ttftMs} ms`);
+      if (tel.promptPerSec) bits.push(`prompt ${tel.promptPerSec} tokens/s`);
+      if (m.finish === 'length') bits.push('stopped at the length limit');
       return bits.length ? `<span class="speed-chip">${bits.map(escapeHtml).join('  ·  ')}</span>` : '';
     }
 
@@ -278,7 +278,7 @@
       const answer = m.reasoning ? (m.content || '') : parsed.answer;
       const thinking = reasoning ? `
         <details class="cot-box" ${m.streaming && !answer ? 'open' : ''}>
-          <summary>${svgIcon('brain')}<span>${m.streaming && !answer ? 'Denkt nach' : 'Gedankengang'} (${reasoning.length} Zeichen)</span></summary>
+          <summary>${svgIcon('brain')}<span>${m.streaming && !answer ? 'Thinking' : 'Thought process'} (${reasoning.length} characters)</span></summary>
           <div class="cot-body">${escapeHtml(reasoning)}</div>
         </details>` : '';
       const body = answer ? MD.render(answer) : (m.streaming ? '<span class="typing"><i></i><i></i><i></i></span>' : '');
@@ -290,7 +290,7 @@
       if (!Array.isArray(m.logprobs) || !m.logprobs.length) return '';
       return `<div class="logprobs-wrap">${m.logprobs.map((lp) => {
         const p = Math.exp(Number(lp.logprob || 0));
-        return `<span class="lp-tok" style="background:hsla(${Math.round(p * 130)},70%,42%,0.22);" title="Wahrscheinlichkeit ${(p * 100).toFixed(1)}%">${escapeHtml(lp.token)}</span>`;
+        return `<span class="lp-tok" style="background:hsla(${Math.round(p * 130)},70%,42%,0.22);" title="Probability ${(p * 100).toFixed(1)}%">${escapeHtml(lp.token)}</span>`;
       }).join('')}</div>`;
     }
 
@@ -301,9 +301,9 @@
             <div class="msg-user-bubble">${attachmentsHtml(node)}${escapeHtml(node.content)}</div>
             <div class="msg-actions-bar">
               ${branchNav(t, node)}
-              <button class="btn-icon btn-icon-xs" data-act="copy" title="Kopieren">${svgIcon('copy')}</button>
-              <button class="btn-icon btn-icon-xs" data-act="edit" title="Bearbeiten und neu senden">${svgIcon('edit')}</button>
-              <button class="btn-icon btn-icon-xs" data-act="delete" title="Diese Nachricht und alles danach löschen">${svgIcon('trash')}</button>
+              <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy">${svgIcon('copy')}</button>
+              <button class="btn-icon btn-icon-xs" data-act="edit" title="Edit and resend">${svgIcon('edit')}</button>
+              <button class="btn-icon btn-icon-xs" data-act="delete" title="Delete this message and everything after it">${svgIcon('trash')}</button>
             </div>
           </div>`;
       }
@@ -313,9 +313,9 @@
           ${logprobsHtml(node)}
           <div class="msg-actions-bar">
             ${branchNav(t, node)}
-            <button class="btn-icon btn-icon-xs" data-act="copy" title="Antwort kopieren">${svgIcon('copy')}</button>
-            <button class="btn-icon btn-icon-xs" data-act="regen" title="Neu erzeugen (die alte Antwort bleibt als Version)">${svgIcon('redo')}</button>
-            <button class="btn-icon btn-icon-xs" data-act="delete" title="Antwort löschen">${svgIcon('trash')}</button>
+            <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy the answer">${svgIcon('copy')}</button>
+            <button class="btn-icon btn-icon-xs" data-act="regen" title="Regenerate (the old answer stays as a version)">${svgIcon('redo')}</button>
+            <button class="btn-icon btn-icon-xs" data-act="delete" title="Delete the answer">${svgIcon('trash')}</button>
             <span class="msg-stats" data-stats>${statsHtml(node)}</span>
           </div>
         </div>`;
@@ -333,7 +333,7 @@
     /** Header: pin label, context fill. */
     function updateChatChrome() {
       const t = currentThread();
-      $('menuPin').textContent = t && t.pinned ? 'Nicht mehr anpinnen' : 'Anpinnen';
+      $('menuPin').textContent = t && t.pinned ? 'Unpin' : 'Pin';
       updateContextMeter();
     }
 
@@ -389,10 +389,10 @@
 
     // ---- building the request ------------------------------------------------
     function userContent(node) {
-      const files = (node.files || []).map((f) => `Datei ${f.name}:\n\`\`\`\n${f.text}\n\`\`\`\n\n`).join('');
+      const files = (node.files || []).map((f) => `File ${f.name}:\n\`\`\`\n${f.text}\n\`\`\`\n\n`).join('');
       const text = files + (node.content || '');
       if (node.images && node.images.length) {
-        const parts = [{ type: 'text', text: text || 'Beschreibe das Bild.' }];
+        const parts = [{ type: 'text', text: text || 'Describe the image.' }];
         node.images.forEach((url) => parts.push({ type: 'image_url', image_url: { url } }));
         return parts;
       }
@@ -457,7 +457,7 @@
     function setBusy(busy) {
       const btn = $('btnSendChat');
       btn.classList.toggle('stop', busy);
-      btn.title = busy ? 'Antwort abbrechen (Esc)' : 'Senden (Eingabe)';
+      btn.title = busy ? 'Stop the answer (Esc)' : 'Send (Enter)';
       btn.innerHTML = busy
         ? '<svg viewBox="0 0 24 24" class="icon icon-sm"><rect width="10" height="10" x="7" y="7" rx="1" fill="currentColor"/></svg>'
         : '<svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
@@ -478,7 +478,7 @@
         const res = await apiFetch('/v1/chat/completions', { method: 'POST', body: requestBody(apiMessages(t, userId)), signal: state.abortController.signal });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          throw new Error(err.error?.message || `Der Server antwortet mit Fehler ${res.status}`);
+          throw new Error(err.error?.message || `The server answered with error ${res.status}`);
         }
         await readEventStream(res, (chunk) => {
           const choice = chunk.choices?.[0];
@@ -539,13 +539,13 @@
           body: {
             model: state.selectedModel || state.status?.model?.name || 'tiny', stream: false, temperature: 0.3, max_tokens: 20,
             messages: [
-              { role: 'system', content: 'Du gibst Gesprächen kurze Titel. Antworte nur mit dem Titel, höchstens fünf Wörter, ohne Anführungszeichen und ohne Satzzeichen am Ende.' },
-              { role: 'user', content: `Frage: ${first.content.slice(0, 400)}\n\nAntwort: ${reply.content.slice(0, 400)}\n\nTitel:` },
+              { role: 'system', content: 'You give conversations short titles. Answer with the title only, at most five words, without quotation marks and without punctuation at the end.' },
+              { role: 'user', content: `Question: ${first.content.slice(0, 400)}\n\nAnswer: ${reply.content.slice(0, 400)}\n\nTitle:` },
             ],
           },
         });
         const data = await res.json();
-        const title = String(data.choices?.[0]?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/["„“”*#\n]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.!?:]+$/, '');
+        const title = String(data.choices?.[0]?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/["*#\n]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.!?:]+$/, '');
         if (title && title.length >= 3 && title.length <= 60) {
           t.title = title;
           saveThreads();
@@ -594,7 +594,7 @@
       const wrap = $('messagesColumn').querySelector(`[data-node="${nodeId}"]`);
       if (!node || !wrap || state.abortController) return;
       wrap.innerHTML = `<div class="msg-edit"><textarea class="ui-textarea" rows="3">${escapeHtml(node.content)}</textarea>` +
-        `<div class="msg-edit-actions"><button class="btn btn-ghost btn-sm" data-edit-cancel>Abbrechen</button><button class="btn btn-primary btn-sm" data-edit-save="${nodeId}">Senden</button></div></div>`;
+        `<div class="msg-edit-actions"><button class="btn btn-ghost btn-sm" data-edit-cancel>Cancel</button><button class="btn btn-primary btn-sm" data-edit-save="${nodeId}">Send</button></div></div>`;
       const ta = wrap.querySelector('textarea');
       ta.style.height = `${Math.min(ta.scrollHeight + 4, 320)}px`;
       ta.focus();
@@ -608,7 +608,7 @@
     async function deleteMessage(nodeId) {
       const t = currentThread();
       if (!t || state.abortController) return;
-      const ok = await askDialog({ title: 'Nachricht löschen?', text: 'Die Nachricht und alles, was danach in dieser Version kommt, wird gelöscht.', ok: 'Löschen', danger: true });
+      const ok = await askDialog({ title: 'Delete the message?', text: 'The message and everything after it in this version will be deleted.', ok: 'Delete', danger: true });
       if (!ok) return;
       removeSubtree(t, nodeId);
       saveThreads();
@@ -652,14 +652,14 @@
     async function addFiles(fileList) {
       for (const file of Array.from(fileList || [])) {
         if (file.type.startsWith('image/')) {
-          try { state.attachments.push({ kind: 'image', name: file.name || 'Bild', dataUrl: await shrinkImage(file) }); } catch { toast(`${file.name}: Das Bild konnte nicht gelesen werden`); }
+          try { state.attachments.push({ kind: 'image', name: file.name || 'Image', dataUrl: await shrinkImage(file) }); } catch { toast(`${file.name}: the image could not be read`); }
         } else if (/\.pdf$/i.test(file.name)) {
-          toast('PDF-Dateien kann fLLM noch nicht lesen. Kopiere den Text hinein oder nimm eine Textdatei.');
+          toast('fLLM cannot read PDF files yet. Paste the text or use a text file.');
         } else if (file.size > MAX_TEXT_ATTACHMENT) {
-          toast(`${file.name} ist zu groß (mehr als ${formatBytes(MAX_TEXT_ATTACHMENT)}).`);
+          toast(`${file.name} is too large (more than ${formatBytes(MAX_TEXT_ATTACHMENT)}).`);
         } else {
           const text = await file.text();
-          if (text.includes('\u0000')) { toast(`${file.name} ist keine Textdatei.`); continue; }
+          if (text.includes('\u0000')) { toast(`${file.name} is not a text file.`); continue; }
           state.attachments.push({ kind: 'text', name: file.name, text, size: file.size });
         }
       }
@@ -669,11 +669,11 @@
     // ---- presets ----------------------------------------------------------------
     const BUILTIN_PRESETS = [
       { id: 'standard', name: 'Standard', system: '', temperature: 0.7, top_p: 0.95, top_k: 20 },
-      { id: 'genau', name: 'Genau und knapp', system: 'Antworte kurz, sachlich und nur mit dem, was du sicher weißt. Sage es, wenn du etwas nicht weißt.', temperature: 0.2, top_p: 0.9, top_k: 20 },
-      { id: 'kreativ', name: 'Kreativ', system: 'Du bist ein einfallsreicher Schreibpartner. Biete überraschende Ideen und lebendige Sprache.', temperature: 1.0, top_p: 0.95, top_k: 60 },
-      { id: 'programmierer', name: 'Programmierer', system: 'Du bist ein erfahrener Softwareentwickler. Antworte mit lauffähigem Code und einer kurzen Erklärung. Nenne Annahmen ausdrücklich.', temperature: 0.2, top_p: 0.9, top_k: 20 },
-      { id: 'uebersetzer', name: 'Übersetzer Deutsch/Englisch', system: 'Übersetze den Text des Nutzers zwischen Deutsch und Englisch. Gib nur die Übersetzung aus, ohne Kommentar.', temperature: 0.1, top_p: 0.9, top_k: 20 },
-      { id: 'lektor', name: 'Lektor', system: 'Verbessere Rechtschreibung, Grammatik und Stil des Textes. Zeige danach in einer kurzen Liste, was du geändert hast.', temperature: 0.3, top_p: 0.9, top_k: 20 },
+      { id: 'precise', name: 'Precise and brief', system: 'Answer briefly and factually, and only with what you are sure about. Say so when you do not know something.', temperature: 0.2, top_p: 0.9, top_k: 20 },
+      { id: 'creative', name: 'Creative', system: 'You are an inventive writing partner. Offer surprising ideas and vivid language.', temperature: 1.0, top_p: 0.95, top_k: 60 },
+      { id: 'programmer', name: 'Programmer', system: 'You are an experienced software developer. Answer with working code and a short explanation. State your assumptions explicitly.', temperature: 0.2, top_p: 0.9, top_k: 20 },
+      { id: 'translator', name: 'Translator English/German', system: "Translate the user's text between English and German. Output only the translation, without comments.", temperature: 0.1, top_p: 0.9, top_k: 20 },
+      { id: 'editor', name: 'Editor', system: 'Improve the spelling, grammar and style of the text. Then show in a short list what you changed.', temperature: 0.3, top_p: 0.9, top_k: 20 },
     ];
 
     const customPresets = () => { try { return JSON.parse(localStorage.getItem(PRESET_KEY) || '[]'); } catch { return []; } };
@@ -683,7 +683,7 @@
       $('presetItems').innerHTML = all.map((p) => `
         <button class="nav-item ${p.id === (state.preset || 'standard') ? 'active' : ''}" data-preset="${escapeHtml(p.id)}" title="${escapeHtml(p.system || 'Ohne Systemprompt')}">
           <span>${escapeHtml(p.name)}</span>
-          ${p.custom ? `<span class="preset-del" data-preset-del="${escapeHtml(p.id)}" title="Löschen">✕</span>` : `<span class="quant-chip" style="margin-left:auto;">T ${p.temperature}</span>`}
+          ${p.custom ? `<span class="preset-del" data-preset-del="${escapeHtml(p.id)}" title="Delete">✕</span>` : `<span class="quant-chip" style="margin-left:auto;">T ${p.temperature}</span>`}
         </button>`).join('');
       const current = all.find((p) => p.id === (state.preset || 'standard'));
       $('presetLabel').textContent = current ? current.name : 'Eigene Einstellung';
@@ -699,11 +699,11 @@
       if (t) { t.system = p.system || null; t.preset = id; saveThreads(); }
       renderPresets();
       updateContextMeter();
-      toast(`Voreinstellung „${p.name}“ gewählt`);
+      toast(`Preset "${p.name}" selected`);
     }
 
     async function savePreset() {
-      const name = await askDialog({ title: 'Voreinstellung speichern', text: 'Speichert den aktuellen Systemprompt und die Sampling-Werte unter einem Namen.', input: '', ok: 'Speichern' });
+      const name = await askDialog({ title: 'Save preset', text: 'Saves the current system prompt and sampling values under a name.', input: '', ok: 'Save' });
       if (!name) return;
       const s = getSampler();
       const list = customPresets().filter((p) => p.name !== name);
@@ -711,7 +711,7 @@
       localStorage.setItem(PRESET_KEY, JSON.stringify(list));
       state.preset = list[list.length - 1].id;
       renderPresets();
-      toast(`Voreinstellung „${name}“ gespeichert`);
+      toast(`Preset "${name}" saved`);
     }
 
     // ---- export, import ------------------------------------------------------------
@@ -722,28 +722,28 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     }
-    const fileSafe = (s) => String(s).replace(/[^\w\-. äöüÄÖÜß]+/g, '_').slice(0, 60) || 'chat';
+    const fileSafe = (s) => String(s).replace(/[^\p{L}\p{N}\-. ]+/gu, '_').slice(0, 60) || 'chat';
 
     function threadMarkdown(t) {
       const lines = [`# ${t.title}`, ''];
       const system = t.system || '';
       if (system) lines.push(`> Systemprompt: ${system.replace(/\n/g, ' ')}`, '');
       for (const n of pathOf(t)) {
-        lines.push(n.role === 'user' ? '## Du' : '## Modell', '', messageText(n), '');
+        lines.push(n.role === 'user' ? '## You' : '## Model', '', messageText(n), '');
       }
       return lines.join('\n');
     }
 
     async function chatAction(action) {
       const t = currentThread();
-      if (!t) { toast('Öffne zuerst einen Chat.'); return; }
+      if (!t) { toast('Open a chat first.'); return; }
       if (action === 'rename') {
-        const name = await askDialog({ title: 'Chat umbenennen', input: t.title, ok: 'Umbenennen' });
+        const name = await askDialog({ title: 'Rename chat', input: t.title, ok: 'Rename' });
         if (name) { t.title = name.slice(0, 80); t.autoTitle = false; saveThreads(); renderThreadList(); }
       } else if (action === 'pin') {
         t.pinned = !t.pinned; saveThreads(); renderThreadList(); updateChatChrome();
       } else if (action === 'duplicate') {
-        const copy = copyThread(t); state.threads.unshift(copy); openThread(copy.id); toast('Chat dupliziert');
+        const copy = copyThread(t); state.threads.unshift(copy); openThread(copy.id); toast('Chat duplicated');
       } else if (action === 'export-md') {
         download(`${fileSafe(t.title)}.md`, 'text/markdown', threadMarkdown(t));
       } else if (action === 'export-json') {
@@ -756,7 +756,7 @@
     async function deleteThread(id) {
       const t = state.threads.find((x) => x.id === id);
       if (!t) return;
-      if (!(await askDialog({ title: 'Chat löschen?', text: `„${t.title}“ wird endgültig gelöscht.`, ok: 'Löschen', danger: true }))) return;
+      if (!(await askDialog({ title: 'Delete chat?', text: `"${t.title}" will be deleted for good.`, ok: 'Delete', danger: true }))) return;
       state.threads = state.threads.filter((x) => x.id !== id);
       if (state.activeThreadId === id) state.activeThreadId = null;
       saveThreads();
@@ -766,7 +766,7 @@
 
     function importThreads(text) {
       let list;
-      try { list = JSON.parse(text); } catch { toast('Die Datei ist kein gültiges JSON.'); return; }
+      try { list = JSON.parse(text); } catch { toast('The file is not valid JSON.'); return; }
       if (!Array.isArray(list)) list = [list];
       let added = 0;
       for (const raw of list) {
@@ -778,7 +778,7 @@
       }
       saveThreads();
       renderThreadList();
-      toast(added ? `${added} Chat${added === 1 ? '' : 's'} importiert` : 'In der Datei wurden keine Chats gefunden.');
+      toast(added ? `${added} chat${added === 1 ? '' : 's'} imported` : 'No chats were found in the file.');
     }
 
     // ---- slash commands ----------------------------------------------------------------
@@ -787,15 +787,15 @@
       const arg = rest.join(' ').trim();
       const done = () => { $('chatTextarea').value = ''; $('chatTextarea').style.height = 'auto'; return true; };
       switch (cmd.toLowerCase()) {
-        case 'clear': case 'neu': startNewChat(); return done();
+        case 'clear': case 'new': startNewChat(); return done();
         case 'system':
           $('txtSystemPrompt').value = arg;
           { const t = currentThread(); if (t) { t.system = arg || null; saveThreads(); } }
           updateContextMeter();
-          toast(arg ? 'Systemprompt gesetzt' : 'Systemprompt entfernt');
+          toast(arg ? 'System prompt set' : 'System prompt removed');
           return done();
         case 'export': await chatAction('export-md'); return done();
-        case 'hilfe': case 'help': $('helpModal').classList.add('open'); return done();
+        case 'help': $('helpModal').classList.add('open'); return done();
         case 'retry': {
           const t = currentThread();
           const last = t && pathOf(t).filter((n) => n.role === 'assistant').pop();
@@ -823,7 +823,7 @@
       if (ren) {
         e.stopPropagation();
         const t = state.threads.find((x) => x.id === ren.dataset.renTid);
-        const name = t && await askDialog({ title: 'Chat umbenennen', input: t.title, ok: 'Umbenennen' });
+        const name = t && await askDialog({ title: 'Rename chat', input: t.title, ok: 'Rename' });
         if (name) { t.title = name.slice(0, 80); t.autoTitle = false; saveThreads(); renderThreadList(); }
         return;
       }
@@ -835,7 +835,7 @@
       const copyCode = e.target.closest('[data-copy-code]');
       if (copyCode) {
         const pre = $(copyCode.dataset.copyCode);
-        if (pre) { await navigator.clipboard.writeText(pre.textContent); toast('Code kopiert'); }
+        if (pre) { await navigator.clipboard.writeText(pre.textContent); toast('Code copied'); }
         return;
       }
       const wrapCode = e.target.closest('[data-wrap-code]');
@@ -865,7 +865,7 @@
       const t = currentThread();
       const node = t?.nodes[id];
       if (!node) return;
-      if (act.dataset.act === 'copy') { await navigator.clipboard.writeText(messageText(node)); toast('Kopiert'); }
+      if (act.dataset.act === 'copy') { await navigator.clipboard.writeText(messageText(node)); toast('Copied'); }
       else if (act.dataset.act === 'edit') startEditing(id);
       else if (act.dataset.act === 'regen') await regenerate(id);
       else if (act.dataset.act === 'delete') await deleteMessage(id);
@@ -911,11 +911,11 @@
       clearTimeout(tokTimer);
       tokTimer = setTimeout(async () => {
         const max = state.status?.model?.max_context || 4096;
-        if (!el.value.trim()) { $('liveTokenCounter').textContent = `0 / ${max} Token`; return; }
+        if (!el.value.trim()) { $('liveTokenCounter').textContent = `0 / ${max} tokens`; return; }
         try {
           const r = await apiFetch('/tokenize', { method: 'POST', body: { content: el.value } });
-          if (r.ok) $('liveTokenCounter').textContent = `${((await r.json()).tokens || []).length} / ${max} Token`;
-        } catch { $('liveTokenCounter').textContent = `ca. ${estimateTokens(el.value)} / ${max} Token`; }
+          if (r.ok) $('liveTokenCounter').textContent = `${((await r.json()).tokens || []).length} / ${max} tokens`;
+        } catch { $('liveTokenCounter').textContent = `about ${estimateTokens(el.value)} / ${max} tokens`; }
       }, 250);
     });
     $('chatTextarea').addEventListener('keydown', (e) => {
@@ -933,9 +933,9 @@
       const text = e.clipboardData?.getData('text/plain') || '';
       if (text.length > PASTE_AS_FILE) {
         e.preventDefault();
-        state.attachments.push({ kind: 'text', name: 'Eingefügter Text.txt', text, size: text.length });
+        state.attachments.push({ kind: 'text', name: 'Pasted text.txt', text, size: text.length });
         renderAttachments();
-        toast('Langer Text als Datei angehängt');
+        toast('Long text attached as a file');
       }
     });
     $('btnSendChat').addEventListener('click', sendChatPrompt);
@@ -976,12 +976,12 @@
     });
     $('btnDeleteAllThreads').addEventListener('click', async () => {
       if (!state.threads.length) return;
-      if (!(await askDialog({ title: 'Alle Chats löschen?', text: `${state.threads.length} Chats werden endgültig gelöscht. Exportiere sie vorher, wenn du sie behalten willst.`, ok: 'Alle löschen', danger: true }))) return;
+      if (!(await askDialog({ title: 'Delete all chats?', text: `${state.threads.length} chats will be deleted for good. Export them first if you want to keep them.`, ok: 'Delete all', danger: true }))) return;
       state.threads = [];
       state.activeThreadId = null;
       saveThreads();
       renderThreadList();
       renderChatArea();
-      toast('Alle Chats gelöscht');
+      toast('All chats deleted');
     });
     $('btnFactoryResetThreads').addEventListener('click', () => $('btnDeleteAllThreads').click());

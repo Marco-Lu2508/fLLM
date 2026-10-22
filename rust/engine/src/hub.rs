@@ -969,6 +969,27 @@ fn download_file(
     Ok(())
 }
 
+/// The file a download is writing right now, for a UI that polls (the Studio shows it as a progress bar).
+#[derive(Clone, Debug)]
+pub struct DownloadProgress {
+    pub file: String,
+    pub written: u64,
+    pub total: Option<u64>,
+    pub mb_per_s: f64,
+    pub finished: bool,
+}
+
+static DOWNLOAD: std::sync::Mutex<Option<DownloadProgress>> = std::sync::Mutex::new(None);
+
+/// The latest progress report of a running or just finished download.
+pub fn download_progress() -> Option<DownloadProgress> {
+    DOWNLOAD.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn clear_download_progress() {
+    *DOWNLOAD.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 fn progress(
     path: &Path,
     written: u64,
@@ -977,6 +998,13 @@ fn progress(
     seconds: f64,
     finished: bool,
 ) {
+    *DOWNLOAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(DownloadProgress {
+        file: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        written,
+        total,
+        mb_per_s: received as f64 / 1_000_000.0 / seconds.max(0.001),
+        finished,
+    });
     let percent = total.filter(|&n| n > 0).map_or_else(
         || "size unknown".into(),
         |n| format!("{:.1}%", written as f64 * 100.0 / n as f64),
@@ -1417,6 +1445,55 @@ pub fn repository_files(repository: &str) -> Result<Vec<(String, u64)>, String> 
         files.push((name.to_owned(), size));
     }
     Ok(files)
+}
+
+fn studio_file() -> PathBuf {
+    let base = cache_root();
+    base.parent().unwrap_or(&base).join("fllm").join("studio.json")
+}
+
+/// The model the Studio was last started or switched to (`fllm-rs studio` starts with it when no `--model` is given).
+pub fn last_studio_model() -> Option<String> {
+    let text = fs::read_to_string(studio_file()).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?.get("last_model")?.as_str().map(str::to_owned)
+}
+
+pub fn remember_studio_model(model: &str) {
+    let file = studio_file();
+    if let Some(dir) = file.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(file, serde_json::json!({"last_model": model}).to_string());
+}
+
+/// Search the Hub for repositories that contain GGUF files, most downloaded first.
+pub fn search_models(query: &str, limit: usize) -> Result<Vec<Value>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("fllm-rust/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut url = reqwest::Url::parse("https://huggingface.co/api/models").map_err(|e| e.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("search", query)
+        .append_pair("filter", "gguf")
+        .append_pair("sort", "downloads")
+        .append_pair("direction", "-1")
+        .append_pair("limit", &limit.clamp(1, 50).to_string());
+    let found: Vec<Value> = get(&client, url, &token())?.json().map_err(|e| e.to_string())?;
+    Ok(found
+        .into_iter()
+        .filter_map(|m| {
+            let id = m.get("id").or_else(|| m.get("modelId"))?.as_str()?.to_owned();
+            Some(serde_json::json!({
+                "id": id,
+                "downloads": m.get("downloads").and_then(Value::as_u64).unwrap_or(0),
+                "likes": m.get("likes").and_then(Value::as_u64).unwrap_or(0),
+                "updated": m.get("lastModified").and_then(Value::as_str).unwrap_or(""),
+            }))
+        })
+        .collect())
 }
 
 #[cfg(test)]

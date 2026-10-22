@@ -1618,7 +1618,7 @@ async fn studio_control_plane_manages_config_hardware_models_and_keys() {
                 "temperature": 0.42,
                 "top_p": 0.88,
                 "top_k": 15,
-                "system_prompt": "Du bist ein Rust-Assistent.",
+                "system_prompt": "You are a Rust assistant.",
                 "aliases": ["gpt-4o-local"]
             }),
         )

@@ -132,7 +132,7 @@
       $('navHub').classList.toggle('active', surfaceName === 'hub');
       $('navSettings').classList.toggle('active', surfaceName === 'settings');
       $('appShell').classList.toggle('tab-code', state.tab === 'code');
-      $('threadGroupTitle').textContent = state.tab === 'code' ? 'Ordner' : 'Chats';
+      $('threadGroupTitle').textContent = state.tab === 'code' ? 'Folders' : 'Chats';
       renderThreadList();
 
       if (surfaceName === 'code') { loadWorkspace(); setTimeout(() => $('codeTextarea').focus(), 30); }

@@ -9,7 +9,7 @@
       const size = params >= 1e9 ? `${nf(params / 1e9)} Milliarden Parameter` : params > 0 ? `${nf(params / 1e6, 0)} Millionen Parameter` : '';
       const facts = [size, m.quantization, m.max_context ? `${nf(m.max_context, 0)} Token Kontext` : ''].filter(Boolean);
       $('welcomeHeading').textContent = state.selectedModel || m.name || 'Bereit';
-      $('welcomeSub').textContent = `Läuft lokal auf diesem Rechner${facts.length ? ': ' + facts.join(', ') : ''}.`;
+      $('welcomeSub').textContent = `Running locally on this computer${facts.length ? ': ' + facts.join(', ') : ''}.`;
 
       // tokens per second from the counters of the server (its own clock, so a slow poll does not skew it)
       const tokens = Number(mt.generated_tokens_total || 0);
@@ -35,7 +35,7 @@
       $('heroTps').textContent = busy ? nf(rate, 1) : '0';
       $('headerTps').textContent = busy ? nf(rate, 0) : '0';
       $('headerTrace').classList.toggle('is-busy', busy);
-      $('heroTpsLabel').textContent = busy ? 'Token pro Sekunde, das Modell antwortet gerade' : 'Token pro Sekunde, das Modell wartet auf eine Frage';
+      $('heroTpsLabel').textContent = busy ? 'tokens per second, the model is answering' : 'tokens per second, the model is waiting for a question';
     }
 
     // --- Studio Status Sync ---
@@ -52,7 +52,7 @@
         $('activeModelLabel').textContent = state.selectedModel;
         $('activeQuantChip').textContent = m.quantization || 'GGUF';
         $('footerSimdLabel').textContent = `CPU · ${data.config?.active_cpu_tier || 'simd'}`;
-        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} Plätze`;
+        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} slots`;
         $('settingsVersionBadge').textContent = `fllm-rs ${data.version || '0.1.2'}`;
         $('genBuildInfoText').textContent = data.build_info || '';
         $('serverEndpointUrlText').textContent = `${window.location.origin}/v1`;
@@ -91,70 +91,6 @@
       } catch {}
     }
 
-    // --- Hub ---
-    async function refreshHub() {
-      try {
-        const res = await apiFetch('/api/studio/models');
-        if (!res.ok) return;
-        state.modelsHub = await res.json();
-        renderHub();
-      } catch {}
-    }
-
-    function renderHub() {
-      const m = state.status?.model || {};
-      $('loadedModelHubItem').innerHTML = `
-        <div class="app-card-item">
-          <div class="app-item-info">
-            <div class="app-item-title">${escapeHtml(m.name || 'Loaded Model')} <span class="quant-chip" style="color:var(--primary);">In der Engine aktiv</span></div>
-            <div class="app-item-desc mono">${escapeHtml(m.arch || 'llama')} · ${escapeHtml(m.parameter_size || '')} · ${formatBytes(m.size_bytes)} · ${m.max_context || 512} ctx</div>
-          </div>
-          <div class="app-item-actions">
-            <button class="btn btn-sm btn-primary" data-use-model="${escapeHtml(m.name || '')}">Chat</button>
-          </div>
-        </div>
-      `;
-
-      const cached = state.modelsHub?.cached || [];
-      $('cachedModelsHubList').innerHTML = cached.map((c) => `
-        <div class="app-card-item">
-          <div class="app-item-info">
-            <div class="app-item-title mono">${escapeHtml(c.name)}</div>
-            <div class="app-item-desc mono">${formatBytes(c.size_bytes)} · ${escapeHtml(c.path)}</div>
-          </div>
-          <div class="app-item-actions">
-            <button class="btn btn-xs btn-destructive" data-del-cache="${escapeHtml(c.name)}">Löschen</button>
-          </div>
-        </div>
-      `).join('');
-
-      const q = ($('hubSearchInput').value || '').toLowerCase().trim();
-      const cat = (state.modelsHub?.catalog || []).filter((item) => {
-        if (!q) return true;
-        return item.id.toLowerCase().includes(q) || item.display_name.toLowerCase().includes(q) || item.architecture.toLowerCase().includes(q);
-      });
-
-      $('hubCatalogCards').innerHTML = cat.map((entry) => `
-        <div class="app-card">
-          <div class="app-card-header" style="margin-bottom:8px;padding-bottom:8px;">
-            <div>
-              <div style="display:flex;align-items:center;gap:8px;">
-                <span style="font-weight:600;font-size:14.5px;color:var(--foreground);">${escapeHtml(entry.display_name)}</span>
-                <span class="quant-chip">${escapeHtml(entry.architecture)}</span>
-                <span class="quant-chip">${entry.context_length} ctx</span>
-                ${entry.vision ? '<span class="quant-chip">Vision</span>' : ''}
-              </div>
-              <p class="app-item-desc mono" style="margin-top:3px;">${escapeHtml(entry.default_repo || entry.gguf_repo || '')}: für deinen Arbeitsspeicher empfohlen ist <strong>${escapeHtml(entry.recommended_quant)}</strong>, etwa ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB</p>
-            </div>
-            <div style="display:flex;gap:6px;">
-              <button class="btn btn-sm btn-outline" data-inspect-hf="${escapeHtml(entry.default_repo || entry.gguf_repo || '')}">Dateien</button>
-              <button class="btn btn-sm btn-primary" data-pull-cat="${escapeHtml(entry.id)}" data-pull-q="${escapeHtml(entry.recommended_quant)}">${escapeHtml(entry.recommended_quant)} laden</button>
-            </div>
-          </div>
-        </div>
-      `).join('');
-    }
-
     // --- API Keys ---
     async function refreshApiKeys() {
       try {
@@ -166,7 +102,7 @@
         $('inpGlobalTpm').value = rl.tokens_per_minute || '';
         const keys = state.keysData.keys || [];
         if (!keys.length) {
-          $('apiKeysTableContainer').innerHTML = `<div class="app-item-desc">Es ist kein API-Schlüssel eingerichtet. Der Server ist offen und nimmt Änderungen nur von diesem Rechner an. Lege oben einen Schlüssel an, um Anfragen mit Bearer-Token zu verlangen.</div>`;
+          $('apiKeysTableContainer').innerHTML = `<div class="app-item-desc">No API key is set up. The server is open, and it accepts changes only from this computer. Create a key above to require a Bearer token for requests.</div>`;
           return;
         }
         $('apiKeysTableContainer').innerHTML = `
@@ -207,9 +143,9 @@
           const usedPct = totalB > 0 ? ((totalB - freeB) / totalB) * 100 : 0;
           const tiers = hw.supported_cpu_tiers || [];
           $('hwRamDesc').textContent = (hw.measured_cpu_bandwidth_gbs
-            ? `Befehlssatz-Stufe: ${hw.active_cpu_tier}. Gemessene Speicherbandbreite: ${Number(hw.measured_cpu_bandwidth_gbs).toFixed(1)} GB/s.`
-            : `Befehlssatz-Stufe: ${hw.active_cpu_tier} (möglich: ${tiers.join(', ')}).`) + ` ${hw.threads} Threads.`;
-          $('hwRamText').textContent = `${formatBytes(freeB)} frei von ${formatBytes(totalB)}`;
+            ? `Instruction set: ${hw.active_cpu_tier}. Measured memory bandwidth: ${Number(hw.measured_cpu_bandwidth_gbs).toFixed(1)} GB/s.`
+            : `Instruction set: ${hw.active_cpu_tier} (available: ${tiers.join(', ')}).`) + ` ${hw.threads} threads.`;
+          $('hwRamText').textContent = `${formatBytes(freeB)} free of ${formatBytes(totalB)}`;
           $('hwRamProgress').style.width = `${Math.min(100, Math.max(2, usedPct)).toFixed(0)}%`;
           const sel = $('selSimdTierCap');
           const wanted = ['auto', ...tiers];
@@ -225,13 +161,13 @@
                 <div>
                   <div style="font-weight:600;color:var(--foreground);">${escapeHtml(d.name)}</div>
                   <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                    <span class="backend-chip"><span class="backend-chip-dot"></span>${escapeHtml(({ cpu: 'Prozessor', cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12' })[String(d.backend).toLowerCase()] || d.backend)}</span>
-                    ${d.description ? `<span class="quant-chip">${escapeHtml(String(d.description).replace(/\bthreads\b/, 'Threads'))}</span>` : ''}
-                    ${d.unified_memory ? '<span class="quant-chip">teilt den Arbeitsspeicher</span>' : ''}
+                    <span class="backend-chip"><span class="backend-chip-dot"></span>${escapeHtml(({ cpu: 'Processor', cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12' })[String(d.backend).toLowerCase()] || d.backend)}</span>
+                    ${d.description ? `<span class="quant-chip">${escapeHtml(String(d.description).replace(/\bthreads\b/, 'threads'))}</span>` : ''}
+                    ${d.unified_memory ? '<span class="quant-chip">shares system memory</span>' : ''}
                   </div>
-                  ${d.notes ? `<details class="device-notes"><summary>Technische Hinweise</summary><div class="app-item-desc">${escapeHtml(d.notes)}</div></details>` : ''}
+                  ${d.notes ? `<details class="device-notes"><summary>Technical notes</summary><div class="app-item-desc">${escapeHtml(d.notes)}</div></details>` : ''}
                 </div>
-                <span class="mono tabular" style="font-size:12px;white-space:nowrap;">${formatBytes(d.free_memory_bytes)} frei von ${formatBytes(d.total_memory_bytes)}</span>
+                <span class="mono tabular" style="font-size:12px;white-space:nowrap;">${formatBytes(d.free_memory_bytes)} free of ${formatBytes(d.total_memory_bytes)}</span>
               </div>
             </div>
           `).join('');
@@ -320,7 +256,7 @@
       const v = $('selRouteTest').value;
       const model = state.selectedModel || state.status?.model?.name || 'tiny';
       const map = {
-        'POST:/v1/chat/completions': { model, messages: [{ role: 'user', content: 'Hallo! Antworte kurz.' }], max_tokens: 48 },
+        'POST:/v1/chat/completions': { model, messages: [{ role: 'user', content: 'Hello! Answer briefly.' }], max_tokens: 48 },
         'POST:/v1/messages': { model, max_tokens: 48, messages: [{ role: 'user', content: 'Hello via Anthropic API!' }] },
         'POST:/v1/responses': { model, input: 'Three facts about Rust.', max_output_tokens: 48 },
         'POST:/api/chat': { model, stream: false, messages: [{ role: 'user', content: 'Hello via Ollama API!' }] },

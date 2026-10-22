@@ -155,7 +155,7 @@ settings only; report what works and what does not:
 
 Streaming, tool use and thinking support vary by program; the server side of
 each is documented in [server-api.md](../server-api.md) and
-[api-compat.md](../api-compat.md). The built-in browser chat page (`GET /`)
+[api-compat.md](../api-compat.md). The built-in browser app, the [Studio](studio.md) (`GET /`),
 needs no client at all.
 
 ## See also

@@ -35,7 +35,7 @@
               <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
               <span>Chat</span>
             </button>
-            <button class="nav-tab" data-tab="code" title="Coding-Agent: liest, ändert und startet Programme in einem Ordner deines Rechners.">
+            <button class="nav-tab" data-tab="code" title="Coding agent: reads, edits and runs programs inside one folder of this computer.">
               <svg viewBox="0 0 24 24" class="icon icon-sm"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               <span>Code</span>
             </button>
@@ -45,21 +45,21 @@
           <nav class="nav-main">
             <button class="nav-item" id="navNewChat">
               <svg viewBox="0 0 24 24" class="icon"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
-              <span>Neuer Chat</span>
+              <span>New chat</span>
               <span class="kbd-group">Ctrl N</span>
             </button>
             <button class="nav-item" id="navOpenSearch">
               <svg viewBox="0 0 24 24" class="icon"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-              <span>Suche</span>
+              <span>Search</span>
               <span class="kbd-group">Ctrl K</span>
             </button>
             <button class="nav-item" data-surface="hub" id="navHub">
               <svg viewBox="0 0 24 24" class="icon"><rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3"/></svg>
-              <span>Modelle</span>
+              <span>Models</span>
             </button>
             <button class="nav-item" data-surface="settings" id="navSettings">
               <svg viewBox="0 0 24 24" class="icon"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-              <span>Einstellungen</span>
+              <span>Settings</span>
             </button>
           </nav>
         </div>
@@ -70,25 +70,25 @@
             <span id="threadGroupTitle">Chats</span>
             <div class="chats-only" style="display:flex;gap:2px;">
               <input type="file" id="fileImportThreads" accept="application/json,.json" style="display:none;">
-              <button class="btn-icon btn-icon-xs" id="btnImportThreads" title="Chats importieren (JSON)">
+              <button class="btn-icon btn-icon-xs" id="btnImportThreads" title="Import chats (JSON)">
                 <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
               </button>
-              <button class="btn-icon btn-icon-xs" id="btnExportThreads" title="Alle Chats exportieren (JSON)">
+              <button class="btn-icon btn-icon-xs" id="btnExportThreads" title="Export all chats (JSON)">
                 <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
               </button>
-              <button class="btn-icon btn-icon-xs" id="btnDeleteAllThreads" title="Alle Chats löschen">
+              <button class="btn-icon btn-icon-xs" id="btnDeleteAllThreads" title="Delete all chats">
                 <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
               </button>
             </div>
           </div>
-          <input type="search" class="thread-search chats-only" id="threadSearch" placeholder="Chats durchsuchen" aria-label="Chats durchsuchen">
+          <input type="search" class="thread-search chats-only" id="threadSearch" placeholder="Search chats" aria-label="Search chats">
 <div class="thread-list" id="threadList"></div>
         </div>
 
         <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
         <div class="sidebar-footer">
           <span class="mono" id="footerSimdLabel">CPU · avx-vnni</span>
-          <span class="mono tabular" id="footerSlotsLabel">0/8 Plätze</span>
+          <span class="mono tabular" id="footerSlotsLabel">0/8 slots</span>
         </div>
       </div>
     </aside>
@@ -104,7 +104,7 @@
       <section class="surface-view active" id="surface-chat">
         <header class="header-page">
           <div class="header-left">
-            <button class="btn-icon" id="btnExpandSidebarChat" style="display:none;" title="Sidebar öffnen">
+            <button class="btn-icon" id="btnExpandSidebarChat" style="display:none;" title="Open sidebar">
               <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
             </button>
             <!-- DropdownModelProvider -->
@@ -117,22 +117,22 @@
               </button>
               <div class="popover-panel" id="modelDropdownMenu" style="top:calc(100% + 6px);bottom:auto;width:300px;">
                 <div class="popover-head">
-                  <span>Geladenes Modell und Aliase</span>
-                  <button class="btn btn-xs btn-ghost" id="btnModelMenuGoHub">Modelle öffnen</button>
+                  <span>Loaded model and aliases</span>
+                  <button class="btn btn-xs btn-ghost" id="btnModelMenuGoHub">Open models</button>
                 </div>
                 <div class="popover-body" id="modelDropdownItems"></div>
               </div>
             </div>
             <div style="position:relative;">
-              <button class="model-pill" id="btnPresets" title="Voreinstellungen: Systemprompt und Sampling zusammen speichern">
+              <button class="model-pill" id="btnPresets" title="Presets: save system prompt and sampling together">
                 <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>
                 <span id="presetLabel">Standard</span>
                 <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--muted-foreground);"><path d="m6 9 6 6 6-6"/></svg>
               </button>
               <div class="popover-panel" id="presetMenu" style="top:calc(100% + 6px);bottom:auto;width:330px;">
                 <div class="popover-head">
-                  <span>Voreinstellungen</span>
-                  <button class="btn btn-xs btn-ghost" id="btnPresetSave">Aktuelle speichern</button>
+                  <span>Presets</span>
+                  <button class="btn btn-xs btn-ghost" id="btnPresetSave">Save current</button>
                 </div>
                 <div class="popover-body" id="presetItems"></div>
               </div>
@@ -140,32 +140,32 @@
           </div>
 
           <div class="header-right">
-            <div class="header-trace" id="headerTrace" title="Erzeugte Token pro Sekunde" aria-hidden="true">
+            <div class="header-trace" id="headerTrace" title="Generated tokens per second" aria-hidden="true">
               <svg viewBox="0 0 600 64" preserveAspectRatio="none"><polyline id="headerTraceLine" points="0,63 600,63"></polyline></svg>
               <span class="tabular" id="headerTps">0</span>
             </div>
-            <div class="ctx-meter" id="ctxMeter" title="Wie voll der Kontext dieses Chats ist">
+            <div class="ctx-meter" id="ctxMeter" title="How full the context of this chat is">
               <span class="ctx-bar"><i id="ctxFill"></i></span>
               <span class="tabular" id="ctxText">0 / 4096</span>
             </div>
             <div style="position:relative;">
-              <button class="btn-icon" id="btnChatMenu" title="Mehr zu diesem Chat" aria-haspopup="true">
+              <button class="btn-icon" id="btnChatMenu" title="More" aria-haspopup="true">
                 <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></svg>
               </button>
               <div class="popover-panel menu-panel" id="chatMenu" style="top:calc(100% + 6px);bottom:auto;left:auto;right:0;width:230px;">
-                <button class="menu-item" data-chat-action="rename">Umbenennen</button>
-                <button class="menu-item" data-chat-action="pin" id="menuPin">Anpinnen</button>
-                <button class="menu-item" data-chat-action="duplicate">Duplizieren</button>
-                <button class="menu-item" data-chat-action="export-md">Als Markdown exportieren</button>
-                <button class="menu-item" data-chat-action="export-json">Als JSON exportieren</button>
-                <button class="menu-item danger" data-chat-action="delete">Chat löschen</button>
+                <button class="menu-item" data-chat-action="rename">Rename</button>
+                <button class="menu-item" data-chat-action="pin" id="menuPin">Pin</button>
+                <button class="menu-item" data-chat-action="duplicate">Duplicate</button>
+                <button class="menu-item" data-chat-action="export-md">Export as Markdown</button>
+                <button class="menu-item" data-chat-action="export-json">Export as JSON</button>
+                <button class="menu-item danger" data-chat-action="delete">Delete chat</button>
               </div>
             </div>
           </div>
         </header>
 
         <div class="chat-container is-empty" id="chatContainer">
-          <div class="drop-overlay" id="dropOverlay"><span>Dateien hier ablegen</span></div>
+          <div class="drop-overlay" id="dropOverlay"><span>Drop files here</span></div>
           <!-- Messages Scroll Area -->
           <div class="chat-messages-scroll" id="chatMessagesScroll">
             <div class="messages-column" id="messagesColumn"></div>
@@ -174,9 +174,9 @@
           <!-- Composer Region (Centered when empty, bottom when chatting) -->
           <div class="chat-composer-region">
             <div class="chat-empty-hero">
-              <h1 id="welcomeHeading">Bereit</h1>
-              <p id="welcomeSub">Das Modell wird geladen.</p>
-              <div class="hero-trace" id="heroTrace" role="img" aria-label="Erzeugte Token pro Sekunde, letzte zwei Minuten">
+              <h1 id="welcomeHeading">Ready</h1>
+              <p id="welcomeSub">Loading the model.</p>
+              <div class="hero-trace" id="heroTrace" role="img" aria-label="Generated tokens per second, last two minutes">
                 <svg viewBox="0 0 600 64" preserveAspectRatio="none" aria-hidden="true">
                   <line class="hero-trace-base" x1="0" y1="63" x2="600" y2="63"></line>
                   <polyline class="hero-trace-line" id="heroTraceLine" points="0,63 600,63"></polyline>
@@ -189,15 +189,15 @@
               <!-- Sampling Parameters Popover (containers/SamplerPopover.tsx) -->
               <div class="popover-panel" id="samplerPopover">
                 <div class="popover-head">
-                  <span>Sampling: Parameter des Modells</span>
+                  <span>Sampling parameters</span>
                   <div style="display:flex;gap:4px;">
-                    <button class="btn btn-xs btn-ghost" id="btnResetSampler">Zurücksetzen</button>
-                    <button class="btn btn-xs btn-primary" id="btnSaveSamplerToRust" title="Speichert die Parameter als Standard des Servers">Als Standard speichern</button>
+                    <button class="btn btn-xs btn-ghost" id="btnResetSampler">Reset</button>
+                    <button class="btn btn-xs btn-primary" id="btnSaveSamplerToRust" title="Saves the parameters as the server default">Save as default</button>
                   </div>
                 </div>
                 <div class="popover-body">
                   <div class="param-item">
-                    <div class="param-row-top"><span>Temperatur</span><input type="number" step="0.05" min="0" max="2" id="numTemp" class="param-val-input" value="0.7"></div>
+                    <div class="param-row-top"><span>Temperature</span><input type="number" step="0.05" min="0" max="2" id="numTemp" class="param-val-input" value="0.7"></div>
                     <input type="range" min="0" max="2" step="0.05" id="rngTemp" value="0.7">
                   </div>
                   <div class="param-item">
@@ -213,20 +213,20 @@
                     <input type="range" min="0" max="1" step="0.01" id="rngMinP" value="0.0">
                   </div>
                   <div class="param-item">
-                    <div class="param-row-top"><span>Maximale Länge</span><input type="number" step="16" min="1" max="8192" id="numMaxTokens" class="param-val-input" value="256"></div>
+                    <div class="param-row-top"><span>Max tokens</span><input type="number" step="16" min="1" max="8192" id="numMaxTokens" class="param-val-input" value="256"></div>
                     <input type="range" min="16" max="2048" step="16" id="rngMaxTokens" value="256">
                   </div>
                   <div class="param-item">
-                    <div class="param-row-top"><span>Wiederholungsstrafe</span><input type="number" step="0.05" min="1" max="2" id="numRepeatPen" class="param-val-input" value="1.0"></div>
+                    <div class="param-row-top"><span>Repeat penalty</span><input type="number" step="0.05" min="1" max="2" id="numRepeatPen" class="param-val-input" value="1.0"></div>
                     <input type="range" min="1" max="2" step="0.05" id="rngRepeatPen" value="1.0">
                   </div>
                   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:4px;">
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Presence-Strafe</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Presence penalty</label>
                       <input type="number" step="0.1" min="-2" max="2" id="numPresencePen" class="ui-input mono" style="width:100%;" value="0.0">
                     </div>
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Frequency-Strafe</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Frequency penalty</label>
                       <input type="number" step="0.1" min="-2" max="2" id="numFreqPen" class="ui-input mono" style="width:100%;" value="0.0">
                     </div>
                     <div>
@@ -236,29 +236,29 @@
                     <div>
                       <label style="font-size:11px;color:var(--muted-foreground);">Mirostat (0/1/2)</label>
                       <select id="selMirostat" class="ui-select mono" style="width:100%;">
-                        <option value="0">0 (aus)</option>
+                        <option value="0">0 (off)</option>
                         <option value="1">1 (Mirostat v1)</option>
                         <option value="2">2 (Mirostat v2)</option>
                       </select>
                     </div>
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Seed (-1 = zufällig)</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Seed (-1 = random)</label>
                       <input type="number" step="1" id="numSeed" class="ui-input mono" style="width:100%;" value="-1">
                     </div>
                     <div>
-                      <label style="font-size:11px;color:var(--muted-foreground);">Ausgabeformat</label>
+                      <label style="font-size:11px;color:var(--muted-foreground);">Output format</label>
                       <select id="selConstraint" class="ui-select mono" style="width:100%;">
-                        <option value="none">Freier Text</option>
-                        <option value="json_object">JSON-Objekt</option>
-                        <option value="json_schema">JSON-Schema</option>
-                        <option value="gbnf">GBNF-Grammatik</option>
-                        <option value="regex">Regulärer Ausdruck</option>
+                        <option value="none">Free text</option>
+                        <option value="json_object">JSON object</option>
+                        <option value="json_schema">JSON schema</option>
+                        <option value="gbnf">GBNF grammar</option>
+                        <option value="regex">Regular expression</option>
                       </select>
                     </div>
                   </div>
-                  <textarea id="txtConstraintSpec" class="ui-textarea mono" rows="3" style="display:none;font-size:11.5px;" placeholder="JSON-Schema, GBNF oder regulärer Ausdruck"></textarea>
+                  <textarea id="txtConstraintSpec" class="ui-textarea mono" rows="3" style="display:none;font-size:11.5px;" placeholder="JSON schema, GBNF grammar or regular expression"></textarea>
                   <div style="display:flex;align-items:center;justify-content:space-between;padding-top:4px;">
-                    <span style="font-size:12px;">Spekulatives Decoding</span>
+                    <span style="font-size:12px;">Speculative decoding</span>
                     <label class="ui-switch"><input type="checkbox" id="chkSpeculative" checked><span class="ui-switch-track"></span></label>
                   </div>
                   <div style="display:flex;align-items:center;justify-content:space-between;">
@@ -271,13 +271,13 @@
               <!-- Assistant / System Prompt Popover -->
               <div class="popover-panel" id="assistantPopover" style="width:360px;">
                 <div class="popover-head">
-                  <span>Systemprompt dieses Chats</span>
-                  <button class="btn btn-xs btn-primary" id="btnSaveSystemPromptRust">Als Standard speichern</button>
+                  <span>System prompt of this chat</span>
+                  <button class="btn btn-xs btn-primary" id="btnSaveSystemPromptRust">Save as default</button>
                 </div>
                 <div class="popover-body">
-                  <label style="font-size:12px;color:var(--muted-foreground);">Systemprompt</label>
-                  <textarea id="txtSystemPrompt" class="ui-textarea" rows="4" placeholder="Du bist ein präziser, hilfreicher KI-Assistent..."></textarea>
-                  <label style="font-size:12px;color:var(--muted-foreground);">Stop-Sequenzen (mit Komma getrennt)</label>
+                  <label style="font-size:12px;color:var(--muted-foreground);">System prompt</label>
+                  <textarea id="txtSystemPrompt" class="ui-textarea" rows="4" placeholder="You are a precise, helpful assistant..."></textarea>
+                  <label style="font-size:12px;color:var(--muted-foreground);">Stop sequences (comma-separated)</label>
                   <input type="text" id="inpStopWords" class="ui-input mono" placeholder="</s>, <|im_end|>">
                 </div>
               </div>
@@ -290,32 +290,32 @@
                   id="chatTextarea"
                   class="chat-textarea"
                   rows="1"
-                  placeholder="Schreib eine Frage oder einen Auftrag"
+                  placeholder="Ask anything or give an instruction"
                 ></textarea>
 
                 <div class="chat-input-toolbar">
                   <div class="toolbar-left">
                     <input type="file" id="fileAttachInput" multiple style="display:none;" accept="image/*,.txt,.md,.markdown,.json,.csv,.tsv,.log,.rs,.py,.js,.mjs,.ts,.tsx,.jsx,.c,.h,.cpp,.hpp,.cc,.cs,.java,.kt,.go,.rb,.php,.swift,.toml,.yaml,.yml,.ini,.html,.css,.scss,.sh,.ps1,.bat,.sql,.xml,.tex">
-                    <button class="btn-icon btn-icon-xs" id="btnAttach" title="Bild oder Datei anhängen (auch per Ziehen oder Einfügen)">
+                    <button class="btn-icon btn-icon-xs" id="btnAttach" title="Attach an image or file (or drop or paste it)">
                       <svg viewBox="0 0 24 24" class="icon"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
                     </button>
 
                     <!-- Assistant Switcher Chip -->
                     <button class="composer-chip" id="btnToggleAssistantPop" title="System Prompt & Assistant">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
-                      <span>Systemprompt</span>
+                      <span>System prompt</span>
                     </button>
 
                     <!-- SamplerPopover Trigger (IconAdjustmentsHorizontal) -->
-                    <button class="composer-chip" id="btnToggleSamplerPop" title="Sampling-Parameter">
+                    <button class="composer-chip" id="btnToggleSamplerPop" title="Sampling parameters">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
                       <span>Sampling</span>
                     </button>
 
                     <!-- Thinking / Reasoning Toggle -->
-                    <button class="composer-chip" id="btnToggleThinking" title="Das Modell erst nachdenken lassen (wenn es das kann)">
+                    <button class="composer-chip" id="btnToggleThinking" title="Let the model think first (if it can)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/></svg>
-                      <span>Denken</span>
+                      <span>Thinking</span>
                     </button>
 
                   </div>
@@ -324,7 +324,7 @@
                     <!-- TokenCounter -->
                     <span class="mono tabular" style="font-size:11px;color:var(--muted-foreground);margin-right:4px;" id="liveTokenCounter">0 / 512 tok</span>
 
-                    <button class="send-circle-btn" id="btnSendChat" title="Senden (Eingabe)">
+                    <button class="send-circle-btn" id="btnSendChat" title="Send (Enter)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
                     </button>
                   </div>
@@ -334,17 +334,17 @@
 
             <!-- Subtle quick-start pills on empty chat -->
             <div class="chat-starter-pills" id="starterPills">
-              <button class="starter-pill" data-prompt="Erkläre in einfachen Worten, wie ein Sprachmodell Wort für Wort einen Text erzeugt.">
-                <span>Wie erzeugt ein Sprachmodell Text?</span>
+              <button class="starter-pill" data-prompt="Explain in simple words how a language model writes a text word by word.">
+                <span>How does a language model write text?</span>
               </button>
-              <button class="starter-pill" data-prompt="Schreibe eine schnelle Rust-Funktion für ein Skalarprodukt zweier f32-Slices.">
-                <span>Skalarprodukt in Rust schreiben</span>
+              <button class="starter-pill" data-prompt="Write a fast Rust function for the dot product of two f32 slices.">
+                <span>Write a dot product in Rust</span>
               </button>
               <button class="starter-pill" data-action="open-keys">
-                <span>API-Schlüssel anlegen</span>
+                <span>Create an API key</span>
               </button>
               <button class="starter-pill" data-action="open-hub">
-                <span>Modelle verwalten</span>
+                <span>Manage models</span>
               </button>
             </div>
           </div>
@@ -357,33 +357,33 @@
       <section class="surface-view" id="surface-code">
         <header class="header-page">
           <div class="header-left">
-            <button class="btn-icon" id="btnExpandSidebarCode" style="display:none;" title="Seitenleiste öffnen">
+            <button class="btn-icon" id="btnExpandSidebarCode" style="display:none;" title="Open sidebar">
               <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
             </button>
-            <button class="model-pill" id="btnWorkspace" title="Arbeitsordner wählen">
+            <button class="model-pill" id="btnWorkspace" title="Choose the workspace folder">
               <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-              <span id="wsName">Ordner wählen</span>
+              <span id="wsName">Choose folder</span>
               <span class="quant-chip" id="wsBranch" style="display:none;"></span>
             </button>
-            <div class="seg" id="permSeg" role="group" aria-label="Was der Agent allein darf">
-              <button data-perm="ask" class="active" title="Vor jeder Änderung und jedem Befehl fragen">Fragen</button>
-              <button data-perm="edit" title="Änderungen an Dateien erlauben, Befehle erfragen">Auto-Edit</button>
-              <button data-perm="plan" title="Nur lesen: der Agent macht einen Plan und ändert nichts">Plan</button>
+            <div class="seg" id="permSeg" role="group" aria-label="What the agent may do on its own">
+              <button data-perm="ask" class="active" title="Ask before every change and every command">Ask</button>
+              <button data-perm="edit" title="Allow file changes, ask before commands">Auto-edit</button>
+              <button data-perm="plan" title="Read only: the agent makes a plan and changes nothing">Plan</button>
             </div>
           </div>
           <div class="header-right">
-            <div class="header-trace" id="codeTrace" title="Erzeugte Token pro Sekunde" aria-hidden="true">
+            <div class="header-trace" id="codeTrace" title="Generated tokens per second" aria-hidden="true">
               <svg viewBox="0 0 600 64" preserveAspectRatio="none"><polyline id="codeTraceLine" points="0,63 600,63"></polyline></svg>
               <span class="tabular" id="codeTps">0</span>
             </div>
-            <div class="ctx-meter" id="codeCtxMeter" title="Wie voll der Kontext dieser Sitzung ist">
+            <div class="ctx-meter" id="codeCtxMeter" title="How full the context of this session is">
               <span class="ctx-bar"><i id="codeCtxFill"></i></span>
               <span class="tabular" id="codeCtxText">0 / 4096</span>
             </div>
-            <button class="btn-icon" id="btnCodeUndo" title="Letzte Dateiänderung rückgängig machen">
+            <button class="btn-icon" id="btnCodeUndo" title="Undo the last file change">
               <svg viewBox="0 0 24 24" class="icon"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
             </button>
-            <button class="btn-icon" id="btnCodeNew" title="Neue Sitzung">
+            <button class="btn-icon" id="btnCodeNew" title="New session">
               <svg viewBox="0 0 24 24" class="icon"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
             </button>
           </div>
@@ -395,10 +395,10 @@
               <div class="code-todos" id="codeTodos" style="display:none;"></div>
               <div class="code-input-box">
                 <div class="mention-pop" id="mentionPop"></div>
-                <textarea id="codeTextarea" rows="1" placeholder="Beschreibe die Aufgabe. @ nennt eine Datei, / zeigt Befehle."></textarea>
+                <textarea id="codeTextarea" rows="1" placeholder="Describe the task. @ adds a file, / shows commands."></textarea>
                 <div class="code-input-bar">
-                  <span class="code-hint" id="codeHint">Eingabe sendet, Umschalt+Eingabe macht eine neue Zeile</span>
-                  <button class="send-circle-btn" id="btnCodeSend" title="Senden (Eingabe)">
+                  <span class="code-hint" id="codeHint">Enter sends, Shift+Enter adds a new line</span>
+                  <button class="send-circle-btn" id="btnCodeSend" title="Send (Enter)">
                     <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
                   </button>
                 </div>
@@ -417,42 +417,52 @@
             <button class="btn-icon" id="btnExpandSidebarHub" style="display:none;">
               <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
             </button>
-            <span style="font-weight:600;font-size:15px;">Modelle</span>
+            <span style="font-weight:600;font-size:15px;">Models</span>
           </div>
           <div class="header-right">
-            <input type="text" id="hubSearchInput" class="ui-input" style="width:260px;" placeholder="Katalog oder Architektur durchsuchen">
+            <input type="text" id="hubSearchInput" class="ui-input" style="width:260px;" placeholder="Search catalog or architecture">
             <button class="btn btn-sm btn-outline" id="btnRefreshHub">Refresh</button>
           </div>
         </header>
 
         <div class="hub-scroll">
           <div class="hub-container">
-            <!-- HuggingFace Direct Repo Inspector & Downloader -->
+            <div class="app-card">
+              <div class="app-card-title">Loaded model</div>
+              <div id="loadedModelHubItem"></div>
+            </div>
+
             <div class="app-card">
               <div class="app-card-header">
                 <div>
-                  <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Von Hugging Face laden</h2>
-                  <p class="app-item-desc">Sieh dir ein GGUF-Repository auf Hugging Face an oder lade ein Modell direkt in den Modell-Cache.</p>
+                  <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Find and download models</h2>
+                  <p class="app-item-desc">Search Hugging Face for GGUF models, or paste a repository such as <code>owner/name</code> or a link.</p>
                 </div>
               </div>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="hfRepoInput" class="ui-input mono" style="flex:2;min-width:240px;" placeholder="z. B. Qwen/Qwen3-8B-GGUF oder bartowski/Llama-3.2-3B-Instruct-GGUF">
-                <input type="text" id="hfQuantInput" class="ui-input mono" style="width:140px;" placeholder="Quant (Q4_K_M)">
-                <button class="btn btn-secondary" id="btnInspectHfRepo">Dateien ansehen</button>
-                <button class="btn btn-primary" id="btnPullHfModel">GGUF laden</button>
+                <input type="text" id="hfRepoInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="Search, e.g. qwen coder, or paste bartowski/Llama-3.2-3B-Instruct-GGUF">
+                <button class="btn btn-primary" id="btnSearchHf">Search</button>
               </div>
+              <div id="downloadBar" class="dl-bar" style="display:none;"><div class="dl-track"><i id="dlFill"></i></div><span id="dlText" class="tabular"></span></div>
               <div id="hfFilesBox" style="display:none;margin-top:12px;"></div>
             </div>
 
-            <!-- Currently Loaded Model & Local Cache -->
             <div class="app-card">
-              <div class="app-card-title">Geladene und heruntergeladene Modelle</div>
-              <div id="loadedModelHubItem"></div>
-              <div id="cachedModelsHubList" style="margin-top:8px;"></div>
+              <div class="app-card-title">On this computer</div>
+              <div id="cachedModelsHubList"></div>
             </div>
 
-            <!-- Curated Catalog Models (routes/hub/index.tsx style) -->
-            <div id="hubCatalogCards" style="display:flex;flex-direction:column;gap:12px;"></div>
+            <div class="app-card">
+              <div class="app-card-title">Suggested models</div>
+              <div id="hubCatalogCards" style="display:flex;flex-direction:column;gap:2px;"></div>
+            </div>
+
+            <div class="modal-backdrop" id="switchOverlay" style="z-index:140;align-items:center;padding-top:0;">
+              <div class="dialog" style="text-align:center;">
+                <h3 id="switchTitle">Switching model</h3>
+                <p id="switchText">The server restarts with the new model. Your chats stay in this browser.</p>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -537,17 +547,17 @@
                 </div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Alle Chats löschen</div>
-                    <div class="app-item-desc">Löscht alle gespeicherten Chats in diesem Browser.</div>
+                    <div class="app-item-title">Delete all chats</div>
+                    <div class="app-item-desc">Deletes all saved chats in this browser.</div>
                   </div>
                   <div class="app-item-actions">
-                    <button class="btn btn-sm btn-destructive" id="btnFactoryResetThreads">Chats löschen</button>
+                    <button class="btn btn-sm btn-destructive" id="btnFactoryResetThreads">Delete chats</button>
                   </div>
                 </div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Titel automatisch vergeben</div>
-                    <div class="app-item-desc">Das Modell gibt neuen Chats nach der ersten Antwort einen kurzen Titel.</div>
+                    <div class="app-item-title">Name new chats automatically</div>
+                    <div class="app-item-desc">After the first answer the model gives a new chat a short title.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkAutoTitle" checked><span class="ui-switch-track"></span></label>
@@ -585,8 +595,8 @@
                 <div class="app-card-title">Appearance</div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Farbschema</div>
-                    <div class="app-item-desc">Dunkel oder hell.</div>
+                    <div class="app-item-title">Theme</div>
+                    <div class="app-item-desc">Dark or light.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selThemeMode" class="ui-select">
@@ -598,8 +608,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Akzentfarbe</div>
-                    <div class="app-item-desc">Färbt Seitenleiste und Bedienelemente.</div>
+                    <div class="app-item-title">Accent color</div>
+                    <div class="app-item-desc">Colors the sidebar and the controls.</div>
                   </div>
                   <div class="app-item-actions">
                     <div class="accent-picker-row" id="accentPickerRow"></div>
@@ -608,8 +618,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Schriftgröße</div>
-                    <div class="app-item-desc">Grundgröße der Schrift in der ganzen Oberfläche.</div>
+                    <div class="app-item-title">Font size</div>
+                    <div class="app-item-desc">Base size of the text in the whole interface.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selFontSize" class="ui-select">
@@ -623,8 +633,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Eigene Nachrichten einfärben</div>
-                    <div class="app-item-desc">Tönt deine Nachrichten in der gewählten Akzentfarbe.</div>
+                    <div class="app-item-title">Tint your messages</div>
+                    <div class="app-item-desc">Tints your messages in the accent color.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkColoredBubble" checked><span class="ui-switch-track"></span></label>
@@ -633,8 +643,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Geschwindigkeit anzeigen</div>
-                    <div class="app-item-desc">Zeigt unter jeder Antwort Token pro Sekunde und die Zeit bis zum ersten Token.</div>
+                    <div class="app-item-title">Show generation speed</div>
+                    <div class="app-item-desc">Shows tokens per second and the time to the first token below every answer.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkShowSpeed" checked><span class="ui-switch-track"></span></label>
@@ -693,7 +703,7 @@
                   <input type="text" id="inpKeyCustom" class="ui-input mono" style="flex:1;min-width:150px;" placeholder="Optional secret (leave empty to generate)">
                   <input type="number" id="inpKeyRpm" class="ui-input mono" style="width:95px;" placeholder="RPM">
                   <input type="number" id="inpKeyTpm" class="ui-input mono" style="width:95px;" placeholder="TPM">
-                  <button class="btn btn-primary" id="btnCreateKey">Schlüssel anlegen</button>
+                  <button class="btn btn-primary" id="btnCreateKey">Create key</button>
                 </div>
 
                 <div id="newKeyBanner" style="display:none;padding:10px 12px;border-radius:8px;border:1px solid var(--primary);background:color-mix(in srgb, var(--primary) 12%, transparent);margin-bottom:12px;align-items:center;justify-content:space-between;gap:10px;">
@@ -749,7 +759,7 @@
                 <div class="app-card-header">
                   <div>
                     <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Hardware & Rust CPU SIMD Engine</h2>
-                    <p class="app-item-desc">Sieh, welche Geräte fLLM nutzt, begrenze die CPU-Befehlssätze und prüfe die Rechenkerne mit einem Selbsttest.</p>
+                    <p class="app-item-desc">See which devices fLLM uses, limit the CPU instruction sets and check the compute kernels with a self test.</p>
                   </div>
                   <div style="display:flex;gap:6px;">
                     <button class="btn btn-sm btn-outline" id="btnMeasureBandwidth">Measure RAM Bandwidth</button>
@@ -759,8 +769,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Höchste CPU-Befehlssatz-Stufe</div>
-                    <div class="app-item-desc">Begrenzt, welche Befehlssätze (AVX2, AVX-512 ...) der Prozessor benutzen darf. Nützlich zum Vergleichen und Testen.</div>
+                    <div class="app-item-title">Highest CPU instruction set</div>
+                    <div class="app-item-desc">Limits which instruction sets (AVX2, AVX-512, ...) the processor may use. Useful for comparing and testing.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selSimdTierCap" class="ui-select mono">
@@ -777,8 +787,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Gewichte für das Lesen von Prompts umpacken</div>
-                    <div class="app-item-desc">Ordnet die Gewichte so an, dass lange Prompts schneller gelesen werden. Kostet etwas Arbeitsspeicher.</div>
+                    <div class="app-item-title">Repack weights for prompt processing</div>
+                    <div class="app-item-desc">Rearranges the weights so that long prompts are processed faster. Costs some memory.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkCpuRepack" checked><span class="ui-switch-track"></span></label>
@@ -787,8 +797,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Arbeitsspeicher</div>
-                    <div class="app-item-desc" id="hwRamDesc">Wird gemessen ...</div>
+                    <div class="app-item-title">System memory</div>
+                    <div class="app-item-desc" id="hwRamDesc">Measuring ...</div>
                   </div>
                   <div class="app-item-actions">
                     <div class="ui-progress"><div class="ui-progress-bar" id="hwRamProgress" style="width:35%;"></div></div>
@@ -799,13 +809,13 @@
 
               <!-- Detected Devices List (GpuGroupCard style) -->
               <div class="app-card">
-                <div class="app-card-title">Erkannte Rechengeräte</div>
+                <div class="app-card-title">Detected compute devices</div>
                 <div id="hwDevicesGrid" style="display:flex;flex-direction:column;gap:10px;"></div>
               </div>
 
               <!-- Live Scheduler Slots -->
               <div class="app-card">
-                <div class="app-card-title">Gleichzeitige Anfragen (Plätze)</div>
+                <div class="app-card-title">Concurrent requests (slots)</div>
                 <div id="hwSlotsTableWrap"></div>
               </div>
 
@@ -820,7 +830,7 @@
             <div class="settings-pane" id="spane-tokenizer">
               <div class="app-card">
                 <div class="app-card-title">Live GGUF Tokenizer (<code>POST /tokenize</code>)</div>
-                <textarea id="tokTextInput" class="ui-textarea" style="width:100%;" rows="3">Hallo! Wie tokenisiert die Rust-Engine von fLLM diesen Satz?</textarea>
+                <textarea id="tokTextInput" class="ui-textarea" style="width:100%;" rows="3">Hello! How does the fLLM Rust engine tokenize this sentence?</textarea>
                 <div style="display:flex;align-items:center;justify-content:space-between;margin:10px 0;">
                   <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
                     <input type="checkbox" id="chkTokSpecial" checked> Include BOS/Special Tokens
@@ -834,8 +844,8 @@
                 <div class="app-card-title">Jinja2 Chat-Template Renderer (<code>POST /apply-template</code>)</div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                   <textarea id="jinjaMessagesInput" class="ui-textarea mono" rows="7" style="font-size:11.5px;">[
-  {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
-  {"role": "user", "content": "Erkläre SIMD in einem Satz."}
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "Explain SIMD in one sentence."}
 ]</textarea>
                   <pre id="jinjaOutputPre" class="ui-textarea mono" style="font-size:11.5px;white-space:pre-wrap;overflow:auto;"></pre>
                 </div>
@@ -905,7 +915,7 @@
   <!-- Search Dialog Modal (Ctrl+K — containers/dialogs/SearchDialog.tsx) -->
   <div class="modal-backdrop" id="searchModal">
     <div class="search-dialog">
-      <input type="text" class="search-dialog-input" id="searchModalInput" placeholder="Chats, Modelle und Einstellungen durchsuchen (Esc schließt)">
+      <input type="text" class="search-dialog-input" id="searchModalInput" placeholder="Search chats, models and settings (Esc closes)">
       <div class="search-results" id="searchModalResults"></div>
     </div>
   </div>
@@ -917,7 +927,7 @@
       <p id="dialogText"></p>
       <input type="text" class="ui-input" id="dialogInput" style="display:none;">
       <div class="dialog-actions">
-        <button class="btn btn-ghost" id="dialogCancel">Abbrechen</button>
+        <button class="btn btn-ghost" id="dialogCancel">Cancel</button>
         <button class="btn btn-primary" id="dialogOk">OK</button>
       </div>
     </div>
@@ -926,20 +936,20 @@
   <!-- Keyboard shortcuts -->
   <div class="modal-backdrop" id="helpModal">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="helpTitle" style="width:min(520px,92vw);">
-      <h3 id="helpTitle">Tastenkürzel</h3>
+      <h3 id="helpTitle">Keyboard shortcuts</h3>
       <table class="app-table shortcuts">
         <tbody>
-          <tr><td>Neuer Chat</td><td class="mono">Strg N</td></tr>
-          <tr><td>Suche</td><td class="mono">Strg K</td></tr>
-          <tr><td>Seitenleiste ein- und ausblenden</td><td class="mono">Strg B</td></tr>
-          <tr><td>Senden</td><td class="mono">Eingabe</td></tr>
-          <tr><td>Neue Zeile</td><td class="mono">Umschalt Eingabe</td></tr>
-          <tr><td>Antwort abbrechen</td><td class="mono">Esc</td></tr>
-          <tr><td>Letzte eigene Nachricht bearbeiten</td><td class="mono">Pfeil hoch (bei leerem Feld)</td></tr>
-          <tr><td>Diese Übersicht</td><td class="mono">Strg /</td></tr>
+          <tr><td>New chat</td><td class="mono">Ctrl N</td></tr>
+          <tr><td>Search</td><td class="mono">Ctrl K</td></tr>
+          <tr><td>Show or hide the sidebar</td><td class="mono">Ctrl B</td></tr>
+          <tr><td>Send</td><td class="mono">Enter</td></tr>
+          <tr><td>New line</td><td class="mono">Shift Enter</td></tr>
+          <tr><td>Stop the answer</td><td class="mono">Esc</td></tr>
+          <tr><td>Edit your last message</td><td class="mono">Arrow up (empty field)</td></tr>
+          <tr><td>This overview</td><td class="mono">Ctrl /</td></tr>
         </tbody>
       </table>
-      <div class="dialog-actions"><button class="btn btn-primary" id="helpClose">Schließen</button></div>
+      <div class="dialog-actions"><button class="btn btn-primary" id="helpClose">Close</button></div>
     </div>
   </div>
 

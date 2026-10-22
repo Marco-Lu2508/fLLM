@@ -521,6 +521,116 @@ pub(in crate::server) async fn hf_files(
     }
 }
 
+/// Downloads in progress (a pull or the first half of a model change); `model_progress` reports them.
+static ACTIVE_DOWNLOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A catalog name, a Hugging Face reference (`owner/repo[:QUANT]`, `hf://owner/repo/file.gguf`) or a local file, resolved to a file
+/// on disk; downloads what is missing.
+fn resolve_model(spec: &str, quant: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
+    if std::path::Path::new(spec).is_file() {
+        return Ok((std::path::PathBuf::from(spec), spec.to_owned()));
+    }
+    let reference = if let Some(entry) = crate::catalog::find(spec) {
+        let q = quant
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::catalog::recommend_quant(&entry, crate::catalog::available_memory_bytes()));
+        format!("hf://{}:{}", entry.repo, q)
+    } else if let Some(q) = quant.filter(|_| !spec.contains(':')) {
+        format!("{spec}:{q}")
+    } else {
+        spec.to_owned()
+    };
+    ACTIVE_DOWNLOADS.fetch_add(1, Ordering::SeqCst);
+    crate::hub::clear_download_progress();
+    let path = crate::hub::resolve(&reference, None, false);
+    ACTIVE_DOWNLOADS.fetch_sub(1, Ordering::SeqCst);
+    Ok((path?, reference))
+}
+
+/// `GET /api/studio/models/progress`: the file that is being downloaded, if any.
+pub(in crate::server) async fn model_progress() -> Response {
+    let active = ACTIVE_DOWNLOADS.load(Ordering::SeqCst) > 0;
+    match crate::hub::download_progress() {
+        Some(p) if active || !p.finished => Json(json!({
+            "active": active,
+            "file": p.file,
+            "written": p.written,
+            "total": p.total,
+            "mb_per_s": p.mb_per_s,
+        }))
+        .into_response(),
+        _ => Json(json!({"active": active})).into_response(),
+    }
+}
+
+/// `GET /api/studio/models/search?q=...`: Hugging Face repositories with GGUF files, most downloaded first.
+pub(in crate::server) async fn search_models(Query(query): Query<HashMap<String, String>>) -> Response {
+    let text = query.get("q").map(|s| s.trim().to_owned()).unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || crate::hub::search_models(&text, 20)).await;
+    match res {
+        Ok(Ok(found)) => Json(json!({"results": found})).into_response(),
+        Ok(Err(err)) => api_error(StatusCode::BAD_GATEWAY, &err),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// The arguments this server was started with, but with `model` as its model (and without a fixed `--model-name`).
+fn relaunch_args(model: &str) -> Vec<String> {
+    relaunch_args_from(&std::env::args().skip(1).collect::<Vec<_>>(), model)
+}
+
+fn relaunch_args_from(given: &[String], model: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < given.len() {
+        match given[i].as_str() {
+            "--model" | "-m" | "--model-name" => i += 2,
+            a if a.starts_with("--model=") || a.starts_with("--model-name=") => i += 1,
+            other => {
+                out.push(other.to_owned());
+                i += 1;
+            }
+        }
+    }
+    out.push("--model".into());
+    out.push(model.to_owned());
+    out
+}
+
+/// `POST /api/studio/models/load` with `{model, quant?}`: gets the model (downloading it if needed), starts a new server process
+/// with it and ends this one. The new process waits for the port, so the page only has to wait until the server answers again.
+pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
+    let Some(spec) = body.get("model").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned) else {
+        return api_error(StatusCode::BAD_REQUEST, "model specification is required");
+    };
+    let quant = body.get("quant").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let resolved = tokio::task::spawn_blocking(move || resolve_model(&spec, quant.as_deref())).await;
+    let path = match resolved {
+        Ok(Ok((path, _))) => path,
+        Ok(Err(err)) => return api_error(StatusCode::BAD_REQUEST, &err),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let model = path.display().to_string();
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot find the server program: {e}")),
+    };
+    let started = std::process::Command::new(exe)
+        .args(relaunch_args(&model))
+        .env("FLLM_REPLACE_SERVER", "1")
+        .stdin(std::process::Stdio::null())
+        .spawn();
+    if let Err(e) = started {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot start the new server: {e}"));
+    }
+    crate::hub::remember_studio_model(&model);
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        std::process::exit(0);
+    });
+    Json(json!({"status": "restarting", "model_path": model})).into_response()
+}
+
 pub(in crate::server) async fn pull_model(Json(body): Json<Value>) -> Response {
     let Some(spec) = body.get("model").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
         return api_error(StatusCode::BAD_REQUEST, "model specification is required");
@@ -532,25 +642,7 @@ pub(in crate::server) async fn pull_model(Json(body): Json<Value>) -> Response {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let res = tokio::task::spawn_blocking(move || -> Result<(std::path::PathBuf, String), String> {
-        let reference = if let Some(entry) = crate::catalog::find(&spec_owned) {
-            let q = quant_owned.unwrap_or_else(|| {
-                crate::catalog::recommend_quant(&entry, crate::catalog::available_memory_bytes())
-            });
-            format!("hf://{}:{}", entry.repo, q)
-        } else if let Some(q) = &quant_owned {
-            if !spec_owned.contains(':') {
-                format!("{spec_owned}:{q}")
-            } else {
-                spec_owned.clone()
-            }
-        } else {
-            spec_owned.clone()
-        };
-        let path = crate::hub::resolve(&reference, None, false)?;
-        Ok((path, reference))
-    })
-    .await;
+    let res = tokio::task::spawn_blocking(move || resolve_model(&spec_owned, quant_owned.as_deref())).await;
     match res {
         Ok(Ok((path, reference))) => Json(json!({
             "status": "success",
@@ -649,5 +741,24 @@ pub(in crate::server) async fn delete_key(
         .into_response()
     } else {
         api_error(StatusCode::NOT_FOUND, &format!("API key '{id}' not found"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relaunch_args_from;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_model_change_keeps_every_other_option() {
+        let out = relaunch_args_from(&args(&["serve", "--model", "old.gguf", "--port", "9000", "--model-name", "old", "--ctx", "8192"]), "new.gguf");
+        assert_eq!(out, args(&["serve", "--port", "9000", "--ctx", "8192", "--model", "new.gguf"]));
+        let out = relaunch_args_from(&args(&["studio", "--model=old.gguf", "--model-name=x"]), "new.gguf");
+        assert_eq!(out, args(&["studio", "--model", "new.gguf"]));
+        let out = relaunch_args_from(&args(&["serve"]), "m.gguf");
+        assert_eq!(out, args(&["serve", "--model", "m.gguf"]));
     }
 }
