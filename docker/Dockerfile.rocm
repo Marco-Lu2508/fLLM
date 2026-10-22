@@ -60,10 +60,12 @@ RUN touch rust/*/src/lib.rs rust/engine/src/bin/serve.rs rust/engine/build.rs \
 FROM ubuntu:${UBUNTU} AS runtime
 ARG RUNTIME_PACKAGES="amdrocm-runtime10.1"
 ENV DEBIAN_FRONTEND=noninteractive
+# the certificates come first: the ROCm repository below is https and apt cannot verify it without them
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates     && rm -rf /var/lib/apt/lists/*
 # the ROCm repository of the builder (source list + signing key) provides the runtime libraries
 COPY --from=builder /etc/apt/keyrings /etc/apt/keyrings
 COPY --from=builder /etc/apt/sources.list.d/rocm.list /etc/apt/sources.list.d/rocm.list
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates ${RUNTIME_PACKAGES} \
+RUN apt-get update && apt-get install -y --no-install-recommends ${RUNTIME_PACKAGES} \
     && rm -rf /var/lib/apt/lists/* \
     && echo /opt/rocm/lib > /etc/ld.so.conf.d/rocm.conf && ldconfig
 COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
