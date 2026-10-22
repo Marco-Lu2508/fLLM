@@ -20,6 +20,8 @@ pub mod logging;
 pub mod model_facts;
 pub mod options;
 mod remote_image;
+mod setup;
+pub use setup::serve_setup;
 pub(crate) mod security;
 mod tls;
 #[cfg(test)]

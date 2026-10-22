@@ -314,12 +314,8 @@ fn studio_args(rest: &[String]) -> Vec<String> {
                 args.push("--model".into());
                 args.push(model);
             }
-            None => {
-                eprintln!(
-                    "fllm-rs studio: no model yet. Start it once with a model, for example\n  fllm-rs studio --model owner/repo:Q4_K_M\nor with the path of a .gguf file. Later starts reuse the last model, and the Studio can switch models."
-                );
-                std::process::exit(2);
-            }
+            // no model chosen yet: the server starts without one and the page offers to pick one
+            None => env::set_var("FLLM_STUDIO_SETUP", "1"),
         },
     }
     if open {
@@ -781,6 +777,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if speculative_method == Some(Method::Off) {
             draft_model = None;
         }
+    }
+    if model_path.is_none() && env::var_os("FLLM_STUDIO_SETUP").is_some() {
+        if let Err(e) = fllm_engine::server::serve_setup(&host, port) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     let model_path = model_path.unwrap_or_else(|| usage("--model is required"));
     if let Err(e) = parallel.validate() {

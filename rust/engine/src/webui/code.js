@@ -725,6 +725,7 @@
       const ta = $('codeTextarea');
       const text = ta.value.trim();
       if (!text) return;
+      if (state.setup) { toast('Load a model first.'); switchSurface('hub'); return; }
       ta.value = '';
       ta.style.height = 'auto';
       closeMention();

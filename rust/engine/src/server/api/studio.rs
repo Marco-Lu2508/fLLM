@@ -412,6 +412,24 @@ pub(in crate::server) async fn selftest_cpu(
 }
 
 pub(in crate::server) async fn models_hub(State(state): State<Arc<AppState>>) -> Response {
+    let aliases = state.aliases.read().unwrap().clone();
+    Json(models_hub_json(json!({
+        "name": state.model_name,
+        "arch": state.model_arch,
+        "size_bytes": state.facts.size_bytes,
+        "parameters": state.facts.parameters,
+        "parameter_size": state.facts.parameter_size(),
+        "quantization": state.facts.quantization,
+        "max_context": state.max_context,
+        "trained_context": state.facts.trained_context,
+        "digest": state.facts.digest,
+        "aliases": aliases,
+    })))
+    .into_response()
+}
+
+/// The model page data: the loaded model (`Null` when the server runs without one), downloads and suggestions.
+pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
     let avail_mem = crate::catalog::available_memory_bytes();
     let cached: Vec<Value> = crate::hub::list_cache()
         .unwrap_or_default()
@@ -469,25 +487,12 @@ pub(in crate::server) async fn models_hub(State(state): State<Arc<AppState>>) ->
         })
         .collect();
 
-    let aliases = state.aliases.read().unwrap().clone();
-    Json(json!({
+    json!({
         "available_memory_bytes": avail_mem,
-        "loaded": {
-            "name": state.model_name,
-            "arch": state.model_arch,
-            "size_bytes": state.facts.size_bytes,
-            "parameters": state.facts.parameters,
-            "parameter_size": state.facts.parameter_size(),
-            "quantization": state.facts.quantization,
-            "max_context": state.max_context,
-            "trained_context": state.facts.trained_context,
-            "digest": state.facts.digest,
-            "aliases": aliases,
-        },
+        "loaded": loaded,
         "cached": cached,
         "catalog": catalog,
-    }))
-    .into_response()
+    })
 }
 
 pub(in crate::server) async fn hf_files(

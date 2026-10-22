@@ -559,6 +559,7 @@
       const raw = $('chatTextarea').value;
       const text = raw.trim();
       if (!text && !state.attachments.length) return;
+      if (state.setup) { toast('Load a model first.'); switchSurface('hub'); return; }
       if (text.startsWith('/') && state.attachments.length === 0 && (await runSlashCommand(text))) return;
       $('chatTextarea').value = '';
       $('chatTextarea').style.height = 'auto';

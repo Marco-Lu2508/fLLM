@@ -45,6 +45,11 @@
         if (!res.ok) return;
         const data = await res.json();
         state.status = data;
+        const wasSetup = state.setup;
+        state.setup = Boolean(data.setup);
+        $('setupBanner').style.display = state.setup ? '' : 'none';
+        $('loadedModelCard').style.display = state.setup ? 'none' : '';
+        if (state.setup && wasSetup === undefined) switchSurface('hub');
         updateHero(data);
 
         const m = data.model || {};

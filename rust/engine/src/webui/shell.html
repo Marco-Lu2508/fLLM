@@ -427,7 +427,12 @@
 
         <div class="hub-scroll">
           <div class="hub-container">
-            <div class="app-card">
+            <div class="app-card" id="setupBanner" style="display:none;">
+              <h2 style="font-size:16px;font-weight:600;color:var(--foreground);">Welcome to fLLM</h2>
+              <p class="app-item-desc">No model is loaded yet. Pick one below: a suggestion fits most computers, or search Hugging Face. "Download and load" gets you chatting in a minute.</p>
+            </div>
+
+            <div class="app-card" id="loadedModelCard">
               <div class="app-card-title">Loaded model</div>
               <div id="loadedModelHubItem"></div>
             </div>

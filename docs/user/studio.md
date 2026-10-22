@@ -6,6 +6,7 @@ nothing but the binary and a browser; the page and all its scripts are embedded 
 ```sh
 fllm-rs studio --model owner/repo:Q4_K_M     # first start: pick a model once
 fllm-rs studio                                # later starts reuse the last model and open the page
+                                              # (with no model yet, the page opens and helps you pick one)
 fllm-rs serve --model model.gguf              # the same page is served at / by every fllm-rs server
 ```
 
