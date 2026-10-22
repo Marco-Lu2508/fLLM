@@ -328,6 +328,8 @@ jobs:
           persist-credentials: false
 
       - name: Build (CUDA container; sm_75..sm_120 plus PTX of the highest arch)
+        env:
+          RUST_FEATURES: rust-gpu,cuda
         run: ./scripts/release/build-linux-cuda.sh
 
       - name: Verify dynamic dlopen support
