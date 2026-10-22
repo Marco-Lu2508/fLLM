@@ -119,8 +119,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.tag.outputs.tag }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -eu
+          # a tag push starts from a clean slate: releases left over from an earlier run of this tag (also drafts, which gh release view does not see) are removed
+          if [ "$EVENT" = "push" ]; then
+            for id in $(gh api --paginate "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id"); do
+              gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            done
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --prerelease --latest=false
           else
