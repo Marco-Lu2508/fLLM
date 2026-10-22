@@ -451,6 +451,8 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
             let params_b = crate::catalog::infer_parameters_billion(&entry.name).unwrap_or(7.0);
             let rec_quant = crate::catalog::recommend_quant(entry, avail_mem);
             let est_bytes = crate::catalog::estimate_quant_bytes(params_b, &rec_quant);
+            // 2-bit and 1-bit quantizations run, but answer badly: a model that fits only that way counts as too large
+            let very_low_quality = ["Q2", "IQ2", "IQ1"].iter().any(|p| rec_quant.to_ascii_uppercase().starts_with(p));
             let quants_list = if entry.quants.is_empty() {
                 crate::catalog::DEFAULT_QUANTS.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()
             } else {
@@ -481,14 +483,38 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
                 "parameters_billion": params_b,
                 "context_length": 32768,
                 "vision": is_vision,
+                "fits": (avail_mem > 0).then_some(est_bytes as f64 * 1.15 <= avail_mem as f64 && !very_low_quality),
                 "tags": quants_list,
                 "variants": variants,
             })
         })
         .collect();
 
+    // the largest models that run comfortably (at 4 bit they take at most 40 % of the memory, so they also answer quickly), one per family
+    let mut picks: Vec<&Value> = catalog
+        .iter()
+        .filter(|e| {
+            let q4 = crate::catalog::estimate_quant_bytes(e["parameters_billion"].as_f64().unwrap_or(1000.0), "Q4_K_M");
+            avail_mem > 0 && q4 as f64 * 2.5 <= avail_mem as f64
+        })
+        .collect();
+    picks.sort_by(|a, b| b["parameters_billion"].as_f64().partial_cmp(&a["parameters_billion"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    let mut families = Vec::new();
+    let recommended: Vec<Value> = picks
+        .into_iter()
+        .filter(|e| {
+            let family = e["architecture"].as_str().unwrap_or_default().to_owned();
+            !families.contains(&family) && {
+                families.push(family);
+                true
+            }
+        })
+        .take(3)
+        .map(|e| e["id"].clone())
+        .collect();
     json!({
         "available_memory_bytes": avail_mem,
+        "recommended": recommended,
         "loaded": loaded,
         "cached": cached,
         "catalog": catalog,

@@ -94,14 +94,19 @@ pub fn find(name: &str) -> Option<CatalogEntry> {
         .find(|entry| entry.name.eq_ignore_ascii_case(target) || entry.name.eq_ignore_ascii_case(&normalized))
 }
 
+/// Memory a model can use: the free memory of the best discrete GPU, else (integrated GPU, CPU, or a GPU that reports nothing) the free
+/// memory of the computer, which both of them share.
 pub fn available_memory_bytes() -> u64 {
-    let devices = list_devices();
-    if let Some(gpu) = devices.iter().find(|d| d.dev_type == DeviceType::Gpu) {
-        gpu.free_memory_bytes
-    } else if let Some(igpu) = devices.iter().find(|d| d.dev_type == DeviceType::IntegratedGpu) {
-        igpu.free_memory_bytes
+    let discrete = list_devices()
+        .iter()
+        .filter(|d| d.dev_type == DeviceType::Gpu)
+        .map(|d| d.free_memory_bytes)
+        .max()
+        .unwrap_or(0);
+    if discrete > 0 {
+        discrete
     } else {
-        devices.first().map(|d| d.free_memory_bytes).unwrap_or(0)
+        crate::devices::host_free_memory_bytes()
     }
 }
 

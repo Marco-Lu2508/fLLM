@@ -5,12 +5,30 @@
     const nf = (n) => Number(n || 0).toLocaleString('en-US');
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+    /** One line about the computer: processor, graphics cards and the memory a model can use. */
+    function describeComputer(hw, hub) {
+      const devices = hw?.devices || [];
+      const names = [];
+      for (const d of devices) {
+        if (d.backend === 'cpu') { names.unshift(d.name); continue; }
+        const label = `${d.name}${d.dev_type === 'gpu' ? ` (${formatBytes(d.total_memory_bytes)})` : ''}`;
+        if (!names.includes(label)) names.push(label);
+      }
+      const usable = Number(hub?.available_memory_bytes || 0);
+      return `${names.join(' · ') || 'Unknown processor'} · ${usable ? `${formatBytes(usable)} usable for a model` : 'memory unknown'}`;
+    }
+
     async function refreshHub() {
       try {
+
         const res = await apiFetch('/api/studio/models');
         if (!res.ok) return;
         state.modelsHub = await res.json();
         renderHub();
+        if (!state.hardware) { // looking at the hardware can take a moment: the page is shown first
+          const hw = await apiFetch('/api/studio/hardware');
+          if (hw.ok) { state.hardware = await hw.json(); renderHub(); }
+        }
       } catch { /* the server is restarting: the next call asks again */ }
     }
 
@@ -22,8 +40,28 @@
       return `<span class="fit ${ok ? 'fit-ok' : 'fit-no'}" title="${ok ? 'Should fit into the memory that is free' : 'May not fit into the memory that is free'}">${ok ? 'fits in memory' : 'may not fit'}</span>`;
     }
 
+    function renderRecommended(hub) {
+      const byId = new Map((hub.catalog || []).map((e) => [e.id, e]));
+      const picks = (hub.recommended || []).map((id) => byId.get(id)).filter(Boolean);
+      $('recommendedCards').innerHTML = picks.length ? `
+        <p class="app-item-desc" style="margin-top:12px;">Models that run well here:</p>
+        ${picks.map((entry) => `
+        <div class="catalog-row">
+          <div class="catalog-name">
+            <strong>${escapeHtml(entry.display_name)}</strong>
+            <span class="quant-chip">${escapeHtml(entry.recommended_quant)}</span>${entry.vision ? '<span class="quant-chip">vision</span>' : ''}
+            <small class="mono">about ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB</small>
+          </div>
+          <div class="app-item-actions">
+            <button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and start</button>
+          </div>
+        </div>`).join('')}` : '';
+    }
+
     function renderHub() {
       const hub = state.modelsHub || {};
+      $('computerSummary').textContent = describeComputer(state.hardware, hub);
+      renderRecommended(hub);
       const m = state.status?.model || hub.loaded || {};
       $('loadedModelHubItem').innerHTML = `
         <div class="app-card-item">
@@ -48,7 +86,12 @@
         </div>`).join('') : '<p class="app-item-desc">No downloaded models yet. Search for one above.</p>';
 
       const q = ($('hubSearchInput').value || '').toLowerCase().trim();
-      const cat = (hub.catalog || []).filter((item) => !q || item.id.toLowerCase().includes(q) || item.architecture.toLowerCase().includes(q));
+      const all = (hub.catalog || []).filter((item) => !q || item.id.toLowerCase().includes(q) || item.architecture.toLowerCase().includes(q));
+      // what fits first, the biggest of those on top; models that are too large for this computer stay hidden until asked for
+      const rank = (e) => (e.fits === false ? 1 : 0);
+      all.sort((a, b) => rank(a) - rank(b) || Number(b.parameters_billion) - Number(a.parameters_billion));
+      const tooLarge = all.filter((e) => e.fits === false).length;
+      const cat = state.showLarge ? all : all.filter((e) => e.fits !== false);
       $('hubCatalogCards').innerHTML = cat.map((entry) => `
         <div class="catalog-row">
           <div class="catalog-name">
@@ -61,7 +104,7 @@
             <button class="btn btn-sm btn-secondary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}">Download</button>
             <button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and load</button>
           </div>
-        </div>`).join('');
+        </div>`).join('') + (tooLarge ? `<p class="app-item-desc" style="margin-top:10px;"><button class="btn btn-sm btn-ghost" data-toggle-large="1">${state.showLarge ? 'Hide' : 'Show'} ${tooLarge} models that are too large for this computer</button></p>` : '');
     }
 
     // ---- search and files -------------------------------------------------------------------------
@@ -189,6 +232,7 @@
     $('hfRepoInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchHf(); });
     $('surface-hub').addEventListener('click', async (e) => {
       if (e.target.closest('[data-use-model]')) { switchSurface('chat'); return; }
+      if (e.target.closest('[data-toggle-large]')) { state.showLarge = !state.showLarge; renderHub(); return; }
       const inspect = e.target.closest('[data-inspect]');
       if (inspect) { await showFiles(inspect.dataset.inspect); return; }
       const dl = e.target.closest('[data-download]');

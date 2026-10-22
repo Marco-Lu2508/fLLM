@@ -29,6 +29,7 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/ready", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/studio/status", get(|| async { Json(status()) }))
         .route("/api/studio/models", get(|| async { Json(api::studio::models_hub_json(Value::Null)) }))
+        .route("/api/studio/hardware", get(api::studio::hardware))
         .route("/api/studio/hf-files", get(api::studio::hf_files))
         .route("/api/studio/models/pull", post(api::studio::pull_model))
         .route("/api/studio/models/load", post(api::studio::load_model))

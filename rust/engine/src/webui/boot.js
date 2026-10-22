@@ -170,7 +170,6 @@
     renderChatArea();
     renderPresets();
     updateRouteTesterSample();
-    refreshStudioStatus();
-    loadWorkspace();
+    refreshStudioStatus().then(() => { if (!state.setup) loadWorkspace(); });
     if (window.matchMedia('(max-width: 760px)').matches) toggleSidebar(); // on a phone the rail would cover the page
     setInterval(() => { if (!document.hidden) refreshStudioStatus(); }, 2000); // a hidden tab asks nothing

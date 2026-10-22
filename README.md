@@ -1,9 +1,10 @@
 # fLLM
 
-fLLM is an LLM inference engine written in Rust. It loads GGUF files (all 35 ggml storage types it
-registers, including the K and IQ quants), imports Hugging Face checkpoints (safetensors and PyTorch,
-including 4-bit AWQ and GPTQ, FP8, MXFP4 and EXL2/EXL3 weights) by converting them to GGUF, quantizes,
-and serves OpenAI, Anthropic, Ollama, SGLang, TGI and llama.cpp style HTTP APIs from one port. It also
+fLLM is an LLM inference engine written in Rust, with a desktop app (chat, coding agent and model manager)
+on top. It loads GGUF files (all 35 ggml storage types it registers, including the K and IQ quants) and
+Hugging Face checkpoints (safetensors and PyTorch, including 4-bit AWQ and GPTQ, FP8, MXFP4 and EXL2/EXL3
+weights): a checkpoint is translated into the GGUF tensor layout while it is loaded, and a Hugging Face
+repository is converted once and kept in the cache. It quantizes, and serves OpenAI, Anthropic, Ollama, SGLang, TGI and llama.cpp style HTTP APIs from one port. It also
 has a terminal chat (`fllm-rs run`), encoder and embedding models, image input for SigLIP/Idefics3
 projectors, and CPU, CUDA and wgpu (Vulkan, Metal, DirectX 12) backends.
 
@@ -16,7 +17,13 @@ fLLM is young. Read [Status](#status) for what has actually run on which hardwar
 
 ## Quick start
 
-**1. Release binary** (Linux x86_64/aarch64, macOS aarch64/x86_64):
+**1. Desktop app** (Windows and Linux): download the installer from the
+[latest release](https://github.com/Marco-Lu2508/fLLM/releases) (`fLLM_<version>_x64-setup.exe` or `.msi` on Windows;
+`.deb`, `.rpm` or `.AppImage` on Linux), install it and start it. On the first start the app shows your hardware and
+suggests models that fit into its memory; pick one and chat. No terminal needed. The installers are not signed yet,
+so Windows may show a warning ([docs/user/desktop.md](docs/user/desktop.md)). macOS is not packaged yet.
+
+**2. Release binary** (command line; Linux x86_64/aarch64, macOS aarch64/x86_64, Windows x86_64):
 
 ```sh
 git clone https://github.com/Marco-Lu2508/fLLM && cd fLLM
@@ -24,13 +31,13 @@ curl -fsSL https://raw.githubusercontent.com/Marco-Lu2508/fLLM/main/install.sh |
 ./run.sh run unsloth/Qwen3.5-9B-GGUF:Q4_K_M           # downloads the model once, then chats in the terminal
 ```
 
-The v0.1.0 release has `fllm-linux-x86_64-musl`, `fllm-linux-aarch64-musl`, `fllm-macos-aarch64` and
-`fllm-macos-x86_64` archives, each with a `.sha256` file. It is marked as a pre-release. There are no
-Windows assets yet; on Windows `install.ps1` builds from source with `cargo` until a release has them.
-The release binaries are built with the `rust-gpu` feature (CPU, Vulkan, Metal, DirectX 12 through
-wgpu), not with CUDA: for NVIDIA GPUs use the CUDA image or build with `--features cuda`.
+Each release has archives for Linux (musl and gnu, x86_64 and aarch64), macOS (aarch64 and x86_64) and Windows
+(`fllm-windows-x86_64-msvc.zip`), each with a `.sha256` file; 0.x releases are marked as pre-releases. The archives
+are built with the `rust-gpu` feature (CPU, Vulkan, Metal, DirectX 12 through wgpu); the Linux `gnu` and desktop
+builds also contain the native Vulkan backend. CUDA and ROCm archives are optional release assets, listed on the
+release page when their build succeeded; otherwise use the CUDA image or build with `--features cuda`.
 
-**2. Docker** (images on ghcr.io: `latest` for CPU, linux/amd64 and linux/arm64; `cuda` for linux/amd64):
+**3. Docker** (images on ghcr.io: `latest` for CPU, linux/amd64 and linux/arm64; `cuda` for linux/amd64):
 
 ```sh
 docker run -it --rm -v fllm:/home/fllm/.cache ghcr.io/marco-lu2508/fllm:latest run unsloth/Qwen3.5-0.8B-GGUF:Q4_K_M
@@ -42,7 +49,7 @@ docker run -d --gpus all -v fllm:/home/fllm/.cache -p 8000:8000 ghcr.io/marco-lu
 The CUDA image needs only the NVIDIA driver (and the NVIDIA Container Toolkit on Linux), see
 [docs/quickstart-windows-linux.md](docs/quickstart-windows-linux.md) and [docs/docker.md](docs/docker.md).
 
-**3. From source** (Rust stable, a C compiler, Git; CUDA builds also need the CUDA toolkit):
+**4. From source** (Rust stable, a C compiler, Git; CUDA builds also need the CUDA toolkit):
 
 ```sh
 cargo build --release --locked -p fllm-engine --features rust-gpu --bin fllm-rs
@@ -59,8 +66,9 @@ A repository with several GGUF files needs the `:QUANT` suffix.
 
 ### Models and formats
 
-`serve` and `run` load **GGUF** files and, since a Hugging Face repository or a local directory usually holds a
-**checkpoint** instead, convert those automatically on first use: `fllm-rs run owner/repo` on a repository without
+`serve` and `run` load **GGUF** files directly. A **checkpoint** (safetensors or PyTorch) needs no manual step either:
+a local directory or file is translated into the GGUF tensor layout in memory while it loads, and a Hugging Face
+repository is converted automatically on first use: `fllm-rs run owner/repo` on a repository without
 GGUF files downloads the weights, checks the architecture from `config.json` first, converts once and caches the GGUF
 next to the other models (`fllm-rs list` shows it, `fllm-rs rm owner/repo` removes it, `rm owner/repo --converted` keeps
 the downloaded checkpoint and removes only the GGUF; the cache is `FLLM_CACHE`, else `$HF_HOME/hub`, a local directory is
@@ -139,7 +147,7 @@ One port, several dialects, all translated onto the same chat pipeline
 | SGLang, TGI | `/generate`, `/generate_stream`, `/info`, `/get_model_info`, `/get_server_info` |
 | llama.cpp | `/completion`, `/infill`, `/tokenize`, `/detokenize`, `/embedding`, `/props`, `/slots`, `/apply-template` |
 | Encoders | `/v1/embeddings`, `/v1/rerank`, `/rerank`, `/v1/score`, `/classify`, `/pooling` |
-| Other | `/` built-in web chat page, `/health`, `/metrics` (Prometheus) |
+| Other | `/` the built-in Studio (browser app), `/health`, `/metrics` (Prometheus) |
 
 Common to the chat routes: streaming (SSE); tool calling with 19 tool-call parsers (Hermes/Qwen, Qwen3-Coder,
 GLM, Llama 3, Mistral, DeepSeek, Kimi, gpt-oss and others; `--tool-parser auto` picks from the chat
@@ -189,10 +197,10 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 
 ### Tools and clients
 
-`fllm-rs chat` and `bench` talk to any running OpenAI-compatible server. [docs/user/clients.md](docs/user/clients.md)
-
-`fllm-rs studio` starts the server and opens the Studio, the built-in browser app with chat, a coding agent and a model manager. [docs/user/studio.md](docs/user/studio.md)
-covers curl, the OpenAI, Anthropic and Ollama SDKs and program integrations.
+`fllm-rs studio` starts the server and opens the Studio, the built-in browser app with chat, a coding agent and a
+model manager (the desktop app shows the same page in its own window): [docs/user/studio.md](docs/user/studio.md).
+`fllm-rs chat` and `bench` talk to any running OpenAI-compatible server;
+[docs/user/clients.md](docs/user/clients.md) covers curl, the OpenAI, Anthropic and Ollama SDKs and program integrations.
 
 ## Status
 
@@ -203,10 +211,10 @@ What has actually been run on hardware, and what has not:
 | CPU x86-64 (AVX2, AVX-VNNI, AVX-512) | Runs. Self test and real models on AVX2 and on an AMD Zen 5 (AVX-512); the AMX kernels have only been run in an emulator |
 | NVIDIA CUDA, Turing (T4), Blackwell (RTX PRO 6000) | Runs. Self test 595 + 395 checks, real models (Llama, Qwen2.5, Qwen3.5 with DeltaNet, AWQ, GPTQ, NVFP4) |
 | NVIDIA Ampere / Ada / Hopper | Builds; the same kernels as the tested cards, not yet measured |
-| Linux aarch64, macOS (Apple silicon), Windows (MSVC) | Build, unit tests and the CPU self tests run in CI on GitHub-hosted runners (the Linux and Windows runners have no GPU). The SVE kernel is opt-in and was not run. Windows release assets are not published yet |
+| Linux aarch64, macOS (Apple silicon), Windows (MSVC) | Build, unit tests and the CPU self tests run in CI on GitHub-hosted runners (the Linux and Windows runners have no GPU). The SVE kernel is opt-in and was not run. Windows release assets and the desktop installer exist since 0.1.2; the installer was tried on one Windows PC only |
 | Apple Metal | The native Metal kernels (attention for f16 and q8_0 KV caches in decode and prompt, KV-cache writes and more) run their GPU checks on the Apple-silicon CI runner and match the CPU reference to about 1e-7. A whole model has not been run on Metal yet |
-| Vulkan | Ran on a few devices (NVIDIA, Intel); slower than CUDA, some operations are missing |
-| AMD ROCm, Intel SYCL, NPUs, TPU | Compile only (test level L0): not run on the hardware |
+| Vulkan | Ran on a few devices (NVIDIA, Intel, and an AMD handheld with a Radeon 780M, where the native backend runs the whole model on the GPU and the integrated-GPU memory falls back to shared host memory); slower than CUDA. DirectX 12 through wgpu has a known bug with legacy quantizations on AMD |
+| AMD ROCm (HIP), Intel SYCL, NPUs, TPU | Compile only (test level L0): not run on the hardware |
 
 The test levels (L0 compiles, L1 self test passes on the device, L2 same greedy text as the CPU, L3 speed
 measured) are defined in [docs/test-levels.md](docs/test-levels.md).
