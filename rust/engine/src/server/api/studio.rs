@@ -325,7 +325,7 @@ pub(in crate::server) async fn hardware(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let run_bench = query.get("benchmark").is_some_and(|v| v == "true" || v == "1");
-    let result = tokio::task::spawn_blocking(move || {
+    let probe = tokio::task::spawn_blocking(move || {
         let devices: Vec<Value> = crate::devices::inventory()
             .into_iter()
             .map(|d| {
@@ -378,12 +378,12 @@ pub(in crate::server) async fn hardware(
             "measured_cpu_bandwidth_gbs": measured_bw,
             "devices": devices,
         })
-    })
-    .await;
-
-    match result {
-        Ok(val) => Json(val).into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    });
+    // a graphics driver that hangs while it is asked must not leave the page waiting for ever
+    match tokio::time::timeout(std::time::Duration::from_secs(60), probe).await {
+        Ok(Ok(val)) => Json(val).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("the hardware check failed: {e}")),
+        Err(_) => api_error(StatusCode::GATEWAY_TIMEOUT, "the hardware check did not finish within 60 seconds (a graphics driver may not answer)"),
     }
 }
 
@@ -413,7 +413,7 @@ pub(in crate::server) async fn selftest_cpu(
 
 pub(in crate::server) async fn models_hub(State(state): State<Arc<AppState>>) -> Response {
     let aliases = state.aliases.read().unwrap().clone();
-    Json(models_hub_json(json!({
+    models_hub_with(json!({
         "name": state.model_name,
         "arch": state.model_arch,
         "size_bytes": state.facts.size_bytes,
@@ -424,8 +424,18 @@ pub(in crate::server) async fn models_hub(State(state): State<Arc<AppState>>) ->
         "trained_context": state.facts.trained_context,
         "digest": state.facts.digest,
         "aliases": aliases,
-    })))
-    .into_response()
+    }))
+    .await
+}
+
+/// `models_hub_json` off the request thread (looking at the graphics cards can take a moment, or hang on a bad driver).
+pub(in crate::server) async fn models_hub_with(loaded: Value) -> Response {
+    let work = tokio::task::spawn_blocking(move || models_hub_json(loaded));
+    match tokio::time::timeout(std::time::Duration::from_secs(60), work).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(_) => api_error(StatusCode::GATEWAY_TIMEOUT, "the hardware check did not finish within 60 seconds (a graphics driver may not answer)"),
+    }
 }
 
 /// The model page data: the loaded model (`Null` when the server runs without one), downloads and suggestions.
@@ -581,6 +591,9 @@ fn resolve_model(spec: &str, quant: Option<&str>) -> Result<(std::path::PathBuf,
 /// `GET /api/studio/models/progress`: the file that is being downloaded, if any.
 pub(in crate::server) async fn model_progress() -> Response {
     let active = ACTIVE_DOWNLOADS.load(Ordering::SeqCst) > 0;
+    let job = pull_job().map(|j| {
+        json!({"model": j.model, "state": j.state, "attempt": j.attempt, "max_attempts": PULL_ATTEMPTS, "error": j.message, "model_path": j.path, "reference": j.reference})
+    });
     match crate::hub::download_progress() {
         Some(p) if active || !p.finished => Json(json!({
             "active": active,
@@ -588,9 +601,10 @@ pub(in crate::server) async fn model_progress() -> Response {
             "written": p.written,
             "total": p.total,
             "mb_per_s": p.mb_per_s,
+            "job": job,
         }))
         .into_response(),
-        _ => Json(json!({"active": active})).into_response(),
+        _ => Json(json!({"active": active, "job": job})).into_response(),
     }
 }
 
@@ -663,28 +677,83 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
     Json(json!({"status": "restarting", "model_path": model})).into_response()
 }
 
+/// The model download that runs in the background (one at a time). The page starts it and polls `model_progress`, so a long download is
+/// not tied to one HTTP request, and a dropped connection is resumed by the next attempt.
+#[derive(Clone, Default)]
+struct PullJob {
+    model: String,
+    /// `running`, `done` or `failed`
+    state: &'static str,
+    attempt: u32,
+    message: String,
+    path: String,
+    reference: String,
+}
+
+static PULL_JOB: std::sync::Mutex<Option<PullJob>> = std::sync::Mutex::new(None);
+
+fn pull_job() -> Option<PullJob> {
+    PULL_JOB.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn set_pull_job(job: PullJob) {
+    *PULL_JOB.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
+}
+
+/// Whether another try can help: the connection broke or timed out (the partial file stays and the next try continues it).
+fn worth_retrying(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    ["interrupted", "connection", "timed out", "timeout", "truncated", "error sending", "dns", "reset", "broken pipe", "unexpected eof", "hub request"]
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
+const PULL_ATTEMPTS: u32 = 8;
+
+fn run_pull(spec: String, quant: Option<String>) {
+    let mut job = PullJob { model: spec.clone(), state: "running", ..PullJob::default() };
+    for attempt in 1..=PULL_ATTEMPTS {
+        job.attempt = attempt;
+        set_pull_job(job.clone());
+        match resolve_model(&spec, quant.as_deref()) {
+            Ok((path, reference)) => {
+                job.state = "done";
+                job.path = path.display().to_string();
+                job.reference = reference;
+                job.message.clear();
+                set_pull_job(job);
+                return;
+            }
+            Err(error) => {
+                job.message = error.clone();
+                if attempt == PULL_ATTEMPTS || !worth_retrying(&error) {
+                    break;
+                }
+                set_pull_job(job.clone());
+                std::thread::sleep(std::time::Duration::from_secs(u64::from(attempt.min(5)) * 3));
+            }
+        }
+    }
+    job.state = "failed";
+    set_pull_job(job);
+}
+
+/// `POST /api/studio/models/pull` with `{model, quant?}`: starts the download and answers at once; `model_progress` tells how it goes.
 pub(in crate::server) async fn pull_model(Json(body): Json<Value>) -> Response {
     let Some(spec) = body.get("model").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
         return api_error(StatusCode::BAD_REQUEST, "model specification is required");
     };
-    let spec_owned = spec.to_owned();
-    let quant_owned = body
-        .get("quant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let res = tokio::task::spawn_blocking(move || resolve_model(&spec_owned, quant_owned.as_deref())).await;
-    match res {
-        Ok(Ok((path, reference))) => Json(json!({
-            "status": "success",
-            "model_path": path.display().to_string(),
-            "reference": reference,
-        }))
-        .into_response(),
-        Ok(Err(err)) => api_error(StatusCode::BAD_REQUEST, &err),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    let quant = body.get("quant").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    if pull_job().is_some_and(|job| job.state == "running") {
+        return api_error(StatusCode::CONFLICT, "a download is already running");
     }
+    set_pull_job(PullJob { model: spec.to_owned(), state: "running", attempt: 1, ..PullJob::default() });
+    let spec = spec.to_owned();
+    if let Err(e) = std::thread::Builder::new().name("fllm-model-pull".into()).spawn(move || run_pull(spec, quant)) {
+        set_pull_job(PullJob { state: "failed", message: format!("cannot start the download: {e}"), ..PullJob::default() });
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "cannot start the download");
+    }
+    Json(json!({"status": "started"})).into_response()
 }
 
 pub(in crate::server) async fn delete_cached_model(Json(body): Json<Value>) -> Response {

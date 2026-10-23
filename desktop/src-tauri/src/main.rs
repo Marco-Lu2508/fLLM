@@ -34,14 +34,27 @@ fn server_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-fn start_server(port: u16) -> Result<Server, String> {
+/// The server writes what it prints into `server.log` in the log folder of the app, so a problem can be looked at afterwards.
+fn server_log(dir: Option<PathBuf>) -> (Stdio, Stdio) {
+    let file = dir.and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::File::create(dir.join("server.log")).ok()
+    });
+    match file.and_then(|f| f.try_clone().ok().map(|clone| (f, clone))) {
+        Some((out, err)) => (Stdio::from(out), Stdio::from(err)),
+        None => (Stdio::null(), Stdio::null()),
+    }
+}
+
+fn start_server(port: u16, log_dir: Option<PathBuf>) -> Result<Server, String> {
     let mut command = Command::new(server_program());
+    let (out, err) = server_log(log_dir);
     command
         .args(["studio", "--no-open", "--host", "127.0.0.1", "--port", &port.to_string()])
         .env("FLLM_EXIT_ON_STDIN_EOF", "1")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(out)
+        .stderr(err);
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // no console window
     let mut child = command.spawn().map_err(|e| format!("The server could not be started: {e}"))?;
@@ -66,7 +79,7 @@ fn main() {
         .manage(Running::default())
         .setup(|app| {
             let port = free_port();
-            let started = start_server(port);
+            let started = start_server(port, app.path().app_log_dir().ok());
             let window = app.get_webview_window("main").expect("main window");
             let handle = app.handle().clone();
             std::thread::spawn(move || {

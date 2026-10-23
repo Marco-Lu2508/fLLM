@@ -279,7 +279,8 @@ impl RepoSession {
         let guard = repository_lock(&repository, true)?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(3600))
+            // a big model on a slow line takes hours: the limit only ends a connection that hangs for good
+            .timeout(Duration::from_secs(6 * 3600))
             .user_agent("fllm-rust/0.1")
             .build()
             .map_err(|e| e.to_string())?;

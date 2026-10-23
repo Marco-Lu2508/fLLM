@@ -7,6 +7,7 @@
 
     /** One line about the computer: processor, graphics cards and the memory a model can use. */
     function describeComputer(hw, hub) {
+      if (!hw && state.hardwareError) return `The hardware could not be read: ${state.hardwareError}`;
       const devices = hw?.devices || [];
       const names = [];
       for (const d of devices) {
@@ -18,6 +19,18 @@
       return `${names.join(' · ') || 'Unknown processor'} · ${usable ? `${formatBytes(usable)} usable for a model` : 'memory unknown'}`;
     }
 
+    /** Plain text about this computer and this app, for a bug report. */
+    function diagnostics(hw, hub) {
+      const s = state.status || {};
+      const lines = [`app: ${s.build_info || s.version || 'unknown'}`, `system: ${hw?.os || '?'} ${hw?.arch || '?'}, ${hw?.threads || '?'} threads`];
+      lines.push(`backends: ${(hw?.compiled_backends || []).join(', ')}`);
+      lines.push(`cpu: ${(hw?.cpu_capabilities || []).join(' ')} (tiers: ${(hw?.supported_cpu_tiers || []).join(', ')})`);
+      lines.push(`memory: ${formatBytes(hw?.host_free_memory_bytes)} free, usable for a model ${formatBytes(hub?.available_memory_bytes)}`);
+      for (const d of hw?.devices || []) lines.push(`device: ${d.id} ${d.name} [${d.dev_type}, ${d.api}] ${formatBytes(d.free_memory_bytes)} free of ${formatBytes(d.total_memory_bytes)}`);
+      if (state.hardwareError) lines.push(`error: ${state.hardwareError}`);
+      return lines.join('\n');
+    }
+
     async function refreshHub() {
       try {
 
@@ -26,8 +39,12 @@
         state.modelsHub = await res.json();
         renderHub();
         if (!state.hardware) { // looking at the hardware can take a moment: the page is shown first
-          const hw = await apiFetch('/api/studio/hardware');
-          if (hw.ok) { state.hardware = await hw.json(); renderHub(); }
+          try {
+            const hw = await apiFetch('/api/studio/hardware');
+            if (hw.ok) state.hardware = await hw.json();
+            else state.hardwareError = (await hw.json().catch(() => ({}))).error?.message || `HTTP ${hw.status}`;
+          } catch (e) { state.hardwareError = e.message; }
+          renderHub();
         }
       } catch { /* the server is restarting: the next call asks again */ }
     }
@@ -162,29 +179,40 @@
       bar.style.display = 'flex';
       $('dlFill').style.width = '0%';
       $('dlText').textContent = 'Starting ...';
-      const poll = setInterval(async () => {
-        try {
-          const d = await (await apiFetch('/api/studio/models/progress')).json();
-          if (d.active && d.file) {
-            const pct = d.total ? Math.min(100, (d.written / d.total) * 100) : 0;
-            $('dlFill').style.width = `${pct.toFixed(1)}%`;
-            $('dlText').textContent = `${d.file}: ${d.total ? `${pct.toFixed(0)}%, ` : ''}${formatBytes(d.written)}${d.total ? ` of ${formatBytes(d.total)}` : ''}, ${Number(d.mb_per_s).toFixed(1)} MB/s`;
-          }
-        } catch { /* a missed poll only delays the bar */ }
-      }, 700);
       let ok = false;
       try {
         const res = await apiFetch('/api/studio/models/pull', { method: 'POST', body: { model: spec, quant: quant || '' } });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error?.message || 'The download failed.');
+        const started = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(started.error?.message || 'The download could not be started.');
+        // the download runs in the background of the server; this loop only shows how it goes
+        let result = null;
+        let misses = 0;
+        while (!result) {
+          await sleep(700);
+          try {
+            const d = await (await apiFetch('/api/studio/models/progress')).json();
+            misses = 0;
+            if (d.active && d.file) {
+              const pct = d.total ? Math.min(100, (d.written / d.total) * 100) : 0;
+              $('dlFill').style.width = `${pct.toFixed(1)}%`;
+              $('dlText').textContent = `${d.file}: ${d.total ? `${pct.toFixed(0)}%, ` : ''}${formatBytes(d.written)}${d.total ? ` of ${formatBytes(d.total)}` : ''}, ${Number(d.mb_per_s).toFixed(1)} MB/s`;
+            }
+            const job = d.job;
+            if (job && job.attempt > 1 && job.state === 'running') $('dlText').textContent = `Connection lost, continuing (attempt ${job.attempt} of ${job.max_attempts}) ...`;
+            if (job?.state === 'done') result = job;
+            else if (job?.state === 'failed') throw Object.assign(new Error(job.error || 'The download failed.'), { fatal: true });
+          } catch (e) {
+            if (e.fatal) throw e;
+            if (++misses > 40) throw new Error('The connection to the app was lost.');
+          }
+        }
         toast('Download finished');
         ok = true;
         await refreshHub();
-        if (thenLoad) await loadModel(data.reference || spec, spec);
+        if (thenLoad) await loadModel(result.reference || spec, spec);
       } catch (e) {
         toast(e.message);
       } finally {
-        clearInterval(poll);
         downloading = false;
         bar.style.display = 'none';
       }
@@ -227,6 +255,7 @@
 
     // ---- events ---------------------------------------------------------------------------------------------------
     $('hubSearchInput').addEventListener('input', renderHub);
+    $('btnCopyDiag').addEventListener('click', () => { navigator.clipboard.writeText($('computerDetails').textContent).then(() => toast('Copied')); });
     $('btnRefreshHub').addEventListener('click', refreshHub);
     $('btnSearchHf').addEventListener('click', searchHf);
     $('hfRepoInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchHf(); });

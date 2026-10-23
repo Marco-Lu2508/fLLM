@@ -28,7 +28,7 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/ready", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/studio/status", get(|| async { Json(status()) }))
-        .route("/api/studio/models", get(|| async { Json(api::studio::models_hub_json(Value::Null)) }))
+        .route("/api/studio/models", get(|| api::studio::models_hub_with(Value::Null)))
         .route("/api/studio/hardware", get(api::studio::hardware))
         .route("/api/studio/hf-files", get(api::studio::hf_files))
         .route("/api/studio/models/pull", post(api::studio::pull_model))
