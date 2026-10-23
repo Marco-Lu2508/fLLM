@@ -1510,6 +1510,11 @@ fn studio_file() -> PathBuf {
     base.parent().unwrap_or(&base).join("fllm").join("studio.json")
 }
 
+/// The MCP server list (`mcp.json`, the common `{"mcpServers": {...}}` format) next to `studio.json`.
+pub fn mcp_file() -> PathBuf {
+    studio_file().with_file_name("mcp.json")
+}
+
 /// The model the Studio was last started or switched to (`fllm-rs studio` starts with it when no `--model` is given).
 pub fn last_studio_model() -> Option<String> {
     let text = fs::read_to_string(studio_file()).ok()?;

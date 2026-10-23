@@ -327,6 +327,10 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models/local", post(api::studio::add_local_model).delete(api::studio::remove_local_model))
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
         .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
+        .route("/api/studio/mcp/servers", get(api::mcp::servers).post(api::mcp::upsert).delete(api::mcp::remove))
+        .route("/api/studio/mcp/restart", post(api::mcp::restart))
+        .route("/api/studio/mcp/tools", get(api::mcp::tools))
+        .route("/api/studio/mcp/call", post(api::mcp::call))
         .route("/api/studio/agent/workspace", post(api::agent::workspace))
         .route("/api/studio/agent/tool", post(api::agent::tool))
         .route("/api/studio/agent/undo", post(api::agent::undo))
@@ -507,6 +511,7 @@ async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
         _ = &mut shutdown => return,
         _ = tokio::signal::ctrl_c() => {},
     }
+    api::mcp::shutdown();
     tracing::info!("shutdown requested; finishing requests in flight (press Ctrl-C again to stop immediately)");
     tokio::spawn(async {
         let _ = tokio::signal::ctrl_c().await;
