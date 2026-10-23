@@ -98,12 +98,10 @@ fn xml_function(function: &Value) -> String {
     let mut body = String::new();
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (key, property) in properties {
-            let param = format!(
-                "{} {} {}",
-                lit(&format!("<parameter={key}>\n")),
-                xml_value(property),
-                lit("\n</parameter>\n")
-            );
+            let value = xml_value(property);
+            // PARAM_TEXT contains its own closing tag: a separate literal would overlap with the text
+            let close = if value == "PARAM_TEXT" { String::new() } else { lit("\n</parameter>\n") };
+            let param = format!("{} {} {}", lit(&format!("<parameter={key}>\n")), value, close);
             if required.contains(&key.as_str()) {
                 body.push_str(&format!(" {param}"));
             } else {
@@ -184,7 +182,10 @@ pub fn lark_for(parser: &str, functions: &[Value], parallel: bool, allow_text: b
     };
     out.push_str(&format!("calls: {sequence}\n"));
     if parser == "qwen3_coder" {
-        out.push_str(&text_terminal("PARAM_TEXT", &["</parameter>"], None));
+        // value, newline and the closing tag in one lexeme (see `xml_function`); the tag occurs only at the end
+        out.push_str(
+            "PARAM_TEXT: /(?s:.+)\\n<\\/parameter>\\n/ & ~/(?s:.*)<\\/parameter>(?s:.*)<\\/parameter>(?s:.*)/\n",
+        );
     }
     if allow_text {
         out.push_str(&text_terminal("TEXT", markers, first));
@@ -218,6 +219,19 @@ mod tests {
             panic!("grammar does not compile:\n{lark}");
         };
         m.consume_tokens(&env.tokenize(text)).is_ok() && m.is_accepting().unwrap_or(false)
+    }
+
+    /// Number of leading bytes of `text` the grammar lets through (for readable failures).
+    fn progress(lark: &str, text: &str) -> usize {
+        let env = ApproximateTokEnv::single_byte_env();
+        let factory = ParserFactory::new_simple(&env).unwrap();
+        let mut m = crate::structured::matcher(&factory, TopLevelGrammar::from_lark(lark.into())).unwrap();
+        for (i, token) in env.tokenize(text).iter().enumerate() {
+            if m.consume_tokens(&[*token]).is_err() {
+                return i;
+            }
+        }
+        text.len()
     }
 
     fn parses(parser: &str, text: &str) -> Vec<tool_parsers::RawCall> {
@@ -275,7 +289,8 @@ mod tests {
     fn qwen3_coder_xml_is_typed_by_the_schema() {
         let g = lark_for("qwen3_coder", &tools(), true, true).unwrap();
         let call = "<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n<parameter=days>\n3\n</parameter>\n<parameter=unit>\nf\n</parameter>\n</function>\n</tool_call>";
-        assert!(accepts(&g, call));
+        let done = progress(&g, call);
+        assert!(accepts(&g, call), "failed: stopped after {done} of {} bytes at {:?}; grammar {:?}", call.len(), &call[done.min(call.len())..], g);
         let calls = parses("qwen3_coder", call);
         assert_eq!(calls[0].name, "get_weather");
         let args = tool_parsers::arguments_json(&calls[0].args, Some(&tools()[0]["parameters"])).unwrap();
