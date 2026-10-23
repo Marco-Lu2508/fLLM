@@ -6,7 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-23
+
 ### Fixed
+- Release: the CUDA archive is built with the CUDA backend (a global feature setting had overridden it), and the ROCm build script is executable. A tag push removes releases left over from an earlier run of the same tag.
 - Studio: a model download runs in the background of the app and resumes after a dropped connection (it was cancelled after 10 minutes, and a download took at most one hour); the models page shows the computer, suggests models that run well in its memory and hides the ones that are too large; memory for integrated and unreported GPUs comes from the computer. The desktop app keeps a `server.log`.
 
 ## [0.1.2] - 2026-10-22
