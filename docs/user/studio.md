@@ -39,8 +39,10 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
 
 ## Code: the coding agent
 
-Pick a folder and describe a task. The model works through tools that the server runs inside that folder, and a task list. Every step
-is shown as a card, file changes with a diff.
+Pick a folder and describe a task. The model works through tools that the server runs inside that folder (`list_dir`, `read_file`,
+`write_file`, `edit_file`, `glob`, `grep`, `bash`, and more when the server offers them, such as `multi_edit`, background shell jobs,
+`web_fetch` and `web_search`), plus tools of the page itself: a task list, `ask_user` and `spawn_agent`. Tools of configured MCP servers
+are added too. Every step is shown as a card, file changes with a diff, long output cut with a "Show all" button.
 
 | Tool | What it does |
 | --- | --- |
@@ -59,10 +61,6 @@ The server lists its tools, with the permission category the page asks about (`r
 time), and `POST /api/studio/agent/undo` takes `{"steps": n}` or `{"to": id}` to go back several changes at once (newest first).
 The chat page can use the network tools without an agent session through `POST /api/studio/web/fetch` (`{url, max_chars?}`) and
 `POST /api/studio/web/search` (`{query, limit?}`).
-Pick a folder and describe a task. The model works through tools that the server runs inside that folder (`list_dir`, `read_file`,
-`write_file`, `edit_file`, `glob`, `grep`, `bash`, and more when the server offers them, such as `multi_edit`, background shell jobs,
-`web_fetch` and `web_search`), plus tools of the page itself: a task list, `ask_user` and `spawn_agent`. Tools of configured MCP servers
-are added too. Every step is shown as a card, file changes with a diff, long output cut with a "Show all" button.
 
 | Mode | What the agent does on its own |
 | --- | --- |
@@ -108,6 +106,7 @@ fLLM runs on only, like the other agent routes. To let them reach a documentatio
 A small model often writes a command into the answer instead of calling the tool. Use a model with good tool calling for real work.
 
 The pure logic of this page (rule matching, compaction, command expansion) has tests: `node rust/engine/src/webui/tests/code.test.js`.
+
 ## Models
 
 Shows the loaded model, downloaded models and suggestions. Search Hugging Face (GGUF repositories, most downloaded first), look at the
