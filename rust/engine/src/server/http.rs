@@ -658,6 +658,8 @@ mod studio_gate_tests {
         assert!(!studio_admin_blocked(false, &post, PULL, addr("[::ffff:127.0.0.1]:5000"), &local));
         assert!(studio_admin_blocked(false, &post, PULL, addr("192.168.1.20:5000"), &local));
         assert!(studio_admin_blocked(false, &Method::DELETE, "/api/studio/keys/key-1", addr("10.7.0.4:1"), &local));
+        assert!(studio_admin_blocked(false, &post, "/api/studio/extract", addr("10.7.0.4:1"), &local));
+        assert!(!studio_admin_blocked(false, &post, "/api/studio/extract", addr("127.0.0.1:5000"), &local));
         assert!(studio_admin_blocked(false, &post, PULL, None, &local), "an unknown peer counts as remote");
     }
 
