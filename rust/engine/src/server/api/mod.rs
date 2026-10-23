@@ -9,6 +9,7 @@ use std::pin::Pin;
 pub(super) mod anthropic;
 pub(super) mod batches;
 pub(super) mod llamacpp;
+pub(super) mod mcp;
 pub(super) mod ollama_extra;
 pub(super) mod responses;
 pub(super) mod agent;

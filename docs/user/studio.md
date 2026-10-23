@@ -96,6 +96,23 @@ feature limit, memory speed, a processor check), Server and API (address, reques
 server messages with refresh and copy), and under More: model details, text tools and ready-made examples for connecting Claude Code,
 the OpenAI libraries and curl.
 
+## Tools (MCP)
+
+Settings has a Tools (MCP) page for Model Context Protocol servers: programs that offer tools (files, search, databases, ...) over their
+standard input and output. Add a server with a name, a command (for example `npx`), arguments (one per line) and optional environment
+variables. Each server shows its state (starting, ready, or failed with the reason), its tools and its last error output; you can restart,
+edit or remove it. The list is saved in `mcp.json` next to `studio.json` in the common format
+`{"mcpServers": {"name": {"command": "npx", "args": ["-y", "pkg"], "env": {"KEY": "value"}}}}`, so a file from another MCP client works as is.
+Edits to the file are picked up the next time the page or the API reads it. An optional `"timeout_seconds"` per server sets the limit for
+one tool call (default 60). A server that stops is started again on the next call, with a growing pause after repeated failures.
+
+**Warning:** an MCP server runs on this computer with your user rights. Only add servers you trust. Saved environment variable values are
+never sent back to the page.
+
+API: `GET /api/studio/mcp/servers`, `POST` and `DELETE /api/studio/mcp/servers`, `POST /api/studio/mcp/restart`,
+`GET /api/studio/mcp/tools` (`{tools: [{server, name, description, input_schema}]}`) and `POST /api/studio/mcp/call`
+(`{server, name, arguments}` gives `{content, is_error}`). Everything except the two GET routes is administration (see below).
+
 ## Who may change things
 
 Reading (status, hardware, models) is open like the rest of the API. Changing things through `/api/studio/*` (settings, downloads,

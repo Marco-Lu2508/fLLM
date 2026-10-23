@@ -678,6 +678,24 @@ mod studio_gate_tests {
     }
 
     #[test]
+    fn mcp_administration_and_calls_are_gated_but_listing_is_not() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        for (method, path) in [
+            (Method::POST, "/api/studio/mcp/servers"),
+            (Method::DELETE, "/api/studio/mcp/servers"),
+            (Method::POST, "/api/studio/mcp/restart"),
+            (Method::POST, "/api/studio/mcp/call"),
+        ] {
+            assert!(studio_admin_blocked(false, &method, path, remote, &h), "{method} {path}");
+            let local = headers("127.0.0.1:8000", None);
+            assert!(!studio_admin_blocked(false, &method, path, addr("127.0.0.1:1"), &local), "{method} {path}");
+        }
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/mcp/tools", remote, &h));
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/mcp/servers", remote, &h));
+    }
+
+    #[test]
     fn studio_reading_and_other_routes_are_not_gated() {
         let remote = addr("192.168.1.20:5000");
         let h = headers("192.168.1.5:8000", None);

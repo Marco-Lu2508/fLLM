@@ -1709,6 +1709,11 @@ pub fn idle_unload_minutes() -> u64 {
     studio_setting("idle_unload_minutes").and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
+/// The MCP server list (`mcp.json`, the common `{"mcpServers": {...}}` format) next to `studio.json`.
+pub fn mcp_file() -> PathBuf {
+    studio_file().with_file_name("mcp.json")
+}
+
 /// The model the Studio was last started or switched to (`fllm-rs studio` starts with it when no `--model` is given).
 pub fn last_studio_model() -> Option<String> {
     studio_setting("last_model")?.as_str().map(str::to_owned)
