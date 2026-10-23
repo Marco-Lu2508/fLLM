@@ -18,7 +18,19 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
 * Every chat is a tree. Editing one of your messages or regenerating an answer keeps the old version; switch between versions with the
   arrows under the message.
 * Markdown with tables, lists and highlighted code, collapsible reasoning blocks, a context meter, and live tokens-per-second.
-* Attach images (for vision models) and text or code files by button, drag and drop or paste. A long paste becomes a file.
+* Attach images (for vision models), documents and text or code files by button, drag and drop or paste. A long paste becomes a file.
+* **Documents.** Attach PDF (with a text layer), DOCX, XLSX, EPUB, HTML, CSV, Markdown, code and other text files by button, drag and
+  drop or paste. The server reads them (`POST /api/studio/extract`, up to 50 MB; a scanned PDF without a text layer, an encrypted PDF
+  and the old binary Office formats are refused with a message). A document that fits the model's context (about a third of it) goes
+  into the message whole. A longer one is not stuffed in: it is cut into passages of about 500 tokens, the passages that match your
+  question best (BM25 ranking in the browser, no embedding model) are added to the prompt with labels such as `[report.pdf, chunk 3/42]`,
+  and a chip under your message ("Using 6 passages from report.pdf") shows them. Several documents can be in one chat; they stay in
+  the chat and are searched for every later question until you remove them (the x on their chip). The extracted text is stored in the
+  browser with the chat, at most 600,000 characters per document and 1,500,000 per chat; the page says so when a limit cuts a document.
+* **Use the web.** Switch on *Use the web* in the composer and each question is searched on the web first. The first three results
+  are read, their best passages are added to the prompt with their source numbers, and the sources are listed under the answer. This
+  uses the web tools of the server (`/api/studio/web/search` and `/api/studio/web/fetch`); if they are missing or blocked, the page
+  says so and answers without the web. The pages are fetched by the server, so the computer running fLLM needs internet access.
 * Presets store a system prompt together with sampling values. The sampling panel covers temperature, top-p/top-k/min-p, penalties,
   mirostat, DRY, a seed and constrained output (JSON object, JSON schema, GBNF grammar, regular expression).
 * Chats can be pinned, renamed, duplicated, exported (Markdown or JSON), imported and searched by title and content. New chats get a

@@ -295,7 +295,7 @@
 
                 <div class="chat-input-toolbar">
                   <div class="toolbar-left">
-                    <input type="file" id="fileAttachInput" multiple style="display:none;" accept="image/*,.txt,.md,.markdown,.json,.csv,.tsv,.log,.rs,.py,.js,.mjs,.ts,.tsx,.jsx,.c,.h,.cpp,.hpp,.cc,.cs,.java,.kt,.go,.rb,.php,.swift,.toml,.yaml,.yml,.ini,.html,.css,.scss,.sh,.ps1,.bat,.sql,.xml,.tex">
+                    <input type="file" id="fileAttachInput" multiple style="display:none;" accept="image/*,.pdf,.docx,.xlsx,.epub,.htm,.txt,.md,.markdown,.json,.csv,.tsv,.log,.rs,.py,.js,.mjs,.ts,.tsx,.jsx,.c,.h,.cpp,.hpp,.cc,.cs,.java,.kt,.go,.rb,.php,.swift,.toml,.yaml,.yml,.ini,.html,.css,.scss,.sh,.ps1,.bat,.sql,.xml,.tex">
                     <button class="btn-icon btn-icon-xs" id="btnAttach" title="Attach an image or file (or drop or paste it)">
                       <svg viewBox="0 0 24 24" class="icon"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
                     </button>
@@ -316,6 +316,12 @@
                     <button class="composer-chip" id="btnToggleThinking" title="Let the model think first (if it can)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/></svg>
                       <span>Thinking</span>
+                    </button>
+
+                    <!-- Web search for the question -->
+                    <button class="composer-chip" id="btnToggleWeb" title="Search the web for your question and answer from the pages found (needs a server with the web tools)">
+                      <svg viewBox="0 0 24 24" class="icon icon-sm"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20a15 15 0 0 1 0-20"/></svg>
+                      <span>Use the web</span>
                     </button>
 
                   </div>

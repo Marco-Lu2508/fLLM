@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Studio: chat with documents and the web. PDF (text layer), DOCX, XLSX, EPUB and HTML files can be attached (`POST /api/studio/extract`, text extraction in plain Rust without new dependencies); documents longer than the context are cut into passages and the ones that match the question (BM25 in the browser) go into the prompt with source labels, several documents per chat. A "Use the web" switch searches the question, reads the first results and lists the sources under the answer ([docs/user/studio.md](docs/user/studio.md)).
 - Studio: Hugging Face sign-in with an access token (private and gated models), a check for a newer release with download and start of the installer, and curated model suggestions that fit the memory (and the processor, without a discrete graphics card), your own GGUF files (a path or a folder) in the model list, and a hardware page that names the device in use.
 
 ### Fixed
