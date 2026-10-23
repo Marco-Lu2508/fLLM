@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Studio coding agent (server side): `multi_edit`, richer `grep` (output modes, context, case folding, limits), notebook reading, background shell jobs (`bash_output`, `bash_kill`) with a working directory that persists between commands, `web_fetch` and `web_search` with private-address protection (`FLLM_AGENT_ALLOW_PRIVATE_URLS=1` lifts it), the routes `GET /api/studio/agent/tools`, `GET /api/studio/agent/changes`, `POST /api/studio/web/fetch` and `/search`, and undo by `steps` or up to a change id.
 - Studio: Hugging Face sign-in with an access token (private and gated models), a check for a newer release with download and start of the installer, and curated model suggestions that fit the memory (and the processor, without a discrete graphics card), your own GGUF files (a path or a folder) in the model list, and a hardware page that names the device in use.
 
 ### Fixed
