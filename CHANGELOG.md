@@ -6,6 +6,8 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-23
+
 ### Added
 - Studio: chat with documents and the web. PDF (text layer), DOCX, XLSX, EPUB and HTML files can be attached (`POST /api/studio/extract`, text extraction in plain Rust without new dependencies); documents longer than the context are cut into passages and the ones that match the question (BM25 in the browser) go into the prompt with source labels, several documents per chat. A "Use the web" switch searches the question, reads the first results and lists the sources under the answer ([docs/user/studio.md](docs/user/studio.md)).
 - Studio coding agent (server side): `multi_edit`, richer `grep` (output modes, context, case folding, limits), notebook reading, background shell jobs (`bash_output`, `bash_kill`) with a working directory that persists between commands, `web_fetch` and `web_search` with private-address protection (`FLLM_AGENT_ALLOW_PRIVATE_URLS=1` lifts it), the routes `GET /api/studio/agent/tools`, `GET /api/studio/agent/changes`, `POST /api/studio/web/fetch` and `/search`, and undo by `steps` or up to a change id.
