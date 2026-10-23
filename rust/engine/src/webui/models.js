@@ -92,7 +92,18 @@
         </div>`;
 
       const cached = hub.cached || [];
-      $('cachedModelsHubList').innerHTML = cached.length ? cached.map((c) => `
+      const local = (hub.local || []).map((l) => `
+        <div class="app-card-item">
+          <div class="app-item-info">
+            <div class="app-item-title mono">${escapeHtml(l.name)} ${fitBadge(l.size_bytes)}</div>
+            <div class="app-item-desc mono">${formatBytes(l.size_bytes)} · ${escapeHtml(l.path)}</div>
+          </div>
+          <div class="app-item-actions">
+            <button class="btn btn-sm btn-secondary" data-load="${escapeHtml(l.path)}" data-label="${escapeHtml(l.name)}">Load</button>
+            <button class="btn btn-sm btn-ghost" data-del-local="${escapeHtml(l.path)}" title="Takes it off this list; the file stays on disk">Remove</button>
+          </div>
+        </div>`).join('');
+      $('cachedModelsHubList').innerHTML = local + (cached.length ? cached.map((c) => `
         <div class="app-card-item">
           <div class="app-item-info">
             <div class="app-item-title mono">${escapeHtml(c.name)} ${fitBadge(c.size_bytes)}</div>
@@ -102,7 +113,7 @@
             <button class="btn btn-sm btn-secondary" data-load="${escapeHtml(c.name)}" title="Restart the server with this model">Load</button>
             <button class="btn btn-sm btn-ghost" data-del-cache="${escapeHtml(c.name)}">Delete</button>
           </div>
-        </div>`).join('') : '<p class="app-item-desc">No downloaded models yet. Search for one above.</p>';
+        </div>`).join('') : (local ? '' : '<p class="app-item-desc">No downloaded models yet. Search for one above.</p>'));
 
       const q = ($('hubSearchInput').value || '').toLowerCase().trim();
       const all = (hub.catalog || []).filter((item) => !q || item.id.toLowerCase().includes(q) || item.architecture.toLowerCase().includes(q));
@@ -288,6 +299,16 @@
     $('hubSearchInput').addEventListener('input', renderHub);
     $('btnCopyDiag').addEventListener('click', () => { navigator.clipboard.writeText($('computerDetails').textContent).then(() => toast('Copied')); });
     $('btnRefreshHub').addEventListener('click', refreshHub);
+    async function addLocal() {
+      const res = await apiFetch('/api/studio/models/local', { method: 'POST', body: { path: $('localPathInput').value } });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast(d.error?.message || 'The file could not be added.'); return; }
+      $('localPathInput').value = '';
+      toast(d.added.length === 1 ? 'Model added' : `Added ${d.added.length} models`);
+      refreshHub();
+    }
+    $('btnAddLocal').addEventListener('click', addLocal);
+    $('localPathInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') addLocal(); });
     $('btnHfSave').addEventListener('click', async () => {
       const res = await apiFetch('/api/studio/hf-account', { method: 'POST', body: { token: $('hfTokenInput').value } });
       const d = await res.json().catch(() => ({}));
@@ -318,7 +339,9 @@
       const dl = e.target.closest('[data-download]');
       if (dl) { await downloadModel(dl.dataset.download, dl.dataset.quant, Boolean(dl.dataset.thenLoad)); return; }
       const load = e.target.closest('[data-load]');
-      if (load) { await loadModel(load.dataset.load, load.dataset.load); return; }
+      if (load) { await loadModel(load.dataset.load, load.dataset.label || load.dataset.load); return; }
+      const delLocal = e.target.closest('[data-del-local]');
+      if (delLocal) { await apiFetch('/api/studio/models/local', { method: 'DELETE', body: { path: delLocal.dataset.delLocal } }); refreshHub(); return; }
       const del = e.target.closest('[data-del-cache]');
       if (del) {
         if (!(await askDialog({ title: 'Delete this download?', text: `${del.dataset.delCache} is removed from the model cache.`, ok: 'Delete', danger: true }))) return;

@@ -324,6 +324,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models/search", get(api::studio::search_models))
         .route("/api/studio/models/progress", get(api::studio::model_progress))
         .route("/api/studio/models/cache", delete(api::studio::delete_cached_model))
+        .route("/api/studio/models/local", post(api::studio::add_local_model).delete(api::studio::remove_local_model))
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
         .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
         .route("/api/studio/agent/workspace", post(api::agent::workspace))

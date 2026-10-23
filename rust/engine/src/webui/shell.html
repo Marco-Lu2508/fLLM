@@ -450,6 +450,15 @@
               <details style="margin-top:12px;"><summary class="app-item-desc" style="cursor:pointer;">Details for a bug report</summary><pre class="mono" id="computerDetails" style="white-space:pre-wrap;font-size:11px;margin:8px 0;"></pre><button class="btn btn-sm btn-outline" id="btnCopyDiag">Copy</button></details>
             </div>
 
+            <div class="app-card" id="localFileCard">
+              <div class="app-card-title">Add a model file</div>
+              <p class="app-item-desc">Already have a GGUF file? Paste its path (a folder works too). The file stays where it is.</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <input type="text" id="localPathInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="C:\Models\my-model-Q4_K_M.gguf" autocomplete="off">
+                <button class="btn btn-primary" id="btnAddLocal">Add</button>
+              </div>
+            </div>
+
             <div class="app-card" id="hfAccountCard">
               <div class="app-card-title">Hugging Face account</div>
               <p class="app-item-desc" id="hfAccountText">Checking ...</p>

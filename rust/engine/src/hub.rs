@@ -1516,6 +1516,91 @@ pub fn last_studio_model() -> Option<String> {
     serde_json::from_str::<Value>(&text).ok()?.get("last_model")?.as_str().map(str::to_owned)
 }
 
+/// GGUF files the user added from anywhere on the computer (they stay where they are). The list is a small file next to `studio.json`.
+fn local_models_file() -> PathBuf {
+    studio_file().with_file_name("local-models.json")
+}
+
+fn read_local_models() -> Vec<String> {
+    fs::read_to_string(local_models_file())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_local_models(list: &[String]) {
+    let file = local_models_file();
+    if let Some(dir) = file.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(file, serde_json::json!(list).to_string());
+}
+
+fn is_gguf_file(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    path.is_file() && fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && &magic == b"GGUF"
+}
+
+/// The added files that still exist: `(path, size in bytes)`.
+pub fn local_models() -> Vec<(String, u64)> {
+    read_local_models()
+        .into_iter()
+        .filter_map(|p| fs::metadata(&p).ok().filter(|m| m.is_file()).map(|m| (p, m.len())))
+        .collect()
+}
+
+/// Adds a GGUF file, or every GGUF file in a folder (one level of sub-folders is searched too). Returns the files that were added.
+pub fn add_local_model(input: &str) -> Result<Vec<String>, String> {
+    let cleaned = input.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    if cleaned.is_empty() {
+        return Err("type or paste the path of a .gguf file".into());
+    }
+    let path = PathBuf::from(cleaned);
+    let mut found = Vec::new();
+    if path.is_dir() {
+        let mut stack = vec![(path.clone(), 0)];
+        while let Some((dir, depth)) = stack.pop() {
+            for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+                let p = entry.path();
+                if p.is_dir() && depth < 1 {
+                    stack.push((p, depth + 1));
+                } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")) && is_gguf_file(&p) {
+                    found.push(p);
+                }
+            }
+        }
+        if found.is_empty() {
+            return Err("this folder has no .gguf files".into());
+        }
+    } else if path.is_file() {
+        if !is_gguf_file(&path) {
+            return Err("this is not a GGUF file (it does not start with the GGUF header)".into());
+        }
+        found.push(path);
+    } else {
+        return Err("no such file or folder".into());
+    }
+    let mut list = read_local_models();
+    let mut added = Vec::new();
+    for p in found {
+        let text = fs::canonicalize(&p).unwrap_or(p).display().to_string();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned();
+        if !list.contains(&text) {
+            list.push(text.clone());
+        }
+        added.push(text);
+    }
+    write_local_models(&list);
+    Ok(added)
+}
+
+/// Takes a file off the list of added models (the file itself is not touched).
+pub fn remove_local_model(path: &str) {
+    let list: Vec<String> = read_local_models().into_iter().filter(|p| p != path).collect();
+    write_local_models(&list);
+}
+
 pub fn forget_studio_model() {
     let _ = fs::remove_file(studio_file());
 }

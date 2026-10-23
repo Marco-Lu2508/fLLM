@@ -536,6 +536,10 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
         "recommended": recommended,
         "loaded": loaded,
         "cached": cached,
+        "local": crate::hub::local_models()
+            .into_iter()
+            .map(|(path, size)| json!({"path": path, "name": std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), "size_bytes": size}))
+            .collect::<Vec<_>>(),
         "catalog": catalog,
     })
 }
@@ -615,6 +619,23 @@ pub(in crate::server) async fn model_progress() -> Response {
         .into_response(),
         _ => Json(json!({"active": active, "job": job})).into_response(),
     }
+}
+
+/// `POST /api/studio/models/local` with `{path}`: adds a GGUF file (or the GGUF files of a folder) from this computer to the models.
+pub(in crate::server) async fn add_local_model(Json(body): Json<Value>) -> Response {
+    let path = body.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+    match tokio::task::spawn_blocking(move || crate::hub::add_local_model(&path)).await {
+        Ok(Ok(added)) => Json(json!({"added": added})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::BAD_REQUEST, &error),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `DELETE /api/studio/models/local` with `{path}`: takes the file off the list (the file stays on disk).
+pub(in crate::server) async fn remove_local_model(Json(body): Json<Value>) -> Response {
+    let path = body.get("path").and_then(Value::as_str).unwrap_or_default();
+    crate::hub::remove_local_model(path);
+    Json(json!({"status": "removed"})).into_response()
 }
 
 /// `GET /api/studio/hf-account`: whose Hugging Face token is in use (private and gated models need one).
