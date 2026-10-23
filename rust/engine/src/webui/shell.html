@@ -792,7 +792,7 @@
               <div class="app-card">
                 <div class="app-card-header">
                   <div>
-                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Hardware & Rust CPU SIMD Engine</h2>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Hardware</h2>
                     <p class="app-item-desc">See which devices fLLM uses, limit the CPU instruction sets and check the compute kernels with a self test.</p>
                   </div>
                   <div style="display:flex;gap:6px;">
@@ -843,7 +843,8 @@
 
               <!-- Detected Devices List (GpuGroupCard style) -->
               <div class="app-card">
-                <div class="app-card-title">Detected compute devices</div>
+                <div class="app-card-title">Compute devices</div>
+              <p class="app-item-desc" id="hwChoiceText"></p>
                 <div id="hwDevicesGrid" style="display:flex;flex-direction:column;gap:10px;"></div>
               </div>
 

@@ -542,6 +542,20 @@ pub fn inventory() -> Vec<InventoryEntry> {
     for (backend, device) in crate::backend::native_list_devices_tagged(raw.len()) {
         raw.push((backend, Api::Native, device));
     }
+    // some Windows drivers announce the same integrated GPU twice (two driver registrations): list it once
+    let mut seen: Vec<(&'static str, Api, String, u64)> = Vec::new();
+    raw.retain(|(backend, api, info)| {
+        if info.dev_type != DeviceType::IntegratedGpu {
+            return true;
+        }
+        let key = (*backend, *api, info.name.clone(), info.total_memory_bytes);
+        if seen.contains(&key) {
+            false
+        } else {
+            seen.push(key);
+            true
+        }
+    });
     index_entries(raw)
 }
 

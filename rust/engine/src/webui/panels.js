@@ -158,16 +158,23 @@
           const wanted = ['auto', ...tiers];
           if (sel.options.length !== wanted.length || [...sel.options].some((o, i) => o.value !== wanted[i])) {
             const cur = state.status?.config?.cpu_tier_cap || 'auto';
-            sel.innerHTML = wanted.map((t) => `<option value="${t}">${t === 'auto' ? 'Auto (hoechster unterstuetzter)' : t}</option>`).join('');
+            sel.innerHTML = wanted.map((t) => `<option value="${t}">${t === 'auto' ? 'Auto (highest supported)' : t}</option>`).join('');
             sel.value = wanted.includes(cur) ? cur : 'auto';
           }
 
-          $('hwDevicesGrid').innerHTML = devs.map((d) => `
+          // a device that reports no memory cannot hold a model: it stays out of the list (the details for a bug report still name it)
+          const usable = devs.filter((d) => d.backend === 'cpu' || Number(d.total_memory_bytes) > 0);
+          const chosen = usable.find((d) => d.id === hw.auto_choice);
+          $('hwChoiceText').textContent = chosen
+            ? `With the automatic choice fLLM runs models on: ${chosen.name} (${({ cpu: 'the processor', vulkan: 'Vulkan', hip: 'AMD ROCm', cuda: 'NVIDIA CUDA', metal: 'Metal', dx12: 'DirectX 12' })[String(chosen.backend).toLowerCase()] || chosen.backend}${chosen.id.startsWith('wgpu') ? ', generic' : ''}). The processor is the fallback.`
+            : 'The processor runs the models: no usable graphics device was found.';
+          $('hwDevicesGrid').innerHTML = usable.map((d) => `
             <div class="device-card">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
                 <div>
                   <div style="font-weight:600;color:var(--foreground);">${escapeHtml(d.name)}</div>
                   <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                    ${d.id === hw.auto_choice ? '<span class="quant-chip" style="color:var(--primary);">in use (automatic choice)</span>' : ''}
                     <span class="backend-chip"><span class="backend-chip-dot"></span>${escapeHtml(({ cpu: 'Processor', cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12' })[String(d.backend).toLowerCase()] || d.backend)}</span>
                     ${d.description ? `<span class="quant-chip">${escapeHtml(String(d.description).replace(/\bthreads\b/, 'threads'))}</span>` : ''}
                     ${d.unified_memory ? '<span class="quant-chip">shares system memory</span>' : ''}

@@ -375,6 +375,7 @@ pub(in crate::server) async fn hardware(
             "active_cpu_tier": capped_tiers.last().copied().unwrap_or("scalar"),
             "cpu_repack": cpu_kernels::repack_enabled(),
             "auto_order": crate::devices::auto_order(),
+            "auto_choice": crate::devices::device_candidates("auto").ok().and_then(|chain| chain.first().map(|(backend, index)| if backend == "cpu" { "cpu".to_owned() } else { format!("{backend}:{index}") })),
             "measured_cpu_bandwidth_gbs": measured_bw,
             "devices": devices,
         })
