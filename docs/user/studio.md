@@ -39,8 +39,26 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
 
 ## Code: the coding agent
 
-Pick a folder and describe a task. The model works through tools that the server runs inside that folder: `list_dir`, `read_file`,
-`write_file`, `edit_file`, `glob`, `grep`, `bash`, and a task list. Every step is shown as a card, file changes with a diff.
+Pick a folder and describe a task. The model works through tools that the server runs inside that folder, and a task list. Every step
+is shown as a card, file changes with a diff.
+
+| Tool | What it does |
+| --- | --- |
+| `list_dir`, `glob` | List a folder, find files by pattern. |
+| `read_file` | Read a text file with line numbers. A Jupyter notebook (`.ipynb`) is shown as text cells with their outputs. |
+| `grep` | Regular-expression search. Optional `output_mode` (`content`, `files`, `count`), `context` lines, `case_insensitive` and `head_limit`. |
+| `write_file`, `edit_file` | Create or overwrite a file; replace text in a file. |
+| `multi_edit` | Several edits to one file, all or nothing, one undo step. |
+| `bash` | Run a shell command. A `cd` stays in effect for the next call (never outside the folder). With `background: true` it starts a job and returns a job id. |
+| `bash_output`, `bash_kill` | Read the output of a background job (the newest 256 KB are kept) or stop it. Jobs are stopped when the session ends, the folder changes or the server stops. |
+| `web_fetch` | Download an http(s) page and return it as readable text (10 s connect and 30 s total timeout, 2 MB body cap, at most 5 redirects). |
+| `web_search` | Best-effort web search through an HTML search page that needs no key. Returns title, URL and snippet; says so clearly when the search page blocks the request. |
+
+The server lists its tools, with the permission category the page asks about (`read`, `edit`, `command`, `network`), at
+`GET /api/studio/agent/tools`. `GET /api/studio/agent/changes` lists every file change of the session (id, path, `create` or `edit`,
+time), and `POST /api/studio/agent/undo` takes `{"steps": n}` or `{"to": id}` to go back several changes at once (newest first).
+The chat page can use the network tools without an agent session through `POST /api/studio/web/fetch` (`{url, max_chars?}`) and
+`POST /api/studio/web/search` (`{query, limit?}`).
 
 | Mode | What the agent does on its own |
 | --- | --- |
@@ -57,6 +75,12 @@ message. A `FLLM.md`, `AGENTS.md` or `CLAUDE.md` in the folder is read as projec
 Safety: the agent tools are reachable from the machine fLLM runs on only, also when an API key is set. Paths cannot leave the folder
 (also through symbolic links). The agent can still run any command you allow, so choose the folder with care. Set `FLLM_NO_AGENT=1` to
 switch the agent routes off completely.
+
+Network safety: `web_fetch`, `web_search` and the two web routes only speak http and https, refuse URLs with credentials, and refuse
+targets on loopback, private, link-local (including cloud metadata) and other reserved addresses. The host name is resolved by the
+server and the connection is pinned to the checked address; every redirect is checked again. They are reachable from the machine
+fLLM runs on only, like the other agent routes. To let them reach a documentation server on your own network, start fLLM with
+`FLLM_AGENT_ALLOW_PRIVATE_URLS=1`. `FLLM_NO_AGENT=1` switches them off too.
 
 A small model often writes a command into the answer instead of calling the tool. Use a model with good tool calling for real work.
 

@@ -1585,9 +1585,45 @@ async fn studio_agent_tools_work_inside_one_workspace_and_only_on_this_machine()
         .post("/api/studio/agent/tool", json!({"name": "read_file", "args": {"path": "../secret.txt"}}))
         .await;
     assert_eq!(escape.json()["ok"], false);
-    let undone = h.post("/api/studio/agent/undo", json!({})).await;
+
+    // the tool catalog, the change log and undo by steps or id
+    let catalog = h.get("/api/studio/agent/tools").await;
+    assert_eq!(catalog.status, StatusCode::OK);
+    let names: Vec<String> = catalog.json()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| format!("{}:{}", t["function"]["name"].as_str().unwrap(), t["permission"].as_str().unwrap()))
+        .collect();
+    for expected in ["multi_edit:edit", "bash:command", "bash_output:read", "web_fetch:network", "web_search:network", "read_file:read"] {
+        assert!(names.contains(&expected.to_owned()), "{expected} missing in {names:?}");
+    }
+    h.post("/api/studio/agent/tool", json!({"name": "write_file", "args": {"path": "two.txt", "content": "2"}})).await;
+    let changes = h.get("/api/studio/agent/changes").await.json();
+    let list = changes["changes"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[1]["path"], "two.txt");
+    assert_eq!(list[1]["kind"], "create");
+    let both = h.post("/api/studio/agent/undo", json!({"to": list[0]["id"]})).await.json();
+    assert_eq!(both["ok"], true, "{both}");
+    assert_eq!(both["restored"].as_array().unwrap().len(), 2);
+    assert_eq!(both["restored"][0]["path"], "two.txt");
+    assert_eq!(both["restored"][0]["action"], "removed");
+    assert!(!dir.join("hello.txt").exists() && !dir.join("two.txt").exists());
+    assert_eq!(h.post("/api/studio/agent/undo", json!({})).await.json()["ok"], false);
+    h.post("/api/studio/agent/tool", json!({"name": "write_file", "args": {"path": "hello.txt", "content": "hi\n"}})).await;
+    let undone = h.post("/api/studio/agent/undo", json!({"steps": 1})).await;
     assert_eq!(undone.json()["ok"], true);
     assert!(!dir.join("hello.txt").exists());
+
+    // the web routes refuse private targets by default and need a url / query
+    let private = h.post("/api/studio/web/fetch", json!({"url": "http://127.0.0.1:9/"})).await.json();
+    assert_eq!(private["ok"], false);
+    assert!(private["error"].as_str().unwrap().contains("refused"), "{private}");
+    assert_eq!(h.post("/api/studio/web/fetch", json!({})).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(h.post("/api/studio/web/search", json!({})).await.status, StatusCode::BAD_REQUEST);
+    let net_tool = h.post("/api/studio/agent/tool", json!({"name": "web_fetch", "args": {"url": "ftp://example.com/x"}})).await.json();
+    assert_eq!(net_tool["ok"], false);
 
     // the same call from another machine is refused, whether or not a key exists
     let remote = Request::builder()
