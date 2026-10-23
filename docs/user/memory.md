@@ -81,6 +81,30 @@ counts exact per-token bytes per half, so `--gpu-memory-utilization` and the
 fitted context follow the format automatically; the log prints the format and
 block count (`paged <format> KV`).
 
+## Agents and parallel requests
+
+Coding agents and sub-agents send several requests at once that start with the same long
+system prompt and tool list.
+
+- **Batching.** All running requests share one decode step (continuous batching). Raise
+  `--max-seqs` to the number of parallel sub-agents (default 16; each sequence costs KV
+  memory, see above). Requests beyond it wait in the queue.
+- **Prefix cache.** On by default (not for stateful/hybrid models and not for requests with
+  images or audio). Whole KV blocks (16 tokens) of an identical prefix are reused; the last
+  partial block and everything after the first differing token are computed again. The reply
+  reports the reused tokens as `usage.prompt_tokens_details.cached_tokens`. Blocks enter the
+  cache while the first request prefills, so requests that arrive after it has started reuse
+  them; requests that are admitted in the very same step each compute the prefix once. For a
+  burst, send one request first, then the rest. Keep the shared part byte-identical and put
+  anything that varies (task text, time) at the end.
+- **KV cache type.** `--kv-cache-type q8_0` or `fp8_e4m3` roughly halves KV memory, so about
+  twice as many sequences or cached prefixes fit. Prefix reuse works with every cache format,
+  because cached blocks are stored in the cache's own format and never converted.
+- **Tool calls.** `"tool_call_grammar": true` ([server-api.md](../server-api.md#constrained-tool-calls))
+  works with batching, the prefix cache and every KV type; it only adds a mask per token.
+- To measure a setup, `scripts/agent_load_test.py` sends N parallel chat requests with a shared
+  prefix and prints the time and tokens per second.
+
 ## Quick rule of thumb
 
 Model file size + KV cache + about 1 GB overhead ≤ VRAM. A 12 GB card runs a

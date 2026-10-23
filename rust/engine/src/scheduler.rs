@@ -1040,3 +1040,44 @@ mod policy_tests {
         assert_eq!(s.wait_times.len(), 2);
     }
 }
+
+#[cfg(test)]
+mod prefix_reuse_tests {
+    use super::*;
+
+    /// Agents send many requests that share a long prefix (system prompt and tool list): after the
+    /// first one has computed it, the following ones reuse every full block and run together with it.
+    #[test]
+    fn requests_with_a_shared_prefix_reuse_full_blocks_and_run_together() {
+        let cfg = SchedulerConfig {
+            block_size: 4,
+            max_num_seqs: 4,
+            max_num_batched_tokens: 64,
+            prefix_cache: true,
+            preemption: "recompute".into(),
+            ..SchedulerConfig::default()
+        };
+        let pc = PrefixCache::new(64, true, true).unwrap();
+        let mut s = Scheduler::new(cfg, BlockManager::new(64, 4).unwrap(), Some(pc), 256);
+        let prompt = |tail: i64| {
+            let mut p: Vec<i64> = (0..10).collect();
+            p.push(tail);
+            p
+        };
+        s.add_request("r1".into(), vec![Sequence::new(1, "r1".into(), prompt(100), 8, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        s.commit_chunk(1, 11).unwrap();
+        // 11 tokens: two full blocks are cacheable (the last token is always computed)
+        s.add_request("r2".into(), vec![Sequence::new(2, "r2".into(), prompt(200), 8, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        assert_eq!(s.sequences[&2].cached_prompt_tokens, 8, "two whole blocks come from the cache");
+        assert_eq!(s.prefix_cache_hits, 1);
+        assert_eq!(s.sequences[&1].cached_prompt_tokens, 0);
+        assert!(s.running.contains(&1) && s.running.contains(&2), "both sequences are batched");
+        // a different prefix does not hit
+        let other: Vec<i64> = (50..61).collect();
+        s.add_request("r3".into(), vec![Sequence::new(3, "r3".into(), other, 8, 0.0)]);
+        s.schedule().unwrap().unwrap();
+        assert_eq!(s.sequences[&3].cached_prompt_tokens, 0);
+    }
+}
