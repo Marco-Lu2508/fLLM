@@ -239,7 +239,8 @@ pub fn studio_admin_blocked(
     headers: &HeaderMap,
 ) -> bool {
     // the agent tools read and write files and run programs: never from another machine, with or without a key
-    let agent = path.starts_with("/api/studio/agent/");
+    // (the file picker opens a window on this machine's screen)
+    let agent = path.starts_with("/api/studio/agent/") || path == "/api/studio/pick-file";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
@@ -686,6 +687,15 @@ mod studio_gate_tests {
         assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/keys", remote, &h));
         // ... except for the agent tools, which never leave this machine
         assert!(studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", remote, &h));
+        // ... and the file picker, which opens a window on the screen of this machine
+        assert!(studio_admin_blocked(true, &Method::POST, "/api/studio/pick-file", remote, &h));
+        // the new model-management routes need a key like every other change
+        for path in ["/api/studio/models/unload", "/api/studio/models/downloads", "/api/studio/settings"] {
+            assert!(studio_admin_blocked(false, &Method::POST, path, remote, &h), "{path}");
+            assert!(!studio_admin_blocked(true, &Method::POST, path, remote, &h), "{path}");
+            assert!(!studio_admin_blocked(false, &Method::POST, path, addr("127.0.0.1:5000"), &headers("127.0.0.1:8000", None)), "{path}");
+        }
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/logs", remote, &h));
         let local = headers("127.0.0.1:8000", None);
         assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", addr("127.0.0.1:1"), &local));
     }

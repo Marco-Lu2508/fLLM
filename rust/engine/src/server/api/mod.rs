@@ -13,6 +13,7 @@ pub(super) mod ollama_extra;
 pub(super) mod responses;
 pub(super) mod agent;
 pub(super) mod studio;
+pub(super) mod studio_ops;
 pub(super) mod tgi;
 pub(super) mod vllm;
 

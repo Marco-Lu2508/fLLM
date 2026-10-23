@@ -319,6 +319,8 @@ fn studio_args(rest: &[String]) -> Vec<String> {
         },
     }
     env::set_var("FLLM_STUDIO", "1");
+    // the models folder chosen in the Studio
+    fllm_engine::hub::apply_saved_models_dir();
     if open {
         env::set_var("FLLM_OPEN_BROWSER", "1");
     }

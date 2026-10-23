@@ -71,6 +71,7 @@ pub(in crate::server) fn build_status_json(state: &AppState) -> Value {
             "bos_ids": state.tokenizer.bos_ids(),
             "eos_ids": state.tokenizer.eos_ids(),
             "shared_choices": state.shared_choices,
+            "load_options": super::studio_ops::active_options_json(&std::env::args().skip(1).collect::<Vec<_>>()),
             "aliases": aliases,
             "capabilities": {
                 "completion": true,
@@ -531,8 +532,11 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
         })
         .take(3)
         .map(|e| e["id"].clone())
-        .collect();    json!({
+        .collect();
+    json!({
         "available_memory_bytes": avail_mem,
+        "model_options": super::studio_ops::saved_options_json(),
+        "models_dir": crate::hub::cache_root().display().to_string(),
         "recommended": recommended,
         "loaded": loaded,
         "cached": cached,
@@ -551,14 +555,23 @@ pub(in crate::server) async fn hf_files(
         return api_error(StatusCode::BAD_REQUEST, "missing ?repo=owner/name query parameter");
     };
     let repo_clone = repo.clone();
-    let res = tokio::task::spawn_blocking(move || crate::hub::repository_files(&repo_clone)).await;
+    let res = tokio::task::spawn_blocking(move || crate::hub::repository_files(&repo_clone).map(|files| (files, crate::catalog::available_memory_bytes()))).await;
     match res {
-        Ok(Ok(files)) => {
-            let gguf_files: Vec<Value> = files
+        Ok(Ok((files, avail))) => {
+            let mut gguf_files: Vec<Value> = files
                 .iter()
                 .filter(|(name, _)| name.to_ascii_lowercase().ends_with(".gguf"))
-                .map(|(name, size)| json!({"filename": name, "size_bytes": size}))
+                .map(|(name, size)| {
+                    json!({
+                        "filename": name,
+                        "size_bytes": size,
+                        "quant": crate::hub::quant_of_filename(name),
+                        "fits": (avail > 0 && *size > 0).then_some(*size as f64 * 1.15 <= avail as f64),
+                    })
+                })
                 .collect();
+            // what fits first, the largest (best quality) of those on top
+            gguf_files.sort_by_key(|f| (f["fits"] != json!(true), std::cmp::Reverse(f["size_bytes"].as_u64().unwrap_or(0))));
             let all_files: Vec<Value> = files
                 .into_iter()
                 .map(|(name, size)| json!({"filename": name, "size_bytes": size}))
@@ -575,12 +588,11 @@ pub(in crate::server) async fn hf_files(
     }
 }
 
-/// Downloads in progress (a pull or the first half of a model change); `model_progress` reports them.
-static ACTIVE_DOWNLOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(in crate::server) use super::studio_ops::{model_progress, pull_model};
 
 /// A catalog name, a Hugging Face reference (`owner/repo[:QUANT]`, `hf://owner/repo/file.gguf`) or a local file, resolved to a file
 /// on disk; downloads what is missing.
-fn resolve_model(spec: &str, quant: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
+pub(super) fn resolve_model(spec: &str, quant: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
     if std::path::Path::new(spec).is_file() {
         return Ok((std::path::PathBuf::from(spec), spec.to_owned()));
     }
@@ -594,31 +606,9 @@ fn resolve_model(spec: &str, quant: Option<&str>) -> Result<(std::path::PathBuf,
     } else {
         spec.to_owned()
     };
-    ACTIVE_DOWNLOADS.fetch_add(1, Ordering::SeqCst);
     crate::hub::clear_download_progress();
-    let path = crate::hub::resolve(&reference, None, false);
-    ACTIVE_DOWNLOADS.fetch_sub(1, Ordering::SeqCst);
-    Ok((path?, reference))
-}
-
-/// `GET /api/studio/models/progress`: the file that is being downloaded, if any.
-pub(in crate::server) async fn model_progress() -> Response {
-    let active = ACTIVE_DOWNLOADS.load(Ordering::SeqCst) > 0;
-    let job = pull_job().map(|j| {
-        json!({"model": j.model, "state": j.state, "attempt": j.attempt, "max_attempts": PULL_ATTEMPTS, "error": j.message, "model_path": j.path, "reference": j.reference})
-    });
-    match crate::hub::download_progress() {
-        Some(p) if active || !p.finished => Json(json!({
-            "active": active,
-            "file": p.file,
-            "written": p.written,
-            "total": p.total,
-            "mb_per_s": p.mb_per_s,
-            "job": job,
-        }))
-        .into_response(),
-        _ => Json(json!({"active": active, "job": job})).into_response(),
-    }
+    let path = crate::hub::resolve(&reference, None, false)?;
+    Ok((path, reference))
 }
 
 /// `POST /api/studio/models/local` with `{path}`: adds a GGUF file (or the GGUF files of a folder) from this computer to the models.
@@ -687,7 +677,8 @@ fn relaunch_args(model: &str) -> Vec<String> {
     relaunch_args_from(&std::env::args().skip(1).collect::<Vec<_>>(), model)
 }
 
-fn relaunch_args_from(given: &[String], model: &str) -> Vec<String> {
+/// The arguments without any model flag.
+pub(super) fn strip_model_args(given: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < given.len() {
@@ -700,6 +691,11 @@ fn relaunch_args_from(given: &[String], model: &str) -> Vec<String> {
             }
         }
     }
+    out
+}
+
+fn relaunch_args_from(given: &[String], model: &str) -> Vec<String> {
+    let mut out = strip_model_args(given);
     out.push("--model".into());
     out.push(model.to_owned());
     out
@@ -712,6 +708,18 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
         return api_error(StatusCode::BAD_REQUEST, "model specification is required");
     };
     let quant = body.get("quant").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    // options that cannot work are turned down before anything is downloaded
+    let requested = match super::studio_ops::requested_options(&body) {
+        Ok(requested) => requested,
+        Err(message) => return api_error(StatusCode::BAD_REQUEST, &message),
+    };
+    let current_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Some(options) = &requested {
+        if let Err(message) = options.check_with_device(&super::studio_ops::device_of(&current_args)) {
+            return api_error(StatusCode::BAD_REQUEST, &message);
+        }
+    }
+    crate::hub::set_download_stop(crate::hub::STOP_NONE);
     let resolved = tokio::task::spawn_blocking(move || resolve_model(&spec, quant.as_deref())).await;
     let path = match resolved {
         Ok(Ok((path, _))) => path,
@@ -731,104 +739,13 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
     let model = path.display().to_string();
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot find the server program: {e}")),
-    };
-    let started = std::process::Command::new(exe)
-        .args(relaunch_args(&model))
-        .env("FLLM_REPLACE_SERVER", "1")
-        // the desktop app watches its server through this pipe, so the new server keeps it
-        .stdin(if std::env::var_os("FLLM_EXIT_ON_STDIN_EOF").is_some() { std::process::Stdio::inherit() } else { std::process::Stdio::null() })
-        .spawn();
-    if let Err(e) = started {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot start the new server: {e}"));
+    let args = super::studio_ops::args_with_options(relaunch_args(&model), &model, requested);
+    if let Err(error) = super::studio_ops::spawn_replacement(args, false) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error);
     }
     crate::hub::remember_studio_model(&model);
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-        std::process::exit(0);
-    });
+    super::studio_ops::exit_after_reply();
     Json(json!({"status": "restarting", "model_path": model})).into_response()
-}
-
-/// The model download that runs in the background (one at a time). The page starts it and polls `model_progress`, so a long download is
-/// not tied to one HTTP request, and a dropped connection is resumed by the next attempt.
-#[derive(Clone, Default)]
-struct PullJob {
-    model: String,
-    /// `running`, `done` or `failed`
-    state: &'static str,
-    attempt: u32,
-    message: String,
-    path: String,
-    reference: String,
-}
-
-static PULL_JOB: std::sync::Mutex<Option<PullJob>> = std::sync::Mutex::new(None);
-
-fn pull_job() -> Option<PullJob> {
-    PULL_JOB.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-fn set_pull_job(job: PullJob) {
-    *PULL_JOB.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
-}
-
-/// Whether another try can help: the connection broke or timed out (the partial file stays and the next try continues it).
-fn worth_retrying(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    ["interrupted", "connection", "timed out", "timeout", "truncated", "error sending", "dns", "reset", "broken pipe", "unexpected eof", "hub request"]
-        .iter()
-        .any(|word| lower.contains(word))
-}
-
-const PULL_ATTEMPTS: u32 = 8;
-
-fn run_pull(spec: String, quant: Option<String>) {
-    let mut job = PullJob { model: spec.clone(), state: "running", ..PullJob::default() };
-    for attempt in 1..=PULL_ATTEMPTS {
-        job.attempt = attempt;
-        set_pull_job(job.clone());
-        match resolve_model(&spec, quant.as_deref()) {
-            Ok((path, reference)) => {
-                job.state = "done";
-                job.path = path.display().to_string();
-                job.reference = reference;
-                job.message.clear();
-                set_pull_job(job);
-                return;
-            }
-            Err(error) => {
-                job.message = error.clone();
-                if attempt == PULL_ATTEMPTS || !worth_retrying(&error) {
-                    break;
-                }
-                set_pull_job(job.clone());
-                std::thread::sleep(std::time::Duration::from_secs(u64::from(attempt.min(5)) * 3));
-            }
-        }
-    }
-    job.state = "failed";
-    set_pull_job(job);
-}
-
-/// `POST /api/studio/models/pull` with `{model, quant?}`: starts the download and answers at once; `model_progress` tells how it goes.
-pub(in crate::server) async fn pull_model(Json(body): Json<Value>) -> Response {
-    let Some(spec) = body.get("model").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
-        return api_error(StatusCode::BAD_REQUEST, "model specification is required");
-    };
-    let quant = body.get("quant").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
-    if pull_job().is_some_and(|job| job.state == "running") {
-        return api_error(StatusCode::CONFLICT, "a download is already running");
-    }
-    set_pull_job(PullJob { model: spec.to_owned(), state: "running", attempt: 1, ..PullJob::default() });
-    let spec = spec.to_owned();
-    if let Err(e) = std::thread::Builder::new().name("fllm-model-pull".into()).spawn(move || run_pull(spec, quant)) {
-        set_pull_job(PullJob { state: "failed", message: format!("cannot start the download: {e}"), ..PullJob::default() });
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "cannot start the download");
-    }
-    Json(json!({"status": "started"})).into_response()
 }
 
 pub(in crate::server) async fn delete_cached_model(Json(body): Json<Value>) -> Response {

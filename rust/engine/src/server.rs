@@ -325,6 +325,12 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models/progress", get(api::studio::model_progress))
         .route("/api/studio/models/cache", delete(api::studio::delete_cached_model))
         .route("/api/studio/models/local", post(api::studio::add_local_model).delete(api::studio::remove_local_model))
+        .route("/api/studio/models/unload", post(api::studio_ops::unload_model))
+        .route("/api/studio/models/downloads", post(api::studio_ops::download_action))
+        .route("/api/studio/pick-file", post(api::studio_ops::pick_file))
+        .route("/api/studio/settings", get(api::studio_ops::get_settings).post(api::studio_ops::update_settings))
+        .route("/api/studio/logs", get(api::studio_ops::logs))
+        .route("/api/studio/hf-readme", get(api::studio_ops::hf_readme))
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
         .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
         .route("/api/studio/agent/workspace", post(api::agent::workspace))
@@ -412,6 +418,7 @@ pub fn serve(
     let Built { state, router, worker_rx, metrics } = build(&runtime, tokenizer, config)?;
     let ready = state.ready.clone();
     let context = state.http.clone();
+    api::studio_ops::spawn_idle_unload(state.metrics.clone());
     // the router owns the last sender of the worker channel; the worker must see it disconnect to stop
     drop(state);
     if !context.security.auth_required() && !address.ip().is_loopback() {

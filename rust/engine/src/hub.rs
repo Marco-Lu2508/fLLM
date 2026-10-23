@@ -147,11 +147,49 @@ fn hub_home() -> PathBuf {
                 .join("huggingface")
         })
 }
+/// The models folder chosen in the Studio (it wins over the environment, and applies at once).
+static MODELS_DIR_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Where downloaded models are kept: the folder chosen in the Studio, `FLLM_MODELS_DIR`, `FLLM_CACHE`, `HF_HUB_CACHE`, or the
+/// Hugging Face cache of the user.
 pub fn cache_root() -> PathBuf {
+    if let Some(dir) = MODELS_DIR_OVERRIDE.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return dir;
+    }
+    env::var_os("FLLM_MODELS_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_cache_root)
+}
+
+/// The cache folder without the Studio's models-folder setting; the Studio's own small files live next to it.
+fn default_cache_root() -> PathBuf {
     env::var_os("FLLM_CACHE")
         .or_else(|| env::var_os("HF_HUB_CACHE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| hub_home().join("hub"))
+}
+
+/// The models folder when nothing is chosen in the Studio.
+pub fn default_models_dir() -> PathBuf {
+    default_cache_root()
+}
+
+/// Switches the models folder of this process (`None`: back to the default).
+pub fn set_models_dir(dir: Option<PathBuf>) {
+    *MODELS_DIR_OVERRIDE.write().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// The models folder saved by the Studio, if any.
+pub fn saved_models_dir() -> Option<String> {
+    studio_setting("models_dir").and_then(|v| v.as_str().map(str::to_owned)).filter(|s| !s.is_empty())
+}
+
+/// Applies the saved models folder to this process (called when the Studio starts).
+pub fn apply_saved_models_dir() {
+    if let Some(dir) = saved_models_dir() {
+        set_models_dir(Some(PathBuf::from(dir)));
+    }
 }
 fn token() -> Option<String> {
     env::var("HF_TOKEN")
@@ -967,6 +1005,11 @@ fn download_file(
                 output
                     .write_all(&buffer[..n])
                     .map_err(|e| format!("cannot write download: {e}"))?;
+                match DOWNLOAD_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                    STOP_PAUSE => return Err(DOWNLOAD_PAUSED.into()),
+                    STOP_CANCEL => return Err(DOWNLOAD_CANCELLED.into()),
+                    _ => {}
+                }
                 received = received
                     .checked_add(n as u64)
                     .ok_or("download byte count overflow")?;
@@ -1025,6 +1068,24 @@ fn download_file(
     }
     fs::remove_file(partial).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Asks the download that is running to stop (checked after every block it writes; the partial file stays for resuming).
+pub const STOP_NONE: u8 = 0;
+pub const STOP_PAUSE: u8 = 1;
+pub const STOP_CANCEL: u8 = 2;
+pub const DOWNLOAD_PAUSED: &str = "download paused; the finished part is kept";
+pub const DOWNLOAD_CANCELLED: &str = "download cancelled; the finished part is kept";
+static DOWNLOAD_STOP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(STOP_NONE);
+
+/// Sets what the running download should do next: `STOP_NONE` to go on, `STOP_PAUSE` or `STOP_CANCEL` to end it.
+pub fn set_download_stop(kind: u8) {
+    DOWNLOAD_STOP.store(kind, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the running download has been asked to do (`STOP_NONE`, `STOP_PAUSE` or `STOP_CANCEL`).
+pub fn download_stop() -> u8 {
+    DOWNLOAD_STOP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The file a download is writing right now, for a UI that polls (the Studio shows it as a progress bar).
@@ -1505,20 +1566,157 @@ pub fn repository_files(repository: &str) -> Result<Vec<(String, u64)>, String> 
     Ok(files)
 }
 
+/// The model card (README.md) of a repository, as text.
+pub fn repository_readme(repository: &str) -> Result<String, String> {
+    let parts: Vec<&str> = repository.split('/').collect();
+    if parts.len() != 2 || parts.iter().any(|p| p.is_empty() || p.contains(['?', '#', '\\'])) {
+        return Err("repository must be owner/repo".into());
+    }
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("fllm-rust/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut url = reqwest::Url::parse("https://huggingface.co").map_err(|e| e.to_string())?;
+    {
+        let mut seg = url.path_segments_mut().map_err(|_| "invalid Hub URL")?;
+        seg.extend([parts[0], parts[1], "raw", "main", "README.md"]);
+    }
+    let response = client.get(url).header(reqwest::header::RANGE, "bytes=0-65535");
+    let response = match token() {
+        Some(t) => response.bearer_auth(t),
+        None => response,
+    }
+    .send()
+    .map_err(|e| format!("cannot read the model card: {}", e.without_url()))?;
+    if !response.status().is_success() {
+        return Err(format!("this repository has no model card (HTTP {})", response.status().as_u16()));
+    }
+    let bytes = response.bytes().map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(65536)]).into_owned())
+}
+
+/// The start of a model card as plain text: no front matter, no images, no HTML tags, no headings marks; at most `max` characters.
+pub fn readme_summary(text: &str, max: usize) -> String {
+    let mut body = text.trim_start_matches('\u{feff}').trim_start();
+    if let Some(rest) = body.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            body = rest[end + 4..].trim_start();
+        }
+    }
+    let mut kept = Vec::new();
+    let mut in_code = false;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || line.is_empty() || line.starts_with("![") || line.starts_with('|') || line.starts_with("<!--") {
+            if line.is_empty() && !kept.is_empty() && kept.last() != Some(&String::new()) {
+                kept.push(String::new());
+            }
+            continue;
+        }
+        // drop HTML tags such as <p align="center"> and <img ...>
+        let mut clean = String::new();
+        let mut in_tag = false;
+        for c in line.trim_start_matches('#').trim().chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' if in_tag => in_tag = false,
+                _ if !in_tag => clean.push(c),
+                _ => {}
+            }
+        }
+        let clean = clean.trim().to_owned();
+        if !clean.is_empty() {
+            kept.push(clean);
+        }
+    }
+    let joined = kept.join("\n");
+    let joined = joined.trim();
+    if joined.chars().count() <= max {
+        return joined.to_owned();
+    }
+    let cut: String = joined.chars().take(max).collect();
+    format!("{}...", cut.trim_end())
+}
+
+/// The quantization named in a GGUF file name (`model-Q4_K_M.gguf` gives `Q4_K_M`), upper case; `None` when it names none.
+pub fn quant_of_filename(name: &str) -> Option<String> {
+    let stem = name.rsplit('/').next().unwrap_or(name);
+    let stem = stem.strip_suffix(".gguf").or_else(|| stem.strip_suffix(".GGUF")).unwrap_or(stem);
+    stem.split(['-', '.']).map(str::to_ascii_uppercase).find(|token| {
+        let t = token.strip_prefix('I').unwrap_or(token);
+        let quant_like = t.starts_with('Q') && t.chars().nth(1).is_some_and(|c| c.is_ascii_digit());
+        let plain = matches!(token.as_str(), "F16" | "F32" | "BF16" | "MXFP4" | "FP16");
+        (quant_like && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) || plain
+    })
+}
+
+/// The folder of the Studio's small files (`studio.json`, the lists of added models and per-model options). It does not move with the
+/// models folder setting.
+fn studio_dir() -> PathBuf {
+    let base = default_cache_root();
+    base.parent().unwrap_or(&base).join("fllm")
+}
+
 fn studio_file() -> PathBuf {
-    let base = cache_root();
-    base.parent().unwrap_or(&base).join("fllm").join("studio.json")
+    studio_dir().join("studio.json")
+}
+
+/// A small data file of the Studio, next to `studio.json`.
+pub fn studio_data_file(name: &str) -> PathBuf {
+    studio_dir().join(name)
+}
+
+fn read_studio() -> serde_json::Map<String, Value> {
+    fs::read_to_string(studio_file())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_studio(settings: &serde_json::Map<String, Value>) {
+    let file = studio_file();
+    if let Some(dir) = file.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(file, Value::Object(settings.clone()).to_string());
+}
+
+/// One value of `studio.json`.
+pub fn studio_setting(key: &str) -> Option<Value> {
+    read_studio().get(key).cloned()
+}
+
+/// Sets (or, with `Null`, removes) one value of `studio.json` and keeps the others.
+pub fn set_studio_setting(key: &str, value: Value) {
+    let mut settings = read_studio();
+    if value.is_null() {
+        settings.remove(key);
+    } else {
+        settings.insert(key.to_owned(), value);
+    }
+    write_studio(&settings);
+}
+
+/// Minutes of inactivity after which the Studio unloads the model (0: never).
+pub fn idle_unload_minutes() -> u64 {
+    studio_setting("idle_unload_minutes").and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
 /// The model the Studio was last started or switched to (`fllm-rs studio` starts with it when no `--model` is given).
 pub fn last_studio_model() -> Option<String> {
-    let text = fs::read_to_string(studio_file()).ok()?;
-    serde_json::from_str::<Value>(&text).ok()?.get("last_model")?.as_str().map(str::to_owned)
+    studio_setting("last_model")?.as_str().map(str::to_owned)
 }
 
 /// GGUF files the user added from anywhere on the computer (they stay where they are). The list is a small file next to `studio.json`.
 fn local_models_file() -> PathBuf {
-    studio_file().with_file_name("local-models.json")
+    studio_data_file("local-models.json")
 }
 
 fn read_local_models() -> Vec<String> {
@@ -1602,15 +1800,11 @@ pub fn remove_local_model(path: &str) {
 }
 
 pub fn forget_studio_model() {
-    let _ = fs::remove_file(studio_file());
+    set_studio_setting("last_model", Value::Null);
 }
 
 pub fn remember_studio_model(model: &str) {
-    let file = studio_file();
-    if let Some(dir) = file.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let _ = fs::write(file, serde_json::json!({"last_model": model}).to_string());
+    set_studio_setting("last_model", Value::String(model.to_owned()));
 }
 
 /// Search the Hub for repositories that contain GGUF files, most downloaded first.
@@ -1768,5 +1962,29 @@ mod tests {
             select_unindexed_weight(&["pytorch_model.bin"]).unwrap(),
             "pytorch_model.bin"
         );
+    }
+}
+
+#[cfg(test)]
+mod studio_tests {
+    use super::*;
+
+    #[test]
+    fn quantization_is_read_from_the_file_name() {
+        assert_eq!(quant_of_filename("Qwen3-8B-Q4_K_M.gguf").as_deref(), Some("Q4_K_M"));
+        assert_eq!(quant_of_filename("sub/dir/model.IQ3_XS.gguf").as_deref(), Some("IQ3_XS"));
+        assert_eq!(quant_of_filename("gemma-3-12b-it-UD-Q8_0-00001-of-00002.gguf").as_deref(), Some("Q8_0"));
+        assert_eq!(quant_of_filename("model-bf16.gguf").as_deref(), Some("BF16"));
+        assert_eq!(quant_of_filename("Qwen3-8B.gguf"), None);
+    }
+
+    #[test]
+    fn the_model_card_summary_skips_front_matter_and_markup() {
+        let card = "---\nlicense: mit\ntags:\n- gguf\n---\n# My Model\n\n![logo](x.png)\n<p align=\"center\"><img src=\"a\"></p>\nA small model for chat.\n\n```sh\nrun it\n```\n| a | b |\nSecond paragraph.";
+        let text = readme_summary(card, 600);
+        assert!(!text.contains("license") && !text.contains("logo") && !text.contains("run it") && !text.contains('<'), "{text}");
+        assert!(text.starts_with("My Model") && text.contains("A small model for chat.") && text.contains("Second paragraph."), "{text}");
+        let long = readme_summary(&"word ".repeat(400), 100);
+        assert!(long.chars().count() <= 104 && long.ends_with("..."));
     }
 }

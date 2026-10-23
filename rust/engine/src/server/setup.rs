@@ -44,6 +44,11 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/models/progress", get(api::studio::model_progress))
         .route("/api/studio/models/cache", delete(api::studio::delete_cached_model))
         .route("/api/studio/models/local", post(api::studio::add_local_model).delete(api::studio::remove_local_model))
+        .route("/api/studio/models/downloads", post(api::studio_ops::download_action))
+        .route("/api/studio/pick-file", post(api::studio_ops::pick_file))
+        .route("/api/studio/settings", get(api::studio_ops::get_settings).post(api::studio_ops::update_settings))
+        .route("/api/studio/logs", get(api::studio_ops::logs))
+        .route("/api/studio/hf-readme", get(api::studio_ops::hf_readme))
         .layer(axum::middleware::from_fn_with_state(context, http::layer))
 }
 
