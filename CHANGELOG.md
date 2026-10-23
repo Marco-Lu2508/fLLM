@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Studio Code: sub-agents that run in parallel (nested cards, read-only by default), context compaction (automatic at about 70 percent and /compact), ask_user questions, /init, custom slash commands from `.fllm/commands/*.md`, /rewind and /resume with automatic per-folder sessions, persistent allow/deny permission rules, a background jobs panel, MCP tools, multi_edit and web tools support, constrained tool-call output, and nicer diffs and long-output handling.
 - Studio: Hugging Face sign-in with an access token (private and gated models), a check for a newer release with download and start of the installer, and curated model suggestions that fit the memory (and the processor, without a discrete graphics card), your own GGUF files (a path or a folder) in the model list, and a hardware page that names the device in use.
 
 ### Fixed
