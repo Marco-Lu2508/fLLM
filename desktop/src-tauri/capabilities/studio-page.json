@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "studio-page",
+  "description": "The Studio page (served by the local server on the loopback address) may call the few commands of the Desktop app settings, nothing else.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*"]
+  },
+  "permissions": [
+    "allow-get-desktop-settings",
+    "allow-set-keep-in-tray",
+    "allow-set-autostart",
+    "allow-open-log-folder",
+    "allow-restart-server"
+  ]
+}

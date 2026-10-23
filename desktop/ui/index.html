@@ -4,10 +4,20 @@
 <style>
   html, body { height: 100%; margin: 0; }
   body { display: flex; align-items: center; justify-content: center; font: 15px system-ui, sans-serif; background: #15130f; color: #d9d2c3; }
-  main { text-align: center; }
+  main { text-align: center; max-width: 560px; padding: 0 24px; }
   h1 { font-size: 28px; margin: 0 0 8px; }
 </style>
 <main>
   <h1>fLLM</h1>
   <p id="note">Starting ...</p>
 </main>
+<script>
+  // The app passes a message in the fragment of the address (for example when the server has stopped).
+  function show() {
+    var text = ''
+    try { text = decodeURIComponent(location.hash.slice(1)) } catch (e) {}
+    if (text) document.getElementById('note').textContent = text
+  }
+  show()
+  addEventListener('hashchange', show)
+</script>

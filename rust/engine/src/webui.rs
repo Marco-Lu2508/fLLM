@@ -21,6 +21,7 @@ const SCRIPT: [&str; 10] = [
     include_str!("webui/mcp.js"),
     include_str!("webui/models.js"),
     include_str!("webui/listeners-panels.js"),
+    include_str!("webui/desktop.js"),
     include_str!("webui/boot.js"),
 ];
 

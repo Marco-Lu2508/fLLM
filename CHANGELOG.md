@@ -14,6 +14,8 @@ behaviour between versions).
 - Studio model management: advanced load options (context length, GPU layers, threads, conversation memory type, parallel chats) remembered per model and shown on the loaded-model card, Unload and "unload after N idle minutes", native file and folder dialogs (Browse), a download queue with pause, resume, cancel, speed and time left that survives page reloads, a setting for the models folder, model card summaries and quantization and fit hints in the Hugging Face file list, a Logs page, a speed test, and plainer wording across Settings.
 - Studio: Tools (MCP) in Settings. The server starts Model Context Protocol servers (stdio) from `mcp.json`, lists their tools and calls them (`/api/studio/mcp/*`).
 
+- Desktop app: one window only (a second start focuses the first), a tray icon with a menu, optional keep running in the tray and start at sign-in, remembered window size and position, a clear message when the server stops, and a Desktop app section in the Studio settings (open log folder, restart server).
+
 ### Fixed
 - Studio: a model that cannot be loaded (for example a Gemma 4 file) no longer ends the server and leaves an empty window: the Models page opens and shows the reason. Models the engine cannot read are turned down before a switch. The desktop app waits for a slow model load and shows how long it has been loading. The list of downloaded models is no longer taken from the browser cache. The Gemma 4 entries left the catalog (not supported yet).
 
