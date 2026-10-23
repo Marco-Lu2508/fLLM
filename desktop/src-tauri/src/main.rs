@@ -1,24 +1,48 @@
 //! The fLLM desktop app: a window around the Studio. The server is the `fllm-rs` program that is installed next to this one; the window
 //! shows it as soon as it answers. When the app ends, the pipe on the standard input of the server closes and the server stops with it.
+//! Around the window: one instance only, a tray icon, an optional start at sign-in, the remembered window place, and a few commands
+//! the Studio page may call (see `capabilities/studio-page.json`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{Manager, RunEvent};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, RunEvent, State, Url, WindowEvent};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_window_state::StateFlags;
 
 /// The page keeps its chats per address, so the app prefers the same port every time.
 const FIRST_PORT: u16 = 47821;
+/// Given to the program when the system starts it at sign-in.
+const AUTOSTART_ARG: &str = "--autostarted";
 
 struct Server {
     child: Child,
     _pipe: Option<ChildStdin>,
 }
 
-#[derive(Default)]
-struct Running(Mutex<Option<Server>>);
+/// What the app keeps in `settings.json` in its config folder.
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
+struct Settings {
+    keep_in_tray: bool,
+}
+
+struct Shell {
+    port: u16,
+    /// The address of the loading page (taken from the window at the start).
+    loading_url: Mutex<Option<Url>>,
+    running: Mutex<Option<Server>>,
+    /// Counts the starts of the server, so an older wait or watch ends when a newer start has begun.
+    generation: AtomicU64,
+    settings: Mutex<Settings>,
+}
 
 fn free_port() -> u16 {
     (FIRST_PORT..FIRST_PORT + 40)
@@ -32,6 +56,26 @@ fn server_program() -> PathBuf {
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn settings_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|dir| dir.join("settings.json"))
+}
+
+fn load_settings(app: &AppHandle) -> Settings {
+    settings_file(app)
+        .and_then(|file| std::fs::read(file).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let file = settings_file(app).ok_or("There is no config folder.")?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(file, text).map_err(|e| e.to_string())
 }
 
 /// The server writes what it prints into `server.log` in the log folder of the app, so a problem can be looked at afterwards.
@@ -62,62 +106,252 @@ fn start_server(port: u16, log_dir: Option<PathBuf>) -> Result<Server, String> {
     Ok(Server { child, _pipe: pipe })
 }
 
+fn stop_server(app: &AppHandle) {
+    if let Some(mut server) = app.state::<Shell>().running.lock().unwrap().take() {
+        drop(server._pipe.take());
+        let _ = server.child.kill();
+        let _ = server.child.wait();
+    }
+}
+
+/// Shows the main window again (tray, second start of the app).
+fn show_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Shows the loading page with a message; the page reads the message from the fragment of its address.
+fn show_loading(app: &AppHandle, message: &str) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let Some(mut url) = app.state::<Shell>().loading_url.lock().unwrap().clone() else { return };
+    let encoded: String = message
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    url.set_fragment(Some(&encoded));
+    let _ = window.navigate(url);
+}
+
 /// Waits until the server answers. A model is loaded before the server listens, which takes a while for a big one, so the wait is long;
-/// it ends early when the server program has stopped.
-fn wait_until_answers(port: u16, handle: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
+/// it ends early when the server program has stopped or a newer start has begun.
+fn wait_until_answers(app: &AppHandle, generation: u64) -> Result<(), String> {
+    let shell = app.state::<Shell>();
+    let address = SocketAddr::from(([127, 0, 0, 1], shell.port));
     let started = Instant::now();
     let mut last_note = Duration::ZERO;
     while started.elapsed() < Duration::from_secs(30 * 60) {
+        if shell.generation.load(Ordering::SeqCst) != generation {
+            return Err(String::new());
+        }
         if TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok() {
             return Ok(());
         }
-        if let Some(server) = handle.state::<Running>().0.lock().unwrap().as_mut() {
+        if let Some(server) = shell.running.lock().unwrap().as_mut() {
             if let Ok(Some(status)) = server.child.try_wait() {
-                return Err(format!("The server stopped right after the start ({status}). Its log is in the log folder of the app (server.log)."));
+                return Err(stopped_message(&format!("The server stopped right after the start ({status}).")));
             }
         }
         if started.elapsed() - last_note >= Duration::from_secs(2) && started.elapsed() > Duration::from_secs(6) {
             last_note = started.elapsed();
-            let _ = window.eval(&format!(
-                "var n=document.getElementById('note'); if(n) n.textContent='Loading the last model ... {} s'",
-                started.elapsed().as_secs()
-            ));
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval(&format!(
+                    "var n=document.getElementById('note'); if(n) n.textContent='Loading the last model ... {} s'",
+                    started.elapsed().as_secs()
+                ));
+            }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
     Err("The server did not start in time.".to_owned())
 }
+
+fn stopped_message(what: &str) -> String {
+    format!("{what} Choose \"Restart server\" in the menu of the tray icon, or start the app again. The log is in the log folder of the app (server.log).")
+}
+
+/// Starts (or restarts) the server, then shows its page once it answers, and shows the loading page again if the server stops.
+fn launch(app: &AppHandle) {
+    let shell = app.state::<Shell>();
+    let generation = shell.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    stop_server(app);
+    let port = shell.port;
+    let started = start_server(port, app.path().app_log_dir().ok());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let shell = app.state::<Shell>();
+        let outcome = started.and_then(|server| {
+            *shell.running.lock().unwrap() = Some(server);
+            wait_until_answers(&app, generation)
+        });
+        if shell.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        if let Err(message) = outcome {
+            show_loading(&app, &message);
+            return;
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            if let Ok(url) = format!("http://127.0.0.1:{port}/").parse::<Url>() {
+                let _ = window.navigate(url);
+            }
+        }
+        // watch the server: if it ends by itself, say so
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if shell.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            let ended = shell.running.lock().unwrap().as_mut().and_then(|s| s.child.try_wait().ok().flatten());
+            if let Some(status) = ended {
+                shell.running.lock().unwrap().take();
+                show_loading(&app, &stopped_message(&format!("The server has stopped ({status}).")));
+                return;
+            }
+        }
+    });
+}
+
+fn open_folder(path: &std::path::Path) -> Result<(), String> {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(program).arg(path).spawn().map(|_| ()).map_err(|e| format!("The folder could not be opened: {e}"))
+}
+
+fn open_logs(app: &AppHandle) -> Result<(), String> {
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    open_folder(&dir)
+}
+
+// ---- the commands the Studio page may call ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSettings {
+    keep_in_tray: bool,
+    autostart: bool,
+    log_folder: String,
+    config_folder: String,
+}
+
+#[tauri::command]
+fn get_desktop_settings(app: AppHandle, shell: State<Shell>) -> Result<DesktopSettings, String> {
+    let folder = |dir: tauri::Result<PathBuf>| dir.map(|d| d.display().to_string()).unwrap_or_default();
+    Ok(DesktopSettings {
+        keep_in_tray: shell.settings.lock().unwrap().keep_in_tray,
+        autostart: app.autolaunch().is_enabled().map_err(|e| e.to_string())?,
+        log_folder: folder(app.path().app_log_dir()),
+        config_folder: folder(app.path().app_config_dir()),
+    })
+}
+
+#[tauri::command]
+fn set_keep_in_tray(app: AppHandle, shell: State<Shell>, value: bool) -> Result<(), String> {
+    let mut settings = shell.settings.lock().unwrap();
+    settings.keep_in_tray = value;
+    save_settings(&app, &settings)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, value: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if value { manager.enable() } else { manager.disable() }.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_log_folder(app: AppHandle) -> Result<(), String> {
+    open_logs(&app)
+}
+
+#[tauri::command]
+fn restart_server(app: AppHandle) {
+    show_loading(&app, "Restarting the server ...");
+    launch(&app);
+}
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open fLLM", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "Restart server", true, None::<&str>)?;
+    let logs = MenuItem::with_id(app, "logs", "Open log folder", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &restart, &logs, &quit])?;
+    let mut tray = TrayIconBuilder::new()
+        .tooltip("fLLM")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main(app),
+            "restart" => restart_server(app.clone()),
+            "logs" => {
+                let _ = open_logs(app);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 fn main() {
     let app = tauri::Builder::default()
-        .manage(Running::default())
+        // must be the first plugin: a second start only brings the first window to the front
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::all() - StateFlags::VISIBLE).build())
+        .manage(Shell {
+            port: free_port(),
+            loading_url: Mutex::new(None),
+            running: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            settings: Mutex::new(Settings::default()),
+        })
+        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, restart_server])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && window.state::<Shell>().settings.lock().unwrap().keep_in_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
-            let port = free_port();
-            let started = start_server(port, app.path().app_log_dir().ok());
-            let window = app.get_webview_window("main").expect("main window");
-            let waiter = window.clone();
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                let outcome = started.and_then(|server| {
-                    *handle.state::<Running>().0.lock().unwrap() = Some(server);
-                    wait_until_answers(port, &handle, &waiter)
-                });
-                let script = match outcome {
-                    Ok(()) => format!("location.replace('http://127.0.0.1:{port}/')"),
-                    Err(message) => format!("document.getElementById('note').textContent = {message:?}"),
-                };
-                let _ = window.eval(&script);
-            });
+            let shell = app.state::<Shell>();
+            *shell.settings.lock().unwrap() = load_settings(&handle);
+            let window = app.get_webview_window("main").expect("main window");
+            *shell.loading_url.lock().unwrap() = window.url().ok();
+            // started by the system at sign-in and kept in the tray: stay out of the way
+            if std::env::args().any(|a| a == AUTOSTART_ARG) && shell.settings.lock().unwrap().keep_in_tray {
+                let _ = window.hide();
+            }
+            if let Err(e) = build_tray(app) {
+                eprintln!("The tray icon could not be created: {e}");
+            }
+            launch(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building the fLLM app");
     app.run(|handle, event| {
         if let RunEvent::Exit = event {
-            if let Some(mut server) = handle.state::<Running>().0.lock().unwrap().take() {
-                drop(server._pipe.take());
-                let _ = server.child.kill();
-            }
+            handle.state::<Shell>().generation.fetch_add(1, Ordering::SeqCst);
+            stop_server(handle);
         }
     });
 }
