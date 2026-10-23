@@ -5,7 +5,7 @@
     const ROOT = 'root';
     const uid = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
     const PRESET_KEY = 'fllm.studio.presets.v1';
-    const MAX_TEXT_ATTACHMENT = 400 * 1024;
+    const MAX_TEXT_ATTACHMENT = 20 * 1024 * 1024;
     const PASTE_AS_FILE = 6000;
 
     function newThread(title) {
@@ -299,6 +299,7 @@
         return `
           <div class="msg-user-wrap" data-node="${node.id}">
             <div class="msg-user-bubble">${attachmentsHtml(node)}${escapeHtml(node.content)}</div>
+            ${ragChipsHtml(node)}
             <div class="msg-actions-bar">
               ${branchNav(t, node)}
               <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy">${svgIcon('copy')}</button>
@@ -311,6 +312,7 @@
         <div class="msg-assistant-wrap" data-node="${node.id}">
           <div class="msg-assistant-body">${assistantInner(node)}</div>
           ${logprobsHtml(node)}
+          ${ragSourcesHtml(t, node)}
           <div class="msg-actions-bar">
             ${branchNav(t, node)}
             <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy the answer">${svgIcon('copy')}</button>
@@ -335,6 +337,7 @@
       const t = currentThread();
       $('menuPin').textContent = t && t.pinned ? 'Unpin' : 'Pin';
       updateContextMeter();
+      renderAttachments();
     }
 
     const estimateTokens = (text) => Math.ceil(String(text || '').length / 3.6);
@@ -343,7 +346,8 @@
       if (!t) return 0;
       const path = pathOf(t);
       let total = estimateTokens($('txtSystemPrompt').value) + 8;
-      for (const n of path) total += estimateTokens(n.content) + 6 + (n.images ? n.images.length * 256 : 0) + (n.files || []).reduce((s, f) => s + estimateTokens(f.text), 0);
+      const lastUser = path.filter((n) => n.role === 'user').pop();
+      for (const n of path) total += estimateTokens(n.content) + 6 + (n.images ? n.images.length * 256 : 0) + (n.files || []).reduce((s, f) => s + estimateTokens(f.text), 0) + (n === lastUser ? ragTokens(n) : 0);
       return total;
     }
 
@@ -388,9 +392,10 @@
     }
 
     // ---- building the request ------------------------------------------------
-    function userContent(node) {
+    function userContent(node, withContext) {
       const files = (node.files || []).map((f) => `File ${f.name}:\n\`\`\`\n${f.text}\n\`\`\`\n\n`).join('');
-      const text = files + (node.content || '');
+      const context = withContext ? ragPrefix(node) : '';
+      const text = context + files + (node.content || (context ? 'Summarize the key points.' : ''));
       if (node.images && node.images.length) {
         const parts = [{ type: 'text', text: text || 'Describe the image.' }];
         node.images.forEach((url) => parts.push({ type: 'image_url', image_url: { url } }));
@@ -403,10 +408,12 @@
       const out = [];
       const system = $('txtSystemPrompt').value.trim();
       if (system) out.push({ role: 'system', content: system });
-      for (const n of pathOf(t)) {
-        out.push({ role: n.role, content: n.role === 'user' ? userContent(n) : (n.content || '') });
-        if (n.id === upToNodeId) break;
-      }
+      const path = pathOf(t);
+      const end = upToNodeId ? path.findIndex((n) => n.id === upToNodeId) : -1;
+      const used = end >= 0 ? path.slice(0, end + 1) : path;
+      // passages from documents and the web only travel with the newest question
+      const lastUser = used.filter((n) => n.role === 'user').pop();
+      for (const n of used) out.push({ role: n.role, content: n.role === 'user' ? userContent(n, n === lastUser) : (n.content || '') });
       return out;
     }
 
@@ -569,8 +576,12 @@
       const images = state.attachments.filter((a) => a.kind === 'image').map((a) => a.dataUrl);
       const files = state.attachments.filter((a) => a.kind === 'text').map((a) => ({ name: a.name, text: a.text }));
       const userNode = addChild(t, parent, { role: 'user', content: text, images: images.length ? images : undefined, files: files.length ? files : undefined });
+      const newDocs = state.attachments.filter((a) => a.kind === 'doc');
+      if (newDocs.length) { ragStoreDocs(t, newDocs); userNode.ragFresh = true; }
       state.attachments = [];
       renderAttachments();
+      renderChatArea();
+      if (!(await ragPrepare(t, userNode))) return;
       await generateReply(t, userNode.id);
     }
 
@@ -585,7 +596,8 @@
       const t = currentThread();
       const old = t?.nodes[nodeId];
       if (!t || !old || state.abortController) return;
-      const copy = addChild(t, old.parent, { role: 'user', content: newText, images: old.images, files: old.files });
+      const copy = addChild(t, old.parent, { role: 'user', content: newText, images: old.images, files: old.files, ragFresh: old.ragFresh });
+      if (!(await ragPrepare(t, copy))) return;
       await generateReply(t, copy.id);
     }
 
@@ -623,9 +635,9 @@
 
     // ---- attachments ------------------------------------------------------------
     function renderAttachments() {
-      $('attachmentsRow').innerHTML = state.attachments.map((a, i) => (a.kind === 'image'
-        ? `<div class="att-item"><img src="${a.dataUrl}" alt="${escapeHtml(a.name)}"><button class="att-remove" data-rm-att="${i}" title="Entfernen">✕</button></div>`
-        : `<div class="file-chip removable" title="${escapeHtml(a.name)} (${formatBytes(a.size)})">${svgIcon('file')}<span>${escapeHtml(a.name)}</span><button class="att-x" data-rm-att="${i}" title="Entfernen">✕</button></div>`)).join('');
+      $('attachmentsRow').innerHTML = ragDocsChipsHtml() + state.attachments.map((a, i) => (a.kind === 'image'
+        ? `<div class="att-item"><img src="${a.dataUrl}" alt="${escapeHtml(a.name)}"><button class="att-remove" data-rm-att="${i}" title="Remove">✕</button></div>`
+        : `<div class="file-chip removable" title="${escapeHtml(a.name)} (${formatBytes(a.size)})${a.kind === 'doc' ? ': too long for the context, the passages that match your question are used' : ''}">${svgIcon('file')}<span>${escapeHtml(a.name)}</span><button class="att-x" data-rm-att="${i}" title="Remove">✕</button></div>`)).join('');
     }
 
     function shrinkImage(file) {
@@ -654,14 +666,18 @@
       for (const file of Array.from(fileList || [])) {
         if (file.type.startsWith('image/')) {
           try { state.attachments.push({ kind: 'image', name: file.name || 'Image', dataUrl: await shrinkImage(file) }); } catch { toast(`${file.name}: the image could not be read`); }
-        } else if (/\.pdf$/i.test(file.name)) {
-          toast('fLLM cannot read PDF files yet. Paste the text or use a text file.');
+        } else if (RAG_SERVER_EXT.test(file.name)) {
+          toast(`Reading ${file.name}...`);
+          try {
+            const doc = await ragExtract(file);
+            ragPlace(file.name, doc.text, file.size, { pages: doc.pages, truncated: doc.truncated });
+          } catch (e) { toast(e.message); }
         } else if (file.size > MAX_TEXT_ATTACHMENT) {
           toast(`${file.name} is too large (more than ${formatBytes(MAX_TEXT_ATTACHMENT)}).`);
         } else {
           const text = await file.text();
           if (text.includes('\u0000')) { toast(`${file.name} is not a text file.`); continue; }
-          state.attachments.push({ kind: 'text', name: file.name, text, size: file.size });
+          ragPlace(file.name, text, file.size);
         }
       }
       renderAttachments();
@@ -934,7 +950,7 @@
       const text = e.clipboardData?.getData('text/plain') || '';
       if (text.length > PASTE_AS_FILE) {
         e.preventDefault();
-        state.attachments.push({ kind: 'text', name: 'Pasted text.txt', text, size: text.length });
+        ragPlace('Pasted text.txt', text, text.length);
         renderAttachments();
         toast('Long text attached as a file');
       }

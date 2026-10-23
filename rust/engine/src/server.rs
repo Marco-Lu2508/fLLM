@@ -314,6 +314,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/hardware", get(api::studio::hardware))
         .route("/api/studio/hf-account", get(api::studio::hf_account).post(api::studio::hf_login))
         .route("/api/studio/open-url", post(api::studio::open_url))
+        .route("/api/studio/extract", post(api::extract::extract).layer(DefaultBodyLimit::max(api::extract::MAX_UPLOAD_BYTES)))
         .route("/api/studio/update", get(api::studio::update_status))
         .route("/api/studio/update/install", post(api::studio::update_install))
         .route("/api/studio/selftest-cpu", post(api::studio::selftest_cpu))

@@ -35,6 +35,7 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/hardware", get(api::studio::hardware))
         .route("/api/studio/hf-account", get(api::studio::hf_account).post(api::studio::hf_login))
         .route("/api/studio/open-url", post(api::studio::open_url))
+        .route("/api/studio/extract", post(api::extract::extract).layer(axum::extract::DefaultBodyLimit::max(api::extract::MAX_UPLOAD_BYTES)))
         .route("/api/studio/update", get(api::studio::update_status))
         .route("/api/studio/update/install", post(api::studio::update_install))
         .route("/api/studio/mcp/servers", get(api::mcp::servers).post(api::mcp::upsert).delete(api::mcp::remove))

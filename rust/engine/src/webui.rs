@@ -15,6 +15,7 @@ const SCRIPT: [&str; 10] = [
     include_str!("webui/markdown.js"),
     include_str!("webui/sampler.js"),
     include_str!("webui/chat.js"),
+    include_str!("webui/rag.js"),
     include_str!("webui/code.js"),
     include_str!("webui/panels.js"),
     include_str!("webui/mcp.js"),
