@@ -556,6 +556,11 @@
               <span>Claude Code & SDKs</span>
             </button>
 
+            <button class="settings-nav-btn" data-spane="mcp">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.2-.6-.6-2.2z"/></svg>
+              <span>Tools (MCP)</span>
+            </button>
+
             <div class="settings-section-label">Model Providers</div>
             <button class="settings-nav-btn" data-spane="provider-fllm">
               <svg viewBox="0 0 24 24" class="icon"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
@@ -914,6 +919,41 @@
                   <div class="code-card-header"><span id="sdkSnippetLang">bash</span><button class="btn btn-xs btn-ghost" id="btnCopySdkSnippet">Copy</button></div>
                   <pre id="preSdkSnippet"></pre>
                 </div>
+              </div>
+            </div>
+
+            <!-- MCP tool servers -->
+            <div class="settings-pane" id="spane-mcp">
+              <div class="app-card">
+                <div class="app-card-title">Tools (MCP)</div>
+                <p class="app-item-desc" style="margin-bottom:8px;">Model Context Protocol servers give the model extra tools (files, search, databases, ...). Each server is a program that fLLM starts on this computer.</p>
+                <p class="app-item-desc" style="margin-bottom:12px;color:var(--destructive,#d33);"><strong>Warning:</strong> an MCP server runs with your user rights and can read, change and delete what you can. Only add servers you trust, and check the command and arguments.</p>
+                <div id="mcpServerList"></div>
+              </div>
+              <div class="app-card">
+                <div class="app-card-title" id="mcpFormTitle">Add a server</div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Name</div>
+                  <input type="text" id="mcpName" class="ui-input mono" placeholder="files" autocomplete="off">
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Command</div>
+                  <input type="text" id="mcpCommand" class="ui-input mono" placeholder="npx" autocomplete="off">
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Arguments (one per line)</div>
+                  <textarea id="mcpArgs" class="ui-input mono" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/path/to/folder"></textarea>
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Environment variables (NAME=value, one per line)</div>
+                  <textarea id="mcpEnv" class="ui-input mono" rows="3" placeholder="API_KEY=..."></textarea>
+                  <div class="app-item-desc" id="mcpEnvHint"></div>
+                </div>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                  <button class="btn btn-sm btn-primary" id="btnMcpSave">Save and start</button>
+                  <button class="btn btn-sm btn-ghost" id="btnMcpCancel">Clear</button>
+                </div>
+                <div class="app-item-desc" id="mcpFileInfo" style="margin-top:8px;"></div>
               </div>
             </div>
 
