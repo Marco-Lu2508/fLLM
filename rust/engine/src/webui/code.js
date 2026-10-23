@@ -13,6 +13,7 @@
     const CODE_RULES_KEY = 'fllm.studio.coderules.v1';
     const INSTRUCTION_FILES = ['FLLM.md', 'AGENTS.md', 'CLAUDE.md'];
     const COMPACT_RATIO = 0.7;
+    const TOO_SMALL = 'This model\'s context is too small for the agent; load it with a larger context under Models > Advanced.';
 
     // @pure-begin  (no DOM access in this block: it is loaded by tests/code.test.js)
     const RISKY_COMMANDS = new Set(['rm', 'rmdir', 'del', 'erase', 'rd', 'format', 'shutdown', 'reboot', 'mkfs', 'dd', 'sudo', 'su', 'curl', 'wget', 'iwr', 'invoke-webrequest', 'powershell', 'pwsh', 'cmd', 'sh', 'bash', 'chmod', 'chown', 'kill', 'taskkill', 'git']);
@@ -169,6 +170,49 @@
       const m = s.match(/\b(?:job|shell|process|task|id)\b[\s:=#"'(]*([A-Za-z0-9_-]+)/i) || s.match(/\b(bash_[A-Za-z0-9]+|[a-f0-9]{6,}|\d+)\b/);
       return m ? m[1] : null;
     }
+    const MIN_COMPLETION = 200;
+    /** Tokens the answer may use: the wanted size, cut to what is left of the context. 0 when less than MIN_COMPLETION remain. */
+    function computeMaxTokens(maxContext, promptTokens, wanted = 2048) {
+      const margin = 32 + Math.ceil(maxContext * 0.02);
+      const room = Math.floor(maxContext - promptTokens - margin);
+      const n = Math.min(wanted, room);
+      return n >= MIN_COMPLETION ? n : 0;
+    }
+
+    /** Reads the numbers out of "maximum context length is 4096 tokens. However, you requested 4520 tokens (2472 in the prompt, 2048 in the completion)". */
+    function parseContextError(message) {
+      const s = String(message || '');
+      const max = s.match(/maximum context length is (\d+)/i);
+      const prompt = s.match(/(\d+) in the prompt/i);
+      if (!max || !prompt) return null;
+      return { max: Number(max[1]), prompt: Number(prompt[1]) };
+    }
+
+    /** max_tokens for the retry after a context error, or 0 when the agent cannot work in this context. */
+    function retryMaxTokens(info, wanted = 2048) {
+      return info ? computeMaxTokens(info.max, info.prompt, wanted) : 0;
+    }
+
+    const RARE_TOOLS = /^(web_search|notebook)/;
+    /** Small contexts get one short sentence per tool, no per-parameter text, and no rarely needed tools. */
+    function compactTool(tool) {
+      const f = tool.function;
+      const first = String(f.description || '').split(/(?<=[.!?])\s/)[0].slice(0, 90);
+      const slim = (schema) => {
+        if (Array.isArray(schema)) return schema.map(slim);
+        if (!schema || typeof schema !== 'object') return schema;
+        const o = {};
+        for (const [k, v] of Object.entries(schema)) {
+          if (k === 'description' && typeof v === 'string') continue;
+          o[k] = k === 'properties' && v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([n, s]) => [n, slim(s)])) : slim(v);
+        }
+        return o;
+      };
+      return { type: 'function', function: { name: f.name, description: first, parameters: slim(f.parameters) } };
+    }
+    function compactTools(tools, keepRare) {
+      return tools.filter((t) => keepRare || !RARE_TOOLS.test(t.function.name)).map(compactTool);
+    }
     // @pure-end
 
     // ---- tools ----------------------------------------------------------------------------------------
@@ -214,6 +258,7 @@
       seq: 0,
       waiters: new Map(), // item id -> { resolve, cancel }
       noGrammar: false,
+      calib: 1, // server-counted prompt tokens / our estimate of the last request
     };
     code.perm = ['ask', 'edit', 'plan'].includes(code.perm) ? code.perm : 'ask';
 
@@ -267,11 +312,30 @@
     const toolListFor = (plan) => [...code.registry.values()]
       .filter((e) => !plan || readOnlyTool(e) || e.source === 'client')
       .map((e) => ({ type: 'function', function: { name: e.name, description: e.def.description, parameters: e.def.parameters } }));
-    const toolList = () => toolListFor(code.perm === 'plan');
+    /** Contexts of 8192 tokens or less get the compact prompt and tool forms. */
+    const compactMode = () => ctxMax() <= 8192;
+    const toolList = () => {
+      const full = toolListFor(code.perm === 'plan');
+      return compactMode() ? compactTools(full, ctxMax() >= 16384 || localStorage.getItem('fllm.studio.codefulltools') === '1') : full;
+    };
+    const fixedTokens = (ctx) => estimateTokens(ctx.system) + estimateTokens(JSON.stringify(ctx.tools || []));
     const serverHas = (name) => code.registry.get(name)?.source === 'server';
 
     function codeSystemPrompt() {
       const w = code.workspace || {};
+      if (compactMode()) {
+        const c = [
+          'You are fLLM Code, a coding agent on the user\'s computer. Use the tools to inspect and change files in the workspace and to run commands.',
+          '- Read before you change; never guess file contents. Prefer edit_file (exact, unique old_string); write_file only for new files.',
+          '- Build or test after changes and fix failures. Keep a todo_write list for 3+ steps.',
+          '- Delegate broad searches or independent investigations with spawn_agent (self-contained prompt; several in one turn run in parallel). Do small jobs yourself.',
+          '- Ask with ask_user when a decision is the user\'s. Keep answers short, in the user\'s language. Do not delete files or send data elsewhere unless asked.',
+        ];
+        if (code.perm === 'plan') c.push('PLAN MODE: read only. Investigate, then write a short numbered plan and stop.');
+        c.push(`Workspace: ${w.root || '(none)'} (${w.os || 'unknown'}, ${w.shell || 'shell'})${w.git_branch ? `, branch ${w.git_branch}` : ''}`, `Date: ${new Date().toISOString().slice(0, 10)}`);
+        if (code.instructions) c.push('Project instructions:', code.instructions.slice(0, 1200));
+        return c.join('\n');
+      }
       const lines = [
         'You are fLLM Code, a coding agent that runs on the user\'s own computer. You work inside the workspace folder shown below and use tools to look at files, change them and run commands.',
         '',
@@ -828,7 +892,8 @@
       setMeter('codeCtxFill', 'codeCtxText', code.used || codeEstimate(), ctxMax());
     }
     const estimateMessages = (messages) => messages.reduce((s, m) => s + estimateTokens(m.content) + estimateTokens(JSON.stringify(m.tool_calls || '')) + 6, 0);
-    const codeEstimate = () => estimateTokens(codeSystemPrompt()) + estimateMessages(code.messages);
+    // system prompt + tool list + messages, scaled by how far the last estimate was off from the server's own count
+    const codeEstimate = () => Math.round((estimateTokens(codeSystemPrompt()) + estimateTokens(JSON.stringify(toolList())) + estimateMessages(code.messages)) * code.calib);
 
     function setCodeBusy(busy) {
       code.running = busy;
@@ -913,15 +978,30 @@
         model: state.selectedModel || state.status?.model?.name || 'tiny',
         messages: [{ role: 'system', content: ctx.system }, ...ctx.messages],
         stream: true, stream_options: { include_usage: true },
-        temperature: Math.min(p.temperature, 0.4), top_p: 0.9, max_tokens: Math.max(p.max_tokens, 2048),
+        temperature: Math.min(p.temperature, 0.4), top_p: 0.9,
       };
+      const estimate = fixedTokens(ctx) + estimateMessages(ctx.messages);
+      const wanted = Math.max(p.max_tokens, 2048);
+      const fit = computeMaxTokens(ctxMax(), Math.round(estimate * code.calib), wanted);
+      if (!fit) throw new Error(TOO_SMALL);
+      body.max_tokens = fit;
       if (ctx.tools.length) { body.tools = ctx.tools; if (!code.noGrammar) body.tool_call_grammar = true; }
       if (state.thinkingEnabled) body.reasoning_effort = 'high';
       let res = await apiFetch('/v1/chat/completions', { method: 'POST', body: { ...body }, signal: ctx.signal });
-      if (res.status === 400 && body.tool_call_grammar) {
-        code.noGrammar = true; // this server does not know the field
-        delete body.tool_call_grammar;
-        res = await apiFetch('/v1/chat/completions', { method: 'POST', body, signal: ctx.signal });
+      for (let attempt = 0; attempt < 2 && !res.ok && res.status === 400; attempt++) {
+        const err = await res.clone().json().catch(() => ({}));
+        const info = parseContextError(err.error?.message);
+        if (info) {
+          // the server counted more prompt tokens than we did: learn the ratio and retry once with a smaller answer
+          code.calib = Math.min(2, Math.max(1, info.prompt / Math.max(1, estimate)));
+          const smaller = retryMaxTokens(info, wanted);
+          if (!smaller) throw new Error(TOO_SMALL);
+          body.max_tokens = smaller;
+        } else if (body.tool_call_grammar && !code.noGrammar) {
+          code.noGrammar = true; // this server does not know the field
+          delete body.tool_call_grammar;
+        } else break;
+        res = await apiFetch('/v1/chat/completions', { method: 'POST', body: { ...body }, signal: ctx.signal });
       }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -943,6 +1023,7 @@
         }
         if (choice?.finish_reason) finish = choice.finish_reason;
         if (chunk.usage?.total_tokens) ctx.onUsage?.(chunk.usage.total_tokens);
+        if (chunk.usage?.prompt_tokens) code.calib = Math.min(2, Math.max(0.7, chunk.usage.prompt_tokens / Math.max(1, estimate)));
         if (chunk.timings?.predicted_per_second) item.tps = chunk.timings.predicted_per_second;
       });
       let found = calls.filter(Boolean);
@@ -1135,7 +1216,10 @@
 
     async function summarise(messages, system, tools, signal, focus) {
       const ask = 'Summarise the conversation above so that work can continue from your summary alone. Include: what the user wants, decisions made, files read or changed (paths) and what changed, commands run and their results, open errors, and the next steps. Keep it under 500 words. Do not call tools.' + (focus ? ` Pay special attention to: ${focus}` : '');
-      const body = { model: state.selectedModel || state.status?.model?.name || 'tiny', messages: [{ role: 'system', content: system }, ...messages, { role: 'user', content: ask }], stream: false, temperature: 0.2, max_tokens: 1200 };
+      const body = { model: state.selectedModel || state.status?.model?.name || 'tiny', messages: [{ role: 'system', content: system }, ...messages, { role: 'user', content: ask }], stream: false, temperature: 0.2 };
+      const room = computeMaxTokens(ctxMax(), Math.round((estimateTokens(system) + estimateTokens(JSON.stringify(tools)) + estimateMessages(body.messages.slice(1))) * code.calib), 1200);
+      if (!room) throw new Error(TOO_SMALL);
+      body.max_tokens = room;
       if (tools.length) body.tools = tools; // same prefix as the conversation: the server cache is reused
       const res = await apiFetch('/v1/chat/completions', { method: 'POST', body, signal });
       if (!res.ok) throw new Error(`The server answered with error ${res.status}`);
@@ -1177,10 +1261,10 @@
             compactions++;
             await compactSession(ctx);
           }
-          const dropped = fitContext(code.messages, estimateTokens(ctx.system));
+          const dropped = fitContext(code.messages, fixedTokens(ctx));
           if (dropped) codeNotice('Older steps were removed from the context of the model so that it does not overflow. You still see them here.');
           ctx.messages = code.messages;
-        } else if (!wrapUp && (step === ctx.maxSteps - 1 || estimateTokens(ctx.system) + estimateMessages(ctx.messages) > ctx.budget)) {
+        } else if (!wrapUp && (step === ctx.maxSteps - 1 || fixedTokens(ctx) + estimateMessages(ctx.messages) > ctx.budget)) {
           wrapUp = true; // out of steps or budget: ask for the report and ignore further tool calls
           ctx.messages.push({ role: 'user', content: 'Stop investigating now. Write your final report with what you found so far, without calling tools.' });
         }

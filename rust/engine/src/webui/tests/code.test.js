@@ -12,7 +12,7 @@ assert(begin >= 0 && end > begin, 'pure block markers not found in code.js');
 const block = src.slice(begin, end);
 const COMPACT_RATIO = 0.7;
 const L = new Function('COMPACT_RATIO', `${block}
-return { globToRegex, parseRules, evaluateRules, commandKey, needsCompaction, splitForCompaction, buildCompactedMessages, parseCommandFile, expandCommand, commandNamesFromPaths, safeToolName, parseJobId, normPath };`)(COMPACT_RATIO);
+return { computeMaxTokens, parseContextError, retryMaxTokens, compactTools, globToRegex, parseRules, evaluateRules, commandKey, needsCompaction, splitForCompaction, buildCompactedMessages, parseCommandFile, expandCommand, commandNamesFromPaths, safeToolName, parseJobId, normPath };`)(COMPACT_RATIO);
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -121,6 +121,38 @@ test('tool names and job ids', () => {
   assert.strictEqual(L.parseJobId('Started job 7f3a2c in the background'), '7f3a2c');
   assert.strictEqual(L.parseJobId('started bash_12'), 'bash_12');
   assert.strictEqual(L.parseJobId('nothing'), null);
+});
+
+test('computeMaxTokens fits the answer into what is left', () => {
+  assert.strictEqual(L.computeMaxTokens(32768, 2000), 2048);
+  const n = L.computeMaxTokens(4096, 2472);
+  assert.ok(n >= 200 && n + 2472 < 4096, `got ${n}`);
+  assert.strictEqual(L.computeMaxTokens(4096, 3800), 0);
+  assert.strictEqual(L.computeMaxTokens(4096, 4500), 0);
+});
+
+test('parseContextError and retry size for the real server message', () => {
+  const msg = "This model's maximum context length is 4096 tokens. However, you requested 4520 tokens (2472 in the prompt, 2048 in the completion). Please reduce the length.";
+  assert.deepStrictEqual(L.parseContextError(msg), { max: 4096, prompt: 2472 });
+  const r = L.retryMaxTokens(L.parseContextError(msg));
+  assert.ok(r > 200 && r + 2472 <= 4096 && r < 2048, `got ${r}`);
+  assert.strictEqual(L.parseContextError('something else'), null);
+  assert.strictEqual(L.retryMaxTokens(null), 0);
+  assert.strictEqual(L.retryMaxTokens({ max: 4096, prompt: 3900 }), 0);
+});
+
+test('compactTools shortens and drops rare tools', () => {
+  const tools = [
+    { type: 'function', function: { name: 'grep', description: 'Search files. Returns lines with a long explanation that goes on.', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'regex' } }, required: ['pattern'] } } },
+    { type: 'function', function: { name: 'web_search', description: 'Search the web.', parameters: { type: 'object', properties: {} } } },
+  ];
+  const c = L.compactTools(tools, false);
+  assert.strictEqual(c.length, 1);
+  assert.strictEqual(c[0].function.description, 'Search files.');
+  assert.strictEqual(c[0].function.parameters.properties.pattern.description, undefined);
+  assert.deepStrictEqual(c[0].function.parameters.required, ['pattern']);
+  assert.strictEqual(L.compactTools(tools, true).length, 2);
+  assert.ok(JSON.stringify(c).length < JSON.stringify(tools).length);
 });
 
 console.log(`${n} tests passed`);
