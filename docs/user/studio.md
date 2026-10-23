@@ -59,6 +59,10 @@ The server lists its tools, with the permission category the page asks about (`r
 time), and `POST /api/studio/agent/undo` takes `{"steps": n}` or `{"to": id}` to go back several changes at once (newest first).
 The chat page can use the network tools without an agent session through `POST /api/studio/web/fetch` (`{url, max_chars?}`) and
 `POST /api/studio/web/search` (`{query, limit?}`).
+Pick a folder and describe a task. The model works through tools that the server runs inside that folder (`list_dir`, `read_file`,
+`write_file`, `edit_file`, `glob`, `grep`, `bash`, and more when the server offers them, such as `multi_edit`, background shell jobs,
+`web_fetch` and `web_search`), plus tools of the page itself: a task list, `ask_user` and `spawn_agent`. Tools of configured MCP servers
+are added too. Every step is shown as a card, file changes with a diff, long output cut with a "Show all" button.
 
 | Mode | What the agent does on its own |
 | --- | --- |
@@ -66,11 +70,30 @@ The chat page can use the network tools without an agent session through `POST /
 | Auto-edit | Also changes files. Still asks before commands. |
 | Plan | Only reads, then writes a plan. "Run the plan" switches to Ask. |
 
-"Always" on a question allows that kind of action for the rest of the session. Commands containing `;`, `&`, `|`, redirections or
-substitutions, and risky programs (`rm`, `curl`, `sudo`, `git`, shells, ...), can only be allowed once at a time.
+**Permissions.** "Always" on a question allows that kind of action for the rest of the session. Commands containing `;`, `&`, `|`,
+redirections or substitutions, and risky programs (`rm`, `curl`, `sudo`, `git`, shells, ...), can only be allowed once at a time.
+Network tools and MCP tools always ask first. Persistent rules per folder live in the *Permission rules* box of the side panel (or
+`/allow` and `/deny`): one `category: pattern` per line with the categories `bash`, `edit`, `network`, `mcp` and `read`, for example
+`bash: npm test*`, `edit: src/**`, `network: *`. Deny beats allow. An allow rule never covers a command with shell operators, and a
+risky program is only covered by a rule that names it (`bash: git status*`, not `bash: *`).
 
-Commands: `/plan`, `/ask`, `/edit`, `/undo` (last file change), `/diff`, `/status`, `/cd path`, `/clear`. `@file` adds a file to the
+**Sub-agents.** The model can hand a self-contained job (a broad search, an independent investigation) to a sub-agent with a fresh
+context and gets back only its report. Several sub-agents started in one turn run in parallel, shown as nested cards with live status.
+They are read-only unless the model asks for `full` mode (the usual questions still apply), have a step and context budget, and stop
+when you stop the agent. All requests share the same system prompt and tool list, so the server can reuse its prompt cache.
+
+**Long sessions.** When the conversation passes about 70% of the model's context, older turns are summarised by the model and replaced
+(the task list and the changed files are kept, and a notice says so). `/compact [focus]` does it on demand. Sessions of each folder are
+saved in the browser automatically; `/resume` or the side panel brings an earlier one back.
+
+Commands (type `/` for the list): `/init` (the agent writes `FLLM.md`), `/compact`, `/resume`, `/rewind` (undo file changes back to a
+chosen point), `/undo [n]`, `/plan`, `/ask`, `/edit`, `/diff`, `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/clear`. Your own
+commands are Markdown files in `.fllm/commands/` of the folder: `review.md` becomes `/review`, an optional `description:` front matter
+line is shown in the list, and `$ARGUMENTS` (or `$1` ... `$9`) is replaced by what follows the command. `@file` adds a file to the
 message. A `FLLM.md`, `AGENTS.md` or `CLAUDE.md` in the folder is read as project instructions.
+
+Commands started in the background appear in the *Background jobs* panel, where you can read their output and stop them. Requests of
+agent turns ask the server to constrain tool calls to valid ones (`tool_call_grammar`); servers that do not know it ignore it.
 
 Safety: the agent tools are reachable from the machine fLLM runs on only, also when an API key is set. Paths cannot leave the folder
 (also through symbolic links). The agent can still run any command you allow, so choose the folder with care. Set `FLLM_NO_AGENT=1` to
@@ -84,6 +107,7 @@ fLLM runs on only, like the other agent routes. To let them reach a documentatio
 
 A small model often writes a command into the answer instead of calling the tool. Use a model with good tool calling for real work.
 
+The pure logic of this page (rule matching, compaction, command expansion) has tests: `node rust/engine/src/webui/tests/code.test.js`.
 ## Models
 
 Shows the loaded model, downloaded models and suggestions. Search Hugging Face (GGUF repositories, most downloaded first), look at the
