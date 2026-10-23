@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Server: `tool_call_grammar: true` on `/v1/chat/completions` limits a reply with tools to plain text or valid tool calls in the model's own call format (Hermes/Qwen, Qwen3-Coder, Llama 3, Mistral, Granite 3) with declared names and schema-conforming arguments; also used for `tool_choice` `required` and named functions. Docs: "Agents and parallel requests" in the memory guide, and `scripts/agent_load_test.py`.
 - Studio: Hugging Face sign-in with an access token (private and gated models), a check for a newer release with download and start of the installer, and curated model suggestions that fit the memory (and the processor, without a discrete graphics card), your own GGUF files (a path or a folder) in the model list, and a hardware page that names the device in use.
 
 ### Fixed

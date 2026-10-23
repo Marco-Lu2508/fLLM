@@ -9,6 +9,12 @@ pub struct ToolSpec {
     pub disabled: bool,
     parallel: bool,
     parser: Arc<dyn ToolParser>,
+    /// `tool_call_grammar: true` was requested.
+    grammar_requested: bool,
+    required: bool,
+    named: Option<String>,
+    /// Lark grammar that limits the reply to text or valid calls of the parser's format.
+    native_grammar: Option<String>,
 }
 
 impl ToolSpec {
@@ -73,19 +79,61 @@ impl ToolSpec {
             None => true,
             Some(v) => v.as_bool().ok_or("parallel_tool_calls must be a boolean")?,
         };
+        let grammar_requested = match body.get("tool_call_grammar") {
+            None | Some(Value::Null) => false,
+            Some(v) => v.as_bool().ok_or("tool_call_grammar must be a boolean")?,
+        };
         Ok(Self {
             functions,
             forced_schema,
             disabled,
             parallel,
             parser: tool_parsers::default_parser(),
+            grammar_requested,
+            required,
+            named: named.map(str::to_owned),
+            native_grammar: None,
         })
     }
 
     /// Read tool calls with the parser of the loaded model instead of the Hermes default.
+    ///
+    /// With `tool_call_grammar` this also builds the grammar of the parser's call format. A
+    /// parser without a grammar leaves generation unconstrained (and `tool_choice: required`
+    /// on the generic JSON constraint).
     pub fn with_parser(mut self, parser: Arc<dyn ToolParser>) -> Self {
         self.parser = parser;
+        self.native_grammar = None;
+        if self.grammar_requested && self.active() {
+            let allowed: Vec<Value> = self
+                .functions
+                .iter()
+                .filter(|f| self.named.as_deref().is_none_or(|n| f["name"] == n))
+                .cloned()
+                .collect();
+            self.native_grammar =
+                crate::tool_grammar::lark_for(self.parser.id(), &allowed, self.parallel, !self.required);
+            match &self.native_grammar {
+                Some(_) => self.forced_schema = None,
+                None => tracing::info!(
+                    "tool_call_grammar: tool parser '{}' has no grammar, generation is unconstrained",
+                    self.parser.id()
+                ),
+            }
+        }
         self
+    }
+
+    /// `true` when the reply is constrained to text or calls in the parser's format.
+    pub fn has_native_grammar(&self) -> bool {
+        self.native_grammar.is_some()
+    }
+
+    /// The constraint for this request (see [`ToolSpec::with_parser`]).
+    pub fn native_grammar(&self) -> Option<llguidance::api::TopLevelGrammar> {
+        self.native_grammar
+            .as_ref()
+            .map(|lark| llguidance::api::TopLevelGrammar::from_lark(lark.clone()))
     }
 
     /// `true` when the request declares tools the model may call.

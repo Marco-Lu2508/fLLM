@@ -442,6 +442,96 @@ async fn tool_calls_round_trip() {
     assert_eq!(followup.status, StatusCode::OK, "{}", followup.text());
 }
 
+fn mode_tools() -> Value {
+    json!([
+        {"type": "function", "function": {"name": "set_mode", "description": "switch mode",
+            "parameters": {"type": "object", "properties": {"mode": {"enum": ["on", "off"]}}, "required": ["mode"], "additionalProperties": false}}},
+        {"type": "function", "function": {"name": "reset", "description": "reset",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}}
+    ])
+}
+
+/// Checks one reply of a tool-grammar request: the text never carries a call by accident, and every
+/// call names a declared tool with arguments that follow its schema. Returns the number of calls.
+fn check_tool_reply(reply: &Reply) -> usize {
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let message = reply.json()["choices"][0]["message"].clone();
+    let content = message["content"].as_str().unwrap_or("");
+    assert!(!content.contains("<tool_call>"), "{content:?}");
+    let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+    for call in &calls {
+        let arguments: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        match call["function"]["name"].as_str().unwrap() {
+            "set_mode" => assert!(["on", "off"].contains(&arguments["mode"].as_str().unwrap_or("")), "{arguments}"),
+            "reset" => assert_eq!(arguments, json!({})),
+            other => panic!("undeclared tool {other}"),
+        }
+    }
+    calls.len()
+}
+
+#[tokio::test]
+async fn tool_call_grammar_makes_random_output_parse() {
+    let h = shared();
+    // required: only calls are possible, so whatever the random model samples must be a valid call
+    let mut finished = 0;
+    for seed in 0..12u64 {
+        let reply = h
+            .chat(json!({"max_tokens": 200, "temperature": 1.0, "seed": seed, "tools": mode_tools(),
+                "tool_choice": "required", "tool_call_grammar": true}))
+            .await;
+        let calls = check_tool_reply(&reply);
+        if reply.json()["choices"][0]["finish_reason"] == "tool_calls" {
+            assert!(calls >= 1);
+            finished += 1;
+        }
+    }
+    assert!(finished > 0, "no seeded request completed a call");
+    // a named tool is the only one that can be called
+    for seed in 0..6u64 {
+        let reply = h
+            .chat(json!({"max_tokens": 200, "temperature": 1.0, "seed": seed, "tools": mode_tools(), "parallel_tool_calls": false,
+                "tool_choice": {"type": "function", "function": {"name": "reset"}}, "tool_call_grammar": true}))
+            .await;
+        check_tool_reply(&reply);
+        for call in reply.json()["choices"][0]["message"]["tool_calls"].as_array().cloned().unwrap_or_default() {
+            assert_eq!(call["function"]["name"], "reset");
+        }
+    }
+    // auto: text or a valid call, never a broken one; streaming agrees
+    for seed in 0..8u64 {
+        let reply = h
+            .chat(json!({"max_tokens": 60, "temperature": 1.0, "seed": seed, "tools": mode_tools(), "tool_call_grammar": true}))
+            .await;
+        check_tool_reply(&reply);
+    }
+    let stream = h
+        .chat(json!({"max_tokens": 200, "temperature": 1.0, "seed": 3, "stream": true, "tools": mode_tools(),
+            "tool_choice": "required", "tool_call_grammar": true}))
+        .await;
+    assert_eq!(stream.status, StatusCode::OK, "{}", stream.text());
+    assert!(!stream.text().contains("event: error"), "{}", stream.text());
+}
+
+#[tokio::test]
+async fn tool_call_grammar_request_validation_and_fallbacks() {
+    let h = shared();
+    let bad = h.chat(json!({"tools": mode_tools(), "tool_call_grammar": "yes"})).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.text());
+    let clash = h
+        .chat(json!({"tools": mode_tools(), "tool_call_grammar": true, "response_format": {"type": "json_object"}}))
+        .await;
+    assert_eq!(clash.status, StatusCode::BAD_REQUEST, "{}", clash.text());
+    // without tools the field changes nothing
+    let plain = h.chat(json!({"tool_call_grammar": true})).await;
+    assert_eq!(plain.status, StatusCode::OK, "{}", plain.text());
+    assert!(plain.json()["choices"][0]["message"]["content"].is_string());
+    // a parser without a grammar leaves generation unconstrained (and does not fail)
+    let other = start(Settings { tool_parser: Some("gpt_oss".into()), ..Settings::default() });
+    let reply = other.chat(json!({"tools": mode_tools(), "tool_call_grammar": true})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+}
+
 #[tokio::test]
 async fn responses_api_stores_and_returns_responses() {
     let h = shared();
