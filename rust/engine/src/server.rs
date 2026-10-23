@@ -1408,6 +1408,7 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
         .cloned()
         .unwrap_or_default();
     if tool_spec.forced_schema.is_some()
+        || tool_spec.has_native_grammar()
         || body
             .get("response_format")
             .is_some_and(|f| f["type"] != "text")
@@ -2040,6 +2041,21 @@ async fn openai_generate(
         body["response_format"] =
             json!({"type":"json_schema","json_schema":{"name":"tool_call","schema":schema}});
     }
+    // tool_call_grammar: text or calls in the parser's format. The grammar starts with the first
+    // generated token, so it is skipped when the prompt already opened a reasoning block.
+    let mut native_grammar = tool_spec.native_grammar();
+    if native_grammar.is_some() {
+        if body.get("response_format").is_some() || body.get("grammar").is_some() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "tool_call_grammar cannot be combined with response_format or grammar",
+            );
+        }
+        if reasoning.as_ref().is_some_and(ReasoningSpec::starts_in_reasoning) {
+            tracing::info!("tool_call_grammar: the prompt opens a reasoning block, generation is unconstrained");
+            native_grammar = None;
+        }
+    }
     let n = match body.get("n") {
         None => 1,
         Some(v) => match v.as_u64().filter(|n| (1..=16).contains(n)) {
@@ -2065,6 +2081,7 @@ async fn openai_generate(
         && (!state.shared_choices
             || !images.is_empty()
             || tool_spec.forced_schema.is_some()
+            || native_grammar.is_some()
             || body.get("response_format").is_some()
             || body.get("grammar").is_some()
             || body.get("grammar_type").is_some())
@@ -2200,16 +2217,21 @@ async fn openai_generate(
             prompt.len(),
         );
     }
+    let constraint = match native_grammar {
+        Some(grammar) => crate::structured::matcher(&state.grammar_factory, grammar).map(Some),
+        None => request_constraint(&state, &body),
+    };
+    let constraint = match constraint {
+        Ok(c) => c,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+    };
     let mut rx = match submit_constrained(
         &state,
         &request_id,
         prompt.clone(),
         max_tokens,
         sampling,
-        match request_constraint(&state, &body) {
-            Ok(c) => c,
-            Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
-        },
+        constraint,
         images,
     ) {
         Ok(rx) => rx,
@@ -2565,6 +2587,11 @@ impl ReasoningSpec {
             keep: keep_ids(state, literals),
             parser,
         }
+    }
+
+    /// `true` when the prompt ended inside an open reasoning block (the first generated text is reasoning).
+    fn starts_in_reasoning(&self) -> bool {
+        !self.parser.split("x", false).reasoning.is_empty()
     }
 
     #[cfg(test)]

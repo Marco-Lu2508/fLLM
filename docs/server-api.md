@@ -219,6 +219,7 @@ Request fields:
 | `tools` | Array of `{"type":"function","function":{"name":…,"parameters":{…}}}`; only `function` tools |
 | `tool_choice` | `"none"`, `"auto"`, `"required"` or `{"type":"function","function":{"name":"…"}}`; default `auto` when tools are present, otherwise `none` |
 | `parallel_tool_calls` | Boolean; default `true`. `false` rejects a reply containing more than one call |
+| `tool_call_grammar` | Boolean; default `false`. With `tools`, constrains decoding, see [Constrained tool calls](#constrained-tool-calls) |
 | `response_format` | See structured output |
 | `grammar`, `grammar_type` | See structured output |
 | `chat_template_kwargs` | Object merged into the Jinja chat-template context |
@@ -347,6 +348,31 @@ means "choose from the model"; `none` turns a parser off.
 - Many families put their markers into control tokens that plain detokenization drops
   (MiniCPM5's `<function`, `<param`, Mistral's `[TOOL_CALLS]`, Harmony's `<|channel|>` …). While a
   request declares tools, the server keeps exactly these tokens visible.
+
+### Constrained tool calls
+
+Small models often write a command as plain text or break the JSON of a call. Send
+`"tool_call_grammar": true` together with `tools` and the reply is limited to either
+
+- ordinary text that cannot contain the opening marker of a call (prose never turns into a
+  call by accident), or
+- one call, or several unless `parallel_tool_calls` is `false`, in the exact format of the
+  model's tool parser, with a declared function name and arguments that follow that
+  function's JSON schema (required keys, types, enums).
+
+`tool_choice: "required"` removes the text branch, `{"type":"function","function":{"name":…}}`
+also limits the names to that function. Without `tool_call_grammar`, a required call is
+generated as bare JSON as before.
+
+Formats with a grammar: `hermes` (also Qwen2.5/3, Granite 4), `qwen3_coder` (XML; integer,
+number, boolean and enum parameters are typed, nested values use their JSON schema; other
+string constraints such as `pattern` are not enforced), `llama3`, `mistral`
+(`[TOOL_CALLS]name[ARGS]{…}`) and `granite3`. For any other parser the server logs one line and
+leaves generation unconstrained (the field is accepted). The grammar starts at the first
+generated token, so `enable_thinking` is set to `false` like for other constrained requests;
+when the prompt still ends inside an open reasoning block the grammar is skipped. It cannot
+be combined with `response_format` or `grammar` (`400`), and not with `n > 1` / `best_of`.
+Only `/v1/chat/completions` reads the field.
 
 ### Tool parsers (`--tool-parser`)
 

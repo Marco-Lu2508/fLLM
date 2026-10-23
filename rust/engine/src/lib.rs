@@ -47,6 +47,7 @@ pub mod rust_decoder;
 pub mod sampling;
 pub mod structured;
 pub mod template_json;
+pub mod tool_grammar;
 pub mod tool_parsers;
 pub mod tools;
 pub mod vision;
