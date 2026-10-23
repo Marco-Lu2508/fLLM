@@ -154,3 +154,36 @@
     .catalog-name small { flex-basis: 100%; font-size: 12px; color: var(--muted-foreground); }
     .nowrap { white-space: nowrap; }
     .result-list { border: 1px solid var(--border); border-radius: 8px; padding: 2px 12px; }
+
+    /* sub-agents, questions, jobs, rules */
+    .tool-card.is-agent { border-left: 3px solid var(--copper); }
+    .tool-progress { margin-left: auto; flex-shrink: 0; font-size: 11.5px; color: var(--muted-foreground); }
+    .tool-children { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px 8px 14px; margin: 6px 10px; border-left: 2px solid var(--border); }
+    .tool-children .code-assistant { font-size: 13px; }
+    .tool-children .tool-card { background: transparent; }
+    .sub-prompt { max-height: 90px; overflow: auto; color: var(--muted-foreground); }
+    .sub-report { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 13px; }
+    .sub-report h5 { margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted-foreground); text-transform: uppercase; letter-spacing: 0.04em; }
+    .tool-more { margin: 0 10px 8px; }
+    .ask-user { flex-direction: column; align-items: stretch; }
+    .ask-user > span { margin-right: 0; }
+    .ask-options { display: flex; flex-wrap: wrap; gap: 6px; }
+    .ask-free { display: flex; gap: 6px; }
+    .ask-free .ui-input { flex: 1; }
+    .code-notice.has-choices { text-align: left; white-space: pre-wrap; }
+    .notice-choices { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+    .mention-hint { margin-left: 10px; color: var(--muted-foreground); font-size: 11.5px; }
+    .job { margin-bottom: 8px; font-size: 12px; }
+    .job-head { display: flex; align-items: center; gap: 6px; overflow: hidden; }
+    .job-cmd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .job-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--muted-foreground); }
+    .job-running { background: var(--success); }
+    .job-actions { display: flex; align-items: center; gap: 4px; }
+    .job-out { margin: 4px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+    .session-list { list-style: none; display: grid; gap: 2px; }
+    .session-list button { width: 100%; padding: 3px 6px; border-radius: 5px; text-align: left; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-list li.active button, .session-list button:hover { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+    .rules-box summary { cursor: pointer; list-style: none; }
+    .rules-box summary h4 { margin-bottom: 6px; }
+    .rules-label { display: block; margin: 8px 0 3px; font-size: 12px; font-weight: 500; }
+    .rules-text { width: 100%; font-size: 11.5px; margin-bottom: 6px; }
