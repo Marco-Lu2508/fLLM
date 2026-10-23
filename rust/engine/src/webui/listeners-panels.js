@@ -101,10 +101,10 @@
       const data = await res.json();
       $('simdSelftestCard').style.display = 'block';
       const okAll = data.ok && data.failed === 0;
-      $('simdSelftestTitle').textContent = `SIMD kernel self test: ${data.checks - data.failed}/${data.checks} checks passed in ${Math.round(data.duration_ms)} ms, ${data.skipped} skipped (instruction set not supported)`;
+      $('simdSelftestTitle').textContent = `Processor check: ${data.checks - data.failed} of ${data.checks} checks passed in ${Math.round(data.duration_ms)} ms, ${data.skipped} skipped (feature not supported by this processor)`;
       $('simdSelftestTableWrap').innerHTML = `
         <table class="app-table">
-          <thead><tr><th>SIMD-Tier</th><th>Checks</th><th>Bestanden</th><th>Fehlgeschlagen</th><th>Status</th></tr></thead>
+          <thead><tr><th>Feature level</th><th>Checks</th><th>Passed</th><th>Failed</th><th>Result</th></tr></thead>
           <tbody>
             ${(data.tested_tiers || []).map((c) => `
               <tr>
@@ -117,7 +117,7 @@
             `).join('')}
           </tbody>
         </table>
-        <p class="app-item-desc" style="margin-top:8px;">Every kernel (Q4/Q6/IQ4, attention, RMSNorm, ...) is checked against an f64 reference for each instruction set. ${okAll ? 'All correct.' : 'Some results deviate!'}</p>
+        <p class="app-item-desc" style="margin-top:8px;">The calculations the model needs are checked against exact results for every processor feature level. ${okAll ? 'All correct.' : 'Some results deviate.'}</p>
       `;
     });
 

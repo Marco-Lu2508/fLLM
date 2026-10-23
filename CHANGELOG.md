@@ -8,6 +8,7 @@ behaviour between versions).
 
 ### Added
 - Studio: Hugging Face sign-in with an access token (private and gated models), a check for a newer release with download and start of the installer, and curated model suggestions that fit the memory (and the processor, without a discrete graphics card), your own GGUF files (a path or a folder) in the model list, and a hardware page that names the device in use.
+- Studio model management: advanced load options (context length, GPU layers, threads, conversation memory type, parallel chats) remembered per model and shown on the loaded-model card, Unload and "unload after N idle minutes", native file and folder dialogs (Browse), a download queue with pause, resume, cancel, speed and time left that survives page reloads, a setting for the models folder, model card summaries and quantization and fit hints in the Hugging Face file list, a Logs page, a speed test, and plainer wording across Settings.
 
 ### Fixed
 - Studio: a model that cannot be loaded (for example a Gemma 4 file) no longer ends the server and leaves an empty window: the Models page opens and shows the reason. Models the engine cannot read are turned down before a switch. The desktop app waits for a slow model load and shows how long it has been loading. The list of downloaded models is no longer taken from the browser cache. The Gemma 4 entries left the catalog (not supported yet).

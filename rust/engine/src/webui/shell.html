@@ -455,6 +455,7 @@
               <p class="app-item-desc">Already have a GGUF file? Paste its path (a folder works too). The file stays where it is.</p>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <input type="text" id="localPathInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="C:\Models\my-model-Q4_K_M.gguf" autocomplete="off">
+                <button class="btn btn-outline" id="btnBrowseLocal">Browse ...</button>
                 <button class="btn btn-primary" id="btnAddLocal">Add</button>
               </div>
             </div>
@@ -486,8 +487,13 @@
                 <input type="text" id="hfRepoInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="Search, e.g. qwen coder, or paste bartowski/Llama-3.2-3B-Instruct-GGUF">
                 <button class="btn btn-primary" id="btnSearchHf">Search</button>
               </div>
-              <div id="downloadBar" class="dl-bar" style="display:none;"><div class="dl-track"><i id="dlFill"></i></div><span id="dlText" class="tabular"></span></div>
               <div id="hfFilesBox" style="display:none;margin-top:12px;"></div>
+            </div>
+
+            <div class="app-card" id="downloadsCard" style="display:none;">
+              <div class="app-card-title">Downloads</div>
+              <p class="app-item-desc">One download runs at a time, the others wait. A paused or cancelled download keeps what it has, so it can continue later.</p>
+              <div id="downloadList"></div>
             </div>
 
             <div class="app-card">
@@ -498,6 +504,45 @@
             <div class="app-card">
               <div class="app-card-title">Suggested models</div>
               <div id="hubCatalogCards" style="display:flex;flex-direction:column;gap:2px;"></div>
+            </div>
+
+            <div class="modal-backdrop" id="loadOptionsModal" style="z-index:130;">
+              <div class="dialog" role="dialog" aria-modal="true" style="width:min(480px,94vw);">
+                <h3 id="loadOptionsTitle">Load model</h3>
+                <p id="loadOptionsText" class="app-item-desc"></p>
+                <details id="loadAdvanced">
+                  <summary class="app-item-desc" style="cursor:pointer;">Advanced</summary>
+                  <div style="display:grid;grid-template-columns:1fr 150px;gap:8px 12px;align-items:center;margin-top:10px;">
+                    <label for="optContext" class="app-item-desc">Context length (tokens of memory for the conversation)</label>
+                    <input type="text" id="optContext" class="ui-input mono" placeholder="auto">
+                    <label for="optGpuLayers" class="app-item-desc">Layers on the graphics card</label>
+                    <input type="text" id="optGpuLayers" class="ui-input mono" placeholder="auto (or all, or a number)">
+                    <label for="optThreads" class="app-item-desc">Processor threads</label>
+                    <input type="text" id="optThreads" class="ui-input mono" placeholder="auto">
+                    <label for="optKv" class="app-item-desc">Conversation memory type (smaller types allow longer chats)</label>
+                    <select id="optKv" class="ui-select mono">
+                      <option value="">auto</option>
+                      <option value="f16">f16</option>
+                      <option value="q8_0">q8_0 (half the size)</option>
+                      <option value="q5_1">q5_1</option>
+                      <option value="q5_0">q5_0</option>
+                      <option value="q4_1">q4_1</option>
+                      <option value="q4_0">q4_0 (quarter of the size)</option>
+                      <option value="bf16">bf16</option>
+                      <option value="fp8_e4m3">fp8_e4m3</option>
+                      <option value="int8">int8</option>
+                    </select>
+                    <label for="optSeqs" class="app-item-desc">Chats answered at the same time</label>
+                    <input type="text" id="optSeqs" class="ui-input mono" placeholder="auto">
+                  </div>
+                  <p class="app-item-desc" style="margin-top:8px;">Leave a field on auto when unsure. The choice is remembered for this model.</p>
+                </details>
+                <div class="msg-error" id="loadOptionsError" style="display:none;margin-top:8px;"></div>
+                <div class="dialog-actions">
+                  <button class="btn btn-ghost" id="loadOptionsCancel">Cancel</button>
+                  <button class="btn btn-primary" id="loadOptionsOk">Load</button>
+                </div>
+              </div>
             </div>
 
             <div class="modal-backdrop" id="switchOverlay" style="z-index:140;align-items:center;padding-top:0;">
@@ -537,29 +582,35 @@
               <svg viewBox="0 0 24 24" class="icon"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
               <span>Appearance</span>
             </button>
-            <button class="settings-nav-btn" data-spane="local-api-server">
-              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/></svg>
-              <span>Local API Server</span>
+            <button class="settings-nav-btn" data-spane="models">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+              <span>Models</span>
             </button>
             <button class="settings-nav-btn" data-spane="hardware">
               <svg viewBox="0 0 24 24" class="icon"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
-              <span>Hardware & SIMD</span>
+              <span>Hardware</span>
+            </button>
+            <button class="settings-nav-btn" data-spane="local-api-server">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/></svg>
+              <span>Server and API</span>
+            </button>
+            <button class="settings-nav-btn" data-spane="logs">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/></svg>
+              <span>Logs</span>
+            </button>
+
+            <div class="settings-section-label">More</div>
+            <button class="settings-nav-btn" data-spane="provider-fllm">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M12 16v-4"/><path d="M12 8h.01"/><circle cx="12" cy="12" r="10"/></svg>
+              <span>Model details</span>
             </button>
             <button class="settings-nav-btn" data-spane="tokenizer">
               <svg viewBox="0 0 24 24" class="icon"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
-              <span>Tokenizer & Jinja</span>
+              <span>Text tools</span>
             </button>
-
-            <div class="settings-section-label">Integrations</div>
             <button class="settings-nav-btn" data-spane="claude-code">
               <svg viewBox="0 0 24 24" class="icon"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-              <span>Claude Code & SDKs</span>
-            </button>
-
-            <div class="settings-section-label">Model Providers</div>
-            <button class="settings-nav-btn" data-spane="provider-fllm">
-              <svg viewBox="0 0 24 24" class="icon"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-              <span>fllm.rs (GGUF)</span>
+              <span>Connect other apps</span>
             </button>
           </nav>
 
@@ -572,20 +623,20 @@
                 <div class="app-card-title">General</div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">App Version & Rust Build</div>
+                    <div class="app-item-title">Version</div>
                     <div class="app-item-desc mono" id="genBuildInfoText">fllm-rs 0.1.2</div>
                   </div>
                   <div class="app-item-actions">
-                    <button class="btn btn-sm btn-outline" id="btnRefreshAllStatus">Refresh Status</button>
+                    <button class="btn btn-sm btn-outline" id="btnRefreshAllStatus">Refresh</button>
                   </div>
                 </div>
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Hugging Face Cache Folder</div>
-                    <div class="app-item-desc mono">~/.cache/fllm/models</div>
+                    <div class="app-item-title">Models</div>
+                    <div class="app-item-desc">Download, load and remove models.</div>
                   </div>
                   <div class="app-item-actions">
-                    <button class="btn btn-sm btn-secondary" id="btnGenGoHub">Manage Models</button>
+                    <button class="btn btn-sm btn-secondary" id="btnGenGoHub">Open Models</button>
                   </div>
                 </div>
                 <div class="app-card-item">
@@ -609,11 +660,11 @@
               </div>
 
               <div class="app-card">
-                <div class="app-card-title">CLI & <code>fllm.toml</code> Configuration Generator</div>
+                <div class="app-card-title">Start it from a terminal</div>
                 <div class="app-card-item column">
                   <div class="app-item-info">
-                    <div class="app-item-title">Reproducible <code>fllm-rs serve</code> Command</div>
-                    <div class="app-item-desc">Generated from your current model, context, aliases, and API key settings.</div>
+                    <div class="app-item-title">Command</div>
+                    <div class="app-item-desc">Starts the server the way it runs now, without this app.</div>
                   </div>
                   <div class="code-card" style="width:100%;margin:0;">
                     <div class="code-card-header"><span>bash</span><button class="btn btn-xs btn-ghost" id="btnCopyCliCmd">Copy</button></div>
@@ -622,7 +673,7 @@
                 </div>
                 <div class="app-card-item column">
                   <div class="app-item-info">
-                    <div class="app-item-title"><code>fllm.toml</code> Server Manifest</div>
+                    <div class="app-item-title">Settings file (<code>fllm.toml</code>)</div>
                   </div>
                   <div class="code-card" style="width:100%;margin:0;">
                     <div class="code-card-header"><span>toml</span><button class="btn btn-xs btn-ghost" id="btnCopyTomlCmd">Copy</button></div>
@@ -696,13 +747,69 @@
               </div>
             </div>
 
-            <!-- 3. LOCAL API SERVER (routes/settings/local-api-server.tsx) -->
+            <!-- MODELS: where models are kept and when they are unloaded -->
+            <div class="settings-pane" id="spane-models">
+              <div class="app-card">
+                <div class="app-card-title">Models</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Models folder</div>
+                    <div class="app-item-desc">Where downloaded models are stored. Models you already have stay where they are; only new downloads go to the new folder. Leave it empty for the default.</div>
+                    <div class="app-item-desc mono" id="modelsDirActive"></div>
+                  </div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;width:100%;">
+                    <input type="text" id="inpModelsDir" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="Default folder" autocomplete="off">
+                    <button class="btn btn-outline" id="btnBrowseModelsDir">Browse ...</button>
+                    <button class="btn btn-primary" id="btnSaveModelsDir">Save</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Unload the model when idle</div>
+                    <div class="app-item-desc">Frees the memory after this many minutes without a request. 0 keeps the model loaded. Load it again from Models when you need it.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <input type="number" min="0" id="inpIdleMinutes" class="ui-input mono" style="width:90px;" value="0">
+                    <span class="app-item-desc">minutes</span>
+                    <button class="btn btn-sm btn-secondary" id="btnSaveIdle">Save</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Unload now</div>
+                    <div class="app-item-desc">Stops the model and frees its memory. The app stays open.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-outline" id="btnUnloadSettings">Unload</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- LOGS -->
+            <div class="settings-pane" id="spane-logs">
+              <div class="app-card">
+                <div class="app-card-header">
+                  <div>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Logs</h2>
+                    <p class="app-item-desc">The latest messages of the server. Useful when something does not work; copy them into a bug report.</p>
+                  </div>
+                  <div style="display:flex;gap:6px;">
+                    <button class="btn btn-sm btn-outline" id="btnRefreshLogs">Refresh</button>
+                    <button class="btn btn-sm btn-outline" id="btnCopyLogs">Copy</button>
+                  </div>
+                </div>
+                <div class="code-card" style="margin:0;"><pre id="preLogs" style="max-height:480px;white-space:pre-wrap;">Loading ...</pre></div>
+              </div>
+            </div>
+
+            <!-- 3. SERVER AND API -->
             <div class="settings-pane" id="spane-local-api-server">
               <div class="app-card">
                 <div class="app-card-header">
                   <div>
-                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Local API Server</h2>
-                    <p class="app-item-desc">Run an OpenAI, Anthropic (<code>/v1/messages</code>), and Ollama (<code>/api/chat</code>) compatible local server powered by Rust.</p>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Server and API</h2>
+                    <p class="app-item-desc">Other apps can use your model through this address. It speaks the OpenAI, Anthropic and Ollama APIs.</p>
                   </div>
                   <div style="display:flex;align-items:center;gap:8px;">
                     <span class="backend-chip"><span class="backend-chip-dot"></span>Running</span>
@@ -711,7 +818,7 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Server Endpoint URL</div>
+                    <div class="app-item-title">Address</div>
                     <div class="app-item-desc mono" id="serverEndpointUrlText">http://127.0.0.1:8000/v1</div>
                   </div>
                   <div class="app-item-actions">
@@ -721,8 +828,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Global Rate Limits (Token Bucket)</div>
-                    <div class="app-item-desc">Enforced directly in Rust <code>server::security::Security</code> across all endpoints.</div>
+                    <div class="app-item-title">Request limits</div>
+                    <div class="app-item-desc">The most requests and tokens per minute the server accepts. Empty means no limit.</div>
                   </div>
                   <div class="app-item-actions">
                     <input type="number" id="inpGlobalRpm" class="ui-input mono" style="width:110px;" placeholder="RPM (∞)">
@@ -736,14 +843,14 @@
               <div class="app-card">
                 <div class="app-card-header">
                   <div>
-                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">API Keys (Bearer & <code>x-api-key</code>)</h2>
-                    <p class="app-item-desc">Create and revoke API keys at runtime in the Rust server. Keys use constant-time SHA-256 verification and per-key rate buckets.</p>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">API keys</h2>
+                    <p class="app-item-desc">With at least one key, apps must send a key to use the server. Create a key for each app and revoke it when you no longer need it.</p>
                   </div>
                 </div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
                   <input type="text" id="inpKeyLabel" class="ui-input" style="flex:1;min-width:140px;" placeholder="Key label (e.g. Cursor IDE, Claude Code)">
-                  <input type="text" id="inpKeyCustom" class="ui-input mono" style="flex:1;min-width:150px;" placeholder="Optional secret (leave empty to generate)">
+                  <input type="text" id="inpKeyCustom" class="ui-input mono" style="flex:1;min-width:150px;" placeholder="Your own key (leave empty to make one)">
                   <input type="number" id="inpKeyRpm" class="ui-input mono" style="width:95px;" placeholder="RPM">
                   <input type="number" id="inpKeyTpm" class="ui-input mono" style="width:95px;" placeholder="TPM">
                   <button class="btn btn-primary" id="btnCreateKey">Create key</button>
@@ -751,7 +858,7 @@
 
                 <div id="newKeyBanner" style="display:none;padding:10px 12px;border-radius:8px;border:1px solid var(--primary);background:color-mix(in srgb, var(--primary) 12%, transparent);margin-bottom:12px;align-items:center;justify-content:space-between;gap:10px;">
                   <div>
-                    <div style="font-size:11.5px;font-weight:600;color:var(--primary);">New API Key Created & Activated in Browser:</div>
+                    <div style="font-size:11.5px;font-weight:600;color:var(--primary);">New key created. Copy it now; it is only shown once:</div>
                     <code class="mono" style="font-size:13px;" id="newKeySecretText"></code>
                   </div>
                   <button class="btn btn-sm btn-secondary" id="btnCopyNewKey">Copy Key</button>
@@ -762,7 +869,7 @@
 
               <!-- Live Endpoint Tester -->
               <div class="app-card">
-                <div class="app-card-title">Interactive Route Tester</div>
+                <div class="app-card-title">Try the API</div>
                 <div style="display:flex;gap:8px;margin-bottom:10px;">
                   <select id="selRouteTest" class="ui-select mono" style="flex:1;">
                     <option value="POST:/v1/chat/completions">POST /v1/chat/completions (OpenAI Chat)</option>
@@ -786,7 +893,7 @@
               <div class="app-card">
                 <details id="detailsPrometheusLog">
                   <summary style="cursor:pointer;font-weight:500;font-size:13.5px;display:flex;align-items:center;justify-content:space-between;">
-                    <span>Server Telemetry & Prometheus <code>/metrics</code></span>
+                    <span>Server statistics (<code>/metrics</code>)</span>
                     <button type="button" class="btn btn-xs btn-outline" id="btnRefreshMetrics">Refresh</button>
                   </summary>
                   <div class="code-card" style="margin-top:10px;">
@@ -802,18 +909,28 @@
                 <div class="app-card-header">
                   <div>
                     <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Hardware</h2>
-                    <p class="app-item-desc">See which devices fLLM uses, limit the CPU instruction sets and check the compute kernels with a self test.</p>
+                    <p class="app-item-desc">The processor and graphics cards fLLM can use, and a few ways to check that they work.</p>
                   </div>
                   <div style="display:flex;gap:6px;">
-                    <button class="btn btn-sm btn-outline" id="btnMeasureBandwidth">Measure RAM Bandwidth</button>
-                    <button class="btn btn-sm btn-primary" id="btnRunSimdSelftest">Run SIMD Self-Test (21 Kernels)</button>
+                    <button class="btn btn-sm btn-outline" id="btnMeasureBandwidth">Measure memory speed</button>
+                    <button class="btn btn-sm btn-primary" id="btnRunSimdSelftest">Check the processor</button>
                   </div>
                 </div>
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Highest CPU instruction set</div>
-                    <div class="app-item-desc">Limits which instruction sets (AVX2, AVX-512, ...) the processor may use. Useful for comparing and testing.</div>
+                    <div class="app-item-title">Speed test</div>
+                    <div class="app-item-desc" id="speedTestResult">Runs a short answer with the loaded model and measures how fast it reads and writes.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-primary" id="btnSpeedTest">Run speed test</button>
+                  </div>
+                </div>
+
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Processor feature limit</div>
+                    <div class="app-item-desc">Stops the processor from using its newest features. Only useful when something misbehaves; leave it on Auto.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selSimdTierCap" class="ui-select mono">
@@ -830,8 +947,8 @@
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Repack weights for prompt processing</div>
-                    <div class="app-item-desc">Rearranges the weights so that long prompts are processed faster. Costs some memory.</div>
+                    <div class="app-item-title">Faster reading of long prompts</div>
+                    <div class="app-item-desc">Prepares the model so that long texts are read faster. Uses some extra memory.</div>
                   </div>
                   <div class="app-item-actions">
                     <label class="ui-switch"><input type="checkbox" id="chkCpuRepack" checked><span class="ui-switch-track"></span></label>
@@ -859,13 +976,13 @@
 
               <!-- Live Scheduler Slots -->
               <div class="app-card">
-                <div class="app-card-title">Concurrent requests (slots)</div>
+                <div class="app-card-title">Chats answered at the same time</div>
                 <div id="hwSlotsTableWrap"></div>
               </div>
 
               <!-- SIMD Kernel Self-Test Report -->
               <div class="app-card" id="simdSelftestCard" style="display:none;">
-                <div class="app-card-title" id="simdSelftestTitle">SIMD Kernel Self-Test Results</div>
+                <div class="app-card-title" id="simdSelftestTitle">Processor check</div>
                 <div id="simdSelftestTableWrap"></div>
               </div>
             </div>
@@ -873,11 +990,11 @@
             <!-- 5. TOKENIZER & JINJA (Tokenizer & Chat Templates) -->
             <div class="settings-pane" id="spane-tokenizer">
               <div class="app-card">
-                <div class="app-card-title">Live GGUF Tokenizer (<code>POST /tokenize</code>)</div>
+                <div class="app-card-title">See how the model splits text into tokens</div>
                 <textarea id="tokTextInput" class="ui-textarea" style="width:100%;" rows="3">Hello! How does the fLLM Rust engine tokenize this sentence?</textarea>
                 <div style="display:flex;align-items:center;justify-content:space-between;margin:10px 0;">
                   <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
-                    <input type="checkbox" id="chkTokSpecial" checked> Include BOS/Special Tokens
+                    <input type="checkbox" id="chkTokSpecial" checked> Include the special start token
                   </label>
                   <span class="mono" style="font-size:12px;color:var(--muted-foreground);" id="tokStatsLabel">0 tokens</span>
                 </div>
@@ -885,7 +1002,7 @@
               </div>
 
               <div class="app-card">
-                <div class="app-card-title">Jinja2 Chat-Template Renderer (<code>POST /apply-template</code>)</div>
+                <div class="app-card-title">See the text the model receives for a chat</div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                   <textarea id="jinjaMessagesInput" class="ui-textarea mono" rows="7" style="font-size:11.5px;">[
   {"role": "system", "content": "You are a helpful assistant."},
@@ -894,7 +1011,7 @@
                   <pre id="jinjaOutputPre" class="ui-textarea mono" style="font-size:11.5px;white-space:pre-wrap;overflow:auto;"></pre>
                 </div>
                 <div style="margin-top:10px;display:flex;justify-content:flex-end;">
-                  <button class="btn btn-sm btn-primary" id="btnRenderJinja">Render Template</button>
+                  <button class="btn btn-sm btn-primary" id="btnRenderJinja">Show the text</button>
                 </div>
               </div>
             </div>
@@ -902,8 +1019,8 @@
             <!-- 6. CLAUDE CODE & SDKS (routes/settings/claude-code.tsx) -->
             <div class="settings-pane" id="spane-claude-code">
               <div class="app-card">
-                <div class="app-card-title">Claude Code & External SDK Integration</div>
-                <p class="app-item-desc" style="margin-bottom:12px;">Because fLLM implements both the Anthropic Messages API (<code>/v1/messages</code>) and the OpenAI API (<code>/v1/chat/completions</code>), you can connect Claude Code, Cursor, Continue, or the official SDKs directly to your local Rust server.</p>
+                <div class="app-card-title">Connect other apps</div>
+                <p class="app-item-desc" style="margin-bottom:12px;">fLLM speaks the same languages as the big AI services, so coding tools such as Claude Code, Cursor or Continue, and the official libraries, can use your model. Copy one of these examples.</p>
                 <div style="display:flex;gap:6px;margin-bottom:10px;" id="sdkSnippetTabs">
                   <button class="btn btn-sm btn-secondary" data-sdk="claude">Claude Code CLI</button>
                   <button class="btn btn-sm btn-ghost" data-sdk="python">OpenAI Python</button>
@@ -922,27 +1039,27 @@
               <div class="app-card">
                 <div class="app-card-header">
                   <div>
-                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">fllm.rs Local GGUF Provider</h2>
-                    <p class="app-item-desc">Inspect the active GGUF model metadata, manage model aliases, and view the embedded Jinja2 chat template.</p>
+                    <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">Model details</h2>
+                    <p class="app-item-desc">Facts about the loaded model, other names apps can use for it, and the chat format it carries.</p>
                   </div>
                 </div>
                 <div id="providerModelFacts"></div>
 
                 <div class="app-card-item">
                   <div class="app-item-info">
-                    <div class="app-item-title">Model Aliases (<code>/api/copy</code> & <code>/api/delete</code>)</div>
-                    <div class="app-item-desc">Map names like <code>gpt-4o-mini</code> or <code>claude-3-5-sonnet</code> to your local GGUF model.</div>
+                    <div class="app-item-title">Other names</div>
+                    <div class="app-item-desc">Apps that ask for a name like <code>gpt-4o-mini</code> get this model.</div>
                   </div>
                   <div class="app-item-actions">
                     <input type="text" id="inpNewAlias" class="ui-input mono" style="width:160px;" placeholder="e.g. claude-3-sonnet">
-                    <button class="btn btn-sm btn-primary" id="btnAddAlias">Add Alias</button>
+                    <button class="btn btn-sm btn-primary" id="btnAddAlias">Add name</button>
                   </div>
                 </div>
                 <div id="providerAliasesList" style="padding-top:8px;display:flex;gap:6px;flex-wrap:wrap;"></div>
               </div>
 
               <div class="app-card">
-                <div class="app-card-title">Embedded GGUF Chat Template & Modelfile</div>
+                <div class="app-card-title">Chat format of the model</div>
                 <div class="code-card" style="margin:0;">
                   <pre id="preProviderTemplate" style="max-height:220px;white-space:pre-wrap;"></pre>
                 </div>

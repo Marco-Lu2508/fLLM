@@ -59,6 +59,28 @@ If the model that should load cannot be used (an architecture fLLM does not supp
 still opens on the Models page and shows the reason; the model is forgotten so that the next start does not fail the same way. A model
 is also checked before the server is restarted with it.
 
+**Load options.** *Load* opens a dialog with an *Advanced* section: context length, layers on the graphics card (a number or
+`all`), processor threads, the memory type of the conversation (f16, q8_0, q4_0, ...) and how many chats are answered at once.
+Everything left on *auto* is chosen by the server. The choices are remembered per model file and shown on the loaded-model card.
+Combinations that cannot work (for example q4_0 conversation memory on a Vulkan, DirectX 12 or Metal device, or GPU layers while
+running on the processor) are refused with a message. There is no switch for prefix caching: the engine has no such option, so none is offered.
+
+**Unload.** *Unload* on the loaded-model card restarts the server on the same port without a model, keeping all other options.
+*Settings > Models* has "Unload the model when idle" (minutes without a request; 0 never); the next *Load* works as usual. Chat and
+Code ask you to load a model while none is loaded.
+
+**Downloads.** Downloads are queued: one runs, the others wait. Each can be paused, resumed or cancelled; the finished part stays on
+disk, so a later download continues where it stopped. The list shows speed and time left and is kept by the server, so it is the
+same after a page reload (but not after the server restarts). *Settings > Models* sets the models folder for new downloads
+(models that are already downloaded stay where they are).
+
+**Browse.** The *Browse* buttons open the file or folder dialog of the operating system on the machine that runs fLLM (PowerShell on
+Windows, `osascript` on macOS, `zenity` or `kdialog` on Linux; without one the button explains that and you type the path). It works
+from that machine only.
+
+**Model details.** The file list of a Hugging Face repository shows the start of the model card, the quantization of each file, its
+size and whether it should fit into the free memory, with the files that fit first.
+
 **Your own GGUF files.** The *Add a model file* card takes the path of a .gguf file, or of a folder (its .gguf files are added). The files stay where they are and appear in the list of models on the computer; *Remove* only takes them off the list.
 
 **Hugging Face account.** Private and gated models need an access token: paste one (read access is enough) into the Hugging Face card
@@ -69,8 +91,10 @@ so downloads from the page, `fllm-rs pull` and `fllm-rs run` all use it. A `HF_T
 installer of this system and start it (Windows: the setup program, Linux: the AppImage or the package).
 ## Settings
 
-Appearance, the local API server (endpoint, rate limits, API keys, route tester), hardware (devices, CPU instruction set, memory
-bandwidth, a kernel self test), the tokenizer and chat template tools, and ready-made snippets for Claude Code, the OpenAI SDKs and curl.
+Grouped as General, Appearance, Models (models folder, idle unload), Hardware (devices, a speed test of the loaded model, processor
+feature limit, memory speed, a processor check), Server and API (address, request limits, API keys, a tester), Logs (the latest
+server messages with refresh and copy), and under More: model details, text tools and ready-made examples for connecting Claude Code,
+the OpenAI libraries and curl.
 
 ## Who may change things
 

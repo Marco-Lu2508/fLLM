@@ -4,12 +4,17 @@
     function updateHero(data) {
       const m = data.model || {};
       const mt = data.metrics || {};
-      const nf = (value, digits = 1) => value.toLocaleString('de-DE', { maximumFractionDigits: digits });
+      const nf = (value, digits = 1) => value.toLocaleString('en-US', { maximumFractionDigits: digits });
       const params = Number(m.parameters || 0);
-      const size = params >= 1e9 ? `${nf(params / 1e9)} Milliarden Parameter` : params > 0 ? `${nf(params / 1e6, 0)} Millionen Parameter` : '';
-      const facts = [size, m.quantization, m.max_context ? `${nf(m.max_context, 0)} Token Kontext` : ''].filter(Boolean);
-      $('welcomeHeading').textContent = state.selectedModel || m.name || 'Bereit';
-      $('welcomeSub').textContent = `Running locally on this computer${facts.length ? ': ' + facts.join(', ') : ''}.`;
+      const size = params >= 1e9 ? `${nf(params / 1e9)} billion parameters` : params > 0 ? `${nf(params / 1e6, 0)} million parameters` : '';
+      const facts = [size, m.quantization, m.max_context ? `${nf(m.max_context, 0)} tokens of context` : ''].filter(Boolean);
+      if (data.setup) {
+        $('welcomeHeading').textContent = 'No model loaded';
+        $('welcomeSub').textContent = 'Open Models and load one to start chatting.';
+      } else {
+        $('welcomeHeading').textContent = state.selectedModel || m.name || 'Ready';
+        $('welcomeSub').textContent = `Running locally on this computer${facts.length ? ': ' + facts.join(', ') : ''}.`;
+      }
 
       // tokens per second from the counters of the server (its own clock, so a slow poll does not skew it)
       const tokens = Number(mt.generated_tokens_total || 0);
@@ -75,8 +80,8 @@
 
         // Provider facts in Settings > fllm.rs
         $('providerModelFacts').innerHTML = `
-          <div class="app-card-item"><div class="app-item-info"><div class="app-item-title">Architecture & Parameters</div><div class="app-item-desc mono">${escapeHtml(m.arch)} · ${escapeHtml(m.parameter_size)} (${Number(m.parameters || 0).toLocaleString()} params) · ${formatBytes(m.size_bytes)}</div></div><span class="quant-chip">${escapeHtml(m.quantization)}</span></div>
-          <div class="app-card-item"><div class="app-item-info"><div class="app-item-title">Context Window & Vocabulary</div><div class="app-item-desc mono">${m.max_context} tokens (trained ${m.trained_context}) · ${m.vocab_size} vocab · Tool parser: ${escapeHtml(m.tool_parser)}</div></div></div>
+          <div class="app-card-item"><div class="app-item-info"><div class="app-item-title">Model</div><div class="app-item-desc mono">${escapeHtml(m.arch)} · ${escapeHtml(m.parameter_size)} (${Number(m.parameters || 0).toLocaleString()} parameters) · ${formatBytes(m.size_bytes)}</div></div><span class="quant-chip">${escapeHtml(m.quantization)}</span></div>
+          <div class="app-card-item"><div class="app-item-info"><div class="app-item-title">Conversation length</div><div class="app-item-desc mono">${m.max_context} tokens now (the model was trained for ${m.trained_context}) · ${m.vocab_size} known word pieces</div></div></div>
         `;
         $('providerAliasesList').innerHTML = (m.aliases || []).map((a) => `
           <span class="backend-chip">${escapeHtml(a)} <button data-del-alias="${escapeHtml(a)}" style="color:var(--destructive);margin-left:4px;">✕</button></span>
@@ -114,18 +119,18 @@
         }
         $('apiKeysTableContainer').innerHTML = `
           <table class="app-table">
-            <thead><tr><th>ID</th><th>Label</th><th>Key</th><th>Rate Limit</th><th>Requests</th><th>Tokens</th><th>429s</th><th></th></tr></thead>
+            <thead><tr><th>ID</th><th>Name</th><th>Key</th><th>Limit</th><th>Requests</th><th>Tokens</th><th>Refused</th><th></th></tr></thead>
             <tbody>
               ${keys.map((k) => `
                 <tr>
                   <td class="mono">${escapeHtml(k.id)}</td>
                   <td><strong>${escapeHtml(k.label)}</strong></td>
                   <td class="mono">${escapeHtml(k.masked)}</td>
-                  <td class="mono">${k.rpm_limit ? k.rpm_limit + ' pro Minute' : 'Standard'}</td>
+                  <td class="mono">${k.rpm_limit ? k.rpm_limit + ' per minute' : 'Default'}</td>
                   <td class="mono tabular">${k.requests_accepted}</td>
                   <td class="mono tabular">${k.tokens_used}</td>
                   <td class="mono tabular">${k.rejected}</td>
-                  <td><button class="btn btn-xs btn-destructive" data-revoke-key="${escapeHtml(k.id)}">Widerrufen</button></td>
+                  <td><button class="btn btn-xs btn-destructive" data-revoke-key="${escapeHtml(k.id)}">Revoke</button></td>
                 </tr>
               `).join('')}
             </tbody>
