@@ -216,21 +216,6 @@ repo = "unsloth/gemma-3-27b-it-GGUF"
 default = "Q4_K_M"
 
 [[models]]
-name = "gemma4:4b"
-repo = "unsloth/gemma-4-4b-it-GGUF"
-default = "Q4_K_M"
-
-[[models]]
-name = "gemma4:9b"
-repo = "unsloth/gemma-4-9b-it-GGUF"
-default = "Q4_K_M"
-
-[[models]]
-name = "gemma4:27b"
-repo = "unsloth/gemma-4-27b-it-GGUF"
-default = "Q4_K_M"
-
-[[models]]
 name = "k2-horizon:4b"
 repo = "IFM/K2-Horizon-3.7B-GGUF"
 default = "Q4_K_M"

@@ -161,6 +161,63 @@ fn token() -> Option<String> {
         .map(|t| t.trim().to_owned())
         .filter(|t| !t.is_empty())
 }
+/// Where the access token is kept (the file the Hugging Face tools use too, so one login serves both).
+fn token_file() -> PathBuf {
+    hub_home().join("token")
+}
+
+/// The Hugging Face account of the token in use: `(name, where the token comes from)`; `None` without a token.
+pub fn account() -> Result<Option<(String, &'static str)>, String> {
+    let Some(token) = token() else {
+        return Ok(None);
+    };
+    let source = if env::var("HF_TOKEN").is_ok() || env::var("HUGGING_FACE_HUB_TOKEN").is_ok() { "environment" } else { "saved" };
+    whoami(&token).map(|name| Some((name, source)))
+}
+
+fn whoami(token: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(30))
+        .user_agent("fllm-rust/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(url(&["api", "whoami-v2"])?)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| format!("cannot reach Hugging Face: {e}"))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Hugging Face does not accept this token".into());
+    }
+    if !response.status().is_success() {
+        return Err(format!("Hugging Face answered {}", response.status()));
+    }
+    let body: Value = response.json().map_err(|e| e.to_string())?;
+    Ok(body.get("name").and_then(Value::as_str).unwrap_or("unknown").to_owned())
+}
+
+/// Checks `token` with the Hub and keeps it for later downloads. An empty token signs out.
+pub fn save_token(token: &str) -> Result<Option<String>, String> {
+    let token = token.trim();
+    let file = token_file();
+    if token.is_empty() {
+        let _ = fs::remove_file(&file);
+        return Ok(None);
+    }
+    let name = whoami(token)?;
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    fs::write(&file, token).map_err(|e| format!("cannot save the token: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&file, fs::Permissions::from_mode(0o600));
+    }
+    Ok(Some(name))
+}
+
 fn is_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -1457,6 +1514,10 @@ fn studio_file() -> PathBuf {
 pub fn last_studio_model() -> Option<String> {
     let text = fs::read_to_string(studio_file()).ok()?;
     serde_json::from_str::<Value>(&text).ok()?.get("last_model")?.as_str().map(str::to_owned)
+}
+
+pub fn forget_studio_model() {
+    let _ = fs::remove_file(studio_file());
 }
 
 pub fn remember_studio_model(model: &str) {

@@ -318,13 +318,35 @@ fn studio_args(rest: &[String]) -> Vec<String> {
             None => env::set_var("FLLM_STUDIO_SETUP", "1"),
         },
     }
+    env::set_var("FLLM_STUDIO", "1");
     if open {
         env::set_var("FLLM_OPEN_BROWSER", "1");
     }
     args
 }
 
+/// The Studio must stay usable when its model cannot be loaded (unsupported architecture, broken file, not enough memory): it then
+/// serves the model page with the reason instead of ending, so the app never sits in front of a window that stays empty.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let result = run();
+    if let Err(error) = &result {
+        if env::var_os("FLLM_STUDIO").is_some() {
+            let args = env::args().collect::<Vec<_>>();
+            let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let host = after("--host").unwrap_or_else(|| "127.0.0.1".to_owned());
+            let port = after("--port").and_then(|p| p.parse().ok()).unwrap_or(8000);
+            let message = error.to_string();
+            eprintln!("error: {message}");
+            fllm_engine::hub::forget_studio_model();
+            if fllm_engine::server::serve_setup(&host, port, Some(message)).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    result
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if matches!(args.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         println!("{}", fllm_engine::version::long_version());
@@ -787,7 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if model_path.is_none() && env::var_os("FLLM_STUDIO_SETUP").is_some() {
-        if let Err(e) = fllm_engine::server::serve_setup(&host, port) {
+        if let Err(e) = fllm_engine::server::serve_setup(&host, port, None) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }

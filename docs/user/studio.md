@@ -55,6 +55,16 @@ files with a hint whether they fit into the free memory, and download with a pro
 model: the page asks first, the server starts a new process with the same options and the new model, and the page reloads when it is
 back. This needs the server to run in a terminal or service you can restart; the new process takes over the port.
 
+If the model that should load cannot be used (an architecture fLLM does not support yet, a damaged file, not enough memory), the Studio
+still opens on the Models page and shows the reason; the model is forgotten so that the next start does not fail the same way. A model
+is also checked before the server is restarted with it.
+
+**Hugging Face account.** Private and gated models need an access token: paste one (read access is enough) into the Hugging Face card
+of the Models page. It is checked with Hugging Face and kept in the same file the Hugging Face tools use (`~/.cache/huggingface/token`),
+so downloads from the page, `fllm-rs pull` and `fllm-rs run` all use it. A `HF_TOKEN` variable wins over the saved token.
+
+**Updates.** The Studio asks GitHub for a newer release once per start. If there is one, the Models page offers to download the
+installer of this system and start it (Windows: the setup program, Linux: the AppImage or the package).
 ## Settings
 
 Appearance, the local API server (endpoint, rate limits, API keys, route tester), hardware (devices, CPU instruction set, memory

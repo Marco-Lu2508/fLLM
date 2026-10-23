@@ -4,11 +4,14 @@
 use super::*;
 use axum::routing::{delete, get, post};
 
+static PROBLEM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn status() -> Value {
     json!({
         "status": "ok",
         "ready": true,
         "setup": true,
+        "setup_error": PROBLEM.get(),
         "version": env!("CARGO_PKG_VERSION"),
         "build_info": crate::version::long_version(),
         "model": {
@@ -30,6 +33,10 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/status", get(|| async { Json(status()) }))
         .route("/api/studio/models", get(|| api::studio::models_hub_with(Value::Null)))
         .route("/api/studio/hardware", get(api::studio::hardware))
+        .route("/api/studio/hf-account", get(api::studio::hf_account).post(api::studio::hf_login))
+        .route("/api/studio/open-url", post(api::studio::open_url))
+        .route("/api/studio/update", get(api::studio::update_status))
+        .route("/api/studio/update/install", post(api::studio::update_install))
         .route("/api/studio/hf-files", get(api::studio::hf_files))
         .route("/api/studio/models/pull", post(api::studio::pull_model))
         .route("/api/studio/models/load", post(api::studio::load_model))
@@ -39,8 +46,12 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .layer(axum::middleware::from_fn_with_state(context, http::layer))
 }
 
-/// Serves the page and the model routes on `host:port` until the process is stopped.
-pub fn serve_setup(host: &str, port: u16) -> Result<(), String> {
+/// Serves the page and the model routes on `host:port` until the process is stopped. `problem` is why there is no model (the one
+/// that was meant to load failed): the page shows it.
+pub fn serve_setup(host: &str, port: u16, problem: Option<String>) -> Result<(), String> {
+    if let Some(problem) = problem {
+        let _ = PROBLEM.set(problem);
+    }
     let address = listen_address(host, port)?;
     let context = http::HttpContext::new(options::HttpOptions::default());
     let ready = Arc::new(AtomicBool::new(false));

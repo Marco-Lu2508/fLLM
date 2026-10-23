@@ -171,5 +171,6 @@
     renderPresets();
     updateRouteTesterSample();
     refreshStudioStatus().then(() => { if (!state.setup) loadWorkspace(); });
+    setTimeout(() => { state.updateChecked = true; checkUpdate().then(() => { if (state.update?.newer) toast(`Version ${state.update.latest} is available: see Models.`); }); }, 4000);
     if (window.matchMedia('(max-width: 760px)').matches) toggleSidebar(); // on a phone the rail would cover the page
     setInterval(() => { if (!document.hidden) refreshStudioStatus(); }, 2000); // a hidden tab asks nothing

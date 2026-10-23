@@ -48,6 +48,8 @@
         const wasSetup = state.setup;
         state.setup = Boolean(data.setup);
         $('setupBanner').style.display = state.setup ? '' : 'none';
+        $('setupError').style.display = data.setup_error ? '' : 'none';
+        if (data.setup_error) $('setupError').textContent = `The model could not be loaded: ${data.setup_error}`;
         $('loadedModelCard').style.display = state.setup ? 'none' : '';
         if (state.setup && wasSetup === undefined) switchSurface('hub');
         updateHero(data);

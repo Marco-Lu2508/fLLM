@@ -42,7 +42,6 @@ const FAMILY_DEFAULTS: &[(&str, &str)] = &[
     ("qwen3.6", "qwen3.6:35b-a3b"),
     ("gemma2", "gemma2:9b"),
     ("gemma3", "gemma3:4b"),
-    ("gemma4", "gemma4:9b"),
     ("mistral", "mistral:7b"),
     ("mistral-nemo", "mistral-nemo:12b"),
     ("mistral-small", "mistral-small:24b"),
@@ -485,7 +484,7 @@ quants = ["Q8_0", "Q4_K_M"]
         assert!(all.len() >= 60, "expected rich model catalog, got {}", all.len());
         for family in [
             "llama3:8b", "llama3.1:8b", "llama3.2:3b", "llama3.3:70b", "llama4:scout",
-            "qwen2.5:7b", "qwen3:8b", "qwen3.5:9b", "gemma2:9b", "gemma3:4b", "gemma4:9b",
+            "qwen2.5:7b", "qwen3:8b", "qwen3.5:9b", "gemma2:9b", "gemma3:4b",
             "mistral:7b", "mixtral:8x7b", "devstral:24b", "codestral:22b",
             "deepseek-r1:8b", "deepseek-v3:671b", "phi3:3.8b", "phi4:14b",
             "smollm2:1.7b", "granite3:8b", "command-r:35b", "internlm3:8b",

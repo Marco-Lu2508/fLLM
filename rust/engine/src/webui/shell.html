@@ -427,7 +427,18 @@
 
         <div class="hub-scroll">
           <div class="hub-container">
+            <div class="app-card" id="updateCard" style="display:none;">
+              <div class="app-card-title">Update available</div>
+              <p class="app-item-desc" id="updateText"></p>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <button class="btn btn-primary" id="btnUpdateInstall">Download and install</button>
+                <button class="btn btn-ghost" id="btnUpdatePage">What is new</button>
+                <span class="app-item-desc mono" id="updateProgress"></span>
+              </div>
+            </div>
+
             <div class="app-card" id="setupBanner" style="display:none;">
+              <div class="msg-error" id="setupError" style="display:none;margin-bottom:8px;"></div>
               <h2 style="font-size:16px;font-weight:600;color:var(--foreground);">Welcome to fLLM</h2>
               <p class="app-item-desc">No model is loaded yet. Pick one below: a suggestion fits most computers, or search Hugging Face. "Download and load" gets you chatting in a minute.</p>
             </div>
@@ -437,6 +448,17 @@
               <p class="app-item-desc mono" id="computerSummary">Looking at the hardware ...</p>
               <div id="recommendedCards"></div>
               <details style="margin-top:12px;"><summary class="app-item-desc" style="cursor:pointer;">Details for a bug report</summary><pre class="mono" id="computerDetails" style="white-space:pre-wrap;font-size:11px;margin:8px 0;"></pre><button class="btn btn-sm btn-outline" id="btnCopyDiag">Copy</button></details>
+            </div>
+
+            <div class="app-card" id="hfAccountCard">
+              <div class="app-card-title">Hugging Face account</div>
+              <p class="app-item-desc" id="hfAccountText">Checking ...</p>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <input type="password" id="hfTokenInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="Paste an access token (hf_...)" autocomplete="off">
+                <button class="btn btn-primary" id="btnHfSave">Sign in</button>
+                <button class="btn btn-outline" id="btnHfSignOut" style="display:none;">Sign out</button>
+              </div>
+              <p class="app-item-desc">A token is needed for private and gated models. Read access is enough. <button class="btn btn-sm btn-ghost" id="btnHfTokenPage">Create a token</button></p>
             </div>
 
             <div class="app-card" id="loadedModelCard">

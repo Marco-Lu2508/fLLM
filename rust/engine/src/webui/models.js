@@ -38,6 +38,8 @@
         if (!res.ok) return;
         state.modelsHub = await res.json();
         renderHub();
+        refreshAccount();
+        if (!state.updateChecked) { state.updateChecked = true; checkUpdate(); }
         if (!state.hardware) { // looking at the hardware can take a moment: the page is shown first
           try {
             const hw = await apiFetch('/api/studio/hardware');
@@ -253,10 +255,59 @@
       $('switchText').textContent = 'Check the terminal where fLLM runs. If it stopped, start it again, then reload this page.';
     }
 
+    // ---- Hugging Face account ------------------------------------------------------------------------------
+    async function refreshAccount() {
+      try {
+        const d = await (await apiFetch('/api/studio/hf-account')).json();
+        $('hfAccountText').textContent = d.signed_in
+          ? `Signed in as ${d.name}${d.source === 'environment' ? ' (token from the environment)' : ''}.`
+          : (d.error ? `The saved token does not work: ${d.error}` : 'Not signed in. Public models need no account.');
+        $('btnHfSignOut').style.display = d.signed_in && d.source === 'saved' ? '' : 'none';
+      } catch { $('hfAccountText').textContent = 'The account could not be checked.'; }
+    }
+
+    // ---- updates -------------------------------------------------------------------------------------------------
+    async function checkUpdate() {
+      try {
+        const d = await (await apiFetch('/api/studio/update')).json();
+        state.update = d;
+        const canInstall = Boolean(d.installer);
+        $('updateCard').style.display = d.newer ? '' : 'none';
+        if (d.newer) {
+          $('updateText').textContent = `Version ${d.latest} is available (you have ${d.current}).${canInstall ? '' : ' There is no installer for this system yet; open the release page.'}`;
+          $('btnUpdateInstall').style.display = canInstall ? '' : 'none';
+        }
+        const i = d.install || {};
+        $('updateProgress').textContent = i.state === 'downloading' ? `Downloading ${formatBytes(i.written)}${i.total ? ` of ${formatBytes(i.total)}` : ''} ...`
+          : i.state === 'started' ? 'The installer has started. Close fLLM and follow its steps.'
+          : i.state === 'failed' ? `Failed: ${i.error}` : '';
+        return i.state;
+      } catch { return 'idle'; }
+    }
     // ---- events ---------------------------------------------------------------------------------------------------
     $('hubSearchInput').addEventListener('input', renderHub);
     $('btnCopyDiag').addEventListener('click', () => { navigator.clipboard.writeText($('computerDetails').textContent).then(() => toast('Copied')); });
     $('btnRefreshHub').addEventListener('click', refreshHub);
+    $('btnHfSave').addEventListener('click', async () => {
+      const res = await apiFetch('/api/studio/hf-account', { method: 'POST', body: { token: $('hfTokenInput').value } });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast(d.error?.message || 'The token was not accepted.'); return; }
+      $('hfTokenInput').value = '';
+      toast(d.signed_in ? `Signed in as ${d.name}` : 'Signed out');
+      refreshAccount();
+    });
+    $('btnHfSignOut').addEventListener('click', async () => {
+      await apiFetch('/api/studio/hf-account', { method: 'POST', body: { token: '' } });
+      refreshAccount();
+    });
+    const openPage = (url) => apiFetch('/api/studio/open-url', { method: 'POST', body: { url } });
+    $('btnHfTokenPage').addEventListener('click', () => openPage('https://huggingface.co/settings/tokens'));
+    $('btnUpdatePage').addEventListener('click', () => openPage(state.update?.page || 'https://github.com/Marco-Lu2508/fLLM/releases'));
+    $('btnUpdateInstall').addEventListener('click', async () => {
+      const res = await apiFetch('/api/studio/update/install', { method: 'POST' });
+      if (!res.ok) { toast((await res.json().catch(() => ({}))).error?.message || 'The download could not be started.'); return; }
+      while ((await checkUpdate()) === 'downloading') await sleep(800);
+    });
     $('btnSearchHf').addEventListener('click', searchHf);
     $('hfRepoInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchHf(); });
     $('surface-hub').addEventListener('click', async (e) => {

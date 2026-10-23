@@ -438,9 +438,15 @@ pub(in crate::server) async fn models_hub_with(loaded: Value) -> Response {
     }
 }
 
+/// General-purpose chat models that are known to run well, best first: what the Studio suggests when they fit into the memory.
+const STARTER_MODELS: &[&str] = &[
+    "qwen3.5:9b", "qwen3:14b", "gpt-oss:20b", "gemma3:12b", "qwen3:8b", "llama3.1:8b", "qwen3.5:4b", "gemma3:4b", "phi4-mini:3.8b", "llama3.2:3b", "qwen3.5:0.8b",
+];
+
 /// The model page data: the loaded model (`Null` when the server runs without one), downloads and suggestions.
 pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
     let avail_mem = crate::catalog::available_memory_bytes();
+    let has_discrete_gpu = crate::devices::list_devices().iter().any(|d| d.dev_type == crate::devices::DeviceType::Gpu);
     let cached: Vec<Value> = crate::hub::list_cache()
         .unwrap_or_default()
         .into_iter()
@@ -501,14 +507,17 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
         .collect();
 
     // the largest models that run comfortably (at 4 bit they take at most 40 % of the memory, so they also answer quickly), one per family
-    let mut picks: Vec<&Value> = catalog
-        .iter()
-        .filter(|e| {
-            let q4 = crate::catalog::estimate_quant_bytes(e["parameters_billion"].as_f64().unwrap_or(1000.0), "Q4_K_M");
-            avail_mem > 0 && q4 as f64 * 2.5 <= avail_mem as f64
-        })
-        .collect();
-    picks.sort_by(|a, b| b["parameters_billion"].as_f64().partial_cmp(&a["parameters_billion"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    let mut picks: Vec<&Value> = Vec::new();
+    for wanted in STARTER_MODELS {
+        let Some(entry) = catalog.iter().find(|e| e["id"] == *wanted) else { continue };
+        let params = entry["parameters_billion"].as_f64().unwrap_or(1000.0);
+        let q4 = crate::catalog::estimate_quant_bytes(params, "Q4_K_M");
+        // without a discrete graphics card the processor does the work: a model above 10 billion parameters would answer slowly
+        let fast_enough = has_discrete_gpu || params <= 10.0;
+        if avail_mem > 0 && fast_enough && q4 as f64 * 2.5 <= avail_mem as f64 {
+            picks.push(entry);
+        }
+    }
     let mut families = Vec::new();
     let recommended: Vec<Value> = picks
         .into_iter()
@@ -521,8 +530,7 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
         })
         .take(3)
         .map(|e| e["id"].clone())
-        .collect();
-    json!({
+        .collect();    json!({
         "available_memory_bytes": avail_mem,
         "recommended": recommended,
         "loaded": loaded,
@@ -608,6 +616,39 @@ pub(in crate::server) async fn model_progress() -> Response {
     }
 }
 
+/// `GET /api/studio/hf-account`: whose Hugging Face token is in use (private and gated models need one).
+pub(in crate::server) async fn hf_account() -> Response {
+    match tokio::task::spawn_blocking(crate::hub::account).await {
+        Ok(Ok(Some((name, source)))) => Json(json!({"signed_in": true, "name": name, "source": source})).into_response(),
+        Ok(Ok(None)) => Json(json!({"signed_in": false})).into_response(),
+        Ok(Err(error)) => Json(json!({"signed_in": false, "error": error})).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `POST /api/studio/hf-account` with `{token}`: checks the token with Hugging Face and keeps it; an empty token signs out.
+pub(in crate::server) async fn hf_login(Json(body): Json<Value>) -> Response {
+    let token = body.get("token").and_then(Value::as_str).unwrap_or_default().to_owned();
+    match tokio::task::spawn_blocking(move || crate::hub::save_token(&token)).await {
+        Ok(Ok(Some(name))) => Json(json!({"signed_in": true, "name": name, "source": "saved"})).into_response(),
+        Ok(Ok(None)) => Json(json!({"signed_in": false})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::BAD_REQUEST, &error),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `POST /api/studio/open-url` with `{url}`: opens a page of Hugging Face or of the fLLM project in the browser of the computer (the
+/// window of the desktop app cannot open links itself).
+pub(in crate::server) async fn open_url(Json(body): Json<Value>) -> Response {
+    let url = body.get("url").and_then(Value::as_str).unwrap_or_default();
+    let allowed = ["https://huggingface.co/", "https://github.com/Marco-Lu2508/fLLM"];
+    if !allowed.iter().any(|prefix| url.starts_with(prefix)) {
+        return api_error(StatusCode::BAD_REQUEST, "only pages of Hugging Face and of the fLLM project can be opened");
+    }
+    super::super::open_browser(url);
+    Json(json!({"status": "opened"})).into_response()
+}
+
 /// `GET /api/studio/models/search?q=...`: Hugging Face repositories with GGUF files, most downloaded first.
 pub(in crate::server) async fn search_models(Query(query): Query<HashMap<String, String>>) -> Response {
     let text = query.get("q").map(|s| s.trim().to_owned()).unwrap_or_default();
@@ -655,6 +696,18 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
         Ok(Err(err)) => return api_error(StatusCode::BAD_REQUEST, &err),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
+    // a model the engine cannot use is turned down here, while the current one is still running
+    let checked = path.clone();
+    let usable = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mapping = fllm_gguf_probe::MappedGguf::open(&checked).map_err(|e| e.to_string())?;
+        crate::tokenizer::TokenizerBundle::from_gguf(&mapping).map(|_| ())
+    })
+    .await;
+    match usable {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => return api_error(StatusCode::BAD_REQUEST, &format!("fLLM cannot use this model yet: {reason}")),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
     let model = path.display().to_string();
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -862,4 +915,175 @@ mod tests {
         let out = relaunch_args_from(&args(&["serve"]), "m.gguf");
         assert_eq!(out, args(&["serve", "--model", "m.gguf"]));
     }
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------
+// Updates: the app asks GitHub for a newer release and can fetch and start its installer
+// ------------------------------------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct UpdateInstall {
+    /// `idle`, `downloading`, `started` or `failed`
+    state: &'static str,
+    written: u64,
+    total: u64,
+    message: String,
+}
+
+static UPDATE_INSTALL: std::sync::Mutex<UpdateInstall> = std::sync::Mutex::new(UpdateInstall { state: "idle", written: 0, total: 0, message: String::new() });
+
+fn version_parts(version: &str) -> Vec<u64> {
+    version.trim_start_matches('v').split(['.', '-']).map_while(|part| part.parse().ok()).collect()
+}
+
+/// The installer of this system in the assets of a release: `(file name, download URL)`.
+fn installer_asset(assets: &[Value]) -> Option<(String, String)> {
+    let wanted: &[&str] = if cfg!(windows) {
+        &["-setup.exe"]
+    } else if cfg!(target_os = "linux") {
+        &[".AppImage", ".deb"]
+    } else {
+        &[]
+    };
+    wanted.iter().find_map(|suffix| {
+        assets.iter().find_map(|asset| {
+            let name = asset.get("name")?.as_str()?;
+            let url = asset.get("browser_download_url")?.as_str()?;
+            name.ends_with(suffix).then(|| (name.to_owned(), url.to_owned()))
+        })
+    })
+}
+
+fn check_update() -> Result<Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("fllm-rust/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let releases: Vec<Value> = client
+        .get("https://api.github.com/repos/Marco-Lu2508/fLLM/releases?per_page=10")
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("cannot ask GitHub for updates: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+    let current = env!("CARGO_PKG_VERSION");
+    let newest = releases
+        .iter()
+        .filter(|r| !r.get("draft").and_then(Value::as_bool).unwrap_or(false))
+        .max_by_key(|r| version_parts(r.get("tag_name").and_then(Value::as_str).unwrap_or_default()));
+    let Some(release) = newest else {
+        return Ok(json!({"current": current, "newer": false}));
+    };
+    let tag = release.get("tag_name").and_then(Value::as_str).unwrap_or_default();
+    let newer = version_parts(tag) > version_parts(current);
+    let assets = release.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let installer = installer_asset(&assets);
+    Ok(json!({
+        "current": current,
+        "latest": tag.trim_start_matches('v'),
+        "newer": newer,
+        "page": release.get("html_url"),
+        "installer": installer.map(|(name, _)| name),
+    }))
+}
+
+/// `GET /api/studio/update`: is there a newer release, and how far is the installer download.
+pub(in crate::server) async fn update_status() -> Response {
+    match tokio::task::spawn_blocking(check_update).await {
+        Ok(Ok(mut value)) => {
+            let install = UPDATE_INSTALL.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            value["install"] = json!({"state": if install.state.is_empty() { "idle" } else { install.state }, "written": install.written, "total": install.total, "error": install.message});
+            Json(value).into_response()
+        }
+        Ok(Err(error)) => Json(json!({"current": env!("CARGO_PKG_VERSION"), "newer": false, "error": error})).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+fn set_install(state: &'static str, written: u64, total: u64, message: &str) {
+    *UPDATE_INSTALL.lock().unwrap_or_else(|e| e.into_inner()) = UpdateInstall { state, written, total, message: message.to_owned() };
+}
+
+fn fetch_installer() -> Result<(), String> {
+    let releases: Vec<Value> = reqwest::blocking::Client::builder()
+        .user_agent("fllm-rust/0.1")
+        .build()
+        .map_err(|e| e.to_string())?
+        .get("https://api.github.com/repos/Marco-Lu2508/fLLM/releases?per_page=10")
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("cannot ask GitHub for updates: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+    let release = releases
+        .iter()
+        .filter(|r| !r.get("draft").and_then(Value::as_bool).unwrap_or(false))
+        .max_by_key(|r| version_parts(r.get("tag_name").and_then(Value::as_str).unwrap_or_default()))
+        .ok_or("no release found")?;
+    let assets = release.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (name, url) = installer_asset(&assets).ok_or("this release has no installer for this system")?;
+    let target = std::env::temp_dir().join(&name);
+    let mut response = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(3600))
+        .user_agent("fllm-rust/0.1")
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(&url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("cannot download the installer: {e}"))?;
+    let total = response.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&target).map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+    let mut written = 0u64;
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut response, &mut buffer).map_err(|e| format!("download interrupted: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buffer[..n]).map_err(|e| e.to_string())?;
+        written += n as u64;
+        set_install("downloading", written, total, "");
+    }
+    drop(file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+    }
+    // the installer asks to close the app before it replaces it
+    let started = if cfg!(windows) {
+        std::process::Command::new(&target).spawn().map(|_| ())
+    } else if name.ends_with(".AppImage") {
+        std::process::Command::new(&target).spawn().map(|_| ())
+    } else {
+        std::process::Command::new("xdg-open").arg(&target).spawn().map(|_| ())
+    };
+    started.map_err(|e| format!("cannot start the installer {}: {e}", target.display()))?;
+    set_install("started", written, total, &target.display().to_string());
+    Ok(())
+}
+
+/// `POST /api/studio/update/install`: downloads the installer of the newest release in the background and starts it.
+pub(in crate::server) async fn update_install() -> Response {
+    {
+        let mut state = UPDATE_INSTALL.lock().unwrap_or_else(|e| e.into_inner());
+        if state.state == "downloading" {
+            return api_error(StatusCode::CONFLICT, "the installer is already downloading");
+        }
+        *state = UpdateInstall { state: "downloading", ..UpdateInstall::default() };
+    }
+    let spawned = std::thread::Builder::new().name("fllm-update".into()).spawn(|| {
+        if let Err(error) = fetch_installer() {
+            set_install("failed", 0, 0, &error);
+        }
+    });
+    if let Err(e) = spawned {
+        set_install("failed", 0, 0, &e.to_string());
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "cannot start the download");
+    }
+    Json(json!({"status": "started"})).into_response()
 }

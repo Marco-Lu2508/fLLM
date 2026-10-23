@@ -85,7 +85,8 @@
         headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(opts.body);
       }
-      return fetch(path, Object.assign({}, opts, { headers }));
+      // the answers describe the state of the app right now: never take them from the cache of the browser
+      return fetch(path, Object.assign({ cache: 'no-store' }, opts, { headers }));
     }
 
     // --- Theme & Accent Colors ---
