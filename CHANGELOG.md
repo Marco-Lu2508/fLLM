@@ -8,6 +8,7 @@ behaviour between versions).
 
 ### Added
 - Studio: Hugging Face sign-in with an access token (private and gated models), a check for a newer release with download and start of the installer, and curated model suggestions that fit the memory (and the processor, without a discrete graphics card), your own GGUF files (a path or a folder) in the model list, and a hardware page that names the device in use.
+- Studio: Tools (MCP) in Settings. The server starts Model Context Protocol servers (stdio) from `mcp.json`, lists their tools and calls them (`/api/studio/mcp/*`).
 
 ### Fixed
 - Studio: a model that cannot be loaded (for example a Gemma 4 file) no longer ends the server and leaves an empty window: the Models page opens and shows the reason. Models the engine cannot read are turned down before a switch. The desktop app waits for a slow model load and shows how long it has been loading. The list of downloaded models is no longer taken from the browser cache. The Gemma 4 entries left the catalog (not supported yet).
