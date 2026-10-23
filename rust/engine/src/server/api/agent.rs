@@ -10,7 +10,7 @@ use std::{
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -22,12 +22,22 @@ const MAX_RESULTS: usize = 200;
 const MAX_OUTPUT_BYTES: usize = 30_000;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
-const MAX_UNDO: usize = 50;
+const MAX_CHANGES: usize = 500;
+const MAX_NOTEBOOK_BYTES: u64 = 20 << 20;
+const MAX_NOTEBOOK_OUTPUT_CHARS: usize = 2000;
+/// Printed by the wrapper around a foreground command so the working directory can be carried to the next call.
+const CWD_MARK: &str = "__FLLM_CWD__";
 /// Folders that are never walked by `glob` and `grep` (build output and dependencies).
 const SKIPPED_DIRS: [&str; 6] = [".git", "node_modules", "target", ".venv", "__pycache__", ".idea"];
 
-struct UndoEntry {
+/// One file change of the session: enough to put the file back as it was.
+struct Change {
+    id: u64,
     path: PathBuf,
+    /// `create` or `edit`.
+    kind: &'static str,
+    /// Unix time in seconds.
+    time: u64,
     /// The content before the change; `None` when the file did not exist.
     before: Option<Vec<u8>>,
 }
@@ -35,19 +45,62 @@ struct UndoEntry {
 #[derive(Default)]
 struct Inner {
     root: Option<PathBuf>,
-    undo: Vec<UndoEntry>,
+    /// Working directory of the shell (inside the root); `None` means the root itself.
+    cwd: Option<PathBuf>,
+    changes: Vec<Change>,
+    next_id: u64,
 }
 
-/// The workspace of the agent and the undo stack of its file changes.
+/// The workspace of the agent, its shell state, background jobs and the change log of the session.
 #[derive(Default)]
 pub(in crate::server) struct AgentSession {
     inner: Mutex<Inner>,
+    jobs: super::agent_jobs::Jobs,
+}
+
+/// What `undo` put back.
+pub(in crate::server) struct Restored {
+    pub id: u64,
+    pub path: String,
+    /// `restored` (an older content is back) or `removed` (a created file is gone).
+    pub action: &'static str,
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 type ToolResult = Result<String, String>;
 
 fn lock(m: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A path as the model sees it: relative to the workspace, with forward slashes.
+fn shown_under(root: Option<&Path>, path: &Path) -> String {
+    match root {
+        Some(root) => path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/"),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// One replacement of `edit_file`/`multi_edit` on text in memory: returns the new text and the replacement count.
+fn apply_edit(text: &str, old: &str, new: &str, replace_all: bool, shown: &str) -> Result<(String, usize), String> {
+    if old.is_empty() {
+        return Err("old_string must not be empty; use write_file to create a file".into());
+    }
+    if old == new {
+        return Err("old_string and new_string are the same".into());
+    }
+    let count = text.matches(old).count();
+    if count == 0 {
+        return Err(format!("old_string was not found in {shown}; read the file again and copy the text exactly"));
+    }
+    if count > 1 && !replace_all {
+        return Err(format!("old_string occurs {count} times in {shown}; add surrounding lines to make it unique, or set replace_all"));
+    }
+    let changed = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
+    Ok((changed, if replace_all { count } else { 1 }))
 }
 
 /// `.` and `..` removed without touching the file system.
@@ -92,12 +145,33 @@ impl AgentSession {
         if !root.is_dir() {
             return Err(format!("{} is not a folder", root.display()));
         }
-        let mut inner = lock(&self.inner);
-        if inner.root.as_ref() != Some(&root) {
-            inner.undo.clear();
+        let changed = {
+            let mut inner = lock(&self.inner);
+            let changed = inner.root.as_ref() != Some(&root);
+            if changed {
+                inner.changes.clear();
+                inner.cwd = None;
+            }
+            inner.root = Some(root.clone());
+            changed
+        };
+        if changed {
+            // a new workspace is a new session: nothing started in the old one keeps running
+            self.jobs.kill_all();
         }
-        inner.root = Some(root.clone());
         Ok(root)
+    }
+
+    /// Ends the session's background jobs; returns how many were still running.
+    pub(in crate::server) fn end_session(&self) -> usize {
+        self.jobs.kill_all()
+    }
+
+    /// The folder shell commands start in: the last `cd` of a command, or the workspace root.
+    fn shell_dir(&self) -> Result<PathBuf, String> {
+        let root = self.root()?;
+        let cwd = lock(&self.inner).cwd.clone();
+        Ok(cwd.filter(|dir| dir.starts_with(&root) && dir.is_dir()).unwrap_or(root))
     }
 
     pub(in crate::server) fn current_root(&self) -> Option<PathBuf> {
@@ -131,10 +205,7 @@ impl AgentSession {
     }
 
     fn shown(&self, path: &Path) -> String {
-        match self.current_root() {
-            Some(root) => path.strip_prefix(&root).unwrap_or(path).to_string_lossy().replace('\\', "/"),
-            None => path.to_string_lossy().into_owned(),
-        }
+        shown_under(self.current_root().as_deref(), path)
     }
 
     pub(in crate::server) fn run_tool(&self, name: &str, args: &Value) -> ToolResult {
@@ -151,9 +222,15 @@ impl AgentSession {
                 text("new_string").unwrap_or_default(),
                 args.get("replace_all").and_then(Value::as_bool).unwrap_or(false),
             ),
+            "multi_edit" => self.multi_edit(need("path")?, args.get("edits")),
             "glob" => self.glob(need("pattern")?),
-            "grep" => self.grep(need("pattern")?, text("path"), text("glob")),
+            "grep" => self.grep(need("pattern")?, text("path"), text("glob"), &GrepOptions::from_args(args)?),
+            "bash" if args.get("background").and_then(Value::as_bool).unwrap_or(false) => {
+                self.jobs.start(need("command")?, &self.shell_dir()?)
+            }
             "bash" => self.bash(need("command")?, number("timeout_ms")),
+            "bash_output" => self.jobs.output(need("job_id")?, number("since")),
+            "bash_kill" => self.jobs.kill(need("job_id")?),
             other => Err(format!("unknown tool '{other}'")),
         }
     }
@@ -192,12 +269,16 @@ impl AgentSession {
     }
 
     fn read_text(&self, path: &Path) -> Result<String, String> {
+        self.read_text_limited(path, MAX_FILE_BYTES)
+    }
+
+    fn read_text_limited(&self, path: &Path, max: u64) -> Result<String, String> {
         let meta = fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", self.shown(path)))?;
         if meta.is_dir() {
             return Err(format!("{} is a folder; use list_dir", self.shown(path)));
         }
-        if meta.len() > MAX_FILE_BYTES {
-            return Err(format!("{} is larger than {} MB", self.shown(path), MAX_FILE_BYTES >> 20));
+        if meta.len() > max {
+            return Err(format!("{} is larger than {} MB", self.shown(path), max >> 20));
         }
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
         if bytes.contains(&0) {
@@ -208,7 +289,13 @@ impl AgentSession {
 
     fn read_file(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> ToolResult {
         let path = self.resolve(path)?;
-        let text = self.read_text(&path)?;
+        let is_notebook = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ipynb"));
+        let text = if is_notebook {
+            notebook_text(&self.read_text_limited(&path, MAX_NOTEBOOK_BYTES)?)
+                .map_err(|e| format!("{} is not a readable notebook: {e}", self.shown(&path)))?
+        } else {
+            self.read_text(&path)?
+        };
         let start = offset.unwrap_or(1).max(1) as usize - 1;
         let limit = (limit.unwrap_or(MAX_READ_LINES as u64) as usize).clamp(1, MAX_READ_LINES);
         let total = text.lines().count();
@@ -231,10 +318,24 @@ impl AgentSession {
 
     fn remember(&self, path: &Path, before: Option<Vec<u8>>) {
         let mut inner = lock(&self.inner);
-        inner.undo.push(UndoEntry { path: path.to_owned(), before });
-        if inner.undo.len() > MAX_UNDO {
-            inner.undo.remove(0);
+        inner.next_id += 1;
+        let id = inner.next_id;
+        let kind = if before.is_some() { "edit" } else { "create" };
+        inner.changes.push(Change { id, path: path.to_owned(), kind, time: unix_now(), before });
+        if inner.changes.len() > MAX_CHANGES {
+            inner.changes.remove(0);
         }
+    }
+
+    /// The file changes of this session, oldest first.
+    pub(in crate::server) fn changes(&self) -> Vec<Value> {
+        let root = self.current_root();
+        let inner = lock(&self.inner);
+        inner
+            .changes
+            .iter()
+            .map(|c| json!({"id": c.id, "path": shown_under(root.as_deref(), &c.path), "kind": c.kind, "time": c.time}))
+            .collect()
     }
 
     fn write_file(&self, path: &str, content: &str) -> ToolResult {
@@ -257,41 +358,81 @@ impl AgentSession {
 
     fn edit_file(&self, path: &str, old: &str, new: &str, replace_all: bool) -> ToolResult {
         let path = self.resolve(path)?;
-        if old.is_empty() {
-            return Err("old_string must not be empty; use write_file to create a file".into());
-        }
-        if old == new {
-            return Err("old_string and new_string are the same".into());
-        }
         let text = self.read_text(&path)?;
-        let count = text.matches(old).count();
-        if count == 0 {
-            return Err(format!("old_string was not found in {}; read the file again and copy the text exactly", self.shown(&path)));
-        }
-        if count > 1 && !replace_all {
-            return Err(format!(
-                "old_string occurs {count} times in {}; add surrounding lines to make it unique, or set replace_all",
-                self.shown(&path)
-            ));
-        }
-        let changed = if replace_all { text.replace(old, new) } else { text.replacen(old, new, 1) };
+        let (changed, count) = apply_edit(&text, old, new, replace_all, &self.shown(&path))?;
         self.remember(&path, Some(text.into_bytes()));
         fs::write(&path, changed).map_err(|e| format!("cannot write {}: {e}", self.shown(&path)))?;
         Ok(format!("Edited {} ({count} replacement{})", self.shown(&path), if count == 1 { "" } else { "s" }))
     }
 
-    /// Revert the latest file change; returns what was reverted.
-    pub(in crate::server) fn undo(&self) -> ToolResult {
-        let entry = lock(&self.inner).undo.pop().ok_or_else(|| "there is nothing to undo".to_owned())?;
-        match &entry.before {
-            Some(bytes) => fs::write(&entry.path, bytes).map_err(|e| e.to_string())?,
-            None => fs::remove_file(&entry.path).map_err(|e| e.to_string())?,
+    /// Several edits of one file, applied in order to the result of the previous one. All or nothing: the file
+    /// is written once, after every edit worked, and counts as one undo step.
+    fn multi_edit(&self, path: &str, edits: Option<&Value>) -> ToolResult {
+        let path = self.resolve(path)?;
+        let edits = edits.and_then(Value::as_array).filter(|a| !a.is_empty()).ok_or("'edits' must be a non-empty list")?;
+        let text = self.read_text(&path)?;
+        let shown = self.shown(&path);
+        let mut current = text.clone();
+        let mut replacements = 0usize;
+        for (index, edit) in edits.iter().enumerate() {
+            let field = |key: &str| edit.get(key).and_then(Value::as_str);
+            let old = field("old_string").ok_or_else(|| format!("edit {}: 'old_string' is missing (nothing was changed)", index + 1))?;
+            let new = field("new_string").unwrap_or_default();
+            let all = edit.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+            let (next, count) = apply_edit(&current, old, new, all, &shown)
+                .map_err(|e| format!("edit {} of {}: {e} (nothing was changed)", index + 1, edits.len()))?;
+            current = next;
+            replacements += count;
         }
-        Ok(format!(
-            "{} {}",
-            if entry.before.is_some() { "Restored" } else { "Removed" },
-            self.shown(&entry.path)
-        ))
+        self.remember(&path, Some(text.into_bytes()));
+        fs::write(&path, current).map_err(|e| format!("cannot write {shown}: {e}"))?;
+        Ok(format!("Edited {shown} ({} edits, {replacements} replacements)", edits.len()))
+    }
+
+    /// Put back the latest change; returns what was reverted.
+    #[cfg(test)]
+    fn undo(&self) -> ToolResult {
+        let restored = self.undo_many(Some(1), None)?;
+        Ok(restored.iter().map(|r| format!("{} {}", if r.action == "removed" { "Removed" } else { "Restored" }, r.path)).collect::<Vec<_>>().join("\n"))
+    }
+
+    /// Revert the last `steps` changes, or every change from the one with id `to` on (that change included),
+    /// newest first. Without either, one step.
+    pub(in crate::server) fn undo_many(&self, steps: Option<u64>, to: Option<u64>) -> Result<Vec<Restored>, String> {
+        if steps.is_some() && to.is_some() {
+            return Err("give either 'steps' or 'to', not both".into());
+        }
+        let root = self.current_root();
+        let mut inner = lock(&self.inner);
+        if inner.changes.is_empty() {
+            return Err("there is nothing to undo".into());
+        }
+        let keep = match to {
+            Some(id) => inner.changes.iter().position(|c| c.id == id).ok_or_else(|| format!("there is no change with id {id}"))?,
+            None => {
+                let steps = steps.unwrap_or(1);
+                if steps == 0 {
+                    return Err("'steps' must be at least 1".into());
+                }
+                inner.changes.len().saturating_sub(usize::try_from(steps).unwrap_or(usize::MAX))
+            }
+        };
+        let mut restored = Vec::new();
+        while inner.changes.len() > keep {
+            let Some(change) = inner.changes.pop() else { break };
+            let outcome = match &change.before {
+                Some(bytes) => fs::write(&change.path, bytes),
+                None => fs::remove_file(&change.path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+            };
+            let path = shown_under(root.as_deref(), &change.path);
+            if let Err(e) = outcome {
+                let done = restored.iter().map(|r: &Restored| r.path.clone()).collect::<Vec<_>>().join(", ");
+                inner.changes.push(change);
+                return Err(format!("cannot restore {path}: {e}{}", if done.is_empty() { String::new() } else { format!(" (already restored: {done})") }));
+            }
+            restored.push(Restored { id: change.id, path, action: if change.before.is_some() { "restored" } else { "removed" } });
+        }
+        Ok(restored)
     }
 
     /// Files below the workspace (without build output and dependencies) with their path relative to the workspace.
@@ -302,13 +443,15 @@ impl AgentSession {
             let Ok(read) = fs::read_dir(&dir) else { continue };
             let mut entries: Vec<_> = read.filter_map(Result::ok).collect();
             entries.sort_by_key(|e| e.file_name());
-            for entry in entries.into_iter().rev() {
+            // files of this folder in name order first, then the sub folders in name order
+            let mut folders = Vec::new();
+            for entry in entries {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let Ok(kind) = entry.file_type() else { continue };
                 let path = entry.path();
                 if kind.is_dir() {
                     if !SKIPPED_DIRS.contains(&name.as_str()) {
-                        stack.push(path);
+                        folders.push(path);
                     }
                 } else if kind.is_file() {
                     let rel = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
@@ -317,6 +460,7 @@ impl AgentSession {
                     }
                 }
             }
+            stack.extend(folders.into_iter().rev());
         }
     }
 
@@ -343,13 +487,18 @@ impl AgentSession {
         Ok(out)
     }
 
-    fn grep(&self, pattern: &str, path: Option<&str>, glob: Option<&str>) -> ToolResult {
-        let regex = Regex::new(pattern).map_err(|e| format!("the pattern is not a valid regular expression: {e}"))?;
+    fn grep(&self, pattern: &str, path: Option<&str>, glob: Option<&str>, options: &GrepOptions) -> ToolResult {
+        let regex = regex::RegexBuilder::new(pattern)
+            .case_insensitive(options.case_insensitive)
+            .build()
+            .map_err(|e| format!("the pattern is not a valid regular expression: {e}"))?;
         let filter = glob.map(glob_regex).transpose()?;
         let start = self.resolve(path.unwrap_or("."))?;
         let single = start.is_file().then(|| start.clone());
         let mut hits: Vec<String> = Vec::new();
+        let mut files: Vec<(String, usize)> = Vec::new();
         let mut total = 0usize;
+        let mut shown_matches = 0usize;
         let mut scan = |path: &Path, rel: &str| -> bool {
             if let Some(filter) = &filter {
                 if !filter.is_match(rel) && !filter.is_match(rel.rsplit('/').next().unwrap_or(rel)) {
@@ -365,13 +514,38 @@ impl AgentSession {
                 return true;
             }
             let text = String::from_utf8_lossy(&bytes);
-            for (index, line) in text.lines().enumerate() {
-                if regex.is_match(line) {
-                    total += 1;
-                    if hits.len() < MAX_RESULTS {
-                        let shown: String = line.trim_end().chars().take(300).collect();
-                        hits.push(format!("{rel}:{}: {shown}", index + 1));
+            let lines: Vec<&str> = text.lines().collect();
+            let matched: Vec<usize> = (0..lines.len()).filter(|&i| regex.is_match(lines[i])).collect();
+            if matched.is_empty() {
+                return true;
+            }
+            total += matched.len();
+            files.push((rel.to_owned(), matched.len()));
+            if options.mode == GrepMode::Content && shown_matches < options.limit {
+                let clip = |line: &str| -> String { line.trim_end().chars().take(300).collect() };
+                if options.context > 0 && !hits.is_empty() {
+                    hits.push("--".into());
+                }
+                let mut printed_until = 0usize; // lines before this index are already in the output
+                for &index in &matched {
+                    if shown_matches >= options.limit {
+                        break;
                     }
+                    let from = index.saturating_sub(options.context).max(printed_until);
+                    if options.context > 0 && printed_until > 0 && from > printed_until {
+                        hits.push("--".into());
+                    }
+                    for (n, line) in lines.iter().enumerate().take(index).skip(from) {
+                        hits.push(format!("{rel}-{}- {}", n + 1, clip(line)));
+                    }
+                    hits.push(format!("{rel}:{}: {}", index + 1, clip(lines[index])));
+                    shown_matches += 1;
+                    let until = (index + 1 + options.context).min(lines.len());
+                    let next_match = matched.iter().copied().find(|&m| m > index).unwrap_or(usize::MAX);
+                    for (n, line) in lines.iter().enumerate().take(until.min(next_match)).skip(index + 1) {
+                        hits.push(format!("{rel}-{}- {}", n + 1, clip(line)));
+                    }
+                    printed_until = until.min(next_match).max(index + 1);
                 }
             }
             total < 20_000
@@ -383,31 +557,46 @@ impl AgentSession {
             }
             None => self.walk(&start, &mut scan),
         }
-        if hits.is_empty() {
+        if total == 0 {
             return Ok("no matches".into());
         }
-        let mut out = hits.join("\n");
-        out.push('\n');
-        if total > hits.len() {
-            out.push_str(&format!("... {} more matching lines\n", total - hits.len()));
+        let mut out = String::new();
+        match options.mode {
+            GrepMode::Content => {
+                out = hits.join("\n");
+                out.push('\n');
+                if total > shown_matches {
+                    out.push_str(&format!("... {} more matching lines\n", total - shown_matches));
+                }
+            }
+            GrepMode::Files => {
+                for (rel, _) in files.iter().take(options.limit) {
+                    out.push_str(&format!("{rel}\n"));
+                }
+                if files.len() > options.limit {
+                    out.push_str(&format!("... {} more files\n", files.len() - options.limit));
+                }
+            }
+            GrepMode::Count => {
+                for (rel, n) in files.iter().take(options.limit) {
+                    out.push_str(&format!("{rel}:{n}\n"));
+                }
+                if files.len() > options.limit {
+                    out.push_str(&format!("... {} more files\n", files.len() - options.limit));
+                }
+                out.push_str(&format!("total: {total} matching lines in {} files\n", files.len()));
+            }
         }
         Ok(out)
     }
 
     fn bash(&self, command: &str, timeout_ms: Option<u64>) -> ToolResult {
         let root = self.root()?;
+        let dir = self.shell_dir()?;
         let limit = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1000, MAX_TIMEOUT_MS));
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(command);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(command);
-            c
-        };
+        let mut cmd = super::agent_jobs::shell_command(&super::agent_jobs::with_cwd_report(command, CWD_MARK));
         let mut child = cmd
-            .current_dir(&root)
+            .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -430,6 +619,18 @@ impl AgentSession {
         };
         let stdout = out_reader.join().unwrap_or_default();
         let stderr = err_reader.join().unwrap_or_default();
+        let (stdout, reported) = split_cwd_report(&stdout, CWD_MARK);
+        let mut moved = String::new();
+        if let Some(new_dir) = reported.and_then(|p| fs::canonicalize(p).ok()).map(plain) {
+            // a `cd` out of the workspace is ignored: the next command starts where this one started
+            if new_dir.starts_with(&root) && new_dir.is_dir() && new_dir != dir {
+                moved = format!("\n(working directory is now {})", match self.shown(&new_dir).as_str() {
+                    "" => ".".to_owned(),
+                    other => other.to_owned(),
+                });
+                lock(&self.inner).cwd = Some(new_dir);
+            }
+        }
         let mut text = String::from_utf8_lossy(&stdout).into_owned();
         if !stderr.is_empty() {
             if !text.is_empty() && !text.ends_with('\n') {
@@ -447,9 +648,107 @@ impl AgentSession {
         }
         match status {
             None => Err(format!("the command ran longer than {} s and was stopped\n{text}", limit.as_secs())),
-            Some(status) if status.success() => Ok(if text.is_empty() { "(no output)".into() } else { text }),
-            Some(status) => Err(format!("exit code {}\n{text}", status.code().map_or_else(|| "unknown".into(), |c| c.to_string()))),
+            Some(status) if status.success() => Ok(if text.is_empty() { format!("(no output){moved}") } else { format!("{text}{moved}") }),
+            Some(status) => Err(format!("exit code {}\n{text}{moved}", status.code().map_or_else(|| "unknown".into(), |c| c.to_string()))),
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrepMode {
+    Content,
+    Files,
+    Count,
+}
+
+/// The optional arguments of `grep`.
+struct GrepOptions {
+    mode: GrepMode,
+    context: usize,
+    case_insensitive: bool,
+    limit: usize,
+}
+
+impl GrepOptions {
+    fn from_args(args: &Value) -> Result<Self, String> {
+        let mode = match args.get("output_mode").and_then(Value::as_str).unwrap_or("content") {
+            "content" => GrepMode::Content,
+            "files" | "files_with_matches" => GrepMode::Files,
+            "count" => GrepMode::Count,
+            other => return Err(format!("output_mode must be content, files or count, not '{other}'")),
+        };
+        let number = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+        Ok(Self {
+            mode,
+            context: number("context").unwrap_or(0).min(20),
+            case_insensitive: args.get("case_insensitive").and_then(Value::as_bool).unwrap_or(false),
+            limit: number("head_limit").filter(|&n| n > 0).unwrap_or(MAX_RESULTS).min(2000),
+        })
+    }
+}
+
+/// A Jupyter notebook as text: one block per cell with its source and the text of its outputs (no images).
+fn notebook_text(raw: &str) -> Result<String, String> {
+    let notebook: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let cells = notebook.get("cells").and_then(Value::as_array).ok_or("it has no 'cells' list")?;
+    // `source` and output `text` are a string or a list of strings
+    let joined = |value: Option<&Value>| -> String {
+        match value {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(parts)) => parts.iter().filter_map(Value::as_str).collect(),
+            _ => String::new(),
+        }
+    };
+    let clip = |s: String| -> String {
+        if s.chars().count() > MAX_NOTEBOOK_OUTPUT_CHARS {
+            let mut short: String = s.chars().take(MAX_NOTEBOOK_OUTPUT_CHARS).collect();
+            short.push_str("\n... output cut");
+            short
+        } else {
+            s
+        }
+    };
+    let mut out = String::new();
+    for (index, cell) in cells.iter().enumerate() {
+        let kind = cell.get("cell_type").and_then(Value::as_str).unwrap_or("code");
+        out.push_str(&format!("# [cell {} | {kind}]\n", index + 1));
+        out.push_str(joined(cell.get("source")).trim_end());
+        out.push('\n');
+        for output in cell.get("outputs").and_then(Value::as_array).into_iter().flatten() {
+            let text = match output.get("output_type").and_then(Value::as_str) {
+                Some("stream") => joined(output.get("text")),
+                Some("error") => format!(
+                    "{}: {}",
+                    output.get("ename").and_then(Value::as_str).unwrap_or("error"),
+                    output.get("evalue").and_then(Value::as_str).unwrap_or_default()
+                ),
+                _ => joined(output.get("data").and_then(|d| d.get("text/plain"))),
+            };
+            if !text.trim().is_empty() {
+                out.push_str("# output:\n");
+                out.push_str(clip(text).trim_end());
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+    if cells.is_empty() {
+        out.push_str("(the notebook has no cells)\n");
+    }
+    Ok(out)
+}
+
+/// Cuts the working-directory report the wrapper printed at the end of the output.
+fn split_cwd_report(stdout: &[u8], mark: &str) -> (Vec<u8>, Option<PathBuf>) {
+    let needle = format!("\n{mark}");
+    let text = String::from_utf8_lossy(stdout);
+    match text.rfind(&needle) {
+        Some(at) => {
+            let report = text[at + needle.len()..].trim();
+            let dir = (!report.is_empty()).then(|| PathBuf::from(report));
+            (text.as_bytes()[..at].to_vec(), dir)
+        }
+        None => (stdout.to_vec(), None),
     }
 }
 
@@ -508,16 +807,16 @@ fn glob_regex(pattern: &str) -> Result<Regex, String> {
 }
 
 /// `FLLM_NO_AGENT=1` switches the agent routes off (for servers that must never run commands or touch files).
-fn agent_disabled() -> bool {
+pub(super) fn agent_disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("FLLM_NO_AGENT").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
-fn disabled_reply() -> Response {
+pub(super) fn disabled_reply() -> Response {
     api_error(StatusCode::FORBIDDEN, "the coding agent is switched off on this server (FLLM_NO_AGENT)")
 }
 
-fn result_json(result: ToolResult) -> Value {
+pub(super) fn result_json(result: ToolResult) -> Value {
     match result {
         Ok(output) => json!({"ok": true, "output": output}),
         Err(error) => json!({"ok": false, "error": error}),
@@ -558,6 +857,10 @@ pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(bod
         return api_error(StatusCode::BAD_REQUEST, "the tool name is missing");
     };
     let args = body.get("args").cloned().unwrap_or_else(|| json!({}));
+    // the network tools are async and need no workspace
+    if let Some(result) = super::agent_net::run_tool(&name, &args).await {
+        return Json(result_json(result)).into_response();
+    }
     let worker = state.clone();
     match tokio::task::spawn_blocking(move || worker.agent.run_tool(&name, &args)).await {
         Ok(result) => Json(result_json(result)).into_response(),
@@ -565,12 +868,61 @@ pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(bod
     }
 }
 
-/// `POST /api/studio/agent/undo`: reverts the latest file change of the agent.
-pub(in crate::server) async fn undo(State(state): State<Arc<AppState>>) -> Response {
+/// `GET /api/studio/agent/tools`: every server-side tool as an OpenAI function schema plus its `permission`.
+pub(in crate::server) async fn tools() -> Response {
     if agent_disabled() {
         return disabled_reply();
     }
-    Json(result_json(state.agent.undo())).into_response()
+    Json(json!({"tools": super::agent_tools::catalog()})).into_response()
+}
+
+/// `GET /api/studio/agent/changes`: the file changes of this session, oldest first.
+pub(in crate::server) async fn changes(State(state): State<Arc<AppState>>) -> Response {
+    if agent_disabled() {
+        return disabled_reply();
+    }
+    Json(json!({"changes": state.agent.changes()})).into_response()
+}
+
+/// `POST /api/studio/agent/end`: ends the session's background jobs.
+pub(in crate::server) async fn end(State(state): State<Arc<AppState>>) -> Response {
+    if agent_disabled() {
+        return disabled_reply();
+    }
+    let worker = state.clone();
+    let stopped = tokio::task::spawn_blocking(move || worker.agent.end_session()).await.unwrap_or(0);
+    Json(json!({"ok": true, "stopped": stopped})).into_response()
+}
+
+/// `POST /api/studio/agent/undo`: reverts the latest file change of the agent (`{}` or no body), the last
+/// `{steps: n}` changes, or everything back to `{to: id}` (that change included). Answers
+/// `{ok, output, restored: [{id, path, action}]}`; `restored` is newest first.
+pub(in crate::server) async fn undo(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    if agent_disabled() {
+        return disabled_reply();
+    }
+    let body: Value = if body.iter().all(u8::is_ascii_whitespace) {
+        json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+        }
+    };
+    let steps = body.get("steps").and_then(Value::as_u64);
+    let to = body.get("to").and_then(Value::as_u64);
+    match state.agent.undo_many(steps, to) {
+        Ok(restored) => {
+            let output = restored
+                .iter()
+                .map(|r| format!("{} {}", if r.action == "removed" { "Removed" } else { "Restored" }, r.path))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let list: Vec<Value> = restored.iter().map(|r| json!({"id": r.id, "path": r.path, "action": r.action})).collect();
+            Json(json!({"ok": true, "output": output, "restored": list})).into_response()
+        }
+        Err(error) => Json(json!({"ok": false, "error": error, "restored": []})).into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -653,6 +1005,172 @@ mod tests {
         let stopped = s.run_tool("bash", &json!({"command": slow, "timeout_ms": 1000})).unwrap_err();
         assert!(stopped.contains("was stopped"), "{stopped}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn multi_edit_is_all_or_nothing_and_one_undo_step() {
+        let (s, root) = session();
+        s.run_tool("write_file", &json!({"path": "m.txt", "content": "alpha beta beta gamma\n"})).unwrap();
+        let ok = s
+            .run_tool(
+                "multi_edit",
+                &json!({"path": "m.txt", "edits": [
+                    {"old_string": "alpha", "new_string": "ALPHA"},
+                    {"old_string": "beta", "new_string": "B", "replace_all": true},
+                    {"old_string": "ALPHA B", "new_string": "first"},
+                ]}),
+            )
+            .unwrap();
+        assert!(ok.contains("3 edits, 4 replacements"), "{ok}");
+        assert_eq!(fs::read_to_string(root.join("m.txt")).unwrap(), "first B gamma\n");
+        // the second edit fails (ambiguous): the file stays as it was
+        let bad = s
+            .run_tool("multi_edit", &json!({"path": "m.txt", "edits": [
+                {"old_string": "first", "new_string": "1st"},
+                {"old_string": "zzz", "new_string": "y"},
+            ]}))
+            .unwrap_err();
+        assert!(bad.contains("edit 2 of 2") && bad.contains("nothing was changed"), "{bad}");
+        assert_eq!(fs::read_to_string(root.join("m.txt")).unwrap(), "first B gamma\n");
+        assert!(s.run_tool("multi_edit", &json!({"path": "m.txt", "edits": []})).is_err());
+        assert!(s.run_tool("multi_edit", &json!({"path": "m.txt"})).is_err());
+        // one undo step brings back the text from before all three edits
+        assert_eq!(s.changes().len(), 2);
+        s.undo().unwrap();
+        assert_eq!(fs::read_to_string(root.join("m.txt")).unwrap(), "alpha beta beta gamma\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changes_are_listed_and_undone_by_steps_or_up_to_an_id() {
+        let (s, root) = session();
+        assert!(s.undo_many(None, None).is_err());
+        s.run_tool("write_file", &json!({"path": "a.txt", "content": "1"})).unwrap();
+        s.run_tool("write_file", &json!({"path": "a.txt", "content": "2"})).unwrap();
+        s.run_tool("edit_file", &json!({"path": "a.txt", "old_string": "2", "new_string": "3"})).unwrap();
+        s.run_tool("write_file", &json!({"path": "sub/b.txt", "content": "b"})).unwrap();
+        let list = s.changes();
+        let kinds: Vec<_> = list.iter().map(|c| c["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["create", "edit", "edit", "create"]);
+        assert_eq!(list[3]["path"], "sub/b.txt");
+        assert!(list[0]["time"].as_u64().unwrap() > 0);
+        let ids: Vec<u64> = list.iter().map(|c| c["id"].as_u64().unwrap()).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
+        assert!(s.undo_many(Some(1), Some(ids[0])).is_err(), "steps and to together are refused");
+        assert!(s.undo_many(Some(0), None).is_err());
+        assert!(s.undo_many(None, Some(9999)).is_err());
+        // two steps: the creation of b and the edit "2" -> "3"
+        let two = s.undo_many(Some(2), None).unwrap();
+        assert_eq!(two.iter().map(|r| (r.path.as_str(), r.action)).collect::<Vec<_>>(), [("sub/b.txt", "removed"), ("a.txt", "restored")]);
+        assert!(!root.join("sub/b.txt").exists());
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "2");
+        assert_eq!(s.changes().len(), 2);
+        // back to just before the second change
+        let rest = s.undo_many(None, Some(ids[1])).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "1");
+        // more steps than changes undo everything
+        assert_eq!(s.undo_many(Some(50), None).unwrap().len(), 1);
+        assert!(!root.join("a.txt").exists());
+        assert!(s.changes().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn grep_modes_context_case_and_limits() {
+        let (s, root) = session();
+        s.run_tool("write_file", &json!({"path": "one.txt", "content": "a\nNeedle 1\nb\nc\nd\ne\nneedle 2\nf\n"})).unwrap();
+        s.run_tool("write_file", &json!({"path": "two.txt", "content": "needle 3\nneedle 4\n"})).unwrap();
+        let grep = |extra: Value| {
+            let mut args = json!({"pattern": "needle"});
+            args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            s.run_tool("grep", &args)
+        };
+        let sensitive = grep(json!({})).unwrap();
+        assert!(sensitive.contains("one.txt:7: needle 2") && !sensitive.contains("Needle 1"), "{sensitive}");
+        let folded = grep(json!({"case_insensitive": true, "path": "one.txt"})).unwrap();
+        assert!(folded.contains("one.txt:2: Needle 1") && folded.contains("one.txt:7:"), "{folded}");
+        let files = grep(json!({"output_mode": "files"})).unwrap();
+        assert_eq!(files, "one.txt\ntwo.txt\n");
+        let count = grep(json!({"output_mode": "count", "case_insensitive": true})).unwrap();
+        assert!(count.contains("one.txt:2\n") && count.contains("two.txt:2\n") && count.contains("total: 4 matching lines in 2 files"), "{count}");
+        let limited = grep(json!({"head_limit": 1})).unwrap();
+        assert!(limited.contains("one.txt:7:") && limited.contains("2 more matching lines"), "{limited}");
+        let one_file = grep(json!({"output_mode": "files", "head_limit": 1})).unwrap();
+        assert!(one_file.contains("one.txt") && one_file.contains("1 more files"), "{one_file}");
+        // context: neighbours with `-`, a gap marker between distant blocks and files
+        let ctx = grep(json!({"case_insensitive": true, "context": 1, "path": "one.txt"})).unwrap();
+        assert_eq!(ctx, "one.txt-1- a\none.txt:2: Needle 1\none.txt-3- b\n--\none.txt-6- e\none.txt:7: needle 2\none.txt-8- f\n");
+        let merged = grep(json!({"context": 2, "path": "two.txt"})).unwrap();
+        assert_eq!(merged, "two.txt:1: needle 3\ntwo.txt:2: needle 4\n");
+        assert!(grep(json!({"output_mode": "bogus"})).is_err());
+        assert_eq!(grep(json!({"pattern": "zzz", "output_mode": "count"})).unwrap(), "no matches");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn notebooks_are_read_as_text_cells() {
+        let (s, root) = session();
+        let notebook = json!({"cells": [
+            {"cell_type": "markdown", "source": ["# Title\n", "text"]},
+            {"cell_type": "code", "source": "print(1)\nx = 2", "outputs": [
+                {"output_type": "stream", "name": "stdout", "text": ["1\n"]},
+                {"output_type": "execute_result", "data": {"text/plain": "2", "image/png": "AAAA"}},
+                {"output_type": "error", "ename": "ValueError", "evalue": "bad", "traceback": []},
+            ]},
+        ], "metadata": {}, "nbformat": 4});
+        fs::write(root.join("n.ipynb"), notebook.to_string()).unwrap();
+        let read = s.run_tool("read_file", &json!({"path": "n.ipynb"})).unwrap();
+        assert!(read.contains("\t# [cell 1 | markdown]") && read.contains("\t# Title\n") && read.contains("\ttext\n"), "{read}");
+        assert!(read.contains("\t# [cell 2 | code]") && read.contains("\tprint(1)\n") && read.contains("\tx = 2\n"), "{read}");
+        assert_eq!(read.matches("\t# output:\n").count(), 3, "{read}");
+        assert!(read.contains("\t1\n") && read.contains("\t2\n") && read.contains("\tValueError: bad\n"), "{read}");
+        assert!(!read.contains("AAAA"), "images are left out: {read}");
+        fs::write(root.join("broken.ipynb"), "{not json").unwrap();
+        assert!(s.run_tool("read_file", &json!({"path": "broken.ipynb"})).unwrap_err().contains("not a readable notebook"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shell_keeps_its_directory_inside_the_workspace_and_runs_background_jobs() {
+        let (s, root) = session();
+        fs::create_dir_all(root.join("src/deep")).unwrap();
+        let moved = s.run_tool("bash", &json!({"command": "cd src/deep && echo in-deep"})).unwrap();
+        assert!(moved.starts_with("in-deep\n") && moved.contains("(working directory is now src/deep)"), "{moved}");
+        let pwd = s.run_tool("bash", &json!({"command": "pwd"})).unwrap();
+        assert!(pwd.trim_start().starts_with(root.join("src/deep").to_str().unwrap()), "{pwd}");
+        // the exit code survives the wrapper, and a `cd` out of the workspace is ignored
+        assert!(s.run_tool("bash", &json!({"command": "cd .. && exit 3"})).is_err());
+        let up = s.run_tool("bash", &json!({"command": "cd /"})).unwrap();
+        assert!(!up.contains("working directory is now"), "{up}");
+        let still = s.run_tool("bash", &json!({"command": "pwd"})).unwrap();
+        assert!(!still.trim().is_empty() && PathBuf::from(still.trim()).starts_with(&root), "{still}");
+        // file tools still use paths relative to the workspace root
+        s.run_tool("write_file", &json!({"path": "r.txt", "content": "x"})).unwrap();
+        assert!(root.join("r.txt").exists());
+        // background jobs start in the shell directory and are stopped with the session
+        let started = s.run_tool("bash", &json!({"command": "pwd; sleep 30", "background": true})).unwrap();
+        assert!(started.contains("job1"), "{started}");
+        let mut seen = String::new();
+        for _ in 0..100 {
+            seen = s.run_tool("bash_output", &json!({"job_id": "job1"})).unwrap();
+            if seen.contains(root.to_str().unwrap()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(seen.contains("status: running") && seen.contains(root.to_str().unwrap()), "{seen}");
+        assert_eq!(s.end_session(), 1);
+        assert!(s.run_tool("bash_output", &json!({"job_id": "job1"})).is_err());
+        // choosing another workspace also ends the jobs
+        s.run_tool("bash", &json!({"command": "sleep 30", "background": true})).unwrap();
+        let other = std::env::temp_dir().join(format!("fllm-agent-other-{}", std::process::id()));
+        fs::create_dir_all(&other).unwrap();
+        s.set_root(other.to_str().unwrap()).unwrap();
+        assert!(s.run_tool("bash_output", &json!({"job_id": "job2"})).is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(other);
     }
 
     #[test]
