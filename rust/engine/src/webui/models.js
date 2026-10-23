@@ -62,7 +62,11 @@
 
     function renderRecommended(hub) {
       const byId = new Map((hub.catalog || []).map((e) => [e.id, e]));
-      const picks = (hub.recommended || []).map((id) => byId.get(id)).filter(Boolean);
+      // the suggestions use the 4-bit quantization: nearly as good as the big ones, much smaller and faster
+      const picks = (hub.recommended || []).map((id) => byId.get(id)).filter(Boolean).map((e) => {
+        const v = (e.variants || []).find((x) => x.quant === 'Q4_K_M');
+        return v ? { ...e, recommended_quant: v.quant, estimated_bytes: v.estimated_bytes } : e;
+      });
       $('recommendedCards').innerHTML = picks.length ? `
         <p class="app-item-desc" style="margin-top:12px;">Models that run well here:</p>
         ${picks.map((entry) => `
