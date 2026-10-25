@@ -840,7 +840,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          f=$(ls desktop/src-tauri/binaries/fllm-rs-cuda-* | head -n 1)
+          f=$(find desktop/src-tauri/binaries -name 'fllm-rs-cuda-*' | head -n 1)
           size=$(wc -c < "$f")
           echo "$f: $size bytes"
           if [ "$size" -lt 20000000 ]; then
@@ -924,6 +924,7 @@ jobs:
           fi
           if [ "$HIP_RESULT" != "success" ]; then
             echo "::warning::fllm-windows-x86_64-msvc-hip.zip was not built (job result: $HIP_RESULT); install.ps1 uses the plain Windows asset (Vulkan still drives AMD GPUs)"
+          fi
           if [ "$DESKTOP_RESULT" != "success" ]; then
             echo "::error title=desktop installers::the base desktop installers were not all built (job result: $DESKTOP_RESULT)"
           fi
