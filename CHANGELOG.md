@@ -8,6 +8,7 @@ behaviour between versions).
 
 ### Added
 - Studio chat: a *Research* mode that plans search queries, reads web pages in parallel, takes notes within the model's context, reflects for one more round and writes a cited report, with a collapsible research log and a Stop button that cancels every request.
+- Studio: Model providers in Settings. Use models of cloud services and other servers (OpenAI-compatible services, Anthropic, Ollama, LM Studio, vLLM) in the chat next to the local model; they appear in the model menu as "Provider · model". Keys stay in `providers.json` on this computer and never reach the page; the routes (`/api/studio/providers/*`) work only from this machine, refuse internal addresses unless a provider is marked local, and translate Anthropic requests and streams to the OpenAI format ([docs/user/studio.md](docs/user/studio.md)).
 
 ## [0.1.5] - 2026-10-25
 

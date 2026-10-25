@@ -224,6 +224,10 @@ impl<F: FnOnce() + Unpin> Drop for Watched<F> {
     }
 }
 
+fn is_providers_path(path: &str) -> bool {
+    path == "/api/studio/providers" || path.starts_with("/api/studio/providers/")
+}
+
 /// The Studio routes that change something (settings, model downloads and deletions, API keys) are
 /// administration. Without a configured API key they are only open to a client on the same machine:
 /// otherwise anybody who can reach the port could delete models or register a key and lock the owner out.
@@ -240,9 +244,11 @@ pub fn studio_admin_blocked(
 ) -> bool {
     // the agent tools read and write files and run programs: never from another machine, with or without a key
     // (the file picker opens a window on this machine's screen; the web fetch and search routes reach out from this machine and read files of the agent: same rule)
-    let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file";
+    let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file"
+        // the model providers hold keys of other services and relay requests with them: same rule, reads included
+        || is_providers_path(path);
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes";
+    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path);
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)
@@ -697,6 +703,23 @@ mod studio_gate_tests {
         }
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/mcp/tools", remote, &h));
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/mcp/servers", remote, &h));
+    }
+
+    #[test]
+    fn provider_routes_stay_on_this_machine_even_with_an_api_key() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        for path in ["/api/studio/providers", "/api/studio/providers/test", "/api/studio/providers/models", "/api/studio/providers/chat"] {
+            for method in [Method::GET, Method::POST, Method::DELETE] {
+                for auth in [false, true] {
+                    assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} from another machine (key: {auth})");
+                    assert!(!studio_admin_blocked(auth, &method, path, here, &local), "{method} {path} from this machine (key: {auth})");
+                }
+            }
+        }
+        assert!(studio_admin_blocked(false, &Method::POST, "/api/studio/providers/chat", here, &headers("rebind.example:8000", None)));
     }
 
     #[test]

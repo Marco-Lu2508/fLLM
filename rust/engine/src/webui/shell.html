@@ -629,6 +629,10 @@
               <svg viewBox="0 0 24 24" class="icon"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.2-.6-.6-2.2z"/></svg>
               <span>Tools (MCP)</span>
             </button>
+            <button class="settings-nav-btn" data-spane="providers">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+              <span>Model providers</span>
+            </button>
           </nav>
 
           <!-- Settings Right Content Area -->
@@ -1083,6 +1087,58 @@
                   <button class="btn btn-sm btn-ghost" id="btnMcpCancel">Clear</button>
                 </div>
                 <div class="app-item-desc" id="mcpFileInfo" style="margin-top:8px;"></div>
+              </div>
+            </div>
+
+            <!-- Model providers: other servers and cloud services -->
+            <div class="settings-pane" id="spane-providers">
+              <div class="app-card">
+                <div class="app-card-title">Model providers</div>
+                <p class="app-item-desc" style="margin-bottom:8px;">Use models of other servers and cloud services (OpenAI-compatible services, Anthropic, Ollama, LM Studio, vLLM) in the chat, next to the model on this computer. They appear in the model menu as "Provider · model".</p>
+                <p class="app-item-desc" style="margin-bottom:12px;"><strong>Privacy:</strong> everything you type in a chat with such a model is sent to that service. Keys are stored in a file on this computer and are never shown again; this page never receives them, fLLM adds them when it passes your request on.</p>
+                <div id="provList"></div>
+                <div style="display:flex;gap:6px;margin-top:8px;align-items:center;">
+                  <button class="btn btn-xs btn-ghost" id="btnProvRefreshModels">Refresh all model lists</button>
+                </div>
+                <div class="app-item-desc" id="provResult" style="margin-top:8px;white-space:pre-wrap;"></div>
+              </div>
+              <div class="app-card">
+                <div class="app-card-title" id="provFormTitle">Add a provider</div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Start from a template</div>
+                  <div id="provPresets" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Name</div>
+                  <input type="text" id="provName" class="ui-input" placeholder="My provider" autocomplete="off">
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Type</div>
+                  <select id="provKind" class="ui-select mono">
+                    <option value="openai">OpenAI-compatible</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="ollama">Ollama</option>
+                  </select>
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Address</div>
+                  <input type="text" id="provUrl" class="ui-input mono" placeholder="https://api.example.com/v1" autocomplete="off">
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Key</div>
+                  <input type="password" id="provKey" class="ui-input mono" placeholder="sk-..." autocomplete="new-password">
+                  <label class="app-item-desc" id="provClearKeyRow" style="display:none;"><input type="checkbox" id="provClearKey"> Remove the saved key</label>
+                </div>
+                <div class="app-card-item column">
+                  <label class="app-item-desc"><input type="checkbox" id="provLocal"> This server runs on this computer or network</label>
+                  <div class="app-item-desc">Needed for Ollama, LM Studio and other servers you run yourself. Without it, addresses on this computer or a private network are refused.</div>
+                </div>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                  <button class="btn btn-sm btn-primary" id="btnProvSave">Save</button>
+                  <button class="btn btn-sm btn-ghost" id="btnProvTestForm">Test</button>
+                  <button class="btn btn-sm btn-ghost" id="btnProvCancel">Clear</button>
+                </div>
+                <div class="app-item-desc" id="provFileInfo" style="margin-top:8px;"></div>
               </div>
             </div>
 

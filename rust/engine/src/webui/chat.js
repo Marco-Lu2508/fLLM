@@ -361,6 +361,7 @@
     }
 
     function updateContextMeter() {
+      if (window.fllmRemoteMeter && window.fllmRemoteMeter(contextUsed(currentThread()))) return; // providers hook: no local limit for a provider's model
       const max = state.status?.model?.max_context || 4096;
       setMeter('ctxFill', 'ctxText', contextUsed(currentThread()), max);
     }
@@ -484,12 +485,14 @@
       let first = null;
       let chunks = 0;
       try {
-        const res = await apiFetch('/v1/chat/completions', { method: 'POST', body: requestBody(apiMessages(t, userId)), signal: state.abortController.signal });
+        const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook: a provider's model goes through the proxy route
+        const res = await apiFetch(ep.url, { method: 'POST', body: ep.transform(requestBody(apiMessages(t, userId))), signal: state.abortController.signal });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           throw new Error(err.error?.message || `The server answered with error ${res.status}`);
         }
         await readEventStream(res, (chunk) => {
+          if (chunk.error) aNode.error = chunk.error.message || 'The provider reported an error.'; // providers hook
           const choice = chunk.choices?.[0];
           const delta = choice?.delta;
           if (delta) {
@@ -529,7 +532,7 @@
         saveThreads();
         renderChatArea();
         refreshStudioStatus();
-        if (aNode.usage?.total_tokens) setMeter('ctxFill', 'ctxText', aNode.usage.total_tokens, state.status?.model?.max_context || 4096);
+        if (aNode.usage?.total_tokens && !(window.fllmRemoteMeter && window.fllmRemoteMeter(aNode.usage.total_tokens))) setMeter('ctxFill', 'ctxText', aNode.usage.total_tokens, state.status?.model?.max_context || 4096);
         maybeTitle(t);
       }
     }
@@ -543,15 +546,16 @@
       if (!first || !reply) return;
       t.autoTitle = false;
       try {
-        const res = await apiFetch('/v1/chat/completions', {
+        const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook
+        const res = await apiFetch(ep.url, {
           method: 'POST',
-          body: {
+          body: ep.transform({
             model: state.selectedModel || state.status?.model?.name || 'tiny', stream: false, temperature: 0.3, max_tokens: 20,
             messages: [
               { role: 'system', content: 'You give conversations short titles. Answer with the title only, at most five words, without quotation marks and without punctuation at the end.' },
               { role: 'user', content: `Question: ${first.content.slice(0, 400)}\n\nAnswer: ${reply.content.slice(0, 400)}\n\nTitle:` },
             ],
-          },
+          }),
         });
         const data = await res.json();
         const title = String(data.choices?.[0]?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/["*#\n]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.!?:]+$/, '');
@@ -931,6 +935,7 @@
       el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
       clearTimeout(tokTimer);
       tokTimer = setTimeout(async () => {
+        if (window.fllmRemoteSelected && window.fllmRemoteSelected()) { $('liveTokenCounter').textContent = `about ${estimateTokens(el.value)} tokens`; return; } // providers hook
         const max = state.status?.model?.max_context || 4096;
         if (!el.value.trim()) { $('liveTokenCounter').textContent = `0 / ${max} tokens`; return; }
         try {
