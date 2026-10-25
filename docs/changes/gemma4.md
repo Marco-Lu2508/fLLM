@@ -54,6 +54,16 @@ python scripts/verify_gemma4.py --list
 python scripts/verify_gemma4.py --fllm target/release/fllm-rs --example target/release/examples/verify_checkpoint --generate
 ```
 
+## GGUF files from llama.cpp (Gemma 4 E4B)
+
+A GGUF written by llama.cpp (for example `unsloth/gemma-4-E4B-it-GGUF`, Q4_K_M) loads and answers correctly on the CPU. Checked against
+llama.cpp: the activations of the first layer match, a factual prompt and a short coding task are answered correctly, about 23 tokens/s
+on 8 threads of a server CPU. Three things were needed for such files: the tokenizer (`tokenizer.ggml.model = gemma4`: byte-pair
+encoding with the merges of the file, spaces written as `▁`, byte fallback; the token ids match the checkpoint's own tokenizer.json),
+a chat-template check that no longer mistakes `set ns.x = ns.x + ...` for a cycle, and the attention scale (llama.cpp does not write
+`attention.scale`; Gemma 4 and Gemma 3n use 1.0). Text only; the vision and audio parts are skipped, and the model runs on the CPU path
+described below.
+
 ## (b) Environment variables and flags
 
 | Name | Default | Meaning |

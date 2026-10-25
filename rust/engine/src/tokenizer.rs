@@ -152,6 +152,8 @@ impl TokenizerBundle {
                     None,
                     false,
                 )
+            } else if model_name == "gemma4" {
+                (build_gemma4_bpe(metadata, &tokens)?, None, true)
             } else if matches!(model_name, "llama" | "t5") {
                 let (tokenizer, options, byte_fallback, encoder) =
                     build_unigram(metadata, &tokens, model_name)?;
@@ -602,6 +604,54 @@ fn pre_patterns(pre_type: &str) -> Option<&'static [&'static str]> {
         "laguna" => Some(&LAGUNA),
         _ => None,
     }
+}
+
+/// The tokenizer of Gemma 4 (`tokenizer.ggml.model == "gemma4"`): BPE over the vocabulary with the merges of the file, spaces
+/// written as `▁` (a normalizer, as in the checkpoint's tokenizer.json), `<0xHH>` byte tokens for what the vocabulary lacks, and
+/// no prefix space.
+fn build_gemma4_bpe(metadata: &serde_json::Map<String, Value>, tokens: &[String]) -> Result<Tokenizer, String> {
+    use tokenizers::decoders::DecoderWrapper;
+    use tokenizers::normalizers::Replace;
+    let mut vocab = ahash::AHashMap::with_capacity(tokens.len());
+    for (id, token) in tokens.iter().enumerate() {
+        vocab.insert(token.clone(), u32::try_from(id).map_err(|_| "GGUF vocabulary exceeds u32 IDs")?);
+    }
+    let merges = metadata
+        .get("tokenizer.ggml.merges")
+        .and_then(Value::as_array)
+        .ok_or("the Gemma 4 GGUF has no tokenizer.ggml.merges")?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|merge| {
+            let (left, right) = merge.split_once(' ')?;
+            let joined = format!("{left}{right}");
+            (vocab.contains_key(left) && vocab.contains_key(right) && vocab.contains_key(&joined))
+                .then(|| (left.to_owned(), right.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let unknown = metadata
+        .get("tokenizer.ggml.unknown_token_id")
+        .and_then(Value::as_u64)
+        .and_then(|id| tokens.get(id as usize).cloned())
+        .unwrap_or_else(|| "<unk>".to_owned());
+    let model = BPE::builder()
+        .vocab_and_merges(vocab, merges)
+        .byte_fallback(true)
+        .unk_token(unknown)
+        .fuse_unk(true)
+        .ignore_merges(false)
+        .build()
+        .map_err(|error| format!("cannot build the Gemma 4 tokenizer: {error}"))?;
+    let mut tokenizer = Tokenizer::new(model);
+    tokenizer
+        .with_normalizer(Some(Replace::new(" ", "▁").map_err(|error| error.to_string())?))
+        .map_err(|error| error.to_string())?;
+    tokenizer.with_decoder(Some(DecoderSequence::new(vec![
+        DecoderWrapper::Replace(Replace::new("▁", " ").map_err(|error| error.to_string())?),
+        DecoderWrapper::ByteFallback(ByteFallback::default()),
+        DecoderWrapper::Fuse(Fuse::default()),
+    ])));
+    Ok(tokenizer)
 }
 
 fn build_legacy_bpe(
@@ -1190,7 +1240,7 @@ fn special_ids(
 /// for SentencePiece vocabularies and the Llama-3 / Tekken style BPE ones; the other byte-level BPE models (gpt-oss,
 /// Qwen, ...) are prompted without it.
 fn default_add_bos(model: Option<&str>, pre: Option<&str>, has_bos: bool) -> bool {
-    let spm = matches!(model, Some("llama" | "t5"))
+    let spm = matches!(model, Some("llama" | "t5" | "gemma4"))
         || matches!(
             pre,
             Some(
@@ -1257,6 +1307,33 @@ mod tests {
         match mismatch {
             Err(error) => assert!(error.contains("ID mismatch")),
             Ok(_) => panic!("expected HF/GGUF token ID mismatch to be rejected"),
+        }
+    }
+
+    /// Compares the Gemma 4 tokenizer built from a GGUF with the checkpoint's own tokenizer.json (both files are needed:
+    /// `FLLM_TEST_GEMMA4_GGUF` and `FLLM_TEST_GEMMA4_TOKENIZER`).
+    #[test]
+    #[ignore = "needs the Gemma 4 GGUF and tokenizer.json (set FLLM_TEST_GEMMA4_GGUF and FLLM_TEST_GEMMA4_TOKENIZER)"]
+    fn gemma4_gguf_tokenizer_matches_the_checkpoint_tokenizer() {
+        let (Ok(gguf), Ok(json)) = (std::env::var("FLLM_TEST_GEMMA4_GGUF"), std::env::var("FLLM_TEST_GEMMA4_TOKENIZER")) else {
+            return;
+        };
+        let mapping = MappedGguf::open(std::path::Path::new(&gguf)).unwrap();
+        let ours = TokenizerBundle::from_gguf(&mapping).unwrap();
+        let reference = Tokenizer::from_file(&json).unwrap();
+        for text in [
+            "Hello, world!",
+            "  leading and  double  spaces",
+            "def f(x):\n    return x * 2\n",
+            "Grüße aus München — 你好，世界 🙂",
+            "line one\n\nline two\ttabbed",
+            "<start_of_turn>user\nHi<end_of_turn>\n<start_of_turn>model\n",
+            "1234567890 3.14159",
+        ] {
+            let expected = reference.encode(text, false).unwrap().get_ids().to_vec();
+            let got = ours.encode_without_bos(text).unwrap();
+            assert_eq!(got, expected, "token ids differ for {text:?}");
+            assert_eq!(ours.decode(&got, false).unwrap(), text, "round trip differs for {text:?}");
         }
     }
 

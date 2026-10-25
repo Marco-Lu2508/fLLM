@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- Gemma 4 GGUF files from llama.cpp (such as `unsloth/gemma-4-E4B-it-GGUF`) now load and answer correctly on the CPU: a new tokenizer type `gemma4`, a chat-template check that accepts `set ns.x = ns.x + ...`, and the attention scale 1.0 these files rely on. `gemma4:e4b` is in the model catalog.
+
 ## [0.1.4] - 2026-10-23
 
 ### Added

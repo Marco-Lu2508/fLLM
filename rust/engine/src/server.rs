@@ -2503,23 +2503,31 @@ pub fn validate_chat_template(template: &str) -> Result<(), String> {
                 if let Some((obj, _)) = lhs.split_once(['.', '[']) {
                     let obj = obj.trim();
                     if !obj.is_empty() {
+                        // `set ns.n = ns.n + 1` reads an attribute of the object and is the usual way to count in a template; what
+                        // makes a cycle is the object itself as a value (`set ns.n = ns`, `set ns.n = [ns]`)
                         let is_ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
-                        let mut tokens = Vec::new();
-                        let mut current = String::new();
-                        for c in rhs.chars() {
-                            if is_ident_char(c) {
-                                current.push(c);
-                            } else if !current.is_empty() {
-                                tokens.push(std::mem::take(&mut current));
+                        let chars: Vec<char> = rhs.chars().collect();
+                        let mut i = 0;
+                        let mut cyclic = false;
+                        while i < chars.len() {
+                            if is_ident_char(chars[i]) {
+                                let start = i;
+                                while i < chars.len() && is_ident_char(chars[i]) {
+                                    i += 1;
+                                }
+                                let word: String = chars[start..i].iter().collect();
+                                let after_word = chars[i..].iter().find(|c| !c.is_whitespace());
+                                let member_of_other = start > 0 && chars[..start].iter().rev().find(|c| !c.is_whitespace()) == Some(&'.');
+                                if word == obj && !member_of_other && !matches!(after_word, Some('.') | Some('[')) {
+                                    cyclic = true;
+                                }
+                            } else {
+                                i += 1;
                             }
                         }
-                        if !current.is_empty() {
-                            tokens.push(current);
-                        }
-                        if tokens.iter().any(|t| t == obj) {
+                        if cyclic {
                             return Err("chat template contains cyclic self-referential assignment".into());
-                        }
-                    }
+                        }                    }
                 }
             }
         }
@@ -3646,6 +3654,13 @@ mod chat_template_tests {
 
         let deep = "(".repeat(65) + &")".repeat(65);
         assert!(validate_chat_template(&deep).is_err());
+    }
+
+    #[test]
+    fn counting_with_a_namespace_attribute_is_not_a_cycle() {
+        let counting = "{% set ns = namespace(n=0, r='') %}{% set ns.n = ns.n + 1 %}{%- set ns.r = ns.r + part.get('x') -%}";
+        assert!(validate_chat_template(counting).is_ok());
+        assert!(validate_chat_template("{% set ns.n = [ns] %}").is_err());
     }
 
     #[test]

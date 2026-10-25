@@ -600,6 +600,10 @@ impl ModelConfig {
         };
         let gemma_cfg = parse_gemma(meta, a, mapping, layers);
         let mut attention_scale = float(meta, a, "attention.scale");
+        // llama.cpp does not write the key for these models: their queries are normalized and the scores are not scaled
+        if attention_scale.is_none() && matches!(a, "gemma4" | "gemma3n") {
+            attention_scale = Some(1.0);
+        }
         if mla.is_some() {
             // ggml folds the YaRN magnitude into the softmax scale for DeepSeek models
             let multiplier = float(meta, a, "rope.scaling.yarn_log_multiplier").unwrap_or(0.0);

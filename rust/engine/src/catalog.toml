@@ -206,6 +206,11 @@ repo = "unsloth/gemma-3-4b-it-GGUF"
 default = "Q4_K_M"
 
 [[models]]
+name = "gemma4:e4b"
+repo = "unsloth/gemma-4-E4B-it-GGUF"
+default = "Q4_K_M"
+
+[[models]]
 name = "gemma3:12b"
 repo = "unsloth/gemma-3-12b-it-GGUF"
 default = "Q4_K_M"
