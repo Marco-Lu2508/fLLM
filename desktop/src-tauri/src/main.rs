@@ -198,14 +198,31 @@ fn launch(app: &AppHandle) {
                 let _ = window.navigate(url);
             }
         }
-        // watch the server: if it ends by itself, say so
+        // Watch the server. When the model is switched, the server starts a replacement that takes over the port and then ends itself: the
+        // replacement holds the same standard-input pipe, so the pipe must stay open (dropping it stops the replacement). After the
+        // program has ended, only the port tells whether a server is there.
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut child_ended: Option<String> = None;
+        let mut down_since: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_secs(1));
             if shell.generation.load(Ordering::SeqCst) != generation {
                 return;
             }
-            let ended = shell.running.lock().unwrap().as_mut().and_then(|s| s.child.try_wait().ok().flatten());
-            if let Some(status) = ended {
+            if child_ended.is_none() {
+                let ended = shell.running.lock().unwrap().as_mut().and_then(|s| s.child.try_wait().ok().flatten());
+                if let Some(status) = ended {
+                    child_ended = Some(status.to_string());
+                }
+            }
+            if TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok() {
+                down_since = None;
+                continue;
+            }
+            let Some(status) = &child_ended else { continue };
+            // gone and silent: a replacement may still be loading its model, so give it time
+            let since = *down_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > Duration::from_secs(10 * 60) {
                 shell.running.lock().unwrap().take();
                 show_loading(&app, &stopped_message(&format!("The server has stopped ({status}).")));
                 return;
