@@ -168,7 +168,7 @@
     loadThreads();
     renderThreadList();
     renderChatArea();
-    renderPresets();
+    prjInit(); // projects.js: assistants (migrated presets), projects, memory, prompt library
     updateRouteTesterSample();
     refreshStudioStatus().then(() => { if (!state.setup) loadWorkspace(); });
     setTimeout(() => { state.updateChecked = true; checkUpdate().then(() => { if (state.update?.newer) toast(`Version ${state.update.latest} is available: see Models.`); }); }, 4000);

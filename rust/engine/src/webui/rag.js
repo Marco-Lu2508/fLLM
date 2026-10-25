@@ -131,13 +131,15 @@
     // ---- documents kept in a chat ---------------------------------------------------
     const ragIndexCache = new Map();
 
-    function ragThreadIndex(t) {
-      const docs = t.docs || [];
+    // The index covers the documents of the chat and, unless `chatOnly`, the knowledge of its project (projects.js).
+    function ragThreadIndex(t, chatOnly) {
+      const docs = prjCombinedDocs(state.prj.projects, t, chatOnly);
       const sig = docs.map((d) => `${d.id}:${d.text.length}`).join('|');
-      const hit = ragIndexCache.get(t.id);
+      const key = chatOnly ? `${t.id}:chat` : t.id;
+      const hit = ragIndexCache.get(key);
       if (hit && hit.sig === sig) return hit.index;
       const index = ragBuildIndex(docs);
-      ragIndexCache.set(t.id, { sig, index });
+      ragIndexCache.set(key, { sig, index });
       return index;
     }
 
@@ -161,11 +163,13 @@
         t.docs.push({ id: uid('doc'), name: p.name, text, pages: p.pages, chars: text.length });
       }
       ragIndexCache.delete(t.id);
+      ragIndexCache.delete(`${t.id}:chat`);
     }
 
     function ragRemoveDoc(t, id) {
       t.docs = (t.docs || []).filter((d) => d.id !== id);
       ragIndexCache.delete(t.id);
+      ragIndexCache.delete(`${t.id}:chat`);
       saveThreads();
       renderAttachments();
     }
@@ -227,7 +231,7 @@
       node.passages = undefined;
       node.web = undefined;
       const wantsWeb = state.useWeb && (node.content || '').trim();
-      const hasDocs = (t.docs || []).length > 0;
+      const hasDocs = prjCombinedDocs(state.prj.projects, t, false).length > 0; // the chat's documents and its project's knowledge
       if (!hasDocs && !wantsWeb) return true;
       const controller = new AbortController();
       state.abortController = controller;
@@ -239,7 +243,7 @@
           const index = ragThreadIndex(t);
           const k = ragPassageCount();
           let found = ragSearch(index, node.content || '', k);
-          if (!found.length && node.ragFresh) found = ragOpening(index, k);
+          if (!found.length && node.ragFresh) found = ragOpening(ragThreadIndex(t, true), k); // "summarize this": only the chat's own documents
           found.sort((a, b) => (a.docId === b.docId ? a.n - b.n : 0));
           node.passages = found.length ? found.map((p) => ({ doc: p.doc, n: p.n, m: p.m, text: p.text })) : undefined;
         }

@@ -189,3 +189,69 @@
     .research-page a:hover { text-decoration: underline; }
     .research-page pre { white-space: pre-wrap; margin: 4px 0 4px 12px; font: inherit; max-height: 220px; overflow: auto; }
     .research-date { opacity: 0.7; font-size: 11px; }
+    /* ---- assistants, projects, memory (projects.js) ---- */
+    .as-badge { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0; }
+    #presetBadge { display: inline-flex; }
+    .as-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .as-row:hover { background: color-mix(in srgb, var(--foreground) 7%, transparent); }
+    .as-row.active { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+    .as-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+    .as-name b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .as-name small { color: var(--muted-foreground); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .as-dialog, .prj-dialog { width: min(560px, 94vw); max-height: 90vh; overflow-y: auto; }
+    .as-dialog .ui-input, .as-dialog .ui-select, .as-dialog .ui-textarea, .prj-dialog .ui-textarea { width: 100%; }
+    .as-label { display: block; margin: 10px 0 4px; font-size: 12px; color: var(--muted-foreground); }
+    .as-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .as-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; align-items: center; }
+    .as-pick { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; }
+    .as-pick.active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+    .starter-edit { opacity: 0.6; }
+
+    .prj-row { display: flex; align-items: center; gap: 4px; padding: 5px 6px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+    .prj-row:hover { background: color-mix(in srgb, var(--foreground) 7%, transparent); }
+    .prj-row:hover .thread-row-actions { display: inline-flex; }
+    .prj-name { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+    .prj-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .prj-name svg { color: var(--primary); flex-shrink: 0; }
+    .prj-count { font-size: 11px; color: var(--muted-foreground); }
+    .prj-chev { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted-foreground); }
+    .prj-chev svg { width: 12px; height: 12px; transition: transform 0.12s ease; }
+    .prj-chev.open svg { transform: rotate(90deg); }
+    .prj-chat { margin-left: 18px; }
+    .prj-empty { margin-left: 18px; padding: 3px 8px; }
+    .drop-zone { display: none; margin: 4px 2px; padding: 8px; border: 1px dashed var(--border); border-radius: 6px; font-size: 12px; color: var(--muted-foreground); text-align: center; }
+    .dragging .drop-zone { display: block; }
+    [data-drop].over { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+    .thread-archive-toggle { display: flex; align-items: center; gap: 6px; padding: 8px; font-size: 12px; color: var(--muted-foreground); }
+    .thread-archive-toggle:hover { color: var(--foreground); }
+    .sel-box { display: none; margin: 0 6px 0 0; accent-color: var(--primary); }
+    .select-mode .sel-box { display: inline-block; }
+    .select-mode .thread-row-actions { display: none !important; }
+    .thread-row.selected { background: color-mix(in srgb, var(--primary) 16%, transparent); }
+    .bulk-bar { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 4px; background: var(--sidebar); border-top: 1px solid var(--sidebar-border); font-size: 12px; }
+    .bulk-bar span { flex-basis: 100%; color: var(--muted-foreground); }
+
+    .prj-drop { border: 1px dashed var(--border); border-radius: 8px; padding: 8px; margin-top: 4px; }
+    .prj-drop.over { border-color: var(--primary); }
+    .prj-doc { display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: 13px; }
+    .prj-doc svg { color: var(--muted-foreground); flex-shrink: 0; }
+    .prj-doc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .prj-doc-size { font-size: 11.5px; color: var(--muted-foreground); white-space: nowrap; }
+    .prj-chats { max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; }
+    .prj-chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pick-list { display: flex; flex-direction: column; max-height: 50vh; overflow-y: auto; }
+
+    .mem-list, .plib-list { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+    .mem-row, .plib-row { display: flex; align-items: flex-start; gap: 6px; width: 100%; }
+    .mem-row .ui-input, .plib-row .ui-input { flex: 1; }
+    .plib-row { flex-direction: column; align-items: stretch; border: 1px solid var(--border); border-radius: 8px; padding: 8px; position: relative; }
+    .plib-row .btn-icon { position: absolute; top: 6px; right: 6px; }
+    .plib-row .ui-input { margin-right: 28px; }
+    .plib-row .ui-textarea { width: 100%; }
+
+    .chat-input-box { position: relative; }
+    .slash-menu { display: none; position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 20; max-height: 260px; overflow-y: auto; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--popover); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }
+    .slash-menu.open { display: block; }
+    .slash-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 6px 10px; border-radius: 6px; text-align: left; font-size: 13px; }
+    .slash-item small { color: var(--muted-foreground); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .slash-item.active, .slash-item:hover { background: color-mix(in srgb, var(--primary) 14%, transparent); }
