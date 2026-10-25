@@ -313,6 +313,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/status", get(api::studio::status))
         .route("/api/studio/config", post(api::studio::update_config))
         .route("/api/studio/hardware", get(api::studio::hardware))
+        .route("/api/studio/npu", get(api::npu::state))
+        .route("/api/studio/npu/setup", post(api::npu::start_setup).delete(api::npu::remove_runtime))
         .route("/api/studio/hf-account", get(api::studio::hf_account).post(api::studio::hf_login))
         .route("/api/studio/open-url", post(api::studio::open_url))
         .route("/api/studio/extract", post(api::extract::extract).layer(DefaultBodyLimit::max(api::extract::MAX_UPLOAD_BYTES)))

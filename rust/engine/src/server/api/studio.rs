@@ -349,6 +349,27 @@ pub(in crate::server) async fn hardware(
                 })
             })
             .collect();
+        // NPUs that are found but cannot be used yet ("runtime missing", "not supported yet"); they are listed as unavailable
+        let mut devices = devices;
+        for notice in crate::backend::npu::status::notices() {
+            devices.push(json!({
+                "id": "npu-unavailable",
+                "backend": "npu",
+                "api": "native",
+                "index": Value::Null,
+                "name": notice.name,
+                "description": notice.text,
+                "dev_type": "accelerator",
+                "available": false,
+                "status": notice.status,
+                "free_memory_bytes": 0,
+                "total_memory_bytes": 0,
+                "compute_units": notice.text,
+                "bandwidth_gbs": Value::Null,
+                "unified_memory": Value::Null,
+                "notes": notice.text,
+            }));
+        }
         let measured_bw = if run_bench {
             Some(crate::devices::measure_cpu_bandwidth_gbs())
         } else {
@@ -717,6 +738,16 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
     if let Some(options) = &requested {
         if let Err(message) = options.check_with_device(&super::studio_ops::device_of(&current_args)) {
             return api_error(StatusCode::BAD_REQUEST, &message);
+        }
+        // an NPU that is not ready is turned down here, with the reason, instead of after the restart
+        if options.wants_npu() {
+            let state = tokio::task::spawn_blocking(crate::backend::npu::status::state).await.unwrap_or("no_npu");
+            if state != "ready" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("The NPU cannot be used yet: {}. See Settings, Hardware.", crate::backend::npu::status::state_text(state)),
+                );
+            }
         }
     }
     crate::hub::set_download_stop(crate::hub::STOP_NONE);

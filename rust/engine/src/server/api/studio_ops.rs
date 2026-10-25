@@ -20,6 +20,8 @@ pub(in crate::server) struct LoadOptions {
     pub threads: Option<usize>,
     pub kv_cache_type: Option<String>,
     pub max_seqs: Option<usize>,
+    /// A `--device` value (`auto`, `cpu`, `vulkan:1`, `npu`); `None` keeps the start option of the server.
+    pub device: Option<String>,
 }
 
 const CONTEXT_FLAGS: &[&str] = &["--ctx", "--ctx-size", "--max-model-len"];
@@ -27,6 +29,7 @@ const GPU_LAYER_FLAGS: &[&str] = &["--gpu-layers", "-ngl", "--n-gpu-layers"];
 const THREAD_FLAGS: &[&str] = &["--threads"];
 const KV_FLAGS: &[&str] = &["--kv-cache-type", "--kv-cache-dtype", "--cache-type-k", "-ctk", "--cache-type-v", "-ctv"];
 const SEQ_FLAGS: &[&str] = &["--max-seqs"];
+const DEVICE_FLAGS: &[&str] = &["--device"];
 
 static NULL: Value = Value::Null;
 
@@ -78,7 +81,20 @@ impl LoadOptions {
         if !is_auto(get("max_seqs")) {
             options.max_seqs = Some(whole_number(get("max_seqs"), "The number of parallel requests", 1, 256)?);
         }
+        // unlike the other fields `auto` is kept here: it removes a `--device` the server was started with
+        if let Some(name) = get("device").as_str().map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) {
+            let plain = name.starts_with(|c: char| c.is_ascii_alphabetic()) && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'));
+            match crate::devices::parse_spec(&name) {
+                Ok(_) if plain => options.device = Some(name),
+                _ => return Err(format!("The device \"{name}\" is not known. Use auto, cpu, or a device from the Hardware page.")),
+            }
+        }
         Ok(options)
+    }
+
+    /// Whether the options ask for an NPU.
+    pub fn wants_npu(&self) -> bool {
+        self.device.as_deref().is_some_and(|d| d == "npu" || d.starts_with("npu:") || d == "openvino")
     }
 
     /// `null` stands for automatic.
@@ -89,6 +105,7 @@ impl LoadOptions {
             "threads": self.threads,
             "kv_cache_type": self.kv_cache_type,
             "max_seqs": self.max_seqs,
+            "device": self.device,
         })
     }
 
@@ -98,7 +115,8 @@ impl LoadOptions {
 
     /// Refuses combinations that cannot work on `device` (the `--device` value the server runs with).
     pub fn check_with_device(&self, device: &str) -> Result<(), String> {
-        // `vulkan:1` names the second device of the Vulkan backend
+        // a device chosen in the options replaces the one the server started with; `vulkan:1` names the second device of the Vulkan backend
+        let device = self.device.as_deref().unwrap_or(device);
         let device = device.split(':').next().unwrap_or_default().to_ascii_lowercase();
         if let Some(format) = self.kv_cache_type.as_deref().and_then(crate::kv_format::KvFormat::parse) {
             if matches!(device.as_str(), "vulkan" | "dx12" | "metal") && !format.is_legacy() {
@@ -116,6 +134,8 @@ impl LoadOptions {
     /// The server arguments with these options in place of the ones given before.
     pub fn apply(&self, args: &[String]) -> Vec<String> {
         let all: Vec<&str> = [CONTEXT_FLAGS, GPU_LAYER_FLAGS, THREAD_FLAGS, KV_FLAGS, SEQ_FLAGS].concat();
+        // the device is only replaced when the options name one
+        let all: Vec<&str> = if self.device.is_some() { [all, DEVICE_FLAGS.to_vec()].concat() } else { all };
         let mut out = remove_flags(args, &all);
         if let Some(n) = self.context {
             out.extend(["--ctx".to_owned(), n.to_string()]);
@@ -132,6 +152,9 @@ impl LoadOptions {
         }
         if let Some(n) = self.max_seqs {
             out.extend(["--max-seqs".to_owned(), n.to_string()]);
+        }
+        if let Some(device) = self.device.as_ref().filter(|d| d.as_str() != "auto") {
+            out.extend(["--device".to_owned(), device.clone()]);
         }
         out
     }
@@ -802,13 +825,37 @@ mod tests {
     #[test]
     fn options_are_read_and_checked() {
         let ok = LoadOptions::from_json(&json!({"context": "8192", "gpu_layers": "all", "threads": 6, "kv_cache_type": "Q8_0", "max_seqs": "auto"})).unwrap();
-        assert_eq!(ok, LoadOptions { context: Some(8192), gpu_layers: Some("all".into()), threads: Some(6), kv_cache_type: Some("q8_0".into()), max_seqs: None });
+        assert_eq!(ok, LoadOptions { context: Some(8192), gpu_layers: Some("all".into()), threads: Some(6), kv_cache_type: Some("q8_0".into()), max_seqs: None, device: None });
         assert!(LoadOptions::from_json(&json!({})).unwrap().is_automatic());
         assert!(LoadOptions::from_json(&json!({"context": "auto", "gpu_layers": "auto"})).unwrap().is_automatic());
         for bad in [json!({"context": 3}), json!({"context": "big"}), json!({"gpu_layers": -1}), json!({"threads": 0}), json!({"kv_cache_type": "q3_9"}), json!({"max_seqs": 1000})] {
             let error = LoadOptions::from_json(&bad).unwrap_err();
             assert!(error.ends_with('.'), "{error}");
         }
+    }
+
+    #[test]
+    fn the_device_option_replaces_the_start_flag() {
+        let npu = LoadOptions::from_json(&json!({"device": "NPU"})).unwrap();
+        assert_eq!(npu.device.as_deref(), Some("npu"));
+        assert!(npu.wants_npu() && !npu.is_automatic());
+        assert!(LoadOptions::from_json(&json!({"device": "npu:0"})).unwrap().wants_npu());
+        assert!(!LoadOptions::from_json(&json!({"device": "vulkan:1"})).unwrap().wants_npu());
+        assert!(!LoadOptions::from_json(&json!({"device": ""})).unwrap().wants_npu());
+        for bad in [json!({"device": "npu:x"}), json!({"device": "cpu; rm -rf"}), json!({"device": "--ctx"})] {
+            assert!(LoadOptions::from_json(&bad).is_err(), "{bad}");
+        }
+        let given = args(&["serve", "--device", "cuda:0", "--model", "m.gguf"]);
+        assert_eq!(npu.apply(&given), args(&["serve", "--model", "m.gguf", "--device", "npu"]));
+        // `auto` removes the flag, no device in the options keeps it
+        let auto = LoadOptions::from_json(&json!({"device": "auto"})).unwrap();
+        assert_eq!(auto.apply(&given), args(&["serve", "--model", "m.gguf"]));
+        let keep = LoadOptions { context: Some(4096), ..LoadOptions::default() };
+        assert_eq!(keep.apply(&given), args(&["serve", "--device", "cuda:0", "--model", "m.gguf", "--ctx", "4096"]));
+        // the device of the options decides which combinations are refused
+        let layers = LoadOptions { gpu_layers: Some("20".into()), device: Some("cpu".into()), ..LoadOptions::default() };
+        assert!(layers.check_with_device("vulkan").is_err());
+        assert_eq!(npu.to_json()["device"], "npu");
     }
 
     #[test]
