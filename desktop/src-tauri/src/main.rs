@@ -363,18 +363,27 @@ struct VariantInfo {
     detected: bool,
 }
 
+/// The three saved values the settings page shows, read under one lock.
+fn settings_snapshot(settings: &Mutex<Settings>) -> (bool, String, String) {
+    let settings = settings.lock().unwrap();
+    (settings.keep_in_tray, settings.quick_entry.clone(), settings.variant.clone())
+}
+
 #[tauri::command]
 fn get_desktop_settings(app: AppHandle, shell: State<Shell>) -> Result<DesktopSettings, String> {
     let folder = |dir: tauri::Result<PathBuf>| dir.map(|d| d.display().to_string()).unwrap_or_default();
     let active = shell.active.lock().unwrap().clone();
+    // One lock, taken once: a second `lock()` in the same expression would wait for the first guard for ever (the command runs on the
+    // thread of the window, which then stops answering: "not responding")
+    let (keep_in_tray, quick_entry, variant) = settings_snapshot(&shell.settings);
     Ok(DesktopSettings {
-        keep_in_tray: shell.settings.lock().unwrap().keep_in_tray,
+        keep_in_tray,
         autostart: app.autolaunch().is_enabled().map_err(|e| e.to_string())?,
         log_folder: folder(app.path().app_log_dir()),
         config_folder: folder(app.path().app_config_dir()),
-        quick_entry: shell.settings.lock().unwrap().quick_entry.clone(),
+        quick_entry,
         default_quick_entry: DEFAULT_QUICK_ENTRY.to_owned(),
-        variant: shell.settings.lock().unwrap().variant.clone(),
+        variant,
         variant_from_env: std::env::var("FLLM_DESKTOP_VARIANT").ok().filter(|v| !v.trim().is_empty()),
         active_variant: active.name,
         active_variant_label: active.label,
@@ -530,4 +539,21 @@ fn main() {
             stop_server(handle);
         }
     });
+}
+
+#[cfg(test)]
+mod settings_lock_tests {
+    use super::*;
+
+    #[test]
+    fn reading_the_settings_does_not_wait_for_itself() {
+        let settings = Mutex::new(Settings::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = tx.send(settings_snapshot(&settings));
+            });
+            assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "reading the settings blocked");
+        });
+    }
 }
