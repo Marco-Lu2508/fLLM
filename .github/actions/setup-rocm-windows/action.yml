@@ -12,8 +12,11 @@ inputs:
     description: Python package index of AMD's ROCm wheels
     default: "https://stable.repo.amd.com/rocm/whl-next/"
   sha256:
-    description: 'one "<file>  <sha256>" per line; a wheel without an entry only gets a warning. Empty until the first run has printed them.'
-    default: ""
+    description: 'one "<file>  <sha256>" per line; a wheel without an entry only gets a warning (the hashes below are those of version 10.0.0 as downloaded by a CI run)'
+    default: |
+      rocm-10.0.0.tar.gz  65b5982249612a310135f5e061b9f28909e8ad718a1ddb3f1abba92298b7216b
+      rocm_sdk_devel-10.0.0-py3-none-win_amd64.whl  3ca92d4af9b31113ec21f826c8e5a7f1c30a702438f6e9dc98bceb0fccd95993
+      rocm_sdk_core-10.0.0-py3-none-win_amd64.whl  066195cb0f7df02e6009facb17652dd992d13fae44d87652e5ab928d5b4f0851
 runs:
   using: composite
   steps:
