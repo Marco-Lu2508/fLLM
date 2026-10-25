@@ -536,17 +536,22 @@ jobs:
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
           log-file-suffix: "release-windows-cuda.txt"
 
-      - name: CUTLASS and FlashInfer headers
+      - name: CUTLASS headers (FlashInfer is left out, its headers do not compile with the MSVC host compiler)
         shell: bash
         run: |
           git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
-          git clone --depth 1 --branch v0.6.5 https://github.com/flashinfer-ai/flashinfer third_party/flashinfer
 
       - name: Build and pack (all GPU architectures of the default list)
         shell: pwsh
         env:
           FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler -diag-suppress 69"
-        run: ./scripts/build-windows.ps1 -Cuda -SkipTests -OutDir dist
+        run: |
+          ./scripts/build-windows.ps1 -Cuda -SkipTests -OutDir dist *>&1 | Tee-Object -FilePath build.log
+          if (-not (Test-Path dist/*.zip)) {
+            $tail = ((Select-String -Path build.log -Pattern 'error [A-Z]*[0-9]+|fatal error|error:|LNK[0-9]+|Write-Error' | Select-Object -First 25 | ForEach-Object { $_.Line.Trim() }) -join '%0A')
+            Write-Host "::error title=Windows CUDA build failed::$tail"
+            exit 1
+          }
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -652,9 +657,171 @@ jobs:
             printf '%s  %s\n' "$(cat "$sum.tmp")" "$(basename "$f")" > "$sum"
             gh release upload "$TAG" "$f" "$sum" --clobber
           done
+
+  # The desktop installers with a second engine inside: fllm-rs-cuda (CUDA + Vulkan, static CUDA runtime, needs only the NVIDIA driver) next to
+  # the base fllm-rs. A separate job, so that a failed CUDA build never costs the base installers of the job above: they are published
+  # either way, and this job adds "fLLM-cuda..." named installers when it succeeds. When it fails, it prints an ::error:: annotation
+  # (and `finalize` repeats it). The base installers have no placeholder at all: tauri.conf.json lists only the base program, and
+  # tauri.cuda.conf.json (used only here) adds the CUDA one, which must be a real build (size check below).
+  # Architectures: sm_75 .. sm_120 (RTX 20 series and newer, data centre A100/H100/B200, PTX of the newest); Pascal and Volta cards are
+  # not covered, they choose "CPU + Vulkan" in the settings (docs/user/desktop.md).
+  desktop-cuda:
+    name: desktop installer with CUDA (${{ matrix.name }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    continue-on-error: true
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-2022
+          - name: Linux
+            os: ubuntu-24.04
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      CUDA_ARCHS: "75;80;86;89;90;100;120"
+    steps:
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: CUDA toolkit (Windows)
+        if: runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.8.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
+          log-file-suffix: "release-desktop-cuda.txt"
+
+      - name: System packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends glslc libvulkan-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf rpm file
+
+      - name: Build the base server program
+        shell: bash
+        run: |
+          cargo build --release --locked -p fllm-engine --features rust-gpu,vulkan --bin fllm-rs
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          ext=""; if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          mkdir -p desktop/src-tauri/binaries
+          cp "target/release/fllm-rs$ext" "desktop/src-tauri/binaries/fllm-rs-$triple$ext"
+
+      - name: CUTLASS headers (Windows; FlashInfer is left out, its headers do not compile with the MSVC host compiler)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v4.8.0 https://github.com/NVIDIA/cutlass third_party/cutlass
+
+      - name: Build the CUDA server program (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          FLLM_CUDA_EXTRA_FLAGS: "-allow-unsupported-compiler -diag-suppress 69"
+        run: |
+          ./scripts/build-windows.ps1 -Cuda -CudaArchs $env:CUDA_ARCHS -SkipTests -SkipPackage *>&1 | Tee-Object -FilePath build.log
+          $exe = "target/x86_64-pc-windows-msvc/release/fllm-rs.exe"
+          if (-not (Test-Path $exe)) {
+            $tail = ((Select-String -Path build.log -Pattern 'error [A-Z]*[0-9]+|fatal error|error:|LNK[0-9]+|Write-Error' | Select-Object -First 25 | ForEach-Object { $_.Line.Trim() }) -join '%0A')
+            Write-Host "::error title=CUDA server program (Windows) failed to build::$tail"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force desktop/src-tauri/binaries | Out-Null
+          Copy-Item $exe "desktop/src-tauri/binaries/fllm-rs-cuda-x86_64-pc-windows-msvc.exe"
+
+      - name: Build the CUDA server program (Linux, CUDA container)
+        if: runner.os == 'Linux'
+        env:
+          RUST_FEATURES: rust-gpu,cuda
+        run: |
+          set -eu
+          set -o pipefail
+          ./scripts/release/build-linux-cuda.sh 2>&1 | tee build.log || {
+            tail=$(grep -E 'error(\[|:)|nvcc fatal|undefined reference' build.log | head -25 | paste -sd '|' - | sed 's/|/%0A/g')
+            echo "::error title=CUDA server program (Linux) failed to build::$tail"
+            exit 1
+          }
+          ./scripts/verify-dlopen.sh dist-cuda/fllm-rs
+          mkdir -p desktop/src-tauri/binaries
+          cp dist-cuda/fllm-rs desktop/src-tauri/binaries/fllm-rs-cuda-x86_64-unknown-linux-gnu
+
+      - name: The CUDA server program must be a real build, not a placeholder
+        shell: bash
+        run: |
+          set -eu
+          f=$(ls desktop/src-tauri/binaries/fllm-rs-cuda-* | head -n 1)
+          size=$(wc -c < "$f")
+          echo "$f: $size bytes"
+          if [ "$size" -lt 20000000 ]; then
+            echo "::error title=CUDA server program is too small::$f has $size bytes; a real CUDA build is far larger, this looks like a placeholder"
+            exit 1
+          fi
+
+      - name: Tauri command line tool
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build the installers (base and CUDA program inside)
+        shell: bash
+        working-directory: desktop/src-tauri
+        run: |
+          cargo tauri icon ../app-icon.png
+          cargo tauri build --config tauri.cuda.conf.json
+
+      - name: Upload to the release (names start with fLLM-cuda)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          cd desktop/src-tauri/target/release/bundle
+          for f in nsis/*.exe msi/*.msi deb/*.deb rpm/*.rpm appimage/*.AppImage; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            new="$(printf '%s' "$base" | sed -E 's/^(fLLM)([_-])/\1-cuda\2/')"
+            [ "$new" != "$base" ] || new="cuda-$base"
+            cp "$f" "$new"
+            sum="$new.sha256"
+            printf '%s  %s\n' "$(sha256sum "$new" | awk '{print $1}')" "$new" > "$sum"
+            gh release upload "$TAG" "$new" "$sum" --clobber
+          done
+
+      - name: Report a failed CUDA installer
+        if: failure()
+        shell: bash
+        run: echo "::error title=desktop installer with CUDA (${{ matrix.name }}) was not built::The base installer of this platform is published; the fLLM-cuda installer is missing. See the failed step above."
+
   finalize:
     name: publish release
-    needs: [prepare, build, linux-cuda, linux-rocm, windows, windows-cuda, desktop]
+    needs: [prepare, build, linux-cuda, linux-rocm, windows, windows-cuda, desktop, desktop-cuda]
     if: ${{ !cancelled() && needs.build.result == 'success' && needs.windows.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -667,6 +834,8 @@ jobs:
       LINUX_CUDA_RESULT: ${{ needs.linux-cuda.result }}
       LINUX_ROCM_RESULT: ${{ needs.linux-rocm.result }}
       CUDA_RESULT: ${{ needs.windows-cuda.result }}
+      DESKTOP_RESULT: ${{ needs.desktop.result }}
+      DESKTOP_CUDA_RESULT: ${{ needs.desktop-cuda.result }}
     steps:
       - name: Check the assets and append SHA256 checksum table to release notes
         run: |
@@ -688,6 +857,12 @@ jobs:
           fi
           if [ "$CUDA_RESULT" != "success" ]; then
             echo "::warning::fllm-windows-x86_64-msvc-cuda.zip was not built (job result: $CUDA_RESULT); install.ps1 uses the plain Windows asset"
+          fi
+          if [ "$DESKTOP_RESULT" != "success" ]; then
+            echo "::error title=desktop installers::the base desktop installers were not all built (job result: $DESKTOP_RESULT)"
+          fi
+          if [ "$DESKTOP_CUDA_RESULT" != "success" ]; then
+            echo "::error title=desktop installers with CUDA::the fLLM-cuda desktop installers were not all built (job result: $DESKTOP_CUDA_RESULT); the release has the base installers only"
           fi
           mkdir -p sums
           gh release download "$TAG" --pattern "*.sha256" --dir sums --clobber

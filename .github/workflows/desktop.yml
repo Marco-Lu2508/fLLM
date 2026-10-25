@@ -1,6 +1,9 @@
 # The desktop app (Tauri): the Studio in its own window with the server built in, as an installer per system (Windows: setup and msi,
 # Linux: deb, rpm and AppImage). A downloadable workflow artifact, no release, no tag. Runs by hand (Actions -> desktop -> Run workflow)
 # and on a push to main that changes the app or this workflow. Installers are not signed yet.
+# This workflow builds only the base engine variant (fllm-rs: CPU, Vulkan, DirectX), which is all that tauri.conf.json lists, so it stays
+# fast and needs no placeholder files. The installers with the CUDA variant inside (tauri.cuda.conf.json) are built by the
+# `desktop-cuda` job of release.yml.
 name: desktop
 
 on:
