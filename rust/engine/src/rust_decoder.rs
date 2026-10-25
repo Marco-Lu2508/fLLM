@@ -2099,6 +2099,13 @@ impl RustDecoder {
                     last_error = error;
                     skipped = true;
                 }
+                // an NPU is experimental and often not usable (no runtime, no driver, a model it cannot take): the server must not end
+                // because of it, so the model runs on the CPU and the reason is logged and shown on the Hardware page
+                Err(error) if backend == "npu" => {
+                    let message = crate::backend::npu::status::record_fallback(&error);
+                    eprintln!("[fllm-rs] --device npu: {message} (details: {error})");
+                    return Ok(());
+                }
                 Err(error) => return Err(error),
             }
         }

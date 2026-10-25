@@ -58,7 +58,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 [features]
 # The x86-64 AVX-512 / AMX kernels are compiled in by default: they are #[target_feature] functions chosen at run time by CPUID,
 # so the binary still runs on any x86-64 CPU (docs/cpu-kernels.md, "Building with the avx512 feature"). `--no-default-features` leaves them out.
-default = ["avx512"]
+default = ["avx512", "npu-openvino"]
 rust-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 cuda = ["dep:libloading"]
 # native backends (all optional; none is in the default set). Verification level of each is in docs/backends.md
@@ -67,6 +67,8 @@ metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
 # AMD: the CUDA sources built with hipcc (FLLM_HIP=1) behind the cuda backend; this feature adds the HIP-specific Rust glue
 hip = ["cuda"]
 sycl = []
+# Intel NPU through the OpenVINO C runtime, which is opened at run time (no link-time dependency): the feature is in the default set so that
+# the same binary can use an NPU once the runtime is installed (`fllm-rs npu-setup`, or Settings > Hardware in the Studio).
 npu-openvino = ["dep:libloading"]
 npu-xdna = ["dep:libloading"]
 npu-qnn = ["dep:libloading"]

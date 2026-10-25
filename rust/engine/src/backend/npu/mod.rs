@@ -1,15 +1,23 @@
-//! NPU backends (Intel OpenVINO, AMD XDNA, Qualcomm QNN, Apple Neural Engine).
+//! NPU backends (Intel OpenVINO, AMD XDNA, Qualcomm QNN, Apple Neural Engine) and their setup in the app.
 //!
-//! Scaffold: the module layout is fixed so that the packages can fill in their files without touching this one. Until a
-//! package implements `backend::create`, `--device npu` reports that the backend is not implemented.
-//! Level of verification: L0 (compiles; never run on hardware).
+//! * [`probe`]: NPUs the operating system lists, without any vendor runtime;
+//! * [`setup`] / [`zip`]: download, check and unpack of the pinned OpenVINO runtime (`fllm-rs npu-setup`, `/api/studio/npu/setup`);
+//! * [`status`]: the state shown by the app (hardware, runtime, setup, last fallback to the CPU);
+//! * the providers ([`openvino`] hybrid backend; [`xdna`], [`hexagon`], [`ane`] probes) behind their cargo features.
+//!
+//! This module is always compiled; the OpenVINO backend is in the default features and loads the OpenVINO C runtime at run time.
+//! Level of verification: L0 (compiles; never run on an NPU).
 
 pub mod backend;
 pub mod device_info;
 pub mod openvino;
+pub mod probe;
+pub mod setup;
+pub mod status;
 pub mod xdna;
 pub mod hexagon;
 pub mod ane;
+pub mod zip;
 
 use super::Backend;
 use crate::devices::DeviceInfo;

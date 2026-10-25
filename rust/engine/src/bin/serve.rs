@@ -82,7 +82,7 @@ fn usage(error: &str) -> ! {
     eprintln!("       fllm-rs --version | -V | version");
     eprintln!("       fllm-rs studio [--model MODEL] [--no-open] [serve options]   (the browser app; reuses the last model)");
     eprintln!("       fllm-rs devices [--json] [--measure] | formats | inspect PATH | pull hf://org/repo/file.gguf");
-    eprintln!("       fllm-rs npu-setup   (installs the OpenVINO runtime for the Intel NPU into ~/.fllm/openvino)");
+    eprintln!("       fllm-rs npu-setup [--remove]   (downloads the OpenVINO runtime for the Intel NPU into ~/.fllm/openvino; --remove deletes it)");
     eprintln!("       fllm-rs selftest-cpu [--tier TIER] | selftest-gpu [--device auto|vulkan|metal|hip|...] [--only GROUPS] [--quants LIST] [--json FILE] [--list]");
     eprintln!("       fllm-rs bench-kernel --op marlin_gemv [--m 1] [--n 2048] [--k 2048] [--iters 200] (CUDA builds; --help)");
     eprintln!("       fllm-rs convert CHECKPOINT OUTPUT.gguf [--outtype preserve|f16|f32]");
@@ -162,6 +162,7 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "version_long": fllm_engine::version::long_version(),
             "compiled_backends": compiled_backends(),
             "devices": devices,
+            "unusable_npus": fllm_engine::backend::npu::status::notices().iter().map(|n| serde_json::json!({"name": n.name, "vendor": n.vendor, "status": n.status, "text": n.text})).collect::<Vec<_>>(),
             "auto_order": policy.order,
             "auto_integrated_gpus": policy.integrated,
             "auto_chain": chain.iter().map(|(backend, index)| format!("{backend}:{index}")).collect::<Vec<_>>(),
@@ -234,6 +235,12 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             role,
         );
     }
+    // NPUs the operating system lists but that cannot be used (yet): shown so that the user knows why `--device npu` does not work
+    let notices = fllm_engine::backend::npu::status::notices();
+    for notice in &notices {
+        println!("  [-] {} ({})
+      Status:       {}", notice.name, notice.vendor, notice.text);
+    }
     println!();
     let described: Vec<String> = chain.iter().map(|(backend, index)| describe_choice(backend, *index)).collect();
     println!("Auto selection (--device auto): {}", described.join(" -> "));
@@ -286,7 +293,8 @@ fn latent_mla_unavailable(model: &GgufModel, backend: &str, index: usize, key: K
 }
 
 fn plan_target(selected_backend: &str, selected_index: usize) -> Option<fllm_engine::DeviceInfo> {
-    if selected_backend == "cpu" {
+    // the NPU backend is a hybrid: the host's memory and the CPU stream do the work, so the plan is the CPU's
+    if selected_backend == "cpu" || selected_backend == "npu" {
         return None;
     }
     fllm_engine::devices::find_entry(selected_backend, selected_index).map(|entry| entry.info)
@@ -374,7 +382,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         usage("");
     }
     if args.first().map(String::as_str) == Some("npu-setup") {
-        return npu_setup();
+        return npu_setup(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("devices") {
         return print_devices(&args[1..]);
@@ -991,7 +999,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let requested_context = context;
     if max_seqs_auto {
         // GPU pools are cut to the device's memory below; the CPU keeps the default pool
-        max_sequences = if selected_backend == "cpu" { 16 } else { 256 };
+        max_sequences = if matches!(selected_backend.as_str(), "cpu" | "npu") { 16 } else { 256 };
     }
     let mut model = GgufModel::load(path.to_str().unwrap(), context, max_sequences, threads)?;
     if context_request.is_none() {
@@ -1351,38 +1359,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `fllm-rs npu-setup`: installs the OpenVINO runtime (the pip wheel `openvino`, which carries the C library and the NPU plug-in) into
-/// `~/.fllm/openvino` (`$FLLM_HOME/openvino`), where the NPU backend looks for it. Needs Python 3 with pip and a network connection.
-fn npu_setup() -> Result<(), Box<dyn std::error::Error>> {
-    let base = std::env::var_os("FLLM_HOME")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|h| std::path::PathBuf::from(h).join(".fllm"))
-        })
-        .ok_or("neither FLLM_HOME nor HOME is set")?;
-    let target = base.join("openvino");
-    std::fs::create_dir_all(&target)?;
-    let python = if cfg!(windows) { ["py", "python"] } else { ["python3", "python"] };
-    for exe in python {
-        let status = std::process::Command::new(exe)
-            .args(["-m", "pip", "install", "--upgrade", "--target"])
-            .arg(&target)
-            .arg("openvino")
-            .status();
-        match status {
-            Ok(s) if s.success() => {
-                println!("OpenVINO installed in {}; `fllm-rs devices` lists the NPU now.", target.display());
-                if cfg!(target_os = "linux") {
-                    println!("The NPU driver (intel_vpu / amdxdna kernel module and its user-space part) comes from your distribution; the user needs access to /dev/accel (group render).");
+/// `fllm-rs npu-setup`: downloads the pinned OpenVINO runtime (checked against its SHA-256) and unpacks it into `~/.fllm/openvino`
+/// (`$FLLM_HOME/openvino`), where the NPU backend looks for it. `fllm-rs npu-setup --remove` deletes it again. The same code runs
+/// behind `POST /api/studio/npu/setup`.
+fn npu_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use fllm_engine::backend::npu::setup;
+    match args {
+        [] => {}
+        [flag] if flag == "--remove" => {
+            setup::remove()?;
+            println!("The OpenVINO runtime was removed.");
+            return Ok(());
+        }
+        _ => return Err("usage: fllm-rs npu-setup [--remove]".into()),
+    }
+    setup::start()?;
+    let mut last = String::new();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let p = setup::progress();
+        let line = if p.total > 0 {
+            format!("{}: {:.1} of {:.1} MB", p.message, p.done as f64 / 1e6, p.total as f64 / 1e6)
+        } else {
+            p.message.clone()
+        };
+        if line != last {
+            eprint!("\r{line}   ");
+            last = line;
+        }
+        if !p.phase.busy() {
+            eprintln!();
+            return match p.phase {
+                setup::Phase::Done => {
+                    println!("OpenVINO {} is installed in {}; `fllm-rs devices` lists the NPU when the driver provides one.", setup::OPENVINO_VERSION, setup::install_dir().map(|d| d.display().to_string()).unwrap_or_default());
+                    if cfg!(target_os = "linux") {
+                        println!("The NPU driver (intel_vpu kernel module and its user-space part) comes from your distribution; the user needs access to /dev/accel (group render).");
+                    }
+                    Ok(())
                 }
-                return Ok(());
-            }
-            Ok(_) => return Err(format!("`{exe} -m pip install openvino` failed").into()),
-            Err(_) => continue,
+                setup::Phase::Cancelled => Err("cancelled".into()),
+                _ => Err(p.error.unwrap_or_else(|| "the setup failed".to_owned()).into()),
+            };
         }
     }
-    Err("Python 3 with pip was not found (tried python3 / python)".into())
 }

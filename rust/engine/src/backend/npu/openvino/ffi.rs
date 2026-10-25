@@ -155,7 +155,9 @@ pub struct Api {
 unsafe impl Send for Api {}
 unsafe impl Sync for Api {}
 
-static API: OnceLock<Result<Arc<Api>, String>> = OnceLock::new();
+/// The loaded runtime. A failed load is *not* remembered: the runtime can be installed while the process runs (Settings > Hardware), and
+/// the next call must then find it.
+static API: std::sync::Mutex<Option<Arc<Api>>> = std::sync::Mutex::new(None);
 
 /// Copy the function pointer of a mandatory symbol.
 macro_rules! required {
@@ -178,7 +180,13 @@ macro_rules! optional {
 impl Api {
     /// The process-wide runtime; the first call searches for the library and binds the symbols.
     pub fn get() -> Result<Arc<Api>, String> {
-        API.get_or_init(Api::load).clone()
+        let mut slot = API.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(api) = slot.as_ref() {
+            return Ok(api.clone());
+        }
+        let api = Api::load()?;
+        *slot = Some(api.clone());
+        Ok(api)
     }
 
     fn load() -> Result<Arc<Api>, String> {
@@ -479,6 +487,14 @@ fn installation_dirs(root: &Path) -> Vec<PathBuf> {
         root.join("bin"),
         root.join("libs"),
     ]
+}
+
+/// The first file of the C runtime that exists on disk (without loading it), for the status page: `None` when only the system loader's
+/// own search could find it.
+pub fn find_runtime_file() -> Option<PathBuf> {
+    library_candidates()
+        .into_iter()
+        .find(|p| p.parent().is_some_and(|d| !d.as_os_str().is_empty()) && p.is_file())
 }
 
 /// Every place the C runtime is looked for, most specific first.
