@@ -984,7 +984,7 @@ async fn slow_requests_hit_the_request_timeout() {
 async fn keys_are_checked_on_every_route_but_the_open_ones() {
     let h = start(with_keys(&["alpha", "beta"]));
     // open
-    for path in ["/health", "/ready", "/"] {
+    for path in ["/health", "/ready", "/", "/studio/runner.js"] {
         assert_eq!(h.get(path).await.status, StatusCode::OK, "{path}");
     }
     // closed without a key, in the dialect of the route

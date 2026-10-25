@@ -737,7 +737,7 @@
     // ---- thread list helpers (used by renderThreadList) --------------------------------------
     function prjSidebarThreads(q) {
       const P = state.prj;
-      return prjSidebarView(state.threads, { q, showArchived: P.showArchived, projectIds: P.projects.map((p) => p.id), textOf: threadText });
+      return prjSidebarView(state.threads.filter((t) => !t.temporary), { q, showArchived: P.showArchived, projectIds: P.projects.map((p) => p.id), textOf: threadText });
     }
     function prjArchiveToggleHtml(count, q) {
       if (!count || q) return '';

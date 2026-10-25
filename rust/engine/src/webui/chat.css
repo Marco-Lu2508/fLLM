@@ -255,3 +255,87 @@
     .slash-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 6px 10px; border-radius: 6px; text-align: left; font-size: 13px; }
     .slash-item small { color: var(--muted-foreground); font-size: 11.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .slash-item.active, .slash-item:hover { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+    /* tables and messages on narrow windows */
+    .msg-assistant-wrap, .msg-assistant-body { min-width: 0; }
+    .msg-assistant-prose { min-width: 0; overflow-wrap: anywhere; }
+    .md-table { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .md-table table { min-width: 100%; }
+    .md-table th, .md-table td { min-width: 5.5em; overflow-wrap: normal; }
+
+    /* math: a small typesetter built from plain HTML */
+    .tex { font-family: "Cambria Math", "STIX Two Math", "Latin Modern Math", Georgia, serif; font-size: 1.04em; white-space: nowrap; }
+    .tex i { font-style: italic; }
+    .tex-display { display: block; margin: 10px 0; padding: 4px 0; text-align: center; overflow-x: auto; }
+    .math-block.tex { color: inherit; background: none; padding: 4px 0; white-space: nowrap; }
+    .tex sup, .tex sub { font-size: 0.72em; line-height: 0; }
+    .tex .tx-ss { display: inline-flex; flex-direction: column; vertical-align: middle; font-size: 0.72em; line-height: 1.15; }
+    .tex .tx-ss sup, .tex .tx-ss sub { font-size: 1em; line-height: 1.15; vertical-align: baseline; position: static; }
+    .tx-frac { display: inline-flex; flex-direction: column; vertical-align: middle; text-align: center; margin: 0 0.15em; }
+    .tx-num { padding: 0 0.2em; border-bottom: 1px solid currentColor; }
+    .tx-den { padding: 0 0.2em; }
+    .tx-sqrt { display: inline-flex; align-items: stretch; }
+    .tx-rcnt { border-top: 1px solid currentColor; padding: 0 0.15em; }
+    .tx-lim { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1.1; }
+    .tx-top, .tx-bot { font-size: 0.72em; }
+    .tx-op { font-size: 1.2em; }
+    .tx-fn, .tx-rm { font-style: normal; }
+    .tx-fn::after { content: "\2009"; }
+    .tx-over { border-top: 1px solid currentColor; }
+    .tx-under { border-bottom: 1px solid currentColor; }
+
+    /* message actions */
+    .msg-actions-bar .is-on { color: var(--primary); }
+    .msg-actions-bar .act-text { font-size: 9.5px; font-weight: 700; letter-spacing: 0.02em; }
+    .msg-actions-bar .copied-label { margin-left: 3px; font-size: 11.5px; }
+    .msg-actions-bar .is-copied, .msg-actions-bar [data-act="continue"] { width: auto; padding: 0 6px; }
+    .msg-actions-bar .is-copied { color: var(--primary); }
+    .menu-item.is-current { background: color-mix(in srgb, var(--primary) 16%, transparent); }
+    #styleMenu { bottom: calc(100% + 8px); }
+
+    /* temporary chat */
+    .temp-banner { padding: 6px 14px; font-size: 12.5px; text-align: center; color: var(--foreground); background: color-mix(in srgb, var(--copper) 16%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--copper) 40%, transparent); }
+    .temp-banner[hidden] { display: none; }
+    #btnTemporary.active { color: var(--copper); background: color-mix(in srgb, var(--copper) 14%, transparent); }
+
+    /* code block runner output */
+    .run-out { border-top: 1px solid var(--border); padding: 8px 12px; font-size: 12.5px; background: color-mix(in srgb, var(--foreground) 3%, transparent); }
+    .run-status { color: var(--muted-foreground); font-size: 11.5px; }
+    .run-status.is-warn { color: var(--copper); }
+    .run-lines { margin: 4px 0 0; max-height: 240px; overflow: auto; font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+    .run-lines:empty { display: none; }
+    .run-line.is-error { color: var(--destructive); }
+    .run-line.is-warn { color: var(--copper); }
+    .run-line.is-value { color: var(--primary); }
+
+    /* artifact side panel */
+    .chat-container.art-open { --art-w: min(580px, 46%); }
+    .chat-container.art-open .chat-messages-scroll, .chat-container.art-open .chat-composer-region { margin-right: var(--art-w); }
+    .art-panel {
+      display: none;
+      position: absolute;
+      top: 0; right: 0; bottom: 0;
+      width: var(--art-w);
+      flex-direction: column;
+      z-index: 40;
+      border-left: 1px solid var(--border);
+      background: var(--background);
+    }
+    .chat-container.art-open .art-panel { display: flex; }
+    .art-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    .art-title { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+    .art-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
+    .art-title small { color: var(--muted-foreground); font-size: 11.5px; }
+    .art-versions { display: inline-flex; align-items: center; gap: 2px; font-size: 11.5px; color: var(--muted-foreground); }
+    .art-versions button:disabled { opacity: 0.3; cursor: default; }
+    .art-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+    .art-tools { display: inline-flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
+    .art-body { flex: 1; min-height: 0; overflow: auto; }
+    .art-frame { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+    .art-code { margin: 0; padding: 12px; font-size: 12.5px; tab-size: 4; white-space: pre; }
+    .art-doc { padding: 14px 18px; }
+    .art-note { margin-top: 8px; font-size: 12px; color: var(--muted-foreground); }
+    .art-panel.is-large { position: fixed; inset: 3vh 3vw; width: auto; z-index: 150; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55); overflow: hidden; }
+    @media (max-width: 880px) {
+      .chat-container.art-open .chat-messages-scroll, .chat-container.art-open .chat-composer-region { margin-right: 0; }
+      .chat-container.art-open { --art-w: 100%; }
+    }

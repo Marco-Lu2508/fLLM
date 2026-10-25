@@ -10,11 +10,12 @@ use std::sync::OnceLock;
 const SHELL: &str = include_str!("webui/shell.html");
 const STYLE: [&str; 3] = [include_str!("webui/style.css"), include_str!("webui/chat.css"), include_str!("webui/code.css")];
 /// The script parts, joined in this order inside one function scope.
-const SCRIPT: [&str; 16] = [
+const SCRIPT: [&str; 17] = [
     include_str!("webui/core.js"),
     include_str!("webui/markdown.js"),
     include_str!("webui/sampler.js"),
     include_str!("webui/chat.js"),
+    include_str!("webui/artifacts.js"),
     include_str!("webui/rag.js"),
     include_str!("webui/projects.js"),
     include_str!("webui/research.js"),
@@ -43,6 +44,18 @@ pub fn page(api_key_required: bool) -> Response {
     ([
         (header::CACHE_CONTROL, "no-store"),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        (header::CONTENT_SECURITY_POLICY, "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
+        (header::CONTENT_SECURITY_POLICY, "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self'; font-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
     ], Html(page)).into_response()
+}
+
+/// The Web Worker that runs JavaScript code blocks of the chat. It is a separate script (not a Blob) so that it carries
+/// its own policy: it may evaluate code but can load and connect to nothing, while the page keeps a policy without
+/// `unsafe-eval`.
+pub fn runner() -> Response {
+    ([
+        (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+        (header::CACHE_CONTROL, "no-store"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'unsafe-eval'"),
+    ], include_str!("webui/runner.js")).into_response()
 }

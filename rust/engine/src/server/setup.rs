@@ -28,6 +28,7 @@ fn status() -> Value {
 fn router(context: Arc<http::HttpContext>) -> Router {
     Router::new()
         .route("/", get(|| async { crate::webui::page(false) }))
+        .route("/studio/runner.js", get(|| async { crate::webui::runner() }))
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/ready", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/studio/status", get(|| async { Json(status()) }))
