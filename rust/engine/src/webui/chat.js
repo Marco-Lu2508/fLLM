@@ -119,6 +119,7 @@
 
     function startNewChat() {
       state.activeThreadId = null;
+      prjOnNewChat(); // projects.js: a new chat starts with the chosen assistant
       saveThreads();
       switchSurface('chat');
       renderThreadList();
@@ -132,6 +133,7 @@
         t = newThread((firstText || 'New chat').replace(/\s+/g, ' ').slice(0, 48));
         t.system = $('txtSystemPrompt').value.trim() || null;
         t.preset = state.preset || null;
+        prjOnNewThread(t); // projects.js: join the project the chat was started from
         state.threads.unshift(t);
         state.activeThreadId = t.id;
         saveThreads();
@@ -168,9 +170,10 @@
       if (state.tab === 'code') { renderWorkspaceList(); return; }
       const container = $('threadList');
       const q = ($('threadSearch').value || '').toLowerCase().trim();
-      let list = state.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt);
-      if (q) list = list.filter((t) => t.title.toLowerCase().includes(q) || threadText(t).includes(q));
-      if (!list.length) {
+      // projects.js: chats of projects and archived chats are kept out of the main list (a search finds them all)
+      const view = prjSidebarThreads(q);
+      const list = view.main;
+      if (!list.length && !view.archived.length && !view.archivedCount) {
         container.innerHTML = `<div class="thread-empty">${q ? 'No chat matches the search' : 'No chats yet'}</div>`;
         return;
       }
@@ -182,19 +185,22 @@
         const g = groups.find((x) => x[0] === name);
         if (g) g[1].push(t); else groups.push([name, [t]]);
       }
+      if (view.archived.length) groups.push(['Archived', view.archived]);
       const icon = (d) => `<svg viewBox="0 0 24 24" class="icon icon-sm">${d}</svg>`;
       container.innerHTML = groups.map(([name, items]) => `
         <div class="thread-group">${escapeHtml(name)}</div>
         ${items.map((t) => `
-          <div class="thread-row ${t.id === state.activeThreadId && state.surface === 'chat' ? 'active' : ''}" data-tid="${t.id}">
+          <div class="thread-row ${t.id === state.activeThreadId && state.surface === 'chat' ? 'active' : ''} ${state.prj.selected.has(t.id) ? 'selected' : ''}" data-tid="${t.id}" draggable="true">
+            <input type="checkbox" class="sel-box" ${state.prj.selected.has(t.id) ? 'checked' : ''} tabindex="-1">
             <span class="thread-row-title">${t.pinned ? icon('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>') : ''}${escapeHtml(t.title)}</span>
             <div class="thread-row-actions">
               <button class="btn-icon btn-icon-xs" data-pin-tid="${t.id}" title="${t.pinned ? 'Unpin' : 'Pin'}">${icon('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>')}</button>
               <button class="btn-icon btn-icon-xs" data-ren-tid="${t.id}" title="Rename">${icon('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>')}</button>
+              <button class="btn-icon btn-icon-xs" data-arch-tid="${t.id}" title="${t.archived ? 'Unarchive' : 'Archive'}">${icon('<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>')}</button>
               <button class="btn-icon btn-icon-xs" data-del-tid="${t.id}" title="Delete">${icon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>')}</button>
             </div>
           </div>`).join('')}
-      `).join('');
+      `).join('') + prjArchiveToggleHtml(view.archivedCount, q);
     }
 
     // ---- dialogs ------------------------------------------------------------
@@ -336,6 +342,7 @@
     function updateChatChrome() {
       const t = currentThread();
       $('menuPin').textContent = t && t.pinned ? 'Unpin' : 'Pin';
+      prjChrome(); // projects.js: assistant label, project badge, suggestions
       updateContextMeter();
       renderAttachments();
     }
@@ -345,7 +352,7 @@
     function contextUsed(t) {
       if (!t) return 0;
       const path = pathOf(t);
-      let total = estimateTokens($('txtSystemPrompt').value) + 8;
+      let total = estimateTokens(prjComposeSystem(t, $('txtSystemPrompt').value.trim())) + 8;
       const lastUser = path.filter((n) => n.role === 'user').pop();
       for (const n of path) total += estimateTokens(n.content) + 6 + (n.images ? n.images.length * 256 : 0) + (n.files || []).reduce((s, f) => s + estimateTokens(f.text), 0) + (n === lastUser ? ragTokens(n) : 0);
       return total;
@@ -406,7 +413,7 @@
 
     function apiMessages(t, upToNodeId) {
       const out = [];
-      const system = $('txtSystemPrompt').value.trim();
+      const system = prjComposeSystem(t, $('txtSystemPrompt').value.trim()); // projects.js: personalization + project + assistant
       if (system) out.push({ role: 'system', content: system });
       const path = pathOf(t);
       const end = upToNodeId ? path.findIndex((n) => n.id === upToNodeId) : -1;
@@ -568,6 +575,7 @@
       if (!text && !state.attachments.length) return;
       if (state.setup) { toast('Load a model first.'); switchSurface('hub'); return; }
       if (text.startsWith('/') && state.attachments.length === 0 && (await runSlashCommand(text))) return;
+      prjCaptureMemory(text); // projects.js: "remember that ..." saves a memory
       $('chatTextarea').value = '';
       $('chatTextarea').style.height = 'auto';
       const t = ensureActiveThread(text || state.attachments[0]?.name);
@@ -695,41 +703,10 @@
 
     const customPresets = () => { try { return JSON.parse(localStorage.getItem(PRESET_KEY) || '[]'); } catch { return []; } };
 
-    function renderPresets() {
-      const all = [...BUILTIN_PRESETS, ...customPresets().map((p) => ({ ...p, custom: true }))];
-      $('presetItems').innerHTML = all.map((p) => `
-        <button class="nav-item ${p.id === (state.preset || 'standard') ? 'active' : ''}" data-preset="${escapeHtml(p.id)}" title="${escapeHtml(p.system || 'Ohne Systemprompt')}">
-          <span>${escapeHtml(p.name)}</span>
-          ${p.custom ? `<span class="preset-del" data-preset-del="${escapeHtml(p.id)}" title="Delete">✕</span>` : `<span class="quant-chip" style="margin-left:auto;">T ${p.temperature}</span>`}
-        </button>`).join('');
-      const current = all.find((p) => p.id === (state.preset || 'standard'));
-      $('presetLabel').textContent = current ? current.name : 'Eigene Einstellung';
-    }
-
-    function applyPreset(id) {
-      const p = [...BUILTIN_PRESETS, ...customPresets()].find((x) => x.id === id);
-      if (!p) return;
-      state.preset = id;
-      $('txtSystemPrompt').value = p.system || '';
-      setSamplerUI({ temperature: p.temperature, top_p: p.top_p, top_k: p.top_k });
-      const t = currentThread();
-      if (t) { t.system = p.system || null; t.preset = id; saveThreads(); }
-      renderPresets();
-      updateContextMeter();
-      toast(`Preset "${p.name}" selected`);
-    }
-
-    async function savePreset() {
-      const name = await askDialog({ title: 'Save preset', text: 'Saves the current system prompt and sampling values under a name.', input: '', ok: 'Save' });
-      if (!name) return;
-      const s = getSampler();
-      const list = customPresets().filter((p) => p.name !== name);
-      list.push({ id: uid('p'), name, system: s.system_prompt, temperature: s.temperature, top_p: s.top_p, top_k: s.top_k });
-      localStorage.setItem(PRESET_KEY, JSON.stringify(list));
-      state.preset = list[list.length - 1].id;
-      renderPresets();
-      toast(`Preset "${name}" saved`);
-    }
+    // Presets are assistants now (projects.js): the old custom presets are migrated once and shown as assistants,
+    // the stored list under PRESET_KEY is only read for that migration.
+    const renderPresets = () => asstRender();
+    const applyPreset = (id) => asstApply(id);
 
     // ---- export, import ------------------------------------------------------------
     function download(name, mime, content) {
@@ -754,6 +731,7 @@
     async function chatAction(action) {
       const t = currentThread();
       if (!t) { toast('Open a chat first.'); return; }
+      if (prjChatAction(action, t)) return; // projects.js: archive, move to a project, personalization
       if (action === 'rename') {
         const name = await askDialog({ title: 'Rename chat', input: t.title, ok: 'Rename' });
         if (name) { t.title = name.slice(0, 80); t.autoTitle = false; saveThreads(); renderThreadList(); }
@@ -827,6 +805,7 @@
     $('threadSearch').addEventListener('input', renderThreadList);
 
     $('threadList').addEventListener('click', async (e) => {
+      if (prjThreadListClick(e)) return; // projects.js: select mode, archive
       const del = e.target.closest('[data-del-tid]');
       if (del) { e.stopPropagation(); deleteThread(del.dataset.delTid); return; }
       const pin = e.target.closest('[data-pin-tid]');
@@ -896,24 +875,11 @@
     });
     $('btnChatMenu').addEventListener('click', (e) => { e.stopPropagation(); $('chatMenu').classList.toggle('open'); });
 
-    $('btnPresets').addEventListener('click', (e) => { e.stopPropagation(); $('presetMenu').classList.toggle('open'); });
-    $('presetItems').addEventListener('click', (e) => {
-      const del = e.target.closest('[data-preset-del]');
-      if (del) {
-        e.stopPropagation();
-        localStorage.setItem(PRESET_KEY, JSON.stringify(customPresets().filter((p) => p.id !== del.dataset.presetDel)));
-        if (state.preset === del.dataset.presetDel) state.preset = null;
-        renderPresets();
-        return;
-      }
-      const item = e.target.closest('[data-preset]');
-      if (item) { applyPreset(item.dataset.preset); $('presetMenu').classList.remove('open'); }
-    });
-    $('btnPresetSave').addEventListener('click', savePreset);
+    // (the assistant menu is wired in projects.js)
 
     $('txtSystemPrompt').addEventListener('input', () => {
       const t = currentThread();
-      if (t) { t.system = $('txtSystemPrompt').value.trim() || null; saveThreads(); }
+      if (t) { t.system = $('txtSystemPrompt').value.trim() || null; t.preset = null; saveThreads(); }
       state.preset = null;
       renderPresets();
       updateContextMeter();

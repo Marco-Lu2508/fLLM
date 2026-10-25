@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Studio: assistants (the old presets, now with icon, color, default model, suggestions and JSON import/export), projects with instructions and a searchable document knowledge base, personalization with memory ("remember that ..."), a `/` prompt library, and chat organization (bulk select, drag to pin, archive).
+
 ## [0.1.5] - 2026-10-25
 
 ### Fixed

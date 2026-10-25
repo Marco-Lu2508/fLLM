@@ -31,7 +31,26 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   are read, their best passages are added to the prompt with their source numbers, and the sources are listed under the answer. This
   uses the web tools of the server (`/api/studio/web/search` and `/api/studio/web/fetch`); if they are missing or blocked, the page
   says so and answers without the web. The pages are fetched by the server, so the computer running fLLM needs internet access.
-* Presets store a system prompt together with sampling values. The sampling panel covers temperature, top-p/top-k/min-p, penalties,
+* **Assistants.** The pill next to the model name picks an assistant: a name, icon and color, instructions (system prompt), default
+  sampling values, an optional default model and up to four suggestions for an empty chat (editable; the chips on a new chat come from
+  the assistant). A new chat starts with the chosen assistant. Assistants can be exported and imported as JSON. The older presets are
+  migrated once into assistants with the same ids; the built-in ones are read-only (edit makes a copy).
+* **Projects.** The *Projects* section of the sidebar groups chats. A project has instructions that are added to the system prompt of
+  all its chats and a knowledge base: add PDF, Office, EPUB, HTML, text and code files to the project page (the server extracts the
+  text as for chat documents). Every question in a chat of the project searches those documents together with the chat's own ones
+  (BM25 in the browser), and the passages are shown as chips under your message. Only the extracted text is stored: at most 600,000
+  characters per document, 2,000,000 per project and 3,500,000 for all projects; the page says so when a limit applies. Create, rename
+  and delete projects in the sidebar, drag chats onto a project (or use *Move to a project* in the chat menu), and open the project
+  page for its chats, instructions and files with sizes. Deleting a project keeps its chats.
+* **Personalization and memory** (Settings > Personalization). *About me and how to answer* is put in front of the system prompt of
+  every chat (2,000 characters; switch it off for one chat in the chat menu). Memory holds facts you want every chat to know: start a
+  message with "remember that ..." or press the bookmark under a message; edit or delete them in Settings. At most 3,000 characters of
+  memory go into a prompt (newest first). All of it stays in the browser and is sent only to the model you chat with.
+* **Prompt library.** Save prompts with a title in Settings > Personalization, then type `/` in the message box to list them, filter by
+  typing, and insert one with Enter or Tab.
+* **Organizing chats.** The select button above the chat list allows bulk delete, move, archive and export. Drag a chat onto the
+  "pin" target to pin it. Archived chats leave the main list (*Show archived* brings them back) and are still found by the search.
+* The sampling panel covers temperature, top-p/top-k/min-p, penalties,
   mirostat, DRY, a seed and constrained output (JSON object, JSON schema, GBNF grammar, regular expression).
 * Chats can be pinned, renamed, duplicated, exported (Markdown or JSON), imported and searched by title and content. New chats get a
   short title from the model (switch off in Settings).
@@ -106,6 +125,7 @@ fLLM runs on only, like the other agent routes. To let them reach a documentatio
 A small model often writes a command into the answer instead of calling the tool. Use a model with good tool calling for real work.
 
 The pure logic of this page (rule matching, compaction, command expansion) has tests: `node rust/engine/src/webui/tests/code.test.js`.
+The logic of assistants, memory and project retrieval is tested by `node rust/engine/src/webui/tests/projects.test.js`.
 
 ## Models
 

@@ -65,10 +65,25 @@
         </div>
 
         <!-- SidebarContent: Chats List (NavChats.tsx) -->
-        <div class="sidebar-content">
+        <div class="sidebar-content" id="sidebarMain">
+          <!-- Projects (projects.js) -->
+          <div class="chats-only" id="projectsBlock">
+            <div class="sidebar-group-header">
+              <span>Projects</span>
+              <button class="btn-icon btn-icon-xs" id="btnNewProject" title="New project">
+                <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+              </button>
+            </div>
+            <div class="thread-list" id="projectList"></div>
+            <div class="drop-zone" data-drop="pin">Drop a chat here to pin it</div>
+            <div class="drop-zone" data-drop="unfile">Drop a chat here to take it out of its project</div>
+          </div>
           <div class="sidebar-group-header">
             <span id="threadGroupTitle">Chats</span>
             <div class="chats-only" style="display:flex;gap:2px;">
+              <button class="btn-icon btn-icon-xs" id="btnSelectMode" title="Select several chats (delete, move, archive, export)">
+                <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="m3 6 1 1 2-2"/><path d="m3 12 1 1 2-2"/><path d="m3 18 1 1 2-2"/></svg>
+              </button>
               <input type="file" id="fileImportThreads" accept="application/json,.json" style="display:none;">
               <button class="btn-icon btn-icon-xs" id="btnImportThreads" title="Import chats (JSON)">
                 <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
@@ -83,6 +98,14 @@
           </div>
           <input type="search" class="thread-search chats-only" id="threadSearch" placeholder="Search chats" aria-label="Search chats">
 <div class="thread-list" id="threadList"></div>
+          <div class="bulk-bar" id="bulkBar" style="display:none;">
+            <span id="bulkCount">0 selected</span>
+            <button class="btn btn-xs btn-secondary" data-bulk="move">Move</button>
+            <button class="btn btn-xs btn-secondary" data-bulk="archive">Archive</button>
+            <button class="btn btn-xs btn-secondary" data-bulk="export">Export</button>
+            <button class="btn btn-xs btn-destructive" data-bulk="delete">Delete</button>
+            <button class="btn btn-xs btn-ghost" id="bulkDone">Done</button>
+          </div>
         </div>
 
         <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
@@ -124,19 +147,28 @@
               </div>
             </div>
             <div style="position:relative;">
-              <button class="model-pill" id="btnPresets" title="Presets: save system prompt and sampling together">
-                <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>
+              <button class="model-pill" id="btnPresets" title="Assistant: instructions and sampling for this chat">
+                <span id="presetBadge"></span>
                 <span id="presetLabel">Standard</span>
                 <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--muted-foreground);"><path d="m6 9 6 6 6-6"/></svg>
               </button>
-              <div class="popover-panel" id="presetMenu" style="top:calc(100% + 6px);bottom:auto;width:330px;">
+              <div class="popover-panel" id="presetMenu" style="top:calc(100% + 6px);bottom:auto;width:360px;">
                 <div class="popover-head">
-                  <span>Presets</span>
-                  <button class="btn btn-xs btn-ghost" id="btnPresetSave">Save current</button>
+                  <span>Assistants</span>
+                  <span style="display:flex;gap:2px;">
+                    <input type="file" id="fileImportAssistant" accept="application/json,.json" style="display:none;">
+                    <button class="btn btn-xs btn-ghost" id="btnAsNew">New</button>
+                    <button class="btn btn-xs btn-ghost" id="btnAsImport" title="Import an assistant (JSON)">Import</button>
+                    <button class="btn btn-xs btn-ghost" id="btnPresetSave" title="Save the current instructions and sampling as an assistant">Save current</button>
+                  </span>
                 </div>
                 <div class="popover-body" id="presetItems"></div>
               </div>
             </div>
+            <button class="model-pill" id="prjBadge" style="display:none;" title="Open the project page">
+              <svg viewBox="0 0 24 24" class="icon icon-sm" style="color:var(--primary);"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              <span id="prjBadgeName"></span>
+            </button>
           </div>
 
           <div class="header-right">
@@ -156,6 +188,9 @@
                 <button class="menu-item" data-chat-action="rename">Rename</button>
                 <button class="menu-item" data-chat-action="pin" id="menuPin">Pin</button>
                 <button class="menu-item" data-chat-action="duplicate">Duplicate</button>
+                <button class="menu-item" data-chat-action="project">Move to a project...</button>
+                <button class="menu-item" data-chat-action="archive" id="menuArchive">Archive</button>
+                <button class="menu-item" data-chat-action="personal" id="menuPersonal" title="Whether your instructions and memory from Settings > Personalization are sent in this chat">Personalization: on</button>
                 <button class="menu-item" data-chat-action="export-md">Export as Markdown</button>
                 <button class="menu-item" data-chat-action="export-json">Export as JSON</button>
                 <button class="menu-item danger" data-chat-action="delete">Delete chat</button>
@@ -284,6 +319,8 @@
 
               <!-- Rounded-3XL ChatInput Card -->
               <div class="chat-input-box">
+                <!-- saved prompts: type / to insert one (projects.js) -->
+                <div class="slash-menu" id="slashMenu"></div>
                 <div class="attachments-row" id="attachmentsRow"></div>
 
                 <textarea
@@ -584,6 +621,10 @@
               <svg viewBox="0 0 24 24" class="icon"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" x2="2" y1="8" y2="22"/><line x1="17.5" x2="9" y1="15" y2="15"/></svg>
               <span>General</span>
             </button>
+            <button class="settings-nav-btn" data-spane="personalization">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              <span>Personalization</span>
+            </button>
             <button class="settings-nav-btn" data-spane="appearance">
               <svg viewBox="0 0 24 24" class="icon"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
               <span>Appearance</span>
@@ -690,6 +731,58 @@
                     <div class="code-card-header"><span>toml</span><button class="btn btn-xs btn-ghost" id="btnCopyTomlCmd">Copy</button></div>
                     <pre id="genTomlPre"></pre>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- PERSONALIZATION (projects.js): about me, memory, prompt library -->
+            <div class="settings-pane" id="spane-personalization">
+              <div class="app-card">
+                <div class="app-card-title">About me and how to answer</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Custom instructions</div>
+                    <div class="app-item-desc">Put in front of the system prompt of your chats (switch it off for one chat in the chat menu). Everything on this page stays in this browser; it is sent only to the model you are chatting with.</div>
+                  </div>
+                  <textarea id="memAbout" class="ui-textarea" rows="5" style="width:100%;" placeholder="For example: I am a nurse. Keep answers short, use metric units, and explain medical terms."></textarea>
+                  <div style="display:flex;justify-content:space-between;align-items:center;width:100%;">
+                    <span class="mono" style="font-size:11px;color:var(--muted-foreground);" id="memAboutCount">0 / 2000</span>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Use these instructions
+                      <span class="ui-switch"><input type="checkbox" id="chkUseAbout" checked><span class="ui-switch-track"></span></span></label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">Memory</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Remembered facts</div>
+                    <div class="app-item-desc">Start a message with "remember that ..." or press the bookmark under a message to add one. Memories are added to the system prompt of every chat (up to 3,000 characters) and stay in this browser.</div>
+                  </div>
+                  <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Use memory
+                    <span class="ui-switch"><input type="checkbox" id="chkUseMemory" checked><span class="ui-switch-track"></span></span></label>
+                  <div class="mem-list" id="memList"></div>
+                  <div class="mem-row">
+                    <input type="text" class="ui-input" id="memNew" maxlength="400" placeholder="Add something to remember">
+                    <button class="btn btn-sm btn-secondary" id="memAdd">Add</button>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;align-items:center;width:100%;">
+                    <span class="app-item-desc" id="memUsage"></span>
+                    <button class="btn btn-sm btn-destructive" id="memClear">Forget everything</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">Prompt library</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Saved prompts</div>
+                    <div class="app-item-desc">Type <span class="mono">/</span> in the message box to list them, pick one with the arrow keys and Enter, or keep typing to filter by title.</div>
+                  </div>
+                  <div class="plib-list" id="plibList"></div>
+                  <button class="btn btn-sm btn-secondary" id="plibAdd">Add a prompt</button>
                 </div>
               </div>
             </div>
@@ -1137,6 +1230,77 @@
         <button class="btn btn-ghost" id="dialogCancel">Cancel</button>
         <button class="btn btn-primary" id="dialogOk">OK</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Assistant editor (projects.js) -->
+  <div class="modal-backdrop" id="assistantModal" style="align-items:center;padding-top:0;">
+    <div class="dialog as-dialog" role="dialog" aria-modal="true" aria-labelledby="asTitle">
+      <h3 id="asTitle">Assistant</h3>
+      <label class="as-label">Name</label>
+      <input type="text" class="ui-input" id="asName" maxlength="60">
+      <label class="as-label">Icon and color</label>
+      <div class="as-picks" id="asIconRow"></div>
+      <div class="as-picks" id="asColorRow"></div>
+      <label class="as-label">Instructions (system prompt)</label>
+      <textarea class="ui-textarea" id="asSystem" rows="5" placeholder="You are a precise, helpful assistant..."></textarea>
+      <div class="as-grid">
+        <div><label class="as-label">Temperature</label><input type="number" class="ui-input" id="asTemp" min="0" max="2" step="0.05"></div>
+        <div><label class="as-label">Top-p</label><input type="number" class="ui-input" id="asTopP" min="0" max="1" step="0.01"></div>
+        <div><label class="as-label">Top-k</label><input type="number" class="ui-input" id="asTopK" min="0" max="1000" step="1"></div>
+      </div>
+      <label class="as-label">Default model</label>
+      <select class="ui-select" id="asModel"></select>
+      <label class="as-label">Suggestions on an empty chat (one per line, up to 4)</label>
+      <textarea class="ui-textarea" id="asStarters" rows="4" placeholder="Leave empty for generic suggestions"></textarea>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" id="asExport" title="Save the assistant as a JSON file">Export</button>
+        <button class="btn btn-destructive" id="asDelete">Delete</button>
+        <span style="flex:1;"></span>
+        <button class="btn btn-ghost" id="asCancel">Cancel</button>
+        <button class="btn btn-primary" id="asSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project page (projects.js) -->
+  <div class="modal-backdrop" id="projectModal" style="align-items:center;padding-top:0;">
+    <div class="dialog prj-dialog" role="dialog" aria-modal="true" aria-labelledby="prjTitle">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <h3 id="prjTitle" style="flex:1;margin:0;"></h3>
+        <button class="btn btn-sm btn-ghost" id="prjRename">Rename</button>
+        <button class="btn btn-sm btn-primary" id="prjNewChat">New chat in project</button>
+      </div>
+      <label class="as-label">Instructions for every chat of this project</label>
+      <textarea class="ui-textarea" id="prjInstr" rows="4" placeholder="For example: Answer as a support engineer for our product. Use the documents below."></textarea>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;">
+        <label class="as-label" style="margin:0;">Knowledge</label>
+        <span>
+          <input type="file" id="prjFileInput" multiple style="display:none;" accept=".pdf,.docx,.xlsx,.epub,.htm,.html,.txt,.md,.markdown,.json,.csv,.tsv,.log,.rs,.py,.js,.ts,.c,.cpp,.java,.go,.toml,.yaml,.yml,.xml,.tex,.sql,.sh">
+          <button class="btn btn-xs btn-secondary" id="prjAddDocs">Add files</button>
+        </span>
+      </div>
+      <div class="prj-drop" id="prjDrop">
+        <div id="prjDocs"></div>
+        <div class="app-item-desc" id="prjUsage"></div>
+        <div class="app-item-desc">Every question in a chat of this project searches these documents; the best passages are shown under your message. Drop files here.</div>
+      </div>
+      <label class="as-label">Chats</label>
+      <div class="prj-chats" id="prjChats"></div>
+      <div class="dialog-actions">
+        <button class="btn btn-destructive" id="prjDelete">Delete project</button>
+        <span style="flex:1;"></span>
+        <button class="btn btn-primary" id="prjClose">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Choose a project (projects.js) -->
+  <div class="modal-backdrop" id="pickModal" style="align-items:center;padding-top:0;">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="pickTitle">
+      <h3 id="pickTitle">Choose a project</h3>
+      <div class="pick-list" id="pickList"></div>
+      <div class="dialog-actions"><button class="btn btn-ghost" id="pickCancel">Cancel</button></div>
     </div>
   </div>
 
