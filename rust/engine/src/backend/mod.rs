@@ -17,6 +17,9 @@ pub mod vulkan;
 pub mod metal;
 #[cfg(feature = "hip")]
 pub mod hip;
+// DLL search order and delay-load hooks of the HIP runtime (Windows); the pure parts are tested without the feature
+#[cfg(any(feature = "hip", test))]
+pub mod hip_runtime;
 #[cfg(feature = "sycl")]
 pub mod sycl;
 #[cfg(any(feature = "npu-openvino", feature = "npu-xdna", feature = "npu-qnn", feature = "npu-ane"))]

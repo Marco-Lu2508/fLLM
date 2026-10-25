@@ -784,23 +784,136 @@ stderr:
     }
 }
 
+/// Offload architectures built when `FLLM_HIP_ARCHS` is not set. Linux: everything the kernels were checked for. Windows: only the
+/// GPUs a Windows driver and the HIP SDK run (RDNA2 to RDNA4 consumer / workstation cards and the RDNA3.5 APUs); the Instinct and Vega
+/// targets have no Windows runtime, so compiling them only costs build time.
+fn default_hip_archs(windows: bool) -> &'static str {
+    if windows {
+        "gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201"
+    } else {
+        "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201"
+    }
+}
+
+/// `requested` (`a;b;c`) as a list without blanks and duplicates.
+fn parse_hip_archs(requested: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for arch in requested.split([';', ',', ' ']).map(str::trim).filter(|a| !a.is_empty()) {
+        if !out.iter().any(|o| o == arch) {
+            out.push(arch.to_owned());
+        }
+    }
+    out
+}
+
+/// Name of the device-library bitcode file that belongs to `arch` (`gfx1100` -> `oclc_isa_version_1100.bc`).
+fn isa_bitcode_name(arch: &str) -> String {
+    format!("oclc_isa_version_{}.bc", arch.strip_prefix("gfx").unwrap_or(arch))
+}
+
+/// Splits `archs` into the ones the SDK's device libraries cover and the ones they do not. `bitcode_files` is the content of the SDK's
+/// `amdgcn/bitcode` directory; `None` (directory not found) keeps everything, the compiler then decides.
+fn split_supported_archs(archs: &[String], bitcode_files: Option<&[String]>) -> (Vec<String>, Vec<String>) {
+    let Some(files) = bitcode_files else { return (archs.to_vec(), Vec::new()) };
+    archs.iter().cloned().partition(|a| files.iter().any(|f| *f == isa_bitcode_name(a)))
+}
+
+/// The directory with the device-library bitcode of an SDK (`lib/llvm/amdgcn/bitcode`, older layouts `amdgcn/bitcode`).
+fn hip_bitcode_dir(rocm: &Path) -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("HIP_DEVICE_LIB_PATH").map(PathBuf::from).filter(|d| d.is_dir()) {
+        return Some(dir);
+    }
+    let layouts: [&[&str]; 4] = [&["lib", "llvm", "amdgcn", "bitcode"], &["amdgcn", "bitcode"], &["lib", "bitcode"], &["lib", "device"]];
+    layouts.iter().map(|parts| parts.iter().fold(rocm.to_path_buf(), |p, part| p.join(part))).find(|d| d.is_dir())
+}
+
+/// The DLL name an `amdhip64.lib` import library refers to (`amdhip64_7.dll`): the import descriptors store it as plain ASCII.
+fn dll_name_in_import_lib(bytes: &[u8]) -> Option<String> {
+    let needle = b"amdhip64";
+    let mut start = 0;
+    while let Some(pos) = bytes[start..].windows(needle.len()).position(|w| w.eq_ignore_ascii_case(needle)) {
+        let at = start + pos;
+        let tail = &bytes[at..];
+        let len = tail.iter().take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'.').count();
+        let word = String::from_utf8_lossy(&tail[..len]).into_owned();
+        if word.to_ascii_lowercase().ends_with(".dll") {
+            return Some(word);
+        }
+        start = at + needle.len();
+    }
+    None
+}
+
+/// The runtime DLL to take when the import library does not name one: the newest `amdhip64_N.dll`, else `amdhip64.dll`.
+fn pick_hip_dll(names: &[String]) -> Option<String> {
+    let version = |n: &str| -> Option<u32> { n.to_ascii_lowercase().strip_prefix("amdhip64_")?.strip_suffix(".dll")?.parse().ok() };
+    names
+        .iter()
+        .filter(|n| version(n).is_some())
+        .max_by_key(|n| version(n))
+        .or_else(|| names.iter().find(|n| n.eq_ignore_ascii_case("amdhip64.dll")))
+        .cloned()
+}
+
+/// The compiler driver: `bin/hipcc` where the SDK has one, else the SDK's own clang (`lib/llvm/bin/clang++`) as a HIP compiler, which
+/// needs `--rocm-path` and the device library path spelled out (returned as the extra arguments).
+fn hip_compiler(rocm: &Path, target: &Target) -> (PathBuf, Vec<String>) {
+    let hipcc = rocm.join("bin").join(host_exe("hipcc"));
+    if hipcc.is_file() {
+        return (hipcc, Vec::new());
+    }
+    let clang = rocm.join("lib").join("llvm").join("bin").join(host_exe("clang++"));
+    if clang.is_file() {
+        let mut args = vec![format!("--rocm-path={}", rocm.display()), "-D__HIP_PLATFORM_AMD__".to_owned()];
+        if let Some(dir) = hip_bitcode_dir(rocm) {
+            args.push(format!("--hip-device-lib-path={}", dir.display()));
+        }
+        if target.msvc {
+            args.push("-fms-extensions".to_owned());
+        }
+        return (clang, args);
+    }
+    (hipcc, Vec::new())
+}
+
 /// AMD GPUs: the same kernel sources compiled with hipcc (`FLLM_HIP=1`, `--features cuda`). The tensor-core kernels are
-/// compiled out (cuda/hip_compat.h), the HIP runtime is linked dynamically (libamdhip64 from the ROCm install).
-/// `FLLM_HIP_ARCHS` lists the offload architectures (default: RDNA2-4 consumer cards and gfx90a/gfx942), `ROCM_PATH` the install
+/// compiled out (cuda/hip_compat.h). Linux links libamdhip64 from the ROCm install. Windows links the HIP runtime lazily (see below).
+/// `FLLM_HIP_ARCHS` lists the offload architectures (default: `default_hip_archs`), `ROCM_PATH` the install
 /// (on Windows `HIP_PATH`, which the HIP SDK installer sets, or the newest `Program Files\AMD\ROCm\X.Y`; `amdhip64.lib` from its `lib`).
 /// With the MSVC target the objects are `.obj`, packed with `lib.exe`, and compiled for the C runtime rustc links (`-fms-runtime-lib`).
+///
+/// Windows, run time: the binary must start on a machine without the HIP runtime DLL (it then falls back to Vulkan / CPU), so the import
+/// is delay-loaded (`/DELAYLOAD:amdhip64_N.dll`, the name read from `amdhip64.lib`) and `src/backend/hip_runtime.rs` supplies the
+/// delay-load hooks that search for the DLL and, when there is none, stand in stubs that report "no device".
+/// `FLLM_HIP_DELAYLOAD=0` links the DLL the ordinary way (the binary then needs it to start).
 fn hip_kernels() {
     println!("cargo:rerun-if-changed=cuda");
     println!("cargo:rerun-if-changed=hip");
     println!("cargo:rerun-if-env-changed=FLLM_HIP_ARCHS");
+    println!("cargo:rerun-if-env-changed=FLLM_HIP_DELAYLOAD");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=HIP_PATH");
+    println!("cargo:rerun-if-env-changed=HIP_DEVICE_LIB_PATH");
     let target = Target::from_env();
     let rocm = rocm_home(&target);
-    let hipcc = rocm.join("bin").join(host_exe("hipcc"));
+    let (hipcc, driver_args) = hip_compiler(&rocm, &target);
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    let archs = std::env::var("FLLM_HIP_ARCHS")
-        .unwrap_or_else(|_| "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201".into());
+    let requested = std::env::var("FLLM_HIP_ARCHS").unwrap_or_else(|_| default_hip_archs(target.windows).into());
+    let mut archs = parse_hip_archs(&requested);
+    if target.windows {
+        // the Windows SDK may ship device libraries for fewer targets than the Linux one: skip what it cannot build
+        let files: Option<Vec<String>> = hip_bitcode_dir(&rocm)
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect());
+        let (kept, dropped) = split_supported_archs(&archs, files.as_deref());
+        if !dropped.is_empty() {
+            println!("cargo:warning=HIP SDK has no device libraries for {}: skipped", dropped.join(", "));
+        }
+        assert!(!kept.is_empty(), "no usable GPU architecture in FLLM_HIP_ARCHS={requested:?} for the HIP SDK at {}", rocm.display());
+        archs = kept;
+    }
+    // the architectures this binary carries code for: the runtime lists only devices it can run (src/backend/cuda.rs, list_devices)
+    println!("cargo:rustc-env=FLLM_HIP_BUILT_ARCHS={}", archs.join(";"));
     let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
     let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
@@ -809,18 +922,22 @@ fn hip_kernels() {
         let object = out.join(target.object_name(source));
         let mut command = Command::new(&hipcc);
         command.args(["-x", "hip", "-c", "-O3", "-std=c++17", "-DFLLM_NO_FP4", "-Wno-unused-value", "-Wno-unused-result"]);
+        command.args(&driver_args);
         if source != "kv_quant.cu" { command.arg("-ffast-math"); }
         command.args(target.hipcc_platform_flags());
-        for arch in archs.split(';').map(str::trim).filter(|a| !a.is_empty()) {
+        for arch in &archs {
             command.arg(format!("--offload-arch={arch}"));
         }
-        let status = command
+        let output = command
             .arg("-o")
             .arg(&object)
             .arg(PathBuf::from(dir).join(source))
-            .status()
-            .unwrap_or_else(|e| panic!("cannot run {}: {e} (set ROCM_PATH)", hipcc.display()));
-        assert!(status.success(), "hipcc failed on {source}");
+            .output()
+            .unwrap_or_else(|e| panic!("cannot run {}: {e} (set ROCM_PATH / HIP_PATH)", hipcc.display()));
+        if !output.status.success() {
+            eprintln!("{} failed on {source}:\n{}\n{}", hipcc.display(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            panic!("hipcc failed on {source}");
+        }
         objects.push(object);
     }
     let library = out.join(target.library_name("fllmcuda"));
@@ -829,6 +946,28 @@ fn hip_kernels() {
     println!("cargo:rustc-link-lib=static=fllmcuda");
     println!("cargo:rustc-link-search=native={}", rocm.join("lib").display());
     println!("cargo:rustc-link-lib=dylib=amdhip64");
+    if target.msvc {
+        let import_lib = rocm.join("lib").join("amdhip64.lib");
+        let from_import_lib = std::fs::read(&import_lib).ok().and_then(|bytes| dll_name_in_import_lib(&bytes));
+        let from_bin = || {
+            let names: Vec<String> = std::fs::read_dir(rocm.join("bin"))
+                .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                .unwrap_or_default();
+            pick_hip_dll(&names)
+        };
+        let delay = std::env::var("FLLM_HIP_DELAYLOAD").map_or(true, |v| v != "0");
+        match from_import_lib.or_else(from_bin) {
+            Some(dll) if delay => {
+                println!("cargo:warning=HIP runtime DLL: {dll} (delay-loaded)");
+                println!("cargo:rustc-env=FLLM_HIP_DLL_NAME={dll}");
+                println!("cargo:rustc-cfg=fllm_hip_delayload");
+                println!("cargo:rustc-link-lib=dylib=delayimp");
+                println!("cargo:rustc-link-arg=/DELAYLOAD:{dll}");
+            }
+            Some(dll) => println!("cargo:rustc-env=FLLM_HIP_DLL_NAME={dll}"),
+            None => println!("cargo:warning=cannot tell the name of the HIP runtime DLL from {}: linking it the ordinary way", import_lib.display()),
+        }
+    }
     if !target.windows {
         for lib in ["dl", "rt", "pthread", "stdc++"] {
             println!("cargo:rustc-link-lib={lib}");
@@ -1050,6 +1189,7 @@ fn sycl_kernels() {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(fllm_hip_delayload)");
     provenance();
     if env::var_os("CARGO_FEATURE_VULKAN").is_some() {
         vulkan_shaders();
@@ -1166,6 +1306,35 @@ mod tests {
         assert_eq!(p.sm100, [100, 103]);
         assert_eq!(gencode_flags_a(&[100, 103]), ["-gencode", "arch=compute_100a,code=sm_100a", "-gencode", "arch=compute_103a,code=sm_103a"]);
         assert_eq!(gencode_flags(&[89, 120]).last().map(String::as_str), Some("arch=compute_120,code=compute_120"));
+    }
+
+    #[test]
+    fn hip_arch_lists() {
+        assert_eq!(parse_hip_archs(" gfx1100;gfx1151 ;;gfx1100,gfx1201"), ["gfx1100", "gfx1151", "gfx1201"]);
+        assert!(parse_hip_archs("").is_empty());
+        // Windows default: no Vega / Instinct, but the APUs and RDNA4
+        let win = parse_hip_archs(default_hip_archs(true));
+        assert!(win.iter().all(|a| a.starts_with("gfx1")));
+        assert!(win.contains(&"gfx1151".to_owned()) && win.contains(&"gfx1201".to_owned()) && win.contains(&"gfx1200".to_owned()));
+        // Linux default unchanged
+        assert!(parse_hip_archs(default_hip_archs(false)).contains(&"gfx942".to_owned()));
+        assert_eq!(isa_bitcode_name("gfx1100"), "oclc_isa_version_1100.bc");
+        assert_eq!(isa_bitcode_name("gfx90a"), "oclc_isa_version_90a.bc");
+        let files: Vec<String> = ["oclc_isa_version_1100.bc", "oclc_isa_version_1151.bc", "ocml.bc"].iter().map(|s| s.to_string()).collect();
+        let want = parse_hip_archs("gfx1030;gfx1100;gfx1151");
+        assert_eq!(split_supported_archs(&want, Some(files.as_slice())), (vec!["gfx1100".to_owned(), "gfx1151".to_owned()], vec!["gfx1030".to_owned()]));
+        assert_eq!(split_supported_archs(&want, None), (want.clone(), Vec::new()));
+    }
+
+    #[test]
+    fn hip_dll_names() {
+        let lib = b"\0\0!<arch>\n__IMPORT_DESCRIPTOR_amdhip64_7\0hipMalloc\0amdhip64_7.dll\0\0";
+        assert_eq!(dll_name_in_import_lib(lib).as_deref(), Some("amdhip64_7.dll"));
+        assert_eq!(dll_name_in_import_lib(b"amdhip64.lib only"), None);
+        let names: Vec<String> = ["amdhip64.dll", "amdhip64_6.dll", "amdhip64_10.dll", "hipcc.exe"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pick_hip_dll(&names).as_deref(), Some("amdhip64_10.dll"));
+        assert_eq!(pick_hip_dll(&names[..1]).as_deref(), Some("amdhip64.dll"));
+        assert_eq!(pick_hip_dll(&names[3..]), None);
     }
 
     #[test]

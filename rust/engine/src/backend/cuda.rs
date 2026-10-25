@@ -812,6 +812,12 @@ fn dev_ptr(buf: &DeviceBuffer) -> Result<*mut u8, BackendError> {
 
 /// CUDA devices as inventory entries, numbered from `first_index`.
 pub fn list_devices(first_index: usize) -> Vec<DeviceInfo> {
+    // Windows HIP build: the runtime DLL is loaded lazily and may be missing (then no AMD device is listed, the other backends stay)
+    #[cfg(feature = "hip")]
+    if let Err(message) = crate::backend::hip_runtime::check() {
+        crate::backend::hip_runtime::note_missing_once(&message);
+        return Vec::new();
+    }
     // SAFETY: plain queries; a missing driver makes the count negative.
     let count = unsafe { fllm_cuda_device_count() };
     (0..count.max(0))
@@ -828,6 +834,20 @@ pub fn list_devices(first_index: usize) -> Vec<DeviceInfo> {
             }
             // SAFETY: `fllm_cuda_device_info` wrote a NUL-terminated name.
             let name = unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned();
+            // an AMD GPU this binary has no code for is not a device (it would fail at the first kernel); `auto` then goes on to Vulkan
+            #[cfg(feature = "hip")]
+            if major == 0 {
+                use crate::backend::{hip::device_info::gcn_arch, hip_runtime::{arch_is_built, built_archs}};
+                let override_set = std::env::var_os("HSA_OVERRIDE_GFX_VERSION").is_some();
+                if let Some(arch) = gcn_arch(&name) {
+                    if !arch_is_built(&arch, built_archs(), override_set) {
+                        // (with several AMD GPUs of which only some are built for, the ordinals of the later ones shift)
+                        static ONCE: std::sync::Once = std::sync::Once::new();
+                        ONCE.call_once(|| eprintln!("[fllm-rs] hip: {name} is not in this build's GPU list ({}); skipped (rebuild with FLLM_HIP_ARCHS={arch})", built_archs().unwrap_or("")));
+                        return None;
+                    }
+                }
+            }
             Some(DeviceInfo {
                 index: first_index + dev as usize,
                 name,
@@ -866,6 +886,8 @@ pub struct CudaBackend {
 
 impl CudaBackend {
     pub fn new(device: usize) -> Result<Self, BackendError> {
+        #[cfg(feature = "hip")]
+        crate::backend::hip_runtime::check().map_err(BackendError::DeviceNotFound)?;
         // SAFETY: plain query.
         let count = unsafe { fllm_cuda_device_count() };
         if count < 0 {
