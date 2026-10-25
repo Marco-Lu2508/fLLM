@@ -172,6 +172,33 @@ API: `GET /api/studio/mcp/servers`, `POST` and `DELETE /api/studio/mcp/servers`,
 `GET /api/studio/mcp/tools` (`{tools: [{server, name, description, input_schema}]}`) and `POST /api/studio/mcp/call`
 (`{server, name, arguments}` gives `{content, is_error}`). Everything except the two GET routes is administration (see below).
 
+## Model providers
+
+Settings has a Model providers page for models that do not run on this computer: cloud services and other servers. A provider is an
+OpenAI-compatible address (OpenAI, OpenRouter, Groq, Together, Mistral, the Google Gemini OpenAI-compatible endpoint, LM Studio, vLLM and
+many more), Anthropic, or an Ollama server. Pick a template (it fills in the address only), enter a key if the service needs one and press
+Test: fLLM lists the models of the provider and tells you plainly what went wrong (for example "the key was not accepted"). Providers can be
+switched off, edited, refreshed and removed. Their models appear in the model menu of the header after the local ones, as
+"Provider · model". Choosing one sends that conversation to the provider; streaming, the stop button and the token meter work as usual.
+Settings of the local engine (top-k, min-p, mirostat, DRY, grammars, speculative decoding) are not sent to other services, and the context
+meter shows tokens used without a limit. Anthropic requests are translated to the Messages API and the answers back to the OpenAI format
+(text, tool calls, images and token usage).
+
+The list is saved in `providers.json` next to `studio.json`: `{"providers": [{"id", "name", "kind", "base_url", "api_key", "enabled",
+"local", "models"}]}` with `kind` one of `openai`, `anthropic` or `ollama`. A server that runs on this computer or on your network
+(Ollama, LM Studio, vLLM) needs "This server runs on this computer or network" (`"local": true`); without it addresses on this computer, in
+private networks and other internal ranges are refused, and redirects are never followed. A saved key is dropped when the address of a
+provider is changed to another host without entering the key again.
+
+**Security:** keys stay on this computer, in `providers.json` (readable only by your user on Linux and macOS). The page never sees them: every
+route returns `has_key` instead of the key, and the chat route adds the key when it passes your request on. Keys are not written to logs and
+are removed from error messages. Everything you type in a chat with such a model is sent to that service; read its privacy terms. All
+provider routes work only from this machine, even when an API key is configured.
+
+API: `GET`, `POST` and `DELETE /api/studio/providers`, `POST /api/studio/providers/test`, `GET /api/studio/providers/models[?refresh=1]`
+(`{models: [{provider, provider_name, kind, local, id}], errors}`) and `POST /api/studio/providers/chat` (`{provider, request}` with an
+OpenAI chat-completions body; answers like `/v1/chat/completions`, as JSON or as an event stream).
+
 ## Who may change things
 
 Reading (status, hardware, models) is open like the rest of the API. Changing things through `/api/studio/*` (settings, downloads,

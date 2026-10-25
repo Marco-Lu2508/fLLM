@@ -86,6 +86,7 @@
         $('providerAliasesList').innerHTML = (m.aliases || []).map((a) => `
           <span class="backend-chip">${escapeHtml(a)} <button data-del-alias="${escapeHtml(a)}" style="color:var(--destructive);margin-left:4px;">✕</button></span>
         `).join('');
+        if (window.fllmPickerHook) window.fllmPickerHook(); // providers hook: models of other providers in the picker
         $('preProviderTemplate').textContent = m.chat_template || '';
 
         if (!state._samplerLoaded) {

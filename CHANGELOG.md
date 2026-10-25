@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Studio: Model providers in Settings. Use models of cloud services and other servers (OpenAI-compatible services, Anthropic, Ollama, LM Studio, vLLM) in the chat next to the local model; they appear in the model menu as "Provider · model". Keys stay in `providers.json` on this computer and never reach the page; the routes (`/api/studio/providers/*`) work only from this machine, refuse internal addresses unless a provider is marked local, and translate Anthropic requests and streams to the OpenAI format ([docs/user/studio.md](docs/user/studio.md)).
+
 ## [0.1.5] - 2026-10-25
 
 ### Fixed
