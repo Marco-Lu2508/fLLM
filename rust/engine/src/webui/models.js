@@ -288,7 +288,7 @@
     }
 
     // ---- switching the loaded model ---------------------------------------------------------------------------
-    const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs' };
+    const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs', device: 'optDevice' };
 
     function readOptions() {
       const out = {};
@@ -317,6 +317,7 @@
       const saved = state.modelsHub?.model_options?.[key] || {};
       for (const [name, id] of Object.entries(optionFields)) $(id).value = saved[name] ?? '';
       $('loadAdvanced').open = Object.values(saved).some((v) => v !== null && v !== undefined);
+      await fillDeviceChoices(saved.device);
       $('loadOptionsTitle').textContent = 'Load this model?';
       $('loadOptionsText').textContent = `The server restarts with ${label || reference}. This takes a few seconds; your chats stay in this browser.`;
       $('loadOptionsError').style.display = 'none';
