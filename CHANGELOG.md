@@ -6,6 +6,8 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-26
+
 ### Fixed
 - Desktop app 0.1.6: the window stopped responding as soon as the page asked for the desktop settings (the settings page, and at start). The command locked its settings twice in one expression and waited for itself; it now reads them under one lock.
 

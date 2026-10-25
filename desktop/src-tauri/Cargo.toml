@@ -1,6 +1,6 @@
 [package]
 name = "fllm-desktop"
-version = "0.1.6"
+version = "0.1.7"
 description = "fLLM desktop app: the Studio in its own window, with the server built in"
 edition = "2021"
 license = "Apache-2.0"
