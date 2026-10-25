@@ -15,7 +15,7 @@ use std::{
 };
 
 /// Paths that never need a key: liveness, readiness and the browser page (which asks the user for the key).
-const BUILT_IN_PUBLIC: [&str; 3] = ["/health", "/ready", "/"];
+const BUILT_IN_PUBLIC: [&str; 4] = ["/health", "/ready", "/", "/studio/runner.js"];
 
 pub fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // A panic while a lock was held (for example in a request that was isolated by catch_unwind) must not take

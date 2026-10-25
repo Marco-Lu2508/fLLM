@@ -304,6 +304,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
     let upload_limit = api::batches::max_upload_bytes();
     let router = Router::new()
         .route("/", get(webui).head(api::ollama_extra::head_root))
+        .route("/studio/runner.js", get(|| async { crate::webui::runner() }))
         .route("/health", get(health))
         .route("/ready", get(ready_check))
         .route("/metrics", get(metrics))
