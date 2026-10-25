@@ -158,9 +158,15 @@ impl Runtime {
 
     /// The process-wide core (created on first use); `Err` while the C runtime cannot be loaded.
     pub fn shared() -> Result<Arc<Runtime>, String> {
-        static SHARED: std::sync::OnceLock<Result<Arc<Runtime>, String>> =
-            std::sync::OnceLock::new();
-        SHARED.get_or_init(Runtime::new).clone()
+        // a failure is not remembered: the runtime may be installed while the process runs
+        static SHARED: std::sync::Mutex<Option<Arc<Runtime>>> = std::sync::Mutex::new(None);
+        let mut slot = SHARED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(runtime) = slot.as_ref() {
+            return Ok(runtime.clone());
+        }
+        let runtime = Runtime::new()?;
+        *slot = Some(runtime.clone());
+        Ok(runtime)
     }
 
     pub fn api(&self) -> &Arc<Api> {

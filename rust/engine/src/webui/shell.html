@@ -582,6 +582,9 @@
                 <details id="loadAdvanced">
                   <summary class="app-item-desc" style="cursor:pointer;">Advanced</summary>
                   <div style="display:grid;grid-template-columns:1fr 150px;gap:8px 12px;align-items:center;margin-top:10px;">
+                    <label for="optDevice" class="app-item-desc">Run on</label>
+                    <select id="optDevice" class="ui-select mono" style="width:100%;"><option value="auto">Automatic (recommended)</option></select>
+                    <p id="optDeviceWarning" class="app-item-desc" style="display:none;grid-column:1 / -1;margin:0;"></p>
                     <label for="optContext" class="app-item-desc">Context length (tokens of memory for the conversation)</label>
                     <input type="text" id="optContext" class="ui-input mono" placeholder="auto">
                     <label for="optGpuLayers" class="app-item-desc">Layers on the graphics card</label>
@@ -1124,6 +1127,29 @@
                 <div class="app-card-title">Compute devices</div>
               <p class="app-item-desc" id="hwChoiceText"></p>
                 <div id="hwDevicesGrid" style="display:flex;flex-direction:column;gap:10px;"></div>
+              </div>
+
+              <!-- NPU (npu.js) -->
+              <div class="app-card" id="npuCard">
+                <div class="app-card-title">NPU (neural processing unit)</div>
+                <p class="app-item-desc" id="npuSummary">Checking for an NPU ...</p>
+                <div id="npuHardwareList"></div>
+                <div class="ui-progress" id="npuProgressWrap" style="display:none;"><div class="ui-progress-bar" id="npuProgress" style="width:0%;"></div></div>
+                <p class="app-item-desc" id="npuProgressText" style="display:none;"></p>
+                <div class="msg-error" id="npuError" style="display:none;margin:8px 0;"></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
+                  <button class="btn btn-primary" id="npuSetupBtn" style="display:none;">Install the runtime</button>
+                  <button class="btn btn-ghost" id="npuCancelBtn" style="display:none;">Cancel</button>
+                  <button class="btn btn-ghost" id="npuRemoveBtn" style="display:none;">Remove the runtime</button>
+                </div>
+                <details>
+                  <summary class="app-item-desc" style="cursor:pointer;">What the NPU does today</summary>
+                  <div id="npuExplain"></div>
+                </details>
+                <details>
+                  <summary class="app-item-desc" style="cursor:pointer;">Supported weight formats</summary>
+                  <div id="npuFormats"></div>
+                </details>
               </div>
 
               <!-- Live Scheduler Slots -->

@@ -16,7 +16,9 @@ pub mod hybrid;
 
 /// Create the backend of the `index`-th NPU device.
 pub fn create(index: usize) -> Result<Arc<dyn Backend>, String> {
+    #[allow(unused_mut)]
     let mut remaining = index;
+    #[allow(unused_mut)]
     let mut providers: Vec<&str> = Vec::new();
     #[cfg(feature = "npu-openvino")]
     {
@@ -56,6 +58,15 @@ pub fn create(index: usize) -> Result<Arc<dyn Backend>, String> {
         remaining -= found;
     }
     let _ = remaining;
+    #[cfg(feature = "npu-openvino")]
+    {
+        if super::probe::detect().iter().any(|d| d.vendor == super::probe::Vendor::Intel) {
+            return Err(format!(
+                "no usable NPU: the operating system lists an Intel NPU, but OpenVINO does not ({})",
+                super::status::state_text(super::status::state())
+            ));
+        }
+    }
     Err(format!(
         "no NPU device {index} (providers in this build: {}); `fllm-rs devices` lists what was found. For Intel NPUs the OpenVINO runtime, the NPU \
          plugin and the driver are required (rust/engine/src/backend/npu/OPENVINO.md)",

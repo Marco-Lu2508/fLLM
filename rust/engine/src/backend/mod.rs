@@ -22,7 +22,7 @@ pub mod hip;
 pub mod hip_runtime;
 #[cfg(feature = "sycl")]
 pub mod sycl;
-#[cfg(any(feature = "npu-openvino", feature = "npu-xdna", feature = "npu-qnn", feature = "npu-ane"))]
+// always compiled: the detection and the runtime setup of the NPU work without any NPU feature (the providers are behind their features)
 pub mod npu;
 #[cfg(feature = "tpu-pjrt")]
 pub mod tpu;

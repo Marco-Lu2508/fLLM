@@ -45,16 +45,20 @@ fn matches_prefix(device: &str, prefix: &str) -> bool {
 /// The matching devices, queried once per process. Empty when OpenVINO or its NPU plugin is missing; the reason is logged once.
 pub fn enumerate() -> &'static [OvDevice] {
     static DEVICES: OnceLock<Vec<OvDevice>> = OnceLock::new();
-    DEVICES.get_or_init(|| match query() {
-        Ok(devices) => devices,
+    if let Some(found) = DEVICES.get() {
+        return found;
+    }
+    match query() {
+        Ok(devices) => DEVICES.get_or_init(|| devices),
         Err(error) => {
+            // not remembered: the runtime may be installed (or the driver loaded) while the process runs
             crate::backend::log_once(
                 "openvino-devices",
                 &format!("no OpenVINO NPU listed: {error}"),
             );
-            Vec::new()
+            &[]
         }
-    })
+    }
 }
 
 fn query() -> Result<Vec<OvDevice>, String> {

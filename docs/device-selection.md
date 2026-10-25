@@ -56,6 +56,15 @@ the chain, ending on the CPU. An *explicit* device is never replaced silently: i
 | `FLLM_AUTO_IGPU=0` | integrated GPUs other than Apple's are left to an explicit `--device`. Default: they take part. On x86 machines the CPU kernels can be the faster choice than the integrated GPU, and the inventory cannot tell; if `auto` picks an iGPU that is slower than `--device cpu` for you, set this |
 | `FLLM_ALLOW_SOFTWARE_GPU=1` | software adapters (lavapipe, WARP) count as GPUs |
 
+### NPUs
+
+`auto` never chooses an NPU, also when one is ready; an NPU is always an explicit choice: `--device npu` (`npu:0`), or *Run on: NPU* in the load
+options of the Studio. The Intel NPU backend is compiled into the standard binary and loads the OpenVINO runtime at run time; install it with
+`fllm-rs npu-setup` or from Settings, Hardware (section 6 of [backends.md](backends.md)). `fllm-rs devices` lists an NPU the operating system
+finds even when the runtime is missing, as `NPU found, runtime missing`, and AMD / Qualcomm NPUs as `detected, not supported yet`; neither can be
+selected. If `--device npu` cannot work for a model, the server runs it on the processor and prints why, instead of stopping (this fallback is for
+NPUs only; any other explicit device that cannot be created is still an error). The NPU backend is experimental and has test level L0.
+
 ## 3. Capabilities in `fllm-rs devices`
 
 Every device shows `FP16`, `BF16`, `Int8 dot` (a hardware integer dot product: dp4a, VNNI, dotprod, DP4A on Intel, `int-dot` of Vulkan), `Matrix cores`

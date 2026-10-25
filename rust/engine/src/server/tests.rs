@@ -1630,6 +1630,8 @@ async fn studio_administration_from_another_machine_needs_an_api_key() {
         (Method::POST, "/api/studio/models/pull"),
         (Method::DELETE, "/api/studio/models/cache"),
         (Method::DELETE, "/api/studio/keys/key-1"),
+        (Method::POST, "/api/studio/npu/setup"),
+        (Method::DELETE, "/api/studio/npu/setup"),
     ] {
         let reply = h.send(remote(method, path, "{}")).await;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{path}");
@@ -1646,6 +1648,24 @@ async fn studio_administration_from_another_machine_needs_an_api_key() {
         .unwrap();
     assert_eq!(h.send(foreign_page).await.status, StatusCode::FORBIDDEN);
     assert_eq!(h.get("/api/studio/keys").await.json()["auth_required"], false);
+}
+
+#[tokio::test]
+async fn studio_npu_state_is_readable_and_its_setup_needs_this_machine() {
+    let h = start(Settings::default());
+    let reply = h.get("/api/studio/npu").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let state = reply.json();
+    assert!(state["state"].is_string());
+    assert_eq!(state["device"], "npu");
+    assert!(state["warning"].as_str().unwrap().contains("Experimental"));
+    assert!(state["quantizations"]["exact"].as_array().unwrap().iter().any(|q| q == "Q4_0"));
+    assert!(state["setup"]["progress"]["phase"].is_string());
+    // a bad action is a plain 400, before anything is downloaded
+    let bad = h.post("/api/studio/npu/setup", json!({"action": "format"})).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    // the hardware page lists the same state for the devices it shows
+    assert!(h.get("/api/studio/hardware").await.json()["devices"].is_array());
 }
 
 #[tokio::test]

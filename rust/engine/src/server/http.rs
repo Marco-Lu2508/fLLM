@@ -246,7 +246,9 @@ pub fn studio_admin_blocked(
     // (the file picker opens a window on this machine's screen; the web fetch and search routes reach out from this machine and read files of the agent: same rule)
     let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file"
         // the model providers hold keys of other services and relay requests with them: same rule, reads included
-        || is_providers_path(path);
+        || is_providers_path(path)
+        // the NPU setup downloads a native runtime that the server loads afterwards, and its removal deletes files: never from another machine
+        || path == "/api/studio/npu/setup";
     // the list of changes names files of the workspace, so even this read stays on this machine
     let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path);
     if (auth_required && !agent)
@@ -743,6 +745,25 @@ mod studio_gate_tests {
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/logs", remote, &h));
         let local = headers("127.0.0.1:8000", None);
         assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", addr("127.0.0.1:1"), &local));
+    }
+
+    #[test]
+    fn the_npu_setup_changes_files_and_stays_on_this_machine() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        for method in [Method::POST, Method::DELETE] {
+            for auth in [false, true] {
+                assert!(studio_admin_blocked(auth, &method, "/api/studio/npu/setup", remote, &h), "{method} from another machine (key: {auth})");
+                assert!(!studio_admin_blocked(auth, &method, "/api/studio/npu/setup", here, &local), "{method} from this machine (key: {auth})");
+                // a page of another site in the owner's browser, and a rebinding name
+                assert!(studio_admin_blocked(auth, &method, "/api/studio/npu/setup", here, &headers("127.0.0.1:8000", Some("https://evil.example"))));
+                assert!(studio_admin_blocked(auth, &method, "/api/studio/npu/setup", here, &headers("rebind.example:8000", None)));
+            }
+        }
+        // the state is read-only like the hardware page
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/npu", remote, &h));
     }
 
     #[test]

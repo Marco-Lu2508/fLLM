@@ -230,10 +230,11 @@ otherwise `FLLM_NPU` stays off by default and the feature remains an experiment.
 
 ## Setting up the runtime: `fllm-rs npu-setup`
 
-`fllm-rs npu-setup` installs the OpenVINO runtime (the pip wheel `openvino`, which carries `libopenvino_c` and the NPU plug-in) into
-`~/.fllm/openvino` (`$FLLM_HOME/openvino`). The backend finds it there without further settings, as it finds a virtual environment
+`fllm-rs npu-setup` downloads the pinned OpenVINO runtime (the wheel `openvino`, which carries `libopenvino_c` and the NPU plug-in, from
+`files.pythonhosted.org`, checked against a pinned SHA-256; no Python needed) and unpacks `openvino/libs` into
+`~/.fllm/openvino` (`$FLLM_HOME/openvino`); `--remove` deletes it. The Studio does the same from Settings, Hardware (`setup.rs`, `status.rs`). The backend finds it there without further settings, as it finds a virtual environment
 (`VIRTUAL_ENV`), the user and system Python site directories (`~/.local/lib/python3.*/site-packages/openvino/libs`), `/opt/intel/openvino*`
-and `FLLM_OPENVINO_C_LIB` / `FLLM_OPENVINO_DIR`. It needs Python 3 with pip and a network connection. The kernel driver (`intel_vpu`, with its
+and `FLLM_OPENVINO_C_LIB` / `FLLM_OPENVINO_DIR`. It needs a network connection. The kernel driver (`intel_vpu`, with its
 user-space part `intel-level-zero-npu` / `libze_intel_npu`) comes from the distribution, and the user needs access to `/dev/accel/accel0`
 (group `render`). Then `fllm-rs devices` lists the NPU and `fllm-rs selftest-gpu --device npu` checks it; select it with `--device npu`.
 Measured on a Core Ultra 5 235U (Meteor Lake NPU) with a 1.5B Q4_K_M model: the selftest passes (606 checks, 0 failed) and the answers are

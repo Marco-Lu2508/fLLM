@@ -221,11 +221,18 @@ size and whether it should fit into the free memory, with the files that fit fir
 of the Models page. It is checked with Hugging Face and kept in the same file the Hugging Face tools use (`~/.cache/huggingface/token`),
 so downloads from the page, `fllm-rs pull` and `fllm-rs run` all use it. A `HF_TOKEN` variable wins over the saved token.
 
+**NPU (experimental).** If your computer has an Intel NPU, Settings, Hardware shows an NPU card. When the NPU is found but its runtime (OpenVINO,
+a download of about 60 to 85 MB from the official Python package host, checked against a fixed checksum) is missing, the card has an **Install the runtime**
+button with a progress bar and a Cancel button, and **Remove the runtime** takes it away again. Once the card says *Ready*, the load dialog of the
+Models page (Advanced, *Run on*) lists the NPU. Be aware: it is experimental and has not been run on NPU hardware by the authors yet; it is slower than the
+processor for many models, the weights are held twice in memory and only dense models work. The automatic choice never uses the NPU. If the NPU cannot
+take a model, the model runs on the processor and the card shows why. AMD and Qualcomm NPUs are shown as *detected, not supported yet*.
+
 **Updates.** The Studio asks GitHub for a newer release once per start. If there is one, the Models page offers to download the
 installer of this system and start it (Windows: the setup program, Linux: the AppImage or the package).
 ## Settings
 
-Grouped as General, Appearance, Models (models folder, idle unload), Hardware (devices, a speed test of the loaded model, processor
+Grouped as General, Appearance, Models (models folder, idle unload), Hardware (devices, the NPU card, a speed test of the loaded model, processor
 feature limit, memory speed, a processor check), Server and API (address, request limits, API keys, a tester), Logs (the latest
 server messages with refresh and copy), and under More: model details, text tools and ready-made examples for connecting Claude Code,
 the OpenAI libraries and curl.
@@ -277,5 +284,5 @@ OpenAI chat-completions body; answers like `/v1/chat/completions`, as JSON or as
 ## Who may change things
 
 Reading (status, hardware, models) is open like the rest of the API. Changing things through `/api/studio/*` (settings, downloads,
-deletions, API keys, model switch) needs an API key when one is configured. Without a key it is accepted only from the same machine, from
+deletions, API keys, model switch, installing or removing the NPU runtime) needs an API key when one is configured. Without a key it is accepted only from the same machine, from
 the page of this server, addressed by `localhost` or an IP address. Other websites in your browser cannot use it.
