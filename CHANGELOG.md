@@ -6,7 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-25
+
 ### Fixed
+- Desktop app: switching the model in the app no longer ends with an empty window and a stopped server. The app closed the pipe that keeps the new server alive as soon as the old server ended; it now waits for the new one. Models such as Qwen3.5 whose chat template counts with `ns.x = ns.x + ...` load again.
 - Gemma 4 GGUF files from llama.cpp (such as `unsloth/gemma-4-E4B-it-GGUF`) now load and answer correctly on the CPU: a new tokenizer type `gemma4`, a chat-template check that accepts `set ns.x = ns.x + ...`, and the attention scale 1.0 these files rely on. `gemma4:e4b` is in the model catalog.
 
 ## [0.1.4] - 2026-10-23
