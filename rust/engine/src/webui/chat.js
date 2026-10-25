@@ -310,9 +310,11 @@
       }
       return `
         <div class="msg-assistant-wrap" data-node="${node.id}">
+          ${researchSlotsHtml(node, 'top')}
           <div class="msg-assistant-body">${assistantInner(node)}</div>
           ${logprobsHtml(node)}
           ${ragSourcesHtml(t, node)}
+          ${researchSlotsHtml(node, 'bottom')}
           <div class="msg-actions-bar">
             ${branchNav(t, node)}
             <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy the answer">${svgIcon('copy')}</button>
@@ -581,6 +583,8 @@
       state.attachments = [];
       renderAttachments();
       renderChatArea();
+      // research.js: Research mode replaces the single answer by a multi-step run
+      if (state.research && text && !images.length) { await researchRun(t, userNode); return; }
       if (!(await ragPrepare(t, userNode))) return;
       await generateReply(t, userNode.id);
     }

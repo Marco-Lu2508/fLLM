@@ -31,6 +31,17 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   are read, their best passages are added to the prompt with their source numbers, and the sources are listed under the answer. This
   uses the web tools of the server (`/api/studio/web/search` and `/api/studio/web/fetch`); if they are missing or blocked, the page
   says so and answers without the web. The pages are fetched by the server, so the computer running fLLM needs internet access.
+* **Research.** Switch on *Research* in the composer for questions that need more than one page. The model plans 3 to 6 search queries,
+  the pages found are read in parallel (at most 4 requests at a time; duplicate and junk results such as social media, PDFs and
+  login pages are skipped), the best passages of each page are picked with the same BM25 ranking as for documents, and the model
+  writes short notes per page. It then checks whether the notes answer the question and, if not, runs one more round of searches
+  (at most 2 rounds; a line above the answer shows round, step and progress). The answer is a report with *Summary*, *Findings* and
+  *Open questions*, citing sources as [1], [2], followed by a source list with title, link and date when the page shows one. Under
+  the answer, the collapsible *Research log* lists the queries, every page with its notes, failures and the time spent. The notes
+  never take more than about 60 % of the model's context: longer notes are condensed, then cut. The Stop button cancels every
+  pending request. Research needs the web tools of the server; when they are missing or blocked, or nothing usable is found, the
+  page says why and the model answers on its own. Small models make weaker plans and notes, so check important claims in the
+  linked pages. Research is not used for messages with images; edited or regenerated messages get a normal answer.
 * Presets store a system prompt together with sampling values. The sampling panel covers temperature, top-p/top-k/min-p, penalties,
   mirostat, DRY, a seed and constrained output (JSON object, JSON schema, GBNF grammar, regular expression).
 * Chats can be pinned, renamed, duplicated, exported (Markdown or JSON), imported and searched by title and content. New chats get a

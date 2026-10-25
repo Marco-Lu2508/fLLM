@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Studio chat: a *Research* mode that plans search queries, reads web pages in parallel, takes notes within the model's context, reflects for one more round and writes a cited report, with a collapsible research log and a Stop button that cancels every request.
+
 ## [0.1.5] - 2026-10-25
 
 ### Fixed

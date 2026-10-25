@@ -172,3 +172,20 @@
     .rag-sources a { color: var(--primary); text-decoration: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rag-sources a:hover { text-decoration: underline; }
     .doc-chip { border-style: dashed; }
+
+    /* research mode: progress above the answer, log below it */
+    #btnToggleResearch.active { color: var(--primary); border-color: var(--primary); }
+    .research-progress { font-size: 12px; color: var(--muted-foreground); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; margin-bottom: 8px; background: var(--card); }
+    .research-progress.busy { font-style: italic; }
+    .research-progress.warn { color: var(--destructive); font-style: normal; }
+    .research-top:empty, .research-bottom:empty { display: none; }
+    .research-log { margin-top: 8px; font-size: 12px; color: var(--muted-foreground); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; background: var(--card); }
+    .research-log > summary { cursor: pointer; }
+    .research-sec { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+    .research-sec ol, .research-sec ul { margin: 0; padding-left: 20px; }
+    .research-page { display: flex; flex-direction: column; gap: 2px; }
+    .research-page.fail span { color: var(--destructive); }
+    .research-page a { color: var(--primary); text-decoration: none; }
+    .research-page a:hover { text-decoration: underline; }
+    .research-page pre { white-space: pre-wrap; margin: 4px 0 4px 12px; font: inherit; max-height: 220px; overflow: auto; }
+    .research-date { opacity: 0.7; font-size: 11px; }
