@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- Desktop app 0.1.6: the window stopped responding as soon as the page asked for the desktop settings (the settings page, and at start). The command locked its settings twice in one expression and waited for itself; it now reads them under one lock.
+
 ### Added
 - AMD GPUs on Windows (experimental, never run on an AMD GPU): `scripts/build-windows.ps1 -Hip` builds the HIP kernels with the ROCm / HIP SDK for Windows, the HIP runtime DLL is delay-loaded and searched at run time (the binary starts without it and falls back to Vulkan / the CPU), GPUs the build has no code for are no longer listed, and the CI workflow `windows-hip-package` and an optional `windows-hip` release job produce `fllm-windows-x86_64-msvc-hip.zip` ([docs/changes/hip.md](docs/changes/hip.md)).
 - Desktop app: engine variants. Releases also carry `fLLM-cuda` installers for Windows and Linux with a second server program (CUDA + Vulkan) next to the base one (CPU + Vulkan + DirectX); the app picks the CUDA one when an NVIDIA driver and GPU are found, falls back to the base one if it stops right after the start, and can be told otherwise in Settings, Desktop app, or with `FLLM_DESKTOP_VARIANT` ([docs/user/desktop.md](docs/user/desktop.md)).
