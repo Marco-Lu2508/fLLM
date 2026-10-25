@@ -30,6 +30,8 @@
         item('Start fLLM when I sign in', 'Starts the app when you sign in to this computer.', toggle('chkDesktopAutostart')) +
         item('Quick entry hotkey', 'Works from any program: brings fLLM to the front with a new chat. Click the field and press the keys; it needs Ctrl, Alt or Cmd. It does not work on some Linux desktops (Wayland).',
           '<input type="text" readonly class="ui-input mono" id="inpQuickEntry" style="width:170px;" placeholder="Off"> <button class="btn btn-sm btn-ghost" id="btnQuickEntryClear">Off</button> <button class="btn btn-sm btn-ghost" id="btnQuickEntryDefault">Default</button>') +
+        item('Graphics backends', '<span id="desktopVariantDesc">Which build of the server runs. Automatic picks the best one for this computer. Takes effect when the server restarts.</span>',
+          '<select class="ui-input" id="selDesktopVariant" style="width:230px;"></select>') +
         item('Server log', '<span class="mono" id="desktopLogFolder"></span>', '<button class="btn btn-sm btn-secondary" id="btnDesktopLogs">Open log folder</button>') +
         item('Server', 'Stops the server and starts it again. The page reloads when it is ready.', '<button class="btn btn-sm btn-secondary" id="btnDesktopRestart">Restart server</button>') +
         '<div class="app-card-item"><div class="app-item-desc" id="desktopStatus"></div></div></div>';
@@ -43,7 +45,32 @@
         pane.querySelector('#desktopLogFolder').textContent = s.logFolder;
         pane.querySelector('#inpQuickEntry').value = s.quickEntry || '';
         defaultQuickEntry = s.defaultQuickEntry || '';
+        const vs = s.variants || [];
+        const sel = pane.querySelector('#selDesktopVariant');
+        sel.innerHTML = '<option value="auto">Automatic</option>' + vs.map((v) =>
+          `<option value="${v.name}"${v.installed ? '' : ' disabled'}>${v.label}${v.installed ? '' : ' (not installed)'}</option>`).join('');
+        sel.value = s.variant || 'auto';
+        sel.disabled = vs.filter((v) => v.installed).length < 2;
+        const env = s.variantFromEnv ? ` The environment variable FLLM_DESKTOP_VARIANT=${s.variantFromEnv} overrides this choice.` : '';
+        const running = s.activeVariantLabel ? ` Running now: ${s.activeVariantLabel}.` : '';
+        pane.querySelector('#desktopVariantDesc').textContent =
+          (vs.length && sel.disabled ? 'This installation holds one server build only.' : 'Which build of the server runs. Automatic picks the best one for this computer. Takes effect when the server restarts.') + running + env;
+        // the hardware card of the settings names the variant too
+        const choice = document.getElementById('hwChoiceText');
+        if (choice) {
+          let line = document.getElementById('hwDesktopVariant');
+          if (!line) {
+            line = document.createElement('div');
+            line.id = 'hwDesktopVariant';
+            line.className = 'app-item-desc';
+            choice.insertAdjacentElement('afterend', line);
+          }
+          line.textContent = s.activeVariantLabel ? `Server build: ${s.activeVariantLabel}.${s.variantNote ? ' ' + s.variantNote : ''}` : '';
+        }
       }).catch(fail);
+      pane.querySelector('#selDesktopVariant').addEventListener('change', (e) => {
+        call('set_variant', { value: e.target.value }).then(() => status('Restart the server to use the new choice.')).catch((err) => { fail(err); refresh(); });
+      });
       // quick entry: the field records a key combination in the form the app understands ("Ctrl+Alt+Space")
       let defaultQuickEntry = '';
       const setQuickEntry = (value) => call('set_quick_entry', { value }).then(() => { status(''); return refresh(); }).catch((e) => { fail(e); refresh(); });
