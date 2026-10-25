@@ -15,6 +15,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, State, Url, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_window_state::StateFlags;
 
 /// The page keeps its chats per address, so the app prefers the same port every time.
@@ -28,10 +29,20 @@ struct Server {
 }
 
 /// What the app keeps in `settings.json` in its config folder.
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 struct Settings {
     keep_in_tray: bool,
+    /// The global hotkey that brings the window to the front with a new chat ("" = off).
+    quick_entry: String,
+}
+
+const DEFAULT_QUICK_ENTRY: &str = "Ctrl+Alt+Space";
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_owned() }
+    }
 }
 
 struct Shell {
@@ -121,6 +132,26 @@ fn show_main(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// The quick-entry hotkey: bring the window to the front and ask the page for a new chat with the cursor in the composer. Before the
+/// page has loaded (loading page) the call finds nothing to run and does nothing more than show the window.
+fn quick_entry(app: &AppHandle) {
+    show_main(app);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval("if (window.fllmQuickEntry) window.fllmQuickEntry();");
+    }
+}
+
+/// Registers `keys` (for example "Ctrl+Alt+Space") as the only global hotkey; an empty text switches the hotkey off.
+fn register_quick_entry(app: &AppHandle, keys: &str) -> Result<(), String> {
+    let hotkeys = app.global_shortcut();
+    let _ = hotkeys.unregister_all();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let shortcut: Shortcut = keys.parse().map_err(|_| format!("\"{keys}\" is not a valid key combination."))?;
+    hotkeys.register(shortcut).map_err(|e| format!("The hotkey could not be registered (another program may use it): {e}"))
 }
 
 /// Shows the loading page with a message; the page reads the message from the fragment of its address.
@@ -257,6 +288,8 @@ struct DesktopSettings {
     autostart: bool,
     log_folder: String,
     config_folder: String,
+    quick_entry: String,
+    default_quick_entry: String,
 }
 
 #[tauri::command]
@@ -267,7 +300,23 @@ fn get_desktop_settings(app: AppHandle, shell: State<Shell>) -> Result<DesktopSe
         autostart: app.autolaunch().is_enabled().map_err(|e| e.to_string())?,
         log_folder: folder(app.path().app_log_dir()),
         config_folder: folder(app.path().app_config_dir()),
+        quick_entry: shell.settings.lock().unwrap().quick_entry.clone(),
+        default_quick_entry: DEFAULT_QUICK_ENTRY.to_owned(),
     })
+}
+
+/// Sets the quick-entry hotkey ("" switches it off). The old hotkey stays when the new one cannot be registered.
+#[tauri::command]
+fn set_quick_entry(app: AppHandle, shell: State<Shell>, value: String) -> Result<(), String> {
+    let value = value.trim().to_owned();
+    if let Err(e) = register_quick_entry(&app, &value) {
+        let old = shell.settings.lock().unwrap().quick_entry.clone();
+        let _ = register_quick_entry(&app, &old);
+        return Err(e);
+    }
+    let mut settings = shell.settings.lock().unwrap();
+    settings.quick_entry = value;
+    save_settings(&app, &settings)
 }
 
 #[tauri::command]
@@ -331,6 +380,15 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
         .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::all() - StateFlags::VISIBLE).build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        quick_entry(app);
+                    }
+                })
+                .build(),
+        )
         .manage(Shell {
             port: free_port(),
             loading_url: Mutex::new(None),
@@ -338,7 +396,7 @@ fn main() {
             generation: AtomicU64::new(0),
             settings: Mutex::new(Settings::default()),
         })
-        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, restart_server])
+        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, restart_server, set_quick_entry])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" && window.state::<Shell>().settings.lock().unwrap().keep_in_tray {
@@ -353,6 +411,10 @@ fn main() {
             *shell.settings.lock().unwrap() = load_settings(&handle);
             let window = app.get_webview_window("main").expect("main window");
             *shell.loading_url.lock().unwrap() = window.url().ok();
+            let keys = shell.settings.lock().unwrap().quick_entry.clone();
+            if let Err(e) = register_quick_entry(&handle, &keys) {
+                eprintln!("{e}");
+            }
             // started by the system at sign-in and kept in the tray: stay out of the way
             if std::env::args().any(|a| a == AUTOSTART_ARG) && shell.settings.lock().unwrap().keep_in_tray {
                 let _ = window.hide();

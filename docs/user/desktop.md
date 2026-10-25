@@ -20,6 +20,10 @@ stored in the usual fLLM model folder, shared with the command line.
 * **Tray icon:** a menu with Open fLLM, Restart server, Open log folder and Quit. Left click on the icon opens the window.
 * **Keep running in the tray:** off by default. When on, closing the window hides it and the server keeps running; use Quit in the tray menu to end the app.
 * **Start fLLM when I sign in:** off by default. When it is on together with the tray option, the app starts hidden in the tray.
+* **Quick entry hotkey:** a global hotkey (default Ctrl+Alt+Space) that works from any program: it brings the window to the front (also
+  from the tray) and opens a new chat with the cursor in the message field. Change or switch it off in Settings, Desktop app: click the
+  field and press the keys (Ctrl, Alt or Cmd is required). If another program already uses the combination the page says so and keeps
+  the old hotkey. Some Linux desktops (Wayland) do not allow global hotkeys.
 * **Window place:** size and position are remembered between starts.
 * **If the server stops,** the window shows the loading page with a message. Use Restart server in the tray menu (the log is in the log folder, `server.log`).
 
@@ -31,8 +35,8 @@ Linux `~/.config/io.github.marco-lu2508.fllm`, macOS `~/Library/Application Supp
 registered with the system (a Run entry on Windows, an autostart `.desktop` file on Linux, a launch agent on macOS), and the window place is kept by the window-state plugin in the same config folder. On
 Linux the tray icon needs an app-indicator extension on some desktops (for example GNOME).
 
-Security: the page of the local server may call exactly five commands of the app (read the options, set the tray option, set the
-start at sign-in, open the log folder, restart the server), and only when it is shown from `http://127.0.0.1` in the app window (a Tauri 2
+Security: the page of the local server may call exactly six commands of the app (read the options, set the tray option, set the
+start at sign-in, set the quick entry hotkey, open the log folder, restart the server), and only when it is shown from `http://127.0.0.1` in the app window (a Tauri 2
 remote capability, `desktop/src-tauri/capabilities/studio-page.json`). No file, shell or network access of the app is exposed.
 
 The source is in `desktop/` (Tauri 2). To build it yourself, build `fllm-rs`, copy it to

@@ -68,6 +68,27 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   short title from the model (switch off in Settings).
 * Chats are stored in the browser (`localStorage`) and never leave it.
 
+## Everyday features
+
+* **Welcome tour.** On the first start (once the page knows your hardware) a short tour explains what fLLM is, shows your computer and
+  the memory a model can use, points to the suggested models and gives three tips. Skip it any time; Settings, General, *Show the
+  welcome tour* brings it back.
+* **Keyboard shortcuts.** Press `?` (outside a text field) or Ctrl/Cmd+`/` for the list. New chat, search, focus the message field,
+  show or hide the sidebar, stop, go to Chat, Code or Models, open Settings, next and previous chat, and regenerate have keys that you
+  can change: choose *Change* and press the new keys. A key that is already in use, or that would disturb typing, is refused with a
+  message. The choices are kept in the browser. Ctrl becomes Cmd on macOS.
+* **Dictation.** The microphone button in the message field fills it with what you say, live. It uses the speech recognition of the
+  browser (`webkitSpeechRecognition`), so the audio may go to the speech service of the browser's maker; fLLM never receives or
+  stores audio. Where the browser or the desktop app's web view has no speech recognition the button is hidden, and Settings, Voice
+  and alerts says so. The language defaults to the browser language and can be changed there.
+* **Reading aloud.** Uses the speech synthesis of the browser. Settings, Voice and alerts has the voice, speed and pitch, a button to
+  try them, and *Read answers automatically*. Markdown marks and code blocks are not spoken; long text is read in pieces. A stop
+  button appears next to the microphone while it speaks (Esc stops it too). Other parts of the page can call
+  `window.fllmSpeak(text)` and `window.fllmStopSpeaking()`.
+* **Alerts.** When an answer that took more than 20 seconds, or a Code agent run, finishes while the window is not in front, a system
+  notification is shown (the browser asks for permission once) and, if switched on, a short tone is played. Both are optional in
+  Settings, Voice and alerts.
+
 ## Code: the coding agent
 
 Pick a folder and describe a task. The model works through tools that the server runs inside that folder (`list_dir`, `read_file`,
