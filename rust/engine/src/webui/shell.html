@@ -330,6 +330,14 @@
                     <!-- TokenCounter -->
                     <span class="mono tabular" style="font-size:11px;color:var(--muted-foreground);margin-right:4px;" id="liveTokenCounter">0 / 512 tok</span>
 
+                    <!-- voice: stop reading aloud, and dictation (shown by voice.js when the browser can do it) -->
+                    <button class="btn-icon btn-icon-xs" id="btnStopSpeaking" style="display:none;" title="Stop reading aloud">
+                      <svg viewBox="0 0 24 24" class="icon"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/></svg>
+                    </button>
+                    <button class="btn-icon btn-icon-xs" id="btnMic" style="display:none;" title="Dictate with the microphone">
+                      <svg viewBox="0 0 24 24" class="icon"><rect width="6" height="12" x="9" y="2" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
+                    </button>
+
                     <button class="send-circle-btn" id="btnSendChat" title="Send (Enter)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
                     </button>
@@ -648,6 +656,24 @@
                   </div>
                   <div class="app-item-actions">
                     <button class="btn btn-sm btn-secondary" id="btnGenGoHub">Open Models</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Welcome tour</div>
+                    <div class="app-item-desc">A short introduction to fLLM, your computer and the first steps.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-secondary" id="btnShowTour">Show the welcome tour</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Keyboard shortcuts</div>
+                    <div class="app-item-desc">See and change the keys.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <button class="btn btn-sm btn-secondary" id="btnShowShortcuts">Keyboard shortcuts</button>
                   </div>
                 </div>
                 <div class="app-card-item">
@@ -1144,19 +1170,26 @@
   <div class="modal-backdrop" id="helpModal">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="helpTitle" style="width:min(520px,92vw);">
       <h3 id="helpTitle">Keyboard shortcuts</h3>
+      <p>Choose Change, then press the new keys. A combination that is already in use is refused.</p>
       <table class="app-table shortcuts">
-        <tbody>
-          <tr><td>New chat</td><td class="mono">Ctrl N</td></tr>
-          <tr><td>Search</td><td class="mono">Ctrl K</td></tr>
-          <tr><td>Show or hide the sidebar</td><td class="mono">Ctrl B</td></tr>
-          <tr><td>Send</td><td class="mono">Enter</td></tr>
-          <tr><td>New line</td><td class="mono">Shift Enter</td></tr>
-          <tr><td>Stop the answer</td><td class="mono">Esc</td></tr>
-          <tr><td>Edit your last message</td><td class="mono">Arrow up (empty field)</td></tr>
-          <tr><td>This overview</td><td class="mono">Ctrl /</td></tr>
-        </tbody>
+        <tbody id="shortcutsBody"></tbody>
       </table>
-      <div class="dialog-actions"><button class="btn btn-primary" id="helpClose">Close</button></div>
+      <p id="shortcutsMessage" class="sc-message"></p>
+      <div class="dialog-actions"><button class="btn btn-ghost" id="btnShortcutsReset">Reset all</button><button class="btn btn-primary" id="helpClose">Close</button></div>
+    </div>
+  </div>
+
+  <!-- Welcome tour (first start; Settings, General brings it back) -->
+  <div class="modal-backdrop" id="tourModal">
+    <div class="dialog tour" role="dialog" aria-modal="true" aria-labelledby="tourTitle">
+      <div class="tour-dots" id="tourDots"></div>
+      <h3 id="tourTitle"></h3>
+      <div id="tourBody"></div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" id="tourSkip">Skip</button>
+        <button class="btn btn-ghost" id="tourBack">Back</button>
+        <button class="btn btn-primary" id="tourNext">Next</button>
+      </div>
     </div>
   </div>
 

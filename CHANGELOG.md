@@ -6,6 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Studio: everyday features of a chat app. Dictation with the microphone button (browser speech recognition, hidden where unavailable), reading answers aloud (voice, speed, pitch, optional automatic reading), rebindable keyboard shortcuts with a panel on `?` / Ctrl+`/`, system notifications and an optional tone when a long answer or an agent run finishes in the background, and a welcome tour on the first start (Settings, General brings it back).
+- Desktop app: a global quick-entry hotkey (default Ctrl+Alt+Space, configurable under Settings, Desktop app) that brings the window to the front with a new chat.
+
 ## [0.1.5] - 2026-10-25
 
 ### Fixed
