@@ -13,7 +13,11 @@ What it needs
   * -Cuda: the CUDA Toolkit (CUDA_PATH is set by its installer; nvcc needs the MSVC host compiler, which the step above provides).
     FLLM_CUDA_ARCHS selects the GPU architectures (-CudaArchs "89;120" for a quick build); a Visual Studio newer than the toolkit
     supports needs FLLM_CUDA_EXTRA_FLAGS="-allow-unsupported-compiler".
-  * -Hip: the AMD HIP SDK for Windows (HIP_PATH) with hipcc.
+  * -Hip: a ROCm / HIP SDK for Windows (HIP_PATH, or the newest Program Files\AMD\ROCm\X.Y) with hipcc or lib\llvm\bin\clang++, and
+    lib\amdhip64.lib. -HipArchs "gfx1100;gfx1151" selects the GPU architectures (default: RDNA2..RDNA4 and the RDNA3.5 APUs; the
+    ones the SDK has no device libraries for are skipped). The package gets the runtime DLLs of the SDK (amdhip64_N.dll, amd_comgr,
+    rocm_kpack, when present) next to fllm-rs.exe unless -NoHipRuntime is given; the binary finds a runtime in the driver
+    (System32) or the SDK on its own, so a package without them also works where one is installed.
   * the native Vulkan backend: the Vulkan SDK (glslc, VULKAN_SDK); without it the script drops the "vulkan" feature and says so.
 
 The binary is linked with the static C runtime (-C target-feature=+crt-static) so that no Visual C++ redistributable is needed;
@@ -25,6 +29,7 @@ Nothing here has run on a Windows machine with these toolchains yet (status L0: 
 param(
     [switch]$Cuda,
     [switch]$Hip,
+    [switch]$NoHipRuntime,
     [switch]$Arm64,
     [switch]$DynamicCrt,
     [switch]$NoVulkan,
@@ -150,7 +155,26 @@ if ($LASTEXITCODE -ne 0) { Fail "rustup target add $Triple failed" }
 
 if ($CudaArchs) { $env:FLLM_CUDA_ARCHS = $CudaArchs }
 if ($HipArchs) { $env:FLLM_HIP_ARCHS = $HipArchs }
-if ($Hip) { $env:FLLM_HIP = "1" }
+$HipRoot = $null
+if ($Hip) {
+    $env:FLLM_HIP = "1"
+    # the SDK root, the way build.rs finds it: ROCM_PATH, HIP_PATH, else the newest Program Files\AMD\ROCm\X.Y
+    $HipRoot = if ($env:ROCM_PATH) { $env:ROCM_PATH } elseif ($env:HIP_PATH) { $env:HIP_PATH } else {
+        $rocmDir = Join-Path $env:ProgramFiles "AMD\ROCm"
+        $newest = if (Test-Path $rocmDir) { Get-ChildItem $rocmDir -Directory | Sort-Object { try { [version]$_.Name } catch { [version]"0.0" } } -Descending | Select-Object -First 1 } else { $null }
+        if ($newest) { $newest.FullName } else { $null }
+    }
+    if (-not $HipRoot -or -not (Test-Path $HipRoot)) { Fail "-Hip: no HIP SDK found; install the AMD HIP SDK for Windows or set HIP_PATH" }
+    $hipcc = Join-Path $HipRoot "bin\hipcc.exe"
+    $hipClang = Join-Path $HipRoot "lib\llvm\bin\clang++.exe"
+    $hipLib = Join-Path $HipRoot "lib\amdhip64.lib"
+    Write-Host "hip root:  $HipRoot"
+    Write-Host "compiler:  $(if (Test-Path $hipcc) { $hipcc } elseif (Test-Path $hipClang) { "$hipClang (no hipcc.exe in the SDK)" } else { 'NOT FOUND' })"
+    if (-not (Test-Path $hipcc) -and -not (Test-Path $hipClang)) { Fail "-Hip: neither bin\hipcc.exe nor lib\llvm\bin\clang++.exe in $HipRoot" }
+    if (-not (Test-Path $hipLib)) { Fail "-Hip: $hipLib (import library of the HIP runtime) is missing" }
+    # build.rs reads ROCM_PATH / HIP_PATH; make sure it sees the root found here
+    if (-not $env:ROCM_PATH -and -not $env:HIP_PATH) { $env:HIP_PATH = $HipRoot }
+}
 if (-not $DynamicCrt) {
     $flag = "-C target-feature=+crt-static"
     if ($env:RUSTFLAGS -and $env:RUSTFLAGS -notmatch "crt-static") { $env:RUSTFLAGS = "$($env:RUSTFLAGS) $flag" }
@@ -172,6 +196,17 @@ $Binary = Join-Path $targetDir "$Triple\release\fllm-rs.exe"
 if (-not (Test-Path $Binary)) { Fail "build finished but $Binary is missing" }
 
 # smoke test: the binary starts and lists its devices (the CPU at least)
+if ($Hip) {
+    # show how the HIP runtime is imported: it must be a delay-load import, or the exe does not start without the DLL
+    $dumpbin = Find-Tool "dumpbin.exe"
+    if ($dumpbin) {
+        Write-Host "---- dumpbin /dependents"
+        & $dumpbin /nologo /dependents $Binary
+        Write-Host "---- dumpbin /imports (delay-load section)"
+        & $dumpbin /nologo /imports $Binary | Select-String -Pattern "amdhip64|delay" -Context 0,1
+        Write-Host "----"
+    }
+}
 & $Binary --help *> $null
 & $Binary devices
 if ($LASTEXITCODE -ne 0) { Fail "$Binary devices failed" }
@@ -189,6 +224,41 @@ try {
     if (Test-Path (Join-Path $Root "NOTICE")) { Copy-Item (Join-Path $Root "NOTICE") (Join-Path $stage "NOTICE") }
     if (Test-Path (Join-Path $Root "THIRD_PARTY.md")) { Copy-Item (Join-Path $Root "THIRD_PARTY.md") (Join-Path $stage "THIRD_PARTY.md") }
     if (Test-Path (Join-Path $Root "licenses")) { Copy-Item -Recurse (Join-Path $Root "licenses") (Join-Path $stage "licenses") }
+    if ($Hip) {
+        # What may be redistributed: the HIP runtime DLLs of the SDK (open-source ROCm components, MIT / Apache-2.0 with LLVM exception;
+        # their license texts go to licenses\rocm). Not bundled: the graphics driver, the Visual C++ runtime (the exe uses the static one),
+        # and the SDK's closed or EULA-bound parts. The user needs an AMD driver that supports the GPU; the binary uses the DLL next to
+        # it first, then the one in System32 (driver), then HIP_PATH / Program Files\AMD\ROCm.
+        $bundled = @()
+        if (-not $NoHipRuntime) {
+            foreach ($pattern in @("amdhip64*.dll", "amd_comgr*.dll", "rocm_kpack*.dll")) {
+                foreach ($f in Get-ChildItem -Path (Join-Path $HipRoot "bin") -Filter $pattern -File -ErrorAction SilentlyContinue) {
+                    Copy-Item $f.FullName (Join-Path $stage $f.Name)
+                    $bundled += $f.Name
+                }
+            }
+            $licDir = Join-Path $stage "licenses\rocm"
+            New-Item -ItemType Directory -Force -Path $licDir | Out-Null
+            foreach ($f in Get-ChildItem -Path $HipRoot -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(LICENSE|NOTICE|COPYING)' }) { Copy-Item $f.FullName $licDir }
+            foreach ($f in Get-ChildItem -Path (Join-Path $HipRoot "share\doc") -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(LICENSE|NOTICE|COPYING)' } | Select-Object -First 40) {
+                Copy-Item $f.FullName (Join-Path $licDir ("{0}-{1}" -f $f.Directory.Name, $f.Name)) -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Host "bundled HIP runtime files: $(if ($bundled) { $bundled -join ', ' } else { '(none)' })"
+        $readme = @(
+            "fLLM with AMD HIP (ROCm) kernels for Windows",
+            "",
+            "Needs an AMD GPU that the Windows HIP runtime supports (Radeon RX 7000 / 9000, some RX 6000, Ryzen AI Max / Strix Halo)",
+            "and a current AMD Radeon (Adrenalin) driver. Without a usable GPU or runtime fllm-rs.exe still starts and uses Vulkan or the CPU.",
+            "",
+            "The HIP runtime DLL (amdhip64_N.dll) is looked up in this order: FLLM_HIP_DLL, this folder, System32 (the driver),",
+            "HIP_PATH\bin, ROCM_PATH\bin, Program Files\AMD\ROCm\<newest>\bin. Delete the bundled amdhip64*.dll to use the driver's copy.",
+            "",
+            "Bundled runtime files: $(if ($bundled) { $bundled -join ', ' } else { 'none' }). They come from the AMD ROCm / HIP SDK and keep their own licenses (licenses\rocm).",
+            "Check with: fllm-rs devices"
+        )
+        Set-Content -Path (Join-Path $stage "README-HIP.txt") -Value $readme -Encoding ASCII
+    }
     $zip = Join-Path $dist $Asset
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip

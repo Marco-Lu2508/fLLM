@@ -1,0 +1,81 @@
+# Installs the ROCm / HIP SDK for Windows from AMD's open-source "TheRock" Python wheels (rocm, rocm-sdk-core, rocm-sdk-devel at one
+# pinned version; no GUI installer, the way llama.cpp's Windows ROCm build does it) and exports HIP_PATH / HIP_PLATFORM.
+# Used by windows-hip-package.yml and by the windows-hip job of release.yml. The wheels are cached per version.
+# Pin the hashes with the `sha256` input once they are known (the first run prints them as warnings).
+name: Set up the ROCm SDK (Windows)
+description: ROCm / HIP SDK from AMD's ROCm wheels, exports HIP_PATH
+inputs:
+  version:
+    description: version of the rocm wheels
+    default: "10.0.0"
+  index:
+    description: Python package index of AMD's ROCm wheels
+    default: "https://stable.repo.amd.com/rocm/whl-next/"
+  sha256:
+    description: 'one "<file>  <sha256>" per line; a wheel without an entry only gets a warning. Empty until the first run has printed them.'
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Cache the ROCm wheels
+      id: wheels-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: rocm-wheels
+        key: rocm-wheels-windows-${{ inputs.version }}
+
+    - name: Download the ROCm wheels
+      if: steps.wheels-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        ROCM_VERSION: ${{ inputs.version }}
+        ROCM_INDEX: ${{ inputs.index }}
+      run: |
+        python -m pip install --upgrade pip
+        New-Item -ItemType Directory -Force rocm-wheels | Out-Null
+        python -m pip download --no-deps --index-url $env:ROCM_INDEX -d rocm-wheels "rocm==$env:ROCM_VERSION" "rocm-sdk-core==$env:ROCM_VERSION" "rocm-sdk-devel==$env:ROCM_VERSION"
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error title=ROCm wheel download failed::pip download from $env:ROCM_INDEX failed"; exit 1 }
+
+    - name: Check the wheels against the pinned hashes
+      shell: pwsh
+      env:
+        ROCM_SHA256: ${{ inputs.sha256 }}
+      run: |
+        $pins = @{}
+        foreach ($line in ($env:ROCM_SHA256 -split "`n")) { if ($line.Trim() -match '^(\S+)\s+([0-9a-fA-F]{64})$') { $pins[$Matches[1]] = $Matches[2].ToLower() } }
+        foreach ($f in Get-ChildItem rocm-wheels -File) {
+          $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower()
+          Write-Host "$($f.Name)  $h  ($([math]::Round($f.Length / 1MB)) MB)"
+          if ($pins.ContainsKey($f.Name)) {
+            if ($pins[$f.Name] -ne $h) { Write-Host "::error title=ROCm wheel hash mismatch::$($f.Name) is $h, pinned $($pins[$f.Name])"; exit 1 }
+          } else {
+            Write-Host "::warning title=ROCm wheel not pinned::$($f.Name)  $h"
+          }
+        }
+
+    - name: Install the ROCm SDK
+      shell: pwsh
+      run: |
+        python -m venv C:\rocm-venv
+        & C:\rocm-venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+        & C:\rocm-venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation (Get-ChildItem rocm-wheels -File | ForEach-Object { $_.FullName })
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error title=ROCm install failed::pip install of the wheels failed"; exit 1 }
+        & C:\rocm-venv\Scripts\rocm-sdk.exe init
+        if ($LASTEXITCODE -ne 0) { Write-Host "::error title=rocm-sdk init failed::exit code $LASTEXITCODE"; exit 1 }
+        $root = (& C:\rocm-venv\Scripts\rocm-sdk.exe path --root | Select-Object -Last 1).Trim()
+        Write-Host "SDK root: $root"
+        "HIP_PATH=$root" >> $env:GITHUB_ENV
+        "HIP_PLATFORM=amd" >> $env:GITHUB_ENV
+        Write-Host "::group::SDK layout"
+        Get-ChildItem $root | ForEach-Object { Write-Host $_.Name }
+        Write-Host "-- bin (hip / amd / rocm files)"
+        Get-ChildItem (Join-Path $root "bin") -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'hip|amd|rocm' } | ForEach-Object { Write-Host $_.Name }
+        Write-Host "-- lib (*.lib)"
+        Get-ChildItem (Join-Path $root "lib") -Filter *.lib -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'hip|amd' } | ForEach-Object { Write-Host $_.Name }
+        Write-Host "-- device libraries"
+        Get-ChildItem $root -Recurse -Filter "oclc_isa_version_*.bc" -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Host $_.FullName.Substring($root.Length) }
+        Write-Host "::endgroup::"
+        $hipcc = Join-Path $root "bin\hipcc.exe"
+        $clang = Join-Path $root "lib\llvm\bin\clang++.exe"
+        if (-not (Test-Path $hipcc) -and -not (Test-Path $clang)) { Write-Host "::error title=No HIP compiler in the SDK::neither bin\hipcc.exe nor lib\llvm\bin\clang++.exe under $root"; exit 1 }
+        if (-not (Test-Path (Join-Path $root "lib\amdhip64.lib"))) { Write-Host "::error title=No import library::lib\amdhip64.lib is missing under $root"; exit 1 }

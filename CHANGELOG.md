@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- AMD GPUs on Windows (experimental, never run on an AMD GPU): `scripts/build-windows.ps1 -Hip` builds the HIP kernels with the ROCm / HIP SDK for Windows, the HIP runtime DLL is delay-loaded and searched at run time (the binary starts without it and falls back to Vulkan / the CPU), GPUs the build has no code for are no longer listed, and the CI workflow `windows-hip-package` and an optional `windows-hip` release job produce `fllm-windows-x86_64-msvc-hip.zip` ([docs/changes/hip.md](docs/changes/hip.md)).
+
 ## [0.1.6] - 2026-10-25
 
 ### Added

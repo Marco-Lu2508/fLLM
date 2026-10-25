@@ -898,7 +898,7 @@ fn hip_kernels() {
     let rocm = rocm_home(&target);
     let (hipcc, driver_args) = hip_compiler(&rocm, &target);
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    let requested = std::env::var("FLLM_HIP_ARCHS").unwrap_or_else(|_| default_hip_archs(target.windows).into());
+    let requested = std::env::var("FLLM_HIP_ARCHS").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default_hip_archs(target.windows).into());
     let mut archs = parse_hip_archs(&requested);
     if target.windows {
         // the Windows SDK may ship device libraries for fewer targets than the Linux one: skip what it cannot build

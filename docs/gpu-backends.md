@@ -367,7 +367,9 @@ FLLM_HIP=1 FLLM_HIP_ARCHS="gfx1030;gfx1100;gfx1201;gfx942" cargo build --release
 ```
 
 `FLLM_HIP_ARCHS` lists the offload targets (default: gfx908, gfx90a, gfx942, gfx1030, gfx1100-1103, gfx1150/1151, gfx1200/1201),
-`ROCM_PATH` the install (default `/opt/rocm`). The binary links `libamdhip64` dynamically, so it needs a ROCm runtime. What runs on
+`ROCM_PATH` the install (default `/opt/rocm`). The Linux binary links `libamdhip64` dynamically, so it needs a ROCm runtime. On Windows
+(`build-windows.ps1 -Hip`, see [windows.md](windows.md) and [changes/hip.md](changes/hip.md)) the runtime DLL is delay-loaded and searched
+at run time, so the same binary also starts without it; Windows default architectures are the RDNA2..RDNA4 / RDNA3.5 list. What runs on
 AMD today: all integer-dot-product decode kernels (Q4_0 ... Q8_0, Q4_K/Q5_K/Q6_K, IQ4, MXFP4), the FP32 GEMM, the plain and
 split-KV attention kernels, MoE and the paged KV cache. The NVIDIA tensor-core kernels (prompt GEMMs, FlashInfer/CUTLASS paths,
 NVFP4) are compiled out (`fllm_cc()` reports 10, `hip_stubs.cu` declines the calls), so prompt processing uses the generic decode-and-multiply GEMM of

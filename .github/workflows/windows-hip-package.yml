@@ -1,0 +1,114 @@
+# The Windows package with the AMD HIP (ROCm) kernels (fllm-windows-x86_64-msvc-hip.zip) as a downloadable workflow artifact, without a release or a tag.
+# Test level L0: this workflow only shows that the kernels compile and link for Windows; nothing here runs on an AMD GPU (docs/changes/hip.md).
+#
+# The ROCm / HIP SDK comes from AMD's open-source ROCm "TheRock" Python wheels (the way llama.cpp's Windows ROCm build gets it): wheels
+# rocm, rocm-sdk-core, rocm-sdk-devel at one pinned version from AMD's index, no GUI installer (.github/actions/setup-rocm-windows).
+#
+# Triggers: a push to a `hipwin-test/**` branch (cheap: two GPU architectures), a push to main that touches the HIP build (all architectures
+# of the Windows default list), and by hand (Actions -> windows-hip-package -> Run workflow; input `archs`, "default" = the full list).
+name: windows-hip-package
+
+on:
+  push:
+    branches: ["hipwin-test/**", main]
+    paths:
+      - "rust/engine/cuda/**"
+      - "rust/engine/hip/**"
+      - "rust/engine/build.rs"
+      - "rust/engine/src/backend/hip/**"
+      - "rust/engine/src/backend/hip_runtime.rs"
+      - "scripts/build-windows.ps1"
+      - ".github/workflows/windows-hip-package.yml"
+      - ".github/actions/setup-rocm-windows/**"
+  workflow_dispatch:
+    inputs:
+      archs:
+        description: 'GPU architectures, ";" separated, or "default" for the full Windows list'
+        default: "gfx1100;gfx1151"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-hip-package-${{ github.ref }}
+  cancel-in-progress: true
+
+
+jobs:
+  package:
+    name: Windows HIP package
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master; the toolchain input selects the version
+        with:
+          toolchain: stable
+
+      - name: Vulkan SDK (glslc for the native Vulkan backend, sets VULKAN_SDK)
+        uses: jakoch/install-vulkan-sdk-action@d17de7e2f5e50efb5d2123efed18497d3c58c533 # v1.7.0
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: Which GPU architectures
+        id: archs
+        shell: pwsh
+        env:
+          INPUT_ARCHS: ${{ github.event.inputs.archs }}
+        run: |
+          if ($env:INPUT_ARCHS) { $a = $env:INPUT_ARCHS }
+          elseif ($env:GITHUB_REF_NAME -like "hipwin-test/*") { $a = "gfx1100;gfx1151" }
+          else { $a = "default" }
+          if ($a -eq "default") { $a = "" }
+          "list=$a" >> $env:GITHUB_OUTPUT
+          Write-Host "FLLM_HIP_ARCHS = '$a' (empty = the Windows default list of build.rs)"
+
+      - name: ROCm / HIP SDK (wheels, cached; sets HIP_PATH)
+        uses: ./.github/actions/setup-rocm-windows  # version and hash pins are inputs with defaults in the action
+
+      - name: Build and pack
+        shell: pwsh
+        env:
+          FLLM_HIP_ARCHS: ${{ steps.archs.outputs.list }}
+        run: |
+          ./scripts/build-windows.ps1 -Hip -SkipTests -OutDir dist *>&1 | Tee-Object -FilePath build.log
+          if (-not (Test-Path dist/*.zip)) {
+            $errors = ((Select-String -Path build.log -Pattern 'error [A-Z]*[0-9]+|fatal error|error:|LNK[0-9]+|Write-Error|hipcc failed|cannot run' | Select-Object -First 20 | ForEach-Object { $_.Line.Trim() }) -join '%0A')
+            $tail = ((Get-Content build.log -Tail 12 | ForEach-Object { $_.Trim() }) -join '%0A')
+            Write-Host "::error title=Windows HIP build failed::$errors%0A-- tail --%0A$tail"
+            exit 1
+          }
+
+      - name: Show what is in the package
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path dist/*.zip) {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $z = [System.IO.Compression.ZipFile]::OpenRead((Get-ChildItem dist/*.zip | Select-Object -First 1).FullName)
+            $z.Entries | ForEach-Object { Write-Host ("{0,12}  {1}" -f $_.Length, $_.FullName) }
+            $z.Dispose()
+          }
+
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-hip-package-buildlog
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Keep the package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fllm-windows-x86_64-msvc-hip
+          path: dist/*
+          retention-days: 30

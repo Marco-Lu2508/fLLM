@@ -69,6 +69,50 @@ The runtime stage installs the runtime package from the ROCm apt repository of t
 `amdrocm-runtime10.1` for the pinned image). The image has not been built to the end in this work (it is several GB and the build slots were
 busy); the Dockerfile follows `Dockerfile.cuda` and the individual pieces were looked up in the pinned container.
 
+## Windows (HIP SDK for Windows)
+
+**Test level L0 and less.** The Windows build is compiled only by CI (`windows-hip-package.yml`); until that has run green it is not even known to
+compile. Nothing has run on an AMD GPU, with or without Windows. The statements below describe the design and what the CI is meant to show.
+
+* **Build**: `scripts/build-windows.ps1 -Hip [-HipArchs "gfx1100;gfx1151"]` (Visual Studio C++ tools + a ROCm / HIP SDK). `build.rs` uses
+  `bin\hipcc.exe`, or the SDK's `lib\llvm\bin\clang++.exe` as HIP compiler when there is none, objects are `.obj`, packed with `lib.exe` through a
+  response file (the hipcc command line has one source and the architecture flags, far from the Windows command-line limit). Default
+  architectures on Windows: `gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201`; the Linux list is unchanged. Architectures for
+  which the SDK has no device library (`oclc_isa_version_<n>.bc`) are skipped with a warning.
+* **SDK in CI**: the ROCm wheels of AMD's "TheRock" build (`rocm`, `rocm-sdk-core`, `rocm-sdk-devel` 10.0.0 from `stable.repo.amd.com/rocm/whl-next/`,
+  HIP runtime `amdhip64_7.dll`), the way llama.cpp's Windows ROCm job gets its SDK; no GUI installer, no EULA click-through. The version is pinned in
+  `.github/actions/setup-rocm-windows/action.yml`. **The file hashes are not pinned yet**: the index does not publish them and nothing was downloaded
+  while writing this, so the first run prints `SHA-256` of each wheel as a warning and the `sha256` input of the action (one `<file>  <hash>` line each)
+  must be filled in afterwards; a mismatch then fails the job. The wheels are cached per version.
+* **Runtime without hard dependency**: the HIP runtime is *delay-loaded* (`/DELAYLOAD:amdhip64_N.dll`, name read from `amdhip64.lib`; `delayimp.lib`).
+  `src/backend/hip_runtime.rs` defines the two delay-load hooks. Before a load they look for the DLL in this order: `FLLM_HIP_DLL` (file or
+  directory), the folder of `fllm-rs.exe` (the package bundles the SDK's runtime there), `System32` (the Adrenalin driver installs a HIP runtime
+  there on recent versions), `%HIP_PATH%\bin`, `%ROCM_PATH%\bin`, `Program Files\AMD\ROCm\<newest>\bin`, then the Windows default search. If
+  none loads, the failure hook hands out stubs: the compiler-generated registration calls that run before `main` do nothing, everything else returns
+  `hipErrorNoDevice`, `hipGetErrorString` returns a text. `fllm-rs devices` then lists no AMD GPU, prints one line saying what to install
+  (driver or HIP SDK, or `FLLM_HIP_DLL`), and `--device auto` goes on to Vulkan / the CPU. The DLL name is fixed at build time (an import lib
+  of HIP 6.x names `amdhip64_6.dll`, 7.x `amdhip64_7.dll`), so a DLL of another major version is not picked up.
+  `FLLM_HIP_DELAYLOAD=0` links the DLL normally. **What is not known**: whether the SDK's linker accepts the delay-load of this import library and the
+  hook symbols without duplicate-symbol errors (the CI step prints `dumpbin /dependents` and `/imports` to show it), and whether clang's eager
+  fat-binary registration works through the stubs. If the hooks fail to link, build with `FLLM_HIP_DELAYLOAD=0` (then the exe needs the DLL to start).
+  Only `fllm-rs` of this package is delay-loaded (the link argument is set by the engine's build script); a different final binary that links the
+  engine with `hip` (e.g. a desktop shell) needs `/DELAYLOAD:` for the DLL named in the build output warning.
+* **Which GPUs**: the HIP SDK 7.2 for Windows lists as supported Radeon RX 9070 / 9070 XT / 9060 (gfx1200, gfx1201), RX 7900 / 7800 / 7700 / 7600 and
+  matching Radeon PRO (gfx1100, gfx1101, gfx1102), and the Ryzen AI 300 / 400 and AI Max (Strix Halo) APUs (gfx1150, gfx1151). RDNA2 (RX 6000,
+  gfx1030..1032), RDNA1 and Vega are marked unsupported by AMD ("might cause runtime errors"); no Instinct card is listed for Windows. The
+  iGPU of older Ryzen APUs such as the Radeon 780M (gfx1103) is not on the list either: Vulkan (`--device vulkan`) is the path there. gfx1030
+  and gfx1103 are in the build list so that unlisted but working cards can run, with no promise.
+* **`HSA_OVERRIDE_GFX_VERSION`** is read by the Linux ROCm user-mode stack. The Windows runtime does not use that stack, so it is not expected to
+  have any effect there (not tested); the engine does not let it override the architecture check on Windows.
+* **GPUs outside the build list**: on every platform a GPU whose architecture is not in the list the binary was built for is no longer listed (it would
+  fail at the first kernel); one stderr line names it and says to rebuild with `FLLM_HIP_ARCHS`. On Linux `HSA_OVERRIDE_GFX_VERSION` keeps the
+  old behaviour (device listed). With several AMD GPUs of which only some are built for, the device numbers of the later ones shift.
+* **Redistribution**: the package bundles from the SDK only `amdhip64*.dll`, `amd_comgr*.dll`, `rocm_kpack*.dll` (as llama.cpp's package does), plus
+  the license files found in the SDK (`licenses\rocm`). These are open-source ROCm components; the build prints which files it took, and
+  `README-HIP.txt` in the archive lists them. Not bundled: the graphics driver, rocBLAS / hipBLAS (not used), the MSVC runtime (statically linked).
+  Whether the license texts found are complete is not checked: review them before a public release.
+* **What the first CI run shows**: see the report of this change; the build log artifact `windows-hip-package-buildlog` keeps everything.
+
 ## ROCm versions and unsupported cards
 
 * Pinned compile environment: `rocm/dev-ubuntu-24.04@sha256:5ed1362e...` (HIP 7.16 / "ROCm 10.1" package layout `amdrocm-*`, LLVM 24). All

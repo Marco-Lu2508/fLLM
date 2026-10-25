@@ -11,6 +11,7 @@ no `nvcc` on Windows, no Vulkan SDK on Windows has run yet; the first Windows te
 | --- | --- | --- |
 | `fllm-windows-x86_64-msvc.zip` | CPU, Vulkan and DirectX 12 through wgpu (`rust-gpu`), native Vulkan when the Vulkan SDK was there at build time | a GPU driver for GPU use |
 | `fllm-windows-x86_64-msvc-cuda.zip` | the same plus the CUDA kernels (CUDA runtime linked statically) | the NVIDIA driver |
+| `fllm-windows-x86_64-msvc-hip.zip` | the same plus the AMD HIP (ROCm) kernels (optional asset, test level L0: compiles in CI, never run on an AMD GPU); the HIP runtime DLLs of the SDK are inside | an AMD driver that supports the GPU; `fllm-rs.exe` also starts without any AMD software and uses Vulkan or the CPU |
 | `fllm-windows-aarch64-msvc.zip` | Windows on ARM64, CPU (NEON) and wgpu | |
 | `fllm-windows-x86_64.zip` | older MinGW cross build, CPU and wgpu | |
 
@@ -54,7 +55,15 @@ By hand: `cargo build --release --locked -p fllm-engine --features "rust-gpu,cud
   is on `PATH`, otherwise the script finds it through `FLLM_MSVC_BIN` (the directory of `cl.exe` and `lib.exe`) or `vswhere` and passes `-ccbin`
   (`FLLM_CUDA_CCBIN` overrides). A Visual Studio newer than the toolkit supports: `FLLM_CUDA_EXTRA_FLAGS=-allow-unsupported-compiler`.
   The MinGW target cannot build CUDA (nvcc only takes `cl.exe` on Windows); `build.rs` says so.
-* **HIP** (`FLLM_HIP=1`, AMD HIP SDK for Windows): `HIP_PATH` or the newest `Program Files\AMD\ROCm\X.Y`, no `-fPIC`, `-fms-runtime-lib=dll` (`static` with `crt-static`), `amdhip64.lib`.
+* **HIP** (`FLLM_HIP=1`, `build-windows.ps1 -Hip`, AMD HIP SDK for Windows): `ROCM_PATH` / `HIP_PATH` or the newest `Program Files\AMD\ROCm\X.Y`, no `-fPIC`,
+  `-fms-runtime-lib=dll` (`static` with `crt-static`), `amdhip64.lib` from the SDK's `lib`. The compiler is `bin\hipcc.exe`, or the SDK's
+  `lib\llvm\bin\clang++.exe` driven as a HIP compiler (`--rocm-path`, `--hip-device-lib-path`) when the SDK has no `hipcc.exe`. The default
+  architecture list on Windows is `gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201` (no Vega / Instinct: there is no
+  Windows runtime for them); `FLLM_HIP_ARCHS` / `-HipArchs` overrides it, and entries for which the SDK has no `oclc_isa_version_*.bc`
+  device library are skipped with a build warning. Every build records its list; at run time a GPU outside it is not listed.
+  The HIP runtime is **delay-loaded** (`/DELAYLOAD:amdhip64_N.dll`, the name is read from `amdhip64.lib`), so `fllm-rs.exe` starts on a machine without
+  it; `FLLM_HIP_DELAYLOAD=0` links it the ordinary way. Details and the search order of the DLL: [docs/changes/hip.md](changes/hip.md).
+  CI: `windows-hip-package.yml` (artifact `fllm-windows-x86_64-msvc-hip`) and the optional `windows-hip` job of the release workflow.
 * **Vulkan** (`--features vulkan`): `glslc` from `GLSLC`, else from `VULKAN_SDK\Bin`, else from `PATH`.
 * Unchanged on Linux: `.o` objects, `ar crs`, `-fPIC`, the library directories (the Arm CUDA directories `targets/sbsa-linux` and `targets/aarch64-linux` were added).
 
