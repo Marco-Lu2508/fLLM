@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Intel NPU from the app (experimental, test level L0: not run on NPU hardware): the `npu-openvino` feature is now in the default features and loads the OpenVINO runtime at run time, so the standard binary can use an NPU without a rebuild. `fllm-rs devices` and `GET /api/studio/hardware` list an NPU the system finds even when the runtime is missing, and AMD / Qualcomm NPUs as "detected, not supported yet". New routes `GET /api/studio/npu`, `POST` and `DELETE /api/studio/npu/setup` install (pinned OpenVINO 2026.4.1, checked size and SHA-256, official host only, resumable, cancellable, no Python needed) or remove the runtime; `fllm-rs npu-setup [--remove]` uses the same code. Settings, Hardware has an NPU card, and the load options have a *Run on* choice that lists the NPU when it is ready. `--device auto` still never picks an NPU. An NPU that cannot take a model now falls back to the processor with a readable reason instead of ending the server ([docs/backends.md](docs/backends.md) section 6).
+
 ## [0.1.6] - 2026-10-25
 
 ### Added

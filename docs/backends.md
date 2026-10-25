@@ -123,6 +123,7 @@ Apple-silicon CI runner are the exception: they execute on a GPU.
 | `--device auto`, device numbers (`vulkan:N` = N-th device of the backend), `devices --json` | selection logic covered by unit tests and by runs without a GPU; L0 on hardware |
 | Self-test harness (groups, `--only`, `--quants`, `--list`, `--strict`, `--json`) | the CPU against itself (`selftest-gpu --device cpu`: 220 checks, 0 failed, 35 skipped); this checks the harness, not a GPU backend. CUDA: see the README Status table |
 | Autotuner (`src/autotune.rs`) | L0: called by nothing, nothing measured |
+| Intel NPU backend in the release binary | the cargo feature `npu-openvino` is in the **default** feature set; the OpenVINO runtime is opened at run time (`dlopen` / `LoadLibrary`, no link-time dependency), so the same binary starts on every machine and uses an NPU once the runtime is installed (section 6). Compiled and unit tested; **L0**: it has not run on NPU hardware |
 
 ## 5. Known gaps
 
@@ -230,3 +231,50 @@ Ordered by area.
   The CPU backend itself reports 7 failed q8 attention checks in the self test.
 * **Autotuner:** `src/autotune.rs` is called by nothing.
 * **Numbers:** all speed figures for backends other than CPU and CUDA are expectations, not measurements; the L3 column is empty for them.
+
+## 6. NPUs in the app
+
+**Test level: L0 for everything in this section.** The NPU backends compile and their logic is unit tested; the authors have not run them on NPU
+hardware. Nothing here says that an NPU works. What exists:
+
+| NPU | Status in the app |
+| --- | --- |
+| Intel NPU (Core Ultra, via OpenVINO) | detected; usable after the runtime is installed; **experimental** hybrid backend (L0) |
+| AMD XDNA (Ryzen AI) | detected and shown as "detected, not supported yet"; probe code only, never usable |
+| Qualcomm Hexagon | detected and shown as "detected, not supported yet"; probe code only, never usable |
+| Apple Neural Engine | not detected by the app; probe code only (feature `npu-ane`) |
+
+**What the Intel path does.** The "hybrid" backend sends the large quantized projections (`quantized_linear`) of a prompt to the NPU and runs
+everything else on the processor's reference stream. No speed-up is expected when the model writes its answer, and the model is often slower than
+on the processor alone. The weights are held twice (the processor's copy and the NPU's converted copy). Only dense models work. Details, limits
+and the measurement plan: `rust/engine/src/backend/npu/OPENVINO.md`.
+
+**Weight formats on the NPU** (conversion at load time): Q4_0 and Q8_0 exact (INT4 / INT8, group 32); Q4_1, Q2_K, Q3_K, Q4_K, IQ4_NL, MXFP4, NVFP4 and
+AWQ/GPTQ 4-bit re-quantised to INT4 (group 128); Q5_0, Q5_1, Q5_K, Q6_K re-quantised to INT8; F16, BF16, F32 as FP16. Nothing else.
+
+**Detection** (works without the OpenVINO runtime, `backend/npu/probe.rs`): Linux, the kernel accelerator class (`/sys/class/accel/accelN`,
+`/dev/accel/accelN`; the driver `intel_vpu` names an Intel NPU, `amdxdna` an AMD one); Windows, the present devices of the device-manager classes
+`ComputeAccelerator` and `System`, recognised by name (`Intel(R) AI Boost`, `AMD IPU Device`, `Qualcomm(R) Hexagon(TM) NPU`), asked through PowerShell.
+When the runtime is installed, OpenVINO's own device list decides what is usable.
+
+**Setting up the runtime.** `fllm-rs npu-setup` (or the **Install the runtime** button in Settings, Hardware) downloads the Python wheel
+`openvino` 2026.4.1 for this system (Linux x86-64 / aarch64, Windows x86-64) from `files.pythonhosted.org` only, checks its size and SHA-256 against
+the values pinned in `backend/npu/setup.rs` (taken from the file list of the release on PyPI, `pypi.org/project/openvino/2026.4.1`, on 2026-10-25), and
+unpacks `openvino/libs/` into `~/.fllm/openvino` (`$FLLM_HOME/openvino`). No Python is needed. An interrupted download is resumed; the run can be
+cancelled. `fllm-rs npu-setup --remove` (or **Remove the runtime**) deletes the directory. The OpenVINO runtime is Apache-2.0 licensed and is
+downloaded by the user's machine, not redistributed with fLLM. The pinned values were copied from the PyPI page and have not been exercised
+against the real download by the authors; a wrong value makes the setup fail with a checksum message and nothing is installed. The NPU driver itself
+is separate: on Linux the distribution's `intel_vpu` module and the user-space NPU driver, with access to `/dev/accel/accel0` (group `render`);
+on Windows the Intel NPU driver (Windows Update or the maker's site).
+
+**Using it.** `--device auto` never picks the NPU. Choose **NPU** under *Advanced*, *Run on* in the load dialog of the Models page (listed only when the
+state is ready) or start with `--device npu`. If the NPU cannot be created or cannot take the model, the server does not stop: it logs the reason,
+runs the model on the processor and shows the reason on the NPU card (`last_error` of `GET /api/studio/npu`).
+
+**Routes.** `GET /api/studio/npu` (state, hardware found, runtime path and version, setup progress, last error); `POST /api/studio/npu/setup`
+(start the setup, or `{"action":"cancel"}`); `DELETE /api/studio/npu/setup` (remove the runtime). The two changing routes are administration and
+only accept this machine, also when an API key is set.
+
+**Cargo feature string for the release and desktop workflows.** Nothing has to be added: `npu-openvino` is in the default features, so
+`--features rust-gpu,vulkan` (and any list that does not use `--no-default-features`) already contains it. A build with
+`--no-default-features` has no NPU backend; the app then reports "this build has no NPU support".

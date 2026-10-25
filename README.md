@@ -304,11 +304,12 @@ FLLM_CUDA_ARCHS=120 cargo build --release --locked -p fllm-engine --features cud
 
 | Cargo feature | Adds |
 | --- | --- |
-| (none) | CPU only (plus the default `avx512` feature on x86-64) |
+| (none) | CPU only (plus the default `avx512` feature on x86-64 and the default `npu-openvino` feature, which only loads the OpenVINO runtime when one is installed) |
 | `rust-gpu` | wgpu backends: Vulkan, Metal, DirectX 12 (what `make`, `install.sh`, the release binaries and the CPU image use) |
 | `cuda` | NVIDIA kernels, compiled with `nvcc` (architectures from `FLLM_CUDA_ARCHS`) |
 | `avx512` | x86-64 AVX-512 / AMX CPU kernels; **on by default** (`--no-default-features` leaves them out; chosen at run time by CPUID, so the binary still runs on any x86-64 CPU) |
-| `hip`, `sycl`, `vulkan`, `metal`, `npu-openvino`, `tpu-pjrt` | optional native backends; the test level differs per backend (Metal: kernel checks in CI, others L0), see [docs/backends.md](docs/backends.md) |
+| `npu-openvino` | Intel NPU backend (experimental, L0); **on by default**, loads the OpenVINO runtime at run time (`fllm-rs npu-setup`); see [docs/backends.md](docs/backends.md) section 6 |
+| `hip`, `sycl`, `vulkan`, `metal`, `tpu-pjrt` | optional native backends; the test level differs per backend (Metal: kernel checks in CI, others L0), see [docs/backends.md](docs/backends.md) |
 
 `make test` runs the Rust tests. On Windows see [docs/windows.md](docs/windows.md).
 
