@@ -4,7 +4,10 @@
 //! the Studio page may call (see `capabilities/studio-page.json`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod variants;
+
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -35,14 +38,25 @@ struct Settings {
     keep_in_tray: bool,
     /// The global hotkey that brings the window to the front with a new chat ("" = off).
     quick_entry: String,
+    /// Which engine variant to start: "auto" or the name of a variant (see `variants.rs`).
+    variant: String,
 }
 
 const DEFAULT_QUICK_ENTRY: &str = "Ctrl+Alt+Space";
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_owned() }
+        Settings { keep_in_tray: false, quick_entry: DEFAULT_QUICK_ENTRY.to_owned(), variant: variants::AUTO.to_owned() }
     }
+}
+
+/// The variant the server runs now, for the settings page.
+#[derive(Default, Clone)]
+struct Active {
+    name: String,
+    label: String,
+    /// Why this variant runs when it is not the plain choice (a fallback, an ignored setting).
+    note: String,
 }
 
 struct Shell {
@@ -53,20 +67,13 @@ struct Shell {
     /// Counts the starts of the server, so an older wait or watch ends when a newer start has begun.
     generation: AtomicU64,
     settings: Mutex<Settings>,
+    active: Mutex<Active>,
 }
 
 fn free_port() -> u16 {
     (FIRST_PORT..FIRST_PORT + 40)
         .find(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
         .unwrap_or(FIRST_PORT)
-}
-
-fn server_program() -> PathBuf {
-    let name = if cfg!(windows) { "fllm-rs.exe" } else { "fllm-rs" };
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
-        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn settings_file(app: &AppHandle) -> Option<PathBuf> {
@@ -89,11 +96,15 @@ fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     std::fs::write(file, text).map_err(|e| e.to_string())
 }
 
-/// The server writes what it prints into `server.log` in the log folder of the app, so a problem can be looked at afterwards.
-fn server_log(dir: Option<PathBuf>) -> (Stdio, Stdio) {
+/// The server writes what it prints into `server.log` in the log folder of the app, so a problem can be looked at afterwards. The app
+/// starts the file with a line of its own that names the variant (`append`: a second start after a fallback keeps the first one's output).
+fn server_log(dir: Option<PathBuf>, header: &str, append: bool) -> (Stdio, Stdio) {
     let file = dir.and_then(|dir| {
         std::fs::create_dir_all(&dir).ok()?;
-        std::fs::File::create(dir.join("server.log")).ok()
+        let path = dir.join("server.log");
+        let mut file = if append { std::fs::OpenOptions::new().create(true).append(true).open(path).ok()? } else { std::fs::File::create(path).ok()? };
+        let _ = writeln!(file, "[desktop] {header}");
+        Some(file)
     });
     match file.and_then(|f| f.try_clone().ok().map(|clone| (f, clone))) {
         Some((out, err)) => (Stdio::from(out), Stdio::from(err)),
@@ -101,9 +112,9 @@ fn server_log(dir: Option<PathBuf>) -> (Stdio, Stdio) {
     }
 }
 
-fn start_server(port: u16, log_dir: Option<PathBuf>) -> Result<Server, String> {
-    let mut command = Command::new(server_program());
-    let (out, err) = server_log(log_dir);
+fn start_server(port: u16, variant: &variants::Variant, log_dir: Option<PathBuf>, header: &str, append: bool) -> Result<Server, String> {
+    let mut command = Command::new(variants::sidecar_path(variant));
+    let (out, err) = server_log(log_dir, header, append);
     command
         .args(["studio", "--no-open", "--host", "127.0.0.1", "--port", &port.to_string()])
         .env("FLLM_EXIT_ON_STDIN_EOF", "1")
@@ -168,21 +179,21 @@ fn show_loading(app: &AppHandle, message: &str) {
 
 /// Waits until the server answers. A model is loaded before the server listens, which takes a while for a big one, so the wait is long;
 /// it ends early when the server program has stopped or a newer start has begun.
-fn wait_until_answers(app: &AppHandle, generation: u64) -> Result<(), String> {
+fn wait_until_answers(app: &AppHandle, generation: u64) -> Result<(), Wait> {
     let shell = app.state::<Shell>();
     let address = SocketAddr::from(([127, 0, 0, 1], shell.port));
     let started = Instant::now();
     let mut last_note = Duration::ZERO;
     while started.elapsed() < Duration::from_secs(30 * 60) {
         if shell.generation.load(Ordering::SeqCst) != generation {
-            return Err(String::new());
+            return Err(Wait::Superseded);
         }
         if TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok() {
             return Ok(());
         }
         if let Some(server) = shell.running.lock().unwrap().as_mut() {
             if let Ok(Some(status)) = server.child.try_wait() {
-                return Err(stopped_message(&format!("The server stopped right after the start ({status}).")));
+                return Err(Wait::Stopped(status.to_string()));
             }
         }
         if started.elapsed() - last_note >= Duration::from_secs(2) && started.elapsed() > Duration::from_secs(6) {
@@ -196,7 +207,16 @@ fn wait_until_answers(app: &AppHandle, generation: u64) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    Err("The server did not start in time.".to_owned())
+    Err(Wait::Failed("The server did not start in time.".to_owned()))
+}
+
+/// Why the wait for the server ended without an answer.
+enum Wait {
+    /// A newer start has begun; nothing more to do.
+    Superseded,
+    /// The server program ended before it answered (the text is its exit status). A missing driver library shows up like this.
+    Stopped(String),
+    Failed(String),
 }
 
 fn stopped_message(what: &str) -> String {
@@ -209,14 +229,47 @@ fn launch(app: &AppHandle) {
     let generation = shell.generation.fetch_add(1, Ordering::SeqCst) + 1;
     stop_server(app);
     let port = shell.port;
-    let started = start_server(port, app.path().app_log_dir().ok());
+    // which variant: the environment, then the saved setting, then the hardware that is present
+    let saved = shell.settings.lock().unwrap().variant.clone();
+    let (request, ignored) = variants::request_from(std::env::var("FLLM_DESKTOP_VARIANT").ok().as_deref(), &saved);
+    let (first, chosen_note) = variants::choose(request, &|v| variants::sidecar_path(v).is_file(), &variants::Probe::detect());
+    let mut notice = [ignored, chosen_note].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    let log_dir = app.path().app_log_dir().ok();
     let app = app.clone();
     std::thread::spawn(move || {
         let shell = app.state::<Shell>();
-        let outcome = started.and_then(|server| {
-            *shell.running.lock().unwrap() = Some(server);
-            wait_until_answers(&app, generation)
-        });
+        let mut variant = first;
+        let mut append = false;
+        let outcome = loop {
+            *shell.active.lock().unwrap() = Active { name: variant.name.to_owned(), label: variant.label.to_owned(), note: notice.clone() };
+            let header = if notice.is_empty() { format!("variant {} ({})", variant.name, variant.label) } else { format!("variant {} ({}): {notice}", variant.name, variant.label) };
+            let result = match start_server(port, variant, log_dir.clone(), &header, append) {
+                Ok(server) => {
+                    *shell.running.lock().unwrap() = Some(server);
+                    wait_until_answers(&app, generation)
+                }
+                Err(e) => Err(Wait::Stopped(e)),
+            };
+            match result {
+                Ok(()) => break Ok(()),
+                Err(Wait::Superseded) => return,
+                Err(Wait::Failed(message)) => break Err(message),
+                Err(Wait::Stopped(reason)) => {
+                    if shell.generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    // a variant that stops right after the start (driver missing, library error): the base variant takes over, once
+                    let Some(base) = variants::fallback(variant) else {
+                        break Err(stopped_message(&format!("The server stopped right after the start ({reason}).")));
+                    };
+                    notice = format!("The {} variant stopped right after the start ({reason}); the {} variant runs instead.", variant.label, base.label);
+                    show_loading(&app, &notice);
+                    stop_server(&app);
+                    variant = base;
+                    append = true;
+                }
+            }
+        };
         if shell.generation.load(Ordering::SeqCst) != generation {
             return;
         }
@@ -290,11 +343,30 @@ struct DesktopSettings {
     config_folder: String,
     quick_entry: String,
     default_quick_entry: String,
+    /// The saved choice: "auto" or a variant name.
+    variant: String,
+    /// Set when the environment variable FLLM_DESKTOP_VARIANT decides (it beats the saved choice).
+    variant_from_env: Option<String>,
+    active_variant: String,
+    active_variant_label: String,
+    variant_note: String,
+    variants: Vec<VariantInfo>,
+}
+
+#[derive(Serialize)]
+struct VariantInfo {
+    name: &'static str,
+    label: &'static str,
+    /// The server program of this variant is part of this installation.
+    installed: bool,
+    /// The hardware it is for was found.
+    detected: bool,
 }
 
 #[tauri::command]
 fn get_desktop_settings(app: AppHandle, shell: State<Shell>) -> Result<DesktopSettings, String> {
     let folder = |dir: tauri::Result<PathBuf>| dir.map(|d| d.display().to_string()).unwrap_or_default();
+    let active = shell.active.lock().unwrap().clone();
     Ok(DesktopSettings {
         keep_in_tray: shell.settings.lock().unwrap().keep_in_tray,
         autostart: app.autolaunch().is_enabled().map_err(|e| e.to_string())?,
@@ -302,7 +374,31 @@ fn get_desktop_settings(app: AppHandle, shell: State<Shell>) -> Result<DesktopSe
         config_folder: folder(app.path().app_config_dir()),
         quick_entry: shell.settings.lock().unwrap().quick_entry.clone(),
         default_quick_entry: DEFAULT_QUICK_ENTRY.to_owned(),
+        variant: shell.settings.lock().unwrap().variant.clone(),
+        variant_from_env: std::env::var("FLLM_DESKTOP_VARIANT").ok().filter(|v| !v.trim().is_empty()),
+        active_variant: active.name,
+        active_variant_label: active.label,
+        variant_note: active.note,
+        variants: {
+            let probe = variants::Probe::detect();
+            variants::VARIANTS
+                .iter()
+                .map(|v| VariantInfo { name: v.name, label: v.label, installed: variants::sidecar_path(v).is_file(), detected: (v.detect)(&probe) })
+                .collect()
+        },
     })
+}
+
+/// Sets the engine variant ("auto" or a variant name); it takes effect at the next start of the server.
+#[tauri::command]
+fn set_variant(app: AppHandle, shell: State<Shell>, value: String) -> Result<(), String> {
+    let request = variants::parse_request(&value)?;
+    let mut settings = shell.settings.lock().unwrap();
+    settings.variant = match request {
+        variants::Request::Auto => variants::AUTO.to_owned(),
+        variants::Request::Named(v) => v.name.to_owned(),
+    };
+    save_settings(&app, &settings)
 }
 
 /// Sets the quick-entry hotkey ("" switches it off). The old hotkey stays when the new one cannot be registered.
@@ -395,8 +491,9 @@ fn main() {
             running: Mutex::new(None),
             generation: AtomicU64::new(0),
             settings: Mutex::new(Settings::default()),
+            active: Mutex::new(Active::default()),
         })
-        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, restart_server, set_quick_entry])
+        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, restart_server, set_quick_entry, set_variant])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" && window.state::<Shell>().settings.lock().unwrap().keep_in_tray {
