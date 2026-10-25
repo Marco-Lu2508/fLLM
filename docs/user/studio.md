@@ -36,6 +36,28 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
 * Chats can be pinned, renamed, duplicated, exported (Markdown or JSON), imported and searched by title and content. New chats get a
   short title from the model (switch off in Settings).
 * Chats are stored in the browser (`localStorage`) and never leave it.
+* **Artifacts.** A code block of `html`, `svg`, `markdown` or `csv` has a *Preview* button that opens a side panel next to the chat
+  with the tabs *Preview* and *Code*, and the actions Reload, Copy, Download (as a file) and Larger (a large view). HTML and SVG run
+  in a sandboxed frame (`sandbox="allow-scripts"`, no same-origin access, and a policy that forbids every network request), so a
+  page can use scripts and styles but cannot reach the Studio, the server or the internet. Markdown and CSV are rendered as a document
+  and a table (first 500 rows). An artifact is versioned: when a later answer contains a block of the same kind, it becomes the next
+  version of that artifact (version switcher in the panel header; the panel jumps to the new version when the answer ends). Give a block
+  a title in its info string, for example ```` ```html title="Todo app" ````, to keep several artifacts apart: blocks with the same title
+  are versions of each other, and a titled block of any language (also `python`) gets an *Open* button.
+* **Run JavaScript.** A `javascript` block has a *Run* button. The code runs in a Web Worker with no page access and no network
+  (`fetch`, `XMLHttpRequest`, `WebSocket` and `importScripts` throw). The output of `console`, the final value and errors appear under the
+  block. It stops after 5 seconds or with the *Stop* button; top-level `await` and `return` work. The worker is served by the Studio
+  itself at `/studio/runner.js` with its own policy (it may evaluate code but can connect to nothing).
+* **Message actions.** Under an answer: copy (as visible text), copy as Markdown, read aloud (shown when a speech add-on provides
+  `window.fllmSpeak`), thumbs up or down with an optional note (stored with the chat and part of its JSON and Markdown export),
+  regenerate, delete. When an answer stopped at the token limit, *Continue* asks the model to go on and appends to the same message.
+* **Response style.** The *Style* button in the composer (Default, Concise, Explanatory, Formal, Casual) adds one short instruction to
+  the system prompt of that chat.
+* **Temporary chat.** The ghost button in the header starts a chat that is never saved: it is kept out of the chat list and of
+  `localStorage`, a banner says so, and it is gone when you close it, open another chat or reload the page.
+* **Math and tables.** `$...$`, `$$...$$`, `\(...\)` and `\[...\]` are typeset by a small built-in renderer (fractions, powers,
+  subscripts, greek letters, roots, sums, integrals and common symbols). Anything it does not understand (matrices, for example) is
+  shown as source text in a chip. Wide tables scroll sideways instead of overflowing.
 
 ## Code: the coding agent
 

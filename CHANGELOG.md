@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Studio chat: a preview panel with versions for HTML, SVG, Markdown and CSV code blocks (sandboxed, no network), a sandboxed JavaScript runner for code blocks, copy-as-Markdown, thumbs up/down with a note, a *Continue* button for answers cut by the token limit, response styles, temporary chats that are never saved, a small built-in LaTeX renderer and scrollable tables. The Studio now serves its code-runner worker at `/studio/runner.js`.
+
 ## [0.1.5] - 2026-10-25
 
 ### Fixed

@@ -148,6 +148,9 @@
               <span class="ctx-bar"><i id="ctxFill"></i></span>
               <span class="tabular" id="ctxText">0 / 4096</span>
             </div>
+            <button class="btn-icon" id="btnTemporary" title="Temporary chat: not saved, gone when you close it" aria-pressed="false">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z"/></svg>
+            </button>
             <div style="position:relative;">
               <button class="btn-icon" id="btnChatMenu" title="More" aria-haspopup="true">
                 <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></svg>
@@ -165,6 +168,7 @@
         </header>
 
         <div class="chat-container is-empty" id="chatContainer">
+          <div class="temp-banner" id="tempBanner" hidden>Temporary chat: it is not saved and disappears when you close it or start another chat.</div>
           <div class="drop-overlay" id="dropOverlay"><span>Drop files here</span></div>
           <!-- Messages Scroll Area -->
           <div class="chat-messages-scroll" id="chatMessagesScroll">
@@ -323,6 +327,15 @@
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20a15 15 0 0 1 0-20"/></svg>
                       <span>Use the web</span>
                     </button>
+
+                    <!-- Response style of this chat -->
+                    <span style="position:relative;display:inline-flex;">
+                      <button class="composer-chip" id="btnStyle" title="Response length and style for this chat">
+                        <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h13"/></svg>
+                        <span id="styleLabel">Style</span>
+                      </button>
+                      <div class="popover-panel menu-panel" id="styleMenu" style="width:190px;"></div>
+                    </span>
 
                   </div>
 

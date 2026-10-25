@@ -58,8 +58,8 @@
       clearTimeout(saveTimer);
       const strip = (t) => ({ ...t, nodes: Object.fromEntries(Object.entries(t.nodes).map(([id, n]) => [id, n.streaming ? { ...n, streaming: false } : n])) });
       try {
-        localStorage.setItem(STORAGE.threads, JSON.stringify(state.threads.map(strip)));
-        if (state.activeThreadId) localStorage.setItem(STORAGE.activeThread, state.activeThreadId);
+        localStorage.setItem(STORAGE.threads, JSON.stringify(state.threads.filter((t) => !t.temporary).map(strip)));
+        if (state.activeThreadId && !currentThread()?.temporary) localStorage.setItem(STORAGE.activeThread, state.activeThreadId);
         else localStorage.removeItem(STORAGE.activeThread);
       } catch {
         if (!quotaWarned) {
@@ -118,6 +118,7 @@
     }
 
     function startNewChat() {
+      leaveThread();
       state.activeThreadId = null;
       saveThreads();
       switchSurface('chat');
@@ -132,6 +133,8 @@
         t = newThread((firstText || 'New chat').replace(/\s+/g, ' ').slice(0, 48));
         t.system = $('txtSystemPrompt').value.trim() || null;
         t.preset = state.preset || null;
+        t.style = state.newStyle; state.newStyle = undefined;
+        if (state.tempNext) t.temporary = true;
         state.threads.unshift(t);
         state.activeThreadId = t.id;
         saveThreads();
@@ -141,6 +144,7 @@
     }
 
     function openThread(id) {
+      leaveThread(id);
       state.activeThreadId = id;
       const t = currentThread();
       if (t && t.system !== null && t.system !== undefined) $('txtSystemPrompt').value = t.system;
@@ -168,7 +172,7 @@
       if (state.tab === 'code') { renderWorkspaceList(); return; }
       const container = $('threadList');
       const q = ($('threadSearch').value || '').toLowerCase().trim();
-      let list = state.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+      let list = state.threads.filter((t) => !t.temporary).sort((a, b) => b.updatedAt - a.updatedAt);
       if (q) list = list.filter((t) => t.title.toLowerCase().includes(q) || threadText(t).includes(q));
       if (!list.length) {
         container.innerHTML = `<div class="thread-empty">${q ? 'No chat matches the search' : 'No chats yet'}</div>`;
@@ -315,7 +319,8 @@
           ${ragSourcesHtml(t, node)}
           <div class="msg-actions-bar">
             ${branchNav(t, node)}
-            <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy the answer">${svgIcon('copy')}</button>
+            <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy the answer as plain text">${svgIcon('copy')}</button>
+            ${assistantExtraActions(node, isLast)}
             <button class="btn-icon btn-icon-xs" data-act="regen" title="Regenerate (the old answer stays as a version)">${svgIcon('redo')}</button>
             <button class="btn-icon btn-icon-xs" data-act="delete" title="Delete the answer">${svgIcon('trash')}</button>
             <span class="msg-stats" data-stats>${statsHtml(node)}</span>
@@ -330,6 +335,7 @@
       $('messagesColumn').innerHTML = path.map((n, i) => messageHtml(t, n, i === path.length - 1)).join('');
       updateChatChrome();
       if (path.length) scrollChatToEnd(true);
+      chatExtrasSync();
     }
 
     /** Header: pin label, context fill. */
@@ -406,7 +412,7 @@
 
     function apiMessages(t, upToNodeId) {
       const out = [];
-      const system = $('txtSystemPrompt').value.trim();
+      const system = withStylePrompt($('txtSystemPrompt').value.trim(), t.style);
       if (system) out.push({ role: 'system', content: system });
       const path = pathOf(t);
       const end = upToNodeId ? path.findIndex((n) => n.id === upToNodeId) : -1;
@@ -470,9 +476,20 @@
         : '<svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
     }
 
+    /** Messages for a request; when `cont` is given, the cut answer is replayed and the model is asked to go on. */
+    function continuationMessages(t, userId, cont) {
+      const msgs = apiMessages(t, userId);
+      if (cont) {
+        msgs.push({ role: 'assistant', content: splitReasoning(cont.content || '').answer || cont.content || '' });
+        msgs.push({ role: 'user', content: 'Continue exactly where your last message stopped. Do not repeat anything and do not add an introduction.' });
+      }
+      return msgs;
+    }
+
     /** Generate the answer to the user message `userId` as a new assistant node. */
-    async function generateReply(t, userId) {
-      const aNode = addChild(t, userId, { role: 'assistant', content: '', reasoning: '', streaming: true, logprobs: [], model: state.selectedModel || state.status?.model?.name || '' });
+    async function generateReply(t, userId, cont) {
+      const aNode = cont || addChild(t, userId, { role: 'assistant', content: '', reasoning: '', streaming: true, logprobs: [], model: state.selectedModel || state.status?.model?.name || '' });
+      if (cont) { cont.streaming = true; cont.finish = undefined; cont.error = undefined; }
       saveThreads();
       renderThreadList();
       renderChatArea();
@@ -482,7 +499,7 @@
       let first = null;
       let chunks = 0;
       try {
-        const res = await apiFetch('/v1/chat/completions', { method: 'POST', body: requestBody(apiMessages(t, userId)), signal: state.abortController.signal });
+        const res = await apiFetch('/v1/chat/completions', { method: 'POST', body: requestBody(continuationMessages(t, userId, cont)), signal: state.abortController.signal });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           throw new Error(err.error?.message || `The server answered with error ${res.status}`);
@@ -747,6 +764,7 @@
       if (system) lines.push(`> Systemprompt: ${system.replace(/\n/g, ' ')}`, '');
       for (const n of pathOf(t)) {
         lines.push(n.role === 'user' ? '## You' : '## Model', '', messageText(n), '');
+        if (n.rating) lines.push(`_Rating: ${n.rating === 'up' ? 'good' : 'bad'}${n.ratingNote ? ` (${n.ratingNote})` : ''}_`, '');
       }
       return lines.join('\n');
     }
@@ -882,7 +900,7 @@
       const t = currentThread();
       const node = t?.nodes[id];
       if (!node) return;
-      if (act.dataset.act === 'copy') { await navigator.clipboard.writeText(messageText(node)); toast('Copied'); }
+      if (act.dataset.act === 'copy') { await navigator.clipboard.writeText(node.role === 'assistant' ? plainTextOf(node.id, messageText(node)) : messageText(node)); toast('Copied'); }
       else if (act.dataset.act === 'edit') startEditing(id);
       else if (act.dataset.act === 'regen') await regenerate(id);
       else if (act.dataset.act === 'delete') await deleteMessage(id);
@@ -984,7 +1002,7 @@
       await addFiles(e.dataTransfer.files);
     });
 
-    $('btnExportThreads').addEventListener('click', () => download(`fllm-chats-${new Date().toISOString().slice(0, 10)}.json`, 'application/json', JSON.stringify(state.threads, null, 2)));
+    $('btnExportThreads').addEventListener('click', () => download(`fllm-chats-${new Date().toISOString().slice(0, 10)}.json`, 'application/json', JSON.stringify(state.threads.filter((t) => !t.temporary), null, 2)));
     $('btnImportThreads').addEventListener('click', () => $('fileImportThreads').click());
     $('fileImportThreads').addEventListener('change', async (e) => {
       const file = e.target.files?.[0];

@@ -68,6 +68,146 @@
         return out + esc(code.slice(last));
       }
 
+      // ---- math: a small, safe LaTeX subset (no library) -----------------------
+      // Fractions, powers, subscripts, greek letters, roots, sums, integrals and common symbols.
+      // Everything is escaped; anything not understood makes the caller show the source in a chip.
+      const GREEK = {
+        alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', varepsilon: 'ε', zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'ϑ', iota: 'ι', kappa: 'κ',
+        lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π', varpi: 'ϖ', rho: 'ρ', varrho: 'ϱ', sigma: 'σ', varsigma: 'ς', tau: 'τ', upsilon: 'υ', phi: 'φ', varphi: 'φ',
+        chi: 'χ', psi: 'ψ', omega: 'ω',
+      };
+      const GREEK_UP = { Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π', Sigma: 'Σ', Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω' };
+      const TEX_SYM = {
+        cdot: '·', times: '×', div: '÷', pm: '±', mp: '∓', leq: '≤', le: '≤', geq: '≥', ge: '≥', neq: '≠', ne: '≠', approx: '≈', equiv: '≡', sim: '∼', propto: '∝',
+        infty: '∞', partial: '∂', nabla: '∇', to: '→', rightarrow: '→', leftarrow: '←', gets: '←', Rightarrow: '⇒', Leftarrow: '⇐', Leftrightarrow: '⇔', leftrightarrow: '↔',
+        mapsto: '↦', implies: '⟹', iff: '⟺', in: '∈', notin: '∉', subset: '⊂', subseteq: '⊆', supset: '⊃', cup: '∪', cap: '∩', forall: '∀', exists: '∃', ldots: '…',
+        cdots: '⋯', dots: '…', circ: '∘', ell: 'ℓ', angle: '∠', neg: '¬', land: '∧', lor: '∨', wedge: '∧', vee: '∨', emptyset: '∅', varnothing: '∅', mid: '|', ast: '∗',
+        star: '⋆', oplus: '⊕', otimes: '⊗', langle: '⟨', rangle: '⟩', lbrace: '{', rbrace: '}', lVert: '‖', rVert: '‖', lvert: '|', rvert: '|', prime: '′', degree: '°',
+        ',': ' ', ';': ' ', ':': ' ', '!': '', quad: ' ', qquad: '  ', ' ': ' ', '{': '{', '}': '}', '%': '%', '&': '&', '#': '#', _: '_', $: '$', '|': '‖',
+        '(': '(', ')': ')', '[': '[', ']': ']', '/': '/', '<': '<', '>': '>', '.': '',
+      };
+      const TEX_BIG = { sum: '∑', prod: '∏', coprod: '∐', bigcup: '⋃', bigcap: '⋂', int: '∫', iint: '∬', oint: '∮' };
+      const TEX_FN = new Set('sin cos tan cot sec csc sinh cosh tanh arcsin arccos arctan log ln lg exp lim max min sup inf det gcd arg dim ker deg mod Pr'.split(' '));
+      const TEX_ACCENT = { hat: '̂', widehat: '̂', bar: '̄', vec: '⃗', dot: '̇', ddot: '̈', tilde: '̃', widetilde: '̃' };
+      const BB = { R: 'ℝ', N: 'ℕ', Z: 'ℤ', Q: 'ℚ', C: 'ℂ', P: 'ℙ', H: 'ℍ' };
+
+      /** LaTeX source -> safe HTML, or null when something is not understood. */
+      function texToHtml(src, display) {
+        const s = String(src);
+        if (!s.trim() || s.length > 2000) return null;
+        let i = 0;
+        let depth = 0;
+        const fail = () => { throw new Error('tex'); };
+        const skipWs = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+        const rawGroup = () => {
+          skipWs();
+          if (s[i] !== '{') fail();
+          let level = 0;
+          const start = ++i;
+          for (; i < s.length; i++) {
+            if (s[i] === '\\') { i++; continue; }
+            if (s[i] === '{') level++;
+            else if (s[i] === '}') { if (!level) { const out = s.slice(start, i); i++; return out; } level--; }
+          }
+          return fail();
+        };
+        function seq(end) {
+          if (++depth > 30) fail();
+          let html = '';
+          for (;;) {
+            skipWs();
+            if (i >= s.length) { if (end) fail(); break; }
+            if (end && s[i] === end) { i++; break; }
+            html += scripted();
+          }
+          depth--;
+          return html;
+        }
+        function arg() {
+          skipWs();
+          if (i >= s.length) fail();
+          if (s[i] === '{') { i++; return seq('}'); }
+          return atom().h;
+        }
+        function scripted() {
+          const base = '^_'.includes(s[i]) ? { h: '' } : atom();
+          let sup = '';
+          let sub = '';
+          for (;;) {
+            skipWs();
+            if (s[i] === '^' && !sup) { i++; sup = arg(); } else if (s[i] === '_' && !sub) { i++; sub = arg(); } else break;
+          }
+          if (!sup && !sub) return base.h;
+          if (base.limits && display) {
+            return `<span class="tx-lim"><span class="tx-top">${sup}</span><span class="tx-big">${base.h}</span><span class="tx-bot">${sub}</span></span>`;
+          }
+          if (sup && sub) return `${base.h}<span class="tx-ss"><sup>${sup}</sup><sub>${sub}</sub></span>`;
+          return sup ? `${base.h}<sup>${sup}</sup>` : `${base.h}<sub>${sub}</sub>`;
+        }
+        function atom() {
+          const c = s[i++];
+          if (c === '{') return { h: seq('}') };
+          if (c === '\\') return command();
+          if (c === '}' || c === '^' || c === '_') return fail();
+          if (/[A-Za-z]/.test(c)) return { h: `<i>${c}</i>` };
+          if (c === '-') return { h: '−' };
+          if (c === '*') return { h: '∗' };
+          if (c === "'") return { h: '′' };
+          if (c === '~' || c === '&') return { h: ' ' };
+          return { h: esc(c) };
+        }
+        function delimiter() {
+          skipWs();
+          if (s[i] === '\\') { i++; const m = /^[A-Za-z]+|^./.exec(s.slice(i)); i += m[0].length; return esc(TEX_SYM[m[0]] ?? fail()); }
+          return esc(s[i++] === '.' ? '' : s[i - 1]);
+        }
+        function command() {
+          const m = /^[A-Za-z]+|^[\s\S]/.exec(s.slice(i));
+          if (!m) return fail();
+          const name = m[0];
+          i += name.length;
+          if (GREEK[name]) return { h: `<i>${GREEK[name]}</i>` };
+          if (GREEK_UP[name]) return { h: GREEK_UP[name] };
+          if (name === '\\') return { h: '<br>' };
+          if (TEX_BIG[name]) return { h: `<span class="tx-op">${TEX_BIG[name]}</span>`, limits: name !== 'int' && name !== 'iint' && name !== 'oint' };
+          if (TEX_FN.has(name)) return { h: `<span class="tx-fn">${name}</span>`, limits: name === 'lim' || name === 'max' || name === 'min' };
+          if (Object.prototype.hasOwnProperty.call(TEX_SYM, name)) return { h: esc(TEX_SYM[name]) };
+          switch (name) {
+            case 'frac': case 'dfrac': case 'tfrac': { const a = arg(); const b = arg(); return { h: `<span class="tx-frac"><span class="tx-num">${a}</span><span class="tx-den">${b}</span></span>` }; }
+            case 'sqrt': {
+              let idx = '';
+              if (s[i] === '[') { i++; idx = seq(']'); }
+              const body = arg();
+              return { h: `${idx ? `<sup class="tx-rootn">${idx}</sup>` : ''}<span class="tx-sqrt"><span class="tx-rad">√</span><span class="tx-rcnt">${body}</span></span>` };
+            }
+            case 'text': case 'mathrm': case 'textrm': case 'mbox': case 'operatorname': return { h: `<span class="tx-rm">${esc(rawGroup())}</span>` };
+            case 'textbf': return { h: `<b>${esc(rawGroup())}</b>` };
+            case 'mathbf': case 'boldsymbol': case 'bm': return { h: `<b>${arg()}</b>` };
+            case 'mathbb': return { h: esc(rawGroup().replace(/[A-Z]/g, (ch) => BB[ch] || ch)) };
+            case 'mathcal': case 'mathit': case 'mathsf': case 'mathtt': case 'displaystyle': case 'textstyle': case 'limits': case 'nolimits': return name.startsWith('math') ? { h: arg() } : { h: '' };
+            case 'left': case 'right': case 'big': case 'Big': case 'bigg': case 'Bigg': return { h: delimiter() };
+            case 'overline': return { h: `<span class="tx-over">${arg()}</span>` };
+            case 'underline': return { h: `<span class="tx-under">${arg()}</span>` };
+            default:
+              if (TEX_ACCENT[name]) return { h: `${arg()}${TEX_ACCENT[name]}` };
+              return fail();
+          }
+        }
+        try {
+          const html = seq(null);
+          return html ? html : null;
+        } catch {
+          return null;
+        }
+      }
+
+      /** Math as a styled span; the plain source in a chip when it cannot be typeset. */
+      function mathSpan(src, display) {
+        const html = texToHtml(src, display);
+        if (html === null) return `<span class="math-inline" title="Shown as source: not a supported LaTeX expression">${esc(src)}</span>`;
+        return `<span class="tex${display ? ' tex-display' : ''}">${html}</span>`;
+      }
+
       // ---- inline ------------------------------------------------------------
       const safeUrl = (u) => /^(https?:\/\/|mailto:|#|\/)/i.test(u.trim()) ? u.trim() : '';
 
@@ -77,13 +217,14 @@
         let s = String(src);
         // code spans first: their content is literal
         s = s.replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, __, code) => keep(`<code class="inline-code">${esc(code.trim())}</code>`));
-        // math written with dollars stays readable as code-like text
-        s = s.replace(/\$\$([^$\n]+)\$\$|(?<![\w$])\$([^$\n]+?)\$(?![\w$])/g, (_, a, b) => keep(`<span class="math-inline">${esc(a || b)}</span>`));
+        // math: typeset when the small renderer understands it, otherwise shown as source in a chip
+        s = s.replace(/\$\$([^$\n]+)\$\$|\\\[([^\n]+?)\\\]|\\\(([^\n]+?)\\\)|(?<![\w$\\])\$(?!\s)([^$\n]*?[^\s$\\])\$(?![\w$])/g,
+          (_, a, b, c, d) => keep(mathSpan(a || b || c || d, Boolean(a || b))));
         // links and images
         s = s.replace(/!?\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (all, label, url) => {
           const href = safeUrl(url);
           if (!href) return all;
-          const text = all.startsWith('!') ? (label || 'Bild') : label;
+          const text = all.startsWith('!') ? (label || 'Image') : label;
           return keep(`<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${inlineText(text)}</a>`);
         });
         s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g, (_, pre, url) => pre + keep(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`));
@@ -102,12 +243,16 @@
 
       // ---- blocks ------------------------------------------------------------
       let codeSeq = 0;
-      function codeBlock(lang, code, closed) {
+      // Other scripts (artifacts.js) set `hooks.actions` to add buttons such as Preview or Run to a block.
+      const hooks = { actions: () => '' };
+      function codeBlock(lang, code, closed, info) {
         const id = `cb${++codeSeq}`;
         const label = esc(lang || 'text');
-        return `<div class="code-card${closed ? '' : ' is-open'}"><div class="code-card-header"><span>${label}</span>` +
-          `<span class="code-card-actions"><button class="btn btn-xs btn-ghost" data-wrap-code="${id}" title="Zeilenumbruch">Umbruch</button>` +
-          `<button class="btn btn-xs btn-ghost" data-copy-code="${id}">Kopieren</button></span></div>` +
+        let extra = '';
+        try { extra = closed ? hooks.actions(lang, info || '', code, id) || '' : ''; } catch { extra = ''; }
+        return `<div class="code-card${closed ? '' : ' is-open'}" data-lang="${esc(String(lang || '').toLowerCase())}"><div class="code-card-header"><span>${label}</span>` +
+          `<span class="code-card-actions">${extra}<button class="btn btn-xs btn-ghost" data-wrap-code="${id}" title="Toggle line wrapping">Wrap</button>` +
+          `<button class="btn btn-xs btn-ghost" data-copy-code="${id}">Copy</button></span></div>` +
           `<pre id="${id}"><code>${highlight(code, lang)}</code></pre></div>`;
       }
 
@@ -135,7 +280,7 @@
         while (i < lines.length) {
           const line = lines[i];
           let m;
-          if ((m = line.match(/^\s*(`{3,}|~{3,})\s*([\w+#.-]*)[^\n]*$/))) {
+          if ((m = line.match(/^\s*(`{3,}|~{3,})\s*([\w+#.-]*)([^\n]*)$/))) {
             flush();
             const fence = m[1];
             const body = [];
@@ -146,7 +291,7 @@
               body.push(lines[i]);
               i++;
             }
-            html += codeBlock(m[2], body.join('\n'), closed);
+            html += codeBlock(m[2], body.join('\n'), closed, m[3]);
             continue;
           }
           if (/^\s*$/.test(line)) { flush(); i++; continue; }
@@ -157,13 +302,16 @@
             continue;
           }
           if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { flush(); html += '<hr>'; i++; continue; }
-          if (/^\s*\$\$\s*$/.test(line)) {
+          if ((m = line.match(/^\s*(\$\$|\\\[)\s*$/))) {
             flush();
+            const close = m[1] === '$$' ? /^\s*\$\$\s*$/ : /^\s*\\\]\s*$/;
             const body = [];
             i++;
-            while (i < lines.length && !/^\s*\$\$\s*$/.test(lines[i])) { body.push(lines[i]); i++; }
+            while (i < lines.length && !close.test(lines[i])) { body.push(lines[i]); i++; }
             i++;
-            html += `<div class="math-block">${esc(body.join('\n'))}</div>`;
+            const tex = body.join('\n');
+            const typeset = texToHtml(tex, true);
+            html += typeset === null ? `<div class="math-block">${esc(tex)}</div>` : `<div class="math-block tex tex-display">${typeset}</div>`;
             continue;
           }
           if (/^\s*>/.test(line)) {
@@ -238,5 +386,5 @@
         return { html: `${html}</${tag}>`, next: i };
       }
 
-      return { render, inline, highlight, esc };
+      return { render, inline, highlight, esc, texToHtml, hooks };
     })();
