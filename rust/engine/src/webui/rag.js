@@ -1,16 +1,14 @@
     // ==========================================================================
     // Documents and the web in chat. A document that does not fit the context is cut into passages
     // (about 500 tokens, with overlap) and ranked against the question with BM25 in the browser: no embedding
-    // model is needed. The best passages go into the prompt with a source label. "Use the web" searches for
-    // the question, reads the first pages found and ranks their passages the same way.
+    // model is needed. The best passages go into the prompt with a source label. The web is reached through the
+    // model's own tool calls (tools.js), not here.
     // ==========================================================================
     const RAG_CHUNK_CHARS = 1800; // about 500 tokens
     const RAG_OVERLAP_CHARS = 240;
     const RAG_MAX_DOC_CHARS = 600000; // kept per document in the browser storage
     const RAG_MAX_CHAT_CHARS = 1500000; // kept per chat
     const RAG_FIT_SHARE = 0.35; // a document goes in whole when it takes less than this share of the context
-    const RAG_WEB_PAGES = 3;
-    const RAG_WEB_PAGE_CHARS = 80000;
     const RAG_STOP = new Set(('a an the and or but if of to in on at by for with from as is are was were be been it its this that these those ' +
       'i you he she we they me my your our their what which who whom how why when where do does did not no so than then there here can could ' +
       'will would should may might about into over under also just very der die das und oder aber ist sind war ein eine einer den dem des ' +
@@ -185,54 +183,14 @@
       try { const j = await res.json(); return j.error?.message || j.error || j.message || ''; } catch { return ''; }
     }
 
-    /** Searches the web for the question and keeps the best passages of the first pages found on the message. */
-    async function ragWeb(node, signal) {
-      const query = (node.content || '').trim();
-      node.web = { query, sources: [], passages: [] };
-      if (!query) return;
-      let results;
-      try {
-        const res = await apiFetch('/api/studio/web/search', { method: 'POST', body: { query, limit: 6 }, signal });
-        if (!res.ok) { node.web.error = ragWebError(res.status, String(await ragErrorDetail(res))); return; }
-        results = (await res.json()).results || [];
-      } catch (e) {
-        if (e.name === 'AbortError') throw e;
-        node.web.error = `Web search failed: ${e.message}`;
-        return;
-      }
-      const top = results.filter((r) => /^https?:\/\//i.test(r.url || '')).slice(0, RAG_WEB_PAGES);
-      if (!top.length) { node.web.error = 'The web search found nothing for this question.'; return; }
-      const pages = await Promise.all(top.map(async (r) => {
-        try {
-          const res = await apiFetch('/api/studio/web/fetch', { method: 'POST', body: { url: r.url, max_chars: RAG_WEB_PAGE_CHARS }, signal });
-          if (!res.ok) return '';
-          return String((await res.json()).text || '');
-        } catch (e) {
-          if (e.name === 'AbortError') throw e;
-          return '';
-        }
-      }));
-      const docs = [];
-      top.forEach((r, i) => {
-        const title = r.title || r.url;
-        node.web.sources.push({ n: i + 1, title, url: r.url, fetched: !!pages[i] });
-        const text = pages[i] || [r.title, r.snippet].filter(Boolean).join('\n\n');
-        if (text.trim()) docs.push({ id: i + 1, name: title, text });
-      });
-      const index = ragBuildIndex(docs);
-      const found = ragSearch(index, query, ragPassageCount()).length ? ragSearch(index, query, ragPassageCount()) : ragOpening(index, 3);
-      node.web.passages = found.map((p) => ({ n: p.docId, title: p.doc, url: top[p.docId - 1].url, text: p.text }));
-      if (!node.web.passages.length) node.web.error = 'The pages found had no readable text.';
-    }
-
     // ---- preparing a message ----------------------------------------------------------------
     /** Adds the passages of the chat's documents and the web results to a user message. Returns false when stopped. */
     async function ragPrepare(t, node) {
       node.passages = undefined;
       node.web = undefined;
-      const wantsWeb = state.useWeb && (node.content || '').trim();
+      // (the web is not searched here any more: with "Allow web access" the model decides, see tools.js)
       const hasDocs = prjCombinedDocs(state.prj.projects, t, false).length > 0; // the chat's documents and its project's knowledge
-      if (!hasDocs && !wantsWeb) return true;
+      if (!hasDocs) return true;
       const controller = new AbortController();
       state.abortController = controller;
       setBusy(true);
@@ -246,11 +204,6 @@
           if (!found.length && node.ragFresh) found = ragOpening(ragThreadIndex(t, true), k); // "summarize this": only the chat's own documents
           found.sort((a, b) => (a.docId === b.docId ? a.n - b.n : 0));
           node.passages = found.length ? found.map((p) => ({ doc: p.doc, n: p.n, m: p.m, text: p.text })) : undefined;
-        }
-        if (wantsWeb) {
-          node.ctxStatus = 'Searching the web';
-          renderChatArea();
-          await ragWeb(node, controller.signal);
         }
         return true;
       } catch (e) {
@@ -355,12 +308,14 @@
       }
     }
 
-    // ---- the "Use the web" switch ------------------------------------------------------------------
+    // ---- the "Allow web access" switch ----------------------------------------------------------------
+    // On: the model is offered the tools web_search and web_fetch and decides itself when to use them (tools.js).
     state.useWeb = false;
     $('btnToggleWeb').addEventListener('click', () => {
       state.useWeb = !state.useWeb;
       $('btnToggleWeb').classList.toggle('active', state.useWeb);
-      if (state.useWeb) toast('Your questions are searched on the web; the pages found are given to the model.');
+      if (state.useWeb) toast('The model may now search the web and read pages when it needs to. Questions it can answer itself are not searched.');
+      updateContextMeter();
     });
     $('attachmentsRow').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-rm-doc]');

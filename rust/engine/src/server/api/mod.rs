@@ -10,6 +10,7 @@ pub(super) mod anthropic;
 pub(super) mod batches;
 pub(super) mod extract;
 pub(super) mod llamacpp;
+pub(super) mod memory;
 pub(super) mod npu;
 pub(super) mod mcp;
 pub(super) mod ollama_extra;

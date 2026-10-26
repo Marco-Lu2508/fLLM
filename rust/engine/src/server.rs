@@ -490,6 +490,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/agent/tools", get(api::agent::tools))
         .route("/api/studio/agent/changes", get(api::agent::changes))
         .route("/api/studio/agent/end", post(api::agent::end))
+        .route("/api/studio/memory", get(api::memory::get_memory).put(api::memory::put_memory).layer(DefaultBodyLimit::max(api::memory::MAX_BODY)))
         .route("/api/studio/web/fetch", post(api::agent_net::fetch_route))
         .route("/api/studio/web/search", post(api::agent_net::search_route))
         .route("/api/studio/skills", get(api::skills::list).post(api::skills::write).delete(api::skills::remove))

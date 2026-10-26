@@ -171,6 +171,16 @@
     .rag-sources { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 6px; font-size: 12px; color: var(--muted-foreground); }
     .rag-sources a { color: var(--primary); text-decoration: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rag-sources a:hover { text-decoration: underline; }
+    .tool-cards { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 8px; }
+    .tool-card { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--muted-foreground); background: color-mix(in srgb, var(--muted-foreground) 6%, transparent); }
+    .tool-card .icon { flex: none; }
+    .tool-card-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tool-card.is-error { color: var(--destructive, #e5484d); }
+    .tool-card.undone .tool-card-label { text-decoration: line-through; }
+    .tool-card-undo { border: 0; background: none; padding: 0 2px; font: inherit; color: var(--primary); cursor: pointer; }
+    .tool-card-undo:hover { text-decoration: underline; }
+    .tool-card-spin { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: tool-card-rot 0.8s linear infinite; }
+    @keyframes tool-card-rot { to { transform: rotate(360deg); } }
     .doc-chip { border-style: dashed; }
 
     /* research mode: progress above the answer, log below it */
