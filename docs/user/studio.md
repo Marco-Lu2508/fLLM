@@ -146,63 +146,115 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
 
 ## Code: the coding agent
 
-Pick a folder and describe a task. The model works through tools that the server runs inside that folder (`list_dir`, `read_file`,
-`write_file`, `edit_file`, `glob`, `grep`, `bash`, and more when the server offers them, such as `multi_edit`, background shell jobs,
-`web_fetch` and `web_search`), plus tools of the page itself: a task list, `ask_user` and `spawn_agent`. Tools of configured MCP servers
-are added too. Every step is shown as a card, file changes with a diff, long output cut with a "Show all" button.
+Pick a folder and describe a task. The model works through tools that the server runs inside that folder, plus tools of the page itself
+(task list, `ask_user`, `task` for sub-agents). Tools of configured MCP servers are added too. Every step is shown as a card, file
+changes with a diff, long output cut with a "Show all" button. The design borrows ideas from [OpenCode](https://opencode.ai) (MIT): build
+and plan agents, sub-agents by type, permissions per tool, tolerant edits, a diff tool, sessions you can fork and revert, project
+instruction files and custom commands. Nothing was copied from it; the prompts and the code are fLLM's own.
 
 | Tool | What it does |
 | --- | --- |
-| `list_dir`, `glob` | List a folder, find files by pattern. |
-| `read_file` | Read a text file with line numbers. A Jupyter notebook (`.ipynb`) is shown as text cells with their outputs. |
-| `grep` | Regular-expression search. Optional `output_mode` (`content`, `files`, `count`), `context` lines, `case_insensitive` and `head_limit`. |
-| `write_file`, `edit_file` | Create or overwrite a file; replace text in a file. |
+| `list_dir` | Folder tree (`depth` 1 to 4), folders first. Build output and what `.gitignore` excludes is listed but not opened. |
+| `glob` | Find files by pattern, newest first. `.gitignore` and `.ignore` are respected. |
+| `read_file` | Text file with line numbers, `offset` and `limit`. Binary files and images are refused with a clear message; a missing file suggests similar names. A Jupyter notebook (`.ipynb`) is shown as text cells with their outputs. |
+| `grep` | Regular-expression search (or `literal` text, `word` matches). `output_mode` (`content`, `files`, `count`), `context` lines, `case_insensitive`, `head_limit`. Respects `.gitignore`. |
+| `write_file` | Create a file or replace it completely. |
+| `edit_file` | Replace text. Exact match first; if there is none, a unique match that ignores indentation and trailing spaces is accepted. CRLF files stay CRLF. A failing edit says where the closest text is, which lines differ and the line numbers of every place when the text is not unique. |
 | `multi_edit` | Several edits to one file, all or nothing, one undo step. |
-| `bash` | Run a shell command. A `cd` stays in effect for the next call (never outside the folder). With `background: true` it starts a job and returns a job id. |
+| `patch` | A unified diff over one or several files (create, change, delete), all or nothing. Hunks are placed by their content, line numbers only need to be roughly right. |
+| `diagnostics` | A quick check without a language server: `python -m py_compile`, `node --check`, JSON parse for a file; `cargo check`, `tsc --noEmit` or `go vet` for the project when it has `Cargo.toml`, `tsconfig.json` or `go.mod`. Returns the first problems. Only fixed commands run. |
+| `bash` | Run a shell command; stdout and stderr keep their order, long output keeps its start and its end. A `cd` stays in effect for the next call (never outside the folder). With `background: true` it starts a job and returns a job id. A timeout or Stop ends the whole process tree. |
 | `bash_output`, `bash_kill` | Read the output of a background job (the newest 256 KB are kept) or stop it. Jobs are stopped when the session ends, the folder changes or the server stops. |
-| `web_fetch` | Download an http(s) page and return it as readable text (10 s connect and 30 s total timeout, 2 MB body cap, at most 5 redirects). |
-| `web_search` | Best-effort web search through an HTML search page that needs no key. Returns title, URL and snippet; says so clearly when the search page blocks the request. |
+| `memory` | List, add, update or remove short memory entries (see below). |
+| `web_fetch`, `web_search` | Download an http(s) page as readable text (10 s connect and 30 s total timeout, 2 MB body cap, at most 5 redirects); best-effort web search through an HTML search page that needs no key. |
+| `todo_write`, `todo_read` | The task list shown in the side panel (page tool). |
+| `task` | Start a sub-agent with a fresh context (page tool, below). |
+| `ask_user` | Ask you a question with a few answer choices (page tool). |
 
-The server lists its tools, with the permission category the page asks about (`read`, `edit`, `command`, `network`), at
+The server lists its tools, with the permission category the page asks about (`read`, `edit`, `command`, `network`, `memory`), at
 `GET /api/studio/agent/tools`. `GET /api/studio/agent/changes` lists every file change of the session (id, path, `create` or `edit`,
-time), and `POST /api/studio/agent/undo` takes `{"steps": n}` or `{"to": id}` to go back several changes at once (newest first).
-The chat page can use the network tools without an agent session through `POST /api/studio/web/fetch` (`{url, max_chars?}`) and
-`POST /api/studio/web/search` (`{query, limit?}`).
+time), `POST /api/studio/agent/undo` takes `{"steps": n}` or `{"to": id}` to go back several changes at once (newest first) and
+`{"redo": n}` to apply undone changes again. `POST /api/studio/agent/cancel` ends running commands (the Stop button),
+`POST /api/studio/agent/files` (`{query, limit}`) lists workspace files and folders by fuzzy match, `POST /api/studio/agent/instructions`
+returns the project instruction files and the memories, and `POST /api/studio/agent/memory` (`{scope, op: get | set | append, text}`)
+reads and writes a memory file. All of them, like the tools, can only be reached from the machine fLLM runs on. The chat page can use
+the network tools without an agent session through `POST /api/studio/web/fetch` (`{url, max_chars?}`) and `POST /api/studio/web/search`
+(`{query, limit?}`).
+
+**Agents and system prompts.** The header switches between the *Build* agent (reads, changes files, runs commands) and the *Plan* agent
+(only reads, then writes a plan; "Run the plan" hands it to Build). Alt+B does the same. Under Build, *Ask* and *Auto-edit* choose
+whether file changes are asked about. The system prompt is assembled from separate parts: the agent's rules, a note for the model family
+(Qwen, Llama, Mistral, Gemma, gpt-oss or generic, read from the model name) with an example of a correct tool call, an environment block
+(folder, system, shell, git branch and state, date), the project instruction files and the memory. Small models (8B parameters or less,
+or a context of 8192 tokens or less) get a short numbered-rules form and one tool call at a time; larger ones get the full guidance
+(how to choose a tool, how to edit safely, how to check the work, when to use the task list, when to ask, what not to do). Mentions of
+tools the server does not offer are left out.
 
 | Mode | What the agent does on its own |
 | --- | --- |
-| Ask (default) | Reads and searches. Asks before every file change and every command. |
-| Auto-edit | Also changes files. Still asks before commands. |
-| Plan | Only reads, then writes a plan. "Run the plan" switches to Ask. |
+| Build, Ask (default) | Reads and searches. Asks before every file change and every command. |
+| Build, Auto-edit | Also changes files. Still asks before commands. |
+| Plan | Only reads, then writes a plan. |
 
-**Permissions.** "Always" on a question allows that kind of action for the rest of the session. Commands containing `;`, `&`, `|`,
-redirections or substitutions, and risky programs (`rm`, `curl`, `sudo`, `git`, shells, ...), can only be allowed once at a time.
-Network tools and MCP tools always ask first. Persistent rules per folder live in the *Permission rules* box of the side panel (or
-`/allow` and `/deny`): one `category: pattern` per line with the categories `bash`, `edit`, `network`, `mcp` and `read`, for example
-`bash: npm test*`, `edit: src/**`, `network: *`. Deny beats allow. An allow rule never covers a command with shell operators, and a
-risky program is only covered by a rule that names it (`bash: git status*`, not `bash: *`).
+**Permissions.** The *Permissions* box of the side panel has a table: for each kind of action (read and search, change files, commands,
+web, MCP tools, memory) and for each agent (build, plan) *allow*, *ask* or *deny*; "default" keeps the built-in behaviour. Below it,
+pattern rules per folder (or `/allow` and `/deny`): one `category: pattern` per line with the categories `bash`, `edit`, `network`, `mcp`,
+`read` and `memory`, for example `bash: npm test*`, `edit: src/**`, `network: *`, optionally for one agent: `[plan] bash: ls*`. A deny
+rule or a *deny* mode always wins; an allow rule answers the question but never overrides a *deny* mode. An allow rule never covers a
+command with shell operators, and a risky program (`rm`, `curl`, `sudo`, `git`, shells, ...) is only covered by a rule that names it
+(`bash: git status*`, not `bash: *`). "Always" on a question allows that kind of action for the rest of the session. A patch is checked
+against the rules for every file it touches. A call that is repeated three times in a row with the same arguments is not run again; the
+model is told to try something else.
 
-**Sub-agents.** The model can hand a self-contained job (a broad search, an independent investigation) to a sub-agent with a fresh
-context and gets back only its report. Several sub-agents started in one turn run in parallel, shown as nested cards with live status.
-They are read-only unless the model asks for `full` mode (the usual questions still apply), have a step and context budget, and stop
-when you stop the agent. All requests share the same system prompt and tool list, so the server can reuse its prompt cache.
+**Check my edits automatically.** In the *Settings* box: after every edit the agent runs `diagnostics` for the changed file and the
+first problems are added to the edit result (and shown on the card). It is off by default because it can take seconds per edit.
+`/check [path]` runs the same check by hand.
+
+**Sub-agents.** The model can hand a self-contained job to a sub-agent with a fresh context and gets back only its report. `task` with
+`agent: "explore"` (default) can only read and search; `agent: "general"` may also change files and run commands (the usual questions
+still apply; the Plan agent can only start explore agents). Several started in one turn run in parallel as nested cards with live
+status. They have a step and context budget and stop when you stop the agent. All requests share the same system prompt and tool list,
+so the server can reuse its prompt cache.
+
+**Sessions.** Sessions of each folder are saved in the browser (up to 30) and get a short title from the model after the first answer.
+The side panel lists them with search, *Rename*, *Fork*, *Export* (a Markdown file with the messages and the tools used) and *Delete*.
+Hover a message of yours for *Fork* (a new session that continues from before that message; its text goes back into the input) and
+*Revert* (the conversation and the file changes since that message are taken back, through the same change log as `/rewind`; the
+notice offers *Undo the revert*). Messages from before a compaction cannot be forked or reverted to. Stopping the agent leaves the
+session valid: calls that did not finish get an "interrupted" result, so the next request works with every chat template, and commands
+the server was running are ended.
+
+**Message queue and shell.** Enter while the agent works queues the message (shown as a chip above the input; ✕ removes it) and sends
+it when the run is over; Stop returns queued text to the input. `!command` runs a shell command yourself; its output is shown and
+given to the model with your next message. `@` completes file and folder names with a fuzzy search over the folder (it respects
+`.gitignore`); the content of mentioned files is attached. The header has a model switch for the agent.
 
 **Long sessions.** When the conversation passes about 70% of the model's context, older turns are summarised by the model and replaced
-(the task list and the changed files are kept, and a notice says so). `/compact [focus]` does it on demand. Sessions of each folder are
-saved in the browser automatically; `/resume` or the side panel brings an earlier one back.
+(the task list and the changed files are kept, and a notice says so). `/compact [focus]` does it on demand. Tool output keeps its start
+and its end when it is cut.
 
-Commands (type `/` for the list): `/init` (the agent writes `FLLM.md`), `/compact`, `/resume`, `/rewind` (undo file changes back to a
-chosen point), `/undo [n]`, `/plan`, `/ask`, `/edit`, `/diff`, `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/clear`. Your own
-commands are Markdown files in `.fllm/commands/` of the folder: `review.md` becomes `/review`, an optional `description:` front matter
-line is shown in the list, and `$ARGUMENTS` (or `$1` ... `$9`) is replaced by what follows the command. `@file` adds a file to the
-message. A `FLLM.md`, `AGENTS.md` or `CLAUDE.md` in the folder is read as project instructions.
+**Project instructions and memory.** `AGENTS.md`, `FLLM.md` or `CLAUDE.md` (the first one found per folder, in this order) of the folder
+and of its parent folders up to the repository root are part of the prompt, nearest first, capped. `/init` has the agent write an
+`AGENTS.md`. The memory is two short lists: `.fllm/memory.md` in the folder and one for you in the Studio folder (`agent-memory.md`).
+The model adds entries itself with the `memory` tool when it learns something lasting (your preferences, project conventions, commands
+that work); `/remember [global] text` adds one by hand, and the *Memory* box in the side panel shows and edits both. Both files are
+plain Markdown lists (`- entry`), at most 100 entries of 400 characters each.
+
+Commands (type `/` for the list, with search): `/init`, `/compact`, `/resume`, `/fork`, `/revert`, `/rename`, `/export`, `/rewind` (undo
+file changes back to a chosen point), `/undo [n]`, `/plan`, `/build`, `/ask`, `/edit`, `/agent`, `/model`, `/remember`, `/memory`,
+`/check`, `/diff`, `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/clear`. Your own commands are Markdown files in
+`.fllm/commands/` of the folder: `review.md` becomes `/review`, an optional `description:` front matter line is shown in the list, and
+`$ARGUMENTS` (or `$1` ... `$9`) is replaced by what follows the command. Keyboard: Alt+B switches the agent, Alt+L picks a session,
+Esc stops, Mod+N starts a new session (all rebindable under Keyboard shortcuts).
 
 Commands started in the background appear in the *Background jobs* panel, where you can read their output and stop them. Requests of
 agent turns ask the server to constrain tool calls to valid ones (`tool_call_grammar`); servers that do not know it ignore it.
 
 Safety: the agent tools are reachable from the machine fLLM runs on only, also when an API key is set. Paths cannot leave the folder
-(also through symbolic links). The agent can still run any command you allow, so choose the folder with care. Set `FLLM_NO_AGENT=1` to
-switch the agent routes off completely.
+(also through symbolic links; on Windows the drive letter and folder names are compared without regard to case). The agent can still run
+any command you allow, so choose the folder with care. Set `FLLM_NO_AGENT=1` to switch the agent routes off completely. On Windows
+commands run with `cmd.exe`; a command written over several lines is joined with `&`, and a `!` inside a command may be taken by
+cmd's delayed expansion, which the working-directory tracking needs (known limit, not worked around yet).
 
 Network safety: `web_fetch`, `web_search` and the two web routes only speak http and https, refuse URLs with credentials, and refuse
 targets on loopback, private, link-local (including cloud metadata) and other reserved addresses. The host name is resolved by the
@@ -215,6 +267,9 @@ A small model often writes a command into the answer instead of calling the tool
 The pure logic of this page (rule matching, compaction, command expansion) has tests: `node rust/engine/src/webui/tests/code.test.js`.
 The logic of assistants, memory and project retrieval is tested by `node rust/engine/src/webui/tests/projects.test.js`; the chat tool loop,
 the memory tool and secret refusal by `tools.test.js`; system prompts, titles and the parsing of all page scripts by `prompts.test.js` (same folder).
+The pure logic of this page (rule matching, permission modes, compaction, message repair, session cutting, command expansion, the
+prompts) has tests: `node rust/engine/src/webui/tests/code.test.js` and `node rust/engine/src/webui/tests/codeprompts.test.js`.
+The logic of assistants, memory and project retrieval is tested by `node rust/engine/src/webui/tests/projects.test.js`.
 
 ## Models
 

@@ -431,10 +431,19 @@
               <span id="wsName">Choose folder</span>
               <span class="quant-chip" id="wsBranch" style="display:none;"></span>
             </button>
-            <div class="seg" id="permSeg" role="group" aria-label="What the agent may do on its own">
+            <div class="seg" id="agentSeg" role="group" aria-label="Which agent works">
+              <button data-agent="build" class="active" title="Build: reads, changes files and runs commands (Alt+B switches)">Build</button>
+              <button data-agent="plan" title="Plan: reads only and writes a plan, changes nothing (Alt+B switches)">Plan</button>
+            </div>
+            <div class="seg" id="permSeg" role="group" aria-label="What the build agent may do on its own">
               <button data-perm="ask" class="active" title="Ask before every change and every command">Ask</button>
               <button data-perm="edit" title="Allow file changes, ask before commands">Auto-edit</button>
-              <button data-perm="plan" title="Read only: the agent makes a plan and changes nothing">Plan</button>
+            </div>
+            <div class="code-model-wrap">
+              <button class="model-pill" id="btnCodeModel" title="Model used by the agent">
+                <span id="codeModelLabel">Model</span>
+              </button>
+              <div class="popover-panel code-model-menu" id="codeModelMenu"></div>
             </div>
           </div>
           <div class="header-right">
@@ -459,9 +468,10 @@
             <div class="code-scroll" id="codeScroll"><div class="code-column" id="codeColumn"></div></div>
             <div class="code-composer">
               <div class="code-todos" id="codeTodos" style="display:none;"></div>
+              <div class="code-queue" id="codeQueue" style="display:none;"></div>
               <div class="code-input-box">
                 <div class="mention-pop" id="mentionPop"></div>
-                <textarea id="codeTextarea" rows="1" placeholder="Describe the task. @ adds a file, / shows commands."></textarea>
+                <textarea id="codeTextarea" rows="1" placeholder="Describe the task. @ adds a file, / shows commands, ! runs a shell command."></textarea>
                 <div class="code-input-bar">
                   <span class="code-hint" id="codeHint">Enter sends, Shift+Enter adds a new line</span>
                   <button class="send-circle-btn" id="btnCodeSend" title="Send (Enter)">

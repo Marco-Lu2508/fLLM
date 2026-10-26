@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 const SHELL: &str = include_str!("webui/shell.html");
 const STYLE: [&str; 3] = [include_str!("webui/style.css"), include_str!("webui/chat.css"), include_str!("webui/code.css")];
 /// The script parts, joined in this order inside one function scope.
-const SCRIPT: [&str; 22] = [
+const SCRIPT: [&str; 23] = [
     include_str!("webui/core.js"),
     include_str!("webui/prompts.js"),
     include_str!("webui/markdown.js"),
@@ -21,6 +21,7 @@ const SCRIPT: [&str; 22] = [
     include_str!("webui/projects.js"),
     include_str!("webui/research.js"),
     include_str!("webui/tools.js"),
+    include_str!("webui/codeprompts.js"),
     include_str!("webui/code.js"),
     include_str!("webui/panels.js"),
     include_str!("webui/mcp.js"),

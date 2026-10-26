@@ -175,6 +175,8 @@
       { id: 'prevChat', keys: 'Alt+ArrowUp', desc: 'Previous chat in the list' },
       { id: 'regenerate', keys: 'Alt+R', desc: 'Regenerate the last answer' },
       { id: 'shortcuts', keys: 'Mod+/', desc: 'This overview (also ? outside a text field)' },
+      { id: 'codeAgent', keys: 'Alt+B', desc: 'Code: switch between the build and the plan agent' },
+      { id: 'codeSessions', keys: 'Alt+L', desc: 'Code: pick an earlier session of this folder' },
     ];
     /** Keys with a fixed meaning that no shortcut may take. */
     const FIXED_KEYS = [
@@ -355,6 +357,8 @@
       prevChat: () => stepChat(-1),
       regenerate: regenerateLast,
       shortcuts: openShortcuts,
+      codeAgent: () => { if (state.surface !== 'code') switchSurface('code'); toggleAgent(); },
+      codeSessions: () => { if (state.surface !== 'code') switchSurface('code'); runCodeCommand('/resume'); },
     };
 
     window.addEventListener('keydown', (e) => {

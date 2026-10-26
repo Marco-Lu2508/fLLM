@@ -42,10 +42,17 @@ pub(super) fn shell_command(line: &str) -> Command {
 /// The command followed by a line that reports the final working directory and keeps the exit code.
 pub(super) fn with_cwd_report(command: &str, mark: &str) -> String {
     if cfg!(windows) {
-        format!("{command} & echo. & echo {mark}!cd! & exit /b !errorlevel!")
+        format!("{} & echo. & echo {mark}!cd! & exit /b !errorlevel!", windows_one_line(command))
     } else {
-        format!("{command}\n__fllm_rc=$?\nprintf '\\n{mark}%s\\n' \"$(pwd)\"\nexit $__fllm_rc")
+        // stderr joins stdout so that the output keeps the order in which the program wrote it
+        format!("exec 2>&1\n{command}\n__fllm_rc=$?\nprintf '\\n{mark}%s\\n' \"$(pwd)\"\nexit $__fllm_rc")
     }
+}
+
+/// `cmd /C` stops reading at the first line break: several lines become one line joined with `&`.
+pub(super) fn windows_one_line(command: &str) -> String {
+    let lines: Vec<&str> = command.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    lines.join(" & ")
 }
 
 #[derive(Default)]
@@ -100,7 +107,7 @@ impl Job {
     }
 }
 
-fn kill_tree(pid: u32) {
+pub(super) fn kill_tree(pid: u32) {
     #[cfg(windows)]
     let mut c = {
         let mut c = Command::new("taskkill");
@@ -300,6 +307,12 @@ mod tests {
         assert!(jobs.kill("job1").unwrap().contains("already finished"));
         assert_eq!(jobs.kill_all(), 1);
         assert!(jobs.output("job2", None).is_err(), "ended sessions forget their jobs");
+    }
+
+    #[test]
+    fn several_lines_become_one_line_for_cmd() {
+        assert_eq!(windows_one_line("cd src\r\n\r\ncargo test  \n"), "cd src & cargo test");
+        assert_eq!(windows_one_line("echo hi"), "echo hi");
     }
 
     #[test]
