@@ -440,7 +440,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_partial_prefills = 0usize;
     let mut long_prefill_threshold = 0usize;
     let mut max_long_partial_prefills = 1usize;
-    let mut decode_first = false;
+    let mut decode_first = true;
     let mut preemption_swap = false;
     let mut swap_space_gib = 0.0f64;
     let mut max_batched_tokens = 512usize;

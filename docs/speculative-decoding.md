@@ -103,7 +103,7 @@ the mask as a bitmask; DRY and Mirostat rows keep sampling on the host. Default:
 | `--kv-watermark-blocks N` | 1 % of the pool (at most 64) | a waiting sequence is admitted only if this many blocks stay free for the running ones |
 | `--max-num-partial-prefills N` | 0 (no limit) | at most N sequences prefill in one step |
 | `--long-prefill-token-threshold T`, `--max-long-partial-prefills N` | 0, 1 | prompts longer than T count as long; at most N of them prefill per step, shorter prompts interleave |
-| `--chunked-prefill-policy prefill-first\|decode-first` | `prefill-first` | `decode-first` keeps one token of each step's budget per running decoder out of the prompt chunks' reach (lower inter-token latency under load) |
+| `--chunked-prefill-policy prefill-first|decode-first` | `decode-first` | `decode-first` keeps one token of each step's budget per running decoder out of the prompt chunks' reach: a user whose prompt is done gets the answer streamed while the prompts of others are still read (4 users with 2000-token prompts on Vulkan: first tokens after 9 to 32 s instead of all after 31 s); `prefill-first` reads every waiting prompt first |\|decode-first` | `prefill-first` | `decode-first` keeps one token of each step's budget per running decoder out of the prompt chunks' reach (lower inter-token latency under load) |
 | `--preemption-mode recompute\|swap`, `--swap-space GiB` | `recompute`, 0 | `swap` copies the KV blocks of a preempted sequence to host memory and back instead of recomputing the sequence; it needs KV block operations on the backend (checked at start-up) |
 
 `n > 1` and `best_of` (the `n` candidates with the highest cumulative log-probability of `best_of` samples; not with `stream`) fork the sequence after the
