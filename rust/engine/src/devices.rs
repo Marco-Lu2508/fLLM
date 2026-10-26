@@ -385,13 +385,16 @@ pub(crate) fn cpu_name() -> String {
 /// The processor brand string from CPUID (x86 only).
 #[cfg(target_arch = "x86_64")]
 fn cpuid_brand() -> Option<String> {
-    use std::arch::x86_64::__cpuid;
-    if __cpuid(0x8000_0000).eax < 0x8000_0004 {
+    use std::arch::x86_64::{CpuidResult, __cpuid};
+    // CPUID exists on every x86_64 processor; the call is `unsafe` before Rust 1.90 only
+    #[allow(unused_unsafe)]
+    let cpuid = |leaf: u32| -> CpuidResult { unsafe { __cpuid(leaf) } };
+    if cpuid(0x8000_0000).eax < 0x8000_0004 {
         return None;
     }
     let mut bytes = Vec::with_capacity(48);
     for leaf in 0x8000_0002u32..=0x8000_0004 {
-        let r = __cpuid(leaf);
+        let r = cpuid(leaf);
         for word in [r.eax, r.ebx, r.ecx, r.edx] {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
