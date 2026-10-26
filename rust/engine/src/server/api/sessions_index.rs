@@ -116,6 +116,14 @@ pub(super) fn forget(file: &Path, id: &str) -> Result<(), String> {
     write_all(file, &kept)
 }
 
+pub(super) fn forget_all(file: &Path) -> Result<(), String> {
+    let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    match fs::remove_file(file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
 /// Lowercase words of letters and digits (at least two characters).
 pub(super) fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
@@ -216,13 +224,14 @@ pub(in crate::server) async fn index(Json(body): Json<Value>) -> Response {
     }
 }
 
-/// `DELETE /api/studio/sessions/index?id=` drops the copy of one session.
+/// `DELETE /api/studio/sessions/index?id=` drops the copy of one session; `?all=1` drops every copy.
 pub(in crate::server) async fn remove(Query(query): Query<HashMap<String, String>>) -> Response {
     let id = query.get("id").cloned().unwrap_or_default();
-    if id.is_empty() {
+    let all = query.get("all").is_some_and(|v| v == "1");
+    if id.is_empty() && !all {
         return api_error(StatusCode::BAD_REQUEST, "id is missing");
     }
-    match tokio::task::spawn_blocking(move || forget(&data_file(), &id)).await {
+    match tokio::task::spawn_blocking(move || if all { forget_all(&data_file()) } else { forget(&data_file(), &id) }).await {
         Ok(Ok(())) => Json(json!({"ok": true})).into_response(),
         Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -286,6 +295,9 @@ mod tests {
         assert_eq!(hits.len(), 2);
         forget(&file, "1").unwrap();
         assert_eq!(search_in(&file, "gamma", 10).len(), 1);
+        forget_all(&file).unwrap();
+        assert!(search_in(&file, "gamma", 10).is_empty());
+        forget_all(&file).unwrap();
     }
 
     #[test]
