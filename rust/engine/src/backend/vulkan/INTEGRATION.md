@@ -100,6 +100,7 @@ and pools beyond 4 GiB work. Attention with head widths above 512 goes through t
 | `FLLM_VULKAN_EXACT=1` | only the f32 shaders (`_s`, `lin_*`): meets the FP32 bound of `selftest-gpu`; `backend::vulkan::backend::set_exact_math(bool)` overrides it at run time |
 | `FLLM_VULKAN_NO_IDOT=1` | never plan the int8 dot-product variants |
 | `FLLM_VULKAN_NO_COOP=1` | never plan the cooperative-matrix variants |
+| `FLLM_VK_MM=0`, `FLLM_VK_MM_MIN_BATCH`, `FLLM_VK_MM_BM`, `FLLM_VK_MM_BN` | prompt-path kernel `mmq_<fmt>_i` (`mm_q.comp`): switch off, smallest batch, tile size; see `docs/changes/vulkan-prefill.md` |
 | `FLLM_VULKAN_VERBOSE=1` | prints the planner capabilities (cooperative matrices, integer dot, subgroup size ...) when the device is opened and, once per shader, the variant, specialization constants and grid of the first `quantized_linear` that uses it; also the probe messages of `API.md` |
 | `FLLM_ALLOW_SOFTWARE_GPU`, `FLLM_VULKAN_VALIDATE`, `FLLM_VK_CACHE_DIR`, `FLLM_VK_PIPELINE_CACHE` | see `API.md` |
 

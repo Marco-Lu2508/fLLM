@@ -97,6 +97,7 @@ pub(crate) fn derive_caps(caps: &VkCaps) -> (VkCapsLike, Option<u32>) {
         subgroup_size: coop.map_or(caps.subgroup_size.max(1), |c| c.0),
         fp16: caps.fp16,
         max_shared: caps.max_shared_memory,
+        max_workgroup: caps.max_workgroup_invocations.min(caps.max_workgroup_size[0]),
         vendor: caps.vendor_id,
     };
     let pin = coop.and_then(|(size, pinned)| pinned.then_some(size));

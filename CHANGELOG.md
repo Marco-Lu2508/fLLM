@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Vulkan: a new tiled matrix-matrix kernel for prompt processing with quantized weights (`mmq_<format>_i`, used from 32 rows up on GPUs with the int8 dot product), and the shaders now emit the dot-product instruction themselves when the shader compiler is too old to do it (the Windows release build was affected). Compiled and unit tested, not yet measured on a GPU; `FLLM_VK_MM=0` switches the kernel off, `FLLM_VK_MM_BM` / `FLLM_VK_MM_BN` tune the tile ([docs/changes/vulkan-prefill.md](docs/changes/vulkan-prefill.md)).
 - NPU: a load option "What the NPU computes" (`--npu-mode all`): besides the long prompt blocks the NPU then also computes the single rows of the answer, the way later and stronger NPUs will be used. Measured on an Intel Core Ultra NPU with Qwen3.5-2B Q4_K_M: the answer runs at about 5 tokens/s this way (after a one-time compile of a few minutes that OpenVINO keeps in its cache), about as fast as the processor and well below the graphics chip.
 
 ## [0.1.7] - 2026-10-26

@@ -70,6 +70,7 @@ Several weights reading the same activations (q, k, v; gate, up) can share one p
 |---|---|---|
 | `mv_*` | 0 = workgroup size (power of two, 64/128), 1 = `NROWS` weight rows per workgroup (2), 2 = `NCOLS` = batch (1..8) | `ceil(rows / NROWS)` workgroups, split into `x <= 65535`, `y = ceil(n / 65535)` (group = `x + y * numGroupsX`) |
 | `mm_*_s`, `mm_*_i` | none (local size 256) | `ceil(rows / 64)`, `ceil(batch / 64)`, 1 |
+| `mmq_*_i` (`mm_q.comp`, binding 1 is read as `uvec4[]`, so the prepass buffer is a multiple of 16 bytes) | 0 = workgroup size = BM * BN / 16, 1 = BM (32/64/128), 2 = BN (64/128) | `ceil(rows / BM)`, `ceil(batch / BN)`, 1; planned instead of `mm_*_i` from batch 32 up |
 | `mm_*_c` | 0 = workgroup size = 4 x subgroup size | same |
 | `quant_act_q8*` | none (local size 128) | `ceil(batch * cols / 32 / 128)`, split like `mv_*` |
 | `quant_permute` | none (local size 256) | `ceil(batch * cols / 256)`, split like `mv_*` |

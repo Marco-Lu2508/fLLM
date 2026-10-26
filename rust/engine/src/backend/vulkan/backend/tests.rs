@@ -451,6 +451,7 @@ fn capability_profiles() -> Vec<VkCapsLike> {
                 subgroup_size,
                 fp16: true,
                 max_shared: 49152,
+                max_workgroup: 1024,
                 vendor: 0x10de,
             });
         }
@@ -461,6 +462,7 @@ fn capability_profiles() -> Vec<VkCapsLike> {
         subgroup_size: 32,
         fp16: false,
         max_shared: 16384,
+        max_workgroup: 1024,
         vendor: 0,
     });
     profiles
@@ -539,6 +541,7 @@ fn every_projection_plan_matches_its_compiled_module() {
         subgroup_size: 32,
         fp16: false,
         max_shared: 16384,
+        max_workgroup: 1024,
         vendor: 0,
     };
     for &quant in supported_formats() {
@@ -582,7 +585,7 @@ fn no_shader_is_orphaned() {
     let always = |_: &str| true;
     for &quant in supported_formats() {
         for caps in capability_profiles() {
-            for batch in [1usize, 16] {
+            for batch in [1usize, 16, 64] {
                 let options = PlanOptions {
                     exact: false,
                     available: Some(&always),

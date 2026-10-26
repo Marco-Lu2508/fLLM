@@ -18,7 +18,7 @@ pub use layout::{
     FormatInfo, PackedWeight, WeightSlice,
 };
 pub use plan::{
-    exact_math_from_env, plan_quantized_linear, plan_quantized_linear_with, split_groups,
+    exact_math_from_env, mmq_shared_bytes, mmq_tile, plan_quantized_linear, MmqKnobs, plan_quantized_linear_with, split_groups,
     BindingRole, BindingSlot, LinearPlan, PlanKind, PlanOptions, PrepassBinding, PrepassKind,
     PrepassPlan, PrepassRole, SpecConstant, Variant, VkCapsLike, MATVEC_MAX_BATCH, PUSH_BYTES,
 };

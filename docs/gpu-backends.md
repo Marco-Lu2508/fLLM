@@ -211,6 +211,11 @@ Create `rust/engine/src/backend/cuda.rs`.
 > **Status:** the native Vulkan backend exists (feature `vulkan`, `ash`, own allocator instead of `gpu-allocator`, SPIR-V compiled by `build.rs`): see
 > `rust/engine/src/backend/vulkan/{API.md,INTEGRATION.md}` and `rust/engine/shaders/vulkan/`. Level L0. The steps below are the original plan and differ in details.
 
+> **Prompt processing.** For batches of 32 rows and more the int8 dot-product path uses the tiled kernel `mmq_<fmt>_i` (`shaders/vulkan/mm_q.comp`: bank-conflict-free
+> shared-memory tiles, double buffering, one scale multiplication per scale group), and the shaders emit the dot-product instruction themselves when the
+> compiler (glslang < 15.2) lacks `GL_EXT_integer_dot_product`. Switches: `FLLM_VK_MM=0` (back to `mm_<fmt>_i`), `FLLM_VK_MM_MIN_BATCH`, `FLLM_VK_MM_BM`,
+> `FLLM_VK_MM_BN`; `FLLM_VK_PROFILE=1` times every kernel. Compiled and unit tested, speed not yet measured on a device: [changes/vulkan-prefill.md](changes/vulkan-prefill.md).
+
 The native Vulkan backend provides high-performance vendor-independent acceleration on Linux, Windows, and embedded hardware using `ash`.
 
 ### Step 1: Create Files
