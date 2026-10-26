@@ -234,8 +234,10 @@ Ordered by area.
 
 ## 6. NPUs in the app
 
-**Test level: L0 for everything in this section.** The NPU backends compile and their logic is unit tested; the authors have not run them on NPU
-hardware. Nothing here says that an NPU works. What exists:
+**Test level.** The Intel NPU path ran on one machine (a Core Ultra laptop, "Intel(R) AI Boost", architecture 3720, OpenVINO 2026.4.1 installed by
+the app): the runtime installed itself, the NPU compiled its models and a Qwen3.5-2B Q4_K_M model answered correctly with the NPU computing the
+matrix products. That is one device and one model; everything else in this section (AMD, Qualcomm, Apple, other Intel parts, other models) has
+only been compiled and unit tested (L0). What exists:
 
 | NPU | Status in the app |
 | --- | --- |
@@ -245,8 +247,13 @@ hardware. Nothing here says that an NPU works. What exists:
 | Apple Neural Engine | not detected by the app; probe code only (feature `npu-ane`) |
 
 **What the Intel path does.** The "hybrid" backend sends the large quantized projections (`quantized_linear`) of a prompt to the NPU and runs
-everything else on the processor's reference stream. No speed-up is expected when the model writes its answer, and the model is often slower than
-on the processor alone. The weights are held twice (the processor's copy and the NPU's converted copy). Only dense models work. Details, limits
+everything else (attention, normalisation, the layers with a gate) on the processor's reference stream. By default only blocks of 64 or more rows go
+to the NPU, so the answer, one row at a time, is computed by the processor. The load option **What the NPU computes: everything it can**
+(`--npu-mode all`) sends every projection to the NPU, also single rows (static chunks of 16 rows, padded); the first start compiles about a hundred
+small NPU models (several minutes, kept in OpenVINO's cache afterwards). Measured on the machine above with Qwen3.5-2B Q4_K_M and a short prompt:
+answer about 5 tokens/s in that mode, 6 tokens/s by default, 5 tokens/s on the processor alone and 25 tokens/s on the integrated graphics chip, so
+the NPU is not the fast choice on this hardware; the mode exists so that the whole model can run on an NPU, and for stronger NPUs. The model is often
+slower than on the processor alone. The weights are held twice (the processor's copy and the NPU's converted copy). Only dense models work. Details, limits
 and the measurement plan: `rust/engine/src/backend/npu/OPENVINO.md`.
 
 **Weight formats on the NPU** (conversion at load time): Q4_0 and Q8_0 exact (INT4 / INT8, group 32); Q4_1, Q2_K, Q3_K, Q4_K, IQ4_NL, MXFP4, NVFP4 and

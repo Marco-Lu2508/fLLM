@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- NPU: a load option "What the NPU computes" (`--npu-mode all`): besides the long prompt blocks the NPU then also computes the single rows of the answer, the way later and stronger NPUs will be used. Measured on an Intel Core Ultra NPU with Qwen3.5-2B Q4_K_M: the answer runs at about 5 tokens/s this way (after a one-time compile of a few minutes that OpenVINO keeps in its cache), about as fast as the processor and well below the graphics chip.
+
 ## [0.1.7] - 2026-10-26
 
 ### Fixed

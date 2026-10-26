@@ -288,7 +288,13 @@
     }
 
     // ---- switching the loaded model ---------------------------------------------------------------------------
-    const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs', device: 'optDevice' };
+    const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs', device: 'optDevice', npu_mode: 'optNpuMode' };
+    // the NPU choice only matters when the model runs on the NPU
+    function syncNpuMode() {
+      const onNpu = /^(npu|openvino)/.test($('optDevice').value);
+      for (const id of ['optNpuMode', 'optNpuModeLabel']) $(id).style.display = onNpu ? '' : 'none';
+    }
+    $('optDevice').addEventListener('change', syncNpuMode);
 
     function readOptions() {
       const out = {};
@@ -318,6 +324,7 @@
       for (const [name, id] of Object.entries(optionFields)) $(id).value = saved[name] ?? '';
       $('loadAdvanced').open = Object.values(saved).some((v) => v !== null && v !== undefined);
       await fillDeviceChoices(saved.device);
+      syncNpuMode();
       $('loadOptionsTitle').textContent = 'Load this model?';
       $('loadOptionsText').textContent = `The server restarts with ${label || reference}. This takes a few seconds; your chats stay in this browser.`;
       $('loadOptionsError').style.display = 'none';

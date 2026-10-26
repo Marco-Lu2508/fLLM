@@ -585,6 +585,8 @@
                     <label for="optDevice" class="app-item-desc">Run on</label>
                     <select id="optDevice" class="ui-select mono" style="width:100%;"><option value="auto">Automatic (recommended)</option></select>
                     <p id="optDeviceWarning" class="app-item-desc" style="display:none;grid-column:1 / -1;margin:0;"></p>
+                    <label for="optNpuMode" class="app-item-desc" id="optNpuModeLabel" style="display:none;">What the NPU computes</label>
+                    <select id="optNpuMode" class="ui-select mono" style="width:100%;display:none;"><option value="">Long prompts only (default)</option><option value="all">Everything it can (answers too; the first start compiles for the NPU and takes minutes, once)</option></select>
                     <label for="optContext" class="app-item-desc">Context length (tokens of memory for the conversation)</label>
                     <input type="text" id="optContext" class="ui-input mono" placeholder="auto">
                     <label for="optGpuLayers" class="app-item-desc">Layers on the graphics card</label>

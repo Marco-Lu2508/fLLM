@@ -632,6 +632,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|_| usage("invalid --threads"))
             }
             "--device" => device = value(&args, &mut i, "--device").to_lowercase(),
+            // `all`: the NPU computes every matrix product it can (the defaults send only long prompt blocks to it)
+            "--npu-mode" => {
+                if value(&args, &mut i, "--npu-mode").eq_ignore_ascii_case("all") {
+                    for (name, setting) in [("FLLM_NPU_MIN_BATCH", "1"), ("FLLM_NPU_CHUNK", "16"), ("FLLM_NPU_MIN_ELEMS", "1"), ("FLLM_NPU_CPU_GOPS", "0.001"), ("FLLM_NPU_OVERHEAD_US", "0")] {
+                        if env::var_os(name).is_none() {
+                            env::set_var(name, setting);
+                        }
+                    }
+                }
+            }
             "--gpu-memory-utilization" => {
                 gpu_memory_utilization = value(&args, &mut i, "--gpu-memory-utilization")
                     .parse()

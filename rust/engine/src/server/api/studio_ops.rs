@@ -22,6 +22,8 @@ pub(in crate::server) struct LoadOptions {
     pub max_seqs: Option<usize>,
     /// A `--device` value (`auto`, `cpu`, `vulkan:1`, `npu`); `None` keeps the start option of the server.
     pub device: Option<String>,
+    /// `all`: the NPU computes every matrix product it can, also the single rows of the answer (default: only the long prompt blocks).
+    pub npu_mode: Option<String>,
 }
 
 const CONTEXT_FLAGS: &[&str] = &["--ctx", "--ctx-size", "--max-model-len"];
@@ -30,6 +32,7 @@ const THREAD_FLAGS: &[&str] = &["--threads"];
 const KV_FLAGS: &[&str] = &["--kv-cache-type", "--kv-cache-dtype", "--cache-type-k", "-ctk", "--cache-type-v", "-ctv"];
 const SEQ_FLAGS: &[&str] = &["--max-seqs"];
 const DEVICE_FLAGS: &[&str] = &["--device"];
+const NPU_MODE_FLAGS: &[&str] = &["--npu-mode"];
 
 static NULL: Value = Value::Null;
 
@@ -89,6 +92,11 @@ impl LoadOptions {
                 _ => return Err(format!("The device \"{name}\" is not known. Use auto, cpu, or a device from the Hardware page.")),
             }
         }
+        match get("npu_mode").as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("auto") | Some("prompt") => {}
+            Some("all") => options.npu_mode = Some("all".to_owned()),
+            Some(other) => return Err(format!("The NPU mode \"{other}\" is not known. Use prompt or all.")),
+        }
         Ok(options)
     }
 
@@ -106,6 +114,7 @@ impl LoadOptions {
             "kv_cache_type": self.kv_cache_type,
             "max_seqs": self.max_seqs,
             "device": self.device,
+            "npu_mode": self.npu_mode,
         })
     }
 
@@ -133,7 +142,7 @@ impl LoadOptions {
 
     /// The server arguments with these options in place of the ones given before.
     pub fn apply(&self, args: &[String]) -> Vec<String> {
-        let all: Vec<&str> = [CONTEXT_FLAGS, GPU_LAYER_FLAGS, THREAD_FLAGS, KV_FLAGS, SEQ_FLAGS].concat();
+        let all: Vec<&str> = [CONTEXT_FLAGS, GPU_LAYER_FLAGS, THREAD_FLAGS, KV_FLAGS, SEQ_FLAGS, NPU_MODE_FLAGS].concat();
         // the device is only replaced when the options name one
         let all: Vec<&str> = if self.device.is_some() { [all, DEVICE_FLAGS.to_vec()].concat() } else { all };
         let mut out = remove_flags(args, &all);
@@ -155,6 +164,10 @@ impl LoadOptions {
         }
         if let Some(device) = self.device.as_ref().filter(|d| d.as_str() != "auto") {
             out.extend(["--device".to_owned(), device.clone()]);
+        }
+        // only meaningful on an NPU; the server ignores it otherwise
+        if let (Some(mode), true) = (&self.npu_mode, self.wants_npu()) {
+            out.extend(["--npu-mode".to_owned(), mode.clone()]);
         }
         out
     }
@@ -825,13 +838,27 @@ mod tests {
     #[test]
     fn options_are_read_and_checked() {
         let ok = LoadOptions::from_json(&json!({"context": "8192", "gpu_layers": "all", "threads": 6, "kv_cache_type": "Q8_0", "max_seqs": "auto"})).unwrap();
-        assert_eq!(ok, LoadOptions { context: Some(8192), gpu_layers: Some("all".into()), threads: Some(6), kv_cache_type: Some("q8_0".into()), max_seqs: None, device: None });
+        assert_eq!(ok, LoadOptions { context: Some(8192), gpu_layers: Some("all".into()), threads: Some(6), kv_cache_type: Some("q8_0".into()), max_seqs: None, device: None, npu_mode: None });
         assert!(LoadOptions::from_json(&json!({})).unwrap().is_automatic());
         assert!(LoadOptions::from_json(&json!({"context": "auto", "gpu_layers": "auto"})).unwrap().is_automatic());
         for bad in [json!({"context": 3}), json!({"context": "big"}), json!({"gpu_layers": -1}), json!({"threads": 0}), json!({"kv_cache_type": "q3_9"}), json!({"max_seqs": 1000})] {
             let error = LoadOptions::from_json(&bad).unwrap_err();
             assert!(error.ends_with('.'), "{error}");
         }
+    }
+
+    #[test]
+    fn the_npu_mode_is_passed_only_to_an_npu() {
+        let all = LoadOptions::from_json(&json!({"device": "npu", "npu_mode": "all"})).unwrap();
+        assert_eq!(all.npu_mode.as_deref(), Some("all"));
+        assert_eq!(all.apply(&args(&["serve", "--model", "m.gguf"])), args(&["serve", "--model", "m.gguf", "--device", "npu", "--npu-mode", "all"]));
+        // a stale mode does not travel to another device, and the default is no flag
+        let other = LoadOptions::from_json(&json!({"device": "cpu", "npu_mode": "all"})).unwrap();
+        assert!(!other.apply(&args(&["serve"])).contains(&"--npu-mode".to_owned()));
+        let prompt = LoadOptions::from_json(&json!({"device": "npu", "npu_mode": "prompt"})).unwrap();
+        assert_eq!(prompt.npu_mode, None);
+        assert!(LoadOptions::from_json(&json!({"npu_mode": "everything"})).is_err());
+        assert_eq!(all.to_json()["npu_mode"], "all");
     }
 
     #[test]
