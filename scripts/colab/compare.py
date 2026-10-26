@@ -274,6 +274,8 @@ def main():
     ap.add_argument("--no-ollama", action="store_true")
     ap.add_argument("--no-vllm", action="store_true")
     ap.add_argument("--no-sglang", action="store_true")
+    ap.add_argument("--fllm-args", default="", help="extra arguments for fllm-rs serve, e.g. \"--chunked-prefill-policy prefill-first\"")
+    ap.add_argument("--only", help="comma-separated engines to measure (the others are still installed if needed), e.g. fllm")
     args = ap.parse_args()
     os.makedirs(args.work, exist_ok=True)
     os.chdir(args.work)
@@ -329,7 +331,7 @@ def main():
         no_think = {"chat_template_kwargs": {"enable_thinking": False}}
         ctx_one = max(sizes) + args.tokens + 400
         for name, binary in engines.items():
-            if not binary or name not in (HF_ENGINES if hf else GGUF_ENGINES):
+            if not binary or name not in (HF_ENGINES if hf else GGUF_ENGINES) or (args.only and name not in args.only.split(",")):
                 continue
             if name == "fllm" and not os.path.exists(path):
                 per[name] = {"error": "no GGUF for fLLM (conversion failed)"}
@@ -338,12 +340,12 @@ def main():
             log(f"== {label} on {name}")
             server = None
             if name == "fllm":
-                server = Server([binary, "serve", "--model", path, "--device", "cuda", "--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"],
-                                f"http://127.0.0.1:{port}/health", "m", logfile="fllm.log")
+                server = Server([binary, "serve", "--model", path, "--device", "cuda", "--port", str(port), "--ctx", str(ctx), "--max-seqs", str(maxu), "--model-name", "m"] + args.fllm_args.split(),
+                                f"http://127.0.0.1:{port}/health", "m", logfile=f"fllm-{key}.log")
                 extra = no_think
             elif name == "llama.cpp":
                 server = Server([binary, "-m", path, "-ngl", "99", "-c", str(ctx), "-np", str(maxu), "--host", "127.0.0.1", "--port", str(port), "--alias", "m", "--no-webui"],
-                                f"http://127.0.0.1:{port}/health", "m", logfile="llama.log")
+                                f"http://127.0.0.1:{port}/health", "m", logfile=f"llama-{key}.log")
                 extra = no_think
             elif name == "ollama":
                 env = {"OLLAMA_HOST": f"127.0.0.1:{port}", "OLLAMA_MODELS": os.path.join(args.work, "ollama-models"),
@@ -353,19 +355,19 @@ def main():
                 def create(env=env):
                     rc, _ = sh("ollama create bench -f Modelfile", env=env, timeout=1800)
                     return rc == 0
-                server = Server([binary, "serve"], f"http://127.0.0.1:{port}/api/version", "bench", env=env, logfile="ollama.log", after=create)
+                server = Server([binary, "serve"], f"http://127.0.0.1:{port}/api/version", "bench", env=env, logfile=f"ollama-{key}.log", after=create)
                 extra = {"reasoning_effort": "none"}
             elif name == "vllm":
                 server = Server([binary, "serve", hf_dir, "--port", str(port), "--max-model-len", str(ctx_one), "--max-num-seqs", str(maxu),
                                  "--gpu-memory-utilization", "0.85", "--served-model-name", "m"],
                                 f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda", "PATH": f"{args.work}/vllm_env/bin:/usr/local/cuda/bin:" + os.environ["PATH"]},
-                                logfile="vllm.log")
+                                logfile=f"vllm-{key}.log")
                 extra = no_think
             elif name == "sglang":
                 server = Server([binary, "-m", "sglang.launch_server", "--model-path", hf_dir, "--port", str(port), "--host", "127.0.0.1", "--context-length", str(ctx_one),
                                  "--max-running-requests", str(maxu), "--mem-fraction-static", "0.8", "--served-model-name", "m"],
                                 f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda", "PATH": f"{args.work}/sglang_env/bin:/usr/local/cuda/bin:" + os.environ["PATH"]},
-                                logfile="sglang.log")
+                                logfile=f"sglang-{key}.log")
                 extra = no_think
             if not server or not server.ok:
                 tail = open(server.logfile).read()[-600:] if server else ""
@@ -378,6 +380,11 @@ def main():
                 per[name] = measure(server, port, sizes, users, args.tokens, extra)
             except Exception as ex:
                 per[name] = {"error": str(ex)[:200]}
+            if server.proc.poll() is not None or any("error" in r or r.get("each_tok_s") == 0.0 for r in per[name] if isinstance(r, dict)):
+                # the server failed during the run: keep the end of its log in the result
+                tail = open(server.logfile, errors="replace").read()[-3000:]
+                result.setdefault("failures", {})[f"{label} / {name}"] = tail
+                log(f"{name} failed, end of {server.logfile}: " + tail[-1500:])
             server.stop()
             time.sleep(3)
         result["models"][label] = per
