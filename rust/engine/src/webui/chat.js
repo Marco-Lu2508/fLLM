@@ -747,7 +747,7 @@
       { id: 'precise', name: 'Precise and brief', system: 'Answer briefly and factually, and only with what you are sure about. Say so when you do not know something.', temperature: 0.2, top_p: 0.9, top_k: 20 },
       { id: 'creative', name: 'Creative', system: 'You are an inventive writing partner. Offer surprising ideas and vivid language.', temperature: 1.0, top_p: 0.95, top_k: 60 },
       { id: 'programmer', name: 'Programmer', system: 'You are an experienced software developer. Answer with working code and a short explanation. State your assumptions explicitly.', temperature: 0.2, top_p: 0.9, top_k: 20 },
-      { id: 'translator', name: 'Translator English/German', system: "Translate the user's text between English and German. Output only the translation, without comments.", temperature: 0.1, top_p: 0.9, top_k: 20 },
+      { id: 'translator', name: 'Translator', system: "Translate the user's text into the language they ask for. If they name none, translate English into the language of their interface and other languages into English. Output only the translation, without comments.", temperature: 0.1, top_p: 0.9, top_k: 20 },
       { id: 'editor', name: 'Editor', system: 'Improve the spelling, grammar and style of the text. Then show in a short list what you changed.', temperature: 0.3, top_p: 0.9, top_k: 20 },
     ];
 
