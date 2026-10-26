@@ -6,6 +6,8 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-26
+
 ### Added
 - Studio: Settings "Skills and schedules": skills (Markdown procedures per user and per workspace, a `skill` tool and a propose-a-skill helper), scheduled tasks that the server runs on a clock (chat answers or read-only agent runs, last results kept, optional desktop notification), and full-text search of past chats and code sessions with a persistent copy on the computer. See `docs/changes/personal-agent.md`.
 - Thinking only where the model can think: the status route and `/v1/models` report `capabilities.thinking` (`control` none / toggle / effort / always, the template variable, the levels and the default), read from the chat template, the reasoning parser and the architecture. The Studio shows its Thinking chip only for models that can think, with the levels the model has (Off / Low / Medium / High for models with a switch, Low / Medium / High for effort models such as gpt-oss), remembered per chat.
