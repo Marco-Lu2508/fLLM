@@ -101,11 +101,36 @@ pub(crate) fn device_pieces(kv: &DeviceKvCache, block: usize) -> Result<BlockPie
     if block >= kv.pool_blocks {
         return Err("KV block outside the pool".into());
     }
+    if kv.layout.is_some() {
+        return layered_pieces(kv, block);
+    }
     let (key_layout, value_layout) = kv.layouts();
     let (Some(key_regions), Some(value_regions)) = (key_layout.block_regions(kv.block_size), value_layout.block_regions(kv.block_size)) else {
         return Err("this KV format has blocks that are not whole words".into());
     };
     Ok(BlockPieces::new(kv.layers, kv.words_per_layer_k, &key_regions, kv.words_per_layer_v, &value_regions, block))
+}
+
+/// The pieces of `block` in pools whose layers have their own geometry (`DeviceKvCache::layout`); layers that read an earlier layer's cache
+/// have no region and no pieces.
+fn layered_pieces(kv: &DeviceKvCache, block: usize) -> Result<BlockPieces, String> {
+    let (key_format, value_format) = kv.formats();
+    let mut out = BlockPieces { keys: Vec::new(), values: Vec::new() };
+    for layer in 0..kv.layers {
+        let heads = kv.layer_kv_heads(layer);
+        for (pieces, format, dim, start, words) in [
+            (&mut out.keys, key_format, kv.layer_head_dim(layer), kv.layer_key_offset(layer), kv.layer_key_words(layer)),
+            (&mut out.values, value_format, kv.layer_value_dim(layer), kv.layer_value_offset(layer), kv.layer_value_words(layer)),
+        ] {
+            if words == 0 {
+                continue;
+            }
+            let layout = crate::kv_format::KvLayout::new(format, kv.slots(), heads, dim);
+            let regions = layout.block_regions(kv.block_size).ok_or("this KV format has blocks that are not whole words")?;
+            pieces.extend(regions.iter().map(|&(offset, per_block)| (start + offset + block * per_block, per_block)));
+        }
+    }
+    Ok(out)
 }
 
 fn slice(pool: &DeviceBuffer, offset: usize, words: usize) -> Result<DeviceBuffer, BackendError> {

@@ -541,6 +541,12 @@ pub struct DeviceLayerWeights {
     pub qkv: Option<DeviceMergedProj>,
     /// gate and up as one matrix: `ffn_gate` and `ffn_up` are `None` then, `ffn_down` is set.
     pub gate_up: Option<DeviceMergedProj>,
+    /// Gemma per-layer input path after the feed-forward block: gate (hidden -> per-layer width), projection back and its norm.
+    pub ple: Option<(crate::backend::DeviceWeight, crate::backend::DeviceWeight, crate::backend::DeviceBuffer)>,
+    /// Gemma layer output scale (multiplies the residual stream at the end of the layer).
+    pub out_scale: Option<f32>,
+    /// Weightless RMS norm of every value head (Gemma 4 / 3n): a vector of ones of the value width.
+    pub v_norm: Option<crate::backend::DeviceBuffer>,
 }
 
 /// Several projections of a layer uploaded as one matrix (`FLLM_MERGE_PROJ`): rows of the parts in `parts` (q, k, v or gate, up, 0).
@@ -662,6 +668,19 @@ fn device_rms_inplace(
     std::mem::swap(buf, &mut out);
     scratch.recycle(out);
     Ok(())
+}
+
+/// Q8_0 blocks (`f16` scale, 32 `i8`) of `data`, whose length is a multiple of 32 (ggml's `quantize_row_q8_0`).
+fn quantize_q8_0(data: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() / 32 * 34);
+    for block in data.as_chunks::<32>().0 {
+        let amax = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let d = amax / 127.0;
+        let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+        out.extend_from_slice(&half::f16::from_f32(d).to_le_bytes());
+        out.extend(block.iter().map(|v| (v * inv).round().clamp(-127.0, 127.0) as i8 as u8));
+    }
+    out
 }
 
 /// `out = norm(x)` with the model's norm kind (RMS or LayerNorm).
@@ -2518,6 +2537,21 @@ impl RustDecoder {
                 }
             };
 
+        // an unquantized linear as Q8_0 (blocks of 32 weights with an f16 scale): the int8 kernels instead of the f32 one, at a quarter of
+        // the memory and a relative error below 0.4 % per weight
+        let upload_linear_q8 = |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
+            if linear.packed_weights().is_some() || !linear.cols.is_multiple_of(32) || linear.weight.data.len() != linear.rows * linear.cols {
+                return upload_linear(name, linear);
+            }
+            let bytes = quantize_q8_0(&linear.weight.data);
+            backend
+                .upload_weight(name, &bytes, crate::backend::QuantType::Q8_0, linear.rows, linear.cols, linear.bias.as_deref())
+                .or_else(|_| {
+                    backend.upload_weight(name, cast_f32_to_u8(&linear.weight.data), crate::backend::QuantType::F32, linear.rows, linear.cols, linear.bias.as_deref())
+                })
+                .map_err(|e| e.to_string())
+        };
+
         // Linears whose packed rows are one after the other in memory (the Marlin 4-bit formats without activation permutation,
         // NVFP4, and K-quants) as one device matrix: concatenated along the output dimension.
         // `None` when the parts differ in format or width, or have only some biases.
@@ -2642,6 +2676,9 @@ impl RustDecoder {
                     sinks: None,
                     qkv: None,
                     gate_up: None,
+                    ple: None,
+                    out_scale: None,
+                    v_norm: None,
                 });
                 continue;
             }
@@ -2653,7 +2690,7 @@ impl RustDecoder {
                 .transpose()?;
             // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
             let merged_qkv = match &layer.attn {
-                Attn::Std { q, k, v } if merge_on && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() => {
+                Attn::Std { q, k, v } if merge_on && layer.value_moe.is_none() && !layer.output_gate && self.cfg.qkv_clip.is_none() && !layer.kv_shared && !layer.k_eq_v => {
                     upload_merged(&format!("blk.{i}.attn_qkv"), &[q, k, v])?
                 }
                 _ => None,
@@ -2662,8 +2699,8 @@ impl RustDecoder {
                 Attn::Std { .. } if merged_qkv.is_some() => (None, None, None),
                 Attn::Std { q, k, v } => (
                     Some(upload_linear(&format!("blk.{i}.attn_q"), q)?),
-                    Some(upload_linear(&format!("blk.{i}.attn_k"), k)?),
-                    if layer.value_moe.is_some() { None } else { Some(upload_linear(&format!("blk.{i}.attn_v"), v)?) },
+                    if layer.kv_shared { None } else { Some(upload_linear(&format!("blk.{i}.attn_k"), k)?) },
+                    if layer.value_moe.is_some() || layer.kv_shared || layer.k_eq_v { None } else { Some(upload_linear(&format!("blk.{i}.attn_v"), v)?) },
                 ),
                 _ => (None, None, None),
             };
@@ -2935,6 +2972,20 @@ impl RustDecoder {
                 sinks: layer.sinks.clone().map(Arc::new),
                 qkv: merged_qkv,
                 gate_up: merged_gate_up,
+                ple: match layer.gemma.as_ref().and_then(|g| g.ple_parts()) {
+                    Some((gate, proj, norm)) => Some((
+                        upload_linear_q8(&format!("blk.{i}.inp_gate"), gate)?,
+                        upload_linear_q8(&format!("blk.{i}.proj"), proj)?,
+                        upload_norm(&format!("blk.{i}.post_norm"), norm)?,
+                    )),
+                    None => None,
+                },
+                out_scale: layer.gemma.as_ref().and_then(|g| g.output_scale()).filter(|&s| s != 1.0),
+                v_norm: if self.cfg.value_norm && !layer.kv_shared {
+                    Some(upload_vec(&vec![1.0f32; self.cfg.layer_value_dim(i)])?)
+                } else {
+                    None
+                },
             });
         }
 
@@ -3125,6 +3176,8 @@ impl RustDecoder {
             rms(&mut host_x, &vec![1.0; hidden], cfg.eps);
         }
         self.stash_embeddings(&host_x);
+        // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings
+        let ple_host = if self.ple.is_some() { self.ple_inputs(ids, &host_x)? } else { None };
         if !recording {
             stream
                 .upload_activations(&mut x_buf, &host_x)
@@ -3155,7 +3208,7 @@ impl RustDecoder {
                 let mut host_x = vec![0.0f32; rows * hidden];
                 stream.download(cast_f32_to_u8_mut(&mut host_x), &x_buf).map_err(err)?;
                 let mut trace = crate::cpu_profile::Trace::new(false, rows);
-                self.host_layers(i..i + 1, &mut host_x, &positions, tables, lengths, key, value, &mut trace, None, &mut Vec::new())?;
+                self.host_layers(i..i + 1, &mut host_x, &positions, tables, lengths, key, value, &mut trace, ple_host.as_deref(), &mut Vec::new())?;
                 stream.upload(&mut x_buf, cast_f32_to_u8(&host_x)).map_err(err)?;
                 continue;
             }
@@ -3187,7 +3240,9 @@ impl RustDecoder {
             }
             let std_qkv = match (&dev_layer.q, &dev_layer.k, &dev_layer.v) {
                 (Some(q), Some(k), Some(v)) => Some((q, k, Some(v))),
-                (Some(q), Some(k), None) if dev_layer.host_values => Some((q, k, None)),
+                (Some(q), Some(k), None) if dev_layer.host_values || layer.k_eq_v => Some((q, k, None)),
+                // the layer reads the cache of an earlier layer: only the query is projected (the key weight is a placeholder)
+                (Some(q), None, None) if layer.kv_shared => Some((q, q, None)),
                 // one matrix for all three: the merged path below replaces the individual projections
                 _ if dev_layer.qkv.is_some() => dev_layer.qkv.as_ref().map(|m| (&m.weight, &m.weight, Some(&m.weight))),
                 _ => None,
@@ -3209,7 +3264,9 @@ impl RustDecoder {
                 if let Some((q_w, k_w, v_w)) = std_qkv {
                 // 4-bit q/k/v: the three GEMMs leave FP16 and one kernel adds the bias, rotates q and k and writes k and v into the cache
                 let mut fused_qkv = false;
-                if cfg.rope.dims > 0
+                let plain_kv = !layer.kv_shared && !layer.k_eq_v && dev_layer.v_norm.is_none();
+                if plain_kv
+                    && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
                     && self.kv_kind == 1
                     && dev_layer.q_norm.is_none()
@@ -3228,8 +3285,8 @@ impl RustDecoder {
                     if ok {
                         let (cos, sin) = &dev_weights.rope[layer.rope_table];
                         let rope_params = RopeParams {
-                            heads: cfg.heads,
-                            kv_heads: cfg.kv_heads,
+                            heads: layer_heads,
+                            kv_heads: layer_kv_heads,
                             dim: dk,
                             rope_dim: cfg.layer_rope_dims(i),
                             neox: cfg.rope.neox,
@@ -3263,7 +3320,8 @@ impl RustDecoder {
                 let mut merged_fused = false;
                 if let Some(mq) = &dev_layer.qkv {
                     let (nq, nk, nv) = (mq.parts[0], mq.parts[1], mq.parts[2]);
-                    let can_fuse = cfg.rope.dims > 0
+                    let can_fuse = plain_kv
+                        && cfg.rope.dims > 0
                         && cfg.layer_rotates(i)
                         && self.kv_kind == 1
                         && !cfg.qk_norm_after_rope
@@ -3279,8 +3337,8 @@ impl RustDecoder {
                     if can_fuse {
                         let (cos, sin) = &dev_weights.rope[layer.rope_table];
                         let rope_params = RopeParams {
-                            heads: cfg.heads,
-                            kv_heads: cfg.kv_heads,
+                            heads: layer_heads,
+                            kv_heads: layer_kv_heads,
                             dim: dk,
                             rope_dim: cfg.layer_rope_dims(i),
                             neox: cfg.rope.neox,
@@ -3332,7 +3390,7 @@ impl RustDecoder {
                     .quantized_linear(&mut q_buf, &normed_buf, q_w, q_w.bias.as_ref())
                     .map_err(err)?;
                 }
-                if !merged_done {
+                if !merged_done && !layer.kv_shared {
                 stream
                     .quantized_linear(&mut k_buf, &normed_buf, k_w, k_w.bias.as_ref())
                     .map_err(err)?;
@@ -3347,6 +3405,13 @@ impl RustDecoder {
                     stream.download(cast_f32_to_u8_mut(&mut host_normed), &normed_buf).map_err(err)?;
                     let values = self.value_moe_forward(vm, &host_normed)?;
                     stream.upload(&mut v_buf, cast_f32_to_u8(&values)).map_err(err)?;
+                } else if layer.k_eq_v {
+                    // the values are the keys before their norm and rotation
+                    stream.copy_buffer(&mut v_buf, &k_buf).map_err(err)?;
+                }
+                if !merged_done {
+                    // Gemma 4 / 3n: every value head is RMS-normalised without a weight
+                    device_rms_inplace(&mut **stream, &mut scratch, &mut v_buf, dev_layer.v_norm.as_ref(), cfg.eps, 1)?;
                 }
                 if let Some(clip) = cfg.qkv_clip {
                     for buf in [&mut q_buf, &mut k_buf, &mut v_buf] {
@@ -3363,6 +3428,7 @@ impl RustDecoder {
                 let mut qk_fused = merged_fused;
                 if qk_norm_rope_fusion()
                     && !qk_fused
+                    && !layer.kv_shared
                     && !cfg.qk_norm_after_rope
                     && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
@@ -3374,8 +3440,8 @@ impl RustDecoder {
                 {
                     let (cos, sin) = &dev_weights.rope[layer.rope_table];
                     let rope_params = RopeParams {
-                        heads: cfg.heads,
-                        kv_heads: cfg.kv_heads,
+                        heads: layer_heads,
+                        kv_heads: layer_kv_heads,
                         dim: dk,
                         rope_dim: cfg.layer_rope_dims(i),
                         neox: cfg.rope.neox,
@@ -3407,8 +3473,8 @@ impl RustDecoder {
                 if cfg.rope.dims > 0 && cfg.layer_rotates(i) && !qk_fused {
                     let (cos, sin) = &dev_weights.rope[layer.rope_table];
                     let rope_params = RopeParams {
-                        heads: cfg.heads,
-                        kv_heads: cfg.kv_heads,
+                        heads: layer_heads,
+                        kv_heads: layer_kv_heads,
                         dim: dk,
                         rope_dim: cfg.layer_rope_dims(i),
                         neox: cfg.rope.neox,
@@ -3423,7 +3489,7 @@ impl RustDecoder {
                             stream.rope(&mut q_buf, &mut k_buf, &axis_positions, &axis_params).map_err(err)?;
                         }
                     } else {
-                        if !cfg.qk_norm_after_rope && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
+                        if !cfg.qk_norm_after_rope && !layer.kv_shared && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
                             kv_written = stream
                                 .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, i, &positions, &slots, &rope_params)
                                 .map_err(err)?;
@@ -3953,6 +4019,38 @@ impl RustDecoder {
                 stream.upload(&mut buf, cast_f32_to_u8(&added)).map_err(err)?;
                 stream.residual_add(&mut x_buf, &buf, 1.0).map_err(err)?;
                 scratch.recycle(buf);
+            }
+            // Gemma per-layer input path: x += norm(proj(act(gate(x)) * input of this layer)), then the layer output scale
+            if let (Some((gate_w, proj_w, norm_w)), Some(inputs), Some(global)) = (&dev_layer.ple, ple_host.as_deref(), self.ple.as_ref()) {
+                let width = global.dim;
+                let total = cfg.layers * width;
+                let mut layer_in = vec![0.0f32; rows * width];
+                for r in 0..rows {
+                    layer_in[r * width..(r + 1) * width].copy_from_slice(&inputs[r * total + i * width..r * total + (i + 1) * width]);
+                }
+                let mut input_buf = scratch.acquire(rows * width * 4).map_err(err)?;
+                stream.upload(&mut input_buf, cast_f32_to_u8(&layer_in)).map_err(err)?;
+                let mut gated = scratch.acquire(rows * width * 4).map_err(err)?;
+                stream.quantized_linear(&mut gated, &x_buf, gate_w, gate_w.bias.as_ref()).map_err(err)?;
+                let mut act = scratch.acquire(rows * width * 4).map_err(err)?;
+                match cfg.activation {
+                    Activation::GeluTanh => stream.geglu(&mut act, &gated, &input_buf).map_err(err)?,
+                    Activation::Silu => stream.swiglu(&mut act, &gated, &input_buf).map_err(err)?,
+                    other => stream.activation_glu(&mut act, &gated, &input_buf, act_code(other)).map_err(err)?,
+                }
+                let mut back = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                stream.quantized_linear(&mut back, &act, proj_w, proj_w.bias.as_ref()).map_err(err)?;
+                device_post_norm_inplace(&mut **stream, &mut scratch, cfg.norm, &mut back, Some(norm_w), None, cfg.post_eps, self.groups)?;
+                stream.residual_add(&mut x_buf, &back, 1.0).map_err(err)?;
+                for buf in [input_buf, gated, act, back] {
+                    scratch.recycle(buf);
+                }
+            }
+            if let Some(scale) = dev_layer.out_scale {
+                let mut copy = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                stream.copy_buffer(&mut copy, &x_buf).map_err(err)?;
+                stream.residual_add(&mut x_buf, &copy, scale - 1.0).map_err(err)?;
+                scratch.recycle(copy);
             }
             if i == 0 || crate::backend::env_flag_once!("FLLM_DEBUG_LAYERS") {
                 debug_sum(&mut **stream, &format!("l_out-{i}"), &x_buf);
@@ -7217,5 +7315,23 @@ mod grouped_rms_norm_tests {
             stream.download(cast_f32_to_u8_mut(&mut got_post), &post_buf).expect("download");
             assert_eq!(got, got_post);
         }
+    }
+}
+
+#[cfg(test)]
+mod q8_upload_tests {
+    #[test]
+    fn q8_0_encoding_round_trips_through_the_gguf_decoder() {
+        let data: Vec<f32> = (0..96).map(|i| ((i * 37 % 23) as f32 - 11.0) * 0.013 + if i == 40 { 0.9 } else { 0.0 }).collect();
+        let bytes = super::quantize_q8_0(&data);
+        assert_eq!(bytes.len(), 3 * 34);
+        let back = crate::compute::dequantize(&bytes, 8, data.len()).unwrap();
+        for (block, decoded) in data.chunks(32).zip(back.chunks(32)) {
+            let amax = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            for (a, b) in block.iter().zip(decoded) {
+                assert!((a - b).abs() <= amax / 127.0 * 0.51 + 1e-3 * amax, "{a} vs {b}");
+            }
+        }
+        assert!(super::quantize_q8_0(&[0.0; 32]).iter().skip(2).all(|&b| b == 0));
     }
 }

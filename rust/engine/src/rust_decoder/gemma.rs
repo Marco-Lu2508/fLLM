@@ -74,7 +74,7 @@ pub(super) struct PleGlobal {
     table: Embedding,
     projection: Linear,
     norm: Vec<f32>,
-    dim: usize,
+    pub(super) dim: usize,
 }
 
 fn tensor_exists(mapping: &MappedGguf, name: &str) -> bool {
@@ -189,23 +189,30 @@ pub(super) fn load_global(model: &GgufModel, cfg: &ModelConfig) -> Result<Option
 }
 
 impl GemmaLayer {
-    /// What the device forward pass does not run of this layer (it has no kernels for these parts yet), if anything.
+    /// What the device forward pass does not run of this layer (it has no kernels for these parts yet), if anything. The per-layer
+    /// inputs and the output scale run on the device.
     pub(super) fn device_gap(&self) -> Option<&'static str> {
-        if self.ple.is_some() {
-            Some("Gemma per-layer embeddings")
-        } else if self.altup.is_some() {
+        if self.altup.is_some() {
             Some("Gemma AltUp residual streams")
         } else if self.laurel.is_some() {
             Some("Gemma LAuReL residual")
         } else if self.moe.is_some() {
             Some("the Gemma mixture-of-experts branch")
-        } else if self.scalar.is_some_and(|s| s != 1.0) {
-            Some("a Gemma layer output scale")
         } else if self.sparsity > 0.0 {
             Some("Gemma activation sparsity")
         } else {
             None
         }
+    }
+
+    /// Gate, projection and norm of the per-layer input path.
+    pub(super) fn ple_parts(&self) -> Option<(&Linear, &Linear, &Norm)> {
+        self.ple.as_ref().map(|p| (&p.gate, &p.proj, &p.norm))
+    }
+
+    /// The layer output scale.
+    pub(super) fn output_scale(&self) -> Option<f32> {
+        self.scalar
     }
 }
 
