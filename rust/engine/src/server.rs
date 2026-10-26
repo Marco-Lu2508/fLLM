@@ -88,6 +88,8 @@ struct AppState {
     tool_parser: Arc<dyn crate::tool_parsers::ToolParser>,
     /// Reasoning format of the model (--reasoning-parser, else chosen from the chat template).
     reasoning_family: Family,
+    /// What the loaded model can do about thinking (`capabilities.thinking` of the status route).
+    thinking: crate::thinking::ThinkingCaps,
     tokenizer: Arc<TokenizerBundle>,
     grammar_factory: Arc<llguidance::ParserFactory>,
     worker: std_mpsc::Sender<WorkerCommand>,
@@ -182,6 +184,141 @@ impl GenerationRx {
     }
 }
 
+/// Budget forcing for `thinking_budget`: the state of a request whose reasoning block is cut after a number of tokens.
+struct BudgetControl {
+    state: Arc<AppState>,
+    request_id: String,
+    prompt: Vec<i64>,
+    sampling: crate::sampling::SamplingParams,
+    max_tokens: usize,
+    spec: ReasoningSpec,
+    machine: crate::thinking::BudgetMachine,
+    /// Every token produced so far, the forced ones included.
+    ids: Vec<u32>,
+}
+
+impl BudgetControl {
+    /// Looks at one more generated token. When the reasoning block is still open at the budget, returns the tokens that end it
+    /// (the closing tag and a line break); the caller continues the generation from there.
+    fn observe(&mut self, event: &crate::runtime::TokenEvent) -> Option<Vec<u32>> {
+        use crate::thinking::{Probe, Step};
+        self.ids.push(event.token_id as u32);
+        if event.finished {
+            self.machine.finish();
+            return None;
+        }
+        let (state, spec, ids) = (&self.state, &self.spec, &self.ids);
+        let mut close = None;
+        let step = self.machine.on_token(|| {
+            let Ok(text) = decode_chat_text(&state.tokenizer, ids, Some(spec)) else {
+                return Probe::Absent;
+            };
+            let probe = spec.parser.probe(&text);
+            if probe == Probe::Open {
+                close = spec.parser.close_tag(&text);
+            }
+            probe
+        });
+        if step != Step::Force {
+            return None;
+        }
+        let tail = state.tokenizer.encode_without_bos(&format!("
+{}
+
+", close?)).ok()?;
+        // no room left for an answer: the length limit ends the reply as it would without a budget
+        if tail.is_empty() || self.max_tokens <= self.ids.len() + tail.len() {
+            return None;
+        }
+        self.ids.extend(&tail);
+        Some(tail)
+    }
+
+    /// The second part of the request: the prompt, the reasoning so far and the closing tag, then the answer.
+    fn continuation(&self) -> Result<GenerationRx, String> {
+        let mut prompt = self.prompt.clone();
+        prompt.extend(self.ids.iter().map(|id| i64::from(*id)));
+        let mut sampling = self.sampling.clone();
+        sampling.min_tokens = sampling.min_tokens.saturating_sub(self.ids.len());
+        submit_constrained(
+            &self.state,
+            &format!("{}.answer", self.request_id),
+            prompt,
+            self.max_tokens - self.ids.len(),
+            sampling,
+            None,
+            ImageOverrides::default(),
+        )
+        .map_err(|_| "the server could not continue the reply after the thinking budget (it is busy)".to_owned())
+    }
+}
+
+/// The token stream of a chat request. With a thinking budget it ends the reasoning block itself: when the budget's tokens are
+/// used up and the block is open, the closing tag is delivered as if the model had written it, the first generation is
+/// cancelled and a second one continues from prompt + reasoning + tag. The caller sees one uninterrupted stream.
+struct ReasoningRx {
+    rx: Option<GenerationRx>,
+    control: Option<BudgetControl>,
+    queue: std::collections::VecDeque<crate::runtime::TokenEvent>,
+    /// The reasoning block was cut: the tokens in `queue` come first, then the continuation starts.
+    resume: bool,
+    resumed: bool,
+    prompt_tokens: usize,
+}
+
+impl ReasoningRx {
+    fn new(rx: GenerationRx, control: Option<BudgetControl>) -> Self {
+        let prompt_tokens = control.as_ref().map_or(0, |c| c.prompt.len());
+        Self { rx: Some(rx), control, queue: Default::default(), resume: false, resumed: false, prompt_tokens }
+    }
+
+    fn timings(&self, prompt_tokens: usize) -> Value {
+        self.rx.as_ref().map_or(Value::Null, |rx| rx.observation.timings(prompt_tokens))
+    }
+
+    async fn recv(&mut self) -> Option<Result<crate::runtime::TokenEvent, String>> {
+        if let Some(event) = self.queue.pop_front() {
+            return Some(Ok(event));
+        }
+        if self.resume {
+            self.resume = false;
+            // the first part must release its slot before the second one asks for one
+            self.rx = None;
+            match self.control.as_ref()?.continuation() {
+                Ok(rx) => {
+                    self.rx = Some(rx);
+                    self.resumed = true;
+                }
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        let item = self.rx.as_mut()?.recv().await?;
+        let mut event = match item {
+            Ok(event) => event,
+            Err(error) => return Some(Err(error)),
+        };
+        if self.resumed {
+            // the continuation reports the cache hits of the longer prompt
+            event.cached_prompt_tokens = event.cached_prompt_tokens.min(self.prompt_tokens);
+        } else if let Some(control) = self.control.as_mut() {
+            if let Some(tail) = control.observe(&event) {
+                for id in tail {
+                    self.queue.push_back(crate::runtime::TokenEvent {
+                        token_id: i64::from(id),
+                        finished: false,
+                        finish_reason: None,
+                        logprobs: None,
+                        request_finished: false,
+                        ..event.clone()
+                    });
+                }
+                self.resume = true;
+            }
+        }
+        Some(Ok(event))
+    }
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -263,7 +400,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
     let grammar_factory = Arc::new(tokenizer.grammar_factory()?);
     let tool_parser = crate::tool_parsers::select(&model_arch, &format!("{chat_template}\n{tool_chat_template}"), config.tool_parser.as_deref())?;
     let reasoning_family = Family::select(&chat_template, config.reasoning_parser.as_deref())?;
-    tracing::info!("tool parser: {}, reasoning parser: {:?}", tool_parser.id(), reasoning_family);
+    let thinking = crate::thinking::ThinkingCaps::detect(&chat_template, reasoning_family, &model_arch);
+    tracing::info!("tool parser: {}, reasoning parser: {:?}, thinking: {}", tool_parser.id(), reasoning_family, thinking.control.name());
     let http_context = http::HttpContext::new(config.http.clone());
     let ready = Arc::new(AtomicBool::new(false));
     let state = Arc::new(AppState {
@@ -273,6 +411,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         tool_chat_template,
         tool_parser,
         reasoning_family,
+        thinking,
         tokenizer: Arc::new(tokenizer),
         grammar_factory,
         worker: worker_tx,
@@ -1300,7 +1439,7 @@ async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         .map(|id| {
             json!({"id":id,"object":"model","created":created,"owned_by":"fllm","root":state.model_name,
                    "parent":null,"max_model_len":state.max_context,
-                   "capabilities":{"vision":vision,"video":video,"audio":audio},"modalities":modalities})
+                   "capabilities":{"vision":vision,"video":video,"audio":audio,"thinking":state.thinking.to_json()},"modalities":modalities})
         })
         .collect();
     Json(json!({"object":"list","data":data})).into_response()
@@ -1428,6 +1567,26 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
         }
         template_kwargs.insert("reasoning_effort".into(), effort.clone());
     }
+    // thinking budget: `thinking_budget` tokens, or on a model with a thinking switch the budget of a reasoning_effort level
+    let thinking_budget = match crate::thinking::request_budget(
+        body.get("thinking_budget"),
+        body.get("reasoning_effort").and_then(Value::as_str),
+        state.thinking.control,
+    ) {
+        Ok(budget) => budget,
+        Err(error) => return api_error_with(StatusCode::BAD_REQUEST, &error, None, Some("thinking_budget")),
+    };
+    if thinking_budget.is_some() && body.get("thinking_budget").is_some_and(|v| !v.is_null()) && body.get("n").and_then(Value::as_u64).unwrap_or(1) > 1 {
+        return api_error_with(StatusCode::BAD_REQUEST, "thinking_budget cannot be combined with n > 1", None, Some("thinking_budget"));
+    }
+    if state.thinking.control == crate::thinking::Control::Toggle && !state.thinking.variable.is_empty() {
+        // asking for an effort or a budget switches thinking on, "none" off, unless the request set the switch itself
+        let asked = thinking_budget.is_some() || body.get("reasoning_effort").is_some();
+        if asked && !template_kwargs.contains_key(state.thinking.variable) {
+            let off = body.get("reasoning_effort").and_then(Value::as_str).is_some_and(crate::thinking::effort_is_off);
+            template_kwargs.insert(state.thinking.variable.into(), json!(!off));
+        }
+    }
     let prompt = match render_messages(
         &state,
         Value::Array(messages.clone()),
@@ -1445,7 +1604,8 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
         Ok(ids) => ids.into_iter().map(i64::from).collect::<Vec<_>>(),
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
     };
-    let reasoning = ReasoningSpec::for_request(&state, &prompt, &tool_spec);
+    let mut reasoning = ReasoningSpec::for_request(&state, &prompt, &tool_spec);
+    reasoning.budget = thinking_budget;
     openai_generate(
         state,
         body,
@@ -2232,7 +2392,22 @@ async fn openai_generate(
         Ok(c) => c,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
     };
-    let mut rx = match submit_constrained(
+    // thinking budget: only for one unconstrained, text-only choice
+    let budget_plan = reasoning
+        .as_ref()
+        .and_then(|spec| spec.budget.map(|budget| (spec.clone(), budget)))
+        .filter(|_| best_of == 1 && constraint.is_none() && images.is_empty());
+    let budget_control = budget_plan.map(|(spec, budget)| BudgetControl {
+        state: state.clone(),
+        request_id: request_id.clone(),
+        prompt: prompt.clone(),
+        sampling: sampling.clone(),
+        max_tokens,
+        spec,
+        machine: crate::thinking::BudgetMachine::new(budget),
+        ids: Vec::new(),
+    });
+    let rx = match submit_constrained(
         &state,
         &request_id,
         prompt.clone(),
@@ -2244,6 +2419,7 @@ async fn openai_generate(
         Ok(rx) => rx,
         Err(response) => return response,
     };
+    let mut rx = ReasoningRx::new(rx, budget_control);
     state.metrics.requests.fetch_add(1, Ordering::Relaxed);
     if stream {
         let state2 = state.clone();
@@ -2328,7 +2504,7 @@ async fn openai_generate(
                             } else {
                                 json!({"index":choice_index,"text":"","finish_reason":reason,"logprobs":null})
                             };
-                            let final_obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":[choice],"usage":null,"timings":rx.observation.timings(prompt.len())});
+                            let final_obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":[choice],"usage":null,"timings":rx.timings(prompt.len())});
                             yield Ok::<Event, Infallible>(Event::default().data(final_obj.to_string()));
                             current.done = true;
                             if choice_states.iter().all(|choice| choice.done) {
@@ -2463,7 +2639,7 @@ async fn openai_generate(
             choices.push(choice);
         }
         Json(json!({"id":request_id,"object":if is_chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":choices,
-            "usage":openai_usage(prompt.len(), completion, cached, reasoning_count),"timings":rx.observation.timings(prompt.len())})).into_response()
+            "usage":openai_usage(prompt.len(), completion, cached, reasoning_count),"timings":rx.timings(prompt.len())})).into_response()
     }
 }
 
@@ -2591,6 +2767,8 @@ struct ReasoningSpec {
     /// Marker tokens that are special tokens: kept as literal text when decoding. Holds the
     /// reasoning tags and, when the request declares tools, the tool-call markers.
     keep: Vec<(u32, String)>,
+    /// Reasoning tokens after which the server ends the reasoning block itself (`thinking_budget`).
+    budget: Option<usize>,
 }
 
 impl ReasoningSpec {
@@ -2601,6 +2779,7 @@ impl ReasoningSpec {
         Self {
             keep: keep_ids(state, literals),
             parser,
+            budget: None,
         }
     }
 
@@ -2614,6 +2793,7 @@ impl ReasoningSpec {
         Self {
             parser: Family::Think.parser(prompt),
             keep: Vec::new(),
+            budget: None,
         }
     }
 

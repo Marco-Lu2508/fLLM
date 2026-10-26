@@ -19,6 +19,7 @@
 //! | `granite` | `Here is my thought process:` ... `Here is my response:` | Granite 3.2/3.3 template |
 //! | `hunyuan` | `<think>` ... `</think>` then the answer inside `<answer>` ... `</answer>` | Hunyuan-A13B |
 
+use crate::thinking::Probe;
 use std::sync::Arc;
 
 /// Reasoning and answer of the text seen so far.
@@ -41,6 +42,17 @@ pub trait ReasoningParser: Send + Sync {
 
     /// Split the text produced so far. `complete` is `true` for the final call.
     fn split(&self, text: &str, complete: bool) -> ReasoningParts;
+
+    /// Where `text` stands in the reasoning block. Parsers that cannot say (and so cannot be cut short by a thinking budget)
+    /// return [`Probe::Absent`].
+    fn probe(&self, _text: &str) -> Probe {
+        Probe::Absent
+    }
+
+    /// The closing tag that ends the reasoning block `text` is inside of, `None` when the format has no tag to write.
+    fn close_tag(&self, _text: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Length of the prefix of `piece` that cannot be the start of one of `tags` at its end.
@@ -84,6 +96,8 @@ pub struct TagReasoning {
     closes: Vec<String>,
     keep: Vec<String>,
     starts_open: bool,
+    /// Index of the closing tag that pairs with the opening tag the prompt wrote (several think modes).
+    close_hint: Option<usize>,
 }
 
 impl TagReasoning {
@@ -101,7 +115,13 @@ impl TagReasoning {
             closes: own(closes),
             keep: own(keep),
             starts_open,
+            close_hint: None,
         }
+    }
+
+    pub fn with_close_hint(mut self, index: Option<usize>) -> Self {
+        self.close_hint = index;
+        self
     }
 
     pub fn starts_open(&self) -> bool {
@@ -184,6 +204,34 @@ impl ReasoningParser for TagReasoning {
             content,
             reasoning_found,
         }
+    }
+
+    fn probe(&self, text: &str) -> Probe {
+        let mut rest = text;
+        if self.starts_open {
+            let lead = rest.trim_start();
+            if let Some(after) = self.opens.iter().find_map(|open| lead.strip_prefix(open.as_str())) {
+                rest = after;
+            }
+        } else if let Some((index, len)) = earliest(rest, &self.opens) {
+            rest = &rest[index + len..];
+        } else {
+            return Probe::Absent;
+        }
+        if earliest(rest, &self.closes).is_some() {
+            Probe::Closed
+        } else if safe_prefix_end(rest, &self.closes) < rest.len() {
+            Probe::Closing
+        } else {
+            Probe::Open
+        }
+    }
+
+    fn close_tag(&self, text: &str) -> Option<String> {
+        // tags come in pairs (K2-Horizon has three think modes): the one whose opening tag is in the text
+        let paired = self.opens.iter().zip(&self.closes).find(|(open, _)| text.contains(open.as_str()));
+        let hinted = self.close_hint.and_then(|i| self.closes.get(i));
+        paired.map(|(_, close)| close).or(hinted).or_else(|| self.closes.first()).cloned()
     }
 }
 
@@ -584,14 +632,11 @@ impl Family {
                 let opens = ["<ifm|think>", "<ifm|think_fast>", "<ifm|think_faster>"];
                 let closes = ["</ifm|think>", "</ifm|think_fast>", "</ifm|think_faster>"];
                 let keep: Vec<&str> = opens.iter().chain(&closes).copied().collect();
-                let starts_open = opens.iter().any(|open| tail.ends_with(open));
-                Arc::new(TagReasoning::new(
-                    "ifm",
-                    &opens,
-                    &closes,
-                    &keep,
-                    starts_open,
-                ))
+                let mode = opens.iter().position(|open| tail.ends_with(open));
+                Arc::new(
+                    TagReasoning::new("ifm", &opens, &closes, &keep, mode.is_some())
+                        .with_close_hint(mode),
+                )
             }
             Family::Mistral => tags("mistral", "[THINK]", "[/THINK]", tail),
             Family::Granite => Arc::new(TagReasoning::new(
@@ -709,6 +754,32 @@ hi
         let streamed = parser.split("<think>a</think>
 <answer>text</ans", false);
         assert_eq!(streamed.content, "text");
+    }
+
+    #[test]
+    fn probe_and_close_tag_for_budget_forcing() {
+        let own = Family::Think.parser("<|im_start|>assistant\n");
+        assert_eq!(own.probe("plain answer"), Probe::Absent);
+        assert_eq!(own.probe("<think>\nstep one"), Probe::Open);
+        assert_eq!(own.probe("<think>\nstep one</thi"), Probe::Closing);
+        assert_eq!(own.probe("<think>\nstep one</think>\n\nanswer"), Probe::Closed);
+        assert_eq!(own.close_tag("<think>\nx").as_deref(), Some("</think>"));
+        // the prompt opened the block
+        let open = Family::Think.parser("<|Assistant|><think>\n");
+        assert_eq!(open.probe("step one"), Probe::Open);
+        assert_eq!(open.probe("step one</think>done"), Probe::Closed);
+        // the three think modes of one template close with their own tag
+        let ifm = Family::Ifm.parser("<|ifm|im_start|>assistant\n<ifm|think_fast>\n");
+        assert_eq!(ifm.probe("quick"), Probe::Open);
+        assert_eq!(ifm.close_tag("quick").as_deref(), Some("</ifm|think_fast>"));
+        let own = Family::Ifm.parser("<|ifm|im_start|>assistant\n");
+        assert_eq!(own.close_tag("<ifm|think_faster>quick").as_deref(), Some("</ifm|think_faster>"));
+        let gemma = Family::Gemma4.parser("<|turn>model\n");
+        assert_eq!(gemma.probe("<|channel>thought\nhmm"), Probe::Open);
+        assert_eq!(gemma.close_tag("<|channel>thought\nhmm").as_deref(), Some("<channel|>"));
+        // formats that cannot be cut short say so
+        assert_eq!(Family::GptOss.parser("").probe("<|channel|>analysis<|message|>x"), Probe::Absent);
+        assert_eq!(Family::None.parser("").close_tag("x"), None);
     }
 
     #[test]

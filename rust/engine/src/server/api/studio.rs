@@ -34,8 +34,6 @@ pub(in crate::server) fn build_status_json(state: &AppState) -> Value {
         .as_ref()
         .is_some_and(|v| v.marker(crate::vision::MediaKind::Video).is_some());
     let audio = state.vision.as_ref().is_some_and(|v| v.family() == "whisper");
-    let thinking = state.chat_template.contains("hinking")
-        || !matches!(state.reasoning_family, crate::reasoning::Family::None);
     let rate_limit = state.http.security.rate_limit_spec();
     let counters = &state.http.counters;
     let m = &state.metrics;
@@ -82,7 +80,7 @@ pub(in crate::server) fn build_status_json(state: &AppState) -> Value {
                 "vision": vision,
                 "video": video,
                 "audio": audio,
-                "thinking": thinking,
+                "thinking": state.thinking.to_json(),
             }
         },
         "config": {
@@ -770,6 +768,15 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
     let model = path.display().to_string();
+    let speculative = {
+        let (requested, model, path) = (requested.clone(), model.clone(), path.clone());
+        tokio::task::spawn_blocking(move || super::studio_ops::check_speculative(requested.as_ref(), &model, &path)).await
+    };
+    match speculative {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => return api_error(StatusCode::BAD_REQUEST, &message),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
     let args = super::studio_ops::args_with_options(relaunch_args(&model), &model, requested);
     if let Err(error) = super::studio_ops::spawn_replacement(args, false) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error);

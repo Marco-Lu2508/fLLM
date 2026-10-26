@@ -24,7 +24,20 @@ pub(in crate::server) struct LoadOptions {
     pub device: Option<String>,
     /// `all`: the NPU computes every matrix product it can, also the single rows of the answer (default: only the long prompt blocks).
     pub npu_mode: Option<String>,
+    /// Speculative decoding, a start option of the server: `off`, `lookup` (n-gram prompt lookup), `draft` (a small model of the
+    /// same family) or `mtp` (the multi-token prediction heads of the model). `None` keeps the start options of the server.
+    pub speculative: Option<String>,
+    /// The draft model (a GGUF path) for `draft`.
+    pub draft_model: Option<String>,
+    /// Tokens proposed per step for `lookup` and `draft`.
+    pub speculative_tokens: Option<usize>,
 }
+
+/// Architectures with recurrent layers: rejected draft tokens would advance the recurrent state, so they cannot speculate.
+const STATEFUL_ARCHITECTURES: &[&str] = &[
+    "qwen3next", "qwen35", "qwen35moe", "olmo_hybrid", "mamba", "mamba2", "jamba", "granitehybrid", "bamba", "nemotron_h",
+    "nemotron_h_moe", "falcon-h1", "zamba2", "lfm2", "lfm2moe", "rwkv6", "rwkv7",
+];
 
 const CONTEXT_FLAGS: &[&str] = &["--ctx", "--ctx-size", "--max-model-len"];
 const GPU_LAYER_FLAGS: &[&str] = &["--gpu-layers", "-ngl", "--n-gpu-layers"];
@@ -33,6 +46,10 @@ const KV_FLAGS: &[&str] = &["--kv-cache-type", "--kv-cache-dtype", "--cache-type
 const SEQ_FLAGS: &[&str] = &["--max-seqs"];
 const DEVICE_FLAGS: &[&str] = &["--device"];
 const NPU_MODE_FLAGS: &[&str] = &["--npu-mode"];
+const SPECULATIVE_FLAGS: &[&str] = &[
+    "--speculative", "-sp", "--speculative-lookup", "--speculative-model", "--draft-model", "--model-draft",
+    "--num-speculative-tokens", "--draft-tokens",
+];
 
 static NULL: Value = Value::Null;
 
@@ -97,7 +114,33 @@ impl LoadOptions {
             Some("all") => options.npu_mode = Some("all".to_owned()),
             Some(other) => return Err(format!("The NPU mode \"{other}\" is not known. Use prompt or all.")),
         }
+        options.read_speculative(value)?;
         Ok(options)
+    }
+
+    fn read_speculative(&mut self, value: &Value) -> Result<(), String> {
+        let get = |key: &str| value.get(key).unwrap_or(&NULL);
+        let mode = get("speculative").as_str().map(|s| s.trim().to_ascii_lowercase());
+        let mode = match mode.as_deref() {
+            None | Some("") | Some("auto") => return Ok(()),
+            Some("off") => "off",
+            Some("lookup") | Some("ngram") => "lookup",
+            Some("draft") => "draft",
+            Some("mtp") => "mtp",
+            Some(other) => return Err(format!("The speculative decoding mode \"{other}\" is not known. Use off, lookup, draft or mtp.")),
+        };
+        self.speculative = Some(mode.to_owned());
+        if mode == "draft" {
+            let model = get("draft_model").as_str().map(str::trim).unwrap_or_default();
+            if model.is_empty() {
+                return Err("Choose the small model that drafts for speculative decoding, or pick another mode.".into());
+            }
+            self.draft_model = Some(model.to_owned());
+        }
+        if matches!(mode, "lookup" | "draft") && !is_auto(get("speculative_tokens")) {
+            self.speculative_tokens = Some(whole_number(get("speculative_tokens"), "The number of tokens proposed per step", 1, 32)?);
+        }
+        Ok(())
     }
 
     /// Whether the options ask for an NPU.
@@ -115,6 +158,9 @@ impl LoadOptions {
             "max_seqs": self.max_seqs,
             "device": self.device,
             "npu_mode": self.npu_mode,
+            "speculative": self.speculative,
+            "draft_model": self.draft_model,
+            "speculative_tokens": self.speculative_tokens,
         })
     }
 
@@ -134,6 +180,9 @@ impl LoadOptions {
                 ));
             }
         }
+        if self.speculative.as_deref() == Some("mtp") && !matches!(device.as_str(), "auto" | "cpu" | "cuda") {
+            return Err(format!("Multi-token prediction runs on the processor or on a CUDA graphics card, not on the {device} backend. Pick another mode or another device."));
+        }
         if self.gpu_layers.as_deref().is_some_and(|n| n != "0") && device == "cpu" {
             return Err("GPU layers have no effect while the model runs on the processor. Set GPU layers to automatic.".into());
         }
@@ -142,7 +191,10 @@ impl LoadOptions {
 
     /// The server arguments with these options in place of the ones given before.
     pub fn apply(&self, args: &[String]) -> Vec<String> {
-        let all: Vec<&str> = [CONTEXT_FLAGS, GPU_LAYER_FLAGS, THREAD_FLAGS, KV_FLAGS, SEQ_FLAGS, NPU_MODE_FLAGS].concat();
+        let mut all: Vec<&str> = [CONTEXT_FLAGS, GPU_LAYER_FLAGS, THREAD_FLAGS, KV_FLAGS, SEQ_FLAGS, NPU_MODE_FLAGS].concat();
+        if self.speculative.is_some() {
+            all.extend(SPECULATIVE_FLAGS);
+        }
         // the device is only replaced when the options name one
         let all: Vec<&str> = if self.device.is_some() { [all, DEVICE_FLAGS.to_vec()].concat() } else { all };
         let mut out = remove_flags(args, &all);
@@ -169,7 +221,57 @@ impl LoadOptions {
         if let (Some(mode), true) = (&self.npu_mode, self.wants_npu()) {
             out.extend(["--npu-mode".to_owned(), mode.clone()]);
         }
+        out.extend(self.speculative_args());
         out
+    }
+
+    /// The server flags of the speculative decoding choice.
+    fn speculative_args(&self) -> Vec<String> {
+        let tokens = |default: usize| self.speculative_tokens.unwrap_or(default).to_string();
+        match self.speculative.as_deref() {
+            Some("off") => vec!["--speculative".into(), "off".into()],
+            Some("lookup") => vec!["--speculative".into(), "ngram".into(), "--num-speculative-tokens".into(), tokens(5)],
+            Some("draft") => {
+                let model = self.draft_model.clone().unwrap_or_default();
+                vec!["--speculative".into(), "draft".into(), "--speculative-model".into(), model, "--num-speculative-tokens".into(), tokens(5)]
+            }
+            Some("mtp") => vec!["--speculative".into(), "mtp".into()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Refuses a speculative decoding choice that cannot work with the model file `target` (checked before the server restarts).
+    pub fn check_with_model(&self, target: &Path) -> Result<(), String> {
+        let Some(mode) = self.speculative.as_deref().filter(|m| *m != "off") else { return Ok(()) };
+        let probe = fllm_gguf_probe::MappedGguf::open(target).map_err(|e| e.to_string())?;
+        let index = probe.index();
+        let arch = index.metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
+        if STATEFUL_ARCHITECTURES.contains(&arch) {
+            return Err(format!("Speculative decoding does not work with this model: its architecture ({arch}) keeps a running state that cannot be rolled back when a guess is wrong. Choose off."));
+        }
+        match mode {
+            "mtp" if !index.tensors.iter().any(|t| t.name.contains(".nextn.")) => {
+                Err("This model file has no multi-token prediction heads. Choose prompt lookup or a draft model instead.".into())
+            }
+            "draft" => {
+                let draft = self.draft_model.as_deref().unwrap_or_default();
+                let path = PathBuf::from(draft);
+                if !path.is_file() {
+                    return Err(format!("The draft model \"{draft}\" was not found. Pick one of the downloaded models."));
+                }
+                let small = fllm_gguf_probe::MappedGguf::open(&path).map_err(|e| format!("The draft model cannot be read: {e}"))?;
+                if small.index().file_len >= index.file_len {
+                    return Err("The draft model must be smaller than the model it drafts for, or speculation only slows it down.".into());
+                }
+                for key in ["tokenizer.ggml.tokens", "tokenizer.ggml.bos_token_id", "tokenizer.ggml.eos_token_id"] {
+                    if index.metadata.get(key) != small.index().metadata.get(key) {
+                        return Err("The draft model does not use the same vocabulary as the model. Pick a draft model of the same family.".into());
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -225,7 +327,26 @@ pub(in crate::server) fn active_options_json(args: &[String]) -> Value {
         "kv_cache_type": flag_value(args, &["--kv-cache-type", "--kv-cache-dtype"]).or_else(|| flag_value(args, &["--cache-type-k", "-ctk"])).unwrap_or_else(|| "auto".to_owned()),
         "max_seqs": given(SEQ_FLAGS),
         "device": device_of(args),
+        "speculative": active_speculative(args),
+        "draft_model": flag_value(args, &["--draft-model", "--model-draft", "--speculative-model"]),
     })
+}
+
+/// The speculative decoding mode the server runs with, in the words of the load options (`auto`: no flag given).
+fn active_speculative(args: &[String]) -> String {
+    let lookup = flag_value(args, &["--speculative-lookup", "-sp"]).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) > 0;
+    let draft = flag_value(args, &["--draft-model", "--model-draft", "--speculative-model"]).is_some();
+    match flag_value(args, &["--speculative"]).map(|v| v.to_ascii_lowercase()).as_deref() {
+        Some("off") => "off".into(),
+        Some("ngram") => "lookup".into(),
+        Some("draft") => "draft".into(),
+        Some("mtp") => "mtp".into(),
+        Some(number) if number.parse::<usize>().is_ok_and(|n| n > 0) => "lookup".into(),
+        Some(other) => other.to_owned(),
+        None if draft => "draft".into(),
+        None if lookup => "lookup".into(),
+        None => "auto".into(),
+    }
 }
 
 const OPTIONS_FILE: &str = "model-options.json";
@@ -272,6 +393,14 @@ pub(in crate::server) fn requested_options(body: &Value) -> Result<Option<LoadOp
     match body.get("options").filter(|v| v.is_object()) {
         Some(given) => LoadOptions::from_json(given).map(Some),
         None => Ok(None),
+    }
+}
+
+/// Refuses a speculative decoding choice (given or saved for the model) that cannot work with the model file.
+pub(in crate::server) fn check_speculative(requested: Option<&LoadOptions>, model: &str, path: &Path) -> Result<(), String> {
+    match requested.cloned().or_else(|| saved_options(model)) {
+        Some(options) => options.check_with_model(path),
+        None => Ok(()),
     }
 }
 
@@ -838,13 +967,63 @@ mod tests {
     #[test]
     fn options_are_read_and_checked() {
         let ok = LoadOptions::from_json(&json!({"context": "8192", "gpu_layers": "all", "threads": 6, "kv_cache_type": "Q8_0", "max_seqs": "auto"})).unwrap();
-        assert_eq!(ok, LoadOptions { context: Some(8192), gpu_layers: Some("all".into()), threads: Some(6), kv_cache_type: Some("q8_0".into()), max_seqs: None, device: None, npu_mode: None });
+        assert_eq!(ok, LoadOptions { context: Some(8192), gpu_layers: Some("all".into()), threads: Some(6), kv_cache_type: Some("q8_0".into()), max_seqs: None, device: None, npu_mode: None, ..LoadOptions::default() });
         assert!(LoadOptions::from_json(&json!({})).unwrap().is_automatic());
         assert!(LoadOptions::from_json(&json!({"context": "auto", "gpu_layers": "auto"})).unwrap().is_automatic());
         for bad in [json!({"context": 3}), json!({"context": "big"}), json!({"gpu_layers": -1}), json!({"threads": 0}), json!({"kv_cache_type": "q3_9"}), json!({"max_seqs": 1000})] {
             let error = LoadOptions::from_json(&bad).unwrap_err();
             assert!(error.ends_with('.'), "{error}");
         }
+    }
+
+    #[test]
+    fn speculative_choices_become_server_flags() {
+        let given = args(&["serve", "--model", "m.gguf", "--speculative-lookup", "4", "--draft-tokens", "3", "--port", "9000"]);
+        let off = LoadOptions::from_json(&json!({"speculative": "off"})).unwrap();
+        assert_eq!(off.apply(&given), args(&["serve", "--model", "m.gguf", "--port", "9000", "--speculative", "off"]));
+        let lookup = LoadOptions::from_json(&json!({"speculative": "Lookup", "speculative_tokens": "8"})).unwrap();
+        assert_eq!(lookup.apply(&args(&["serve"])), args(&["serve", "--speculative", "ngram", "--num-speculative-tokens", "8"]));
+        let default_tokens = LoadOptions::from_json(&json!({"speculative": "lookup"})).unwrap();
+        assert!(default_tokens.apply(&args(&["serve"])).ends_with(&args(&["--num-speculative-tokens", "5"])));
+        let draft = LoadOptions::from_json(&json!({"speculative": "draft", "draft_model": "/models/small.gguf", "speculative_tokens": 4})).unwrap();
+        assert_eq!(draft.apply(&given), args(&["serve", "--model", "m.gguf", "--port", "9000", "--speculative", "draft", "--speculative-model", "/models/small.gguf", "--num-speculative-tokens", "4"]));
+        let mtp = LoadOptions::from_json(&json!({"speculative": "mtp", "speculative_tokens": 4, "draft_model": "x.gguf"})).unwrap();
+        assert_eq!((mtp.speculative_tokens, mtp.draft_model.as_deref()), (None, None));
+        assert_eq!(mtp.apply(&args(&["serve"])), args(&["serve", "--speculative", "mtp"]));
+        // not chosen: the start flags of the server stay
+        let none = LoadOptions::from_json(&json!({"speculative": "auto", "context": 4096})).unwrap();
+        assert_eq!(none.apply(&given)[..given.len()], given[..]);
+        // saved choices come back as they were
+        let again = LoadOptions::from_json(&draft.to_json()).unwrap();
+        assert_eq!(again, draft);
+        assert_eq!(draft.to_json()["speculative"], "draft");
+    }
+
+    #[test]
+    fn impossible_speculative_choices_are_turned_down() {
+        for bad in [json!({"speculative": "turbo"}), json!({"speculative": "draft"}), json!({"speculative": "draft", "draft_model": "  "}), json!({"speculative": "lookup", "speculative_tokens": 99})] {
+            let error = LoadOptions::from_json(&bad).unwrap_err();
+            assert!(error.ends_with('.'), "{error}");
+        }
+        let mtp = LoadOptions::from_json(&json!({"speculative": "mtp"})).unwrap();
+        assert!(mtp.check_with_device("auto").is_ok() && mtp.check_with_device("cpu").is_ok() && mtp.check_with_device("cuda").is_ok());
+        assert!(mtp.check_with_device("vulkan").unwrap_err().contains("CUDA"));
+        let on_vulkan = LoadOptions { device: Some("vulkan:1".into()), ..mtp.clone() };
+        assert!(on_vulkan.check_with_device("cpu").is_err());
+        let lookup = LoadOptions::from_json(&json!({"speculative": "lookup"})).unwrap();
+        assert!(lookup.check_with_device("vulkan").is_ok());
+    }
+
+    #[test]
+    fn the_active_speculative_mode_is_read_from_the_start_flags() {
+        let mode = |list: &[&str]| active_options_json(&args(list))["speculative"].clone();
+        assert_eq!(mode(&["serve"]), "auto");
+        assert_eq!(mode(&["serve", "--speculative", "ngram"]), "lookup");
+        assert_eq!(mode(&["serve", "--speculative=5"]), "lookup");
+        assert_eq!(mode(&["serve", "--speculative-lookup", "4"]), "lookup");
+        assert_eq!(mode(&["serve", "--draft-model", "d.gguf"]), "draft");
+        assert_eq!(mode(&["serve", "--speculative", "mtp"]), "mtp");
+        assert_eq!(mode(&["serve", "--speculative", "off"]), "off");
     }
 
     #[test]
