@@ -225,6 +225,9 @@ struct FllmStream {
     cudaStream_t s;
     void *arena;      // ring of per-call metadata (positions, slots, block tables ...)
     size_t cap, off;
+    // arenas replaced by a larger one: pointers into them may still be held by the call that grew the ring (an attention call stages its
+    // lengths, then its block tables), so they are freed with the stream
+    std::vector<void *> retired_arenas;
     float *ws;        // scratch for split-KV attention partials
     size_t ws_bytes;
     void *x16;        // FP16 copy of the activations for the tensor-core GEMM
@@ -352,6 +355,7 @@ void fllm_cuda_stream_destroy(FllmStream *st) {
     cudaSetDevice(st->dev);
     cudaStreamSynchronize(st->s);
     cudaFree(st->arena);
+    for (void *p : st->retired_arenas) cudaFree(p);
     cudaFree(st->ws);
     cudaFree(st->x16);
         st->epoch++;
@@ -431,7 +435,9 @@ static int stage(FllmStream *st, int kind, const void *host, size_t bytes, void 
     // 512-row batch at 32k context are 8 MB; the lengths staged right after them would wrap onto them)
     if (need > st->cap / 2) {
         CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
-        cudaFree(st->arena);
+        // not freed yet: the caller may hold a pointer staged into it a moment ago (the lengths of the attention call whose block tables
+        // are staged now); freeing it made the next kernel read released memory ("illegal memory access" with many rows at long contexts)
+        if (st->arena) st->retired_arenas.push_back(st->arena);
         st->epoch++;
         st->cap = need * 4;
         st->arena = nullptr;
