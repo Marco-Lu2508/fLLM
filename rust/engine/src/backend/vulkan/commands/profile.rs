@@ -20,6 +20,12 @@ pub const SLOTS: u32 = 1024;
 const RING: u32 = 4;
 const REPORT_EVERY: u64 = 64;
 
+/// `FLLM_VK_PROFILE=N` with N > 1: a table every N command buffers instead of [`REPORT_EVERY`].
+fn report_every() -> u64 {
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| std::env::var("FLLM_VK_PROFILE").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&n| n > 1).unwrap_or(REPORT_EVERY))
+}
+
 /// The timestamps one command buffer wrote: first slot, number of slots used and the pipeline name of each dispatch.
 pub struct Recorded {
     pub base: u32,
@@ -60,7 +66,7 @@ impl Profiler {
         // SAFETY: plain creation on a valid device.
         let pool = unsafe { core.device.create_query_pool(&info, None) }.ok()?;
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| eprintln!("[fllm-rs] FLLM_VK_PROFILE: timing every dispatch (table every {REPORT_EVERY} submissions)"));
+        ONCE.call_once(|| eprintln!("[fllm-rs] FLLM_VK_PROFILE: timing every dispatch (table every {} submissions)", report_every()));
         Some(Self {
             pool,
             period_ns: f64::from(period),
@@ -109,7 +115,7 @@ impl Profiler {
             e.1 += ticks as f64 * self.period_ns;
         }
         *reads += 1;
-        if reads.is_multiple_of(REPORT_EVERY) {
+        if reads.is_multiple_of(report_every()) {
             report(total, *reads);
         }
         Ok(())

@@ -300,6 +300,8 @@ pub struct MmqKnobs {
     pub bm: Option<u32>,
     /// `FLLM_VK_MM_BN` (64 or 128): tokens per workgroup.
     pub bn: Option<u32>,
+    /// `FLLM_VK_MM_TM` (4 or 8): weight rows per invocation.
+    pub tm: Option<u32>,
 }
 
 impl MmqKnobs {
@@ -308,6 +310,7 @@ impl MmqKnobs {
         min_batch: 32,
         bm: None,
         bn: None,
+        tm: None,
     };
 
     /// Reads the `FLLM_VK_MM*` variables.
@@ -319,6 +322,7 @@ impl MmqKnobs {
             min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch).max(MATVEC_MAX_BATCH + 1),
             bm: num("FLLM_VK_MM_BM").filter(|v| matches!(v, 32 | 64 | 128)),
             bn: num("FLLM_VK_MM_BN").filter(|v| matches!(v, 64 | 128)),
+            tm: num("FLLM_VK_MM_TM").filter(|v| matches!(v, 4 | 8)),
         }
     }
 
@@ -333,20 +337,29 @@ pub fn mmq_shared_bytes(bm: u32, bn: u32) -> u32 {
     4 * (24 * bm + 22 * bn)
 }
 
-/// Tile `(BM, BN)` of the prompt-path kernel for a device and a batch, `None` when the old kernels should serve it (switched off, batch below the
-/// threshold, or a device whose limits the tile does not fit). The workgroup has `BM * BN / 16` invocations: every invocation owns 4 x 4 outputs.
-/// The default 64 x 64 (256 invocations, ~11 KiB of shared memory) suits subgroup sizes 16 to 64; the knobs override it for measuring.
+/// Tile `(BM, BN)` of the prompt-path kernel for a device and a batch with 4 x 4 outputs per invocation, `None` when the old kernels should serve
+/// it (see [`mmq_tile_tm`]).
 pub fn mmq_tile(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32, u32)> {
+    mmq_tile_tm(caps, batch, &MmqKnobs { tm: Some(4), ..*knobs }).map(|(bm, bn, _)| (bm, bn))
+}
+
+/// Tile `(BM, BN, TM)` of the prompt-path kernel for a device and a batch, `None` when the old kernels should serve it (switched off, batch below
+/// the threshold, or a device whose limits the tile does not fit). The workgroup has `BM * BN / (TM * 4)` invocations: every invocation owns
+/// TM x 4 outputs. The default is 128 x 64 with TM 8 (256 invocations, ~18 KiB of shared memory), which suits subgroup sizes 16 to 64; the knobs
+/// override it for measuring.
+pub fn mmq_tile_tm(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32, u32, u32)> {
     if !knobs.enabled || batch < knobs.min_batch.max(MATVEC_MAX_BATCH + 1) {
         return None;
     }
-    let mut bm = knobs.bm.unwrap_or(64);
+    // 8 rows per invocation read half as many shared-memory words per dot product as 4 (measured +15-20 % prompt speed on Intel Xe-LPG)
+    let tm = knobs.tm.unwrap_or(8);
+    let mut bm = knobs.bm.unwrap_or(if tm == 8 { 128 } else { 64 });
     let mut bn = knobs.bn.unwrap_or(64);
-    // the invocation count must cover the loaders (4 * BM weight chunks, 2 * BN activation vectors) and fit the device
-    while bm * bn / 16 > caps.max_workgroup && bm > 32 {
+    let wg = |bm: u32, bn: u32| bm * bn / (tm * 4);
+    while wg(bm, bn) > caps.max_workgroup && bm > 32 {
         bm /= 2;
     }
-    while bm * bn / 16 > caps.max_workgroup && bn > 64 {
+    while wg(bm, bn) > caps.max_workgroup && bn > 64 {
         bn /= 2;
     }
     while mmq_shared_bytes(bm, bn) > caps.max_shared {
@@ -358,7 +371,8 @@ pub fn mmq_tile(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32,
             return None;
         }
     }
-    (bm * bn / 16 <= caps.max_workgroup && bm * bn / 16 >= 4 * bm && bm * bn / 16 >= 2 * bn).then_some((bm, bn))
+    // the loaders loop, so any workgroup that fits the device and has whole rows of invocations works
+    (bm >= tm && wg(bm, bn) >= 1 && wg(bm, bn) <= caps.max_workgroup).then_some((bm, bn, tm))
 }
 
 /// Plan with the default options (`exact` from `FLLM_VULKAN_EXACT`, no bias, scale 1).
@@ -471,7 +485,7 @@ pub fn plan_quantized_linear_with(
     // prompt path: the tiled kernel of mm_q.comp replaces mm_<fmt>_i for batches from the threshold up
     let mmq = if !matvec && variant == Variant::IntDot && options.force.is_none() {
         let name = format!("mmq_{tag}_i");
-        mmq_tile(caps, batch32, &MmqKnobs::get()).filter(|_| available(&name)).map(|tile| (name, tile))
+        mmq_tile_tm(caps, batch32, &MmqKnobs::get()).filter(|_| available(&name)).map(|tile| (name, tile))
     } else {
         None
     };
@@ -515,16 +529,17 @@ pub fn plan_quantized_linear_with(
             ],
             split_groups((rows as u64).div_ceil(per_group as u64)),
         )
-    } else if let Some((_, (bm, bn))) = &mmq {
+    } else if let Some((_, (bm, bn, tm))) = &mmq {
         (
             PlanKind::MatMul,
             vec![
                 SpecConstant {
                     id: 0,
-                    value: bm * bn / 16,
+                    value: bm * bn / (tm * 4),
                 },
                 SpecConstant { id: 1, value: *bm },
                 SpecConstant { id: 2, value: *bn },
+                SpecConstant { id: 3, value: *tm },
             ],
             [
                 (rows as u64).div_ceil(*bm as u64) as u32,

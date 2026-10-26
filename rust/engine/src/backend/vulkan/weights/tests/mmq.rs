@@ -83,8 +83,9 @@ fn prompt_batches_use_the_tiled_kernel() {
     assert_eq!(plan.shader_name, "mmq_q4_k_i");
     assert_eq!(plan.variant, Variant::IntDot);
     let values: Vec<u32> = plan.spec_constants.iter().map(|c| c.value).collect();
-    assert_eq!(values, [256, 64, 64]);
-    assert_eq!(plan.groups, [32, 8, 1]);
+    // 128 x 64 tile, 8 x 4 outputs per invocation
+    assert_eq!(values, [256, 128, 64, 8]);
+    assert_eq!(plan.groups, [16, 8, 1]);
     assert!(plan.activation_prepass.is_some());
     // below the threshold and in the matrix-vector range the old kernels serve
     let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 16, &caps_no_coop(), &lossy_options()).unwrap();
