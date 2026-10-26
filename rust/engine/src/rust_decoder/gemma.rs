@@ -188,6 +188,13 @@ pub(super) fn load_global(model: &GgufModel, cfg: &ModelConfig) -> Result<Option
     }))
 }
 
+impl PleGlobal {
+    /// The projection of the embeddings to the per-layer inputs.
+    pub(super) fn projection(&self) -> &Linear {
+        &self.projection
+    }
+}
+
 impl GemmaLayer {
     /// What the device forward pass does not run of this layer (it has no kernels for these parts yet), if anything. The per-layer
     /// inputs and the output scale run on the device.
@@ -222,10 +229,21 @@ impl RustDecoder {
         let Some(ple) = &self.ple else {
             return Ok(None);
         };
+        let projected = ple.projection.forward(embedded)?;
+        self.ple_inputs_from(ids, projected)
+    }
+
+    /// [`Self::ple_inputs`] from the projection of the embeddings (`rows x (layers * ple_dim)`), computed wherever it was.
+    pub(super) fn ple_inputs_from(&self, ids: &[i64], mut projected: Vec<f32>) -> Result<Option<Vec<f32>>, String> {
+        let Some(ple) = &self.ple else {
+            return Ok(None);
+        };
         let cfg = &self.cfg;
         let total = cfg.layers * ple.dim;
         let rows = ids.len();
-        let mut projected = ple.projection.forward(embedded)?;
+        if projected.len() != rows * total {
+            return Err("per-layer projection of the wrong size".into());
+        }
         let root = (cfg.hidden as f32).powf(-0.5);
         projected.iter_mut().for_each(|v| *v *= root);
         rms(&mut projected, &ple.norm, cfg.eps);

@@ -750,6 +750,8 @@ pub struct DeviceModelWeights {
     /// `RopeParams` so a step does not copy them.
     pub rope: Vec<SharedRopeTable>,
     pub alibi: Option<Arc<Vec<f32>>>,
+    /// Gemma per-layer inputs: the projection of the embeddings to `layers x width` (the rest of the path is cheap and stays on the host).
+    pub ple_proj: Option<crate::backend::DeviceWeight>,
 }
 
 /// Rotary cos/sin tables shared between the decoder and device `RopeParams`.
@@ -3018,6 +3020,10 @@ impl RustDecoder {
                 .map(|t| (Arc::new(t.cos.clone()), Arc::new(t.sin.clone())))
                 .collect(),
             alibi: self.cfg.alibi_slopes.clone().map(Arc::new),
+            ple_proj: match self.ple.as_ref() {
+                Some(global) => Some(upload_linear_q8("per_layer_model_proj", global.projection())?),
+                None => None,
+            },
         };
 
         let mut pool = crate::backend::BufferPool::new(Arc::clone(&backend));
@@ -3176,12 +3182,26 @@ impl RustDecoder {
             rms(&mut host_x, &vec![1.0; hidden], cfg.eps);
         }
         self.stash_embeddings(&host_x);
-        // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings
-        let ple_host = if self.ple.is_some() { self.ple_inputs(ids, &host_x)? } else { None };
         if !recording {
             stream
                 .upload_activations(&mut x_buf, &host_x)
                 .map_err(err)?;
+        }
+        // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings; the large projection runs on the device
+        let ple_host = match (self.ple.as_ref(), dev_weights.ple_proj.as_ref()) {
+            (Some(global), Some(proj)) if !recording => {
+                let total = cfg.layers * global.dim;
+                let mut projected_buf = scratch.acquire(rows * total * 4).map_err(err)?;
+                stream.quantized_linear(&mut projected_buf, &x_buf, proj, proj.bias.as_ref()).map_err(err)?;
+                let mut projected = vec![0.0f32; rows * total];
+                stream.download(cast_f32_to_u8_mut(&mut projected), &projected_buf).map_err(err)?;
+                scratch.recycle(projected_buf);
+                self.ple_inputs_from(ids, projected)?
+            }
+            (Some(_), _) => self.ple_inputs(ids, &host_x)?,
+            _ => None,
+        };
+        if !recording {
             debug_sum(&mut **stream, "embd", &x_buf);
         }
 
