@@ -8,6 +8,7 @@ behaviour between versions).
 
 ### Added
 - NPU: a load option "What the NPU computes" (`--npu-mode all`): besides the long prompt blocks the NPU then also computes the single rows of the answer, the way later and stronger NPUs will be used. Measured on an Intel Core Ultra NPU with Qwen3.5-2B Q4_K_M: the answer runs at about 5 tokens/s this way (after a one-time compile of a few minutes that OpenVINO keeps in its cache), about as fast as the processor and well below the graphics chip.
+- `--threads auto` (the new default): the CPU thread count follows the processor's topology (one thread per physical core; on hybrid processors all fast cores plus three quarters of the efficiency cores, never the low-power ones) and is confirmed by a measurement of about a second on the real weights at start-up, remembered per CPU, weight type and matrix shape (`FLLM_NO_AUTOTUNE=1` skips it). The old default of one thread per logical processor was less than half as fast for answers as 8 threads on a 14-thread hybrid laptop. Prompts keep all logical processors when all cores are alike; on Windows hybrid processors the process leaves power throttling and stays on the chosen cores (`FLLM_NO_PIN=1` disables that). `fllm-rs devices` and `/api/studio/hardware` report the topology and the thread count ([docs/cpu-kernels.md](docs/cpu-kernels.md#thread-count)).
 
 ## [0.1.7] - 2026-10-26
 

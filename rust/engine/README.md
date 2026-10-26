@@ -23,7 +23,7 @@ Options include:
 - `--ctx N` (or `--max-model-len`): Context length per sequence (default: `4096`).
 - `--max-seqs N`: Maximum concurrent sequences (default: `16`).
 - `--max-batched-tokens N`: Max tokens per forward pass budget (default: `512`).
-- `--threads N`: Worker threads (default: available CPU parallelism).
+- `--threads auto|N`: Worker threads (default `auto`: chosen from the processor topology and measured once; see docs/cpu-kernels.md).
 - `--device auto|cpu|vulkan|metal|dx12`: Compute device (default: `auto`, which means CPU).
 - `--kv-cache-type f16|q8_0`: KV cache storage (default: `f16`).
 - `--api-key KEY`: Optional bearer token auth (or via `FLLM_API_KEY`).
