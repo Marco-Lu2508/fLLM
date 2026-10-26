@@ -177,21 +177,19 @@ impl MemoryPlan {
         // 1. All layers are on device (offload_layers == total_layers).
         // 2. The model has Q4_K weights (marlin_q4k_extra > 0).
         // 3. Free VRAM has room for weights, dual Marlin layout, scratchpad, driver overhead (384 MB), and at least min_blocks KV cache.
-        let needed_with_marlin = weights_on_device + marlin_q4k_extra + scratchpad_bytes + (384u64 << 20) + min_kv_needed;
+        // (the same reserve as without it: the utilization budget, the backend overhead and the recurrent states; the KV pool used to get
+        // everything up to the card's free memory here, and a busy step then ran out of memory)
+        let needed_with_marlin = reserved_bytes + marlin_q4k_extra + min_kv_needed;
         let marlin_q4k_dual = offload_layers == total_layers
             && marlin_q4k_extra > 0
-            && free_vram >= needed_with_marlin;
+            && budget_bytes >= needed_with_marlin;
 
         let final_reserved = if marlin_q4k_dual {
-            weights_on_device + marlin_q4k_extra + scratchpad_bytes + (384u64 << 20)
+            reserved_bytes + marlin_q4k_extra
         } else {
             reserved_bytes
         };
-        let final_available_for_kv = if marlin_q4k_dual {
-            free_vram.saturating_sub(final_reserved)
-        } else {
-            budget_bytes.saturating_sub(final_reserved)
-        };
+        let final_available_for_kv = budget_bytes.saturating_sub(final_reserved);
 
         let kv_block_count = final_available_for_kv
             .checked_div(kv_block_bytes)
