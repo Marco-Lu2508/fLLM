@@ -31,6 +31,7 @@
       state.selectedModel = btn.dataset.pickModel;
       $('activeModelLabel').textContent = state.selectedModel;
       $('modelDropdownMenu').classList.remove('open');
+      renderThinkingChip();
       refreshStudioStatus();
     });
 
@@ -59,9 +60,10 @@
       const v = $('selConstraint').value;
       $('txtConstraintSpec').style.display = (v === 'none' || v === 'json_object') ? 'none' : 'block';
     });
+    // thinking: the chip steps through the levels the loaded model has (sampler.js)
     $('btnToggleThinking').addEventListener('click', () => {
-      state.thinkingEnabled = !state.thinkingEnabled;
-      $('btnToggleThinking').classList.toggle('active', state.thinkingEnabled);
+      const caps = thinkingCaps();
+      setThinkingLevel(nextThinkingLevel(caps, thinkingLevelNow()));
     });
 
     const saveConfigToRust = async () => {
@@ -73,7 +75,7 @@
           repetition_penalty: p.repetition_penalty, presence_penalty: p.presence_penalty,
           frequency_penalty: p.frequency_penalty, dry_multiplier: p.dry_multiplier,
           mirostat: p.mirostat, seed: p.seed < 0 ? null : p.seed,
-          speculative: p.speculative, system_prompt: p.system_prompt,
+          system_prompt: p.system_prompt,
         },
       });
       if (res.ok) { toast('Saved as the engine default'); refreshStudioStatus(); }
@@ -81,7 +83,7 @@
     $('btnSaveSamplerToRust').addEventListener('click', saveConfigToRust);
     $('btnSaveSystemPromptRust').addEventListener('click', saveConfigToRust);
     $('btnResetSampler').addEventListener('click', () => {
-      setSamplerUI({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, repetition_penalty: 1.0, presence_penalty: 0, frequency_penalty: 0, dry_multiplier: 0, mirostat: 0, seed: -1, speculative: true });
+      setSamplerUI({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, repetition_penalty: 1.0, presence_penalty: 0, frequency_penalty: 0, dry_multiplier: 0, mirostat: 0, seed: -1 });
     });
 
     // ---- search (Ctrl+K): chats by title and content, plus places in the app ----
