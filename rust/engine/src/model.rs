@@ -194,6 +194,8 @@ pub struct GgufModel {
     table_stride: usize,
     pool_blocks: usize,
     threads: i32,
+    /// Workers for batches of many rows (0: the same as `threads`).
+    prefill_threads: i32,
     rope: Arc<Vec<RopeTables>>,
     /// Base of each table of `rope`.
     rope_bases: Vec<f32>,
@@ -279,6 +281,7 @@ impl GgufModel {
             table_stride,
             pool_blocks,
             threads,
+            prefill_threads: 0,
             rope: Arc::new(rope),
             rope_bases,
             chat_template,
@@ -329,6 +332,7 @@ impl GgufModel {
             table_stride: self.table_stride,
             pool_blocks: self.pool_blocks,
             threads: self.threads,
+            prefill_threads: self.prefill_threads,
             rope: Arc::clone(&self.rope),
             chat_template: self.chat_template.clone(),
             kv_kind: self.kv_kind,
@@ -562,6 +566,17 @@ impl GgufModel {
     }
     pub fn threads(&self) -> i32 {
         self.threads
+    }
+    /// Changes the CPU worker count; only effective before the runtime is built from this model.
+    pub fn set_threads(&mut self, threads: i32) {
+        self.threads = threads.max(1);
+    }
+    /// Workers for batches of many rows (prompts); never fewer than `threads`.
+    pub fn prefill_threads(&self) -> i32 {
+        self.prefill_threads.max(self.threads)
+    }
+    pub fn set_prefill_threads(&mut self, threads: i32) {
+        self.prefill_threads = threads.max(0);
     }
     /// Rotary tables: index 0 for global layers, 1 (when present) for sliding-window layers.
     pub fn rope_tables(&self) -> &[RopeTables] {

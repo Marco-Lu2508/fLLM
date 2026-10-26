@@ -846,6 +846,9 @@ pub struct RustDecoder {
     /// Offsets of every layer's region in the key and value pools.
     kvl: crate::kv_geometry::KvPoolLayout,
     pool: rayon::ThreadPool,
+    /// A larger pool for batches of at least [`PREFILL_ROWS`] rows (prompts are compute-bound and use the second hardware thread
+    /// of every core, decoding is memory-bound and does not); `None` when it would not differ from `pool`.
+    prefill_pool: Option<rayon::ThreadPool>,
     /// Learned absolute position embeddings, `positions x hidden`.
     position_table: Option<Vec<f32>>,
     /// LayerNorm applied to the embeddings before the first layer (BLOOM).
@@ -1204,7 +1207,18 @@ fn cast_f32_to_u8_mut(slice: &mut [f32]) -> &mut [u8] {
     unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr().cast::<u8>(), slice.len() * 4) }
 }
 
+/// Batches of at least this many rows run on the larger prefill pool when there is one.
+const PREFILL_ROWS: usize = 8;
+
 impl RustDecoder {
+    /// The pool for a step of `rows` rows: single rows (decoding) use the decode pool.
+    fn pool_for(&self, rows: usize) -> &rayon::ThreadPool {
+        match &self.prefill_pool {
+            Some(pool) if rows >= PREFILL_ROWS => pool,
+            _ => &self.pool,
+        }
+    }
+
     pub fn load(model: &GgufModel, device: &str) -> Result<Self, String> {
         Self::load_layers(model, device, None)
     }
@@ -1885,6 +1899,11 @@ impl RustDecoder {
                 .num_threads(model.threads().max(1) as usize)
                 .build()
                 .map_err(|e| e.to_string())?,
+            prefill_pool: if model.prefill_threads() > model.threads() {
+                rayon::ThreadPoolBuilder::new().num_threads(model.prefill_threads() as usize).build().ok()
+            } else {
+                None
+            },
             position_table: if has_tensor(mapping, "position_embd.weight") {
                 Some(Tensor::load(mapping, "position_embd.weight")?.data)
             } else {
@@ -6123,7 +6142,7 @@ impl RustDecoder {
             .iter()
             .map(|&n| n as usize - 1 + usize::from(self.mtp.is_some()))
             .collect();
-        self.pool.install(|| {
+        self.pool_for(rows).install(|| {
             let mut trace = crate::cpu_profile::Trace::new(self.profile, rows);
             let first_stage = self.par.as_ref().is_none_or(|p| p.is_first_stage());
             let last_stage = self.par.as_ref().is_none_or(|p| p.is_last_stage());
@@ -6234,7 +6253,7 @@ impl RustDecoder {
         let deepstack = self.row_deepstack();
         let (fmt_k, fmt_v) = self.kv_formats();
         let mut x = std::mem::take(x_io);
-        let done = self.pool.install(|| {
+        let done = self.pool_for(rows).install(|| {
             let mut qkv_workspace = compute::ProjectionGroupWorkspace::default();
             let mut ffn_workspace = compute::ProjectionGroupWorkspace::default();
             let residual = cfg.residual_scale;

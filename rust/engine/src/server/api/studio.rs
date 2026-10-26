@@ -386,7 +386,10 @@ pub(in crate::server) async fn hardware(
         json!({
             "arch": std::env::consts::ARCH,
             "os": std::env::consts::OS,
-            "threads": rayon::current_num_threads(),
+            "threads": crate::cpu_threads::active_threads(),
+            "available_threads": crate::cpu_topology::detect().logical_count(),
+            "threads_source": crate::cpu_threads::current().map_or("policy", |c| c.source),
+            "cpu_topology": crate::cpu_topology::detect().to_json(),
             "host_free_memory_bytes": crate::devices::host_free_memory_bytes(),
             "available_memory_bytes": crate::catalog::available_memory_bytes(),
             "compiled_backends": crate::devices::compiled_backends(),
