@@ -120,6 +120,29 @@
           <span class="quant-chip" style="margin-left:auto;">${it.type}</span>
         </button>`).join('') : '<div class="thread-empty">Nothing found</div>';
       $('searchModalResults')._items = items;
+      // sessions.js: full-text hits in all chats and code sessions (also those only the server remembers); added when they arrive
+      if (query.length >= 2 && window.fllmSessionSearch) {
+        const stamp = (renderSearchResults._stamp = (renderSearchResults._stamp || 0) + 1);
+        window.fllmSessionSearch(query, { limit: 8 }).then((hits) => {
+          if (renderSearchResults._stamp !== stamp || !$('searchModal').classList.contains('open')) return;
+          const shown = new Set(items.map((it) => it.title));
+          const more = (hits || []).filter((h) => !shown.has(h.title)).map((h) => ({
+            type: h.kind === 'code' ? 'Code session' : 'Chat',
+            title: h.title || 'Untitled',
+            sub: h.snippet || '',
+            match: true,
+            run: () => { if (h.threadId && state.threads.some((t) => t.id === h.threadId)) openThread(h.threadId); else if (h.kind === 'code') switchSurface('code'); else toast('This chat is only in the search index of the app, not in this browser.'); },
+          }));
+          if (!more.length) return;
+          const all = [...items, ...more].slice(0, 30);
+          $('searchModalResults').innerHTML = all.map((it, i) => `
+        <button class="nav-item" data-sres="${i}">
+          <span class="search-title">${escapeHtml(it.title)}${it.sub ? `<small>${escapeHtml(it.sub)}</small>` : ''}</span>
+          <span class="quant-chip" style="margin-left:auto;">${it.type}</span>
+        </button>`).join('');
+          $('searchModalResults')._items = all;
+        }).catch(() => { /* the plain list stays */ });
+      }
     }
     $('navOpenSearch').addEventListener('click', openSearchModal);
     $('searchModalInput').addEventListener('input', (e) => renderSearchResults(e.target.value));

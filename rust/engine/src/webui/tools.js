@@ -16,6 +16,8 @@
       web_fetch: '{"url": "https://example.com/page"}',
       memory: '{"action": "add", "text": "Prefers metric units"}',
       search_chats: '{"query": "trip to Lisbon"}',
+      skill: '{"action": "read", "name": "release-checklist"}',
+      schedule: '{"name": "Morning news", "prompt": "Summarise the top technology news", "when": "daily at 08:00"}',
     };
 
     const CT_TEXT = {
@@ -149,6 +151,8 @@
       web_fetch: (a, done) => `${done ? 'Read' : 'Reading'}: ${ctShort(String(a.url || '').replace(/^https?:\/\//, ''), 80)}`,
       memory: (a, done) => (done ? 'Memory' : 'Updating memory'),
       search_chats: (a, done) => `${done ? 'Searched your chats' : 'Searching your chats'}: ${ctShort(a.query, 60)}`,
+      skill: (a, done) => `${done ? 'Skill' : 'Using a skill'}: ${ctShort(`${a.action || ''} ${a.name || ''}`.trim(), 60)}`,
+      schedule: (a, done) => `${done ? 'Schedule' : 'Setting up a schedule'}: ${ctShort(a.name || a.prompt, 60)}`,
     };
 
     /**
@@ -224,6 +228,22 @@
         return { text: r.text, card: { label: ctShort(labelText, 140), status: 'done', change: c } };
       }
 
+      // skills and scheduled tasks (skills.js): they check their own arguments and the schedule asks the user first
+      if (name === 'skill' || name === 'schedule') {
+        const run = name === 'skill' ? window.fllmSkillToolRun : window.fllmScheduleToolRun;
+        const check = name === 'skill' ? window.fllmSkillCheckArgs : window.fllmScheduleCheckArgs;
+        if (!run) return fail(`Error: the tool ${name} is not available.`);
+        const problem = check ? check(args) : '';
+        if (problem) return fail(`Error: ${problem}`);
+        try {
+          const text = String(await run(args, {}));
+          return { text: ctClip(text, room()), card: { label: label(args, true), status: 'done', detail: ctShort(text.split('\n')[0], 80) } };
+        } catch (e) {
+          if (e.name === 'AbortError') throw e;
+          return fail(`Error: ${e.message}`);
+        }
+      }
+
       // search_chats
       const query = String(args.query || '').trim();
       if (!query) return fail('Error: "query" is required.');
@@ -282,7 +302,17 @@
     function ctOffered(t) {
       const flags = ctOfferedFlags(t);
       const remote = Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected());
-      return ctDefs(flags, !remote && spSize(state.status?.model) === 'compact');
+      const compact = !remote && spSize(state.status?.model) === 'compact';
+      const defs = ctDefs(flags, compact);
+      // skills and schedules: not for temporary chats, and not for small models (every extra tool makes them less reliable)
+      if (!compact && !(t && (t.temporary || t.noPersonal)) && !state.setup && !(state.ctBroken && state.ctBroken[state.selectedModel || state.status?.model?.name || ''])) {
+        // a skill tool only when there is a skill to use, the schedule tool only when the message sounds like a reminder
+        const haveSkills = Boolean(window.fllmSkillIndex && String(window.fllmSkillIndex() || '').trim());
+        const lastUser = (() => { try { const path = t ? pathOf(t) : []; for (let i = path.length - 1; i >= 0; i--) if (path[i].role === 'user') return String(path[i].content || ''); } catch { /* none */ } return ''; })();
+        if (haveSkills && window.fllmSkillToolDef) defs.push(window.fllmSkillToolDef);
+        if (window.fllmScheduleToolDef && /\b(remind|schedule|every\s+(day|morning|evening|week|hour|\d+\s*min)|daily|weekly|hourly|each\s+(day|morning|week)|cron)\b/i.test(lastUser)) defs.push(window.fllmScheduleToolDef);
+      }
+      return defs;
     }
 
     // ---- the answer of a chat with tools -------------------------------------------------------------------

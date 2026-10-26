@@ -847,10 +847,13 @@
       const project = t ? prjProjectOf(t) : prjById(P.pending);
       const remote = Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected());
       const compact = !remote && spSize(state.status?.model) === 'compact';
-      return composeSystem({
+      const system = composeSystem({
         defaults: spForChat(t), base, personal: t && t.noPersonal ? null : P.personal, project,
         memoryOff: Boolean(t && t.noMemory), memoryCap: compact ? PRJ_LIMITS.memoryPromptCompact : PRJ_LIMITS.memoryPrompt,
       });
+      // the saved skills (skills.js): names and when to use them, so that the model can read one with the skill tool
+      const skills = compact || (t && (t.noPersonal || t.temporary)) ? '' : String((window.fllmSkillIndex && window.fllmSkillIndex()) || '').trim();
+      return skills ? `${system}\n\n${skills}`.trim() : system;
     }
 
     // ---- chat actions, archive, header ---------------------------------------------------
