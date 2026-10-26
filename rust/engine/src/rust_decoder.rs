@@ -2542,16 +2542,25 @@ impl RustDecoder {
         // an unquantized linear as Q8_0 (blocks of 32 weights with an f16 scale): the int8 kernels instead of the f32 one, at a quarter of
         // the memory and a relative error below 0.4 % per weight
         let upload_linear_q8 = |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
-            if linear.packed_weights().is_some() || !linear.cols.is_multiple_of(32) || linear.weight.data.len() != linear.rows * linear.cols {
+            if !linear.cols.is_multiple_of(32) {
                 return upload_linear(name, linear);
             }
-            let bytes = quantize_q8_0(&linear.weight.data);
+            // f16 / bf16 weights stay packed in the linear: unpack them first (other packed formats are quantized already)
+            let unpacked;
+            let data: &[f32] = match linear.packed_weights() {
+                Some((kind @ (1 | 30), bytes)) => {
+                    unpacked = crate::compute::dequantize(bytes, kind, linear.rows * linear.cols)?;
+                    &unpacked
+                }
+                Some(_) => return upload_linear(name, linear),
+                None if linear.weight.data.len() == linear.rows * linear.cols => &linear.weight.data,
+                None => return upload_linear(name, linear),
+            };
+            let bytes = quantize_q8_0(data);
             backend
                 .upload_weight(name, &bytes, crate::backend::QuantType::Q8_0, linear.rows, linear.cols, linear.bias.as_deref())
-                .or_else(|_| {
-                    backend.upload_weight(name, cast_f32_to_u8(&linear.weight.data), crate::backend::QuantType::F32, linear.rows, linear.cols, linear.bias.as_deref())
-                })
                 .map_err(|e| e.to_string())
+                .or_else(|_| upload_linear(name, linear))
         };
 
         // Linears whose packed rows are one after the other in memory (the Marlin 4-bit formats without activation permutation,
@@ -3201,6 +3210,26 @@ impl RustDecoder {
             (Some(_), _) => self.ple_inputs(ids, &host_x)?,
             _ => None,
         };
+        // every layer's slice of them goes up now, while the device has nothing queued: an upload between the layers would wait for the
+        // work recorded before it
+        let mut ple_bufs: Vec<Option<crate::backend::DeviceBuffer>> = Vec::new();
+        if let (Some(inputs), Some(global)) = (ple_host.as_deref(), self.ple.as_ref()) {
+            let width = global.dim;
+            let total = cfg.layers * width;
+            for (i, dev_layer) in dev_weights.layers.iter().enumerate() {
+                if dev_layer.ple.is_none() || dev_layer.host_layer {
+                    ple_bufs.push(None);
+                    continue;
+                }
+                let mut layer_in = vec![0.0f32; rows * width];
+                for r in 0..rows {
+                    layer_in[r * width..(r + 1) * width].copy_from_slice(&inputs[r * total + i * width..r * total + (i + 1) * width]);
+                }
+                let mut buf = scratch.acquire(rows * width * 4).map_err(err)?;
+                stream.upload(&mut buf, cast_f32_to_u8(&layer_in)).map_err(err)?;
+                ple_bufs.push(Some(buf));
+            }
+        }
         if !recording {
             debug_sum(&mut **stream, "embd", &x_buf);
         }
@@ -4041,15 +4070,8 @@ impl RustDecoder {
                 scratch.recycle(buf);
             }
             // Gemma per-layer input path: x += norm(proj(act(gate(x)) * input of this layer)), then the layer output scale
-            if let (Some((gate_w, proj_w, norm_w)), Some(inputs), Some(global)) = (&dev_layer.ple, ple_host.as_deref(), self.ple.as_ref()) {
+            if let (Some((gate_w, proj_w, norm_w)), Some(input_buf), Some(global)) = (&dev_layer.ple, ple_bufs.get_mut(i).and_then(Option::take), self.ple.as_ref()) {
                 let width = global.dim;
-                let total = cfg.layers * width;
-                let mut layer_in = vec![0.0f32; rows * width];
-                for r in 0..rows {
-                    layer_in[r * width..(r + 1) * width].copy_from_slice(&inputs[r * total + i * width..r * total + (i + 1) * width]);
-                }
-                let mut input_buf = scratch.acquire(rows * width * 4).map_err(err)?;
-                stream.upload(&mut input_buf, cast_f32_to_u8(&layer_in)).map_err(err)?;
                 let mut gated = scratch.acquire(rows * width * 4).map_err(err)?;
                 stream.quantized_linear(&mut gated, &x_buf, gate_w, gate_w.bias.as_ref()).map_err(err)?;
                 let mut act = scratch.acquire(rows * width * 4).map_err(err)?;
