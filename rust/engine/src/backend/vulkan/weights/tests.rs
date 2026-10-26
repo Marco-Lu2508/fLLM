@@ -6,6 +6,8 @@ use super::plan::*;
 use crate::backend::QuantType;
 use crate::cpu_selftest::{random_weights, Lcg};
 
+mod mmq;
+
 /// GGUF type of the blocks of `quant` (the Q4ZP formats store the Q4Z blocks followed by a permutation table).
 fn block_kind(quant: QuantType) -> u32 {
     let id = quant.to_gguf_type_id();
@@ -332,6 +334,7 @@ fn caps_full() -> VkCapsLike {
         subgroup_size: 32,
         fp16: true,
         max_shared: 49152,
+        max_workgroup: 1024,
         vendor: 0x10de,
     }
 }
@@ -430,7 +433,7 @@ fn prefill_prefers_cooperative_matrices_then_integer_dot_then_f32() {
     let plan =
         plan_quantized_linear_with(QuantType::Q6_K, 4096, 4096, 512, &no_coop, &lossy_options())
             .unwrap();
-    assert_eq!(plan.shader_name, "mm_q6_k_i");
+    assert_eq!(plan.shader_name, "mmq_q6_k_i");
     assert!(plan.activation_prepass.is_some());
 
     let plan = plan_quantized_linear_with(
@@ -452,7 +455,7 @@ fn prefill_prefers_cooperative_matrices_then_integer_dot_then_f32() {
     };
     let plan = plan_quantized_linear_with(QuantType::Q6_K, 4096, 4096, 512, &caps_full(), &options)
         .unwrap();
-    assert_eq!(plan.shader_name, "mm_q6_k_i");
+    assert_eq!(plan.shader_name, "mmq_q6_k_i");
 }
 
 #[test]

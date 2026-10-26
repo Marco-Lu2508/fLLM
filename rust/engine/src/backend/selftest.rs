@@ -1242,6 +1242,22 @@ impl<'a> Tester<'a> {
                 );
             }
         }
+        // prompt-sized batches over wide, odd-block-count rows (the tiled matrix-matrix kernel: tile edges in both directions, many K steps)
+        for kind in self.kinds(&[2u32, 8, 12, 14, 10, 11]) {
+            let block = if matches!(kind, 10..=14) { 256 } else { 32 };
+            for (rows, batch) in [(130usize, 65usize), (66, 505)] {
+                let cols = 9 * block;
+                let r = self.linear(kind, rows, cols, batch, batch == 505).map(|mut o| {
+                    o.tol = o.tol.max(Self::FAST_TOL);
+                    o
+                });
+                self.record(
+                    &format!("fast linear {}", format_name(kind)),
+                    &format!("{rows}x{cols} batch {batch}{}", if batch == 505 { " +bias" } else { "" }),
+                    r,
+                );
+            }
+        }
         // 4-bit AWQ / GPTQ weights (Marlin GEMM): rows and columns multiples of 128, every batch size the decoder produces
         for kind in self.kinds(&[0x8000_0010u32, 0x8000_0011, 0x8000_0012]) {
             for batch in [1usize, 2, 3, 4, 5, 8, 16, 17, 40, 129, 356] {

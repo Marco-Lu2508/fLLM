@@ -31,6 +31,8 @@ pub struct VkCapsLike {
     pub fp16: bool,
     /// `maxComputeSharedMemorySize` in bytes.
     pub max_shared: u32,
+    /// Largest workgroup the pipelines may use (`maxComputeWorkGroupInvocations`, limited by `maxComputeWorkGroupSize[0]`).
+    pub max_workgroup: u32,
     /// PCI vendor id (0x10de NVIDIA, 0x1002 AMD, 0x8086 Intel, 0x106b Apple, 0x13b5 ARM, 0x5143 Qualcomm); 0 = unknown.
     pub vendor: u32,
 }
@@ -44,6 +46,7 @@ impl Default for VkCapsLike {
             subgroup_size: 32,
             fp16: false,
             max_shared: 16384,
+            max_workgroup: 256,
             vendor: 0,
         }
     }
@@ -286,6 +289,78 @@ fn matvec_tuning(caps: &VkCapsLike, columns: u32) -> (u32, u32) {
     (wg, rows)
 }
 
+/// Switches of the prompt-path kernel `mm_q.comp` (`mmq_<fmt>_i`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmqKnobs {
+    /// `FLLM_VK_MM=0` / `legacy` / `off`: never plan the `mmq_*` kernels (the `mm_*_i` kernels serve every batch above the matrix-vector range).
+    pub enabled: bool,
+    /// `FLLM_VK_MM_MIN_BATCH`: smallest batch served by `mmq_*` (default 32).
+    pub min_batch: u32,
+    /// `FLLM_VK_MM_BM` (32, 64 or 128): weight rows per workgroup.
+    pub bm: Option<u32>,
+    /// `FLLM_VK_MM_BN` (64 or 128): tokens per workgroup.
+    pub bn: Option<u32>,
+}
+
+impl MmqKnobs {
+    pub const DEFAULT: MmqKnobs = MmqKnobs {
+        enabled: true,
+        min_batch: 32,
+        bm: None,
+        bn: None,
+    };
+
+    /// Reads the `FLLM_VK_MM*` variables.
+    pub fn from_env() -> Self {
+        let num = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<u32>().ok());
+        let off = std::env::var("FLLM_VK_MM").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "legacy" | "false"));
+        MmqKnobs {
+            enabled: !off,
+            min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch).max(MATVEC_MAX_BATCH + 1),
+            bm: num("FLLM_VK_MM_BM").filter(|v| matches!(v, 32 | 64 | 128)),
+            bn: num("FLLM_VK_MM_BN").filter(|v| matches!(v, 64 | 128)),
+        }
+    }
+
+    fn get() -> Self {
+        static KNOBS: std::sync::OnceLock<MmqKnobs> = std::sync::OnceLock::new();
+        *KNOBS.get_or_init(Self::from_env)
+    }
+}
+
+/// Shared memory (bytes) of `mm_q.comp` for a `bm x bn` tile (the worst case: two scale groups per step and the additive term).
+pub fn mmq_shared_bytes(bm: u32, bn: u32) -> u32 {
+    4 * (24 * bm + 22 * bn)
+}
+
+/// Tile `(BM, BN)` of the prompt-path kernel for a device and a batch, `None` when the old kernels should serve it (switched off, batch below the
+/// threshold, or a device whose limits the tile does not fit). The workgroup has `BM * BN / 16` invocations: every invocation owns 4 x 4 outputs.
+/// The default 64 x 64 (256 invocations, ~11 KiB of shared memory) suits subgroup sizes 16 to 64; the knobs override it for measuring.
+pub fn mmq_tile(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32, u32)> {
+    if !knobs.enabled || batch < knobs.min_batch.max(MATVEC_MAX_BATCH + 1) {
+        return None;
+    }
+    let mut bm = knobs.bm.unwrap_or(64);
+    let mut bn = knobs.bn.unwrap_or(64);
+    // the invocation count must cover the loaders (4 * BM weight chunks, 2 * BN activation vectors) and fit the device
+    while bm * bn / 16 > caps.max_workgroup && bm > 32 {
+        bm /= 2;
+    }
+    while bm * bn / 16 > caps.max_workgroup && bn > 64 {
+        bn /= 2;
+    }
+    while mmq_shared_bytes(bm, bn) > caps.max_shared {
+        if bn > 64 {
+            bn /= 2;
+        } else if bm > 32 {
+            bm /= 2;
+        } else {
+            return None;
+        }
+    }
+    (bm * bn / 16 <= caps.max_workgroup && bm * bn / 16 >= 4 * bm && bm * bn / 16 >= 2 * bn).then_some((bm, bn))
+}
+
 /// Plan with the default options (`exact` from `FLLM_VULKAN_EXACT`, no bias, scale 1).
 pub fn plan_quantized_linear(
     quant: QuantType,
@@ -393,7 +468,17 @@ pub fn plan_quantized_linear_with(
         }
     };
 
-    let shader_name = format!("{prefix}_{tag}_{}", variant.suffix());
+    // prompt path: the tiled kernel of mm_q.comp replaces mm_<fmt>_i for batches from the threshold up
+    let mmq = if !matvec && variant == Variant::IntDot && options.force.is_none() {
+        let name = format!("mmq_{tag}_i");
+        mmq_tile(caps, batch32, &MmqKnobs::get()).filter(|_| available(&name)).map(|tile| (name, tile))
+    } else {
+        None
+    };
+    let shader_name = match &mmq {
+        Some((name, _)) => name.clone(),
+        None => format!("{prefix}_{tag}_{}", variant.suffix()),
+    };
     let out_stride = options.out_stride.unwrap_or(rows32);
     let xq_d = batch32 * cols32 / 4;
     let push = QPush {
@@ -429,6 +514,23 @@ pub fn plan_quantized_linear_with(
                 },
             ],
             split_groups((rows as u64).div_ceil(per_group as u64)),
+        )
+    } else if let Some((_, (bm, bn))) = &mmq {
+        (
+            PlanKind::MatMul,
+            vec![
+                SpecConstant {
+                    id: 0,
+                    value: bm * bn / 16,
+                },
+                SpecConstant { id: 1, value: *bm },
+                SpecConstant { id: 2, value: *bn },
+            ],
+            [
+                (rows as u64).div_ceil(*bm as u64) as u32,
+                (batch as u64).div_ceil(*bn as u64) as u32,
+                1,
+            ],
         )
     } else {
         let spec = if variant == Variant::CoopMat {
@@ -474,7 +576,8 @@ pub fn plan_quantized_linear_with(
             push_constants: words(&[cols32, batch32, xq_d]),
             groups: split_groups(blocks.div_ceil(128)),
             bindings,
-            output_bytes: (xq_d as usize + blocks as usize) * 4,
+            // a multiple of 16 bytes: mm_q.comp reads the result through a uvec4 view
+            output_bytes: (xq_d as usize + blocks as usize).next_multiple_of(4) * 4,
             uses_perm: perm,
         })
     } else if perm {

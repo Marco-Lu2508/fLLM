@@ -104,3 +104,22 @@ mm_q4z128_s mm_scalar.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
 mm_q4z128_i mm_idot.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
 mm_q4z128_c mm_coopmat.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128 #optional
 
+
+# Prompt-path matrix-matrix kernels (mm_q.comp): tiled, double-buffered, bank-conflict free, scale folded per group. The planner uses them for batch >= FLLM_VK_MM_MIN_BATCH
+# on devices with the int8 dot product; mm_<fmt>_i stays the fallback (FLLM_VK_MM=legacy).
+mmq_q4_0_i mm_q.comp -DFMT_Q4_0=1
+mmq_q4_1_i mm_q.comp -DFMT_Q4_1=1
+mmq_q5_0_i mm_q.comp -DFMT_Q5_0=1
+mmq_q5_1_i mm_q.comp -DFMT_Q5_1=1
+mmq_q8_0_i mm_q.comp -DFMT_Q8_0=1
+mmq_q2_k_i mm_q.comp -DFMT_Q2_K=1
+mmq_q3_k_i mm_q.comp -DFMT_Q3_K=1
+mmq_q4_k_i mm_q.comp -DFMT_Q4_K=1
+mmq_q5_k_i mm_q.comp -DFMT_Q5_K=1
+mmq_q6_k_i mm_q.comp -DFMT_Q6_K=1
+mmq_iq4_nl_i mm_q.comp -DFMT_IQ4_NL=1
+mmq_mxfp4_i mm_q.comp -DFMT_MXFP4=1
+mmq_nvfp4_i mm_q.comp -DFMT_NVFP4=1
+mmq_q4z32_i mm_q.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32
+mmq_q4z64_i mm_q.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64
+mmq_q4z128_i mm_q.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128

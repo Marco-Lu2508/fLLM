@@ -40,12 +40,25 @@ uint sub8(uint x, uint c) {
 
 // signed 4 x int8 dot product of two packed words
 int idot4(uint a, uint b) {
-#ifdef FLLM_HW_DOT
+#if FLLM_HW_DOT == 1
     return dotPacked4x8EXT(int(a), int(b));
+#elif FLLM_HW_DOT == 2
+    return fllm_sdot(int(a), int(b), 0);
 #else
     ivec4 x = (ivec4(int(a)) << ivec4(24, 16, 8, 0)) >> 24;
     ivec4 y = (ivec4(int(b)) << ivec4(24, 16, 8, 0)) >> 24;
     return x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
+#endif
+}
+
+// acc + signed 4 x int8 dot product (one instruction with the hardware dot product; saturation cannot happen for the sums of one 32-value block)
+int idot4acc(uint a, uint b, int acc) {
+#if FLLM_HW_DOT == 1
+    return dotPacked4x8AccSatEXT(int(a), int(b), acc);
+#elif FLLM_HW_DOT == 2
+    return fllm_sdot_acc(int(a), int(b), acc, 0);
+#else
+    return acc + idot4(a, b);
 #endif
 }
 
