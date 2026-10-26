@@ -211,7 +211,7 @@ pub(super) fn attention(
         fllm_cuda_mla_attention(
             s.raw,
             dev_ptr(q_lat)?.cast(),
-            dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
+            dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
             dev_ptr(o_lat)?.cast(),
             block_tables.as_ptr(),
             block_tables.len(),

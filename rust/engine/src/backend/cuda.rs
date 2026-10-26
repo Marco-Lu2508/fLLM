@@ -1756,8 +1756,8 @@ impl CudaStream {
             fllm_cuda_tree_attention(
                 self.raw,
                 dev_ptr(q)?.cast(),
-                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                 dev_ptr(out)?.cast(),
                 dev_ptr(&dev_tables)?.cast(),
                 dev_ptr(&dev_lengths)?.cast(),
@@ -2079,8 +2079,8 @@ impl CudaStream {
                 dev_ptr(q)?.cast(),
                 dev_ptr(k)?.cast(),
                 dev_ptr(v)?.cast(),
-                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                 pos.as_ptr(),
                 slot_ids.as_ptr(),
                 to_c(rows, "rows")?,
@@ -2238,8 +2238,8 @@ impl Stream for CudaStream {
                 self.act.code(),
                 dev_ptr(q_out)?.cast(),
                 dev_ptr(qkv)?.cast(),
-                dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                 pos.as_ptr(),
                 slot_ids.as_ptr(),
                 to_c(rows, "rows")?,
@@ -4223,8 +4223,8 @@ fn attention_paged(
                 fllm_cuda_kvq_attention(
                     self.raw,
                     dev_ptr(q)?.cast(),
-                    dev_ptr(&kv.key_pool)?.add(layer_idx * kv.words_per_layer_k * 2).cast(),
-                    dev_ptr(&kv.value_pool)?.add(layer_idx * kv.words_per_layer_v * 2).cast(),
+                    dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                    dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
                     dev_ptr(out)?.cast(),
                     block_tables.as_ptr(),
                     block_tables.len(),
@@ -4290,14 +4290,14 @@ fn attention_paged(
             if kv.kv_kind == 1 {
                 let ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
                 let rows = to_c(slots.len(), "rows")?;
-                for (src, pool, words, width) in [(k, &kv.key_pool, kv.words_per_layer_k, kv.head_dim), (v, &kv.value_pool, kv.words_per_layer_v, kv.value_dim)] {
+                for (src, pool, start, width) in [(k, &kv.key_pool, kv.layer_key_offset(layer_idx), kv.layer_head_dim(layer_idx)), (v, &kv.value_pool, kv.layer_value_offset(layer_idx), kv.layer_value_dim(layer_idx))] {
                     // SAFETY: `validate_kv_write` checked sources and slot ranges.
                     check(unsafe {
                         fllm_cuda_na_kv_write(
                             self.raw,
                             self.act.code(),
                             dev_ptr(src)?.cast(),
-                            dev_ptr(pool)?.add(layer_idx * words * 2).cast(),
+                            dev_ptr(pool)?.add(start * 2).cast(),
                             ids.as_ptr(),
                             rows,
                             to_c(kv.kv_heads * width, "kv width")?,

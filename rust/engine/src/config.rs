@@ -375,6 +375,47 @@ fn uniform(meta: &Map<String, Value>, arch: &str, name: &str) -> Option<usize> {
 
 impl ModelConfig {
     pub fn from_gguf(mapping: &MappedGguf) -> Result<Self, String> {
+        let mut cfg = Self::from_gguf_metadata(mapping)?;
+        cfg.drop_recurrent_kv(mapping);
+        Ok(cfg)
+    }
+
+    /// In a hybrid model the layers that keep a recurrent state instead of keys and values (Gated DeltaNet, Mamba: they have `ssm_*`
+    /// tensors and no key projection) get no KV cache: their entry in `layer_geoms` has no KV heads, so the pool holds only the attention
+    /// layers (Qwen3.5: 6 of 24 layers, a quarter of the memory). `FLLM_FULL_KV=1` keeps a cache for every layer.
+    fn drop_recurrent_kv(&mut self, mapping: &MappedGguf) {
+        if self.mla.is_some() || std::env::var_os("FLLM_FULL_KV").is_some_and(|v| !v.is_empty() && v != "0") {
+            return;
+        }
+        let names: std::collections::HashSet<&str> = mapping.index().tensors.iter().map(|t| t.name.as_str()).collect();
+        let recurrent: Vec<bool> = (0..self.layers)
+            .map(|l| {
+                let prefix = format!("blk.{l}.");
+                let state = names.iter().any(|n| n.strip_prefix(prefix.as_str()).is_some_and(|rest| rest.starts_with("ssm_")));
+                state && !names.contains(format!("{prefix}attn_k.weight").as_str())
+            })
+            .collect();
+        // a model without attention layers keeps its tiny dummy cache; layers that read another layer's cache must keep their source
+        if recurrent.iter().all(|&r| !r) || recurrent.iter().all(|&r| r) {
+            return;
+        }
+        if (0..self.layers).any(|l| self.layer_kv_source(l).is_some_and(|src| recurrent.get(src).copied().unwrap_or(false))) {
+            return;
+        }
+        let mut geoms = self.layer_geoms.take().unwrap_or_else(|| {
+            (0..self.layers)
+                .map(|_| LayerGeom { heads: self.heads, kv_heads: self.kv_heads, head_dim: self.head_dim, value_dim: self.value_dim, kv_source: None, ff: self.ff })
+                .collect()
+        });
+        for (g, &r) in geoms.iter_mut().zip(&recurrent) {
+            if r {
+                g.kv_heads = 0;
+            }
+        }
+        self.layer_geoms = Some(geoms);
+    }
+
+    fn from_gguf_metadata(mapping: &MappedGguf) -> Result<Self, String> {
         let meta = &mapping.index().metadata;
         let arch = meta
             .get("general.architecture")
