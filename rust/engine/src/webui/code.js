@@ -1526,7 +1526,7 @@
 
     /** The first problems of a quick check of the files an edit changed (setting "check my edits automatically"). */
     async function autoCheckEdit(name, args, ctx) {
-      if (!code.autoCheck || ctx.readOnly || !serverHas('diagnostics')) return '';
+      if (!code.autoCheck || ctx.readOnly || !serverHas('diagnostics') || modeFor(code.modes, agentName(), 'bash', false) === 'deny') return '';
       const paths = name === 'patch' ? patchPaths(args.patch) : (args.path ? [args.path] : []);
       const seen = new Set();
       const reports = [];
@@ -1685,6 +1685,11 @@
       return splitReasoning(String(data.choices?.[0]?.message?.content || '')).answer.trim();
     }
 
+    /** After compaction or trimming the message list no longer lines up with the turns: fork and revert are not offered for them. */
+    function forgetTurnIndexes() {
+      for (const i of code.view) if (i.kind === 'user') delete i.msgIndex;
+    }
+
     /** Summarises older turns and replaces them. Returns true when it did. Never retries by itself. */
     async function compactSession(ctx, { force = false, focus = '' } = {}) {
       const plan = splitForCompaction(code.messages);
@@ -1698,6 +1703,7 @@
       try { summary = await summarise(plan.head, ctx.system, ctx.tools, ctx.signal, focus); } catch (e) { if (e.name === 'AbortError') throw e; }
       if (!summary) { note.text = 'Compacting failed; older steps are trimmed instead.'; paintItem(note); return false; }
       code.messages = buildCompactedMessages(summary, plan.tail, { todos: code.todos, files: [...code.changed.keys()] });
+      forgetTurnIndexes();
       code.compactedAt = code.messages.length;
       code.lastUsed = 0;
       code.used = 0;
@@ -1720,7 +1726,7 @@
             await compactSession(ctx);
           }
           const dropped = fitContext(code.messages, fixedTokens(ctx));
-          if (dropped) codeNotice('Older steps were removed from the context of the model so that it does not overflow. You still see them here.');
+          if (dropped) { forgetTurnIndexes(); codeNotice('Older steps were removed from the context of the model so that it does not overflow. You still see them here.'); }
           ctx.messages = code.messages;
         } else if (!wrapUp && (step === ctx.maxSteps - 1 || fixedTokens(ctx) + estimateMessages(ctx.messages) > ctx.budget)) {
           wrapUp = true; // out of steps or budget: ask for the report and ignore further tool calls
