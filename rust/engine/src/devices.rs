@@ -369,7 +369,7 @@ fn meminfo(key: &str) -> u64 {
         .map_or(0, |kib| kib * 1024)
 }
 
-fn cpu_name() -> String {
+pub(crate) fn cpu_name() -> String {
     std::fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|text| {
@@ -378,7 +378,31 @@ fn cpu_name() -> String {
                 .and_then(|rest| rest.split_once(':'))
                 .map(|(_, name)| name.trim().to_owned())
         })
+        .or_else(cpuid_brand)
         .unwrap_or_else(|| std::env::consts::ARCH.to_owned())
+}
+
+/// The processor brand string from CPUID (x86 only).
+#[cfg(target_arch = "x86_64")]
+fn cpuid_brand() -> Option<String> {
+    use std::arch::x86_64::__cpuid;
+    if __cpuid(0x8000_0000).eax < 0x8000_0004 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(48);
+    for leaf in 0x8000_0002u32..=0x8000_0004 {
+        let r = __cpuid(leaf);
+        for word in [r.eax, r.ebx, r.ecx, r.edx] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn cpuid_brand() -> Option<String> {
+    None
 }
 
 fn cpu_info() -> DeviceInfo {
