@@ -6614,12 +6614,10 @@ impl RustDecoder {
                     dump_layer("q", i, q);
                     dump_layer("k", i, k);
                     dump_layer("v", i, v);
-                    let tiled = layer.window.is_none()
-                        && cfg.alibi_slopes.is_none()
+                    let tiled = cfg.alibi_slopes.is_none()
                         && layer.chunk.is_none()
                         && layer.sinks.is_none()
                         && cfg.attention_softcap.is_none()
-                        && cfg.attention_scale.is_none()
                         && dk == dv
                         && matches!(self.kv_kind, 1 | 2)
                         && self.row_visible_lengths().is_none();
@@ -6635,7 +6633,7 @@ impl RustDecoder {
                             data: &value[value_region.0..value_region.0 + self.kvl.value_words[crate::kv_geometry::KvPoolLayout::owner(cfg, i)]],
                             ..key_cache
                         };
-                        crate::cpu_attention::attention(
+                        crate::cpu_attention::attention_with(
                             q.as_slice(),
                             key_cache,
                             value_cache,
@@ -6644,6 +6642,7 @@ impl RustDecoder {
                             heads,
                             self.block_size,
                             self.stride,
+                            &crate::cpu_attention::Options { scale: cfg.attention_scale, window: layer.window },
                         )
                     } else {
                         None

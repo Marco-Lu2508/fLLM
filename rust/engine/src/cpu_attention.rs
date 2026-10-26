@@ -107,6 +107,30 @@ pub fn attention(
     block_size: usize,
     stride: usize,
 ) -> Option<Vec<f32>> {
+    attention_with(q, key, value, tables, lengths, heads, block_size, stride, &Options::default())
+}
+
+/// What a layer changes in [`attention`]: the score scale (default `1 / sqrt(dim)`) and a sliding window (row `b` sees the last `window`
+/// positions of its `lengths[b]`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    pub scale: Option<f32>,
+    pub window: Option<usize>,
+}
+
+/// [`attention`] with a score scale and a sliding window.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_with(
+    q: &[f32],
+    key: Cache<'_>,
+    value: Cache<'_>,
+    tables: &[i64],
+    lengths: &[i64],
+    heads: usize,
+    block_size: usize,
+    stride: usize,
+    options: &Options,
+) -> Option<Vec<f32>> {
     let batch = lengths.len();
     let dim = key.dim;
     let kv_heads = key.kv_heads;
@@ -117,9 +141,12 @@ pub fn attention(
         || kv_heads == 0
         || !heads.is_multiple_of(kv_heads)
         || heads / kv_heads > 16
+        || options.window == Some(0)
     {
         return None;
     }
+    // first position row b attends to
+    let start_of = |b: usize| options.window.map_or(0, |w| (lengths[b] as usize).saturating_sub(w));
     assert_eq!(q.len(), batch * heads * dim);
     assert_eq!(tables.len(), batch * stride);
     assert!(block_size > 0 && stride > 0);
@@ -222,14 +249,16 @@ pub fn attention(
         .div_ceil(base.max(1))
         .max(1)
         .min((max_len / 256).max(1));
-    let scale = (dim as f32).sqrt().recip();
+    let scale = options.scale.unwrap_or_else(|| (dim as f32).sqrt().recip());
     let parts = crate::cpu_spin::collect(base * segments, |it| {
         let ti = tiles.len() - 1 - it / (kv_heads * segments);
         let kh = (it / segments) % kv_heads;
         let seg = it % segments;
         let tile = &tiles[ti];
-        let span = tile.length.div_ceil(segments).div_ceil(64) * 64;
-        let end = tile.length.min((seg + 1) * span);
+        // the rows of a tile are consecutive positions: the first one has the earliest window start
+        let lo = start_of(tile.first) / 64 * 64;
+        let span = (tile.length - lo).div_ceil(segments).div_ceil(64) * 64;
+        let end = tile.length.min(lo + (seg + 1) * span);
         let nr = tile.rows * g;
         let mut p = Partial {
             max: vec![f32::NEG_INFINITY; nr],
@@ -263,7 +292,7 @@ pub fn attention(
                 *query_row = &packed[(b * heads + h) * blocks..][..blocks];
             }
         }
-        for kb in (seg * span..end).step_by(64) {
+        for kb in (lo + seg * span..end).step_by(64) {
             let nk = (end - kb).min(64);
             for j in 0..nk {
                 let t = kb + j;
@@ -280,7 +309,7 @@ pub fn attention(
                 for r in 0..nr {
                     let b = tile.first + r / g;
                     let h = kh * g + r % g;
-                    scores[r * 64 + j] = if t >= lengths[b] as usize {
+                    scores[r * 64 + j] = if t >= lengths[b] as usize || t < start_of(b) {
                         f32::NEG_INFINITY
                     } else if key.q8 {
                         scores[r * 64 + j]
@@ -1059,5 +1088,67 @@ mod q8_attention_scratch_tests {
         );
         drop(retained);
         reset_tls();
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::{attention_with, Cache, Options};
+    use half::f16;
+
+    /// Softmax attention over f32 values, row b seeing positions start..lengths[b].
+    #[allow(clippy::too_many_arguments)]
+    fn reference(q: &[f32], keys: &[f32], values: &[f32], lengths: &[i64], heads: usize, kv_heads: usize, dim: usize, scale: f32, window: Option<usize>) -> Vec<f32> {
+        let g = heads / kv_heads;
+        let mut out = vec![0.0f32; q.len()];
+        for (b, &n) in lengths.iter().enumerate() {
+            let n = n as usize;
+            let start = window.map_or(0, |w| n.saturating_sub(w));
+            for h in 0..heads {
+                let kh = h / g;
+                let qv = &q[(b * heads + h) * dim..][..dim];
+                let scores: Vec<f32> = (start..n)
+                    .map(|t| keys[(t * kv_heads + kh) * dim..][..dim].iter().zip(qv).map(|(k, x)| k * x).sum::<f32>() * scale)
+                    .collect();
+                let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let e: Vec<f32> = scores.iter().map(|s| (s - m).exp()).collect();
+                let sum: f32 = e.iter().sum();
+                for (i, t) in (start..n).enumerate() {
+                    for d in 0..dim {
+                        out[(b * heads + h) * dim + d] += e[i] / sum * values[(t * kv_heads + kh) * dim + d];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn sliding_window_and_scale_match_a_direct_computation() {
+        let (heads, kv_heads, dim, block_size) = (4, 2, 64, 16);
+        let slots = 512;
+        let mut state = 7u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let keys: Vec<f32> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_f32()).collect();
+        let values: Vec<f32> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_f32()).collect();
+        let key_words: Vec<u16> = keys.iter().map(|&v| f16::from_f32(v).to_bits()).collect();
+        let value_words: Vec<u16> = values.iter().map(|&v| f16::from_f32(v).to_bits()).collect();
+        // a decode row and a run of prompt rows, all of one sequence laid out in slot order
+        let lengths: Vec<i64> = vec![300, 200, 201, 202, 203, 204];
+        let stride = slots / block_size;
+        let tables: Vec<i64> = lengths.iter().flat_map(|_| (0..stride as i64).collect::<Vec<_>>()).collect();
+        let q: Vec<f32> = (0..lengths.len() * heads * dim).map(|_| rnd()).collect();
+        for (scale, window) in [(None, None), (Some(1.0), None), (Some(0.2), Some(100)), (None, Some(7)), (Some(1.0), Some(1000))] {
+            let key = Cache { data: &key_words, slots, kv_heads, dim, q8: false };
+            let value = Cache { data: &value_words, ..key };
+            let have = attention_with(&q, key, value, &tables, &lengths, heads, block_size, stride, &Options { scale, window })
+                .expect("the tiled path takes this shape");
+            let want = reference(&q, &keys, &values, &lengths, heads, kv_heads, dim, scale.unwrap_or(1.0 / (dim as f32).sqrt()), window);
+            let worst = have.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 2e-3, "scale {scale:?} window {window:?}: max difference {worst}");
+        }
     }
 }
