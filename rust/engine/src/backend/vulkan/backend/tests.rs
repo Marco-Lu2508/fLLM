@@ -298,7 +298,7 @@ fn all_op_plans() -> Vec<OpPlan> {
             plans.extend(plan_kv_write(&kv_layout(kind, kv_heads, dk, dv), &[0, 5, 9]).unwrap());
         }
     }
-    let tuning = AttentionTuning::default();
+    for tuning in [AttentionTuning::default(), AttentionTuning { prefill_rows: crate::backend::vulkan::ops::attention::PREFILL_ROWS_WIDE, ..AttentionTuning::default() }] {
     for kind in [1, 2] {
         for (heads, kv_heads, dk, dv) in [
             (8, 2, 64, 64),
@@ -321,6 +321,7 @@ fn all_op_plans() -> Vec<OpPlan> {
                 plans.extend(plan_attention(&layout, &params, &tables, &lengths, &tuning).unwrap());
             }
         }
+    }
     }
 
     plans.push(plan_moe_topk(3, 64, 8, true, 1.0).unwrap());

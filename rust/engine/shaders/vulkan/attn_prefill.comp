@@ -1,17 +1,20 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: attn_prefill | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [ceil((rows_end - row0) / 16), heads, 1]
-// Paged attention for prompt processing (Stream::attention_paged with one row per token): a workgroup of 128 lanes handles one query head of a BLOCK of
-// 16 consecutive rows and walks the keys in tiles of 32, so each key / value row is decoded once per 16 query rows instead of once per row.
-// Variants (macros): KV_Q8 = 0 / 1 (f16 / q8_0 cache), DVMAX = 128 / 256 / 512 (largest value width dv the accumulators hold; dk is free up to 512).
+// FLLM-SHADER: attn_prefill | bindings: q,kpool,vpool,meta,bias,out | push: heads,kv_heads,dk,dv,stride,block_size,scale,softcap,window,chunk,flags,rows_total,row0,rows_end,k_base,v_base,k_scale,v_scale,k_group,v_group | grid: [ceil((rows_end - row0) / BR), heads, 1]
+// Paged attention for prompt processing (Stream::attention_paged with one row per token): a workgroup of 8 * BR lanes handles one query head of a BLOCK
+// of BR consecutive rows (BR = 16, or 64 for devices with workgroups of 512 invocations: the key and value tiles and the barriers then serve four times
+// as many queries) and walks the keys in tiles of 32, so each key / value row is decoded once per BR query rows instead of once per row.
+// Variants (macros): KV_Q8 = 0 / 1 (f16 / q8_0 cache), DVMAX = 128 / 256 / 512 (largest value width dv the accumulators hold; dk is free up to 512), BR.
 //   Lane = (li, jl) with li = lane / 8 the query row inside the block and jl = lane % 8: scoring gives lane the keys jl, jl + 8, jl + 16, jl + 24 of the
 //   tile for its row (K and Q are staged in shared memory in chunks of 32 dimensions), the value accumulation gives it the dimensions jl + 8 e of every
 //   value chunk (V staged in shared memory in chunks of 32 dimensions). Online softmax per row; masks per row (chunk / window / causal length).
 // REQUIREMENT (the planner checks it): all rows of a block read the keys through ONE block table: the rows' tables agree on every block the row needs
 // as the table of the block's longest row. Blocks that do not satisfy it go to attn_decode. Row r attends to start(r) .. lengths[r]-1 like attn_decode.
-// Shared memory: 13.6 KiB. Output: out[(r * heads + head) * dv + d] for the global row r.
-#define WG 128
+// Shared memory: 13.6 KiB (BR 16), 30 KiB (BR 64). Output: out[(r * heads + head) * dv + d] for the global row r.
+#ifndef BR
 #define BR 16
+#endif
+#define WG (BR * 8)
 #define BC 32
 #define DC 32
 #define VC 32

@@ -1047,6 +1047,8 @@ fn sample_plans() -> Vec<OpPlan> {
             v.extend(
                 plan_attention(&kv, &params, &t, &lengths, &AttentionTuning::default()).unwrap(),
             );
+            let wide = AttentionTuning { prefill_rows: PREFILL_ROWS_WIDE, ..AttentionTuning::default() };
+            v.extend(plan_attention(&kv, &params, &t, &lengths, &wide).unwrap());
         }
     }
     let shape = delta_shape(2, 4, 64, 64, 4);

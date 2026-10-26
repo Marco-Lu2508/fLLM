@@ -10,6 +10,8 @@ pub const MAX_HEAD_WIDTH: usize = 512;
 pub const MAX_SPLITS: usize = 256;
 /// Query rows of one workgroup of `attn_prefill`.
 pub const PREFILL_ROWS: usize = 16;
+/// Query rows per workgroup of the wide prompt kernel (`attn_prefill_*_r64`).
+pub const PREFILL_ROWS_WIDE: usize = 64;
 
 /// Geometry of one layer of a [`DeviceKvCache`] as seen by the shaders. Positions are 16-bit words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +185,9 @@ pub struct AttentionTuning {
     pub use_prefill_kernel: bool,
     /// Fewest rows of a run that the prompt kernel takes (below it the decode kernel is cheaper).
     pub prefill_min_rows: usize,
+    /// Query rows per workgroup of the prompt kernel: [`PREFILL_ROWS`] (128 invocations) or [`PREFILL_ROWS_WIDE`] (512 invocations, the
+    /// `_r64` variants), see [`AttentionTuning::for_device`].
+    pub prefill_rows: usize,
 }
 
 impl Default for AttentionTuning {
@@ -193,7 +198,18 @@ impl Default for AttentionTuning {
             min_split_keys: 64,
             use_prefill_kernel: true,
             prefill_min_rows: 4,
+            prefill_rows: PREFILL_ROWS,
         }
+    }
+}
+
+impl AttentionTuning {
+    /// The defaults with the wide prompt tile on devices whose workgroups take 512 invocations (`FLLM_VK_ATTN_ROWS=16` keeps the narrow one).
+    pub fn for_device(max_workgroup: u32) -> Self {
+        static NARROW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let narrow = *NARROW.get_or_init(|| std::env::var("FLLM_VK_ATTN_ROWS").is_ok_and(|v| v.trim() == "16"));
+        let wide = !narrow && max_workgroup as usize >= 8 * PREFILL_ROWS_WIDE;
+        Self { prefill_rows: if wide { PREFILL_ROWS_WIDE } else { PREFILL_ROWS }, ..Self::default() }
     }
 }
 
@@ -315,9 +331,9 @@ pub fn plan_attention(
     while i < rows {
         let mut take = 1;
         if tuning.use_prefill_kernel && tuning.prefill_min_rows > 1 {
-            // longest run of <= 16 rows whose block tables are prefixes of one table (checked pairwise through the longest row seen so far)
+            // longest run of <= prefill_rows rows whose block tables are prefixes of one table (checked pairwise through the longest row seen so far)
             let mut longest = i;
-            while take < PREFILL_ROWS && i + take < rows {
+            while take < tuning.prefill_rows && i + take < rows {
                 let q = i + take;
                 let m = need(lengths[q]).min(need(lengths[longest]));
                 if table(q)[..m] != table(longest)[..m] {
@@ -330,7 +346,8 @@ pub fn plan_attention(
             }
         }
         if take >= tuning.prefill_min_rows.max(2) && tuning.use_prefill_kernel {
-            let extend = matches!(segments.last(), Some(&(f, e, true)) if e == i && (e - f).is_multiple_of(PREFILL_ROWS) && (e - f + take) <= MAX_GROUPS_PER_DIM as usize * PREFILL_ROWS);
+            let br = tuning.prefill_rows;
+            let extend = matches!(segments.last(), Some(&(f, e, true)) if e == i && (e - f).is_multiple_of(br) && (e - f + take) <= MAX_GROUPS_PER_DIM as usize * br);
             if extend {
                 if let Some(s) = segments.last_mut() {
                     s.1 = i + take;
@@ -490,13 +507,20 @@ impl Common<'_> {
 
     fn prefill_plan(&self, first: usize, end: usize) -> Result<OpPlan, BackendError> {
         let p = self.params;
-        let name = match (self.is_q8(), p.value_dim) {
-            (false, 0..=128) => "attn_prefill_f16_d128",
-            (false, 129..=256) => "attn_prefill_f16_d256",
-            (false, _) => "attn_prefill_f16_d512",
-            (true, 0..=128) => "attn_prefill_q8_d128",
-            (true, 129..=256) => "attn_prefill_q8_d256",
-            (true, _) => "attn_prefill_q8_d512",
+        let wide = self.tuning.prefill_rows == PREFILL_ROWS_WIDE;
+        let name = match (self.is_q8(), p.value_dim, wide) {
+            (false, 0..=128, false) => "attn_prefill_f16_d128",
+            (false, 129..=256, false) => "attn_prefill_f16_d256",
+            (false, _, false) => "attn_prefill_f16_d512",
+            (true, 0..=128, false) => "attn_prefill_q8_d128",
+            (true, 129..=256, false) => "attn_prefill_q8_d256",
+            (true, _, false) => "attn_prefill_q8_d512",
+            (false, 0..=128, true) => "attn_prefill_f16_d128_r64",
+            (false, 129..=256, true) => "attn_prefill_f16_d256_r64",
+            (false, _, true) => "attn_prefill_f16_d512_r64",
+            (true, 0..=128, true) => "attn_prefill_q8_d128_r64",
+            (true, 129..=256, true) => "attn_prefill_q8_d256_r64",
+            (true, _, true) => "attn_prefill_q8_d512_r64",
         };
         let push = self.cache_push(
             self.head_push()
@@ -505,7 +529,7 @@ impl Common<'_> {
                 .u("rows_end", end),
         );
         // the field order of the shader: ... flags, rows_total, row0, rows_end, k_base, ...
-        let blocks = div_up(end - first, PREFILL_ROWS);
+        let blocks = div_up(end - first, self.tuning.prefill_rows);
         plan(
             name,
             push,
