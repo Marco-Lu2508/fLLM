@@ -444,8 +444,9 @@ pub(crate) unsafe fn gemv_avx2(
     }
     match kind {
         Q4K => by_rows!(12),
+        Q5K => by_rows!(13),
         Q6K => by_rows!(14),
-        _ => unreachable!("only Q4_K and Q6_K have a batch-one AVX2 kernel"),
+        _ => unreachable!("only Q4_K, Q5_K and Q6_K have a batch-one AVX2 kernel"),
     }
 }
 
@@ -583,13 +584,27 @@ unsafe fn gemv_body_avx2<const KIND: u32, const R: usize>(
                 let scales = _mm256_broadcastsi128_si256(_mm_cvtepu8_epi16(_mm_cvtsi64_si128(
                     scales as i64,
                 )));
+                // Q5_K: the fifth bits of value l of pair p sit in bit 2p (first 32 values) and 2p + 1 (next 32) of qh[l]
+                let qh = if KIND == Q5K { _mm256_loadu_si256(raw.as_ptr().add(16).cast()) } else { _mm256_setzero_si256() };
+                let one = _mm256_set1_epi8(1);
+                let qs_at = if KIND == Q5K { 48 } else { 16 };
                 for pair in 0..4usize {
-                    let packed = _mm256_loadu_si256(raw.as_ptr().add(16 + pair * 32).cast());
-                    let lo = _mm256_and_si256(packed, low4);
-                    let hi = _mm256_and_si256(_mm256_srli_epi16::<4>(packed), low4);
+                    let packed = _mm256_loadu_si256(raw.as_ptr().add(qs_at + pair * 32).cast());
+                    let mut lo = _mm256_and_si256(packed, low4);
+                    let mut hi = _mm256_and_si256(_mm256_srli_epi16::<4>(packed), low4);
+                    if KIND == Q5K {
+                        // the shift count is a run-time value here: _mm256_srl_epi16 with a count register (bits of the
+                        // neighbouring byte that move in are masked off)
+                        let count_lo = _mm_cvtsi32_si128(2 * pair as i32);
+                        let count_hi = _mm_cvtsi32_si128(2 * pair as i32 + 1);
+                        let bit_lo = _mm256_and_si256(_mm256_srl_epi16(qh, count_lo), one);
+                        let bit_hi = _mm256_and_si256(_mm256_srl_epi16(qh, count_hi), one);
+                        lo = _mm256_or_si256(lo, _mm256_slli_epi16::<4>(bit_lo));
+                        hi = _mm256_or_si256(hi, _mm256_slli_epi16::<4>(bit_hi));
+                    }
                     let x_lo = _mm256_load_si256(xs[2 * pair].q.as_ptr().cast());
                     let x_hi = _mm256_load_si256(xs[2 * pair + 1].q.as_ptr().cast());
-                    // 4-bit weights: a pair of products is at most 2 * 15 * 127, no saturation.
+                    // 4- or 5-bit weights: a pair of products is at most 2 * 31 * 127, no saturation.
                     let p_lo = _mm256_madd_epi16(
                         _mm256_shuffle_epi8(scales, word_selectors[2 * pair]),
                         _mm256_maddubs_epi16(lo, x_lo),
@@ -2170,6 +2185,36 @@ mod tests {
             }
         }
     }
+    // The batch-one AVX2 kernel (Q4_K, Q5_K, Q6_K) against the f64 reference, every panel size it serves.
+    #[test]
+    fn batch_one_avx2_kernel_matches_the_scalar_reference() {
+        use crate::cpu_selftest::{compare, random_weights, reference_packed, Lcg};
+        if !(std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") && std::arch::is_x86_feature_detected!("f16c")) {
+            return;
+        }
+        let mut rng = Lcg(57);
+        for kind in [12u32, 13, 14] {
+            for blocks in [1, 3] {
+                let cols = blocks * 256;
+                let rows = 9;
+                let weights = random_weights(kind, rows, cols, &mut rng);
+                for size in 1..=4 {
+                    let x = rng.vector(cols, 3.0);
+                    let packed = prepare(&x, cols, kind);
+                    let (want, scale) = reference_packed(&weights, kind, rows, cols, &packed);
+                    let mut output = vec![vec![0.0; rows]];
+                    crate::cpu_schedule::row_panels(&mut output, &[rows], 1, size, || (), |_, _, first, out| {
+                        let valid = (rows - first).min(size);
+                        // SAFETY: AVX2/FMA/F16C detected above; the weights hold `rows` complete rows.
+                        unsafe { super::gemv_avx2(&weights, kind, first, valid, &packed, cols / 32, out) };
+                    });
+                    let (error, ok) = compare(&output[0], &want, &scale);
+                    assert!(ok, "gemv avx2 kind {kind} blocks {blocks} panel {size}: {error:e}");
+                }
+            }
+        }
+    }
+
     // The predecoded kernels (decode a panel once, then dot) against the f64 reference and
     // against the streaming kernels they replace for prompts: every panel row count, one and
     // three blocks, token counts around the pair boundaries.
