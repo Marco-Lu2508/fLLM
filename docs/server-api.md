@@ -215,7 +215,8 @@ Request fields:
 | `logprobs`, `top_logprobs` | Boolean and integer `0..20` (top_logprobs requires logprobs:true) |
 | `stream_options.include_usage` | Boolean; final usage-only chunk, default false |
 | `min_tokens`, `ignore_eos`, `stop_token_ids` | Minimum generation length, EOS suppression, explicit vocabulary stop IDs |
-| `reasoning_effort` | Passed through to chat_template_kwargs.reasoning_effort |
+| `reasoning_effort` | Passed through to chat_template_kwargs.reasoning_effort. On a model with a thinking switch (`capabilities.thinking.control` is `toggle`) it also switches thinking on, `none` switches it off, and `low` / `medium` set a thinking budget of 512 / 2048 tokens (`high` is unlimited); see [Thinking](#thinking) |
+| `thinking_budget` | Integer, at least 1: the most tokens the reasoning block may use before the server ends it itself, see [Thinking](#thinking). Not with `n > 1` |
 | `tools` | Array of `{"type":"function","function":{"name":…,"parameters":{…}}}`; only `function` tools |
 | `tool_choice` | `"none"`, `"auto"`, `"required"` or `{"type":"function","function":{"name":"…"}}`; default `auto` when tools are present, otherwise `none` |
 | `parallel_tool_calls` | Boolean; default `true`. `false` rejects a reply containing more than one call |
@@ -404,6 +405,43 @@ other families; pick the closest id with `--tool-parser` if the wire format matc
 If a model's calls come back as plain text, the log line shows which parser was chosen; the
 usual causes are a template without the model's marker (use `--tool-parser`) and a tokenizer
 that does not store the markers as tokens.
+
+### Thinking
+
+`capabilities.thinking` of `GET /api/studio/status` (`model.capabilities`) and of every entry of `GET /v1/models` tells what the loaded
+model can do about thinking. The server reads it from the chat template (the variables `enable_thinking`, `thinking`,
+`reasoning_effort`, the reasoning markers), the reasoning parser it picked and the architecture:
+
+```json
+{"supported": true, "control": "toggle", "variable": "enable_thinking", "levels": ["off","low","medium","high"], "default": "high"}
+```
+
+| `control` | Models | What a client can do |
+| --- | --- | --- |
+| `none` | Llama, Mistral, Gemma 3 and others without a thinking mode (`supported` is `false`) | nothing; the Studio hides its Thinking chip |
+| `toggle` | Qwen3, Qwen3.5, GLM, Gemma 4, Granite 3.3 and other templates with a switch | `off`, or `low` / `medium` / `high`, where the levels are budgets enforced by the server |
+| `effort` | gpt-oss and other templates that take `reasoning_effort` | `low`, `medium`, `high`, handed to the template; the model scales its own thinking |
+| `always` | DeepSeek-R1 style templates that always open a reasoning block | nothing to switch (an explicit `thinking_budget` still applies) |
+
+`variable` is the template variable the switch or level goes into, `default` the level the model uses when a request says nothing.
+The detection is a reading of the template, not a test of the model: a template that handles thinking in a way the reader does not
+know shows as `none` or `always`, and `chat_template_kwargs` still reaches the template.
+
+**Thinking budget.** With `thinking_budget` (or `reasoning_effort` `low` / `medium` on a `toggle` model) the server watches the
+reasoning block. When it has used the budget's number of tokens and is still open, the server closes it itself: it appends the
+model's closing tag and a line break to the context (`</think>` for the Qwen/DeepSeek family, the matching tag of the other
+formats), ends the first generation and continues from prompt + reasoning + closing tag, so the model writes its answer next.
+The client sees one uninterrupted stream (`reasoning_content` deltas, then `content`). Details:
+
+* The forced tokens count as completion tokens (they are part of the context), the reasoning part of `reasoning_tokens` is
+  at most the budget plus the closing tag. `prompt_tokens` stays the size of the original prompt.
+* The continuation is a second request internally. It reuses the prefix cache for the prompt; the reasoning tokens are
+  prefilled again unless the cache still holds them (`timings` then describe the continuation).
+* A block the model closed before the budget is left alone, as is a reply without a reasoning block.
+* Not applied (the request runs as without a budget) for constrained output (`response_format`, grammars, forced tool
+  calls), images, and for reasoning formats that have no closing tag to write (`gpt_oss`, which uses `reasoning_effort`).
+  `n > 1` with an explicit `thinking_budget` is refused (`400`).
+* If `max_tokens` leaves no room for an answer after the closing tag, the budget is not applied.
 
 ### Reasoning parsers (`--reasoning-parser`)
 

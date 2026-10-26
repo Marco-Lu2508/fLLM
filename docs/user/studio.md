@@ -27,6 +27,12 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   and a chip under your message ("Using 6 passages from report.pdf") shows them. Several documents can be in one chat; they stay in
   the chat and are searched for every later question until you remove them (the x on their chip). The extracted text is stored in the
   browser with the chat, at most 600,000 characters per document and 1,500,000 per chat; the page says so when a limit cuts a document.
+* **Thinking.** The *Thinking* chip in the composer appears only when the loaded model can think, and offers what the model supports:
+  a model with a thinking switch (Qwen3, Qwen3.5, GLM, Gemma 4, ...) steps through Off, Low, Medium and High on each click (Low and
+  Medium make the server end the thinking after about 512 or 2048 tokens and let the model answer; High lets it think as long as it
+  wants); a model that takes an effort (gpt-oss) offers Low, Medium and High; a model that always thinks (DeepSeek-R1 style) shows the
+  chip greyed out; models without a thinking mode (Llama, Mistral, Gemma 3, ...) do not show it. The level is remembered per chat, and a
+  new chat starts at the model's own default. With a model of another provider the chip sends the level as the reasoning effort.
 * **Use the web.** Switch on *Use the web* in the composer and each question is searched on the web first. The first three results
   are read, their best passages are added to the prompt with their source numbers, and the sources are listed under the answer. This
   uses the web tools of the server (`/api/studio/web/search` and `/api/studio/web/fetch`); if they are missing or blocked, the page
@@ -196,6 +202,7 @@ is also checked before the server is restarted with it.
 **Load options.** *Load* opens a dialog with an *Advanced* section: context length, layers on the graphics card (a number or
 `all`), processor threads, the memory type of the conversation (f16, q8_0, q4_0, ...) and how many chats are answered at once.
 Everything left on *auto* is chosen by the server. The choices are remembered per model file and shown on the loaded-model card.
+*Speculative decoding* (guessing ahead to answer faster, a start option of the server, so it is chosen here and not per chat) can be off, *prompt lookup* (no extra model; guesses from the text of the conversation, good for code edits, summaries and quoted text), *draft model* (pick a smaller downloaded model of the same family) or *multi-token prediction* (only models that have the heads, on the processor or a CUDA graphics card). The answers are the same as without it, only the speed changes, and it can also be slower when the guesses are rarely right. Models with recurrent layers (for example Qwen3.5 or Mamba) cannot use it. The choice is remembered per model.
 Combinations that cannot work (for example q4_0 conversation memory on a Vulkan, DirectX 12 or Metal device, or GPU layers while
 running on the processor) are refused with a message. There is no switch for prefix caching: the engine has no such option, so none is offered.
 

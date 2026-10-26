@@ -12,7 +12,7 @@ were added with it. Test levels are stated per feature in [changes/spec.md](chan
 | `ngram` (or a number, the older syntax) | longest earlier match of the conversation's last tokens (prompt lookup) | nothing | every backend |
 | `suffix` | longest match across the whole conversation and a cache of recent generations; follows the continuation most matches agree on | nothing | every backend |
 | `draft` | a small model of the same tokenizer | `--speculative-model PATH_OR_HF` (or `--draft-model`) | the same device as the target, own KV pool |
-| `mtp` | the NextN / MTP head of the checkpoint (DeepSeek-V3 style), one candidate | a checkpoint with the head | CPU (the head has no GPU path yet) |
+| `mtp` | the NextN / MTP head of the checkpoint (DeepSeek-V3 style), one candidate | a checkpoint with the head | CPU or CUDA (`--device cpu`, `auto` or `cuda`; the other backends are refused) |
 | `eagle`, `eagle3`, `medusa` | | | not implemented: the flags are rejected with an explanation |
 
 Other flags: `--num-speculative-tokens N` (1 to 32, the largest number of draft tokens per verification; default 5 for `ngram` and
