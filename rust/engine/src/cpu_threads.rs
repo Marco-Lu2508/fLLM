@@ -22,7 +22,10 @@ const BUDGET: Duration = Duration::from_millis(1200);
 /// Hard stop (cold weights, a busy machine): the policy value is used and nothing is cached.
 const DEADLINE: Duration = Duration::from_millis(2500);
 /// Projections smaller than this are served from cache and say nothing about memory bandwidth: no measurement.
-const MIN_WEIGHT_BYTES: u64 = 8 << 20;
+const MIN_WEIGHT_BYTES: u64 = 2 << 20;
+/// The same projection of the following layers joins the measurement until the weights read per pass exceed this, so a pass streams
+/// from memory like a decode step does instead of hitting the cache (a 2B model's largest matrix is 7 MB).
+const PASS_BYTES: u64 = 96 << 20;
 
 /// What the process runs with, for the logs, `fllm-rs devices` and the Studio's hardware page.
 #[derive(Clone, Debug)]
@@ -151,6 +154,11 @@ fn cache_path() -> std::path::PathBuf {
 
 /// The projection that stands for a decode step: the largest 2-D quantized weight of the first layer, as
 /// `(name without ".weight", rows, cols, type id, bytes)`.
+/// The layer number of `blk.N.name`.
+fn base_layer(base: &str) -> Option<usize> {
+    base.strip_prefix("blk.")?.split_once('.')?.0.parse().ok()
+}
+
 fn representative(mapping: &MappedGguf) -> Option<(String, usize, usize, u32, u64)> {
     let layer_of = |name: &str| -> Option<usize> { name.strip_prefix("blk.")?.split_once('.')?.0.parse().ok() };
     let eligible = |t: &&fllm_gguf_probe::TensorInfo| {
@@ -167,17 +175,23 @@ fn representative(mapping: &MappedGguf) -> Option<(String, usize, usize, u32, u6
     Some((base, t.dimensions[1] as usize, t.dimensions[0] as usize, t.type_id, t.payload_len))
 }
 
-fn time_candidate(pool: &rayon::ThreadPool, linear: &Linear, input: &[f32], slice: Duration) -> Option<f64> {
+fn time_candidate(pool: &rayon::ThreadPool, linears: &[Linear], input: &[f32], slice: Duration) -> Option<f64> {
+    let pass = || -> Option<()> {
+        for linear in linears {
+            linear.forward(input).ok()?;
+        }
+        Some(())
+    };
     pool.install(|| {
         for _ in 0..2 {
-            linear.forward(input).ok()?;
+            pass()?;
         }
         let start = Instant::now();
         let mut best = f64::INFINITY;
         loop {
             let t = Instant::now();
             for _ in 0..4 {
-                linear.forward(input).ok()?;
+                pass()?;
             }
             best = best.min(t.elapsed().as_secs_f64() / 4.0);
             if start.elapsed() >= slice {
@@ -238,8 +252,27 @@ pub fn tune(mapping: &MappedGguf, hidden: usize) -> ThreadChoice {
     }
     let started = Instant::now();
     let measured = (|| {
-        let mut linear = Linear::load(mapping, &base, rows, cols).ok()?;
-        linear.enable_fast_cpu();
+        // the projection of the first layer and the same one of the following layers, until a pass reads PASS_BYTES
+        let suffix = base.strip_prefix("blk.").and_then(|r| r.split_once('.')).map(|(_, s)| s.to_owned());
+        let mut linears = Vec::new();
+        let mut read = 0u64;
+        for layer in 0.. {
+            let name = match &suffix {
+                Some(s) if layer > 0 => format!("blk.{}.{s}", base_layer(&base)? + layer),
+                _ if layer > 0 => break,
+                _ => base.clone(),
+            };
+            let Ok(mut linear) = Linear::load(mapping, &name, rows, cols) else { break };
+            linear.enable_fast_cpu();
+            linears.push(linear);
+            read += bytes;
+            if read >= PASS_BYTES || layer >= 64 {
+                break;
+            }
+        }
+        if linears.is_empty() {
+            return None;
+        }
         // fixed pseudo-random activations; the values do not matter for the time
         let mut state = 0x9E37_79B9u32;
         let input: Vec<f32> = (0..cols)
@@ -261,7 +294,7 @@ pub fn tune(mapping: &MappedGguf, hidden: usize) -> ThreadChoice {
                 return None;
             }
             let (_, pool) = pools.iter().find(|(m, _)| *m == n)?;
-            time_candidate(pool, &linear, &input, slice)
+            time_candidate(pool, &linears, &input, slice)
         })
     })();
     match measured {
