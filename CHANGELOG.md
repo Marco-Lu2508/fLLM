@@ -16,6 +16,8 @@ behaviour between versions).
 - `FLLM_VK_PROFILE=N` prints the shader table every N command buffers, summed over all recorders of the process.
 
 ### Fixed
+- CUDA: 16 simultaneous users (or a few at long contexts) failed with "illegal memory access": an attention call staged its lengths, then grew the metadata ring for its block tables and freed the memory the lengths were in. Found and verified on a Colab L4 (16 of 16 requests answered afterwards).
+- Models with recurrent layers (Qwen3.5, Mamba) on a GPU: the memory plan now leaves room for the recurrent states of all sequences; before, the KV pool took the whole card and a busy step ran out of memory.
 - A model step that failed (for example a device error under load) stopped the whole server; now its requests get the error, the error is logged at once, and the server keeps serving (three failed steps in a row still stop it).
 - Gemma 4 on the CPU: the fast attention kernel now takes the sliding window and the score scale, so the model no longer uses the scalar reference in every layer (Core Ultra 5 235U, Gemma 4 E4B Q4_K_M: prompts 34 instead of 18 tokens/s, answers up to 8.7 instead of 3 to 4).
 - Gemma per-layer weights stored as bf16 or f16 now go to the device as Q8_0 as well (the projection of the per-layer inputs ran in the slow bf16 kernel).

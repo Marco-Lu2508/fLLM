@@ -115,7 +115,7 @@ impl MemoryPlan {
         let kv_block_bytes = (block_size as u64) * bytes_per_token;
 
         // Backend workspaces, the driver context and padded weight layouts
-        let overhead_bytes = (768u64 << 20) + (layer_attn + layer_ffn) / 20;
+        let overhead_bytes = (768u64 << 20) + (layer_attn + layer_ffn) / 20 + recurrent_state_bytes(model);
         // Smallest pool worth giving up decode speed for: one full-context sequence. More concurrent sequences share the
         // pool (the scheduler preempts when it runs dry); offloading feed-forward layers to the host costs far more.
         let min_blocks = model.table_stride().max(1) as u64;
@@ -258,4 +258,35 @@ impl MemoryPlan {
         Ok(plan)
     }
 
+}
+
+/// Device memory of the recurrent states (Gated DeltaNet, Mamba-2, Mamba-1 layers): the decoder keeps up to two states per sequence slot
+/// (`state_capacity`), each holding every recurrent layer. They are allocated while the server runs, so the KV pool must leave room for
+/// them (16 sequences of Qwen3.5-2B need about 600 MB; without the reserve the pool took the whole card and the first busy step failed).
+fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {
+    let cfg = model.config();
+    let mut layers = std::collections::BTreeSet::new();
+    for t in &model.mapping().index().tensors {
+        if let Some(rest) = t.name.strip_prefix("blk.") {
+            if t.name.contains(".ssm_") {
+                if let Some(index) = rest.split('.').next().and_then(|n| n.parse::<usize>().ok()) {
+                    layers.insert(index);
+                }
+            }
+        }
+    }
+    if layers.is_empty() {
+        return 0;
+    }
+    let per_layer = if let Some(d) = &cfg.delta {
+        let conv_dim = 2 * d.k_heads * d.k_dim + d.v_heads * d.v_dim;
+        d.v_heads * d.k_dim * d.v_dim * 4 + conv_dim * d.conv_kernel.saturating_sub(1) * 4
+    } else if let Some(m) = &cfg.mamba {
+        m.inner * m.state * 4 + (m.inner + 2 * m.groups * m.state) * m.conv_kernel.saturating_sub(1) * 4
+    } else if let Some(m) = &cfg.mamba1 {
+        m.inner * m.state * 4 + m.inner * m.conv_kernel.saturating_sub(1) * 4
+    } else {
+        0
+    };
+    (layers.len() * per_layer.next_multiple_of(256) * model.max_sequences().max(1) * 2) as u64
 }
