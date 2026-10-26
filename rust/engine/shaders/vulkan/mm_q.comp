@@ -1,5 +1,5 @@
 #version 450
-// FLLM-SHADER: mmq_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(uvec4[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | spec: 0 = workgroup size = BM * BN / (TM * 4), 1 = BM, 2 = BN, 3 = TM | grid: ceil(rows/BM) x ceil(batch/BN) x 1
+// FLLM-SHADER: mmq_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(uvec4[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | spec: 0 = workgroup size = BM * BN / (TM * 4), 1 = BM, 2 = BN, 3 = TM, 4 = KS | grid: ceil(rows/BM) x ceil(batch/BN) x 1
 // Quantized matrix-matrix product for prompt processing (batch of tens to thousands of rows): same contract and numerical model as mm_idot.comp
 // (int8 activations in blocks of 32 with a float scale, weights decoded by the chunk decoders of _q_fmt_*.glsl, 4 x int8 dot products), organised for
 // throughput:
@@ -7,12 +7,14 @@
 //    8) placed at rows i * BM/TM + tx and tokens j * BN/4 + ty, so that the lanes of a subgroup read consecutive shared-memory words (the tiles are
 //    stored "word-major": word w of row r at w * BM + r) and write consecutive output rows. A larger TM reads fewer shared-memory words per dot
 //    product, which is what limits GPUs whose shared memory is slow next to their integer dot rate (integrated graphics);
-//  * one K step = one block of 32 values; the weight chunk and the activation words of the next step are fetched into registers before the current
-//    step is computed, then stored to the other half of a double-buffered tile: one barrier per K step;
-//  * the integer dot products of a scale group (32 values, or 16 for Q2_K / Q3_K / Q6_K / NVFP4: NG = 2 groups per step) are accumulated with the
+//  * one K step = KS blocks of 32 values (KS 1 or 2); the weight chunks and the activation words of the next step are fetched into registers before
+//    the current step is computed, then stored to the other half of a double-buffered tile: one barrier per K step;
+//  * the integer dot products of a scale group (32 values, or 16 for Q2_K / Q3_K / Q6_K / NVFP4: NG = 2 groups per block) are accumulated with the
 //    accumulating dot instruction and converted/scaled once per group: acc += float(isum) * (ws * d_act) [+ wm * d_act * sum(act)].
 //  * the sum of the activations of each half block (for the additive term wm of Q4_1, Q5_1, Q2_K, Q4_K, Q5_K) is computed once while the tile is staged.
-// The loaders loop when the workgroup has fewer invocations than weight chunks (4 * BM) or activation vectors (2 * BN).
+// The loaders loop when the workgroup has fewer invocations than weight chunks (4 * KS * BM) or activation vectors (2 * KS * BN). Neighbouring
+// invocations load neighbouring chunks of one weight row (and the halves of one token), which keeps the reads of a subgroup on few cache lines.
+// A step past the last block loads zeros (rows whose block count is not a multiple of KS).
 #extension GL_GOOGLE_include_directive : enable
 #include "_q_ext.glsl"
 
@@ -20,6 +22,7 @@ layout(local_size_x = 256, local_size_x_id = 0, local_size_y = 1, local_size_z =
 layout(constant_id = 1) const uint BM = 64;
 layout(constant_id = 2) const uint BN = 64;
 layout(constant_id = 3) const uint TM = 4;
+layout(constant_id = 4) const uint KS = 1;
 
 #include "_q_common.glsl"
 #include "_q_formats.glsl"
@@ -28,7 +31,7 @@ layout(std430, set = 0, binding = 1) readonly buffer XQBuf { uvec4 xq4[]; };
 layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
 layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
 
-// scale groups per K step: 1 = one weight scale per 32 values, 2 = one per 16 values
+// scale groups per block: 1 = one weight scale per 32 values, 2 = one per 16 values
 #if defined(FMT_Q2_K) || defined(FMT_Q3_K) || defined(FMT_Q6_K) || defined(FMT_NVFP4)
 #define NG 2
 #else
@@ -39,38 +42,41 @@ layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
 const uint TXN = BM / TM;   // invocations along the rows of the tile
 const uint TYN = BN / 4u;   // invocations along the tokens of the tile
 const uint WGS = TXN * TYN; // invocations of the workgroup (specialization constant 0 must equal it)
-const uint NA = (4u * BM + WGS - 1u) / WGS;   // weight chunks loaded per invocation and step
-const uint NB = (2u * BN + WGS - 1u) / WGS;   // activation vectors loaded per invocation and step
+const uint CA = 4u * KS;    // weight chunks (8 values) per row and step
+const uint CB = 2u * KS;    // activation vectors (16 values) per token and step
+const uint NA = (CA * BM + WGS - 1u) / WGS;   // weight chunks loaded per invocation and step
+const uint NB = (CB * BN + WGS - 1u) / WGS;   // activation vectors loaded per invocation and step
+const uint AW = 8u * KS;    // words per row and step
 
-shared uint Ap[2u * 8u * BM];        // [buffer][word][row]
-shared float Aws[2u * NG * BM];      // [buffer][group][row]
-shared uint Bp[2u * 8u * BN];        // [buffer][word][token]
-shared float Bd[2u * BN];            // [buffer][token] activation block scale
+shared uint Ap[2u * AW * BM];             // [buffer][word][row]
+shared float Aws[2u * KS * NG * BM];      // [buffer][block][group][row]
+shared uint Bp[2u * AW * BN];             // [buffer][word][token]
+shared float Bd[2u * KS * BN];            // [buffer][block][token] activation block scale
 #ifdef HAS_WM
-shared float Awm[2u * NG * BM];
-shared float Bs[2u * 2u * BN];       // [buffer][half][token]: scale * sum of the 16 activations of the half block
+shared float Awm[2u * KS * NG * BM];
+shared float Bs[2u * KS * 2u * BN];       // [buffer][block][half][token]: scale * sum of the 16 activations of the half block
 #endif
 
-// loads of step `kb` into the registers; unit u of the weight loader is chunk u % 4 (8 values) of row u / 4, unit u of the activation loader
-// is half u % 2 (16 values) of token u / 2: neighbouring invocations read neighbouring bytes of one row, which keeps the reads of a subgroup
-// on few cache lines (a macro: the registers stay local to main, which keeps them out of memory)
+// loads of step `KB` into the registers (a macro: the registers stay local to main, which keeps them out of memory)
 #define LOAD_STEP(KB) { const uint kb_ = (KB); \
     [[unroll]] for (uint n = 0; n < NA; ++n) { \
         const uint u = t + n * WGS; \
         ap0[n] = 0u; ap1[n] = 0u; aws[n] = 0.0; awm[n] = 0.0; \
-        const uint row_g = m0 + u / 4u; \
-        if (u < 4u * BM && row_g < p.rows) { \
-            const uint kk = (kb_ << 5) + ((u % 4u) << 3); \
+        const uint row_g = m0 + u / CA; \
+        const uint blk = kb_ * KS + (u % CA) / 4u; \
+        if (u < CA * BM && row_g < p.rows && blk < nk) { \
+            const uint kk = (blk << 5) + ((u % 4u) << 3); \
             wchunk(row_g * p.nb + kk / QK, (kk % QK) >> 3, ap0[n], ap1[n], aws[n], awm[n]); \
         } \
     } \
     [[unroll]] for (uint n = 0; n < NB; ++n) { \
         const uint u = t + n * WGS; \
         bx[n] = uvec4(0u); bdv[n] = 0.0; \
-        const uint tok_g = n0 + u / 2u; \
-        if (u < 2u * BN && tok_g < p.batch) { \
-            bx[n] = xq4[tok_g * (p.cols >> 4) + (kb_ << 1) + u % 2u]; \
-            const uint si = p.xq_d + tok_g * nk + kb_; \
+        const uint tok_g = n0 + u / CB; \
+        const uint blk = kb_ * KS + (u % CB) / 2u; \
+        if (u < CB * BN && tok_g < p.batch && blk < nk) { \
+            bx[n] = xq4[tok_g * (p.cols >> 4) + (blk << 1) + (u % 2u)]; \
+            const uint si = p.xq_d + tok_g * nk + blk; \
             bdv[n] = uintBitsToFloat(xq4[si >> 2][si & 3u]); \
         } \
     } \
@@ -83,6 +89,7 @@ void main() {
     const uint m0 = gl_WorkGroupID.x * BM;
     const uint n0 = gl_WorkGroupID.y * BN;
     const uint nk = p.cols >> 5;
+    const uint steps = (nk + KS - 1u) / KS;
 
     float acc[TM][4];
     [[unroll]] for (uint i = 0; i < TM; ++i) {
@@ -95,29 +102,30 @@ void main() {
     float bdv[NB];
     LOAD_STEP(0u)
 
-    for (uint kb = 0u; kb < nk; ++kb) {
+    for (uint kb = 0u; kb < steps; ++kb) {
         const uint cur = kb & 1u;
 
         // store the registers into the buffer `cur` (written by this step's loads; the barrier at the end of the previous step has passed)
         [[unroll]] for (uint n = 0; n < NA; ++n) {
             const uint u = t + n * WGS;
-            if (u < 4u * BM) {
-                const uint a_row = u / 4u;
-                const uint a_kc = u % 4u;
-                Ap[cur * 8u * BM + (a_kc * 2u) * BM + a_row] = ap0[n];
-                Ap[cur * 8u * BM + (a_kc * 2u + 1u) * BM + a_row] = ap1[n];
+            if (u < CA * BM) {
+                const uint a_row = u / CA;
+                const uint a_kc = u % CA;          // chunk within the step: block a_kc / 4, chunk a_kc % 4 of the block
+                const uint a_blk = a_kc / 4u;
+                Ap[cur * AW * BM + (a_kc * 2u) * BM + a_row] = ap0[n];
+                Ap[cur * AW * BM + (a_kc * 2u + 1u) * BM + a_row] = ap1[n];
 #if NG == 1
-                if (a_kc == 0u) {
-                    Aws[cur * BM + a_row] = aws[n];
+                if ((a_kc % 4u) == 0u) {
+                    Aws[(cur * KS + a_blk) * BM + a_row] = aws[n];
 #ifdef HAS_WM
-                    Awm[cur * BM + a_row] = awm[n];
+                    Awm[(cur * KS + a_blk) * BM + a_row] = awm[n];
 #endif
                 }
 #else
                 if ((a_kc & 1u) == 0u) {
-                    Aws[(cur * 2u + (a_kc >> 1)) * BM + a_row] = aws[n];
+                    Aws[((cur * KS + a_blk) * 2u + ((a_kc % 4u) >> 1)) * BM + a_row] = aws[n];
 #ifdef HAS_WM
-                    Awm[(cur * 2u + (a_kc >> 1)) * BM + a_row] = awm[n];
+                    Awm[((cur * KS + a_blk) * 2u + ((a_kc % 4u) >> 1)) * BM + a_row] = awm[n];
 #endif
                 }
 #endif
@@ -125,63 +133,67 @@ void main() {
         }
         [[unroll]] for (uint n = 0; n < NB; ++n) {
             const uint u = t + n * WGS;
-            if (u < 2u * BN) {
-                const uint b_tok = u / 2u;
-                const uint b_q = u % 2u;
-                Bp[cur * 8u * BN + (b_q * 4u + 0u) * BN + b_tok] = bx[n].x;
-                Bp[cur * 8u * BN + (b_q * 4u + 1u) * BN + b_tok] = bx[n].y;
-                Bp[cur * 8u * BN + (b_q * 4u + 2u) * BN + b_tok] = bx[n].z;
-                Bp[cur * 8u * BN + (b_q * 4u + 3u) * BN + b_tok] = bx[n].w;
-                if (b_q == 0u) Bd[cur * BN + b_tok] = bdv[n];
+            if (u < CB * BN) {
+                const uint b_tok = u / CB;
+                const uint b_v = u % CB;           // vector within the step: block b_v / 2, half b_v % 2
+                const uint b_blk = b_v / 2u;
+                Bp[cur * AW * BN + (b_v * 4u + 0u) * BN + b_tok] = bx[n].x;
+                Bp[cur * AW * BN + (b_v * 4u + 1u) * BN + b_tok] = bx[n].y;
+                Bp[cur * AW * BN + (b_v * 4u + 2u) * BN + b_tok] = bx[n].z;
+                Bp[cur * AW * BN + (b_v * 4u + 3u) * BN + b_tok] = bx[n].w;
+                if ((b_v & 1u) == 0u) Bd[(cur * KS + b_blk) * BN + b_tok] = bdv[n];
 #ifdef HAS_WM
-                Bs[(cur * 2u + b_q) * BN + b_tok] = bdv[n] * float(idot4(0x01010101u, bx[n].x) + idot4(0x01010101u, bx[n].y) + idot4(0x01010101u, bx[n].z) + idot4(0x01010101u, bx[n].w));
+                Bs[((cur * KS + b_blk) * 2u + (b_v & 1u)) * BN + b_tok] = bdv[n] * float(idot4(0x01010101u, bx[n].x) + idot4(0x01010101u, bx[n].y) + idot4(0x01010101u, bx[n].z) + idot4(0x01010101u, bx[n].w));
 #endif
             }
         }
         barrier();
 
         // fetch the next step into the registers (the global loads overlap with the arithmetic below)
-        if (kb + 1u < nk) {
+        if (kb + 1u < steps) {
             LOAD_STEP(kb + 1u)
         }
 
         // arithmetic on the buffer `cur`
-        float bd[4];
-        [[unroll]] for (uint j = 0; j < 4; ++j) bd[j] = Bd[cur * BN + j * TYN + ty];
-        [[unroll]] for (uint g = 0; g < NG; ++g) {
-            int isum[TM][4];
-            [[unroll]] for (uint i = 0; i < TM; ++i) {
-                [[unroll]] for (uint j = 0; j < 4; ++j) isum[i][j] = 0;
-            }
-            [[unroll]] for (uint w = 0; w < GW; ++w) {
-                uint b[4];
-                [[unroll]] for (uint j = 0; j < 4; ++j) b[j] = Bp[cur * 8u * BN + (g * GW + w) * BN + j * TYN + ty];
+        [[unroll]] for (uint q = 0; q < KS; ++q) {
+            float bd[4];
+            [[unroll]] for (uint j = 0; j < 4; ++j) bd[j] = Bd[(cur * KS + q) * BN + j * TYN + ty];
+            [[unroll]] for (uint g = 0; g < NG; ++g) {
+                int isum[TM][4];
                 [[unroll]] for (uint i = 0; i < TM; ++i) {
-                    const uint a = Ap[cur * 8u * BM + (g * GW + w) * BM + i * TXN + tx];
-                    [[unroll]] for (uint j = 0; j < 4; ++j) isum[i][j] = idot4acc(a, b[j], isum[i][j]);
+                    [[unroll]] for (uint j = 0; j < 4; ++j) isum[i][j] = 0;
                 }
-            }
+                [[unroll]] for (uint w = 0; w < GW; ++w) {
+                    const uint word = q * 8u + g * GW + w;
+                    uint b[4];
+                    [[unroll]] for (uint j = 0; j < 4; ++j) b[j] = Bp[cur * AW * BN + word * BN + j * TYN + ty];
+                    [[unroll]] for (uint i = 0; i < TM; ++i) {
+                        const uint a = Ap[cur * AW * BM + word * BM + i * TXN + tx];
+                        [[unroll]] for (uint j = 0; j < 4; ++j) isum[i][j] = idot4acc(a, b[j], isum[i][j]);
+                    }
+                }
 #ifdef HAS_WM
-            float bsv[4];
-            [[unroll]] for (uint j = 0; j < 4; ++j) {
-                const uint tok = j * TYN + ty;
-#if NG == 1
-                bsv[j] = Bs[(cur * 2u) * BN + tok] + Bs[(cur * 2u + 1u) * BN + tok];
-#else
-                bsv[j] = Bs[(cur * 2u + g) * BN + tok];
-#endif
-            }
-#endif
-            [[unroll]] for (uint i = 0; i < TM; ++i) {
-                const float wsv = Aws[(cur * NG + g) * BM + i * TXN + tx];
-#ifdef HAS_WM
-                const float wmv = Awm[(cur * NG + g) * BM + i * TXN + tx];
-#endif
+                float bsv[4];
                 [[unroll]] for (uint j = 0; j < 4; ++j) {
-                    acc[i][j] += float(isum[i][j]) * (wsv * bd[j]);
-#ifdef HAS_WM
-                    acc[i][j] += wmv * bsv[j];
+                    const uint tok = j * TYN + ty;
+#if NG == 1
+                    bsv[j] = Bs[((cur * KS + q) * 2u) * BN + tok] + Bs[((cur * KS + q) * 2u + 1u) * BN + tok];
+#else
+                    bsv[j] = Bs[((cur * KS + q) * 2u + g) * BN + tok];
 #endif
+                }
+#endif
+                [[unroll]] for (uint i = 0; i < TM; ++i) {
+                    const float wsv = Aws[((cur * KS + q) * NG + g) * BM + i * TXN + tx];
+#ifdef HAS_WM
+                    const float wmv = Awm[((cur * KS + q) * NG + g) * BM + i * TXN + tx];
+#endif
+                    [[unroll]] for (uint j = 0; j < 4; ++j) {
+                        acc[i][j] += float(isum[i][j]) * (wsv * bd[j]);
+#ifdef HAS_WM
+                        acc[i][j] += wmv * bsv[j];
+#endif
+                    }
                 }
             }
         }

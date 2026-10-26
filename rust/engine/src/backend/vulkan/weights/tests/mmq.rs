@@ -84,7 +84,7 @@ fn prompt_batches_use_the_tiled_kernel() {
     assert_eq!(plan.variant, Variant::IntDot);
     let values: Vec<u32> = plan.spec_constants.iter().map(|c| c.value).collect();
     // 128 x 64 tile, 8 x 4 outputs per invocation
-    assert_eq!(values, [256, 128, 64, 8]);
+    assert_eq!(values, [256, 128, 64, 8, 1]);
     assert_eq!(plan.groups, [16, 8, 1]);
     assert!(plan.activation_prepass.is_some());
     // below the threshold and in the matrix-vector range the old kernels serve
