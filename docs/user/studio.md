@@ -27,10 +27,16 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   and a chip under your message ("Using 6 passages from report.pdf") shows them. Several documents can be in one chat; they stay in
   the chat and are searched for every later question until you remove them (the x on their chip). The extracted text is stored in the
   browser with the chat, at most 600,000 characters per document and 1,500,000 per chat; the page says so when a limit cuts a document.
-* **Use the web.** Switch on *Use the web* in the composer and each question is searched on the web first. The first three results
-  are read, their best passages are added to the prompt with their source numbers, and the sources are listed under the answer. This
-  uses the web tools of the server (`/api/studio/web/search` and `/api/studio/web/fetch`); if they are missing or blocked, the page
-  says so and answers without the web. The pages are fetched by the server, so the computer running fLLM needs internet access.
+* **Allow web access.** Switch on *Allow web access* in the composer and the model is offered the tools `web_search` and `web_fetch`. It decides
+  itself: current or unknown facts (news, prices, versions, a link you give) lead to a search; explanations, writing, code and small
+  talk are answered directly without one. Each tool call shows as a small card ("Searched: ...", "Read: ..."), the results go back to the
+  model, and the sources it cites as [n] are listed under the answer. At most 5 rounds of tool calls per answer, then one more answer
+  without tools; Stop works at any point. Results are cut to a share of the context size, so small contexts get short results. A model
+  that never calls tools simply answers; a server or chat template that refuses tools gets a plain request (a toast says so). The tools
+  use the web routes of the server (`/api/studio/web/search` and `/api/studio/web/fetch`), which refuse private addresses; if they
+  are missing or blocked the model is told and the card shows the error. The pages are fetched by the server, so the computer running
+  fLLM needs internet access. Tool calls are constrained with `tool_call_grammar` unless *Thinking* is on (the grammar would switch
+  thinking off).
 * **Research.** Switch on *Research* in the composer for questions that need more than one page. The model plans 3 to 6 search queries,
   the pages found are read in parallel (at most 4 requests at a time; duplicate and junk results such as social media, PDFs and
   login pages are skipped), the best passages of each page are picked with the same BM25 ranking as for documents, and the model
@@ -54,10 +60,27 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   characters per document, 2,000,000 per project and 3,500,000 for all projects; the page says so when a limit applies. Create, rename
   and delete projects in the sidebar, drag chats onto a project (or use *Move to a project* in the chat menu), and open the project
   page for its chats, instructions and files with sizes. Deleting a project keeps its chats.
-* **Personalization and memory** (Settings > Personalization). *About me and how to answer* is put in front of the system prompt of
-  every chat (2,000 characters; switch it off for one chat in the chat menu). Memory holds facts you want every chat to know: start a
-  message with "remember that ..." or press the bookmark under a message; edit or delete them in Settings. At most 3,000 characters of
-  memory go into a prompt (newest first). All of it stays in the browser and is sent only to the model you chat with.
+* **System prompt.** Every chat starts with a default system prompt made by the page: the date and time (kept for 30 minutes so the
+  server can reuse its cache), your language, concise answers by default, formatting rules, honesty about uncertainty, no invented
+  sources, and how to use the tools that are on. It never mentions a tool that is not offered. It comes in a compact size (models under
+  about 3.5 billion parameters or contexts under 12,288 tokens) and a full size, with a short adjustment for the model family (Qwen,
+  Llama, Mistral, Gemma, gpt-oss, DeepSeek, Phi, SmolLM) that is read from the model name and chat template. It says that the model
+  runs locally on your computer, except for models of an external provider. After it come, in this order: your personalization and
+  memory, the instructions of the project, the instructions of the assistant. *Settings > Personalization > System prompt* shows the
+  prompt as it is sent now and lets you add your own text or replace the default prompt (`{{date}}`, `{{time}}` and `{{language}}` are
+  filled in); an assistant can do the same for itself in its editor. Titles of new chats use a separate, short prompt that never
+  reveals the system prompt and works with thinking models.
+* **Personalization and memory** (Settings > Personalization). *About me and how to answer* is put in front of the instructions of every
+  chat (2,000 characters; switch it off for one chat in the chat menu). Memory holds short facts about you. The model manages it itself
+  with a `memory` tool (add, update, remove, list): when it learns something durable (name, preferences, projects, constraints) a card
+  "Saved to memory: ..." appears in the chat with an **Undo** button. It is told never to save trivia or secrets, and the page refuses
+  texts that look like passwords, keys or card numbers, also when you type them. You can still start a message with "remember that ..."
+  or press the bookmark under a message. Edit, delete or *Forget everything* in Settings. At most 3,000 characters (1,200 for compact
+  prompts) go into a prompt, entries that were come back to first, then the newest. *Memory* can be switched off globally (Settings) and
+  per chat (chat menu, which also stops the model from changing it). The memory lives in the browser and as a copy in `memory.json`
+  next to `studio.json` (`GET`/`PUT /api/studio/memory`, this machine only); a browser with no stored personalization restores it from
+  that copy. The *search_chats* tool lets the model look through the titles and text of your earlier chats when you refer to one; the
+  page asks once per chat whether to allow it, and temporary chats are never searched.
 * **Prompt library.** Save prompts with a title in Settings > Personalization, then type `/` in the message box to list them, filter by
   typing, and insert one with Enter or Tab.
 * **Organizing chats.** The select button above the chat list allows bulk delete, move, archive and export. Drag a chat onto the
@@ -180,7 +203,8 @@ fLLM runs on only, like the other agent routes. To let them reach a documentatio
 A small model often writes a command into the answer instead of calling the tool. Use a model with good tool calling for real work.
 
 The pure logic of this page (rule matching, compaction, command expansion) has tests: `node rust/engine/src/webui/tests/code.test.js`.
-The logic of assistants, memory and project retrieval is tested by `node rust/engine/src/webui/tests/projects.test.js`.
+The logic of assistants, memory and project retrieval is tested by `node rust/engine/src/webui/tests/projects.test.js`; the chat tool loop,
+the memory tool and secret refusal by `tools.test.js`; system prompts, titles and the parsing of all page scripts by `prompts.test.js` (same folder).
 
 ## Models
 

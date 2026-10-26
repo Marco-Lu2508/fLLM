@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- Studio chat that decides for itself: *Use the web* became *Allow web access* and offers the model `web_search` and `web_fetch` as tools instead of searching every question (compact "Searched" / "Read" cards, sources under the answer, at most 5 rounds, Stop works, results sized to the context, `tool_call_grammar`). A default system prompt in a compact and a full size with adjustments per model family (date and time, language, honesty, tool rules; shown and overridable or extendable in Settings > Personalization and per assistant). A `memory` tool the model manages (add, update, remove, list; "Saved to memory" cards with Undo; secrets refused; per-chat and global switch) with a server-side copy (`GET`/`PUT /api/studio/memory`, `memory.json`, this machine only), and a `search_chats` tool for earlier chats (asked once per chat). Chat titles use a short prompt that works with thinking models.
 - NPU: a load option "What the NPU computes" (`--npu-mode all`): besides the long prompt blocks the NPU then also computes the single rows of the answer, the way later and stronger NPUs will be used. Measured on an Intel Core Ultra NPU with Qwen3.5-2B Q4_K_M: the answer runs at about 5 tokens/s this way (after a one-time compile of a few minutes that OpenVINO keeps in its cache), about as fast as the processor and well below the graphics chip.
 
 ## [0.1.7] - 2026-10-26
