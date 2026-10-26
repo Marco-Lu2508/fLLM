@@ -21,7 +21,7 @@
     const PRJ_LIMITS = {
       name: 60, system: 8000, starter: 140, model: 120,
       doc: 600000, project: 2000000, total: 3500000, minRoom: 2000, instructions: 8000,
-      about: 2000, memory: 400, memories: 100, memoryPrompt: 3000,
+      about: 2000, memory: 400, memories: 100, memoryPrompt: 3000, memoryPromptCompact: 1200, category: 24, sysText: 6000,
       promptTitle: 60, promptText: 8000, prompts: 100,
     };
     const ASST_ICONS = ['bot', 'pen', 'code', 'book', 'globe', 'spark', 'chat', 'star'];
@@ -52,6 +52,9 @@
         top_k: Math.round(prjClamp(raw.top_k, 0, 1000, 20)),
         model: String(raw.model ?? '').trim().slice(0, PRJ_LIMITS.model),
         starters,
+        // how this assistant treats the default system prompt (prompts.js): inherit the global choice, replace it or add to it
+        sysMode: ['override', 'append'].includes(raw.sysMode) ? raw.sysMode : 'inherit',
+        sysText: String(raw.sysText ?? '').slice(0, PRJ_LIMITS.sysText),
       };
     }
 
@@ -122,40 +125,152 @@
       return t || null;
     }
 
-    /** Adds a memory unless it is empty, a duplicate or the list is full. */
-    function memAdd(list, text, now, makeId) {
-      const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, PRJ_LIMITS.memory);
-      if (!t) return { list, status: 'empty' };
-      if (list.some((m) => m.text.toLowerCase() === t.toLowerCase())) return { list, status: 'duplicate' };
-      if (list.length >= PRJ_LIMITS.memories) return { list, status: 'full' };
-      return { list: list.concat([{ id: makeId(), text: t, createdAt: now }]), status: 'added' };
+    /** Does a text look like a password, an access key, a card number or similar? Such things are never saved to memory. */
+    function memSecret(text) {
+      const t = String(text || '');
+      if (/\b(?:pass(?:word|wd|phrase|code)?|pin|secret|api[ _-]?key|access[ _-]?key|private[ _-]?key|token|credentials?|cvv|cvc)\b\s*(?:is|are|:|=)\s*(?:\S*\d\S*|\S{6,})/i.test(t)) return true;
+      if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(t)) return true;
+      if (/\b(?:sk|pk|rk|ghp|gho|ghs|xox[abp]|AIza|hf)[-_][A-Za-z0-9_-]{16,}/.test(t) || /\bAKIA[0-9A-Z]{16}\b/.test(t)) return true;
+      if (/(?:^|\s)[A-Za-z0-9+/_-]{32,}={0,2}(?=\s|$|[.,;])/.test(t)) return true; // a long token without spaces
+      for (const m of t.matchAll(/\b(?:\d[ -]?){13,19}\b/g)) {
+        const digits = m[0].replace(/\D/g, '');
+        if (digits.length < 13 || digits.length > 19) continue;
+        let sum = 0;
+        for (let i = 0; i < digits.length; i++) {
+          let d = Number(digits[digits.length - 1 - i]);
+          if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9; }
+          sum += d;
+        }
+        if (sum % 10 === 0) return true;
+      }
+      return /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,4})?\b/.test(t); // IBAN
     }
 
-    /** The memories that go into the prompt: the newest first until `cap` characters are used, then in the original order. */
-    function memSelect(memories, cap) {
-      const picked = [];
-      let used = 0;
-      for (let i = memories.length - 1; i >= 0; i--) {
-        const cost = memories[i].text.length + 3;
-        if (used + cost > cap) break;
-        picked.push(memories[i].text);
-        used += cost;
+    const memCategory = (c) => String(c ?? '').toLowerCase().replace(/[^a-z0-9 _-]/g, '').replace(/\s+/g, ' ').trim().slice(0, PRJ_LIMITS.category);
+    const memNorm = (text) => String(text || '').replace(/\s+/g, ' ').trim().slice(0, PRJ_LIMITS.memory);
+
+    /** Clean memory entries from untrusted data (storage, the server copy). Older entries only had id, text and createdAt. */
+    function memSanitize(raw, makeId) {
+      return (Array.isArray(raw) ? raw : []).filter((m) => m && typeof m.text === 'string' && m.text.trim()).slice(0, PRJ_LIMITS.memories).map((m) => {
+        const createdAt = Number(m.createdAt) || 0;
+        const e = { id: String(m.id || makeId()).slice(0, 64), text: m.text.slice(0, PRJ_LIMITS.memory), createdAt, updatedAt: Number(m.updatedAt) || createdAt, uses: Math.max(0, Math.min(1000, Math.round(Number(m.uses) || 0))) };
+        const c = memCategory(m.category);
+        if (c) e.category = c;
+        return e;
+      });
+    }
+
+    /** Adds a memory unless it is empty, a secret, a duplicate or the list is full. */
+    function memAdd(list, text, now, makeId, category) {
+      const t = memNorm(text);
+      if (!t) return { list, status: 'empty' };
+      if (memSecret(t)) return { list, status: 'secret' };
+      if (list.some((m) => m.text.toLowerCase() === t.toLowerCase())) return { list, status: 'duplicate' };
+      if (list.length >= PRJ_LIMITS.memories) return { list, status: 'full' };
+      const entry = { id: makeId(), text: t, createdAt: now, updatedAt: now, uses: 0 };
+      const c = memCategory(category);
+      if (c) entry.category = c;
+      return { list: list.concat([entry]), status: 'added', entry };
+    }
+
+    /** Entries that the model may name: by id, by position in the list (1 = first) or by a part of the text. */
+    function memFind(list, args) {
+      const id = args.id !== undefined && args.id !== null ? String(args.id).trim() : '';
+      if (id) {
+        const byId = list.filter((m) => m.id === id);
+        if (byId.length) return byId;
+        if (/^\d+$/.test(id) && list[Number(id) - 1]) return [list[Number(id) - 1]];
+        return [];
       }
-      return { lines: picked.reverse(), dropped: memories.length - picked.length, used };
+      const part = String(args.match ?? args.old_text ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!part) return [];
+      return list.filter((m) => m.text.toLowerCase().includes(part));
     }
 
     /**
-     * The system prompt of a request: personalization (about me, memory), then the instructions of the project, then
-     * the instructions of the assistant. `personal` is null when personalization is off for the chat.
+     * The `memory` tool of the chat. args: { action: add | update | remove | list, text, category, id, match }.
+     * Returns { list, text (what the model is told), change (what happened, for the undo card) | null }.
+     */
+    function memToolApply(list, args, now, makeId) {
+      const a = args && typeof args === 'object' ? args : {};
+      const action = String(a.action || '').toLowerCase();
+      const out = (text, nextList, change) => ({ list: nextList || list, text, change: change || null });
+      if (action === 'list') {
+        return out(list.length ? list.map((m, i) => `${i + 1}. [${m.id}]${m.category ? ` (${m.category})` : ''} ${m.text}`).join('\n') : 'The memory is empty.');
+      }
+      if (action === 'add') {
+        const r = memAdd(list, a.text, now, makeId, a.category);
+        if (r.status === 'empty') return out('Error: "text" is required for add.');
+        if (r.status === 'secret') return out('Not saved: this looks like a password, key or card number, which must never be stored.');
+        if (r.status === 'full') return out(`Error: the memory is full (${PRJ_LIMITS.memories} entries). Remove an entry first.`);
+        if (r.status === 'duplicate') {
+          const next = list.map((m) => (m.text.toLowerCase() === memNorm(a.text).toLowerCase() ? { ...m, uses: (m.uses || 0) + 1 } : m));
+          return out('Already remembered.', next);
+        }
+        return out('Saved.', r.list, { kind: 'add', id: r.entry.id, after: r.entry });
+      }
+      if (action === 'update' || action === 'remove') {
+        const found = memFind(list, a);
+        if (!found.length) return out('Error: no matching entry. Use action "list" to see the entries, then pass "id" or part of the old text as "match".');
+        if (found.length > 1) return out(`Error: ${found.length} entries match; be more specific or pass "id". Matches:\n${found.slice(0, 5).map((m) => `[${m.id}] ${m.text}`).join('\n')}`);
+        const before = found[0];
+        if (action === 'remove') return out('Removed.', list.filter((m) => m.id !== before.id), { kind: 'remove', id: before.id, before });
+        const text = memNorm(a.text);
+        if (!text) return out('Error: "text" is required for update.');
+        if (memSecret(text)) return out('Not saved: this looks like a password, key or card number, which must never be stored.');
+        const after = { ...before, text, updatedAt: now, uses: (before.uses || 0) + 1 };
+        const c = a.category !== undefined ? memCategory(a.category) : '';
+        if (c) after.category = c;
+        return out('Updated.', list.map((m) => (m.id === before.id ? after : m)), { kind: 'update', id: before.id, before, after });
+      }
+      return out('Error: "action" must be add, update, remove or list.');
+    }
+
+    /** Takes back one change of memToolApply (the card's Undo). Returns the new list, or null when it no longer applies. */
+    function memUndo(list, change) {
+      if (!change) return null;
+      if (change.kind === 'add') return list.some((m) => m.id === change.id) ? list.filter((m) => m.id !== change.id) : null;
+      if (change.kind === 'update') return list.some((m) => m.id === change.id) ? list.map((m) => (m.id === change.id ? change.before : m)) : null;
+      if (change.kind === 'remove') return list.some((m) => m.id === change.id) || list.length >= PRJ_LIMITS.memories ? null : list.concat([change.before]);
+      return null;
+    }
+
+    /**
+     * The memories that go into the prompt, within `cap` characters. Priority: entries that were come back to
+     * (uses >= 2) first, then the rest, each group newest first; the chosen ones keep their original order.
+     */
+    function memSelect(memories, cap) {
+      const rank = memories.map((m, i) => ({ m, i })).sort((a, b) => {
+        const ha = (a.m.uses || 0) >= 2 ? 1 : 0;
+        const hb = (b.m.uses || 0) >= 2 ? 1 : 0;
+        return hb - ha || b.i - a.i;
+      });
+      const chosen = [];
+      let used = 0;
+      for (const r of rank) {
+        const cost = r.m.text.length + 3;
+        if (used + cost > cap) continue;
+        chosen.push(r);
+        used += cost;
+      }
+      chosen.sort((a, b) => a.i - b.i);
+      return { lines: chosen.map((r) => r.m.text), dropped: memories.length - chosen.length, used };
+    }
+
+    /**
+     * The system prompt of a request: the default prompt (prompts.js), personalization (about me, memory), the
+     * instructions of the project, then the instructions of the assistant. `personal` is null when personalization
+     * is off for the chat; `memoryOff` keeps only the memory out; `memoryCap` caps the memory block.
      */
     function composeSystem(o) {
       const parts = [];
+      if (o.defaults && o.defaults.trim()) parts.push(o.defaults.trim());
       const p = o.personal;
       if (p) {
         if (p.useAbout && String(p.about || '').trim()) parts.push(`About the user and how they want answers (in their own words):\n${p.about.trim().slice(0, PRJ_LIMITS.about)}`);
-        if (p.useMemory) {
-          const m = memSelect(p.memories || [], PRJ_LIMITS.memoryPrompt);
-          if (m.lines.length) parts.push(`Facts the user asked you to remember:\n${m.lines.map((x) => `- ${x}`).join('\n')}`);
+        if (p.useMemory && !o.memoryOff) {
+          const m = memSelect(p.memories || [], o.memoryCap || PRJ_LIMITS.memoryPrompt);
+          if (m.lines.length) parts.push(`Saved memory about the user (use it when it is relevant, do not bring it up otherwise):\n${m.lines.map((x) => `- ${x}`).join('\n')}`);
         }
       }
       if (o.project && String(o.project.instructions || '').trim()) {
@@ -290,13 +405,48 @@
       const per = prjRead(PRJ_KEYS.personal, {}) || {};
       P.personal = {
         about: String(per.about || '').slice(0, PRJ_LIMITS.about), useAbout: per.useAbout !== false, useMemory: per.useMemory !== false,
-        memories: (Array.isArray(per.memories) ? per.memories : []).filter((m) => m && typeof m.text === 'string').map((m) => ({ id: String(m.id || uid('mem')), text: m.text.slice(0, PRJ_LIMITS.memory), createdAt: m.createdAt || 0 })).slice(0, PRJ_LIMITS.memories),
+        memories: memSanitize(per.memories, () => uid('mem')),
       };
       P.prompts = (Array.isArray(prjRead(PRJ_KEYS.prompts, [])) ? prjRead(PRJ_KEYS.prompts, []) : []).filter((p) => p && p.title && typeof p.text === 'string')
         .map((p) => ({ id: String(p.id || uid('pr')), title: String(p.title).slice(0, PRJ_LIMITS.promptTitle), text: p.text.slice(0, PRJ_LIMITS.promptText) })).slice(0, PRJ_LIMITS.prompts);
     }
     const prjSaveProjects = () => prjWrite(PRJ_KEYS.projects, state.prj.projects, 'the projects');
-    const prjSavePersonal = () => prjWrite(PRJ_KEYS.personal, state.prj.personal, 'your personalization');
+    const prjSavePersonal = () => { const ok = prjWrite(PRJ_KEYS.personal, state.prj.personal, 'your personalization'); if (ok) memSyncSoon(); return ok; };
+
+    // ---- server copy of the memory (memory.json next to studio.json) --------------------------------
+    let memSyncTimer = null;
+    let memSynced = null;
+    function memDoc() { return { version: 1, memories: state.prj.personal.memories }; }
+    function memSyncSoon() {
+      if (state.memSyncOff) return;
+      clearTimeout(memSyncTimer);
+      memSyncTimer = setTimeout(async () => {
+        const body = memDoc();
+        const text = JSON.stringify(body);
+        if (text === memSynced) return;
+        try {
+          const res = await apiFetch('/api/studio/memory', { method: 'PUT', body });
+          if (res.ok) memSynced = text; else state.memSyncOff = true; // this server has no such route, or it is not reachable from here
+        } catch { /* try again with the next change */ }
+      }, 800);
+    }
+    /** First run in a browser without stored personalization: take the memory from the copy on the server. */
+    async function memImportFromServer() {
+      if (localStorage.getItem(PRJ_KEYS.personal) !== null) { memSyncSoon(); return; }
+      try {
+        const res = await apiFetch('/api/studio/memory');
+        if (!res.ok) { state.memSyncOff = true; return; }
+        const doc = (await res.json()).memory;
+        const list = memSanitize(doc && doc.memories, () => uid('mem'));
+        if (list.length) {
+          state.prj.personal.memories = list;
+          prjWrite(PRJ_KEYS.personal, state.prj.personal, 'your personalization');
+          memSynced = JSON.stringify(memDoc());
+          memRender();
+          toast(`${list.length} remembered fact${list.length === 1 ? '' : 's'} restored from the copy on this computer.`);
+        }
+      } catch { /* no server copy */ }
+    }
     const prjSavePrompts = () => prjWrite(PRJ_KEYS.prompts, state.prj.prompts, 'the prompt library');
     const asstSaveList = () => prjWrite(PRJ_KEYS.assistants, state.prj.assistants, 'the assistants');
 
@@ -395,6 +545,8 @@
       $('asModel').innerHTML = `<option value="">Any (keep the current model)</option>${names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('')}`;
       $('asModel').value = a ? a.model : '';
       $('asStarters').value = a ? (a.starters || []).join('\n') : '';
+      $('asSysMode').value = a && a.sysMode ? a.sysMode : 'inherit';
+      $('asSysText').value = a && a.sysText ? a.sysText : '';
       $('asDelete').style.display = asEd.id ? '' : 'none';
       asstEditorPaint();
       $('presetMenu').classList.remove('open');
@@ -405,7 +557,7 @@
       return asstSanitize({
         id: asEd.id || undefined, name: $('asName').value, icon: asEd.icon, color: asEd.color, system: $('asSystem').value,
         temperature: $('asTemp').value, top_p: $('asTopP').value, top_k: $('asTopK').value, model: $('asModel').value,
-        starters: $('asStarters').value.split('\n'),
+        starters: $('asStarters').value.split('\n'), sysMode: $('asSysMode').value, sysText: $('asSysText').value,
       }, prjMakeId('as'));
     }
     function asstEditorSave() {
@@ -689,11 +841,16 @@
       if (state.preset && asstById(state.preset)) asstApply(state.preset, { silent: true, noThread: true });
     }
 
-    /** The system prompt of a request for chat `t` (or the chat about to start): personalization, project and assistant. */
+    /** The system prompt of a request for chat `t` (or the chat about to start): default prompt, personalization, project and assistant. */
     function prjComposeSystem(t, base) {
       const P = state.prj;
       const project = t ? prjProjectOf(t) : prjById(P.pending);
-      return composeSystem({ base, personal: t && t.noPersonal ? null : P.personal, project });
+      const remote = Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected());
+      const compact = !remote && spSize(state.status?.model) === 'compact';
+      return composeSystem({
+        defaults: spForChat(t), base, personal: t && t.noPersonal ? null : P.personal, project,
+        memoryOff: Boolean(t && t.noMemory), memoryCap: compact ? PRJ_LIMITS.memoryPromptCompact : PRJ_LIMITS.memoryPrompt,
+      });
     }
 
     // ---- chat actions, archive, header ---------------------------------------------------
@@ -706,6 +863,7 @@
       if (p) { badge.dataset.pid = p.id; $('prjBadgeName').textContent = p.name; }
       $('menuArchive').textContent = t && t.archived ? 'Unarchive' : 'Archive';
       $('menuPersonal').textContent = t && t.noPersonal ? 'Personalization: off' : 'Personalization: on';
+      $('menuMemory').textContent = t && t.noMemory ? 'Memory: off' : 'Memory: on';
       asstRender();
       prjRenderStarters();
       prjDecorateMessages();
@@ -729,6 +887,12 @@
         t.noPersonal = !t.noPersonal;
         saveThreads(); updateChatChrome(); updateContextMeter();
         toast(t.noPersonal ? 'Your instructions and memory are not used in this chat.' : 'Your instructions and memory are used in this chat.');
+        return true;
+      }
+      if (action === 'memory') {
+        t.noMemory = !t.noMemory;
+        saveThreads(); updateChatChrome(); updateContextMeter();
+        toast(t.noMemory ? 'Memory is not used or changed in this chat.' : 'Memory is used in this chat.');
         return true;
       }
       return false;
@@ -848,7 +1012,7 @@
       const P = state.prj;
       if (!P.personal.useMemory) return;
       const t = currentThread();
-      if (t && t.noPersonal) return;
+      if (t && (t.noPersonal || t.noMemory)) return;
       const m = memExtract(text);
       if (m) memRemember(m);
     }
@@ -856,6 +1020,7 @@
       const P = state.prj;
       const r = memAdd(P.personal.memories, text, Date.now(), prjMakeId('mem'));
       if (r.status === 'duplicate') { toast('Already remembered.'); return; }
+      if (r.status === 'secret') { toast('That looks like a password, key or card number. It is not saved to memory.'); return; }
       if (r.status === 'full') { toast(`The memory is full (${PRJ_LIMITS.memories} entries). Delete some in Settings > Personalization.`); return; }
       if (r.status !== 'added') return;
       P.personal.memories = r.list;
@@ -887,8 +1052,24 @@
     });
 
     // settings: Personalization
+    /** Settings > Personalization > System prompt: the choice and the prompt as it is sent now. */
+    function spRender() {
+      const stored = spStored();
+      if (document.activeElement !== $('spText')) $('spText').value = stored.text;
+      $('spMode').value = stored.mode;
+      const t = currentThread();
+      $('spPreview').value = spForChat(t);
+      const model = state.status?.model || {};
+      $('spInfo').textContent = window.fllmRemoteSelected && window.fllmRemoteSelected()
+        ? 'The selected model runs at an external provider: the full prompt is used and it does not say that the model runs locally.'
+        : `Model family: ${spFamily(model)}. Size: ${spSize(model)}${spSize(model) === 'compact' ? ' (small model or small context)' : ''}. Lines about tools appear when web access, memory or chat search are on.`;
+    }
+    $('spMode').addEventListener('change', () => { spSaveStored({ mode: $('spMode').value, text: $('spText').value }); spRender(); updateContextMeter(); });
+    $('spText').addEventListener('input', () => { spSaveStored({ mode: $('spMode').value, text: $('spText').value.slice(0, SP_LIMITS.custom) }); $('spPreview').value = spForChat(currentThread()); updateContextMeter(); });
+
     function memRender() {
       const P = state.prj;
+      spRender();
       const per = P.personal;
       if (document.activeElement !== $('memAbout')) $('memAbout').value = per.about;
       $('memAboutCount').textContent = `${per.about.length} / ${PRJ_LIMITS.about}`;
@@ -899,8 +1080,8 @@
         ? `${per.memories.length} of ${PRJ_LIMITS.memories} entries. ${sel.dropped ? `The ${sel.dropped} oldest do not fit into the ${PRJ_LIMITS.memoryPrompt.toLocaleString('en-US')} characters sent to the model and are skipped.` : 'All of them are sent to the model.'}`
         : 'Nothing remembered yet.';
       $('memList').innerHTML = per.memories.map((m) => `
-        <div class="mem-row"><input type="text" class="ui-input" maxlength="${PRJ_LIMITS.memory}" data-mem-edit="${m.id}" value="${escapeHtml(m.text)}">
-          <button class="btn-icon btn-icon-xs" data-mem-del="${m.id}" title="Delete">${prjIcon(PRJ_SVG.x)}</button></div>`).join('');
+        <div class="mem-row"><input type="text" class="ui-input" maxlength="${PRJ_LIMITS.memory}" data-mem-edit="${m.id}" value="${escapeHtml(m.text)}" title="${escapeHtml(`${m.category ? `${m.category}, ` : ''}saved ${m.createdAt ? new Date(m.createdAt).toLocaleDateString('en-US') : 'earlier'}${m.updatedAt && m.updatedAt !== m.createdAt ? `, changed ${new Date(m.updatedAt).toLocaleDateString('en-US')}` : ''}`)}">
+          ${m.category ? `<span class="quant-chip">${escapeHtml(m.category)}</span>` : ''}<button class="btn-icon btn-icon-xs" data-mem-del="${m.id}" title="Delete">${prjIcon(PRJ_SVG.x)}</button></div>`).join('');
       $('plibList').innerHTML = P.prompts.length ? P.prompts.map((p) => `
         <div class="plib-row"><input type="text" class="ui-input" maxlength="${PRJ_LIMITS.promptTitle}" data-plib-title="${p.id}" value="${escapeHtml(p.title)}" placeholder="Title">
           <textarea class="ui-textarea" rows="2" maxlength="${PRJ_LIMITS.promptText}" data-plib-text="${p.id}" placeholder="Prompt">${escapeHtml(p.text)}</textarea>
@@ -927,7 +1108,8 @@
       const m = inp && state.prj.personal.memories.find((x) => x.id === inp.dataset.memEdit);
       if (!m) return;
       const text = inp.value.replace(/\s+/g, ' ').trim().slice(0, PRJ_LIMITS.memory);
-      if (text) m.text = text; else state.prj.personal.memories = state.prj.personal.memories.filter((x) => x !== m);
+      if (text && memSecret(text)) { toast('That looks like a password, key or card number. It is not saved to memory.'); memRender(); return; }
+      if (text) { m.text = text; m.updatedAt = Date.now(); } else state.prj.personal.memories = state.prj.personal.memories.filter((x) => x !== m);
       prjSavePersonal(); memRender(); updateContextMeter();
     });
     $('memList').addEventListener('click', (e) => {
@@ -1033,4 +1215,5 @@
       prjRenderSidebar();
       prjBulkPaint();
       memRender();
+      memImportFromServer();
     }

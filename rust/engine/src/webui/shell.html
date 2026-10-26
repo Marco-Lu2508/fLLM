@@ -194,6 +194,7 @@
                 <button class="menu-item" data-chat-action="project">Move to a project...</button>
                 <button class="menu-item" data-chat-action="archive" id="menuArchive">Archive</button>
                 <button class="menu-item" data-chat-action="personal" id="menuPersonal" title="Whether your instructions and memory from Settings > Personalization are sent in this chat">Personalization: on</button>
+                <button class="menu-item" data-chat-action="memory" id="menuMemory" title="Whether the assistant may use and change its saved memory in this chat">Memory: on</button>
                 <button class="menu-item" data-chat-action="export-md">Export as Markdown</button>
                 <button class="menu-item" data-chat-action="export-json">Export as JSON</button>
                 <button class="menu-item danger" data-chat-action="delete">Delete chat</button>
@@ -360,9 +361,9 @@
                     </button>
 
                     <!-- Web search for the question -->
-                    <button class="composer-chip" id="btnToggleWeb" title="Search the web for your question and answer from the pages found (needs a server with the web tools)">
+                    <button class="composer-chip" id="btnToggleWeb" title="Let the model search the web and read pages when it decides it needs to (needs a server with the web tools)">
                       <svg viewBox="0 0 24 24" class="icon icon-sm"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20a15 15 0 0 1 0-20"/></svg>
-                      <span>Use the web</span>
+                      <span>Allow web access</span>
                     </button>
 
                     <!-- Research: plan, search, read, take notes, write a cited report -->
@@ -811,7 +812,7 @@
                 <div class="app-card-item column">
                   <div class="app-item-info">
                     <div class="app-item-title">Remembered facts</div>
-                    <div class="app-item-desc">Start a message with "remember that ..." or press the bookmark under a message to add one. Memories are added to the system prompt of every chat (up to 3,000 characters) and stay in this browser.</div>
+                    <div class="app-item-desc">The assistant saves durable facts about you on its own (a card with Undo appears in the chat). You can also start a message with "remember that ..." or press the bookmark under a message. Memories are added to the system prompt of every chat (up to 3,000 characters, fewer for small models), are kept in this browser and as a copy on this computer, and can be switched off for one chat in the chat menu.</div>
                   </div>
                   <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Use memory
                     <span class="ui-switch"><input type="checkbox" id="chkUseMemory" checked><span class="ui-switch-track"></span></span></label>
@@ -824,6 +825,24 @@
                     <span class="app-item-desc" id="memUsage"></span>
                     <button class="btn btn-sm btn-destructive" id="memClear">Forget everything</button>
                   </div>
+                </div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">System prompt</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">What the model is told first</div>
+                    <div class="app-item-desc">A default prompt (date and time, your language, how to answer, which tools exist) comes first, adjusted to the loaded model. Then come your instructions and memory, the project instructions and the assistant instructions. Below is the default prompt as it is sent right now.</div>
+                  </div>
+                  <select id="spMode" class="ui-select">
+                    <option value="default">Use the default prompt</option>
+                    <option value="append">Add my text after the default prompt</option>
+                    <option value="override">Replace the default prompt with my text</option>
+                  </select>
+                  <textarea id="spText" class="ui-textarea" rows="4" style="width:100%;" placeholder="Your text. {{date}}, {{time}} and {{language}} are filled in."></textarea>
+                  <textarea id="spPreview" class="ui-textarea mono" rows="9" style="width:100%;" readonly></textarea>
+                  <div class="app-item-desc" id="spInfo"></div>
                 </div>
               </div>
 
@@ -1381,6 +1400,13 @@
       <select class="ui-select" id="asModel"></select>
       <label class="as-label">Suggestions on an empty chat (one per line, up to 4)</label>
       <textarea class="ui-textarea" id="asStarters" rows="4" placeholder="Leave empty for generic suggestions"></textarea>
+      <label class="as-label">Default system prompt for this assistant</label>
+      <select class="ui-select" id="asSysMode">
+        <option value="inherit">Use the global setting (Settings &gt; Personalization)</option>
+        <option value="append">Add to the default prompt</option>
+        <option value="override">Replace the default prompt</option>
+      </select>
+      <textarea class="ui-textarea" id="asSysText" rows="3" placeholder="Text added to or replacing the default prompt. {{date}}, {{time}} and {{language}} are filled in."></textarea>
       <div class="dialog-actions">
         <button class="btn btn-ghost" id="asExport" title="Save the assistant as a JSON file">Export</button>
         <button class="btn btn-destructive" id="asDelete">Delete</button>

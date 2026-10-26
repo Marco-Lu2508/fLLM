@@ -110,7 +110,7 @@
     function copyThread(t) {
       const idMap = {};
       Object.keys(t.nodes).forEach((id) => { idMap[id] = id === ROOT ? ROOT : uid('m'); });
-      const copy = { ...t, id: uid('thr'), title: `${t.title} (Kopie)`, createdAt: Date.now(), updatedAt: Date.now(), pinned: false, nodes: {} };
+      const copy = { ...t, id: uid('thr'), title: `${t.title} (copy)`, createdAt: Date.now(), updatedAt: Date.now(), pinned: false, nodes: {} };
       for (const [id, n] of Object.entries(t.nodes)) {
         copy.nodes[idMap[id]] = { ...n, id: idMap[id], parent: n.parent ? idMap[n.parent] : n.parent, children: n.children.map((c) => idMap[c]) };
       }
@@ -293,7 +293,7 @@
         </details>` : '';
       const body = answer ? MD.render(answer) : (m.streaming ? '<span class="typing"><i></i><i></i><i></i></span>' : '');
       const err = m.error ? `<div class="msg-error">${escapeHtml(m.error)}</div>` : '';
-      return `${thinking}<div class="msg-assistant-prose">${body}</div>${err}`;
+      return `${ctCardsHtml(m)}${thinking}<div class="msg-assistant-prose">${body}</div>${err}`; // tools.js: "Searched: ...", "Saved to memory: ..." cards
     }
 
     function logprobsHtml(m) {
@@ -323,7 +323,7 @@
           ${researchSlotsHtml(node, 'top')}
           <div class="msg-assistant-body">${assistantInner(node)}</div>
           ${logprobsHtml(node)}
-          ${ragSourcesHtml(t, node)}
+          ${ragSourcesHtml(t, node)}${ctSourcesHtml(node)}
           ${researchSlotsHtml(node, 'bottom')}
           <div class="msg-actions-bar">
             ${branchNav(t, node)}
@@ -370,7 +370,7 @@
       const ratio = Math.min(1, used / Math.max(1, max));
       $(fillId).style.width = `${(ratio * 100).toFixed(0)}%`;
       $(fillId).parentElement.parentElement.classList.toggle('is-high', ratio > 0.8);
-      $(textId).textContent = `${used.toLocaleString('de-DE')} / ${max.toLocaleString('de-DE')}`;
+      $(textId).textContent = `${used.toLocaleString('en-US')} / ${max.toLocaleString('en-US')}`;
     }
 
     function updateContextMeter() {
@@ -496,6 +496,54 @@
       return msgs;
     }
 
+    /**
+     * One streamed request: the text and reasoning grow on `aNode`, `stats` collects the timing. `extra` is merged into
+     * the request body (tools.js sends `tools` this way). Returns the tool calls the model made, if any.
+     */
+    async function chatStream(aNode, messages, signal, stats, extra) {
+      const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook: a provider's model goes through the proxy route
+      const res = await apiFetch(ep.url, { method: 'POST', body: ep.transform({ ...requestBody(messages), ...(extra || {}) }), signal });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const failure = new Error(err.error?.message || `The server answered with error ${res.status}`);
+        failure.status = res.status;
+        throw failure;
+      }
+      const calls = [];
+      let finish = '';
+      await readEventStream(res, (chunk) => {
+        if (chunk.error) aNode.error = chunk.error.message || 'The provider reported an error.'; // providers hook
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta;
+        if (delta) {
+          if (stats.first === null && (delta.content || delta.reasoning_content)) stats.first = performance.now();
+          if (delta.reasoning_content) aNode.reasoning += delta.reasoning_content;
+          if (delta.content) { aNode.content += delta.content; stats.chunks++; }
+          for (const tc of delta.tool_calls || []) { // tools.js: calls arrive in pieces
+            const i = tc.index ?? Math.max(0, calls.length - 1);
+            if (!calls[i]) calls[i] = { id: tc.id || '', name: '', args: '' };
+            if (tc.id) calls[i].id = tc.id;
+            if (tc.function?.name) calls[i].name += tc.function.name;
+            if (tc.function?.arguments) calls[i].args += tc.function.arguments;
+          }
+        }
+        const lp = choice?.logprobs?.content;
+        if (Array.isArray(lp)) aNode.logprobs.push(...lp);
+        if (choice?.finish_reason) { aNode.finish = choice.finish_reason; finish = choice.finish_reason; }
+        if (chunk.timings) {
+          aNode.telemetry = {
+            ...(aNode.telemetry || {}),
+            tokPerSec: chunk.timings.predicted_per_second ? chunk.timings.predicted_per_second.toFixed(1) : undefined,
+            promptPerSec: chunk.timings.prompt_per_second ? Math.round(chunk.timings.prompt_per_second) : undefined,
+            tokens: chunk.timings.predicted_n || undefined,
+          };
+        }
+        if (chunk.usage) aNode.usage = chunk.usage;
+        paintStreaming(aNode);
+      });
+      return { calls: calls.filter((c) => c && c.name), finish };
+    }
+
     /** Generate the answer to the user message `userId` as a new assistant node. */
     async function generateReply(t, userId, cont) {
       const aNode = cont || addChild(t, userId, { role: 'assistant', content: '', reasoning: '', streaming: true, logprobs: [], model: state.selectedModel || state.status?.model?.name || '' });
@@ -506,38 +554,13 @@
       state.abortController = new AbortController();
       setBusy(true);
       const t0 = performance.now();
-      let first = null;
-      let chunks = 0;
+      const stats = { first: null, chunks: 0 };
       try {
-        const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook: a provider's model goes through the proxy route
-        const res = await apiFetch(ep.url, { method: 'POST', body: ep.transform(requestBody(continuationMessages(t, userId, cont))), signal: state.abortController.signal });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.error?.message || `The server answered with error ${res.status}`);
-        }
-        await readEventStream(res, (chunk) => {
-          if (chunk.error) aNode.error = chunk.error.message || 'The provider reported an error.'; // providers hook
-          const choice = chunk.choices?.[0];
-          const delta = choice?.delta;
-          if (delta) {
-            if (first === null && (delta.content || delta.reasoning_content)) first = performance.now();
-            if (delta.reasoning_content) aNode.reasoning += delta.reasoning_content;
-            if (delta.content) { aNode.content += delta.content; chunks++; }
-          }
-          const lp = choice?.logprobs?.content;
-          if (Array.isArray(lp)) aNode.logprobs.push(...lp);
-          if (choice?.finish_reason) aNode.finish = choice.finish_reason;
-          if (chunk.timings) {
-            aNode.telemetry = {
-              ...(aNode.telemetry || {}),
-              tokPerSec: chunk.timings.predicted_per_second ? chunk.timings.predicted_per_second.toFixed(1) : undefined,
-              promptPerSec: chunk.timings.prompt_per_second ? Math.round(chunk.timings.prompt_per_second) : undefined,
-              tokens: chunk.timings.predicted_n || undefined,
-            };
-          }
-          if (chunk.usage) aNode.usage = chunk.usage;
-          paintStreaming(aNode);
-        });
+        const offered = cont ? [] : ctOffered(t); // tools.js: the model may call tools (web, memory, chat search); none offered = a plain answer
+        if (offered.length) await ctGenerate(t, userId, aNode, offered, stats);
+        else await chatStream(aNode, continuationMessages(t, userId, cont), state.abortController.signal, stats);
+        const first = stats.first;
+        const chunks = stats.chunks;
         const elapsed = Math.max((performance.now() - (first || t0)) / 1000, 0.02);
         aNode.telemetry = {
           ttftMs: first ? Math.round(first - t0) : undefined,
@@ -573,17 +596,17 @@
         const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook
         const res = await apiFetch(ep.url, {
           method: 'POST',
+          // prompts.js: a short prompt that does not reveal the system prompt; thinking is switched off so that a small
+          // answer budget is not used up by reasoning (templates without the switch ignore it; stray think blocks are cut below)
           body: ep.transform({
-            model: state.selectedModel || state.status?.model?.name || 'tiny', stream: false, temperature: 0.3, max_tokens: 20,
-            messages: [
-              { role: 'system', content: 'You give conversations short titles. Answer with the title only, at most five words, without quotation marks and without punctuation at the end.' },
-              { role: 'user', content: `Question: ${first.content.slice(0, 400)}\n\nAnswer: ${reply.content.slice(0, 400)}\n\nTitle:` },
-            ],
+            model: state.selectedModel || state.status?.model?.name || 'tiny', stream: false, temperature: 0.3, max_tokens: 40,
+            chat_template_kwargs: { enable_thinking: false },
+            messages: spTitleMessages(splitReasoning(first.content).answer || first.content, splitReasoning(reply.content).answer || reply.content),
           }),
         });
         const data = await res.json();
-        const title = String(data.choices?.[0]?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/["*#\n]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.!?:]+$/, '');
-        if (title && title.length >= 3 && title.length <= 60) {
+        const title = spCleanTitle(data.choices?.[0]?.message?.content);
+        if (title) {
           t.title = title;
           saveThreads();
           renderThreadList();
@@ -746,7 +769,7 @@
     function threadMarkdown(t) {
       const lines = [`# ${t.title}`, ''];
       const system = t.system || '';
-      if (system) lines.push(`> Systemprompt: ${system.replace(/\n/g, ' ')}`, '');
+      if (system) lines.push(`> System prompt: ${system.replace(/\n/g, ' ')}`, '');
       for (const n of pathOf(t)) {
         lines.push(n.role === 'user' ? '## You' : '## Model', '', messageText(n), '');
         if (n.rating) lines.push(`_Rating: ${n.rating === 'up' ? 'good' : 'bad'}${n.ratingNote ? ` (${n.ratingNote})` : ''}_`, '');
