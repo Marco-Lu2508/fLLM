@@ -187,3 +187,27 @@
     .rules-box summary h4 { margin-bottom: 6px; }
     .rules-label { display: block; margin: 8px 0 3px; font-size: 12px; font-weight: 500; }
     .rules-text { width: 100%; font-size: 11.5px; margin-bottom: 6px; }
+
+    /* agent and model switch, message queue, session list, memory and permission tables */
+    .code-model-wrap { position: relative; }
+    .code-model-menu { top: calc(100% + 6px); bottom: auto; left: 0; width: 300px; max-height: 320px; overflow: auto; }
+    .code-model-menu .popover-item { display: block; width: 100%; text-align: left; padding: 6px 10px; background: none; border: 0; color: inherit; cursor: pointer; font: inherit; }
+    .code-model-menu .popover-item:hover, .code-model-menu .popover-item.active { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+    .code-queue { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 6px; }
+    .queue-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 4px 2px 10px; border: 1px dashed var(--border); border-radius: 999px; font-size: 12px; color: var(--muted-foreground); }
+    .queue-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+    .queue-chip button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; }
+    .turn-actions { display: none; justify-content: flex-end; gap: 4px; margin-top: 2px; }
+    .code-user:hover .turn-actions { display: flex; }
+    .session-search { width: 100%; margin-bottom: 6px; }
+    .session-list li { display: flex; flex-direction: column; }
+    .session-acts { display: none; gap: 2px; flex-wrap: wrap; }
+    .session-list li:hover .session-acts, .session-list li.active .session-acts { display: flex; }
+    .session-list .session-acts button { width: auto; }
+    .mode-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+    .mode-table th { text-align: left; font-weight: 500; color: var(--muted-foreground); text-transform: capitalize; }
+    .mode-table td { padding: 2px 4px 2px 0; }
+    .mode-select { width: 100%; font-size: 12px; padding: 2px 4px; }
+    .check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .tool-check h5 { margin: 8px 0 2px; font-size: 12px; color: var(--muted-foreground); }
+    .diff-ctx { color: var(--muted-foreground); }
