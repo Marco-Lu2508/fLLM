@@ -763,8 +763,16 @@ async fn ollama_keep_alive_and_loading() {
     let ps = h.get("/api/ps").await.json();
     assert_eq!(ps["models"][0]["name"], "tiny");
     assert!(ps["models"][0]["expires_at"].as_str().unwrap().starts_with("20"));
-    h.post("/api/generate", json!({"model": "tiny", "prompt": "", "keep_alive": -1})).await;
-    assert_eq!(h.get("/api/ps").await.json()["models"][0]["expires_at"], "0001-01-01T00:00:00Z");
+    // other tests share the model and renew its expiry with their own requests, so ask again if one slipped in
+    let mut forever = false;
+    for _ in 0..20 {
+        h.post("/api/generate", json!({"model": "tiny", "prompt": "", "keep_alive": -1})).await;
+        forever = h.get("/api/ps").await.json()["models"][0]["expires_at"] == "0001-01-01T00:00:00Z";
+        if forever {
+            break;
+        }
+    }
+    assert!(forever, "keep_alive -1 never showed as forever");
 }
 
 #[test]
