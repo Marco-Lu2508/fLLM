@@ -116,8 +116,9 @@ pub(super) fn kill_tree(pid: u32) {
     };
     #[cfg(not(windows))]
     let mut c = {
-        let mut c = Command::new("kill");
-        c.args(["-KILL", &format!("-{pid}")]);
+        // the shell's own `kill` first: it takes a negative number as a process group on every shell, the external one varies
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(format!("kill -KILL -- -{pid} 2>/dev/null || /bin/kill -KILL -- -{pid}"));
         c
     };
     let _ = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
