@@ -6,6 +6,20 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Gemma 4 on the graphics chip: the device pass now runs the per-layer embeddings, the layer output scale, the value norm, layers whose values are their keys and layers that read an earlier layer's cache (the per-layer weights are uploaded as Q8_0). Measured on an Intel Core Ultra 5 235U (Vulkan) with Gemma 4 E4B Q4_K_M: answers at 12.7 tokens/s (llama.cpp 12.6), prompts at 115 tokens/s (llama.cpp 167); before, the model failed on the device.
+- Vulkan prompt speed: the quantized matrix kernel computes 8 x 4 outputs per invocation on a 128 x 64 tile and its loaders read neighbouring bytes of a row (`FLLM_VK_MM_TM`, `FLLM_VK_MM_KS` for tuning), and the Gated DeltaNet recurrence runs over 16 value columns per workgroup with subgroup shuffles instead of one workgroup and a dozen barriers per token and head (`FLLM_VK_DELTA_COLS=0` keeps the old shader). Qwen3.5-2B Q4_K_M, 505-token prompt on the same laptop: 351 tokens/s (0.1.8: 245, llama.cpp: 374).
+- `scripts/bench-load.ps1`: fLLM, llama.cpp and Ollama under load (prompts of several lengths, several users at once, total and per-user speed, time to the first token).
+- `/skill` in the chat and on the Code page: the model writes a skill from the conversation and shows it for approval.
+- `FLLM_VK_PROFILE=N` prints the shader table every N command buffers, summed over all recorders of the process.
+
+### Fixed
+- An explicitly chosen device that cannot run a model (for example Gemma 3n on Vulkan) no longer stops the server: the model runs on the CPU and the reason is logged.
+- Gemma 4 on Vulkan and the NPU failed with "rope width 512 invalid for head width 256": the device pass used one rotary width for all layers.
+- Windows: the low-power efficiency cores of Intel Core Ultra are told from the other efficiency cores by their cache (Windows gives them the same efficiency class), so `--threads auto` picks 8 instead of 9 threads on a Core Ultra 5 235U; an explicit `--threads n` gets the same core placement as the automatic count (a 10-thread run answered at 9 tokens/s without it, 24 with it).
+- The code page sent `reasoning_effort: high` whenever thinking was on; it now sends what the loaded model understands for the chosen level.
+- KV block copies (several choices per request, swap preemption) work with KV pools whose layers have their own sizes.
+
 ## [0.1.8] - 2026-10-26
 
 ### Added
