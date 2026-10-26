@@ -1434,7 +1434,11 @@
       if (!fit) throw new Error(TOO_SMALL);
       body.max_tokens = fit;
       if (ctx.tools.length) { body.tools = ctx.tools; if (!code.noGrammar) body.tool_call_grammar = true; }
-      if (state.thinkingEnabled) body.reasoning_effort = 'high';
+      // thinking: the level chosen on the chat page, sent the way the loaded model understands it (nothing for a model without thinking)
+      if (typeof thinkingCaps === 'function') {
+        const caps = thinkingCaps();
+        Object.assign(body, thinkingRequestFields(caps, thinkingLevelFor(caps, state.thinkingLevel)));
+      }
       let res = await apiFetch('/v1/chat/completions', { method: 'POST', body: { ...body }, signal: ctx.signal });
       for (let attempt = 0; attempt < 2 && !res.ok && res.status === 400; attempt++) {
         const err = await res.clone().json().catch(() => ({}));
