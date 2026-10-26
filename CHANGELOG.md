@@ -17,6 +17,7 @@ behaviour between versions).
 - `FLLM_VK_PROFILE=N` prints the shader table every N command buffers, summed over all recorders of the process.
 
 ### Fixed
+- CPU answers with small models were up to 30 % slower than llama.cpp on server processors: the thread measurement at start-up skipped models whose largest matrix is under 8 MB (it now streams the same projection of several layers, 96 MB per pass, and measures every model), and the Gated DeltaNet recurrence woke rayon's sleeping workers in every layer of every token instead of using the spinning ones. Qwen3.5-2B Q4_K_M on an AMD EPYC VM with 10 vCPUs: 46 to 55 tokens/s before, 65 after (llama.cpp 63 to 76 on the same, busy machine).
 - CUDA: 16 simultaneous users (or a few at long contexts) failed with "illegal memory access": an attention call staged its lengths, then grew the metadata ring for its block tables and freed the memory the lengths were in. Found and verified on a Colab L4 (16 of 16 requests answered afterwards).
 - Models with recurrent layers (Qwen3.5, Mamba) on a GPU: the memory plan now leaves room for the recurrent states of all sequences; before, the KV pool took the whole card and a busy step ran out of memory.
 - A model step that failed (for example a device error under load) stopped the whole server; now its requests get the error, the error is logged at once, and the server keeps serving (three failed steps in a row still stop it).
