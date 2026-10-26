@@ -353,6 +353,14 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/agent/end", post(api::agent::end))
         .route("/api/studio/web/fetch", post(api::agent_net::fetch_route))
         .route("/api/studio/web/search", post(api::agent_net::search_route))
+        .route("/api/studio/skills", get(api::skills::list).post(api::skills::write).delete(api::skills::remove))
+        .route("/api/studio/skills/read", get(api::skills::read))
+        .route("/api/studio/sessions/index", post(api::sessions_index::index).delete(api::sessions_index::remove))
+        .route("/api/studio/sessions/search", get(api::sessions_index::search))
+        .route("/api/studio/schedule", get(api::schedule::list).post(api::schedule::upsert).delete(api::schedule::remove))
+        .route("/api/studio/schedule/run", post(api::schedule::run_now))
+        .route("/api/studio/schedule/results", get(api::schedule::results))
+        .route("/api/studio/schedule/check", get(api::schedule::check))
         .route("/v1/models", get(models))
         .route("/v1/models/{id}", get(api::model_by_id))
         .route("/v1/messages", post(api::anthropic::messages))
@@ -436,6 +444,7 @@ pub fn serve(
     let ready = state.ready.clone();
     let context = state.http.clone();
     api::studio_ops::spawn_idle_unload(state.metrics.clone());
+    let scheduler_state = Arc::downgrade(&state);
     // the router owns the last sender of the worker channel; the worker must see it disconnect to stop
     drop(state);
     if !context.security.auth_required() && !address.ip().is_loopback() {
@@ -469,6 +478,7 @@ pub fn serve(
                     open_browser(&format!("http{}://{}:{}/", if tls { "s" } else { "" }, if host.contains(':') { format!("[{host}]") } else { host }, address.port()));
                 }
                 ready.store(true, Ordering::Relaxed);
+                api::schedule::start(scheduler_state, tokio::runtime::Handle::current());
                 // the router (and with it the sender of the worker channel) lives until the last connection is gone
                 http::serve(listener, router, context, ready.clone(), shutdown_signal(shutdown_rx)).await
             })

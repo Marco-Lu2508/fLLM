@@ -228,6 +228,14 @@ fn is_providers_path(path: &str) -> bool {
     path == "/api/studio/providers" || path.starts_with("/api/studio/providers/")
 }
 
+/// Skills (files of the user and of workspaces), the copy of the chat text used for search and the scheduled tasks
+/// (prompts, folders and results): personal data and, for tasks, prompts that run on this machine, so even reads
+/// stay on this machine.
+fn is_personal_path(path: &str) -> bool {
+    path.starts_with("/api/studio/sessions/")
+        || ["/api/studio/skills", "/api/studio/schedule"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
+}
+
 /// The Studio routes that change something (settings, model downloads and deletions, API keys) are
 /// administration. Without a configured API key they are only open to a client on the same machine:
 /// otherwise anybody who can reach the port could delete models or register a key and lock the owner out.
@@ -247,10 +255,11 @@ pub fn studio_admin_blocked(
     let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file"
         // the model providers hold keys of other services and relay requests with them: same rule, reads included
         || is_providers_path(path)
+        || is_personal_path(path)
         // the NPU setup downloads a native runtime that the server loads afterwards, and its removal deletes files: never from another machine
         || path == "/api/studio/npu/setup";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path);
+    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path) || is_personal_path(path);
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)
@@ -745,6 +754,30 @@ mod studio_gate_tests {
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/logs", remote, &h));
         let local = headers("127.0.0.1:8000", None);
         assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", addr("127.0.0.1:1"), &local));
+    }
+
+    #[test]
+    fn skills_sessions_and_schedule_stay_on_this_machine_reads_included() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        let other_site = headers("127.0.0.1:8000", Some("https://evil.example"));
+        for path in [
+            "/api/studio/skills", "/api/studio/skills/read", "/api/studio/sessions/index", "/api/studio/sessions/search",
+            "/api/studio/schedule", "/api/studio/schedule/run", "/api/studio/schedule/results", "/api/studio/schedule/check",
+        ] {
+            for method in [Method::GET, Method::POST, Method::DELETE] {
+                for auth in [false, true] {
+                    assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} from another machine (key: {auth})");
+                    assert!(!studio_admin_blocked(auth, &method, path, here, &local), "{method} {path} from this machine (key: {auth})");
+                    assert!(studio_admin_blocked(auth, &method, path, here, &other_site), "{method} {path} from a page of another site");
+                }
+            }
+        }
+        assert!(!is_personal_path("/api/studio/skillset"));
+        assert!(!is_personal_path("/api/studio/scheduled"));
+        assert!(!is_personal_path("/api/studio/sessions"));
     }
 
     #[test]

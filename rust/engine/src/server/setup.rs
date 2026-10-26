@@ -61,6 +61,14 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/settings", get(api::studio_ops::get_settings).post(api::studio_ops::update_settings))
         .route("/api/studio/logs", get(api::studio_ops::logs))
         .route("/api/studio/hf-readme", get(api::studio_ops::hf_readme))
+        .route("/api/studio/skills", get(api::skills::list).post(api::skills::write).delete(api::skills::remove))
+        .route("/api/studio/skills/read", get(api::skills::read))
+        .route("/api/studio/sessions/index", post(api::sessions_index::index).delete(api::sessions_index::remove))
+        .route("/api/studio/sessions/search", get(api::sessions_index::search))
+        .route("/api/studio/schedule", get(api::schedule::list).post(api::schedule::upsert).delete(api::schedule::remove))
+        .route("/api/studio/schedule/run", post(api::schedule::run_now))
+        .route("/api/studio/schedule/results", get(api::schedule::results))
+        .route("/api/studio/schedule/check", get(api::schedule::check))
         .layer(axum::middleware::from_fn_with_state(context, http::layer))
 }
 
