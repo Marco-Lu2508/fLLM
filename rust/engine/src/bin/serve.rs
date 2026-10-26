@@ -28,7 +28,20 @@ fn pin_threads_to_cores(spec: &str) {
         tracing::info!("Pinned inference process to CPU affinity mask: {spec_trimmed}");
     }
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn pin_threads_to_cores(spec: &str) {
+    // a count: the first N logical processors in the order the thread policy fills them (fast cores first)
+    match spec.trim().parse::<usize>() {
+        Ok(n) if n > 0 => {
+            let topology = fllm_engine::cpu_topology::detect();
+            if fllm_engine::cpu_topology::pin_first(topology, n) {
+                tracing::info!("Restricted the process to {n} logical processors (fast cores first)");
+            }
+        }
+        _ => tracing::warn!("--pin-cores on Windows takes a number of logical processors, not a list or a mask: {spec}"),
+    }
+}
+#[cfg(not(any(target_os = "linux", windows)))]
 fn pin_threads_to_cores(_spec: &str) {}
 use fllm_engine::{
     compiled_backends, kv_format::KvFormat,
@@ -37,7 +50,7 @@ use fllm_engine::{
     DeviceType, GgufModel, InferenceRuntime,
 };
 use fllm_gguf_probe::MappedGguf;
-use std::{env, process, thread};
+use std::{env, process};
 
 /// A draft model given as a file, a Hugging Face reference or a directory: resolved to one GGUF file (checkpoints are converted).
 fn resolve_gguf(spec: &str, offline: bool) -> Result<std::path::PathBuf, String> {
@@ -74,7 +87,7 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
     eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a checkpoint is converted to GGUF once and cached; --quant ({}) re-encodes an unquantized checkpoint while converting", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
@@ -162,6 +175,8 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "version_long": fllm_engine::version::long_version(),
             "compiled_backends": compiled_backends(),
             "devices": devices,
+            "cpu_topology": fllm_engine::cpu_topology::detect().to_json(),
+            "threads": fllm_engine::cpu_topology::detect().default_threads(),
             "unusable_npus": fllm_engine::backend::npu::status::notices().iter().map(|n| serde_json::json!({"name": n.name, "vendor": n.vendor, "status": n.status, "text": n.text})).collect::<Vec<_>>(),
             "auto_order": policy.order,
             "auto_integrated_gpus": policy.integrated,
@@ -233,6 +248,13 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             capabilities,
             cuda_lines,
             role,
+        );
+    }
+    {
+        let topology = fllm_engine::cpu_topology::detect();
+        println!(
+            "CPU threads (--threads auto starts from): {}; a short measurement at model load may adjust it (FLLM_NO_AUTOTUNE=1 skips it)",
+            fllm_engine::cpu_threads::summary(topology.default_threads(), topology)
         );
     }
     // NPUs the operating system lists but that cannot be used (yet): shown so that the user knows why `--device npu` does not work
@@ -423,9 +445,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut swap_space_gib = 0.0f64;
     let mut max_batched_tokens = 512usize;
     let mut batch_explicit = false;
-    let mut threads = thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(1);
+    // --threads auto (the default): the processor's own default now, refined by a short measurement once the model is loaded
+    let mut threads = fllm_engine::cpu_topology::detect().default_threads() as i32;
+    let mut threads_auto = true;
     let mut http = fllm_engine::server::options::HttpOptions::default();
     let mut generation_source = fllm_engine::server::gencfg::Source::Auto;
     let mut default_temperature: Option<f64> = None;
@@ -627,9 +649,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|_| usage("invalid --max-batched-tokens"))
             }
             "--threads" => {
-                threads = value(&args, &mut i, "--threads")
-                    .parse()
-                    .unwrap_or_else(|_| usage("invalid --threads"))
+                let given = value(&args, &mut i, "--threads");
+                if given.eq_ignore_ascii_case("auto") {
+                    threads_auto = true;
+                } else {
+                    threads = given.parse().ok().filter(|n| *n > 0).unwrap_or_else(|| usage("invalid --threads"));
+                    threads_auto = false;
+                }
             }
             "--device" => device = value(&args, &mut i, "--device").to_lowercase(),
             // `all`: the NPU computes every matrix product it can (the defaults send only long prompt blocks to it)
@@ -1012,6 +1038,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_sequences = if matches!(selected_backend.as_str(), "cpu" | "npu") { 16 } else { 256 };
     }
     let mut model = GgufModel::load(path.to_str().unwrap(), context, max_sequences, threads)?;
+    {
+        let topology = fllm_engine::cpu_topology::detect();
+        let choice = if !threads_auto {
+            fllm_engine::cpu_threads::ThreadChoice { threads: threads as usize, prefill: threads as usize, policy: topology.default_threads(), source: "flag", detail: "--threads".into() }
+        } else if selected_backend == "cpu" && pin_cores.is_none() {
+            fllm_engine::cpu_threads::tune(model.mapping(), model.hidden_size())
+        } else {
+            fllm_engine::cpu_threads::ThreadChoice { threads: threads as usize, prefill: threads as usize, policy: threads as usize, source: "policy", detail: "not running on the CPU, or --pin-cores given".into() }
+        };
+        threads = choice.threads as i32;
+        model.set_threads(threads);
+        model.set_prefill_threads(choice.prefill as i32);
+        let prompts = if choice.prefill > choice.threads { format!("; {} for prompts", choice.prefill) } else { String::new() };
+        tracing::info!("threads: {}{prompts} [{}: {}]", fllm_engine::cpu_threads::summary(choice.threads, topology), choice.source, choice.detail);
+        fllm_engine::cpu_threads::record(choice);
+    }
     if context_request.is_none() {
         // --ctx auto lets a single sequence grow to the trained length; it does not enlarge the memory: the KV pool keeps the
         // size of the former default (max-seqs x 4096 tokens), never below one full-length sequence

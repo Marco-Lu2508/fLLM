@@ -26,6 +26,8 @@ pub mod cpu_quantized;
 pub mod cpu_selftest;
 mod cpu_schedule;
 mod cpu_spin;
+pub mod cpu_threads;
+pub mod cpu_topology;
 pub mod draft;
 pub(crate) mod kv_blocks;
 pub mod speculative;

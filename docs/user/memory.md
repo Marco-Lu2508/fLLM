@@ -14,7 +14,7 @@ numbers, and what is (not) documented about CPU RAM. Sources:
 | `--ctx`, `--ctx-size`, `--max-model-len` | `4096` | Context window; `prompt + max_tokens` must fit |
 | `--max-seqs` | `16` | Sequences scheduled concurrently |
 | `--max-batched-tokens` | `512` | Token budget per model call (prefill chunk size) |
-| `--threads` | all cores | CPU worker threads |
+| `--threads` | `auto` | CPU worker threads (`auto` picks a count that suits the processor and measures it once) |
 | `--gpu-memory-utilization` | `0.90` | Fraction of free device memory the planner may use |
 | `--gpu-layers`, `-ngl`, `--n-gpu-layers` | `auto` | Layers fully on the device, or `auto` to fit the budget |
 

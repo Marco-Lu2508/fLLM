@@ -212,7 +212,67 @@ rows (64 bytes of output per token) while many panels remain and shrinks to a si
 towards the end of the queue (a worker takes at most a quarter of its share of what is left), so
 a slow E-core cannot hold the tail of a projection while P-cores idle. `--threads` sizes the pool
 and `--pin-cores` sets the process affinity before the pool starts, so pool threads inherit it;
-neither was changed. Whether leaving out low-power E-cores helps decode is still unmeasured.
+neither was changed by the scheduler. The default thread count is described next.
+
+### Thread count
+
+Decode is limited by memory bandwidth, and every parallel step waits for its slowest thread, so
+"one thread per logical processor" is the worst default on a hybrid part. Measured on a Core
+Ultra 5 235U (2 performance cores with hyper-threading, 8 efficiency cores, 2 low-power cores,
+14 logical processors; Qwen3.5-2B Q4_K_M, 505-token prompt, 128 greedy tokens):
+
+| threads | prompt tok/s | answer tok/s |
+|---|---|---|
+| 4 | 114 | 16.5 |
+| 6 | 123 | 17.7 |
+| 8 | 133 | 19.6 |
+| 10 | 108 | 14.5 |
+| 12 | 130 | 15 |
+| 14 (former default) | 100 | 9.3 |
+
+`cpu_topology` describes the machine (Windows CPU sets and `EfficiencyClass`, Linux sysfs
+`thread_siblings_list` with `cpu_capacity` or the maximum frequency, macOS `hw.perflevelN`;
+anything else, or a process limited to fewer processors than exist, counts as equal cores) and
+`--threads auto`, the default, uses it twice.
+
+1. **Policy** (`Topology::default_threads`). One performance class: one thread per physical
+   core. The second hardware thread adds no bandwidth, and its work competes with its sibling
+   for the core's load ports and L1. Several classes: every core of the fastest class plus
+   three quarters of the cores of the others, leaving out the slowest class when there are
+   three (the low-power cores of Core Ultra sit outside the compute tile and are several times
+   slower). The quarter that stays free is for the operating system, the HTTP server and the
+   sampler, which otherwise compete with workers that never sleep. The rule gives 8 on the 235U
+   (2 + 6), 12 on a 6P+8E+2LPE part, 11 on an 8P+4E Apple M2 Pro, 8 on 8 cores with SMT, 64 on
+   a 64-core server. It is a heuristic calibrated on the one table above, which is why the
+   measurement exists. The count is also capped so that each thread gets at least 32 output
+   rows of the model's hidden size.
+2. **Measurement** (`cpu_threads`). After the model is loaded, unless the model is tiny (the
+   largest projection of the first layer is under 8 MiB, so it fits the caches and says nothing
+   about bandwidth), `FLLM_NO_AUTOTUNE=1` is set, or `--pin-cores` is given: a matrix-vector
+   product of that projection, on the real weights through the real kernels, is timed for the
+   policy value, one step (a quarter of it) below and one and two steps above. Candidates are
+   timed in two interleaved rounds, each keeps its best time, and the smallest count within 3 %
+   of the fastest wins. The whole run is about 1.2 s (2.5 s hard stop, then the policy value is
+   used and nothing is cached). The result is logged in one line and stored in
+   `cpu-threads.json` next to the Studio settings, keyed by CPU model, cores and threads per
+   class, weight type and matrix shape, so later starts take no time. Delete the file to measure
+   again. Idle spin-pool threads of the unused candidates stay parked.
+
+Prompt processing is compute-bound and the second hardware thread helps it, so when all cores
+are alike the decoder keeps a second, larger pool (all logical processors) for batches of 8 or
+more rows; single rows use the decode pool. On a hybrid part the decode count is kept for both,
+because on the 235U 8 threads also gave the best prompt speed (133 against 130 at 12 and 100 at
+14). The effect on SMT desktops is expected (10 to 25 % for prompts) but unmeasured.
+
+Windows on hybrid parts: the process opts out of power throttling (EcoQoS), and when fewer
+threads than logical processors are used the process is restricted (`SetProcessDefaultCpuSets`)
+to the first `n` processors of the order "fast cores first, then efficiency cores, then the
+second thread of fast cores, then low-power cores", so workers stay off the cores that were left
+out. `FLLM_NO_PIN=1` disables the restriction. Thread priorities are not changed. On Linux the
+kernel's hybrid scheduler already places threads well; `--pin-cores` stays available.
+`fllm-rs devices` prints the topology and the thread count, `--json` and
+`/api/studio/hardware` carry `cpu_topology`, `threads`, `available_threads` and
+`threads_source`.
 
 ## MoE decode (fused expert passes)
 
@@ -359,8 +419,8 @@ could not be measured:
    but risks spills with 16 YMM registers.
 3. **Hybrid cores.** Each projection is one dynamic queue over all Rayon workers
    (`rayon::broadcast`); claims now shrink at the tail. Dynamic claiming balances P and E cores, but low-power E cores
-   (outside the compute tile on Meteor/Arrow Lake U) are much slower; excluding them with
-   `--pin-cores` may help decode. Not measured.
+   (outside the compute tile on Meteor/Arrow Lake U) are much slower; `--threads auto` now leaves
+   them out (see "Thread count"). The policy and the tuner are untested beyond the one laptop.
 4. **AMD CCDs and NUMA.** Threads are not pinned; mmap'ed weights land wherever the page
    cache placed them. On multi-CCD parts, giving each CCD a contiguous row range would keep
    each CCD's L3 hot. Not measured.

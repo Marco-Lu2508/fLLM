@@ -27,9 +27,9 @@ fllm-rs --help             # usage summary
 | `--ctx`, `--ctx-size`, `--max-model-len` | integer | `4096` | Context window; `prompt + max_tokens` must fit into it |
 | `--max-seqs` | integer | `16` | Sequences scheduled concurrently |
 | `--max-batched-tokens` | integer | `512` | Token budget per model call (also the prefill chunk size) |
-| `--threads` | integer | all available cores | CPU worker threads (`std::thread::available_parallelism`) |
+| `--threads` | `auto` or integer | `auto` | CPU worker threads. `auto` starts from the processor's own default (one thread per physical core; on a hybrid processor all fast cores plus three quarters of the efficiency cores, never the low-power ones) and, when the model runs on the CPU, confirms it with a measurement of about one second that is cached per CPU, weight type and matrix shape (`FLLM_NO_AUTOTUNE=1` skips it; `FLLM_NO_PIN=1` stops the Windows core restriction). A number is used as given. Details in [cpu-kernels.md](cpu-kernels.md#thread-count) |
 | `--device` | string (lowercased) | `auto` | `auto` takes the best GPU of the build in the order CUDA > ROCm > Metal > Vulkan > DX12 > SYCL (`FLLM_AUTO_ORDER` changes the order) and falls back to the CPU when there is none; `cpu` forces the CPU. `cuda`, `hip` (ROCm), `metal`, `vulkan`, `dx12`, `sycl`, `npu`, `tpu` select that backend when it was compiled in; `BACKEND:N` picks device N of a backend (`vulkan:1` is the second Vulkan device; `fllm-rs devices` prints the value to use); `gpu`/`wgpu` mean any wgpu adapter and need the `rust-gpu` feature. An explicit GPU request fails if the backend is unavailable or only a software adapter exists. See [device-selection.md](device-selection.md) |
-| `-C`, `--pin-cores`, `--p-cores`, `--pin-mask` | string | none | Linux only: pin the process to a CPU affinity mask — `8` (first 8 cores), `0,2,3` (core list) or `0xFF5` (hex mask) |
+| `-C`, `--pin-cores`, `--p-cores`, `--pin-mask` | string | none | pin the process to some CPUs. Linux: `8` (first 8 cores), `0,2,3` (core list) or `0xFF5` (hex mask). Windows: a number of logical processors, taken fast cores first. Switches `--threads auto` off its measurement |
 
 `--revision REV`, `--local-files-only` and `--offline` apply to `hf://` model references:
 `REV` selects a Hub revision (default `main`), the boolean flags restrict resolution to the
