@@ -225,9 +225,6 @@ struct FllmStream {
     cudaStream_t s;
     void *arena;      // ring of per-call metadata (positions, slots, block tables ...)
     size_t cap, off;
-    // arenas replaced by a larger one: pointers into them may still be held by the call that grew the ring (an attention call stages its
-    // lengths, then its block tables), so they are freed with the stream
-    std::vector<void *> retired_arenas;
     float *ws;        // scratch for split-KV attention partials
     size_t ws_bytes;
     void *x16;        // FP16 copy of the activations for the tensor-core GEMM
@@ -315,6 +312,9 @@ struct FllmStream {
     void *act_tmp[3] = {nullptr, nullptr, nullptr};
     size_t act_tmp_bytes[3] = {0, 0, 0};
     int *act_check = nullptr;
+    // arenas replaced by a larger one: pointers into them may still be held by the call that grew the ring (an attention call stages its
+    // lengths, then its block tables), so they are freed with the stream
+    std::vector<void *> retired_arenas;
 };
 
 static int flush_add(FllmStream *st) {
