@@ -67,6 +67,16 @@
     /** Calls written as text, <tool_call>{"name": ..., "arguments": {...}}</tool_call>, for models whose output the server did not parse. */
     function ctTextCalls(content, names) {
       const out = [];
+      // a whole answer that is one JSON object (or a list) naming an offered tool, with or without a code fence, is a call too
+      const bare = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      if (!bare.includes('<tool_call>') && (bare[0] === '{' || bare[0] === '[')) {
+        try {
+          const v = JSON.parse(bare);
+          const items = Array.isArray(v) ? v : [v];
+          const calls = items.map((x) => { const fn = x && typeof x === 'object' ? (x.function && typeof x.function === 'object' ? x.function : x) : null; const args = fn ? (fn.arguments ?? fn.parameters ?? {}) : {}; return fn && names.includes(fn.name) && typeof args !== 'number' && typeof args !== 'boolean' ? { id: '', name: fn.name, args: typeof args === 'string' ? args : JSON.stringify(args) } : null; });
+          if (calls.length && calls.every(Boolean)) return calls;
+        } catch { /* not JSON */ }
+      }
       for (const m of String(content || '').matchAll(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g)) {
         try {
           const j = JSON.parse(m[1]);
@@ -370,9 +380,10 @@
           }
         }
         let calls = r.calls.map((c) => ({ ...c }));
-        if (!calls.length && opts.tools.length && aNode.content.includes('<tool_call>')) {
+        if (!calls.length && opts.tools.length) {
+          const hadMarker = aNode.content.includes('<tool_call>');
           calls = ctTextCalls(aNode.content, names);
-          if (calls.length) aNode.content = aNode.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
+          if (calls.length) aNode.content = hadMarker ? aNode.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim() : '';
         }
         return { content: splitReasoning(aNode.content).answer, calls: calls.filter((c) => c.name) };
       };

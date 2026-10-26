@@ -135,6 +135,14 @@ test('calls written as text are found, others are ignored', () => {
   assert.deepStrictEqual(JSON.parse(calls[0].args), { query: 'x' });
 });
 
+test('an answer that is one bare JSON call is a call; prose and unknown tools are not', () => {
+  const names = ['web_search', 'memory'];
+  assert.deepStrictEqual(L.ctTextCalls('{"name": "web_search", "arguments": {"query": "rust"}}', names).map((c) => c.name), ['web_search']);
+  assert.deepStrictEqual(L.ctTextCalls('```json\n[{"name":"memory","arguments":{"action":"list"}}]\n```', names).map((c) => c.name), ['memory']);
+  assert.deepStrictEqual(L.ctTextCalls('{"name": "format_disk", "arguments": {}}', names), []);
+  assert.deepStrictEqual(L.ctTextCalls('Sure: {"name": "web_search", "arguments": {}}', names), []);
+});
+
 test('the budget grows with the context and is bounded', () => {
   const small = L.ctBudget(4096);
   const big = L.ctBudget(131072);
