@@ -841,6 +841,16 @@
           toast(arg ? 'System prompt set' : 'System prompt removed');
           return done();
         case 'export': await chatAction('export-md'); return done();
+        case 'skill': {
+          // the model writes a skill from this chat; nothing is saved before the user approves it
+          const t = currentThread();
+          if (!t || typeof window.fllmSkillPropose !== 'function') return false;
+          done();
+          const messages = pathOf(t).filter((n) => n.role === 'user' || n.role === 'assistant').map((n) => ({ role: n.role, content: String(n.content || '') }));
+          const r = await window.fllmSkillPropose({ messages });
+          if (r && r.saved) toast('Skill saved');
+          return true;
+        }
         case 'help': $('helpModal').classList.add('open'); return done();
         case 'retry': {
           const t = currentThread();

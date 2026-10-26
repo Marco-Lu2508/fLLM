@@ -1963,7 +1963,7 @@
       ['fork', 'New session from an earlier message'], ['revert', 'Go back to before a message, files included'], ['rename', 'Rename this session'], ['export', 'Save this session as Markdown'],
       ['rewind', 'Undo file changes back to a chosen point'], ['undo', 'Undo the last file change (/undo 3 for three)'],
       ['plan', 'Plan agent: read only'], ['build', 'Build agent'], ['ask', 'Build agent, ask before every change'], ['edit', 'Build agent, auto-edit'], ['agent', 'Switch between build and plan'], ['model', 'Pick the model'],
-      ['remember', 'Save a fact to memory (/remember global ...)'], ['memory', 'Show and edit the memory'], ['check', 'Check the code for errors (diagnostics)'],
+      ['skill', 'Turn this session into a reusable skill'], ['remember', 'Save a fact to memory (/remember global ...)'], ['memory', 'Show and edit the memory'], ['check', 'Check the code for errors (diagnostics)'],
       ['diff', 'git diff'], ['status', 'git status'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['help', 'List the commands'],
     ];
 
@@ -1997,6 +1997,13 @@
       const name = cmd.toLowerCase();
       switch (name) {
         case 'clear': case 'new': newCodeSession(); return true;
+        case 'skill': {
+          // the model writes a skill from this session; nothing is saved before the user approves it
+          if (typeof window.fllmSkillPropose !== 'function') return false;
+          const r = await window.fllmSkillPropose({ messages: code.messages, workspace: code.workspace && code.workspace.root });
+          if (r && r.saved) codeNotice('Skill saved.');
+          return true;
+        }
         case 'undo': await undoChange(Number(rest[0]) || 1); return true;
         case 'rewind': await showRewind(); return true;
         case 'compact':
