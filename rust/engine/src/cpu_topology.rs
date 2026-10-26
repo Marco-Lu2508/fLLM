@@ -337,7 +337,8 @@ pub fn from_linux(cpus: &[LinuxCpu]) -> Topology {
 /// type at 4, and for type 0 the CPU set: id at 8, group at 12, logical processor index at 14, core index at 15, efficiency class
 /// at 18).
 pub fn from_windows_cpu_sets(buffer: &[u8]) -> Topology {
-    let mut raw = Vec::new();
+    // (id, group, core, last level cache index, efficiency class)
+    let mut sets = Vec::new();
     let mut at = 0usize;
     while at + 8 <= buffer.len() {
         let size = u32::from_le_bytes(buffer[at..at + 4].try_into().unwrap_or([0; 4])) as usize;
@@ -349,14 +350,23 @@ pub fn from_windows_cpu_sets(buffer: &[u8]) -> Topology {
             let record = &buffer[at..at + size];
             let id = u32::from_le_bytes(record[8..12].try_into().unwrap_or([0; 4])) as usize;
             let group = u16::from_le_bytes(record[12..14].try_into().unwrap_or([0; 2]));
-            raw.push(RawCpu {
-                id,
-                core: (u32::from(group), u32::from(record[15])),
-                perf: u64::from(record[18]),
-            });
+            sets.push((id, u32::from(group), u32::from(record[15]), record[16], record[18]));
         }
         at += size;
     }
+    // Windows gives the efficiency cores and the low-power cores of Intel Core Ultra the same efficiency class. The low-power
+    // cores sit outside the compute tile and do not share its last level cache, so a core below the top class that does not
+    // share a cache with a top class core is ranked under the other efficiency cores.
+    let top = sets.iter().map(|s| s.4).max().unwrap_or(0);
+    let top_caches: Vec<u8> = sets.iter().filter(|s| s.4 == top).map(|s| s.3).collect();
+    let raw: Vec<RawCpu> = sets
+        .iter()
+        .map(|&(id, group, core, cache, class)| RawCpu {
+            id,
+            core: (group, core),
+            perf: u64::from(class) * 4 + if class == top || top_caches.contains(&cache) { 2 } else { 0 },
+        })
+        .collect();
     Topology::from_raw(&raw, false, "windows cpu sets")
 }
 
@@ -527,18 +537,24 @@ mod tests {
         from_linux(&cpus)
     }
 
-    /// `p` P cores with SMT, `e` E cores, `l` low-power cores, as Windows CPU sets (efficiency classes 2, 1, 0).
+    /// `p` P cores with SMT, `e` E cores, `l` low-power cores, as Windows CPU sets (efficiency classes 2, 1 and, for the
+    /// low-power cores, 0 or, as on real Core Ultra parts, 1 again). The low-power cores have a cache of their own.
     fn windows_buffer(p: usize, e: usize, l: usize) -> Vec<u8> {
+        windows_buffer_with(p, e, l, 0)
+    }
+
+    fn windows_buffer_with(p: usize, e: usize, l: usize, lpe_class: u8) -> Vec<u8> {
         let mut out = Vec::new();
         let mut index = 0u32;
         let mut core = 0u8;
-        let push = |class: u8, smt: usize, out: &mut Vec<u8>, index: &mut u32, core: &mut u8| {
+        let push = |class: u8, cache: u8, smt: usize, out: &mut Vec<u8>, index: &mut u32, core: &mut u8| {
             for _ in 0..smt {
                 let mut record = [0u8; 32];
                 record[0..4].copy_from_slice(&32u32.to_le_bytes());
                 record[8..12].copy_from_slice(&(0x100 + *index).to_le_bytes());
                 record[14] = *index as u8;
                 record[15] = *core;
+                record[16] = cache;
                 record[18] = class;
                 out.extend_from_slice(&record);
                 *index += 1;
@@ -546,13 +562,13 @@ mod tests {
             *core += 1;
         };
         for _ in 0..p {
-            push(2, 2, &mut out, &mut index, &mut core);
+            push(2, 0, 2, &mut out, &mut index, &mut core);
         }
         for _ in 0..e {
-            push(1, 1, &mut out, &mut index, &mut core);
+            push(1, 0, 1, &mut out, &mut index, &mut core);
         }
         for _ in 0..l {
-            push(0, 1, &mut out, &mut index, &mut core);
+            push(lpe_class, 1, 1, &mut out, &mut index, &mut core);
         }
         out
     }
@@ -591,6 +607,10 @@ mod tests {
         assert_eq!((t.physical_cores(), t.logical_count()), (12, 14));
         assert_eq!(t.classes().iter().map(|c| (c.cores, c.threads)).collect::<Vec<_>>(), vec![(2, 2), (8, 8), (2, 4)]);
         assert_eq!(t.cores[0].logical, vec![0x100, 0x101]);
+        // the same classes as Windows reports them on a Core Ultra: efficiency and low-power cores share a class
+        let t = from_windows_cpu_sets(&windows_buffer_with(2, 8, 2, 1));
+        assert_eq!(t.classes().iter().map(|c| (c.cores, c.threads)).collect::<Vec<_>>(), vec![(2, 2), (8, 8), (2, 4)]);
+        assert_eq!(t.default_threads(), 8);
         // a truncated or foreign record ends the walk instead of panicking
         let mut cut = windows_buffer(1, 1, 0);
         cut.truncate(40);
