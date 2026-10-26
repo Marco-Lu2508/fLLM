@@ -779,10 +779,7 @@ fn run_worker_loop(
             runtime.step()
         }));
         let stepped = match stepped {
-            Ok(result) => {
-                consecutive_panics = 0;
-                result
-            }
+            Ok(result) => result,
             Err(payload) => {
                 // The batch that was running is in an unknown state: fail all requests in flight with an error id and
                 // drop their sequences, then keep serving. Repeated panics without a good step in between stop the
@@ -801,6 +798,7 @@ fn run_worker_loop(
         };
         match stepped {
             Ok(events) => {
+                consecutive_panics = 0;
                 let stats = runtime.batch_stats();
                 metrics.observability.processed(stats.prefill_rows.saturating_sub(previous_stats.prefill_rows));
                 metrics.forward_calls.fetch_add(
@@ -872,10 +870,17 @@ fn run_worker_loop(
                 }
             }
             Err(error) => {
-                for (_, output) in outputs.drain() {
+                // like a panic: the requests of the failed step get the error and the server keeps serving; only repeated
+                // failures without a good step in between stop it
+                tracing::error!("a model step failed: {error}");
+                for (request_id, output) in outputs.drain() {
                     let _ = output.send(Err(error.clone()));
+                    let _ = catch_unwind(AssertUnwindSafe(|| runtime.cancel_request(&request_id)));
                 }
-                return Err(error);
+                consecutive_panics += 1;
+                if consecutive_panics >= 3 {
+                    return Err(format!("three consecutive model steps failed; stopping (last error: {error})"));
+                }
             }
         }
     }

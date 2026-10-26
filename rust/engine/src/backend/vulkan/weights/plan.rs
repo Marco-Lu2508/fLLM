@@ -296,9 +296,9 @@ pub struct MmqKnobs {
     pub enabled: bool,
     /// `FLLM_VK_MM_MIN_BATCH`: smallest batch served by `mmq_*` (default 32).
     pub min_batch: u32,
-    /// `FLLM_VK_MM_BM` (32, 64 or 128): weight rows per workgroup.
+    /// `FLLM_VK_MM_BM` (32, 64, 128 or 256): weight rows per workgroup.
     pub bm: Option<u32>,
-    /// `FLLM_VK_MM_BN` (64 or 128): tokens per workgroup.
+    /// `FLLM_VK_MM_BN` (32, 64 or 128): tokens per workgroup.
     pub bn: Option<u32>,
     /// `FLLM_VK_MM_TM` (4 or 8): weight rows per invocation.
     pub tm: Option<u32>,
@@ -323,8 +323,8 @@ impl MmqKnobs {
         MmqKnobs {
             enabled: !off,
             min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch).max(MATVEC_MAX_BATCH + 1),
-            bm: num("FLLM_VK_MM_BM").filter(|v| matches!(v, 32 | 64 | 128)),
-            bn: num("FLLM_VK_MM_BN").filter(|v| matches!(v, 64 | 128)),
+            bm: num("FLLM_VK_MM_BM").filter(|v| matches!(v, 32 | 64 | 128 | 256)),
+            bn: num("FLLM_VK_MM_BN").filter(|v| matches!(v, 32 | 64 | 128)),
             tm: num("FLLM_VK_MM_TM").filter(|v| matches!(v, 4 | 8)),
             ks: num("FLLM_VK_MM_KS").filter(|v| matches!(v, 1 | 2)),
         }
