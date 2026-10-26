@@ -1185,14 +1185,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         max_batched_tokens = 2048;
                         plan_for(&model, max_batched_tokens).unwrap_or(first)
                     } else if !batch_explicit && max_batched_tokens < 1024 {
-                        // prompt chunks of 1024 tokens fill the GEMM tiles better (NVFP4 prompts +8 %); keep them only if the
-                        // plan stays the same apart from a little less KV cache
-                        match plan_for(&model, 1024) {
-                            Ok(bigger) if bigger.offload_layers == first.offload_layers && bigger.kv_block_count * 10 >= first.kv_block_count * 9 => {
-                                max_batched_tokens = 1024;
+                        // prompt chunks of 1024 tokens fill the GEMM tiles better (NVFP4 prompts +8 %); a discrete card that serves
+                        // several sequences takes 2048 (the prompts of several users need half the steps, as with vLLM's default
+                        // budget); either only if the plan stays the same apart from a little less KV cache
+                        let keeps = |bigger: &fllm_engine::backend::memory::MemoryPlan| {
+                            bigger.offload_layers == first.offload_layers && bigger.kv_block_count * 10 >= first.kv_block_count * 9
+                        };
+                        let wide = (!unified && max_sequences > 1).then(|| plan_for(&model, 2048).ok()).flatten().filter(|b| keeps(b));
+                        match wide {
+                            Some(bigger) => {
+                                max_batched_tokens = 2048;
                                 bigger
                             }
-                            _ => first,
+                            None => match plan_for(&model, 1024) {
+                                Ok(bigger) if keeps(&bigger) => {
+                                    max_batched_tokens = 1024;
+                                    bigger
+                                }
+                                _ => first,
+                            },
                         }
                     } else {
                         first

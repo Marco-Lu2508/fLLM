@@ -9,6 +9,14 @@ use crate::backend::{BackendError, QuantType};
 pub const PUSH_BYTES: usize = 48;
 /// Largest batch served by the matrix-vector shaders; bigger batches use the tiled matrix-matrix shaders.
 pub const MATVEC_MAX_BATCH: u32 = 8;
+
+/// Largest batch served by the matrix-vector shaders: [`MATVEC_MAX_BATCH`], or `FLLM_VK_MV_MAX` (1..=8) for measuring a device.
+pub fn matvec_max() -> u32 {
+    static MAX: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("FLLM_VK_MV_MAX").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=MATVEC_MAX_BATCH).contains(v)).unwrap_or(MATVEC_MAX_BATCH)
+    })
+}
 /// `maxComputeWorkGroupCount` that every Vulkan device offers per dimension; larger grids are split over x and y.
 pub const MAX_GROUPS_PER_DIM: u64 = 65535;
 
@@ -322,7 +330,7 @@ impl MmqKnobs {
         let off = std::env::var("FLLM_VK_MM").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "legacy" | "false"));
         MmqKnobs {
             enabled: !off,
-            min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch).max(MATVEC_MAX_BATCH + 1),
+            min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch).max(matvec_max() + 1),
             bm: num("FLLM_VK_MM_BM").filter(|v| matches!(v, 32 | 64 | 128 | 256)),
             bn: num("FLLM_VK_MM_BN").filter(|v| matches!(v, 32 | 64 | 128)),
             tm: num("FLLM_VK_MM_TM").filter(|v| matches!(v, 4 | 8)),
@@ -352,7 +360,7 @@ pub fn mmq_tile(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32,
 /// TM x 4 outputs. The default is 128 x 64 with TM 8 (256 invocations, ~18 KiB of shared memory), which suits subgroup sizes 16 to 64; the knobs
 /// override it for measuring.
 pub fn mmq_tile_tm(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32, u32, u32, u32)> {
-    if !knobs.enabled || batch < knobs.min_batch.max(MATVEC_MAX_BATCH + 1) {
+    if !knobs.enabled || batch < knobs.min_batch.max(matvec_max() + 1) {
         return None;
     }
     // 8 rows per invocation read half as many shared-memory words per dot product as 4 (measured +15-20 % prompt speed on Intel Xe-LPG)
@@ -433,7 +441,7 @@ pub fn plan_quantized_linear_with(
             &default_available
         }
     };
-    let matvec = batch32 <= MATVEC_MAX_BATCH;
+    let matvec = batch32 <= matvec_max();
     let prefix = if matvec { "mv" } else { "mm" };
     let prepass_name = |variant: Variant| -> String {
         match variant {
