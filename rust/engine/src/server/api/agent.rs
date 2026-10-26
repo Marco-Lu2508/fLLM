@@ -51,6 +51,18 @@ struct Inner {
     cwd: Option<PathBuf>,
     changes: Vec<Change>,
     next_id: u64,
+    /// Changes that were undone and can be done again; any new change clears it. The last one is the next to redo.
+    redo: Vec<Redo>,
+}
+
+/// An undone change: the content after it, so that it can be applied again.
+struct Redo {
+    id: u64,
+    path: PathBuf,
+    kind: &'static str,
+    time: u64,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
 }
 
 /// The workspace of the agent, its shell state, background jobs and the change log of the session.
@@ -178,6 +190,7 @@ impl AgentSession {
             let changed = inner.root.as_ref() != Some(&root);
             if changed {
                 inner.changes.clear();
+                inner.redo.clear();
                 inner.cwd = None;
             }
             inner.root = Some(root.clone());
@@ -458,6 +471,7 @@ impl AgentSession {
         let id = inner.next_id;
         let kind = if before.is_some() { "edit" } else { "create" };
         inner.changes.push(Change { id, path: path.to_owned(), kind, time: unix_now(), before });
+        inner.redo.clear();
         if inner.changes.len() > MAX_CHANGES {
             inner.changes.remove(0);
         }
@@ -623,6 +637,7 @@ impl AgentSession {
         let mut restored = Vec::new();
         while inner.changes.len() > keep {
             let Some(change) = inner.changes.pop() else { break };
+            let after = fs::read(&change.path).ok();
             let outcome = match &change.before {
                 Some(bytes) => fs::write(&change.path, bytes),
                 None => fs::remove_file(&change.path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
@@ -634,8 +649,37 @@ impl AgentSession {
                 return Err(format!("cannot restore {path}: {e}{}", if done.is_empty() { String::new() } else { format!(" (already restored: {done})") }));
             }
             restored.push(Restored { id: change.id, path, action: if change.before.is_some() { "restored" } else { "removed" } });
+            inner.redo.push(Redo { id: change.id, path: change.path, kind: change.kind, time: change.time, before: change.before, after });
+            if inner.redo.len() > MAX_CHANGES {
+                inner.redo.remove(0);
+            }
         }
         Ok(restored)
+    }
+
+    /// Apply the last `count` undone changes again, oldest first.
+    pub(in crate::server) fn redo_many(&self, count: u64) -> Result<Vec<Restored>, String> {
+        let root = self.current_root();
+        let mut inner = lock(&self.inner);
+        if inner.redo.is_empty() {
+            return Err("there is nothing to redo (a new change clears the undone ones)".into());
+        }
+        let mut done = Vec::new();
+        for _ in 0..count.max(1) {
+            let Some(r) = inner.redo.pop() else { break };
+            let outcome = match &r.after {
+                Some(bytes) => fs::write(&r.path, bytes),
+                None => fs::remove_file(&r.path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+            };
+            let path = shown_under(root.as_deref(), &r.path);
+            if let Err(e) = outcome {
+                inner.redo.push(r);
+                return Err(format!("cannot redo {path}: {e}"));
+            }
+            done.push(Restored { id: r.id, path, action: if r.after.is_some() { "restored" } else { "removed" } });
+            inner.changes.push(Change { id: r.id, path: r.path, kind: r.kind, time: r.time, before: r.before });
+        }
+        Ok(done)
     }
 
     /// Files below `start` (without build output, dependencies and what `.gitignore` / `.ignore` exclude) with their
@@ -1195,7 +1239,11 @@ pub(in crate::server) async fn undo(State(state): State<Arc<AppState>>, body: ax
     };
     let steps = body.get("steps").and_then(Value::as_u64);
     let to = body.get("to").and_then(Value::as_u64);
-    match state.agent.undo_many(steps, to) {
+    let outcome = match body.get("redo").and_then(Value::as_u64) {
+        Some(count) => state.agent.redo_many(count),
+        None => state.agent.undo_many(steps, to),
+    };
+    match outcome {
         Ok(restored) => {
             let output = restored
                 .iter()
@@ -1510,6 +1558,28 @@ mod tests_more {
         s.undo_many(Some(3), None).unwrap();
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
         assert!(!root.join("c.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undone_changes_can_be_redone_until_a_new_change_happens() {
+        let (s, root) = session();
+        s.run_tool("write_file", &json!({"path": "a.txt", "content": "1"})).unwrap();
+        s.run_tool("edit_file", &json!({"path": "a.txt", "old_string": "1", "new_string": "2"})).unwrap();
+        s.run_tool("write_file", &json!({"path": "b.txt", "content": "b"})).unwrap();
+        s.undo_many(None, Some(2)).unwrap();
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "1");
+        assert!(!root.join("b.txt").exists());
+        let again = s.redo_many(2).unwrap();
+        assert_eq!(again.len(), 2);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "2");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b");
+        assert_eq!(s.changes().len(), 3);
+        // the log is whole again: everything can be undone once more
+        s.undo_many(Some(3), None).unwrap();
+        assert!(!root.join("a.txt").exists());
+        s.run_tool("write_file", &json!({"path": "c.txt", "content": "c"})).unwrap();
+        assert!(s.redo_many(1).is_err(), "a new change clears the redo stack");
         let _ = fs::remove_dir_all(root);
     }
 
