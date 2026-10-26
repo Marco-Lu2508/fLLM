@@ -72,6 +72,8 @@ COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
 # Unprivileged user (uid 1000, so bind-mounted host directories of the first Linux user work); video / render give access to /dev/kfd and
 # /dev/dri (the group ids of the host differ: pass --group-add with the numeric ids if the names do not match).
 RUN (userdel -r ubuntu 2>/dev/null || true) \
+ && (getent group video >/dev/null || groupadd -r video) \
+ && (getent group render >/dev/null || groupadd -r render) \
  && useradd -m -u 1000 -G video,render fllm \
  && mkdir -p /home/fllm/.cache && chown fllm:fllm /home/fllm/.cache
 USER fllm

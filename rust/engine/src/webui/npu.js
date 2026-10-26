@@ -105,7 +105,9 @@
       for (const d of (hw && hw.devices) || []) {
         if (!d || d.backend === 'cpu' || d.backend === 'npu' || d.available === false || !(Number(d.total_memory_bytes) > 0)) continue;
         if (out.some((o) => o.value === d.id)) continue;
-        out.push({ value: d.id, label: `${d.name} (${names[String(d.backend).toLowerCase()] || d.backend})`, warning: null });
+        // the same graphics chip shows up once per driver interface: say which one this entry is
+        const kind = d.api === 'wgpu' ? ', generic' : (d.api === 'native' ? ', native' : '');
+        out.push({ value: d.id, label: `${d.name} (${names[String(d.backend).toLowerCase()] || d.backend}${kind})`, warning: null });
       }
       if (npu && npu.state === 'ready') out.push({ value: 'npu', label: 'NPU (experimental)', warning: npu.warning || NPU_WARNING });
       const wanted = String(current || '').toLowerCase();
