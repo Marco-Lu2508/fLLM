@@ -203,7 +203,8 @@ pub(crate) fn run(
         };
         let tasks = vh * chunks;
         if parallel || n * vh * hk * hv > 1 << 16 {
-            (0..tasks).into_par_iter().for_each(task);
+            // the spinning workers of the projections: a decode step reaches them awake, rayon's would have to be woken
+            crate::cpu_spin::for_each(tasks, task);
         } else {
             (0..tasks).for_each(task);
         }

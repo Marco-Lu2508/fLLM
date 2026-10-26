@@ -207,6 +207,25 @@ impl<T> Claimed<T> {
     }
 }
 
+/// `(0..count).into_par_iter().for_each(f)` on the spinning threads (rayon when they do not apply).
+pub(crate) fn for_each(count: usize, f: impl Fn(usize) + Sync + Send) {
+    use rayon::prelude::*;
+    if count > 1 {
+        let next = AtomicUsize::new(0);
+        let claimed = run(&|| loop {
+            let index = next.fetch_add(1, Relaxed);
+            if index >= count {
+                break;
+            }
+            f(index);
+        });
+        if claimed {
+            return;
+        }
+    }
+    (0..count).into_par_iter().for_each(f);
+}
+
 /// `(0..count).into_par_iter().map(f).collect()` on the spinning threads (rayon when they do not
 /// apply). Results keep the index order.
 pub(crate) fn collect<T: Send>(count: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
