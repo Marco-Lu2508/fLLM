@@ -50,6 +50,7 @@
         if (!res.ok) return;
         const data = await res.json();
         state.status = data;
+        renderThinkingChip(); // thinking chip follows the loaded model (sampler.js)
         const wasSetup = state.setup;
         state.setup = Boolean(data.setup);
         $('setupBanner').style.display = state.setup ? '' : 'none';

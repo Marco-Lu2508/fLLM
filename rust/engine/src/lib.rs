@@ -42,6 +42,7 @@ pub mod mem;
 pub mod parallel;
 pub mod parameters;
 pub mod reasoning;
+pub mod thinking;
 pub mod rope;
 pub mod rust_decoder;
 pub mod sampling;

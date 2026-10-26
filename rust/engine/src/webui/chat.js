@@ -125,6 +125,7 @@
       switchSurface('chat');
       renderThreadList();
       renderChatArea();
+      renderThinkingChip(); // thinking
       $('chatTextarea').focus();
     }
 
@@ -136,6 +137,7 @@
         t.preset = state.preset || null;
         prjOnNewThread(t); // projects.js: join the project the chat was started from
         t.style = state.newStyle; state.newStyle = undefined;
+        if (state.thinkingLevel) t.thinkingLevel = state.thinkingLevel; // thinking: the chat remembers its level
         if (state.tempNext) t.temporary = true;
         state.threads.unshift(t);
         state.activeThreadId = t.id;
@@ -154,6 +156,7 @@
       switchSurface('chat');
       renderThreadList();
       renderChatArea();
+      renderThinkingChip(); // thinking
     }
 
     // ---- thread list --------------------------------------------------------
@@ -440,14 +443,13 @@
         messages, stream: true, stream_options: { include_usage: true },
         temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, min_p: p.min_p, max_tokens: p.max_tokens,
         repetition_penalty: p.repetition_penalty, presence_penalty: p.presence_penalty, frequency_penalty: p.frequency_penalty,
-        speculative: p.speculative,
       };
       if (p.seed >= 0) body.seed = p.seed;
       if (p.stop.length) body.stop = p.stop;
       if (p.dry_multiplier > 0) body.dry_multiplier = p.dry_multiplier;
       if (p.mirostat > 0) body.mirostat = p.mirostat;
       if (p.logprobs) { body.logprobs = true; body.top_logprobs = 5; }
-      if (state.thinkingEnabled) body.reasoning_effort = 'high';
+      Object.assign(body, thinkingRequestFields(thinkingCaps(), thinkingLevelNow())); // thinking: only what the loaded model supports (sampler.js)
       if (p.constraint === 'json_object') body.response_format = { type: 'json_object' };
       else if (p.constraint === 'json_schema' && p.constraint_spec) {
         try { body.response_format = { type: 'json_schema', json_schema: { name: 'schema', strict: true, schema: JSON.parse(p.constraint_spec) } }; } catch { /* the schema box holds invalid JSON: ignore it */ }

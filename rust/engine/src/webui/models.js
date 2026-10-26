@@ -88,7 +88,7 @@
       renderRecommended(hub);
       const m = state.status?.model || hub.loaded || {};
       const lo = m.load_options || {};
-      const shownOptions = lo.device ? `device: ${lo.device} · GPU layers: ${lo.gpu_layers} · threads: ${lo.threads} · conversation memory: ${lo.kv_cache_type} · chats at once: ${m.max_sequences || lo.max_seqs}` : '';
+      const shownOptions = lo.device ? `device: ${lo.device} · GPU layers: ${lo.gpu_layers} · threads: ${lo.threads} · conversation memory: ${lo.kv_cache_type} · chats at once: ${m.max_sequences || lo.max_seqs}${lo.speculative && lo.speculative !== 'auto' ? ` · speculative decoding: ${lo.speculative}` : ''}` : '';
       $('loadedModelHubItem').innerHTML = `
         <div class="app-card-item">
           <div class="app-item-info">
@@ -288,7 +288,7 @@
     }
 
     // ---- switching the loaded model ---------------------------------------------------------------------------
-    const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs', device: 'optDevice', npu_mode: 'optNpuMode' };
+    const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs', device: 'optDevice', npu_mode: 'optNpuMode', speculative: 'optSpeculative', draft_model: 'optDraftModel', speculative_tokens: 'optSpecTokens' };
     // the NPU choice only matters when the model runs on the NPU
     function syncNpuMode() {
       const onNpu = /^(npu|openvino)/.test($('optDevice').value);
@@ -296,9 +296,32 @@
     }
     $('optDevice').addEventListener('change', syncNpuMode);
 
+    // speculative decoding: the choices that go with the mode (the texts are in sampler.js)
+    function syncSpeculative() {
+      const mode = $('optSpeculative').value;
+      const show = (ids, on) => ids.forEach((id) => { $(id).style.display = on ? '' : 'none'; });
+      show(['optDraftModelLabel', 'optDraftModel'], mode === 'draft');
+      show(['optSpecTokensLabel', 'optSpecTokens'], mode === 'lookup' || mode === 'draft');
+      const note = speculativeNote(mode);
+      $('optSpeculativeNote').textContent = note;
+      show(['optSpeculativeNote'], Boolean(note));
+    }
+    $('optSpeculative').addEventListener('change', syncSpeculative);
+
+    /** The downloaded models that can serve as a draft model, the smallest first. */
+    function fillDraftChoices(selected) {
+      const hub = state.modelsHub || {};
+      const files = [...(hub.local || []), ...(hub.cached || []).filter((c) => /\.gguf$/i.test(c.path || ''))];
+      const seen = new Set();
+      const rows = files.filter((f) => f.path && !seen.has(f.path) && seen.add(f.path)).sort((a, b) => (a.size_bytes || 0) - (b.size_bytes || 0));
+      $('optDraftModel').innerHTML = `<option value="">Choose a model</option>${rows.map((f) => `<option value="${escapeHtml(f.path)}">${escapeHtml(f.name || baseName(f.path))} (${formatBytes(f.size_bytes)})</option>`).join('')}`;
+      if (selected) $('optDraftModel').value = selected;
+    }
+
     function readOptions() {
       const out = {};
-      for (const [key, id] of Object.entries(optionFields)) out[key] = $(id).value.trim().toLowerCase() || null;
+      // a path keeps its case
+      for (const [key, id] of Object.entries(optionFields)) out[key] = (key === 'draft_model' ? $(id).value.trim() : $(id).value.trim().toLowerCase()) || null;
       return out;
     }
 
@@ -321,7 +344,9 @@
     /** Asks how to load the model (with the advanced options), then restarts the server with it. `key` finds the options saved for the model. */
     async function loadModel(reference, label, key) {
       const saved = state.modelsHub?.model_options?.[key] || {};
+      fillDraftChoices(saved.draft_model);
       for (const [name, id] of Object.entries(optionFields)) $(id).value = saved[name] ?? '';
+      syncSpeculative();
       $('loadAdvanced').open = Object.values(saved).some((v) => v !== null && v !== undefined);
       await fillDeviceChoices(saved.device);
       syncNpuMode();

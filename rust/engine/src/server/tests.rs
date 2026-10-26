@@ -97,9 +97,13 @@ impl Reply {
 }
 
 fn start(settings: Settings) -> Harness {
-    let gguf = tiny_gguf();
+    start_with(tiny_gguf().to_path_buf(), settings)
+}
+
+fn start_with(gguf: PathBuf, settings: Settings) -> Harness {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        let gguf = gguf.as_path();
         let mapping = MappedGguf::open(gguf).unwrap();
         let facts = ModelFacts::from_gguf(gguf, &mapping);
         let tokenizer = TokenizerBundle::from_gguf(&mapping).unwrap();
@@ -1818,4 +1822,95 @@ async fn studio_control_plane_manages_config_hardware_models_and_keys() {
     assert_eq!(revoked.status, StatusCode::OK);
     assert_eq!(revoked.json()["auth_required"], false);
     assert_eq!(h.get("/v1/models").await.status, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Thinking: capabilities and the thinking budget
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A tiny model whose template has a thinking switch like Qwen3: the prompt ends inside `<think>` unless it is switched off.
+fn thinking_harness() -> &'static Harness {
+    static SHARED: OnceLock<Harness> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let path = tiny_gguf().with_file_name("tiny-thinking.gguf");
+        let template = "{%- for m in messages -%}{{ m['role'] }}: {{ m['content'] }}\n{% endfor -%}assistant:\
+            {%- if enable_thinking is defined and enable_thinking is false -%}<think>\n\n</think>\n\n{%- else -%}<think>\n{%- endif -%}";
+        let options = tiny_model::Options { chat_template: template.to_owned(), ..Default::default() };
+        tiny_model::write_gguf(&path, &options).unwrap();
+        start_with(path, Settings::default())
+    })
+}
+
+#[tokio::test]
+async fn status_reports_what_the_model_can_do_about_thinking() {
+    let plain = shared().get("/api/studio/status").await.json();
+    let caps = &plain["model"]["capabilities"]["thinking"];
+    assert_eq!((caps["supported"].clone(), caps["control"].clone()), (json!(false), json!("none")));
+    let thinking = thinking_harness().get("/api/studio/status").await.json();
+    let caps = &thinking["model"]["capabilities"]["thinking"];
+    assert_eq!(caps["supported"], true);
+    assert_eq!(caps["control"], "toggle");
+    assert_eq!(caps["variable"], "enable_thinking");
+    assert_eq!(caps["levels"], json!(["off", "low", "medium", "high"]));
+    assert_eq!(caps["default"], "high");
+    let models = thinking_harness().get("/v1/models").await.json();
+    assert_eq!(models["data"][0]["capabilities"]["thinking"]["control"], "toggle");
+}
+
+#[tokio::test]
+async fn thinking_budget_is_validated() {
+    let h = thinking_harness();
+    for bad in [json!(0), json!(-1), json!("100"), json!(1.5)] {
+        let reply = h.chat(json!({"thinking_budget": bad})).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        assert!(reply.text().contains("thinking_budget"), "{}", reply.text());
+    }
+    let reply = h.chat(json!({"thinking_budget": 5, "n": 2})).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(h.chat(json!({"thinking_budget": null})).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn effort_switches_thinking_on_and_none_switches_it_off() {
+    let h = thinking_harness();
+    let tokens = |reply: Reply| reply.json()["usage"]["prompt_tokens"].as_u64().unwrap();
+    let on = tokens(h.chat(json!({"max_tokens": 1})).await);
+    let off = tokens(h.chat(json!({"max_tokens": 1, "reasoning_effort": "none"})).await);
+    let low = tokens(h.chat(json!({"max_tokens": 1, "reasoning_effort": "low"})).await);
+    // an empty think block is longer than the opened one
+    assert!(off > on, "off {off}, on {on}");
+    assert_eq!(low, on);
+}
+
+#[tokio::test]
+async fn thinking_budget_ends_the_reasoning_and_the_answer_follows() {
+    let h = thinking_harness();
+    let reply = h.chat(json!({"max_tokens": 40, "thinking_budget": 3})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let body = reply.json();
+    let message = &body["choices"][0]["message"];
+    let reasoning = message["reasoning_content"].as_str().unwrap_or_default();
+    let usage = &body["usage"];
+    let completion = usage["completion_tokens"].as_u64().unwrap();
+    // forced: the reasoning is cut at the budget, the closing tag and a line break count as generated text
+    assert!(reasoning.chars().count() <= 3, "panicked reasoning {reasoning:?} body {body}");
+    assert!(completion > 3, "panicked the reply ended inside the budget {body}");
+    assert!(completion >= 3 + "\n</think>\n\n".len() as u64, "panicked completion {completion} body {body}");
+    assert!(usage["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap() <= 3, "panicked usage {body}");
+    // the same request streamed gives the same reasoning and no error
+    let streamed = h.chat(json!({"max_tokens": 40, "thinking_budget": 3, "stream": true})).await;
+    assert_eq!(streamed.status, StatusCode::OK);
+    assert!(streamed.events().iter().all(|(name, _)| name != "error"), "{}", streamed.text());
+    let mut reasoning_text = String::new();
+    let mut content = String::new();
+    for chunk in streamed.chunks() {
+        if let Some(delta) = chunk["choices"][0]["delta"]["reasoning_content"].as_str() {
+            reasoning_text.push_str(delta);
+        }
+        if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
+            content.push_str(delta);
+        }
+    }
+    assert_eq!(reasoning_text, reasoning, "panicked {}", streamed.text());
+    assert_eq!(content, message["content"].as_str().unwrap_or_default());
 }

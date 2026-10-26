@@ -69,7 +69,7 @@ fn capabilities(state: &AppState) -> Vec<&'static str> {
     if state.vision.is_some() {
         caps.push("vision");
     }
-    if state.chat_template.contains("hinking") {
+    if state.thinking.supported() {
         caps.push("thinking");
     }
     caps

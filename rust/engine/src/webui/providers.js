@@ -53,7 +53,7 @@
     }
 
     // settings of the local engine that other servers do not understand
-    const LOCAL_ONLY_FIELDS = ['top_k', 'min_p', 'repetition_penalty', 'speculative', 'dry_multiplier', 'dry_base', 'dry_allowed_length',
+    const LOCAL_ONLY_FIELDS = ['top_k', 'min_p', 'repetition_penalty', 'speculative', 'thinking_budget', 'chat_template_kwargs', 'dry_multiplier', 'dry_base', 'dry_allowed_length',
       'dry_penalty_last_n', 'mirostat', 'mirostat_tau', 'mirostat_eta', 'grammar', 'grammar_type', 'regex', 'tool_call_grammar',
       'tfs_z', 'typical_p', 'ignore_eos', 'cache_prompt', 'logit_bias_tokens'];
 
