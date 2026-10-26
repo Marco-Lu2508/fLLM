@@ -30,10 +30,13 @@ def one(i):
 threads = [threading.Thread(target=one, args=(i,)) for i in range(n)]
 [t.start() for t in threads]
 [t.join() for t in threads]
-for i, o in enumerate(out):
-    print(f"request {i:2}: {o}")
+ok = [o for o in out if o.startswith("ok")]
+bad = [o for o in out if not o.startswith("ok")]
+print(f"{len(ok)} of {n} requests answered" + (f"; first answer: {ok[0]}" if ok else ""))
+if bad:
+    print(f"{len(bad)} failed; first error: {bad[0]}")
 PY
 sleep 2
 echo "---- server log (without INFO lines) ----"
-grep -v " INFO " "$LOG" | grep -v "OpenVINO" | tail -30
+grep -v " INFO " "$LOG" | grep -v -E "OpenVINO|listening on|features:|Scheduler:|backend enabled" | tail -15
 pkill -x fllm-rs 2>/dev/null
