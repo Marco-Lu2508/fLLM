@@ -699,6 +699,10 @@
               <svg viewBox="0 0 24 24" class="icon"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
               <span>Model providers</span>
             </button>
+            <button class="settings-nav-btn" data-spane="skills">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>Skills and schedules</span>
+            </button>
           </nav>
 
           <!-- Settings Right Content Area -->
@@ -1298,6 +1302,83 @@
                   <button class="btn btn-sm btn-ghost" id="btnProvCancel">Clear</button>
                 </div>
                 <div class="app-item-desc" id="provFileInfo" style="margin-top:8px;"></div>
+              </div>
+            </div>
+
+            <!-- Skills, scheduled tasks and the search of past chats (skills.js, sessions.js) -->
+            <div class="settings-pane" id="spane-skills">
+              <div class="app-card">
+                <div class="app-card-title">Skills</div>
+                <p class="app-item-desc" style="margin-bottom:8px;">A skill is a saved procedure (a Markdown file) that the model can read when a task matches it, and write itself after a task that is worth repeating. Skills of the user apply everywhere; skills of a workspace folder are kept in that folder.</p>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Workspace folder (optional)</div>
+                  <input type="text" id="skWorkspace" class="ui-input mono" placeholder="Absolute path of a project folder, to see its skills" autocomplete="off">
+                </div>
+                <div id="skList"></div>
+                <div class="app-item-desc" id="skFolderInfo" style="margin-top:8px;"></div>
+              </div>
+              <div class="app-card">
+                <div class="app-card-title">Write a skill</div>
+                <div class="app-card-item column">
+                  <div style="display:flex;gap:8px;">
+                    <input type="text" id="skName" class="ui-input mono" placeholder="name (lowercase, dashes)" autocomplete="off" style="flex:1;">
+                    <select id="skScope" class="ui-input" style="width:auto;"><option value="user">For every project</option><option value="workspace">This workspace folder</option></select>
+                  </div>
+                </div>
+                <div class="app-card-item column">
+                  <textarea id="skText" class="ui-input mono" rows="12" spellcheck="false" placeholder="---&#10;name: my-skill&#10;description: What it does&#10;when: When to use it&#10;---&#10;1. Step"></textarea>
+                </div>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                  <button class="btn btn-sm btn-primary" id="btnSkSave">Save skill</button>
+                  <button class="btn btn-sm btn-ghost" id="btnSkNew">New from template</button>
+                </div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">Scheduled tasks</div>
+                <p class="app-item-desc" style="margin-bottom:8px;">A task runs a prompt on a schedule and keeps the last results here. <strong>Tasks run only while the app is running</strong>; a run that was missed while it was closed is not made up. An agent task may read and search one folder and look things up on the web, but cannot change anything.</p>
+                <div class="app-item-desc" id="scNote" style="margin-bottom:8px;"></div>
+                <div id="scList"></div>
+              </div>
+              <div class="app-card">
+                <div class="app-card-title" id="scFormTitle">New task</div>
+                <div class="app-card-item column"><div class="app-item-title">Name</div><input type="text" id="scName" class="ui-input" maxlength="80" autocomplete="off"></div>
+                <div class="app-card-item column"><div class="app-item-title">Prompt</div><textarea id="scPrompt" class="ui-input" rows="4" placeholder="Summarise the open issues in this folder's TODO.md"></textarea></div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">Schedule</div>
+                  <div style="display:flex;gap:8px;">
+                    <input type="text" id="scWhenInput" class="ui-input mono" placeholder="daily at 08:30" autocomplete="off" style="flex:1;">
+                    <select id="scWhenPresets" class="ui-input" style="width:auto;">
+                      <option value="">Examples</option><option>every 30 minutes</option><option>hourly</option><option>daily at 08:30</option><option>weekdays at 09:00</option>
+                      <option>weekly on mon at 09:00</option><option>*/15 9-17 * * mon-fri</option>
+                    </select>
+                  </div>
+                  <div class="app-item-desc" id="scPreview"></div>
+                  <div class="app-item-desc">Also accepted: "every 2 hours", "hourly at :15", or a cron line (minute hour day month weekday). Local time.</div>
+                </div>
+                <div class="app-card-item column"><div class="app-item-title">Kind</div>
+                  <select id="scMode" class="ui-input" style="width:auto;"><option value="chat">Chat answer</option><option value="agent">Agent run in a folder (read-only)</option></select>
+                </div>
+                <div class="app-card-item column" id="scFolderRow" style="display:none;"><div class="app-item-title">Folder</div><input type="text" id="scFolder" class="ui-input mono" placeholder="Absolute path" autocomplete="off"></div>
+                <div class="app-card-item"><div class="app-item-title">Desktop notification when a result is ready</div><label class="ui-switch"><input type="checkbox" id="scNotify"><span class="ui-switch-track"></span></label></div>
+                <div class="app-card-item"><div class="app-item-title">Enabled</div><label class="ui-switch"><input type="checkbox" id="scEnabled" checked><span class="ui-switch-track"></span></label></div>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                  <button class="btn btn-sm btn-primary" id="btnScSave">Save task</button>
+                  <button class="btn btn-sm btn-ghost" id="btnScClear">Clear</button>
+                </div>
+              </div>
+
+              <div class="app-card">
+                <div class="app-card-title">Search of past chats</div>
+                <p class="app-item-desc" style="margin-bottom:8px;">Chats and code sessions are searched by their words. A text copy is also kept in the Studio folder on this computer, so they can still be found after the browser storage was cleared. Temporary chats are never copied.</p>
+                <div class="app-card-item"><div class="app-item-title">Keep a searchable copy on this computer</div><label class="ui-switch"><input type="checkbox" id="chkSessionIndex" checked><span class="ui-switch-track"></span></label></div>
+                <input type="text" id="ssQuery" class="ui-input" placeholder="Search chats and code sessions" autocomplete="off" style="margin-top:8px;">
+                <div id="ssResults"></div>
+                <div class="app-item-desc" id="ssInfo" style="margin-top:8px;"></div>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                  <button class="btn btn-xs btn-ghost" id="btnSessionIndexNow">Copy everything now</button>
+                  <button class="btn btn-xs btn-ghost" id="btnSessionIndexClear">Delete the copy</button>
+                </div>
               </div>
             </div>
 

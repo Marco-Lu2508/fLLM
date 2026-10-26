@@ -281,6 +281,27 @@ API: `GET`, `POST` and `DELETE /api/studio/providers`, `POST /api/studio/provide
 (`{models: [{provider, provider_name, kind, local, id}], errors}`) and `POST /api/studio/providers/chat` (`{provider, request}` with an
 OpenAI chat-completions body; answers like `/v1/chat/completions`, as JSON or as an event stream).
 
+## Skills, scheduled tasks and search of past chats
+
+Settings has a "Skills and schedules" page. Details and the page API are in `docs/changes/personal-agent.md`.
+
+**Skills.** A skill is a saved procedure: a Markdown file `<name>/SKILL.md` with a front matter (`name`, `description`, `when`) and the
+steps. Your own skills are kept in the `skills` folder next to `studio.json`; the skills of a project in `<project>/.fllm/skills/`. The page
+lists, edits and deletes them. The model can read them with the `skill` tool and, after a task worth repeating, propose a new one that you
+approve before it is saved.
+
+**Scheduled tasks.** A task runs a prompt on a schedule (`every 30 minutes`, `hourly`, `daily at 08:30`, `weekdays at 09:00`,
+`weekly on mon,thu at 18:00`, or a cron line) in local time, either as a chat answer or as an agent run in a folder that may only read,
+search and look things up on the web. The last 20 results of each task are kept in the page. **Tasks run only while the app is running
+with a model loaded**; runs missed while it was closed are not made up. A task never runs twice at once. "Run now" starts one at once, and
+a task can ask for a desktop notification while a page is open.
+
+**Search of past chats.** Chats and code sessions are searched by their words. A plain-text copy is kept in `sessions.jsonl` next to
+`studio.json`, so they can be found after the browser storage was cleared; it can be switched off and deleted in the same page.
+Temporary chats are never copied.
+
+These routes (`/api/studio/skills`, `/api/studio/sessions/*`, `/api/studio/schedule*`) work only from this machine, reads included.
+
 ## Who may change things
 
 Reading (status, hardware, models) is open like the rest of the API. Changing things through `/api/studio/*` (settings, downloads,
