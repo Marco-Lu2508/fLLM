@@ -1041,6 +1041,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let topology = fllm_engine::cpu_topology::detect();
         let choice = if !threads_auto {
+            if selected_backend == "cpu" && pin_cores.is_none() {
+                fllm_engine::cpu_threads::place_explicit(threads as usize);
+            }
             fllm_engine::cpu_threads::ThreadChoice { threads: threads as usize, prefill: threads as usize, policy: topology.default_threads(), source: "flag", detail: "--threads".into() }
         } else if selected_backend == "cpu" && pin_cores.is_none() {
             fllm_engine::cpu_threads::tune(model.mapping(), model.hidden_size())

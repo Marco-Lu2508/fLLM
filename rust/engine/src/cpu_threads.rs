@@ -187,6 +187,16 @@ fn time_candidate(pool: &rayon::ThreadPool, linear: &Linear, input: &[f32], slic
     })
 }
 
+/// An explicit `--threads n` on a hybrid processor: the same placement as the tuned count (power throttling off, the process kept on the n
+/// preferred logical processors, see `pin_first`); without it the operating system spreads the workers over the slow cores as well.
+pub fn place_explicit(threads: usize) {
+    let topology = topology::detect();
+    if topology.is_hybrid() {
+        topology::disable_power_throttling();
+        topology::pin_first(topology, threads);
+    }
+}
+
 /// Chooses the thread count of the CPU workers for the model in `mapping`. `hidden` is the model's hidden size: a pool is never
 /// larger than the output rows can feed. Also lets the operating system keep the workers on the chosen cores (Windows) and out of
 /// power throttling when the processor is hybrid.
