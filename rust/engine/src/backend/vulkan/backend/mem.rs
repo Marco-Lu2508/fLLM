@@ -14,6 +14,8 @@ pub(crate) struct VkMem {
     pub chunks: Vec<Buffer>,
     /// Layers per entry of `chunks`.
     pub layers_per_chunk: usize,
+    /// Pools whose layers differ in size (per-layer KV geometry): the chunk and the byte offset in it of every layer (empty otherwise).
+    pub layer_starts: Vec<(usize, u64)>,
     /// Mixture-of-experts tables carry the arena they index.
     pub experts: Option<ExpertInfo>,
 }
@@ -24,6 +26,7 @@ impl VkMem {
             buffer,
             chunks: Vec::new(),
             layers_per_chunk: 0,
+            layer_starts: Vec::new(),
             experts: None,
         }
     }
@@ -153,18 +156,30 @@ pub(crate) fn table_bytes(slices: &[SliceInfo]) -> usize {
 /// every range far below `maxStorageBufferRange` and lets pools larger than 4 GiB work.
 pub(crate) fn pool_window(pool: &DeviceBuffer, layer: usize, words_per_layer: usize, align: u64) -> Result<(Buffer, usize), BackendError> {
     let mem = mem_of(pool)?;
-    let (base, local) = if mem.chunks.is_empty() {
-        (view_of(pool)?, layer)
+    let bytes = (words_per_layer * 2) as u64;
+    let (base, start) = if let Some(&(chunk, start)) = mem.layer_starts.get(layer) {
+        let base = if mem.chunks.is_empty() {
+            view_of(pool)?
+        } else {
+            mem.chunks
+                .get(chunk)
+                .cloned()
+                .ok_or_else(|| BackendError::InvalidShape(format!("layer {layer} is outside the split KV pool")))?
+        };
+        (base, start)
+    } else if mem.chunks.is_empty() {
+        (view_of(pool)?, layer as u64 * bytes)
     } else {
         let chunk = layer / mem.layers_per_chunk.max(1);
         let buffer = mem
             .chunks
             .get(chunk)
             .ok_or_else(|| BackendError::InvalidShape(format!("layer {layer} is outside the split KV pool")))?;
-        (buffer.clone(), layer % mem.layers_per_chunk.max(1))
+        (buffer.clone(), (layer % mem.layers_per_chunk.max(1)) as u64 * bytes)
     };
-    let bytes = (words_per_layer * 2) as u64;
-    let start = local as u64 * bytes;
+    if bytes == 0 {
+        return Err(BackendError::InvalidShape(format!("KV layer {layer} has no cache of its own (it reads an earlier layer)")));
+    }
     if start + bytes > base.size() {
         return Err(BackendError::InvalidShape(format!("KV layer {layer} lies outside its pool")));
     }

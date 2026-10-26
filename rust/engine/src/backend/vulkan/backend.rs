@@ -197,9 +197,83 @@ impl Backend for VulkanBackend {
             layer_geoms: None,
         })
     }
+
+    fn allocate_kv_cache_layered(
+        &self,
+        layers: usize,
+        pool_blocks: usize,
+        block_size: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        kv_kind: i32,
+        layout: Option<crate::kv_geometry::KvPoolLayout>,
+        layer_geoms: Option<Vec<crate::config::LayerGeom>>,
+    ) -> Result<DeviceKvCache, BackendError> {
+        // one geometry for every layer: the plain pools
+        let Some(layout) = layout.filter(|_| layer_geoms.is_some()) else {
+            return self.allocate_kv_cache(layers, pool_blocks, block_size, kv_heads, head_dim, value_dim, kv_kind);
+        };
+        let (words_per_layer_k, words_per_layer_v) =
+            DeviceKvCache::geometry(layers, pool_blocks, block_size, kv_heads, head_dim, value_dim, kv_kind)?;
+        let key_pool = self.allocate_layered_pool(&layout.key_words)?;
+        let value_pool = self.allocate_layered_pool(&layout.value_words)?;
+        Ok(DeviceKvCache {
+            key_pool,
+            value_pool,
+            kv_kind,
+            layers,
+            pool_blocks,
+            block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+            words_per_layer_k,
+            words_per_layer_v,
+            layout: Some(layout),
+            layer_geoms,
+        })
+    }
 }
 
 impl VulkanBackend {
+    /// A KV pool whose layers have their own sizes (`words[l]` 16-bit words; 0 for a layer that reads an earlier layer's cache), zero-filled.
+    /// The layers lie back to back; a pool larger than `maxBufferSize` is split into allocations of whole layers.
+    fn allocate_layered_pool(&self, words: &[usize]) -> Result<DeviceBuffer, BackendError> {
+        let sh = &self.shared;
+        let limit = sh.caps().max_buffer_size.min(sh.caps().max_memory_allocation_size).max(1);
+        // (chunk, byte offset) per layer: back to back as in `KvPoolLayout`, so a pool of one allocation has the layout's offsets
+        // (the KV block copies address it by them); `pool_window` binds an unaligned start through an aligned view and a skew
+        let mut starts = Vec::with_capacity(words.len());
+        let mut sizes: Vec<u64> = vec![0];
+        for &w in words {
+            let bytes = w as u64 * 2;
+            if bytes.next_multiple_of(4) > limit {
+                return Err(BackendError::OutOfMemory { requested: bytes as usize, available: limit as usize });
+            }
+            let last = sizes.len() - 1;
+            if sizes[last] + bytes.next_multiple_of(4) > limit {
+                sizes.push(0);
+            }
+            let last = sizes.len() - 1;
+            starts.push((last, sizes[last]));
+            sizes[last] += bytes;
+        }
+        let total: u64 = sizes.iter().map(|s| s.max(&4).next_multiple_of(16)).sum();
+        let mut chunks = Vec::new();
+        for size in &sizes {
+            let size = size.max(&4).next_multiple_of(16);
+            let buffer = sh.ctx.allocator().alloc_device(size, crate::backend::vulkan::memory::BufferUsage::COMPUTE)?;
+            sh.zero_sync(&buffer, 0, size)?;
+            chunks.push(buffer);
+        }
+        let head = chunks[0].clone();
+        // one allocation: an ordinary buffer (the KV block copies address it as a whole), more: split like `allocate_pool`
+        let chunks = if chunks.len() == 1 { Vec::new() } else { chunks };
+        let mem = VkMem { buffer: head, chunks, layers_per_chunk: 0, layer_starts: starts, experts: None };
+        Ok(DeviceBuffer::new(sh.next_id(), total as usize, sh.device_id, Arc::new(mem)))
+    }
+
     /// One KV pool (`layers` layers of `words_per_layer` 16-bit words), zero-filled. A pool larger than `maxBufferSize` is split into one
     /// allocation per group of layers (the stream binds one layer window at a time, see `mem::pool_window`).
     fn allocate_pool(&self, layers: usize, words_per_layer: usize) -> Result<DeviceBuffer, BackendError> {
@@ -238,6 +312,7 @@ impl VulkanBackend {
             buffer: head,
             chunks,
             layers_per_chunk: per_chunk,
+            layer_starts: Vec::new(),
             experts: None,
         };
         Ok(DeviceBuffer::new(sh.next_id(), total, sh.device_id, Arc::new(mem)))

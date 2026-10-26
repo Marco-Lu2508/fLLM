@@ -2095,7 +2095,7 @@ impl RustDecoder {
     }
     /// Pick the compute device for `device` (a `--device` value, see `devices`) and load the model onto it.
     ///
-    /// An explicit device that cannot be created is an error. With `auto` every device of the chain (best first, ending in the CPU) is
+    /// An explicit device that cannot be created is an error; one that cannot run this model leaves it on the CPU. With `auto` every device of the chain (best first, ending in the CPU) is
     /// tried in turn: a device that cannot be created, or that cannot run this model, is reported and skipped.
     pub fn set_device(&mut self, device: &str) -> Result<(), String> {
         let automatic = crate::devices::is_auto(device);
@@ -2123,6 +2123,11 @@ impl RustDecoder {
                 Err(error) if backend == "npu" => {
                     let message = crate::backend::npu::status::record_fallback(&error);
                     eprintln!("[fllm-rs] --device npu: {message} (details: {error})");
+                    return Ok(());
+                }
+                // the device works but has no kernels for this model: run it on the CPU rather than refuse to start
+                Err(error) if error.contains("cannot run on the") => {
+                    eprintln!("[fllm-rs] --device {device}: {error}; running on the CPU instead");
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -2219,6 +2224,11 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok`: the stream has the attention-gate / element-wise kernels.
     fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, conv_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
+        // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
+        if let Some(gap) = std::iter::once(layer).chain(&self.layers).find_map(|l| l.gemma.as_ref().and_then(|g| g.device_gap())) {
+            return Some(gap);
+        }
         if layer.parallel.is_some() {
             // the Mamba-2 branch keeps its state on the host; the layer is computed by the host reference code
             return Some("a Mamba-2 branch next to the attention");

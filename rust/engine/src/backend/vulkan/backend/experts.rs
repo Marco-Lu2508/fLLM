@@ -29,6 +29,7 @@ fn table_buffer(sh: &Shared, offsets: &[u32], info: ExpertInfo) -> Result<Device
         buffer: table,
         chunks: Vec::new(),
         layers_per_chunk: 0,
+        layer_starts: Vec::new(),
         experts: Some(info),
     };
     Ok(DeviceBuffer::new(sh.next_id(), bytes.len(), sh.device_id, Arc::new(mem)))
