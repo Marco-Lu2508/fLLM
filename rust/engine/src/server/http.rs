@@ -248,9 +248,11 @@ pub fn studio_admin_blocked(
         // the model providers hold keys of other services and relay requests with them: same rule, reads included
         || is_providers_path(path)
         // the NPU setup downloads a native runtime that the server loads afterwards, and its removal deletes files: never from another machine
-        || path == "/api/studio/npu/setup";
+        || path == "/api/studio/npu/setup"
+        // the remembered notes about the user are personal: this machine only, reads included
+        || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path);
+    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path) || path == "/api/studio/memory";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)
@@ -764,6 +766,21 @@ mod studio_gate_tests {
         }
         // the state is read-only like the hardware page
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/npu", remote, &h));
+    }
+
+    #[test]
+    fn the_memory_stays_on_this_machine_for_reads_and_writes() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        for method in [Method::GET, Method::PUT] {
+            for auth in [false, true] {
+                assert!(studio_admin_blocked(auth, &method, "/api/studio/memory", remote, &h), "{method} from another machine (key: {auth})");
+                assert!(!studio_admin_blocked(auth, &method, "/api/studio/memory", here, &local), "{method} from this machine (key: {auth})");
+                assert!(studio_admin_blocked(auth, &method, "/api/studio/memory", here, &headers("127.0.0.1:8000", Some("https://evil.example"))));
+            }
+        }
     }
 
     #[test]
