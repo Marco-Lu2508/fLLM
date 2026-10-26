@@ -245,16 +245,18 @@ impl RustDecoder {
             return Err("per-layer projection of the wrong size".into());
         }
         let root = (cfg.hidden as f32).powf(-0.5);
-        projected.iter_mut().for_each(|v| *v *= root);
-        rms(&mut projected, &ple.norm, cfg.eps);
         let token_scale = (ple.dim as f32).sqrt();
         let mix = 0.5f32.sqrt();
-        for (r, &id) in ids.iter().enumerate() {
+        // rows are independent: a prompt of hundreds of tokens decodes its table rows in parallel (the same arithmetic per row)
+        projected.par_chunks_mut(total).zip(ids.par_iter()).try_for_each(|(row, &id)| -> Result<(), String> {
+            row.iter_mut().for_each(|v| *v *= root);
+            rms(row, &ple.norm, cfg.eps);
             let identity = ple.table.row(id as usize)?;
-            for (v, e) in projected[r * total..(r + 1) * total].iter_mut().zip(&identity) {
+            for (v, e) in row.iter_mut().zip(&identity) {
                 *v = (*v + e * token_scale) * mix;
             }
-        }
+            Ok(())
+        })?;
         debug_assert_eq!(projected.len(), rows * total);
         Ok(Some(projected))
     }
