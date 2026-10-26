@@ -1399,6 +1399,26 @@
       return calls;
     }
 
+    /**
+     * Small models often answer with the call itself as plain JSON ({"name": "list_dir", "arguments": {...}}), alone or in a code fence,
+     * without the markers of their template. When the whole answer is such an object (or a list of them) and the name is a tool we offered,
+     * it is a call.
+     */
+    function extractBareJsonCalls(content, toolNames) {
+      const text = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      if (!text || (text[0] !== '{' && text[0] !== '[')) return [];
+      let value;
+      try { value = JSON.parse(text); } catch { return []; }
+      const calls = [];
+      for (const item of Array.isArray(value) ? value : [value]) {
+        const fn = item && typeof item === 'object' && item.function && typeof item.function === 'object' ? item.function : item;
+        const name = fn && typeof fn.name === 'string' ? fn.name : '';
+        const args = fn ? (fn.arguments !== undefined ? fn.arguments : fn.parameters) : undefined;
+        if (!name || !toolNames.includes(name) || (args !== undefined && args !== null && typeof args !== 'object' && typeof args !== 'string')) return [];
+        calls.push({ id: `call_${cid()}`, name, args: typeof args === 'string' ? args : JSON.stringify(args || {}) });
+      }
+      return calls;
+    }
     /** ctx: { system, tools, messages, signal, onUsage }. Every request starts with the same system prompt and tool list. */
     async function streamAssistant(item, ctx) {
       const p = getSampler();
@@ -1458,6 +1478,11 @@
       if (!found.length && item.content.includes('<tool_call>')) {
         found = extractTextToolCalls(item.content);
         if (found.length) item.content = item.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
+      }
+      if (!found.length && item.content && !item.content.includes('<tool_call>')) {
+        const names = (ctx.tools || []).map((d) => (d.function ? d.function.name : d.name)).filter(Boolean);
+        const bare = extractBareJsonCalls(item.content, names);
+        if (bare.length) { found = bare; item.content = ''; }
       }
       return { calls: found.filter((c) => c.name), finish };
     }
