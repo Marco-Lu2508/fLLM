@@ -1001,6 +1001,9 @@ fn vulkan_shaders() {
     println!("cargo:rerun-if-changed=shaders/vulkan");
     println!("cargo:rerun-if-env-changed=GLSLC");
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+    println!("cargo:rerun-if-env-changed=FLLM_VK_NO_SPIRV_DOT");
+    // FLLM_VK_NO_SPIRV_DOT=1 at build time: no hand-emitted OpSDot with compilers that lack GL_EXT_integer_dot_product (plain integer emulation instead)
+    let no_spirv_dot = env::var("FLLM_VK_NO_SPIRV_DOT").is_ok_and(|v| !v.is_empty() && v != "0");
     let dir = PathBuf::from("shaders/vulkan");
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("vulkan");
     std::fs::create_dir_all(&out).expect("create OUT_DIR/vulkan");
@@ -1033,6 +1036,7 @@ fn vulkan_shaders() {
             .args(["--target-env=vulkan1.2", "-O", "-I"])
             .arg(&dir)
             .args(defines)
+            .args(no_spirv_dot.then_some("-DFLLM_NO_SPIRV_DOT=1"))
             .arg("-o")
             .arg(&spv)
             .arg(dir.join(source))
