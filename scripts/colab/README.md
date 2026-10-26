@@ -68,13 +68,13 @@ version number, so the script also works with older releases.
 * `--build-from-source` builds only the CUDA architectures of the detected card, so the
   resulting binary is not the release artifact.
 
-## Comparison with llama.cpp, Ollama and vLLM
+## Comparison with vLLM, SGLang, llama.cpp and Ollama
 
-`compare.py` serves the same GGUF models with fLLM, llama.cpp (built with CUDA), Ollama and optionally vLLM on the Colab GPU and
-measures prompts of 100, 500 and 2000 tokens with 1, 4 and 8 simultaneous users (total tokens per second, time to the first token,
-speed per user):
+`compare.py` serves the same models with fLLM and the other engines on the Colab GPU: GGUF files with fLLM, llama.cpp (built with
+CUDA) and Ollama; AWQ 4-bit checkpoints with vLLM, SGLang and fLLM (converted from the same checkpoint). It measures prompts of 100,
+500 and 2000 tokens with 1, 4 and 16 simultaneous users (total tokens per second, time to the first token, speed per user):
 
 ```sh
 git clone -q https://github.com/Marco-Lu2508/fLLM && python3 fLLM/scripts/colab/compare.py                       # release binary
-python3 fLLM/scripts/colab/compare.py --build-from-source --models llama8b,qwen2b,gemma4 --vllm              # newest main, more
+python3 fLLM/scripts/colab/compare.py --build-from-source --models llama8b-awq,qwen3b-awq,gemma4 --users 1,8,32   # newest main
 ```

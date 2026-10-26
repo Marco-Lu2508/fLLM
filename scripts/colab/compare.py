@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Compare fLLM with llama.cpp, Ollama and (optionally) vLLM on the same Colab GPU, with one and with several users.
+"""Compare fLLM with vLLM, SGLang, llama.cpp and Ollama on the same Colab GPU, with one and with several users.
 
 Run it in a Colab cell on a GPU runtime (T4, L4, A100, H100, G4), from a checkout of the repository:
 
     !git clone -q https://github.com/Marco-Lu2508/fLLM && python3 fLLM/scripts/colab/compare.py
 
+Two groups of models, because the engines read different formats:
+
+  * GGUF models (Q4_K_M): fLLM, llama.cpp and Ollama serve the same file.
+  * Hugging Face 4-bit models (AWQ INT4): vLLM and SGLang serve the checkpoint, fLLM serves the same checkpoint converted with
+    `fllm-rs convert` (the same weights and the same 4-bit scheme).
+
 Steps (each is skipped with a reason when it cannot run, none stops the others):
 
   1. fLLM       the CUDA binary of the latest release (sha256-checked), or --fllm PATH, or --build-from-source (main, 5-25 minutes)
-  2. llama.cpp  built from source with CUDA (llama-server, 5-15 minutes; --no-llama skips it)
-  3. Ollama     the official Linux install (a few minutes; --no-ollama skips it), started on a private port and model folder
-  4. vLLM       only with --vllm: installed into its own environment (10+ minutes), serves the same GGUF file where it can
-  5. models     GGUF files from Hugging Face (Llama-3.1-8B Q4_K_M and Qwen3.5-2B Q4_K_M by default; --models to choose)
-  6. measure    every engine serves the model through /v1/chat/completions with streaming; for each prompt length (100, 500, 2000
-                tokens) and number of simultaneous users (1, 4, 8) all requests start at once, every prompt is different (no cache
+  2. vLLM       installed into its own environment (10+ minutes; --no-vllm skips it)
+  3. SGLang     installed into its own environment (10+ minutes; --no-sglang skips it)
+  4. llama.cpp  built from source with CUDA (llama-server, 5-15 minutes; --no-llama skips it)
+  5. Ollama     the official Linux install (a few minutes; --no-ollama skips it), started on a private port and model folder
+  6. models     --models, default llama8b (GGUF), llama8b-awq (AWQ) and qwen2b (GGUF)
+  7. measure    every engine serves the model through /v1/chat/completions with streaming; for each prompt length (100, 500, 2000
+                tokens) and number of simultaneous users (1, 4, 16) all requests start at once, every prompt is different (no cache
                 reuse), and the answer is 64 tokens long. Reported: generated tokens per second of all users together, the
                 average time to the first token, and the speed one user sees after its first token.
 
@@ -35,11 +42,16 @@ import time
 import urllib.request
 
 REPO = "Marco-Lu2508/fLLM"
+# key: (label, GGUF URL or Hugging Face repo, smallest GPU memory in MiB)
 MODELS = {
-    "llama8b": ("Llama-3.1-8B-Instruct Q4_K_M", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", 7000),
-    "qwen2b": ("Qwen3.5-2B Q4_K_M", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", 3000),
-    "gemma4": ("Gemma 4 E4B Q4_K_M", "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf", 7000),
+    "llama8b": ("Llama-3.1-8B-Instruct Q4_K_M (GGUF)", "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", 7000),
+    "llama8b-awq": ("Llama-3.1-8B-Instruct AWQ INT4", "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4", 7000),
+    "qwen2b": ("Qwen3.5-2B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf", 3000),
+    "qwen3b-awq": ("Qwen2.5-3B-Instruct AWQ", "Qwen/Qwen2.5-3B-Instruct-AWQ", 4000),
+    "gemma4": ("Gemma 4 E4B Q4_K_M (GGUF)", "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf", 7000),
 }
+GGUF_ENGINES = ("fllm", "llama.cpp", "ollama")
+HF_ENGINES = ("fllm", "vllm", "sglang")
 SENTENCE = "The quick brown fox jumps over the lazy dog. "  # about 10 tokens
 T0 = time.time()
 
@@ -133,8 +145,29 @@ def get_vllm(work):
     vbin = os.path.join(work, "vllm_env/bin/vllm")
     if not os.path.exists(vbin):
         log("installing vLLM ...")
+        # uv instead of venv: Colab lacks python3-venv
         sh(f"pip install -q uv && uv venv --clear --python 3.12 {work}/vllm_env && uv pip install -q --python {work}/vllm_env/bin/python vllm", timeout=3600)
     return vbin if os.path.exists(vbin) else None
+
+
+def get_sglang(work):
+    py = os.path.join(work, "sglang_env/bin/python")
+    if not os.path.exists(py) or sh(f"{py} -c 'import sglang'")[0] != 0:
+        log("installing SGLang ...")
+        sh(f"pip install -q uv && uv venv --clear --python 3.12 {work}/sglang_env && uv pip install -q --python {py} 'sglang[all]'", timeout=3600)
+    return py if sh(f"{py} -c 'import sglang'")[0] == 0 else None
+
+
+def hf_download(repo, dest):
+    """All files of a Hugging Face model repository (weights, config, tokenizer)."""
+    os.makedirs(dest, exist_ok=True)
+    info = json.load(urllib.request.urlopen(f"https://huggingface.co/api/models/{repo}"))
+    for f in info["siblings"]:
+        n = f["rfilename"]
+        if n.endswith((".md", ".png", ".jpg")) or n.startswith(".") or "/" in n:
+            continue
+        download(f"https://huggingface.co/{repo}/resolve/main/{n}", os.path.join(dest, n))
+    return dest
 
 
 def wait_health(url, proc, seconds=900):
@@ -233,13 +266,14 @@ def main():
     ap.add_argument("--work", default="/content/fllm_compare" if os.path.exists("/content") else os.path.abspath("fllm_compare"))
     ap.add_argument("--fllm", help="an fllm-rs binary to use instead of the release")
     ap.add_argument("--build-from-source", action="store_true", help="build fLLM from main (newest changes, takes longer)")
-    ap.add_argument("--models", default="llama8b,qwen2b", help=f"comma-separated, of {','.join(MODELS)}")
+    ap.add_argument("--models", default="llama8b,llama8b-awq,qwen2b", help=f"comma-separated, of {','.join(MODELS)}")
     ap.add_argument("--sizes", default="100,500,2000")
-    ap.add_argument("--users", default="1,4,8")
+    ap.add_argument("--users", default="1,4,16")
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--no-llama", action="store_true")
     ap.add_argument("--no-ollama", action="store_true")
-    ap.add_argument("--vllm", action="store_true", help="also vLLM (long installation)")
+    ap.add_argument("--no-vllm", action="store_true")
+    ap.add_argument("--no-sglang", action="store_true")
     args = ap.parse_args()
     os.makedirs(args.work, exist_ok=True)
     os.chdir(args.work)
@@ -262,8 +296,10 @@ def main():
         engines["llama.cpp"] = get_llama(args.work)
     if not args.no_ollama:
         engines["ollama"] = get_ollama()
-    if args.vllm:
+    if not args.no_vllm:
         engines["vllm"] = get_vllm(args.work)
+    if not args.no_sglang:
+        engines["sglang"] = get_sglang(args.work)
     result["engines"] = {k: (v or "not available") for k, v in engines.items()}
     log(f"engines: {result['engines']}")
     if engines.get("fllm"):
@@ -277,11 +313,26 @@ def main():
         if vram < need:
             log(f"skip {label}: the GPU has less than {need} MiB")
             continue
-        path = download(url, os.path.join(args.work, os.path.basename(url)))
+        hf = not url.startswith("http")
+        if hf:
+            # vLLM and SGLang read the checkpoint, fLLM a GGUF converted from it
+            hf_dir = hf_download(url, os.path.join(args.work, url.split("/")[1]))
+            path = hf_dir + ".gguf"
+            if engines.get("fllm") and not os.path.exists(path):
+                log(f"converting {url} for fLLM")
+                rc, out = sh(f"{engines['fllm']} convert {hf_dir} {path} 2>&1 | tail -3", timeout=3600)
+                if not os.path.exists(path):
+                    log("conversion failed: " + out[-300:])
+        else:
+            path = download(url, os.path.join(args.work, os.path.basename(url)))
         per = {}
         no_think = {"chat_template_kwargs": {"enable_thinking": False}}
+        ctx_one = max(sizes) + args.tokens + 400
         for name, binary in engines.items():
-            if not binary:
+            if not binary or name not in (HF_ENGINES if hf else GGUF_ENGINES):
+                continue
+            if name == "fllm" and not os.path.exists(path):
+                per[name] = {"error": "no GGUF for fLLM (conversion failed)"}
                 continue
             port = random.randint(20000, 30000)
             log(f"== {label} on {name}")
@@ -305,9 +356,16 @@ def main():
                 server = Server([binary, "serve"], f"http://127.0.0.1:{port}/api/version", "bench", env=env, logfile="ollama.log", after=create)
                 extra = {"reasoning_effort": "none"}
             elif name == "vllm":
-                server = Server([binary, "serve", path, "--port", str(port), "--max-model-len", str(max(sizes) + args.tokens + 400), "--max-num-seqs", str(maxu),
+                server = Server([binary, "serve", hf_dir, "--port", str(port), "--max-model-len", str(ctx_one), "--max-num-seqs", str(maxu),
                                  "--gpu-memory-utilization", "0.85", "--served-model-name", "m"],
-                                f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda"}, logfile="vllm.log")
+                                f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda", "PATH": f"{args.work}/vllm_env/bin:/usr/local/cuda/bin:" + os.environ["PATH"]},
+                                logfile="vllm.log")
+                extra = no_think
+            elif name == "sglang":
+                server = Server([binary, "-m", "sglang.launch_server", "--model-path", hf_dir, "--port", str(port), "--host", "127.0.0.1", "--context-length", str(ctx_one),
+                                 "--max-running-requests", str(maxu), "--mem-fraction-static", "0.8", "--served-model-name", "m"],
+                                f"http://127.0.0.1:{port}/health", "m", env={"CUDA_HOME": "/usr/local/cuda", "PATH": f"{args.work}/sglang_env/bin:/usr/local/cuda/bin:" + os.environ["PATH"]},
+                                logfile="sglang.log")
                 extra = no_think
             if not server or not server.ok:
                 tail = open(server.logfile).read()[-600:] if server else ""
