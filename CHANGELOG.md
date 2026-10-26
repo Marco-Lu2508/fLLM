@@ -16,6 +16,9 @@ behaviour between versions).
 - `FLLM_VK_PROFILE=N` prints the shader table every N command buffers, summed over all recorders of the process.
 
 ### Fixed
+- A model step that failed (for example a device error under load) stopped the whole server; now its requests get the error, the error is logged at once, and the server keeps serving (three failed steps in a row still stop it).
+- Gemma 4 on the CPU: the fast attention kernel now takes the sliding window and the score scale, so the model no longer uses the scalar reference in every layer (Core Ultra 5 235U, Gemma 4 E4B Q4_K_M: prompts 34 instead of 18 tokens/s, answers up to 8.7 instead of 3 to 4).
+- Gemma per-layer weights stored as bf16 or f16 now go to the device as Q8_0 as well (the projection of the per-layer inputs ran in the slow bf16 kernel).
 - An explicitly chosen device that cannot run a model (for example Gemma 3n on Vulkan) no longer stops the server: the model runs on the CPU and the reason is logged.
 - Gemma 4 on Vulkan and the NPU failed with "rope width 512 invalid for head width 256": the device pass used one rotary width for all layers.
 - Windows: the low-power efficiency cores of Intel Core Ultra are told from the other efficiency cores by their cache (Windows gives them the same efficiency class), so `--threads auto` picks 8 instead of 9 threads on a Core Ultra 5 235U; an explicit `--threads n` gets the same core placement as the automatic count (a 10-thread run answered at 9 tokens/s without it, 24 with it).
