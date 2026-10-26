@@ -33,14 +33,29 @@ pub fn delta_supported(shape: &DeltaShape) -> bool {
         && (2..=8).contains(&shape.conv_kernel)
 }
 
-fn delta_rec_shader(hk: usize) -> Option<&'static str> {
-    Some(match hk {
-        32 => "delta_rec_hk32",
-        64 => "delta_rec_hk64",
-        96 => "delta_rec_hk96",
-        128 => "delta_rec_hk128",
+fn delta_rec_shader(hk: usize, cols: bool) -> Option<&'static str> {
+    Some(match (hk, cols) {
+        (32, false) => "delta_rec_hk32",
+        (64, false) => "delta_rec_hk64",
+        (96, false) => "delta_rec_hk96",
+        (128, false) => "delta_rec_hk128",
+        (32, true) => "delta_recc_hk32",
+        (64, true) => "delta_recc_hk64",
+        (96, true) => "delta_recc_hk96",
+        (128, true) => "delta_recc_hk128",
         _ => return None,
     })
+}
+
+/// Value columns per workgroup of `delta_recc_hk*`.
+const RECC_COLUMNS: usize = 16;
+
+/// Whether the column-split recurrence (`delta_recc_hk*` + `delta_gnorm`) can run: it needs subgroup shuffles and subgroups of at least 4 lanes.
+/// `FLLM_VK_DELTA_COLS=0` keeps the one-workgroup-per-head shader.
+pub fn delta_cols_usable(shuffle: bool, min_subgroup: u32) -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let off = *OFF.get_or_init(|| std::env::var("FLLM_VK_DELTA_COLS").is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false")));
+    shuffle && min_subgroup >= 4 && !off
 }
 
 /// Plans of `Stream::delta_layer`: for every non-empty run a `delta_conv` and a `delta_rec_hk*` dispatch (in this order, barrier in between; the runs are
@@ -53,6 +68,17 @@ pub fn plan_delta_layer(
     runs: &[RunSpec],
     state_offset: usize,
 ) -> Result<Vec<OpPlan>, BackendError> {
+    plan_delta_layer_with(shape, runs, state_offset, false)
+}
+
+/// [`plan_delta_layer`]; `cols`: the recurrence as `delta_recc_hk*` over `ceil(v_dim / 16)` workgroups per value head followed by the gated norm
+/// `delta_gnorm` (slots `z`, `norm`, `out`), see [`delta_cols_usable`].
+pub fn plan_delta_layer_with(
+    shape: &DeltaShape,
+    runs: &[RunSpec],
+    state_offset: usize,
+    cols: bool,
+) -> Result<Vec<OpPlan>, BackendError> {
     if !delta_supported(shape) {
         return Err(BackendError::UnsupportedOperation(format!(
             "DeltaNet shape {}/{} heads {}x{} kernel {} is not supported by the Vulkan shaders",
@@ -64,7 +90,7 @@ pub fn plan_delta_layer(
             "DeltaNet state offset must be a multiple of 4 bytes",
         ));
     }
-    let rec_name = delta_rec_shader(shape.k_dim).ok_or_else(|| invalid("DeltaNet key width"))?;
+    let rec_name = delta_rec_shader(shape.k_dim, cols).ok_or_else(|| invalid("DeltaNet key width"))?;
     let (kh, vh, hk, hv, ksz) = (
         shape.k_heads,
         shape.v_heads,
@@ -77,7 +103,7 @@ pub fn plan_delta_layer(
     let hist_off = (state_offset + shape.rec_bytes()) / 4;
     let qscale = (hk as f32).powf(-0.5);
     let value_blocks = div_up(shape.value_dim(), 128);
-    let mut plans = Vec::with_capacity(runs.len() * 2);
+    let mut plans = Vec::with_capacity(runs.len() * 3);
     for (i, run) in runs.iter().enumerate() {
         if run.rows == 0 {
             continue;
@@ -141,7 +167,24 @@ pub fn plan_delta_layer(
                 "too many DeltaNet value heads".into(),
             ));
         }
-        plans.push(plan(rec_name, rec_push, [vh as u32, 1, 1], rec_slots)?);
+        if !cols {
+            plans.push(plan(rec_name, rec_push, [vh as u32, 1, 1], rec_slots)?);
+            continue;
+        }
+        let recc_slots = Slots::new()
+            .scratch("mixed", 0, mixed_bytes, Access::Read)
+            .read("beta")
+            .read("alpha")
+            .read("dt_bias")
+            .read("decay")
+            .run_state("state", i)
+            .write("out");
+        plans.push(plan(rec_name, rec_push, [vh as u32, div_up(hv, RECC_COLUMNS) as u32, 1], recc_slots)?);
+        if run.rows > MAX_GROUPS_PER_DIM as usize {
+            return Err(BackendError::UnsupportedOperation("DeltaNet run too long for one dispatch".into()));
+        }
+        let norm_push = Push::new().u("vh", vh).u("hv", hv).u("row0", run.first_row).f("eps", shape.eps);
+        plans.push(plan("delta_gnorm", norm_push, [vh as u32, run.rows as u32, 1], Slots::new().read("z").read("norm").write("out"))?);
     }
     Ok(plans)
 }

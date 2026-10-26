@@ -8,7 +8,7 @@ use crate::backend::vulkan::ops::moe::{
     MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    plan_delta_layer, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape, Mamba2Shape, RunSpec,
+    plan_delta_layer, plan_delta_layer_with, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape, Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
     plan_argmax, plan_embedding, plan_glu, plan_layer_norm, plan_residual_add, plan_rms_norm, plan_rms_norm_grouped, plan_rope, plan_sigmoid_gate_mul,
@@ -387,6 +387,7 @@ fn all_op_plans() -> Vec<OpPlan> {
             },
         ];
         plans.extend(plan_delta_layer(&shape, &runs, 256).unwrap());
+        plans.extend(plan_delta_layer_with(&shape, &runs, 256, true).unwrap());
     }
     for state in [16, 32, 64, 128, 48] {
         let shape = Mamba2Shape {

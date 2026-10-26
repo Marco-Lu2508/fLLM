@@ -81,6 +81,12 @@ delta_rec_hk32 delta_rec.comp -DHK=32
 delta_rec_hk64 delta_rec.comp -DHK=64
 delta_rec_hk96 delta_rec.comp -DHK=96
 delta_rec_hk128 delta_rec.comp -DHK=128
+# the same recurrence for 16 value columns per workgroup through subgroup shuffles (no barrier per token), and the gated norm after it
+delta_recc_hk32 delta_rec_cols.comp -DHK=32
+delta_recc_hk64 delta_rec_cols.comp -DHK=64
+delta_recc_hk96 delta_rec_cols.comp -DHK=96
+delta_recc_hk128 delta_rec_cols.comp -DHK=128
+delta_gnorm delta_gnorm.comp
 
 # Mamba selective scans: NS = state size kept in registers, gen = any state size (state in memory)
 mamba_scan2_ns16 mamba_scan2.comp -DNS=16

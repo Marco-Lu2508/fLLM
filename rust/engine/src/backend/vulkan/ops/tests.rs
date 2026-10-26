@@ -1062,6 +1062,21 @@ fn sample_plans() -> Vec<OpPlan> {
         )
         .unwrap(),
     );
+    for hk in [32, 64, 96, 128] {
+        v.extend(
+            plan_delta_layer_with(
+                &delta_shape(2, 4, hk, 40, 4),
+                &[RunSpec {
+                    first_row: 0,
+                    rows: 3,
+                    reset: true,
+                }],
+                0,
+                true,
+            )
+            .unwrap(),
+        );
+    }
     for hk in [32, 96, 128] {
         v.extend(
             plan_delta_layer(

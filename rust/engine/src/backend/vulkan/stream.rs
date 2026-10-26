@@ -29,7 +29,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_with, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -801,7 +801,10 @@ impl Stream for VulkanStream {
                 reset: r.reset,
             })
             .collect();
-        let plans = plan_delta_layer(shape, &specs, state_offset)?;
+        let caps = self.sh.caps();
+        let min_subgroup = if caps.min_subgroup_size > 0 { caps.min_subgroup_size } else { caps.subgroup_size };
+        let cols = crate::backend::vulkan::ops::recurrent::delta_cols_usable(caps.subgroup_ops.shuffle, min_subgroup);
+        let plans = plan_delta_layer_with(shape, &specs, state_offset, cols)?;
         if plans.is_empty() {
             return Ok(());
         }

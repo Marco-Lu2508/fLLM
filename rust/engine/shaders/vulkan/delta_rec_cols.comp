@@ -1,0 +1,90 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_shuffle : enable
+// FLLM-SHADER: delta_recc | bindings: mixed,beta,alpha,dt_bias,decay,state,out | push: kh,vh,hv,conv_dim,tiled,row0,n,reset,state_off,beta_scale,eps | grid: [vh, ceil(hv / 16), 1] per run
+// Gated DeltaNet, part 2 without the output norm: the same delta-rule recurrence as delta_rec.comp, for 16 value columns of one value head per
+// workgroup, writing the head output o before its gated RMS norm (delta_gnorm.comp applies it afterwards). Value column c is handled by
+// four neighbouring lanes, each holding HK/4 rows of the column's state in registers; their dot products over the key dimension meet through
+// subgroup shuffles, and every lane reads its quarter of the query and key head straight from `mixed` (the lanes of a quarter read the same
+// words). So a token costs no barrier at all, where delta_rec.comp needs about a dozen for the shared exchanges and the norm, and a head runs
+// as ceil(hv / 16) workgroups instead of one. Needs subgroup shuffles and a subgroup size of at least 4 (the planner checks).
+// The recurrent state S[j][i][c] is FP32 at state[state_off + (j * HK + i) * hv + c]; eps is not read (the norm pass applies it).
+#define WG 64
+#define LPC 4u               // lanes per value column
+#define CW (WG / LPC)        // value columns per workgroup
+#ifndef HK
+#define HK 128
+#endif
+#define RPL (HK / 4)         // state rows per lane
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer BetaBuf { float beta[]; };
+layout(std430, binding = 2) readonly buffer AlphaBuf { float alpha[]; };
+layout(std430, binding = 3) readonly buffer DtBuf { float dt_bias[]; };
+layout(std430, binding = 4) readonly buffer DecayBuf { float decay[]; };
+layout(std430, binding = 5) buffer StateBuf { float state[]; };
+layout(std430, binding = 6) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint kh;
+    uint vh;
+    uint hv;
+    uint conv_dim;
+    uint tiled;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    float beta_scale;
+    float eps;
+} p;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint j = gl_WorkGroupID.x;
+    const uint c = gl_WorkGroupID.y * CW + lane / LPC;
+    const uint part = lane % LPC;
+    const bool col_ok = c < p.hv;
+    const uint key_dim = p.kh * HK;
+    const uint value_dim = p.vh * p.hv;
+    const uint src = p.tiled != 0u ? j % p.kh : j / (p.vh / p.kh);
+    const uint cc = col_ok ? c : 0u;
+    const uint sbase = p.state_off + (j * HK + part * RPL) * p.hv + cc;
+
+    float s[RPL];
+    [[unroll]] for (uint i = 0u; i < RPL; i++) s[i] = (col_ok && p.reset == 0u) ? state[sbase + i * p.hv] : 0.0;
+
+    const float dtb = dt_bias[j];
+    const float dec = decay[j];
+
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        const uint qoff = row * p.conv_dim + src * HK + part * RPL;
+        const uint koff = qoff + key_dim;
+        const float forget = exp(dec * softplus20(alpha[row * p.vh + j] + dtb));
+        const float sigma = p.beta_scale / (1.0 + exp(-beta[row * p.vh + j]));
+        const float v = mixed[row * p.conv_dim + 2u * key_dim + j * p.hv + cc];
+
+        float memory = 0.0;
+        [[unroll]] for (uint i = 0u; i < RPL; i++) {
+            s[i] *= forget;
+            memory += s[i] * mixed[koff + i];
+        }
+        memory += subgroupShuffleXor(memory, 1u);
+        memory += subgroupShuffleXor(memory, 2u);
+        const float delta = (v - memory) * sigma;
+        float acc = 0.0;
+        [[unroll]] for (uint i = 0u; i < RPL; i++) {
+            s[i] += mixed[koff + i] * delta;
+            acc += s[i] * mixed[qoff + i];
+        }
+        acc += subgroupShuffleXor(acc, 1u);
+        acc += subgroupShuffleXor(acc, 2u);
+        if (part == 0u && col_ok) outv[row * value_dim + j * p.hv + c] = acc;
+    }
+    if (col_ok) {
+        [[unroll]] for (uint i = 0u; i < RPL; i++) state[sbase + i * p.hv] = s[i];
+    }
+}

@@ -1,0 +1,32 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: delta_gnorm | bindings: z,norm,out | push: vh,hv,row0,eps | grid: [vh, rows, 1] per run
+// Gated RMS norm of the Gated DeltaNet head outputs written by delta_rec_cols.comp, in place, for one value head j and one row per workgroup:
+//   out[row][j][c] = o[c] * (1 / sqrt(mean_c(o^2) + eps)) * norm[c] * silu(z[row][j][c])      (value width hv <= 128; row = row0 + workgroup y)
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer ZBuf { float z[]; };
+layout(std430, binding = 1) readonly buffer NormBuf { float norm_w[]; };
+layout(std430, binding = 2) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint vh;
+    uint hv;
+    uint row0;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint j = gl_WorkGroupID.x;
+    const uint row = p.row0 + gl_WorkGroupID.y;
+    const uint idx = row * (p.vh * p.hv) + j * p.hv + lane;
+    const bool ok = lane < p.hv;
+    const float o = ok ? outv[idx] : 0.0;
+    const float ss = wg_sum(o * o);
+    const float inv = 1.0 / sqrt(ss / float(p.hv) + p.eps);
+    if (ok) outv[idx] = o * inv * norm_w[lane] * silu(z[idx]);
+}
