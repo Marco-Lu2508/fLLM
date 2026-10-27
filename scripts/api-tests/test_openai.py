@@ -81,12 +81,20 @@ def test_embeddings(client, model):
 def test_structured_output(client, model):
     schema = {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "boolean"}},
               "required": ["a", "b"], "additionalProperties": False}
-    reply = client.chat.completions.create(
-        model=model, messages=[{"role": "user", "content": "x"}], max_tokens=60,
-        response_format={"type": "json_schema", "json_schema": {"name": "t", "schema": schema, "strict": True}},
-    )
-    value = json.loads(reply.choices[0].message.content)
-    assert isinstance(value["a"], int) and isinstance(value["b"], bool)
+    # the model has random weights: the grammar allows white space and any number of digits, so one sample may use up
+    # its tokens before the closing brace. Every answer that does finish must be valid; one of a few seeds must finish.
+    finished = 0
+    for seed in range(8):
+        reply = client.chat.completions.create(
+            model=model, messages=[{"role": "user", "content": "x"}], max_tokens=200, seed=seed,
+            response_format={"type": "json_schema", "json_schema": {"name": "t", "schema": schema, "strict": True}},
+        )
+        if reply.choices[0].finish_reason != "stop":
+            continue
+        value = json.loads(reply.choices[0].message.content)
+        assert isinstance(value["a"], int) and isinstance(value["b"], bool)
+        finished += 1
+    assert finished > 0, "no sample finished within 200 tokens"
 
 
 def test_tool_call_round_trip(client, model):
