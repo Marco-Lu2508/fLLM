@@ -566,6 +566,20 @@ can be paused and resumed, and loads the model when it is done. The Models page 
 Hugging Face search and a field for a GGUF that is already on disk. Nothing has to be typed in a terminal, and nothing is
 downloaded without a click.
 
+## The look
+
+`webui/theme.css` is the design system and is loaded after the older sheets, so it refines them without a rewrite: one accent
+colour per personality (**copper** by default — the colour of the material, since this is a Rust engine — with seven
+alternatives in the accent picker; green is kept for “ok” states only), a slate-black background for the
+dark theme and warm paper for the light one, an 8-pixel grid, two radii (8 for controls, 14 for surfaces), a type scale from
+11 to 34 px, mono for meta and numbers, and motion tokens that respect `prefers-reduced-motion`. The rules follow the UI/UX
+Pro Max guidance for developer tools (dark-first Swiss minimalism, bento surfaces, contrast of at least 4.5:1, visible focus
+rings, no colour as the only signal). The sidebar is a floating rail with a hairline border, chat text is centred in a 900 px
+reading column, the composer is the one elevated card, and the empty chat hides the sparkline instead of showing a flat line
+and a lonely counter. Deliberate deviations from the generated `design-system/fllm-studio/MASTER.md`: copper instead of acid
+green (the database default reads as every other AI tool), no uppercase eyebrows, no dotted meta strings, and cards sit on
+hairlines instead of shadows.
+
 ## The desktop app
 
 The Tauri app in `desktop/` starts `fllm-rs studio` on a free port and shows that page in **its own window** — no

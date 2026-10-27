@@ -17,7 +17,7 @@
       const variant = (entry.variants || []).find((v) => v.quant === quant) || (entry.variants || [])[0] || null;
       const bytes = Number(variant?.estimated_bytes || entry.estimated_bytes || 0);
       const size = bytes ? (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`) : '';
-      const label = `${entry.display_name || rec}${quant ? ` · ${quant}` : ''}${size ? ` · ${size}` : ''}`;
+      const label = [entry.display_name || rec, quant, size].filter(Boolean).join(', ');
       const fits = variant?.fits_memory ?? entry.fits;
       const key = `${rec}:${quant}:${size}`;
       if (heroStartFor === key) return; // the hero is redrawn on every status poll
@@ -27,7 +27,7 @@
         '<div style="display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;">' +
         '  <button class="btn btn-primary" id="btnHeroDownload">Download and start</button>' +
         '  <span class="app-item-desc mono" style="font-size:11px;">' + escapeHtml(label) +
-        (fits === false ? ' · may not fit into free memory' : '') + '</span>' +
+        (fits === false ? ', may not fit into free memory' : '') + '</span>' +
         '</div>';
       const button = box.querySelector('#btnHeroDownload');
       if (button) {
