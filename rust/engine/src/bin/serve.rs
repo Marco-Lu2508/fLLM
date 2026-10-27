@@ -49,7 +49,6 @@ use fllm_engine::{
     tokenizer::TokenizerBundle,
     DeviceType, GgufModel, InferenceRuntime,
 };
-use fllm_gguf_probe::MappedGguf;
 use std::{env, process};
 
 /// A draft model given as a file, a Hugging Face reference or a directory: resolved to one GGUF file (checkpoints are converted).
