@@ -788,8 +788,10 @@ fn serve_once(bin: &Path, cache: &Path, model: &Path, extra: &[&str]) -> (String
         let _ = child.kill();
         panic!("the server did not start for {} {extra:?}:\n{}", model.display(), logs(&log_path));
     }
-    let completion = http(port, "POST", "/v1/completions", r#"{"model":"x","prompt":"t5 t9 t3 t17","max_tokens":10,"temperature":0}"#).unwrap_or_default();
     let models = http(port, "GET", "/v1/models", "").unwrap_or_default();
+    let id = models.split("\"id\":\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or("x").to_owned();
+    let body = format!(r#"{{"model":"{id}","prompt":[1,5,9,3,17],"max_tokens":10,"temperature":0}}"#);
+    let completion = http(port, "POST", "/v1/completions", &body).unwrap_or_default();
     let _ = child.kill();
     let _ = child.wait();
     let text = completion.split("\"text\":\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or_else(|| panic!("no completion in {completion}\n{}", logs(&log_path))).to_owned();
