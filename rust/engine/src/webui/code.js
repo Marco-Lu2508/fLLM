@@ -637,7 +637,15 @@
 
     const cid = () => `c${++code.seq}${Date.now().toString(36).slice(-3)}`;
     const ownerOf = new WeakMap(); // sub-agent items -> the spawn_agent item that is painted
-    const ctxMax = () => state.status?.model?.max_context || 4096;
+    // a model of a provider (providers.js) has no context the server knows; the agent plans for a common 128k window then
+    const ctxMax = () => (typeof window.fllmRemoteSelected === 'function' && window.fllmRemoteSelected() ? 128000 : state.status?.model?.max_context || 4096);
+
+    /** POST of a chat-completions body: to this server, or through the proxy route when the selected model belongs to a provider. */
+    function codeChat(body, signal) {
+      if (typeof window.fllmChatEndpoint !== 'function') return apiFetch('/v1/chat/completions', { method: 'POST', body, signal });
+      const ep = window.fllmChatEndpoint(state.selectedModel);
+      return apiFetch(ep.url, { method: 'POST', body: ep.transform(body), signal });
+    }
 
     function registryFromDefs() {
       const map = new Map();
@@ -1088,7 +1096,7 @@
           ],
           stream: false, temperature: 0.2, max_tokens: 400,
         };
-        const res = await apiFetch('/v1/chat/completions', { method: 'POST', body });
+        const res = await codeChat(body);
         if (res.ok) title = cleanTitle(splitReasoning(String((await res.json()).choices?.[0]?.message?.content || '')).answer);
       } catch { /* the heuristic title stays */ } finally { code.titling = false; }
       if (title && id === code.sessionId && !code.titleLocked) {
@@ -1643,7 +1651,7 @@
         const caps = thinkingCaps();
         Object.assign(body, thinkingRequestFields(caps, thinkingLevelFor(caps, state.thinkingLevel)));
       }
-      let res = await apiFetch('/v1/chat/completions', { method: 'POST', body: { ...body }, signal: ctx.signal });
+      let res = await codeChat({ ...body }, ctx.signal);
       for (let attempt = 0; attempt < 2 && !res.ok && res.status === 400; attempt++) {
         const err = await res.clone().json().catch(() => ({}));
         const info = parseContextError(err.error?.message);
@@ -1657,7 +1665,7 @@
           code.noGrammar = true; // this server does not know the field
           delete body.tool_call_grammar;
         } else break;
-        res = await apiFetch('/v1/chat/completions', { method: 'POST', body: { ...body }, signal: ctx.signal });
+        res = await codeChat({ ...body }, ctx.signal);
       }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1940,7 +1948,7 @@
       if (!room) throw new Error(TOO_SMALL);
       body.max_tokens = room;
       if (tools.length) body.tools = tools; // same prefix as the conversation: the server cache is reused
-      const res = await apiFetch('/v1/chat/completions', { method: 'POST', body, signal });
+      const res = await codeChat(body, signal);
       if (!res.ok) throw new Error(`The server answered with error ${res.status}`);
       const data = await res.json();
       return splitReasoning(String(data.choices?.[0]?.message?.content || '')).answer.trim();
