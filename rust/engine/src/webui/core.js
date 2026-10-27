@@ -102,12 +102,6 @@
     }
     window.fllmConfirm = confirmDialog;
 
-    // The page is an app, not a web page: no browser menu on a right click (text fields keep theirs for copy and paste)
-    document.addEventListener('contextmenu', (e) => {
-      if (e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]')) return;
-      e.preventDefault();
-    });
-
     function toast(msg) {
       const el = document.createElement('div');
       el.className = 'toast-card';

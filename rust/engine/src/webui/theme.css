@@ -649,3 +649,6 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 button, summary, label, .menu-item, .thread-row, .sidebar-nav-item, .settings-nav-btn { -webkit-user-select: none; user-select: none; }
 img, a { -webkit-user-drag: none; }
+.cm { min-width: 190px; }
+.cm .cs-item { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.cm-key { color: var(--muted-fg); font-size: var(--text-xs); }

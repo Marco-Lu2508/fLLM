@@ -194,3 +194,72 @@
       document.addEventListener('mousedown', hide, true);
       document.addEventListener('scroll', hide, true);
     })();
+
+    /** The right-click menu of the app (cut, copy, paste, select all, copy link) instead of the browser's. */
+    (() => {
+      let menu = null;
+      const close = () => { if (menu) { menu.remove(); menu = null; } };
+      const isEditable = (el) => el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'range', 'file', 'color'].includes(el.type)) || el.isContentEditable);
+      const selectionText = (field) => (field && typeof field.selectionStart === 'number' && field.tagName !== 'SELECT'
+        ? field.value.slice(field.selectionStart, field.selectionEnd)
+        : String(window.getSelection() || ''));
+
+      async function paste(field) {
+        let text = '';
+        try { text = await navigator.clipboard.readText(); } catch { toast('Paste is not allowed here. Use Ctrl+V.'); return; }
+        field.focus();
+        if (typeof field.selectionStart === 'number') {
+          field.setRangeText(text, field.selectionStart, field.selectionEnd, 'end');
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        } else document.execCommand('insertText', false, text);
+      }
+
+      function actions(target) {
+        const list = [];
+        const field = isEditable(target) ? target : null;
+        const text = selectionText(field);
+        const link = target.closest && target.closest('a[href]');
+        if (field) {
+          const readOnly = field.readOnly || field.disabled;
+          list.push({ label: 'Cut', key: 'Ctrl+X', off: readOnly || !text, run: () => { navigator.clipboard.writeText(text); field.focus(); document.execCommand('delete'); } });
+          list.push({ label: 'Copy', key: 'Ctrl+C', off: !text, run: () => navigator.clipboard.writeText(text) });
+          list.push({ label: 'Paste', key: 'Ctrl+V', off: readOnly, run: () => paste(field) });
+          list.push({ label: 'Select all', key: 'Ctrl+A', run: () => { field.focus(); field.select ? field.select() : document.execCommand('selectAll'); } });
+          return list;
+        }
+        if (text) list.push({ label: 'Copy', key: 'Ctrl+C', run: () => navigator.clipboard.writeText(text) });
+        if (link) list.push({ label: 'Copy link', run: () => navigator.clipboard.writeText(link.href) });
+        const block = target.closest && target.closest('pre, .msg-assistant-prose, .msg-user-bubble, .tool-cmd, td');
+        if (block && !text) list.push({ label: block.tagName === 'PRE' ? 'Copy code' : 'Copy text', run: () => navigator.clipboard.writeText(block.innerText.trim()) });
+        if (block) list.push({ label: 'Select all text here', run: () => { const r = document.createRange(); r.selectNodeContents(block); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } });
+        return list;
+      }
+
+      document.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        close();
+        customSelects.close();
+        const list = actions(e.target);
+        if (!list.length) return;
+        menu = document.createElement('div');
+        menu.className = 'popover-panel cs-list open cm';
+        list.forEach((a) => {
+          const row = document.createElement('div');
+          row.className = 'menu-item cs-item' + (a.off ? ' cs-disabled' : '');
+          const name = document.createElement('span');
+          name.textContent = a.label;
+          row.appendChild(name);
+          if (a.key) { const k = document.createElement('span'); k.className = 'cm-key'; k.textContent = a.key; row.appendChild(k); }
+          row.addEventListener('mousedown', (ev) => ev.preventDefault());
+          row.addEventListener('click', () => { if (a.off) return; close(); a.run(); });
+          menu.appendChild(row);
+        });
+        document.body.appendChild(menu);
+        menu.style.left = `${Math.max(6, Math.min(e.clientX, window.innerWidth - menu.offsetWidth - 6))}px`;
+        menu.style.top = `${Math.max(6, Math.min(e.clientY, window.innerHeight - menu.offsetHeight - 6))}px`;
+      });
+      document.addEventListener('mousedown', (e) => { if (menu && !menu.contains(e.target)) close(); }, true);
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); }, true);
+      document.addEventListener('scroll', close, true);
+      window.addEventListener('blur', close);
+    })();
