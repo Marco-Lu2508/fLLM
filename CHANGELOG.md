@@ -6,6 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-10-28
+
+Safetensors checkpoints load without a GGUF file, the Studio looks like an app (own menus, lists, tooltips and dialogs), the app no longer loads a model when it opens, and the server can be administered safely: API keys with an admin right, a Settings > Engine page for every cache and telemetry option, and containers restart in place.
+
 ### Changed
 - The output cache holds at most 64 MB by default (was 256 MB).
 - The app no longer loads a model when it opens. The last model loads with your first message in Chat or Code, which is then sent on its own once the model is ready. Settings > Models > "Load the last model when the app starts" brings the old behaviour back.
@@ -34,6 +38,7 @@ behaviour between versions).
 - **The output cache never applied to chat completions**: the eligibility check required "no reasoning spec", but the chat path always passes one (even for a model without a reasoning parser). A live server now shows `hits: 1, stored: 1` for a repeated deterministic prompt.
 - **Draining was not enforced on the chat path**: `openai_generate` had no admission check of its own, so `/v1/chat/completions` answered 200 while `/ready` already reported `draining`. The shared generation path now refuses with 503 too.
 - The columns of the usage and cost table line up (numbers right-aligned).
+- The glow around the message box is even on every side; before, the top corners stayed dark.
 
 ## [0.1.10] - 2026-10-27
 
