@@ -176,6 +176,10 @@ impl Harness {
         self.call(Method::GET, path, None, &[]).await
     }
 
+    async fn delete(&self, path: &str) -> Reply {
+        self.call(Method::DELETE, path, None, &[]).await
+    }
+
     async fn post(&self, path: &str, body: Value) -> Reply {
         self.call(Method::POST, path, Some(body), &[]).await
     }
@@ -1988,4 +1992,45 @@ async fn two_identical_requests_at_the_same_time_share_one_computation() {
     assert_eq!(followers, 1, "the second request has to wait for the first one's answer");
     assert_eq!(texts[0], texts[1], "both see the same answer");
     h.state.metrics.inject_delay_ms.store(0, Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn the_prefix_cache_can_be_inspected_while_the_worker_runs() {
+    let h = start(Settings::default());
+    // a request fills the prefix cache (the prompt's blocks are remembered)
+    let _ = h.chat(json!({"max_tokens": 2, "ignore_eos": true})).await;
+    let report = h.get("/admin/prefix-cache").await;
+    assert_eq!(report.status, StatusCode::OK, "{}", report.text());
+    let body = report.json();
+    assert_eq!(body["enabled"], true);
+    assert!(body["entries"].as_u64().is_some(), "the report has to count entries");
+    assert!(body["tree"].is_object(), "and carries the radix tree");
+}
+
+#[tokio::test]
+async fn the_prefix_cache_can_be_emptied() {
+    let h = start(Settings::default());
+    let _ = h.chat(json!({"max_tokens": 2, "ignore_eos": true})).await;
+    let before = h.get("/admin/prefix-cache").await.json();
+    assert!(before["entries"].as_u64().unwrap() > 0, "a request fills the cache");
+    // DELETE takes no body; the harness routes by method, so build the request directly
+    let cleared = h.delete("/admin/prefix-cache").await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.text());
+    assert!(cleared.json()["dropped"].as_u64().unwrap() > 0);
+    let after = h.get("/admin/prefix-cache").await.json();
+    assert_eq!(after["entries"], 0, "the cache is empty afterwards");
+}
+
+#[tokio::test]
+async fn a_cache_salt_keeps_answers_apart() {
+    let h = start(Settings::default());
+    let body = |salt: &str| json!({
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0, "max_tokens": 4, "ignore_eos": true, "cache_salt": salt
+    });
+    assert_eq!(h.post("/v1/chat/completions", body("a")).await.status, StatusCode::OK);
+    assert_eq!(h.post("/v1/chat/completions", body("b")).await.status, StatusCode::OK);
+    assert_eq!(h.state.cache.stats()["hits"], 0, "another salt must not reuse the answer");
+    assert_eq!(h.post("/v1/chat/completions", body("a")).await.status, StatusCode::OK);
+    assert_eq!(h.state.cache.stats()["hits"], 1, "the same salt is a hit");
 }

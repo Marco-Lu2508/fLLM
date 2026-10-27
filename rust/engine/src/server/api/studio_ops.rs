@@ -585,6 +585,7 @@ fn engine_defaults() -> Value {
     json!({
         "output_cache": "exact", "output_cache_mb": 64, "output_cache_ttl": 3600, "cache_scope": "global",
         "prefix_cache": true, "prefix_salt": "", "preemption": "recompute", "otel_endpoint": "", "otel_service": "fllm",
+        "kv_disk_dir": "", "kv_disk_mb": 8192,
     })
 }
 
@@ -637,6 +638,7 @@ fn engine_changes(body: &Value) -> Result<Vec<(&'static str, Option<Value>)>, St
         ("output_cache", engine_choice(body, "output_cache", &["exact", "off"])),
         ("output_cache_mb", engine_number(body, "output_cache_mb", 1, 65_536)),
         ("output_cache_ttl", engine_number(body, "output_cache_ttl", 1, 31_536_000)),
+        ("kv_disk_mb", engine_number(body, "kv_disk_mb", 1, 4_194_304)),
         ("cache_scope", engine_choice(body, "cache_scope", &["global", "tenant", "off"])),
         ("preemption", engine_choice(body, "preemption", &["recompute", "swap"])),
     ] {
@@ -655,6 +657,17 @@ fn engine_changes(body: &Value) -> Result<Vec<(&'static str, Option<Value>)>, St
             }
             changes.push((key, (!text.is_empty()).then(|| json!(text))));
         }
+    }
+    if let Some(text) = body.get("kv_disk_dir").and_then(Value::as_str) {
+        let text = text.trim();
+        if !text.is_empty() {
+            let path = std::path::Path::new(text);
+            if !path.is_absolute() {
+                return Err("Type the full path of the folder for the prompt blocks on disk.".into());
+            }
+            std::fs::create_dir_all(path).map_err(|e| format!("The folder cannot be created: {e}"))?;
+        }
+        changes.push(("kv_disk_dir", (!text.is_empty()).then(|| json!(text))));
     }
     if let Some(text) = body.get("otel_endpoint").and_then(Value::as_str) {
         let text = text.trim();

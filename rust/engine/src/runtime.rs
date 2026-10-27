@@ -66,6 +66,11 @@ pub struct InferenceRuntime {
     /// Statistics since the last flush to the metrics.
     spec_delta: crate::speculative::SpecStats,
     decoder: Option<crate::rust_decoder::RustDecoder>,
+    /// The disk tier for cached prefix blocks (off unless `FLLM_KV_DISK_DIR` is set).
+    kv_tier: std::sync::Arc<crate::mem::kv_tier::KvTier>,
+    /// Writes for the disk tier, off the step path: file I/O must never delay a token.
+    spill_tx: Option<std::sync::mpsc::SyncSender<SpillJob>>,
+    kv_warmed: bool,
     /// KV data of the sequences preempted by swap, one export per block in table order.
     swap_store: std::collections::HashMap<i64, Vec<Vec<u8>>>,
     /// n > 1 can fork sequences on this backend (host arrays, or device pools whose block copy passed its self check).
@@ -154,6 +159,9 @@ impl InferenceRuntime {
         let scheduler = Scheduler::new(config, bm, Some(pc), model.max_context());
         let key_len = model.key_buffer_len()?;
         let value_len = model.value_buffer_len()?;
+        // the disk tier writes on its own thread: file I/O must never sit between two tokens
+        let kv_tier = std::sync::Arc::new(crate::mem::kv_tier::KvTier::from_env());
+        let spill_tx = spawn_spill_writer(std::sync::Arc::clone(&kv_tier));
         Ok(Self {
             model,
             scheduler,
@@ -177,6 +185,9 @@ impl InferenceRuntime {
             spec_stats: Default::default(),
             spec_delta: Default::default(),
             decoder: None,
+            kv_tier,
+            spill_tx,
+            kv_warmed: false,
             swap_store: Default::default(),
             fork_ok: false,
             swap_out_blocks: 0,
@@ -191,6 +202,87 @@ impl InferenceRuntime {
             batch_stats: BatchStats::default(),
             metrics: None,
         })
+    }
+
+    /// Copies a running sequence together with its KV, so two continuations can be explored from the same point. The copy
+    /// is independent: a token appended to one never touches the other. This is the primitive beam search needs.
+    pub fn fork_sequence(&mut self, source: i64) -> Result<i64, String> {
+        let source_seq = self
+            .scheduler
+            .sequences
+            .get(&source)
+            .cloned()
+            .ok_or_else(|| format!("unknown sequence to fork: {source}"))?;
+        let blocks = self
+            .scheduler
+            .bm
+            .get_table(source)
+            .map_err(|error| error.to_string())?
+            .blocks
+            .clone();
+        if blocks.is_empty() {
+            return Err("cannot fork a sequence without KV blocks".into());
+        }
+        if self.available_blocks() < blocks.len() {
+            return Err("not enough free KV blocks to fork".into());
+        }
+        let new_id = self.next_sequence_id;
+        self.next_sequence_id = new_id.checked_add(1).ok_or("sequence id space exhausted")?;
+        self.scheduler
+            .bm
+            .new_table(new_id)
+            .map_err(|error| error.to_string())?;
+        // copy block by block; a failure gives every block back, so a fork either happens or it does not
+        let mut copied: Vec<usize> = Vec::with_capacity(blocks.len());
+        for &block in &blocks {
+            let free = match self.scheduler.alloc_free_block() {
+                Ok(free) => free,
+                Err(error) => {
+                    self.discard_fork(new_id, &copied);
+                    return Err(error.to_string());
+                }
+            };
+            if let Err(error) = self.copy_prompt_block(block, free as usize) {
+                self.scheduler.free_block(free);
+                self.discard_fork(new_id, &copied);
+                return Err(error);
+            }
+            if let Err(error) = self.scheduler.bm.claim_block_for(new_id, free) {
+                self.scheduler.free_block(free);
+                self.discard_fork(new_id, &copied);
+                return Err(error.to_string());
+            }
+            copied.push(free as usize);
+        }
+        let mut sequence = source_seq;
+        sequence.seq_id = new_id;
+        sequence.blocks = copied.clone();
+        // the copy is already computed, so admission has nothing to schedule for it
+        sequence.num_computed = sequence.num_computed.max(sequence.prefill_target);
+        self.scheduler.requests.entry(sequence.req_id.clone()).or_default().push(new_id);
+        self.scheduler.sequences.insert(new_id, sequence);
+        self.scheduler.waiting.push_back(new_id);
+        Ok(new_id)
+    }
+
+    /// Gives the blocks of a failed fork back and drops its table.
+    fn discard_fork(&mut self, new_id: i64, copied: &[usize]) {
+        for &block in copied {
+            self.scheduler.free_block(block as i64);
+        }
+        let _ = self.scheduler.bm.drop_table(new_id);
+    }
+
+    /// Sets the per-request prefix salt (`cache_salt`): requests with different salts never share KV blocks.
+    pub fn set_request_prefix_salt(&mut self, request_id: &str, salt: u64) {
+        if salt == 0 {
+            return;
+        }
+        for sequence in self.scheduler.sequences.values_mut() {
+            if sequence.req_id == request_id {
+                sequence.prefix_salt = salt;
+            }
+        }
     }
 
     pub fn submit(
@@ -579,6 +671,29 @@ impl InferenceRuntime {
         self.fork_ok
     }
     /// Sequences preempted so far, and the KV blocks swapped out to and back in from host memory.
+    /// Empties the prefix cache; returns how many entries it held.
+    pub fn clear_prefix_cache(&mut self) -> Result<usize, String> {
+        self.scheduler.clear_prefix_cache().map_err(|e| e.to_string())
+    }
+
+    /// What the prefix cache holds, for `GET /admin/prefix-cache`.
+    pub fn prefix_cache_report(&self) -> serde_json::Value {
+        let hits = self.scheduler.prefix_cache_hits;
+        match self.scheduler.pc.as_ref() {
+            None => serde_json::json!({"enabled": false, "hits": hits}),
+            Some(pc) => serde_json::json!({
+                "enabled": self.scheduler.cfg.prefix_cache,
+                "entries": pc.len(),
+                "hits": hits,
+                "blocks": pc.entries_lru().iter().map(|entry| serde_json::json!({
+                    "hash": format!("{:016x}", entry.chain_hash),
+                    "tokens": entry.tokens.len(),
+                })).collect::<Vec<_>>(),
+                "tree": pc.tree_snapshot(),
+            }),
+        }
+    }
+
     pub fn preemption_stats(&self) -> (u64, u64, u64) {
         (self.scheduler.preemptions, self.swap_out_blocks, self.swap_in_blocks)
     }
@@ -925,7 +1040,125 @@ impl InferenceRuntime {
         Ok(())
     }
 
+    /// What the disk tier holds, for `GET /admin/kv-tier`.
+    pub fn kv_tier_stats(&self) -> serde_json::Value {
+        self.kv_tier.stats()
+    }
+
+    /// Empties the disk tier; returns how many blocks were removed.
+    pub fn clear_kv_tier(&self) -> usize {
+        self.kv_tier.clear()
+    }
+
+    /// Reads cached blocks back from the disk tier and registers them in the prefix cache, parents before children, so a
+    /// prompt can hit the cache right after a restart. Returns how many blocks were taken.
+    pub fn warm_prefix_cache(&mut self, limit: usize) -> Result<usize, String> {
+        if !self.kv_tier.enabled() {
+            return Ok(0);
+        }
+        let stored = self.kv_tier.entries();
+        // children by parent, so a chain can be walked from its root
+        let mut children: std::collections::HashMap<u64, Vec<crate::mem::kv_tier::Stored>> = std::collections::HashMap::new();
+        for block in stored {
+            children.entry(block.parent).or_default().push(block);
+        }
+        for list in children.values_mut() {
+            list.sort_by_key(|block| block.hash);
+        }
+        let mut registered = 0usize;
+        let mut roots: Vec<u64> = children.keys().copied().filter(|parent| *parent == 0).collect();
+        if roots.is_empty() {
+            // a tier that only holds a middle of a chain cannot be rebuilt: without the root the hash chain is unverifiable
+            return Ok(0);
+        }
+        roots.sort_unstable();
+        for root in roots {
+            let mut chain: Vec<crate::mem::kv_tier::Stored> = Vec::new();
+            let mut cursor = root;
+            while let Some(next) = children.get(&cursor).and_then(|list| list.first()).cloned() {
+                chain.push(next.clone());
+                cursor = next.hash;
+                if chain.len() >= limit {
+                    break;
+                }
+            }
+            if chain.is_empty() {
+                continue;
+            }
+            // blocks first: a block has to hold its KV before the tree may point at it
+            let mut blocks: Vec<(u64, Vec<i64>, i64)> = Vec::new();
+            let mut failed = false;
+            for block in &chain {
+                let Some(bytes) = self.kv_tier.load(block.hash) else {
+                    failed = true;
+                    break;
+                };
+                let Ok(bid) = self.scheduler.alloc_free_block() else {
+                    failed = true;
+                    break;
+                };
+                if self.kv_import_block(bid as usize, &bytes).is_err() {
+                    self.scheduler.free_block(bid);
+                    failed = true;
+                    break;
+                }
+                blocks.push((block.hash, block.tokens.clone(), bid));
+            }
+            if failed || blocks.is_empty() {
+                for (_, _, bid) in &blocks {
+                    self.scheduler.free_block(*bid);
+                }
+                continue;
+            }
+            match self.scheduler.register_prefix_chain(&blocks) {
+                Ok(true) => registered += blocks.len(),
+                _ => {
+                    for (_, _, bid) in &blocks {
+                        self.scheduler.free_block(*bid);
+                    }
+                }
+            }
+            if registered >= limit {
+                break;
+            }
+        }
+        Ok(registered)
+    }
+
+    /// Writes the blocks the scheduler just registered in the prefix cache to the disk tier, when one is configured.
+    /// They are alive (the cache holds a reference), so their KV is still exactly what belongs to their hash.
+    fn spill_pending(&mut self) {
+        // export on this thread (it owns the decoder), write on another (it owns the file I/O)
+        let Some(tx) = self.spill_tx.clone() else {
+            self.scheduler.take_pending_spills();
+            return;
+        };
+        for (hash, parent, block, tokens) in self.scheduler.take_pending_spills() {
+            if block < 0 {
+                continue;
+            }
+            let bytes = match self.kv_export_block(block as usize) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!("could not export block {block} for the disk tier: {error}");
+                    continue;
+                }
+            };
+            // a full queue drops the block: losing a cache entry is better than delaying a token
+            let _ = tx.try_send(SpillJob { hash, parent, tokens, bytes });
+        }
+    }
+
     pub fn step(&mut self) -> Result<Vec<TokenEvent>, String> {
+        self.spill_pending();
+        if !self.kv_warmed {
+            self.kv_warmed = true;
+            match self.warm_prefix_cache(128) {
+                Ok(0) => {}
+                Ok(count) => tracing::info!("warmed {count} prefix blocks from the disk tier"),
+                Err(error) => tracing::warn!("could not warm the prefix cache from disk: {error}"),
+            }
+        }
         self.image_embeddings
             .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
         self.draft_q.clear();
@@ -1956,6 +2189,32 @@ fn copy_cache_regions(
 #[cfg(test)]
 fn argmax(logits: &[f32]) -> usize {
     crate::sampling::argmax(logits)
+}
+
+/// One block on its way to the disk tier.
+struct SpillJob {
+    hash: u64,
+    parent: u64,
+    tokens: Vec<i64>,
+    bytes: Vec<u8>,
+}
+
+/// Starts the writer thread and returns the sending half. The queue is small on purpose: a block that cannot be queued is
+/// dropped, because a cache entry is worth less than a token.
+fn spawn_spill_writer(tier: std::sync::Arc<crate::mem::kv_tier::KvTier>) -> Option<std::sync::mpsc::SyncSender<SpillJob>> {
+    if !tier.enabled() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel::<SpillJob>(256);
+    std::thread::Builder::new()
+        .name("fllm-kv-disk".into())
+        .spawn(move || {
+            for job in rx {
+                tier.spill(job.hash, job.parent, &job.tokens, &job.bytes);
+            }
+        })
+        .ok()?;
+    Some(tx)
 }
 
 #[cfg(test)]

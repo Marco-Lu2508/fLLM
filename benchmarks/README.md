@@ -33,3 +33,21 @@ Without those, a number is not a benchmark, it is advertising.
 Without it the client generates prompts that differ in their beginning, so the prefix cache cannot make the measurement
 free — that difference matters: with a shared prefix, fLLM and every engine with a cache will look several times faster,
 and the number then measures the cache, not the engine.
+
+## A worked example (the client, not a performance claim)
+
+```bash
+fllm-rs make-tiny-model /tmp/tiny.gguf
+fllm-rs --model /tmp/tiny.gguf --model-name tiny --device cpu --port 8099 &
+python3 scripts/bench.py --target fllm=http://127.0.0.1:8099 --model tiny \
+    --requests 8 --concurrency 2 --max-tokens 16 --prompt-words 20 --json bench-tiny.json
+```
+
+```
+8 requests, concurrency 2, max 16 tokens, temperature 0.0
+      fllm  ttft p50    127.9 ms  p99     291.7 ms      99.9 tok/s     128 tokens  failed 0
+```
+
+Those numbers describe a random tiny model on a CPU and say nothing about how fast fLLM is with a real model. What they do
+show is that the client speaks the same streaming protocol a real run uses, measures TTFT from the first byte of the stream,
+and writes a JSON file. Replace the target with your model and the numbers become meaningful.

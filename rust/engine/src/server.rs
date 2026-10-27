@@ -132,6 +132,8 @@ enum WorkerCommand {
         request_id: String,
         prompt: Vec<i64>,
         max_tokens: usize,
+        /// `cache_salt` of the request: 0 when it does not ask for isolation.
+        prefix_salt: u64,
         sampling: Box<crate::sampling::SamplingParams>,
         constraint: Option<Box<llguidance::Matcher>>,
         images: Box<ImageOverrides>,
@@ -142,7 +144,45 @@ enum WorkerCommand {
         pooling: String,
         output: tokio::sync::oneshot::Sender<Result<Vec<f32>, String>>,
     },
+    /// `GET /admin/prefix-cache`: what the prefix cache holds right now.
+    Stats {
+        output: tokio::sync::oneshot::Sender<Value>,
+    },
+    /// `DELETE /admin/prefix-cache`: empty it and give the blocks back.
+    ClearPrefixCache {
+        output: tokio::sync::oneshot::Sender<Result<usize, String>>,
+    },
+    /// `GET /admin/kv-tier`: the disk tier's counters.
+    KvTierStats {
+        output: tokio::sync::oneshot::Sender<Value>,
+    },
+    /// `DELETE /admin/kv-tier`: drop every stored block.
+    ClearKvTier {
+        output: tokio::sync::oneshot::Sender<usize>,
+    },
 }
+
+/// `cache_salt` of a request: a string or a number, folded into 64 bits. 0 means "no isolation".
+fn cache_salt_of(body: &Value) -> u64 {
+    let Some(value) = body.get("cache_salt") else {
+        return 0;
+    };
+    let text = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => return 0,
+    };
+    if text.is_empty() {
+        return 0;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 
 #[derive(Clone)]
 struct GenerationTx {
@@ -259,6 +299,7 @@ impl BudgetControl {
             sampling,
             None,
             ImageOverrides::default(),
+            0,
         )
         .map_err(|_| "the server could not continue the reply after the thinking budget (it is busy)".to_owned())
     }
@@ -485,6 +526,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/admin/drain", post(admin_drain).delete(admin_undrain))
         .route("/admin/telemetry", get(admin_telemetry))
         .route("/admin/config", get(admin_config))
+        .route("/admin/prefix-cache", get(admin_prefix_cache).delete(admin_prefix_cache_clear))
+        .route("/admin/kv-tier", get(admin_kv_tier).delete(admin_kv_tier_clear))
         .route("/version", get(api::vllm::version))
         .route("/is_sleeping", get(api::vllm::is_sleeping))
         .route("/api/studio/status", get(api::studio::status))
@@ -970,10 +1013,25 @@ fn accept_command(
                 let _ = output.send(result);
             }
         }
+        WorkerCommand::Stats { output } => {
+            let report = runtime.prefix_cache_report();
+            // the receiver may be gone (the client hung up); that is not an error
+            let _ = output.send(report);
+        }
+        WorkerCommand::ClearPrefixCache { output } => {
+            let _ = output.send(runtime.clear_prefix_cache());
+        }
+        WorkerCommand::KvTierStats { output } => {
+            let _ = output.send(runtime.kv_tier_stats());
+        }
+        WorkerCommand::ClearKvTier { output } => {
+            let _ = output.send(runtime.clear_kv_tier());
+        }
         WorkerCommand::Submit {
             request_id,
             prompt,
             max_tokens,
+            prefix_salt,
             sampling,
             constraint,
             images,
@@ -983,6 +1041,8 @@ fn accept_command(
             // A panic in model code while a request is set up fails this request only.
             let admitted = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
                 let sequence_id = runtime.submit_with_sampling(request_id.clone(), prompt, max_tokens, *sampling)?;
+                // the salt has to be on the sequence before the first admission computes its prefix chain
+                runtime.set_request_prefix_salt(&request_id, prefix_salt);
                 let attached = runtime
                     .attach_media(sequence_id, *images)
                     .and_then(|()| match constraint {
@@ -1442,6 +1502,56 @@ fn server_health_metrics(state: &AppState) -> String {
         counters.connections_rejected.load(Ordering::Relaxed),
         counters.request_timeouts.load(Ordering::Relaxed),
     )
+}
+
+/// `GET /admin/prefix-cache`: the entries the prefix cache holds, their hashes and the hit counter. Goes through the worker,
+/// because the cache lives on the inference thread.
+async fn admin_prefix_cache(State(state): State<Arc<AppState>>) -> Response {
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::Stats { output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    match answer.await {
+        Ok(report) => Json(report).into_response(),
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    }
+}
+
+/// `DELETE /admin/prefix-cache`: drop every entry and hand the blocks back to the allocator.
+async fn admin_prefix_cache_clear(State(state): State<Arc<AppState>>) -> Response {
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::ClearPrefixCache { output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    match answer.await {
+        Ok(Ok(dropped)) => Json(json!({"dropped": dropped})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    }
+}
+
+/// `GET /admin/kv-tier`: how much the disk tier holds and how often it was used.
+async fn admin_kv_tier(State(state): State<Arc<AppState>>) -> Response {
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::KvTierStats { output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    match answer.await {
+        Ok(stats) => Json(stats).into_response(),
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    }
+}
+
+/// `DELETE /admin/kv-tier`: drop every stored block on disk.
+async fn admin_kv_tier_clear(State(state): State<Arc<AppState>>) -> Response {
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::ClearKvTier { output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    match answer.await {
+        Ok(removed) => Json(json!({"removed": removed})).into_response(),
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    }
 }
 
 /// `GET /admin/config`: the settings that are actually in force — what the environment and the page decided, in one place.
@@ -2634,6 +2744,7 @@ async fn openai_generate(
         sampling,
         constraint,
         images,
+        cache_salt_of(&body),
     ) {
         Ok(rx) => rx,
         Err(response) => return response,
@@ -3153,6 +3264,7 @@ async fn sglang_generate(
             Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
         },
         ImageOverrides::default(),
+        cache_salt_of(&body),
     ) {
         Ok(rx) => rx,
         Err(response) => return response,
@@ -3503,6 +3615,7 @@ async fn ollama_generate_inner(
             Err(e) => return api::ollama_extra::error(StatusCode::BAD_REQUEST, &e),
         },
         images,
+        cache_salt_of(&body),
     ) {
         Ok(rx) => rx,
         Err(response) => return api::ollama_extra::error_from(response).await,
@@ -3774,6 +3887,9 @@ fn queue_full(state: &AppState) -> Response {
 
 // Axum responses are intentionally returned directly on this error-only path.
 #[allow(clippy::result_large_err)]
+// Eight arguments is a lot, but this is the one place where a request turns into a worker command; a struct would only move
+// the same fields one level down.
+#[allow(clippy::too_many_arguments)]
 fn submit_constrained(
     state: &AppState,
     request_id: &str,
@@ -3782,6 +3898,7 @@ fn submit_constrained(
     sampling: crate::sampling::SamplingParams,
     constraint: Option<llguidance::Matcher>,
     images: ImageOverrides,
+    prefix_salt: u64,
 ) -> Result<GenerationRx, Response> {
     if prompt.is_empty() {
         return Err(api_error(
@@ -3828,6 +3945,7 @@ fn submit_constrained(
             request_id: request_id.into(),
             prompt,
             max_tokens,
+            prefix_salt,
             sampling: Box::new(sampling),
             constraint: constraint.map(Box::new),
             images: Box::new(images),

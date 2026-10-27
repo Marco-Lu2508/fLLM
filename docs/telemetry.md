@@ -30,6 +30,18 @@ Beyond the model counters: `fllm_output_cache_*` (hits, misses, evictions, bytes
 refused), `fllm_coalescing_leaders_total` / `fllm_coalesced_requests_total` (requests that computed for others / waited),
 and `fllm_otel_spans_sent_total`. One scrape answers "is this instance healthy, busy, and answering from cache".
 
+## Inspecting the prefix cache
+
+`GET /admin/prefix-cache` answers with `enabled`, `entries`, `hits`, the blocks (`hash`, `tokens`) and the radix `tree`.
+Live example from a tiny model after one request: four entries of 16 tokens, each with the chain hash that identifies it.
+This is what makes a "why was my prompt not reused" question answerable instead of guessed. `DELETE /admin/prefix-cache`
+empties it and gives the blocks back to the allocator — useful after a template change, when the old blocks are dead weight.
+
+## The disk tier
+
+`GET /admin/kv-tier` reports `enabled`, `dir`, `max_bytes`, `used_bytes`, `spills`, `hits`, `misses` and `drops`;
+`DELETE /admin/kv-tier` removes every stored block. Both go through the inference worker, like the prefix cache.
+
 ## Rate limits already exist
 
 Before building anything new: per-key limits are in the server already —

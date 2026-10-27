@@ -66,6 +66,10 @@ Two more knobs decide how much state is shared between requests:
 | `FLLM_PREFIX_CACHE` | on | `off` disables the prefix cache completely: no KV block is taken from or given to another request. Use it when requests of different tenants must never share state — the cheaper variant is one process per tenant. |
 | `FLLM_PREEMPTION` | `recompute` | `swap` moves the KV blocks of a preempted sequence into host memory instead of throwing them away and prefilling again. `swap` needs a backend that can copy KV blocks; without that the server says so and keeps recomputing. |
 
+**Per-request isolation is `cache_salt`:** a string or number in the request body. It seeds that request's prefix chain and it
+is part of the output-cache key, so two callers with different salts never share an answer or a KV block. Requests without it
+keep the historical behaviour (one namespace per process).
+
 **Per-deployment isolation is a salt:** `FLLM_PREFIX_SALT=<name>` seeds every prefix chain, so two servers cannot share
 blocks even if they see the same prompt. It is per process, not per key — a deployment that serves several tenants from one
 process needs one process per tenant (or `FLLM_PREFIX_CACHE=off`).

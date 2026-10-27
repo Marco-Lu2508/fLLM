@@ -122,6 +122,10 @@ pub(crate) fn fingerprint(state: &AppState, body: &Value, is_chat: bool) -> Opti
         .collect::<Vec<_>>()
         .join("\u{1f}");
     sampling.sort_by(|a, b| a.0.cmp(&b.0));
+    // the salt does not change the text, but it names the namespace the answer belongs to
+    if let Some(value) = body.get("cache_salt") {
+        sampling.push(("cache_salt".to_owned(), value.to_string()));
+    }
     // logprobs change the answer payload, so they belong into the key
     for key in ["logprobs", "top_logprobs"] {
         if let Some(value) = body.get(key) {

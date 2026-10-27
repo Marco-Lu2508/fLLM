@@ -51,6 +51,8 @@ pub struct Sequence {
     pub choice_index: usize,
     pub blocks: Vec<usize>,
     pub block_hashes: Vec<Option<u64>>,
+    /// Per-request salt (`cache_salt`): its blocks never match another salt's, even for the same prompt.
+    pub prefix_salt: u64,
     /// Draft length controller of this sequence (see `SchedulerConfig::speculative_adaptive`).
     pub adaptive: crate::speculative::AdaptiveDraft,
     /// Order of arrival in the scheduler (ties of equal priority are served first come, first served).
@@ -110,6 +112,7 @@ impl Sequence {
             choice_index: 0,
             blocks: vec![],
             block_hashes: vec![],
+            prefix_salt: 0,
             adaptive: crate::speculative::AdaptiveDraft::new(1, 16),
             arrival: 0,
             enqueued: std::time::Instant::now(),
@@ -232,6 +235,9 @@ pub struct Scheduler {
     pub sequences: HashMap<i64, Sequence>,
     pub requests: HashMap<String, Vec<i64>>,
     pub prefix_cache_hits: u64,
+    /// Blocks that were just registered in the prefix cache and may be written to the disk tier. Drained by the runtime,
+    /// which owns the decoder: the scheduler knows the block and its hash, but not the KV bytes.
+    pub pending_spills: Vec<(u64, u64, i64, Vec<i64>)>,
     next_offset: HashMap<i64, usize>,
     pub external_drafts: HashMap<i64, Vec<i64>>,
     next_arrival: u64,
@@ -272,6 +278,7 @@ impl Scheduler {
             sequences: HashMap::new(),
             requests: HashMap::new(),
             prefix_cache_hits: 0,
+            pending_spills: Vec::new(),
             next_offset: HashMap::new(),
             external_drafts: HashMap::new(),
             next_arrival: 0,
@@ -472,8 +479,8 @@ impl Scheduler {
         let n_full = prompt.len().saturating_sub(1) / self.cfg.block_size;
         let mut hashes = vec![];
         let mut toks = vec![];
-        // the seed is what separates one deployment's prefix blocks from another's: same seed, shared blocks
-        let mut prev = prefix_seed();
+        // the seed separates deployments, the sequence's salt separates requests: same seed *and* same salt, shared blocks
+        let mut prev = prefix_seed() ^ self.sequences[&sid].prefix_salt;
         for b in 0..n_full {
             let seg = prompt[b * self.cfg.block_size..(b + 1) * self.cfg.block_size].to_vec();
             prev = PrefixCache::hash_chain(prev, &seg);
@@ -632,6 +639,119 @@ impl Scheduler {
             }
         })?)
     }
+    /// Takes the blocks the runtime should write to the disk tier. They stay alive (the cache holds a reference), so
+    /// their KV is still valid when the runtime reads it.
+    pub fn take_pending_spills(&mut self) -> Vec<(u64, u64, i64, Vec<i64>)> {
+        const KEEP: usize = 4096;
+        if self.pending_spills.len() > KEEP {
+            let drop = self.pending_spills.len() - KEEP;
+            self.pending_spills.drain(..drop);
+        }
+        std::mem::take(&mut self.pending_spills)
+    }
+
+    /// A free block, for a block that is read back from the disk tier.
+    pub fn alloc_free_block(&mut self) -> Result<i64, SchedulerError> {
+        Ok(self.bm.allocator.alloc()? as i64)
+    }
+
+    /// Gives a block back that was allocated for a disk import and then not used.
+    pub fn free_block(&mut self, bid: i64) {
+        let _ = self.bm.allocator.dec_ref(bid);
+    }
+
+    pub fn has_prefix_hash(&self, hash: u64) -> bool {
+        self.pc.as_ref().is_some_and(|pc| pc.contains(hash))
+    }
+
+    /// Registers a whole chain at once: the radix tree needs the path from its root, not single blocks side by side.
+    pub fn register_prefix_chain(&mut self, chain: &[(u64, Vec<i64>, i64)]) -> Result<bool, SchedulerError> {
+        let Some(pc) = self.pc.as_mut() else {
+            return Ok(false);
+        };
+        if chain.is_empty() || pc.contains(chain[0].0) {
+            return Ok(false);
+        }
+        let entries: Vec<PrefixEntry> = chain
+            .iter()
+            .map(|(hash, tokens, block)| PrefixEntry {
+                chain_hash: *hash,
+                block_id: *block,
+                tokens: tokens.clone(),
+            })
+            .collect();
+        let bm = &mut self.bm;
+        let cell = std::cell::RefCell::new(&mut *bm);
+        let mut claim = |bid: i64| {
+            cell.borrow_mut()
+                .allocator
+                .inc_ref(bid)
+                .map_err(PrefixCacheError::from)
+        };
+        let mut release = |bid: i64| {
+            cell.borrow_mut()
+                .allocator
+                .dec_ref(bid)
+                .map_err(PrefixCacheError::from)
+        };
+        pc.insert_path(&entries, &mut claim, &mut release)?;
+        Ok(true)
+    }
+
+    /// Registers a block that already holds imported KV under `hash`. The parent has to be in the cache (or be `0`),
+    /// otherwise the chain would claim a prefix it does not have.
+    pub fn register_prefix_block(
+        &mut self,
+        hash: u64,
+        parent: u64,
+        tokens: Vec<i64>,
+        block: i64,
+    ) -> Result<bool, SchedulerError> {
+        if parent != 0 && !self.has_prefix_hash(parent) {
+            return Ok(false);
+        }
+        let Some(pc) = self.pc.as_mut() else {
+            return Ok(false);
+        };
+        if pc.contains(hash) {
+            return Ok(false);
+        }
+        let bm = &mut self.bm;
+        let cell = std::cell::RefCell::new(&mut *bm);
+        let mut claim = |bid: i64| {
+            cell.borrow_mut()
+                .allocator
+                .inc_ref(bid)
+                .map_err(PrefixCacheError::from)
+        };
+        let mut release = |bid: i64| {
+            cell.borrow_mut()
+                .allocator
+                .dec_ref(bid)
+                .map_err(PrefixCacheError::from)
+        };
+        pc.insert(hash, block, tokens, &mut claim, &mut release)?;
+        Ok(true)
+    }
+
+    /// Empties the prefix cache and gives the blocks back to the allocator. Returns how many entries were dropped.
+    pub fn clear_prefix_cache(&mut self) -> Result<usize, SchedulerError> {
+        let Some(pc) = self.pc.as_mut() else {
+            return Ok(0);
+        };
+        let before = pc.len();
+        let bm = &mut self.bm;
+        pc.clear(&mut |bid| {
+            let i = bid as usize;
+            if bm.allocator.refcounts.get(i).copied() == Some(1) {
+                bm.allocator.dec_ref(bid).map_err(PrefixCacheError::from)?;
+                bm.block_hashes.remove(&i);
+            }
+            Ok(())
+        })?;
+        Ok(before)
+    }
+
     fn preempt(&mut self, sid: i64) -> Result<(), SchedulerError> {
         let seq = self.sequences.get_mut(&sid).unwrap();
         seq.preempted = true;
@@ -752,6 +872,12 @@ impl Scheduler {
             pc.as_mut()
                 .unwrap()
                 .insert_path(&entries, &mut claim, &mut release)?;
+            // (own hash, parent hash, block, tokens) — the parent is what makes a chain rebuildable later
+            let mut parent = 0u64;
+            for entry in &entries {
+                self.pending_spills.push((entry.chain_hash, parent, entry.block_id, entry.tokens.clone()));
+                parent = entry.chain_hash;
+            }
         }
         Ok(())
     }

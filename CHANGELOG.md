@@ -18,6 +18,7 @@ behaviour between versions).
 
 ### Added
 - Docker and Kubernetes: the options of the page apply to `serve` too, the CPU Compose file keeps them in a volume, and restarting or loading another model inside a container replaces the server in place instead of ending the container.
+- Settings > Engine also has the folder and size for prompt blocks on disk (`FLLM_KV_DISK_DIR`), with live numbers and buttons to delete them or forget the shared prompts in memory.
 - Settings > Engine: the output cache (on or off, size, time, who shares it), prefix sharing, the prefix separator, what happens when memory runs out, telemetry address and name, plus live numbers, "empty the cache" and "stop taking new requests". The options are saved and take effect when the server restarts (a button restarts it).
 
 ### Fixed
@@ -44,6 +45,17 @@ Fixes the header menus of 0.1.9 (the assistant list could not be used), makes th
 - Code page: "The coding agent is not available." now says why (the server without a model has no agent: load a model first), shows the HTTP status for other errors, and has a *Try again* button.
 
 ### Added
+- **`Runtime::fork_sequence`**: copies a running sequence with its KV blocks (block by block via `copy_prompt_block`, which handles both uniform and layered geometries), gives everything back on failure, and hands the copy to admission as already-computed. This is the primitive beam search needs; the search itself is not built yet.
+- **`cache_salt` per request**: the salt names the namespace of an answer — it seeds the prefix chain (`Sequence::prefix_salt`) and is part of the output-cache key, so two tenants with different salts never see each other's cached answer or KV blocks. Live: salt B regenerated after salt A had cached the same prompt; the same salt was a hit.
+- **Disk-tier writes run on their own thread**: the step path exports the block and hands it to a bounded queue (256), so file I/O never sits between two tokens; a full queue drops the block instead of delaying a token.
+- **`GET|DELETE /admin/kv-tier`**: the disk tier reports its directory, budget, used bytes, spills, hits, misses and drops; `DELETE` removes every stored block and answers how many. Live: `used_bytes 12780`, `{"removed":3}`, back to `0`.
+- **`DELETE /admin/prefix-cache`**: empties the cache and hands the blocks back to the allocator (`Scheduler::clear_prefix_cache`), answering how many entries were dropped. Verified live: 3 entries → `{"dropped":3}` → 0.
+- **`GET /admin/prefix-cache`**: what the prefix cache holds — entry count, hit counter, every block with its chain hash and token count, and the radix tree itself. Runs through the inference worker, because the cache lives on that thread.
+- **KV disk tier reads**: `Runtime::warm_prefix_cache` rebuilds chains from disk at the first step (root first, whole path via `insert_path`), so a restart keeps the prefix cache. Live: `warmed 4 prefix blocks` and `cached: 64 / 76` on the first request of a fresh process.
+- **KV disk tier format v2**: every block stores its parent hash and its tokens, so a chain can be rebuilt in order (`FLLMKV02`); verified live with a four-block chain.
+- **KV disk tier (write-through)**: cached prefix blocks are written to `FLLM_KV_DISK_DIR` as soon as the prefix cache registers them (`Scheduler::insert_full_blocks` → `pending_spills` → `Runtime::spill_pending`), while the block is alive so its KV still belongs to its hash. Verified live: one chat request produced three `.kv` files of 4120 bytes. Reading back is not wired yet (`docs/dev/kv-disk-tier.md`).
+- **KV disk tier (storage)**: `mem/kv_tier.rs` writes evicted KV blocks to `FLLM_KV_DISK_DIR` under their chain hash with an LRU budget, atomic renames and a header check; not wired into the engine yet (`docs/dev/kv-disk-tier.md`).
+- **Design notes**: `docs/dev/step-api.md` (the seam beam search, multi-step and jump-forward need) and `docs/dev/kv-disk-tier.md`.
 - **`FLLM_PREFIX_SALT`**: seeds every prefix chain, so two deployments can never reuse each other's KV blocks for the same prompt.
 - **`GET /admin/config`**: the effective settings in one place — cache identity and statistics, prefix cache, preemption policy, telemetry, coalescing, sandbox, ready/draining.
 - **Request coalescing**: identical deterministic requests that are in flight at the same time are computed once — the first leads, the rest wait for its answer (and learn when it failed instead of hanging).

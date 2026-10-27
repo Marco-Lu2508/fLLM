@@ -140,6 +140,19 @@ impl PrefixCache {
         hash ^ (hash >> 29)
     }
 
+    /// Whether a chain hash is in the cache already.
+    pub fn contains(&self, hash: u64) -> bool {
+        self.by_hash.contains_key(&hash)
+    }
+
+    /// The block a chain hash points at.
+    pub fn block_of(&self, hash: u64) -> Option<i64> {
+        self.by_hash
+            .get(&hash)
+            .and_then(|index| self.nodes[*index].as_ref())
+            .and_then(|node| node.block_id)
+    }
+
     pub fn len(&self) -> usize {
         self.blocks.len()
     }

@@ -105,6 +105,8 @@ are valid; anything else exits with `invalid number for <flag>`.
 | `FLLM_OUTPUT_CACHE_TTL` | Server | Lifetime of a cached answer in seconds, default `3600` |
 | `FLLM_CACHE_SCOPE` | Server | `global` (default) shares answers between users, `tenant` scopes them per `user` field, `off` disables the cache; `tenant` next to a running prefix cache logs a warning |
 | `FLLM_PREFIX_CACHE` | Scheduler | Prefix (KV block) sharing between requests, on by default; `off`, `0`, `no` or `false` switch it off |
+| `FLLM_KV_DISK_DIR` | Scheduler | Directory for the KV disk tier; empty means off. Cached preface blocks are written there and read back at the first step, so a restart keeps the prefix cache |
+| `FLLM_KV_DISK_BYTES` | Scheduler | Byte budget of the disk tier, default `8589934592` (8 GiB); the least recently used block goes first |
 | `FLLM_PREFIX_SALT` | Scheduler | Seeds every prefix chain, so two deployments can never reuse each other's KV blocks for the same prompt; empty keeps the historical seed `0` |
 | `FLLM_PREEMPTION` | Scheduler | `recompute` (default) drops a sequence's KV and rebuilds it later, `swap` keeps it in host memory; `swap` needs a backend that can copy KV |
 | `FLLM_OTEL_ENDPOINT` | Server | OTLP/HTTP collector base URL; without it no spans leave the process |

@@ -39,6 +39,12 @@
         row('', 'Separate this installation', 'A text that keeps the shared prompt blocks of this server apart from those of another server. Leave it empty unless you run several.', '<input type="text" id="engPrefixSalt" class="ui-input mono" style="width:180px;" autocomplete="off">') +
         row('', 'When memory runs out', '“Recompute” drops the work of a waiting request and does it again later (saves memory). “Move to RAM” keeps it in the main memory (faster to continue, needs RAM).', select('engPreemption', [['recompute', 'Recompute'], ['swap', 'Move to RAM']])) +
         '</div>' +
+        '<div class="app-card" style="margin-top:12px;"><div class="app-card-title">Prompt blocks on disk</div>' +
+        row('', 'Keep shared prompt blocks on disk', 'A folder where the work done for long shared prompts (system prompts, documents) is saved, so a restart does not have to redo it. Empty means off. Use a fast disk; the folder is never read from another program.', '<input type="text" id="engKvDir" class="ui-input mono" style="width:260px;" placeholder="off (type a full folder path)" autocomplete="off">') +
+        row('', 'Disk space for them', 'The oldest blocks are removed when the folder is full.', number('engKvMb', 1) + ' <span class="app-item-desc">MB</span>') +
+        '<div class="app-item-desc mono" id="engKvStats" style="padding:8px 4px 0;font-size:11px;"></div>' +
+        '<div style="display:flex;gap:8px;padding:8px 4px 0;"><button class="btn btn-ghost" id="engKvClear">Delete the blocks on disk</button><button class="btn btn-ghost" id="engPrefixClear">Forget the shared prompts in memory</button></div>' +
+        '</div>' +
         '<div class="app-card" style="margin-top:12px;"><div class="app-card-title">Telemetry</div>' +
         row('', 'Send traces to', 'The address of an OpenTelemetry collector (for example http://127.0.0.1:4318). Nothing is sent while it is empty. Only timings and sizes are sent, never the text of a conversation.', '<input type="text" id="engOtelEndpoint" class="ui-input mono" style="width:260px;" placeholder="off" autocomplete="off">') +
         row('', 'Name of this server', 'How the server is called in the traces.', '<input type="text" id="engOtelService" class="ui-input mono" style="width:180px;" autocomplete="off">') +
@@ -60,7 +66,7 @@
       const FIELDS = {
         output_cache: ['engOutputCache', 'value'], output_cache_mb: ['engCacheMb', 'value'], output_cache_ttl: ['engCacheTtl', 'value'],
         cache_scope: ['engCacheScope', 'value'], prefix_cache: ['engPrefixCache', 'checked'], prefix_salt: ['engPrefixSalt', 'value'],
-        preemption: ['engPreemption', 'value'], otel_endpoint: ['engOtelEndpoint', 'value'], otel_service: ['engOtelService', 'value'],
+        preemption: ['engPreemption', 'value'], kv_disk_dir: ['engKvDir', 'value'], kv_disk_mb: ['engKvMb', 'value'], otel_endpoint: ['engOtelEndpoint', 'value'], otel_service: ['engOtelService', 'value'],
       };
       let defaults = {};
       let saved = {};
@@ -97,6 +103,21 @@
         }
       }
 
+      async function liveKv() {
+        try {
+          const res = await apiFetch('/admin/kv-tier');
+          if (!res.ok) throw new Error(String(res.status));
+          const t = await res.json();
+          el('engKvStats').textContent = t.enabled === false ? 'The disk copy is off.' : `now: ${formatBytes(t.used_bytes || 0)} of ${formatBytes(t.max_bytes || 0)} used · ${t.hits ?? 0} blocks read back, ${t.spills ?? 0} written, ${t.drops ?? 0} skipped`;
+          el('engKvClear').disabled = false;
+          el('engPrefixClear').disabled = false;
+        } catch {
+          el('engKvStats').textContent = 'Load a model to see the live numbers.';
+          el('engKvClear').disabled = true;
+          el('engPrefixClear').disabled = true;
+        }
+      }
+
       async function load() {
         try {
           const res = await apiFetch('/api/studio/engine');
@@ -110,6 +131,7 @@
           say('Could not read the settings: ' + ((e && e.message) || e));
         }
         live();
+        liveKv();
       }
 
       async function save(body, message) {
@@ -147,6 +169,18 @@
         const data = await res.json().catch(() => ({}));
         toast(res.ok ? `${data.cleared ?? 0} saved answers removed.` : 'The cache could not be emptied.');
         live();
+      });
+      el('engKvClear').addEventListener('click', async () => {
+        if (!await confirmDialog('Delete every prompt block that is saved on disk?')) return;
+        const res = await apiFetch('/admin/kv-tier', { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        toast(res.ok ? `${data.removed ?? 0} blocks deleted.` : 'The blocks could not be deleted.');
+        liveKv();
+      });
+      el('engPrefixClear').addEventListener('click', async () => {
+        const res = await apiFetch('/admin/prefix-cache', { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        toast(res.ok ? `${data.dropped ?? 0} shared prompts forgotten.` : 'The cache could not be emptied.');
       });
       el('engDrain').addEventListener('change', async (e) => {
         const res = await apiFetch('/admin/drain', { method: e.target.checked ? 'POST' : 'DELETE' });
