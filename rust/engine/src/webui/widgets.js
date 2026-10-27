@@ -214,6 +214,24 @@
         } else document.execCommand('insertText', false, text);
       }
 
+      /** The buttons of the row or message under the pointer (pin, rename, delete, copy ...) as menu entries; they run the button's own click. */
+      function rowActions(target) {
+        let el = target;
+        let bar = null;
+        while (el && el !== document.body) {
+          const own = el.matches && el.matches('.thread-row, .prj-row') ? el.querySelector('.thread-row-actions') : null;
+          if (own) { bar = own; break; }
+          const bars = el.querySelectorAll ? el.querySelectorAll('.msg-actions-bar') : [];
+          if (bars.length === 1) { bar = bars[0]; break; }
+          el = el.parentElement;
+        }
+        if (!bar) return [];
+        return Array.from(bar.querySelectorAll('button')).map((button) => {
+          const full = button.dataset.tip || button.getAttribute('title') || button.getAttribute('aria-label') || '';
+          return { label: full.split(/[.:]/)[0].trim(), run: () => button.click(), danger: /delete|remove/i.test(full) };
+        }).filter((x) => x.label);
+      }
+
       function actions(target) {
         const list = [];
         const field = isEditable(target) ? target : null;
@@ -228,6 +246,10 @@
           return list;
         }
         if (text) list.push({ label: 'Copy', key: 'Ctrl+C', run: () => navigator.clipboard.writeText(text) });
+        const own = rowActions(target);
+        if (own.length && list.length) list.push({ separator: true });
+        list.push(...own);
+        if (own.length && !text) return list;
         if (link) list.push({ label: 'Copy link', run: () => navigator.clipboard.writeText(link.href) });
         const block = target.closest && target.closest('pre, .msg-assistant-prose, .msg-user-bubble, .tool-cmd, td');
         if (block && !text) list.push({ label: block.tagName === 'PRE' ? 'Copy code' : 'Copy text', run: () => navigator.clipboard.writeText(block.innerText.trim()) });
@@ -244,8 +266,9 @@
         menu = document.createElement('div');
         menu.className = 'popover-panel cs-list open cm';
         list.forEach((a) => {
+          if (a.separator) { const line = document.createElement('div'); line.className = 'cm-sep'; menu.appendChild(line); return; }
           const row = document.createElement('div');
-          row.className = 'menu-item cs-item' + (a.off ? ' cs-disabled' : '');
+          row.className = 'menu-item cs-item' + (a.off ? ' cs-disabled' : '') + (a.danger ? ' danger' : '');
           const name = document.createElement('span');
           name.textContent = a.label;
           row.appendChild(name);

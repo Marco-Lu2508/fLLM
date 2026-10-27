@@ -652,3 +652,13 @@ img, a { -webkit-user-drag: none; }
 .cm { min-width: 190px; }
 .cm .cs-item { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .cm-key { color: var(--muted-fg); font-size: var(--text-xs); }
+.cm-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+
+/* sliders in the look of the app */
+input[type=range] { -webkit-appearance: none; appearance: none; height: 18px; background: transparent; cursor: pointer; }
+input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 999px; background: var(--border-strong); }
+input[type=range]::-moz-range-track { height: 4px; border-radius: 999px; background: var(--border-strong); }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%; background: var(--primary); border: 2px solid var(--bg); box-shadow: 0 0 0 1px var(--primary); }
+input[type=range]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); border: 2px solid var(--bg); box-shadow: 0 0 0 1px var(--primary); }
+input[type=range]:focus-visible { outline: none; }
+input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--primary-soft); }
