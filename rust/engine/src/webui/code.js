@@ -2541,7 +2541,11 @@
         return;
       }
       if (!text) return;
-      if (state.setup) { toast('Load a model first.'); switchSurface('hub'); return; }
+      if (state.setup) {
+        if (state.status?.last_model && await window.fllmLoadLastModelFor(text, 'code')) return;
+        if (!state.status?.last_model) { toast('Load a model first.'); switchSurface('hub'); }
+        return;
+      }
       ta.value = '';
       ta.style.height = 'auto';
       closeMention();

@@ -615,3 +615,11 @@ header, .app-header {
   color: var(--muted-fg);
   padding: 16px 16px 6px;
 }
+
+/* ---- tables of numbers (usage and cost, ...) ------------------------------------------------------ */
+table.tabular { border-collapse: collapse; table-layout: auto; width: 100%; font-size: var(--text-sm, 13px); }
+table.tabular th, table.tabular td { padding: 7px 10px; text-align: right; vertical-align: baseline; white-space: nowrap; }
+table.tabular th:first-child, table.tabular td:first-child { text-align: left; width: 100%; white-space: normal; overflow-wrap: anywhere; }
+table.tabular thead th { color: var(--muted-fg, var(--muted-foreground)); font-size: var(--text-xs, 12px); font-weight: 500; border-bottom: 1px solid var(--border); }
+table.tabular tbody td { border-bottom: 1px solid color-mix(in oklab, var(--border) 55%, transparent); }
+table.tabular tfoot th { font-weight: 600; border-top: 1px solid var(--border); }

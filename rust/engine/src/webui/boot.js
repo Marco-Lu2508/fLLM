@@ -410,7 +410,25 @@
     renderChatArea();
     prjInit(); // projects.js: assistants (migrated presets), projects, memory, prompt library
     updateRouteTesterSample();
-    refreshStudioStatus().then(() => { if (!state.setup) loadWorkspace(); });
+    refreshStudioStatus().then(() => {
+      if (state.setup) return;
+      loadWorkspace();
+      // the message that asked for the model to be loaded (models.js: loadLastModelFor) goes out now
+      let pending = null;
+      try { pending = JSON.parse(sessionStorage.getItem('fllm.pendingSend') || 'null'); } catch { /* not ours */ }
+      if (!pending || !pending.text) return;
+      sessionStorage.removeItem('fllm.pendingSend');
+      setTimeout(() => {
+        if (pending.surface === 'code') {
+          switchSurface('code');
+          $('codeTextarea').value = pending.text;
+          $('btnCodeSend').click();
+        } else {
+          $('chatTextarea').value = pending.text;
+          sendChatPrompt();
+        }
+      }, 400);
+    });
     setTimeout(() => { state.updateChecked = true; checkUpdate().then(() => { if (state.update?.newer) toast(`Version ${state.update.latest} is available: see Models.`); }); }, 4000);
     if (window.matchMedia('(max-width: 760px)').matches) toggleSidebar(); // on a phone the rail would cover the page
     setInterval(() => { if (!document.hidden) refreshStudioStatus(); }, 2000); // a hidden tab asks nothing

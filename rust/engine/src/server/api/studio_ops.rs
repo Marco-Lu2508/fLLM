@@ -518,6 +518,7 @@ fn settings_json() -> Value {
     let default_dir = crate::hub::default_models_dir();
     json!({
         "idle_unload_minutes": crate::hub::idle_unload_minutes(),
+        "load_on_start": crate::hub::load_on_start(),
         "models_dir": crate::hub::saved_models_dir(),
         "models_dir_active": crate::hub::cache_root().display().to_string(),
         "models_dir_default": default_dir.display().to_string(),
@@ -554,6 +555,9 @@ pub(in crate::server) async fn update_settings(Json(body): Json<Value>) -> Respo
             Some(m) if m <= 10_080 => crate::hub::set_studio_setting("idle_unload_minutes", json!(m)),
             _ => return api_error(StatusCode::BAD_REQUEST, "The idle time must be a whole number of minutes, from 0 (never) to 10080."),
         }
+    }
+    if let Some(on) = body.get("load_on_start").and_then(Value::as_bool) {
+        crate::hub::set_studio_setting("load_on_start", json!(on));
     }
     if let Some(text) = body.get("models_dir").and_then(Value::as_str) {
         if text.trim().is_empty() {

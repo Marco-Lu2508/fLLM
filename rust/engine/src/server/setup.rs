@@ -12,6 +12,8 @@ fn status() -> Value {
         "ready": true,
         "setup": true,
         "setup_error": PROBLEM.get(),
+        // the model that loads with the first message (the page offers it instead of sending the user to the model list)
+        "last_model": if PROBLEM.get().is_some() { None } else { crate::hub::last_studio_model() },
         "version": env!("CARGO_PKG_VERSION"),
         "build_info": crate::version::long_version(),
         "model": {
@@ -70,6 +72,21 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/schedule/run", post(api::schedule::run_now))
         .route("/api/studio/schedule/results", get(api::schedule::results))
         .route("/api/studio/schedule/check", get(api::schedule::check))
+        // the settings pages that need no model: the app opens without one now and loads the last model with the first message
+        .route("/api/studio/skills/library", get(api::skills::library).post(api::skills::install_builtin))
+        .route("/api/studio/skills/import", post(api::skills::import))
+        .route("/api/studio/hooks", get(api::hooks::list).post(api::hooks::save_handler))
+        .route("/api/studio/hooks/test", post(api::hooks::test))
+        .route("/api/studio/agents", get(api::agents::list).post(api::agents::write).delete(api::agents::remove_route))
+        .route("/api/studio/prices", get(api::prices::list).post(api::prices::save_handler))
+        .route("/api/studio/plugins", get(api::plugins::list).post(api::plugins::install_route).delete(api::plugins::remove_route))
+        .route("/api/studio/plugins/commands", get(api::plugins::commands_route))
+        .route("/api/studio/plugins/command", get(api::plugins::command_route))
+        .route("/api/studio/runtime", get(api::studio_mode::route_status).post(api::studio_mode::route_save))
+        .route("/api/studio/embeddings", get(api::studio_embed::route_status).post(api::studio_embed::route_save))
+        .route("/api/studio/search", post(api::websearch::search_route))
+        .route("/api/studio/search/engines", get(api::websearch::engines_route).post(api::websearch::engines_save))
+        .route("/api/studio/web/search", post(api::websearch::search_route))
         .layer(axum::middleware::from_fn_with_state(context, http::layer))
 }
 

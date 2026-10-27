@@ -106,7 +106,11 @@
         $('setupError').style.display = data.setup_error ? '' : 'none';
         if (data.setup_error) $('setupError').textContent = `The model could not be loaded: ${data.setup_error}`;
         $('loadedModelCard').style.display = state.setup ? 'none' : '';
-        if (state.setup && wasSetup === undefined) switchSurface('hub');
+        // without a model the page opens on the model list, unless the last model loads with the first message
+        if (state.setup && wasSetup === undefined && !data.last_model) switchSurface('hub');
+        if (data.last_model && $('setupText')) {
+          $('setupText').textContent = 'No model is loaded. The last model loads when you send your first message, or load another one below.';
+        }
         updateHero(data);
 
         const m = data.model || {};

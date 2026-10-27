@@ -6,6 +6,13 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Changed
+- The app no longer loads a model when it opens. The last model loads with your first message in Chat or Code, which is then sent on its own once the model is ready. Settings > Models > "Load the last model when the app starts" brings the old behaviour back.
+- The settings pages for hooks, agents, prices, plugins, runtime, embeddings and web search open without a model loaded.
+
+### Fixed
+- The columns of the usage and cost table line up (numbers right-aligned).
+
 ## [0.1.10] - 2026-10-27
 
 Fixes the header menus of 0.1.9 (the assistant list could not be used), makes the Code page say why it is unavailable, lets the coding agent create its own sub-agents, and turns conversation lookup on by default.

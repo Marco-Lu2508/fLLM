@@ -1709,6 +1709,12 @@ pub fn idle_unload_minutes() -> u64 {
     studio_setting("idle_unload_minutes").and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
+/// Whether the Studio loads the last model when it starts (setting `load_on_start`). Off by default: the app opens at once and the model
+/// loads when the first message is sent (the memory stays free until then).
+pub fn load_on_start() -> bool {
+    studio_setting("load_on_start").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// The MCP server list (`mcp.json`, the common `{"mcpServers": {...}}` format) next to `studio.json`.
 pub fn mcp_file() -> PathBuf {
     studio_file().with_file_name("mcp.json")

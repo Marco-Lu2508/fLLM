@@ -401,6 +401,29 @@
       await waitForRestart((d) => d.model?.name !== before, 'Loading the model ...');
     }
 
+    /**
+     * The app started without a model but knows the last one: load it now, and send the message that asked for it as soon as the page is
+     * back. `text` is kept across the restart in the session storage of this tab.
+     */
+    async function loadLastModelFor(text, surface) {
+      const reference = state.status?.last_model;
+      if (!reference) return false;
+      sessionStorage.setItem('fllm.pendingSend', JSON.stringify({ text, surface }));
+      $('switchTitle').textContent = 'Loading the model';
+      $('switchText').textContent = `${baseName(reference)} loads now. Your message is sent when it is ready ...`;
+      $('switchOverlay').classList.add('open');
+      const res = await apiFetch('/api/studio/models/load', { method: 'POST', body: { model: reference } });
+      if (!res.ok) {
+        sessionStorage.removeItem('fllm.pendingSend');
+        $('switchOverlay').classList.remove('open');
+        toast((await res.json().catch(() => ({}))).error?.message || 'The model could not be loaded.');
+        return false;
+      }
+      await waitForRestart((d) => !d.setup, 'Loading the model ...');
+      return true;
+    }
+    window.fllmLoadLastModelFor = loadLastModelFor;
+
     async function unloadModel() {
       const ok = await askDialog({ title: 'Unload the model?', text: 'The model is removed from memory. You can load it again from Models.', ok: 'Unload' });
       if (!ok) return;
@@ -473,6 +496,7 @@
         const d = await (await apiFetch('/api/studio/settings')).json();
         $('inpModelsDir').value = d.models_dir || '';
         $('inpIdleMinutes').value = d.idle_unload_minutes || 0;
+        $('chkLoadOnStart').checked = Boolean(d.load_on_start);
         $('modelsDirActive').textContent = `In use now: ${d.models_dir_active}`;
         $('inpModelsDir').placeholder = d.models_dir_default ? `Default: ${d.models_dir_default}` : 'Default folder';
       } catch { /* the server is restarting */ }
@@ -489,6 +513,7 @@
       const path = await browse('folder');
       if (path) $('inpModelsDir').value = path;
     });
+    $('chkLoadOnStart').addEventListener('change', () => saveSettings({ load_on_start: $('chkLoadOnStart').checked }, $('chkLoadOnStart').checked ? 'The last model loads when the app starts.' : 'The last model loads with your first message.'));
     $('btnSaveIdle').addEventListener('click', () => saveSettings({ idle_unload_minutes: Number($('inpIdleMinutes').value || 0) }, 'Saved'));
     $('btnUnloadSettings').addEventListener('click', () => (state.setup ? toast('No model is loaded.') : unloadModel()));
 

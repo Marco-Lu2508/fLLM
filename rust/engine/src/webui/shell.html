@@ -517,7 +517,7 @@
             <div class="app-card" id="setupBanner" style="display:none;">
               <div class="msg-error" id="setupError" style="display:none;margin-bottom:8px;"></div>
               <h2 style="font-size:16px;font-weight:600;color:var(--foreground);">Welcome to fLLM</h2>
-              <p class="app-item-desc">No model is loaded yet. Pick one below: a suggestion fits most computers, or search Hugging Face. "Download and load" gets you chatting in a minute.</p>
+              <p class="app-item-desc" id="setupText">No model is loaded yet. Pick one below: a suggestion fits most computers, or search Hugging Face. "Download and load" gets you chatting in a minute.</p>
             </div>
 
             <div class="app-card" id="computerCard">
@@ -965,6 +965,15 @@
                     <input type="text" id="inpModelsDir" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="Default folder" autocomplete="off">
                     <button class="btn btn-outline" id="btnBrowseModelsDir">Browse ...</button>
                     <button class="btn btn-primary" id="btnSaveModelsDir">Save</button>
+                  </div>
+                </div>
+                <div class="app-card-item">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Load the last model when the app starts</div>
+                    <div class="app-item-desc">Off: the app opens at once and the last model loads when you send your first message, so no memory is used before you need it. On: it loads at start.</div>
+                  </div>
+                  <div class="app-item-actions">
+                    <label class="switch"><input type="checkbox" id="chkLoadOnStart"><span class="switch-track"></span></label>
                   </div>
                 </div>
                 <div class="app-card-item">

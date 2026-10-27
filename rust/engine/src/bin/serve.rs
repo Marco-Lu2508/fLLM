@@ -340,10 +340,12 @@ fn studio_args(rest: &[String]) -> Vec<String> {
     match given {
         Some(model) => fllm_engine::hub::remember_studio_model(&model),
         None => match fllm_engine::hub::last_studio_model() {
-            Some(model) => {
+            Some(model) if fllm_engine::hub::load_on_start() => {
                 args.push("--model".into());
                 args.push(model);
             }
+            // the last model is known but loads with the first message (Settings > Models > Load the last model when the app starts)
+            Some(_) => env::set_var("FLLM_STUDIO_SETUP", "1"),
             // no model chosen yet: the server starts without one and the page offers to pick one
             None => env::set_var("FLLM_STUDIO_SETUP", "1"),
         },

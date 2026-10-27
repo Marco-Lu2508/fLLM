@@ -632,7 +632,12 @@
       const raw = $('chatTextarea').value;
       const text = raw.trim();
       if (!text && !state.attachments.length) return;
-      if (state.setup) { toast('Load a model first.'); switchSurface('hub'); return; }
+      if (state.setup) {
+        // the app opened without a model: the last one loads now and the message goes out when it is there
+        if (state.status?.last_model && text && !state.attachments.length && await window.fllmLoadLastModelFor(text, 'chat')) return;
+        if (!state.status?.last_model) { toast('Load a model first.'); switchSurface('hub'); }
+        return;
+      }
       if (text.startsWith('/') && state.attachments.length === 0 && (await runSlashCommand(text))) return;
       prjCaptureMemory(text); // projects.js: "remember that ..." saves a memory
       $('chatTextarea').value = '';
