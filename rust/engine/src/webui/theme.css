@@ -423,7 +423,8 @@ h3 { font-size: var(--text-xl); }
 }
 .chat-input-box:focus-within {
   border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
-  box-shadow: var(--shadow-2), 0 0 0 3px var(--primary-soft);
+  /* the same glow on every side, the corners at the top included (a drop shadow below the box made the top look unlit) */
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--primary) 20%, transparent), 0 0 28px color-mix(in oklab, var(--primary) 24%, transparent);
 }
 .chat-textarea {
   background: transparent;
@@ -516,7 +517,7 @@ h3 { font-size: var(--text-xl); }
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-2);
 }
-.code-input-box:focus-within { border-color: color-mix(in oklab, var(--primary) 55%, var(--border)); box-shadow: var(--shadow-2), 0 0 0 3px var(--primary-soft); }
+.code-input-box:focus-within { border-color: color-mix(in oklab, var(--primary) 55%, var(--border)); box-shadow: 0 0 0 4px color-mix(in oklab, var(--primary) 20%, transparent), 0 0 28px color-mix(in oklab, var(--primary) 24%, transparent); }
 .diff { font-size: var(--text-xs); border-radius: var(--r-sm); border: 1px solid var(--border); overflow: auto; }
 .diff-add { background: color-mix(in oklab, var(--ok) 14%, transparent); }
 .diff-del { background: color-mix(in oklab, var(--danger) 14%, transparent); }
