@@ -49,7 +49,7 @@ spec:
             - {name: http, containerPort: 8000}
           env:
             - {name: FLLM_OUTPUT_CACHE, value: "exact"}
-            - {name: FLLM_OUTPUT_CACHE_BYTES, value: "268435456"}
+            - {name: FLLM_OUTPUT_CACHE_BYTES, value: "67108864"}
             - {name: FLLM_CACHE_SCOPE, value: "global"}
           resources:
             limits:
@@ -68,9 +68,13 @@ spec:
             periodSeconds: 20
           volumeMounts:
             - {name: models, mountPath: /models, readOnly: true}
+            # the options saved on the Settings page (use a PersistentVolumeClaim instead of emptyDir to keep them when the pod is replaced)
+            - {name: state, mountPath: /home/fllm/.cache/fllm}
       volumes:
         - name: models
           persistentVolumeClaim: {claimName: fllm-models}
+        - name: state
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

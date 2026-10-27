@@ -31,7 +31,7 @@ resources:
 # the output cache: exact answers only for deterministic requests (temperature 0)
 cache:
   enabled: true
-  bytes: 268435456
+  bytes: 67108864
   ttlSeconds: 3600
   scope: global
 
@@ -40,4 +40,12 @@ readiness:
   initialDelaySeconds: 5
   failureThreshold: 24
 
+# the options saved on the Settings page (Settings > Engine, keys made in the app). Without a claim they live in an emptyDir and are gone
+# when the pod is replaced; name a PersistentVolumeClaim to keep them.
+state:
+  claimName: ""
+  mountPath: /home/fllm/.cache/fllm
+
+# Without an API key the page can show things but not change them (a pod sees every request as coming from another machine).
+# The key given here (or --api-key) is an admin key.
 apiKey: ""

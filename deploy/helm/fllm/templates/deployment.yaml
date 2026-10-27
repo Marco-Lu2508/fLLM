@@ -47,12 +47,19 @@ spec:
             httpGet: {path: /health, port: http}
             initialDelaySeconds: 30
             periodSeconds: 20
-          {{- if .Values.persistence.enabled }}
           volumeMounts:
+            {{- if .Values.persistence.enabled }}
             - {name: models, mountPath: {{ .Values.persistence.mountPath }}, readOnly: {{ .Values.persistence.readOnly }}}
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
+            {{- end }}
+            - {name: state, mountPath: {{ .Values.state.mountPath }}}
       volumes:
+        {{- if .Values.persistence.enabled }}
         - name: models
           persistentVolumeClaim: {claimName: {{ .Values.persistence.claimName }}}
-      {{- end }}
+        {{- end }}
+        - name: state
+          {{- if .Values.state.claimName }}
+          persistentVolumeClaim: {claimName: {{ .Values.state.claimName }}}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
