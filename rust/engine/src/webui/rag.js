@@ -4,11 +4,13 @@
     // model is needed. The best passages go into the prompt with a source label. The web is reached through the
     // model's own tool calls (tools.js), not here.
     // ==========================================================================
+    // @pure-begin
     const RAG_CHUNK_CHARS = 1800; // about 500 tokens
     const RAG_OVERLAP_CHARS = 240;
     const RAG_MAX_DOC_CHARS = 600000; // kept per document in the browser storage
     const RAG_MAX_CHAT_CHARS = 1500000; // kept per chat
     const RAG_FIT_SHARE = 0.35; // a document goes in whole when it takes less than this share of the context
+    const RAG_VEC_MIN = 0.3; // cosine a passage needs to count as a hit without sharing a word with the question
     const RAG_STOP = new Set(('a an the and or but if of to in on at by for with from as is are was were be been it its this that these those ' +
       'i you he she we they me my your our their what which who whom how why when where do does did not no so than then there here can could ' +
       'will would should may might about into over under also just very der die das und oder aber ist sind war ein eine einer den dem des ' +
@@ -80,27 +82,59 @@
       return { chunks, df, avg };
     }
 
-    /** The `k` best passages for the query, best first (only passages that share a word with it). */
-    function ragSearch(index, query, k) {
+    /** The `k` best passages for the query, best first (only passages that share a word with it). With `queryVec` and
+     * vectors in the index the ranking is hybrid: 60 % keyword (BM25, scaled to its best hit) and 40 % meaning (cosine),
+     * so an exact word still wins over a neighbouring meaning. */
+    function ragSearch(index, query, k, queryVec) {
       const terms = [...new Set(ragTokenize(query))];
-      if (!terms.length || !index.chunks.length) return [];
+      const vec = Array.isArray(queryVec) && index.vecs && index.vecs.length === index.chunks.length ? queryVec : null;
+      if ((!terms.length && !vec) || !index.chunks.length) return [];
       const N = index.chunks.length;
       const k1 = 1.5;
       const b = 0.75;
-      const scored = [];
-      for (const c of index.chunks) {
-        let score = 0;
+      const rows = [];
+      let best = 0;
+      index.chunks.forEach((c, i) => {
+        let bm = 0;
         for (const w of terms) {
           const f = c.tf.get(w);
           if (!f) continue;
           const d = index.df.get(w) || 0;
           const idf = Math.log(1 + (N - d + 0.5) / (d + 0.5));
-          score += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * c.len / index.avg));
+          bm += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * c.len / index.avg));
         }
-        if (score > 0) scored.push({ c, score });
+        if (bm > best) best = bm;
+        rows.push({ c, i, bm });
+      });
+      const scored = [];
+      for (const row of rows) {
+        if (!vec) {
+          if (row.bm > 0) scored.push({ c: row.c, score: row.bm });
+          continue;
+        }
+        const cos = ragCosine(vec, index.vecs[row.i]);
+        // a passage without a shared word has to be clearly close in meaning, otherwise everything would match
+        if (row.bm <= 0 && cos < RAG_VEC_MIN) continue;
+        const keyword = best > 0 ? row.bm / best : 0;
+        scored.push({ c: row.c, score: 0.6 * keyword + 0.4 * Math.max(0, cos) });
       }
       scored.sort((x, y) => y.score - x.score);
       return scored.slice(0, k).map((s) => ({ docId: s.c.docId, doc: s.c.doc, n: s.c.n, m: s.c.m, text: s.c.text, score: s.score }));
+    }
+
+    /** Cosine similarity of two vectors (0 when one of them is empty or all zeros). */
+    function ragCosine(a, b) {
+      if (!Array.isArray(a) || !Array.isArray(b) || !a.length || a.length !== b.length) return 0;
+      let dot = 0;
+      let na = 0;
+      let nb = 0;
+      for (let i = 0; i < a.length; i += 1) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+      }
+      if (!na || !nb) return 0;
+      return dot / Math.sqrt(na * nb);
     }
 
     /** The first passages of every document: used when the question names nothing to search for ("summarize this"). */
@@ -112,6 +146,61 @@
         for (const c of index.chunks.filter((x) => x.docId === id).slice(0, per)) out.push({ docId: c.docId, doc: c.doc, n: c.n, m: c.m, text: c.text, score: 0 });
       }
       return out.slice(0, k);
+    }
+
+    // @pure-end
+
+    /** The embeddings server set in Settings > Search, read once (an empty string means: none). */
+    async function ragEmbedUrl() {
+      if (typeof state.embedUrl === 'string') return state.embedUrl;
+      try {
+        const res = await apiFetch('/api/studio/embeddings');
+        const data = await res.json();
+        state.embedUrl = data.url || '';
+      } catch {
+        state.embedUrl = '';
+      }
+      return state.embedUrl;
+    }
+
+    /** Vectors for a batch of texts from the route (which talks to the embeddings server). */
+    async function ragEmbedTexts(texts) {
+      const out = [];
+      for (let i = 0; i < texts.length; i += 32) {
+        const slice = texts.slice(i, i + 32);
+        const res = await apiFetch('/api/studio/embed', { method: 'POST', body: { input: slice } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error((data.error && data.error.message) || 'The embeddings server did not answer.');
+        for (const vector of data.vectors || []) out.push(vector);
+      }
+      return out;
+    }
+
+    /** Fills `index.vecs` once per index (the index itself is cached per chat, so this costs once). */
+    async function ragFillVectors(index) {
+      if (index.vecs || index.vecsFailed) return index.vecs;
+      try {
+        index.vecs = await ragEmbedTexts(index.chunks.map((c) => c.text));
+        if (index.vecs.length !== index.chunks.length) index.vecs = null;
+      } catch (e) {
+        index.vecsFailed = (e && e.message) || String(e);
+        index.vecs = null;
+      }
+      return index.vecs;
+    }
+
+    /** Keyword search, or hybrid search when an embeddings server is set and answers. */
+    async function ragSearchBest(index, query, k) {
+      const url = await ragEmbedUrl();
+      if (!url) return ragSearch(index, query, k);
+      try {
+        const filled = await ragFillVectors(index);
+        if (!filled) return ragSearch(index, query, k);
+        const [vector] = await ragEmbedTexts([query]);
+        return ragSearch(index, query, k, vector);
+      } catch {
+        return ragSearch(index, query, k);
+      }
     }
 
     /** How many passages fit: about 40 % of the context, between 2 and 8. */
@@ -200,7 +289,7 @@
           renderChatArea();
           const index = ragThreadIndex(t);
           const k = ragPassageCount();
-          let found = ragSearch(index, node.content || '', k);
+          let found = await ragSearchBest(index, node.content || '', k);
           if (!found.length && node.ragFresh) found = ragOpening(ragThreadIndex(t, true), k); // "summarize this": only the chat's own documents
           found.sort((a, b) => (a.docId === b.docId ? a.n - b.n : 0));
           node.passages = found.length ? found.map((p) => ({ doc: p.doc, n: p.n, m: p.m, text: p.text })) : undefined;
@@ -322,3 +411,76 @@
       const t = currentThread();
       if (btn && t) ragRemoveDoc(t, btn.dataset.rmDoc);
     });
+
+    // ---- Settings > Search: the embeddings server for the document search --------
+    (function searchSettings() {
+      const nav = document.getElementById('settingsMenuNav');
+      const content = document.querySelector('.settings-content-scroll');
+      if (!nav || !content) return;
+
+      const button = document.createElement('button');
+      button.className = 'settings-nav-btn';
+      button.dataset.spane = 'search';
+      button.innerHTML = '<svg viewBox="0 0 24 24" class="icon"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><span>Search</span>';
+      nav.appendChild(button);
+
+      const pane = document.createElement('div');
+      pane.className = 'settings-pane';
+      pane.id = 'spane-search';
+      pane.innerHTML =
+        '<div class="app-card"><div class="app-card-title">Document search</div>' +
+        '<div class="app-item-desc" style="margin-bottom:10px;">Documents are cut into passages and ranked by keyword (BM25) in this browser. With an embeddings server the ranking becomes hybrid: half keyword, half meaning, so a passage is found even when the question uses another word for the same thing. Nothing to install: run <span class="mono">fllm-rs serve --encoder &lt;model&gt;</span> or point it at any OpenAI-compatible <span class="mono">/v1/embeddings</span>. Leave the field empty to keep keyword-only search.</div>' +
+        '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">' +
+        '  <input class="ui-input mono" id="embedUrl" placeholder="http://127.0.0.1:8100" style="flex:1;min-width:260px;" autocomplete="off">' +
+        '  <button class="btn btn-sm" id="btnEmbedSave">Save</button>' +
+        '  <button class="btn btn-sm btn-ghost" id="btnEmbedTest">Test</button>' +
+        '</div>' +
+        '<div class="app-item-desc mono" id="embedStatus" style="margin-top:8px;font-size:11px;white-space:pre-wrap;"></div>' +
+        '</div>';
+      content.appendChild(pane);
+
+      const input = pane.querySelector('#embedUrl');
+      const status = pane.querySelector('#embedStatus');
+      const say = (text) => { status.textContent = text || ''; };
+
+      async function load() {
+        try {
+          const res = await apiFetch('/api/studio/embeddings');
+          const data = await res.json();
+          input.value = data.url || '';
+          say(data.configured ? 'Hybrid search is on.' : 'Keyword search only.');
+        } catch (e) {
+          say('Could not read the setting: ' + ((e && e.message) || e));
+        }
+      }
+
+      pane.querySelector('#btnEmbedSave').addEventListener('click', async () => {
+        try {
+          const res = await apiFetch('/api/studio/embeddings', { method: 'POST', body: { url: input.value.trim() } });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { say((data.error && data.error.message) || 'Could not save it.'); return; }
+          state.embedUrl = data.url || '';
+          // indexes built so far hold no vectors yet
+          for (const entry of ragIndexCache.values()) { entry.index.vecs = null; entry.index.vecsFailed = null; }
+          say(data.configured ? 'Saved. The next question searches hybrid.' : 'Saved. Keyword search only.');
+        } catch (e) {
+          say('Could not save it: ' + ((e && e.message) || e));
+        }
+      });
+
+      pane.querySelector('#btnEmbedTest').addEventListener('click', async () => {
+        say('Asking the server ...');
+        try {
+          const res = await apiFetch('/api/studio/embed', { method: 'POST', body: { input: ['the quick brown fox', 'a fast brown fox'] } });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { say((data.error && data.error.message) || 'The server did not answer.'); return; }
+          const vectors = data.vectors || [];
+          const close = vectors.length === 2 ? ragCosine(vectors[0], vectors[1]) : 0;
+          say(`${vectors.length} vector(s), ${data.dims || 0} numbers each${data.model ? ', model ' + data.model : ''}. Similarity of two similar sentences: ${close.toFixed(3)}.`);
+        } catch (e) {
+          say('The server did not answer: ' + ((e && e.message) || e));
+        }
+      });
+
+      load();
+    })();

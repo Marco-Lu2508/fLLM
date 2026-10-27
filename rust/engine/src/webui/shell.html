@@ -216,6 +216,7 @@
             <div class="chat-empty-hero">
               <h1 id="welcomeHeading">Ready</h1>
               <p id="welcomeSub">Loading the model.</p>
+              <div id="heroStart" style="display:none;margin:14px auto 0;max-width:520px;"></div>
               <div class="hero-trace" id="heroTrace" role="img" aria-label="Generated tokens per second, last two minutes">
                 <svg viewBox="0 0 600 64" preserveAspectRatio="none" aria-hidden="true">
                   <line class="hero-trace-base" x1="0" y1="63" x2="600" y2="63"></line>
@@ -1271,6 +1272,11 @@
                   <input type="text" id="mcpName" class="ui-input mono" placeholder="files" autocomplete="off">
                 </div>
                 <div class="app-card-item column">
+                  <div class="app-item-title">URL (a remote server instead of a command)</div>
+                  <input type="text" id="mcpUrl" class="ui-input mono" placeholder="https://mcp.example.com/mcp" autocomplete="off">
+                  <div class="app-item-desc">A server reached over HTTP (Streamable HTTP). Fill either the command or the URL.</div>
+                </div>
+                <div class="app-card-item column">
                   <div class="app-item-title">Command</div>
                   <input type="text" id="mcpCommand" class="ui-input mono" placeholder="npx" autocomplete="off">
                 </div>
@@ -1282,6 +1288,11 @@
                   <div class="app-item-title">Environment variables (NAME=value, one per line)</div>
                   <textarea id="mcpEnv" class="ui-input mono" rows="3" placeholder="API_KEY=..."></textarea>
                   <div class="app-item-desc" id="mcpEnvHint"></div>
+                </div>
+                <div class="app-card-item column">
+                  <div class="app-item-title">HTTP headers for a remote server (NAME=value, one per line)</div>
+                  <textarea id="mcpHeaders" class="ui-input mono" rows="2" placeholder="Authorization=Bearer ${MY_TOKEN}"></textarea>
+                  <div class="app-item-desc">A value may reference an environment variable as <span class="mono">${NAME}</span>, so a token does not have to be written into the file.</div>
                 </div>
                 <div style="display:flex;gap:6px;margin-top:8px;">
                   <button class="btn btn-sm btn-primary" id="btnMcpSave">Save and start</button>

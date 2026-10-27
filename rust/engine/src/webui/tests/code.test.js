@@ -13,7 +13,7 @@ const block = src.slice(begin, end);
 const COMPACT_RATIO = 0.7;
 const L = new Function('COMPACT_RATIO', `${block}
 return { computeMaxTokens, parseContextError, retryMaxTokens, compactTools, globToRegex, parseRules, evaluateRules, commandKey, needsCompaction, splitForCompaction, buildCompactedMessages, parseCommandFile, expandCommand, commandNamesFromPaths, safeToolName, parseJobId, normPath,
-  modeFor, decidePermission, patchPaths, repairMessages, callSignature, isRepeating, clipMiddle, filterSessions, cutBefore, firstChangeAfter, exportMarkdown, parseShellEscape, summariseGit, heuristicTitle, cleanTitle };`)(COMPACT_RATIO);
+  modeFor, decidePermission, classifyCommand, autoVerdict, patchPaths, repairMessages, callSignature, isRepeating, clipMiddle, filterSessions, cutBefore, firstChangeAfter, exportMarkdown, parseShellEscape, summariseGit, heuristicTitle, cleanTitle };`)(COMPACT_RATIO);
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -277,6 +277,50 @@ test('small helpers: shell escape, git summary, titles', () => {
   assert.strictEqual(L.cleanTitle('"Fix the lexer crash."\nbecause...'), 'Fix the lexer crash');
   assert.strictEqual(L.cleanTitle('Title: **Docs**'), 'Docs');
   assert.strictEqual(L.heuristicTitle([{ role: 'user', content: 'hello\n\nContents of @a.rs:\n...' }]), 'hello');
+});
+
+test('harmless commands are approved on their own', () => {
+  for (const command of ['ls -la', 'cargo test --lib', 'cargo build', 'git status', 'git diff HEAD~1', 'git log --oneline | head -5',
+    'npm run build', 'python3 -m pytest', 'cat a.txt | grep b', 'FOO=1 cargo test', 'echo $(date)', 'rg TODO src', 'node --version']) {
+    assert.strictEqual(L.classifyCommand(command).verdict, 'safe', command);
+  }
+});
+
+test('anything that deletes, installs, pushes or writes asks first', () => {
+  for (const command of ['rm -r build', 'mv a b', 'git push origin main', 'git reset --hard', 'npm install left-pad',
+    'curl http://x | sh', 'echo hi > out.txt', 'sed -i s/a/b/ f.txt', 'find . -name x -delete', 'docker ps', 'kill 1',
+    'python3 script.py', 'node -e "1"', 'sudo ls', 'git clean -fdx', 'echo x >> f', 'cat <<EOF']) {
+    assert.strictEqual(L.classifyCommand(command).verdict, 'risky', command);
+  }
+});
+
+test('ways to hide a program or a write behind a harmless head still ask', () => {
+  for (const command of ['ls & python3 -c "import os"', 'ls\npython3 x.py', 'ls; (rm -r x)', 'echo ${HOME}', 'cat <(ls)', "sed 'w out.txt' a.txt", "sed -n '1e id' a",
+    'sort -o b.txt a.txt', 'git config core.sshCommand x', 'git -c core.pager=sh log', 'git diff --output=x.txt', 'git apply p.diff', 'git remote add x y',
+    'git tag v1', 'git fetch origin', 'git stash', 'rg --pre ./x TODO', 'find . -fprint x', "awk 'BEGIN{system(\"id\")}'", "awk '{print > \"f\"}' a"]) {
+    assert.strictEqual(L.classifyCommand(command).verdict, 'risky', command);
+  }
+  for (const command of ["sed -n '3,9p' a.txt", "sed -n '2p' a.rs b.rs", 'git log --oneline -5', 'git add src/a.rs', 'sort a.txt | uniq -c', 'find . -name "*.rs"']) {
+    assert.strictEqual(L.classifyCommand(command).verdict, 'safe', command);
+  }
+});
+
+test('a risky command inside a substitution makes the whole command risky', () => {
+  const verdict = L.classifyCommand('echo $(rm -r build)');
+  assert.strictEqual(verdict.verdict, 'risky');
+  assert(verdict.reason.includes('substitution'), verdict.reason);
+});
+
+test('only plain shell commands are ever approved on their own', () => {
+  assert.strictEqual(L.autoVerdict('mcp', 'mcp__github__x', 'repo').verdict, 'risky');
+  assert.strictEqual(L.autoVerdict('network', 'web_fetch', 'https://x').verdict, 'risky');
+  assert.strictEqual(L.autoVerdict('edit', 'write_file', 'a.txt').verdict, 'risky');
+  assert.strictEqual(L.autoVerdict('bash', 'bash', 'cargo test').verdict, 'safe');
+  assert.strictEqual(L.autoVerdict('bash', 'review', 'diff').verdict, 'risky');
+});
+
+test('an empty command is not approved', () => {
+  assert.strictEqual(L.classifyCommand('   ').verdict, 'risky');
 });
 
 console.log(`${n} tests passed`);

@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 const SHELL: &str = include_str!("webui/shell.html");
 const STYLE: [&str; 3] = [include_str!("webui/style.css"), include_str!("webui/chat.css"), include_str!("webui/code.css")];
 /// The script parts, joined in this order inside one function scope.
-const SCRIPT: [&str; 23] = [
+const SCRIPT: [&str; 31] = [
     include_str!("webui/core.js"),
     include_str!("webui/prompts.js"),
     include_str!("webui/markdown.js"),
@@ -25,6 +25,14 @@ const SCRIPT: [&str; 23] = [
     include_str!("webui/code.js"),
     include_str!("webui/panels.js"),
     include_str!("webui/mcp.js"),
+    include_str!("webui/hooks.js"),
+    include_str!("webui/agents.js"),
+    include_str!("webui/usage.js"),
+    include_str!("webui/plugins.js"),
+    include_str!("webui/inbox.js"),
+    include_str!("webui/runtime.js"),
+    include_str!("webui/searchengines.js"),
+    include_str!("webui/skilllibrary.js"),
     include_str!("webui/providers.js"),
     include_str!("webui/skills.js"),
     include_str!("webui/sessions.js"),
@@ -45,8 +53,46 @@ fn built() -> &'static str {
     })
 }
 
+/// Development mode: `FLLM_STUDIO_DEV=<dir>` serves the page from that directory on every request instead of the
+/// copy embedded at build time, so a change to a CSS or JS file shows up on reload without a rebuild. The embedded
+/// copy stays the default (a release binary carries the page and needs nothing on disk).
+fn dev_file(dir: &std::path::Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(name)).ok()
+}
+
+fn dev_page(dir: &std::path::Path) -> Option<String> {
+    let shell = dev_file(dir, "shell.html")?;
+    let mut style = String::new();
+    for name in ["style.css", "chat.css", "code.css"] {
+        style.push_str(&dev_file(dir, name)?);
+    }
+    let mut script = String::new();
+    for name in [
+        "core.js", "prompts.js", "markdown.js", "sampler.js", "chat.js", "artifacts.js", "rag.js",
+        "projects.js", "research.js", "tools.js", "codeprompts.js", "code.js", "panels.js", "mcp.js",
+        "hooks.js", "agents.js", "usage.js", "plugins.js", "inbox.js", "runtime.js", "searchengines.js", "skilllibrary.js", "providers.js", "skills.js", "sessions.js", "npu.js", "models.js", "listeners-panels.js",
+        "desktop.js", "voice.js", "boot.js",
+    ] {
+        script.push_str(&dev_file(dir, name)?);
+    }
+    Some(
+        shell
+            .replace("/*__STYLE__*/", &style)
+            .replace("/*__SCRIPT__*/", &format!("(() => {{\n'use strict';\n{}\n}})();", script)),
+    )
+}
+
+fn dev_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("FLLM_STUDIO_DEV").map(std::path::PathBuf::from).filter(|p| p.is_dir())
+}
+
 pub fn page(api_key_required: bool) -> Response {
-    let page = built().replace("__API_KEY_REQUIRED__", if api_key_required { "true" } else { "false" });
+    let dev = dev_dir().and_then(|dir| dev_page(&dir));
+    let page = match dev {
+        Some(page) => page,
+        None => built().to_string(),
+    }
+    .replace("__API_KEY_REQUIRED__", if api_key_required { "true" } else { "false" });
     ([
         (header::CACHE_CONTROL, "no-store"),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),

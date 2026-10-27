@@ -253,6 +253,7 @@
       trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>',
       prev: '<path d="m15 18-6-6 6-6"/>',
       next: '<path d="m9 18 6-6-6-6"/>',
+      rewind: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v5l3 2"/>',
       file: '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/>',
       brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>',
     };
@@ -317,6 +318,7 @@
               ${branchNav(t, node)}
               <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy">${svgIcon('copy')}</button>
               <button class="btn-icon btn-icon-xs" data-act="edit" title="Edit and resend">${svgIcon('edit')}</button>
+              <button class="btn-icon btn-icon-xs" data-act="rewind" title="Rewind: the conversation ends at this message. Nothing is deleted, Undo brings the rest back.">${svgIcon('rewind')}</button>
               <button class="btn-icon btn-icon-xs" data-act="delete" title="Delete this message and everything after it">${svgIcon('trash')}</button>
             </div>
           </div>`;
@@ -333,6 +335,7 @@
             <button class="btn-icon btn-icon-xs" data-act="copy" title="Copy the answer as plain text">${svgIcon('copy')}</button>
             ${assistantExtraActions(node, isLast)}
             <button class="btn-icon btn-icon-xs" data-act="regen" title="Regenerate (the old answer stays as a version)">${svgIcon('redo')}</button>
+            <button class="btn-icon btn-icon-xs" data-act="rewind" title="Rewind: the conversation ends at this answer. Nothing is deleted, Undo brings the rest back.">${svgIcon('rewind')}</button>
             <button class="btn-icon btn-icon-xs" data-act="delete" title="Delete the answer">${svgIcon('trash')}</button>
             <span class="msg-stats" data-stats>${statsHtml(node)}</span>
           </div>
@@ -444,6 +447,11 @@
         temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, min_p: p.min_p, max_tokens: p.max_tokens,
         repetition_penalty: p.repetition_penalty, presence_penalty: p.presence_penalty, frequency_penalty: p.frequency_penalty,
       };
+      // The engine rejects a request whose prompt plus max_tokens exceeds the context (OpenAI's behaviour). The page's
+      // estimate of the prompt is rough, so for a small context it asks for a share of the window instead of the
+      // sampler's number: a 512-token model then answers shorter instead of failing the whole request.
+      const ctxWindow = Number(state.status?.model?.max_context) || 4096;
+      if (ctxWindow < 4096) body.max_tokens = Math.min(body.max_tokens, Math.max(32, Math.floor(ctxWindow / 4)));
       if (p.seed >= 0) body.seed = p.seed;
       if (p.stop.length) body.stop = p.stop;
       if (p.dry_multiplier > 0) body.dry_multiplier = p.dry_multiplier;
@@ -541,6 +549,9 @@
           };
         }
         if (chunk.usage) aNode.usage = chunk.usage;
+        if (chunk.usage && typeof window.fllmUsageRecord === 'function') {
+          window.fllmUsageRecord(state.selectedModel || state.status?.model?.name, chunk.usage);
+        }
         paintStreaming(aNode);
       });
       return { calls: calls.filter((c) => c && c.name), finish };
@@ -926,7 +937,67 @@
       else if (act.dataset.act === 'edit') startEditing(id);
       else if (act.dataset.act === 'regen') await regenerate(id);
       else if (act.dataset.act === 'delete') await deleteMessage(id);
+      else if (act.dataset.act === 'rewind') chatRewindTo(t, id);
     });
+
+    /**
+     * Rewind: the conversation ends at this message. Nothing is deleted — the messages below stay attached to the node
+     * and are detached from the path, so Undo (or the version arrows) brings them back. That is the chat half of what the
+     * Code page does with files.
+     */
+    function chatRewindTo(t, nodeId) {
+      const path = pathOf(t);
+      const index = path.findIndex((n) => n.id === nodeId);
+      if (index < 0) return false;
+      const node = path[index];
+      const hidden = path.length - index - 1;
+      if (hidden < 1) { toast('Nothing after this message to rewind.'); return false; }
+      t.rewinds = t.rewinds || [];
+      t.rewinds.push({ node: node.id, children: node.children.slice(), active: node.active, hidden, at: Date.now() });
+      if (t.rewinds.length > 20) t.rewinds.shift();
+      node.children = [];
+      node.active = 0;
+      // every message above keeps the path it had
+      for (let i = 0; i < index; i++) {
+        const parent = path[i];
+        const k = parent.children.indexOf(path[i + 1].id);
+        if (k >= 0) parent.active = k;
+      }
+      saveThreads();
+      renderChatArea();
+      rewindNotice(t, hidden);
+      return true;
+    }
+
+    /** Takes back the last rewind of this chat. */
+    function chatUndoRewind(t) {
+      const record = t && t.rewinds && t.rewinds.pop();
+      if (!record) return false;
+      const node = t.nodes[record.node];
+      if (node) {
+        node.children = record.children;
+        node.active = record.active;
+      }
+      saveThreads();
+      renderChatArea();
+      return true;
+    }
+
+    /** A notice with Undo, instead of a toast that vanishes. */
+    function rewindNotice(t, hidden) {
+      const el = document.createElement('div');
+      el.className = 'toast-card';
+      el.textContent = `Rewound: ${hidden} message(s) after this one are hidden. `;
+      const undo = document.createElement('button');
+      undo.className = 'btn btn-xs btn-ghost';
+      undo.textContent = 'Undo';
+      undo.addEventListener('click', () => {
+        if (chatUndoRewind(t)) { toast('Rewind undone'); el.remove(); }
+      });
+      el.appendChild(undo);
+      $('toastStack').appendChild(el);
+      setTimeout(() => el.remove(), 9000);
+    }
 
     $('chatMenu').addEventListener('click', (e) => {
       const item = e.target.closest('[data-chat-action]');

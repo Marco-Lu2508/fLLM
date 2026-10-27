@@ -125,6 +125,17 @@ pub(super) fn catalog() -> Vec<Value> {
             &["command"],
         ),
         tool(
+            "review",
+            "read",
+            "Review the changes of this workspace: the git diff plus the findings of a fixed set of rules (secrets, eval/exec, shell with interpolation, SQL by concatenation, conflict markers, plain http, TODO, debug output, unwrap, unsafe, swallowed errors), each with file and line. Read the diff, open the files, and say for each finding whether it is real. This tool changes nothing. Use scope \"staged\" for the index and \"branch\" with base for a comparison against another branch.",
+            json!({
+                "scope": {"type": "string", "enum": ["diff", "staged", "branch"], "description": "diff (default): the uncommitted changes. staged: what is in the index. branch: everything since the base branch."},
+                "base": {"type": "string", "description": "With scope \"branch\": the branch, tag or commit to compare against (default HEAD)."},
+                "security": {"type": "boolean", "description": "Only the security rules (secrets, eval, shell, SQL, conflict markers, plain http)."},
+            }),
+            &[],
+        ),
+        tool(
             "diagnostics",
             "command",
             "Check the code for errors without running it: a syntax check of one file (Python, JavaScript, JSON) or a build check of the project (cargo check, tsc --noEmit, go vet) when the workspace has the matching project file. Returns the first problems. Run it after editing code, before you tell the user the work is done.",
@@ -133,6 +144,53 @@ pub(super) fn catalog() -> Vec<Value> {
                 "timeout_s": {"type": "integer", "description": "Time limit in seconds (5 to 300, default 120)."},
             }),
             &[],
+        ),
+        tool(
+            "session_note",
+            "memory",
+            "Leave a handover note for the next session in this workspace, or read the notes that wait here. Chats live in the browser, so a closed session cannot be talked to; a note waits in `.fllm/messages.json` and the Studio shows it the next time a chat is opened. Put in what a colleague would need: what was tried, what is left, which file or branch matters. With `list` true it shows the notes instead of writing one.",
+            json!({
+                "text": {"type": "string", "description": "The note. A few sentences, no secrets."},
+                "to": {"type": "string", "description": "Optional: the title of the chat it is meant for. Empty means every chat of this workspace sees it."},
+                "list": {"type": "boolean", "description": "Show the notes of this workspace instead of writing one."},
+            }),
+            &[],
+        ),
+        tool(
+            "mcp_resource",
+            "read",
+            "Read a resource that an MCP server publishes (a file, a database record, a document it owns). Call it with only the server to list its resources and their uris, then again with a uri to read one. Resources are read-only and are neither tools nor prompts.",
+            json!({
+                "server": {"type": "string", "description": "The name of the MCP server, as the MCP page shows it."},
+                "uri": {"type": "string", "description": "The uri of the resource to read; leave empty to list the resources of the server."},
+            }),
+            &["server"],
+        ),
+        tool(
+            "notebook_edit",
+            "edit",
+            "Change a Jupyter notebook (.ipynb) cell by cell instead of rewriting its JSON: replace the source of a cell, insert a cell or delete one. Cells are counted from 1, like read_file shows them. Replacing the source of a code cell clears its old output, because it no longer matches the code. Read the notebook with read_file first.",
+            json!({
+                "path": {"type": "string", "description": "The .ipynb file."},
+                "action": {"type": "string", "enum": ["replace", "insert", "delete"]},
+                "cell": {"type": "integer", "description": "1-based cell number. For insert: the position the new cell gets (1 to count+1)."},
+                "source": {"type": "string", "description": "The new source for replace and insert (ignored for delete)."},
+                "cell_type": {"type": "string", "enum": ["code", "markdown", "raw"], "description": "Only for insert; default code."},
+            }),
+            &["path", "action", "cell"],
+        ),
+        tool(
+            "lsp",
+            "read",
+            "Ask the language server of this project instead of guessing: \"diagnostics\" reports the problems a real language server sees in one file (types, imports, borrows), \"symbols\" searches the workspace for a symbol by name, and \"definition\" finds where a symbol at a position is defined. Needs a language server on PATH (rust-analyzer, pyright-langserver, typescript-language-server, gopls, clangd); when none is installed the tool says so, and the diagnostics tool still works without one.",
+            json!({
+                "action": {"type": "string", "enum": ["diagnostics", "symbols", "definition"]},
+                "path": {"type": "string", "description": "File for diagnostics and definition (default for diagnostics: the first source file of the workspace)."},
+                "query": {"type": "string", "description": "With symbols: the name to look for."},
+                "line": {"type": "integer", "description": "With definition: 1-based line."},
+                "character": {"type": "integer", "description": "With definition: 1-based column."},
+            }),
+            &["action"],
         ),
         tool(
             "bash_output",

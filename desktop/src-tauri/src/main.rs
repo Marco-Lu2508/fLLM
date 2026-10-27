@@ -118,6 +118,9 @@ fn start_server(port: u16, variant: &variants::Variant, log_dir: Option<PathBuf>
     command
         .args(["studio", "--no-open", "--host", "127.0.0.1", "--port", &port.to_string()])
         .env("FLLM_EXIT_ON_STDIN_EOF", "1")
+        // the app shows the page in its own window; a browser must never open, even when the environment of the
+        // person starting the app says otherwise (FLLM_OPEN_BROWSER was set for the command line version)
+        .env_remove("FLLM_OPEN_BROWSER")
         .stdin(Stdio::piped())
         .stdout(out)
         .stderr(err);

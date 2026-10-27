@@ -167,6 +167,57 @@ impl<T: Transport> Client<T> {
         Ok(tools)
     }
 
+    /// The resources the server publishes (`resources/list`). A server without support answers with an error, and that
+    /// is not a failure: an empty list is the honest answer.
+    pub fn list_resources(&mut self, timeout: Duration) -> Result<Vec<Value>, McpError> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let params = match &cursor {
+                Some(c) => json!({"cursor": c}),
+                None => json!({}),
+            };
+            let result = match self.request("resources/list", params, timeout) {
+                Ok(value) => value,
+                Err(e) => {
+                    let text = e.message();
+                    if text.contains("-32601") || text.to_ascii_lowercase().contains("method not found") {
+                        return Ok(Vec::new());
+                    }
+                    return Err(e);
+                }
+            };
+            for item in result.get("resources").and_then(Value::as_array).into_iter().flatten() {
+                let Some(uri) = item.get("uri").and_then(Value::as_str) else { continue };
+                out.push(json!({
+                    "uri": uri,
+                    "name": item.get("name").and_then(Value::as_str).unwrap_or(uri),
+                    "description": item.get("description").and_then(Value::as_str).unwrap_or_default(),
+                    "mime_type": item.get("mimeType").and_then(Value::as_str).unwrap_or_default(),
+                }));
+            }
+            match result.get("nextCursor").and_then(Value::as_str) {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_owned()),
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// The text of one resource (`resources/read`); a binary body is noted, not guessed.
+    pub fn read_resource(&mut self, uri: &str, timeout: Duration) -> Result<String, McpError> {
+        let result = self.request("resources/read", json!({"uri": uri}), timeout)?;
+        let mut parts: Vec<String> = Vec::new();
+        for item in result.get("contents").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                parts.push(text.to_owned());
+            } else if let Some(blob) = item.get("blob").and_then(Value::as_str) {
+                parts.push(format!("[binary content, {} bytes base64]", blob.len()));
+            }
+        }
+        Ok(if parts.is_empty() { "(the resource is empty)".to_owned() } else { parts.join("\n") })
+    }
+
     pub fn call_tool(&mut self, name: &str, arguments: Value, timeout: Duration) -> Result<(String, bool), McpError> {
         let result = self.request("tools/call", json!({"name": name, "arguments": arguments}), timeout)?;
         Ok(result_text(&result))
@@ -212,14 +263,29 @@ pub(super) struct ServerConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    /// Set for a remote server: the MCP endpoint (Streamable HTTP). Exactly one of `command` and `url` is set.
+    pub url: Option<String>,
+    /// Extra HTTP headers for a remote server; `${NAME}` is expanded from the environment when the request is made.
+    pub headers: BTreeMap<String, String>,
     pub timeout: Duration,
 }
 
 impl ServerConfig {
     fn from_value(value: &Value) -> Result<Self, String> {
         let command = value.get("command").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
-        if command.is_empty() {
-            return Err("the command is empty".to_owned());
+        let url = value
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned);
+        if let Some(url) = &url {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err("the url of a remote MCP server must start with http:// or https://".to_owned());
+            }
+        }
+        if url.is_none() && command.is_empty() {
+            return Err("either a command (a local server) or a url (a remote server) is needed".to_owned());
         }
         let args = match value.get("args") {
             None | Some(Value::Null) => Vec::new(),
@@ -237,12 +303,20 @@ impl ServerConfig {
                 .collect::<Result<_, _>>()?,
             Some(_) => return Err("env must be an object of strings".to_owned()),
         };
+        let headers = match value.get("headers") {
+            None | Some(Value::Null) => BTreeMap::new(),
+            Some(Value::Object(map)) => map
+                .iter()
+                .map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())).ok_or("every header value must be a string"))
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err("headers must be an object of strings".to_owned()),
+        };
         let seconds = value
             .get("timeout_seconds")
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_CALL_TIMEOUT_SECS)
             .clamp(1, MAX_CALL_TIMEOUT_SECS);
-        Ok(ServerConfig { command, args, env, timeout: Duration::from_secs(seconds) })
+        Ok(ServerConfig { command, args, env, url, headers, timeout: Duration::from_secs(seconds) })
     }
 }
 
@@ -350,6 +424,149 @@ impl Drop for StdioTransport {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// HTTP transport (MCP "Streamable HTTP": one POST per message, the answer as JSON or as an event stream)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Expands `${NAME}` to the value of the environment variable, so a token can live in the environment instead of
+/// `mcp.json`. A missing variable becomes an empty string (the server then answers with its own 401, which is clearer
+/// than a config error here).
+pub(super) fn expand_env(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let name = &after[..end];
+                out.push_str(&std::env::var(name).unwrap_or_default());
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A remote MCP server reached over HTTP. Every message is one POST; the server answers with a single JSON message, an
+/// array of them, or an SSE stream whose `data:` lines are the messages. The `Mcp-Session-Id` the server hands out on the
+/// first answer is sent with every later request.
+pub(super) struct HttpTransport {
+    url: String,
+    headers: BTreeMap<String, String>,
+    http: reqwest::blocking::Client,
+    session: Option<String>,
+    queue: std::collections::VecDeque<String>,
+}
+
+impl HttpTransport {
+    fn new(config: &ServerConfig) -> Result<Self, String> {
+        let url = config.url.clone().ok_or_else(|| "the url is missing".to_owned())?;
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .user_agent(format!("fllm-studio/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
+        Ok(HttpTransport { url, headers: config.headers.clone(), http, session: None, queue: std::collections::VecDeque::new() })
+    }
+}
+
+impl Transport for HttpTransport {
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        let mut request = self
+            .http
+            .post(&self.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+            .body(line.to_owned());
+        for (name, value) in &self.headers {
+            request = request.header(name.as_str(), expand_env(value));
+        }
+        if let Some(session) = &self.session {
+            request = request.header("mcp-session-id", session.clone());
+        }
+        let response = request.send().map_err(|e| format!("the MCP server did not answer: {e}"))?;
+        let status = response.status();
+        if let Some(session) = response.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+            self.session = Some(session.to_owned());
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let body = response.text().map_err(|e| format!("cannot read the answer of the MCP server: {e}"))?;
+        if !status.is_success() {
+            let detail: String = body.trim().chars().take(300).collect();
+            return Err(format!("the MCP server answered {status}: {detail}"));
+        }
+        if body.trim().is_empty() {
+            return Ok(()); // 202 Accepted: a notification has no answer
+        }
+        if content_type.contains("text/event-stream") {
+            for raw in body.lines() {
+                if let Some(data) = raw.trim().strip_prefix("data:") {
+                    let data = data.trim();
+                    if !data.is_empty() {
+                        self.queue.push_back(data.to_owned());
+                    }
+                }
+            }
+            return Ok(());
+        }
+        match serde_json::from_str::<Value>(&body) {
+            Ok(Value::Array(items)) => {
+                for item in items {
+                    self.queue.push_back(item.to_string());
+                }
+                Ok(())
+            }
+            Ok(other) => {
+                self.queue.push_back(other.to_string());
+                Ok(())
+            }
+            Err(e) => Err(format!("the MCP server sent something that is not JSON: {e}")),
+        }
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Recv {
+        if let Some(line) = self.queue.pop_front() {
+            return Recv::Line(line);
+        }
+        // the answer arrived with the POST: a short wait keeps `Client::request` from spinning until its deadline
+        std::thread::sleep(timeout.min(Duration::from_millis(25)));
+        Recv::Timeout
+    }
+}
+
+/// Either transport, so one `Client` type serves local and remote servers.
+pub(super) enum AnyTransport {
+    Stdio(StdioTransport),
+    Http(HttpTransport),
+}
+
+impl Transport for AnyTransport {
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        match self {
+            AnyTransport::Stdio(t) => t.send(line),
+            AnyTransport::Http(t) => t.send(line),
+        }
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Recv {
+        match self {
+            AnyTransport::Stdio(t) => t.recv(timeout),
+            AnyTransport::Http(t) => t.recv(timeout),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Server registry
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -384,7 +601,7 @@ struct Entry {
     raw: Value,
     config: Result<ServerConfig, String>,
     status: Mutex<Status>,
-    client: Mutex<Option<Client<StdioTransport>>>,
+    client: Mutex<Option<Client<AnyTransport>>>,
     stderr: Arc<Mutex<String>>,
 }
 
@@ -424,8 +641,9 @@ impl Entry {
         status.message = message;
     }
 
-    /// Starts the process and does the handshake and the tool listing. The caller holds the `client` lock.
-    fn start_locked(&self, slot: &mut Option<Client<StdioTransport>>) -> Result<(), String> {
+    /// Starts the process or connects over HTTP, then does the handshake and the tool listing. The caller holds the
+    /// `client` lock.
+    fn start_locked(&self, slot: &mut Option<Client<AnyTransport>>) -> Result<(), String> {
         *slot = None;
         let config = self.config.clone()?;
         {
@@ -435,7 +653,10 @@ impl Entry {
         }
         lock(&self.stderr).clear();
         let outcome = (|| {
-            let transport = StdioTransport::spawn(&config, self.stderr.clone())?;
+            let transport = match &config.url {
+                Some(_) => AnyTransport::Http(HttpTransport::new(&config)?),
+                None => AnyTransport::Stdio(StdioTransport::spawn(&config, self.stderr.clone())?),
+            };
             let mut client = Client::new(transport);
             client.initialize(INITIALIZE_TIMEOUT).map_err(|e| e.message())?;
             let tools = client.list_tools(LIST_TIMEOUT).map_err(|e| e.message())?;
@@ -470,7 +691,8 @@ impl Entry {
         self.start_locked(&mut slot)
     }
 
-    fn call(&self, tool: &str, arguments: Value) -> Result<(String, bool), String> {
+    /// Runs `f` on a running client, starting the server when it is down — the same way `call` does it.
+    fn with_client<T>(&self, f: impl FnOnce(&mut Client<AnyTransport>, Duration) -> Result<T, McpError>) -> Result<T, String> {
         let timeout = self.config.clone()?.timeout;
         let mut slot = lock(&self.client);
         if slot.is_none() {
@@ -484,24 +706,46 @@ impl Entry {
             self.start_locked(&mut slot)?;
         }
         let client = slot.as_mut().ok_or("the MCP server is not running")?;
-        match client.call_tool(tool, arguments, timeout) {
-            Ok(result) => Ok(result),
+        match f(client, timeout) {
+            Ok(value) => Ok(value),
             Err(McpError::Closed(why)) => {
                 *slot = None;
                 self.fail(format!("the server ended: {why}"));
-                Err(format!("the MCP server `{}` ended while the tool ran", self.name))
+                Err(format!("the MCP server `{}` ended while it was asked", self.name))
             }
             Err(e) => Err(e.message()),
         }
     }
 
+    fn resources(&self) -> Result<Vec<Value>, String> {
+        self.with_client(|client, timeout| client.list_resources(timeout))
+    }
+
+    fn read_resource(&self, uri: &str) -> Result<String, String> {
+        self.with_client(|client, timeout| client.read_resource(uri, timeout))
+    }
+
+    fn call(&self, tool: &str, arguments: Value) -> Result<(String, bool), String> {
+        let tool = tool.to_owned();
+        self.with_client(move |client, timeout| client.call_tool(&tool, arguments, timeout))
+    }
+
     fn describe(&self) -> Value {
         let status = lock(&self.status);
-        let (command, args, env_keys, timeout) = match &self.config {
-            Ok(c) => (c.command.clone(), c.args.clone(), c.env.keys().cloned().collect::<Vec<_>>(), c.timeout.as_secs()),
+        let (command, args, env_keys, url, headers, timeout) = match &self.config {
+            Ok(c) => (
+                c.command.clone(),
+                c.args.clone(),
+                c.env.keys().cloned().collect::<Vec<_>>(),
+                c.url.clone().unwrap_or_default(),
+                c.headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+                c.timeout.as_secs(),
+            ),
             Err(_) => (
                 self.raw.get("command").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 Vec::new(),
+                Vec::new(),
+                self.raw.get("url").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 Vec::new(),
                 DEFAULT_CALL_TIMEOUT_SECS,
             ),
@@ -510,6 +754,8 @@ impl Entry {
             "name": self.name,
             "command": command,
             "args": args,
+            "url": url,
+            "headers": headers,
             // the values stay in mcp.json: they often hold secrets
             "env_keys": env_keys,
             "timeout_seconds": timeout,
@@ -639,30 +885,42 @@ fn upsert_server(body: &Value) -> Result<(), String> {
         .or_insert_with(|| json!({}));
     let servers = servers.as_object_mut().ok_or("\"mcpServers\" in mcp.json must be an object")?;
     let mut server = servers.get(&name).and_then(Value::as_object).cloned().unwrap_or_default();
-    for key in ["command", "args", "timeout_seconds"] {
+    for key in ["command", "args", "url", "timeout_seconds"] {
         if let Some(v) = body.get(key) {
             server.insert(key.to_owned(), v.clone());
         }
     }
-    if let Some(Value::Object(env)) = body.get("env") {
-        let old = server.get("env").and_then(Value::as_object).cloned().unwrap_or_default();
-        let mut merged = serde_json::Map::new();
-        for (k, v) in env {
-            if k.trim().is_empty() {
-                continue;
-            }
-            match v {
-                Value::Null => {
-                    if let Some(kept) = old.get(k) {
-                        merged.insert(k.clone(), kept.clone());
+    // a remote server does not need the stdio fields, and a local one does not need the url
+    if body.get("url").and_then(Value::as_str).map(|u| !u.trim().is_empty()).unwrap_or(false) {
+        server.remove("command");
+        server.remove("args");
+        server.remove("env");
+    }
+    for key in ["env", "headers"] {
+        if let Some(Value::Object(values)) = body.get(key) {
+            let old = server.get(key).and_then(Value::as_object).cloned().unwrap_or_default();
+            let mut merged = serde_json::Map::new();
+            for (k, v) in values {
+                if k.trim().is_empty() {
+                    continue;
+                }
+                match v {
+                    Value::Null => {
+                        if let Some(kept) = old.get(k) {
+                            merged.insert(k.clone(), kept.clone());
+                        }
+                    }
+                    other => {
+                        merged.insert(k.clone(), other.clone());
                     }
                 }
-                other => {
-                    merged.insert(k.clone(), other.clone());
-                }
+            }
+            if merged.is_empty() {
+                server.remove(key);
+            } else {
+                server.insert(key.to_owned(), Value::Object(merged));
             }
         }
-        server.insert("env".to_owned(), Value::Object(merged));
     }
     let server = Value::Object(server);
     ServerConfig::from_value(&server)?;
@@ -809,6 +1067,73 @@ pub(in crate::server) async fn call(Json(body): Json<Value>) -> Response {
         Ok(Err((status, e))) => api_error(status, &e),
         Err(r) => r,
     }
+}
+
+/// `POST /api/studio/mcp/resources` `{server}`: the resources a server publishes.
+pub(in crate::server) async fn resources(Json(body): Json<Value>) -> Response {
+    let server = body.get("server").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let for_work = server.clone();
+    let work = move || -> Result<Vec<Value>, (StatusCode, String)> {
+        let entry = entry_named(&for_work).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+        entry.resources().map_err(|e| (StatusCode::BAD_GATEWAY, e))
+    };
+    match blocking(work).await {
+        Ok(Ok(items)) => Json(json!({"server": server, "resources": items})).into_response(),
+        Ok(Err((status, e))) => api_error(status, &e),
+        Err(r) => r,
+    }
+}
+
+/// `POST /api/studio/mcp/resource` `{server, uri}`: the text of one resource.
+pub(in crate::server) async fn resource(Json(body): Json<Value>) -> Response {
+    let server = body.get("server").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let uri = body.get("uri").and_then(Value::as_str).unwrap_or_default().to_owned();
+    if uri.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "the resource uri is missing");
+    }
+    let for_work = (server.clone(), uri.clone());
+    let work = move || -> Result<String, (StatusCode, String)> {
+        let entry = entry_named(&for_work.0).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+        entry.read_resource(&for_work.1).map_err(|e| (StatusCode::BAD_GATEWAY, e))
+    };
+    match blocking(work).await {
+        Ok(Ok(content)) => Json(json!({"uri": uri, "content": content})).into_response(),
+        Ok(Err((status, e))) => api_error(status, &e),
+        Err(r) => r,
+    }
+}
+
+/// The `mcp_resource` tool: list the resources of a server, or read one by uri.
+pub(super) fn read_tool(body: &Value) -> Result<String, String> {
+    let server = body.get("server").and_then(Value::as_str).unwrap_or("").trim();
+    if server.is_empty() {
+        return Err("server is missing".to_owned());
+    }
+    let uri = body.get("uri").and_then(Value::as_str).unwrap_or("").trim();
+    let entry = entry_named(server)?;
+    if uri.is_empty() {
+        let items = entry.resources()?;
+        if items.is_empty() {
+            return Ok(format!("The MCP server `{server}` publishes no resources."));
+        }
+        let mut out = format!("{} resource(s) of `{server}`:\n", items.len());
+        for item in items.iter().take(100) {
+            out.push_str(&format!(
+                "- {} ({}){}: {}\n",
+                item.get("uri").and_then(Value::as_str).unwrap_or(""),
+                item.get("name").and_then(Value::as_str).unwrap_or(""),
+                {
+                    let kind = item.get("mime_type").and_then(Value::as_str).unwrap_or("");
+                    if kind.is_empty() { String::new() } else { format!(" [{kind}]") }
+                },
+                item.get("description").and_then(Value::as_str).unwrap_or("")
+            ));
+        }
+        return Ok(out);
+    }
+    let text = entry.read_resource(uri)?;
+    let shown: String = text.chars().take(60_000).collect();
+    Ok(format!("Resource {uri} of `{server}`:\n\n{shown}"))
 }
 
 #[cfg(test)]
@@ -1008,5 +1333,84 @@ mod tests {
         assert!(!valid_name(""));
         assert!(!valid_name("a b"));
         assert!(!valid_name("../x"));
+    }
+
+    /// A throwaway HTTP server that answers the handshake and one tools/list, so the HTTP transport is tested against
+    /// something that speaks the protocol without a network.
+    fn fake_mcp_server() -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let trimmed = line.trim_end().to_owned();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    let lower = trimmed.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = reader.read_exact(&mut body);
+                let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+                let id = request.get("id").cloned();
+                let reply = match (method, id) {
+                    ("initialize", Some(id)) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "serverInfo": {"name": "fake", "version": "1"}}
+                    }),
+                    ("tools/list", Some(id)) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {"tools": [{"name": "echo", "description": "Echoes", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}]}
+                    }),
+                    _ => Value::Null,
+                };
+                let (status, payload) = if reply.is_null() { ("202 Accepted", String::new()) } else { ("200 OK", reply.to_string()) };
+                let response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}", payload.len());
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}/mcp"), handle)
+    }
+
+    #[test]
+    fn a_remote_server_is_reached_over_http() {
+        let (url, server) = fake_mcp_server();
+        let config = ServerConfig::from_value(&json!({"url": url, "headers": {"Authorization": "Bearer ${FLLM_TEST_MCP_TOKEN}"}})).expect("config");
+        assert_eq!(config.headers["Authorization"], "Bearer ${FLLM_TEST_MCP_TOKEN}", "the environment reference stays in the file and is expanded per request");
+        let mut client = Client::new(HttpTransport::new(&config).expect("transport"));
+        client.initialize(Duration::from_secs(5)).expect("initialize");
+        assert_eq!(client.protocol, PROTOCOL_VERSION);
+        let tools = client.list_tools(Duration::from_secs(5)).expect("tools/list");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "echo");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn the_url_is_checked_and_environment_references_are_expanded() {
+        assert!(ServerConfig::from_value(&json!({"url": "ftp://example.com/mcp"})).is_err());
+        assert!(ServerConfig::from_value(&json!({})).is_err(), "neither a command nor a url");
+        assert!(ServerConfig::from_value(&json!({"command": "npx"})).is_ok());
+        let remote = ServerConfig::from_value(&json!({"url": "https://example.com/mcp"})).expect("remote");
+        assert_eq!(remote.url.as_deref(), Some("https://example.com/mcp"));
+        std::env::set_var("FLLM_TEST_EXPAND", "secret");
+        assert_eq!(expand_env("Bearer ${FLLM_TEST_EXPAND}!"), "Bearer secret!");
+        assert_eq!(expand_env("no refs"), "no refs");
+        assert_eq!(expand_env("${FLLM_MISSING_VAR}"), "");
+        assert_eq!(expand_env("${unclosed"), "${unclosed");
     }
 }

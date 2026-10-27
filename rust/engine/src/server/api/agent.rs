@@ -275,6 +275,18 @@ impl AgentSession {
     }
 
     pub(in crate::server) fn run_tool(&self, name: &str, args: &Value) -> ToolResult {
+        let dir = self.current_root();
+        let result = self.run_tool_inner(name, args);
+        let post = super::hooks::dispatch("post_tool_call", name, args, dir.as_deref());
+        let result = super::hooks::with_notes(result, &post);
+        if super::hooks::is_edit_tool(name) && result.is_ok() {
+            let edited = super::hooks::dispatch("on_file_edit", name, args, dir.as_deref());
+            return super::hooks::with_notes(result, &edited);
+        }
+        result
+    }
+
+    fn run_tool_inner(&self, name: &str, args: &Value) -> ToolResult {
         let text = |key: &str| args.get(key).and_then(Value::as_str);
         let need = |key: &str| text(key).ok_or_else(|| format!("the argument '{key}' is missing"));
         let number = |key: &str| args.get(key).and_then(Value::as_u64);
@@ -284,6 +296,11 @@ impl AgentSession {
             "write_file" => self.write_file(need("path")?, need("content")?),
             "patch" => self.patch(need("patch")?),
             "diagnostics" => super::agent_diag::run(self, text("path"), number("timeout_s")),
+            "review" => super::agent_review::run(self, args),
+            "lsp" => super::agent_lsp::run(self, args),
+            "notebook_edit" => super::agent_notebook::run(self, args),
+            "mcp_resource" => super::mcp::read_tool(args),
+            "session_note" => super::agent_messages::tool(self, args),
             "memory" => super::agent_mem::tool(self, args),
             "edit_file" => self.edit_file(
                 need("path")?,
@@ -869,9 +886,8 @@ impl AgentSession {
         let root = self.root()?;
         let dir = self.shell_dir()?;
         let limit = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1000, MAX_TIMEOUT_MS));
-        let mut cmd = super::agent_jobs::shell_command(&super::agent_jobs::with_cwd_report(command, CWD_MARK));
+        let mut cmd = super::agent_jobs::shell_command_in(&super::agent_jobs::with_cwd_report(command, CWD_MARK), &root, &dir);
         let mut child = cmd
-            .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1138,20 +1154,31 @@ fn workspace_json(state: &AppState) -> Value {
     }
 }
 
-/// `POST /api/studio/agent/workspace`: `{path}` chooses the folder, an empty body reports the current one.
+/// `POST /api/studio/agent/workspace`: `{path}` chooses the folder the agent works in.
 pub(in crate::server) async fn workspace(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
     if agent_disabled() {
         return disabled_reply();
     }
     if let Some(path) = body.get("path").and_then(Value::as_str) {
+        let before = state.agent.current_root();
         if let Err(error) = state.agent.set_root(path) {
             return api_error(StatusCode::BAD_REQUEST, &error);
+        }
+        let after = state.agent.current_root();
+        if before != after {
+            let started = super::hooks::dispatch("on_session_start", "", &json!({}), after.as_deref());
+            let mut answer = workspace_json(&state);
+            if let Some(object) = answer.as_object_mut() {
+                object.insert("hooks".to_owned(), json!({"context": started.notes(), "blocked": started.blocked}));
+            }
+            return Json(answer).into_response();
         }
     }
     Json(workspace_json(&state)).into_response()
 }
 
 /// `POST /api/studio/agent/tool`: `{name, args}` runs one tool and returns `{ok, output}` or `{ok: false, error}`.
+/// Hooks of the user run around it: `pre_tool_call` may block the call, `post_tool_call` and `on_file_edit` add notes.
 pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
     if agent_disabled() {
         return disabled_reply();
@@ -1160,13 +1187,18 @@ pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(bod
         return api_error(StatusCode::BAD_REQUEST, "the tool name is missing");
     };
     let args = body.get("args").cloned().unwrap_or_else(|| json!({}));
+    let dir = state.agent.current_root();
+    let pre = super::hooks::dispatch("pre_tool_call", &name, &args, dir.as_deref());
+    if pre.blocked {
+        return Json(result_json(Err(format!("a hook blocked this call: {}", pre.reason)))).into_response();
+    }
     // the network tools are async and need no workspace
     if let Some(result) = super::agent_net::run_tool(&name, &args).await {
-        return Json(result_json(result)).into_response();
+        return Json(result_json(super::hooks::with_notes(result, &pre))).into_response();
     }
     let worker = state.clone();
     match tokio::task::spawn_blocking(move || worker.agent.run_tool(&name, &args)).await {
-        Ok(result) => Json(result_json(result)).into_response(),
+        Ok(result) => Json(result_json(super::hooks::with_notes(result, &pre))).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -1192,9 +1224,11 @@ pub(in crate::server) async fn end(State(state): State<Arc<AppState>>) -> Respon
     if agent_disabled() {
         return disabled_reply();
     }
+    let root = state.agent.current_root();
+    let finished = super::hooks::dispatch("on_session_end", "", &json!({}), root.as_deref());
     let worker = state.clone();
     let stopped = tokio::task::spawn_blocking(move || worker.agent.end_session()).await.unwrap_or(0);
-    Json(json!({"ok": true, "stopped": stopped})).into_response()
+    Json(json!({"ok": true, "stopped": stopped, "hooks": {"context": finished.notes()}})).into_response()
 }
 
 /// `POST /api/studio/agent/cancel`: ends the foreground commands that run right now (the Stop button).

@@ -1,6 +1,54 @@
     // --- Start screen: what the engine is doing right now ---
     const heroTrace = { samples: [], lastTokens: null, lastUptime: null, size: 60 };
 
+    /** The first start: recommend one model and download it with a click, so nobody has to know what a quant is. */
+    let heroStartFor = '';
+    function renderHeroStart() {
+      const box = document.getElementById('heroStart');
+      if (!box) return;
+      const hub = state.modelsHub;
+      const rec = (hub?.recommended || [])[0] || '';
+      const entry = (hub?.catalog || []).find((c) => c.id === rec) || null;
+      if (!entry) {
+        box.style.display = 'none';
+        return;
+      }
+      const quant = entry.default_quant || '';
+      const variant = (entry.variants || []).find((v) => v.quant === quant) || (entry.variants || [])[0] || null;
+      const bytes = Number(variant?.estimated_bytes || entry.estimated_bytes || 0);
+      const size = bytes ? (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`) : '';
+      const label = `${entry.display_name || rec}${quant ? ` · ${quant}` : ''}${size ? ` · ${size}` : ''}`;
+      const fits = variant?.fits_memory ?? entry.fits;
+      const key = `${rec}:${quant}:${size}`;
+      if (heroStartFor === key) return; // the hero is redrawn on every status poll
+      heroStartFor = key;
+      box.style.display = '';
+      box.innerHTML =
+        '<div style="display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;">' +
+        '  <button class="btn btn-primary" id="btnHeroDownload">Download and start</button>' +
+        '  <span class="app-item-desc mono" style="font-size:11px;">' + escapeHtml(label) +
+        (fits === false ? ' · may not fit into free memory' : '') + '</span>' +
+        '</div>';
+      const button = box.querySelector('#btnHeroDownload');
+      if (button) {
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          button.textContent = 'Downloading ...';
+          try {
+            const ok = await window.fllmDownloadModel(rec, quant, true);
+            if (!ok) {
+              button.disabled = false;
+              button.textContent = 'Download and start';
+            }
+          } catch (e) {
+            button.disabled = false;
+            button.textContent = 'Download and start';
+            if (typeof toast === 'function') toast((e && e.message) || 'The download failed.');
+          }
+        });
+      }
+    }
+
     function updateHero(data) {
       const m = data.model || {};
       const mt = data.metrics || {};
@@ -10,7 +58,8 @@
       const facts = [size, m.quantization, m.max_context ? `${nf(m.max_context, 0)} tokens of context` : ''].filter(Boolean);
       if (data.setup) {
         $('welcomeHeading').textContent = 'No model loaded';
-        $('welcomeSub').textContent = 'Open Models and load one to start chatting.';
+        $('welcomeSub').textContent = 'Download one below, or open Models and pick your own.';
+        renderHeroStart();
       } else {
         $('welcomeHeading').textContent = state.selectedModel || m.name || 'Ready';
         $('welcomeSub').textContent = `Running locally on this computer${facts.length ? ': ' + facts.join(', ') : ''}.`;

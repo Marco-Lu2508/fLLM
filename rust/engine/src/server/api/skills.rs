@@ -155,6 +155,19 @@ pub(in crate::server) async fn list(Query(query): Query<HashMap<String, String>>
             skills.push(skill);
         }
     }
+    // skills of plugins come last and cannot shadow your own
+    for (plugin, base) in super::plugins::skill_bases() {
+        let scope = format!("plugin:{plugin}");
+        for mut skill in list_in(&base) {
+            let name = skill["name"].as_str().unwrap_or("");
+            if skills.iter().any(|s| s["name"].as_str() == Some(name)) {
+                continue;
+            }
+            skill["scope"] = json!(scope);
+            skill["read_only"] = json!(true);
+            skills.push(skill);
+        }
+    }
     Json(json!({"skills": skills, "user_folder": user_base().display().to_string()})).into_response()
 }
 
@@ -162,7 +175,14 @@ pub(in crate::server) async fn list(Query(query): Query<HashMap<String, String>>
 pub(in crate::server) async fn read(Query(query): Query<HashMap<String, String>>) -> Response {
     let scope = query.get("scope").map_or("user", String::as_str);
     let name = query.get("name").map_or("", String::as_str);
-    match base_for(scope, query.get("workspace").map(String::as_str)).and_then(|base| read_in(&base, name)) {
+    let found = match scope.strip_prefix("plugin:") {
+        Some(plugin) => super::plugins::folder(plugin)
+            .map(|path| path.join("skills"))
+            .ok_or_else(|| format!("there is no plugin '{plugin}'"))
+            .and_then(|base| read_in(&base, name)),
+        None => base_for(scope, query.get("workspace").map(String::as_str)).and_then(|base| read_in(&base, name)),
+    };
+    match found {
         Ok(content) => Json(json!({"name": name, "scope": scope, "content": content})).into_response(),
         Err(e) => api_error(StatusCode::NOT_FOUND, &e),
     }
@@ -186,6 +206,89 @@ pub(in crate::server) async fn remove(Query(query): Query<HashMap<String, String
     match base_for(scope, query.get("workspace").map(String::as_str)).and_then(|base| delete_in(&base, name)) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => api_error(StatusCode::NOT_FOUND, &e),
+    }
+}
+
+// ---- skills that come with the app -----------------------------------------------------------
+
+/// Skills that ship with the binary: they are installed with one click, and installing writes a normal skill file that the
+/// user can change afterwards. Nothing here is magic — the same file could be typed by hand.
+pub(super) const LIBRARY: [(&str, &str); 6] = [
+    ("commit-message", include_str!("../../builtin_skills/commit-message.md")),
+    ("code-review", include_str!("../../builtin_skills/code-review.md")),
+    ("debug-bisect", include_str!("../../builtin_skills/debug-bisect.md")),
+    ("tests-first", include_str!("../../builtin_skills/tests-first.md")),
+    ("sql-query", include_str!("../../builtin_skills/sql-query.md")),
+    ("release-notes", include_str!("../../builtin_skills/release-notes.md")),
+];
+
+/// `GET /api/studio/skills/library`: the built-in skills with their description, and whether each is installed.
+pub(in crate::server) async fn library() -> Response {
+    let installed: Vec<String> = list_in(&user_base()).into_iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect();
+    let items: Vec<Value> = LIBRARY
+        .iter()
+        .map(|(name, text)| {
+            let (meta, _) = front_matter(text);
+            json!({
+                "name": name,
+                "description": meta.get("description").cloned().unwrap_or_default(),
+                "when": meta.get("when").cloned().unwrap_or_default(),
+                "installed": installed.iter().any(|i| i == name),
+            })
+        })
+        .collect();
+    Json(json!({"skills": items, "folder": user_base().display().to_string()})).into_response()
+}
+
+/// `POST /api/studio/skills/library` `{name}`: writes the built-in skill into the user folder.
+pub(in crate::server) async fn install_builtin(Json(body): Json<Value>) -> Response {
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("");
+    let Some((_, text)) = LIBRARY.iter().find(|(n, _)| *n == name) else {
+        return api_error(StatusCode::NOT_FOUND, "there is no built-in skill with that name");
+    };
+    match write_in(&user_base(), name, text) {
+        Ok(()) => Json(json!({"ok": true, "name": name})).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+/// A skill from a URL: anything that serves a SKILL.md as text, for example a raw GitHub link.
+fn clean_skill_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("the address has to start with http:// or https://".to_owned());
+    }
+    if url.len() > 500 {
+        return Err("the address is too long".to_owned());
+    }
+    Ok(url.to_owned())
+}
+
+/// `POST /api/studio/skills/import` `{url, name?}`: fetches a SKILL.md and stores it.
+pub(in crate::server) async fn import(Json(body): Json<Value>) -> Response {
+    let Ok(url) = clean_skill_url(body.get("url").and_then(Value::as_str).unwrap_or("")) else {
+        return api_error(StatusCode::BAD_REQUEST, "give an http(s) address of a SKILL.md");
+    };
+    let fetched = match super::agent_net::fetch_public_text(&url).await {
+        Ok(text) => text,
+        Err(e) => return api_error(StatusCode::BAD_GATEWAY, &e),
+    };
+    let (meta, _) = front_matter(&fetched);
+    let from_body = body.get("name").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+    let name = if !from_body.is_empty() {
+        from_body
+    } else {
+        meta.get("name").cloned().unwrap_or_default()
+    };
+    if !valid_name(&name) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "the file needs a front matter with a name (1 to 64 characters: lowercase letters, digits, '-' and '_'), or pass a name",
+        );
+    }
+    match write_in(&user_base(), &name, &fetched) {
+        Ok(()) => Json(json!({"ok": true, "name": name, "bytes": fetched.len()})).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, &e),
     }
 }
 
@@ -267,4 +370,24 @@ mod tests {
         assert!(read_in(&base, "linked").is_err());
         assert!(list_in(&base).is_empty());
     }
+    #[test]
+    fn every_built_in_skill_has_a_name_description_and_when() {
+        for (name, text) in LIBRARY {
+            assert!(valid_name(name), "{name}");
+            let (meta, body) = front_matter(text);
+            assert_eq!(meta.get("name").map(String::as_str), Some(name), "{name}: front matter name has to match");
+            assert!(!meta.get("description").unwrap_or(&String::new()).is_empty(), "{name}: no description");
+            assert!(!meta.get("when").unwrap_or(&String::new()).is_empty(), "{name}: no when");
+            assert!(body.lines().count() >= 3, "{name}: the body is too short to be useful");
+        }
+    }
+
+    #[test]
+    fn a_skill_url_has_to_be_http() {
+        assert!(clean_skill_url("https://example.org/SKILL.md").is_ok());
+        assert!(clean_skill_url(" file:///etc/passwd ").is_err());
+        assert!(clean_skill_url("").is_err());
+        assert!(clean_skill_url(&format!("https://{}", "a".repeat(600))).is_err());
+    }
+
 }
