@@ -306,7 +306,7 @@
           provLoadModels(false);
         }
         if (btn.dataset.provAct === 'remove') {
-          if (!confirm('Remove this provider and its saved key?')) return;
+          if (!await confirmDialog('Remove this provider and its saved key?')) return;
           await provRequest('DELETE', '/api/studio/providers', { id });
           await provRefresh();
           provLoadModels(false);

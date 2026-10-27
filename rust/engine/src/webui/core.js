@@ -66,6 +66,48 @@
       return `${(b / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
     }
 
+    /** A question inside the app instead of the browser's own box: resolves true on OK and false on Cancel, Escape or a click outside. */
+    function confirmDialog(message) {
+      return new Promise((resolve) => {
+        const back = document.createElement('div');
+        back.className = 'modal-backdrop open';
+        back.style.cssText = 'z-index:200;align-items:center;padding-top:0;';
+        const box = document.createElement('div');
+        box.className = 'dialog';
+        const text = document.createElement('p');
+        text.textContent = message;
+        const actions = document.createElement('div');
+        actions.className = 'dialog-actions';
+        const cancel = document.createElement('button');
+        cancel.className = 'btn btn-ghost';
+        cancel.textContent = 'Cancel';
+        const ok = document.createElement('button');
+        ok.className = 'btn btn-primary';
+        ok.textContent = 'OK';
+        actions.append(cancel, ok);
+        box.append(text, actions);
+        back.appendChild(box);
+        const done = (value) => { document.removeEventListener('keydown', onKey, true); back.remove(); resolve(value); };
+        const onKey = (e) => {
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+          if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); done(true); }
+        };
+        cancel.addEventListener('click', () => done(false));
+        ok.addEventListener('click', () => done(true));
+        back.addEventListener('mousedown', (e) => { if (e.target === back) done(false); });
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(back);
+        ok.focus();
+      });
+    }
+    window.fllmConfirm = confirmDialog;
+
+    // The page is an app, not a web page: no browser menu on a right click (text fields keep theirs for copy and paste)
+    document.addEventListener('contextmenu', (e) => {
+      if (e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]')) return;
+      e.preventDefault();
+    });
+
     function toast(msg) {
       const el = document.createElement('div');
       el.className = 'toast-card';

@@ -80,7 +80,7 @@
         const row = e.target.closest('[data-plugin]');
         if (!row) return;
         const name = row.dataset.plugin;
-        if (!window.confirm(`Remove the plugin "${name}" and everything it contributes?`)) return;
+        if (!await confirmDialog(`Remove the plugin "${name}" and everything it contributes?`)) return;
         try {
           const res = await apiFetch('/api/studio/plugins', { method: 'DELETE', body: { name } });
           const data = await res.json();

@@ -179,7 +179,7 @@
           mcpRefresh();
         }
         if (btn && btn.dataset.mcpAct === 'remove') {
-          if (!confirm(`Remove the MCP server "${name}"?`)) return;
+          if (!await confirmDialog(`Remove the MCP server "${name}"?`)) return;
           await mcpRequest('DELETE', '/api/studio/mcp/servers', { name });
           mcpRefresh();
         }

@@ -75,8 +75,8 @@
       }
 
       pane.querySelectorAll('input[name=rtSandbox]').forEach((radio) => radio.addEventListener('change', () => save({ sandbox: radio.value })));
-      pane.querySelector('#rtTurbo').addEventListener('change', (e) => {
-        if (e.target.checked && !window.confirm('Turbo removes every permission question and the sandbox. Continue?')) {
+      pane.querySelector('#rtTurbo').addEventListener('change', async (e) => {
+        if (e.target.checked && !await confirmDialog('Turbo removes every permission question and the sandbox. Continue?')) {
           e.target.checked = false;
           return;
         }

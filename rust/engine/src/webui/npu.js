@@ -175,8 +175,8 @@
 
     $('npuSetupBtn')?.addEventListener('click', () => npuSetupAction('POST', { action: 'install' }));
     $('npuCancelBtn')?.addEventListener('click', () => npuSetupAction('POST', { action: 'cancel' }));
-    $('npuRemoveBtn')?.addEventListener('click', () => {
-      if (confirm('Remove the OpenVINO runtime? The NPU cannot be used until it is installed again.')) npuSetupAction('DELETE');
+    $('npuRemoveBtn')?.addEventListener('click', async () => {
+      if (await confirmDialog('Remove the OpenVINO runtime? The NPU cannot be used until it is installed again.')) npuSetupAction('DELETE');
     });
 
     // The card refreshes when the Hardware pane is shown (the pane gets the class "active").

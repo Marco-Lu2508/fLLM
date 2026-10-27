@@ -1378,7 +1378,7 @@ mod tests {
                     _ => Value::Null,
                 };
                 let (status, payload) = if reply.is_null() { ("202 Accepted", String::new()) } else { ("200 OK", reply.to_string()) };
-                let response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}", payload.len());
+                let response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{payload}", payload.len());
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
             }

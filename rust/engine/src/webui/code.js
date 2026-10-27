@@ -2370,7 +2370,7 @@
         case 'turbo': {
           const want = String(argText || '').trim().toLowerCase();
           const next = want === 'on' ? true : want === 'off' ? false : !code.turbo;
-          if (next && !window.confirm('Turbo removes every permission question and the sandbox. Continue?')) return true;
+          if (next && !await confirmDialog('Turbo removes every permission question and the sandbox. Continue?')) return true;
           try {
             const res = await apiFetch('/api/studio/runtime', { method: 'POST', body: { turbo: next } });
             const data = await res.json().catch(() => ({}));

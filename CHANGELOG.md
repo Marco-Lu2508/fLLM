@@ -11,6 +11,7 @@ behaviour between versions).
 - The settings pages for hooks, agents, prices, plugins, runtime, embeddings and web search open without a model loaded.
 
 ### Fixed
+- Questions (Turbo, removing a provider, plugin, MCP server or the NPU runtime) appear inside the app instead of the browser's own box, and a right click no longer opens the browser menu (text fields keep theirs).
 - The columns of the usage and cost table line up (numbers right-aligned).
 
 ## [0.1.10] - 2026-10-27
