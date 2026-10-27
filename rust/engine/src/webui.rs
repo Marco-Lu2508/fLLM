@@ -8,7 +8,13 @@ use axum::{
 use std::sync::OnceLock;
 
 const SHELL: &str = include_str!("webui/shell.html");
-const STYLE: [&str; 3] = [include_str!("webui/style.css"), include_str!("webui/chat.css"), include_str!("webui/code.css")];
+const STYLE: [&str; 4] = [
+    include_str!("webui/style.css"),
+    include_str!("webui/chat.css"),
+    include_str!("webui/code.css"),
+    // the design system v2 comes last: it refines the older sheets without rewriting every selector
+    include_str!("webui/theme.css"),
+];
 /// The script parts, joined in this order inside one function scope.
 const SCRIPT: [&str; 31] = [
     include_str!("webui/core.js"),
@@ -63,7 +69,7 @@ fn dev_file(dir: &std::path::Path, name: &str) -> Option<String> {
 fn dev_page(dir: &std::path::Path) -> Option<String> {
     let shell = dev_file(dir, "shell.html")?;
     let mut style = String::new();
-    for name in ["style.css", "chat.css", "code.css"] {
+    for name in ["style.css", "chat.css", "code.css", "theme.css"] {
         style.push_str(&dev_file(dir, name)?);
     }
     let mut script = String::new();

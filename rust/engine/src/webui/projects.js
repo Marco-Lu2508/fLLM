@@ -620,7 +620,7 @@
     function prjRenderStarters() {
       const id = asstEffectiveId();
       const a = (id && asstById(id)) || { name: 'Assistant', starters: [] };
-      $('starterPills').innerHTML = asstStarters(a).map((s) => `<button class="starter-pill" data-prompt="${escapeHtml(s)}"><span>${escapeHtml(s.length > 64 ? `${s.slice(0, 62)}...` : s)}</span></button>`).join('') +
+      $('starterPills').innerHTML = asstStarters(a).map((s) => `<button class="starter-pill" data-prompt="${escapeHtml(s)}"><span>${escapeHtml(s.length > 110 ? `${s.slice(0, 108)}…` : s)}</span></button>`).join('') +
         (id && !asstById(id).builtin ? `<button class="starter-pill starter-edit" data-action="edit-starters" title="Edit the suggestions of this assistant"><span>Edit suggestions</span></button>` : '');
     }
     $('starterPills').addEventListener('click', (e) => {

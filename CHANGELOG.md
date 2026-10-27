@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Changed
+- **New design system** (`webui/theme.css`, loaded last): OLED-dark slate and warm paper light theme, signal-green accent with seven alternatives in the accent picker, 8 px grid, 11–34 px type scale, mono for meta, floating sidebar rail, centred 900 px reading column, raised composer, bento starter cards, quiet focus rings and reduced-motion support. The empty chat no longer shows a flat sparkline.
+
 ### Added
 - **One click to the first model**: the empty chat screen offers the recommended model with its quantization and size and downloads it in place (progress, pause, resume, then load). Nothing has to be chosen in a terminal.
 - **Sandbox and turbo in the page** (Settings > Runtime): `sandbox` as `off`/`workspace`/`strict` and a turbo switch that removes every permission question and the sandbox, kept in `runtime.json`; the environment still wins, and the page says when `bwrap` is missing. `/turbo` and `/sandbox` in the agent.

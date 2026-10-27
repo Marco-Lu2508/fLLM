@@ -1,17 +1,15 @@
     // Accent palette
+    // One accent per personality; the first is copper — the colour of the material (Rust, patina),
+    // not the acid green every AI tool reaches for.
     const ACCENT_COLORS = [
-      { name: 'Patina',  value: 'patina',  thumb: '#43c0aa', primary: '#43c0aa', primaryLight: '#17806f', sidebar: { light: '#e3eae7', dark: '#0b1116' } },
-      { name: 'Kupfer',  value: 'kupfer',  thumb: '#d9925a', primary: '#e0955c', primaryLight: '#b4672b', sidebar: { light: '#ece6df', dark: '#150f0b' } },
-      { name: 'Emerald', value: 'emerald', thumb: '#38AB51', primary: '#38AB51', sidebar: { light: '#C4F3CE', dark: '#194D24' } },
-      { name: 'Teal',    value: 'teal',    thumb: '#38AB8D', primary: '#38AB8D', sidebar: { light: '#C4F3E6', dark: '#194D3F' } },
-      { name: 'Cyan',    value: 'cyan',    thumb: '#45BBDE', primary: '#45BBDE', sidebar: { light: '#C4E8F3', dark: '#0F4657' } },
-      { name: 'Blue',    value: 'blue',    thumb: '#456BDE', primary: '#456BDE', sidebar: { light: '#C4D0F3', dark: '#0F2157' } },
-      { name: 'Purple',  value: 'purple',  thumb: '#865EEA', primary: '#865EEA', sidebar: { light: '#D2C4F3', dark: '#220C5A' } },
-      { name: 'Orange',  value: 'orange',  thumb: '#E9A23F', primary: '#E9A23F', sidebar: { light: '#F3DFC4', dark: '#5C3A0A' } },
-      { name: 'Red',     value: 'red',     thumb: '#F0614B', primary: '#F0614B', sidebar: { light: '#F3CBC4', dark: '#5E1308' } },
-      { name: 'Green',   value: 'green',   thumb: '#88BA42', primary: '#88BA42', sidebar: { light: '#DFF3C4', dark: '#374B1B' } },
-      { name: 'Pink',    value: 'pink',    thumb: '#D55EF3', primary: '#D55EF3', sidebar: { light: '#FFDAE9', dark: '#4D075F' } },
-      { name: 'Rose',    value: 'rose',    thumb: '#F655B8', primary: '#F655B8', sidebar: { light: '#F3C4E1', dark: '#61053E' } },
+      { name: 'Copper',  value: 'patina',  thumb: '#e08a4b', primary: '#e08a4b', primaryLight: '#b4541f', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Signal',  value: 'emerald', thumb: '#4ade80', primary: '#4ade80', primaryLight: '#15803d', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Indigo',  value: 'indigo',  thumb: '#8b8cf9', primary: '#8b8cf9', primaryLight: '#4338ca', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Cyan',    value: 'cyan',    thumb: '#22d3ee', primary: '#22d3ee', primaryLight: '#0e7490', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Rose',    value: 'rose',    thumb: '#fb7185', primary: '#fb7185', primaryLight: '#be123c', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Violet', value: 'purple',  thumb: '#c084fc', primary: '#c084fc', primaryLight: '#7e22ce', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Steel',   value: 'blue',    thumb: '#94a3b8', primary: '#94a3b8', primaryLight: '#334155', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Lime',    value: 'green',   thumb: '#a3e635', primary: '#a3e635', primaryLight: '#4d7c0f', sidebar: { light: '#ffffff', dark: '#12151c' } },
     ];
 
     const STORAGE = {
