@@ -5,6 +5,8 @@ use crate::{
     safetensors::{self, Tensor},
     CheckpointError,
 };
+use crate::quantize::QType;
+use crate::requant::{layer_count, quantize_tensor_into, target_kind, Preset};
 use fllm_gguf_probe::{GgufIndex, MappedGguf, TensorInfo};
 use serde_json::{Map, Value};
 use std::{
@@ -1268,13 +1270,11 @@ fn is_untouched(t: &OutTensor) -> bool {
     }
 }
 
-pub fn materialize_mapped_gguf(
-    meta: &[(String, Meta)],
-    tensors: &[OutTensor],
-) -> Result<MappedGguf, CheckpointError> {
-    let mut index_metadata = serde_json::Map::new();
+/// The metadata of `meta` in the form `MappedGguf` reads from a GGUF header.
+fn index_metadata(meta: &[(String, Meta)], tensor_count: usize) -> Map<String, Value> {
+    let mut index_metadata = Map::new();
     index_metadata.insert("GGUF.version".into(), Value::from(3u32));
-    index_metadata.insert("GGUF.tensor_count".into(), Value::from(tensors.len() as u64));
+    index_metadata.insert("GGUF.tensor_count".into(), Value::from(tensor_count as u64));
     index_metadata.insert("GGUF.kv_count".into(), Value::from(meta.len() as u64));
     index_metadata.insert("general.alignment".into(), Value::from(32u32));
     for (k, v) in meta {
@@ -1296,101 +1296,127 @@ pub fn materialize_mapped_gguf(
         };
         index_metadata.insert(k.clone(), val);
     }
+    index_metadata
+}
 
-    let mut total_anon_size: usize = 0;
-    for t in tensors {
-        if !is_untouched(t) {
-            let len = usize::try_from(t.data_len)
-                .map_err(|_| CheckpointError::Invalid("tensor length overflow".into()))?;
-            total_anon_size = (total_anon_size + 31) & !31;
-            total_anon_size = total_anon_size
-                .checked_add(len)
-                .ok_or_else(|| CheckpointError::Invalid("anon mmap size overflow".into()))?;
-        }
-    }
+/// Where one tensor of a directly loaded model comes from.
+enum Source {
+    /// Served straight from the memory-mapped checkpoint file.
+    Mapped(std::sync::Arc<memmap2::Mmap>, u64),
+    /// Built into the anonymous map at this offset, as it is.
+    Built(usize),
+    /// Quantized into the anonymous map at this offset.
+    Quantized(usize, QType),
+}
 
-    let mut modified_offsets = HashMap::new();
-    let anon_ro = if total_anon_size > 0 {
-        let mut anon_mmap = memmap2::MmapOptions::new()
-            .len(total_anon_size)
-            .map_anon()?;
-        let mut cursor = 0usize;
-        for t in tensors {
-            if !is_untouched(t) {
-                cursor = (cursor + 31) & !31;
-                let start = cursor;
-                let len = usize::try_from(t.data_len)
-                    .map_err(|_| CheckpointError::Invalid("tensor length overflow".into()))?;
-                let end = start + len;
-                let mut slice = std::io::Cursor::new(&mut anon_mmap[start..end]);
-                let written = gguf::write_tensor(&mut slice, t)?;
-                if written != t.data_len {
-                    return Err(CheckpointError::Invalid(format!(
-                        "tensor {} wrote {written} bytes, expected {}",
-                        t.name, t.data_len
-                    )));
-                }
-                modified_offsets.insert(t.name.clone(), start as u64);
-                cursor = end;
-            }
-        }
-        Some(std::sync::Arc::new(anon_mmap.make_read_only()?))
-    } else {
-        None
-    };
-
-    let mut extra_mappings = HashMap::new();
-    let mut result_tensors = Vec::with_capacity(tensors.len());
-
-    for t in tensors {
-        let type_id = gguf_type_id(&t.dtype)?;
-        let dimensions = t.dims.clone();
-
-        let (mapping, data_offset) = if is_untouched(t) {
-            match &t.data {
-                safetensors::Payload::Mapped(arc_mmap, range) => {
-                    (std::sync::Arc::clone(arc_mmap), range.start as u64)
-                }
-                _ => unreachable!(),
-            }
-        } else {
-            let offset = *modified_offsets
-                .get(&t.name)
-                .ok_or_else(|| CheckpointError::Invalid(format!("missing offset for {}", t.name)))?;
-            let ro = anon_ro
-                .as_ref()
-                .ok_or_else(|| CheckpointError::Invalid("missing anon mmap".into()))?;
-            (std::sync::Arc::clone(ro), offset)
+/// Present converted tensors as a GGUF model without writing a file: tensors the converter copies unchanged stay slices of the
+/// memory-mapped checkpoint, every other tensor is produced once by the converter's own writer into an anonymous read-only
+/// map (the size it would have in the GGUF file). With `quant` the float tensors are re-encoded with the preset of
+/// `fllm-rs quantize` one tensor at a time, so the half-precision form of the whole model never exists. The bytes equal
+/// those of the GGUF file `convert_checkpoint` (followed by `quantize_gguf`) would write. Consumes `tensors` so that data
+/// built in memory is released as soon as it has been placed. Fails with `OverBudget` before anything is built when the tensors that
+/// have to be built need more than `max_built_bytes`.
+pub fn materialize_mapped_gguf(
+    meta: &[(String, Meta)],
+    tensors: Vec<OutTensor>,
+    quant: Option<Preset>,
+    max_built_bytes: Option<u64>,
+) -> Result<MappedGguf, CheckpointError> {
+    let layers = layer_count(tensors.iter().map(|t| t.name.as_str()));
+    let overflow = || CheckpointError::Invalid("tensor length overflow".into());
+    // 1. layout: which tensors stay in the checkpoint file, and where the others go
+    let mut sources = Vec::with_capacity(tensors.len());
+    let mut infos = Vec::with_capacity(tensors.len());
+    let mut anon_size = 0usize;
+    for t in &tensors {
+        let source_type = gguf_type_id(&t.dtype)?;
+        let elements: u64 = t.dims.iter().product();
+        let kind = quant.and_then(|p| target_kind(p, &t.name, &t.dims, source_type, layers));
+        let (type_id, len) = match kind {
+            Some(k) => (k.ggml_id(), k.row_bytes(usize::try_from(elements).map_err(|_| overflow())?) as u64),
+            None => (source_type, t.data_len),
         };
-
-        extra_mappings.insert(t.name.clone(), mapping);
-        result_tensors.push(TensorInfo {
-            name: t.name.clone(),
-            dimensions,
-            type_id,
-            data_offset,
-            payload_len: t.data_len,
-        });
+        let source = match (&t.data, kind, is_untouched(t)) {
+            (safetensors::Payload::Mapped(map, range), None, true) => Source::Mapped(std::sync::Arc::clone(map), range.start as u64),
+            _ => {
+                anon_size = (anon_size + 31) & !31;
+                let at = anon_size;
+                anon_size = anon_size.checked_add(usize::try_from(len).map_err(|_| overflow())?).ok_or_else(overflow)?;
+                match kind {
+                    Some(k) => Source::Quantized(at, k),
+                    None => Source::Built(at),
+                }
+            }
+        };
+        infos.push((t.name.clone(), t.dims.clone(), type_id, len));
+        sources.push((source, source_type));
     }
-
+    if let Some(limit) = max_built_bytes.filter(|&l| anon_size as u64 > l) {
+        return Err(CheckpointError::OverBudget { needed: anon_size as u64, limit });
+    }
+    // 2. write the built tensors, one at a time
+    let mut anon = memmap2::MmapOptions::new().len(anon_size.max(1)).map_anon()?;
+    let mut staging: Vec<u8> = Vec::new();
+    for (t, (source, source_type)) in tensors.into_iter().zip(&sources) {
+        match source {
+            Source::Mapped(..) => {}
+            Source::Built(at) => {
+                let end = at + usize::try_from(t.data_len).map_err(|_| overflow())?;
+                let written = gguf::write_tensor(&mut std::io::Cursor::new(&mut anon[*at..end]), &t)?;
+                if written != t.data_len {
+                    return Err(CheckpointError::Invalid(format!("tensor {} wrote {written} bytes, expected {}", t.name, t.data_len)));
+                }
+            }
+            Source::Quantized(at, kind) => {
+                let elements: u64 = t.dims.iter().product();
+                let end = at + kind.row_bytes(elements as usize);
+                if is_untouched(&t) {
+                    quantize_tensor_into(*kind, *source_type, &t.dims, t.data.as_slice(), &mut anon[*at..end]);
+                } else {
+                    staging.clear();
+                    let written = gguf::write_tensor(&mut staging, &t)?;
+                    if written != t.data_len {
+                        return Err(CheckpointError::Invalid(format!("tensor {} wrote {written} bytes, expected {}", t.name, t.data_len)));
+                    }
+                    quantize_tensor_into(*kind, *source_type, &t.dims, &staging, &mut anon[*at..end]);
+                }
+            }
+        }
+    }
+    let anon = std::sync::Arc::new(anon.make_read_only()?);
+    // 3. the index, with a mapping per tensor
+    let mut extra_mappings = HashMap::new();
+    let mut result_tensors = Vec::with_capacity(infos.len());
+    for ((name, dimensions, type_id, payload_len), (source, _)) in infos.into_iter().zip(sources) {
+        let (mapping, data_offset) = match source {
+            Source::Mapped(map, offset) => (map, offset),
+            Source::Built(at) | Source::Quantized(at, _) => (std::sync::Arc::clone(&anon), at as u64),
+        };
+        extra_mappings.insert(name.clone(), mapping);
+        result_tensors.push(TensorInfo { name, dimensions, type_id, data_offset, payload_len });
+    }
     let index = GgufIndex {
         version: 3,
-        metadata: index_metadata,
+        metadata: index_metadata(meta, result_tensors.len()),
         tensors: result_tensors,
         data_offset: 0,
         file_len: 0,
     };
-
-    MappedGguf::from_index_and_mappings(index, extra_mappings)
-        .map_err(CheckpointError::Io)
+    MappedGguf::from_index_and_mappings(index, extra_mappings).map_err(CheckpointError::Io)
 }
 
-pub fn load_checkpoint_as_gguf(
-    input: &Path,
-    options: ConvertOptions,
-) -> Result<MappedGguf, CheckpointError> {
+/// Open a checkpoint as a model without writing a GGUF file: the tensors the converter would copy unchanged are slices of
+/// the checkpoint files, the others are built in memory (see `materialize_mapped_gguf`).
+pub fn load_checkpoint_as_gguf(input: &Path, options: ConvertOptions) -> Result<MappedGguf, CheckpointError> {
+    load_checkpoint_quantized(input, options, None, None)
+}
+
+/// `load_checkpoint_as_gguf` that also re-encodes the unquantized float weights with `quant` while loading
+/// (the in-memory form of `--quant`). `options.output_dtype` should be `F16` then, as for the file conversion.
+/// `max_built_bytes` caps the memory for tensors that cannot be slices of the checkpoint (`CheckpointError::OverBudget`).
+pub fn load_checkpoint_quantized(input: &Path, options: ConvertOptions, quant: Option<Preset>, max_built_bytes: Option<u64>) -> Result<MappedGguf, CheckpointError> {
     let (_arch, meta, outs, _skipped) = prepare_checkpoint(input, options)?;
-    materialize_mapped_gguf(&meta, &outs)
+    materialize_mapped_gguf(&meta, outs, quant, max_built_bytes)
 }
 /// A vision tower tensor: kept in its source layout (rank above two flattened to `[out, rest]`), converted only in dtype.
 fn vision_tensor(name: String, t: Tensor, requested: OutputDType) -> Result<OutTensor, CheckpointError> {

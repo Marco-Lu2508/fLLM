@@ -298,25 +298,7 @@ impl GgufModel {
         max_sequences: usize,
         threads: i32,
     ) -> Result<Self, String> {
-        let p = std::path::Path::new(model_path);
-        let mapping = if (p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("safetensors")))
-            || (p.is_dir() && (p.join("config.json").is_file() || p.join("params.json").is_file()))
-        {
-            fllm_checkpoint::load_checkpoint_as_gguf(p, fllm_checkpoint::ConvertOptions::default())
-                .map_err(|e| e.to_string())?
-        } else {
-            match MappedGguf::open(model_path) {
-                Ok(m) => m,
-                Err(e) => {
-                    if p.exists() {
-                        fllm_checkpoint::load_checkpoint_as_gguf(p, fllm_checkpoint::ConvertOptions::default())
-                            .map_err(|_| e.to_string())?
-                    } else {
-                        return Err(e.to_string());
-                    }
-                }
-            }
-        };
+        let mapping = crate::import::open_model(std::path::Path::new(model_path))?;
         Self::from_mapping(mapping, max_context, max_sequences, threads)
     }
 

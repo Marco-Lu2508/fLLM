@@ -49,14 +49,13 @@ use fllm_engine::{
     tokenizer::TokenizerBundle,
     DeviceType, GgufModel, InferenceRuntime,
 };
-use fllm_gguf_probe::MappedGguf;
 use std::{env, process};
 
 /// A draft model given as a file, a Hugging Face reference or a directory: resolved to one GGUF file (checkpoints are converted).
 fn resolve_gguf(spec: &str, offline: bool) -> Result<std::path::PathBuf, String> {
     let path = fllm_engine::import::prepare(
         spec,
-        &fllm_engine::import::ImportOptions { revision: None, offline, quant: None, outtype: None, direct: false },
+        &fllm_engine::import::ImportOptions { revision: None, offline, quant: None, outtype: None, direct: false, no_direct: true },
     )?;
     if !path.is_dir() {
         return Ok(path);
@@ -89,7 +88,7 @@ fn usage(error: &str) -> ! {
     }
     eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
-    eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a checkpoint is converted to GGUF once and cached; --quant ({}) re-encodes an unquantized checkpoint while converting", fllm_checkpoint::Preset::NAMES);
+    eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a verified safetensors checkpoint is loaded directly without writing a GGUF file (--direct forces that, --no-direct-load converts to a cached GGUF file instead); --quant ({}) re-encodes an unquantized checkpoint while loading", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
     eprintln!("       (wgpu devices: f16 and q8_0 only; nvfp4 is experimental, keys below 8 bit can break some models, see docs/gpu-backends.md)");
     eprintln!("       fllm-rs --version | -V | version");
@@ -433,6 +432,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut import_quant: Option<String> = None;
     let mut import_outtype: Option<String> = None;
     let mut import_direct = false;
+    let mut import_no_direct = false;
     let mut host = "127.0.0.1".to_owned();
     let mut port = 8000u16;
     // None: --ctx auto
@@ -538,6 +538,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--revision" => hub_revision = Some(value(&args, &mut i, "--revision")),
             "--local-files-only" | "--offline" => hub_offline = true,
             "--direct" | "--zero-copy" => import_direct = true,
+            "--no-direct-load" | "--no-direct" => import_no_direct = true,
             "--model" => model_path = Some(value(&args, &mut i, "--model")),
             "--engine" => {
                 let engine = value(&args, &mut i, "--engine");
@@ -880,9 +881,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             quant: import_quant,
             outtype: import_outtype,
             direct: import_direct,
+            no_direct: import_no_direct,
         },
     )?;
-    if path.is_dir() {
+    if path.is_dir() && !fllm_engine::import::is_direct(&path) {
         let mut ggufs = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&path) {
             for entry in entries.flatten() {
@@ -916,14 +918,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
-    let inferred_name = path
-        .file_stem()
-        .and_then(|x| x.to_str())
-        .map(fllm_engine::import::display_name)
-        .unwrap_or("fllm-model")
-        .to_owned();
+    let direct_load = fllm_engine::import::is_direct(&path);
+    let inferred_name = if direct_load {
+        fllm_engine::import::direct_model_name(&path)
+    } else {
+        path.file_stem()
+            .and_then(|x| x.to_str())
+            .map(fllm_engine::import::display_name)
+            .unwrap_or("fllm-model")
+            .to_owned()
+    };
 
-    let mapping = MappedGguf::open(&path)?;
+    // a checkpoint loaded directly is built once here and shared with the model (a GGUF file is cheap to map again)
+    let mapping = fllm_engine::import::open_model(&path)?;
     let facts = fllm_engine::server::ModelFacts::from_gguf(&path, &mapping);
     let is_encoder = mapping
         .index()
@@ -948,11 +955,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref cores) = pin_cores {
             pin_threads_to_cores(cores);
         }
-        let mut encoder = fllm_engine::encoder::BertEncoder::load(
-            path.to_str().ok_or("invalid model path")?,
-            threads.max(1) as usize,
-            pooling,
-        )?;
+        let mut encoder = if direct_load {
+            fllm_engine::encoder::BertEncoder::from_mapping(mapping.with_tensor_aliases(&[])?, threads.max(1) as usize, pooling)?
+        } else {
+            fllm_engine::encoder::BertEncoder::load(path.to_str().ok_or("invalid model path")?, threads.max(1) as usize, pooling)?
+        };
         encoder.set_device(&device)?;
         if batch_explicit {
             fllm_engine::encoder_server::set_max_batched_tokens(max_batched_tokens);
@@ -1041,7 +1048,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // GPU pools are cut to the device's memory below; the CPU keeps the default pool
         max_sequences = if matches!(selected_backend.as_str(), "cpu" | "npu") { 16 } else { 256 };
     }
-    let mut model = GgufModel::load(path.to_str().unwrap(), context, max_sequences, threads)?;
+    let mut model = if direct_load {
+        GgufModel::from_mapping(mapping.with_tensor_aliases(&[])?, context, max_sequences, threads)?
+    } else {
+        GgufModel::load(path.to_str().unwrap(), context, max_sequences, threads)?
+    };
     {
         let topology = fllm_engine::cpu_topology::detect();
         let choice = if !threads_auto {

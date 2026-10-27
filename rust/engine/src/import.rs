@@ -11,12 +11,17 @@
 
 use crate::hub::{self, CacheEntry, Reference, RepoSession};
 use fllm_checkpoint::{ConvertOptions, OutputDType, Preset};
+use fllm_gguf_probe::MappedGguf;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -55,8 +60,11 @@ pub struct ImportOptions {
     pub quant: Option<String>,
     /// `--outtype preserve|f16|f32`.
     pub outtype: Option<String>,
-    /// `--direct` / `--zero-copy`: load safetensors directly without converting to GGUF on disk.
+    /// `--direct` / `--zero-copy`: load the checkpoint directly, without a GGUF file, and refuse instead of falling back to
+    /// the conversion when that is not possible.
     pub direct: bool,
+    /// `--no-direct-load`: always convert to a cached GGUF file first (the behaviour before direct loading existed).
+    pub no_direct: bool,
 }
 
 impl ImportOptions {
@@ -73,9 +81,28 @@ impl ImportOptions {
             "--revision" => self.revision = Some(value(i)?),
             "--local-files-only" | "--offline" => self.offline = true,
             "--direct" | "--zero-copy" => self.direct = true,
+            "--no-direct-load" | "--no-direct" => self.no_direct = true,
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// The flags that make a child process (`run` starts `serve`) decide the same way about the same checkpoint.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (flag, value) in [("--quant", &self.quant), ("--outtype", &self.outtype)] {
+            if let Some(v) = value {
+                args.push(flag.to_owned());
+                args.push(v.clone());
+            }
+        }
+        if self.direct {
+            args.push("--direct".into());
+        }
+        if self.no_direct {
+            args.push("--no-direct-load".into());
+        }
+        args
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -92,11 +119,8 @@ impl ImportOptions {
         if self.quant.is_some() && self.outtype.is_some() {
             return Err("--quant and --outtype cannot be combined".into());
         }
-        if self.direct && self.quant.is_some() {
-            return Err("--quant and --direct cannot be combined".into());
-        }
-        if self.direct && self.outtype.is_some() {
-            return Err("--outtype and --direct cannot be combined".into());
+        if self.direct && self.no_direct {
+            return Err("--direct and --no-direct-load cannot be combined".into());
         }
         Ok(())
     }
@@ -453,12 +477,7 @@ fn convert_into(input: &Path, final_path: &Path, origin: &Origin<'_>) -> Result<
     remove_partial_files(final_path);
     let partial = part_path(final_path, "");
     let result = (|| -> Result<(), String> {
-        let (dtype, preset) = match origin.outtype {
-            OutType::Preserve => (OutputDType::Preserve, None),
-            OutType::F16 => (OutputDType::F16, None),
-            OutType::F32 => (OutputDType::F32, None),
-            OutType::Quant(q) => (OutputDType::F16, Preset::parse(q)),
-        };
+        let (dtype, preset) = dtype_and_preset(origin.outtype);
         let started = Instant::now();
         let _beat = Heartbeat::start(format!("still converting {}", origin.source));
         let stage = if preset.is_some() { part_path(final_path, ".f16") } else { partial.clone() };
@@ -495,6 +514,130 @@ fn convert_into(input: &Path, final_path: &Path, origin: &Origin<'_>) -> Result<
     }
     drop(lock);
     result
+}
+
+/// The tensor type the converter writes for `outtype`, and the preset that re-encodes it afterwards.
+fn dtype_and_preset(outtype: &OutType) -> (OutputDType, Option<Preset>) {
+    match outtype {
+        OutType::Preserve => (OutputDType::Preserve, None),
+        OutType::F16 => (OutputDType::F16, None),
+        OutType::F32 => (OutputDType::F32, None),
+        OutType::Quant(q) => (OutputDType::F16, Preset::parse(q)),
+    }
+}
+
+// ---- loading a checkpoint without writing a GGUF file ----
+
+/// Source quantizations whose direct load is checked, tensor by tensor, against the conversion by tests (see
+/// `docs/rust-formats-and-import.md`). Other checkpoints are converted unless `--direct` asks for the direct load anyway.
+const VERIFIED_DIRECT: &[&str] = &["none", "awq", "gptq", "nvfp4", "fp8", "int4", "int8"];
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// How the checkpoints that `prepare` handed out for direct loading were asked to be loaded (`--outtype`, `--quant`).
+fn direct_registry() -> &'static Mutex<HashMap<PathBuf, OutType>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, OutType>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn hand_out_direct(input: PathBuf, outtype: &OutType) -> PathBuf {
+    direct_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(input.clone(), outtype.clone());
+    input
+}
+
+/// Whether `prepare` returned this path for direct loading: a checkpoint directory (which may hold converted GGUF files
+/// of earlier runs) or a weights file, to be opened with `open_model`.
+pub fn is_direct(path: &Path) -> bool {
+    direct_registry().lock().unwrap_or_else(|e| e.into_inner()).contains_key(path)
+}
+
+/// A name for a model that is loaded directly: the repository of a cached Hub snapshot, else the directory or file stem.
+pub fn direct_model_name(path: &Path) -> String {
+    let repo = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("models--"))
+        .and_then(|n| n.rsplit("--").next())
+        .filter(|n| !n.is_empty());
+    if let (Some(repo), true) = (repo, path.is_dir()) {
+        return repo.to_owned();
+    }
+    let name = if path.is_dir() { path.file_name() } else { path.file_stem() };
+    name.and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("fllm-model").to_owned()
+}
+
+/// Whether `open_model` reads `path` as a checkpoint: a `.safetensors` file or a directory with `config.json` / `params.json`.
+pub fn is_checkpoint_input(path: &Path) -> bool {
+    (path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("safetensors")))
+        || (path.is_dir() && (path.join("config.json").is_file() || path.join("params.json").is_file()))
+}
+
+/// Open a model for the engine: a GGUF file is memory-mapped, a checkpoint (`prepare` hands one out when it loads
+/// directly) is presented as the GGUF model the converter would have written, without writing it; see
+/// `fllm_checkpoint::load_checkpoint_quantized`.
+pub fn open_model(path: &Path) -> Result<MappedGguf, String> {
+    if is_checkpoint_input(path) {
+        return load_direct(path);
+    }
+    match MappedGguf::open(path) {
+        Ok(mapping) => Ok(mapping),
+        Err(e) if path.exists() => load_direct(path).map_err(|_| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn load_direct(path: &Path) -> Result<MappedGguf, String> {
+    let outtype = direct_registry().lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned().unwrap_or(OutType::Preserve);
+    let (output_dtype, preset) = dtype_and_preset(&outtype);
+    // tensors that cannot stay slices of the checkpoint are built in memory that the system cannot take back under pressure
+    // (a GGUF file would sit in the evictable page cache), so refuse early instead of driving the machine into swap
+    let free = crate::devices::host_free_memory_bytes();
+    let limit = (free > 0).then(|| free / 4 * 3);
+    fllm_checkpoint::load_checkpoint_quantized(path, ConvertOptions { output_dtype, overwrite: false, spec_head: None }, preset, limit).map_err(|e| match e {
+        fllm_checkpoint::CheckpointError::OverBudget { .. } => format!("{e}; --no-direct-load converts to a cached GGUF file instead"),
+        other => other.to_string(),
+    })
+}
+
+/// Why this checkpoint is not loaded directly by default, or `None` when it is.
+fn direct_unsupported(check: &fllm_checkpoint::ConfigCheck, weight_names: &[String], weight_bytes: u64, outtype: &OutType) -> Option<String> {
+    if !VERIFIED_DIRECT.contains(&check.quantization.as_str()) {
+        return Some(format!("the direct load of {} checkpoints is not verified yet", check.quantization));
+    }
+    if weight_names.iter().any(|n| !n.ends_with(".safetensors") && !n.ends_with(".safetensors.index.json")) {
+        return Some("PyTorch weights are converted".to_owned());
+    }
+    // the converted tensors live in memory, the converted file would live in the page cache
+    let free = crate::devices::host_free_memory_bytes();
+    let share = if check.quantization == "none" { free / 4 * 3 } else { free / 2 };
+    if free > 0 && !matches!(outtype, OutType::Quant(_)) && weight_bytes > share {
+        return Some(format!("the weights ({}) are large for the free memory ({})", gb(weight_bytes), gb(free)));
+    }
+    None
+}
+
+/// What to do with a checkpoint: `Some(forced)` loads it directly (`forced` when `--direct` asked for it), `None` converts it.
+fn direct_mode(opts: &ImportOptions, unsupported: Option<String>, what: &str) -> Option<bool> {
+    if opts.no_direct || env_flag("FLLM_NO_DIRECT_LOAD") {
+        return None;
+    }
+    if opts.direct || env_flag("FLLM_DIRECT_SAFETENSORS") {
+        if let Some(reason) = unsupported {
+            eprintln!("[fllm-rs] loading {what} directly although {reason}");
+        }
+        return Some(true);
+    }
+    match unsupported {
+        None => Some(false),
+        Some(reason) => {
+            eprintln!("[fllm-rs] {what} is converted to a GGUF file: {reason} (--direct loads it anyway)");
+            None
+        }
+    }
 }
 
 /// Resolve what `run`, `serve` and `pull` were given to a GGUF file (or, for a local directory with GGUF files, that
@@ -559,7 +702,9 @@ fn prepare_hub(reference: &Reference, opts: &ImportOptions) -> Result<PathBuf, S
     let final_path = session
         .snapshot
         .join(converted_name(&reference.repo, &label_for(&outtype, &check, &cfg), &key));
-    if final_path.is_file() {
+    // a conversion that is already in the cache starts faster than building the tensors again, so it is used unless --direct
+    let direct = direct_mode(opts, direct_unsupported(&check, &weights, weight_bytes, &outtype), &repo_name);
+    if direct != Some(true) && final_path.is_file() {
         session.record_revision()?;
         eprintln!("[fllm-rs] using the converted model from the cache: {}", final_path.display());
         print_memory_hint(fs::metadata(&final_path).map_or(0, |m| m.len()), &outtype, &check.quantization);
@@ -573,6 +718,26 @@ fn prepare_hub(reference: &Reference, opts: &ImportOptions) -> Result<PathBuf, S
         .filter(|f| !session.is_cached(f))
         .filter_map(|f| session.size_of(f))
         .sum();
+    if direct.is_some() {
+        check_disk(&session.snapshot, missing, missing)?;
+        eprintln!(
+            "[fllm-rs] {repo_name} is a {} checkpoint without GGUF files ({}, {} of weights); it is loaded directly, without writing a GGUF file",
+            if check.quantization == "none" { "plain".to_owned() } else { check.quantization.clone() },
+            check.architecture,
+            gb(weight_bytes)
+        );
+        if missing > 0 {
+            eprintln!("[fllm-rs] downloading {} ...", gb(missing));
+        }
+        for file in hub::CHECKPOINT_SUPPORT_FILES.iter().filter(|f| name_refs.contains(f)) {
+            session.download(file)?;
+        }
+        for file in &weights {
+            session.download(file)?;
+        }
+        session.record_revision()?;
+        return Ok(hand_out_direct(session.snapshot.clone(), &outtype));
+    }
     check_disk(&session.snapshot, disk_needed(missing, weight_bytes, &outtype), missing)?;
     eprintln!(
         "[fllm-rs] {repo_name} is a {} checkpoint without GGUF files ({}, {} of weights); it is converted to GGUF ({}) once and the result is cached under {}",
@@ -608,6 +773,10 @@ pub fn local_cache_dir() -> PathBuf {
     hub::cache_root().join("fllm-local")
 }
 
+fn is_weight_name(name: &str) -> bool {
+    name.ends_with(".safetensors") || name.ends_with(".bin") || name.ends_with(".pt") || name.ends_with(".pth")
+}
+
 fn is_checkpoint_file(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("safetensors" | "bin" | "pt" | "pth"))
 }
@@ -622,7 +791,9 @@ fn local_checkpoint_root(path: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     let entries: Vec<_> = fs::read_dir(path).ok()?.flatten().collect();
-    let has_gguf = entries.iter().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("gguf")));
+    let has_gguf = entries.iter().any(|e| {
+        e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("gguf")) && !hub::is_converted_name(&e.file_name().to_string_lossy())
+    });
     let has_weights = entries.iter().any(|e| {
         let n = e.file_name().to_string_lossy().into_owned();
         n.ends_with(".safetensors") || n.ends_with(".safetensors.index.json") || n == "pytorch_model.bin" || n == "pytorch_model.bin.index.json"
@@ -643,7 +814,7 @@ fn local_fingerprint(root: &Path) -> Result<(Vec<String>, u64), String> {
     names.sort();
     for path in names {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let weight = name.ends_with(".safetensors") || name.ends_with(".bin") || name.ends_with(".pt") || name.ends_with(".pth");
+        let weight = is_weight_name(&name);
         let relevant = weight || matches!(name.as_str(), "config.json" | "hf_quant_config.json" | "tokenizer.json" | "tokenizer_config.json" | "generation_config.json" | "chat_template.jinja" | "chat_template.json" | "params.json" | "tekken.json" | "tokenizer.model" | "tiktoken.model" | "qwen.tiktoken" | "spiece.model" | "sentencepiece.bpe.model")
             || name.ends_with(".tiktoken")
             || name.ends_with(".index.json");
@@ -675,13 +846,18 @@ fn prepare_local(path: &Path, opts: &ImportOptions) -> Result<PathBuf, String> {
     let local_refs: Vec<&str> = local_names.iter().map(String::as_str).collect();
     require_tokenizer(has_tokenizer_source(&local_refs), &what)?;
     let outtype = choose_outtype(&check.quantization, opts.quant.as_deref(), opts.outtype.as_deref())?;
-    if opts.direct || std::env::var("FLLM_DIRECT_SAFETENSORS").is_ok_and(|v| v != "0") {
-        eprintln!("[fllm-rs] loading {what} directly via zero-copy safetensors");
-        return Ok(input);
+    let (files, weight_bytes) = local_fingerprint(&root)?;
+    let weight_names: Vec<String> = files.iter().filter_map(|f| f.split(':').next()).filter(|n| is_weight_name(n)).map(str::to_owned).collect();
+    let direct = direct_mode(opts, direct_unsupported(&check, &weight_names, weight_bytes, &outtype), &what);
+    let load_directly = |input: PathBuf| {
+        eprintln!("[fllm-rs] loading {what} directly, without writing a GGUF file");
+        hand_out_direct(input, &outtype)
+    };
+    if direct == Some(true) {
+        return Ok(load_directly(input));
     }
     let cfg = read_config(&root)?;
     let canonical = fs::canonicalize(&input).unwrap_or_else(|_| input.clone());
-    let (files, weight_bytes) = local_fingerprint(&root)?;
     let label = outtype.label();
     let canonical_text = canonical.to_string_lossy().into_owned();
     let import_version = IMPORT_VERSION.to_string();
@@ -700,6 +876,9 @@ fn prepare_local(path: &Path, opts: &ImportOptions) -> Result<PathBuf, String> {
         eprintln!("[fllm-rs] using the converted model from the cache: {}", final_path.display());
         print_memory_hint(fs::metadata(&final_path).map_or(0, |m| m.len()), &outtype, &check.quantization);
         return Ok(final_path);
+    }
+    if direct.is_some() {
+        return Ok(load_directly(input));
     }
     check_disk(&local_cache_dir(), disk_needed(0, weight_bytes, &outtype), 0)?;
     eprintln!(

@@ -79,6 +79,52 @@ fn more_bits(i: usize, n: usize) -> bool {
     i < n / 8 || i >= 7 * n / 8 || (i - n / 8) % 3 == 2
 }
 
+/// Number of transformer layers: one more than the highest `blk.N.` index among the tensor names.
+pub(crate) fn layer_count<'a>(names: impl Iterator<Item = &'a str>) -> usize {
+    names
+        .filter_map(|n| n.strip_prefix("blk.")?.split('.').next()?.parse::<usize>().ok())
+        .max()
+        .map_or(0, |m| m + 1)
+}
+
+/// The block type a float tensor (F32, F16 or BF16 as `type_id`) is re-encoded in, or `None` to keep it as it is.
+pub(crate) fn target_kind(preset: Preset, name: &str, dims: &[u64], type_id: u32, layers: usize) -> Option<QType> {
+    element_size(type_id)?;
+    choose(preset, name, dims, layers)
+}
+
+const BATCH_ROWS: usize = 256;
+
+/// Quantize rows `first..last` of the float tensor `src` (rows of `cols` elements) in parallel; one block row per entry.
+pub(crate) fn quantize_rows(kind: QType, type_id: u32, cols: usize, src: &[u8], first: usize, last: usize) -> Vec<Vec<u8>> {
+    let width = element_size(type_id).unwrap_or(2);
+    (first..last)
+        .into_par_iter()
+        .map(|row| {
+            let mut values = Vec::with_capacity(cols);
+            row_to_f32(type_id, &src[row * cols * width..(row + 1) * cols * width], &mut values);
+            let mut bytes = Vec::with_capacity(kind.row_bytes(cols));
+            quantize_row(kind, &values, &mut bytes);
+            bytes
+        })
+        .collect()
+}
+
+/// Quantize a whole float tensor into `dst`, which must be exactly `kind.row_bytes(elements)` long.
+pub(crate) fn quantize_tensor_into(kind: QType, type_id: u32, dims: &[u64], src: &[u8], dst: &mut [u8]) {
+    let cols = dims[0] as usize;
+    let width = element_size(type_id).unwrap_or(2);
+    let rows = src.len() / (cols * width);
+    let mut at = 0;
+    for first in (0..rows).step_by(BATCH_ROWS) {
+        for block in quantize_rows(kind, type_id, cols, src, first, (first + BATCH_ROWS).min(rows)) {
+            dst[at..at + block.len()].copy_from_slice(&block);
+            at += block.len();
+        }
+    }
+    debug_assert_eq!(at, dst.len());
+}
+
 /// Target type for one tensor, or `None` to keep it unchanged.
 fn choose(preset: Preset, name: &str, dims: &[u64], layers: usize) -> Option<QType> {
     let quantizable = name.ends_with(".weight")
@@ -287,18 +333,7 @@ pub fn quantize_gguf(
         });
     }
     let data_start = (r.at as u64).div_ceil(alignment) * alignment;
-    let layers = infos
-        .iter()
-        .filter_map(|t| {
-            t.name
-                .strip_prefix("blk.")?
-                .split('.')
-                .next()?
-                .parse::<usize>()
-                .ok()
-        })
-        .max()
-        .map_or(0, |m| m + 1);
+    let layers = layer_count(infos.iter().map(|t| t.name.as_str()));
 
     // plan the output layout
     struct Out {
@@ -309,11 +344,7 @@ pub fn quantize_gguf(
     let mut plan = Vec::with_capacity(infos.len());
     for t in &infos {
         let elements: u64 = t.dims.iter().product();
-        let kind = if element_size(t.type_id).is_some() {
-            choose(preset, &t.name, &t.dims, layers)
-        } else {
-            None
-        };
+        let kind = target_kind(preset, &t.name, &t.dims, t.type_id, layers);
         plan.push(match kind {
             Some(k) => Out {
                 kind,
@@ -367,24 +398,9 @@ pub fn quantize_gguf(
                 let width = element_size(t.type_id).unwrap();
                 let rows = src.len() / (cols * width);
                 // quantize in parallel batches of rows, then write in order
-                let batch = 256usize;
-                for first in (0..rows).step_by(batch) {
-                    let last = (first + batch).min(rows);
-                    let blocks: Vec<Vec<u8>> = (first..last)
-                        .into_par_iter()
-                        .map(|row| {
-                            let mut values = Vec::with_capacity(cols);
-                            row_to_f32(
-                                t.type_id,
-                                &src[row * cols * width..(row + 1) * cols * width],
-                                &mut values,
-                            );
-                            let mut bytes = Vec::with_capacity(kind.row_bytes(cols));
-                            quantize_row(kind, &values, &mut bytes);
-                            bytes
-                        })
-                        .collect();
-                    for b in blocks {
+                for first in (0..rows).step_by(BATCH_ROWS) {
+                    let last = (first + BATCH_ROWS).min(rows);
+                    for b in quantize_rows(kind, t.type_id, cols, src, first, last) {
                         w.write_all(&b)?;
                     }
                 }

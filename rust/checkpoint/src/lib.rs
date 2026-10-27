@@ -36,7 +36,7 @@ mod zamba2;
 mod vision_plan;
 
 pub use convert::{
-    check_config, convert_checkpoint, inspect_checkpoint, load_checkpoint_as_gguf, CheckpointInventory, ConversionReport,
+    check_config, convert_checkpoint, inspect_checkpoint, load_checkpoint_as_gguf, load_checkpoint_quantized, CheckpointInventory, ConversionReport,
     ConvertOptions, ConfigCheck, OutputDType, SpecHeadKind, TensorSummary,
 };
 
@@ -55,6 +55,8 @@ use std::{fmt, io};
 pub enum CheckpointError {
     Io(io::Error),
     Invalid(String),
+    /// A direct load would have to build more tensor data in memory than the caller allows.
+    OverBudget { needed: u64, limit: u64 },
 }
 
 impl fmt::Display for CheckpointError {
@@ -62,6 +64,7 @@ impl fmt::Display for CheckpointError {
         match self {
             Self::Io(e) => write!(f, "{e}"),
             Self::Invalid(e) => write!(f, "{e}"),
+            Self::OverBudget { needed, limit } => write!(f, "loading directly needs {needed} bytes of memory for converted tensors, more than the {limit} allowed"),
         }
     }
 }
@@ -84,3 +87,5 @@ impl From<&str> for CheckpointError {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod direct_tests;

@@ -440,7 +440,11 @@ fn load_post_ops(model: &MappedGguf, hidden: usize) -> Result<(Vec<PostOp>, bool
 
 impl BertEncoder {
     pub fn load(path: &str, threads: usize, pooling: Option<String>) -> Result<Self, String> {
-        let model = MappedGguf::open(path).map_err(|e| e.to_string())?;
+        Self::from_mapping(crate::import::open_model(std::path::Path::new(path))?, threads, pooling)
+    }
+
+    /// The encoder of an already opened model (a GGUF file or a checkpoint loaded directly).
+    pub fn from_mapping(model: MappedGguf, threads: usize, pooling: Option<String>) -> Result<Self, String> {
         let meta = &model.index().metadata;
         if meta.get("general.architecture").and_then(Value::as_str) != Some("bert") {
             return Err("this independent encoder supports the BERT GGUF architecture".into());
@@ -933,7 +937,7 @@ impl BertEncoder {
                 .and_then(Value::as_u64)
                 .and_then(|n| usize::try_from(n).ok())
                 .unwrap_or(128);
-            if local_attention == 0 || local_attention % 2 != 0 {
+            if local_attention == 0 || !local_attention.is_multiple_of(2) {
                 return Err("invalid modernbert local attention window".into());
             }
             let head_dim = hidden / heads;

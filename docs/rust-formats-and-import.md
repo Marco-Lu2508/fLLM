@@ -67,6 +67,53 @@ A conversion that fails removes its partial file. After a kill (Ctrl-C included)
 until the next start of the same conversion, which removes them while holding the conversion lock (a second process waits for the
 first); they are never mistaken for models.
 
+### Direct loading (no GGUF file)
+
+For the checkpoints listed below `run`, `serve` and `pull` do **not** convert to a GGUF file at all. The engine reads the
+checkpoint through a view that looks like the GGUF the converter would have written (`fllm_checkpoint::load_checkpoint_quantized`,
+`fllm_engine::import::open_model`): the metadata is made from `config.json` and the tokenizer files, the tensors the converter
+copies unchanged (most weights of an unquantized bf16/f16/f32 model, FP8 and NVFP4 payloads, norms) are slices of the
+memory-mapped safetensors files, and every other tensor (the rope-permuted `q`/`k` projections, packed AWQ/GPTQ/compressed-tensors
+repacks, dtype changes, stacked experts) is produced once, by the converter's own writer, into one anonymous read-only map. No
+conversion logic is duplicated: `convert` and the direct load share `prepare_checkpoint` and the tensor writer. The disk holds the
+checkpoint only; the extra memory is the size of the tensors that cannot be slices.
+
+- `--quant TYPE` (and `--outtype f16|f32`) work while loading. Each float tensor is converted to F16 and re-encoded with the same
+  rows-in-parallel quantizer and the same per-tensor mix as `fllm-rs quantize`, one tensor at a time, straight into the result;
+  the half-precision form of the whole model never exists, and no file is written.
+- `--direct` (or `FLLM_DIRECT_SAFETENSORS=1`) forces the direct load for every checkpoint the converter understands, also those not
+  listed below, and ignores a cached conversion. `--no-direct-load` (or `FLLM_NO_DIRECT_LOAD=1`) always takes the older route:
+  convert once and cache the GGUF.
+- Default (neither flag): direct for source quantizations `none`, `awq`, `gptq`, `nvfp4`, `fp8`, `int4`, `int8` (compressed-tensors)
+  in safetensors files. EXL2, EXL3, MXFP4, bitsandbytes, MLX and PyTorch `.bin`/`.pt` weights keep converting (their direct load is
+  not tested). A finished conversion of the same model in the cache is still used (it starts faster than rebuilding the tensors
+  on every start). A checkpoint whose weights exceed three quarters of the free memory (a half of it for already quantized ones)
+  is converted too, because the converted file would live in the evictable page cache while the built tensors are anonymous memory;
+  if the built tensors exceed three quarters of the free memory at load time the load stops with a message instead.
+- A Hub repository is downloaded into its snapshot directory and that directory is loaded; `pull` then only downloads.
+- Each start of the server builds the non-slice tensors again (seconds for small models; not measured for large ones). A converted,
+  cached GGUF starts without that work, so `--no-direct-load` can be better for a model you start often and have disk for.
+
+What the tests prove (all on the CPU, tiny synthetic models, nothing from the network):
+
+| Claim | Test |
+| --- | --- |
+| Every tensor byte, dimension, type and every metadata value of the direct load equals the converted file, for bf16/f16/f32 stored as one file or 2-3 shards, with `preserve`, `f16` and `f32` | `fllm-checkpoint` `direct_tests::unquantized_checkpoints_load_identically_to_the_converted_file` |
+| The same for GPTQ 4-bit (group 32), GPTQ 8-bit in two shards, AWQ | `direct_tests::packed_gptq_and_awq_checkpoints_load_identically_to_the_converted_file` |
+| Quantizing while loading equals `convert` to F16 followed by `quantize` (q8_0, q4_k_m, q4_0, q6_k, q5_k_s, q2_k, mxfp4) | `direct_tests::quantizing_while_loading_equals_convert_then_quantize` |
+| Untouched tensors are slices of the mapped file, the rest share one anonymous map | `direct_tests::untouched_tensors_stay_slices_of_the_checkpoint` |
+| The memory limit stops a load before anything is built | `direct_tests::a_memory_budget_stops_the_load_before_anything_is_built` |
+| Tensor bytes and the decoder's logits are bit-identical to the converted file for NVFP4, compressed-tensors int4/int8 (both layouts), block-wise FP8, and the mixture-of-experts variants of NVFP4, int4 and FP8 | `fllm-engine` `import_tests::direct_load_equals_the_converted_file_for_every_quantized_layout` |
+| The same logits from a dense checkpoint at `preserve`, `f16` and `f32` | `import_tests::direct_load_of_unquantized_checkpoints_gives_the_same_logits_as_the_converted_file` |
+| `prepare` hands out the checkpoint by default, writes nothing to the cache, honours `--no-direct-load`, the environment switches, a cached conversion and `--direct`; `--quant` while loading equals the cached conversion for q8_0, q4_0, q4_k_m; Hub download then direct load | `import::tests::verified_checkpoints_load_directly_by_default_and_no_direct_load_converts`, `an_existing_conversion_is_used_unless_direct_is_forced`, `the_environment_switches_choose_the_path`, `quantizing_on_load_matches_the_cached_conversion`, `only_verified_checkpoints_load_directly_without_being_asked`, `hub_checkpoint_loads_directly_after_the_download_without_a_gguf_file` |
+| The real `fllm-rs serve` binary, started on a checkpoint directory (NVFP4, bf16, bf16 with `--quant q8_0`), writes no GGUF file, names the model after the directory and returns the same greedy completion as with `--no-direct-load` | `import_tests::the_serve_command_loads_checkpoint_directories_directly_and_answers_like_the_converted_file` (needs the binary built next to the test executable, else it skips itself) |
+
+Not proven: real multi-GB checkpoints (time to first token, peak memory, behaviour near the memory limit), GPU runs of a directly
+loaded model (the tensors reach the GPU through the same `MappedGguf` calls, but only the CPU was run), tensors of a safetensors
+file that are not 32-byte aligned (a GGUF file aligns them; the CPU engine reads them unaligned, no GPU back end was run on such
+a slice), EXL2/EXL3/MXFP4/bitsandbytes/MLX/PyTorch checkpoints, and `fllm-rs run` interactively (it passes the same flags to the
+`serve` it starts; that flag list is unit tested).
+
 ## Commands
 
 ```sh

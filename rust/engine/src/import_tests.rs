@@ -668,3 +668,161 @@ fn block_wise_fp8_experts_convert_to_f16() {
     // no compact device format for the 128x128 tiles yet (docs/moe-formats.md): the experts are expanded, and must still be right
     check_moe(Kind::Fp8Block(32), 29, 1, 5e-3);
 }
+
+// ---- direct loading: `open_model` of a checkpoint equals the converted GGUF file ----
+
+/// Every tensor (name, dimensions, type, bytes) and every metadata value of the two models is equal.
+pub(crate) fn assert_same_model(direct: &MappedGguf, file: &MappedGguf, what: &str) {
+    assert_eq!(direct.index().metadata, file.index().metadata, "{what}: metadata");
+    assert_eq!(direct.index().tensors.len(), file.index().tensors.len(), "{what}: tensor count");
+    for t in &direct.index().tensors {
+        let r = file.index().tensors.iter().find(|r| r.name == t.name).unwrap_or_else(|| panic!("{what}: {} missing", t.name));
+        assert_eq!((&t.dimensions, t.type_id, t.payload_len), (&r.dimensions, r.type_id, r.payload_len), "{what}: layout of {}", t.name);
+        assert!(direct.tensor_bytes(&t.name).unwrap() == file.tensor_bytes(&t.name).unwrap(), "{what}: bytes of {}", t.name);
+    }
+}
+
+#[test]
+fn direct_load_equals_the_converted_file_for_every_quantized_layout() {
+    for (kind, moe) in [
+        (Kind::Nvfp4, false),
+        (Kind::CtInt4(32), false),
+        (Kind::CtInt8, false),
+        (Kind::CtPacked8, false),
+        (Kind::Fp8Block(32), false),
+        (Kind::Nvfp4, true),
+        (Kind::CtInt4(32), true),
+        (Kind::Fp8Block(32), true),
+    ] {
+        let (quant, reference) = (scratch("dq"), scratch("dr"));
+        if moe {
+            build_moe_pair(kind, 9, &quant, &reference);
+        } else {
+            build_pair(kind, 9, &quant, &reference);
+        }
+        for dtype in [OutputDType::Preserve, OutputDType::F16] {
+            let gguf = convert(&quant, dtype);
+            let direct = crate::import::open_model(&quant).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            if matches!(dtype, OutputDType::Preserve) {
+                assert_same_model(&direct, &MappedGguf::open(&gguf).unwrap(), &format!("{kind:?} moe={moe}"));
+                // the engine computes the same logits from both
+                assert_eq!(logits(&quant, &PROMPT), logits(&gguf, &PROMPT), "{kind:?} moe={moe}: logits");
+            }
+        }
+        for d in [quant, reference] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+}
+
+#[test]
+fn direct_load_of_unquantized_checkpoints_gives_the_same_logits_as_the_converted_file() {
+    let (quant, reference) = (scratch("du-q"), scratch("du-r"));
+    build_pair(Kind::Nvfp4, 13, &quant, &reference);
+    for dtype in [OutputDType::Preserve, OutputDType::F16, OutputDType::F32] {
+        let gguf = convert(&reference, dtype);
+        // `open_model` on a bare directory loads with the default type (preserve); other types go through the checkpoint API
+        let options = ConvertOptions { output_dtype: dtype, overwrite: false, spec_head: None };
+        let direct = fllm_checkpoint::load_checkpoint_as_gguf(&reference, options).unwrap();
+        assert_same_model(&direct, &MappedGguf::open(&gguf).unwrap(), &format!("{dtype:?}"));
+        if matches!(dtype, OutputDType::Preserve) {
+            assert_eq!(logits(&reference, &PROMPT), logits(&gguf, &PROMPT));
+        }
+    }
+    for d in [quant, reference] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+// ---- the `fllm-rs serve` command itself ----
+
+/// The release or debug binary next to the test executable, when it has been built (`cargo build --bin fllm-rs`).
+fn built_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.parent()?;
+    let bin = dir.join(if cfg!(windows) { "fllm-rs.exe" } else { "fllm-rs" });
+    bin.is_file().then_some(bin)
+}
+
+fn http(port: u16, method: &str, path: &str, body: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok()?;
+    let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    Some(response)
+}
+
+/// Starts `fllm-rs serve --model MODEL ...` on the CPU, asks for a greedy completion and returns (text, model ids, log).
+fn serve_once(bin: &Path, cache: &Path, model: &Path, extra: &[&str]) -> (String, String, String) {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let log_path = cache.join(format!("serve-{port}.log"));
+    let log = fs::File::create(&log_path).unwrap();
+    let mut child = std::process::Command::new(bin)
+        .args(["serve", "--device", "cpu", "--ctx", "64", "--max-seqs", "2", "--host", "127.0.0.1", "--port", &port.to_string(), "--model"])
+        .arg(model)
+        .args(extra)
+        .env("FLLM_CACHE", cache)
+        .env("HF_HOME", cache)
+        .env_remove("FLLM_NO_DIRECT_LOAD")
+        .env_remove("FLLM_DIRECT_SAFETENSORS")
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let mut ready = false;
+    for _ in 0..120 {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if http(port, "GET", "/health", "").is_some_and(|r| r.starts_with("HTTP/1.1 200")) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let logs = |path: &Path| fs::read_to_string(path).unwrap_or_default();
+    if !ready {
+        let _ = child.kill();
+        panic!("the server did not start for {} {extra:?}:\n{}", model.display(), logs(&log_path));
+    }
+    let models = http(port, "GET", "/v1/models", "").unwrap_or_default();
+    let id = models.split("\"id\":\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or("x").to_owned();
+    let body = format!(r#"{{"model":"{id}","prompt":[1,5,9,3,17],"max_tokens":10,"temperature":0}}"#);
+    let completion = http(port, "POST", "/v1/completions", &body).unwrap_or_default();
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = completion.split("\"text\":\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or_else(|| panic!("no completion in {completion}\n{}", logs(&log_path))).to_owned();
+    (text, models, logs(&log_path))
+}
+
+#[test]
+fn the_serve_command_loads_checkpoint_directories_directly_and_answers_like_the_converted_file() {
+    let Some(bin) = built_binary() else {
+        eprintln!("skipped: build the fllm-rs binary first (cargo build --bin fllm-rs)");
+        return;
+    };
+    let (quant, reference) = (scratch("srv-q"), scratch("srv-r"));
+    build_pair(Kind::Nvfp4, 71, &quant, &reference);
+    let cache = scratch("srv-cache");
+    let cache_files = |dir: &Path| fs::read_dir(dir.join("fllm-local")).map(|d| d.flatten().count()).unwrap_or(0);
+    for (model, extra) in [(&quant, vec![]), (&reference, vec![]), (&reference, vec!["--quant", "q8_0"])] {
+        let (direct_text, models, log) = serve_once(&bin, &cache, model, &extra);
+        assert!(log.contains("directly"), "no direct load for {}:\n{log}", model.display());
+        assert_eq!(cache_files(&cache), 0, "a GGUF file was written for {}", model.display());
+        let name = model.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(models.contains(&name), "model id should be the directory name {name}: {models}");
+        let mut converted = extra.clone();
+        converted.push("--no-direct-load");
+        let (converted_text, _, log) = serve_once(&bin, &cache, model, &converted);
+        assert!(cache_files(&cache) > 0, "--no-direct-load must write the converted file:\n{log}");
+        assert!(!direct_text.is_empty());
+        assert_eq!(direct_text, converted_text, "{} {extra:?}", model.display());
+        let _ = fs::remove_dir_all(cache.join("fllm-local"));
+    }
+    for d in [quant, reference, cache] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
