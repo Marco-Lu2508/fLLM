@@ -570,6 +570,7 @@
       todo_write: { description: 'Keep a task list for work with several steps. Send the complete list every time; exactly one task should be in_progress.', properties: { todos: { type: 'array', items: { type: 'object', properties: { content: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] } }, required: ['content', 'status'] } } }, required: ['todos'] },
       todo_read: { description: 'Read the current task list (use it when you have lost track of the plan).', properties: {}, required: [] },
       task: { description: 'Start a sub-agent with a fresh context and get back only its final report. agent "explore" is read-only and fast: use it for broad research ("where is X handled", "how does Y work"). agent "general" may also edit files and run commands: use it for a self-contained job. Several task calls in one turn run in parallel. The sub-agent does not see this conversation, so the prompt must contain everything it needs: the goal, where to look, and what the report must contain.', properties: { description: { type: 'string', description: 'Three to six words naming the job.' }, prompt: { type: 'string', description: 'The complete task and what the report should contain.' }, agent: { type: 'string', enum: ['explore', 'general'], description: 'explore (default): read and search only. general: may also edit and run commands, with the usual permission questions.' } }, required: ['description', 'prompt'] },
+      create_agent: { permission: 'edit', description: 'Create a reusable sub-agent as a file that the task tool can start by name afterwards (like a custom agent in Claude Code). Use it when a kind of job comes back again and again (review, test writing, migrations, research in one area). The user is asked before it is written. Give it a short lowercase name, a description of when to use it, the tools it may use (for example read_file, grep, glob, list_dir for a reviewer that must not change anything; leave the list empty for all tools) and its instructions: what it does, how it works and what its report looks like.', properties: { name: { type: 'string', description: 'Lowercase letters, digits, - and _ (for example code-reviewer).' }, description: { type: 'string', description: 'One sentence: when to use this agent.' }, instructions: { type: 'string', description: 'The system prompt of the agent.' }, tools: { type: 'array', items: { type: 'string' }, description: 'Tool names it may use; empty means all.' }, scope: { type: 'string', enum: ['workspace', 'user'], description: 'workspace (default): only for this folder. user: for every folder.' }, model: { type: 'string', description: 'Optional: another model for this agent.' } }, required: ['name', 'description', 'instructions'] },
       ask_user: { description: 'Ask the user a question with a few answer choices when a decision is theirs and you cannot find the answer yourself. The answer comes back as the result.', properties: { question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, description: 'Two to five short choices.' } }, required: ['question'] },
     };
 
@@ -654,7 +655,7 @@
     }
 
     function addClientTools(map) {
-      for (const [name, d] of Object.entries(CLIENT_TOOLS)) map.set(name, { name, permission: 'read', source: 'client', def: { description: d.description, parameters: { type: 'object', properties: d.properties, required: d.required } } });
+      for (const [name, d] of Object.entries(CLIENT_TOOLS)) map.set(name, { name, permission: d.permission || 'read', source: 'client', def: { description: d.description, parameters: { type: 'object', properties: d.properties, required: d.required } } });
     }
 
     /** Server tools (fallback: the built-in list), then page tools, then MCP tools. Stable order keeps the prompt cache valid. */
@@ -711,7 +712,7 @@
 
     const readOnlyTool = (entry) => entry.permission === 'read' && entry.source !== 'client';
     const toolListFor = (plan) => [...code.registry.values()]
-      .filter((e) => !plan || readOnlyTool(e) || e.source === 'client')
+      .filter((e) => !plan || readOnlyTool(e) || (e.source === 'client' && e.permission === 'read'))
       .map((e) => {
         // the task tool offers the custom agents of this folder as well
         if (e.name === 'task' && (code.agents || []).length) {
@@ -809,10 +810,19 @@
           code.disabled = null;
           if (data.root) await onWorkspaceOpened();
         } else {
-          code.disabled = (await res.json().catch(() => ({}))).error?.message || 'The coding agent is not available.';
+          const text = await res.text().catch(() => '');
+          let message = '';
+          try { message = JSON.parse(text).error?.message || ''; } catch { /* not JSON */ }
+          // the server without a model (the start screen, or a model that did not load) has no agent routes at all
+          code.disabled = message || (res.status === 404 ? 'The coding agent starts together with a model. Load a model on the Models page, then come back here.' : '') || `The coding agent did not answer (HTTP ${res.status}${text ? `: ${text.replace(/\s+/g, ' ').slice(0, 160)}` : ''}).`;
         }
         renderCode();
-      } catch { /* the page is opened before the server is ready: the next visit asks again */ }
+      } catch (error) {
+        // the page is opened before the server is ready: the next visit asks again; a page that stays on "not available" says why
+        code.disabled = code.disabled || `The coding agent could not be reached (${error && error.message ? error.message : 'no answer'}).`;
+        renderCode();
+        setTimeout(() => { if (code.disabled) loadWorkspace(); }, 3000);
+      }
     }
 
     async function toolCall(name, args, signal) {
@@ -822,6 +832,16 @@
         return { ok: false, error: err.error?.message || `Error ${res.status}` };
       }
       return res.json();
+    }
+
+    /** `create_agent`: writes the sub-agent file through the agents route (the user was asked before). */
+    async function createAgentFile(args) {
+      const scope = args.scope === 'user' ? 'user' : 'workspace';
+      const body = { name: String(args.name || '').trim(), description: args.description || '', tools: Array.isArray(args.tools) ? args.tools : [], model: args.model || '', body: args.instructions || '', scope, workspace: code.workspace && code.workspace.root };
+      const res = await apiFetch('/api/studio/agents', { method: 'POST', body });
+      if (!res.ok) return { ok: false, error: (await res.json().catch(() => ({}))).error?.message || `Error ${res.status}` };
+      await loadAgents();
+      return { ok: true, output: `The agent "${body.name}" was created (${scope === 'user' ? 'for every folder' : 'for this folder'}). Start it with the task tool: agent "${body.name}".` };
     }
 
     async function mcpCall(entry, args, signal) {
@@ -1374,7 +1394,7 @@
     }
 
     function emptyCodeHtml() {
-      if (code.disabled) return `<div class="code-empty"><h1>Code</h1><p>${escapeHtml(code.disabled)}</p></div>`;
+      if (code.disabled) return `<div class="code-empty"><h1>Code</h1><p>${escapeHtml(code.disabled)}</p><p><button class="btn btn-secondary" data-code-retry>Try again</button></p></div>`;
       if (!code.workspace) {
         const recent = recentWorkspaces();
         return `<div class="code-empty">
@@ -1823,6 +1843,8 @@
       if (isTask(call.name)) return runSubAgent(item, args, ctx);
 
       let decision = authorize(entry, args);
+      // an agent for every folder is written outside the workspace: that is always the user's call, unless a rule forbids it
+      if (call.name === 'create_agent' && args.scope === 'user' && decision === 'allow') decision = 'ask';
       if (decision === 'ask' && code.autoApprove) {
         const info = permissionInfo(entry, args);
         const verdict = autoVerdict(info.cat, entry.name, info.subject);
@@ -1840,7 +1862,9 @@
       item.status = 'running';
       paintItem(item);
       try {
-        const r = entry.source === 'mcp' ? await mcpCall(entry, args, ctx.signal) : await toolCall(call.name, args, ctx.signal);
+        const r = entry.source === 'mcp' ? await mcpCall(entry, args, ctx.signal)
+          : call.name === 'create_agent' ? await createAgentFile(args)
+            : await toolCall(call.name, args, ctx.signal);
         item.status = r.ok ? 'ok' : 'error';
         item.output = r.ok ? r.output : r.error;
         let reply = r.ok ? r.output : `Error: ${r.error}`;
@@ -2620,6 +2644,7 @@
         if (turnAction.dataset.turnFork) forkSession(turnAction.dataset.turnFork); else await revertToMessage(turnAction.dataset.turnRevert);
         return;
       }
+      if (e.target.closest('[data-code-retry]')) { code.disabled = null; await loadWorkspace(); return; }
       const resume = e.target.closest('[data-resume]');
       if (resume) { resumeSession(resume.dataset.resume); return; }
       const cmd = e.target.closest('[data-code-command]');

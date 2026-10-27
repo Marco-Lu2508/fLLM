@@ -1283,6 +1283,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             path.display()
         );
     }
+    // Conversation lookup is on unless the user chose something else: it costs nothing when it finds no match and about doubles the speed on
+    // text that repeats (code edits, summaries, quotes, agent loops), with the same text as without. Only where it has been run: the
+    // processor and the Vulkan / DirectX chips (the CUDA, HIP and Metal verification kernels have not been run on hardware yet), and not
+    // for models with a recurrent state. `--speculative off` or FLLM_SPECULATIVE_DEFAULT=off keeps it away.
+    if speculative_method.is_none()
+        && speculative_lookup == 0
+        && !speculative_mtp
+        && draft_model.is_none()
+        && !speculative_suffix
+        && !runtime.model.is_stateful()
+        && matches!(selected_backend.as_str(), "cpu" | "vulkan" | "dx12" | "wgpu-vulkan" | "wgpu-dx12" | "wgpu")
+        && !env::var("FLLM_SPECULATIVE_DEFAULT").is_ok_and(|v| matches!(v.trim(), "off" | "0" | "false"))
+    {
+        speculative_suffix = true;
+    }
     if speculative_suffix {
         let tokens = num_speculative_tokens.unwrap_or(6);
         runtime.enable_suffix(

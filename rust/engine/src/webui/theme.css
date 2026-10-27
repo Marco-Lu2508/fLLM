@@ -584,7 +584,11 @@ header, .app-header {
   background: color-mix(in oklab, var(--bg) 82%, transparent);
   backdrop-filter: blur(10px);
   padding: 8px var(--space-5);
+  /* the blur makes the header its own layer: without a z-index its menus (model, assistant, chat) were painted under the page */
+  position: relative;
+  z-index: 80;
 }
+.popover-panel { z-index: 90; }
 
 .sidebar-footer { padding: 10px 12px; }
 .sidebar-header { padding: 12px 12px 10px; }

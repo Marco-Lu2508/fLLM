@@ -6,7 +6,15 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Changed
+- Conversation lookup (`--speculative suffix`) is on by default for models without a recurrent state on the processor and on Vulkan / DirectX graphics (`--speculative off` or `FLLM_SPECULATIVE_DEFAULT=off` keeps it away; CUDA, HIP and Metal stay off until their verification kernels have run on hardware). Same text as without, up to twice the speed on code edits, summaries and agent loops, no cost when it finds nothing.
+
+### Fixed
+- The menus of the page header (model, assistant, chat) were painted under the page since the new design system: the header had its own layer without a stacking order, so assistants could not be picked and the text of the start page showed through. Opening one menu closes the other.
+- Code page: "The coding agent is not available." now says why (the server without a model has no agent: load a model first), shows the HTTP status for other errors, and has a *Try again* button.
+
 ### Added
+- Code agent: the `create_agent` tool writes a reusable sub-agent (name, description, tools, instructions) for this folder or for every folder, after the user agreed; the `task` tool starts it by name afterwards. Not offered in plan mode.
 - Load dialog: *Conversation lookup* (`--speculative suffix`) and a *Browse...* button for the draft model (any GGUF file on the computer; the server still checks that it is smaller and shares the vocabulary). Measured on Gemma 4 E4B, CPU of a server (10 cores): repeating and extending code 19 -> 37 tokens/s with conversation lookup (26 with prompt lookup), a free story 21 -> 28 (prompt lookup: 17, slower than none); the text is the same as without. On Gemma 4 with Vulkan the text is the same too.
 
 ## [0.1.9] - 2026-10-27

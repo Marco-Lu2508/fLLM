@@ -590,7 +590,7 @@
       if (asstSaveList()) { asstRender(); toast(`Assistant "${r.assistant.name}" imported`); }
     }
 
-    $('btnPresets').addEventListener('click', (e) => { e.stopPropagation(); $('presetMenu').classList.toggle('open'); });
+    $('btnPresets').addEventListener('click', (e) => { e.stopPropagation(); $('modelDropdownMenu').classList.remove('open'); $('presetMenu').classList.toggle('open'); });
     $('presetItems').addEventListener('click', (e) => {
       const edit = e.target.closest('[data-as-edit]');
       if (edit) { e.stopPropagation(); asstOpenEditor(asstById(edit.dataset.asEdit)); return; }
