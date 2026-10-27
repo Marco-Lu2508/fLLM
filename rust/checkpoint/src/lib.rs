@@ -36,7 +36,7 @@ mod zamba2;
 mod vision_plan;
 
 pub use convert::{
-    check_config, convert_checkpoint, inspect_checkpoint, load_checkpoint_as_gguf, CheckpointInventory, ConversionReport,
+    check_config, convert_checkpoint, inspect_checkpoint, load_checkpoint_as_gguf, load_checkpoint_quantized, CheckpointInventory, ConversionReport,
     ConvertOptions, ConfigCheck, OutputDType, SpecHeadKind, TensorSummary,
 };
 
