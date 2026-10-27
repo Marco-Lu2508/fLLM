@@ -1,6 +1,6 @@
 // ==========================================================================
     // Settings > Engine: the options of the engine that are not tied to one model — the caches, the order in which work is dropped,
-    // telemetry and the admin key — and the live controls (stop taking work, empty the cache).
+    // telemetry — and the live controls (stop taking work, empty the cache).
     //  - the options are saved on this computer and take effect when the server starts again (the page offers to restart it)
     //  - the numbers of the caches and the drain switch are live and come from the running server
     // ==========================================================================
@@ -45,7 +45,7 @@
         '<div class="app-item-desc mono" id="engOtelStats" style="padding:8px 4px 0;font-size:11px;"></div>' +
         '</div>' +
         '<div class="app-card" style="margin-top:12px;"><div class="app-card-title">Administration</div>' +
-        row('', 'Admin key', 'Without it only this computer may stop the server taking work, empty the cache or read the settings. With it, another computer can do that too by sending it as <span class="mono">x-admin-key</span>. An API key for chatting is never enough. The key is never shown again after you save it.', '<input type="password" id="engAdminKey" class="ui-input mono" style="width:200px;" placeholder="not set" autocomplete="new-password">') +
+        row('', 'Who may administer', 'This computer always may. Another computer needs an API key with the <b>Admin</b> right (Settings > Server and API). A key made for chatting never opens these controls.', '<span class="app-item-desc">Keys: Server and API</span>') +
         row('', 'Stop taking new requests', 'The server finishes what it is doing and answers new requests with “busy”. Used before a restart or an update, so nobody loses an answer. Takes effect at once.', toggle('engDrain')) +
         '</div>' +
         '<div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap;">' +
@@ -73,8 +73,6 @@
       function collect() {
         const body = {};
         for (const [key, [id, prop]] of Object.entries(FIELDS)) body[key] = el(id)[prop];
-        const key = el('engAdminKey').value;
-        if (key) body.admin_key = key;
         return body;
       }
 
@@ -106,8 +104,6 @@
           defaults = data.defaults || {};
           saved = data.values || {};
           fill(saved);
-          el('engAdminKey').value = '';
-          el('engAdminKey').placeholder = data.admin_key_set ? 'set (type a new one to change it)' : 'not set';
           const env = data.set_by_environment || [];
           say(env.length ? `Set by the environment of the server and not changeable here: ${env.join(', ')}.` : '');
         } catch (e) {
@@ -122,8 +118,6 @@
           const data = await res.json().catch(() => ({}));
           if (!res.ok) { say((data.error && data.error.message) || 'Could not save it.'); return false; }
           saved = data.values || {};
-          el('engAdminKey').value = '';
-          el('engAdminKey').placeholder = data.admin_key_set ? 'set (type a new one to change it)' : 'not set';
           el('engRestart').style.display = '';
           say(message || 'Saved. The changes take effect when the server restarts.');
           return true;
@@ -135,7 +129,7 @@
 
       el('engSave').addEventListener('click', () => save(collect()));
       el('engReset').addEventListener('click', async () => {
-        if (!await confirmDialog('Set every option on this page back to its default? The admin key is kept.')) return;
+        if (!await confirmDialog('Set every option on this page back to its default?')) return;
         const body = {};
         for (const key of Object.keys(FIELDS)) body[key] = typeof defaults[key] === 'boolean' ? defaults[key] : (typeof defaults[key] === 'number' ? defaults[key] : String(defaults[key] ?? ''));
         if (await save(body, 'Back to the defaults. They take effect when the server restarts.')) fill(defaults);

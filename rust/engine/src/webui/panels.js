@@ -179,7 +179,7 @@
               ${keys.map((k) => `
                 <tr>
                   <td class="mono">${escapeHtml(k.id)}</td>
-                  <td><strong>${escapeHtml(k.label)}</strong></td>
+                  <td><strong>${escapeHtml(k.label)}</strong>${k.admin ? ' <span class="quant-chip">admin</span>' : ''}</td>
                   <td class="mono">${escapeHtml(k.masked)}</td>
                   <td class="mono">${k.rpm_limit ? k.rpm_limit + ' per minute' : 'Default'}</td>
                   <td class="mono tabular">${k.requests_accepted}</td>

@@ -558,9 +558,7 @@ fn engine_json() -> Value {
     let mut values = engine_defaults();
     let saved = crate::hub::engine_settings();
     for (key, value) in &saved {
-        if key != "admin_key" {
-            values[key.as_str()] = value.clone();
-        }
+        values[key.as_str()] = value.clone();
     }
     let overridden: Vec<&str> = crate::hub::ENGINE_OPTIONS
         .iter()
@@ -570,7 +568,6 @@ fn engine_json() -> Value {
     json!({
         "values": values,
         "defaults": engine_defaults(),
-        "admin_key_set": saved.get("admin_key").and_then(Value::as_str).is_some_and(|k| !k.is_empty()) || std::env::var_os("FLLM_ADMIN_KEY").is_some_and(|v| !v.is_empty()),
         // options that the environment of the server sets and the page cannot change
         "set_by_environment": overridden,
     })
@@ -616,7 +613,7 @@ fn engine_changes(body: &Value) -> Result<Vec<(&'static str, Option<Value>)>, St
     if let Some(on) = body.get("prefix_cache").and_then(Value::as_bool) {
         changes.push(("prefix_cache", Some(json!(on))));
     }
-    for key in ["prefix_salt", "otel_service", "admin_key"] {
+    for key in ["prefix_salt", "otel_service"] {
         if let Some(text) = body.get(key).and_then(Value::as_str) {
             let text = text.trim();
             if text.len() > 200 || text.chars().any(char::is_control) {
@@ -1103,7 +1100,7 @@ mod tests {
         assert!(ok.contains(&("prefix_cache", Some(json!(false)))));
         assert!(ok.contains(&("prefix_salt", Some(json!("a")))));
         // an empty text takes an option back to its default
-        assert_eq!(engine_changes(&json!({"otel_endpoint": "", "admin_key": ""})).unwrap(), vec![("admin_key", None), ("otel_endpoint", None)]);
+        assert_eq!(engine_changes(&json!({"otel_endpoint": "", "prefix_salt": ""})).unwrap(), vec![("prefix_salt", None), ("otel_endpoint", None)]);
         for bad in [json!({"output_cache": "maybe"}), json!({"output_cache_mb": 0}), json!({"cache_scope": "x"}), json!({"otel_endpoint": "ftp://x"}), json!({"prefix_salt": "a
 b"}), json!({"preemption": 3})] {
             assert!(engine_changes(&bad).is_err(), "{bad}");

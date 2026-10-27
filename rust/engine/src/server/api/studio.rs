@@ -848,7 +848,8 @@ pub(in crate::server) async fn create_key(
     let rpm = body.get("rpm").and_then(Value::as_f64).filter(|&v| v > 0.0);
     let tpm = body.get("tpm").and_then(Value::as_f64).filter(|&v| v > 0.0);
 
-    match state.http.security.add_key(&raw_key, label, rpm, tpm) {
+    let admin = body.get("admin").and_then(Value::as_bool).unwrap_or(false);
+    match state.http.security.add_key(&raw_key, label, rpm, tpm, admin) {
         Ok(key_info) => Json(json!({
             "status": "created",
             "secret": raw_key,

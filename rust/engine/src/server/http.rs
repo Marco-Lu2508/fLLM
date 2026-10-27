@@ -252,17 +252,28 @@ fn is_personal_path(path: &str) -> bool {
 /// A web page in the owner's own browser reaches the port from this machine as well, so the request must
 /// also address the server by `localhost` or an IP address (a DNS-rebinding name is refused) and, when the
 /// browser names an origin, come from the page of this very server.
-pub fn studio_admin_blocked(
+#[cfg(test)]
+pub fn studio_admin_blocked(auth_required: bool, method: &Method, path: &str, peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
+    studio_admin_blocked_for(auth_required, method, path, peer, headers, false)
+}
+
+/// Like [`studio_admin_blocked`], for a caller that may present a key with the admin right (`admin_caller`).
+pub fn studio_admin_blocked_for(
     auth_required: bool,
     method: &Method,
     path: &str,
     peer: Option<SocketAddr>,
     headers: &HeaderMap,
+    admin_caller: bool,
 ) -> bool {
-    // /admin/* (drain, clear the cache, effective settings): this machine, or any machine that presents the admin key in `x-admin-key`
-    // (set `FLLM_ADMIN_KEY` or the page). A normal API key is never enough, it belongs to the users of the models.
+    // /admin/* (drain, clear the cache, effective settings): this machine, or any machine with an API key that has the admin right.
+    // A key made for the users of the models is never enough.
     if path == "/admin" || path.starts_with("/admin/") {
-        return !(admin_key_matches(headers) || local_browser_request(peer, headers));
+        return !(admin_caller || local_browser_request(peer, headers));
+    }
+    // with API keys in use, making and removing keys is for admin keys or this machine (otherwise any user could make themselves an admin)
+    if auth_required && (path == "/api/studio/keys" || path.starts_with("/api/studio/keys/")) && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return !(admin_caller || local_browser_request(peer, headers));
     }
     // the agent tools read and write files and run programs: never from another machine, with or without a key
     // (the file picker opens a window on this machine's screen; the web fetch and search routes reach out from this machine and read files of the agent: same rule)
@@ -287,21 +298,6 @@ pub fn studio_admin_blocked(
         return false;
     }
     !local_browser_request(peer, headers)
-}
-
-/// Whether `x-admin-key` carries the admin key of this server (`FLLM_ADMIN_KEY`); compared without stopping at the first difference.
-fn admin_key_matches(headers: &HeaderMap) -> bool {
-    let Ok(expected) = std::env::var("FLLM_ADMIN_KEY") else { return false };
-    let expected = expected.trim().as_bytes();
-    let given = headers.get("x-admin-key").and_then(|v| v.to_str().ok()).unwrap_or_default().trim().as_bytes();
-    if expected.is_empty() {
-        return false;
-    }
-    let mut difference = expected.len() ^ given.len();
-    for (i, byte) in expected.iter().enumerate() {
-        difference |= usize::from(*byte ^ given.get(i).copied().unwrap_or(0));
-    }
-    difference == 0
 }
 
 /// Whether the request comes from this machine and from the page of this very server: the peer is a loopback address, the server is named
@@ -344,7 +340,7 @@ pub async fn layer(State(ctx): State<Arc<HttpContext>>, request: Request, next: 
         && request.headers().contains_key("access-control-request-method")
     {
         preflight(&ctx.options, request.headers(), origin.as_deref().unwrap_or_default(), &id, &path)
-    } else if studio_admin_blocked(ctx.security.auth_required(), &method, &path, peer, request.headers()) {
+    } else if studio_admin_blocked_for(ctx.security.auth_required(), &method, &path, peer, request.headers(), ctx.security.is_admin_request(request.headers())) {
         errors::for_path(
             &path,
             StatusCode::FORBIDDEN,
@@ -738,7 +734,7 @@ mod studio_gate_tests {
     }
 
     #[test]
-    fn the_admin_routes_need_this_machine_or_the_admin_key() {
+    fn the_admin_routes_need_this_machine_or_a_key_with_the_admin_right() {
         let remote = addr("192.168.1.20:5000");
         let here = addr("127.0.0.1:5000");
         let h = headers("192.168.1.5:8000", None);
@@ -749,6 +745,15 @@ mod studio_gate_tests {
                 assert!(!studio_admin_blocked(auth, &method, path, here, &local), "{method} {path} from this machine");
             }
         }
+        // a key with the admin right opens them from anywhere, and is the only one that may make or remove keys while keys are in use
+        for (method, path) in [(Method::POST, "/admin/drain"), (Method::DELETE, "/admin/cache")] {
+            assert!(!studio_admin_blocked_for(true, &method, path, remote, &h, true));
+        }
+        assert!(studio_admin_blocked_for(true, &Method::POST, "/api/studio/keys", remote, &h, false));
+        assert!(studio_admin_blocked_for(true, &Method::DELETE, "/api/studio/keys/key-2", remote, &h, false));
+        assert!(!studio_admin_blocked_for(true, &Method::POST, "/api/studio/keys", remote, &h, true));
+        assert!(!studio_admin_blocked_for(true, &Method::GET, "/api/studio/keys", remote, &h, false));
+        assert!(!studio_admin_blocked_for(true, &Method::POST, "/api/studio/keys", here, &local, false), "the owner at this machine");
         // a web page of another site in the owner's browser is refused, a rebinding name too
         assert!(studio_admin_blocked(false, &Method::POST, "/admin/drain", here, &headers("127.0.0.1:8000", Some("https://evil.example"))));
         assert!(studio_admin_blocked(false, &Method::POST, "/admin/drain", here, &headers("rebind.example:8000", None)));
@@ -826,8 +831,8 @@ mod studio_gate_tests {
         let h = headers("192.168.1.5:8000", None);
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/status", remote, &h));
         assert!(!studio_admin_blocked(false, &Method::POST, "/v1/chat/completions", remote, &h));
-        // with an API key configured the normal key check decides
-        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/keys", remote, &h));
+        // with an API key configured the normal key check decides (making keys needs the admin right, see the admin tests)
+        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/settings", remote, &h));
         // ... except for the agent tools, which never leave this machine
         assert!(studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", remote, &h));
         // ... and the file picker, which opens a window on the screen of this machine

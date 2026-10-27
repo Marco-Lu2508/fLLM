@@ -1711,7 +1711,7 @@ pub fn idle_unload_minutes() -> u64 {
 
 /// The engine options of the Studio page (`studio.json`, key `engine`) and the environment variable each one sets. The page writes
 /// them; they take effect when the server starts again.
-pub const ENGINE_OPTIONS: [(&str, &str); 10] = [
+pub const ENGINE_OPTIONS: [(&str, &str); 9] = [
     ("output_cache", "FLLM_OUTPUT_CACHE"),
     ("output_cache_mb", "FLLM_OUTPUT_CACHE_BYTES"),
     ("output_cache_ttl", "FLLM_OUTPUT_CACHE_TTL"),
@@ -1721,7 +1721,6 @@ pub const ENGINE_OPTIONS: [(&str, &str); 10] = [
     ("preemption", "FLLM_PREEMPTION"),
     ("otel_endpoint", "FLLM_OTEL_ENDPOINT"),
     ("otel_service", "FLLM_OTEL_SERVICE"),
-    ("admin_key", "FLLM_ADMIN_KEY"),
 ];
 
 /// The engine options saved by the page (empty when none).

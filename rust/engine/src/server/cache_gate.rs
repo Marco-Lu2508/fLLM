@@ -68,7 +68,7 @@ pub(crate) fn tenant(body: &Value, scope: &Scope) -> Option<String> {
         Scope::Off => Some(String::new()),
         Scope::Global => Some(String::new()),
         Scope::Tenant => {
-            let key = security::current_caller().and_then(|c| c.limiter).filter(|k| k.label != "anonymous").map(|k| k.id.clone());
+            let key = security::current_caller().and_then(|c| c.limiter).filter(|k| k.id != "anonymous").map(|k| k.id.clone());
             let user = body.get("user").and_then(Value::as_str).map(str::trim).filter(|user| !user.is_empty());
             match (key, user) {
                 (Some(key), Some(user)) => Some(format!("{key}\0{user}")),

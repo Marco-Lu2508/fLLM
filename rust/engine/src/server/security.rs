@@ -118,6 +118,9 @@ pub struct KeyState {
     pub id: String,
     pub label: String,
     pub masked: String,
+    /// May use the administration routes (`/admin/*`, creating and removing keys) from any machine. Keys given on the command line are
+    /// the operator's and have it; keys made on the Studio page have it only when asked for.
+    pub admin: bool,
     pub created_at: u64,
     pub rpm_limit: Option<f64>,
     pub tpm_limit: Option<f64>,
@@ -130,14 +133,15 @@ pub struct KeyState {
 
 impl KeyState {
     fn new(label: String, spec: &RateLimitSpec) -> Self {
-        Self::with_meta(label.clone(), label, "cli••••key".into(), spec)
+        Self::with_meta(label.clone(), label, "cli••••key".into(), spec, false)
     }
 
-    fn with_meta(id: String, label: String, masked: String, spec: &RateLimitSpec) -> Self {
+    fn with_meta(id: String, label: String, masked: String, spec: &RateLimitSpec, admin: bool) -> Self {
         Self {
             id,
             label,
             masked,
+            admin,
             created_at: unix_secs(),
             rpm_limit: spec.requests_per_minute,
             tpm_limit: spec.tokens_per_minute,
@@ -241,6 +245,7 @@ impl Security {
                         id,
                         mask_secret(key),
                         &options.rate_limit,
+                        true,
                     )),
                 ));
             }
@@ -257,6 +262,13 @@ impl Security {
 
     pub fn auth_required(&self) -> bool {
         !lock(&self.keys).is_empty()
+    }
+
+    /// Whether the request presents a key that has the admin right.
+    pub fn is_admin_request(&self, headers: &HeaderMap) -> bool {
+        let Some(raw) = presented_key(headers) else { return false };
+        let d = digest(raw);
+        lock(&self.keys).iter().any(|(known, state)| ct_eq(known, &d) && state.admin)
     }
 
     pub fn rate_limit_spec(&self) -> RateLimitSpec {
@@ -277,6 +289,7 @@ impl Security {
                     "id": state.id,
                     "label": state.label,
                     "masked": state.masked,
+                    "admin": state.admin,
                     "created_at": state.created_at,
                     "rpm_limit": state.rpm_limit,
                     "tpm_limit": state.tpm_limit,
@@ -294,6 +307,7 @@ impl Security {
         label: &str,
         rpm: Option<f64>,
         tpm: Option<f64>,
+        admin: bool,
     ) -> Result<serde_json::Value, String> {
         let raw_key = raw_key.trim();
         if raw_key.is_empty() {
@@ -321,11 +335,13 @@ impl Security {
             clean_label.clone(),
             mask_secret(raw_key),
             &spec,
+            admin,
         ));
         let info = serde_json::json!({
             "id": state.id,
             "label": state.label,
             "masked": state.masked,
+            "admin": state.admin,
             "created_at": state.created_at,
             "rpm_limit": state.rpm_limit,
             "tpm_limit": state.tpm_limit,

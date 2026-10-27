@@ -12,11 +12,11 @@ behaviour between versions).
 - The settings pages for hooks, agents, prices, plugins, runtime, embeddings and web search open without a model loaded.
 
 ### Security
-- The `/admin/*` routes (drain, empty the cache, effective settings, telemetry) answer only this computer, or another computer that sends the admin key in `x-admin-key` (`FLLM_ADMIN_KEY` or Settings > Engine). A normal API key no longer reaches them.
+- The `/admin/*` routes (drain, empty the cache, effective settings, telemetry) answer only this computer, or another computer with an API key that has the **admin right**. Keys given with `--api-key` are admin keys; keys made on the Studio page are admin keys only when "Admin" is ticked. A key made for chatting no longer reaches them, and while keys are in use only an admin key (or this computer) can make or remove keys, so no user can make themselves an admin.
 - With `FLLM_CACHE_SCOPE=tenant` the output cache is separated by the API key of the caller (together with the `user` field), not by the `user` field alone, which any caller could choose.
 
 ### Added
-- Settings > Engine: the output cache (on or off, size, time, who shares it), prefix sharing, the prefix separator, what happens when memory runs out, telemetry address and name, the admin key, plus live numbers, "empty the cache" and "stop taking new requests". The options are saved and take effect when the server restarts (a button restarts it).
+- Settings > Engine: the output cache (on or off, size, time, who shares it), prefix sharing, the prefix separator, what happens when memory runs out, telemetry address and name, plus live numbers, "empty the cache" and "stop taking new requests". The options are saved and take effect when the server restarts (a button restarts it).
 
 ### Fixed
 - Drop-down lists, tooltips and the arrows of number fields are drawn by the app instead of the browser, and buttons and menus can no longer be selected as text, so the window looks like an app.
