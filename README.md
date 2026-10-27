@@ -67,7 +67,7 @@ A repository with several GGUF files needs the `:QUANT` suffix.
 ### Models and formats
 
 `serve` and `run` load **GGUF** files directly. A **checkpoint** (safetensors or PyTorch) needs no manual step either:
-a local directory or file, or a downloaded Hugging Face repository, with safetensors weights is translated into the GGUF tensor layout in memory while it loads, with no GGUF file written (`--no-direct-load` converts to a cached GGUF instead, and formats whose direct load is not yet verified convert anyway); a Hugging Face
+a local directory or file, or a downloaded Hugging Face repository, with safetensors weights is translated into the GGUF tensor layout in memory while it loads, with no GGUF file written (`--no-direct-load` converts to a cached GGUF instead, and formats whose direct load is not yet verified convert anyway); otherwise a Hugging Face
 repository is converted automatically on first use: `fllm-rs run owner/repo` on a repository without
 GGUF files downloads the weights, checks the architecture from `config.json` first, converts once and caches the GGUF
 next to the other models (`fllm-rs list` shows it, `fllm-rs rm owner/repo` removes it, `rm owner/repo --converted` keeps
