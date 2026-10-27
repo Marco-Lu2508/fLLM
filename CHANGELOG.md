@@ -6,6 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-27
+
+Gemma 4 on graphics chips, a faster Vulkan prompt path, CPU answers on par with llama.cpp on server processors, a fix for 16 users on CUDA, and a large step for the Studio and its coding agent (sandbox, hooks, plugins, sub-agents, language servers, worktrees) with a new look.
+
 ### Changed
 - **New design system** (`webui/theme.css`, loaded last): OLED-dark slate and warm paper light theme, signal-green accent with seven alternatives in the accent picker, 8 px grid, 11–34 px type scale, mono for meta, floating sidebar rail, centred 900 px reading column, raised composer, bento starter cards, quiet focus rings and reduced-motion support. The empty chat no longer shows a flat sparkline.
 
