@@ -304,8 +304,9 @@
     function syncSpeculative() {
       const mode = $('optSpeculative').value;
       const show = (ids, on) => ids.forEach((id) => { $(id).style.display = on ? '' : 'none'; });
-      show(['optDraftModelLabel', 'optDraftModel'], mode === 'draft');
-      show(['optSpecTokensLabel', 'optSpecTokens'], mode === 'lookup' || mode === 'draft');
+      show(['optDraftModelLabel'], mode === 'draft');
+      $('optDraftRow').style.display = mode === 'draft' ? 'flex' : 'none';
+      show(['optSpecTokensLabel', 'optSpecTokens'], mode === 'lookup' || mode === 'suffix' || mode === 'draft');
       const note = speculativeNote(mode);
       $('optSpeculativeNote').textContent = note;
       show(['optSpeculativeNote'], Boolean(note));
@@ -321,6 +322,20 @@
       $('optDraftModel').innerHTML = `<option value="">Choose a model</option>${rows.map((f) => `<option value="${escapeHtml(f.path)}">${escapeHtml(f.name || baseName(f.path))} (${formatBytes(f.size_bytes)})</option>`).join('')}`;
       if (selected) $('optDraftModel').value = selected;
     }
+
+    // any GGUF file on the computer can be the draft model; the server checks that it is smaller and has the same vocabulary
+    $('btnBrowseDraft').addEventListener('click', async () => {
+      const path = await browse('gguf');
+      if (!path) return;
+      const select = $('optDraftModel');
+      if (![...select.options].some((o) => o.value === path)) {
+        const option = document.createElement('option');
+        option.value = path;
+        option.textContent = baseName(path);
+        select.appendChild(option);
+      }
+      select.value = path;
+    });
 
     function readOptions() {
       const out = {};

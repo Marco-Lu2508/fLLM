@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- Load dialog: *Conversation lookup* (`--speculative suffix`) and a *Browse...* button for the draft model (any GGUF file on the computer; the server still checks that it is smaller and shares the vocabulary). Measured on Gemma 4 E4B, CPU of a server (10 cores): repeating and extending code 19 -> 37 tokens/s with conversation lookup (26 with prompt lookup), a free story 21 -> 28 (prompt lookup: 17, slower than none); the text is the same as without. On Gemma 4 with Vulkan the text is the same too.
+
 ## [0.1.9] - 2026-10-27
 
 Gemma 4 on graphics chips, a faster Vulkan prompt path, CPU answers on par with llama.cpp on server processors, a fix for 16 users on CUDA, and a large step for the Studio and its coding agent (sandbox, hooks, plugins, sub-agents, language servers, worktrees) with a new look.

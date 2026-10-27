@@ -125,9 +125,10 @@ impl LoadOptions {
             None | Some("") | Some("auto") => return Ok(()),
             Some("off") => "off",
             Some("lookup") | Some("ngram") => "lookup",
+            Some("suffix") => "suffix",
             Some("draft") => "draft",
             Some("mtp") => "mtp",
-            Some(other) => return Err(format!("The speculative decoding mode \"{other}\" is not known. Use off, lookup, draft or mtp.")),
+            Some(other) => return Err(format!("The speculative decoding mode \"{other}\" is not known. Use off, lookup, suffix, draft or mtp.")),
         };
         self.speculative = Some(mode.to_owned());
         if mode == "draft" {
@@ -137,7 +138,7 @@ impl LoadOptions {
             }
             self.draft_model = Some(model.to_owned());
         }
-        if matches!(mode, "lookup" | "draft") && !is_auto(get("speculative_tokens")) {
+        if matches!(mode, "lookup" | "suffix" | "draft") && !is_auto(get("speculative_tokens")) {
             self.speculative_tokens = Some(whole_number(get("speculative_tokens"), "The number of tokens proposed per step", 1, 32)?);
         }
         Ok(())
@@ -231,6 +232,7 @@ impl LoadOptions {
         match self.speculative.as_deref() {
             Some("off") => vec!["--speculative".into(), "off".into()],
             Some("lookup") => vec!["--speculative".into(), "ngram".into(), "--num-speculative-tokens".into(), tokens(5)],
+            Some("suffix") => vec!["--speculative".into(), "suffix".into(), "--num-speculative-tokens".into(), tokens(6)],
             Some("draft") => {
                 let model = self.draft_model.clone().unwrap_or_default();
                 vec!["--speculative".into(), "draft".into(), "--speculative-model".into(), model, "--num-speculative-tokens".into(), tokens(5)]
@@ -983,6 +985,10 @@ mod tests {
         assert_eq!(off.apply(&given), args(&["serve", "--model", "m.gguf", "--port", "9000", "--speculative", "off"]));
         let lookup = LoadOptions::from_json(&json!({"speculative": "Lookup", "speculative_tokens": "8"})).unwrap();
         assert_eq!(lookup.apply(&args(&["serve"])), args(&["serve", "--speculative", "ngram", "--num-speculative-tokens", "8"]));
+        let suffix = LoadOptions::from_json(&json!({"speculative": "suffix"})).unwrap();
+        assert_eq!(suffix.apply(&args(&["serve"])), args(&["serve", "--speculative", "suffix", "--num-speculative-tokens", "6"]));
+        let suffix_tokens = LoadOptions::from_json(&json!({"speculative": "Suffix", "speculative_tokens": 3})).unwrap();
+        assert!(suffix_tokens.apply(&args(&["serve"])).ends_with(&args(&["--num-speculative-tokens", "3"])));
         let default_tokens = LoadOptions::from_json(&json!({"speculative": "lookup"})).unwrap();
         assert!(default_tokens.apply(&args(&["serve"])).ends_with(&args(&["--num-speculative-tokens", "5"])));
         let draft = LoadOptions::from_json(&json!({"speculative": "draft", "draft_model": "/models/small.gguf", "speculative_tokens": 4})).unwrap();
@@ -1024,6 +1030,7 @@ mod tests {
         assert_eq!(mode(&["serve", "--draft-model", "d.gguf"]), "draft");
         assert_eq!(mode(&["serve", "--speculative", "mtp"]), "mtp");
         assert_eq!(mode(&["serve", "--speculative", "off"]), "off");
+        assert_eq!(mode(&["serve", "--speculative", "suffix"]), "suffix");
     }
 
     #[test]

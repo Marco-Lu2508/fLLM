@@ -116,7 +116,8 @@
     /** What the load dialog tells about a speculative decoding mode. */
     function speculativeNote(mode) {
       const what = {
-        lookup: 'Guesses the next words from the text of the conversation and lets the model check them. It costs nothing when it finds no match and helps most with code edits, summaries and quoted text, little with free chat.',
+        lookup: 'Guesses the next words from the text of the conversation and lets the model check them. It helps with code edits, summaries and quoted text; in free chat the guesses are often wrong and it can make the answer a little slower (measured: 17 % slower on a story). Conversation lookup is the better choice.',
+        suffix: 'Looks for the same words earlier in the conversation and in recent answers and lets the model check the guess. It costs nothing when it finds no match and roughly doubles the speed when the model repeats text: editing code, summaries, quotes, agent loops that read the same files again. The answer is the same as without it.',
         draft: 'A small model of the same family guesses ahead and this model checks the guesses. It needs extra memory and helps with every kind of text when the small model often agrees.',
         mtp: 'Uses the prediction heads that some models carry. Only models that have them can use it, on the processor or a CUDA graphics card.',
       }[mode];

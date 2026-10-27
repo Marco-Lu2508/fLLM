@@ -621,11 +621,15 @@
                       <option value="">Server default</option>
                       <option value="off">Off</option>
                       <option value="lookup">Prompt lookup (no extra model)</option>
+                      <option value="suffix">Conversation lookup (no extra model, best for code and summaries)</option>
                       <option value="draft">Draft model (a small model of the same family)</option>
                       <option value="mtp">Multi-token prediction (models with built-in heads)</option>
                     </select>
                     <label for="optDraftModel" class="app-item-desc" id="optDraftModelLabel" style="display:none;">Draft model (a downloaded model, smaller than this one)</label>
-                    <select id="optDraftModel" class="ui-select mono" style="width:100%;display:none;"></select>
+                    <div id="optDraftRow" style="display:none;gap:6px;width:100%;">
+                      <select id="optDraftModel" class="ui-select mono" style="flex:1;min-width:0;"></select>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btnBrowseDraft">Browse...</button>
+                    </div>
                     <label for="optSpecTokens" class="app-item-desc" id="optSpecTokensLabel" style="display:none;">Tokens guessed per step (1 to 32)</label>
                     <input type="text" id="optSpecTokens" class="ui-input mono" placeholder="5" style="display:none;">
                     <p id="optSpeculativeNote" class="app-item-desc" style="display:none;grid-column:1 / -1;margin:0;"></p>
