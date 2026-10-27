@@ -266,6 +266,9 @@ pub fn studio_admin_blocked(
         || is_providers_path(path)
         || is_personal_path(path)
         || is_agent_config_path(path)
+        // MCP servers are programs this server starts, and their tools act on this machine: adding, restarting and calling them is for this machine
+        // only (listing them is not)
+        || (path.starts_with("/api/studio/mcp") && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS))
         // the NPU setup downloads a native runtime that the server loads afterwards, and its removal deletes files: never from another machine
         || path == "/api/studio/npu/setup"
         // the remembered notes about the user are personal: this machine only, reads included
@@ -725,6 +728,10 @@ mod studio_gate_tests {
             (Method::POST, "/api/studio/embeddings"),
             (Method::POST, "/api/studio/search/engines"),
             (Method::POST, "/api/studio/agent/worktree"),
+            (Method::POST, "/api/studio/mcp/servers"),
+            (Method::DELETE, "/api/studio/mcp/servers"),
+            (Method::POST, "/api/studio/mcp/call"),
+            (Method::POST, "/api/studio/mcp/resource"),
         ] {
             for auth in [false, true] {
                 assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} auth {auth}");
