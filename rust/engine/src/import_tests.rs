@@ -733,3 +733,94 @@ fn direct_load_of_unquantized_checkpoints_gives_the_same_logits_as_the_converted
         let _ = fs::remove_dir_all(d);
     }
 }
+
+// ---- the `fllm-rs serve` command itself ----
+
+/// The release or debug binary next to the test executable, when it has been built (`cargo build --bin fllm-rs`).
+fn built_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.parent()?;
+    let bin = dir.join(if cfg!(windows) { "fllm-rs.exe" } else { "fllm-rs" });
+    bin.is_file().then_some(bin)
+}
+
+fn http(port: u16, method: &str, path: &str, body: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok()?;
+    let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    Some(response)
+}
+
+/// Starts `fllm-rs serve --model MODEL ...` on the CPU, asks for a greedy completion and returns (text, model ids, log).
+fn serve_once(bin: &Path, cache: &Path, model: &Path, extra: &[&str]) -> (String, String, String) {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let log_path = cache.join(format!("serve-{port}.log"));
+    let log = fs::File::create(&log_path).unwrap();
+    let mut child = std::process::Command::new(bin)
+        .args(["serve", "--device", "cpu", "--ctx", "64", "--max-seqs", "2", "--host", "127.0.0.1", "--port", &port.to_string(), "--model"])
+        .arg(model)
+        .args(extra)
+        .env("FLLM_CACHE", cache)
+        .env("HF_HOME", cache)
+        .env_remove("FLLM_NO_DIRECT_LOAD")
+        .env_remove("FLLM_DIRECT_SAFETENSORS")
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let mut ready = false;
+    for _ in 0..120 {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if http(port, "GET", "/health", "").is_some_and(|r| r.starts_with("HTTP/1.1 200")) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let logs = |path: &Path| fs::read_to_string(path).unwrap_or_default();
+    if !ready {
+        let _ = child.kill();
+        panic!("the server did not start for {} {extra:?}:\n{}", model.display(), logs(&log_path));
+    }
+    let completion = http(port, "POST", "/v1/completions", r#"{"model":"x","prompt":"t5 t9 t3 t17","max_tokens":10,"temperature":0}"#).unwrap_or_default();
+    let models = http(port, "GET", "/v1/models", "").unwrap_or_default();
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = completion.split("\"text\":\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or_else(|| panic!("no completion in {completion}\n{}", logs(&log_path))).to_owned();
+    (text, models, logs(&log_path))
+}
+
+#[test]
+fn the_serve_command_loads_checkpoint_directories_directly_and_answers_like_the_converted_file() {
+    let Some(bin) = built_binary() else {
+        eprintln!("skipped: build the fllm-rs binary first (cargo build --bin fllm-rs)");
+        return;
+    };
+    let (quant, reference) = (scratch("srv-q"), scratch("srv-r"));
+    build_pair(Kind::Nvfp4, 71, &quant, &reference);
+    let cache = scratch("srv-cache");
+    let cache_files = |dir: &Path| fs::read_dir(dir.join("fllm-local")).map(|d| d.flatten().count()).unwrap_or(0);
+    for (model, extra) in [(&quant, vec![]), (&reference, vec![]), (&reference, vec!["--quant", "q8_0"])] {
+        let (direct_text, models, log) = serve_once(&bin, &cache, model, &extra);
+        assert!(log.contains("directly"), "no direct load for {}:\n{log}", model.display());
+        assert_eq!(cache_files(&cache), 0, "a GGUF file was written for {}", model.display());
+        let name = model.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(models.contains(&name), "model id should be the directory name {name}: {models}");
+        let mut converted = extra.clone();
+        converted.push("--no-direct-load");
+        let (converted_text, _, log) = serve_once(&bin, &cache, model, &converted);
+        assert!(cache_files(&cache) > 0, "--no-direct-load must write the converted file:\n{log}");
+        assert!(!direct_text.is_empty());
+        assert_eq!(direct_text, converted_text, "{} {extra:?}", model.display());
+        let _ = fs::remove_dir_all(cache.join("fllm-local"));
+    }
+    for d in [quant, reference, cache] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
