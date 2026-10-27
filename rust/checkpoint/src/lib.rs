@@ -84,3 +84,5 @@ impl From<&str> for CheckpointError {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod direct_tests;
