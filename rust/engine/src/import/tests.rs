@@ -580,3 +580,179 @@ fn prepare_local_with_direct_flag_bypasses_conversion() {
         let _ = fs::remove_dir_all(d);
     }
 }
+
+fn direct_options() -> ImportOptions {
+    ImportOptions::default()
+}
+
+#[test]
+fn verified_checkpoints_load_directly_by_default_and_no_direct_load_converts() {
+    let quant = scratch("dflt-q");
+    let plain = scratch("dflt-p");
+    build_pair(Kind::Nvfp4, 61, &quant, &plain);
+    let cache = scratch("dflt-cache");
+    let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str()), ("FLLM_NO_DIRECT_LOAD", None), ("FLLM_DIRECT_SAFETENSORS", None)]);
+    let dir = quant.to_str().unwrap();
+    let path = prepare(dir, &direct_options()).unwrap();
+    assert_eq!(path, quant, "a verified checkpoint is handed out as it is");
+    assert!(is_direct(&path));
+    assert!(fs::read_dir(&cache).unwrap().next().is_none(), "nothing may be written to the cache");
+    let model = open_model(&path).unwrap();
+    assert_eq!(model.index().tensors.iter().find(|t| t.name == "blk.1.ffn_up.weight").map(|t| t.type_id), Some(40));
+    // the same checkpoint with --no-direct-load is converted into the cache
+    let converted = prepare(dir, &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
+    assert!(converted.starts_with(local_cache_dir()) && !is_direct(&converted), "{}", converted.display());
+    for d in [quant, plain, cache] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn an_existing_conversion_is_used_unless_direct_is_forced() {
+    let quant = scratch("pref-q");
+    let plain = scratch("pref-p");
+    build_pair(Kind::Nvfp4, 62, &quant, &plain);
+    let cache = scratch("pref-cache");
+    let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str()), ("FLLM_NO_DIRECT_LOAD", None), ("FLLM_DIRECT_SAFETENSORS", None)]);
+    let dir = quant.to_str().unwrap();
+    let converted = prepare(dir, &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
+    assert_eq!(prepare(dir, &direct_options()).unwrap(), converted, "the finished conversion starts faster");
+    assert_eq!(prepare(dir, &ImportOptions { direct: true, ..Default::default() }).unwrap(), quant, "--direct ignores it");
+    for d in [quant, plain, cache] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn the_environment_switches_choose_the_path() {
+    let quant = scratch("env-q");
+    let plain = scratch("env-p");
+    build_pair(Kind::Nvfp4, 63, &quant, &plain);
+    let cache = scratch("env-cache");
+    let dir = quant.to_str().unwrap();
+    {
+        let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str()), ("FLLM_NO_DIRECT_LOAD", Some("1")), ("FLLM_DIRECT_SAFETENSORS", None)]);
+        let path = prepare(dir, &direct_options()).unwrap();
+        assert!(path.starts_with(local_cache_dir()), "FLLM_NO_DIRECT_LOAD=1 converts: {}", path.display());
+    }
+    {
+        let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str()), ("FLLM_NO_DIRECT_LOAD", Some("0")), ("FLLM_DIRECT_SAFETENSORS", Some("1"))]);
+        assert_eq!(prepare(dir, &direct_options()).unwrap(), quant, "FLLM_DIRECT_SAFETENSORS=1 forces the direct load");
+    }
+    for d in [quant, plain, cache] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn quantizing_on_load_matches_the_cached_conversion() {
+    for preset in ["q8_0", "q4_0", "q4_k_m"] {
+        let quant = scratch("ql-q");
+        let plain = scratch("ql-p");
+        build_pair(Kind::Nvfp4, 64, &quant, &plain);
+        let cache = scratch("ql-cache");
+        let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str()), ("FLLM_NO_DIRECT_LOAD", None), ("FLLM_DIRECT_SAFETENSORS", None)]);
+        let dir = plain.to_str().unwrap();
+        let direct_path = prepare(dir, &ImportOptions { quant: Some(preset.into()), ..Default::default() }).unwrap();
+        assert_eq!(direct_path, plain);
+        assert!(fs::read_dir(&cache).unwrap().next().is_none(), "no file for {preset}");
+        let direct = open_model(&direct_path).unwrap();
+        let converted = prepare(dir, &ImportOptions { quant: Some(preset.into()), no_direct: true, ..Default::default() }).unwrap();
+        crate::import_tests::assert_same_model(&direct, &MappedGguf::open(&converted).unwrap(), preset);
+        let up = direct.index().tensors.iter().find(|t| t.name == "blk.0.ffn_up.weight").unwrap();
+        assert_ne!(up.type_id, 30, "{preset}: the weights are still bf16");
+        for d in [quant, plain, cache] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+}
+
+#[test]
+fn only_verified_checkpoints_load_directly_without_being_asked() {
+    let check = |q: &str| fllm_checkpoint::ConfigCheck { architecture: "llama".into(), quantization: q.into() };
+    let st = vec!["model-00001-of-00002.safetensors".to_owned(), "model.safetensors.index.json".to_owned()];
+    for q in ["none", "awq", "gptq", "nvfp4", "fp8", "int4", "int8"] {
+        assert_eq!(direct_unsupported(&check(q), &st, 1000, &OutType::Preserve), None, "{q}");
+    }
+    for q in ["exl2", "exl3", "mxfp4", "bitsandbytes", "mlx"] {
+        let why = direct_unsupported(&check(q), &st, 1000, &OutType::Preserve).unwrap();
+        assert!(why.contains("not verified"), "{q}: {why}");
+    }
+    let torch = vec!["pytorch_model.bin".to_owned()];
+    assert!(direct_unsupported(&check("none"), &torch, 1000, &OutType::Preserve).unwrap().contains("PyTorch"));
+    // a checkpoint much larger than any free memory stays on the file-based path, unless it is quantized on load
+    let huge = u64::MAX / 2;
+    assert!(direct_unsupported(&check("none"), &st, huge, &OutType::Preserve).unwrap().contains("large"));
+    assert_eq!(direct_unsupported(&check("none"), &st, huge, &OutType::Quant("q4_k_m".into())), None);
+    // modes: forced, automatic, off
+    let opts = |direct, no_direct| ImportOptions { direct, no_direct, ..Default::default() };
+    let _env = EnvGuard::set(&[("FLLM_NO_DIRECT_LOAD", None), ("FLLM_DIRECT_SAFETENSORS", None)]);
+    assert_eq!(direct_mode(&opts(false, false), None, "m"), Some(false));
+    assert_eq!(direct_mode(&opts(false, false), Some("why".into()), "m"), None);
+    assert_eq!(direct_mode(&opts(true, false), Some("why".into()), "m"), Some(true));
+    assert_eq!(direct_mode(&opts(false, true), None, "m"), None);
+}
+
+#[test]
+fn direct_models_are_named_after_their_repository_or_directory() {
+    let dir = scratch("name");
+    assert_eq!(direct_model_name(&dir.join("model.safetensors")), "model");
+    let nested = dir.join("models--acme--Tiny-7B").join("snapshots").join("0123abcd");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(direct_model_name(&nested), "Tiny-7B");
+    let plain = dir.join("Qwen2.5-7B");
+    fs::create_dir_all(&plain).unwrap();
+    assert_eq!(direct_model_name(&plain), "Qwen2.5-7B");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_snapshot_with_only_converted_ggufs_is_still_a_checkpoint() {
+    let quant = scratch("snap-q");
+    let plain = scratch("snap-p");
+    build_pair(Kind::Nvfp4, 65, &quant, &plain);
+    assert!(local_checkpoint_root(&quant).is_some());
+    fs::write(quant.join("Tiny-nvfp4-fllm0123456789ab.gguf"), b"x").unwrap();
+    assert!(local_checkpoint_root(&quant).is_some(), "our own conversions do not make a GGUF directory");
+    fs::write(quant.join("user.gguf"), b"x").unwrap();
+    assert!(local_checkpoint_root(&quant).is_none(), "a user's GGUF file does");
+    for d in [quant, plain] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn hub_checkpoint_loads_directly_after_the_download_without_a_gguf_file() {
+    let quant = scratch("hubd-q");
+    let plain = scratch("hubd-r");
+    build_pair(Kind::Nvfp4, 66, &quant, &plain);
+    let stub = Stub::start(repo_routes("acme", "tiny-nvfp4", &dir_files(&quant)));
+    let (cache, home) = (scratch("hubd-cache"), scratch("hubd-home"));
+    let _env = hub_env(&stub, &cache, &home);
+    let snapshot = cache.join("models--acme--tiny-nvfp4").join("snapshots").join(COMMIT);
+
+    let path = prepare("acme/tiny-nvfp4", &ImportOptions::default()).unwrap();
+    assert_eq!(path, snapshot);
+    assert!(is_direct(&path));
+    assert!(snapshot.join("model.safetensors").is_file());
+    let ggufs = fs::read_dir(&snapshot).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".gguf")).count();
+    assert_eq!(ggufs, 0, "no GGUF file may be written");
+    assert_eq!(direct_model_name(&path), "tiny-nvfp4");
+    let model = open_model(&path).unwrap();
+    assert_eq!(model.index().tensors.iter().find(|t| t.name == "blk.0.attn_q.weight").map(|t| t.type_id), Some(40));
+
+    // offline: the cached files are enough, and nothing is downloaded again
+    let before = stub.paths().len();
+    let offline = ImportOptions { offline: true, ..Default::default() };
+    assert_eq!(prepare("https://huggingface.co/acme/tiny-nvfp4", &offline).unwrap(), snapshot);
+    assert_eq!(stub.paths().len(), before);
+
+    // a conversion made later sits in the same directory; the directory stays a checkpoint and the conversion is preferred
+    let converted = prepare("acme/tiny-nvfp4", &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
+    assert!(hub::is_converted_name(&converted.file_name().unwrap().to_string_lossy()));
+    assert_eq!(prepare("acme/tiny-nvfp4", &offline).unwrap(), converted);
+    assert_eq!(prepare("acme/tiny-nvfp4", &ImportOptions { offline: true, direct: true, ..Default::default() }).unwrap(), snapshot);
+    for d in [quant, plain, cache, home] {
+        let _ = fs::remove_dir_all(d);
+    }
+}

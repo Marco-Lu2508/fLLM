@@ -668,3 +668,68 @@ fn block_wise_fp8_experts_convert_to_f16() {
     // no compact device format for the 128x128 tiles yet (docs/moe-formats.md): the experts are expanded, and must still be right
     check_moe(Kind::Fp8Block(32), 29, 1, 5e-3);
 }
+
+// ---- direct loading: `open_model` of a checkpoint equals the converted GGUF file ----
+
+/// Every tensor (name, dimensions, type, bytes) and every metadata value of the two models is equal.
+pub(crate) fn assert_same_model(direct: &MappedGguf, file: &MappedGguf, what: &str) {
+    assert_eq!(direct.index().metadata, file.index().metadata, "{what}: metadata");
+    assert_eq!(direct.index().tensors.len(), file.index().tensors.len(), "{what}: tensor count");
+    for t in &direct.index().tensors {
+        let r = file.index().tensors.iter().find(|r| r.name == t.name).unwrap_or_else(|| panic!("{what}: {} missing", t.name));
+        assert_eq!((&t.dimensions, t.type_id, t.payload_len), (&r.dimensions, r.type_id, r.payload_len), "{what}: layout of {}", t.name);
+        assert!(direct.tensor_bytes(&t.name).unwrap() == file.tensor_bytes(&t.name).unwrap(), "{what}: bytes of {}", t.name);
+    }
+}
+
+#[test]
+fn direct_load_equals_the_converted_file_for_every_quantized_layout() {
+    for (kind, moe) in [
+        (Kind::Nvfp4, false),
+        (Kind::CtInt4(32), false),
+        (Kind::CtInt8, false),
+        (Kind::CtPacked8, false),
+        (Kind::Fp8Block(32), false),
+        (Kind::Nvfp4, true),
+        (Kind::CtInt4(32), true),
+        (Kind::Fp8Block(32), true),
+    ] {
+        let (quant, reference) = (scratch("dq"), scratch("dr"));
+        if moe {
+            build_moe_pair(kind, 9, &quant, &reference);
+        } else {
+            build_pair(kind, 9, &quant, &reference);
+        }
+        for dtype in [OutputDType::Preserve, OutputDType::F16] {
+            let gguf = convert(&quant, dtype);
+            let direct = crate::import::open_model(&quant).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            if matches!(dtype, OutputDType::Preserve) {
+                assert_same_model(&direct, &MappedGguf::open(&gguf).unwrap(), &format!("{kind:?} moe={moe}"));
+                // the engine computes the same logits from both
+                assert_eq!(logits(&quant, &PROMPT), logits(&gguf, &PROMPT), "{kind:?} moe={moe}: logits");
+            }
+        }
+        for d in [quant, reference] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+}
+
+#[test]
+fn direct_load_of_unquantized_checkpoints_gives_the_same_logits_as_the_converted_file() {
+    let (quant, reference) = (scratch("du-q"), scratch("du-r"));
+    build_pair(Kind::Nvfp4, 13, &quant, &reference);
+    for dtype in [OutputDType::Preserve, OutputDType::F16, OutputDType::F32] {
+        let gguf = convert(&reference, dtype);
+        // `open_model` on a bare directory loads with the default type (preserve); other types go through the checkpoint API
+        let options = ConvertOptions { output_dtype: dtype, overwrite: false, spec_head: None };
+        let direct = fllm_checkpoint::load_checkpoint_as_gguf(&reference, options).unwrap();
+        assert_same_model(&direct, &MappedGguf::open(&gguf).unwrap(), &format!("{dtype:?}"));
+        if matches!(dtype, OutputDType::Preserve) {
+            assert_eq!(logits(&reference, &PROMPT), logits(&gguf, &PROMPT));
+        }
+    }
+    for d in [quant, reference] {
+        let _ = fs::remove_dir_all(d);
+    }
+}

@@ -248,3 +248,22 @@ fn packed_gptq_and_awq_checkpoints_load_identically_to_the_converted_file() {
         let _ = fs::remove_dir_all(dir);
     }
 }
+
+#[test]
+fn a_memory_budget_stops_the_load_before_anything_is_built() {
+    let dir = scratch("budget");
+    llama(&dir, Store::Bf16, 1, 3);
+    let options = ConvertOptions::default();
+    match load_checkpoint_quantized(&dir, options, None, Some(1)) {
+        Err(crate::CheckpointError::OverBudget { needed, limit }) => assert!(needed > 1 && limit == 1),
+        other => panic!("expected OverBudget, got {:?}", other.map(|_| ())),
+    }
+    // a generous budget loads, and quantizing shrinks what has to be built
+    assert!(load_checkpoint_quantized(&dir, options, None, Some(u64::MAX)).is_ok());
+    let quantized = ConvertOptions { output_dtype: OutputDType::F16, ..options };
+    let q8 = load_checkpoint_quantized(&dir, quantized, Preset::parse("q8_0"), Some(u64::MAX)).unwrap();
+    let f16 = load_checkpoint_quantized(&dir, quantized, None, Some(u64::MAX)).unwrap();
+    let total = |m: &MappedGguf| m.index().tensors.iter().map(|t| t.payload_len).sum::<u64>();
+    assert!(total(&q8) < total(&f16) * 6 / 10, "q8_0 {} vs f16 {}", total(&q8), total(&f16));
+    let _ = fs::remove_dir_all(dir);
+}
