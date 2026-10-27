@@ -6,10 +6,14 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-27
+
+Fixes the header menus of 0.1.9 (the assistant list could not be used), makes the Code page say why it is unavailable, lets the coding agent create its own sub-agents, and turns conversation lookup on by default.
 ### Changed
 - Conversation lookup (`--speculative suffix`) is on by default for models without a recurrent state on the processor and on Vulkan / DirectX graphics (`--speculative off` or `FLLM_SPECULATIVE_DEFAULT=off` keeps it away; CUDA, HIP and Metal stay off until their verification kernels have run on hardware). Same text as without, up to twice the speed on code edits, summaries and agent loops, no cost when it finds nothing.
 
 ### Fixed
+- Release signing (Cosign) is tried three times: one archive of 0.1.9 failed to sign when many jobs asked the signing service at once.
 - The menus of the page header (model, assistant, chat) were painted under the page since the new design system: the header had its own layer without a stacking order, so assistants could not be picked and the text of the start page showed through. Opening one menu closes the other.
 - Code page: "The coding agent is not available." now says why (the server without a model has no agent: load a model first), shows the HTTP status for other errors, and has a *Try again* button.
 
