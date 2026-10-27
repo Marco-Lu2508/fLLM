@@ -945,11 +945,12 @@ async fn queue_limit_answers_429_with_retry_after() {
     settings.http.max_queue = Some(1);
     let h = Arc::new(start(settings));
     h.state.metrics.inject_delay_ms.store(150, Ordering::Relaxed);
-    // one running + one queued fill the admission limit of 2
+    // one running + one queued fill the admission limit of 2; the two differ, otherwise the second would join the first
+    // as a coalesced follower and never take a slot
     let mut slow = Vec::new();
-    for _ in 0..2 {
+    for tokens in [4, 5] {
         let h = h.clone();
-        slow.push(tokio::spawn(async move { h.chat(json!({"max_tokens": 4, "ignore_eos": true})).await }));
+        slow.push(tokio::spawn(async move { h.chat(json!({"max_tokens": tokens, "ignore_eos": true})).await }));
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
     let rejected = h.chat(json!({"max_tokens": 2})).await;
@@ -1921,4 +1922,70 @@ async fn thinking_budget_ends_the_reasoning_and_the_answer_follows() {
     }
     assert_eq!(reasoning_text, reasoning, "panicked {}", streamed.text());
     assert_eq!(content, message["content"].as_str().unwrap_or_default());
+}
+
+// The three tests below exist because the output cache and draining were green in unit tests while the live server did
+// nothing: the eligibility check looked at the wrong field, and the chat path never reached the admission check. These go
+// through HTTP, which is where the difference shows.
+
+#[tokio::test]
+async fn an_identical_deterministic_chat_request_is_answered_from_the_cache() {
+    let h = start(Settings::default());
+    let body = json!({"messages": [{"role": "user", "content": "hello"}], "temperature": 0, "max_tokens": 4, "ignore_eos": true});
+    let first = h.post("/v1/chat/completions", body.clone()).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let after_first = h.state.cache.stats();
+    assert_eq!(after_first["stored"], 1, "the answer has to be remembered");
+    let second = h.post("/v1/chat/completions", body).await;
+    assert_eq!(second.status, StatusCode::OK);
+    let stats = h.state.cache.stats();
+    assert_eq!(stats["hits"], 1, "the second identical request is a hit");
+    assert_eq!(second.json()["choices"][0]["message"]["content"], first.json()["choices"][0]["message"]["content"]);
+}
+
+#[tokio::test]
+async fn a_request_without_an_explicit_greedy_temperature_stays_out_of_the_cache() {
+    // the server default may be anything; the gate cannot see it, so it must not guess
+    let h = start(Settings::default());
+    let body = json!({"messages": [{"role": "user", "content": "hello"}], "max_tokens": 4, "ignore_eos": true});
+    assert_eq!(h.post("/v1/chat/completions", body.clone()).await.status, StatusCode::OK);
+    assert_eq!(h.post("/v1/chat/completions", body).await.status, StatusCode::OK);
+    assert_eq!(h.state.cache.stats()["stored"], 0);
+}
+
+#[tokio::test]
+async fn a_draining_server_refuses_chat_requests() {
+    let h = start(Settings::default());
+    let body = json!({"messages": [{"role": "user", "content": "hello"}], "max_tokens": 2});
+    h.state.draining.store(true, Ordering::Relaxed);
+    let refused = h.post("/v1/chat/completions", body.clone()).await;
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE, "{}", refused.text());
+    assert_eq!(refused.header("retry-after"), "30");
+    assert_eq!(h.get("/ready").await.status, StatusCode::SERVICE_UNAVAILABLE);
+    h.state.draining.store(false, Ordering::Relaxed);
+    assert_eq!(h.post("/v1/chat/completions", body).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn two_identical_requests_at_the_same_time_share_one_computation() {
+    // the model is slowed down so the second request arrives while the first one is still generating
+    let h = Arc::new(start(Settings::default()));
+    h.state.metrics.inject_delay_ms.store(120, Ordering::Relaxed);
+    let body = json!({"messages": [{"role": "user", "content": "same question"}], "temperature": 0, "max_tokens": 4, "ignore_eos": true});
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let h = h.clone();
+        let body = body.clone();
+        tasks.push(tokio::spawn(async move { h.post("/v1/chat/completions", body).await }));
+    }
+    let mut texts = Vec::new();
+    for task in tasks {
+        let reply = task.await.expect("no panic");
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        texts.push(reply.json()["choices"][0]["message"]["content"].clone());
+    }
+    let (_, followers) = h.state.coalesce.counters();
+    assert_eq!(followers, 1, "the second request has to wait for the first one's answer");
+    assert_eq!(texts[0], texts[1], "both see the same answer");
+    h.state.metrics.inject_delay_ms.store(0, Ordering::Relaxed);
 }

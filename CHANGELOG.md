@@ -15,6 +15,11 @@ behaviour between versions).
 - A right click on a chat, a project or a message lists its actions (pin, rename, archive, delete, copy, rewind ...). Sliders are drawn in the look of the app.
 - A right click opens a menu of the app (cut, copy, paste, select all, copy link, copy code or text) instead of the browser's.
 - Questions (Turbo, removing a provider, plugin, MCP server or the NPU runtime) appear inside the app instead of the browser's own box, and a right click no longer opens the browser menu (text fields keep theirs).
+- **Regression tests through HTTP**: four tests now drive `/v1/chat/completions` and `/ready` instead of calling functions — an identical deterministic request must be a cache hit, a request without an explicit greedy temperature must stay out of the cache, a draining server must answer 503, and two identical requests at the same time must share one computation (one follower). Each of the four was mutation-checked: reverting the fix makes it fail. All three failed against the code of this session before the fixes above.
+- **OTLP attribute shape**: every span attribute is now `{"key": …, "value": {"stringValue"|"intValue"|"boolValue": …}}` as the protocol requires; before, a custom attribute carried `keyValue` next to `key`, which a real collector would ignore.
+- **`fllm_otel_spans_sent_total` / `sent`** counted nothing: the exporter thread sent batches but never reported them. It now counts every batch the collector accepted (HTTP 2xx).
+- **The output cache never applied to chat completions**: the eligibility check required "no reasoning spec", but the chat path always passes one (even for a model without a reasoning parser). A live server now shows `hits: 1, stored: 1` for a repeated deterministic prompt.
+- **Draining was not enforced on the chat path**: `openai_generate` had no admission check of its own, so `/v1/chat/completions` answered 200 while `/ready` already reported `draining`. The shared generation path now refuses with 503 too.
 - The columns of the usage and cost table line up (numbers right-aligned).
 
 ## [0.1.10] - 2026-10-27
@@ -29,6 +34,25 @@ Fixes the header menus of 0.1.9 (the assistant list could not be used), makes th
 - Code page: "The coding agent is not available." now says why (the server without a model has no agent: load a model first), shows the HTTP status for other errors, and has a *Try again* button.
 
 ### Added
+- **`FLLM_PREFIX_SALT`**: seeds every prefix chain, so two deployments can never reuse each other's KV blocks for the same prompt.
+- **`GET /admin/config`**: the effective settings in one place — cache identity and statistics, prefix cache, preemption policy, telemetry, coalescing, sandbox, ready/draining.
+- **Request coalescing**: identical deterministic requests that are in flight at the same time are computed once — the first leads, the rest wait for its answer (and learn when it failed instead of hanging).
+- **Metrics**: `/metrics` now reports draining state, coalescing counters and exported spans next to the cache counters.
+- **Tenant-scope warning**: a tenant-scoped output cache next to a running prefix cache logs a warning, because KV blocks would still be shared.
+- **OTLP telemetry**: one span per finished answer, exported as OTLP/HTTP JSON to `FLLM_OTEL_ENDPOINT` by a background thread (no SDK, no new dependency), with `GET /admin/telemetry` for its state (`docs/telemetry.md`).
+- **Draining**: `POST /admin/drain` refuses new work (`503` + `Retry-After`) while running requests finish, `/ready` reports `draining`; `DELETE /admin/drain` resumes. Makes rolling restarts safe.
+- **Router metrics**: `GET /router/metrics` exposes routed requests, per-backend requests, failures and health in Prometheus format.
+- **Prefix-cache switch and preemption policy**: `FLLM_PREFIX_CACHE=off` stops any KV sharing between requests (for tenants that must not share), `FLLM_PREEMPTION=swap` keeps the KV of a preempted sequence in host memory instead of recomputing it.
+- **Output cache**: deterministic requests (`temperature = 0`, one choice, no tools/images/logprobs) are answered from a
+  SHA-256-keyed, byte- and age-bounded cache instead of being generated again, with tenant-scoped namespaces
+  (`FLLM_CACHE_SCOPE`), `/admin/cache` (stats + clear) and its own Prometheus counters (`docs/output-cache.md`).
+- **`fllm-router`**: a prefix-aware router in front of several servers — the same prompt beginning always lands on the same
+  backend, so the prefix cache keeps working across a fleet; failed backends are skipped and health is exposed at
+  `/router/stats` (`docs/router.md`).
+- **Benchmark client** `scripts/bench.py`: one client for fLLM, vLLM, SGLang and llama.cpp, measuring TTFT and ITL
+  percentiles plus throughput at a given concurrency, with results as JSON (`benchmarks/README.md`).
+- **Kubernetes and Helm**: `deploy/k8s/` (server, router, model volume, probes) and `deploy/helm/fllm/` with cache, GPU
+  resources and readiness settings.
 - Code agent: the `create_agent` tool writes a reusable sub-agent (name, description, tools, instructions) for this folder or for every folder, after the user agreed; the `task` tool starts it by name afterwards. Not offered in plan mode.
 - Load dialog: *Conversation lookup* (`--speculative suffix`) and a *Browse...* button for the draft model (any GGUF file on the computer; the server still checks that it is smaller and shares the vocabulary). Measured on Gemma 4 E4B, CPU of a server (10 cores): repeating and extending code 19 -> 37 tokens/s with conversation lookup (26 with prompt lookup), a free story 21 -> 28 (prompt lookup: 17, slower than none); the text is the same as without. On Gemma 4 with Vulkan the text is the same too.
 

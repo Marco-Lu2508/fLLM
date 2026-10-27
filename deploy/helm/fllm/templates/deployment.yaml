@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels: {app: {{ .Release.Name }}}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: {{ .Release.Name }}}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: fllm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --model={{ .Values.model.path }}
+            - --device={{ .Values.model.device }}
+            - --host=0.0.0.0
+            - --port={{ .Values.service.port }}
+            - --max-seqs={{ .Values.model.maxSeqs }}
+            {{- if .Values.apiKey }}
+            - --api-key={{ .Values.apiKey }}
+            {{- end }}
+          ports:
+            - {name: http, containerPort: {{ .Values.service.port }}}
+          env:
+            - {name: FLLM_OUTPUT_CACHE, value: "{{ if .Values.cache.enabled }}exact{{ else }}off{{ end }}"}
+            - {name: FLLM_OUTPUT_CACHE_BYTES, value: "{{ .Values.cache.bytes }}"}
+            - {name: FLLM_OUTPUT_CACHE_TTL, value: "{{ .Values.cache.ttlSeconds }}"}
+            - {name: FLLM_CACHE_SCOPE, value: "{{ .Values.cache.scope }}"}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: {{ .Values.readiness.initialDelaySeconds }}
+            periodSeconds: 5
+            failureThreshold: {{ .Values.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - {name: models, mountPath: {{ .Values.persistence.mountPath }}, readOnly: {{ .Values.persistence.readOnly }}}
+          {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: {{ .Values.persistence.claimName }}}
+      {{- end }}

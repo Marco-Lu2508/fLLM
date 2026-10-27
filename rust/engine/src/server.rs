@@ -13,6 +13,7 @@ use axum::{
     Json, Router,
 };
 mod api;
+mod cache_gate;
 pub(crate) mod errors;
 pub mod gencfg;
 pub(crate) mod http;
@@ -114,6 +115,16 @@ struct AppState {
     agent: api::agent::AgentSession,
     vision: Option<Arc<dyn crate::vision::MultimodalEncoder>>,
     vision_admission: Arc<tokio::sync::Semaphore>,
+    /// Answers that were computed before, handed out again for identical deterministic requests.
+    cache: Arc<crate::cache::response_cache::ResponseCache>,
+    /// Model and template identity: part of every cache key, so a model change invalidates old answers.
+    cache_identity: String,
+    /// Set by `POST /admin/drain` before a planned restart: new work is refused, running work finishes.
+    draining: Arc<AtomicBool>,
+    /// OTLP trace exporter (off unless `FLLM_OTEL_ENDPOINT` is set).
+    tracer: Arc<crate::telemetry::Tracer>,
+    /// Identical requests that are in flight at the same time share one computation.
+    coalesce: Arc<crate::cache::coalescer::Coalescer>,
 }
 
 enum WorkerCommand {
@@ -402,6 +413,24 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
     let reasoning_family = Family::select(&chat_template, config.reasoning_parser.as_deref())?;
     let thinking = crate::thinking::ThinkingCaps::detect(&chat_template, reasoning_family, &model_arch);
     tracing::info!("tool parser: {}, reasoning parser: {:?}, thinking: {}", tool_parser.id(), reasoning_family, thinking.control.name());
+    let cache_identity = cache_gate::identity(&config.model_name, &model_arch, &chat_template, &tool_chat_template);
+    let cache = cache_gate::from_env();
+    // tenant-scoped answers with a shared prefix cache would still share KV blocks: say it loudly instead of pretending
+    if matches!(cache.scope(), crate::cache::response_cache::Scope::Tenant)
+        && !matches!(std::env::var("FLLM_PREFIX_CACHE").unwrap_or_default().trim().to_ascii_lowercase().as_str(), "off" | "0" | "no" | "false")
+    {
+        tracing::warn!(
+            "FLLM_CACHE_SCOPE=tenant isolates cached answers, but the prefix cache still shares KV blocks between requests; set FLLM_PREFIX_CACHE=off (or run one server per tenant) for real isolation"
+        );
+    }
+    let cache_stats = cache.stats();
+    tracing::info!(
+        "output cache: {} (scope {}, {} MiB, ttl {} s)",
+        if cache.enabled() { "on" } else { "off" },
+        cache.scope().name(),
+        cache_stats["max_bytes"].as_u64().unwrap_or(0) / (1 << 20),
+        cache_stats["ttl_seconds"].as_u64().unwrap_or(0)
+    );
     let http_context = http::HttpContext::new(config.http.clone());
     let ready = Arc::new(AtomicBool::new(false));
     let state = Arc::new(AppState {
@@ -439,6 +468,11 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         }),
         vision: runtime.vision.clone(),
         vision_admission: Arc::new(tokio::sync::Semaphore::new(crate::vision::preprocess::MediaLimits::get().concurrency)),
+        cache,
+        cache_identity,
+        draining: Arc::new(AtomicBool::new(false)),
+        tracer: Arc::new(crate::telemetry::Tracer::from_env()),
+        coalesce: crate::cache::coalescer::Coalescer::new(),
     });
     let upload_limit = api::batches::max_upload_bytes();
     let router = Router::new()
@@ -447,6 +481,10 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/health", get(health))
         .route("/ready", get(ready_check))
         .route("/metrics", get(metrics))
+        .route("/admin/cache", get(admin_cache).delete(admin_cache_clear))
+        .route("/admin/drain", post(admin_drain).delete(admin_undrain))
+        .route("/admin/telemetry", get(admin_telemetry))
+        .route("/admin/config", get(admin_config))
         .route("/version", get(api::vllm::version))
         .route("/is_sleeping", get(api::vllm::is_sleeping))
         .route("/api/studio/status", get(api::studio::status))
@@ -1012,6 +1050,10 @@ async fn pooling(
     };
     let mode = if matches!(pooling_mode, "last" | "mean") { pooling_mode } else { "mean" };
 
+    // a draining server takes no new work: the load balancer should send it to another one
+    if let Some(refusal) = state.draining_response() {
+        return refusal;
+    }
     let _permit = match state.admission.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -1084,6 +1126,10 @@ async fn score(
         return api_error(StatusCode::BAD_REQUEST, "request must include text_1 and text_2");
     };
 
+    // a draining server takes no new work: the load balancer should send it to another one
+    if let Some(refusal) = state.draining_response() {
+        return refusal;
+    }
     let _permit = match state.admission.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -1178,6 +1224,10 @@ async fn rerank(
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
+    // a draining server takes no new work: the load balancer should send it to another one
+    if let Some(refusal) = state.draining_response() {
+        return refusal;
+    }
     let _permit = match state.admission.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -1284,6 +1334,10 @@ async fn classify(
     if inputs.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "input must not be empty");
     }
+    // a draining server takes no new work: the load balancer should send it to another one
+    if let Some(refusal) = state.draining_response() {
+        return refusal;
+    }
     let _permit = match state.admission.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -1348,10 +1402,10 @@ async fn health() -> Json<Value> {
 async fn ready_check(State(state): State<Arc<AppState>>) -> Response {
     let now = state.metrics.started.elapsed().as_millis() as u64;
     let idle_ms = now.saturating_sub(state.metrics.heartbeat_ms.load(Ordering::Relaxed));
-    let serving = state.ready.load(Ordering::Relaxed);
+    let serving = state.ready.load(Ordering::Relaxed) && !state.draining.load(Ordering::Relaxed);
     let responsive = idle_ms < state.metrics.stall_ms.load(Ordering::Relaxed);
     let status = if serving && responsive { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-    let reason = if !serving { "starting or shutting down" } else if !responsive { "worker not responding" } else { "ready" };
+    let reason = if state.draining.load(Ordering::Relaxed) { "draining" } else if !serving { "starting or shutting down" } else if !responsive { "worker not responding" } else { "ready" };
     (
         status,
         Json(json!({
@@ -1388,6 +1442,66 @@ fn server_health_metrics(state: &AppState) -> String {
     )
 }
 
+/// `GET /admin/config`: the settings that are actually in force — what the environment and the page decided, in one place.
+async fn admin_config(State(state): State<Arc<AppState>>) -> Response {
+    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
+    Json(json!({
+        "model": state.model_name,
+        "model_arch": state.model_arch,
+        "cache_identity": state.cache_identity,
+        "max_context": state.max_context,
+        "max_sequences": state.max_sequences,
+        "ready": state.ready.load(Ordering::Relaxed),
+        "draining": state.draining.load(Ordering::Relaxed),
+        "output_cache": state.cache.stats(),
+        "prefix_cache": !matches!(
+            env("FLLM_PREFIX_CACHE").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "no" | "false"
+        ),
+        "prefix_salt_set": env("FLLM_PREFIX_SALT").is_some(),
+        "prefix_seed": crate::scheduler::prefix_seed(),
+        "preemption": match env("FLLM_PREEMPTION").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+            "swap" => "swap",
+            _ => "recompute",
+        },
+        "telemetry": state.tracer.stats(),
+        "coalescing": state.coalesce.stats(),
+        "sandbox": crate::server::api::agent_sandbox::status_json(),
+    }))
+    .into_response()
+}
+
+/// `GET /admin/telemetry`: whether the OTLP exporter is on and how many spans left the process.
+async fn admin_telemetry(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.tracer.stats()).into_response()
+}
+
+/// `POST /admin/drain`: no new requests, running ones finish (for a rolling restart).
+async fn admin_drain(State(state): State<Arc<AppState>>) -> Response {
+    state.draining.store(true, Ordering::Relaxed);
+    tracing::info!("draining: no new requests are accepted, running work continues");
+    Json(json!({"draining": true})).into_response()
+}
+
+/// `DELETE /admin/drain`: accept work again.
+async fn admin_undrain(State(state): State<Arc<AppState>>) -> Response {
+    state.draining.store(false, Ordering::Relaxed);
+    tracing::info!("draining cancelled");
+    Json(json!({"draining": false})).into_response()
+}
+
+/// `GET /admin/cache`: what the output cache holds and how often it was used.
+async fn admin_cache(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.cache.stats()).into_response()
+}
+
+/// `DELETE /admin/cache`: drops every cached answer (after a model change, or when memory is needed).
+async fn admin_cache_clear(State(state): State<Arc<AppState>>) -> Response {
+    let cleared = state.cache.clear();
+    tracing::info!("output cache cleared ({cleared} answers)");
+    Json(json!({"cleared": cleared})).into_response()
+}
+
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     use options::MetricsStyle;
     let style = state.http.options.metrics_style;
@@ -1408,6 +1522,19 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         state.metrics.model_forward_ns.load(Ordering::Relaxed) as f64 / 1e9,
         state.metrics.postprocess_ns.load(Ordering::Relaxed) as f64 / 1e9,
         );
+    // the output cache reports itself: hits, misses, evictions, bytes
+    body.push_str(&state.cache.prometheus());
+    let (leaders, followers) = state.coalesce.counters();
+    body.push_str(&format!(
+        "# HELP fllm_draining Whether the server refuses new work (1) or not (0)\n# TYPE fllm_draining gauge\nfllm_draining {}\n\
+         # HELP fllm_coalescing_leaders_total Requests that computed an answer others waited for\n# TYPE fllm_coalescing_leaders_total counter\nfllm_coalescing_leaders_total {}\n\
+         # HELP fllm_coalesced_requests_total Requests that waited for another request's answer\n# TYPE fllm_coalesced_requests_total counter\nfllm_coalesced_requests_total {}\n\
+         # HELP fllm_otel_spans_sent_total Spans exported over OTLP\n# TYPE fllm_otel_spans_sent_total counter\nfllm_otel_spans_sent_total {}\n",
+        u8::from(state.draining.load(Ordering::Relaxed)),
+        leaders,
+        followers,
+        state.tracer.sent(),
+    ));
         body.push_str(&format!("# TYPE fllm_draft_proposed_tokens_total counter\nfllm_draft_proposed_tokens_total {}\n# TYPE fllm_draft_accepted_tokens_total counter\nfllm_draft_accepted_tokens_total {}\n",state.metrics.draft_proposed.load(Ordering::Relaxed),state.metrics.draft_accepted.load(Ordering::Relaxed)));
         body.push_str(&state.metrics.observability.render());
         body.push_str(&server_health_metrics(&state));
@@ -1426,6 +1553,16 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 }
 
 impl AppState {
+    /// `Some(503)` while the server is draining.
+    fn draining_response(&self) -> Option<Response> {
+        if !self.draining.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut response = api_error(StatusCode::SERVICE_UNAVAILABLE, "the server is draining: it accepts no new requests");
+        response.headers_mut().insert("retry-after", axum::http::HeaderValue::from_static("30"));
+        Some(response)
+    }
+
     /// Whether a request's `model` field names this server's model: the served name, an alias (`*` at the end of an
     /// alias matches any suffix), or nothing at all. HOOK(multi-model): the lookup in a model registry goes here.
     fn knows_model(&self, requested: &str) -> bool {
@@ -1765,6 +1902,10 @@ async fn embeddings(
         .unwrap_or("mean");
     if !matches!(pooling, "mean" | "last") {
         return api_error(StatusCode::BAD_REQUEST, "pooling must be mean or last");
+    }
+    // a draining server takes no new work: the load balancer should send it to another one
+    if let Some(refusal) = state.draining_response() {
+        return refusal;
     }
     let _permit = match state.admission.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -2231,6 +2372,10 @@ async fn openai_generate(
     reasoning: Option<ReasoningSpec>,
     images: ImageOverrides,
 ) -> Response {
+    // a draining server takes no new inference work, on any route
+    if let Some(refusal) = state.draining_response() {
+        return refusal;
+    }
     let empty_tool_request = json!({});
     let tool_spec = match tool_spec_for(&state, if is_chat {
         &body
@@ -2284,7 +2429,10 @@ async fn openai_generate(
         return api_error(StatusCode::BAD_REQUEST, "best_of cannot be combined with stream");
     }
     if body.get("use_beam_search").and_then(Value::as_bool).unwrap_or(false) {
-        return api_error(StatusCode::BAD_REQUEST, "use_beam_search is not supported; use best_of");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "use_beam_search needs a step-wise generate API that this server does not expose yet (it generates a whole completion per call):              beam search has to prune between tokens, so it cannot be built on top of one-shot generation without faking it.              Use best_of, which samples several complete candidates and returns the one with the highest cumulative log-probability.",
+        );
     }
     if best_of > 1
         && (!state.shared_choices
@@ -2415,6 +2563,33 @@ async fn openai_generate(
     let id = state.next_request.fetch_add(1, Ordering::Relaxed);
     let request_id = format!("req_{id:016x}");
     let created = unix_now();
+    let span = crate::telemetry::SpanBuilder::new(if is_chat { "chat.completions" } else { "completions" })
+        .text("model", &model)
+        .int("prompt_tokens", prompt.len() as i64)
+        .attr("stream", crate::telemetry::Attr::Bool(stream));
+    // a deterministic request may have been answered before, or may be running right now: check both before any work starts
+    let mut coal_lead: Option<crate::cache::coalescer::Leader> = None;
+    // only a *budgeted* reasoning request changes the text; the parser alone is part of the model identity
+    let reasoning_budgeted = reasoning.as_ref().is_some_and(|spec| spec.budget.is_some());
+    if !stream && n == 1 && best_of == 1 && images.is_empty() && !reasoning_budgeted {
+        if let Some(cached) = cache_gate::lookup(&state, &body, &prompt, is_chat, &request_id, created, &model) {
+            let hit = cached.get("usage").and_then(|u| u.get("completion_tokens")).and_then(Value::as_i64).unwrap_or(0);
+            state.tracer.record(span.text("cache", "hit").int("completion_tokens", hit).finish());
+            return Json(cached).into_response();
+        }
+        if let Some(key) = cache_gate::key_of(&state, &body, &prompt, is_chat) {
+            match state.coalesce.join(key) {
+                crate::cache::coalescer::Role::Follower(mut rx) => {
+                    // somebody is already computing exactly this: wait for the answer instead of a second model run
+                    return match rx.recv().await {
+                        Ok(Some(payload)) => Json(payload).into_response(),
+                        _ => api_error(StatusCode::SERVICE_UNAVAILABLE, "the request this one joined did not finish; try again"),
+                    };
+                }
+                crate::cache::coalescer::Role::Leader(leader) => coal_lead = Some(leader),
+            }
+        }
+    }
     if max_tokens == 0 {
         return empty_openai_response(
             (include_usage, logprobs_requested, &echo_text, n),
@@ -2680,8 +2855,29 @@ async fn openai_generate(
             }
             choices.push(choice);
         }
-        Json(json!({"id":request_id,"object":if is_chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":choices,
-            "usage":openai_usage(prompt.len(), completion, cached, reasoning_count),"timings":rx.timings(prompt.len())})).into_response()
+        let payload = json!({"id":request_id,"object":if is_chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":choices,
+            "usage":openai_usage(prompt.len(), completion, cached, reasoning_count),"timings":rx.timings(prompt.len())});
+        // remember the answer for an identical, deterministic request
+        if !reasoning_budgeted {
+            let text: String = choice_states.iter().map(|c| c.filter.text()).collect();
+            let tokens: Vec<u32> = choice_states.iter().flat_map(|c| c.ids.iter().copied()).collect();
+            let finish = choice_states.first().map(|c| c.reason).unwrap_or("stop");
+            let logprobs = choices.first().and_then(|choice| choice.get("logprobs")).cloned().filter(|v| !v.is_null());
+            cache_gate::store(
+                &state,
+                &body,
+                &prompt,
+                is_chat,
+                cache_gate::Stored { text: &text, tokens, finish_reason: finish, logprobs },
+            );
+        }
+        // wake everyone who joined this request
+        if let Some(leader) = coal_lead.take() {
+            leader.publish(payload.clone());
+        }
+        // one span per finished answer: the streaming path reports its own end
+        state.tracer.record(span.int("completion_tokens", completion as i64).finish());
+        Json(payload).into_response()
     }
 }
 

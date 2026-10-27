@@ -13,7 +13,7 @@ sha2 = "0.10"
 getrandom = "0.3"
 regex = "1"
 fllm-checkpoint = { path = "../checkpoint" }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 ahash = "0.8.12"
 fllm-gguf-probe = { path = "../gguf-probe" }
 tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
@@ -84,3 +84,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "fllm-rs"
 path = "src/bin/serve.rs"
+
+# the prefix-aware router that sits in front of several fLLM servers
+[[bin]]
+name = "fllm-router"
+path = "src/bin/router.rs"

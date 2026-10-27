@@ -1,0 +1,83 @@
+# One fLLM server in Kubernetes: a Deployment with a model volume, a Service, and probes that use the real endpoints.
+# Works the same way with two replicas behind deploy/k8s/router.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fllm
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fllm-models
+  namespace: fllm
+spec:
+  accessModes: [ReadOnlyMany]
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fllm
+  namespace: fllm
+  labels: {app: fllm}
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: fllm}
+  template:
+    metadata:
+      labels: {app: fllm}
+    spec:
+      # the model has to be on the node before the process starts: 100 GB over a network volume is slow
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: fllm
+          image: ghcr.io/marco-lu2508/fllm:latest
+          args:
+            - serve
+            - --model=/models/model.gguf
+            - --device=cuda
+            - --host=0.0.0.0
+            - --port=8000
+            - --max-seqs=16
+          ports:
+            - {name: http, containerPort: 8000}
+          env:
+            - {name: FLLM_OUTPUT_CACHE, value: "exact"}
+            - {name: FLLM_OUTPUT_CACHE_BYTES, value: "268435456"}
+            - {name: FLLM_CACHE_SCOPE, value: "global"}
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              memory: 32Gi
+            requests:
+              memory: 8Gi
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 24      # loading a big model takes a while: do not restart it for that
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - {name: models, mountPath: /models, readOnly: true}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: fllm-models}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fllm
+  namespace: fllm
+spec:
+  selector: {app: fllm}
+  ports:
+    - {name: http, port: 8000, targetPort: http}

@@ -3,6 +3,8 @@
 #![cfg_attr(target_arch = "aarch64", allow(clippy::incompatible_msrv))]
 pub mod autotune;
 pub mod backend;
+pub mod cache;
+pub mod telemetry;
 pub mod chat_template;
 pub mod bench;
 pub mod bench_kernel;

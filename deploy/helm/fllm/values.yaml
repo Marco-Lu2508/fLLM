@@ -1,0 +1,43 @@
+image:
+  repository: ghcr.io/marco-lu2508/fllm
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+model:
+  # path inside the container; mount it with persistence.claimName
+  path: /models/model.gguf
+  device: cuda
+  maxSeqs: 16
+
+service:
+  type: ClusterIP
+  port: 8000
+
+persistence:
+  enabled: true
+  claimName: fllm-models
+  mountPath: /models
+  readOnly: true
+
+resources:
+  limits:
+    nvidia.com/gpu: "1"
+    memory: 32Gi
+  requests:
+    memory: 8Gi
+
+# the output cache: exact answers only for deterministic requests (temperature 0)
+cache:
+  enabled: true
+  bytes: 268435456
+  ttlSeconds: 3600
+  scope: global
+
+# readiness needs patience: a large model takes time to load
+readiness:
+  initialDelaySeconds: 5
+  failureThreshold: 24
+
+apiKey: ""

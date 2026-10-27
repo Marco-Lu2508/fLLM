@@ -472,7 +472,8 @@ impl Scheduler {
         let n_full = prompt.len().saturating_sub(1) / self.cfg.block_size;
         let mut hashes = vec![];
         let mut toks = vec![];
-        let mut prev = 0u64;
+        // the seed is what separates one deployment's prefix blocks from another's: same seed, shared blocks
+        let mut prev = prefix_seed();
         for b in 0..n_full {
             let seg = prompt[b * self.cfg.block_size..(b + 1) * self.cfg.block_size].to_vec();
             prev = PrefixCache::hash_chain(prev, &seg);
@@ -870,6 +871,43 @@ impl Scheduler {
             }
         }
         s.ngram_upto = tokens.len();
+    }
+}
+
+/// The seed every prefix chain starts from. `FLLM_PREFIX_SALT` separates the block identities of two deployments, so a
+/// tenant running its own server never reuses another tenant's KV blocks even when the prompt is identical.
+pub fn prefix_seed() -> u64 {
+    static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SEED.get_or_init(|| seed_of(std::env::var("FLLM_PREFIX_SALT").unwrap_or_default().trim()))
+}
+
+/// FNV-1a over the salt; an empty salt keeps the historical seed of `0`, so a single-user setup is unchanged.
+fn seed_of(salt: &str) -> u64 {
+    if salt.is_empty() {
+        return 0;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in salt.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod salt_tests {
+    use super::*;
+
+    #[test]
+    fn a_salt_separates_block_identities() {
+        assert_eq!(seed_of(""), 0, "without a salt nothing changes");
+        assert_ne!(seed_of("tenant-a"), 0);
+        assert_ne!(seed_of("tenant-a"), seed_of("tenant-b"), "two tenants must not share blocks");
+        assert_eq!(seed_of("tenant-a"), seed_of("tenant-a"), "the same salt is stable across restarts");
+        let tokens = [1i64, 2, 3];
+        let a = PrefixCache::hash_chain(seed_of("tenant-a"), &tokens);
+        let b = PrefixCache::hash_chain(seed_of("tenant-b"), &tokens);
+        assert_ne!(a, b, "the chains of two tenants can never meet");
     }
 }
 

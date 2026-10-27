@@ -100,6 +100,15 @@ are valid; anything else exits with `invalid number for <flag>`.
 | Variable | Read by | Effect |
 | --- | --- | --- |
 | `FLLM_API_KEY` | `serve` (and the `chat`/`bench` clients as their default `--api-key`) | Initial value of `--api-key`; the flag overrides it |
+| `FLLM_OUTPUT_CACHE` | Server | `exact` keeps answers to deterministic requests; `off`, `0`, `no`, `false` or `none` switch the cache off |
+| `FLLM_OUTPUT_CACHE_BYTES` | Server | Byte budget of the output cache, default `268435456` (256 MiB); the least recently used answer goes first |
+| `FLLM_OUTPUT_CACHE_TTL` | Server | Lifetime of a cached answer in seconds, default `3600` |
+| `FLLM_CACHE_SCOPE` | Server | `global` (default) shares answers between users, `tenant` scopes them per `user` field, `off` disables the cache; `tenant` next to a running prefix cache logs a warning |
+| `FLLM_PREFIX_CACHE` | Scheduler | Prefix (KV block) sharing between requests, on by default; `off`, `0`, `no` or `false` switch it off |
+| `FLLM_PREFIX_SALT` | Scheduler | Seeds every prefix chain, so two deployments can never reuse each other's KV blocks for the same prompt; empty keeps the historical seed `0` |
+| `FLLM_PREEMPTION` | Scheduler | `recompute` (default) drops a sequence's KV and rebuilds it later, `swap` keeps it in host memory; `swap` needs a backend that can copy KV |
+| `FLLM_OTEL_ENDPOINT` | Server | OTLP/HTTP collector base URL; without it no spans leave the process |
+| `FLLM_OTEL_SERVICE` | Server | `service.name` of the exported resource, default `fllm` |
 | `FLLM_RUST_PROFILE` | Rust decoder | When set (any value), a traced forward call prints one `{"rust_cpu_profile":{"rows":…,"phases_ms":{…}}}` line (total rows plus per-phase milliseconds) to stderr |
 | `FLLM_CUDA_GRAPH` | CUDA decoder | CUDA graphs of decode steps: on by default for eligible models; `0`, `off`, `false` or `no` switch them off, `1`, `on` or `true` ask for them explicitly (an ineligible model still decodes without graphs); any other value is the default. See docs/gpu-backends.md |
 | `FLLM_FUSE`, `FLLM_FUSE_ADD_NORM`, `FLLM_FUSE_NORM_QUANT`, `FLLM_FUSE_ROPE_KV`, `FLLM_FUSE_GLU_Q8`, `FLLM_FUSE_HEAD_COPY` | CUDA decoder | Fused decode kernels (residual add + norm + activation quantization, rotary + cache write, gated activation + int8 quantization, final-norm copy); all on by default, `0`, `off`, `false` or `no` switch one off; a switch that is not set follows `FLLM_FUSE` (`FLLM_FUSE=0` turns all of them off, and `FLLM_FUSE=0 FLLM_FUSE_ROPE_KV=1` runs one alone). See docs/gpu-backends.md |

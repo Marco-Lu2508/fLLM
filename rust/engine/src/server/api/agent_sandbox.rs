@@ -138,7 +138,7 @@ fn argv_for(mode: Mode, bwrap: &Path, line: &str, root: &Path, cwd: &Path) -> Ve
 }
 
 /// The state the page shows: which mode is asked for, whether it works here, and why not.
-pub(super) fn status_json() -> Value {
+pub(crate) fn status_json() -> Value {
     let mode = mode();
     let status = match probe() {
         Ok(path) => json!({"available": true, "path": path.display().to_string(), "reason": Value::Null}),

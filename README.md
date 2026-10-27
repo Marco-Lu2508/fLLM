@@ -261,6 +261,9 @@ The code and `--help` are authoritative where a page and the program disagree.
 
 **Start here**
 - [docs/index.md](docs/index.md), [docs/getting-started.md](docs/getting-started.md): documentation index, install, get weights, quantize, serve, curl, chat, embeddings
+- [docs/output-cache.md](docs/output-cache.md), [docs/router.md](docs/router.md): the output cache (deterministic answers are not computed twice), the prefix-aware router for a fleet, and the switches that decide how much state requests share
+- [benchmarks/README.md](benchmarks/README.md): the benchmark client and what a published number has to state
+- [deploy/](deploy): Kubernetes manifests and a Helm chart
 - [docs/quickstart-windows-linux.md](docs/quickstart-windows-linux.md): Docker with an NVIDIA GPU, step by step
 - [docs/user/commands.md](docs/user/commands.md): every `fllm-rs` subcommand
 - [docs/configuration.md](docs/configuration.md): every `serve` flag and environment variable

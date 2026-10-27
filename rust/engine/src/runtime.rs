@@ -131,8 +131,17 @@ impl InferenceRuntime {
             block_size,
             max_num_seqs: max_sequences,
             max_num_batched_tokens: max_batched_tokens,
-            prefix_cache: !stateful,
-            preemption: "recompute".into(),
+            // FLLM_PREFIX_CACHE=off: no shared KV blocks between requests (a tenant that must not share)
+            prefix_cache: !stateful
+                && !matches!(
+                    std::env::var("FLLM_PREFIX_CACHE").unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+                    "off" | "0" | "no" | "false"
+                ),
+            // FLLM_PREEMPTION=swap: a preempted sequence's KV goes to host memory instead of being recomputed
+            preemption: match std::env::var("FLLM_PREEMPTION").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+                "swap" => "swap".to_string(),
+                _ => "recompute".to_string(),
+            },
             speculative_lookup,
             speculative_window: if speculative_lookup > 0 && speculative_window == 0 {
                 32
