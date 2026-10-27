@@ -7,8 +7,16 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Changed
+- The output cache holds at most 64 MB by default (was 256 MB).
 - The app no longer loads a model when it opens. The last model loads with your first message in Chat or Code, which is then sent on its own once the model is ready. Settings > Models > "Load the last model when the app starts" brings the old behaviour back.
 - The settings pages for hooks, agents, prices, plugins, runtime, embeddings and web search open without a model loaded.
+
+### Security
+- The `/admin/*` routes (drain, empty the cache, effective settings, telemetry) answer only this computer, or another computer that sends the admin key in `x-admin-key` (`FLLM_ADMIN_KEY` or Settings > Engine). A normal API key no longer reaches them.
+- With `FLLM_CACHE_SCOPE=tenant` the output cache is separated by the API key of the caller (together with the `user` field), not by the `user` field alone, which any caller could choose.
+
+### Added
+- Settings > Engine: the output cache (on or off, size, time, who shares it), prefix sharing, the prefix separator, what happens when memory runs out, telemetry address and name, the admin key, plus live numbers, "empty the cache" and "stop taking new requests". The options are saved and take effect when the server restarts (a button restarts it).
 
 ### Fixed
 - Drop-down lists, tooltips and the arrows of number fields are drawn by the app instead of the browser, and buttons and menus can no longer be selected as text, so the window looks like an app.

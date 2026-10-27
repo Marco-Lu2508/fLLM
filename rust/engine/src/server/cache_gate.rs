@@ -2,7 +2,7 @@
 //! cached at all, and turn a cached entry back into an OpenAI-shaped answer.
 //!
 //! Configuration comes from the environment, so nothing has to change in the option parser:
-//! `FLLM_OUTPUT_CACHE=exact|off` (default `exact`), `FLLM_OUTPUT_CACHE_BYTES` (default 256 MiB),
+//! `FLLM_OUTPUT_CACHE=exact|off` (default `exact`), `FLLM_OUTPUT_CACHE_BYTES` (default 64 MiB),
 //! `FLLM_OUTPUT_CACHE_TTL` (seconds, default 3600), `FLLM_CACHE_SCOPE=global|tenant|off` (default `global`).
 //!
 //! Only requests whose answer is determined take part: `temperature = 0`, `n = 1`, no streaming, no tools, no images and no
@@ -38,7 +38,7 @@ pub(crate) fn from_env() -> Arc<ResponseCache> {
         std::env::var("FLLM_OUTPUT_CACHE").unwrap_or_else(|_| "exact".to_owned()).to_ascii_lowercase().as_str(),
         "off" | "0" | "no" | "false" | "none"
     );
-    let bytes = std::env::var("FLLM_OUTPUT_CACHE_BYTES").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(256 << 20);
+    let bytes = std::env::var("FLLM_OUTPUT_CACHE_BYTES").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(64 << 20);
     let ttl = std::env::var("FLLM_OUTPUT_CACHE_TTL").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(3600);
     let scope = if enabled { scope } else { Scope::Off };
     Arc::new(ResponseCache::new(bytes, Duration::from_secs(ttl), scope))
@@ -60,17 +60,23 @@ pub(crate) fn identity(model: &str, arch: &str, chat_template: &str, tool_templa
     digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
-/// The tenant namespace: the `user` field of the request, or `None` when a tenant-scoped cache must stay out of the way.
+/// The tenant namespace. With a tenant-scoped cache it is the API key of the caller (which the caller cannot choose) together with the
+/// `user` field of the request; without keys it is the `user` field alone, and `None` when there is neither, so that the cache stays out
+/// of the way.
 pub(crate) fn tenant(body: &Value, scope: &Scope) -> Option<String> {
     match scope {
         Scope::Off => Some(String::new()),
         Scope::Global => Some(String::new()),
-        Scope::Tenant => body
-            .get("user")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|user| !user.is_empty())
-            .map(str::to_owned),
+        Scope::Tenant => {
+            let key = security::current_caller().and_then(|c| c.limiter).filter(|k| k.label != "anonymous").map(|k| k.id.clone());
+            let user = body.get("user").and_then(Value::as_str).map(str::trim).filter(|user| !user.is_empty());
+            match (key, user) {
+                (Some(key), Some(user)) => Some(format!("{key}\0{user}")),
+                (Some(key), None) => Some(key),
+                (None, Some(user)) => Some(user.to_owned()),
+                (None, None) => None,
+            }
+        }
     }
 }
 

@@ -1709,6 +1709,57 @@ pub fn idle_unload_minutes() -> u64 {
     studio_setting("idle_unload_minutes").and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
+/// The engine options of the Studio page (`studio.json`, key `engine`) and the environment variable each one sets. The page writes
+/// them; they take effect when the server starts again.
+pub const ENGINE_OPTIONS: [(&str, &str); 10] = [
+    ("output_cache", "FLLM_OUTPUT_CACHE"),
+    ("output_cache_mb", "FLLM_OUTPUT_CACHE_BYTES"),
+    ("output_cache_ttl", "FLLM_OUTPUT_CACHE_TTL"),
+    ("cache_scope", "FLLM_CACHE_SCOPE"),
+    ("prefix_cache", "FLLM_PREFIX_CACHE"),
+    ("prefix_salt", "FLLM_PREFIX_SALT"),
+    ("preemption", "FLLM_PREEMPTION"),
+    ("otel_endpoint", "FLLM_OTEL_ENDPOINT"),
+    ("otel_service", "FLLM_OTEL_SERVICE"),
+    ("admin_key", "FLLM_ADMIN_KEY"),
+];
+
+/// The engine options saved by the page (empty when none).
+pub fn engine_settings() -> serde_json::Map<String, Value> {
+    studio_setting("engine").and_then(|v| v.as_object().cloned()).unwrap_or_default()
+}
+
+/// The text a saved option puts into its environment variable (megabytes become bytes, a switch becomes `on`/`off`).
+fn engine_env_value(key: &str, value: &Value) -> Option<String> {
+    let text = match value {
+        Value::Bool(on) => if *on { "on" } else { "off" }.to_owned(),
+        Value::Number(n) if key == "output_cache_mb" => (n.as_u64()? << 20).to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.trim().to_owned(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Puts the saved engine options into the environment of this process (called once at start, before the server is built). What an
+/// earlier call set is taken back first, so an option that was reset to its default is gone after the next start.
+pub fn apply_saved_engine_settings() {
+    if let Ok(previous) = std::env::var("FLLM_ENGINE_APPLIED") {
+        for name in previous.split(',').filter(|n| !n.is_empty()) {
+            std::env::remove_var(name);
+        }
+    }
+    let mut applied = Vec::new();
+    let saved = engine_settings();
+    for (key, name) in ENGINE_OPTIONS {
+        if let Some(text) = saved.get(key).and_then(|v| engine_env_value(key, v)) {
+            std::env::set_var(name, text);
+            applied.push(name);
+        }
+    }
+    std::env::set_var("FLLM_ENGINE_APPLIED", applied.join(","));
+}
+
 /// Whether the Studio loads the last model when it starts (setting `load_on_start`). Off by default: the app opens at once and the model
 /// loads when the first message is sent (the memory stays free until then).
 pub fn load_on_start() -> bool {

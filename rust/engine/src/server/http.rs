@@ -235,7 +235,7 @@ fn is_providers_path(path: &str) -> bool {
 /// prices change what the agent does, and the embeddings and search-engine settings name addresses the server calls: configuration of the
 /// agent, so this machine only, reads included, with or without an API key.
 fn is_agent_config_path(path: &str) -> bool {
-    ["/api/studio/hooks", "/api/studio/plugins", "/api/studio/runtime", "/api/studio/agents", "/api/studio/prices", "/api/studio/embeddings", "/api/studio/embed", "/api/studio/search"]
+    ["/api/studio/engine", "/api/studio/restart", "/api/studio/hooks", "/api/studio/plugins", "/api/studio/runtime", "/api/studio/agents", "/api/studio/prices", "/api/studio/embeddings", "/api/studio/embed", "/api/studio/search"]
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
 }
@@ -259,6 +259,11 @@ pub fn studio_admin_blocked(
     peer: Option<SocketAddr>,
     headers: &HeaderMap,
 ) -> bool {
+    // /admin/* (drain, clear the cache, effective settings): this machine, or any machine that presents the admin key in `x-admin-key`
+    // (set `FLLM_ADMIN_KEY` or the page). A normal API key is never enough, it belongs to the users of the models.
+    if path == "/admin" || path.starts_with("/admin/") {
+        return !(admin_key_matches(headers) || local_browser_request(peer, headers));
+    }
     // the agent tools read and write files and run programs: never from another machine, with or without a key
     // (the file picker opens a window on this machine's screen; the web fetch and search routes reach out from this machine and read files of the agent: same rule)
     let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file"
@@ -281,8 +286,29 @@ pub fn studio_admin_blocked(
     {
         return false;
     }
+    !local_browser_request(peer, headers)
+}
+
+/// Whether `x-admin-key` carries the admin key of this server (`FLLM_ADMIN_KEY`); compared without stopping at the first difference.
+fn admin_key_matches(headers: &HeaderMap) -> bool {
+    let Ok(expected) = std::env::var("FLLM_ADMIN_KEY") else { return false };
+    let expected = expected.trim().as_bytes();
+    let given = headers.get("x-admin-key").and_then(|v| v.to_str().ok()).unwrap_or_default().trim().as_bytes();
+    if expected.is_empty() {
+        return false;
+    }
+    let mut difference = expected.len() ^ given.len();
+    for (i, byte) in expected.iter().enumerate() {
+        difference |= usize::from(*byte ^ given.get(i).copied().unwrap_or(0));
+    }
+    difference == 0
+}
+
+/// Whether the request comes from this machine and from the page of this very server: the peer is a loopback address, the server is named
+/// by `localhost` or an IP address (a DNS-rebinding name is refused) and the origin, when the browser names one, is the server itself.
+fn local_browser_request(peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
     if !peer.is_some_and(|addr| addr.ip().to_canonical().is_loopback()) {
-        return true;
+        return false;
     }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
     let name = match host.strip_prefix('[') {
@@ -290,13 +316,11 @@ pub fn studio_admin_blocked(
         None => host.rsplit_once(':').map_or(host, |(name, _)| name),
     };
     if !(name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::IpAddr>().is_ok()) {
-        return true;
+        return false;
     }
     match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        None => false,
-        Some(origin) => origin
-            .split_once("://")
-            .is_none_or(|(_, authority)| !authority.eq_ignore_ascii_case(host)),
+        None => true,
+        Some(origin) => origin.split_once("://").is_some_and(|(_, authority)| authority.eq_ignore_ascii_case(host)),
     }
 }
 
@@ -714,10 +738,30 @@ mod studio_gate_tests {
     }
 
     #[test]
+    fn the_admin_routes_need_this_machine_or_the_admin_key() {
+        let remote = addr("192.168.1.20:5000");
+        let here = addr("127.0.0.1:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        for (method, path) in [(Method::POST, "/admin/drain"), (Method::DELETE, "/admin/cache"), (Method::GET, "/admin/config"), (Method::GET, "/admin/telemetry")] {
+            for auth in [false, true] {
+                assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} from another machine (key: {auth})");
+                assert!(!studio_admin_blocked(auth, &method, path, here, &local), "{method} {path} from this machine");
+            }
+        }
+        // a web page of another site in the owner's browser is refused, a rebinding name too
+        assert!(studio_admin_blocked(false, &Method::POST, "/admin/drain", here, &headers("127.0.0.1:8000", Some("https://evil.example"))));
+        assert!(studio_admin_blocked(false, &Method::POST, "/admin/drain", here, &headers("rebind.example:8000", None)));
+    }
+
+    #[test]
     fn the_configuration_of_the_agent_stays_on_this_machine_even_with_an_api_key() {
         let remote = addr("192.168.1.20:5000");
         let h = headers("192.168.1.5:8000", None);
         for (method, path) in [
+            (Method::POST, "/api/studio/engine"),
+            (Method::GET, "/api/studio/engine"),
+            (Method::POST, "/api/studio/restart"),
             (Method::POST, "/api/studio/hooks"),
             (Method::POST, "/api/studio/hooks/test"),
             (Method::POST, "/api/studio/plugins"),

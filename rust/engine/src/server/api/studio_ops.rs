@@ -542,6 +542,135 @@ fn validate_models_dir(text: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+// ------------------------------------------------------------------------------------------------------------------------------
+// Engine options: caches, preemption, telemetry and the admin key (saved here, applied when the server starts again)
+// ------------------------------------------------------------------------------------------------------------------------------
+
+/// The value an option has when nothing is saved (what the server uses by default).
+fn engine_defaults() -> Value {
+    json!({
+        "output_cache": "exact", "output_cache_mb": 64, "output_cache_ttl": 3600, "cache_scope": "global",
+        "prefix_cache": true, "prefix_salt": "", "preemption": "recompute", "otel_endpoint": "", "otel_service": "fllm",
+    })
+}
+
+fn engine_json() -> Value {
+    let mut values = engine_defaults();
+    let saved = crate::hub::engine_settings();
+    for (key, value) in &saved {
+        if key != "admin_key" {
+            values[key.as_str()] = value.clone();
+        }
+    }
+    let overridden: Vec<&str> = crate::hub::ENGINE_OPTIONS
+        .iter()
+        .filter(|(key, name)| !saved.contains_key(*key) && std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+        .map(|(key, _)| *key)
+        .collect();
+    json!({
+        "values": values,
+        "defaults": engine_defaults(),
+        "admin_key_set": saved.get("admin_key").and_then(Value::as_str).is_some_and(|k| !k.is_empty()) || std::env::var_os("FLLM_ADMIN_KEY").is_some_and(|v| !v.is_empty()),
+        // options that the environment of the server sets and the page cannot change
+        "set_by_environment": overridden,
+    })
+}
+
+/// `GET /api/studio/engine`
+pub(in crate::server) async fn get_engine() -> Response {
+    Json(engine_json()).into_response()
+}
+
+fn engine_choice(body: &Value, key: &str, allowed: &[&str]) -> Result<Option<Value>, String> {
+    match body.get(key) {
+        None => Ok(None),
+        Some(Value::String(s)) if allowed.contains(&s.as_str()) => Ok(Some(json!(s))),
+        Some(_) => Err(format!("`{key}` must be one of: {}.", allowed.join(", "))),
+    }
+}
+
+fn engine_number(body: &Value, key: &str, min: u64, max: u64) -> Result<Option<Value>, String> {
+    match body.get(key) {
+        None => Ok(None),
+        Some(v) => match v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())) {
+            Some(n) if (min..=max).contains(&n) => Ok(Some(json!(n))),
+            _ => Err(format!("`{key}` must be a whole number from {min} to {max}.")),
+        },
+    }
+}
+
+/// The changes a `POST /api/studio/engine` body asks for: a value sets an option, an empty text takes it back to its default.
+fn engine_changes(body: &Value) -> Result<Vec<(&'static str, Option<Value>)>, String> {
+    let mut changes: Vec<(&'static str, Option<Value>)> = Vec::new();
+    for (key, value) in [
+        ("output_cache", engine_choice(body, "output_cache", &["exact", "off"])),
+        ("output_cache_mb", engine_number(body, "output_cache_mb", 1, 65_536)),
+        ("output_cache_ttl", engine_number(body, "output_cache_ttl", 1, 31_536_000)),
+        ("cache_scope", engine_choice(body, "cache_scope", &["global", "tenant", "off"])),
+        ("preemption", engine_choice(body, "preemption", &["recompute", "swap"])),
+    ] {
+        if let Some(v) = value? {
+            changes.push((key, Some(v)));
+        }
+    }
+    if let Some(on) = body.get("prefix_cache").and_then(Value::as_bool) {
+        changes.push(("prefix_cache", Some(json!(on))));
+    }
+    for key in ["prefix_salt", "otel_service", "admin_key"] {
+        if let Some(text) = body.get(key).and_then(Value::as_str) {
+            let text = text.trim();
+            if text.len() > 200 || text.chars().any(char::is_control) {
+                return Err(format!("`{key}` is too long or has control characters."));
+            }
+            changes.push((key, (!text.is_empty()).then(|| json!(text))));
+        }
+    }
+    if let Some(text) = body.get("otel_endpoint").and_then(Value::as_str) {
+        let text = text.trim();
+        if !text.is_empty() && !(text.starts_with("http://") || text.starts_with("https://")) {
+            return Err("The telemetry address must start with http:// or https://.".into());
+        }
+        changes.push(("otel_endpoint", (!text.is_empty()).then(|| json!(text))));
+    }
+    Ok(changes)
+}
+
+/// `POST /api/studio/engine` with any of the options. Takes effect when the server starts again.
+pub(in crate::server) async fn update_engine(Json(body): Json<Value>) -> Response {
+    let changes = match engine_changes(&body) {
+        Ok(changes) => changes,
+        Err(message) => return api_error(StatusCode::BAD_REQUEST, &message),
+    };
+    let mut saved = crate::hub::engine_settings();
+    for (key, value) in changes {
+        match value {
+            Some(v) => saved.insert(key.to_owned(), v),
+            None => saved.remove(key),
+        };
+    }
+    crate::hub::set_studio_setting("engine", if saved.is_empty() { Value::Null } else { Value::Object(saved) });
+    Json(engine_json()).into_response()
+}
+
+/// `POST /api/studio/restart`: the server starts again with the same model and options (the engine options take effect).
+pub(in crate::server) async fn restart_server() -> Response {
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let setup = std::env::var_os("FLLM_STUDIO_SETUP").is_some();
+    let has_model = args.iter().any(|a| a == "--model" || a == "-m" || a.starts_with("--model="));
+    if !setup && !has_model {
+        if let Some(model) = crate::hub::last_studio_model() {
+            args.push("--model".into());
+            args.push(model);
+        }
+    }
+    args.retain(|a| a != "--no-open");
+    if let Err(error) = spawn_replacement(args, setup) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    exit_after_reply();
+    Json(json!({"status": "restarting"})).into_response()
+}
+
 /// `GET /api/studio/settings`
 pub(in crate::server) async fn get_settings() -> Response {
     Json(settings_json()).into_response()
@@ -965,6 +1094,22 @@ pub(in crate::server) async fn hf_readme(Query(query): Query<HashMap<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_options_are_checked_before_they_are_saved() {
+        let ok = engine_changes(&json!({"output_cache": "off", "output_cache_mb": "128", "cache_scope": "tenant", "prefix_cache": false, "prefix_salt": " a ", "otel_endpoint": "http://127.0.0.1:4318"})).expect("valid");
+        assert!(ok.contains(&("output_cache", Some(json!("off")))));
+        assert!(ok.contains(&("output_cache_mb", Some(json!(128)))));
+        assert!(ok.contains(&("prefix_cache", Some(json!(false)))));
+        assert!(ok.contains(&("prefix_salt", Some(json!("a")))));
+        // an empty text takes an option back to its default
+        assert_eq!(engine_changes(&json!({"otel_endpoint": "", "admin_key": ""})).unwrap(), vec![("admin_key", None), ("otel_endpoint", None)]);
+        for bad in [json!({"output_cache": "maybe"}), json!({"output_cache_mb": 0}), json!({"cache_scope": "x"}), json!({"otel_endpoint": "ftp://x"}), json!({"prefix_salt": "a
+b"}), json!({"preemption": 3})] {
+            assert!(engine_changes(&bad).is_err(), "{bad}");
+        }
+    }
+
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()

@@ -510,6 +510,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models/downloads", post(api::studio_ops::download_action))
         .route("/api/studio/pick-file", post(api::studio_ops::pick_file))
         .route("/api/studio/settings", get(api::studio_ops::get_settings).post(api::studio_ops::update_settings))
+        .route("/api/studio/engine", get(api::studio_ops::get_engine).post(api::studio_ops::update_engine))
+        .route("/api/studio/restart", post(api::studio_ops::restart_server))
         .route("/api/studio/logs", get(api::studio_ops::logs))
         .route("/api/studio/hf-readme", get(api::studio_ops::hf_readme))
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))

@@ -90,3 +90,11 @@ manifest) safe: the old pod stops receiving work before it stops.
 ready/draining, the output-cache statistics, whether the prefix cache is on, which preemption policy is active, the telemetry
 and coalescing counters, and the sandbox state. Useful when a deployment behaves differently from what the environment
 suggests — the answer comes from the process, not from the manifest.
+
+## Settings page and the admin key
+
+Every option above is also on **Settings > Engine** in the app. The page saves them on this computer and the server uses them after its next start
+(the page has a button for that); an option that the environment of the server sets wins and is listed on the page as such.
+
+The `/admin/*` routes answer this computer only. To use them from another machine, set an admin key (`FLLM_ADMIN_KEY`, or the page) and send it as
+`x-admin-key`, together with the normal API key when the server asks for one. An API key for chatting does not open them.

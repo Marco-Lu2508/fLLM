@@ -62,6 +62,8 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/memory", get(api::memory::get_memory).put(api::memory::put_memory).layer(axum::extract::DefaultBodyLimit::max(api::memory::MAX_BODY)))
         .route("/api/studio/pick-file", post(api::studio_ops::pick_file))
         .route("/api/studio/settings", get(api::studio_ops::get_settings).post(api::studio_ops::update_settings))
+        .route("/api/studio/engine", get(api::studio_ops::get_engine).post(api::studio_ops::update_engine))
+        .route("/api/studio/restart", post(api::studio_ops::restart_server))
         .route("/api/studio/logs", get(api::studio_ops::logs))
         .route("/api/studio/hf-readme", get(api::studio_ops::hf_readme))
         .route("/api/studio/skills", get(api::skills::list).post(api::skills::write).delete(api::skills::remove))
