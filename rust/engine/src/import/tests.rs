@@ -198,15 +198,21 @@ fn import_flags_are_parsed_and_validated() {
     assert!(options.parse_flag(&a, &mut i).unwrap());
     i += 1;
     assert!(!options.parse_flag(&a, &mut i).unwrap(), "--ctx belongs to the server");
-    assert_eq!(options, ImportOptions { revision: Some("v1".into()), offline: true, quant: Some("q4_k_m".into()), outtype: None, direct: false });
+    assert_eq!(options, ImportOptions { revision: Some("v1".into()), offline: true, quant: Some("q4_k_m".into()), outtype: None, direct: false, no_direct: false });
     let mut direct_opts = ImportOptions::default();
     assert!(direct_opts.parse_flag(&args(&["--direct"]), &mut 0).unwrap());
     assert!(direct_opts.direct);
     let mut zc_opts = ImportOptions::default();
     assert!(zc_opts.parse_flag(&args(&["--zero-copy"]), &mut 0).unwrap());
     assert!(zc_opts.direct);
-    assert!(ImportOptions { direct: true, quant: Some("q4_0".into()), ..Default::default() }.validate().is_err());
-    assert!(ImportOptions { direct: true, outtype: Some("f16".into()), ..Default::default() }.validate().is_err());
+    // direct loading takes --quant and --outtype; only the two opposite switches exclude each other
+    assert!(ImportOptions { direct: true, quant: Some("q4_0".into()), ..Default::default() }.validate().is_ok());
+    assert!(ImportOptions { direct: true, outtype: Some("f16".into()), ..Default::default() }.validate().is_ok());
+    assert!(ImportOptions { direct: true, no_direct: true, ..Default::default() }.validate().is_err());
+    let mut off = ImportOptions::default();
+    assert!(off.parse_flag(&args(&["--no-direct-load"]), &mut 0).unwrap());
+    assert!(off.no_direct);
+    assert_eq!(ImportOptions { quant: Some("q8_0".into()), direct: true, ..Default::default() }.to_args(), args(&["--quant", "q8_0", "--direct"]));
     assert!(options.validate().is_ok());
     assert!(ImportOptions { quant: Some("q9".into()), ..Default::default() }.validate().is_err());
     assert!(ImportOptions { quant: Some("q8_0".into()), outtype: Some("f16".into()), ..Default::default() }.validate().is_err());
@@ -338,7 +344,7 @@ fn local_directories_convert_once_and_follow_their_files() {
     let cache = scratch("local-cache");
     let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str())]);
     let dir = quant.to_str().unwrap();
-    let options = ImportOptions::default();
+    let options = ImportOptions { no_direct: true, ..Default::default() };
     let first = prepare(dir, &options).unwrap();
     assert!(first.starts_with(local_cache_dir()), "{}", first.display());
     assert_eq!(tensor_types(&first).get("blk.1.ffn_up.weight"), Some(&40));
@@ -351,7 +357,7 @@ fn local_directories_convert_once_and_follow_their_files() {
     let entry = listed.iter().find(|e| e.path == first).expect("converted model listed");
     assert!(entry.note.contains("converted from") && entry.note.contains("nvfp4"), "{}", entry.note);
     // other parameters make another file
-    let f16 = prepare(dir, &ImportOptions { outtype: Some("f16".into()), ..Default::default() }).unwrap();
+    let f16 = prepare(dir, &ImportOptions { outtype: Some("f16".into()), no_direct: true, ..Default::default() }).unwrap();
     assert_ne!(f16, first);
     assert_eq!(tensor_types(&f16).get("blk.0.attn_q.weight"), Some(&1));
     // changing the checkpoint changes the key
@@ -376,7 +382,7 @@ fn quant_re_encodes_an_unquantized_directory_and_is_refused_for_quantized_ones()
     build_pair(Kind::Nvfp4, 41, &quant, &plain);
     let cache = scratch("q8-cache");
     let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str())]);
-    let path = prepare(plain.to_str().unwrap(), &ImportOptions { quant: Some("q8_0".into()), ..Default::default() }).unwrap();
+    let path = prepare(plain.to_str().unwrap(), &ImportOptions { quant: Some("q8_0".into()), no_direct: true, ..Default::default() }).unwrap();
     let types = tensor_types(&path);
     assert_eq!(types.get("blk.0.attn_q.weight"), Some(&8), "linear weights become Q8_0");
     assert_eq!(types.get("blk.0.attn_norm.weight"), Some(&1), "norms stay F16");
@@ -387,9 +393,9 @@ fn quant_re_encodes_an_unquantized_directory_and_is_refused_for_quantized_ones()
         .filter(|n| n.contains(".fllm-part"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
-    let err = prepare(quant.to_str().unwrap(), &ImportOptions { quant: Some("q4_k_m".into()), ..Default::default() }).unwrap_err();
+    let err = prepare(quant.to_str().unwrap(), &ImportOptions { quant: Some("q4_k_m".into()), no_direct: true, ..Default::default() }).unwrap_err();
     assert!(err.contains("already quantized (nvfp4)"), "{err}");
-    let err = prepare(plain.to_str().unwrap(), &ImportOptions { quant: Some("nope".into()), ..Default::default() }).unwrap_err();
+    let err = prepare(plain.to_str().unwrap(), &ImportOptions { quant: Some("nope".into()), no_direct: true, ..Default::default() }).unwrap_err();
     assert!(err.contains("--quant must be one of"), "{err}");
     for d in [quant, plain, cache] {
         let _ = fs::remove_dir_all(d);
@@ -400,11 +406,11 @@ fn quant_re_encodes_an_unquantized_directory_and_is_refused_for_quantized_ones()
 fn directories_with_a_gguf_or_without_a_checkpoint_are_left_alone() {
     let dir = scratch("plain-dir");
     fs::write(dir.join("model.gguf"), b"GGUF").unwrap();
-    assert_eq!(prepare(dir.to_str().unwrap(), &ImportOptions::default()).unwrap(), dir);
-    assert_eq!(prepare("missing/local.gguf", &ImportOptions::default()).unwrap(), PathBuf::from("missing/local.gguf"));
+    assert_eq!(prepare(dir.to_str().unwrap(), &ImportOptions { no_direct: true, ..Default::default() }).unwrap(), dir);
+    assert_eq!(prepare("missing/local.gguf", &ImportOptions { no_direct: true, ..Default::default() }).unwrap(), PathBuf::from("missing/local.gguf"));
     let file = dir.join("model.gguf");
-    assert_eq!(prepare(file.to_str().unwrap(), &ImportOptions::default()).unwrap(), file);
-    assert!(prepare(file.to_str().unwrap(), &ImportOptions { quant: Some("q8_0".into()), ..Default::default() })
+    assert_eq!(prepare(file.to_str().unwrap(), &ImportOptions { no_direct: true, ..Default::default() }).unwrap(), file);
+    assert!(prepare(file.to_str().unwrap(), &ImportOptions { quant: Some("q8_0".into()), no_direct: true, ..Default::default() })
         .unwrap_err()
         .contains("not one"));
     let _ = fs::remove_dir_all(dir);
@@ -419,7 +425,7 @@ fn hub_checkpoint_is_downloaded_converted_cached_and_removable() {
     let (cache, home) = (scratch("hub-cache"), scratch("hub-home"));
     let _env = hub_env(&stub, &cache, &home);
 
-    let path = prepare("acme/tiny-nvfp4", &ImportOptions::default()).unwrap();
+    let path = prepare("acme/tiny-nvfp4", &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
     assert!(path.starts_with(cache.join("models--acme--tiny-nvfp4").join("snapshots").join(COMMIT)), "{}", path.display());
     assert!(hub::is_converted_name(&path.file_name().unwrap().to_string_lossy()));
     assert_eq!(tensor_types(&path).get("blk.0.attn_q.weight"), Some(&40));
@@ -431,14 +437,14 @@ fn hub_checkpoint_is_downloaded_converted_cached_and_removable() {
     // a second start: only the revision lookup, no downloads, same file
     let before = stub.paths().len();
     let modified = fs::metadata(&path).unwrap().modified().unwrap();
-    assert_eq!(prepare("acme/tiny-nvfp4", &ImportOptions::default()).unwrap(), path);
+    assert_eq!(prepare("acme/tiny-nvfp4", &ImportOptions { no_direct: true, ..Default::default() }).unwrap(), path);
     let new_hits = stub.paths()[before..].to_vec();
     assert!(new_hits.iter().all(|p| p.starts_with("/api/")), "{new_hits:?}");
     assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
 
     // offline works from the cache and does not touch the network
     let before = stub.paths().len();
-    let offline = ImportOptions { offline: true, ..Default::default() };
+    let offline = ImportOptions { offline: true, no_direct: true, ..Default::default() };
     assert_eq!(prepare("https://huggingface.co/acme/tiny-nvfp4", &offline).unwrap(), path);
     assert_eq!(stub.paths().len(), before);
 
@@ -449,9 +455,9 @@ fn hub_checkpoint_is_downloaded_converted_cached_and_removable() {
     assert!(converted.reference.starts_with("hf://acme/tiny-nvfp4/") && converted.note.contains("converted from"));
 
     // a different output type is a different file; --quant on a quantized checkpoint is an error
-    let f16 = prepare("acme/tiny-nvfp4", &ImportOptions { outtype: Some("f16".into()), ..Default::default() }).unwrap();
+    let f16 = prepare("acme/tiny-nvfp4", &ImportOptions { outtype: Some("f16".into()), no_direct: true, ..Default::default() }).unwrap();
     assert_ne!(f16, path);
-    assert!(prepare("acme/tiny-nvfp4", &ImportOptions { quant: Some("q8_0".into()), ..Default::default() })
+    assert!(prepare("acme/tiny-nvfp4", &ImportOptions { quant: Some("q8_0".into()), no_direct: true, ..Default::default() })
         .unwrap_err()
         .contains("already quantized"));
 
@@ -478,7 +484,7 @@ fn unsupported_architecture_is_reported_before_the_weights_are_downloaded() {
     let stub = Stub::start(repo_routes("acme", "novel", &dir_files(&dir)));
     let (cache, home) = (scratch("arch-cache"), scratch("arch-home"));
     let _env = hub_env(&stub, &cache, &home);
-    let err = prepare("acme/novel", &ImportOptions::default()).unwrap_err();
+    let err = prepare("acme/novel", &ImportOptions { no_direct: true, ..Default::default() }).unwrap_err();
     assert!(err.contains("totally_new") && err.contains("not supported") && err.contains("docs/architectures.md"), "{err}");
     assert!(err.contains("nothing else was downloaded"), "{err}");
     let paths = stub.paths();
@@ -498,7 +504,7 @@ fn missing_tokenizer_is_reported_before_the_weights_are_downloaded() {
     let stub = Stub::start(repo_routes("acme", "no-tokenizer", &files));
     let (cache, home) = (scratch("tok-cache"), scratch("tok-home"));
     let _env = hub_env(&stub, &cache, &home);
-    let err = prepare("acme/no-tokenizer", &ImportOptions::default()).unwrap_err();
+    let err = prepare("acme/no-tokenizer", &ImportOptions { no_direct: true, ..Default::default() }).unwrap_err();
     assert!(err.contains("has no tokenizer the conversion can use"), "{err}");
     assert!(position(&stub.paths(), "/model.safetensors").is_none(), "{:?}", stub.paths());
     for d in [quant, plain, cache, home] {
@@ -515,17 +521,17 @@ fn gated_and_private_repositories_name_the_token_variable() {
     let (cache, home) = (scratch("gate-cache"), scratch("gate-home"));
     {
         let _env = hub_env(&stub, &cache, &home);
-        let err = prepare("acme/secret", &ImportOptions::default()).unwrap_err();
+        let err = prepare("acme/secret", &ImportOptions { no_direct: true, ..Default::default() }).unwrap_err();
         assert!(err.contains("HF_TOKEN") && err.contains("private or gated"), "{err}");
-        let err = prepare("acme/gated", &ImportOptions::default()).unwrap_err();
+        let err = prepare("acme/gated", &ImportOptions { no_direct: true, ..Default::default() }).unwrap_err();
         assert!(err.contains("HF_TOKEN") && err.contains("license"), "{err}");
-        let err = prepare("acme/missing", &ImportOptions::default()).unwrap_err();
+        let err = prepare("acme/missing", &ImportOptions { no_direct: true, ..Default::default() }).unwrap_err();
         assert!(err.contains("not found") && err.contains("404"), "{err}");
     }
     {
         let _env = hub_env(&stub, &cache, &home);
         std::env::set_var("HF_TOKEN", "test-token");
-        let err = prepare("acme/gated", &ImportOptions::default()).unwrap_err();
+        let err = prepare("acme/gated", &ImportOptions { no_direct: true, ..Default::default() }).unwrap_err();
         assert!(err.contains("accept the model license") && err.contains("HF_TOKEN"), "{err}");
         assert!(stub.hits.lock().unwrap().iter().any(|(_, bearer)| *bearer), "the token must be sent");
     }
@@ -545,15 +551,15 @@ fn repositories_with_ggufs_keep_resolving_to_the_gguf() {
     let stub = Stub::start(repo_routes("acme", "both", &files));
     let (cache, home) = (scratch("both-cache"), scratch("both-home"));
     let _env = hub_env(&stub, &cache, &home);
-    let path = prepare("acme/both", &ImportOptions::default()).unwrap();
+    let path = prepare("acme/both", &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
     assert!(path.ends_with("model-Q4_K_M.gguf"), "{}", path.display());
     assert!(position(&stub.paths(), "/model.safetensors").is_none());
-    let err = prepare("acme/both", &ImportOptions { quant: Some("q8_0".into()), ..Default::default() }).unwrap_err();
+    let err = prepare("acme/both", &ImportOptions { quant: Some("q8_0".into()), no_direct: true, ..Default::default() }).unwrap_err();
     assert!(err.contains("holds GGUF files"), "{err}");
     // selecting a quantization or a file is the old behaviour and rejects conversion flags
-    let selected = prepare("acme/both:Q4_K_M", &ImportOptions::default()).unwrap();
+    let selected = prepare("acme/both:Q4_K_M", &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
     assert_eq!(selected, path);
-    assert!(prepare("acme/both:Q4_K_M", &ImportOptions { outtype: Some("f16".into()), ..Default::default() }).is_err());
+    assert!(prepare("acme/both:Q4_K_M", &ImportOptions { outtype: Some("f16".into()), no_direct: true, ..Default::default() }).is_err());
     for d in [cache, home] {
         let _ = fs::remove_dir_all(d);
     }

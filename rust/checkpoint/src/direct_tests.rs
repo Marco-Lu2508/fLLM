@@ -207,7 +207,7 @@ fn quantizing_while_loading_equals_convert_then_quantize() {
         llama(&dir, store, shards, 11);
         let preset = Preset::parse(preset).unwrap();
         let options = ConvertOptions { output_dtype: OutputDType::F16, overwrite: false, spec_head: None };
-        let direct = load_checkpoint_quantized(&dir, options, Some(preset)).unwrap();
+        let direct = load_checkpoint_quantized(&dir, options, Some(preset), None).unwrap();
         let stage = convert_to(&dir, "stage.gguf", OutputDType::F16);
         let quantized = dir.join("quantized.gguf");
         quantize_gguf(&stage, &quantized, preset).unwrap();

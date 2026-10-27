@@ -121,7 +121,7 @@ impl GenerationDefaults {
                 if !from_model.is_empty() {
                     return Ok((from_model, "GGUF metadata".into()));
                 }
-                let beside = model_file.parent().map(|d| d.join("generation_config.json"));
+                let beside = if model_file.is_dir() { Some(model_file.join("generation_config.json")) } else { model_file.parent().map(|d| d.join("generation_config.json")) };
                 if let Some(file) = beside.filter(|f| f.is_file()) {
                     if let Ok(defaults) = read_file(&file) {
                         if !defaults.is_empty() {

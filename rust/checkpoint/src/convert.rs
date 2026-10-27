@@ -1314,11 +1314,13 @@ enum Source {
 /// map (the size it would have in the GGUF file). With `quant` the float tensors are re-encoded with the preset of
 /// `fllm-rs quantize` one tensor at a time, so the half-precision form of the whole model never exists. The bytes equal
 /// those of the GGUF file `convert_checkpoint` (followed by `quantize_gguf`) would write. Consumes `tensors` so that data
-/// built in memory is released as soon as it has been placed.
+/// built in memory is released as soon as it has been placed. Fails with `OverBudget` before anything is built when the tensors that
+/// have to be built need more than `max_built_bytes`.
 pub fn materialize_mapped_gguf(
     meta: &[(String, Meta)],
     tensors: Vec<OutTensor>,
     quant: Option<Preset>,
+    max_built_bytes: Option<u64>,
 ) -> Result<MappedGguf, CheckpointError> {
     let layers = layer_count(tensors.iter().map(|t| t.name.as_str()));
     let overflow = || CheckpointError::Invalid("tensor length overflow".into());
@@ -1348,6 +1350,9 @@ pub fn materialize_mapped_gguf(
         };
         infos.push((t.name.clone(), t.dims.clone(), type_id, len));
         sources.push((source, source_type));
+    }
+    if let Some(limit) = max_built_bytes.filter(|&l| anon_size as u64 > l) {
+        return Err(CheckpointError::OverBudget { needed: anon_size as u64, limit });
     }
     // 2. write the built tensors, one at a time
     let mut anon = memmap2::MmapOptions::new().len(anon_size.max(1)).map_anon()?;
@@ -1403,14 +1408,15 @@ pub fn materialize_mapped_gguf(
 /// Open a checkpoint as a model without writing a GGUF file: the tensors the converter would copy unchanged are slices of
 /// the checkpoint files, the others are built in memory (see `materialize_mapped_gguf`).
 pub fn load_checkpoint_as_gguf(input: &Path, options: ConvertOptions) -> Result<MappedGguf, CheckpointError> {
-    load_checkpoint_quantized(input, options, None)
+    load_checkpoint_quantized(input, options, None, None)
 }
 
 /// `load_checkpoint_as_gguf` that also re-encodes the unquantized float weights with `quant` while loading
 /// (the in-memory form of `--quant`). `options.output_dtype` should be `F16` then, as for the file conversion.
-pub fn load_checkpoint_quantized(input: &Path, options: ConvertOptions, quant: Option<Preset>) -> Result<MappedGguf, CheckpointError> {
+/// `max_built_bytes` caps the memory for tensors that cannot be slices of the checkpoint (`CheckpointError::OverBudget`).
+pub fn load_checkpoint_quantized(input: &Path, options: ConvertOptions, quant: Option<Preset>, max_built_bytes: Option<u64>) -> Result<MappedGguf, CheckpointError> {
     let (_arch, meta, outs, _skipped) = prepare_checkpoint(input, options)?;
-    materialize_mapped_gguf(&meta, outs, quant)
+    materialize_mapped_gguf(&meta, outs, quant, max_built_bytes)
 }
 /// A vision tower tensor: kept in its source layout (rank above two flattened to `[out, rest]`), converted only in dtype.
 fn vision_tensor(name: String, t: Tensor, requested: OutputDType) -> Result<OutTensor, CheckpointError> {

@@ -117,7 +117,8 @@ fn fingerprint(path: &Path, len: u64) -> String {
 impl ModelFacts {
     pub fn from_gguf(path: &Path, mapping: &MappedGguf) -> Self {
         let index = mapping.index();
-        let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(index.file_len);
+        // a checkpoint loaded directly has no model file: its size is that of its tensors
+        let size_bytes = std::fs::metadata(path).ok().filter(|m| m.is_file()).map_or_else(|| index.tensors.iter().map(|t| t.payload_len).sum::<u64>().max(index.file_len), |m| m.len());
         let parameters = index
             .tensors
             .iter()
