@@ -14,8 +14,10 @@ behaviour between versions).
 ### Security
 - The `/admin/*` routes (drain, empty the cache, effective settings, telemetry) answer only this computer, or another computer with an API key that has the **admin right**. Keys given with `--api-key` are admin keys; keys made on the Studio page are admin keys only when "Admin" is ticked. A key made for chatting no longer reaches them, and while keys are in use only an admin key (or this computer) can make or remove keys, so no user can make themselves an admin.
 - With `FLLM_CACHE_SCOPE=tenant` the output cache is separated by the API key of the caller (together with the `user` field), not by the `user` field alone, which any caller could choose.
+- While API keys are in use, changing the server through `/api/studio/*` (settings, models, updates, keys) needs an admin key or this machine; before, every key could do it.
 
 ### Added
+- Docker and Kubernetes: the options of the page apply to `serve` too, the CPU Compose file keeps them in a volume, and restarting or loading another model inside a container replaces the server in place instead of ending the container.
 - Settings > Engine: the output cache (on or off, size, time, who shares it), prefix sharing, the prefix separator, what happens when memory runs out, telemetry address and name, plus live numbers, "empty the cache" and "stop taking new requests". The options are saved and take effect when the server restarts (a button restarts it).
 
 ### Fixed

@@ -24,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
-RUN useradd -m fllm
+# the settings made on the Studio page (Settings > Engine ...) live in ~/.cache/fllm: a volume mounted there keeps them across restarts
+RUN useradd -m fllm && mkdir -p /home/fllm/.cache/fllm && chown -R fllm:fllm /home/fllm/.cache
 USER fllm
 WORKDIR /home/fllm
 EXPOSE 8000

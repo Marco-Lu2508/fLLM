@@ -353,8 +353,6 @@ fn studio_args(rest: &[String]) -> Vec<String> {
     env::set_var("FLLM_STUDIO", "1");
     // the models folder chosen in the Studio
     fllm_engine::hub::apply_saved_models_dir();
-    // the engine options chosen on the Settings page (caches, telemetry, admin key)
-    fllm_engine::hub::apply_saved_engine_settings();
     if open {
         env::set_var("FLLM_OPEN_BROWSER", "1");
     }
@@ -401,6 +399,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let args = if args.first().map(String::as_str) == Some("studio") { studio_args(&args[1..]) } else { args };
+    // the engine options chosen on the Settings page (caches, telemetry); in `serve` too, which is what a container runs
+    fllm_engine::hub::apply_saved_engine_settings();
     if fllm_engine::cli::dispatch(&args)? {
         return Ok(());
     }

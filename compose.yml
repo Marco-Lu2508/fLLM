@@ -19,6 +19,8 @@ services:
       - FLLM_API_KEY
     volumes:
       - ${FLLM_MODELS_DIR:-./models}:/models:ro
+      # the settings made in the app (Settings > Engine, keys, ...) stay across restarts and updates
+      - fllm-data:/home/fllm/.cache/fllm
     command: >
       serve --host 0.0.0.0 --port 8000
       --model /models/${FLLM_MODEL:-model.gguf}
@@ -29,3 +31,6 @@ services:
       --speculative-lookup ${FLLM_SPECULATIVE_LOOKUP:-0}
       ${FLLM_EXTRA_ARGS:-}
     restart: unless-stopped
+
+volumes:
+  fllm-data:

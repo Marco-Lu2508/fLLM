@@ -224,6 +224,13 @@ impl<F: FnOnce() + Unpin> Drop for Watched<F> {
     }
 }
 
+/// The Studio routes that change the server for everybody who uses it.
+fn is_server_change(path: &str) -> bool {
+    ["/api/studio/keys", "/api/studio/config", "/api/studio/settings", "/api/studio/engine", "/api/studio/restart", "/api/studio/models", "/api/studio/update", "/api/studio/selftest-cpu", "/api/studio/open-url"]
+        .iter()
+        .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
+}
+
 fn is_providers_path(path: &str) -> bool {
     path == "/api/studio/providers" || path.starts_with("/api/studio/providers/")
 }
@@ -235,7 +242,7 @@ fn is_providers_path(path: &str) -> bool {
 /// prices change what the agent does, and the embeddings and search-engine settings name addresses the server calls: configuration of the
 /// agent, so this machine only, reads included, with or without an API key.
 fn is_agent_config_path(path: &str) -> bool {
-    ["/api/studio/engine", "/api/studio/restart", "/api/studio/hooks", "/api/studio/plugins", "/api/studio/runtime", "/api/studio/agents", "/api/studio/prices", "/api/studio/embeddings", "/api/studio/embed", "/api/studio/search"]
+    ["/api/studio/hooks", "/api/studio/plugins", "/api/studio/runtime", "/api/studio/agents", "/api/studio/prices", "/api/studio/embeddings", "/api/studio/embed", "/api/studio/search"]
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
 }
@@ -271,8 +278,9 @@ pub fn studio_admin_blocked_for(
     if path == "/admin" || path.starts_with("/admin/") {
         return !(admin_caller || local_browser_request(peer, headers));
     }
-    // with API keys in use, making and removing keys is for admin keys or this machine (otherwise any user could make themselves an admin)
-    if auth_required && (path == "/api/studio/keys" || path.starts_with("/api/studio/keys/")) && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+    // with API keys in use, changing the server itself (keys, settings, models, updates) is for admin keys or this machine: otherwise any
+    // user of the models could make themselves an admin, delete models or switch what everybody else is using
+    if auth_required && is_server_change(path) && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         return !(admin_caller || local_browser_request(peer, headers));
     }
     // the agent tools read and write files and run programs: never from another machine, with or without a key
@@ -753,6 +761,11 @@ mod studio_gate_tests {
         assert!(studio_admin_blocked_for(true, &Method::DELETE, "/api/studio/keys/key-2", remote, &h, false));
         assert!(!studio_admin_blocked_for(true, &Method::POST, "/api/studio/keys", remote, &h, true));
         assert!(!studio_admin_blocked_for(true, &Method::GET, "/api/studio/keys", remote, &h, false));
+        for path in ["/api/studio/settings", "/api/studio/engine", "/api/studio/restart", "/api/studio/models/load", "/api/studio/models/cache", "/api/studio/update/install", "/api/studio/config"] {
+            assert!(studio_admin_blocked_for(true, &Method::POST, path, remote, &h, false), "{path} for a user key");
+            assert!(!studio_admin_blocked_for(true, &Method::POST, path, remote, &h, true), "{path} for an admin key");
+        }
+        assert!(!studio_admin_blocked_for(true, &Method::GET, "/api/studio/models", remote, &h, false), "reading the model list stays open");
         assert!(!studio_admin_blocked_for(true, &Method::POST, "/api/studio/keys", here, &local, false), "the owner at this machine");
         // a web page of another site in the owner's browser is refused, a rebinding name too
         assert!(studio_admin_blocked(false, &Method::POST, "/admin/drain", here, &headers("127.0.0.1:8000", Some("https://evil.example"))));
@@ -764,9 +777,6 @@ mod studio_gate_tests {
         let remote = addr("192.168.1.20:5000");
         let h = headers("192.168.1.5:8000", None);
         for (method, path) in [
-            (Method::POST, "/api/studio/engine"),
-            (Method::GET, "/api/studio/engine"),
-            (Method::POST, "/api/studio/restart"),
             (Method::POST, "/api/studio/hooks"),
             (Method::POST, "/api/studio/hooks/test"),
             (Method::POST, "/api/studio/plugins"),
@@ -831,16 +841,17 @@ mod studio_gate_tests {
         let h = headers("192.168.1.5:8000", None);
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/status", remote, &h));
         assert!(!studio_admin_blocked(false, &Method::POST, "/v1/chat/completions", remote, &h));
-        // with an API key configured the normal key check decides (making keys needs the admin right, see the admin tests)
-        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/settings", remote, &h));
+        // with an API key configured the normal key check decides (changing the server needs the admin right, see the admin tests; reading a document does not)
+        assert!(!studio_admin_blocked(true, &Method::POST, "/api/studio/extract", remote, &h));
         // ... except for the agent tools, which never leave this machine
         assert!(studio_admin_blocked(true, &Method::POST, "/api/studio/agent/tool", remote, &h));
         // ... and the file picker, which opens a window on the screen of this machine
         assert!(studio_admin_blocked(true, &Method::POST, "/api/studio/pick-file", remote, &h));
-        // the new model-management routes need a key like every other change
+        // the model-management routes need an admin key like every other change of the server
         for path in ["/api/studio/models/unload", "/api/studio/models/downloads", "/api/studio/settings"] {
             assert!(studio_admin_blocked(false, &Method::POST, path, remote, &h), "{path}");
-            assert!(!studio_admin_blocked(true, &Method::POST, path, remote, &h), "{path}");
+            assert!(studio_admin_blocked(true, &Method::POST, path, remote, &h), "{path} for a key without the admin right");
+            assert!(!studio_admin_blocked_for(true, &Method::POST, path, remote, &h, true), "{path}");
             assert!(!studio_admin_blocked(false, &Method::POST, path, addr("127.0.0.1:5000"), &headers("127.0.0.1:8000", None)), "{path}");
         }
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/logs", remote, &h));

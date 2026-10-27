@@ -593,6 +593,20 @@ or run it in Docker) and `fllm-rs studio --no-open` does not; `fllm-rs serve` op
 
 ## Who may change things
 
-Reading (status, hardware, models) is open like the rest of the API. Changing things through `/api/studio/*` (settings, downloads,
-deletions, API keys, model switch, installing or removing the NPU runtime) needs an API key when one is configured. Without a key it is accepted only from the same machine, from
-the page of this server, addressed by `localhost` or an IP address. Other websites in your browser cannot use it.
+Reading (status, hardware, models) is open like the rest of the API. Changing the server through `/api/studio/*` (settings, model downloads, loading and
+deletions, updates, API keys, the engine options) needs, when API keys are in use, a key with the **admin right** (Settings > Server and API: tick
+"Admin"; keys given with `--api-key` have it). A key made for chatting cannot do any of that, so one user cannot change what everybody else uses. Without
+keys the changes are accepted only from the same machine, from the page of this server, addressed by `localhost` or an IP address. Other websites in your
+browser cannot use them. Everything that runs commands or reads files on the server (agent tools, hooks, plugins, MCP servers, providers, the runtime
+switch, the engine options) stays on the machine itself, with or without a key.
+
+## Docker and Kubernetes
+
+The page works in a container the same way. Two things differ:
+
+- **Settings are kept in a volume.** The Compose files mount one at `~/.cache/fllm` (`fllm-data`; the GPU files keep the whole `~/.cache`). Without a volume the
+  options saved on the page are gone when the container is removed.
+- **Set an API key.** A container sees every request as coming from another machine (Docker's gateway), so without `FLLM_API_KEY` the page can show things but not change them. With the key (it is an admin key) the page works as on your own computer: enter the key in the page when it asks.
+- **Restarting.** In a container the server starts itself again in place (same process, so the container keeps running). That is what "Restart the server now"
+  on Settings > Engine and loading another model do. If that ever fails the process ends and the restart policy of the container (`restart: unless-stopped`,
+  Kubernetes' default) starts it again. `FLLM_CONTAINER=1` forces this behaviour where fLLM cannot tell it runs in a container.

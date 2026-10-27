@@ -426,9 +426,26 @@ pub(in crate::server) fn args_with_options(args: Vec<String>, model: &str, reque
 // Starting the next server process: model change and unload
 // ------------------------------------------------------------------------------------------------------------------------------
 
+/// Whether this process runs in a container (Docker, Podman, Kubernetes). There the server is the first process of the container: when it
+/// ends the container ends, so a new server cannot be started next to it and has to take its place instead.
+pub(in crate::server) fn in_container() -> bool {
+    std::env::var_os("FLLM_CONTAINER").is_some()
+        || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
+        || Path::new("/.dockerenv").exists()
+        || Path::new("/run/.containerenv").exists()
+}
+
+/// The server that takes this process's place in a container: the arguments and whether it starts without a model.
+static TAKES_OVER: std::sync::Mutex<Option<(Vec<String>, bool)>> = std::sync::Mutex::new(None);
+
 /// Starts a server with `args` that takes over the port from this one. `setup`: it starts without a model.
+/// In a container the same program is started in place of this process once the reply has gone out (see [`exit_after_reply`]).
 pub(in crate::server) fn spawn_replacement(args: Vec<String>, setup: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find the server program: {e}"))?;
+    if cfg!(unix) && in_container() {
+        *TAKES_OVER.lock().unwrap_or_else(|e| e.into_inner()) = Some((args, setup));
+        return Ok(());
+    }
     let mut command = std::process::Command::new(exe);
     command
         .args(args)
@@ -444,10 +461,27 @@ pub(in crate::server) fn spawn_replacement(args: Vec<String>, setup: bool) -> Re
     command.spawn().map(|_| ()).map_err(|e| format!("cannot start the new server: {e}"))
 }
 
-/// Ends this process shortly after the reply has gone out.
+/// Ends this process shortly after the reply has gone out. In a container the new server replaces it instead (same process id, so the
+/// container keeps running); if that fails the process ends and the restart policy of the container starts it again.
 pub(in crate::server) fn exit_after_reply() {
     let _ = std::thread::Builder::new().name("fllm-exit".into()).spawn(|| {
         std::thread::sleep(Duration::from_millis(700));
+        #[cfg(unix)]
+        if let Some((args, setup)) = TAKES_OVER.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            use std::os::unix::process::CommandExt;
+            if let Ok(exe) = std::env::current_exe() {
+                let mut command = std::process::Command::new(exe);
+                command.args(args);
+                if setup {
+                    command.env("FLLM_STUDIO_SETUP", "1");
+                }
+                if let Some(dir) = crate::hub::saved_models_dir() {
+                    command.env("FLLM_MODELS_DIR", dir);
+                }
+                let error = command.exec();
+                tracing::error!("the server could not start itself again: {error}");
+            }
+        }
         std::process::exit(0);
     });
 }
