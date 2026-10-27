@@ -58,6 +58,13 @@
 
       async function refresh() {
         chatKey = currentChat();
+        if (!chatKey) {
+          // no chat is open yet: nothing to ask the server about
+          notes = [];
+          button.style.display = 'none';
+          hide();
+          return;
+        }
         try {
           const res = await apiFetch('/api/studio/agent/messages?chat=' + encodeURIComponent(chatKey));
           const data = await res.json();
