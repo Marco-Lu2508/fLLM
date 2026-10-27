@@ -78,12 +78,30 @@ fn write_file(path: &Path, entries: &[(String, &'static str, Vec<usize>, Vec<u8>
 
 /// A tiny Llama checkpoint in `store`, as one file or as `shards` files with an index.
 fn llama(dir: &Path, store: Store, shards: usize, seed: u64) {
-    let cfg = json!({
+    llama_quantized(dir, store, shards, seed, None);
+}
+
+/// A packed-weights layout of the attention and MLP linears (random codes: only the converter's handling is compared).
+#[derive(Clone, Copy)]
+enum Packed {
+    Gptq { bits: usize },
+    Awq,
+}
+
+const GROUP: usize = 32;
+
+fn llama_quantized(dir: &Path, store: Store, shards: usize, seed: u64, packed: Option<Packed>) {
+    let mut cfg = json!({
         "model_type": "llama", "architectures": ["LlamaForCausalLM"], "hidden_size": HIDDEN, "num_attention_heads": HEADS,
         "num_key_value_heads": KV_HEADS, "num_hidden_layers": LAYERS, "intermediate_size": INTER, "vocab_size": VOCAB,
         "rms_norm_eps": 1e-5, "rope_theta": 10000.0, "max_position_embeddings": 128, "hidden_act": "silu",
         "tie_word_embeddings": false, "bos_token_id": 1, "eos_token_id": 2
     });
+    match packed {
+        Some(Packed::Gptq { bits }) => cfg["quantization_config"] = json!({"quant_method": "gptq", "bits": bits, "group_size": GROUP, "desc_act": false, "sym": false}),
+        Some(Packed::Awq) => cfg["quantization_config"] = json!({"quant_method": "awq", "bits": 4, "group_size": GROUP, "version": "gemm", "zero_point": true}),
+        None => {}
+    }
     fs::write(dir.join("config.json"), cfg.to_string()).unwrap();
     let vocab: serde_json::Map<String, serde_json::Value> = (0..VOCAB).map(|i| (format!("t{i}"), json!(i))).collect();
     fs::write(dir.join("tokenizer.json"), json!({"version": "1.0", "added_tokens": [], "model": {"type": "BPE", "vocab": vocab, "merges": []}}).to_string()).unwrap();
@@ -92,6 +110,23 @@ fn llama(dir: &Path, store: Store, shards: usize, seed: u64) {
     let mut entries = Vec::new();
     for (name, shape) in tensor_names() {
         let n: usize = shape.iter().product();
+        if let (Some(layout), true) = (packed, name.contains("_proj.weight")) {
+            let (out, inp) = (shape[0], shape[1]);
+            let prefix = name.trim_end_matches(".weight");
+            let words = |rng: &mut Rng, count: usize| -> Vec<u8> { (0..count).flat_map(|_| ((rng.unit() * 2e9) as i32).to_le_bytes()).collect() };
+            let scales: Vec<u8> = (0..inp / GROUP * out).flat_map(|_| f16::from_f32(0.01 + 0.01 * rng.unit().abs()).to_le_bytes()).collect();
+            let (qweight, qzeros) = match layout {
+                Packed::Gptq { bits } => {
+                    let per = 32 / bits;
+                    ((vec![inp / per, out], words(&mut rng, inp / per * out)), (vec![inp / GROUP, out / per], words(&mut rng, inp / GROUP * out / per)))
+                }
+                Packed::Awq => ((vec![inp, out / 8], words(&mut rng, inp * out / 8)), (vec![inp / GROUP, out / 8], words(&mut rng, inp / GROUP * out / 8))),
+            };
+            entries.push((format!("{prefix}.qweight"), "I32", qweight.0, qweight.1));
+            entries.push((format!("{prefix}.qzeros"), "I32", qzeros.0, qzeros.1));
+            entries.push((format!("{prefix}.scales"), "F16", vec![inp / GROUP, out], scales));
+            continue;
+        }
         let norm = name.contains("norm");
         let values: Vec<f32> = (0..n).map(|_| if norm { 1.0 + 0.1 * rng.unit() } else { 0.5 * rng.unit() }).collect();
         let (dtype, bytes): (&'static str, Vec<u8>) = match store {
@@ -199,4 +234,17 @@ fn untouched_tensors_stay_slices_of_the_checkpoint() {
     assert!(!std::sync::Arc::ptr_eq(embd, q));
     assert!(std::sync::Arc::ptr_eq(q, direct.extra_mappings().get("blk.1.attn_k.weight").unwrap()));
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn packed_gptq_and_awq_checkpoints_load_identically_to_the_converted_file() {
+    for (packed, label, shards) in [(Packed::Gptq { bits: 4 }, "gptq4", 1), (Packed::Gptq { bits: 8 }, "gptq8", 2), (Packed::Awq, "awq", 1)] {
+        let dir = scratch(label);
+        llama_quantized(&dir, Store::F16, shards, 5, Some(packed));
+        let options = ConvertOptions::default();
+        let direct = load_checkpoint_as_gguf(&dir, options).unwrap();
+        let file = MappedGguf::open(convert_to(&dir, "ref.gguf", OutputDType::Preserve)).unwrap();
+        assert_same(&direct, &file, label);
+        let _ = fs::remove_dir_all(dir);
+    }
 }
