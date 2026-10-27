@@ -300,6 +300,8 @@
       const none = { web: false, memory: false, chats: false };
       const model = state.selectedModel || state.status?.model?.name || '';
       if (state.setup || (state.ctBroken && state.ctBroken[model])) return none;
+      // a context of a few hundred tokens cannot hold tool schemas and an answer: the chat runs without tools
+      if (!(window.fllmRemoteSelected && window.fllmRemoteSelected()) && spSize(state.status?.model) === 'tiny') return none;
       const P = state.prj && state.prj.personal;
       const priv = Boolean(t && (t.temporary || t.noPersonal));
       return {

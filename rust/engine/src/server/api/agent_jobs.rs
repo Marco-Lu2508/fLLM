@@ -19,6 +19,24 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The platform shell running one command line, inside the sandbox when this machine has one. `root` is the workspace
+/// that stays writable, `cwd` the folder the command starts in.
+pub(super) fn shell_command_in(line: &str, root: &Path, cwd: &Path) -> Command {
+    match super::agent_sandbox::wrap(line, root, cwd) {
+        Some(argv) => {
+            let mut command = Command::new(&argv[0]);
+            command.args(&argv[1..]);
+            command.current_dir(cwd);
+            command
+        }
+        None => {
+            let mut command = shell_command(line);
+            command.current_dir(cwd);
+            command
+        }
+    }
+}
+
 /// The platform shell running one command line.
 pub(super) fn shell_command(line: &str) -> Command {
     #[cfg(windows)]
@@ -160,8 +178,7 @@ impl Jobs {
                 jobs.remove(&id);
             }
         }
-        let mut child = shell_command(command)
-            .current_dir(dir)
+        let mut child = shell_command_in(command, dir, dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

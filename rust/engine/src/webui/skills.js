@@ -348,6 +348,9 @@
 
     function skFormWorkspace() { return $('skWorkspace') ? $('skWorkspace').value.trim() : ''; }
 
+    // other panes (the library) can ask for a reload after installing a skill
+    window.fllmSkillsReload = () => { try { if (typeof skRefreshPane === 'function') skRefreshPane(); } catch { /* the pane is closed */ } };
+
     async function skRefreshPane() {
       const box = $('skList');
       if (!box) return;

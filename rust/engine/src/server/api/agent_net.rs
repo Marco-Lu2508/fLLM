@@ -20,7 +20,6 @@ const DEFAULT_CHARS: usize = 20_000;
 const MAX_CHARS: usize = 100_000;
 const DEFAULT_RESULTS: usize = 8;
 const MAX_RESULTS: usize = 20;
-const SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
 /// `FLLM_AGENT_ALLOW_PRIVATE_URLS=1` lets the network tools reach loopback and private addresses.
@@ -301,9 +300,9 @@ pub(super) fn html_to_text(html: &str) -> String {
 /// One search result.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct SearchHit {
-    title: String,
-    url: String,
-    snippet: String,
+    pub(super) title: String,
+    pub(super) url: String,
+    pub(super) snippet: String,
 }
 
 /// The target of a result link: the search engine wraps it as `/l/?uddg=<encoded url>`.
@@ -352,7 +351,7 @@ fn parse_search_results(html: &str, limit: usize) -> Vec<SearchHit> {
 }
 
 /// The hits of a search page, or the reason there are none.
-fn interpret_search(status: u16, html: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
+pub(super) fn interpret_search(status: u16, html: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
     let blocked = "web search is blocked or rate limited by the search endpoint right now; try again later, or fetch a specific URL with web_fetch";
     if matches!(status, 202 | 403 | 418 | 429 | 503) {
         return Err(blocked.into());
@@ -374,18 +373,7 @@ fn interpret_search(status: u16, html: &str, limit: usize) -> Result<Vec<SearchH
     Err("the search page has no results in a format this tool understands (the endpoint may have changed or blocked the request)".into())
 }
 
-async fn search(query: &str, limit: Option<usize>) -> Result<Vec<SearchHit>, String> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err("the query is empty".into());
-    }
-    let limit = limit.unwrap_or(DEFAULT_RESULTS).clamp(1, MAX_RESULTS);
-    let url = reqwest::Url::parse_with_params(SEARCH_ENDPOINT, [("q", query)]).map_err(|e| e.to_string())?;
-    // the search endpoint is public: the private-address switch is never needed for it
-    let page = fetch_raw(url.as_str(), "text/html", false).await?;
-    interpret_search(page.status, &String::from_utf8_lossy(&page.body), limit)
-}
-
+#[cfg(test)]
 fn format_hits(hits: &[SearchHit]) -> String {
     if hits.is_empty() {
         return "no results".into();
@@ -401,6 +389,12 @@ fn size_arg(args: &Value, key: &str) -> Option<usize> {
     args.get(key).and_then(Value::as_u64).map(|n| usize::try_from(n).unwrap_or(usize::MAX))
 }
 
+/// A public page as text, for other features that fetch a file (a skill from a URL). Same checks as `web_fetch`.
+pub(super) async fn fetch_public_text(url: &str) -> Result<String, String> {
+    let page = fetch_page(url, Some(200_000), allow_private_from_env()).await?;
+    Ok(page.text)
+}
+
 /// Runs a network tool of the agent; `None` when `name` is not one of them.
 pub(super) async fn run_tool(name: &str, args: &Value) -> Option<Result<String, String>> {
     match name {
@@ -410,7 +404,16 @@ pub(super) async fn run_tool(name: &str, args: &Value) -> Option<Result<String, 
         }),
         "web_search" => Some(match args.get("query").and_then(Value::as_str) {
             None => Err("the argument 'query' is missing".into()),
-            Some(query) => search(query, size_arg(args, "limit")).await.map(|hits| format_hits(&hits)),
+            Some(query) => {
+                // every engine the user configured (DuckDuckGo and Wikipedia need no setup)
+                let limit = size_arg(args, "limit").unwrap_or(DEFAULT_RESULTS).clamp(1, MAX_RESULTS);
+                let value = super::websearch::search(query, limit).await;
+                if value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                    Ok(super::websearch::as_text(&value))
+                } else {
+                    Err(value.get("error").and_then(Value::as_str).unwrap_or("the search failed").to_owned())
+                }
+            }
         }),
         _ => None,
     }
@@ -432,23 +435,6 @@ pub(in crate::server) async fn fetch_route(Json(body): Json<Value>) -> Response 
     }
 }
 
-/// `POST /api/studio/web/search`: `{query, limit?}` answers `{ok, results: [{title, url, snippet}]}` or
-/// `{ok: false, error}`.
-pub(in crate::server) async fn search_route(Json(body): Json<Value>) -> Response {
-    if agent_disabled() {
-        return disabled_reply();
-    }
-    let Some(query) = body.get("query").and_then(Value::as_str) else {
-        return api_error(StatusCode::BAD_REQUEST, "the field 'query' is missing");
-    };
-    match search(query, size_arg(&body, "limit")).await {
-        Ok(hits) => {
-            let results: Vec<Value> = hits.iter().map(|h| json!({"title": h.title, "url": h.url, "snippet": h.snippet})).collect();
-            Json(json!({"ok": true, "results": results})).into_response()
-        }
-        Err(e) => Json(result_json(Err(e))).into_response(),
-    }
-}
 
 #[cfg(test)]
 mod tests {

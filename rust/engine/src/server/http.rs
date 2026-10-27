@@ -231,6 +231,15 @@ fn is_providers_path(path: &str) -> bool {
 /// Skills (files of the user and of workspaces), the copy of the chat text used for search and the scheduled tasks
 /// (prompts, folders and results): personal data and, for tasks, prompts that run on this machine, so even reads
 /// stay on this machine.
+/// Hooks and plugins run shell commands, the runtime route switches the sandbox and the permission questions off, own sub-agents and the
+/// prices change what the agent does, and the embeddings and search-engine settings name addresses the server calls: configuration of the
+/// agent, so this machine only, reads included, with or without an API key.
+fn is_agent_config_path(path: &str) -> bool {
+    ["/api/studio/hooks", "/api/studio/plugins", "/api/studio/runtime", "/api/studio/agents", "/api/studio/prices", "/api/studio/embeddings", "/api/studio/embed", "/api/studio/search"]
+        .iter()
+        .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
+}
+
 fn is_personal_path(path: &str) -> bool {
     path.starts_with("/api/studio/sessions/")
         || ["/api/studio/skills", "/api/studio/schedule"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
@@ -256,12 +265,13 @@ pub fn studio_admin_blocked(
         // the model providers hold keys of other services and relay requests with them: same rule, reads included
         || is_providers_path(path)
         || is_personal_path(path)
+        || is_agent_config_path(path)
         // the NPU setup downloads a native runtime that the server loads afterwards, and its removal deletes files: never from another machine
         || path == "/api/studio/npu/setup"
         // the remembered notes about the user are personal: this machine only, reads included
         || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path) || is_personal_path(path) || path == "/api/studio/memory";
+    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)
@@ -698,6 +708,30 @@ mod studio_gate_tests {
         // a name that resolves to 127.0.0.1 (DNS rebinding), even with a matching origin
         assert!(studio_admin_blocked(false, &post, PULL, peer, &headers("rebind.example:8000", Some("http://rebind.example:8000"))));
         assert!(studio_admin_blocked(false, &post, PULL, peer, &headers("rebind.example:8000", None)));
+    }
+
+    #[test]
+    fn the_configuration_of_the_agent_stays_on_this_machine_even_with_an_api_key() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        for (method, path) in [
+            (Method::POST, "/api/studio/hooks"),
+            (Method::POST, "/api/studio/hooks/test"),
+            (Method::POST, "/api/studio/plugins"),
+            (Method::DELETE, "/api/studio/plugins"),
+            (Method::GET, "/api/studio/plugins"),
+            (Method::POST, "/api/studio/runtime"),
+            (Method::POST, "/api/studio/agents"),
+            (Method::POST, "/api/studio/embeddings"),
+            (Method::POST, "/api/studio/search/engines"),
+            (Method::POST, "/api/studio/agent/worktree"),
+        ] {
+            for auth in [false, true] {
+                assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} auth {auth}");
+            }
+            let local = headers("127.0.0.1:8000", None);
+            assert!(!studio_admin_blocked(false, &method, path, addr("127.0.0.1:1"), &local), "{method} {path}");
+        }
     }
 
     #[test]

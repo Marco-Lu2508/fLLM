@@ -424,6 +424,134 @@
     function compactTools(tools, keepRare) {
       return tools.filter((t) => keepRare || !RARE_TOOLS.test(t.function.name)).map(compactTool);
     }
+    // ---- automatic approval: what a run may do without asking ------------------------------------------
+    // A fixed table, not a model: every command is looked up. Reading, building and testing are harmless; anything that
+    // deletes, installs, pushes or writes through a redirect is not. Auto approval never overrides a deny rule and never
+    // applies to network or MCP calls — only to shell commands and only when the switch is on.
+    const HARMLESS = {
+      // reading
+      ls: [], cat: [], head: [], tail: [], wc: [], pwd: [], echo: [], printf: [], date: [], whoami: [], uname: [], which: [], type: [],
+      sort: [], uniq: [], cut: [], tr: [], basename: [], dirname: [], realpath: [], stat: [], file: [], du: [], df: [], tree: [], jq: [],
+      grep: [], rg: [], find: [], sed: [], awk: [], diff: [], cmp: [], column: [], seq: [], hostname: [],
+      python3: [], python: [], node: [],
+      // building and testing
+      cargo: ['build', 'check', 'test', 'clippy', 'fmt', 'doc', 'metadata', 'tree', 'bench', 'locate-project', '--version', '-V'],
+      rustc: ['--version', '-V', '--explain'],
+      rustfmt: ['--check', '--version'],
+      npm: ['run', 'test', 'ls', '--version', '-v'],
+      npx: ['tsc', 'prettier'],
+      tsc: [], prettier: ['--check'], eslint: [], pytest: [], pyright: [],
+      go: ['build', 'test', 'vet', 'fmt', 'version', 'list', 'env'],
+      make: [], cmake: ['--build', '--version'],
+      deno: ['check', 'test', 'fmt', 'lint', '--version'],
+      bun: ['test', 'run', '--version'],
+      // git, reading and staging only
+      git: ['status', 'diff', 'log', 'show', 'add', 'blame', 'describe', 'rev-parse', 'ls-files', 'shortlog'],
+    };
+    // these subcommands of git change history or the working tree
+    const GIT_DANGER = new Set(['push', 'reset', 'clean', 'rebase', 'merge', 'cherry-pick', 'revert', 'checkout', 'switch', 'restore', 'rm', 'mv', 'gc', 'prune', 'filter-branch', 'am']);
+    const DANGER_WORDS = /\b(rm|rmdir|mv|cp|chmod|chown|chgrp|dd|mkfs\w*|truncate|shred|shutdown|reboot|halt|poweroff|kill|pkill|killall|mount|umount|systemctl|service|docker|podman|kubectl|helm|terraform|ansible|apt|apt-get|yum|dnf|pacman|brew|snap|flatpak|pip|pip3|npm|yarn|pnpm|curl|wget|nc|netcat|ncat|ssh|scp|sftp|rsync|tee|sudo|su|doas|chroot|insmod|modprobe|ln|useradd|passwd|crontab|at|nohup|setsid|eval|exec|source)\b/;
+
+    /** Splits a command line into the parts that run on their own (&&, ||, ; and the two sides of a pipe). */
+    function commandParts(command) {
+      return String(command || '').split(/&&|\|\||;|\|/).map((p) => p.trim()).filter(Boolean);
+    }
+
+    /** The program of one part, without leading NAME=value pairs and without a path. */
+    function commandHead(part) {
+      const words = part.split(/\s+/).filter(Boolean);
+      let i = 0;
+      while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i += 1;
+      const word = words[i] || '';
+      return { head: word.split('/').pop(), args: words.slice(i + 1), rest: words.slice(i) };
+    }
+
+    /**
+     * Is this command harmless? `{verdict: 'safe'|'risky', reason}`. Everything is decided by the table above plus four
+     * hard rules: a redirect that is not /dev/null, a heredoc, a substitution with something risky inside, and any part
+     * whose program is not on the list.
+     */
+    function classifyCommand(command) {
+      const text = String(command || '').trim();
+      if (!text) return { verdict: 'risky', reason: 'the command is empty' };
+      // one simple line: a second line, a background job, a subshell, a group or a process substitution can hide a program
+      if (/[\r\n]/.test(text)) return { verdict: 'risky', reason: 'it has more than one line' };
+      if (/(^|[^&|>\d])&($|[^&>])/.test(text.replace(/"[^"]*"|'[^']*'/g, ''))) return { verdict: 'risky', reason: 'it starts a background job' };
+      if (/\$\{|<\(|>\(|(^|[\s;|&])[({]/.test(text.replace(/"[^"]*"|'[^']*'/g, ''))) return { verdict: 'risky', reason: 'it uses a group, a subshell or an expansion' };
+      const redirect = text.match(/(^|\s)(\d?)>>?\s*([^\s|&;]+)/);
+      if (redirect && redirect[3] !== '/dev/null') {
+        return { verdict: 'risky', reason: `it writes into ${redirect[3]} through a redirect` };
+      }
+      if (/<<-?\s*['"]?[A-Za-z_]/.test(text)) return { verdict: 'risky', reason: 'it uses a heredoc, which writes a file or feeds a program' };
+      for (const m of text.matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
+        const inner = classifyCommand(m[1] || m[2] || '');
+        if (inner.verdict !== 'safe') return { verdict: 'risky', reason: `inside the substitution: ${inner.reason}` };
+      }
+      const parts = commandParts(text);
+      if (!parts.length) return { verdict: 'risky', reason: 'there is nothing to run' };
+      for (const part of parts) {
+        const { head, args, rest } = commandHead(part);
+        if (!head) continue;
+        if (!Object.prototype.hasOwnProperty.call(HARMLESS, head)) {
+          return { verdict: 'risky', reason: `\`${head}\` is not on the list of harmless programs` };
+        }
+        if (head === 'git') {
+          // options before the subcommand (`-c`, `-C`, `--exec-path`, `--git-dir`) can configure or redirect it
+          if (args.length && args[0].startsWith('-')) return { verdict: 'risky', reason: '`git` is given an option before its command' };
+          const sub = args.find((a) => !a.startsWith('-')) || '';
+          if (GIT_DANGER.has(sub)) return { verdict: 'risky', reason: `\`git ${sub}\` changes history or the working tree` };
+          if (args.some((a) => /^--(output|ext-diff|textconv|open-files-in-pager|exec-path|upload-pack|receive-pack)\b/.test(a) || a === '-o')) {
+            return { verdict: 'risky', reason: 'a `git` option writes a file or starts a program' };
+          }
+        }
+        // sed is allowed to print a range of lines, nothing else (its scripts can write files with `w` and run programs with `e`)
+        if (head === 'sed' && !/^sed\s+-n\s+(['"])\d+(,(\d+|\$))?p\1(\s+[^\s-]\S*)+$/.test(part.trim().replace(/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/, ''))) {
+          return { verdict: 'risky', reason: '`sed` is only approved for `sed -n \'3,9p\' file`' };
+        }
+        if (head === 'sort' && args.some((a) => a === '-o' || a.startsWith('-o') || a.startsWith('--output') || a.startsWith('--compress-program'))) {
+          return { verdict: 'risky', reason: '`sort` would write a file or start a program' };
+        }
+        if (head === 'rg' && args.some((a) => a.startsWith('--pre') || a === '--hostname-bin')) return { verdict: 'risky', reason: '`rg` would start a program' };
+        if (head === 'find' && args.some((a) => ['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'].includes(a))) {
+          return { verdict: 'risky', reason: '`find` would run a program or write or delete files' };
+        }
+        if (head === 'awk' && /system\(|getline|\|\s*"|print\s*>|printf\s*>/.test(args.join(' '))) return { verdict: 'risky', reason: '`awk` would start a program or write a file' };
+        // interpreters run whatever they are given, so only a test runner and --version pass
+        if (head === 'python3' || head === 'python') {
+          const at = args.indexOf('-m');
+          const module = at >= 0 ? args[at + 1] || '' : '';
+          const test = ['pytest', 'unittest', 'json.tool', 'py_compile', 'compileall'].includes(module);
+          const version = args.includes('--version') || args.includes('-V');
+          if (!test && !version) return { verdict: 'risky', reason: `\`${head}\` would run code that is no test` };
+        }
+        if (head === 'node') {
+          const version = args.includes('--version') || args.includes('-v');
+          const check = args.includes('--check');
+          if (!version && !check) return { verdict: 'risky', reason: '`node` would run code that is no syntax check' };
+        }
+        const allowed = HARMLESS[head];
+        if (allowed.length) {
+          const sub = args.find((a) => !a.startsWith('-')) || args.find((a) => a.startsWith('-')) || '';
+          const ok = allowed.some((a) => sub === a || sub.startsWith(`${a}=`) || (a.startsWith('-') && sub === a));
+          if (!ok) return { verdict: 'risky', reason: `\`${head} ${sub}\` is not on the list of harmless subcommands` };
+        }
+        if (DANGER_WORDS.test(args.join(' ').replace(/"[^"]*"|'[^']*'/g, ''))) {
+          return { verdict: 'risky', reason: `\`${head}\` is given something that changes files or the system` };
+        }
+      }
+      return { verdict: 'safe', reason: 'reads, builds or tests only' };
+    }
+
+    /**
+     * The verdict for a whole call: only shell commands can be approved automatically, and only when they are harmless.
+     * `category` is the permission category, `name` the tool.
+     */
+    function autoVerdict(category, name, subject) {
+      if (category !== 'bash') return { verdict: 'risky', reason: `a ${category} call is never approved on its own` };
+      if (name !== 'bash') return { verdict: 'risky', reason: `\`${name}\` is not a plain shell command` };
+      return classifyCommand(subject);
+    }
+
     // @pure-end
 
     // ---- tools ----------------------------------------------------------------------------------------
@@ -449,6 +577,10 @@
       workspace: null, // { root, name, git_branch, os, shell }
       perm: localStorage.getItem('fllm.studio.perm') || 'ask',
       alwaysAllow: new Set(),
+      // harmless commands (reading, building, testing) run without a question; the switch is in /autoapprove
+      autoApprove: localStorage.getItem('fllm.studio.autoapprove') !== '0',
+      // turbo comes from the server (/api/studio/runtime): no questions at all, sandbox off
+      turbo: false,
       messages: [], // what the model sees
       view: [], // what the user sees
       todos: [],
@@ -549,10 +681,41 @@
       code.registry = map;
     }
 
+    /** The folder the coding agent works in, for the settings pages (sub-agents). */
+    window.fllmCodeWorkspace = () => (code.workspace && code.workspace.root) || null;
+
+    /** Custom sub-agents of this folder (`agents/*.md`, scope user and workspace). */
+    async function loadAgents() {
+      const root = code.workspace && code.workspace.root;
+      const query = root ? `?workspace=${encodeURIComponent(root)}` : '';
+      try {
+        const res = await apiFetch(`/api/studio/agents${query}`);
+        if (res.ok) {
+          const data = await res.json();
+          code.agents = Array.isArray(data.agents) ? data.agents : [];
+        }
+      } catch { /* no custom agents: the two built-in types stay */ }
+    }
+
+    /** The sub-agent by name: a custom one (`agents/*.md`) or a built-in type (`explore`, `general`). */
+    const customAgent = (name) => (code.agents || []).find((a) => a.name === name) || null;
+    const agentNames = () => ['explore', 'general', ...(code.agents || []).map((a) => a.name)];
+
     const readOnlyTool = (entry) => entry.permission === 'read' && entry.source !== 'client';
     const toolListFor = (plan) => [...code.registry.values()]
       .filter((e) => !plan || readOnlyTool(e) || e.source === 'client')
-      .map((e) => ({ type: 'function', function: { name: e.name, description: e.def.description, parameters: e.def.parameters } }));
+      .map((e) => {
+        // the task tool offers the custom agents of this folder as well
+        if (e.name === 'task' && (code.agents || []).length) {
+          const names = agentNames();
+          const extra = (code.agents || []).map((a) => `${a.name}${a.description ? ` (${a.description})` : ''}`).join('; ');
+          const parameters = JSON.parse(JSON.stringify(e.def.parameters));
+          parameters.properties.agent.enum = names;
+          parameters.properties.agent.description = `explore (default): read and search only. general: may also edit and run commands. Custom agents of this folder: ${extra}.`;
+          return { type: 'function', function: { name: e.name, description: e.def.description, parameters } };
+        }
+        return { type: 'function', function: { name: e.name, description: e.def.description, parameters: e.def.parameters } };
+      });
     /** Contexts of 8192 tokens or less get the compact prompt and tool forms. */
     const compactMode = () => ctxMax() <= 8192;
     const toolList = () => {
@@ -591,9 +754,30 @@
       return true;
     }
 
+    /** Sandbox und Turbo kommen vom Server, damit Seite und Prozess dasselbe meinen. */
+    async function loadRuntime() {
+      try {
+        const res = await apiFetch('/api/studio/runtime');
+        const data = await res.json();
+        code.turbo = Boolean(data.turbo);
+        code.sandbox = data.sandbox;
+        code.sandboxAvailable = Boolean(data.sandbox_available);
+      } catch {
+        code.turbo = false;
+      }
+      renderCode();
+    }
+    window.fllmRuntimeChanged = (data) => {
+      code.turbo = Boolean(data.turbo);
+      code.sandbox = data.sandbox;
+      code.sandboxAvailable = Boolean(data.sandbox_available);
+      codeNotice(`Runtime: sandbox ${code.sandbox}${code.turbo ? ' · turbo on (no questions)' : ''}`);
+      renderCode();
+    };
+
     /** Everything that belongs to the opened folder: instructions, tools, commands, rules, last session. */
     async function onWorkspaceOpened() {
-      await Promise.all([loadInstructions(), loadRegistry(), loadCustomCommands(), loadGitState()]);
+      await Promise.all([loadInstructions(), loadRegistry(), loadAgents(), loadCustomCommands(), loadGitState(), loadRuntime()]);
       loadRules();
       restoreCodeSession();
       refreshChanges();
@@ -707,9 +891,26 @@
         const r = await toolCall('read_file', { path: c.path, limit: 4 }).catch(() => null);
         if (r?.ok) c.description = parseCommandFile(r.output.replace(/^\s*\d+\t/gm, '')).description;
       }
+      // commands that an installed plugin brings; your own command of the same name wins
+      try {
+        const res = await apiFetch('/api/studio/plugins/commands');
+        if (res.ok) {
+          const data = await res.json();
+          for (const c of data.commands || []) {
+            if (code.custom.some((x) => x.name === c.name)) continue;
+            code.custom.push({ name: c.name, description: c.description || '', plugin: c.plugin });
+          }
+        }
+      } catch { /* no plugins installed */ }
     }
 
     async function readCustomCommand(c) {
+      if (c.plugin) {
+        const res = await apiFetch(`/api/studio/plugins/command?plugin=${encodeURIComponent(c.plugin)}&name=${encodeURIComponent(c.name)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error((data.error && data.error.message) || 'The command of the plugin could not be read.');
+        return data.body;
+      }
       const r = await toolCall('read_file', { path: c.path, limit: 2000 });
       if (!r?.ok) throw new Error(r?.error || 'The command file could not be read.');
       return parseCommandFile(r.output.replace(/^\s*\d+\t/gm, '')).body;
@@ -988,8 +1189,9 @@
       todo_read: () => ['Read task list', ''],
       ask_user: (a) => ['Question', a.question || ''],
       spawn_agent: (a) => ['Sub-agent', a.description || ''],
-      task: (a) => [`Sub-agent (${a.agent === 'general' || a.mode === 'full' ? 'general' : 'explore'})`, a.description || ''],
+      task: (a) => [`Sub-agent (${a.agent || (a.mode === 'full' ? 'general' : 'explore')})`, a.description || ''],
       patch: (a) => ['Apply patch', patchPaths(a.patch).join(', ')],
+      review: (a) => [a.security ? 'Security review' : 'Code review', a.scope || 'diff'],
       diagnostics: (a) => ['Check code', a.path || 'project'],
       memory: (a) => [`Memory ${a.action || 'list'}`, `${a.scope || 'workspace'}${a.text ? `: ${a.text}` : ''}`],
     };
@@ -1086,6 +1288,7 @@
               <span class="tool-verb">${escapeHtml(verb)}</span>
               <span class="tool-target mono">${escapeHtml(target)}</span>${progress}
             </summary>
+            ${item.autoNote ? `<div class="tool-auto" style="font-size:11px;color:var(--muted-foreground);padding:2px 0 0 22px;">Approved on its own: ${escapeHtml(item.autoNote)}</div>` : ''}
             ${hasDetail ? `<div class="tool-body">${body}</div>` : ''}
           </details>
           ${ask}
@@ -1337,6 +1540,7 @@
     // ---- permissions ----------------------------------------------------------------------------------
     /** 'deny' (a rule says no), 'allow', or 'ask'. */
     function authorize(entry, args) {
+      if (code.turbo) return 'allow'; // turbo: no question, no rule
       if (entry.source === 'client') return 'allow';
       const { cat, subjects } = permissionInfo(entry, args);
       const rules = parsedRules();
@@ -1423,7 +1627,7 @@
     async function streamAssistant(item, ctx) {
       const p = getSampler();
       const body = {
-        model: state.selectedModel || state.status?.model?.name || 'tiny',
+        model: ctx.model || state.selectedModel || state.status?.model?.name || 'tiny',
         messages: [{ role: 'system', content: ctx.system }, ...ctx.messages],
         stream: true, stream_options: { include_usage: true },
         temperature: Math.min(p.temperature, 0.4), top_p: 0.9,
@@ -1475,6 +1679,7 @@
         }
         if (choice?.finish_reason) finish = choice.finish_reason;
         if (chunk.usage?.total_tokens) ctx.onUsage?.(chunk.usage.total_tokens);
+        if (chunk.usage && !ctx.child && typeof window.fllmUsageRecord === 'function') window.fllmUsageRecord(body.model, chunk.usage);
         if (chunk.usage?.prompt_tokens) code.calib = Math.min(2, Math.max(0.7, chunk.usage.prompt_tokens / Math.max(1, estimate)));
         if (chunk.timings?.predicted_per_second) item.tps = chunk.timings.predicted_per_second;
       });
@@ -1609,7 +1814,15 @@
       }
       if (isTask(call.name)) return runSubAgent(item, args, ctx);
 
-      const decision = authorize(entry, args);
+      let decision = authorize(entry, args);
+      if (decision === 'ask' && code.autoApprove) {
+        const info = permissionInfo(entry, args);
+        const verdict = autoVerdict(info.cat, entry.name, info.subject);
+        if (verdict.verdict === 'safe') {
+          decision = 'allow';
+          item.autoNote = verdict.reason;
+        }
+      }
       if (decision === 'deny') return finish('denied', 'Blocked by a permission rule.', 'Denied: a permission rule of the user blocks this action. Do not try it again; choose another way or ask the user.');
       if (decision === 'ask') {
         paintItem(item);
@@ -1648,19 +1861,38 @@
       if (!prompt) { item.status = 'error'; item.output = 'No prompt.'; paintItem(item); return 'Error: task needs a prompt.'; }
       if (parent.depth > 0) { item.status = 'denied'; item.output = 'Sub-agents cannot start sub-agents.'; paintItem(item); return 'Denied: sub-agents cannot start sub-agents.'; }
       args.description = String(args.description || 'Sub-task').slice(0, 80);
-      // "explore" reads only; "general" may change things unless the plan agent is working. (older calls said mode: "full")
-      const type = (args.agent === 'general' || args.mode === 'full') && code.perm !== 'plan' ? 'general' : 'explore';
+      // a custom agent (`agents/*.md`) brings its own instructions, tool list, model and step budget;
+      // otherwise "explore" reads only and "general" may change things (unless the plan agent is working).
+      const wantedAgent = String(args.agent || '').trim();
+      const custom = wantedAgent ? customAgent(wantedAgent) : null;
+      if (wantedAgent && !custom && wantedAgent !== 'explore' && wantedAgent !== 'general') {
+        item.status = 'error';
+        item.output = `There is no sub-agent "${wantedAgent}". Known: ${agentNames().join(', ')}.`;
+        paintItem(item);
+        return `Error: there is no sub-agent "${wantedAgent}". Known: ${agentNames().join(', ')}.`;
+      }
+      const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'patch', 'bash', 'bash_kill', 'memory']);
+      const allowed = custom && custom.tools && custom.tools.length ? new Set(custom.tools) : null;
+      const type = custom ? custom.name : ((args.agent === 'general' || args.mode === 'full') && code.perm !== 'plan' ? 'general' : 'explore');
       item.agentType = type;
-      const readOnly = type === 'explore';
+      const readOnly = custom
+        ? (allowed ? ![...allowed].some((t) => WRITE_TOOLS.has(t)) : true)
+        : type === 'explore';
       item.children = [];
       item.status = 'running';
       item.progress = 'starting';
       paintItem(item);
       const max = ctxMax();
+      const tools = allowed ? parent.tools.filter((t) => allowed.has(t.function.name)) : parent.tools;
+      const system = custom ? `${parent.system}\n\n[sub-agent "${custom.name}"]\n${custom.body || ''}` : parent.system;
+      const firstMessage = custom
+        ? `Sub-agent "${custom.name}"${custom.description ? ` — ${custom.description}` : ''}\n\n${args.prompt}`
+        : subAgentPrompt(args, type);
       const ctx = {
-        system: parent.system, tools: parent.tools, messages: [{ role: 'user', content: subAgentPrompt(args, type) }],
+        system, tools, messages: [{ role: 'user', content: firstMessage }],
         view: item.children, root: item, depth: 1, readOnly, signal: parent.signal, isStopped: parent.isStopped,
-        maxSteps: CHILD_MAX_STEPS, budget: Math.floor(max * 0.75), onUsage: null, child: true, history: [],
+        maxSteps: (custom && custom.max_steps) || CHILD_MAX_STEPS, model: (custom && custom.model) || null,
+        budget: Math.floor(max * 0.75), onUsage: null, child: true, history: [],
       };
       let report = '';
       try {
@@ -1964,7 +2196,7 @@
       ['rewind', 'Undo file changes back to a chosen point'], ['undo', 'Undo the last file change (/undo 3 for three)'],
       ['plan', 'Plan agent: read only'], ['build', 'Build agent'], ['ask', 'Build agent, ask before every change'], ['edit', 'Build agent, auto-edit'], ['agent', 'Switch between build and plan'], ['model', 'Pick the model'],
       ['skill', 'Turn this session into a reusable skill'], ['remember', 'Save a fact to memory (/remember global ...)'], ['memory', 'Show and edit the memory'], ['check', 'Check the code for errors (diagnostics)'],
-      ['diff', 'git diff'], ['status', 'git status'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['help', 'List the commands'],
+      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['help', 'List the commands'],
     ];
 
     /** Rows for a pick list of the user messages of this session, newest first. */
@@ -2051,7 +2283,118 @@
         case 'memory': code.sideOpen.memory = true; code.memDraft = null; renderCodeSide(true); $('codeSide').querySelector('[data-k="memory"]')?.scrollIntoView({ block: 'nearest' }); return true;
         case 'check': await userTool('diagnostics', argText ? { path: argText } : {}); return true;
         case 'diff': await userRun('git diff --stat && git diff', true); return true;
+        case 'review': {
+          const [scopeWord, base] = argText.split(/\s+/).filter(Boolean);
+          const scope = scopeWord === 'staged' ? 'staged' : (scopeWord === 'branch' ? 'branch' : 'diff');
+          await userTool('review', scope === 'branch' ? { scope, base: base || undefined } : { scope });
+          return true;
+        }
+        case 'security-review': case 'security': await userTool('review', { scope: 'diff', security: true }); return true;
+        case 'worktree': case 'wt': {
+          const [sub, name] = argText.split(/\s+/).filter(Boolean);
+          const action = sub === 'new' ? 'new' : (sub === 'leave' ? 'leave' : (sub === 'remove' ? 'remove' : 'list'));
+          if ((action === 'new' || action === 'remove') && !name) {
+            codeNotice('Usage: /worktree new <name> · /worktree leave · /worktree remove <name> · /worktree (list)');
+            return true;
+          }
+          try {
+            const res = await apiFetch('/api/studio/agent/worktree', { method: 'POST', body: { action, name } });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { codeNotice((data.error && data.error.message) || 'The worktree action failed.'); return true; }
+            if (action === 'new') {
+              await setWorkspace(data.path);
+              codeNotice(`Worktree ${data.branch} at ${data.path}. The agent works there now; /worktree leave brings you back, /worktree remove ${name} deletes it.`);
+            } else if (action === 'leave') {
+              await setWorkspace(data.path);
+              codeNotice(`Back in the main worktree (${data.path}${data.branch ? ', branch ' + data.branch : ''}).`);
+            } else if (action === 'remove') {
+              codeNotice(`Removed the worktree ${data.removed}. Its branch stays until you delete it.`);
+            } else {
+              const rows = (data.worktrees || []).map((w) => `${w.current ? '*' : ' '} ${w.name || '(main)'}  ${w.branch || ''}  ${w.path}`).join('\n');
+              codeNotice(rows || 'No worktrees. /worktree new <name> creates one.');
+            }
+          } catch (e) {
+            codeNotice(`The worktree action failed: ${(e && e.message) || e}`);
+          }
+          return true;
+        }
+        case 'batch': {
+          // one task in its own worktree: the main folder stays untouched and the result waits on a branch
+          const [name] = argText.split(/\s+/).filter(Boolean);
+          const task = argText.slice(name ? name.length : 0).trim();
+          if (!name || !task) { codeNotice('Usage: /batch <name> <task> — the task runs in a new worktree on branch <name>.'); return true; }
+          try {
+            const res = await apiFetch('/api/studio/agent/worktree', { method: 'POST', body: { action: 'new', name } });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { codeNotice((data.error && data.error.message) || 'The worktree could not be created.'); return true; }
+            await setWorkspace(data.path);
+            codeNotice(`Batch ${name}: working on branch ${data.branch} in ${data.path}.`);
+            await agentRun(task, '/batch');
+          } catch (e) {
+            codeNotice(`The batch could not start: ${(e && e.message) || e}`);
+          }
+          return true;
+        }
+        case 'turbo': {
+          const want = String(argText || '').trim().toLowerCase();
+          const next = want === 'on' ? true : want === 'off' ? false : !code.turbo;
+          if (next && !window.confirm('Turbo removes every permission question and the sandbox. Continue?')) return true;
+          try {
+            const res = await apiFetch('/api/studio/runtime', { method: 'POST', body: { turbo: next } });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { codeNotice((data.error && data.error.message) || 'The runtime could not be changed.'); return true; }
+            code.turbo = Boolean(data.turbo);
+            code.sandbox = data.sandbox;
+            codeNotice(code.turbo ? 'Turbo is on: every tool call runs, nothing asks, sandbox off.' : 'Turbo is off: the usual permission questions are back.');
+            renderCode();
+          } catch (e) {
+            codeNotice('The runtime could not be changed: ' + ((e && e.message) || e));
+          }
+          return true;
+        }
+        case 'sandbox': {
+          const want = String(argText || '').trim().toLowerCase();
+          if (!['off', 'workspace', 'strict'].includes(want)) {
+            codeNotice(`Sandbox is ${code.sandbox || 'unknown'}${code.sandboxAvailable ? '' : ' (bubblewrap does not work on this machine)'}. /sandbox off | workspace | strict`);
+            return true;
+          }
+          try {
+            const res = await apiFetch('/api/studio/runtime', { method: 'POST', body: { sandbox: want } });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { codeNotice((data.error && data.error.message) || 'The sandbox mode could not be changed.'); return true; }
+            code.sandbox = data.sandbox;
+            codeNotice(`Sandbox: ${data.sandbox}${data.sandbox_available ? '' : ' — but bubblewrap does not work here, so commands run unwrapped'}.`);
+          } catch (e) {
+            codeNotice('The sandbox mode could not be changed: ' + ((e && e.message) || e));
+          }
+          return true;
+        }
+        case 'autoapprove': {
+          const want = String(argText || '').trim().toLowerCase();
+          if (want === 'on' || want === 'off') {
+            code.autoApprove = want === 'on';
+            localStorage.setItem('fllm.studio.autoapprove', code.autoApprove ? '1' : '0');
+          }
+          codeNotice(`Automatic approval is ${code.autoApprove ? 'on' : 'off'}: ${code.autoApprove ? 'harmless commands (reading, building, testing) run without a question; everything else still asks.' : 'every command asks again.'}\n/autoapprove on · /autoapprove off`);
+          return true;
+        }
         case 'status': await userRun('git status -sb', true); return true;
+        case 'cost': case 'usage': {
+          const summary = typeof window.fllmUsageSummary === 'function' ? window.fllmUsageSummary() : null;
+          codeNotice(summary ? `${summary.text}. Prices and the full table: Settings > Usage and cost.` : 'No usage counted yet in this browser.');
+          return true;
+        }
+        case 'sandbox': {
+          try {
+            const res = await apiFetch('/api/studio/agent/sandbox');
+            const s = await res.json();
+            const state = s.active ? `active (mode ${s.mode})` : `not active (mode ${s.mode}): ${s.sandbox?.reason || 'unavailable'}`;
+            codeNotice(`Command sandbox: ${state}. Set FLLM_SANDBOX=off|workspace|strict and restart the server to change it.`);
+          } catch (e) {
+            codeNotice(`Could not read the sandbox state: ${(e && e.message) || e}`);
+          }
+          return true;
+        }
         case 'cd': case 'folder': if (rest.length) await setWorkspace(rest.join(' ')); else await pickWorkspace(); return true;
         case 'allow': case 'deny': {
           if (!parseRules(argText).length) { codeNotice(`Usage: /${name} category: pattern, for example /${name} bash: npm test*`); return true; }

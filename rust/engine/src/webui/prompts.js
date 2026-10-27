@@ -7,7 +7,7 @@
     const SP_KEY = 'fllm.studio.sysprompt.v1';
 
     // @pure-begin
-    const SP_LIMITS = { custom: 6000, compactContext: 12288, compactParams: 3.5e9 };
+    const SP_LIMITS = { custom: 6000, compactContext: 12288, compactParams: 3.5e9, tinyContext: 2048 };
 
     /** The model family, from the name, the architecture and the chat template of the loaded model. */
     function spFamily(model) {
@@ -27,11 +27,15 @@
       return 'generic';
     }
 
-    /** "compact" for small models and small contexts, else "full". */
+    /**
+     * "tiny" for a context so small that a full prompt would fill it, "compact" for small models and small contexts,
+     * else "full". Under 2048 tokens the prompt and the tool schemas together would leave no room for the answer.
+     */
     function spSize(model) {
       const m = model || {};
       const ctx = Number(m.max_context) || 4096;
       const params = Number(m.parameters) || 0;
+      if (ctx < SP_LIMITS.tinyContext) return 'tiny';
       return ctx < SP_LIMITS.compactContext || (params > 0 && params < SP_LIMITS.compactParams) ? 'compact' : 'full';
     }
 
@@ -94,6 +98,12 @@
       const compact = o.size === 'compact';
       const tools = o.tools || {};
       const lang = spLanguageName(o.locale);
+      // A context of a few hundred tokens has room for two lines of instruction and nothing else: no tool text, no
+      // family notes, no formatting rules. That is the difference between "an answer" and "the prompt does not fit".
+      if (o.size === 'tiny') {
+        return `You are a helpful assistant${o.local ? " running locally on the user's computer" : ''}. The date is ${spDate(o.now)}. ` +
+          `Answer in the language of the user (${lang} if unclear), be brief, and say so when you are unsure.`;
+      }
       const lines = [];
       lines.push(compact
         ? `You are a helpful assistant${o.local ? " running locally on the user's computer" : ''}. Today is ${spNow(o.now)}.`

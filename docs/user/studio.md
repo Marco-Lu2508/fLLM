@@ -117,6 +117,9 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   regenerate, delete. When an answer stopped at the token limit, *Continue* asks the model to go on and appends to the same message.
 * **Response style.** The *Style* button in the composer (Default, Concise, Explanatory, Formal, Casual) adds one short instruction to
   the system prompt of that chat.
+* **Rewind.** Every message has a rewind button (the clock): the conversation ends at that message. Nothing is deleted —
+  the messages below stay attached to the node and are only detached from the visible path, so the notice's *Undo* brings
+  them back, and a reload keeps the state. That is the chat counterpart of what the Code page does with files.
 * **Temporary chat.** The ghost button in the header starts a chat that is never saved: it is kept out of the chat list and of
   `localStorage`, a banner says so, and it is gone when you close it, open another chat or reload the page.
 * **Math and tables.** `$...$`, `$$...$$`, `\(...\)` and `\[...\]` are typeset by a small built-in renderer (fractions, powers,
@@ -216,6 +219,24 @@ still apply; the Plan agent can only start explore agents). Several started in o
 status. They have a step and context budget and stop when you stop the agent. All requests share the same system prompt and tool list,
 so the server can reuse its prompt cache.
 
+**Your own sub-agents.** Settings, *Sub-agents* defines further agents as Markdown files: `agents/<name>.md` in the Studio folder (all
+folders) or `.fllm/agents/<name>.md` in a workspace. The front matter holds `name`, `description`, `tools` (a comma-separated list of
+tool names; empty keeps the tools of the session), `model` (empty uses the model of the session, so one agent can run on another model or
+provider) and `max_steps`; the body is the instruction the sub-agent starts with. The `task` tool lists them by name, and an agent whose
+tool list contains no writing, command or memory tool is treated as read-only. The list is read when a folder is opened, so a new agent
+shows up without a restart.
+
+**Hooks.** Settings, *Hooks* attaches shell commands to five points of the loop: `pre_tool_call`, `post_tool_call`, `on_file_edit`,
+`on_session_start` and `on_session_end`. A hook gets one JSON object on stdin (`event`, `tool`, `arguments`, `workspace`) and runs in the
+workspace folder with your rights; its exit code decides: `0` passes and its output is added to the tool result as notes, `2` blocks the
+call and its stderr is the reason the model reads, any other code is reported as a failed hook without stopping the agent. A hook may
+also print `{"decision": "block", "reason": "..."}` or `{"context": "..."}`. The matcher is a comma-separated list of tool names, a
+prefix such as `edit*`, or empty for every tool; a timeout of 1 to 300 s per hook keeps a hanging command from blocking the turn. That is
+how a formatter runs after every edit, a guard refuses writes outside a folder, or a script records what the agent did — deterministically,
+instead of hoping the prompt is followed. The list lives in `hooks.json` next to `studio.json`; *Test* runs the matching hooks once with a
+sample payload. The routes are `GET`/`POST /api/studio/hooks` and `POST /api/studio/hooks/test`; the agents use
+`GET`/`POST`/`DELETE /api/studio/agents`.
+
 **Sessions.** Sessions of each folder are saved in the browser (up to 30) and get a short title from the model after the first answer.
 The side panel lists them with search, *Rename*, *Fork*, *Export* (a Markdown file with the messages and the tools used) and *Delete*.
 Hover a message of yours for *Fork* (a new session that continues from before that message; its text goes back into the input) and
@@ -242,13 +263,21 @@ plain Markdown lists (`- entry`), at most 100 entries of 400 characters each.
 
 Commands (type `/` for the list, with search): `/init`, `/compact`, `/resume`, `/fork`, `/revert`, `/rename`, `/export`, `/rewind` (undo
 file changes back to a chosen point), `/undo [n]`, `/plan`, `/build`, `/ask`, `/edit`, `/agent`, `/model`, `/remember`, `/memory`,
-`/check`, `/diff`, `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/clear`. Your own commands are Markdown files in
-`.fllm/commands/` of the folder: `review.md` becomes `/review`, an optional `description:` front matter line is shown in the list, and
+`/check`, `/diff`, `/review` (the changes with the findings of a fixed set of rules; `/review staged` and `/review branch <base>` too), `/security-review` (only the security rules), `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/clear`. Your own commands are Markdown files in
+`.fllm/commands/` of the folder: `review.md` becomes `/review` (a built-in command of the same name wins), an optional `description:`
+front matter line is shown in the list, and
 `$ARGUMENTS` (or `$1` ... `$9`) is replaced by what follows the command. Keyboard: Alt+B switches the agent, Alt+L picks a session,
 Esc stops, Mod+N starts a new session (all rebindable under Keyboard shortcuts).
 
 Commands started in the background appear in the *Background jobs* panel, where you can read their output and stop them. Requests of
 agent turns ask the server to constrain tool calls to valid ones (`tool_call_grammar`); servers that do not know it ignore it.
+
+**Sandbox.** The approval rules decide *whether* a command may run; the sandbox decides what it can reach once it runs. With
+`bwrap` (bubblewrap) installed, every `bash` command and every background job runs with the root filesystem mounted read-only, the
+workspace writable, a private `/tmp` and its own PID and IPC namespace; `FLLM_SANDBOX=strict` also takes the network away and
+`FLLM_SANDBOX=off` switches it off. The server checks at the first command whether bubblewrap really works (a test run, not just the
+binary); if it does not — a missing `bwrap`, or a kernel or container policy that forbids user namespaces — the command runs as before
+and `GET /api/studio/agent/sandbox` says why. Nothing is reported as sandboxed that is not; `/sandbox` shows the state.
 
 Safety: the agent tools are reachable from the machine fLLM runs on only, also when an API key is set. Paths cannot leave the folder
 (also through symbolic links; on Windows the drive letter and folder names are compared without regard to case). The agent can still run
@@ -324,8 +353,15 @@ installer of this system and start it (Windows: the setup program, Linux: the Ap
 
 Grouped as General, Appearance, Models (models folder, idle unload), Hardware (devices, the NPU card, a speed test of the loaded model, processor
 feature limit, memory speed, a processor check), Server and API (address, request limits, API keys, a tester), Logs (the latest
-server messages with refresh and copy), and under More: model details, text tools and ready-made examples for connecting Claude Code,
+server messages with refresh and copy), Usage and cost (tokens per model counted in this browser, with the prices you enter),
+and under More: model details, text tools and ready-made examples for connecting Claude Code,
 the OpenAI libraries and curl.
+
+**Usage and cost.** Every answer returns its token counts; the page adds them per model and keeps them in the browser
+(Settings, *Usage and cost*; `/cost` shows the summary in the Code page). A local model costs nothing and needs no entry.
+For a model behind a provider, add a price row — a pattern matched against the model name (the longest wins, `*` matches any
+tail, for example `gpt-6*`), dollars per million input and output tokens, and an optional note. Models without a row show
+tokens only: no dollar amount is invented. The rows live in `prices.json`; `GET`/`POST /api/studio/prices` are the routes.
 
 ## Tools (MCP)
 
@@ -336,6 +372,13 @@ edit or remove it. The list is saved in `mcp.json` next to `studio.json` in the 
 `{"mcpServers": {"name": {"command": "npx", "args": ["-y", "pkg"], "env": {"KEY": "value"}}}}`, so a file from another MCP client works as is.
 Edits to the file are picked up the next time the page or the API reads it. An optional `"timeout_seconds"` per server sets the limit for
 one tool call (default 60). A server that stops is started again on the next call, with a growing pause after repeated failures.
+
+**Remote servers.** A server can also be reached over HTTP (MCP "Streamable HTTP") instead of being started as a program:
+fill the *URL* field and leave the command empty. One POST per message; the answer arrives as JSON or as an event stream, and
+the `Mcp-Session-Id` the server hands out is sent with every later request. Extra headers go in the same form
+(`NAME=value` per line); a value may reference an environment variable as `${NAME}`, so a token does not have to be written
+into `mcp.json`. In the file that is `{"mcpServers": {"name": {"url": "https://...", "headers": {"Authorization": "Bearer ${MY_TOKEN}"}}}}`.
+A URL is refused unless it starts with `http://` or `https://`.
 
 **Warning:** an MCP server runs on this computer with your user rights. Only add servers you trust. Saved environment variable values are
 never sent back to the page.
@@ -391,6 +434,148 @@ a task can ask for a desktop notification while a page is open.
 Temporary chats are never copied.
 
 These routes (`/api/studio/skills`, `/api/studio/sessions/*`, `/api/studio/schedule*`) work only from this machine, reads included.
+
+## Plugins
+
+A plugin is a folder that adds several things at once, without copying anything into your own configuration:
+
+```
+plugins/<name>/plugin.json          {"name", "version", "description", "author"}
+plugins/<name>/skills/<skill>/SKILL.md
+plugins/<name>/agents/<name>.md     same front matter as your own sub-agents
+plugins/<name>/commands/<name>.md   your own slash commands (description in the front matter)
+plugins/<name>/hooks.json           the same shape as Settings > Hooks
+```
+
+Settings, *Plugins* installs a plugin from a local folder or from a repository (`git clone --depth 1`, with an optional
+branch; the clone gets `GIT_TERMINAL_PROMPT=0`, so it can never ask for a password, and only https, http, ssh, `git@` and
+`file://` addresses are accepted). The folder is copied into `plugins/`, lists what each plugin
+contributes and removes it again; removing the folder removes every contribution, because nothing was merged into your
+files. Contributions are read-only: a skill from your own folder wins over one of the same name, a plugin's sub-agents
+cannot be edited in place (copy the file into `agents/`), and its hooks appear in Settings > Hooks under *From plugins*
+with the plugin's name. A hook of a plugin gets `FLLM_PLUGIN_DIR` in its environment, so it can call the scripts that ship
+with the plugin. Installation refuses links, more than 5,000 files and more than 50 MB, and a plugin name has to be a
+lowercase slug. Routes: `GET`/`POST`/`DELETE /api/studio/plugins`, `GET /api/studio/plugins/commands`,
+`GET /api/studio/plugins/command?plugin=&name=`.
+
+## Worktrees
+
+A change can run in its own checkout on its own branch, while the main folder keeps its state: `/worktree new <name>`
+creates `git worktree add .fllm/worktrees/<name> -b <name>` and switches the agent there, `/worktree leave` goes back to
+the main worktree, `/worktree remove <name>` deletes the checkout (the branch stays), `/worktree` lists them. `/batch <name>
+<task>` is the same in one step: it makes the worktree and runs the task there, so a risky change never touches the main
+tree and you decide afterwards whether to merge the branch. `.fllm/worktrees/` is added to `.git/info/exclude`, so the
+worktrees never show up as untracked files. Everything goes through `git worktree`, never through a shell; the route is
+`POST /api/studio/agent/worktree` with `{action: new|list|leave|remove, name, branch}`.
+
+## Language servers
+
+The `lsp` tool asks a real language server instead of guessing: `diagnostics` for a file (types, imports, borrows —
+exactly what the server says, with file, line and column), `symbols` for a workspace-wide symbol search and `definition`
+for a position. It uses `rust-analyzer` for Rust, `typescript-language-server` for TS/JS, `pyright-langserver` or `pylsp`
+for Python, `gopls` for Go and `clangd` for C/C++ — whichever is first on `PATH`. Without a server the tool says so and
+names the ones that are installed; the `diagnostics` tool then still works, because it calls the compiler directly. Each
+call starts the server, asks and stops it, so the first answer of a big project takes as long as the server needs to
+index.
+
+## Document search with an embeddings server
+
+Documents are cut into passages and ranked by keyword (BM25) in the browser. Settings > *Search* can point at an
+embeddings server (`fllm-rs serve --encoder <model>`, or any OpenAI-compatible `/v1/embeddings`); then the ranking is
+hybrid: 60 % keyword and 40 % cosine, and a passage is also found when the question uses another word for the same thing
+(cosine has to reach 0.3 to count as a hit on its own). The vectors are computed once per chat and kept with the index;
+the *Test* button shows how many numbers an embedding has and how close two sentences are. Without an address the search
+stays keyword-only and says so — the chat server itself does not embed. The setting lives in `embeddings.json` next to
+`studio.json`; routes `GET`/`POST /api/studio/embeddings` and `POST /api/studio/embed`.
+
+## Sandbox and turbo
+
+Settings > *Runtime* decides how freely the app may work, and the choice is kept in `runtime.json`:
+
+- **sandbox** — `workspace` (system read-only, workspace writable, private `/tmp`, own PID namespace), `strict` (also no
+  network) or `off` (a plain shell). It needs `bwrap`; without it the command runs unwrapped and the page says so instead of
+  pretending. `FLLM_SANDBOX` in the service file wins over the page.
+- **turbo** — no permission questions at all: every tool call runs, deny rules and the sandbox included. It is a loud red
+  switch with a confirmation, it stays off until somebody turns it on, and `/turbo on|off` does the same from the agent.
+  `/sandbox off|workspace|strict` shows or sets the mode.
+
+The agent reads both from the server (`GET /api/studio/runtime`), so page and process cannot disagree.
+
+## Web search that needs no server
+
+Two engines work the moment the app starts: DuckDuckGo over its HTML endpoint and Wikipedia over its public API — no key, no
+instance, nothing to host. Settings > *Search* holds the list; a SearXNG instance or a Brave key can be added, and every
+engine is asked on each search, with the results merged by URL. The answer says per engine what happened (`DuckDuckGo: 8
+hit(s)`, `SearXNG: HTTP 403`), so a blocked engine never looks like "nothing found" — DuckDuckGo, for one, asks for a
+captcha on datacenter addresses. The *Test a search* button runs one real query. The engine list lives in `search.json`,
+the routes are `GET`/`POST /api/studio/search/engines` and `POST /api/studio/search`.
+
+## Skills that come with the app
+
+Settings > *Skills* has a library of six skills inside the binary (commit message, code review, debugging, tests first, SQL,
+release notes). One click writes one into your skills folder as a normal file you can edit. *Import from URL* fetches any
+`SKILL.md` over http(s) — a raw GitHub link, for example — and stores it under its front-matter name.
+
+## Automatic approval
+
+Asking a question for `ls` and `git status` costs attention, so harmless commands run without one: reading (`ls`, `cat`,
+`rg`, `find`, `jq`, `sed`, `awk`), building and testing (`cargo build/check/test/clippy/fmt`, `npm run`, `npm test`, `tsc`,
+`pytest`, `go build/test/vet`, `make`, `deno`, `bun`) and git reading or staging (`git status/diff/log/show/branch/add/…`).
+The decision comes from a fixed table, not from a model: every part of the command line (split at `&&`, `||`, `;` and `|`)
+has to be on the list. Four hard rules then reject a command no matter what: a redirect into anything but `/dev/null`, a
+heredoc, a substitution (`$(…)`, backticks) whose inside is not harmless again, and any interpreter that would run
+arbitrary code (`python3 script.py`, `node -e`, `node script.js`). Instead of the table, `python3 -m pytest` and
+`node --check` pass, because they run tests or a syntax check.
+
+Everything else still asks: `rm`, `mv`, `git push/reset/clean/checkout`, package installs, `curl`/`wget`, `docker`,
+`sudo`, `kill`, and every network, MCP or edit call — auto approval only ever covers plain shell commands. A deny rule
+beats it. `/autoapprove` shows the switch, `/autoapprove on|off` sets it (kept in the browser). Approved calls say why in
+the tool card: “Approved on its own: reads, builds or tests only”.
+
+## Notebooks
+
+`read_file` shows a `.ipynb` as text cells; `notebook_edit` changes one cell without touching the JSON around it:
+`{path, action: replace|insert|delete, cell, source, cell_type}` with 1-based cell numbers. Replacing the source of a code
+cell clears its old output and its execution count, because they no longer match the code. `insert` takes the position the
+new cell gets (1 to count+1) and a `cell_type` of code, markdown or raw; `delete` refuses to remove the last cell. The tool
+answers with the cell list, so the model sees the notebook rather than the JSON, and it refuses anything that is not a
+`.ipynb`.
+
+## MCP resources
+
+Besides tools, an MCP server can publish resources (files, records, documents it owns). The MCP page has a *Resources*
+button per server that lists them with their uri and reads one on click; the model has the `mcp_resource` tool for the
+same thing: only `server` lists the resources, `server` plus `uri` reads one. A server that does not support resources is
+not an error — it simply has none. Routes: `POST /api/studio/mcp/resources` and `POST /api/studio/mcp/resource`.
+
+## Notes between sessions
+
+A chat lives in the browser, so one session cannot talk to another session that is closed. What works is a handover: the
+`session_note` tool (`{text, to?}`, or `{list: true}`) writes a note into `.fllm/messages.json` of the workspace, and the
+next chat shows it — the header has an *Inbox* button with the number of waiting notes, one click puts a note into the
+composer, another marks it done. `to` narrows a note to one chat title; empty means every chat of the workspace sees it.
+That is deliberately not a fake message bus: nothing runs in the background, the note simply waits. Routes:
+`GET`/`POST`/`DELETE /api/studio/agent/messages`.
+
+## The first start
+
+Install, open, and the chat screen says what is missing instead of showing an empty box: *No model loaded* with one
+button — *Download and start* — for the model the hub recommends for this machine (name, quantization and size are on the
+button, and it says when the file may not fit into the free memory). The download runs with progress, speed and an ETA,
+can be paused and resumed, and loads the model when it is done. The Models page does the same with the whole catalog,
+Hugging Face search and a field for a GGUF that is already on disk. Nothing has to be typed in a terminal, and nothing is
+downloaded without a click.
+
+## The desktop app
+
+The Tauri app in `desktop/` starts `fllm-rs studio` on a free port and shows that page in **its own window** — no
+browser, no address bar, no tab; the window is a webview of the running server, the way VS Code, Slack or Discord are built.
+It passes `--no-open` and removes `FLLM_OPEN_BROWSER` from the server's environment, so a browser cannot open even if the
+variable is set globally. The tray menu only handles the server and the window: *Open fLLM* brings the window forward,
+*Restart server* restarts it, *Open log folder*, *Quit*.
+
+The command line version is separate: `fllm-rs studio` opens your browser once (for people who downloaded only the binary
+or run it in Docker) and `fllm-rs studio --no-open` does not; `fllm-rs serve` opens nothing at all.
 
 ## Who may change things
 

@@ -287,6 +287,10 @@
       }
     }
 
+    // the start screen offers the recommended model; it calls this
+    window.fllmDownloadModel = downloadModel;
+    window.fllmRefreshHub = refreshHub;
+
     // ---- switching the loaded model ---------------------------------------------------------------------------
     const optionFields = { context: 'optContext', gpu_layers: 'optGpuLayers', threads: 'optThreads', kv_cache_type: 'optKv', max_seqs: 'optSeqs', device: 'optDevice', npu_mode: 'optNpuMode', speculative: 'optSpeculative', draft_model: 'optDraftModel', speculative_tokens: 'optSpecTokens' };
     // the NPU choice only matters when the model runs on the NPU
