@@ -166,7 +166,7 @@ impl Default for CpuBackend {
 
 impl CpuBackend {
     pub fn new() -> Self {
-        let all_quants = vec![
+        let mut all_quants = vec![
             QuantType::F32,
             QuantType::F16,
             QuantType::BF16,
@@ -197,6 +197,7 @@ impl CpuBackend {
             QuantType::Q4Z64,
             QuantType::Q4Z128,
         ];
+        all_quants.extend(QuantType::mlx_affine_common());
         Self {
             capabilities: BackendCapabilities {
                 name: "CPU".to_string(),

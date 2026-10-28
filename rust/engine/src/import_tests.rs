@@ -116,6 +116,8 @@ pub(crate) enum Kind {
     CtInt8,
     /// block-wise FP8 (`weight_scale_inv`), square tiles of this size
     Fp8Block(usize),
+    /// MLX affine quantization with this many bits and this group size (embeddings and head quantized as well, f16 scales)
+    Mlx(usize, usize),
 }
 
 /// A linear layer of the model: the entries of the quantized checkpoint and the dequantized F32 values.
@@ -191,6 +193,32 @@ fn quantized_linear(rng: &mut Rng, kind: Kind, prefix: &str, out: usize, inp: us
                 entries.push(Entry { name: format!("{prefix}.weight_shape"), dtype: "I64", shape: vec![2], bytes: shape });
             }
         }
+        Kind::Mlx(bits, group) => {
+            let codes: Vec<u32> = (0..out * inp).map(|_| rng.below(1 << bits) as u32).collect();
+            let half = |v: f32| half::f16::from_f32(v).to_f32();
+            let scales: Vec<f32> = (0..out * inp / group).map(|_| half(0.004 + 0.002 * rng.below(8) as f32)).collect();
+            let biases: Vec<f32> = (0..out * inp / group).map(|_| half(0.03 * rng.unit())).collect();
+            for r in 0..out {
+                for c in 0..inp {
+                    let g = r * (inp / group) + c / group;
+                    dense[r * inp + c] = codes[r * inp + c] as f32 * scales[g] + biases[g];
+                }
+            }
+            // MLX words: code i of a row at bit i * bits of a little-endian bit stream (written bit by bit)
+            let mut bytes = vec![0u8; out * inp * bits / 8];
+            for (i, &code) in codes.iter().enumerate() {
+                for b in 0..bits {
+                    if code >> b & 1 != 0 {
+                        let at = i * bits + b;
+                        bytes[at / 8] |= 1 << (at % 8);
+                    }
+                }
+            }
+            let f16s = |v: &[f32]| v.iter().flat_map(|s| half::f16::from_f32(*s).to_bits().to_le_bytes()).collect::<Vec<u8>>();
+            entries.push(Entry { name: format!("{prefix}.weight"), dtype: "U32", shape: vec![out, inp * bits / 32], bytes });
+            entries.push(Entry { name: format!("{prefix}.scales"), dtype: "F16", shape: vec![out, inp / group], bytes: f16s(&scales) });
+            entries.push(Entry { name: format!("{prefix}.biases"), dtype: "F16", shape: vec![out, inp / group], bytes: f16s(&biases) });
+        }
         Kind::Fp8Block(tile) => {
             let bytes: Vec<u8> = (0..out * inp).map(|_| (rng.below(2) as u8) << 7 | (0x28 + rng.below(16) as u8)).collect();
             let tiles = (out / tile) * (inp / tile);
@@ -220,6 +248,7 @@ fn quantization_config(kind: Kind) -> Value {
         Kind::CtInt8 => json!({"quant_method": "compressed-tensors", "format": "int-quantized", "ignore": ["lm_head"],
             "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 8, "type": "int", "symmetric": true,
             "strategy": "channel"}}}}),
+        Kind::Mlx(bits, group) => json!({"bits": bits, "group_size": group}),
         Kind::Fp8Block(t) => json!({"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [t, t]}),
     }
 }
@@ -265,10 +294,19 @@ pub(crate) fn build_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path
         r.push(Entry { name: e.name.clone(), dtype: e.dtype, shape: e.shape.clone(), bytes: e.bytes.clone() });
         q.push(e);
     };
-    let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
-    both(bf16_entry("model.embed_tokens.weight", &[VOCAB, HIDDEN], &embed), &mut q_entries, &mut r_entries);
-    let head: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| 0.3 * rng.unit()).collect();
-    both(bf16_entry("lm_head.weight", &[VOCAB, HIDDEN], &head), &mut q_entries, &mut r_entries);
+    if matches!(kind, Kind::Mlx(..)) {
+        // mlx-lm quantizes the embeddings and the head too
+        for (prefix, file) in [("model.embed_tokens", "model.embed_tokens.weight"), ("lm_head", "lm_head.weight")] {
+            let (entries, dense) = quantized_linear(&mut rng, kind, prefix, VOCAB, HIDDEN);
+            q_entries.extend(entries);
+            r_entries.push(f32_entry(file, &[VOCAB, HIDDEN], &dense));
+        }
+    } else {
+        let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
+        both(bf16_entry("model.embed_tokens.weight", &[VOCAB, HIDDEN], &embed), &mut q_entries, &mut r_entries);
+        let head: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| 0.3 * rng.unit()).collect();
+        both(bf16_entry("lm_head.weight", &[VOCAB, HIDDEN], &head), &mut q_entries, &mut r_entries);
+    }
     let norm: Vec<f32> = (0..HIDDEN).map(|_| 1.0 + 0.1 * rng.unit()).collect();
     both(bf16_entry("model.norm.weight", &[HIDDEN], &norm), &mut q_entries, &mut r_entries);
     for layer in 0..LAYERS {
@@ -429,6 +467,20 @@ fn compressed_tensors_int4_groups_become_q4z_and_match_the_reference() {
 }
 
 #[test]
+fn mlx_affine_checkpoints_stay_native_and_match_the_reference() {
+    for (n, (bits, group)) in [(4, 32), (2, 64), (3, 32), (5, 64), (6, 32), (8, 64)].into_iter().enumerate() {
+        let native = fllm_gguf_probe::MlxAffine { bits: bits as u32, group: group as u32, bf16: false }.type_id();
+        // embeddings and head are native too; both run the packed codes on the CPU against f32 activations
+        check(
+            Kind::Mlx(bits, group),
+            100 + n as u64,
+            &[("blk.0.attn_q.weight", native), ("blk.1.ffn_down.weight", native), ("output.weight", native), ("token_embd.weight", native)],
+            1e-4,
+        );
+    }
+}
+
+#[test]
 fn compressed_tensors_int8_become_q8_0_and_match_the_reference() {
     for kind in [Kind::CtInt8, Kind::CtPacked8] {
         // Q8_0 weights meet 8-bit activations on the CPU: that adds the usual ~1 % activation rounding
@@ -567,10 +619,19 @@ fn build_moe_pair(kind: Kind, seed: u64, quant_dir: &Path, ref_dir: &Path) {
         r.push(Entry { name: e.name.clone(), dtype: e.dtype, shape: e.shape.clone(), bytes: e.bytes.clone() });
         q.push(e);
     };
-    let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
-    both(bf16_entry("model.embed_tokens.weight", &[VOCAB, HIDDEN], &embed), &mut q_entries, &mut r_entries);
-    let head: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| 0.3 * rng.unit()).collect();
-    both(bf16_entry("lm_head.weight", &[VOCAB, HIDDEN], &head), &mut q_entries, &mut r_entries);
+    if matches!(kind, Kind::Mlx(..)) {
+        // mlx-lm quantizes the embeddings and the head too
+        for (prefix, file) in [("model.embed_tokens", "model.embed_tokens.weight"), ("lm_head", "lm_head.weight")] {
+            let (entries, dense) = quantized_linear(&mut rng, kind, prefix, VOCAB, HIDDEN);
+            q_entries.extend(entries);
+            r_entries.push(f32_entry(file, &[VOCAB, HIDDEN], &dense));
+        }
+    } else {
+        let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
+        both(bf16_entry("model.embed_tokens.weight", &[VOCAB, HIDDEN], &embed), &mut q_entries, &mut r_entries);
+        let head: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| 0.3 * rng.unit()).collect();
+        both(bf16_entry("lm_head.weight", &[VOCAB, HIDDEN], &head), &mut q_entries, &mut r_entries);
+    }
     let norm: Vec<f32> = (0..HIDDEN).map(|_| 1.0 + 0.1 * rng.unit()).collect();
     both(bf16_entry("model.norm.weight", &[HIDDEN], &norm), &mut q_entries, &mut r_entries);
     for layer in 0..LAYERS {
