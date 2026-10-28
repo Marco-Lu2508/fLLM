@@ -668,22 +668,29 @@ fn quantizing_on_load_matches_the_cached_conversion() {
 }
 
 #[test]
-fn only_verified_checkpoints_load_directly_without_being_asked() {
+fn every_supported_checkpoint_format_loads_directly_without_being_asked() {
     let check = |q: &str| fllm_checkpoint::ConfigCheck { architecture: "llama".into(), quantization: q.into() };
-    let st = vec!["model-00001-of-00002.safetensors".to_owned(), "model.safetensors.index.json".to_owned()];
-    for q in ["none", "awq", "gptq", "nvfp4", "fp8", "int4", "int8"] {
-        assert_eq!(direct_unsupported(&check(q), &st, 1000, &OutType::Preserve), None, "{q}");
+    for q in ["none", "awq", "gptq", "nvfp4", "fp8", "int4", "int8", "mxfp4", "bitsandbytes", "mlx", "exl2", "exl3"] {
+        assert_eq!(direct_unsupported(&check(q), 1000, &OutType::Preserve), None, "{q}");
     }
-    for q in ["exl2", "exl3", "mxfp4", "bitsandbytes", "mlx"] {
-        let why = direct_unsupported(&check(q), &st, 1000, &OutType::Preserve).unwrap();
-        assert!(why.contains("not verified"), "{q}: {why}");
-    }
-    let torch = vec!["pytorch_model.bin".to_owned()];
-    assert!(direct_unsupported(&check("none"), &torch, 1000, &OutType::Preserve).unwrap().contains("PyTorch"));
+    // a quantization the converter learns later is converted until a parity test proves its direct load
+    let why = direct_unsupported(&check("future-format"), 1000, &OutType::Preserve).unwrap();
+    assert!(why.contains("not verified"), "{why}");
     // a checkpoint much larger than any free memory stays on the file-based path, unless it is quantized on load
     let huge = u64::MAX / 2;
-    assert!(direct_unsupported(&check("none"), &st, huge, &OutType::Preserve).unwrap().contains("large"));
-    assert_eq!(direct_unsupported(&check("none"), &st, huge, &OutType::Quant("q4_k_m".into())), None);
+    for q in ["none", "mlx", "bitsandbytes", "exl2", "exl3", "gptq"] {
+        assert!(direct_unsupported(&check(q), huge, &OutType::Preserve).unwrap().contains("large"), "{q}");
+        assert_eq!(direct_unsupported(&check(q), huge, &OutType::Quant("q4_k_m".into())), None, "{q}");
+    }
+    // formats that expand to 16-bit weights count their expanded size against the free memory
+    let free = crate::devices::host_free_memory_bytes();
+    if free > 0 {
+        let between = free / 3;
+        assert_eq!(direct_unsupported(&check("none"), between, &OutType::Preserve), None);
+        assert_eq!(direct_unsupported(&check("gptq"), between, &OutType::Preserve), None);
+        assert!(direct_unsupported(&check("mlx"), between, &OutType::Preserve).unwrap().contains("expanded"));
+        assert!(direct_unsupported(&check("exl3"), between, &OutType::Preserve).unwrap().contains("expanded"));
+    }
     // modes: forced, automatic, off
     let opts = |direct, no_direct| ImportOptions { direct, no_direct, ..Default::default() };
     let _env = EnvGuard::set(&[("FLLM_NO_DIRECT_LOAD", None), ("FLLM_DIRECT_SAFETENSORS", None)]);
@@ -753,6 +760,53 @@ fn hub_checkpoint_loads_directly_after_the_download_without_a_gguf_file() {
     assert_eq!(prepare("acme/tiny-nvfp4", &offline).unwrap(), converted);
     assert_eq!(prepare("acme/tiny-nvfp4", &ImportOptions { offline: true, direct: true, ..Default::default() }).unwrap(), snapshot);
     for d in [quant, plain, cache, home] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn mxfp4_bitsandbytes_mlx_exl2_and_pytorch_checkpoints_load_directly_by_default() {
+    let cache = scratch("fmts-cache");
+    let _env = EnvGuard::set(&[("FLLM_CACHE", cache.to_str()), ("HF_HOME", cache.to_str()), ("FLLM_NO_DIRECT_LOAD", None), ("FLLM_DIRECT_SAFETENSORS", None)]);
+    for format in crate::import_tests::FORMATS {
+        let dir = scratch("fmts");
+        crate::import_tests::build_format(format, 23, &dir);
+        let path = prepare(dir.to_str().unwrap(), &direct_options()).unwrap();
+        assert_eq!(path, dir, "{format:?}: handed out as it is");
+        assert!(is_direct(&path), "{format:?}");
+        assert!(fs::read_dir(&cache).unwrap().next().is_none(), "{format:?}: nothing may be written to the cache");
+        let direct = open_model(&path).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+        // --no-direct-load converts it into the cache; the conversion is the same model
+        let converted = prepare(dir.to_str().unwrap(), &ImportOptions { no_direct: true, ..Default::default() }).unwrap();
+        assert!(converted.starts_with(local_cache_dir()) && !is_direct(&converted), "{format:?}: {}", converted.display());
+        crate::import_tests::assert_same_model(&direct, &MappedGguf::open(&converted).unwrap(), &format!("{format:?}"));
+        // a finished conversion is used by default from now on, and --direct ignores it again
+        assert_eq!(prepare(dir.to_str().unwrap(), &direct_options()).unwrap(), converted, "{format:?}");
+        assert_eq!(prepare(dir.to_str().unwrap(), &ImportOptions { direct: true, ..Default::default() }).unwrap(), dir, "{format:?}");
+        for entry in fs::read_dir(&cache).unwrap().flatten() {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+    let _ = fs::remove_dir_all(cache);
+}
+
+#[test]
+fn hub_repository_with_pytorch_weights_loads_directly_after_the_download() {
+    let dir = scratch("hubbin");
+    crate::import_tests::build_format(crate::import_tests::Format::TorchBin, 24, &dir);
+    let stub = Stub::start(repo_routes("acme", "tiny-bin", &dir_files(&dir)));
+    let (cache, home) = (scratch("hubbin-cache"), scratch("hubbin-home"));
+    let _env = hub_env(&stub, &cache, &home);
+    let snapshot = cache.join("models--acme--tiny-bin").join("snapshots").join(COMMIT);
+    let path = prepare("acme/tiny-bin", &ImportOptions::default()).unwrap();
+    assert_eq!(path, snapshot);
+    assert!(is_direct(&path));
+    assert!(snapshot.join("pytorch_model.bin").is_file());
+    assert_eq!(fs::read_dir(&snapshot).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".gguf")).count(), 0);
+    let direct = open_model(&path).unwrap();
+    assert!(direct.index().tensors.iter().any(|t| t.name == "blk.0.attn_q.weight"));
+    for d in [dir, cache, home] {
         let _ = fs::remove_dir_all(d);
     }
 }

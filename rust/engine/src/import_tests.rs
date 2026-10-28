@@ -734,6 +734,279 @@ fn direct_load_of_unquantized_checkpoints_gives_the_same_logits_as_the_converted
     }
 }
 
+// ---- checkpoint formats whose weights are expanded or repacked while loading ----
+
+/// Layouts with random codes (only the loaders are compared, so the codes need no meaning).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Format {
+    /// MLX affine: bits and group size.
+    Mlx(usize, usize),
+    BnbNf4,
+    BnbInt8,
+    /// compressed-tensors MXFP4.
+    Mxfp4,
+    Exl2,
+    /// Unquantized bf16 weights in a PyTorch ZIP archive `pytorch_model.bin`.
+    TorchBin,
+}
+
+fn u32_bytes(rng: &mut Rng, n: usize) -> Vec<u8> {
+    (0..n).flat_map(|_| (rng.next() as u32).to_le_bytes()).collect()
+}
+
+fn raw_entry(name: String, dtype: &'static str, shape: Vec<usize>, bytes: Vec<u8>) -> Entry {
+    Entry { name, dtype, shape, bytes }
+}
+
+fn f16_values(values: impl Iterator<Item = f32>) -> Vec<u8> {
+    values.flat_map(|v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect()
+}
+
+fn format_linear(rng: &mut Rng, format: Format, prefix: &str, out: usize, inp: usize) -> Vec<Entry> {
+    let w = format!("{prefix}.weight");
+    match format {
+        Format::Mlx(bits, group) => vec![
+            raw_entry(w, "U32", vec![out, inp * bits / 32], u32_bytes(rng, out * inp * bits / 32)),
+            raw_entry(format!("{prefix}.scales"), "F16", vec![out, inp / group], f16_values((0..out * inp / group).map(|_| 0.01 + 0.01 * rng.unit().abs()))),
+            raw_entry(format!("{prefix}.biases"), "F16", vec![out, inp / group], f16_values((0..out * inp / group).map(|_| 0.02 * rng.unit()))),
+        ],
+        Format::BnbNf4 => {
+            let n = out * inp;
+            let block = 64;
+            let state = json!({"quant_type": "nf4", "blocksize": block, "dtype": "bfloat16", "shape": [out, inp]}).to_string().into_bytes();
+            vec![
+                raw_entry(w.clone(), "U8", vec![n / 2, 1], (0..n / 2).map(|_| rng.below(256) as u8).collect()),
+                f32_entry(&format!("{w}.quant_map"), &[16], &(0..16).map(|i| (i as f32 - 7.5) / 8.0).collect::<Vec<_>>()),
+                f32_entry(&format!("{w}.absmax"), &[n / block], &(0..n / block).map(|_| 0.05 + 0.05 * rng.unit().abs()).collect::<Vec<_>>()),
+                raw_entry(format!("{w}.quant_state.bitsandbytes__nf4"), "U8", vec![state.len()], state),
+            ]
+        }
+        Format::BnbInt8 => vec![
+            raw_entry(w, "I8", vec![out, inp], (0..out * inp).map(|_| rng.below(256) as u8).collect()),
+            f32_entry(&format!("{prefix}.SCB"), &[out], &(0..out).map(|_| 0.2 + 0.2 * rng.unit().abs()).collect::<Vec<_>>()),
+        ],
+        Format::Mxfp4 => vec![
+            raw_entry(format!("{prefix}.weight_packed"), "U8", vec![out, inp / 2], (0..out * inp / 2).map(|_| rng.below(256) as u8).collect()),
+            raw_entry(format!("{prefix}.weight_scale"), "U8", vec![out, inp / 32], (0..out * inp / 32).map(|_| 118 + rng.below(6) as u8).collect()),
+        ],
+        Format::Exl2 => {
+            let widths = [2usize, 3, 4, 5, 6, 8];
+            let count = inp / 32;
+            let mut groups = Vec::new();
+            let mut rows = 0usize;
+            for g in 0..count {
+                groups.extend_from_slice(&[widths[g % 6] as u16, rows as u16]);
+                rows += widths[g % 6];
+            }
+            let mut perm: Vec<u32> = (0..inp as u32).collect();
+            for i in (1..inp).rev() {
+                perm.swap(i, rng.below(i as u64 + 1) as usize);
+            }
+            vec![
+                raw_entry(format!("{prefix}.q_weight"), "I32", vec![rows, out], u32_bytes(rng, rows * out)),
+                raw_entry(format!("{prefix}.q_groups"), "I16", vec![count * 2], groups.iter().flat_map(|v| v.to_le_bytes()).collect()),
+                raw_entry(format!("{prefix}.q_scale"), "I32", vec![count, out / 8], u32_bytes(rng, count * out / 8)),
+                raw_entry(format!("{prefix}.q_scale_max"), "F16", vec![count], f16_values((0..count).map(|_| 0.5))),
+                raw_entry(format!("{prefix}.q_invperm"), "I32", vec![inp], perm.iter().flat_map(|v| v.to_le_bytes()).collect()),
+            ]
+        }
+        Format::TorchBin => unreachable!("PyTorch weights are not quantized"),
+    }
+}
+
+/// CRC-32 (IEEE) as ZIP stores it.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// A ZIP archive without compression whose members start at multiples of 64 bytes, as `torch.save` writes them.
+fn write_stored_zip(path: &Path, members: &[(String, Vec<u8>)]) {
+    let mut out: Vec<u8> = Vec::new();
+    let mut central: Vec<u8> = Vec::new();
+    for (name, data) in members {
+        let offset = out.len() as u32;
+        let crc = crc32(data);
+        let after_name = out.len() + 30 + name.len();
+        let mut pad = (64 - after_name % 64) % 64;
+        if pad > 0 && pad < 4 {
+            pad += 64;
+        }
+        let extra: Vec<u8> = if pad == 0 { Vec::new() } else { [&[0xff, 0xff][..], &((pad - 4) as u16).to_le_bytes(), &vec![0u8; pad - 4]].concat() };
+        let common = |v: &mut Vec<u8>| {
+            v.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            v.extend_from_slice(&0u16.to_le_bytes()); // flags
+            v.extend_from_slice(&0u16.to_le_bytes()); // stored
+            v.extend_from_slice(&0u16.to_le_bytes()); // time
+            v.extend_from_slice(&0x21u16.to_le_bytes()); // date 1980-01-01
+            v.extend_from_slice(&crc.to_le_bytes());
+            v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        };
+        out.extend_from_slice(b"PK\x03\x04");
+        common(&mut out);
+        out.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&extra);
+        out.extend_from_slice(data);
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        common(&mut central);
+        central.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        central.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let start = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    fs::write(path, out).unwrap();
+}
+
+/// `torch.save(state_dict)` for bf16 tensors: the pickle (`OrderedDict` of `_rebuild_tensor_v2` calls) and one member per storage.
+fn write_torch_bin(path: &Path, entries: &[Entry]) {
+    let int = |p: &mut Vec<u8>, v: usize| {
+        p.push(b'J');
+        p.extend_from_slice(&(v as u32).to_le_bytes());
+    };
+    let text = |p: &mut Vec<u8>, s: &str| {
+        p.push(b'X');
+        p.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        p.extend_from_slice(s.as_bytes());
+    };
+    let mut pickle = vec![0x80, 2];
+    pickle.extend_from_slice(b"ccollections\nOrderedDict\nq\x00)Rq\x01(");
+    for (i, e) in entries.iter().enumerate() {
+        text(&mut pickle, &e.name);
+        pickle.extend_from_slice(b"ctorch._utils\n_rebuild_tensor_v2\n((");
+        text(&mut pickle, "storage");
+        pickle.extend_from_slice(b"ctorch\nBFloat16Storage\n");
+        text(&mut pickle, &i.to_string());
+        text(&mut pickle, "cpu");
+        int(&mut pickle, e.shape.iter().product());
+        pickle.extend_from_slice(b"tQ");
+        int(&mut pickle, 0);
+        pickle.push(b'(');
+        e.shape.iter().for_each(|d| int(&mut pickle, *d));
+        pickle.push(b't');
+        pickle.push(b'(');
+        let mut stride = 1usize;
+        let mut strides = Vec::new();
+        for d in e.shape.iter().rev() {
+            strides.push(stride);
+            stride *= d;
+        }
+        strides.iter().rev().for_each(|s| int(&mut pickle, *s));
+        pickle.extend_from_slice(&[b't', 0x89, b'h', 0, b')', b'R', b't', b'R']);
+    }
+    pickle.extend_from_slice(b"u.");
+    let mut members = vec![("archive/data.pkl".to_owned(), pickle)];
+    members.extend(entries.iter().enumerate().map(|(i, e)| (format!("archive/data/{i}"), e.bytes.clone())));
+    members.push(("archive/byteorder".to_owned(), b"little".to_vec()));
+    write_stored_zip(path, &members);
+}
+
+/// A tiny Llama checkpoint in `format` (weights, config, tokenizer).
+pub(crate) fn build_format(format: Format, seed: u64, dir: &Path) {
+    let mut rng = Rng(seed);
+    let mut entries = Vec::new();
+    let dense = |rng: &mut Rng, entries: &mut Vec<Entry>, name: &str, shape: &[usize], scale: f32| {
+        let n: usize = shape.iter().product();
+        let norm = name.contains("norm");
+        let values: Vec<f32> = (0..n).map(|_| if norm { 1.0 + 0.1 * rng.unit() } else { scale * rng.unit() }).collect();
+        entries.push(bf16_entry(name, shape, &values));
+    };
+    dense(&mut rng, &mut entries, "model.embed_tokens.weight", &[VOCAB, HIDDEN], 1.0);
+    dense(&mut rng, &mut entries, "lm_head.weight", &[VOCAB, HIDDEN], 0.3);
+    dense(&mut rng, &mut entries, "model.norm.weight", &[HIDDEN], 1.0);
+    for layer in 0..LAYERS {
+        for n in ["input_layernorm", "post_attention_layernorm"] {
+            dense(&mut rng, &mut entries, &format!("model.layers.{layer}.{n}.weight"), &[HIDDEN], 1.0);
+        }
+        for (name, out, inp) in [
+            ("self_attn.q_proj", HEADS * HEAD_DIM, HIDDEN),
+            ("self_attn.k_proj", KV_HEADS * HEAD_DIM, HIDDEN),
+            ("self_attn.v_proj", KV_HEADS * HEAD_DIM, HIDDEN),
+            ("self_attn.o_proj", HIDDEN, HEADS * HEAD_DIM),
+            ("mlp.gate_proj", INTER, HIDDEN),
+            ("mlp.up_proj", INTER, HIDDEN),
+            ("mlp.down_proj", HIDDEN, INTER),
+        ] {
+            let prefix = format!("model.layers.{layer}.{name}");
+            if let Format::TorchBin = format {
+                dense(&mut rng, &mut entries, &format!("{prefix}.weight"), &[out, inp], 0.3);
+            } else {
+                entries.extend(format_linear(&mut rng, format, &prefix, out, inp));
+            }
+        }
+    }
+    let (key, config) = match format {
+        Format::Mlx(bits, group) => ("quantization", Some(json!({"group_size": group, "bits": bits}))),
+        Format::BnbNf4 => ("quantization_config", Some(json!({"quant_method": "bitsandbytes", "load_in_4bit": true, "bnb_4bit_quant_type": "nf4"}))),
+        Format::BnbInt8 => ("quantization_config", Some(json!({"quant_method": "bitsandbytes", "load_in_8bit": true}))),
+        Format::Mxfp4 => (
+            "quantization_config",
+            Some(json!({"quant_method": "compressed-tensors", "format": "mxfp4-pack-quantized", "ignore": ["lm_head"],
+                "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 4, "type": "float", "group_size": 32, "strategy": "group", "symmetric": true}}}})),
+        ),
+        Format::Exl2 => ("quantization_config", Some(json!({"quant_method": "exl2", "bits": 4.0}))),
+        Format::TorchBin => ("quantization_config", None),
+    };
+    write_support_files(dir, None);
+    if let Some(config) = config {
+        let mut cfg: Value = serde_json::from_slice(&fs::read(dir.join("config.json")).unwrap()).unwrap();
+        cfg[key] = config;
+        fs::write(dir.join("config.json"), cfg.to_string()).unwrap();
+    }
+    if let Format::TorchBin = format {
+        write_torch_bin(&dir.join("pytorch_model.bin"), &entries);
+    } else {
+        write_safetensors(&dir.join("model.safetensors"), &entries);
+    }
+}
+
+pub(crate) const FORMATS: [Format; 7] = [
+    Format::Mlx(4, 32),
+    Format::Mlx(3, 64),
+    Format::BnbNf4,
+    Format::BnbInt8,
+    Format::Mxfp4,
+    Format::Exl2,
+    Format::TorchBin,
+];
+
+#[test]
+fn direct_load_equals_the_converted_file_for_mxfp4_bitsandbytes_mlx_exl2_and_pytorch_weights() {
+    for format in FORMATS {
+        let dir = scratch("fmt");
+        build_format(format, 17, &dir);
+        let gguf = convert(&dir, OutputDType::Preserve);
+        let direct = crate::import::open_model(&dir).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+        assert_same_model(&direct, &MappedGguf::open(&gguf).unwrap(), &format!("{format:?}"));
+        // the engine computes the same logits from both, and they are numbers
+        let (from_direct, from_file) = (logits(&dir, &PROMPT), logits(&gguf, &PROMPT));
+        assert!(from_direct.iter().all(|v| v.is_finite()), "{format:?}: logits are not finite");
+        assert_eq!(from_direct, from_file, "{format:?}: logits");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
 // ---- the `fllm-rs serve` command itself ----
 
 /// The release or debug binary next to the test executable, when it has been built (`cargo build --bin fllm-rs`).

@@ -335,7 +335,9 @@ pub fn prepare_checkpoint(
     };
     let scales = crate::hybrid::weight_scales(&cfg)?;
     let fp8_block = fp8_block_size(&cfg);
-    let (dense, packed_groups) = split_packed_cfg(all, quant, fp8_block, cfg.get("quantization").unwrap_or(&Value::Null), &|n| {
+    // mlx-lm writes the bits and group sizes as `quantization` and, in the same form, as `quantization_config`
+    let mlx_config = cfg.get("quantization").filter(|q| q.is_object()).or_else(|| cfg.get("quantization_config").filter(|q| q.is_object())).unwrap_or(&Value::Null);
+    let (dense, packed_groups) = split_packed_cfg(all, quant, fp8_block, mlx_config, &|n| {
         Ok(match plan.map(n)? {
             Mapped::Skip => None,
             Mapped::Tensor { name, .. } => Some(name),
