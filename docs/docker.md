@@ -192,3 +192,8 @@ FLLM_MODEL_NAME=my-model docker compose up -d
   access that you add yourself.
 - The image build is also what the `docker.yml` workflow runs (see [ci.md](ci.md)); release binaries are built by the
   `release.yml` workflow.
+- The images contain no web browser. The Code agent's browser (Settings > Browser in the Studio, see
+  [the browser](user/studio.md#the-browser)) needs a Chromium-family browser inside the container, so add one to your own image,
+  for example `RUN apt-get update && apt-get install -y --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*`, or set
+  `FLLM_BROWSER` to its path. fLLM adds `--no-sandbox` to the browser when it runs as root, as it does in a container. Nothing
+  else changes without it: the browser tools then say that no browser was found.

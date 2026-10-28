@@ -15,7 +15,16 @@ pub(super) fn tool(name: &str, permission: &str, description: &str, properties: 
     })
 }
 
+/// The catalog the page asks for: the browser tools are in it only while the user has switched the browser on.
 pub(super) fn catalog() -> Vec<Value> {
+    let mut tools = base_catalog();
+    if super::agent_browser::enabled() {
+        tools.extend(super::agent_browser::catalog());
+    }
+    tools
+}
+
+fn base_catalog() -> Vec<Value> {
     vec![
         tool(
             "list_dir",
@@ -271,7 +280,7 @@ mod tests {
         let session = AgentSession::default();
         for t in catalog() {
             let name = t["function"]["name"].as_str().unwrap();
-            if name.starts_with("web_") {
+            if name.starts_with("web_") || name.starts_with("browser_") {
                 continue; // async, covered by agent_net
             }
             // no workspace yet: a known tool fails on that, an unknown one says so

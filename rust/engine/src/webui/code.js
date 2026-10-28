@@ -697,6 +697,9 @@
       code.registry = map;
     }
 
+    /** The tool list is read again (Settings > Browser adds or removes the browser tools). */
+    window.fllmReloadTools = () => loadRegistry().catch(() => {});
+
     /** The folder the coding agent works in, for the settings pages (sub-agents). */
     window.fllmCodeWorkspace = () => (code.workspace && code.workspace.root) || null;
 
@@ -971,6 +974,7 @@
     // ---- saving sessions --------------------------------------------------------------------------
     const clipForSave = (items) => items.map((i) => {
       const c = { ...i };
+      delete c.image; // screenshots are not kept in the saved session
       if (typeof c.output === 'string' && c.output.length > 20000) c.output = `${c.output.slice(0, 20000)}\n... [cut]`;
       if (c.children) c.children = clipForSave(c.children);
       // screenshots are never written to the browser storage: they are large, and they show the screen
@@ -999,7 +1003,7 @@
       const all = readSessions();
       const mine = (all[code.workspace.root] || []).filter((s) => s.id !== code.sessionId);
       const view = clipForSave(code.view.filter((i) => !(i.kind === 'notice' && i.choices)));
-      mine.unshift({ id: code.sessionId, title: sessionTitleNow(), titleLocked: code.titleLocked, time: Date.now(), messages: withoutImages(code.messages), view, todos: code.todos, used: code.used });
+      mine.unshift({ id: code.sessionId, title: sessionTitleNow(), titleLocked: code.titleLocked, time: Date.now(), messages: withoutImages(code.messages).map((m) => (Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url') ? { ...m, content: '[a screenshot of the browser was here]' } : m)), view, todos: code.todos, used: code.used });
       all[code.workspace.root] = mine.slice(0, MAX_SESSIONS);
       writeSessions(all);
     }
@@ -1233,6 +1237,17 @@
       computer_wait: (a) => ['Wait', `${a.ms ?? 1000} ms`],
       computer_cursor: () => ['Pointer position', ''],
       computer_displays: () => ['List displays', ''],
+      browser_open: (a) => ['Open in browser', a.url || ''],
+      browser_snapshot: () => ['Read the browser page', ''],
+      browser_click: (a) => ['Browser click', `ref ${a.ref ?? ''}`],
+      browser_type: (a) => ['Browser type', `ref ${a.ref ?? ''}: ${String(a.text ?? '').slice(0, 60)}${a.submit ? ' + Enter' : ''}`],
+      browser_select: (a) => ['Browser select', `ref ${a.ref ?? ''}: ${a.value ?? ''}`],
+      browser_press: (a) => ['Browser key', a.key || ''],
+      browser_scroll: (a) => ['Browser scroll', a.ref != null ? `to ref ${a.ref}` : (a.direction || 'down')],
+      browser_back: () => ['Browser back', ''],
+      browser_screenshot: (a) => ['Browser screenshot', a.ref != null ? `ref ${a.ref}` : (a.full_page ? 'whole page' : '')],
+      browser_tabs: (a) => ['Browser tabs', a.select != null ? `switch to ${a.select}` : ''],
+      browser_close: (a) => ['Close browser', a.all ? 'all' : (a.tab != null ? `tab ${a.tab}` : 'tab')],
       todo_write: () => ['Task list', ''],
       todo_read: () => ['Read task list', ''],
       ask_user: (a) => ['Question', a.question || ''],
@@ -1324,6 +1339,7 @@
       } else if (item.name === 'ask_user') {
         if (item.output) body += `<pre class="tool-out">${escapeHtml(item.output)}</pre>`;
       } else if (item.output) body += outputHtml(item);
+      if (item.image) body += `<img class="tool-shot" src="${item.image}" alt="Screenshot of the browser page">`;
       const hasDetail = body || item.status === 'pending';
       const open = (item.open !== undefined ? item.open : defaultOpen(item)) ? ' open' : '';
       const ask = item.status === 'pending' ? (item.name === 'ask_user' ? askUserHtml(item) : permissionHtml(item)) : '';
@@ -1352,7 +1368,8 @@
       else if (cat === 'bash') subject = typeof args.command === 'string' ? args.command : `${entry.name} ${Object.values(args).join(' ')}`.trim();
       else if (cat === 'edit' && typeof args.patch === 'string') { subjects = patchPaths(args.patch); subject = subjects[0] || ''; }
       else if (cat === 'edit' || cat === 'read') subject = String(args.path ?? args.pattern ?? '');
-      else if (cat === 'network') subject = String(args.url ?? args.query ?? '');
+      // the browser tools without a URL are judged by the page the browser is on, so that per-domain network rules cover them too
+      else if (cat === 'network') subject = String(args.url ?? args.query ?? (/^browser_/.test(entry.name) && typeof window.fllmBrowserUrl === 'function' ? window.fllmBrowserUrl() : ''));
       else if (cat === 'memory') subject = String(args.scope || 'workspace');
       else subject = `${entry.server}/${entry.tool}`;
       return { cat, subject, subjects: subjects && subjects.length ? subjects : [subject] };
@@ -1574,7 +1591,8 @@
     function updateCodeMeter() {
       setMeter('codeCtxFill', 'codeCtxText', code.used || codeEstimate(), ctxMax());
     }
-    const estimateMessages = (messages) => messages.reduce((s, m) => s + estimateTokens(m.content) + estimateTokens(JSON.stringify(m.tool_calls || '')) + 6 + (Array.isArray(m.images) ? m.images.length * 1200 : 0), 0);
+    const contentTokens = (c) => (Array.isArray(c) ? c.reduce((n, p) => n + (p.type === 'image_url' ? 1000 : estimateTokens(p.text)), 0) : estimateTokens(c));
+    const estimateMessages = (messages) => messages.reduce((s, m) => s + contentTokens(m.content) + estimateTokens(JSON.stringify(m.tool_calls || '')) + 6 + (Array.isArray(m.images) ? m.images.length * 1200 : 0), 0);
     // system prompt + tool list + messages, scaled by how far the last estimate was off from the server's own count
     const codeEstimate = () => Math.round((estimateTokens(codeSystemPrompt()) + estimateTokens(JSON.stringify(toolList())) + estimateMessages(code.messages)) * code.calib);
 
@@ -1903,6 +1921,8 @@
             : await toolCall(call.name, args, ctx.signal);
         item.status = r.ok ? 'ok' : 'error';
         item.output = r.ok ? r.output : r.error;
+        if (r.ok && r.image) { item.image = r.image; (ctx.browserShots || (ctx.browserShots = [])).push(r.image); }
+        if (/^browser_/.test(call.name) && typeof window.fllmBrowserPoke === 'function') window.fllmBrowserPoke();
         let reply = r.ok ? r.output : `Error: ${r.error}`;
         if (entry.permission === 'computer') computerDone(item, r, ctx);
         if (r.ok && EDIT_TOOLS.has(call.name)) {
@@ -2101,9 +2121,25 @@
         }
         calls.forEach((c, k) => ctx.messages.push({ role: 'tool', tool_call_id: c.id, content: replies[k] ?? 'Stopped before this call ran.' }));
         computerAttachImages(ctx);
+        attachShots(ctx);
         if (!ctx.child) { saveCodeSession(); if (step === ctx.maxSteps - 1) codeNotice(`Stopped after ${ctx.maxSteps} steps. Write "continue" if the agent should go on.`); }
       }
       return last ? splitReasoning(last.content || '').answer.trim() : '';
+    }
+
+    /**
+     * A screenshot of the browser tool goes to a model that can see as a user message with the picture (a tool message cannot carry one).
+     * Only the newest picture stays in the conversation: older ones become a note, so the context does not fill up with images.
+     */
+    const SHOT_MARK = '[Screenshot of the browser page,';
+    function attachShots(ctx) {
+      const shots = ctx.browserShots || [];
+      ctx.browserShots = [];
+      if (!shots.length || !state.status?.model?.capabilities?.vision) return;
+      for (const m of ctx.messages) {
+        if (m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'text' && String(p.text).startsWith(SHOT_MARK))) m.content = '[an older screenshot of the browser was removed to save space]';
+      }
+      ctx.messages.push({ role: 'user', content: [{ type: 'text', text: SHOT_MARK + ' taken by browser_screenshot]' }, { type: 'image_url', image_url: { url: shots[shots.length - 1] } }] });
     }
 
     /** One run of the agent for a user message. Runs go one after the other, so a message sent while the previous run is still winding down waits. */
@@ -2116,7 +2152,8 @@
     async function agentRunNow(userText, display) {
       if (!code.workspace) { await pickWorkspace(); if (!code.workspace) return; }
       code.reverted = null;
-      const expanded = await expandMentions(takePending() + userText);
+      const notes = typeof window.fllmBrowserTakeComments === 'function' ? window.fllmBrowserTakeComments() : '';
+      const expanded = await expandMentions(takePending() + notes + userText);
       await refreshChanges();
       await computerBegin();
       const mark = code.changes ? Math.max(0, ...code.changes.map((c) => c.id)) : 0;

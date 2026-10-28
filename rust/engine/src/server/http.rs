@@ -298,7 +298,7 @@ pub fn studio_admin_blocked_for(
         // the remembered notes about the user are personal: this machine only, reads included
         || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory";
+    let reads_workspace = path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || path == "/api/studio/agent/browser" || path.starts_with("/api/studio/agent/browser/") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)
@@ -816,6 +816,32 @@ mod studio_gate_tests {
         }
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/mcp/tools", remote, &h));
         assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/mcp/servers", remote, &h));
+    }
+
+    #[test]
+    fn the_browser_of_the_agent_is_reachable_from_this_machine_only_with_or_without_a_key() {
+        // the browser can hold logged-in sessions: its settings, its live picture and the input into it never leave this machine
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        for path in [
+            "/api/studio/agent/browser",
+            "/api/studio/agent/browser/settings",
+            "/api/studio/agent/browser/frame",
+            "/api/studio/agent/browser/input",
+        ] {
+            for method in [Method::GET, Method::POST] {
+                for auth in [false, true] {
+                    assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} from another machine (key: {auth})");
+                    assert!(!studio_admin_blocked(auth, &method, path, here, &local), "{method} {path} from this machine (key: {auth})");
+                }
+                // a page of another site in the owner's browser, and a rebinding name, are refused too
+                assert!(studio_admin_blocked(false, &method, path, here, &headers("127.0.0.1:8000", Some("https://evil.example"))), "{method} {path} from a foreign page");
+                assert!(studio_admin_blocked(false, &method, path, here, &headers("rebind.example:8000", None)), "{method} {path} through a rebinding name");
+                assert!(studio_admin_blocked_for(true, &method, path, remote, &h, true), "{method} {path}: even an admin key does not open it from another machine");
+            }
+        }
     }
 
     #[test]

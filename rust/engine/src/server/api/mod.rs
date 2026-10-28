@@ -49,6 +49,10 @@ mod agent_computer_x11;
 mod agent_computer_win;
 #[cfg(all(feature = "computer-use", target_os = "macos"))]
 mod agent_computer_mac;
+pub(super) mod agent_browser;
+mod agent_browser_policy;
+mod agent_browser_snap;
+mod agent_ws;
 mod agent_tools;
 pub(super) mod agents;
 pub(super) mod hooks;

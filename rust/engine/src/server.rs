@@ -602,6 +602,10 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/agent/computer", get(api::agent_computer::route_status))
         .route("/api/studio/agent/computer/stop", post(api::agent_computer::route_stop))
         .route("/api/studio/agent/computer/begin", post(api::agent_computer::route_begin))
+        .route("/api/studio/agent/browser", get(api::agent_browser::status))
+        .route("/api/studio/agent/browser/settings", post(api::agent_browser::save_settings))
+        .route("/api/studio/agent/browser/frame", post(api::agent_browser::frame))
+        .route("/api/studio/agent/browser/input", post(api::agent_browser::input))
         .route("/api/studio/agent/files", post(api::agent::files))
         .route("/api/studio/agent/memory", post(api::agent_mem::memory))
         .route("/api/studio/agent/instructions", post(api::agent_mem::instructions))
@@ -821,6 +825,7 @@ async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
         _ = tokio::signal::ctrl_c() => {},
     }
     api::mcp::shutdown();
+    api::agent_browser::shutdown().await;
     tracing::info!("shutdown requested; finishing requests in flight (press Ctrl-C again to stop immediately)");
     tokio::spawn(async {
         let _ = tokio::signal::ctrl_c().await;

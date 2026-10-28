@@ -116,6 +116,16 @@ test('sub-agent prompts: explore reads only, general may change files', () => {
   assert.ok(P.subAgentPrompt(args, 'whatever').includes('Type: explore'), 'unknown types are read only');
 });
 
+test('the browser is explained only when the model has the browser tools', () => {
+  const without = P.buildSystemPrompt({ agent: 'build', tier: 'full', family: 'generic', tools: ALL_TOOLS });
+  assert.ok(!/browser_open/.test(without), 'no browser tools, no browser section');
+  const withTools = new Set([...ALL_TOOLS, 'browser_open', 'browser_click']);
+  for (const tier of ['full', 'compact']) {
+    const p = P.buildSystemPrompt({ agent: 'build', tier, family: 'generic', tools: withTools });
+    assert.ok(p.includes('browser_open') && p.includes('browser_snapshot') && p.includes('ref'), tier);
+  }
+});
+
 test('all page scripts together are valid JavaScript', () => {
   const rs = fs.readFileSync(path.join(dir, '..', 'webui.rs'), 'utf8');
   const files = [...rs.matchAll(/include_str!\("webui\/([\w-]+\.js)"\)/g)].map((m) => m[1]).filter((f) => f !== 'runner.js');
