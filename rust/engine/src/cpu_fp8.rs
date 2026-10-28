@@ -60,55 +60,74 @@ fn dot<const FMA: bool>(x: &[f32], w: &[f32]) -> f32 {
     ((lanes[0] + lanes[4]) + (lanes[1] + lanes[5])) + ((lanes[2] + lanes[6]) + (lanes[3] + lanes[7])) + tail
 }
 
-/// Decode weight row `row` of matrix `slab` into `buf` (`cols` values), tile by tile.
+/// Where the scales of a weight matrix are: one per tile behind the codes (`FP8B`), or one binary16 scale per row behind the codes (`FP8M`, the
+/// per-tensor and per-channel scales of ModelOpt and compressed-tensors checkpoints).
+#[derive(Clone, Copy)]
+enum Scales<'a> {
+    Tiles(&'a Fp8bLayout),
+    PerRow { rows: usize, cols: usize },
+}
+
+impl Scales<'_> {
+    fn cols(&self) -> usize {
+        match self {
+            Scales::Tiles(layout) => layout.cols,
+            Scales::PerRow { cols, .. } => *cols,
+        }
+    }
+}
+
+/// Decode weight row `row` of the (first) matrix into `buf` (`cols` values), tile by tile.
 #[inline(always)]
-fn decode_row(layout: &Fp8bLayout, bytes: &[u8], slab: usize, row: usize, buf: &mut [f32]) {
-    let base = (slab * layout.rows + row) * layout.cols;
-    let codes = &bytes[base..base + layout.cols];
-    for (tile, (c, o)) in codes.chunks(layout.block_cols).zip(buf.chunks_mut(layout.block_cols)).enumerate() {
-        let scale = layout.scale(bytes, layout.tile_index(slab, row, tile * layout.block_cols));
-        decode_run(c, scale, o);
+fn decode_row(src: Scales<'_>, bytes: &[u8], row: usize, buf: &mut [f32]) {
+    match src {
+        Scales::Tiles(layout) => {
+            let base = row * layout.cols;
+            let codes = &bytes[base..base + layout.cols];
+            for (tile, (c, o)) in codes.chunks(layout.block_cols).zip(buf.chunks_mut(layout.block_cols)).enumerate() {
+                let scale = layout.scale(bytes, layout.tile_index(0, row, tile * layout.block_cols));
+                decode_run(c, scale, o);
+            }
+        }
+        Scales::PerRow { rows, cols } => {
+            let at = rows * cols + row * 2;
+            let scale = half::f16::from_le_bytes([bytes[at], bytes[at + 1]]).to_f32();
+            decode_run(&bytes[row * cols..(row + 1) * cols], scale, buf);
+        }
     }
 }
 
 /// Rows `row0..` of the product for one task: `out` holds `batch` values per row, row after row.
 #[inline(always)]
-fn rows_body<const FMA: bool>(layout: &Fp8bLayout, bytes: &[u8], input: &[f32], batch: usize, row0: usize, out: &mut [f32], buf: &mut [f32]) {
+fn rows_body<const FMA: bool>(src: Scales<'_>, bytes: &[u8], input: &[f32], batch: usize, row0: usize, out: &mut [f32], buf: &mut [f32]) {
+    let cols = src.cols();
     for (i, res) in out.chunks_exact_mut(batch).enumerate() {
-        decode_row(layout, bytes, 0, row0 + i, buf);
+        decode_row(src, bytes, row0 + i, buf);
         for (b, r) in res.iter_mut().enumerate() {
-            *r = dot::<FMA>(&input[b * layout.cols..(b + 1) * layout.cols], buf);
+            *r = dot::<FMA>(&input[b * cols..(b + 1) * cols], buf);
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn rows_avx2(layout: &Fp8bLayout, bytes: &[u8], input: &[f32], batch: usize, row0: usize, out: &mut [f32], buf: &mut [f32]) {
-    rows_body::<true>(layout, bytes, input, batch, row0, out, buf);
+unsafe fn rows_avx2(src: Scales<'_>, bytes: &[u8], input: &[f32], batch: usize, row0: usize, out: &mut [f32], buf: &mut [f32]) {
+    rows_body::<true>(src, bytes, input, batch, row0, out, buf);
 }
 
-fn rows(layout: &Fp8bLayout, bytes: &[u8], input: &[f32], batch: usize, row0: usize, out: &mut [f32], buf: &mut [f32]) {
+fn rows(src: Scales<'_>, bytes: &[u8], input: &[f32], batch: usize, row0: usize, out: &mut [f32], buf: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
     if crate::cpu_kernels::isa() != "scalar" {
         // SAFETY: `isa` reports an AVX2 tier only when the CPU has avx2 and fma.
-        unsafe { rows_avx2(layout, bytes, input, batch, row0, out, buf) };
+        unsafe { rows_avx2(src, bytes, input, batch, row0, out, buf) };
         return;
     }
     // NEON has a fused multiply-add in the base instruction set of AArch64
-    rows_body::<{ cfg!(target_arch = "aarch64") }>(layout, bytes, input, batch, row0, out, buf);
+    rows_body::<{ cfg!(target_arch = "aarch64") }>(src, bytes, input, batch, row0, out, buf);
 }
 
-/// `out[b][r] = sum_c input[b][c] * w[r][c] (+ bias[r])` for an `FP8B` tensor `packed` (GGUF type `kind`) of one `rows` x `cols` matrix.
-/// `input` holds `batch` rows of `cols` values; the result `batch` rows of `rows` values.
-pub fn linear(kind: u32, packed: &[u8], input: &[f32], rows_out: usize, cols: usize, bias: Option<&[f32]>) -> Result<Vec<f32>, String> {
-    let layout = Fp8bLayout::parse(kind, packed)?;
-    if layout.slabs != 1 || layout.rows != rows_out || layout.cols != cols {
-        return Err(format!(
-            "FP8B weight holds {} matrices of {} x {}, a single {rows_out} x {cols} matrix was expected",
-            layout.slabs, layout.rows, layout.cols
-        ));
-    }
+/// The product of `input` (`batch` rows of `cols` values) with the matrix whose codes and scales `bytes` hold: `batch` rows of `rows_out` values.
+fn drive(src: Scales<'_>, bytes: &[u8], input: &[f32], rows_out: usize, cols: usize, bias: Option<&[f32]>) -> Result<Vec<f32>, String> {
     if cols == 0 || !input.len().is_multiple_of(cols) {
         return Err("projection input dimensions do not match".into());
     }
@@ -123,7 +142,7 @@ pub fn linear(kind: u32, packed: &[u8], input: &[f32], rows_out: usize, cols: us
     let mut tmp = vec![0f32; rows_out * batch];
     tmp.par_chunks_mut(ROWS_PER_TASK * batch)
         .enumerate()
-        .for_each_init(|| vec![0f32; cols], |buf, (task, chunk)| rows(&layout, packed, input, batch, task * ROWS_PER_TASK, chunk, buf));
+        .for_each_init(|| vec![0f32; cols], |buf, (task, chunk)| rows(src, bytes, input, batch, task * ROWS_PER_TASK, chunk, buf));
     let mut out = if batch == 1 {
         tmp
     } else {
@@ -143,6 +162,27 @@ pub fn linear(kind: u32, packed: &[u8], input: &[f32], rows_out: usize, cols: us
         }
     }
     Ok(out)
+}
+
+/// `out[b][r] = sum_c input[b][c] * w[r][c] (+ bias[r])` for an `FP8B` tensor `packed` (GGUF type `kind`) of one `rows` x `cols` matrix.
+/// `input` holds `batch` rows of `cols` values; the result `batch` rows of `rows` values.
+pub fn linear(kind: u32, packed: &[u8], input: &[f32], rows_out: usize, cols: usize, bias: Option<&[f32]>) -> Result<Vec<f32>, String> {
+    let layout = Fp8bLayout::parse(kind, packed)?;
+    if layout.slabs != 1 || layout.rows != rows_out || layout.cols != cols {
+        return Err(format!(
+            "FP8B weight holds {} matrices of {} x {}, a single {rows_out} x {cols} matrix was expected",
+            layout.slabs, layout.rows, layout.cols
+        ));
+    }
+    drive(Scales::Tiles(&layout), packed, input, rows_out, cols, bias)
+}
+
+/// The same for an `FP8M` tensor (GGUF type 0x8000_0020): `rows * cols` codes, then one binary16 scale per row.
+pub fn linear_row_scaled(packed: &[u8], input: &[f32], rows_out: usize, cols: usize, bias: Option<&[f32]>) -> Result<Vec<f32>, String> {
+    if rows_out.checked_mul(cols).and_then(|n| n.checked_add(rows_out * 2)) != Some(packed.len()) {
+        return Err(format!("FP8M weight of {} bytes is not {rows_out} x {cols} codes with a binary16 scale per row", packed.len()));
+    }
+    drive(Scales::PerRow { rows: rows_out, cols }, packed, input, rows_out, cols, bias)
 }
 
 /// The bytes of an `FP8B` tensor from its parts: `codes` (all matrices), one f32 scale per tile, trailer.
@@ -268,9 +308,9 @@ mod tests {
             let mut tmp = vec![0f32; rows * batch];
             for (task, chunk) in tmp.chunks_mut(batch * ROWS_PER_TASK).enumerate() {
                 if fma {
-                    rows_body::<true>(&layout, &bytes, &input, batch, task * ROWS_PER_TASK, chunk, &mut buf);
+                    rows_body::<true>(Scales::Tiles(&layout), &bytes, &input, batch, task * ROWS_PER_TASK, chunk, &mut buf);
                 } else {
-                    rows_body::<false>(&layout, &bytes, &input, batch, task * ROWS_PER_TASK, chunk, &mut buf);
+                    rows_body::<false>(Scales::Tiles(&layout), &bytes, &input, batch, task * ROWS_PER_TASK, chunk, &mut buf);
                 }
             }
             let gamma = (cols + 4) as f64 * f64::from(f32::EPSILON) * 0.5;
@@ -280,6 +320,41 @@ mod tests {
                     assert!((got - want[i]).abs() <= gamma * mag[i] + 1e-30, "fma {fma}, row {r}, token {b}: {got} vs {}", want[i]);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn row_scaled_fp8m_matches_the_dequantized_reference() {
+        let mut rng = Lcg(77);
+        for (rows, cols, batch) in [(5usize, 130usize, 1usize), (9, 300, 3), (1, 7, 2), (33, 64, 5)] {
+            // codes without the NaN pattern, one binary16 scale per row
+            let mut bytes: Vec<u8> = (0..rows * cols)
+                .map(|_| {
+                    let c = rng.next() as u8;
+                    if c & 0x7f == 0x7f { c & 0x80 } else { c }
+                })
+                .collect();
+            for _ in 0..rows {
+                bytes.extend_from_slice(&half::f16::from_f32(0.002 + 0.004 * (rng.unit() + 1.0)).to_le_bytes());
+            }
+            let input: Vec<f32> = (0..batch * cols).map(|_| rng.unit()).collect();
+            let bias: Vec<f32> = (0..rows).map(|_| rng.unit()).collect();
+            let w = dequantize(&bytes, 0x8000_0020, rows * cols).unwrap();
+            let got = linear_row_scaled(&bytes, &input, rows, cols, Some(&bias)).unwrap();
+            let gamma = (cols + 4) as f64 * f64::from(f32::EPSILON) * 0.5;
+            for b in 0..batch {
+                for r in 0..rows {
+                    let (mut sum, mut mag) = (f64::from(bias[r]), f64::from(bias[r]).abs());
+                    for c in 0..cols {
+                        let t = f64::from(input[b * cols + c]) * f64::from(w[r * cols + c]);
+                        sum += t;
+                        mag += t.abs();
+                    }
+                    let err = (f64::from(got[b * rows + r]) - sum).abs();
+                    assert!(err <= gamma * mag + 1e-30, "{rows}x{cols} batch {batch} element ({b}, {r}): {} vs {sum}", got[b * rows + r]);
+                }
+            }
+            assert!(linear_row_scaled(&bytes[1..], &input, rows, cols, None).is_err());
         }
     }
 

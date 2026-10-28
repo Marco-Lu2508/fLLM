@@ -182,7 +182,7 @@ exponent and mantissa bits move into an f32 whose bias is corrected by `120 << 2
 table, no branches the compiler cannot turn into selects), then dotted with every activation row in f32 (16 independent partial sums, fixed
 reduction order). The activations are **not** quantized, so there is no 8-bit activation noise (unlike Q4Z); the result differs from an f64 evaluation of
 the dequantized weights by the f32 summation bound only. x86-64: one instance compiled with `avx2,fma` chosen by `cpu_kernels::isa()`; AArch64: the
-same code with the native FMA; other targets: portable. Threads split the output rows (4 per task), so results are identical for any thread count.
+same code with the native FMA; other targets: portable. Threads split the output rows (4 per task), so results are identical for any thread count. `FP8M` (one binary16 scale per row) runs through the same loops (`cpu_fp8::linear_row_scaled`).
 Tested by `cpu_fp8::tests` (8 tile shapes with partial tiles, batches 1/2/5, bias, thread counts 1/3, both loop variants) and by `selftest-cpu` (five
 tile shapes against the dense matrix). Speed not measured yet (the decode loop reads one byte per weight and does about two vector instructions per
 element; memory-bound on desktop CPUs by that count, not by a measurement).

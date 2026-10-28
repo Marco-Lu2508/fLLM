@@ -1026,6 +1026,10 @@ impl Linear {
                 // block-wise FP8 stays 8-bit in memory: the tile scales are applied while the codes are decoded
                 return crate::cpu_fp8::linear(*kind, packed, input, self.rows, self.cols, self.bias.as_deref());
             }
+            if fllm_gguf_probe::fp8m_type(*kind) {
+                // per-row scaled FP8 (per-tensor and per-channel checkpoints): the same loops with one scale per row
+                return crate::cpu_fp8::linear_row_scaled(packed, input, self.rows, self.cols, self.bias.as_deref());
+            }
         }
         #[cfg(feature = "npu-openvino")]
         if let Some((done, mut out)) = self.npu_rows(input) {
