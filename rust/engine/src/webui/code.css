@@ -212,12 +212,12 @@
     .tool-check h5 { margin: 8px 0 2px; font-size: 12px; color: var(--muted-foreground); }
     .diff-ctx { color: var(--muted-foreground); }
     /* computer use: the always-visible banner with the STOP button, and the screenshot cards with the marker of the action */
-    .cu-banner { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--destructive); color: #fff; font-size: 13px; line-height: 1.4; border-bottom: 2px solid rgba(0, 0, 0, 0.25); }
-    .cu-banner.is-turbo { background: repeating-linear-gradient(135deg, var(--destructive), var(--destructive) 14px, #8c1510 14px, #8c1510 28px); }
+    .cu-banner { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: #b3261e; color: #fff; font-size: 13px; line-height: 1.4; border-bottom: 2px solid rgba(0, 0, 0, 0.25); }
+    .cu-banner.is-turbo { background: repeating-linear-gradient(135deg, #b3261e, #b3261e 14px, #8c1510 14px, #8c1510 28px); }
     .cu-banner .cu-text { flex: 1; min-width: 0; }
     .cu-banner .cu-keys { display: block; font-size: 11px; opacity: 0.9; }
     .cu-banner .cu-dot { width: 12px; height: 12px; border-radius: 50%; background: #fff; flex: none; animation: cu-pulse 1.6s ease-in-out infinite; }
-    .cu-banner .cu-stop { flex: none; min-width: 96px; padding: 10px 22px; font-size: 16px; font-weight: 800; letter-spacing: 0.06em; background: #fff; color: var(--destructive); border: 0; border-radius: 8px; cursor: pointer; }
+    .cu-banner .cu-stop { flex: none; min-width: 96px; padding: 10px 22px; font-size: 16px; font-weight: 800; letter-spacing: 0.06em; background: #fff; color: #b3261e; border: 0; border-radius: 8px; cursor: pointer; }
     .cu-banner .cu-stop:hover { background: #ffe9e7; }
     .cu-banner .cu-stop:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
     @keyframes cu-pulse { 50% { opacity: 0.35; } }
