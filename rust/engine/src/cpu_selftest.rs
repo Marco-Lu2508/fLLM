@@ -691,6 +691,36 @@ const Q4Z_KINDS: [u32; 6] = [
     0x8000_0016,
 ];
 
+/// An `FP8B` projection (tiles of `tile` = (rows, columns)) against the dense matrix of `compute::dequantize` and the f32 input: the kernel
+/// and the reference differ in the order of the summation only.
+fn fp8b_dense_case(tier: CpuTier, report: &mut Report, rng: &mut Lcg, tile: (usize, usize), (rows, cols, batch): (usize, usize, usize)) {
+    let kind = fllm_gguf_probe::fp8b_type_id(tile.0, tile.1).expect("tile shape with a type id");
+    let weights = random_weights(kind, rows, cols, rng);
+    let x = rng.vector(batch * cols, 2.0);
+    let (have, millis) = timed(|| crate::cpu_fp8::linear(kind, &weights, &x, rows, cols, None).ok());
+    let result = have.map(|have| {
+        let dense = crate::compute::dequantize(&weights, kind, rows * cols).expect("dequantize");
+        let mut want = vec![0.0f64; batch * rows];
+        let mut scale = vec![0.0f64; batch * rows];
+        for t in 0..batch {
+            for r in 0..rows {
+                for c in 0..cols {
+                    let term = f64::from(dense[r * cols + c]) * f64::from(x[t * cols + c]);
+                    want[t * rows + r] += term;
+                    scale[t * rows + r] += term.abs();
+                }
+            }
+        }
+        compare_with(&have, &want, &scale, 1e-5)
+    });
+    report.line(
+        tier,
+        &format!("fp8b tiles {}x{} rows {rows} cols {cols} batch {batch} vs dense f32 matrix", tile.0, tile.1),
+        result,
+        millis,
+    );
+}
+
 /// A Q4Z / Q4ZP projection against the dense matrix the loader dequantizes (`compute::dequantize`,
 /// permutation included) and the unquantized input: tests the meaning of the format (nibble order,
 /// zero point, direction of the permutation), which the kernel-level references share by
@@ -837,6 +867,11 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
 
     for kind in Q4Z_KINDS {
         q4z_dense_case(tier, report, &mut rng, kind);
+    }
+
+    // Block-wise FP8: the codes stay 8-bit, the tile scales are applied while they are decoded (no 8-bit activations: the activations stay f32)
+    for (tile, rows, cols, batch) in [((128, 128), 13, 300, 1), ((128, 128), 130, 520, 3), ((32, 32), 70, 200, 5), ((1, 128), 33, 384, 2), ((16, 1), 20, 52, 4)] {
+        fp8b_dense_case(tier, report, &mut rng, tile, (rows, cols, batch));
     }
 
     if full {

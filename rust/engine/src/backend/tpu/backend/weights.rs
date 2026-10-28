@@ -57,6 +57,7 @@ fn decode_rows(
 ) -> Result<(), BackendError> {
     let kind = quant.to_gguf_type_id();
     let whole_tensor_only = fllm_gguf_probe::fp8m_type(kind)
+        || fllm_gguf_probe::fp8b_type(kind)
         || fllm_gguf_probe::q4zp_group(kind).is_some()
         || fllm_gguf_probe::q4z_group(kind).is_some();
     let decode = |bytes: &[u8], count: usize| {

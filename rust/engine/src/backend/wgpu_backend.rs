@@ -1233,7 +1233,22 @@ impl Backend for WgpuBackend {
     ) -> Result<DeviceWeight, BackendError> {
         let kind = quant_type.to_gguf_type_id();
         let converted;
-        let (bytes, quant_type) = if NATIVE_KINDS.contains(&kind) {
+        let expanded16: Vec<u8>;
+        let (bytes, quant_type) = if fllm_gguf_probe::fp8b_type(kind) {
+            // Block-wise FP8 has no WGSL decoder: the codes are expanded once with their tile scales, exactly, to binary16 (2 bytes per weight, not
+            // the 4 of the generic F32 expansion below)
+            let values = crate::compute::dequantize(raw_bytes, kind, rows * cols)
+                .map_err(|e| BackendError::UnsupportedOperation(format!("{name}: {e}")))?;
+            log_once(
+                "wgpu-fp8b-f16",
+                &format!("Block-wise FP8 weights have no WGSL decoder; expanded to F16 on upload (first: {name}, {} MiB)", (values.len() * 2) >> 20),
+            );
+            if values.iter().any(|v| !v.is_finite() || v.abs() > 65504.0) {
+                return Err(invalid(format!("{name}: a dequantized block-wise FP8 weight does not fit binary16")));
+            }
+            expanded16 = values.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
+            (expanded16.as_slice(), QuantType::F16)
+        } else if NATIVE_KINDS.contains(&kind) {
             let (block, width) = (quant_type.block_size(), quant_type.block_bytes());
             if !cols.is_multiple_of(block) || raw_bytes.len() != rows * (cols / block) * width {
                 return Err(invalid(format!(

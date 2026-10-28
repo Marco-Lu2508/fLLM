@@ -208,7 +208,8 @@ impl SyclBackend {
                 quant_type,
                 QuantType::NvFp4 | QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin
             )
-            || fllm_gguf_probe::fp8m_type(kind);
+            || fllm_gguf_probe::fp8m_type(kind)
+            || fllm_gguf_probe::fp8b_type(kind);
         if few_bits {
             log_once(
                 &format!("sycl-f16-{kind}"),

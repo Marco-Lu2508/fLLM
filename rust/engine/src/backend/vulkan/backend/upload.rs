@@ -97,7 +97,8 @@ fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: u
 /// rows are re-quantized to Q5_K (5.5 bit, finer than the 2-4 bit grids they came from, and served by the fast shaders), everything else is
 /// stored as binary16 (binary32 when a value does not fit), with the tensor scale folded in.
 fn expand<'a>(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize, scale: f32) -> Result<Prepared<'a>, BackendError> {
-    if matches!(quant, QuantType::Other(_)) {
+    // (block-wise FP8 tile shapes other than 128 x 128 are `Other` types too; their codes expand exactly)
+    if matches!(quant, QuantType::Other(id) if !fllm_gguf_probe::fp8b_type(id)) {
         return Err(BackendError::UnsupportedQuant(quant));
     }
     let mut values = crate::compute::dequantize(raw, quant.to_gguf_type_id(), rows * cols)
@@ -107,10 +108,11 @@ fn expand<'a>(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize
             *v *= scale;
         }
     }
+    // FP8 codes with their scales expand exactly to binary16: no re-quantization to Q5_K
     let float_source = matches!(
         quant,
         QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4
-    );
+    ) || fllm_gguf_probe::fp8b_type(quant.to_gguf_type_id());
     if cols.is_multiple_of(256) && !float_source {
         use rayon::prelude::*;
         let row_bytes = cols / 256 * 176;
