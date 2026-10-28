@@ -9,6 +9,8 @@ python3 scripts/colab/verify_all.py --dry-run     # print the plan, download not
 python3 scripts/colab/verify_all.py --cpu-only    # CPU checks only, any machine
 ```
 
+**Do not use `--build-from-source` on Colab unless you have an hour to spare**: the CUDA build there takes close to an hour. The default (no flag) downloads the release binary (`fllm-linux-x86_64-cuda.tar.gz`, built for every architecture from Pascal to Blackwell) and starts checking after about a minute.
+
 Useful options: `--binary PATH` (verify a binary you built), `--build-from-source`
 (slow, builds `main` with the CUDA kernels for the detected card), `--version TAG`
 (a specific release instead of `latest`), `--work DIR` (download/working directory,

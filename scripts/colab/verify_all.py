@@ -1136,10 +1136,18 @@ def acquire_from_source():
     env["CARGO_BUILD_JOBS"] = str(max(1, (os.cpu_count() or 2) // 2))
     sh(["cargo", "build", "--release", "--locked", "-p", "fllm-engine", "--features",
         "rust-gpu,cuda", "--bin", "fllm-rs"], timeout=BUILD_TIMEOUT, check=True, env=env,
-       cwd=os.path.join(src, "rust"))
-    binary = os.path.join(src, "rust", "target", "release", "fllm-rs")
+       cwd=src)
+    # the Cargo workspace is at the repository root (older layouts had it in rust/): look in both and ask cargo
+    candidates = [os.path.join(src, "target", "release", "fllm-rs"), os.path.join(src, "rust", "target", "release", "fllm-rs")]
+    try:
+        import json as _json
+        meta = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=src, capture_output=True, text=True, timeout=120)
+        candidates.insert(0, os.path.join(_json.loads(meta.stdout)["target_directory"], "release", "fllm-rs"))
+    except Exception:  # noqa: BLE001 - the two fixed places are enough
+        pass
+    binary = next((c for c in candidates if os.path.exists(c)), candidates[-1])
     if not os.path.exists(binary):
-        raise StepFailed("build finished but %s does not exist" % binary)
+        raise StepFailed("build finished but fllm-rs is in none of: %s" % ", ".join(candidates))
     return binary, "built from source (FLLM_CUDA_ARCHS=%s)" % archs
 
 
