@@ -718,6 +718,20 @@ fn inspect_kind(path: &Path) -> Result<InspectKind, String> {
     }
 }
 
+/// (id, name, values per block, bytes per block) of the fLLM-specific tensor types: the 4-bit AWQ / GPTQ groups, the bitsandbytes types.
+fn fllm_types() -> Vec<(u32, String, u64, u64)> {
+    let mut types = Vec::new();
+    for (id, name, group) in [(0x8000_0010u32, "q4z32", 32u64), (0x8000_0011, "q4z64", 64), (0x8000_0012, "q4z128", 128), (0x8000_0014, "q4zp32", 32), (0x8000_0015, "q4zp64", 64), (0x8000_0016, "q4zp128", 128)] {
+        types.push((id, name.to_owned(), group, group / 2 + 3));
+    }
+    types.push((0x8000_0020, "fp8m".to_owned(), 1, 1));
+    types.push((0x8000_0021, "fp8b".to_owned(), 1, 1));
+    for (id, name, block, bytes) in fllm_gguf_probe::bnb::TYPES {
+        types.push((id, name.to_owned(), block as u64, bytes as u64));
+    }
+    types
+}
+
 fn formats(args: &[String]) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{}", help("formats"));
@@ -745,6 +759,10 @@ fn formats(args: &[String]) -> Result<(), String> {
         );
     }
     println!("Decoder labels describe tensor decoding only; architecture, kernel, and device support are separate.");
+    println!("fLLM-specific tensor types (written by the converter, not part of GGML):");
+    for (id, name, block, bytes) in fllm_types() {
+        println!("{id:#x} {name:<10} block={block:<3} bytes={bytes:<3}");
+    }
     Ok(())
 }
 

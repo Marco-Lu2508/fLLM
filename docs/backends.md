@@ -33,6 +33,10 @@ A cross-compile check only proves that the Rust code compiles, not that it links
 Columns: **L** = Q4_0 Q4_1 Q5_0 Q5_1 Q8_0; **K** = Q2_K Q3_K Q4_K Q5_K Q6_K; **IQ4** = IQ4_NL; **MX** = MXFP4; **NV** = NVFP4;
 **Q4Z** = AWQ/GPTQ 4-bit (Q4Z32/64/128, Q4ZP with act-order); **F** = F16/BF16 (F32).
 Numbers in square brackets refer to the notes below the table.
+**bitsandbytes** (NF4B64/128, FP4B64/128, INT8R; no column): x86 CPU AVX2 and portable kernels, run by us (`docs/cpu-kernels.md`);
+CUDA decode GEMV and tensor-core prompt path, compiled for sm_80/89/90/120 and never run on a GPU (L0); every other backend, including
+Vulkan, Metal, wgpu, the NPU and the TPU path, takes them through a conversion at upload (L0†, 3.6 times the packed size in 16-bit,
+7 times in F32; `docs/gpu-backends.md`).
 
 | Hardware | L | K | IQ4 | MX | NV | Q4Z | F |
 | --- | --- | --- | --- | --- | --- | --- | --- |

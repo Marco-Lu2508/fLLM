@@ -174,6 +174,24 @@ ignored test `cargo test --release -p fllm-engine cpu_q4z -- --ignored --nocaptu
 shows 15 to 22 GB/s of weights per core at decode (the 2 MB test matrix is cache resident) and 51 to 59
 GMAC/s per core for a 64-token prompt.
 
+## bitsandbytes NF4, FP4 and int8 (`cpu_bnb`)
+
+The packed `NF4B64/128`, `FP4B64/128` and `INT8R` tensors ([rust-formats-and-import.md](rust-formats-and-import.md)) are computed without
+expanding them and **without quantizing the activations**: the products are `f32` and the only difference to the f64 reference is the
+order of the float sums.
+
+- AVX2 + FMA: the 16-entry code book is two vectors of eight floats; `vpermps` picks within each by the low three index bits and
+  `vblendvps` by the fourth. Eight code bytes widen to eight 32-bit indexes (`vpmovzxbd`); the high nibbles are the even elements and
+  the low nibbles the odd ones, so the activations are split once per call into an even and an odd plane and no shuffle is needed.
+  A group of 16 decoded weights is applied to up to four tokens (prompts are compute-bound, decode reads each code once); the
+  block's absmax multiplies the block sum, not each weight. int8 blocks widen with `vpmovsxbd`.
+- Without AVX2 (other CPUs, the scalar tier, aarch64) a portable loop with table loads and eight accumulators per block does the
+  same; there is no NEON kernel yet (the 16-entry `f32` table does not fit `tbl`, an f16-pair version is future work).
+- Rows are handed out in panels of four by the common scheduler; tokens in tiles of four. The tier cap (`selftest-cpu --tiers`)
+  switches between the two kernels.
+- Throughput: `cargo test --release -p fllm-engine cpu_bnb -- --ignored --nocapture` prints GB/s of weights and GMAC/s per kernel.
+  Not measured on a large model yet.
+
 ## Building with the `avx512` feature
 
 The feature is on by default (`default = ["avx512"]` in `rust/engine/Cargo.toml`, enabled by the commit
@@ -372,6 +390,7 @@ run the old path.
 | NEON `sdot` and `smmla` paths (Q8_0, Q4_0..Q6_K) | compiled for aarch64-unknown-linux-gnu and run on hardware by us |
 | NEON Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, float formats, DeltaNet step, SVE Q8_0 decode | compiled (check, clippy, codegen) for aarch64-unknown-linux-gnu; the layout and lane algebra is tested on x86 through scalar models; **not run on ARM hardware** (L0, see [cpu-arm.md](cpu-arm.md)) |
 | AVX-512 BW/VNNI kernels (Q8_0, classic, K panels, attention, `exp_shifted`), the `avx512` feature kernels (16-row VNNI GEMM, 512-bit codebook, Q2_K/Q3_K/IQ4_XS, float, BF16, DeltaNet), AMX tiles | **Real silicon**: AMD EPYC 9B45 (Zen 5, Colab): `selftest-cpu` 413 checks per tier, three models (avx512bw, avx512-vnni, avx512-bf16; no AMX there). **Emulated**: Intel SDE 9.58 executes the whole unit-test suite (`-spr`: 325 tests, including the AVX-512 and AMX ones, which skip themselves on other hardware), `selftest-cpu --tiers all` (`-spr`: 22 101 checks on the tiers avx2 to amx; `-icl`, `-skx`, `-adl` for their tiers; 0 failed) and runs two models end to end (Llama-3.2-3B Q4_K_M and Qwen2.5-3B AWQ on avx512bw and avx512-vnni); SDE is a functional emulator, so alignment, encoding and result bits are checked but speed is not. Intel silicon, AMX silicon and Zen 4 are untested |
+| bitsandbytes kernels (`cpu_bnb`): AVX2 + FMA and portable | run by us on an AMD EPYC 9255 VM (AVX2 + FMA, no AVX-512): unit tests against the f64 reference at 1 to 17 blocks per row, 1 to 13 rows, 1 to 17 tokens for all five types, `selftest-cpu` per tier, the whole decoder on a tiny model (`import_tests`); no aarch64 run, no AVX-512 specific kernel (AVX2 is used there) |
 | Q4Z / Q4ZP kernels (`cpu_q4z`) | AVX2 on an AMD EPYC 9255 VM (unit tests, `selftest-cpu`, Qwen2.5-3B AWQ end to end with speed); AVX-VNNI, AVX-512BW and AVX-512 VNNI under SDE; no AVX-512 speed measurement yet |
 | `selftest-cpu` | run on the AVX2 host and under SDE for every tier; `--tiers all --gguf` on 197 real tensors |
 
