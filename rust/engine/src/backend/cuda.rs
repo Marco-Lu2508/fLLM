@@ -1292,6 +1292,17 @@ impl Backend for CudaBackend {
             if self.cc >= 75 && ok {
                 return self.upload_fp8_marlin(name, raw_bytes, rows, cols, bias);
             }
+            // no Marlin FP8 kernel for this GPU or shape: the per-row scales become tiles one row high and the block-wise FP8 kernels run the weight
+            // 8-bit (FP32 GEMV for decode, FP16 tensor cores for prompts from sm_75)
+            if !self.rocm {
+                if let Some((block_kind, block_bytes)) = crate::cpu_fp8::fp8m_as_fp8b(raw_bytes, rows, cols) {
+                    log_once(
+                        "cuda-fp8m-as-blocks",
+                        &format!("FP8M weights without a Marlin FP8 kernel on this GPU run through the block-wise FP8 kernels, 8-bit (first: {name}); Marlin FP8 needs sm_75 and 128-aligned shapes"),
+                    );
+                    return hopper_fp8::upload_fp8_block(self, name, &block_bytes, block_kind, rows, cols, bias);
+                }
+            }
             log_once(
                 "cuda-fp8m-fallback",
                 &format!("FP8M weights are expanded to F32 on this GPU (first: {name}); Marlin FP8 needs sm_75 and 128-aligned shapes"),

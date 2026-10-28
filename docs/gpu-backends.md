@@ -407,6 +407,8 @@ Decode keeps the GEMV on every GPU: it is bound by the weight bandwidth (1 byte 
 MoE (`moe_tc_kernel`): FP8B experts with 128 x 128 tiles apply the scale of every 16-code run while the tile is staged (the scales of an expert sit
 `rows * cols` bytes into its buffer); other tile shapes, and experts whose code count is not a multiple of 4, take the per-expert path. A weight whose
 code count is not a multiple of 4 (the f32 scale table would be unaligned) and AMD HIP builds (no kernels) are expanded to F16 at upload, with a message.
+Per-tensor / per-channel `FP8M` weights that the Marlin FP8 kernel cannot take (below sm_75, widths that are not a multiple of 128) are repacked at upload into
+`FP8B` tiles one row high (`cpu_fp8::fp8m_as_fp8b`: f16 row scales widened to f32 exactly) and run through the same kernels, 8-bit; before they were expanded to F32 (4 bytes per weight).
 
 `selftest-gpu --only fp8blk` (`selftest/fp8blk.rs`): every GEMV batch variant (1, 2, 3, 4, 5, 7, 8, 9, 12, 16), the prompt GEMM (17, 33, 129), ten tile
 shapes (128 x 128, 64 x 64, 32 x 32, 128 x 32, 1 x 128, 16 x 16, 64 x 8 ...), rows that end inside a tile row, widths that are not a multiple of 16

@@ -185,6 +185,26 @@ pub fn linear_row_scaled(packed: &[u8], input: &[f32], rows_out: usize, cols: us
     drive(Scales::PerRow { rows: rows_out, cols }, packed, input, rows_out, cols, bias)
 }
 
+/// An `FP8M` tensor (codes, one binary16 scale per row) as the `FP8B` tensor of tiles one row high and `2^ceil(log2(cols))` wide (one tile per
+/// row): the same weights for the block-wise FP8 kernels, with the scales widened to f32 exactly. Lets devices without a Marlin FP8 kernel, or with
+/// shapes it cannot take, keep per-row scaled FP8 weights 8-bit. `None` when the width does not fit a tile (above 32768).
+pub fn fp8m_as_fp8b(raw: &[u8], rows: usize, cols: usize) -> Option<(u32, Vec<u8>)> {
+    let count = rows.checked_mul(cols)?;
+    if rows == 0 || cols == 0 || raw.len() != count.checked_add(rows * 2)? {
+        return None;
+    }
+    let kind = fllm_gguf_probe::fp8b_type_id(1, cols.next_power_of_two())?;
+    let layout = Fp8bLayout::new(kind, cols, rows, 1)?;
+    let mut out = Vec::with_capacity(layout.total_len());
+    out.extend_from_slice(&raw[..count]);
+    for c in raw[count..].as_chunks::<2>().0 {
+        out.extend_from_slice(&half::f16::from_le_bytes(*c).to_f32().to_le_bytes());
+    }
+    out.extend_from_slice(&layout.trailer());
+    debug_assert_eq!(out.len(), layout.total_len());
+    Some((kind, out))
+}
+
 /// The bytes of an `FP8B` tensor from its parts: `codes` (all matrices), one f32 scale per tile, trailer.
 pub fn pack(layout: &Fp8bLayout, codes: &[u8], scales: &[f32]) -> Vec<u8> {
     assert_eq!(codes.len(), layout.elements());
@@ -356,6 +376,32 @@ mod tests {
             }
             assert!(linear_row_scaled(&bytes[1..], &input, rows, cols, None).is_err());
         }
+    }
+
+    #[test]
+    fn fp8m_as_row_tiles_dequantizes_to_the_same_weights_and_runs_the_block_kernel() {
+        let mut rng = Lcg(5);
+        for (rows, cols) in [(5usize, 130usize), (9, 256), (3, 7)] {
+            let mut bytes: Vec<u8> = (0..rows * cols)
+                .map(|_| {
+                    let c = rng.next() as u8;
+                    if c & 0x7f == 0x7f { c & 0x80 } else { c }
+                })
+                .collect();
+            for _ in 0..rows {
+                bytes.extend_from_slice(&half::f16::from_f32(0.002 + 0.004 * (rng.unit() + 1.0)).to_le_bytes());
+            }
+            let (kind, tiles) = fp8m_as_fp8b(&bytes, rows, cols).unwrap();
+            assert_eq!(fp8b_shape(kind), Some((1, cols.next_power_of_two())));
+            assert_eq!(dequantize(&tiles, kind, rows * cols).unwrap(), dequantize(&bytes, 0x8000_0020, rows * cols).unwrap());
+            let input: Vec<f32> = (0..2 * cols).map(|_| rng.unit()).collect();
+            let a = linear(kind, &tiles, &input, rows, cols, None).unwrap();
+            let b = linear_row_scaled(&bytes, &input, rows, cols, None).unwrap();
+            assert_eq!(a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{rows}x{cols}");
+        }
+        assert!(fp8m_as_fp8b(&[0u8; 10], 2, 4).is_none(), "length");
+        let wide = vec![0u8; 33_000 * 2 + 4];
+        assert!(fp8m_as_fp8b(&wide, 2, 33_000).is_none(), "width above 32768");
     }
 
     #[test]
