@@ -32,7 +32,7 @@ change was run on a GPU**: every CUDA statement is L0. CPU statements say `cargo
 * New controls: `allowed_token_ids`, `bad_words` (strings, blocked at the start of a text and after a space; multi-token words block their last token
   once the prefix was generated), `logprobs_mode` (`raw_logprobs` default, `processed_logprobs`), `priority`, `timeout`, `speculative`, `best_of`
   (non-streaming; the `n` candidates with the highest cumulative log-probability are returned, usage counts all candidates).
-  `use_beam_search` is rejected with a message.
+  (`use_beam_search` was rejected here at the time; it is implemented now, see `docs/api-compat.md`.)
 * CUDA sampler `cuda/sampling.cu` + `Stream::sample_rows` + capability `sample_on_device` (true on CUDA and the CPU backend): bias, penalties, grammar bitmask,
   temperature, top-k, min-p, typical-p, top-p, Gumbel-max draw with Philox noise, raw or processed log-probabilities with top-N alternatives. Host reference
   `sampling::device_sample_reference` (sorting instead of bisection). `FLLM_DEVICE_SAMPLING=1` routes decode steps through it (default off).
@@ -107,7 +107,7 @@ and agreed with `device_sample_reference` on every token, log-probability and al
 * EAGLE, EAGLE-3, Medusa, tree attention (`cuda/attn_tree.cu`) and KV compaction of tree branches: not implemented. `speculative::verify_tree` is ready for them.
 * Speculation and `n > 1` for stateful (hybrid / recurrent) models, recurrent-state snapshots, prefix cache for stateful models, `--prefix-state-interval`: not implemented.
 * MTP stays CPU-only with one candidate; multi-candidate MTP, MTP on the GPU: not implemented.
-* Prompt logprobs, `echo` log-probabilities, beam search, `include_stop_str_in_output`, `skip_special_tokens`, `logits_processors`: not implemented (`best_of`,
+* Prompt logprobs, `echo` log-probabilities, `include_stop_str_in_output`, `skip_special_tokens`, `logits_processors`: not implemented (`best_of`,
   `bad_words`, `allowed_token_ids`, `logprobs_mode`, `min_tokens`, `ignore_eos`, `stop_token_ids` are).
 * Host-memory prefix-cache tier (`--kv-offload-gib`): not implemented.
 * The device sampler and block copy on CUDA, device swap and the device draft model are unproven on hardware.

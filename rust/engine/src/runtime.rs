@@ -25,6 +25,8 @@ pub struct BatchStats {
     pub max_rows: usize,
     pub prefill_rows: usize,
     pub decode_rows: usize,
+    /// Decode rounds that reused the previous round's batch without asking the scheduler (`--multi-step`).
+    pub replayed_rounds: usize,
     pub draft_proposed: usize,
     pub draft_accepted: usize,
     /// Tokens the grammar forced and the engine appended without sampling (jump-forward decoding).
@@ -35,6 +37,15 @@ pub struct BatchStats {
     pub batch_build_ns: u64,
     pub model_forward_ns: u64,
     pub postprocess_ns: u64,
+}
+
+/// A beam search in flight: the search state plus what the runtime needs to feed it.
+struct BeamRun {
+    search: crate::beam::BeamSearch,
+    sampling: crate::sampling::SamplingParams,
+    /// Prompt tokens served from the prefix cache, for the usage numbers.
+    cached: usize,
+    leader: i64,
 }
 
 struct BatchRow {
@@ -65,6 +76,17 @@ pub struct InferenceRuntime {
     spec_head: Option<crate::draft::SpecHeadEngine>,
     /// Distributions the draft model drew this step's draft tokens from (only for sequences with a draft model proposal).
     draft_q: std::collections::HashMap<i64, Vec<Option<crate::speculative::Dist>>>,
+    /// Beam searches in flight, by request id (see `submit_beam`).
+    beams: std::collections::HashMap<String, BeamRun>,
+    /// The request a beam sequence belongs to.
+    beam_seq: std::collections::HashMap<i64, String>,
+    /// Finished beam hypotheses waiting to be handed out as token events (the output channel has a bounded size).
+    beam_outbox: std::collections::HashMap<String, std::collections::VecDeque<TokenEvent>>,
+    beam_results: std::collections::HashMap<String, Vec<crate::beam::Hypothesis>>,
+    beam_failures: Vec<(String, String)>,
+    beam_steps: u64,
+    /// The decode batch of the last round when it was a plain decode round (the input of multi-step scheduling).
+    plain_round: Option<Vec<i64>>,
     spec_method: crate::speculative::SpeculativeMethod,
     /// Largest number of draft tokens per verification (`--num-speculative-tokens`).
     spec_tokens: usize,
@@ -183,6 +205,13 @@ impl InferenceRuntime {
             suffix: None,
             spec_head: None,
             draft_q: Default::default(),
+            beams: Default::default(),
+            beam_seq: Default::default(),
+            beam_outbox: Default::default(),
+            beam_results: Default::default(),
+            beam_failures: Vec::new(),
+            beam_steps: 0,
+            plain_round: None,
             spec_method: if speculative_lookup > 0 {
                 crate::speculative::SpeculativeMethod::Ngram
             } else {
@@ -220,17 +249,24 @@ impl InferenceRuntime {
             .get(&source)
             .cloned()
             .ok_or_else(|| format!("unknown sequence to fork: {source}"))?;
-        let blocks = self
-            .scheduler
-            .bm
-            .get_table(source)
-            .map_err(|error| error.to_string())?
-            .blocks
-            .clone();
+        if self.model.is_stateful() {
+            return Err("cannot fork a sequence of a stateful model".into());
+        }
+        let (blocks, table_tokens) = {
+            let table = self.scheduler.bm.get_table(source).map_err(|error| error.to_string())?;
+            (table.blocks.clone(), table.num_tokens)
+        };
         if blocks.is_empty() {
             return Err("cannot fork a sequence without KV blocks".into());
         }
-        if self.available_blocks() < blocks.len() {
+        // Blocks that are completely computed are never written again (a sequence only appends), so the fork shares them by
+        // reference count: this is the copy-on-write of the block manager. Only the block that holds the computed tail is
+        // copied, because the source and the fork both write into it next.
+        let block_size = self.model.block_size();
+        let computed = source_seq.num_computed;
+        let shared = (computed / block_size).min(blocks.len());
+        let tail = (!computed.is_multiple_of(block_size) && shared < blocks.len()).then(|| blocks[shared]);
+        if tail.is_some() && self.available_blocks() < 1 && self.scheduler.reclaim_cache(1) == 0 {
             return Err("not enough free KV blocks to fork".into());
         }
         let new_id = self.next_sequence_id;
@@ -239,45 +275,35 @@ impl InferenceRuntime {
             .bm
             .new_table(new_id)
             .map_err(|error| error.to_string())?;
-        // copy block by block; a failure gives every block back, so a fork either happens or it does not
-        let mut copied: Vec<usize> = Vec::with_capacity(blocks.len());
-        for &block in &blocks {
-            let free = match self.scheduler.alloc_free_block() {
-                Ok(free) => free,
-                Err(error) => {
-                    self.discard_fork(new_id, &copied);
-                    return Err(error.to_string());
-                }
-            };
-            if let Err(error) = self.copy_prompt_block(block, free as usize) {
-                self.scheduler.free_block(free);
-                self.discard_fork(new_id, &copied);
-                return Err(error);
+        // a failure gives every block back (dropping the table releases the shared ones and the copy), so a fork either
+        // happens or it does not
+        let built = (|| -> Result<(), String> {
+            for &block in blocks.iter().take(shared) {
+                self.scheduler.bm.claim_block_for(new_id, block as i64).map_err(|error| error.to_string())?;
             }
-            if let Err(error) = self.scheduler.bm.claim_block_for(new_id, free) {
-                self.scheduler.free_block(free);
-                self.discard_fork(new_id, &copied);
-                return Err(error.to_string());
+            if let Some(source_tail) = tail {
+                let copy = self.scheduler.bm.append_block(new_id).map_err(|error| error.to_string())?;
+                self.copy_prompt_block(source_tail, copy)?;
             }
-            copied.push(free as usize);
+            Ok(())
+        })();
+        if let Err(error) = built {
+            let _ = self.scheduler.bm.drop_table(new_id);
+            return Err(error);
         }
+        let new_blocks = self.scheduler.bm.get_table(new_id).map_err(|error| error.to_string())?.blocks.clone();
+        self.scheduler.bm.get_table_mut(new_id).map_err(|error| error.to_string())?.num_tokens = table_tokens;
         let mut sequence = source_seq;
         sequence.seq_id = new_id;
-        sequence.blocks = copied.clone();
+        sequence.blocks = new_blocks;
+        sequence.block_hashes.truncate(shared);
+        sequence.state = "waiting".into();
         // the copy is already computed, so admission has nothing to schedule for it
         sequence.num_computed = sequence.num_computed.max(sequence.prefill_target);
         self.scheduler.requests.entry(sequence.req_id.clone()).or_default().push(new_id);
         self.scheduler.sequences.insert(new_id, sequence);
         self.scheduler.waiting.push_back(new_id);
         Ok(new_id)
-    }
-
-    /// Gives the blocks of a failed fork back and drops its table.
-    fn discard_fork(&mut self, new_id: i64, copied: &[usize]) {
-        for &block in copied {
-            self.scheduler.free_block(block as i64);
-        }
-        let _ = self.scheduler.bm.drop_table(new_id);
     }
 
     /// Sets the per-request prefix salt (`cache_salt`): requests with different salts never share KV blocks.
@@ -402,6 +428,272 @@ impl InferenceRuntime {
             && self.draft.is_none()
             && self.mtp.is_none()
     }
+    /// Starts a beam search (`use_beam_search`): `params.width` beams that share the prompt's KV blocks, pruned after every token
+    /// by the summed log-probability (see `beam.rs` for the exact scoring). The finished hypotheses come out as token events
+    /// through `take_beam_events` (`choice_index` = rank, best first), all at once when the search ends.
+    ///
+    /// Refused with `beam::REFUSED` (can never run) or `beam::BUSY` (try again later) in the error text instead of being queued
+    /// into a state that cannot finish: the beams need `width` sequence slots and, in the worst case, their own KV tails.
+    pub fn submit_beam(
+        &mut self,
+        request_id: String,
+        prompt_tokens: Vec<i64>,
+        max_tokens: usize,
+        mut sampling: crate::sampling::SamplingParams,
+        params: crate::beam::BeamParams,
+    ) -> Result<i64, String> {
+        use crate::beam::{BeamSearch, BUSY, MAX_BEAMS, REFUSED};
+        if params.width == 0 || params.width > MAX_BEAMS {
+            return Err(format!("{REFUSED}the beam width must be between 1 and {MAX_BEAMS}"));
+        }
+        if params.returned == 0 || params.returned > params.width {
+            return Err(format!("{REFUSED}n must be between 1 and the beam width"));
+        }
+        if !params.length_penalty.is_finite() {
+            return Err(format!("{REFUSED}length_penalty must be a finite number"));
+        }
+        // a width of one never forks, so it only needs the engines that watch every token to be absent
+        let unsupported = if params.width > 1 {
+            !self.supports_shared_choices()
+        } else {
+            self.draft.is_some() || self.mtp.is_some()
+        };
+        if unsupported {
+            return Err(format!(
+                "{REFUSED}it needs a stateless model on a backend with KV block copy and no draft/MTP engine"
+            ));
+        }
+        if sampling.logprobs.is_some() {
+            return Err(format!("{REFUSED}logprobs are not available"));
+        }
+        if (sampling.repetition_penalty - 1.0).abs() > 1e-6
+            || sampling.presence_penalty != 0.0
+            || sampling.frequency_penalty != 0.0
+            || sampling.dry_multiplier > 0.0
+            || sampling.mirostat != 0
+        {
+            return Err(format!(
+                "{REFUSED}repetition/presence/frequency penalties, DRY and mirostat change the distribution per beam and are not supported"
+            ));
+        }
+        let slots = self.scheduler.cfg.max_num_seqs;
+        if params.width > slots {
+            return Err(format!("{REFUSED}a width of {} needs that many sequence slots, the server has {slots}", params.width));
+        }
+        let block_size = self.model.block_size();
+        let needed = prompt_tokens.len().div_ceil(block_size) + params.width * (max_tokens.div_ceil(block_size) + 1);
+        let usable = self.model.pool_blocks().saturating_sub(1);
+        if needed > usable {
+            return Err(format!(
+                "{REFUSED}in the worst case it needs {needed} KV blocks (prompt plus {} beams of {max_tokens} tokens) and the pool has {usable}; lower max_tokens or the beam width",
+                params.width
+            ));
+        }
+        let reserved: usize = self.beams.values().map(|run| run.search.params().width).sum();
+        if reserved + params.width > slots {
+            return Err(format!("{BUSY}other beam searches hold {reserved} of the {slots} sequence slots; try again shortly"));
+        }
+        sampling.choices = 1;
+        sampling.speculative = false;
+        let leader = self.submit_with_sampling(request_id.clone(), prompt_tokens, max_tokens, sampling.clone())?;
+        let mut finishing = sampling.stop_token_ids.clone();
+        if !sampling.ignore_eos {
+            finishing.extend(self.eos_ids.iter().copied());
+        }
+        let search = BeamSearch::new(params, leader, max_tokens, sampling.min_tokens, finishing);
+        self.beam_seq.insert(leader, request_id.clone());
+        self.beams.insert(request_id, BeamRun { search, sampling, cached: 0, leader });
+        Ok(leader)
+    }
+
+    /// Runs a beam search to the end and returns the `n` best hypotheses, best first (it steps the whole runtime, so other
+    /// requests make progress too). For library callers and tests; the server uses `submit_beam` and `take_beam_events`.
+    pub fn run_beam_search(
+        &mut self,
+        request_id: &str,
+        prompt_tokens: Vec<i64>,
+        max_tokens: usize,
+        sampling: crate::sampling::SamplingParams,
+        mut params: crate::beam::BeamParams,
+    ) -> Result<Vec<crate::beam::Hypothesis>, String> {
+        params.keep_result = true;
+        self.submit_beam(request_id.to_owned(), prompt_tokens, max_tokens, sampling, params)?;
+        while self.beams.contains_key(request_id) {
+            let progress = (self.batch_stats.forward_calls, self.beam_steps);
+            self.step()?;
+            if let Some(position) = self.beam_failures.iter().position(|(id, _)| id == request_id) {
+                return Err(self.beam_failures.remove(position).1);
+            }
+            if progress == (self.batch_stats.forward_calls, self.beam_steps) && self.beams.contains_key(request_id) {
+                self.cancel_request(request_id)?;
+                return Err("scheduler could not make progress with the available KV pool".into());
+            }
+        }
+        self.beam_outbox.remove(request_id);
+        self.beam_results.remove(request_id).ok_or_else(|| "the beam search ended without a result".to_owned())
+    }
+
+    /// Requests whose finished beam hypotheses wait to be sent as token events.
+    pub fn beam_outbox_requests(&self) -> Vec<String> {
+        self.beam_outbox.keys().cloned().collect()
+    }
+
+    /// Up to `max` of the token events of a finished beam search, in order; the last event of the request has
+    /// `request_finished` set.
+    pub fn take_beam_events(&mut self, request_id: &str, max: usize) -> Vec<TokenEvent> {
+        let Some(queue) = self.beam_outbox.get_mut(request_id) else {
+            return Vec::new();
+        };
+        let take = max.min(queue.len());
+        let events: Vec<TokenEvent> = queue.drain(..take).collect();
+        if queue.is_empty() {
+            self.beam_outbox.remove(request_id);
+        }
+        events
+    }
+
+    /// Beam searches that failed after they were accepted (the KV pool ran out while forking), with the reason. The runtime
+    /// has already released their sequences.
+    pub fn take_failures(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.beam_failures)
+    }
+
+    /// A beam is ready for the next search step when its KV covers every token and the logits that follow are in hand.
+    fn beam_ready(&self, sid: i64) -> bool {
+        self.pending_logits.contains_key(&sid)
+            && self.scheduler.bm.get_table(sid).is_ok()
+            && self
+                .scheduler
+                .sequences
+                .get(&sid)
+                .is_some_and(|s| s.state == "running" && s.swapped_blocks == 0 && s.num_computed == s.tokens.len())
+    }
+
+    /// Advances every beam search whose beams are all ready. A search that cannot continue (the pool ran out) fails alone.
+    fn drive_beams(&mut self) {
+        let mut requests: Vec<String> = self.beams.keys().cloned().collect();
+        requests.sort();
+        for request in requests {
+            if let Err(error) = self.advance_beam(&request) {
+                tracing::warn!("beam search {request} failed: {error}");
+                let _ = self.cancel_request(&request);
+                self.beam_failures.push((request, error));
+            }
+        }
+    }
+
+    fn advance_beam(&mut self, request: &str) -> Result<(), String> {
+        let Some(mut run) = self.beams.remove(request) else {
+            return Ok(());
+        };
+        let outcome = self.advance_beam_run(request, &mut run);
+        // a finished search is gone; a running one stays, and so does a failed one until the caller cancels it
+        if !(outcome.is_ok() && run.search.is_done()) {
+            self.beams.insert(request.to_owned(), run);
+        }
+        outcome
+    }
+
+    fn advance_beam_run(&mut self, request: &str, run: &mut BeamRun) -> Result<(), String> {
+        let old: Vec<i64> = run.search.alive.iter().map(|beam| beam.seq).collect();
+        if !old.iter().all(|&sid| self.beam_ready(sid)) {
+            return Ok(());
+        }
+        let vocab = self.model.vocab_size();
+        let mut logits = Vec::with_capacity(old.len());
+        for (beam, &sid) in run.search.alive.iter().zip(&old) {
+            let mut row = self.pending_logits.get(&sid).cloned().ok_or("missing beam logits")?;
+            if row.len() != vocab {
+                return Err("LM head returned an invalid vocabulary row".into());
+            }
+            for &(id, bias) in &run.sampling.logit_bias {
+                if let Some(value) = row.get_mut(id) {
+                    *value += bias;
+                }
+            }
+            let history = self.scheduler.sequences.get(&sid).map(|s| s.tokens.clone()).unwrap_or_default();
+            crate::sampling::apply_generation_controls(&mut row, &run.sampling, &self.eos_ids, beam.tokens.len(), &history);
+            logits.push(row);
+            if let Some(sequence) = self.scheduler.sequences.get(&sid) {
+                run.cached = run.cached.max(sequence.cached_prompt_tokens);
+            }
+        }
+        self.beam_steps += 1;
+        let selections = run.search.advance(&logits);
+        drop(logits);
+        if run.search.is_done() {
+            for &sid in &old {
+                self.beam_seq.remove(&sid);
+                self.finish_choice(request, sid)?;
+            }
+            self.queue_beam_events(request, run);
+            return Ok(());
+        }
+        // beams that no hypothesis continues give their blocks back first, so the forks have room
+        let mut used = vec![false; old.len()];
+        for selection in &selections {
+            used[selection.parent] = true;
+        }
+        for (index, &sid) in old.iter().enumerate() {
+            if !used[index] {
+                self.beam_seq.remove(&sid);
+                self.finish_choice(request, sid)?;
+            }
+        }
+        // the first child continues its parent's sequence, further children fork it (before the parent moves on)
+        let mut taken = vec![false; old.len()];
+        let mut children = Vec::with_capacity(selections.len());
+        for selection in &selections {
+            if !taken[selection.parent] {
+                taken[selection.parent] = true;
+                children.push(old[selection.parent]);
+            } else {
+                let child = self.fork_sequence(old[selection.parent])?;
+                self.beam_seq.insert(child, request.to_owned());
+                children.push(child);
+            }
+        }
+        for (index, (&sid, selection)) in children.iter().zip(&selections).enumerate() {
+            run.search.set_seq(index, sid);
+            self.pending_logits.remove(&sid);
+            self.scheduler
+                .sequences
+                .get_mut(&sid)
+                .ok_or("missing beam sequence")?
+                .append_token(selection.token);
+            self.scheduler.commit_decode(sid).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Turns the finished hypotheses into token events, one choice per hypothesis in rank order.
+    fn queue_beam_events(&mut self, request: &str, run: &BeamRun) {
+        let best = run.search.best();
+        let mut queue = std::collections::VecDeque::new();
+        let last_choice = best.len().saturating_sub(1);
+        for (choice, hypothesis) in best.iter().enumerate() {
+            let last = hypothesis.tokens.len().saturating_sub(1);
+            for (index, &token) in hypothesis.tokens.iter().enumerate() {
+                let finished = index == last;
+                queue.push_back(TokenEvent {
+                    request_id: request.to_owned(),
+                    sequence_id: run.leader,
+                    token_id: token,
+                    finished,
+                    finish_reason: finished.then_some(hypothesis.finish_reason),
+                    logprobs: None,
+                    cached_prompt_tokens: run.cached,
+                    choice_index: choice,
+                    request_finished: finished && choice == last_choice,
+                });
+            }
+        }
+        if run.search.params().keep_result {
+            self.beam_results.insert(request.to_owned(), best);
+        }
+        self.beam_outbox.insert(request.to_owned(), queue);
+    }
+
     fn finish_choice(&mut self, request: &str, sid: i64) -> Result<(), String> {
         self.scheduler.release(sid).map_err(|e| e.to_string())?;
         self.scheduler.sequences.remove(&sid);
@@ -723,7 +1015,8 @@ impl InferenceRuntime {
     }
 
     pub fn active_requests(&self) -> usize {
-        self.scheduler.requests.len()
+        // a finished beam search still has events to hand out
+        self.scheduler.requests.len() + self.beam_outbox.len()
     }
 
     /// Switch jump-forward decoding on (`Some`) or off (`None`). It applies to grammar-constrained sequences only; see
@@ -850,6 +1143,10 @@ impl InferenceRuntime {
 
     /// Cancel an active request and release its scheduler sequence and KV blocks.
     pub fn cancel_request(&mut self, request_id: &str) -> Result<(), String> {
+        self.beams.remove(request_id);
+        self.beam_seq.retain(|_, request| request != request_id);
+        self.beam_outbox.remove(request_id);
+        self.beam_results.remove(request_id);
         let sequence_ids = self
             .scheduler
             .requests
@@ -1260,7 +1557,83 @@ impl InferenceRuntime {
         }
     }
 
+    /// One scheduler round, plus up to `multi_step - 1` further decode rounds on the same batch while it does not change (see
+    /// `multi_step_batch`). The events of the rounds come back in order, so a sequence's tokens are never reordered; a sequence
+    /// that stops (end token, `max_tokens`) leaves the batch, which ends the run of extra rounds before it could decode past
+    /// its stop.
     pub fn step(&mut self) -> Result<Vec<TokenEvent>, String> {
+        let mut events = self.step_round(None)?;
+        for _ in 1..self.scheduler.cfg.multi_step.max(1) {
+            let Some(batch) = self.multi_step_batch() else { break };
+            events.extend(self.step_round(Some(batch))?);
+            self.batch_stats.replayed_rounds += 1;
+        }
+        Ok(events)
+    }
+
+    /// Enables `rounds` decode rounds per scheduler round (`--multi-step`). Returns the number in effect: 1 (off) on an
+    /// accelerator, because the multi-round path has only been verified on the host CPU backend; `FLLM_MULTI_STEP_UNVERIFIED=1`
+    /// overrides that. Call after `attach_compute`.
+    pub fn set_multi_step(&mut self, rounds: usize) -> Result<usize, String> {
+        if rounds == 0 || rounds > 16 {
+            return Err("multi-step must be between 1 and 16".into());
+        }
+        if self.decoder.is_none() {
+            return Err("enable multi-step after attaching compute".into());
+        }
+        let unverified = matches!(std::env::var("FLLM_MULTI_STEP_UNVERIFIED").as_deref(), Ok("1"));
+        let effective = if rounds > 1 && !self.shared_choices_cpu && !unverified { 1 } else { rounds };
+        self.scheduler.cfg.multi_step = effective;
+        Ok(effective)
+    }
+
+    /// The batch for another decode round, when the previous round was a plain decode round and nothing about it changed:
+    /// the same sequences are running, nobody waits for admission, every sequence still has a token to decode and a free
+    /// slot in its last block (or a block to take), and no request timed out. Anything that needs a decision between two
+    /// tokens (speculation, grammar, media, beam search, a prompt still being computed) keeps the ordinary single step.
+    fn multi_step_batch(&mut self) -> Option<crate::scheduler::ScheduledStep> {
+        let decode = self.plain_round.take()?;
+        if self.draft.is_some()
+            || self.mtp.is_some()
+            || self.suffix.is_some()
+            || self.spec_head.is_some()
+            || self.scheduler.cfg.speculative_lookup > 0
+            || !self.beams.is_empty()
+            || !self.pending_choices.is_empty()
+            || !self.scheduler.waiting.is_empty()
+            || self.scheduler.running.len() != decode.len()
+            || !self.scheduler.expired_requests(Instant::now()).is_empty()
+        {
+            return None;
+        }
+        let mut blocks = 0usize;
+        for sid in &decode {
+            let sequence = self.scheduler.sequences.get(sid)?;
+            if sequence.state != "running"
+                || !self.scheduler.running.contains(sid)
+                || sequence.constrained
+                || sequence.has_media
+                || self.constraints.contains_key(sid)
+                || self.pending_logits.contains_key(sid)
+                || sequence.remaining_max() == 0
+                || sequence.num_computed + 1 != sequence.tokens.len()
+            {
+                return None;
+            }
+            blocks += self.scheduler.bm.num_blocks_needed(*sid, 1).ok()?;
+        }
+        if blocks > self.scheduler.bm.allocator.available() {
+            return None;
+        }
+        for sid in &decode {
+            self.scheduler.bm.ensure_blocks(*sid, 1).ok()?;
+        }
+        Some(crate::scheduler::ScheduledStep { prefill: Vec::new(), decode, verify: Vec::new() })
+    }
+
+    /// One round: schedule (or take the given batch), run the forward pass, sample, commit.
+    fn step_round(&mut self, replay: Option<crate::scheduler::ScheduledStep>) -> Result<Vec<TokenEvent>, String> {
+        self.plain_round = None;
         self.spill_pending();
         if !self.kv_warmed {
             self.kv_warmed = true;
@@ -1362,7 +1735,10 @@ impl InferenceRuntime {
             }
             self.spec_delta.draft_ns += started.elapsed().as_nanos() as u64;
         }
-        let scheduled = self.scheduler.schedule().map_err(|e| e.to_string())?;
+        let scheduled = match replay {
+            Some(batch) => Some(batch),
+            None => self.scheduler.schedule().map_err(|e| e.to_string())?,
+        };
         self.carry_out_swaps()?;
         if let Some(metrics) = &self.metrics {
             let (running, waiting, free, total, hits) = self.metrics_snapshot();
@@ -1378,6 +1754,7 @@ impl InferenceRuntime {
             self.scheduler.wait_times.clear();
         }
         let Some(mut step) = scheduled else {
+            self.drive_beams();
             return Ok(Vec::new());
         };
         // A sequence whose prompt logits are still pending takes its next token from them: it is a plain decode step, whatever draft
@@ -1561,6 +1938,7 @@ impl InferenceRuntime {
             && prefill_commits.iter().all(|(_, _, final_row)| final_row.is_none())
             && step.decode.iter().all(|sid| {
                 !self.pending_logits.contains_key(sid)
+                    && !self.beam_seq.contains_key(sid)
                     && !self.constraints.contains_key(sid)
                     && self.scheduler.sequences.get(sid).is_some_and(|s| {
                         s.sampling.argmax_only() && s.sampling.logprobs.is_none() && s.output_len >= s.sampling.min_tokens
@@ -1576,7 +1954,9 @@ impl InferenceRuntime {
             && self.mtp.is_none()
             && logit_rows.len() == decode_row.len()
             && prefill_commits.iter().all(|(_, _, final_row)| final_row.is_none())
-            && step.decode.iter().all(|sid| !self.pending_logits.contains_key(sid) && !self.constraints.contains_key(sid))
+            && step.decode.iter().all(|sid| {
+                !self.pending_logits.contains_key(sid) && !self.beam_seq.contains_key(sid) && !self.constraints.contains_key(sid)
+            })
         {
             self.device_sample_job(&step.decode)
         } else {
@@ -1702,7 +2082,31 @@ impl InferenceRuntime {
 
         let vocab = self.model.vocab_size();
         let mut events = Vec::new();
+        // the next round may reuse this batch when it was nothing but plain decode rows
+        if step.prefill.is_empty()
+            && step.verify.is_empty()
+            && !step.decode.is_empty()
+            && step.decode.iter().all(|sid| !self.beam_seq.contains_key(sid))
+        {
+            self.plain_round = Some(step.decode.clone());
+        }
         for sid in step.decode {
+            if self.beam_seq.contains_key(&sid) {
+                // a beam does not sample: its logits wait until every beam of the search has them (`drive_beams`)
+                if let std::collections::hash_map::Entry::Vacant(slot) = self.pending_logits.entry(sid) {
+                    let row = *decode_row.get(&sid).ok_or_else(|| format!("missing decode result for {sid}"))?;
+                    let compact_row = logit_rows
+                        .binary_search(&row)
+                        .map_err(|_| format!("missing decode LM-head result for {sid}"))?;
+                    let offset = compact_row * vocab;
+                    if offset + vocab > batch_logits.len() {
+                        return Err("LM head returned an invalid vocabulary row".into());
+                    }
+                    slot.insert(batch_logits[offset..offset + vocab].to_vec());
+                    self.scheduler.commit_chunk(sid, 1).map_err(|e| e.to_string())?;
+                }
+                continue;
+            }
             let (sampling, tokens_history) = self
                 .scheduler
                 .sequences
@@ -1880,6 +2284,7 @@ impl InferenceRuntime {
             }
         }
 
+        self.drive_beams();
         let had_verify = !verify_candidates.is_empty();
         for cand in verify_candidates {
             let sid = cand.sid;
@@ -2130,8 +2535,12 @@ impl InferenceRuntime {
     pub fn run_until_request_done(&mut self, request_id: &str) -> Result<Vec<i64>, String> {
         let mut tokens = Vec::new();
         while self.scheduler.requests.contains_key(request_id) {
+            let progress = (self.batch_stats.forward_calls, self.beam_steps);
             let events = self.step()?;
-            if events.is_empty() && self.scheduler.requests.contains_key(request_id) {
+            if events.is_empty()
+                && progress == (self.batch_stats.forward_calls, self.beam_steps)
+                && self.scheduler.requests.contains_key(request_id)
+            {
                 return Err("scheduler could not make progress with the available KV pool".into());
             }
             for event in events.into_iter().filter(|e| e.request_id == request_id) {
@@ -2413,3 +2822,7 @@ mod tests {
         assert_eq!(cfg.speculative_window, 32);
     }
 }
+
+#[cfg(test)]
+#[path = "beam_tests.rs"]
+mod beam_tests;

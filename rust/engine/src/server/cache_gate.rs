@@ -88,6 +88,10 @@ pub(crate) fn fingerprint(state: &AppState, body: &Value, is_chat: bool) -> Opti
     if is_chat && body.get("tools").is_some_and(|tools| tools.as_array().is_some_and(|a| !a.is_empty())) {
         return None; // tool calls have their own answer shape
     }
+    // beam search ignores the sampling fields this key is made of, so the key would not describe the answer
+    if body.get("use_beam_search").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     for key in ["echo", "lora", "adapter", "adapters"] {
         if body.get(key).is_some_and(|value| !value.is_null()) {
             return None;

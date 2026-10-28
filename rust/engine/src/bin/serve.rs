@@ -87,6 +87,7 @@ fn usage(error: &str) -> ! {
         eprintln!("{error}");
     }
     eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("       --multi-step N (alias --num-scheduler-steps): up to N decode rounds per scheduler round while the batch does not change; off by default, CPU backend only until verified elsewhere");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
     eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a verified safetensors checkpoint is loaded directly without writing a GGUF file (--direct forces that, --no-direct-load converts to a cached GGUF file instead); --quant ({}) re-encodes an unquantized checkpoint while loading", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
@@ -447,6 +448,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut scheduling_policy = fllm_engine::scheduler::SchedulingPolicy::Fcfs;
     let mut sched_watermark: Option<usize> = None;
     let mut max_partial_prefills = 0usize;
+    let mut multi_step = 1usize;
     let mut long_prefill_threshold = 0usize;
     let mut max_long_partial_prefills = 1usize;
     let mut decode_first = true;
@@ -621,6 +623,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .parse()
                         .unwrap_or_else(|_| usage("invalid --kv-watermark-blocks")),
                 );
+            }
+            "--multi-step" | "--num-scheduler-steps" => {
+                multi_step = value(&args, &mut i, "--multi-step")
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=16).contains(n))
+                    .unwrap_or_else(|| usage("--multi-step expects a number from 1 to 16"));
             }
             "--max-num-partial-prefills" => {
                 max_partial_prefills = value(&args, &mut i, "--max-num-partial-prefills")
@@ -1367,6 +1376,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     runtime.attach_compute(&device)?;
+    if multi_step > 1 {
+        let effective = runtime.set_multi_step(multi_step)?;
+        if effective == multi_step {
+            eprintln!("[fllm-rs] Multi-step scheduling: up to {effective} decode rounds per scheduler round (plain decoding only; speculation, grammars, media and beam search use single steps)");
+        } else {
+            eprintln!("[fllm-rs] --multi-step {multi_step} is ignored on this backend: it has only been verified on the CPU backend (set FLLM_MULTI_STEP_UNVERIFIED=1 to use it anyway)");
+        }
+    }
     if preemption_swap {
         let c = runtime.model.config();
         let (key_fmt, value_fmt) = runtime.model.kv_formats();

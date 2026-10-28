@@ -104,6 +104,7 @@ the mask as a bitmask; DRY and Mirostat rows keep sampling on the host. Default:
 | `--max-num-partial-prefills N` | 0 (no limit) | at most N sequences prefill in one step |
 | `--long-prefill-token-threshold T`, `--max-long-partial-prefills N` | 0, 1 | prompts longer than T count as long; at most N of them prefill per step, shorter prompts interleave |
 | `--chunked-prefill-policy prefill-first|decode-first` | `decode-first` | `decode-first` keeps one token of each step's budget per running decoder out of the prompt chunks' reach: a user whose prompt is done gets the answer streamed while the prompts of others are still read (4 users with 2000-token prompts on Vulkan: first tokens after 9 to 32 s instead of all after 31 s); `prefill-first` reads every waiting prompt first |\|decode-first` | `prefill-first` | `decode-first` keeps one token of each step's budget per running decoder out of the prompt chunks' reach (lower inter-token latency under load) |
+| `--multi-step N` (alias `--num-scheduler-steps`) | 1 (off) | up to N decode rounds per scheduler round while the batch is unchanged: no new request waits, nothing finished, no prompt is being read. It saves the scheduler's bookkeeping between rounds, not forward passes (the forward passes stay the same number), at the price that new requests and cancellations are noticed up to N rounds later and a stop string is noticed by the server after the extra tokens exist (they are discarded, never sent). Speculative decoding, grammar-constrained requests, media and beam search always run single steps. Accepted on the CPU backend only; on an accelerator it is ignored with a message because it has not been verified there (`FLLM_MULTI_STEP_UNVERIFIED=1` overrides) |
 | `--preemption-mode recompute\|swap`, `--swap-space GiB` | `recompute`, 0 | `swap` copies the KV blocks of a preempted sequence to host memory and back instead of recomputing the sequence; it needs KV block operations on the backend (checked at start-up) |
 
 `n > 1` and `best_of` (the `n` candidates with the highest cumulative log-probability of `best_of` samples; not with `stream`) fork the sequence after the
@@ -118,5 +119,5 @@ cover.
 
 EAGLE, EAGLE-3 and Medusa heads, tree verification of the draft (the verification, `speculative::verify_tree`, is implemented and
 tested, but the decoder has no tree attention mask), recurrent-state snapshots for hybrid models (so no speculation and no `n > 1` for them),
-the stateful prefix cache, prompt log-probabilities / `echo` log-probabilities, beam search, host-memory prefix-cache tiers.
+the stateful prefix cache, prompt log-probabilities / `echo` log-probabilities, host-memory prefix-cache tiers.
 See [changes/spec.md](changes/spec.md) for the full list.

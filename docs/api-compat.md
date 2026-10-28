@@ -195,7 +195,8 @@ are fabricated for it. `echo: true` on completions prepends the original string
 prompt (or decoded text for token-ID prompts). Prompt logprobs are omitted because
 prefill evaluates the LM head only at the last
 prompt position. Generated text offsets include the echoed prompt character count.
-`best_of` is explicitly rejected.
+`best_of` (without `use_beam_search`) samples `best_of` candidates and returns the `n` with the highest cumulative
+log-probability; it cannot be streamed. See "Beam search" below for `use_beam_search`.
 
 Legacy completions follow the documented `logprobs: 0..5` limit. The per-token
 `top_logprobs` map includes the sampled token even when it is outside the top N,
@@ -242,6 +243,38 @@ resolving to the CPU), a stateless model, no draft/MTP engine, and unconstrained
 text input. GPU cache state, hybrid recurrent state, image embeddings and grammar
 matchers do not yet have a supported shared-prompt fork operation; those combinations
 return a validation error. The prompt is computed once and only complete state is shared.
+
+## Beam search (`use_beam_search`)
+
+`POST /v1/completions` and `/v1/chat/completions` accept the vLLM fields for beam search. It is deterministic: the same
+request gives the same hypotheses.
+
+| Field | Meaning |
+|---|---|
+| `use_beam_search: true` | run a beam search instead of sampling |
+| `best_of` | the beam width (1 to 8). Without it the width is `n` |
+| `n` | how many of the finished hypotheses to return (at most the width), best first, as `choices` |
+| `length_penalty` | default `1.0`. A hypothesis scores `sum of token log-probabilities / length ^ length_penalty`, where `length` counts the generated tokens including the final stop token. Larger values favour longer text |
+| `early_stopping` | `false` (default): stop when no live beam can beat the worst of the `best_of` finished hypotheses at its current length; `true`: stop as soon as `best_of` hypotheses are finished; `"never"`: stop only when no live beam can still win at its best reachable length |
+
+Beams share the KV blocks of the prompt and of every common prefix (complete blocks are shared by reference count, only
+the block a beam writes into is copied), so a width of 8 costs far less KV than eight separate requests. A hypothesis
+ends at the end-of-sequence token (unless `ignore_eos`), at a `stop_token_ids` token, at a `stop` string, or at
+`max_tokens` (`finish_reason` `stop` or `length`). Scores use the raw log-softmax of the model's logits after
+`logit_bias`, `min_tokens`, `allowed_token_ids` and `bad_words`. `temperature`, `top_p`, `top_k`, `min_p`, `seed` and the
+other sampling fields do not apply to a beam search.
+
+`usage.completion_tokens` counts the tokens of the hypotheses that are returned. The work spent on the beams that lost is
+not billed.
+
+Refused with `400` and a message that names the cause: `stream: true` (no token is final before the search ends),
+`logprobs`, repetition/presence/frequency penalties, DRY, mirostat, grammar-constrained generation (`response_format`,
+`grammar`, forced tool calls), images, a width above 8, and a width or token budget the server cannot hold. The budget
+is checked before the search starts: it needs `best_of` sequence slots (`--max-seqs`) and, in the worst case, a KV tail of
+`max_tokens` for every beam, so a large width together with the default `max_tokens` (the rest of the context) can be
+refused; set `max_tokens`. When other beam searches hold the slots the answer is `503`. Beam search with a width above 1
+needs the same backend as `n > 1` (CPU, a stateless model, no draft/MTP engine); a width of 1 is plain greedy decoding.
+Beam requests never use the output cache.
 
 
 ## Encoder task compatibility

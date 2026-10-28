@@ -2165,3 +2165,98 @@ async fn a_cache_salt_keeps_answers_apart() {
     assert_eq!(h.post("/v1/chat/completions", body("a")).await.status, StatusCode::OK);
     assert_eq!(h.state.cache.stats()["hits"], 1, "the same salt is a hit");
 }
+
+fn beam_harness() -> &'static Harness {
+    static BEAM: OnceLock<Harness> = OnceLock::new();
+    BEAM.get_or_init(|| start(Settings { max_seqs: 8, ..Settings::default() }))
+}
+
+fn choice_texts(reply: &Reply) -> Vec<String> {
+    reply.json()["choices"].as_array().unwrap().iter().map(|c| c["text"].as_str().unwrap().to_owned()).collect()
+}
+
+/// One test, because the beams of concurrent requests share the eight sequence slots of this server.
+#[tokio::test]
+async fn beam_search_over_http() {
+    let h = beam_harness();
+    let plain = h.post("/v1/completions", json!({"prompt": "abc", "max_tokens": 12, "temperature": 0, "ignore_eos": true})).await;
+    assert_eq!(plain.status, StatusCode::OK, "{}", plain.text());
+    let greedy = choice_texts(&plain).remove(0);
+
+    // beam width 1 is greedy decoding
+    let one = h.post("/v1/completions", json!({"prompt": "abc", "max_tokens": 12, "use_beam_search": true, "ignore_eos": true})).await;
+    assert_eq!(one.status, StatusCode::OK, "{}", one.text());
+    assert_eq!(choice_texts(&one), vec![greedy.clone()]);
+    assert_eq!(one.json()["choices"][0]["finish_reason"], "length");
+    assert_eq!(one.json()["usage"]["completion_tokens"], 12);
+
+    // n hypotheses out of best_of beams, best first, honest usage, deterministic
+    let body = json!({"prompt": "abc", "max_tokens": 12, "use_beam_search": true, "n": 3, "best_of": 4, "ignore_eos": true,
+        "length_penalty": 0.5, "early_stopping": "never", "temperature": 1.0});
+    let wide = h.post("/v1/completions", body.clone()).await;
+    assert_eq!(wide.status, StatusCode::OK, "{}", wide.text());
+    let texts = choice_texts(&wide);
+    assert_eq!(texts.len(), 3);
+    assert_eq!(texts.iter().collect::<std::collections::HashSet<_>>().len(), 3, "different hypotheses: {texts:?}");
+    assert_eq!(wide.json()["usage"]["completion_tokens"], 36, "three hypotheses of twelve tokens");
+    let indexes: Vec<_> = wide.json()["choices"].as_array().unwrap().iter().map(|c| c["index"].as_u64().unwrap()).collect();
+    assert_eq!(indexes, vec![0, 1, 2]);
+    assert_eq!(choice_texts(&h.post("/v1/completions", body).await), texts, "the search is deterministic");
+
+    // chat shape
+    let chat = h
+        .post("/v1/chat/completions", json!({"messages": [{"role": "user", "content": "hello"}], "max_tokens": 6, "use_beam_search": true, "n": 2}))
+        .await;
+    assert_eq!(chat.status, StatusCode::OK, "{}", chat.text());
+    assert_eq!(chat.json()["choices"].as_array().unwrap().len(), 2);
+    assert_eq!(chat.json()["choices"][1]["message"]["role"], "assistant");
+
+    // a stop string ends a hypothesis, and the text is cut where it starts
+    let probe: Vec<char> = greedy.chars().collect();
+    let stop = probe[3].to_string();
+    let first_at = greedy.find(&stop).unwrap();
+    let stopped = h
+        .post("/v1/completions", json!({"prompt": "abc", "max_tokens": 12, "use_beam_search": true, "ignore_eos": true, "stop": [stop]}))
+        .await;
+    assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.text());
+    assert_eq!(stopped.json()["choices"][0]["finish_reason"], "stop");
+    assert_eq!(choice_texts(&stopped)[0], greedy[..first_at]);
+
+    // output larger than the channel to the client (8 x 100 tokens): the worker hands it out as the client takes it
+    let big = h
+        .post("/v1/completions", json!({"prompt": "abc", "max_tokens": 100, "use_beam_search": true, "n": 8, "ignore_eos": true}))
+        .await;
+    assert_eq!(big.status, StatusCode::OK, "{}", big.text());
+    assert_eq!(big.json()["choices"].as_array().unwrap().len(), 8);
+    assert_eq!(big.json()["usage"]["completion_tokens"], 800);
+
+    // refusals, each with a message that names the cause
+    let refuse = |body: Value, needle: &'static str| async move {
+        let reply = h.post("/v1/completions", body).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text());
+        let message = reply.json()["error"]["message"].as_str().unwrap().to_owned();
+        assert!(message.contains(needle), "{message:?} should mention {needle:?}");
+    };
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "stream": true}), "stream").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "best_of": 9}), "at most 8").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "n": 9}), "at most 8").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": "yes"}), "boolean").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "length_penalty": "long"}), "length_penalty").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "early_stopping": "sometimes"}), "early_stopping").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "logprobs": 2}), "logprobs").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "response_format": {"type": "json_object"}}), "grammar").await;
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "repetition_penalty": 1.3, "max_tokens": 4}), "penalties").await;
+    // eight beams of 250 tokens cannot fit the KV pool (128 blocks of 16 tokens): refused up front, not queued
+    refuse(json!({"prompt": "abc", "use_beam_search": true, "n": 8, "max_tokens": 250}), "KV blocks").await;
+    // the refused requests left nothing behind: a normal request still runs
+    assert_eq!(h.post("/v1/completions", json!({"prompt": "abc", "max_tokens": 3})).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn beam_search_is_refused_when_the_slots_cannot_hold_the_beams() {
+    // the shared server has four sequence slots
+    let h = shared();
+    let reply = h.post("/v1/completions", json!({"prompt": "abc", "use_beam_search": true, "n": 5, "max_tokens": 4})).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text());
+    assert!(reply.json()["error"]["message"].as_str().unwrap().contains("sequence slots"));
+}
