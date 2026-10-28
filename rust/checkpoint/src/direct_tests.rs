@@ -12,15 +12,15 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-const HIDDEN: usize = 256;
-const HEADS: usize = 4;
-const KV_HEADS: usize = 2;
-const HEAD_DIM: usize = 64;
-const INTER: usize = 256;
-const LAYERS: usize = 2;
-const VOCAB: usize = 48;
+pub(crate) const HIDDEN: usize = 256;
+pub(crate) const HEADS: usize = 4;
+pub(crate) const KV_HEADS: usize = 2;
+pub(crate) const HEAD_DIM: usize = 64;
+pub(crate) const INTER: usize = 256;
+pub(crate) const LAYERS: usize = 2;
+pub(crate) const VOCAB: usize = 48;
 
-fn scratch(tag: &str) -> PathBuf {
+pub(crate) fn scratch(tag: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let p = std::env::temp_dir().join(format!("fllm-direct-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let _ = fs::remove_dir_all(&p);
@@ -28,9 +28,9 @@ fn scratch(tag: &str) -> PathBuf {
     p
 }
 
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 impl Rng {
-    fn unit(&mut self) -> f32 {
+    pub(crate) fn unit(&mut self) -> f32 {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((self.0 >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
     }
@@ -43,7 +43,7 @@ enum Store {
     F32,
 }
 
-fn tensor_names() -> Vec<(String, Vec<usize>)> {
+pub(crate) fn tensor_names() -> Vec<(String, Vec<usize>)> {
     let mut v = vec![("model.embed_tokens.weight".to_owned(), vec![VOCAB, HIDDEN]), ("lm_head.weight".to_owned(), vec![VOCAB, HIDDEN]), ("model.norm.weight".to_owned(), vec![HIDDEN])];
     for l in 0..LAYERS {
         let p = format!("model.layers.{l}");
@@ -60,7 +60,7 @@ fn tensor_names() -> Vec<(String, Vec<usize>)> {
     v
 }
 
-fn write_file(path: &Path, entries: &[(String, &'static str, Vec<usize>, Vec<u8>)]) {
+pub(crate) fn write_file(path: &Path, entries: &[(String, &'static str, Vec<usize>, Vec<u8>)]) {
     let mut header = serde_json::Map::new();
     let mut payload = Vec::new();
     for (name, dtype, shape, bytes) in entries {
@@ -153,7 +153,7 @@ fn llama_quantized(dir: &Path, store: Store, shards: usize, seed: u64, packed: O
 }
 
 /// Every tensor (name, dims, type, bytes) and every metadata value of the two models is equal.
-fn assert_same(direct: &MappedGguf, file: &MappedGguf, what: &str) {
+pub(crate) fn assert_same(direct: &MappedGguf, file: &MappedGguf, what: &str) {
     assert_eq!(direct.index().metadata, file.index().metadata, "{what}: metadata");
     assert_eq!(direct.index().tensors.len(), file.index().tensors.len(), "{what}: tensor count");
     for t in &direct.index().tensors {
@@ -165,7 +165,7 @@ fn assert_same(direct: &MappedGguf, file: &MappedGguf, what: &str) {
     }
 }
 
-fn convert_to(dir: &Path, name: &str, dtype: OutputDType) -> PathBuf {
+pub(crate) fn convert_to(dir: &Path, name: &str, dtype: OutputDType) -> PathBuf {
     let out = dir.join(name);
     convert_checkpoint(dir, &out, ConvertOptions { output_dtype: dtype, overwrite: false, spec_head: None }).unwrap();
     out
