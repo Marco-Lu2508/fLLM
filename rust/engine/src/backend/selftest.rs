@@ -2303,6 +2303,15 @@ impl<'a> Tester<'a> {
             let r = self.linear(8, 70_001, 32, 2, false);
             self.record("linear q8_0", "70001x32 batch 2", r);
         }
+        // Per-row scaled FP8 at shapes the Marlin FP8 kernel cannot take (CUDA repacks them into one-row tiles of the block-wise kernels)
+        for kind in self.kinds(&[0x8000_0020u32]) {
+            for (rows, cols) in [(12usize, 77usize), (13, 300), (40, 200)] {
+                for batch in [1, 2, 5] {
+                    let r = self.linear(kind, rows, cols, batch, batch == 5);
+                    self.record(&format!("linear {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if batch == 5 { " +bias" } else { "" }), r);
+                }
+            }
+        }
         // Block-wise FP8: the usual 128 x 128 tiles (odd widths, rows that end inside a tile row, a width of one partial tile) and the other
         // tile shapes the format allows. rows * cols is a multiple of 4 (the device keeps the weight 8-bit then).
         if self.filter.wants_kind(0x8000_0021) {
@@ -2656,7 +2665,7 @@ impl<'a> Tester<'a> {
             && !matches!(kind, 20 | 23 | 39) // run natively through the shared 16-entry grid kernels
             && self.device.name() != "CPU";
         // block-wise FP8 on a device without a kernel for it is expanded to binary16 at upload: the weights are rounded (2^-11 relative)
-        let f16_expanded = fllm_gguf_probe::fp8b_type(kind) && !supported && self.device.name() != "CPU";
+        let f16_expanded = (fllm_gguf_probe::fp8b_type(kind) || fllm_gguf_probe::fp8m_type(kind)) && !supported && self.device.name() != "CPU";
         let device_tol = if converted {
             0.02
         } else if f16_expanded {
