@@ -1196,6 +1196,14 @@ pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(bod
     if let Some(result) = super::agent_net::run_tool(&name, &args).await {
         return Json(result_json(super::hooks::with_notes(result, &pre))).into_response();
     }
+    // the browser tools are async too; a screenshot comes back as an extra `image` (a data URL) next to the text
+    if let Some((result, image)) = super::agent_browser::run_tool(dir.is_some(), &name, &args).await {
+        let mut answer = result_json(super::hooks::with_notes(result, &pre));
+        if let (Some(image), Some(object)) = (image, answer.as_object_mut()) {
+            object.insert("image".to_owned(), json!(image));
+        }
+        return Json(answer).into_response();
+    }
     let worker = state.clone();
     match tokio::task::spawn_blocking(move || worker.agent.run_tool(&name, &args)).await {
         Ok(result) => Json(result_json(super::hooks::with_notes(result, &pre))).into_response(),
@@ -1226,6 +1234,8 @@ pub(in crate::server) async fn end(State(state): State<Arc<AppState>>) -> Respon
     }
     let root = state.agent.current_root();
     let finished = super::hooks::dispatch("on_session_end", "", &json!({}), root.as_deref());
+    // the browser of the agent ends with the session (its profile folder keeps the cookies)
+    super::agent_browser::shutdown().await;
     let worker = state.clone();
     let stopped = tokio::task::spawn_blocking(move || worker.agent.end_session()).await.unwrap_or(0);
     Json(json!({"ok": true, "stopped": stopped, "hooks": {"context": finished.notes()}})).into_response()
