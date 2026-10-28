@@ -3,7 +3,7 @@
 //! `network`, `memory`), so the page does not have to hard-code the tools.
 use super::*;
 
-fn tool(name: &str, permission: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+pub(super) fn tool(name: &str, permission: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "type": "function",
         "function": {

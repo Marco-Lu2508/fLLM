@@ -45,12 +45,44 @@ pub(super) fn turbo() -> bool {
     read().get("turbo").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Whether the user switched computer use on (screenshots, mouse and keyboard for the agent). Off unless they did.
+pub(super) fn computer_use() -> bool {
+    read().get("computer_use").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Actions per minute the agent may do with computer use (1 to 600, default 30).
+pub(super) fn computer_rate() -> u32 {
+    read().get("computer_rate").and_then(Value::as_u64).map_or(30, |n| n.clamp(1, 600) as u32)
+}
+
+/// Actions per task (1 to 5000, default 200).
+pub(super) fn computer_max_steps() -> u32 {
+    read().get("computer_max_steps").and_then(Value::as_u64).map_or(200, |n| n.clamp(1, 5000) as u32)
+}
+
+fn write_all(current: &Value) -> Result<(), String> {
+    let path = file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(current).unwrap_or_else(|_| "{}".to_owned());
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Switches computer use on or off (the STOP button and the panic key switch it off).
+pub(super) fn set_computer_use(on: bool) -> Result<(), String> {
+    let mut current = read();
+    current["computer_use"] = json!(on);
+    write_all(&current)
+}
+
 fn status() -> Value {
     let sandbox = sandbox_mode();
     json!({
         "sandbox": sandbox,
         "sandbox_from_env": std::env::var("FLLM_SANDBOX").map(|v| !v.trim().is_empty()).unwrap_or(false),
         "turbo": turbo(),
+        "computer": super::agent_computer::status_json(),
         "file": file().display().to_string(),
         // what the sandbox can actually do here, so the page does not promise more than the machine can
         "sandbox_available": super::agent_sandbox::available(),
@@ -67,6 +99,24 @@ pub(in crate::server) async fn route_status() -> Response {
 /// `POST /api/studio/runtime` `{sandbox?, turbo?}`.
 pub(in crate::server) async fn route_save(Json(body): Json<Value>) -> Response {
     let mut current = read();
+    if let Some(on) = body.get("computer_use").and_then(Value::as_bool) {
+        if on && !cfg!(feature = "computer-use") {
+            return api_error(StatusCode::BAD_REQUEST, "this build has no computer use (it was built without the computer-use feature)");
+        }
+        if on && std::env::var("FLLM_NO_COMPUTER_USE").is_ok_and(|v| !v.trim().is_empty() && v.trim() != "0") {
+            return api_error(StatusCode::BAD_REQUEST, "computer use is forbidden on this server (FLLM_NO_COMPUTER_USE)");
+        }
+        current["computer_use"] = json!(on);
+        if on {
+            // a fresh start: nothing of an earlier stop or task is carried over
+            super::agent_computer::begin();
+        }
+    }
+    for (key, max) in [("computer_rate", 600u64), ("computer_max_steps", 5000u64)] {
+        if let Some(n) = body.get(key).and_then(Value::as_u64) {
+            current[key] = json!(n.clamp(1, max));
+        }
+    }
     if let Some(sandbox) = body.get("sandbox").and_then(Value::as_str) {
         let value = sandbox.trim().to_ascii_lowercase();
         if !["off", "workspace", "strict"].contains(&value.as_str()) {
@@ -87,15 +137,8 @@ pub(in crate::server) async fn route_save(Json(body): Json<Value>) -> Response {
             current["sandbox"] = json!("off");
         }
     }
-    let path = file();
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot create {}: {e}", parent.display()));
-        }
-    }
-    let text = serde_json::to_string_pretty(&current).unwrap_or_else(|_| "{}".to_owned());
-    if let Err(e) = std::fs::write(&path, text) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot write {}: {e}", path.display()));
+    if let Err(e) = write_all(&current) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
     Json(status()).into_response()
 }

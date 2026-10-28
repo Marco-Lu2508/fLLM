@@ -1192,6 +1192,14 @@ pub(in crate::server) async fn tool(State(state): State<Arc<AppState>>, Json(bod
     if pre.blocked {
         return Json(result_json(Err(format!("a hook blocked this call: {}", pre.reason)))).into_response();
     }
+    // computer use (screen and input of this machine) has its own switch, rate limit and stop; the scheduled tasks never reach it
+    if super::agent_computer::is_computer_tool(&name) {
+        let result = tokio::task::spawn_blocking(move || super::agent_computer::run(&name, &args)).await;
+        return match result {
+            Ok(result) => Json(super::agent_computer::outcome_json(result)).into_response(),
+            Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        };
+    }
     // the network tools are async and need no workspace
     if let Some(result) = super::agent_net::run_tool(&name, &args).await {
         return Json(result_json(super::hooks::with_notes(result, &pre))).into_response();
@@ -1208,7 +1216,12 @@ pub(in crate::server) async fn tools() -> Response {
     if agent_disabled() {
         return disabled_reply();
     }
-    Json(json!({"tools": super::agent_tools::catalog()})).into_response()
+    let mut list = super::agent_tools::catalog();
+    // the screen and input tools are only offered while the user has switched computer use on and this machine can do it
+    if super::agent_computer::offered() {
+        list.extend(super::agent_computer::catalog());
+    }
+    Json(json!({"tools": list})).into_response()
 }
 
 /// `GET /api/studio/agent/changes`: the file changes of this session, oldest first.

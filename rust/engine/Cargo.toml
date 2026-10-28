@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 
 # the Windows sandbox for agent commands (job object, restricted token); already in the lock file through other crates, so nothing new is built
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { version = "0.6", optional = true }
@@ -62,7 +62,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 [features]
 # The x86-64 AVX-512 / AMX kernels are compiled in by default: they are #[target_feature] functions chosen at run time by CPUID,
 # so the binary still runs on any x86-64 CPU (docs/cpu-kernels.md, "Building with the avx512 feature"). `--no-default-features` leaves them out.
-default = ["avx512", "npu-openvino"]
+default = ["avx512", "npu-openvino", "computer-use"]
 rust-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 cuda = ["dep:libloading"]
 # native backends (all optional; none is in the default set). Verification level of each is in docs/backends.md
@@ -80,6 +80,10 @@ npu-ane = []
 tpu-pjrt = ["dep:libloading"]
 arm-simd = []
 avx512 = []
+# Computer use for the coding agent (screenshots, mouse, keyboard): a thin layer over the operating system written against X11 (Linux),
+# GDI/SendInput (Windows) and CoreGraphics (macOS) with no extra crates. It is compiled in by default but off at run time until the user
+# switches it on in Settings > Runtime. docs/user/studio.md, "Computer use".
+computer-use = []
 
 [lib]
 name = "fllm_engine"

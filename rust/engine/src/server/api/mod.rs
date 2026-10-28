@@ -42,6 +42,13 @@ mod agent_sandbox_win;
 pub(super) mod agent_worktree;
 pub(super) mod agent_mem;
 pub(super) mod agent_net;
+pub(super) mod agent_computer;
+#[cfg(all(feature = "computer-use", target_os = "linux"))]
+mod agent_computer_x11;
+#[cfg(all(feature = "computer-use", windows))]
+mod agent_computer_win;
+#[cfg(all(feature = "computer-use", target_os = "macos"))]
+mod agent_computer_mac;
 mod agent_tools;
 pub(super) mod agents;
 pub(super) mod hooks;

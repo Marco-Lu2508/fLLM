@@ -298,7 +298,7 @@ pub fn studio_admin_blocked_for(
         // the remembered notes about the user are personal: this machine only, reads included
         || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory";
+    let reads_workspace = path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)
@@ -917,6 +917,37 @@ mod studio_gate_tests {
         }
     }
 
+    /// Computer use controls the screen, the mouse and the keyboard of this machine: no other machine may reach any of its routes
+    /// (the switch, the status, the stop, a tool call), with or without an API key, with an admin key, as a read or a write, or
+    /// through a web page of another site in the owner's browser.
+    #[test]
+    fn computer_use_is_never_reachable_from_another_machine() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        let evil = headers("127.0.0.1:8000", Some("https://evil.example"));
+        let routes = [
+            (Method::POST, "/api/studio/agent/tool"),
+            (Method::GET, "/api/studio/agent/computer"),
+            (Method::POST, "/api/studio/agent/computer/stop"),
+            (Method::POST, "/api/studio/agent/computer/begin"),
+            (Method::GET, "/api/studio/runtime"),
+            (Method::POST, "/api/studio/runtime"),
+        ];
+        for (method, path) in routes {
+            for auth in [false, true] {
+                assert!(studio_admin_blocked(auth, &method, path, remote, &h), "{method} {path} from another machine (key: {auth})");
+                assert!(studio_admin_blocked(auth, &method, path, None, &h), "{method} {path} from an unknown peer (key: {auth})");
+                assert!(!studio_admin_blocked(auth, &method, path, here, &local), "{method} {path} from this machine (key: {auth})");
+                assert!(studio_admin_blocked(auth, &method, path, here, &evil), "{method} {path} from a page of another site (key: {auth})");
+                assert!(studio_admin_blocked(auth, &method, path, here, &headers("rebind.example:8000", None)), "{method} {path} through a rebinding name (key: {auth})");
+                // an admin key does not make the screen of this machine reachable from elsewhere
+                assert!(studio_admin_blocked_for(auth, &method, path, remote, &h, true), "{method} {path} with an admin key from another machine (key: {auth})");
+            }
+        }
+    }
+
     #[test]
     fn web_and_change_routes_of_the_agent_stay_on_this_machine() {
         let remote = addr("192.168.1.20:5000");
@@ -935,8 +966,7 @@ mod studio_gate_tests {
             assert!(!studio_admin_blocked(auth, &Method::GET, "/api/studio/agent/changes", here, &local));
         }
         // the tool catalog is plain information
-        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/agent/tools", remote, &h));
-        // a rebinding name is refused for the new routes as for the old ones
+        assert!(!studio_admin_blocked(false, &Method::GET, "/api/studio/agent/tools", remote, &h));        // a rebinding name is refused for the new routes as for the old ones
         assert!(studio_admin_blocked(false, &Method::POST, "/api/studio/web/fetch", here, &headers("rebind.example:8000", None)));
     }
 }

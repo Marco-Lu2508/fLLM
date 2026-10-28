@@ -40,7 +40,7 @@
     }
 
     const normPath = (p) => String(p || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
-    const RULE_CATEGORIES = new Set(['bash', 'edit', 'network', 'mcp', 'command', 'read', 'memory', '*']);
+    const RULE_CATEGORIES = new Set(['bash', 'edit', 'network', 'mcp', 'command', 'read', 'memory', 'computer', '*']);
 
     /** "bash: git status*" per line, optionally for one agent: "[plan] bash: ls*". Blank lines and # comments are ignored. */
     function parseRules(text) {
@@ -196,14 +196,16 @@
     }
 
     // ---- permissions per tool category and agent ----
-    const MODE_CATEGORIES = ['read', 'edit', 'bash', 'network', 'mcp', 'memory'];
+    const MODE_CATEGORIES = ['read', 'edit', 'bash', 'network', 'mcp', 'memory', 'computer'];
     const AGENTS = ['build', 'plan'];
     /** What each agent does without being told otherwise. 'edit' follows the quick switch (ask / auto-edit). */
     const DEFAULT_MODES = {
-      build: { read: 'allow', edit: 'ask', bash: 'ask', network: 'ask', mcp: 'ask', memory: 'allow' },
-      plan: { read: 'allow', edit: 'deny', bash: 'deny', network: 'ask', mcp: 'ask', memory: 'deny' },
+      build: { read: 'allow', edit: 'ask', bash: 'ask', network: 'ask', mcp: 'ask', memory: 'allow', computer: 'ask' },
+      plan: { read: 'allow', edit: 'deny', bash: 'deny', network: 'ask', mcp: 'ask', memory: 'deny', computer: 'deny' },
     };
     const MODE_VALUES = new Set(['allow', 'ask', 'deny']);
+    /** The computer tools that only look; every other computer tool operates the machine. */
+    const COMPUTER_LOOK = new Set(['computer_screenshot', 'computer_cursor', 'computer_displays', 'computer_wait']);
 
     /** The mode of a category for an agent: the user's table, else the default (auto-edit makes edit allow for build). */
     function modeFor(modes, agent, category, autoEdit) {
@@ -222,6 +224,9 @@
       if (evaluateRules(rules, category, subject, agent) === 'deny') return 'deny';
       const mode = modeFor(modes, agent, category, autoEdit);
       if (mode === 'deny') return 'deny';
+      // Operating the computer (click, type, key, scroll, drag, move) is asked every single time: neither a mode of 'allow', nor an allow
+      // rule, nor "Always" can lift that; only turbo does (it never gets here). Looking (screenshot, cursor, displays, wait) follows the normal rules.
+      if (category === 'computer' && !COMPUTER_LOOK.has(String(subject).split(' ')[0])) return 'ask';
       if (mode === 'allow') return 'allow';
       if (evaluateRules(rules, category, subject, agent) === 'allow') return 'allow';
       return remembered ? 'allow' : 'ask';
@@ -1213,6 +1218,16 @@
       bash_kill: (a) => ['Stop job', Object.values(a)[0] ?? ''],
       web_fetch: (a) => ['Fetch page', a.url || ''],
       web_search: (a) => ['Web search', a.query || ''],
+      computer_screenshot: (a) => ['Screenshot', a.region ? 'a part of the screen' : (a.display !== undefined ? `display ${a.display}` : 'the screen')],
+      computer_click: (a) => [a.double ? 'Double-click' : `${a.button && a.button !== 'left' ? `${a.button}-` : ''}Click`, `${a.x}, ${a.y}`],
+      computer_move: (a) => ['Move the pointer', `${a.x}, ${a.y}`],
+      computer_drag: (a) => ['Drag', `${a.from?.x ?? '?'}, ${a.from?.y ?? '?'} to ${a.to?.x ?? '?'}, ${a.to?.y ?? '?'}`],
+      computer_type: (a) => ['Type', JSON.stringify(String(a.text ?? '').slice(0, 60))],
+      computer_key: (a) => ['Press keys', String(a.keys ?? '')],
+      computer_scroll: (a) => ['Scroll', `${a.dx ? `${a.dx} right ` : ''}${a.dy ? `${a.dy} down ` : ''}at ${a.x}, ${a.y}`],
+      computer_wait: (a) => ['Wait', `${a.ms ?? 1000} ms`],
+      computer_cursor: () => ['Pointer position', ''],
+      computer_displays: () => ['List displays', ''],
       todo_write: () => ['Task list', ''],
       todo_read: () => ['Read task list', ''],
       ask_user: (a) => ['Question', a.question || ''],
@@ -1324,10 +1339,11 @@
     }
 
     function permissionInfo(entry, args) {
-      const cat = entry.source === 'mcp' ? 'mcp' : entry.permission === 'edit' ? 'edit' : entry.permission === 'network' ? 'network' : entry.permission === 'command' ? 'bash' : entry.permission === 'memory' ? 'memory' : 'read';
+      const cat = entry.source === 'mcp' ? 'mcp' : entry.permission === 'edit' ? 'edit' : entry.permission === 'network' ? 'network' : entry.permission === 'command' ? 'bash' : entry.permission === 'memory' ? 'memory' : entry.permission === 'computer' ? 'computer' : 'read';
       let subject = '';
       let subjects = null;
-      if (cat === 'bash') subject = typeof args.command === 'string' ? args.command : `${entry.name} ${Object.values(args).join(' ')}`.trim();
+      if (cat === 'computer') subject = computerSubject(entry.name, args);
+      else if (cat === 'bash') subject = typeof args.command === 'string' ? args.command : `${entry.name} ${Object.values(args).join(' ')}`.trim();
       else if (cat === 'edit' && typeof args.patch === 'string') { subjects = patchPaths(args.patch); subject = subjects[0] || ''; }
       else if (cat === 'edit' || cat === 'read') subject = String(args.path ?? args.pattern ?? '');
       else if (cat === 'network') subject = String(args.url ?? args.query ?? '');
@@ -1345,6 +1361,8 @@
       if (cat === 'bash') { const k = entry.name === 'bash' ? commandKey(subject) : entry.name; return k ? `bash:${k}` : null; }
       if (cat === 'network') return 'network';
       if (cat === 'mcp') return `mcp:${subject}`;
+      // only looking can be allowed for the rest of the session, and only on the screenshot card; operating the computer never
+      if (cat === 'computer') return entry.name === 'computer_screenshot' ? 'computer:look' : null;
       return null;
     }
 
@@ -1352,9 +1370,9 @@
       const key = alwaysKey(item);
       const entry = code.registry.get(item.name);
       const cat = entry ? permissionInfo(entry, item.args || {}).cat : 'bash';
-      const label = { bash: 'Run this command?', network: 'Allow this network request?', mcp: 'Call this external tool?' }[cat] || (item.name === 'write_file' ? 'Write this file?' : 'Apply this change?');
-      const tip = cat === 'edit' ? 'Allow file changes in this session without asking' : cat === 'bash' ? `Allow more "${(key || '').slice(5)}" commands in this session without asking` : 'Allow this in this session without asking';
-      return `<div class="perm-ask"><span>${label}</span>
+      const label = { bash: 'Run this command?', network: 'Allow this network request?', mcp: 'Call this external tool?', computer: computerQuestion(item) }[cat] || (item.name === 'write_file' ? 'Write this file?' : 'Apply this change?');
+      const tip = cat === 'edit' ? 'Allow file changes in this session without asking' : cat === 'bash' ? `Allow more "${(key || '').slice(5)}" commands in this session without asking` : cat === 'computer' ? 'Allow screenshots in this session without asking (clicks and typing are always asked)' : 'Allow this in this session without asking';
+      return `<div class="perm-ask${cat === 'computer' ? ' perm-computer' : ''}"><span>${label}</span>
         <button class="btn btn-sm btn-primary" data-perm-answer="allow">Allow</button>
         ${key ? `<button class="btn btn-sm btn-secondary" data-perm-answer="always" title="${escapeHtml(tip)}">Always${cat === 'bash' ? ` (${escapeHtml(key.slice(5))})` : ''}</button>` : ''}
         <button class="btn btn-sm btn-ghost" data-perm-answer="deny">Deny</button></div>`;
@@ -1478,7 +1496,7 @@
         ${j.open ? `<pre class="job-out">${escapeHtml(j.out || '(no output yet)')}</pre>` : ''}</div>`).join('');
     }
 
-    const MODE_LABEL = { read: 'Read and search', edit: 'Change files', bash: 'Commands', network: 'Web', mcp: 'External (MCP) tools', memory: 'Memory' };
+    const MODE_LABEL = { read: 'Read and search', edit: 'Change files', bash: 'Commands', network: 'Web', mcp: 'External (MCP) tools', memory: 'Memory', computer: 'Screen, mouse and keyboard' };
 
     function permissionsHtml() {
       const modeOf = (agent, cat) => code.modes?.[agent]?.[cat] || '';
@@ -1576,6 +1594,7 @@
         let remembered = false;
         if (cat === 'bash') { const key = entry.name === 'bash' ? commandKey(subject) : entry.name; remembered = Boolean(key) && code.alwaysAllow.has(`bash:${key}`); }
         else if (cat === 'network') remembered = code.alwaysAllow.has('network');
+        else if (cat === 'computer') remembered = COMPUTER_LOOK.has(entry.name) && code.alwaysAllow.has('computer:look');
         else if (cat === 'mcp') remembered = code.alwaysAllow.has(`mcp:${subject}`);
         return decidePermission({ rules, modes: code.modes, agent: agentName(), autoEdit: code.perm === 'edit', category: cat, subject, remembered });
       });
