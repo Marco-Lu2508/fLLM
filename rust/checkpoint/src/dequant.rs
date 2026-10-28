@@ -620,6 +620,46 @@ mod tests {
     }
 
     #[test]
+    fn stacked_bitsandbytes_experts_are_written_expert_by_expert() {
+        use crate::packed_quant::PackedData;
+        use fllm_gguf_probe::bnb;
+        let mut state = 99u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        };
+        let (rows, cols) = (3usize, 128usize);
+        let mut expert = |blocksize: usize| {
+            let codes: Vec<u8> = (0..rows * cols / 2).map(|_| next()).collect();
+            let absmax: Vec<u8> = (0..rows * cols / blocksize).flat_map(|b| (0.5 + b as f32 * 0.25).to_le_bytes()).collect();
+            Bnb4::new(owned(codes), bnb::NF4_CODE, Absmax::Plain { payload: owned(absmax), dtype: Float::F32 }, blocksize, rows, cols).unwrap()
+        };
+        let (a, b) = (expert(64), expert(64));
+        let stacked = PackedData::Concat { parts: vec![PackedData::Bnb4(a.clone()), PackedData::Bnb4(b.clone())], elements: 2 * rows * cols, part_rows: rows };
+        let type_id = stacked.bnb_type().expect("both experts fit the same native type");
+        let (mut got, mut want) = (Vec::new(), Vec::new());
+        for row in 0..2 * rows {
+            stacked.encode_bnb_row(type_id, row, &mut got).unwrap();
+        }
+        for part in [&a, &b] {
+            for row in 0..rows {
+                part.encode_row(type_id, row, &mut want).unwrap();
+            }
+        }
+        assert_eq!(got, want);
+        // decoding across the expert boundary
+        let mut all = vec![0f32; 2 * rows * cols];
+        stacked.decode_f32_chunk(0, &mut all).unwrap();
+        assert_eq!(all, bnb::dequantize(&got, type_id, 2 * rows * cols).unwrap());
+        // experts that need different native types (block 64 / block 128) or another family give no common type
+        let wide = expert(128);
+        assert_eq!(PackedData::Bnb4(wide.clone()).bnb_type(), Some(bnb::NF4_B128));
+        let mixed = PackedData::Concat { parts: vec![PackedData::Bnb4(a), PackedData::Bnb4(wide)], elements: 2 * rows * cols, part_rows: rows };
+        assert_eq!(mixed.bnb_type(), None);
+        assert!(mixed.is_expanded());
+    }
+
+    #[test]
     fn bitsandbytes_int8_rows_keep_their_own_scale() {
         use fllm_gguf_probe::bnb;
         let (rows, cols) = (3usize, 192usize);

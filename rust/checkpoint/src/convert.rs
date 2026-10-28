@@ -351,7 +351,7 @@ pub fn prepare_checkpoint(
         })
     })?;
     // formats without a compact fLLM type are expanded when written; say what that costs
-    let expanded: u64 = packed_groups.iter().filter(|g| g.1.is_expanded() && (!matches!(g.1, PackedData::Bnb4(_) | PackedData::Bnb8(_)) || options.output_dtype == OutputDType::Preserve)).map(|g| g.1.element_count() as u64).sum();
+    let expanded: u64 = packed_groups.iter().filter(|g| g.1.is_expanded() && (!g.1.is_bnb() || options.output_dtype == OutputDType::Preserve)).map(|g| g.1.element_count() as u64).sum();
     if expanded > 0 {
         let width = if options.output_dtype == OutputDType::F32 { 4.0 } else { 2.0 };
         eprintln!(

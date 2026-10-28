@@ -369,6 +369,33 @@ mod tests {
         }
     }
 
+    /// The older route expanded the blocks to F16 weights: the native kernels (exact products, f32 sums) differ from it by the F16 rounding of
+    /// every weight, a relative 2^-11 = 4.9e-4 at most, so at most that fraction of the sum of the absolute terms.
+    #[test]
+    fn the_kernels_agree_with_the_expanded_f16_weights_within_the_f16_rounding() {
+        let mut rng = Lcg(0xb5b4_0004);
+        for kind in KINDS {
+            let layout = bnb::layout(kind).unwrap();
+            let (rows, cols, batch) = (11, 7 * layout.block, 4);
+            let weights = random_weights(kind, rows, cols, &mut rng);
+            let x = rng.vector(batch * cols, 2.0);
+            let have = linear(&weights, kind, &x, rows, cols, None).unwrap();
+            let expanded: Vec<f32> = bnb::dequantize(&weights, kind, rows * cols).unwrap().into_iter().map(|v| half::f16::from_f32(v).to_f32()).collect();
+            for t in 0..batch {
+                for r in 0..rows {
+                    let (mut old, mut magnitude) = (0.0f64, 0.0f64);
+                    for c in 0..cols {
+                        let term = f64::from(expanded[r * cols + c]) * f64::from(x[t * cols + c]);
+                        old += term;
+                        magnitude += term.abs();
+                    }
+                    let error = (f64::from(have[t * rows + r]) - old).abs();
+                    assert!(error <= 5e-4 * magnitude + 1e-6, "kind {kind:#x} token {t} row {r}: native {} expanded {old}", have[t * rows + r]);
+                }
+            }
+        }
+    }
+
     #[test]
     fn bias_is_added_and_bad_shapes_are_declined() {
         let mut rng = Lcg(0xb5b4_0003);

@@ -554,6 +554,16 @@ impl PackedData {
         match self {
             Self::Dyn(_) => true,
             Self::Bnb4(_) | Self::Bnb8(_) => self.bnb_type().is_none(),
+            Self::Concat { parts, .. } => parts.iter().any(|p| matches!(p, Self::Dyn(_))) || (self.is_bnb() && self.bnb_type().is_none()),
+            _ => false,
+        }
+    }
+
+    /// Whether this tensor (or the experts of a stacked group) comes from a bitsandbytes checkpoint.
+    pub fn is_bnb(&self) -> bool {
+        match self {
+            Self::Bnb4(_) | Self::Bnb8(_) => true,
+            Self::Concat { parts, .. } => parts.iter().any(Self::is_bnb),
             _ => false,
         }
     }
