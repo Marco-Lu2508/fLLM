@@ -58,6 +58,10 @@ pub struct PackedLayout {
 }
 
 pub fn layout_for(kind: u32) -> Result<PackedLayout, String> {
+    if fllm_gguf_probe::fp8b_type(kind) {
+        // the tile scales and the trailer follow the codes of the whole matrix: a row or column range is not a byte range
+        return Err("tensor-parallel splitting of block-wise FP8 (FP8B) weights is not implemented (use pipeline parallelism or one device)".into());
+    }
     let (block, block_bytes) = match kind {
         0 => (1, 4),
         other => quant_layout(other).ok_or_else(|| format!("tensor-parallel splitting does not know GGUF type {other}"))?,

@@ -71,7 +71,7 @@ pub enum PackedData {
         rows: usize,
         cols: usize,
     },
-    /// FP8 weights with one scale per tile (block-wise FP8); written as f16.
+    /// FP8 weights with one scale per tile (block-wise FP8); written as `FP8B` with f32 scales.
     Fp8Block(crate::symint::Fp8Block),
     /// NVIDIA ModelOpt NVFP4 (GGUF type 40 when the rows fit 64-value blocks).
     Nvfp4(crate::nvfp4::Nvfp4),
@@ -573,12 +573,20 @@ impl PackedData {
         }
     }
 
-    /// Whether this tensor is in the block-wise FP8 format (`Fp8Block`).
-    pub fn is_fp8b(&self) -> bool {
+    /// The `FP8B` GGUF type id this tensor can be written as: a block-wise FP8 matrix, or a stack of equally shaped ones (the
+    /// experts of a layer) with the same tile shape. `None` for every other tensor and for tile shapes without a type id.
+    pub fn fp8b_type_id(&self) -> Option<u32> {
         match self {
-            Self::Fp8Block(b) => b.is_128x128(),
-            Self::Concat { parts, .. } => !parts.is_empty() && parts.iter().all(|p| p.is_fp8b()),
-            _ => false,
+            Self::Fp8Block(b) => b.type_id(),
+            Self::Concat { parts, .. } => {
+                let first = parts.first()?.fp8_block()?;
+                let id = first.type_id()?;
+                parts
+                    .iter()
+                    .all(|p| p.fp8_block().is_some_and(|b| (b.rows(), b.cols(), b.block_rows(), b.block_cols()) == (first.rows(), first.cols(), first.block_rows(), first.block_cols())))
+                    .then_some(id)
+            }
+            _ => None,
         }
     }
 
@@ -676,6 +684,46 @@ impl PackedData {
             }
         }
     }
+}
+
+/// The tensor dtype name of an `FP8B` GGUF type (`FP8B` for the 128 x 128 tile, `FP8B<rows>x<cols>` otherwise).
+pub(crate) fn fp8b_dtype_name(type_id: u32) -> String {
+    match fllm_gguf_probe::fp8b_shape(type_id) {
+        Some((128, 128)) | None => "FP8B".to_string(),
+        Some((rows, cols)) => format!("FP8B{rows}x{cols}"),
+    }
+}
+
+/// The GGUF type id of an `FP8B` dtype name (see [`fp8b_dtype_name`]).
+pub(crate) fn fp8b_dtype_id(name: &str) -> Option<u32> {
+    if name == "FP8B" || name == "F8B" {
+        return Some(0x8000_0021);
+    }
+    let (rows, cols) = name.strip_prefix("FP8B")?.split_once('x')?;
+    fllm_gguf_probe::fp8b_type_id(rows.parse().ok()?, cols.parse().ok()?)
+}
+
+/// For a row permutation `order` (output row `i` is source row `order[i]`) of a `rows`-row matrix with tiles of `tile_rows` rows: the
+/// source tile row of every output tile row, when the permutation moves whole tile rows only (every output tile row takes exactly the
+/// rows of one source tile row), so that the scales can be permuted instead of the weights being re-quantized. `None` otherwise.
+pub(crate) fn fp8b_tile_row_map(order: &[usize], rows: usize, tile_rows: usize) -> Option<Vec<usize>> {
+    if order.len() != rows || tile_rows == 0 || order.iter().any(|&s| s >= rows) {
+        return None;
+    }
+    let tiles = rows.div_ceil(tile_rows);
+    let size = |t: usize| (rows - t * tile_rows).min(tile_rows);
+    let mut map = Vec::with_capacity(tiles);
+    for t in 0..tiles {
+        let lo = t * tile_rows;
+        let source = order[lo] / tile_rows;
+        if size(source) != size(t) || order[lo..lo + size(t)].iter().any(|&s| s / tile_rows != source) {
+            return None;
+        }
+        map.push(source);
+    }
+    // a bijection that maps every output tile row inside one source tile row of the same size covers each source tile row once
+    let mut seen = vec![false; tiles];
+    map.iter().all(|&s| !std::mem::replace(&mut seen[s], true)).then_some(map)
 }
 
 /// Convert a bounded slice of raw SafeTensors FP8 bytes to f32.

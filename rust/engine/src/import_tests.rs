@@ -193,15 +193,16 @@ fn quantized_linear(rng: &mut Rng, kind: Kind, prefix: &str, out: usize, inp: us
         }
         Kind::Fp8Block(tile) => {
             let bytes: Vec<u8> = (0..out * inp).map(|_| (rng.below(2) as u8) << 7 | (0x28 + rng.below(16) as u8)).collect();
-            let tiles = (out / tile) * (inp / tile);
-            let scales: Vec<f32> = (0..tiles).map(|_| 0.01 + 0.005 * rng.below(8) as f32).collect();
+            // the tile grid rounds up: a matrix smaller than a tile (128 x 128 tiles on this tiny model) has one partial tile
+            let (tile_rows, tile_cols) = (out.div_ceil(tile), inp.div_ceil(tile));
+            let scales: Vec<f32> = (0..tile_rows * tile_cols).map(|_| 0.01 + 0.005 * rng.below(8) as f32).collect();
             for r in 0..out {
                 for c in 0..inp {
-                    dense[r * inp + c] = ref_e4m3(bytes[r * inp + c]) * scales[(r / tile) * (inp / tile) + c / tile];
+                    dense[r * inp + c] = ref_e4m3(bytes[r * inp + c]) * scales[(r / tile) * tile_cols + c / tile];
                 }
             }
             entries.push(Entry { name: format!("{prefix}.weight"), dtype: "F8_E4M3", shape: vec![out, inp], bytes });
-            entries.push(f32_entry(&format!("{prefix}.weight_scale_inv"), &[out / tile, inp / tile], &scales));
+            entries.push(f32_entry(&format!("{prefix}.weight_scale_inv"), &[tile_rows, tile_cols], &scales));
         }
     }
     (entries, dense)
@@ -436,9 +437,55 @@ fn compressed_tensors_int8_become_q8_0_and_match_the_reference() {
     }
 }
 
+/// The GGUF type id of the tile shape `tile` x `tile`.
+fn fp8b(tile: usize) -> u32 {
+    fllm_gguf_probe::fp8b_type_id(tile, tile).expect("power-of-two tile")
+}
+
 #[test]
-fn block_wise_fp8_expands_to_f16_and_matches_the_reference() {
-    check(Kind::Fp8Block(32), 17, &[("blk.0.attn_q.weight", 1), ("blk.1.ffn_down.weight", 1)], 5e-3);
+fn block_wise_fp8_stays_fp8_and_matches_the_reference() {
+    assert_eq!(fp8b(128), 0x8000_0021);
+    // 128 x 128 (every matrix of the tiny model is smaller than one tile: partial tiles on both edges), and the tile shapes in between:
+    // the weights stay 8-bit with their f32 scales, and the engine computes what the dequantized F32 model computes
+    for tile in [128, 32, 16] {
+        check(Kind::Fp8Block(tile), 17, &[("blk.0.attn_q.weight", fp8b(tile)), ("blk.1.ffn_down.weight", fp8b(tile)), ("output.weight", 30)], 1e-3);
+    }
+}
+
+#[test]
+fn block_wise_fp8_with_a_tile_without_a_type_is_expanded_to_f16() {
+    // 48 x 48 tiles are not a power of two: no FP8B type id, the converter expands the weights (and they must still be right)
+    check(Kind::Fp8Block(48), 17, &[("blk.0.attn_q.weight", 1), ("blk.1.ffn_down.weight", 1)], 5e-3);
+}
+
+#[test]
+fn block_wise_fp8_tensors_take_one_byte_per_weight_plus_the_scales() {
+    for tile in [128usize, 32] {
+        let (quant, reference) = (scratch("fp8b-size"), scratch("fp8b-size-r"));
+        build_pair(Kind::Fp8Block(tile), 19, &quant, &reference);
+        let gguf = MappedGguf::open(convert(&quant, OutputDType::Preserve)).unwrap();
+        let q = gguf.index().tensors.iter().find(|t| t.name == "blk.0.attn_q.weight").unwrap();
+        let (rows, cols) = (HEADS * HEAD_DIM, HIDDEN);
+        let tiles = rows.div_ceil(tile) * cols.div_ceil(tile);
+        assert_eq!(q.payload_len as usize, rows * cols + tiles * 4 + fllm_gguf_probe::FP8B_TRAILER, "tile {tile}");
+        let _ = fs::remove_dir_all(quant);
+        let _ = fs::remove_dir_all(reference);
+    }
+}
+
+#[test]
+fn native_block_wise_fp8_and_its_f16_expansion_give_the_same_logits() {
+    // the old path stored block-wise FP8 as F16 (`--outtype f16` still does): the native kernel must agree with it up to the rounding of the
+    // weights to binary16 (relative 2^-11 per weight, averaged over the dot products)
+    for tile in [128usize, 32] {
+        let (quant, reference) = (scratch("fp8b-par"), scratch("fp8b-par-r"));
+        build_pair(Kind::Fp8Block(tile), 23, &quant, &reference);
+        let native = logits(&convert(&quant, OutputDType::Preserve), &PROMPT);
+        let expanded = logits(&convert(&quant, OutputDType::F16), &PROMPT);
+        assert_close(&native, &expanded, 4e-3, &format!("native FP8B vs F16 expansion, tile {tile}"));
+        let _ = fs::remove_dir_all(quant);
+        let _ = fs::remove_dir_all(reference);
+    }
 }
 
 #[test]
@@ -664,9 +711,17 @@ fn int4_experts_stay_q4z() {
 }
 
 #[test]
-fn block_wise_fp8_experts_convert_to_f16() {
-    // no compact device format for the 128x128 tiles yet (docs/moe-formats.md): the experts are expanded, and must still be right
-    check_moe(Kind::Fp8Block(32), 29, 1, 5e-3);
+fn block_wise_fp8_experts_stay_fp8_with_the_scales_of_every_expert() {
+    for tile in [128usize, 32] {
+        let dims = check_moe(Kind::Fp8Block(tile), 29, fp8b(tile), 1e-3);
+        assert_eq!(dims["blk.0.ffn_gate_exps.weight"], vec![HIDDEN as u64, INTER as u64, EXPERTS as u64]);
+        assert_eq!(dims["blk.0.ffn_down_exps.weight"], vec![INTER as u64, HIDDEN as u64, EXPERTS as u64]);
+    }
+}
+
+#[test]
+fn block_wise_fp8_experts_with_a_tile_without_a_type_are_expanded_to_f16() {
+    check_moe(Kind::Fp8Block(48), 29, 1, 5e-3);
 }
 
 // ---- direct loading: `open_model` of a checkpoint equals the converted GGUF file ----
@@ -690,9 +745,12 @@ fn direct_load_equals_the_converted_file_for_every_quantized_layout() {
         (Kind::CtInt8, false),
         (Kind::CtPacked8, false),
         (Kind::Fp8Block(32), false),
+        (Kind::Fp8Block(128), false),
+        (Kind::Fp8Block(16), false),
         (Kind::Nvfp4, true),
         (Kind::CtInt4(32), true),
         (Kind::Fp8Block(32), true),
+        (Kind::Fp8Block(128), true),
     ] {
         let (quant, reference) = (scratch("dq"), scratch("dr"));
         if moe {

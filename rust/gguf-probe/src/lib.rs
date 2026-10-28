@@ -196,9 +196,139 @@ pub fn fp8m_type(type_id: u32) -> bool {
     type_id == 0x8000_0020
 }
 
-/// fLLM-specific `FP8B` tensor type (FP8 E4M3 weights with tile scales): id 0x8000_0021.
+/// Tile shape `(rows, columns)` of the fLLM-specific `FP8B` tensor types (FP8 E4M3 weights with one scale per tile, the
+/// `weight_scale_inv` of block-wise FP8 checkpoints). The shape is part of the type id: `0x8000_0021` is the usual 128 x 128 tile,
+/// `0x8000_0100 | (log2(rows) << 4) | log2(columns)` any other power-of-two tile up to 32768.
+pub fn fp8b_shape(type_id: u32) -> Option<(usize, usize)> {
+    match type_id {
+        0x8000_0021 => Some((128, 128)),
+        0x8000_0100..=0x8000_01ff => {
+            let code = type_id & 0xff;
+            Some((1usize << (code >> 4), 1usize << (code & 15)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `type_id` is one of the `FP8B` types (see [`fp8b_shape`]).
 pub fn fp8b_type(type_id: u32) -> bool {
-    type_id == 0x8000_0021
+    fp8b_shape(type_id).is_some()
+}
+
+/// The `FP8B` type id of a tile shape; `None` unless both sides are powers of two up to 32768.
+pub fn fp8b_type_id(block_rows: usize, block_cols: usize) -> Option<u32> {
+    if (block_rows, block_cols) == (128, 128) {
+        return Some(0x8000_0021);
+    }
+    if !block_rows.is_power_of_two() || !block_cols.is_power_of_two() {
+        return None;
+    }
+    let (lr, lc) = (block_rows.trailing_zeros(), block_cols.trailing_zeros());
+    (lr <= 15 && lc <= 15).then_some(0x8000_0100 | (lr << 4) | lc)
+}
+
+/// Size of the trailer behind the scales of an `FP8B` tensor.
+pub const FP8B_TRAILER: usize = 16;
+const FP8B_MAGIC: u32 = u32::from_le_bytes(*b"F8B1");
+
+/// Byte layout of an `FP8B` tensor, a stack of `slabs` weight matrices of `rows` x `cols` (the experts of a mixture-of-experts layer;
+/// 1 for a plain matrix):
+///
+/// 1. `slabs * rows * cols` E4M3 bytes, row-major, exactly as in the checkpoint;
+/// 2. one little-endian `f32` scale per tile, slab after slab, tiles row-major (`ceil(rows / tile_rows) * ceil(cols / tile_cols)`
+///    per slab); a weight is `e4m3(code) * scale`, the convention of `weight_scale_inv`;
+/// 3. a 16-byte trailer `"F8B1", cols, rows, slabs` (little-endian `u32`), so that a reader that only holds the bytes (a
+///    generic dequantizer, a backend that expands the weights at upload) knows the geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fp8bLayout {
+    pub block_rows: usize,
+    pub block_cols: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub slabs: usize,
+}
+
+impl Fp8bLayout {
+    /// The layout of a tensor of GGUF type `type_id` and `slabs` matrices of `rows` x `cols`.
+    pub fn new(type_id: u32, cols: usize, rows: usize, slabs: usize) -> Option<Self> {
+        let (block_rows, block_cols) = fp8b_shape(type_id)?;
+        (cols > 0 && rows > 0 && slabs > 0).then_some(Self { block_rows, block_cols, rows, cols, slabs })
+    }
+
+    /// The layout of a tensor with GGUF dimensions `[cols, rows, slabs...]` (a rank-1 tensor is one row).
+    pub fn from_dims(type_id: u32, dims: &[u64]) -> Option<Self> {
+        let cols = usize::try_from(*dims.first()?).ok()?;
+        let rows = usize::try_from(dims.get(1).copied().unwrap_or(1)).ok()?;
+        let slabs = dims.iter().skip(2).try_fold(1usize, |n, &d| n.checked_mul(usize::try_from(d).ok()?))?;
+        Self::new(type_id, cols, rows, slabs)
+    }
+
+    pub fn elements(&self) -> usize {
+        self.slabs.saturating_mul(self.rows).saturating_mul(self.cols)
+    }
+
+    /// Tiles per row of tiles.
+    pub fn tile_cols(&self) -> usize {
+        self.cols.div_ceil(self.block_cols)
+    }
+
+    pub fn tiles_per_slab(&self) -> usize {
+        self.rows.div_ceil(self.block_rows).saturating_mul(self.tile_cols())
+    }
+
+    pub fn tiles(&self) -> usize {
+        self.slabs.saturating_mul(self.tiles_per_slab())
+    }
+
+    /// Offset of the scale table.
+    pub fn scale_offset(&self) -> usize {
+        self.elements()
+    }
+
+    /// Total bytes: codes, scales, trailer.
+    pub fn total_len(&self) -> usize {
+        self.elements().saturating_add(self.tiles().saturating_mul(4)).saturating_add(FP8B_TRAILER)
+    }
+
+    /// Index into the scale table of the tile that holds element (`row`, `col`) of matrix `slab`.
+    pub fn tile_index(&self, slab: usize, row: usize, col: usize) -> usize {
+        slab * self.tiles_per_slab() + (row / self.block_rows) * self.tile_cols() + col / self.block_cols
+    }
+
+    /// The trailer bytes.
+    pub fn trailer(&self) -> [u8; FP8B_TRAILER] {
+        let mut t = [0u8; FP8B_TRAILER];
+        t[..4].copy_from_slice(&FP8B_MAGIC.to_le_bytes());
+        t[4..8].copy_from_slice(&(self.cols as u32).to_le_bytes());
+        t[8..12].copy_from_slice(&(self.rows as u32).to_le_bytes());
+        t[12..].copy_from_slice(&(self.slabs as u32).to_le_bytes());
+        t
+    }
+
+    /// Read the geometry from the trailer of `bytes` (a whole `FP8B` tensor) and check the length.
+    pub fn parse(type_id: u32, bytes: &[u8]) -> Result<Self, String> {
+        let (block_rows, block_cols) = fp8b_shape(type_id).ok_or_else(|| format!("GGUF type {type_id:#x} is not an FP8B type"))?;
+        let tail = bytes
+            .len()
+            .checked_sub(FP8B_TRAILER)
+            .map(|at| &bytes[at..])
+            .ok_or("FP8B tensor shorter than its trailer")?;
+        let word = |i: usize| u32::from_le_bytes([tail[4 * i], tail[4 * i + 1], tail[4 * i + 2], tail[4 * i + 3]]);
+        if word(0) != FP8B_MAGIC {
+            return Err("FP8B tensor without the F8B1 trailer (written by an older version?)".into());
+        }
+        let layout = Self { block_rows, block_cols, cols: word(1) as usize, rows: word(2) as usize, slabs: word(3) as usize };
+        if layout.cols == 0 || layout.rows == 0 || layout.slabs == 0 || layout.total_len() != bytes.len() {
+            return Err(format!("FP8B trailer ({} x {} x {}) does not match the {} bytes of the tensor", layout.slabs, layout.rows, layout.cols, bytes.len()));
+        }
+        Ok(layout)
+    }
+
+    /// The scale of tile `index` of the table in `bytes`.
+    pub fn scale(&self, bytes: &[u8], index: usize) -> f32 {
+        let at = self.scale_offset() + index * 4;
+        f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
 }
 
 fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
@@ -223,6 +353,15 @@ fn tensor_payload_len(type_id: u32, dimensions: &[u64]) -> Result<u64, String> {
             "tensor row length {} is not divisible by GGML block size {block_size}",
             dimensions[0]
         ));
+    }
+    if fp8b_type(type_id) {
+        // codes, f32 scales per tile and the trailer: the length depends on the tile shape of the type and the dimensions
+        let layout = Fp8bLayout::from_dims(type_id, dimensions).ok_or("FP8B tensor dimensions do not fit this platform")?;
+        let tiles = layout.tiles() as u64;
+        return (layout.elements() as u64)
+            .checked_add(tiles.checked_mul(4).ok_or("FP8B scale table size overflow")?)
+            .and_then(|n| n.checked_add(FP8B_TRAILER as u64))
+            .ok_or_else(|| "tensor payload length overflow".to_owned());
     }
     let elements = dimensions.iter().try_fold(1u64, |total, dim| {
         total

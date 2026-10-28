@@ -138,6 +138,11 @@ pub(super) fn grouped(call: MoeGrouped<'_>) -> Result<(), BackendError> {
     let block_expert = read_i32(&sort.block_expert, sort.max_blocks)?;
     let post = read_i32(&sort.post, 1)?[0] as usize;
     let row_bytes = cols / quant_type.block_size().max(1) * quant_type.block_bytes();
+    // block-wise FP8 keeps its tile scales and trailer behind the codes of the matrix
+    let entry_len = match fllm_gguf_probe::Fp8bLayout::new(kind, cols, rows, 1) {
+        Some(layout) => layout.total_len(),
+        None => rows * row_bytes,
+    };
     // dequantized weights and biases, once per expert that has pairs
     let mut cache: HashMap<(usize, bool), Dequantized> = HashMap::new();
     let used: Vec<usize> = (0..post / block).filter_map(|b| (block_expert[b] >= 0).then_some(block_expert[b] as usize)).collect();
@@ -148,7 +153,7 @@ pub(super) fn grouped(call: MoeGrouped<'_>) -> Result<(), BackendError> {
             }
             let (t, b) = if up { (table_up, bias_up) } else { (Some(table), bias) };
             let t = t.ok_or_else(|| invalid("moe_grouped_linear: no table for the up projection"))?;
-            let raw = entry_bytes(t, e, rows * row_bytes)?;
+            let raw = entry_bytes(t, e, entry_len)?;
             let w = crate::compute::dequantize(&raw, kind, rows * cols).map_err(BackendError::DriverError)?;
             let bv = match b {
                 Some(bt) => Some(entry_bytes(bt, e, rows * 4)?.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect::<Vec<f32>>()),

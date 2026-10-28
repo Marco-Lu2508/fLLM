@@ -797,7 +797,9 @@ pub fn prepare_checkpoint(
             });
         let q8_0 = preserve && packed.sym_int().is_some_and(|t| t.q8_0_ok());
         let mxfp4 = preserve && packed.mxfp4().is_some();
-        let fp8b = preserve && packed.is_fp8b();
+        // block-wise FP8 stays FP8 with its tile scales (`FP8B`): a matrix or a stack of equally shaped matrices, and a row permutation (the
+        // RoPE reordering of some architectures) may only move whole tile rows, otherwise the weights are expanded
+        let fp8b = if preserve { fp8b_layout(&packed, &dims, rowperm(&name)?.as_deref()) } else { None };
         // (stacked experts have a leading expert dimension: their rows are all rows of all experts)
         let in_features = dims.last().copied().unwrap_or(0) as usize;
         let rows_out = dims[..dims.len().saturating_sub(1)].iter().product::<u64>() as usize;
@@ -805,7 +807,7 @@ pub fn prepare_checkpoint(
             _ if nvfp4 => "NVFP4".to_string(),
             _ if q8_0 => "Q8_0".to_string(),
             _ if mxfp4 => "MXFP4".to_string(),
-            _ if fp8b => "FP8B".to_string(),
+            _ if fp8b.is_some() => crate::packed_quant::fp8b_dtype_name(fp8b.map_or(0, |(id, _)| id)),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
             (None, None, true, _) => "FP8M".to_string(),
@@ -816,18 +818,7 @@ pub fn prepare_checkpoint(
             _ if nvfp4 => (rows_out * (in_features / 64 * 36)) as u64,
             _ if q8_0 => (rows_out * (in_features / 32 * 34)) as u64,
             _ if mxfp4 => (rows_out * (in_features / 32 * 17)) as u64,
-            _ if fp8b => {
-                let num_scales = match &packed {
-                    PackedData::Fp8Block(b) => b.scales().len(),
-                    PackedData::Concat { parts, .. } => parts
-                        .iter()
-                        .filter_map(|p| p.fp8_block())
-                        .map(|b| b.scales().len())
-                        .sum::<usize>(),
-                    _ => 0,
-                };
-                (count + num_scales * 2) as u64
-            }
+            _ if fp8b.is_some() => fp8b.map_or(0, |(_, layout)| layout.total_len() as u64),
             (Some(g), _, _) => (count / g * (g / 2 + 3)) as u64,
             (None, Some(g), _) => (count / g * (g / 2 + 3) + in_features * 4) as u64,
             (None, None, true) => (count + rows_out * 2) as u64,
@@ -1212,7 +1203,27 @@ pub fn convert_checkpoint(
     })
 }
 
+/// The `FP8B` type and byte layout of a packed tensor with HF dimensions `dims` (`[experts, rows, cols]` or `[rows, cols]`), or `None` when it
+/// cannot be stored as FP8B (not block-wise FP8, a tile shape without a type, a row permutation that cuts through tile rows).
+fn fp8b_layout(packed: &PackedData, dims: &[u64], perm: Option<&[usize]>) -> Option<(u32, fllm_gguf_probe::Fp8bLayout)> {
+    let id = packed.fp8b_type_id()?;
+    let gguf_dims: Vec<u64> = dims.iter().rev().copied().collect();
+    let layout = fllm_gguf_probe::Fp8bLayout::from_dims(id, &gguf_dims)?;
+    if layout.elements() != packed.element_count() {
+        return None;
+    }
+    if let Some(order) = perm {
+        if layout.slabs != 1 || crate::packed_quant::fp8b_tile_row_map(order, layout.rows, layout.block_rows).is_none() {
+            return None;
+        }
+    }
+    Some((id, layout))
+}
+
 fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
+    if let Some(id) = crate::packed_quant::fp8b_dtype_id(dtype) {
+        return Ok(id);
+    }
     Ok(match dtype {
         "F32" => 0,
         "F16" => 1,
@@ -1252,7 +1263,6 @@ fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
         "Q4ZP64" => 0x8000_0015,
         "Q4ZP128" => 0x8000_0016,
         "FP8M" | "F8M" => 0x8000_0020,
-        "FP8B" => 0x8000_0021,
         _ => return Err(CheckpointError::Invalid(format!("unsupported GGUF tensor dtype {dtype}"))),
     })
 }
@@ -2109,7 +2119,10 @@ pub(crate) fn split_packed_cfg(
                 let rows = w.shape[0] as usize;
                 let cols = w.shape[1] as usize;
                 let scale_count = scale_tensor.shape.iter().product::<u64>() as usize;
-                let tile_scales = scale_tensor.shape.len() == 2 && scale_count != 1 && scale_count != rows;
+                // a 2-D scale that is not one value or one per row holds tile scales; with a declared tile size an exact match of the tile grid
+                // counts as well (a matrix no larger than one tile has a 1 x 1 grid, a layer with as many tile rows as rows a 1 x N grid)
+                let grid_match = fp8_block.is_some_and(|(br, bc)| scale_tensor.shape[..] == [rows.div_ceil(br) as u64, cols.div_ceil(bc) as u64]);
+                let tile_scales = scale_tensor.shape.len() == 2 && ((scale_count != 1 && scale_count != rows) || grid_match);
                 if tile_scales {
                     let (br, bc) = fp8_block.ok_or_else(|| {
                         format!(
@@ -2117,6 +2130,13 @@ pub(crate) fn split_packed_cfg(
                             w.name, scale_tensor.shape
                         )
                     })?;
+                    let grid = [rows.div_ceil(br) as u64, cols.div_ceil(bc) as u64];
+                    if scale_tensor.shape[..] != grid {
+                        return Err(format!(
+                            "{}: weight_scale_inv has the shape {:?}, the {br}x{bc} tiles of a {rows}x{cols} weight form a {}x{} grid",
+                            w.name, scale_tensor.shape, grid[0], grid[1]
+                        ));
+                    }
                     let t = crate::symint::Fp8Block::new(w.payload.clone(), scale_values(&scale_tensor)?, rows, cols, br, bc)
                         .map_err(|e| format!("{}: {e}", w.name))?;
                     let mapped = map(&w.name)?

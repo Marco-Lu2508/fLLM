@@ -19,6 +19,7 @@ pub mod cpu_elementwise;
 pub(crate) mod cpu_delta;
 pub(crate) mod cpu_kda;
 pub mod cpu_float;
+pub mod cpu_fp8;
 pub mod cpu_kernels;
 #[cfg(target_arch = "x86_64")]
 mod cpu_kquant;

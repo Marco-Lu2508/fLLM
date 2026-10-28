@@ -271,28 +271,25 @@ impl Fp8Block {
         &self.scales
     }
 
-    #[allow(dead_code)]
     pub fn rows(&self) -> usize {
         self.rows
     }
 
-    #[allow(dead_code)]
     pub fn cols(&self) -> usize {
         self.cols
     }
 
-    #[allow(dead_code)]
     pub fn block_rows(&self) -> usize {
         self.block_rows
     }
 
-    #[allow(dead_code)]
     pub fn block_cols(&self) -> usize {
         self.block_cols
     }
 
-    pub fn is_128x128(&self) -> bool {
-        self.block_rows == 128 && self.block_cols == 128
+    /// The GGUF `FP8B` type id of this tile shape (`None` when the shape has no id: tiles that are not powers of two).
+    pub fn type_id(&self) -> Option<u32> {
+        fllm_gguf_probe::fp8b_type_id(self.block_rows, self.block_cols)
     }
 }
 

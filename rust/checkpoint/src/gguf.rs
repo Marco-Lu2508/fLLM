@@ -121,13 +121,15 @@ pub fn write_to(
             "Q4ZP64" => 0x8000_0015,
             "Q4ZP128" => 0x8000_0016,
             "FP8M" | "F8M" => 0x8000_0020,
-            "FP8B" | "F8B" => 0x8000_0021,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "unsupported GGUF tensor dtype",
-                ))
-            }
+            other => match crate::packed_quant::fp8b_dtype_id(other) {
+                Some(id) => id,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "unsupported GGUF tensor dtype",
+                    ))
+                }
+            },
         };
         header.write_all(&ty.to_le_bytes())?;
         header.write_all(&rel.to_le_bytes())?;
@@ -303,55 +305,77 @@ fn write_packed_fp8m(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::R
     Ok(total as u64)
 }
 
+/// Block-wise FP8 (`FP8B`): the E4M3 codes of every matrix, then the f32 tile scales, then the trailer (layout: `fllm_gguf_probe::Fp8bLayout`).
+/// A row permutation is applied to the code rows and, tile row by tile row, to the scales (`fp8b_tile_row_map`).
 fn write_packed_fp8b(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result<u64> {
-    match p {
-        PackedData::Fp8Block(b) => {
-            let weight = b.weight_bytes();
-            let scales = b.scales();
-            w.write_all(weight)?;
-            for &s in scales {
-                w.write_all(&half::f16::from_f32(s).to_bits().to_le_bytes())?;
-            }
-            let total = weight.len() + scales.len() * 2;
-            if total as u64 != t.data_len {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "FP8B length mismatch"));
-            }
-            Ok(total as u64)
-        }
-        PackedData::Concat { parts, .. } => {
-            let mut total_w = 0usize;
-            let mut total_s = 0usize;
-            for part in parts {
-                let b = part.fp8_block().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "non-FP8B part in stacked FP8B tensor")
-                })?;
-                w.write_all(b.weight_bytes())?;
-                total_w += b.weight_bytes().len();
-            }
-            for part in parts {
-                let b = part.fp8_block().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "non-FP8B part in stacked FP8B tensor")
-                })?;
-                for &s in b.scales() {
-                    w.write_all(&half::f16::from_f32(s).to_bits().to_le_bytes())?;
-                }
-                total_s += b.scales().len() * 2;
-            }
-            let total = total_w + total_s;
-            if total as u64 != t.data_len {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "FP8B length mismatch"));
-            }
-            Ok(total as u64)
-        }
-        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "tensor cannot be stored as FP8B")),
+    let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
+    let id = crate::packed_quant::fp8b_dtype_id(&t.dtype).ok_or_else(|| bad("unknown FP8B dtype"))?;
+    let layout = fllm_gguf_probe::Fp8bLayout::from_dims(id, &t.dims).ok_or_else(|| bad("invalid FP8B dimensions"))?;
+    if layout.total_len() as u64 != t.data_len {
+        return Err(bad("FP8B length mismatch"));
     }
+    let blocks: Vec<&crate::symint::Fp8Block> = match p {
+        PackedData::Fp8Block(b) => vec![b],
+        PackedData::Concat { parts, .. } => parts
+            .iter()
+            .map(|part| part.fp8_block().ok_or_else(|| bad("non-FP8B part in stacked FP8B tensor")))
+            .collect::<io::Result<_>>()?,
+        _ => return Err(bad("tensor cannot be stored as FP8B")),
+    };
+    if blocks.len() != layout.slabs
+        || blocks.iter().any(|b| {
+            (b.rows(), b.cols(), b.block_rows(), b.block_cols()) != (layout.rows, layout.cols, layout.block_rows, layout.block_cols)
+        })
+    {
+        return Err(bad("FP8B matrices do not match the tensor dimensions"));
+    }
+    let tile_map = match t.source_for_output.as_deref() {
+        Some(order) if layout.slabs == 1 => Some(
+            crate::packed_quant::fp8b_tile_row_map(order, layout.rows, layout.block_rows)
+                .ok_or_else(|| bad("row permutation of an FP8B tensor cuts through tile rows"))?,
+        ),
+        Some(_) => return Err(bad("row permutation of stacked FP8B tensors")),
+        None => None,
+    };
+    for b in &blocks {
+        match t.source_for_output.as_deref() {
+            Some(order) => {
+                for &src in order {
+                    w.write_all(&b.weight_bytes()[src * layout.cols..(src + 1) * layout.cols])?;
+                }
+            }
+            None => w.write_all(b.weight_bytes())?,
+        }
+    }
+    let tile_cols = layout.tile_cols();
+    let mut scales = Vec::with_capacity(layout.tiles_per_slab() * 4);
+    for b in &blocks {
+        scales.clear();
+        match &tile_map {
+            Some(map) => {
+                for &src in map {
+                    for &s in &b.scales()[src * tile_cols..(src + 1) * tile_cols] {
+                        scales.extend_from_slice(&s.to_le_bytes());
+                    }
+                }
+            }
+            None => {
+                for &s in b.scales() {
+                    scales.extend_from_slice(&s.to_le_bytes());
+                }
+            }
+        }
+        w.write_all(&scales)?;
+    }
+    w.write_all(&layout.trailer())?;
+    Ok(layout.total_len() as u64)
 }
 
 fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result<u64> {
     if t.dtype == "FP8M" || t.dtype == "F8M" {
         return write_packed_fp8m(w, t, p);
     }
-    if t.dtype == "FP8B" || t.dtype == "F8B" {
+    if crate::packed_quant::fp8b_dtype_id(&t.dtype).is_some() {
         return write_packed_fp8b(w, t, p);
     }
     if t.dtype == "NVFP4" {

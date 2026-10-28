@@ -192,6 +192,7 @@ impl CpuBackend {
             QuantType::IQ4_XS,
             QuantType::Fp8E4m3,
             QuantType::Fp8E5m2,
+            QuantType::Fp8Block,
             QuantType::NvFp4,
             QuantType::Q4Z32,
             QuantType::Q4Z64,
@@ -670,10 +671,6 @@ impl Stream for CpuStream {
         weight: &DeviceWeight,
         bias: Option<&DeviceBuffer>,
     ) -> Result<(), BackendError> {
-        // block-scaled FP8 weights are a GPU (Marlin) layout; this backend has no kernel for them
-        if weight.quant_type == QuantType::Fp8Block {
-            return Err(BackendError::UnsupportedQuant(QuantType::Fp8Block));
-        }
         let x_data = read_f32(x)?;
         let b_data = bias.map(read_f32).transpose()?;
         let (rows, cols) = (weight.rows, weight.cols);
@@ -682,6 +679,13 @@ impl Stream for CpuStream {
         }
         if b_data.as_ref().is_some_and(|b| b.len() < rows) {
             return Err(invalid("linear bias shorter than the output rows"));
+        }
+        if fllm_gguf_probe::fp8b_type(weight.quant_type.to_gguf_type_id()) {
+            // block-wise FP8: the CPU kernel decodes the codes with the scales of their tiles (the weights stay 8-bit)
+            let w_bytes = read_bytes(&weight.buffer)?;
+            let out_data = crate::cpu_fp8::linear(weight.quant_type.to_gguf_type_id(), &w_bytes, &x_data, rows, cols, b_data.as_deref())
+                .map_err(BackendError::DriverError)?;
+            return write_f32(out, &out_data, "quantized_linear");
         }
         if weight.quant_type == QuantType::Fp8Marlin {
             let w_bytes = read_bytes(&weight.buffer)?;

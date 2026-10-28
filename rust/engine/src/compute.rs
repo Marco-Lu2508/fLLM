@@ -61,7 +61,8 @@ pub(crate) fn quant_layout(kind: u32) -> Option<(usize, usize)> {
         0x8000_0010 | 0x8000_0014 => Some((32, 19)),
         0x8000_0011 | 0x8000_0015 => Some((64, 35)),
         0x8000_0012 | 0x8000_0016 => Some((128, 67)),
-        0x8000_0020 | 0x8000_0021 => Some((1, 1)),
+        0x8000_0020 => Some((1, 1)),
+        k if fllm_gguf_probe::fp8b_type(k) => Some((1, 1)),
         _ => fllm_gguf_probe::quant_types::by_id(kind)
             .map(|ty| (ty.block_elements, ty.bytes_per_block)),
     }
@@ -116,7 +117,7 @@ fn dequantize_q4zp(bytes: &[u8], group: usize, count: usize) -> Result<Vec<f32>,
     Ok(out)
 }
 
-fn e4m3fn_to_f32(bits: u8) -> f32 {
+pub(crate) fn e4m3fn_to_f32(bits: u8) -> f32 {
     let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
     let exp = (bits >> 3) & 0x0f;
     let mant = bits & 0x07;
@@ -156,59 +157,20 @@ fn dequantize_fp8m(bytes: &[u8], count: usize) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
-fn dequantize_fp8b(bytes: &[u8], count: usize) -> Result<Vec<f32>, String> {
-    if bytes.len() <= count {
-        return Err("missing scales in FP8B tensor".into());
+/// `FP8B` (block-wise FP8) to f32: `e4m3(code) * scale of the tile`; the geometry comes from the trailer of the tensor.
+fn dequantize_fp8b(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, String> {
+    let layout = fllm_gguf_probe::Fp8bLayout::parse(kind, bytes)?;
+    if layout.elements() != count {
+        return Err(format!("FP8B tensor holds {} values, {count} expected", layout.elements()));
     }
-    let scale_bytes = bytes.len() - count;
-    let (br, bc) = (128usize, 128usize);
-    let (is_f32, num_tiles) = if scale_bytes.is_multiple_of(4) && scale_bytes > 0 {
-        (true, scale_bytes / 4)
-    } else if scale_bytes.is_multiple_of(2) && scale_bytes > 0 {
-        (false, scale_bytes / 2)
-    } else {
-        return Err("invalid scale length in FP8B tensor".into());
-    };
-    let cols = if count.is_multiple_of(bc) {
-        let mut found_cols = None;
-        for c in (bc..=count).step_by(bc) {
-            if count.is_multiple_of(c) {
-                let r = count / c;
-                if r.div_ceil(br) * c.div_ceil(bc) == num_tiles {
-                    found_cols = Some(c);
-                    break;
-                }
+    let mut out = Vec::with_capacity(count);
+    for slab in 0..layout.slabs {
+        for row in 0..layout.rows {
+            let base = (slab * layout.rows + row) * layout.cols;
+            for (tile, codes) in bytes[base..base + layout.cols].chunks(layout.block_cols).enumerate() {
+                let scale = layout.scale(bytes, layout.tile_index(slab, row, tile * layout.block_cols));
+                out.extend(codes.iter().map(|&b| e4m3fn_to_f32(b) * scale));
             }
-        }
-        found_cols.unwrap_or(bc)
-    } else {
-        bc
-    };
-    let rows = count / cols;
-    let tiles_x = cols.div_ceil(bc);
-    let mut out = vec![0.0f32; count];
-    for r in 0..rows {
-        let tr = r / br;
-        for c in 0..cols {
-            let tc = c / bc;
-            let tile_idx = (tr * tiles_x + tc).min(num_tiles.saturating_sub(1));
-            let scale = if is_f32 {
-                let s_bytes = [
-                    bytes[count + tile_idx * 4],
-                    bytes[count + tile_idx * 4 + 1],
-                    bytes[count + tile_idx * 4 + 2],
-                    bytes[count + tile_idx * 4 + 3],
-                ];
-                f32::from_le_bytes(s_bytes)
-            } else {
-                let s_bytes = [
-                    bytes[count + tile_idx * 2],
-                    bytes[count + tile_idx * 2 + 1],
-                ];
-                half::f16::from_le_bytes(s_bytes).to_f32()
-            };
-            let idx = r * cols + c;
-            out[idx] = e4m3fn_to_f32(bytes[idx]) * scale;
         }
     }
     Ok(out)
@@ -219,7 +181,7 @@ pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, Str
         return dequantize_fp8m(bytes, count);
     }
     if fllm_gguf_probe::fp8b_type(kind) {
-        return dequantize_fp8b(bytes, count);
+        return dequantize_fp8b(bytes, kind, count);
     }
     if let Some(group) = fllm_gguf_probe::q4zp_group(kind) {
         return dequantize_q4zp(bytes, group as usize, count);
@@ -383,6 +345,38 @@ fn nvfp4_input_scale(model: &MappedGguf, name: &str, first: usize, total_rows: u
     }
 }
 
+/// Rows `first..first + rows` (counted over all rows of all matrices) of the `FP8B` tensor `raw` of GGUF dimensions `dims`, as a tensor of
+/// its own. The whole tensor of a single matrix is a view; a part is copied (codes and the scales of its tile rows are not contiguous).
+/// The part has to lie in one matrix and to start at a tile row.
+pub(crate) fn fp8b_rows(raw: &TensorBytes, kind: u32, dims: &[u64], first: usize, rows: usize, name: &str) -> Result<TensorBytes, String> {
+    let all = fllm_gguf_probe::Fp8bLayout::from_dims(kind, dims).ok_or_else(|| format!("invalid FP8B dimensions of {name}: {dims:?}"))?;
+    if fllm_gguf_probe::Fp8bLayout::parse(kind, raw).map_err(|e| format!("{name}: {e}"))? != all {
+        return Err(format!("{name}: the FP8B trailer does not match the tensor dimensions {dims:?}"));
+    }
+    if first == 0 && rows == all.rows && all.slabs == 1 {
+        return raw.slice(0, raw.len());
+    }
+    let (slab, within) = (first / all.rows, first % all.rows);
+    if within + rows > all.rows {
+        return Err(format!("{name}: rows {first}..{} cross the boundary of a {}-row matrix", first + rows, all.rows));
+    }
+    if !within.is_multiple_of(all.block_rows) {
+        return Err(format!(
+            "{name}: block-wise FP8 rows {first}.. do not start at a {}-row tile (a fused tensor cut inside a tile cannot keep its scales)",
+            all.block_rows
+        ));
+    }
+    let part = fllm_gguf_probe::Fp8bLayout { rows, slabs: 1, ..all };
+    let mut buf = Vec::with_capacity(part.total_len());
+    buf.extend_from_slice(&raw[first * all.cols..(first + rows) * all.cols]);
+    let first_tile = slab * all.tiles_per_slab() + within / all.block_rows * all.tile_cols();
+    let tiles = rows.div_ceil(all.block_rows) * all.tile_cols();
+    buf.extend_from_slice(&raw[all.scale_offset() + first_tile * 4..all.scale_offset() + (first_tile + tiles) * 4]);
+    buf.extend_from_slice(&part.trailer());
+    debug_assert_eq!(buf.len(), part.total_len());
+    Ok(TensorBytes::from_vec(buf))
+}
+
 impl Linear {
     pub fn packed_weights(&self) -> Option<(u32, &[u8])> {
         self.packed
@@ -471,12 +465,8 @@ impl Linear {
             let extra_bytes = if fllm_gguf_probe::fp8m_type(info.type_id) {
                 rows.checked_mul(2).ok_or("rows overflow")?
             } else if fllm_gguf_probe::fp8b_type(info.type_id) {
-                let tiles = rows.div_ceil(128) * cols.div_ceil(128);
-                if raw.len() == (count / block) * bytes + tiles * 4 {
-                    tiles * 4
-                } else {
-                    tiles * 2
-                }
+                // scales and trailer (the geometry is checked against the trailer below)
+                fllm_gguf_probe::Fp8bLayout::new(info.type_id, cols, rows, 1).map_or(0, |l| l.total_len() - count)
             } else {
                 perm_bytes
             };
@@ -580,12 +570,8 @@ impl Linear {
             let extra_bytes = if is_fp8m {
                 total_rows.checked_mul(2).ok_or("total_rows overflow")?
             } else if is_fp8b {
-                let tiles = total_rows.div_ceil(128) * cols.div_ceil(128);
-                if raw.len() == row_bytes * total_rows + tiles * 4 {
-                    tiles * 4
-                } else {
-                    tiles * 2
-                }
+                // scales and trailer; `fp8b_rows` checks the geometry against the trailer
+                raw.len().saturating_sub(row_bytes * total_rows)
             } else {
                 perm_bytes
             };
@@ -602,19 +588,8 @@ impl Linear {
                 buf.extend_from_slice(&raw[first * row_bytes..(first + rows) * row_bytes]);
                 buf.extend_from_slice(&raw[total_rows * row_bytes + first * 2..total_rows * row_bytes + (first + rows) * 2]);
                 TensorBytes::from_vec(buf)
-            } else if is_fp8b && (first > 0 || rows < total_rows) {
-                let scale_unit = if extra_bytes == total_rows.div_ceil(128) * cols.div_ceil(128) * 4 { 4 } else { 2 };
-                let tiles_x = cols.div_ceil(128);
-                let first_tile = (first / 128) * tiles_x;
-                let num_tiles = rows.div_ceil(128) * tiles_x;
-                let mut buf = Vec::with_capacity(rows * row_bytes + num_tiles * scale_unit);
-                buf.extend_from_slice(&raw[first * row_bytes..(first + rows) * row_bytes]);
-                let scale_start = total_rows * row_bytes + first_tile * scale_unit;
-                let scale_end = scale_start + num_tiles * scale_unit;
-                if scale_end <= raw.len() {
-                    buf.extend_from_slice(&raw[scale_start..scale_end]);
-                }
-                TensorBytes::from_vec(buf)
+            } else if is_fp8b {
+                fp8b_rows(&raw, info.type_id, &info.dimensions, first, rows, name)?
             } else {
                 raw.slice(first * row_bytes, rows * row_bytes + extra_bytes)?
             };
@@ -1009,6 +984,12 @@ impl Linear {
         if input.is_empty() {
             return Ok(Vec::new());
         }
+        if let Some((kind, packed)) = &self.packed {
+            if fllm_gguf_probe::fp8b_type(*kind) {
+                // block-wise FP8 stays 8-bit in memory: the tile scales are applied while the codes are decoded
+                return crate::cpu_fp8::linear(*kind, packed, input, self.rows, self.cols, self.bias.as_deref());
+            }
+        }
         #[cfg(feature = "npu-openvino")]
         if let Some((done, mut out)) = self.npu_rows(input) {
             if let Some(bias) = &self.bias {
@@ -1101,46 +1082,7 @@ impl Linear {
                     let i = index % self.rows;
                     let x = &input[b * self.cols..(b + 1) * self.cols];
                     let sum = if let Some((kind, packed)) = &self.packed {
-                        if fllm_gguf_probe::fp8b_type(*kind) {
-                            let br = 128;
-                            let bc = 128;
-                            let tiles_x = self.cols.div_ceil(bc);
-                            let tr = i / br;
-                            let row_w = &packed[i * self.cols..(i + 1) * self.cols];
-                            let scale_start = self.rows * self.cols;
-                            let scale_len = packed.len().saturating_sub(scale_start);
-                            let is_f32 = scale_len >= tiles_x * 4;
-                            let mut row_sum = 0.0f32;
-                            for (c, &b) in row_w.iter().enumerate() {
-                                let tc = c / bc;
-                                let tile_idx = tr * tiles_x + tc;
-                                let scale = if is_f32 {
-                                    if scale_start + (tile_idx + 1) * 4 <= packed.len() {
-                                        let s_bytes = [
-                                            packed[scale_start + tile_idx * 4],
-                                            packed[scale_start + tile_idx * 4 + 1],
-                                            packed[scale_start + tile_idx * 4 + 2],
-                                            packed[scale_start + tile_idx * 4 + 3],
-                                        ];
-                                        f32::from_le_bytes(s_bytes)
-                                    } else {
-                                        1.0f32
-                                    }
-                                } else {
-                                    if scale_start + (tile_idx + 1) * 2 <= packed.len() {
-                                        let s_bytes = [
-                                            packed[scale_start + tile_idx * 2],
-                                            packed[scale_start + tile_idx * 2 + 1],
-                                        ];
-                                        half::f16::from_le_bytes(s_bytes).to_f32()
-                                    } else {
-                                        1.0f32
-                                    }
-                                };
-                                row_sum += x[c] * (e4m3fn_to_f32(b) * scale);
-                            }
-                            row_sum
-                        } else if fllm_gguf_probe::fp8m_type(*kind) {
+                        if fllm_gguf_probe::fp8m_type(*kind) {
                             let s_bytes = [
                                 packed[self.rows * self.cols + i * 2],
                                 packed[self.rows * self.cols + i * 2 + 1],
