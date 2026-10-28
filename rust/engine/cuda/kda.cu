@@ -17,6 +17,13 @@ struct DeltaRun {
 #define DELTA_CHUNK 16
 
 __device__ __forceinline__ float block_sum_n(float v, float *scratch) {
+    if (blockDim.x < 32) {
+        // one partial warp (head width 16): reduce over the live lanes only; a full-warp mask names lanes that do not exist
+        // and the missing shuffle sources would be counted twice, and `warps` below would be 0
+        const unsigned live = (1u << blockDim.x) - 1u;
+        for (int o = (int)blockDim.x >> 1; o > 0; o >>= 1) v += __shfl_xor_sync(live, v, o);
+        return v;
+    }
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, warps = blockDim.x >> 5;
     v = warp_sum(v);
     __syncthreads();
