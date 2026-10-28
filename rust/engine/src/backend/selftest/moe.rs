@@ -589,7 +589,21 @@ impl Tester<'_> {
         let tables: Vec<DeviceBuffer> = routed.iter().map(|r| self.device.upload_pointer_table(r)).collect::<Result<_, _>>()?;
         let logits = self.rng.vector(tokens * experts, 2.0);
         let sel_bias = if c.bias { self.rng.vector(experts, 0.3) } else { Vec::new() };
-        let x = self.rng.vector(tokens * hidden, 1.0);
+        // The grouped GEMMs take FP16 activations, so the SwiGLU outputs (~ gate * up) must stay below 65504. The random k-quant
+        // weights are far larger than real ones (q4_k: about 3 per weight), which put single activations of this layer past the
+        // FP16 range (inf * 0 = NaN). Scale the input so the gate / up projections have a standard deviation of about 24.
+        let weight_ms = {
+            let (mut sum, mut n) = (0.0f64, 0usize);
+            for p in 0..2 {
+                for w in &dense[p] {
+                    sum += w.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>();
+                    n += w.len();
+                }
+            }
+            sum / n.max(1) as f64
+        };
+        let x_scale = (24.0 / (weight_ms.sqrt() * (hidden as f64).sqrt()).max(1e-9)).min(1.0) as f32;
+        let x = self.rng.vector(tokens * hidden, x_scale);
         let gate_vec = if c.shared_gate { self.rng.vector(hidden, 0.3) } else { Vec::new() };
 
         let mut stream = self.device.create_stream()?;
