@@ -23,6 +23,7 @@ pub mod cpu_kernels;
 #[cfg(target_arch = "x86_64")]
 mod cpu_kquant;
 mod cpu_profile;
+mod cpu_exl;
 #[cfg(target_arch = "x86_64")]
 mod cpu_q4z;
 pub mod cpu_quantized;

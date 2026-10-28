@@ -368,6 +368,10 @@ pub enum QuantType {
     Q4_K_Marlin,
     Fp8Marlin,
     Fp8Block,
+    /// fLLM-specific packed ExLlamaV2 / ExLlamaV3 matrices (GGUF types 0x8000_0030 / 0x8000_0031): one self-describing blob per tensor,
+    /// layout in `fllm_gguf_probe::exl`. They have no fixed block size; backends without a kernel get them expanded at upload.
+    Exl2,
+    Exl3,
     Other(u32),
 }
 
@@ -411,6 +415,8 @@ impl QuantType {
             0x8000_0016 => Self::Q4ZP128,
             0x8000_0020 => Self::Fp8Marlin,
             0x8000_0021 => Self::Fp8Block,
+            0x8000_0030 => Self::Exl2,
+            0x8000_0031 => Self::Exl3,
             other => Self::Other(other),
         }
     }
@@ -455,6 +461,8 @@ impl QuantType {
             Self::Nvfp4Marlin => 0x8000_0013,
             Self::Fp8Marlin => 0x8000_0020,
             Self::Fp8Block => 0x8000_0021,
+            Self::Exl2 => 0x8000_0030,
+            Self::Exl3 => 0x8000_0031,
             Self::Other(other) => *other,
         }
     }
@@ -485,7 +493,7 @@ impl QuantType {
             }
             Self::IQ4_NL => 32,
             Self::IQ4_XS => 256,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 32,
             Self::NvFp4 => 64,
             Self::Q4Z32 | Self::Q4ZP32 => 32,
@@ -522,7 +530,7 @@ impl QuantType {
             Self::IQ4_NL => 18,
             Self::IQ3_S => 110,
             Self::IQ4_XS => 136,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 17,
             Self::NvFp4 => 36,
             Self::Q4Z32 | Self::Q4ZP32 => 19,

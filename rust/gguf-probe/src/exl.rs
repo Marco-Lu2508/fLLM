@@ -265,8 +265,19 @@ pub fn pack_codes(codes: &[u8], bits: usize, out: &mut Vec<u8>) {
 
 /// Unpack `out.len()` codes of `bits` width from an LSB-first bitstream and store `code - 2^(bits-1)`.
 pub fn unpack_centered(words: &[u8], bits: usize, out: &mut [f32]) {
-    let mask = (1u64 << bits) - 1;
     let zero = (1i32 << (bits - 1)) as f32;
+    if 32 % bits == 0 {
+        // 2, 4 and 8 bits: codes never straddle a word
+        let (per, mask) = (32 / bits, (1u32 << bits) - 1);
+        for (wi, chunk) in out.chunks_mut(per).enumerate() {
+            let w = word(words, wi);
+            for (j, slot) in chunk.iter_mut().enumerate() {
+                *slot = ((w >> (j * bits)) & mask) as f32 - zero;
+            }
+        }
+        return;
+    }
+    let mask = (1u64 << bits) - 1;
     let (mut buf, mut have, mut next) = (0u64, 0usize, 0usize);
     for slot in out.iter_mut() {
         if have < bits {
@@ -676,6 +687,59 @@ pub fn dequantize(blob: &[u8], type_id: u32, count: usize) -> Result<Vec<f32>, S
         return Err(format!("EXL{} tensor holds {} values, expected {count}", if exl3 { 3 } else { 2 }, values.len()));
     }
     Ok(values)
+}
+
+// ---------------------------------------------------------------------------------------------------------- test support
+
+/// A random but valid EXL2 blob (self-tests and unit tests): mixed group widths of 32 or 64 inputs, a random input permutation,
+/// random scale indices. `cols` must be a multiple of 32. `next` yields uniform random numbers.
+pub fn synthetic_exl2(rows: usize, cols: usize, next: &mut dyn FnMut() -> u64) -> Vec<u8> {
+    assert!(cols > 0 && cols % 32 == 0 && rows > 0);
+    const WIDTHS: [usize; 6] = [2, 3, 4, 5, 6, 8];
+    let mut groups = Vec::new();
+    let mut left = cols;
+    while left > 0 {
+        let n = if left >= 64 && next() % 3 == 0 { 64 } else { 32 };
+        groups.push((n, WIDTHS[(next() % 6) as usize]));
+        left -= n;
+    }
+    let layout = Exl2Layout::new(rows, cols, &groups).expect("valid synthetic layout");
+    let maxima: Vec<u16> = groups.iter().map(|_| f16::from_f32(8.0 + (next() % 24) as f32).to_bits()).collect();
+    let mut perm: Vec<u32> = (0..cols as u32).collect();
+    for i in (1..cols).rev() {
+        perm.swap(i, (next() % (i as u64 + 1)) as usize);
+    }
+    let mut blob = layout.prefix(&maxima, &perm);
+    let mut codes = Vec::new();
+    for _ in 0..rows {
+        let mut nibbles = vec![0u32; groups.len().div_ceil(8)];
+        for (g, &(n, bits)) in groups.iter().enumerate() {
+            codes.clear();
+            codes.extend((0..n).map(|_| (next() & ((1 << bits) - 1)) as u8));
+            pack_codes(&codes, bits, &mut blob);
+            nibbles[g / 8] |= ((next() % 16) as u32) << (4 * (g % 8));
+        }
+        for w in nibbles {
+            blob.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(blob.len(), layout.header.total);
+    blob
+}
+
+/// A random but valid EXL3 blob: random trellis words, +-1 sign vectors and a random output permutation.
+pub fn synthetic_exl3(rows: usize, cols: usize, bits: usize, codebook: u8, next: &mut dyn FnMut() -> u64) -> Vec<u8> {
+    let layout = Exl3Layout::new(rows, cols, bits, codebook).expect("valid synthetic layout");
+    let sign = |v: u64| if v & 1 == 0 { 0x3c00u16 } else { 0xbc00 };
+    let suh: Vec<u16> = (0..cols).map(|_| sign(next())).collect();
+    let svh: Vec<u16> = (0..rows).map(|_| sign(next())).collect();
+    let mut map: Vec<u32> = (0..rows as u32).collect();
+    for i in (1..rows).rev() {
+        map.swap(i, (next() % (i as u64 + 1)) as usize);
+    }
+    let mut blob = layout.prefix(&suh, &svh, &map);
+    blob.extend((0..layout.header.total - layout.header.data_off).map(|_| next() as u8));
+    blob
 }
 
 #[cfg(test)]
