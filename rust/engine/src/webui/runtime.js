@@ -21,13 +21,14 @@
       pane.id = 'spane-runtime';
       pane.innerHTML =
         '<div class="app-card"><div class="app-card-title">Sandbox for agent commands</div>' +
-        '<div class="app-item-desc" style="margin-bottom:10px;">Approvals decide whether a command may run; the sandbox decides what it can reach once it runs. <span class="mono">workspace</span>: the system is read-only, the workspace writable, private /tmp, own PID namespace. <span class="mono">strict</span>: also no network. <span class="mono">off</span>: a plain shell. Needs <span class="mono">bwrap</span> (Linux); without it the command runs unwrapped and the status below says so.</div>' +
+        '<div class="app-item-desc" style="margin-bottom:10px;">Approvals decide whether a command may run; the sandbox decides what it can reach once it runs. <span class="mono">workspace</span>: the system is read-only, the workspace writable, private /tmp, own PID namespace. <span class="mono">strict</span>: also no network. <span class="mono">off</span>: a plain shell. How it is done depends on the system: bubblewrap on Linux, a restricted low-integrity token in a job object on Windows (<span class="mono">strict</span> is unavailable there), Seatbelt on macOS. Windows and macOS are implemented but not yet verified on real machines, so they stay <span class="mono">off</span> until you choose a mode. When the mechanism does not work, the command runs unwrapped and the status below says so.</div>' +
         '<div id="rtSandboxRow" style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;">' +
         '  <label style="display:flex;gap:6px;align-items:center;"><input type="radio" name="rtSandbox" value="off"> off</label>' +
         '  <label style="display:flex;gap:6px;align-items:center;"><input type="radio" name="rtSandbox" value="workspace"> workspace</label>' +
         '  <label style="display:flex;gap:6px;align-items:center;"><input type="radio" name="rtSandbox" value="strict"> strict</label>' +
         '</div>' +
         '<div class="app-item-desc mono" id="rtSandboxState" style="margin-top:8px;font-size:11px;"></div>' +
+        '<div class="app-item-desc" id="rtSandboxDetails" style="margin-top:6px;font-size:11px;"></div>' +
         '</div>' +
         '<div class="app-card" style="margin-top:12px;border:1px solid var(--destructive,#d33);">' +
         '<div class="app-card-title" style="color:var(--destructive,#d33);">Turbo</div>' +
@@ -46,9 +47,23 @@
         for (const radio of pane.querySelectorAll('input[name=rtSandbox]')) radio.disabled = Boolean(data.turbo) || Boolean(data.sandbox_from_env);
         const parts = [`sandbox: ${data.sandbox}`];
         if (data.sandbox_from_env) parts.push('set by FLLM_SANDBOX for this server and wins over this page');
-        parts.push(data.sandbox_available ? 'bubblewrap works here' : 'bubblewrap does not work here — commands run unwrapped');
+        const st = data.sandbox_status || {};
+        const mechanism = st.mechanism || 'the sandbox';
+        if (st.active) parts.push(`${mechanism} is active`);
+        else if (data.sandbox === 'off') parts.push('sandbox is off');
+        else parts.push(`${mechanism} is not active — ${(st.sandbox && st.sandbox.reason) || 'it does not work here'}${st.platform === 'windows' && data.sandbox === 'strict' ? ' (commands are refused in this mode)' : ' (commands run unwrapped)'}`);
         if (data.turbo) parts.push('turbo is on: no questions, sandbox off');
         sandboxState().textContent = parts.join(' · ');
+        // what is and is not enforced here, and how well that is verified
+        const details = pane.querySelector('#rtSandboxDetails');
+        if (details) {
+          const lines = [];
+          for (const item of st.enforced || []) lines.push('Enforced: ' + item);
+          for (const item of st.not_enforced || []) lines.push('Not enforced: ' + item);
+          if (st.verification) lines.push('Verification: ' + st.verification);
+          details.textContent = lines.join('\n');
+          details.style.whiteSpace = 'pre-wrap';
+        }
         document.body.dataset.turbo = data.turbo ? '1' : '0';
       }
 

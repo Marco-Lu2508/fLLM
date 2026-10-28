@@ -279,6 +279,30 @@ workspace writable, a private `/tmp` and its own PID and IPC namespace; `FLLM_SA
 binary); if it does not — a missing `bwrap`, or a kernel or container policy that forbids user namespaces — the command runs as before
 and `GET /api/studio/agent/sandbox` says why. Nothing is reported as sandboxed that is not; `/sandbox` shows the state.
 
+On **Windows** there is a different mechanism (implemented, **not yet verified on real Windows machines**, so it is off by default
+there and you switch it on under Settings > Runtime or with `FLLM_SANDBOX=workspace`). Each command is started through
+`fllm-rs sandbox-exec`, which runs it under a restricted token at low integrity level inside a job object:
+
+- *Enforced (mode `workspace`)*: the whole process tree is killed on stop, timeout or when the server ends; writes are refused outside
+  the workspace and a private temp folder under `%USERPROFILE%\AppData\LocalLow\fLLM`; privileges are removed and administrator groups
+  are deny-only; at most 512 processes and three quarters of the physical memory per command; no clipboard, desktop or window-handle
+  access; environment variables that look like secrets (`..._TOKEN`, `..._KEY`, `..._PASSWORD`, ...) are removed and `TEMP`/`TMP` point
+  to the private folder.
+- *Not enforced*: **reading** (the whole disk stays readable, including your profile), **the network**, and other places that are
+  writable at low integrity (such as `AppData\LocalLow`). `strict` is **unavailable** on Windows because a network cut-off needs an
+  AppContainer, which is not implemented: in that mode commands are refused with a message instead of running with a network.
+- *Side effect*: the workspace folder gets a low integrity label (with `icacls`, once, remembered in `sandbox-labelled.txt`), which is
+  what lets a low-integrity process write there. Drive roots, the user profile, personal folders such as Documents and system folders
+  are refused as workspaces for this reason. Programs that need to write elsewhere (`~/.cargo`, `%APPDATA%`) fail in `workspace` mode,
+  as they do on Linux with the read-only root.
+- *Self-test*: before the Windows sandbox counts as available, fLLM runs real commands through it on your machine and demands that a
+  write into the allowed folder works and a write outside fails. If that does not hold, the status says why and commands run unwrapped
+  (as with a missing `bwrap` on Linux). If the sandbox works but cannot start one particular command, the command fails with the
+  reason; it never silently runs unsandboxed.
+
+On **macOS** a Seatbelt (`sandbox-exec`) profile exists for the three modes, also off by default and **unverified** (profile text and
+arguments are unit-tested, no Mac was available; the same self-test guards it). Diagnostics and hook commands are not sandboxed on any system.
+
 Safety: the agent tools are reachable from the machine fLLM runs on only, also when an API key is set. Paths cannot leave the folder
 (also through symbolic links; on Windows the drive letter and folder names are compared without regard to case). The agent can still run
 any command you allow, so choose the folder with care. Set `FLLM_NO_AGENT=1` to switch the agent routes off completely. On Windows
@@ -493,8 +517,10 @@ stays keyword-only and says so — the chat server itself does not embed. The se
 Settings > *Runtime* decides how freely the app may work, and the choice is kept in `runtime.json`:
 
 - **sandbox** — `workspace` (system read-only, workspace writable, private `/tmp`, own PID namespace), `strict` (also no
-  network) or `off` (a plain shell). It needs `bwrap`; without it the command runs unwrapped and the page says so instead of
-  pretending. `FLLM_SANDBOX` in the service file wins over the page.
+  network) or `off` (a plain shell). On Linux it needs `bwrap`; Windows (low-integrity token in a job object, no `strict`) and
+  macOS (Seatbelt) are implemented but not yet verified on real machines and default to `off`. Without a working mechanism the
+  command runs unwrapped and the page lists what is enforced, what is not and why instead of pretending. `FLLM_SANDBOX` in the
+  service file wins over the page.
 - **turbo** — no permission questions at all: every tool call runs, deny rules and the sandbox included. It is a loud red
   switch with a confirmation, it stays off until somebody turns it on, and `/turbo on|off` does the same from the agent.
   `/sandbox off|workspace|strict` shows or sets the mode.
