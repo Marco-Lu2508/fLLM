@@ -666,6 +666,96 @@ mod tests {
             .collect()
     }
 
+    /// Host model of `kvq_write_warp_kernel` (cuda/kv_quant.cu) for the 4 and 5 bit formats: lane `l` of the warp holds the values
+    /// `l + 32 k` of the unit, the element of largest magnitude is found with a ballot over the lanes, the nibbles are packed with
+    /// `__shfl_down_sync` and the fifth bits are collected with `__ballot_sync`. The arithmetic is that of `quantize_group`; what the model
+    /// checks is the lane arithmetic around it (which element is "the first of largest magnitude", where each word goes) against
+    /// `encode_slot`. A device ballot that returns garbage (the `kvq_ballot32` that called itself) breaks exactly these two places.
+    fn warp_encode(fmt: KvFormat, x: &[f32], first: usize, layout: &KvLayout, pool: &mut [u16]) {
+        let unit = x.len();
+        let nk = unit.div_ceil(32);
+        let ok = |k: usize, lane: usize| lane + 32 * k < unit;
+        let v = |k: usize, lane: usize| if ok(k, lane) { x[lane + 32 * k] } else { 0.0 };
+        let ballot = |pred: &dyn Fn(usize) -> bool| (0..32).fold(0u32, |m, lane| m | (u32::from(pred(lane)) << lane));
+        let amax = (0..nk).flat_map(|k| (0..32).map(move |l| (k, l))).fold(0.0f32, |m, (k, l)| m.max(v(k, l).abs()));
+        let (scale, min, codes): (u16, u16, Vec<Vec<u32>>) = if matches!(fmt, KvFormat::Q4_1 | KvFormat::Q5_1) {
+            let levels = if fmt == KvFormat::Q4_1 { 15.0f32 } else { 31.0f32 };
+            let mn = (0..nk).flat_map(|k| (0..32).map(move |l| (k, l))).filter(|&(k, l)| ok(k, l)).fold(f32::INFINITY, |m, (k, l)| m.min(v(k, l)));
+            let mx = (0..nk).flat_map(|k| (0..32).map(move |l| (k, l))).filter(|&(k, l)| ok(k, l)).fold(f32::NEG_INFINITY, |m, (k, l)| m.max(v(k, l)));
+            let (sb, mb) = (hb((mx - mn) / levels), hb(mn));
+            let (d, m) = (h(sb), h(mb));
+            let codes = (0..nk).map(|k| (0..32).map(|l| if d == 0.0 { 0 } else { (((v(k, l) - m) / d) + 0.5).floor().clamp(0.0, levels) as u32 }).collect()).collect();
+            (sb, mb, codes)
+        } else {
+            let mut vmax = 0.0f32;
+            let mut found = false;
+            for k in 0..nk {
+                let mask = ballot(&|l| ok(k, l) && v(k, l).abs() == amax);
+                let cand = v(k, if mask != 0 { mask.trailing_zeros() as usize } else { 0 });
+                if !found && mask != 0 && amax > 0.0 {
+                    vmax = cand;
+                    found = true;
+                }
+            }
+            let (zero, levels) = if fmt == KvFormat::Q4_0 { (8.0f32, 15.0f32) } else { (16.0f32, 31.0f32) };
+            let sb = hb(vmax / -zero);
+            let d = h(sb);
+            let codes = (0..nk)
+                .map(|k| (0..32).map(|l| if d == 0.0 { zero as u32 } else { ((v(k, l) / d) + (zero + 0.5)).floor().clamp(0.0, levels) as u32 }).collect())
+                .collect();
+            (sb, 0, codes)
+        };
+        let five = matches!(fmt, KvFormat::Q5_0 | KvFormat::Q5_1);
+        for (k, code) in codes.iter().enumerate() {
+            for lane in 0..32usize {
+                let idx0 = first + 32 * k + lane;
+                if lane % 4 == 0 && ok(k, lane) {
+                    // lanes beyond 31 do not exist; the lanes a packing lane reads are inside its quad
+                    let nib = |o: usize| code[lane + o] & 15;
+                    pool[idx0 >> 2] = (nib(0) | nib(1) << 4 | nib(2) << 8 | nib(3) << 12) as u16;
+                }
+            }
+            if five {
+                let bits = ballot(&|l| ok(k, l) && (code[l] >> 4) & 1 == 1);
+                let w0 = layout.hi_off + ((first + 32 * k) >> 4);
+                if 32 * k < unit {
+                    pool[w0] = (bits & 0xffff) as u16;
+                }
+                if 32 * k + 16 < unit {
+                    pool[w0 + 1] = (bits >> 16) as u16;
+                }
+            }
+        }
+        let gfirst = first / layout.fmt.group(layout.dim);
+        pool[layout.scale_off + gfirst] = scale;
+        if matches!(fmt, KvFormat::Q4_1 | KvFormat::Q5_1) {
+            pool[layout.min_off + gfirst] = min;
+        }
+    }
+
+    #[test]
+    fn warp_encoder_model_matches_the_cpu_layout() {
+        for fmt in [KvFormat::Q4_0, KvFormat::Q5_0, KvFormat::Q4_1, KvFormat::Q5_1] {
+            for dim in [32usize, 64, 80, 96, 128] {
+                let (slots, kv_heads) = (7usize, 2usize);
+                let layout = KvLayout::new(fmt, slots, kv_heads, dim);
+                let unit = fmt.group(dim);
+                for seed in 1..6u32 {
+                    let mut want = vec![0u16; layout.words];
+                    let mut got = vec![0u16; layout.words];
+                    for slot in [0usize, 3, 6] {
+                        let row = sample(layout.kv, seed * 17 + slot as u32);
+                        layout.encode_slot(&mut want, slot, &row);
+                        for u in 0..layout.kv / unit {
+                            warp_encode(fmt, &row[u * unit..(u + 1) * unit], slot * layout.kv + u * unit, &layout, &mut got);
+                        }
+                    }
+                    assert_eq!(got, want, "{} dim {dim} seed {seed}", fmt.name());
+                }
+            }
+        }
+    }
+
     #[test]
     fn kind_packing_round_trips() {
         for &k in &KvFormat::ALL {

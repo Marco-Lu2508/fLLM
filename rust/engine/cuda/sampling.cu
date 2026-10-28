@@ -381,7 +381,16 @@ sample_rows_kernel(const float *__restrict__ logits, float *work, int vocab, con
             }
             prev_v = b;
             prev_i = bi;
-            if (bi == 0x7fffffff) break;
+            if (bi == 0x7fffffff) {
+                // nothing left: the remaining slots of the row are empty too (the device buffer is not initialised)
+                if (threadIdx.x == 0) {
+                    for (int r = n + 1; r < top_n; r++) {
+                        top_ids[(size_t)row * top_stride + r] = -1;
+                        top_logprob[(size_t)row * top_stride + r] = -INFINITY;
+                    }
+                }
+                break;
+            }
         }
     }
 }

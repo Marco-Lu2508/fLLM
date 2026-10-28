@@ -37,7 +37,7 @@ mod hmla;
 use kv::layout_of;
 
 pub const HELP: &str = "usage: fllm-rs selftest-gpu [--device auto|vulkan|metal|dx12|hip|sycl|npu|tpu|gpu|cpu|BACKEND:N] [--only GROUPS] [--quants LIST]
-                           [--json FILE] [--strict] [--expect-skips FILE] [--list]
+                           [--json FILE] [--strict] [--failures-only] [--expect-skips FILE] [--list]
 Runs every backend operation on random data on the chosen backend and on the CPU backend, compares both with an f64
 reference and prints the largest error of each check relative to its error scale, the tolerance and the device time.
 The output is grouped by operation (linear, embedding, norm, rope, activation, kv, attention, moe, delta, sampling,
@@ -51,6 +51,7 @@ host; --list says what each covers).
                  limits the run to the groups that depend on a format (linear, embedding, moe, host)
   --json FILE    write every check and the summary as JSON
   --strict       count checks the backend reports as unsupported as failures
+  --failures-only print only the failing checks (and the summary), not the passing and skipped ones
   --expect-skips FILE  compare the skipped checks (per group and op) with the `expected-skips` block of FILE (the backend's
                  EXPECTED_SKIPS.md) and fail on any difference, in either direction
   --list         print the groups and formats and exit
@@ -241,6 +242,7 @@ struct Options {
     json: Option<String>,
     filter: Filter,
     strict: bool,
+    failures_only: bool,
     expect_skips: Option<String>,
 }
 
@@ -254,7 +256,7 @@ enum Command {
 fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut device = "auto".to_string();
     let (mut json, mut only, mut quants, mut expect_skips) = (None, None, None, None);
-    let (mut strict, mut list) = (false, false);
+    let (mut strict, mut list, mut failures_only) = (false, false, false);
     let mut i = 0;
     let value = |i: &mut usize, flag: &str| -> Result<String, String> {
         *i += 1;
@@ -268,6 +270,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             "--only" => only = Some(value(&mut i, "--only")?),
             "--quants" => quants = Some(value(&mut i, "--quants")?),
             "--strict" => strict = true,
+            "--failures-only" => failures_only = true,
             "--expect-skips" => expect_skips = Some(value(&mut i, "--expect-skips")?),
             "--list" => list = true,
             other => return Err(format!("unknown argument {other}\n{HELP}")),
@@ -277,7 +280,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
     if list {
         return Ok(Command::List);
     }
-    Ok(Command::Run(Options { device, json, filter: Filter::parse(only.as_deref(), quants.as_deref())?, strict, expect_skips }))
+    Ok(Command::Run(Options { device, json, filter: Filter::parse(only.as_deref(), quants.as_deref())?, strict, failures_only, expect_skips }))
 }
 
 /// `--list`: the groups and the weight formats.
@@ -304,6 +307,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Command::Run(options) => options,
     };
     clear_records();
+    FAILURES_ONLY.store(options.failures_only, std::sync::atomic::Ordering::Relaxed);
     let mut ran = (options.device.clone(), 0usize);
     let mut verdict = run_selected(&options, &mut ran);
     if verdict.is_ok() && options.strict {
@@ -792,6 +796,9 @@ struct WorstAt {
     want_len: usize,
 }
 
+/// Set by `--failures-only`: `Tester::record` prints only the failing checks.
+static FAILURES_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 thread_local! {
     static WORST_LOG: std::cell::RefCell<Vec<WorstAt>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -805,6 +812,12 @@ fn log_worst(at: WorstAt) -> f64 {
         log.push(at);
     });
     at.err
+}
+
+/// For checks that compute their own error: records the element of the largest error so that `describe_failure` can name it. `have` and
+/// `want` are the two values compared at `index` of `len`, `scale` the error scale; returns `err`.
+fn note_worst(err: f64, index: usize, len: usize, have: f32, want: f64, scale: f64) -> f64 {
+    log_worst(WorstAt { err, index, have, want, scale, len, want_len: len })
 }
 
 /// The message of a check whose error is beyond its tolerance: for the device and for the CPU backend the error, the tolerance and the worst element.
@@ -1092,13 +1105,15 @@ impl<'a> Tester<'a> {
             }
         }
         WORST_LOG.with(|l| l.borrow_mut().clear());
-        if self.printed_group != self.group {
+        let quiet = status != Status::Failed && FAILURES_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+        if !quiet && self.printed_group != self.group {
             println!("== {} ==", self.group);
             self.printed_group = self.group;
         }
         let text = message.clone().unwrap_or_default();
         let measured = outcome.as_ref().ok();
         match (measured, status) {
+            _ if quiet => {}
             (Some(o), status) => println!(
                 "{op:<18} {shape:<40} {:>9.2e} {:>9.2e} {:>9.2e} {:>10.3} {}",
                 o.device,
@@ -1544,28 +1559,50 @@ impl<'a> Tester<'a> {
             });
         }
         let (wrong, got, want, ms) = self.sample_compare(&logits, vocab, &params, &[], &[], &[], 0, stride)?;
+        // element r * (stride + 1): the chosen token (its id, or its log-probability when the id is right); r * (stride + 1) + 1 + j: the
+        // j-th alternative (its id, or its log-probability when the id is right); 1e3 for a wrong id
+        let len = rows * (stride + 1);
         let mut worst = wrong as f64 * 1e3;
+        let mut at = (if wrong > 0 { worst } else { 0.0 }, 0usize, 0.0f32, 0.0f64);
+        let mut see = |err: f64, index: usize, have: f32, want: f64| {
+            if err > at.0 || (err.is_nan() && !at.0.is_nan()) {
+                at = (err, index, have, want);
+            }
+        };
         for (r, reference) in want.iter().enumerate() {
-            if got.ids[r] == reference.id {
-                worst = worst.max(f64::from((got.logprobs[r] - reference.logprob).abs()));
+            if got.ids[r] != reference.id {
+                see(1e3, r * (stride + 1), got.ids[r] as f32, f64::from(reference.id));
+            } else {
+                let e = f64::from((got.logprobs[r] - reference.logprob).abs());
+                worst = worst.max(e);
+                see(e, r * (stride + 1), got.logprobs[r], f64::from(reference.logprob));
             }
             for j in 0..stride {
                 let (gi, gl) = (got.top_ids[r * stride + j], got.top_logprobs[r * stride + j]);
+                let index = r * (stride + 1) + 1 + j;
                 match reference.top.get(j) {
                     Some(&(wi, wl)) => {
                         if gi != wi {
                             worst = worst.max(1e3);
+                            see(1e3, index, gi as f32, f64::from(wi));
                         } else {
-                            worst = worst.max(f64::from((gl - wl).abs()));
+                            let e = f64::from((gl - wl).abs());
+                            worst = worst.max(e);
+                            see(e, index, gl, f64::from(wl));
                         }
                     }
                     None => {
                         if gi != -1 {
                             worst = worst.max(1e3);
+                            see(1e3, index, gi as f32, -1.0);
                         }
                     }
                 }
             }
+        }
+        if worst > 2e-4 {
+            // the token ids of a wrong draw and of a wrong alternative are reported as "got" / "expected" ids
+            note_worst(worst, at.1, len, at.2, at.3, 1.0);
         }
         Ok(Outcome { device: worst, cpu: 0.0, tol: 2e-4, cpu_tol: 1.0, ms })
     }
@@ -4631,6 +4668,14 @@ mod tests {
             Command::Run(o) => assert_eq!(o.device, "auto"),
             _ => panic!("expected a run"),
         }
+        match parse_args(&args(&["--failures-only", "--only", "kv"])).unwrap() {
+            Command::Run(o) => assert!(o.failures_only && !o.strict),
+            _ => panic!("expected a run"),
+        }
+        match parse_args(&args(&[])).unwrap() {
+            Command::Run(o) => assert!(!o.failures_only),
+            _ => panic!("expected a run"),
+        }
         assert!(matches!(parse_args(&args(&["--list"])).unwrap(), Command::List));
         assert!(matches!(parse_args(&args(&["-h"])).unwrap(), Command::Help));
         assert!(parse_args(&args(&["--device"])).unwrap_err().contains("missing value"));
@@ -4717,6 +4762,22 @@ broken line
         let error = check_expected_skips(path.to_str().unwrap(), &records[1..]).unwrap_err();
         assert!(error.contains("attention bf16: expected 2 skipped, found 1"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_check_with_its_own_error_names_the_worst_element() {
+        let cpu = CpuBackend::new();
+        let filter = Filter::all();
+        let mut t = Tester::new(&cpu, &filter, "exact");
+        t.enter("kv");
+        let err = note_worst(6.5, 3, 10, 1.5, 2.5, 0.5);
+        t.record("kv_write", "x", Ok(Outcome { device: err, cpu: 0.0, tol: 1.0, cpu_tol: 1.0, ms: 0.0 }));
+        let message = t.records[0].message.clone().unwrap_or_default();
+        assert!(message.contains("at element 3 of 10: got 1.5, expected 2.500000e0"), "{message}");
+        let err = note_worst(f64::INFINITY, 7, 10, f32::NAN, 1.0, 1.0);
+        t.record("kv_write", "y", Ok(Outcome { device: err, cpu: 0.0, tol: 1.0, cpu_tol: 1.0, ms: 0.0 }));
+        let message = t.records[1].message.clone().unwrap_or_default();
+        assert!(message.contains("NaN at element 7 of 10"), "{message}");
     }
 
     #[test]
@@ -4807,6 +4868,21 @@ broken line
 
     /// The test checks the CPU backend against itself: a tolerance or reference that is wrong for the CPU backend would be wrong for
     /// every device too. The groups here are the cheap ones.
+    #[test]
+    fn the_checks_hold_for_the_cpu_backend_moe_layers() {
+        let cpu = CpuBackend::new();
+        let filter = Filter::parse(Some("moe"), Some("q4_k")).unwrap();
+        let mut t = Tester::new(&cpu, &filter, "exact");
+        t.run_all();
+        let failed: Vec<String> = t
+            .records
+            .iter()
+            .filter(|r| r.status == Status::Failed)
+            .map(|r| format!("{} {} ({:?}, {:?}): {:?}", r.op, r.shape, r.device_error, r.tolerance, r.message))
+            .collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
     #[test]
     fn the_checks_hold_for_the_cpu_backend() {
         let cpu = CpuBackend::new();
