@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- Helm chart: the size and time of the output cache were written as `6.7108864e+07` and ignored by the server (so the default stayed); they are whole numbers now, and `helm lint` passes. `appVersion` follows the release.
+
 ### Added
 - Settings > Tools (MCP) > "Find servers": search the official MCP registry (registry.modelcontextprotocol.io) or Smithery, and put a hit into the form below with the command (`npx`, `uvx`, `docker`) or the remote address it needs, ready to check and save. The values to fill in (tokens, folders) are listed. Nothing runs before the person saves it.
 - Settings > Skills and schedules > "Find skills on GitHub": type a repository (`owner/repo`, a GitHub address, or the command of a skills directory such as `npx skills add owner/repo`), see its skills with their descriptions and install the ones you want into your skills folder. It needs no account. A link opens the skills.sh directory for browsing, and with a Vercel token (saved on this computer, never shown again) the same card searches the directory and its most installed, trending and hot skills, installs a skill from it and shows the security audits of skills.sh. The front matter reader now understands YAML block values (`description: >`).

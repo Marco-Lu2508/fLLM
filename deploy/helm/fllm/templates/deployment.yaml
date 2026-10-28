@@ -33,8 +33,8 @@ spec:
             - {name: http, containerPort: {{ .Values.service.port }}}
           env:
             - {name: FLLM_OUTPUT_CACHE, value: "{{ if .Values.cache.enabled }}exact{{ else }}off{{ end }}"}
-            - {name: FLLM_OUTPUT_CACHE_BYTES, value: "{{ .Values.cache.bytes }}"}
-            - {name: FLLM_OUTPUT_CACHE_TTL, value: "{{ .Values.cache.ttlSeconds }}"}
+            - {name: FLLM_OUTPUT_CACHE_BYTES, value: "{{ .Values.cache.bytes | int64 }}"}
+            - {name: FLLM_OUTPUT_CACHE_TTL, value: "{{ .Values.cache.ttlSeconds | int64 }}"}
             - {name: FLLM_CACHE_SCOPE, value: "{{ .Values.cache.scope }}"}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
