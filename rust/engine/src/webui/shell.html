@@ -456,6 +456,10 @@
               <span class="ctx-bar"><i id="codeCtxFill"></i></span>
               <span class="tabular" id="codeCtxText">0 / 4096</span>
             </div>
+            <button class="btn-icon" id="btnCodeBrowser" title="Browser: watch and use the page the agent works with" aria-pressed="false">
+              <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>
+              <span class="br-live" id="brLiveDot" hidden></span>
+            </button>
             <button class="btn-icon" id="btnCodeUndo" title="Undo the last file change">
               <svg viewBox="0 0 24 24" class="icon"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
             </button>
@@ -482,6 +486,7 @@
               </div>
             </div>
           </div>
+          <aside class="code-browser" id="codeBrowser" hidden aria-label="Browser"></aside>
           <aside class="code-side" id="codeSide"></aside>
         </div>
       </section>

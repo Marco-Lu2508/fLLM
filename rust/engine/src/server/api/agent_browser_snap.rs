@@ -187,7 +187,7 @@ fn walk(node: &Value, by_id: &HashMap<&str, &Value>, refs: &mut RefMap, depth: u
                 if let Some(url) = property(node, "url") {
                     let url = text_of(url);
                     if !url.is_empty() {
-                        line.push_str(&format!(" href={}", clip(&url, 200)));
+                        line.push_str(&format!(" url={}", clip(&url, 200)));
                     }
                 }
             }
@@ -380,7 +380,7 @@ mod tests {
         let mut refs = RefMap::default();
         let text = format_snapshot(&page(), &mut refs, &SnapshotOptions { title: "Shop", url: "https://example.com/", max_chars: 10_000 });
         let expected = "Page: Shop\nURL: https://example.com/\n\
-- navigation \"Main\"\n  - heading \"Welcome\" [level=1]\n  - link \"Pricing\" href=https://example.com/pricing [ref=1]\n\
+- navigation \"Main\"\n  - heading \"Welcome\" [level=1]\n  - link \"Pricing\" url=https://example.com/pricing [ref=1]\n\
 - form\n  - textbox \"Email\" value=\"me@example.com\" required [ref=2]\n  - checkbox \"Subscribe\" unchecked [ref=3]\n  - button \"Sign up\" [ref=4]\n\
 - text: Free for 30 days.\n\
 [4 interactive elements; use their ref with browser_click, browser_type, browser_scroll]";

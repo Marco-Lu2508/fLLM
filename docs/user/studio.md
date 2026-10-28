@@ -527,6 +527,67 @@ Settings > *Runtime* decides how freely the app may work, and the choice is kept
 
 The agent reads both from the server (`GET /api/studio/runtime`), so page and process cannot disagree.
 
+## The browser
+
+The Code agent can use a real web browser, the way a person does: open a page, read it, click, type, scroll, take a
+screenshot. You watch the same page live in the **Browser** panel of the Code page (the globe button in the header, closed by
+default), can click, type and scroll in it yourself, and can leave comments on elements that the agent then acts on.
+The main use is testing the app the agent is building: it starts the dev server, opens `http://localhost:3000`, clicks through
+it and reads the console errors and failed requests that come back with every result.
+
+**It is off until you switch it on:** Settings > *Browser* > *Let the agent use a browser*. Until then the tools do not even
+appear in the tool list.
+
+How it works: fLLM starts a Chromium-family browser that is already on the computer (Google Chrome, Chromium, Microsoft
+Edge or Brave; Edge is part of Windows) and drives it over the Chrome DevTools Protocol from the server, so it behaves the same
+in the desktop app, in the Studio in a browser tab and in Docker. Nothing is downloaded and no automation framework is
+used. If no browser is found, the tools and the panel say so and name what to install; nothing else is affected. To choose
+one yourself: the environment variable `FLLM_BROWSER` or Settings > *Browser* > *Browser program*.
+
+- **Own profile.** The browser runs with its own profile folder (`browser-profile` inside fLLM's data folder, see
+  [Where fLLM keeps its files](#where-fllm-keeps-its-files)), never with your own browser profile, without extensions and
+  without first-run screens. Cookies stay in that profile between sessions (switch *Keep logins and cookies* off for a
+  throw-away profile each time).
+- **Headless by default.** *Show the browser window* opens a real window instead, for example to log in to a site once; the
+  agent then works with that session. Do this only for sites you are willing to let the agent act on.
+- **The tools** (all in the permission category `network`: they ask first, "Always" allows them for the session, a rule such as
+  `network: localhost*` or `network: *.example.com*` allows or denies by the page the browser is on, deny rules win, turbo skips
+  the questions): `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_select`, `browser_press`,
+  `browser_scroll`, `browser_back`, `browser_screenshot`, `browser_tabs`, `browser_close`.
+  `browser_snapshot` is what a model without vision uses: the page as compact text (title, URL, headings, links, buttons, fields)
+  with a number `[ref=N]` on everything that can be operated; a ref stays the same for the same element while the page stays on
+  the same document. A screenshot is shown in the tool card and, when the loaded model has vision, attached to the conversation
+  (only the newest one is kept); a model without vision gets the text description only.
+- **Waiting.** After opening a page or after a click the tool waits (up to 20 s and 8 s) until the page has loaded and the
+  network is quiet, then returns the new snapshot, console errors, uncaught exceptions, failed requests and HTTP errors.
+  JavaScript dialogs are answered by the server (alerts accepted, the rest dismissed) and reported.
+- **Safety.** Only `http` and `https` pages can be opened; `file:`, `chrome:`, `devtools:`, `view-source:`, `javascript:`,
+  `data:` and other schemes are refused, for navigations of the agent, of you, of links and of redirects. Link-local and
+  cloud-metadata addresses (169.254.x.x and the like) are never reachable. `localhost` is allowed while a workspace is open
+  (the default *local addresses* setting `auto`), the local network (10.x, 172.16-31.x, 192.168.x) only with the setting `all`,
+  and `none` forbids both. A name is resolved and every address it returns is checked, so a name that points to an internal
+  address is refused; because the browser resolves the name again itself, a server that changes its answer between the two
+  lookups is not fully excluded. Every request of a page is checked too: a page from the internet cannot load anything from
+  this machine or your network. Downloads are refused; camera, microphone, location and notification requests are denied.
+- **Only on this computer.** The panel and its controls (`/api/studio/agent/browser/*`) are refused from every other machine,
+  with or without an API key, like the other agent routes: the browser can hold logged-in sessions.
+- **It stops with the server.** The browser is closed when the agent session ends, after 20 minutes without use, when the
+  server stops, and when the server is killed (a process-group watchdog on Linux and macOS, a job object on Windows).
+
+**Taking over and comments.** In the panel you can type an address, go back and forward, reload, and use the page with the
+mouse (click, double click, wheel) and the keyboard (click the picture first; Tab and Enter go to the page, not to the
+Studio). The comment button switches on comment mode: click an element, write what should be done, and *Add comment*. The
+comments (element role, name, text, `ref` and your note) are put in front of your next message to the agent, or sent at once
+with *Send to the agent*.
+
+**What is verified.** Linux with Chromium 156 in Docker (Debian 13), headless: opening a local page, snapshot, typing into a
+field, choosing an option, clicking a button, the page changing, screenshots (PNG), tabs, going back, the refusals above, the
+panel routes, closing, and the browser disappearing when the server is killed. The URL policy, the CDP framing (against a fake
+server), the snapshot and the key mapping have unit tests. **Not verified:** Windows (Edge and Chrome, the job object), macOS,
+the headed window on a real desktop, and the panel in the desktop app. The panel itself was exercised in a real browser
+tab against a running server (see the changelog); keyboard input into the preview from a physical keyboard and an IME was not.
+Only Chromium-family browsers work; Firefox and Safari are not supported.
+
 ## Web search that needs no server
 
 Two engines work the moment the app starts: DuckDuckGo over its HTML endpoint and Wikipedia over its public API — no key, no
@@ -620,7 +681,7 @@ or run it in Docker) and `fllm-rs studio --no-open` does not; `fllm-rs serve` op
 ## Where fLLM keeps its files
 
 fLLM has its own folder (Settings > Models shows the path): `%LOCALAPPDATA%LLM` on Windows, `~/Library/Application Support/fLLM` on macOS and
-`~/.local/share/fllm` elsewhere (`$XDG_DATA_HOME/fllm`). It holds the settings (`studio.json`), `plugins/`, `agents/`, `hooks.json`, notes and prices.
+`~/.local/share/fllm` elsewhere (`$XDG_DATA_HOME/fllm`). It holds the settings (`studio.json`), `plugins/`, `agents/`, `hooks.json`, notes and prices, and for the agent's browser `browser.json` and the profile folder `browser-profile/`.
 `FLLM_HOME` puts it somewhere else. Earlier versions kept these files inside the Hugging Face cache (`~/.cache/huggingface/fllm`); the first start of
 a newer version moves them into the new folder.
 
@@ -644,6 +705,7 @@ The page works in a container the same way. Two things differ:
 - **Settings are kept in a volume.** The images set `FLLM_HOME=/home/fllm/.cache/fllm` and the Compose files mount a volume there (`fllm-data`; the GPU files keep the whole `~/.cache`). Without a volume the
   options saved on the page are gone when the container is removed.
 - **Set an API key.** A container sees every request as coming from another machine (Docker's gateway), so without `FLLM_API_KEY` the page can show things but not change them. With the key (it is an admin key) the page works as on your own computer: enter the key in the page when it asks.
+- **No browser inside.** The agent's browser needs a Chromium-family browser in the container; the images do not contain one (see [docker.md](../docker.md)).
 - **Restarting.** In a container the server starts itself again in place (same process, so the container keeps running). That is what "Restart the server now"
   on Settings > Engine and loading another model do. If that ever fails the process ends and the restart policy of the container (`restart: unless-stopped`,
   Kubernetes' default) starts it again. `FLLM_CONTAINER=1` forces this behaviour where fLLM cannot tell it runs in a container.

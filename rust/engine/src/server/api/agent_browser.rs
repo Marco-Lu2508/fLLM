@@ -297,7 +297,7 @@ fn is_root() -> bool {
 fn guard_child(child: &Child, temp: Option<&Path>) {
     // A shell that outlives the server notices that it is gone and kills the browser's process group (the browser was
     // started as the leader of its own group). It ignores INT/HUP/TERM so that a Ctrl-C in the terminal does not take it down first.
-    let script = r#"trap '' INT HUP TERM; while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done; kill -KILL -- "-$2" 2>/dev/null; if [ -n "$3" ]; then sleep 1; rm -rf "$3"; fi; exit 0"#;
+    let script = r#"trap '' INT HUP TERM; while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done; kill -s KILL -- "-$2" 2>/dev/null; kill -s KILL "$2" 2>/dev/null; if [ -n "$3" ]; then sleep 1; rm -rf "$3"; fi; exit 0"#;
     let watchdog = Command::new("sh")
         .arg("-c")
         .arg(script)
@@ -471,6 +471,11 @@ impl Session {
             Some(c) => matches!(c.try_wait(), Ok(None)),
             None => false,
         }
+    }
+
+    fn current_url(&self) -> String {
+        let st = self.st();
+        st.tabs.get(st.current).map(|t| t.url.clone()).unwrap_or_default()
     }
 
     fn touch(&self) {
@@ -670,7 +675,13 @@ impl Session {
                 st.current = st.tabs.len() - 1;
             }
         }
-        for (method, params) in [
+        // A page that waits for the debugger must not be able to hold the setup up: all commands go out together, each with a short limit.
+        let agent = match self.cmd("Browser.getVersion", json!({}), None).await {
+            // sites that turn headless browsers away look for this word
+            Ok(version) => version["userAgent"].as_str().unwrap_or_default().replace("HeadlessChrome", "Chrome"),
+            Err(_) => String::new(),
+        };
+        let mut setup: Vec<(&str, Value)> = vec![
             ("Page.enable", json!({})),
             ("Runtime.enable", json!({})),
             ("Network.enable", json!({})),
@@ -679,21 +690,15 @@ impl Session {
             ("Accessibility.enable", json!({})),
             ("Fetch.enable", json!({"patterns": [{"urlPattern": "*"}]})),
             ("Emulation.setFocusEmulationEnabled", json!({"enabled": true})),
-        ] {
-            let _ = self.cmd(method, params, Some(&sid)).await;
-        }
+        ];
         if !self.headed {
-            let _ = self
-                .cmd("Emulation.setDeviceMetricsOverride", json!({"width": VIEW_W, "height": VIEW_H, "deviceScaleFactor": 1, "mobile": false}), Some(&sid))
-                .await;
+            setup.push(("Emulation.setDeviceMetricsOverride", json!({"width": VIEW_W, "height": VIEW_H, "deviceScaleFactor": 1, "mobile": false})));
         }
-        if let Ok(version) = self.cmd("Browser.getVersion", json!({}), None).await {
-            // sites that turn headless browsers away look for this word
-            let agent = version["userAgent"].as_str().unwrap_or_default().replace("HeadlessChrome", "Chrome");
-            if !agent.is_empty() {
-                let _ = self.cmd("Network.setUserAgentOverride", json!({"userAgent": agent}), Some(&sid)).await;
-            }
+        if !agent.is_empty() {
+            setup.push(("Network.setUserAgentOverride", json!({"userAgent": agent})));
         }
+        let calls = setup.into_iter().map(|(method, params)| self.cdp.call(method, params, Some(&sid), Duration::from_secs(6)));
+        let _ = futures_util::future::join_all(calls).await;
         self.with_tab(&sid, |t| t.ready = true);
         if waiting {
             let _ = self.cmd("Runtime.runIfWaitingForDebugger", json!({}), Some(&sid)).await;
@@ -744,35 +749,10 @@ impl Session {
     }
 
     async fn verdict(&self, sid: &str, url_text: &str, kind: &str) -> Result<(), String> {
-        let scheme = url_text.split(':').next().unwrap_or_default().to_ascii_lowercase();
-        match scheme.as_str() {
-            // never reach the network or the files
-            "data" | "blob" | "about" | "filesystem" | "chrome-error" => return Ok(()),
-            "http" | "https" | "ws" | "wss" => {}
-            other => {
-                return if kind == "Document" { Err(format!("the scheme '{other}:' is not allowed")) } else { Err(format!("requests to '{other}:' are not allowed")) };
-            }
-        }
-        let url = match reqwest::Url::parse(url_text) {
-            Ok(u) => u,
-            Err(_) => return Ok(()),
-        };
+        let Some(url) = judge_scheme(url_text, kind)? else { return Ok(()) };
         let Some(reach) = self.reach_of_host(&url).await else { return Ok(()) };
-        let policy = self.url_policy();
-        if !policy.allows(reach) {
-            return Err(match reach {
-                Reach::Forbidden => "link-local, metadata and reserved addresses are never reachable".to_owned(),
-                _ => "a local address that the browser settings do not allow".to_owned(),
-            });
-        }
-        // a page from the internet must not reach into this machine or the local network
-        if kind != "Document" && matches!(reach, Reach::Loopback | Reach::Private) {
-            let local_page = self.with_tab(sid, |t| t.main_local).unwrap_or(false);
-            if !local_page {
-                return Err("a page from the internet may not load local addresses".into());
-            }
-        }
-        Ok(())
+        let main_local = self.with_tab(sid, |t| t.main_local).unwrap_or(false);
+        judge_reach(reach, kind, self.url_policy(), main_local)
     }
 
     // ---- helpers of the tools ---------------------------------------------------------------------------------
@@ -1236,6 +1216,46 @@ impl Session {
     }
 }
 
+/// The first half of the decision about a request of a page: `Ok(None)` for what never reaches the network (data and blob
+/// URLs, the empty page), `Ok(Some(url))` for an address whose host still has to be judged, `Err` for a scheme that is refused.
+/// `kind` is the CDP resource type; `Document` is a page or frame being loaded.
+fn judge_scheme(url_text: &str, kind: &str) -> Result<Option<reqwest::Url>, String> {
+    let scheme = url_text.split(':').next().unwrap_or_default().to_ascii_lowercase();
+    match scheme.as_str() {
+        "data" | "blob" | "about" | "filesystem" | "chrome-error" => Ok(None),
+        "http" | "https" | "ws" | "wss" => Ok(reqwest::Url::parse(url_text).ok()),
+        other if kind == "Document" => Err(format!("the scheme '{other}:' is not allowed")),
+        other => Err(format!("requests to '{other}:' are not allowed")),
+    }
+}
+
+/// The second half: what the address leads to, under the settings. A page from the internet (`main_local` false) may not
+/// load subresources from this machine or the local network, whatever the settings say.
+fn judge_reach(reach: Reach, kind: &str, policy: UrlPolicy, main_local: bool) -> Result<(), String> {
+    if !policy.allows(reach) {
+        return Err(match reach {
+            Reach::Forbidden => "link-local, metadata and reserved addresses are never reachable".to_owned(),
+            _ => "a local address that the browser settings do not allow".to_owned(),
+        });
+    }
+    if kind != "Document" && matches!(reach, Reach::Loopback | Reach::Private) && !main_local {
+        return Err("a page from the internet may not load local addresses".into());
+    }
+    Ok(())
+}
+
+/// The scheme for an address typed without one: `http` for `localhost` and IP addresses (dev servers rarely have a certificate),
+/// `https` for everything else.
+fn bare_scheme(text: &str) -> &'static str {
+    let host = text.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = if host.starts_with('[') { host.split(']').next().unwrap_or_default().trim_start_matches('[') } else { host.rsplit_once(':').map_or(host, |(h, _)| h) };
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") || host.parse::<std::net::IpAddr>().is_ok() {
+        "http"
+    } else {
+        "https"
+    }
+}
+
 fn ref_arg(args: &Value) -> Result<u32, String> {
     match args.get("ref") {
         Some(Value::Number(n)) => n.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| "ref has to be a whole number from browser_snapshot".to_owned()),
@@ -1268,6 +1288,7 @@ fn status_json(state: &AppState, settings: &Settings, session: Option<&Arc<Sessi
     json!({
         "settings": settings.to_json(),
         "running": session.is_some(),
+        "url": session.map(|s| s.current_url()),
         "workspace": state.agent.current_root().is_some(),
         "browser": found.as_ref().ok().map(|p| p.display().to_string()),
         "browser_error": found.err(),
@@ -1390,7 +1411,7 @@ pub(in crate::server) async fn input(State(state): State<Arc<AppState>>, Json(bo
             "navigate" => {
                 let text = body.get("url").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
                 // a bare host name is what people type
-                let text = if !text.contains("://") && !text.starts_with("about:") && !text.is_empty() { format!("https://{text}") } else { text };
+                let text = if !text.contains("://") && !text.starts_with("about:") && !text.is_empty() { format!("{}://{text}", bare_scheme(&text)) } else { text };
                 let url = policy::check_url(&text, session.url_policy()).await?;
                 let answer = session.cmd("Page.navigate", json!({"url": url.as_str()}), Some(&sid)).await?;
                 if let Some(error) = answer["errorText"].as_str().filter(|e| !e.is_empty()) {
@@ -1447,6 +1468,50 @@ mod tests {
             }
         }
         assert!(is_tool("browser_click") && !is_tool("browser_hack") && !is_tool("web_fetch"));
+    }
+
+    #[test]
+    fn requests_of_a_page_are_judged_by_scheme_and_by_where_the_page_comes_from() {
+        use super::policy::LocalAddresses::{All, Auto, Off};
+        let pol = |local, workspace| UrlPolicy { local, workspace };
+        // schemes: files and browser pages are never loaded, data and blob never touch the network
+        for url in ["file:///etc/passwd", "chrome://settings", "view-source:https://x.test/", "javascript:alert(1)", "ftp://x.test/", "chrome-extension://abc/p.html"] {
+            assert!(judge_scheme(url, "Document").is_err(), "{url} as a page");
+            assert!(judge_scheme(url, "Image").is_err(), "{url} as a resource");
+        }
+        for url in ["data:text/html,hi", "blob:https://x.test/uuid", "about:blank", "chrome-error://chromewebdata/"] {
+            assert!(judge_scheme(url, "Document").unwrap().is_none(), "{url}");
+        }
+        assert!(judge_scheme("https://example.com/a", "Script").unwrap().is_some());
+        // a page from the internet cannot read from this machine or the local network, even with everything allowed
+        for (reach, name) in [(Reach::Loopback, "loopback"), (Reach::Private, "private")] {
+            assert!(judge_reach(reach, "XHR", pol(All, true), false).is_err(), "{name} resource of a public page");
+            assert!(judge_reach(reach, "Script", pol(All, true), false).is_err());
+            assert!(judge_reach(reach, "Document", pol(All, true), false).is_ok(), "{name} page the user or agent opened on purpose");
+            assert!(judge_reach(reach, "XHR", pol(All, true), true).is_ok(), "{name} resource of a local page");
+        }
+        // the settings still apply to local pages
+        assert!(judge_reach(Reach::Loopback, "XHR", pol(Auto, false), true).is_err(), "no workspace");
+        assert!(judge_reach(Reach::Loopback, "XHR", pol(Auto, true), true).is_ok());
+        assert!(judge_reach(Reach::Loopback, "Document", pol(Off, true), true).is_err());
+        assert!(judge_reach(Reach::Private, "Document", pol(Auto, true), true).is_err());
+        // metadata and link-local never, from anywhere
+        for kind in ["Document", "XHR", "Image"] {
+            for main_local in [true, false] {
+                assert!(judge_reach(Reach::Forbidden, kind, pol(All, true), main_local).is_err());
+            }
+        }
+        assert!(judge_reach(Reach::Public, "Script", pol(Off, false), false).is_ok());
+    }
+
+    #[test]
+    fn an_address_typed_without_a_scheme_gets_http_for_local_hosts_and_https_otherwise() {
+        for local in ["localhost:3000", "localhost", "127.0.0.1:8080/x", "[::1]:5173/", "app.localhost/p", "192.168.1.2"] {
+            assert_eq!(bare_scheme(local), "http", "{local}");
+        }
+        for public in ["example.com", "example.com:8443/a?b=c", "docs.rs/x"] {
+            assert_eq!(bare_scheme(public), "https", "{public}");
+        }
     }
 
     #[test]

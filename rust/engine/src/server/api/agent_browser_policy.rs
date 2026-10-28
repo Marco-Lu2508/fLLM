@@ -427,6 +427,7 @@ pub(super) fn launch_args(profile: &Path, show_window: bool, no_sandbox: bool, w
         "--disable-extensions".to_owned(),
         "--disable-sync".to_owned(),
         "--disable-background-networking".to_owned(),
+        "--disable-breakpad".to_owned(),
         "--disable-component-update".to_owned(),
         "--disable-default-apps".to_owned(),
         "--disable-popup-blocking".to_owned(),

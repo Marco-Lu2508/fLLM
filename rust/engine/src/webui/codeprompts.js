@@ -197,6 +197,11 @@
           ? 'Memory: when you learn a lasting fact (user preference, project convention, a command that works), save it with the memory tool. Do not save secrets or task details.'
           : 'Memory: you have a memory tool. Save durable facts as short entries: the user\'s preferences, conventions of this project, commands that work, mistakes to avoid. Check the list first so you do not duplicate; update or remove entries that became wrong. Never save secrets, and do not save details that only matter for the current task.');
       }
+      if (tools.has('browser_open')) {
+        out.push('', tier === 'compact'
+          ? 'Browser: browser_open opens a page the user can watch, browser_snapshot reads it (every element has a ref), browser_click and browser_type use those refs. Use it to test a dev server (http://localhost:PORT); the result lists console errors. Use web_fetch for plain reading.'
+          : 'Browser: you have a real browser that the user can watch and take over. browser_open opens a page and returns a text snapshot; every element you can operate has a ref number, which browser_click, browser_type, browser_select and browser_scroll take. Refs are only valid for the page they came from: after the page changed, use the refs of the newest result, or read the page again with browser_snapshot. Each result also lists console errors and failed requests of the page. Use the browser to test the app you are building (open the dev server, for example http://localhost:3000, click through it, check the errors) and for pages that need a real browser; for plain reading of documentation web_fetch is cheaper. Use browser_screenshot only when the layout matters. The user can leave comments on elements of the page; they arrive at the start of their message with the ref of the element. Never type a password or secret that the user did not give you.');
+      }
       out.push('', ...FAMILY_NOTES[family]);
       if (opts.env) out.push('', opts.env);
       const instructions = instructionsBlock(opts.files, tier === 'compact' ? 2500 : 9000);
