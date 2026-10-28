@@ -1,0 +1,73 @@
+# A CUDA build of any branch for checking on a real GPU (Google Colab, a rented card) without waiting for a release.
+#
+#   gh workflow run colab-binary.yml -f ref=main            # builds sm_80 (A100), sm_89 (L4) and sm_120 (Blackwell)
+#   gh workflow run colab-binary.yml -f ref=main -f archs="89"   # one architecture: a few minutes
+#
+# The result is published as a pre-release named `colab-latest` (replaced by every run) with `fllm-colab-cuda.tar.gz`; it is a test
+# build and NOT signed or part of the releases. Download on the GPU machine:
+#   curl -L --retry 8 --retry-all-errors -o b.tgz https://github.com/<owner>/<repo>/releases/download/colab-latest/fllm-colab-cuda.tar.gz
+#   tar xzf b.tgz && ./fllm-rs selftest-gpu --device cuda
+name: colab-binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build"
+        required: true
+        default: main
+      archs:
+        description: "CUDA architectures, separated by semicolons"
+        required: true
+        default: "80;89;120"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: CUDA test build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: write
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/.ghcup
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Build (CUDA container)
+        env:
+          RUST_FEATURES: rust-gpu,cuda
+          CUDA_ARCHS: ${{ inputs.archs }}
+        run: ./scripts/release/build-linux-cuda.sh
+
+      - name: Package
+        run: |
+          mkdir pkg
+          cp dist-cuda/fllm-rs pkg/fllm-rs
+          tar -C pkg -czf fllm-colab-cuda.tar.gz fllm-rs
+          sha256sum fllm-colab-cuda.tar.gz | tee fllm-colab-cuda.tar.gz.sha256
+          ls -l fllm-colab-cuda.tar.gz
+
+      - name: Publish as the pre-release colab-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILT_REF: ${{ inputs.ref }}
+          BUILT_ARCHS: ${{ inputs.archs }}
+        run: |
+          sha=$(git rev-parse --short HEAD)
+          gh release delete colab-latest --yes --cleanup-tag || true
+          gh release create colab-latest --prerelease --target "$GITHUB_SHA" \
+            --title "Colab test build" \
+            --notes "Test build of ${BUILT_REF} (${sha}) for CUDA architectures ${BUILT_ARCHS}. Not signed, not a release." \
+            fllm-colab-cuda.tar.gz fllm-colab-cuda.tar.gz.sha256

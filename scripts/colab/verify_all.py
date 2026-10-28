@@ -1099,7 +1099,7 @@ def github_release(tag):
     except urllib.error.HTTPError as exc:
         raise StepFailed("cannot read release '%s' from GitHub (HTTP %d)" % (tag, exc.code))
     if tag == "latest":
-        data = next((r for r in data if not r.get("draft")), None)
+        data = next((r for r in data if not r.get("draft") and not str(r.get("tag_name", "")).startswith("colab-")), None)
         if data is None:
             raise StepFailed("the repository has no release yet")
     return data
