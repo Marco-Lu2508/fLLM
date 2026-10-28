@@ -621,6 +621,29 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
     return rc;
 }
 
+// Packed EXL2 / EXL3 weights (exl.cu): CUDA-core kernels that decode the codes while multiplying. Any pending fused work is flushed first, the
+// activation caches are invalidated (the scratch of EXL3 is the FP16 activation buffer).
+int fllm_cuda_linear_exl(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows, int cols, int batch) {
+    CHECK(cudaSetDevice(st->dev), "cudaSetDevice");
+    if (int e = flush_glu(st)) return e;
+    st->q4z_ready = false;
+    st->fp4_ready = false;
+    st->x16_ready = false;
+    st->x8_ready = false;
+    const size_t need = kind == (int)0x80000031 ? fllm_exl3_scratch_bytes(rows, cols, batch) : 0;
+    if (need > st->x16_bytes) {
+        if (st->capture) {
+            return fllm_set_error("EXL3 linear: scratch buffer must not reallocate during graph capture (needs %zu, has %zu)", need, st->x16_bytes);
+        }
+        CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+        cudaFree(st->x16);
+        st->epoch++;
+        st->x16 = nullptr;
+        st->x16_bytes = (need * 2 + 255) & ~size_t(255);
+        CHECK(cudaMalloc(&st->x16, st->x16_bytes), "cudaMalloc(activation scratch)");
+    }
+    return fllm_exl_launch(st->s, kind, w, x, y, bias, rows, cols, batch, st->x16, st->x16_bytes);
+}
 // Switch the accumulate mode of the Marlin 4-bit GEMM on or off (vLLM fuses the residual add into the norm that follows; here it is
 // the conversion of the FP16 result that does it).
 int fllm_cuda_q4z_accumulate(int on, float scale) {

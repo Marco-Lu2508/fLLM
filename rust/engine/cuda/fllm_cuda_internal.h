@@ -337,6 +337,11 @@ int fllm_shortconv_supported(int hidden, int ksz);
 int fllm_shortconv_launch(cudaStream_t s, const void *runs, int nruns, int hidden, int ksz, size_t state_off, const float *proj,
                           const float *convw, const float *convb, float *out);
 int fllm_softplus_mul_launch(cudaStream_t s, float *x, const float *g, size_t n, float beta);
+// Native EXL2 / EXL3 projections (exl.cu); `kind` is the GGUF type id (0x80000030 / 0x80000031), `w` the blob of rust/gguf-probe/src/exl.rs. EXL3 needs
+// fllm_exl3_scratch_bytes(rows, cols, batch) of device scratch (EXL2 none).
+size_t fllm_exl3_scratch_bytes(int rows, int cols, int batch);
+int fllm_exl_launch(cudaStream_t s, int kind, const void *w, const float *x, float *y, const float *bias, int rows, int cols, int batch,
+                    void *scratch, size_t scratch_bytes);
 // Mamba-1 selective state space layer (mamba1.cu); `runs` points to device memory
 int fllm_ssm_conv_launch(cudaStream_t s, const void *runs, int nruns, const float *proj, int width, int off, const float *convw, const float *convb,
                          float *mixed, int channels, int ksz, size_t state_off, size_t rec_bytes);

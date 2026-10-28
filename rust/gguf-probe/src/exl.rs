@@ -146,7 +146,7 @@ impl Header {
             .checked_mul(h.row_bytes)
             .and_then(|n| n.checked_add(h.data_off))
             .ok_or("EXL tensor size overflow")?;
-        if data_end != h.total || h.data_off % 16 != 0 || h.data_off < HEADER_LEN {
+        if data_end != h.total || !h.data_off.is_multiple_of(16) || h.data_off < HEADER_LEN {
             return Err("EXL tensor data section inconsistent".into());
         }
         Ok(h)
@@ -443,7 +443,7 @@ impl Exl3Layout {
         if !(1..=8).contains(&bits) || codebook > 2 {
             return Err("unsupported EXL3 width or codebook".into());
         }
-        if rows == 0 || cols == 0 || rows % 128 != 0 || cols % 128 != 0 {
+        if rows == 0 || cols == 0 || !rows.is_multiple_of(128) || !cols.is_multiple_of(128) {
             return Err("EXL3 dimensions must be multiples of 128".into());
         }
         let off_a = HEADER_LEN;
@@ -552,7 +552,7 @@ impl<'a> Exl3View<'a> {
         }
         let bits = (header.param & 0xff) as usize;
         let codebook = header.param >> 8;
-        if !(1..=8).contains(&bits) || codebook > 2 || header.rows % 128 != 0 || header.cols % 128 != 0 {
+        if !(1..=8).contains(&bits) || codebook > 2 || !header.rows.is_multiple_of(128) || !header.cols.is_multiple_of(128) {
             return Err("EXL3 tensor parameters invalid".into());
         }
         if header.row_bytes != header.cols / 16 * 32 * bits
@@ -694,12 +694,12 @@ pub fn dequantize(blob: &[u8], type_id: u32, count: usize) -> Result<Vec<f32>, S
 /// A random but valid EXL2 blob (self-tests and unit tests): mixed group widths of 32 or 64 inputs, a random input permutation,
 /// random scale indices. `cols` must be a multiple of 32. `next` yields uniform random numbers.
 pub fn synthetic_exl2(rows: usize, cols: usize, next: &mut dyn FnMut() -> u64) -> Vec<u8> {
-    assert!(cols > 0 && cols % 32 == 0 && rows > 0);
+    assert!(cols > 0 && cols.is_multiple_of(32) && rows > 0);
     const WIDTHS: [usize; 6] = [2, 3, 4, 5, 6, 8];
     let mut groups = Vec::new();
     let mut left = cols;
     while left > 0 {
-        let n = if left >= 64 && next() % 3 == 0 { 64 } else { 32 };
+        let n = if left >= 64 && next().is_multiple_of(3) { 64 } else { 32 };
         groups.push((n, WIDTHS[(next() % 6) as usize]));
         left -= n;
     }

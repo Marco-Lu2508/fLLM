@@ -95,7 +95,7 @@ const QUANT_GROUPS: &[&str] = &["linear", "embedding", "moe", "host"];
 /// Weight formats the self test knows (GGUF type ids; `format_name` gives the names).
 const KINDS: &[u32] = &[
     0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
-    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021,
+    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021, 0x8000_0030, 0x8000_0031,
 ];
 
 /// Lower case without separators: `Q4_K` and `q4-k` are the same name.
@@ -1301,6 +1301,26 @@ impl<'a> Tester<'a> {
                     &format!("384x1024 batch {batch}{}", if with_bias { " +bias" } else { "" }),
                     r,
                 );
+            }
+        }
+        // packed ExLlamaV2 / ExLlamaV3 matrices (native kernels; backends without them expand at upload and still have to agree): EXL2 widths
+        // are multiples of 32 (33 groups here: an odd count, mixed widths, codes straddling words), EXL3 rows and columns multiples of 128;
+        // batches above 128 take several passes of the EXL3 kernels
+        for kind in self.kinds(&[0x8000_0030u32, 0x8000_0031]) {
+            let shapes: &[(usize, usize)] = if kind == 0x8000_0030 { &[(131, 1056), (40, 96)] } else { &[(384, 1024), (128, 384)] };
+            for &(rows, cols) in shapes {
+                for batch in [1usize, 2, 3, 4, 5, 8, 16, 17, 40, 129, 356] {
+                    let with_bias = batch == 3 || batch == 129;
+                    let r = self.linear(kind, rows, cols, batch, with_bias).map(|mut o| {
+                        o.tol = o.tol.max(Self::FAST_TOL);
+                        o
+                    });
+                    self.record(
+                        &format!("fast linear {}", format_name(kind)),
+                        &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }),
+                        r,
+                    );
+                }
             }
         }
         // 8-bit FP8 weights (Marlin GEMM): rows and columns multiples of 128

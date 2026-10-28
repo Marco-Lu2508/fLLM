@@ -42,11 +42,11 @@ pub(crate) fn validate(blob: &[u8], kind: u32, rows: usize, cols: usize) -> Resu
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     let mut lanes = [0f32; 8];
-    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
-    let tail: f32 = ca.remainder().iter().zip(cb.remainder()).map(|(x, y)| x * y).sum();
-    for (x, y) in ca.zip(cb) {
-        for i in 0..8 {
-            lanes[i] += x[i] * y[i];
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    for (x, y) in ca.iter().zip(cb) {
+        for ((lane, &p), &q) in lanes.iter_mut().zip(x).zip(y) {
+            *lane += p * q;
         }
     }
     lanes.iter().sum::<f32>() + tail
@@ -125,7 +125,7 @@ fn exl3(blob: &[u8], input: &[f32], rows: usize, cols: usize, batch: usize) -> R
         for (value, s) in token.iter_mut().zip(&suh) {
             *value *= s;
         }
-        for block in token.chunks_exact_mut(128) {
+        for block in token.as_chunks_mut::<128>().0 {
             exl::hadamard128(block);
         }
     });
@@ -160,7 +160,7 @@ fn exl3(blob: &[u8], input: &[f32], rows: usize, cols: usize, batch: usize) -> R
     // y = svh * H z on every 128-block, scattered to the output rows
     let mut out = vec![0f32; batch * rows];
     for (zt, ot) in z.chunks_exact_mut(rows).zip(out.chunks_exact_mut(rows)) {
-        for (base, block) in zt.chunks_exact_mut(128).enumerate() {
+        for (base, block) in zt.as_chunks_mut::<128>().0.iter_mut().enumerate() {
             exl::hadamard128(block);
             for (o, &value) in block.iter().enumerate() {
                 let source = base * 128 + o;
@@ -247,3 +247,6 @@ mod tests {
         assert!(linear(&blob[..blob.len() - 4], EXL2_TYPE, &[0.0; 32], 8, 32, None).is_err());
     }
 }
+
+#[cfg(test)]
+mod mirror_tests;
