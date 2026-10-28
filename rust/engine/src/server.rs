@@ -64,6 +64,8 @@ struct Metrics {
     requests: AtomicU64,
     generated_tokens: AtomicU64,
     forward_calls: AtomicU64,
+    forced_tokens: AtomicU64,
+    jumps: AtomicU64,
     rows_total: AtomicU64,
     multi_row_calls: AtomicU64,
     max_rows: AtomicU64,
@@ -387,6 +389,8 @@ pub struct ServerConfig {
     pub tool_parser: Option<String>,
     /// --reasoning-parser: a reasoning format id, or auto/absent to choose from the chat template.
     pub reasoning_parser: Option<String>,
+    /// Jump-forward decoding of grammar-constrained requests (`--no-jump-forward`, `FLLM_JUMP_FORWARD=off`).
+    pub jump_forward: bool,
 }
 
 /// Temperature of an OpenAI-style request that sets none and whose model ships no `generation_config.json` sampling
@@ -408,6 +412,7 @@ struct Built {
     router: Router,
     worker_rx: std_mpsc::Receiver<WorkerCommand>,
     metrics: Arc<Metrics>,
+    jump_forward: Option<Arc<crate::structured::JumpForward>>,
 }
 
 fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerConfig) -> Result<Built, String> {
@@ -433,6 +438,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         requests: AtomicU64::new(0),
         generated_tokens: AtomicU64::new(0),
         forward_calls: AtomicU64::new(0),
+        forced_tokens: AtomicU64::new(0),
+        jumps: AtomicU64::new(0),
         rows_total: AtomicU64::new(0),
         multi_row_calls: AtomicU64::new(0),
         max_rows: AtomicU64::new(0),
@@ -450,6 +457,14 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
     server_metrics.observability.set_model_name(&config.model_name);
     let (worker_tx, worker_rx) = std_mpsc::channel::<WorkerCommand>();
     let grammar_factory = Arc::new(tokenizer.grammar_factory()?);
+    let tokenizer = Arc::new(tokenizer);
+    let jump_forward = config.jump_forward.then(|| {
+        let encoder = tokenizer.clone();
+        Arc::new(crate::structured::JumpForward::new(
+            grammar_factory.tok_env().clone(),
+            Some(Box::new(move |text: &str| encoder.encode_plain(text).ok())),
+        ))
+    });
     let tool_parser = crate::tool_parsers::select(&model_arch, &format!("{chat_template}\n{tool_chat_template}"), config.tool_parser.as_deref())?;
     let reasoning_family = Family::select(&chat_template, config.reasoning_parser.as_deref())?;
     let thinking = crate::thinking::ThinkingCaps::detect(&chat_template, reasoning_family, &model_arch);
@@ -482,7 +497,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         tool_parser,
         reasoning_family,
         thinking,
-        tokenizer: Arc::new(tokenizer),
+        tokenizer,
         grammar_factory,
         worker: worker_tx,
         next_request: AtomicU64::new(1),
@@ -684,17 +699,18 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .layer(axum::middleware::from_fn_with_state(server_metrics.observability.clone(), crate::metrics::observe))
         .layer(axum::middleware::from_fn_with_state(http_context, http::layer))
         .with_state(state.clone());
-    Ok(Built { state, router, worker_rx, metrics: server_metrics })
+    Ok(Built { state, router, worker_rx, metrics: server_metrics, jump_forward })
 }
 
 pub fn serve(
-    runtime: InferenceRuntime,
+    mut runtime: InferenceRuntime,
     tokenizer: TokenizerBundle,
     config: ServerConfig,
 ) -> Result<(), String> {
     let address = listen_address(&config.host, config.port)?;
     let tls = config.http.tls_cert.is_some();
-    let Built { state, router, worker_rx, metrics } = build(&runtime, tokenizer, config)?;
+    let Built { state, router, worker_rx, metrics, jump_forward } = build(&runtime, tokenizer, config)?;
+    runtime.set_jump_forward(jump_forward);
     let ready = state.ready.clone();
     let context = state.http.clone();
     api::studio_ops::spawn_idle_unload(state.metrics.clone());
@@ -915,6 +931,8 @@ fn run_worker_loop(
                     (stats.forward_calls - previous_stats.forward_calls) as u64,
                     Ordering::Relaxed,
                 );
+                metrics.forced_tokens.fetch_add((stats.forced_tokens - previous_stats.forced_tokens) as u64, Ordering::Relaxed);
+                metrics.jumps.fetch_add((stats.jumps - previous_stats.jumps) as u64, Ordering::Relaxed);
                 metrics.rows_total.fetch_add(
                     (stats.rows_total - previous_stats.rows_total) as u64,
                     Ordering::Relaxed,

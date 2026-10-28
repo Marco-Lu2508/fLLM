@@ -59,6 +59,121 @@ pub fn matcher(factory: &ParserFactory, grammar: TopLevelGrammar) -> Result<Matc
     Ok(matcher)
 }
 
+/// Jump-forward decoding (the "compressed finite state machine" idea of SGLang).
+///
+/// Where the grammar allows exactly one continuation for the next several bytes (the fixed keys, quotes and punctuation of a JSON
+/// schema, a literal in a Lark rule), the engine does not need the model to choose them. `plan` asks the grammar for those forced
+/// bytes, turns them into tokens and consumes them in the grammar; the runtime then appends the tokens and lets the model process
+/// all of them in one forward pass (a prefill chunk) instead of one pass per token.
+///
+/// Rules that keep the output valid and, where possible, identical to token-by-token decoding:
+///
+/// 1. Nothing is forced when the grammar currently accepts (end of sequence is an alternative) or has stopped, and a jump stops at
+///    the first token after which the grammar accepts.
+/// 2. Only bytes the grammar itself forces (`Matcher::compute_ff_bytes`) are turned into tokens, the bytes of the chosen tokens
+///    must spell exactly those bytes (checked, never assumed), and the tokens are validated against the grammar before use.
+/// 3. With a vocabulary of single-byte tokens a byte string has exactly one tokenisation, so a forced byte is also the only token
+///    the mask would allow: the result is token for token identical to decoding without jump-forward, and no random number is
+///    spent on it (a one-element distribution draws none).
+/// 4. With multi-byte tokens the forced text is tokenised canonically together with the token that precedes it (the tokenisation
+///    must keep that token as its first token, otherwise the greedy longest match of the vocabulary is used), and the last token of
+///    the forced text is not jumped over: it may merge with whatever the model writes next. Its bytes stay forced, so the next
+///    sampled token has to start with them (token healing, the way llguidance treats forced bytes). The text is still the same
+///    text; the token sequence may differ from what token-by-token sampling would have produced.
+pub struct JumpForward {
+    env: llguidance::toktrie::TokEnv,
+    canonical: Option<CanonicalEncoder>,
+    multi_byte: bool,
+}
+
+/// Whether jump-forward decoding is on unless a flag says otherwise: it is, except when `FLLM_JUMP_FORWARD` is `off`, `0`, `no` or
+/// `false` (`--no-jump-forward` turns it off on the command line).
+pub fn jump_forward_default() -> bool {
+    !matches!(std::env::var("FLLM_JUMP_FORWARD").unwrap_or_default().trim().to_ascii_lowercase().as_str(), "off" | "0" | "no" | "false")
+}
+
+/// Encodes plain text (no BOS, no special tokens) with the model's tokenizer.
+pub type CanonicalEncoder = Box<dyn Fn(&str) -> Option<Vec<u32>> + Send + Sync>;
+
+impl JumpForward {
+    /// Without `canonical` the greedy longest match over the vocabulary tokenises forced text.
+    pub fn new(env: llguidance::toktrie::TokEnv, canonical: Option<CanonicalEncoder>) -> Self {
+        let trie = env.tok_trie();
+        let multi_byte = (0..trie.vocab_size() as u32).any(|id| !trie.is_special_token(id) && trie.token_len(id) > 1);
+        Self { env, canonical, multi_byte }
+    }
+
+    /// Whether forced text can be tokenised in more than one way (some token spans several bytes).
+    pub fn multi_byte(&self) -> bool {
+        self.multi_byte
+    }
+
+    /// Number of leading `tokens` that spell the start of `bytes` exactly.
+    fn spelled_prefix(&self, tokens: &[u32], bytes: &[u8]) -> usize {
+        let trie = self.env.tok_trie();
+        let mut at = 0;
+        for (i, &t) in tokens.iter().enumerate() {
+            let piece = trie.token(t);
+            if trie.is_special_token(t) || piece.is_empty() || bytes.get(at..at + piece.len()) != Some(piece) {
+                return i;
+            }
+            at += piece.len();
+        }
+        tokens.len()
+    }
+
+    /// Tokens that spell the start of the forced `bytes` which follow the sampled token `last`.
+    fn cover(&self, last: u32, bytes: &[u8]) -> Vec<u32> {
+        let trie = self.env.tok_trie();
+        if let (true, Some(encode), false) = (self.multi_byte, &self.canonical, trie.is_special_token(last)) {
+            let mut context = trie.token(last).to_vec();
+            context.extend_from_slice(bytes);
+            if let Some(ids) = std::str::from_utf8(&context).ok().and_then(encode) {
+                if ids.first() == Some(&last) {
+                    let rest = &ids[1..];
+                    if self.spelled_prefix(rest, bytes) == rest.len() && rest.iter().map(|&t| trie.token_len(t)).sum::<usize>() == bytes.len() {
+                        return rest.to_vec();
+                    }
+                }
+            }
+        }
+        let greedy = trie.greedy_tokenize(bytes);
+        let n = self.spelled_prefix(&greedy, bytes);
+        greedy[..n].to_vec()
+    }
+
+    /// The tokens the grammar forces next, already consumed by `matcher`, at most `budget` of them. Empty when nothing is forced
+    /// or when it is not safe to jump; the matcher is then where plain decoding would find it, except that forced bytes may be
+    /// pending as the prefix of the next token (rule 4).
+    pub fn plan(&self, matcher: &mut Matcher, last: u32, budget: usize) -> Vec<u32> {
+        if budget == 0 || matcher.is_stopped() || !matches!(matcher.is_accepting(), Ok(false)) {
+            return Vec::new();
+        }
+        let forced = matcher.compute_ff_bytes();
+        if forced.is_empty() {
+            return Vec::new();
+        }
+        let mut tokens = self.cover(last, &forced);
+        if self.multi_byte {
+            tokens.pop();
+        }
+        tokens.truncate(budget);
+        let valid = matcher.validate_tokens(&tokens).unwrap_or(0);
+        tokens.truncate(valid);
+        let mut taken = Vec::with_capacity(tokens.len());
+        for t in tokens {
+            if matcher.consume_token(t).is_err() {
+                break;
+            }
+            taken.push(t);
+            if matcher.is_stopped() || !matches!(matcher.is_accepting(), Ok(false)) {
+                break;
+            }
+        }
+        taken
+    }
+}
+
 /// Translate the regular CFG subset shared by GBNF and Lark. Unsupported constructs
 /// fail at compilation rather than being accepted as an unconstrained request.
 fn gbnf_to_lark(text: &str) -> Result<String, String> {

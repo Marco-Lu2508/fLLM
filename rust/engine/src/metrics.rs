@@ -69,6 +69,8 @@ pub struct Metrics {
     processed: AtomicU64,
     generated: AtomicU64,
     mtp_proposed: AtomicU64,
+    jump_tokens: AtomicU64,
+    jump_steps: AtomicU64,
     mtp_accepted: AtomicU64,
     spec_steps: AtomicU64,
     spec_proposed: AtomicU64,
@@ -109,6 +111,8 @@ impl Metrics {
             processed: AtomicU64::new(0),
             generated: AtomicU64::new(0),
             mtp_proposed: AtomicU64::new(0),
+            jump_tokens: AtomicU64::new(0),
+            jump_steps: AtomicU64::new(0),
             mtp_accepted: AtomicU64::new(0),
             spec_steps: AtomicU64::new(0),
             spec_proposed: AtomicU64::new(0),
@@ -214,6 +218,11 @@ impl Metrics {
     }
     pub fn dequeue(&self) {
         self.queued.fetch_sub(1, Relaxed);
+    }
+    /// One jump-forward step that appended `forced` grammar-forced tokens without sampling them.
+    pub fn jump_forward(&self, forced: usize) {
+        self.jump_tokens.fetch_add(forced as u64, Relaxed);
+        self.jump_steps.fetch_add(1, Relaxed);
     }
     pub fn mtp_proposed(&self, n: usize) {
         self.mtp_proposed.fetch_add(n as u64, Relaxed);
@@ -348,6 +357,12 @@ impl Metrics {
                 "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}"
             );
         }
+        let _ = writeln!(out, "# HELP fllm_jump_forward_tokens_total Tokens forced by a grammar and appended without a forward pass of their own (counted in completion tokens)
+# TYPE fllm_jump_forward_tokens_total counter
+fllm_jump_forward_tokens_total {}
+# HELP fllm_jump_forward_steps_total Jump-forward steps (one forward pass each covers all tokens forced at that point)
+# TYPE fllm_jump_forward_steps_total counter
+fllm_jump_forward_steps_total {}", self.jump_tokens.load(Relaxed), self.jump_steps.load(Relaxed));
         let proposed = self.mtp_proposed.load(Relaxed);
         let accepted = self.mtp_accepted.load(Relaxed);
         let _ = writeln!(out, "# HELP fllm_mtp_proposed_tokens_total MTP candidates actually scheduled for target verification\n# TYPE fllm_mtp_proposed_tokens_total counter\nfllm_mtp_proposed_tokens_total {proposed}\n# HELP fllm_mtp_accepted_tokens_total MTP candidates accepted by the target\n# TYPE fllm_mtp_accepted_tokens_total counter\nfllm_mtp_accepted_tokens_total {accepted}\n# HELP fllm_mtp_acceptance_ratio Accepted MTP candidates divided by proposed candidates\n# TYPE fllm_mtp_acceptance_ratio gauge\nfllm_mtp_acceptance_ratio {:.6}", if proposed == 0 { 0.0 } else { accepted as f64 / proposed as f64 });
