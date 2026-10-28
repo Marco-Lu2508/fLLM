@@ -346,7 +346,7 @@ fn guard_child(child: &Child, _temp: Option<&Path>) {
     if job != 0 {
         // SAFETY: both handles are valid; the child handle belongs to `child`.
         unsafe {
-            AssignProcessToJobObject(job as *mut std::ffi::c_void, child.as_raw_handle() as *mut std::ffi::c_void);
+            AssignProcessToJobObject(job as *mut std::ffi::c_void, child.as_raw_handle());
         }
     }
 }
