@@ -589,3 +589,109 @@ pub(crate) fn append_converted(out: &mut Vec<u8>, dtype: &str, v: f32) -> io::Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod fp8b_tests {
+    use super::*;
+    use crate::symint::Fp8Block;
+
+    fn payload(data: Vec<u8>) -> Payload {
+        let len = data.len();
+        Payload::Owned(Arc::new(data), 0..len)
+    }
+
+    fn f32s(bytes: &[u8]) -> Vec<f32> {
+        bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
+    }
+
+    /// A 4 x 3 matrix with 2 x 2 tiles (grid 2 x 2, scales 1 2 / 3 4) written with the row order `order`.
+    fn written(order: Option<Vec<usize>>) -> Result<(Vec<u8>, Vec<u8>), io::Error> {
+        let codes: Vec<u8> = (0..12).map(|i| 0x30 + i as u8).collect();
+        let block = Fp8Block::new(payload(codes.clone()), vec![1.0, 2.0, 3.0, 4.0], 4, 3, 2, 2).unwrap();
+        let id = fllm_gguf_probe::fp8b_type_id(2, 2).unwrap();
+        let layout = fllm_gguf_probe::Fp8bLayout::new(id, 3, 4, 1).unwrap();
+        let t = OutTensor {
+            name: "w.weight".into(),
+            dims: vec![3, 4],
+            source_dtype: "F32".into(),
+            dtype: crate::packed_quant::fp8b_dtype_name(id),
+            data: payload(Vec::new()),
+            packed: Some(Arc::new(PackedData::Fp8Block(block))),
+            data_len: layout.total_len() as u64,
+            source_for_output: order,
+            add: 0.0,
+            owned: None,
+            parts: Vec::new(),
+        };
+        let mut out = Vec::new();
+        let n = write_tensor(&mut out, &t)?;
+        assert_eq!(n as usize, layout.total_len());
+        Ok((codes, out))
+    }
+
+    #[test]
+    fn the_writer_stores_codes_f32_scales_and_the_trailer() {
+        let (codes, out) = written(None).unwrap();
+        assert_eq!(&out[..12], &codes[..]);
+        assert_eq!(f32s(&out[12..28]), [1.0, 2.0, 3.0, 4.0]);
+        let id = fllm_gguf_probe::fp8b_type_id(2, 2).unwrap();
+        assert_eq!(&out[28..], &fllm_gguf_probe::Fp8bLayout::new(id, 3, 4, 1).unwrap().trailer());
+    }
+
+    #[test]
+    fn a_row_permutation_of_whole_tile_rows_permutes_the_scale_rows() {
+        let (codes, out) = written(Some(vec![2, 3, 0, 1])).unwrap();
+        assert_eq!(&out[..12], &[&codes[6..], &codes[..6]].concat()[..]);
+        assert_eq!(f32s(&out[12..28]), [3.0, 4.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_row_permutation_inside_the_tile_rows_keeps_the_scales_in_place() {
+        let (codes, out) = written(Some(vec![1, 0, 3, 2])).unwrap();
+        assert_eq!(&out[..3], &codes[3..6]);
+        assert_eq!(&out[3..6], &codes[..3]);
+        assert_eq!(f32s(&out[12..28]), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn a_row_permutation_that_cuts_tile_rows_is_refused() {
+        assert!(written(Some(vec![1, 2, 0, 3])).is_err());
+        assert!(crate::packed_quant::fp8b_tile_row_map(&[1, 2, 0, 3], 4, 2).is_none());
+        assert_eq!(crate::packed_quant::fp8b_tile_row_map(&[2, 3, 0, 1], 4, 2), Some(vec![1, 0]));
+        // a partial last tile row cannot swap places with a full one
+        assert!(crate::packed_quant::fp8b_tile_row_map(&[2, 0, 1], 3, 2).is_none());
+        assert_eq!(crate::packed_quant::fp8b_tile_row_map(&[1, 0, 2], 3, 2), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn stacked_experts_are_written_matrix_after_matrix_with_their_own_scales() {
+        let id = fllm_gguf_probe::fp8b_type_id(2, 2).unwrap();
+        let layout = fllm_gguf_probe::Fp8bLayout::new(id, 3, 4, 3).unwrap();
+        let mut parts = Vec::new();
+        let mut want_codes = Vec::new();
+        for e in 0..3u8 {
+            let codes: Vec<u8> = (0..12).map(|i| e * 20 + i as u8).collect();
+            want_codes.extend_from_slice(&codes);
+            let scales = (0..4).map(|i| f32::from(e) * 10.0 + i as f32).collect();
+            parts.push(PackedData::Fp8Block(Fp8Block::new(payload(codes), scales, 4, 3, 2, 2).unwrap()));
+        }
+        let t = OutTensor {
+            name: "w_exps.weight".into(),
+            dims: vec![3, 4, 3],
+            source_dtype: "F32".into(),
+            dtype: crate::packed_quant::fp8b_dtype_name(id),
+            data: payload(Vec::new()),
+            packed: Some(Arc::new(PackedData::Concat { parts, elements: 36, part_rows: 4 })),
+            data_len: layout.total_len() as u64,
+            source_for_output: None,
+            add: 0.0,
+            owned: None,
+            parts: Vec::new(),
+        };
+        let mut out = Vec::new();
+        assert_eq!(write_tensor(&mut out, &t).unwrap() as usize, layout.total_len());
+        assert_eq!(&out[..36], &want_codes[..]);
+        assert_eq!(f32s(&out[36..84]), [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0]);
+        assert_eq!(fllm_gguf_probe::Fp8bLayout::parse(id, &out).unwrap(), layout);
+    }
+}

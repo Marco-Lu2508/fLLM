@@ -847,6 +847,56 @@ impl AsRef<[u8]> for TensorBytes {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fp8b_type_ids_round_trip_and_describe_the_tile() {
+        assert_eq!(fp8b_shape(0x8000_0021), Some((128, 128)));
+        assert_eq!(fp8b_type_id(128, 128), Some(0x8000_0021));
+        for (rows, cols) in [(1, 1), (1, 128), (16, 16), (32, 32), (64, 8), (128, 32), (256, 64), (32768, 32768)] {
+            let id = fp8b_type_id(rows, cols).unwrap();
+            assert_eq!(fp8b_shape(id), Some((rows, cols)), "{rows}x{cols}");
+            assert!(fp8b_type(id));
+        }
+        assert_eq!(fp8b_type_id(48, 48), None, "not a power of two");
+        assert_eq!(fp8b_type_id(65536, 1), None, "tile above 32768");
+        assert_eq!(fp8b_type_id(0, 1), None);
+        // neighbours in the id space are not FP8B types
+        for id in [0x8000_0020, 0x8000_0022, 0x8000_00ff, 0x8000_0200, 0x8000_0030, 0x8001_0000, 40] {
+            assert!(!fp8b_type(id), "{id:#x}");
+        }
+    }
+
+    #[test]
+    fn fp8b_payload_length_counts_codes_scales_and_trailer() {
+        // GGUF dimensions are [columns, rows, matrices...]
+        let id = fp8b_type_id(128, 128).unwrap();
+        assert_eq!(tensor_payload_len(id, &[130, 129]).unwrap(), 130 * 129 + 2 * 2 * 4 + 16);
+        assert_eq!(tensor_payload_len(id, &[64, 128, 6]).unwrap(), 6 * 64 * 128 + 6 * 4 + 16, "six experts of one partial tile each");
+        let small = fp8b_type_id(32, 16).unwrap();
+        assert_eq!(tensor_payload_len(small, &[40, 70, 3]).unwrap(), 3 * 40 * 70 + 3 * 3 * 3 * 4 + 16);
+        let layout = Fp8bLayout::from_dims(small, &[40, 70, 3]).unwrap();
+        assert_eq!((layout.tile_cols(), layout.tiles_per_slab(), layout.tiles(), layout.scale_offset()), (3, 9, 27, 8400));
+    }
+
+    #[test]
+    fn fp8b_trailer_round_trips_and_rejects_other_bytes() {
+        let id = fp8b_type_id(8, 4).unwrap();
+        let layout = Fp8bLayout::new(id, 10, 9, 2).unwrap();
+        let mut bytes = vec![0u8; layout.total_len() - FP8B_TRAILER];
+        bytes.extend_from_slice(&layout.trailer());
+        assert_eq!(Fp8bLayout::parse(id, &bytes).unwrap(), layout);
+        // the length has to agree with the geometry in the trailer, the type has to be an FP8B type
+        assert!(Fp8bLayout::parse(id, &bytes[1..]).is_err());
+        assert!(Fp8bLayout::parse(8, &bytes).is_err());
+        let mut other = bytes.clone();
+        let at = other.len() - FP8B_TRAILER;
+        other[at] = b'X';
+        assert!(Fp8bLayout::parse(id, &other).is_err());
+        let mut wrong_shape = bytes;
+        let n = wrong_shape.len();
+        wrong_shape[n - 4..].copy_from_slice(&3u32.to_le_bytes());
+        assert!(Fp8bLayout::parse(id, &wrong_shape).is_err(), "matrices 3 instead of 2");
+    }
+
     fn put_u32(out: &mut Vec<u8>, v: u32) {
         out.extend_from_slice(&v.to_le_bytes());
     }
