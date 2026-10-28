@@ -505,6 +505,31 @@ async fn jump_forward_matches_plain_decoding_and_needs_fewer_forward_passes() {
     )
     .await;
     assert!(forced > 0 && with <= without);
+
+    // four constrained requests in one batch (jump-forward steps of one sequence share forward passes with the others) and a
+    // streamed one give the texts the sequential runs without jump-forward gave
+    let (off, on) = jump_pair();
+    let request = |seed: u64| merge_into(schema_format(with_compact(nested.clone())), json!({"max_tokens": 160, "temperature": 1.0, "seed": seed}));
+    let (r0, r1, r2, r3) = tokio::join!(on.chat(request(20)), on.chat(request(21)), on.chat(request(22)), on.chat(request(23)));
+    for (seed, together) in [(20, r0), (21, r1), (22, r2), (23, r3)] {
+        let alone = off.chat(request(seed)).await;
+        assert_eq!(together.json()["choices"][0]["message"]["content"], alone.json()["choices"][0]["message"]["content"], "seed {seed}");
+        assert_eq!(together.json()["usage"], alone.json()["usage"], "seed {seed}");
+    }
+    let streamed = on.chat(merge_into(request(24), json!({"stream": true}))).await;
+    let text: String = streamed.chunks().iter().filter_map(|c| c["choices"][0]["delta"]["content"].as_str()).collect();
+    let alone = off.chat(request(24)).await;
+    assert_eq!(text, alone.json()["choices"][0]["message"]["content"].as_str().unwrap());
+
+    // the counters are exported
+    let exported = on.get("/metrics").await.text();
+    let value = |name: &str| -> u64 {
+        exported.lines().find_map(|l| l.strip_prefix(name).and_then(|v| v.trim().parse().ok())).unwrap_or_else(|| panic!("{name} missing"))
+    };
+    assert!(value("fllm_jump_forward_tokens_total ") > 0 && value("fllm_jump_forward_steps_total ") > 0);
+    assert_eq!(value("fllm_jump_forward_tokens_total "), jump_counters(on).1);
+    let exported_off = off.get("/metrics").await.text();
+    assert!(exported_off.contains("fllm_jump_forward_tokens_total 0"));
 }
 
 fn merge_into(mut target: Value, extra: Value) -> Value {

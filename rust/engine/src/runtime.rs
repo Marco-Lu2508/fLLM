@@ -2055,6 +2055,8 @@ impl InferenceRuntime {
                 if let Some(last) = events.last_mut() {
                     last.request_finished = done;
                 }
+            } else if let Some(&last_token) = emitted.last() {
+                self.jump_forward_after(sid, last_token, &mut events)?;
             }
         }
         if had_verify {

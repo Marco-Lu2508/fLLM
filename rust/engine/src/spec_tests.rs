@@ -394,3 +394,56 @@ fn grammar_constrained_requests_speculate_and_stay_inside_the_grammar() {
     assert_eq!(constrained(&mut drafted, "draft", 30), plain);
     assert!(drafted.speculative_status().2.steps > 0);
 }
+
+/// Like `constrained`, for a GBNF grammar, with jump-forward decoding on or off. Returns the tokens and the runtime's stats.
+fn constrained_jump(rt: &mut InferenceRuntime, id: &str, grammar: &str, jump: bool) -> (Vec<i64>, crate::runtime::BatchStats) {
+    let model = load();
+    let tokenizer = crate::tokenizer::TokenizerBundle::from_gguf(model.mapping()).unwrap();
+    let factory = tokenizer.grammar_factory().unwrap();
+    rt.set_jump_forward(jump.then(|| std::sync::Arc::new(crate::structured::JumpForward::new(factory.tok_env().clone(), None))));
+    let grammar = crate::structured::request_grammar(&serde_json::json!({ "grammar": grammar })).unwrap().unwrap();
+    let matcher = crate::structured::matcher(&factory, grammar).unwrap();
+    let sid = rt.submit_with_sampling(id.into(), PROMPT.to_vec(), 40, SamplingParams::default()).unwrap();
+    rt.set_constraint(sid, matcher).unwrap();
+    let mut out = Vec::new();
+    for _ in 0..10_000 {
+        let mut done = false;
+        for e in rt.step().unwrap() {
+            if e.request_id == id {
+                out.push(e.token_id);
+                done |= e.request_finished;
+            }
+        }
+        if done {
+            return (out, rt.batch_stats());
+        }
+    }
+    panic!("no progress");
+}
+
+#[test]
+fn jump_forward_keeps_the_tokens_and_steps_aside_for_draft_models() {
+    let grammar = r#"root ::= "t5" ("t9" | "t6") "t7t7t7" ("t5" | "t9")"#;
+    let make = |lookup: usize| {
+        let mut rt = InferenceRuntime::with_speculative(load(), 4, 64, vec![2], lookup, 8).unwrap();
+        rt.attach_compute("cpu").unwrap();
+        rt
+    };
+    let (plain, stats) = constrained_jump(&mut make(0), "plain", grammar, false);
+    assert_eq!(stats.forced_tokens, 0);
+    assert!(plain.len() >= 6, "{plain:?}");
+    let (jumped, jump_stats) = constrained_jump(&mut make(0), "jump", grammar, true);
+    assert_eq!(jumped, plain);
+    assert!(jump_stats.forced_tokens > 0 && jump_stats.forward_calls < stats.forward_calls, "{jump_stats:?} vs {stats:?}");
+    // with n-gram drafts attached
+    let (with_lookup, lookup_stats) = constrained_jump(&mut make(4), "lookup", grammar, true);
+    assert_eq!(with_lookup, plain);
+    assert!(lookup_stats.forced_tokens > 0);
+    // a draft model keeps per-token state of its own: the engine does not jump, and the tokens are still the same
+    let mut drafted = make(0);
+    drafted.enable_draft(load(), 3).unwrap();
+    drafted.attach_compute("cpu").unwrap();
+    let (with_draft, draft_stats) = constrained_jump(&mut drafted, "draft", grammar, true);
+    assert_eq!(with_draft, plain);
+    assert_eq!(draft_stats.forced_tokens, 0);
+}
