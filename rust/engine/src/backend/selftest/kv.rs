@@ -178,8 +178,9 @@ impl Tester<'_> {
         let evaluate = |pools: &[f32]| -> f64 {
             let all = words_of(pools);
             let (kw, vw) = all.split_at(layers * words[0]);
-            let mut err = 0.0f64;
-            for ((pool, src), fmt, w) in [((kw, &k), kf, words[0]), ((vw, &v), vf, words[1])] {
+            // (error, element, decoded value, source value, allowed error) of the worst element
+            let mut worst_at = (0.0f64, 0usize, 0.0f64, 0.0f64, 1.0f64);
+            for (part, ((pool, src), fmt, w)) in [((kw, &k), kf, words[0]), ((vw, &v), vf, words[1])].into_iter().enumerate() {
                 let layout = KvLayout::new(fmt, slots_total, kv_heads, dim);
                 let view = PoolView {
                     words: pool,
@@ -203,18 +204,27 @@ impl Tester<'_> {
                         } else {
                             (have - x).abs() / amax / fmt.max_relative_error()
                         };
+                        let at = (part * rows * kv + r * kv + c, have, x, amax * fmt.max_relative_error());
                         if e.is_nan() {
-                            return f64::INFINITY;
+                            return note_worst(f64::INFINITY, at.0, 2 * rows * kv, at.1 as f32, at.2, at.3);
                         }
-                        err = err.max(e);
+                        if e > worst_at.0 {
+                            worst_at = (e, at.0, at.1, at.2, at.3);
+                        }
                     }
                 }
             }
-            err
+            // element = (keys 0, values 1) * rows * kv + row * kv + channel; "got" is the decoded value, "expected" the source value and
+            // the error scale the largest error the format allows for the element's group
+            note_worst(worst_at.0, worst_at.1, 2 * rows * kv, worst_at.2 as f32, worst_at.3, worst_at.4)
         };
         // the CPU backend and the device must produce the same words (ties of the rounding may differ in a few places)
         let differing = device.iter().zip(&cpu).filter(|(a, b)| a != b).count() as f64 / device.len().max(1) as f64;
         let parity = differing / 0.003;
+        if let Some(i) = device.iter().zip(&cpu).position(|(a, b)| a != b) {
+            // element = word of the pools (keys, then values), "got" the device word, "expected" the CPU word
+            note_worst(parity, i, device.len(), device[i], f64::from(cpu[i]), 0.003 * device.len() as f64);
+        }
         Ok(Outcome { device: evaluate(&device).max(parity), cpu: evaluate(&cpu), tol: 1.0, cpu_tol: 1.0, ms })
     }
 }
