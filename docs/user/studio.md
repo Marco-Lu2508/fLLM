@@ -527,6 +527,64 @@ Settings > *Runtime* decides how freely the app may work, and the choice is kept
 
 The agent reads both from the server (`GET /api/studio/runtime`), so page and process cannot disagree.
 
+## Computer use
+
+With computer use the coding agent can **look at your screen and operate your computer**: it takes screenshots and moves the
+mouse, clicks, types, presses keys and scrolls, to get things done in desktop programs that have no command line and no API. It
+is the most dangerous thing the agent can do, so it is built to be off, visible and interruptible.
+
+**Warning.** While it is on, the agent sees everything that is open on the screen (private messages, other windows, a password
+you can read) and can do anything you could do with the mouse and keyboard in the programs that are open. A mistake of the
+model can send a message, delete a file or pay for something. Use it on a computer and with a model you trust, with nothing
+sensitive open, and watch what happens.
+
+How it works:
+
+- **Off until you switch it on**: Settings > *Runtime* > *Computer use* > "Let the agent see the screen and use mouse and
+  keyboard" (with a confirmation). While it is off, the tools are not offered to the model and the server refuses them. Two
+  limits are settings there: actions per minute (default 30) and actions per task (default 200). `FLLM_NO_COMPUTER_USE=1` on
+  the server forbids it for good.
+- **Ten tools**, one permission category `computer`: `computer_screenshot` (a display or a part of it, scaled to at most 1568
+  pixels on the long side), `computer_click`, `computer_move`, `computer_drag`, `computer_type`, `computer_key` (`ctrl+s`,
+  `enter`, `alt+left`, ...), `computer_scroll`, `computer_wait`, `computer_cursor`, `computer_displays`. Coordinates are pixels
+  of the *last screenshot* the model took; the server converts them to the real position (display scaling, several displays,
+  zoomed regions). Nothing is clicked before a screenshot exists.
+- **Every action asks you first.** The card shows the last screenshot with a red crosshair where the click, drag or scroll
+  will go, so you see what you approve. "Always" is offered only for screenshots, never for clicks, typing or keys: a mode of
+  *allow* or an allow rule does not lift that either; only **turbo** removes the questions (the banner then says so). Deny rules
+  win, the plan agent never gets these tools and sub-agents may not use them.
+- **A red banner** on the Code page shows while computer use is on, with a big **STOP** button. **Esc three times** on the page
+  or **Ctrl+Alt+Shift+Esc** anywhere (the server watches the keyboard itself) cancels the running action, ends the run and
+  switches computer use off. `POST /api/studio/agent/computer/stop` does the same.
+- **Never from another machine.** The tools, the status, the stop route and the settings are reachable from this computer only,
+  with or without an API key, and the scheduled tasks (which run without you) cannot use them.
+- **Screenshots stay in the conversation only while needed**: the last two go to the model, older ones are dropped, and none is
+  written to the saved session.
+- A few key chords that act on the whole computer are refused (Ctrl+Alt+Del, Ctrl+Shift+Esc, Alt+F4, Ctrl+Alt+F1..F12, locking
+  the screen, the Run dialog, Force Quit and logging out on macOS). This is a convenience against careless moments, **not a
+  security boundary**: your answer to the question on the card is.
+
+Honest limits:
+
+- **The model must be good at pictures.** It has to understand a screenshot and name the pixel of a button. Most small local
+  models are bad at that (they miss by dozens of pixels). Use a strong vision model, or a provider model. For web pages prefer a
+  browser tool that works on the structure of the page; it is faster and more reliable than clicking on pixels.
+- **Linux**: X11 only (Xorg, Xvfb, VNC desktops that run X). **Wayland cannot be controlled** without a desktop portal, so on a
+  Wayland session the setting says "not possible" and why; log in to an X11 session instead. Characters the keyboard layout cannot
+  produce are reported instead of typed. A remote X display (`DISPLAY=host:0`) is not supported.
+- **macOS** asks you to allow *Screen Recording* and *Accessibility* for the app that runs fLLM (fLLM.app, or the terminal the
+  server was started from); without them the setting explains what to switch on in System Settings > Privacy & Security.
+- **Windows**: programs that run as administrator and the UAC prompt do not accept input from a normal program; protected video
+  is captured black; the lock screen is out of reach.
+- A remote desktop session (RDP, VNC) works as far as the session has a real display; a server without a desktop has none.
+
+What has been verified: on Linux/X11 the whole chain runs against a real X server (Xvfb in Docker): a screenshot of the virtual
+screen, a click on a button of a Tk window, typing into an entry field, keys, scroll, drag, double click, the refused chords, the
+limits, the stop route and the panic chord (`scripts/computer-use-e2e`). The coordinate mapping (display scaling, several
+displays, zoomed regions), the key chords, the limits, the permission rules and the local-machine-only routes are unit tested.
+The Windows and macOS layers compile and pass the linter for their targets but have **not been run on a real machine**, and no
+real vision model has driven it yet.
+
 ## Web search that needs no server
 
 Two engines work the moment the app starts: DuckDuckGo over its HTML endpoint and Wikipedia over its public API — no key, no

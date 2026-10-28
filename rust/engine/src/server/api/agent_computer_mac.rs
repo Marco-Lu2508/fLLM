@@ -216,7 +216,8 @@ pub fn capture(d: &DisplayInfo, region: (u32, u32, u32, u32)) -> Result<Frame, S
             let little = info & 0x7000 == 0x2000;
             let mut rgba = Vec::with_capacity(rw * rh * 4);
             for row in ry..ry + rh {
-                for px in bytes[row * stride + rx * 4..row * stride + (rx + rw) * 4].chunks_exact(4) {
+                let (pixels, _) = bytes[row * stride + rx * 4..row * stride + (rx + rw) * 4].as_chunks::<4>();
+                for px in pixels {
                     if little {
                         rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
                     } else {

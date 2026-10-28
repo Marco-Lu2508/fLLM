@@ -675,6 +675,8 @@
           for (const t of list) {
             const f = t.function || t;
             if (!f?.name) continue;
+            // the screen and input tools only count when the status route (this computer only) says that computer use is on
+            if ((t.permission || f.permission) === 'computer' && !computerOn()) continue;
             parsed.set(f.name, { name: f.name, permission: t.permission || f.permission || 'command', source: 'server', def: { description: f.description || '', parameters: f.parameters || { type: 'object', properties: {} } } });
           }
           if (parsed.size) map = parsed;

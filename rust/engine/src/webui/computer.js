@@ -126,8 +126,12 @@
     // @pure-end
 
     const computer = { status: null, timer: 0, esc: [], busy: '', warnedVision: false, stopping: false };
-    const computerOn = () => Boolean(computer.status && computer.status.enabled && computer.status.available);
-    const computerQuestion = (item) => computerQuestionText(item.name, item.args);
+    function computerOn() {
+      return Boolean(computer.status && computer.status.enabled && computer.status.available);
+    }
+    function computerQuestion(item) {
+      return computerQuestionText(item.name, item.args);
+    }
 
     function fireComputerEvent() {
       window.dispatchEvent(new CustomEvent('fllm:computer', { detail: computer.status }));

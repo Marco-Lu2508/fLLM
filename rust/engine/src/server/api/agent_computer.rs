@@ -1300,6 +1300,27 @@ mod tests {
         assert!(!is_computer_tool("bash") && !is_computer_tool("read_file"));
     }
 
+    /// The scheduled tasks and every other unattended path call `AgentSession::run_tool`: the computer tools must not exist there.
+    #[test]
+    fn unattended_paths_cannot_reach_the_computer_tools() {
+        let session = super::super::agent::AgentSession::default();
+        for t in catalog() {
+            let name = t["function"]["name"].as_str().unwrap();
+            let error = session.run_tool(name, &json!({"x": 1, "y": 1, "text": "x", "keys": "a"})).unwrap_err();
+            assert!(error.contains("unknown tool"), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_tool_call_while_the_switch_is_off_is_refused_before_anything_happens() {
+        // the file of this machine decides; the test only runs the refusal when computer use happens to be off
+        if !super::super::studio_mode::computer_use() {
+            let error = run("computer_click", &json!({"x": 1, "y": 1})).err().expect("refused");
+            assert!(error.contains("switched off") || error.contains("switched off on this server") || error.contains("forbidden"), "{error}");
+            assert!(run("computer_screenshot", &json!({})).is_err());
+        }
+    }
+
     #[test]
     fn points_come_as_objects_or_pairs_and_numbers_may_be_strings() {
         assert_eq!(point_of(&json!({"x": 3, "y": 4.5})), Some((3.0, 4.5)));

@@ -143,7 +143,8 @@ pub fn capture(d: &DisplayInfo, region: (u32, u32, u32, u32)) -> Result<Frame, S
         if copied == 0 || lines == 0 {
             return Err("Windows refused to copy the screen (a locked session, the secure desktop or a remote session without a display)".to_owned());
         }
-        for px in bgra.chunks_exact_mut(4) {
+        let (pixels, _) = bgra.as_chunks_mut::<4>();
+        for px in pixels {
             px.swap(0, 2);
             px[3] = 255;
         }
