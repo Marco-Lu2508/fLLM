@@ -279,7 +279,7 @@ workspace writable, a private `/tmp` and its own PID and IPC namespace; `FLLM_SA
 binary); if it does not — a missing `bwrap`, or a kernel or container policy that forbids user namespaces — the command runs as before
 and `GET /api/studio/agent/sandbox` says why. Nothing is reported as sandboxed that is not; `/sandbox` shows the state.
 
-On **Windows** there is a different mechanism (implemented, **not yet verified on real Windows machines**, so it is off by default
+On **Windows** there is a different mechanism (implemented and checked on one Windows 11 machine, **not yet on others**, so it is off by default
 there and you switch it on under Settings > Runtime or with `FLLM_SANDBOX=workspace`). Each command is started through
 `fllm-rs sandbox-exec`, which runs it under a restricted token at low integrity level inside a job object:
 

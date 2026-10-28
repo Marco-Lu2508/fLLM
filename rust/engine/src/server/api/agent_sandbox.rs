@@ -246,7 +246,7 @@ pub(super) fn describe(os: &str, mode: Mode, working: bool) -> Description {
     match os {
         "windows" => {
             let mechanism = "restricted low-integrity token + job object, started through the fllm-rs sandbox-exec launcher";
-            let verification = "implemented and cross-compiled, its decisions are unit-tested; not yet verified on real Windows machines (the first command runs a self-test on this machine and the sandbox is reported unavailable when it fails)";
+            let verification = "implemented and cross-compiled, its decisions are unit-tested; verified on one Windows 11 machine (writes outside the workspace denied; git, node and python work), not yet on others (the first command runs a self-test on this machine and the sandbox is reported unavailable when it fails)";
             let (enforced, not_enforced) = match mode {
                 Mode::Off => (vec![], vec!["everything: the sandbox is off"]),
                 Mode::Strict => (vec![], vec!["everything: strict is unavailable on Windows (no network cut-off), commands are refused in this mode"]),
