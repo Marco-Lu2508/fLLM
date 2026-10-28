@@ -2,6 +2,7 @@
 // compiler, so the lint that compares them with the MSRV is silenced there.
 #![cfg_attr(target_arch = "aarch64", allow(clippy::incompatible_msrv))]
 pub mod autotune;
+pub mod beam;
 pub mod backend;
 pub mod cache;
 pub mod telemetry;

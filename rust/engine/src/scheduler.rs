@@ -182,6 +182,9 @@ pub struct SchedulerConfig {
     /// Reserve one token of every step's budget per decoding sequence before prompt chunks are scheduled, so a long prompt cannot
     /// starve the running sequences (inter-token latency); false = the prompt chunks come first.
     pub decode_first: bool,
+    /// Decode steps the runtime may run per scheduler round while the batch does not change (`--multi-step`, 1 = off).
+    /// The scheduler itself ignores it; `InferenceRuntime::step` reads it.
+    pub multi_step: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +224,7 @@ impl Default for SchedulerConfig {
             max_long_partial_prefills: 1,
             swap_blocks: 0,
             decode_first: false,
+            multi_step: 1,
         }
     }
 }
@@ -638,6 +642,10 @@ impl Scheduler {
                 Ok(false)
             }
         })?)
+    }
+    /// Frees up to `need` cached prefix blocks that no sequence uses; returns how many were freed.
+    pub fn reclaim_cache(&mut self, need: usize) -> usize {
+        self.evict_cache(need).unwrap_or(0)
     }
     /// Takes the blocks the runtime should write to the disk tier. They stay alive (the cache holds a reference), so
     /// their KV is still valid when the runtime reads it.
