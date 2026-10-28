@@ -93,7 +93,7 @@ __device__ __forceinline__ float kvq_at(const uint16_t *w, const FllmKvDesc &d, 
 // latency bound: one dependent global load per iteration and few resident warps).
 __device__ __forceinline__ unsigned kvq_ballot32(unsigned full, int pred) {
 #if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
-    return kvq_ballot32(full, pred);
+    return __ballot_sync(full, pred);
 #else
     (void)full;
     unsigned bits = pred ? (1u << (threadIdx.x & 31)) : 0u;
