@@ -12,6 +12,9 @@ use std::fmt;
 /// Function constant index (`q_fc_nb`): tokens per threadgroup column of the matrix-vector kernels.
 pub const FC_NB: u32 = 500;
 
+/// Bit 63 of `QParams::plane1` for MLX affine weights whose scales and biases are bfloat16 (`Q_MLX_BF16` in common.metal).
+pub const MLX_BF16_FLAG: u64 = 1 << 63;
+
 /// Simdgroups per threadgroup of the matrix-vector kernels (`Q_MV_NSG`).
 const MV_NSG: u32 = 2;
 /// Maximal batch of the matrix-vector kernels.
@@ -342,8 +345,10 @@ pub fn plan_quantized_linear(
         return Err(PlanError::Device("simd width or thread limit is 0".into()));
     }
 
+    // MLX affine weights with bfloat16 scales: bit 63 of the plane-1 offset tells the decoder (`Q_MLX_BF16` in common.metal)
+    let plane1 = planes.plane1 | if quant.mlx_affine().is_some_and(|m| m.bf16) { MLX_BF16_FLAG } else { 0 };
     let params = QParams {
-        plane1: planes.plane1,
+        plane1,
         rows: rows32,
         cols: cols32,
         batch: batch32,

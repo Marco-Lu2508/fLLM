@@ -63,8 +63,9 @@ pub(crate) fn quant_layout(kind: u32) -> Option<(usize, usize)> {
         0x8000_0012 | 0x8000_0016 => Some((128, 67)),
         0x8000_0020 => Some((1, 1)),
         k if fllm_gguf_probe::fp8b_type(k) => Some((1, 1)),
-        _ => fllm_gguf_probe::quant_types::by_id(kind)
-            .map(|ty| (ty.block_elements, ty.bytes_per_block)),
+        _ => fllm_gguf_probe::mlx_affine(kind)
+            .map(|m| (m.group as usize, m.block_bytes() as usize))
+            .or_else(|| fllm_gguf_probe::quant_types::by_id(kind).map(|ty| (ty.block_elements, ty.bytes_per_block))),
     }
 }
 
@@ -177,6 +178,10 @@ fn dequantize_fp8b(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, St
 }
 
 pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, String> {
+    if fllm_gguf_probe::exl::is_exl_type(kind) {
+        // native EXL2 / EXL3 blobs hold a whole matrix: this is the expand-at-upload fallback of backends without a kernel
+        return fllm_gguf_probe::exl::dequantize(bytes, kind, count);
+    }
     if fllm_gguf_probe::fp8m_type(kind) {
         return dequantize_fp8m(bytes, count);
     }
@@ -188,6 +193,9 @@ pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, Str
     }
     if let Some(group) = fllm_gguf_probe::q4z_group(kind) {
         return dequantize_q4z(bytes, group as usize, count);
+    }
+    if crate::cpu_mlx::handles(kind) {
+        return crate::cpu_mlx::dequantize(bytes, kind, count);
     }
     if matches!(kind, 16..=23 | 29) {
         return crate::quant_iq::dequantize_iq(bytes, kind, count);
@@ -476,6 +484,10 @@ impl Linear {
                 return Err(format!("invalid packed projection {name}"));
             }
             Some((info.type_id, model.owned_tensor_bytes(&name)?))
+        } else if fllm_gguf_probe::exl::is_exl_type(info.type_id) {
+            // native EXL2 / EXL3 blob: self-describing, validated once here
+            crate::cpu_exl::validate(model.tensor_bytes(&name)?, info.type_id, rows, cols).map_err(|e| format!("invalid packed projection {name}: {e}"))?;
+            Some((info.type_id, model.owned_tensor_bytes(&name)?))
         } else {
             None
         };
@@ -557,6 +569,31 @@ impl Linear {
             }
             _ => None,
         };
+        if fllm_gguf_probe::exl::is_exl_type(info.type_id) {
+            // native EXL2 rows are independent: a slice is a smaller blob; EXL3 mixes the outputs of 128-blocks and is only used whole
+            let whole = first == 0 && rows == total_rows;
+            let raw = model.tensor_bytes(name)?;
+            let part = if whole {
+                model.owned_tensor_bytes(name)?
+            } else if info.type_id == fllm_gguf_probe::exl::EXL2_TYPE {
+                TensorBytes::from_vec(fllm_gguf_probe::exl::Exl2View::parse(raw)?.slice_rows(first, rows)?)
+            } else {
+                return Err(format!("{name}: an EXL3 tensor cannot be split into rows"));
+            };
+            crate::cpu_exl::validate(&part, info.type_id, rows, cols).map_err(|e| format!("invalid packed projection {name}: {e}"))?;
+            return Ok(Self {
+                weight: Tensor { shape: vec![cols, rows], data: Vec::new() },
+                bias,
+                rows,
+                cols,
+                packed: Some((info.type_id, part)),
+                scale: 1.0,
+                input_scale: 0.0,
+                fast_cpu: false,
+                #[cfg(feature = "rust-gpu")]
+                gpu: None,
+            });
+        }
         if let Some((block, bytes)) = quant_layout(info.type_id) {
             if !cols.is_multiple_of(block) {
                 return Err(format!("{name} width is not a multiple of its block size"));
@@ -1000,6 +1037,19 @@ impl Linear {
             // the rows the NPU did not take (fewer than a full block) run on the CPU kernels
             out.extend(self.forward(&input[done * self.cols..])?);
             return Ok(out);
+        }
+        if let Some((kind, packed)) = &self.packed {
+            if crate::cpu_exl::handles(*kind) {
+                return crate::cpu_exl::linear(packed, *kind, input, self.rows, self.cols, self.bias.as_deref());
+            }
+        }
+        // MLX affine weights: f32 activations against the packed codes (also the reference of the device kernels)
+        if let Some((kind, packed)) = &self.packed {
+            if crate::cpu_mlx::handles(*kind) {
+                if let Some(out) = crate::cpu_mlx::linear(packed, *kind, input, self.rows, self.cols, self.bias.as_deref()) {
+                    return Ok(out);
+                }
+            }
         }
         if self.fast_cpu {
             let float = if let Some((kind @ (1 | 30), packed)) = &self.packed {

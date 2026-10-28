@@ -7,6 +7,13 @@ use crate::backend::BackendCapabilities;
 /// Name of the backend (`Backend::name`, messages of the decoder).
 pub const BACKEND_NAME: &str = "metal";
 
+/// The formats of `supported_formats`; `FLLM_METAL_NO_MLX=1` leaves out the MLX affine kernels (they have not run on every Apple GPU yet):
+/// the decoder then expands such weights to f16 when it uploads them.
+fn advertised_formats() -> Vec<crate::backend::QuantType> {
+    let no_mlx = std::env::var_os("FLLM_METAL_NO_MLX").is_some_and(|v| v != "0");
+    supported_formats().into_iter().filter(|q| !(no_mlx && q.mlx_affine().is_some())).collect()
+}
+
 /// Capabilities of the Metal backend.
 ///
 /// `supported_quants` lists the formats the quantized-linear kernels read natively (`weights::supported_formats`); every other format is
@@ -15,7 +22,7 @@ pub const BACKEND_NAME: &str = "metal";
 pub fn capabilities(info: &MetalDeviceInfo) -> BackendCapabilities {
     BackendCapabilities {
         name: format!("Metal ({})", info.name),
-        supported_quants: supported_formats(),
+        supported_quants: advertised_formats(),
         supports_rms_norm: true,
         supports_grouped_rms_norm: false,
         supports_layer_norm: true,

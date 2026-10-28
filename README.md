@@ -81,20 +81,22 @@ checkpoints and GPU runs of converted files were **not** tested.
 | GGUF v2/v3 with F32/F16/BF16, Q4_0 ... Q8_0, Q2_K ... Q6_K, IQ1 ... IQ4, TQ, MXFP4, NVFP4 | loaded directly | `fllm-rs formats` lists the 35 registered types; registration is not a promise of a fast kernel |
 | safetensors (single or sharded) and PyTorch `.bin` / `.pt` / `.pth` | checkpoints of unquantized, AWQ, GPTQ, FP8, NVFP4, compressed-tensors, MXFP4, bitsandbytes, MLX, EXL2 and EXL3 weights, in safetensors or PyTorch ZIP files, are loaded directly by `run` / `serve` (no GGUF file; `--no-direct-load` converts instead; proven on tiny synthetic models, not yet on large real ones); `convert` writes a file you name | Hub repository, local directory or file; `config.json` and `tokenizer.json` are required. Unquantized bf16/f16/f32 stay as they are (`--outtype f16`/`f32` to change) or are re-encoded with `--quant q4_k_m`, `q8_0`, ... |
 | AWQ 4-bit (AutoAWQ GEMM) and GPTQ 4-bit, including act-order | converted automatically, kept 4-bit as fLLM-specific `Q4Z` / `Q4ZP` tensors; nothing is re-quantized | group sizes 32, 64, 128; other sizes, fp32 scales and stacked experts are expanded to F16 |
+| MLX affine quantization (mlx-community and mlx-lm exports: 2, 3, 4, 5, 6 and 8 bits, `quantization` in `config.json`), embeddings and head included | loaded directly or converted automatically, kept packed as fLLM-specific `MLXA` tensors: the MLX words, scales and biases as they are (4.5 bits per weight for 4-bit with group 64, like the checkpoint); nothing is re-quantized | groups that are a multiple of 32 (any size up to 8160), scales and biases exact in f16 or bfloat16 (the usual case); 7-bit weights, other group sizes and float32 scales without an exact 16-bit form are expanded to F16 with a warning; the `mxfp4` / `nvfp4` modes of MLX and stacked experts are refused |
 | FP8 checkpoints (`quant_method` fp8, ModelOpt FP8, compressed-tensors float) | converted automatically; per-tensor or per-row scales stay FP8, block-wise `weight_scale_inv` is expanded to F16 | |
 | NVIDIA ModelOpt NVFP4 (`quant_algo` NVFP4, `hf_quant_config.json` or `quantization_config`) | converted automatically to GGUF type 40 (the layout of llama.cpp, no llama.cpp needed): block scales copied, `weight_scale_2` stored as `<name>.scale` | dense models; excluded modules (for example `lm_head`) stay bf16/f16; FP8 KV-cache scales are ignored; NVFP4 mixture-of-experts checkpoints are expanded to F16 |
 | compressed-tensors int4 / int8 (`pack-quantized`, `int-quantized`, symmetric) | converted automatically: int4 groups of 32/64/128 become `Q4Z`, int8 becomes `Q8_0` | asymmetric, act-order, other bit widths, sparse and compressed-tensors NVFP4 are refused with a message |
 | gpt-oss MXFP4 | repacks the MXFP4 blocks (loaded directly, or written by `convert`) | |
-| EXL2 / EXL3 | expands to F16 (or re-quantizes with `--outtype`), loaded directly or written by `convert` | import only, not native EXL inference ([docs/exl-formats.md](docs/exl-formats.md)) |
+| EXL2 / EXL3 | stays packed: the codes, scales, group widths and permutation (EXL2) or trellis tiles and Hadamard signs (EXL3) are kept in fLLM's `EXL2` / `EXL3` GGUF types, loaded directly or written by `convert`; `--dtype f16` expands | runs natively on the CPU and on NVIDIA GPUs (CUDA-core kernels, **not yet run on a GPU**); other backends expand to F16 at upload; stacked MoE experts and fractional EXL3 are expanded or refused ([docs/exl-formats.md](docs/exl-formats.md)) |
 
 Where the weight formats run natively ([docs/gpu-backends.md](docs/gpu-backends.md),
 [docs/backends.md](docs/backends.md), [docs/cpu-kernels.md](docs/cpu-kernels.md)):
 
 | Device | Native kernels | Everything else |
 | --- | --- | --- |
-| CPU (x86-64, AArch64) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K ... Q6_K; on x86-64 also Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4 | rows decoded on demand (functional, slow): the other IQ/TQ types, NVFP4, Q4Z/Q4ZP |
-| CUDA | all of the above, the IQ family, MXFP4, NVFP4 (FP4 tensor cores on Blackwell sm_12x, Marlin FP4 on other GPUs from Turing), AWQ/GPTQ `Q4Z`/`Q4ZP` through Marlin (Turing and newer, shapes in multiples of 128) | expanded at upload |
-| wgpu (Vulkan, Metal, DX12) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K, Q5_K, Q6_K | expanded to F32 at upload |
+| CPU (x86-64, AArch64) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K ... Q6_K; on x86-64 also Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4; MLX affine `MLXA` (all widths and groups, f32 activations, AVX2 where present) | rows decoded on demand (functional, slow): the other IQ/TQ types, NVFP4, Q4Z/Q4ZP |
+| CUDA | all of the above, the IQ family, MXFP4, NVFP4 (FP4 tensor cores on Blackwell sm_12x, Marlin FP4 on other GPUs from Turing), AWQ/GPTQ `Q4Z`/`Q4ZP` through Marlin (Turing and newer, shapes in multiples of 128), MLX affine `MLXA` (own kernels on the packed words; not yet run on a GPU) | expanded at upload |
+| wgpu (Vulkan, Metal, DX12) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K, Q5_K, Q6_K | expanded to F32 at upload (MLX affine: to F16) |
+| Metal (native) | the formats of the table in [docs/gpu-backends.md](docs/gpu-backends.md), MLX affine `MLXA` (kernels written, checked as C++ on the CPU, awaiting the Apple-silicon run) | expanded at upload |
 
 ### Architectures
 

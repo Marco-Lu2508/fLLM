@@ -39,6 +39,18 @@ int fllm_fp8_marlin_launch(cudaStream_t, int, int, const void *, const float *, 
 }
 int fllm_fp8_marlin_repack(int, const void *, void *, int, int) { return fllm_set_error("Marlin FP8 repack needs an NVIDIA GPU"); }
 
+// Native EXL2 / EXL3 kernels (exl.cu) are not built for AMD: the backend does not list the formats and the decoder expands them on upload
+size_t fllm_exl3_scratch_bytes(int, int, int) { return 0; }
+int fllm_exl_launch(cudaStream_t, int, const void *, const float *, float *, const float *, int, int, int, void *, size_t) {
+    return fllm_set_error("EXL2 / EXL3 kernels need an NVIDIA GPU");
+}
+
+// MLX affine weights (mlx_affine.cu) have no AMD kernels yet: the decoder expands them to f16 for these GPUs (the backend does not list them)
+int fllm_mlx_launch(cudaStream_t, const void *, int, const float *, float *, const float *, int, int, int) {
+    return fllm_set_error("MLX affine kernels need an NVIDIA GPU");
+}
+extern "C" int fllm_cuda_mlx_force(int) { return 0; }
+
 // Q4_K Marlin GEMM (marlin_q4k.cu) is NVIDIA-only: decline, the portable kernels serve the call
 int fllm_marlin_q4k_try(cudaStream_t, const void *, const float *, float *, const float *, int, int, int, void *, size_t) { return 0; }
 

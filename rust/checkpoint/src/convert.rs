@@ -351,7 +351,8 @@ pub fn prepare_checkpoint(
         })
     })?;
     // formats without a compact fLLM type are expanded when written; say what that costs
-    let expanded: u64 = packed_groups.iter().filter(|g| matches!(g.1, PackedData::Dyn(_))).map(|g| g.1.element_count() as u64).sum();
+    let native_mlx = |g: &PackedData| options.output_dtype == OutputDType::Preserve && g.mlx().is_some_and(|m| m.native().is_some());
+    let expanded: u64 = packed_groups.iter().filter(|g| matches!(g.1, PackedData::Dyn(_)) && !native_mlx(&g.1)).map(|g| g.1.element_count() as u64).sum();
     if expanded > 0 {
         let width = if options.output_dtype == OutputDType::F32 { 4.0 } else { 2.0 };
         eprintln!(
@@ -800,6 +801,16 @@ pub fn prepare_checkpoint(
         // block-wise FP8 stays FP8 with its tile scales (`FP8B`): a matrix or a stack of equally shaped matrices, and a row permutation (the
         // RoPE reordering of some architectures) may only move whole tile rows, otherwise the weights are expanded
         let fp8b = if preserve { fp8b_layout(&packed, &dims, rowperm(&name)?.as_deref()) } else { None };
+        // MLX affine weights keep their packed words, scales and biases (`MLXA` types) when that changes no value
+        let mlx = packed.mlx().filter(|_| preserve).and_then(|m| {
+            let native = m.native();
+            if native.is_none() {
+                eprintln!("warning: {name}: MLX weight is expanded to F16 because {}", m.native_refusal());
+            }
+            native
+        });
+        // EXL2 / EXL3 matrices stay packed (native `EXL2` / `EXL3` blobs, docs/exl-formats.md); `--dtype f16|f32` expands them
+        let exl = if preserve { packed.exl_native() } else { None };
         // (stacked experts have a leading expert dimension: their rows are all rows of all experts)
         let in_features = dims.last().copied().unwrap_or(0) as usize;
         let rows_out = dims[..dims.len().saturating_sub(1)].iter().product::<u64>() as usize;
@@ -808,6 +819,8 @@ pub fn prepare_checkpoint(
             _ if q8_0 => "Q8_0".to_string(),
             _ if mxfp4 => "MXFP4".to_string(),
             _ if fp8b.is_some() => crate::packed_quant::fp8b_dtype_name(fp8b.map_or(0, |(id, _)| id)),
+            _ if mlx.is_some() => crate::dequant_bits::mlx_dtype_name(mlx.expect("checked")),
+            _ if exl.is_some() => exl.map_or_else(String::new, |e| e.0.to_string()),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
             (None, None, true, _) => "FP8M".to_string(),
@@ -819,6 +832,11 @@ pub fn prepare_checkpoint(
             _ if q8_0 => (rows_out * (in_features / 32 * 34)) as u64,
             _ if mxfp4 => (rows_out * (in_features / 32 * 17)) as u64,
             _ if fp8b.is_some() => fp8b.map_or(0, |(_, layout)| layout.total_len() as u64),
+            _ if mlx.is_some() => {
+                let m = mlx.expect("checked");
+                (rows_out * (in_features / m.group as usize) * m.block_bytes() as usize) as u64
+            }
+            _ if exl.is_some() => exl.map_or(0, |e| e.1 as u64),
             (Some(g), _, _) => (count / g * (g / 2 + 3)) as u64,
             (None, Some(g), _) => (count / g * (g / 2 + 3) + in_features * 4) as u64,
             (None, None, true) => (count + rows_out * 2) as u64,
@@ -1263,6 +1281,11 @@ fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
         "Q4ZP64" => 0x8000_0015,
         "Q4ZP128" => 0x8000_0016,
         "FP8M" | "F8M" => 0x8000_0020,
+        "EXL2" => 0x8000_0030,
+        "EXL3" => 0x8000_0031,
+        _ if dtype.starts_with("MLXA") => {
+            crate::dequant_bits::mlx_dtype_id(dtype).ok_or_else(|| CheckpointError::Invalid(format!("unsupported MLX tensor dtype {dtype}")))?
+        }
         _ => return Err(CheckpointError::Invalid(format!("unsupported GGUF tensor dtype {dtype}"))),
     })
 }
@@ -1650,7 +1673,9 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
     if let Some(q) = mlx {
         return match q.get("mode").and_then(Value::as_str).unwrap_or("affine") {
             "affine" => Ok(Quantization::Mlx),
-            other => Err(format!("MLX quantization mode {other:?} is not supported (only affine); convert the original model instead")),
+            other => Err(format!(
+                "MLX quantization mode {other:?} is not supported: only the affine mode (scales and biases per group) is read; the mxfp4 and nvfp4 modes of MLX (E8M0 / E4M3 block scales, no biases) need their own reader. Use an affine export of the model or convert the original weights"
+            )),
         };
     }
     let Some(q) = cfg.get("quantization_config").filter(|v| !v.is_null()) else {
@@ -3198,6 +3223,17 @@ mod quantization_config_tests {
         assert!(compressed_tensors(&mixed).unwrap_err().contains("mixed-precision"));
         let sparse = json!({"quant_method": "compressed-tensors", "sparsity_config": {"format": "sparse-24-bitmask"}, "config_groups": {}});
         assert!(compressed_tensors(&sparse).unwrap_err().contains("sparse"));
+    }
+
+    #[test]
+    fn mlx_modes_other_than_affine_are_refused_with_the_reason() {
+        let affine = json!({"quantization": {"group_size": 64, "bits": 4}});
+        assert_eq!(quantization(&affine).unwrap(), Quantization::Mlx);
+        assert_eq!(quantization(&json!({"quantization": {"group_size": 64, "bits": 4, "mode": "affine"}})).unwrap(), Quantization::Mlx);
+        for mode in ["mxfp4", "nvfp4", "mxfp8"] {
+            let err = quantization(&json!({"quantization": {"group_size": 32, "bits": 4, "mode": mode}})).unwrap_err();
+            assert!(err.contains(mode) && err.contains("only the affine mode"), "{err}");
+        }
     }
 
     #[test]

@@ -1,0 +1,25 @@
+// Smallest <metal_stdlib> that common.metal needs to be compiled as C++ (scalar types, address-space words, as_type); used by dec8_mlx.cpp.
+// The full emulation (run_emu.sh) uses the shim of mslcheck.sh instead.
+#pragma once
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+namespace metal {}
+using uchar = uint8_t;
+using ushort = uint16_t;
+using uint = uint32_t;
+using ulong = uint64_t;
+using half = _Float16;
+#define device
+#define constant
+#define thread
+#define threadgroup
+
+template <class To, class From>
+To as_type(From from) {
+    static_assert(sizeof(To) == sizeof(From), "as_type needs types of one size");
+    To to;
+    memcpy(&to, &from, sizeof(To));
+    return to;
+}

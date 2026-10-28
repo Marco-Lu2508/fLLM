@@ -181,7 +181,7 @@ pub fn device_layout(quant: QuantType, rows: usize, cols: usize) -> Result<Plane
                 total_bytes: round_up(plane1 + blocks, 16) as u64,
             }
         }
-        Repack::Q4z => {
+        Repack::Q4z | Repack::Mlx => {
             let plane1 = round_up(blocks * info.block_bytes, 16);
             Planes {
                 layout: DeviceLayout::Planar,
@@ -280,6 +280,28 @@ pub fn pack_weight(
                         p[k * 4..k * 4 + 2].copy_from_slice(&src[half..half + 2]);
                         p[k * 4 + 2] = src[half + 2] & 15;
                         p[k * 4 + 3] = 0;
+                    }
+                });
+            Cow::Owned(out)
+        }
+        Repack::Mlx => {
+            // [scale: 2][bias: 2][codes] per group -> codes plane + one word per group (scale in the low half, bias in the high half)
+            let codes_len = info.block_bytes;
+            let mut out = vec![0u8; planes.total_bytes as usize];
+            let (codes, params) = out.split_at_mut(planes.plane1 as usize);
+            codes
+                .par_chunks_mut(codes_len * 64)
+                .zip(params.par_chunks_mut(4 * 64))
+                .enumerate()
+                .for_each(|(i, (c, p))| {
+                    for k in 0..p.len() / 4 {
+                        let block = i * 64 + k;
+                        if block >= blocks {
+                            break;
+                        }
+                        let src = &raw[block * (codes_len + 4)..(block + 1) * (codes_len + 4)];
+                        p[k * 4..k * 4 + 4].copy_from_slice(&src[..4]);
+                        c[k * codes_len..(k + 1) * codes_len].copy_from_slice(&src[4..]);
                     }
                 });
             Cow::Owned(out)

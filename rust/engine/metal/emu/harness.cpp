@@ -222,6 +222,13 @@ const Entry entries[] = {
     ENTRY("q4z128", q_fmt_q4z128), ENTRY("q4z32p", q_fmt_q4z32), ENTRY("q4z64p", q_fmt_q4z64), ENTRY("q4z128p", q_fmt_q4z128),
     ENTRY("f32", q_fmt_f32), ENTRY("f16", q_fmt_f16), ENTRY("bf16", q_fmt_bf16), ENTRY("fp8e4m3", q_fmt_fp8e4m3),
     ENTRY("fp8e5m2", q_fmt_fp8e5m2), ENTRY("fp8m", q_fmt_fp8m),
+    // MLX affine (MLXA): the `b` tags are the bfloat16 variants (the dump carries Q_MLX_BF16 in plane 1)
+    ENTRY("mlx2g32", q_fmt_mlx2g32), ENTRY("mlx2g32b", q_fmt_mlx2g32), ENTRY("mlx2g64", q_fmt_mlx2g64), ENTRY("mlx2g64b", q_fmt_mlx2g64), ENTRY("mlx2g128", q_fmt_mlx2g128), ENTRY("mlx2g128b", q_fmt_mlx2g128),
+    ENTRY("mlx3g32", q_fmt_mlx3g32), ENTRY("mlx3g32b", q_fmt_mlx3g32), ENTRY("mlx3g64", q_fmt_mlx3g64), ENTRY("mlx3g64b", q_fmt_mlx3g64), ENTRY("mlx3g128", q_fmt_mlx3g128), ENTRY("mlx3g128b", q_fmt_mlx3g128),
+    ENTRY("mlx4g32", q_fmt_mlx4g32), ENTRY("mlx4g32b", q_fmt_mlx4g32), ENTRY("mlx4g64", q_fmt_mlx4g64), ENTRY("mlx4g64b", q_fmt_mlx4g64), ENTRY("mlx4g128", q_fmt_mlx4g128), ENTRY("mlx4g128b", q_fmt_mlx4g128),
+    ENTRY("mlx5g32", q_fmt_mlx5g32), ENTRY("mlx5g32b", q_fmt_mlx5g32), ENTRY("mlx5g64", q_fmt_mlx5g64), ENTRY("mlx5g64b", q_fmt_mlx5g64), ENTRY("mlx5g128", q_fmt_mlx5g128), ENTRY("mlx5g128b", q_fmt_mlx5g128),
+    ENTRY("mlx6g32", q_fmt_mlx6g32), ENTRY("mlx6g32b", q_fmt_mlx6g32), ENTRY("mlx6g64", q_fmt_mlx6g64), ENTRY("mlx6g64b", q_fmt_mlx6g64), ENTRY("mlx6g128", q_fmt_mlx6g128), ENTRY("mlx6g128b", q_fmt_mlx6g128),
+    ENTRY("mlx8g32", q_fmt_mlx8g32), ENTRY("mlx8g32b", q_fmt_mlx8g32), ENTRY("mlx8g64", q_fmt_mlx8g64), ENTRY("mlx8g64b", q_fmt_mlx8g64), ENTRY("mlx8g128", q_fmt_mlx8g128), ENTRY("mlx8g128b", q_fmt_mlx8g128),
 };
 
 }  // namespace

@@ -166,7 +166,7 @@ impl Default for CpuBackend {
 
 impl CpuBackend {
     pub fn new() -> Self {
-        let all_quants = vec![
+        let mut all_quants = vec![
             QuantType::F32,
             QuantType::F16,
             QuantType::BF16,
@@ -197,7 +197,10 @@ impl CpuBackend {
             QuantType::Q4Z32,
             QuantType::Q4Z64,
             QuantType::Q4Z128,
+            QuantType::Exl2,
+            QuantType::Exl3,
         ];
+        all_quants.extend(QuantType::mlx_affine_common());
         Self {
             capabilities: BackendCapabilities {
                 name: "CPU".to_string(),
@@ -276,6 +279,9 @@ impl Backend for CpuBackend {
         cols: usize,
         bias: Option<&[f32]>,
     ) -> Result<DeviceWeight, BackendError> {
+        if crate::cpu_exl::handles(quant_type.to_gguf_type_id()) {
+            crate::cpu_exl::validate(raw_bytes, quant_type.to_gguf_type_id(), rows, cols).map_err(|e| invalid(format!("{name}: {e}")))?;
+        }
         let buffer = self.allocate_buffer(raw_bytes.len())?;
         with_buffer_slice_mut(&buffer, |dst| dst.copy_from_slice(raw_bytes))?;
 
@@ -686,6 +692,12 @@ impl Stream for CpuStream {
             let out_data = crate::cpu_fp8::linear(weight.quant_type.to_gguf_type_id(), &w_bytes, &x_data, rows, cols, b_data.as_deref())
                 .map_err(BackendError::DriverError)?;
             return write_f32(out, &out_data, "quantized_linear");
+        }
+        let exl_kind = weight.quant_type.to_gguf_type_id();
+        if crate::cpu_exl::handles(exl_kind) {
+            // packed EXL2 / EXL3 blob: decoded group by group / tile by tile while multiplying, never expanded
+            let result = with_buffer_slice(&weight.buffer, |blob| crate::cpu_exl::linear(blob, exl_kind, &x_data, rows, cols, b_data.as_deref()))?;
+            return write_f32(out, &result.map_err(BackendError::DriverError)?, "quantized_linear");
         }
         if weight.quant_type == QuantType::Fp8Marlin {
             let w_bytes = read_bytes(&weight.buffer)?;

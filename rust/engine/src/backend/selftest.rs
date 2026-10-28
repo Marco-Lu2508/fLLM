@@ -17,6 +17,7 @@ use half::{bf16, f16};
 use std::time::Instant;
 
 mod kv;
+mod mlx;
 mod moe;
 #[cfg(feature = "cuda")]
 mod prefill;
@@ -88,6 +89,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("fp8blk", "CUDA block-wise FP8 weights (FP8B): decode GEMV and prompt GEMM that keep the weights 8-bit, the FP8 tensor-core path against its emulation, tile shapes, odd shapes, 8-bit memory check"),
     ("hattn", "CUDA Hopper and FlashInfer attention: FA3 prefill, sliding window / soft cap / sinks, ragged batches, tensor-core decode, cascade"),
     ("hmla", "CUDA latent-cache MLA (DeepSeek-V2/V3): absorbed up-projections, 576-value cache, tensor cores"),
+    ("mlx", "MLX affine group-quantized weights (2 to 8 bits, groups of 32 to 128, f16 and bf16 scales): quantized_linear against the f64 reference, every device kernel (GEMV, FP32 tile, tensor cores) on its own"),
     ("hgemm", "CUDA cuBLASLt GEMMs (runtime-loaded) and Hopper CUTLASS WGMMA FP8"),
     ("fp4sm100", "CUDA NVFP4 block-scaled GEMM on datacenter Blackwell (sm_100 tcgen05)")
 ];
@@ -98,7 +100,7 @@ const QUANT_GROUPS: &[&str] = &["linear", "embedding", "moe", "host"];
 /// Weight formats the self test knows (GGUF type ids; `format_name` gives the names).
 const KINDS: &[u32] = &[
     0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
-    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021,
+    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021, 0x8000_0030, 0x8000_0031,
 ];
 
 /// Lower case without separators: `Q4_K` and `q4-k` are the same name.
@@ -942,6 +944,9 @@ fn nvfp4_weight_values(raw: &[u8], rows: usize, cols: usize) -> Vec<f32> {
 /// Random weights of GGUF type `kind`: uniform [-1, 1] floats, or valid quant blocks with
 /// moderate scales (`cpu_selftest::random_weights`).
 fn random_kind(rng: &mut Lcg, kind: u32, rows: usize, cols: usize) -> Vec<u8> {
+    if let Some(m) = fllm_gguf_probe::mlx_affine(kind) {
+        return crate::cpu_mlx::random_weights(m, rows, cols, rng);
+    }
     if kind == 12 {
         if let Ok(spec) = std::env::var("FLLM_SELFTEST_TENSOR") {
             if let Some((path, name)) = spec.split_once(':') {
@@ -1193,6 +1198,9 @@ impl<'a> Tester<'a> {
         if self.enter("linear") {
             self.fast_linear_cases();
         }
+        if self.enter("mlx") {
+            self.mlx_cases(true);
+        }
         if self.enter("sampling") {
             self.sampling_cases();
         }
@@ -1308,6 +1316,26 @@ impl<'a> Tester<'a> {
                     &format!("384x1024 batch {batch}{}", if with_bias { " +bias" } else { "" }),
                     r,
                 );
+            }
+        }
+        // packed ExLlamaV2 / ExLlamaV3 matrices (native kernels; backends without them expand at upload and still have to agree): EXL2 widths
+        // are multiples of 32 (33 groups here: an odd count, mixed widths, codes straddling words), EXL3 rows and columns multiples of 128;
+        // batches above 128 take several passes of the EXL3 kernels
+        for kind in self.kinds(&[0x8000_0030u32, 0x8000_0031]) {
+            let shapes: &[(usize, usize)] = if kind == 0x8000_0030 { &[(131, 1056), (40, 96)] } else { &[(384, 1024), (128, 384)] };
+            for &(rows, cols) in shapes {
+                for batch in [1usize, 2, 3, 4, 5, 8, 16, 17, 40, 129, 356] {
+                    let with_bias = batch == 3 || batch == 129;
+                    let r = self.linear(kind, rows, cols, batch, with_bias).map(|mut o| {
+                        o.tol = o.tol.max(Self::FAST_TOL);
+                        o
+                    });
+                    self.record(
+                        &format!("fast linear {}", format_name(kind)),
+                        &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }),
+                        r,
+                    );
+                }
             }
         }
         // 8-bit FP8 weights (Marlin GEMM): rows and columns multiples of 128
@@ -2190,6 +2218,9 @@ impl<'a> Tester<'a> {
         }
         if self.enter("linear") {
             self.linear_cases();
+        }
+        if self.enter("mlx") {
+            self.mlx_cases(false);
         }
         if self.enter("embedding") {
             self.embedding_cases();

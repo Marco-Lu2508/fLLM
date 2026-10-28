@@ -141,6 +141,18 @@ extern "C" {
         batch: c_int,
         perm: *const c_int,
     ) -> c_int;
+    /// Packed EXL2 / EXL3 blobs (exl.cu), read in place.
+    fn fllm_cuda_linear_exl(
+        st: *mut RawStream,
+        w: *const c_void,
+        kind: c_int,
+        x: *const f32,
+        y: *mut f32,
+        bias: *const f32,
+        rows: c_int,
+        cols: c_int,
+        batch: c_int,
+    ) -> c_int;
     fn fllm_cuda_q4z_repack(dev: c_int, awq_words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_q4z_supported(rows: c_int, cols: c_int, group: c_int) -> c_int;
     fn fllm_cuda_q4z_accumulate(on: c_int, scale: f32) -> c_int;
@@ -919,6 +931,14 @@ impl CudaBackend {
             // block-wise FP8 stays 8-bit on every NVIDIA GPU (FP32 GEMV; tensor cores for prompts from sm_75); the HIP build expands it to F16
             supported_quants.push(QuantType::Fp8Block);
         }
+        if !rocm {
+            // MLX affine group-quantized weights (cuda/mlx_affine.cu); AMD GPUs get them expanded to f16 by the decoder
+            supported_quants.extend(QuantType::mlx_affine_common());
+        }
+        if cc >= 60 && !rocm {
+            // packed ExLlamaV2 / ExLlamaV3 matrices: CUDA-core kernels (cuda/exl.cu); AMD and older GPUs get them expanded on upload
+            supported_quants.extend([QuantType::Exl2, QuantType::Exl3]);
+        }
         let capabilities = BackendCapabilities {
             name: info.name.clone(),
             supported_quants,
@@ -1289,7 +1309,16 @@ impl Backend for CudaBackend {
             );
         }
         let converted: Vec<u8>;
-        let (bytes, quant_type): (&[u8], QuantType) = if (kind == 20 && cols.is_multiple_of(32)) || (kind == 23 && cols.is_multiple_of(256)) {
+        let native_mlx = quant_type.mlx_affine().filter(|m| !self.rocm && super::mlx::device_shape_ok(*m, rows, cols));
+        if quant_type.mlx_affine().is_some() && native_mlx.is_none() {
+            // never re-quantized: the decoder expands MLX weights that a backend cannot take natively
+            return Err(BackendError::UnsupportedQuant(quant_type));
+        }
+        let (bytes, quant_type): (&[u8], QuantType) = if let Some(m) = native_mlx {
+            // packed words, scales and biases as three planes (backend/mlx.rs): the kernels read the codes as 32-bit words
+            converted = super::mlx::device_planes(raw_bytes, m, rows, cols).map_err(|e| invalid(format!("{name}: {e}")))?;
+            (&converted, quant_type)
+        } else if (kind == 20 && cols.is_multiple_of(32)) || (kind == 23 && cols.is_multiple_of(256)) {
             // IQ4_NL / IQ4_XS run natively as 32-value blocks with an fp16 scale and a 16-entry grid (IQ4_NL layout)
             let blocks = rows * cols / 32;
             let nl = if kind == 20 {
@@ -1309,6 +1338,10 @@ impl Backend for CudaBackend {
             }
             converted = legacy_device_layout(&mxfp4_to_nl(raw_bytes), rows, cols, 2);
             (&converted, QuantType::Mxfp4)
+        } else if matches!(quant_type, QuantType::Exl2 | QuantType::Exl3) && self.cc >= 60 && !self.rocm {
+            // packed EXL blob: stays packed on the device, decoded by exl.cu while multiplying (validated here, once)
+            crate::cpu_exl::validate(raw_bytes, kind, rows, cols).map_err(|e| invalid(format!("{name}: {e}")))?;
+            (raw_bytes, quant_type)
         } else if NATIVE_KINDS.contains(&kind) || (kind == 40 && self.fp4) {
             let (block, width) = (quant_type.block_size(), quant_type.block_bytes());
             if !cols.is_multiple_of(block) || raw_bytes.len() != rows * (cols / block) * width {
@@ -2817,6 +2850,37 @@ impl Stream for CudaStream {
         if fllm_gguf_probe::fp8b_type(kind) {
             return hopper_fp8::linear_fp8_block(self, out, x, weight, bias);
         }
+        if matches!(weight.quant_type, QuantType::Exl2 | QuantType::Exl3) {
+            let (rows, cols) = (weight.rows, weight.cols);
+            if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) {
+                return Err(invalid("linear input dimensions do not match"));
+            }
+            let batch = x.size / (cols * 4);
+            if batch == 0 {
+                return Ok(());
+            }
+            if out.size < batch * rows * 4 || bias.is_some_and(|b| b.size < rows * 4) {
+                return Err(invalid("linear output or bias smaller than batch x rows"));
+            }
+            let bias_ptr = match bias {
+                Some(b) => dev_ptr(b)? as *const f32,
+                None => std::ptr::null(),
+            };
+            // SAFETY: sizes checked above; the weight was validated and uploaded as a packed blob by `upload_weight`.
+            return check(unsafe {
+                fllm_cuda_linear_exl(
+                    self.raw,
+                    dev_ptr(&weight.buffer)?.cast(),
+                    kind as c_int,
+                    dev_ptr(x)?.cast(),
+                    dev_ptr(out)?.cast(),
+                    bias_ptr,
+                    to_c(rows, "rows")?,
+                    to_c(cols, "cols")?,
+                    to_c(batch, "batch")?,
+                )
+            });
+        }
         if weight.quant_type == QuantType::Fp8Marlin {
             if weight.perm.is_some() {
                 return hopper_fp8::linear_w8a8(self, out, x, weight, bias);
@@ -2888,7 +2952,7 @@ impl Stream for CudaStream {
                 )
             });
         }
-        if !NATIVE_KINDS.contains(&kind) && kind != 40 && kind != 20 && kind != 39 && kind != 41 {
+        if !NATIVE_KINDS.contains(&kind) && kind != 40 && kind != 20 && kind != 39 && kind != 41 && weight.quant_type.mlx_affine().is_none() {
             return Err(BackendError::UnsupportedQuant(weight.quant_type));
         }
         let (rows, cols) = (weight.rows, weight.cols);

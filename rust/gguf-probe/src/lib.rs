@@ -1,3 +1,4 @@
+pub mod exl;
 pub mod quant_types;
 use memmap2::{Mmap, MmapOptions};
 use serde::Serialize;
@@ -191,6 +192,47 @@ pub fn q4zp_group(type_id: u32) -> Option<u64> {
     }
 }
 
+/// Geometry of the fLLM-specific `MLXA` tensor types: MLX affine group quantization kept native.
+///
+/// Type id `0x8001_0000 | bf16 << 12 | (group / 32) << 4 | bits`. A row is `cols / group` blocks; a block holds the values of one group:
+/// the scale and the bias (`w = scale * code + bias`) as two 16-bit floats (f16 or bf16, as the checkpoint stores them), then
+/// `group * bits / 8` bytes of codes in the MLX bit order (a little-endian bit stream, code `i` at bit `i * bits`; the 3, 5 and 6 bit
+/// codes straddle the 32-bit words).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MlxAffine {
+    pub bits: u32,
+    pub group: u32,
+    /// Scales and biases are bfloat16 (otherwise IEEE half).
+    pub bf16: bool,
+}
+
+impl MlxAffine {
+    /// Bytes of one block (one group).
+    pub fn block_bytes(&self) -> u64 {
+        u64::from(self.group) * u64::from(self.bits) / 8 + 4
+    }
+
+    pub fn type_id(&self) -> u32 {
+        MLX_AFFINE_BASE | (u32::from(self.bf16) << 12) | ((self.group / 32) << 4) | self.bits
+    }
+}
+
+/// First id of the `MLXA` tensor types.
+pub const MLX_AFFINE_BASE: u32 = 0x8001_0000;
+
+/// Whether `bits` / `group` can be stored as an `MLXA` type: 2, 3, 4, 5, 6 or 8 bits and a group that is a multiple of 32 (up to 8160).
+pub fn mlx_affine_supported(bits: u32, group: u32) -> bool {
+    matches!(bits, 2..=6 | 8) && group != 0 && group.is_multiple_of(32) && group / 32 <= 255
+}
+
+pub fn mlx_affine(type_id: u32) -> Option<MlxAffine> {
+    if type_id & !0x1fff != MLX_AFFINE_BASE {
+        return None;
+    }
+    let found = MlxAffine { bits: type_id & 15, group: ((type_id >> 4) & 255) * 32, bf16: type_id & 0x1000 != 0 };
+    mlx_affine_supported(found.bits, found.group).then_some(found)
+}
+
 /// fLLM-specific `FP8M` tensor type (FP8 E4M3 weights with per-channel FP16 scales for Marlin W8A16): id 0x8000_0020.
 pub fn fp8m_type(type_id: u32) -> bool {
     type_id == 0x8000_0020
@@ -339,6 +381,9 @@ fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
     if fp8m_type(type_id) || fp8b_type(type_id) {
         return Some((1, 1));
     }
+    if let Some(mlx) = mlx_affine(type_id) {
+        return Some((u64::from(mlx.group), mlx.block_bytes()));
+    }
     quant_types::by_id(type_id).map(|ty| (ty.block_elements as u64, ty.bytes_per_block as u64))
 }
 
@@ -467,7 +512,13 @@ fn parse(data: &[u8]) -> Result<GgufIndex, String> {
         let absolute = data_offset_u64
             .checked_add(relative_offset)
             .ok_or_else(|| format!("tensor {name:?} data offset overflow"))?;
-        let payload_len = tensor_payload_len(type_id, &dimensions)?;
+        // the native EXL2 / EXL3 blobs carry their own length in the header (it depends on the bit widths of the matrix)
+        let payload_len = if exl::is_exl_type(type_id) {
+            let at = usize::try_from(absolute).map_err(|_| format!("tensor {name:?} offset does not fit usize"))?;
+            exl::payload_len(data.get(at..).unwrap_or(&[]), type_id).map_err(|e| format!("tensor {name:?}: {e}"))?
+        } else {
+            tensor_payload_len(type_id, &dimensions)?
+        };
         let end = absolute
             .checked_add(payload_len)
             .ok_or_else(|| format!("tensor {name:?} payload range overflow"))?;
@@ -896,6 +947,30 @@ mod tests {
         assert_eq!(meta["tokenizer.ggml.model"], "gpt2");
         // the original view is untouched
         assert_eq!(mapped.index().metadata["general.architecture"], "exaone");
+    }
+
+    #[test]
+    fn mlx_affine_type_ids_round_trip_and_size_the_payload() {
+        for bits in [2u32, 3, 4, 5, 6, 8] {
+            for group in [32u32, 64, 96, 128, 256, 8160] {
+                for bf16 in [false, true] {
+                    let m = MlxAffine { bits, group, bf16 };
+                    assert_eq!(mlx_affine(m.type_id()), Some(m));
+                    assert!(mlx_affine_supported(bits, group));
+                    // a row of two groups
+                    let cols = u64::from(group) * 2;
+                    assert_eq!(tensor_payload_len(m.type_id(), &[cols, 3]).unwrap(), 3 * 2 * (u64::from(group) * u64::from(bits) / 8 + 4));
+                }
+            }
+        }
+        for (bits, group) in [(1u32, 64u32), (7, 64), (9, 64), (4, 0), (4, 48), (4, 32 * 256)] {
+            assert!(!mlx_affine_supported(bits, group), "{bits} bits, group {group}");
+        }
+        // ids outside the family and ids with unsupported fields are not MLX types
+        for id in [0x8000_0010u32, 0x8001_2000, 0x8001_0000, 0x8001_0017, 0x8001_0004 + 0x20_0000] {
+            assert_eq!(mlx_affine(id), None, "{id:#x}");
+        }
+        assert!(tensor_payload_len(0x8001_0024, &[96, 1]).is_err(), "row length 96 is not a multiple of the 64 group");
     }
 
     #[test]

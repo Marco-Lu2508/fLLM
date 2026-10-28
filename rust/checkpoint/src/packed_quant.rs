@@ -523,6 +523,14 @@ impl PackedData {
         }
     }
 
+    /// The MLX affine tensor, if this is one.
+    pub fn mlx(&self) -> Option<&crate::dequant_bits::MlxAffine> {
+        match self {
+            Self::Dyn(t) => t.mlx(),
+            _ => None,
+        }
+    }
+
     /// The MXFP4 tensor, if this is one.
     pub fn mxfp4(&self) -> Option<&crate::dequant::Mxfp4> {
         match self {
@@ -548,6 +556,24 @@ impl PackedData {
         match self {
             Self::SymInt(t) => Some(t),
             _ => None,
+        }
+    }
+
+    /// `(dtype name, blob length)` when this tensor can be stored as a native `EXL2` / `EXL3` blob (not stacked experts).
+    pub fn exl_native(&self) -> Option<(&'static str, usize)> {
+        match self {
+            Self::Exl2(t) => t.blob_len().ok().map(|n| ("EXL2", n)),
+            Self::Exl3(t) => t.blob_len().ok().map(|n| ("EXL3", n)),
+            _ => None,
+        }
+    }
+
+    /// Write the native blob of an EXL2 / EXL3 tensor; `order[i]` is the source row written as row `i`.
+    pub fn write_exl_blob(&self, w: &mut impl std::io::Write, order: Option<&[usize]>) -> Result<u64, String> {
+        match self {
+            Self::Exl2(t) => t.write_blob(w, order),
+            Self::Exl3(t) => t.write_blob(w, order),
+            _ => Err("tensor cannot be stored as a native EXL blob".into()),
         }
     }
 

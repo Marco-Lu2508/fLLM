@@ -165,9 +165,13 @@ quantization_config JSON is retained as `fllm.source.quantization_config`, inclu
 bits, head_bits and calibration when supplied. Actual widths come from each
 matrix's group or trellis tensors, not from a checkpoint's average bit count.
 
-F16 conversion expands the weights and loses EXL's storage and bandwidth
-advantages. Requantization introduces another lossy step and does not preserve
-the original EXL codes. Import is not native EXL inference. EXL2 supports upstream
+By default (no `--outtype`) the matrices stay packed as the fLLM-specific tensor types
+`EXL2` and `EXL3`: the original codes, scale indices, group widths and input permutation
+(EXL2), or the trellis tiles and Hadamard sign vectors (EXL3), are copied bit for bit and the
+engine multiplies them without expanding them (CPU, and CUDA-core kernels on NVIDIA GPUs; other
+backends expand to F16 once at upload). `--outtype f16` expands the weights and loses EXL's
+storage and bandwidth advantages; requantization is another lossy step and does not preserve
+the original EXL codes. Stacked expert tensors are always expanded. EXL2 supports upstream
 widths 2/3/4/5/6/8 and validated input permutations. EXL3 supports integer widths
 1..8, default/mcg/mul1 codebooks and 128-block Hadamard transforms. Fractional
 EXL3, deprecated separate scale tensors and non-linear n-gram rings are rejected.

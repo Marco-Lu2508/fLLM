@@ -28,5 +28,5 @@ pub use layout::{
 };
 pub use plan::{
     all_kernel_names, plan_quantized_linear, BufferSlots, LinearOp, LinearPlan, MetalCapsLike,
-    PermuteParams, PlanConstant, PlanError, PrepassPlan, QParams, FC_NB, FLAG_BIAS, FLAG_RESIDUAL,
+    PermuteParams, PlanConstant, PlanError, PrepassPlan, QParams, FC_NB, FLAG_BIAS, FLAG_RESIDUAL, MLX_BF16_FLAG,
 };

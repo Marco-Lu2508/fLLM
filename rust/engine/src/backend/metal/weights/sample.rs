@@ -107,6 +107,13 @@ pub fn sample_weights(quant: QuantType, rows: usize, cols: usize, seed: u64) -> 
                 b[block / 2..block / 2 + 2].copy_from_slice(&d);
                 b[block / 2 + 2] = (rng.next_u64() % 16) as u8;
             }
+            q if q.mlx_affine().is_some() => {
+                // scale and bias in the 16-bit format of the type, then the codes (any bytes are valid codes)
+                let bf = q.mlx_affine().is_some_and(|m| m.bf16);
+                let enc = |v: f32| if bf { bf16::from_f32(v).to_le_bytes() } else { f16::from_f32(v).to_le_bytes() };
+                b[..2].copy_from_slice(&enc(0.001 + (rng.next_u64() % 100) as f32 / 4000.0));
+                b[2..4].copy_from_slice(&enc((rng.next_u64() % 100) as f32 / 1000.0 - 0.05));
+            }
             other => panic!("no generator for {other:?}"),
         }
         bytes.extend(b);

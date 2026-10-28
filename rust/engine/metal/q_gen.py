@@ -27,6 +27,24 @@ FORMATS = [
     ("q4z32", "q_fmt_q4z32", "fp"),
     ("q4z64", "q_fmt_q4z64", "fp"),
     ("q4z128", "q_fmt_q4z128", "fp"),
+    ("mlx2g32", "q_fmt_mlx2g32", "mlx"),
+    ("mlx2g64", "q_fmt_mlx2g64", "mlx"),
+    ("mlx2g128", "q_fmt_mlx2g128", "mlx"),
+    ("mlx3g32", "q_fmt_mlx3g32", "mlx"),
+    ("mlx3g64", "q_fmt_mlx3g64", "mlx"),
+    ("mlx3g128", "q_fmt_mlx3g128", "mlx"),
+    ("mlx4g32", "q_fmt_mlx4g32", "mlx"),
+    ("mlx4g64", "q_fmt_mlx4g64", "mlx"),
+    ("mlx4g128", "q_fmt_mlx4g128", "mlx"),
+    ("mlx5g32", "q_fmt_mlx5g32", "mlx"),
+    ("mlx5g64", "q_fmt_mlx5g64", "mlx"),
+    ("mlx5g128", "q_fmt_mlx5g128", "mlx"),
+    ("mlx6g32", "q_fmt_mlx6g32", "mlx"),
+    ("mlx6g64", "q_fmt_mlx6g64", "mlx"),
+    ("mlx6g128", "q_fmt_mlx6g128", "mlx"),
+    ("mlx8g32", "q_fmt_mlx8g32", "mlx"),
+    ("mlx8g64", "q_fmt_mlx8g64", "mlx"),
+    ("mlx8g128", "q_fmt_mlx8g128", "mlx"),
     ("f16", "q_fmt_f16", "fp"),
     ("bf16", "q_fmt_bf16", "fp"),
     ("f32", "q_fmt_f32", "fp"),
@@ -39,6 +57,7 @@ FAMILY_TEXT = {
     "legacy": "Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL",
     "kquant": "Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_XS",
     "fp": "MXFP4, NVFP4, Q4Z32/64/128 (AWQ/GPTQ), F16, BF16, F32, FP8M, FP8 E4M3/E5M2",
+    "mlx": "MLX affine group quantization (MLXA types): 2, 3, 4, 5, 6 and 8 bits, groups of 32, 64 and 128; f16 or bf16 scales and biases",
 }
 
 
@@ -56,7 +75,7 @@ def header(kind, family):
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    for family in ("legacy", "kquant", "fp"):
+    for family in ("legacy", "kquant", "fp", "mlx"):
         fmts = [(n, s) for (n, s, f) in FORMATS if f == family]
         text = header("mv", family)
         for n, s in fmts:

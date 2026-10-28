@@ -28,6 +28,7 @@ Checkpoint output types are preserve, F16 and F32. This does not add a GGUF quan
 | FP8 (`quant_method` fp8, ModelOpt `quant_algo` FP8, compressed-tensors float 8 bit) | `FP8M` for one scale per tensor or row; F16 for block-wise `weight_scale_inv` (`weight_block_size` or `block_structure`) | `weight_scale_inv` multiplies the decoded value, as in the DeepSeek and transformers FP8 code |
 | ModelOpt NVFP4 | GGUF type 40 plus `<name>.scale` and `<name>.input_scale` | details in [awq-gptq-marlin.md](awq-gptq-marlin.md); other `quant_algo` values are refused |
 | compressed-tensors `pack-quantized` (symmetric int4, int8) and `int-quantized` (symmetric int8) | int4 with group 32/64/128: `Q4Z`; 8 bit with a scale per 32 or more inputs: `Q8_0`; else F16 | scales may be f16, bf16 or f32 (rounded to f16 in the blocks) |
+| MLX affine (`quantization: {bits, group_size}`, 2/3/4/5/6/8 bits) | `MLXA<bits>G<group>[B]` (fLLM-specific, see below), else F16 | words, scales and biases are copied as they are |
 | EXL2, EXL3, gpt-oss MXFP4 | see [exl-formats.md](exl-formats.md) | |
 
 `--outtype f16` or `f32` expands every quantized weight. Refused with a message that says what to use instead: ModelOpt algorithms
@@ -35,6 +36,39 @@ other than NVFP4 and FP8 (`unsupported ModelOpt quant_algo "..."`), compressed-t
 "nvfp4-pack-quantized") is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint ...`), asymmetric or act-order or sparse
 compressed-tensors, mixed-precision `config_groups`, and other quantization methods (`unsupported quantization_config quant_method
 "..." (supported: gptq, awq, fp8, compressed-tensors, modelopt NVFP4/FP8, exl2, exl3)`).
+
+### MLX affine quantization (`MLXA`)
+
+mlx-lm and mlx-community exports quantize every linear (and, with `nn.quantize`, the embedding and the head) per group of 32, 64 or 128 inputs:
+`weight` holds `bits`-bit codes in `uint32` words (code `i` of a row at bit `i * bits` of a little-endian bit stream, so the 3, 5 and 6 bit
+codes straddle word boundaries), `scales` and `biases` one value per group, `w = scale * code + bias`. The bias is a float, not a multiple of
+the scale, so Q4Z (an integer zero point) cannot hold it exactly; the weights stay native as their own tensor types instead:
+
+* **Type id** `0x8001_0000 | bf16 << 12 | (group / 32) << 4 | bits` (`fllm_gguf_probe::MlxAffine`; the converter names them
+  `MLXA4G64`, `MLXA4G64B` for bfloat16 scales). Bits 2, 3, 4, 5, 6 and 8; any group that is a multiple of 32.
+* **Block** (one group): scale and bias as two 16-bit floats (f16, or bfloat16 when the checkpoint\'s values need it), then
+  `group * bits / 8` bytes of codes exactly as the MLX words hold them. A row is `cols / group` blocks, so the file costs what the
+  checkpoint costs (4.5 bits per weight for 4-bit with group 64). Tensors that are rows of blocks need no special treatment in the
+  loader: row slices, tensor-parallel splits along the inputs (by groups), memory mapping, and embedding lookups work as for the other
+  block formats.
+* **Exact or not at all.** The converter checks that every scale and bias of a tensor survives the round trip through f16 (preferred) or
+  bfloat16 bit for bit. If not (float32 scales with a full mantissa, as `mx.quantize` makes them in float32), the width is 7 bits, or
+  the group is not a multiple of 32, the tensor is expanded to F16 as before and the converter prints a warning that says why. Nothing is
+  re-quantized. mlx-community checkpoints store bfloat16 or f16 scales, so they are native.
+* **Refused**: the `mxfp4` and `nvfp4` modes of MLX (`"mode"` in the `quantization` dictionary; their E8M0 / E4M3 scales and the lack of
+  biases need their own reader) and stacked expert weights (3-dimensional `weight`), with a message.
+* **CPU** (`cpu_mlx.rs`): f32 activations against the packed codes; 32 codes are unpacked at a time with the bit width as a constant,
+  tiles of 4 rows are decoded once for all tokens, AVX2 + FMA where the CPU has them. It is also the reference of the device tests.
+* **CUDA** (`cuda/mlx_affine.cu`, device image in `backend/mlx.rs`): the codes, scales and biases become three planes; a GEMV (one warp per
+  row, up to 4 tokens per pass), an FP32 tile GEMM and a tensor-core GEMM (WMMA, weights dequantized into FP16 fragments in shared memory,
+  from sm_75) read the packed words directly. Group sizes and bit widths are not templated beyond the bit width. AMD GPUs expand to F16.
+* **Metal** (`metal/common.metal` `q_fmt_mlx`, `q_*_mlx.metal`, `backend/metal/weights`): the kernels of the quantized linear family with
+  a chunk decoder for the MLX codes; the codes plane and one `scale | bias << 16` word per group; bit 63 of the plane-1 offset marks bfloat16.
+  `FLLM_METAL_NO_MLX=1` switches them off (the decoder then expands to F16 on upload).
+* **Other backends** (Vulkan, wgpu, SYCL, NPU, TPU, HIP): no kernel; `RustDecoder::init_backend` checks the capability list and uploads the
+  weight dequantized as F16 (one line on stderr names the first tensor). Correct, 16 bits per weight on the device.
+
+What is proven (CPU tests) and what is not: see the table below and the end of this section.
 
 ### Conversion on first use
 
@@ -93,13 +127,13 @@ checkpoint only; the extra memory is the size of the tensors that cannot be slic
   refused before it is parsed. A finished conversion of the same model in the cache is still used (it starts faster than rebuilding
   the tensors on every start). A checkpoint whose weights exceed three quarters of the free memory (a half of it for already
   quantized ones) is converted too, because the converted file would live in the evictable page cache while the built tensors are
-  anonymous memory. MLX and bitsandbytes weights count four times, EXL2/EXL3 weights five times their size in that comparison, since
-  the converter expands them to 16-bit weights. If the built tensors exceed three quarters of the free memory at load time the load
+  anonymous memory. bitsandbytes weights count four times their size in that comparison, since the converter expands them to
+  16-bit weights; MLX weights and EXL2/EXL3 matrices stay packed (a compact blob is built once into the anonymous map, about a quarter of the former
+  F16 size at 4 bits per weight), only stacked expert tensors are still expanded (MLX weights whose scales have no exact 16-bit form too). If the built tensors exceed three quarters of the free memory at load time the load
   stops with a message instead.
 - What stays a slice: unquantized tensors that need no change (also those of a PyTorch archive whose storages are stored without
-  compression, which is what `torch.save` writes). Everything the converter expands (MLX, bitsandbytes, EXL2/EXL3 to F16) or repacks
-  (MXFP4 blocks, gpt-oss experts) is built once into the anonymous map, so these formats need memory for the 16-bit weights (EXL,
-  MLX, bitsandbytes) where the converted file would have lived in the page cache.
+  compression, which is what `torch.save` writes). Everything the converter expands (bitsandbytes, EXL2/EXL3 stacked experts to F16) or builds as a compact blob (EXL2/EXL3, the `MLXA` blocks of MLX) or repacks
+  (MXFP4 blocks, gpt-oss experts) is built once into the anonymous map, so these formats need memory for the 16-bit weights (bitsandbytes) or the packed blob (EXL, MLX) where the converted file would have lived in the page cache.
 - A Hub repository is downloaded into its snapshot directory and that directory is loaded; `pull` then only downloads.
 - Each start of the server builds the non-slice tensors again (seconds for small models; not measured for large ones). A converted,
   cached GGUF starts without that work, so `--no-direct-load` can be better for a model you start often and have disk for.
@@ -118,14 +152,24 @@ What the tests prove (all on the CPU, tiny synthetic models, nothing from the ne
 | `prepare` hands out the checkpoint by default, writes nothing to the cache, honours `--no-direct-load`, the environment switches, a cached conversion and `--direct`; `--quant` while loading equals the cached conversion for q8_0, q4_0, q4_k_m; Hub download then direct load | `import::tests::verified_checkpoints_load_directly_by_default_and_no_direct_load_converts`, `an_existing_conversion_is_used_unless_direct_is_forced`, `the_environment_switches_choose_the_path`, `quantizing_on_load_matches_the_cached_conversion`, `every_supported_checkpoint_format_loads_directly_without_being_asked`, `hub_checkpoint_loads_directly_after_the_download_without_a_gguf_file` |
 | Every tensor byte, dimension, type and metadata value of the direct load equals the converted file for MXFP4 (compressed-tensors, 1-2 shards, `preserve` and `f16`; the gpt-oss checkpoint of the converter's tests, experts stay MXFP4) | `fllm-checkpoint` `direct_format_tests::mxfp4_compressed_tensors_loads_identically_to_the_converted_file`, `gpt_oss_mxfp4_checkpoint_loads_identically_to_the_converted_file` |
 | The same for bitsandbytes NF4 and FP4 (block 64/128, with and without double quantization, 1-2 shards), int8 (1 and 3 shards), NF4 as F32, NF4 with `q8_0` on load | `direct_format_tests::bitsandbytes_checkpoints_load_identically_to_the_converted_file` |
-| The same for MLX affine with 2, 3, 4, 5, 6 and 8 bits, group 32 and 64, linears only or also embedding and head, 1-2 shards, bits given as `quantization` or as `quantization_config` | `direct_format_tests::mlx_quantized_checkpoints_load_identically_to_the_converted_file` |
+| The same for MLX affine with 2, 3, 4, 5, 6 and 8 bits, group 32 and 64, linears only or also embedding and head, 1-2 shards, bits given as `quantization` or as `quantization_config`; the file holds native `MLXA` tensors of the right type, bfloat16 scales are picked when half does not hold them, float32 scales and group 16 fall back to F16 | `direct_format_tests::mlx_quantized_checkpoints_load_identically_to_the_converted_file`, `mlx_bfloat16_scales_are_native_and_scales_without_an_exact_16_bit_form_are_expanded` |
+| Native MLX blocks decode bit for bit like the expanding reader (real `mx.quantize` fixtures for 2-8 bits, groups 32/64, with scales rounded to f16 and bfloat16; an independent word-and-shift decoder) and every bit width unpacks, including the codes that straddle two words | `dequant_bits::tests::mlx_fixtures_become_native_blocks_that_decode_identically`, `native_blocks_unpack_every_bit_width_including_codes_that_straddle_words`, `scales_pick_half_then_bfloat16_and_anything_else_is_not_native`, `mlx_dtype_names_round_trip_to_type_ids` |
+| An MLX checkpoint (2-8 bits, groups 32 and 64, embeddings and head quantized too) runs on the CPU engine against its dequantized float32 twin to 1e-4 of the largest logit, and as an F16 expansion to 2e-2; the tensors are native `MLXA` types | `fllm-engine` `import_tests::mlx_affine_checkpoints_stay_native_and_match_the_reference` |
+| The CPU kernel equals the dequantized weights to the f32 summation bound for every width, group 32-128, f16 and bfloat16 scales, 1-17 tokens and rows that fill no tile; codes at the word boundaries are read from both words | `cpu_mlx::tests::linear_matches_the_dequantized_weights_within_f32_summation_error`, `straddling_codes_are_read_from_both_words`, `every_code_of_every_bit_width_unpacks_including_the_ones_that_straddle_words` |
+| The device image (three planes) and a host model of the CUDA GEMV (lane striding over chunks, 32-lane butterfly sum, FMA order) equal the CPU reference | `backend::mlx::tests::planes_hold_the_words_scales_and_biases_of_every_row`, `the_kernel_model_matches_the_cpu_reference_for_all_widths_and_odd_shapes` |
+| Other MLX quantization modes are refused with the reason | `convert::tests::mlx_modes_other_than_affine_are_refused_with_the_reason` |
+| Metal: file blocks become the codes plane and the scale words, the kernel names and the bfloat16 flag are planned, a Rust mirror of the MSL chunk decoder equals the reference for all 36 formats; the MSL decoder text itself, compiled as C++, decodes 107520 values of every width, group size and scale format bit for bit | `backend::metal::weights::tests::mlx_planes_hold_every_code_scale_and_bias_of_the_file_blocks`, `mlx_formats_agree_with_the_type_ids_of_the_checkpoint_and_plan_their_kernels`, `repacked_planes_decode_to_the_reference`; `metal/emu/run_dec8_mlx.sh` |
 | The same for EXL2 (all group widths 2-8 bits, permuted inputs) and EXL3 (2-4 bits, all three codebooks, dense and bit-packed sign vectors, 1-2 shards) | `direct_format_tests::exl2_checkpoints_load_identically_to_the_converted_file`, `exl3_checkpoints_load_identically_to_the_converted_file` |
+| The same for EXL2 (all group widths 2-8 bits, permuted inputs) and EXL3 (2-4 bits, all three codebooks, dense and bit-packed sign vectors, 1-2 shards), as native `EXL2` / `EXL3` tensors and (`--dtype f16`) expanded | `direct_format_tests::exl2_checkpoints_load_identically_to_the_converted_file`, `exl3_checkpoints_load_identically_to_the_converted_file` |
+| EXL2 / EXL3 stay packed: the native blob dequantizes to the importer's expanded matrix (EXL2 within 2e-3 per weight, EXL3 within 1e-2 of the RMS; all widths, codebooks, row reordering), the CPU kernels equal the dequantized matrix, and a synthetic EXL2 model's logits equal those of an independent dequantization (5e-3) | `exl2::tests::native_blob_matches_the_expanded_importer_path`, `exl3::tests::native_*`, `cpu_exl::tests::*`, `import_tests::exl2_checkpoint_stays_packed_and_matches_the_dequantized_reference` |
 | The same for PyTorch ZIP weights: one stored bf16 archive, one compressed archive, two f16 shards with an index, f32 converted to f16; stored storages stay slices of the archive | `direct_format_tests::pytorch_zip_weights_load_identically_to_the_converted_file`, `stored_pytorch_storages_stay_slices_of_the_archive` |
 | A pickle that would run `os.system`, `eval`, `exec`, `subprocess` calls (GLOBAL, STACK_GLOBAL, INST, OBJ, NEWOBJ, EXT, BUILD) is refused and runs nothing, also through the direct load; a legacy non-ZIP pickle is refused | `direct_format_tests::malicious_pickles_are_refused_and_never_run` |
 | The memory limit stops the load of MLX, bitsandbytes, EXL2 and compressed PyTorch weights before anything is built | `direct_format_tests::the_memory_budget_applies_to_every_expanded_format` |
 | Through `open_model`, tensors and the decoder's logits (finite, bit-identical) equal the converted file for MLX (4 bit g32, 3 bit g64), bitsandbytes NF4 and int8, MXFP4, EXL2 and a PyTorch `.bin` | `fllm-engine` `import_tests::direct_load_equals_the_converted_file_for_mxfp4_bitsandbytes_mlx_exl2_and_pytorch_weights` |
 | `prepare` hands these out by default without touching the cache, `--no-direct-load` converts to the same model (used afterwards by default), `--direct` ignores the conversion; a Hub repository with PyTorch weights loads directly after the download | `import::tests::mxfp4_bitsandbytes_mlx_exl2_and_pytorch_checkpoints_load_directly_by_default`, `hub_repository_with_pytorch_weights_loads_directly_after_the_download` |
 | The real `fllm-rs serve` binary, started on a checkpoint directory (NVFP4, bf16, bf16 with `--quant q8_0`), writes no GGUF file, names the model after the directory and returns the same greedy completion as with `--no-direct-load` | `import_tests::the_serve_command_loads_checkpoint_directories_directly_and_answers_like_the_converted_file` (needs the binary built next to the test executable, else it skips itself) |
+
+Not proven for MLX affine: any run on a GPU (CUDA `mlx_affine.cu` compiles with nvcc 12.8 for sm_80/89/90/120 and the Rust side builds with `--features cuda`; the self test group `mlx` of `fllm-rs selftest-gpu --only mlx` checks every kernel on a device and has not run on one; the Metal kernels have only been compiled as C++ on the CPU and are awaiting the Apple-silicon CI run), checkpoints from the real mlx-community (the fixtures come from `mx.quantize`, the engine tests from a writer in the test), `mxfp4` / `nvfp4` modes.
 
 Not proven: real multi-GB checkpoints (time to first token, peak memory, behaviour near the memory limit), GPU runs of a directly
 loaded model (the tensors reach the GPU through the same `MappedGguf` calls, but only the CPU was run), tensors of a safetensors

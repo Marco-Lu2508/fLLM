@@ -369,6 +369,29 @@ impl Layer {
     }
 }
 
+/// MLX affine weights for a backend that has no kernel for them: dequantized on the host and uploaded as f16 (the values the converter
+/// used to write), one tensor at a time. The device then holds 16 bits per weight; the CPU backend and CUDA read the packed form.
+fn upload_mlx_expanded(
+    backend: &dyn crate::backend::Backend,
+    name: &str,
+    kind: u32,
+    bytes: &[u8],
+    linear: &Linear,
+) -> Result<crate::backend::DeviceWeight, String> {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "[fllm-rs] {} has no kernel for MLX affine quantized weights yet; they are expanded to f16 when uploaded (first: {name})",
+            backend.name()
+        );
+    }
+    let values = compute::dequantize(bytes, kind, linear.rows * linear.cols)?;
+    let halves: Vec<u8> = values.iter().flat_map(|&v| half::f16::from_f32(v).to_bits().to_le_bytes()).collect();
+    backend
+        .upload_weight(name, &halves, crate::backend::QuantType::F16, linear.rows, linear.cols, linear.bias.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 struct Embedding {
     data: fllm_gguf_probe::TensorBytes,
     kind: u32,
@@ -2509,6 +2532,20 @@ impl RustDecoder {
         let upload_linear =
             |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
                 if let Some((kind, bytes)) = linear.packed_weights() {
+                    // packed EXL2 / EXL3 blobs are expanded to F16 here when the backend has no native kernel for them
+                    if fllm_gguf_probe::exl::is_exl_type(kind) && !backend.capabilities().supports_quant(crate::backend::QuantType::from_gguf_type_id(kind)) {
+                        let half = crate::cpu_exl::expanded_f16(bytes, kind, linear.rows, linear.cols)?;
+                        static NOTICE: std::sync::Once = std::sync::Once::new();
+                        NOTICE.call_once(|| eprintln!("[fllm-rs] the {} backend has no EXL2/EXL3 kernel: packed weights are expanded to F16 on upload (first: {name})", backend.name()));
+                        return backend
+                            .upload_weight_scaled(name, &half, crate::backend::QuantType::F16, linear.rows, linear.cols, linear.bias.as_deref(), linear.scale)
+                            .map_err(|e| e.to_string());
+                    }
+                    // MLX affine weights on a backend without a kernel for them: expanded to f16 once, here (documented in docs/gpu-backends.md)
+                    let quant = crate::backend::QuantType::from_gguf_type_id(kind);
+                    if quant.mlx_affine().is_some() && !caps.supports_quant(quant) {
+                        return upload_mlx_expanded(&*backend, name, kind, bytes, linear);
+                    }
                     // NVFP4: the backend stores the checkpoint's static activation scale next to the weight (read inside upload_weight_scaled)
                     crate::backend::set_next_nvfp4_input_scale(linear.input_scale);
                     let uploaded = backend

@@ -1,5 +1,6 @@
 //! Checkpoint (unshuffled) EXL2 packing. See docs/exl-formats.md for provenance.
 use crate::safetensors::{Payload, Tensor};
+use fllm_gguf_probe::exl::{pack_codes, Exl2Layout};
 use half::f16;
 use std::collections::HashMap;
 
@@ -275,6 +276,78 @@ impl Exl2 {
         self.elements
     }
 
+    /// Geometry of the native `EXL2` blob of this matrix (see `fllm_gguf_probe::exl`).
+    pub(crate) fn blob_layout(&self) -> Result<Exl2Layout, String> {
+        let groups: Vec<(usize, usize)> = self
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let end = self.groups.get(i + 1).map_or(self.input, |next| next.input_start);
+                (end - g.input_start, g.bits)
+            })
+            .collect();
+        Exl2Layout::new(self.output, self.input, &groups)
+    }
+
+    pub(crate) fn blob_len(&self) -> Result<usize, String> {
+        Ok(self.blob_layout()?.header.total)
+    }
+
+    /// The code of stored input `row` (inside group `group`) of output column `out`.
+    fn code(&self, group: usize, row: usize, out: usize) -> u32 {
+        let g = &self.groups[group];
+        let bit = (row - g.input_start) * g.bits;
+        let word = g.packed_start + bit / 32;
+        let shift = bit % 32;
+        let mut code = u32_at(self.weight.as_slice(), word * self.output + out) >> shift;
+        if shift + g.bits > 32 {
+            code |= u32_at(self.weight.as_slice(), (word + 1) * self.output + out) << (32 - shift);
+        }
+        code & ((1 << g.bits) - 1)
+    }
+
+    /// Write the native blob: the rows come in the order `order` (`order[i]` is the source row written as row `i`).
+    /// The codes, scale indices and group maxima are copied bit for bit; nothing is dequantized.
+    pub(crate) fn write_blob(&self, w: &mut impl std::io::Write, order: Option<&[usize]>) -> Result<u64, String> {
+        let layout = self.blob_layout()?;
+        let maxima: Vec<u16> = (0..self.groups.len()).map(|g| u16_at(self.maxima.as_slice(), g)).collect();
+        let mut perm = vec![0u32; self.input];
+        for (original, &packed) in self.inverse.iter().enumerate() {
+            perm[packed] = original as u32;
+        }
+        let io = |e: std::io::Error| e.to_string();
+        w.write_all(&layout.prefix(&maxima, &perm)).map_err(io)?;
+        let mut total = layout.header.data_off as u64;
+        let mut row = Vec::with_capacity(layout.header.row_bytes);
+        let mut codes = Vec::new();
+        for i in 0..self.output {
+            let out = match order {
+                Some(o) => *o.get(i).filter(|&&s| s < self.output).ok_or("invalid EXL2 row permutation")?,
+                None => i,
+            };
+            row.clear();
+            let mut nibbles = vec![0u32; self.groups.len().div_ceil(8)];
+            for (g, group) in self.groups.iter().enumerate() {
+                let n = layout.groups[g].0;
+                codes.clear();
+                codes.extend((0..n).map(|k| self.code(g, group.input_start + k, out) as u8));
+                pack_codes(&codes, group.bits, &mut row);
+                let nibble = (u32_at(self.scales.as_slice(), g * (self.output / 8) + out / 8) >> (4 * (out % 8))) & 15;
+                nibbles[g / 8] |= nibble << (4 * (g % 8));
+            }
+            for word in nibbles {
+                row.extend_from_slice(&word.to_le_bytes());
+            }
+            if row.len() != layout.header.row_bytes {
+                return Err("EXL2 row size mismatch".into());
+            }
+            w.write_all(&row).map_err(io)?;
+            total += row.len() as u64;
+        }
+        Ok(total)
+    }
+
     pub(crate) fn decode_chunk(&self, start: usize, dst: &mut [f32]) -> Result<(), String> {
         if start
             .checked_add(dst.len())
@@ -413,5 +486,45 @@ mod tests {
         assert!(Exl2::read("matrix", &mut g)
             .unwrap_err()
             .contains("permutation"));
+    }
+
+    fn with_varied_scales() -> Exl2 {
+        let mut g = encoded();
+        let scales: Vec<u8> = (0..24u32).map(|i| (i * 37 + 11) as u8).collect();
+        g.insert("q_scale".into(), tensor("q_scale", "I32", vec![6, 1], scales));
+        let maxima: Vec<u8> = (0..6).flat_map(|i| f16::from_f32(100.0 + 17.0 * i as f32).to_bits().to_le_bytes()).collect();
+        g.insert("q_scale_max".into(), tensor("q_scale_max", "F16", vec![6], maxima));
+        Exl2::read("matrix", &mut g).unwrap()
+    }
+
+    #[test]
+    fn native_blob_matches_the_expanded_importer_path() {
+        use fllm_gguf_probe::exl::Exl2View;
+        let reader = with_varied_scales();
+        let mut expanded = vec![0.0; reader.element_count()];
+        reader.decode_chunk(0, &mut expanded).unwrap();
+        let mut blob = Vec::new();
+        let written = reader.write_blob(&mut blob, None).unwrap();
+        assert_eq!(written as usize, blob.len());
+        assert_eq!(blob.len(), reader.blob_len().unwrap());
+        let view = Exl2View::validate(&blob).unwrap();
+        let native = view.dequantize();
+        let mut worst = 0.0f32;
+        for (a, b) in native.iter().zip(&expanded) {
+            // the importer rounds the group scale and the product to F16, the native path multiplies in F32
+            let err = (a - b).abs() / b.abs().max(1e-3);
+            worst = worst.max(err);
+            assert!((a - b).abs() <= 2e-3 * b.abs() + 1e-6, "native {a} vs expanded {b}");
+        }
+        assert!(worst < 2e-3, "worst relative error {worst}");
+        // a different row order writes the same rows, permuted
+        let order: Vec<usize> = (0..8).rev().collect();
+        let mut permuted = Vec::new();
+        reader.write_blob(&mut permuted, Some(&order)).unwrap();
+        let pv = Exl2View::validate(&permuted).unwrap().dequantize();
+        for (i, &src) in order.iter().enumerate() {
+            assert_eq!(pv[i * 192..(i + 1) * 192], native[src * 192..(src + 1) * 192]);
+        }
+        assert!(reader.write_blob(&mut Vec::new(), Some(&[0, 1])).is_err());
     }
 }

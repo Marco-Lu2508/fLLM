@@ -8,6 +8,7 @@ pub mod act_dtype;
 pub mod cpu;
 pub mod memory;
 pub mod moe;
+pub mod mlx;
 pub mod q4z;
 pub mod selftest;
 pub mod stub;
@@ -368,6 +369,10 @@ pub enum QuantType {
     Q4_K_Marlin,
     Fp8Marlin,
     Fp8Block,
+    /// fLLM-specific packed ExLlamaV2 / ExLlamaV3 matrices (GGUF types 0x8000_0030 / 0x8000_0031): one self-describing blob per tensor,
+    /// layout in `fllm_gguf_probe::exl`. They have no fixed block size; backends without a kernel get them expanded at upload.
+    Exl2,
+    Exl3,
     Other(u32),
 }
 
@@ -411,6 +416,8 @@ impl QuantType {
             0x8000_0016 => Self::Q4ZP128,
             0x8000_0020 => Self::Fp8Marlin,
             0x8000_0021 => Self::Fp8Block,
+            0x8000_0030 => Self::Exl2,
+            0x8000_0031 => Self::Exl3,
             other => Self::Other(other),
         }
     }
@@ -455,6 +462,8 @@ impl QuantType {
             Self::Nvfp4Marlin => 0x8000_0013,
             Self::Fp8Marlin => 0x8000_0020,
             Self::Fp8Block => 0x8000_0021,
+            Self::Exl2 => 0x8000_0030,
+            Self::Exl3 => 0x8000_0031,
             Self::Other(other) => *other,
         }
     }
@@ -468,6 +477,29 @@ impl QuantType {
             Self::Nvfp4Marlin => Some(16),
             _ => None,
         }
+    }
+
+    /// MLX affine group-quantized weights (`MLXA` types, ids from `fllm_gguf_probe::MLX_AFFINE_BASE`): the packed words, scales and biases of an
+    /// `mlx-community` checkpoint as they are. They travel as `Other(id)`; this decodes the id.
+    pub fn mlx_affine(&self) -> Option<fllm_gguf_probe::MlxAffine> {
+        match self {
+            Self::Other(id) => fllm_gguf_probe::mlx_affine(*id),
+            _ => None,
+        }
+    }
+
+    /// Every MLX affine type with a group size of 32, 64 or 128 (the ones the native kernels of a backend cover; a backend lists them in
+    /// `BackendCapabilities::supported_quants`).
+    pub fn mlx_affine_common() -> Vec<QuantType> {
+        let mut all = Vec::new();
+        for bits in [2u32, 3, 4, 5, 6, 8] {
+            for group in [32u32, 64, 128] {
+                for bf16 in [false, true] {
+                    all.push(Self::Other(fllm_gguf_probe::MlxAffine { bits, group, bf16 }.type_id()));
+                }
+            }
+        }
+        all
     }
 
     pub fn is_q4zp(&self) -> bool {
@@ -485,14 +517,14 @@ impl QuantType {
             }
             Self::IQ4_NL => 32,
             Self::IQ4_XS => 256,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 32,
             Self::NvFp4 => 64,
             Self::Q4Z32 | Self::Q4ZP32 => 32,
             Self::Q4Z64 | Self::Q4ZP64 => 64,
             Self::Q4Z128 | Self::Q4ZP128 => 128,
             Self::Nvfp4Marlin => 16,
-            Self::Other(_) => 32,
+            Self::Other(id) => fllm_gguf_probe::mlx_affine(*id).map_or(32, |m| m.group as usize),
         }
     }
 
@@ -522,12 +554,13 @@ impl QuantType {
             Self::IQ4_NL => 18,
             Self::IQ3_S => 110,
             Self::IQ4_XS => 136,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 17,
             Self::NvFp4 => 36,
             Self::Q4Z32 | Self::Q4ZP32 => 19,
             Self::Q4Z64 | Self::Q4ZP64 => 35,
             Self::Q4Z128 | Self::Q4ZP128 => 67,
+            Self::Other(id) => fllm_gguf_probe::mlx_affine(*id).map_or(32, |m| m.block_bytes() as usize),
             _ => 32,
         }
     }

@@ -245,6 +245,7 @@ extern "C" int fllm_cuda_set_exact(int on) {
 int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias,
                        int rows, int cols, int batch, void *x16, size_t x16_bytes) {
     const uint8_t *w = static_cast<const uint8_t *>(W);
+    if (fllm_kind_is_mlx(kind)) return fllm_mlx_launch(s, W, kind, X, Y, bias, rows, cols, batch);
     switch (kind) {
         case KIND_F32: return launch_kind<KIND_F32>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_F16: return launch_kind<KIND_F16>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
