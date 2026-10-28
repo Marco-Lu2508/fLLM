@@ -7,7 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Fixed
-- A chat answer that ended in the middle of a tool call (Gemma's `<|tool_call>call:...`) no longer shows the raw markup, and answers with tools get room for thinking, searching and writing (at least 2048 tokens or half the context). The default for Max tokens is 2048 (was 256) and its slider goes up to 8192. When the model runs out of tokens before it writes an answer, the page says so instead of "did not write an answer".
+- A chat answer that ended in the middle of a tool call (Gemma's `<|tool_call>call:...`) no longer shows the raw markup, and answers with tools get room for thinking, searching and writing (at least 2048 tokens or half the context). Max tokens is automatic by default (what is left of the context window after the prompt, up to 131072) instead of 256, and its slider reaches the context size of the loaded model. When the model runs out of tokens before it writes an answer, the page says so instead of "did not write an answer".
 
 ### Changed
 - fLLM has its own folder for settings, plugins, sub-agents, hooks, skills and notes (`%LOCALAPPDATA%LLM`, `~/Library/Application Support/fLLM`, `~/.local/share/fllm`; `FLLM_HOME` changes it). Before, they lay inside the Hugging Face cache. The first start moves the old files over. Models stay in the Hugging Face cache when it exists and go to `models/` in the own folder on a computer without one. The container images set `FLLM_HOME` to the volume path they used before.

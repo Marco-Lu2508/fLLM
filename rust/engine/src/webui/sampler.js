@@ -5,7 +5,7 @@
         top_p: parseFloat($('numTopP').value) || 0.95,
         top_k: parseInt($('numTopK').value, 10) || 0,
         min_p: parseFloat($('numMinP').value) || 0.0,
-        max_tokens: parseInt($('numMaxTokens').value, 10) || 2048,
+        max_tokens: parseInt($('numMaxTokens').value, 10) || 0, // 0: automatic, see requestBody
         repetition_penalty: parseFloat($('numRepeatPen').value) || 1.0,
         presence_penalty: parseFloat($('numPresencePen').value) || 0.0,
         frequency_penalty: parseFloat($('numFreqPen').value) || 0.0,
@@ -45,10 +45,20 @@
       }
     }
 
+    /** The range of the Max tokens slider follows the context window of the loaded model (0 on the slider is automatic). */
+    function syncMaxTokensRange() {
+      const ctx = Number(state.status?.model?.max_context) || 8192;
+      const max = Math.max(8192, Math.min(ctx, 1048576));
+      const range = $('rngMaxTokens');
+      if (Number(range.max) !== max) { range.max = max; range.step = max > 65536 ? 1024 : max > 16384 ? 256 : 16; }
+    }
+
     // Bind sliders <-> number inputs
     [['Temp', 'Temp'], ['TopP', 'TopP'], ['TopK', 'TopK'], ['MinP', 'MinP'], ['MaxTokens', 'MaxTokens'], ['RepeatPen', 'RepeatPen']].forEach(([n, r]) => {
       $(`rng${r}`).addEventListener('input', () => { $(`num${n}`).value = $(`rng${r}`).value; });
       $(`num${n}`).addEventListener('input', () => { $(`rng${r}`).value = $(`num${n}`).value; });
+    // 0 on the Max tokens slider means automatic: the number field then stays empty
+    $('rngMaxTokens').addEventListener('input', () => { if (Number($('rngMaxTokens').value) === 0) $('numMaxTokens').value = ''; });
     });
 
 

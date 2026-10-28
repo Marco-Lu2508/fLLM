@@ -388,6 +388,7 @@
     }
 
     function updateContextMeter() {
+      syncMaxTokensRange();
       if (window.fllmRemoteMeter && window.fllmRemoteMeter(contextUsed(currentThread()))) return; // providers hook: no local limit for a provider's model
       const max = state.status?.model?.max_context || 4096;
       setMeter('ctxFill', 'ctxText', contextUsed(currentThread()), max);
@@ -455,6 +456,15 @@
         temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, min_p: p.min_p, max_tokens: p.max_tokens,
         repetition_penalty: p.repetition_penalty, presence_penalty: p.presence_penalty, frequency_penalty: p.frequency_penalty,
       };
+      if (!p.max_tokens) {
+        // automatic: what is left of the context window after the prompt (a provider's model: a safe 4096)
+        const remote = Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected());
+        const window_ = Number(state.status?.model?.max_context) || 4096;
+        const text = JSON.stringify(messages);
+        const images = (text.match(/data:image/g) || []).length;
+        const used = estimateTokens(text.replace(/data:[^"]{200,}/g, '')) + images * 512;
+        body.max_tokens = remote ? 4096 : Math.max(64, Math.min(131072, Math.floor(window_ - used * 1.2 - 256)));
+      }
       // The engine rejects a request whose prompt plus max_tokens exceeds the context (OpenAI's behaviour). The page's
       // estimate of the prompt is rough, so for a small context it asks for a share of the window instead of the
       // sampler's number: a 512-token model then answers shorter instead of failing the whole request.
