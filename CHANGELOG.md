@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Fixed
+- The Sampling panel (and the other pop-up panels above the message box) is no longer cut off at the top of the window: it opens below when there is not enough room above, never grows beyond the window and scrolls inside.
 - A chat answer that ended in the middle of a tool call (Gemma's `<|tool_call>call:...`) no longer shows the raw markup, and answers with tools get room for thinking, searching and writing (at least 2048 tokens or half the context). Max tokens is automatic by default (what is left of the context window after the prompt, up to 131072) instead of 256, and its slider reaches the context size of the loaded model. When the model runs out of tokens before it writes an answer, the page says so instead of "did not write an answer".
 
 ### Changed

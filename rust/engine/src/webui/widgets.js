@@ -286,3 +286,41 @@
       document.addEventListener('scroll', close, true);
       window.addEventListener('blur', close);
     })();
+
+    /** Pop-up panels (sampling, system prompt, assistants ...) open above their button: when there is not enough room above they open below,
+     *  and they never grow beyond the window (the content scrolls instead). */
+    (() => {
+      function fit(panel) {
+        if (panel.classList.contains('cs-list')) return;
+        const anchor = panel.parentElement;
+        if (!anchor) return;
+        panel.style.top = '';
+        panel.style.bottom = '';
+        panel.style.left = '';
+        panel.style.maxHeight = 'none';
+        const natural = Array.from(panel.children).reduce((sum, child) => sum + (child.scrollHeight || child.offsetHeight), 0) + 2;
+        const rect = anchor.getBoundingClientRect();
+        const above = rect.top - 16;
+        const below = window.innerHeight - rect.bottom - 16;
+        if (natural <= above) {
+          panel.style.maxHeight = '';
+        } else if (below > above) {
+          panel.style.top = 'calc(100% + 10px)';
+          panel.style.bottom = 'auto';
+          panel.style.maxHeight = `${Math.max(160, Math.floor(below))}px`;
+        } else {
+          panel.style.maxHeight = `${Math.max(160, Math.floor(above))}px`;
+        }
+        const box = panel.getBoundingClientRect();
+        if (box.right > window.innerWidth - 8) panel.style.left = `${Math.round(window.innerWidth - 8 - box.right)}px`;
+        else if (box.left < 8) panel.style.left = `${Math.round(8 - box.left)}px`;
+      }
+      const watcher = new MutationObserver((records) => {
+        for (const r of records) {
+          const el = r.target;
+          if (el.classList && el.classList.contains('popover-panel') && el.classList.contains('open')) fit(el);
+        }
+      });
+      watcher.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+      window.addEventListener('resize', () => document.querySelectorAll('.popover-panel.open').forEach(fit));
+    })();
