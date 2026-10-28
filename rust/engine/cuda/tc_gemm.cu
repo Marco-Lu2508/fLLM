@@ -100,7 +100,7 @@ __device__ __forceinline__ void store16(__half *dst, const float *v) {
     d[1] = b;
 }
 
-template <int KIND>
+template <uint32_t KIND>
 __global__ void __launch_bounds__(TC_NT, TC_MINB)
 tc_gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y,
                const float *__restrict__ bias, int rows, int cols, int batch) {
@@ -209,7 +209,7 @@ tc_gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float
 // AMD matrix cores through rocWMMA (MIT, https://github.com/ROCm/rocWMMA): the same decode-into-shared-memory scheme as above;
 // the 16x16 output tiles of the block are dealt to the waves, A = activations (token x k), B = decoded weights (k x row).
 constexpr int TC_EPI_BYTES = 8 * 256 * sizeof(float);  // epilogue staging for up to 8 waves
-template <int KIND>
+template <uint32_t KIND>
 __global__ void __launch_bounds__(TC_NT)
 tc_gemm_wmma_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y,
                     const float *__restrict__ bias, int rows, int cols, int batch) {
@@ -317,7 +317,7 @@ tc_gemm_wmma_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, 
 }
 #endif
 
-template <int KIND>
+template <uint32_t KIND>
 static int run(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols,
                int batch) {
     if (TC_SMEM > (size_t)fllm_smem_limit()) return 0;
@@ -361,7 +361,7 @@ int fllm_tc_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, fl
     if (fllm_hip_gemm_try(s, W, kind, X, Y, bias, rows, cols, batch)) return 1;
 #endif
     const uint8_t *w = static_cast<const uint8_t *>(W);
-    switch (kind) {
+    switch ((uint32_t)kind) {
         case KIND_F32: return run<KIND_F32>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_F16: return run<KIND_F16>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_BF16: return run<KIND_BF16>(s, w, X, Y, bias, rows, cols, batch);
@@ -384,6 +384,11 @@ int fllm_tc_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, fl
         case KIND_IQ3_S: return run<KIND_IQ3_S>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_IQ2_S: return run<KIND_IQ2_S>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_IQ1_M: return run<KIND_IQ1_M>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_NF4B64: return run<KIND_NF4B64>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_NF4B128: return run<KIND_NF4B128>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_FP4B64: return run<KIND_FP4B64>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_FP4B128: return run<KIND_FP4B128>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_INT8R: return run<KIND_INT8R>(s, w, X, Y, bias, rows, cols, batch);
         default: return 0;
     }
 }

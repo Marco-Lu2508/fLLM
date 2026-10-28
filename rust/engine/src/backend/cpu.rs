@@ -197,6 +197,11 @@ impl CpuBackend {
             QuantType::Q4Z32,
             QuantType::Q4Z64,
             QuantType::Q4Z128,
+            QuantType::Nf4B64,
+            QuantType::Nf4B128,
+            QuantType::Fp4B64,
+            QuantType::Fp4B128,
+            QuantType::Int8Row,
             QuantType::Exl2,
             QuantType::Exl3,
         ];
@@ -752,6 +757,13 @@ impl Stream for CpuStream {
             _ => weight.quant_type.to_gguf_type_id(),
         };
         let w_bytes = read_bytes(&weight.buffer)?;
+        if weight.quant_type.is_bnb() {
+            // NF4 / FP4 / int8 blocks: the packed-weight kernel (f32 activations), the dequantizing loop below when the shape does not fit
+            let bias = b_data.as_deref().map(|b| &b[..rows]);
+            if let Some(values) = crate::cpu_bnb::linear(&w_bytes, kind, &x_data, rows, cols, bias) {
+                return write_f32(out, &values, "quantized_linear");
+            }
+        }
         let perm: Option<Vec<usize>> = if is_q4zp {
             let p_bytes = &w_bytes[rows * row_bytes..];
             Some((0..cols).map(|c| u32::from_le_bytes(p_bytes[c * 4..(c + 1) * 4].try_into().unwrap()) as usize).collect())

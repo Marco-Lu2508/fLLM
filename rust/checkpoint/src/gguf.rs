@@ -114,6 +114,7 @@ pub fn write_to(
             "MXFP4" => 39,
             "NVFP4" => 40,
             "Q8_0" => 8,
+            other if fllm_gguf_probe::bnb::type_id_by_name(other).is_some() => fllm_gguf_probe::bnb::type_id_by_name(other).unwrap_or(0),
             "Q4Z32" => 0x8000_0010,
             "Q4Z64" => 0x8000_0011,
             "Q4Z128" => 0x8000_0012,
@@ -398,6 +399,9 @@ fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result
                 .ok_or_else(|| "tensor cannot be stored as MXFP4".to_owned())?
                 .encode_gguf_row(row, buf)
         });
+    }
+    if let Some(type_id) = fllm_gguf_probe::bnb::type_id_by_name(&t.dtype) {
+        return write_packed_rows(w, t, |row, buf| p.encode_bnb_row(type_id, row, buf));
     }
     if t.dtype.starts_with("MLXA") {
         return write_packed_rows(w, t, |row, buf| {

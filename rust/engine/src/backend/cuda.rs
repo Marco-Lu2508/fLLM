@@ -921,6 +921,8 @@ impl CudaBackend {
             .and_then(|t| t.parse::<u32>().ok())
             .unwrap_or(0);
         let mut supported_quants: Vec<QuantType> = NATIVE_KINDS.iter().map(|&k| QuantType::from_gguf_type_id(k)).collect();
+        // bitsandbytes NF4 / FP4 / int8 blocks are read as they are stored (cuda/bnb.cuh, decode16 in common.cuh)
+        supported_quants.extend([QuantType::Nf4B64, QuantType::Nf4B128, QuantType::Fp4B64, QuantType::Fp4B128, QuantType::Int8Row]);
         // AMD GPUs (the HIP build of the kernels lists them as "CUDA/ROCm"): 4-bit weights run through hip/hip_q4z.cu
         let rocm = info.description.starts_with("CUDA/ROCm");
         if cc >= 75 || rocm {
@@ -1353,7 +1355,7 @@ impl Backend for CudaBackend {
             // packed EXL blob: stays packed on the device, decoded by exl.cu while multiplying (validated here, once)
             crate::cpu_exl::validate(raw_bytes, kind, rows, cols).map_err(|e| invalid(format!("{name}: {e}")))?;
             (raw_bytes, quant_type)
-        } else if NATIVE_KINDS.contains(&kind) || (kind == 40 && self.fp4) {
+        } else if NATIVE_KINDS.contains(&kind) || (kind == 40 && self.fp4) || quant_type.is_bnb() {
             let (block, width) = (quant_type.block_size(), quant_type.block_bytes());
             if !cols.is_multiple_of(block) || raw_bytes.len() != rows * (cols / block) * width {
                 return Err(invalid(format!(
@@ -2380,7 +2382,7 @@ impl Stream for CudaStream {
 
     fn embedding_lookup(&mut self, out: &mut DeviceBuffer, ids: &[i64], weight: &DeviceWeight) -> Result<(), BackendError> {
         let kind = weight.quant_type.to_gguf_type_id();
-        if !NATIVE_KINDS.contains(&kind) && kind != 20 && kind != 39 {
+        if !NATIVE_KINDS.contains(&kind) && kind != 20 && kind != 39 && !weight.quant_type.is_bnb() {
             return Err(BackendError::UnsupportedQuant(weight.quant_type));
         }
         if let Some(&id) = ids.iter().find(|&&id| id < 0 || id as usize >= weight.rows) {
@@ -2963,7 +2965,7 @@ impl Stream for CudaStream {
                 )
             });
         }
-        if !NATIVE_KINDS.contains(&kind) && kind != 40 && kind != 20 && kind != 39 && kind != 41 && weight.quant_type.mlx_affine().is_none() {
+        if !NATIVE_KINDS.contains(&kind) && kind != 40 && kind != 20 && kind != 39 && kind != 41 && !weight.quant_type.is_bnb() && weight.quant_type.mlx_affine().is_none() {
             return Err(BackendError::UnsupportedQuant(weight.quant_type));
         }
         let (rows, cols) = (weight.rows, weight.cols);

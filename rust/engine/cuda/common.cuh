@@ -51,8 +51,15 @@ enum FllmKind : uint32_t {
     KIND_NVFP4 = 40,
     KIND_Q4Z32 = 0x80000010, KIND_Q4Z64 = 0x80000011, KIND_Q4Z128 = 0x80000012,
     KIND_Q4ZP32 = 0x80000014, KIND_Q4ZP64 = 0x80000015, KIND_Q4ZP128 = 0x80000016,
-    KIND_FP8M = 0x80000020, KIND_FP8B = 0x80000021
+    KIND_FP8M = 0x80000020, KIND_FP8B = 0x80000021,
+    // bitsandbytes (fllm_gguf_probe::bnb): NF4 / FP4 blocks of 64 or 128 values [f32 absmax][codes], int8 blocks of 64 [f32 row scale][i8]
+    KIND_NF4B64 = 0x80000040, KIND_NF4B128 = 0x80000041, KIND_FP4B64 = 0x80000042, KIND_FP4B128 = 0x80000043, KIND_INT8R = 0x80000044
 };
+
+__host__ __device__ constexpr bool kind_is_bnb4(uint32_t kind) {
+    return kind == KIND_NF4B64 || kind == KIND_NF4B128 || kind == KIND_FP4B64 || kind == KIND_FP4B128;
+}
+__host__ __device__ constexpr bool kind_is_bnb(uint32_t kind) { return kind_is_bnb4(kind) || kind == KIND_INT8R; }
 
 __host__ __device__ constexpr bool kind_is_iq_or_kextra(uint32_t kind) {
     return kind == KIND_Q2_K || kind == KIND_Q3_K || kind == KIND_IQ2_XXS || kind == KIND_IQ2_XS || kind == KIND_IQ3_XXS ||
@@ -66,8 +73,8 @@ __host__ __device__ constexpr int kind_iq_block_bytes(uint32_t kind) {
 __host__ __device__ constexpr int kind_block_elems(uint32_t kind) {
     return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_FP8M || kind == KIND_FP8B ? 1
            : kind == KIND_Q4Z64 || kind == KIND_Q4ZP64 ? 64
-           : kind == KIND_Q4Z128 || kind == KIND_Q4ZP128 ? 128
-           : kind == KIND_NVFP4 ? 64
+           : kind == KIND_Q4Z128 || kind == KIND_Q4ZP128 || kind == KIND_NF4B128 || kind == KIND_FP4B128 ? 128
+           : kind == KIND_NVFP4 || kind == KIND_NF4B64 || kind == KIND_FP4B64 || kind == KIND_INT8R ? 64
            : kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind) ? 256 : 32;
 }
 __host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
@@ -79,6 +86,8 @@ __host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
         case KIND_Q4Z64: case KIND_Q4ZP64: return 35;
         case KIND_Q4Z128: case KIND_Q4ZP128: return 67;
         case KIND_NVFP4: return 36;
+        case KIND_NF4B64: case KIND_FP4B64: return 36;
+        case KIND_NF4B128: case KIND_FP4B128: case KIND_INT8R: return 68;
         case KIND_Q4_0: case KIND_IQ4_NL: case KIND_MXFP4: return 18;
         case KIND_Q4_1: return 20;
         case KIND_Q5_0: return 22;
@@ -99,7 +108,28 @@ __host__ __device__ constexpr size_t kind_row_bytes(uint32_t kind, int cols) {
 __host__ __device__ constexpr bool kind_supported(uint32_t kind) {
     return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_Q4_0 || kind == KIND_IQ4_NL || kind == KIND_MXFP4 ||
            kind == KIND_Q4_1 || kind == KIND_Q5_0 || kind == KIND_Q5_1 || kind == KIND_Q8_0 ||
-           kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind);
+           kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind) || kind_is_bnb(kind);
+}
+
+// 16-entry code books of bitsandbytes NF4 / FP4 (identical to NF4_CODE / FP4_CODE of fllm_gguf_probe::bnb, 9 significant digits round-trip
+// a float). A binary select tree over the four index bits: no table in memory, so no local-memory spill for a dynamic index.
+__device__ __forceinline__ float bnb_select16(uint32_t q, float v0, float v1, float v2, float v3, float v4, float v5, float v6, float v7,
+                                              float v8, float v9, float v10, float v11, float v12, float v13, float v14, float v15) {
+    const bool b0 = (q & 1u) != 0, b1 = (q & 2u) != 0, b2 = (q & 4u) != 0, b3 = (q & 8u) != 0;
+    const float a0 = b0 ? v1 : v0, a1 = b0 ? v3 : v2, a2 = b0 ? v5 : v4, a3 = b0 ? v7 : v6;
+    const float a4 = b0 ? v9 : v8, a5 = b0 ? v11 : v10, a6 = b0 ? v13 : v12, a7 = b0 ? v15 : v14;
+    const float c0 = b1 ? a1 : a0, c1 = b1 ? a3 : a2, c2 = b1 ? a5 : a4, c3 = b1 ? a7 : a6;
+    const float d0 = b2 ? c1 : c0, d1 = b2 ? c3 : c2;
+    return b3 ? d1 : d0;
+}
+template <bool FP4>
+__device__ __forceinline__ float bnb_code(uint32_t q) {
+    if (FP4) {
+        return bnb_select16(q, 0.0f, 0.00520833349f, 0.666666687f, 1.0f, 0.333333343f, 0.5f, 0.166666672f, 0.25f,
+                            -0.0f, -0.00520833349f, -0.666666687f, -1.0f, -0.333333343f, -0.5f, -0.166666672f, -0.25f);
+    }
+    return bnb_select16(q, -1.0f, -0.696192801f, -0.525073051f, -0.394917488f, -0.284441382f, -0.18477343f, -0.0910500363f, 0.0f,
+                        0.0795802996f, 0.160930201f, 0.246112302f, 0.337915242f, 0.440709829f, 0.562617004f, 0.722956836f, 1.0f);
 }
 
 // One rotation pair of the rotary embedding (rope_kernel in elementwise.cu, rope_kv_f32_kernel in fused.cu).
@@ -284,6 +314,35 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         }
         return;
     }
+    if (kind_is_bnb4(KIND)) {
+        // [f32 absmax][block / 2 code bytes]; byte j holds elements 2j (high nibble) and 2j + 1 (low nibble)
+        constexpr int be = kind_block_elems(KIND), bb = be / 2 + 4;
+        constexpr bool fp4 = KIND == KIND_FP4B64 || KIND == KIND_FP4B128;
+        const uint8_t *b = rp + (size_t)((run * 16) / be) * bb;
+        const float scale = __ldg(reinterpret_cast<const float *>(b));  // blocks are 4-byte aligned
+        const uint32_t *q = reinterpret_cast<const uint32_t *>(b + 4 + ((run * 16) % be) / 2);  // 8 code bytes, 4-byte aligned
+        const uint32_t words[2] = {q[0], q[1]};
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            const uint32_t byte = (words[j >> 2] >> (8 * (j & 3))) & 0xffu;
+            w[2 * j] = bnb_code<fp4>(byte >> 4) * scale;
+            w[2 * j + 1] = bnb_code<fp4>(byte & 15u) * scale;
+        }
+        return;
+    }
+    if (KIND == KIND_INT8R) {
+        // [f32 row scale][64 x i8]
+        const uint8_t *b = rp + (size_t)((run * 16) / 64) * 68;
+        const float scale = __ldg(reinterpret_cast<const float *>(b));  // blocks are 4-byte aligned
+        const uint32_t *q = reinterpret_cast<const uint32_t *>(b + 4 + (run * 16) % 64);  // 16 bytes, 4-byte aligned
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const uint32_t word = q[j];
+#pragma unroll
+            for (int i = 0; i < 4; i++) w[4 * j + i] = (float)(int8_t)(word >> (8 * i)) * scale;
+        }
+        return;
+    }
     if (KIND == KIND_FP8M || KIND == KIND_FP8B) {
         const uint8_t *qs = rp + (run * 16);
 #pragma unroll
@@ -350,6 +409,11 @@ __device__ __forceinline__ float weight_at(const uint8_t *w, uint32_t kind, size
         case KIND_Q4Z32: decode16<KIND_Q4Z32>(rp, (int)run, cols, v); break;
         case KIND_Q4Z64: decode16<KIND_Q4Z64>(rp, (int)run, cols, v); break;
         case KIND_Q4Z128: decode16<KIND_Q4Z128>(rp, (int)run, cols, v); break;
+        case KIND_NF4B64: decode16<KIND_NF4B64>(rp, (int)run, cols, v); break;
+        case KIND_NF4B128: decode16<KIND_NF4B128>(rp, (int)run, cols, v); break;
+        case KIND_FP4B64: decode16<KIND_FP4B64>(rp, (int)run, cols, v); break;
+        case KIND_FP4B128: decode16<KIND_FP4B128>(rp, (int)run, cols, v); break;
+        case KIND_INT8R: decode16<KIND_INT8R>(rp, (int)run, cols, v); break;
         case KIND_FP8M: decode16<KIND_FP8M>(rp, (int)run, cols, v); break;
         case KIND_FP8B: decode16<KIND_FP8B>(rp, (int)run, cols, v); break;
         default: decode16<KIND_Q6_K>(rp, (int)run, cols, v); break;

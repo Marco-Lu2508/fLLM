@@ -615,7 +615,9 @@ fn direct_unsupported(check: &fllm_checkpoint::ConfigCheck, weight_bytes: u64, o
     let free = crate::devices::host_free_memory_bytes();
     let (expansion, share) = match check.quantization.as_str() {
         "none" => (1, free / 4 * 3),
-        "mlx" | "bitsandbytes" => (4, free / 4 * 3),
+        // (bitsandbytes NF4 / FP4 / int8 stay packed in their own types; a tensor whose rows are not a multiple of 64 values is expanded, and the
+        // memory limit of the load stops that before it is built)
+        "mlx" => (4, free / 4 * 3),
         "exl2" | "exl3" => (5, free / 4 * 3),
         _ => (1, free / 2),
     };

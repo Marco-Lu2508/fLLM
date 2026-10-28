@@ -100,7 +100,7 @@ Dequantizing paths expand to F16 (F32 with `--outtype f32`) and print a warning 
 | `compressed-tensors` asymmetric / actorder / sparse / mixed | rejected | messages from `compressed_tensors()`, unchanged |
 | `modelopt` NVFP4, FP8 | accepted (before) | `NVFP4`, `FP8M` |
 | `modelopt` other `quant_algo` | rejected | `unsupported ModelOpt quant_algo "X": only NVFP4 and FP8 checkpoints can be imported` |
-| `bitsandbytes` 4-bit NF4/FP4, double quantization; 8-bit LLM.int8 | accepted (new) | expanded to F16, checked against bitsandbytes 0.50 |
+| `bitsandbytes` 4-bit NF4/FP4, double quantization; 8-bit LLM.int8 | accepted (new); native since the bitsandbytes round | `NF4B64/128`, `FP4B64/128`, `INT8R` (packed codes kept; F16 for rows that are not a multiple of 64 values); checked against bitsandbytes 0.50 |
 | MLX affine (`quantization: {bits, group_size}`), 2 to 8 bits, per-module overrides | accepted (new) | expanded to F16, checked against `mlx` 0.32 (`mx.quantize`/`mx.dequantize`) |
 | MLX `mode` other than affine | rejected | `MLX quantization mode "mxfp4" is not supported (only affine); convert the original model instead` |
 | `exl2`, `exl3` | accepted (before) | native rows |

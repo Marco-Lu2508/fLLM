@@ -100,7 +100,17 @@ const QUANT_GROUPS: &[&str] = &["linear", "embedding", "moe", "host"];
 /// Weight formats the self test knows (GGUF type ids; `format_name` gives the names).
 const KINDS: &[u32] = &[
     0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
-    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021, 0x8000_0030, 0x8000_0031,
+    0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021, 0x8000_0030, 0x8000_0031, fllm_gguf_probe::bnb::NF4_B64, fllm_gguf_probe::bnb::NF4_B128,
+    fllm_gguf_probe::bnb::FP4_B64, fllm_gguf_probe::bnb::FP4_B128, fllm_gguf_probe::bnb::INT8_ROW,
+];
+
+/// The bitsandbytes weight formats (`fllm_gguf_probe::bnb`).
+const BNB: [u32; 5] = [
+    fllm_gguf_probe::bnb::NF4_B64,
+    fllm_gguf_probe::bnb::NF4_B128,
+    fllm_gguf_probe::bnb::FP4_B64,
+    fllm_gguf_probe::bnb::FP4_B128,
+    fllm_gguf_probe::bnb::INT8_ROW,
 ];
 
 /// Lower case without separators: `Q4_K` and `q4-k` are the same name.
@@ -126,7 +136,7 @@ pub fn parse_quants(list: &str) -> Result<Vec<u32>, String> {
                 .copied()
                 .filter(|&k| {
                     let name = normalize(format_name(k));
-                    name.starts_with(&wanted) && !(wanted == "q4z" && name.starts_with("q4zp"))
+                    (name.starts_with(&wanted) && !(wanted == "q4z" && name.starts_with("q4zp"))) || (wanted == "bnb" && fllm_gguf_probe::bnb::is_bnb(k))
                 })
                 .collect()
         };
@@ -1288,6 +1298,37 @@ impl<'a> Tester<'a> {
                 );
             }
         }
+        // bitsandbytes NF4 / FP4 / int8 (the packed blocks stay packed on the device): odd block counts, a row of many blocks, every batch size
+        for kind in self.kinds(&BNB) {
+            let block = fllm_gguf_probe::bnb::layout(kind).map_or(64, |l| l.block);
+            for cols in [5 * block, 16 * block] {
+                for batch in [1usize, 2, 3, 4, 5, 8, 16, 40, 129, 356] {
+                    let with_bias = batch == 3 || batch == 129;
+                    let r = self.linear(kind, 259, cols, batch, with_bias).map(|mut o| {
+                        o.tol = o.tol.max(Self::FAST_TOL);
+                        o
+                    });
+                    self.record(
+                        &format!("fast linear {}", format_name(kind)),
+                        &format!("259x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }),
+                        r,
+                    );
+                }
+            }
+            // prompt-sized batches over wide rows: tile edges in both directions, many K steps
+            for (rows, batch) in [(130usize, 65usize), (66, 505)] {
+                let cols = 9 * block;
+                let r = self.linear(kind, rows, cols, batch, batch == 505).map(|mut o| {
+                    o.tol = o.tol.max(Self::FAST_TOL);
+                    o
+                });
+                self.record(
+                    &format!("fast linear {}", format_name(kind)),
+                    &format!("{rows}x{cols} batch {batch}{}", if batch == 505 { " +bias" } else { "" }),
+                    r,
+                );
+            }
+        }
         // 4-bit AWQ / GPTQ weights (Marlin GEMM): rows and columns multiples of 128, every batch size the decoder produces
         for kind in self.kinds(&[0x8000_0010u32, 0x8000_0011, 0x8000_0012]) {
             for batch in [1usize, 2, 3, 4, 5, 8, 16, 17, 40, 129, 356] {
@@ -2268,10 +2309,11 @@ impl<'a> Tester<'a> {
         // Projections: every native format, two converted at upload (Q2_K, IQ4_NL); 13 rows,
         // batches 1/2/5 (the kernel tiles four batch rows), odd column counts for floats and
         // odd block counts for quants, a bias, and more output rows than one grid dimension.
-        for kind in self.kinds(&[0u32, 1, 30, 2, 3, 6, 7, 8, 12, 13, 14, 10, 11, 16, 17, 18, 19, 21, 22, 29, 20, 39]) {
+        for kind in self.kinds(&[0u32, 1, 30, 2, 3, 6, 7, 8, 12, 13, 14, 10, 11, 16, 17, 18, 19, 21, 22, 29, 20, 39, BNB[0], BNB[1], BNB[2], BNB[3], BNB[4]]) {
             let block = match kind {
                 0 | 1 | 30 => 1,
                 10..=14 | 16..=19 | 21 | 22 | 29 => 256,
+                k if fllm_gguf_probe::bnb::is_bnb(k) => fllm_gguf_probe::bnb::layout(k).map_or(64, |l| l.block),
                 _ => 32,
             };
             let cols = if block == 1 { 77 } else { 3 * block };
@@ -2661,8 +2703,8 @@ impl<'a> Tester<'a> {
         // the error scale; the CPU backend is still held to the exact tolerance.
         let supported = self.device.capabilities().supports_quant(QuantType::from_gguf_type_id(kind));
         let converted = !supported
-            && cols.is_multiple_of(256)
-            && !matches!(kind, 20 | 23 | 39) // run natively through the shared 16-entry grid kernels
+            && ((cols.is_multiple_of(256) && !matches!(kind, 20 | 23 | 39)) // 20, 23, 39 run natively through the shared 16-entry grid kernels
+                || fllm_gguf_probe::bnb::is_bnb(kind)) // expanded to 16-bit values on upload by backends without a decoder
             && self.device.name() != "CPU";
         // block-wise FP8 on a device without a kernel for it is expanded to binary16 at upload: the weights are rounded (2^-11 relative)
         let f16_expanded = (fllm_gguf_probe::fp8b_type(kind) || fllm_gguf_probe::fp8m_type(kind)) && !supported && self.device.name() != "CPU";

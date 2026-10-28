@@ -1,3 +1,4 @@
+pub mod bnb;
 pub mod exl;
 pub mod quant_types;
 use memmap2::{Mmap, MmapOptions};
@@ -380,6 +381,9 @@ fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
     }
     if fp8m_type(type_id) || fp8b_type(type_id) {
         return Some((1, 1));
+    }
+    if let Some(l) = bnb::layout(type_id) {
+        return Some((l.block as u64, l.bytes as u64));
     }
     if let Some(mlx) = mlx_affine(type_id) {
         return Some((u64::from(mlx.group), mlx.block_bytes()));

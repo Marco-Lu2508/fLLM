@@ -65,6 +65,7 @@ pub(crate) fn layout(kind: u32) -> (usize, usize) {
         39 => (32, 17),
         0x8000_0020 => (1, 1),
         k if fllm_gguf_probe::fp8b_type(k) => (1, 1),
+        k if fllm_gguf_probe::bnb::is_bnb(k) => fllm_gguf_probe::bnb::layout(k).map_or((1, 1), |l| (l.block, l.bytes)),
         _ => panic!("no self-test layout for GGUF type {kind}"),
     }
 }
@@ -103,6 +104,11 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
         0x8000_0016 => "q4zp128",
         0x8000_0020 => "fp8m",
         k if fllm_gguf_probe::fp8b_type(k) => "fp8b",
+        fllm_gguf_probe::bnb::NF4_B64 => "nf4b64",
+        fllm_gguf_probe::bnb::NF4_B128 => "nf4b128",
+        fllm_gguf_probe::bnb::FP4_B64 => "fp4b64",
+        fllm_gguf_probe::bnb::FP4_B128 => "fp4b128",
+        fllm_gguf_probe::bnb::INT8_ROW => "int8r",
         0x8000_0030 => "exl2",
         0x8000_0031 => "exl3",
         _ => "?",
@@ -185,6 +191,12 @@ pub(crate) fn random_weights(kind: u32, rows: usize, cols: usize, rng: &mut Lcg)
                 // group / 2 code bytes, fp16 scale, zero point
                 b[block / 2..block / 2 + 2].copy_from_slice(&d);
                 b[block / 2 + 2] = (rng.next() % 16) as u8;
+            }
+            k if fllm_gguf_probe::bnb::is_bnb(k) => {
+                // an f32 scale (absmax, or the row scale of int8) in front of the codes; int8 blocks of one row share it in a real file,
+                // random blocks do not need to: every block is checked on its own
+                let scale = 0.01 + (rng.next() % 100) as f32 / 400.0;
+                b[..4].copy_from_slice(&scale.to_le_bytes());
             }
             _ => unreachable!(),
         }
@@ -622,6 +634,8 @@ pub(crate) fn compare_with(
 fn project(weights: &[u8], kind: u32, x: &[f32], rows: usize, cols: usize) -> Option<Vec<f32>> {
     if kind == 8 {
         cpu_kernels::q8_linear(weights, x, rows, cols, None)
+    } else if crate::cpu_bnb::handles(kind) {
+        crate::cpu_bnb::linear(weights, kind, x, rows, cols, None)
     } else if fllm_gguf_probe::q4z_group(kind).is_some() {
         #[cfg(target_arch = "x86_64")]
         {
@@ -731,6 +745,14 @@ fn fp8b_dense_case(tier: CpuTier, report: &mut Report, rng: &mut Lcg, tile: (usi
         millis,
     );
 }
+/// bitsandbytes types (NF4 and FP4 with 64 or 128 values per block, int8 with a row scale).
+const BNB_KINDS: [u32; 5] = [
+    fllm_gguf_probe::bnb::NF4_B64,
+    fllm_gguf_probe::bnb::NF4_B128,
+    fllm_gguf_probe::bnb::FP4_B64,
+    fllm_gguf_probe::bnb::FP4_B128,
+    fllm_gguf_probe::bnb::INT8_ROW,
+];
 
 /// A Q4Z / Q4ZP projection against the dense matrix the loader dequantizes (`compute::dequantize`,
 /// permutation included) and the unquantized input: tests the meaning of the format (nibble order,
@@ -883,6 +905,25 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     // Block-wise FP8: the codes stay 8-bit, the tile scales are applied while they are decoded (no 8-bit activations: the activations stay f32)
     for (tile, rows, cols, batch) in [((128, 128), 13, 300, 1), ((128, 128), 130, 520, 3), ((32, 32), 70, 200, 5), ((1, 128), 33, 384, 2), ((16, 1), 20, 52, 4)] {
         fp8b_dense_case(tier, report, &mut rng, tile, (rows, cols, batch));
+    }
+
+    // bitsandbytes NF4 / FP4 / int8: the packed-weight kernels against the f64 reference with the unquantized f32 activations (the
+    // kernels quantize nothing, so the tolerance is the one of a float dot product), on ragged shapes
+    for kind in BNB_KINDS {
+        let block = layout(kind).0;
+        for (rows, blocks) in [(1usize, 1usize), (13, 3), (16, 2), (7, 9)] {
+            let cols = blocks * block;
+            let weights = random_weights(kind, rows, cols, &mut rng);
+            for batch in [1usize, 2, 3, 5, 17] {
+                let x = rng.vector(batch * cols, 3.0);
+                let (have, millis) = timed(|| project(&weights, kind, &x, rows, cols));
+                let result = have.map(|have| {
+                    let (want, scale) = crate::cpu_bnb::reference(&weights, kind, &x, rows, cols);
+                    compare_with(&have, &want, &scale, 1e-5)
+                });
+                report.line(tier, &format!("{} rows {rows} cols {cols} batch {batch}", format_name(kind)), result, millis);
+            }
+        }
     }
 
     if full {

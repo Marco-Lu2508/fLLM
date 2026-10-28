@@ -27,7 +27,7 @@ __device__ __forceinline__ void load16(const float *p, int e0, int cols, float *
     }
 }
 
-template <int KIND, int NB>
+template <uint32_t KIND, int NB>
 __global__ void __launch_bounds__(128)
 gemv_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y,
             const float *__restrict__ bias, int rows, int cols, int batch, int b0) {
@@ -69,7 +69,7 @@ gemv_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
 // GEMM for larger batches (prefill): 64x64 output tile per block, K step 64, FP32 FMA.
 // Weights are decoded straight into shared memory, one run of 16 per thread.
 // ---------------------------------------------------------------------------------------------
-template <int KIND>
+template <uint32_t KIND>
 __global__ void __launch_bounds__(256)
 gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *__restrict__ Y,
             const float *__restrict__ bias, int rows, int cols, int batch) {
@@ -142,6 +142,8 @@ gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
 // ---------------------------------------------------------------------------------------------
 // Launchers
 // ---------------------------------------------------------------------------------------------
+#include "bnb.cuh"
+
 template <int KIND>
 static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias,
                        int rows, int cols, int batch, void *x16, size_t x16_bytes) {
@@ -231,6 +233,30 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
     return fllm_check_launch("linear");
 }
 
+// bitsandbytes NF4 / FP4 / int8 (ids above INT_MAX, so not a launch_kind instantiation): the decode GEMV of bnb.cuh for up to eight tokens, the
+// tensor-core GEMM of tc_gemm.cu (blocks decoded into FP16 tiles) from sixteen, else the generic FP32 kernels on decode16
+template <uint32_t KIND>
+static int launch_bnb(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols, int batch) {
+    if (batch <= 8 && fllm_bnb_gemv_try(s, W, KIND, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
+    if (batch >= 16 && !fllm_exact_math() && fllm_tc_gemm_try(s, W, (int)KIND, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
+    if (batch <= 8) {
+        const dim3 block(128), grid((rows + 3) / 4);
+        for (int b0 = 0; b0 < batch; b0 += 4) {
+            const int nb = batch - b0 < 4 ? batch - b0 : 4;
+            switch (nb) {
+                case 1: gemv_kernel<KIND, 1><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+                case 2: gemv_kernel<KIND, 2><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+                case 3: gemv_kernel<KIND, 3><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+                default: gemv_kernel<KIND, 4><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch, b0); break;
+            }
+        }
+    } else {
+        const dim3 grid((rows + 63) / 64, (batch + 63) / 64), block(256);
+        gemm_kernel<KIND><<<grid, block, 0, s>>>(W, X, Y, bias, rows, cols, batch);
+    }
+    return fllm_check_launch("linear");
+}
+
 static int g_exact = -1;  // -1: not read yet
 bool fllm_exact_math() {
     if (g_exact < 0) g_exact = getenv("FLLM_CUDA_EXACT") != nullptr ? 1 : 0;
@@ -246,7 +272,7 @@ int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, 
                        int rows, int cols, int batch, void *x16, size_t x16_bytes) {
     const uint8_t *w = static_cast<const uint8_t *>(W);
     if (fllm_kind_is_mlx(kind)) return fllm_mlx_launch(s, W, kind, X, Y, bias, rows, cols, batch);
-    switch (kind) {
+    switch ((uint32_t)kind) {
         case KIND_F32: return launch_kind<KIND_F32>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_F16: return launch_kind<KIND_F16>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_BF16: return launch_kind<KIND_BF16>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
@@ -270,6 +296,11 @@ int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, 
         case KIND_IQ3_S: return launch_kind<KIND_IQ3_S>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_IQ2_S: return launch_kind<KIND_IQ2_S>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_IQ1_M: return launch_kind<KIND_IQ1_M>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
+        case KIND_NF4B64: return launch_bnb<KIND_NF4B64>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_NF4B128: return launch_bnb<KIND_NF4B128>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_FP4B64: return launch_bnb<KIND_FP4B64>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_FP4B128: return launch_bnb<KIND_FP4B128>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_INT8R: return launch_bnb<KIND_INT8R>(s, w, X, Y, bias, rows, cols, batch);
         default: return fllm_set_error("linear: unsupported weight type %d", kind);
     }
 }

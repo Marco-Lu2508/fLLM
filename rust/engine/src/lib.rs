@@ -14,6 +14,7 @@ pub mod compute;
 pub mod config;
 pub mod cpu_arm;
 pub mod cpu_attention;
+mod cpu_bnb;
 pub mod cpu_avx512;
 pub mod cpu_elementwise;
 pub(crate) mod cpu_delta;

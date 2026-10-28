@@ -307,7 +307,7 @@ fllm-rs serve --model MODEL.gguf --device cuda   # or --device auto (CUDA is pre
 
 | Operation | Status |
 | --- | --- |
-| `quantized_linear`, `embedding_lookup` | native for `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q2_K Q3_K Q4_K Q5_K Q6_K IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_NL IQ4_XS MXFP4 NVFP4`; only unusual shapes fall back to a one-time conversion (logged). Packed `EXL2` / `EXL3` tensors (sm_60 and later) run through CUDA-core kernels of `cuda/exl.cu` that decode the codes while multiplying (**compiled for sm_75 to sm_120, mirrored on the host, not yet run on a GPU**; run `fllm-rs selftest --quants exl2,exl3`) |
+| `quantized_linear`, `embedding_lookup` | native for `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q2_K Q3_K Q4_K Q5_K Q6_K IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_NL IQ4_XS MXFP4 NVFP4 NF4B64 NF4B128 FP4B64 FP4B128 INT8R` (the last five are the bitsandbytes types, see "bitsandbytes" below); only unusual shapes fall back to a one-time conversion (logged). Packed `EXL2` / `EXL3` tensors (sm_60 and later) run through CUDA-core kernels of `cuda/exl.cu` that decode the codes while multiplying (**compiled for sm_75 to sm_120, mirrored on the host, not yet run on a GPU**; run `fllm-rs selftest --quants exl2,exl3`) |
 | `quantized_linear` of MLX affine weights (`MLXA`, 2 to 8 bits, groups of any multiple of 32, f16 or bf16 scales) | native, own kernels on the packed words (below); NVIDIA only, AMD GPUs get the weights expanded to F16 by the decoder |
 | `rms_norm`, `layer_norm`, `rope`, `swiglu`, `geglu`, `residual_add` | native |
 | `kv_cache_write`, `attention_paged` | native (f16 and q8_0 cache; CUDA also all other [KV cache formats](#kv-cache-formats), GQA, softcap, window, chunk, sinks, ALiBi; head width up to 512, wider heads fall back to the CPU) |
@@ -322,12 +322,13 @@ fllm-rs serve --model MODEL.gguf --device cuda   # or --device auto (CUDA is pre
 | tensor-core GEMM (`qgemm4k.cu`, `qgemm6k.cu`) | 2+ tokens, Q4_K / Q6_K | fp16 tensor cores, weights dequantized in registers, one pipeline stage per super-block (long contiguous reads), split-K for small matrices |
 | fused-decode GEMM (`tc_gemm.cu`) | other formats, 16+ tokens | |
 | generic FP32 kernels (`linear.cu`) | everything else, `FLLM_CUDA_EXACT=1` | exactly the tolerances of `selftest-gpu` |
+| bitsandbytes (`bnb.cuh`) | NF4 / FP4 / int8 blocks, 1-8 tokens | one warp per row, byte-pair code book in shared memory, FP32 activations; 16+ tokens use `tc_gemm.cu` (blocks decoded into FP16 tiles), 9-15 tokens the generic FP32 kernels |
 | NVFP4 (`nvfp4.cu`) | NVFP4 weights on Blackwell (sm_12x), up to 64 tokens | FP4 tensor cores (`mma ... kind::mxf4nvf4`), activations quantized to NVFP4 on the fly |
 | NVFP4 (`nvfp4_cutlass.cu`) | NVFP4 weights, more than 64 tokens | CUTLASS block-scaled GEMM (TMA, warp specialization; tile by `FLLM_NVFP4_TILE`, default 128x128x256). Its epilogue adds the output projections to the residual stream (FP32) and leaves FP16 for gate and up, whose consumer (the activation quantization of the down projection) reads FP16; needs the CUTLASS headers at build time, see below |
 | attention (`attention3.cu`, `attention2.cu`, `attention.cu`) | prefill (tensor cores), decode (split-KV), everything else | f16 cache; q8_0 cache and unusual heads use the generic kernel |
 
 Environment switches: `FLLM_CUDA_EXACT=1` (FP32 only), `FLLM_CUDA_NO_FLASHINFER` (prompt attention through the built-in kernel), `FLLM_CUDA_NO_CUTLASS` (NVFP4 prompts through the built-in kernel), `FLLM_CUDA_NO_TC`, `FLLM_CUDA_NO_QGEMM`,
-`FLLM_CUDA_NO_MMVQ`, `FLLM_CUDA_NO_MMVQ1` (single-token Q4_K/Q5_K/Q6_K), `FLLM_CUDA_NO_MMVQ_LEG` (32-value formats), `FLLM_CUDA_NO_FLASH`,
+`FLLM_CUDA_NO_BNB_GEMV` (bitsandbytes decode through the generic kernel), `FLLM_CUDA_NO_MMVQ`, `FLLM_CUDA_NO_MMVQ1` (single-token Q4_K/Q5_K/Q6_K), `FLLM_CUDA_NO_MMVQ_LEG` (32-value formats), `FLLM_CUDA_NO_FLASH`,
 `FLLM_CUDA_OLD_GEMV`, `FLLM_CUDA_OLD_ATTN`, `FLLM_CUDA_NO_AUTOTUNE`, `FLLM_CUDA_TUNE_LOG`, `FLLM_CUDA_NO_GLU_FUSE`, `FLLM_CUDA_NO_X16_REUSE`, `FLLM_NO_FUSED_ADD` (output projections added to the residual by a separate kernel), `FLLM_NO_FUSED_QKV` (Marlin q/k/v), `FLLM_NO_F16_FFN` (Marlin and NVFP4 gate/up) and `FLLM_NO_F16_NVFP4` (NVFP4 gate/up) keep FP32 results, `FLLM_FP4_TILE=1..4` (force an NVFP4 prompt tile for tests), `FLLM_NVFP4_TILE`, `FLLM_NVFP4_TUNE`, `FLLM_NVFP4_ACT_SCALE`, `FLLM_FUSE_NVFP4_NORM` and `FLLM_FUSE_NVFP4_ATTN_OUT` (see [NVFP4 models](#nvfp4-models)),
 `FLLM_HEAD_FULL=1` (keep a BF16/F16 output projection at full precision instead of Q6_K), `FLLM_FUSE=0` and `FLLM_FUSE_ADD_NORM` /
 `FLLM_FUSE_NORM_QUANT` / `FLLM_FUSE_ROPE_KV` / `FLLM_FUSE_GLU_Q8` / `FLLM_FUSE_HEAD_COPY` `=0|1` (the fused decode kernels, see "Fewer kernels per decode token").
@@ -441,6 +442,39 @@ AMD today: all integer-dot-product decode kernels (Q4_0 ... Q8_0, Q4_K/Q5_K/Q6_K
 split-KV attention kernels, MoE and the paged KV cache. The NVIDIA tensor-core kernels (prompt GEMMs, FlashInfer/CUTLASS paths,
 NVFP4) are compiled out (`fllm_cc()` reports 10, `hip_stubs.cu` declines the calls), so prompt processing uses the generic decode-and-multiply GEMM of
 `tc_gemm.cu` on the matrix cores of RDNA3/4 and CDNA (rocWMMA, 16x16x16 fragments; RDNA2 and older use the FP32 GEMM). The CI job `hip-build` compiles this configuration.
+
+### bitsandbytes (NF4, FP4, LLM.int8())
+
+Checkpoints quantized with bitsandbytes keep their packed codes on the device (types `NF4B64`, `NF4B128`, `FP4B64`, `FP4B128`, `INT8R`,
+layout in [rust-formats-and-import.md](rust-formats-and-import.md)): 4.25 to 4.5 bits per weight for NF4/FP4 and 8.5 for int8, not
+the 16 bits of the older expanding conversion.
+
+- **Decode (1-8 tokens)**: `bnb4_gemv_kernel` / `bnb8_gemv_kernel` in `cuda/bnb.cuh`. One warp per output row, a lane takes runs of 16
+  weights (two aligned 32-bit loads of code bytes). The NF4/FP4 code book is looked up through a 256-entry table of `float2` in shared
+  memory indexed by the whole code byte (one `LDS.64` per two weights, no nibble extraction); the partial sum of a run is multiplied
+  by its block's `f32` absmax once. int8 sign-extends four bytes per word. Activations stay FP32, so the arithmetic is that of the
+  CPU reference (`FLLM_CUDA_NO_BNB_GEMV=1` selects the generic `decode16` kernel instead). No local-memory spill (`-Xptxas -v`, sm_80
+  to sm_120: 50 to 64 registers).
+- **Prompts (16+ tokens)**: the existing tensor-core GEMM of `tc_gemm.cu` decodes each weight tile into FP16 shared memory
+  (`decode16` in `common.cuh`: a select tree over the four index bits for NF4/FP4, so no table in memory) and runs
+  `mma.m16n8k16`, which is the "dequantize tiles into f16 fragments on the fly" design; 9-15 tokens run the FP32 kernels of
+  `linear.cu`. Rounding the weights and activations to FP16 costs the 1e-3 level that every other quantized format has here
+  (the host test `the_tensor_core_tiles_round_to_f16_within_the_stated_tolerance` states 1.5e-3 of the absolute terms).
+- **int8 outliers**: not decomposed. The "outlier columns" of LLM.int8() are columns of the same int8 matrix with the same row
+  scale, so `x * dequant(W)` is the whole product (see the format note above); a checkpoint in a tiled `weight_format` is refused
+  when it is read.
+- **MoE experts** in these types run through the per-expert `quantized_linear` (the grouped expert GEMM and the dp4a fast path list
+  their formats and do not include them).
+- **Other devices**: Vulkan expands the weights to F16 when they are uploaded, Metal to F16 (F32 if a value does not fit), the wgpu
+  backend to F32; each logs the format and the size once and needs about 4 times (wgpu: 7 times) the packed size in device memory.
+  The CPU backend runs the packed-weight kernels.
+- **Status**: compiled with nvcc 12.8 for sm_80, sm_89, sm_90 and sm_120 (no errors, no register spills; `cargo check --features cuda` with the whole `build.rs` nvcc build for sm_80 passes too); the arithmetic of the
+  kernels (byte-pair table, run and block indexing, lane partition, warp butterfly, FP16 rounding of tiles) is mirrored on the host
+  and compared with the f64 reference in `cpu_bnb::tests::the_cuda_*`, and the code book literals in `common.cuh` are compared with
+  the Rust tables bit for bit. **No GPU has run these kernels.** `fllm-rs selftest-gpu --only linear --quants bnb` (also `nf4`, `fp4`,
+  `int8r`, or one type) runs `linear nf4b64 ...` and `fast linear nf4b64 ...` against the CPU backend and the f64 reference at odd
+  shapes (13 rows of 3 blocks; 259 rows of 5 and of 16 blocks at batches 1, 2, 3, 4, 5, 8, 16, 40, 129 and 356; 130 and 66 rows of 9
+  blocks at batches 65 and 505), exact and fast kernels; that is the run to do on an A100, L4 or Blackwell card.
 
 ### NVFP4 models
 
