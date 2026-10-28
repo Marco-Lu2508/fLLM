@@ -57,6 +57,16 @@ Numbers in square brackets refer to the notes below the table.
 | Apple Neural Engine | probe only (linear through Core ML) | – | – | – | – | – | – |
 | Google TPU (PJRT/StableHLO) | L0† (host decoding, upload as bf16/f32/int8) | L0† | L0† | L0† | L0† | L0† (Q4Z/Q4ZP/FP8M through `compute::dequantize`) | L0 |
 
+
+MLX affine group quantization (`MLXA`, 2 to 8 bits, groups of 32 or more, see [rust-formats-and-import.md](rust-formats-and-import.md#mlx-affine-quantization-mlxa)) per hardware, same scale as above:
+
+| Hardware | MLXA |
+| --- | --- |
+| CPU (all tiers) | L1: portable Rust with an AVX2 + FMA instance chosen at run time (`cpu_mlx.rs`), f32 activations; the unit tests and the engine tests ran on an x86-64 machine (the AArch64 build uses the portable instance and was not run) |
+| CUDA (NVIDIA) | L0: own kernels on the packed words (GEMV, FP32 tile, WMMA tensor cores from sm_75; `cuda/mlx_affine.cu`) compiled with nvcc 12.8 for sm_80/89/90/120; the device self test `mlx` has not run on a GPU |
+| Metal native | L0: kernels for 36 formats (6 widths x 3 groups x f16/bf16 scales) built on the quantized linear family; the chunk decoder text compiled as C++ and run on the CPU decodes every width bit for bit; never compiled by the Metal compiler. `FLLM_METAL_NO_MLX=1` turns them off |
+| Vulkan, wgpu, SYCL, NPU, TPU, ROCm/HIP | L0†: no kernel; the decoder uploads the weight dequantized as F16 (`RustDecoder::init_backend`, one stderr line), so a model that is 4.5 bits per weight on disk is 16 on the device |
+
 Notes:
 
 1. **x86 CPU:** `docs/cpu-kernels.md` ("What is tested") lists the AVX2 and AVX-VNNI projections as "run on hardware by us"; the kernels

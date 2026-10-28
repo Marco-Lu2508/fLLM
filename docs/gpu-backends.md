@@ -308,6 +308,7 @@ fllm-rs serve --model MODEL.gguf --device cuda   # or --device auto (CUDA is pre
 | Operation | Status |
 | --- | --- |
 | `quantized_linear`, `embedding_lookup` | native for `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q2_K Q3_K Q4_K Q5_K Q6_K IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_NL IQ4_XS MXFP4 NVFP4`; only unusual shapes fall back to a one-time conversion (logged) |
+| `quantized_linear` of MLX affine weights (`MLXA`, 2 to 8 bits, groups of any multiple of 32, f16 or bf16 scales) | native, own kernels on the packed words (below); NVIDIA only, AMD GPUs get the weights expanded to F16 by the decoder |
 | `rms_norm`, `layer_norm`, `rope`, `swiglu`, `geglu`, `residual_add` | native |
 | `kv_cache_write`, `attention_paged` | native (f16 and q8_0 cache; CUDA also all other [KV cache formats](#kv-cache-formats), GQA, softcap, window, chunk, sinks, ALiBi; head width up to 512, wider heads fall back to the CPU) |
 | `moe_route`, `moe_expert_gemm`, `sampling_logits` | host fallback |
@@ -362,7 +363,31 @@ The tensor-core kernels (FP16 prompt GEMMs, FlashInfer/CUTLASS paths, the Marlin
 (6.x) and Volta (7.0): there the dispatcher uses the FP32/`dp4a` kernels (single-token decode runs at
 the same bandwidth-bound speed, prompt processing is much slower). `FLLM_CUDA_FORCE_CC=61` forces that path for testing.
 
+### MLX affine weights (`MLXA`)
+
+Checkpoints of mlx-lm / mlx-community (`quantization: {bits, group_size}`) stay quantized on the device: 4-bit with group 64 takes 4.5 bits per
+weight, as in the checkpoint. The upload (`CudaBackend::upload_weight`) turns the GGUF blocks into three planes in one buffer, written by
+`backend/mlx.rs` (`device_planes`): the MLX words of every row (code `i` at bit `i * bits`, so 32 codes are exactly `bits` words and a 3-, 5- or
+6-bit code never leaves its chunk), then the scales, then the biases (16-bit floats, f16 or bf16 as the type id says). `w = code * scale + bias`.
+`cuda/mlx_affine.cu` has three kernels, all reading the words directly (the bit width is a template parameter, the group size a run-time value):
+
+| Kernel | Used for | How |
+| --- | --- | --- |
+| `mlx_gemv_kernel` | 1 to 8 tokens | one warp per row; lane `l` takes the chunks of 32 weights `l, l + 32, ...`, unpacks them in registers and uses them for up to 4 tokens per pass; FP32 arithmetic on the FP32 activations; `warp_sum` |
+| `mlx_gemm_kernel` | 9 or more tokens with `FLLM_CUDA_EXACT=1`, or `FLLM_CUDA_NO_TC`, or below sm_75 | 64 x 64 tile, K step 32; the 32 words of 64 rows are staged in shared memory, unpacked into an FP32 tile, FP32 FMA |
+| `mlx_wmma_kernel` | 16 or more tokens from sm_75 | the same staging; the tile is dequantized into FP16 and multiplied with FP16-converted activations on tensor cores (WMMA 16x16x16, FP32 accumulation); about 1e-3 relative error, like `tc_gemm.cu` |
+
+`selftest-gpu --only mlx` (`selftest/mlx.rs`) checks `quantized_linear` for 12 type variants (every width, group 32/64/128, both scale formats) against
+the f64 reference of the dequantized weights, in the exact pass (FP32 kernels at the f32 rounding bound) and the fast pass (tensor cores at the fast
+bound); `fllm_cuda_mlx_force` runs every kernel on its own at every batch size, so the switch by batch size cannot hide one. The arithmetic and
+indexing of the GEMV are mirrored by a host model (`backend::mlx::tests::the_kernel_model_matches_the_cpu_reference_for_all_widths_and_odd_shapes`).
+
+Verified: the file compiles with nvcc 12.8.1 for sm_80, 89, 90 and 120 and the Rust side builds with `--features cuda`; the host model matches the
+CPU reference. **Not run on any GPU.** The first thing to do on a Colab A100 / L4 / Blackwell: `fllm-rs selftest-gpu --only mlx`. AMD GPUs never see the
+type: `BackendCapabilities::supported_quants` lacks it (`hip_stubs.cu` only keeps the link complete) and the decoder uploads F16.
+
 ### AMD GPUs (ROCm / HIP)
+
 
 The same kernel sources build for AMD with `hipcc` (`cuda/hip_compat.h` maps the runtime calls and intrinsics; `__dp4a`
 becomes `v_dot4_i32_i8` / `v_dot4_i32_iu8`):
