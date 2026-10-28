@@ -412,7 +412,7 @@ mod tests {
         assert!(on.not_enforced.iter().any(|e| e.contains("reading")));
         assert!(on.not_enforced.iter().any(|e| e.contains("network")));
         assert!(!on.enforced.iter().any(|e| e.contains("no network")));
-        assert!(on.verification.contains("not yet verified"));
+        assert!(on.verification.contains("not yet on others"));
         // strict claims nothing on Windows
         let strict = describe("windows", Mode::Strict, false);
         assert!(strict.enforced.is_empty() && strict.not_enforced[0].contains("unavailable"));

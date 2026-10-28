@@ -2697,7 +2697,8 @@ async fn openai_generate(
         .get("repetition_penalty")
         .and_then(Value::as_f64)
         .map(|v| v as f32)
-        .unwrap_or(studio_cfg.sampling.repetition_penalty);
+        // a beam search scores plain log-probabilities: the penalty a model recommends for sampling is not applied to it
+        .unwrap_or(if use_beam_search { 1.0 } else { studio_cfg.sampling.repetition_penalty });
     let sampling = crate::sampling::SamplingParams {
         temperature,
         top_p,
@@ -2713,6 +2714,25 @@ async fn openai_generate(
         openai_sampling_controls(&body, is_chat, state.tokenizer.vocab_size(), &mut sampling)
     {
         return api_error(StatusCode::BAD_REQUEST, &error);
+    }
+    if use_beam_search {
+        // a beam search scores plain log-probabilities: what the model recommends for sampling (a repetition penalty ...) is not applied to
+        // it; a penalty the request itself asks for is still refused by the runtime
+        if body.get("repetition_penalty").is_none() {
+            sampling.repetition_penalty = 1.0;
+        }
+        if body.get("presence_penalty").is_none() {
+            sampling.presence_penalty = 0.0;
+        }
+        if body.get("frequency_penalty").is_none() {
+            sampling.frequency_penalty = 0.0;
+        }
+        if body.get("dry_multiplier").is_none() {
+            sampling.dry_multiplier = 0.0;
+        }
+        if body.get("mirostat").is_none() {
+            sampling.mirostat = 0;
+        }
     }
     sampling.choices = if use_beam_search { 1 } else { best_of };
     let min_tokens = sampling.min_tokens;

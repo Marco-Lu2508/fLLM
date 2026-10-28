@@ -7,6 +7,8 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Fixed
+- `serve --device cuda --embeddings` (and a vision model with `--mmproj`) failed to start with "unsupported Rust GPU backend cuda": the small helper models (text encoders, vision towers) now run on the CPU when the device is `cuda`, `hip` or another one they cannot use. Found by the A100 run of the Colab check.
+- Beam search ignores the repetition penalty a model recommends for sampling instead of refusing every request on such a model (a penalty the request itself asks for is still refused).
 - Helm chart: the size and time of the output cache were written as `6.7108864e+07` and ignored by the server (so the default stayed); they are whole numbers now, and `helm lint` passes. `appVersion` follows the release.
 
 ### Added
