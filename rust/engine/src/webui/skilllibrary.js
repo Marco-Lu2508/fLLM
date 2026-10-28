@@ -36,6 +36,11 @@
         '  <button class="btn btn-sm" id="skRepoGo">Show skills</button>' +
         '</div>' +
         '<div id="skRepoList" style="margin-top:8px;"></div>' +
+        '<details id="skDir" style="margin-top:12px;"><summary class="app-item-desc" style="cursor:pointer;">Search the skills.sh directory from here (needs a Vercel token)</summary>' +
+        '<div class="app-item-desc" style="margin:8px 0;">skills.sh lets you search and see the most installed skills when you send a token of a Vercel project with OIDC Federation turned on (<span class="mono">vercel env pull</span> writes it as VERCEL_OIDC_TOKEN). The token is saved on this computer only, never shown again, and expires after about 12 hours. Without it, the GitHub search above does the same job for a repository you name.</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;"><input class="ui-input mono" id="skTok" type="password" placeholder="Vercel token" style="flex:1;min-width:220px;" autocomplete="new-password"><button class="btn btn-sm" id="skTokSave">Save token</button><button class="btn btn-sm btn-ghost" id="skTokClear">Remove it</button></div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;"><input class="ui-input" id="skDirQ" placeholder="Search skills (empty: the most installed)" style="flex:1;min-width:220px;" autocomplete="off"><select id="skDirView" class="ui-select"><option value="all-time">Most installed</option><option value="trending">Trending</option><option value="hot">Hot</option></select><button class="btn btn-sm" id="skDirGo">Search</button></div>' +
+        '<div id="skDirList" style="margin-top:8px;"></div></details>' +
         '<div class="app-item-desc mono" id="skRepoStatus" style="margin-top:8px;font-size:11px;white-space:pre-wrap;"></div>';
       pane.appendChild(finder);
       const fsay = (text) => { finder.querySelector('#skRepoStatus').textContent = text || ''; };
@@ -67,6 +72,61 @@
           fsay('Could not read the repository: ' + ((err && err.message) || err));
         }
       }
+      const dsay = fsay;
+      const dlist = finder.querySelector('#skDirList');
+      async function searchDirectory() {
+        dsay('Searching ...');
+        dlist.innerHTML = '';
+        try {
+          const q = finder.querySelector('#skDirQ').value.trim();
+          const view = finder.querySelector('#skDirView').value;
+          const res = await apiFetch('/api/studio/skills/directory?q=' + encodeURIComponent(q) + '&view=' + encodeURIComponent(view));
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { dsay((data.error && data.error.message) || 'The directory did not answer.'); return; }
+          if (!data.configured) { dsay('Save a Vercel token first.'); return; }
+          const skills = data.skills || [];
+          dsay(skills.length ? `${skills.length} skills from skills.sh.` : 'Nothing found.');
+          dlist.innerHTML = skills.map((k) =>
+            '<div style="display:flex;gap:8px;align-items:flex-start;border-bottom:1px solid var(--border);padding:6px 0;">' +
+            '  <div style="flex:1;"><div class="app-item-title" style="font-size:12px;">' + escapeHtml(k.name) + '</div>' +
+            '    <div class="app-item-desc">' + escapeHtml(k.id) + (k.installs ? ' · ' + Number(k.installs).toLocaleString() + ' installs' : '') + '</div></div>' +
+            '  <button class="btn btn-xs ' + (k.installed ? 'btn-ghost' : 'btn-secondary') + '" data-dir-install="' + escapeHtml(k.id) + '"' + (k.installed ? ' disabled' : '') + '>' + (k.installed ? 'installed' : 'Install') + '</button>' +
+            '</div>').join('');
+        } catch (err) {
+          dsay('The directory did not answer: ' + ((err && err.message) || err));
+        }
+      }
+      finder.querySelector('#skDirGo').addEventListener('click', searchDirectory);
+      finder.querySelector('#skDirQ').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchDirectory(); });
+      async function saveToken(token) {
+        const res = await apiFetch('/api/studio/skills/directory/token', { method: 'POST', body: { token } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { dsay((data.error && data.error.message) || 'Could not save it.'); return; }
+        finder.querySelector('#skTok').value = '';
+        dsay(token ? 'Token saved.' : 'Token removed.');
+        if (token) searchDirectory();
+      }
+      finder.querySelector('#skTokSave').addEventListener('click', () => { const t = finder.querySelector('#skTok').value.trim(); if (t) saveToken(t); });
+      finder.querySelector('#skTokClear').addEventListener('click', () => saveToken(''));
+      dlist.addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-dir-install]');
+        if (!btn || btn.disabled) return;
+        dsay('Installing ...');
+        try {
+          const res = await apiFetch('/api/studio/skills/directory/install', { method: 'POST', body: { id: btn.dataset.dirInstall } });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { dsay((data.error && data.error.message) || 'Could not install it.'); return; }
+          btn.textContent = 'installed';
+          btn.disabled = true;
+          const audits = (data.audits || []).map((a) => `${a.provider}: ${a.status}${a.risk ? ' (' + a.risk + ')' : ''}`).join(', ');
+          dsay(`Installed ${data.name}.${audits ? ' Security audits: ' + audits + '.' : ''} It is in your skills folder and can be edited there.`);
+          await load();
+          if (typeof window.fllmSkillsReload === 'function') window.fllmSkillsReload();
+        } catch (err) {
+          dsay('Could not install it: ' + ((err && err.message) || err));
+        }
+      });
+
       finder.querySelector('#skRepoGo').addEventListener('click', showRepo);
       finder.querySelector('#skRepo').addEventListener('keydown', (e) => { if (e.key === 'Enter') showRepo(); });
       flist.addEventListener('click', async (e) => {

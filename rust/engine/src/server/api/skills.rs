@@ -7,6 +7,7 @@ use axum::extract::Query;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const MAX_SKILL_BYTES: usize = 64 * 1024;
 const MAX_SKILLS: usize = 500;
@@ -370,6 +371,161 @@ pub(in crate::server) async fn github_list(Query(query): Query<HashMap<String, S
     Json(json!({"repo": format!("{owner}/{repo}"), "skills": skills, "truncated": tree["truncated"].as_bool().unwrap_or(false)})).into_response()
 }
 
+// ------------------------------------------------------------------------------------------------------------------------------
+// The skills.sh directory (optional): search and the leaderboard need a Vercel token, which the user can enter on the page
+// ------------------------------------------------------------------------------------------------------------------------------
+
+const DIRECTORY_HOST: &str = "https://skills.sh";
+
+/// The token for the skills.sh API: the one saved on the page, else `VERCEL_OIDC_TOKEN` of the environment.
+fn directory_token() -> Option<String> {
+    crate::hub::studio_setting("skills_sh_token")
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .or_else(|| std::env::var("VERCEL_OIDC_TOKEN").ok())
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// One request to the skills.sh API; the error carries the status to answer with and a message for the page.
+async fn directory_get(path: &str) -> Result<Value, (StatusCode, String)> {
+    let Some(token) = directory_token() else {
+        return Err((StatusCode::UNAUTHORIZED, "enter a Vercel token first".into()));
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https" && matches!(attempt.url().host_str(), Some("skills.sh") | Some("www.skills.sh")) && attempt.previous().len() < 3 {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let response = client
+        .get(format!("{DIRECTORY_HOST}/api/v1/{path}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("skills.sh did not answer: {e}")))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err((StatusCode::UNAUTHORIZED, "skills.sh did not accept the token (they expire after about 12 hours: enter a new one)".into()));
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "skills.sh says: too many requests, try again in a minute".into()));
+    }
+    if !status.is_success() {
+        return Err((StatusCode::BAD_GATEWAY, format!("skills.sh answered with status {}", status.as_u16())));
+    }
+    let bytes = response.bytes().await.map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if bytes.len() > 4 << 20 {
+        return Err((StatusCode::BAD_GATEWAY, "the answer of skills.sh is too large".into()));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_GATEWAY, "skills.sh answered with something that is not JSON".into()))
+}
+
+/// The id of a skill in the directory (`owner/repo/skill` or `host/skill`): a few plain segments, nothing that climbs out of the path.
+fn directory_id_ok(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('/').collect();
+    (2..=4).contains(&parts.len())
+        && parts.iter().all(|p| !p.is_empty() && !p.starts_with('.') && p.len() <= 100 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+}
+
+/// `GET /api/studio/skills/directory?q=<words>&view=all-time|trending|hot`: search (two letters or more) or the leaderboard of skills.sh.
+/// `{configured: false}` when no token is saved.
+pub(in crate::server) async fn directory_list(Query(query): Query<HashMap<String, String>>) -> Response {
+    if directory_token().is_none() {
+        return Json(json!({"configured": false, "skills": []})).into_response();
+    }
+    let q = query.get("q").map(|q| q.trim()).unwrap_or("");
+    let path = if q.chars().count() >= 2 {
+        let mut encoded = String::new();
+        for c in q.chars().take(100) {
+            if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
+                encoded.push(c);
+            } else {
+                let mut buffer = [0u8; 4];
+                for byte in c.encode_utf8(&mut buffer).bytes() {
+                    encoded.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+        format!("skills/search?q={encoded}&limit=40")
+    } else {
+        let view = match query.get("view").map(String::as_str) {
+            Some("trending") => "trending",
+            Some("hot") => "hot",
+            _ => "all-time",
+        };
+        format!("skills?view={view}&per_page=40")
+    };
+    match directory_get(&path).await {
+        Ok(value) => {
+            let installed: Vec<String> = list_in(&user_base()).into_iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect();
+            let skills: Vec<Value> = value["data"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|s| s["id"].as_str().is_some_and(directory_id_ok))
+                        .map(|s| {
+                            let id = s["id"].as_str().unwrap_or("");
+                            let slug = slug_of(id.rsplit('/').next().unwrap_or(""), "skill");
+                            json!({"id": id, "name": s["name"].as_str().unwrap_or(&slug), "slug": slug, "source": s["source"], "installs": s["installs"], "installed": installed.contains(&slug)})
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Json(json!({"configured": true, "skills": skills})).into_response()
+        }
+        Err((status, message)) => api_error(status, &message),
+    }
+}
+
+/// `POST /api/studio/skills/directory/install` `{id}`: reads the skill from skills.sh (its SKILL.md) and stores it. The answer says what
+/// the security audits of skills.sh found, when it knows.
+pub(in crate::server) async fn directory_install(Json(body): Json<Value>) -> Response {
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    if !directory_id_ok(id) {
+        return bad("that is not the id of a skill");
+    }
+    let detail = match directory_get(&format!("skills/{id}")).await {
+        Ok(value) => value,
+        Err((status, message)) => return api_error(status, &message),
+    };
+    let file = detail["files"].as_array().and_then(|files| {
+        files.iter().find(|f| f["path"].as_str().is_some_and(|p| p == "SKILL.md" || p.ends_with("/SKILL.md")))
+    });
+    let Some(text) = file.and_then(|f| f["contents"].as_str()) else {
+        return api_error(StatusCode::NOT_FOUND, "skills.sh has no copy of the files of this skill; install it from its GitHub repository instead");
+    };
+    let (meta, _) = front_matter(text);
+    let from_id = slug_of(id.rsplit('/').next().unwrap_or(""), "skill");
+    let name = meta.get("name").filter(|n| valid_name(n)).cloned().unwrap_or(from_id);
+    if let Err(e) = write_in(&user_base(), &name, text) {
+        return bad(&e);
+    }
+    // best effort: the audits of the partners of skills.sh
+    let audits = directory_get(&format!("skills/audit/{id}")).await.ok().map(|a| {
+        a["audits"]
+            .as_array()
+            .map(|list| list.iter().map(|x| json!({"provider": x["provider"], "status": x["status"], "risk": x["riskLevel"], "summary": x["summary"]})).collect::<Vec<_>>())
+            .unwrap_or_default()
+    });
+    Json(json!({"ok": true, "name": name, "audits": audits})).into_response()
+}
+
+/// `POST /api/studio/skills/directory/token` `{token}`: saves (or, empty, removes) the Vercel token. It is never sent back to the page.
+pub(in crate::server) async fn directory_token_save(Json(body): Json<Value>) -> Response {
+    let token = body.get("token").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+    if token.len() > 8000 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return bad("that does not look like a token");
+    }
+    crate::hub::set_studio_setting("skills_sh_token", if token.is_empty() { Value::Null } else { json!(token) });
+    Json(json!({"ok": true, "configured": directory_token().is_some()})).into_response()
+}
+
 /// A skill from a URL: anything that serves a SKILL.md as text, for example a raw GitHub link.
 fn clean_skill_url(raw: &str) -> Result<String, String> {
     let url = raw.trim();
@@ -430,6 +586,16 @@ mod tests {
         }
         assert_eq!(slug_of("skills/Frontend Design", "r"), "frontend-design");
         assert_eq!(slug_of("", "my-repo"), "my-repo");
+    }
+
+    #[test]
+    fn directory_ids_are_plain_paths() {
+        for good in ["vercel-labs/skills/find-skills", "mintlify.com/mintlify", "a/b/c"] {
+            assert!(directory_id_ok(good), "{good}");
+        }
+        for bad in ["", "one", "a/../b", "../x/y", "a//b", "a/b/c/d/e", "a/b?x=1", "a/%2e%2e/b", ".hidden/x"] {
+            assert!(!directory_id_ok(bad), "{bad}");
+        }
     }
 
     #[test]

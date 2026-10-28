@@ -592,6 +592,9 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/skills/library", get(api::skills::library).post(api::skills::install_builtin))
         .route("/api/studio/skills/import", post(api::skills::import))
         .route("/api/studio/skills/github", get(api::skills::github_list))
+        .route("/api/studio/skills/directory", get(api::skills::directory_list))
+        .route("/api/studio/skills/directory/install", post(api::skills::directory_install))
+        .route("/api/studio/skills/directory/token", post(api::skills::directory_token_save))
         .route(
             "/api/studio/agent/messages",
             get(api::agent_messages::route_list).post(api::agent_messages::route_add).delete(api::agent_messages::route_dismiss),
