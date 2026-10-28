@@ -1868,6 +1868,11 @@ fn scale_values(t: &Tensor) -> Result<Vec<f32>, String> {
             .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()),
+        // UE8M0 scales (DeepSeek-V3.1 and later, MX formats): 2^(e - 127), 0xff is NaN
+        "F8_E8M0" => bytes
+            .iter()
+            .map(|&e| if e == 0xff { Err(format!("{} contains the E8M0 NaN code", t.name)) } else { Ok(f32::from_bits(if e == 0 { 0x0040_0000 } else { u32::from(e) << 23 })) })
+            .collect(),
         other => Err(format!("unsupported scale dtype {other} for {}", t.name)),
     }
 }

@@ -131,19 +131,24 @@ fp8blk_gemv_kernel(const uint8_t *__restrict__ W, const float *__restrict__ S, c
 }
 
 // ---------------------------------------------------------------------------------------------
-// Prompts: tensor-core GEMM, 128 weight rows x 128 tokens per block, K step 64, the next tile is fetched (and expanded) while the current one
-// is multiplied. Structure of tc_gemm.cu.
+// Prompts: tensor-core GEMM, 128 weight rows x 128 (or 64) tokens per block, K step 64, the next tile is fetched (and expanded) while the
+// current one is multiplied. Structure of tc_gemm.cu.
 // ---------------------------------------------------------------------------------------------
-constexpr int FB_BM = 128, FB_BN = 128, FB_BK = 64, FB_WM = 2, FB_WN = 4;
+constexpr int FB_BM = 128, FB_BK = 64, FB_WM = 2;
+constexpr int FB_BN_BIG = 128, FB_WN_BIG = 4;    // 128 tokens, 8 warps: 73728 bytes of shared memory
+constexpr int FB_BN_SMALL = 64, FB_WN_SMALL = 2; // 64 tokens, 4 warps: 55296 bytes (devices with 64 KB of shared memory, short prompts)
 constexpr int FB_LD = FB_BK + 8;
-constexpr int FB_NT = FB_WM * FB_WN * 32;
-constexpr int FB_MI = FB_BM / FB_WM / 16;
-constexpr int FB_NI = FB_BN / FB_WN / 8;
-constexpr int FB_APT = FB_BM * FB_BK / 16 / FB_NT;
-constexpr int FB_BPT = FB_BN * FB_BK / 16 / FB_NT;
-constexpr int FB_RPK = FB_BK / 16;
-static_assert(FB_APT >= 1 && FB_BPT >= 1 && FB_NI % 2 == 0 && FB_BK % 16 == 0 && FB_MI >= 1, "tile shape");
-constexpr size_t FB_SMEM = (size_t)2 * (FB_BM + FB_BN) * FB_LD * sizeof(__half);
+template <int BN_, int WN_>
+struct FbTile {
+    static constexpr int NT = FB_WM * WN_ * 32;
+    static constexpr int MI = FB_BM / FB_WM / 16;     // 16-row fragments per warp
+    static constexpr int NI = BN_ / WN_ / 8;          // 8-token fragments per warp
+    static constexpr int APT = FB_BM * FB_BK / 16 / NT;  // 16-code weight runs per thread and step
+    static constexpr int BPT = BN_ * FB_BK / 16 / NT;    // 16-value activation runs per thread and step
+    static constexpr int RPK = FB_BK / 16;               // runs per tile row
+    static constexpr size_t SMEM = (size_t)2 * (FB_BM + BN_) * FB_LD * sizeof(__half);
+    static_assert(APT >= 1 && BPT >= 1 && NI % 2 == 0 && FB_BK % 16 == 0 && MI >= 1, "tile shape");
+};
 
 __device__ __forceinline__ uint32_t fb_pack_half2(float lo, float hi) {
     const __half2 h = __floats2half2_rn(lo, hi);
@@ -162,33 +167,35 @@ __device__ __forceinline__ void fb_store16(__half *dst, const float *v) {
 }
 
 // cols is a multiple of 16 (checked by the launcher), so every run is complete.
-__global__ void __launch_bounds__(FB_NT)
+template <int BN_, int WN_>
+__global__ void __launch_bounds__(FbTile<BN_, WN_>::NT)
 fp8blk_tc_kernel(const uint8_t *__restrict__ W, const float *__restrict__ S, const float *__restrict__ X, float *__restrict__ Y,
                  const float *__restrict__ bias, int rows, int cols, int batch, int lbr, int lbc, int tiles_c) {
 #if FLLM_TC
+    using T = FbTile<BN_, WN_>;
     extern __shared__ __align__(16) unsigned char fb_smem[];
     __half *As = reinterpret_cast<__half *>(fb_smem);  // [2][FB_BM][FB_LD]
-    __half *Bs = As + (size_t)2 * FB_BM * FB_LD;       // [2][FB_BN][FB_LD]
+    __half *Bs = As + (size_t)2 * FB_BM * FB_LD;       // [2][BN_][FB_LD]
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int wm = warp % FB_WM, wn = warp / FB_WM;
-    const int m0 = blockIdx.x * FB_BM, n0 = blockIdx.y * FB_BN;
+    const int m0 = blockIdx.x * FB_BM, n0 = blockIdx.y * BN_;
     const int ktiles = (cols + FB_BK - 1) / FB_BK;
 
-    float acc[FB_MI][FB_NI][4];
+    float acc[T::MI][T::NI][4];
 #pragma unroll
-    for (int a = 0; a < FB_MI; a++)
+    for (int a = 0; a < T::MI; a++)
 #pragma unroll
-        for (int b = 0; b < FB_NI; b++)
+        for (int b = 0; b < T::NI; b++)
 #pragma unroll
             for (int c = 0; c < 4; c++) acc[a][b][c] = 0.f;
 
-    float wv[FB_APT][16], xv[FB_BPT][16];
+    float wv[T::APT][16], xv[T::BPT][16];
     auto fetch = [&](int kt) {
 #pragma unroll
-        for (int i = 0; i < FB_APT; i++) {
-            const int run = tid + i * FB_NT;
-            const int m = m0 + run / FB_RPK;
-            const int k = kt * FB_BK + (run % FB_RPK) * 16;
+        for (int i = 0; i < T::APT; i++) {
+            const int run = tid + i * T::NT;
+            const int m = m0 + run / T::RPK;
+            const int k = kt * FB_BK + (run % T::RPK) * 16;
             if (m < rows && k < cols) {
                 const uint8_t *wr = W + (size_t)m * cols;
                 fb_decode_run(wr, k, cols, (reinterpret_cast<uintptr_t>(wr) & 15) == 0, S + (size_t)(m >> lbr) * tiles_c, lbc, wv[i]);
@@ -198,10 +205,10 @@ fp8blk_tc_kernel(const uint8_t *__restrict__ W, const float *__restrict__ S, con
             }
         }
 #pragma unroll
-        for (int i = 0; i < FB_BPT; i++) {
-            const int run = tid + i * FB_NT;
-            const int n = n0 + run / FB_RPK;
-            const int k = kt * FB_BK + (run % FB_RPK) * 16;
+        for (int i = 0; i < T::BPT; i++) {
+            const int run = tid + i * T::NT;
+            const int n = n0 + run / T::RPK;
+            const int k = kt * FB_BK + (run % T::RPK) * 16;
             if (n < batch && k < cols) {
                 fb_load16_x(X + (size_t)n * cols, k, cols, true, xv[i]);
             } else {
@@ -212,14 +219,14 @@ fp8blk_tc_kernel(const uint8_t *__restrict__ W, const float *__restrict__ S, con
     };
     auto stash = [&](int buf) {
 #pragma unroll
-        for (int i = 0; i < FB_APT; i++) {
-            const int run = tid + i * FB_NT;
-            fb_store16(As + ((size_t)buf * FB_BM + run / FB_RPK) * FB_LD + (run % FB_RPK) * 16, wv[i]);
+        for (int i = 0; i < T::APT; i++) {
+            const int run = tid + i * T::NT;
+            fb_store16(As + ((size_t)buf * FB_BM + run / T::RPK) * FB_LD + (run % T::RPK) * 16, wv[i]);
         }
 #pragma unroll
-        for (int i = 0; i < FB_BPT; i++) {
-            const int run = tid + i * FB_NT;
-            fb_store16(Bs + ((size_t)buf * FB_BN + run / FB_RPK) * FB_LD + (run % FB_RPK) * 16, xv[i]);
+        for (int i = 0; i < T::BPT; i++) {
+            const int run = tid + i * T::NT;
+            fb_store16(Bs + ((size_t)buf * BN_ + run / T::RPK) * FB_LD + (run % T::RPK) * 16, xv[i]);
         }
     };
 
@@ -230,23 +237,23 @@ fp8blk_tc_kernel(const uint8_t *__restrict__ W, const float *__restrict__ S, con
         const int buf = kt & 1;
         if (kt + 1 < ktiles) fetch(kt + 1);
         const __half *a_base = As + (size_t)buf * FB_BM * FB_LD;
-        const __half *b_base = Bs + (size_t)buf * FB_BN * FB_LD;
+        const __half *b_base = Bs + (size_t)buf * BN_ * FB_LD;
 #pragma unroll
         for (int kk = 0; kk < FB_BK; kk += 16) {
-            uint32_t af[FB_MI][4], bf[FB_NI][2];
+            uint32_t af[T::MI][4], bf[T::NI][2];
 #pragma unroll
-            for (int mi = 0; mi < FB_MI; mi++)
+            for (int mi = 0; mi < T::MI; mi++)
                 ldmatrix4(af[mi][0], af[mi][1], af[mi][2], af[mi][3],
                           a_base + (size_t)(wm * (FB_BM / FB_WM) + mi * 16 + (lane & 15)) * FB_LD + kk + (lane >> 4) * 8);
 #pragma unroll
-            for (int np = 0; np < FB_NI / 2; np++)
+            for (int np = 0; np < T::NI / 2; np++)
                 ldmatrix4(bf[np * 2][0], bf[np * 2][1], bf[np * 2 + 1][0], bf[np * 2 + 1][1],
-                          b_base + (size_t)(wn * (FB_BN / FB_WN) + np * 16 + (lane & 7) + ((lane >> 4) << 3)) * FB_LD + kk +
+                          b_base + (size_t)(wn * (BN_ / WN_) + np * 16 + (lane & 7) + ((lane >> 4) << 3)) * FB_LD + kk +
                               ((lane >> 3) & 1) * 8);
 #pragma unroll
-            for (int mi = 0; mi < FB_MI; mi++)
+            for (int mi = 0; mi < T::MI; mi++)
 #pragma unroll
-                for (int ni = 0; ni < FB_NI; ni++) mma16816(acc[mi][ni], af[mi], bf[ni][0], bf[ni][1]);
+                for (int ni = 0; ni < T::NI; ni++) mma16816(acc[mi][ni], af[mi], bf[ni][0], bf[ni][1]);
         }
         if (kt + 1 < ktiles) stash(buf ^ 1);
         __syncthreads();
@@ -254,13 +261,13 @@ fp8blk_tc_kernel(const uint8_t *__restrict__ W, const float *__restrict__ S, con
 
     const int g = lane >> 2, t = lane & 3;
 #pragma unroll
-    for (int mi = 0; mi < FB_MI; mi++)
+    for (int mi = 0; mi < T::MI; mi++)
 #pragma unroll
-        for (int ni = 0; ni < FB_NI; ni++)
+        for (int ni = 0; ni < T::NI; ni++)
 #pragma unroll
             for (int c = 0; c < 4; c++) {
                 const int m = m0 + wm * (FB_BM / FB_WM) + mi * 16 + g + (c >> 1) * 8;
-                const int n = n0 + wn * (FB_BN / FB_WN) + ni * 8 + 2 * t + (c & 1);
+                const int n = n0 + wn * (BN_ / WN_) + ni * 8 + 2 * t + (c & 1);
                 if (m < rows && n < batch) Y[(size_t)n * rows + m] = acc[mi][ni][c] + (bias ? bias[m] : 0.f);
             }
 #endif
@@ -279,17 +286,31 @@ int try_tc(cudaStream_t s, const uint8_t *w, const float *scales, const float *x
            int lbc, int tiles_c, int *rc) {
     static const bool disabled = getenv("FLLM_CUDA_NO_TC") != nullptr;
     if (disabled || batch <= 16 || fllm_exact_math() || fllm_cc() < 75 || (cols & 15) != 0 || (reinterpret_cast<uintptr_t>(x) & 15) != 0) return 0;
-    if (FB_SMEM > (size_t)fllm_smem_limit()) return 0;
-    static std::atomic<unsigned> configured{0};
+    // 128 tokens per block when the device allows 72 KB of shared memory and the batch fills it, else 64
+    const size_t smem_limit = (size_t)fllm_smem_limit();
+    const bool big = FbTile<FB_BN_BIG, FB_WN_BIG>::SMEM <= smem_limit && batch > 64;
+    if (!big && FbTile<FB_BN_SMALL, FB_WN_SMALL>::SMEM > smem_limit) return 0;
+    static std::atomic<unsigned> configured_big{0}, configured_small{0};
     int dev = 0;
     cudaGetDevice(&dev);
     if (dev < 0 || dev >= 32) dev = 0;
-    if (!(configured.load() & (1u << dev))) {
-        cudaFuncSetAttribute(fp8blk_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)FB_SMEM);
-        configured.fetch_or(1u << dev);
+    if (big) {
+        using T = FbTile<FB_BN_BIG, FB_WN_BIG>;
+        if (!(configured_big.load() & (1u << dev))) {
+            cudaFuncSetAttribute(fp8blk_tc_kernel<FB_BN_BIG, FB_WN_BIG>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)T::SMEM);
+            configured_big.fetch_or(1u << dev);
+        }
+        const dim3 grid((rows + FB_BM - 1) / FB_BM, (batch + FB_BN_BIG - 1) / FB_BN_BIG), block(T::NT);
+        fp8blk_tc_kernel<FB_BN_BIG, FB_WN_BIG><<<grid, block, T::SMEM, s>>>(w, scales, x, y, bias, rows, cols, batch, lbr, lbc, tiles_c);
+    } else {
+        using T = FbTile<FB_BN_SMALL, FB_WN_SMALL>;
+        if (!(configured_small.load() & (1u << dev))) {
+            cudaFuncSetAttribute(fp8blk_tc_kernel<FB_BN_SMALL, FB_WN_SMALL>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)T::SMEM);
+            configured_small.fetch_or(1u << dev);
+        }
+        const dim3 grid((rows + FB_BM - 1) / FB_BM, (batch + FB_BN_SMALL - 1) / FB_BN_SMALL), block(T::NT);
+        fp8blk_tc_kernel<FB_BN_SMALL, FB_WN_SMALL><<<grid, block, T::SMEM, s>>>(w, scales, x, y, bias, rows, cols, batch, lbr, lbc, tiles_c);
     }
-    const dim3 grid((rows + FB_BM - 1) / FB_BM, (batch + FB_BN - 1) / FB_BN), block(FB_NT);
-    fp8blk_tc_kernel<<<grid, block, FB_SMEM, s>>>(w, scales, x, y, bias, rows, cols, batch, lbr, lbc, tiles_c);
     *rc = fllm_check_launch("fp8 block tensor-core gemm");
     return 1;
 }

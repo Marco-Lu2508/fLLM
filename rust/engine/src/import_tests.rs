@@ -116,6 +116,8 @@ pub(crate) enum Kind {
     CtInt8,
     /// block-wise FP8 (`weight_scale_inv`), square tiles of this size
     Fp8Block(usize),
+    /// the same with UE8M0 scales (powers of two stored as one exponent byte, DeepSeek-V3.1 and later)
+    Fp8BlockE8m0(usize),
     /// MLX affine quantization with this many bits and this group size (embeddings and head quantized as well, f16 scales)
     Mlx(usize, usize),
     /// ExLlamaV2: mixed 2..8-bit groups of 32 inputs, random input permutation, 4-bit scale indices
@@ -279,18 +281,29 @@ fn quantized_linear(rng: &mut Rng, kind: Kind, prefix: &str, out: usize, inp: us
             });
             entries.push(Entry { name: format!("{prefix}.q_invperm"), dtype: "I32", shape: vec![inp], bytes: le32(&invperm) });
         }
-        Kind::Fp8Block(tile) => {
+        Kind::Fp8Block(tile) | Kind::Fp8BlockE8m0(tile) => {
+            let e8m0 = matches!(kind, Kind::Fp8BlockE8m0(_));
             let bytes: Vec<u8> = (0..out * inp).map(|_| (rng.below(2) as u8) << 7 | (0x28 + rng.below(16) as u8)).collect();
             // the tile grid rounds up: a matrix smaller than a tile (128 x 128 tiles on this tiny model) has one partial tile
             let (tile_rows, tile_cols) = (out.div_ceil(tile), inp.div_ceil(tile));
-            let scales: Vec<f32> = (0..tile_rows * tile_cols).map(|_| 0.01 + 0.005 * rng.below(8) as f32).collect();
+            // E8M0 exponents 2^-9 .. 2^-6 (stored biased by 127); otherwise values that are not powers of two
+            let exponents: Vec<u8> = (0..tile_rows * tile_cols).map(|_| 118 + rng.below(4) as u8).collect();
+            let scales: Vec<f32> = if e8m0 {
+                exponents.iter().map(|&e| 2f32.powi(i32::from(e) - 127)).collect()
+            } else {
+                (0..tile_rows * tile_cols).map(|_| 0.01 + 0.005 * rng.below(8) as f32).collect()
+            };
             for r in 0..out {
                 for c in 0..inp {
                     dense[r * inp + c] = ref_e4m3(bytes[r * inp + c]) * scales[(r / tile) * tile_cols + c / tile];
                 }
             }
             entries.push(Entry { name: format!("{prefix}.weight"), dtype: "F8_E4M3", shape: vec![out, inp], bytes });
-            entries.push(f32_entry(&format!("{prefix}.weight_scale_inv"), &[tile_rows, tile_cols], &scales));
+            if e8m0 {
+                entries.push(Entry { name: format!("{prefix}.weight_scale_inv"), dtype: "F8_E8M0", shape: vec![tile_rows, tile_cols], bytes: exponents });
+            } else {
+                entries.push(f32_entry(&format!("{prefix}.weight_scale_inv"), &[tile_rows, tile_cols], &scales));
+            }
         }
     }
     (entries, dense)
@@ -311,7 +324,7 @@ fn quantization_config(kind: Kind) -> Value {
             "strategy": "channel"}}}}),
         Kind::Mlx(bits, group) => json!({"bits": bits, "group_size": group}),
         Kind::Exl2 => json!({"quant_method": "exl2", "bits": 4.0}),
-        Kind::Fp8Block(t) => json!({"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [t, t]}),
+        Kind::Fp8Block(t) | Kind::Fp8BlockE8m0(t) => json!({"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [t, t]}),
     }
 }
 
@@ -562,6 +575,13 @@ fn block_wise_fp8_stays_fp8_and_matches_the_reference() {
     // the weights stay 8-bit with their f32 scales, and the engine computes what the dequantized F32 model computes
     for tile in [128, 32, 16] {
         check(Kind::Fp8Block(tile), 17, &[("blk.0.attn_q.weight", fp8b(tile)), ("blk.1.ffn_down.weight", fp8b(tile)), ("output.weight", 30)], 1e-3);
+    }
+}
+
+#[test]
+fn block_wise_fp8_with_ue8m0_scales_stays_fp8_and_matches_the_reference() {
+    for tile in [128usize, 32] {
+        check(Kind::Fp8BlockE8m0(tile), 31, &[("blk.0.attn_q.weight", fp8b(tile)), ("blk.1.ffn_down.weight", fp8b(tile))], 1e-3);
     }
 }
 

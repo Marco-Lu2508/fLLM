@@ -388,6 +388,39 @@ Verified: the file compiles with nvcc 12.8.1 for sm_80, 89, 90 and 120 and the R
 CPU reference. **Not run on any GPU.** The first thing to do on a Colab A100 / L4 / Blackwell: `fllm-rs selftest-gpu --only mlx`. AMD GPUs never see the
 type: `BackendCapabilities::supported_quants` lacks it (`hip_stubs.cu` only keeps the link complete) and the decoder uploads F16.
 
+### Block-wise FP8 (`FP8B`)
+
+Checkpoints with `weight_scale_inv` per 128 x 128 tile (DeepSeek-V3, Qwen3-FP8, GLM-FP8 ...) stay 8-bit on every NVIDIA GPU: the device buffer is the
+GGUF tensor itself (E4M3 codes, f32 tile scales, 16-byte trailer; [rust-formats-and-import.md](rust-formats-and-import.md#block-wise-fp8-fp8b)), so a
+weight takes 1.0002 bytes per element and the host fallbacks (`weight_to_host`, the CPU backend) read it as it is. Before, the converter wrote an
+`FP8B` that the engine could not load, and the documented route was an F16 expansion (2 bytes) or, on GPUs without the FP8 tensor cores, an F32 one
+(4 bytes). `cuda/fp8_block.cu` (the scale of a tile is `scales[(row >> lbr) * tiles_per_row + (k >> lbc)]`, shifts passed at run time, so every
+power-of-two tile works):
+
+| Kernel | Used for | How |
+| --- | --- | --- |
+| `fp8blk_gemv_kernel<NB>` | 1 to 16 tokens (NB = 1, 2, 4, 8, 16; larger batches in chunks of 16) | one warp per output row; lane `l` takes the runs of 16 codes `l, l + 32, ...`, expands them in registers (`code -> float` with the E4M3 formula, times the tile scale) and uses them for all tokens of the pass; FP32 `fmaf` on the FP32 activations (no activation rounding), `warp_sum`; any sm the binary is built for |
+| `fp8blk_tc_kernel` | more than 16 tokens from sm_75 (`FLLM_CUDA_NO_TC` and exact mode switch it off) | the 128 x 128 x 64 tile of `tc_gemm.cu` with the weight tile expanded to FP16 in registers (code times scale, rounded once) before it goes to shared memory; FP16 `mma.sync`, FP32 accumulation; about 1e-3 relative error like the other W16 tensor-core paths; needs a width that is a multiple of 16 |
+| `fllm_fp8_w8a8_gemm` (`fp8_gemm.cu`) | more than 16 tokens, 128 x 128 tiles, width a multiple of 128, sm_89 and newer (Ada, Hopper, Blackwell) | FP8 x FP8 tensor cores (`mma.sync` e4m3), activations quantized per token and 128 values, the product of every 128-wide K step scaled by the activation and tile scales; `FLLM_FP8_GEMM=cutlass` takes the Hopper blockwise-scaling kernel. `FLLM_FP8_BLOCK_W8A8=0` switches this path off, `=1` also uses it for decode |
+
+Decode keeps the GEMV on every GPU: it is bound by the weight bandwidth (1 byte per weight), and FP8 activations would only add error. Grouped
+MoE (`moe_tc_kernel`): FP8B experts with 128 x 128 tiles apply the scale of every 16-code run while the tile is staged (the scales of an expert sit
+`rows * cols` bytes into its buffer); other tile shapes, and experts whose code count is not a multiple of 4, take the per-expert path. A weight whose
+code count is not a multiple of 4 (the f32 scale table would be unaligned) and AMD HIP builds (no kernels) are expanded to F16 at upload, with a message.
+
+`selftest-gpu --only fp8blk` (`selftest/fp8blk.rs`): every GEMV batch variant (1, 2, 3, 4, 5, 7, 8, 9, 12, 16), the prompt GEMM (17, 33, 129), ten tile
+shapes (128 x 128, 64 x 64, 32 x 32, 128 x 32, 1 x 128, 16 x 16, 64 x 8 ...), rows that end inside a tile row, widths that are not a multiple of 16
+or of the tile, against the f64 reference of the dequantized weights and the CPU backend, with the FP8 tensor-core path switched off; an
+8-bit-memory check (the buffer has the size of the tensor); on sm_89+ the FP8 tensor-core path through `quantized_linear` against a host emulation
+of its activation quantization (tolerance 1e-3 of the sum of absolute terms) and against the worst-case quantization error. The `linear`, `fast
+linear` and `moe` groups carry `fp8b` entries too (`--quants fp8b`).
+
+Verified: all of `fp8_block.cu`, `moe.cu`, `api.cu`, `fp8_gemm.cu` compile with nvcc 12.8.1 for sm_61, 70, 75, 80, 89, 90 and 120 (no spills in the GEMV
+except 4 bytes at NB = 4 on sm_80; 170 registers in the tensor-core kernel), the Rust side builds and passes clippy with `--features cuda`, and host
+mirrors of the kernel arithmetic (decoder, GEMV lanes and warp reduction, tensor-core tile coverage with the constants read from the source, MoE and
+W8A8 scale addressing) match the CPU reference. **Not run on any GPU.** The first thing to do on a Colab A100 / L4 / Blackwell: `fllm-rs selftest-gpu
+--only fp8blk`, then `--only linear,moe --quants fp8b`.
+
 ### AMD GPUs (ROCm / HIP)
 
 

@@ -254,6 +254,36 @@ mod tests {
     }
 
     #[test]
+    fn the_portable_and_the_fused_multiply_add_loops_agree_with_the_reference() {
+        // `rows_body` is generic over the FMA flag: x86-64 runs it with FMA inside an AVX2 function when the CPU has the tier, AArch64 with its
+        // native fused multiply-add, anything else without. Both instantiations run here as plain code, whatever this CPU is.
+        let mut rng = Lcg(9);
+        let kind = 0x8000_0021;
+        let (rows, cols, batch) = (9usize, 300usize, 2usize);
+        let (layout, bytes) = random_tensor(kind, cols, rows, 1, &mut rng);
+        let input: Vec<f32> = (0..batch * cols).map(|_| rng.unit()).collect();
+        let (want, mag) = reference(kind, &bytes, &layout, &input, None);
+        for fma in [false, true] {
+            let mut buf = vec![0f32; cols];
+            let mut tmp = vec![0f32; rows * batch];
+            for (task, chunk) in tmp.chunks_mut(batch * ROWS_PER_TASK).enumerate() {
+                if fma {
+                    rows_body::<true>(&layout, &bytes, &input, batch, task * ROWS_PER_TASK, chunk, &mut buf);
+                } else {
+                    rows_body::<false>(&layout, &bytes, &input, batch, task * ROWS_PER_TASK, chunk, &mut buf);
+                }
+            }
+            let gamma = (cols + 4) as f64 * f64::from(f32::EPSILON) * 0.5;
+            for r in 0..rows {
+                for b in 0..batch {
+                    let (got, i) = (f64::from(tmp[r * batch + b]), b * rows + r);
+                    assert!((got - want[i]).abs() <= gamma * mag[i] + 1e-30, "fma {fma}, row {r}, token {b}: {got} vs {}", want[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn linear_is_independent_of_the_thread_count() {
         let mut rng = Lcg(11);
         let kind = 0x8000_0021;

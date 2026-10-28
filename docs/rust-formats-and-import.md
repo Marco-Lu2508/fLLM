@@ -25,7 +25,7 @@ Checkpoint output types are preserve, F16 and F32. This does not add a GGUF quan
 | Scheme | Output with `--outtype preserve` | Notes |
 | --- | --- | --- |
 | AutoGPTQ 4-bit (also act-order), AutoAWQ 4-bit GEMM with zero points | `Q4Z32/64/128`, `Q4ZP32/64/128` (fLLM-specific), else F16 | unchanged values |
-| FP8 (`quant_method` fp8, ModelOpt `quant_algo` FP8, compressed-tensors float 8 bit) | `FP8M` for one scale per tensor or row; F16 for block-wise `weight_scale_inv` (`weight_block_size` or `block_structure`) | `weight_scale_inv` multiplies the decoded value, as in the DeepSeek and transformers FP8 code |
+| FP8 (`quant_method` fp8, ModelOpt `quant_algo` FP8, compressed-tensors float 8 bit) | `FP8M` for one scale per tensor or row; `FP8B` (fLLM-specific, below) for block-wise `weight_scale_inv` (`weight_block_size` or `block_structure`), F16 only for tiles that are not powers of two | `weight_scale_inv` multiplies the decoded value, as in the DeepSeek and transformers FP8 code |
 | ModelOpt NVFP4 | GGUF type 40 plus `<name>.scale` and `<name>.input_scale` | details in [awq-gptq-marlin.md](awq-gptq-marlin.md); other `quant_algo` values are refused |
 | compressed-tensors `pack-quantized` (symmetric int4, int8) and `int-quantized` (symmetric int8) | int4 with group 32/64/128: `Q4Z`; 8 bit with a scale per 32 or more inputs: `Q8_0`; else F16 | scales may be f16, bf16 or f32 (rounded to f16 in the blocks) |
 | MLX affine (`quantization: {bits, group_size}`, 2/3/4/5/6/8 bits) | `MLXA<bits>G<group>[B]` (fLLM-specific, see below), else F16 | words, scales and biases are copied as they are |
@@ -36,6 +36,39 @@ other than NVFP4 and FP8 (`unsupported ModelOpt quant_algo "..."`), compressed-t
 "nvfp4-pack-quantized") is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint ...`), asymmetric or act-order or sparse
 compressed-tensors, mixed-precision `config_groups`, and other quantization methods (`unsupported quantization_config quant_method
 "..." (supported: gptq, awq, fp8, compressed-tensors, modelopt NVFP4/FP8, exl2, exl3)`).
+
+### Block-wise FP8 (`FP8B`)
+
+DeepSeek-V3 / R1, Qwen3-FP8, GLM-4.5-FP8, Kimi-K2, MiniMax and similar checkpoints store E4M3 weights with one `weight_scale_inv` per tile of
+128 x 128 weights (`weight_block_size` in `quantization_config`, or `block_structure` of compressed-tensors). They stay 8-bit:
+
+* **Layout** (`fllm_gguf_probe::Fp8bLayout`, the one place that knows it): the E4M3 codes of the tensor exactly as in the checkpoint (for
+  stacked experts one matrix after the other), then one little-endian **f32** scale per tile (row-major over the tile grid, matrix after
+  matrix; `ceil(rows / tile_rows) * ceil(cols / tile_cols)` per matrix, edge tiles are partial), then a 16-byte trailer
+  `"F8B1", cols, rows, matrices` (`u32` each). The trailer makes the tensor describe itself, so a generic reader that only has the bytes
+  (`compute::dequantize`, every backend that expands at upload) needs no side information. A weight is `e4m3(code) * scale`. The cost is
+  `1 + 4 / (tile_rows * tile_cols)` bytes per weight: 1.00024 for 128 x 128. Scales of the checkpoint may be f32, bf16, f16 or UE8M0
+  (`F8_E8M0`, powers of two, DeepSeek-V3.1 and later); they are stored as f32, exactly.
+* **Type id**: `0x8000_0021` for 128 x 128; `0x8000_0100 | log2(tile_rows) << 4 | log2(tile_cols)` for every other power-of-two tile up to
+  32768 (the converter names them `FP8B32x32`, ...). The tile shape is in the id, so the tensor length follows from the id and the GGUF
+  dimensions (the probe computes it; this was the bug of the first `FP8B`, which counted only the codes). Tiles that are not powers of
+  two (not seen in real checkpoints) still expand to F16 in the converter.
+* **Row permutations** (the RoPE reordering of some architectures) are applied to the code rows and, when the permutation moves whole tile
+  rows only (head size a multiple of the tile height, as for 128 x 128 and head size 128), to the scales; otherwise the tensor is expanded.
+  A scale tensor whose shape is not the tile grid of its weight is refused.
+* **Slicing**: `Linear::load_rows` cuts one expert (or a tile-aligned range of rows) out of a stacked tensor and rebuilds codes, scales and
+  trailer for it (`compute::fp8b_rows`); a cut inside a tile row is refused with a message (it cannot keep its scales). A whole single
+  matrix is a view. Tensor-parallel splitting of `FP8B` is refused (`parallel::shard::layout_for`); pipeline and expert parallelism work.
+* **CPU** (`cpu_fp8.rs`): a row is expanded to f32 in a scratch buffer tile by tile with an integer-only E4M3 decoder (no table), then
+  multiplied with every activation row; AVX2+FMA instance chosen at run time (`cpu_kernels::isa`), NEON with its native FMA, portable code
+  elsewhere; threads split the output rows, so the result does not depend on the thread count. It backs the CPU backend and is the
+  reference of the device checks.
+* **CUDA**: [gpu-backends.md](gpu-backends.md#block-wise-fp8-fp8b) (the weight stays 8-bit on every NVIDIA GPU).
+* **Other backends** (Vulkan, wgpu, Metal, SYCL, TPU, AMD HIP): no kernel; the codes are expanded with their scales to binary16 at upload
+  (exact; 2 bytes per weight; one line on stderr names the first tensor). Correct, not compact.
+* **Direct load**: the codes are copied once into the anonymous map next to their scales (the scales have to follow the codes in the same
+  tensor, so the tensor cannot be a slice of the checkpoint file). Dense FP8B tensors therefore cost their size in anonymous memory, like
+  FP8M, Q4Z and NVFP4 today; stacked experts have to be built anyway. The checks of the memory limit apply.
 
 ### MLX affine quantization (`MLXA`)
 
@@ -148,6 +181,10 @@ What the tests prove (all on the CPU, tiny synthetic models, nothing from the ne
 | Untouched tensors are slices of the mapped file, the rest share one anonymous map | `direct_tests::untouched_tensors_stay_slices_of_the_checkpoint` |
 | The memory limit stops a load before anything is built | `direct_tests::a_memory_budget_stops_the_load_before_anything_is_built` |
 | Tensor bytes and the decoder's logits are bit-identical to the converted file for NVFP4, compressed-tensors int4/int8 (both layouts), block-wise FP8, and the mixture-of-experts variants of NVFP4, int4 and FP8 | `fllm-engine` `import_tests::direct_load_equals_the_converted_file_for_every_quantized_layout` |
+| Block-wise FP8 stays `FP8B` for 128 x 128, 32 x 32 and 16 x 16 tiles (dense and as stacked experts) and the engine's logits equal those of the dequantized F32 model (1e-3) and, within 4e-3, those of the F16 expansion of the same checkpoint; UE8M0 scales; a tile without a type id expands; a tensor costs `codes + 4 * tiles + 16` bytes | `import_tests::block_wise_fp8_stays_fp8_and_matches_the_reference`, `block_wise_fp8_experts_stay_fp8_with_the_scales_of_every_expert`, `native_block_wise_fp8_and_its_f16_expansion_give_the_same_logits`, `block_wise_fp8_with_ue8m0_scales_stays_fp8_and_matches_the_reference`, `block_wise_fp8_with_a_tile_without_a_type_is_expanded_to_f16`, `block_wise_fp8_tensors_take_one_byte_per_weight_plus_the_scales` |
+| The CPU kernel equals an f64 evaluation of the dequantized weights (partial tiles on both edges, 1 x N and N x 1 tiles, bias, batches 1/2/5, any thread count, portable and FMA loops); scale indexing of the tile grid and of stacked matrices; trailer checks; expert and row-range slicing, with cuts inside a tile row refused | `cpu_fp8::tests::*` |
+| The arithmetic of the CUDA kernels run on the host: the decoder formula for every finite code, the GEMV lane/run/scale arithmetic and warp reduction against the reference (odd shapes, tiles from 1 to 128, per-element scales), tile coverage of the tensor-core kernel (constants read from `fp8_block.cu`), scale addressing of the grouped MoE kernel and of the W8A8 kernel | `cpu_fp8::mirror_tests::*` |
+| All `fp8b` checks of the GPU self-test (every tile shape, odd shapes, grouped experts) pass on the CPU backend, so the f64 reference and the random weights are right before they run on a GPU | `selftest::extra_group_tests::block_wise_fp8_checks_pass_on_the_cpu_backend` |
 | The same logits from a dense checkpoint at `preserve`, `f16` and `f32` | `import_tests::direct_load_of_unquantized_checkpoints_gives_the_same_logits_as_the_converted_file` |
 | `prepare` hands out the checkpoint by default, writes nothing to the cache, honours `--no-direct-load`, the environment switches, a cached conversion and `--direct`; `--quant` while loading equals the cached conversion for q8_0, q4_0, q4_k_m; Hub download then direct load | `import::tests::verified_checkpoints_load_directly_by_default_and_no_direct_load_converts`, `an_existing_conversion_is_used_unless_direct_is_forced`, `the_environment_switches_choose_the_path`, `quantizing_on_load_matches_the_cached_conversion`, `every_supported_checkpoint_format_loads_directly_without_being_asked`, `hub_checkpoint_loads_directly_after_the_download_without_a_gguf_file` |
 | Every tensor byte, dimension, type and metadata value of the direct load equals the converted file for MXFP4 (compressed-tensors, 1-2 shards, `preserve` and `f16`; the gpt-oss checkpoint of the converter's tests, experts stay MXFP4) | `fllm-checkpoint` `direct_format_tests::mxfp4_compressed_tensors_loads_identically_to_the_converted_file`, `gpt_oss_mxfp4_checkpoint_loads_identically_to_the_converted_file` |

@@ -107,43 +107,48 @@ fn cuda_constants(source: &str, names: &[&str]) -> Vec<usize> {
 #[test]
 fn the_tensor_core_kernel_covers_its_tiles_exactly_once() {
     let source = include_str!("../../cuda/fp8_block.cu");
-    let c = cuda_constants(source, &["FB_BM", "FB_BN", "FB_BK", "FB_WM", "FB_WN"]);
-    let (bm, bn, bk, wm_n, wn_n) = (c[0], c[1], c[2], c[3], c[4]);
-    let nt = wm_n * wn_n * 32;
-    let (mi_n, ni_n) = (bm / wm_n / 16, bn / wn_n / 8);
-    let (apt, bpt, rpk) = (bm * bk / 16 / nt, bn * bk / 16 / nt, bk / 16);
-    // 8 warps of 32 threads for the 2 x 4 warp grid; the launcher uses FB_NT = FB_WM * FB_WN * 32 threads
-    assert_eq!(nt, 256);
-    // weight and activation runs: every (tile row, 16-wide chunk) of the shared-memory tile is written by exactly one thread
-    for (count, per_thread) in [(bm, apt), (bn, bpt)] {
-        assert_eq!(count * rpk, nt * per_thread, "threads times runs per thread is the tile");
-        let mut seen = vec![0u8; count * rpk];
-        for tid in 0..nt {
-            for i in 0..per_thread {
-                let run = tid + i * nt;
-                seen[(run / rpk) * rpk + run % rpk] += 1;
+    let c = cuda_constants(source, &["FB_BM", "FB_BK", "FB_WM", "FB_BN_BIG", "FB_WN_BIG", "FB_BN_SMALL", "FB_WN_SMALL"]);
+    let (bm, bk, wm_n) = (c[0], c[1], c[2]);
+    // the two tile configurations of the launcher: (tokens per block, warps along the tokens, threads)
+    for (bn, wn_n, threads) in [(c[3], c[4], 256), (c[5], c[6], 128)] {
+        let nt = wm_n * wn_n * 32;
+        assert_eq!(nt, threads, "threads of the {bn}-token tile");
+        let (mi_n, ni_n) = (bm / wm_n / 16, bn / wn_n / 8);
+        let (apt, bpt, rpk) = (bm * bk / 16 / nt, bn * bk / 16 / nt, bk / 16);
+        // weight and activation runs: every (tile row, 16-wide chunk) of the shared-memory tile is written by exactly one thread
+        for (count, per_thread) in [(bm, apt), (bn, bpt)] {
+            assert_eq!(count * rpk, nt * per_thread, "threads times runs per thread is the tile");
+            let mut seen = vec![0u8; count * rpk];
+            for tid in 0..nt {
+                for i in 0..per_thread {
+                    let run = tid + i * nt;
+                    seen[(run / rpk) * rpk + run % rpk] += 1;
+                }
             }
+            assert!(seen.iter().all(|&n| n == 1), "tile of {count} rows, {bn}-token configuration");
         }
-        assert!(seen.iter().all(|&n| n == 1), "tile of {count} rows");
-    }
-    // the epilogue: every output element of the block tile is stored by exactly one (warp, lane, fragment, register)
-    let mut seen = vec![0u8; bm * bn];
-    for warp in 0..nt / 32 {
-        let (wm, wn) = (warp % wm_n, warp / wm_n);
-        for lane in 0..32 {
-            let (g, t) = (lane >> 2, lane & 3);
-            for mi in 0..mi_n {
-                for ni in 0..ni_n {
-                    for e in 0..4 {
-                        let m = wm * (bm / wm_n) + mi * 16 + g + (e >> 1) * 8;
-                        let n = wn * (bn / wn_n) + ni * 8 + 2 * t + (e & 1);
-                        seen[m * bn + n] += 1;
+        // the epilogue: every output element of the block tile is stored by exactly one (warp, lane, fragment, register)
+        let mut seen = vec![0u8; bm * bn];
+        for warp in 0..nt / 32 {
+            let (wm, wn) = (warp % wm_n, warp / wm_n);
+            for lane in 0..32 {
+                let (g, t) = (lane >> 2, lane & 3);
+                for mi in 0..mi_n {
+                    for ni in 0..ni_n {
+                        for e in 0..4 {
+                            let m = wm * (bm / wm_n) + mi * 16 + g + (e >> 1) * 8;
+                            let n = wn * (bn / wn_n) + ni * 8 + 2 * t + (e & 1);
+                            seen[m * bn + n] += 1;
+                        }
                     }
                 }
             }
         }
+        assert!(seen.iter().all(|&n| n == 1), "outputs of the {bn}-token configuration");
+        // the shared memory of the configuration (two stages of weight and activation tiles, 72 halves per row) as the launcher computes it
+        let smem = 2 * (bm + bn) * (bk + 8) * 2;
+        assert!(smem <= if bn == c[3] { 73_728 } else { 65_536 }, "{bn}-token tile uses {smem} bytes");
     }
-    assert!(seen.iter().all(|&n| n == 1));
 }
 
 #[test]

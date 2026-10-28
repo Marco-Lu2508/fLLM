@@ -174,6 +174,19 @@ ignored test `cargo test --release -p fllm-engine cpu_q4z -- --ignored --nocaptu
 shows 15 to 22 GB/s of weights per core at decode (the 2 MB test matrix is cache resident) and 51 to 59
 GMAC/s per core for a 64-token prompt.
 
+## Block-wise FP8 (`FP8B`)
+
+`cpu_fp8` multiplies the 8-bit tensors of [rust-formats-and-import.md](rust-formats-and-import.md#block-wise-fp8-fp8b) without a dense matrix: a row is
+expanded to f32 in a scratch buffer of one row, tile by tile with the f32 scale of the tile (the E4M3 code is expanded with integer arithmetic only:
+exponent and mantissa bits move into an f32 whose bias is corrected by `120 << 23`, subnormals are `mantissa * 2^-9`, NaN for the two NaN codes; no
+table, no branches the compiler cannot turn into selects), then dotted with every activation row in f32 (16 independent partial sums, fixed
+reduction order). The activations are **not** quantized, so there is no 8-bit activation noise (unlike Q4Z); the result differs from an f64 evaluation of
+the dequantized weights by the f32 summation bound only. x86-64: one instance compiled with `avx2,fma` chosen by `cpu_kernels::isa()`; AArch64: the
+same code with the native FMA; other targets: portable. Threads split the output rows (4 per task), so results are identical for any thread count.
+Tested by `cpu_fp8::tests` (8 tile shapes with partial tiles, batches 1/2/5, bias, thread counts 1/3, both loop variants) and by `selftest-cpu` (five
+tile shapes against the dense matrix). Speed not measured yet (the decode loop reads one byte per weight and does about two vector instructions per
+element; memory-bound on desktop CPUs by that count, not by a measurement).
+
 ## Building with the `avx512` feature
 
 The feature is on by default (`default = ["avx512"]` in `rust/engine/Cargo.toml`, enabled by the commit

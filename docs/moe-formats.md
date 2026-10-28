@@ -41,7 +41,8 @@ wrong per-expert factor changes the logits. `nvfp4::tests::stacked_experts_keep_
 
 ## Not done
 
-* Block-wise FP8 (`weight_scale_inv` per 128x128 tile) has no compact tensor type: the tile scales do not map onto the per-row scales of
-  `FP8M`. A new type with a tile-scale table and a GEMM prologue that applies it is needed; the experts are expanded to F16.
+* Block-wise FP8 experts stay `FP8B` (codes, f32 tile scales per expert, trailer; [rust-formats-and-import.md](rust-formats-and-import.md#block-wise-fp8-fp8b)):
+  the CPU decoder multiplies them natively, the CUDA grouped GEMM applies the 128 x 128 tile scales (other tile shapes use the per-expert path),
+  other backends expand them to F16 at upload. Direct load builds the stacked tensor in memory (the experts of a checkpoint are separate tensors).
 * Stacked GPTQ act-order experts (`Q4ZP`) need the permutation table once per tensor; the row slicing of `load_rows` does not handle the
   trailing table of a slice, so they stay expanded.

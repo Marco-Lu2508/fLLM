@@ -58,7 +58,7 @@ Rank numbering is stage-major: `rank = stage * tp + tp_rank`, so a tensor-parall
 `ShardSpec { dim, start, len }` cuts a tensor along `Rows` (output features) or `Cols` (input features). A column cut has to start and
 end on a quantization block: QK_K = 256 for the K-quants and IQ formats, 32 for Q4_0..Q8_0/IQ4_NL/MXFP4, 64 for NVFP4, the group size
 (32/64/128) for Q4Z/Q4ZP. On GPUs the Marlin formats (Q4_K, Q4Z) additionally need tiles of 16 x 64 (K multiple of 16, N multiple of 64).
-FP8M keeps its per-row scales with the rows; NVFP4 keeps its per-tensor scale (a per-expert scale vector is cut with
+FP8M keeps its per-row scales with the rows; block-wise FP8 (`FP8B`) cannot be cut (the tile scales follow the codes of the whole matrix; pipeline and expert parallelism work); NVFP4 keeps its per-tensor scale (a per-expert scale vector is cut with
 `shard_expert_scales`); a GPTQ tensor with activation order (Q4ZP) can be cut by columns only when its permutation stays inside the cut,
 otherwise the error says so and suggests `desc_act=false` or pipeline parallelism. When the sizes do not work the server stops before
 loading with a message such as
