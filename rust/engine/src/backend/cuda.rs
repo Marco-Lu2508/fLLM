@@ -1695,13 +1695,14 @@ impl CudaStream {
         self.upload(dst, &bytes)
     }
 
-    /// Persistent FP32 scratch `slot` of at least `bytes` (a clone of the handle: the buffer is shared).
+    /// Persistent FP32 scratch `slot`: a view of exactly `bytes` (the buffer is shared and grown on demand). The view must not be longer than
+    /// the request: the FP32 operations it feeds derive the batch from `size` (`quantized_linear` wants `x.size` to be `batch * cols * 4`).
     fn wide_slot(&mut self, slot: usize, bytes: usize) -> Result<DeviceBuffer, BackendError> {
         if self.wide[slot].as_ref().is_none_or(|b| b.size < bytes) {
             self.wide[slot] = None;
             self.wide[slot] = Some(self.alloc((bytes * 5 / 4).max(256))?);
         }
-        Ok(self.wide[slot].clone().expect("allocated above"))
+        self.wide[slot].as_ref().expect("allocated above").slice(0, bytes)
     }
 
     /// `dst` (FP32) = the first `count` values of the activation buffer `src`.
