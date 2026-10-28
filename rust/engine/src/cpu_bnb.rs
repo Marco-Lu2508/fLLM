@@ -85,6 +85,7 @@ impl Kernel {
     /// Every kernel this CPU can run.
     #[cfg(test)]
     pub(crate) fn available() -> Vec<Self> {
+        #[allow(unused_mut)] // (only x86-64 has a second kernel)
         let mut found = vec![Self::Portable];
         #[cfg(target_arch = "x86_64")]
         if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
@@ -430,6 +431,28 @@ mod tests {
             for i in 0..16 {
                 assert_eq!(cuda[i].to_bits(), rust[i].to_bits(), "{name} entry {i}: cuda {} rust {}", cuda[i], rust[i]);
             }
+        }
+    }
+
+    #[test]
+    fn the_cuda_kind_ids_are_the_rust_type_ids() {
+        let source = include_str!("../cuda/common.cuh");
+        for (name, id) in [
+            ("KIND_NF4B64", bnb::NF4_B64),
+            ("KIND_NF4B128", bnb::NF4_B128),
+            ("KIND_FP4B64", bnb::FP4_B64),
+            ("KIND_FP4B128", bnb::FP4_B128),
+            ("KIND_INT8R", bnb::INT8_ROW),
+        ] {
+            let at = source.find(&format!("{name} = 0x")).unwrap_or_else(|| panic!("{name} is not defined in common.cuh"));
+            let digits: String = source[at + name.len() + 5..].chars().take_while(char::is_ascii_hexdigit).collect();
+            assert_eq!(u32::from_str_radix(&digits, 16).unwrap(), id, "{name}");
+        }
+        // block sizes of the CUDA side (kind_block_elems / kind_block_bytes) are the layouts of the Rust side
+        assert!(source.contains("case KIND_NF4B64: case KIND_FP4B64: return 36;"));
+        assert!(source.contains("case KIND_NF4B128: case KIND_FP4B128: case KIND_INT8R: return 68;"));
+        for (id, _, block, bytes) in bnb::TYPES {
+            assert_eq!(bytes, if id == bnb::INT8_ROW { 4 + block } else { 4 + block / 2 }, "{id:#x}");
         }
     }
 

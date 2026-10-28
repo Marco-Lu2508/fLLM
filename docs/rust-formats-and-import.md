@@ -44,9 +44,9 @@ The weights are not expanded: the converter writes (and the direct load builds) 
 
 | Type | Id | Values per block | Bytes per block | Block |
 | --- | --- | --- | --- | --- |
-| `NF4B64` / `FP4B64` | `0x8000_00B0` / `0x8000_00B2` | 64 | 36 | `f32 absmax`, 32 code bytes |
-| `NF4B128` / `FP4B128` | `0x8000_00B1` / `0x8000_00B3` | 128 | 68 | `f32 absmax`, 64 code bytes |
-| `INT8R` | `0x8000_00B4` | 64 | 68 | `f32 scale`, 64 `i8` codes |
+| `NF4B64` / `FP4B64` | `0x8000_0040` / `0x8000_0042` | 64 | 36 | `f32 absmax`, 32 code bytes |
+| `NF4B128` / `FP4B128` | `0x8000_0041` / `0x8000_0043` | 128 | 68 | `f32 absmax`, 64 code bytes |
+| `INT8R` | `0x8000_0044` | 64 | 68 | `f32 scale`, 64 `i8` codes |
 
 - 4-bit: code byte `j` holds element `2j` in the high nibble and `2j + 1` in the low nibble (the order bitsandbytes packs them in);
   the value is `code_book[nibble] * absmax` with the NF4 or FP4 code book of bitsandbytes (`NF4_CODE`, `FP4_CODE`; the fixtures

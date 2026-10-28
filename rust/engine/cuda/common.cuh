@@ -53,7 +53,7 @@ enum FllmKind : uint32_t {
     KIND_Q4ZP32 = 0x80000014, KIND_Q4ZP64 = 0x80000015, KIND_Q4ZP128 = 0x80000016,
     KIND_FP8M = 0x80000020, KIND_FP8B = 0x80000021,
     // bitsandbytes (fllm_gguf_probe::bnb): NF4 / FP4 blocks of 64 or 128 values [f32 absmax][codes], int8 blocks of 64 [f32 row scale][i8]
-    KIND_NF4B64 = 0x800000B0, KIND_NF4B128 = 0x800000B1, KIND_FP4B64 = 0x800000B2, KIND_FP4B128 = 0x800000B3, KIND_INT8R = 0x800000B4
+    KIND_NF4B64 = 0x80000040, KIND_NF4B128 = 0x80000041, KIND_FP4B64 = 0x80000042, KIND_FP4B128 = 0x80000043, KIND_INT8R = 0x80000044
 };
 
 __host__ __device__ constexpr bool kind_is_bnb4(uint32_t kind) {

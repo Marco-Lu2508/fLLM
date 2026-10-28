@@ -1,16 +1,16 @@
 //! The fLLM-specific tensor types that hold bitsandbytes weights as they are: NF4 and FP4 (4-bit codes into a 16-entry code book, one
 //! absolute maximum per block) and LLM.int8() (int8 codes, one scale per output row).
 //!
-//! The ids sit in the private range (`0x8000_00B0..`) next to the other fLLM types (Q4Z, FP8M, FP8B). Layouts, all little endian, every
+//! The ids sit in the private range (`0x8000_0040..0x8000_0044`; the block of ids `0x8000_0040` to `0x8000_004F` is bitsandbytes' own) next to the other fLLM types (Q4Z, FP8M, FP8B, EXL). Layouts, all little endian, every
 //! row a whole number of blocks:
 //!
 //! | type | id | values per block | bytes per block | block |
 //! |---|---|---|---|---|
-//! | `NF4B64`  | `0x8000_00B0` | 64  | 36 | `f32 absmax`, 32 code bytes |
-//! | `NF4B128` | `0x8000_00B1` | 128 | 68 | `f32 absmax`, 64 code bytes |
-//! | `FP4B64`  | `0x8000_00B2` | 64  | 36 | `f32 absmax`, 32 code bytes |
-//! | `FP4B128` | `0x8000_00B3` | 128 | 68 | `f32 absmax`, 64 code bytes |
-//! | `INT8R`   | `0x8000_00B4` | 64  | 68 | `f32 scale`, 64 `i8` codes |
+//! | `NF4B64`  | `0x8000_0040` | 64  | 36 | `f32 absmax`, 32 code bytes |
+//! | `NF4B128` | `0x8000_0041` | 128 | 68 | `f32 absmax`, 64 code bytes |
+//! | `FP4B64`  | `0x8000_0042` | 64  | 36 | `f32 absmax`, 32 code bytes |
+//! | `FP4B128` | `0x8000_0043` | 128 | 68 | `f32 absmax`, 64 code bytes |
+//! | `INT8R`   | `0x8000_0044` | 64  | 68 | `f32 scale`, 64 `i8` codes |
 //!
 //! Code byte `j` of a 4-bit block holds the codes of elements `2j` (high nibble) and `2j + 1` (low nibble), the order bitsandbytes packs
 //! them in; the value of an element is `code_book[nibble] * absmax`. The absmax of a double-quantized checkpoint is dequantized once
@@ -19,15 +19,15 @@
 //! of the row. Both layouts need rows of a multiple of the block size.
 
 /// NF4, 64 values per block.
-pub const NF4_B64: u32 = 0x8000_00B0;
+pub const NF4_B64: u32 = 0x8000_0040;
 /// NF4, 128 values per block.
-pub const NF4_B128: u32 = 0x8000_00B1;
+pub const NF4_B128: u32 = 0x8000_0041;
 /// FP4, 64 values per block.
-pub const FP4_B64: u32 = 0x8000_00B2;
+pub const FP4_B64: u32 = 0x8000_0042;
 /// FP4, 128 values per block.
-pub const FP4_B128: u32 = 0x8000_00B3;
+pub const FP4_B128: u32 = 0x8000_0043;
 /// LLM.int8() weights, 64 values per block.
-pub const INT8_ROW: u32 = 0x8000_00B4;
+pub const INT8_ROW: u32 = 0x8000_0044;
 
 /// What the codes of a block mean.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

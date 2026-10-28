@@ -230,3 +230,41 @@ fn place(
     }
     Ok((buffer, perm))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// bitsandbytes NF4 / FP4 / int8 blocks have no shader: `prepare` expands them to the F16 values of the dequantizer (not a re-quantization).
+    #[test]
+    fn bitsandbytes_weights_are_expanded_to_f16_on_upload() {
+        use fllm_gguf_probe::bnb;
+        for (quant, kind) in [
+            (QuantType::Nf4B64, bnb::NF4_B64),
+            (QuantType::Nf4B128, bnb::NF4_B128),
+            (QuantType::Fp4B64, bnb::FP4_B64),
+            (QuantType::Fp4B128, bnb::FP4_B128),
+            (QuantType::Int8Row, bnb::INT8_ROW),
+        ] {
+            let block = bnb::layout(kind).unwrap();
+            // a width that is a multiple of 256 would be re-quantized to Q5_K for other formats: these stay F16
+            let (rows, cols) = (3, 256);
+            let blocks = rows * cols / block.block;
+            let raw: Vec<u8> = (0..blocks)
+                .flat_map(|b| {
+                    let mut v = (0.05 + 0.01 * b as f32).to_le_bytes().to_vec();
+                    v.extend((0..block.bytes - 4).map(|i| (i * 37 + b * 11) as u8));
+                    v
+                })
+                .collect();
+            let prepared = prepare("w", &raw, quant, rows, cols, 1.0).unwrap();
+            assert_eq!(prepared.quant, QuantType::F16, "{quant:?}");
+            let want = crate::compute::dequantize(&raw, kind, rows * cols).unwrap();
+            assert_eq!(prepared.bytes.len(), rows * cols * 2);
+            for (i, pair) in prepared.bytes.as_chunks::<2>().0.iter().enumerate() {
+                let got = half::f16::from_le_bytes(*pair).to_f32();
+                assert_eq!(got, half::f16::from_f32(want[i]).to_f32(), "{quant:?} element {i}");
+            }
+        }
+    }
+}
