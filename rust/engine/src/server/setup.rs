@@ -44,6 +44,7 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/update", get(api::studio::update_status))
         .route("/api/studio/update/install", post(api::studio::update_install))
         .route("/api/studio/mcp/servers", get(api::mcp::servers).post(api::mcp::upsert).delete(api::mcp::remove))
+        .route("/api/studio/mcp/registry", get(api::mcp_registry::search))
         .route("/api/studio/mcp/restart", post(api::mcp::restart))
         .route("/api/studio/mcp/tools", get(api::mcp::tools))
         .route("/api/studio/mcp/call", post(api::mcp::call))

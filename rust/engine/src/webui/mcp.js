@@ -188,3 +188,88 @@
         mcpRefresh();
       }
     });
+
+    // ---- Find MCP servers: the official registry and Smithery -------------------------------------------------
+    // A choice is put into the form below, so the person sees what will run (a program that starts with their rights) before saving it.
+    (function mcpRegistry() {
+      const form = $('mcpFormTitle') && $('mcpFormTitle').closest('.app-card');
+      if (!form) return;
+      const card = document.createElement('div');
+      card.className = 'app-card';
+      card.innerHTML =
+        '<div class="app-card-title">Find servers</div>' +
+        '<div class="app-item-desc" style="margin-bottom:8px;">Search the <a href="#" data-mcp-site="https://registry.modelcontextprotocol.io/">official MCP registry</a> or <a href="#" data-mcp-site="https://smithery.ai/servers">Smithery</a>. ' +
+        '“Use” fills in the form below; read the command, fill in the values it asks for, and save. Anybody can publish to these lists: only run what you trust.</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;"><select id="mcpRegSource" class="ui-select"><option value="official">Official registry</option><option value="smithery">Smithery</option></select>' +
+        '<input class="ui-input" id="mcpRegQ" placeholder="Search (for example github, postgres, files)" style="flex:1;min-width:220px;" autocomplete="off"><button class="btn btn-sm" id="mcpRegGo">Search</button></div>' +
+        '<div id="mcpRegList" style="margin-top:8px;"></div>' +
+        '<div style="margin-top:6px;"><button class="btn btn-sm btn-ghost" id="mcpRegMore" style="display:none;">Show more</button></div>' +
+        '<div class="app-item-desc mono" id="mcpRegStatus" style="margin-top:8px;font-size:11px;white-space:pre-wrap;"></div>';
+      form.parentElement.insertBefore(card, form);
+      const say = (t) => { card.querySelector('#mcpRegStatus').textContent = t || ''; };
+      const list = card.querySelector('#mcpRegList');
+      const more = card.querySelector('#mcpRegMore');
+      let next = null;
+      let found = [];
+
+      card.addEventListener('click', (e) => {
+        const site = e.target.closest('[data-mcp-site]');
+        if (site) { e.preventDefault(); apiFetch('/api/studio/open-url', { method: 'POST', body: { url: site.dataset.mcpSite } }); }
+      });
+
+      const row = (s, index) =>
+        '<div style="border-bottom:1px solid var(--border);padding:8px 0;">' +
+        '<div class="app-item-title" style="font-size:12px;">' + escapeHtml(s.title) + (s.verified ? ' <span class="quant-chip">verified</span>' : '') + (s.version ? ' <span class="app-item-desc">' + escapeHtml(s.version) + '</span>' : '') + '</div>' +
+        '<div class="app-item-desc">' + escapeHtml(s.description || '') + '</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">' +
+        (s.candidates.length ? s.candidates.map((c, k) => '<button class="btn btn-xs btn-secondary" data-mcp-use="' + index + ':' + k + '">Use: ' + escapeHtml(c.label) + '</button>').join('') : '<span class="app-item-desc">fLLM cannot run this one yet (no npm, Python or container package and no HTTP address).</span>') +
+        '</div></div>';
+
+      async function search(append) {
+        say('Searching ...');
+        if (!append) { found = []; list.innerHTML = ''; next = null; }
+        try {
+          const params = new URLSearchParams({ source: card.querySelector('#mcpRegSource').value, q: card.querySelector('#mcpRegQ').value.trim() });
+          if (append && next) params.set('cursor', next);
+          const res = await apiFetch('/api/studio/mcp/registry?' + params.toString());
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { say((data.error && data.error.message) || 'The registry did not answer.'); return; }
+          found = found.concat(data.servers || []);
+          next = data.next || null;
+          list.innerHTML = found.map(row).join('');
+          more.style.display = next ? '' : 'none';
+          say(found.length ? `${found.length} servers.` : 'Nothing found.');
+        } catch (err) {
+          say('The registry did not answer: ' + ((err && err.message) || err));
+        }
+      }
+      card.querySelector('#mcpRegGo').addEventListener('click', () => search(false));
+      card.querySelector('#mcpRegQ').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(false); });
+      more.addEventListener('click', () => search(true));
+
+      list.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-mcp-use]');
+        if (!btn) return;
+        const [i, k] = btn.dataset.mcpUse.split(':').map(Number);
+        const server = found[i];
+        const c = server && server.candidates[k];
+        if (!c) return;
+        mcpClearForm();
+        $('mcpName').value = c.name || '';
+        const notes = [];
+        if (c.kind === 'remote') {
+          $('mcpUrl').value = c.url;
+          // a header value with {placeholders} is a template: the person replaces them
+          $('mcpHeaders').value = (c.headers || []).map((h) => `${h.name}=${h.value || ''}`).join('\n');
+          for (const h of c.headers || []) if (h.required || /\{[^}]+\}/.test(h.value || '')) notes.push(`${h.name}: ${h.description || 'fill this in'}`);
+        } else {
+          $('mcpCommand').value = c.command;
+          $('mcpArgs').value = (c.args || []).join('\n');
+          $('mcpEnv').value = (c.env || []).map((v) => `${v.name}=${v.value || ''}`).join('\n');
+          for (const v of c.env || []) if (v.required) notes.push(`${v.name}: ${v.description || 'fill this in'}`);
+          if ((c.args || []).some((a) => /^<.+>$/.test(a))) notes.push('replace the <...> arguments with real values');
+        }
+        $('mcpFormTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        say(`Filled in the form below with “${server.title}”. ${notes.length ? 'Still to do: ' + notes.join('; ') + '. ' : ''}Check it, then press Save.`);
+      });
+    })();

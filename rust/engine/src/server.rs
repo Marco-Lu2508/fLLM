@@ -560,6 +560,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/keys", get(api::studio::list_keys).post(api::studio::create_key))
         .route("/api/studio/keys/{id}", delete(api::studio::delete_key))
         .route("/api/studio/mcp/servers", get(api::mcp::servers).post(api::mcp::upsert).delete(api::mcp::remove))
+        .route("/api/studio/mcp/registry", get(api::mcp_registry::search))
         .route("/api/studio/mcp/restart", post(api::mcp::restart))
         .route("/api/studio/mcp/tools", get(api::mcp::tools))
         .route("/api/studio/mcp/call", post(api::mcp::call))
