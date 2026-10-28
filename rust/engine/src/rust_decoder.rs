@@ -2511,8 +2511,7 @@ impl RustDecoder {
                 if let Some((kind, bytes)) = linear.packed_weights() {
                     // packed EXL2 / EXL3 blobs are expanded to F16 here when the backend has no native kernel for them
                     if fllm_gguf_probe::exl::is_exl_type(kind) && !backend.capabilities().supports_quant(crate::backend::QuantType::from_gguf_type_id(kind)) {
-                        let values = crate::compute::dequantize(bytes, kind, linear.rows * linear.cols)?;
-                        let half: Vec<u8> = values.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect();
+                        let half = crate::cpu_exl::expanded_f16(bytes, kind, linear.rows, linear.cols)?;
                         static NOTICE: std::sync::Once = std::sync::Once::new();
                         NOTICE.call_once(|| eprintln!("[fllm-rs] the {} backend has no EXL2/EXL3 kernel: packed weights are expanded to F16 on upload (first: {name})", backend.name()));
                         return backend

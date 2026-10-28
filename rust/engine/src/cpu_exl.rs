@@ -40,6 +40,13 @@ pub(crate) fn validate(blob: &[u8], kind: u32, rows: usize, cols: usize) -> Resu
     Ok(())
 }
 
+/// The F16 bytes of the whole matrix: what a backend without an EXL kernel is given instead of the blob (expand-at-upload fallback).
+pub(crate) fn expanded_f16(blob: &[u8], kind: u32, rows: usize, cols: usize) -> Result<Vec<u8>, String> {
+    validate(blob, kind, rows, cols)?;
+    let values = exl::dequantize(blob, kind, rows * cols)?;
+    Ok(values.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect())
+}
+
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     let mut lanes = [0f32; 8];
     let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
@@ -234,6 +241,52 @@ mod tests {
         let mut rng = Lcg(9);
         let blob = exl::synthetic_exl3(128, 384, 3, 0, &mut || rng.next());
         check(&blob, EXL3_TYPE, 128, 384, 2, 77, 2e-5);
+    }
+
+    /// Indicative CPU speed (run with `-- --ignored --nocapture`; the numbers depend on the machine and on what else runs on it).
+    #[test]
+    #[ignore]
+    fn bench_cpu_decode_speed() {
+        for (kind, label) in [(EXL2_TYPE, "exl2"), (EXL3_TYPE, "exl3 3-bit")] {
+            let (rows, cols) = (4096usize, 4096usize);
+            let mut rng = Lcg(77);
+            let blob = if kind == EXL2_TYPE {
+                exl::synthetic_exl2(rows, cols, &mut || rng.next())
+            } else {
+                exl::synthetic_exl3(rows, cols, 3, 0, &mut || rng.next())
+            };
+            for batch in [1usize, 8, 64] {
+                let x = rng.vector(batch * cols, 1.0);
+                let _ = linear(&blob, kind, &x, rows, cols, None).unwrap();
+                let start = std::time::Instant::now();
+                let reps = 5;
+                for _ in 0..reps {
+                    let _ = linear(&blob, kind, &x, rows, cols, None).unwrap();
+                }
+                let ms = start.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
+                eprintln!("BENCH {label} {rows}x{cols} batch {batch}: {ms:.1} ms per call, {:.2} Gweights/s, {} threads", (rows * cols) as f64 / ms / 1e6, rayon::current_num_threads());
+            }
+        }
+    }
+
+    #[test]
+    fn the_upload_fallback_expands_to_f16_values_of_the_native_matrix() {
+        for kind in [EXL2_TYPE, EXL3_TYPE] {
+            let (rows, cols) = (128usize, 128usize);
+            let mut rng = Lcg(31);
+            let blob = if kind == EXL2_TYPE {
+                exl::synthetic_exl2(rows, cols, &mut || rng.next())
+            } else {
+                exl::synthetic_exl3(rows, cols, 3, 1, &mut || rng.next())
+            };
+            let bytes = expanded_f16(&blob, kind, rows, cols).unwrap();
+            assert_eq!(bytes.len(), rows * cols * 2);
+            let dense = exl::dequantize(&blob, kind, rows * cols).unwrap();
+            for (value, half) in dense.iter().zip(bytes.as_chunks::<2>().0) {
+                assert_eq!(half::f16::from_le_bytes(*half), half::f16::from_f32(*value));
+            }
+            assert!(expanded_f16(&blob, kind, rows, cols + 1).is_err());
+        }
     }
 
     #[test]

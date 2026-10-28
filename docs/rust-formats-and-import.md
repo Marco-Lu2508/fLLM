@@ -93,13 +93,13 @@ checkpoint only; the extra memory is the size of the tensors that cannot be slic
   refused before it is parsed. A finished conversion of the same model in the cache is still used (it starts faster than rebuilding
   the tensors on every start). A checkpoint whose weights exceed three quarters of the free memory (a half of it for already
   quantized ones) is converted too, because the converted file would live in the evictable page cache while the built tensors are
-  anonymous memory. MLX and bitsandbytes weights count four times, EXL2/EXL3 weights five times their size in that comparison, since
-  the converter expands them to 16-bit weights. If the built tensors exceed three quarters of the free memory at load time the load
+  anonymous memory. MLX and bitsandbytes weights count four times their size in that comparison, since the converter expands them to
+  16-bit weights; EXL2/EXL3 matrices stay packed (a compact blob is built once into the anonymous map, about a quarter of the former
+  F16 size at 4 bits per weight), only stacked expert tensors are still expanded. If the built tensors exceed three quarters of the free memory at load time the load
   stops with a message instead.
 - What stays a slice: unquantized tensors that need no change (also those of a PyTorch archive whose storages are stored without
-  compression, which is what `torch.save` writes). Everything the converter expands (MLX, bitsandbytes, EXL2/EXL3 to F16) or repacks
-  (MXFP4 blocks, gpt-oss experts) is built once into the anonymous map, so these formats need memory for the 16-bit weights (EXL,
-  MLX, bitsandbytes) where the converted file would have lived in the page cache.
+  compression, which is what `torch.save` writes). Everything the converter expands (MLX, bitsandbytes, EXL2/EXL3 stacked experts to F16) or builds as a compact blob (EXL2/EXL3) or repacks
+  (MXFP4 blocks, gpt-oss experts) is built once into the anonymous map, so these formats need memory for the 16-bit weights (MLX, bitsandbytes) or the packed blob (EXL) where the converted file would have lived in the page cache.
 - A Hub repository is downloaded into its snapshot directory and that directory is loaded; `pull` then only downloads.
 - Each start of the server builds the non-slice tensors again (seconds for small models; not measured for large ones). A converted,
   cached GGUF starts without that work, so `--no-direct-load` can be better for a model you start often and have disk for.
@@ -119,7 +119,8 @@ What the tests prove (all on the CPU, tiny synthetic models, nothing from the ne
 | Every tensor byte, dimension, type and metadata value of the direct load equals the converted file for MXFP4 (compressed-tensors, 1-2 shards, `preserve` and `f16`; the gpt-oss checkpoint of the converter's tests, experts stay MXFP4) | `fllm-checkpoint` `direct_format_tests::mxfp4_compressed_tensors_loads_identically_to_the_converted_file`, `gpt_oss_mxfp4_checkpoint_loads_identically_to_the_converted_file` |
 | The same for bitsandbytes NF4 and FP4 (block 64/128, with and without double quantization, 1-2 shards), int8 (1 and 3 shards), NF4 as F32, NF4 with `q8_0` on load | `direct_format_tests::bitsandbytes_checkpoints_load_identically_to_the_converted_file` |
 | The same for MLX affine with 2, 3, 4, 5, 6 and 8 bits, group 32 and 64, linears only or also embedding and head, 1-2 shards, bits given as `quantization` or as `quantization_config` | `direct_format_tests::mlx_quantized_checkpoints_load_identically_to_the_converted_file` |
-| The same for EXL2 (all group widths 2-8 bits, permuted inputs) and EXL3 (2-4 bits, all three codebooks, dense and bit-packed sign vectors, 1-2 shards) | `direct_format_tests::exl2_checkpoints_load_identically_to_the_converted_file`, `exl3_checkpoints_load_identically_to_the_converted_file` |
+| The same for EXL2 (all group widths 2-8 bits, permuted inputs) and EXL3 (2-4 bits, all three codebooks, dense and bit-packed sign vectors, 1-2 shards), as native `EXL2` / `EXL3` tensors and (`--dtype f16`) expanded | `direct_format_tests::exl2_checkpoints_load_identically_to_the_converted_file`, `exl3_checkpoints_load_identically_to_the_converted_file` |
+| EXL2 / EXL3 stay packed: the native blob dequantizes to the importer's expanded matrix (EXL2 within 2e-3 per weight, EXL3 within 1e-2 of the RMS; all widths, codebooks, row reordering), the CPU kernels equal the dequantized matrix, and a synthetic EXL2 model's logits equal those of an independent dequantization (5e-3) | `exl2::tests::native_blob_matches_the_expanded_importer_path`, `exl3::tests::native_*`, `cpu_exl::tests::*`, `import_tests::exl2_checkpoint_stays_packed_and_matches_the_dequantized_reference` |
 | The same for PyTorch ZIP weights: one stored bf16 archive, one compressed archive, two f16 shards with an index, f32 converted to f16; stored storages stay slices of the archive | `direct_format_tests::pytorch_zip_weights_load_identically_to_the_converted_file`, `stored_pytorch_storages_stay_slices_of_the_archive` |
 | A pickle that would run `os.system`, `eval`, `exec`, `subprocess` calls (GLOBAL, STACK_GLOBAL, INST, OBJ, NEWOBJ, EXT, BUILD) is refused and runs nothing, also through the direct load; a legacy non-ZIP pickle is refused | `direct_format_tests::malicious_pickles_are_refused_and_never_run` |
 | The memory limit stops the load of MLX, bitsandbytes, EXL2 and compressed PyTorch weights before anything is built | `direct_format_tests::the_memory_budget_applies_to_every_expanded_format` |
