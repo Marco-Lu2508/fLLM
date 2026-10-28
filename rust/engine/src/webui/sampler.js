@@ -5,7 +5,7 @@
         top_p: parseFloat($('numTopP').value) || 0.95,
         top_k: parseInt($('numTopK').value, 10) || 0,
         min_p: parseFloat($('numMinP').value) || 0.0,
-        max_tokens: parseInt($('numMaxTokens').value, 10) || 256,
+        max_tokens: parseInt($('numMaxTokens').value, 10) || 2048,
         repetition_penalty: parseFloat($('numRepeatPen').value) || 1.0,
         presence_penalty: parseFloat($('numPresencePen').value) || 0.0,
         frequency_penalty: parseFloat($('numFreqPen').value) || 0.0,

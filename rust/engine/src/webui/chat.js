@@ -238,12 +238,20 @@
     }
 
     // ---- rendering ----------------------------------------------------------
+    /** The markup of a tool call that was written as text (several families of models), also when the answer ended in the middle of one. */
+    function stripToolMarkup(text) {
+      return String(text)
+        .replace(/<\|?tool_call\|?>[\s\S]*?<\/?\|?tool_call\|?>/g, '')
+        .replace(/<\|?tool_call\|?>[\s\S]*$/, '')
+        .trim();
+    }
+
     function splitReasoning(text) {
       const open = text.indexOf('<think>');
-      if (open === -1) return { reasoning: '', answer: text };
+      if (open === -1) return { reasoning: '', answer: stripToolMarkup(text) };
       const close = text.indexOf('</think>');
-      if (close === -1) return { reasoning: text.slice(open + 7).trim(), answer: text.slice(0, open).trim() };
-      return { reasoning: text.slice(open + 7, close).trim(), answer: (text.slice(0, open) + text.slice(close + 8)).trim() };
+      if (close === -1) return { reasoning: text.slice(open + 7).trim(), answer: stripToolMarkup(text.slice(0, open)) };
+      return { reasoning: text.slice(open + 7, close).trim(), answer: stripToolMarkup(text.slice(0, open) + text.slice(close + 8)) };
     }
 
     const ICON = {
@@ -512,7 +520,10 @@
      */
     async function chatStream(aNode, messages, signal, stats, extra) {
       const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook: a provider's model goes through the proxy route
-      const res = await apiFetch(ep.url, { method: 'POST', body: ep.transform({ ...requestBody(messages), ...(extra || {}) }), signal });
+      const body = { ...requestBody(messages), ...(extra || {}) };
+      // an answer with tools may think, write a search and then write the answer: it needs room for all of that
+      if (extra && extra.tools) body.max_tokens = Math.max(body.max_tokens, Math.min(2048, Math.floor((Number(state.status?.model?.max_context) || 4096) / 2)));
+      const res = await apiFetch(ep.url, { method: 'POST', body: ep.transform(body), signal });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         const failure = new Error(err.error?.message || `The server answered with error ${res.status}`);

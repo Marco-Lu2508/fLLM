@@ -412,7 +412,9 @@
         aNode.tools = (aNode.tools || []).map((c) => (c.status === 'running' ? { ...c, status: 'error', detail: 'stopped' } : c));
         if (!aNode.tools.length) aNode.tools = undefined;
       }
-      if (!signal.aborted && !aNode.content.trim() && !aNode.error) aNode.error = 'The model did not write an answer.';
+      if (!signal.aborted && !splitReasoning(aNode.content).answer && !aNode.error) {
+        aNode.error = aNode.finish === 'length' ? 'The model ran out of tokens before it wrote an answer. Raise Max tokens in Sampling.' : 'The model did not write an answer.';
+      }
     }
 
     // ---- display -------------------------------------------------------------------------------------------------
