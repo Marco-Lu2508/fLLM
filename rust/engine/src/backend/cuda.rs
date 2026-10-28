@@ -915,6 +915,10 @@ impl CudaBackend {
             // 4-bit AWQ / GPTQ weights run through the Marlin GEMM of vLLM
             supported_quants.extend([QuantType::Q4Z32, QuantType::Q4Z64, QuantType::Q4Z128, QuantType::Fp8Block]);
         }
+        if !rocm {
+            // MLX affine group-quantized weights (cuda/mlx_affine.cu); AMD GPUs get them expanded to f16 by the decoder
+            supported_quants.extend(QuantType::mlx_affine_common());
+        }
         let capabilities = BackendCapabilities {
             name: info.name.clone(),
             supported_quants,
@@ -1287,7 +1291,16 @@ impl Backend for CudaBackend {
             );
         }
         let converted: Vec<u8>;
-        let (bytes, quant_type): (&[u8], QuantType) = if (kind == 20 && cols.is_multiple_of(32)) || (kind == 23 && cols.is_multiple_of(256)) {
+        let native_mlx = quant_type.mlx_affine().filter(|m| !self.rocm && super::mlx::device_shape_ok(*m, rows, cols));
+        if quant_type.mlx_affine().is_some() && native_mlx.is_none() {
+            // never re-quantized: the decoder expands MLX weights that a backend cannot take natively
+            return Err(BackendError::UnsupportedQuant(quant_type));
+        }
+        let (bytes, quant_type): (&[u8], QuantType) = if let Some(m) = native_mlx {
+            // packed words, scales and biases as three planes (backend/mlx.rs): the kernels read the codes as 32-bit words
+            converted = super::mlx::device_planes(raw_bytes, m, rows, cols).map_err(|e| invalid(format!("{name}: {e}")))?;
+            (&converted, quant_type)
+        } else if (kind == 20 && cols.is_multiple_of(32)) || (kind == 23 && cols.is_multiple_of(256)) {
             // IQ4_NL / IQ4_XS run natively as 32-value blocks with an fp16 scale and a 16-entry grid (IQ4_NL layout)
             let blocks = rows * cols / 32;
             let nl = if kind == 20 {
@@ -2886,7 +2899,7 @@ impl Stream for CudaStream {
                 )
             });
         }
-        if !NATIVE_KINDS.contains(&kind) && kind != 40 && kind != 20 && kind != 39 && kind != 41 {
+        if !NATIVE_KINDS.contains(&kind) && kind != 40 && kind != 20 && kind != 39 && kind != 41 && weight.quant_type.mlx_affine().is_none() {
             return Err(BackendError::UnsupportedQuant(weight.quant_type));
         }
         let (rows, cols) = (weight.rows, weight.cols);

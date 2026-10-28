@@ -32,14 +32,14 @@ fn half_to_f32(bytes: [u8; 2], bf16: bool) -> f32 {
 
 /// The 32 codes in the `BITS` words at `src` (`BITS * 4` bytes), as floats.
 #[inline(always)]
-fn unpack32<const BITS: usize>(src: &[u8], out: &mut [f32]) {
+fn unpack32<const BITS: usize>(src: &[u8], out: &mut [f32; 32]) {
     // one spare word: the straddling read below is only taken when the code really crosses into the next word
     let mut words = [0u32; 9];
     for (k, w) in words.iter_mut().take(BITS).enumerate() {
         *w = u32::from_le_bytes([src[4 * k], src[4 * k + 1], src[4 * k + 2], src[4 * k + 3]]);
     }
     let mask = (1u32 << BITS) - 1;
-    for (i, slot) in out.iter_mut().take(32).enumerate() {
+    for (i, slot) in out.iter_mut().enumerate() {
         let (word, shift) = (i * BITS / 32, (i * BITS) % 32);
         let mut v = words[word] >> shift;
         if shift + BITS > 32 {
@@ -55,7 +55,7 @@ fn row_impl<const BITS: usize>(row: &[u8], group: usize, bf16: bool, out: &mut [
     for (b, dst) in row.chunks_exact(block).zip(out.chunks_exact_mut(group)) {
         let scale = half_to_f32([b[0], b[1]], bf16);
         let bias = half_to_f32([b[2], b[3]], bf16);
-        for (codes, values) in b[4..].chunks_exact(BITS * 4).zip(dst.chunks_exact_mut(32)) {
+        for (codes, values) in b[4..].chunks_exact(BITS * 4).zip(dst.as_chunks_mut::<32>().0.iter_mut()) {
             unpack32::<BITS>(codes, values);
             for v in values.iter_mut() {
                 *v = *v * scale + bias;
@@ -93,7 +93,7 @@ pub(crate) fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f3
 #[inline(always)]
 fn dot(w: &[f32], x: &[f32]) -> f32 {
     let mut lanes = [0f32; 8];
-    for (w, x) in w.chunks_exact(8).zip(x.chunks_exact(8)) {
+    for (w, x) in w.as_chunks::<8>().0.iter().zip(x.as_chunks::<8>().0) {
         for ((lane, &a), &b) in lanes.iter_mut().zip(w).zip(x) {
             *lane += a * b;
         }
@@ -175,6 +175,23 @@ pub(crate) fn linear(packed: &[u8], kind: u32, input: &[f32], rows: usize, cols:
         }
     }
     Some(out)
+}
+
+/// Random valid `MLXA` rows for the device self test: uniform codes, scales around 0.01 .. 0.03 and biases in +-0.1, exact in the 16-bit
+/// format of the type.
+pub(crate) fn random_weights(m: MlxAffine, rows: usize, cols: usize, rng: &mut crate::cpu_selftest::Lcg) -> Vec<u8> {
+    let (group, bits) = (m.group as usize, m.bits as usize);
+    let half = |v: f32| -> [u8; 2] {
+        if m.bf16 { half::bf16::from_f32(v).to_bits() } else { half::f16::from_f32(v).to_bits() }.to_le_bytes()
+    };
+    let mut out = Vec::with_capacity(rows * (cols / group) * m.block_bytes() as usize);
+    for _ in 0..rows * (cols / group) {
+        out.extend_from_slice(&half(0.01 + 0.02 * (rng.next() % 1000) as f32 / 1000.0));
+        out.extend_from_slice(&half(0.1 * rng.unit()));
+        // random bits are random codes of any width: the codes are a bit stream
+        out.extend((0..group * bits / 8).map(|_| rng.next() as u8));
+    }
+    out
 }
 
 #[cfg(test)]

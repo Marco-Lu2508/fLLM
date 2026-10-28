@@ -8,6 +8,7 @@ pub mod act_dtype;
 pub mod cpu;
 pub mod memory;
 pub mod moe;
+pub mod mlx;
 pub mod q4z;
 pub mod selftest;
 pub mod stub;

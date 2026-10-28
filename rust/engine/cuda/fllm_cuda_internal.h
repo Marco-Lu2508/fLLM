@@ -41,6 +41,10 @@ int fllm_rms_norm_prompt_launch(cudaStream_t s, const void *y16, const float *bi
 
 int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows,
                        int cols, int batch, void *x16, size_t x16_bytes);
+// MLX affine group-quantized weights (mlx_affine.cu): `kind` is the MLXA type id (0x80010000 | bf16 << 12 | (group / 32) << 4 | bits), `W` the
+// device image of backend/mlx.rs
+int fllm_mlx_launch(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch);
+inline bool fllm_kind_is_mlx(int kind) { return ((uint32_t)kind & ~0x1fffu) == 0x80010000u; }
 // true when FLLM_CUDA_EXACT is set: only the FP32 kernels may run (used by selftest-gpu)
 bool fllm_exact_math();
 // Layers hand the same activations to several consecutive linears (q, k, v / gate, up). The first one converts them to

@@ -1657,7 +1657,9 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
     if let Some(q) = mlx {
         return match q.get("mode").and_then(Value::as_str).unwrap_or("affine") {
             "affine" => Ok(Quantization::Mlx),
-            other => Err(format!("MLX quantization mode {other:?} is not supported (only affine); convert the original model instead")),
+            other => Err(format!(
+                "MLX quantization mode {other:?} is not supported: only the affine mode (scales and biases per group) is read; the mxfp4 and nvfp4 modes of MLX (E8M0 / E4M3 block scales, no biases) need their own reader. Use an affine export of the model or convert the original weights"
+            )),
         };
     }
     let Some(q) = cfg.get("quantization_config").filter(|v| !v.is_null()) else {
@@ -3195,6 +3197,17 @@ mod quantization_config_tests {
         assert!(compressed_tensors(&mixed).unwrap_err().contains("mixed-precision"));
         let sparse = json!({"quant_method": "compressed-tensors", "sparsity_config": {"format": "sparse-24-bitmask"}, "config_groups": {}});
         assert!(compressed_tensors(&sparse).unwrap_err().contains("sparse"));
+    }
+
+    #[test]
+    fn mlx_modes_other_than_affine_are_refused_with_the_reason() {
+        let affine = json!({"quantization": {"group_size": 64, "bits": 4}});
+        assert_eq!(quantization(&affine).unwrap(), Quantization::Mlx);
+        assert_eq!(quantization(&json!({"quantization": {"group_size": 64, "bits": 4, "mode": "affine"}})).unwrap(), Quantization::Mlx);
+        for mode in ["mxfp4", "nvfp4", "mxfp8"] {
+            let err = quantization(&json!({"quantization": {"group_size": 32, "bits": 4, "mode": mode}})).unwrap_err();
+            assert!(err.contains(mode) && err.contains("only the affine mode"), "{err}");
+        }
     }
 
     #[test]
