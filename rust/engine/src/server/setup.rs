@@ -77,6 +77,7 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         // the settings pages that need no model: the app opens without one now and loads the last model with the first message
         .route("/api/studio/skills/library", get(api::skills::library).post(api::skills::install_builtin))
         .route("/api/studio/skills/import", post(api::skills::import))
+        .route("/api/studio/skills/github", get(api::skills::github_list))
         .route("/api/studio/hooks", get(api::hooks::list).post(api::hooks::save_handler))
         .route("/api/studio/hooks/test", post(api::hooks::test))
         .route("/api/studio/agents", get(api::agents::list).post(api::agents::write).delete(api::agents::remove_route))

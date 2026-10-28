@@ -21,22 +21,44 @@ pub(super) fn valid_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// The front matter (`key: value` lines between two `---` lines at the top) and the rest of the text.
+/// The front matter (`key: value` lines between two `---` lines at the top) and the rest of the text. A value written as a YAML block
+/// (`description: >` or `|` followed by indented lines) is read as the text of those lines.
 pub(super) fn front_matter(text: &str) -> (BTreeMap<String, String>, &str) {
     let mut meta = BTreeMap::new();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else { return (meta, text) };
+    let lines: Vec<&str> = rest.split_inclusive('\n').collect();
     let mut consumed = 0;
-    for line in rest.split_inclusive('\n') {
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
         consumed += line.len();
+        index += 1;
         let trimmed = line.trim_end();
         if trimmed == "---" {
             return (meta, &rest[consumed..]);
         }
         if let Some((key, value)) = trimmed.split_once(':') {
-            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            let value = value.trim();
+            let block = (value.starts_with('>') || value.starts_with('|')) && value[1..].chars().all(|c| c == '+' || c == '-');
+            let value = if block {
+                let folded = value.starts_with('>');
+                let mut parts: Vec<&str> = Vec::new();
+                while index < lines.len()
+                    && (lines[index].starts_with(' ') || lines[index].starts_with('\t') || lines[index].trim().is_empty())
+                    && lines[index].trim_end() != "---"
+                {
+                    consumed += lines[index].len();
+                    parts.push(lines[index].trim());
+                    index += 1;
+                }
+                parts.retain(|p| !p.is_empty());
+                parts.join(if folded { " " } else { "\n" })
+            } else {
+                value.trim_matches(|c| c == '"' || c == '\'').to_owned()
+            };
             if !key.trim().is_empty() {
-                meta.insert(key.trim().to_ascii_lowercase(), value.to_owned());
+                meta.insert(key.trim().to_ascii_lowercase(), value);
             }
         }
     }
@@ -252,6 +274,102 @@ pub(in crate::server) async fn install_builtin(Json(body): Json<Value>) -> Respo
     }
 }
 
+/// `owner/repo` from what a person pastes: `owner/repo`, a GitHub address (also of a folder inside it) or the command of a skills
+/// directory (`npx skills add owner/repo`).
+fn parse_repo(raw: &str) -> Result<(String, String), String> {
+    let token = raw.split_whitespace().last().unwrap_or("");
+    let path = token
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .trim_start_matches("github.com/")
+        .trim_start_matches("git@github.com:")
+        .trim_end_matches(".git");
+    let mut parts = path.split('/').filter(|p| !p.is_empty());
+    let (Some(owner), Some(repo)) = (parts.next(), parts.next()) else {
+        return Err("type a GitHub repository like owner/repo".into());
+    };
+    let ok = |s: &str| s.len() <= 100 && !s.starts_with('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if !ok(owner) || !ok(repo) {
+        return Err("that is not a GitHub repository name (owner/repo)".into());
+    }
+    Ok((owner.to_owned(), repo.to_owned()))
+}
+
+/// The slug a skill file gets from the folder it lies in.
+fn slug_of(folder: &str, repo: &str) -> String {
+    let base = folder.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(repo);
+    let slug: String = base
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    slug.trim_matches('-').chars().take(64).collect()
+}
+
+/// `GET /api/studio/skills/github?repo=owner/repo`: the skills (folders with a SKILL.md) of a public GitHub repository, with the address
+/// each one can be imported from. Nothing is installed.
+pub(in crate::server) async fn github_list(Query(query): Query<HashMap<String, String>>) -> Response {
+    let (owner, repo) = match parse_repo(query.get("repo").map(String::as_str).unwrap_or("")) {
+        Ok(pair) => pair,
+        Err(e) => return bad(&e),
+    };
+    let tree_url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1");
+    let text = match super::agent_net::fetch_public_text_up_to(&tree_url).await {
+        Ok(text) => text,
+        Err(e) => return api_error(StatusCode::BAD_GATEWAY, &format!("GitHub did not answer for {owner}/{repo}: {e}")),
+    };
+    let Ok(tree) = serde_json::from_str::<Value>(&text) else {
+        return api_error(StatusCode::BAD_GATEWAY, "GitHub answered with something that is not a file list (the repository may not exist, or the limit for requests without an account is used up)");
+    };
+    let mut found: Vec<(String, String)> = tree["tree"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e["type"] == "blob")
+                .filter_map(|e| e["path"].as_str())
+                .filter(|p| *p == "SKILL.md" || p.ends_with("/SKILL.md"))
+                .map(|p| (p.to_owned(), slug_of(p.trim_end_matches("SKILL.md").trim_end_matches('/'), &repo)))
+                .filter(|(_, slug)| valid_name(slug))
+                .take(200)
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    let installed: Vec<String> = list_in(&user_base()).into_iter().filter_map(|s| s["name"].as_str().map(str::to_owned)).collect();
+    // the description of the first ones, read from the files themselves (a few at a time)
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, (path, _)) in found.iter().enumerate().take(40) {
+        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
+        tasks.spawn(async move { (index, super::agent_net::fetch_public_text(&url).await.ok()) });
+    }
+    let mut descriptions: HashMap<usize, String> = HashMap::new();
+    while let Some(Ok((index, text))) = tasks.join_next().await {
+        if let Some(text) = text {
+            let (meta, body) = front_matter(&text);
+            let description = meta.get("description").cloned().filter(|d| !d.is_empty()).unwrap_or_else(|| {
+                body.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or_default().chars().take(160).collect()
+            });
+            descriptions.insert(index, description);
+        }
+    }
+    let skills: Vec<Value> = found
+        .iter()
+        .enumerate()
+        .map(|(index, (path, slug))| {
+            json!({
+                "name": slug,
+                "path": path,
+                "description": descriptions.get(&index).cloned().unwrap_or_default(),
+                "url": format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"),
+                "installed": installed.iter().any(|i| i == slug),
+            })
+        })
+        .collect();
+    Json(json!({"repo": format!("{owner}/{repo}"), "skills": skills, "truncated": tree["truncated"].as_bool().unwrap_or(false)})).into_response()
+}
+
 /// A skill from a URL: anything that serves a SKILL.md as text, for example a raw GitHub link.
 fn clean_skill_url(raw: &str) -> Result<String, String> {
     let url = raw.trim();
@@ -303,6 +421,18 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_is_found_in_what_people_paste() {
+        for raw in ["vercel-labs/skills", "https://github.com/vercel-labs/skills", "https://github.com/vercel-labs/skills/tree/main/skills/x", "npx skills add vercel-labs/skills", "git@github.com:vercel-labs/skills.git"] {
+            assert_eq!(parse_repo(raw).unwrap(), ("vercel-labs".to_owned(), "skills".to_owned()), "{raw}");
+        }
+        for bad in ["", "one", "a/../b", "../x/y", ".hidden/x"] {
+            assert!(parse_repo(bad).is_err(), "{bad}");
+        }
+        assert_eq!(slug_of("skills/Frontend Design", "r"), "frontend-design");
+        assert_eq!(slug_of("", "my-repo"), "my-repo");
+    }
+
+    #[test]
     fn names_are_slugs_and_cannot_climb_out() {
         for good in ["a", "deploy-app", "x_1", "0day"] {
             assert!(valid_name(good), "{good}");
@@ -329,6 +459,15 @@ mod tests {
         assert!(meta.is_empty() && body == "# Just text\n");
         let (meta, body) = front_matter("---\nname: open\nno closing line\n");
         assert!(meta.is_empty() && body.starts_with("---"));
+    }
+
+    #[test]
+    fn block_values_in_the_front_matter_are_read() {
+        let (meta, body) = front_matter("---\nname: x\ndescription: >\n  First part\n  second part\nwhen: |-\n  line one\n  line two\nlicense: MIT\n---\nbody\n");
+        assert_eq!(meta["description"], "First part second part");
+        assert_eq!(meta["when"], "line one\nline two");
+        assert_eq!(meta["license"], "MIT");
+        assert_eq!(body, "body\n");
     }
 
     #[test]

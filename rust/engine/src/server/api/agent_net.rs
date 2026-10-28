@@ -395,6 +395,19 @@ pub(super) async fn fetch_public_text(url: &str) -> Result<String, String> {
     Ok(page.text)
 }
 
+/// Like [`fetch_public_text`] for a larger text (the file list of a repository, up to the size limit of every download here); an answer
+/// that does not fit is an error, not a cut-off text.
+pub(super) async fn fetch_public_text_up_to(url: &str) -> Result<String, String> {
+    let fetched = fetch_raw(url, "application/json,text/plain;q=0.9,*/*;q=0.5", allow_private_from_env()).await?;
+    if !(200..300).contains(&fetched.status) {
+        return Err(format!("the server answered HTTP status {}", fetched.status));
+    }
+    if fetched.cut {
+        return Err("the answer is too large".into());
+    }
+    Ok(String::from_utf8_lossy(&fetched.body).into_owned())
+}
+
 /// Runs a network tool of the agent; `None` when `name` is not one of them.
 pub(super) async fn run_tool(name: &str, args: &Value) -> Option<Result<String, String>> {
     match name {
