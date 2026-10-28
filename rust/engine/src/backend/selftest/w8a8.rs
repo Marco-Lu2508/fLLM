@@ -14,7 +14,7 @@ use crate::backend::cuda::hopper_fp8::{direct_gemm, set_fp8_gemm_mode, set_int8_
 use crate::kv_format::{e4m3_to_f32, f32_to_e4m3};
 
 /// Tolerance of the FP8 products against the emulation (relative to the sum of the absolute terms).
-const FP8_TOL: f64 = 1e-3;
+pub(super) const FP8_TOL: f64 = 1e-3;
 /// The same for the int8 products.
 const INT8_TOL: f64 = 1e-5;
 
@@ -24,7 +24,7 @@ fn e4m3_round(v: f32) -> f64 {
 
 /// The quantize-dequantize of one token for the FP8 kernels: one scale per `group` values (dynamic, amax / 448), or the static `scale`. Also returns the
 /// per-element bound of the quantization error.
-fn fp8_activations(row: &[f32], group: usize, static_scale: Option<f32>) -> (Vec<f64>, Vec<f64>) {
+pub(super) fn fp8_activations(row: &[f32], group: usize, static_scale: Option<f32>) -> (Vec<f64>, Vec<f64>) {
     let mut deq = Vec::with_capacity(row.len());
     let mut bound = Vec::with_capacity(row.len());
     for chunk in row.chunks(group) {
@@ -57,7 +57,7 @@ fn int8_activations(row: &[f32]) -> Vec<f64> {
 }
 
 /// Activations with tokens of very different magnitude: a scale that is shared between tokens loses the small ones.
-fn token_gains(rng: &mut Lcg, batch: usize, cols: usize) -> Vec<f32> {
+pub(super) fn token_gains(rng: &mut Lcg, batch: usize, cols: usize) -> Vec<f32> {
     let mut x = rng.vector(batch * cols, 1.0);
     for b in 0..batch {
         let gain = [1.0f32, 1e-2, 3.0, 1e-3, 0.3][b % 5];
@@ -68,12 +68,12 @@ fn token_gains(rng: &mut Lcg, batch: usize, cols: usize) -> Vec<f32> {
     x
 }
 
-fn outcome(have: &[f32], want: &[f64], scale: &[f64], tol: f64, ms: f64) -> Outcome {
+pub(super) fn outcome(have: &[f32], want: &[f64], scale: &[f64], tol: f64, ms: f64) -> Outcome {
     Outcome { device: worst(have, want, scale), cpu: 0.0, tol, cpu_tol: tol, ms }
 }
 
 /// Mean error check that complements the maximum: a systematic error of every element is a defect even when each one is below the tolerance.
-fn mean_error(have: &[f32], want: &[f64], scale: &[f64]) -> f64 {
+pub(super) fn mean_error(have: &[f32], want: &[f64], scale: &[f64]) -> f64 {
     have.iter().zip(want).zip(scale).map(|((&h, &w), &s)| (f64::from(h) - w).abs() / s.max(1e-30)).sum::<f64>() / have.len().max(1) as f64
 }
 

@@ -306,6 +306,11 @@ int fllm_fp8_gemm_mode() {
     return env;
 }
 
+int fllm_fp8_gemm_forced_mode() {
+    const int forced = g_mode.load();
+    return forced >= 0 ? forced : -1;
+}
+
 bool fllm_fp8_w8a8_enabled(int rows, int cols) {
     const int mode = fllm_fp8_gemm_mode();
     if (mode == 0 || fllm_cc() < 89 || fllm_exact_math()) return false;

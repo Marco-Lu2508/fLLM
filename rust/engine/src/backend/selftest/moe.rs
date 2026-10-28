@@ -111,7 +111,7 @@ impl Tester<'_> {
             let r = self.moe_route_legacy_check(rows, experts, k);
             self.record("moe route (trait)", &format!("{rows}x{experts} k{k}"), r);
         }
-        for kind in self.kinds(&[8u32, 12, 1]) {
+        for kind in self.kinds(&[8u32, 12, 1, 0x8000_0021]) {
             let r = self.moe_expert_gemm_check(kind, 6, 20, 2, 130, 512);
             self.record(&format!("moe expert_gemm {}", format_name(kind)), "6 experts 20 tokens k2 130x512", r);
         }
@@ -129,7 +129,7 @@ impl Tester<'_> {
         }
         // the grouped GEMM: every format of the kernel, both tiles, with bias; K-quants need widths of 256
         let mode_swiglu = MoeGlu { mode: 0, alpha: 0.0, limit: 0.0 };
-        for kind in self.kinds(&[1u32, 30, 2, 3, 6, 7, 8, 12, 13, 14, 20, 39]) {
+        for kind in self.kinds(&[1u32, 30, 2, 3, 6, 7, 8, 12, 13, 14, 20, 39, 0x8000_0021]) {
             for block in [16usize, 64] {
                 let tokens = if block == 16 { 6 } else { 70 };
                 let r = self.moe_grouped_check(kind, 8, tokens, 2, 130, 512, block, 2, None, true, false, usize::MAX);
@@ -139,6 +139,13 @@ impl Tester<'_> {
             self.record(&format!("moe grouped {}", format_name(kind)), "down shape 8 experts 140 pairs 256x512", r);
             let r = self.moe_grouped_check(kind, 6, 40, 3, 130, 512, 16, 3, Some(mode_swiglu), true, false, usize::MAX);
             self.record(&format!("moe gate/up {}", format_name(kind)), "6 experts 40 tokens k3 130x512 swiglu +bias", r);
+        }
+        // block-wise FP8 experts: widths that are not a multiple of the 128-wide tile (a 16-wide last tile), rows that end inside a tile row
+        for kind in self.kinds(&[0x8000_0021u32]) {
+            let r = self.moe_grouped_check(kind, 6, 40, 3, 130, 528, 64, 3, Some(mode_swiglu), true, false, usize::MAX);
+            self.record("moe gate/up fp8b", "6 experts 40 tokens k3 130x528 swiglu +bias", r);
+            let r = self.moe_grouped_check(kind, 8, 6, 2, 260, 144, 16, 1, None, false, false, usize::MAX);
+            self.record("moe grouped fp8b", "8 experts 6 tokens k2 260x144 tile 16", r);
         }
         let glu_modes = [
             ("geglu", MoeGlu { mode: 1, alpha: 0.0, limit: 0.0 }),

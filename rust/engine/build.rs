@@ -405,6 +405,7 @@ enum Flavor {
 const EXTRA_SOURCES: &[(&str, Flavor)] = &[
     ("nvfp4_cutlass_sm100.cu", Flavor::Sm100),
     ("fp8_gemm.cu", Flavor::Generic),
+    ("fp8_block.cu", Flavor::Generic),
     ("fp8_cutlass_sm90.cu", Flavor::Hopper),
     ("int8_gemm.cu", Flavor::Generic),
     ("cublaslt_gemm.cu", Flavor::Generic),

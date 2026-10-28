@@ -2872,7 +2872,7 @@ impl RustDecoder {
                                 let same = list.iter().all(|e| {
                                     e.gate.quant_type == kinds[0] && e.up.quant_type == kinds[1] && e.down.quant_type == kinds[2]
                                 });
-                                let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012 | 0x8000_0020 | 0x8000_0021);
+                                let ok_kind = |q: crate::backend::QuantType| matches!(q.to_gguf_type_id(), 1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012);
                                 let (ff, hid) = (list[0].gate.rows, list[0].gate.cols);
                                 let dims = list[0].down.rows == hid
                                     && list[0].down.cols == ff

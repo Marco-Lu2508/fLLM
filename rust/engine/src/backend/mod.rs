@@ -1123,6 +1123,12 @@ pub struct BackendCapabilities {
 
 impl BackendCapabilities {
     pub fn supports_quant(&self, quant: QuantType) -> bool {
+        // block-wise FP8 tile shapes other than 128 x 128 are `Other` types: a backend that lists `Fp8Block` runs every tile shape of the format
+        if let QuantType::Other(id) = quant {
+            if fllm_gguf_probe::fp8b_type(id) {
+                return self.supported_quants.contains(&QuantType::Fp8Block);
+            }
+        }
         self.supported_quants.contains(&quant)
     }
 }

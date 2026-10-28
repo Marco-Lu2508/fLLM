@@ -6,6 +6,13 @@
 // FLLM_FP8_GEMM = auto | 0 | 1 | cutlass; fllm_fp8_gemm_set_mode overrides it at run time (self test): -1 environment, 0 off, 1 mma.sync, 2 CUTLASS.
 void fllm_fp8_gemm_set_mode(int mode);
 int fllm_fp8_gemm_mode();
+// The mode a caller forced with fllm_fp8_gemm_set_mode (0 off, 1 mma.sync, 2 CUTLASS), -1 when none: lets code that has its own default
+// (block-wise FP8 weights, fp8_block.cu) tell "not set" from "off".
+int fllm_fp8_gemm_forced_mode();
+// Block-wise FP8 weights (GGUF type FP8B; fp8_block.cu): y[batch][rows] = x[batch][cols] * W^T (+ bias) for the device buffer `w` of such a weight
+// (rows * cols E4M3 codes, then the FP32 tile scales; tiles of 2^lbr rows x 2^lbc columns). Chooses between the FP8 tensor cores
+// (fllm_fp8_w8a8_gemm), the FP16 tensor-core GEMM and the FP32 GEMV; 0 when the product ran, > 0 on error.
+int fllm_fp8_block_gemm(cudaStream_t s, const void *w, const float *x, float *y, const float *bias, int rows, int cols, int batch, int lbr, int lbc);
 // Should an FP8M weight of rows x cols be uploaded in the W8A8 layout (row-major E4M3 bytes + FP32 scales) on the current device?
 bool fllm_fp8_w8a8_enabled(int rows, int cols);
 // y[batch][rows] = x[batch][cols] * W^T (+ bias). W: E4M3 [rows][cols]. wblock 0: wscale = FP32 per row; wblock 1: wscale = FP32

@@ -288,6 +288,7 @@ moe_tc_kernel(const uint8_t *const *__restrict__ wtab, const uint8_t *const *__r
     const int32_t *my_sorted = sorted + (size_t)blockIdx.y * BN;
 
     const uint8_t *wrow[T::APT];
+    const float *srow[T::APT];  // FP8B: the tile scales (128 x 128 tiles) of the row, behind the codes of the expert matrix
     {
         const uint8_t *Wg = wtab[e];
         const uint8_t *Wu = GLU ? wtab2[e] : nullptr;
@@ -304,6 +305,10 @@ moe_tc_kernel(const uint8_t *const *__restrict__ wtab, const uint8_t *const *__r
                 row = m0 + s;
             }
             wrow[i] = row < rows ? Wb + (size_t)row * row_bytes : nullptr;
+            srow[i] = nullptr;
+            if constexpr (KIND == KIND_FP8B) {
+                if (row < rows) srow[i] = reinterpret_cast<const float *>(Wb + (size_t)rows * cols) + (size_t)(row >> 7) * ((cols + 127) >> 7);
+            }
         }
     }
     const float *xrow[T::BPT];
@@ -331,6 +336,12 @@ moe_tc_kernel(const uint8_t *const *__restrict__ wtab, const uint8_t *const *__r
             const int k = kt * T::BK + ((tid + i * T::NT) % T::RPK) * 16;
             if (wrow[i]) {
                 decode16<KIND>(wrow[i], k >> 4, cols, wv[i]);
+                if constexpr (KIND == KIND_FP8B) {
+                    // the tile scale of the 16 codes (a run never straddles two 128-wide tiles); past the end of the row the activations are zero
+                    const float sc = k < cols ? __ldg(srow[i] + (k >> 7)) : 0.f;
+#pragma unroll
+                    for (int j = 0; j < 16; j++) wv[i][j] *= sc;
+                }
             } else {
 #pragma unroll
                 for (int j = 0; j < 16; j++) wv[i][j] = 0.f;
@@ -483,7 +494,6 @@ static int moe_tc_kind(cudaStream_t s, uint32_t kind, const MoeGemmArgs &a) {
         case KIND_Q4Z32: return moe_tc_run<KIND_Q4Z32, BN, GLU>(s, a);
         case KIND_Q4Z64: return moe_tc_run<KIND_Q4Z64, BN, GLU>(s, a);
         case KIND_Q4Z128: return moe_tc_run<KIND_Q4Z128, BN, GLU>(s, a);
-        case KIND_FP8M: return moe_tc_run<KIND_FP8M, BN, GLU>(s, a);
         case KIND_FP8B: return moe_tc_run<KIND_FP8B, BN, GLU>(s, a);
         default: return fllm_set_error("moe_grouped: unsupported weight type %d", kind);
     }
@@ -496,7 +506,7 @@ int fllm_moe_grouped_supported(uint32_t kind, int cols, int block) {
         case KIND_Q2_K: case KIND_Q3_K: case KIND_IQ2_XXS: case KIND_IQ2_XS: case KIND_IQ3_XXS: case KIND_IQ1_S:
         case KIND_IQ3_S: case KIND_IQ2_S: case KIND_IQ1_M: case KIND_NVFP4:
         case KIND_Q4Z32: case KIND_Q4Z64: case KIND_Q4Z128:
-        case KIND_FP8M: case KIND_FP8B: break;
+        case KIND_FP8B: break;  // 128 x 128 tiles; FP8M (row scales behind the codes, or the W8A8 / Marlin layouts) has no grouped kernel
         default: return 0;
     }
     return (block == 16 || block == 64) && (cols & 15) == 0 && (cols % kind_block_elems(kind)) == 0 && fllm_cc() >= 75;

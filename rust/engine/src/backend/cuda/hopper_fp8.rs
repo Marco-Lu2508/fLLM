@@ -1,5 +1,6 @@
 //! FP8 and int8 W8A8 GEMMs (cuda/fp8_gemm.cu, cuda/int8_gemm.cu): the upload layout of FP8M weights for the W8A8 kernel, the linear op that
-//! runs it, and a direct path to the kernels for the self test (block-wise FP8 and plain int8 weights have no weight format in the engine yet).
+//! runs it, a direct path to the kernels for the self test (plain int8 weights have no weight format in the engine yet), and the upload and
+//! linear op of block-wise FP8 weights (`FP8B`, cuda/fp8_block.cu).
 //!
 //! An FP8M weight (E4M3 bytes plus one f16 scale per row) is uploaded in one of two layouts. `FLLM_FP8_GEMM=0`, devices below sm_89 and shapes
 //! whose width is not a multiple of 128 keep the Marlin layout (W8A16, `upload_fp8_marlin`). Otherwise (`auto` and `1` on sm_89 and newer) the
@@ -7,6 +8,7 @@
 //! scales as FP32 sit in `DeviceWeight::perm` (a Marlin FP8 weight has no
 //! permutation, so `perm.is_some()` on an `Fp8Marlin` weight means "W8A8 layout"). The activations are quantized to E4M3 in the kernel call.
 use super::*;
+use fllm_gguf_probe::Fp8bLayout;
 use half::f16;
 
 extern "C" {
@@ -26,6 +28,18 @@ extern "C" {
         batch: c_int,
         amode: c_int,
         static_scale: f32,
+    ) -> c_int;
+    fn fllm_cuda_linear_fp8_block(
+        st: *mut RawStream,
+        w: *const c_void,
+        x: *const f32,
+        y: *mut f32,
+        bias: *const f32,
+        rows: c_int,
+        cols: c_int,
+        batch: c_int,
+        lbr: c_int,
+        lbc: c_int,
     ) -> c_int;
     fn fllm_cuda_linear_int8_plain(
         st: *mut RawStream,
@@ -50,6 +64,22 @@ pub fn set_fp8_gemm_mode(mode: i32) {
 pub fn set_int8_gemm_mode(mode: i32) {
     // SAFETY: plain setter of a process-wide flag.
     unsafe { fllm_cuda_int8_gemm_set_mode(mode) };
+}
+
+/// Compute capability times ten (89 = sm_89) of CUDA device `device`; 0 when it cannot be found (or is a ROCm device).
+pub fn device_cc(device: usize) -> u32 {
+    list_devices(0)
+        .into_iter()
+        .nth(device)
+        .filter(|info| !info.description.starts_with("CUDA/ROCm"))
+        .and_then(|info| {
+            info.description
+                .split("sm_")
+                .nth(1)
+                .and_then(|t| t.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|t| t.parse::<u32>().ok())
+        })
+        .unwrap_or(0)
 }
 
 /// How the activations of an FP8 W8A8 product are scaled: (mode, static factor). `FLLM_FP8_ACT_STATIC=<factor>` selects one static per-tensor
@@ -114,33 +144,38 @@ pub(super) fn try_upload_w8a8(
     }))
 }
 
-/// The upload of a block-wise FP8 weight (QuantType::Fp8Block, 128x128 blocks).
-pub(super) fn try_upload_fp8_block(
+/// Upload of a block-wise FP8 weight (`FP8B`, GGUF type `kind`, any power-of-two tile shape). The device buffer is the tensor as the GGUF file holds
+/// it (codes, FP32 tile scales, trailer): the weight stays 8-bit on every GPU, and the host fallbacks (`weight_to_host`, the CPU backend) read it
+/// as such. The kernels (`cuda/fp8_block.cu`) expand the codes in registers; on sm_89 and newer prompts of 128 x 128 tile weights use the FP8
+/// tensor cores. The one case that is not kept 8-bit is a weight whose code count is not a multiple of 4 (the scale table would be unaligned):
+/// it is expanded to F16 here, with a message.
+pub(super) fn upload_fp8_block(
     backend: &CudaBackend,
     name: &str,
     raw_bytes: &[u8],
+    kind: u32,
     rows: usize,
     cols: usize,
     bias: Option<&[f32]>,
-) -> Result<Option<DeviceWeight>, BackendError> {
-    if backend.rocm || backend.cc < 89 {
-        return Ok(None);
+) -> Result<DeviceWeight, BackendError> {
+    if backend.rocm {
+        return upload_fp8_block_as_f16(backend, name, raw_bytes, kind, rows, cols, bias, "the HIP build has no block-wise FP8 kernels");
     }
-    let qbytes = rows * cols;
-    let num_scales = rows.div_ceil(128) * cols.div_ceil(128);
-    let expected = qbytes + num_scales * 2;
-    if raw_bytes.len() != expected {
-        return Err(invalid(format!("{name}: {} bytes are not {rows} x {cols} blockwise FP8 (expected {expected})", raw_bytes.len())));
+    let layout = Fp8bLayout::parse(kind, raw_bytes).map_err(|e| invalid(format!("{name}: {e}")))?;
+    if layout.slabs != 1 || layout.rows != rows || layout.cols != cols {
+        return Err(invalid(format!(
+            "{name}: the FP8B tensor holds {} matrices of {} x {}, a single {rows} x {cols} matrix was expected",
+            layout.slabs, layout.rows, layout.cols
+        )));
+    }
+    if !(rows * cols).is_multiple_of(4) {
+        return upload_fp8_block_as_f16(backend, name, raw_bytes, kind, rows, cols, bias, "the scale table would not be 4-byte aligned");
     }
     if bias.is_some_and(|b| b.len() != rows) {
         return Err(invalid(format!("{name}: bias does not have {rows} values")));
     }
-    let scale_raw = &raw_bytes[qbytes..];
-    let buffer = backend.alloc(qbytes)?;
-    backend.upload_sync(&buffer, &raw_bytes[..qbytes])?;
-    let scales: Vec<u8> = scale_raw.as_chunks::<2>().0.iter().flat_map(|c| f16::from_le_bytes(*c).to_f32().to_le_bytes()).collect();
-    let scale_buffer = backend.alloc(num_scales * 4)?;
-    backend.upload_sync(&scale_buffer, &scales)?;
+    let buffer = backend.alloc(raw_bytes.len())?;
+    backend.upload_sync(&buffer, raw_bytes)?;
     let bias_buf = if let Some(b) = bias {
         let buf = backend.alloc(rows * 4)?;
         let bytes: Vec<u8> = b.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -149,17 +184,95 @@ pub(super) fn try_upload_fp8_block(
     } else {
         None
     };
-    log_once("cuda-fp8-block", &format!("Block-wise FP8 weights (128x128) run as W8A8 on the FP8 tensor cores; first: {name}"));
-    Ok(Some(DeviceWeight {
+    let (br, bc) = (layout.block_rows, layout.block_cols);
+    log_once(
+        "cuda-fp8-block",
+        &format!(
+            "Block-wise FP8 weights ({br}x{bc} tiles) stay 8-bit on the device: {} (first: {name})",
+            if backend.cc >= 89 && (br, bc) == (128, 128) {
+                "FP8 tensor cores for prompts (FLLM_FP8_BLOCK_W8A8=0 switches them off), FP32 dequantizing GEMV for decode"
+            } else if backend.cc >= 75 {
+                "FP16 tensor cores for prompts, FP32 dequantizing GEMV for decode"
+            } else {
+                "FP32 dequantizing GEMV"
+            }
+        ),
+    );
+    Ok(DeviceWeight {
         name: name.to_string(),
-        quant_type: QuantType::Fp8Block,
+        quant_type: QuantType::from_gguf_type_id(kind),
         rows,
         cols,
         buffer,
         bias: bias_buf,
         scale: 1.0,
-        perm: Some(scale_buffer),
-    }))
+        perm: None,
+    })
+}
+
+/// The explicit fallback: the weight expanded to F16 (2 bytes per weight instead of 1) and uploaded as an F16 weight.
+#[allow(clippy::too_many_arguments)]
+fn upload_fp8_block_as_f16(
+    backend: &CudaBackend,
+    name: &str,
+    raw_bytes: &[u8],
+    kind: u32,
+    rows: usize,
+    cols: usize,
+    bias: Option<&[f32]>,
+    why: &str,
+) -> Result<DeviceWeight, BackendError> {
+    let values = crate::compute::dequantize(raw_bytes, kind, rows * cols).map_err(|e| BackendError::UnsupportedOperation(format!("{name}: {e}")))?;
+    log_once(
+        "cuda-fp8-block-f16",
+        &format!("Block-wise FP8 weights are expanded to F16 on this device ({why}; first: {name}, {} MiB)", (values.len() * 2) >> 20),
+    );
+    let bytes: Vec<u8> = values.iter().flat_map(|&v| f16::from_f32(v).to_le_bytes()).collect();
+    backend.upload_weight(name, &bytes, QuantType::F16, rows, cols, bias)
+}
+
+/// `out = x * W^T (+ bias)` for an `FP8B` weight (`upload_fp8_block`).
+pub(super) fn linear_fp8_block(
+    stream: &mut CudaStream,
+    out: &mut DeviceBuffer,
+    x: &DeviceBuffer,
+    weight: &DeviceWeight,
+    bias: Option<&DeviceBuffer>,
+) -> Result<(), BackendError> {
+    let (rows, cols) = (weight.rows, weight.cols);
+    if rows == 0 || cols == 0 || !x.size.is_multiple_of(cols * 4) {
+        return Err(invalid("linear input dimensions do not match"));
+    }
+    let batch = x.size / (cols * 4);
+    if batch == 0 {
+        return Ok(());
+    }
+    if out.size < batch * rows * 4 {
+        return Err(invalid("linear output smaller than batch x rows"));
+    }
+    if bias.is_some_and(|b| b.size < rows * 4) {
+        return Err(invalid("linear bias shorter than the output rows"));
+    }
+    let (br, bc) = fllm_gguf_probe::fp8b_shape(weight.quant_type.to_gguf_type_id()).ok_or_else(|| invalid("not a block-wise FP8 weight"))?;
+    let bias_ptr = match bias {
+        Some(b) => dev_ptr(b)? as *const f32,
+        None => std::ptr::null(),
+    };
+    // SAFETY: sizes checked above; the buffer was uploaded by `upload_fp8_block` (codes, then the scales the kernels address from `rows * cols`).
+    check(unsafe {
+        fllm_cuda_linear_fp8_block(
+            stream.raw,
+            dev_ptr(&weight.buffer)?.cast(),
+            dev_ptr(x)?.cast(),
+            dev_ptr(out)?.cast(),
+            bias_ptr,
+            to_c(rows, "rows")?,
+            to_c(cols, "cols")?,
+            to_c(batch, "batch")?,
+            br.trailing_zeros() as c_int,
+            bc.trailing_zeros() as c_int,
+        )
+    })
 }
 
 /// `out = x * W^T (+ bias)` for an FP8M weight in the W8A8 layout (`weight.perm` holds the row scales).
@@ -190,21 +303,20 @@ pub(super) fn linear_w8a8(
         None => std::ptr::null(),
     };
     let (amode_env, static_scale) = activation_scale();
-    let (wblock, amode) = if weight.quant_type == QuantType::Fp8Block { (1, 2) } else { (0, amode_env) };
-    // SAFETY: sizes checked above; the weight was uploaded by `try_upload_w8a8` or `try_upload_fp8_block`.
+    // SAFETY: sizes checked above; the weight was uploaded by `try_upload_w8a8`.
     check(unsafe {
         fllm_cuda_linear_fp8_w8a8(
             stream.raw,
             dev_ptr(&weight.buffer)?.cast(),
             dev_ptr(scales)?.cast(),
-            wblock,
+            0,
             dev_ptr(x)?.cast(),
             dev_ptr(out)?.cast(),
             bias_ptr,
             to_c(rows, "rows")?,
             to_c(cols, "cols")?,
             to_c(batch, "batch")?,
-            amode,
+            amode_env,
             static_scale,
         )
     })

@@ -84,7 +84,7 @@ pub(super) fn moe_enabled() -> bool {
 pub(super) fn grouped_kind(kind: u32) -> bool {
     matches!(
         kind,
-        1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012 | 0x8000_0020 | 0x8000_0021
+        1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012 | 0x8000_0021
     )
 }
 
@@ -93,7 +93,7 @@ pub(super) fn grouped_supported(cc: u32, quant_type: QuantType, cols: usize, blo
     let kind = quant_type.to_gguf_type_id();
     let width = if matches!(kind, 10..=14 | 16..=19 | 21 | 22 | 29) {
         256
-    } else if matches!(kind, 1 | 30 | 0x8000_0020 | 0x8000_0021) {
+    } else if matches!(kind, 1 | 30 | 0x8000_0021) {
         1
     } else if kind == 40 {
         64
@@ -337,5 +337,8 @@ mod tests {
         assert!(grouped_supported(80, q(40), 2048, 16), "NVFP4 is supported in grouped GEMM");
         assert!(grouped_supported(80, q(0x8000_0010), 2048, 16), "Q4Z is supported in grouped GEMM");
         assert!(grouped_supported(80, q(0x8000_0021), 2048, 16), "FP8B is supported in grouped GEMM");
+        assert!(grouped_supported(80, q(0x8000_0021), 528, 64), "FP8B with a partial last tile");
+        assert!(!grouped_supported(80, q(0x8000_0155), 2048, 16), "only the 128 x 128 tiles have a grouped kernel; other tiles use the per-expert path");
+        assert!(!grouped_supported(80, q(0x8000_0020), 2048, 16), "FP8M has row scales the grouped kernel does not apply");
     }
 }

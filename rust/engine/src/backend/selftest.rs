@@ -29,6 +29,8 @@ mod fp4sm100;
 #[cfg(feature = "cuda")]
 mod w8a8;
 #[cfg(feature = "cuda")]
+mod fp8blk;
+#[cfg(feature = "cuda")]
 mod hgemm;
 #[cfg(feature = "cuda")]
 mod hattn;
@@ -83,6 +85,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("actdtype", "CUDA narrow activations (FLLM_ACT_DTYPE f16/bf16): norm, residual, GLU, rope, KV write, Marlin GEMM, FFN chain, attention against the FP32 pipeline"),
     ("smallm", "CUDA Marlin small-M GEMV (1 to 4 rows) against the Marlin GEMM and the reference; prints us per call of both"),
     ("w8a8", "CUDA FP8 and int8 W8A8 tensor-core GEMMs with activation quantization (FLLM_SELFTEST_BENCH=1 adds timings against the W8A16 paths)"),
+    ("fp8blk", "CUDA block-wise FP8 weights (FP8B): decode GEMV and prompt GEMM that keep the weights 8-bit, the FP8 tensor-core path against its emulation, tile shapes, odd shapes, 8-bit memory check"),
     ("hattn", "CUDA Hopper and FlashInfer attention: FA3 prefill, sliding window / soft cap / sinks, ragged batches, tensor-core decode, cascade"),
     ("hmla", "CUDA latent-cache MLA (DeepSeek-V2/V3): absorbed up-projections, 576-value cache, tensor cores"),
     ("hgemm", "CUDA cuBLASLt GEMMs (runtime-loaded) and Hopper CUTLASS WGMMA FP8"),
@@ -1222,6 +1225,10 @@ impl<'a> Tester<'a> {
             self.w8a8_cases();
         }
         #[cfg(feature = "cuda")]
+        if self.enter("fp8blk") {
+            self.fp8blk_cases();
+        }
+        #[cfg(feature = "cuda")]
         if self.enter("hattn") {
             self.hattn_cases();
         }
@@ -1304,11 +1311,7 @@ impl<'a> Tester<'a> {
             }
         }
         // 8-bit FP8 weights (Marlin GEMM): rows and columns multiples of 128
-        for kind in self.kinds(&[0x8000_0020u32, 0x8000_0021]) {
-            // block-scaled FP8 (0x8000_0021) has no CPU reference kernel: nothing to compare the device with
-            if kind == 0x8000_0021 {
-                continue;
-            }
+        for kind in self.kinds(&[0x8000_0020u32]) {
             for batch in [1usize, 2, 3, 4, 5, 8, 16, 17, 40, 129, 356] {
                 let with_bias = batch == 3 || batch == 129;
                 let r = self.linear(kind, 384, 1024, batch, with_bias).map(|mut o| {
@@ -1321,6 +1324,30 @@ impl<'a> Tester<'a> {
                     r,
                 );
             }
+        }
+        // block-wise FP8 (FP8B): the weights stay 8-bit on the device, the kernels apply the tile scales; the CPU kernel (`cpu_fp8`) is the reference of
+        // the CPU backend. Decode batches (1 .. 16 tokens), the prompt kernel (more than 16), widths that are not a multiple of 16 (no tensor-core
+        // tile) or of the 128-wide tile, rows that end inside a tile row. The FP8 tensor-core path (sm_89 and newer; it rounds the activations to FP8)
+        // is switched off here and checked against its own emulation by the `fp8blk` group.
+        if self.filter.wants_kind(0x8000_0021) {
+            #[cfg(feature = "cuda")]
+            crate::backend::cuda::hopper_fp8::set_fp8_gemm_mode(0);
+            for (rows, cols) in [(384usize, 1024usize), (259, 1000), (200, 640)] {
+                for batch in [1usize, 2, 3, 4, 5, 8, 9, 16, 17, 40, 129, 356] {
+                    let with_bias = batch == 3 || batch == 129;
+                    let r = self.linear(0x8000_0021, rows, cols, batch, with_bias).map(|mut o| {
+                        o.tol = o.tol.max(Self::FAST_TOL);
+                        o
+                    });
+                    self.record(
+                        "fast linear fp8b",
+                        &format!("{rows}x{cols} batch {batch}{}", if with_bias { " +bias" } else { "" }),
+                        r,
+                    );
+                }
+            }
+            #[cfg(feature = "cuda")]
+            crate::backend::cuda::hopper_fp8::set_fp8_gemm_mode(-1);
         }
         // NVFP4 through the Marlin W4A16 kernel (the default on GPUs without FP4 tensor cores, FLLM_NVFP4_MARLIN=1 elsewhere); the
         // FP4 tensor-core kernel quantizes its activations to FP4 and is held to a looser bound by the model tests instead
@@ -2245,6 +2272,33 @@ impl<'a> Tester<'a> {
             let r = self.linear(8, 70_001, 32, 2, false);
             self.record("linear q8_0", "70001x32 batch 2", r);
         }
+        // Block-wise FP8: the usual 128 x 128 tiles (odd widths, rows that end inside a tile row, a width of one partial tile) and the other
+        // tile shapes the format allows. rows * cols is a multiple of 4 (the device keeps the weight 8-bit then).
+        if self.filter.wants_kind(0x8000_0021) {
+            let tile = |rows: usize, cols: usize| (128usize, 128usize, rows, cols);
+            for (br, bc, rows, cols) in [
+                tile(12, 77),
+                tile(13, 256),
+                tile(13, 300),
+                tile(130, 520),
+                (32, 32, 70, 200),
+                (64, 16, 90, 300),
+                (1, 128, 33, 384),
+                (128, 32, 130, 256),
+                (16, 1, 20, 13 * 4),
+                (256, 64, 7 * 4, 200),
+            ] {
+                let kind = fllm_gguf_probe::fp8b_type_id(br, bc).expect("tile shape with a type id");
+                for batch in [1, 2, 5] {
+                    let r = self.linear(kind, rows, cols, batch, batch == 5);
+                    self.record(
+                        "linear fp8b",
+                        &format!("{rows}x{cols} tiles {br}x{bc} batch {batch}{}", if batch == 5 { " +bias" } else { "" }),
+                        r,
+                    );
+                }
+            }
+        }
     }
 
     fn embedding_cases(&mut self) {
@@ -2565,11 +2619,21 @@ impl<'a> Tester<'a> {
         // Formats a backend only reaches by re-quantizing them at upload (CUDA: Q5_K for wide rows of
         // formats without a decoder) carry that conversion error: judge the device against 2 % of
         // the error scale; the CPU backend is still held to the exact tolerance.
-        let converted = !self.device.capabilities().supported_quants.contains(&QuantType::from_gguf_type_id(kind))
+        let supported = self.device.capabilities().supports_quant(QuantType::from_gguf_type_id(kind));
+        let converted = !supported
             && cols.is_multiple_of(256)
             && !matches!(kind, 20 | 23 | 39) // run natively through the shared 16-entry grid kernels
             && self.device.name() != "CPU";
-        let device_tol = if converted { 0.02 } else { tol }.max(self.npu_requant_tol(kind));
+        // block-wise FP8 on a device without a kernel for it is expanded to binary16 at upload: the weights are rounded (2^-11 relative)
+        let f16_expanded = fllm_gguf_probe::fp8b_type(kind) && !supported && self.device.name() != "CPU";
+        let device_tol = if converted {
+            0.02
+        } else if f16_expanded {
+            tol.max(Self::FAST_TOL)
+        } else {
+            tol
+        }
+        .max(self.npu_requant_tol(kind));
         Ok(Outcome {
             device: worst(&device, &want, &scale),
             cpu: worst(&cpu, &want, &scale),
@@ -4948,4 +5012,22 @@ mod extra_group_tests {
 
     
     
+
+    /// The block-wise FP8 checks (every tile shape, odd shapes, grouped experts) run against the CPU backend, whose kernel is `cpu_fp8`, and pass:
+    /// the f64 reference, the random weights and the shapes of the checks are right before they are run on a GPU.
+    #[test]
+    fn block_wise_fp8_checks_pass_on_the_cpu_backend() {
+        let cpu = CpuBackend::new();
+        let filter = Filter::parse(Some("linear,moe"), Some("fp8b")).unwrap();
+        let mut t = Tester::new(&cpu, &filter, "exact");
+        t.extra_groups = true;
+        t.run_all();
+        t.run_fast();
+        let fp8b: Vec<_> = t.records.iter().filter(|r| r.op.contains("fp8b")).collect();
+        assert!(fp8b.len() > 40, "only {} fp8b checks ran", fp8b.len());
+        let failed: Vec<_> = fp8b.iter().filter(|r| r.status == Status::Failed).map(|r| (&r.op, &r.shape, &r.message)).collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+        let skipped = fp8b.iter().filter(|r| r.status == Status::Skipped).count();
+        assert_eq!(skipped, 0, "the CPU backend runs every fp8b check");
+    }
 }

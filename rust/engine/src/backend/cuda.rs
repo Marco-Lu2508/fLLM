@@ -913,7 +913,11 @@ impl CudaBackend {
         let rocm = info.description.starts_with("CUDA/ROCm");
         if cc >= 75 || rocm {
             // 4-bit AWQ / GPTQ weights run through the Marlin GEMM of vLLM
-            supported_quants.extend([QuantType::Q4Z32, QuantType::Q4Z64, QuantType::Q4Z128, QuantType::Fp8Block]);
+            supported_quants.extend([QuantType::Q4Z32, QuantType::Q4Z64, QuantType::Q4Z128]);
+        }
+        if !rocm {
+            // block-wise FP8 stays 8-bit on every NVIDIA GPU (FP32 GEMV; tensor cores for prompts from sm_75); the HIP build expands it to F16
+            supported_quants.push(QuantType::Fp8Block);
         }
         let capabilities = BackendCapabilities {
             name: info.name.clone(),
@@ -1257,10 +1261,8 @@ impl Backend for CudaBackend {
         bias: Option<&[f32]>,
     ) -> Result<DeviceWeight, BackendError> {
         let kind = quant_type.to_gguf_type_id();
-        if quant_type == QuantType::Fp8Block {
-            if let Some(weight) = hopper_fp8::try_upload_fp8_block(self, name, raw_bytes, rows, cols, bias)? {
-                return Ok(weight);
-            }
+        if fllm_gguf_probe::fp8b_type(kind) {
+            return hopper_fp8::upload_fp8_block(self, name, raw_bytes, kind, rows, cols, bias);
         }
         if quant_type == QuantType::Fp8Marlin {
             if let Some(weight) = hopper_fp8::try_upload_w8a8(self, name, raw_bytes, rows, cols, bias)? {
@@ -2811,10 +2813,10 @@ impl Stream for CudaStream {
         if self.act.is_narrow() {
             return self.narrow_linear(out, x, weight, bias);
         }
-        if weight.quant_type == QuantType::Fp8Block {
-            return hopper_fp8::linear_w8a8(self, out, x, weight, bias);
-        }
         let kind = weight.quant_type.to_gguf_type_id();
+        if fllm_gguf_probe::fp8b_type(kind) {
+            return hopper_fp8::linear_fp8_block(self, out, x, weight, bias);
+        }
         if weight.quant_type == QuantType::Fp8Marlin {
             if weight.perm.is_some() {
                 return hopper_fp8::linear_w8a8(self, out, x, weight, bias);

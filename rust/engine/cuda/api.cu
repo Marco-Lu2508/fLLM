@@ -820,6 +820,17 @@ int fllm_cuda_linear_fp8_w8a8(FllmStream *st, const void *w, const float *wscale
     return rc;
 #endif
 }
+// Block-wise FP8 weight (FP8B; fp8_block.cu): `w` is the device buffer of the weight, tiles of 2^lbr rows x 2^lbc columns
+int fllm_cuda_linear_fp8_block(FllmStream *st, const void *w, const float *x, float *y, const float *bias, int rows, int cols, int batch, int lbr,
+                               int lbc) {
+#if defined(__HIPCC__)
+    (void)st; (void)w; (void)x; (void)y; (void)bias; (void)rows; (void)cols; (void)batch; (void)lbr; (void)lbc;
+    return fllm_set_error("block-wise FP8 weights are not available in the ROCm build");
+#else
+    PREP(st);
+    return fllm_fp8_block_gemm(st->s, w, x, y, bias, rows, cols, batch, lbr, lbc);
+#endif
+}
 // int8 weights [rows][cols] with one FP32 scale per row, per-token activations (the SmoothQuant / compressed-tensors layout)
 int fllm_cuda_linear_int8_plain(FllmStream *st, const void *w, const float *wscale, const float *x, float *y, const float *bias, int rows, int cols,
                                 int batch) {
