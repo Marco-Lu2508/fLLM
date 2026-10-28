@@ -408,7 +408,7 @@ the 16 bits of the older expanding conversion.
 - **Other devices**: Vulkan expands the weights to F16 when they are uploaded, Metal to F16 (F32 if a value does not fit), the wgpu
   backend to F32; each logs the format and the size once and needs about 4 times (wgpu: 7 times) the packed size in device memory.
   The CPU backend runs the packed-weight kernels.
-- **Status**: compiled with nvcc 12.8 for sm_80, sm_89, sm_90 and sm_120 (no errors, no register spills); the arithmetic of the
+- **Status**: compiled with nvcc 12.8 for sm_80, sm_89, sm_90 and sm_120 (no errors, no register spills; `cargo check --features cuda` with the whole `build.rs` nvcc build for sm_80 passes too); the arithmetic of the
   kernels (byte-pair table, run and block indexing, lane partition, warp butterfly, FP16 rounding of tiles) is mirrored on the host
   and compared with the f64 reference in `cpu_bnb::tests::the_cuda_*`, and the code book literals in `common.cuh` are compared with
   the Rust tables bit for bit. **No GPU has run these kernels.** `fllm-rs selftest-gpu --only linear --quants bnb` (also `nf4`, `fp4`,
