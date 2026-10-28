@@ -121,6 +121,7 @@ pub fn write_to(
             "Q4ZP32" => 0x8000_0014,
             "Q4ZP64" => 0x8000_0015,
             "Q4ZP128" => 0x8000_0016,
+            name if name.starts_with("MLXA") => crate::dequant_bits::mlx_dtype_id(name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsupported MLX tensor dtype"))?,
             "FP8M" | "F8M" => 0x8000_0020,
             "FP8B" | "F8B" => 0x8000_0021,
             "EXL2" => 0x8000_0030,
@@ -377,6 +378,12 @@ fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result
     }
     if let Some(type_id) = fllm_gguf_probe::bnb::type_id_by_name(&t.dtype) {
         return write_packed_rows(w, t, |row, buf| p.encode_bnb_row(type_id, row, buf));
+    if t.dtype.starts_with("MLXA") {
+        return write_packed_rows(w, t, |row, buf| {
+            p.mlx()
+                .ok_or_else(|| "tensor cannot be stored as MLXA".to_owned())?
+                .encode_gguf_row(row, buf)
+        });
     }
     if t.dtype == "Q8_0" {
         return write_packed_rows(w, t, |row, buf| {

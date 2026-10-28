@@ -17,6 +17,7 @@ use half::{bf16, f16};
 use std::time::Instant;
 
 mod kv;
+mod mlx;
 mod moe;
 #[cfg(feature = "cuda")]
 mod prefill;
@@ -85,6 +86,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("w8a8", "CUDA FP8 and int8 W8A8 tensor-core GEMMs with activation quantization (FLLM_SELFTEST_BENCH=1 adds timings against the W8A16 paths)"),
     ("hattn", "CUDA Hopper and FlashInfer attention: FA3 prefill, sliding window / soft cap / sinks, ragged batches, tensor-core decode, cascade"),
     ("hmla", "CUDA latent-cache MLA (DeepSeek-V2/V3): absorbed up-projections, 576-value cache, tensor cores"),
+    ("mlx", "MLX affine group-quantized weights (2 to 8 bits, groups of 32 to 128, f16 and bf16 scales): quantized_linear against the f64 reference, every device kernel (GEMV, FP32 tile, tensor cores) on its own"),
     ("hgemm", "CUDA cuBLASLt GEMMs (runtime-loaded) and Hopper CUTLASS WGMMA FP8"),
     ("fp4sm100", "CUDA NVFP4 block-scaled GEMM on datacenter Blackwell (sm_100 tcgen05)")
 ];
@@ -949,6 +951,9 @@ fn nvfp4_weight_values(raw: &[u8], rows: usize, cols: usize) -> Vec<f32> {
 /// Random weights of GGUF type `kind`: uniform [-1, 1] floats, or valid quant blocks with
 /// moderate scales (`cpu_selftest::random_weights`).
 fn random_kind(rng: &mut Lcg, kind: u32, rows: usize, cols: usize) -> Vec<u8> {
+    if let Some(m) = fllm_gguf_probe::mlx_affine(kind) {
+        return crate::cpu_mlx::random_weights(m, rows, cols, rng);
+    }
     if kind == 12 {
         if let Ok(spec) = std::env::var("FLLM_SELFTEST_TENSOR") {
             if let Some((path, name)) = spec.split_once(':') {
@@ -1199,6 +1204,9 @@ impl<'a> Tester<'a> {
     fn run_fast(&mut self) {
         if self.enter("linear") {
             self.fast_linear_cases();
+        }
+        if self.enter("mlx") {
+            self.mlx_cases(true);
         }
         if self.enter("sampling") {
             self.sampling_cases();
@@ -2224,6 +2232,9 @@ impl<'a> Tester<'a> {
         }
         if self.enter("linear") {
             self.linear_cases();
+        }
+        if self.enter("mlx") {
+            self.mlx_cases(false);
         }
         if self.enter("embedding") {
             self.embedding_cases();

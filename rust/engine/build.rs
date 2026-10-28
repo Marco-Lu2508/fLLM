@@ -517,7 +517,7 @@ fn cuda_kernels() {
     if nvcc_major >= 13 {
         extra.push("-static-global-template-stub=false".into());
     }
-    let sources = ["api.cu", "kda.cu", "sampling.cu", "attn_tree.cu", "comm_kernels.cu", "moe.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu", "attn_encoder.cu", "act_narrow.cu", "exl.cu"];
+    let sources = ["api.cu", "kda.cu", "sampling.cu", "attn_tree.cu", "comm_kernels.cu", "moe.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "tc_gemm.cu", "qgemm4k.cu", "attention3.cu", "qgemm6k.cu", "qgemm5k.cu", "qgemm8.cu", "qgemm_leg.cu", "attention4.cu", "mmvq.cu", "nvfp4.cu", "nvfp4_cutlass.cu", "flashinfer_prefill.cu", "marlin_q4k.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "mla.cu", "mamba2.cu", "shortconv.cu", "mamba1.cu", "fused.cu", "attn_encoder.cu", "act_narrow.cu", "exl.cu", "mlx_affine.cu"];
     let mut objects = Vec::new();
     for source in sources {
         if source == "nvfp4_cutlass.cu" && (cutlass.is_none() || plan.fp4_sm120.is_empty()) {

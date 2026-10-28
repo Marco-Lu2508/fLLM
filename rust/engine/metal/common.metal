@@ -445,6 +445,33 @@ struct q_fmt_q4z {
     }
 };
 
+// MLX affine group quantization (fLLM `MLXA` types): plane 0 = the codes of every group as the MLX words have them (GROUP * BITS / 8 bytes,
+// a little-endian bit stream, code i at bit i * BITS), plane 1 = one word per group: scale | bias << 16 as binary16, or as bfloat16 when
+// bit 63 of q_params::plane1 is set (Q_MLX_BF16; the planner sets it, the offset of plane 1 is the low 63 bits).
+// weight = code * scale + bias. A chunk of 8 codes is BITS bytes at a byte boundary (8 * BITS bits), so a chunk is read byte by byte
+// (the offset c * BITS is not 4-byte aligned for odd widths) and the codes are cut out of a 64 bit window.
+#define Q_MLX_BF16 0x8000000000000000ul
+template <uint BITS, uint GROUP>
+struct q_fmt_mlx {
+    Q_CONST uint QK = GROUP;
+    Q_CONST uint BYTES = GROUP * BITS / 8;
+    Q_CONST uint CPB = GROUP / 8;
+    Q_NO_ROW_SCALE
+    static void dec8(q_bytes w, ulong g, uint c, ulong p1, thread float *o) {
+        const bool bf = (p1 & Q_MLX_BF16) != 0ul;
+        const uint sb = q_u32(w + (p1 & ~Q_MLX_BF16) + g * 4ul, 0u);
+        const uint sraw = sb & 0xFFFFu;
+        const uint braw = sb >> 16;
+        const float scale = bf ? as_type<float>(sraw << 16) : float(as_type<half>(ushort(sraw)));
+        const float bias = bf ? as_type<float>(braw << 16) : float(as_type<half>(ushort(braw)));
+        q_bytes b = w + g * BYTES + c * BITS;
+        ulong v = 0ul;
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < BITS; ++i) v |= ulong(b[i]) << (8u * i);
+        #pragma clang loop unroll(full)
+        for (uint k = 0; k < 8; ++k) o[k] = float(uint((v >> (BITS * k)) & ((1ul << BITS) - 1ul))) * scale + bias;
+    }
+};
 // ---- dense / float formats: "blocks" of 8 values ------------------------------------------------------------------------
 
 struct q_fmt_f32 {
@@ -537,6 +564,24 @@ struct q_fmt_fp8m {
 typedef q_fmt_q4z<32> q_fmt_q4z32;
 typedef q_fmt_q4z<64> q_fmt_q4z64;
 typedef q_fmt_q4z<128> q_fmt_q4z128;
+typedef q_fmt_mlx<2, 32> q_fmt_mlx2g32;
+typedef q_fmt_mlx<2, 64> q_fmt_mlx2g64;
+typedef q_fmt_mlx<2, 128> q_fmt_mlx2g128;
+typedef q_fmt_mlx<3, 32> q_fmt_mlx3g32;
+typedef q_fmt_mlx<3, 64> q_fmt_mlx3g64;
+typedef q_fmt_mlx<3, 128> q_fmt_mlx3g128;
+typedef q_fmt_mlx<4, 32> q_fmt_mlx4g32;
+typedef q_fmt_mlx<4, 64> q_fmt_mlx4g64;
+typedef q_fmt_mlx<4, 128> q_fmt_mlx4g128;
+typedef q_fmt_mlx<5, 32> q_fmt_mlx5g32;
+typedef q_fmt_mlx<5, 64> q_fmt_mlx5g64;
+typedef q_fmt_mlx<5, 128> q_fmt_mlx5g128;
+typedef q_fmt_mlx<6, 32> q_fmt_mlx6g32;
+typedef q_fmt_mlx<6, 64> q_fmt_mlx6g64;
+typedef q_fmt_mlx<6, 128> q_fmt_mlx6g128;
+typedef q_fmt_mlx<8, 32> q_fmt_mlx8g32;
+typedef q_fmt_mlx<8, 64> q_fmt_mlx8g64;
+typedef q_fmt_mlx<8, 128> q_fmt_mlx8g128;
 
 // ---- kernel interface shared by the matrix-vector and matrix-matrix kernels -------------------------------------------------------
 

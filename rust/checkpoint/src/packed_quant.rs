@@ -528,6 +528,14 @@ impl PackedData {
         }
     }
 
+    /// The MLX affine tensor, if this is one.
+    pub fn mlx(&self) -> Option<&crate::dequant_bits::MlxAffine> {
+        match self {
+            Self::Dyn(t) => t.mlx(),
+            _ => None,
+        }
+    }
+
     /// The MXFP4 tensor, if this is one.
     pub fn mxfp4(&self) -> Option<&crate::dequant::Mxfp4> {
         match self {

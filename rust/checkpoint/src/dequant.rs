@@ -15,6 +15,10 @@ pub trait Dequant: Send + Sync + std::fmt::Debug {
     fn element_count(&self) -> usize;
     /// Fill `dst` with the elements `start..start + dst.len()` in row-major order.
     fn decode_chunk(&self, start: usize, dst: &mut [f32]) -> Result<(), String>;
+    /// The MLX affine tensor behind this reader, which the converter can store natively (`MLXA` tensor types).
+    fn mlx(&self) -> Option<&crate::dequant_bits::MlxAffine> {
+        None
+    }
 }
 
 fn range(start: usize, len: usize, total: usize) -> Result<std::ops::Range<usize>, String> {
