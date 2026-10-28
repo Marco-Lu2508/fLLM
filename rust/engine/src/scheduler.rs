@@ -808,6 +808,17 @@ impl Scheduler {
         self.ngram_upto(sid);
         Ok(())
     }
+    /// Jump-forward: `forced` tokens were appended behind the token just sampled. Neither has a KV entry yet, so the sequence goes
+    /// back to prefill for them: the next step computes all of them in one chunk and returns the logits of the last one.
+    pub fn begin_jump(&mut self, sid: i64, forced: usize) -> Result<(), SchedulerError> {
+        self.bm.ensure_blocks(sid, forced as i64)?;
+        let blocks = self.bm.get_table(sid)?.blocks.clone();
+        let seq = self.sequences.get_mut(&sid).ok_or_else(|| SchedulerError::Value(format!("unknown sequence {sid}")))?;
+        seq.blocks = blocks;
+        seq.prefill_target = seq.num_tokens();
+        self.next_offset.remove(&sid);
+        Ok(())
+    }
     pub fn commit_verify(&mut self, sid: i64) -> Result<(), SchedulerError> {
         let nt = self.sequences[&sid].num_tokens();
         {

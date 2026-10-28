@@ -391,7 +391,8 @@ impl TokenizerBundle {
         Ok(ids)
     }
 
-    fn encode_plain(&self, text: &str) -> Result<Vec<u32>, String> {
+    /// Encodes text with the model's tokenizer, without BOS, EOS or special-token parsing.
+    pub fn encode_plain(&self, text: &str) -> Result<Vec<u32>, String> {
         if let (Some(spm), Some(options)) = (&self.spm, self.sentencepiece) {
             return Ok(spm.encode(text, options.add_space_prefix));
         }

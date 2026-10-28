@@ -27,6 +27,10 @@ pub struct BatchStats {
     pub decode_rows: usize,
     pub draft_proposed: usize,
     pub draft_accepted: usize,
+    /// Tokens the grammar forced and the engine appended without sampling (jump-forward decoding).
+    pub forced_tokens: usize,
+    /// Steps after which forced tokens were appended.
+    pub jumps: usize,
     pub scheduler_ns: u64,
     pub batch_build_ns: u64,
     pub model_forward_ns: u64,
@@ -53,6 +57,8 @@ pub struct InferenceRuntime {
     pending_choices: std::collections::HashMap<i64, Vec<Sequence>>,
     shared_choices_cpu: bool,
     constraints: std::collections::HashMap<i64, llguidance::Matcher>,
+    /// Jump-forward decoding for constrained sequences (None: off).
+    jump_forward: Option<std::sync::Arc<crate::structured::JumpForward>>,
     draft: Option<crate::draft::DraftEngine>,
     mtp: Option<crate::draft::MtpEngine>,
     suffix: Option<crate::speculative::SuffixCache>,
@@ -171,6 +177,7 @@ impl InferenceRuntime {
             pending_choices: Default::default(),
             shared_choices_cpu: false,
             constraints: std::collections::HashMap::new(),
+            jump_forward: None,
             draft: None,
             mtp: None,
             suffix: None,
@@ -717,6 +724,110 @@ impl InferenceRuntime {
 
     pub fn active_requests(&self) -> usize {
         self.scheduler.requests.len()
+    }
+
+    /// Switch jump-forward decoding on (`Some`) or off (`None`). It applies to grammar-constrained sequences only; see
+    /// `structured::JumpForward` for the rules and `docs/server-api.md` (Jump-forward decoding) for what it does and does not change.
+    pub fn set_jump_forward(&mut self, jump: Option<std::sync::Arc<crate::structured::JumpForward>>) {
+        self.jump_forward = jump;
+    }
+
+    /// After a sampled token of a constrained sequence: if the grammar forces the next bytes, append them as tokens (events like
+    /// sampled ones) and send the sequence back to prefill so that one forward pass computes the KV entries of the sampled token and
+    /// all forced tokens and returns the logits for the token after them. Nothing changes for sequences that cannot jump safely.
+    fn jump_forward_after(&mut self, sid: i64, last: i64, events: &mut Vec<TokenEvent>) -> Result<(), String> {
+        /// Tokens worth of KV blocks that must be free before a jump is tried.
+        const RESERVE: usize = 1024;
+        let Some(jump) = self.jump_forward.clone() else {
+            return Ok(());
+        };
+        // Draft models, MTP and speculative heads keep per-token state of their own that forced tokens would bypass.
+        if self.draft.is_some() || self.mtp.is_some() || self.spec_head.is_some() {
+            return Ok(());
+        }
+        let Some(sequence) = self.scheduler.sequences.get(&sid) else {
+            return Ok(());
+        };
+        let s = &sequence.sampling;
+        // Settings whose per-token effect is not a pure function of the one allowed token decide by plain decoding.
+        if !sequence.constrained
+            || sequence.has_media
+            || s.choices != 1
+            || s.mirostat != 0
+            || s.logprobs.is_some()
+            || !s.logit_bias.is_empty()
+            || !s.allowed_token_ids.is_empty()
+            || !s.bad_word_ids.is_empty()
+            || sequence.output_len < s.min_tokens
+        {
+            return Ok(());
+        }
+        let remaining = sequence.remaining_max();
+        if remaining == 0 {
+            return Ok(());
+        }
+        let bm = &self.scheduler.bm;
+        let needed = bm.num_blocks_needed(sid, remaining.min(RESERVE) as i64).map_err(|e| e.to_string())?;
+        if needed > bm.allocator.available() {
+            return Ok(());
+        }
+        let Some(matcher) = self.constraints.get_mut(&sid) else {
+            return Ok(());
+        };
+        let forced = jump.plan(matcher, last as u32, remaining);
+        if forced.is_empty() {
+            return Ok(());
+        }
+        let sequence = self.scheduler.sequences.get_mut(&sid).ok_or("missing jump sequence")?;
+        let request_id = sequence.req_id.clone();
+        let choice_index = sequence.choice_index;
+        let cached_prompt_tokens = sequence.cached_prompt_tokens;
+        let stop_at = forced.iter().position(|&t| sequence.sampling.stops_on_token(i64::from(t), &self.eos_ids));
+        let mut appended = 0usize;
+        let mut finished = false;
+        for (j, &token) in forced.iter().enumerate() {
+            let token = i64::from(token);
+            sequence.append_token(token);
+            appended += 1;
+            let hit_eos = stop_at == Some(j);
+            let hit_limit = sequence.remaining_max() == 0;
+            finished = hit_eos || hit_limit;
+            events.push(TokenEvent {
+                request_id: request_id.clone(),
+                sequence_id: sid,
+                token_id: token,
+                finished,
+                finish_reason: if hit_eos {
+                    Some("stop")
+                } else if hit_limit {
+                    Some("length")
+                } else {
+                    None
+                },
+                logprobs: None,
+                cached_prompt_tokens,
+                choice_index,
+                request_finished: false,
+            });
+            if finished {
+                break;
+            }
+        }
+        self.batch_stats.forced_tokens += appended;
+        self.batch_stats.jumps += 1;
+        if let Some(metrics) = &self.metrics {
+            metrics.jump_forward(appended);
+        }
+        if finished {
+            self.finish_choice(&request_id, sid)?;
+            let done = !self.scheduler.requests.contains_key(&request_id);
+            if let Some(event) = events.last_mut() {
+                event.request_finished = done;
+            }
+        } else {
+            self.scheduler.begin_jump(sid, appended).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn set_constraint(
@@ -1764,6 +1875,9 @@ impl InferenceRuntime {
                 choice_index,
                 request_finished: finished && !self.scheduler.requests.contains_key(&request_id),
             });
+            if !finished {
+                self.jump_forward_after(sid, token, &mut events)?;
+            }
         }
 
         let had_verify = !verify_candidates.is_empty();
@@ -1941,6 +2055,8 @@ impl InferenceRuntime {
                 if let Some(last) = events.last_mut() {
                     last.request_finished = done;
                 }
+            } else if let Some(&last_token) = emitted.last() {
+                self.jump_forward_after(sid, last_token, &mut events)?;
             }
         }
         if had_verify {

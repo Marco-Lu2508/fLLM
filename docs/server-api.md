@@ -137,6 +137,67 @@ string ends generation with `finish_reason: "stop"` and the matched text is not 
 Constraints are sampler masks, not post-processing; unsupported constructs are rejected
 before generation starts.
 
+### Jump-forward decoding
+
+Where a grammar allows exactly one continuation for the next several characters (the fixed keys,
+quotes and punctuation of a JSON schema, a literal in a Lark or GBNF rule), the model has nothing to
+decide. fLLM asks the grammar for those forced characters, appends them as tokens and lets the model
+process all of them in **one** forward pass (the same kind of pass as a prompt chunk) instead of one
+pass per token. Sampling continues afterwards as usual. This is the "compressed finite state
+machine" idea of SGLang. It applies to `response_format`, `grammar` and `tool_call_grammar`
+requests and needs nothing in the request.
+
+What it changes and what it does not:
+
+- The reply is the same as before: forced tokens are streamed as tokens like sampled ones, and
+  `usage.completion_tokens` counts them. `finish_reason`, `max_tokens` and stop tokens behave as
+  without it.
+- With a vocabulary of single-character or byte tokens (for example the test model of
+  `fllm-rs make-tiny-model`) a forced character is also the only token the grammar mask would allow, so
+  the output is identical to decoding without jump-forward, token for token and seed for seed. The
+  tests check this (see below).
+- With ordinary subword vocabularies the same text is produced, but the token sequence can differ
+  from token-by-token decoding: the forced text is tokenised with the model's tokenizer together with
+  the token before it, and the last token of each forced run is not jumped over (it could merge with
+  what the model writes next); its characters stay forced, so the next sampled token has to start with
+  them. Text that the model chooses afterwards can therefore differ from a run without
+  jump-forward, as any change in the token history can.
+- Nothing is forced where the grammar may also end or may choose between continuations. JSON schemas
+  allow whitespace between tokens by default, which leaves little to force; adding
+  `"x-guidance": {"whitespace_flexible": false}` to the schema selects compact JSON and leaves long
+  forced runs (the keys of an object, enum values after their first character).
+- It is skipped for a sequence (which then decodes token by token) when the request asks for
+  `logprobs`, `logit_bias`, `allowed_token_ids`, bad words, `min_tokens` that is not reached yet,
+  Mirostat or several choices, for images in the prompt, and while a draft model, MTP or a
+  speculative head is active. N-gram speculation works together with it (tested); suffix speculation takes the same path.
+
+Turn it off with `--no-jump-forward` or `FLLM_JUMP_FORWARD=off` (`--jump-forward` forces it on).
+`/metrics` reports `fllm_jump_forward_tokens_total` (tokens appended without sampling) and
+`fllm_jump_forward_steps_total` (jumps; each costs one forward pass). The same numbers appear as
+`forced_tokens`/`jumps` in the runtime's batch statistics.
+
+What has been measured: forward-pass counts on the CPU test model, 12 seeds per grammar, with and
+without jump-forward and identical output (`server::tests::jump_forward_matches_plain_decoding_and_needs_fewer_forward_passes`;
+the counts include the one prompt pass of every request):
+
+| grammar | forward passes without | with | completion tokens forced |
+|---|---|---|---|
+| object with fixed keys, enum, boolean (compact) | 486 | 96 | 390 of 486 |
+| nested arrays of objects (compact) | 293 | 63 | 230 of 293 |
+| Lark literal with alternatives | 440 | 91 | 349 of 440 |
+| GBNF literal with alternatives | 182 | 36 | 146 of 182 |
+| same object, default flexible whitespace | 827 | 742 | 85 of 827 |
+| nested arrays, flexible whitespace | 409 | 409 | 0 of 409 |
+| `json_object` | 1150 | 1146 | 4 of 1150 |
+
+What has **not** been measured: wall-clock speed-up on a real model. A forward pass over several
+tokens costs more than one over a single token, but on memory-bound decoding (most GPUs and CPUs
+at batch size 1) it costs much less than the same number of single-token passes; how much depends on
+the model, the hardware and how much of a real schema is fixed text. The numbers above are step counts,
+not seconds, and the test model has one character per token, which is the best case for the
+amount of forced text (real vocabularies need fewer tokens for the same text, and keep the last
+token of each run for the model). A schema with free text everywhere gains nothing.
+
 ---
 
 ## GET /

@@ -86,7 +86,7 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
     eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch / AWQ / GPTQ / FP8 / ModelOpt NVFP4) as repository or directory: a verified safetensors checkpoint is loaded directly without writing a GGUF file (--direct forces that, --no-direct-load converts to a cached GGUF file instead); --quant ({}) re-encodes an unquantized checkpoint while loading", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
@@ -459,6 +459,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut threads_auto = true;
     let mut http = fllm_engine::server::options::HttpOptions::default();
     let mut generation_source = fllm_engine::server::gencfg::Source::Auto;
+    let mut jump_forward = fllm_engine::structured::jump_forward_default();
     let mut default_temperature: Option<f64> = None;
     let mut default_top_p: Option<f64> = None;
     let mut default_top_k: Option<usize> = None;
@@ -692,6 +693,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--no-generation-config" => generation_source = fllm_engine::server::gencfg::Source::Vllm,
             "--no-repack" => fllm_engine::cpu_kernels::set_repack(false),
+            "--no-jump-forward" => jump_forward = false,
+            "--jump-forward" => jump_forward = true,
             "--tool-parser" => {
                 let name = value(&args, &mut i, "--tool-parser");
                 if !fllm_engine::tool_parsers::is_known(&name) {
@@ -987,6 +990,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 sampling_defaults: Default::default(),
                 tool_parser: None,
                 reasoning_parser: None,
+                jump_forward: false,
             },
         )
         .map_err(Into::into);
@@ -1455,6 +1459,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             sampling_defaults,
             tool_parser,
             reasoning_parser,
+            jump_forward,
         },
     )?;
     Ok(())

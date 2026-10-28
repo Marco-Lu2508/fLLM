@@ -59,6 +59,121 @@ pub fn matcher(factory: &ParserFactory, grammar: TopLevelGrammar) -> Result<Matc
     Ok(matcher)
 }
 
+/// Jump-forward decoding (the "compressed finite state machine" idea of SGLang).
+///
+/// Where the grammar allows exactly one continuation for the next several bytes (the fixed keys, quotes and punctuation of a JSON
+/// schema, a literal in a Lark rule), the engine does not need the model to choose them. `plan` asks the grammar for those forced
+/// bytes, turns them into tokens and consumes them in the grammar; the runtime then appends the tokens and lets the model process
+/// all of them in one forward pass (a prefill chunk) instead of one pass per token.
+///
+/// Rules that keep the output valid and, where possible, identical to token-by-token decoding:
+///
+/// 1. Nothing is forced when the grammar currently accepts (end of sequence is an alternative) or has stopped, and a jump stops at
+///    the first token after which the grammar accepts.
+/// 2. Only bytes the grammar itself forces (`Matcher::compute_ff_bytes`) are turned into tokens, the bytes of the chosen tokens
+///    must spell exactly those bytes (checked, never assumed), and the tokens are validated against the grammar before use.
+/// 3. With a vocabulary of single-byte tokens a byte string has exactly one tokenisation, so a forced byte is also the only token
+///    the mask would allow: the result is token for token identical to decoding without jump-forward, and no random number is
+///    spent on it (a one-element distribution draws none).
+/// 4. With multi-byte tokens the forced text is tokenised canonically together with the token that precedes it (the tokenisation
+///    must keep that token as its first token, otherwise the greedy longest match of the vocabulary is used), and the last token of
+///    the forced text is not jumped over: it may merge with whatever the model writes next. Its bytes stay forced, so the next
+///    sampled token has to start with them (token healing, the way llguidance treats forced bytes). The text is still the same
+///    text; the token sequence may differ from what token-by-token sampling would have produced.
+pub struct JumpForward {
+    env: llguidance::toktrie::TokEnv,
+    canonical: Option<CanonicalEncoder>,
+    multi_byte: bool,
+}
+
+/// Whether jump-forward decoding is on unless a flag says otherwise: it is, except when `FLLM_JUMP_FORWARD` is `off`, `0`, `no` or
+/// `false` (`--no-jump-forward` turns it off on the command line).
+pub fn jump_forward_default() -> bool {
+    !matches!(std::env::var("FLLM_JUMP_FORWARD").unwrap_or_default().trim().to_ascii_lowercase().as_str(), "off" | "0" | "no" | "false")
+}
+
+/// Encodes plain text (no BOS, no special tokens) with the model's tokenizer.
+pub type CanonicalEncoder = Box<dyn Fn(&str) -> Option<Vec<u32>> + Send + Sync>;
+
+impl JumpForward {
+    /// Without `canonical` the greedy longest match over the vocabulary tokenises forced text.
+    pub fn new(env: llguidance::toktrie::TokEnv, canonical: Option<CanonicalEncoder>) -> Self {
+        let trie = env.tok_trie();
+        let multi_byte = (0..trie.vocab_size() as u32).any(|id| !trie.is_special_token(id) && trie.token_len(id) > 1);
+        Self { env, canonical, multi_byte }
+    }
+
+    /// Whether forced text can be tokenised in more than one way (some token spans several bytes).
+    pub fn multi_byte(&self) -> bool {
+        self.multi_byte
+    }
+
+    /// Number of leading `tokens` that spell the start of `bytes` exactly.
+    fn spelled_prefix(&self, tokens: &[u32], bytes: &[u8]) -> usize {
+        let trie = self.env.tok_trie();
+        let mut at = 0;
+        for (i, &t) in tokens.iter().enumerate() {
+            let piece = trie.token(t);
+            if trie.is_special_token(t) || piece.is_empty() || bytes.get(at..at + piece.len()) != Some(piece) {
+                return i;
+            }
+            at += piece.len();
+        }
+        tokens.len()
+    }
+
+    /// Tokens that spell the start of the forced `bytes` which follow the sampled token `last`.
+    fn cover(&self, last: u32, bytes: &[u8]) -> Vec<u32> {
+        let trie = self.env.tok_trie();
+        if let (true, Some(encode), false) = (self.multi_byte, &self.canonical, trie.is_special_token(last)) {
+            let mut context = trie.token(last).to_vec();
+            context.extend_from_slice(bytes);
+            if let Some(ids) = std::str::from_utf8(&context).ok().and_then(encode) {
+                if ids.first() == Some(&last) {
+                    let rest = &ids[1..];
+                    if self.spelled_prefix(rest, bytes) == rest.len() && rest.iter().map(|&t| trie.token_len(t)).sum::<usize>() == bytes.len() {
+                        return rest.to_vec();
+                    }
+                }
+            }
+        }
+        let greedy = trie.greedy_tokenize(bytes);
+        let n = self.spelled_prefix(&greedy, bytes);
+        greedy[..n].to_vec()
+    }
+
+    /// The tokens the grammar forces next, already consumed by `matcher`, at most `budget` of them. Empty when nothing is forced
+    /// or when it is not safe to jump; the matcher is then where plain decoding would find it, except that forced bytes may be
+    /// pending as the prefix of the next token (rule 4).
+    pub fn plan(&self, matcher: &mut Matcher, last: u32, budget: usize) -> Vec<u32> {
+        if budget == 0 || matcher.is_stopped() || !matches!(matcher.is_accepting(), Ok(false)) {
+            return Vec::new();
+        }
+        let forced = matcher.compute_ff_bytes();
+        if forced.is_empty() {
+            return Vec::new();
+        }
+        let mut tokens = self.cover(last, &forced);
+        if self.multi_byte {
+            tokens.pop();
+        }
+        tokens.truncate(budget);
+        let valid = matcher.validate_tokens(&tokens).unwrap_or(0);
+        tokens.truncate(valid);
+        let mut taken = Vec::with_capacity(tokens.len());
+        for t in tokens {
+            if matcher.consume_token(t).is_err() {
+                break;
+            }
+            taken.push(t);
+            if matcher.is_stopped() || !matches!(matcher.is_accepting(), Ok(false)) {
+                break;
+            }
+        }
+        taken
+    }
+}
+
 /// Translate the regular CFG subset shared by GBNF and Lark. Unsupported constructs
 /// fail at compilation rather than being accepted as an unconstrained request.
 fn gbnf_to_lark(text: &str) -> Result<String, String> {
@@ -174,5 +289,119 @@ mod tests {
         assert!(!m.compute_mask().unwrap().is_allowed(b'n' as u32));
         m.consume_tokens(&env.tokenize("yes")).unwrap();
         assert!(m.is_accepting().unwrap());
+    }
+
+    /// Text of a decoder that always takes the lowest allowed token; with `jump` it also appends what the grammar forces. Returns the
+    /// text and the number of times the decoder had to compute a mask (one model step each).
+    fn decode_lowest(factory: &ParserFactory, env: &llguidance::toktrie::TokEnv, grammar: Value, jump: Option<&JumpForward>) -> (Vec<u8>, usize) {
+        let mut m = matcher(factory, request_grammar(&grammar).unwrap().unwrap()).unwrap();
+        let eos = env.tok_trie().eos_token();
+        let (mut text, mut steps) = (Vec::new(), 0);
+        for _ in 0..400 {
+            let mask = m.compute_mask_or_eos().unwrap();
+            steps += 1;
+            let token = (0..env.tok_trie().vocab_size() as u32).find(|&t| mask.is_allowed(t)).unwrap();
+            if token == eos {
+                break;
+            }
+            m.consume_token(token).unwrap();
+            text.extend_from_slice(env.tok_trie().token(token));
+            if let Some(jump) = jump {
+                for t in jump.plan(&mut m, token, 1000) {
+                    text.extend_from_slice(env.tok_trie().token(t));
+                }
+            }
+        }
+        (text, steps)
+    }
+
+    #[test]
+    fn jump_forward_with_single_byte_tokens_gives_the_text_of_plain_decoding_in_fewer_steps() {
+        let env = ApproximateTokEnv::single_byte_env();
+        let factory = ParserFactory::new_simple(&env).unwrap();
+        let jump = JumpForward::new(env.clone(), None);
+        assert!(!jump.multi_byte());
+        for schema in [
+            json!({"type":"object","properties":{"name":{"type":"string","maxLength":3},"kind":{"enum":["alpha","beta"]},"ok":{"type":"boolean"}},
+                   "required":["name","kind","ok"],"additionalProperties":false,"x-guidance":{"whitespace_flexible":false}}),
+            json!({"type":"object","properties":{"rows":{"type":"array","maxItems":2,"items":{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":9}},
+                   "required":["id"],"additionalProperties":false}}},"required":["rows"],"additionalProperties":false,"x-guidance":{"whitespace_flexible":false}}),
+            // flexible whitespace: little is forced, the text must still match
+            json!({"type":"object","properties":{"ok":{"const":true}},"required":["ok"],"additionalProperties":false}),
+        ] {
+            let grammar = json!({"response_format":{"type":"json_schema","json_schema":{"schema":schema}}});
+            let (plain, plain_steps) = decode_lowest(&factory, &env, grammar.clone(), None);
+            let (jumped, jump_steps) = decode_lowest(&factory, &env, grammar, Some(&jump));
+            assert!(!plain.is_empty());
+            assert_eq!(String::from_utf8_lossy(&jumped), String::from_utf8_lossy(&plain));
+            assert!(jump_steps <= plain_steps, "{jump_steps} > {plain_steps}");
+        }
+        let literal = json!({"grammar":"root ::= \"answer=\" (\"yes\" | \"no\") \";done\""});
+        let (plain, plain_steps) = decode_lowest(&factory, &env, literal.clone(), None);
+        let (jumped, jump_steps) = decode_lowest(&factory, &env, literal, Some(&jump));
+        assert_eq!(jumped, plain);
+        assert_eq!(String::from_utf8_lossy(&plain), "answer=no;done");
+        assert!(jump_steps * 2 < plain_steps, "{jump_steps} vs {plain_steps}");
+    }
+
+    #[test]
+    fn nothing_is_forced_where_the_grammar_may_end_or_choose() {
+        let env = ApproximateTokEnv::single_byte_env();
+        let factory = ParserFactory::new_simple(&env).unwrap();
+        let jump = JumpForward::new(env.clone(), None);
+        // after "a" the grammar accepts: end of sequence is an alternative to "bc"
+        let mut m = matcher(&factory, request_grammar(&json!({"grammar":"root ::= \"a\" (\"bc\")?"})).unwrap().unwrap()).unwrap();
+        m.consume_token(b'a' as u32).unwrap();
+        assert!(jump.plan(&mut m, b'a' as u32, 10).is_empty());
+        // two alternatives: nothing is forced either
+        let mut m = matcher(&factory, request_grammar(&json!({"grammar":"root ::= \"ab\" | \"ac\""})).unwrap().unwrap()).unwrap();
+        m.consume_token(b'a' as u32).unwrap();
+        assert!(jump.plan(&mut m, b'a' as u32, 10).is_empty());
+        // a budget of zero forces nothing; with a budget the rest of the literal is taken and the grammar is finished
+        let mut m = matcher(&factory, request_grammar(&json!({"grammar":"root ::= \"xyz\""})).unwrap().unwrap()).unwrap();
+        m.consume_token(b'x' as u32).unwrap();
+        assert!(jump.plan(&mut m, b'x' as u32, 0).is_empty());
+        assert_eq!(jump.plan(&mut m, b'x' as u32, 10), vec![b'y' as u32, b'z' as u32]);
+        assert!(m.compute_mask_or_eos().unwrap().is_allowed(env.tok_trie().eos_token()));
+    }
+
+    #[test]
+    fn jump_forward_with_multi_byte_tokens_keeps_the_last_forced_token_as_a_prefix() {
+        use llguidance::toktrie::{TokRxInfo, TokTrie};
+        let mut words: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+        words.extend(["{\"", "\":", "name", "\":\"", "\"}"].iter().map(|w| w.as_bytes().to_vec()));
+        let eos = words.len() as u32;
+        words.push(b"\xff<eos>".to_vec());
+        let trie = TokTrie::from(&TokRxInfo::new(words.len() as u32, eos), &words);
+        let env: llguidance::toktrie::TokEnv = std::sync::Arc::new(ApproximateTokEnv::new(trie));
+        let factory = ParserFactory::new_simple(&env).unwrap();
+        let jump = JumpForward::new(env.clone(), None);
+        assert!(jump.multi_byte());
+        let grammar = request_grammar(&json!({"grammar":"start: \"{\\\"name\\\":\\\"\" /[a-z]{2}/ \"\\\"}\"","grammar_type":"lark"})).unwrap().unwrap();
+        let mut m = matcher(&factory, grammar).unwrap();
+        m.consume_token(b'{' as u32).unwrap();
+        let taken = jump.plan(&mut m, b'{' as u32, 100);
+        let trie = env.tok_trie();
+        let spelled: Vec<u8> = taken.iter().flat_map(|&t| trie.token(t).to_vec()).collect();
+        // the forced text is `"name":"`; the tokens taken spell a proper prefix of it and the rest stays pending
+        assert!(!taken.is_empty() && spelled.len() < 8, "{:?}", String::from_utf8_lossy(&spelled));
+        let pending = m.compute_ff_bytes();
+        assert!(!pending.is_empty());
+        assert_eq!([spelled.as_slice(), pending.as_slice()].concat(), b"\"name\":\"");
+        // the next token has to start with the pending bytes; a token that does not is not allowed
+        let mask = m.compute_mask().unwrap();
+        assert!(mask.is_allowed(pending[0] as u32) || taken.len() < 8);
+        assert!(!mask.is_allowed(b'z' as u32));
+        // writing the pending bytes one token at a time, then two letters and the end, completes the object
+        let mut rest = pending.clone();
+        rest.extend_from_slice(b"ab\"}");
+        let mut at = 0;
+        while at < rest.len() {
+            let token = (1..=rest.len() - at).rev().find_map(|n| trie.token_id(&rest[at..at + n]).filter(|&t| m.validate_tokens(&[t]).unwrap_or(0) == 1));
+            let token = token.expect("a token that continues the object");
+            m.consume_token(token).unwrap();
+            at += trie.token_len(token);
+        }
+        assert!(m.is_accepting().unwrap() || m.is_stopped());
     }
 }

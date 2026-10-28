@@ -32,6 +32,7 @@ struct Settings {
     ctx: usize,
     temperature: Option<f64>,
     tool_parser: Option<String>,
+    jump_forward: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +43,7 @@ impl Default for Settings {
             ctx: 256,
             temperature: None,
             tool_parser: Some("hermes".into()),
+            jump_forward: true,
         }
     }
 }
@@ -123,8 +125,10 @@ fn start_with(gguf: PathBuf, settings: Settings) -> Harness {
             sampling_defaults: Default::default(),
             tool_parser: settings.tool_parser,
             reasoning_parser: None,
+            jump_forward: settings.jump_forward,
         };
-        let Built { state, router, worker_rx, metrics } = build(&runtime, tokenizer, config).unwrap();
+        let Built { state, router, worker_rx, metrics, jump_forward } = build(&runtime, tokenizer, config).unwrap();
+        runtime.set_jump_forward(jump_forward);
         state.ready.store(true, Ordering::Relaxed);
         sender.send((router, state)).unwrap();
         // the worker ends when the last sender of its channel (the router state) is dropped
@@ -404,6 +408,133 @@ async fn structured_output_follows_the_schema() {
     // a random model may not close the object within the budget; what it writes must at least open one
     let object = h.chat(json!({"max_tokens": 80, "response_format": {"type": "json_object"}})).await;
     assert!(object.json()["choices"][0]["message"]["content"].as_str().unwrap().trim_start().starts_with('{'), "{}", object.text());
+}
+
+/// Two servers on the same tiny model that differ only in jump-forward decoding: `(off, on)`.
+fn jump_pair() -> &'static (Harness, Harness) {
+    static PAIR: OnceLock<(Harness, Harness)> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        (
+            start(Settings { jump_forward: false, ..Settings::default() }),
+            start(Settings { jump_forward: true, ..Settings::default() }),
+        )
+    })
+}
+
+/// Counters of the worker since the start: model forward calls and tokens appended by jump-forward.
+fn jump_counters(h: &Harness) -> (u64, u64, u64) {
+    let m = &h.state.metrics;
+    (m.forward_calls.load(Ordering::Relaxed), m.forced_tokens.load(Ordering::Relaxed), m.jumps.load(Ordering::Relaxed))
+}
+
+/// Runs the same constrained chat request for several seeds on both servers and checks that text, finish reason and the reported
+/// completion tokens are identical. Returns `(forward calls without, forward calls with, tokens forced, completion tokens)`.
+async fn jump_compare(name: &str, extra: Value, seeds: std::ops::Range<u64>) -> (u64, u64, u64, u64) {
+    let (off, on) = jump_pair();
+    let (off_before, on_before) = (jump_counters(off), jump_counters(on));
+    let mut completion_tokens = 0;
+    for seed in seeds {
+        let mut body = json!({"max_tokens": 160, "temperature": 1.0, "seed": seed});
+        merge(&mut body, extra.clone());
+        let a = off.chat(body.clone()).await;
+        let b = on.chat(body).await;
+        assert_eq!(a.status, StatusCode::OK, "{name}: {}", a.text());
+        assert_eq!(b.status, StatusCode::OK, "{name}: {}", b.text());
+        let (a, b) = (a.json(), b.json());
+        assert_eq!(a["choices"][0]["message"]["content"], b["choices"][0]["message"]["content"], "{name}, seed {seed}");
+        assert_eq!(a["choices"][0]["finish_reason"], b["choices"][0]["finish_reason"], "{name}, seed {seed}");
+        // forced tokens are completion tokens like sampled ones: the usage block does not change
+        assert_eq!(a["usage"], b["usage"], "{name}, seed {seed}");
+        completion_tokens += a["usage"]["completion_tokens"].as_u64().unwrap();
+    }
+    let (off_after, on_after) = (jump_counters(off), jump_counters(on));
+    assert_eq!(off_after.1, off_before.1, "{name}: the server with jump-forward off must not force tokens");
+    (off_after.0 - off_before.0, on_after.0 - on_before.0, on_after.1 - on_before.1, completion_tokens)
+}
+
+fn schema_format(schema: Value) -> Value {
+    json!({"response_format": {"type": "json_schema", "json_schema": {"name": "t", "schema": schema, "strict": true}}})
+}
+
+#[tokio::test]
+async fn jump_forward_matches_plain_decoding_and_needs_fewer_forward_passes() {
+    // compact JSON: nothing but the fixed keys, quotes and punctuation is forced, so the grammar has long forced runs
+    let compact = json!({"x-guidance": {"whitespace_flexible": false}});
+    let with_compact = |mut schema: Value| {
+        merge(&mut schema, compact.clone());
+        schema
+    };
+    let fixed_keys = json!({"type": "object", "properties": {"name": {"type": "string", "maxLength": 4},
+        "kind": {"enum": ["alpha", "beta", "gamma"]}, "ok": {"type": "boolean"}},
+        "required": ["name", "kind", "ok"], "additionalProperties": false});
+    let nested = json!({"type": "object", "properties": {"items": {"type": "array", "maxItems": 3, "items": {"type": "object",
+        "properties": {"id": {"type": "integer", "minimum": 0, "maximum": 99}, "tag": {"enum": ["x", "yy"]}},
+        "required": ["id", "tag"], "additionalProperties": false}}}, "required": ["items"], "additionalProperties": false});
+
+    let mut report = Vec::new();
+    for (name, extra, strict_gain) in [
+        ("fixed keys, compact", schema_format(with_compact(fixed_keys.clone())), true),
+        ("nested arrays, compact", schema_format(with_compact(nested.clone())), true),
+        (
+            "lark literal",
+            json!({"grammar_type": "lark", "grammar":
+                r#"start: "{\"verdict\": " ("true" | "false") ", \"reason\": \"" /[a-z]{1,5}/ "\"}""#}),
+            true,
+        ),
+        ("gbnf literal", json!({"grammar": r#"root ::= "answer=" ("yes" | "no") ";done""#}), true),
+        // whitespace may follow every token here, so little is forced; the output still has to be identical
+        ("fixed keys, flexible whitespace", schema_format(fixed_keys.clone()), false),
+        ("nested arrays, flexible whitespace", schema_format(nested.clone()), false),
+        ("json_object", json!({"response_format": {"type": "json_object"}}), false),
+    ] {
+        let (without, with, forced, tokens) = jump_compare(name, extra, 0..12).await;
+        assert!(with <= without, "{name}: jump-forward must never need more forward passes ({with} > {without})");
+        if strict_gain {
+            assert!(forced > 0, "{name}: nothing was forced");
+            assert!(with < without, "{name}: {with} forward passes with jump-forward, {without} without");
+        }
+        report.push(format!("{name}: {without} -> {with} forward passes, {forced} of {tokens} completion tokens forced"));
+    }
+    println!("jump-forward on the tiny model (12 seeds each):\n{}", report.join("\n"));
+
+    // greedy decoding and a stop-at-length budget in the middle of a forced run give the same text as well
+    let (without, with, forced, _) = jump_compare(
+        "greedy, short budget",
+        merge_into(schema_format(with_compact(fixed_keys)), json!({"temperature": 0, "max_tokens": 9})),
+        0..2,
+    )
+    .await;
+    assert!(forced > 0 && with <= without);
+
+    // four constrained requests in one batch (jump-forward steps of one sequence share forward passes with the others) and a
+    // streamed one give the texts the sequential runs without jump-forward gave
+    let (off, on) = jump_pair();
+    let request = |seed: u64| merge_into(schema_format(with_compact(nested.clone())), json!({"max_tokens": 160, "temperature": 1.0, "seed": seed}));
+    let (r0, r1, r2, r3) = tokio::join!(on.chat(request(20)), on.chat(request(21)), on.chat(request(22)), on.chat(request(23)));
+    for (seed, together) in [(20, r0), (21, r1), (22, r2), (23, r3)] {
+        let alone = off.chat(request(seed)).await;
+        assert_eq!(together.json()["choices"][0]["message"]["content"], alone.json()["choices"][0]["message"]["content"], "seed {seed}");
+        assert_eq!(together.json()["usage"], alone.json()["usage"], "seed {seed}");
+    }
+    let streamed = on.chat(merge_into(request(24), json!({"stream": true}))).await;
+    let text: String = streamed.chunks().iter().filter_map(|c| c["choices"][0]["delta"]["content"].as_str()).collect();
+    let alone = off.chat(request(24)).await;
+    assert_eq!(text, alone.json()["choices"][0]["message"]["content"].as_str().unwrap());
+
+    // the counters are exported
+    let exported = on.get("/metrics").await.text();
+    let value = |name: &str| -> u64 {
+        exported.lines().find_map(|l| l.strip_prefix(name).and_then(|v| v.trim().parse().ok())).unwrap_or_else(|| panic!("{name} missing"))
+    };
+    assert!(value("fllm_jump_forward_tokens_total ") > 0 && value("fllm_jump_forward_steps_total ") > 0);
+    assert_eq!(value("fllm_jump_forward_tokens_total "), jump_counters(on).1);
+    let exported_off = off.get("/metrics").await.text();
+    assert!(exported_off.contains("fllm_jump_forward_tokens_total 0"));
+}
+
+fn merge_into(mut target: Value, extra: Value) -> Value {
+    merge(&mut target, extra);
+    target
 }
 
 const WEATHER_CALL: &str = "<tool_call>\\n{\\\"name\\\": \\\"get_weather\\\", \\\"arguments\\\": {\\\"city\\\": \\\"Berlin\\\"}}\\n</tool_call>";
