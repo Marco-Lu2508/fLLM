@@ -1066,14 +1066,23 @@ def run_step(key, title, fn, timeout):
 # ---------------------------------------------------------------------------
 
 def github_release(tag):
-    url = "https://api.github.com/repos/%s/releases/%s" % (RELEASE_REPO, tag)
+    # GitHub's `releases/latest` skips pre-releases, and every 0.x release of fLLM is one: take the newest release that is not a draft
+    if tag == "latest":
+        url = "https://api.github.com/repos/%s/releases?per_page=5" % RELEASE_REPO
+    else:
+        url = "https://api.github.com/repos/%s/releases/tags/%s" % (RELEASE_REPO, tag)
     req = urllib.request.Request(url, headers={"User-Agent": "fllm-verify-all",
                                                "Accept": "application/vnd.github+json"})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         raise StepFailed("cannot read release '%s' from GitHub (HTTP %d)" % (tag, exc.code))
+    if tag == "latest":
+        data = next((r for r in data if not r.get("draft")), None)
+        if data is None:
+            raise StepFailed("the repository has no release yet")
+    return data
 
 
 def acquire_from_release(tag, asset_name):

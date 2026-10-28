@@ -100,7 +100,8 @@ def get_fllm(args, work):
         rc, out = sh(f"cd {src} && FLLM_CUDA_ARCHS={arch} cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs 2>&1 | tail -3", timeout=3 * 3600)
         binary = f"{src}/target/release/fllm-rs"
         return binary if os.path.exists(binary) else None
-    rel = json.load(urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases/latest"))
+    # `releases/latest` skips pre-releases and all 0.x releases are pre-releases: take the newest one that is not a draft
+    rel = next(r for r in json.load(urllib.request.urlopen(f"https://api.github.com/repos/{REPO}/releases?per_page=5")) if not r.get("draft"))
     assets = {a["name"]: a["browser_download_url"] for a in rel["assets"]}
     name = "fllm-linux-x86_64-cuda.tar.gz"
     if name not in assets:
