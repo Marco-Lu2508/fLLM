@@ -67,7 +67,7 @@ A repository with several GGUF files needs the `:QUANT` suffix.
 ### Models and formats
 
 `serve` and `run` load **GGUF** files directly. A **checkpoint** (safetensors or PyTorch) needs no manual step either:
-a local directory or file, or a downloaded Hugging Face repository, with safetensors weights is translated into the GGUF tensor layout in memory while it loads, with no GGUF file written (`--no-direct-load` converts to a cached GGUF instead, and formats whose direct load is not yet verified convert anyway); otherwise a Hugging Face
+a local directory or file, or a downloaded Hugging Face repository, with safetensors or PyTorch weights is translated into the GGUF tensor layout in memory while it loads, with no GGUF file written (`--no-direct-load` converts to a cached GGUF instead); a Hugging Face
 repository is converted automatically on first use: `fllm-rs run owner/repo` on a repository without
 GGUF files downloads the weights, checks the architecture from `config.json` first, converts once and caches the GGUF
 next to the other models (`fllm-rs list` shows it, `fllm-rs rm owner/repo` removes it, `rm owner/repo --converted` keeps
@@ -80,13 +80,13 @@ checkpoints and GPU runs of converted files were **not** tested.
 | Input | How it is handled | Notes |
 | --- | --- | --- |
 | GGUF v2/v3 with F32/F16/BF16, Q4_0 ... Q8_0, Q2_K ... Q6_K, IQ1 ... IQ4, TQ, MXFP4, NVFP4 | loaded directly | `fllm-rs formats` lists the 35 registered types; registration is not a promise of a fast kernel |
-| safetensors (single or sharded) and PyTorch `.bin` / `.pt` / `.pth` | safetensors of unquantized, AWQ, GPTQ, FP8, NVFP4 and compressed-tensors checkpoints are loaded directly by `run` / `serve` (no GGUF file; `--no-direct-load` converts instead); other formats convert on first use; `convert` writes a file you name | Hub repository, local directory or file; `config.json` and `tokenizer.json` are required. Unquantized bf16/f16/f32 stay as they are (`--outtype f16`/`f32` to change) or are re-encoded with `--quant q4_k_m`, `q8_0`, ... |
+| safetensors (single or sharded) and PyTorch `.bin` / `.pt` / `.pth` | checkpoints of unquantized, AWQ, GPTQ, FP8, NVFP4, compressed-tensors, MXFP4, bitsandbytes, MLX, EXL2 and EXL3 weights, in safetensors or PyTorch ZIP files, are loaded directly by `run` / `serve` (no GGUF file; `--no-direct-load` converts instead; proven on tiny synthetic models, not yet on large real ones); `convert` writes a file you name | Hub repository, local directory or file; `config.json` and `tokenizer.json` are required. Unquantized bf16/f16/f32 stay as they are (`--outtype f16`/`f32` to change) or are re-encoded with `--quant q4_k_m`, `q8_0`, ... |
 | AWQ 4-bit (AutoAWQ GEMM) and GPTQ 4-bit, including act-order | converted automatically, kept 4-bit as fLLM-specific `Q4Z` / `Q4ZP` tensors; nothing is re-quantized | group sizes 32, 64, 128; other sizes, fp32 scales and stacked experts are expanded to F16 |
 | FP8 checkpoints (`quant_method` fp8, ModelOpt FP8, compressed-tensors float) | converted automatically; per-tensor or per-row scales stay FP8, block-wise `weight_scale_inv` is expanded to F16 | |
 | NVIDIA ModelOpt NVFP4 (`quant_algo` NVFP4, `hf_quant_config.json` or `quantization_config`) | converted automatically to GGUF type 40 (the layout of llama.cpp, no llama.cpp needed): block scales copied, `weight_scale_2` stored as `<name>.scale` | dense models; excluded modules (for example `lm_head`) stay bf16/f16; FP8 KV-cache scales are ignored; NVFP4 mixture-of-experts checkpoints are expanded to F16 |
 | compressed-tensors int4 / int8 (`pack-quantized`, `int-quantized`, symmetric) | converted automatically: int4 groups of 32/64/128 become `Q4Z`, int8 becomes `Q8_0` | asymmetric, act-order, other bit widths, sparse and compressed-tensors NVFP4 are refused with a message |
-| gpt-oss MXFP4 | `convert` repacks the MXFP4 blocks | |
-| EXL2 / EXL3 | `convert` expands to F16 (or re-quantizes with `--outtype`) | import only, not native EXL inference ([docs/exl-formats.md](docs/exl-formats.md)) |
+| gpt-oss MXFP4 | repacks the MXFP4 blocks (loaded directly, or written by `convert`) | |
+| EXL2 / EXL3 | expands to F16 (or re-quantizes with `--outtype`), loaded directly or written by `convert` | import only, not native EXL inference ([docs/exl-formats.md](docs/exl-formats.md)) |
 
 Where the weight formats run natively ([docs/gpu-backends.md](docs/gpu-backends.md),
 [docs/backends.md](docs/backends.md), [docs/cpu-kernels.md](docs/cpu-kernels.md)):

@@ -23,7 +23,7 @@ and [model-coverage.md](model-coverage.md).
 | Item | State | Notes |
 | --- | --- | --- |
 | New architectures (for example the Gemma 4 family) | planned | Adding a model: [adding-a-model.md](adding-a-model.md); each needs a tiny-checkpoint check against `transformers` |
-| Loading safetensors directly, without writing a GGUF first | done for unquantized, AWQ, GPTQ, FP8, ModelOpt NVFP4 and compressed-tensors safetensors (default); `--quant` while loading; EXL2/EXL3, MXFP4, bitsandbytes, MLX and PyTorch weights still convert | Proven byte for byte against the converted file by tests, see [rust-formats-and-import.md](rust-formats-and-import.md). Not measured on real multi-GB models |
+| Loading checkpoints directly, without writing a GGUF first | done and the default for unquantized, AWQ, GPTQ, FP8, ModelOpt NVFP4, compressed-tensors, MXFP4, bitsandbytes, MLX, EXL2 and EXL3 weights in safetensors or PyTorch ZIP files; `--quant` while loading | Proven byte for byte against the converted file by tests, see [rust-formats-and-import.md](rust-formats-and-import.md). Fixtures hold random codes in each layout; EXL3 logits are not compared through the engine (its tiles need dimensions of 128). Not measured on real multi-GB models |
 | More vision families (beyond SmolVLM/Idefics3) | planned | Image input, projector and tokenizer-side placeholders per family |
 | Audio and speech input | planned | Not started |
 | Full SentencePiece/Unigram tokenizer support | planned | BPE families are covered |

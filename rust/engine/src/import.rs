@@ -530,7 +530,7 @@ fn dtype_and_preset(outtype: &OutType) -> (OutputDType, Option<Preset>) {
 
 /// Source quantizations whose direct load is checked, tensor by tensor, against the conversion by tests (see
 /// `docs/rust-formats-and-import.md`). Other checkpoints are converted unless `--direct` asks for the direct load anyway.
-const VERIFIED_DIRECT: &[&str] = &["none", "awq", "gptq", "nvfp4", "fp8", "int4", "int8"];
+const VERIFIED_DIRECT: &[&str] = &["none", "awq", "gptq", "nvfp4", "fp8", "int4", "int8", "mxfp4", "bitsandbytes", "mlx", "exl2", "exl3"];
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
@@ -604,18 +604,24 @@ fn load_direct(path: &Path) -> Result<MappedGguf, String> {
 }
 
 /// Why this checkpoint is not loaded directly by default, or `None` when it is.
-fn direct_unsupported(check: &fllm_checkpoint::ConfigCheck, weight_names: &[String], weight_bytes: u64, outtype: &OutType) -> Option<String> {
+fn direct_unsupported(check: &fllm_checkpoint::ConfigCheck, weight_bytes: u64, outtype: &OutType) -> Option<String> {
     if !VERIFIED_DIRECT.contains(&check.quantization.as_str()) {
         return Some(format!("the direct load of {} checkpoints is not verified yet", check.quantization));
     }
-    if weight_names.iter().any(|n| !n.ends_with(".safetensors") && !n.ends_with(".safetensors.index.json")) {
-        return Some("PyTorch weights are converted".to_owned());
-    }
-    // the converted tensors live in memory, the converted file would live in the page cache
+    // PyTorch ZIP weights (.bin/.pt/.pth) are read by the restricted reader (it never runs pickle code) and load directly as
+    // well: stored storages are slices of the mapped archive, compressed ones are built
+    // the converted tensors live in memory, the converted file would live in the page cache; formats the converter expands
+    // to 16-bit weights need several times the size of the files
     let free = crate::devices::host_free_memory_bytes();
-    let share = if check.quantization == "none" { free / 4 * 3 } else { free / 2 };
-    if free > 0 && !matches!(outtype, OutType::Quant(_)) && weight_bytes > share {
-        return Some(format!("the weights ({}) are large for the free memory ({})", gb(weight_bytes), gb(free)));
+    let (expansion, share) = match check.quantization.as_str() {
+        "none" => (1, free / 4 * 3),
+        "mlx" | "bitsandbytes" => (4, free / 4 * 3),
+        "exl2" | "exl3" => (5, free / 4 * 3),
+        _ => (1, free / 2),
+    };
+    let needed = weight_bytes.saturating_mul(expansion);
+    if free > 0 && !matches!(outtype, OutType::Quant(_)) && needed > share {
+        return Some(format!("the weights ({}{}) are large for the free memory ({})", gb(weight_bytes), if expansion > 1 { format!(", about {} expanded", gb(needed)) } else { String::new() }, gb(free)));
     }
     None
 }
@@ -703,7 +709,7 @@ fn prepare_hub(reference: &Reference, opts: &ImportOptions) -> Result<PathBuf, S
         .snapshot
         .join(converted_name(&reference.repo, &label_for(&outtype, &check, &cfg), &key));
     // a conversion that is already in the cache starts faster than building the tensors again, so it is used unless --direct
-    let direct = direct_mode(opts, direct_unsupported(&check, &weights, weight_bytes, &outtype), &repo_name);
+    let direct = direct_mode(opts, direct_unsupported(&check, weight_bytes, &outtype), &repo_name);
     if direct != Some(true) && final_path.is_file() {
         session.record_revision()?;
         eprintln!("[fllm-rs] using the converted model from the cache: {}", final_path.display());
@@ -847,8 +853,7 @@ fn prepare_local(path: &Path, opts: &ImportOptions) -> Result<PathBuf, String> {
     require_tokenizer(has_tokenizer_source(&local_refs), &what)?;
     let outtype = choose_outtype(&check.quantization, opts.quant.as_deref(), opts.outtype.as_deref())?;
     let (files, weight_bytes) = local_fingerprint(&root)?;
-    let weight_names: Vec<String> = files.iter().filter_map(|f| f.split(':').next()).filter(|n| is_weight_name(n)).map(str::to_owned).collect();
-    let direct = direct_mode(opts, direct_unsupported(&check, &weight_names, weight_bytes, &outtype), &what);
+    let direct = direct_mode(opts, direct_unsupported(&check, weight_bytes, &outtype), &what);
     let load_directly = |input: PathBuf| {
         eprintln!("[fllm-rs] loading {what} directly, without writing a GGUF file");
         hand_out_direct(input, &outtype)

@@ -505,6 +505,33 @@ fn stored_pytorch_storages_stay_slices_of_the_archive() {
     let _ = fs::remove_dir_all(packed);
 }
 
+#[test]
+fn the_memory_budget_applies_to_every_expanded_format() {
+    let over_budget = |dir: &Path, what: &str| {
+        match load_checkpoint_quantized(dir, ConvertOptions::default(), None, Some(1)) {
+            Err(crate::CheckpointError::OverBudget { needed, limit }) => assert!(needed > 1 && limit == 1, "{what}"),
+            other => panic!("{what}: expected OverBudget, got {:?}", other.map(|_| ())),
+        }
+        assert!(load_checkpoint_quantized(dir, ConvertOptions::default(), None, Some(u64::MAX)).is_ok(), "{what}");
+    };
+    let mlx_dir = scratch("budget-mlx");
+    model(&mlx_dir, 81, &[("quantization", json!({"group_size": 64, "bits": 4}))], Scope::Linears, 1, mlx(4, 64));
+    over_budget(&mlx_dir, "mlx");
+    let bnb_dir = scratch("budget-bnb");
+    let kind = Bnb::Nf4 { block: 64, double: false };
+    model(&bnb_dir, 82, &[("quantization_config", bnb_config(kind))], Scope::Linears, 1, bnb(kind));
+    over_budget(&bnb_dir, "bitsandbytes");
+    let exl_dir = scratch("budget-exl2");
+    model(&exl_dir, 83, &[("quantization_config", json!({"quant_method": "exl2"}))], Scope::Linears, 1, exl2);
+    over_budget(&exl_dir, "exl2");
+    let bin_dir = scratch("budget-bin");
+    torch_model(&bin_dir, 84, &["pytorch_model.bin"], false, "BF16");
+    over_budget(&bin_dir, "deflated pytorch weights");
+    for d in [mlx_dir, bnb_dir, exl_dir, bin_dir] {
+        let _ = fs::remove_dir_all(d);
+    }
+}
+
 /// A `data.pkl` that would run `os.system` (or similar) under the real unpickler; the restricted reader must refuse it
 /// and must not run anything.
 fn malicious_archive(dir: &Path, pickle: &[u8]) -> PathBuf {
@@ -549,7 +576,7 @@ fn malicious_pickles_are_refused_and_never_run() {
     cases.push(("stack global", p));
     // INST, OBJ, NEWOBJ, NEWOBJ_EX, BUILD and EXT opcodes
     let mut inst = vec![0x80, 2, b'('];
-    inst.extend_from_slice(format!("ios\nsystem\n").as_bytes());
+    inst.extend_from_slice(b"ios\nsystem\n");
     inst.push(b'.');
     cases.push(("INST", inst));
     cases.push(("OBJ", vec![0x80, 2, b'(', b'N', b'o', b'.']));
