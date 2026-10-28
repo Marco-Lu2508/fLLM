@@ -669,10 +669,16 @@ impl Session {
         }
         {
             let mut st = self.st();
-            st.tabs.push(Tab::new(&target_id, &sid));
-            // a page opened by a click becomes the current one: that is where the person expects to be
-            if st.tabs.len() > 1 {
-                st.current = st.tabs.len() - 1;
+            if let Some(known) = st.tabs.iter_mut().find(|t| t.target_id == target_id) {
+                // the same page again under a new session (the browser moved it to another process): it keeps its place
+                known.session_id = sid.clone();
+                known.ready = false;
+            } else {
+                st.tabs.push(Tab::new(&target_id, &sid));
+                // a page opened by a click becomes the current one: that is where the person expects to be
+                if st.tabs.len() > 1 {
+                    st.current = st.tabs.len() - 1;
+                }
             }
         }
         // A page that waits for the debugger must not be able to hold the setup up: all commands go out together, each with a short limit.
@@ -912,6 +918,20 @@ impl Session {
         Ok(answer["result"]["value"].clone())
     }
 
+    /// A picture of the page. A tab that is not the active one of the browser (after another tab was closed) cannot be photographed:
+    /// it is brought to the front and the picture is taken again.
+    async fn capture(&self, sid: &str, params: Value) -> Result<Value, String> {
+        match self.cmd("Page.captureScreenshot", params.clone(), Some(sid)).await {
+            Err(e) if e.contains("Not attached to an active page") || e.contains("not visible") => {
+                let target = self.with_tab(sid, |t| t.target_id.clone()).unwrap_or_default();
+                self.cmd("Target.activateTarget", json!({"targetId": target}), None).await?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                self.cmd("Page.captureScreenshot", params, Some(sid)).await
+            }
+            other => other,
+        }
+    }
+
     async fn page_count(&self) -> usize {
         self.cmd("Target.getTargets", json!({}), None)
             .await
@@ -1116,7 +1136,7 @@ impl Session {
             params["captureBeyondViewport"] = json!(true);
             what = "the whole page".to_owned();
         }
-        let shot = self.cmd("Page.captureScreenshot", params, Some(&sid)).await?;
+        let shot = self.capture(&sid, params).await?;
         let data = shot["data"].as_str().ok_or("the browser returned no picture")?.to_owned();
         let (title, url) = self.refresh_info(&sid).await;
         let kib = data.len() * 3 / 4 / 1024;
@@ -1165,6 +1185,13 @@ impl Session {
         };
         self.cmd("Target.closeTarget", json!({"targetId": target}), None).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
+        let next = {
+            let st = self.st();
+            st.tabs.get(st.current).map(|t| t.target_id.clone())
+        };
+        if let Some(next) = next {
+            let _ = self.cmd("Target.activateTarget", json!({"targetId": next}), None).await;
+        }
         let left = self.st().tabs.len();
         Ok(Reply::text(if left == 0 { "Closed the tab. No tab is open; browser_open opens a new one.".to_owned() } else { format!("Closed the tab. {left} tab(s) left.") }))
     }
@@ -1173,7 +1200,14 @@ impl Session {
 
     async fn frame(&self, since: &str) -> Result<Value, String> {
         let sid = self.current().await?;
-        let shot = self.cmd("Page.captureScreenshot", json!({"format": "jpeg", "quality": 62}), Some(&sid)).await?;
+        let shot = match self.capture(&sid, json!({"format": "jpeg", "quality": 62})).await {
+            Ok(shot) => shot,
+            Err(error) => {
+                // the browser's own error pages (connection refused ...) cannot be photographed: say where the tab is instead
+                let (title, url) = self.refresh_info(&sid).await;
+                return Ok(json!({"running": true, "url": url, "title": title, "undrawable": error}));
+            }
+        };
         let data = shot["data"].as_str().unwrap_or_default();
         let key = format!("{}-{}", data.len(), data.bytes().step_by((data.len() / 64).max(1)).fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)));
         let (title, url) = self.refresh_info(&sid).await;

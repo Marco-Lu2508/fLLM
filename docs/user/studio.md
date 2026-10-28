@@ -580,12 +580,12 @@ Studio). The comment button switches on comment mode: click an element, write wh
 comments (element role, name, text, `ref` and your note) are put in front of your next message to the agent, or sent at once
 with *Send to the agent*.
 
-**What is verified.** Linux with Chromium 156 in Docker (Debian 13), headless: opening a local page, snapshot, typing into a
-field, choosing an option, clicking a button, the page changing, screenshots (PNG), tabs, going back, the refusals above, the
+**What is verified.** Linux with Chromium 156 in Docker (Debian 13), headless and with a window on a virtual display (Xvfb): opening a local page, snapshot, typing into a
+field, choosing an option, clicking a button, the page changing, screenshots (PNG), tabs (a link that opens a new tab), going back, cookies kept across a restart of the browser, the refusals above, the
 panel routes, closing, and the browser disappearing when the server is killed. The URL policy, the CDP framing (against a fake
-server), the snapshot and the key mapping have unit tests. **Not verified:** Windows (Edge and Chrome, the job object), macOS,
-the headed window on a real desktop, and the panel in the desktop app. The panel itself was exercised in a real browser
-tab against a running server (see the changelog); keyboard input into the preview from a physical keyboard and an IME was not.
+server), the snapshot and the key mapping have unit tests. **Not verified:** Windows (Edge and Chrome, the job object; that code was not even compiled by the Linux build used for testing), macOS (its watchdog is the same shell script as on Linux),
+a window on a real desktop, and the panel in the desktop app. The panel itself was exercised in a real browser
+tab against a running server (clicks, typing and comment mode, on a wide and a narrow window); keyboard input into the preview from a physical keyboard and an IME was not.
 Only Chromium-family browsers work; Firefox and Safari are not supported.
 
 ## Web search that needs no server

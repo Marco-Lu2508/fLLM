@@ -78,6 +78,7 @@
         if (!s.browser) {
           return `No Chromium-based browser was found on this computer. ${installHelp()}<button class="btn btn-sm btn-secondary" id="brSettings">Open Browser settings</button>`;
         }
+        if (br.running && br.undrawable) return `The browser shows a page that cannot be drawn here, probably an error page (the site is not reachable). Address: ${escapeHtml(String(br.undrawable))}. The address bar and the agent still work.`;
         return 'Nothing is open yet. The agent starts the browser when it opens a page; you can also type an address above.';
       }
 
@@ -149,7 +150,12 @@
           const data = await post('/frame', { since: br.key });
           br.running = Boolean(data.running);
           if (!br.running) { br.key = ''; img.removeAttribute('src'); }
-          else if (!data.error) {
+          else if (data.undrawable) {
+            br.undrawable = data.url || true; br.key = ''; img.removeAttribute('src');
+            br.url = data.url || br.url;
+            if (document.activeElement !== urlInput) urlInput.value = br.url;
+          } else if (!data.error) {
+            br.undrawable = false;
             if (data.image) { img.src = data.image; br.key = data.key; }
             if (data.width) br.view = { width: data.width, height: data.height || br.view.height };
             br.url = data.url || br.url;
