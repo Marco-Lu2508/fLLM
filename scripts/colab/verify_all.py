@@ -38,6 +38,7 @@ import argparse
 import atexit
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -170,30 +171,49 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def download(url, dest, timeout=DOWNLOAD_TIMEOUT):
-    """Stream url to dest (skip when present); returns dest."""
+def download(url, dest, timeout=DOWNLOAD_TIMEOUT, attempts=8):
+    """Stream url to dest (skip when present); returns dest. A dropped connection is retried and the download continues where it stopped."""
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         log("    already downloaded: %s" % os.path.basename(dest))
         return dest
     tmp = dest + ".part"
     log("    downloading %s" % url)
-    req = urllib.request.Request(url, headers={"User-Agent": "fllm-verify-all"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as fh:
-        total, seen, last = resp.headers.get("Content-Length"), 0, 0
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            fh.write(chunk)
-            seen += len(chunk)
-            if seen - last > (256 << 20):
-                last = seen
-                if total:
-                    log("    ... %d of %d MB" % (seen >> 20, int(total) >> 20))
-                else:
-                    log("    ... %d MB" % (seen >> 20))
-    os.replace(tmp, dest)
-    return dest
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        headers = {"User-Agent": "fllm-verify-all"}
+        if have:
+            headers["Range"] = "bytes=%d-" % have
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+                resumed = have > 0 and getattr(resp, "status", 200) == 206
+                if have and not resumed:
+                    have = 0  # the server sent the whole file again
+                length = resp.headers.get("Content-Length")
+                total = (int(length) + have) if length else None
+                seen, last = have, have
+                with open(tmp, "ab" if resumed else "wb") as fh:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        seen += len(chunk)
+                        if seen - last > (256 << 20):
+                            last = seen
+                            log("    ... %d of %d MB" % (seen >> 20, (total or 0) >> 20) if total else "    ... %d MB" % (seen >> 20))
+                if total is not None and seen < total:
+                    raise ConnectionError("the download stopped at %d of %d bytes" % (seen, total))
+            os.replace(tmp, dest)
+            return dest
+        except (OSError, ConnectionError, urllib.error.URLError, http.client.HTTPException) as exc:
+            if isinstance(exc, urllib.error.HTTPError) and 400 <= exc.code < 500 and exc.code != 429:
+                raise
+            last_error = exc
+            wait = min(30, 2 * attempt)
+            log("    download interrupted (%s); attempt %d of %d, continuing in %d s" % (exc, attempt, attempts, wait))
+            time.sleep(wait)
+    raise last_error
 
 
 def bin_has_string(needle):
