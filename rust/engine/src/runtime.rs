@@ -727,7 +727,7 @@ impl InferenceRuntime {
     }
 
     /// Switch jump-forward decoding on (`Some`) or off (`None`). It applies to grammar-constrained sequences only; see
-    /// `structured::JumpForward` for the rules and `docs/structured-output.md` for what it does and does not change.
+    /// `structured::JumpForward` for the rules and `docs/server-api.md` (Jump-forward decoding) for what it does and does not change.
     pub fn set_jump_forward(&mut self, jump: Option<std::sync::Arc<crate::structured::JumpForward>>) {
         self.jump_forward = jump;
     }
