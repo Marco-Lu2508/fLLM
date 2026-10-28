@@ -62,8 +62,9 @@ pub(crate) fn quant_layout(kind: u32) -> Option<(usize, usize)> {
         0x8000_0011 | 0x8000_0015 => Some((64, 35)),
         0x8000_0012 | 0x8000_0016 => Some((128, 67)),
         0x8000_0020 | 0x8000_0021 => Some((1, 1)),
-        _ => fllm_gguf_probe::quant_types::by_id(kind)
-            .map(|ty| (ty.block_elements, ty.bytes_per_block)),
+        _ => fllm_gguf_probe::mlx_affine(kind)
+            .map(|m| (m.group as usize, m.block_bytes() as usize))
+            .or_else(|| fllm_gguf_probe::quant_types::by_id(kind).map(|ty| (ty.block_elements, ty.bytes_per_block))),
     }
 }
 
@@ -226,6 +227,9 @@ pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, Str
     }
     if let Some(group) = fllm_gguf_probe::q4z_group(kind) {
         return dequantize_q4z(bytes, group as usize, count);
+    }
+    if crate::cpu_mlx::handles(kind) {
+        return crate::cpu_mlx::dequantize(bytes, kind, count);
     }
     if matches!(kind, 16..=23 | 29) {
         return crate::quant_iq::dequantize_iq(bytes, kind, count);
@@ -1019,6 +1023,14 @@ impl Linear {
             // the rows the NPU did not take (fewer than a full block) run on the CPU kernels
             out.extend(self.forward(&input[done * self.cols..])?);
             return Ok(out);
+        }
+        // MLX affine weights: f32 activations against the packed codes (also the reference of the device kernels)
+        if let Some((kind, packed)) = &self.packed {
+            if crate::cpu_mlx::handles(*kind) {
+                if let Some(out) = crate::cpu_mlx::linear(packed, *kind, input, self.rows, self.cols, self.bias.as_deref()) {
+                    return Ok(out);
+                }
+            }
         }
         if self.fast_cpu {
             let float = if let Some((kind @ (1 | 30), packed)) = &self.packed {

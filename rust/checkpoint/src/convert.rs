@@ -351,7 +351,8 @@ pub fn prepare_checkpoint(
         })
     })?;
     // formats without a compact fLLM type are expanded when written; say what that costs
-    let expanded: u64 = packed_groups.iter().filter(|g| matches!(g.1, PackedData::Dyn(_))).map(|g| g.1.element_count() as u64).sum();
+    let native_mlx = |g: &PackedData| options.output_dtype == OutputDType::Preserve && g.mlx().is_some_and(|m| m.native().is_some());
+    let expanded: u64 = packed_groups.iter().filter(|g| matches!(g.1, PackedData::Dyn(_)) && !native_mlx(&g.1)).map(|g| g.1.element_count() as u64).sum();
     if expanded > 0 {
         let width = if options.output_dtype == OutputDType::F32 { 4.0 } else { 2.0 };
         eprintln!(
@@ -797,6 +798,14 @@ pub fn prepare_checkpoint(
             });
         let q8_0 = preserve && packed.sym_int().is_some_and(|t| t.q8_0_ok());
         let mxfp4 = preserve && packed.mxfp4().is_some();
+        // MLX affine weights keep their packed words, scales and biases (`MLXA` types) when that changes no value
+        let mlx = packed.mlx().filter(|_| preserve).and_then(|m| {
+            let native = m.native();
+            if native.is_none() {
+                eprintln!("warning: {name}: MLX weight is expanded to F16 because {}", m.native_refusal());
+            }
+            native
+        });
         let fp8b = preserve && packed.is_fp8b();
         // (stacked experts have a leading expert dimension: their rows are all rows of all experts)
         let in_features = dims.last().copied().unwrap_or(0) as usize;
@@ -805,6 +814,7 @@ pub fn prepare_checkpoint(
             _ if nvfp4 => "NVFP4".to_string(),
             _ if q8_0 => "Q8_0".to_string(),
             _ if mxfp4 => "MXFP4".to_string(),
+            _ if mlx.is_some() => crate::dequant_bits::mlx_dtype_name(mlx.expect("checked")),
             _ if fp8b => "FP8B".to_string(),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
@@ -816,6 +826,10 @@ pub fn prepare_checkpoint(
             _ if nvfp4 => (rows_out * (in_features / 64 * 36)) as u64,
             _ if q8_0 => (rows_out * (in_features / 32 * 34)) as u64,
             _ if mxfp4 => (rows_out * (in_features / 32 * 17)) as u64,
+            _ if mlx.is_some() => {
+                let m = mlx.expect("checked");
+                (rows_out * (in_features / m.group as usize) * m.block_bytes() as usize) as u64
+            }
             _ if fp8b => {
                 let num_scales = match &packed {
                     PackedData::Fp8Block(b) => b.scales().len(),
@@ -1253,6 +1267,9 @@ fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
         "Q4ZP128" => 0x8000_0016,
         "FP8M" | "F8M" => 0x8000_0020,
         "FP8B" => 0x8000_0021,
+        _ if dtype.starts_with("MLXA") => {
+            crate::dequant_bits::mlx_dtype_id(dtype).ok_or_else(|| CheckpointError::Invalid(format!("unsupported MLX tensor dtype {dtype}")))?
+        }
         _ => return Err(CheckpointError::Invalid(format!("unsupported GGUF tensor dtype {dtype}"))),
     })
 }

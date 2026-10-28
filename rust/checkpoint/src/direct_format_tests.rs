@@ -249,6 +249,11 @@ fn bitsandbytes_checkpoints_load_identically_to_the_converted_file() {
 
 // ---------------------------------------------------------------- MLX
 
+/// The native GGUF type of MLX weights with f16 (`bf16` false) or bfloat16 scales.
+fn mlx_type(bits: usize, group: usize, bf16: bool) -> u32 {
+    fllm_gguf_probe::MlxAffine { bits: bits as u32, group: group as u32, bf16 }.type_id()
+}
+
 fn mlx(bits: usize, group: usize) -> impl FnMut(&mut Rng, &str, usize, usize) -> Option<Vec<Entry>> {
     move |rng, prefix, out, inp| {
         let groups = out * inp / group;
@@ -260,6 +265,53 @@ fn mlx(bits: usize, group: usize) -> impl FnMut(&mut Rng, &str, usize, usize) ->
     }
 }
 
+/// MLX weights whose scales and biases are `dtype` ("BF16" or "F32"); `tiny` puts one value below the range of half precision.
+fn mlx_dtype(bits: usize, group: usize, dtype: &'static str, tiny: bool) -> impl FnMut(&mut Rng, &str, usize, usize) -> Option<Vec<Entry>> {
+    move |rng, prefix, out, inp| {
+        let groups = out * inp / group;
+        let values = |rng: &mut Rng, scale: f32| -> Vec<u8> {
+            (0..groups)
+                .flat_map(|i| {
+                    let v = if tiny && i == 0 { 3e-7 } else { scale * (1.0 + 0.5 * rng.unit().abs()) + 1e-3 * rng.unit() };
+                    if dtype == "BF16" {
+                        bf16::from_f32(v).to_le_bytes().to_vec()
+                    } else {
+                        v.to_le_bytes().to_vec()
+                    }
+                })
+                .collect()
+        };
+        Some(vec![
+            (format!("{prefix}.weight"), "U32", vec![out, inp * bits / 32], random_bytes(rng, out * inp * bits / 8)),
+            (format!("{prefix}.scales"), dtype, vec![out, inp / group], values(rng, 0.02)),
+            (format!("{prefix}.biases"), dtype, vec![out, inp / group], values(rng, -0.1)),
+        ])
+    }
+}
+
+#[test]
+fn mlx_bfloat16_scales_are_native_and_scales_without_an_exact_16_bit_form_are_expanded() {
+    // bfloat16 values, one of them below the smallest subnormal of half precision: bfloat16 scales in the native blocks
+    let dir = scratch("mlxbf");
+    model(&dir, 43, &[("quantization", json!({"group_size": 64, "bits": 4}))], Scope::Linears, 1, mlx_dtype(4, 64, "BF16", true));
+    assert_direct_equals_converted(&dir, OutputDType::Preserve, mlx_type(4, 64, true), "mlx bf16 scales");
+    let _ = fs::remove_dir_all(dir);
+    // bfloat16 values that half precision holds as well: the half form is chosen (the same bytes would decode either way)
+    let dir = scratch("mlxbf2");
+    model(&dir, 44, &[("quantization", json!({"group_size": 32, "bits": 6}))], Scope::Linears, 1, mlx_dtype(6, 32, "BF16", false));
+    assert_direct_equals_converted(&dir, OutputDType::Preserve, mlx_type(6, 32, false), "mlx bf16 scales that half holds");
+    let _ = fs::remove_dir_all(dir);
+    // full float32 scales: no exact 16-bit form, so the weights are expanded to f16 as before (and the converter says so)
+    let dir = scratch("mlxf32");
+    model(&dir, 45, &[("quantization", json!({"group_size": 64, "bits": 4}))], Scope::Linears, 1, mlx_dtype(4, 64, "F32", false));
+    assert_direct_equals_converted(&dir, OutputDType::Preserve, F16_TYPE, "mlx f32 scales");
+    let _ = fs::remove_dir_all(dir);
+    // a group size that is no multiple of 32 has no native type either
+    let dir = scratch("mlx16");
+    model(&dir, 46, &[("quantization", json!({"group_size": 16, "bits": 4}))], Scope::Linears, 1, mlx(4, 16));
+    assert_direct_equals_converted(&dir, OutputDType::Preserve, F16_TYPE, "mlx group 16");
+    let _ = fs::remove_dir_all(dir);
+}
 #[test]
 fn mlx_quantized_checkpoints_load_identically_to_the_converted_file() {
     for (bits, group, scope, shards) in [
@@ -273,7 +325,7 @@ fn mlx_quantized_checkpoints_load_identically_to_the_converted_file() {
     ] {
         let dir = scratch("mlx");
         model(&dir, 41, &[("quantization", json!({"group_size": group, "bits": bits}))], scope, shards, mlx(bits, group));
-        assert_direct_equals_converted(&dir, OutputDType::Preserve, F16_TYPE, &format!("mlx {bits} bits, group {group}, {shards} shards"));
+        assert_direct_equals_converted(&dir, OutputDType::Preserve, mlx_type(bits, group, false), &format!("mlx {bits} bits, group {group}, {shards} shards"));
         let _ = fs::remove_dir_all(dir);
     }
     // MLX also writes the same dictionary as `quantization_config`

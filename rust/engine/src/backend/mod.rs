@@ -470,6 +470,29 @@ impl QuantType {
         }
     }
 
+    /// MLX affine group-quantized weights (`MLXA` types, ids from `fllm_gguf_probe::MLX_AFFINE_BASE`): the packed words, scales and biases of an
+    /// `mlx-community` checkpoint as they are. They travel as `Other(id)`; this decodes the id.
+    pub fn mlx_affine(&self) -> Option<fllm_gguf_probe::MlxAffine> {
+        match self {
+            Self::Other(id) => fllm_gguf_probe::mlx_affine(*id),
+            _ => None,
+        }
+    }
+
+    /// Every MLX affine type with a group size of 32, 64 or 128 (the ones the native kernels of a backend cover; a backend lists them in
+    /// `BackendCapabilities::supported_quants`).
+    pub fn mlx_affine_common() -> Vec<QuantType> {
+        let mut all = Vec::new();
+        for bits in [2u32, 3, 4, 5, 6, 8] {
+            for group in [32u32, 64, 128] {
+                for bf16 in [false, true] {
+                    all.push(Self::Other(fllm_gguf_probe::MlxAffine { bits, group, bf16 }.type_id()));
+                }
+            }
+        }
+        all
+    }
+
     pub fn is_q4zp(&self) -> bool {
         matches!(self, Self::Q4ZP32 | Self::Q4ZP64 | Self::Q4ZP128)
     }
@@ -492,7 +515,7 @@ impl QuantType {
             Self::Q4Z64 | Self::Q4ZP64 => 64,
             Self::Q4Z128 | Self::Q4ZP128 => 128,
             Self::Nvfp4Marlin => 16,
-            Self::Other(_) => 32,
+            Self::Other(id) => fllm_gguf_probe::mlx_affine(*id).map_or(32, |m| m.group as usize),
         }
     }
 
@@ -528,6 +551,7 @@ impl QuantType {
             Self::Q4Z32 | Self::Q4ZP32 => 19,
             Self::Q4Z64 | Self::Q4ZP64 => 35,
             Self::Q4Z128 | Self::Q4ZP128 => 67,
+            Self::Other(id) => fllm_gguf_probe::mlx_affine(*id).map_or(32, |m| m.block_bytes() as usize),
             _ => 32,
         }
     }
