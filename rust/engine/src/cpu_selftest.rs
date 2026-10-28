@@ -108,6 +108,8 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
         fllm_gguf_probe::bnb::FP4_B64 => "fp4b64",
         fllm_gguf_probe::bnb::FP4_B128 => "fp4b128",
         fllm_gguf_probe::bnb::INT8_ROW => "int8r",
+        0x8000_0030 => "exl2",
+        0x8000_0031 => "exl3",
         _ => "?",
     }
 }
@@ -115,6 +117,15 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
 /// Random packed rows. Payload bytes are uniform; every scale field holds a finite, moderate
 /// value so products stay far from overflow.
 pub(crate) fn random_weights(kind: u32, rows: usize, cols: usize, rng: &mut Lcg) -> Vec<u8> {
+    // packed EXL2 / EXL3 blobs: random but valid groups, permutation, trellis words and sign vectors (docs/exl-formats.md)
+    if kind == fllm_gguf_probe::exl::EXL2_TYPE {
+        return fllm_gguf_probe::exl::synthetic_exl2(rows, cols, &mut || rng.next());
+    }
+    if kind == fllm_gguf_probe::exl::EXL3_TYPE {
+        let bits = 1 + (rng.next() % 8) as usize;
+        let codebook = (rng.next() % 3) as u8;
+        return fllm_gguf_probe::exl::synthetic_exl3(rows, cols, bits, codebook, &mut || rng.next());
+    }
     if kind == 0x8000_0021 {
         let tiles = rows.div_ceil(128) * cols.div_ceil(128);
         let mut bytes = Vec::with_capacity(rows * cols + tiles * 2);

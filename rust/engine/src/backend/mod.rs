@@ -378,6 +378,10 @@ pub enum QuantType {
     Fp4B128,
     /// LLM.int8() weights, 64 values per block: `[f32 row scale][64 i8]`.
     Int8Row,
+    /// fLLM-specific packed ExLlamaV2 / ExLlamaV3 matrices (GGUF types 0x8000_0030 / 0x8000_0031): one self-describing blob per tensor,
+    /// layout in `fllm_gguf_probe::exl`. They have no fixed block size; backends without a kernel get them expanded at upload.
+    Exl2,
+    Exl3,
     Other(u32),
 }
 
@@ -426,6 +430,8 @@ impl QuantType {
             fllm_gguf_probe::bnb::FP4_B64 => Self::Fp4B64,
             fllm_gguf_probe::bnb::FP4_B128 => Self::Fp4B128,
             fllm_gguf_probe::bnb::INT8_ROW => Self::Int8Row,
+            0x8000_0030 => Self::Exl2,
+            0x8000_0031 => Self::Exl3,
             other => Self::Other(other),
         }
     }
@@ -475,6 +481,8 @@ impl QuantType {
             Self::Fp4B64 => fllm_gguf_probe::bnb::FP4_B64,
             Self::Fp4B128 => fllm_gguf_probe::bnb::FP4_B128,
             Self::Int8Row => fllm_gguf_probe::bnb::INT8_ROW,
+            Self::Exl2 => 0x8000_0030,
+            Self::Exl3 => 0x8000_0031,
             Self::Other(other) => *other,
         }
     }
@@ -514,7 +522,7 @@ impl QuantType {
             }
             Self::IQ4_NL => 32,
             Self::IQ4_XS => 256,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 32,
             Self::NvFp4 => 64,
             Self::Q4Z32 | Self::Q4ZP32 => 32,
@@ -553,7 +561,7 @@ impl QuantType {
             Self::IQ4_NL => 18,
             Self::IQ3_S => 110,
             Self::IQ4_XS => 136,
-            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block => 1,
+            Self::Fp8E4m3 | Self::Fp8E5m2 | Self::Fp8Marlin | Self::Fp8Block | Self::Exl2 | Self::Exl3 => 1,
             Self::Mxfp4 => 17,
             Self::NvFp4 => 36,
             Self::Q4Z32 | Self::Q4ZP32 => 19,

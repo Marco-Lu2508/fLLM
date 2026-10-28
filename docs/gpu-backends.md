@@ -307,7 +307,7 @@ fllm-rs serve --model MODEL.gguf --device cuda   # or --device auto (CUDA is pre
 
 | Operation | Status |
 | --- | --- |
-| `quantized_linear`, `embedding_lookup` | native for `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q2_K Q3_K Q4_K Q5_K Q6_K IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_NL IQ4_XS MXFP4 NVFP4 NF4B64 NF4B128 FP4B64 FP4B128 INT8R` (the last five are the bitsandbytes types, see "bitsandbytes" below); only unusual shapes fall back to a one-time conversion (logged) |
+| `quantized_linear`, `embedding_lookup` | native for `F32 F16 BF16 Q4_0 Q4_1 Q5_0 Q5_1 Q8_0 Q2_K Q3_K Q4_K Q5_K Q6_K IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ3_XXS IQ3_S IQ4_NL IQ4_XS MXFP4 NVFP4 NF4B64 NF4B128 FP4B64 FP4B128 INT8R` (the last five are the bitsandbytes types, see "bitsandbytes" below); only unusual shapes fall back to a one-time conversion (logged). Packed `EXL2` / `EXL3` tensors (sm_60 and later) run through CUDA-core kernels of `cuda/exl.cu` that decode the codes while multiplying (**compiled for sm_75 to sm_120, mirrored on the host, not yet run on a GPU**; run `fllm-rs selftest --quants exl2,exl3`) |
 | `rms_norm`, `layer_norm`, `rope`, `swiglu`, `geglu`, `residual_add` | native |
 | `kv_cache_write`, `attention_paged` | native (f16 and q8_0 cache; CUDA also all other [KV cache formats](#kv-cache-formats), GQA, softcap, window, chunk, sinks, ALiBi; head width up to 512, wider heads fall back to the CPU) |
 | `moe_route`, `moe_expert_gemm`, `sampling_logits` | host fallback |
@@ -356,6 +356,8 @@ device. The experts of a mixture-of-experts layer count as feed-forward weights 
   experts; everything else stays on the CPU.
 
 Q2_K, Q3_K and the IQ family are decoded natively (generic decoders in `iq_decode.cuh`; the list in the `quantized_linear` row above is `NATIVE_KINDS` of `backend/cuda.rs` plus the IQ4 and FP4 formats with their own kernels). Only tensor types outside that list and unusual shapes are converted once on upload (the conversion is logged).
+
+EXL2 / EXL3 tensors are the exception to "native or converted": CUDA reads the packed blob in place (`cuda/exl.cu`, see [exl-formats.md](exl-formats.md)); every other backend (wgpu/Vulkan, Metal, SYCL, TPU, NPU, AMD HIP, NVIDIA below sm_60) does not list the type as supported, so the decoder expands the blob to F16 once, at upload, and prints one notice. That keeps those backends correct but gives them no memory saving.
 
 ### Older GPUs
 

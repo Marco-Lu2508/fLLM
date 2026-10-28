@@ -116,6 +116,8 @@ pub(crate) enum Kind {
     CtInt8,
     /// block-wise FP8 (`weight_scale_inv`), square tiles of this size
     Fp8Block(usize),
+    /// ExLlamaV2: mixed 2..8-bit groups of 32 inputs, random input permutation, 4-bit scale indices
+    Exl2,
 }
 
 /// A linear layer of the model: the entries of the quantized checkpoint and the dequantized F32 values.
@@ -191,6 +193,64 @@ fn quantized_linear(rng: &mut Rng, kind: Kind, prefix: &str, out: usize, inp: us
                 entries.push(Entry { name: format!("{prefix}.weight_shape"), dtype: "I64", shape: vec![2], bytes: shape });
             }
         }
+        Kind::Exl2 => {
+            // written from the EXL2 format definition (q_weight / q_groups / q_scale / q_scale_max / q_invperm), not from the importer
+            const WIDTHS: [usize; 6] = [2, 3, 4, 5, 6, 8];
+            let groups = inp / 32;
+            let bits: Vec<usize> = (0..groups).map(|g| WIDTHS[(g + rng.below(6) as usize) % 6]).collect();
+            let mut start = Vec::new();
+            let mut packed_rows = 0;
+            for b in &bits {
+                start.push(packed_rows);
+                packed_rows += b;
+            }
+            // stored input k multiplies original input perm[k]
+            let mut perm: Vec<usize> = (0..inp).collect();
+            for i in (1..inp).rev() {
+                perm.swap(i, rng.below(i as u64 + 1) as usize);
+            }
+            let mut invperm = vec![0u32; inp];
+            for (k, &p) in perm.iter().enumerate() {
+                invperm[p] = k as u32;
+            }
+            let maxima: Vec<f32> = (0..groups).map(|_| half::f16::from_f32(0.03 + 0.01 * rng.below(5) as f32).to_f32()).collect();
+            let nibbles: Vec<u32> = (0..groups * out).map(|_| rng.below(4) as u32).collect();
+            let mut words = vec![0u32; packed_rows * out];
+            let mut scale_words = vec![0u32; groups * out / 8];
+            let h = |x: f32| half::f16::from_f32(x).to_f32();
+            for o in 0..out {
+                for g in 0..groups {
+                    let s = nibbles[g * out + o];
+                    scale_words[g * (out / 8) + o / 8] |= s << (4 * (o % 8));
+                    let scale = h(((s + 1) * (s + 1)) as f32 * h(maxima[g] / 256.0));
+                    for i in 0..32 {
+                        let code = rng.below(1 << bits[g]) as u32;
+                        let bit = i * bits[g];
+                        words[(start[g] + bit / 32) * out + o] |= code << (bit % 32);
+                        if bit % 32 + bits[g] > 32 {
+                            words[(start[g] + bit / 32 + 1) * out + o] |= code >> (32 - bit % 32);
+                        }
+                        dense[o * inp + perm[g * 32 + i]] = h((code as i32 - (1 << (bits[g] - 1))) as f32 * scale);
+                    }
+                }
+            }
+            let le32 = |v: &[u32]| -> Vec<u8> { v.iter().flat_map(|w| w.to_le_bytes()).collect() };
+            entries.push(Entry { name: format!("{prefix}.q_weight"), dtype: "I32", shape: vec![packed_rows, out], bytes: le32(&words) });
+            entries.push(Entry {
+                name: format!("{prefix}.q_groups"),
+                dtype: "I16",
+                shape: vec![2 * groups],
+                bytes: bits.iter().zip(&start).flat_map(|(&b, &s)| [b as u16, s as u16]).flat_map(u16::to_le_bytes).collect(),
+            });
+            entries.push(Entry { name: format!("{prefix}.q_scale"), dtype: "I32", shape: vec![groups, out / 8], bytes: le32(&scale_words) });
+            entries.push(Entry {
+                name: format!("{prefix}.q_scale_max"),
+                dtype: "F16",
+                shape: vec![groups],
+                bytes: maxima.iter().flat_map(|m| half::f16::from_f32(*m).to_bits().to_le_bytes()).collect(),
+            });
+            entries.push(Entry { name: format!("{prefix}.q_invperm"), dtype: "I32", shape: vec![inp], bytes: le32(&invperm) });
+        }
         Kind::Fp8Block(tile) => {
             let bytes: Vec<u8> = (0..out * inp).map(|_| (rng.below(2) as u8) << 7 | (0x28 + rng.below(16) as u8)).collect();
             let tiles = (out / tile) * (inp / tile);
@@ -220,6 +280,7 @@ fn quantization_config(kind: Kind) -> Value {
         Kind::CtInt8 => json!({"quant_method": "compressed-tensors", "format": "int-quantized", "ignore": ["lm_head"],
             "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 8, "type": "int", "symmetric": true,
             "strategy": "channel"}}}}),
+        Kind::Exl2 => json!({"quant_method": "exl2", "bits": 4.0}),
         Kind::Fp8Block(t) => json!({"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [t, t]}),
     }
 }
@@ -439,6 +500,17 @@ fn compressed_tensors_int8_become_q8_0_and_match_the_reference() {
 #[test]
 fn block_wise_fp8_expands_to_f16_and_matches_the_reference() {
     check(Kind::Fp8Block(32), 17, &[("blk.0.attn_q.weight", 1), ("blk.1.ffn_down.weight", 1)], 5e-3);
+}
+
+#[test]
+fn exl2_checkpoint_stays_packed_and_matches_the_dequantized_reference() {
+    // the conversion keeps the matrices as native EXL2 blobs (0x8000_0030); the engine multiplies them without expanding them
+    check(
+        Kind::Exl2,
+        19,
+        &[("blk.0.attn_q.weight", 0x8000_0030), ("blk.0.attn_k.weight", 0x8000_0030), ("blk.1.ffn_down.weight", 0x8000_0030), ("output.weight", 30)],
+        5e-3,
+    );
 }
 
 #[test]

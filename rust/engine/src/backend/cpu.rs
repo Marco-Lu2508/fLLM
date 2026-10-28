@@ -201,6 +201,8 @@ impl CpuBackend {
             QuantType::Fp4B64,
             QuantType::Fp4B128,
             QuantType::Int8Row,
+            QuantType::Exl2,
+            QuantType::Exl3,
         ];
         Self {
             capabilities: BackendCapabilities {
@@ -280,6 +282,9 @@ impl Backend for CpuBackend {
         cols: usize,
         bias: Option<&[f32]>,
     ) -> Result<DeviceWeight, BackendError> {
+        if crate::cpu_exl::handles(quant_type.to_gguf_type_id()) {
+            crate::cpu_exl::validate(raw_bytes, quant_type.to_gguf_type_id(), rows, cols).map_err(|e| invalid(format!("{name}: {e}")))?;
+        }
         let buffer = self.allocate_buffer(raw_bytes.len())?;
         with_buffer_slice_mut(&buffer, |dst| dst.copy_from_slice(raw_bytes))?;
 
@@ -687,6 +692,12 @@ impl Stream for CpuStream {
         }
         if b_data.as_ref().is_some_and(|b| b.len() < rows) {
             return Err(invalid("linear bias shorter than the output rows"));
+        }
+        let exl_kind = weight.quant_type.to_gguf_type_id();
+        if crate::cpu_exl::handles(exl_kind) {
+            // packed EXL2 / EXL3 blob: decoded group by group / tile by tile while multiplying, never expanded
+            let result = with_buffer_slice(&weight.buffer, |blob| crate::cpu_exl::linear(blob, exl_kind, &x_data, rows, cols, b_data.as_deref()))?;
+            return write_f32(out, &result.map_err(BackendError::DriverError)?, "quantized_linear");
         }
         if weight.quant_type == QuantType::Fp8Marlin {
             let w_bytes = read_bytes(&weight.buffer)?;

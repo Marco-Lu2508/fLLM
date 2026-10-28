@@ -800,6 +800,8 @@ pub fn prepare_checkpoint(
         // bitsandbytes NF4 / FP4 / int8 stay 4-bit / 8-bit blocks of their own type (no value changes)
         let bnb = if preserve { packed.bnb_type().and_then(|id| fllm_gguf_probe::bnb::TYPES.iter().find(|t| t.0 == id)) } else { None };
         let fp8b = preserve && packed.is_fp8b();
+        // EXL2 / EXL3 matrices stay packed (native `EXL2` / `EXL3` blobs, docs/exl-formats.md); `--dtype f16|f32` expands them
+        let exl = if preserve { packed.exl_native() } else { None };
         // (stacked experts have a leading expert dimension: their rows are all rows of all experts)
         let in_features = dims.last().copied().unwrap_or(0) as usize;
         let rows_out = dims[..dims.len().saturating_sub(1)].iter().product::<u64>() as usize;
@@ -809,6 +811,7 @@ pub fn prepare_checkpoint(
             _ if mxfp4 => "MXFP4".to_string(),
             _ if bnb.is_some() => bnb.map_or_else(String::new, |t| t.1.to_ascii_uppercase()),
             _ if fp8b => "FP8B".to_string(),
+            _ if exl.is_some() => exl.map_or_else(String::new, |e| e.0.to_string()),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
             (None, None, true, _) => "FP8M".to_string(),
@@ -832,6 +835,7 @@ pub fn prepare_checkpoint(
                 };
                 (count + num_scales * 2) as u64
             }
+            _ if exl.is_some() => exl.map_or(0, |e| e.1 as u64),
             (Some(g), _, _) => (count / g * (g / 2 + 3)) as u64,
             (None, Some(g), _) => (count / g * (g / 2 + 3) + in_features * 4) as u64,
             (None, None, true) => (count + rows_out * 2) as u64,
@@ -1258,6 +1262,8 @@ fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
         "Q4ZP128" => 0x8000_0016,
         "FP8M" | "F8M" => 0x8000_0020,
         "FP8B" => 0x8000_0021,
+        "EXL2" => 0x8000_0030,
+        "EXL3" => 0x8000_0031,
         _ => return Err(CheckpointError::Invalid(format!("unsupported GGUF tensor dtype {dtype}"))),
     })
 }

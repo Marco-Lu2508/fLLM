@@ -2,6 +2,7 @@
 //! docs/exl-formats.md (ExLlamaV3, Copyright (c) 2025 Turboderp).
 use crate::exl2::{dim, half_round, shape, take, u16_at, u32_at};
 use crate::safetensors::{Payload, Tensor};
+use fllm_gguf_probe::exl::Exl3Layout;
 use half::f16;
 use std::collections::{BTreeSet, HashMap};
 
@@ -163,6 +164,46 @@ impl Exl3 {
         self.elements
     }
 
+    pub(crate) fn blob_layout(&self) -> Result<Exl3Layout, String> {
+        Exl3Layout::new(self.output, self.input, self.bits, self.codebook)
+    }
+
+    pub(crate) fn blob_len(&self) -> Result<usize, String> {
+        Ok(self.blob_layout()?.header.total)
+    }
+
+    /// Write the native blob. `order[i]` is the source output channel written as row `i` (the converter's row reordering);
+    /// the trellis words are copied bit for bit, tile columns first.
+    pub(crate) fn write_blob(&self, w: &mut impl std::io::Write, order: Option<&[usize]>) -> Result<u64, String> {
+        let layout = self.blob_layout()?;
+        let mut out_map: Vec<u32> = (0..self.output as u32).collect();
+        if let Some(order) = order {
+            if order.len() != self.output {
+                return Err("invalid EXL3 row permutation".into());
+            }
+            let mut seen = vec![false; self.output];
+            for (row, &source) in order.iter().enumerate() {
+                if source >= self.output || std::mem::replace(&mut seen[source], true) {
+                    return Err("invalid EXL3 row permutation".into());
+                }
+                out_map[source] = row as u32;
+            }
+        }
+        let half = |v: &[f32]| v.iter().map(|&x| f16::from_f32(x).to_bits()).collect::<Vec<u16>>();
+        let io = |e: std::io::Error| e.to_string();
+        w.write_all(&layout.prefix(&half(&self.left), &half(&self.right), &out_map)).map_err(io)?;
+        let tile_bytes = 32 * self.bits;
+        let (tiles_in, tiles_out) = (self.input / 16, self.output / 16);
+        let data = self.trellis.as_slice();
+        for no in 0..tiles_out {
+            for ki in 0..tiles_in {
+                let at = (ki * tiles_out + no) * tile_bytes;
+                w.write_all(data.get(at..at + tile_bytes).ok_or("EXL3 trellis truncated")?).map_err(io)?;
+            }
+        }
+        Ok(layout.header.total as u64)
+    }
+
     fn tile(&self, input_base: usize, output_base: usize, scratch: &mut [f32]) {
         for k in 0..8 {
             for n in 0..8 {
@@ -310,5 +351,67 @@ mod tests {
             },
         );
         assert!(Exl3::read("w", &mut g).unwrap_err().contains("fractional"));
+    }
+
+    fn lcg(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed >> 33
+    }
+
+    fn random_matrix(bits: usize, codebook: u8, input: usize, output: usize, seed: u64) -> Exl3 {
+        let mut s = seed;
+        let bytes: Vec<u8> = (0..input / 16 * (output / 16) * 32 * bits).map(|_| lcg(&mut s) as u8).collect();
+        let len = bytes.len();
+        let sign = |s: &mut u64| if lcg(s) & 1 == 0 { 1.0 } else { -1.0 };
+        Exl3 {
+            trellis: Payload::Owned(Arc::new(bytes), 0..len),
+            left: (0..input).map(|_| sign(&mut s)).collect(),
+            right: (0..output).map(|_| sign(&mut s)).collect(),
+            bits,
+            codebook,
+            input,
+            output,
+            elements: input * output,
+        }
+    }
+
+    #[test]
+    fn native_codebook_matches_the_importer_for_every_state() {
+        for codebook in 0..3u8 {
+            for state in 0..=u16::MAX {
+                let native = fllm_gguf_probe::exl::codebook_value(state, codebook);
+                let reference = decode_codebook(state, codebook);
+                assert!(native == reference || (native.is_nan() && reference.is_nan()), "codebook {codebook} state {state}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_blob_matches_the_expanded_importer_path_and_row_order() {
+        use fllm_gguf_probe::exl::Exl3View;
+        for (bits, codebook) in [(1usize, 0u8), (2, 0), (3, 2), (4, 1), (5, 0), (6, 1), (8, 2)] {
+            let reader = random_matrix(bits, codebook, 128, 256, 7 + bits as u64);
+            let mut expanded = vec![0.0; reader.element_count()];
+            reader.decode_chunk(0, &mut expanded).unwrap();
+            let mut blob = Vec::new();
+            assert_eq!(reader.write_blob(&mut blob, None).unwrap() as usize, blob.len());
+            assert_eq!(blob.len(), reader.blob_len().unwrap());
+            let native = Exl3View::validate(&blob).unwrap().dequantize();
+            let rms = (expanded.iter().map(|x| x * x).sum::<f32>() / expanded.len() as f32).sqrt();
+            let worst = native.iter().zip(&expanded).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            // the importer rounds to F16 after every transform stage, the native path stays in F32
+            assert!(worst <= 1e-2 * rms.max(1e-6), "bits {bits} codebook {codebook}: worst {worst}, rms {rms}");
+            let order: Vec<usize> = (0..256).map(|i| (i * 37 + 5) % 256).collect();
+            let mut permuted = Vec::new();
+            reader.write_blob(&mut permuted, Some(&order)).unwrap();
+            let pv = Exl3View::validate(&permuted).unwrap().dequantize();
+            for (row, &source) in order.iter().enumerate() {
+                assert_eq!(pv[row * 128..(row + 1) * 128], native[source * 128..(source + 1) * 128]);
+            }
+        }
+        let reader = random_matrix(2, 0, 128, 128, 1);
+        assert!(reader.write_blob(&mut Vec::new(), Some(&[0, 0])).is_err());
+        let dup: Vec<usize> = vec![0; 128];
+        assert!(reader.write_blob(&mut Vec::new(), Some(&dup)).is_err());
     }
 }

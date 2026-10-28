@@ -86,7 +86,7 @@ checkpoints and GPU runs of converted files were **not** tested.
 | NVIDIA ModelOpt NVFP4 (`quant_algo` NVFP4, `hf_quant_config.json` or `quantization_config`) | converted automatically to GGUF type 40 (the layout of llama.cpp, no llama.cpp needed): block scales copied, `weight_scale_2` stored as `<name>.scale` | dense models; excluded modules (for example `lm_head`) stay bf16/f16; FP8 KV-cache scales are ignored; NVFP4 mixture-of-experts checkpoints are expanded to F16 |
 | compressed-tensors int4 / int8 (`pack-quantized`, `int-quantized`, symmetric) | converted automatically: int4 groups of 32/64/128 become `Q4Z`, int8 becomes `Q8_0` | asymmetric, act-order, other bit widths, sparse and compressed-tensors NVFP4 are refused with a message |
 | gpt-oss MXFP4 | repacks the MXFP4 blocks (loaded directly, or written by `convert`) | |
-| EXL2 / EXL3 | expands to F16 (or re-quantizes with `--outtype`), loaded directly or written by `convert` | import only, not native EXL inference ([docs/exl-formats.md](docs/exl-formats.md)) |
+| EXL2 / EXL3 | stays packed: the codes, scales, group widths and permutation (EXL2) or trellis tiles and Hadamard signs (EXL3) are kept in fLLM's `EXL2` / `EXL3` GGUF types, loaded directly or written by `convert`; `--dtype f16` expands | runs natively on the CPU and on NVIDIA GPUs (CUDA-core kernels, **not yet run on a GPU**); other backends expand to F16 at upload; stacked MoE experts and fractional EXL3 are expanded or refused ([docs/exl-formats.md](docs/exl-formats.md)) |
 
 Where the weight formats run natively ([docs/gpu-backends.md](docs/gpu-backends.md),
 [docs/backends.md](docs/backends.md), [docs/cpu-kernels.md](docs/cpu-kernels.md)):
