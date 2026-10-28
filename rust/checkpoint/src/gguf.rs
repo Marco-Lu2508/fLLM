@@ -122,6 +122,8 @@ pub fn write_to(
             "Q4ZP128" => 0x8000_0016,
             "FP8M" | "F8M" => 0x8000_0020,
             "FP8B" | "F8B" => 0x8000_0021,
+            "EXL2" => 0x8000_0030,
+            "EXL3" => 0x8000_0031,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -353,6 +355,14 @@ fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result
     }
     if t.dtype == "FP8B" || t.dtype == "F8B" {
         return write_packed_fp8b(w, t, p);
+    }
+    if t.dtype == "EXL2" || t.dtype == "EXL3" {
+        let wrong = |m: String| io::Error::new(io::ErrorKind::InvalidData, m);
+        let written = p.write_exl_blob(w, t.source_for_output.as_deref()).map_err(wrong)?;
+        if written != t.data_len {
+            return Err(wrong(format!("{} output length mismatch: wrote {written}, expected {}", t.dtype, t.data_len)));
+        }
+        return Ok(written);
     }
     if t.dtype == "NVFP4" {
         return write_packed_rows(w, t, |row, buf| p.encode_nvfp4_row(row, buf));

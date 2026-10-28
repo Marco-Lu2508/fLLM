@@ -1,3 +1,4 @@
+pub mod exl;
 pub mod quant_types;
 use memmap2::{Mmap, MmapOptions};
 use serde::Serialize;
@@ -328,7 +329,13 @@ fn parse(data: &[u8]) -> Result<GgufIndex, String> {
         let absolute = data_offset_u64
             .checked_add(relative_offset)
             .ok_or_else(|| format!("tensor {name:?} data offset overflow"))?;
-        let payload_len = tensor_payload_len(type_id, &dimensions)?;
+        // the native EXL2 / EXL3 blobs carry their own length in the header (it depends on the bit widths of the matrix)
+        let payload_len = if exl::is_exl_type(type_id) {
+            let at = usize::try_from(absolute).map_err(|_| format!("tensor {name:?} offset does not fit usize"))?;
+            exl::payload_len(data.get(at..).unwrap_or(&[]), type_id).map_err(|e| format!("tensor {name:?}: {e}"))?
+        } else {
+            tensor_payload_len(type_id, &dimensions)?
+        };
         let end = absolute
             .checked_add(payload_len)
             .ok_or_else(|| format!("tensor {name:?} payload range overflow"))?;

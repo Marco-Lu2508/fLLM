@@ -551,6 +551,24 @@ impl PackedData {
         }
     }
 
+    /// `(dtype name, blob length)` when this tensor can be stored as a native `EXL2` / `EXL3` blob (not stacked experts).
+    pub fn exl_native(&self) -> Option<(&'static str, usize)> {
+        match self {
+            Self::Exl2(t) => t.blob_len().ok().map(|n| ("EXL2", n)),
+            Self::Exl3(t) => t.blob_len().ok().map(|n| ("EXL3", n)),
+            _ => None,
+        }
+    }
+
+    /// Write the native blob of an EXL2 / EXL3 tensor; `order[i]` is the source row written as row `i`.
+    pub fn write_exl_blob(&self, w: &mut impl std::io::Write, order: Option<&[usize]>) -> Result<u64, String> {
+        match self {
+            Self::Exl2(t) => t.write_blob(w, order),
+            Self::Exl3(t) => t.write_blob(w, order),
+            _ => Err("tensor cannot be stored as a native EXL blob".into()),
+        }
+    }
+
     /// Whether this tensor is in the FP8 Marlin format (W8A16 with per-channel scales).
     pub fn is_fp8m(&self) -> bool {
         matches!(self, Self::Fp8Marlin { .. })

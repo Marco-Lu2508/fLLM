@@ -114,6 +114,8 @@ fn assert_direct_equals_converted(dir: &Path, outtype: OutputDType, expect_type:
 const F16_TYPE: u32 = 1;
 const F32_TYPE: u32 = 0;
 const MXFP4_TYPE: u32 = 39;
+const EXL2_TYPE: u32 = 0x8000_0030;
+const EXL3_TYPE: u32 = 0x8000_0031;
 
 // ---------------------------------------------------------------- MXFP4
 
@@ -312,10 +314,11 @@ fn exl2(rng: &mut Rng, prefix: &str, out: usize, inp: usize) -> Option<Vec<Entry
 #[test]
 fn exl2_checkpoints_load_identically_to_the_converted_file() {
     let cfg = json!({"quant_method": "exl2", "bits": 4.0});
-    for (shards, outtype) in [(1, OutputDType::Preserve), (2, OutputDType::F16)] {
+    // by default the matrices stay packed (native EXL2 blobs); `--dtype f16` expands them to half precision
+    for (shards, outtype, expect) in [(1, OutputDType::Preserve, EXL2_TYPE), (2, OutputDType::Preserve, EXL2_TYPE), (2, OutputDType::F16, F16_TYPE)] {
         let dir = scratch("exl2");
         model(&dir, 51, &[("quantization_config", cfg.clone())], Scope::Linears, shards, exl2);
-        assert_direct_equals_converted(&dir, outtype, F16_TYPE, &format!("exl2, {shards} shards, {outtype:?}"));
+        assert_direct_equals_converted(&dir, outtype, expect, &format!("exl2, {shards} shards, {outtype:?}"));
         let _ = fs::remove_dir_all(dir);
     }
 }
@@ -347,9 +350,13 @@ fn exl3_checkpoints_load_identically_to_the_converted_file() {
     for (bits, codebook, packed_signs, shards) in [(2, 0, false, 1), (4, 1, true, 2), (3, 2, false, 1)] {
         let dir = scratch("exl3");
         model(&dir, 61, &[("quantization_config", cfg.clone())], Scope::Linears, shards, exl3(bits, codebook, packed_signs));
-        assert_direct_equals_converted(&dir, OutputDType::Preserve, F16_TYPE, &format!("exl3 {bits} bits, codebook {codebook}, packed signs {packed_signs}, {shards} shards"));
+        assert_direct_equals_converted(&dir, OutputDType::Preserve, EXL3_TYPE, &format!("exl3 {bits} bits, codebook {codebook}, packed signs {packed_signs}, {shards} shards"));
         let _ = fs::remove_dir_all(dir);
     }
+    let dir = scratch("exl3");
+    model(&dir, 61, &[("quantization_config", cfg)], Scope::Linears, 1, exl3(3, 0, false));
+    assert_direct_equals_converted(&dir, OutputDType::F16, F16_TYPE, "exl3 expanded to f16");
+    let _ = fs::remove_dir_all(dir);
 }
 
 // ---------------------------------------------------------------- PyTorch ZIP weights
