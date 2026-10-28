@@ -137,6 +137,8 @@ enum WorkerCommand {
         sampling: Box<crate::sampling::SamplingParams>,
         constraint: Option<Box<llguidance::Matcher>>,
         images: Box<ImageOverrides>,
+        /// Set for a beam search (`use_beam_search`): the request is run by `submit_beam` instead of the sampler.
+        beam: Option<Box<crate::beam::BeamParams>>,
         output: GenerationTx,
     },
     Embed {
@@ -194,6 +196,10 @@ struct GenerationTx {
 impl GenerationTx {
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
+    }
+    /// Events that fit into the channel right now.
+    fn room(&self) -> usize {
+        self.inner.capacity()
     }
     fn send(&self, event: Result<crate::runtime::TokenEvent, String>) -> Result<(), ()> {
         self.inner.try_send(event).map_err(|error| {
@@ -975,7 +981,43 @@ fn run_worker_loop(
                         }
                     }
                 }
-                if no_events && runtime.active_requests() > 0 && !did_work {
+                // a beam search that failed after it was accepted (the KV pool ran out while forking)
+                for (request_id, error) in runtime.take_failures() {
+                    if let Some(output) = outputs.remove(&request_id) {
+                        let _ = output.send(Err(error));
+                    }
+                }
+                // finished beam searches hand out their hypotheses as fast as the output channel takes them
+                let mut waiting_for_room = false;
+                for request_id in runtime.beam_outbox_requests() {
+                    let Some(output) = outputs.get(&request_id) else {
+                        let _ = runtime.cancel_request(&request_id);
+                        continue;
+                    };
+                    let room = output.room();
+                    if room == 0 {
+                        waiting_for_room = true;
+                        continue;
+                    }
+                    let (mut dropped, mut done) = (false, false);
+                    for event in runtime.take_beam_events(&request_id, room) {
+                        metrics.observability.generated();
+                        done |= event.request_finished;
+                        if output.send(Ok(event)).is_err() {
+                            dropped = true;
+                            break;
+                        }
+                    }
+                    if dropped {
+                        let _ = runtime.cancel_request(&request_id);
+                        outputs.remove(&request_id);
+                    } else if done {
+                        outputs.remove(&request_id);
+                    }
+                }
+                if waiting_for_room {
+                    thread::sleep(std::time::Duration::from_millis(1));
+                } else if no_events && runtime.active_requests() > 0 && !did_work {
                     thread::yield_now();
                 }
             }
@@ -1040,12 +1082,16 @@ fn accept_command(
             sampling,
             constraint,
             images,
+            beam,
             output,
         } => {
             metrics.observability.queue_time(output.submitted.elapsed().as_secs_f64());
             // A panic in model code while a request is set up fails this request only.
             let admitted = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-                let sequence_id = runtime.submit_with_sampling(request_id.clone(), prompt, max_tokens, *sampling)?;
+                let sequence_id = match beam {
+                    Some(beam) => runtime.submit_beam(request_id.clone(), prompt, max_tokens, *sampling, *beam)?,
+                    None => runtime.submit_with_sampling(request_id.clone(), prompt, max_tokens, *sampling)?,
+                };
                 // the salt has to be on the sequence before the first admission computes its prefix chain
                 runtime.set_request_prefix_salt(&request_id, prefix_salt);
                 let attached = runtime
@@ -2545,13 +2591,54 @@ async fn openai_generate(
     if best_of > n && body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
         return api_error(StatusCode::BAD_REQUEST, "best_of cannot be combined with stream");
     }
-    if body.get("use_beam_search").and_then(Value::as_bool).unwrap_or(false) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "use_beam_search needs a step-wise generate API that this server does not expose yet (it generates a whole completion per call):              beam search has to prune between tokens, so it cannot be built on top of one-shot generation without faking it.              Use best_of, which samples several complete candidates and returns the one with the highest cumulative log-probability.",
-        );
+    let use_beam_search = match body.get("use_beam_search") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => return api_error(StatusCode::BAD_REQUEST, "use_beam_search must be a boolean"),
+    };
+    let mut beam_rules: Option<(f64, crate::beam::EarlyStopping)> = None;
+    if use_beam_search {
+        // best_of is the beam width (vLLM), n the number of hypotheses returned
+        if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "use_beam_search cannot be combined with stream: the beams are pruned until the search ends, so no token is final before then",
+            );
+        }
+        if best_of > crate::beam::MAX_BEAMS {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("use_beam_search accepts at most {} beams (best_of, or n when best_of is absent)", crate::beam::MAX_BEAMS),
+            );
+        }
+        if !images.is_empty()
+            || tool_spec.forced_schema.is_some()
+            || native_grammar.is_some()
+            || body.get("response_format").is_some_and(|v| !v.is_null())
+            || body.get("grammar").is_some_and(|v| !v.is_null())
+            || body.get("grammar_type").is_some_and(|v| !v.is_null())
+        {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "use_beam_search cannot be combined with grammar-constrained generation (response_format, grammar, forced tool calls) or images",
+            );
+        }
+        let length_penalty = match body.get("length_penalty") {
+            None | Some(Value::Null) => 1.0,
+            Some(value) => match value.as_f64().filter(|v| v.is_finite()) {
+                Some(value) => value,
+                None => return api_error(StatusCode::BAD_REQUEST, "length_penalty must be a finite number"),
+            },
+        };
+        let early_stopping = match body.get("early_stopping") {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => crate::beam::EarlyStopping::Heuristic,
+            Some(Value::Bool(true)) => crate::beam::EarlyStopping::Always,
+            Some(Value::String(rule)) if rule == "never" => crate::beam::EarlyStopping::Never,
+            Some(_) => return api_error(StatusCode::BAD_REQUEST, "early_stopping must be true, false or \"never\""),
+        };
+        beam_rules = Some((length_penalty, early_stopping));
     }
-    if best_of > 1
+    if best_of > 1 && !use_beam_search
         && (!state.shared_choices
             || !images.is_empty()
             || tool_spec.forced_schema.is_some()
@@ -2609,10 +2696,13 @@ async fn openai_generate(
     {
         return api_error(StatusCode::BAD_REQUEST, &error);
     }
-    sampling.choices = best_of;
+    sampling.choices = if use_beam_search { 1 } else { best_of };
     let min_tokens = sampling.min_tokens;
     let logprobs_requested = sampling.logprobs.is_some();
-    if best_of > n && sampling.logprobs.is_none() {
+    if use_beam_search && logprobs_requested {
+        return api_error(StatusCode::BAD_REQUEST, "logprobs are not available with use_beam_search");
+    }
+    if best_of > n && !use_beam_search && sampling.logprobs.is_none() {
         // the ranking needs the log-probability of every sampled token
         sampling.logprobs = Some(0);
     }
@@ -2730,7 +2820,7 @@ async fn openai_generate(
     let budget_plan = reasoning
         .as_ref()
         .and_then(|spec| spec.budget.map(|budget| (spec.clone(), budget)))
-        .filter(|_| best_of == 1 && constraint.is_none() && images.is_empty());
+        .filter(|_| best_of == 1 && !use_beam_search && constraint.is_none() && images.is_empty());
     let budget_control = budget_plan.map(|(spec, budget)| BudgetControl {
         state: state.clone(),
         request_id: request_id.clone(),
@@ -2741,7 +2831,24 @@ async fn openai_generate(
         machine: crate::thinking::BudgetMachine::new(budget),
         ids: Vec::new(),
     });
-    let rx = match submit_constrained(
+    let beam = beam_rules.map(|(length_penalty, early_stopping)| {
+        let mut params = crate::beam::BeamParams::new(best_of, n);
+        params.length_penalty = length_penalty;
+        params.early_stopping = early_stopping;
+        if stop_strings.iter().any(|stop| !stop.is_empty()) {
+            // a hypothesis ends where its text first contains a stop string, the same rule the reply is cut by afterwards
+            let tokenizer = state.tokenizer.clone();
+            let reasoning = reasoning.clone();
+            let stops = stop_strings.clone();
+            params.stop_check = Some(Arc::new(move |tokens: &[i64]| {
+                let ids: Vec<u32> = tokens.iter().map(|id| *id as u32).collect();
+                decode_chat_text(&tokenizer, &ids, reasoning.as_ref())
+                    .is_ok_and(|text| StopFilter::new(stops.clone()).update(&text, false).matched)
+            }));
+        }
+        params
+    });
+    let rx = match submit_request(
         &state,
         &request_id,
         prompt.clone(),
@@ -2750,6 +2857,7 @@ async fn openai_generate(
         constraint,
         images,
         cache_salt_of(&body),
+        beam,
     ) {
         Ok(rx) => rx,
         Err(response) => return response,
@@ -2866,13 +2974,13 @@ async fn openai_generate(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let mut choice_states = (0..best_of)
+        let mut choice_states = (0..if use_beam_search { n } else { best_of })
             .map(|_| OpenaiChoice::new(&stop_strings))
             .collect::<Vec<_>>();
         while let Some(message) = rx.recv().await {
             let event = match message {
                 Ok(event) => event,
-                Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+                Err(error) => return generation_error(&error),
             };
             let Some(current) = choice_states.get_mut(event.choice_index) else {
                 return api_error(
@@ -2911,7 +3019,11 @@ async fn openai_generate(
                 break;
             }
         }
-        if choice_states.iter().any(|c| !c.done) {
+        if use_beam_search {
+            // fewer than n hypotheses can exist (a narrow vocabulary); the ranks that exist are returned
+            choice_states.retain(|c| c.done);
+        }
+        if choice_states.iter().any(|c| !c.done) || choice_states.is_empty() {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "generation ended before all choices completed",
@@ -2923,7 +3035,7 @@ async fn openai_generate(
             .map(|c| c.cached_tokens)
             .max()
             .unwrap_or(0);
-        if best_of > n {
+        if best_of > n && !use_beam_search {
             // keep the candidates with the highest cumulative log-probability, best first
             choice_states.sort_by(|a, b| b.score.total_cmp(&a.score));
             choice_states.truncate(n);
@@ -3905,6 +4017,22 @@ fn submit_constrained(
     images: ImageOverrides,
     prefix_salt: u64,
 ) -> Result<GenerationRx, Response> {
+    submit_request(state, request_id, prompt, max_tokens, sampling, constraint, images, prefix_salt, None)
+}
+
+/// `submit_constrained`, or a beam search when `beam` is given.
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
+fn submit_request(
+    state: &AppState,
+    request_id: &str,
+    prompt: Vec<i64>,
+    max_tokens: usize,
+    sampling: crate::sampling::SamplingParams,
+    constraint: Option<llguidance::Matcher>,
+    images: ImageOverrides,
+    prefix_salt: u64,
+    beam: Option<crate::beam::BeamParams>,
+) -> Result<GenerationRx, Response> {
     if prompt.is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -3954,6 +4082,7 @@ fn submit_constrained(
             sampling: Box::new(sampling),
             constraint: constraint.map(Box::new),
             images: Box::new(images),
+            beam: beam.map(Box::new),
             output: GenerationTx {
                 inner: tx,
                 error: error.clone(),
@@ -3974,6 +4103,19 @@ fn submit_constrained(
         _permit: permit,
         caller,
     })
+}
+
+/// An error the engine reported for a request it accepted: beam-search refusals are the client's to fix (400) or a matter of
+/// waiting (503); anything else is ours.
+fn generation_error(message: &str) -> Response {
+    let status = if message.starts_with(crate::beam::REFUSED) {
+        StatusCode::BAD_REQUEST
+    } else if message.starts_with(crate::beam::BUSY) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    api_error(status, message)
 }
 
 fn api_error(status: StatusCode, message: &str) -> Response {
