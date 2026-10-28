@@ -31,6 +31,13 @@ Environment: `EMU_WORK` (default `/tmp/fllm-metal-emu`), `DUMP_DIR`, `JOBS`, `MS
 `CXX` (a clang++ with `_Float16` and `__builtin_elementwise_*`; default the ROCm clang of `~/fllm-tools/tools`). The unit tests of `weights/` run in
 the engine crate on Apple targets only (module `backend::metal`); on other hosts they run in a small harness crate that includes the same files.
 
+## MLX affine chunk decoder on its own
+
+`run_dec8_mlx.sh` compiles only `common.metal` (same sed, `mini_stdlib/metal_stdlib` instead of the shim: scalar types, address-space words, `as_type`) with any C++20 compiler
+that has `_Float16` and runs `dec8_mlx.cpp`: random codes of every width (2, 3, 4, 5, 6, 8), groups 32/64/128, f16 and bfloat16 scales are written into the device image (plane 0 words,
+plane 1 `scale | bias << 16`) by a bit-by-bit packer that shares no code with the decoder, and the real `q_fmt_mlx<BITS, GROUP>::dec8` must reproduce `code * scale + bias` bit for bit
+(107520 values, built with `-fsanitize=alignment`). It needs neither the msl-shim nor the vectors of the Rust test; the full kernels of the `mlx*` tags go through `run_emu.sh` as the other formats.
+
 ## Limits of the emulation
 
 It executes the **text** of the kernels with C++ semantics: float and integer behaviour as in C++ (Metal fast-math, denormal flushing, `fma` contraction,

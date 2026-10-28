@@ -61,6 +61,19 @@ fn dec8_q4z(image: &[u8], plane1: usize, group: usize, g: usize, c: usize) -> [f
     o
 }
 
+/// `q_fmt_mlx<BITS, GROUP>::dec8`; `bf16`: bit 63 of the plane-1 offset (`MLX_BF16_FLAG`)
+fn dec8_mlx(image: &[u8], plane1: usize, bits: usize, group: usize, bf16: bool, g: usize, c: usize) -> [f32; 8] {
+    let word = u32::from_le_bytes(image[plane1 + g * 4..plane1 + g * 4 + 4].try_into().unwrap());
+    let convert = |raw: u32| if bf16 { f32::from_bits(raw << 16) } else { f16::from_bits(raw as u16).to_f32() };
+    let (scale, bias) = (convert(word & 0xffff), convert(word >> 16));
+    let start = g * (group * bits / 8) + c * bits;
+    let mut v = 0u64;
+    for (i, &byte) in image[start..start + bits].iter().enumerate() {
+        v |= u64::from(byte) << (8 * i);
+    }
+    std::array::from_fn(|k| ((v >> (bits * k)) & ((1u64 << bits) - 1)) as f32 * scale + bias)
+}
+
 #[test]
 fn every_format_has_consistent_geometry() {
     for quant in supported_formats() {
@@ -155,7 +168,7 @@ fn raw_alignment_assumptions_of_the_kernels_hold() {
 
 #[test]
 fn repacked_planes_decode_to_the_reference() {
-    for quant in [
+    let mut repacked = vec![
         QuantType::Mxfp4,
         QuantType::Q4Z32,
         QuantType::Q4Z64,
@@ -163,7 +176,9 @@ fn repacked_planes_decode_to_the_reference() {
         QuantType::Q4ZP32,
         QuantType::Q4ZP64,
         QuantType::Q4ZP128,
-    ] {
+    ];
+    repacked.extend(supported_formats().into_iter().filter(|q| q.mlx_affine().is_some()));
+    for quant in repacked {
         let info = format_info(quant).unwrap();
         let (rows, cols) = (7usize, info.qk * 3);
         let raw = sample_weights(quant, rows, cols, 77);
@@ -181,6 +196,8 @@ fn repacked_planes_decode_to_the_reference() {
                 for c in 0..info.qk / 8 {
                     let got = if quant == QuantType::Mxfp4 {
                         dec8_mxfp4(&packed.bytes, plane1, r * nb + b, c)
+                    } else if let Some(m) = quant.mlx_affine() {
+                        dec8_mlx(&packed.bytes, plane1, m.bits as usize, m.group as usize, m.bf16, r * nb + b, c)
                     } else {
                         dec8_q4z(&packed.bytes, plane1, info.qk, r * nb + b, c)
                     };
@@ -633,6 +650,59 @@ fn grids_cover_the_output_exactly() {
     }
 }
 
+#[test]
+fn mlx_formats_agree_with_the_type_ids_of_the_checkpoint_and_plan_their_kernels() {
+    let mlx: Vec<QuantType> = supported_formats().into_iter().filter(|q| q.mlx_affine().is_some()).collect();
+    // 6 widths x 3 group sizes x 2 scale formats
+    assert_eq!(mlx.len(), 36);
+    assert_eq!(mlx, QuantType::mlx_affine_common(), "the capability list and the table are the same set");
+    for quant in mlx {
+        let m = quant.mlx_affine().unwrap();
+        let info = format_info(quant).unwrap();
+        assert_eq!(quant.to_gguf_type_id(), m.type_id());
+        assert_eq!(info.tag, format!("mlx{}g{}", m.bits, m.group));
+        assert_eq!(info.repack, super::format::Repack::Mlx);
+        assert_eq!(info.block_bytes, m.group as usize * m.bits as usize / 8);
+        assert_eq!(info.src_block_bytes, m.block_bytes() as usize);
+        // the kernel planes of 7 rows of 3 groups
+        let (rows, cols) = (7usize, m.group as usize * 3);
+        let planes = device_layout(quant, rows, cols).unwrap();
+        assert_eq!(planes.layout, DeviceLayout::Planar);
+        assert_eq!(planes.plane1 % 16, 0);
+        let plan = plan_quantized_linear(quant, rows, cols, 1, &caps()).unwrap();
+        assert_eq!(plan.kernel_name, format!("fllm_q_mv_mlx{}g{}_r4", m.bits, m.group));
+        // bfloat16 scales are flagged in bit 63 of plane 1, which stays the offset in the low bits
+        assert_eq!(plan.params.plane1 & !MLX_BF16_FLAG, planes.plane1);
+        assert_eq!(plan.params.plane1 & MLX_BF16_FLAG != 0, m.bf16);
+        let mm = plan_quantized_linear(quant, rows, cols, 33, &caps()).unwrap();
+        assert_eq!(mm.kernel_name, format!("fllm_q_mm_mlx{}g{}_h", m.bits, m.group));
+        assert!(all_kernel_names().contains(&plan.kernel_name) && all_kernel_names().contains(&mm.kernel_name));
+    }
+}
+
+#[test]
+fn mlx_planes_hold_every_code_scale_and_bias_of_the_file_blocks() {
+    for bits in [2u32, 3, 4, 5, 6, 8] {
+        for (group, bf16) in [(32u32, false), (64, true), (128, false)] {
+            let quant = QuantType::Other(fllm_gguf_probe::MlxAffine { bits, group, bf16 }.type_id());
+            let (rows, cols) = (5usize, group as usize * 2);
+            let raw = sample_weights(quant, rows, cols, 99);
+            let packed = pack_weight(quant, rows, cols, &raw).unwrap();
+            let block = group as usize * bits as usize / 8 + 4;
+            let plane1 = packed.planes.plane1 as usize;
+            for g in 0..rows * cols / group as usize {
+                // the 4 header bytes of the file block are the plane-1 word, the rest are the codes in place
+                assert_eq!(&packed.bytes[plane1 + 4 * g..plane1 + 4 * g + 4], &raw[g * block..g * block + 4], "{bits} bits group {g}");
+                let codes = block - 4;
+                assert_eq!(&packed.bytes[g * codes..(g + 1) * codes], &raw[g * block + 4..(g + 1) * block], "{bits} bits group {g}");
+            }
+            assert!(packed.perm.is_none());
+            assert!(pack_weight(quant, rows, cols, &raw[1..]).is_err(), "wrong length");
+            assert!(pack_weight(quant, rows, group as usize * 2 + 8, &raw).is_err(), "columns are no whole number of groups");
+        }
+    }
+}
+
 // ---- vectors for the CPU emulation of the kernels -----------------------------------------------------------------------------
 
 /// Writes the device images and the reference dequantization of every format to `$FLLM_METAL_DUMP_DIR/<tag>[_variant].bin` (no-op when
@@ -660,14 +730,17 @@ fn dump_vectors_for_the_msl_emulation() {
             let want = reference_weights(quant, &raw, rows, cols).unwrap();
             let mut out = Vec::new();
             let planes = packed.planes;
+            // MLX affine weights with bfloat16 scales carry the flag in bit 63 of plane 1, as the planner puts it into q_params
+            let bf16 = quant.mlx_affine().is_some_and(|m| m.bf16);
+            let plane1 = planes.plane1 | if bf16 { MLX_BF16_FLAG } else { 0 };
             for v in [
                 0x4d54_4c51u32,
                 rows as u32,
                 cols as u32,
                 info.qk as u32,
                 (cols / info.qk) as u32,
-                planes.plane1 as u32,
-                (planes.plane1 >> 32) as u32,
+                plane1 as u32,
+                (plane1 >> 32) as u32,
                 packed.bytes.len() as u32,
                 packed.perm.is_some() as u32,
                 quant.to_gguf_type_id(),
@@ -685,6 +758,8 @@ fn dump_vectors_for_the_msl_emulation() {
             }
             let tag = if info.permuted {
                 format!("{}p", info.tag)
+            } else if bf16 {
+                format!("{}b", info.tag)
             } else {
                 info.tag.to_owned()
             };

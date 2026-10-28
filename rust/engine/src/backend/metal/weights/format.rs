@@ -11,6 +11,8 @@ pub enum Family {
     KQuant,
     /// MXFP4, NVFP4, Q4Z*, floats, FP8
     Fp,
+    /// MLX affine group quantization (the `MLXA` types)
+    Mlx,
 }
 
 impl Family {
@@ -20,6 +22,7 @@ impl Family {
             Family::Legacy => "legacy",
             Family::KQuant => "kquant",
             Family::Fp => "fp",
+            Family::Mlx => "mlx",
         }
     }
 }
@@ -34,6 +37,9 @@ pub enum Repack {
     /// Q4Z / Q4ZP: blocks of `group / 2` code bytes, an f16 scale and a zero-point byte into a plane of codes and a plane of
     /// words `scale | zero << 16`.
     Q4z,
+    /// MLXA (MLX affine): blocks of `[scale: 2][bias: 2][group * bits / 8 code bytes]` into a plane of codes and a plane of words
+    /// `scale | bias << 16` (the 16-bit floats as they are; bfloat16 scales are flagged by bit 63 of the plane-1 offset in `q_params`).
+    Mlx,
 }
 
 /// Geometry of one format.
@@ -93,6 +99,27 @@ const fn q4z(quant: QuantType, tag: &'static str, group: usize, permuted: bool) 
     }
 }
 
+/// GGUF type id of an MLX affine type (`fllm_gguf_probe::MlxAffine::type_id`; a unit test checks that they agree).
+const fn mlx_id(bits: u32, group: u32, bf16: bool) -> u32 {
+    0x8001_0000 | ((bf16 as u32) << 12) | ((group / 32) << 4) | bits
+}
+
+/// An MLX affine format; `tag` names its kernels (`mlx<bits>g<group>`), shared by the f16 and the bf16 variant.
+const fn mlx(bits: u32, group: u32, bf16: bool, tag: &'static str) -> FormatInfo {
+    FormatInfo {
+        quant: QuantType::Other(mlx_id(bits, group, bf16)),
+        tag,
+        family: Family::Mlx,
+        qk: group as usize,
+        block_bytes: (group * bits / 8) as usize,
+        src_qk: group as usize,
+        src_block_bytes: (group * bits / 8 + 4) as usize,
+        repack: Repack::Mlx,
+        permuted: false,
+        row_scales: false,
+    }
+}
+
 const fn dense(quant: QuantType, tag: &'static str, value_bytes: usize) -> FormatInfo {
     raw(quant, tag, Family::Fp, 8, 8 * value_bytes)
 }
@@ -129,6 +156,42 @@ static FORMATS: &[FormatInfo] = &[
     q4z(QuantType::Q4ZP32, "q4z32", 32, true),
     q4z(QuantType::Q4ZP64, "q4z64", 64, true),
     q4z(QuantType::Q4ZP128, "q4z128", 128, true),
+    mlx(2, 32, false, "mlx2g32"),
+    mlx(2, 32, true, "mlx2g32"),
+    mlx(2, 64, false, "mlx2g64"),
+    mlx(2, 64, true, "mlx2g64"),
+    mlx(2, 128, false, "mlx2g128"),
+    mlx(2, 128, true, "mlx2g128"),
+    mlx(3, 32, false, "mlx3g32"),
+    mlx(3, 32, true, "mlx3g32"),
+    mlx(3, 64, false, "mlx3g64"),
+    mlx(3, 64, true, "mlx3g64"),
+    mlx(3, 128, false, "mlx3g128"),
+    mlx(3, 128, true, "mlx3g128"),
+    mlx(4, 32, false, "mlx4g32"),
+    mlx(4, 32, true, "mlx4g32"),
+    mlx(4, 64, false, "mlx4g64"),
+    mlx(4, 64, true, "mlx4g64"),
+    mlx(4, 128, false, "mlx4g128"),
+    mlx(4, 128, true, "mlx4g128"),
+    mlx(5, 32, false, "mlx5g32"),
+    mlx(5, 32, true, "mlx5g32"),
+    mlx(5, 64, false, "mlx5g64"),
+    mlx(5, 64, true, "mlx5g64"),
+    mlx(5, 128, false, "mlx5g128"),
+    mlx(5, 128, true, "mlx5g128"),
+    mlx(6, 32, false, "mlx6g32"),
+    mlx(6, 32, true, "mlx6g32"),
+    mlx(6, 64, false, "mlx6g64"),
+    mlx(6, 64, true, "mlx6g64"),
+    mlx(6, 128, false, "mlx6g128"),
+    mlx(6, 128, true, "mlx6g128"),
+    mlx(8, 32, false, "mlx8g32"),
+    mlx(8, 32, true, "mlx8g32"),
+    mlx(8, 64, false, "mlx8g64"),
+    mlx(8, 64, true, "mlx8g64"),
+    mlx(8, 128, false, "mlx8g128"),
+    mlx(8, 128, true, "mlx8g128"),
     dense(QuantType::F32, "f32", 4),
     dense(QuantType::F16, "f16", 2),
     dense(QuantType::BF16, "bf16", 2),
