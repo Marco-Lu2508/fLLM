@@ -42,6 +42,7 @@ mod os {
     pub fn platform() -> &'static str {
         "none"
     }
+    pub fn request_access() {}
     pub fn available() -> Result<(), String> {
         Err(WHY.to_owned())
     }
@@ -944,6 +945,14 @@ pub(super) fn stop() {
     let mut s = state();
     s.steps = 0;
     s.last_shot = None;
+}
+
+/// The user switched computer use on: ask the system for the permissions it wants (macOS shows its own dialog) and start the
+/// watcher for the panic chord.
+pub(super) fn switched_on() {
+    os::request_access();
+    ensure_watcher();
+    begin();
 }
 
 /// A new task starts: the step count and the remembered screenshot are cleared.

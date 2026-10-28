@@ -109,7 +109,7 @@ pub(in crate::server) async fn route_save(Json(body): Json<Value>) -> Response {
         current["computer_use"] = json!(on);
         if on {
             // a fresh start: nothing of an earlier stop or task is carried over
-            super::agent_computer::begin();
+            super::agent_computer::switched_on();
         }
     }
     for (key, max) in [("computer_rate", 600u64), ("computer_max_steps", 5000u64)] {

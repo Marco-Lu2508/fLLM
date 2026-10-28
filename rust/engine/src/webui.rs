@@ -16,7 +16,7 @@ const STYLE: [&str; 4] = [
     include_str!("webui/theme.css"),
 ];
 /// The script parts, joined in this order inside one function scope.
-const SCRIPT: [&str; 33] = [
+const SCRIPT: [&str; 34] = [
     include_str!("webui/core.js"),
     include_str!("webui/prompts.js"),
     include_str!("webui/markdown.js"),
@@ -29,6 +29,7 @@ const SCRIPT: [&str; 33] = [
     include_str!("webui/tools.js"),
     include_str!("webui/codeprompts.js"),
     include_str!("webui/code.js"),
+    include_str!("webui/computer.js"),
     include_str!("webui/panels.js"),
     include_str!("webui/mcp.js"),
     include_str!("webui/hooks.js"),
@@ -77,7 +78,7 @@ fn dev_page(dir: &std::path::Path) -> Option<String> {
     let mut script = String::new();
     for name in [
         "core.js", "prompts.js", "markdown.js", "sampler.js", "chat.js", "artifacts.js", "rag.js",
-        "projects.js", "research.js", "tools.js", "codeprompts.js", "code.js", "panels.js", "mcp.js",
+        "projects.js", "research.js", "tools.js", "codeprompts.js", "code.js", "computer.js", "panels.js", "mcp.js",
         "hooks.js", "agents.js", "usage.js", "plugins.js", "inbox.js", "runtime.js", "searchengines.js", "skilllibrary.js", "providers.js", "skills.js", "sessions.js", "npu.js", "models.js", "engine.js", "listeners-panels.js",
         "desktop.js", "voice.js", "widgets.js", "boot.js",
     ] {

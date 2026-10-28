@@ -211,3 +211,19 @@
     .check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
     .tool-check h5 { margin: 8px 0 2px; font-size: 12px; color: var(--muted-foreground); }
     .diff-ctx { color: var(--muted-foreground); }
+    /* computer use: the always-visible banner with the STOP button, and the screenshot cards with the marker of the action */
+    .cu-banner { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--destructive); color: #fff; font-size: 13px; line-height: 1.4; border-bottom: 2px solid rgba(0, 0, 0, 0.25); }
+    .cu-banner.is-turbo { background: repeating-linear-gradient(135deg, var(--destructive), var(--destructive) 14px, #8c1510 14px, #8c1510 28px); }
+    .cu-banner .cu-text { flex: 1; min-width: 0; }
+    .cu-banner .cu-keys { display: block; font-size: 11px; opacity: 0.9; }
+    .cu-banner .cu-dot { width: 12px; height: 12px; border-radius: 50%; background: #fff; flex: none; animation: cu-pulse 1.6s ease-in-out infinite; }
+    .cu-banner .cu-stop { flex: none; min-width: 96px; padding: 10px 22px; font-size: 16px; font-weight: 800; letter-spacing: 0.06em; background: #fff; color: var(--destructive); border: 0; border-radius: 8px; cursor: pointer; }
+    .cu-banner .cu-stop:hover { background: #ffe9e7; }
+    .cu-banner .cu-stop:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+    @keyframes cu-pulse { 50% { opacity: 0.35; } }
+    @media (prefers-reduced-motion: reduce) { .cu-banner .cu-dot { animation: none; } }
+    .cu-shot { position: relative; display: inline-block; max-width: 100%; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; line-height: 0; }
+    .cu-shot img { display: block; max-width: 100%; max-height: 380px; width: auto; height: auto; }
+    .cu-shot .cu-mark { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+    .cu-gone { font-size: 12px; color: var(--muted-foreground); padding: 4px 0; }
+    .perm-computer { border-color: var(--destructive); }

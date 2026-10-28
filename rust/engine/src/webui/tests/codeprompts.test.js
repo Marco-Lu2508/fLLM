@@ -97,6 +97,16 @@ test('instructions and memory are capped and labelled', () => {
   assert.ok(p.indexOf('Instructions of this project') > p.indexOf('Safety') && p.indexOf('Memory (facts') > p.indexOf('Instructions of this project'));
 });
 
+test('the computer use rules are in the prompt only when the tools exist and the agent can act', () => {
+  const withTools = new Set([...ALL_TOOLS, 'computer_screenshot', 'computer_click']);
+  const full = P.buildSystemPrompt({ agent: 'build', tier: 'full', family: 'generic', tools: withTools });
+  assert.ok(full.includes('Computer use (screen, mouse, keyboard)') && full.includes('ask_user') && full.includes('Take a screenshot first'));
+  const compact = P.buildSystemPrompt({ agent: 'build', tier: 'compact', family: 'generic', tools: withTools });
+  assert.ok(compact.includes('computer_screenshot shows the screen') && !compact.includes('Computer use (screen, mouse, keyboard)'));
+  assert.ok(!P.buildSystemPrompt({ agent: 'build', tier: 'full', family: 'generic', tools: ALL_TOOLS }).includes('computer_'), 'off by default: no word about it');
+  assert.ok(!P.buildSystemPrompt({ agent: 'plan', tier: 'full', family: 'generic', tools: withTools }).includes('computer_click'), 'the plan agent cannot act');
+});
+
 test('sub-agent prompts: explore reads only, general may change files', () => {
   const args = { description: 'find the parser', prompt: 'Where is the parser?' };
   const e = P.subAgentPrompt(args, 'explore');

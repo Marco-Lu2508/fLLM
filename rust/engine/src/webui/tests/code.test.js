@@ -185,6 +185,38 @@ test('permission modes: defaults per agent, user table, auto-edit, rules', () =>
   assert.strictEqual(L.modeFor({ build: { edit: 'bogus' } }, 'build', 'edit', false), 'ask');
 });
 
+test('computer use: operating the machine is asked every time, only looking can be allowed, deny wins, plan never', () => {
+  const none = { allow: [], deny: [] };
+  const decide = (extra) => L.decidePermission({ rules: none, modes: {}, agent: 'build', autoEdit: false, category: 'computer', subject: 'computer_click 10,20', ...extra });
+  const operating = ['computer_click 10,20', 'computer_move 1,2', 'computer_drag 1,2 -> 3,4', 'computer_type "hello"', 'computer_key ctrl+s', 'computer_scroll 5,5 dx=0 dy=3'];
+  const looking = ['computer_screenshot', 'computer_cursor', 'computer_displays', 'computer_wait 500'];
+  for (const subject of operating) {
+    assert.strictEqual(decide({ subject }), 'ask', `${subject}: default asks`);
+    assert.strictEqual(decide({ subject, remembered: true }), 'ask', `${subject}: "always" never covers it`);
+    assert.strictEqual(decide({ subject, modes: { build: { computer: 'allow' } } }), 'ask', `${subject}: a mode of allow does not lift the question`);
+    assert.strictEqual(decide({ subject, rules: { allow: L.parseRules('computer: *'), deny: [] } }), 'ask', `${subject}: an allow rule does not lift the question`);
+    assert.strictEqual(decide({ subject, rules: { allow: L.parseRules('*: *'), deny: [] } }), 'ask', `${subject}: not even a wildcard allow rule`);
+    assert.strictEqual(decide({ subject, agent: 'plan' }), 'deny', `${subject}: plan mode never`);
+    assert.strictEqual(decide({ subject, modes: { build: { computer: 'deny' } } }), 'deny');
+    assert.strictEqual(decide({ subject, rules: { allow: [], deny: L.parseRules('computer: computer_*') } }), 'deny', `${subject}: a deny rule wins`);
+  }
+  for (const subject of looking) {
+    assert.strictEqual(decide({ subject }), 'ask', `${subject}: default asks`);
+    assert.strictEqual(decide({ subject, remembered: true }), 'allow', `${subject}: allowed for the session after "Always"`);
+    assert.strictEqual(decide({ subject, modes: { build: { computer: 'allow' } } }), 'allow');
+    assert.strictEqual(decide({ subject, agent: 'plan', remembered: true }), 'deny', `${subject}: plan mode never`);
+    assert.strictEqual(decide({ subject, remembered: true, rules: { allow: [], deny: L.parseRules('computer: computer_screenshot*') } }), subject.startsWith('computer_screenshot') ? 'deny' : 'allow');
+  }
+  // specific deny rules: a click may be forbidden while typing is not
+  const rules = { allow: [], deny: L.parseRules('computer: computer_click*') };
+  assert.strictEqual(decide({ subject: 'computer_click 1,1', rules }), 'deny');
+  assert.strictEqual(decide({ subject: 'computer_type "x"', rules }), 'ask');
+  // the category is known to the rules and to the mode table
+  assert.deepStrictEqual(L.parseRules('computer: computer_key ctrl+s').map((r) => r.category), ['computer']);
+  assert.strictEqual(L.modeFor({}, 'build', 'computer', false), 'ask');
+  assert.strictEqual(L.modeFor({}, 'plan', 'computer', false), 'deny');
+});
+
 test('patchPaths lists the files of a unified diff', () => {
   const p = '--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+z\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-q\n';
   assert.deepStrictEqual(L.patchPaths(p), ['src/a.rs', 'new.txt', 'gone.txt']);

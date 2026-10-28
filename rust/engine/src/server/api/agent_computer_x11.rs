@@ -359,6 +359,9 @@ fn with_conn<T>(f: impl FnOnce(&mut Conn) -> Result<T, String>) -> Result<T, Str
 
 // ---- the platform interface -----------------------------------------------------------------------
 
+/// Nothing to ask for on X11.
+pub fn request_access() {}
+
 pub fn available() -> Result<(), String> {
     with_conn(|_| Ok(()))
 }

@@ -58,6 +58,18 @@
       '7. Do not delete files, push, or send data elsewhere unless asked. Keep answers short, in the user\'s language.',
     ];
 
+    // ---- computer use (only added when the user switched it on and the tools exist) ----
+    const COMPUTER_FULL = [
+      'Computer use (screen, mouse, keyboard)',
+      '- You can look at the screen with computer_screenshot and operate programs with computer_click, computer_type, computer_key, computer_scroll, computer_drag and computer_move. Use them only for programs that have no command line, no API and are not a web page; for files and commands use the other tools (and the browser tool for web pages if you have one).',
+      '- Take a screenshot first, and again after every action that may have changed the screen. Coordinates are pixels of your last screenshot. Make one action at a time and check its result before the next; use computer_wait when a program is still loading.',
+      '- Click a field before you type into it. Use keyboard shortcuts where you are sure of them. If the screen is not what you expected twice in a row, stop and tell the user instead of clicking around.',
+      '- The user watches every action, approves each one and can stop you at any time. Before anything with real consequences (payments, sending messages, deleting data, changing system settings, entering a password) use ask_user. Never type a password or secret you were not given for this task, and never copy secrets from the screen into your answers.',
+    ];
+    const COMPUTER_COMPACT = [
+      'Computer use: computer_screenshot shows the screen; computer_click / computer_type / computer_key / computer_scroll operate it. Take a screenshot first and after every action; coordinates are pixels of your last screenshot; one action at a time. Only for programs without API or command line. Ask with ask_user before payments, sending, deleting or passwords. If the screen is not as expected twice, stop and tell the user.',
+    ];
+
     // ---- plan agent ----
     const PLAN_AGENT = [
       'PLAN MODE: you may only read and search. You must not change files, run commands that change anything, or call tools that write. Investigate the code that matters, then answer with a plan and stop.',
@@ -197,6 +209,7 @@
           ? 'Memory: when you learn a lasting fact (user preference, project convention, a command that works), save it with the memory tool. Do not save secrets or task details.'
           : 'Memory: you have a memory tool. Save durable facts as short entries: the user\'s preferences, conventions of this project, commands that work, mistakes to avoid. Check the list first so you do not duplicate; update or remove entries that became wrong. Never save secrets, and do not save details that only matter for the current task.');
       }
+      if (tools.has('computer_screenshot') && opts.agent !== 'plan') out.push('', ...(tier === 'compact' ? COMPUTER_COMPACT : COMPUTER_FULL));
       out.push('', ...FAMILY_NOTES[family]);
       if (opts.env) out.push('', opts.env);
       const instructions = instructionsBlock(opts.files, tier === 'compact' ? 2500 : 9000);

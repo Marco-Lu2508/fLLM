@@ -106,8 +106,6 @@ pub fn platform() -> &'static str {
 
 fn screen_permission() -> Result<(), String> {
     if optional_bool_fn(b"CGPreflightScreenCaptureAccess\0") == Some(false) {
-        // asking once makes macOS show its own dialog and add fLLM to the list in System Settings
-        let _ = optional_bool_fn(b"CGRequestScreenCaptureAccess\0");
         return Err("macOS has not allowed this app to record the screen. Open System Settings > Privacy & Security > Screen Recording, switch fLLM on (or the terminal that started the server), then restart the app".to_owned());
     }
     Ok(())
@@ -119,6 +117,13 @@ fn input_permission() -> Result<(), String> {
         Ok(())
     } else {
         Err("macOS has not allowed this app to control the computer. Open System Settings > Privacy & Security > Accessibility, switch fLLM on (or the terminal that started the server), then restart the app".to_owned())
+    }
+}
+
+/// Called when the user switches computer use on: asking makes macOS show its own dialog and list fLLM in System Settings.
+pub fn request_access() {
+    if optional_bool_fn(b"CGPreflightScreenCaptureAccess\0") == Some(false) {
+        let _ = optional_bool_fn(b"CGRequestScreenCaptureAccess\0");
     }
 }
 

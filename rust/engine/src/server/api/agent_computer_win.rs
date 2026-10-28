@@ -39,6 +39,9 @@ fn dpi_aware() {
     });
 }
 
+/// Nothing to ask for on Windows.
+pub fn request_access() {}
+
 pub fn available() -> Result<(), String> {
     dpi_aware();
     // SAFETY: GetDC(NULL) is the device context of the whole screen; it is released right away.

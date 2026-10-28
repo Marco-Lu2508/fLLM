@@ -787,6 +787,7 @@
       code.sandboxAvailable = Boolean(data.sandbox_available);
       codeNotice(`Runtime: sandbox ${code.sandbox}${code.turbo ? ' · turbo on (no questions)' : ''}`);
       renderCode();
+      refreshComputer();
     };
 
     /** Everything that belongs to the opened folder: instructions, tools, commands, rules, last session. */
@@ -970,6 +971,8 @@
       const c = { ...i };
       if (typeof c.output === 'string' && c.output.length > 20000) c.output = `${c.output.slice(0, 20000)}\n... [cut]`;
       if (c.children) c.children = clipForSave(c.children);
+      // screenshots are never written to the browser storage: they are large, and they show the screen
+      if (c.image || c.shot) { delete c.image; delete c.shot; c.gone = true; }
       return c;
     });
     const sessionTitleNow = () => code.title || heuristicTitle(code.messages);
@@ -994,7 +997,7 @@
       const all = readSessions();
       const mine = (all[code.workspace.root] || []).filter((s) => s.id !== code.sessionId);
       const view = clipForSave(code.view.filter((i) => !(i.kind === 'notice' && i.choices)));
-      mine.unshift({ id: code.sessionId, title: sessionTitleNow(), titleLocked: code.titleLocked, time: Date.now(), messages: code.messages, view, todos: code.todos, used: code.used });
+      mine.unshift({ id: code.sessionId, title: sessionTitleNow(), titleLocked: code.titleLocked, time: Date.now(), messages: withoutImages(code.messages), view, todos: code.todos, used: code.used });
       all[code.workspace.root] = mine.slice(0, MAX_SESSIONS);
       writeSessions(all);
     }
@@ -1302,7 +1305,7 @@
       return [item.name, String(first).slice(0, 80)];
     };
 
-    const defaultOpen = (item) => item.status === 'pending' || EDIT_TOOLS.has(item.name) || item.name === 'ask_user'
+    const defaultOpen = (item) => item.status === 'pending' || EDIT_TOOLS.has(item.name) || (item.name.startsWith('computer_') && Boolean(item.image || item.shot)) || item.name === 'ask_user'
       || (item.name === 'bash' && item.output && item.status === 'error') || (item.status === 'running' && item.name === 'bash') || (isTask(item.name) && item.status === 'running') || Boolean(item.check);
 
     function toolHtml(item) {
@@ -1310,6 +1313,7 @@
       let body = '';
       if (item.name === 'bash') body += `<pre class="tool-cmd">$ ${escapeHtml(item.args?.command || '')}</pre>`;
       body += diffHtml(item);
+      if (item.name.startsWith('computer_')) body += computerBodyHtml(item);
       if (item.name === 'todo_write' && Array.isArray(item.args?.todos)) body += todoListHtml(item.args.todos);
       else if (isTask(item.name)) {
         body += `<pre class="tool-cmd sub-prompt">${escapeHtml(String(item.args?.prompt || '').slice(0, 1500))}</pre>`;
@@ -1568,7 +1572,7 @@
     function updateCodeMeter() {
       setMeter('codeCtxFill', 'codeCtxText', code.used || codeEstimate(), ctxMax());
     }
-    const estimateMessages = (messages) => messages.reduce((s, m) => s + estimateTokens(m.content) + estimateTokens(JSON.stringify(m.tool_calls || '')) + 6, 0);
+    const estimateMessages = (messages) => messages.reduce((s, m) => s + estimateTokens(m.content) + estimateTokens(JSON.stringify(m.tool_calls || '')) + 6 + (Array.isArray(m.images) ? m.images.length * 1200 : 0), 0);
     // system prompt + tool list + messages, scaled by how far the last estimate was off from the server's own count
     const codeEstimate = () => Math.round((estimateTokens(codeSystemPrompt()) + estimateTokens(JSON.stringify(toolList())) + estimateMessages(code.messages)) * code.calib);
 
@@ -1675,7 +1679,7 @@
       const p = getSampler();
       const body = {
         model: ctx.model || state.selectedModel || state.status?.model?.name || 'tiny',
-        messages: [{ role: 'system', content: ctx.system }, ...ctx.messages],
+        messages: [{ role: 'system', content: ctx.system }, ...toWireMessages(ctx.messages)],
         stream: true, stream_options: { include_usage: true },
         temperature: Math.min(p.temperature, 0.4), top_p: 0.9,
       };
@@ -1802,7 +1806,7 @@
     }
 
     const isTask = (name) => name === 'task' || name === 'spawn_agent'; // spawn_agent: the name in older sessions
-    const NO_LOOP_GUARD = new Set(['bash_output', 'todo_read', 'todo_write', 'ask_user', 'task', 'spawn_agent', 'memory']);
+    const NO_LOOP_GUARD = new Set(['bash_output', 'todo_read', 'todo_write', 'ask_user', 'task', 'spawn_agent', 'memory', 'computer_screenshot', 'computer_wait', 'computer_cursor', 'computer_displays']);
     const CHECKED_EXTENSIONS = new Set(['py', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'rs', 'go', 'json']);
 
     /** The first problems of a quick check of the files an edit changed (setting "check my edits automatically"). */
@@ -1831,6 +1835,7 @@
       if (args === null) return finish('error', 'The arguments are not valid JSON.', 'Error: the arguments were not valid JSON. Call the tool again with a valid JSON object.');
       if (!entry) return finish('error', `Unknown tool ${call.name}`, `Error: unknown tool '${call.name}'. Available tools: ${[...code.registry.keys()].join(', ')}.`);
       if (ctx.depth > 0 && entry.source === 'client') return finish('denied', 'Not available to sub-agents.', `Denied: ${call.name} is not available to a sub-agent. Do the work yourself and put the answer in your report.`);
+      if (entry.permission === 'computer' && (ctx.depth > 0 || ctx.readOnly)) return finish('denied', 'Not available to sub-agents.', 'Denied: a sub-agent may not use the screen, mouse or keyboard. Do that work yourself.');
       if (ctx.readOnly && !readOnlyTool(entry)) return finish('denied', 'This sub-agent is read-only.', 'Denied: this sub-agent is read-only. Describe the change in your report instead.');
       if (code.perm === 'plan' && !readOnlyTool(entry) && entry.source !== 'client') return finish('denied', 'Plan mode only allows reading.', 'Denied: plan mode only allows reading. Describe the change in your plan instead.');
 
@@ -1873,10 +1878,20 @@
         }
       }
       if (decision === 'deny') return finish('denied', 'Blocked by a permission rule.', 'Denied: a permission rule of the user blocks this action. Do not try it again; choose another way or ask the user.');
+      // computer use: the card shows what the model saw last with a marker where the action goes, before and after the question
+      if (entry.permission === 'computer') {
+        const early = computerPrepare(item);
+        if (early) return finish('error', early, `Error: ${early}`);
+        computerActivity(item, decision === 'ask');
+      }
       if (decision === 'ask') {
         paintItem(item);
         const verdict = await askPermission(item);
-        if (verdict === 'deny' || ctx.isStopped()) return finish('denied', ctx.isStopped() ? 'Stopped.' : 'You denied this.', 'The user denied this action. Do not try it again unchanged; ask what they want instead.');
+        if (verdict === 'deny' || ctx.isStopped()) {
+          if (entry.permission === 'computer') { computer.busy = ''; renderComputerBanner(); }
+          return finish('denied', ctx.isStopped() ? 'Stopped.' : 'You denied this.', 'The user denied this action. Do not try it again unchanged; ask what they want instead.');
+        }
+        if (entry.permission === 'computer') computerActivity(item, false);
       }
       item.status = 'running';
       paintItem(item);
@@ -1887,6 +1902,7 @@
         item.status = r.ok ? 'ok' : 'error';
         item.output = r.ok ? r.output : r.error;
         let reply = r.ok ? r.output : `Error: ${r.error}`;
+        if (entry.permission === 'computer') computerDone(item, r, ctx);
         if (r.ok && EDIT_TOOLS.has(call.name)) {
           for (const p of (call.name === 'patch' ? patchPaths(args.patch) : [args.path]).filter(Boolean)) code.changed.set(p, (code.changed.get(p) || 0) + 1);
           renderCodeSide();
@@ -1986,7 +2002,7 @@
 
     async function summarise(messages, system, tools, signal, focus) {
       const ask = 'Summarise the conversation above so that work can continue from your summary alone. Include: what the user wants, decisions made, files read or changed (paths) and what changed, commands run and their results, open errors, and the next steps. Keep it under 500 words. Do not call tools.' + (focus ? ` Pay special attention to: ${focus}` : '');
-      const body = { model: state.selectedModel || state.status?.model?.name || 'tiny', messages: [{ role: 'system', content: system }, ...messages, { role: 'user', content: ask }], stream: false, temperature: 0.2 };
+      const body = { model: state.selectedModel || state.status?.model?.name || 'tiny', messages: [{ role: 'system', content: system }, ...withoutImages(messages), { role: 'user', content: ask }], stream: false, temperature: 0.2 };
       const room = computeMaxTokens(ctxMax(), Math.round((estimateTokens(system) + estimateTokens(JSON.stringify(tools)) + estimateMessages(body.messages.slice(1))) * code.calib), 1200);
       if (!room) throw new Error(TOO_SMALL);
       body.max_tokens = room;
@@ -2082,6 +2098,7 @@
           }
         }
         calls.forEach((c, k) => ctx.messages.push({ role: 'tool', tool_call_id: c.id, content: replies[k] ?? 'Stopped before this call ran.' }));
+        computerAttachImages(ctx);
         if (!ctx.child) { saveCodeSession(); if (step === ctx.maxSteps - 1) codeNotice(`Stopped after ${ctx.maxSteps} steps. Write "continue" if the agent should go on.`); }
       }
       return last ? splitReasoning(last.content || '').answer.trim() : '';
@@ -2099,6 +2116,7 @@
       code.reverted = null;
       const expanded = await expandMentions(takePending() + userText);
       await refreshChanges();
+      await computerBegin();
       const mark = code.changes ? Math.max(0, ...code.changes.map((c) => c.id)) : 0;
       // the new message is appended to a conversation that is valid for every template; its index is kept for fork and revert
       const messages = repairMessages([...code.messages, { role: 'user', content: expanded }]).messages;
