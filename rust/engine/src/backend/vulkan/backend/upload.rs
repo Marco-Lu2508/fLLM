@@ -107,10 +107,12 @@ fn expand<'a>(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize
             *v *= scale;
         }
     }
-    let float_source = matches!(
-        quant,
-        QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4
-    );
+    // (bitsandbytes NF4 / FP4 / int8 are 4 and 8-bit grids of their own: expanded to F16, never re-quantized)
+    let float_source = quant.is_bnb()
+        || matches!(
+            quant,
+            QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4
+        );
     if cols.is_multiple_of(256) && !float_source {
         use rayon::prelude::*;
         let row_bytes = cols / 256 * 176;

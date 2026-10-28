@@ -351,7 +351,7 @@ pub fn prepare_checkpoint(
         })
     })?;
     // formats without a compact fLLM type are expanded when written; say what that costs
-    let expanded: u64 = packed_groups.iter().filter(|g| matches!(g.1, PackedData::Dyn(_))).map(|g| g.1.element_count() as u64).sum();
+    let expanded: u64 = packed_groups.iter().filter(|g| g.1.is_expanded() && (!matches!(g.1, PackedData::Bnb4(_) | PackedData::Bnb8(_)) || options.output_dtype == OutputDType::Preserve)).map(|g| g.1.element_count() as u64).sum();
     if expanded > 0 {
         let width = if options.output_dtype == OutputDType::F32 { 4.0 } else { 2.0 };
         eprintln!(
@@ -797,6 +797,8 @@ pub fn prepare_checkpoint(
             });
         let q8_0 = preserve && packed.sym_int().is_some_and(|t| t.q8_0_ok());
         let mxfp4 = preserve && packed.mxfp4().is_some();
+        // bitsandbytes NF4 / FP4 / int8 stay 4-bit / 8-bit blocks of their own type (no value changes)
+        let bnb = if preserve { packed.bnb_type().and_then(|id| fllm_gguf_probe::bnb::TYPES.iter().find(|t| t.0 == id)) } else { None };
         let fp8b = preserve && packed.is_fp8b();
         // (stacked experts have a leading expert dimension: their rows are all rows of all experts)
         let in_features = dims.last().copied().unwrap_or(0) as usize;
@@ -805,6 +807,7 @@ pub fn prepare_checkpoint(
             _ if nvfp4 => "NVFP4".to_string(),
             _ if q8_0 => "Q8_0".to_string(),
             _ if mxfp4 => "MXFP4".to_string(),
+            _ if bnb.is_some() => bnb.map_or_else(String::new, |t| t.1.to_ascii_uppercase()),
             _ if fp8b => "FP8B".to_string(),
             (Some(g), _, _, _) => format!("Q4Z{g}"),
             (None, Some(g), _, _) => format!("Q4ZP{g}"),
@@ -816,6 +819,7 @@ pub fn prepare_checkpoint(
             _ if nvfp4 => (rows_out * (in_features / 64 * 36)) as u64,
             _ if q8_0 => (rows_out * (in_features / 32 * 34)) as u64,
             _ if mxfp4 => (rows_out * (in_features / 32 * 17)) as u64,
+            _ if bnb.is_some() => bnb.map_or(0, |t| rows_out * (in_features / t.2 * t.3)) as u64,
             _ if fp8b => {
                 let num_scales = match &packed {
                     PackedData::Fp8Block(b) => b.scales().len(),
@@ -1245,6 +1249,7 @@ fn gguf_type_id(dtype: &str) -> Result<u32, CheckpointError> {
         "BF16" => 30,
         "MXFP4" => 39,
         "NVFP4" => 40,
+        other if fllm_gguf_probe::bnb::type_id_by_name(other).is_some() => fllm_gguf_probe::bnb::type_id_by_name(other).unwrap_or(0),
         "Q4Z32" => 0x8000_0010,
         "Q4Z64" => 0x8000_0011,
         "Q4Z128" => 0x8000_0012,

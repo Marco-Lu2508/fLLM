@@ -1,3 +1,4 @@
+pub mod bnb;
 pub mod quant_types;
 use memmap2::{Mmap, MmapOptions};
 use serde::Serialize;
@@ -208,6 +209,9 @@ fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
     }
     if fp8m_type(type_id) || fp8b_type(type_id) {
         return Some((1, 1));
+    }
+    if let Some(l) = bnb::layout(type_id) {
+        return Some((l.block as u64, l.bytes as u64));
     }
     quant_types::by_id(type_id).map(|ty| (ty.block_elements as u64, ty.bytes_per_block as u64))
 }

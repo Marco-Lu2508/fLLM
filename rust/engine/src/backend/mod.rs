@@ -368,6 +368,16 @@ pub enum QuantType {
     Q4_K_Marlin,
     Fp8Marlin,
     Fp8Block,
+    /// bitsandbytes NF4 (16-entry NormalFloat code book), 64 values per block: `[f32 absmax][32 code bytes]` (`fllm_gguf_probe::bnb`).
+    Nf4B64,
+    /// NF4, 128 values per block: `[f32 absmax][64 code bytes]`.
+    Nf4B128,
+    /// bitsandbytes FP4 (16-entry floating-point code book), 64 values per block.
+    Fp4B64,
+    /// FP4, 128 values per block.
+    Fp4B128,
+    /// LLM.int8() weights, 64 values per block: `[f32 row scale][64 i8]`.
+    Int8Row,
     Other(u32),
 }
 
@@ -411,6 +421,11 @@ impl QuantType {
             0x8000_0016 => Self::Q4ZP128,
             0x8000_0020 => Self::Fp8Marlin,
             0x8000_0021 => Self::Fp8Block,
+            fllm_gguf_probe::bnb::NF4_B64 => Self::Nf4B64,
+            fllm_gguf_probe::bnb::NF4_B128 => Self::Nf4B128,
+            fllm_gguf_probe::bnb::FP4_B64 => Self::Fp4B64,
+            fllm_gguf_probe::bnb::FP4_B128 => Self::Fp4B128,
+            fllm_gguf_probe::bnb::INT8_ROW => Self::Int8Row,
             other => Self::Other(other),
         }
     }
@@ -455,6 +470,11 @@ impl QuantType {
             Self::Nvfp4Marlin => 0x8000_0013,
             Self::Fp8Marlin => 0x8000_0020,
             Self::Fp8Block => 0x8000_0021,
+            Self::Nf4B64 => fllm_gguf_probe::bnb::NF4_B64,
+            Self::Nf4B128 => fllm_gguf_probe::bnb::NF4_B128,
+            Self::Fp4B64 => fllm_gguf_probe::bnb::FP4_B64,
+            Self::Fp4B128 => fllm_gguf_probe::bnb::FP4_B128,
+            Self::Int8Row => fllm_gguf_probe::bnb::INT8_ROW,
             Self::Other(other) => *other,
         }
     }
@@ -472,6 +492,15 @@ impl QuantType {
 
     pub fn is_q4zp(&self) -> bool {
         matches!(self, Self::Q4ZP32 | Self::Q4ZP64 | Self::Q4ZP128)
+    }
+
+    /// Geometry of the bitsandbytes types (`Nf4B64` ... `Int8Row`).
+    pub fn bnb_layout(&self) -> Option<fllm_gguf_probe::bnb::Layout> {
+        fllm_gguf_probe::bnb::layout(self.to_gguf_type_id())
+    }
+
+    pub fn is_bnb(&self) -> bool {
+        self.bnb_layout().is_some()
     }
 
     /// Block size: number of values represented by one quant block.
@@ -492,6 +521,8 @@ impl QuantType {
             Self::Q4Z64 | Self::Q4ZP64 => 64,
             Self::Q4Z128 | Self::Q4ZP128 => 128,
             Self::Nvfp4Marlin => 16,
+            Self::Nf4B64 | Self::Fp4B64 | Self::Int8Row => 64,
+            Self::Nf4B128 | Self::Fp4B128 => 128,
             Self::Other(_) => 32,
         }
     }
@@ -528,6 +559,8 @@ impl QuantType {
             Self::Q4Z32 | Self::Q4ZP32 => 19,
             Self::Q4Z64 | Self::Q4ZP64 => 35,
             Self::Q4Z128 | Self::Q4ZP128 => 67,
+            Self::Nf4B64 | Self::Fp4B64 => 36,
+            Self::Nf4B128 | Self::Fp4B128 | Self::Int8Row => 68,
             _ => 32,
         }
     }

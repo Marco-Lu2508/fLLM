@@ -5,6 +5,7 @@
 //! 4-bit GEMM layout with zero points, plus unscaled SafeTensors FP8 element
 //! decoding for F8_E4M3 (float8_e4m3fn) and F8_E5M2 (float8_e5m2).
 
+use crate::dequant::Dequant;
 use crate::safetensors::Payload;
 use half::f16;
 
@@ -79,7 +80,11 @@ pub enum PackedData {
     SymInt(crate::symint::SymInt),
     /// OCP MXFP4 weights (GGUF type MXFP4 when written compactly).
     Mxfp4(crate::dequant::Mxfp4),
-    /// Formats the engine has no kernel for (bitsandbytes, ...): expanded to F16/F32 when written.
+    /// bitsandbytes NF4 / FP4 (GGUF types `NF4B64` ... `FP4B128` when the code book is the standard one and the rows fit 64 values).
+    Bnb4(crate::dequant::Bnb4),
+    /// bitsandbytes LLM.int8() (GGUF type `INT8R` when the rows fit 64 values).
+    Bnb8(crate::dequant::Bnb8),
+    /// Formats the engine has no kernel for: expanded to F16/F32 when written.
     Dyn(std::sync::Arc<dyn crate::dequant::Dequant>),
 }
 
@@ -531,6 +536,41 @@ impl PackedData {
         }
     }
 
+    /// The bitsandbytes type this tensor (or every expert of a stacked group) is written as without changing a value, if there is one.
+    pub fn bnb_type(&self) -> Option<u32> {
+        match self {
+            Self::Bnb4(t) => t.native_type(),
+            Self::Bnb8(t) => t.native_type(),
+            Self::Concat { parts, .. } => {
+                let first = parts.first()?.bnb_type()?;
+                parts.iter().all(|p| p.bnb_type() == Some(first)).then_some(first)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether writing this tensor expands it to 16-bit values although it is packed in the checkpoint (no compact fLLM type fits).
+    pub fn is_expanded(&self) -> bool {
+        match self {
+            Self::Dyn(_) => true,
+            Self::Bnb4(_) | Self::Bnb8(_) => self.bnb_type().is_none(),
+            _ => false,
+        }
+    }
+
+    /// Append the blocks of output row `row` of a bitsandbytes tensor (or of a stacked group of them) in the layout of `type_id`.
+    pub fn encode_bnb_row(&self, type_id: u32, row: usize, dst: &mut Vec<u8>) -> Result<(), String> {
+        match self {
+            Self::Bnb4(t) => t.encode_row(type_id, row, dst),
+            Self::Bnb8(t) => t.encode_row(row, dst),
+            Self::Concat { parts, part_rows, .. } => parts
+                .get(row / (*part_rows).max(1))
+                .ok_or_else(|| format!("bitsandbytes row {row} out of range"))?
+                .encode_bnb_row(type_id, row % (*part_rows).max(1), dst),
+            _ => Err("tensor cannot be stored as a bitsandbytes type".into()),
+        }
+    }
+
     /// Append the GGUF type 40 blocks of output row `row` of an NVFP4 tensor or of a stacked group of them.
     pub fn encode_nvfp4_row(&self, row: usize, dst: &mut Vec<u8>) -> Result<(), String> {
         match self {
@@ -623,6 +663,8 @@ impl PackedData {
             Self::Nvfp4(t) => t.element_count(),
             Self::SymInt(t) => t.element_count(),
             Self::Mxfp4(t) => t.element_count(),
+            Self::Bnb4(t) => t.element_count(),
+            Self::Bnb8(t) => t.element_count(),
             Self::Dyn(t) => t.element_count(),
         }
     }
@@ -650,6 +692,8 @@ impl PackedData {
             Self::Nvfp4(t) => t.decode_chunk(start, dst),
             Self::SymInt(t) => t.decode_chunk(start, dst),
             Self::Mxfp4(t) => t.decode_chunk(start, dst),
+            Self::Bnb4(t) => t.decode_chunk(start, dst),
+            Self::Bnb8(t) => t.decode_chunk(start, dst),
             Self::Dyn(t) => t.decode_chunk(start, dst),
             Self::Fp8 {
                 bytes,

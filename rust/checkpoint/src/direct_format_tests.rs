@@ -168,6 +168,8 @@ fn gpt_oss_mxfp4_checkpoint_loads_identically_to_the_converted_file() {
 enum Bnb {
     Nf4 { block: usize, double: bool },
     Fp4 { block: usize, double: bool },
+    /// NF4 blocks with a code book of another kind (not the one bitsandbytes defines): no native type, expanded to 16 bits.
+    OddCode { block: usize },
     Int8,
 }
 
@@ -175,6 +177,7 @@ fn bnb_config(kind: Bnb) -> Value {
     match kind {
         Bnb::Int8 => json!({"quant_method": "bitsandbytes", "load_in_8bit": true, "load_in_4bit": false}),
         Bnb::Nf4 { double, .. } => json!({"quant_method": "bitsandbytes", "load_in_4bit": true, "bnb_4bit_quant_type": "nf4", "bnb_4bit_use_double_quant": double}),
+        Bnb::OddCode { .. } => json!({"quant_method": "bitsandbytes", "load_in_4bit": true, "bnb_4bit_quant_type": "nf4"}),
         Bnb::Fp4 { double, .. } => json!({"quant_method": "bitsandbytes", "load_in_4bit": true, "bnb_4bit_quant_type": "fp4", "bnb_4bit_use_double_quant": double}),
     }
 }
@@ -191,11 +194,16 @@ fn bnb(kind: Bnb) -> impl FnMut(&mut Rng, &str, usize, usize) -> Option<Vec<Entr
         let (name, block, double) = match kind {
             Bnb::Nf4 { block, double } => ("nf4", block, double),
             Bnb::Fp4 { block, double } => ("fp4", block, double),
+            Bnb::OddCode { block } => ("nf4", block, false),
             Bnb::Int8 => unreachable!(),
         };
         let n = out * inp;
         let blocks = n / block;
-        let code = f32_bytes((0..16).map(|i| (i as f32 - 7.5) / 8.0));
+        let code = match kind {
+            Bnb::Nf4 { .. } => f32_bytes(fllm_gguf_probe::bnb::NF4_CODE),
+            Bnb::Fp4 { .. } => f32_bytes(fllm_gguf_probe::bnb::FP4_CODE),
+            _ => f32_bytes((0..16).map(|i| (i as f32 - 7.5) / 8.0)),
+        };
         let mut entries = vec![
             (w.clone(), "U8", vec![n / 2, 1], random_bytes(rng, n / 2)),
             (format!("{w}.quant_map"), "F32", vec![16], code),
@@ -219,17 +227,24 @@ fn bnb(kind: Bnb) -> impl FnMut(&mut Rng, &str, usize, usize) -> Option<Vec<Entr
 
 #[test]
 fn bitsandbytes_checkpoints_load_identically_to_the_converted_file() {
-    for (kind, label, shards) in [
-        (Bnb::Nf4 { block: 64, double: false }, "nf4 bs64", 1),
-        (Bnb::Nf4 { block: 128, double: true }, "nf4 double-quantized bs128", 2),
-        (Bnb::Fp4 { block: 64, double: false }, "fp4 bs64", 1),
-        (Bnb::Fp4 { block: 64, double: true }, "fp4 double-quantized bs64", 1),
-        (Bnb::Int8, "int8", 1),
-        (Bnb::Int8, "int8 sharded", 3),
+    use fllm_gguf_probe::bnb::{FP4_B64, INT8_ROW, NF4_B128, NF4_B64};
+    for (kind, label, shards, expect) in [
+        (Bnb::Nf4 { block: 64, double: false }, "nf4 bs64", 1, NF4_B64),
+        (Bnb::Nf4 { block: 128, double: true }, "nf4 double-quantized bs128", 2, NF4_B128),
+        (Bnb::Nf4 { block: 256, double: true }, "nf4 double-quantized bs256", 1, NF4_B128),
+        (Bnb::Fp4 { block: 64, double: false }, "fp4 bs64", 1, FP4_B64),
+        (Bnb::Fp4 { block: 64, double: true }, "fp4 double-quantized bs64", 1, FP4_B64),
+        (Bnb::OddCode { block: 64 }, "nf4 with another code book", 1, F16_TYPE),
+        (Bnb::Int8, "int8", 1, INT8_ROW),
+        (Bnb::Int8, "int8 sharded", 3, INT8_ROW),
     ] {
         let dir = scratch("bnb");
         model(&dir, 31, &[("quantization_config", bnb_config(kind))], Scope::Linears, shards, bnb(kind));
-        assert_direct_equals_converted(&dir, OutputDType::Preserve, F16_TYPE, label);
+        assert_direct_equals_converted(&dir, OutputDType::Preserve, expect, label);
+        // an explicit 16-bit type expands the weights as before
+        if shards == 1 {
+            assert_direct_equals_converted(&dir, OutputDType::F16, F16_TYPE, &format!("{label} as f16"));
+        }
         let _ = fs::remove_dir_all(dir);
     }
     // F32 output and quantizing on load take the same path

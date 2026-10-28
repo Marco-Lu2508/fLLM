@@ -62,6 +62,7 @@ pub(crate) fn quant_layout(kind: u32) -> Option<(usize, usize)> {
         0x8000_0011 | 0x8000_0015 => Some((64, 35)),
         0x8000_0012 | 0x8000_0016 => Some((128, 67)),
         0x8000_0020 | 0x8000_0021 => Some((1, 1)),
+        k if fllm_gguf_probe::bnb::is_bnb(k) => fllm_gguf_probe::bnb::layout(k).map(|l| (l.block, l.bytes)),
         _ => fllm_gguf_probe::quant_types::by_id(kind)
             .map(|ty| (ty.block_elements, ty.bytes_per_block)),
     }
@@ -220,6 +221,9 @@ pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, Str
     }
     if fllm_gguf_probe::fp8b_type(kind) {
         return dequantize_fp8b(bytes, count);
+    }
+    if fllm_gguf_probe::bnb::is_bnb(kind) {
+        return fllm_gguf_probe::bnb::dequantize(bytes, kind, count);
     }
     if let Some(group) = fllm_gguf_probe::q4zp_group(kind) {
         return dequantize_q4zp(bytes, group as usize, count);
@@ -1050,6 +1054,13 @@ impl Linear {
             };
             if let Some(Some(out)) = float {
                 return Ok(out);
+            }
+            if let Some((kind, packed)) = &self.packed {
+                if crate::cpu_bnb::handles(*kind) {
+                    if let Some(out) = crate::cpu_bnb::linear(packed, *kind, input, self.rows, self.cols, self.bias.as_deref()) {
+                        return Ok(out);
+                    }
+                }
             }
             #[cfg(target_arch = "x86_64")]
             if let Some((kind, packed)) = &self.packed {

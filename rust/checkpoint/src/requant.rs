@@ -260,6 +260,7 @@ fn stored_bytes(type_id: u32, elements: u64) -> Result<u64, String> {
         .iter()
         .find(|t| t.id == type_id)
         .map(|t| (t.block_elements as u64, t.bytes_per_block as u64))
+        .or_else(|| fllm_gguf_probe::bnb::layout(type_id).map(|l| (l.block as u64, l.bytes as u64)))
         .ok_or_else(|| format!("unknown tensor type {type_id}"))?;
     Ok(elements / block * bytes)
 }

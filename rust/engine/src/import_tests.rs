@@ -776,7 +776,7 @@ fn format_linear(rng: &mut Rng, format: Format, prefix: &str, out: usize, inp: u
             let state = json!({"quant_type": "nf4", "blocksize": block, "dtype": "bfloat16", "shape": [out, inp]}).to_string().into_bytes();
             vec![
                 raw_entry(w.clone(), "U8", vec![n / 2, 1], (0..n / 2).map(|_| rng.below(256) as u8).collect()),
-                f32_entry(&format!("{w}.quant_map"), &[16], &(0..16).map(|i| (i as f32 - 7.5) / 8.0).collect::<Vec<_>>()),
+                f32_entry(&format!("{w}.quant_map"), &[16], &fllm_gguf_probe::bnb::NF4_CODE),
                 f32_entry(&format!("{w}.absmax"), &[n / block], &(0..n / block).map(|_| 0.05 + 0.05 * rng.unit().abs()).collect::<Vec<_>>()),
                 raw_entry(format!("{w}.quant_state.bitsandbytes__nf4"), "U8", vec![state.len()], state),
             ]
@@ -1003,6 +1003,30 @@ fn direct_load_equals_the_converted_file_for_mxfp4_bitsandbytes_mlx_exl2_and_pyt
         let (from_direct, from_file) = (logits(&dir, &PROMPT), logits(&gguf, &PROMPT));
         assert!(from_direct.iter().all(|v| v.is_finite()), "{format:?}: logits are not finite");
         assert_eq!(from_direct, from_file, "{format:?}: logits");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+/// The native NF4 and int8 blocks give the logits of the same weights expanded to F16 (what the converter wrote before the native types):
+/// the only differences are the F16 rounding of the expanded weights and the order of the float sums.
+#[test]
+fn bitsandbytes_native_blocks_give_the_logits_of_the_expanded_weights() {
+    for format in [Format::BnbNf4, Format::BnbInt8] {
+        let dir = scratch("bnbx");
+        build_format(format, 23, &dir);
+        let native = convert(&dir, OutputDType::Preserve);
+        let expanded = convert(&dir, OutputDType::F16);
+        let up = |path: &Path| {
+            let m = MappedGguf::open(path).unwrap();
+            m.index().tensors.iter().find(|t| t.name == "blk.0.ffn_up.weight").unwrap().type_id
+        };
+        assert!(fllm_gguf_probe::bnb::is_bnb(up(&native)), "{format:?}: the weights stay in their native type");
+        assert_eq!(up(&expanded), 1, "{format:?}: --outtype f16 expands them");
+        let (a, b) = (logits(&native, &PROMPT), logits(&expanded, &PROMPT));
+        let peak = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let worst = a.iter().zip(&b).fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+        assert!(a.iter().all(|v| v.is_finite()), "{format:?}: logits are not finite");
+        assert!(worst <= 2e-2 * peak + 1e-4, "{format:?}: logits differ by {worst} (peak {peak})");
         let _ = fs::remove_dir_all(dir);
     }
 }
