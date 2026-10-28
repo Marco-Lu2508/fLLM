@@ -167,7 +167,17 @@ fn default_cache_root() -> PathBuf {
     env::var_os("FLLM_CACHE")
         .or_else(|| env::var_os("HF_HUB_CACHE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| hub_home().join("hub"))
+        .unwrap_or_else(|| {
+            // downloads that earlier versions (or the Hugging Face tools) already made stay where they are; a new installation keeps
+            // its models in fLLM's own folder
+            let shared = hub_home().join("hub");
+            if shared.is_dir() { shared } else { fllm_home().join("models") }
+        })
+}
+
+/// fLLM's own folder for settings, plugins, sub-agents and the like (see [`fllm_home`]).
+pub fn data_dir() -> PathBuf {
+    studio_dir()
 }
 
 /// The models folder when nothing is chosen in the Studio.
@@ -1656,11 +1666,74 @@ pub fn quant_of_filename(name: &str) -> Option<String> {
     })
 }
 
-/// The folder of the Studio's small files (`studio.json`, the lists of added models and per-model options). It does not move with the
-/// models folder setting.
+/// fLLM's own folder for everything that is not a downloaded model: the settings (`studio.json`), plugins, sub-agents, hooks, skills, notes,
+/// prices and the tuning results. `FLLM_HOME` chooses it; otherwise it is the data folder of the system: `%LOCALAPPDATA%\fLLM` on Windows,
+/// `~/Library/Application Support/fLLM` on macOS, `$XDG_DATA_HOME/fllm` (default `~/.local/share/fllm`) elsewhere.
+pub fn fllm_home() -> PathBuf {
+    if let Some(dir) = env::var_os("FLLM_HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let var = |name: &str| env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = || var("HOME").or_else(|| var("USERPROFILE")).unwrap_or_default();
+    if cfg!(windows) {
+        var("LOCALAPPDATA").unwrap_or_else(|| home().join("AppData").join("Local")).join("fLLM")
+    } else if cfg!(target_os = "macos") {
+        home().join("Library").join("Application Support").join("fLLM")
+    } else {
+        var("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local").join("share")).join("fllm")
+    }
+}
+
+/// Where earlier versions kept those files: inside the Hugging Face cache, next to the models.
+fn legacy_studio_dir() -> PathBuf {
+    hub_home().join("fllm")
+}
+
+/// Copies a folder with everything in it (used when a move across drives is not possible).
+fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The first time the own folder is used, the files of an earlier version are moved into it (once; nothing is deleted when moving fails).
+fn migrate_legacy_studio_dir(home: &Path) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let legacy = legacy_studio_dir();
+        if home.exists() || !legacy.is_dir() || legacy == home {
+            return;
+        }
+        if let Some(parent) = home.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::rename(&legacy, home).is_err() && copy_dir_all(&legacy, home).is_ok() {
+            let _ = fs::remove_dir_all(&legacy);
+        }
+    });
+}
+
+/// The folder of the Studio's small files (see [`fllm_home`]). It does not move with the models folder setting. Naming a cache folder
+/// (`FLLM_CACHE`, `HF_HUB_CACHE`) keeps the old place next to it, which is what tests and isolated setups rely on.
 fn studio_dir() -> PathBuf {
-    let base = default_cache_root();
-    base.parent().unwrap_or(&base).join("fllm")
+    if env::var_os("FLLM_HOME").is_some_and(|v| !v.is_empty()) {
+        return fllm_home();
+    }
+    if env::var_os("FLLM_CACHE").or_else(|| env::var_os("HF_HUB_CACHE")).is_some_and(|v| !v.is_empty()) {
+        let base = default_cache_root();
+        return base.parent().unwrap_or(&base).join("fllm");
+    }
+    let home = fllm_home();
+    migrate_legacy_studio_dir(&home);
+    home
 }
 
 fn studio_file() -> PathBuf {

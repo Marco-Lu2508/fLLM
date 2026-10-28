@@ -556,6 +556,7 @@ fn settings_json() -> Value {
         "models_dir": crate::hub::saved_models_dir(),
         "models_dir_active": crate::hub::cache_root().display().to_string(),
         "models_dir_default": default_dir.display().to_string(),
+        "data_dir": crate::hub::data_dir().display().to_string(),
     })
 }
 

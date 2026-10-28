@@ -27,6 +27,8 @@ COPY --from=builder /build/fLLM/target/release/fllm-rs /usr/local/bin/fllm-rs
 # the settings made on the Studio page (Settings > Engine ...) live in ~/.cache/fllm: a volume mounted there keeps them across restarts
 RUN useradd -m fllm && mkdir -p /home/fllm/.cache/fllm && chown -R fllm:fllm /home/fllm/.cache
 USER fllm
+# fLLM's own folder (settings, plugins, ...): inside the volume that the Compose files mount
+ENV FLLM_HOME=/home/fllm/.cache/fllm
 WORKDIR /home/fllm
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:${FLLM_PORT:-8000}/health || exit 1

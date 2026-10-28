@@ -77,6 +77,8 @@ RUN (userdel -r ubuntu 2>/dev/null || true) \
  && useradd -m -u 1000 -G video,render fllm \
  && mkdir -p /home/fllm/.cache && chown fllm:fllm /home/fllm/.cache
 USER fllm
+# fLLM's own folder (settings, plugins, ...): inside the volume that the Compose files mount
+ENV FLLM_HOME=/home/fllm/.cache/fllm
 WORKDIR /home/fllm
 # Models downloaded by `run` / `serve --model owner/repo` land in $HF_HOME/hub (= /home/fllm/.cache/huggingface/hub).
 ENV HF_HOME=/home/fllm/.cache/huggingface

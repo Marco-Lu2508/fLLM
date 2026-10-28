@@ -591,6 +591,17 @@ variable is set globally. The tray menu only handles the server and the window: 
 The command line version is separate: `fllm-rs studio` opens your browser once (for people who downloaded only the binary
 or run it in Docker) and `fllm-rs studio --no-open` does not; `fllm-rs serve` opens nothing at all.
 
+## Where fLLM keeps its files
+
+fLLM has its own folder (Settings > Models shows the path): `%LOCALAPPDATA%LLM` on Windows, `~/Library/Application Support/fLLM` on macOS and
+`~/.local/share/fllm` elsewhere (`$XDG_DATA_HOME/fllm`). It holds the settings (`studio.json`), `plugins/`, `agents/`, `hooks.json`, notes and prices.
+`FLLM_HOME` puts it somewhere else. Earlier versions kept these files inside the Hugging Face cache (`~/.cache/huggingface/fllm`); the first start of
+a newer version moves them into the new folder.
+
+Downloaded models stay in the Hugging Face cache (`~/.cache/huggingface/hub`) when it exists, so a model downloaded by another tool is not downloaded again;
+on a computer without one they go to `models/` inside fLLM's folder. Settings > Models can choose any other folder, and `FLLM_MODELS_DIR` / `FLLM_CACHE` do the
+same for a single run. The GPU tuning results and the compiled shaders are caches and stay in the cache folder of the system (`~/.cache/fllm`, `%LOCALAPPDATA%llm`).
+
 ## Who may change things
 
 Reading (status, hardware, models) is open like the rest of the API. Changing the server through `/api/studio/*` (settings, model downloads, loading and
@@ -604,7 +615,7 @@ switch, the engine options) stays on the machine itself, with or without a key.
 
 The page works in a container the same way. Two things differ:
 
-- **Settings are kept in a volume.** The Compose files mount one at `~/.cache/fllm` (`fllm-data`; the GPU files keep the whole `~/.cache`). Without a volume the
+- **Settings are kept in a volume.** The images set `FLLM_HOME=/home/fllm/.cache/fllm` and the Compose files mount a volume there (`fllm-data`; the GPU files keep the whole `~/.cache`). Without a volume the
   options saved on the page are gone when the container is removed.
 - **Set an API key.** A container sees every request as coming from another machine (Docker's gateway), so without `FLLM_API_KEY` the page can show things but not change them. With the key (it is an admin key) the page works as on your own computer: enter the key in the page when it asks.
 - **Restarting.** In a container the server starts itself again in place (same process, so the container keeps running). That is what "Restart the server now"

@@ -497,7 +497,8 @@
         $('inpModelsDir').value = d.models_dir || '';
         $('inpIdleMinutes').value = d.idle_unload_minutes || 0;
         $('chkLoadOnStart').checked = Boolean(d.load_on_start);
-        $('modelsDirActive').textContent = `In use now: ${d.models_dir_active}`;
+        $('modelsDirActive').textContent = `Models in use now: ${d.models_dir_active}`;
+        if ($('dataDirActive')) $('dataDirActive').textContent = `Settings, plugins and notes: ${d.data_dir}`;
         $('inpModelsDir').placeholder = d.models_dir_default ? `Default: ${d.models_dir_default}` : 'Default folder';
       } catch { /* the server is restarting */ }
     }

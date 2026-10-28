@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Changed
+- fLLM has its own folder for settings, plugins, sub-agents, hooks, skills and notes (`%LOCALAPPDATA%LLM`, `~/Library/Application Support/fLLM`, `~/.local/share/fllm`; `FLLM_HOME` changes it). Before, they lay inside the Hugging Face cache. The first start moves the old files over. Models stay in the Hugging Face cache when it exists and go to `models/` in the own folder on a computer without one. The container images set `FLLM_HOME` to the volume path they used before.
+
 ## [0.1.11] - 2026-10-28
 
 Safetensors checkpoints load without a GGUF file, the Studio looks like an app (own menus, lists, tooltips and dialogs), the app no longer loads a model when it opens, and the server can be administered safely: API keys with an admin right, a Settings > Engine page for every cache and telemetry option, and containers restart in place.
