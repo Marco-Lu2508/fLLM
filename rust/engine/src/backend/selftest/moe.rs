@@ -591,14 +591,12 @@ impl Tester<'_> {
         let sel_bias = if c.bias { self.rng.vector(experts, 0.3) } else { Vec::new() };
         // The grouped GEMMs take FP16 activations, so the SwiGLU outputs (~ gate * up) must stay below 65504. The random k-quant
         // weights are far larger than real ones (q4_k: about 3 per weight), which put single activations of this layer past the
-        // FP16 range (inf * 0 = NaN). Scale the input so the gate / up projections have a standard deviation of about 24.
+        // FP16 range (inf * 0 = NaN). The input is uniform in +-x_scale, which gives the gate / up projections a standard deviation of about 14 (SwiGLU outputs of a few hundred).
         let weight_ms = {
             let (mut sum, mut n) = (0.0f64, 0usize);
-            for p in 0..2 {
-                for w in &dense[p] {
-                    sum += w.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>();
-                    n += w.len();
-                }
+            for w in dense.iter().take(2).flatten() {
+                sum += w.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>();
+                n += w.len();
             }
             sum / n.max(1) as f64
         };
