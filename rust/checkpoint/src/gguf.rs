@@ -378,6 +378,7 @@ fn write_packed(w: &mut impl Write, t: &OutTensor, p: &PackedData) -> io::Result
     }
     if let Some(type_id) = fllm_gguf_probe::bnb::type_id_by_name(&t.dtype) {
         return write_packed_rows(w, t, |row, buf| p.encode_bnb_row(type_id, row, buf));
+    }
     if t.dtype.starts_with("MLXA") {
         return write_packed_rows(w, t, |row, buf| {
             p.mlx()

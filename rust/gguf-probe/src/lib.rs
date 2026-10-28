@@ -254,6 +254,7 @@ fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
     }
     if let Some(l) = bnb::layout(type_id) {
         return Some((l.block as u64, l.bytes as u64));
+    }
     if let Some(mlx) = mlx_affine(type_id) {
         return Some((u64::from(mlx.group), mlx.block_bytes()));
     }
