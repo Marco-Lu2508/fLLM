@@ -4487,3 +4487,9 @@ fn extract_file_from_multipart(body: &[u8], content_type: &str) -> Option<Vec<u8
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
+
+/// `fllm-rs sandbox-exec ...` (hidden): the launcher of the Windows command sandbox. It runs one command line under a
+/// restricted, low-integrity token inside a job object and returns the exit code of that command.
+pub fn run_sandbox_launcher(args: &[String]) -> i32 {
+    api::run_sandbox_launcher(args)
+}

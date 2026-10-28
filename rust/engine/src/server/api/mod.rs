@@ -35,6 +35,10 @@ pub(super) mod agent_messages;
 mod agent_notebook;
 pub(super) mod agent_lsp;
 pub(super) mod agent_sandbox;
+mod agent_sandbox_mac;
+#[cfg(windows)]
+mod agent_sandbox_native;
+mod agent_sandbox_win;
 pub(super) mod agent_worktree;
 pub(super) mod agent_mem;
 pub(super) mod agent_net;
@@ -182,4 +186,17 @@ pub(super) async fn model_by_id(
     }
     Json(json!({"id":id,"object":"model","created":unix_now(),"owned_by":"fllm","root":state.model_name,"parent":null,"max_model_len":state.max_context}))
         .into_response()
+}
+
+/// The hidden `sandbox-exec` subcommand: runs one command line under the Windows sandbox and returns its exit code.
+#[cfg(windows)]
+pub(super) fn run_sandbox_launcher(args: &[String]) -> i32 {
+    agent_sandbox_native::run_launcher(args)
+}
+
+/// The hidden `sandbox-exec` subcommand exists on Windows only.
+#[cfg(not(windows))]
+pub(super) fn run_sandbox_launcher(_args: &[String]) -> i32 {
+    eprintln!("sandbox-exec is the launcher of the Windows sandbox and does nothing on this system");
+    2
 }

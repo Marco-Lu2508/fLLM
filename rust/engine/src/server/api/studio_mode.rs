@@ -54,6 +54,8 @@ fn status() -> Value {
         "file": file().display().to_string(),
         // what the sandbox can actually do here, so the page does not promise more than the machine can
         "sandbox_available": super::agent_sandbox::available(),
+        // the full truth for the page: mechanism, what is and is not enforced, how well it is verified
+        "sandbox_status": super::agent_sandbox::status_json(),
     })
 }
 
@@ -114,8 +116,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_mode_is_workspace() {
-        assert_eq!(super::super::agent_sandbox::DEFAULT_MODE, "workspace");
+    fn the_default_mode_is_workspace_on_linux_and_off_elsewhere() {
+        assert_eq!(super::super::agent_sandbox::DEFAULT_MODE, if cfg!(target_os = "linux") { "workspace" } else { "off" });
     }
 
     #[test]

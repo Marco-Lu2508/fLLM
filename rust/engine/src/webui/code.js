@@ -2387,7 +2387,7 @@
         case 'sandbox': {
           const want = String(argText || '').trim().toLowerCase();
           if (!['off', 'workspace', 'strict'].includes(want)) {
-            codeNotice(`Sandbox is ${code.sandbox || 'unknown'}${code.sandboxAvailable ? '' : ' (bubblewrap does not work on this machine)'}. /sandbox off | workspace | strict`);
+            codeNotice(`Sandbox is ${code.sandbox || 'unknown'}${code.sandboxAvailable ? '' : ' (the sandbox does not work on this machine)'}. /sandbox off | workspace | strict`);
             return true;
           }
           try {
@@ -2395,7 +2395,7 @@
             const data = await res.json().catch(() => ({}));
             if (!res.ok) { codeNotice((data.error && data.error.message) || 'The sandbox mode could not be changed.'); return true; }
             code.sandbox = data.sandbox;
-            codeNotice(`Sandbox: ${data.sandbox}${data.sandbox_available ? '' : ' — but bubblewrap does not work here, so commands run unwrapped'}.`);
+            codeNotice(`Sandbox: ${data.sandbox}${data.sandbox_available ? '' : ' — but the sandbox does not work here, so commands run unwrapped'}.`);
           } catch (e) {
             codeNotice('The sandbox mode could not be changed: ' + ((e && e.message) || e));
           }

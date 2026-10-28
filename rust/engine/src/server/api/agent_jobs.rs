@@ -20,19 +20,26 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The platform shell running one command line, inside the sandbox when this machine has one. `root` is the workspace
-/// that stays writable, `cwd` the folder the command starts in.
-pub(super) fn shell_command_in(line: &str, root: &Path, cwd: &Path) -> Command {
-    match super::agent_sandbox::wrap(line, root, cwd) {
+/// that stays writable, `cwd` the folder the command starts in. An error means the command must not run: a sandbox that is
+/// switched on but cannot start it is never a reason to run it unsandboxed.
+pub(super) fn shell_command_in(line: &str, root: &Path, cwd: &Path) -> Result<Command, String> {
+    match super::agent_sandbox::wrap(line, root, cwd)? {
         Some(argv) => {
             let mut command = Command::new(&argv[0]);
             command.args(&argv[1..]);
             command.current_dir(cwd);
-            command
+            #[cfg(windows)]
+            {
+                // the launcher is a console program; without a console of its own it would open a window
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
+            Ok(command)
         }
         None => {
             let mut command = shell_command(line);
             command.current_dir(cwd);
-            command
+            Ok(command)
         }
     }
 }
@@ -178,7 +185,7 @@ impl Jobs {
                 jobs.remove(&id);
             }
         }
-        let mut child = shell_command_in(command, dir, dir)
+        let mut child = shell_command_in(command, dir, dir)?
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
