@@ -3,8 +3,7 @@
 fLLM is an LLM inference engine written in Rust, with a desktop app (chat, coding agent and model manager)
 on top. It loads GGUF files (all 35 ggml storage types it registers, including the K and IQ quants) and
 Hugging Face checkpoints (safetensors and PyTorch, including 4-bit AWQ and GPTQ, FP8, MXFP4 and EXL2/EXL3
-weights): a checkpoint is translated into the GGUF tensor layout while it is loaded, and a Hugging Face
-repository is converted once and kept in the cache. It quantizes, and serves OpenAI, Anthropic, Ollama, SGLang, TGI and llama.cpp style HTTP APIs from one port. It also
+weights): a checkpoint is translated into the GGUF tensor layout in memory while it loads, with no GGUF file written. It quantizes, and serves OpenAI, Anthropic, Ollama, SGLang, TGI and llama.cpp style HTTP APIs from one port. It also
 has a terminal chat (`fllm-rs run`), encoder and embedding models, image input for SigLIP/Idefics3
 projectors, and CPU, CUDA and wgpu (Vulkan, Metal, DirectX 12) backends.
 
@@ -190,15 +189,38 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   with large key outliers. For models larger than the card, `--gpu-layers` keeps attention on the GPU and
   streams feed-forward weights and MoE experts from host memory ([docs/user/memory.md](docs/user/memory.md)).
 - **Scheduling.** Continuous batching, chunked prefill, prefix cache (hybrid and state-space models
-  switch off prefix sharing and speculation).
-- **Speculative decoding.** Prompt lookup (`--speculative-lookup`), a draft model (`--draft-model`) and
-  the multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only); greedy
-  requests only.
+  switch off prefix sharing and speculation), beam search (`use_beam_search`, CPU backend), `--multi-step N`
+  (several decode rounds per scheduler round, off by default and CPU only until it is verified elsewhere) and
+  jump-forward decoding for grammar-constrained requests (text identical to token-by-token decoding; large gains
+  only with compact JSON schemas). Optional: prompt blocks saved on disk (`FLLM_KV_DISK_DIR`) and an output cache
+  for repeated deterministic requests ([docs/output-cache.md](docs/output-cache.md)).
+- **Speculative decoding.** `--speculative off|ngram|suffix|draft|mtp`: conversation lookup (`suffix`, on by default on
+  the CPU and on Vulkan/DirectX; on CUDA, HIP and Metal it stays off until its kernels have been checked on hardware),
+  prompt lookup, a draft model of your own (`--speculative-model`, browse for it in the load dialog) and the
+  multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only); greedy requests only,
+  and not for models with a recurrent state (Qwen3.5, Mamba).
 
 ### Tools and clients
 
 `fllm-rs studio` starts the server and opens the Studio, the built-in browser app with chat, a coding agent and a
 model manager (the desktop app shows the same page in its own window): [docs/user/studio.md](docs/user/studio.md).
+Inside the Studio:
+
+- **Chat**: projects, assistants, documents, web access and research, sampling controls, thinking levels.
+- **Coding agent** (Code page): reads, searches and edits files and runs commands in one folder, with permission
+  rules, plan and build modes, sub-agents the agent can create itself, hooks, plugins, memory, skills and MCP tools.
+  Optional and off by default: a **browser** the agent drives (a real Chrome, Chromium, Edge or Brave through the
+  DevTools protocol, shown live in a panel where you can click and leave comments), **computer use** (screenshots,
+  mouse and keyboard, every action asked first, a STOP button and a panic key) and a **command sandbox** (bubblewrap on
+  Linux; a restricted token and job object on Windows, checked on one Windows 11 machine; Seatbelt on macOS, unchecked).
+- **Skills and MCP servers**: install skills from any GitHub repository or the skills.sh directory, and find MCP servers
+  in the official registry or on Smithery; nothing runs before you read the command and save it.
+- **Settings > Engine** for the output cache, prompt sharing, telemetry (OTLP) and the disk tier; **API keys with an
+  admin right** protect the server's own settings. Settings, plugins, agents and notes live in fLLM's own folder
+  (`%LOCALAPPDATA%\fLLM`, `~/.local/share/fllm`, or `FLLM_HOME`).
+- **Operation**: Docker images and Compose files, Kubernetes manifests and a Helm chart in [deploy/](deploy), and
+  `fllm-router`, a prefix-aware router for several servers ([docs/router.md](docs/router.md)).
+
 `fllm-rs chat` and `bench` talk to any running OpenAI-compatible server;
 [docs/user/clients.md](docs/user/clients.md) covers curl, the OpenAI, Anthropic and Ollama SDKs and program integrations.
 
@@ -210,10 +232,12 @@ What has actually been run on hardware, and what has not:
 | --- | --- |
 | CPU x86-64 (AVX2, AVX-VNNI, AVX-512) | Runs. Self test and real models on AVX2 and on an AMD Zen 5 (AVX-512); the AMX kernels have only been run in an emulator |
 | NVIDIA CUDA, Turing (T4), Blackwell (RTX PRO 6000) | Runs. Self test 595 + 395 checks, real models (Llama, Qwen2.5, Qwen3.5 with DeltaNet, AWQ, GPTQ, NVFP4) |
-| NVIDIA Ampere / Ada / Hopper | Builds; the same kernels as the tested cards, not yet measured |
+| NVIDIA Ampere (A100) and Ada (L4) | Ran on Google Colab with v0.1.11: 587 of 644 self-test checks passed; the 57 failures (quantized KV-cache writes, a log-probability kernel, a DeltaNet head width, FP16 activations) have found causes and fixes that are **not yet re-run on a GPU**. MoE, GPTQ, CUDA graphs and prompt-lookup gave the CPU's text; Llama-3.2-3B Q4_K_M decodes at 218 tok/s (A100) and 95 tok/s (L4) |
+| NVIDIA Hopper | Builds; not run |
 | Linux aarch64, macOS (Apple silicon), Windows (MSVC) | Build, unit tests and the CPU self tests run in CI on GitHub-hosted runners (the Linux and Windows runners have no GPU). The SVE kernel is opt-in and was not run. Windows release assets and the desktop installer exist since 0.1.2; the installer was tried on one Windows PC only |
 | Apple Metal | The native Metal kernels (attention for f16 and q8_0 KV caches in decode and prompt, KV-cache writes and more) run their GPU checks on the Apple-silicon CI runner and match the CPU reference to about 1e-7. A whole model has not been run on Metal yet |
 | Vulkan | Ran on a few devices (NVIDIA, Intel, and an AMD handheld with a Radeon 780M, where the native backend runs the whole model on the GPU and the integrated-GPU memory falls back to shared host memory); slower than CUDA. DirectX 12 through wgpu has a known bug with legacy quantizations on AMD |
+| Windows agent tools | The browser tool, computer use (screenshot, displays, refused key chords) and the sandbox ran on one Windows 11 machine with three displays; clicking and typing there were not tried |
 | AMD ROCm (HIP), Intel SYCL, NPUs, TPU | Compile only (test level L0): not run on the hardware |
 
 The test levels (L0 compiles, L1 self test passes on the device, L2 same greedy text as the CPU, L3 speed
@@ -255,6 +279,10 @@ NVFP4 build reaches 102 tok/s and 10,070 tok/s (SGLang on the same card: 94 and 
 prompts there too). gpt-oss-20b (MXFP4, larger than the card) decodes at about 45 tok/s. More formats, MoE models and
 concurrent requests are in [docs/gpu-backends.md](docs/gpu-backends.md).
 
+On Google Colab with the v0.1.11 release binary (single user, greedy, over HTTP; Llama-3.2-3B-Instruct Q4_K_M, contexts 355 /
+1863 / 8000 tokens, one run each): an A100 80 GB decodes at 218 / 244 / 232 tok/s and prefills at 5,128 / 16,090 / 19,952 tok/s; an
+L4 decodes at 95 / 96 / 78 tok/s and prefills at 4,088 / 6,540 / 6,909 tok/s. No other engine was measured on these two runs.
+
 ## Documentation
 
 The code and `--help` are authoritative where a page and the program disagree.
@@ -265,6 +293,7 @@ The code and `--help` are authoritative where a page and the program disagree.
 - [benchmarks/README.md](benchmarks/README.md): the benchmark client and what a published number has to state
 - [deploy/](deploy): Kubernetes manifests and a Helm chart
 - [docs/quickstart-windows-linux.md](docs/quickstart-windows-linux.md): Docker with an NVIDIA GPU, step by step
+- [docs/user/studio.md](docs/user/studio.md): the Studio and desktop app: chat, the coding agent, browser, computer use, sandbox, skills, MCP, settings, where files are kept
 - [docs/user/commands.md](docs/user/commands.md): every `fllm-rs` subcommand
 - [docs/configuration.md](docs/configuration.md): every `serve` flag and environment variable
 - [docs/user/clients.md](docs/user/clients.md), [docs/user/memory.md](docs/user/memory.md), [docs/user/troubleshooting.md](docs/user/troubleshooting.md): clients, memory planning, error messages
