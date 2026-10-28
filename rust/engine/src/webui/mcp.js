@@ -265,7 +265,8 @@
         } else {
           $('mcpCommand').value = c.command;
           $('mcpArgs').value = (c.args || []).join('\n');
-          $('mcpEnv').value = (c.env || []).map((v) => `${v.name}=${v.value || ''}`).join('\n');
+          // optional variables with no value are left out (an empty value is not the same as none)
+          $('mcpEnv').value = (c.env || []).filter((v) => v.required || v.value).map((v) => `${v.name}=${v.value || ''}`).join('\n');
           for (const v of c.env || []) if (v.required) notes.push(`${v.name}: ${v.description || 'fill this in'}`);
           if ((c.args || []).some((a) => /^<.+>$/.test(a))) notes.push('replace the <...> arguments with real values');
         }
