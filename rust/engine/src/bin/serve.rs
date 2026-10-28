@@ -385,6 +385,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", fllm_engine::version::long_version());
         return Ok(());
     }
+    // hidden: the launcher of the Windows command sandbox; first of all, because it hands its standard handles to the command
+    // (nothing may read stdin or start a thread before it)
+    if args.first().map(String::as_str) == Some("sandbox-exec") {
+        std::process::exit(fllm_engine::server::run_sandbox_launcher(&args[1..]));
+    }
     // hidden: writes a tiny random model for the HTTP API tests (scripts/api-tests, .github/workflows/api.yml)
     if args.first().map(String::as_str) == Some("make-tiny-model") {
         return fllm_engine::tiny_model::run(&args[1..]).map_err(Into::into);

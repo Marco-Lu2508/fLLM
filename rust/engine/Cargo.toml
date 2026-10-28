@@ -46,6 +46,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json", "ansi"] }
 
+# the Windows sandbox for agent commands (job object, restricted token); already in the lock file through other crates, so nothing new is built
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true }

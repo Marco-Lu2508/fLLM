@@ -886,7 +886,7 @@ impl AgentSession {
         let root = self.root()?;
         let dir = self.shell_dir()?;
         let limit = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1000, MAX_TIMEOUT_MS));
-        let mut cmd = super::agent_jobs::shell_command_in(&super::agent_jobs::with_cwd_report(command, CWD_MARK), &root, &dir);
+        let mut cmd = super::agent_jobs::shell_command_in(&super::agent_jobs::with_cwd_report(command, CWD_MARK), &root, &dir)?;
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

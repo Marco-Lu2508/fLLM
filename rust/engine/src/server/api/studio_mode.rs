@@ -114,8 +114,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_mode_is_workspace() {
-        assert_eq!(super::super::agent_sandbox::DEFAULT_MODE, "workspace");
+    fn the_default_mode_is_workspace_on_linux_and_off_elsewhere() {
+        assert_eq!(super::super::agent_sandbox::DEFAULT_MODE, if cfg!(target_os = "linux") { "workspace" } else { "off" });
     }
 
     #[test]
