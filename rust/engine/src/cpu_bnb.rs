@@ -386,6 +386,233 @@ mod tests {
         assert!(linear(&weights, 12, &x, rows, cols, None).is_none());
     }
 
+    // ------------------------------------------------------------------------------------------------------------------
+    // Host mirrors of the CUDA kernels (cuda/common.cuh decode16, cuda/bnb.cuh): the same index arithmetic, the same order of the
+    // float operations, run on the host so that a layout or indexing mistake in the device code shows up without a GPU.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    /// `bnb_select16` of common.cuh: a binary select tree over the four index bits.
+    fn select16(q: u32, v: &[f32; 16]) -> f32 {
+        let (b0, b1, b2, b3) = (q & 1 != 0, q & 2 != 0, q & 4 != 0, q & 8 != 0);
+        let a: Vec<f32> = (0..8).map(|i| if b0 { v[2 * i + 1] } else { v[2 * i] }).collect();
+        let c: Vec<f32> = (0..4).map(|i| if b1 { a[2 * i + 1] } else { a[2 * i] }).collect();
+        let d: Vec<f32> = (0..2).map(|i| if b2 { c[2 * i + 1] } else { c[2 * i] }).collect();
+        if b3 {
+            d[1]
+        } else {
+            d[0]
+        }
+    }
+
+    /// The literals of the two `bnb_select16(q, ...)` calls in `bnb_code` of common.cuh: (FP4, NF4).
+    fn cuda_code_books() -> (Vec<f32>, Vec<f32>) {
+        let source = include_str!("../cuda/common.cuh");
+        let mut books = Vec::new();
+        let mut rest = source;
+        while let Some(at) = rest.find("return bnb_select16(q, ") {
+            let tail = &rest[at + "return bnb_select16(q, ".len()..];
+            let end = tail.find(");").expect("end of the call");
+            let values: Vec<f32> = tail[..end].split(',').map(|v| v.trim().trim_end_matches('f').parse::<f32>().unwrap_or_else(|e| panic!("{v:?}: {e}"))).collect();
+            books.push(values);
+            rest = &tail[end..];
+        }
+        assert_eq!(books.len(), 2, "bnb_code has an FP4 and an NF4 call");
+        let nf4 = books.pop().unwrap();
+        let fp4 = books.pop().unwrap();
+        (fp4, nf4)
+    }
+
+    #[test]
+    fn the_cuda_code_books_are_the_rust_ones_bit_for_bit() {
+        let (fp4, nf4) = cuda_code_books();
+        for (name, cuda, rust) in [("fp4", fp4, bnb::FP4_CODE), ("nf4", nf4, bnb::NF4_CODE)] {
+            assert_eq!(cuda.len(), 16, "{name}");
+            for i in 0..16 {
+                assert_eq!(cuda[i].to_bits(), rust[i].to_bits(), "{name} entry {i}: cuda {} rust {}", cuda[i], rust[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_select_tree_picks_every_entry() {
+        let book: [f32; 16] = std::array::from_fn(|i| i as f32 * 3.0 + 1.0);
+        for q in 0..16u32 {
+            assert_eq!(select16(q, &book), book[q as usize], "q {q}");
+        }
+    }
+
+    /// `decode16<KIND>` of common.cuh for a bitsandbytes type: 16 values of run `run` of a row (the select tree, the scale multiplied into every value).
+    fn decode16_mirror(kind: u32, row: &[u8], run: usize) -> [f32; 16] {
+        let layout = bnb::layout(kind).unwrap();
+        let (block, bytes) = (layout.block, layout.bytes);
+        let e0 = run * 16;
+        let b = &row[e0 / block * bytes..];
+        let scale = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let mut w = [0f32; 16];
+        match layout.family {
+            Family::Int8 => {
+                let q = &b[4 + e0 % 64..];
+                for j in 0..4 {
+                    let word = u32::from_le_bytes([q[4 * j], q[4 * j + 1], q[4 * j + 2], q[4 * j + 3]]);
+                    for i in 0..4 {
+                        w[4 * j + i] = f32::from((word >> (8 * i)) as u8 as i8) * scale;
+                    }
+                }
+            }
+            family => {
+                let book = bnb::code_book(family).unwrap();
+                let q = &b[4 + e0 % block / 2..];
+                let words = [u32::from_le_bytes([q[0], q[1], q[2], q[3]]), u32::from_le_bytes([q[4], q[5], q[6], q[7]])];
+                for j in 0..8 {
+                    let byte = (words[j >> 2] >> (8 * (j & 3))) & 0xff;
+                    w[2 * j] = select16(byte >> 4, book) * scale;
+                    w[2 * j + 1] = select16(byte & 15, book) * scale;
+                }
+            }
+        }
+        w
+    }
+
+    /// `bnb4_gemv_kernel` / `bnb8_gemv_kernel` of bnb.cuh: one warp (32 lanes) per row, lane `l` takes runs `l, l + 32, ...`, the byte-pair table
+    /// gives two values per code byte, a run's partial sum is multiplied by the block scale, the warp sums with an xor butterfly. Returns `Y`
+    /// (`batch x rows`), passes of four tokens as `fllm_bnb_gemv_try` launches them.
+    fn gemv_mirror(kind: u32, weights: &[u8], x: &[f32], rows: usize, cols: usize, bias: Option<&[f32]>) -> Vec<f32> {
+        let layout = bnb::layout(kind).unwrap();
+        let batch = x.len() / cols;
+        let row_bytes = cols / layout.block * layout.bytes;
+        let mut y = vec![0f32; batch * rows];
+        let pairs: Vec<(f32, f32)> = match bnb::code_book(layout.family) {
+            Some(book) => (0..256usize).map(|e| (select16((e >> 4) as u32, book), select16((e & 15) as u32, book))).collect(),
+            None => Vec::new(),
+        };
+        for b0 in (0..batch).step_by(4) {
+            let nb = (batch - b0).min(4);
+            for row in 0..rows {
+                let rp = &weights[row * row_bytes..(row + 1) * row_bytes];
+                let mut acc = vec![[0f32; 32]; nb];
+                for lane in 0..32 {
+                    for run in (lane..cols / 16).step_by(32) {
+                        let e0 = run * 16;
+                        let blk = &rp[e0 / layout.block * layout.bytes..];
+                        let scale = f32::from_le_bytes([blk[0], blk[1], blk[2], blk[3]]);
+                        let mut w = [0f32; 16];
+                        if layout.family == Family::Int8 {
+                            let q = &blk[4 + e0 % 64..];
+                            for j in 0..4 {
+                                let word = u32::from_le_bytes([q[4 * j], q[4 * j + 1], q[4 * j + 2], q[4 * j + 3]]);
+                                for i in 0..4 {
+                                    w[4 * j + i] = f32::from((word >> (8 * i)) as u8 as i8);
+                                }
+                            }
+                        } else {
+                            let q = &blk[4 + e0 % layout.block / 2..];
+                            let words = [u32::from_le_bytes([q[0], q[1], q[2], q[3]]), u32::from_le_bytes([q[4], q[5], q[6], q[7]])];
+                            for j in 0..8 {
+                                let p = pairs[((words[j >> 2] >> (8 * (j & 3))) & 0xff) as usize];
+                                w[2 * j] = p.0;
+                                w[2 * j + 1] = p.1;
+                            }
+                        }
+                        for (b, lanes) in acc.iter_mut().enumerate() {
+                            let xs = &x[(b0 + b) * cols + e0..][..16];
+                            let mut s = 0f32;
+                            for i in 0..16 {
+                                s = w[i].mul_add(xs[i], s);
+                            }
+                            lanes[lane] = s.mul_add(scale, lanes[lane]);
+                        }
+                    }
+                }
+                for (b, lanes) in acc.iter().enumerate() {
+                    let mut v = *lanes;
+                    for offset in [16, 8, 4, 2, 1] {
+                        let old = v;
+                        for (i, slot) in v.iter_mut().enumerate() {
+                            *slot = old[i] + old[i ^ offset];
+                        }
+                    }
+                    y[(b0 + b) * rows + row] = v[0] + bias.map_or(0.0, |b| b[row]);
+                }
+            }
+        }
+        y
+    }
+
+    #[test]
+    fn the_cuda_gemv_arithmetic_matches_the_reference() {
+        let mut rng = Lcg(0xc0da_0001);
+        for kind in KINDS {
+            let block = bnb::layout(kind).unwrap().block;
+            for blocks in [1usize, 2, 3, 5, 9, 17] {
+                let cols = blocks * block;
+                for (rows, batch) in [(1usize, 1usize), (5, 3), (13, 5), (4, 8), (7, 2)] {
+                    let weights = random_weights(kind, rows, cols, &mut rng);
+                    let x = rng.vector(batch * cols, 3.0);
+                    let bias = rng.vector(rows, 1.0);
+                    let have = gemv_mirror(kind, &weights, &x, rows, cols, Some(&bias));
+                    let (mut want, mut scale) = reference(&weights, kind, &x, rows, cols);
+                    for t in 0..batch {
+                        for r in 0..rows {
+                            want[t * rows + r] += f64::from(bias[r]);
+                            scale[t * rows + r] += f64::from(bias[r]).abs();
+                        }
+                    }
+                    let (error, ok) = compare_with(&have, &want, &scale, 1e-5);
+                    assert!(ok, "kind {kind:#x} rows {rows} cols {cols} batch {batch}: {error:e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cuda_run_decoder_matches_the_dequantizer_for_every_run() {
+        // decode16 (tensor-core GEMM tiles, generic kernels, weight_at): every run of 16 values of every block, bit for bit
+        let mut rng = Lcg(0xc0da_0002);
+        for kind in KINDS {
+            let layout = bnb::layout(kind).unwrap();
+            let (rows, cols) = (3, 4 * layout.block);
+            let weights = random_weights(kind, rows, cols, &mut rng);
+            let dense = bnb::dequantize(&weights, kind, rows * cols).unwrap();
+            let row_bytes = cols / layout.block * layout.bytes;
+            for r in 0..rows {
+                for run in 0..cols / 16 {
+                    let w = decode16_mirror(kind, &weights[r * row_bytes..(r + 1) * row_bytes], run);
+                    for (i, v) in w.iter().enumerate() {
+                        assert_eq!(v.to_bits(), dense[r * cols + run * 16 + i].to_bits(), "kind {kind:#x} row {r} run {run} element {i}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_tensor_core_tiles_round_to_f16_within_the_stated_tolerance() {
+        // tc_gemm.cu decodes a weight run to f32 and stores it as f16 (rounding to nearest even), the activations are f16 too: each product
+        // carries a relative error of at most 2 * 2^-11 (+ the f16 range); compare with the f32 reference on the scale of the absolute terms
+        let mut rng = Lcg(0xc0da_0003);
+        for kind in KINDS {
+            let layout = bnb::layout(kind).unwrap();
+            let (rows, cols, batch) = (9, 6 * layout.block, 5);
+            let weights = random_weights(kind, rows, cols, &mut rng);
+            let x = rng.vector(batch * cols, 2.0);
+            let row_bytes = cols / layout.block * layout.bytes;
+            let mut have = vec![0f64; batch * rows];
+            for r in 0..rows {
+                let mut wh = Vec::with_capacity(cols);
+                for run in 0..cols / 16 {
+                    wh.extend(decode16_mirror(kind, &weights[r * row_bytes..(r + 1) * row_bytes], run).map(|v| half::f16::from_f32(v).to_f32()));
+                }
+                for t in 0..batch {
+                    have[t * rows + r] = wh.iter().zip(&x[t * cols..(t + 1) * cols]).map(|(w, v)| f64::from(*w) * f64::from(half::f16::from_f32(*v).to_f32())).sum();
+                }
+            }
+            let (want, scale) = reference(&weights, kind, &x, rows, cols);
+            for i in 0..have.len() {
+                assert!((have[i] - want[i]).abs() <= 1.5e-3 * scale[i] + 1e-6, "kind {kind:#x} output {i}: {} vs {}", have[i], want[i]);
+            }
+        }
+    }
+
     /// `cargo test --release -p fllm-engine cpu_bnb -- --ignored --nocapture`: weight bytes read per second at decode and weight
     /// multiply-accumulates per second at a 64-token prompt, per kernel and type, on one thread (`FLLM_BENCH_THREADS` for more).
     #[test]
