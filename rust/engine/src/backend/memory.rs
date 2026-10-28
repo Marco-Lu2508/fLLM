@@ -35,6 +35,10 @@ fn tensor_bytes(t: &fllm_gguf_probe::TensorInfo) -> u64 {
         .iter()
         .try_fold(1u64, |acc, &d| acc.checked_mul(d))
         .unwrap_or(0);
+    // packed EXL2 / EXL3 blobs have no fixed block size: the blob is what the device holds (backends without a kernel expand to F16)
+    if fllm_gguf_probe::exl::is_exl_type(t.type_id) {
+        return t.payload_len;
+    }
     let kind = super::QuantType::from_gguf_type_id(t.type_id);
     // sizes of the device layouts: Q6_K blocks are padded to 224 bytes, IQ4_XS becomes IQ4_NL blocks (144 per 256
     // values), MXFP4 blocks carry an fp16 scale (18 bytes)

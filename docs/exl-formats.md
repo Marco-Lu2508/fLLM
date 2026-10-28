@@ -1,8 +1,9 @@
 # EXL checkpoint import
 
 This description was written from the upstream encoders and reconstruction kernels
-before implementing the readers. It describes checkpoint bytes, not the shuffled
-in-memory representation used by the CUDA GEMM kernels.
+before implementing the readers. The first two sections describe checkpoint bytes, not the shuffled
+in-memory representation used by the upstream CUDA GEMM kernels; the native fLLM storage and
+kernels are described under "Native storage and inference".
 
 ## Sources and confirmed EXL2 layout
 
@@ -79,28 +80,72 @@ needed. Architecture names and mappings remain the existing conversion plan's
 responsibility. Preserve quantization_config as provenance, including bits,
 head_bits and calibration, without using average bits to decode any matrix.
 
-## Phase 2: native EXL2 CPU design (no kernel implementation)
+## Native storage and inference (GGUF types `EXL2` and `EXL3`)
 
-Keep q_weight, group offsets, input permutations, scale nibbles and maxima in
-their original mapped representation. For GEMV, first gather input activations
-into packed-input order using q_perm (or derive it from q_invperm once). Traverse
-groups in their stored order and dispatch a width-specific decoder for
-2/3/4/5/6/8 bits. Process a small tile of output columns; each packed row then
-supplies consecutive u32 words to SIMD lanes. Handle cross-word 3/5/6-bit codes
-using the checkpoint bitstream rather than the upstream GPU runtime shuffle.
+Since this change the converter (and the direct loader, which writes the same bytes) keeps EXL matrices packed: a matrix
+becomes one self-describing blob of the fLLM-specific GGUF tensor type `EXL2` (0x8000_0030) or `EXL3` (0x8000_0031). The blob
+layout is defined, and documented byte by byte, in `rust/gguf-probe/src/exl.rs`; the length of a blob is stored in its 64-byte
+header because it depends on the bit widths of the matrix (the GGUF probe reads it from there).
 
-Decode group scales once per output tile. Convert centered codes to vector
-floats and accumulate dot products without materializing a dense weight matrix.
-A fidelity mode can reproduce the importer's intermediate F16 rounding; a faster
-F32 scale multiply needs a separately stated accuracy contract. Prefill/GEMM can
-reuse the same decoder into a bounded micro-panel consumed immediately by a
-matrix multiplication kernel. Dispatch based on matrix dimensions and row count,
-with a scalar fallback for tails. Cache only descriptors and bounded panels.
+* **EXL2 blob**: header, a 16-byte entry per group (`n`, `bits`, `q_scale_max`, word offset, first stored input), the input
+  permutation `perm` (`q_perm`, the inverse of the checkpoint's `q_invperm`; `x'[k] = x[perm[k]]`), then one packed row per output
+  feature: the LSB-first bitstreams of all groups (each group starts on a 32-bit word, 2..8-bit codes may straddle words) followed
+  by the 4-bit scale index of every group. Codes, scale indices and group maxima are copied bit for bit from `q_weight`,
+  `q_scale` and `q_scale_max`; nothing is re-quantized, so the original quality is kept exactly. Row order follows the converter's
+  row reordering of attention weights (rows are independent), which is why a native tensor can be sliced by rows.
+* **EXL3 blob**: header, `suh` and `svh` (F16), an output map (the converter's row reordering is applied *after* the output
+  transform, as a scatter, because the 128-point transform mixes outputs) and the trellis tiles of the checkpoint (16x16 tail-biting
+  rings of K-bit symbols), ordered tile column by tile column. The codebook (default, `mcg`, `mul1`) and K are in the header.
+* **Memory**: EXL2 at 4 bits per weight is about 0.5 byte per weight plus 4 bytes per input column and matrix for the
+  permutation; the F16 expansion this replaces took 2 bytes per weight. EXL3 takes K bits per weight (K = 1..8). Nothing but the
+  blob is held per matrix; the engine decodes while multiplying.
+* **Not native** (still expanded to F16, as before): `--dtype f16|f32`; stacked expert tensors (one blob cannot hold the different
+  group structures and permutations of several experts); fractional EXL3 widths, separate `scale` tensors and n-gram rings (rejected
+  at import, see above).
 
-This is a design, not a performance result. Alignment, SIMD widths, group ordering,
-permutation gather cost and interaction with the existing thread pool need
-measurement in a later task authorized to run models and benchmarks. Corrupt
-groups and permutations must be validated before entering any kernel.
+Where the blobs run:
+
+| Backend | Behaviour |
+| --- | --- |
+| CPU (every OS/architecture) | `rust/engine/src/cpu_exl.rs`, portable Rust, parallel over output rows (EXL2) or 16-output tile columns (EXL3). EXL2: gather the activations into stored order, decode each group (2/4/8-bit by word, 3/5/6-bit through a 64-bit bit buffer) into a small scratch vector, dot it with the tokens of the batch, scale once per group. EXL3: scale and Hadamard-transform the input, decode every 16x16 tile (16-bit ring window, 65536-entry codebook table) and multiply it against all tokens at once, transform the result back and scatter through the output map. No dense matrix is built. |
+| CUDA (NVIDIA, sm_60 and later) | `rust/engine/cuda/exl.cu`: CUDA-core kernels reading the blob in place. EXL2: one warp per output row and tile of up to 16 tokens. EXL3: input transform kernel, trellis product kernel (one block per 16 outputs, one thread per tile symbol), output transform and scatter kernel; scratch is the stream's activation buffer. No tensor cores yet. |
+| AMD (HIP), Vulkan/wgpu, Metal, SYCL, TPU, NPU, older NVIDIA | no native kernel: the decoder expands the blob to F16 once, at upload (`compute::dequantize`, one notice on stderr), then uses the normal F16 path. Correct, but not memory-efficient on those devices. |
+| Tensor-parallel splitting (`parallel/`) | not supported for EXL blobs (a clear error names the type); use `--dtype f16` for such a run. |
+
+Indicative CPU speed (`cpu_exl::tests::bench_cpu_decode_speed`, one 4096x4096 matrix, 10 threads of a shared build server, so
+only an order of magnitude): EXL2 7.2 G weights/s at batch 1 (2.3 ms), 3.3 G/s at batch 8, 0.65 G/s at batch 64; EXL3 (3 bits) 1.4 G
+weights/s at batch 1 (12 ms), 1.0 G/s at batch 8, 0.35 G/s at batch 64. That is roughly 1 token/s (EXL2) and 0.2 token/s (EXL3) for a
+7B model on such a machine: the kernels are portable scalar code that the compiler vectorizes, not tuned SIMD, and EXL3 pays for a
+ring-window extraction and a table lookup per weight. They make every EXL model run on every CPU with the memory of the packed
+weights; they are not a speed claim.
+
+Accuracy contract: the importer's expanded path rounds to F16 after every stage; the native kernels apply the group scale and the
+Hadamard transforms in F32. The two agree to about 1e-3 relative per weight for EXL2 (F16 rounding of scale and product) and to
+about 1e-2 of the matrix RMS for EXL3 (checked per element against the expanded matrix); logits of an end-to-end model agree to
+5e-3. Corrupt groups, permutations and output maps are rejected when the weight is loaded, before a kernel sees them.
+
+What is verified, and how:
+
+* Format arithmetic: pack/unpack of every width at every bit offset including words straddled by 3-, 5- and 6-bit codes, group
+  offsets, permutation, ring windows and tile positions (`fllm_gguf_probe` `exl::tests`, `cpu_exl::mirror_tests`).
+* Converter: direct load equals converted file byte for byte, native and expanded (`direct_format_tests::exl2_*`, `exl3_*`);
+  native blob against the importer's expanded matrix for all EXL2 widths and EXL3 widths 1..8 with all codebooks, with and without row
+  reordering (`exl2::tests::native_blob_*`, `exl3::tests::native_*`); all 3 x 65536 codebook values equal the importer's.
+* CPU kernels against the dequantized matrix for all batch shapes and widths (`cpu_exl::tests`) and an end-to-end synthetic EXL2
+  model against an independent dequantization, logits within 5e-3, both native and `--dtype f16`
+  (`import_tests::exl2_checkpoint_stays_packed_and_matches_the_dequantized_reference`). An end-to-end EXL3 model needs dimensions
+  of 128, larger than the engine test model; EXL3 is covered by the converter and kernel tests above.
+* CUDA: `exl.cu` compiles with nvcc 12.8 for sm_75, sm_80, sm_89, sm_90 and sm_120 (and `api.cu` with its wrapper), and the
+  `cuda` feature of the engine type-checks. The device arithmetic (bit extraction, scale nibbles, permutation, ring window, codebook
+  intrinsics modelled with exact arithmetic, tile placement, Hadamard butterflies, output map) is repeated on the host and compared
+  with the CPU kernels for every width and codebook (`cpu_exl::mirror_tests`, including all 3 x 65536 codebook states). **Not yet run on
+  a GPU**: the kernels have never executed. `fllm-rs selftest --quants exl2,exl3` (group `linear`, fast cases: odd group counts,
+  mixed widths, batches 1..356, EXL3 passes of 128 tokens) compares them with the CPU reference and must be run on an NVIDIA GPU
+  before the CUDA path is relied on. Performance is unmeasured; the decode kernels are written for correctness and simplicity (no
+  shared-memory staging of the activations, no tensor cores), so expect them to be well below the bandwidth limit.
+
+The MIT notice of ExLlamaV2/V3 below applies to the layout facts and constants that were taken from them; no kernel source code
+of either project was copied.
 
 ## MTP / NextN draft source
 

@@ -2532,6 +2532,15 @@ impl RustDecoder {
         let upload_linear =
             |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
                 if let Some((kind, bytes)) = linear.packed_weights() {
+                    // packed EXL2 / EXL3 blobs are expanded to F16 here when the backend has no native kernel for them
+                    if fllm_gguf_probe::exl::is_exl_type(kind) && !backend.capabilities().supports_quant(crate::backend::QuantType::from_gguf_type_id(kind)) {
+                        let half = crate::cpu_exl::expanded_f16(bytes, kind, linear.rows, linear.cols)?;
+                        static NOTICE: std::sync::Once = std::sync::Once::new();
+                        NOTICE.call_once(|| eprintln!("[fllm-rs] the {} backend has no EXL2/EXL3 kernel: packed weights are expanded to F16 on upload (first: {name})", backend.name()));
+                        return backend
+                            .upload_weight_scaled(name, &half, crate::backend::QuantType::F16, linear.rows, linear.cols, linear.bias.as_deref(), linear.scale)
+                            .map_err(|e| e.to_string());
+                    }
                     // MLX affine weights on a backend without a kernel for them: expanded to f16 once, here (documented in docs/gpu-backends.md)
                     let quant = crate::backend::QuantType::from_gguf_type_id(kind);
                     if quant.mlx_affine().is_some() && !caps.supports_quant(quant) {

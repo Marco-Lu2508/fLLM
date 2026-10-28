@@ -146,7 +146,8 @@ files are MLX-style structural models only; no MLX source is included.
 
 https://github.com/turboderp-org/exllamav3, MIT, Copyright (c) 2025 Turboderp (`licenses/ExLlamaV3-MIT.txt`, also reproduced in `docs/exl-formats.md`).
 `rust/checkpoint/src/exl3.rs` (and the layout description in `docs/exl-formats.md`): the EXL3 codebook constants (`mcg` / `mul1` multipliers) and the trellis
-layout are derived from ExLlamaV3 (layout facts / constants); the decoder is written in Rust for fLLM.
+layout are derived from ExLlamaV3 (layout facts / constants); the decoder is written in Rust for fLLM. The native kernels (`rust/engine/src/cpu_exl.rs`, `rust/engine/cuda/exl.cu`) and
+the blob layout (`rust/gguf-probe/src/exl.rs`) are written from those facts; no ExLlamaV2 or ExLlamaV3 kernel source was copied or adapted.
 
 ### rocWMMA and ROCm (AMD)
 

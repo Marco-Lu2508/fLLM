@@ -28,6 +28,8 @@ int fllm_cuda_copy(FllmStream *st, void *dst, const void *src, size_t bytes);
 
 int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows,
                      int cols, int batch);
+// Packed ExLlamaV2 / ExLlamaV3 weights (GGUF types 0x80000030 / 0x80000031), read in place without expansion (exl.cu)
+int fllm_cuda_linear_exl(FllmStream *st, const void *w, int kind, const float *x, float *y, const float *bias, int rows, int cols, int batch);
 int fllm_cuda_linear_nvfp4(FllmStream *st, const void *w, const float *x, float *y, const float *bias, float gscale,
                            int rows, int cols, int batch);
 int fllm_cuda_embedding(FllmStream *st, const void *w, int kind, const int64_t *ids, int n, float *out, int cols);
