@@ -271,6 +271,13 @@ struct ModernBertLayer {
     ffn_norm: PlainNorm,
     global: bool,
 }
+/// Whether the small helper models (text encoders, vision towers) can run on `device`. They use the portable graphics backends only
+/// (`vulkan`, `metal`, `dx12`, `gpu`, `wgpu`); on any other device (`cuda`, `hip`, a TPU ...) they run on the CPU, which is fast enough for
+/// them and keeps `serve --device cuda --embeddings` working instead of failing to start.
+pub fn helper_model_uses_gpu(device: &str) -> bool {
+    matches!(device, "vulkan" | "metal" | "dx12" | "gpu" | "wgpu")
+}
+
 pub struct BertEncoder {
     tokenizer: EncoderTokenizer,
     token: Tensor,
@@ -1734,6 +1741,10 @@ impl BertEncoder {
     }
     pub fn set_device(&mut self, device: &str) -> Result<(), String> {
         if matches!(device, "cpu" | "auto") {
+            return Ok(());
+        }
+        if !crate::encoder::helper_model_uses_gpu(device) {
+            eprintln!("[fllm-rs] this model part runs on the CPU ({device} is used for the language model only)");
             return Ok(());
         }
         #[cfg(feature = "rust-gpu")]

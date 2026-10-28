@@ -370,6 +370,10 @@ impl QwenVlEncoder {
         if matches!(device, "cpu" | "auto") {
             return Ok(());
         }
+        if !crate::encoder::helper_model_uses_gpu(device) {
+            eprintln!("[fllm-rs] this model part runs on the CPU ({device} is used for the language model only)");
+            return Ok(());
+        }
         #[cfg(feature = "rust-gpu")]
         {
             let gpu = crate::gpu::GpuContext::new(device)?;
