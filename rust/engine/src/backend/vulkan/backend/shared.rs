@@ -23,6 +23,13 @@ pub(crate) fn env_on(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
+/// `FLLM_VULKAN_NO_EXT_FORMATS=1`: block-wise FP8, bitsandbytes, MLX affine, EXL2 and EXL3 weights are not read natively but expanded to F16 at upload, as
+/// before the kernels existed (an escape hatch for a driver that miscompiles one of them). Read once per process.
+pub fn ext_formats_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| env_on("FLLM_VULKAN_NO_EXT_FORMATS"))
+}
+
 /// `FLLM_VULKAN_VERBOSE` is set: the backend says which shader variants it plans (and why a device probe found nothing, see `device_info`).
 pub fn verbose() -> bool {
     static VERBOSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

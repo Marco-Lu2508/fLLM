@@ -15,7 +15,7 @@ pub mod layout;
 pub mod plan;
 
 pub use layout::{
-    exl2_device_type, exl2_device_type_of, exl3_device_type, exl3_device_type_of, extended_formats, is_exl3, format_info, pack_rows_of_blob, pack_weight, pack_weight_slices, rows_per_slice, supported_formats, DeviceLayout,
+    exl2_device_type, exl2_device_type_of, is_extended_format, exl3_device_type, exl3_device_type_of, extended_formats, is_exl3, format_info, pack_rows_of_blob, pack_weight, pack_weight_slices, rows_per_slice, supported_formats, DeviceLayout,
     uses_perm, FormatInfo, Geometry, PackedWeight, WeightSlice,
 };
 pub use plan::{

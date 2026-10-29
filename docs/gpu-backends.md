@@ -358,7 +358,7 @@ device. The experts of a mixture-of-experts layer count as feed-forward weights 
 
 Q2_K, Q3_K and the IQ family are decoded natively (generic decoders in `iq_decode.cuh`; the list in the `quantized_linear` row above is `NATIVE_KINDS` of `backend/cuda.rs` plus the IQ4 and FP4 formats with their own kernels). Only tensor types outside that list and unusual shapes are converted once on upload (the conversion is logged).
 
-EXL2 / EXL3 tensors are the exception to "native or converted": CUDA reads the packed blob in place (`cuda/exl.cu`, see [exl-formats.md](exl-formats.md)); Metal reads EXL2 natively ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); EXL3 is expanded); every other backend (wgpu/Vulkan, SYCL, TPU, NPU, AMD HIP, NVIDIA below sm_60) does not list the type as supported, so the decoder expands the blob to F16 once, at upload, and prints one notice. That keeps those backends correct but gives them no memory saving.
+EXL2 / EXL3 tensors are the exception to "native or converted": CUDA reads the packed blob in place (`cuda/exl.cu`, see [exl-formats.md](exl-formats.md)); Metal reads EXL2 natively ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); EXL3 is expanded); the native Vulkan backend reads both ([below](#native-vulkan-block-wise-fp8-bitsandbytes-mlx-affine-and-exl2--exl3)); every other backend (wgpu, SYCL, TPU, NPU, AMD HIP, NVIDIA below sm_60) does not list the type as supported, so the decoder expands the blob to F16 once, at upload, and prints one notice. That keeps those backends correct but gives them no memory saving.
 
 ### Older GPUs
 
@@ -467,8 +467,8 @@ the 16 bits of the older expanding conversion.
   when it is read.
 - **MoE experts** in these types run through the per-expert `quantized_linear` (the grouped expert GEMM and the dp4a fast path list
   their formats and do not include them).
-- **Other devices**: Metal has its own kernels ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); `FLLM_METAL_NO_BNB=1` expands to F16 instead), Vulkan expands the weights to F16 when they are uploaded, the wgpu
-  backend to F32; each logs the format and the size once and needs about 4 times (wgpu: 7 times) the packed size in device memory.
+- **Other devices**: Metal has its own kernels ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); `FLLM_METAL_NO_BNB=1` expands to F16 instead), the native Vulkan backend reads them in place ([below](#native-vulkan-block-wise-fp8-bitsandbytes-mlx-affine-and-exl2--exl3); `FLLM_VULKAN_NO_EXT_FORMATS=1` expands to F16 instead), the wgpu
+  backend expands them to F32; each logs the format and the size once and needs about 4 times (wgpu: 7 times) the packed size in device memory.
   The CPU backend runs the packed-weight kernels.
 - **Status**: compiled with nvcc 12.8 for sm_80, sm_89, sm_90 and sm_120 (no errors, no register spills; `cargo check --features cuda` with the whole `build.rs` nvcc build for sm_80 passes too); the arithmetic of the
   kernels (byte-pair table, run and block indexing, lane partition, warp butterfly, FP16 rounding of tiles) is mirrored on the host
@@ -501,6 +501,37 @@ get `g = row * nb_blocks + blk` and `dec8`, the row-aware formats (FP8B, EXL2) `
 are then expanded to F16 at upload, exactly as before): `FLLM_METAL_NO_FP8B=1`, `FLLM_METAL_NO_BNB=1`, `FLLM_METAL_NO_EXL=1` (and `FLLM_METAL_NO_MLX=1`
 for the MLX kernels). EXL3 has no Metal kernel (Hadamard transforms and trellis decoding): it is expanded to F16 at upload with the usual notice.
 MoE experts of these formats run through the per-expert `quantized_linear` like on the other backends; the `moe_linear_*` kernels do not read them.
+
+### Native Vulkan: block-wise FP8, bitsandbytes, MLX affine and EXL2 / EXL3
+
+The native Vulkan backend (`--device vulkan`, feature `vulkan`) reads these formats in place with the shaders of its quantized-linear family
+(`shaders/vulkan/mv_<fmt>_*.comp` for 1 to 8 tokens, `mm_<fmt>_*` and `mmq_<fmt>_i` above; the contract is `shaders/vulkan/INTERFACE_QUANT.md`). Before,
+`upload_weight` expanded them to F16 (2 bytes per weight, 4 to 8 times the packed size for bitsandbytes and MLX). **What ran: every shader executed on Mesa
+lavapipe (a CPU implementation of Vulkan) in the Vulkan self test (`selftest-gpu --device vulkan`, exact and fast pass, with and without
+`FLLM_VULKAN_FORCE_IDOT=1`) and the repacking, the decoders (as Rust transcriptions of the GLSL) and the planner in unit tests. What did not run: any physical
+GPU. The cooperative-matrix variants (`mm_<fmt>_c`, planned only on devices with `VK_KHR_cooperative_matrix`) compile but lavapipe has no cooperative
+matrices, so they have not executed at all. The first runs on the owner's hardware (AMD Radeon 780M, Intel iGPUs, NVIDIA cards) are the real test; speed
+has not been measured.**
+
+| Format | Device image | Shaders | Notes |
+| --- | --- | --- | --- |
+| `FP8B`, every power-of-two tile (and `FP8M`) | plane 0: the E4M3 codes row-major; plane 1: one f32 scale per row and tile column (the scale of a tile repeated for each row of the tile, so that slices of rows are self-contained) | `mv_fp8b_s`, `mm_fp8b_s` (float decoder `e4m3(code) * scale` as `cpu_fp8.rs`) | 1 byte per weight plus `4 / tile_columns` (3 % for 128-wide tiles). `FP8M` is converted on upload to tiles of one row (`cpu_fp8::fp8m_as_fp8b`). Rows must be a multiple of 8 columns and tiles at least 8 wide, else the weight is expanded to F16 with a notice |
+| `NF4B64/128`, `FP4B64/128` | plane 0: the code bytes of a block as in the file, plane 1: the f32 absmax of every block | `mv_<fmt>_s`, `mm_<fmt>_s` (`book[nibble] * absmax`, the books are the f32 bit patterns of `bnb::NF4_CODE` / `FP4_CODE`) | the same size as the file |
+| `INT8R` | plane 0: the int8 codes, plane 1: the f32 scale of every block | `mv_int8r_{s,i}`, `mm_int8r_{s,i,c}`, `mmq_int8r_i` | |
+| `MLXA`, 2 / 3 / 4 / 5 / 6 / 8 bits, every group that is a multiple of 32 (f16 and bf16 scales) | plane 0: `bits` words per block of 32 codes (the bit stream of the file, codes of 3, 5 and 6 bits straddle words), plane 1: one word `scale \| bias << 16` per group | `mv_mlx<bits>_{s,i}`, `mm_mlx<bits>_{s,i,c}`, `mmq_mlx<bits>_i`; the group (as blocks of 32 per scale) and the scale type travel in the push constants, so six shaders cover all 36 types | 8-bit codes are stored as `code - 128` with `bias + 128 * scale` as the offset (the chunk model keeps the codes in int8 lanes) |
+| `EXL2` | plane 0: rows of the blob with the scale nibbles first, plane 1: word offset and `bits \| group << 8` of every block of 32 inputs, plane 2: the group maxima; the permutation of the blob goes to `DeviceWeight::perm` | `mv_exl2_{s,i}`, `mm_exl2_{s,i,c}`, `mmq_exl2_i`; the activations are gathered through the permutation by the prepass of the act-order GPTQ weights (`quant_permute`, `quant_act_q8_perm`) | groups must be a multiple of 32 inputs (real EXL2 groups are), the row at most 65535 words; else expanded to F16. The row length is part of the device type id (`0x8002_0000 \| row_words`) |
+| `EXL3` | the blob as it is (sign vectors, output map, trellis tiles) | three passes per chunk of 128 tokens: `exl3_pre` (sign vector and Hadamard transform), `exl3_mm` (the trellis tile of 16 x 16 weights decoded in shared memory with the codebook arithmetic of `exl.rs`, multiplied with 16 to 128 tokens), `exl3_post` (Hadamard transform, scatter through the output map, bias) | rows and columns multiples of 128; the blob has to fit one storage binding (the output map scatters over all rows, so it cannot be cut into slices), else expanded to F16. Width and codebook travel in the device type id (`0x8003_0000 \| codebook << 8 \| bits`) |
+
+The decoders follow the CPU kernels (`cpu_fp8`, `cpu_bnb`, `cpu_mlx`, `cpu_exl`, the references of the self tests). FP8, NF4 and FP4 decode to floats, so
+they have only the f32 shaders (`_s`: 1 to 8 tokens and the 64 x 64 tile for prompts); the integer formats (`INT8R`, MLX, EXL2) also have the int8-dot-product
+and tiled prompt variants like Q4_K and friends (the activations are rounded to int8 in blocks of 32 there, the "fast" tolerance of the self test). Switch:
+`FLLM_VULKAN_NO_EXT_FORMATS=1` lists none of these formats as supported and expands them to F16 at upload as before; `FLLM_VULKAN_EXACT=1` plans the f32 shaders only.
+MoE experts of these formats run through the per-expert `quantized_linear` (the `moe_linear_*` shaders do not read them), and embedding tables in them are
+looked up on the host (no `embed_*` shader).
+
+Self test on lavapipe: `fllm-rs selftest-gpu --device vulkan --only linear,fp8blk --quants fp8b,fp8m,nf4b64,nf4b128,fp4b64,fp4b128,int8r,exl2,exl3`, `--only mlx`; the
+`fp8blk` group runs on every backend that lists `FP8B` (the tensor-core checks only on CUDA). Unit tests: `backend::vulkan::weights::tests::ext`,
+`backend::vulkan::weights::exl3`, `backend::vulkan::backend::{upload,tests}`.
 
 ### NVFP4 models
 

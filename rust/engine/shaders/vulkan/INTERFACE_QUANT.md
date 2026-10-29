@@ -2,6 +2,8 @@
 
 Verification level: **L0** (every shader compiles with `glslc --target-env=vulkan1.2 -O` and passes `spirv-val`; the layouts are checked by CPU unit tests
 against `compute::dequantize`; the shader text was additionally executed as C++ on the CPU against an f64 reference, see `emu/README.md`; no shader has ever run on a GPU).
+The formats added later (block-wise FP8, bitsandbytes, MLX affine, EXL2, EXL3: see the end of this file) additionally ran on Mesa lavapipe in `fllm-rs selftest-gpu --device vulkan`
+against the CPU reference, which is execution of the shader code but not on a GPU.
 
 `Stream::quantized_linear`: `out[b][r] = scale * dot(x[b], w[r]) + bias[r]` for `b < batch`, `r < rows`.
 `rows/cols/scale/bias` come from `DeviceWeight`. The Rust side is `src/backend/vulkan/weights.rs` (`pack_weight`, `plan_quantized_linear`).
@@ -15,7 +17,8 @@ against `compute::dequantize`; the shader text was additionally executed as C++ 
 | `mm_scalar.comp` / `mm_idot.comp` / `mm_coopmat.comp` | matrix-matrix for batch > 8: f32 / int8 dot / cooperative matrices |
 | `quant_act_q8.comp` (+ `PERM`) | prepass: f32 activations -> int8 blocks of 32 with float scales (for the `_i` shaders) |
 | `quant_permute.comp` | prepass: gathers the columns for act-order GPTQ (`Q4ZP*`) with the f32 shaders |
-| `variants_quant.list` | the 83 compiled shaders: `mv_<fmt>_s` / `_i`, `mm_<fmt>_s` / `_i` / `_c`, `quant_act_q8`, `quant_act_q8_perm`, `quant_permute` |
+| `variants_quant.list` | the compiled shaders: `mv_<fmt>_s` / `_i`, `mm_<fmt>_s` / `_i` / `_c`, `mmq_<fmt>_i`, `quant_act_q8`, `quant_act_q8_perm`, `quant_permute` (FP8B, NF4 and FP4 have only the `_s` shaders) |
+| `exl3_pre.comp`, `exl3_mm.comp`, `exl3_post.comp` | the three passes of an ExLlamaV3 product (not part of the chunk model, see the end of this file) |
 | `emu/` | CPU-only checks: compile + validate all variants, run the decoders and the whole shaders as C++ against the dequantized reference (`emu/README.md`) |
 
 `<fmt>` = `q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q4z32 q4z64 q4z128` (`Q4ZP32/64/128` use the `q4z*` shaders and a prepass).
@@ -33,7 +36,7 @@ matrix tile would waste at least half of the math and the decode is memory bound
 Precision: `_s` meets the FP32 worst-case bound of `selftest-gpu`'s exact pass (`FLLM_VULKAN_EXACT=1` / `PlanOptions::exact` makes the planner use only `_s`). `_i` adds the rounding of
 the activations to 8 bit (relative error ~ 0.4 % of the largest value of each 32-block), `_c` rounds weights and activations to f16; both belong to the "fast" tolerance.
 
-Build: all 83 variants are compiled by `build.rs` when feature `vulkan` is on (about 20 s with glslc). The `_c` lines end in `#optional`; see the notes in `build.rs`.
+Build: all variants are compiled by `build.rs` when feature `vulkan` is on (about 20 s with glslc). The `_c` lines end in `#optional`; see the notes in `build.rs`.
 
 ## Bindings (descriptor set 0, all `std430` storage buffers)
 
@@ -123,3 +126,26 @@ The Rust mirror in `weights/mirror.rs` repeats the GLSL chunk decoders word for 
 - `mm_*_c` assumes the 16x16x16 cooperative-matrix shape and a workgroup of exactly 4 subgroups; devices that only offer other shapes (e.g. 8x8x16) fall back to `_i`/`_s`.
 - The `_i` matvec shaders re-read the weight words per chunk (no register blocking across chunks); decode speed relative to ggml-vulkan is unknown.
 - f16 overflow in `_c` for activations above 65504 is not guarded.
+
+## Formats added for the native formats of the other backends
+
+Chunk decoders in `_q_fmt_fp8b.glsl`, `_q_fmt_nf4.glsl` (NF4 and FP4: `FMT_NF4` / `FMT_FP4`, `BNB_QK`), `_q_fmt_int8r.glsl`, `_q_fmt_mlx.glsl` (`MLX_BITS`) and `_q_fmt_exl2.glsl`;
+the Rust side is `weights/layout.rs` (`Geometry`), the test transcriptions are in `weights/mirror.rs` and `weights/tests/ext.rs`. `FormatInfo::float_chunk` formats (FP8B, NF4, FP4)
+define `FLOAT_CHUNK` and `wchunk_f(g, cin, out float v[8])` instead of `wchunk`: their values are not small integers, so only `mv_scalar.comp` / `mm_scalar.comp` accept them (the other
+shaders `#error`, the planner never plans another variant for them). The format parameter that the planner cannot derive from the block index travels in push constant `off2`
+(`DeviceLayout::param`; for EXL2 `off3`).
+
+| format (QK) | P0 | P1 | P2 | `off2` / `off3` |
+|---|---|---|---|---|
+| FP8B (8) | `rows * cols` E4M3 codes, row-major | f32 scale per (row, tile column) = `rows * ceil(cols / block_cols)` words: the tile's scale repeated for the rows of the tile | | `off2` = `block_cols` (a multiple of 8, `cols` a multiple of 8). `g = row * nb + chunk`: row = `g / nb` |
+| NF4 / FP4 (64 or 128) | `QK / 2` code bytes (byte j: element 2j in the high, 2j + 1 in the low nibble) | 4: f32 absmax | | |
+| INT8R (64) | 64: int8 codes | 4: f32 scale | | |
+| MLX (32 codes whatever the group) | `bits` words per block of 32 codes (little-endian bit stream, codes may straddle words) | one word `scale \| bias << 16` per *group* (f16 or bf16) | | `off2` = `group / 32 \| bf16 << 16`; scale word = `off1 + g / (group / 32)`; 8-bit codes are `code ^ 0x80` with `wm = bias + 128 * scale` |
+| EXL2 (8) | rows of `row_words` words: the scale nibbles of the groups (eight per word), then the group bitstreams | two words per block of 32 inputs: word offset of its codes in the row, `bits \| group << 8` | one f32 per group: `q_scale_max / 256` | `off3` = `row_words`; `g = row * nb + chunk`; the activations are gathered through the blob's permutation (`DeviceWeight::perm`, the Q4ZP prepasses) |
+
+EXL3 does not use the chunk model: `exl3_pre` (grid `cols / 128 x chunk`) multiplies the activations of tokens `tok0 ..` with the sign vector `suh` of the blob and applies the normalised
+128-point Hadamard transform in shared memory, `exl3_mm` (grid `rows / 16`, spec constant 0 = groups of 16 tokens per pass) decodes the 16 x 16 trellis tile of each input tile
+(tail-biting ring of 256 symbols of K bits, a 16-bit window hashed to a binary16 codebook value) and multiplies it with up to 128 tokens, `exl3_post` (grid `rows / 128 x chunk`)
+transforms back and scatters through the output map (bias, tensor scale). Bindings: pre `weights, x, x2`; mm `weights, x2, z`; post `weights, z, out, bias`; the blob is bound whole (header words 6,
+7, 9, 10, 11, 12 give the offsets, K and the codebook). Push constants: pre `cols, tok0`; mm `rows, cols, chunk`; post `rows, tok0, flags, scale`. Plan: `weights/exl3.rs`; the stream records
+the passes per chunk of 128 tokens (`stream/linear.rs`, `record_exl3`) with two scratch buffers (`x2`: chunk x cols floats, `z`: chunk x rows floats).

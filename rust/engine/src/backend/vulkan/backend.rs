@@ -36,6 +36,9 @@ pub fn native_quants() -> Vec<QuantType> {
     quants.push(QuantType::IQ4_XS);
     // bitsandbytes NF4 / FP4 / int8, block-wise FP8 and MLX affine types (shaders/vulkan/_q_fmt_{nf4,int8r,fp8b,mlx}.glsl); per-row scaled FP8 (FP8M)
     // is block-wise FP8 with one tile per row (converted on upload, `backend/upload.rs`)
+    if shared::ext_formats_disabled() {
+        return quants;
+    }
     quants.extend(extended_formats());
     quants.push(QuantType::Fp8Marlin);
     // ExLlamaV2 matrices (shaders/vulkan/_q_fmt_exl2.glsl) and ExLlamaV3 matrices (exl3_{pre,mm,post}.comp)

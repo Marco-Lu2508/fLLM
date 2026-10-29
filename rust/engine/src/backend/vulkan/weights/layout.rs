@@ -198,6 +198,15 @@ pub fn supported_formats() -> &'static [QuantType] {
     ]
 }
 
+/// Whether `quant` is one of the formats added for the native formats of the other backends (the ones `FLLM_VULKAN_NO_EXT_FORMATS` switches off).
+pub fn is_extended_format(quant: QuantType) -> bool {
+    let id = quant.to_gguf_type_id();
+    fllm_gguf_probe::fp8b_type(id)
+        || fllm_gguf_probe::mlx_affine(id).is_some()
+        || fllm_gguf_probe::bnb::is_bnb(id)
+        || matches!(quant, QuantType::Exl2 | QuantType::Exl3 | QuantType::Fp8Marlin)
+}
+
 /// Formats added for the native formats of the other backends: bitsandbytes NF4 / FP4 / int8, block-wise FP8 (any tile shape is one entry of the capability
 /// list, see `BackendCapabilities::supports_quant`) and the MLX affine types with a group of 32, 64 or 128.
 pub fn extended_formats() -> Vec<QuantType> {

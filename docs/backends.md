@@ -35,7 +35,7 @@ Columns: **L** = Q4_0 Q4_1 Q5_0 Q5_1 Q8_0; **K** = Q2_K Q3_K Q4_K Q5_K Q6_K; **I
 Numbers in square brackets refer to the notes below the table.
 **bitsandbytes** (NF4B64/128, FP4B64/128, INT8R; no column): x86 CPU AVX2 and portable kernels, run by us (`docs/cpu-kernels.md`);
 CUDA decode GEMV and tensor-core prompt path, compiled for sm_80/89/90/120 and never run on a GPU (L0); Metal has its own kernels (L0, see the
-table below the MLXA one); every other backend, including Vulkan, wgpu, the NPU and the TPU path, takes them through a conversion at upload (L0†,
+table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on Mesa lavapipe, never on a GPU; `FLLM_VULKAN_NO_EXT_FORMATS=1` converts instead); every other backend, including wgpu, the NPU and the TPU path, takes them through a conversion at upload (L0†,
 3.6 times the packed size in 16-bit, 7 times in F32; `docs/gpu-backends.md`).
 
 | Hardware | L | K | IQ4 | MX | NV | Q4Z | F |
@@ -69,7 +69,8 @@ MLX affine group quantization (`MLXA`, 2 to 8 bits, groups of 32 or more, see [r
 | CPU (all tiers) | L1: portable Rust with an AVX2 + FMA instance chosen at run time (`cpu_mlx.rs`), f32 activations; the unit tests and the engine tests ran on an x86-64 machine (the AArch64 build uses the portable instance and was not run) |
 | CUDA (NVIDIA) | L0: own kernels on the packed words (GEMV, FP32 tile, WMMA tensor cores from sm_75; `cuda/mlx_affine.cu`) compiled with nvcc 12.8 for sm_80/89/90/120; the device self test `mlx` has not run on a GPU |
 | Metal native | L0: kernels for 36 formats (6 widths x 3 groups x f16/bf16 scales) built on the quantized linear family; the chunk decoder text compiled as C++ and run on the CPU decodes every width bit for bit; never compiled by the Metal compiler. `FLLM_METAL_NO_MLX=1` turns them off |
-| Vulkan, wgpu, SYCL, NPU, TPU, ROCm/HIP | L0†: no kernel; the decoder uploads the weight dequantized as F16 (`RustDecoder::init_backend`, one stderr line), so a model that is 4.5 bits per weight on disk is 16 on the device |
+| Vulkan native | L0*: six shaders (one per bit width, group and scale type in push constants; f32, int8-dot and tiled prompt variants); ran on Mesa lavapipe in the Vulkan self test (`mlx` group, exact and fast pass), never on a GPU |
+| wgpu, SYCL, NPU, TPU, ROCm/HIP | L0†: no kernel; the decoder uploads the weight dequantized as F16 (`RustDecoder::init_backend`, one stderr line), so a model that is 4.5 bits per weight on disk is 16 on the device |
 
 Block-wise FP8 (`FP8B`), bitsandbytes (`NF4B64/128`, `FP4B64/128`, `INT8R`) and EXL2 on **Metal native** (same scale as above). All three are written without a
 Mac at hand: **L0**. The MSL has been linted (`msl_check`), its chunk decoders compiled as C++ and compared bit for bit with the Rust reference
@@ -86,6 +87,21 @@ type-checked and clippy-checked for `aarch64-apple-darwin`; **no Metal compiler 
 
 The weights keep their packed size on the device (about 8, 4.5 and 2 to 8 bits per weight); the arithmetic follows the CPU kernels (f32 per weight, f32 activations,
 simd_sum reduction; half tiles for batches above 8 unless the exact mode is set).
+
+The same formats on **Vulkan native** (**L0\***: every shader ran on Mesa lavapipe, a CPU implementation of Vulkan, against the CPU reference in `selftest-gpu --device vulkan`
+(groups `linear`, `fp8blk`, `mlx`; exact and fast pass, the fast pass also with `FLLM_VULKAN_FORCE_IDOT=1`) and in unit tests; no physical GPU has run them, and the
+cooperative-matrix variants `_c` have not executed anywhere):
+
+| Format | Vulkan native | Switch off |
+| --- | --- | --- |
+| `FP8B` (any power-of-two tile with at least 8 columns) and `FP8M` | L0\*: device image = codes plus one f32 scale per row and tile column (the tile scale repeated per row); f32 shaders `mv_fp8b_s`, `mm_fp8b_s`; `FP8M` is converted to tiles of one row; a row that is not a multiple of 8 columns is expanded to F16 | `FLLM_VULKAN_NO_EXT_FORMATS=1` |
+| `NF4B64/128`, `FP4B64/128` | L0\*: codes and f32 absmax in two planes; f32 shaders (`book[nibble] * absmax`) | same |
+| `INT8R` | L0\*: all variants (f32, int8 dot, tiled prompt kernel, cooperative matrices) | same |
+| `MLXA` | L0\*: see the MLXA table above | same |
+| `EXL2` | L0\*: rows with the scale nibbles first, a table per block of 32 inputs, activations gathered by the act-order prepass; groups must be a multiple of 32 inputs else F16 | same |
+| `EXL3` | L0\*: `exl3_pre` / `exl3_mm` / `exl3_post`, every width and codebook ran on lavapipe; rows and columns multiples of 128 and a blob within one storage binding, else F16 | same |
+
+\* L0 plus an execution on a software Vulkan device; the shaders are validated with `spirv-val`, which is more than L0 but not hardware.
 
 Notes:
 
@@ -225,7 +241,7 @@ Ordered by area.
 ### 5.7 Missing Vulkan parts
 
 * Mamba: see 5.3. `moe_expert_gemm` = `Unsupported`; `moe_linear` is a matvec (no grouped GEMM); `lin_float` is not tiled.
-* Embedding for NVFP4, Q4Z, IQ1-IQ3, IQ4_XS, Q8_K, FP8 has no shader (host decoding); `sampling_logits` with temperature, `moe_route` and
+* Embedding for NVFP4, Q4Z, IQ1-IQ3, IQ4_XS, Q8_K, FP8, FP8B, MLXA, bitsandbytes and EXL2/EXL3 has no shader (host decoding); `sampling_logits` with temperature, `moe_route` and
   attention with head width > 512 run on the CPU.
 * MoE experts are held twice in memory (arena plus individual weights); the arena and the `host_linear` scratch are not part of the
   `MemoryPlan`, so OOM is possible when memory is almost full.

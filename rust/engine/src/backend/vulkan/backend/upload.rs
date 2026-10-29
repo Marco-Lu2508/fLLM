@@ -62,6 +62,10 @@ pub(crate) fn upload_bytes(sh: &Shared, bytes: &[u8]) -> Result<DeviceBuffer, Ba
 }
 
 fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: usize, scale: f32, max_range: u64) -> Result<Prepared<'a>, BackendError> {
+    if super::shared::ext_formats_disabled() && crate::backend::vulkan::weights::is_extended_format(quant) {
+        // (the escape hatch: as before the kernels existed; MLX types are expanded by the decoder before they get here and refused otherwise)
+        return expand(name, raw, quant, rows, cols, scale);
+    }
     match quant {
         QuantType::F32 | QuantType::F16 | QuantType::BF16 => {
             let elem = if quant == QuantType::F32 { 4 } else { 2 };

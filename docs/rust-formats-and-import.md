@@ -67,7 +67,8 @@ DeepSeek-V3 / R1, Qwen3-FP8, GLM-4.5-FP8, Kimi-K2, MiniMax and similar checkpoin
 * **CUDA**: [gpu-backends.md](gpu-backends.md#block-wise-fp8-fp8b) (the weight stays 8-bit on every NVIDIA GPU).
 * **Metal**: kernels for every power-of-two tile in the quantized linear family (`q_fmt_fp8b`, tile shape in `q_params::pad`), the GGUF tensor is the device image;
   written without a Mac, linted and emulated only ([gpu-backends.md](gpu-backends.md#metal-block-wise-fp8-bitsandbytes-and-exl2)); `FLLM_METAL_NO_FP8B=1` switches them off.
-* **Other backends** (Vulkan, wgpu, SYCL, TPU, AMD HIP): no kernel; the codes are expanded with their scales to binary16 at upload
+* **Vulkan** (native backend): f32 shaders `mv_fp8b_s` / `mm_fp8b_s` read the codes in place with the scale of the tile repeated per row (1 byte per weight plus 3 % for 128-wide tiles; `FP8M` is converted to tiles of one row on upload); ran on Mesa lavapipe only, not on a GPU; rows that are not a multiple of 8 columns and tiles narrower than 8 columns still expand to F16 ([gpu-backends.md](gpu-backends.md#native-vulkan-block-wise-fp8-bitsandbytes-mlx-affine-and-exl2--exl3); `FLLM_VULKAN_NO_EXT_FORMATS=1` switches it off).
+* **Other backends** (wgpu, SYCL, TPU, AMD HIP): no kernel; the codes are expanded with their scales to binary16 at upload
   (exact; 2 bytes per weight; one line on stderr names the first tensor). Correct, not compact.
 * **Direct load**: the codes are copied once into the anonymous map next to their scales (the scales have to follow the codes in the same
   tensor, so the tensor cannot be a slice of the checkpoint file). Dense FP8B tensors therefore cost their size in anonymous memory, like
@@ -104,8 +105,8 @@ The weights are not expanded: the converter writes (and the direct load builds) 
   double quantization is 4.5 bits as well; double quantization saves about `0.37` bits per value on disk, which the f32 absmax of
   the native block gives back). Before, every bitsandbytes weight became 16 bit (about 3.5 times the 4-bit size).
 - Kernels: CPU `cpu_bnb` (AVX2 + FMA, portable fallback, f32 activations; [cpu-kernels.md](cpu-kernels.md)), CUDA `bnb.cuh` and the
-  tensor-core GEMM ([gpu-backends.md](gpu-backends.md)). Metal has kernels for them (written without a Mac, linted and emulated only; `FLLM_METAL_NO_BNB=1` switches them off), Vulkan and the wgpu backend have no kernel for these types and
-  expand them to F16 (F32 on wgpu) when the weight is uploaded, which needs 4 times the memory on that device (logged once).
+  tensor-core GEMM ([gpu-backends.md](gpu-backends.md)). Metal has kernels for them (written without a Mac, linted and emulated only; `FLLM_METAL_NO_BNB=1` switches them off), the native Vulkan backend reads them in place (f32 shaders for NF4 / FP4, all variants for `INT8R`; ran on lavapipe only, not on a GPU; `FLLM_VULKAN_NO_EXT_FORMATS=1` expands them instead) and the wgpu backend has no kernel for these types and
+  expands them to F32 when the weight is uploaded, which needs 7 times the packed size on that device (logged once).
 ### MLX affine quantization (`MLXA`)
 
 mlx-lm and mlx-community exports quantize every linear (and, with `nn.quantize`, the embedding and the head) per group of 32, 64 or 128 inputs:
@@ -134,7 +135,9 @@ the scale, so Q4Z (an integer zero point) cannot hold it exactly; the weights st
 * **Metal** (`metal/common.metal` `q_fmt_mlx`, `q_*_mlx.metal`, `backend/metal/weights`): the kernels of the quantized linear family with
   a chunk decoder for the MLX codes; the codes plane and one `scale | bias << 16` word per group; bit 63 of the plane-1 offset marks bfloat16.
   `FLLM_METAL_NO_MLX=1` switches them off (the decoder then expands to F16 on upload).
-* **Other backends** (Vulkan, wgpu, SYCL, NPU, TPU, HIP): no kernel; `RustDecoder::init_backend` checks the capability list and uploads the
+* **Vulkan** (native backend; `shaders/vulkan/_q_fmt_mlx.glsl`): six shaders (one per bit width) on the quantized linear family: `bits` words per block of 32 codes and one `scale | bias << 16` word per
+  group, the group size and the scale type (f16 / bf16) as push constants; f32, int8-dot-product and tiled prompt variants. Ran on Mesa lavapipe only, not on a GPU ([gpu-backends.md](gpu-backends.md#native-vulkan-block-wise-fp8-bitsandbytes-mlx-affine-and-exl2--exl3); `FLLM_VULKAN_NO_EXT_FORMATS=1` expands to F16 instead).
+* **Other backends** (wgpu, SYCL, NPU, TPU, HIP): no kernel; `RustDecoder::init_backend` checks the capability list and uploads the
   weight dequantized as F16 (one line on stderr names the first tensor). Correct, 16 bits per weight on the device.
 
 What is proven (CPU tests) and what is not: see the table below and the end of this section.
