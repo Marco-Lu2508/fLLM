@@ -16,18 +16,23 @@ fn env_flag(name: &str) -> bool {
 /// escape hatch: `FLLM_METAL_NO_MLX=1` (MLX affine), `FLLM_METAL_NO_FP8B=1` (block-wise FP8), `FLLM_METAL_NO_BNB=1` (bitsandbytes NF4 / FP4 /
 /// INT8) leave the family out of the capability list and out of the native upload: its weights are expanded to f16 when they are uploaded.
 pub(super) fn native_enabled(quant: crate::backend::QuantType) -> bool {
-    use crate::backend::QuantType as Q;
-    let off = if quant.mlx_affine().is_some() {
-        "FLLM_METAL_NO_MLX"
-    } else if quant == Q::Fp8Block || matches!(quant, Q::Other(id) if fllm_gguf_probe::fp8b_type(id)) {
-        "FLLM_METAL_NO_FP8B"
-    } else if quant.is_bnb() {
-        "FLLM_METAL_NO_BNB"
-    } else {
-        return true;
-    };
-    !env_flag(off)
+    family_switch(quant).is_none_or(|name| !env_flag(name))
 }
+
+/// The environment variable that switches the family of `quant` off (`None`: the format has no escape hatch).
+fn family_switch(quant: crate::backend::QuantType) -> Option<&'static str> {
+    use crate::backend::QuantType as Q;
+    if quant.mlx_affine().is_some() {
+        Some("FLLM_METAL_NO_MLX")
+    } else if quant == Q::Fp8Block || matches!(quant, Q::Other(id) if fllm_gguf_probe::fp8b_type(id)) {
+        Some("FLLM_METAL_NO_FP8B")
+    } else if quant.is_bnb() {
+        Some("FLLM_METAL_NO_BNB")
+    } else {
+        None
+    }
+}
+
 
 /// The formats of `supported_formats` whose family is not switched off (see [`native_enabled`]).
 fn advertised_formats() -> Vec<crate::backend::QuantType> {
@@ -58,5 +63,24 @@ pub fn capabilities(info: &MetalDeviceInfo) -> BackendCapabilities {
         supports_moe: true,
         max_batch_size: 4096,
         max_context: 262_144,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::QuantType as Q;
+
+    #[test]
+    fn every_new_family_has_an_escape_hatch_and_the_others_have_none() {
+        assert_eq!(family_switch(Q::Fp8Block), Some("FLLM_METAL_NO_FP8B"));
+        assert_eq!(family_switch(Q::from_gguf_type_id(fllm_gguf_probe::fp8b_type_id(16, 32).unwrap())), Some("FLLM_METAL_NO_FP8B"));
+        for q in [Q::Nf4B64, Q::Nf4B128, Q::Fp4B64, Q::Fp4B128, Q::Int8Row] {
+            assert_eq!(family_switch(q), Some("FLLM_METAL_NO_BNB"));
+        }
+        assert_eq!(family_switch(Q::mlx_affine_common()[0]), Some("FLLM_METAL_NO_MLX"));
+        for q in [Q::Q4_K, Q::F16, Q::Fp8Marlin, Q::Mxfp4] {
+            assert_eq!(family_switch(q), None);
+        }
     }
 }

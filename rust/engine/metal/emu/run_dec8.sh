@@ -19,9 +19,21 @@ mkdir -p "$W"
     -e 's/^using namespace metal;//' "$METAL/common.metal"
   printf '\n'
 } > "$W/unit.cpp"
-NAMES=${*:-mlx fp8b bnb}
+# the matrix-vector kernel body for kernel_mv.cpp: the function constant becomes a plain global that the driver sets
+{
+  printf '#line 1 "common_q_gemv.metal"\n'
+  sed -E \
+    -e 's/^constant uint q_fc_nb \[\[function_constant\(500\)\]\];/uint q_fc_nb = 1;/' \
+    -e 's/\[\[[[:space:]]*host_name[[:space:]]*\([^)]*\)[[:space:]]*\]\]//g' \
+    -e 's/\[\[[[:space:]]*kernel[[:space:]]*\]\]//g' \
+    -e 's/(^|[^A-Za-z0-9_.])([0-9]+\.[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?[hH]\b/\1\2\3f16/g' "$METAL/common_q_gemv.metal"
+  printf '\n'
+} > "$W/gemv.cpp"
+NAMES=${*:-mlx fp8b bnb kernel_mv}
 for n in $NAMES; do
-  "${CXX:-c++}" -x c++ -std=c++20 -O1 -fsanitize=alignment -fsanitize-undefined-trap-on-error -Wno-attributes -Wno-unused-value -Wno-pragma-once-outside-header \
-    -Wno-unknown-pragmas -I"$HERE/mini_stdlib" -I"$W" "$HERE/dec8_$n.cpp" -o "$W/dec8_$n"
-  "$W/dec8_$n"
+  SRC=dec8_$n.cpp; [ -f "$HERE/$SRC" ] || SRC=$n.cpp
+  "${CXX:-c++}" -x c++ -std=c++20 -O1 -pthread -fsanitize=alignment -fsanitize-undefined-trap-on-error -Wno-attributes -Wno-unused-value -Wno-pragma-once-outside-header \
+    -idirafter "$HERE" \
+    -Wno-unknown-pragmas -I"$HERE/mini_stdlib" -I"$W" "$HERE/$SRC" -o "$W/$n.out"
+  "$W/$n.out"
 done

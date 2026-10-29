@@ -85,7 +85,7 @@ Q_FUNC void q_scale_min_k4(q_bytes s, uint j, thread float &sc, thread float &mn
 // ROW_AWARE is false for every format whose chunk decoder needs only the global block index `g`; a format whose chunk depends on its weight row
 // and on the parameter block (FP8B: the tile scale) sets it and provides `dec8p` instead of `dec8` (see q_dec8 after q_params).
 #define Q_NO_ROW_SCALE                                                                                                    \
-    Q_CONST bool ROW_AWARE = false;                                                                                      \
+    static constant constexpr bool ROW_AWARE = false;                                                                                      \
     static float row_scale(q_bytes, ulong, uint) { return 1.0f; }
 
 // Q4_0: { half d; uchar qs[16]; }  value j<16: low nibble of qs[j], j>=16: high nibble of qs[j-16]; weight = d * (q - 8)

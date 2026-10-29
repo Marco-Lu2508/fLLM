@@ -111,6 +111,13 @@ jobs:
         shell: bash
         run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- whole_model device_arch_ops --nocapture --test-threads=1
 
+      # Every quantized-linear kernel of the Metal backend (including the block-wise FP8 and bitsandbytes ones, written without a Mac at hand) against
+      # the CPU dequantization as reference: one line per format, kernel and batch size. A runner without a Metal device prints "[skip]".
+      - name: Metal quantized kernels (Apple GPU, CPU reference)
+        if: always() && matrix.runner == 'macos-14'
+        shell: bash
+        run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- metal_quant_kernels --nocapture --test-threads=1
+
       - name: Clippy
         shell: bash
         run: cargo clippy --release --locked -p fllm-engine --lib --bins --features "$FEATURES" -- -D warnings
