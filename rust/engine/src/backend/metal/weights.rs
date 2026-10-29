@@ -22,7 +22,7 @@ pub mod sample;
 #[cfg(test)]
 mod tests;
 
-pub use format::{format_info, supported_formats, Family, FormatInfo};
+pub use format::{check_formats, format_info, supported_formats, Family, FormatInfo};
 pub use layout::{
     device_layout, expected_raw_len, pack_weight, DeviceLayout, PackedWeight, Planes, WeightError,
 };

@@ -10,6 +10,7 @@
 
 use super::format::{format_info, FormatInfo, Repack};
 use crate::backend::QuantType;
+use fllm_gguf_probe::Fp8bLayout;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::fmt;
@@ -131,9 +132,17 @@ fn check_shape(info: &FormatInfo, rows: usize, cols: usize) -> Result<(), Weight
     Ok(())
 }
 
+/// Layout of a block-wise FP8 weight of one `rows` x `cols` matrix (the shape of the tiles is in the type id).
+fn fp8b_layout(quant: QuantType, rows: usize, cols: usize) -> Fp8bLayout {
+    Fp8bLayout::new(quant.to_gguf_type_id(), cols, rows, 1).expect("an FP8B type id")
+}
+
 /// Bytes of the part of the file that holds the blocks (without permutation table).
 fn block_bytes_len(info: &FormatInfo, rows: usize, cols: usize) -> usize {
-    if info.row_scales {
+    if info.tiled {
+        // codes, f32 tile scales, trailer
+        fp8b_layout(info.quant, rows, cols).total_len()
+    } else if info.row_scales {
         rows * cols
     } else {
         rows * cols / info.src_qk * info.src_block_bytes
@@ -163,7 +172,10 @@ pub fn device_layout(quant: QuantType, rows: usize, cols: usize) -> Result<Plane
         Repack::None => {
             let mut total = block_bytes_len(&info, rows, cols);
             let mut plane1 = 0;
-            if info.row_scales {
+            if info.tiled {
+                // the scale table follows the codes; the trailer behind it stays in the image and is not read
+                plane1 = (rows * cols) as u64;
+            } else if info.row_scales {
                 plane1 = total as u64;
                 total += rows * 2;
             }
@@ -232,6 +244,20 @@ pub fn pack_weight(
         });
     }
     let planes = device_layout(quant, rows, cols)?;
+    if info.tiled {
+        // the trailer of the tensor must describe exactly one matrix of this shape (a stack of experts is not one weight)
+        match Fp8bLayout::parse(quant.to_gguf_type_id(), raw) {
+            Ok(l) if l.slabs == 1 && l.rows == rows && l.cols == cols => {}
+            _ => {
+                return Err(WeightError::BadShape {
+                    quant,
+                    rows,
+                    cols,
+                    reason: "the FP8B trailer does not describe one matrix of this shape",
+                })
+            }
+        }
+    }
     let blocks_len = block_bytes_len(&info, rows, cols);
     let perm = if info.permuted {
         Some(parse_permutation(&raw[blocks_len..], cols)?)

@@ -73,6 +73,13 @@ pub fn sample_weights(quant: QuantType, rows: usize, cols: usize, seed: u64) -> 
                 .map(|_| ((rng.next_u64() % 123) as u8 + 1) | sign(&mut rng))
                 .collect();
         }
+        q if info.tiled => {
+            // block-wise FP8: E4M3 codes without the NaN pattern, one f32 scale per tile, the trailer
+            let layout = fllm_gguf_probe::Fp8bLayout::new(q.to_gguf_type_id(), cols, rows, 1).expect("an FP8B type id");
+            let codes: Vec<u8> = (0..rows * cols).map(|_| ((rng.next_u64() % 126) as u8 + 1) | sign(&mut rng)).collect();
+            let scales: Vec<f32> = (0..layout.tiles()).map(|_| 0.001 + (rng.next_u64() % 100) as f32 / 2000.0).collect();
+            return crate::cpu_fp8::pack(&layout, &codes, &scales);
+        }
         _ => {}
     }
     let (block, width) = (info.src_qk, info.src_block_bytes);
@@ -103,6 +110,7 @@ pub fn sample_weights(quant: QuantType, rows: usize, cols: usize, seed: u64) -> 
                     *x = 0x28 + (rng.next_u64() % 16) as u8;
                 }
             }
+            q if q.is_bnb() => b[..4].copy_from_slice(&(0.001 + (rng.next_u64() % 100) as f32 / 4000.0).to_le_bytes()),
             q if q.q4z_group().is_some() => {
                 b[block / 2..block / 2 + 2].copy_from_slice(&d);
                 b[block / 2 + 2] = (rng.next_u64() % 16) as u8;

@@ -301,6 +301,15 @@ impl From<WeightError> for PlanError {
     }
 }
 
+/// `q_params::pad` of a block-wise FP8 weight: log2 of the tile rows, log2 of the tile columns << 8 (0 for every other format).
+fn fp8b_pad(info: &FormatInfo) -> u32 {
+    if !info.tiled {
+        return 0;
+    }
+    let (rows, cols) = fllm_gguf_probe::fp8b_shape(info.quant.to_gguf_type_id()).expect("an FP8B type id");
+    rows.trailing_zeros() | (cols.trailing_zeros() << 8)
+}
+
 fn ceil_div(a: u32, b: u32) -> u32 {
     a.div_ceil(b)
 }
@@ -358,7 +367,8 @@ pub fn plan_quantized_linear(
         row_base: 0,
         x_stride: cols32,
         nb_blocks: (cols / info.qk) as u32,
-        pad: 0,
+        // block-wise FP8: log2 of the tile rows | log2 of the tile columns << 8 (`q_fmt_fp8b`)
+        pad: fp8b_pad(&info),
     };
     let activation_prepass = info.permuted.then(|| PrepassPlan {
         kernel_name: "fllm_q_permute_x",

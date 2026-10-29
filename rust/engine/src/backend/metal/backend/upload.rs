@@ -8,6 +8,7 @@
 //! * Every other format (IQ1 / IQ2 / IQ3, Q8_1, Q8_K, device-only layouts, ...) is decoded on the host and stored as F16 (as F32 if a value
 //!   does not fit), with the per-tensor scale folded in. That costs memory but keeps the model running; it is logged once per format.
 
+use super::caps::native_enabled;
 use super::convert::{
     is_expert_name, mxfp4_raw_len, to_f16_bytes, to_f32_bytes, u32_bytes,
 };
@@ -80,7 +81,7 @@ impl MetalBackend {
         }
         let mut weight = if quant == QuantType::Mxfp4 && is_expert_name(name) {
             self.upload_raw_mxfp4(name, raw, rows, cols, scale)?
-        } else if format_info(quant).is_some() {
+        } else if format_info(quant).is_some() && native_enabled(quant) && self.native_shape_ok(quant, raw, rows, cols) {
             self.upload_native(name, raw, quant, rows, cols, scale)?
         } else {
             self.upload_converted(name, raw, quant, rows, cols, scale)?
@@ -89,6 +90,12 @@ impl MetalBackend {
             weight.bias = Some(self.shared.wrap(self.float_buffer(bias)?));
         }
         Ok(weight)
+    }
+
+    /// Whether the kernels can take this tensor as it is. Always so but for block-wise FP8 tensors whose trailer does not describe one matrix of this
+    /// shape (a stack of experts, a wrong length): those are decoded on the host like every format without a kernel.
+    fn native_shape_ok(&self, quant: QuantType, raw: &[u8], rows: usize, cols: usize) -> bool {
+        format_info(quant).is_none_or(|info| !info.tiled || pack_weight(quant, rows, cols, raw).is_ok())
     }
 
     fn upload_native(
