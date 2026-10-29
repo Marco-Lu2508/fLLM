@@ -364,7 +364,7 @@ pub fn list_adapters(first_index: usize) -> Vec<crate::devices::DeviceInfo> {
     all.into_iter()
         .filter(|adapter| {
             let info = adapter.get_info();
-            info.backend != wgpu::Backend::Gl || !served.iter().any(|n| *n == info.name)
+            info.backend != wgpu::Backend::Gl || !served.contains(&info.name)
         })
         .filter_map(|adapter| {
             let info = adapter.get_info();
