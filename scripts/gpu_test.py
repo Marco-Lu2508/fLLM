@@ -10,6 +10,7 @@ ap.add_argument("--device", required=True)
 ap.add_argument("--workdir", default=os.path.expanduser("~/fl"))
 ap.add_argument("--tag", default=None)
 ap.add_argument("--models", default="small", choices=["small", "big", "all"])
+ap.add_argument("--model", action="append", default=[], metavar="REPO:FILE", help="test this model instead of the --models set (repeatable), e.g. bartowski/google_gemma-3-4b-it-GGUF:google_gemma-3-4b-it-Q4_K_M.gguf")
 ap.add_argument("--no-selftest", action="store_true")
 ap.add_argument("--no-cpu-ref", action="store_true")
 ap.add_argument("--binary-url", default="https://github.com/Marco-Lu2508/fLLM/releases/download/colab-latest/fllm-colab-cuda.tar.gz")
@@ -26,6 +27,8 @@ MODELS_SMALL = [("bartowski/Llama-3.2-3B-Instruct-GGUF", "Llama-3.2-3B-Instruct-
 MODELS_BIG = [("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
               ("Qwen/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M.gguf")]
 MODELS = {"small": MODELS_SMALL, "big": MODELS_BIG, "all": MODELS_SMALL + MODELS_BIG}[args.models]
+if args.model:
+    MODELS = [tuple(m.split(":", 1)) for m in args.model]
 PROMPTS = ["Name three colors of the rainbow.",
            "Count from 1 to 30 separated by commas, then explain in two sentences why the sky is blue.",
            "Write a Python function that returns the n-th Fibonacci number, with a one-line docstring."]
@@ -86,7 +89,7 @@ if not args.no_selftest:
 def fetch(repo, name):
     os.makedirs(f"{W}/models", exist_ok=True)
     path = f"{W}/models/{name}"
-    rc, out = sh(f"curl -sL --retry 8 --retry-delay 3 -C - -o '{path}' 'https://huggingface.co/{repo}/resolve/main/{name}'")
+    rc, out = sh(f"curl -sfL --retry 8 --retry-delay 3 -C - -o '{path}' 'https://huggingface.co/{repo}/resolve/main/{name}'")
     if rc: say(f"   download failed: {out[-200:]}")
     return path
 
