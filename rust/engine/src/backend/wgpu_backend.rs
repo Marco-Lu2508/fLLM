@@ -44,6 +44,9 @@ const FP8B_NATIVE: u32 = 0xF800_0000;
 /// Marker for bitsandbytes tensors the WGSL decoder reads in the file layout: high byte 0xF4, then
 /// the family (0 NF4, 1 FP4, 2 INT8) in bits 5-6 and log2(values per block) in bits 0-4.
 const BNB_NATIVE: u32 = 0xF400_0000;
+/// Marker for MLX affine tensors decoded in the file layout: high byte 0xF2, then the bit width
+/// (bits 0-3), group/32 (bits 4-11) and the scale type (bit 12), the same packing as the type id.
+const MLX_NATIVE: u32 = 0xF200_0000;
 /// "Absent" marker for optional arena arrays.
 const NONE: u32 = u32::MAX;
 
@@ -123,9 +126,32 @@ fn bnb_weight(index: u32, kind: u32) -> f32 {
     let nib = select(byte & 15u, byte >> 4u, local % 2u == 0u);
     return bitcast<f32>(select(FP4_BOOK[nib], NF4_BOOK[nib], family == 0u)) * scale;
 }
+// MLX affine group quantization (MLXA): per group a little-endian bit stream of codes, then one
+// word with the scale (low half) and the bias (high half), binary16 or bfloat16. The upload passes
+// the bit width, group/32 and the scale type under the MLX_NATIVE marker; a weight is code*scale+bias.
+fn half_or_bf16(bits: u32, bf16: u32) -> f32 {
+    if (bf16 != 0u) { return bitcast<f32>(bits << 16u); }
+    return unpack2x16float(bits).x;
+}
+fn mlx_weight(index: u32, kind: u32) -> f32 {
+    let width = kind & 15u;
+    let group = ((kind >> 4u) & 255u) * 32u;
+    let bf16 = (kind >> 12u) & 1u;
+    let code_bytes = group * width / 8u;
+    let start = (index / group) * (code_bytes + 4u);
+    let bit = (index % group) * width;
+    let at = start + 4u + bit / 8u;
+    let window = byte_at(at) | (byte_at(at + 1u) << 8u);
+    let code = (window >> (bit % 8u)) & ((1u << width) - 1u);
+    let sb = start;
+    let scale = half_or_bf16(byte_at(sb) | (byte_at(sb + 1u) << 8u), bf16);
+    let bias = half_or_bf16(byte_at(sb + 2u) | (byte_at(sb + 3u) << 8u), bf16);
+    return f32(code) * scale + bias;
+}
 fn weight_at(index: u32, kind: u32) -> f32 {
     if ((kind & 0xf8000000u) == 0xf8000000u) { return fp8b_weight(index, kind); }
-    if ((kind & 0xfc000000u) == 0xf4000000u) { return bnb_weight(index, kind); }
+    if ((kind & 0xff000000u) == 0xf4000000u) { return bnb_weight(index, kind); }
+    if ((kind & 0xff000000u) == 0xf2000000u) { return mlx_weight(index, kind); }
     if (kind == 0u) { return bitcast<f32>(weights[index]); }
     if (kind == 1u) { return unpack2x16float(weights[index / 2u])[index % 2u]; }
     if (kind == 30u) { return bitcast<f32>(((weights[index / 2u] >> ((index % 2u) * 16u)) & 0xffffu) << 16u); }
@@ -958,6 +984,18 @@ fn invalid(msg: impl Into<String>) -> BackendError {
 
 /// The `hdr[3]` marker for a block-wise FP8 tensor the WGSL decoder can read directly, or `None` when
 /// the upload has to expand it (several slabs / a trailer that does not match the bytes).
+/// The `hdr[3]` marker for an MLX affine tensor the WGSL decoder reads in the file layout, or `None`
+/// when the group does not divide the row or the bytes do not match the layout.
+fn mlx_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
+    let layout = fllm_gguf_probe::mlx_affine(kind)?;
+    let group = layout.group as usize;
+    let block_bytes = layout.block_bytes() as usize;
+    if cols % group != 0 || rows * (cols / group) * block_bytes != raw_bytes.len() {
+        return None;
+    }
+    Some(MLX_NATIVE | (u32::from(layout.bf16) << 12) | ((layout.group / 32) << 4) | layout.bits)
+}
+
 /// The `hdr[3]` marker for a bitsandbytes tensor the WGSL decoder reads in the file layout, or `None`
 /// when the block grid does not fit the shape (then the upload expands it to F32 as before).
 fn bnb_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
@@ -1329,11 +1367,19 @@ impl Backend for WgpuBackend {
         } else {
             None
         };
+        let native_mlx = if native_fp8b.is_none() && native_bnb.is_none() && fllm_gguf_probe::mlx_affine(kind).is_some() {
+            mlx_native_kind(kind, raw_bytes, rows, cols)
+        } else {
+            None
+        };
         let (bytes, quant_type) = if let Some(native) = native_fp8b {
             // WGSL decodes the blob as it is on disk: codes, then one F32 scale per tile.
             (raw_bytes, QuantType::Other(native))
         } else if let Some(native) = native_bnb {
             // bitsandbytes blocks stay as they are: f32 scale, then the code bytes.
+            (raw_bytes, QuantType::Other(native))
+        } else if let Some(native) = native_mlx {
+            // MLX groups stay as they are: the bit stream and the scale/bias word.
             (raw_bytes, QuantType::Other(native))
         } else if fllm_gguf_probe::fp8b_type(kind) {
             // Block-wise FP8 has no WGSL decoder: the codes are expanded once with their tile scales, exactly, to binary16 (2 bytes per weight, not
@@ -2718,6 +2764,86 @@ mod tests {
         }
     }
 
+    /// MLX affine groups: the WGSL decoder's arithmetic against `cpu_mlx::dequantize`, for every
+    /// bit width, two group sizes and both scale types.
+    #[test]
+    fn mlx_native_matches_the_reference_dequantizer() {
+        use super::{mlx_native_kind, MLX_NATIVE};
+        let decode_half = |bits: u16, bf16: bool| -> f32 {
+            if bf16 {
+                f32::from_bits(u32::from(bits) << 16)
+            } else {
+                half::f16::from_bits(bits).to_f32()
+            }
+        };
+        for bits in [2u32, 3, 4, 5, 6, 8] {
+            for group in [32u32, 64] {
+                for bf16 in [false, true] {
+                    let id = fllm_gguf_probe::MlxAffine { bits, group, bf16 }.type_id();
+                    let per_row = 2usize;
+                    let rows = 2usize;
+                    let cols = group as usize * per_row;
+                    let code_bytes = group as usize * bits as usize / 8;
+                    let mut bytes = Vec::new();
+                    for g in 0..rows * per_row {
+                        let scale = 0.03125f32 * (g as f32 + 1.0);
+                        let bias = -0.5f32 + g as f32 * 0.125;
+                        let half = |v: f32| -> [u8; 2] {
+                            if bf16 {
+                                ((v.to_bits() >> 16) as u16).to_le_bytes()
+                            } else {
+                                half::f16::from_f32(v).to_bits().to_le_bytes()
+                            }
+                        };
+                        // the file stores the scale/bias word first, then the codes
+                        bytes.extend_from_slice(&half(scale));
+                        bytes.extend_from_slice(&half(bias));
+                        for j in 0..code_bytes {
+                            bytes.push((((j * 29 + g * 7) % 251) as u8).wrapping_mul(3));
+                        }
+                    }
+                    let marker = mlx_native_kind(id, &bytes, rows, cols).expect("native path");
+                    assert_eq!(marker & 0xFF00_0000, MLX_NATIVE);
+                    assert_eq!(marker & 15, bits, "bit width in the marker");
+                    assert_eq!((marker >> 4) & 255, group / 32, "group in the marker");
+                    assert_eq!((marker >> 12) & 1, u32::from(bf16), "scale type in the marker");
+
+                    let reference = crate::cpu_mlx::dequantize(&bytes, id, rows * cols).expect("reference");
+                    let marker_bits = marker & 15;
+                    let marker_group = ((marker >> 4) & 255) * 32;
+                    let marker_bf16 = (marker >> 12) & 1 != 0;
+                    for index in 0..rows * cols {
+                        let cb = marker_group * marker_bits / 8;
+                        let start = (index / marker_group as usize) * (cb as usize + 4);
+                        let bit = (index as u32 % marker_group) * marker_bits;
+                        let at = start + 4 + (bit / 8) as usize;
+                        let byte = |i: usize| -> u32 { bytes.get(i).copied().map_or(0, u32::from) };
+                        let window = byte(at) | (byte(at + 1) << 8);
+                        let code = (window >> (bit % 8)) & ((1u32 << marker_bits) - 1);
+                        let sb = start;
+                        let scale = decode_half(
+                            u16::from_le_bytes([bytes[sb], bytes[sb + 1]]),
+                            marker_bf16,
+                        );
+                        let bias = decode_half(
+                            u16::from_le_bytes([bytes[sb + 2], bytes[sb + 3]]),
+                            marker_bf16,
+                        );
+                        let mine = code as f32 * scale + bias;
+                        let want = reference[index];
+                        assert!(
+                            (mine - want).abs() <= 1e-5 * want.abs().max(1.0),
+                            "bits {bits} group {group} bf16 {bf16} index {index}: {mine} != {want}"
+                        );
+                    }
+                }
+            }
+        }
+        // a group that does not divide the row keeps the expansion
+        let id = fllm_gguf_probe::MlxAffine { bits: 4, group: 32, bf16: false }.type_id();
+        assert_eq!(mlx_native_kind(id, &[0u8; 20 * 3], 1, 20 + 32), None);
+    }
+
     /// bitsandbytes blocks: the WGSL decoder's arithmetic (mirrored here) against the reference
     /// dequantizer, for every family and both block sizes.
     #[test]
@@ -2755,7 +2881,7 @@ mod tests {
                 }
             }
             let marker = bnb_native_kind(id, &bytes, rows, cols).expect("the WGSL decoder takes this");
-            assert_eq!(marker & 0xFC00_0000, BNB_NATIVE);
+            assert_eq!(marker & 0xFF00_0000, BNB_NATIVE);
             let expected_family = match layout.family {
                 fllm_gguf_probe::bnb::Family::Nf4 => 0u32,
                 fllm_gguf_probe::bnb::Family::Fp4 => 1,
