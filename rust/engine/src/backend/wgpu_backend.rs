@@ -242,9 +242,10 @@ fn weight_at(index: u32, kind: u32) -> f32 {
 /// four batch rows (z), so each weight element is decoded once per four tokens.
 const EXL3_PRE: &str = r#"
 // Stage 1 of the EXL3 projection: x2[t] = H128 (suh * x[tok0 + t]) on every block of 128 inputs.
-// hdr: 1 = cols, 4 = tok0 (token offset). blob word 10 = byte offset of `suh` (binary16 vector).
-@group(0) @binding(2) var<storage, read> x: array<f32>;
-@group(0) @binding(3) var<storage, read_write> x2: array<f32>;
+// The blob is binding 2 (like every weight buffer); hdr holds rows, cols, chunk and tok0.
+@group(0) @binding(2) var<storage, read> weights: array<u32>;
+@group(0) @binding(3) var<storage, read> x: array<f32>;
+@group(0) @binding(4) var<storage, read_write> x2: array<f32>;
 var<workgroup> sh: array<f32, 128>;
 fn half_lo(bits: u32) -> f32 { return unpack2x16float(bits & 0xffffu).x; }
 fn half_hi(bits: u32) -> f32 { return unpack2x16float(bits).y; }
@@ -256,8 +257,8 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     let t = wid.y;
     let cols = hdr[1];
     let tok0 = hdr[4];
-    let suh_word = arena[10] / 4u + (i >> 1u);
-    let suh = select(half_lo(arena[suh_word]), half_hi(arena[suh_word]), (i & 1u) != 0u);
+    let suh_word = weights[10] / 4u + (i >> 1u);
+    let suh = select(half_lo(weights[suh_word]), half_hi(weights[suh_word]), (i & 1u) != 0u);
     var v = x[(tok0 + t) * cols + i] * suh;
     sh[tid] = v;
     var stride = 1u;
@@ -278,10 +279,11 @@ const EXL3_MM: &str = r#"
 // Stage 2 of the EXL3 projection: z[t][16 no + c] = sum_i x2[t][i] * R[i][16 no + c], with the trellis
 // matrix decoded on the fly. One workgroup of 256 invocations per tile column; invocation tid decodes
 // symbol tid (the 16-bit window ending at it) and stores it at the tensor-core position of the packer.
-// hdr: 1 = cols, 2 = chunk (tokens). blob words: 6 = first tile column (bytes), 7 = bytes per column,
-// 9 = K | codebook << 8.
-@group(0) @binding(2) var<storage, read> x2: array<f32>;
-@group(0) @binding(3) var<storage, read_write> z: array<f32>;
+// hdr: 1 = cols, 2 = chunk (tokens, at most 128). Blob words: 6 first tile column (bytes),
+// 7 bytes per tile column, 9 = K | codebook << 8.
+@group(0) @binding(2) var<storage, read> weights: array<u32>;
+@group(0) @binding(3) var<storage, read> x2: array<f32>;
+@group(0) @binding(4) var<storage, read_write> z: array<f32>;
 var<workgroup> tile: array<f32, 256>;
 
 fn half_bits(bits: u32) -> f32 { return unpack2x16float(bits & 0xffffu).x; }
@@ -315,8 +317,8 @@ fn trellis_state(base: u32, nw: u32, bits: u32, index: u32) -> u32 {
     let start = ((index + 1u) * bits + ring - 16u) % ring;
     let wi = start >> 5u;
     let off = start & 31u;
-    let hi = arena[base + wi];
-    let lo = arena[base + select(wi + 1u, 0u, wi + 1u == nw)];
+    let hi = weights[base + wi];
+    let lo = weights[base + select(wi + 1u, 0u, wi + 1u == nw)];
     if (off <= 16u) { return (hi >> (16u - off)) & 0xffffu; }
     return ((hi << (off - 16u)) | (lo >> (48u - off))) & 0xffffu;
 }
@@ -326,9 +328,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(workgroup_id) wid: vec3<u32>) {
     let tid = lid.x;
     let no = wid.x;
+    let rows = hdr[0];
     let cols = hdr[1];
     let chunk = hdr[2];
-    let param = arena[9];
+    let param = weights[9];
     let bits = param & 255u;
     let codebook = param >> 8u;
     let nw = 8u * bits;
@@ -338,7 +341,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     let j = tid & 7u;
     let pr = 2u * (lane_i & 3u) + (j & 1u) + select(0u, 8u, (j & 2u) != 0u);
     let pc = (lane_i >> 2u) + select(0u, 8u, (j & 4u) != 0u);
-    let col_words = arena[6] / 4u + no * (arena[7] / 4u);
+    let col_words = weights[6] / 4u + no * (weights[7] / 4u);
     var acc: array<f32, 8>;
     for (var b = 0u; b < 8u; b = b + 1u) { acc[b] = 0.0; }
     var ki = 0u;
@@ -360,18 +363,19 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     }
     for (var b = 0u; b < 8u; b = b + 1u) {
         let t = b * 16u + tl;
-        if (t < chunk) { z[t * cols + no * 16u + c] = acc[b]; }
+        if (t < chunk) { z[t * rows + no * 16u + c] = acc[b]; }
     }
 }
 "#;
 
 const EXL3_POST: &str = r#"
 // Stage 3 of the EXL3 projection: out[tok0 + t][out_map[o]] = scale * svh[o] * (H128 z[t])[o] (+ bias).
-// hdr: 0 = rows, 4 = tok0, 5 = scale (f32 bits), 6 = flags (bit 0 adds the bias).
-// blob words: 11 = byte offset of `svh`, 12 = byte offset of `out_map`.
-@group(0) @binding(2) var<storage, read> z: array<f32>;
-@group(0) @binding(3) var<storage, read_write> outv: array<f32>;
-@group(0) @binding(4) var<storage, read> biasv: array<f32>;
+// hdr: 0 = rows, 2 = chunk, 4 = tok0, 5 = scale (f32 bits), 6 = flags (bit 0 adds the bias).
+// Blob words: 11 = byte offset of `svh`, 12 = byte offset of `out_map`.
+@group(0) @binding(2) var<storage, read> weights: array<u32>;
+@group(0) @binding(3) var<storage, read> z: array<f32>;
+@group(0) @binding(4) var<storage, read_write> outv: array<f32>;
+@group(0) @binding(5) var<storage, read> biasv: array<f32>;
 var<workgroup> sh: array<f32, 128>;
 fn half_lo(bits: u32) -> f32 { return unpack2x16float(bits & 0xffffu).x; }
 fn half_hi(bits: u32) -> f32 { return unpack2x16float(bits).y; }
@@ -396,9 +400,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
         stride = stride << 1u;
     }
     v = v * 0.08838834764831845;
-    let svh_word = arena[11] / 4u + (o >> 1u);
-    v = v * select(half_lo(arena[svh_word]), half_hi(arena[svh_word]), (o & 1u) != 0u);
-    let row = arena[arena[12] / 4u + o];
+    let svh_word = weights[11] / 4u + (o >> 1u);
+    v = v * select(half_lo(weights[svh_word]), half_hi(weights[svh_word]), (o & 1u) != 0u);
+    let row = weights[weights[12] / 4u + o];
     v = v * hdr_f32(5);
     if ((hdr[6] & 1u) != 0u) { v = v + biasv[row]; }
     outv[(tok0 + t) * rows + row] = v;
@@ -1180,9 +1184,9 @@ impl KernelId {
             KernelId::LayerNorm => &[false, false, false, true],
             KernelId::Ewise => &[true, false],
             KernelId::MlaMove => &[false, false, true],
-            KernelId::Exl3Pre => &[false, true],
-            KernelId::Exl3Mm => &[false, true],
-            KernelId::Exl3Post => &[false, true, false],
+            KernelId::Exl3Pre => &[false, false, true],
+            KernelId::Exl3Mm => &[false, false, true],
+            KernelId::Exl3Post => &[false, false, true, false],
         }
     }
 }
@@ -1226,6 +1230,11 @@ fn invalid(msg: impl Into<String>) -> BackendError {
 /// rows and columns must be multiples of 128.
 fn exl3_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
     if kind != fllm_gguf_probe::exl::EXL3_TYPE || rows % 128 != 0 || cols % 128 != 0 {
+        return None;
+    }
+    // `FLLM_WGPU_EXL3=0` falls back to the F16 expansion, for the case the trellis pass misbehaves
+    // on a device the self test does not cover.
+    if std::env::var("FLLM_WGPU_EXL3").is_ok_and(|v| v == "0" || v == "false") {
         return None;
     }
     if raw_bytes.len() < 64 || &raw_bytes[..4] != b"EXL3" {
@@ -1561,9 +1570,9 @@ fn get_wgpu_buf(buf: &DeviceBuffer) -> Result<&wgpu::Buffer, BackendError> {
     Ok(&inner.buffer)
 }
 
-    /// The ExLlamaV3 projection in three passes: transform the input, multiply against the trellis
-/// matrix decoded on the fly, transform and scatter the output. Scratch is one f32 per input and
-/// one per output of the batch; the weights stay the blob.
+    /// The ExLlamaV3 projection in three passes: transform the input, multiply against the trellis matrix
+/// decoded on the fly, transform and scatter the output. Tokens are processed in chunks of 128 (the
+/// Hadamard workspace and the tile product hold one chunk); the weights stay the blob.
 fn exl3_linear(
     s: &mut WgpuStream,
     out: &mut DeviceBuffer,
@@ -1577,49 +1586,69 @@ fn exl3_linear(
     if rows % 128 != 0 || cols % 128 != 0 {
         return Err(invalid("an EXL3 projection needs 128-multiple rows and columns"));
     }
-    let (h, stride, _) = s.reserve(3, 0)?;
-    let post = h + 2 * stride;
-    let bias_flag = u32::from(bias.is_some());
-    // pre: rows, cols, batch, -, tok0 (the pass handles one token per workgroup)
-    s.host[h..h + 7].copy_from_slice(&[rows as u32, cols as u32, batch as u32, 0, 0, 1.0f32.to_bits(), bias_flag]);
-    // mm: -, cols, chunk
-    s.host[h + stride..h + stride + 3].copy_from_slice(&[0, cols as u32, batch as u32]);
-    // post: rows, -, -, -, tok0, scale, flag (bit 0 adds the bias)
-    s.host[post..post + 7].copy_from_slice(&[rows as u32, 0, 0, 0, 0, 1.0f32.to_bits(), bias_flag]);
-    let x2 = scratch_buffer(&s.context, batch * cols * 4, "fllm-exl3-x2");
-    let z = scratch_buffer(&s.context, batch * rows * 4, "fllm-exl3-z");
+    let max_grid = s.context.limits.max_compute_workgroups_per_dimension as usize;
+    let x2 = scratch_buffer(&s.context, 128 * cols * 4, "fllm-exl3-x2");
+    let z = scratch_buffer(&s.context, 128 * rows * 4, "fllm-exl3-z");
     let context = Arc::clone(&s.context);
     let bias_bind = match bias {
         Some(b) => s.bind(b)?,
         None => WgpuStream::dummy_bind(&context),
     };
-    // read the limit before the dispatches borrow `s` mutably
-    let max_grid = s.context.limits.max_compute_workgroups_per_dimension as usize;
-    let grid = |n: usize, b: usize| -> Result<(u32, u32, u32), BackendError> {
-        if n > max_grid || b > max_grid {
-            return Err(invalid(format!("EXL3 dispatch {n} x {b} exceeds the workgroup grid")));
+    let flag = u32::from(bias.is_some());
+    let mut tok0 = 0usize;
+    while tok0 < batch {
+        let chunk = (batch - tok0).min(128);
+        // pre: rows, cols, chunk, -, tok0, scale, flag; mm: rows, cols, chunk; post: rows, -, chunk, -, tok0, scale, flag
+        let (h, stride, _) = s.reserve(3, 0)?;
+        let post = h + 2 * stride;
+        s.host[h..h + 7].copy_from_slice(&[
+            rows as u32,
+            cols as u32,
+            chunk as u32,
+            0,
+            tok0 as u32,
+            1.0f32.to_bits(),
+            flag,
+        ]);
+        s.host[h + stride..h + stride + 3].copy_from_slice(&[rows as u32, cols as u32, chunk as u32]);
+        s.host[post..post + 7].copy_from_slice(&[
+            rows as u32,
+            0,
+            chunk as u32,
+            0,
+            tok0 as u32,
+            1.0f32.to_bits(),
+            flag,
+        ]);
+        let grid = |n: usize, b: usize| -> Result<(u32, u32, u32), BackendError> {
+            if n > max_grid || b > max_grid {
+                return Err(invalid(format!("EXL3 dispatch {n} x {b} exceeds the workgroup grid")));
+            }
+            Ok((n as u32, b as u32, 1))
+        };
+        let (gx, gy, gz) = grid(cols / 128, chunk)?;
+        {
+            let wb = s.bind(&weight.buffer)?;
+            let xb = s.bind(x)?;
+            let x2b = s.bind(&x2)?;
+            s.dispatch(KernelId::Exl3Pre, h, &[wb, xb, x2b], (gx, gy, gz))?;
         }
-        Ok((n as u32, b as u32, 1))
-    };
-    let (gx, gy, gz) = grid(cols / 128, batch)?;
-    {
-        let xb = s.bind(x)?;
-        let x2b = s.bind(&x2)?;
-        s.dispatch(KernelId::Exl3Pre, h, &[xb, x2b], (gx, gy, gz))?;
+        let (gx, gy, gz) = grid(rows / 16, 1)?;
+        {
+            let wb = s.bind(&weight.buffer)?;
+            let x2b = s.bind(&x2)?;
+            let zb = s.bind(&z)?;
+            s.dispatch(KernelId::Exl3Mm, h + stride, &[wb, x2b, zb], (gx, gy, gz))?;
+        }
+        let (gx, gy, gz) = grid(rows / 128, chunk)?;
+        {
+            let wb = s.bind(&weight.buffer)?;
+            let zb = s.bind(&z)?;
+            let ob = s.bind(out)?;
+            s.dispatch(KernelId::Exl3Post, post, &[wb, zb, ob, bias_bind], (gx, gy, gz))?;
+        }
+        tok0 += chunk;
     }
-    let (gx, gy, gz) = grid(rows / 16, 1)?;
-    {
-        let x2b = s.bind(&x2)?;
-        let zb = s.bind(&z)?;
-        s.dispatch(KernelId::Exl3Mm, h + stride, &[x2b, zb], (gx, gy, gz))?;
-    }
-    let (gx, gy, gz) = grid(rows / 128, batch)?;
-    {
-        let zb = s.bind(&z)?;
-        let ob = s.bind(out)?;
-        s.dispatch(KernelId::Exl3Post, post, &[zb, ob, bias_bind], (gx, gy, gz))?;
-    }
-    let _ = weight;
     Ok(())
 }
 
