@@ -101,7 +101,8 @@ static size_t align256(size_t v) { return (v + 255) & ~size_t(255); }
 // FLLM_MARLIN_PREFILL_CFG=fllm: a prompt batch of more than 64 rows runs as a whole number of 64-row tiles in one launch (the activation and result
 // scratch has room for the padding rows, whose results are dropped). vLLM's host code (marlin_vllm.cu) launches the largest multiple of 64 rows and then a
 // second kernel for the remaining rows, which streams all weights a second time for as little as one row.
-static int marlin_rows(int batch) { return batch > 64 && fllm_opt(FLLM_OPT_MARLIN_CFG) != 0 ? (batch + 63) / 64 * 64 : batch; }
+// Turing keeps vLLM's split: on a T4 the whole-tile launch gave other results than the split (and the split matches the reference).
+static int marlin_rows(int batch) { return batch > 64 && fllm_opt(FLLM_OPT_MARLIN_CFG) != 0 && fllm_cc() >= 80 ? (batch + 63) / 64 * 64 : batch; }
 
 size_t fllm_q4z_io_bytes(int rows, int cols, int batch) {
     batch = marlin_rows(batch);

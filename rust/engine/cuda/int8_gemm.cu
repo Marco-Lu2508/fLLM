@@ -86,7 +86,8 @@ struct Args {
     int padded;  // Q8_0: blocks per row of the device layout (the width rounded up to 256 values)
 };
 
-// Q8_0 selects the weight layout. Each of the 4 warps computes MT x NT m16n8 tiles; the block covers 16 * MT tokens and 32 * NT rows.
+// Q8_0 selects the weight layout. Each of the 4 warps computes MT x NT m16n8 tiles; the block covers 16 * MT tokens and 32 * NT rows
+// (the launches below divide the rows by exactly that).
 template <bool Q8_0, int MT, int NT>
 __global__ void __launch_bounds__(128) int8_gemm_kernel(Args a) {
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 750
@@ -186,11 +187,11 @@ __global__ void __launch_bounds__(128) int8_gemm_kernel(Args a) {
 template <bool Q8_0>
 int launch(cudaStream_t s, const Args &a) {
     if (a.M <= 16) {
-        int8_gemm_kernel<Q8_0, 1, 1><<<dim3((a.N + 127) / 128, (a.M + 15) / 16), 128, 0, s>>>(a);
+        int8_gemm_kernel<Q8_0, 1, 1><<<dim3((a.N + 31) / 32, (a.M + 15) / 16), 128, 0, s>>>(a);
     } else if (a.M <= 64) {
-        int8_gemm_kernel<Q8_0, 2, 2><<<dim3((a.N + 255) / 256, (a.M + 31) / 32), 128, 0, s>>>(a);
+        int8_gemm_kernel<Q8_0, 2, 2><<<dim3((a.N + 63) / 64, (a.M + 31) / 32), 128, 0, s>>>(a);
     } else {
-        int8_gemm_kernel<Q8_0, 4, 2><<<dim3((a.N + 255) / 256, (a.M + 63) / 64), 128, 0, s>>>(a);
+        int8_gemm_kernel<Q8_0, 4, 2><<<dim3((a.N + 63) / 64, (a.M + 63) / 64), 128, 0, s>>>(a);
     }
     return fllm_check_launch("int8 gemm");
 }

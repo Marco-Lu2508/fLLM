@@ -382,33 +382,6 @@ cudaError_t run_level(cudaStream_t s, State &st, Level &lv, Params<DType> &p, in
     return cudaErrorNotSupported;
 }
 
-template <uint32_t D, typename DType>
-cudaError_t run_decode(cudaStream_t s, State &st, Level &lv, const Requests &rq, const DType *q16, DType *o16, const float *sinks,
-                       const uint16_t *kpool, const uint16_t *vpool, int heads, int kv_heads, int block, float scale, float softcap, int window_left) {
-    using DecodeParams = flashinfer::BatchDecodeParams<DType, DType, DType, int32_t>;
-    DecodeParams p;
-    p.q = const_cast<DType *>(q16);
-    p.q_rope_offset = nullptr;
-    p.paged_kv = flashinfer::paged_kv_t<DType, int32_t>(kv_heads, block, D, rq.n, flashinfer::QKVLayout::kNHD,
-                                                        const_cast<DType *>(reinterpret_cast<const DType *>(kpool)),
-                                                        const_cast<DType *>(reinterpret_cast<const DType *>(vpool)),
-                                                        lv.d_idx, lv.d_kvp, lv.d_last);
-    p.o = o16;
-    p.lse = nullptr;
-    p.padded_batch_size = rq.n;
-    p.num_qo_heads = heads;
-    p.q_stride_n = heads * D;
-    p.q_stride_h = D;
-    p.window_left = window_left;
-    p.maybe_alibi_slopes = const_cast<float *>(sinks);
-    p.logits_soft_cap = softcap;
-    p.sm_scale = scale;
-    p.rope_rcp_scale = 1.f;
-    p.rope_rcp_theta = 1.f;
-    return flashinfer::BatchDecodeWithPagedKVCacheDispatched<D, flashinfer::PosEncodingMode::kNone, Variant, DecodeParams>(
-        p, nullptr, nullptr, false, s);
-}
-
 // Fills the parameters of one launch and runs it. q16 / o16: DType buffers of the rows of `rq` in the order of its requests.
 template <typename DType>
 cudaError_t launch(cudaStream_t s, State &st, Level &lv, const Requests &rq, bool causal, const DType *q16, DType *o16, float *lse, const float *sinks,
@@ -607,11 +580,6 @@ int fllm_fi_attention_try(cudaStream_t s, const float *q, const uint16_t *kpool,
             if (kind == 3) {
                 gather_f32_to_d<<<grid(q_elems), 256, 0, s>>>(q, static_cast<__nv_bfloat16 *>(st.q16.ptr), nullptr, rows, (int)row_elems);
                 cudaError_t e = cudaErrorNotSupported;
-                if (decode_like && decode_on) {
-                    if (dk == 64) e = run_decode<64>(s, st, st.level[1], rq, static_cast<const __nv_bfloat16 *>(st.q16.ptr), static_cast<__nv_bfloat16 *>(st.o16a.ptr), sinks, kpool, vpool, heads, kv_heads, block_size, scale, softcap, window_left);
-                    else if (dk == 128) e = run_decode<128>(s, st, st.level[1], rq, static_cast<const __nv_bfloat16 *>(st.q16.ptr), static_cast<__nv_bfloat16 *>(st.o16a.ptr), sinks, kpool, vpool, heads, kv_heads, block_size, scale, softcap, window_left);
-                    else if (dk == 256) e = run_decode<256>(s, st, st.level[1], rq, static_cast<const __nv_bfloat16 *>(st.q16.ptr), static_cast<__nv_bfloat16 *>(st.o16a.ptr), sinks, kpool, vpool, heads, kv_heads, block_size, scale, softcap, window_left);
-                }
                 if (e != cudaSuccess) {
                     e = launch<__nv_bfloat16>(s, st, st.level[1], rq, /*causal=*/true, static_cast<__nv_bfloat16 *>(st.q16.ptr), static_cast<__nv_bfloat16 *>(st.o16a.ptr), nullptr,
                                               sinks, kpool, vpool, heads, kv_heads, dk, block_size, scale, softcap, window_left);
@@ -630,11 +598,6 @@ int fllm_fi_attention_try(cudaStream_t s, const float *q, const uint16_t *kpool,
             } else {
                 gather_f32_to_d<<<grid(q_elems), 256, 0, s>>>(q, static_cast<__half *>(st.q16.ptr), nullptr, rows, (int)row_elems);
                 cudaError_t e = cudaErrorNotSupported;
-                if (decode_like && decode_on) {
-                    if (dk == 64) e = run_decode<64>(s, st, st.level[1], rq, static_cast<const __half *>(st.q16.ptr), static_cast<__half *>(st.o16a.ptr), sinks, kpool, vpool, heads, kv_heads, block_size, scale, softcap, window_left);
-                    else if (dk == 128) e = run_decode<128>(s, st, st.level[1], rq, static_cast<const __half *>(st.q16.ptr), static_cast<__half *>(st.o16a.ptr), sinks, kpool, vpool, heads, kv_heads, block_size, scale, softcap, window_left);
-                    else if (dk == 256) e = run_decode<256>(s, st, st.level[1], rq, static_cast<const __half *>(st.q16.ptr), static_cast<__half *>(st.o16a.ptr), sinks, kpool, vpool, heads, kv_heads, block_size, scale, softcap, window_left);
-                }
                 if (e != cudaSuccess) {
                     e = launch<__half>(s, st, st.level[1], rq, /*causal=*/true, static_cast<__half *>(st.q16.ptr), static_cast<__half *>(st.o16a.ptr), nullptr,
                                        sinks, kpool, vpool, heads, kv_heads, dk, block_size, scale, softcap, window_left);

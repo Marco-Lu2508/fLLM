@@ -10,7 +10,7 @@
 //! The weight layouts are chosen at upload time: the cases switch `FLLM_FP8_GEMM` / `FLLM_INT8_GEMM` at run time and restore the environment's value.
 //! `FLLM_SELFTEST_BENCH=1` adds large shapes that time the W8A8 kernels against the W8A16 / FP16 paths they replace.
 use super::*;
-use crate::backend::cuda::hopper_fp8::{direct_gemm, set_fp8_gemm_mode, set_int8_gemm_mode, Direct};
+use crate::backend::cuda::hopper_fp8::{device_cc, direct_gemm, set_fp8_gemm_mode, set_int8_gemm_mode, Direct};
 use crate::kv_format::{e4m3_to_f32, f32_to_e4m3};
 
 /// Tolerance of the FP8 products against the emulation (relative to the sum of the absolute terms).
@@ -185,6 +185,9 @@ impl Tester<'_> {
             return Err(BackendError::UnsupportedOperation("the CPU backend has no W8A8 kernels".into()));
         }
         let int8 = kind == Direct::Int8Row;
+        if !int8 && device_cc(self.device.device_id()) < 89 {
+            return Err(BackendError::UnsupportedOperation("the FP8 tensor cores start at sm_89".into()));
+        }
         let weights: Vec<u8> = if int8 {
             (0..rows * cols).map(|_| (self.rng.unit() * 127.0).round() as i8 as u8).collect()
         } else {
