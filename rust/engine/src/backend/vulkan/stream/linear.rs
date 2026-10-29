@@ -114,6 +114,7 @@ pub(crate) fn plan_float_linear(
 impl VulkanStream {
     /// `Stream::quantized_linear` for a weight described by `w`: `out[b][r] = scale * dot(x[b], w[r]) + bias[r]`, `x` and `out` already valid views.
     pub(super) fn linear_core(&mut self, w: &LinearWeight, batch: usize, x: &Buffer, out: &Buffer) -> Result<(), BackendError> {
+        self.pending_macs = self.pending_macs.saturating_add((w.rows as u64).saturating_mul(w.cols as u64).saturating_mul(batch as u64));
         let kind = WeightKind::of(w.quant).ok_or(BackendError::UnsupportedQuant(w.quant))?;
         let slices = slice_table(kind, w.rows, w.cols, self.sh.caps().max_storage_buffer_range, self.sh.align())?;
         if slices.last().is_some_and(|s| (s.offset + s.bytes) as u64 > w.weights.size()) {

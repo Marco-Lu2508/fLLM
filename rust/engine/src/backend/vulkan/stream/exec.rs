@@ -14,6 +14,16 @@ const MAX_DISPATCHES_PER_SUBMIT: u64 = 4096;
 const MAX_HOST_BYTES_PER_SUBMIT: u64 = 256 << 20;
 /// Device scratch bytes of one submission before it is forced.
 const MAX_DEVICE_BYTES_PER_SUBMIT: u64 = 1 << 30;
+/// Multiply-adds of the projections (`rows * cols * batch`) one submission may hold before it is forced. A driver kills a job that runs for too long
+/// (Windows: TDR after 2 s; Linux amdgpu: the compute ring timeout, "Vulkan device lost"), and a prompt block of a few hundred tokens on a small
+/// integrated GPU ran past it as one submission; 1.5e11 is about 0.2 s of a Radeon 840M (4 CUs), and a step of a decode token (3e9 for a 3B model)
+/// stays far below it. `FLLM_VK_SUBMIT_MACS` overrides it.
+const DEFAULT_MAX_MACS_PER_SUBMIT: u64 = 150_000_000_000;
+
+fn max_macs_per_submit() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("FLLM_VK_SUBMIT_MACS").ok().and_then(|v| v.trim().parse().ok()).filter(|&v| v > 0).unwrap_or(DEFAULT_MAX_MACS_PER_SUBMIT))
+}
 /// Scratch buffers an operation can ask for (`SlotSource::Scratch { id }`).
 const MAX_SCRATCH_IDS: usize = 8;
 /// A read-back buffer larger than this is released after use.
@@ -276,6 +286,7 @@ impl VulkanStream {
         self.host_cache.clear();
         self.last_value = value;
         self.flushed_dispatches = self.rec.stats().dispatches;
+        self.pending_macs = 0;
         self.dev.finish_frame(&self.sh, value)?;
         self.host.finish_frame(&self.sh, value)?;
         Ok(())
@@ -285,6 +296,7 @@ impl VulkanStream {
     pub(super) fn after_op(&mut self) -> Result<(), BackendError> {
         let pending = self.rec.stats().dispatches.saturating_sub(self.flushed_dispatches);
         if pending >= MAX_DISPATCHES_PER_SUBMIT
+            || self.pending_macs >= max_macs_per_submit()
             || self.host.used() > MAX_HOST_BYTES_PER_SUBMIT
             || self.dev.used() > MAX_DEVICE_BYTES_PER_SUBMIT
         {

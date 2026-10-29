@@ -75,6 +75,8 @@ pub struct VulkanStream {
     last_value: u64,
     /// Dispatch counter of the recorder at the latest submission.
     flushed_dispatches: u64,
+    /// Multiply-adds of the projections recorded since the latest submission (bounds the run time of one submission, see `exec.rs`).
+    pending_macs: u64,
     readback: Option<Buffer>,
     /// Device copies of constant host tables (rope cos / sin), by `Arc` address.
     tables: HashMap<usize, (Arc<Vec<f32>>, Buffer)>,
@@ -114,6 +116,7 @@ impl VulkanStream {
             host: Ring::new(RingKind::Host),
             last_value: 0,
             flushed_dispatches: 0,
+            pending_macs: 0,
             readback: None,
             tables: HashMap::new(),
             trace: None,
