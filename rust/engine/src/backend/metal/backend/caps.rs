@@ -14,7 +14,7 @@ fn env_flag(name: &str) -> bool {
 
 /// Whether the kernels of `quant` are switched on. The kernels of the newer families have not run on every Apple GPU yet, so each family has an
 /// escape hatch: `FLLM_METAL_NO_MLX=1` (MLX affine), `FLLM_METAL_NO_FP8B=1` (block-wise FP8), `FLLM_METAL_NO_BNB=1` (bitsandbytes NF4 / FP4 /
-/// INT8) leave the family out of the capability list and out of the native upload: its weights are expanded to f16 when they are uploaded.
+/// INT8), `FLLM_METAL_NO_EXL=1` (EXL2) leave the family out of the capability list and out of the native upload: its weights are expanded to f16 when they are uploaded.
 pub(super) fn native_enabled(quant: crate::backend::QuantType) -> bool {
     family_switch(quant).is_none_or(|name| !env_flag(name))
 }
@@ -28,11 +28,12 @@ fn family_switch(quant: crate::backend::QuantType) -> Option<&'static str> {
         Some("FLLM_METAL_NO_FP8B")
     } else if quant.is_bnb() {
         Some("FLLM_METAL_NO_BNB")
+    } else if quant == Q::Exl2 {
+        Some("FLLM_METAL_NO_EXL")
     } else {
         None
     }
 }
-
 
 /// The formats of `supported_formats` whose family is not switched off (see [`native_enabled`]).
 fn advertised_formats() -> Vec<crate::backend::QuantType> {
@@ -78,6 +79,8 @@ mod tests {
         for q in [Q::Nf4B64, Q::Nf4B128, Q::Fp4B64, Q::Fp4B128, Q::Int8Row] {
             assert_eq!(family_switch(q), Some("FLLM_METAL_NO_BNB"));
         }
+        assert_eq!(family_switch(Q::Exl2), Some("FLLM_METAL_NO_EXL"));
+        assert_eq!(family_switch(Q::Exl3), None);
         assert_eq!(family_switch(Q::mlx_affine_common()[0]), Some("FLLM_METAL_NO_MLX"));
         for q in [Q::Q4_K, Q::F16, Q::Fp8Marlin, Q::Mxfp4] {
             assert_eq!(family_switch(q), None);

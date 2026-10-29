@@ -73,6 +73,7 @@ pub fn sample_weights(quant: QuantType, rows: usize, cols: usize, seed: u64) -> 
                 .map(|_| ((rng.next_u64() % 123) as u8 + 1) | sign(&mut rng))
                 .collect();
         }
+        QuantType::Exl2 => return exl2_sample(rows, cols, &mut rng),
         q if info.tiled => {
             // block-wise FP8: E4M3 codes without the NaN pattern, one f32 scale per tile, the trailer
             let layout = fllm_gguf_probe::Fp8bLayout::new(q.to_gguf_type_id(), cols, rows, 1).expect("an FP8B type id");
@@ -160,4 +161,39 @@ pub fn reference_weights(
         }
         _ => crate::compute::dequantize(raw, quant.to_gguf_type_id(), rows * cols),
     }
+}
+
+/// A valid EXL2 blob with groups of 8 to 64 inputs (multiples of 8), widths 2 to 8 bits, a random permutation and random scale indices.
+fn exl2_sample(rows: usize, cols: usize, rng: &mut Lcg) -> Vec<u8> {
+    use fllm_gguf_probe::exl::{pack_codes, Exl2Layout};
+    const WIDTHS: [usize; 6] = [2, 3, 4, 5, 6, 8];
+    const SIZES: [usize; 5] = [8, 16, 24, 32, 64];
+    let mut groups = Vec::new();
+    let mut left = cols;
+    while left > 0 {
+        let n = SIZES[(rng.next_u64() % 5) as usize].min(left);
+        groups.push((n, WIDTHS[(rng.next_u64() % 6) as usize]));
+        left -= n;
+    }
+    let layout = Exl2Layout::new(rows, cols, &groups).expect("valid EXL2 sample layout");
+    let maxima: Vec<u16> = groups.iter().map(|_| f16::from_f32(8.0 + (rng.next_u64() % 24) as f32).to_bits()).collect();
+    let mut perm: Vec<u32> = (0..cols as u32).collect();
+    for i in (1..cols).rev() {
+        perm.swap(i, (rng.next_u64() % (i as u64 + 1)) as usize);
+    }
+    let mut blob = layout.prefix(&maxima, &perm);
+    let mut codes = Vec::new();
+    for _ in 0..rows {
+        let mut nibbles = vec![0u32; groups.len().div_ceil(8)];
+        for (g, &(n, bits)) in groups.iter().enumerate() {
+            codes.clear();
+            codes.extend((0..n).map(|_| (rng.next_u64() & ((1 << bits) - 1)) as u8));
+            pack_codes(&codes, bits, &mut blob);
+            nibbles[g / 8] |= ((rng.next_u64() % 16) as u32) << (4 * (g % 8));
+        }
+        for w in nibbles {
+            blob.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    blob
 }

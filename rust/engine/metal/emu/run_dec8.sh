@@ -3,6 +3,8 @@
 #   mlx   the MLX affine decoder of every bit width and group size
 #   fp8b  the block-wise FP8 decoder (tile scale lookup from the row and column) through the q_dec8 selector
 #   bnb   the bitsandbytes NF4 / FP4 / INT8R decoders and their code books
+#   kernel_mv  the matrix-vector kernel bodies on FP8B, bitsandbytes and MLX images (wiring of the row / block index, grid, epilogue)
+#   dump  every chunk of the vectors the Rust test dump_vectors_for_the_msl_emulation writes to $DUMP_DIR, bit for bit against the Rust reference
 # No GPU, no Metal compiler.
 #   usage: run_dec8.sh [name...]       (default: all; CXX: a C++20 compiler with _Float16, e.g. g++ >= 12 or clang++; default c++)
 set -e
@@ -29,11 +31,11 @@ mkdir -p "$W"
     -e 's/(^|[^A-Za-z0-9_.])([0-9]+\.[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?[hH]\b/\1\2\3f16/g' "$METAL/common_q_gemv.metal"
   printf '\n'
 } > "$W/gemv.cpp"
-NAMES=${*:-mlx fp8b bnb kernel_mv}
+NAMES=${*:-mlx fp8b bnb kernel_mv${DUMP_DIR:+ dump}}
 for n in $NAMES; do
   SRC=dec8_$n.cpp; [ -f "$HERE/$SRC" ] || SRC=$n.cpp
   "${CXX:-c++}" -x c++ -std=c++20 -O1 -pthread -fsanitize=alignment -fsanitize-undefined-trap-on-error -Wno-attributes -Wno-unused-value -Wno-pragma-once-outside-header \
     -idirafter "$HERE" \
     -Wno-unknown-pragmas -I"$HERE/mini_stdlib" -I"$W" "$HERE/$SRC" -o "$W/$n.out"
-  "$W/$n.out"
+  if [ "$n" = dump ]; then "$W/$n.out" "${DUMP_DIR:?dump needs DUMP_DIR, the output directory of the Rust test dump_vectors_for_the_msl_emulation}"; else "$W/$n.out"; fi
 done

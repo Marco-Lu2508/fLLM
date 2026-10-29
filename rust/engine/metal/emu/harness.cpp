@@ -232,6 +232,8 @@ const Entry entries[] = {
     ENTRY("mlx8g32", q_fmt_mlx8g32), ENTRY("mlx8g32b", q_fmt_mlx8g32), ENTRY("mlx8g64", q_fmt_mlx8g64), ENTRY("mlx8g64b", q_fmt_mlx8g64), ENTRY("mlx8g128", q_fmt_mlx8g128), ENTRY("mlx8g128b", q_fmt_mlx8g128),
     // block-wise FP8 (FP8B): one kernel for every tile shape, the shape travels in q_params::pad (the dump carries it); `fp8b` is 128 x 128
     ENTRY("fp8b", q_fmt_fp8b), ENTRY("fp8bt16x32", q_fmt_fp8b), ENTRY("fp8bt1x8", q_fmt_fp8b), ENTRY("fp8bt2x4", q_fmt_fp8b), ENTRY("fp8bt64x1", q_fmt_fp8b), ENTRY("fp8bt1x512", q_fmt_fp8b), ENTRY("fp8bt32x16", q_fmt_fp8b),
+    // EXL2: stored-order inputs (the dump carries the permutation, the harness gathers the activations with fllm_q_permute_x)
+    ENTRY("exl2p", q_fmt_exl2),
     // bitsandbytes NF4 / FP4 / LLM.int8()
     ENTRY("nf4b64", q_fmt_nf4b64), ENTRY("nf4b128", q_fmt_nf4b128), ENTRY("fp4b64", q_fmt_fp4b64), ENTRY("fp4b128", q_fmt_fp4b128), ENTRY("int8r", q_fmt_int8r),
 };

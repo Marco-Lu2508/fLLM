@@ -5,7 +5,7 @@
 //! side of the contract is `rust/engine/metal/INTERFACE_QUANT.md`.
 
 use super::format::{format_info, supported_formats, FormatInfo};
-use super::layout::{device_layout, WeightError};
+use super::layout::{device_layout, validate_blob_shape, DeviceLayout, Planes, WeightError};
 use crate::backend::QuantType;
 use std::fmt;
 
@@ -335,7 +335,13 @@ pub fn plan_quantized_linear(
     caps: &MetalCapsLike,
 ) -> Result<LinearPlan, PlanError> {
     let info = format_info(quant).ok_or(WeightError::UnsupportedFormat(quant))?;
-    let planes = device_layout(quant, rows, cols)?; // validates the shape
+    // validates the shape (a self-describing blob has no plane geometry to ask for: its parameters sit in the header of the device image)
+    let planes = if info.blob {
+        validate_blob_shape(&info, rows, cols)?;
+        Planes { layout: DeviceLayout::Image, plane1: 0, total_bytes: 0 }
+    } else {
+        device_layout(quant, rows, cols)?
+    };
     let size = |what: &str, v: usize| {
         u32::try_from(v).map_err(|_| PlanError::BadSize(format!("{what} {v} does not fit 32 bits")))
     };

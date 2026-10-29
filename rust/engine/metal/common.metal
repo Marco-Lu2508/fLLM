@@ -701,6 +701,44 @@ struct q_fmt_fp8b {
     }
 };
 
+// ExLlamaV2 (fLLM `EXL2` type, gguf-probe `exl::Exl2View`): per-group bit widths (2..6 or 8), a code is `code - 2^(bits-1)` times the group scale
+// `(s + 1)^2 * max / 256` (s: the 4-bit scale index of the group in the row), the inputs are stored in the order of a permutation (the activations are
+// gathered into that order by the prepass `fllm_q_permute_x`, the same kernel as for act-order GPTQ). The device image (weights/layout.rs, `pack_exl2`):
+//   bytes 0..16      uint { row_bytes, table_offset, scale_offset, groups }
+//   bytes 16..       the rows of the blob as they are (row r at 16 + r * row_bytes: the group bit streams, then the scale-index words)
+//   table_offset     per chunk of 8 stored inputs two uints { byte offset of the chunk's codes inside the row, group | bits << 24 } (the groups are the
+//                    same in every row, and every group is a multiple of 8 inputs, so a chunk never straddles two groups and starts on a byte),
+//                    then one float per group: max / 256 (exactly the f16 maximum divided by 256)
+//   scale_offset     byte offset of the scale-index words inside a row.
+// A chunk of 8 codes of `bits` bits is `bits` bytes; they are read byte by byte (no alignment) and cut out of a 64 bit window.
+struct q_fmt_exl2 {
+    Q_CONST uint QK = 8;
+    Q_CONST uint BYTES = 8;
+    Q_CONST uint CPB = 1;
+    Q_CONST bool ROW_AWARE = true;
+    static float row_scale(q_bytes, ulong, uint) { return 1.0f; }
+    static void dec8p(q_bytes w, uint row, uint blk, uint, constant q_params &p, thread float *o) {
+        const uint row_bytes = q_u32(w, 0u);
+        const ulong table = ulong(q_u32(w, 4u));
+        const uint scale_offset = q_u32(w, 8u);
+        device const float *maxima = (device const float *)(w + table + ulong(p.cols >> 3) * 8ul);
+        q_bytes chunk = w + table + ulong(blk) * 8ul;
+        const uint code_offset = q_u32(chunk, 0u);
+        const uint info = q_u32(chunk, 4u);
+        const uint bits = info >> 24;
+        const uint g = info & 0xFFFFFFu;
+        q_bytes r = w + 16ul + ulong(row) * ulong(row_bytes);
+        const uint s = (q_u32(r, scale_offset + 4u * (g >> 3)) >> (4u * (g & 7u))) & 15u;
+        const float scale = float((s + 1u) * (s + 1u)) * maxima[g];
+        ulong v = 0ul;
+        for (uint i = 0; i < bits; ++i) v |= ulong(r[code_offset + i]) << (8u * i);
+        const int zero = 1 << (bits - 1u);
+        const ulong mask = (1ul << bits) - 1ul;
+        #pragma clang loop unroll(full)
+        for (uint k = 0; k < 8; ++k) o[k] = float(int((v >> (bits * k)) & mask) - zero) * scale;
+    }
+};
+
 // The chunk decoder as the kernel bodies call it: the 8 weights of chunk `c` of block `blk` of weight row `row`. Formats that only need the global
 // block index (all but ROW_AWARE ones) get g = row * nb_blocks + blk.
 template <typename F, bool ROW_AWARE>

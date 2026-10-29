@@ -88,6 +88,9 @@ fn every_format_has_consistent_geometry() {
         // kernel tag round trip: the tag names a kernel in every family file
         assert!(!info.tag.is_empty());
         let (rows, cols) = dims(&info);
+        if info.blob {
+            continue; // self-describing: no geometry without the bytes
+        }
         let planes = device_layout(quant, rows, cols).unwrap();
         if planes.layout == DeviceLayout::Planar {
             assert_eq!(planes.plane1 % 16, 0, "{quant:?}");
@@ -98,6 +101,7 @@ fn every_format_has_consistent_geometry() {
     assert!(format_info(QuantType::IQ2_XS).is_none());
     assert!(format_info(QuantType::Q8_K).is_none());
     assert!(format_info(QuantType::Nvfp4Marlin).is_none());
+    assert!(format_info(QuantType::Exl3).is_none(), "EXL3 has no Metal kernel");
 }
 
 #[test]
@@ -915,6 +919,111 @@ fn fp8b_weights_that_are_not_one_matrix_of_the_shape_are_refused() {
     assert!(pack_weight(QuantType::Fp8Block, 16, 32, &bad).is_err());
     // columns that are no multiple of 8
     assert!(matches!(expected_raw_len(QuantType::Fp8Block, 4, 12), Err(WeightError::BadShape { .. })));
+}
+
+// ---- EXL2 ------------------------------------------------------------------------------------------------------------------------
+
+/// `q_fmt_exl2::dec8p` on the device image of `pack_weight` (`cols`: `q_params::cols`)
+fn dec8p_exl2(image: &[u8], cols: usize, row: usize, blk: usize) -> [f32; 8] {
+    let row_bytes = word_at(image, 0) as usize;
+    let table = word_at(image, 4) as usize;
+    let scale_offset = word_at(image, 8) as usize;
+    let chunk = table + blk * 8;
+    let code_offset = word_at(image, chunk) as usize;
+    let info = word_at(image, chunk + 4);
+    let (bits, g) = ((info >> 24) as usize, (info & 0xff_ffff) as usize);
+    let maxima = table + (cols >> 3) * 8;
+    let r = 16 + row * row_bytes;
+    let s = (word_at(image, r + scale_offset + 4 * (g >> 3)) >> (4 * (g & 7))) & 15;
+    let scale = ((s + 1) * (s + 1)) as f32 * f32::from_bits(word_at(image, maxima + 4 * g));
+    let mut v = 0u64;
+    for i in 0..bits {
+        v |= u64::from(image[r + code_offset + i]) << (8 * i);
+    }
+    let zero = 1i32 << (bits - 1);
+    let mask = (1u64 << bits) - 1;
+    std::array::from_fn(|k| (((v >> (bits * k)) & mask) as i32 - zero) as f32 * scale)
+}
+
+#[test]
+fn exl2_images_decode_to_the_reference_in_stored_order() {
+    for (rows, cols, seed) in [(5usize, 8usize, 1u64), (7, 72, 2), (9, 256, 3), (3, 520, 4)] {
+        let raw = sample_weights(QuantType::Exl2, rows, cols, seed);
+        let want = reference_weights(QuantType::Exl2, &raw, rows, cols).unwrap();
+        let packed = pack_weight(QuantType::Exl2, rows, cols, &raw).unwrap();
+        assert_eq!(packed.planes.layout, DeviceLayout::Image);
+        assert_eq!(packed.planes.total_bytes as usize, packed.bytes.len());
+        assert!(matches!(packed.bytes, std::borrow::Cow::Owned(_)));
+        let perm = packed.perm.as_ref().expect("EXL2 weights carry their permutation");
+        assert_eq!(perm.len(), cols);
+        // the loop of the kernel bodies (CPB is 1, blk = chunk): chunk ci covers the stored inputs 8 ci .. 8 ci + 8, which multiply x[perm[k]]
+        for r in 0..rows {
+            for ci in 0..cols / 8 {
+                let got = dec8p_exl2(&packed.bytes, cols, r, ci);
+                for (k, v) in got.iter().enumerate() {
+                    let w = want[r * cols + perm[ci * 8 + k] as usize];
+                    assert_eq!(v.to_bits(), w.to_bits(), "{rows}x{cols} row {r} chunk {ci} value {k}: {v} vs {w}");
+                }
+            }
+        }
+        let plan = plan_quantized_linear(QuantType::Exl2, rows, cols, 1, &caps()).unwrap();
+        assert_eq!(plan.kernel_name, "fllm_q_mv_exl2_r4");
+        assert_eq!((plan.params.plane1, plan.params.pad, plan.params.nb_blocks as usize), (0, 0, cols / 8));
+        let pre = plan.activation_prepass.expect("the activations are gathered into stored order");
+        assert_eq!(pre.output_bytes, cols * 4);
+        assert_eq!(plan_quantized_linear(QuantType::Exl2, rows, cols, 33, &caps()).unwrap().kernel_name, "fllm_q_mm_exl2_h");
+    }
+}
+
+/// An EXL2 blob with the given groups (identity permutation, scale index 3 everywhere, codes counting up).
+fn exl2_blob(rows: usize, groups: &[(usize, usize)]) -> Vec<u8> {
+    use fllm_gguf_probe::exl::{pack_codes, Exl2Layout};
+    let cols: usize = groups.iter().map(|g| g.0).sum();
+    let layout = Exl2Layout::new(rows, cols, groups).unwrap();
+    let maxima: Vec<u16> = groups.iter().map(|_| f16::from_f32(10.0).to_bits()).collect();
+    let perm: Vec<u32> = (0..cols as u32).collect();
+    let mut blob = layout.prefix(&maxima, &perm);
+    for _ in 0..rows {
+        let mut nibbles = vec![0u32; groups.len().div_ceil(8)];
+        for (g, &(n, bits)) in groups.iter().enumerate() {
+            let codes: Vec<u8> = (0..n).map(|i| (i % (1 << bits)) as u8).collect();
+            pack_codes(&codes, bits, &mut blob);
+            nibbles[g / 8] |= 3 << (4 * (g % 8));
+        }
+        for w in nibbles {
+            blob.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    blob
+}
+
+#[test]
+fn exl2_blobs_the_kernel_cannot_take_are_refused_so_that_the_upload_expands_them() {
+    // groups of 12 and 20 inputs: a chunk of 8 would straddle two groups
+    let blob = exl2_blob(2, &[(12, 4), (20, 3)]);
+    assert!(matches!(pack_weight(QuantType::Exl2, 2, 32, &blob), Err(WeightError::BadShape { .. })));
+    assert!(reference_weights(QuantType::Exl2, &blob, 2, 32).is_ok(), "the host can still decode it");
+    // groups of 8 are fine, the widest and the narrowest included
+    let ok = exl2_blob(3, &[(8, 2), (16, 8), (8, 5), (24, 6)]);
+    let packed = pack_weight(QuantType::Exl2, 3, 56, &ok).unwrap();
+    let want = reference_weights(QuantType::Exl2, &ok, 3, 56).unwrap();
+    for r in 0..3 {
+        for ci in 0..7 {
+            let got = dec8p_exl2(&packed.bytes, 56, r, ci);
+            for (k, v) in got.iter().enumerate() {
+                assert_eq!(v.to_bits(), want[r * 56 + ci * 8 + k].to_bits(), "row {r} chunk {ci} value {k}");
+            }
+        }
+    }
+    // another shape, a truncated blob, a blob that is not EXL2, columns that are no multiple of 8
+    assert!(pack_weight(QuantType::Exl2, 3, 48, &ok).is_err());
+    assert!(pack_weight(QuantType::Exl2, 2, 56, &ok).is_err());
+    assert!(pack_weight(QuantType::Exl2, 3, 56, &ok[..ok.len() - 4]).is_err());
+    assert!(pack_weight(QuantType::Exl2, 3, 56, &[0u8; 128]).is_err());
+    // the shape alone says nothing about the layout of a blob
+    assert!(expected_raw_len(QuantType::Exl2, 3, 56).is_err());
+    assert!(device_layout(QuantType::Exl2, 3, 56).is_err());
+    assert!(plan_quantized_linear(QuantType::Exl2, 3, 60, 1, &caps()).is_err(), "columns are no multiple of 8");
 }
 
 // ---- vectors for the CPU emulation of the kernels -----------------------------------------------------------------------------
