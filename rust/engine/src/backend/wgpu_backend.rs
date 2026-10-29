@@ -37,6 +37,13 @@ const MAX_ATTENTION_DIM: usize = 512;
 /// GGUF types the linear and embedding kernels decode natively. Other types are dequantized
 /// to F32 once at upload.
 const NATIVE_KINDS: [u32; 11] = [0, 1, 2, 3, 6, 7, 8, 12, 13, 14, 30];
+/// Marker the upload puts into `hdr[3]` for block-wise FP8 (GGUF `FP8B` types) that the WGSL decoder
+/// reads directly: high nibble 0xF8, then log2(block_rows) and log2(block_cols) in the low byte.
+/// No GGUF type id reaches that pattern (the `FP8B` ids carry 0x8000 in the upper half).
+const FP8B_NATIVE: u32 = 0xF800_0000;
+/// Marker for bitsandbytes tensors the WGSL decoder reads in the file layout: high byte 0xF4, then
+/// the family (0 NF4, 1 FP4, 2 INT8) in bits 5-6 and log2(values per block) in bits 0-4.
+const BNB_NATIVE: u32 = 0xF400_0000;
 /// "Absent" marker for optional arena arrays.
 const NONE: u32 = u32::MAX;
 
@@ -65,7 +72,60 @@ const WEIGHT_DECODE: &str = r#"
 fn byte_at(offset: u32) -> u32 { return (weights[offset / 4u] >> ((offset % 4u) * 8u)) & 255u; }
 fn half_at(offset: u32) -> f32 { return unpack2x16float(byte_at(offset) | (byte_at(offset + 1u) << 8u)).x; }
 fn signed_byte(value: u32) -> f32 { return f32(i32(value << 24u) >> 24u); }
+// E4M3FN code to float, exactly `decode_code` of cpu_fp8.rs: exponent and mantissa moved into an
+// F32 (bias 127 instead of 7), subnormals are mantissa * 2^-9, 0x7f/0xff are NaN.
+fn e4m3_value(code: u32) -> f32 {
+    let mag = code & 0x7fu;
+    let normal = bitcast<f32>((mag << 20u) + (120u << 23u));
+    let subnormal = f32(mag & 7u) * (1.0 / 512.0);
+    var value = select(normal, subnormal, (mag >> 3u) == 0u);
+    if (mag == 0x7fu) { value = bitcast<f32>(0x7fc00000u); }
+    return bitcast<f32>(bitcast<u32>(value) | ((code & 0x80u) << 24u));
+}
+// Block-wise FP8 (`FP8B`): `rows * cols` E4M3 codes row-major, then one F32 scale per (row, tile
+// column) pair, tiles row-major; the upload passes log2(block_rows)/log2(block_cols) in `kind`
+// under the FP8_NATIVE marker. A weight is `e4m3(code) * scale`, the `weight_scale_inv` convention.
+fn fp8b_weight(index: u32, kind: u32) -> f32 {
+    let rows = hdr[0]; let cols = hdr[1];
+    let block_rows = 1u << ((kind >> 4u) & 15u);
+    let block_cols = 1u << (kind & 15u);
+    let row = index / cols; let col = index % cols;
+    let tile_cols = (cols + block_cols - 1u) / block_cols;
+    let tile = (row / block_rows) * tile_cols + col / block_cols;
+    let base = rows * cols + 4u * tile;
+    let bits = byte_at(base) | (byte_at(base + 1u) << 8u) | (byte_at(base + 2u) << 16u) | (byte_at(base + 3u) << 24u);
+    return e4m3_value(byte_at(index)) * bitcast<f32>(bits);
+}
+// bitsandbytes (NF4 / FP4 / LLM.int8()) in the file layout: per block an f32 scale followed by the
+// code bytes (block/2 packed nibbles, or block int8 codes). The upload passes the family
+// (0 NF4, 1 FP4, 2 INT8) and log2(values per block) under the BNB_NATIVE marker.
+const NF4_BOOK: array<u32, 16> = array<u32, 16>(0xbf800000u, 0xbf3239b1u, 0xbf066b30u, 0xbeca32a0u,
+    0xbe91a24du, 0xbe3d353fu, 0xbdba7871u, 0x00000000u, 0x3da2faffu, 0x3e24cae3u, 0x3e7c04ddu,
+    0x3ead033au, 0x3ee1a4b8u, 0x3f1007abu, 0x3f3913b3u, 0x3f800000u);
+const FP4_BOOK: array<u32, 16> = array<u32, 16>(0x00000000u, 0x3baaaaabu, 0x3f2aaaabu, 0x3f800000u,
+    0x3eaaaaabu, 0x3f000000u, 0x3e2aaaabu, 0x3e800000u, 0x80000000u, 0xbbaaaaabu, 0xbf2aaaabu,
+    0xbf800000u, 0xbeaaaaabu, 0xbf000000u, 0xbe2aaaabu, 0xbe800000u);
+fn bits_at(offset: u32) -> u32 {
+    let bits = byte_at(offset) | (byte_at(offset + 1u) << 8u) | (byte_at(offset + 2u) << 16u) | (byte_at(offset + 3u) << 24u);
+    return bits;
+}
+fn bnb_weight(index: u32, kind: u32) -> f32 {
+    let family = (kind >> 5u) & 3u;
+    let block = 1u << (kind & 31u);
+    let local = index % block;
+    let codes = select(block / 2u, block, family == 2u);
+    let start = (index / block) * (4u + codes);
+    let scale = bitcast<f32>(bits_at(start));
+    if (family == 2u) {
+        return signed_byte(byte_at(start + 4u + local)) * scale;
+    }
+    let byte = byte_at(start + 4u + local / 2u);
+    let nib = select(byte & 15u, byte >> 4u, local % 2u == 0u);
+    return bitcast<f32>(select(FP4_BOOK[nib], NF4_BOOK[nib], family == 0u)) * scale;
+}
 fn weight_at(index: u32, kind: u32) -> f32 {
+    if ((kind & 0xf8000000u) == 0xf8000000u) { return fp8b_weight(index, kind); }
+    if ((kind & 0xfc000000u) == 0xf4000000u) { return bnb_weight(index, kind); }
     if (kind == 0u) { return bitcast<f32>(weights[index]); }
     if (kind == 1u) { return unpack2x16float(weights[index / 2u])[index % 2u]; }
     if (kind == 30u) { return bitcast<f32>(((weights[index / 2u] >> ((index % 2u) * 16u)) & 0xffffu) << 16u); }
@@ -896,6 +956,32 @@ fn invalid(msg: impl Into<String>) -> BackendError {
     BackendError::InvalidShape(msg.into())
 }
 
+/// The `hdr[3]` marker for a block-wise FP8 tensor the WGSL decoder can read directly, or `None` when
+/// the upload has to expand it (several slabs / a trailer that does not match the bytes).
+/// The `hdr[3]` marker for a bitsandbytes tensor the WGSL decoder reads in the file layout, or `None`
+/// when the block grid does not fit the shape (then the upload expands it to F32 as before).
+fn bnb_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
+    let layout = fllm_gguf_probe::bnb::layout(kind)?;
+    if cols % layout.block != 0 || rows * (cols / layout.block) * layout.bytes != raw_bytes.len() {
+        return None;
+    }
+    let family = match layout.family {
+        fllm_gguf_probe::bnb::Family::Nf4 => 0u32,
+        fllm_gguf_probe::bnb::Family::Fp4 => 1,
+        fllm_gguf_probe::bnb::Family::Int8 => 2,
+    };
+    Some(BNB_NATIVE | (family << 5) | layout.block.trailing_zeros())
+}
+
+fn fp8b_native_kind(raw_bytes: &[u8], kind: u32) -> Option<u32> {
+    let layout = fllm_gguf_probe::Fp8bLayout::parse(kind, raw_bytes).ok()?;
+    if layout.slabs != 1 {
+        return None; // the kernels index one matrix; expert stacks keep the exact expansion
+    }
+    let (lr, lc) = (layout.block_rows.trailing_zeros(), layout.block_cols.trailing_zeros());
+    (lr <= 15 && lc <= 15).then_some(FP8B_NATIVE | (lr << 4) | lc)
+}
+
 fn round4(n: u64) -> u64 {
     n.div_ceil(4) * 4
 }
@@ -1237,7 +1323,19 @@ impl Backend for WgpuBackend {
         let kind = quant_type.to_gguf_type_id();
         let converted;
         let expanded16: Vec<u8>;
-        let (bytes, quant_type) = if fllm_gguf_probe::fp8b_type(kind) {
+        let native_fp8b = if fllm_gguf_probe::fp8b_type(kind) { fp8b_native_kind(raw_bytes, kind) } else { None };
+        let native_bnb = if native_fp8b.is_none() && fllm_gguf_probe::bnb::is_bnb(kind) {
+            bnb_native_kind(kind, raw_bytes, rows, cols)
+        } else {
+            None
+        };
+        let (bytes, quant_type) = if let Some(native) = native_fp8b {
+            // WGSL decodes the blob as it is on disk: codes, then one F32 scale per tile.
+            (raw_bytes, QuantType::Other(native))
+        } else if let Some(native) = native_bnb {
+            // bitsandbytes blocks stay as they are: f32 scale, then the code bytes.
+            (raw_bytes, QuantType::Other(native))
+        } else if fllm_gguf_probe::fp8b_type(kind) {
             // Block-wise FP8 has no WGSL decoder: the codes are expanded once with their tile scales, exactly, to binary16 (2 bytes per weight, not
             // the 4 of the generic F32 expansion below)
             let values = crate::compute::dequantize(raw_bytes, kind, rows * cols)
@@ -2618,5 +2716,151 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{label}: {e:?}"));
         }
+    }
+
+    /// bitsandbytes blocks: the WGSL decoder's arithmetic (mirrored here) against the reference
+    /// dequantizer, for every family and both block sizes.
+    #[test]
+    fn bnb_native_matches_the_reference_dequantizer() {
+        use super::{bnb_native_kind, BNB_NATIVE};
+        // the bit patterns the WGSL module carries
+        let nf4: [u32; 16] = [
+            0xbf800000, 0xbf3239b1, 0xbf066b30, 0xbeca32a0, 0xbe91a24d, 0xbe3d353f, 0xbdba7871, 0x00000000,
+            0x3da2faff, 0x3e24cae3, 0x3e7c04dd, 0x3ead033a, 0x3ee1a4b8, 0x3f1007ab, 0x3f3913b3, 0x3f800000,
+        ];
+        let fp4: [u32; 16] = [
+            0x00000000, 0x3baaaaab, 0x3f2aaaab, 0x3f800000, 0x3eaaaaab, 0x3f000000, 0x3e2aaaab, 0x3e800000,
+            0x80000000, 0xbbaaaaab, 0xbf2aaaab, 0xbf800000, 0xbeaaaaab, 0xbf000000, 0xbe2aaaab, 0xbe800000,
+        ];
+        // the tables must be the ones bitsandbytes defines
+        for (i, value) in nf4.iter().enumerate() {
+            assert_eq!(f32::from_bits(*value), fllm_gguf_probe::bnb::NF4_CODE[i], "NF4 code {i}");
+        }
+        for (i, value) in fp4.iter().enumerate() {
+            assert_eq!(f32::from_bits(*value), fllm_gguf_probe::bnb::FP4_CODE[i], "FP4 code {i}");
+        }
+        for (id, block) in [
+            (fllm_gguf_probe::bnb::NF4_B64, 64usize),
+            (fllm_gguf_probe::bnb::NF4_B128, 128),
+            (fllm_gguf_probe::bnb::FP4_B64, 64),
+            (fllm_gguf_probe::bnb::FP4_B128, 128),
+        ] {
+            let (rows, cols) = (2usize, block * 2);
+            let layout = fllm_gguf_probe::bnb::layout(id).expect("layout");
+            let mut bytes = Vec::new();
+            for b in 0..rows * cols / block {
+                bytes.extend_from_slice(&(0.5f32 * (b as f32 + 1.0)).to_le_bytes());
+                for j in 0..block / 2 {
+                    bytes.push((((j * 13 + b) % 256) as u8).wrapping_mul(7).wrapping_add(3));
+                }
+            }
+            let marker = bnb_native_kind(id, &bytes, rows, cols).expect("the WGSL decoder takes this");
+            assert_eq!(marker & 0xFC00_0000, BNB_NATIVE);
+            let expected_family = match layout.family {
+                fllm_gguf_probe::bnb::Family::Nf4 => 0u32,
+                fllm_gguf_probe::bnb::Family::Fp4 => 1,
+                fllm_gguf_probe::bnb::Family::Int8 => 2,
+            };
+            assert_eq!((marker >> 5) & 3, expected_family, "family in the marker");
+            let family = (marker >> 5) & 3;
+            let per_block = 1usize << (marker & 31);
+            assert_eq!(per_block, block);
+            let book: &[u32; 16] = if family == 0 { &nf4 } else { &fp4 };
+            let reference = fllm_gguf_probe::bnb::dequantize(&bytes, id, rows * cols).expect("reference");
+            for index in 0..rows * cols {
+                let local = index % per_block;
+                let start = (index / per_block) * (4 + per_block / 2);
+                let scale = f32::from_le_bytes([
+                    bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3],
+                ]);
+                let byte = bytes[start + 4 + local / 2];
+                let nib = if local % 2 == 0 { byte >> 4 } else { byte & 15 };
+                let mine = f32::from_bits(book[nib as usize]) * scale;
+                assert_eq!(mine, reference[index], "block {per_block}, index {index}");
+            }
+        }
+        // INT8: one scale per block, one signed byte per value
+        let id = fllm_gguf_probe::bnb::INT8_ROW;
+        let (rows, cols) = (2usize, 128usize);
+        let mut bytes = Vec::new();
+        for b in 0..rows * cols / 64 {
+            bytes.extend_from_slice(&(0.25f32 * (b as f32 + 1.0)).to_le_bytes());
+            for j in 0..64 {
+                bytes.push(((j * 37 + b * 11) % 256) as u8);
+            }
+        }
+        let marker = bnb_native_kind(id, &bytes, rows, cols).expect("int8 native");
+        assert_eq!((marker >> 5) & 3, 2);
+        let reference = fllm_gguf_probe::bnb::dequantize(&bytes, id, rows * cols).expect("reference");
+        for index in 0..rows * cols {
+            let local = index % 64;
+            let start = (index / 64) * 68;
+            let scale = f32::from_le_bytes([
+                bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3],
+            ]);
+            let mine = bytes[start + 4 + local] as i8 as f32 * scale;
+            assert_eq!(mine, reference[index], "int8 index {index}");
+        }
+        // a block grid that does not divide the row stays on the expansion
+        assert_eq!(bnb_native_kind(fllm_gguf_probe::bnb::NF4_B64, &[0u8; 36 * 3], 1, 192 + 8), None);
+    }
+
+    /// The native FP8B path must decode exactly what the upload-time expansion produced before it:
+    /// same codes, same tile scales, same marker wiring. The arithmetic here mirrors
+    /// `fp8b_weight`/`e4m3_value` in the WGSL module line by line.
+    #[test]
+    fn fp8b_native_matches_the_reference_dequantizer() {
+        use super::{fp8b_native_kind, FP8B_NATIVE};
+        let decode = |code: u8| -> f32 {
+            let v = u32::from(code);
+            let mag = v & 0x7f;
+            let normal = f32::from_bits((mag << 20) + (120 << 23));
+            let subnormal = (mag & 7) as f32 * (1.0 / 512.0);
+            let value = if mag >> 3 == 0 { subnormal } else { normal };
+            let value = if mag == 0x7f { f32::NAN } else { value };
+            f32::from_bits(value.to_bits() | ((v & 0x80) << 24))
+        };
+        for (block_rows, block_cols, rows, cols) in
+            [(1usize, 8usize, 2usize, 16usize), (2, 8, 4, 24), (128, 128, 128, 256)]
+        {
+            let id = fllm_gguf_probe::fp8b_type_id(block_rows, block_cols).expect("fp8b type id");
+            let layout = fllm_gguf_probe::Fp8bLayout::new(id, cols, rows, 1).expect("layout");
+            let codes = [0x00u8, 0x01, 0x38, 0xb8, 0x4e, 0x7e, 0x7f];
+            let mut bytes: Vec<u8> = (0..rows * cols).map(|i| codes[i % codes.len()]).collect();
+            for tile in 0..layout.tiles_per_slab() {
+                bytes.extend_from_slice(&(0.125f32 * (tile as f32 + 1.0)).to_le_bytes());
+            }
+            bytes.extend_from_slice(&layout.trailer());
+
+            let marker = fp8b_native_kind(&bytes, id).expect("the WGSL decoder takes this blob");
+            assert_eq!(marker & 0xF800_0000, FP8B_NATIVE);
+            let (br, bc) = (1usize << ((marker >> 4) & 15), 1usize << (marker & 15));
+            assert_eq!((br, bc), (block_rows, block_cols), "marker must round-trip the tile shape");
+
+            let reference = crate::compute::dequantize(&bytes, id, rows * cols).expect("reference");
+            for index in 0..rows * cols {
+                let (row, col) = (index / cols, index % cols);
+                let tile_cols = cols.div_ceil(bc);
+                let tile = (row / br) * tile_cols + col / bc;
+                let base = rows * cols + 4 * tile;
+                let scale =
+                    f32::from_le_bytes([bytes[base], bytes[base + 1], bytes[base + 2], bytes[base + 3]]);
+                let mine = decode(bytes[index]) * scale;
+                let want = reference[index];
+                assert!(
+                    mine == want || (mine.is_nan() && want.is_nan()),
+                    "{rows}x{cols} tiles {br}x{bc}, index {index}: {mine} != {want}"
+                );
+            }
+        }
+        // Stacked experts (several slabs) keep the exact expansion: the kernels index one matrix.
+        let id = fllm_gguf_probe::fp8b_type_id(1, 8).expect("fp8b type id");
+        let layout = fllm_gguf_probe::Fp8bLayout::new(id, 8, 1, 2).expect("layout");
+        let mut bytes = vec![0x38u8; layout.elements()];
+        for _ in 0..layout.tiles() {
+            bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&layout.trailer());
+        assert_eq!(fp8b_native_kind(&bytes, id), None, "multi-slab must not take the native path");
     }
 }
