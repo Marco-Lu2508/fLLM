@@ -47,6 +47,22 @@ const BNB_NATIVE: u32 = 0xF400_0000;
 /// Marker for MLX affine tensors decoded in the file layout: high byte 0xF2, then the bit width
 /// (bits 0-3), group/32 (bits 4-11) and the scale type (bit 12), the same packing as the type id.
 const MLX_NATIVE: u32 = 0xF200_0000;
+/// Marker for EXL3 tensors decoded by the three passes (pre / mm / post) straight from the blob.
+const EXL3_NATIVE: u32 = 0xF100_0000;
+/// Whether `kind` is one of the markers the upload puts into `hdr[3]` for a tensor decoded in its
+/// stored layout. Those ids are not GGUF types, so `NATIVE_KINDS` cannot list them and the usual
+/// `contains` checks would reject a valid weight.
+fn is_decoded_marker(kind: u32) -> bool {
+    match kind & 0xff00_0000 {
+        0xf000_0000 | 0xf100_0000 | 0xf200_0000 | 0xf400_0000 => true,
+        _ => (kind & 0xf800_0000) == 0xf800_0000,
+    }
+}
+
+/// Whether `kind` marks an EXL3 tensor for the three-pass projection.
+fn is_exl3_marker(kind: u32) -> bool {
+    kind & 0xff00_0000 == 0xf100_0000
+}
 /// Marker for EXL2 tensors the upload repacked losslessly into a self-describing layout: high byte
 /// 0xF0, then the group width `n` (bits 4-15) and the bit width (bits 0-3).
 const EXL2_NATIVE: u32 = 0xF000_0000;
@@ -1204,6 +1220,30 @@ fn invalid(msg: impl Into<String>) -> BackendError {
 
 /// The `hdr[3]` marker for a block-wise FP8 tensor the WGSL decoder can read directly, or `None` when
 /// the upload has to expand it (several slabs / a trailer that does not match the bytes).
+/// The `hdr[3]` marker for an EXL3 tensor decoded by the three passes, or `None` when the blob needs
+/// the generic expansion. The blob is passed through untouched; the kernels read the codebook word,
+/// the tile offsets, `suh`, `svh` and the output map from it. The 128-point Hadamard fixes the shape:
+/// rows and columns must be multiples of 128.
+fn exl3_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
+    if kind != fllm_gguf_probe::exl::EXL3_TYPE || rows % 128 != 0 || cols % 128 != 0 {
+        return None;
+    }
+    if raw_bytes.len() < 64 || &raw_bytes[..4] != b"EXL3" {
+        return None;
+    }
+    let word = |at: usize| u32::from_le_bytes(raw_bytes[at..at + 4].try_into().unwrap());
+    let (r, c) = (word(8) as usize, word(12) as usize);
+    let param = word(36);
+    let (bits, codebook) = (param & 0xff, param >> 8);
+    if r != rows || c != cols || !(1..=8).contains(&bits) || codebook > 2 {
+        return None; // fractional widths and unknown codebooks stay on the expansion
+    }
+    if word(16) as usize != raw_bytes.len() {
+        return None;
+    }
+    Some(EXL3_NATIVE)
+}
+
 /// The `hdr[3]` marker for an EXL2 tensor decoded straight from the blob, or `None` when the tensor
 /// needs the generic expansion. Nothing is copied or converted: the upload passes the bytes through
 /// and the kernel reads the header, the group maxima, the q_scale nibbles and the permutation table
@@ -1521,6 +1561,80 @@ fn get_wgpu_buf(buf: &DeviceBuffer) -> Result<&wgpu::Buffer, BackendError> {
     Ok(&inner.buffer)
 }
 
+    /// The ExLlamaV3 projection in three passes: transform the input, multiply against the trellis
+/// matrix decoded on the fly, transform and scatter the output. Scratch is one f32 per input and
+/// one per output of the batch; the weights stay the blob.
+fn exl3_linear(
+    s: &mut WgpuStream,
+    out: &mut DeviceBuffer,
+    x: &DeviceBuffer,
+    weight: &DeviceWeight,
+    bias: Option<&DeviceBuffer>,
+    batch: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(), BackendError> {
+    if rows % 128 != 0 || cols % 128 != 0 {
+        return Err(invalid("an EXL3 projection needs 128-multiple rows and columns"));
+    }
+    let (h, stride, _) = s.reserve(3, 0)?;
+    let post = h + 2 * stride;
+    let bias_flag = u32::from(bias.is_some());
+    // pre: rows, cols, batch, -, tok0 (the pass handles one token per workgroup)
+    s.host[h..h + 7].copy_from_slice(&[rows as u32, cols as u32, batch as u32, 0, 0, 1.0f32.to_bits(), bias_flag]);
+    // mm: -, cols, chunk
+    s.host[h + stride..h + stride + 3].copy_from_slice(&[0, cols as u32, batch as u32]);
+    // post: rows, -, -, -, tok0, scale, flag (bit 0 adds the bias)
+    s.host[post..post + 7].copy_from_slice(&[rows as u32, 0, 0, 0, 0, 1.0f32.to_bits(), bias_flag]);
+    let x2 = scratch_buffer(&s.context, batch * cols * 4, "fllm-exl3-x2");
+    let z = scratch_buffer(&s.context, batch * rows * 4, "fllm-exl3-z");
+    let context = Arc::clone(&s.context);
+    let bias_bind = match bias {
+        Some(b) => s.bind(b)?,
+        None => WgpuStream::dummy_bind(&context),
+    };
+    // read the limit before the dispatches borrow `s` mutably
+    let max_grid = s.context.limits.max_compute_workgroups_per_dimension as usize;
+    let grid = |n: usize, b: usize| -> Result<(u32, u32, u32), BackendError> {
+        if n > max_grid || b > max_grid {
+            return Err(invalid(format!("EXL3 dispatch {n} x {b} exceeds the workgroup grid")));
+        }
+        Ok((n as u32, b as u32, 1))
+    };
+    let (gx, gy, gz) = grid(cols / 128, batch)?;
+    {
+        let xb = s.bind(x)?;
+        let x2b = s.bind(&x2)?;
+        s.dispatch(KernelId::Exl3Pre, h, &[xb, x2b], (gx, gy, gz))?;
+    }
+    let (gx, gy, gz) = grid(rows / 16, 1)?;
+    {
+        let x2b = s.bind(&x2)?;
+        let zb = s.bind(&z)?;
+        s.dispatch(KernelId::Exl3Mm, h + stride, &[x2b, zb], (gx, gy, gz))?;
+    }
+    let (gx, gy, gz) = grid(rows / 128, batch)?;
+    {
+        let zb = s.bind(&z)?;
+        let ob = s.bind(out)?;
+        s.dispatch(KernelId::Exl3Post, post, &[zb, ob, bias_bind], (gx, gy, gz))?;
+    }
+    let _ = weight;
+    Ok(())
+}
+
+/// A fresh scratch buffer for the multi-pass kernels.
+fn scratch_buffer(context: &GpuContext, bytes: usize, label: &str) -> DeviceBuffer {
+    let size = (bytes + 3) & !3;
+    let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    wrap(buffer, size, context.device_id)
+}
+
 fn wrap(buffer: wgpu::Buffer, size: usize, device_id: usize) -> DeviceBuffer {
     DeviceBuffer::new(
         WGPU_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
@@ -1539,10 +1653,30 @@ pub struct WgpuBackend {
 impl WgpuBackend {
     pub fn new(backend_name: &str, device_id: usize) -> Result<Self, BackendError> {
         let context = GpuContext::new(backend_name, device_id)?;
-        let supported_quants = NATIVE_KINDS
+        // Every type the WGSL decoders read in its stored layout. A type missing here makes the
+        // loader expand the tensor before the upload sees it, which would leave the native paths
+        // unreachable; FP8B, bitsandbytes, MLX affine and the EXL blobs all arrive as their own ids.
+        let mut supported_quants: Vec<QuantType> = NATIVE_KINDS
             .iter()
             .map(|&k| QuantType::from_gguf_type_id(k))
             .collect();
+        // FP8B: the 128x128 tile and every power-of-two shape in 0x8000_0100..0x8000_01ff
+        supported_quants.push(QuantType::Fp8Block);
+        for code in 0u32..=0xff {
+            supported_quants.push(QuantType::Other(0x8000_0100 | code));
+        }
+        // bitsandbytes: NF4B64/128, FP4B64/128, INT8R
+        supported_quants.extend([
+            QuantType::Nf4B64,
+            QuantType::Nf4B128,
+            QuantType::Fp4B64,
+            QuantType::Fp4B128,
+            QuantType::Int8Row,
+        ]);
+        supported_quants.extend(QuantType::mlx_affine_common());
+        supported_quants.extend([QuantType::Exl2, QuantType::Exl3]);
+        supported_quants.sort_by_key(QuantType::to_gguf_type_id);
+        supported_quants.dedup();
         let capabilities = BackendCapabilities {
             name: context.name.clone(),
             supported_quants,
@@ -1618,6 +1752,11 @@ impl Backend for WgpuBackend {
         } else {
             None
         };
+        let native_exl3 = if native_fp8b.is_none() && native_bnb.is_none() {
+            exl3_native_kind(kind, raw_bytes, rows, cols)
+        } else {
+            None
+        };
         let native_mlx = if native_fp8b.is_none() && native_bnb.is_none() && fllm_gguf_probe::mlx_affine(kind).is_some() {
             mlx_native_kind(kind, raw_bytes, rows, cols)
         } else {
@@ -1635,14 +1774,17 @@ impl Backend for WgpuBackend {
         } else if let Some(marker) = native_exl2 {
             // EXL2 stays the blob on disk; the kernel reads the tables from it.
             (raw_bytes, QuantType::Other(marker))
+        } else if let Some(marker) = native_exl3 {
+            // EXL3 stays the blob on disk; the three passes read the trellis tiles from it.
+            (raw_bytes, QuantType::Other(marker))
         } else if fllm_gguf_probe::fp8b_type(kind) {
-            // Block-wise FP8 has no WGSL decoder: the codes are expanded once with their tile scales, exactly, to binary16 (2 bytes per weight, not
+            // Only reachable for tile shapes the WGSL decoder declines; expanded once with their tile scales to binary16 (2 bytes per weight, not
             // the 4 of the generic F32 expansion below)
             let values = crate::compute::dequantize(raw_bytes, kind, rows * cols)
                 .map_err(|e| BackendError::UnsupportedOperation(format!("{name}: {e}")))?;
             log_once(
                 "wgpu-fp8b-f16",
-                &format!("Block-wise FP8 weights have no WGSL decoder; expanded to F16 on upload (first: {name}, {} MiB)", (values.len() * 2) >> 20),
+                &format!("Block-wise FP8 weights with this tile shape keep the F16 expansion on upload (first: {name}, {} MiB)", (values.len() * 2) >> 20),
             );
             if values.iter().any(|v| !v.is_finite() || v.abs() > 65504.0) {
                 return Err(invalid(format!("{name}: a dequantized block-wise FP8 weight does not fit binary16")));
@@ -2617,7 +2759,7 @@ impl Stream for WgpuStream {
         bias: Option<&DeviceBuffer>,
     ) -> Result<(), BackendError> {
         let kind = weight.quant_type.to_gguf_type_id();
-        if !NATIVE_KINDS.contains(&kind) {
+        if !NATIVE_KINDS.contains(&kind) && !is_decoded_marker(kind) {
             // upload_weight converts every other type, so this weight did not come from it.
             return Err(BackendError::UnsupportedQuant(weight.quant_type));
         }
@@ -2637,6 +2779,9 @@ impl Stream for WgpuStream {
         }
         fits_u32(batch * cols, "linear input")?;
         fits_u32(batch * rows, "linear output")?;
+        if is_exl3_marker(kind) {
+            return exl3_linear(self, out, x, weight, bias, batch, rows, cols);
+        }
         let tiled = batch >= 16;
         let (gx, gy) = if tiled { (rows.div_ceil(64) as u32, batch.div_ceil(64) as u32) } else { self.grid(rows)? };
         let gz = if tiled { 1 } else { batch.div_ceil(4) };

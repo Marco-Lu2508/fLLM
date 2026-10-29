@@ -2261,6 +2261,10 @@ impl<'a> Tester<'a> {
         if self.enter("mlx") {
             self.mlx_cases(false);
         }
+        // the FP8B decode is exact arithmetic, so the group belongs to this pass as well
+        if self.enter("fp8blk") {
+            self.fp8blk_cases();
+        }
         if self.enter("embedding") {
             self.embedding_cases();
         }

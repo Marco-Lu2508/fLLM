@@ -91,7 +91,11 @@ impl Tester<'_> {
             )));
         }
         // a device with a layout of its own (Vulkan: the scale of a tile repeated for each of its rows) keeps the weight 8-bit but not byte for byte
-        if weight.quant_type.to_gguf_type_id() != kind || weight.buffer.size >= rows * cols * 2 {
+        // either the tensor keeps its own type id, or the backend reports one of the markers it puts
+        // on a weight it decodes from the stored bytes (wgpu: high byte 0xF8 for block-wise FP8)
+        let id = weight.quant_type.to_gguf_type_id();
+        let decoded_in_place = id == kind || (id & 0xf800_0000) == 0xf800_0000;
+        if !decoded_in_place || weight.buffer.size >= rows * cols * 2 {
             return Err(BackendError::DriverError(format!(
                 "the weight is not kept as FP8B: {:?}, {} bytes on the device for {} bytes of tensor",
                 weight.quant_type,
