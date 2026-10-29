@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- `--device opengl` (`gl`): an OpenGL 4.3 / OpenGL ES 3.1 backend through wgpu for graphics cards that have no Vulkan, DirectX 12 or Metal driver. `auto` tries it after DirectX 12 and before the CPU, lists a card only when no other driver serves it and never takes a software renderer. Checked on a software OpenGL (Mesa llvmpipe): the self-test groups linear, activation and norm pass against the CPU and a tiny model writes the CPU's text; not tried on an old graphics card.
+
 ### Security
 - `zip` 9.0.4 -> 9.0.5 (the PyTorch and archive reader of the converter; CVE-2026-115905, found by the Trivy scan).
 

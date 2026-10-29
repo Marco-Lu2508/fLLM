@@ -174,7 +174,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 
 - **Backends.** CPU (runtime-selected AVX2, AVX-VNNI, AVX-512, NEON dotprod/i8mm kernels), CUDA, wgpu
   (Vulkan, Metal, DirectX 12), and optional native Vulkan, Metal, ROCm/HIP, SYCL, Intel NPU (OpenVINO) and
-  TPU backends. `--device auto` takes the first GPU of CUDA, ROCm, Metal, Vulkan, DX12, SYCL, else the
+  TPU backends, and `--device opengl` as the last resort for graphics cards without a Vulkan/DirectX 12/Metal driver. `--device auto` takes the first GPU of CUDA, ROCm, Metal, Vulkan, DX12, OpenGL, SYCL, else the
   CPU; names like `cuda:1` pick a device. One server process uses one device: there is no
   multi-GPU splitting of a single model. See [docs/device-selection.md](docs/device-selection.md).
 - **CUDA.** int8 dot-product and tensor-core GEMMs for quantized weights, Marlin for AWQ/GPTQ/FP4,

@@ -175,7 +175,7 @@ impl LoadOptions {
         let device = self.device.as_deref().unwrap_or(device);
         let device = device.split(':').next().unwrap_or_default().to_ascii_lowercase();
         if let Some(format) = self.kv_cache_type.as_deref().and_then(crate::kv_format::KvFormat::parse) {
-            if matches!(device.as_str(), "vulkan" | "dx12" | "metal") && !format.is_legacy() {
+            if matches!(device.as_str(), "vulkan" | "dx12" | "metal" | "opengl" | "gl") && !format.is_legacy() {
                 return Err(format!(
                     "The {device} graphics backend can only keep the conversation memory as f16 or q8_0. Choose one of those, or run on the processor."
                 ));
