@@ -1229,7 +1229,7 @@ fn invalid(msg: impl Into<String>) -> BackendError {
 /// the tile offsets, `suh`, `svh` and the output map from it. The 128-point Hadamard fixes the shape:
 /// rows and columns must be multiples of 128.
 fn exl3_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
-    if kind != fllm_gguf_probe::exl::EXL3_TYPE || rows % 128 != 0 || cols % 128 != 0 {
+    if kind != fllm_gguf_probe::exl::EXL3_TYPE || !rows.is_multiple_of(128) || !cols.is_multiple_of(128) {
         return None;
     }
     // `FLLM_WGPU_EXL3=0` falls back to the F16 expansion, for the case the trellis pass misbehaves
@@ -1285,7 +1285,7 @@ fn mlx_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Opt
     let layout = fllm_gguf_probe::mlx_affine(kind)?;
     let group = layout.group as usize;
     let block_bytes = layout.block_bytes() as usize;
-    if cols % group != 0 || rows * (cols / group) * block_bytes != raw_bytes.len() {
+    if !cols.is_multiple_of(group) || rows * (cols / group) * block_bytes != raw_bytes.len() {
         return None;
     }
     Some(MLX_NATIVE | (u32::from(layout.bf16) << 12) | ((layout.group / 32) << 4) | layout.bits)
@@ -1295,7 +1295,7 @@ fn mlx_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Opt
 /// when the block grid does not fit the shape (then the upload expands it to F32 as before).
 fn bnb_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
     let layout = fllm_gguf_probe::bnb::layout(kind)?;
-    if cols % layout.block != 0 || rows * (cols / layout.block) * layout.bytes != raw_bytes.len() {
+    if !cols.is_multiple_of(layout.block) || rows * (cols / layout.block) * layout.bytes != raw_bytes.len() {
         return None;
     }
     let family = match layout.family {
@@ -1573,6 +1573,7 @@ fn get_wgpu_buf(buf: &DeviceBuffer) -> Result<&wgpu::Buffer, BackendError> {
     /// The ExLlamaV3 projection in three passes: transform the input, multiply against the trellis matrix
 /// decoded on the fly, transform and scatter the output. Tokens are processed in chunks of 128 (the
 /// Hadamard workspace and the tile product hold one chunk); the weights stay the blob.
+#[allow(clippy::too_many_arguments)]
 fn exl3_linear(
     s: &mut WgpuStream,
     out: &mut DeviceBuffer,
@@ -1583,7 +1584,7 @@ fn exl3_linear(
     rows: usize,
     cols: usize,
 ) -> Result<(), BackendError> {
-    if rows % 128 != 0 || cols % 128 != 0 {
+    if !rows.is_multiple_of(128) || !cols.is_multiple_of(128) {
         return Err(invalid("an EXL3 projection needs 128-multiple rows and columns"));
     }
     let max_grid = s.context.limits.max_compute_workgroups_per_dimension as usize;
