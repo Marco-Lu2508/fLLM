@@ -2353,6 +2353,19 @@ impl<'a> Tester<'a> {
                 }
             }
         }
+        // Packed ExLlamaV3 matrices through the FP32 kernels: every width (1 to 8 bits) with a codebook each, tiles in both directions, batches on both sides of
+        // the 16-token groups of the trellis kernel
+        if self.filter.wants_kind(0x8000_0031) {
+            for bits in 1..=8usize {
+                let codebook = (bits % 3) as u8;
+                let (rows, cols) = (if bits % 2 == 0 { 256usize } else { 128 }, 128 + 128 * (bits % 3));
+                for batch in [1usize, 17] {
+                    let blob = fllm_gguf_probe::exl::synthetic_exl3(rows, cols, bits, codebook, &mut || self.rng.next());
+                    let r = self.linear_with(0x8000_0031, blob, rows, cols, batch, batch == 17);
+                    self.record("linear exl3", &format!("{rows}x{cols} {bits} bits codebook {codebook} batch {batch}{}", if batch == 17 { " +bias" } else { "" }), r);
+                }
+            }
+        }
         // Per-row scaled FP8 at shapes the Marlin FP8 kernel cannot take (CUDA repacks them into one-row tiles of the block-wise kernels)
         for kind in self.kinds(&[0x8000_0020u32]) {
             for (rows, cols) in [(12usize, 77usize), (13, 300), (40, 200)] {
@@ -2653,8 +2666,21 @@ impl<'a> Tester<'a> {
         batch: usize,
         with_bias: bool,
     ) -> Result<Outcome, BackendError> {
-        self.claim = Some(kind);
         let weights = random_kind(&mut self.rng, kind, rows, cols);
+        self.linear_with(kind, weights, rows, cols, batch, with_bias)
+    }
+
+    /// [`Self::linear`] for weights the caller made (a format whose random generator has parameters the case wants to choose).
+    fn linear_with(
+        &mut self,
+        kind: u32,
+        weights: Vec<u8>,
+        rows: usize,
+        cols: usize,
+        batch: usize,
+        with_bias: bool,
+    ) -> Result<Outcome, BackendError> {
+        self.claim = Some(kind);
         let x = self.rng.vector(batch * cols, 1.0);
         let bias = with_bias.then(|| self.rng.vector(rows, 1.0));
         let w = crate::compute::dequantize(&weights, kind, rows * cols)

@@ -38,7 +38,7 @@ pub(crate) fn upload_weight(
             return Err(invalid(format!("{name}: bias has {} values for {rows} rows", b.len())));
         }
     }
-    let prepared = prepare(name, raw, quant, rows, cols, scale)?;
+    let prepared = prepare(name, raw, quant, rows, cols, scale, sh.caps().max_storage_buffer_range)?;
     let (buffer, perm) = place(sh, name, &prepared, rows, cols)?;
     let bias = bias.map(|b| upload_bytes(sh, &to_f32_bytes(b))).transpose()?;
     let perm = perm.map(|p| upload_bytes(sh, &u32_bytes(&p))).transpose()?;
@@ -61,7 +61,7 @@ pub(crate) fn upload_bytes(sh: &Shared, bytes: &[u8]) -> Result<DeviceBuffer, Ba
     Ok(buffer)
 }
 
-fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: usize, scale: f32) -> Result<Prepared<'a>, BackendError> {
+fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: usize, scale: f32, max_range: u64) -> Result<Prepared<'a>, BackendError> {
     match quant {
         QuantType::F32 | QuantType::F16 | QuantType::BF16 => {
             let elem = if quant == QuantType::F32 { 4 } else { 2 };
@@ -76,6 +76,11 @@ fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: u
         }
         // EXL2: the blob stays as it is on the host, the device type carries the row length; a blob the kernels cannot take is expanded to F16
         QuantType::Exl2 => match crate::backend::vulkan::weights::exl2_device_type_of(raw, rows, cols) {
+            Some(device) if DeviceLayout::new(device, rows, cols).is_ok() => Ok(Prepared { bytes: Cow::Borrowed(raw), quant: device, scale }),
+            _ => expand(name, raw, quant, rows, cols, scale),
+        },
+        // EXL3: the blob as it is; the device type carries the width and the codebook. A blob bigger than one binding or of an odd shape is expanded to F16
+        QuantType::Exl3 => match crate::backend::vulkan::weights::exl3_device_type_of(raw, rows, cols, max_range) {
             Some(device) if DeviceLayout::new(device, rows, cols).is_ok() => Ok(Prepared { bytes: Cow::Borrowed(raw), quant: device, scale }),
             _ => expand(name, raw, quant, rows, cols, scale),
         },
@@ -127,7 +132,7 @@ fn expand<'a>(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize
     let float_source = quant.is_bnb()
         || matches!(
             quant,
-            QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4 | QuantType::Exl2
+            QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4 | QuantType::Exl2 | QuantType::Exl3
         )
         || fllm_gguf_probe::fp8b_type(quant.to_gguf_type_id());
     if cols.is_multiple_of(256) && !float_source {
@@ -253,8 +258,8 @@ fn place(
 
 /// (quant type, bytes) `prepare` gives a weight, for the layout tests.
 #[cfg(test)]
-pub(crate) fn prepare_for_test(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize) -> (QuantType, Vec<u8>) {
-    let p = prepare(name, raw, quant, rows, cols, 1.0).unwrap();
+pub(crate) fn prepare_for_test(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize, max_range: u64) -> (QuantType, Vec<u8>) {
+    let p = prepare(name, raw, quant, rows, cols, 1.0, max_range).unwrap();
     (p.quant, p.bytes.into_owned())
 }
 
@@ -285,16 +290,16 @@ mod tests {
                     v
                 })
                 .collect();
-            let prepared = prepare("w", &raw, quant, rows, cols, 1.0).unwrap();
+            let prepared = prepare("w", &raw, quant, rows, cols, 1.0, u64::MAX).unwrap();
             assert_eq!(prepared.quant, quant);
             assert_eq!(prepared.bytes.len(), raw.len());
         }
         let mut rng = crate::cpu_selftest::Lcg(5);
         let fp8 = crate::cpu_selftest::random_weights(0x8000_0021, 4, 256, &mut rng);
-        assert_eq!(prepare("w", &fp8, QuantType::Fp8Block, 4, 256, 0.5).unwrap().quant, QuantType::Fp8Block);
+        assert_eq!(prepare("w", &fp8, QuantType::Fp8Block, 4, 256, 0.5, u64::MAX).unwrap().quant, QuantType::Fp8Block);
         let m = fllm_gguf_probe::MlxAffine { bits: 5, group: 64, bf16: true };
         let mlx = crate::cpu_mlx::random_weights(m, 4, 128, &mut rng);
-        assert_eq!(prepare("w", &mlx, QuantType::Other(m.type_id()), 4, 128, 1.0).unwrap().quant, QuantType::Other(m.type_id()));
+        assert_eq!(prepare("w", &mlx, QuantType::Other(m.type_id()), 4, 128, 1.0, u64::MAX).unwrap().quant, QuantType::Other(m.type_id()));
     }
 
     /// FP8M (codes and a binary16 scale per row) is block-wise FP8 with tiles of one row: the same weights, the scales widened to f32.
@@ -302,7 +307,7 @@ mod tests {
     fn per_row_scaled_fp8_is_converted_to_block_wise_fp8() {
         let (rows, cols) = (5usize, 48usize);
         let raw = crate::cpu_selftest::random_weights(0x8000_0020, rows, cols, &mut crate::cpu_selftest::Lcg(3));
-        let prepared = prepare("w", &raw, QuantType::Fp8Marlin, rows, cols, 1.0).unwrap();
+        let prepared = prepare("w", &raw, QuantType::Fp8Marlin, rows, cols, 1.0, u64::MAX).unwrap();
         let kind = prepared.quant.to_gguf_type_id();
         assert!(fllm_gguf_probe::fp8b_type(kind));
         let want = crate::compute::dequantize(&raw, 0x8000_0020, rows * cols).unwrap();
@@ -315,7 +320,7 @@ mod tests {
     fn fp8_shapes_without_a_kernel_are_expanded_to_f16() {
         for (kind, rows, cols) in [(0x8000_0021u32, 3usize, 100usize), (fllm_gguf_probe::fp8b_type_id(16, 4).unwrap(), 4, 64)] {
             let raw = crate::cpu_selftest::random_weights(kind, rows, cols, &mut crate::cpu_selftest::Lcg(4));
-            let prepared = prepare("w", &raw, QuantType::from_gguf_type_id(kind), rows, cols, 1.0).unwrap();
+            let prepared = prepare("w", &raw, QuantType::from_gguf_type_id(kind), rows, cols, 1.0, u64::MAX).unwrap();
             assert_eq!(prepared.quant, QuantType::F16, "{kind:#x} {rows}x{cols}");
             let want = crate::compute::dequantize(&raw, kind, rows * cols).unwrap();
             for (i, pair) in prepared.bytes.as_chunks::<2>().0.iter().enumerate() {

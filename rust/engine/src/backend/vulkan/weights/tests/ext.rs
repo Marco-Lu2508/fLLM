@@ -353,9 +353,50 @@ fn exl2_blobs_the_kernels_cannot_take_are_expanded_to_f16() {
     assert!(exl2_device_type_of(&blob, rows, cols).is_none());
     assert!(DeviceLayout::new(QuantType::Exl2, rows, cols).is_err());
     let want = exl::dequantize(&blob, exl::EXL2_TYPE, rows * cols).unwrap();
-    let prepared = crate::backend::vulkan::backend::upload::prepare_for_test("w", &blob, QuantType::Exl2, rows, cols);
+    let prepared = crate::backend::vulkan::backend::upload::prepare_for_test("w", &blob, QuantType::Exl2, rows, cols, u64::MAX);
     assert_eq!(prepared.0, QuantType::F16);
     for (i, pair) in prepared.1.as_chunks::<2>().0.iter().enumerate() {
+        assert_eq!(half::f16::from_le_bytes(*pair).to_f32(), half::f16::from_f32(want[i]).to_f32(), "element {i}");
+    }
+}
+
+/// EXL3: the device image is the blob (padded); the width and codebook travel in the device type.
+#[test]
+fn exl3_blobs_are_uploaded_as_they_are_with_their_parameters_in_the_type() {
+    use fllm_gguf_probe::exl;
+    for (bits, codebook, rows, cols) in [(1usize, 0u8, 128usize, 128usize), (3, 1, 256, 128), (8, 2, 128, 384), (5, 0, 384, 256)] {
+        let mut rng = Lcg(bits as u64 * 13 + u64::from(codebook));
+        let blob = exl::synthetic_exl3(rows, cols, bits, codebook, &mut || rng.next());
+        let quant = exl3_device_type_of(&blob, rows, cols, u64::MAX).expect("device type");
+        assert_eq!(Some(quant), exl3_device_type(bits, codebook));
+        assert!(is_exl3(quant) && !uses_perm(quant) && !is_exl3(QuantType::Q4_K));
+        let info = format_info(quant).unwrap();
+        assert!(!info.float_chunk && matches!(info.geometry, Geometry::Exl3 { .. }));
+        let packed = pack_weight(quant, &blob, rows, cols).unwrap();
+        assert_eq!(packed.layout.total_bytes, blob.len().next_multiple_of(16));
+        assert_eq!(&packed.bytes[..blob.len()], &blob[..]);
+        assert!(packed.bytes[blob.len()..].iter().all(|&b| b == 0));
+        // one piece: no slices of rows, and a binding smaller than the blob refuses it
+        assert!(rows_per_slice(quant, cols, 1 << 20).unwrap() >= rows);
+        assert!(pack_rows_of_blob(quant, &blob, rows, cols, 0, rows / 2).unwrap().is_err());
+        assert!(exl3_device_type_of(&blob, rows, cols, blob.len() as u64 - 1).is_none());
+        assert!(exl3_device_type_of(&blob, rows, cols + 128, u64::MAX).is_none());
+        assert!(DeviceLayout::new(quant, rows + 64, cols).is_err());
+    }
+}
+
+#[test]
+fn exl3_blobs_that_do_not_fit_one_binding_are_expanded_to_f16() {
+    use fllm_gguf_probe::exl;
+    let (rows, cols) = (128usize, 128usize);
+    let mut rng = Lcg(21);
+    let blob = exl::synthetic_exl3(rows, cols, 2, 0, &mut || rng.next());
+    let native = crate::backend::vulkan::backend::upload::prepare_for_test("w", &blob, QuantType::Exl3, rows, cols, u64::MAX);
+    assert!(is_exl3(native.0) && native.1 == blob);
+    let expanded = crate::backend::vulkan::backend::upload::prepare_for_test("w", &blob, QuantType::Exl3, rows, cols, 1024);
+    assert_eq!(expanded.0, QuantType::F16);
+    let want = exl::dequantize(&blob, exl::EXL3_TYPE, rows * cols).unwrap();
+    for (i, pair) in expanded.1.as_chunks::<2>().0.iter().enumerate() {
         assert_eq!(half::f16::from_le_bytes(*pair).to_f32(), half::f16::from_f32(want[i]).to_f32(), "element {i}");
     }
 }

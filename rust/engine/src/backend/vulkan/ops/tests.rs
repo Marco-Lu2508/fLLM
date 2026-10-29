@@ -1231,6 +1231,8 @@ fn plans_match_the_shader_headers() {
             if !listed
                 && !stem.starts_with('_')
                 && !stem.starts_with("scaffold")
+                // the three EXL3 passes are recorded by the stream (`stream/linear.rs`) and checked against their modules in `backend/tests.rs`
+                && !stem.starts_with("exl3_")
                 && !stem.starts_with("mv_")
                 && !stem.starts_with("mm_")
                 && !stem.starts_with("quant_")

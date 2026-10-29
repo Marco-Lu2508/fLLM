@@ -38,8 +38,9 @@ pub fn native_quants() -> Vec<QuantType> {
     // is block-wise FP8 with one tile per row (converted on upload, `backend/upload.rs`)
     quants.extend(extended_formats());
     quants.push(QuantType::Fp8Marlin);
-    // ExLlamaV2 matrices (shaders/vulkan/_q_fmt_exl2.glsl); EXL3 (trellis codes with Hadamard transforms) is expanded to F16 by the decoder
+    // ExLlamaV2 matrices (shaders/vulkan/_q_fmt_exl2.glsl) and ExLlamaV3 matrices (exl3_{pre,mm,post}.comp)
     quants.push(QuantType::Exl2);
+    quants.push(QuantType::Exl3);
     quants
 }
 

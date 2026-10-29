@@ -1,0 +1,102 @@
+#version 450
+// FLLM-SHADER: exl3_mm | bindings: 0 weights (the EXL3 blob, u32[]) 1 x2 (f32, chunk x cols, transformed inputs) 2 z (f32, chunk x rows) | push: rows, cols, chunk | spec: 0 = BT (groups of 16 tokens per pass, 1..8) | grid: [rows / 16, 1, 1]
+// ExLlamaV3 projection, step 2 of 3: z[t][16 no + c] = sum_i x2[t][i] * R[i][16 no + c] with the trellis matrix R decoded on the fly (docs/exl-formats.md).
+// One workgroup of 256 invocations per tile column `no` (16 output channels). For every input tile ki (16 inputs) the blob holds 32 * K bytes: a tail-biting
+// ring of 256 symbols of K bits. Invocation `tid` decodes symbol `tid`: the 16-bit window that ends at the symbol, hashed to a binary16 codebook value,
+// stored at the tile position of the symbol (tensor-core fragment order of the upstream packer). The tile is then multiplied with 16 * BT tokens: invocation
+// `tid` owns output channel tid & 15 of token (tid >> 4) + 16 b. Header words of the blob: 6 = byte offset of the first tile column, 7 = bytes per tile column,
+// 9 = K | codebook << 8.
+#extension GL_EXT_control_flow_attributes : enable
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint BT = 1;
+
+layout(std430, set = 0, binding = 0) readonly buffer WeightBuf { uint w[]; };
+layout(std430, set = 0, binding = 1) readonly buffer X2Buf { float x2[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer ZBuf { float z[]; };
+
+layout(push_constant) uniform P {
+    uint rows;
+    uint cols;
+    uint chunk;
+} p;
+
+shared float tile[256];
+
+// binary16 number with the bit pattern `bits` (exact)
+float half_bits(uint bits) {
+    return unpackHalf2x16(bits & 0xffffu).x;
+}
+
+// round an f32 to binary16 precision, ties to even (the result is exact in f32); |x| < 65520, which the codebook values are far below
+float round_half(float x) {
+    const uint b = floatBitsToUint(x);
+    const uint a = b & 0x7fffffffu;
+    if (a < 0x38800000u) {
+        // below 2^-14: subnormal halves, a multiple of 2^-24
+        return roundEven(x * 16777216.0) * (1.0 / 16777216.0);
+    }
+    const uint r = (a + 0x0fffu + ((a >> 13) & 1u)) & 0xffffe000u;
+    return uintBitsToFloat(r | (b & 0x80000000u));
+}
+
+// codebook value of a 16-bit trellis state, as `codebook_value` of gguf-probe exl.rs (binary16 arithmetic of the upstream decoder, result as f32)
+float codebook_value(uint state, uint codebook) {
+    if (codebook == 2u) {
+        const uint x = state * 0x83dcd12du;
+        const uint sum = (x & 0xffu) + ((x >> 8) & 0xffu) + ((x >> 16) & 0xffu) + (x >> 24) + 0x6400u;
+        return round_half(fma(half_bits(sum), half_bits(0x1eeeu), half_bits(0xc931u)));
+    }
+    uint x = codebook == 1u ? state * 0xcbac1fedu : state * 89226354u + 64248484u;
+    x = (x & 0x8fff8fffu) ^ 0x3b603b60u;
+    return round_half(half_bits(x) + half_bits(x >> 16));
+}
+
+// the 16-bit window ending at symbol `index` of a tail-biting ring of nw words (256 symbols of `bits` bits, MSB-first), as `window16`
+uint trellis_state(uint base, uint nw, uint bits, uint index) {
+    const uint ring = 256u * bits;
+    const uint start = ((index + 1u) * bits + ring - 16u) % ring;
+    const uint wi = start >> 5;
+    const uint off = start & 31u;
+    const uint hi = w[base + wi];
+    const uint lo = w[base + ((wi + 1u == nw) ? 0u : wi + 1u)];
+    // bits [off, off + 16) counted from the top of hi
+    if (off <= 16u) return (hi >> (16u - off)) & 0xffffu;
+    return ((hi << (off - 16u)) | (lo >> (48u - off))) & 0xffffu;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint no = gl_WorkGroupID.x;
+    const uint param = w[9];
+    const uint bits = param & 255u;
+    const uint codebook = param >> 8;
+    const uint nw = 8u * bits;
+    const uint c = tid & 15u;
+    const uint tl = tid >> 4;
+    // where the symbol this invocation decodes lands in the 16x16 tile
+    const uint lane_i = tid >> 3;
+    const uint j = tid & 7u;
+    const uint pr = 2u * (lane_i & 3u) + (j & 1u) + (((j & 2u) != 0u) ? 8u : 0u);
+    const uint pc = (lane_i >> 2) + (((j & 4u) != 0u) ? 8u : 0u);
+    const uint col_words = (w[6] >> 2) + no * (w[7] >> 2);
+    float acc[8];
+    [[unroll]] for (uint b = 0; b < 8u; ++b) acc[b] = 0.0;
+    for (uint ki = 0; ki < p.cols / 16u; ++ki) {
+        tile[pr * 16u + pc] = codebook_value(trellis_state(col_words + ki * nw, nw, bits, tid), codebook);
+        barrier();
+        for (uint b = 0; b < BT; ++b) {
+            const uint t = b * 16u + tl;
+            if (t < p.chunk) {
+                const uint xr = t * p.cols + ki * 16u;
+                float sum = 0.0;
+                [[unroll]] for (uint r = 0; r < 16u; ++r) sum += x2[xr + r] * tile[r * 16u + c];
+                acc[b] += sum;
+            }
+        }
+        barrier();
+    }
+    for (uint b = 0; b < BT; ++b) {
+        const uint t = b * 16u + tl;
+        if (t < p.chunk) z[t * p.rows + no * 16u + c] = acc[b];
+    }
+}

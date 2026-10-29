@@ -10,11 +10,12 @@
 //! main dispatch of a [`LinearPlan`] in `Stream::quantized_linear`. The binding and push-constant contract is `shaders/vulkan/INTERFACE_QUANT.md`.
 //! Level of verification: L0 (compiled, CPU unit tests of the layouts; the shaders were never run on a GPU).
 
+pub mod exl3;
 pub mod layout;
 pub mod plan;
 
 pub use layout::{
-    exl2_device_type, exl2_device_type_of, extended_formats, format_info, pack_rows_of_blob, pack_weight, pack_weight_slices, rows_per_slice, supported_formats, DeviceLayout,
+    exl2_device_type, exl2_device_type_of, exl3_device_type, exl3_device_type_of, extended_formats, is_exl3, format_info, pack_rows_of_blob, pack_weight, pack_weight_slices, rows_per_slice, supported_formats, DeviceLayout,
     uses_perm, FormatInfo, Geometry, PackedWeight, WeightSlice,
 };
 pub use plan::{

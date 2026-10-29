@@ -1,0 +1,41 @@
+#version 450
+// FLLM-SHADER: exl3_post | bindings: 0 weights (the EXL3 blob, u32[]) 1 z (f32, chunk x rows) 2 out (f32, rows of `rows`) 3 bias (f32[]) | push: rows, tok0, flags, scale | grid: [rows / 128, chunk, 1]
+// ExLlamaV3 projection, step 3 of 3: y[tok0 + t][out_map[o]] = scale * svh[o] * (H128 z[t])[o] (+ bias) on every block of 128 channels.
+// Header words of the blob: 11 = byte offset of `svh` (binary16), 12 = byte offset of `out_map` (u32, the output row of every channel).
+// flags bit 0: add bias[out_map[o]].
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer WeightBuf { uint w[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ZBuf { float z[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+layout(push_constant) uniform P {
+    uint rows;
+    uint tok0;
+    uint flags;
+    float scale;
+} p;
+
+shared float s[128];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint o = gl_WorkGroupID.x * 128u + tid;
+    const uint t = gl_WorkGroupID.y;
+    float v = z[t * p.rows + o];
+    s[tid] = v;
+    for (uint stride = 1u; stride < 128u; stride <<= 1) {
+        barrier();
+        const float other = s[tid ^ stride];
+        barrier();
+        v = ((tid & stride) != 0u) ? other - v : v + other;
+        s[tid] = v;
+    }
+    v *= 0.08838834764831845;  // 1 / sqrt(128)
+    v *= unpackHalf2x16(w[(w[11] >> 2) + (o >> 1)])[o & 1u];
+    const uint row = w[(w[12] >> 2) + o];
+    v *= p.scale;
+    if ((p.flags & 1u) != 0u) v += biasv[row];
+    outv[(p.tok0 + t) * p.rows + row] = v;
+}

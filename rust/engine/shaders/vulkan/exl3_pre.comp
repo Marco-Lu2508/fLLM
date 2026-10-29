@@ -1,0 +1,36 @@
+#version 450
+// FLLM-SHADER: exl3_pre | bindings: 0 weights (the EXL3 blob, u32[]) 1 x (f32, rows of cols) 2 x2 (f32, chunk x cols) | push: cols, tok0 | grid: [cols / 128, chunk, 1]
+// ExLlamaV3 projection, step 1 of 3 (see exl3_mm.comp, exl3_post.comp and docs/exl-formats.md): x2[t] = H128 (suh * x[tok0 + t]) on every block of 128 inputs.
+// H128 is the normalised Hadamard transform: butterflies on the 128 values of the workgroup in shared memory, then the factor 1 / sqrt(128).
+// The blob header (words 0..15 of the buffer) holds the offset of `suh` (word 10, bytes), which is a vector of binary16 numbers.
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer WeightBuf { uint w[]; };
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { float x[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer X2Buf { float x2[]; };
+
+layout(push_constant) uniform P {
+    uint cols;
+    uint tok0;
+} p;
+
+shared float s[128];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint i = gl_WorkGroupID.x * 128u + tid;
+    const uint t = gl_WorkGroupID.y;
+    const uint suh_word = (w[10] >> 2) + (i >> 1);
+    const float suh = unpackHalf2x16(w[suh_word])[i & 1u];
+    float v = x[(p.tok0 + t) * p.cols + i] * suh;
+    s[tid] = v;
+    for (uint stride = 1u; stride < 128u; stride <<= 1) {
+        barrier();
+        const float other = s[tid ^ stride];
+        barrier();
+        v = ((tid & stride) != 0u) ? other - v : v + other;
+        s[tid] = v;
+    }
+    // (no early exit above: every invocation of the workgroup reaches every barrier)
+    x2[t * p.cols + i] = v * 0.08838834764831845;  // 1 / sqrt(128)
+}

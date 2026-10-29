@@ -573,6 +573,19 @@ fn every_projection_plan_matches_its_compiled_module() {
     }
 }
 
+/// The three EXL3 shaders: bindings, push-constant sizes and the specialization constant of the tile width agree with the plan constants of the stream.
+#[test]
+fn exl3_passes_match_their_compiled_modules() {
+    use crate::backend::vulkan::weights::exl3::{MM_PUSH_BYTES, POST_PUSH_BYTES, PRE_PUSH_BYTES};
+    for (name, bindings, push) in [("exl3_pre", 3u32, PRE_PUSH_BYTES), ("exl3_mm", 3, MM_PUSH_BYTES), ("exl3_post", 4, POST_PUSH_BYTES)] {
+        let info = info_of(name);
+        assert_eq!(info.bindings, (0..bindings).collect::<Vec<_>>(), "{name}: bindings");
+        assert_eq!(info.push_bytes, Some(push), "{name}: push-constant size");
+        assert!(!info.push_non_scalar, "{name}");
+        assert_eq!(info.spec_ids.iter().copied().collect::<Vec<_>>(), if name == "exl3_mm" { vec![0] } else { vec![] }, "{name}: specialization constants");
+    }
+}
+
 #[test]
 fn float_projection_plans_match_their_compiled_modules() {
     for quant in [QuantType::F32, QuantType::F16, QuantType::BF16] {
@@ -612,6 +625,8 @@ fn no_shader_is_orphaned() {
     for quant in [QuantType::F32, QuantType::F16, QuantType::BF16] {
         seen.insert(plan_float_linear(quant, 8, 8, 1, 0, 8, false, 1.0).unwrap().shader.to_owned());
     }
+    // the three passes of an EXL3 product are recorded by the stream, not planned by `plan_quantized_linear`
+    seen.extend(["exl3_pre", "exl3_mm", "exl3_post"].map(str::to_owned));
     let registry: BTreeSet<String> = shaders::SHADERS.iter().map(|(n, _)| (*n).to_owned()).collect();
     let orphans: Vec<&String> = registry.iter().filter(|n| !seen.contains(*n)).collect();
     // the buffer-address variants need bufferDeviceAddress, which the core does not enable; scaffold_fill is the scaffold's test shader

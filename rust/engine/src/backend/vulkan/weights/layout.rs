@@ -20,6 +20,27 @@ pub enum Geometry {
     /// block of 32 inputs (plane 1) and the scale maximum of every group (plane 2); the activations are gathered through the permutation of the blob.
     /// The row length is part of the device-only type id ([`exl2_device_type`]): it is not derivable from the shape.
     Exl2 { row_words: usize },
+    /// ExLlamaV3: the blob as it is (header with the offsets of the sign vectors and the output map, trellis tiles), three passes per product
+    /// (`exl3_pre`, `exl3_mm`, `exl3_post`). The width and the codebook travel in the device-only type id ([`exl3_device_type`]).
+    Exl3 { bits: usize, codebook: u8 },
+}
+
+/// First id of the device-only types of EXL3 weights: `EXL3_DEVICE_BASE | codebook << 8 | bits`.
+pub const EXL3_DEVICE_BASE: u32 = 0x8003_0000;
+
+/// The device-only type of EXL3 weights of `bits` bits per weight (1 to 8) and codebook 0, 1 or 2.
+pub fn exl3_device_type(bits: usize, codebook: u8) -> Option<QuantType> {
+    ((1..=8).contains(&bits) && codebook <= 2).then_some(QuantType::Other(EXL3_DEVICE_BASE | (u32::from(codebook) << 8) | bits as u32))
+}
+
+fn exl3_params(id: u32) -> Option<(usize, u8)> {
+    let (bits, codebook) = ((id & 0xff) as usize, ((id >> 8) & 0xff) as u8);
+    (id & 0xffff_0000 == EXL3_DEVICE_BASE && (1..=8).contains(&bits) && codebook <= 2).then_some((bits, codebook))
+}
+
+/// Whether `quant` is an EXL3 device type (its products take the three-pass path of `exl3.rs`).
+pub fn is_exl3(quant: QuantType) -> bool {
+    exl3_params(quant.to_gguf_type_id()).is_some()
 }
 
 /// First id of the device-only types of EXL2 weights on this backend: `EXL2_DEVICE_BASE | row_words` (the words of one device row; below 65536). The upload
@@ -92,6 +113,17 @@ pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
             src_block_bytes: 0,
             plane_bytes: [0; 4],
             geometry: Geometry::Exl2 { row_words },
+            float_chunk: false,
+        });
+    }
+    if let Some((bits, codebook)) = exl3_params(id) {
+        return Some(FormatInfo {
+            tag: "exl3",
+            qk: 128,
+            src_qk: 128,
+            src_block_bytes: 0,
+            plane_bytes: [0; 4],
+            geometry: Geometry::Exl3 { bits, codebook },
             float_chunk: false,
         });
     }
@@ -223,6 +255,10 @@ fn plane_len(info: &FormatInfo, rows: usize, cols: usize, i: usize) -> Option<us
             2 => Some(cols / 32 * 4),
             _ => Some(0),
         },
+        Geometry::Exl3 { bits, codebook } => match i {
+            0 => fllm_gguf_probe::exl::Exl3Layout::new(rows, cols, bits, codebook).ok().map(|l| l.header.total),
+            _ => Some(0),
+        },
     }
 }
 
@@ -237,6 +273,9 @@ impl DeviceLayout {
                 "{quant:?} needs a multiple of {} columns, got {cols}",
                 info.qk.max(info.src_qk)
             )));
+        }
+        if matches!(info.geometry, Geometry::Exl3 { .. }) && !rows.is_multiple_of(128) {
+            return Err(invalid(format!("{quant:?} needs a multiple of 128 rows, got {rows}")));
         }
         if matches!(info.geometry, Geometry::Exl2 { .. }) && !cols.is_multiple_of(32) {
             return Err(invalid(format!("{quant:?} needs a multiple of 32 columns, got {cols}")));
@@ -272,6 +311,7 @@ impl DeviceLayout {
             Geometry::Mlx { group, bf16, .. } => (group / 32) | (u32::from(bf16) << 16),
             Geometry::Fp8b { block_cols, .. } => block_cols as u32,
             Geometry::Exl2 { row_words } => row_words as u32,
+            Geometry::Exl3 { .. } => 0,
         };
         Ok(Self {
             info,
@@ -322,6 +362,8 @@ pub fn rows_per_slice(
     let per_row: usize = match info.geometry {
         Geometry::Planar => info.plane_bytes.iter().sum::<usize>() * (cols / info.qk),
         Geometry::Exl2 { row_words } => row_words * 4,
+        // (the blob is one piece: it cannot be cut into slices of rows, the upload only takes it when it fits one binding)
+        Geometry::Exl3 { .. } => return Ok(usize::MAX / 2),
         _ => (0..4).map(|i| plane_len(&info, 1, cols, i).unwrap_or(0)).sum(),
     };
     // tables that every slice carries (the block table and the group maxima of EXL2)
@@ -422,6 +464,8 @@ pub fn pack_rows_of_blob(quant: QuantType, raw: &[u8], rows: usize, cols: usize,
     match format_info(quant)?.geometry {
         Geometry::Fp8b { .. } => Some(pack_fp8b(quant, raw, rows, cols, first, n)),
         Geometry::Exl2 { .. } => Some(pack_exl2(quant, raw, rows, cols, first, n)),
+        Geometry::Exl3 { .. } if first == 0 && n == rows => Some(pack_exl3(quant, raw, rows, cols)),
+        Geometry::Exl3 { .. } => Some(Err(BackendError::UnsupportedOperation("EXL3 weights cannot be cut into slices of rows".into()))),
         _ => None,
     }
 }
@@ -434,6 +478,32 @@ pub fn exl2_device_type_of(raw: &[u8], rows: usize, cols: usize) -> Option<Quant
         return None;
     }
     exl2_device_type(v.header.row_bytes / 4)
+}
+
+/// The EXL3 device type for the blob `raw` (whole tensor, `rows` x `cols`), `None` when the kernels cannot take it: a blob that is damaged or of another shape, or
+/// one bigger than a storage-buffer binding (`max_range` bytes: the three passes read the blob through one binding; it cannot be cut into slices of rows because
+/// the output map scatters the channels over all rows).
+pub fn exl3_device_type_of(raw: &[u8], rows: usize, cols: usize, max_range: u64) -> Option<QuantType> {
+    let v = fllm_gguf_probe::exl::Exl3View::validate(raw).ok()?;
+    if v.rows() != rows || v.cols() != cols || raw.len() as u64 > max_range {
+        return None;
+    }
+    exl3_device_type(v.bits(), v.codebook())
+}
+
+/// The EXL3 blob as the device image (padded to 16 bytes).
+fn pack_exl3(quant: QuantType, raw: &[u8], rows: usize, cols: usize) -> Result<PackedWeight, BackendError> {
+    let layout = DeviceLayout::new(quant, rows, cols)?;
+    let Geometry::Exl3 { bits, codebook } = layout.info.geometry else {
+        return Err(BackendError::UnsupportedQuant(quant));
+    };
+    let v = fllm_gguf_probe::exl::Exl3View::parse(raw).map_err(invalid)?;
+    if v.rows() != rows || v.cols() != cols || v.bits() != bits || v.codebook() != codebook || raw.len() > layout.total_bytes {
+        return Err(invalid(format!("{quant:?}: the blob holds {} x {} values of {} bits, codebook {}", v.rows(), v.cols(), v.bits(), v.codebook())));
+    }
+    let mut out = vec![0u8; layout.total_bytes];
+    put(&mut out, 0, raw);
+    Ok(PackedWeight { layout, bytes: out, perm: None })
 }
 
 /// Rows `first .. first + n` of an EXL2 blob in the device layout: per row the scale nibbles first and then the bitstreams (the file has them the other way
@@ -520,6 +590,7 @@ pub fn pack_weight(
     match info.geometry {
         Geometry::Fp8b { .. } => return pack_fp8b(quant, raw, rows, cols, 0, rows),
         Geometry::Exl2 { .. } => return pack_exl2(quant, raw, rows, cols, 0, rows),
+        Geometry::Exl3 { .. } => return pack_exl3(quant, raw, rows, cols),
         Geometry::Mlx { .. } => return pack_mlx(quant, raw, rows, cols),
         Geometry::Planar => {}
     }
@@ -664,7 +735,7 @@ pub fn pack_weight_slices(
     rows_per_slice: usize,
 ) -> Result<Vec<WeightSlice>, BackendError> {
     let layout = DeviceLayout::new(quant, rows, cols)?;
-    if matches!(layout.info.geometry, Geometry::Fp8b { .. } | Geometry::Exl2 { .. }) {
+    if matches!(layout.info.geometry, Geometry::Fp8b { .. } | Geometry::Exl2 { .. } | Geometry::Exl3 { .. }) {
         let step = rows_per_slice.max(1);
         return (0..rows)
             .step_by(step)

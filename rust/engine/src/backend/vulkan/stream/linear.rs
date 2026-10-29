@@ -8,8 +8,9 @@ use crate::backend::vulkan::backend::shared::{is_exact_math, verbose};
 use crate::backend::vulkan::backend::upload::pack_slice;
 use crate::backend::vulkan::memory::Buffer;
 use crate::backend::vulkan::pipeline::ComputePipeline;
+use crate::backend::vulkan::weights::exl3::{plan_exl3, MM_PUSH_BYTES, POST_PUSH_BYTES, PRE_PUSH_BYTES};
 use crate::backend::vulkan::weights::{
-    format_info, plan_quantized_linear_with, split_groups, LinearPlan, PlanOptions, PrepassRole, Variant,
+    format_info, is_exl3, plan_quantized_linear_with, split_groups, LinearPlan, PlanOptions, PrepassRole, Variant,
 };
 use crate::backend::{log_once, BackendError, DeviceBuffer, DeviceWeight, QuantType};
 use std::sync::Arc;
@@ -131,6 +132,12 @@ impl VulkanStream {
         if overlaps(&out_key, &x_key) {
             return Err(BackendError::InvalidShape("the output of a projection overlaps its input".into()));
         }
+        if is_exl3(w.quant) {
+            // ExLlamaV3: three dependent passes through scratch buffers; the projections that share an input cannot share a prepass here
+            self.trace = None;
+            let view = w.weights.slice(slices[0].offset as u64, slices[0].bytes as u64)?;
+            return self.record_exl3(w, &view, batch, x, out);
+        }
         let (mut trace, same_x) = match self.trace.take() {
             Some(t) if t.x == x_key && !t.outs.iter().any(|o| overlaps(o, &out_key) || overlaps(o, &x_key)) => (t, true),
             _ => (
@@ -152,6 +159,36 @@ impl VulkanStream {
             }
         }
         self.trace = Some(trace);
+        Ok(())
+    }
+
+    /// `y = diag(svh) H (R^T (H diag(suh) x))` for an EXL3 weight: per chunk of up to 128 tokens the input transform, the trellis product and the output
+    /// transform with the scatter through the output map (`exl3_pre`, `exl3_mm`, `exl3_post`).
+    fn record_exl3(&mut self, w: &LinearWeight, weights: &Buffer, batch: usize, x: &Buffer, out: &Buffer) -> Result<(), BackendError> {
+        let plan = plan_exl3(w.rows, w.cols, batch, w.bias.is_some(), w.scale)?;
+        let pre = self.sh.pipeline("exl3_pre", &[], 3, PRE_PUSH_BYTES)?;
+        let mm = self.sh.pipeline("exl3_mm", &[(0, plan.tile_groups)], 3, MM_PUSH_BYTES)?;
+        let post = self.sh.pipeline("exl3_post", &[], 4, POST_PUSH_BYTES)?;
+        let x2 = self.dev.alloc(&self.sh, plan.x2_bytes as u64)?;
+        let z = self.dev.alloc(&self.sh, plan.z_bytes as u64)?;
+        let bias = self.bias_binding(w);
+        for pass in &plan.passes {
+            self.rec.bind_pipeline(&pre)?;
+            self.rec.set_buffers(&[weights, x, &x2])?;
+            self.rec.push_constants(&pass.pre_push)?;
+            let [gx, gy, gz] = pass.pre_groups;
+            self.rec.dispatch(gx, gy, gz)?;
+            self.rec.bind_pipeline(&mm)?;
+            self.rec.set_buffers(&[weights, &x2, &z])?;
+            self.rec.push_constants(&pass.mm_push)?;
+            let [gx, gy, gz] = pass.mm_groups;
+            self.rec.dispatch(gx, gy, gz)?;
+            self.rec.bind_pipeline(&post)?;
+            self.rec.set_buffers(&[weights, &z, out, &bias])?;
+            self.rec.push_constants(&pass.post_push)?;
+            let [gx, gy, gz] = pass.post_groups;
+            self.rec.dispatch(gx, gy, gz)?;
+        }
         Ok(())
     }
 
