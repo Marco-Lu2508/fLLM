@@ -1181,13 +1181,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let unified = d.dev_type == DeviceType::IntegratedGpu;
                 let device_free = if unified { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
                 let plan_for = |m: &GgufModel, tokens: usize| {
-                    fllm_engine::backend::memory::MemoryPlan::plan(
+                    fllm_engine::backend::memory::MemoryPlan::plan_for_backend(
                         m,
                         device_free.saturating_sub(draft_reserve),
                         d.total_memory_bytes,
                         gpu_memory_utilization,
                         Some(&gpu_layers),
                         tokens,
+                        selected_backend == "cuda",
                     )
                 };
                 let mut planned = plan_for(&model, max_batched_tokens);
@@ -1342,13 +1343,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if device != "cpu" {
         let target_dev = plan_device.as_ref();
         if let Some(d) = target_dev {
-            if let Ok(plan) = fllm_engine::backend::memory::MemoryPlan::plan(
+            if let Ok(plan) = fllm_engine::backend::memory::MemoryPlan::plan_for_backend(
                 &runtime.model,
                 d.free_memory_bytes,
                 d.total_memory_bytes,
                 gpu_memory_utilization,
                 Some(&gpu_layers),
                 max_batched_tokens,
+                selected_backend == "cuda",
             ) {
                 #[cfg(feature = "cuda")]
                 if selected_backend == "cuda" {

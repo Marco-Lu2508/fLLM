@@ -62,6 +62,20 @@ impl MemoryPlan {
         gpu_layers_arg: Option<&str>,
         max_tokens: usize,
     ) -> Result<Self, String> {
+        Self::plan_for_backend(model, free_vram, total_vram, utilization, gpu_layers_arg, max_tokens, true)
+    }
+
+    /// `marlin_q4k_allowed`: the CUDA backend can keep a second, Marlin-ordered copy of Q4_K weights; every other backend has no use for it, and its
+    /// memory (5/8 byte per weight) must not be taken out of the KV cache.
+    pub fn plan_for_backend(
+        model: &GgufModel,
+        free_vram: u64,
+        total_vram: u64,
+        utilization: f64,
+        gpu_layers_arg: Option<&str>,
+        max_tokens: usize,
+        marlin_q4k_allowed: bool,
+    ) -> Result<Self, String> {
         let util = utilization.clamp(0.01, 1.0);
         let budget_bytes = ((free_vram as f64) * util) as u64;
 
@@ -184,7 +198,8 @@ impl MemoryPlan {
         // (the same reserve as without it: the utilization budget, the backend overhead and the recurrent states; the KV pool used to get
         // everything up to the card's free memory here, and a busy step then ran out of memory)
         let needed_with_marlin = reserved_bytes + marlin_q4k_extra + min_kv_needed;
-        let marlin_q4k_dual = offload_layers == total_layers
+        let marlin_q4k_dual = marlin_q4k_allowed
+            && offload_layers == total_layers
             && marlin_q4k_extra > 0
             && budget_bytes >= needed_with_marlin;
 
