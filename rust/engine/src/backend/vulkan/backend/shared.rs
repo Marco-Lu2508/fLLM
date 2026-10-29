@@ -123,6 +123,10 @@ pub(crate) struct Shared {
     transfer: Mutex<Transfer>,
     next_id: AtomicU64,
     disabled: AtomicU32,
+    /// 0: the prompt shader variant has not been measured, 1: it has been claimed for measuring (or measured).
+    prompt_tuning: AtomicU8,
+    /// The one-time measurement found the int8 dot-product matrix shaders faster than the cooperative-matrix ones on this device.
+    idot_over_coop: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -151,6 +155,8 @@ impl Shared {
             transfer: Mutex::new(transfer),
             next_id: AtomicU64::new(1),
             disabled: AtomicU32::new(0),
+            prompt_tuning: AtomicU8::new(0),
+            idot_over_coop: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -165,10 +171,28 @@ impl Shared {
         if disabled & DISABLED_INT_DOT != 0 {
             like.int_dot = false;
         }
-        if disabled & DISABLED_COOP != 0 {
+        if disabled & DISABLED_COOP != 0 || self.idot_over_coop.load(Ordering::Relaxed) {
             like.coop_matrix = false;
         }
         like
+    }
+
+    /// True for the first caller only: this device's prompt shader variant is measured once (see `VulkanStream::tune_prompt_variant`).
+    pub fn claim_prompt_tuning(&self) -> bool {
+        self.prompt_tuning.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// From now on the planner prefers the int8 dot-product matrix shaders to the cooperative-matrix ones.
+    pub fn prefer_int_dot_over_coop(&self) {
+        self.idot_over_coop.store(true, Ordering::Relaxed);
+    }
+
+    /// A zero-filled device buffer of `size` bytes (scratch of a one-time measurement).
+    pub fn new_zeroed_buffer(&self, size: u64) -> Result<Buffer, BackendError> {
+        let padded = size.max(16).next_multiple_of(16);
+        let buffer = self.ctx.allocator().alloc_device(padded, BufferUsage::COMPUTE)?;
+        self.zero_sync(&buffer, 0, padded)?;
+        Ok(buffer)
     }
 
     /// Never plan `variant` again (its pipeline could not be created on this driver).

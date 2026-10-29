@@ -111,7 +111,73 @@ pub(crate) fn plan_float_linear(
     })
 }
 
+/// Smallest activation batch for which the choice between the cooperative-matrix and the int8 dot-product matrix shaders is measured.
+const PROMPT_TUNE_MIN_BATCH: usize = 32;
+
 impl VulkanStream {
+    /// Once per device: times the matrix-matrix product of a Q4_K weight (4096 x 4096, 512 tokens) with the cooperative-matrix shaders and with the int8
+    /// dot-product shaders and keeps the faster one for the rest of the process. Neither is faster everywhere: on an RTX 2000 Ada the cooperative
+    /// matrices (tensor cores) win by a factor of 2.2, on a Radeon 840M (Mesa RADV, 4 compute units) the integer dot product wins by 22 %.
+    /// `FLLM_VULKAN_NO_TUNE=1` keeps the planner's order (cooperative matrices first).
+    fn tune_prompt_variant(&mut self) {
+        if self.mask_coop || is_exact_math() || std::env::var_os("FLLM_VULKAN_NO_TUNE").is_some_and(|v| !v.is_empty() && v != "0") {
+            return;
+        }
+        let caps = self.sh.caps_like();
+        if !(caps.coop_matrix && caps.int_dot) || !self.sh.claim_prompt_tuning() {
+            return;
+        }
+        match self.measure_prompt_variants() {
+            Ok((coop_ms, idot_ms)) => {
+                let idot_wins = idot_ms < coop_ms * 0.85;
+                if idot_wins {
+                    self.sh.prefer_int_dot_over_coop();
+                }
+                log_once(
+                    "vulkan-prompt-variant",
+                    &format!(
+                        "[fllm-vulkan] prompt matrix shaders measured on {}: cooperative matrices {coop_ms:.1} ms, int8 dot product {idot_ms:.1} ms (4096 x 4096 Q4_K, 512 tokens): using {}",
+                        self.sh.caps().device_name,
+                        if idot_wins { "the int8 dot product" } else { "cooperative matrices" }
+                    ),
+                );
+            }
+            Err(e) => log_once("vulkan-prompt-variant", &format!("[fllm-vulkan] the prompt shader variants could not be measured ({e}); keeping the default order")),
+        }
+    }
+
+    /// `(cooperative-matrix ms, int8-dot ms)` per product of a zero-filled 4096 x 4096 Q4_K weight with 512 tokens (best of three runs after a warm-up).
+    fn measure_prompt_variants(&mut self) -> Result<(f64, f64), BackendError> {
+        const ROWS: usize = 4096;
+        const COLS: usize = 4096;
+        const BATCH: usize = 512;
+        let quant = QuantType::from_gguf_type_id(12);
+        let kind = WeightKind::of(quant).ok_or(BackendError::UnsupportedQuant(quant))?;
+        let slices = slice_table(kind, ROWS, COLS, self.sh.caps().max_storage_buffer_range, self.sh.align())?;
+        let bytes = slices.last().map_or(0, |s| s.offset + s.bytes) as u64;
+        let weights = self.sh.new_zeroed_buffer(bytes)?;
+        let x = self.sh.new_zeroed_buffer((BATCH * COLS * 4) as u64)?;
+        let out = self.sh.new_zeroed_buffer((BATCH * ROWS * 4) as u64)?;
+        let lw = LinearWeight { quant, rows: ROWS, cols: COLS, scale: 1.0, weights, perm: None, bias: None };
+        let mut times = [f64::MAX; 2];
+        for (slot, mask_coop) in [(0usize, false), (1, true)] {
+            let mut stream = VulkanStream::new(Arc::clone(&self.sh))?;
+            stream.mask_coop = mask_coop;
+            for run in 0..4 {
+                let start = std::time::Instant::now();
+                for _ in 0..3 {
+                    stream.trace = None;
+                    stream.linear_core(&lw, BATCH, &x, &out)?;
+                }
+                stream.wait_idle()?;
+                if run > 0 {
+                    times[slot] = times[slot].min(start.elapsed().as_secs_f64() * 1e3 / 3.0);
+                }
+            }
+        }
+        Ok((times[0], times[1]))
+    }
+
     /// `Stream::quantized_linear` for a weight described by `w`: `out[b][r] = scale * dot(x[b], w[r]) + bias[r]`, `x` and `out` already valid views.
     pub(super) fn linear_core(&mut self, w: &LinearWeight, batch: usize, x: &Buffer, out: &Buffer) -> Result<(), BackendError> {
         self.pending_macs = self.pending_macs.saturating_add((w.rows as u64).saturating_mul(w.cols as u64).saturating_mul(batch as u64));
@@ -236,8 +302,14 @@ impl VulkanStream {
     /// planned again.
     fn plan_with_pipelines(&mut self, w: &LinearWeight, slice: &SliceInfo, batch: usize) -> Result<Planned, BackendError> {
         let mut last_error = None;
+        if batch >= PROMPT_TUNE_MIN_BATCH {
+            self.tune_prompt_variant();
+        }
         for _ in 0..3 {
-            let caps = self.sh.caps_like();
+            let mut caps = self.sh.caps_like();
+            if self.mask_coop {
+                caps.coop_matrix = false;
+            }
             let options = PlanOptions {
                 has_bias: w.bias.is_some(),
                 scale: w.scale,

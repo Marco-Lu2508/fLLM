@@ -736,7 +736,14 @@ fn check(code: c_int) -> Result<(), BackendError> {
     if code == 0 {
         Ok(())
     } else {
-        Err(BackendError::DriverError(last_error()))
+        let message = last_error();
+        // the ROCm build has stubs for the kernels that exist for NVIDIA only (device MoE routing, GPU sampling, latent MLA ...): that is "not supported
+        // here", which callers answer with their host path and the self test skips, not a failed driver call
+        if message.contains("needs an NVIDIA GPU") {
+            Err(BackendError::UnsupportedOperation(message))
+        } else {
+            Err(BackendError::DriverError(message))
+        }
     }
 }
 
