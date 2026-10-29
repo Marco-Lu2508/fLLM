@@ -556,8 +556,11 @@ impl Tester<'_> {
                     Some(g) => {
                         let (gv, uv) = (products[0].0, products[1].0);
                         let (lg, lu) = glu_lipschitz(gv, uv, g);
-                        want.push(glu_reference(gv, uv, g));
-                        scale.push(lg * products[0].1 + lu * products[1].1);
+                        let reference = glu_reference(gv, uv, g);
+                        want.push(reference);
+                        // the fast kernels keep the activation in f16: its rounding (half an f16 step, 2^-11 of the value) is part of the
+                        // error scale, which matters where the clamped products make the Lipschitz term vanish (swiglu_oai at its limit)
+                        scale.push(lg * products[0].1 + lu * products[1].1 + reference.abs() * 4.9e-4);
                     }
                     None => {
                         want.push(products[0].0);

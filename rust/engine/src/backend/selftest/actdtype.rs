@@ -366,7 +366,7 @@ impl Tester<'_> {
         let v = round_vec(dt, &self.rng.vector(rows * KV_HEADS * DIM, 2.0));
         let qw: Vec<f32> = self.rng.vector(DIM, 0.4).iter().map(|x| x + 1.0).collect();
         let kw: Vec<f32> = self.rng.vector(DIM, 0.4).iter().map(|x| x + 1.0).collect();
-        let positions: Vec<usize> = (0..rows).map(|r| r * 2 + 1).collect();
+        let positions: Vec<usize> = (0..rows).map(|r| (r * 2 + 1) % 64).collect(); // the cos/sin table has 64 positions
         let (slots, blocks) = Self::kv_layout(rows);
         let params = Self::rope_params(rope_dim, neox);
         let eps = 1e-6f32;
