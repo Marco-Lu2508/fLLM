@@ -272,7 +272,8 @@ pub fn split_groups(n: u64) -> [u32; 3] {
 /// Workgroup size and rows per workgroup of the matrix-vector shaders for a device.
 fn matvec_tuning(caps: &VkCapsLike, columns: u32) -> (u32, u32) {
     let (mut wg, mut rows) = match caps.vendor {
-        0x1002 => (64u32, 1u32),
+        // AMD: two rows per group decode 12 % faster than one on a Radeon 840M (Llama-3.2-3B Q4_K_M: 27.4 -> 30.8 tok/s; work groups of 32 / 128 / 256 were slower)
+        0x1002 => (64u32, 2u32),
         0x10de => (128u32, 2u32),
         _ => (64, 2),
     };
