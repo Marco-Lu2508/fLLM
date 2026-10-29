@@ -9,6 +9,9 @@ behaviour between versions).
 ### Added
 - `--device opengl` (`gl`): an OpenGL 4.3 / OpenGL ES 3.1 backend through wgpu for graphics cards that have no Vulkan, DirectX 12 or Metal driver. `auto` tries it after DirectX 12 and before the CPU, lists a card only when no other driver serves it and never takes a software renderer. Checked on a software OpenGL (Mesa llvmpipe): the self-test groups linear, activation and norm pass against the CPU and a tiny model writes the CPU's text; not tried on an old graphics card.
 
+### Known issues
+- On an L4 (sm_89) the opt-in int8 W8A8 GEMM (`FLLM_INT8_GEMM=1`: plain int8 and Q8_0 prompts) returns wrong values and NaN, and the FlashInfer tensor-core decode (`FLLM_ATTN_DECODE=flashinfer`, GQA group 4, head width 128) fails with an illegal memory access. Both are off by default; the self test group `hattn` stops at the first one, so run groups separately (`--only GROUP`). The FlashInfer prompt path matches within the f16 rounding of its probabilities and output.
+
 ### Security
 - `zip` 9.0.4 -> 9.0.5 (the PyTorch and archive reader of the converter; CVE-2026-115905, found by the Trivy scan).
 
