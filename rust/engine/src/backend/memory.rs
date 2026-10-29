@@ -201,7 +201,9 @@ impl MemoryPlan {
         let kv_cache_bytes = (kv_block_count as u64) * kv_block_bytes;
         let all_reserved = non_layer_bytes + total_layers as u64 * bytes_per_layer + scratchpad_bytes + overhead_bytes
             + if marlin_q4k_dual { marlin_q4k_extra } else { 0 };
-        let all_on_device_kv_blocks = free_vram.saturating_sub(all_reserved).checked_div(kv_block_bytes).unwrap_or(0) as usize;
+        // (of the budget, like the plan itself: counted against the free memory the context came out about a tenth too long, the plan with this
+        // context then no longer held every layer and sent feed-forward weights to the host; seen on an integrated GPU with 5.5 GB)
+        let all_on_device_kv_blocks = budget_bytes.saturating_sub(all_reserved).checked_div(kv_block_bytes).unwrap_or(0) as usize;
 
         let total_model_bytes = if marlin_q4k_dual {
             total_model_bytes + marlin_q4k_extra
