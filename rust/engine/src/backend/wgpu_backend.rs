@@ -1703,9 +1703,7 @@ impl WgpuBackend {
             QuantType::Int8Row,
         ]);
         supported_quants.extend(QuantType::mlx_affine_common());
-        // EXL3 is not advertised: its three WGSL passes are wired but return zeros in the self test on a software Vulkan and OpenGL
-        // device (linear exl3, 16 of 78 checks), so EXL3 stays expanded to F16 on the wgpu backends until that is fixed
-        supported_quants.push(QuantType::Exl2);
+        supported_quants.extend([QuantType::Exl2, QuantType::Exl3]);
         supported_quants.sort_by_key(QuantType::to_gguf_type_id);
         supported_quants.dedup();
         let capabilities = BackendCapabilities {
@@ -1783,9 +1781,7 @@ impl Backend for WgpuBackend {
         } else {
             None
         };
-        // The three EXL3 passes are wired but return zeros in the self test on a software Vulkan and OpenGL device, so the marker is
-        // only given when FLLM_WGPU_EXL3=1 asks for it (to debug the passes); otherwise the tensor is expanded as before.
-        let native_exl3 = if native_fp8b.is_none() && native_bnb.is_none() && std::env::var_os("FLLM_WGPU_EXL3").is_some_and(|v| v == "1") {
+        let native_exl3 = if native_fp8b.is_none() && native_bnb.is_none() {
             exl3_native_kind(kind, raw_bytes, rows, cols)
         } else {
             None
