@@ -151,27 +151,37 @@ fn mlx_weight(index: u32, kind: u32) -> f32 {
     let bias = half_or_bf16(byte_at(sb + 2u) | (byte_at(sb + 3u) << 8u), bf16);
     return f32(code) * scale + bias;
 }
-// EXL2 repacked at upload: per row the group bit streams (unchanged) followed by one f32 scale per
-// group, so the kernel needs neither the group table nor a permutation. The upload only takes this
-// path for uniform groups and an identity act-order permutation; everything else is expanded.
+// EXL2 decoded from the blob as it is on disk, the way the upstream kernels work: the header
+// (data_off at 24, row_bytes at 28, group table at 64) and the permutation table (off_b at 44) are
+// read from the tensor itself, codes and the per-group q_scale nibbles come from the row, and the
+// activation is gathered through `perm` (stored column k multiplies original input perm(k)).
+// Only uniform group widths take this path; mixed widths and EXL3 keep the expansion.
+fn exl2_header(at: u32) -> u32 { return bits_at(at); }
+fn exl2_perm(k: u32) -> u32 { return bits_at(exl2_header(44u) + 4u * k); }
 fn exl2_weight(index: u32, kind: u32) -> f32 {
     let width = kind & 15u;
     let n = (kind >> 4u) & 4095u;
     let cols = hdr[1];
     let groups = cols / n;
+    let data_off = exl2_header(24u);
+    let row_bytes = exl2_header(28u);
     let wpg = (n * width + 31u) / 32u;
-    let words = groups * wpg;
-    let row_bytes = words * 4u + groups * 4u;
-    let row = index / cols; let col = index % cols;
-    let g = col / n;
-    let start = row * row_bytes;
-    let bit = (col % n) * width;
+    let row = index / cols; let k = index % cols;
+    let g = k / n;
+    let start = data_off + row * row_bytes;
+    let bit = (k % n) * width;
     let at = start + g * wpg * 4u + bit / 8u;
     let window = byte_at(at) | (byte_at(at + 1u) << 8u);
     let code = (window >> (bit % 8u)) & ((1u << width) - 1u);
-    let scale = bitcast<f32>(bits_at(start + words * 4u + g * 4u));
+    let tail = start + row_bytes - 4u * ((groups + 7u) / 8u);
+    let word = bits_at(tail + 4u * (g / 8u));
+    let s_nibble = (word >> (4u * (g % 8u))) & 15u;
+    let max_at = 64u + 16u * g + 6u;
+    let qmax = unpack2x16float(byte_at(max_at) | (byte_at(max_at + 1u) << 8u)).x / 256.0;
+    let scale = f32((s_nibble + 1u) * (s_nibble + 1u)) * qmax;
     return (f32(code) - f32(1u << (width - 1u))) * scale;
 }
+fn is_exl2(kind: u32) -> bool { return (kind & 0xff000000u) == 0xf0000000u; }
 fn weight_at(index: u32, kind: u32) -> f32 {
     if ((kind & 0xf8000000u) == 0xf8000000u) { return fp8b_weight(index, kind); }
     if ((kind & 0xff000000u) == 0xf4000000u) { return bnb_weight(index, kind); }
@@ -227,10 +237,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let b0 = wid.z * 4u;
     if (row >= rows || b0 >= batch) { return; }
     let nb = min(4u, batch - b0);
+    let exl = is_exl2(kind);
     var acc = vec4<f32>(0.0);
     for (var col = lane; col < cols; col += 64u) {
         let w = weight_at(row * cols + col, kind);
-        let xi = b0 * cols + col;
+        // EXL2 stores its inputs permuted: stored column col multiplies original input perm(col).
+        // A real branch keeps the permutation read off every other quant type.
+        var src = col;
+        if (exl) { src = exl2_perm(col); }
+        let xi = b0 * cols + src;
         acc.x += w * input[xi];
         if (nb > 1u) { acc.y += w * input[xi + cols]; }
         if (nb > 2u) { acc.z += w * input[xi + 2u * cols]; }
@@ -1009,44 +1024,30 @@ fn invalid(msg: impl Into<String>) -> BackendError {
 
 /// The `hdr[3]` marker for a block-wise FP8 tensor the WGSL decoder can read directly, or `None` when
 /// the upload has to expand it (several slabs / a trailer that does not match the bytes).
-/// Lossless repack of an EXL2 tensor into the layout the WGSL decoder expects: the group bit
-/// streams stay byte-identical, the per-group scale `(s+1)^2 * q_scale_max / 256` (computed exactly
-/// like `Exl2View::scale`) is appended as an f32 per group. Returns the `hdr[3]` marker and the new
-/// bytes, or `None` when the tensor needs the generic expansion (mixed widths, or an act-order
-/// permutation the kernels cannot apply without gathering the activations).
-fn exl2_native_pack(raw_bytes: &[u8], rows: usize, cols: usize) -> Option<(u32, Vec<u8>)> {
+/// The `hdr[3]` marker for an EXL2 tensor decoded straight from the blob, or `None` when the tensor
+/// needs the generic expansion. Nothing is copied or converted: the upload passes the bytes through
+/// and the kernel reads the header, the group maxima, the q_scale nibbles and the permutation table
+/// from the tensor itself. Uniform group widths are required because the kernel addresses a group by
+/// `column / width` instead of scanning the table; mixed widths and EXL3 keep the expansion.
+fn exl2_native_kind(kind: u32, raw_bytes: &[u8], rows: usize, cols: usize) -> Option<u32> {
+    if kind != fllm_gguf_probe::exl::EXL2_TYPE {
+        return None;
+    }
     let view = fllm_gguf_probe::exl::Exl2View::parse(raw_bytes).ok()?;
     if view.rows() != rows || view.cols() != cols {
         return None;
     }
-    let groups = view.groups();
     let first = view.group(0);
-    for g in 1..groups {
+    for g in 1..view.groups() {
         let e = view.group(g);
         if e.n != first.n || e.bits != first.bits {
-            return None; // mixed widths need the per-group table
+            return None; // mixed widths would need the group table in the hot loop
         }
     }
-    if first.n * groups != cols {
+    if first.n * view.groups() != cols {
         return None;
     }
-    for k in 0..cols {
-        if view.perm(k) != k {
-            return None; // act-order permutation: the activations would have to be gathered
-        }
-    }
-    let words = groups * first.words();
-    let mut packed = Vec::with_capacity(rows * (words * 4 + groups * 4));
-    for r in 0..rows {
-        let row = view.row(r);
-        packed.extend_from_slice(&row[..words * 4]);
-        for g in 0..groups {
-            let e = view.group(g);
-            packed.extend_from_slice(&view.scale(row, g, &e).to_le_bytes());
-        }
-    }
-    let marker = EXL2_NATIVE | ((first.n as u32) << 4) | first.bits as u32;
-    Some((marker, packed))
+    Some(EXL2_NATIVE | ((first.n as u32) << 4) | first.bits as u32)
 }
 
 /// The `hdr[3]` marker for an MLX affine tensor the WGSL decoder reads in the file layout, or `None`
@@ -1426,15 +1427,14 @@ impl Backend for WgpuBackend {
         let kind = quant_type.to_gguf_type_id();
         let converted;
         let expanded16: Vec<u8>;
-        let exl2_packed: Vec<u8>;
         let native_fp8b = if fllm_gguf_probe::fp8b_type(kind) { fp8b_native_kind(raw_bytes, kind) } else { None };
         let native_bnb = if native_fp8b.is_none() && fllm_gguf_probe::bnb::is_bnb(kind) {
             bnb_native_kind(kind, raw_bytes, rows, cols)
         } else {
             None
         };
-        let native_exl2 = if kind == fllm_gguf_probe::exl::EXL2_TYPE && native_fp8b.is_none() && native_bnb.is_none() {
-            exl2_native_pack(raw_bytes, rows, cols)
+        let native_exl2 = if native_fp8b.is_none() && native_bnb.is_none() {
+            exl2_native_kind(kind, raw_bytes, rows, cols)
         } else {
             None
         };
@@ -1452,10 +1452,9 @@ impl Backend for WgpuBackend {
         } else if let Some(native) = native_mlx {
             // MLX groups stay as they are: the bit stream and the scale/bias word.
             (raw_bytes, QuantType::Other(native))
-        } else if let Some((marker, packed)) = native_exl2 {
-            // EXL2 repacked: the codes as they are, one f32 scale per group behind them.
-            exl2_packed = packed;
-            (exl2_packed.as_slice(), QuantType::Other(marker))
+        } else if let Some(marker) = native_exl2 {
+            // EXL2 stays the blob on disk; the kernel reads the tables from it.
+            (raw_bytes, QuantType::Other(marker))
         } else if fllm_gguf_probe::fp8b_type(kind) {
             // Block-wise FP8 has no WGSL decoder: the codes are expanded once with their tile scales, exactly, to binary16 (2 bytes per weight, not
             // the 4 of the generic F32 expansion below)
@@ -2839,27 +2838,24 @@ mod tests {
         }
     }
 
-    /// EXL2: the upload repacks a uniform, identity-permutation tensor losslessly; the shader
-    /// arithmetic (mirrored here) must reproduce `exl::dequantize` exactly.
+    /// EXL2: the kernel reads the blob on disk - header, group maxima, q_scale nibbles, permutation -
+    /// and the activation gather replaces any repack. The mirrored arithmetic must reproduce
+    /// `exl::dequantize` for a permuted tensor of uniform groups.
     #[test]
     fn exl2_native_matches_the_reference_dequantizer() {
-        use super::{exl2_native_pack, EXL2_NATIVE};
+        use super::{exl2_native_kind, EXL2_NATIVE};
 
-        // Builds an EXL2 blob with uniform groups and an identity permutation, following the layout
-        // in gguf-probe/src/exl.rs (header, group table, perm, rows).
-        fn build(rows: usize, n: usize, bits: usize, groups: usize, max_f16: u16) -> Vec<u8> {
+        fn build(rows: usize, n: usize, bits: usize, groups: usize, max_f16: u16, permuted: bool) -> Vec<u8> {
             let cols = n * groups;
             let wpg = (n * bits).div_ceil(32);
-            let row_bytes = 4 * (wpg * groups).saturating_add(0) + 4 * groups.div_ceil(8);
+            let row_bytes = 4 * (wpg * groups) + 4 * groups.div_ceil(8);
             let off_a = 64usize;
             let off_b = off_a + 16 * groups;
             let data_off = off_b + 4 * cols;
             let total = data_off + rows * row_bytes;
             let mut blob = vec![0u8; total];
             blob[..4].copy_from_slice(b"EXL2");
-            let put = |blob: &mut Vec<u8>, at: usize, v: u32| {
-                blob[at..at + 4].copy_from_slice(&v.to_le_bytes());
-            };
+            let put = |blob: &mut Vec<u8>, at: usize, v: u32| blob[at..at + 4].copy_from_slice(&v.to_le_bytes());
             put(&mut blob, 4, 1);
             put(&mut blob, 8, rows as u32);
             put(&mut blob, 12, cols as u32);
@@ -2869,7 +2865,6 @@ mod tests {
             put(&mut blob, 32, groups as u32);
             put(&mut blob, 40, off_a as u32);
             put(&mut blob, 44, off_b as u32);
-            put(&mut blob, 48, 0);
             for g in 0..groups {
                 let at = off_a + 16 * g;
                 put(&mut blob, at, n as u32);
@@ -2878,37 +2873,44 @@ mod tests {
                 put(&mut blob, at + 8, (g * wpg) as u32);
                 put(&mut blob, at + 12, (g * n) as u32);
             }
+            // a real act-order permutation: stored column k maps to original column perm[k]
             for k in 0..cols {
-                put(&mut blob, off_b + 4 * k, k as u32);
+                let orig = if permuted { (k * 7 + 3) % cols } else { k };
+                put(&mut blob, off_b + 4 * k, orig as u32);
             }
             for r in 0..rows {
                 let row = data_off + r * row_bytes;
                 for g in 0..groups {
                     let at = row + 4 * (g * wpg);
                     for w in 0..wpg {
-                        // a spread of bit patterns so every code value shows up
                         let v = ((g * 131 + w * 17 + r * 7) as u32).wrapping_mul(2_654_435_761);
                         put(&mut blob, at + 4 * w, v);
                     }
                 }
-                // one q_scale nibble per group, packed into the tail
                 let tail = row + 4 * (wpg * groups);
                 for g in 0..groups {
-                    let s = ((g % 15) + 1) as u32;
                     let word_at = tail + 4 * (g / 8);
                     let mut word = u32::from_le_bytes(blob[word_at..word_at + 4].try_into().unwrap());
-                    word |= s << (4 * (g % 8));
+                    word |= (((g % 15) + 1) as u32) << (4 * (g % 8));
                     put(&mut blob, word_at, word);
                 }
             }
             blob
         }
 
-        for (n, bits, groups) in [(32usize, 2usize, 4usize), (64, 4, 2), (32, 8, 2), (64, 6, 1)] {
+        for (n, bits, groups, permuted) in [
+            (32usize, 2usize, 4usize, false),
+            (64, 4, 2, false),
+            (32, 8, 2, false),
+            (64, 6, 1, false),
+            (32, 4, 4, true),
+            (16, 3, 4, true),
+        ] {
             let rows = 2usize;
             let cols = n * groups;
-            let raw = build(rows, n, bits, groups, half::f16::from_f32(1024.0).to_bits());
-            let (marker, packed) = exl2_native_pack(&raw, rows, cols).expect("native path");
+            let raw = build(rows, n, bits, groups, half::f16::from_f32(1024.0).to_bits(), permuted);
+            let marker = exl2_native_kind(fllm_gguf_probe::exl::EXL2_TYPE, &raw, rows, cols)
+                .expect("native path");
             assert_eq!(marker & 0xFF00_0000, EXL2_NATIVE);
             assert_eq!(marker & 15, bits as u32, "bit width in the marker");
             assert_eq!((marker >> 4) & 4095, n as u32, "group width in the marker");
@@ -2916,46 +2918,49 @@ mod tests {
             let reference =
                 fllm_gguf_probe::exl::dequantize(&raw, fllm_gguf_probe::exl::EXL2_TYPE, rows * cols)
                     .expect("reference");
-            // the mirror of the WGSL decoder, reading the repacked bytes
+
+            // mirror of the WGSL decoder, reading the blob on disk
+            let word = |at: usize| u32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
             let width = marker & 15;
             let per_group = ((marker >> 4) & 4095) as usize;
             let groups_per_row = cols / per_group;
+            let data_off = word(24) as usize;
+            let row_bytes = word(28) as usize;
+            let off_b = word(44) as usize;
             let wpg = (per_group * width as usize).div_ceil(32);
-            let words = groups_per_row * wpg;
-            let row_bytes = words * 4 + groups_per_row * 4;
-            assert_eq!(packed.len(), rows * row_bytes, "repacked size");
+            let mut mine = vec![f32::NAN; rows * cols];
+            for r in 0..rows {
+                for k in 0..cols {
+                    let g = k / per_group;
+                    let start = data_off + r * row_bytes;
+                    let bit = (k % per_group) * width as usize;
+                    let at = start + g * wpg * 4 + bit / 8;
+                    let window = u32::from(raw[at]) | (u32::from(raw[at + 1]) << 8);
+                    let code = (window >> (bit % 8)) & ((1u32 << width) - 1);
+                    let tail = start + row_bytes - 4 * groups_per_row.div_ceil(8);
+                    let scale_word = word(tail + 4 * (g / 8));
+                    let nibble = (scale_word >> (4 * (g % 8))) & 15;
+                    let qmax = f32::from(half::f16::from_bits(u16::from_le_bytes([
+                        raw[64 + 16 * g + 6],
+                        raw[64 + 16 * g + 7],
+                    ]))) / 256.0;
+                    let scale = ((nibble + 1) * (nibble + 1)) as f32 * qmax;
+                    let value = (code as f32 - (1u32 << (width - 1)) as f32) * scale;
+                    // stored column k is original column perm(k)
+                    mine[r * cols + word(off_b + 4 * k) as usize] = value;
+                }
+            }
             for index in 0..rows * cols {
-                let (row, col) = (index / cols, index % cols);
-                let g = col / per_group;
-                let start = row * row_bytes;
-                let bit = (col % per_group) * width as usize;
-                let at = start + g * wpg * 4 + bit / 8;
-                let window = u32::from(packed[at]) | (u32::from(packed[at + 1]) << 8);
-                let code = (window >> (bit % 8)) & ((1u32 << width) - 1);
-                let scale_at = start + words * 4 + g * 4;
-                let scale = f32::from_le_bytes([
-                    packed[scale_at],
-                    packed[scale_at + 1],
-                    packed[scale_at + 2],
-                    packed[scale_at + 3],
-                ]);
-                let mine = (code as f32 - (1u32 << (width - 1)) as f32) * scale;
-                let want = reference[index];
-                assert_eq!(mine, want, "n {n} bits {bits} index {index}");
+                assert_eq!(mine[index], reference[index], "n {n} bits {bits} perm {permuted} index {index}");
             }
         }
 
-        // Mixed widths and a real act-order permutation must keep the expansion.
-        let raw = build(2, 32, 4, 2, half::f16::from_f32(1.0).to_bits());
+        // mixed widths and EXL3 keep the expansion
+        let raw = build(2, 32, 4, 2, half::f16::from_f32(1.0).to_bits(), false);
         let mut mixed = raw.clone();
-        // second group table entry: switch its width (the parser rejects it, so the pack must too)
         mixed[64 + 16 + 4..64 + 16 + 6].copy_from_slice(&2u16.to_le_bytes());
-        assert!(exl2_native_pack(&mixed, 2, 64).is_none());
-        let mut permuted = raw.clone();
-        let off_b = 64 + 16 * 2;
-        permuted[off_b..off_b + 4].copy_from_slice(&1u32.to_le_bytes());
-        permuted[off_b + 4..off_b + 8].copy_from_slice(&0u32.to_le_bytes());
-        assert!(exl2_native_pack(&permuted, 2, 64).is_none(), "act-order must expand");
+        assert!(exl2_native_kind(fllm_gguf_probe::exl::EXL2_TYPE, &mixed, 2, 64).is_none());
+        assert!(exl2_native_kind(fllm_gguf_probe::exl::EXL3_TYPE, &raw, 2, 64).is_none());
     }
 
     /// MLX affine groups: the WGSL decoder's arithmetic against `cpu_mlx::dequantize`, for every
