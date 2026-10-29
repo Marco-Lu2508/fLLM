@@ -88,6 +88,9 @@ fn every_format_has_consistent_geometry() {
         // kernel tag round trip: the tag names a kernel in every family file
         assert!(!info.tag.is_empty());
         let (rows, cols) = dims(&info);
+        if info.blob {
+            continue; // self-describing: no geometry without the bytes
+        }
         let planes = device_layout(quant, rows, cols).unwrap();
         if planes.layout == DeviceLayout::Planar {
             assert_eq!(planes.plane1 % 16, 0, "{quant:?}");
@@ -98,6 +101,7 @@ fn every_format_has_consistent_geometry() {
     assert!(format_info(QuantType::IQ2_XS).is_none());
     assert!(format_info(QuantType::Q8_K).is_none());
     assert!(format_info(QuantType::Nvfp4Marlin).is_none());
+    assert!(format_info(QuantType::Exl3).is_none(), "EXL3 has no Metal kernel");
 }
 
 #[test]
@@ -125,7 +129,7 @@ fn raw_formats_are_borrowed_unchanged() {
         assert!(packed.perm.is_none());
         assert_eq!(
             packed.planes.plane1,
-            if info.row_scales {
+            if info.row_scales || info.tiled {
                 (rows * cols) as u64
             } else {
                 0
@@ -157,6 +161,12 @@ fn raw_alignment_assumptions_of_the_kernels_hold() {
                 | QuantType::Fp8E4m3
                 | QuantType::Fp8E5m2
                 | QuantType::Fp8Marlin
+                | QuantType::Fp8Block
+                | QuantType::Nf4B64
+                | QuantType::Nf4B128
+                | QuantType::Fp4B64
+                | QuantType::Fp4B128
+                | QuantType::Int8Row
         );
         if wide {
             assert_eq!(info.block_bytes % 4, 0, "{quant:?}");
@@ -703,20 +713,333 @@ fn mlx_planes_hold_every_code_scale_and_bias_of_the_file_blocks() {
     }
 }
 
+// ---- bitsandbytes and block-wise FP8: Rust mirrors of the decoders of common.metal ------------------------------------------------
+
+/// The `uint[16]` initializer of the program-scope table `name` in common.metal.
+fn msl_table(name: &str) -> Vec<u32> {
+    let common = std::fs::read_to_string(metal_dir().join("common.metal")).unwrap();
+    let at = common.find(&format!("constant uint {name}[16] = {{")).unwrap_or_else(|| panic!("table {name}"));
+    let body = common[at..].split('{').nth(1).unwrap().split('}').next().unwrap();
+    body.split(',')
+        .map(|t| t.trim().trim_end_matches('u'))
+        .filter(|t| !t.is_empty())
+        .map(|t| u32::from_str_radix(t.trim_start_matches("0x"), 16).unwrap())
+        .collect()
+}
+
+fn word_at(image: &[u8], at: usize) -> u32 {
+    assert_eq!(at % 4, 0, "the kernels issue 32 bit loads here");
+    u32::from_le_bytes(image[at..at + 4].try_into().unwrap())
+}
+
+/// `q_fmt_bnb4<BLOCK, FP4>::dec8` (`book`: the bit patterns of the table the format reads)
+fn dec8_bnb4(image: &[u8], block: usize, book: &[u32], g: usize, c: usize) -> [f32; 8] {
+    let bytes = 4 + block / 2;
+    let b = g * bytes;
+    let d = f32::from_bits(word_at(image, b));
+    let u = word_at(image, b + 4 + 4 * c);
+    let mut o = [0.0; 8];
+    for k in 0..4 {
+        let byte = ((u >> (8 * k)) & 255) as usize;
+        o[2 * k] = f32::from_bits(book[byte >> 4]) * d;
+        o[2 * k + 1] = f32::from_bits(book[byte & 15]) * d;
+    }
+    o
+}
+
+/// `q_fmt_int8r::dec8` (`q_s8` is the sign extension of the low byte)
+fn dec8_int8r(image: &[u8], g: usize, c: usize) -> [f32; 8] {
+    let b = g * 68;
+    let d = f32::from_bits(word_at(image, b));
+    let mut o = [0.0; 8];
+    for i in 0..2 {
+        let u = word_at(image, b + 4 + 8 * c + 4 * i);
+        for k in 0..4 {
+            o[4 * i + k] = f32::from((u >> (8 * k)) as u8 as i8) * d;
+        }
+    }
+    o
+}
+
+/// `q_e4m3`
+fn msl_e4m3(x: u32) -> f32 {
+    let (e, m) = ((x >> 3) & 15, x & 7);
+    let v = if e == 0 {
+        m as f32 * (1.0 / 512.0)
+    } else if e == 15 && m == 7 {
+        f32::from_bits(0x7FC0_0000)
+    } else {
+        f32::from_bits(((e + 120) << 23) | (m << 20))
+    };
+    if x & 0x80 != 0 {
+        -v
+    } else {
+        v
+    }
+}
+
+/// `q_fmt_fp8b::dec8p` with the parameter block the planner built
+fn dec8p_fp8b(image: &[u8], row: usize, blk: usize, p: &QParams) -> [f32; 8] {
+    let (lbr, lbc) = (p.pad & 0xff, (p.pad >> 8) & 0xff);
+    let col = blk * 8;
+    let tiles_per_row = (p.cols as usize + ((1usize << lbc) - 1)) >> lbc;
+    let scales = p.plane1 as usize + (row >> lbr) * tiles_per_row * 4;
+    let base = row * p.cols as usize + col;
+    assert_eq!(base % 4, 0, "the kernels issue 32 bit loads here");
+    std::array::from_fn(|at| {
+        let tile = if lbc >= 3 { col >> lbc } else { (col + at) >> lbc };
+        let s = f32::from_bits(word_at(image, scales + 4 * tile));
+        msl_e4m3(u32::from(image[base + at])) * s
+    })
+}
+
+#[test]
+fn bnb_code_books_of_the_kernels_are_the_rust_books_bit_for_bit() {
+    use fllm_gguf_probe::bnb;
+    let bits = |book: &[f32; 16]| book.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    assert_eq!(msl_table("q_kv_nf4"), bits(&bnb::NF4_CODE));
+    assert_eq!(msl_table("q_kv_bnbfp4"), bits(&bnb::FP4_CODE));
+}
+
+#[test]
+fn bnb_formats_decode_chunk_by_chunk_to_the_reference() {
+    use fllm_gguf_probe::bnb;
+    let nf4 = msl_table("q_kv_nf4");
+    let fp4 = msl_table("q_kv_bnbfp4");
+    let formats = [
+        (QuantType::Nf4B64, 64, 0),
+        (QuantType::Nf4B128, 128, 0),
+        (QuantType::Fp4B64, 64, 1),
+        (QuantType::Fp4B128, 128, 1),
+        (QuantType::Int8Row, 64, 2),
+    ];
+    for (quant, block, kind) in formats {
+        let info = format_info(quant).unwrap();
+        assert_eq!((info.qk, info.src_qk, info.family), (block, block, Family::Bnb));
+        assert_eq!(info.block_bytes, quant.bnb_layout().unwrap().bytes);
+        assert_eq!(info.block_bytes % 4, 0);
+        let (rows, cols) = (5usize, block * 3);
+        let raw = sample_weights(quant, rows, cols, 41);
+        let want = reference_weights(quant, &raw, rows, cols).unwrap();
+        let packed = pack_weight(quant, rows, cols, &raw).unwrap();
+        assert!(matches!(packed.bytes, std::borrow::Cow::Borrowed(_)), "{quant:?} is used as stored");
+        // the loop of the kernel bodies: chunk ci of a row is block ci / CPB, chunk ci % CPB of it
+        let cpb = block / 8;
+        let nb = cols / block;
+        for r in 0..rows {
+            for ci in 0..cols / 8 {
+                let (blk, c) = (ci / cpb, ci % cpb);
+                let g = r * nb + blk;
+                let got = match kind {
+                    0 => dec8_bnb4(&packed.bytes, block, &nf4, g, c),
+                    1 => dec8_bnb4(&packed.bytes, block, &fp4, g, c),
+                    _ => dec8_int8r(&packed.bytes, g, c),
+                };
+                for (k, v) in got.iter().enumerate() {
+                    let w = want[r * cols + ci * 8 + k];
+                    assert_eq!(v.to_bits(), w.to_bits(), "{quant:?} row {r} chunk {ci} value {k}: {v} vs {w}");
+                }
+            }
+        }
+    }
+    // the plans name the kernels of the family
+    for (quant, tag) in [(QuantType::Nf4B64, "nf4b64"), (QuantType::Fp4B128, "fp4b128"), (QuantType::Int8Row, "int8r")] {
+        let plan = plan_quantized_linear(quant, 8, 256, 1, &caps()).unwrap();
+        assert_eq!(plan.kernel_name, format!("fllm_q_mv_{tag}_r4"));
+        assert_eq!(plan.params.pad, 0);
+        assert_eq!(plan.params.plane1, 0);
+        assert!(all_kernel_names().contains(&plan.kernel_name));
+    }
+    assert_eq!(QuantType::Nf4B64.to_gguf_type_id(), bnb::NF4_B64);
+}
+
+#[test]
+fn fp8b_tiles_are_looked_up_like_the_cpu_kernel_for_every_shape() {
+    use fllm_gguf_probe::{fp8b_shape, Fp8bLayout};
+    let mut formats = vec![QuantType::Fp8Block];
+    formats.extend(check_formats().into_iter().filter(|q| matches!(q, QuantType::Other(id) if fp8b_shape(*id).is_some())));
+    // shapes the table does not list: very wide and very tall tiles, 4 x 4
+    formats.extend([(4usize, 4usize), (1, 1), (4096, 2), (2, 32768)].into_iter().map(|(r, c)| QuantType::from_gguf_type_id(fllm_gguf_probe::fp8b_type_id(r, c).unwrap())));
+    assert!(formats.len() >= 11);
+    for quant in formats {
+        let info = format_info(quant).unwrap_or_else(|| panic!("{quant:?}"));
+        assert!(info.tiled && info.family == Family::Fp8b && info.tag == "fp8b" && info.qk == 8);
+        let (tr, tc) = fp8b_shape(quant.to_gguf_type_id()).unwrap();
+        // rows and columns that are not whole tiles, and a matrix smaller than a tile
+        for (rows, cols) in [(37usize, 72usize), (9, 24), (130, 264)] {
+            let raw = sample_weights(quant, rows, cols, 5 + rows as u64);
+            let layout = Fp8bLayout::parse(quant.to_gguf_type_id(), &raw).unwrap();
+            assert_eq!((layout.rows, layout.cols, layout.slabs), (rows, cols, 1));
+            assert_eq!(raw.len(), expected_raw_len(quant, rows, cols).unwrap());
+            let want = reference_weights(quant, &raw, rows, cols).unwrap();
+            let packed = pack_weight(quant, rows, cols, &raw).unwrap();
+            assert!(matches!(packed.bytes, std::borrow::Cow::Borrowed(_)), "used as stored");
+            assert_eq!(packed.planes.plane1 as usize, rows * cols);
+            assert_eq!(packed.planes.total_bytes as usize, raw.len());
+            let plan = plan_quantized_linear(quant, rows, cols, 1, &caps()).unwrap();
+            assert_eq!(plan.kernel_name, "fllm_q_mv_fp8b_r4");
+            assert_eq!(plan.params.plane1, (rows * cols) as u64);
+            assert_eq!(plan.params.pad, tr.trailing_zeros() | (tc.trailing_zeros() << 8), "{quant:?}");
+            assert_eq!(plan.params.nb_blocks as usize, cols / 8);
+            assert_eq!(plan_quantized_linear(quant, rows, cols, 33, &caps()).unwrap().kernel_name, "fllm_q_mm_fp8b_h");
+            for r in 0..rows {
+                for ci in 0..cols / 8 {
+                    // (CPB is 1: blk = ci, c = 0)
+                    let got = dec8p_fp8b(&packed.bytes, r, ci, &plan.params);
+                    for (k, v) in got.iter().enumerate() {
+                        let w = want[r * cols + ci * 8 + k];
+                        assert_eq!(v.to_bits(), w.to_bits(), "{quant:?} {rows}x{cols} row {r} chunk {ci} value {k}: {v} vs {w}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fp8b_weights_that_are_not_one_matrix_of_the_shape_are_refused() {
+    use fllm_gguf_probe::Fp8bLayout;
+    let kind = QuantType::Fp8Block.to_gguf_type_id();
+    let raw = sample_weights(QuantType::Fp8Block, 16, 32, 1);
+    assert!(pack_weight(QuantType::Fp8Block, 16, 32, &raw).is_ok());
+    // another shape with the same number of elements: the trailer says 16 x 32
+    assert!(pack_weight(QuantType::Fp8Block, 32, 16, &raw).is_err());
+    // a stack of two matrices (experts) is no single weight, whatever its length
+    let stack = Fp8bLayout::new(kind, 32, 16, 2).unwrap();
+    let codes = vec![0x38u8; stack.elements()];
+    let scales = vec![1.0f32; stack.tiles()];
+    let bytes = crate::cpu_fp8::pack(&stack, &codes, &scales);
+    assert!(pack_weight(QuantType::Fp8Block, 16, 32, &bytes).is_err());
+    assert!(pack_weight(QuantType::Fp8Block, 32, 32, &bytes).is_err());
+    // an old tensor without the trailer
+    assert!(pack_weight(QuantType::Fp8Block, 16, 32, &raw[..raw.len() - 16]).is_err());
+    let mut bad = raw.clone();
+    let n = bad.len();
+    bad[n - 16] ^= 1;
+    assert!(pack_weight(QuantType::Fp8Block, 16, 32, &bad).is_err());
+    // columns that are no multiple of 8
+    assert!(matches!(expected_raw_len(QuantType::Fp8Block, 4, 12), Err(WeightError::BadShape { .. })));
+}
+
+// ---- EXL2 ------------------------------------------------------------------------------------------------------------------------
+
+/// `q_fmt_exl2::dec8p` on the device image of `pack_weight` (`cols`: `q_params::cols`)
+fn dec8p_exl2(image: &[u8], cols: usize, row: usize, blk: usize) -> [f32; 8] {
+    let row_bytes = word_at(image, 0) as usize;
+    let table = word_at(image, 4) as usize;
+    let scale_offset = word_at(image, 8) as usize;
+    let chunk = table + blk * 8;
+    let code_offset = word_at(image, chunk) as usize;
+    let info = word_at(image, chunk + 4);
+    let (bits, g) = ((info >> 24) as usize, (info & 0xff_ffff) as usize);
+    let maxima = table + (cols >> 3) * 8;
+    let r = 16 + row * row_bytes;
+    let s = (word_at(image, r + scale_offset + 4 * (g >> 3)) >> (4 * (g & 7))) & 15;
+    let scale = ((s + 1) * (s + 1)) as f32 * f32::from_bits(word_at(image, maxima + 4 * g));
+    let mut v = 0u64;
+    for i in 0..bits {
+        v |= u64::from(image[r + code_offset + i]) << (8 * i);
+    }
+    let zero = 1i32 << (bits - 1);
+    let mask = (1u64 << bits) - 1;
+    std::array::from_fn(|k| (((v >> (bits * k)) & mask) as i32 - zero) as f32 * scale)
+}
+
+#[test]
+fn exl2_images_decode_to_the_reference_in_stored_order() {
+    for (rows, cols, seed) in [(5usize, 8usize, 1u64), (7, 72, 2), (9, 256, 3), (3, 520, 4)] {
+        let raw = sample_weights(QuantType::Exl2, rows, cols, seed);
+        let want = reference_weights(QuantType::Exl2, &raw, rows, cols).unwrap();
+        let packed = pack_weight(QuantType::Exl2, rows, cols, &raw).unwrap();
+        assert_eq!(packed.planes.layout, DeviceLayout::Image);
+        assert_eq!(packed.planes.total_bytes as usize, packed.bytes.len());
+        assert!(matches!(packed.bytes, std::borrow::Cow::Owned(_)));
+        let perm = packed.perm.as_ref().expect("EXL2 weights carry their permutation");
+        assert_eq!(perm.len(), cols);
+        // the loop of the kernel bodies (CPB is 1, blk = chunk): chunk ci covers the stored inputs 8 ci .. 8 ci + 8, which multiply x[perm[k]]
+        for r in 0..rows {
+            for ci in 0..cols / 8 {
+                let got = dec8p_exl2(&packed.bytes, cols, r, ci);
+                for (k, v) in got.iter().enumerate() {
+                    let w = want[r * cols + perm[ci * 8 + k] as usize];
+                    assert_eq!(v.to_bits(), w.to_bits(), "{rows}x{cols} row {r} chunk {ci} value {k}: {v} vs {w}");
+                }
+            }
+        }
+        let plan = plan_quantized_linear(QuantType::Exl2, rows, cols, 1, &caps()).unwrap();
+        assert_eq!(plan.kernel_name, "fllm_q_mv_exl2_r4");
+        assert_eq!((plan.params.plane1, plan.params.pad, plan.params.nb_blocks as usize), (0, 0, cols / 8));
+        let pre = plan.activation_prepass.expect("the activations are gathered into stored order");
+        assert_eq!(pre.output_bytes, cols * 4);
+        assert_eq!(plan_quantized_linear(QuantType::Exl2, rows, cols, 33, &caps()).unwrap().kernel_name, "fllm_q_mm_exl2_h");
+    }
+}
+
+/// An EXL2 blob with the given groups (identity permutation, scale index 3 everywhere, codes counting up).
+fn exl2_blob(rows: usize, groups: &[(usize, usize)]) -> Vec<u8> {
+    use fllm_gguf_probe::exl::{pack_codes, Exl2Layout};
+    let cols: usize = groups.iter().map(|g| g.0).sum();
+    let layout = Exl2Layout::new(rows, cols, groups).unwrap();
+    let maxima: Vec<u16> = groups.iter().map(|_| f16::from_f32(10.0).to_bits()).collect();
+    let perm: Vec<u32> = (0..cols as u32).collect();
+    let mut blob = layout.prefix(&maxima, &perm);
+    for _ in 0..rows {
+        let mut nibbles = vec![0u32; groups.len().div_ceil(8)];
+        for (g, &(n, bits)) in groups.iter().enumerate() {
+            let codes: Vec<u8> = (0..n).map(|i| (i % (1 << bits)) as u8).collect();
+            pack_codes(&codes, bits, &mut blob);
+            nibbles[g / 8] |= 3 << (4 * (g % 8));
+        }
+        for w in nibbles {
+            blob.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    blob
+}
+
+#[test]
+fn exl2_blobs_the_kernel_cannot_take_are_refused_so_that_the_upload_expands_them() {
+    // groups of 12 and 20 inputs: a chunk of 8 would straddle two groups
+    let blob = exl2_blob(2, &[(12, 4), (20, 3)]);
+    assert!(matches!(pack_weight(QuantType::Exl2, 2, 32, &blob), Err(WeightError::BadShape { .. })));
+    assert!(reference_weights(QuantType::Exl2, &blob, 2, 32).is_ok(), "the host can still decode it");
+    // groups of 8 are fine, the widest and the narrowest included
+    let ok = exl2_blob(3, &[(8, 2), (16, 8), (8, 5), (24, 6)]);
+    let packed = pack_weight(QuantType::Exl2, 3, 56, &ok).unwrap();
+    let want = reference_weights(QuantType::Exl2, &ok, 3, 56).unwrap();
+    for r in 0..3 {
+        for ci in 0..7 {
+            let got = dec8p_exl2(&packed.bytes, 56, r, ci);
+            for (k, v) in got.iter().enumerate() {
+                assert_eq!(v.to_bits(), want[r * 56 + ci * 8 + k].to_bits(), "row {r} chunk {ci} value {k}");
+            }
+        }
+    }
+    // another shape, a truncated blob, a blob that is not EXL2, columns that are no multiple of 8
+    assert!(pack_weight(QuantType::Exl2, 3, 48, &ok).is_err());
+    assert!(pack_weight(QuantType::Exl2, 2, 56, &ok).is_err());
+    assert!(pack_weight(QuantType::Exl2, 3, 56, &ok[..ok.len() - 4]).is_err());
+    assert!(pack_weight(QuantType::Exl2, 3, 56, &[0u8; 128]).is_err());
+    // the shape alone says nothing about the layout of a blob
+    assert!(expected_raw_len(QuantType::Exl2, 3, 56).is_err());
+    assert!(device_layout(QuantType::Exl2, 3, 56).is_err());
+    assert!(plan_quantized_linear(QuantType::Exl2, 3, 60, 1, &caps()).is_err(), "columns are no multiple of 8");
+}
+
 // ---- vectors for the CPU emulation of the kernels -----------------------------------------------------------------------------
 
 /// Writes the device images and the reference dequantization of every format to `$FLLM_METAL_DUMP_DIR/<tag>[_variant].bin` (no-op when
 /// the variable is unset). `metal/emu/run_emu.sh` runs the MSL kernels as C++ on them.
 ///
 /// Header (little endian u32 words): magic `0x4d544c51`, rows, cols, qk, blocks per row, plane1 low, plane1 high, device bytes,
-/// permutation flag, GGUF type id; then the device image, `rows * cols` f32 reference weights (original column order), and for
+/// permutation flag, GGUF type id, `q_params::pad` (the tile shape of block-wise FP8); then the device image, `rows * cols` f32 reference weights (original column order), and for
 /// act-order weights `cols` u32 permutation entries.
 #[test]
 fn dump_vectors_for_the_msl_emulation() {
     let Ok(dir) = std::env::var("FLLM_METAL_DUMP_DIR") else {
         return;
     };
-    for quant in supported_formats() {
+    for quant in check_formats() {
         let info = format_info(quant).unwrap();
         let mut shapes = vec![(24usize, 256usize, ""), (72usize, 512usize, "_big")];
         // an odd row count: the last threadgroup of every kernel is partly outside the matrix
@@ -733,6 +1056,7 @@ fn dump_vectors_for_the_msl_emulation() {
             // MLX affine weights with bfloat16 scales carry the flag in bit 63 of plane 1, as the planner puts it into q_params
             let bf16 = quant.mlx_affine().is_some_and(|m| m.bf16);
             let plane1 = planes.plane1 | if bf16 { MLX_BF16_FLAG } else { 0 };
+            let pad = plan_quantized_linear(quant, rows, cols, 1, &caps()).unwrap().params.pad;
             for v in [
                 0x4d54_4c51u32,
                 rows as u32,
@@ -744,6 +1068,7 @@ fn dump_vectors_for_the_msl_emulation() {
                 packed.bytes.len() as u32,
                 packed.perm.is_some() as u32,
                 quant.to_gguf_type_id(),
+                pad,
             ] {
                 out.extend_from_slice(&v.to_le_bytes());
             }
@@ -756,7 +1081,10 @@ fn dump_vectors_for_the_msl_emulation() {
                     out.extend_from_slice(&p.to_le_bytes());
                 }
             }
-            let tag = if info.permuted {
+            let tag = if info.tiled && quant != QuantType::Fp8Block {
+                let (r, c) = fllm_gguf_probe::fp8b_shape(quant.to_gguf_type_id()).unwrap();
+                format!("{}t{r}x{c}", info.tag)
+            } else if info.permuted {
                 format!("{}p", info.tag)
             } else if bf16 {
                 format!("{}b", info.tag)

@@ -45,6 +45,13 @@ FORMATS = [
     ("mlx8g32", "q_fmt_mlx8g32", "mlx"),
     ("mlx8g64", "q_fmt_mlx8g64", "mlx"),
     ("mlx8g128", "q_fmt_mlx8g128", "mlx"),
+    ("fp8b", "q_fmt_fp8b", "fp8b"),
+    ("nf4b64", "q_fmt_nf4b64", "bnb"),
+    ("nf4b128", "q_fmt_nf4b128", "bnb"),
+    ("fp4b64", "q_fmt_fp4b64", "bnb"),
+    ("fp4b128", "q_fmt_fp4b128", "bnb"),
+    ("int8r", "q_fmt_int8r", "bnb"),
+    ("exl2", "q_fmt_exl2", "exl"),
     ("f16", "q_fmt_f16", "fp"),
     ("bf16", "q_fmt_bf16", "fp"),
     ("f32", "q_fmt_f32", "fp"),
@@ -58,6 +65,9 @@ FAMILY_TEXT = {
     "kquant": "Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_XS",
     "fp": "MXFP4, NVFP4, Q4Z32/64/128 (AWQ/GPTQ), F16, BF16, F32, FP8M, FP8 E4M3/E5M2",
     "mlx": "MLX affine group quantization (MLXA types): 2, 3, 4, 5, 6 and 8 bits, groups of 32, 64 and 128; f16 or bf16 scales and biases",
+    "fp8b": "block-wise FP8 (FP8B types): E4M3 codes with one f32 scale per tile of any power-of-two shape (row-aware decoder, see q_fmt_fp8b)",
+    "exl": "ExLlamaV2 (EXL2 type): per-group bit widths, stored-order inputs (permuted activations), row-aware decoder, see q_fmt_exl2",
+    "bnb": "bitsandbytes NF4 / FP4 (blocks of 64 or 128 with an f32 absmax) and LLM.int8() (INT8R: blocks of 64 with an f32 row scale)",
 }
 
 
@@ -75,7 +85,7 @@ def header(kind, family):
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    for family in ("legacy", "kquant", "fp", "mlx"):
+    for family in ("legacy", "kquant", "fp", "mlx", "fp8b", "bnb", "exl"):
         fmts = [(n, s) for (n, s, f) in FORMATS if f == family]
         text = header("mv", family)
         for n, s in fmts:

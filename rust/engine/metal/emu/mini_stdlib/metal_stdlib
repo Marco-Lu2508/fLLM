@@ -23,3 +23,19 @@ To as_type(From from) {
     memcpy(&to, &from, sizeof(To));
     return to;
 }
+
+// ---- the little more that the matrix-vector kernel body (common_q_gemv.metal) needs; used by kernel_mv.cpp ------------------------------------
+#define kernel
+struct float4 {
+    float x, y, z, w;
+    float4() = default;
+    float4(float s) : x(s), y(s), z(s), w(s) {}
+    float4(float a, float b, float c, float d) : x(a), y(b), z(c), w(d) {}
+};
+inline float dot(float4 a, float4 b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+struct uint3 {
+    uint x, y, z;
+    uint3(uint a, uint b, uint c) : x(a), y(b), z(c) {}
+};
+inline uint min(uint a, uint b) { return a < b ? a : b; }
+float simd_sum(float v);  // defined by the driver (lock-step lanes of emu_runtime.h)

@@ -13,6 +13,12 @@ pub enum Family {
     Fp,
     /// MLX affine group quantization (the `MLXA` types)
     Mlx,
+    /// Block-wise FP8 (the `FP8B` types, every tile shape)
+    Fp8b,
+    /// bitsandbytes NF4, FP4 and LLM.int8() (the `NF4B*`, `FP4B*`, `INT8R` types)
+    Bnb,
+    /// ExLlamaV2 (the `EXL2` type)
+    Exl,
 }
 
 impl Family {
@@ -23,6 +29,9 @@ impl Family {
             Family::KQuant => "kquant",
             Family::Fp => "fp",
             Family::Mlx => "mlx",
+            Family::Fp8b => "fp8b",
+            Family::Bnb => "bnb",
+            Family::Exl => "exl",
         }
     }
 }
@@ -40,6 +49,9 @@ pub enum Repack {
     /// MLXA (MLX affine): blocks of `[scale: 2][bias: 2][group * bits / 8 code bytes]` into a plane of codes and a plane of words
     /// `scale | bias << 16` (the 16-bit floats as they are; bfloat16 scales are flagged by bit 63 of the plane-1 offset in `q_params`).
     Mlx,
+    /// EXL2: the self-describing blob becomes a device image with a 16-byte header, the rows of the blob, a per-chunk table and the group maxima
+    /// (`q_fmt_exl2` in common.metal); the permutation is split off like the one of act-order GPTQ.
+    Exl2,
 }
 
 /// Geometry of one format.
@@ -61,6 +73,12 @@ pub struct FormatInfo {
     pub permuted: bool,
     /// FP8M: one f16 scale per row follows the E4M3 bytes of the file (and of the device image).
     pub row_scales: bool,
+    /// FP8B: the E4M3 codes are followed by one f32 scale per tile and the 16-byte trailer (`fllm_gguf_probe::Fp8bLayout`; the tile shape is part of
+    /// the type id). The device image is the file; `q_params::plane1` is the offset of the scale table and `q_params::pad` the tile shape.
+    pub tiled: bool,
+    /// EXL2: the tensor is one self-describing blob, its length and layout come from its header, not from the shape (`expected_raw_len` and
+    /// `device_layout` cannot say anything about it; [`super::pack_weight`] reads the blob).
+    pub blob: bool,
 }
 
 const fn raw(
@@ -81,6 +99,8 @@ const fn raw(
         repack: Repack::None,
         permuted: false,
         row_scales: false,
+        tiled: false,
+        blob: false,
     }
 }
 
@@ -96,6 +116,8 @@ const fn q4z(quant: QuantType, tag: &'static str, group: usize, permuted: bool) 
         repack: Repack::Q4z,
         permuted,
         row_scales: false,
+        tiled: false,
+        blob: false,
     }
 }
 
@@ -117,6 +139,17 @@ const fn mlx(bits: u32, group: u32, bf16: bool, tag: &'static str) -> FormatInfo
         repack: Repack::Mlx,
         permuted: false,
         row_scales: false,
+        tiled: false,
+        blob: false,
+    }
+}
+
+/// A block-wise FP8 format: the kernels see 8-code chunks (`qk` 8) and look the tile scale up from the row and column of the chunk.
+const fn fp8b(quant: QuantType) -> FormatInfo {
+    FormatInfo {
+        tiled: true,
+        blob: false,
+        ..raw(quant, "fp8b", Family::Fp8b, 8, 8)
     }
 }
 
@@ -148,6 +181,8 @@ static FORMATS: &[FormatInfo] = &[
         repack: Repack::Mxfp4,
         permuted: false,
         row_scales: false,
+        tiled: false,
+        blob: false,
     },
     raw(QuantType::NvFp4, "nvfp4", Family::Fp, 64, 36),
     q4z(QuantType::Q4Z32, "q4z32", 32, false),
@@ -201,11 +236,42 @@ static FORMATS: &[FormatInfo] = &[
         row_scales: true,
         ..dense(QuantType::Fp8Marlin, "fp8m", 1)
     },
+    fp8b(QuantType::Fp8Block),
+    FormatInfo {
+        permuted: true,
+        blob: true,
+        repack: Repack::Exl2,
+        ..raw(QuantType::Exl2, "exl2", Family::Exl, 8, 8)
+    },
+    raw(QuantType::Nf4B64, "nf4b64", Family::Bnb, 64, 36),
+    raw(QuantType::Nf4B128, "nf4b128", Family::Bnb, 128, 68),
+    raw(QuantType::Fp4B64, "fp4b64", Family::Bnb, 64, 36),
+    raw(QuantType::Fp4B128, "fp4b128", Family::Bnb, 128, 68),
+    raw(QuantType::Int8Row, "int8r", Family::Bnb, 64, 68),
 ];
 
 /// Geometry of `quant`, or `None` if the Metal kernels do not implement it.
 pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
+    // every tile shape of the block-wise FP8 format is one kernel (the shape travels in `q_params::pad`): the shapes other than 128 x 128 are
+    // `Other` types and are not in the table
+    if let QuantType::Other(id) = quant {
+        if fllm_gguf_probe::fp8b_type(id) {
+            return Some(fp8b(quant));
+        }
+    }
     FORMATS.iter().find(|f| f.quant == quant).copied()
+}
+
+/// The tile shapes (rows, columns) besides 128 x 128 whose formats the hardware check and the emulation dump run: partial tiles in both
+/// directions, tiles narrower than a chunk of 8 codes (one scale per code), a tile wider than the matrix, one tile per row (the shape of
+/// `FP8M` weights widened to FP8B).
+pub const FP8B_EXTRA_TILES: [(usize, usize); 6] = [(16, 32), (1, 8), (2, 4), (64, 1), (1, 512), (32, 16)];
+
+/// `supported_formats` plus the extra FP8B tile shapes ([`FP8B_EXTRA_TILES`]): what the hardware check runs.
+pub fn check_formats() -> Vec<QuantType> {
+    let mut all = supported_formats();
+    all.extend(FP8B_EXTRA_TILES.iter().filter_map(|&(r, c)| fllm_gguf_probe::fp8b_type_id(r, c)).map(QuantType::from_gguf_type_id));
+    all
 }
 
 /// All formats `format_info` knows, in kernel-file order.

@@ -61,6 +61,7 @@ pub fn raw_row_bytes(quant: QuantType, cols: usize) -> Option<usize> {
         | Q::Q4ZP64
         | Q::Q4ZP128
         | Q::Fp8Marlin
+        | Q::Fp8Block
         | Q::Nvfp4Marlin
         | Q::Q4_K_Marlin
         | Q::Other(_) => None,

@@ -34,9 +34,9 @@ Columns: **L** = Q4_0 Q4_1 Q5_0 Q5_1 Q8_0; **K** = Q2_K Q3_K Q4_K Q5_K Q6_K; **I
 **Q4Z** = AWQ/GPTQ 4-bit (Q4Z32/64/128, Q4ZP with act-order); **F** = F16/BF16 (F32).
 Numbers in square brackets refer to the notes below the table.
 **bitsandbytes** (NF4B64/128, FP4B64/128, INT8R; no column): x86 CPU AVX2 and portable kernels, run by us (`docs/cpu-kernels.md`);
-CUDA decode GEMV and tensor-core prompt path, compiled for sm_80/89/90/120 and never run on a GPU (L0); every other backend, including
-Vulkan, Metal, wgpu, the NPU and the TPU path, takes them through a conversion at upload (L0†, 3.6 times the packed size in 16-bit,
-7 times in F32; `docs/gpu-backends.md`).
+CUDA decode GEMV and tensor-core prompt path, compiled for sm_80/89/90/120 and never run on a GPU (L0); Metal has its own kernels (L0, see the
+table below the MLXA one); every other backend, including Vulkan, wgpu, the NPU and the TPU path, takes them through a conversion at upload (L0†,
+3.6 times the packed size in 16-bit, 7 times in F32; `docs/gpu-backends.md`).
 
 | Hardware | L | K | IQ4 | MX | NV | Q4Z | F |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -70,6 +70,22 @@ MLX affine group quantization (`MLXA`, 2 to 8 bits, groups of 32 or more, see [r
 | CUDA (NVIDIA) | L0: own kernels on the packed words (GEMV, FP32 tile, WMMA tensor cores from sm_75; `cuda/mlx_affine.cu`) compiled with nvcc 12.8 for sm_80/89/90/120; the device self test `mlx` has not run on a GPU |
 | Metal native | L0: kernels for 36 formats (6 widths x 3 groups x f16/bf16 scales) built on the quantized linear family; the chunk decoder text compiled as C++ and run on the CPU decodes every width bit for bit; never compiled by the Metal compiler. `FLLM_METAL_NO_MLX=1` turns them off |
 | Vulkan, wgpu, SYCL, NPU, TPU, ROCm/HIP | L0†: no kernel; the decoder uploads the weight dequantized as F16 (`RustDecoder::init_backend`, one stderr line), so a model that is 4.5 bits per weight on disk is 16 on the device |
+
+Block-wise FP8 (`FP8B`), bitsandbytes (`NF4B64/128`, `FP4B64/128`, `INT8R`) and EXL2 on **Metal native** (same scale as above). All three are written without a
+Mac at hand: **L0**. The MSL has been linted (`msl_check`), its chunk decoders compiled as C++ and compared bit for bit with the Rust reference
+(`metal/emu/run_dec8.sh`, including the matrix-vector kernel body), the index arithmetic and device images mirrored by unit tests, and the Apple-only code
+type-checked and clippy-checked for `aarch64-apple-darwin`; **no Metal compiler and no Apple GPU has seen the kernels**. The Apple-silicon CI runner runs
+`metal_quant_kernels` (every format, several batch sizes, CPU dequantization as reference).
+
+| Format | Metal native | Switch off |
+| --- | --- | --- |
+| `FP8B` (any power-of-two tile, f32 scales) | L0: the GGUF tensor is the device image (no copy); kernels `fllm_q_{mv,mm}_fp8b_*` look the tile scale up from the row and column of every chunk of 8 codes (`q_fmt_fp8b`, tile shape in `q_params::pad`); a tensor that is not one matrix of the shape (stacked experts) is expanded to F16 | `FLLM_METAL_NO_FP8B=1` |
+| `NF4B64/128`, `FP4B64/128`, `INT8R` | L0: the GGUF tensor is the device image; code books as exact float bit patterns, `book[nibble] * absmax` per weight | `FLLM_METAL_NO_BNB=1` |
+| `EXL2` | L0: own device image (header, rows of the blob, per-chunk table, group maxima), per-group widths 2 to 8 bits, activations gathered into stored order by the act-order prepass; blobs with a group that is not a multiple of 8 inputs are expanded to F16 | `FLLM_METAL_NO_EXL=1` |
+| `EXL3` | L0†: expanded to F16 (Hadamard transforms and trellis tiles have no Metal kernel) | – |
+
+The weights keep their packed size on the device (about 8, 4.5 and 2 to 8 bits per weight); the arithmetic follows the CPU kernels (f32 per weight, f32 activations,
+simd_sum reduction; half tiles for batches above 8 unless the exact mode is set).
 
 Notes:
 

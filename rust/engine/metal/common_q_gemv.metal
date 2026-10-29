@@ -49,7 +49,7 @@ Q_FUNC void q_mv_body(q_bytes w, device const float *x, device float *out, devic
         #pragma clang loop unroll(full)
         for (int r = 0; r < NR; ++r) {
             float wv[8];
-            F::dec8(w, ulong(rowc[r]) * p.nb_blocks + blk, c, p.plane1, wv);
+            q_dec8<F>(w, rowc[r], blk, c, p, wv);
             const float4 w0 = float4(wv[0], wv[1], wv[2], wv[3]);
             const float4 w1 = float4(wv[4], wv[5], wv[6], wv[7]);
             #pragma clang loop unroll(full)

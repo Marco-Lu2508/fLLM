@@ -5,7 +5,7 @@
 //! side of the contract is `rust/engine/metal/INTERFACE_QUANT.md`.
 
 use super::format::{format_info, supported_formats, FormatInfo};
-use super::layout::{device_layout, WeightError};
+use super::layout::{device_layout, validate_blob_shape, DeviceLayout, Planes, WeightError};
 use crate::backend::QuantType;
 use std::fmt;
 
@@ -301,6 +301,15 @@ impl From<WeightError> for PlanError {
     }
 }
 
+/// `q_params::pad` of a block-wise FP8 weight: log2 of the tile rows, log2 of the tile columns << 8 (0 for every other format).
+fn fp8b_pad(info: &FormatInfo) -> u32 {
+    if !info.tiled {
+        return 0;
+    }
+    let (rows, cols) = fllm_gguf_probe::fp8b_shape(info.quant.to_gguf_type_id()).expect("an FP8B type id");
+    rows.trailing_zeros() | (cols.trailing_zeros() << 8)
+}
+
 fn ceil_div(a: u32, b: u32) -> u32 {
     a.div_ceil(b)
 }
@@ -326,7 +335,13 @@ pub fn plan_quantized_linear(
     caps: &MetalCapsLike,
 ) -> Result<LinearPlan, PlanError> {
     let info = format_info(quant).ok_or(WeightError::UnsupportedFormat(quant))?;
-    let planes = device_layout(quant, rows, cols)?; // validates the shape
+    // validates the shape (a self-describing blob has no plane geometry to ask for: its parameters sit in the header of the device image)
+    let planes = if info.blob {
+        validate_blob_shape(&info, rows, cols)?;
+        Planes { layout: DeviceLayout::Image, plane1: 0, total_bytes: 0 }
+    } else {
+        device_layout(quant, rows, cols)?
+    };
     let size = |what: &str, v: usize| {
         u32::try_from(v).map_err(|_| PlanError::BadSize(format!("{what} {v} does not fit 32 bits")))
     };
@@ -358,7 +373,8 @@ pub fn plan_quantized_linear(
         row_base: 0,
         x_stride: cols32,
         nb_blocks: (cols / info.qk) as u32,
-        pad: 0,
+        // block-wise FP8: log2 of the tile rows | log2 of the tile columns << 8 (`q_fmt_fp8b`)
+        pad: fp8b_pad(&info),
     };
     let activation_prepass = info.permuted.then(|| PrepassPlan {
         kernel_name: "fllm_q_permute_x",

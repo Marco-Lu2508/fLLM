@@ -358,7 +358,7 @@ device. The experts of a mixture-of-experts layer count as feed-forward weights 
 
 Q2_K, Q3_K and the IQ family are decoded natively (generic decoders in `iq_decode.cuh`; the list in the `quantized_linear` row above is `NATIVE_KINDS` of `backend/cuda.rs` plus the IQ4 and FP4 formats with their own kernels). Only tensor types outside that list and unusual shapes are converted once on upload (the conversion is logged).
 
-EXL2 / EXL3 tensors are the exception to "native or converted": CUDA reads the packed blob in place (`cuda/exl.cu`, see [exl-formats.md](exl-formats.md)); every other backend (wgpu/Vulkan, Metal, SYCL, TPU, NPU, AMD HIP, NVIDIA below sm_60) does not list the type as supported, so the decoder expands the blob to F16 once, at upload, and prints one notice. That keeps those backends correct but gives them no memory saving.
+EXL2 / EXL3 tensors are the exception to "native or converted": CUDA reads the packed blob in place (`cuda/exl.cu`, see [exl-formats.md](exl-formats.md)); Metal reads EXL2 natively ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); EXL3 is expanded); every other backend (wgpu/Vulkan, SYCL, TPU, NPU, AMD HIP, NVIDIA below sm_60) does not list the type as supported, so the decoder expands the blob to F16 once, at upload, and prints one notice. That keeps those backends correct but gives them no memory saving.
 
 ### Older GPUs
 
@@ -390,6 +390,8 @@ CPU reference. **Not run on any GPU.** The first thing to do on a Colab A100 / L
 type: `BackendCapabilities::supported_quants` lacks it (`hip_stubs.cu` only keeps the link complete) and the decoder uploads F16.
 
 ### Block-wise FP8 (`FP8B`)
+
+*Metal: see [Metal: block-wise FP8, bitsandbytes and EXL2](#metal-block-wise-fp8-bitsandbytes-and-exl2) below.*
 
 Checkpoints with `weight_scale_inv` per 128 x 128 tile (DeepSeek-V3, Qwen3-FP8, GLM-FP8 ...) stay 8-bit on every NVIDIA GPU: the device buffer is the
 GGUF tensor itself (E4M3 codes, f32 tile scales, 16-byte trailer; [rust-formats-and-import.md](rust-formats-and-import.md#block-wise-fp8-fp8b)), so a
@@ -465,7 +467,7 @@ the 16 bits of the older expanding conversion.
   when it is read.
 - **MoE experts** in these types run through the per-expert `quantized_linear` (the grouped expert GEMM and the dp4a fast path list
   their formats and do not include them).
-- **Other devices**: Vulkan expands the weights to F16 when they are uploaded, Metal to F16 (F32 if a value does not fit), the wgpu
+- **Other devices**: Metal has its own kernels ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); `FLLM_METAL_NO_BNB=1` expands to F16 instead), Vulkan expands the weights to F16 when they are uploaded, the wgpu
   backend to F32; each logs the format and the size once and needs about 4 times (wgpu: 7 times) the packed size in device memory.
   The CPU backend runs the packed-weight kernels.
 - **Status**: compiled with nvcc 12.8 for sm_80, sm_89, sm_90 and sm_120 (no errors, no register spills; `cargo check --features cuda` with the whole `build.rs` nvcc build for sm_80 passes too); the arithmetic of the
@@ -475,6 +477,30 @@ the 16 bits of the older expanding conversion.
   `int8r`, or one type) runs `linear nf4b64 ...` and `fast linear nf4b64 ...` against the CPU backend and the f64 reference at odd
   shapes (13 rows of 3 blocks; 259 rows of 5 and of 16 blocks at batches 1, 2, 3, 4, 5, 8, 16, 40, 129 and 356; 130 and 66 rows of 9
   blocks at batches 65 and 505), exact and fast kernels; that is the run to do on an A100, L4 or Blackwell card.
+
+### Metal: block-wise FP8, bitsandbytes and EXL2
+
+The native Metal backend reads these three formats in place with its quantized-linear kernel family (`metal/q_mv_*.metal` for 1 to 8 tokens,
+`q_mm_*.metal` with `simdgroup_matrix` tiles above; the contract is `rust/engine/metal/INTERFACE_QUANT.md`). Before, `upload_weight` decoded them on the
+host and stored F16 (2 bytes per weight, 4 to 8 times the packed size for bitsandbytes). **Verification level L0: the MSL was written without a Mac. It has
+been linted (`msl_check`), its decoders compiled as C++ and compared bit for bit with the Rust reference, the matrix-vector kernel body run on emulated
+threadgroups, the index arithmetic mirrored by unit tests, and the Apple-only Rust code type-checked and clippy-checked for `aarch64-apple-darwin` from
+Linux; the Metal compiler and an Apple GPU have not seen any of it.** The first thing to do on a Mac (or the `macos-14` CI job "Metal quantized kernels"):
+`cargo test --release -p fllm-engine --features metal metal_quant_kernels -- --nocapture` compares every kernel with the CPU dequantization (several
+batch sizes, bias and tensor scale on, half and float tiles).
+
+| Format | Device image | Chunk decoder (8 weights) | Notes |
+| --- | --- | --- | --- |
+| `FP8B`, every power-of-two tile | the GGUF tensor as it is (codes, f32 scale table, trailer; memory-mapped files are bound without a copy) | `q_fmt_fp8b::dec8p`: `e4m3(code) * scale[(row >> lbr) * tiles_per_row + (col >> lbc)]` as in `cpu_fp8.rs`; the tile shape is `q_params::pad`, the offset of the scale table `q_params::plane1`; tiles narrower than 8 columns take one scale per code | one kernel name (`fllm_q_*_fp8b_*`) for all shapes; a tensor whose trailer is not one matrix of the shape (stacked experts) is expanded to F16 at upload |
+| `NF4B64/128`, `FP4B64/128` | the GGUF tensor as it is | `q_fmt_bnb4`: one 32-bit load of 4 code bytes, `book[nibble] * absmax`; the books are float bit patterns that a unit test and the C++ check compare with `bnb::NF4_CODE` / `FP4_CODE` | blocks of 36 / 68 bytes keep every load 4-byte aligned |
+| `INT8R` | the GGUF tensor as it is | `q_fmt_int8r`: two 32-bit loads, `int8 * scale` | the f32 row scale sits in every block |
+| `EXL2` | 16-byte header, the rows of the blob, a table with the code offset and `group \| bits << 24` of every chunk of 8 stored inputs, the group maxima | `q_fmt_exl2::dec8p`: `bits` bytes of codes, `(code - 2^(bits-1)) * (s + 1)^2 * max / 256` | the activations are gathered into stored order by `fllm_q_permute_x` (the act-order prepass); groups must be a multiple of 8 inputs (real EXL2 groups are multiples of 32), else the weight is expanded to F16 |
+
+Kernel structure: the shared bodies call `q_dec8<F>(w, row, blk, c, p, out)`; formats whose chunk depends only on the global block index (all older ones)
+get `g = row * nb_blocks + blk` and `dec8`, the row-aware formats (FP8B, EXL2) `dec8p` with the row and the parameter block. Escape hatches (the weights
+are then expanded to F16 at upload, exactly as before): `FLLM_METAL_NO_FP8B=1`, `FLLM_METAL_NO_BNB=1`, `FLLM_METAL_NO_EXL=1` (and `FLLM_METAL_NO_MLX=1`
+for the MLX kernels). EXL3 has no Metal kernel (Hadamard transforms and trellis decoding): it is expanded to F16 at upload with the usual notice.
+MoE experts of these formats run through the per-expert `quantized_linear` like on the other backends; the `moe_linear_*` kernels do not read them.
 
 ### NVFP4 models
 

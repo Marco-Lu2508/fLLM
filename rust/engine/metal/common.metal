@@ -33,6 +33,12 @@ constant char q_kv_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13,
 // FP4 E2M1 values times two
 constant char q_kv_fp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
 
+// bitsandbytes 4-bit code books as float bit patterns (gguf-probe `bnb::NF4_CODE` / `FP4_CODE`; the emulation compares every entry with them)
+constant uint q_kv_nf4[16] = {0xbf800000u, 0xbf3239b1u, 0xbf066b30u, 0xbeca32a0u, 0xbe91a24du, 0xbe3d353fu, 0xbdba7871u, 0x00000000u,
+                              0x3da2faffu, 0x3e24cae3u, 0x3e7c04ddu, 0x3ead033au, 0x3ee1a4b8u, 0x3f1007abu, 0x3f3913b3u, 0x3f800000u};
+constant uint q_kv_bnbfp4[16] = {0x00000000u, 0x3baaaaabu, 0x3f2aaaabu, 0x3f800000u, 0x3eaaaaabu, 0x3f000000u, 0x3e2aaaabu, 0x3e800000u,
+                                 0x80000000u, 0xbbaaaaabu, 0xbf2aaaabu, 0xbf800000u, 0xbeaaaaabu, 0xbf000000u, 0xbe2aaaabu, 0xbe800000u};
+
 // half of 2^(x - 127) (the E8M0 scale of MXFP4), denormal bit patterns for x < 2 (as the CPU decoder)
 Q_FUNC float q_e8m0_half(uint x) { return as_type<float>(x < 2u ? (0x00200000u << x) : ((x - 1u) << 23)); }
 
@@ -76,7 +82,10 @@ Q_FUNC void q_scale_min_k4(q_bytes s, uint j, thread float &sc, thread float &mn
 // `w` is the start of the weight buffer, `p1` the byte offset of plane 1 for the repacked formats (MXFP4, Q4Z*, FP8M scales).
 // row_scale() is a per-row factor applied after the dot product (FP8M); 1 for all other formats.
 // ---------------------------------------------------------------------------------------------------------------------------
-#define Q_NO_ROW_SCALE \
+// ROW_AWARE is false for every format whose chunk decoder needs only the global block index `g`; a format whose chunk depends on its weight row
+// and on the parameter block (FP8B: the tile scale) sets it and provides `dec8p` instead of `dec8` (see q_dec8 after q_params).
+#define Q_NO_ROW_SCALE                                                                                                    \
+    static constant constexpr bool ROW_AWARE = false;                                                                                      \
     static float row_scale(q_bytes, ulong, uint) { return 1.0f; }
 
 // Q4_0: { half d; uchar qs[16]; }  value j<16: low nibble of qs[j], j>=16: high nibble of qs[j-16]; weight = d * (q - 8)
@@ -472,6 +481,53 @@ struct q_fmt_mlx {
         for (uint k = 0; k < 8; ++k) o[k] = float(uint((v >> (BITS * k)) & ((1ul << BITS) - 1ul))) * scale + bias;
     }
 };
+// bitsandbytes NF4 / FP4 (fLLM types NF4B64, NF4B128, FP4B64, FP4B128, gguf-probe `bnb`), read as they are in the file: a block of BLOCK values is
+// { float absmax; uchar codes[BLOCK / 2]; }. Code byte j holds the elements 2j (high nibble) and 2j + 1 (low nibble); weight =
+// code_book[nibble] * absmax (the book entries are the bit patterns q_kv_nf4 / q_kv_bnbfp4). The blocks are 36 / 68 bytes, so every block and
+// every 4-byte code word of a chunk of 8 values is 4-byte aligned.
+template <uint BLOCK, bool FP4>
+struct q_fmt_bnb4 {
+    Q_CONST uint QK = BLOCK;
+    Q_CONST uint BYTES = 4 + BLOCK / 2;
+    Q_CONST uint CPB = BLOCK / 8;
+    Q_NO_ROW_SCALE
+    static void dec8(q_bytes w, ulong g, uint c, ulong, thread float *o) {
+        q_bytes b = w + g * BYTES;
+        const float d = as_type<float>(q_u32(b, 0u));
+        const uint u = q_u32(b, 4u + 4u * c);
+        #pragma clang loop unroll(full)
+        for (uint k = 0; k < 4; ++k) {
+            const uint byte = (u >> (8 * k)) & 255u;
+            o[2 * k] = as_type<float>(FP4 ? q_kv_bnbfp4[byte >> 4] : q_kv_nf4[byte >> 4]) * d;
+            o[2 * k + 1] = as_type<float>(FP4 ? q_kv_bnbfp4[byte & 15u] : q_kv_nf4[byte & 15u]) * d;
+        }
+    }
+};
+
+// LLM.int8() (fLLM type INT8R): blocks of 64 values { float scale; char codes[64]; }, weight = code * scale (the scale, SCB / 127, is the same in
+// every block of a row).
+struct q_fmt_int8r {
+    Q_CONST uint QK = 64;
+    Q_CONST uint BYTES = 68;
+    Q_CONST uint CPB = 8;
+    Q_NO_ROW_SCALE
+    static void dec8(q_bytes w, ulong g, uint c, ulong, thread float *o) {
+        q_bytes b = w + g * BYTES;
+        const float d = as_type<float>(q_u32(b, 0u));
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 2; ++i) {
+            const uint u = q_u32(b, 4u + 8u * c + 4u * i);
+            #pragma clang loop unroll(full)
+            for (uint k = 0; k < 4; ++k) o[4 * i + k] = q_s8(u >> (8 * k)) * d;
+        }
+    }
+};
+
+typedef q_fmt_bnb4<64, false> q_fmt_nf4b64;
+typedef q_fmt_bnb4<128, false> q_fmt_nf4b128;
+typedef q_fmt_bnb4<64, true> q_fmt_fp4b64;
+typedef q_fmt_bnb4<128, true> q_fmt_fp4b128;
+
 // ---- dense / float formats: "blocks" of 8 values ------------------------------------------------------------------------
 
 struct q_fmt_f32 {
@@ -549,6 +605,7 @@ struct q_fmt_fp8m {
     Q_CONST uint QK = 8;
     Q_CONST uint BYTES = 8;
     Q_CONST uint CPB = 1;
+    Q_CONST bool ROW_AWARE = false;
     static float row_scale(q_bytes w, ulong p1, uint row) { return float(*(device const half *)(w + p1 + ulong(row) * 2u)); }
     static void dec8(q_bytes w, ulong g, uint, ulong, thread float *o) {
         q_bytes b = w + g * BYTES;
@@ -609,3 +666,96 @@ Q_FUNC float q_finish(float acc, float rs, constant q_params &p, device const fl
     return v;
 }
 
+
+// ---- row-aware formats --------------------------------------------------------------------------------------------------------------
+
+// Block-wise FP8 (fLLM `FP8B` types, gguf-probe `Fp8bLayout`), read as it is in the file: rows * cols E4M3 codes (row-major), then one f32 scale
+// per tile of 2^lbr rows x 2^lbc columns (tiles row-major, ceil(cols / 2^lbc) per row of tiles; the file's trailer behind them is not read).
+// weight = e4m3(code) * scale[(row >> lbr) * tiles_per_row + (col >> lbc)], the arithmetic of cpu_fp8.rs. The tile of a chunk depends on its row, so
+// the format is ROW_AWARE: `dec8p` gets the row and the parameter block. q_params: plane1 = byte offset of the scale table (= rows * cols),
+// pad = lbr | lbc << 8, cols = the real number of columns (the last tile may be partial), nb_blocks = cols / 8 (a "block" is one chunk of 8 codes).
+// A chunk (8 codes at row * cols + 8 * blk, a multiple of 8 bytes) lies in one tile when 2^lbc >= 8; narrower tiles take one scale per code.
+struct q_fmt_fp8b {
+    Q_CONST uint QK = 8;
+    Q_CONST uint BYTES = 8;
+    Q_CONST uint CPB = 1;
+    Q_CONST bool ROW_AWARE = true;
+    static float row_scale(q_bytes, ulong, uint) { return 1.0f; }
+    static void dec8p(q_bytes w, uint row, uint blk, uint, constant q_params &p, thread float *o) {
+        const uint lbr = p.pad & 0xFFu;
+        const uint lbc = (p.pad >> 8) & 0xFFu;
+        const uint col = blk * 8u;
+        const uint tiles_per_row = (p.cols + ((1u << lbc) - 1u)) >> lbc;
+        device const float *scales = (device const float *)(w + p.plane1) + ulong(row >> lbr) * ulong(tiles_per_row);
+        q_bytes b = w + ulong(row) * ulong(p.cols) + ulong(col);
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 2; ++i) {
+            const uint u = q_u32(b, 4u * i);
+            #pragma clang loop unroll(full)
+            for (uint k = 0; k < 4; ++k) {
+                const uint at = 4u * i + k;
+                const float s = lbc >= 3u ? scales[col >> lbc] : scales[(col + at) >> lbc];
+                o[at] = q_e4m3((u >> (8 * k)) & 255u) * s;
+            }
+        }
+    }
+};
+
+// ExLlamaV2 (fLLM `EXL2` type, gguf-probe `exl::Exl2View`): per-group bit widths (2..6 or 8), a code is `code - 2^(bits-1)` times the group scale
+// `(s + 1)^2 * max / 256` (s: the 4-bit scale index of the group in the row), the inputs are stored in the order of a permutation (the activations are
+// gathered into that order by the prepass `fllm_q_permute_x`, the same kernel as for act-order GPTQ). The device image (weights/layout.rs, `pack_exl2`):
+//   bytes 0..16      uint { row_bytes, table_offset, scale_offset, groups }
+//   bytes 16..       the rows of the blob as they are (row r at 16 + r * row_bytes: the group bit streams, then the scale-index words)
+//   table_offset     per chunk of 8 stored inputs two uints { byte offset of the chunk's codes inside the row, group | bits << 24 } (the groups are the
+//                    same in every row, and every group is a multiple of 8 inputs, so a chunk never straddles two groups and starts on a byte),
+//                    then one float per group: max / 256 (exactly the f16 maximum divided by 256)
+//   scale_offset     byte offset of the scale-index words inside a row.
+// A chunk of 8 codes of `bits` bits is `bits` bytes; they are read byte by byte (no alignment) and cut out of a 64 bit window.
+struct q_fmt_exl2 {
+    Q_CONST uint QK = 8;
+    Q_CONST uint BYTES = 8;
+    Q_CONST uint CPB = 1;
+    Q_CONST bool ROW_AWARE = true;
+    static float row_scale(q_bytes, ulong, uint) { return 1.0f; }
+    static void dec8p(q_bytes w, uint row, uint blk, uint, constant q_params &p, thread float *o) {
+        const uint row_bytes = q_u32(w, 0u);
+        const ulong table = ulong(q_u32(w, 4u));
+        const uint scale_offset = q_u32(w, 8u);
+        device const float *maxima = (device const float *)(w + table + ulong(p.cols >> 3) * 8ul);
+        q_bytes chunk = w + table + ulong(blk) * 8ul;
+        const uint code_offset = q_u32(chunk, 0u);
+        const uint info = q_u32(chunk, 4u);
+        const uint bits = info >> 24;
+        const uint g = info & 0xFFFFFFu;
+        q_bytes r = w + 16ul + ulong(row) * ulong(row_bytes);
+        const uint s = (q_u32(r, scale_offset + 4u * (g >> 3)) >> (4u * (g & 7u))) & 15u;
+        const float scale = float((s + 1u) * (s + 1u)) * maxima[g];
+        ulong v = 0ul;
+        for (uint i = 0; i < bits; ++i) v |= ulong(r[code_offset + i]) << (8u * i);
+        const int zero = 1 << (bits - 1u);
+        const ulong mask = (1ul << bits) - 1ul;
+        #pragma clang loop unroll(full)
+        for (uint k = 0; k < 8; ++k) o[k] = float(int((v >> (bits * k)) & mask) - zero) * scale;
+    }
+};
+
+// The chunk decoder as the kernel bodies call it: the 8 weights of chunk `c` of block `blk` of weight row `row`. Formats that only need the global
+// block index (all but ROW_AWARE ones) get g = row * nb_blocks + blk.
+template <typename F, bool ROW_AWARE>
+struct q_dec_select {
+    static Q_FUNC void run(q_bytes w, uint row, uint blk, uint c, constant q_params &p, thread float *o) {
+        F::dec8(w, ulong(row) * ulong(p.nb_blocks) + ulong(blk), c, p.plane1, o);
+    }
+};
+
+template <typename F>
+struct q_dec_select<F, true> {
+    static Q_FUNC void run(q_bytes w, uint row, uint blk, uint c, constant q_params &p, thread float *o) {
+        F::dec8p(w, row, blk, c, p, o);
+    }
+};
+
+template <typename F>
+Q_FUNC void q_dec8(q_bytes w, uint row, uint blk, uint c, constant q_params &p, thread float *o) {
+    q_dec_select<F, F::ROW_AWARE>::run(w, row, blk, c, p, o);
+}

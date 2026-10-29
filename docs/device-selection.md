@@ -28,7 +28,7 @@ A number that the machine does not have is refused before anything is loaded, wi
 --device vulkan:7: this machine has 1 vulkan device(s) (vulkan:0 = Intel(R) Iris(R) Xe Graphics (RPL-P)); N counts the devices of one backend, ...
 ```
 
-Backend names: `cpu`, `cuda`, `hip` (`rocm`), `metal`, `vulkan`, `dx12`, `sycl` (`xpu`), `npu` (`openvino`), `tpu`, `gpu` (`wgpu`: any wgpu adapter),
+Backend names: `cpu`, `cuda`, `hip` (`rocm`), `metal`, `vulkan`, `dx12`, `opengl` (`gl`, the last resort for graphics cards without a Vulkan, DirectX 12 or Metal driver; needs OpenGL 4.3 / OpenGL ES 3.1 with compute shaders; `auto` tries it after DirectX 12 and before the CPU, and lists a card only when no other driver serves it), `sycl` (`xpu`), `npu` (`openvino`), `tpu`, `gpu` (`wgpu`: any wgpu adapter),
 and `auto`. `vulkan` and `metal` use the native backend where the build has one and the device is usable, and the wgpu path of the same API
 otherwise. To force one of the two: `vulkan-native` / `metal-native` (native only, an error if it cannot be created) and `wgpu-vulkan`,
 `wgpu-metal`, `wgpu-dx12` (wgpu only). With both present, `fllm-rs devices` lists the wgpu adapters of that API as `wgpu-vulkan:N` etc., so

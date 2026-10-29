@@ -495,7 +495,7 @@ fn run_device(name: &str, index: usize, filter: &Filter) -> Result<Result<(), St
         return Ok(exact.and(fast));
     }
     let wgpu_api = wgpu_only.unwrap_or(name);
-    if matches!(wgpu_api, "vulkan" | "metal" | "dx12" | "gpu" | "wgpu") {
+    if matches!(wgpu_api, "vulkan" | "metal" | "dx12" | "opengl" | "gl" | "gpu" | "wgpu") {
         #[cfg(feature = "rust-gpu")]
         {
             let backend = super::wgpu_backend::WgpuBackend::new(wgpu_api, index).map_err(|e| e.to_string())?;

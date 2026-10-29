@@ -9,7 +9,7 @@
 
 use super::sample::{reference_weights, sample_weights, Lcg};
 use super::{
-    format_info, pack_weight, plan_quantized_linear, supported_formats, LinearPlan, MetalCapsLike,
+    check_formats, format_info, pack_weight, plan_quantized_linear, LinearPlan, MetalCapsLike,
 };
 use crate::backend::metal::buffers::{BufferRef, BufferUsage};
 use crate::backend::metal::commands::{MetalContext, Recorder};
@@ -187,7 +187,7 @@ pub fn run(ctx: &MetalContext) -> GpuCheckReport {
         info.max_threads_per_threadgroup[0] as u32,
         info.has_unified_memory,
     );
-    for quant in supported_formats() {
+    for quant in check_formats() {
         if format_info(quant).is_none() {
             continue;
         }

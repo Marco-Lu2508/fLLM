@@ -275,7 +275,7 @@ struct ModernBertLayer {
 /// (`vulkan`, `metal`, `dx12`, `gpu`, `wgpu`); on any other device (`cuda`, `hip`, a TPU ...) they run on the CPU, which is fast enough for
 /// them and keeps `serve --device cuda --embeddings` working instead of failing to start.
 pub fn helper_model_uses_gpu(device: &str) -> bool {
-    matches!(device, "vulkan" | "metal" | "dx12" | "gpu" | "wgpu")
+    matches!(device, "vulkan" | "metal" | "dx12" | "opengl" | "gl" | "gpu" | "wgpu")
 }
 
 pub struct BertEncoder {

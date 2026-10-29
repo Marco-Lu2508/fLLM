@@ -1,19 +1,23 @@
 //! `Backend::upload_weight` of the Metal backend: device images of the weights.
 //!
-//! * Formats with a Metal kernel (`weights::format_info`) go through `weights::pack_weight`: 21 of them are the bytes of the GGUF tensor
+//! * Formats with a Metal kernel (`weights::format_info`) go through `weights::pack_weight`: most of them are the bytes of the GGUF tensor
 //!   unchanged (borrowed; the bytes are wrapped without a copy when the loader registered its memory map, else copied once into a shared
-//!   buffer), MXFP4 and the Q4Z family are re-sorted into two planes, the permutation table of act-order weights is split off.
+//!   buffer; this includes block-wise FP8 and the bitsandbytes types), MXFP4, the Q4Z family and MLX affine are re-sorted into two planes, EXL2
+//!   gets its own image, the permutation table of act-order and EXL2 weights is split off. A family can be switched off with `FLLM_METAL_NO_MLX`,
+//!   `_NO_FP8B`, `_NO_BNB`, `_NO_EXL` (`caps::native_enabled`); its weights then take the last route below. A block-wise FP8 tensor that is not
+//!   one matrix of the shape and an EXL2 blob with a group that is no multiple of 8 inputs take it too.
 //! * MXFP4 under the name of a routed expert (`blk.N.expK.*`) stays in the raw 17-byte block layout, which is what the `moe_linear_mxfp4`
 //!   kernel reads (the pointer tables of `upload_pointer_table` point at it).
 //! * Every other format (IQ1 / IQ2 / IQ3, Q8_1, Q8_K, device-only layouts, ...) is decoded on the host and stored as F16 (as F32 if a value
 //!   does not fit), with the per-tensor scale folded in. That costs memory but keeps the model running; it is logged once per format.
 
+use super::caps::native_enabled;
 use super::convert::{
     is_expert_name, mxfp4_raw_len, to_f16_bytes, to_f32_bytes, u32_bytes,
 };
 use super::MetalBackend;
 use crate::backend::metal::buffers::{BufferKind, BufferRef, BufferUsage};
-use crate::backend::metal::weights::{format_info, pack_weight, WeightError};
+use crate::backend::metal::weights::{format_info, pack_weight, PackedWeight, WeightError};
 use crate::backend::{log_once, BackendError, DeviceWeight, QuantType};
 use std::borrow::Cow;
 
@@ -80,8 +84,14 @@ impl MetalBackend {
         }
         let mut weight = if quant == QuantType::Mxfp4 && is_expert_name(name) {
             self.upload_raw_mxfp4(name, raw, rows, cols, scale)?
-        } else if format_info(quant).is_some() {
-            self.upload_native(name, raw, quant, rows, cols, scale)?
+        } else if format_info(quant).is_some() && native_enabled(quant) {
+            match pack_weight(quant, rows, cols, raw) {
+                Ok(packed) => self.upload_packed(name, packed, scale)?,
+                // a block-wise FP8 tensor that is not one matrix of this shape (a stack of experts), an EXL2 blob with a group that is not a
+                // multiple of 8 inputs: decoded on the host like every format without a kernel
+                Err(_) if format_info(quant).is_some_and(|i| i.tiled || i.blob) => self.upload_converted(name, raw, quant, rows, cols, scale)?,
+                Err(e) => return Err(weight_error(name, e)),
+            }
         } else {
             self.upload_converted(name, raw, quant, rows, cols, scale)?
         };
@@ -101,6 +111,12 @@ impl MetalBackend {
         scale: f32,
     ) -> Result<DeviceWeight, BackendError> {
         let packed = pack_weight(quant, rows, cols, raw).map_err(|e| weight_error(name, e))?;
+        self.upload_packed(name, packed, scale)
+    }
+
+    /// The device buffers of a weight that `pack_weight` has laid out.
+    fn upload_packed(&self, name: &str, packed: PackedWeight<'_>, scale: f32) -> Result<DeviceWeight, BackendError> {
+        let (quant, rows, cols) = (packed.quant, packed.rows, packed.cols);
         // dense rows are read as 16-byte vectors; every other format needs 4-byte alignment (INTERFACE_QUANT.md)
         let align = if matches!(quant, QuantType::F32 | QuantType::F16 | QuantType::BF16) {
             16

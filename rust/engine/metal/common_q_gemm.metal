@@ -43,7 +43,7 @@ Q_FUNC void q_mm_body(q_bytes w, device const float *x, device float *out, devic
             const uint grow = row_tile + r;
             float v[8];
             if (grow < p.rows && ci < nchunks) {
-                F::dec8(w, ulong(grow) * p.nb_blocks + (ci / F::CPB), ci % F::CPB, p.plane1, v);
+                q_dec8<F>(w, grow, ci / F::CPB, ci % F::CPB, p, v);
             } else {
                 #pragma clang loop unroll(full)
                 for (int i = 0; i < 8; ++i) v[i] = 0.0f;
