@@ -551,7 +551,9 @@ static bool glu_fusable(FllmStream *st, int kind, const void *w, const float *x,
     if ((cols & (narrow_ok ? 31 : 255)) != 0) return false;
     if (kind == 40) return true;
     static const bool no_qgemm = getenv("FLLM_CUDA_NO_QGEMM") != nullptr;
-    if (batch < 16 || no_qgemm || fllm_exact_math() || fllm_cc() < 75) return false;
+    // Turing (sm_75): the tile shapes of the quantized GEMMs do not all fit its shared memory, and a GEMM that gives up after the fused conversion hands the raw
+    // gate to the next kernel (checked on a T4: Llama-3.2-3B Q4_K_M wrote nonsense, the same run was right with FLLM_CUDA_NO_GLU_FUSE=1)
+    if (batch < 16 || no_qgemm || fllm_exact_math() || fllm_cc() < 80) return false;
     switch (kind) {
         case 2: case 3: case 6: case 7: case 8: case 12: case 13: case 14: case 20: return true;
         default: return false;
