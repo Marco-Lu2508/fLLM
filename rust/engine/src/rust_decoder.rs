@@ -2227,7 +2227,7 @@ impl RustDecoder {
             return Ok(());
         }
         let wgpu_api = wgpu_only.unwrap_or(selected_backend);
-        if matches!(wgpu_api, "vulkan" | "metal" | "dx12" | "gpu" | "wgpu") {
+        if matches!(wgpu_api, "vulkan" | "metal" | "dx12" | "opengl" | "gl" | "gpu" | "wgpu") {
             #[cfg(feature = "rust-gpu")]
             {
                 let gpu_backend = crate::backend::wgpu_backend::WgpuBackend::new(wgpu_api, selected_dev_id)

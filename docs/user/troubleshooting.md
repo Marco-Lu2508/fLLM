@@ -29,6 +29,15 @@ missing) instead of silently running on the CPU. `--device auto` uses CUDA
 when available; note its startup line reads `--device auto selects
 CUDA/Metal/Vulkan when available, otherwise CPU`.
 
+## My graphics card is old or has no Vulkan driver
+
+`fllm-rs devices` lists the cards that a Vulkan, DirectX 12 or Metal driver serves. For a card that has none of them (an old NVIDIA or AMD
+card, an old Intel graphics chip, Linux with only Mesa's OpenGL) there is `--device opengl`: it runs the portable kernels through OpenGL 4.3 /
+OpenGL ES 3.1 compute shaders, so the card needs at least that version (`glxinfo -B` shows it). `--device auto` tries it after DirectX 12
+and before the CPU, but never takes a software renderer (llvmpipe, softpipe). Expect it to be slower than Vulkan, and on a card with little
+memory or an old integrated chip the CPU can be faster: compare with `--device cpu`. It has been tested on a software OpenGL (Mesa
+llvmpipe) only, not on an old card. Quantized weights without a portable kernel are expanded when they are uploaded (the log says so).
+
 ## Docker / GPU host problems
 
 | Symptom | Cause / fix |

@@ -74,6 +74,7 @@ impl GpuContext {
             "vulkan" => wgpu::Backends::VULKAN,
             "metal" => wgpu::Backends::METAL,
             "dx12" => wgpu::Backends::DX12,
+            "opengl" | "gl" => wgpu::Backends::GL,
             "gpu" | "wgpu" => wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12,
             _ => return Err(format!("unsupported Rust GPU backend {backend}")),
         };
@@ -348,11 +349,23 @@ impl GpuLinear {
 pub fn list_adapters(first_index: usize) -> Vec<crate::devices::DeviceInfo> {
     use crate::devices::{DeviceInfo, DeviceType};
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12;
+    descriptor.backends = wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12 | wgpu::Backends::GL;
     let backends = descriptor.backends;
     let instance = wgpu::Instance::new(descriptor);
-    pollster::block_on(instance.enumerate_adapters(backends))
-        .into_iter()
+    let all = pollster::block_on(instance.enumerate_adapters(backends));
+    // The same graphics card often shows up twice, through its Vulkan / DirectX / Metal driver and through OpenGL: OpenGL is the
+    // fallback for cards that have no other driver, so it is listed only for adapters that nothing else serves.
+    let served: Vec<String> = all
+        .iter()
+        .map(wgpu::Adapter::get_info)
+        .filter(|i| i.backend != wgpu::Backend::Gl && !matches!(i.device_type, wgpu::DeviceType::Cpu | wgpu::DeviceType::Other))
+        .map(|i| i.name)
+        .collect();
+    all.into_iter()
+        .filter(|adapter| {
+            let info = adapter.get_info();
+            info.backend != wgpu::Backend::Gl || !served.contains(&info.name)
+        })
         .filter_map(|adapter| {
             let info = adapter.get_info();
             let dev_type = match info.device_type {

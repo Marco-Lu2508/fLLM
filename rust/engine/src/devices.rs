@@ -111,7 +111,7 @@ impl InventoryEntry {
 pub fn compiled_backends() -> Vec<String> {
     let mut backends = vec!["cpu".to_owned()];
     if cfg!(feature = "rust-gpu") {
-        backends.extend(["vulkan", "metal", "dx12", "wgpu"].map(str::to_owned));
+        backends.extend(["vulkan", "metal", "dx12", "opengl", "wgpu"].map(str::to_owned));
     }
     if cfg!(feature = "cuda") {
         backends.push("cuda".to_owned());
@@ -136,7 +136,7 @@ pub fn is_backend_available(name: &str) -> bool {
 /// Default order of `--device auto` (backends without a hardware device are skipped; `cpu` is the end of the chain). `sycl`, `npu` and
 /// `tpu` are not part of it: they are chosen by name (`--device sycl`) or put into `FLLM_AUTO_ORDER` (`sycl` only; the NPU and TPU never
 /// take part in `auto`). An Intel GPU is reached through Vulkan.
-pub const DEFAULT_AUTO_ORDER: &[&str] = &["cuda", "hip", "metal", "vulkan", "dx12", "cpu"];
+pub const DEFAULT_AUTO_ORDER: &[&str] = &["cuda", "hip", "metal", "vulkan", "dx12", "opengl", "cpu"];
 
 /// How `auto` chooses: the backends in the order tried, and whether integrated GPUs take part.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +191,7 @@ fn canonical(kind: &str) -> &str {
         "vulkan-native" => "vulkan",
         "metal-native" => "metal",
         "gpu" => "wgpu",
+        "gl" => "opengl",
         other => other,
     }
 }
@@ -509,6 +510,8 @@ fn wgpu_api_of(description: &str) -> &'static str {
         "metal"
     } else if lower.starts_with("dx12") {
         "dx12"
+    } else if lower.starts_with("gl,") || lower == "gl" {
+        "opengl"
     } else {
         "wgpu"
     }
@@ -706,7 +709,7 @@ pub fn infer_backend(info: &DeviceInfo) -> (&'static str, Api) {
     if desc.starts_with("npu") || desc.contains("openvino") || info.dev_type == DeviceType::Accelerator {
         return ("npu", Api::Native);
     }
-    for (prefix, api) in [("vulkan", "vulkan"), ("metal", "metal"), ("dx12", "dx12")] {
+    for (prefix, api) in [("vulkan", "vulkan"), ("metal", "metal"), ("dx12", "dx12"), ("gl,", "opengl")] {
         if desc.starts_with(prefix) {
             return (api, Api::Wgpu);
         }
@@ -1116,7 +1119,7 @@ mod tests {
         assert_eq!(wgpu_api_of("Vulkan, driver 535"), "vulkan");
         assert_eq!(wgpu_api_of("Metal, driver 1"), "metal");
         assert_eq!(wgpu_api_of("Dx12, driver 31"), "dx12");
-        assert_eq!(wgpu_api_of("Gl, driver"), "wgpu");
+        assert_eq!(wgpu_api_of("Gl, driver"), "opengl");
     }
 
     #[test]

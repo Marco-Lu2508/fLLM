@@ -1117,7 +1117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         format!("keys {} / values {}", key_format.name(), value_format.name())
     };
-    if matches!(device.as_str(), "vulkan" | "dx12" | "metal") && !(key_format == value_format && key_format.is_legacy()) {
+    if matches!(device.as_str(), "vulkan" | "dx12" | "metal" | "opengl" | "gl") && !(key_format == value_format && key_format.is_legacy()) {
         return Err(format!(
             "the {device} backend only supports the f16 and q8_0 KV cache (requested {kv_description}); use --device cuda or --device cpu for the other formats"
         )

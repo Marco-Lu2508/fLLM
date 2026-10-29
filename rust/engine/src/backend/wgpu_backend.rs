@@ -962,6 +962,7 @@ impl GpuContext {
             "vulkan" => wgpu::Backends::VULKAN,
             "metal" => wgpu::Backends::METAL,
             "dx12" => wgpu::Backends::DX12,
+            "opengl" | "gl" => wgpu::Backends::GL,
             "gpu" | "wgpu" | "auto" => {
                 wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12
             }
@@ -995,7 +996,9 @@ impl GpuContext {
             max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
             max_buffer_size: adapter_limits.max_buffer_size,
             ..wgpu::Limits::default()
-        };
+        }
+        // an OpenGL adapter offers less than the defaults (fewer storage buffers, less workgroup memory): ask for no more than it has
+        .or_worse_values_from(&adapter_limits);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("fllm-gpu-context"),
             required_limits,
