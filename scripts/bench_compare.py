@@ -117,7 +117,8 @@ def start(engine, binary, device, model, env_extra, log):
                    "--max-model-len", "4096", "--gpu-memory-utilization", "0.85", "--dtype", "float16"]
         else:
             cmd = [binary, "-m", "sglang.launch_server", "--model-path", device, "--served-model-name", "m", "--port", str(PORT),
-                   "--context-length", "4096", "--mem-fraction-static", "0.8", "--dtype", "float16"]
+                   "--context-length", "4096", "--mem-fraction-static", "0.8", "--dtype", "float16",
+                   "--attention-backend", "triton", "--sampling-backend", "pytorch"]
         ready, name = "/health", "m"
     elif engine == "flm":
         # FastFlowLM on an AMD NPU: the model is a FastFlowLM tag (device field, "llama3.2@3b" stands for llama3.2:3b), not the GGUF file

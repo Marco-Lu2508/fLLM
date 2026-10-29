@@ -249,6 +249,14 @@ measured) are defined in [docs/test-levels.md](docs/test-levels.md).
 
 ## Measurements
 
+**Against llama.cpp, Ollama, vLLM, SGLang and the AMD NPU on two laptops (2026-10-29, same client, same model files;
+[docs/benchmarks.md](docs/benchmarks.md) has the method, all tables and the limits).** On an RTX 2000 Ada (8 GB), Llama-3.2-3B Q4_K_M: fLLM's CUDA path
+decodes at 92.5 tok/s (llama.cpp 93.5, Ollama 92.5) and has the fastest prompt (3838 tok/s against 3353 and 3644); on the same 4-bit AWQ checkpoint it is
+ahead of vLLM and SGLang (decode 99.5 against 93.0 and 95.2 tok/s, prompt 5244 against 4792 and 4904). fLLM's CPU kernels are 30 to 70 % faster than
+llama.cpp's. On a Radeon 840M laptop the AMD NPU (FastFlowLM, 306 prompt / 31 decode tok/s) and llama.cpp's Vulkan and ROCm paths are faster for the
+prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 tok/s) with a prompt 25 % behind. Where fLLM is behind: its Vulkan
+backend on the NVIDIA card (35 % behind llama.cpp's Vulkan decode), and it has no backend for the NPU.
+
 Measured on Google Colab with a single user, greedy decoding, over HTTP (before the latest performance work):
 
 | Card, model | fLLM decode | fLLM prefill (355 / 1863 tokens) | vLLM on the same card |
@@ -295,6 +303,7 @@ The code and `--help` are authoritative where a page and the program disagree.
 - [docs/index.md](docs/index.md), [docs/getting-started.md](docs/getting-started.md): documentation index, install, get weights, quantize, serve, curl, chat, embeddings
 - [docs/output-cache.md](docs/output-cache.md), [docs/router.md](docs/router.md): the output cache (deterministic answers are not computed twice), the prefix-aware router for a fleet, and the switches that decide how much state requests share
 - [benchmarks/README.md](benchmarks/README.md): the benchmark client and what a published number has to state
+- [docs/benchmarks.md](docs/benchmarks.md): fLLM against llama.cpp, Ollama, vLLM, SGLang and the AMD NPU on an RTX 2000 Ada and a Radeon 840M laptop
 - [deploy/](deploy): Kubernetes manifests and a Helm chart
 - [docs/quickstart-windows-linux.md](docs/quickstart-windows-linux.md): Docker with an NVIDIA GPU, step by step
 - [docs/user/studio.md](docs/user/studio.md): the Studio and desktop app: chat, the coding agent, browser, computer use, sandbox, skills, MCP, settings, where files are kept
