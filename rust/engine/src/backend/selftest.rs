@@ -85,10 +85,10 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("actdtype", "CUDA narrow activations (FLLM_ACT_DTYPE f16/bf16): norm, residual, GLU, rope, KV write, Marlin GEMM, FFN chain, attention against the FP32 pipeline"),
     ("smallm", "CUDA Marlin small-M GEMV (1 to 4 rows) against the Marlin GEMM and the reference; prints us per call of both"),
     ("w8a8", "CUDA FP8 and int8 W8A8 tensor-core GEMMs with activation quantization (FLLM_SELFTEST_BENCH=1 adds timings against the W8A16 paths)"),
-    ("fp8blk", "CUDA block-wise FP8 weights (FP8B): decode GEMV and prompt GEMM that keep the weights 8-bit, the FP8 tensor-core path against its emulation, tile shapes, odd shapes, 8-bit memory check"),
+    ("fp8blk", "block-wise FP8 weights (FP8B) on CUDA and Vulkan: decode GEMV and prompt GEMM that keep the weights 8-bit, tile shapes, odd shapes, 8-bit memory check; on CUDA also the FP8 tensor-core path against its emulation"),
     ("hattn", "CUDA Hopper and FlashInfer attention: FA3 prefill, sliding window / soft cap / sinks, ragged batches, tensor-core decode, cascade"),
     ("hmla", "CUDA latent-cache MLA (DeepSeek-V2/V3): absorbed up-projections, 576-value cache, tensor cores"),
-    ("mlx", "MLX affine group-quantized weights (2 to 8 bits, groups of 32 to 128, f16 and bf16 scales): quantized_linear against the f64 reference, every device kernel (GEMV, FP32 tile, tensor cores) on its own"),
+    ("mlx", "MLX affine group-quantized weights (2 to 8 bits, groups of 32 to 128, f16 and bf16 scales): quantized_linear against the f64 reference; on CUDA every device kernel (GEMV, FP32 tile, tensor cores) on its own"),
     ("hgemm", "CUDA cuBLASLt GEMMs (runtime-loaded) and Hopper CUTLASS WGMMA FP8"),
     ("fp4sm100", "CUDA NVFP4 block-scaled GEMM on datacenter Blackwell (sm_100 tcgen05)")
 ];
@@ -2342,6 +2342,16 @@ impl<'a> Tester<'a> {
         if self.filter.wants_kind(8) {
             let r = self.linear(8, 70_001, 32, 2, false);
             self.record("linear q8_0", "70001x32 batch 2", r);
+        }
+        // Packed ExLlamaV2 matrices through the FP32 kernels: widths that are multiples of 32 with groups of 32 and 64 inputs of mixed code widths (codes that
+        // straddle words), rows that fill no tile, batches on both sides of the matrix-vector range
+        for kind in self.kinds(&[0x8000_0030u32]) {
+            for (rows, cols) in [(13usize, 96usize), (40, 288)] {
+                for batch in [1, 2, 5, 9] {
+                    let r = self.linear(kind, rows, cols, batch, batch == 5);
+                    self.record(&format!("linear {}", format_name(kind)), &format!("{rows}x{cols} batch {batch}{}", if batch == 5 { " +bias" } else { "" }), r);
+                }
+            }
         }
         // Per-row scaled FP8 at shapes the Marlin FP8 kernel cannot take (CUDA repacks them into one-row tiles of the block-wise kernels)
         for kind in self.kinds(&[0x8000_0020u32]) {

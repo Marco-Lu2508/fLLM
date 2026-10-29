@@ -272,3 +272,90 @@ fn bitsandbytes_blocks_split_into_codes_and_scales() {
         }
     }
 }
+
+/// EXL2: every chunk of the device image decodes to the reference weight of the stored input it covers (`perm` maps stored to original position).
+#[test]
+fn exl2_chunks_decode_to_the_reference_weights_and_slices_agree() {
+    use fllm_gguf_probe::exl;
+    for (rows, cols, seed) in [(5usize, 96usize, 1u64), (9, 160, 2), (4, 256, 3), (3, 32, 4)] {
+        let mut rng = Lcg(seed);
+        let blob = exl::synthetic_exl2(rows, cols, &mut || rng.next());
+        let quant = exl2_device_type_of(&blob, rows, cols).expect("device type");
+        let want = exl::dequantize(&blob, exl::EXL2_TYPE, rows * cols).unwrap();
+        let whole = pack_weight(quant, &blob, rows, cols).unwrap();
+        let perm = whole.perm.clone().expect("permutation");
+        assert_eq!(perm.len(), cols);
+        let info = format_info(quant).unwrap();
+        assert!(info.qk == 8 && !info.float_chunk);
+        let nb = cols / 8;
+        for r in 0..rows {
+            for c8 in 0..nb {
+                let c = chunk(&whole.layout, &whole.bytes, r * nb + c8, 0);
+                for i in 0..8 {
+                    let at = r * cols + perm[c8 * 8 + i] as usize;
+                    assert_eq!((c.ws * c.q[i] as f32).to_bits(), want[at].to_bits(), "{rows}x{cols} row {r} chunk {c8} value {i}");
+                }
+            }
+        }
+        // slices of rows (with the tables) decode like the whole weight
+        let first = 1;
+        let part = pack_rows_of_blob(quant, &blob, rows, cols, first, rows - 1).unwrap().unwrap();
+        assert_eq!(part.perm, whole.perm);
+        for r in 0..rows - 1 {
+            for c8 in 0..nb {
+                let (a, b) = (chunk(&part.layout, &part.bytes, r * nb + c8, 0), chunk(&whole.layout, &whole.bytes, (r + first) * nb + c8, 0));
+                assert_eq!((a.q, a.ws.to_bits()), (b.q, b.ws.to_bits()), "slice row {r} chunk {c8}");
+            }
+        }
+    }
+}
+
+#[test]
+fn exl2_planning_uses_the_permutation_prepass() {
+    use fllm_gguf_probe::exl;
+    let (rows, cols) = (70usize, 128usize);
+    let mut rng = Lcg(11);
+    let blob = exl::synthetic_exl2(rows, cols, &mut || rng.next());
+    let quant = exl2_device_type_of(&blob, rows, cols).unwrap();
+    assert!(uses_perm(quant) && !uses_perm(QuantType::Q4_K));
+    let caps = VkCapsLike { int_dot: true, ..VkCapsLike::default() };
+    let word = |bytes: &[u8], i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+    let plan = plan_quantized_linear_with(quant, rows, cols, 1, &caps, &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mv_exl2_i");
+    assert_eq!(plan.activation_prepass.as_ref().unwrap().shader_name, "quant_act_q8_perm");
+    // the third offset is the length of a device row, the first two the block table and the group maxima
+    let row_words = plan.layout.param;
+    assert_eq!(word(&plan.push_constants, 8), row_words);
+    assert_eq!(word(&plan.push_constants, 6), plan.layout.plane_word_offset[1]);
+    assert_eq!(word(&plan.push_constants, 7), plan.layout.plane_word_offset[2]);
+    assert_eq!(word(&plan.push_constants, 5), (cols / 8) as u32);
+    let exact = plan_quantized_linear_with(quant, rows, cols, 40, &caps, &PlanOptions { exact: true, ..PlanOptions::default() }).unwrap();
+    assert_eq!(exact.shader_name, "mm_exl2_s");
+    assert_eq!(exact.activation_prepass.as_ref().unwrap().shader_name, "quant_permute");
+}
+
+#[test]
+fn exl2_blobs_the_kernels_cannot_take_are_expanded_to_f16() {
+    use fllm_gguf_probe::exl;
+    // groups of 16 inputs: a block of 32 would straddle two groups
+    let (rows, cols) = (3usize, 32usize);
+    let groups = [(16usize, 4usize), (16, 4)];
+    let layout = exl::Exl2Layout::new(rows, cols, &groups).unwrap();
+    let perm: Vec<u32> = (0..cols as u32).rev().collect();
+    let mut blob = layout.prefix(&[0x4800, 0x4a00], &perm);
+    for r in 0..rows {
+        for (g, &(n, bits)) in groups.iter().enumerate() {
+            let codes: Vec<u8> = (0..n).map(|i| ((i * 7 + r * 3 + g) % (1 << bits)) as u8).collect();
+            exl::pack_codes(&codes, bits, &mut blob);
+        }
+        blob.extend_from_slice(&0x0000_0021u32.to_le_bytes());
+    }
+    assert!(exl2_device_type_of(&blob, rows, cols).is_none());
+    assert!(DeviceLayout::new(QuantType::Exl2, rows, cols).is_err());
+    let want = exl::dequantize(&blob, exl::EXL2_TYPE, rows * cols).unwrap();
+    let prepared = crate::backend::vulkan::backend::upload::prepare_for_test("w", &blob, QuantType::Exl2, rows, cols);
+    assert_eq!(prepared.0, QuantType::F16);
+    for (i, pair) in prepared.1.as_chunks::<2>().0.iter().enumerate() {
+        assert_eq!(half::f16::from_le_bytes(*pair).to_f32(), half::f16::from_f32(want[i]).to_f32(), "element {i}");
+    }
+}

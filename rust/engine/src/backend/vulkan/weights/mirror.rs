@@ -256,6 +256,32 @@ pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
             ws = f32::from_bits(w(off3 as usize + g)) * sc as f32;
             wm = 0.0;
         }
+        "exl2" => {
+            let Geometry::Exl2 { row_words } = layout.info.geometry else { panic!("not an EXL2 layout") };
+            let row = g / layout.blocks_per_row;
+            let c8 = g - row * layout.blocks_per_row;
+            let blk = c8 >> 2;
+            let (t0, t1) = (w(off1 as usize + blk * 2) as usize, w(off1 as usize + blk * 2 + 1));
+            let (bits, gid) = ((t1 & 255) as usize, (t1 >> 8) as usize);
+            let rowbase = row * row_words;
+            let base = rowbase + t0;
+            let zero = 1i32 << (bits - 1);
+            let mut c = [0u32; 8];
+            for (i, slot) in c.iter_mut().enumerate() {
+                let pos = ((c8 & 3) * 8 + i) * bits;
+                let (wi, sh) = (pos >> 5, (pos & 31) as u32);
+                let mut v = w(base + wi) >> sh;
+                if sh as usize + bits > 32 {
+                    v |= w(base + wi + 1) << (32 - sh);
+                }
+                *slot = ((v & ((1u32 << bits) - 1)) as i32 - zero) as u32 & 255;
+            }
+            p0 = c[0] | (c[1] << 8) | (c[2] << 16) | (c[3] << 24);
+            p1 = c[4] | (c[5] << 8) | (c[6] << 16) | (c[7] << 24);
+            let s = (w(rowbase + (gid >> 3)) >> ((gid & 7) * 4)) & 15;
+            ws = ((s + 1) * (s + 1)) as f32 * f32::from_bits(w(off2 as usize + gid));
+            wm = 0.0;
+        }
         "int8r" => {
             let b = g * 16 + (cin << 1);
             p0 = w(b);

@@ -2,7 +2,7 @@
 //! counts, bindings and which activation prepass a `rows x cols` weight needs for `batch` activation rows on a device with given
 //! capabilities. Pure CPU code (no Vulkan calls); package 4 turns a [`LinearPlan`] into pipeline creation and `vkCmdDispatch`.
 
-use super::layout::DeviceLayout;
+use super::layout::{DeviceLayout, Geometry};
 use crate::backend::{BackendError, QuantType};
 
 /// Size of the push-constant block of the quantized-linear shaders (`QPush` in `_q_common.glsl`).
@@ -432,7 +432,7 @@ pub fn plan_quantized_linear_with(
         )));
     }
     let tag = layout.info.tag;
-    let perm = quant.is_q4zp();
+    let perm = super::layout::uses_perm(quant);
     let default_available;
     let available: &dyn Fn(&str) -> bool = match options.available {
         Some(f) => f,
@@ -467,7 +467,9 @@ pub fn plan_quantized_linear_with(
                 !matvec && caps.coop_matrix && caps.fp16 && (8..=128).contains(&caps.subgroup_size)
             }
         };
+        // float-chunk formats (FP8, NF4, FP4) have the f32 shaders only
         feature_ok
+            && (variant == Variant::Scalar || !layout.info.float_chunk)
             && shared_ok
             && available(&name)
             && (!needs_prepass || available(&prepass_name(variant)))
@@ -517,8 +519,9 @@ pub fn plan_quantized_linear_with(
         nb: layout.blocks_per_row as u32,
         off: [
             layout.plane_word_offset[1],
-            if layout.param != 0 { layout.param } else { layout.plane_word_offset[2] },
-            layout.plane_word_offset[3],
+            // the format parameter replaces the offset of the first plane that is unused (EXL2 uses planes 1 and 2: it takes the third slot)
+            if layout.param != 0 && !matches!(layout.info.geometry, Geometry::Exl2 { .. }) { layout.param } else { layout.plane_word_offset[2] },
+            if matches!(layout.info.geometry, Geometry::Exl2 { .. }) { layout.param } else { layout.plane_word_offset[3] },
         ],
         out_stride,
         row_base: options.row_base,

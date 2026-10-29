@@ -16,6 +16,28 @@ pub enum Geometry {
     Mlx { bits: u32, group: u32, bf16: bool },
     /// Block-wise FP8: codes row-major (plane 0), the scale of the tile repeated for every row of the tile (plane 1, one f32 per row and tile column).
     Fp8b { block_rows: usize, block_cols: usize },
+    /// ExLlamaV2: rows of `row_words` words (the scale nibbles first, then the bitstreams of the groups), a table with the word offset and width of every
+    /// block of 32 inputs (plane 1) and the scale maximum of every group (plane 2); the activations are gathered through the permutation of the blob.
+    /// The row length is part of the device-only type id ([`exl2_device_type`]): it is not derivable from the shape.
+    Exl2 { row_words: usize },
+}
+
+/// First id of the device-only types of EXL2 weights on this backend: `EXL2_DEVICE_BASE | row_words` (the words of one device row; below 65536). The upload
+/// turns the file type (0x8000_0030) into it, so that `DeviceLayout::new(type, rows, cols)` knows the size of a row.
+pub const EXL2_DEVICE_BASE: u32 = 0x8002_0000;
+
+/// The device-only type of EXL2 weights whose rows are `row_words` words long.
+pub fn exl2_device_type(row_words: usize) -> Option<QuantType> {
+    (row_words > 0 && row_words < 0x1_0000).then_some(QuantType::Other(EXL2_DEVICE_BASE | row_words as u32))
+}
+
+fn exl2_row_words(id: u32) -> Option<usize> {
+    (id & 0xffff_0000 == EXL2_DEVICE_BASE && id & 0xffff != 0).then_some((id & 0xffff) as usize)
+}
+
+/// Whether the shaders read the activations through the column permutation of the weight (`DeviceWeight::perm`): act-order GPTQ and EXL2.
+pub fn uses_perm(quant: QuantType) -> bool {
+    quant.is_q4zp() || exl2_row_words(quant.to_gguf_type_id()).is_some()
 }
 
 /// Static description of a supported weight format.
@@ -60,6 +82,17 @@ pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
             plane_bytes: [8, 0, 0, 0],
             geometry: Geometry::Fp8b { block_rows, block_cols },
             float_chunk: true,
+        });
+    }
+    if let Some(row_words) = exl2_row_words(id) {
+        return Some(FormatInfo {
+            tag: "exl2",
+            qk: 8,
+            src_qk: 32,
+            src_block_bytes: 0,
+            plane_bytes: [0; 4],
+            geometry: Geometry::Exl2 { row_words },
+            float_chunk: false,
         });
     }
     if let Some(m) = fllm_gguf_probe::mlx_affine(id) {
@@ -184,6 +217,12 @@ fn plane_len(info: &FormatInfo, rows: usize, cols: usize, i: usize) -> Option<us
             1 => rows.checked_mul(cols.div_ceil(block_cols))?.checked_mul(4),
             _ => Some(0),
         },
+        Geometry::Exl2 { row_words } => match i {
+            0 => rows.checked_mul(row_words)?.checked_mul(4),
+            1 => Some(cols / 32 * 8),
+            2 => Some(cols / 32 * 4),
+            _ => Some(0),
+        },
     }
 }
 
@@ -198,6 +237,9 @@ impl DeviceLayout {
                 "{quant:?} needs a multiple of {} columns, got {cols}",
                 info.qk.max(info.src_qk)
             )));
+        }
+        if matches!(info.geometry, Geometry::Exl2 { .. }) && !cols.is_multiple_of(32) {
+            return Err(invalid(format!("{quant:?} needs a multiple of 32 columns, got {cols}")));
         }
         // a chunk of 8 codes must not straddle two tiles
         if let Geometry::Fp8b { block_cols, .. } = info.geometry {
@@ -229,6 +271,7 @@ impl DeviceLayout {
             Geometry::Planar => 0,
             Geometry::Mlx { group, bf16, .. } => (group / 32) | (u32::from(bf16) << 16),
             Geometry::Fp8b { block_cols, .. } => block_cols as u32,
+            Geometry::Exl2 { row_words } => row_words as u32,
         };
         Ok(Self {
             info,
@@ -278,10 +321,13 @@ pub fn rows_per_slice(
     }
     let per_row: usize = match info.geometry {
         Geometry::Planar => info.plane_bytes.iter().sum::<usize>() * (cols / info.qk),
+        Geometry::Exl2 { row_words } => row_words * 4,
         _ => (0..4).map(|i| plane_len(&info, 1, cols, i).unwrap_or(0)).sum(),
     };
+    // tables that every slice carries (the block table and the group maxima of EXL2)
+    let fixed = if matches!(info.geometry, Geometry::Exl2 { .. }) { cols / 32 * 12 } else { 0 };
     // planes are padded to 16 bytes each: keep a margin of 4 x 16 bytes
-    let rows = max_range.saturating_sub(64) / per_row.max(1);
+    let rows = max_range.saturating_sub(64 + fixed) / per_row.max(1);
     Ok((rows / 64 * 64).max(64))
 }
 
@@ -370,9 +416,73 @@ fn pack_fp8b(quant: QuantType, raw: &[u8], rows: usize, cols: usize, first: usiz
     Ok(PackedWeight { layout, bytes: out, perm: None })
 }
 
-/// [`pack_fp8b`] for the rows `first .. first + n` when `quant` is a block-wise FP8 type (`None` for every other format: the caller slices the file rows itself).
-pub fn pack_fp8b_slice(quant: QuantType, raw: &[u8], rows: usize, cols: usize, first: usize, n: usize) -> Option<Result<PackedWeight, BackendError>> {
-    matches!(format_info(quant)?.geometry, Geometry::Fp8b { .. }).then(|| pack_fp8b(quant, raw, rows, cols, first, n))
+/// The rows `first .. first + n` of a weight whose file bytes cannot be cut at row boundaries (block-wise FP8: the tiles; EXL2: the tables of the blob), packed
+/// into the device layout. `None` for every other format: the caller slices the file rows itself.
+pub fn pack_rows_of_blob(quant: QuantType, raw: &[u8], rows: usize, cols: usize, first: usize, n: usize) -> Option<Result<PackedWeight, BackendError>> {
+    match format_info(quant)?.geometry {
+        Geometry::Fp8b { .. } => Some(pack_fp8b(quant, raw, rows, cols, first, n)),
+        Geometry::Exl2 { .. } => Some(pack_exl2(quant, raw, rows, cols, first, n)),
+        _ => None,
+    }
+}
+
+/// The EXL2 blob `raw` (whole tensor, `rows` x `cols`) as the device type for `quant`-independent upload: `Some(type)` when the kernels can take it (a group
+/// is a multiple of 32 inputs, so that a block of 32 never straddles two groups; the row fits the id), `None` otherwise (the upload expands it to F16).
+pub fn exl2_device_type_of(raw: &[u8], rows: usize, cols: usize) -> Option<QuantType> {
+    let v = fllm_gguf_probe::exl::Exl2View::validate(raw).ok()?;
+    if v.rows() != rows || v.cols() != cols || !cols.is_multiple_of(32) || (0..v.groups()).any(|g| !v.group(g).n.is_multiple_of(32)) {
+        return None;
+    }
+    exl2_device_type(v.header.row_bytes / 4)
+}
+
+/// Rows `first .. first + n` of an EXL2 blob in the device layout: per row the scale nibbles first and then the bitstreams (the file has them the other way
+/// round, so that a row of the device image starts with the data every chunk needs), the word offset and width of every block of 32 inputs, the scale
+/// maximum of every group. `perm` is the permutation of the blob (`x'[k] = x[perm[k]]`).
+fn pack_exl2(quant: QuantType, raw: &[u8], rows: usize, cols: usize, first: usize, n: usize) -> Result<PackedWeight, BackendError> {
+    let layout = DeviceLayout::new(quant, n, cols)?;
+    let Geometry::Exl2 { row_words } = layout.info.geometry else {
+        return Err(BackendError::UnsupportedQuant(quant));
+    };
+    let v = fllm_gguf_probe::exl::Exl2View::parse(raw).map_err(invalid)?;
+    if v.rows() != rows || v.cols() != cols || v.header.row_bytes != row_words * 4 || n == 0 || first + n > rows {
+        return Err(invalid(format!(
+            "{quant:?}: the blob holds {} x {} values in rows of {} bytes, rows {first}..{} of a {rows} x {cols} weight with {row_words}-word rows were expected",
+            v.rows(),
+            v.cols(),
+            v.header.row_bytes,
+            first + n
+        )));
+    }
+    let groups: Vec<_> = (0..v.groups()).map(|g| v.group(g)).collect();
+    if groups.iter().any(|e| !e.n.is_multiple_of(32)) {
+        return Err(invalid("EXL2 groups that are not a multiple of 32 inputs have no Vulkan kernel".into()));
+    }
+    let scale_words = groups.len().div_ceil(8);
+    let bit_words = row_words - scale_words;
+    let mut out = vec![0u8; layout.total_bytes];
+    for r in 0..n {
+        let row = v.row(first + r);
+        let dst = r * row_words * 4;
+        put(&mut out, dst, &row[bit_words * 4..]);
+        put(&mut out, dst + scale_words * 4, &row[..bit_words * 4]);
+    }
+    let (table, maxima) = (layout.plane_byte_offset(1), layout.plane_byte_offset(2));
+    let mut g = 0usize;
+    for j in 0..cols / 32 {
+        while groups[g].start + groups[g].n <= j * 32 {
+            g += 1;
+        }
+        let e = &groups[g];
+        let word = (scale_words + e.woff + (j * 32 - e.start) / 32 * e.bits) as u32;
+        put(&mut out, table + j * 8, &word.to_le_bytes());
+        put(&mut out, table + j * 8 + 4, &((e.bits as u32) | ((g as u32) << 8)).to_le_bytes());
+    }
+    for (g, e) in groups.iter().enumerate() {
+        put(&mut out, maxima + g * 4, &e.max_scaled().to_le_bytes());
+    }
+    let perm = (0..cols).map(|k| v.perm(k) as u32).collect();
+    Ok(PackedWeight { layout, bytes: out, perm: Some(perm) })
 }
 
 /// An MLX affine weight (`[scale][bias][codes]` per group, file order) in the device layout: the codes of all groups back to back (a group of `group` codes is
@@ -409,6 +519,7 @@ pub fn pack_weight(
     let info = layout.info;
     match info.geometry {
         Geometry::Fp8b { .. } => return pack_fp8b(quant, raw, rows, cols, 0, rows),
+        Geometry::Exl2 { .. } => return pack_exl2(quant, raw, rows, cols, 0, rows),
         Geometry::Mlx { .. } => return pack_mlx(quant, raw, rows, cols),
         Geometry::Planar => {}
     }
@@ -553,11 +664,14 @@ pub fn pack_weight_slices(
     rows_per_slice: usize,
 ) -> Result<Vec<WeightSlice>, BackendError> {
     let layout = DeviceLayout::new(quant, rows, cols)?;
-    if matches!(layout.info.geometry, Geometry::Fp8b { .. }) {
+    if matches!(layout.info.geometry, Geometry::Fp8b { .. } | Geometry::Exl2 { .. }) {
         let step = rows_per_slice.max(1);
         return (0..rows)
             .step_by(step)
-            .map(|first| Ok(WeightSlice { row_base: first, packed: pack_fp8b(quant, raw, rows, cols, first, step.min(rows - first))? }))
+            .map(|first| {
+                let packed = pack_rows_of_blob(quant, raw, rows, cols, first, step.min(rows - first)).ok_or(BackendError::UnsupportedQuant(quant))??;
+                Ok(WeightSlice { row_base: first, packed })
+            })
             .collect();
     }
     let row_bytes = (cols / layout.info.src_qk) * layout.info.src_block_bytes;

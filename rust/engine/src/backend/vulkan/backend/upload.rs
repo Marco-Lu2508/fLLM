@@ -74,6 +74,11 @@ fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: u
                 scale,
             })
         }
+        // EXL2: the blob stays as it is on the host, the device type carries the row length; a blob the kernels cannot take is expanded to F16
+        QuantType::Exl2 => match crate::backend::vulkan::weights::exl2_device_type_of(raw, rows, cols) {
+            Some(device) if DeviceLayout::new(device, rows, cols).is_ok() => Ok(Prepared { bytes: Cow::Borrowed(raw), quant: device, scale }),
+            _ => expand(name, raw, quant, rows, cols, scale),
+        },
         // FP8M (codes and one f16 scale per row) is block-wise FP8 with tiles of one row: the same kernels, the scales widened to f32 exactly
         QuantType::Fp8Marlin => match crate::cpu_fp8::fp8m_as_fp8b(raw, rows, cols) {
             Some((kind, bytes)) if DeviceLayout::new(QuantType::from_gguf_type_id(kind), rows, cols).is_ok() => Ok(Prepared {
@@ -122,7 +127,7 @@ fn expand<'a>(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize
     let float_source = quant.is_bnb()
         || matches!(
             quant,
-            QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4
+            QuantType::Fp8E4m3 | QuantType::Fp8E5m2 | QuantType::Fp8Marlin | QuantType::NvFp4 | QuantType::Exl2
         )
         || fllm_gguf_probe::fp8b_type(quant.to_gguf_type_id());
     if cols.is_multiple_of(256) && !float_source {
@@ -188,7 +193,7 @@ pub(crate) fn pack_slice(
         return pack_weight(quant, raw, rows, cols);
     }
     let info = format_info(quant).ok_or(BackendError::UnsupportedQuant(quant))?;
-    if let Some(slice) = crate::backend::vulkan::weights::pack_fp8b_slice(quant, raw, rows, cols, first, n) {
+    if let Some(slice) = crate::backend::vulkan::weights::pack_rows_of_blob(quant, raw, rows, cols, first, n) {
         return slice;
     }
     let row_bytes = (cols / info.src_qk) * info.src_block_bytes;
@@ -244,6 +249,13 @@ fn place(
         }
     }
     Ok((buffer, perm))
+}
+
+/// (quant type, bytes) `prepare` gives a weight, for the layout tests.
+#[cfg(test)]
+pub(crate) fn prepare_for_test(name: &str, raw: &[u8], quant: QuantType, rows: usize, cols: usize) -> (QuantType, Vec<u8>) {
+    let p = prepare(name, raw, quant, rows, cols, 1.0).unwrap();
+    (p.quant, p.bytes.into_owned())
 }
 
 #[cfg(test)]

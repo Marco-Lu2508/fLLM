@@ -14,8 +14,8 @@ pub mod layout;
 pub mod plan;
 
 pub use layout::{
-    extended_formats, format_info, pack_fp8b_slice, pack_weight, pack_weight_slices, rows_per_slice, supported_formats, DeviceLayout,
-    FormatInfo, Geometry, PackedWeight, WeightSlice,
+    exl2_device_type, exl2_device_type_of, extended_formats, format_info, pack_rows_of_blob, pack_weight, pack_weight_slices, rows_per_slice, supported_formats, DeviceLayout,
+    uses_perm, FormatInfo, Geometry, PackedWeight, WeightSlice,
 };
 pub use plan::{
     exact_math_from_env, mmq_shared_bytes, mmq_tile, plan_quantized_linear, MmqKnobs, plan_quantized_linear_with, split_groups,

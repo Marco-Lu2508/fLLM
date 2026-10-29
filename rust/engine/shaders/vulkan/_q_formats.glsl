@@ -40,6 +40,8 @@
 #include "_q_fmt_int8r.glsl"
 #elif defined(FMT_MLX)
 #include "_q_fmt_mlx.glsl"
+#elif defined(FMT_EXL2)
+#include "_q_fmt_exl2.glsl"
 #else
 #error "define one FMT_* macro (see variants_quant.list)"
 #endif

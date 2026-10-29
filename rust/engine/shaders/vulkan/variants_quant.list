@@ -180,3 +180,11 @@ mm_mlx8_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=8
 mm_mlx8_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=8
 mm_mlx8_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=8 #optional
 mmq_mlx8_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=8
+
+# ExLlamaV2 (EXL2): integer chunks like the other formats; the activations go through the permutation prepass (quant_permute / quant_act_q8_perm) as for act-order GPTQ.
+mv_exl2_s mv_scalar.comp -DFMT_EXL2=1
+mv_exl2_i mv_idot.comp -DFMT_EXL2=1
+mm_exl2_s mm_scalar.comp -DFMT_EXL2=1
+mm_exl2_i mm_idot.comp -DFMT_EXL2=1
+mm_exl2_c mm_coopmat.comp -DFMT_EXL2=1 #optional
+mmq_exl2_i mm_q.comp -DFMT_EXL2=1

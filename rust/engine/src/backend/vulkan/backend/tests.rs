@@ -17,7 +17,7 @@ use crate::backend::vulkan::ops::{
 use crate::backend::vulkan::shaders;
 use crate::backend::vulkan::stream::plan_float_linear;
 use crate::backend::vulkan::weights::{
-    plan_quantized_linear_with, supported_formats, PlanOptions, VkCapsLike, MATVEC_MAX_BATCH, PUSH_BYTES,
+    exl2_device_type, extended_formats, plan_quantized_linear_with, supported_formats, uses_perm, PlanOptions, VkCapsLike, MATVEC_MAX_BATCH, PUSH_BYTES,
 };
 use crate::backend::{AttentionParams, DeltaShape, QuantType};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -470,12 +470,20 @@ fn capability_profiles() -> Vec<VkCapsLike> {
     profiles
 }
 
+/// Every format a projection can be planned for: the planar integer formats, bitsandbytes / block-wise FP8 / MLX, and an EXL2 device type.
+fn planned_formats() -> Vec<QuantType> {
+    let mut all = supported_formats().to_vec();
+    all.extend(extended_formats());
+    all.push(exl2_device_type(64).unwrap());
+    all
+}
+
 #[test]
 fn every_projection_plan_matches_its_compiled_module() {
     let mut seen = BTreeSet::new();
     let always = |_: &str| true;
     let mut count = 0;
-    for &quant in supported_formats() {
+    for quant in planned_formats() {
         for caps in capability_profiles() {
             for batch in [1usize, 2, 5, MATVEC_MAX_BATCH as usize, MATVEC_MAX_BATCH as usize + 1, 33, 256] {
                 for (exact, has_bias) in [(false, false), (false, true), (true, false)] {
@@ -527,9 +535,9 @@ fn every_projection_plan_matches_its_compiled_module() {
                             pp.shader_name,
                             pp.groups
                         );
-                        assert_eq!(pp.uses_perm, quant.is_q4zp());
+                        assert_eq!(pp.uses_perm, uses_perm(quant));
                     } else {
-                        assert!(!quant.is_q4zp(), "act-order weights always need a prepass");
+                        assert!(!uses_perm(quant), "weights with a column permutation always need a prepass");
                     }
                 }
             }
@@ -546,7 +554,7 @@ fn every_projection_plan_matches_its_compiled_module() {
         max_workgroup: 1024,
         vendor: 0,
     };
-    for &quant in supported_formats() {
+    for quant in planned_formats() {
         for batch in [1usize, 9, 100] {
             let plan = plan_quantized_linear_with(
                 quant,
@@ -585,7 +593,7 @@ fn no_shader_is_orphaned() {
         seen.insert(plan.shader_name.to_owned());
     }
     let always = |_: &str| true;
-    for &quant in supported_formats() {
+    for quant in planned_formats() {
         for caps in capability_profiles() {
             for batch in [1usize, 16, 64] {
                 let options = PlanOptions {
