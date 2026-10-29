@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Security
+- `zip` 9.0.4 -> 9.0.5 (the PyTorch and archive reader of the converter; CVE-2026-115905, found by the Trivy scan).
+
 ### Fixed
 - Block-wise FP8 checkpoints with 128 x 128 tiles could be converted but not loaded: the GGUF reader did not count the scales into the tensor size and the loader guessed the tile layout from byte counts. The new `FP8B` layout (above) describes itself. Block-wise scales were stored as f16 (precision and range lost); they are f32 now. A tile grid of one tile (matrices no larger than a tile) is read as tile scales when the checkpoint declares a block size, and a `weight_scale_inv` whose shape is not the tile grid of its weight is refused instead of being read in the wrong order.
 - The grouped MoE GEMM decoded FP8 experts without applying any scale (FP8M row scales sit behind the codes or in the W8A8 / Marlin layouts, block scales were ignored) and the one-to-four-token MoE decode path was declared usable for FP8 experts that it has no kernel for. FP8M experts now take the per-expert path; FP8B experts have scales in the grouped kernel.
