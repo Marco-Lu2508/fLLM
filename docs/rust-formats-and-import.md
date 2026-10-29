@@ -65,7 +65,9 @@ DeepSeek-V3 / R1, Qwen3-FP8, GLM-4.5-FP8, Kimi-K2, MiniMax and similar checkpoin
   elsewhere; threads split the output rows, so the result does not depend on the thread count. It backs the CPU backend and is the
   reference of the device checks.
 * **CUDA**: [gpu-backends.md](gpu-backends.md#block-wise-fp8-fp8b) (the weight stays 8-bit on every NVIDIA GPU).
-* **Other backends** (Vulkan, wgpu, Metal, SYCL, TPU, AMD HIP): no kernel; the codes are expanded with their scales to binary16 at upload
+* **Metal**: kernels for every power-of-two tile in the quantized linear family (`q_fmt_fp8b`, tile shape in `q_params::pad`), the GGUF tensor is the device image;
+  written without a Mac, linted and emulated only ([gpu-backends.md](gpu-backends.md#metal-block-wise-fp8-bitsandbytes-and-exl2)); `FLLM_METAL_NO_FP8B=1` switches them off.
+* **Other backends** (Vulkan, wgpu, SYCL, TPU, AMD HIP): no kernel; the codes are expanded with their scales to binary16 at upload
   (exact; 2 bytes per weight; one line on stderr names the first tensor). Correct, not compact.
 * **Direct load**: the codes are copied once into the anonymous map next to their scales (the scales have to follow the codes in the same
   tensor, so the tensor cannot be a slice of the checkpoint file). Dense FP8B tensors therefore cost their size in anonymous memory, like
@@ -102,7 +104,7 @@ The weights are not expanded: the converter writes (and the direct load builds) 
   double quantization is 4.5 bits as well; double quantization saves about `0.37` bits per value on disk, which the f32 absmax of
   the native block gives back). Before, every bitsandbytes weight became 16 bit (about 3.5 times the 4-bit size).
 - Kernels: CPU `cpu_bnb` (AVX2 + FMA, portable fallback, f32 activations; [cpu-kernels.md](cpu-kernels.md)), CUDA `bnb.cuh` and the
-  tensor-core GEMM ([gpu-backends.md](gpu-backends.md)). Vulkan, Metal and the wgpu backend have no kernel for these types and
+  tensor-core GEMM ([gpu-backends.md](gpu-backends.md)). Metal has kernels for them (written without a Mac, linted and emulated only; `FLLM_METAL_NO_BNB=1` switches them off), Vulkan and the wgpu backend have no kernel for these types and
   expand them to F16 (F32 on wgpu) when the weight is uploaded, which needs 4 times the memory on that device (logged once).
 ### MLX affine quantization (`MLXA`)
 

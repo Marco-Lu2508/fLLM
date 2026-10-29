@@ -31,9 +31,26 @@ Environment: `EMU_WORK` (default `/tmp/fllm-metal-emu`), `DUMP_DIR`, `JOBS`, `MS
 `CXX` (a clang++ with `_Float16` and `__builtin_elementwise_*`; default the ROCm clang of `~/fllm-tools/tools`). The unit tests of `weights/` run in
 the engine crate on Apple targets only (module `backend::metal`); on other hosts they run in a small harness crate that includes the same files.
 
-## MLX affine chunk decoder on its own
+## Chunk decoders and the matrix-vector body without the shim (`run_dec8.sh`)
 
-`run_dec8_mlx.sh` compiles only `common.metal` (same sed, `mini_stdlib/metal_stdlib` instead of the shim: scalar types, address-space words, `as_type`) with any C++20 compiler
+`run_dec8.sh [mlx|fp8b|bnb|kernel_mv|dump]` needs only a C++20 compiler with `_Float16` (g++ >= 12 or clang++; `CXX=...`) and `mini_stdlib/metal_stdlib`:
+`common.metal` (and `common_q_gemv.metal` for `kernel_mv`) go through the same mechanical `sed` as in `run_emu.sh` and are compiled with the checks below,
+all with `-fsanitize=alignment`:
+
+* `dec8_mlx.cpp`, `dec8_fp8b.cpp` (14 tile shapes x 5 matrix shapes, NaN codes included), `dec8_bnb.cpp` (all five types and both code books): independent
+  formulas / packers in C++, the real decoder called through the selector `q_dec8<F>`, bit for bit.
+* `kernel_mv.cpp`: the real `q_mv_r4_t<F>` / `q_mv_r2_t<F>` on emulated threadgroups (std::thread, a barrier per simdgroup for `simd_sum`)
+  for FP8B (5 tile shapes), NF4, FP4, INT8R and MLX 4-bit as a control: rows that are not a multiple of the rows per threadgroup, batches 1..11 (second grid
+  column), padded activation rows, bias, scale and `row_base`; the reference matrix is the output of the selector, so this tests the wiring of the body.
+* `dec8_dump.cpp` (`DUMP_DIR=... run_dec8.sh dump`): every chunk of the vectors dumped by the Rust test `dump_vectors_for_the_msl_emulation` (device images
+  exactly as `pack_weight` makes them, parameter fields, reference weights of `compute::dequantize`, permutations) against the reference, bit for bit: FP8B in 7 tile
+  shapes, NF4/FP4/INT8R, EXL2 and controls. This is the check of the decoders against the Rust reference that needs neither the shim nor a Mac.
+
+Not covered without the shim: the matrix-matrix kernel (`simdgroup_matrix`); `harness.cpp` / `run_emu.sh` do that where the shim is available.
+
+## MLX affine chunk decoder on its own (older description)
+
+`run_dec8_mlx.sh` (now a call of `run_dec8.sh mlx`) compiles only `common.metal` (same sed, `mini_stdlib/metal_stdlib` instead of the shim: scalar types, address-space words, `as_type`) with any C++20 compiler
 that has `_Float16` and runs `dec8_mlx.cpp`: random codes of every width (2, 3, 4, 5, 6, 8), groups 32/64/128, f16 and bfloat16 scales are written into the device image (plane 0 words,
 plane 1 `scale | bias << 16`) by a bit-by-bit packer that shares no code with the decoder, and the real `q_fmt_mlx<BITS, GROUP>::dec8` must reproduce `code * scale + bias` bit for bit
 (107520 values, built with `-fsanitize=alignment`). It needs neither the msl-shim nor the vectors of the Rust test; the full kernels of the `mlx*` tags go through `run_emu.sh` as the other formats.
