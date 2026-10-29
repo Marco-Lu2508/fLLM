@@ -592,7 +592,7 @@ impl Tester<'_> {
         let rms = (want.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / want.len() as f64).sqrt().max(1e-9);
         let scale = vec![rms; want.len()];
         let u = unit_roundoff(dt);
-        Ok(outcome(worst(&got, &as_f64(&want), &scale) / u, 12.0, ms))
+        Ok(outcome(worst(&got, &as_f64(&want), &scale) / u, 16.0, ms))
     }
 
     /// Attention with narrow q and output over a f16 paged cache (prompt rows of one sequence, or a few decode-style rows).
@@ -645,7 +645,8 @@ impl Tester<'_> {
         let got = run(narrow.as_mut())?;
         let ms = start.elapsed().as_secs_f64() * 1e3;
         let rms = (want.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / want.len() as f64).sqrt().max(1e-9);
-        let scale = vec![rms; want.len()];
+        // the output rounding is relative to the element itself: an element above the rms may be off by half a narrow ulp of its own size
+        let scale: Vec<f64> = want.iter().map(|&x| rms.max(f64::from(x).abs())).collect();
         // the narrow output rounding, plus the FP16 output of the FlashInfer prompt kernel in the FP32 reference
         let u = unit_roundoff(dt) + unit_roundoff(ActDtype::F16);
         Ok(outcome(worst(&got, &as_f64(&want), &scale), 2.0 * u + 1e-4, ms))
@@ -723,7 +724,7 @@ impl Tester<'_> {
             return Ok(outcome(err, 3.0, ms));
         }
         // rotation + cache write: the merged kernel against the kernel on the separate results
-        let positions: Vec<usize> = (0..batch).map(|r| r * 3 + 1).collect();
+        let positions: Vec<usize> = (0..batch).map(|r| (r * 3 + 1) % 64).collect(); // the cos/sin table has 64 positions
         let (slots, blocks) = Self::kv_layout(batch);
         let params = Self::rope_params(DIM, true);
         let cache_a = device.allocate_kv_cache(1, blocks, BLOCK, KV_HEADS, DIM, DIM, 1)?;

@@ -142,6 +142,14 @@ impl Tester<'_> {
         let r = self.attention(&case);
         let path = attn_last_path();
         restore(old);
+        let r = r.and_then(|mut o| {
+            // The tensor-core kernels round the probabilities and the output to f16 (the budget of the reference is that of an FP32 kernel): one f16
+            // unit roundoff of the output scale on top, 2.5 times what the runs on an L4 showed
+            if matches!(path, AttnPath::FlashInfer | AttnPath::Cascade) {
+                o.tol += 4.8828125e-4;
+            }
+            Ok(o)
+        });
         let r = r.and_then(|o| match path_of(expect) {
             Some(want) if want != path => Err(BackendError::DriverError(format!("expected the {want:?} path to run, the {path:?} path ran (switches: fi {}, decode {}, cascade {}, backend {})", switches.fi, switches.decode, switches.cascade, switches.backend))),
             _ => Ok(o),
