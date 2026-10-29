@@ -95,7 +95,10 @@ pub(crate) fn derive_caps(caps: &VkCaps) -> (VkCapsLike, Option<u32>) {
         && caps.fp16
         && caps.vulkan_memory_model
         && has_coop_16x16x16(caps)
-        && !env_on("FLLM_VULKAN_NO_COOP");
+        && !env_on("FLLM_VULKAN_NO_COOP")
+        // AMD: the cooperative-matrix GEMM hung the compute queue (amdgpu ring timeout, "Vulkan device lost") for prompts of about 400 tokens and more on a
+        // Radeon 840M with Mesa RADV, and the int8 dot-product shaders are as fast there; FLLM_VULKAN_FORCE_COOP=1 plans it again
+        && (caps.vendor_id != 0x1002 || env_on("FLLM_VULKAN_FORCE_COOP"));
     let like = VkCapsLike {
         coop_matrix: coop_ok,
         // FLLM_VULKAN_FORCE_IDOT=1 also plans the int8 dot-product shaders where the device has the feature but does not accelerate it
