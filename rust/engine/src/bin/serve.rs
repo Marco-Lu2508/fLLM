@@ -1197,17 +1197,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Ok(p) = &planned {
                     // the pool must hold one sequence of the full context: otherwise lower the context instead of failing
-                    if p.kv_block_count < model.table_stride() {
+                    // (and with an automatic context, also when the full context would only fit next to some layers whose feed-forward weights
+                    // then stream from the host: a window of 4096 tokens or more with every layer on the device decodes two to three times faster;
+                    // `--ctx N` keeps the longer window and the offload)
+                    let speed_first = context_request.is_none() && p.offload_layers < p.total_layers && p.all_on_device_kv_blocks >= 256;
+                    if p.kv_block_count < model.table_stride() || speed_first {
                         // keep every layer on the device (decode speed) when that still leaves a usable window; when not even that fits, a context
                         // of 8192 tokens at most (512 blocks of 16): every block above it costs feed-forward weights that then stream from the host,
                         // and a model that is too big for the device is slow enough already (--ctx asks for more)
                         let blocks = if p.all_on_device_kv_blocks >= 256 { p.all_on_device_kv_blocks } else { p.kv_block_count.min(512) };
                         let fit = blocks * model.block_size();
-                        tracing::warn!(
-                            "a context of {} tokens needs more KV cache than the device has left; using {} tokens (--ctx; --kv-cache-type q8_0 or fp8_e4m3 roughly doubles it)",
-                            model.max_context(),
-                            fit
-                        );
+                        if speed_first && p.kv_block_count >= model.table_stride() {
+                            tracing::info!(
+                                "context lowered from {} to {} tokens so that every layer stays on the device (decode speed); --ctx {} keeps the long window and moves the feed-forward weights of some layers to host memory",
+                                model.max_context(),
+                                fit,
+                                model.max_context()
+                            );
+                        } else {
+                            tracing::warn!(
+                                "a context of {} tokens needs more KV cache than the device has left; using {} tokens (--ctx; --kv-cache-type q8_0 or fp8_e4m3 roughly doubles it)",
+                                model.max_context(),
+                                fit
+                            );
+                        }
                         model.limit_context(fit);
                         context = model.max_context();
                         planned = plan_for(&model, max_batched_tokens);
