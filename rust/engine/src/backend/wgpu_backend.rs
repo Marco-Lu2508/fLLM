@@ -224,6 +224,171 @@ fn weight_at(index: u32, kind: u32) -> f32 {
 
 /// hdr: 0 rows, 1 cols, 2 batch, 3 kind, 4 has_bias. One workgroup per output row and tile of
 /// four batch rows (z), so each weight element is decoded once per four tokens.
+const EXL3_PRE: &str = r#"
+// Stage 1 of the EXL3 projection: x2[t] = H128 (suh * x[tok0 + t]) on every block of 128 inputs.
+// hdr: 1 = cols, 4 = tok0 (token offset). blob word 10 = byte offset of `suh` (binary16 vector).
+@group(0) @binding(2) var<storage, read> x: array<f32>;
+@group(0) @binding(3) var<storage, read_write> x2: array<f32>;
+var<workgroup> sh: array<f32, 128>;
+fn half_lo(bits: u32) -> f32 { return unpack2x16float(bits & 0xffffu).x; }
+fn half_hi(bits: u32) -> f32 { return unpack2x16float(bits).y; }
+@compute @workgroup_size(128)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id) wid: vec3<u32>) {
+    let tid = lid.x;
+    let i = wid.x * 128u + tid;
+    let t = wid.y;
+    let cols = hdr[1];
+    let tok0 = hdr[4];
+    let suh_word = arena[10] / 4u + (i >> 1u);
+    let suh = select(half_lo(arena[suh_word]), half_hi(arena[suh_word]), (i & 1u) != 0u);
+    var v = x[(tok0 + t) * cols + i] * suh;
+    sh[tid] = v;
+    var stride = 1u;
+    loop {
+        if (stride >= 128u) { break; }
+        workgroupBarrier();
+        let other = sh[tid ^ stride];
+        workgroupBarrier();
+        if ((tid & stride) != 0u) { v = other - v; } else { v = v + other; }
+        sh[tid] = v;
+        stride = stride << 1u;
+    }
+    x2[t * cols + i] = v * 0.08838834764831845; // 1 / sqrt(128)
+}
+"#;
+
+const EXL3_MM: &str = r#"
+// Stage 2 of the EXL3 projection: z[t][16 no + c] = sum_i x2[t][i] * R[i][16 no + c], with the trellis
+// matrix decoded on the fly. One workgroup of 256 invocations per tile column; invocation tid decodes
+// symbol tid (the 16-bit window ending at it) and stores it at the tensor-core position of the packer.
+// hdr: 1 = cols, 2 = chunk (tokens). blob words: 6 = first tile column (bytes), 7 = bytes per column,
+// 9 = K | codebook << 8.
+@group(0) @binding(2) var<storage, read> x2: array<f32>;
+@group(0) @binding(3) var<storage, read_write> z: array<f32>;
+var<workgroup> tile: array<f32, 256>;
+
+fn half_bits(bits: u32) -> f32 { return unpack2x16float(bits & 0xffffu).x; }
+
+// f32 rounded to binary16 precision, ties to even (exact in f32)
+fn round_half(x: f32) -> f32 {
+    let b = bitcast<u32>(x);
+    let a = b & 0x7fffffffu;
+    if (a < 0x38800000u) {
+        return round(x * 16777216.0) * (1.0 / 16777216.0);
+    }
+    let r = (a + 0x0fffu + ((a >> 13u) & 1u)) & 0xffffe000u;
+    return bitcast<f32>(r | (b & 0x80000000u));
+}
+
+fn codebook_value(state: u32, codebook: u32) -> f32 {
+    if (codebook == 2u) {
+        let x = state * 0x83dcd12du;
+        let sum = (x & 0xffu) + ((x >> 8u) & 0xffu) + ((x >> 16u) & 0xffu) + (x >> 24u) + 0x6400u;
+        return round_half(fma(half_bits(sum), half_bits(0x1eeeu), half_bits(0xc931u)));
+    }
+    var x = state * 89226354u + 64248484u;
+    if (codebook == 1u) { x = state * 0xcbac1fedu; }
+    x = (x & 0x8fff8fffu) ^ 0x3b603b60u;
+    return round_half(half_bits(x) + half_bits(x >> 16u));
+}
+
+// the 16-bit window ending at symbol `index` of a tail-biting ring of nw words, MSB-first
+fn trellis_state(base: u32, nw: u32, bits: u32, index: u32) -> u32 {
+    let ring = 256u * bits;
+    let start = ((index + 1u) * bits + ring - 16u) % ring;
+    let wi = start >> 5u;
+    let off = start & 31u;
+    let hi = arena[base + wi];
+    let lo = arena[base + select(wi + 1u, 0u, wi + 1u == nw)];
+    if (off <= 16u) { return (hi >> (16u - off)) & 0xffffu; }
+    return ((hi << (off - 16u)) | (lo >> (48u - off))) & 0xffffu;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id) wid: vec3<u32>) {
+    let tid = lid.x;
+    let no = wid.x;
+    let cols = hdr[1];
+    let chunk = hdr[2];
+    let param = arena[9];
+    let bits = param & 255u;
+    let codebook = param >> 8u;
+    let nw = 8u * bits;
+    let c = tid & 15u;
+    let tl = tid >> 4u;
+    let lane_i = tid >> 3u;
+    let j = tid & 7u;
+    let pr = 2u * (lane_i & 3u) + (j & 1u) + select(0u, 8u, (j & 2u) != 0u);
+    let pc = (lane_i >> 2u) + select(0u, 8u, (j & 4u) != 0u);
+    let col_words = arena[6] / 4u + no * (arena[7] / 4u);
+    var acc: array<f32, 8>;
+    for (var b = 0u; b < 8u; b = b + 1u) { acc[b] = 0.0; }
+    var ki = 0u;
+    loop {
+        if (ki >= cols / 16u) { break; }
+        tile[pr * 16u + pc] = codebook_value(trellis_state(col_words + ki * nw, nw, bits, tid), codebook);
+        workgroupBarrier();
+        for (var b = 0u; b < 8u; b = b + 1u) {
+            let t = b * 16u + tl;
+            if (t < chunk) {
+                let xr = t * cols + ki * 16u;
+                var sum = 0.0;
+                for (var r = 0u; r < 16u; r = r + 1u) { sum = sum + x2[xr + r] * tile[r * 16u + c]; }
+                acc[b] = acc[b] + sum;
+            }
+        }
+        workgroupBarrier();
+        ki = ki + 1u;
+    }
+    for (var b = 0u; b < 8u; b = b + 1u) {
+        let t = b * 16u + tl;
+        if (t < chunk) { z[t * cols + no * 16u + c] = acc[b]; }
+    }
+}
+"#;
+
+const EXL3_POST: &str = r#"
+// Stage 3 of the EXL3 projection: out[tok0 + t][out_map[o]] = scale * svh[o] * (H128 z[t])[o] (+ bias).
+// hdr: 0 = rows, 4 = tok0, 5 = scale (f32 bits), 6 = flags (bit 0 adds the bias).
+// blob words: 11 = byte offset of `svh`, 12 = byte offset of `out_map`.
+@group(0) @binding(2) var<storage, read> z: array<f32>;
+@group(0) @binding(3) var<storage, read_write> outv: array<f32>;
+@group(0) @binding(4) var<storage, read> biasv: array<f32>;
+var<workgroup> sh: array<f32, 128>;
+fn half_lo(bits: u32) -> f32 { return unpack2x16float(bits & 0xffffu).x; }
+fn half_hi(bits: u32) -> f32 { return unpack2x16float(bits).y; }
+@compute @workgroup_size(128)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id) wid: vec3<u32>) {
+    let tid = lid.x;
+    let rows = hdr[0];
+    let tok0 = hdr[4];
+    let o = wid.x * 128u + tid;
+    let t = wid.y;
+    var v = z[t * rows + o];
+    sh[tid] = v;
+    var stride = 1u;
+    loop {
+        if (stride >= 128u) { break; }
+        workgroupBarrier();
+        let other = sh[tid ^ stride];
+        workgroupBarrier();
+        if ((tid & stride) != 0u) { v = other - v; } else { v = v + other; }
+        sh[tid] = v;
+        stride = stride << 1u;
+    }
+    v = v * 0.08838834764831845;
+    let svh_word = arena[11] / 4u + (o >> 1u);
+    v = v * select(half_lo(arena[svh_word]), half_hi(arena[svh_word]), (o & 1u) != 0u);
+    let row = arena[arena[12] / 4u + o];
+    v = v * hdr_f32(5);
+    if ((hdr[6] & 1u) != 0u) { v = v + biasv[row]; }
+    outv[(tok0 + t) * rows + row] = v;
+}
+"#;
+
 const LINEAR: &str = r#"
 @group(0) @binding(3) var<storage, read> input: array<f32>;
 @group(0) @binding(4) var<storage, read_write> output: array<f32>;
@@ -910,10 +1075,13 @@ enum KernelId {
     LayerNorm,
     Ewise,
     MlaMove,
+    Exl3Pre,
+    Exl3Mm,
+    Exl3Post,
 }
 
 impl KernelId {
-    const ALL: [KernelId; 14] = [
+    const ALL: [KernelId; 17] = [
         KernelId::Linear,
         KernelId::Embedding,
         KernelId::RmsNorm,
@@ -928,6 +1096,9 @@ impl KernelId {
         KernelId::LayerNorm,
         KernelId::Ewise,
         KernelId::MlaMove,
+        KernelId::Exl3Pre,
+        KernelId::Exl3Mm,
+        KernelId::Exl3Post,
     ];
 
     fn label(self) -> &'static str {
@@ -946,6 +1117,9 @@ impl KernelId {
             KernelId::LayerNorm => "fllm-layer-norm",
             KernelId::Ewise => "fllm-ewise",
             KernelId::MlaMove => "fllm-mla-move",
+            KernelId::Exl3Pre => "fllm-exl3-pre",
+            KernelId::Exl3Mm => "fllm-exl3-mm",
+            KernelId::Exl3Post => "fllm-exl3-post",
         }
     }
 
@@ -953,6 +1127,9 @@ impl KernelId {
     fn source(self) -> String {
         let body = match self {
             KernelId::Linear => [WEIGHT_DECODE, LINEAR].concat(),
+            KernelId::Exl3Pre => EXL3_PRE.to_string(),
+            KernelId::Exl3Mm => EXL3_MM.to_string(),
+            KernelId::Exl3Post => EXL3_POST.to_string(),
             KernelId::Embedding => [WEIGHT_DECODE, EMBEDDING].concat(),
             KernelId::RmsNorm => RMS_NORM.to_string(),
             KernelId::Glu => [ERF, GLU].concat(),
@@ -987,6 +1164,9 @@ impl KernelId {
             KernelId::LayerNorm => &[false, false, false, true],
             KernelId::Ewise => &[true, false],
             KernelId::MlaMove => &[false, false, true],
+            KernelId::Exl3Pre => &[false, true],
+            KernelId::Exl3Mm => &[false, true],
+            KernelId::Exl3Post => &[false, true, false],
         }
     }
 }
