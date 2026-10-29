@@ -218,6 +218,12 @@ streaming panels. Measured on a Zen 5 EPYC with the feature built (Colab, Llama-
 `avx512-bf16`; decode 54 tok/s on all tiers (memory bound). The gain of `avx512-vnni` is the
 16-row GEMM that only the feature contains; the default build has not been measured there.
 
+A second Zen 5 machine, a laptop (Ryzen AI 5 PRO 435, 6 cores / 12 threads, Ubuntu 26.04, Llama-3.2-3B Q4_K_M, 944-token prompt, 2026-10-29,
+tier chosen with `FLLM_CPU_ISA`): prompt 101 tok/s on `avx2`, 128 on `avx-vnni`, 61 on `avx512bw`, 142 on `avx512-vnni`, 142 on `avx512-bf16`; decode
+17.0 to 18.0 tok/s on all tiers. `selftest-cpu --tiers all` ran 17 209 checks on the six tiers (scalar to `avx512-bf16`) with 0 failures. The `avx512bw`
+tier is slower than `avx2` for prompts on both Zen 5 machines; it is only the top tier on an AVX-512 CPU without VNNI (Skylake-SP), which has not been
+measured.
+
 **The feature does not make the binary less portable.** It only compiles more functions that carry
 `#[target_feature(enable = ...)]` and the AMX inline assembly; nothing in the repository sets
 `-C target-cpu`, a CPU `target-feature` or `cfg(target_feature)` (the Makefile, `docker/Dockerfile`, the
