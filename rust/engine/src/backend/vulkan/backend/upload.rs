@@ -74,6 +74,15 @@ fn prepare<'a>(name: &str, raw: &'a [u8], quant: QuantType, rows: usize, cols: u
                 scale,
             })
         }
+        // FP8M (codes and one f16 scale per row) is block-wise FP8 with tiles of one row: the same kernels, the scales widened to f32 exactly
+        QuantType::Fp8Marlin => match crate::cpu_fp8::fp8m_as_fp8b(raw, rows, cols) {
+            Some((kind, bytes)) if DeviceLayout::new(QuantType::from_gguf_type_id(kind), rows, cols).is_ok() => Ok(Prepared {
+                bytes: Cow::Owned(bytes),
+                quant: QuantType::from_gguf_type_id(kind),
+                scale,
+            }),
+            _ => expand(name, raw, quant, rows, cols, scale),
+        },
         QuantType::IQ4_XS if cols.is_multiple_of(256) => {
             if raw.len() != rows * (cols / 256) * 136 {
                 return Err(invalid(format!("{name}: {} bytes are not {rows} x {cols} IQ4_XS", raw.len())));
@@ -179,7 +188,10 @@ pub(crate) fn pack_slice(
         return pack_weight(quant, raw, rows, cols);
     }
     let info = format_info(quant).ok_or(BackendError::UnsupportedQuant(quant))?;
-    let row_bytes = (cols / info.qk) * info.src_block_bytes;
+    if let Some(slice) = crate::backend::vulkan::weights::pack_fp8b_slice(quant, raw, rows, cols, first, n) {
+        return slice;
+    }
+    let row_bytes = (cols / info.src_qk) * info.src_block_bytes;
     let block_len = rows * row_bytes;
     if raw.len() < block_len {
         return Err(invalid(format!(
@@ -238,9 +250,10 @@ fn place(
 mod tests {
     use super::*;
 
-    /// bitsandbytes NF4 / FP4 / int8 blocks have no shader: `prepare` expands them to the F16 values of the dequantizer (not a re-quantization).
+    /// bitsandbytes NF4 / FP4 / int8 blocks, block-wise FP8 and MLX affine weights have shaders: `prepare` keeps the file bytes (the planar repacking happens
+    /// in `place`), the quant type unchanged.
     #[test]
-    fn bitsandbytes_weights_are_expanded_to_f16_on_upload() {
+    fn bitsandbytes_fp8_and_mlx_weights_stay_native_on_upload() {
         use fllm_gguf_probe::bnb;
         for (quant, kind) in [
             (QuantType::Nf4B64, bnb::NF4_B64),
@@ -250,7 +263,7 @@ mod tests {
             (QuantType::Int8Row, bnb::INT8_ROW),
         ] {
             let block = bnb::layout(kind).unwrap();
-            // a width that is a multiple of 256 would be re-quantized to Q5_K for other formats: these stay F16
+            // a width that is a multiple of 256 would be re-quantized to Q5_K if the format had no decoder
             let (rows, cols) = (3, 256);
             let blocks = rows * cols / block.block;
             let raw: Vec<u8> = (0..blocks)
@@ -261,12 +274,40 @@ mod tests {
                 })
                 .collect();
             let prepared = prepare("w", &raw, quant, rows, cols, 1.0).unwrap();
-            assert_eq!(prepared.quant, QuantType::F16, "{quant:?}");
+            assert_eq!(prepared.quant, quant);
+            assert_eq!(prepared.bytes.len(), raw.len());
+        }
+        let mut rng = crate::cpu_selftest::Lcg(5);
+        let fp8 = crate::cpu_selftest::random_weights(0x8000_0021, 4, 256, &mut rng);
+        assert_eq!(prepare("w", &fp8, QuantType::Fp8Block, 4, 256, 0.5).unwrap().quant, QuantType::Fp8Block);
+        let m = fllm_gguf_probe::MlxAffine { bits: 5, group: 64, bf16: true };
+        let mlx = crate::cpu_mlx::random_weights(m, 4, 128, &mut rng);
+        assert_eq!(prepare("w", &mlx, QuantType::Other(m.type_id()), 4, 128, 1.0).unwrap().quant, QuantType::Other(m.type_id()));
+    }
+
+    /// FP8M (codes and a binary16 scale per row) is block-wise FP8 with tiles of one row: the same weights, the scales widened to f32.
+    #[test]
+    fn per_row_scaled_fp8_is_converted_to_block_wise_fp8() {
+        let (rows, cols) = (5usize, 48usize);
+        let raw = crate::cpu_selftest::random_weights(0x8000_0020, rows, cols, &mut crate::cpu_selftest::Lcg(3));
+        let prepared = prepare("w", &raw, QuantType::Fp8Marlin, rows, cols, 1.0).unwrap();
+        let kind = prepared.quant.to_gguf_type_id();
+        assert!(fllm_gguf_probe::fp8b_type(kind));
+        let want = crate::compute::dequantize(&raw, 0x8000_0020, rows * cols).unwrap();
+        let got = crate::compute::dequantize(&prepared.bytes, kind, rows * cols).unwrap();
+        assert_eq!(want, got);
+    }
+
+    /// Block-wise FP8 shapes the kernels cannot take (a row that is not a whole number of chunks, tiles narrower than a chunk) are expanded to F16.
+    #[test]
+    fn fp8_shapes_without_a_kernel_are_expanded_to_f16() {
+        for (kind, rows, cols) in [(0x8000_0021u32, 3usize, 100usize), (fllm_gguf_probe::fp8b_type_id(16, 4).unwrap(), 4, 64)] {
+            let raw = crate::cpu_selftest::random_weights(kind, rows, cols, &mut crate::cpu_selftest::Lcg(4));
+            let prepared = prepare("w", &raw, QuantType::from_gguf_type_id(kind), rows, cols, 1.0).unwrap();
+            assert_eq!(prepared.quant, QuantType::F16, "{kind:#x} {rows}x{cols}");
             let want = crate::compute::dequantize(&raw, kind, rows * cols).unwrap();
-            assert_eq!(prepared.bytes.len(), rows * cols * 2);
             for (i, pair) in prepared.bytes.as_chunks::<2>().0.iter().enumerate() {
-                let got = half::f16::from_le_bytes(*pair).to_f32();
-                assert_eq!(got, half::f16::from_f32(want[i]).to_f32(), "{quant:?} element {i}");
+                assert_eq!(half::f16::from_le_bytes(*pair).to_f32(), half::f16::from_f32(want[i]).to_f32(), "element {i}");
             }
         }
     }

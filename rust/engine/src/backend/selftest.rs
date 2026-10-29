@@ -29,7 +29,6 @@ mod actdtype;
 mod fp4sm100;
 #[cfg(feature = "cuda")]
 mod w8a8;
-#[cfg(feature = "cuda")]
 mod fp8blk;
 #[cfg(feature = "cuda")]
 mod hgemm;
@@ -1242,7 +1241,6 @@ impl<'a> Tester<'a> {
         if self.enter("w8a8") {
             self.w8a8_cases();
         }
-        #[cfg(feature = "cuda")]
         if self.enter("fp8blk") {
             self.fp8blk_cases();
         }
@@ -2707,7 +2705,10 @@ impl<'a> Tester<'a> {
                 || fllm_gguf_probe::bnb::is_bnb(kind)) // expanded to 16-bit values on upload by backends without a decoder
             && self.device.name() != "CPU";
         // block-wise FP8 on a device without a kernel for it is expanded to binary16 at upload: the weights are rounded (2^-11 relative)
-        let f16_expanded = (fllm_gguf_probe::fp8b_type(kind) || fllm_gguf_probe::fp8m_type(kind)) && !supported && self.device.name() != "CPU";
+        // (or a shape the device kernels cannot take: it checks that by uploading the weight, see `kept_8bit`)
+        let f16_expanded = (fllm_gguf_probe::fp8b_type(kind) || fllm_gguf_probe::fp8m_type(kind))
+            && (!supported || !self.kept_8bit(kind, &weights, rows, cols))
+            && self.device.name() != "CPU";
         let device_tol = if converted {
             0.02
         } else if f16_expanded {
@@ -2723,6 +2724,13 @@ impl<'a> Tester<'a> {
             cpu_tol: tol,
             ms,
         })
+    }
+
+    /// Whether the device keeps the FP8 weight 8-bit (any layout of its own) instead of expanding it to a 16 or 32-bit float format.
+    fn kept_8bit(&self, kind: u32, weights: &[u8], rows: usize, cols: usize) -> bool {
+        self.device
+            .upload_weight("selftest", weights, QuantType::from_gguf_type_id(kind), rows, cols, None)
+            .is_ok_and(|w| !matches!(w.quant_type, QuantType::F16 | QuantType::BF16 | QuantType::F32))
     }
 
     /// NVFP4 W4A4 against the CPU simulation of vLLM's recipe (see `nvfp4_activation_reference`). `factor` scales the checkpoint-style

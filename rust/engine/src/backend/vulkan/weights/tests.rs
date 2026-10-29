@@ -6,6 +6,7 @@ use super::plan::*;
 use crate::backend::QuantType;
 use crate::cpu_selftest::{random_weights, Lcg};
 
+mod ext;
 mod mmq;
 
 /// GGUF type of the blocks of `quant` (the Q4ZP formats store the Q4Z blocks followed by a permutation table).

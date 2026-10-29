@@ -2,7 +2,7 @@
 //! of `layout.rs`. The tests compare it with `compute::dequantize`, which checks the repacking and the index arithmetic of the shaders
 //! without a GPU (the GLSL text itself is only compiled and validated, never run, in this round).
 
-use super::layout::DeviceLayout;
+use super::layout::{DeviceLayout, Geometry};
 
 /// One decoded chunk of 8 weights: `weight[i] = ws * q[i] + wm`.
 #[derive(Debug, Clone, Copy)]
@@ -256,6 +256,44 @@ pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
             ws = f32::from_bits(w(off3 as usize + g)) * sc as f32;
             wm = 0.0;
         }
+        "int8r" => {
+            let b = g * 16 + (cin << 1);
+            p0 = w(b);
+            p1 = w(b + 1);
+            ws = f32::from_bits(w(off1 as usize + g));
+            wm = 0.0;
+        }
+        "mlx2" | "mlx3" | "mlx4" | "mlx5" | "mlx6" | "mlx8" => {
+            let Geometry::Mlx { bits, .. } = layout.info.geometry else { panic!("not an MLX layout") };
+            let bits = bits as usize;
+            let base = g * bits;
+            let mut c = [0u32; 8];
+            for (i, slot) in c.iter_mut().enumerate() {
+                let pos = (cin * 8 + i) * bits;
+                let (wi, sh) = (pos >> 5, (pos & 31) as u32);
+                let mut v = w(base + wi) >> sh;
+                if sh as usize + bits > 32 {
+                    v |= w(base + wi + 1) << (32 - sh);
+                }
+                *slot = v & ((1u32 << bits) - 1);
+            }
+            let mut q0 = c[0] | (c[1] << 8) | (c[2] << 16) | (c[3] << 24);
+            let mut q1 = c[4] | (c[5] << 8) | (c[6] << 16) | (c[7] << 24);
+            let param = layout.param;
+            let sb = w(off1 as usize + g / (param & 0xffff) as usize);
+            let (scale, bias) = if param >> 16 != 0 {
+                (f32::from_bits(sb << 16), f32::from_bits(sb & 0xffff_0000))
+            } else {
+                half2(sb)
+            };
+            let mut m = bias;
+            if bits == 8 {
+                q0 ^= 0x8080_8080;
+                q1 ^= 0x8080_8080;
+                m = bias + 128.0 * scale;
+            }
+            (p0, p1, ws, wm) = (q0, q1, scale, m);
+        }
         other => panic!("no mirror for {other}"),
     }
     let (a, b) = (lanes(p0), lanes(p1));
@@ -264,4 +302,50 @@ pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
         ws,
         wm,
     }
+}
+
+/// The 8 values of chunk `cin` of block `g` for the float-chunk formats (`wchunk_f`): block-wise FP8, NF4 and FP4.
+pub fn chunk_f(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> [f32; 8] {
+    let off1 = layout.plane_word_offset[1] as usize;
+    let w = |i: usize| word(buf, i);
+    let mut v = [0f32; 8];
+    match layout.info.tag {
+        "fp8b" => {
+            let nb = layout.blocks_per_row;
+            let row = g / nb;
+            let col = (g - row * nb) * 8;
+            let block_cols = layout.param as usize;
+            let tile_cols = layout.cols.div_ceil(block_cols);
+            let s = f32::from_bits(w(off1 + row * tile_cols + col / block_cols));
+            let (a, b) = (w(g * 2), w(g * 2 + 1));
+            for k in 0..4 {
+                v[k] = e4m3_value((a >> (8 * k)) & 255) * s;
+                v[4 + k] = e4m3_value((b >> (8 * k)) & 255) * s;
+            }
+        }
+        "nf4b64" | "nf4b128" | "fp4b64" | "fp4b128" => {
+            let book: &[f32; 16] = if layout.info.tag.starts_with("nf4") { &fllm_gguf_probe::bnb::NF4_CODE } else { &fllm_gguf_probe::bnb::FP4_CODE };
+            let codes = w(g * (layout.info.qk / 8) + cin);
+            let s = f32::from_bits(w(off1 + g));
+            for k in 0..4 {
+                let byte = (codes >> (8 * k)) & 255;
+                v[2 * k] = book[(byte >> 4) as usize] * s;
+                v[2 * k + 1] = book[(byte & 15) as usize] * s;
+            }
+        }
+        other => panic!("no float mirror for {other}"),
+    }
+    v
+}
+
+/// `e4m3_value` of `_q_fmt_fp8b.glsl`.
+fn e4m3_value(code: u32) -> f32 {
+    let mag = code & 0x7f;
+    let normal = f32::from_bits((mag << 20) + (120 << 23));
+    let subnormal = (mag & 7) as f32 * (1.0 / 512.0);
+    let mut value = if mag >> 3 == 0 { subnormal } else { normal };
+    if mag == 0x7f {
+        value = f32::from_bits(0x7fc0_0000);
+    }
+    f32::from_bits(value.to_bits() | ((code & 0x80) << 24))
 }

@@ -50,6 +50,13 @@ void main() {
         [[unroll]] for (uint r = 0; r < NROWS; ++r) {
             const uint row = row0 + r;
             if (row < p.rows) {
+#ifdef FLOAT_CHUNK
+                float wv[8];
+                wchunk_f(row * p.nb + kb, cin, wv);
+                const vec4 q0 = vec4(wv[0], wv[1], wv[2], wv[3]);
+                const vec4 q1 = vec4(wv[4], wv[5], wv[6], wv[7]);
+                [[unroll]] for (uint c = 0; c < NCOLS; ++c) acc[r][c] += dot(q0, xa[c]) + dot(q1, xb[c]);
+#else
                 uint p0, p1;
                 float ws, wm;
                 wchunk(row * p.nb + kb, cin, p0, p1, ws, wm);
@@ -62,6 +69,7 @@ void main() {
                     acc[r][c] += wm * xs[c];
 #endif
                 }
+#endif
             }
         }
     }

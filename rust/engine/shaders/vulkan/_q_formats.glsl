@@ -2,6 +2,8 @@
 // Every format file defines QK (weights per block) and
 //   void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm)
 // g = global block index (row * nb + block in row), cin = chunk (8 weights) inside the block.
+// Formats whose values are not small integers (FP8, NF4, FP4) define FLOAT_CHUNK instead and
+//   void wchunk_f(uint g, uint cin, out float v[8])   (the 8 weight values); only the f32 shaders (mv_scalar, mm_scalar) accept them.
 #if defined(FMT_Q4_0)
 #include "_q_fmt_q4_0.glsl"
 #elif defined(FMT_Q4_1)
@@ -30,6 +32,14 @@
 #include "_q_fmt_nvfp4.glsl"
 #elif defined(FMT_Q4Z)
 #include "_q_fmt_q4z.glsl"
+#elif defined(FMT_FP8B)
+#include "_q_fmt_fp8b.glsl"
+#elif defined(FMT_NF4) || defined(FMT_FP4)
+#include "_q_fmt_nf4.glsl"
+#elif defined(FMT_INT8R)
+#include "_q_fmt_int8r.glsl"
+#elif defined(FMT_MLX)
+#include "_q_fmt_mlx.glsl"
 #else
 #error "define one FMT_* macro (see variants_quant.list)"
 #endif

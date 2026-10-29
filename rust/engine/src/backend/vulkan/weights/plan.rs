@@ -517,7 +517,7 @@ pub fn plan_quantized_linear_with(
         nb: layout.blocks_per_row as u32,
         off: [
             layout.plane_word_offset[1],
-            layout.plane_word_offset[2],
+            if layout.param != 0 { layout.param } else { layout.plane_word_offset[2] },
             layout.plane_word_offset[3],
         ],
         out_stride,

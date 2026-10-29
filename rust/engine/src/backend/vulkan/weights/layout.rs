@@ -7,21 +7,72 @@
 use crate::backend::{BackendError, QuantType};
 use half::f16;
 
+/// How the file layout of a format maps to the device layout (what `pack_weight` does).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Geometry {
+    /// Fixed blocks of the file split into planes, one device block per file block.
+    Planar,
+    /// MLX affine group quantization: device blocks of 32 codes, one scale/bias word per group of `group` codes (plane 1).
+    Mlx { bits: u32, group: u32, bf16: bool },
+    /// Block-wise FP8: codes row-major (plane 0), the scale of the tile repeated for every row of the tile (plane 1, one f32 per row and tile column).
+    Fp8b { block_rows: usize, block_cols: usize },
+}
+
 /// Static description of a supported weight format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatInfo {
     /// Shader name fragment (`mv_<tag>_s`, ...).
     pub tag: &'static str,
-    /// Weights per block (the shader constant `QK`).
+    /// Weights per device block (the shader constant `QK`).
     pub qk: usize,
+    /// Weights per block of the file (`qk` except for MLX, whose file block is a whole group).
+    pub src_qk: usize,
     /// Bytes of one block in the GGUF file.
     pub src_block_bytes: usize,
     /// Bytes per block in each of the (up to four) planes of the device layout; 0 = plane unused.
     pub plane_bytes: [usize; 4],
+    pub geometry: Geometry,
+    /// The decoder yields floats (`wchunk_f`) instead of small integers: only the f32 shaders exist (FP8, NF4, FP4).
+    pub float_chunk: bool,
+}
+
+fn mlx_tag(bits: u32) -> Option<&'static str> {
+    Some(match bits {
+        2 => "mlx2",
+        3 => "mlx3",
+        4 => "mlx4",
+        5 => "mlx5",
+        6 => "mlx6",
+        8 => "mlx8",
+        _ => return None,
+    })
 }
 
 /// Description of `quant`, `None` for formats without a Vulkan shader.
 pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
+    let id = quant.to_gguf_type_id();
+    if let Some((block_rows, block_cols)) = fllm_gguf_probe::fp8b_shape(id) {
+        return Some(FormatInfo {
+            tag: "fp8b",
+            qk: 8,
+            src_qk: 1,
+            src_block_bytes: 1,
+            plane_bytes: [8, 0, 0, 0],
+            geometry: Geometry::Fp8b { block_rows, block_cols },
+            float_chunk: true,
+        });
+    }
+    if let Some(m) = fllm_gguf_probe::mlx_affine(id) {
+        return Some(FormatInfo {
+            tag: mlx_tag(m.bits)?,
+            qk: 32,
+            src_qk: m.group as usize,
+            src_block_bytes: m.block_bytes() as usize,
+            plane_bytes: [4 * m.bits as usize, 4, 0, 0],
+            geometry: Geometry::Mlx { bits: m.bits, group: m.group, bf16: m.bf16 },
+            float_chunk: false,
+        });
+    }
     let (tag, qk, src, planes): (&'static str, usize, usize, [usize; 4]) = match quant {
         QuantType::Q4_0 => ("q4_0", 32, 18, [16, 2, 0, 0]),
         QuantType::Q4_1 => ("q4_1", 32, 20, [16, 4, 0, 0]),
@@ -39,13 +90,21 @@ pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
         QuantType::Q4Z32 | QuantType::Q4ZP32 => ("q4z32", 32, 19, [16, 4, 0, 0]),
         QuantType::Q4Z64 | QuantType::Q4ZP64 => ("q4z64", 64, 35, [32, 4, 0, 0]),
         QuantType::Q4Z128 | QuantType::Q4ZP128 => ("q4z128", 128, 67, [64, 4, 0, 0]),
+        QuantType::Nf4B64 => ("nf4b64", 64, 36, [32, 4, 0, 0]),
+        QuantType::Nf4B128 => ("nf4b128", 128, 68, [64, 4, 0, 0]),
+        QuantType::Fp4B64 => ("fp4b64", 64, 36, [32, 4, 0, 0]),
+        QuantType::Fp4B128 => ("fp4b128", 128, 68, [64, 4, 0, 0]),
+        QuantType::Int8Row => ("int8r", 64, 68, [64, 4, 0, 0]),
         _ => return None,
     };
     Some(FormatInfo {
         tag,
         qk,
+        src_qk: qk,
         src_block_bytes: src,
         plane_bytes: planes,
+        geometry: Geometry::Planar,
+        float_chunk: matches!(quant, QuantType::Nf4B64 | QuantType::Nf4B128 | QuantType::Fp4B64 | QuantType::Fp4B128),
     })
 }
 
@@ -74,6 +133,21 @@ pub fn supported_formats() -> &'static [QuantType] {
     ]
 }
 
+/// Formats added for the native formats of the other backends: bitsandbytes NF4 / FP4 / int8, block-wise FP8 (any tile shape is one entry of the capability
+/// list, see `BackendCapabilities::supports_quant`) and the MLX affine types with a group of 32, 64 or 128.
+pub fn extended_formats() -> Vec<QuantType> {
+    let mut all = vec![
+        QuantType::Nf4B64,
+        QuantType::Nf4B128,
+        QuantType::Fp4B64,
+        QuantType::Fp4B128,
+        QuantType::Int8Row,
+        QuantType::Fp8Block,
+    ];
+    all.extend(QuantType::mlx_affine_common());
+    all
+}
+
 /// Where the planes of a `rows x cols` weight lie in the device buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceLayout {
@@ -86,10 +160,31 @@ pub struct DeviceLayout {
     pub plane_word_offset: [u32; 4],
     /// Size of the device buffer (a multiple of 16).
     pub total_bytes: usize,
+    /// Format parameter the shader reads as push constant `off2` (0 = none, the offset of plane 2 is passed instead): MLX `group / 32 | bf16 << 16`,
+    /// block-wise FP8 the number of columns of a tile.
+    pub param: u32,
 }
 
 fn invalid(msg: String) -> BackendError {
     BackendError::InvalidShape(msg)
+}
+
+/// Bytes of plane `i` of a `rows x cols` weight (before the padding to 16 bytes).
+fn plane_len(info: &FormatInfo, rows: usize, cols: usize, i: usize) -> Option<usize> {
+    let blocks = rows.checked_mul(cols / info.qk)?;
+    match info.geometry {
+        Geometry::Planar => blocks.checked_mul(info.plane_bytes[i]),
+        Geometry::Mlx { group, .. } => match i {
+            0 => blocks.checked_mul(info.plane_bytes[0]),
+            1 => rows.checked_mul(cols / group as usize)?.checked_mul(4),
+            _ => Some(0),
+        },
+        Geometry::Fp8b { block_cols, .. } => match i {
+            0 => rows.checked_mul(cols),
+            1 => rows.checked_mul(cols.div_ceil(block_cols))?.checked_mul(4),
+            _ => Some(0),
+        },
+    }
 }
 
 impl DeviceLayout {
@@ -98,23 +193,27 @@ impl DeviceLayout {
         if rows == 0 || cols == 0 {
             return Err(invalid(format!("empty {quant:?} weight {rows} x {cols}")));
         }
-        if !cols.is_multiple_of(info.qk) {
+        if !cols.is_multiple_of(info.qk) || !cols.is_multiple_of(info.src_qk) {
             return Err(invalid(format!(
                 "{quant:?} needs a multiple of {} columns, got {cols}",
-                info.qk
+                info.qk.max(info.src_qk)
             )));
         }
+        // a chunk of 8 codes must not straddle two tiles
+        if let Geometry::Fp8b { block_cols, .. } = info.geometry {
+            if !block_cols.is_multiple_of(8) {
+                return Err(invalid(format!("{quant:?}: tiles of {block_cols} columns are narrower than a chunk of 8")));
+            }
+        }
         let blocks_per_row = cols / info.qk;
-        let blocks = rows
-            .checked_mul(blocks_per_row)
+        rows.checked_mul(blocks_per_row)
             .ok_or_else(|| invalid("weight block count overflows".into()))?;
         let mut offset = 0usize;
         let mut plane_word_offset = [0u32; 4];
-        for (i, &bytes) in info.plane_bytes.iter().enumerate() {
-            plane_word_offset[i] = u32::try_from(offset / 4)
+        for (i, slot) in plane_word_offset.iter_mut().enumerate() {
+            *slot = u32::try_from(offset / 4)
                 .map_err(|_| invalid("weight larger than 16 GiB".into()))?;
-            let size = blocks
-                .checked_mul(bytes)
+            let size = plane_len(&info, rows, cols, i)
                 .ok_or_else(|| invalid("weight size overflows".into()))?
                 .next_multiple_of(16);
             offset = offset
@@ -126,6 +225,11 @@ impl DeviceLayout {
                 "{rows} x {cols} weight exceeds 32-bit word indexing"
             )));
         }
+        let param = match info.geometry {
+            Geometry::Planar => 0,
+            Geometry::Mlx { group, bf16, .. } => (group / 32) | (u32::from(bf16) << 16),
+            Geometry::Fp8b { block_cols, .. } => block_cols as u32,
+        };
         Ok(Self {
             info,
             rows,
@@ -133,6 +237,7 @@ impl DeviceLayout {
             blocks_per_row,
             plane_word_offset,
             total_bytes: offset,
+            param,
         })
     }
 
@@ -165,13 +270,16 @@ pub fn rows_per_slice(
     max_range: usize,
 ) -> Result<usize, BackendError> {
     let info = format_info(quant).ok_or(BackendError::UnsupportedQuant(quant))?;
-    if cols == 0 || !cols.is_multiple_of(info.qk) {
+    if cols == 0 || !cols.is_multiple_of(info.qk) || !cols.is_multiple_of(info.src_qk) {
         return Err(invalid(format!(
             "{quant:?} needs a multiple of {} columns, got {cols}",
-            info.qk
+            info.qk.max(info.src_qk)
         )));
     }
-    let per_row: usize = info.plane_bytes.iter().sum::<usize>() * (cols / info.qk);
+    let per_row: usize = match info.geometry {
+        Geometry::Planar => info.plane_bytes.iter().sum::<usize>() * (cols / info.qk),
+        _ => (0..4).map(|i| plane_len(&info, 1, cols, i).unwrap_or(0)).sum(),
+    };
     // planes are padded to 16 bytes each: keep a margin of 4 x 16 bytes
     let rows = max_range.saturating_sub(64) / per_row.max(1);
     Ok((rows / 64 * 64).max(64))
@@ -233,6 +341,62 @@ fn q4z_codes(src: &[u8], dst: &mut [u8]) {
     }
 }
 
+/// Rows `first .. first + n` of a block-wise FP8 weight (`raw` = the whole tensor with codes, tile scales and trailer, one matrix) in the device layout: the codes
+/// of the rows, and one f32 scale per row and tile column (the scale of the tile, repeated for the rows of the tile).
+fn pack_fp8b(quant: QuantType, raw: &[u8], rows: usize, cols: usize, first: usize, n: usize) -> Result<PackedWeight, BackendError> {
+    let kind = quant.to_gguf_type_id();
+    let tiles = fllm_gguf_probe::Fp8bLayout::parse(kind, raw).map_err(invalid)?;
+    if tiles.slabs != 1 || tiles.rows != rows || tiles.cols != cols {
+        return Err(invalid(format!(
+            "{quant:?} weight holds {} matrices of {} x {}, one {rows} x {cols} matrix was expected",
+            tiles.slabs, tiles.rows, tiles.cols
+        )));
+    }
+    if n == 0 || first + n > rows {
+        return Err(invalid(format!("rows {first}..{} outside the {rows} rows of the weight", first + n)));
+    }
+    let layout = DeviceLayout::new(quant, n, cols)?;
+    let mut out = vec![0u8; layout.total_bytes];
+    put(&mut out, 0, &raw[first * cols..(first + n) * cols]);
+    let scales = layout.plane_byte_offset(1);
+    let tile_cols = tiles.tile_cols();
+    for r in 0..n {
+        for t in 0..tile_cols {
+            let s = tiles.tile_index(0, first + r, t * tiles.block_cols);
+            let at = tiles.scale_offset() + s * 4;
+            put(&mut out, scales + (r * tile_cols + t) * 4, &raw[at..at + 4]);
+        }
+    }
+    Ok(PackedWeight { layout, bytes: out, perm: None })
+}
+
+/// [`pack_fp8b`] for the rows `first .. first + n` when `quant` is a block-wise FP8 type (`None` for every other format: the caller slices the file rows itself).
+pub fn pack_fp8b_slice(quant: QuantType, raw: &[u8], rows: usize, cols: usize, first: usize, n: usize) -> Option<Result<PackedWeight, BackendError>> {
+    matches!(format_info(quant)?.geometry, Geometry::Fp8b { .. }).then(|| pack_fp8b(quant, raw, rows, cols, first, n))
+}
+
+/// An MLX affine weight (`[scale][bias][codes]` per group, file order) in the device layout: the codes of all groups back to back (a group of `group` codes is
+/// `group / 32` device blocks of `bits` words), and one word `scale | bias << 16` per group.
+fn pack_mlx(quant: QuantType, raw: &[u8], rows: usize, cols: usize) -> Result<PackedWeight, BackendError> {
+    let layout = DeviceLayout::new(quant, rows, cols)?;
+    let info = layout.info;
+    let Geometry::Mlx { bits, group, .. } = info.geometry else {
+        return Err(BackendError::UnsupportedQuant(quant));
+    };
+    let groups = rows * (cols / group as usize);
+    if raw.len() != groups * info.src_block_bytes {
+        return Err(invalid(format!("{quant:?} {rows} x {cols} needs {} bytes, got {}", groups * info.src_block_bytes, raw.len())));
+    }
+    let code_bytes = group as usize * bits as usize / 8;
+    let mut out = vec![0u8; layout.total_bytes];
+    let (plane0, plane1) = (layout.plane_byte_offset(0), layout.plane_byte_offset(1));
+    for (g, b) in raw.chunks_exact(info.src_block_bytes).enumerate() {
+        put(&mut out, plane0 + g * code_bytes, &b[4..]);
+        put(&mut out, plane1 + g * 4, &b[0..4]);
+    }
+    Ok(PackedWeight { layout, bytes: out, perm: None })
+}
+
 /// Converts the raw GGUF bytes of a `rows x cols` weight to the device layout. For Q4ZP the permutation table that follows the blocks in the
 /// file is returned separately.
 pub fn pack_weight(
@@ -243,6 +407,11 @@ pub fn pack_weight(
 ) -> Result<PackedWeight, BackendError> {
     let layout = DeviceLayout::new(quant, rows, cols)?;
     let info = layout.info;
+    match info.geometry {
+        Geometry::Fp8b { .. } => return pack_fp8b(quant, raw, rows, cols, 0, rows),
+        Geometry::Mlx { .. } => return pack_mlx(quant, raw, rows, cols),
+        Geometry::Planar => {}
+    }
     let blocks = layout.blocks();
     let block_len = blocks * info.src_block_bytes;
     let perm_len = if quant.is_q4zp() { cols * 4 } else { 0 };
@@ -334,6 +503,11 @@ pub fn pack_weight(
                 put(&mut out, at(0, g), &b[1..17]);
                 out[at(1, g)] = b[0];
             }
+            // bitsandbytes: `[f32 scale][codes]` into a plane of codes and a plane of scales
+            QuantType::Nf4B64 | QuantType::Nf4B128 | QuantType::Fp4B64 | QuantType::Fp4B128 | QuantType::Int8Row => {
+                put(&mut out, at(0, g), &b[4..]);
+                put(&mut out, at(1, g), &b[0..4]);
+            }
             QuantType::NvFp4 => {
                 put(&mut out, at(0, g), &b[4..36]);
                 put(&mut out, at(1, g), &b[0..4]);
@@ -379,7 +553,14 @@ pub fn pack_weight_slices(
     rows_per_slice: usize,
 ) -> Result<Vec<WeightSlice>, BackendError> {
     let layout = DeviceLayout::new(quant, rows, cols)?;
-    let row_bytes = layout.blocks_per_row * layout.info.src_block_bytes;
+    if matches!(layout.info.geometry, Geometry::Fp8b { .. }) {
+        let step = rows_per_slice.max(1);
+        return (0..rows)
+            .step_by(step)
+            .map(|first| Ok(WeightSlice { row_base: first, packed: pack_fp8b(quant, raw, rows, cols, first, step.min(rows - first))? }))
+            .collect();
+    }
+    let row_bytes = (cols / layout.info.src_qk) * layout.info.src_block_bytes;
     let block_len = rows * row_bytes;
     let perm_len = if quant.is_q4zp() { cols * 4 } else { 0 };
     if raw.len() != block_len + perm_len {

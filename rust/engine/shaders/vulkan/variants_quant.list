@@ -123,3 +123,60 @@ mmq_nvfp4_i mm_q.comp -DFMT_NVFP4=1
 mmq_q4z32_i mm_q.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=32
 mmq_q4z64_i mm_q.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=64
 mmq_q4z128_i mm_q.comp -DFMT_Q4Z=1 -DQ4Z_GROUP=128
+
+# Native formats of the other backends (docs/gpu-backends.md): block-wise FP8, bitsandbytes NF4 / FP4 / int8, MLX affine group quantization.
+# FP8B, NF4 and FP4 decode to floats (E4M3 values and code books are no small integers): only the f32 shaders mv_<fmt>_s / mm_<fmt>_s exist for them.
+# INT8R and MLX (one shader per bit width; the group size and the scale type travel in the push constants) decode to int8 lanes: all variants.
+mv_fp8b_s mv_scalar.comp -DFMT_FP8B=1
+mm_fp8b_s mm_scalar.comp -DFMT_FP8B=1
+mv_nf4b64_s mv_scalar.comp -DFMT_NF4=1 -DBNB_QK=64
+mm_nf4b64_s mm_scalar.comp -DFMT_NF4=1 -DBNB_QK=64
+mv_nf4b128_s mv_scalar.comp -DFMT_NF4=1 -DBNB_QK=128
+mm_nf4b128_s mm_scalar.comp -DFMT_NF4=1 -DBNB_QK=128
+mv_fp4b64_s mv_scalar.comp -DFMT_FP4=1 -DBNB_QK=64
+mm_fp4b64_s mm_scalar.comp -DFMT_FP4=1 -DBNB_QK=64
+mv_fp4b128_s mv_scalar.comp -DFMT_FP4=1 -DBNB_QK=128
+mm_fp4b128_s mm_scalar.comp -DFMT_FP4=1 -DBNB_QK=128
+
+mv_int8r_s mv_scalar.comp -DFMT_INT8R=1
+mv_int8r_i mv_idot.comp -DFMT_INT8R=1
+mm_int8r_s mm_scalar.comp -DFMT_INT8R=1
+mm_int8r_i mm_idot.comp -DFMT_INT8R=1
+mm_int8r_c mm_coopmat.comp -DFMT_INT8R=1 #optional
+mmq_int8r_i mm_q.comp -DFMT_INT8R=1
+mv_mlx2_s mv_scalar.comp -DFMT_MLX=1 -DMLX_BITS=2
+mv_mlx2_i mv_idot.comp -DFMT_MLX=1 -DMLX_BITS=2
+mm_mlx2_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=2
+mm_mlx2_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=2
+mm_mlx2_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=2 #optional
+mmq_mlx2_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=2
+mv_mlx3_s mv_scalar.comp -DFMT_MLX=1 -DMLX_BITS=3
+mv_mlx3_i mv_idot.comp -DFMT_MLX=1 -DMLX_BITS=3
+mm_mlx3_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=3
+mm_mlx3_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=3
+mm_mlx3_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=3 #optional
+mmq_mlx3_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=3
+mv_mlx4_s mv_scalar.comp -DFMT_MLX=1 -DMLX_BITS=4
+mv_mlx4_i mv_idot.comp -DFMT_MLX=1 -DMLX_BITS=4
+mm_mlx4_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=4
+mm_mlx4_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=4
+mm_mlx4_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=4 #optional
+mmq_mlx4_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=4
+mv_mlx5_s mv_scalar.comp -DFMT_MLX=1 -DMLX_BITS=5
+mv_mlx5_i mv_idot.comp -DFMT_MLX=1 -DMLX_BITS=5
+mm_mlx5_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=5
+mm_mlx5_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=5
+mm_mlx5_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=5 #optional
+mmq_mlx5_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=5
+mv_mlx6_s mv_scalar.comp -DFMT_MLX=1 -DMLX_BITS=6
+mv_mlx6_i mv_idot.comp -DFMT_MLX=1 -DMLX_BITS=6
+mm_mlx6_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=6
+mm_mlx6_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=6
+mm_mlx6_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=6 #optional
+mmq_mlx6_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=6
+mv_mlx8_s mv_scalar.comp -DFMT_MLX=1 -DMLX_BITS=8
+mv_mlx8_i mv_idot.comp -DFMT_MLX=1 -DMLX_BITS=8
+mm_mlx8_s mm_scalar.comp -DFMT_MLX=1 -DMLX_BITS=8
+mm_mlx8_i mm_idot.comp -DFMT_MLX=1 -DMLX_BITS=8
+mm_mlx8_c mm_coopmat.comp -DFMT_MLX=1 -DMLX_BITS=8 #optional
+mmq_mlx8_i mm_q.comp -DFMT_MLX=1 -DMLX_BITS=8

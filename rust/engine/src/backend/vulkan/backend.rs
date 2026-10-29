@@ -22,7 +22,7 @@ pub use shared::{is_exact_math, set_exact_math};
 
 use super::stream::VulkanStream;
 use crate::backend::vulkan::instance::{VkContext, VkError};
-use crate::backend::vulkan::weights::supported_formats;
+use crate::backend::vulkan::weights::{extended_formats, supported_formats};
 use crate::backend::{log_once, Backend, BackendCapabilities, BackendError, DeviceBuffer, DeviceKvCache, DeviceWeight, QuantType, Stream};
 use mem::{view_of, VkMem};
 use shared::Shared;
@@ -34,6 +34,10 @@ pub fn native_quants() -> Vec<QuantType> {
     quants.extend_from_slice(supported_formats());
     // IQ4_XS blocks are converted to IQ4_NL exactly on upload
     quants.push(QuantType::IQ4_XS);
+    // bitsandbytes NF4 / FP4 / int8, block-wise FP8 and MLX affine types (shaders/vulkan/_q_fmt_{nf4,int8r,fp8b,mlx}.glsl); per-row scaled FP8 (FP8M)
+    // is block-wise FP8 with one tile per row (converted on upload, `backend/upload.rs`)
+    quants.extend(extended_formats());
+    quants.push(QuantType::Fp8Marlin);
     quants
 }
 

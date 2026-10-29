@@ -42,12 +42,17 @@ void main() {
             const uint row = m0 + ml;
             float vals[8];
             [[unroll]] for (uint i = 0; i < 8; ++i) vals[i] = 0.0;
-            if (row < p.rows) {
+            // (a row that is not a multiple of BK long, FP8 with cols = 8 mod 16: the chunk past the end of the row is zero, not the next row)
+            if (row < p.rows && k0 + kc * 8u < p.cols) {
                 const uint kk = k0 + kc * 8u;
+#ifdef FLOAT_CHUNK
+                wchunk_f(row * p.nb + kk / QK, (kk % QK) >> 3, vals);
+#else
                 uint p0, p1;
                 float ws, wm;
                 wchunk(row * p.nb + kk / QK, (kk % QK) >> 3, p0, p1, ws, wm);
                 chunk_floats(p0, p1, ws, wm, vals);
+#endif
             }
             [[unroll]] for (uint i = 0; i < 8; ++i) As[(kc * 8u + i) * 16u + (ml >> 2)][ml & 3u] = vals[i];
         }
@@ -57,7 +62,7 @@ void main() {
             const uint kq = t & 3u;
             const uint token = n0 + nl;
             vec4 v = vec4(0.0);
-            if (token < p.batch) v = xv[(token * p.cols + k0 + kq * 4u) >> 2];
+            if (token < p.batch && k0 + kq * 4u < p.cols) v = xv[(token * p.cols + k0 + kq * 4u) >> 2];
             [[unroll]] for (uint i = 0; i < 4; ++i) Bs[(kq * 4u + i) * 16u + (nl >> 2)][nl & 3u] = v[i];
         }
         barrier();

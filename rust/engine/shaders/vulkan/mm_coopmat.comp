@@ -16,6 +16,9 @@ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 #include "_q_common.glsl"
 #include "_q_formats.glsl"
+#ifdef FLOAT_CHUNK
+#error "float-chunk formats (FP8, NF4, FP4) have only the f32 shaders"
+#endif
 
 #define BM 64
 #define BN 64
