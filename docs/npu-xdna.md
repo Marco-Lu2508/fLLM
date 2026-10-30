@@ -13,11 +13,11 @@ Point, Strix Halo), XDNA 1 (Phoenix / Hawk Point: a different architecture, `npu
 * **Prompt processing: yes.** The large projections `y = x . W^T` of a prompt chunk (64 or more rows) run on the NPU; everything else runs on
   the processor.
 * **Q4_0, Q4_1 and Q4_K weights stay 4-bit** (0.625 byte per weight with group scales; 1.4 GiB for the 3B model) in NPU-visible buffers and are
-  expanded inside the compute tiles, right before the multiply, on the NPU itself (round 2 below). **Other formats** (Q6_K, Q8_0, F16 ...) are
+  expanded inside the compute tiles, right before the multiply, on the NPU itself (the 4-bit section below). **Other formats** (Q6_K, Q8_0, F16 ...) are
   decoded to bf16 by the processor (fast loops for Q4_0, Q8_0, Q4_K, Q6_K, F16, BF16, F32, the generic dequantizer for the rest), held as bf16
   tiles while the budget lasts and multiplied with bf16 products at 2 TFLOPS; formats without a dequantizer (Q4Z, bitsandbytes, EXL2/3 ...)
   are computed on the processor.
-* **Decode (one row at a time): no.** The NPU is slower than the processor for it in every setup measured (round 2), so the rows stay on the CPU.
+* **Decode (one row at a time): no.** The NPU is slower than the processor for it in every setup measured (with 4-bit weights), so the rows stay on the CPU.
 * **Precision.** Default (`FLLM_XDNA_PRECISION=fast`): 4-bit weights are expanded to block floating point (eight values share an exponent, 8-bit
   mantissas) and the activations are converted the same way inside the tile; products accumulate in f32. A projection is off by about 0.75 % of
   its largest result (about the size of int8 activation quantization); the self test passes its 4e-3 tolerance, and a 714-token prompt through
@@ -127,12 +127,12 @@ converting activations, 1.3 s packing; the rest of the prompt (attention, norms)
 The `--device npu` hybrid backend was checked by the self test only: loading Llama-3.2-3B into it needed more than 9 GB (the reference CPU
 backend's copies plus the NPU registry) on a 14 GB machine that also hosts the GPU, so a whole-model run was not made.
 
-## Round 2: weights packed on the NPU, the block-floating-point MAC (2026-10-30)
+## 4-bit weights on the NPU: weights packed on the NPU, the block-floating-point MAC (2026-10-30)
 
 Goal set after the first round: close the gap to FastFlowLM (306 prompt tokens/s on this 3B model). What was measured and built, in the order it
 was found.
 
-**Where the time went (profile of round 1, bf16 weights resident, 1180-token prompt, 6.6 s).** The NPU itself ran at 2.0 TFLOPS and was busy
+**Where the time went (profile of the first version, bf16 weights resident, 1180-token prompt, 6.6 s).** The NPU itself ran at 2.0 TFLOPS and was busy
 (2.9 s of waiting, 44 %); the processor spent 2.0 s on attention (30 %), 0.2 s on norms and RoPE, 1.1 s converting activations and adding partial sums.
 An ablation of the array design (kernels with the data movement removed, the multiply repeated 1, 2 and 4 times) showed that the **bf16 matmul
 kernel of the compute tile is the limit**: one k-step of a 32 x 64 x 64 tile (131 072 MACs) takes about 3 us, far below what the MAC array can do, and the
@@ -166,7 +166,7 @@ projection of 8192 outputs because every call computes 64 padded rows.
 **Whole model, Llama-3.2-3B-Instruct Q4_K_M, prompt tokens per second of the whole request** (`scripts/npu_prompt_bench.py`, random-word prompts, one
 request at a time, no other benchmark process seen in `ps`; two series each):
 
-| prompt | processor | NPU, exact products (round 1 + 4-bit) | NPU, default (block floating point) | FastFlowLM |
+| prompt | processor | NPU, exact products (first version + 4-bit) | NPU, default (block floating point) | FastFlowLM |
 |---|---|---|---|---|
 | ~1180 tokens | 117-131 | 167-169 | **222-227** | 306 (other prompt) |
 | ~400 tokens | 155-168 | 187-190 | **310-314** | 306 (other prompt) |
