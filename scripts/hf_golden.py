@@ -952,6 +952,21 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=4,
             indexer_types=["full", "shared", "full"],
         ),
+        # GLM-5-Next text model: delta layers, NoPE latent attention with the k-pool indexer (pools of 4 keys, 2 pools + tail), 3 residual streams
+        "glm5_next": lambda: T.Glm5NextConfig(
+            text_config=dict(
+                **{k: v for k, v in common.items() if k not in ("tie_word_embeddings", "num_hidden_layers")}, num_hidden_layers=6, num_attention_heads=4, num_key_value_heads=4,
+                intermediate_size=128, moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=2, topk_group=1,
+                q_lora_rank=24, kv_lora_rank=16, qk_nope_head_dim=16, qk_rope_head_dim=0, v_head_dim=16, routed_scaling_factor=1.5,
+                rms_norm_eps=1e-5, index_n_heads=4, index_head_dim=16, index_topk=8, index_kpool=4, index_kpool_always_select_tail=True,
+                layer_types=["linear_attention", "linear_attention", "indexed_attention", "indexed_attention", "linear_attention", "indexed_attention"],
+                indexer_types=["full", "full", "full", "shared", "full", "full"], mlp_layer_types=["dense", "sparse", "sparse", "sparse", "sparse", "sparse"],
+                linear_head_dim=16, linear_num_heads=4, linear_conv_kernel_dim=4, linear_lower_bound=-5.0, hc_mult=3, hc_sinkhorn_iters=6,
+                swiglu_limit=1.5,
+            ),
+            vision_config=dict(depth=1, hidden_size=32, num_heads=2, intermediate_size=64, out_hidden_size=64, projection_intermediate_size=64),
+            tie_word_embeddings=False,
+        ),
         # Ling-3.0: Kimi-style delta layers with direct bounded gates and rotary latent attention with a head-wise output gate
         "bailing_hybrid": lambda: T.BailingHybridConfig(
             **{**common, "num_hidden_layers": 4}, num_attention_heads=4, num_key_value_heads=4, intermediate_size=128,
@@ -1472,7 +1487,11 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     g = torch.Generator().manual_seed(seed + 1)
     ids = torch.randint(4, vocab, (1, TOKENS), generator=g)
     margins: list[float] = []
-    with torch.no_grad(), stable_topk(margins, getattr(cfg, "index_topk", None)):
+    topk_k = getattr(cfg, "index_topk", None)
+    text = getattr(cfg, "text_config", None)
+    if topk_k is None and getattr(text, "index_kpool", None):
+        topk_k = text.index_topk // text.index_kpool  # GLM-5-Next selects pools of keys
+    with torch.no_grad(), stable_topk(margins, topk_k):
         logits = model(ids).logits[0].float()
     if margins and min(margins) < 5e-4 and seed < 1234 + 60:
         return build(arch, out, vocab, seed + 1)

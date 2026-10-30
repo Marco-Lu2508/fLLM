@@ -27,6 +27,12 @@ pub(crate) fn is_ling(cfg: &Value) -> bool {
     cfg.get("model_type").and_then(Value::as_str) == Some("bailing_hybrid") || cfg.get("_ling").and_then(Value::as_bool) == Some(true)
 }
 
+/// GLM-5-Next text model (`glm5_next`): the same layer mix with NoPE latent attention, the k-pool indexer and manifold-constrained
+/// hyper-connections around every block.
+pub(crate) fn is_glm5next(cfg: &Value) -> bool {
+    matches!(cfg.get("model_type").and_then(Value::as_str), Some("glm5_next" | "glm5_next_text")) || cfg.get("_glm5n").and_then(Value::as_bool) == Some(true)
+}
+
 fn attn_config(cfg: &Value) -> &Value {
     cfg.get("linear_attn_config").filter(|v| v.is_object()).unwrap_or(&Value::Null)
 }
@@ -42,7 +48,7 @@ pub(crate) fn kda_layers(cfg: &Value) -> Result<Vec<bool>, String> {
             .iter()
             .map(|t| match t.as_str() {
                 Some("linear_attention") => Ok(true),
-                Some("full_attention") => Ok(false),
+                Some("full_attention" | "indexed_attention") => Ok(false),
                 other => Err(format!("unsupported Kimi-Linear layer type {other:?}")),
             })
             .collect();
@@ -84,6 +90,11 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
     let layers = kda_layers(cfg)?;
     let mut out = cfg.clone();
     out["_ling"] = is_ling(cfg).into();
+    out["_glm5n"] = is_glm5next(cfg).into();
+    if num(cfg, "qk_rope_head_dim") == Some(0) {
+        // the DeepSeek plan needs a rotary width; the metadata is corrected after it (`plan`)
+        out["qk_rope_head_dim"] = 2.into();
+    }
     out["model_type"] = "kimi_k2".into();
     out["num_hidden_layers"] = (layers.len() as u64).into();
     let copy = |out: &mut Value, to: &str, keys: &[&str]| {
@@ -141,10 +152,16 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
     ]);
     if is_ling(cfg) && cfg.get("kda_safe_gate").and_then(Value::as_bool).unwrap_or(true) {
         plan.meta.push((format!("{arch}.kda.gate_lower_bound"), Meta::F32(flt(cfg, "kda_lower_bound").unwrap_or(-5.0) as f32)));
+    } else if let Some(lb) = flt(cfg, "linear_lower_bound").filter(|_| is_glm5next(cfg)).or_else(|| attn.get("gate_lower_bound").and_then(Value::as_f64))
+    {
+        plan.meta.push((format!("{arch}.kda.gate_lower_bound"), Meta::F32(lb as f32)));
     } else if let Some(lb) = attn.get("gate_lower_bound").and_then(Value::as_f64).or_else(|| cfg.get("safe_gate_lower_bound").and_then(Value::as_f64)).or_else(|| cfg.get("gate_lower_bound").and_then(Value::as_f64)) {
         plan.meta.push((format!("{arch}.kda.gate_lower_bound"), Meta::F32(lb as f32)));
     }
     plan.kinds = kda.iter().map(|&k| if k { b'K' } else { b'A' }).collect();
+    if is_glm5next(cfg) {
+        glm5next_meta(cfg, &mut plan, arch);
+    }
     Ok(plan)
 }
 
@@ -161,10 +178,44 @@ pub(crate) fn normalize(n: &str) -> Option<String> {
     )
 }
 
+fn glm5next_meta(cfg: &Value, plan: &mut Plan, arch: &str) {
+    let u = |k: &str, v: u64| (format!("{arch}.{k}"), Meta::U32(v as u32));
+    if num(cfg, "qk_rope_head_dim") == Some(0) {
+        // NoPE latent attention: the key is the content part only
+        let nope = num(cfg, "qk_nope_head_dim").unwrap_or(0);
+        for (key, value) in &mut plan.meta {
+            if key.ends_with(".attention.key_length") || key.ends_with(".attention.key_length_mla") {
+                *value = Meta::U32(nope as u32);
+            }
+            if key.ends_with(".rope.dimension_count") {
+                *value = Meta::U32(0);
+            }
+        }
+    }
+    plan.meta.extend([
+        u("hc_mult", num(cfg, "hc_mult").unwrap_or(4)),
+        u("hc_sinkhorn_iters", num(cfg, "hc_sinkhorn_iters").unwrap_or(20)),
+        (format!("{arch}.hc_eps"), Meta::F32(flt(cfg, "hc_eps").unwrap_or(1e-6) as f32)),
+        (format!("{arch}.hc_head_mean"), Meta::Bool(true)),
+        u("attention.indexer.kpool", num(cfg, "index_kpool").unwrap_or(1)),
+        (format!("{arch}.attention.indexer.kpool_always_tail"), Meta::Bool(cfg.get("index_kpool_always_select_tail").and_then(Value::as_bool).unwrap_or(true))),
+    ]);
+    if let Some(limit) = flt(cfg, "swiglu_limit").filter(|l| *l > 0.0) {
+        plan.meta.push((format!("{arch}.expert_swiglu_clamp"), Meta::F32(limit as f32)));
+    }
+}
+
 /// Tensor names of Kimi-Linear that the generic plan does not know. `layer` is the layer index, `suf` the name below
 /// `model.layers.<layer>.`.
 pub(crate) fn map(layer: &str, suf: &str, linear: bool) -> Option<Mapped> {
     let plain = |name: &str| Some(Mapped::Tensor { name: format!("blk.{layer}.{name}"), add: 0.0 });
+    // hyper-connection tensors of GLM-5-Next
+    if let Some(hc) = suf.strip_prefix("hc_") {
+        return match hc {
+            "attn_fn" | "attn_base" | "attn_scale" | "ffn_fn" | "ffn_base" | "ffn_scale" => plain(&format!("hc_{hc}.weight")),
+            _ => None,
+        };
+    }
     let kda = suf.strip_prefix("self_attn.");
     if let Some(rest) = kda {
         // Ling-3.0: the head-wise output gate of the latent attention layers
@@ -219,6 +270,9 @@ pub(crate) fn map(layer: &str, suf: &str, linear: bool) -> Option<Mapped> {
 pub(crate) fn requirements(cfg: &Value, i: u64) -> Option<Vec<String>> {
     let kda = *kda_layers(cfg).ok()?.get(i as usize)?;
     let mut need: Vec<&str> = vec!["attn_norm.weight", "ffn_norm.weight", "attn_output.weight"];
+    if is_glm5next(cfg) {
+        need.extend(["hc_attn_fn.weight", "hc_attn_base.weight", "hc_attn_scale.weight", "hc_ffn_fn.weight", "hc_ffn_base.weight", "hc_ffn_scale.weight"]);
+    }
     if kda {
         need.extend([
             "attn_q.weight", "attn_k.weight", "attn_v.weight", "ssm_conv1d_q.weight", "ssm_conv1d_k.weight", "ssm_conv1d_v.weight",

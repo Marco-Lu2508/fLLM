@@ -203,7 +203,7 @@ impl Hc {
 
     /// Mixing weights of a batch: `(post [rows x hc], comb [rows x hc x hc], collapsed [rows x hidden])`.
     #[allow(clippy::too_many_arguments)]
-    fn compute(&self, x: &[f32], rows: usize, hc: usize, hidden: usize, norm_eps: f32, eps: f32, iters: usize) -> Result<VecTriple, String> {
+    pub(super) fn compute(&self, x: &[f32], rows: usize, hc: usize, hidden: usize, norm_eps: f32, eps: f32, iters: usize) -> Result<VecTriple, String> {
         let mut flat = x.to_vec();
         rms_plain(&mut flat, hc * hidden, norm_eps);
         let mixes = self.mix.forward(&flat)?;

@@ -47,6 +47,9 @@ def verify(arch, fllm, work, port):
     gguf = work / f"{arch}.gguf"
     subprocess.run([fllm, "convert", str(src), str(gguf), "--outtype", "f32", "--overwrite"], check=True, capture_output=True)
     tok = Tokenizer.from_file(str(src / "tokenizer.json"))
+    # multimodal checkpoints without a causal-LM class are loaded through their conditional-generation class
+    loader = getattr(T, {"glm5_next": "Glm5NextForConditionalGeneration"}.get(arch, ""), None) or T.AutoModelForCausalLM
+    model = loader.from_pretrained(src, dtype=torch.float32).eval()
     want = []
     if arch in ("rwkv6", "rwkv7"):
         # transformers has no RWKV-6/7: scripts/rwkv_reference.py is the reference

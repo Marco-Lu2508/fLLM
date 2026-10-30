@@ -24,7 +24,7 @@ mod hybrid;
 mod kda;
 mod rwkv;
 mod deepseek4;
-mod hy4;
+mod hc;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -305,6 +305,8 @@ struct Indexer {
     k_norm_bias: Vec<f32>,
     /// Per-head score weights from the layer input: `heads` rows.
     proj: Linear,
+    /// K-pool indexer (GLM-5-Next): gate scores of the pooling from the layer input (`dim` rows) and the position bias `kpool x dim`.
+    pool: Option<(Linear, Vec<f32>)>,
 }
 
 /// Indexer keys of the sparse-attention layers, one `dim`-wide row per cache slot (the slot numbering of the KV pools, so a block
@@ -387,6 +389,7 @@ impl Layer {
         }
         if let Some(ix) = &mut self.indexer {
             all.extend([&mut ix.q_b, &mut ix.k, &mut ix.proj]);
+            all.extend(ix.pool.iter_mut().map(|p| &mut p.0));
         }
         if has_attention {
             all.push(&mut self.out);
@@ -1024,8 +1027,8 @@ pub struct RustDecoder {
     row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
     /// DeepSeek-V4 attention and hyper-connection weights.
     v4: Option<Box<deepseek4::V4Model>>,
-    /// Hy4 hyper-connection weights.
-    hy4: Option<Box<hy4::Hy4Model>>,
+    /// Hyper-connection weights of Hy4 and GLM-5-Next.
+    hc: Option<Box<hc::HcModel>>,
     /// Token ids of the rows of the current pass (hash-routed experts).
     row_ids: std::sync::Mutex<Vec<i64>>,
     /// Indexer keys of the sparse-attention layers (host path).
@@ -1047,6 +1050,47 @@ type AxisTables = Vec<(Arc<Vec<f32>>, Arc<Vec<f32>>)>;
 struct MropeState {
     axes: Vec<u8>,
     axis_tables: std::sync::OnceLock<AxisTables>,
+}
+
+/// Selection of the k-pool indexer for a query that sees `n` tokens: the `topk / kpool` best complete pools (a pool is visible once its
+/// last token is) and, with `always_tail`, the tokens of the incomplete pool the query is in. `store(p)` is `[key, gate score]` of
+/// token `p`.
+fn pooled_selection<'a>(ic: &crate::config::IndexerConfig, q: &[f32], weights: &[f32], ape: &[f32], n: usize, store: impl Fn(usize) -> &'a [f32], trace: bool) -> Vec<u32> {
+    let (dim, kpool, heads) = (ic.dim, ic.kpool, weights.len());
+    let complete = n / kpool;
+    let (scale, head_scale) = ((dim as f32).powf(-0.5), (heads as f32).powf(-0.5));
+    let scored: Vec<(f32, u32)> = (0..complete)
+        .map(|pool| {
+            // softmax over the pool of (gate score + position bias), per channel, weighting the keys
+            let mut pooled = vec![0.0f32; dim];
+            for (c, out) in pooled.iter_mut().enumerate() {
+                let logits: Vec<f32> = (0..kpool).map(|j| store(pool * kpool + j)[dim + c] + ape[j * dim + c]).collect();
+                let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
+                let sum: f32 = exps.iter().sum();
+                *out = exps.iter().enumerate().map(|(j, e)| e / sum * store(pool * kpool + j)[c]).sum();
+            }
+            let mut score = 0.0f32;
+            for h in 0..heads {
+                let dot = compute::dot(&q[h * dim..(h + 1) * dim], &pooled) * scale;
+                if dot > 0.0 {
+                    score += dot * weights[h] * head_scale;
+                }
+            }
+            (score, pool as u32)
+        })
+        .collect();
+    if trace {
+        let mut all = scored.clone();
+        all.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        eprintln!("[dsa-pools] visible tokens {n}: {:?}", &all[..all.len().min(ic.topk / kpool + 2)]);
+    }
+    let mut chosen: Vec<u32> = best_positions(scored, ic.topk / kpool).into_iter().flat_map(|pool| (0..kpool as u32).map(move |j| pool * kpool as u32 + j)).collect();
+    if ic.always_tail {
+        chosen.extend(((n - n % kpool) as u32)..n as u32);
+    }
+    chosen.sort_unstable();
+    chosen
 }
 
 /// The positions of the `k` highest scores, ascending. Equal scores keep the lower position (the score of a key whose indexer heads
@@ -1984,6 +2028,11 @@ impl RustDecoder {
                             vec![0.0; ic.dim]
                         },
                         proj: linear(&format!("{p}.indexer.proj"), ic.heads, hidden)?,
+                        pool: if ic.kpool > 1 {
+                            Some((linear(&format!("{p}.indexer.pool_gate"), ic.dim, hidden)?, vector(mapping, &format!("{p}.indexer.pool_ape.weight"), ic.kpool * ic.dim)?))
+                        } else {
+                            None
+                        },
                     }))
                 }
                 _ => None,
@@ -2084,7 +2133,7 @@ impl RustDecoder {
             })
             .transpose()?;
         let v4 = if cfg.v4.is_some() { Some(Box::new(deepseek4::V4Model::load(model, &cfg)?)) } else { None };
-        let hy4 = if cfg.hy4.is_some() { Some(Box::new(hy4::Hy4Model::load(mapping, &cfg)?)) } else { None };
+        let hc = if cfg.hc.is_some() { Some(Box::new(hc::HcModel::load(mapping, &cfg)?)) } else { None };
         let mut decoder = Self {
             mtp,
             expert_cache,
@@ -2159,7 +2208,7 @@ impl RustDecoder {
             row_deepstack: std::sync::Mutex::new(None),
             row_visible_lengths: std::sync::Mutex::new(None),
             v4,
-            hy4,
+            hc,
             row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
             dsa_dense: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("dense")),
@@ -2290,7 +2339,7 @@ impl RustDecoder {
         if self.mrope.is_none() {
             return Err("multimodal positions were given to a model without M-RoPE sections".into());
         }
-        let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
+        let max_position = self.max_position();
         if p3.len() != rows || p3.iter().flatten().any(|&p| p as usize >= max_position) {
             return Err("invalid multimodal position ids".into());
         }
@@ -2510,6 +2559,15 @@ impl RustDecoder {
         missing
     }
 
+    /// The largest position the rotary tables cover; a model without rotary embeddings (NoPE latent attention) has empty tables, and the
+    /// block table bounds the positions instead.
+    fn max_position(&self) -> usize {
+        match self.rope[0].half {
+            0 => self.stride * self.block_size,
+            half => self.rope[0].cos.len() / half,
+        }
+    }
+
     /// Why layer `i` cannot run on the device (`None`: it can). Such a layer is computed by the host reference code
     /// (`host_layers`) between device layers: the residual stream is downloaded, the layer runs on the CPU with the host KV
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
@@ -2520,8 +2578,8 @@ impl RustDecoder {
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
         }
-        if cfg.hy4.is_some() {
-            return Some("Hy4 hyper-connections");
+        if cfg.hc.is_some() {
+            return Some("hyper-connections");
         }
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
@@ -3420,7 +3478,7 @@ impl RustDecoder {
         let cfg = &self.cfg;
         let hidden = cfg.hidden;
         let mtp = usize::from(self.mtp.is_some());
-        let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
+        let max_position = self.max_position();
         // The CPU path's batch checks, minus the host cache sizes.
         if rows == 0
             || lengths.len() != rows
@@ -4846,12 +4904,20 @@ impl RustDecoder {
             store.resize_with(self.cfg.layers, Vec::new);
         }
         if store[i].is_empty() {
-            store[i] = vec![0.0; self.pool_blocks * self.block_size * dim];
+            store[i] = vec![0.0; self.pool_blocks * self.block_size * ic.store_width()];
         }
+        let width = ic.store_width();
+        let gate = match &ix.pool {
+            Some((gate, _)) => gate.forward(normed)?,
+            None => Vec::new(),
+        };
         let keys = &mut store[i];
         for (r, &position) in positions.iter().enumerate() {
             let slot = slot_of(r, position);
-            keys[slot * dim..(slot + 1) * dim].copy_from_slice(&k[r * dim..(r + 1) * dim]);
+            keys[slot * width..slot * width + dim].copy_from_slice(&k[r * dim..(r + 1) * dim]);
+            if !gate.is_empty() {
+                keys[slot * width + dim..(slot + 1) * width].copy_from_slice(&gate[r * dim..(r + 1) * dim]);
+            }
         }
         let keys: &[f32] = keys;
         let (scale, head_scale) = ((dim as f32).powf(-0.5), (heads as f32).powf(-0.5));
@@ -4861,13 +4927,16 @@ impl RustDecoder {
             .into_par_iter()
             .map(|r| {
                 let n = lengths[r] as usize;
-                if n <= ic.topk {
+                if n <= ic.topk && ix.pool.is_none() {
                     return None;
+                }
+                if let Some((_, ape)) = &ix.pool {
+                    return Some(pooled_selection(ic, &q[r * heads * dim..(r + 1) * heads * dim], &weights[r * heads..(r + 1) * heads], ape, n, |p| &keys[slot_of(r, p) * width..(slot_of(r, p) + 1) * width], trace));
                 }
                 let scored: Vec<(f32, u32)> = (0..n)
                     .map(|p| {
                         let slot = slot_of(r, p);
-                        let key = &keys[slot * dim..(slot + 1) * dim];
+                        let key = &keys[slot * width..slot * width + dim];
                         let mut score = 0.0f32;
                         for h in 0..heads {
                             let dot = compute::dot(&q[(r * heads + h) * dim..(r * heads + h + 1) * dim], key) * scale;
@@ -4899,7 +4968,7 @@ impl RustDecoder {
     /// Bytes one cache block adds to an exported block for the indexer keys (0 without sparse attention).
     pub(crate) fn dsa_block_bytes(&self) -> usize {
         match (&self.cfg.indexer, self.dsa_dense) {
-            (Some(ic), false) => self.layers.iter().filter(|l| l.indexer.is_some()).count() * self.block_size * ic.dim * 4,
+            (Some(ic), false) => self.layers.iter().filter(|l| l.indexer.is_some()).count() * self.block_size * ic.store_width() * 4,
             _ => 0,
         }
     }
@@ -4911,7 +4980,7 @@ impl RustDecoder {
         if store.len() < self.cfg.layers {
             store.resize_with(self.cfg.layers, Vec::new);
         }
-        let per_block = self.block_size * ic.dim;
+        let per_block = self.block_size * ic.store_width();
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.indexer.is_none() {
                 continue;
@@ -6715,7 +6784,10 @@ impl RustDecoder {
                     let width = g.len() / (input.len() / self.cfg.hidden).max(1);
                     gemma::gaussian_top_k(g, width, factor);
                 }
-                if self.cfg.activation == Activation::Silu {
+                if self.cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some() && m.swiglu_clamp_shared) {
+                    // the dense layers of a model with a clamped SwiGLU clamp like its shared expert (GLM-5-Next)
+                    self.gate_activation_clamped(g, u, true, true);
+                } else if self.cfg.activation == Activation::Silu {
                     crate::cpu_elementwise::swiglu(g, u);
                 } else {
                     let activation = self.cfg.activation;
@@ -6885,7 +6957,7 @@ impl RustDecoder {
         }
         let cfg = &self.cfg;
         let rows = ids.len();
-        let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
+        let max_position = self.max_position();
         if rows == 0
             || lengths.len() != rows
             || tables.len() != rows * self.stride
@@ -6977,8 +7049,8 @@ impl RustDecoder {
             let stage_layers = self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()));
             if cfg.v4.is_some() {
                 x = self.v4_layers(&x, ids, &positions, tables, lengths)?;
-            } else if cfg.hy4.is_some() {
-                x = self.hy4_layers(&x, &positions, tables, lengths, key, value)?;
+            } else if cfg.hc.is_some() {
+                x = self.hc_layers(&x, &positions, tables, lengths, key, value)?;
             } else {
                 self.host_layers(stage_layers, &mut x, &positions, tables, lengths, key, value, &mut trace, ple_inputs.as_deref(), &mut streams)?;
             }
@@ -7547,7 +7619,7 @@ impl RustDecoder {
 
     /// Cache positions and slots of the rows (the validation of `forward_backend_inner`).
     fn step_meta(&self, lengths: &[i64], tables: &[i64]) -> Result<(Vec<usize>, Vec<usize>), String> {
-        let max_position = self.rope[0].cos.len() / self.rope[0].half.max(1);
+        let max_position = self.max_position();
         let mut positions = Vec::with_capacity(lengths.len());
         let mut slots = Vec::with_capacity(lengths.len());
         for (r, &length) in lengths.iter().enumerate() {
@@ -7818,7 +7890,22 @@ fn dump_layer(tag: &str, layer: usize, x: &[f32]) {
 
 #[cfg(test)]
 mod best_positions_tests {
-    use super::best_positions;
+    use super::{best_positions, pooled_selection};
+
+    #[test]
+    fn pool_selection_keeps_the_best_pools_and_the_tail() {
+        let ic = crate::config::IndexerConfig { heads: 1, dim: 2, topk: 4, neox: false, rope_last: false, norm_eps: 1e-6, kpool: 2, always_tail: true };
+        // token p stores [key, gate]; the keys grow with the pool number so that later pools score higher
+        let tokens: Vec<[f32; 4]> = (0..7).map(|p| [(p / 2) as f32 + 1.0, 1.0, 0.0, 0.0]).collect();
+        let ape = [0.0f32; 4];
+        let pick = |n: usize| pooled_selection(&ic, &[1.0, 1.0], &[1.0], &ape, n, |p| &tokens[p][..], false);
+        // 7 visible tokens: three complete pools (0..2, 2..4, 4..6), two are kept (the later ones) and token 6 is the tail
+        assert_eq!(pick(7), vec![2, 3, 4, 5, 6]);
+        // 3 visible tokens: one complete pool and the tail token 2
+        assert_eq!(pick(3), vec![0, 1, 2]);
+        // 1 visible token: no pool, only the tail
+        assert_eq!(pick(1), vec![0]);
+    }
 
     #[test]
     fn keeps_the_highest_scores_in_position_order() {

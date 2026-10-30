@@ -256,15 +256,30 @@ pub struct IndexerConfig {
     pub rope_last: bool,
     /// Epsilon of the LayerNorm over the indexer keys.
     pub norm_eps: f32,
+    /// GLM-5-Next: the indexer scores pools of `kpool` keys (a softmax-weighted sum of their keys) and keeps `topk / kpool` pools; 1: no pools.
+    pub kpool: usize,
+    /// With pools: the tokens of the incomplete last pool are always selected.
+    pub always_tail: bool,
 }
 
-/// Hy4: independent hyper-connections, `hc_mult` residual streams without a mixing matrix.
+impl IndexerConfig {
+    /// Values stored per token: the key, and with pools the gate score of the pooling as well.
+    pub fn store_width(&self) -> usize {
+        if self.kpool > 1 { 2 * self.dim } else { self.dim }
+    }
+}
+
+/// Hyper-connections around the blocks of an ordinary decoder (Hy4, GLM-5-Next): `hc_mult` residual streams.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Hy4Config {
+pub struct HcConfig {
     pub hc_mult: usize,
-    /// Scale of the expansion weight: `post = magnitude * sigmoid(..) + eps`.
-    pub magnitude: f32,
+    /// `Some`: independent connections without a mixing matrix, `post = magnitude * sigmoid(..) + eps` (Hy4). `None`: manifold-constrained
+    /// connections with a Sinkhorn-projected mixing matrix and `post = 2 * sigmoid(..)` (GLM-5-Next).
+    pub magnitude: Option<f32>,
+    pub iters: usize,
     pub eps: f32,
+    /// The final collapse is the mean of the streams instead of a learned weighting.
+    pub head_mean: bool,
 }
 
 /// DeepSeek-V4: several residual streams per token (manifold-constrained hyper-connections), shared-KV multi-query attention with a
@@ -358,7 +373,7 @@ pub struct ModelConfig {
     /// Sparse-attention indexer of the MLA layers (a layer without `blk.N.indexer.*` tensors reuses the selection of the layer before).
     pub indexer: Option<IndexerConfig>,
     pub v4: Option<V4Config>,
-    pub hy4: Option<Hy4Config>,
+    pub hc: Option<HcConfig>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
     pub mamba1: Option<Mamba1Config>,
@@ -703,6 +718,8 @@ impl ModelConfig {
                 neox: key(meta, a, "attention.indexer.rope_neox").and_then(Value::as_bool).unwrap_or(false),
                 rope_last: key(meta, a, "attention.indexer.rope_last").and_then(Value::as_bool).unwrap_or(false),
                 norm_eps: float(meta, a, "attention.indexer.norm_eps").unwrap_or(1e-6),
+                kpool: uint(meta, a, "attention.indexer.kpool").unwrap_or(1).max(1),
+                always_tail: key(meta, a, "attention.indexer.kpool_always_tail").and_then(Value::as_bool).unwrap_or(true),
             }),
             _ => None,
         };
@@ -844,15 +861,13 @@ impl ModelConfig {
             mla,
             indexer,
             v4,
-            hy4: if a == "hy4" {
-                Some(Hy4Config {
-                    hc_mult: uint(meta, a, "hc_mult").ok_or("Hy4 needs hy4.hc_mult")?,
-                    magnitude: float(meta, a, "hc_magnitude").unwrap_or(2.0),
-                    eps: float(meta, a, "hc_eps").unwrap_or(1e-6),
-                })
-            } else {
-                None
-            },
+            hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
+                hc_mult,
+                magnitude: float(meta, a, "hc_magnitude"),
+                iters: uint(meta, a, "hc_sinkhorn_iters").unwrap_or(20),
+                eps: float(meta, a, "hc_eps").unwrap_or(1e-6),
+                head_mean: key(meta, a, "hc_head_mean").and_then(Value::as_bool).unwrap_or(false),
+            }),
             shortconv: parse_shortconv(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
@@ -1349,7 +1364,7 @@ pub(crate) mod tests_support {
             mla: None,
             indexer: None,
             v4: None,
-            hy4: None,
+            hc: None,
             delta: None,
             mamba: None,
             mamba1: None,

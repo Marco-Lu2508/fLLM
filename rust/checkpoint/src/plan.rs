@@ -931,7 +931,8 @@ impl Plan {
         if raw == "hy_v4" {
             return crate::hy4::plan(cfg);
         }
-        let ling_hybrid = raw == "bailing_hybrid" && cfg.get("layer_types").and_then(Value::as_array).is_some_and(|t| t.iter().any(|v| v.as_str() == Some("linear_attention")));
+        let glm5next = matches!(raw.as_str(), "glm5_next" | "glm5_next_text");
+        let ling_hybrid = glm5next || raw == "bailing_hybrid" && cfg.get("layer_types").and_then(Value::as_array).is_some_and(|t| t.iter().any(|v| v.as_str() == Some("linear_attention")));
         if ling_hybrid || matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
             return crate::kimi_linear::plan(cfg);
         }
@@ -2783,6 +2784,8 @@ impl Plan {
                     "k_norm.weight" => "k_norm.weight",
                     "k_norm.bias" => "k_norm.bias",
                     "weights_proj.weight" => "proj.weight",
+                    "index_kpool_compress_ape" => "pool_ape.weight",
+                    "index_kpool_compress_gate" => "pool_gate.weight",
                     _ => return Ok(Mapped::Skip),
                 };
                 if idx >= self.layers {
