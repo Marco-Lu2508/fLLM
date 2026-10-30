@@ -1266,6 +1266,17 @@ impl<'a> Tester<'a> {
         if self.enter("fp4sm100") {
             self.fp4sm100_cases();
         }
+        // last: the random data of the cases above does not depend on these
+        if self.enter("attention") {
+            for kind in [1, 2] {
+                for case in long_prompt_cases(kind) {
+                    let label = format!("attention {}", if case.kind == 1 { "f16" } else { "q8" });
+                    let shape = case.describe();
+                    let r = self.attention(&case);
+                    self.record(&label, &shape, r);
+                }
+            }
+        }
     }
 
     /// The fast linear kernels per format, the Marlin shapes and the shared-activation cases.
@@ -3774,7 +3785,10 @@ impl<'a> Tester<'a> {
             }
             let qb = put(backend, stream, &q)?;
             let mut out = backend.allocate_buffer(rows * heads * dv * 4)?;
-            timed(ms, stream, |s| {
+            if case.step {
+                stream.begin_step();
+            }
+            let run = timed(ms, stream, |s| {
                 s.attention_paged(
                     &mut out,
                     &qb,
@@ -3784,7 +3798,11 @@ impl<'a> Tester<'a> {
                     layer,
                     &params,
                 )
-            })?;
+            });
+            if case.step {
+                stream.end_step();
+            }
+            run?;
             get(stream, &out, rows * heads * dv)
         };
         let (device, cpu, ms) = self.both(&op)?;
@@ -3821,6 +3839,8 @@ struct AttnCase {
     scale: Option<f32>,
     /// Leading blocks that all sequences share (a common prompt prefix in the prefix cache).
     shared_blocks: usize,
+    /// Run the call inside a forward pass (`begin_step`), as the decoder does: the library then caches the block tables and groups the rows once.
+    step: bool,
 }
 
 impl AttnCase {
@@ -3843,6 +3863,7 @@ impl AttnCase {
             alibi: false,
             scale: None,
             shared_blocks: 0,
+            step: false,
         }
     }
 
@@ -3884,8 +3905,46 @@ impl AttnCase {
         if self.shared_blocks > 0 {
             s += &format!(" shared{}", self.shared_blocks);
         }
+        if self.step {
+            s += " step";
+        }
         s
     }
+}
+
+/// Runs of 16 or more rows (a prompt of 16 tokens or more) over head widths that the tensor-core prompt kernel and the decode kernels
+/// decline (16 and 80, the groups of 2 query heads per KV head), with and without the step cache of a forward pass: the general kernel has to
+/// take them. On CUDA and HIP this failed with an empty driver error inside a forward pass; only the fast pass runs these cases (the exact
+/// math skips the tensor-core branch).
+fn long_prompt_cases(kind: i32) -> Vec<AttnCase> {
+    let mut cases = Vec::new();
+    for step in [false, true] {
+        cases.push(AttnCase {
+            prefill: 16,
+            step,
+            heads: 4,
+            ..AttnCase::new(kind, 16, &[40])
+        });
+        cases.push(AttnCase {
+            prefill: 24,
+            step,
+            ..AttnCase::new(kind, 16, &[40, 30])
+        });
+        cases.push(AttnCase {
+            block_size: 5,
+            stride: 16,
+            pool_blocks: 33,
+            prefill: 18,
+            step,
+            ..AttnCase::new(kind, 80, &[61, 23])
+        });
+        cases.push(AttnCase {
+            prefill: 20,
+            step,
+            ..AttnCase::new(kind, 32, &[50])
+        });
+    }
+    cases
 }
 
 fn attention_cases() -> Vec<AttnCase> {

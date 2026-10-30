@@ -1701,7 +1701,10 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
             const int rc = fllm_attention2_try(st->s, qr, kpool_layer, vpool_layer, outr, tabs, lens, max_len, sinks, alibi, r1 - r0, heads, kv_heads, dk, dv,
                                                stride, block_size, kind, scale, softcap, window, chunk, st->ws, st->ws_bytes, kscale_base, vscale_base);
             if (rc >= 0) return rc;
-            return -1;
+            // neither decode kernel covers the shape (head width 16 or 80, say): the general kernel takes the rows. Returning -1 here made the caller
+            // of a batch of 16 or more rows of such a model fail with an empty driver error.
+            return fllm_attention_launch(st->s, qr, kpool_layer, vpool_layer, outr, tabs, lens, sinks, alibi, r1 - r0, heads, kv_heads, dk, dv, stride,
+                                         block_size, kind, kgroup, vgroup, kscale_base, vscale_base, scale, softcap, window, chunk);
         };
         if (!st->capture && !no_flash && !alibi && softcap == 0.f && window == 0 && chunk == 0 && rows >= 16 && !fllm_exact_math()) {
             // rows of one sequence (same block table, lengths growing by one) go to the tensor-core kernel; the other rows of the batch
