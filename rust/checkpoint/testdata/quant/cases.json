@@ -86,6 +86,46 @@
    256
   ]
  },
+ "ct_asym_int4_channel": {
+  "bits": 4,
+  "format": "ct_asym",
+  "group_size": 64,
+  "shape": [
+   12,
+   64
+  ],
+  "strategy": "channel"
+ },
+ "ct_asym_int4_group": {
+  "bits": 4,
+  "format": "ct_asym",
+  "group_size": 16,
+  "shape": [
+   12,
+   64
+  ],
+  "strategy": "group"
+ },
+ "ct_asym_int8_channel": {
+  "bits": 8,
+  "format": "ct_asym",
+  "group_size": 64,
+  "shape": [
+   12,
+   64
+  ],
+  "strategy": "channel"
+ },
+ "ct_asym_int8_group": {
+  "bits": 8,
+  "format": "ct_asym",
+  "group_size": 16,
+  "shape": [
+   12,
+   64
+  ],
+  "strategy": "group"
+ },
  "ct_mxfp4": {
   "format": "ct_mxfp4",
   "shape": [

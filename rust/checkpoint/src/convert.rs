@@ -143,6 +143,8 @@ pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
         Quantization::Nvfp4 => "nvfp4",
         Quantization::CtPacked { bits: 4, .. } => "int4",
         Quantization::CtPacked { .. } | Quantization::CtInt8 { .. } => "int8",
+        Quantization::CtAffine { bits: 4, .. } => "int4",
+        Quantization::CtAffine { .. } => "int8",
         Quantization::Mxfp4 | Quantization::CtMxfp4 => "mxfp4",
         Quantization::Bnb => "bitsandbytes",
         Quantization::GptqBits { .. } => "gptq",
@@ -1537,6 +1539,9 @@ pub(crate) enum Quantization {
     CtPacked { bits: u64, group: u64 },
     /// `compressed-tensors` `int-quantized` int8, symmetric; `group` as above.
     CtInt8 { group: u64 },
+    /// `compressed-tensors` integer weights with zero points (asymmetric) and/or activation ordering (`weight_g_idx`), 1 to 8 bits;
+    /// expanded to F16. `packed`: `pack-quantized` (else int8 `weight`); `zero_packed`: the zero points are bit-packed.
+    CtAffine { bits: u64, group: u64, packed: bool, zero_packed: bool },
     /// Hugging Face `mxfp4` (gpt-oss): expert weights as `_blocks`/`_scales`, rebuilt by `gptoss.rs`; other tensors dense.
     Mxfp4,
     /// `compressed-tensors` `mxfp4-pack-quantized`: OCP MXFP4 linear weights.
@@ -1611,7 +1616,7 @@ fn ct_weights(q: &Value) -> Result<Option<&Value>, String> {
 }
 
 fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
-    const HINT: &str = "supported compressed-tensors checkpoints: FP8 (float-quantized), NVFP4 and MXFP4 (nvfp4-pack-quantized, mxfp4-pack-quantized), symmetric int4/int8 weights (pack-quantized) and symmetric int8 (int-quantized); convert other formats to GGUF with llama.cpp or pick another repository";
+    const HINT: &str = "supported compressed-tensors checkpoints: FP8 (float-quantized), NVFP4 and MXFP4 (nvfp4-pack-quantized, mxfp4-pack-quantized), int4/int8 weights with or without zero points and with activation ordering (pack-quantized) and int8 (int-quantized); convert other formats to GGUF with llama.cpp or pick another repository";
     let format = q.get("format").and_then(Value::as_str).unwrap_or("");
     if q.get("sparsity_config")
         .and_then(|s| s.get("format"))
@@ -1646,12 +1651,8 @@ fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
         }
         return Err(format!("compressed-tensors float weights with {bits} bits are not supported; {HINT}"));
     }
-    if w.get("symmetric").and_then(Value::as_bool) == Some(false) {
-        return Err(format!("compressed-tensors asymmetric (zero-point) integer weights are not supported; {HINT}"));
-    }
-    if w.get("actorder").is_some_and(|a| !a.is_null() && a != "null") {
-        return Err(format!("compressed-tensors weights with activation ordering (actorder) are not supported; {HINT}"));
-    }
+    let asymmetric = w.get("symmetric").and_then(Value::as_bool) == Some(false);
+    let act_order = w.get("actorder").is_some_and(|a| !a.is_null() && a != "null" && a != "static");
     let group = match strategy {
         "group" => w
             .get("group_size")
@@ -1663,6 +1664,13 @@ fn compressed_tensors(q: &Value) -> Result<Quantization, String> {
             return Err(format!("compressed-tensors weight strategy {other:?} is not supported; {HINT}"))
         }
     };
+    if asymmetric || act_order {
+        let packed = !matches!(format, "int-quantized");
+        return match (packed, bits) {
+            (true, 1..=8) | (false, 8) => Ok(Quantization::CtAffine { bits, group, packed, zero_packed: packed && strategy != "tensor" }),
+            _ => Err(format!("compressed-tensors format {format:?} with {bits}-bit asymmetric integer weights is not supported; {HINT}")),
+        };
+    }
     match (format, bits) {
         ("int-quantized", 8) => Ok(Quantization::CtInt8 { group }),
         ("pack-quantized", 4 | 8) | ("", 4) => Ok(Quantization::CtPacked { bits, group }),
@@ -2137,6 +2145,9 @@ pub(crate) fn split_packed_cfg(
     }
     if quant == Quantization::CtMxfp4 {
         return crate::dequant::split_ct_mxfp4(all, map);
+    }
+    if let Quantization::CtAffine { bits, group, packed, zero_packed } = quant {
+        return crate::dequant_bits::split_ct_affine(all, bits as usize, group as usize, packed, zero_packed, map);
     }
     if matches!(quant, Quantization::CtPacked { .. } | Quantization::CtInt8 { .. }) {
         return split_ct_int(all, quant, map);
@@ -3316,9 +3327,11 @@ mod quantization_config_tests {
         let fp8 = ct(json!({"num_bits": 8, "type": "float", "strategy": "tensor"}), "float-quantized");
         assert_eq!(compressed_tensors(&fp8).unwrap(), Quantization::Fp8);
         let asym = ct(json!({"num_bits": 4, "type": "int", "symmetric": false, "strategy": "group", "group_size": 32}), "pack-quantized");
-        assert!(compressed_tensors(&asym).unwrap_err().contains("asymmetric"));
+        assert_eq!(compressed_tensors(&asym).unwrap(), Quantization::CtAffine { bits: 4, group: 32, packed: true, zero_packed: true });
         let order = ct(json!({"num_bits": 4, "type": "int", "symmetric": true, "strategy": "group", "group_size": 32, "actorder": "group"}), "pack-quantized");
-        assert!(compressed_tensors(&order).unwrap_err().contains("actorder"));
+        assert_eq!(compressed_tensors(&order).unwrap(), Quantization::CtAffine { bits: 4, group: 32, packed: true, zero_packed: true });
+        let asym8 = ct(json!({"num_bits": 8, "type": "int", "symmetric": false, "strategy": "channel"}), "int-quantized");
+        assert_eq!(compressed_tensors(&asym8).unwrap(), Quantization::CtAffine { bits: 8, group: 0, packed: false, zero_packed: false });
         let fp4 = ct(json!({"num_bits": 4, "type": "float", "strategy": "tensor_group", "group_size": 16}), "nvfp4-pack-quantized");
         assert_eq!(compressed_tensors(&fp4).unwrap(), Quantization::Nvfp4);
         let mx = ct(json!({"num_bits": 4, "type": "float", "strategy": "group", "group_size": 32, "scale_dtype": "torch.uint8"}), "mxfp4-pack-quantized");

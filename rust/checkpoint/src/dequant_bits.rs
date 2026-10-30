@@ -372,6 +372,217 @@ pub(crate) fn split_gptq_bits(
     Ok((dense, packed))
 }
 
+// ---------------------------------------------------------------- compressed-tensors with zero points / activation order
+
+/// `compressed-tensors` integer weights that the symmetric reader (`symint.rs`) does not cover: asymmetric zero points
+/// (`weight_zero_point`) and activation ordering (`weight_g_idx`, the quantization group of every input column).
+///
+/// * `pack-quantized`: `weight_packed` `[out, ceil(in * bits / 32)]` int32, the codes of one row as a dense little-endian
+///   bit stream along the inputs, each stored as `code + 2^(bits-1)`. The zero points of the group / channel strategies are
+///   packed the same way along the *output* dimension: `weight_zero_point` `[ceil(out * bits / 32), groups]`.
+/// * `int-quantized` int8: `weight` `[out, in]` signed codes, `weight_zero_point` unpacked `[out, groups]` (or one value).
+///
+/// `value = (code - zero_point) * scale`.
+#[derive(Debug)]
+pub(crate) struct CtAffine {
+    codes: Payload,
+    /// Bits per packed code; `None` for plain int8 codes.
+    bits: Option<usize>,
+    scales: Vec<f32>,
+    /// One zero point per scale (empty: all zero).
+    zeros: Vec<i32>,
+    g_idx: Option<Vec<u32>>,
+    rows: usize,
+    cols: usize,
+    group: usize,
+    per_tensor: bool,
+}
+
+impl CtAffine {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        codes: Payload,
+        bits: Option<usize>,
+        scales: Vec<f32>,
+        zeros: Vec<i32>,
+        g_idx: Option<Vec<u32>>,
+        rows: usize,
+        cols: usize,
+        group: usize,
+    ) -> Result<Self, String> {
+        if rows == 0 || cols == 0 || group == 0 || !cols.is_multiple_of(group) || bits.is_some_and(|b| !(1..=8).contains(&b)) {
+            return Err(format!("unsupported integer layout: {rows} x {cols}, group {group}, bits {bits:?}"));
+        }
+        let groups = cols / group;
+        let row_bytes = bits.map_or(cols, |b| (cols * b).div_ceil(32) * 4);
+        if codes.as_slice().len() != rows * row_bytes {
+            return Err(format!("weight has {} bytes, expected {}", codes.as_slice().len(), rows * row_bytes));
+        }
+        let per_tensor = scales.len() == 1 && rows * groups != 1;
+        if scales.len() != rows * groups && !per_tensor {
+            return Err(format!("weight_scale has {} values, expected {} ([{rows}, {groups}]) or 1", scales.len(), rows * groups));
+        }
+        if !zeros.is_empty() && zeros.len() != scales.len() {
+            return Err(format!("weight_zero_point has {} values, expected {}", zeros.len(), scales.len()));
+        }
+        if let Some(g) = &g_idx {
+            if g.len() != cols || g.iter().any(|&x| x as usize >= groups) {
+                return Err("weight_g_idx does not match the input dimension and group count".into());
+            }
+        }
+        Ok(Self { codes, bits, scales, zeros, g_idx, rows, cols, group, per_tensor })
+    }
+}
+
+impl Dequant for CtAffine {
+    fn element_count(&self) -> usize {
+        self.rows * self.cols
+    }
+
+    fn decode_chunk(&self, start: usize, dst: &mut [f32]) -> Result<(), String> {
+        let end = start.checked_add(dst.len()).filter(|&e| e <= self.element_count()).ok_or("integer weight range exceeds the tensor")?;
+        let groups = self.cols / self.group;
+        let bytes = self.codes.as_slice();
+        let row_bytes = self.bits.map_or(self.cols, |b| (self.cols * b).div_ceil(32) * 4);
+        for (slot, e) in dst.iter_mut().zip(start..end) {
+            let (r, c) = (e / self.cols, e % self.cols);
+            let q = match self.bits {
+                Some(b) => read_bits(&bytes[r * row_bytes..(r + 1) * row_bytes], c * b, b) as i32 - (1 << (b - 1)),
+                None => i32::from(bytes[r * row_bytes + c] as i8),
+            };
+            let g = self.g_idx.as_ref().map_or(c / self.group, |t| t[c] as usize);
+            let at = if self.per_tensor { 0 } else { r * groups + g };
+            let zero = self.zeros.get(at).copied().unwrap_or(0);
+            *slot = (q - zero) as f32 * self.scales[at];
+        }
+        Ok(())
+    }
+}
+
+/// Integer value `index` of a zero-point tensor that is stored plain (not bit-packed).
+fn plain_ints(t: &Tensor) -> Result<Vec<i32>, String> {
+    let b = t.payload.as_slice();
+    match t.dtype.as_str() {
+        "I8" => Ok(b.iter().map(|&v| i32::from(v as i8)).collect()),
+        "U8" => Ok(b.iter().map(|&v| i32::from(v)).collect()),
+        "I16" => Ok(b.as_chunks::<2>().0.iter().map(|c| i32::from(i16::from_le_bytes(*c))).collect()),
+        "I32" => Ok(b.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()),
+        "I64" => Ok(b.as_chunks::<8>().0.iter().map(|c| i64::from_le_bytes(*c) as i32).collect()),
+        other => Err(format!("{}: zero points must be integers, found {other}", t.name)),
+    }
+}
+
+/// `compressed-tensors` integer weights with zero points and/or `weight_g_idx`: `pack-quantized` (`packed`: `weight_packed`
+/// with `bits` bits) or int8 `weight`. `zero_packed`: the zero points are bit-packed along the output dimension.
+pub(crate) fn split_ct_affine(
+    all: Vec<Tensor>,
+    bits: usize,
+    group: usize,
+    packed: bool,
+    zero_packed: bool,
+    map: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<(Vec<Tensor>, Vec<crate::convert::PackedGroup>), String> {
+    let mut dense = Vec::new();
+    let mut parts: HashMap<String, HashMap<&'static str, Tensor>> = HashMap::new();
+    for t in all {
+        let n = t.name.as_str();
+        let weight_name = if packed { ".weight_packed" } else { ".weight" };
+        let suffix = [".weight_scale", ".weight_zero_point", ".weight_g_idx", ".weight_shape", weight_name]
+            .into_iter()
+            .find(|s| n.ends_with(s) && (*s != ".weight" || t.dtype == "I8"));
+        match suffix {
+            Some(s) => {
+                let base = n[..n.len() - s.len()].to_owned();
+                let key = match s {
+                    ".weight_scale" => "scale",
+                    ".weight_zero_point" => "zero",
+                    ".weight_g_idx" => "g_idx",
+                    ".weight_shape" => "shape",
+                    _ => "weight",
+                };
+                if parts.entry(base).or_default().insert(key, t).is_some() {
+                    return Err("duplicate compressed-tensors component".into());
+                }
+            }
+            // activation quantization parameters are not stored: activations are quantized dynamically by the engine
+            None if n.ends_with(".input_scale") || n.ends_with(".input_zero_point") => {}
+            None => dense.push(t),
+        }
+    }
+    let mut out = Vec::new();
+    let mut bases: Vec<_> = parts.keys().cloned().collect();
+    bases.sort();
+    for base in bases {
+        let mut p = parts.remove(&base).unwrap();
+        let w = p.remove("weight").ok_or_else(|| format!("{base}: scale or zero point without an integer weight"))?;
+        let scale = p.remove("scale").ok_or_else(|| format!("integer weight {} has no {base}.weight_scale", w.name))?;
+        if w.shape.len() != 2 {
+            return Err(format!("{}: expected a rank-2 weight", w.name));
+        }
+        let rows = w.shape[0] as usize;
+        let cols = if packed {
+            if w.dtype != "I32" {
+                return Err(format!("{} must be I32, found {}", w.name, w.dtype));
+            }
+            match p.remove("shape") {
+                Some(s) => {
+                    let dims: Vec<u64> = s.payload.as_slice().as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
+                    if dims.len() != 2 || dims[0] as usize != rows {
+                        return Err(format!("{base}.weight_shape {dims:?} does not match the packed weight"));
+                    }
+                    dims[1] as usize
+                }
+                None => w.shape[1] as usize * 32 / bits,
+            }
+        } else {
+            w.shape[1] as usize
+        };
+        let scales = floats(&scale)?;
+        let group_size = if group == 0 { cols } else { group };
+        let groups = cols / group_size.max(1);
+        let zeros = match p.remove("zero") {
+            None => Vec::new(),
+            Some(z) if packed && zero_packed => {
+                if z.dtype != "I32" || z.shape.len() != 2 || z.shape[0] as usize != (rows * bits).div_ceil(32) || z.shape[1] as usize != groups {
+                    return Err(format!("{}: expected an I32 zero-point tensor [{}, {groups}]", z.name, (rows * bits).div_ceil(32)));
+                }
+                // the bit stream of one group runs down the output rows (columns of the stored matrix)
+                let words = z.shape[0] as usize;
+                let zb = z.payload.as_slice();
+                let mut v = vec![0i32; rows * groups];
+                let mut column = Vec::with_capacity(words * 4);
+                for g in 0..groups {
+                    column.clear();
+                    for wd in 0..words {
+                        let at = (wd * groups + g) * 4;
+                        column.extend_from_slice(&zb[at..at + 4]);
+                    }
+                    for r in 0..rows {
+                        v[r * groups + g] = read_bits(&column, r * bits, bits) as i32 - (1 << (bits - 1));
+                    }
+                }
+                v
+            }
+            Some(z) => {
+                plain_ints(&z)?
+            }
+        };
+        let g_idx = match p.remove("g_idx") {
+            None => None,
+            Some(t) if t.dtype == "I32" => Some(t.payload.as_slice().as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c) as u32).collect()),
+            Some(t) => return Err(format!("{}: weight_g_idx must be I32", t.name)),
+        };
+        let d = CtAffine::new(w.payload.clone(), packed.then_some(bits), scales, zeros, g_idx, rows, cols, group_size)
+            .map_err(|e| format!("{}: {e}", w.name))?;
+        let mapped = map(&format!("{base}.weight"))?.ok_or_else(|| format!("packed tensor {:?} maps to a skipped tensor", w.name))?;
+        out.push((mapped, crate::packed_quant::PackedData::Dyn(Arc::new(d)), vec![rows as u64, cols as u64], w.payload));
+    }
+    if out.is_empty() {
+        return Err("quantization_config declares compressed-tensors integer weights but none were found".into());
+    }
+    Ok((dense, out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +650,48 @@ mod tests {
             seen += 1;
         }
         assert!(seen >= 8, "only {seen} GPTQ fixtures");
+    }
+
+    #[test]
+    fn compressed_tensors_zero_points_match_the_library() {
+        let cases: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/quant/cases.json")).unwrap()).unwrap();
+        let mut seen = 0;
+        for (name, meta) in cases.as_object().unwrap() {
+            if meta["format"] != "ct_asym" {
+                continue;
+            }
+            let (tensors, expected) = fixture(name);
+            let (bits, strategy) = (meta["bits"].as_u64().unwrap() as usize, meta["strategy"].as_str().unwrap());
+            let group = if strategy == "group" { meta["group_size"].as_u64().unwrap() as usize } else { 0 };
+            let (dense, packed) = split_ct_affine(tensors, bits, group, true, true, &identity).unwrap();
+            assert!(dense.is_empty(), "{name}");
+            assert_close(name, &decode_all(&packed[0]), &expected, 1e-6);
+            seen += 1;
+        }
+        assert_eq!(seen, 4, "int4 and int8, group and channel");
+    }
+
+    #[test]
+    fn activation_order_indexes_the_scales_by_the_group_of_each_column() {
+        // 2 rows x 8 columns, 4 bits, two groups of 4; columns 0, 2, 4, 6 belong to group 0 and the others to group 1
+        let codes: Vec<u8> = vec![8, 9, 10, 11, 12, 13, 14, 15, 7, 6, 5, 4, 3, 2, 1, 0]; // code - 8 = -8..7
+        let mut bytes = Vec::new();
+        for row in codes.chunks(8) {
+            let word = row.iter().enumerate().fold(0u32, |w, (i, &c)| w | (u32::from(c) << (4 * i)));
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let g_idx = vec![0u32, 1, 0, 1, 0, 1, 0, 1];
+        let len = bytes.len();
+        let d = CtAffine::new(Payload::Owned(Arc::new(bytes), 0..len), Some(4), vec![0.5, 2.0, 1.0, 4.0], vec![1, 0, 0, -1], Some(g_idx.clone()), 2, 8, 4).unwrap();
+        let mut got = vec![0f32; 16];
+        d.decode_chunk(0, &mut got).unwrap();
+        for e in 0..16 {
+            let (r, c) = (e / 8, e % 8);
+            let q = i32::from(codes[e]) - 8;
+            let g = g_idx[c] as usize;
+            let (scale, zero) = ([0.5f32, 2.0, 1.0, 4.0][r * 2 + g], [1, 0, 0, -1][r * 2 + g]);
+            assert_eq!(got[e], (q - zero) as f32 * scale, "element {e}");
+        }
     }
 
     #[test]
