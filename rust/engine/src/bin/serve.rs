@@ -96,6 +96,7 @@ fn usage(error: &str) -> ! {
     eprintln!("       fllm-rs studio [--model MODEL] [--no-open] [serve options]   (the browser app; reuses the last model)");
     eprintln!("       fllm-rs devices [--json] [--measure] | formats | inspect PATH | pull hf://org/repo/file.gguf");
     eprintln!("       fllm-rs npu-setup [--remove]   (downloads the OpenVINO runtime for the Intel NPU into ~/.fllm/openvino; --remove deletes it)");
+    eprintln!("       fllm-rs npu-bench [--n 2048] [--k 2048] [--batches 32,64,128] [--variants q4_0:g128,...] [--cache DIR]   (times the Intel NPU against the CPU on one projection; --help)");
     eprintln!("       fllm-rs selftest-cpu [--tier TIER] | selftest-gpu [--device auto|vulkan|metal|hip|...] [--only GROUPS] [--quants LIST] [--json FILE] [--list]");
     eprintln!("       fllm-rs bench-kernel --op marlin_gemv [--m 1] [--n 2048] [--k 2048] [--iters 200] (CUDA builds; --help)");
     eprintln!("       fllm-rs convert CHECKPOINT OUTPUT.gguf [--outtype preserve|f16|f32]");
@@ -418,6 +419,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("npu-setup") {
         return npu_setup(&args[1..]);
     }
+    #[cfg(feature = "npu-openvino")]
+    if args.first().map(String::as_str) == Some("npu-bench") {
+        return fllm_engine::backend::npu::openvino::bench::run(&args[1..]).map_err(Into::into);
+    }
     if args.first().map(String::as_str) == Some("amd-npu") {
         return fllm_engine::backend::npu::flm::cli(
             &args[1..],
@@ -692,6 +697,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // `all`: the NPU computes every matrix product it can (the defaults send only long prompt blocks to it; the native AMD XDNA engine takes its three FLLM_XDNA_MIN_* settings)
             "--npu-mode" => {
                 if value(&args, &mut i, "--npu-mode").eq_ignore_ascii_case("all") {
+                    // every product through the NPU needs the hybrid backend, not the host decoder
+                    if env::var_os("FLLM_NPU_HYBRID").is_none() {
+                        env::set_var("FLLM_NPU_HYBRID", "1");
+                    }
                     for (name, setting) in [("FLLM_NPU_MIN_BATCH", "1"), ("FLLM_NPU_CHUNK", "16"), ("FLLM_NPU_MIN_ELEMS", "1"), ("FLLM_NPU_CPU_GOPS", "0.001"), ("FLLM_NPU_OVERHEAD_US", "0"), ("FLLM_XDNA_MIN_ROWS", "1"), ("FLLM_XDNA_MIN_ELEMS", "1"), ("FLLM_XDNA_MIN_EFF", "0")] {
                         if env::var_os(name).is_none() {
                             env::set_var(name, setting);
@@ -966,6 +975,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .get("general.architecture")
         .and_then(serde_json::Value::as_str)
         == Some("bert");
+    // `--device npu` with an Intel NPU: the host decoder runs the model and sends the long prompt projections to the NPU
+    #[cfg(feature = "npu-openvino")]
+    if let Some(rerouted) = fllm_engine::backend::npu::host::route_device(&device) {
+        device = rerouted;
+    }
     // fail early on a malformed or impossible --device, before the model is read; `vulkan:1` counts the devices of that backend
     let device_chain = fllm_engine::devices::device_candidates(&device)?;
     if device == "cpu" {

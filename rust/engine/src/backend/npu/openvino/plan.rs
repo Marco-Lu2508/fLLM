@@ -9,8 +9,8 @@
 //!   is padded to a chunk, and the remainder only goes to the NPU if it has at least `min_batch` rows (else the CPU does it);
 //! * a chunk goes to the NPU if its estimated time (call latency + FLOPs / NPU rate) is below the CPU's estimate.
 //!
-//! **The three rates are assumptions, not measurements** (defaults: CPU 400 GOPS, NPU 1500 GOPS, 500 us per call). They can be
-//! replaced with `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_GOPS` and `FLLM_NPU_OVERHEAD_US` once the measurement plan in OPENVINO.md has been run.
+//! The three rates are rounded from measurements on one Core Ultra 5 235U (defaults: CPU 200 GOPS, NPU 1300 GOPS, 550 us per call; OPENVINO.md section 0)
+//! and can be replaced with `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_GOPS` and `FLLM_NPU_OVERHEAD_US`.
 //!
 //! Settings from the environment: `FLLM_NPU=0` disables the offload, `FLLM_NPU_MIN_BATCH`, `FLLM_NPU_CHUNK`, `FLLM_NPU_MIN_ELEMS`,
 //! `FLLM_NPU_BUDGET_MB` (weight memory held by compiled models, 0 = limited only by the device), `FLLM_NPU_GROUP` (group size of
@@ -46,13 +46,13 @@ impl Default for OffloadPlan {
         Self {
             enabled: true,
             min_batch: 64,
-            chunk: 128,
+            chunk: 256,
             min_elems: 1 << 20,
             budget_bytes: 0,
-            quant: QuantPolicy::default(),
-            cpu_gops: 400.0,
-            npu_gops: 1500.0,
-            call_overhead_us: 500.0,
+            quant: QuantPolicy::int8_channel(),
+            cpu_gops: 200.0,
+            npu_gops: 1300.0,
+            call_overhead_us: 550.0,
         }
     }
 }
@@ -80,10 +80,17 @@ impl OffloadPlan {
         if let Some(v) = env_number::<u64>("FLLM_NPU_BUDGET_MB") {
             plan.budget_bytes = v.saturating_mul(1 << 20);
         }
+        // FLLM_NPU_WEIGHTS: int8 (default, per channel), int4 (INT4 in groups of 128) or exact (Q4_0/Q8_0 bit for bit, groups of 32)
+        match std::env::var("FLLM_NPU_WEIGHTS").ok().as_deref().map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("int4") => plan.quant = QuantPolicy::int4_grouped(),
+            Some("exact") => plan.quant = QuantPolicy::default(),
+            _ => {}
+        }
         if let Some(v) = env_number::<usize>("FLLM_NPU_GROUP") {
             plan.quant = QuantPolicy {
                 group: v,
                 lossless: false,
+                eight: plan.quant.eight,
             };
         }
         if let Some(v) = env_number::<f64>("FLLM_NPU_CPU_GOPS") {
@@ -151,6 +158,7 @@ impl OffloadPlan {
                     self.quant.lossless && matches!(quant, QuantType::Q4_0 | QuantType::Q8_0);
                 let g = if exact { 32 } else { group(self.quant.group) };
                 let scales = rows * (cols / g.max(1)) * 2;
+                let target = if target == Target::Four && self.quant.eight && !exact { Target::Eight } else { target };
                 if target == Target::Four {
                     rows * cols / 2 + scales
                 } else {
@@ -168,13 +176,7 @@ impl OffloadPlan {
             self.chunk,
             self.min_batch,
             self.min_elems,
-            if self.quant.lossless {
-                "exact Q4_0/Q8_0, others int4/int8 group 128".to_owned()
-            } else if self.quant.group == 0 {
-                "re-quantized channel-wise".to_owned()
-            } else {
-                format!("re-quantized group {}", self.quant.group)
-            },
+            self.quant.describe(),
             self.cpu_gops,
             self.npu_gops,
             self.call_overhead_us
@@ -335,7 +337,7 @@ mod tests {
     #[test]
     fn call_overhead_can_make_the_cpu_win() {
         let slow_npu = OffloadPlan {
-            npu_gops: 300.0,
+            npu_gops: 100.0,
             ..OffloadPlan::default()
         };
         assert!(
@@ -351,7 +353,11 @@ mod tests {
 
     #[test]
     fn resident_bytes_follow_the_conversion_policy() {
-        let exact = OffloadPlan::default();
+        let exact = OffloadPlan { quant: QuantPolicy::default(), ..OffloadPlan::default() };
+        // the default plan holds every integer format as INT8 with one scale per row
+        let fast = OffloadPlan::default();
+        assert_eq!(fast.resident_bytes(4096, 4096, QuantType::Q4_0), 4096 * 4096 + 4096 * 2);
+        assert_eq!(fast.resident_bytes(4096, 4096, QuantType::Q4_K), 4096 * 4096 + 4096 * 2);
         // Q4_0: 4096x4096 -> 8 MiB of codes + 4096 * 128 scales * 2 bytes
         assert_eq!(
             exact.resident_bytes(4096, 4096, QuantType::Q4_0),
@@ -374,6 +380,7 @@ mod tests {
             quant: QuantPolicy {
                 group: 0,
                 lossless: false,
+                eight: false,
             },
             ..OffloadPlan::default()
         };

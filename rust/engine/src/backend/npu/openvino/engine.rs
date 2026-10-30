@@ -27,7 +27,7 @@ use half::slice::{HalfBitsSliceExt, HalfFloatSliceExt};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -52,6 +52,8 @@ impl WeightKey {
 enum SlotState {
     /// Nothing compiled yet.
     Idle,
+    /// The background thread has the projection in its queue or is compiling it; the CPU serves it until it is `Ready`.
+    Compiling,
     Ready(Arc<CompiledLinear>),
     /// Compile failed or the weight does not fit; the CPU serves this projection.
     Failed,
@@ -66,9 +68,21 @@ pub struct Slot {
     /// themselves pass the bytes on every call instead ([`NpuEngine::offload_host`]).
     host: Option<Arc<Vec<u8>>>,
     state: Mutex<SlotState>,
+    /// Seconds since the engine opened at the last call; a compiled model that has been idle for long is dropped when the weight
+    /// budget is needed for another model (a model that was unloaded leaves its slots behind).
+    last_used: AtomicU64,
+    /// Bytes the compiled model holds (set when it is compiled).
+    resident: AtomicU64,
 }
 
+/// Seconds a compiled model must have been idle before the budget may take it away.
+const IDLE_EVICT_SECONDS: u64 = 20;
+
 impl Slot {
+    fn new(rows: usize, cols: usize, quant: QuantType, host: Option<Arc<Vec<u8>>>) -> Self {
+        Self { rows, cols, quant, host, state: Mutex::new(SlotState::Idle), last_used: AtomicU64::new(0), resident: AtomicU64::new(0) }
+    }
+
     /// The raw tensor as uploaded, if this slot keeps a copy.
     pub fn host_bytes(&self) -> Option<&[u8]> {
         self.host.as_deref().map(Vec::as_slice)
@@ -91,7 +105,41 @@ pub struct Stats {
     pub range_fallbacks: AtomicU64,
     pub compile_millis: AtomicU64,
     pub npu_millis: AtomicU64,
+    /// Microseconds of the f32 -> f16 conversion of the activations, of the NPU call (copy in, run, copy out) and of the f16 -> f32
+    /// conversion of the results; where the time of an offloaded projection goes (`FLLM_NPU_STATS`).
+    pub to_f16_micros: AtomicU64,
+    pub infer_micros: AtomicU64,
+    pub from_f16_micros: AtomicU64,
+    /// Models compiled by the background thread, and calls the CPU served because a model was not ready yet.
+    pub background_compiles: AtomicU64,
+    pub waiting_calls: AtomicU64,
 }
+
+/// A projection waiting for the background compile thread, with a private copy of its raw tensor (the thread must not depend on the
+/// caller's memory staying mapped).
+struct Job {
+    slot: Arc<Slot>,
+    raw: Vec<u8>,
+}
+
+/// Raw tensor bytes the compile queue may hold at once; further projections wait (the CPU serves them) until the thread has caught up.
+const QUEUE_LIMIT_BYTES: u64 = 192 << 20;
+
+/// A projection whose first compile took more than this many milliseconds per MiB of weights was not in the blob cache: the remaining
+/// models are then compiled by the background thread instead of stalling the first prompt.
+const COLD_COMPILE_MS_PER_MIB: f64 = 60.0;
+
+#[derive(Default)]
+struct CompileQueue {
+    jobs: Mutex<std::collections::VecDeque<Job>>,
+    ready: std::sync::Condvar,
+    pending_bytes: AtomicU64,
+}
+
+/// How the models are compiled: decided by the first compile (`Unknown`: that one runs in the caller).
+const MODE_UNKNOWN: u8 = 0;
+const MODE_INLINE: u8 = 1;
+const MODE_BACKGROUND: u8 = 2;
 
 /// Rows the NPU computed.
 pub struct NpuOutput {
@@ -112,6 +160,13 @@ pub struct NpuEngine {
     dump_dir: Option<PathBuf>,
     consecutive_failures: AtomicUsize,
     disabled: AtomicBool,
+    queue: Arc<CompileQueue>,
+    compile_mode: AtomicU8,
+    started: Instant,
+    /// The blob cache directory had no entries when the engine opened (the first start): everything is compiled for the first time.
+    cache_cold: bool,
+    /// `FLLM_NPU_STATS=N`: log a summary every N offloaded projections (0 = never).
+    stats_every: u64,
     pub stats: Stats,
 }
 
@@ -185,6 +240,9 @@ impl NpuEngine {
             (b, 0) => b,
             (b, limit) => b.min(limit),
         };
+        // the memory planner: the compiled models live in the memory of the computer, next to the model, the KV cache and the
+        // other programs; without a budget of the user they may take 40 % of what is free now (at least 1 GiB)
+        let budget = if plan.budget_bytes == 0 { planned_budget(budget, crate::devices::host_free_memory_bytes()) } else { budget };
         let engine = NpuEngine {
             runtime: Some(runtime),
             device,
@@ -198,10 +256,31 @@ impl NpuEngine {
                 .map(PathBuf::from),
             consecutive_failures: AtomicUsize::new(0),
             disabled: AtomicBool::new(false),
+            queue: Arc::new(CompileQueue::default()),
+            started: Instant::now(),
+            cache_cold: cache_dir().is_none_or(|d| std::fs::read_dir(d).map_or(true, |mut e| e.next().is_none())),
+            compile_mode: AtomicU8::new(match std::env::var("FLLM_NPU_COMPILE").as_deref().map(str::trim) {
+                Ok("inline") => MODE_INLINE,
+                Ok("background") => MODE_BACKGROUND,
+                _ => MODE_UNKNOWN,
+            }),
+            stats_every: std::env::var("FLLM_NPU_STATS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0),
             stats: Stats::default(),
         };
         crate::backend::log_once("npu-plan", &engine.plan.describe());
-        Ok(Arc::new(engine))
+        crate::backend::log_once(
+            "npu-memory",
+            &format!(
+                "NPU weight budget {} MiB (device {} MiB, computer free {} MiB); compiled models cached in {}",
+                engine.budget >> 20,
+                engine.device.total_memory >> 20,
+                crate::devices::host_free_memory_bytes() >> 20,
+                cache_dir().map_or_else(|| "nowhere (FLLM_NPU_CACHE_DIR is empty)".to_owned(), |d| d.display().to_string())
+            ),
+        );
+        let engine = Arc::new(engine);
+        spawn_compile_thread(&engine);
+        Ok(engine)
     }
 
     /// An engine without a runtime: every `run` returns `None`, so everything is left to the CPU kernels. For tests and for hosts that
@@ -225,6 +304,11 @@ impl NpuEngine {
             dump_dir: None,
             consecutive_failures: AtomicUsize::new(0),
             disabled: AtomicBool::new(false),
+            queue: Arc::new(CompileQueue::default()),
+            started: Instant::now(),
+            cache_cold: false,
+            compile_mode: AtomicU8::new(MODE_INLINE),
+            stats_every: 0,
             stats: Stats::default(),
         })
     }
@@ -243,13 +327,7 @@ impl NpuEngine {
         cols: usize,
         raw: &[u8],
     ) -> Arc<Slot> {
-        let slot = Arc::new(Slot {
-            rows,
-            cols,
-            quant,
-            host: Some(Arc::new(raw.to_vec())),
-            state: Mutex::new(SlotState::Idle),
-        });
+        let slot = Arc::new(Slot::new(rows, cols, quant, Some(Arc::new(raw.to_vec()))));
         if let Ok(mut slots) = self.slots.lock() {
             slots.insert(key, Arc::clone(&slot));
         }
@@ -270,7 +348,7 @@ impl NpuEngine {
         if let Some(slot) = removed {
             if let Ok(state) = slot.state.lock() {
                 if matches!(&*state, SlotState::Ready(_)) {
-                    let bytes = self.plan.resident_bytes(slot.rows, slot.cols, slot.quant);
+                    let bytes = slot.resident.swap(0, Ordering::Relaxed);
                     let mut current = self.resident.load(Ordering::Relaxed);
                     while let Err(actual) = self.resident.compare_exchange_weak(
                         current,
@@ -290,14 +368,15 @@ impl NpuEngine {
         self.resident.load(Ordering::Relaxed)
     }
 
-    fn compile(&self, slot: &Slot, raw: &[u8]) -> Result<Arc<CompiledLinear>, String> {
+    /// Convert, build and compile the model of a projection; returns it with the milliseconds the compile took.
+    fn compile(&self, slot: &Slot, raw: &[u8]) -> Result<(Arc<CompiledLinear>, u64), String> {
         let weight = convert(slot.quant, raw, slot.rows, slot.cols, &self.plan.quant)?;
         let bytes = weight.bytes() as u64;
         if self.budget > 0 && self.resident.load(Ordering::Relaxed) + bytes > self.budget {
-            return Err(format!(
-                "NPU weight budget of {} MiB is used up",
-                self.budget >> 20
-            ));
+            self.evict_idle(bytes);
+            if self.resident.load(Ordering::Relaxed) + bytes > self.budget {
+                return Err(format!("NPU weight budget of {} MiB is used up", self.budget >> 20));
+            }
         }
         let name = format!("fllm_linear_{}x{}", slot.rows, slot.cols);
         let ir = build_linear_ir(&weight, self.plan.chunk, &name)?;
@@ -320,6 +399,7 @@ impl NpuEngine {
             .compile_millis
             .fetch_add(elapsed, Ordering::Relaxed);
         self.resident.fetch_add(bytes, Ordering::Relaxed);
+        slot.resident.store(bytes, Ordering::Relaxed);
         crate::backend::log_once(
             "npu-first-compile",
             &format!(
@@ -327,22 +407,85 @@ impl NpuEngine {
                 weight.format, self.plan.chunk
             ),
         );
-        Ok(Arc::new(compiled))
+        // a first compile that was slow for its size means the blob cache did not have it: the rest is compiled in the background
+        if self.compile_mode.load(Ordering::Relaxed) == MODE_UNKNOWN {
+            let per_mib = elapsed as f64 / (bytes as f64 / (1 << 20) as f64).max(0.25);
+            let background = self.cache_cold || per_mib > COLD_COMPILE_MS_PER_MIB;
+            self.compile_mode.store(if background { MODE_BACKGROUND } else { MODE_INLINE }, Ordering::Relaxed);
+            crate::backend::log_once(
+                "npu-compile-mode",
+                &if background {
+                    format!("NPU models are not in the blob cache ({elapsed} ms for the first); compiling the rest in the background, the processor serves prompts meanwhile")
+                } else {
+                    format!("NPU models come from the blob cache ({elapsed} ms for the first); compiling the rest while the prompt waits")
+                },
+            );
+        }
+        Ok((Arc::new(compiled), elapsed))
+    }
+
+    /// Drop the compiled models that have been idle for a while until `needed` more bytes fit the budget.
+    fn evict_idle(&self, needed: u64) {
+        let now = self.started.elapsed().as_secs();
+        let Ok(slots) = self.slots.lock() else { return };
+        let mut idle: Vec<&Arc<Slot>> = slots
+            .values()
+            .filter(|s| s.resident.load(Ordering::Relaxed) > 0 && now.saturating_sub(s.last_used.load(Ordering::Relaxed)) >= IDLE_EVICT_SECONDS)
+            .collect();
+        idle.sort_by_key(|s| s.last_used.load(Ordering::Relaxed));
+        for slot in idle {
+            if self.resident.load(Ordering::Relaxed) + needed <= self.budget {
+                break;
+            }
+            // never wait for a slot that is compiling or running: skip it
+            let Ok(mut state) = slot.state.try_lock() else { continue };
+            if matches!(&*state, SlotState::Ready(_)) {
+                *state = SlotState::Idle;
+                let bytes = slot.resident.swap(0, Ordering::Relaxed);
+                self.resident.fetch_sub(bytes.min(self.resident.load(Ordering::Relaxed)), Ordering::Relaxed);
+            }
+        }
     }
 
     /// The compiled model of a slot, compiling it on first use; `None` when it cannot be served by the NPU.
-    fn session(&self, slot: &Slot, raw: &[u8]) -> Option<Arc<CompiledLinear>> {
+    fn session(&self, slot: &Arc<Slot>, raw: &[u8]) -> Option<Arc<CompiledLinear>> {
         if self.is_disabled() {
             return None;
         }
+        slot.last_used.store(self.started.elapsed().as_secs(), Ordering::Relaxed);
         let mut state = slot.state.lock().ok()?;
         match &*state {
             SlotState::Ready(session) => return Some(Arc::clone(session)),
             SlotState::Failed => return None,
+            SlotState::Compiling => {
+                self.stats.waiting_calls.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
             SlotState::Idle => {}
         }
-        match self.compile(slot, raw) {
-            Ok(session) => {
+        if self.compile_mode.load(Ordering::Relaxed) == MODE_BACKGROUND {
+            // hand the projection to the compile thread (it takes a private copy of the tensor) and let the CPU serve this call
+            if self.queue.pending_bytes.load(Ordering::Relaxed) + raw.len() as u64 > QUEUE_LIMIT_BYTES {
+                self.stats.waiting_calls.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            self.queue.pending_bytes.fetch_add(raw.len() as u64, Ordering::Relaxed);
+            *state = SlotState::Compiling;
+            if let Ok(mut jobs) = self.queue.jobs.lock() {
+                jobs.push_back(Job { slot: Arc::clone(slot), raw: raw.to_vec() });
+                self.queue.ready.notify_one();
+            }
+            self.stats.waiting_calls.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let result = self.compile(slot, raw);
+        self.settle(slot, &mut state, result)
+    }
+
+    /// Record the outcome of a compile in the slot and the counters.
+    fn settle(&self, slot: &Slot, state: &mut SlotState, result: Result<(Arc<CompiledLinear>, u64), String>) -> Option<Arc<CompiledLinear>> {
+        match result {
+            Ok((session, _)) => {
                 self.stats.compiled.fetch_add(1, Ordering::Relaxed);
                 self.consecutive_failures.store(0, Ordering::Relaxed);
                 *state = SlotState::Ready(Arc::clone(&session));
@@ -370,17 +513,36 @@ impl NpuEngine {
         }
     }
 
+    /// What the background thread does with one queued projection.
+    fn finish_job(&self, job: Job) {
+        let result = self.compile(&job.slot, &job.raw);
+        if result.is_ok() {
+            self.stats.background_compiles.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Ok(mut state) = job.slot.state.lock() {
+            self.settle(&job.slot, &mut state, result);
+        }
+    }
+
+    /// Models waiting for or inside the background compile (for the status line).
+    pub fn compiling(&self) -> usize {
+        self.slots
+            .lock()
+            .map(|slots| slots.values().filter(|s| s.state.try_lock().map_or(true, |st| matches!(&*st, SlotState::Compiling))).count())
+            .unwrap_or(0)
+    }
+
     /// Run the rows of `x` (`batch * slot.cols` values) that the plan assigns to the NPU through the projection `slot`.
     ///
     /// `None` when the NPU takes nothing (plan, compile failure, f16 range): the caller computes all rows itself. Otherwise the
     /// result holds the first `rows_done` rows (without bias; the caller adds it) and the caller computes rows `rows_done..batch`.
-    pub fn run(&self, slot: &Slot, x: &[f32], batch: usize) -> Option<NpuOutput> {
+    pub fn run(&self, slot: &Arc<Slot>, x: &[f32], batch: usize) -> Option<NpuOutput> {
         let raw = slot.host_bytes()?;
         self.run_raw(slot, raw, x, batch)
     }
 
     /// [`run`](Self::run) for a caller that supplies the raw tensor itself (needed only for the first call, when the model is built).
-    pub fn run_raw(&self, slot: &Slot, raw: &[u8], x: &[f32], batch: usize) -> Option<NpuOutput> {
+    pub fn run_raw(&self, slot: &Arc<Slot>, raw: &[u8], x: &[f32], batch: usize) -> Option<NpuOutput> {
         let (n, k) = (slot.rows, slot.cols);
         if self.runtime.is_none()
             || x.len() != batch * k
@@ -397,14 +559,18 @@ impl NpuEngine {
         let mut x16 = vec![0u16; chunk * k];
         let mut y16 = vec![0u16; chunk * n];
         let mut done = 0;
+        let micros = |since: Instant| since.elapsed().as_micros() as u64;
         while done < take_rows {
             let take = chunk.min(take_rows - done);
             // f16 has a range of 65504 and the NPU computes in f16: activations that do not fit are left to the CPU
+            let t = Instant::now();
             if !to_f16_checked(&mut x16[..take * k], &input[done * k..(done + take) * k]) {
                 self.stats.range_fallbacks.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
             x16[take * k..].fill(0);
+            self.stats.to_f16_micros.fetch_add(micros(t), Ordering::Relaxed);
+            let t = Instant::now();
             if let Err(error) = session.run(&x16, &mut y16) {
                 crate::backend::log_once(
                     "npu-run-error",
@@ -412,20 +578,26 @@ impl NpuEngine {
                 );
                 return None;
             }
+            self.stats.infer_micros.fetch_add(micros(t), Ordering::Relaxed);
             // an f16 overflow of a sum shows up as Inf: redo the call on the CPU
+            let t = Instant::now();
             if !from_f16_checked(&mut values[done * n..(done + take) * n], &y16[..take * n]) {
                 self.stats.range_fallbacks.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
+            self.stats.from_f16_micros.fetch_add(micros(t), Ordering::Relaxed);
             done += take;
         }
-        self.stats.npu_calls.fetch_add(1, Ordering::Relaxed);
+        let calls = self.stats.npu_calls.fetch_add(1, Ordering::Relaxed) + 1;
         self.stats
             .npu_rows
             .fetch_add(take_rows as u64, Ordering::Relaxed);
         self.stats
             .npu_millis
             .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        if self.stats_every > 0 && calls.is_multiple_of(self.stats_every) {
+            eprintln!("[fllm-npu] {}", self.summary());
+        }
         Some(NpuOutput {
             rows_done: take_rows,
             values,
@@ -449,22 +621,16 @@ impl NpuEngine {
         if self.runtime.is_none() || !self.plan.should_offload(batch, rows, cols, quant) {
             return None;
         }
+        // the address alone is not an identity: a model that was unloaded and another one mapped at the same address must not meet the
+        // compiled weights of the first, so a fingerprint of the bytes is part of the key
         let key = WeightKey {
             id: raw.as_ptr() as usize as u64,
-            offset: 0,
+            offset: fingerprint(raw) as usize,
             size: raw.len(),
         };
         let slot = {
             let mut slots = self.slots.lock().ok()?;
-            Arc::clone(slots.entry(key).or_insert_with(|| {
-                Arc::new(Slot {
-                    rows,
-                    cols,
-                    quant,
-                    host: None,
-                    state: Mutex::new(SlotState::Idle),
-                })
-            }))
+            Arc::clone(slots.entry(key).or_insert_with(|| Arc::new(Slot::new(rows, cols, quant, None))))
         };
         if slot.rows != rows || slot.cols != cols || slot.quant != quant {
             return None;
@@ -541,17 +707,110 @@ impl NpuEngine {
     pub fn summary(&self) -> String {
         let s = &self.stats;
         format!(
-            "NPU offload: {} calls, {} rows on the NPU ({} ms), {} rows on the CPU, {} models compiled ({} ms), {} compile failures, {} f16 range fallbacks, ~{} MiB resident",
+            "NPU offload: {} calls, {} rows on the NPU ({} ms: {} ms to f16, {} ms in the NPU call, {} ms back to f32), {} rows on the CPU, {} models compiled ({} ms, {} in the background), {} calls served by the CPU while a model was not ready, {} compile failures, {} f16 range fallbacks, ~{} MiB resident",
             s.npu_calls.load(Ordering::Relaxed),
             s.npu_rows.load(Ordering::Relaxed),
             s.npu_millis.load(Ordering::Relaxed),
+            s.to_f16_micros.load(Ordering::Relaxed) / 1000,
+            s.infer_micros.load(Ordering::Relaxed) / 1000,
+            s.from_f16_micros.load(Ordering::Relaxed) / 1000,
             s.cpu_rows.load(Ordering::Relaxed),
             s.compiled.load(Ordering::Relaxed),
             s.compile_millis.load(Ordering::Relaxed),
+            s.background_compiles.load(Ordering::Relaxed),
+            s.waiting_calls.load(Ordering::Relaxed),
             s.compile_failures.load(Ordering::Relaxed),
             s.range_fallbacks.load(Ordering::Relaxed),
             self.resident_bytes() >> 20
         )
+    }
+
+    /// The state for the Studio card and `GET /api/studio/npu`: what the offload does right now.
+    pub fn status_json(&self) -> serde_json::Value {
+        let s = &self.stats;
+        let mode = match self.compile_mode.load(Ordering::Relaxed) {
+            MODE_INLINE => "inline",
+            MODE_BACKGROUND => "background",
+            _ => "not decided yet",
+        };
+        serde_json::json!({
+            "engine": "openvino",
+            "device": self.device.full_name,
+            "platform": self.device.architecture,
+            "driver": self.device.driver,
+            "enabled": self.plan.enabled && !self.is_disabled(),
+            "chunk": self.plan.chunk,
+            "min_batch": self.plan.min_batch,
+            "calls": s.npu_calls.load(Ordering::Relaxed),
+            "rows": s.npu_rows.load(Ordering::Relaxed),
+            "models_compiled": s.compiled.load(Ordering::Relaxed),
+            "models_compiling": self.compiling(),
+            "compile_mode": mode,
+            "compile_failures": s.compile_failures.load(Ordering::Relaxed),
+            "resident_mb": self.resident_bytes() >> 20,
+            "budget_mb": self.budget >> 20,
+            "npu_ms": s.npu_millis.load(Ordering::Relaxed),
+            "to_f16_ms": s.to_f16_micros.load(Ordering::Relaxed) / 1000,
+            "infer_ms": s.infer_micros.load(Ordering::Relaxed) / 1000,
+            "from_f16_ms": s.from_f16_micros.load(Ordering::Relaxed) / 1000,
+        })
+    }
+}
+
+/// FNV-1a over 256 bytes at the start, the middle and the end of a tensor: cheap, and enough to tell two tensors at one address apart.
+fn fingerprint(raw: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ raw.len() as u64;
+    let n = raw.len();
+    for start in [0, (n / 2).saturating_sub(128), n.saturating_sub(256)] {
+        let start = start.min(n);
+        for &byte in &raw[start..(start + 256).min(n)] {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// The memory the compiled models may hold: the budget from the device and the user, and at most 40 % of the memory of the computer
+/// that is free now (at least 1 GiB). `free == 0` means unknown.
+fn planned_budget(budget: u64, free: u64) -> u64 {
+    if free == 0 {
+        return budget;
+    }
+    let share = (free / 5 * 2).max(1 << 30);
+    if budget == 0 {
+        share
+    } else {
+        budget.min(share)
+    }
+}
+
+/// One thread per engine compiles the projections that were handed over (see `COLD_COMPILE_MS_PER_MIB`); it ends when the engine goes.
+fn spawn_compile_thread(engine: &Arc<NpuEngine>) {
+    let weak = Arc::downgrade(engine);
+    let queue = Arc::clone(&engine.queue);
+    let spawned = std::thread::Builder::new().name("fllm-npu-compile".to_owned()).spawn(move || loop {
+        let job = {
+            let Ok(mut jobs) = queue.jobs.lock() else { return };
+            loop {
+                if let Some(job) = jobs.pop_front() {
+                    break job;
+                }
+                if weak.strong_count() == 0 {
+                    return;
+                }
+                match queue.ready.wait_timeout(jobs, std::time::Duration::from_secs(2)) {
+                    Ok((guard, _)) => jobs = guard,
+                    Err(_) => return,
+                }
+            }
+        };
+        queue.pending_bytes.fetch_sub(job.raw.len() as u64, Ordering::Relaxed);
+        let Some(engine) = weak.upgrade() else { return };
+        engine.finish_job(job);
+    });
+    if let Err(error) = spawned {
+        crate::backend::log_once("npu-compile-thread", &format!("no background compile thread ({error}); models are compiled while the prompt waits"));
+        engine.compile_mode.store(MODE_INLINE, Ordering::Relaxed);
     }
 }
 
@@ -690,6 +949,43 @@ mod tests {
             .is_none());
         assert!(engine.is_disabled() || engine.resident_bytes() == 0);
         assert!(engine.summary().contains("0 calls"));
+    }
+
+    #[test]
+    fn fingerprint_tells_tensors_at_one_address_apart() {
+        let a = vec![7u8; 4096];
+        let mut b = a.clone();
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+        b[2048] = 8;
+        assert_ne!(fingerprint(&a), fingerprint(&b), "a change in the middle is seen");
+        b[2048] = 7;
+        *b.last_mut().unwrap() = 9;
+        assert_ne!(fingerprint(&a), fingerprint(&b), "a change at the end is seen");
+        assert_ne!(fingerprint(&a[..4000]), fingerprint(&a), "the size is part of it");
+        assert_eq!(fingerprint(&[]), fingerprint(&[]));
+    }
+
+    #[test]
+    fn the_budget_follows_the_free_memory_of_the_computer() {
+        // unknown free memory: the device budget stays
+        assert_eq!(planned_budget(6 << 30, 0), 6 << 30);
+        // 40 % of 10 GiB free is 4 GiB, below the device budget
+        assert_eq!(planned_budget(12 << 30, 10 << 30), (10u64 << 30) / 5 * 2);
+        // a nearly full computer still gets 1 GiB (the budget can only be lowered by the user)
+        assert_eq!(planned_budget(12 << 30, 1 << 30), 1 << 30);
+        assert_eq!(planned_budget(512 << 20, 64 << 30), 512 << 20);
+        assert_eq!(planned_budget(0, 10 << 30), (10u64 << 30) / 5 * 2);
+    }
+
+    #[test]
+    fn status_of_an_offline_engine_says_what_it_is() {
+        let engine = NpuEngine::offline(OffloadPlan::default());
+        let status = engine.status_json();
+        assert_eq!(status["engine"], "openvino");
+        assert_eq!(status["calls"], 0);
+        assert_eq!(status["models_compiling"], 0);
+        assert_eq!(status["chunk"], 256);
+        assert_eq!(status["compile_mode"], "inline");
     }
 
     #[test]

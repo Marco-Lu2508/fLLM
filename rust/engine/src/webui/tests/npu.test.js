@@ -23,7 +23,7 @@ const base = (over = {}) => ({
   runtime: { installed: false, version: null, path: null, managed: false, error: null },
   setup: { available: true, pinned_version: '2026.4.1', download_bytes: 59144434, progress: idle },
   last_error: null,
-  quantizations: { exact: ['Q4_0', 'Q8_0'], converted_int4: ['Q4_K'], converted_int8: ['Q6_K'], float16: ['F16'] },
+  quantizations: { eight_bit: ['Q4_0', 'Q4_K'], exact: ['Q4_0', 'Q8_0'], converted_int4: ['Q4_K'], float16: ['F16'] },
   ...over,
 });
 const intel = { vendor: 'intel', name: 'Intel NPU (accel0)', supported: true, problem: null };
@@ -95,6 +95,14 @@ test('a ready NPU shows the version and the remove button only for our own insta
   assert.strictEqual(system.remove, false);
 });
 
+test('the status line of the prompt offload is passed on, empty when it is not in use', () => {
+  const idleCard = L.npuCardModel(base({ state: 'ready', hardware: [intel] }));
+  assert.strictEqual(idleCard.offload, '');
+  const working = L.npuCardModel(base({ state: 'ready', hardware: [intel], offload_line: 'Prompt offload on Intel(R) AI Boost: 120 calls, 30000 rows, 40 models compiled, 700 MB held', devices: [{ full_name: 'Intel(R) AI Boost', architecture: '3720' }] }));
+  assert.match(working.offload, /^Prompt offload on/);
+  assert.ok(working.summary.includes("Intel(R) AI Boost (platform 3720)"));
+});
+
 test('a runtime without a device explains and keeps the loader error visible', () => {
   const m = L.npuCardModel(base({ state: 'no_device', hardware: [intel], runtime: { installed: true, version: null, path: '/x', managed: false, error: 'symbol missing' } }));
   assert.match(m.summary, /does not list an NPU/);
@@ -110,11 +118,11 @@ test('the reason of the last fallback to the processor is shown', () => {
 test('the card is honest about what the NPU does and lists the formats', () => {
   const m = L.npuCardModel(base());
   const text = m.explanation.join(' ');
-  assert.match(text, /No speed-up is expected/);
-  assert.match(text, /held twice|kept twice/);
-  assert.match(text, /not been run on NPU hardware/);
-  assert.deepStrictEqual(m.formats.map((f) => f.title), ['Exact (same values as on the processor)', 'Converted to 4 bit', 'Converted to 8 bit', 'Half precision']);
-  assert.deepStrictEqual(m.formats[0].items, ['Q4_0', 'Q8_0']);
+  assert.match(text, /Writing the answer is not sped up/);
+  assert.match(text, /needs about its own size again in memory|about its own size again/);
+  assert.match(text, /never chosen automatically/);
+  assert.deepStrictEqual(m.formats.map((f) => f.title.split(" (")[0].split(" with ")[0]), ["Computed as 8 bit", "Half precision", "Exact", "Kept at 4 bit"]);
+  assert.deepStrictEqual(m.formats[0].items, ["Q4_0", "Q4_K"]);
   assert.ok(!/https?:/.test(text), 'no links');
 });
 
@@ -135,9 +143,9 @@ test('the device choice lists automatic, processor, graphics devices and the NPU
   assert.deepStrictEqual(withNpu.map((c) => c.value), ['auto', 'cpu', 'vulkan:0', 'npu']);
   const npu = withNpu.find((c) => c.value === 'npu');
   assert.match(npu.label, /experimental/i);
-  assert.match(npu.warning, /slower than the processor/);
-  assert.match(npu.warning, /held twice/);
-  assert.match(npu.warning, /dense models only/);
+  assert.match(npu.warning, /speeds up reading long prompts/);
+  assert.match(npu.warning, /converted copy of the weights/);
+  assert.match(npu.warning, /integrated graphics are usually faster/);
   assert.ok(withNpu.filter((c) => c.value !== 'npu').every((c) => c.warning === null));
 });
 

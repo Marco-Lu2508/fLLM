@@ -1,17 +1,18 @@
     // ==========================================================================
     // NPU: the card in Settings, Hardware (what was found, install or remove the runtime that drives it) and the device list of the
     // load options. The state comes from GET /api/studio/npu; the card is built from it by npuCardModel (pure, tested in node).
-    // Honest status: the NPU backend has not run on NPU hardware yet (test level L0), so everything here says "experimental".
+    // Honest status: measured on one Intel Core Ultra 5 235U (NPU 3720): the NPU makes reading long prompts faster than the processor alone
+    // (about 1.5 to 3 times) but not faster than the integrated graphics; answers are written at the processor's speed. Experimental.
     // ==========================================================================
 
     // @pure-begin
-    const NPU_WARNING = 'Experimental: slower than the processor for many models; weights are held twice; dense models only.';
+    const NPU_WARNING = 'Experimental: the NPU only speeds up reading long prompts (the processor writes the answer). The integrated graphics are usually faster. A converted copy of the weights is kept in memory.';
 
     const NPU_EXPLANATION = [
-      'Today fLLM can use an Intel NPU only as a helper: the large matrix multiplications of quantized layers run on the NPU while reading a prompt, and everything else runs on the processor.',
-      'No speed-up is expected when the model writes its answer, and the model is often slower than on the processor alone. The weights are kept twice in memory (once for the processor, once converted for the NPU). Only ordinary (dense) models work; mixture-of-experts and other special models stay on the processor.',
-      'It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu. If the NPU cannot take a model, fLLM runs it on the processor and says why here.',
-      'This path is experimental and has not been run on NPU hardware by its authors yet.',
+      'fLLM uses an Intel NPU as a helper: the model runs on the processor, and the large matrix multiplications of a long prompt (64 tokens or more) run on the NPU. Writing the answer is not sped up and stays on the processor.',
+      'On a Core Ultra 5 235U the NPU read prompts 1.5 to 3 times faster than the processor alone, and about as fast as the integrated graphics, which need no setup. The NPU is worth it when the graphics are busy or absent, or to keep the processor free. The first start compiles the NPU programs (about a second each, shown as "still compiling"; the processor serves those meanwhile); later starts take them from a cache.',
+      'The NPU keeps a converted 8-bit copy of the weights it computes with, so a model needs about its own size again in memory (a budget limits it). Only ordinary (dense) models are accelerated; mixture-of-experts and other special models stay on the processor.',
+      'It is never chosen automatically. To use it, pick NPU under Advanced when you load a model, or start fLLM with --device npu (or FLLM_NPU_HOST=1). If the NPU cannot take a model, fLLM runs it on the processor and says why here.',
     ];
 
     const NPU_VENDOR_NAMES = { intel: 'Intel', amd: 'AMD', qualcomm: 'Qualcomm', other: 'Unknown maker' };
@@ -22,7 +23,7 @@
       unsupported_hardware: 'An NPU was detected, but this kind of NPU is not supported yet.',
       setup_unavailable: 'An Intel NPU was found, but fLLM has no automatic setup for this system. Install the OpenVINO runtime yourself and fLLM will find it.',
       no_device: 'The OpenVINO runtime is installed but does not list an NPU. The NPU driver may be missing, or this user may not be allowed to open the device.',
-      ready: 'Ready (experimental). Choose NPU under Advanced when you load a model.',
+      ready: 'Ready (experimental). Choose NPU under Advanced when you load a model; long prompts then run on it.',
       installing: 'Installing the runtime ...',
     };
 
@@ -45,7 +46,7 @@
      * the lists of formats. No DOM here.
      */
     function npuCardModel(npu) {
-      if (!npu) return { summary: 'Checking for an NPU ...', tone: 'muted', hardware: [], button: null, cancel: false, remove: false, progress: { visible: false, percent: 0, text: '' }, error: null, formats: [], explanation: NPU_EXPLANATION };
+      if (!npu) return { summary: 'Checking for an NPU ...', offload: '', tone: 'muted', hardware: [], button: null, cancel: false, remove: false, progress: { visible: false, percent: 0, text: '' }, error: null, formats: [], explanation: NPU_EXPLANATION };
       const setup = npu.setup || {};
       const progress = setup.progress || {};
       const runtime = npu.runtime || {};
@@ -54,7 +55,9 @@
         const mb = setup.download_bytes ? ` (a download of about ${Math.round(setup.download_bytes / 1e6)} MB)` : '';
         summary = `An Intel NPU was found. The runtime that drives it (OpenVINO ${setup.pinned_version || ''}${mb}) is not installed yet.`;
       }
-      if (npu.state === 'ready' && runtime.version) summary = `Ready (experimental), OpenVINO ${runtime.version}. Choose NPU under Advanced when you load a model.`;
+      if (npu.state === 'ready' && runtime.version) summary = `Ready (experimental), OpenVINO ${runtime.version}. Choose NPU under Advanced when you load a model; long prompts then run on it.`;
+      const dev = (npu.devices || [])[0];
+      if (npu.state === 'ready' && dev && dev.full_name) summary += ` ${dev.full_name}${dev.architecture ? ` (platform ${dev.architecture})` : ''}.`;
       if (npu.state === 'unsupported_hardware' && (npu.hardware || []).some((h) => h.vendor === 'amd')) {
         summary = 'An AMD NPU was found. fLLM drives it with its own kernels (long prompts) or through FastFlowLM: see the AMD NPU card below.';
       }
@@ -76,13 +79,16 @@
       const tone = npu.state === 'ready' ? 'good' : (npu.state === 'no_device' || error ? 'warn' : 'muted');
       const q = npu.quantizations || {};
       const formats = [
-        { title: 'Exact (same values as on the processor)', items: q.exact || [] },
-        { title: 'Converted to 4 bit', items: q.converted_int4 || [] },
-        { title: 'Converted to 8 bit', items: q.converted_int8 || [] },
+        { title: 'Computed as 8 bit with one scale per output row (the default)', items: q.eight_bit || [] },
         { title: 'Half precision', items: q.float16 || [] },
+        { title: 'Exact (same values as on the processor) with FLLM_NPU_WEIGHTS=exact', items: q.exact || [] },
+        { title: 'Kept at 4 bit with FLLM_NPU_WEIGHTS=int4', items: q.converted_int4 || [] },
       ].filter((f) => f.items.length);
+      // what the prompt offload is doing now (the status line from the engine; empty when the offload is not in use)
+      const offload = typeof npu.offload_line === 'string' ? npu.offload_line : '';
       return {
         summary,
+        offload,
         tone,
         hardware,
         button,
@@ -131,8 +137,9 @@
         state.npu = await res.json();
       } catch { return; }
       renderNpuCard();
-      const busy = !!state.npu?.setup?.progress?.busy;
-      if (busy && !npuTimer) npuTimer = setInterval(refreshNpu, 1000);
+      // poll while a setup runs, and while the prompt offload is working (its counters change)
+      const busy = !!state.npu?.setup?.progress?.busy || !!state.npu?.offload?.active;
+      if (busy && !npuTimer) npuTimer = setInterval(() => { if ($('spane-hardware')?.classList.contains('active')) refreshNpu(); }, 2000);
       if (!busy && npuTimer) { clearInterval(npuTimer); npuTimer = null; }
     }
 
@@ -141,6 +148,8 @@
       const m = npuCardModel(state.npu);
       $('npuSummary').textContent = m.summary;
       $('npuSummary').style.color = m.tone === 'good' ? 'var(--primary)' : '';
+      $('npuOffload').textContent = m.offload;
+      $('npuOffload').style.display = m.offload ? '' : 'none';
       $('npuHardwareList').innerHTML = m.hardware.map((h) => `
         <div class="device-card" style="margin-bottom:6px;">
           <div style="font-weight:600;color:var(--foreground);">${escapeHtml(h.label)}</div>

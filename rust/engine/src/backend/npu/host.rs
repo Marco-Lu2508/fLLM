@@ -59,3 +59,54 @@ pub fn engine() -> Option<&'static dyn HostOffload> {
     })
     .as_deref()
 }
+
+/// `--device npu` on a computer with an Intel NPU: the host decoder (fast CPU kernels, memory-mapped weights) runs the model and hands the
+/// long prompt projections to the NPU, exactly like `FLLM_NPU_HOST=1`; decode stays on the processor. The hybrid backend (every product
+/// through the reference CPU backend, a second copy of the weights) is used only with `--npu-mode all` or `FLLM_NPU_HYBRID=1`.
+///
+/// Returns the device the rest of the start-up should use (`cpu`), or `None` when the request is not for an Intel NPU or the hybrid
+/// backend was asked for. When the NPU cannot be used the reason is recorded for the Hardware page and the model runs on the processor.
+pub fn route_device(device: &str) -> Option<String> {
+    let name = device.trim().to_ascii_lowercase();
+    let index = match name.as_str() {
+        "npu" | "openvino" => 0,
+        other => other.strip_prefix("npu:").or_else(|| other.strip_prefix("openvino:"))?.parse::<usize>().ok()?,
+    };
+    if std::env::var("FLLM_NPU_HYBRID").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "off" | "false" | "no")) {
+        return None;
+    }
+    // an AMD NPU with fLLM's native kernels keeps its own route (docs/npu-xdna.md)
+    #[cfg(feature = "npu-xdna-native")]
+    if super::xdna::native::available().is_ok() {
+        return None;
+    }
+    if index != 0 {
+        return None;
+    }
+    let found = super::openvino::devices::enumerate();
+    let Some(first) = found.first() else {
+        let message = super::status::record_fallback(&format!("no usable NPU: {}", super::status::state_text(super::status::state())));
+        eprintln!("[fllm-rs] --device {device}: {message}");
+        return Some("cpu".to_owned());
+    };
+    // an explicit --device npu wins over FLLM_NPU_HOST=0
+    std::env::set_var("FLLM_NPU_HOST", "1");
+    eprintln!(
+        "[fllm-rs] --device {device}: the model runs on the processor and its long prompt projections on the NPU ({}); --npu-mode all or FLLM_NPU_HYBRID=1 selects the hybrid backend",
+        first.full_name
+    );
+    Some("cpu".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_device;
+
+    #[test]
+    fn only_requests_for_the_first_npu_are_rerouted() {
+        // none of these is an NPU request (or none for the first NPU), so nothing may change and nothing may be opened
+        for device in ["auto", "cpu", "vulkan:0", "cuda", "npu:x", "npu:1", "npu:", "hip:0"] {
+            assert_eq!(route_device(device), None, "{device}");
+        }
+    }
+}

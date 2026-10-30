@@ -115,13 +115,46 @@ pub struct QuantPolicy {
     pub group: usize,
     /// Convert Q4_0 / Q8_0 exactly (group 32) instead of re-quantizing them to `group`.
     pub lossless: bool,
+    /// Store every integer format as INT8 (the 4-bit formats too). Measured on a Core Ultra 5 235U: INT8 channel-wise weights compile in about
+    /// a second and run as fast as INT4, while INT4 in groups of 32 or 128 takes tens of seconds to compile for the large projections.
+    pub eight: bool,
 }
 
 impl Default for QuantPolicy {
+    /// The exact conversion (Q4_0 and Q8_0 in groups of 32, the rest INT4/INT8 in groups of 128): bit-identical weights, slow to compile.
     fn default() -> Self {
         Self {
             group: 128,
             lossless: true,
+            eight: false,
+        }
+    }
+}
+
+impl QuantPolicy {
+    /// INT8, one scale per output row, for every integer format: the fast default of the offload (see [`QuantPolicy::eight`]). The
+    /// error against the source weights is at most 1/254 of the row maximum, small beside the 4-bit rounding the source already has.
+    pub fn int8_channel() -> Self {
+        Self { group: 0, lossless: false, eight: true }
+    }
+
+    /// INT4 in groups of 128 (the NNCF/OpenVINO default): half the NPU memory of INT8; the large projections take seconds to compile.
+    pub fn int4_grouped() -> Self {
+        Self { group: 128, lossless: false, eight: false }
+    }
+
+    /// Short name for logs and the status line.
+    pub fn describe(&self) -> String {
+        if self.lossless {
+            "exact (Q4_0/Q8_0 in groups of 32, others INT4/INT8 in groups of 128)".to_owned()
+        } else if self.eight && self.group == 0 {
+            "INT8 per channel".to_owned()
+        } else if self.group == 0 {
+            "INT4/INT8 per channel".to_owned()
+        } else if self.eight {
+            format!("INT8 in groups of {}", self.group)
+        } else {
+            format!("INT4/INT8 in groups of {}", self.group)
         }
     }
 }
@@ -381,7 +414,7 @@ pub fn convert(
         }
     }
     // 4-bit codes pack two per byte along a row, so an odd row length takes the 8-bit form
-    let target = if target == Target::Four && !cols.is_multiple_of(2) {
+    let target = if target == Target::Four && (policy.eight || !cols.is_multiple_of(2)) {
         Target::Eight
     } else {
         target
@@ -508,6 +541,29 @@ mod tests {
     }
 
     #[test]
+    fn the_fast_default_stores_four_bit_sources_as_int8_per_channel() {
+        let mut rng = Lcg(11);
+        let (rows, cols) = (6, 256);
+        let raw = q4_0_blocks(&mut rng, rows * cols / 32);
+        let w = convert(QuantType::Q4_0, &raw, rows, cols, &QuantPolicy::int8_channel()).unwrap();
+        assert_eq!((w.format, w.group, w.groups()), (NpuFormat::Int8Sym, cols, 1));
+        assert_eq!(w.codes.len(), rows * cols);
+        let want = crate::compute::dequantize(&raw, 2, rows * cols).unwrap();
+        let got = w.dequantize();
+        for r in 0..rows {
+            let max = want[r * cols..(r + 1) * cols].iter().fold(0f32, |m, v| m.max(v.abs()));
+            // one step of the 8-bit grid is max / 127; the scale is stored as f16, which adds a relative 2^-11
+            let bound = max / 254.0 + max * 1e-3;
+            for c in 0..cols {
+                assert!((got[r * cols + c] - want[r * cols + c]).abs() <= bound, "row {r} col {c}");
+            }
+        }
+        let policy = QuantPolicy::int4_grouped();
+        assert!(!policy.eight && policy.group == 128);
+        assert_eq!(QuantPolicy::int8_channel().describe(), "INT8 per channel");
+    }
+
+    #[test]
     fn requantizing_q4_0_to_group_128_stays_close() {
         let mut rng = Lcg(3);
         let (rows, cols) = (4, 256);
@@ -515,6 +571,7 @@ mod tests {
         let policy = QuantPolicy {
             group: 128,
             lossless: false,
+            eight: false,
         };
         let w = convert(QuantType::Q4_0, &raw, rows, cols, &policy).unwrap();
         assert_eq!(

@@ -14,6 +14,7 @@
 //! source code was copied.
 #![cfg(feature = "npu-openvino")]
 
+pub mod bench;
 pub mod devices;
 pub mod engine;
 pub mod ffi;
@@ -26,12 +27,17 @@ pub mod session;
 pub use engine::{NpuEngine, WeightKey};
 pub use plan::{plan, should_offload, OffloadPlan, PlanEntry, WeightShape};
 
+static HOST: std::sync::OnceLock<Option<std::sync::Arc<NpuEngine>>> = std::sync::OnceLock::new();
+
+/// The host-decoder engine if it has been opened already (never opens it): what the status page reports.
+pub fn host_engine_opened() -> Option<&'static std::sync::Arc<NpuEngine>> {
+    HOST.get().and_then(Option::as_ref)
+}
+
 /// The engine for a *host* decoder (`FLLM_NPU_HOST=1`): opened on first use on the first NPU, `None` when the variable is not set or
 /// no NPU can be opened (the reason is logged once). A host decoder calls [`NpuEngine::offload_host`] on it before computing a
 /// projection with its CPU kernels; see OPENVINO.md for the call sites.
 pub fn host_engine() -> Option<&'static std::sync::Arc<NpuEngine>> {
-    static HOST: std::sync::OnceLock<Option<std::sync::Arc<NpuEngine>>> =
-        std::sync::OnceLock::new();
     HOST.get_or_init(|| {
         let wanted = std::env::var("FLLM_NPU_HOST")
             .is_ok_and(|v| !matches!(v.trim(), "" | "0" | "off" | "false" | "no"));
@@ -90,6 +96,7 @@ mod tests {
             &quant::QuantPolicy {
                 group: 128,
                 lossless: false,
+                eight: false,
             },
         )
         .unwrap();
@@ -101,6 +108,7 @@ mod tests {
             &quant::QuantPolicy {
                 group: 0,
                 lossless: false,
+                eight: false,
             },
         )
         .unwrap();
@@ -181,10 +189,12 @@ mod tests {
             quant::QuantPolicy {
                 group: 128,
                 lossless: false,
+                eight: false,
             },
             quant::QuantPolicy {
                 group: 0,
                 lossless: false,
+                eight: false,
             },
         ] {
             let weight = quant::convert(QuantType::Q4_0, &raw, 64, 256, &policy).unwrap();

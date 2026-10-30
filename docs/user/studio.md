@@ -367,8 +367,7 @@ so downloads from the page, `fllm-rs pull` and `fllm-rs run` all use it. A `HF_T
 **NPU (experimental).** If your computer has an Intel NPU, Settings, Hardware shows an NPU card. When the NPU is found but its runtime (OpenVINO,
 a download of about 60 to 85 MB from the official Python package host, checked against a fixed checksum) is missing, the card has an **Install the runtime**
 button with a progress bar and a Cancel button, and **Remove the runtime** takes it away again. Once the card says *Ready*, the load dialog of the
-Models page (Advanced, *Run on*) lists the NPU. Be aware: it is experimental and has not been run on NPU hardware by the authors yet; it is slower than the
-processor for many models, the weights are held twice in memory and only dense models work. The automatic choice never uses the NPU. If the NPU cannot
+Models page (Advanced, *Run on*) lists the NPU. Be aware: it is experimental and was measured on one Core Ultra 5 235U only; it makes reading long prompts about twice as fast as the processor alone (not faster than the integrated graphics), does nothing for the answer, keeps a converted copy of the weights in memory and only dense models are accelerated. The card shows a status line while it works (calls, models compiled and still compiling, memory held); [intel-npu.md](intel-npu.md) has the details. The automatic choice never uses the NPU. If the NPU cannot
 take a model, the model runs on the processor and the card shows why. AMD and Qualcomm NPUs are shown as *detected, not supported yet*.
 
 **Updates.** The Studio asks GitHub for a newer release once per start. If there is one, the Models page offers to download the

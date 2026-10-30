@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::sync::Mutex;
 
 /// Shown wherever the NPU can be chosen.
-pub const WARNING: &str = "Experimental: slower than the processor for many models; weights are held twice; dense models only.";
+pub const WARNING: &str = "Experimental: the NPU only speeds up reading long prompts (the processor writes the answer). The integrated graphics are usually faster. A converted copy of the weights is kept in memory.";
 
 /// Everything the state is decided from.
 #[derive(Clone, Copy, Debug, Default)]
@@ -200,11 +200,53 @@ pub fn notices() -> Vec<Notice> {
 /// Weight formats and how the NPU backend takes them (docs/backends.md, section 2; OPENVINO.md, "Format conversion").
 pub fn quantizations() -> Value {
     json!({
+        // the default (FLLM_NPU_WEIGHTS=int8): every integer format becomes INT8 with one scale per output row
+        "eight_bit": ["Q4_0", "Q4_1", "Q4_K", "Q5_0", "Q5_1", "Q5_K", "Q6_K", "Q8_0", "Q2_K", "Q3_K", "IQ4_NL", "IQ4_XS", "MXFP4", "NVFP4", "AWQ/GPTQ 4-bit"],
+        "float16": ["F16", "BF16", "F32"],
+        // FLLM_NPU_WEIGHTS=exact keeps Q4_0 and Q8_0 bit for bit; FLLM_NPU_WEIGHTS=int4 halves the NPU memory (slow to compile)
         "exact": ["Q4_0", "Q8_0"],
         "converted_int4": ["Q4_1", "Q2_K", "Q3_K", "Q4_K", "IQ4_NL", "MXFP4", "NVFP4", "AWQ/GPTQ 4-bit"],
         "converted_int8": ["Q5_0", "Q5_1", "Q5_K", "Q6_K"],
-        "float16": ["F16", "BF16", "F32"],
     })
+}
+
+/// What the prompt offload of the host decoder does right now (`FLLM_NPU_HOST=1` or `--device npu`): the engine's counters when it has
+/// been opened, else only whether it is requested.
+#[cfg(feature = "npu-openvino")]
+fn offload_json() -> Value {
+    let requested = std::env::var("FLLM_NPU_HOST").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "off" | "false" | "no"));
+    match super::openvino::host_engine_opened() {
+        Some(engine) => {
+            let mut status = engine.status_json();
+            status["requested"] = json!(true);
+            status["active"] = json!(true);
+            status
+        }
+        None => json!({"requested": requested, "active": false}),
+    }
+}
+
+#[cfg(not(feature = "npu-openvino"))]
+fn offload_json() -> Value {
+    json!({"requested": false, "active": false})
+}
+
+/// One line for the Hardware card about the offload, e.g. "Prompt offload on: 1240 calls, 21 models compiled ..." (empty when not in use).
+pub fn offload_line(status: &Value) -> String {
+    if !status["active"].as_bool().unwrap_or(false) {
+        return String::new();
+    }
+    let compiling = status["models_compiling"].as_u64().unwrap_or(0);
+    format!(
+        "Prompt offload on {}: {} calls, {} rows, {} models compiled{}, {} MB held{}",
+        status["device"].as_str().unwrap_or("the NPU"),
+        status["calls"].as_u64().unwrap_or(0),
+        status["rows"].as_u64().unwrap_or(0),
+        status["models_compiled"].as_u64().unwrap_or(0),
+        if compiling > 0 { format!(" ({compiling} still compiling, the processor serves those)") } else { String::new() },
+        status["resident_mb"].as_u64().unwrap_or(0),
+        if status["enabled"].as_bool() == Some(false) { "; switched off after errors" } else { "" }
+    )
 }
 
 /// `GET /api/studio/npu`.
@@ -216,7 +258,10 @@ pub fn to_json() -> Value {
     let marker = setup::installed();
     let version = marker.as_ref().map(|i| i.version.clone()).filter(|v| v != "unknown").or_else(|| view.version.clone());
     let artifact = setup::host_artifact();
+    let offload = offload_json();
     json!({
+        "offload": offload,
+        "offload_line": offload_line(&offload),
         "state": state,
         "state_text": state_text(state),
         "in_build": facts.compiled,
@@ -291,6 +336,15 @@ mod tests {
         assert!(explain_failure("npu-xdna: no compute path").contains("not supported yet"));
         let other = explain_failure("compile failed: bad shape.");
         assert!(other.contains("compile failed: bad shape)") && !other.contains(".)"));
+    }
+
+    #[test]
+    fn the_offload_line_is_empty_unless_the_offload_runs() {
+        assert_eq!(offload_line(&json!({"requested": true, "active": false})), "");
+        let line = offload_line(&json!({"active": true, "device": "Intel(R) AI Boost", "calls": 12, "rows": 3072, "models_compiled": 4, "models_compiling": 3, "resident_mb": 96, "enabled": true}));
+        assert_eq!(line, "Prompt offload on Intel(R) AI Boost: 12 calls, 3072 rows, 4 models compiled (3 still compiling, the processor serves those), 96 MB held");
+        let off = offload_line(&json!({"active": true, "device": "NPU", "enabled": false}));
+        assert!(off.ends_with("; switched off after errors"));
     }
 
     #[test]

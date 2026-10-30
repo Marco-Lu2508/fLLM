@@ -55,7 +55,7 @@ table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on M
 | ROCm/HIP RDNA4 (gfx12) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (Int4 skinny + WMMA gfx12) | L0 |
 | ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
 | Intel SYCL (Level Zero, Arc/Xe) | L0 | L0 | L0 | L0 | L0† (-> f16) | L0† (-> f16) | L0 |
-| Intel NPU (OpenVINO) | Q4_0, Q8_0: L0 exact (i4/i8, group 32); Q4_1, Q5_x: L0† (requantised) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
+| Intel NPU (OpenVINO) | all integer formats as INT8 per channel: Q4_K/Q6_K (Llama-3.2-1B Q4_K_M), Q4_K (Qwen2.5-0.5B): L2 on one Core Ultra 5 235U; the others L0† (requantised; `FLLM_NPU_WEIGHTS=exact` keeps Q4_0/Q8_0 bit for bit) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
 | AMD XDNA NPU (native) | **L1 on one Ryzen AI 5 PRO 435**: prompt projections only, bf16 x bf16 -> f32 on fLLM's own kernel; Q4_0, Q8_0, Q4_K, Q6_K, F16, BF16, F32 decoded straight to bf16, every other dequantizable format through the generic dequantizer, the rest stays on the CPU ([npu-xdna.md](npu-xdna.md)) | L1 (same kernel; 183 + 576 self-test checks of the `linear`, `host` and `embedding` groups pass) | – | – | – | – | – |
 | AMD XDNA NPU (FastFlowLM) | not fLLM's kernels: the models run in FastFlowLM, which fLLM drives and lists as a provider ([user/amd-npu.md](user/amd-npu.md)); the probe of one MatMul through ONNX Runtime/VitisAI remains | – | – | – | – | – | – |
 | Qualcomm Hexagon NPU | probe only (FP16 MatMul through QNN HTP; Genie wrapper) | – | – | – | – | – | – |
@@ -172,7 +172,7 @@ Apple-silicon CI runner are the exception: they execute on a GPU.
 | Self-test harness (groups, `--only`, `--quants`, `--list`, `--strict`, `--json`) | the CPU against itself (`selftest-gpu --device cpu`: 220 checks, 0 failed, 35 skipped); this checks the harness, not a GPU backend. CUDA: see the README Status table |
 | AMD XDNA native backend (`npu-xdna-native`) | L1: ran on one Ryzen AI 5 PRO 435 laptop under Linux (own `.xclbin` built with mlir-aie/Peano, run through XRT 2.21.75): the `linear`/`host`/`embedding` self test passes (183 + 576 checks, 388 projections on the NPU), Llama-3.2-3B Q4_K_M gives the processor's greedy text on a 714-token prompt and prompts run at 169-180 tok/s against 131-136 on the 6-thread processor ([npu-xdna.md](npu-xdna.md)). Windows, macOS, other XDNA chips: untested (the Windows cross-build compiles) |
 | Autotuner (`src/autotune.rs`) | L0: called by nothing, nothing measured |
-| Intel NPU backend in the release binary | the cargo feature `npu-openvino` is in the **default** feature set; the OpenVINO runtime is opened at run time (`dlopen` / `LoadLibrary`, no link-time dependency), so the same binary starts on every machine and uses an NPU once the runtime is installed (section 6). Compiled and unit tested; **L0**: it has not run on NPU hardware |
+| Intel NPU backend in the release binary | the cargo feature `npu-openvino` is in the **default** feature set; the OpenVINO runtime is opened at run time (`dlopen` / `LoadLibrary`, no link-time dependency), so the same binary starts on every machine and uses an NPU once the runtime is installed (section 6). Compiled, unit tested and run on one Core Ultra 5 235U (see section 6) |
 
 ## 5. Known gaps
 
@@ -288,19 +288,18 @@ Ordered by area.
 
 ## 6. NPUs in the app
 
-**Test level.** The Intel NPU path ran on one machine (a Core Ultra laptop, "Intel(R) AI Boost", architecture 3720, OpenVINO 2026.4.1 installed by
-the app): the runtime installed itself, the NPU compiled its models and a Qwen3.5-2B Q4_K_M model answered correctly with the NPU computing the
-matrix products. That is one device and one model; everything else in this section (AMD, Qualcomm, Apple, other Intel parts, other models) has
+**Test level.** The Intel NPU path ran on one machine (a Core Ultra 5 235U PC, "Intel(R) AI Boost", architecture 3720, Windows 11, OpenVINO 2026.4.1 installed by
+the app): the runtime installed itself, the NPU compiled its models, and Llama-3.2-1B and Qwen2.5-0.5B Q4_K_M read prompts on it with the same greedy text as the processor (measurements: `rust/engine/src/backend/npu/OPENVINO.md` section 0). That is one device and two small models; everything else in this section (AMD, Qualcomm, Apple, other Intel parts, other models) has
 only been compiled and unit tested (L0). What exists:
 
 | NPU | Status in the app |
 | --- | --- |
-| Intel NPU (Core Ultra, via OpenVINO) | detected; usable after the runtime is installed; **experimental** hybrid backend (L0) |
+| Intel NPU (Core Ultra, via OpenVINO) | detected; usable after the runtime is installed; **experimental**: `--device npu` runs the host decoder with the long prompt projections on the NPU (INT8 per channel, compiled models cached on disk); L2/L3 on one Core Ultra 5 235U |
 | AMD XDNA (Ryzen AI) | two routes: **fLLM's own kernels** through XRT (feature `npu-xdna-native`, default; usable once the helper library is built with `fllm-rs amd-npu build-shim`; prompt projections only; L1 on one Ryzen AI 5 PRO 435, [npu-xdna.md](npu-xdna.md)) and FastFlowLM ([user/amd-npu.md](user/amd-npu.md)); both are shown on one card |
 | Qualcomm Hexagon | detected and shown as "detected, not supported yet"; probe code only, never usable |
 | Apple Neural Engine | not detected by the app; probe code only (feature `npu-ane`) |
 
-**What the Intel path does.** The "hybrid" backend sends the large quantized projections (`quantized_linear`) of a prompt to the NPU and runs
+**What the Intel path does.** `--device npu` (or `FLLM_NPU_HOST=1`) keeps the model on the fast host decoder and sends the projections of prompts of 64 or more rows to the NPU (INT8 weights, one scale per output row; the first start compiles about a second per projection in the background while the processor serves the prompts, later starts load the compiled programs from a cache). Measured on a Core Ultra 5 235U with Llama-3.2-1B Q4_K_M: a 512-token prompt is read about twice as fast as on the processor alone and about as fast as on the integrated graphics, a 130-token prompt 1.0 to 1.4 times as fast; decode is unchanged; with Qwen2.5-0.5B the integrated graphics are 2 to 3 times faster than the NPU. The NPU is therefore never chosen automatically. The older "hybrid" backend (`--npu-mode all` or `FLLM_NPU_HYBRID=1`) sends the large quantized projections (`quantized_linear`) of a prompt to the NPU and runs
 everything else (attention, normalisation, the layers with a gate) on the processor's reference stream. By default only blocks of 64 or more rows go
 to the NPU, so the answer, one row at a time, is computed by the processor. The load option **What the NPU computes: everything it can**
 (`--npu-mode all`) sends every projection to the NPU, also single rows (static chunks of 16 rows, padded); the first start compiles about a hundred
@@ -310,8 +309,7 @@ the NPU is not the fast choice on this hardware; the mode exists so that the who
 slower than on the processor alone. The weights are held twice (the processor's copy and the NPU's converted copy). Only dense models work. Details, limits
 and the measurement plan: `rust/engine/src/backend/npu/OPENVINO.md`.
 
-**Weight formats on the NPU** (conversion at load time): Q4_0 and Q8_0 exact (INT4 / INT8, group 32); Q4_1, Q2_K, Q3_K, Q4_K, IQ4_NL, MXFP4, NVFP4 and
-AWQ/GPTQ 4-bit re-quantised to INT4 (group 128); Q5_0, Q5_1, Q5_K, Q6_K re-quantised to INT8; F16, BF16, F32 as FP16. Nothing else.
+**Weight formats on the NPU** (conversion at first use): every integer format (Q4_0, Q4_1, Q4_K, Q5_x, Q6_K, Q8_0, Q2_K, Q3_K, IQ4_*, MXFP4, NVFP4, AWQ/GPTQ 4-bit) becomes INT8 with one scale per output row (INT4 in groups of 32 or 128 compiles in tens of seconds for large projections; `FLLM_NPU_WEIGHTS=int4` or `exact` select those); F16, BF16, F32 as FP16. Nothing else. Environment: `FLLM_NPU_HOST`, `FLLM_NPU_WEIGHTS`, `FLLM_NPU_STATS`, `FLLM_NPU_BUDGET_MB`, `FLLM_NPU_CACHE_DIR`; `fllm-rs npu-bench` times one projection against the processor.
 
 **Detection** (works without the OpenVINO runtime, `backend/npu/probe.rs`): Linux, the kernel accelerator class (`/sys/class/accel/accelN`,
 `/dev/accel/accelN`; the driver `intel_vpu` names an Intel NPU, `amdxdna` an AMD one); Windows, the present devices of the device-manager classes

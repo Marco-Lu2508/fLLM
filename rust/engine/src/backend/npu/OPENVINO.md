@@ -1,8 +1,65 @@
 # Intel NPU via OpenVINO in fLLM
 
-Research, design, limits and measurement plan for the `npu-openvino` feature. **Test level L0** (see [test-levels.md](../../../../../docs/test-levels.md)):
-everything here compiles and is covered by hardware-free tests; it has never run on an NPU, never against a model, and nothing in it has
-been measured. Where numbers appear they are either quoted (with a source) or marked as an *assumption*.
+Research, design, limits and measurement plan for the `npu-openvino` feature. **Test level L2/L3 on one machine** (see
+[test-levels.md](../../../../../docs/test-levels.md)): section 0 below holds what was measured on a Core Ultra 5 235U (NPU 3720, Windows 11,
+OpenVINO 2026.4.1, driver version 1004841) on 2026-10-30; sections 1 to 10 are the earlier research and design text, whose numbers are quotes or
+*assumptions* unless section 0 replaces them. Other Intel NPUs (Lunar Lake 4000 and later), Linux and other models are untested.
+
+## 0. Measured on a Core Ultra 5 235U (2026-10-30)
+
+**What changed because of it.**
+
+* The "195 s to start" seen in the first Windows run was not compilation: 18 models compiled in 1.3 s; the time was the reference CPU backend of the self test.
+* Compile time depends hard on the weight form: INT4 in groups of 32 (the exact Q4_0 form) takes 40-90 s per large projection (338 s once), INT4 in groups of 128
+  5-12 s, **INT8 or INT4 per output channel 0.7-1.2 s**. The channel-wise forms are also the fastest to run. So the default is now **INT8 per channel for every
+  integer format** (`FLLM_NPU_WEIGHTS=int8`; error against the source at most 1/254 of the row maximum, small beside the 4-bit rounding the source has; the model's
+  NPU copy is about its size at 8 bit). `FLLM_NPU_WEIGHTS=int4` (groups of 128) halves the memory, `exact` keeps Q4_0/Q8_0 bit for bit; both compile slowly.
+* The blob cache works (`CACHE_DIR`, default `~/.cache/fllm/npu`, on Windows `%LOCALAPPDATA%\fllm\npu`): 2048x2048 g32: 1005 ms -> 42 ms, g128 544 -> 97 ms.
+  The first compile decides the mode: no cache or a slow first compile means the other models are compiled by a background thread while the processor serves the
+  prompts (the server is ready in 2 s and no prompt waits); a warm cache compiles them while the first prompt waits (about 40 ms each).
+* Static chunk of 256 rows instead of 128 (the call costs about 0.6 ms whatever its size; 256 rows reach 1.3-2.6 TOPS INT8 on 8192x2048, 128 rows 1.2-1.9).
+* `--device npu` now runs the fast host decoder with the prompt projections on the NPU (same as `FLLM_NPU_HOST=1`); the slow hybrid backend only with
+  `--npu-mode all` or `FLLM_NPU_HYBRID=1` (or the `selftest-gpu`, which builds it directly).
+* A compiled model is now keyed by the address **and** a fingerprint of the tensor, and idle models are dropped when the weight budget is needed (a model switch in the Studio
+  leaves the old model's slots behind). The budget is at most 40 % of the free memory of the computer at start (at least 1 GiB) unless `FLLM_NPU_BUDGET_MB` is set.
+
+**Projection microbenchmark** (`fllm-rs npu-bench`, synthetic weights, median of 8-10 calls, the CPU column is fLLM's own kernel on the same Q4_0 data; the processor numbers
+vary by a factor of two between runs on this PC, the NPU numbers by 10 %):
+
+| shape (n x k), batch 256 | weights on the NPU | compile (cold) | NPU ms (GOPS) | CPU ms |
+|---|---|---|---|---|
+| 2048 x 2048 | INT4 g32 (exact) / g128 / per channel | 1.3 s / 0.6 s / 0.2 s | 1.86 (1150) / 1.60 (1340) / 1.55 (1390) | 6.8-9.0 |
+| 8192 x 2048 | INT4 g32 / g128 / per channel | 88 s / 5.3 s / 0.7 s | 9.1 (940) / 5.6 (1540) / 3.3 (2600) | 48-90 |
+| 8192 x 2048 | INT8 per channel / FP16 | 1.0 s / 1.3 s | 4.5 (1910) / 6.0 (1430) | |
+| 2048 x 8192 | INT4 g32 / g128 / per channel | 4.7 s / 9.1 s / 1.1 s | 20 (430) / 8.9 (970) / 6.3 (1380) | 33-240 |
+| 2048 x 8192 | INT8 per channel / FP16 | 1.1 s / 1.8 s | 7.1 (1210) / 6.5 (1320) | |
+| 512 x 2048 | INT8 per channel | 0.2 s | 0.94 (570) | |
+
+A call has a fixed cost of about 0.6 ms, so small projections (the K and V projections, 512 x 2048) gain little; the NPU is 3-5 times faster than the processor's kernel on the large ones.
+
+**Whole model, prompt tokens per second of the request** (`fllm-rs bench`, Llama-3.2-1B Q4_K_M and Qwen2.5-0.5B Q4_K_M, 8 threads, runs alternated; this PC's speed drifts by 40-100 %
+between runs, so only the pairs inside one series mean something; each cell is a median of 2 repetitions):
+
+| model, prompt | processor | NPU prompt offload | iGPU (Vulkan) |
+|---|---|---|---|
+| Llama-3.2-1B, ~130 tokens | 108, 140, 149, 154, 185 | 130, 157, 159, 175, 231 | 98, 189 |
+| Llama-3.2-1B, ~510 tokens | 83, 90, 95, 140, 152 | 176, 180, 224, 245, 319 | 138, 166 |
+| Qwen2.5-0.5B, ~130 tokens | 117 | 105, 144 | 347, 446 |
+| Qwen2.5-0.5B, ~510 tokens | 138 | 117, 227 | 289, 375 |
+
+Read: on a 1B model and a 512-token prompt the NPU route reads about twice as fast as the processor alone (neighbouring runs: 2.2x three times) and is in the range of the
+iGPU; at 130 tokens the gain is 1.0-1.4x; on the 0.5B model most projections are below the offload size (896 hidden) and the gain is small, and the iGPU is 2-3 times faster than the NPU.
+**Decode is unchanged** (A/B with a 16-token prompt, 64 generated tokens: 20.7, 11.0, 21.2 tok/s with the NPU route against 8.3, 13.8, 21.6 without; the spread is the PC, not the route).
+The greedy answer to an 807-token prompt (Llama-3.2-1B) is the same text with and without the NPU.
+
+**Verdict for this chip and this model class.** The NPU does not beat the iGPU, and decode never benefits; it beats the processor for prompts of a few hundred tokens and more on models of 1B and up.
+It therefore stays opt-in (never chosen by `--device auto`); the use cases are a busy or absent iGPU, or keeping the processor free. Not measured: energy, Lunar Lake and later NPUs, 3B+ models, long prompts (2k+), the effect of the NPU running next to the iGPU.
+
+**Where the time goes** (Llama-3.2-1B, 512 tokens, 16 layers x 7 projections): the NPU computes at about 1.2-1.5 TOPS effective, i.e. roughly 0.5 s of the 1.7 s a 512-token prompt needs; the rest is attention, norms, the output
+layer and the f32/f16 conversions on the processor, plus the 0.6 ms per call. `FLLM_NPU_STATS=N` prints the split (conversion to f16, the NPU call, conversion back) every N offloaded projections.
+
+**Unproven or not done:** overlapping the processor and the NPU (the processor idles while the NPU runs a chunk; the two together could add about 15 %); converting the activations once per Q/K/V group; offloading the output layer;
+bucketed chunk sizes (one static size is used; a 70-token prompt pays for 256 rows); NF4; Linux and Lunar Lake and later.
 
 ## 1. Summary
 
@@ -56,7 +113,7 @@ to and from f32, the bias and the tensor scale factor stay on the host.
 
 ## 4. Limits
 
-* **Static shapes.** Every compiled model has a fixed row count `B` (default 128, `FLLM_NPU_CHUNK`). A prompt is split into full
+* **Static shapes.** Every compiled model has a fixed row count `B` (default 256, `FLLM_NPU_CHUNK`). A prompt is split into full
   blocks; a remainder is zero-padded if it has at least `FLLM_NPU_MIN_BATCH` (64) rows, otherwise the CPU computes it.
 * **Compile time.** Every projection is its own model (weights as constants). A model with 32 layers has more than 200 of them.
   The compile time per model is **not measured**, and no reliable figure is known for this model shape; it is the most important measurement point (Section 8). `CACHE_DIR` (default `~/.cache/fllm/npu`, disabled with `FLLM_NPU_CACHE_DIR=`) makes the second start cheaper. Compilation
@@ -143,6 +200,10 @@ in a row switch the NPU off for the process.
 | `FLLM_NPU=0` | offload off |
 | `FLLM_NPU_HOST=1` | host-decoder hook active (Section 7) |
 | `FLLM_NPU_MIN_BATCH`, `FLLM_NPU_CHUNK`, `FLLM_NPU_MIN_ELEMS`, `FLLM_NPU_BUDGET_MB` | planner, Section 6 |
+| `FLLM_NPU_WEIGHTS` | `int8` (default: INT8 per channel), `int4` (INT4 in groups of 128) or `exact` (Q4_0/Q8_0 bit for bit); see section 0 |
+| `FLLM_NPU_STATS` | log a summary line (with the time split) every N offloaded projections |
+| `FLLM_NPU_COMPILE` | `inline` or `background`: force how models are compiled (default: decided by the first compile) |
+| `FLLM_NPU_HYBRID` | `--device npu` uses the hybrid backend instead of the host decoder (`--npu-mode all` sets it) |
 | `FLLM_NPU_GROUP` | group size of re-quantised weights (0 = per channel); also disables the exact Q4_0/Q8_0 conversion |
 | `FLLM_NPU_CPU_GOPS`, `FLLM_NPU_GOPS`, `FLLM_NPU_OVERHEAD_US` | rates of the cost model (placeholders) |
 | `FLLM_NPU_CACHE_DIR` | directory for OpenVINO's `CACHE_DIR` (empty = off) |

@@ -66,4 +66,4 @@ fllm-rs amd-npu native-bench 8192 3072 512 q4_k # one projection on the NPU agai
 * Tested on one machine (a Ryzen AI 5 PRO 435 laptop with Ubuntu 26.04 and FastFlowLM 1.0.11): detection, `flm validate`, download, start, stop, the provider
   entry and a chat through the Studio. Not tested on Windows with an AMD NPU (the code paths are the same; the Windows build runs and reports "no NPU" on a
   PC without one).
-* An Intel NPU is a different path (OpenVINO, experimental), see Settings > Hardware > NPU.
+* An Intel NPU is a different path (OpenVINO, experimental), see [intel-npu.md](intel-npu.md).
