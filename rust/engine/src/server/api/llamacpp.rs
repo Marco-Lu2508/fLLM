@@ -287,6 +287,19 @@ fn marker(state: &AppState, id: u32) -> String {
         .to_owned()
 }
 
+/// The prompt of one family: `markers` are the prefix, suffix and middle control tokens. The markers go in front of the text
+/// they announce (`<|fim_prefix|>` then the code before the cursor), which is how the models were trained.
+pub(crate) fn fim_prompt(family: crate::tokenizer::FimFamily, context: &str, markers: [&str; 3], prefix: &str, suffix: &str) -> String {
+    use crate::tokenizer::FimFamily;
+    let [pre, suf, mid] = markers;
+    match family {
+        FimFamily::Qwen | FimFamily::StarCoder | FimFamily::DeepSeek => format!("{context}{pre}{prefix}{suf}{suffix}{mid}"),
+        FimFamily::CodeLlama => format!("{context}{pre} {prefix} {suf}{suffix} {mid}"),
+        // Codestral is trained suffix first and continues right after the prefix, with no middle token
+        FimFamily::Codestral => format!("{context}{suf}{suffix}{pre}{prefix}"),
+    }
+}
+
 /// Builds the FIM prompt of `/infill`: repository context, then prefix, suffix and the middle
 /// marker in the order the family was trained on.
 fn to_infill_body(state: &AppState, body: &Value) -> Result<Value, String> {
@@ -330,13 +343,7 @@ fn to_infill_body(state: &AppState, body: &Value) -> Result<Value, String> {
     let pre = marker(state, fim.prefix);
     let suf = marker(state, fim.suffix);
     let mid = marker(state, fim.middle);
-    // StarCoder2 and its derivatives were trained suffix-first (llama.cpp `FIM_SPM`).
-    let suffix_first = state.model_name.to_lowercase().contains("starcoder");
-    let prompt = if suffix_first {
-        format!("{context}{suffix}{suf}{prefix}{pre}{mid}")
-    } else {
-        format!("{context}{prefix}{pre}{suffix}{suf}{mid}")
-    };
+    let prompt = fim_prompt(fim.family, &context, [&pre, &suf, &mid], prefix, suffix);
     let mut chat = json!({"prompt": prompt, "stream": body["stream"].as_bool().unwrap_or(false)});
     chat["max_tokens"] = json!(budget(state, &chat["prompt"], body.get("n_predict"))?);
     Ok(chat)
@@ -620,6 +627,17 @@ pub(in crate::server) async fn detokenize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fim_prompts_put_each_marker_before_its_text() {
+        use crate::tokenizer::FimFamily::*;
+        let m = ["<P>", "<S>", "<M>"];
+        assert_eq!(fim_prompt(Qwen, "", m, "a", "b"), "<P>a<S>b<M>");
+        assert_eq!(fim_prompt(StarCoder, "ctx|", m, "a", "b"), "ctx|<P>a<S>b<M>");
+        assert_eq!(fim_prompt(DeepSeek, "", m, "a", "b"), "<P>a<S>b<M>");
+        assert_eq!(fim_prompt(CodeLlama, "", m, "a", "b"), "<P> a <S>b <M>");
+        assert_eq!(fim_prompt(Codestral, "", m, "a", "b"), "<S>b<P>a");
+    }
 
     #[test]
     fn stop_reasons_map_to_llama_cpp_flags() {

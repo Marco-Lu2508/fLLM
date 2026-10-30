@@ -48,22 +48,34 @@ pub struct Fim {
 /// Prompt layout a FIM family expects (llama.cpp `llama_fim_*`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FimFamily {
-    /// Qwen2.5-Coder and StarCoder: `<|fim_prefix|>`, `<|fim_suffix|>`, `<|fim_middle|>`.
+    /// Qwen2.5-Coder, CodeGemma: `<|fim_prefix|>`, `<|fim_suffix|>`, `<|fim_middle|>`.
     Qwen,
-    /// CodeLlama: `<PRE>`, `<SUF>`, `<MID>`.
+    /// StarCoder, StarCoder2, Granite code: `<fim_prefix>`, `<fim_suffix>`, `<fim_middle>`.
+    StarCoder,
+    /// CodeLlama: `<PRE>`, `<SUF>`, `<MID>`, with a space after `<PRE>`, before `<SUF>` and before `<MID>`.
     CodeLlama,
-    /// DeepSeek-Coder: `<｜fim▁prefix｜>`, `<｜fim▁suffix｜>`, `<｜fim▁middle｜>`.
+    /// DeepSeek-Coder: `<｜fim▁begin｜>`, `<｜fim▁hole｜>`, `<｜fim▁end｜>` (or the prefix/suffix/middle spelling).
     DeepSeek,
+    /// Codestral: `[SUFFIX]suffix[PREFIX]prefix`, the model continues after the prefix.
+    Codestral,
 }
 
-/// Control-token literals of the known FIM families, in prefix/suffix/middle order. StarCoder
-/// uses the same markers as Qwen2.5-Coder, so it resolves to [`FimFamily::Qwen`].
-const FIM_LITERALS: [(FimFamily, [&str; 3]); 3] = [
+/// Control-token literals of the known FIM families, in prefix/suffix/middle order.
+const FIM_LITERALS: [(FimFamily, [&str; 3]); 6] = [
     (
         FimFamily::Qwen,
         ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"],
     ),
+    (FimFamily::StarCoder, ["<fim_prefix>", "<fim_suffix>", "<fim_middle>"]),
     (FimFamily::CodeLlama, ["<PRE>", "<SUF>", "<MID>"]),
+    (
+        FimFamily::DeepSeek,
+        [
+            "<｜fim▁begin｜>",
+            "<｜fim▁hole｜>",
+            "<｜fim▁end｜>",
+        ],
+    ),
     (
         FimFamily::DeepSeek,
         [
@@ -72,6 +84,7 @@ const FIM_LITERALS: [(FimFamily, [&str; 3]); 3] = [
             "<｜fim▁middle｜>",
         ],
     ),
+    (FimFamily::Codestral, ["[PREFIX]", "[SUFFIX]", "[MIDDLE]"]),
 ];
 
 #[derive(Clone, Copy)]
