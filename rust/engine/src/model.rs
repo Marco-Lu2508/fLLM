@@ -113,8 +113,18 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
 /// and tensor names are the ones the converter writes for the target are listed:
 /// * `exaone` (EXAONE 3.x) is the Llama graph with the Llama tensor names;
 /// * `ernie4_5-moe` is `ernie4_5moe` with a hyphen;
-/// * `phi2` has the tensors of `phi` (GGUFs with a fused `attn_qkv` tensor fail on the missing `attn_q`).
-const ARCHITECTURE_ALIASES: &[(&str, &str)] = &[("exaone", "llama"), ("ernie4_5-moe", "ernie4_5moe"), ("phi2", "phi")];
+/// * `phi2` has the tensors of `phi` (GGUFs with a fused `attn_qkv` tensor fail on the missing `attn_q`);
+/// * `qwen3vl`, `qwen3vlmoe`, `qwen2vl` are the text models of the Qwen VL files.
+const ARCHITECTURE_ALIASES: &[(&str, &str)] = &[
+    ("exaone", "llama"),
+    ("ernie4_5-moe", "ernie4_5moe"),
+    ("phi2", "phi"),
+    // vision-language GGUFs of llama.cpp: the language model has the tensors of Qwen3 / Qwen3-MoE / Qwen2 and an M-RoPE section list;
+    // without images all three position axes are equal, which is plain rotary embedding (the vision tower is not read)
+    ("qwen3vl", "qwen3"),
+    ("qwen3vlmoe", "qwen3moe"),
+    ("qwen2vl", "qwen2"),
+];
 
 fn canonical_architecture(mapping: MappedGguf) -> MappedGguf {
     let arch = mapping.index().metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
