@@ -9,6 +9,17 @@
     }
     ['btnCollapseSidebar', 'btnExpandSidebarChat', 'btnExpandSidebarCode', 'btnExpandSidebarHub', 'btnExpandSidebarSettings'].forEach((id) => $(id).addEventListener('click', toggleSidebar));
 
+    // On a phone the sidebar is a drawer over the page: closed at the start, closed again after a choice or a tap on the dimmed page.
+    const narrowScreen = window.matchMedia('(max-width: 760px)');
+    function closeSidebarIfNarrow() {
+      if (narrowScreen.matches && !$('appShell').classList.contains('sidebar-collapsed')) toggleSidebar();
+    }
+    narrowScreen.addEventListener('change', closeSidebarIfNarrow);
+    $('sidebarScrim').addEventListener('click', closeSidebarIfNarrow);
+    document.querySelector('.sidebar-outer').addEventListener('click', (e) => {
+      if (e.target.closest('.nav-item, .thread-row') && !e.target.closest('.thread-row-actions, .sel-box')) setTimeout(closeSidebarIfNarrow, 0);
+    });
+
     $('navNewChat').addEventListener('click', startNewChat);
     $('navHub').addEventListener('click', () => switchSurface('hub'));
     $('navSettings').addEventListener('click', () => switchSurface('settings'));

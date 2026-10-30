@@ -197,7 +197,7 @@
       container.innerHTML = groups.map(([name, items]) => `
         <div class="thread-group">${escapeHtml(name)}</div>
         ${items.map((t) => `
-          <div class="thread-row ${t.id === state.activeThreadId && state.surface === 'chat' ? 'active' : ''} ${state.prj.selected.has(t.id) ? 'selected' : ''}" data-tid="${t.id}" draggable="true">
+          <div class="thread-row ${t.id === state.activeThreadId && state.surface === 'chat' ? 'active' : ''} ${state.prj.selected.has(t.id) ? 'selected' : ''}" data-tid="${t.id}" draggable="true" role="button" tabindex="0" aria-current="${t.id === state.activeThreadId && state.surface === 'chat' ? 'true' : 'false'}">
             <input type="checkbox" class="sel-box" ${state.prj.selected.has(t.id) ? 'checked' : ''} tabindex="-1">
             <span class="thread-row-title">${t.pinned ? icon('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>') : ''}${escapeHtml(t.title)}</span>
             <div class="thread-row-actions">
@@ -661,7 +661,7 @@
       }
       if (text.startsWith('/') && state.attachments.length === 0 && (await runSlashCommand(text))) return;
       prjCaptureMemory(text); // projects.js: "remember that ..." saves a memory
-      $('chatTextarea').value = '';
+      $('chatTextarea').value = ''; $('liveTokenCounter').textContent = '';
       $('chatTextarea').style.height = 'auto';
       const t = ensureActiveThread(text || state.attachments[0]?.name);
       const path = pathOf(t);
@@ -925,6 +925,13 @@
       if (row) openThread(row.dataset.tid);
     });
 
+    // the rows are buttons for the keyboard: Enter or Space opens the chat
+    $('threadList').addEventListener('keydown', (e) => {
+      if ((e.key !== 'Enter' && e.key !== ' ') || e.target.closest('button, input')) return;
+      const row = e.target.closest('.thread-row[data-tid]');
+      if (row) { e.preventDefault(); openThread(row.dataset.tid); }
+    });
+
     $('messagesColumn').addEventListener('click', async (e) => {
       const copyCode = e.target.closest('[data-copy-code]');
       if (copyCode) {
@@ -1053,7 +1060,7 @@
       tokTimer = setTimeout(async () => {
         if (window.fllmRemoteSelected && window.fllmRemoteSelected()) { $('liveTokenCounter').textContent = `about ${estimateTokens(el.value)} tokens`; return; } // providers hook
         const max = state.status?.model?.max_context || 4096;
-        if (!el.value.trim()) { $('liveTokenCounter').textContent = `0 / ${max} tokens`; return; }
+        if (!el.value.trim()) { $('liveTokenCounter').textContent = ''; return; }
         try {
           const r = await apiFetch('/tokenize', { method: 'POST', body: { content: el.value } });
           if (r.ok) $('liveTokenCounter').textContent = `${((await r.json()).tokens || []).length} / ${max} tokens`;

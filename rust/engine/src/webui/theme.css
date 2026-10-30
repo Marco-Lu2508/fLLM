@@ -437,7 +437,7 @@ h3 { font-size: var(--text-xl); }
 .chat-textarea:focus { box-shadow: none; border: none; }
 .chat-input-toolbar { padding: 4px 8px 8px; }
 .chat-input-toolbar .btn, .chat-input-toolbar .btn-ghost { font-size: var(--text-2xs); height: 26px; color: var(--muted-fg); }
-.chat-starter-pills { display: grid; gap: 8px; }
+.chat-starter-pills { gap: 8px; }
 .chat-starter-pills > * {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -595,7 +595,7 @@ header, .app-header {
 .sidebar-header { padding: 12px 12px 10px; }
 
 /* chat starter cards: two columns on wide screens, one on narrow */
-.chat-starter-pills { display: flex; flex-wrap: wrap; gap: 8px; max-width: none; }
+.chat-container.is-empty .chat-starter-pills { display: flex; flex-wrap: wrap; gap: 8px; max-width: none; }
 .chat-starter-pills > * {
   flex: 1 1 320px;
   align-items: flex-start;
@@ -663,3 +663,120 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px;
 input[type=range]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); border: 2px solid var(--bg); box-shadow: 0 0 0 1px var(--primary); }
 input[type=range]:focus-visible { outline: none; }
 input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--primary-soft); }
+
+/* ==========================================================================
+   Polish pass (2026-10): chat measure and spacing, code cards, phone layout, touch targets
+   ========================================================================== */
+
+/* The answer column uses the full width of the column; only running text keeps a readable measure, so tables and code get room. */
+.msg-assistant-wrap { max-width: 100%; }
+.msg-assistant-prose > p, .msg-assistant-prose > ul, .msg-assistant-prose > ol,
+.msg-assistant-prose > blockquote, .msg-assistant-prose > h1, .msg-assistant-prose > h2,
+.msg-assistant-prose > h3, .msg-assistant-prose > h4 { max-width: 78ch; }
+.code-card pre { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.code-card-header { background: var(--surface-2); }
+.code-card-header .btn { color: var(--muted-fg); }
+.code-card-header .btn:hover { color: var(--fg); }
+.md-table { border: 1px solid var(--border); border-radius: var(--r-sm); }
+.md-table th, .md-table td { border-width: 0 0 1px 0; }
+.md-table tr:last-child td { border-bottom: 0; }
+.md-table th { background: var(--surface-2); }
+.msg-assistant-prose a { text-decoration-thickness: 1px; }
+
+/* The actions of a message sit in the gap below it; hidden, they must not take room. */
+.messages-column { gap: 26px; }
+.msg-user-wrap { position: relative; }
+.msg-user-wrap .msg-actions-bar { position: absolute; right: 0; top: 100%; margin: 2px 0 0; z-index: 1; }
+.msg-user-wrap:focus-within .msg-actions-bar { opacity: 1; }
+.msg-assistant-wrap .msg-actions-bar { margin-top: 6px; }
+
+/* sidebar rows are keyboard targets: show their actions when focus is inside */
+.thread-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.thread-row:focus-within .thread-row-actions { display: inline-flex; }
+.thread-empty { color: var(--muted-fg); font-size: var(--text-sm); padding: 6px 12px; }
+
+/* The token counter appears while typing and is empty otherwise. */
+#liveTokenCounter:empty { display: none; }
+
+/* The scrim behind the sidebar drawer of a phone */
+.sidebar-scrim { display: none; }
+
+@media (max-width: 760px) {
+  .app-shell:not(.sidebar-collapsed) .sidebar-scrim {
+    display: block; position: fixed; inset: 0; z-index: 95; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px);
+  }
+  .app-shell:not(.sidebar-collapsed) .sidebar-outer { width: min(86vw, 320px); padding: 0; z-index: 100; }
+  .app-shell:not(.sidebar-collapsed) .sidebar-floating { border-radius: 0 var(--r-lg) var(--r-lg) 0; background: var(--surface); }
+
+  .header-page { gap: 6px; padding: 0 8px; }
+  .header-left { min-width: 0; flex: 1 1 auto; gap: 4px; overflow: hidden; }
+  .header-left > div { min-width: 0; }
+  .header-right { flex: none; gap: 2px; }
+  .header-trace, .ctx-meter .ctx-bar { display: none; }
+  .model-pill { max-width: 100%; min-width: 0; }
+  #activeModelLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 34vw; }
+  #presetLabel { display: none; }
+  .model-pill .quant-chip { display: none; }
+  .popover-panel { max-width: calc(100vw - 16px); }
+  #modelDropdownMenu, #presetMenu { width: min(360px, calc(100vw - 16px)) !important; }
+
+  .chat-messages-scroll { padding: 8px 12px 16px; overflow-x: hidden; }
+  .messages-column { gap: 22px; }
+  .msg-user-bubble { max-width: 90%; }
+  .chat-composer-region { padding-left: 8px; padding-right: 8px; }
+  .chat-input-shell { padding-bottom: var(--space-2); }
+  .chat-input-toolbar { flex-wrap: nowrap; gap: 4px; }
+  .toolbar-left { flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; }
+  .toolbar-left::-webkit-scrollbar { display: none; }
+  .toolbar-left .composer-chip { flex: none; }
+  .toolbar-left .composer-chip > span { display: none; }
+  .toolbar-left .composer-chip.active > span#thinkingChipLabel { display: inline; }
+  .toolbar-right { flex: none; }
+  .chat-container:not(.is-empty) .chat-starter-pills { display: none; }
+  .chat-container.is-empty .chat-starter-pills > * { flex-basis: 100%; }
+  .chat-empty-hero h1 { font-size: clamp(26px, 8vw, 36px); }
+  .md-table, .code-card { max-width: calc(100vw - 24px); }
+  .settings-menu { width: auto; }
+}
+
+/* Fingers need larger targets than a mouse does. */
+@media (pointer: coarse) {
+  .btn-icon, .btn-icon-xs { min-width: 36px; min-height: 36px; }
+  .composer-chip { min-height: 36px; min-width: 36px; justify-content: center; }
+  .nav-item, .settings-nav-btn, .thread-row { min-height: 40px; }
+  .thread-row.active .thread-row-actions { display: inline-flex; }
+}
+
+/* ---- settings: search box, found rows, phone layout ---------------------------------------------- */
+.settings-search { position: sticky; top: 0; z-index: 2; padding: 6px 2px 8px; background: var(--bg); }
+.settings-search input { width: 100%; height: var(--control-h); }
+.settings-search-empty { margin: 8px 4px 0; font-size: var(--text-sm); color: var(--muted-fg); }
+.settings-nav-btn[hidden], .settings-section-label[hidden] { display: none; }
+@keyframes search-hit { 0%, 70% { background: var(--primary-soft); } 100% { background: transparent; } }
+.search-hit { animation: search-hit 3.2s var(--ease) both; border-radius: var(--r-sm); box-shadow: 0 0 0 6px var(--primary-soft); }
+@media (prefers-reduced-motion: reduce) { .search-hit { animation: none; background: var(--primary-soft); } }
+
+@media (max-width: 760px) {
+  .settings-shell { flex-direction: column; height: auto; flex: 1; min-height: 0; overflow-y: auto; }
+  .settings-menu {
+    width: auto; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 6px; overflow-x: auto; overflow-y: hidden;
+    border-right: 0; border-bottom: 1px solid var(--border); padding: 8px 10px; scrollbar-width: none; flex: none;
+  }
+  .settings-menu::-webkit-scrollbar { display: none; }
+  .settings-search { position: static; flex: 0 0 150px; padding: 0; background: none; }
+  .settings-search-empty { display: none; }
+  .settings-section-label { display: none; }
+  .settings-nav-btn { width: auto; flex: none; white-space: nowrap; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--r-pill); }
+  .settings-nav-btn svg.icon { display: none; }
+  .settings-nav-btn.active { border-color: var(--primary); box-shadow: none; }
+  .settings-content-scroll { padding: 8px 12px 28px; overflow: visible; }
+  .app-card-item { flex-wrap: wrap; gap: 8px; }
+  .app-card-item > .app-item-info { flex: 1 1 100%; }
+  .app-item-actions { flex-wrap: wrap; }
+  .app-card, .settings-pane { max-width: 100%; }
+  .app-item-desc.mono, .mono { overflow-wrap: anywhere; }
+}
+
+.sidebar-footer { gap: 8px; }
+.sidebar-footer #footerSimdLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-footer #footerSlotsLabel { flex: none; white-space: nowrap; }

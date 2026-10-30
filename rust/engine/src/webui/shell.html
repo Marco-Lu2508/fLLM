@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de" class="dark">
+<html lang="en" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,6 +9,7 @@
 </head>
 <body class="colored-user-bubble">
   <div class="app-shell" id="appShell">
+    <div class="sidebar-scrim" id="sidebarScrim" aria-hidden="true"></div>
 
     <!-- ======================================================================
          1. FLOATING LEFT SIDEBAR (components/left-sidebar/index.tsx)
@@ -23,7 +24,7 @@
               <span>fLLM</span>
             </div>
             <div style="display:flex;align-items:center;gap:2px;">
-              <button class="btn-icon btn-icon-xs" id="btnCollapseSidebar" title="Sidebar einklappen (Ctrl+B)">
+              <button class="btn-icon btn-icon-xs" id="btnCollapseSidebar" title="Collapse the sidebar (Ctrl+B)">
                 <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
               </button>
             </div>
@@ -110,8 +111,8 @@
 
         <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
         <div class="sidebar-footer">
-          <span class="mono" id="footerSimdLabel">CPU · avx-vnni</span>
-          <span class="mono tabular" id="footerSlotsLabel">0/8 slots</span>
+          <span class="mono" id="footerSimdLabel" title="Where the model runs">CPU</span>
+          <span class="mono tabular" id="footerSlotsLabel" title="Requests being answered right now, out of the number the server handles at once">0/8 busy</span>
         </div>
       </div>
     </aside>
@@ -381,7 +382,7 @@
 
                   <div class="toolbar-right">
                     <!-- TokenCounter -->
-                    <span class="mono tabular" style="font-size:11px;color:var(--muted-foreground);margin-right:4px;" id="liveTokenCounter">0 / 512 tok</span>
+                    <span class="mono tabular" style="font-size:11px;color:var(--muted-foreground);margin-right:4px;" id="liveTokenCounter" aria-live="off" title="Tokens in this message, and the context size of the model"></span>
 
                     <!-- voice: stop reading aloud, and dictation (shown by voice.js when the browser can do it) -->
                     <button class="btn-icon btn-icon-xs" id="btnStopSpeaking" style="display:none;" title="Stop reading aloud">
