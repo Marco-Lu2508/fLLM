@@ -574,6 +574,9 @@ pub struct DeviceLayerWeights {
     pub host_values: bool,
     /// Projection of the separate attention output gate (AFMoE, K2 Horizon).
     pub attn_gate: Option<crate::backend::DeviceWeight>,
+    /// BitNet sub-norms: over the attention output in front of the output projection / over the activated feed-forward product.
+    pub attn_sub_norm: Option<crate::backend::DeviceBuffer>,
+    pub ffn_sub_norm: Option<crate::backend::DeviceBuffer>,
     /// Query / key RMS norms (Qwen3, Gemma3 ...), applied over `weight.len()` values.
     pub q_norm: Option<crate::backend::DeviceBuffer>,
     pub k_norm: Option<crate::backend::DeviceBuffer>,
@@ -632,6 +635,8 @@ impl DeviceLayerWeights {
             host_ffn: host,
             host_values: false,
             attn_gate: None,
+            attn_sub_norm: None,
+            ffn_sub_norm: None,
             q_norm: None,
             k_norm: None,
             post_attn_norm: None,
@@ -2474,8 +2479,9 @@ impl RustDecoder {
 
     /// Why layer `i` cannot run on the device (`None`: it can). Such a layer is computed by the host reference code
     /// (`host_layers`) between device layers: the residual stream is downloaded, the layer runs on the CPU with the host KV
-    /// cache, and the stream goes back up. `gate_ok` / `arch_ok`: the stream has the attention-gate / element-wise kernels.
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, conv_ok: bool) -> Option<&'static str> {
+    /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
+    /// per-head gate and value-scale kernels.
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, conv_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
@@ -2491,19 +2497,16 @@ impl RustDecoder {
         }
         match &layer.attn {
             Attn::Std { .. } => {
-                if layer.attn_sub_norm.is_some() {
-                    return Some("an attention sub-norm");
-                }
-                // the device gate kernels multiply element by element: a gate with one value per head would be read as garbage
-                // (Laguna, Step-3.5); the value scale of MiMo-V2 has no device operation either
-                if layer.gate_per_head {
+                // the element-wise gate kernels would read a gate with one value per head (Laguna, Step-3.5) as garbage: that gate and
+                // the value scale of MiMo-V2 have their own device operations (`head_gate_mul`, `scale_inplace`)
+                if layer.gate_per_head && !head_ok {
                     return Some("a per-head attention output gate");
                 }
-                if cfg.value_scale != 1.0 {
+                if cfg.value_scale != 1.0 && !head_ok {
                     return Some("a value scale");
                 }
                 // routed value experts (MoVA) are computed by the host reference inside an otherwise device layer
-                let gated = layer.output_gate || layer.attn_gate.is_some();
+                let gated = layer.output_gate || (layer.attn_gate.is_some() && !layer.gate_per_head);
                 if gated && (!arch_ok || !gate_ok) {
                     return Some("an attention output gate");
                 }
@@ -2592,9 +2595,7 @@ impl RustDecoder {
                 }
             }
             Ffn::Gated { .. } => {
-                if layer.ffn_sub_norm.is_some() {
-                    Some("a feed-forward sub-norm")
-                } else if native(cfg.activation) {
+                if native(cfg.activation) {
                     None
                 } else {
                     Some("an activation without a device kernel")
@@ -2712,10 +2713,10 @@ impl RustDecoder {
                 backend.name()
             ));
         }
-        let (gate_ok, arch_ok) = backend
+        let (gate_ok, arch_ok, head_ok) = backend
             .create_stream()
-            .map(|s| (s.supports_attention_gate(), s.supports_arch_ops()))
-            .unwrap_or((false, false));
+            .map(|s| (s.supports_attention_gate(), s.supports_arch_ops(), s.supports_head_gate()))
+            .unwrap_or((false, false, false));
         let caps = backend.capabilities();
         let mut missing = self.backend_unsupported(caps.supports_layer_norm, caps.supports_grouped_rms_norm);
         // Layers without device kernels run on the host between the device layers (`host_layers`); a model in which no layer can
@@ -2745,7 +2746,7 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, conv_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, conv_ok)
                 }
             })
             .collect();
@@ -3248,6 +3249,8 @@ impl RustDecoder {
                 host_ffn: ffn_host_exact,
                 host_values: layer.value_moe.is_some(),
                 attn_gate: layer.attn_gate.as_ref().map(|g| upload_linear(&format!("blk.{i}.attn_gate"), g)).transpose()?,
+                attn_sub_norm: layer.attn_sub_norm.as_ref().map(upload_vec).transpose()?,
+                ffn_sub_norm: layer.ffn_sub_norm.as_ref().map(upload_vec).transpose()?,
                 q_norm,
                 k_norm,
                 post_attn_norm,
@@ -3608,7 +3611,7 @@ impl RustDecoder {
                 if let Some((q_w, k_w, v_w)) = std_qkv {
                 // 4-bit q/k/v: the three GEMMs leave FP16 and one kernel adds the bias, rotates q and k and writes k and v into the cache
                 let mut fused_qkv = false;
-                let plain_kv = !layer.kv_shared && !layer.k_eq_v && dev_layer.v_norm.is_none();
+                let plain_kv = !layer.kv_shared && !layer.k_eq_v && dev_layer.v_norm.is_none() && cfg.value_scale == 1.0;
                 if plain_kv
                     && cfg.rope.dims > 0
                     && cfg.layer_rotates(i)
@@ -3756,6 +3759,10 @@ impl RustDecoder {
                 if !merged_done {
                     // Gemma 4 / 3n: every value head is RMS-normalised without a weight
                     device_rms_inplace(&mut **stream, &mut scratch, &mut v_buf, dev_layer.v_norm.as_ref(), cfg.eps, 1)?;
+                }
+                // MiMo-V2: the values are scaled before they enter the cache
+                if cfg.value_scale != 1.0 && !layer.kv_shared {
+                    stream.scale_inplace(&mut v_buf, cfg.value_scale).map_err(err)?;
                 }
                 if let Some(clip) = cfg.qkv_clip {
                     for buf in [&mut q_buf, &mut k_buf, &mut v_buf] {
@@ -3946,12 +3953,17 @@ impl RustDecoder {
                         .map_err(err)?;
                 }
                 if let Some(gate) = gate_buf.take() {
-                    match cfg.attn_gate {
-                        crate::config::AttnGate::Sigmoid => stream.sigmoid_gate_mul(&mut attn_buf, &gate).map_err(err)?,
-                        crate::config::AttnGate::Softplus(beta) => stream.softplus_gate_mul(&mut attn_buf, &gate, beta).map_err(err)?,
+                    match (layer.gate_per_head, cfg.attn_gate) {
+                        // one gate value per head and row (Laguna, Step-3.5)
+                        (true, crate::config::AttnGate::Sigmoid) => stream.head_gate_mul(&mut attn_buf, &gate, dv, None).map_err(err)?,
+                        (true, crate::config::AttnGate::Softplus(beta)) => stream.head_gate_mul(&mut attn_buf, &gate, dv, Some(beta)).map_err(err)?,
+                        (false, crate::config::AttnGate::Sigmoid) => stream.sigmoid_gate_mul(&mut attn_buf, &gate).map_err(err)?,
+                        (false, crate::config::AttnGate::Softplus(beta)) => stream.softplus_gate_mul(&mut attn_buf, &gate, beta).map_err(err)?,
                     }
                     scratch.recycle(gate);
                 }
+                // BitNet: an RMS norm over all heads of the attention output, in front of the output projection
+                device_rms_inplace(&mut **stream, &mut scratch, &mut attn_buf, dev_layer.attn_sub_norm.as_ref(), cfg.eps, 1)?;
                 if i == 0 {
                     debug_sum(&mut **stream, "kqv_out-0", &attn_buf);
                 }
@@ -4167,6 +4179,7 @@ impl RustDecoder {
                     && matches!(cfg.activation, Activation::Silu | Activation::GeluTanh)
                     && !crate::backend::env_flag_once!("FLLM_NO_F16_FFN")
                     && gate_w.bias.is_none()
+                    && dev_layer.ffn_sub_norm.is_none()
                     && up_w.bias.is_none()
                     && gate_w.quant_type == up_w.quant_type
                     && gate_w.rows == up_w.rows
@@ -4204,6 +4217,8 @@ impl RustDecoder {
                     stream.activation(&mut act_buf, &up_buf, act).map_err(err)?;
                 }
 
+                // BitNet: an RMS norm over the activated product in front of the down projection
+                device_rms_inplace(&mut **stream, &mut scratch, &mut act_buf, dev_layer.ffn_sub_norm.as_ref(), cfg.eps, 1)?;
                 let mut ffn_out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 // the norm of the next layer (or the final norm) can join the residual add of the down projection
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)

@@ -15,9 +15,12 @@ act_reglu act_glu.comp -DMODE=9
 act_reglu2 act_glu.comp -DMODE=10
 act_copy act_glu.comp -DMODE=11
 
-# in-place element-wise operations (ewise.comp, MODE: 0 clamp, 1 softplus gate) and MLA data movement (mla_move.comp, MODE: 0 q, 1 k, 2 v, 3 latent)
+# in-place element-wise operations (ewise.comp, MODE: 0 clamp, 1 softplus gate, 2 scale; act_head_gate.comp, MODE: 0 sigmoid, 1 softplus: per-head attention gate) and MLA data movement (mla_move.comp, MODE: 0 q, 1 k, 2 v, 3 latent)
 ewise_clamp ewise.comp -DMODE=0
 ewise_softplus ewise.comp -DMODE=1
+ewise_scale ewise.comp -DMODE=2
+act_head_gate_sigmoid act_head_gate.comp -DMODE=0
+act_head_gate_softplus act_head_gate.comp -DMODE=1
 mla_move_q mla_move.comp -DMODE=0
 mla_move_k mla_move.comp -DMODE=1
 mla_move_v mla_move.comp -DMODE=2

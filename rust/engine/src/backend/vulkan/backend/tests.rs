@@ -280,6 +280,10 @@ fn all_op_plans() -> Vec<OpPlan> {
     for softplus in [false, true] {
         plans.push(crate::backend::vulkan::ops::plan_ewise(softplus, 1000, 0.7).unwrap());
     }
+    plans.push(crate::backend::vulkan::ops::plan_scale(1000, 0.7).unwrap());
+    for beta in [None, Some(0.7f32)] {
+        plans.push(crate::backend::vulkan::ops::plan_head_gate(1000, 8, beta).unwrap());
+    }
     {
         use crate::backend::vulkan::ops::{plan_mla_move, MlaPart};
         for part in [MlaPart::Q, MlaPart::K, MlaPart::V, MlaPart::Latent] {

@@ -35,7 +35,7 @@ use crate::backend::vulkan::ops::recurrent::{
 };
 use crate::backend::vulkan::ops::{
     plan_argmax, plan_embedding, plan_ewise, plan_glu, plan_glu_strided, plan_layer_norm, plan_mla_move, plan_residual_add, plan_rms_norm, plan_rms_norm_grouped,
-    plan_rope, plan_sigmoid_gate_mul, plan_split_q_gate, EmbeddingTable, GluLayout, GluMode, MlaPart,
+    plan_head_gate, plan_rope, plan_scale, plan_sigmoid_gate_mul, plan_split_q_gate, EmbeddingTable, GluLayout, GluMode, MlaPart,
 };
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
 use crate::backend::{
@@ -547,6 +547,32 @@ impl Stream for VulkanStream {
         }
         let plan = plan_ewise(true, x.size / 4, beta)?;
         self.run_plans(&[plan], &[Arg::w("x", x), Arg::r("gate", gate)], &[], false)
+    }
+
+    fn head_gate_mul(&mut self, x: &mut DeviceBuffer, gate: &DeviceBuffer, dv: usize, softplus_beta: Option<f32>) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) || dv == 0 || !(x.size / 4).is_multiple_of(dv) || gate.size < x.size / dv || softplus_beta.is_some_and(|b| b <= 0.0) {
+            return Err(invalid("per-head attention gate does not fit its target"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = plan_head_gate(x.size / 4, dv, softplus_beta)?;
+        self.run_plans(&[plan], &[Arg::w("x", x), Arg::r("gate", gate)], &[], false)
+    }
+
+    fn scale_inplace(&mut self, x: &mut DeviceBuffer, factor: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("scale target is not a whole number of floats"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = plan_scale(x.size / 4, factor)?;
+        self.run_plans(&[plan], &[Arg::w("x", x)], &[], false)
+    }
+
+    fn supports_head_gate(&self) -> bool {
+        true
     }
 
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {

@@ -3978,6 +3978,18 @@ impl Tester<'_> {
         self.record("softplus_gate", "2001 values beta 0.693", r);
         let r = self.clamp_check();
         self.record("clamp", "1001 values limit 0.7", r);
+        let heads_ok = self.device.create_stream().map(|s| s.supports_head_gate()).unwrap_or(false);
+        if heads_ok {
+            for (rows, heads, dv, beta) in [(1usize, 4usize, 16usize, None), (3, 8, 24, None), (5, 6, 20, Some(std::f32::consts::LN_2))] {
+                let r = self.head_gate_check(rows, heads, dv, beta);
+                let kind = if beta.is_some() { "softplus" } else { "sigmoid" };
+                self.record("head_gate", &format!("{kind} {rows} rows x {heads} heads x {dv}"), r);
+            }
+            let r = self.scale_check();
+            self.record("scale", "1001 values factor 0.37", r);
+        } else {
+            self.record_skip("head_gate", "per-head attention gate, value scale", "supports_head_gate is false");
+        }
         for (heads, nope, rope, value, kv_lora, rows) in [(3usize, 5usize, 4usize, 6usize, 7usize, 5usize), (16, 128, 64, 128, 512, 3)] {
             let r = self.mla_check(heads, nope, rope, value, kv_lora, rows);
             self.record("mla_assemble", &format!("{heads} heads {nope}+{rope}/{value} latent {kv_lora}"), r);
@@ -4108,6 +4120,46 @@ impl Tester<'_> {
         let have = get(stream.as_mut(), &buf, x.len())?;
         let scale: Vec<f64> = want.iter().map(|v| v.abs().max(1.0)).collect();
         Ok(Outcome { device: worst(&have, &want, &scale), cpu: 0.0, tol: 2e-6, cpu_tol: 1.0, ms })
+    }
+
+    /// `x[r][h][d] *= act(gate[r][h])`: the per-head attention output gate (Laguna, Step-3.5) against an f64 reference.
+    fn head_gate_check(&mut self, rows: usize, heads: usize, dv: usize, beta: Option<f32>) -> Result<Outcome, BackendError> {
+        let x = self.rng.vector(rows * heads * dv, 2.0);
+        let g = self.rng.vector(rows * heads, 6.0);
+        let want: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let gate = f64::from(g[i / dv]);
+                let act = match beta {
+                    None => 1.0 / (1.0 + (-gate).exp()),
+                    Some(b) => {
+                        let scaled = f64::from(b) * gate;
+                        if scaled > 20.0 { gate } else { scaled.exp().ln_1p() / f64::from(b) }
+                    }
+                };
+                f64::from(v) * act
+            })
+            .collect();
+        let mut stream = self.device.create_stream()?;
+        let mut buf = put(self.device, stream.as_mut(), &x)?;
+        let gate = put(self.device, stream.as_mut(), &g)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.head_gate_mul(&mut buf, &gate, dv, beta))?;
+        let have = get(stream.as_mut(), &buf, x.len())?;
+        let scale: Vec<f64> = want.iter().map(|v| v.abs().max(1.0)).collect();
+        Ok(Outcome { device: worst(&have, &want, &scale), cpu: 0.0, tol: 2e-6, cpu_tol: 1.0, ms })
+    }
+
+    fn scale_check(&mut self) -> Result<Outcome, BackendError> {
+        let x = self.rng.vector(1001, 2.0);
+        let want: Vec<f64> = x.iter().map(|&v| f64::from(v) * f64::from(0.37f32)).collect();
+        let mut stream = self.device.create_stream()?;
+        let mut buf = put(self.device, stream.as_mut(), &x)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.scale_inplace(&mut buf, 0.37))?;
+        let have = get(stream.as_mut(), &buf, x.len())?;
+        Ok(Outcome { device: worst(&have, &want, &vec![1.0; want.len()]), cpu: 0.0, tol: 1e-6, cpu_tol: 1.0, ms })
     }
 
     fn clamp_check(&mut self) -> Result<Outcome, BackendError> {

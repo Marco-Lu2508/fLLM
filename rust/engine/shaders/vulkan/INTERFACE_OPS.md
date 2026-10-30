@@ -45,6 +45,8 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `residual_add` | `plan_residual_add` | `misc_residual` |
 | `split_q_gate` | `plan_split_q_gate` | `misc_split_q_gate` |
 | `sigmoid_gate_mul` | `plan_sigmoid_gate_mul` | `act_sigmoid_mul` |
+| `head_gate_mul` (per-head gate, sigmoid or softplus) | `plan_head_gate` | `act_head_gate_{sigmoid,softplus}` |
+| `scale_inplace` | `plan_scale` | `ewise_scale` |
 | `argmax_rows` | `plan_argmax` | `misc_argmax` |
 | `kv_cache_write` | `plan_kv_write` (2 dispatches: keys, values) | `kv_write_f16`, `kv_write_q8` |
 | `attention_paged` | `plan_attention` | `attn_decode_{f16,q8}` (+ `attn_merge`), `attn_prefill_{f16,q8}_d{128,256,512}` |
@@ -364,6 +366,28 @@ Gated attention output (Stream::sigmoid_gate_mul): x[i] = x[i] * sigmoid(gate[i]
 | 0 | `uint` | `count` |
 
 Push block: 4 bytes. Grid: `[min(ceil(count/256), 65535), 1, 1]`.
+
+### `act_head_gate.comp`
+
+Compiled as `act_head_gate_sigmoid` (`MODE=0`) and `act_head_gate_softplus` (`MODE=1`).
+
+```text
+Per-head attention output gate (Stream::head_gate_mul, Laguna and Step-3.5): x[i] = x[i] * act(gate[i / dv]) in place, one gate value per
+head and row, dv output values per head. MODE 0: act(g) = sigmoid(g); MODE 1: act(g) = softplus(beta * g) / beta (the gate itself above scaled 20).
+```
+
+| binding | name | access | type |
+|---|---|---|---|
+| 0 | `x` | read/write | `float x[];` |
+| 1 | `gate` | readonly | `float gate[];` |
+
+| push offset | type | field |
+|---|---|---|
+| 0 | `uint` | `count` |
+| 4 | `uint` | `dv` |
+| 8 | `float` | `beta` |
+
+Push block: 12 bytes. Grid: `[min(ceil(count/256), 65535), 1, 1]`. `ewise.comp` gained `MODE=2` (`ewise_scale`: `x = x * param`, `Stream::scale_inplace`).
 
 ### `misc_residual.comp`
 

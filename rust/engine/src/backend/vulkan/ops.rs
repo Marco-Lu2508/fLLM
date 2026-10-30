@@ -594,6 +594,27 @@ pub fn plan_ewise(softplus: bool, count: usize, param: f32) -> Result<OpPlan, Ba
     )
 }
 
+/// `Stream::scale_inplace` (`ewise_scale`: `x *= factor`).
+pub fn plan_scale(count: usize, factor: f32) -> Result<OpPlan, BackendError> {
+    if count == 0 {
+        return Err(invalid("scale of an empty tensor"));
+    }
+    plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x"))
+}
+
+/// `Stream::head_gate_mul` (`act_head_gate_sigmoid` / `act_head_gate_softplus`): `x[i] *= act(gate[i / dv])` over `count` floats.
+pub fn plan_head_gate(count: usize, dv: usize, softplus_beta: Option<f32>) -> Result<OpPlan, BackendError> {
+    if count == 0 || dv == 0 || !count.is_multiple_of(dv) {
+        return Err(invalid("per-head gate: the output is not a whole number of heads"));
+    }
+    plan(
+        if softplus_beta.is_some() { "act_head_gate_softplus" } else { "act_head_gate_sigmoid" },
+        Push::new().u("count", count).u("dv", dv).f("beta", softplus_beta.unwrap_or(1.0)),
+        groups_1d(count, 256),
+        Slots::new().rw("x").read("gate"),
+    )
+}
+
 /// Which output `mla_move` produces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MlaPart {

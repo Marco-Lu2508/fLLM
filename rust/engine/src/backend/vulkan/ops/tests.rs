@@ -972,6 +972,10 @@ fn sample_plans() -> Vec<OpPlan> {
     for softplus in [false, true] {
         v.push(super::plan_ewise(softplus, 64, 0.5).unwrap());
     }
+    v.push(super::plan_scale(64, 0.5).unwrap());
+    for beta in [None, Some(0.5)] {
+        v.push(super::plan_head_gate(64, 8, beta).unwrap());
+    }
     for part in [super::MlaPart::Q, super::MlaPart::K, super::MlaPart::V, super::MlaPart::Latent] {
         v.push(super::plan_mla_move(part, 3, 4, 16, 8, 16, 32).unwrap());
     }

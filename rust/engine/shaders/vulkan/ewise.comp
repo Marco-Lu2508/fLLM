@@ -3,6 +3,7 @@
 // FLLM-SHADER: ewise | bindings: x,gate | push: count,param | grid: [min(ceil(count/256), 65535), 1, 1]
 // In-place element-wise operations on x (grid-stride loop over count floats), selected by the macro MODE:
 //   0 CLAMP     x = clamp(x, -param, param)                                  (Stream::clamp; gate is not read)
+//   2 SCALE     x = x * param                                                (Stream::scale_inplace; gate is not read)
 //   1 SOFTPLUS  x = x * softplus(param * gate) / param  (the gate itself above scaled 20)   (Stream::softplus_gate_mul, param = beta)
 #define WG 256
 #include "_ops_common.glsl"
@@ -24,6 +25,8 @@ void main() {
     for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
 #if MODE == 0
         x[i] = clamp(x[i], -p.param, p.param);
+#elif MODE == 2
+        x[i] = x[i] * p.param;
 #else
         const float scaled = p.param * gate[i];
         x[i] = x[i] * (scaled > 20.0 ? gate[i] : log(1.0 + exp(scaled)) / p.param);

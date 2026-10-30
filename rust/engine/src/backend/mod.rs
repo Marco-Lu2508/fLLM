@@ -1769,6 +1769,29 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("softplus_gate_mul".into()))
     }
 
+    /// In-place per-head attention output gate: `x[i] *= act(gate[i / dv])` for every output value `i`, `dv` values per head and
+    /// one gate value per head and row (Laguna, Step-3.5). `softplus_beta`: `None` is the sigmoid, `Some(beta)` is
+    /// `softplus(beta * g) / beta`.
+    fn head_gate_mul(
+        &mut self,
+        _x: &mut DeviceBuffer,
+        _gate: &DeviceBuffer,
+        _dv: usize,
+        _softplus_beta: Option<f32>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("head_gate_mul".into()))
+    }
+
+    /// In-place `x = x * factor` (the value scale of MiMo-V2-Flash).
+    fn scale_inplace(&mut self, _x: &mut DeviceBuffer, _factor: f32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("scale_inplace".into()))
+    }
+
+    /// Does this stream implement [`Stream::head_gate_mul`] and [`Stream::scale_inplace`]?
+    fn supports_head_gate(&self) -> bool {
+        false
+    }
+
     /// In-place `x = clamp(x, -limit, limit)`.
     fn clamp(&mut self, _x: &mut DeviceBuffer, _limit: f32) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("clamp".into()))

@@ -1571,6 +1571,14 @@ int fllm_cuda_softplus_mul(FllmStream *st, float *x, const float *g, size_t n, f
     PREP(st);
     return fllm_softplus_mul_launch(st->s, x, g, n, beta);
 }
+int fllm_cuda_head_gate_mul(FllmStream *st, float *x, const float *g, size_t n, size_t dv, float beta) {
+    PREP(st);
+    return fllm_head_gate_launch(st->s, x, g, n, dv, beta);
+}
+int fllm_cuda_scale(FllmStream *st, float *x, size_t n, float factor) {
+    PREP(st);
+    return fllm_scale_launch(st->s, x, n, factor);
+}
 int fllm_cuda_clamp(FllmStream *st, float *x, size_t n, float limit) {
     PREP(st);
     return fllm_clamp_launch(st->s, x, n, limit);

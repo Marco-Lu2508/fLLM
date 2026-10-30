@@ -41,6 +41,25 @@ __global__ void arch_softplus_mul_kernel(float *__restrict__ x, const float *__r
     }
 }
 
+// x[i] *= act(g[i / dv]): per-head attention output gate (Laguna, Step-3.5); beta <= 0 selects the sigmoid, beta > 0 softplus(beta g) / beta
+__global__ void arch_head_gate_kernel(float *__restrict__ x, const float *__restrict__ g, size_t n, size_t dv, float beta) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+        const float gv = g[i / dv];
+        float a;
+        if (beta > 0.f) {
+            const float scaled = beta * gv;
+            a = scaled > 20.f ? gv : log1pf(expf(scaled)) / beta;
+        } else {
+            a = 1.0f / (1.0f + expf(-gv));
+        }
+        x[i] *= a;
+    }
+}
+
+__global__ void arch_scale_kernel(float *__restrict__ x, size_t n, float factor) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) x[i] *= factor;
+}
+
 static unsigned arch_grid(size_t n) {
     size_t g = (n + 255) / 256;
     return (unsigned)(g > 65535 ? 65535 : (g == 0 ? 1 : g));
@@ -65,4 +84,14 @@ int fllm_softplus_mul_launch(cudaStream_t s, float *x, const float *g, size_t n,
     if (n == 0) return 0;
     arch_softplus_mul_kernel<<<arch_grid(n), 256, 0, s>>>(x, g, n, beta);
     return fllm_check_launch("softplus_mul");
+}
+int fllm_head_gate_launch(cudaStream_t s, float *x, const float *g, size_t n, size_t dv, float beta) {
+    if (n == 0) return 0;
+    arch_head_gate_kernel<<<arch_grid(n), 256, 0, s>>>(x, g, n, dv, beta);
+    return fllm_check_launch("head_gate");
+}
+int fllm_scale_launch(cudaStream_t s, float *x, size_t n, float factor) {
+    if (n == 0) return 0;
+    arch_scale_kernel<<<arch_grid(n), 256, 0, s>>>(x, n, factor);
+    return fllm_check_launch("scale");
 }

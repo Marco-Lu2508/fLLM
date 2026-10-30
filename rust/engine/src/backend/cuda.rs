@@ -457,6 +457,8 @@ extern "C" {
     fn fllm_cuda_act(st: *mut RawStream, x: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_act_glu(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, mode: c_int) -> c_int;
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
+    fn fllm_cuda_head_gate_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, dv: usize, beta: f32) -> c_int;
+    fn fllm_cuda_scale(st: *mut RawStream, x: *mut f32, n: usize, factor: f32) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
     #[allow(clippy::too_many_arguments)]
@@ -4060,6 +4062,27 @@ impl Stream for CudaStream {
         }
         // SAFETY: sizes checked above.
         check(unsafe { fllm_cuda_softplus_mul(self.raw, dev_ptr(x)?.cast(), dev_ptr(gate)?.cast(), x.size / 4, beta) })
+    }
+
+    fn head_gate_mul(&mut self, x: &mut DeviceBuffer, gate: &DeviceBuffer, dv: usize, softplus_beta: Option<f32>) -> Result<(), BackendError> {
+        let beta = softplus_beta.unwrap_or(0.0);
+        if !x.size.is_multiple_of(4) || dv == 0 || !(x.size / 4).is_multiple_of(dv) || gate.size < x.size / dv || softplus_beta.is_some_and(|b| b <= 0.0) {
+            return Err(invalid("per-head attention gate does not fit its target"));
+        }
+        // SAFETY: the gate holds one float per `dv` values of x (checked above).
+        check(unsafe { fllm_cuda_head_gate_mul(self.raw, dev_ptr(x)?.cast(), dev_ptr(gate)?.cast(), x.size / 4, dv, beta) })
+    }
+
+    fn scale_inplace(&mut self, x: &mut DeviceBuffer, factor: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("scale target is not a whole number of floats"));
+        }
+        // SAFETY: the buffer is a whole number of floats.
+        check(unsafe { fllm_cuda_scale(self.raw, dev_ptr(x)?.cast(), x.size / 4, factor) })
+    }
+
+    fn supports_head_gate(&self) -> bool {
+        true
     }
 
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {

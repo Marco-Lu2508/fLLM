@@ -3,9 +3,11 @@
 tensor names (layer numbers collapsed). Used to check what real llama.cpp files of a model family contain without downloading them.
 
     python scripts/gguf_peek.py https://huggingface.co/<owner>/<repo>/resolve/main/<file>.gguf [--keys] [--limit 60]
+    python scripts/gguf_peek.py local/file.gguf --keys
 """
 from __future__ import annotations
 
+import os
 import re
 import struct
 import sys
@@ -20,6 +22,11 @@ class Reader:
         self.fetch(0, 1 << 22)
 
     def fetch(self, start: int, size: int) -> None:
+        if os.path.exists(self.url):
+            with open(self.url, "rb") as f:
+                f.seek(start)
+                self.buf, self.start = f.read(size), start
+            return
         req = urllib.request.Request(self.url, headers={"Range": f"bytes={start}-{start + size - 1}"})
         with urllib.request.urlopen(req, timeout=120) as r:
             self.buf, self.start = r.read(), start
