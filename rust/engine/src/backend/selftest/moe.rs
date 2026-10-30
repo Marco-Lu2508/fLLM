@@ -33,11 +33,29 @@ fn glu_reference(g: f64, u: f64, glu: MoeGlu) -> f64 {
 }
 
 /// Lipschitz constants of the activation in `g` and `u` around a point (central differences, with a margin), to turn the error scales of the
-/// two products into the error scale of the activation.
-fn glu_lipschitz(g: f64, u: f64, glu: MoeGlu) -> (f64, f64) {
+/// two products into the error scale of the activation. `mag_g` / `mag_u`: the sums of the absolute terms of the two products. The clamped
+/// activation (mode 2) is not smooth: a pointwise slope is zero when the exact `g` or `u` sits just beyond a clamp, while the device's product,
+/// off by up to the tolerance of the products (`tol * mag`), may sit on the other side. For that mode the slope is the largest one over that
+/// whole interval of each argument, which is exactly what bounds the activation error given products within their tolerance.
+fn glu_lipschitz(g: f64, u: f64, glu: MoeGlu, mag_g: f64, mag_u: f64, tol: f64) -> (f64, f64) {
     let h = 1e-3;
-    let dg = (glu_reference(g + h, u, glu) - glu_reference(g - h, u, glu)).abs() / (2.0 * h);
-    let du = (glu_reference(g, u + h, glu) - glu_reference(g, u - h, glu)).abs() / (2.0 * h);
+    if glu.mode != 2 {
+        let dg = (glu_reference(g + h, u, glu) - glu_reference(g - h, u, glu)).abs() / (2.0 * h);
+        let du = (glu_reference(g, u + h, glu) - glu_reference(g, u - h, glu)).abs() / (2.0 * h);
+        return (dg * 1.2 + 1e-3, du * 1.2 + 1e-3);
+    }
+    let (rg, ru) = (tol * mag_g, tol * mag_u);
+    let steps = 64;
+    let (mut dg, mut du) = (0.0f64, 0.0f64);
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64 * 2.0 - 1.0;
+        let (gi, ui) = (g + t * rg, u + t * ru);
+        // one-sided slopes on both sides of the point: a clamp edge halves the central difference
+        for d in [-h, h] {
+            dg = dg.max(((glu_reference(gi + d, u, glu) - glu_reference(gi, u, glu)) / h).abs());
+            du = du.max(((glu_reference(g, ui + d, glu) - glu_reference(g, ui, glu)) / h).abs());
+        }
+    }
     (dg * 1.2 + 1e-3, du * 1.2 + 1e-3)
 }
 
@@ -555,7 +573,7 @@ impl Tester<'_> {
                 match glu {
                     Some(g) => {
                         let (gv, uv) = (products[0].0, products[1].0);
-                        let (lg, lu) = glu_lipschitz(gv, uv, g);
+                        let (lg, lu) = glu_lipschitz(gv, uv, g, products[0].1, products[1].1, Self::FAST_TOL);
                         let reference = glu_reference(gv, uv, g);
                         want.push(reference);
                         // the fast kernels keep the activation in f16: its rounding (half an f16 step, 2^-11 of the value) is part of the
@@ -700,7 +718,7 @@ impl Tester<'_> {
                     us += tu.abs();
                 }
                 a[i] = glu_reference(g, u, glu);
-                let (lg, lu) = glu_lipschitz(g, u, glu);
+                let (lg, lu) = glu_lipschitz(g, u, glu, gs, us, Self::FAST_TOL);
                 a_scale[i] = lg * gs + lu * us;
             }
             let mut o = vec![0.0f64; hidden];
