@@ -75,7 +75,7 @@ across all batch sizes (1 to 356), totaling 330 checks.
 ## Importing NVFP4 checkpoints
 
 ModelOpt NVFP4 safetensors (`quant_algo: NVFP4`; `hf_quant_config.json` or the `quantization_config` of `config.json`) are read
-by `fllm-rs convert` and converted automatically by `run`, `serve` and `pull`; llama.cpp's converter is not needed. Per quantized
+by `fllm-rs convert` and loaded directly by `run` and `serve` (`--no-direct-load` converts to a cached GGUF file instead); llama.cpp's converter is not needed. Per quantized
 linear the importer reads `weight` (U8, two E2M1 codes per byte, the even input in the low nibble), `weight_scale` (E4M3, one per
 16 inputs), `weight_scale_2` and `input_scale`, and writes GGUF type 40: the block scale bytes are copied unchanged, the nibbles are
 regrouped into the layout of the type (value `j` of a group of 16 in the low nibble of byte `j`, value `j + 8` in the high nibble),
