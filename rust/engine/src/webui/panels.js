@@ -127,7 +127,10 @@
           hardwareFetching = true; // the footer shows the processor until the report arrives, then the device
           apiFetch('/api/studio/hardware').then((r) => (r.ok ? r.json() : null)).then((hw) => { if (hw) { state.hardware = hw; refreshStudioStatus(); } }).catch(() => {}).finally(() => { hardwareFetching = false; });
         }
-        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} busy`;
+        // a mixture-of-experts model whose experts are read from the file: how much of them is cached and how much is read per token
+        const es = m.expert_streaming;
+        const expertNote = es ? ` · experts: ${es.mode}${es.streaming ? `, ${Math.round((es.hit_ratio || 0) * 100)}% cached, ${Math.round((es.read_bytes_per_token || 0) / 1048576)} MB read/token` : ''}` : '';
+        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} busy${expertNote}`;
         $('settingsVersionBadge').textContent = `fllm-rs ${data.version || '0.1.2'}`;
         $('genBuildInfoText').textContent = data.build_info || '';
         $('serverEndpointUrlText').textContent = `${window.location.origin}/v1`;
