@@ -90,7 +90,7 @@ pub fn check_model(mapping: &MappedGguf, cfg: &ModelConfig, par: &ParallelConfig
             Some("multi-head latent attention")
         } else if cfg.delta.is_some() {
             Some("Gated DeltaNet layers")
-        } else if cfg.mamba.is_some() || cfg.mamba1.is_some() {
+        } else if cfg.mamba.is_some() || cfg.mamba1.is_some() || cfg.rwkv.is_some() {
             Some("state-space layers")
         } else if cfg.shortconv.as_ref().is_some_and(|s| s.layers.iter().any(|&c| c)) {
             Some("short-convolution layers")

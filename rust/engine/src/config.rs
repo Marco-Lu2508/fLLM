@@ -207,6 +207,20 @@ pub struct Mamba1Config {
     pub bc_rms_eps: Option<f32>,
 }
 
+/// RWKV-6 / RWKV-7 layers: a time-mix (matrix-valued state per head) and a channel-mix block in every layer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RwkvConfig {
+    /// RWKV-7 ("Goose") when true, RWKV-6 ("Finch") otherwise.
+    pub v7: bool,
+    /// Width of one head (`wkv.head_size`, 64 in all released models).
+    pub head_size: usize,
+    /// Epsilon of the group norm over the heads of the time-mix output.
+    pub group_eps: f32,
+    /// llama.cpp files of RWKV-6 hold weights pre-divided by `2^(layer / n)`: the residual stream is halved after every `n`-th layer
+    /// (`0`: no rescaling).
+    pub rescale_every: usize,
+}
+
 /// Multi-head latent attention (DeepSeek-V2/V3, Kimi-K2): keys and values are rebuilt from a
 /// compressed `kv_lora`-wide latent. The cache holds the rebuilt per-head keys and values.
 #[derive(Clone, Debug, PartialEq)]
@@ -304,6 +318,7 @@ pub struct ModelConfig {
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
     pub mamba1: Option<Mamba1Config>,
+    pub rwkv: Option<RwkvConfig>,
     pub shortconv: Option<ShortConvConfig>,
     /// Layers that skip rotary embeddings (`None`: all rotate).
     pub rope_layers: Option<Vec<bool>>,
@@ -441,7 +456,7 @@ impl ModelConfig {
         let hidden = uint(meta, a, "embedding_length").ok_or("missing embedding_length")?;
         let layers = uint(meta, a, "block_count").ok_or("missing block_count")?;
         // state-space models have no attention; a one-head dummy keeps the cache tiny
-        let state_space = matches!(a, "mamba2" | "mamba");
+        let state_space = matches!(a, "mamba2" | "mamba" | "rwkv6" | "rwkv7");
         let heads = if state_space {
             1
         } else {
@@ -754,6 +769,17 @@ impl ModelConfig {
             shortconv: parse_shortconv(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
+            rwkv: matches!(a, "rwkv6" | "rwkv7")
+                .then(|| {
+                    let head_size = uint(meta, a, "wkv.head_size").unwrap_or(64);
+                    Some(RwkvConfig {
+                        v7: a == "rwkv7",
+                        head_size,
+                        group_eps: float(meta, a, "attention.group_norm_epsilon").unwrap_or(1e-5 * 64.0),
+                        rescale_every: uint(meta, a, "rescale_every_n_layers").unwrap_or(0),
+                    })
+                })
+                .flatten(),
             mamba1: matches!(a, "mamba" | "jamba")
                 .then(|| {
                     Some(Mamba1Config {
@@ -1235,6 +1261,7 @@ pub(crate) mod tests_support {
             delta: None,
             mamba: None,
             mamba1: None,
+            rwkv: None,
             shortconv: None,
             rope_layers: None,
             layer_rope_bases: None,

@@ -22,6 +22,7 @@ use gemma::{AltupGlobal, GemmaLayer, PleGlobal};
 mod par_shard;
 mod hybrid;
 mod kda;
+mod rwkv;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -265,6 +266,8 @@ enum Attn {
     Linear(Box<DeltaNet>),
     /// Kimi Delta Attention (gated delta rule with a decay per key channel).
     Kda(Box<kda::Kda>),
+    /// RWKV-6 / RWKV-7: the whole layer (time-mix and channel-mix) is computed by `rwkv_layer`.
+    Rwkv(Box<rwkv::Rwkv>),
     Std {
         q: Linear,
         k: Linear,
@@ -365,6 +368,7 @@ impl Layer {
             Attn::Std { q, k, v } => all.extend([q, k, v]),
             Attn::Linear(d) => all.extend([&mut d.qkv, &mut d.gate, &mut d.beta, &mut d.alpha]),
             Attn::Kda(k) => all.extend(k.linears_mut()),
+            Attn::Rwkv(r) => all.extend(r.linears_mut()),
             Attn::ShortConv(m) => all.push(&mut m.input),
             Attn::Mamba(m) => all.push(&mut m.input),
             Attn::Mamba1(m) => all.extend([&mut m.input, &mut m.x_proj, &mut m.dt_proj]),
@@ -1659,6 +1663,8 @@ impl RustDecoder {
                     kv_a_norm: vector(mapping, &format!("{p}.attn_kv_a_norm.weight"), m.kv_lora)?,
                     kv_b,
                 }))
+            } else if let Some(rw) = rwkv::Rwkv::load(&cfg, mapping, &p, i, &linear)? {
+                Attn::Rwkv(Box::new(rw))
             } else if !has_tensor(mapping, &format!("{p}.attn_q.weight"))
                 && !has_tensor(mapping, &format!("{p}.attn_qkv.weight"))
             {
@@ -1869,6 +1875,7 @@ impl RustDecoder {
                     linear(&format!("{p}.ssm_out"), hidden, d.v_heads * d.v_dim)?
                 }
                 (Attn::Mamba(_), _, Some(m)) => linear(&format!("{p}.ssm_out"), hidden, m.inner)?,
+                (Attn::Rwkv(_), _, _) => linear(&format!("{p}.time_mix_output"), hidden, hidden)?,
                 (Attn::Kda(_), _, _) => {
                     let k = cfg.hybrid.kda.as_ref().ok_or("missing KDA configuration")?;
                     linear(&format!("{p}.attn_output"), hidden, k.heads * k.head_dim)?
@@ -2519,6 +2526,8 @@ impl RustDecoder {
                 }
                 None
             }
+            // the time-mix and channel-mix blocks and their state exist on the host only
+            Attn::Rwkv(_) => Some("an RWKV time-mix / channel-mix layer (host only)"),
             Attn::Mamba1(m) if m.norms.is_some() => Some("Mamba-1 with learned dt/B/C norms"),
             // Recurrent mixers keep their state on the host (or in their own device buffers) and handle the residual add themselves.
             Attn::Linear(_) | Attn::Mamba(_) | Attn::Mamba1(_) => {
@@ -6955,6 +6964,8 @@ impl RustDecoder {
             let mut qkv_workspace = compute::ProjectionGroupWorkspace::default();
             let mut ffn_workspace = compute::ProjectionGroupWorkspace::default();
             let residual = cfg.residual_scale;
+            // RWKV-7: the values of layer 0 of this pass, read by the value residual of every later layer
+            let mut rwkv_v_first: Vec<f32> = Vec::new();
             for (i, layer) in self.layers.iter().enumerate().skip(range.start).take(range.len()) {
                 let (dk, dv) = (cfg.layer_head_dim(i), cfg.layer_value_dim(i));
                 let (heads, kv_heads) = (cfg.layer_heads(i), cfg.layer_kv_heads(i));
@@ -6981,6 +6992,10 @@ impl RustDecoder {
                     None => None,
                 };
                 dump_layer("normed", i, &normed);
+                if let Attn::Rwkv(rw) = &layer.attn {
+                    self.rwkv_layer(rw, layer, i, &mut x, &normed, tables, lengths, &mut rwkv_v_first)?;
+                    continue;
+                }
                 if matches!(layer.attn, Attn::None) {
                     let ffn = self.ffn_forward(layer, &normed, &mut ffn_workspace)?;
                     add_scaled(&mut x, &ffn, residual);
@@ -7140,6 +7155,7 @@ impl RustDecoder {
                         | Attn::Mamba(_)
                         | Attn::Mamba1(_)
                         | Attn::Kda(_)
+                        | Attn::Rwkv(_)
                         | Attn::None => {
                             unreachable!("handled above")
                         }

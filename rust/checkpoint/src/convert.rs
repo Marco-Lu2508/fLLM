@@ -256,7 +256,7 @@ pub fn prepare_checkpoint(
             "num_key_value_heads",
             "intermediate_size",
         ] {
-            if patched.get(key).is_none() {
+            if patched.get(key).is_none_or(Value::is_null) {
                 patched[key] = 1.into();
             }
         }
@@ -476,10 +476,12 @@ pub fn prepare_checkpoint(
                     continue;
                 }
                 let dtype = output_dtype(&t.dtype, options.output_dtype)?;
-                let [rows, cols] = t.shape[..] else {
-                    return Err(format!("{} is not a matrix", t.name).into());
+                // a matrix, or a stack of matrices (RWKV-6 `time_maa_w2`: 5 x rank x hidden) transposed one by one
+                let (batch, rows, cols) = match t.shape[..] {
+                    [rows, cols] => (1usize, rows as usize, cols as usize),
+                    [batch, rows, cols] => (batch as usize, rows as usize, cols as usize),
+                    _ => return Err(format!("{} is not a matrix", t.name).into()),
                 };
-                let (rows, cols) = (rows as usize, cols as usize);
                 let w = match t.dtype.as_str() {
                     "F32" => 4,
                     "F16" | "BF16" => 2,
@@ -487,14 +489,16 @@ pub fn prepare_checkpoint(
                 };
                 let data = t.payload.as_slice();
                 let mut bytes =
-                    Vec::with_capacity(rows * cols * if dtype == "F32" { 4 } else { 2 });
-                for j in 0..cols {
-                    for i in 0..rows {
-                        let at = (i * cols + j) * w;
-                        let v = crate::gguf::to_f32(&t.dtype, &data[at..at + w])
-                            .map_err(|e| e.to_string())?;
-                        crate::gguf::append_converted(&mut bytes, &dtype, v)
-                            .map_err(|e| e.to_string())?;
+                    Vec::with_capacity(batch * rows * cols * if dtype == "F32" { 4 } else { 2 });
+                for b in 0..batch {
+                    for j in 0..cols {
+                        for i in 0..rows {
+                            let at = ((b * rows + i) * cols + j) * w;
+                            let v = crate::gguf::to_f32(&t.dtype, &data[at..at + w])
+                                .map_err(|e| e.to_string())?;
+                            crate::gguf::append_converted(&mut bytes, &dtype, v)
+                                .map_err(|e| e.to_string())?;
+                        }
                     }
                 }
                 if !seen.insert(name.clone()) {
@@ -502,7 +506,7 @@ pub fn prepare_checkpoint(
                 }
                 outs.push(OutTensor {
                     name,
-                    dims: vec![rows as u64, cols as u64],
+                    dims: if batch == 1 { vec![rows as u64, cols as u64] } else { vec![rows as u64, cols as u64, batch as u64] },
                     source_dtype: dtype.clone(),
                     dtype,
                     data: safetensors::Payload::Owned(std::sync::Arc::new(Vec::new()), 0..0),
@@ -618,8 +622,8 @@ pub fn prepare_checkpoint(
             _ => rowperm(&name)?,
         };
         let mut dims: Vec<u64> = t.shape.iter().rev().copied().collect();
-        if name.ends_with("exp_probs_b.bias") {
-            // some checkpoints store the selection bias as [1, experts]
+        if name.ends_with("exp_probs_b.bias") || (matches!(arch, "rwkv6" | "rwkv7") && is_rwkv_vector(&name)) {
+            // some checkpoints store the selection bias as [1, experts]; RWKV keeps its mixing vectors as [1, 1, hidden]
             dims = vec![count];
         }
         outs.push(OutTensor {
@@ -967,6 +971,46 @@ pub fn prepare_checkpoint(
                 ]),
             }
             for n in need {
+                let key = format!("blk.{i}.{n}");
+                if !byname.contains_key(key.as_str()) {
+                    return Err(format!("missing required tensor {key}").into());
+                }
+            }
+            continue;
+        }
+        if matches!(arch, "rwkv6" | "rwkv7") {
+            let tensors: &[&str] = if arch == "rwkv7" {
+                &[
+                    "attn_norm.weight",
+                    "attn_norm_2.weight",
+                    "time_mix_receptance.weight",
+                    "time_mix_key.weight",
+                    "time_mix_value.weight",
+                    "time_mix_output.weight",
+                    "time_mix_w1.weight",
+                    "time_mix_w2.weight",
+                    "time_mix_w0.weight",
+                    "channel_mix_key.weight",
+                    "channel_mix_value.weight",
+                ]
+            } else {
+                &[
+                    "attn_norm.weight",
+                    "attn_norm_2.weight",
+                    "time_mix_receptance.weight",
+                    "time_mix_key.weight",
+                    "time_mix_value.weight",
+                    "time_mix_gate.weight",
+                    "time_mix_output.weight",
+                    "time_mix_w1.weight",
+                    "time_mix_w2.weight",
+                    "time_mix_decay.weight",
+                    "channel_mix_key.weight",
+                    "channel_mix_receptance.weight",
+                    "channel_mix_value.weight",
+                ]
+            };
+            for n in tensors {
                 let key = format!("blk.{i}.{n}");
                 if !byname.contains_key(key.as_str()) {
                     return Err(format!("missing required tensor {key}").into());
@@ -2456,6 +2500,13 @@ pub(crate) fn split_packed_cfg(
     }
     Ok((dense, packed))
 }
+/// RWKV tensors that are one vector per layer (written flat, kept in full precision by the quantizer).
+fn is_rwkv_vector(name: &str) -> bool {
+    ["time_mix_lerp_", "channel_mix_lerp_", "time_mix_k_k", "time_mix_k_a", "time_mix_r_k", "time_mix_decay.weight", "time_mix_first", "time_mix_w0", "time_mix_a0", "time_mix_v0"]
+        .iter()
+        .any(|p| name.contains(p))
+}
+
 fn expected_shape(
     n: &str,
     h: u64,
@@ -2467,7 +2518,7 @@ fn expected_shape(
 ) -> Result<Option<Vec<u64>>, String> {
     let s = match n {
         "token_embd.weight" => vec![vocab, h],
-        "output_norm.weight" | "output_norm.bias" => vec![h],
+        "output_norm.weight" | "output_norm.bias" | "token_embd_norm.weight" | "token_embd_norm.bias" => vec![h],
         "output.bias" => vec![vocab],
         "output.weight" => vec![vocab, h],
         _ => {
@@ -2644,6 +2695,10 @@ pub(crate) fn tokenizer(
     model_vocab: u64,
     model_config: &Value,
 ) -> Result<(usize, Vec<(String, Meta)>), String> {
+    // the RWKV world vocabulary is a byte-string list with greedy matching, not a BPE
+    if let Some(found) = crate::rwkv_vocab::meta(dir, model_vocab)? {
+        return Ok(found);
+    }
     let p = dir.join("tokenizer.json");
     let mut imported = None;
     let raw = if p.is_file() {

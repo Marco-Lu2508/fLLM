@@ -28,6 +28,7 @@ mod packed_quant;
 mod plan;
 mod quantize;
 mod requant;
+mod rwkv_vocab;
 pub mod safetensors;
 mod st;
 mod step3p5;

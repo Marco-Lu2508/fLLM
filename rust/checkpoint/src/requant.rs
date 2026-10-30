@@ -125,6 +125,21 @@ pub(crate) fn quantize_tensor_into(kind: QType, type_id: u32, dims: &[u64], src:
     debug_assert_eq!(at, dst.len());
 }
 
+/// RWKV tensors other than the big projections (mixing vectors, low-rank adapters, bonus terms): they stay in full precision.
+fn is_rwkv_small(name: &str) -> bool {
+    const BIG: [&str; 8] = [
+        "time_mix_key.weight",
+        "time_mix_value.weight",
+        "time_mix_receptance.weight",
+        "time_mix_gate.weight",
+        "time_mix_output.weight",
+        "channel_mix_key.weight",
+        "channel_mix_receptance.weight",
+        "channel_mix_value.weight",
+    ];
+    (name.contains("time_mix_") || name.contains("channel_mix_")) && !BIG.iter().any(|b| name.ends_with(b))
+}
+
 /// Target type for one tensor, or `None` to keep it unchanged.
 fn choose(preset: Preset, name: &str, dims: &[u64], layers: usize) -> Option<QType> {
     let quantizable = name.ends_with(".weight")
@@ -134,7 +149,8 @@ fn choose(preset: Preset, name: &str, dims: &[u64], layers: usize) -> Option<QTy
         && !name.contains("rope_")
         && !name.starts_with("v.")
         && !name.contains("ssm_")
-        && !name.contains("pos_embd");
+        && !name.contains("pos_embd")
+        && !is_rwkv_small(name);
     if !quantizable {
         return None;
     }

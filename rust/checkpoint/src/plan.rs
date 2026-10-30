@@ -208,7 +208,8 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "granitemoehybrid" | "granite4" | "granite_4" => (Family::Llama, "granitehybrid"),
         "jetnemotron" => (Family::Nemotron, "nemotron_h"),
         "bamba" => (Family::Llama, "bamba"),
-        "rwkv6" | "rwkv7" | "rwkv_6" | "rwkv_7" => (Family::Mamba, "rwkv"),
+        "rwkv6" | "rwkv_6" => (Family::Mamba, "rwkv6"),
+        "rwkv7" | "rwkv_7" => (Family::Mamba, "rwkv7"),
         "xlstm" | "xlstm_lm" => (Family::Mamba, "xlstm"),
         "hrm_text" | "hrm" => (Family::Llama, "hrm"),
         "zaya1" => (Family::Llama, "zaya1"),
@@ -592,6 +593,170 @@ impl Plan {
         })
     }
 
+    /// RWKV-6 ("Finch") and RWKV-7 ("Goose"): time-mix and channel-mix blocks with a matrix-valued state per head. The metadata
+    /// keys are the ones llama.cpp writes (`wkv.head_size`, `rescale_every_n_layers`) plus `attention.group_norm_epsilon`.
+    fn from_rwkv(cfg: &Value, arch: &str) -> Result<Self, String> {
+        let get = |k: &str| num(cfg, k).ok_or_else(|| format!("config.json requires {k}"));
+        let hidden = get("hidden_size")?;
+        let layers = get("num_hidden_layers")?;
+        let v7 = arch == "rwkv7";
+        let head = if v7 {
+            num(cfg, "head_dim").or_else(|| num(cfg, "num_heads").filter(|&h| h > 0).map(|h| hidden / h)).unwrap_or(64)
+        } else {
+            num(cfg, "head_size").unwrap_or(64)
+        };
+        if head == 0 || hidden % head != 0 {
+            return Err(format!("RWKV hidden size {hidden} is not a multiple of the head size {head}"));
+        }
+        let ff = match num(cfg, "intermediate_size") {
+            Some(n) if n > 0 => n,
+            _ if v7 => (flt(cfg, "hidden_ratio").unwrap_or(4.0) * hidden as f64) as u64,
+            _ => (hidden as f64 * 3.5) as u64 / 32 * 32,
+        };
+        let eps = flt(cfg, if v7 { "norm_eps" } else { "layer_norm_epsilon" }).unwrap_or(1e-5) as f32;
+        // RWKV-7 (flash-linear-attention) normalises each head with eps = head_dim * norm_eps; RWKV-6 with 1e-5 * head_size_divisor^2
+        let group_eps = if v7 { head as f32 * eps } else { 1e-5 * (flt(cfg, "head_size_divisor").unwrap_or(8.0) as f32).powi(2) };
+        let u = |k: &str, v: u64| (format!("{arch}.{k}"), Meta::U32(v as u32));
+        let meta = vec![
+            ("general.architecture".to_owned(), Meta::Str(arch.into())),
+            ("general.name".to_owned(), Meta::Str(arch.into())),
+            ("general.alignment".to_owned(), Meta::U32(32)),
+            u("context_length", 1 << 20),
+            u("embedding_length", hidden),
+            u("block_count", layers),
+            u("feed_forward_length", ff),
+            u("wkv.head_size", head),
+            u("attention.head_count", 0),
+            (format!("{arch}.attention.layer_norm_epsilon"), Meta::F32(eps)),
+            (format!("{arch}.attention.group_norm_epsilon"), Meta::F32(group_eps)),
+        ];
+        Ok(Self {
+            arch: arch.to_owned(),
+            family: Family::Mamba,
+            meta,
+            norm_add: 0.0,
+            layers,
+            moe: false,
+            gated: false,
+            moe_layers: vec![false; layers as usize],
+            q_lora: false,
+            mixtral_names: false,
+            synthesized: Vec::new(),
+            linear: Some(LinearDims { k_heads: 1, v_heads: 1, k_dim: 1, v_dim: 1 }),
+            kinds: Vec::new(),
+            classic: None,
+        })
+    }
+
+    /// Tensor names of an RWKV-7 (flash-linear-attention layout) or RWKV-6 (`Rwkv6ForCausalLM` layout) checkpoint.
+    fn map_rwkv(&self, n: &str) -> Result<Mapped, String> {
+        let plain = |name: String| Ok(Mapped::Tensor { name, add: 0.0 });
+        let v7 = self.arch == "rwkv7";
+        // the embedding, final norm, head and the norm in front of layer 0 (applied to the embeddings)
+        let (emb, out_norm, head, pre) = if v7 {
+            ("model.embeddings.weight", "model.norm", "lm_head.weight", "model.layers.0.pre_norm")
+        } else {
+            ("rwkv.embeddings.weight", "rwkv.ln_out", "head.weight", "rwkv.blocks.0.pre_ln")
+        };
+        if n == emb {
+            return plain("token_embd.weight".into());
+        }
+        if n == head {
+            return plain("output.weight".into());
+        }
+        for (prefix, target) in [(out_norm, "output_norm"), (pre, "token_embd_norm")] {
+            if let Some(kind) = n.strip_prefix(prefix).and_then(|r| r.strip_prefix('.')) {
+                if matches!(kind, "weight" | "bias") {
+                    return plain(format!("{target}.{kind}"));
+                }
+            }
+        }
+        let rest = n
+            .strip_prefix(if v7 { "model.layers." } else { "rwkv.blocks." })
+            .ok_or_else(|| format!("unrecognized checkpoint tensor {n:?}"))?;
+        let (i, suf) = rest.split_once('.').ok_or_else(|| format!("malformed layer tensor name {n:?}"))?;
+        if i.parse::<u64>().map_or(true, |i| i >= self.layers) {
+            return Err(format!("tensor {n:?} refers to an invalid layer"));
+        }
+        let to = |name: &str| plain(format!("blk.{i}.{name}"));
+        let transposed = |name: &str| Ok(Mapped::Transposed { name: format!("blk.{i}.{name}") });
+        let (stem, kind) = suf.rsplit_once('.').unwrap_or((suf, ""));
+        let norm = |base: &str| to(&format!("{base}.{kind}"));
+        if v7 {
+            return match stem {
+                "attn_norm" => norm("attn_norm"),
+                "ffn_norm" => norm("attn_norm_2"),
+                "attn.g_norm" => norm("time_mix_ln"),
+                "attn.r_proj" if kind == "weight" => to("time_mix_receptance.weight"),
+                "attn.k_proj" if kind == "weight" => to("time_mix_key.weight"),
+                "attn.v_proj" if kind == "weight" => to("time_mix_value.weight"),
+                "attn.o_proj" if kind == "weight" => to("time_mix_output.weight"),
+                "ffn.key" if kind == "weight" => to("channel_mix_key.weight"),
+                "ffn.value" if kind == "weight" => to("channel_mix_value.weight"),
+                _ => {
+                    let fixed = match suf {
+                        "attn.k_k" => "time_mix_k_k.weight",
+                        "attn.k_a" => "time_mix_k_a.weight",
+                        "attn.r_k" => "time_mix_r_k.weight",
+                        "ffn.x_k" => "channel_mix_lerp_k.weight",
+                        "attn.x_r" => "time_mix_lerp_r.weight",
+                        "attn.x_w" => "time_mix_lerp_w.weight",
+                        "attn.x_k" => "time_mix_lerp_k.weight",
+                        "attn.x_v" => "time_mix_lerp_v.weight",
+                        "attn.x_a" => "time_mix_lerp_a.weight",
+                        "attn.x_g" => "time_mix_lerp_g.weight",
+                        _ => "",
+                    };
+                    if !fixed.is_empty() {
+                        return to(fixed);
+                    }
+                    // low-rank adapters: lora.0 is the down projection, lora.2 the up projection, its bias the constant term
+                    for lora in ["w", "a", "v", "g"] {
+                        if let Some(r) = suf.strip_prefix(format!("attn.{lora}_lora.lora.").as_str()) {
+                            return match r {
+                                "0.weight" => to(&format!("time_mix_{lora}1.weight")),
+                                "2.weight" => to(&format!("time_mix_{lora}2.weight")),
+                                "2.bias" => to(&format!("time_mix_{lora}0.weight")),
+                                _ => Err(format!("unsupported forward-affecting layer tensor {n:?}")),
+                            };
+                        }
+                    }
+                    Err(format!("unsupported forward-affecting layer tensor {n:?}"))
+                }
+            };
+        }
+        match stem {
+            "ln1" => norm("attn_norm"),
+            "ln2" => norm("attn_norm_2"),
+            "attention.ln_x" => norm("time_mix_ln"),
+            "attention.receptance" if kind == "weight" => to("time_mix_receptance.weight"),
+            "attention.key" if kind == "weight" => to("time_mix_key.weight"),
+            "attention.value" if kind == "weight" => to("time_mix_value.weight"),
+            "attention.gate" if kind == "weight" => to("time_mix_gate.weight"),
+            "attention.output" if kind == "weight" => to("time_mix_output.weight"),
+            "feed_forward.key" if kind == "weight" => to("channel_mix_key.weight"),
+            "feed_forward.receptance" if kind == "weight" => to("channel_mix_receptance.weight"),
+            "feed_forward.value" if kind == "weight" => to("channel_mix_value.weight"),
+            _ => match suf {
+                "attention.time_maa_x" => to("time_mix_lerp_x.weight"),
+                "attention.time_maa_w" => to("time_mix_lerp_w.weight"),
+                "attention.time_maa_k" => to("time_mix_lerp_k.weight"),
+                "attention.time_maa_v" => to("time_mix_lerp_v.weight"),
+                "attention.time_maa_r" => to("time_mix_lerp_r.weight"),
+                "attention.time_maa_g" => to("time_mix_lerp_g.weight"),
+                "attention.time_maa_w1" => transposed("time_mix_w1.weight"),
+                "attention.time_maa_w2" => transposed("time_mix_w2.weight"),
+                "attention.time_decay" => to("time_mix_decay.weight"),
+                "attention.time_decay_w1" => transposed("time_mix_decay_w1.weight"),
+                "attention.time_decay_w2" => transposed("time_mix_decay_w2.weight"),
+                "attention.time_faaaa" => to("time_mix_first.weight"),
+                "feed_forward.time_maa_k" => to("channel_mix_lerp_k.weight"),
+                "feed_forward.time_maa_r" => to("channel_mix_lerp_r.weight"),
+                _ => Err(format!("unsupported forward-affecting layer tensor {n:?}")),
+            },
+        }
+    }
+
     /// Pure Mamba-2 stacks: no attention, no feed-forward.
     /// Mamba-1 (and Falcon-Mamba): per-channel state, low-rank time step.
     fn from_mamba1(cfg: &Value, arch: &str) -> Result<Self, String> {
@@ -653,6 +818,9 @@ impl Plan {
     fn from_mamba(cfg: &Value, arch: &str) -> Result<Self, String> {
         if arch == "mamba" {
             return Self::from_mamba1(cfg, arch);
+        }
+        if matches!(arch, "rwkv6" | "rwkv7") {
+            return Self::from_rwkv(cfg, arch);
         }
         let get = |k: &str| num(cfg, k).ok_or_else(|| format!("config.json requires {k}"));
         let hidden = get("hidden_size")?;
@@ -2531,6 +2699,9 @@ impl Plan {
         if self.family == Family::Neox {
             return self.map_neox(n);
         }
+        if matches!(self.arch.as_str(), "rwkv6" | "rwkv7") {
+            return self.map_rwkv(n);
+        }
         if matches!(self.family, Family::Mamba | Family::Nemotron) {
             return self.map_mamba(n);
         }
@@ -3292,5 +3463,42 @@ mod tests {
             plan.map("transformer.h.0.mlp.c_proj.weight").unwrap(),
             Mapped::Tensor { name: "blk.0.ffn_down.weight".into(), add: 0.0 }
         );
+    }
+
+    #[test]
+    fn rwkv_tensors_map_to_the_llama_cpp_names() {
+        let t = |name: &str| Mapped::Tensor { name: name.to_owned(), add: 0.0 };
+        let v7 = Plan::from_config(&json!({"model_type": "rwkv7", "hidden_size": 64, "num_hidden_layers": 2, "head_dim": 16, "intermediate_size": 256, "norm_eps": 1e-5})).unwrap();
+        assert_eq!(v7.arch, "rwkv7");
+        for (hf, gguf) in [
+            ("model.embeddings.weight", "token_embd.weight"),
+            ("model.layers.0.pre_norm.bias", "token_embd_norm.bias"),
+            ("model.norm.weight", "output_norm.weight"),
+            ("lm_head.weight", "output.weight"),
+            ("model.layers.1.attn_norm.weight", "blk.1.attn_norm.weight"),
+            ("model.layers.1.ffn_norm.bias", "blk.1.attn_norm_2.bias"),
+            ("model.layers.1.attn.x_a", "blk.1.time_mix_lerp_a.weight"),
+            ("model.layers.1.attn.w_lora.lora.0.weight", "blk.1.time_mix_w1.weight"),
+            ("model.layers.1.attn.w_lora.lora.2.weight", "blk.1.time_mix_w2.weight"),
+            ("model.layers.1.attn.w_lora.lora.2.bias", "blk.1.time_mix_w0.weight"),
+            ("model.layers.1.attn.g_lora.lora.2.weight", "blk.1.time_mix_g2.weight"),
+            ("model.layers.1.attn.r_k", "blk.1.time_mix_r_k.weight"),
+            ("model.layers.1.attn.g_norm.weight", "blk.1.time_mix_ln.weight"),
+            ("model.layers.1.attn.o_proj.weight", "blk.1.time_mix_output.weight"),
+            ("model.layers.1.ffn.x_k", "blk.1.channel_mix_lerp_k.weight"),
+            ("model.layers.1.ffn.value.weight", "blk.1.channel_mix_value.weight"),
+        ] {
+            assert_eq!(v7.map(hf).unwrap(), t(gguf), "{hf}");
+        }
+        assert!(v7.map("model.layers.1.attn.unknown").is_err());
+        assert!(v7.map("model.layers.9.attn.k_k").is_err());
+        let v6 = Plan::from_config(&json!({"model_type": "rwkv6", "hidden_size": 64, "num_hidden_layers": 2, "head_size": 16, "intermediate_size": null})).unwrap();
+        assert_eq!(v6.arch, "rwkv6");
+        assert_eq!(v6.map("rwkv.blocks.0.pre_ln.weight").unwrap(), t("token_embd_norm.weight"));
+        assert_eq!(v6.map("rwkv.blocks.1.attention.time_maa_r").unwrap(), t("blk.1.time_mix_lerp_r.weight"));
+        assert_eq!(v6.map("rwkv.blocks.1.attention.time_faaaa").unwrap(), t("blk.1.time_mix_first.weight"));
+        assert_eq!(v6.map("rwkv.blocks.1.attention.time_maa_w2").unwrap(), Mapped::Transposed { name: "blk.1.time_mix_w2.weight".into() });
+        assert_eq!(v6.map("rwkv.blocks.1.feed_forward.receptance.weight").unwrap(), t("blk.1.channel_mix_receptance.weight"));
+        assert_eq!(v6.map("head.weight").unwrap(), t("output.weight"));
     }
 }

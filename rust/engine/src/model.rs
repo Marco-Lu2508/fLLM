@@ -72,6 +72,8 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "zamba2",
     "kimi-linear",
     "mamba2",
+    "rwkv6",
+    "rwkv7",
     "qwen3next",
     "qwen35",
     "qwen35moe",
@@ -516,6 +518,7 @@ impl GgufModel {
         self.config.delta.is_some()
             || self.config.mamba.is_some()
             || self.config.mamba1.is_some()
+            || self.config.rwkv.is_some()
             || self.config.hybrid.stateful()
             || self
                 .config
