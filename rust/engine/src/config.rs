@@ -503,6 +503,7 @@ impl ModelConfig {
                     | "deepseek"
                     | "deepseek2"
                     | "ernie4_5"
+                    | "helium"
                     | "ernie4_5moe"
                     | "llama4"
                     | "glm"

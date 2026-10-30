@@ -193,6 +193,7 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "arcee" => (Family::Llama, "arcee"),
         "ministral3" => (Family::Llama, "ministral3"),
         "ernie4_5" => (Family::Llama, "ernie4_5"),
+        "helium" => (Family::Llama, "helium"),
         "hunyuan_v1_dense" => (Family::Llama, "hunyuan-dense"),
         "exaone4" => (Family::Olmo2, "exaone4"),
         "olmo3" => (Family::Olmo2, "olmo3"),

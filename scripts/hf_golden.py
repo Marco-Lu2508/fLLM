@@ -941,6 +941,9 @@ def config_for(arch: str, vocab: int):
                 "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
             },
         ),
+        "helium": lambda: T.HeliumConfig(
+            **common, **dense, head_dim=16, rms_norm_eps=1e-8, rope_theta=20000.0,
+        ),
         "olmo2": lambda: T.Olmo2Config(**common, **dense, rms_norm_eps=1e-6, rope_theta=500000.0),
         "qwen": lambda: _qwen_config(vocab),
         "baichuan": lambda: _baichuan_config(vocab),
