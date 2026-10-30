@@ -111,6 +111,8 @@ pub enum Gating {
     Softmax,
     Sigmoid,
     SparseMixer { jitter_eps: f32 },
+    /// `sqrt(softplus(logit))` (DeepSeek-V4).
+    SqrtSoftplus,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,6 +141,8 @@ pub struct MoeConfig {
     pub input_scaled: bool,
     /// GPT-OSS clamped SwiGLU: `(alpha, limit)`.
     pub swiglu_oai: Option<(f32, f32)>,
+    /// DeepSeek-V4 clamped SwiGLU: the gate is limited above, the up projection on both sides, `silu(gate) * up`.
+    pub swiglu_clamp: Option<f32>,
     /// Nemotron-H latent MoE: the routed experts work on a `latent`-wide projection of the hidden state.
     pub latent: Option<usize>,
     /// Router logits go through `cap * tanh(logit / cap)` before the gating function (Laguna).
@@ -248,6 +252,29 @@ pub struct IndexerConfig {
     pub neox: bool,
 }
 
+/// DeepSeek-V4: several residual streams per token (manifold-constrained hyper-connections), shared-KV multi-query attention with a
+/// sliding window plus compressed long-range entries, a grouped low-rank output projection, hash-routed and top-k MoE layers.
+/// The pool geometry of the model (`head_dim`, `value_dim`) is a placeholder: all attention state lives in per-sequence layer states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct V4Config {
+    /// Width of one attention head (the query, key and value width; K = V).
+    pub head_dim: usize,
+    pub q_lora: usize,
+    pub window: usize,
+    pub hc_mult: usize,
+    pub hc_iters: usize,
+    pub hc_eps: f32,
+    pub o_groups: usize,
+    pub o_lora: usize,
+    pub index_heads: usize,
+    pub index_dim: usize,
+    pub index_topk: usize,
+    /// Compression rate per layer: 0 (window only), 4 (compressed sparse attention, with an indexer) or another rate (heavily compressed).
+    pub ratios: Vec<usize>,
+    /// Per layer: the experts come from a token-id table instead of the router scores.
+    pub hash: Vec<bool>,
+}
+
 /// Attention geometry of one layer. A model whose layers differ in head count, head width, KV heads or
 /// KV sharing carries one entry per layer in `ModelConfig::layer_geoms`; the scalar fields of
 /// `ModelConfig` then describe the first layer that owns a cache.
@@ -315,6 +342,7 @@ pub struct ModelConfig {
     pub mla: Option<MlaConfig>,
     /// Sparse-attention indexer of the MLA layers (a layer without `blk.N.indexer.*` tensors reuses the selection of the layer before).
     pub indexer: Option<IndexerConfig>,
+    pub v4: Option<V4Config>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
     pub mamba1: Option<Mamba1Config>,
@@ -659,9 +687,39 @@ impl ModelConfig {
             }),
             _ => None,
         };
-        let (kv_heads, head_dim, value_dim) = match &mla {
-            Some(m) => (heads, m.nope + m.rope, m.value),
-            None => (kv_heads, head_dim, value_dim),
+        let v4 = if a == "deepseek4" {
+            let ratios: Vec<usize> = match key(meta, a, "v4.compress_ratio") {
+                Some(Value::Array(values)) if values.len() == layers => values.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect(),
+                _ => return Err("DeepSeek-V4 needs v4.compress_ratio with one entry per layer".into()),
+            };
+            let hash: Vec<bool> = match key(meta, a, "v4.hash_layers") {
+                Some(Value::Array(values)) if values.len() == layers => values.iter().map(|v| v.as_bool().unwrap_or(false)).collect(),
+                _ => vec![false; layers],
+            };
+            let need = |name: &str| uint(meta, a, name).ok_or_else(|| format!("DeepSeek-V4 needs {a}.{name}"));
+            Some(V4Config {
+                head_dim,
+                q_lora: need("attention.q_lora_rank")?,
+                window: need("v4.window")?,
+                hc_mult: need("v4.hc_mult")?,
+                hc_iters: need("v4.hc_sinkhorn_iters")?,
+                hc_eps: float(meta, a, "v4.hc_eps").unwrap_or(1e-6),
+                o_groups: need("v4.o_groups")?,
+                o_lora: need("v4.o_lora_rank")?,
+                index_heads: need("v4.index_head_count")?,
+                index_dim: need("v4.index_head_dim")?,
+                index_topk: need("v4.index_top_k")?,
+                ratios,
+                hash,
+            })
+        } else {
+            None
+        };
+        let (kv_heads, head_dim, value_dim) = match (&mla, &v4) {
+            (Some(m), _) => (heads, m.nope + m.rope, m.value),
+            // placeholder cache geometry: the attention state of V4 is kept per sequence outside the KV pools
+            (None, Some(_)) => (1, 2, 2),
+            (None, None) => (kv_heads, head_dim, value_dim),
         };
         let swa_flag = |l: usize| {
             sliding_window.is_some()
@@ -766,6 +824,7 @@ impl ModelConfig {
                 .unwrap_or(a == "muse-glimmer"),
             mla,
             indexer,
+            v4,
             shortconv: parse_shortconv(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
@@ -1110,6 +1169,7 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
         .map(|t| t.dimensions.iter().skip(1).product::<u64>() as usize);
     let gating = match uint(meta, arch, "expert_gating_func") {
         Some(2) => Gating::Sigmoid,
+        Some(4) => Gating::SqrtSoftplus,
         Some(3) => Gating::SparseMixer {
             jitter_eps: float(meta, arch, "expert_router_jitter_noise").unwrap_or(0.01),
         },
@@ -1151,6 +1211,7 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
             .unwrap_or(false),
         latent: uint(meta, arch, "moe_latent_size").filter(|&n| n > 0),
         router_softcap: float(meta, arch, "router_logit_softcapping").filter(|c| *c > 0.0),
+        swiglu_clamp: float(meta, arch, "expert_swiglu_clamp").filter(|l| *l > 0.0),
         swiglu_oai: match (arch, float(meta, arch, "expert_swiglu_limit")) {
             (_, Some(limit)) => Some((
                 float(meta, arch, "expert_swiglu_alpha").unwrap_or(1.702),
@@ -1258,6 +1319,7 @@ pub(crate) mod tests_support {
             qkv_clip: None,
             mla: None,
             indexer: None,
+            v4: None,
             delta: None,
             mamba: None,
             mamba1: None,

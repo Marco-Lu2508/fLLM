@@ -925,6 +925,9 @@ impl Plan {
         if raw == "zamba2" {
             return crate::zamba2::plan(cfg);
         }
+        if raw == "deepseek_v4" {
+            return crate::deepseek4::plan(cfg);
+        }
         if matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
             return crate::kimi_linear::plan(cfg);
         }
@@ -2628,6 +2631,9 @@ impl Plan {
             || n.starts_with("vit_large_projector.")
         {
             return Ok(Mapped::Skip);
+        }
+        if self.arch == "deepseek4" {
+            return crate::deepseek4::map(self, n);
         }
         if self.arch == "gemma4" {
             return crate::gemma::map(self, n);

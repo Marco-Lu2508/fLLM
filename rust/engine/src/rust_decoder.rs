@@ -23,6 +23,7 @@ mod par_shard;
 mod hybrid;
 mod kda;
 mod rwkv;
+mod deepseek4;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -102,6 +103,9 @@ struct Moe {
     shared: Option<(Expert, Option<Vec<f32>>)>,
     /// Latent MoE (Nemotron-H): `(down, up)` projections around the routed experts.
     latent: Option<(Linear, Linear)>,
+    /// Hash routing (DeepSeek-V4's first layers): the experts of token id `t` are `table[t * used .. (t + 1) * used]`; the router scores only
+    /// weight them.
+    tid2eid: Option<Vec<u32>>,
 }
 
 /// Recurrent state of one Gated DeltaNet layer of one sequence.
@@ -1017,6 +1021,10 @@ pub struct RustDecoder {
     row_deepstack: std::sync::Mutex<Option<Arc<DeepstackLevels>>>,
     /// Custom visible lengths per row in attention (bidirectional image attention, prefix-LM mask).
     row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
+    /// DeepSeek-V4 attention and hyper-connection weights.
+    v4: Option<Box<deepseek4::V4Model>>,
+    /// Token ids of the rows of the current pass (hash-routed experts).
+    row_ids: std::sync::Mutex<Vec<i64>>,
     /// Indexer keys of the sparse-attention layers (host path).
     dsa: DsaStore,
     /// `FLLM_DSA=dense`: attend to every token (exact up to `top_k` tokens of context, an approximation beyond).
@@ -1467,7 +1475,7 @@ impl RustDecoder {
             Some(m) => m.nope + m.rope,
             None => cfg.head_dim,
         };
-        if (0..cfg.layers).any(|l| {
+        if cfg.v4.is_none() && (0..cfg.layers).any(|l| {
             let (d, r) = if cfg.mla.is_some() { (dk, cfg.rope.dims) } else { (cfg.layer_head_dim(l), cfg.layer_rope_dims(l)) };
             !d.is_multiple_of(2) || !r.is_multiple_of(2) || r > d
         }) {
@@ -1791,7 +1799,17 @@ impl RustDecoder {
                         .collect();
                     c.register_layer(i, moe.used, &parts)
                 });
+                let tid2eid = if has_tensor(mapping, &format!("{p}.ffn_tid2eid.weight")) {
+                    let table = Tensor::load(mapping, &format!("{p}.ffn_tid2eid.weight"))?.data;
+                    if table.len() % moe.used != 0 || table.iter().any(|v| *v < 0.0 || *v as usize >= moe.experts) {
+                        return Err(format!("invalid hash routing table in {p}"));
+                    }
+                    Some(table.iter().map(|v| *v as u32).collect())
+                } else {
+                    None
+                };
                 Ffn::Moe(Box::new(Moe {
+                    tid2eid,
                     cache,
                     bias: if has_tensor(mapping, &bias_name) {
                         Some(vector(mapping, &bias_name, moe.experts)?)
@@ -2062,6 +2080,7 @@ impl RustDecoder {
                 })
             })
             .transpose()?;
+        let v4 = if cfg.v4.is_some() { Some(Box::new(deepseek4::V4Model::load(model, &cfg)?)) } else { None };
         let mut decoder = Self {
             mtp,
             expert_cache,
@@ -2135,6 +2154,8 @@ impl RustDecoder {
             row_positions3: std::sync::Mutex::new(None),
             row_deepstack: std::sync::Mutex::new(None),
             row_visible_lengths: std::sync::Mutex::new(None),
+            v4,
+            row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
             dsa_dense: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("dense")),
             dsa_exact_on_device: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("exact")),
@@ -2491,6 +2512,9 @@ impl RustDecoder {
     #[allow(clippy::too_many_arguments)]
     fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
+        if cfg.v4.is_some() {
+            return Some("DeepSeek-V4 hyper-connections and compressed attention");
+        }
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
         if let Some(gap) = std::iter::once(layer).chain(&self.layers).find_map(|l| l.gemma.as_ref().and_then(|g| g.device_gap())) {
@@ -6187,7 +6211,17 @@ impl RustDecoder {
     /// same bits as the parallel one.
     fn gate_activation(&self, g: &mut [f32], u: &[f32], parallel: bool) {
         let activation = self.cfg.activation;
-        if let Some((alpha, limit)) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_oai) {
+        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp) {
+            let apply = |g: &mut f32, u: &f32| {
+                let gate = g.min(limit);
+                *g = gate / (1.0 + (-gate).exp()) * u.clamp(-limit, limit);
+            };
+            if parallel {
+                g.par_iter_mut().zip(u.par_iter()).for_each(|(g, u)| apply(g, u));
+            } else {
+                g.iter_mut().zip(u).for_each(|(g, u)| apply(g, u));
+            }
+        } else if let Some((alpha, limit)) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_oai) {
             let apply = |g: &mut f32, u: &f32| {
                 let gate = g.min(limit);
                 let up = u.clamp(-limit, limit);
@@ -6268,6 +6302,10 @@ impl RustDecoder {
         let hidden = self.cfg.hidden;
         let tokens = input.len() / hidden;
         let mut logits = moe.router.forward(input)?;
+        let hashed_ids: Vec<i64> = if moe.tid2eid.is_some() { self.row_ids.lock().map_err(|_| "row id lock poisoned")?.clone() } else { Vec::new() };
+        if moe.tid2eid.is_some() && hashed_ids.len() != tokens {
+            return Err(format!("hash routing needs the token ids of {tokens} rows, got {}", hashed_ids.len()));
+        }
         if let Some(cap) = cfg.router_softcap {
             logits.iter_mut().for_each(|l| *l = cap * (*l / cap).tanh());
         }
@@ -6337,6 +6375,7 @@ impl RustDecoder {
                     exps.iter().map(|x| x / sum).collect()
                 }
                 Gating::Sigmoid => row.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect(),
+                Gating::SqrtSoftplus => row.iter().map(|&x| (if x > 20.0 { x } else { x.exp().ln_1p() }).sqrt()).collect(),
                 Gating::SparseMixer { .. } => unreachable!(),
             };
             order.clear();
@@ -6373,7 +6412,11 @@ impl RustDecoder {
             } else {
                 order.sort_by(rank);
             }
-            let chosen = &order[..cfg.used];
+            let hashed: Option<Vec<usize>> = moe.tid2eid.as_ref().map(|table| {
+                let id = (hashed_ids[t].max(0) as usize).min(table.len() / cfg.used - 1);
+                table[id * cfg.used..(id + 1) * cfg.used].iter().map(|&e| e as usize).collect()
+            });
+            let chosen = hashed.as_deref().unwrap_or(&order[..cfg.used]);
             let total: f32 = if let Some(p) = cfg.weight_norm_p {
                 chosen
                     .iter()
@@ -6898,7 +6941,11 @@ impl RustDecoder {
             let mut streams = self.altup_expand(&x)?;
             self.stash_embeddings(&x);
             let stage_layers = self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()));
-            self.host_layers(stage_layers, &mut x, &positions, tables, lengths, key, value, &mut trace, ple_inputs.as_deref(), &mut streams)?;
+            if cfg.v4.is_some() {
+                x = self.v4_layers(&x, ids, &positions, tables, lengths)?;
+            } else {
+                self.host_layers(stage_layers, &mut x, &positions, tables, lengths, key, value, &mut trace, ple_inputs.as_deref(), &mut streams)?;
+            }
             if !last_stage {
                 self.par_send_activations(&x)?;
                 return Ok(Vec::new());

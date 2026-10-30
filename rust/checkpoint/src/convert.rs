@@ -248,6 +248,8 @@ pub fn prepare_checkpoint(
         crate::zamba2::config(&cfg)?
     } else if arch == "kimi-linear" {
         crate::kimi_linear::config(&cfg)?
+    } else if arch == "deepseek4" {
+        crate::deepseek4::config(&cfg)?
     } else if matches!(plan.family, Family::Mamba | Family::Nemotron) {
         // no attention or feed-forward sizes: give the shape checks harmless values
         let mut patched = cfg.clone();
@@ -376,6 +378,10 @@ pub fn prepare_checkpoint(
             return Ok(None);
         }
         if name.contains(".nextn.") {
+            return Ok(None);
+        }
+        // DeepSeek-V4 has its own attention, hyper-connection and routing tensors
+        if arch == "deepseek4" && !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight") {
             return Ok(None);
         }
         // layers of Gemma 4 differ in head width and KV heads; the engine checks the shapes against the per-layer metadata
@@ -578,6 +584,30 @@ pub fn prepare_checkpoint(
                 source_for_output,
                 add: 0.0,
                 owned: None,
+                parts: Vec::new(),
+            });
+            continue;
+        }
+        if matches!(t.dtype.as_str(), "I64" | "I32") {
+            // integer tables (the token-to-expert table of hash-routed layers) are stored as f32
+            let width = if t.dtype == "I64" { 8 } else { 4 };
+            let data = t.payload.as_slice();
+            let mut bytes = Vec::with_capacity(data.len() / width * 4);
+            for chunk in data.chunks_exact(width) {
+                let v = if width == 8 { i64::from_le_bytes(chunk.try_into().map_err(|_| "integer tensor layout")?) } else { i64::from(i32::from_le_bytes(chunk.try_into().map_err(|_| "integer tensor layout")?)) };
+                bytes.extend_from_slice(&(v as f32).to_le_bytes());
+            }
+            outs.push(OutTensor {
+                name,
+                dims: t.shape.iter().rev().copied().collect(),
+                source_dtype: "F32".into(),
+                dtype: "F32".into(),
+                data: safetensors::Payload::Owned(std::sync::Arc::new(Vec::new()), 0..0),
+                packed: None,
+                data_len: bytes.len() as u64,
+                source_for_output: None,
+                add: 0.0,
+                owned: Some(bytes),
                 parts: Vec::new(),
             });
             continue;

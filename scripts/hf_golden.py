@@ -952,6 +952,19 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=4,
             indexer_types=["full", "shared", "full"],
         ),
+        # four layers: window only, compressed sparse (rate 2, indexer keeps 3), heavily compressed (rate 4), compressed sparse again;
+        # three residual streams, the first two feed-forwards hash-routed, YaRN on the compressing layers' rotary embedding
+        "deepseek_v4": lambda: T.DeepseekV4Config(
+            **{**common, "num_hidden_layers": 4}, num_attention_heads=4, head_dim=16, partial_rotary_factor=0.5,
+            q_lora_rank=24, o_groups=2, o_lora_rank=8, moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2,
+            routed_scaling_factor=1.5, rms_norm_eps=1e-6, hc_mult=3, hc_sinkhorn_iters=6, sliding_window=6,
+            index_n_heads=4, index_head_dim=16, index_topk=3, swiglu_limit=1.5,
+            layer_types=["sliding_attention", "compressed_sparse_attention", "heavily_compressed_attention", "compressed_sparse_attention"],
+            compress_rates={"compressed_sparse_attention": 2, "heavily_compressed_attention": 4},
+            mlp_layer_types=["hash_moe", "hash_moe", "moe", "moe"],
+            rope_theta=10000.0, compress_rope_theta=160000.0,
+            rope_parameters={"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 16, "beta_fast": 32.0, "beta_slow": 1.0},
+        ),
         "mimo_v2_flash": lambda: T.MiMoV2FlashConfig(
             **{**common, "num_hidden_layers": 4}, num_attention_heads=4, num_key_value_heads=2, intermediate_size=128,
             moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=2, topk_group=1,
@@ -1205,10 +1218,11 @@ def stable_topk(margins=None, index_topk=None):
         if self.dim() != 3 or self.dtype != torch.float32 or not largest or (index_topk is not None and k != index_topk):
             return original(self, k, dim=dim, largest=largest, sorted=sorted)
         values, index = torch.sort(self, dim=dim, descending=True, stable=True)
-        if margins is not None and dim in (-1, 2):
+        if margins is not None and dim in (-1, 2) and values.shape[-1] > k:
             for q in range(values.shape[1]):
-                if q + 1 > k:
-                    margins.append(float(values[0, q, k - 1] - values[0, q, k]))
+                kept, dropped = float(values[0, q, k - 1]), float(values[0, q, k])
+                if kept > float("-inf") and dropped > float("-inf"):
+                    margins.append(kept - dropped)
         return torch.return_types.topk((values.narrow(dim, 0, k), index.narrow(dim, 0, k)))
 
     torch.Tensor.topk = stable
@@ -1413,6 +1427,18 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 p.copy_(0.2 * torch.randn_like(p))
             if name.endswith(".gate.bias") or name.endswith("v_router.bias"):
                 p.normal_(std=0.3)  # K2 Horizon selection biases
+            if arch == "deepseek_v4" and name.endswith((".base", ".hc_base")):
+                p.normal_(std=0.5)
+            if arch == "deepseek_v4" and name.endswith((".scale", ".hc_scale")):
+                p.copy_(1.0 + 0.3 * torch.randn_like(p))
+        if arch == "deepseek_v4":
+            g4 = torch.Generator().manual_seed(seed + 7)
+            for name, buffer in model.named_buffers():
+                if name.endswith("e_score_correction_bias"):
+                    buffer.copy_(0.2 * torch.randn(buffer.shape, generator=g4))
+                if name.endswith("tid2eid"):
+                    table = torch.stack([torch.randperm(cfg.n_routed_experts, generator=g4)[: cfg.num_experts_per_tok] for _ in range(buffer.shape[0])])
+                    buffer.copy_(table)
         for name, b in model.named_buffers():
             if name.endswith("e_score_correction_bias"):
                 b.copy_(0.2 * torch.randn_like(b))
@@ -1432,7 +1458,7 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     margins: list[float] = []
     with torch.no_grad(), stable_topk(margins, getattr(cfg, "index_topk", None)):
         logits = model(ids).logits[0].float()
-    if arch.endswith("_sparse") and margins and min(margins) < 5e-4 and seed < 1234 + 60:
+    if margins and min(margins) < 5e-4 and seed < 1234 + 60:
         return build(arch, out, vocab, seed + 1)
     golden = {
         "arch": arch,

@@ -104,6 +104,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "olmoe",
     "deepseek",
     "deepseek2",
+    "deepseek4",
     "k2_horizon",
     "k2-horizon",
     "k2horizon",
@@ -516,6 +517,7 @@ impl GgufModel {
     /// speculative rollback are unavailable.
     pub fn is_stateful(&self) -> bool {
         self.config.delta.is_some()
+            || self.config.v4.is_some()
             || self.config.mamba.is_some()
             || self.config.mamba1.is_some()
             || self.config.rwkv.is_some()

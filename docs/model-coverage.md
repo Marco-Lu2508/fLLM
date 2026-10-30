@@ -56,6 +56,7 @@ Verified column:
 | MiMo-V2-Flash (`mimo_v2_flash`: per-layer KV heads, sinks, value scale) | safetensors, llama.cpp `mimo2` GGUF (alias) | D | D (value scale) | D | H on AMD GPUs (attention layers stay on the host: the HIP decode step differs, see device runs) | H (attention layers: value scale) | T 2.7e-4 (new fixture; the real 309B checkpoint was not run); the `mimo2` header of a real file was checked against the metadata keys, no such file was run |
 | DeepSeek V2/V3/R1, Kimi K2, Mistral Large 3 / Mistral 4, Youtu, Sarvam-MLA, MiniCPM3, Ling-2 (`deepseek_v2`, `deepseek_v3`, `kimi_k2`, `mistral4`, ...) | safetensors (also FP8 block), GGUF `deepseek2` | D | D | D (equal KV head count) / H | D | D | T 1.4e-4 .. 2.0e-4 |
 | DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`; GGUF `deepseek32`, `glm-dsa` by name) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 with `index_topk` above the sequence length; **T 1.7e-4 / 3.5e-4 with the indexer cutting 4 of 12 tokens** (`deepseek_v32_sparse`, `glm_moe_dsa_sparse`). The exact lightning-indexer selection runs on the CPU path; accelerators attend densely (exact up to `index_topk` tokens) unless `FLLM_DSA=exact` puts the layers on the host. No device kernel for the indexer |
+| DeepSeek-V4 / V4.1 (`deepseek_v4`; GGUF `deepseek4`) | safetensors (transformers and Hub tensor names; bf16/f16/f32) | D | C | C | C | C | T 5e-7 .. 1e-6 (new; 12..40 positions, also cached decoding and server completions). Accelerators run on the CPU with a notice; no MTP head; FP8/FP4 Hub weights not read; the real checkpoints were not run |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | H (attention layers) | H | H | H | T 2.6e-4 |
 | DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). **Dense attention:** the sparse-attention indexer is not run; that equals DSA while the context is at most `index_topk` (2048) and is approximate beyond (see Open gaps) |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | D | D | D | H (attention layers) | T 2.6e-4 |
@@ -71,6 +72,8 @@ Verified column:
 | DBRX | safetensors | D | C | C | C | C | T 1.3e-4 |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
+| Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
+| Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 
 ## Encoders, rerankers, embedders
 
@@ -209,8 +212,9 @@ CPU text for both fixtures, and with `FLLM_DSA=dense` the device text equals the
 
 Not implemented, ordered by how many current models need them:
 
-1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** and compressed or sparse key-value caches: DeepSeek-V4 and
-   V4.1, Hy4, Qwen3.8-Flash-Next, GLM-5-Next, Motif. A new decoder structure and new cache types in every backend.
+1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** on accelerators, and for Hy4, Qwen3.8-Flash-Next, GLM-5-Next and
+   Motif at all. DeepSeek-V4 has them on the CPU (see the matrix); the device kernels for the stream mixing, the compressors and the
+   per-sequence state are missing, as is its MTP head and the FP8 / FP4 Hub weight formats.
 2. **A device kernel for the DeepSeek-V3.2 / GLM-5 indexer.** The CPU path is exact at any context length (indexer keys per
    slot beside the KV pools); accelerators keep dense attention, exact up to `index_topk` tokens, or run those layers on the
    host (`FLLM_DSA=exact`). A real 685B / 753B checkpoint was not run.
@@ -305,7 +309,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | Qwen3.8 2.4T A95B | 2.4T | `Qwen3_5MoeForCausalLM` | V (arch) | Same layers as Qwen3.5-MoE; too large to run. |
 
 | Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **N** | Hyper-connections, n-gram embeddings, per-layer embeddings, sparse indexer. |
-| DeepSeek V4.1 Flash, V4 Pro 0813 | 552B, 1.6T | `DeepseekV41ForCausalLM`, `DeepseekV4ForCausalLM` | **N** | Hyper-connections, engram embeddings, compressed/sparse attention. |
+| DeepSeek V4.1 Flash, V4 Pro 0813 | 552B, 1.6T | `DeepseekV41ForCausalLM`, `DeepseekV4ForCausalLM` | V (tiny, CPU) | Hyper-connections, compressed/sparse attention, hash routing as in `deepseek_v4`; the V4.1 engram embeddings are not implemented. Checkpoints not run. |
 | Motif 3 | 314B | `MotifForCausalLM` | **N** | GDLA attention, multi-stream residuals, PolyNorm activation. |
 | MiniMax-M3 | 428B | `MiniMaxM3SparseForConditionalGeneration` | **N** | Block-sparse attention index on top of MiniMax-M2, `swigluoai`. |
 | Inkling | 975B | `InklingForConditionalGeneration` | **N** | Short convs, relative position tables, log scaling, shared expert sink. |
