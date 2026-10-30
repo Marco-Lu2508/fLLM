@@ -1,5 +1,5 @@
 # The desktop app (Tauri): the Studio in its own window with the server built in, as an installer per system (Windows: setup and msi,
-# Linux: deb, rpm and AppImage). A downloadable workflow artifact, no release, no tag. Runs by hand (Actions -> desktop -> Run workflow)
+# Linux: deb, rpm and AppImage, macOS: dmg for Apple silicon). A downloadable workflow artifact, no release, no tag. Runs by hand (Actions -> desktop -> Run workflow)
 # and on a push to main that changes the app or this workflow. Installers are not signed yet.
 # This workflow builds only the base engine variant (fllm-rs: CPU, Vulkan, DirectX), which is all that tauri.conf.json lists, so it stays
 # fast and needs no placeholder files. The installers with the CUDA variant inside (tauri.cuda.conf.json) are built by the
@@ -32,8 +32,14 @@ jobs:
         include:
           - name: Windows
             os: windows-2022
+            features: rust-gpu,vulkan
           - name: Linux
             os: ubuntu-24.04
+            features: rust-gpu,vulkan
+          # macOS uses the wgpu Metal path (the same feature set as the macOS release assets); no Vulkan SDK is involved
+          - name: macOS
+            os: macos-14
+            features: rust-gpu
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -62,7 +68,7 @@ jobs:
       - name: Build the server program
         shell: bash
         run: |
-          cargo build --release --locked -p fllm-engine --features rust-gpu,vulkan --bin fllm-rs
+          cargo build --release --locked -p fllm-engine --features "${{ matrix.features }}" --bin fllm-rs
           triple="$(rustc -vV | sed -n 's/^host: //p')"
           ext=""; if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
           mkdir -p desktop/src-tauri/binaries
@@ -88,4 +94,5 @@ jobs:
             desktop/src-tauri/target/release/bundle/deb/*.deb
             desktop/src-tauri/target/release/bundle/rpm/*.rpm
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/release/bundle/dmg/*.dmg
           retention-days: 30
