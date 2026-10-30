@@ -952,6 +952,13 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=4,
             indexer_types=["full", "shared", "full"],
         ),
+        # LongCat-Flash: two attention + dense MLP sublayers per layer and a shortcut MoE with identity ("zero") experts
+        "longcat_flash": lambda: T.LongcatFlashConfig(
+            **{k: v for k, v in common.items() if k != "num_hidden_layers"}, num_layers=2, num_attention_heads=4, num_key_value_heads=4,
+            ffn_hidden_size=128, expert_ffn_hidden_size=32, n_routed_experts=6, head_dim=8, zero_expert_num=2, moe_topk=3,
+            q_lora_rank=24, kv_lora_rank=16, qk_nope_head_dim=16, qk_rope_head_dim=8, v_head_dim=16, routed_scaling_factor=1.5,
+            rms_norm_eps=1e-5, rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        ),
         # GLM-5-Next text model: delta layers, NoPE latent attention with the k-pool indexer (pools of 4 keys, 2 pools + tail), 3 residual streams
         "glm5_next": lambda: T.Glm5NextConfig(
             text_config=dict(

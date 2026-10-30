@@ -147,6 +147,8 @@ pub struct MoeConfig {
     pub swiglu_clamp_shared: bool,
     /// Nemotron-H latent MoE: the routed experts work on a `latent`-wide projection of the hidden state.
     pub latent: Option<usize>,
+    /// Experts that return their input (LongCat-Flash): the router scores `experts` of which the last `zero_experts` have no weights.
+    pub zero_experts: usize,
     /// Router logits go through `cap * tanh(logit / cap)` before the gating function (Laguna).
     pub router_softcap: Option<f32>,
 }
@@ -372,6 +374,8 @@ pub struct ModelConfig {
     pub mla: Option<MlaConfig>,
     /// Sparse-attention indexer of the MLA layers (a layer without `blk.N.indexer.*` tensors reuses the selection of the layer before).
     pub indexer: Option<IndexerConfig>,
+    /// LongCat-Flash: scalings of the normalised low-rank query and key/value latents `(sqrt(hidden / q_lora), sqrt(hidden / kv_lora))`.
+    pub mla_scales: Option<(f32, f32)>,
     pub v4: Option<V4Config>,
     pub hc: Option<HcConfig>,
     pub delta: Option<DeltaConfig>,
@@ -592,6 +596,7 @@ impl ModelConfig {
                     | "deepseek"
                     | "deepseek2"
                     | "kimi-linear"
+                    | "longcat-flash"
                     | "ernie4_5"
                     | "helium"
                     | "ernie4_5moe"
@@ -860,6 +865,10 @@ impl ModelConfig {
                 .unwrap_or(a == "muse-glimmer"),
             mla,
             indexer,
+            mla_scales: match (float(meta, a, "attention.q_lora_scale"), float(meta, a, "attention.kv_lora_scale")) {
+                (Some(q), Some(kv)) => Some((q, kv)),
+                _ => None,
+            },
             v4,
             hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
                 hc_mult,
@@ -1253,6 +1262,7 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
             .and_then(Value::as_bool)
             .unwrap_or(false),
         latent: uint(meta, arch, "moe_latent_size").filter(|&n| n > 0),
+        zero_experts: uint(meta, arch, "expert_zero_count").unwrap_or(0),
         router_softcap: float(meta, arch, "router_logit_softcapping").filter(|c| *c > 0.0),
         swiglu_clamp: float(meta, arch, "expert_swiglu_clamp").filter(|l| *l > 0.0),
         swiglu_clamp_shared: key(meta, arch, "expert_swiglu_clamp_shared").and_then(Value::as_bool).unwrap_or(true),
@@ -1363,6 +1373,7 @@ pub(crate) mod tests_support {
             qkv_clip: None,
             mla: None,
             indexer: None,
+            mla_scales: None,
             v4: None,
             hc: None,
             delta: None,

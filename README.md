@@ -117,7 +117,7 @@ GLM, InternLM, Nemotron and more), mixture-of-experts (Mixtral, Qwen MoE, DeepSe
 with multi-head latent attention, gpt-oss, Llama 4, DBRX, PhiMoE and more), and recurrent or hybrid
 models (Mamba 1/2, Qwen3-Next, Qwen3.5/3.6 with gated DeltaNet in HF and llama.cpp GGUF layouts,
 Nemotron-H, Granite hybrid, LFM2, Kimi-Linear). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
-packed Hugging Face checkpoints), DeepSeek-V4, Hy4 and GLM-5-Next (hyper-connections; CPU), Ling-3.0 (Kimi delta layers with direct gates plus rotary latent attention), DeepSeek-V3.2 and GLM-5 (with the sparse lightning indexer, exact at any context length on the CPU; accelerators attend
+packed Hugging Face checkpoints), DeepSeek-V4, Hy4 and GLM-5-Next (hyper-connections; CPU), LongCat-Flash (CPU), Ling-3.0 (Kimi delta layers with direct gates plus rotary latent attention), DeepSeek-V3.2 and GLM-5 (with the sparse lightning indexer, exact at any context length on the CPU; accelerators attend
 densely unless `FLLM_DSA=exact`, see [docs/architectures.md](docs/architectures.md)), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear. BERT, RoBERTa/XLM-R and ModernBERT serve
 Nemotron-H, Granite hybrid, LFM2, Kimi-Linear, RWKV-6 and RWKV-7 on the CPU). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
 packed Hugging Face checkpoints), DeepSeek-V3.2 and GLM-5 (with dense attention instead of the sparse indexer, exact up to 2048 tokens of

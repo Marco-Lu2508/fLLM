@@ -931,6 +931,9 @@ impl Plan {
         if raw == "hy_v4" {
             return crate::hy4::plan(cfg);
         }
+        if raw == "longcat_flash" {
+            return crate::longcat::plan(cfg);
+        }
         let glm5next = matches!(raw.as_str(), "glm5_next" | "glm5_next_text");
         let ling_hybrid = glm5next || raw == "bailing_hybrid" && cfg.get("layer_types").and_then(Value::as_array).is_some_and(|t| t.iter().any(|v| v.as_str() == Some("linear_attention")));
         if ling_hybrid || matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
@@ -2639,6 +2642,9 @@ impl Plan {
         }
         if self.arch == "deepseek4" {
             return crate::deepseek4::map(self, n);
+        }
+        if self.arch == "longcat-flash" {
+            return crate::longcat::map(self, n);
         }
         let ling_renamed;
         let n = if self.arch == "kimi-linear" {

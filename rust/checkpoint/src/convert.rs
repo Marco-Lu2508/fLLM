@@ -250,6 +250,8 @@ pub fn prepare_checkpoint(
         crate::kimi_linear::config(&cfg)?
     } else if arch == "deepseek4" {
         crate::deepseek4::config(&cfg)?
+    } else if arch == "longcat-flash" {
+        crate::longcat::config(&cfg)?
     } else if matches!(plan.family, Family::Mamba | Family::Nemotron) {
         // no attention or feed-forward sizes: give the shape checks harmless values
         let mut patched = cfg.clone();
@@ -397,7 +399,7 @@ pub fn prepare_checkpoint(
         // MLA attention has its own projection shapes
         if matches!(
             arch,
-            "deepseek2" | "hy4" | "minicpm3" | "qwen3next" | "g9v3" | "mamba2" | "nemotron_h" | "nemotron_h_moe" | "kimi-linear"
+            "deepseek2" | "hy4" | "longcat-flash" | "minicpm3" | "qwen3next" | "g9v3" | "mamba2" | "nemotron_h" | "nemotron_h_moe" | "kimi-linear"
         ) && name.contains(".attn_")
         {
             return Ok(None);

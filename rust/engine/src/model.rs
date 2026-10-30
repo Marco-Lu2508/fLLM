@@ -106,6 +106,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "deepseek2",
     "deepseek4",
     "hy4",
+    "longcat-flash",
     "k2_horizon",
     "k2-horizon",
     "k2horizon",

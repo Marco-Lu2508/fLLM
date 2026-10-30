@@ -292,6 +292,14 @@ struct Mla {
     kv_b: Linear,
 }
 
+/// `weights` times `scale` (a scalar that follows a normalisation is folded into its weights).
+fn scaled(mut weights: Vec<f32>, scale: Option<f32>) -> Vec<f32> {
+    if let Some(s) = scale {
+        weights.iter_mut().for_each(|w| *w *= s);
+    }
+    weights
+}
+
 /// Queries, keys and values of an MLA layer.
 type MlaQkv = [Vec<f32>; 3];
 
@@ -321,6 +329,10 @@ struct Layer {
     attn: Attn,
     /// Sparse-attention indexer of an MLA layer.
     indexer: Option<Box<Indexer>>,
+    /// LongCat-Flash: a mixture of experts that reads the input of this layer's feed-forward and joins the residual stream after the
+    /// next layer (`takes_shortcut`).
+    shortcut: Option<Box<Moe>>,
+    takes_shortcut: bool,
     /// The layer attends to the tokens the last layer with an indexer selected (GLM-5 layers marked `shared`).
     dsa_shared: bool,
     /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
@@ -1668,7 +1680,7 @@ impl RustDecoder {
                 let q_a = match m.q_lora {
                     Some(rank) => Some((
                         linear(&format!("{p}.attn_q_a"), rank, hidden)?,
-                        vector(mapping, &format!("{p}.attn_q_a_norm.weight"), rank)?,
+                        scaled(vector(mapping, &format!("{p}.attn_q_a_norm.weight"), rank)?, cfg.mla_scales.map(|s| s.0)),
                     )),
                     None => None,
                 };
@@ -1715,7 +1727,7 @@ impl RustDecoder {
                     q_a,
                     q,
                     kv_a: linear(&format!("{p}.attn_kv_a_mqa"), m.kv_lora + m.rope, hidden)?,
-                    kv_a_norm: vector(mapping, &format!("{p}.attn_kv_a_norm.weight"), m.kv_lora)?,
+                    kv_a_norm: scaled(vector(mapping, &format!("{p}.attn_kv_a_norm.weight"), m.kv_lora)?, cfg.mla_scales.map(|s| s.1)),
                     kv_b,
                 }))
             } else if let Some(rw) = rwkv::Rwkv::load(&cfg, mapping, &p, i, &linear)? {
@@ -2040,8 +2052,34 @@ impl RustDecoder {
             // a layer of a model with an indexer that has none of its own reuses the selection of the layer before
             let dsa_shared = indexer.is_none() && cfg.indexer.is_some() && mtp_prefix.is_none() && saw_indexer && matches!(attn, Attn::Mla(_));
             saw_indexer |= indexer.is_some();
+            let shortcut = if has_tensor(mapping, &format!("{p}.shortcut_gate_inp.weight")) {
+                let moe = cfg.moe.as_ref().ok_or("GGUF has shortcut experts but no expert metadata")?;
+                let routed = moe.experts - moe.zero_experts;
+                let load = |kind: &str, e: usize, rows: usize, cols: usize| -> Result<Linear, String> {
+                    let mut l = Linear::load_rows(mapping, &format!("{p}.shortcut_{kind}_exps.weight"), None, e * rows, rows, cols)?;
+                    l.enable_fast_cpu();
+                    Ok(l)
+                };
+                let experts = (0..routed)
+                    .map(|e| Ok(Expert { gate: Some(load("gate", e, moe.expert_ff, hidden)?), up: load("up", e, moe.expert_ff, hidden)?, down: load("down", e, hidden, moe.expert_ff)? }))
+                    .collect::<Result<Vec<_>, String>>()?;
+                Some(Box::new(Moe {
+                    router: linear(&format!("{p}.shortcut_gate_inp"), moe.experts, hidden)?,
+                    bias: Some(vector(mapping, &format!("{p}.shortcut_exp_probs_b.bias"), moe.experts)?),
+                    experts,
+                    cache: None,
+                    shared: None,
+                    latent: None,
+                    tid2eid: None,
+                }))
+            } else {
+                None
+            };
+            let takes_shortcut = cfg.arch == "longcat-flash" && i % 2 == 1;
             let mut layer = Layer {
                 indexer,
+                shortcut,
+                takes_shortcut,
                 dsa_shared,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
                 zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
@@ -2577,6 +2615,10 @@ impl RustDecoder {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
+        }
+        if layer.shortcut.is_some() || layer.takes_shortcut {
+            // the shortcut experts join the stream two sublayers later: the pass over the layers keeps them on the host
+            return Some("shortcut experts across layers");
         }
         if cfg.hc.is_some() {
             return Some("hyper-connections");
@@ -6395,6 +6437,33 @@ impl RustDecoder {
         true
     }
 
+    /// LongCat-Flash shortcut experts: the routed experts as usual, a zero expert (index beyond the stored experts) returns its input.
+    fn shortcut_forward(&self, moe: &Moe, input: &[f32], workspace: &mut compute::ProjectionGroupWorkspace) -> Result<Vec<f32>, String> {
+        let hidden = self.cfg.hidden;
+        let routed = self.moe_route(moe, input)?;
+        let mut out = vec![0.0f32; input.len()];
+        for (e, assigned) in routed.iter().enumerate().filter(|(_, a)| !a.is_empty()) {
+            match moe.experts.get(e) {
+                Some(expert) => {
+                    let mut rows = Vec::with_capacity(assigned.len() * hidden);
+                    for &(t, _) in assigned {
+                        rows.extend_from_slice(&input[t * hidden..(t + 1) * hidden]);
+                    }
+                    let result = self.expert_forward(expert, &rows, workspace)?;
+                    for (n, &(t, w)) in assigned.iter().enumerate() {
+                        out[t * hidden..(t + 1) * hidden].iter_mut().zip(&result[n * hidden..(n + 1) * hidden]).for_each(|(o, r)| *o += w * r);
+                    }
+                }
+                None => {
+                    for &(t, w) in assigned {
+                        out[t * hidden..(t + 1) * hidden].iter_mut().zip(&input[t * hidden..(t + 1) * hidden]).for_each(|(o, x)| *o += w * x);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Which tokens go to which expert, with their weights: `routed[expert] = [(token, weight)]`.
     fn moe_route(&self, moe: &Moe, input: &[f32]) -> Result<Vec<Vec<(usize, f32)>>, String> {
         let cfg = self
@@ -7121,6 +7190,8 @@ impl RustDecoder {
             let residual = cfg.residual_scale;
             // RWKV-7: the values of layer 0 of this pass, read by the value residual of every later layer
             let mut rwkv_v_first: Vec<f32> = Vec::new();
+            // LongCat-Flash: the shortcut experts of a layer join the stream after the layer that follows
+            let mut pending_shortcut: Option<Vec<f32>> = None;
             for (i, layer) in self.layers.iter().enumerate().skip(range.start).take(range.len()) {
                 let (dk, dv) = (cfg.layer_head_dim(i), cfg.layer_value_dim(i));
                 let (heads, kv_heads) = (cfg.layer_heads(i), cfg.layer_kv_heads(i));
@@ -7443,6 +7514,9 @@ impl RustDecoder {
                     next
                 };
                 trace.mark(1);
+                if let Some(moe) = &layer.shortcut {
+                    pending_shortcut = Some(self.shortcut_forward(moe, &ffn_input, &mut ffn_workspace)?);
+                }
                 let mut ffn = self.ffn_forward(layer, &ffn_input, &mut ffn_workspace)?;
                 if let Some(moe) = layer.gemma.as_ref().and_then(|g| g.has_moe()) {
                     self.gemma_moe_branch(moe, &x, &mut ffn, &mut ffn_workspace)?;
@@ -7457,6 +7531,11 @@ impl RustDecoder {
                     }
                 } else {
                     add_scaled(&mut x, &ffn, residual);
+                    if layer.takes_shortcut {
+                        if let Some(shortcut) = pending_shortcut.take() {
+                            add_scaled(&mut x, &shortcut, 1.0);
+                        }
+                    }
                     dump_layer("ffn", i, &x);
                 }
                 if let Some(g) = &layer.gemma {
