@@ -215,6 +215,14 @@ Devices (RTX 2000 Ada Laptop GPU through Vulkan, `vulkan:1`; tiny fixtures; `scr
 the dense device attention and gives a different text from the CPU (the indexer cuts 4 of 19 tokens); with `FLLM_DSA=exact` the text equals the
 CPU text for both fixtures, and with `FLLM_DSA=dense` the device text equals the dense CPU text. CUDA, HIP, Metal and Vulkan on AMD were not run.
 
+### Models added with their own decoders (device behaviour)
+
+Tiny random fixtures through `scripts/gpu_arch_smoke.py --device vulkan:1` (RTX 2000 Ada Laptop GPU, 12 greedy tokens, text from the device
+against text from the CPU): DeepSeek-V4, Hy4, GLM-5-Next, LongCat-Flash, Inkling and MiniMax-M3 all give the same text, because the engine
+prints that the model cannot run on the backend and continues on the CPU (`--device vulkan:1: ... use --device cpu; running on the CPU
+instead`); no accelerator kernel ran for them. Ling-3.0 gave the same text with its delta layers on the device and its latent attention layers
+(output gate) on the host. CUDA, HIP and Metal were not run for any of them.
+
 ## Open gaps
 
 Not implemented, ordered by how many current models need them:
