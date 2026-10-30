@@ -56,7 +56,7 @@ table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on M
 | ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
 | Intel SYCL (Level Zero, Arc/Xe) | L0 | L0 | L0 | L0 | L0† (-> f16) | L0† (-> f16) | L0 |
 | Intel NPU (OpenVINO) | Q4_0, Q8_0: L0 exact (i4/i8, group 32); Q4_1, Q5_x: L0† (requantised) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
-| AMD XDNA NPU | probe only (one MatMul through ONNX Runtime/VitisAI) | – | – | – | – | – | – |
+| AMD XDNA NPU | no kernels of fLLM: the models run in FastFlowLM, which fLLM drives and lists as a provider ([user/amd-npu.md](user/amd-npu.md)); the probe of one MatMul through ONNX Runtime/VitisAI remains | – | – | – | – | – | – |
 | Qualcomm Hexagon NPU | probe only (FP16 MatMul through QNN HTP; Genie wrapper) | – | – | – | – | – | – |
 | Apple Neural Engine | probe only (linear through Core ML) | – | – | – | – | – | – |
 | Google TPU (PJRT/StableHLO) | L0† (host decoding, upload as bf16/f32/int8) | L0† | L0† | L0† | L0† | L0† (Q4Z/Q4ZP/FP8M through `compute::dequantize`) | L0 |

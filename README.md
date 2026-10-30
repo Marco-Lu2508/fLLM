@@ -141,6 +141,7 @@ speech are not supported; for multimodal checkpoints only the text model is conv
 | `merge-lora`, `gguf-set`, `gguf-split`, `gguf-merge` | LoRA merge, GGUF metadata and shard tools |
 | `devices`, `selftest-cpu`, `selftest-gpu`, `completions` | device inventory, kernel self tests, shell completion |
 | `studio` | start the server and open the Studio (the browser app) |
+| `amd-npu status\|list\|pull\|serve` | the NPU of an AMD Ryzen AI processor through FastFlowLM ([docs/user/amd-npu.md](docs/user/amd-npu.md)) |
 | `agent -p "TASK"`, `gateway telegram\|matrix` | the coding agent without a browser, and the same agent behind a Telegram or Matrix chat ([docs/user/agent-cli.md](docs/user/agent-cli.md)) |
 
 `fllm-rs <command> --help` prints the usage of each command; [docs/user/commands.md](docs/user/commands.md)
@@ -259,7 +260,7 @@ What has actually been run on hardware, and what has not:
 | Windows agent tools | The browser tool, computer use (screenshot, displays, refused key chords) and the sandbox ran on one Windows 11 machine with three displays; clicking and typing there were not tried |
 | AMD ROCm (HIP) | Ran on one GPU, a Radeon 840M (`gfx1153`, ROCm 7.1 from Ubuntu 26.04): `linear` passes for every weight format, 821 self-test checks ok, 13 failed (int8 W8A8 against an exact reference, one MoE case), 470 skipped (kernels that exist for NVIDIA only); dense models write the CPU's text (Llama-3.2-3B: 22 tok/s decode, 157 tok/s prompt); MoE models and host-streamed layers fail in a host-to-device copy. Building needs rocWMMA headers that Ubuntu's package lacks (see the changelog) |
 | Intel SYCL, TPU | Compile only (test level L0): not run on the hardware |
-| NPUs | Intel NPU (OpenVINO): ran on one Core Ultra laptop, slower than the processor. AMD XDNA, Qualcomm Hexagon and the Apple Neural Engine: detection only, no compute path (an AMD XDNA 2 NPU ran Llama-3.2-3B at 31 tok/s through the third-party FastFlowLM in our benchmark, see [docs/benchmarks.md](docs/benchmarks.md)) |
+| NPUs | Intel NPU (OpenVINO): ran on one Core Ultra laptop, slower than the processor. **AMD XDNA 2 (Ryzen AI)**: runs through FastFlowLM, which fLLM finds, drives and lists as a provider (Llama-3.2-3B at 31 tok/s decode on a Ryzen AI 5 PRO 435; tested on Linux, see [docs/user/amd-npu.md](docs/user/amd-npu.md)). Qualcomm Hexagon and the Apple Neural Engine: detection only, no compute path |
 
 The test levels (L0 compiles, L1 self test passes on the device, L2 same greedy text as the CPU, L3 speed
 measured) are defined in [docs/test-levels.md](docs/test-levels.md).
@@ -325,6 +326,7 @@ The code and `--help` are authoritative where a page and the program disagree.
 - [docs/quickstart-windows-linux.md](docs/quickstart-windows-linux.md): Docker with an NVIDIA GPU, step by step
 - [docs/user/studio.md](docs/user/studio.md): the Studio and desktop app: chat, the coding agent, browser, computer use, sandbox, skills, MCP, settings, where files are kept
 - [docs/user/commands.md](docs/user/commands.md): every `fllm-rs` subcommand
+- [docs/user/amd-npu.md](docs/user/amd-npu.md): the NPU of an AMD Ryzen AI processor through FastFlowLM
 - [docs/configuration.md](docs/configuration.md): every `serve` flag and environment variable
 - [docs/user/clients.md](docs/user/clients.md), [docs/user/memory.md](docs/user/memory.md), [docs/user/troubleshooting.md](docs/user/troubleshooting.md): clients, memory planning, error messages
 
