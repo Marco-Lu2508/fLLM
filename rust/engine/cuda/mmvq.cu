@@ -273,7 +273,12 @@ mmvq_q6k_kernel(const uint8_t *W_, const int8_t *Xq_, const float2 *Xs_, float *
 }
 
 int fllm_mmvq_maxb() {
+#if defined(__HIPCC__)
+    // AMD: the integer-dot kernel beats the FP32 GEMV (4x on a Radeon 840M at 8 tokens) and the matrix-core GEMM (2x at 16 tokens) up to 16 tokens
+    static const int v = getenv("FLLM_CUDA_MMVQ_MAXB") ? atoi(getenv("FLLM_CUDA_MMVQ_MAXB")) : 16;
+#else
     static const int v = getenv("FLLM_CUDA_MMVQ_MAXB") ? atoi(getenv("FLLM_CUDA_MMVQ_MAXB")) : 4;
+#endif
     return v > 16 ? 16 : v;
 }
 #ifndef MMVQ_MAXB
