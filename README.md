@@ -119,8 +119,11 @@ models (Mamba 1/2, Qwen3-Next, Qwen3.5/3.6 with gated DeltaNet in HF and llama.c
 Nemotron-H, Granite hybrid, LFM2, Kimi-Linear). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
 packed Hugging Face checkpoints), DeepSeek-V3.2 and GLM-5 (with the sparse lightning indexer, exact at any context length on the CPU; accelerators attend
 densely unless `FLLM_DSA=exact`, see [docs/architectures.md](docs/architectures.md)), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear. BERT, RoBERTa/XLM-R and ModernBERT serve
+Nemotron-H, Granite hybrid, LFM2, Kimi-Linear, RWKV-6 and RWKV-7 on the CPU). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
+packed Hugging Face checkpoints), DeepSeek-V3.2 and GLM-5 (with dense attention instead of the sparse indexer, exact up to 2048 tokens of
+context), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear. BERT, RoBERTa/XLM-R and ModernBERT serve
 embeddings and rerank/classify (also BGE-M3, ColBERT, Qwen3-Embedding, EmbeddingGemma).
-The full list, with the families that are **not** supported (for example DeepSeek V4, Kimi K3, Ling-3.0, RWKV), is in
+The full list, with the families that are **not** supported (for example DeepSeek V4, Kimi K3, Ling-3.0, xLSTM), is in
 [docs/architectures.md](docs/architectures.md); the per-architecture table with devices and verification levels is
 [docs/model-coverage.md](docs/model-coverage.md). Conversion refuses an unknown `model_type`.
 

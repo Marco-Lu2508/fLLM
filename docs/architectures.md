@@ -95,6 +95,7 @@ speculative decoding are switched off for them.
 | `lfm2_moe` | ShortConv/attention with leading dense FFNs, sigmoid top-k routing, selection bias and epsilon normalization; CPU only; tiny fixture agrees with transformers 5.19 (2.9e-4) |
 | `lfm2` | gated ShortConv with per-sequence history + Q/K-normalized attention; CPU and CUDA; tiny fixture agrees with transformers 5.19 (1.8e-4) |
 | `mamba`, `falcon_mamba`, `mamba2` | selective state-space mixers |
+| `rwkv7` (RWKV-7 "Goose"), `rwkv6` (RWKV-6 "Finch"); GGUF `rwkv7`, `rwkv6` | time-mix (token shift, low-rank adapters, a matrix-valued WKV state per head, group norm) + channel-mix (token shift, squared ReLU; RWKV-6 with a receptance gate), LayerNorm everywhere, a norm on the embeddings. **CPU only**: on an accelerator request the model reports `an RWKV time-mix / channel-mix layer (host only)` and runs on the CPU. Converts the flash-linear-attention layout of RWKV-7 (`RWKVxForCausalLM`, `model.layers.N.attn.*`) and the Hugging Face RWKV-6 layout (`rwkv.blocks.N.attention.*`); reads llama.cpp files of both (fused mixing vectors, `rescale_every_n_layers`). The RWKV world tokenizer (`tokenizer.ggml.model = rwkv`, greedy longest match over bytes) is implemented; the converter builds it from `rwkv_vocab_v20230424.txt`. Tiny fixtures agree with `scripts/rwkv_reference.py` (RWKV-7 4.7e-7, RWKV-6 1.1e-6), real checkpoints see docs/model-coverage.md. Raw BlinkDL `.pth` files (`blocks.N.att.*`) are not read |
 | `qwen3_next`, `qwen3_5`, `qwen3_5_moe` | gated DeltaNet + gated attention (+ MoE) |
 | `kimi_linear` (Kimi-Linear 48B-A3B) | Kimi Delta Attention layers (gated delta rule with a per-channel decay, short convolutions, low-rank gates) interleaved with latent attention without rope, dense then MoE feed-forwards; checked against transformers 5.22 (8.2e-5) |
 | GGUF `qwen35`, `qwen35moe` (llama.cpp / unsloth files) | same layers; llama.cpp stores each head's query and gate side by side, the value heads of the DeltaNet layers tiled (value head `j` belongs to key head `j % key heads`) and the MoE experts as one `ffn_gate_up_exps` tensor with `[gate; up]` rows per expert. Loaded as such (checked against fLLM's own conversion of Qwen3.5-0.8B: identical text; Qwen3.6-35B-A3B Q4_K_S runs). The DeltaNet recurrence runs on the device with the CUDA backend (`deltanet.cu`); on the other backends it runs on the CPU between device layers. |
@@ -104,7 +105,7 @@ speculative decoding are switched off for them.
 ## Not supported
 
 * DeepSeek V4 and Hy4 (hyper-connections, compressed/sparse caches), Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
-  RWKV, xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama, Qwen3.8-Flash-Next. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
+  xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama, Qwen3.8-Flash-Next. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
 * Step-3 (not 3.5/3.7): MFA attention.
 * A.X-K2: Gated RMSNorm wrapper (`AXK2GatedRMSNorm`) with internal `gate_mlp` projection.
@@ -131,7 +132,7 @@ GPT-4o, DeepSeek-V3, K2); other values fall back to the GPT-2 split. Check a new
 ```sh
 python scripts/verify_architectures.py --fllm target/release/fllm-rs \
     --example target/release/examples/verify_checkpoint llama qwen3 gemma3 deepseek exaone deepseek_v3
-python scripts/verify_generation.py --fllm target/release/fllm-rs qwen3_5 mamba2
+python scripts/verify_generation.py --fllm target/release/fllm-rs qwen3_5 mamba2 rwkv7 rwkv6
 python scripts/verify_tokenizer.py MODEL.gguf HF_TOKENIZER_DIR target/release/examples/tokenize
 ```
 

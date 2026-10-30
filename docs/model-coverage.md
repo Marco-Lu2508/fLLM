@@ -60,13 +60,14 @@ Verified column:
 | K2 Horizon, G9v3 (`k2_horizon`, `g9v3`) | safetensors, GGUF | D | D | D | D | D | T 1.5e-4 .. 1.9e-4 (remote-code reference) |
 | Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | H | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
 | Kimi-Linear 48B-A3B (`kimi_linear`: KDA + latent attention without rope + MoE) | safetensors | D | D | D | H | D | T 8.2e-5 (new fixture; the KDA recurrence is also checked against `fla.ops.kda.naive` in `rust/engine/testdata`) |
+| RWKV-7, RWKV-6 (`rwkv7`, `rwkv6`; GGUF `rwkv7`, `rwkv6`) | safetensors (fla layout / HF RWKV-6), GGUF | D | C | C | C | C | T 4.7e-7 / 1.1e-6 against `scripts/rwkv_reference.py` (transformers has no RWKV-6/7); R: real 0.1B RWKV-7 and 1.6B RWKV-6, see below |
 | Mamba 1/2, Falcon-Mamba (`mamba`, `mamba2`, `falcon_mamba`) | safetensors, GGUF | D | D | D (Mamba-2) / H | H | H | T 3e-7 .. 6e-7 |
 | Granite 4 hybrid, Bamba, Nemotron-H and Nemotron-3 (`granitemoehybrid`, `bamba`, `nemotron_h`, latent MoE) | safetensors, GGUF | D | D | D / H | H | H | T 3e-5 .. 1.6e-4; T+G for Nemotron-3-Nano |
 | Falcon-H1, Zamba2 | safetensors | D | H | H | H | H | T 1.8e-4 / 1.6e-3 |
 | Jamba (`jamba`) | safetensors | D | D (CUDA scan) | H | H | H | T 1.2e-4 |
 | LFM2, LFM2-MoE | safetensors | D | D (dense) / C (MoE) | H | H | H | T 1.8e-4 / 2.9e-4 |
 | DBRX | safetensors | D | C | C | C | C | T 1.3e-4 |
-| Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
+| Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 
 ## Encoders, rerankers, embedders
@@ -128,6 +129,8 @@ logits were compared with `verify_checkpoint` (f32 KV cache) where noted.
 | --- | --- | --- |
 | microsoft/bitnet-b1.58-2B-4T (packed uint8 ternary weights) | `quant_method: bitnet` reader, `bitnet` architecture with sub-norms, tied embeddings | logits of 19 positions against transformers on the unpacked weights (`scripts/unpack_bitnet.py`): relative 1.7e-4, arg-max equal everywhere. Greedy text is coherent ("Paris", counting); it matches transformers on the counting prompt and diverges after 4 to 38 characters on the other three (f16 KV cache; not examined further). The reference BitLinear's 8-bit activation rounding is applied by neither side |
 | kyutai/helium-1-2b | The Hub config of this model is plain `llama`, so it runs through the Llama path (the new `helium` model type is for transformers-native Helium configs only) | logits of 18 positions: relative 5.4e-4, arg-max equal; greedy text identical on two of four prompts, the other two diverge after 9 and 23 characters |
+| RWKV/RWKV7-Goose-World2.8-0.1B-HF (RWKV-7, 0.1B) | `rwkv7` converter (fla layout, bf16 weights) and the llama.cpp F16 GGUF of the same model (fused mixing vectors, `rwkv` tokenizer) | logits of 12 positions against `scripts/rwkv_reference.py` (float32 on the original weights): converted checkpoint relative 1.9e-6, llama.cpp F16 GGUF 2.4e-4, arg-max equal at every position; the GGUF completes "The Eiffel Tower is located in the city of" with " Paris, France. It is the tallest building in the world" on the CPU |
+| RWKV/v6-Finch-1B6-HF (RWKV-6, 1.6B) | `rwkv6` converter and the llama.cpp F16 GGUF (pre-scaled weights, `rescale_every_n_layers` 6) | 12 positions against the reference: converted checkpoint 1.8e-6, llama.cpp F16 GGUF 4.2e-4, arg-max equal; the reference itself is a transcription of the official recurrence, not the model's own remote code (that needs flash-linear-attention kernels) |
 | Qwen/Qwen3-VL-2B-Instruct, text only | `qwen3_vl_text` path | four of four continuations identical to transformers |
 | Qwen3-VL-2B-Instruct Q8_0 GGUF of the Qwen organisation (architecture `qwen3vl`) | the new `qwen3vl` alias | loads and generates; two of four continuations identical to the float32 transformers text, the others differ after 20 and 52 characters (Q8_0 against float32) |
 
@@ -185,7 +188,7 @@ Not implemented, ordered by how many current models need them:
    host (`FLLM_DSA=exact`). A real 685B / 753B checkpoint was not run.
 3. **KDA variants**: Ling-3.0 (bounded forget gate, rotary latent attention with a head gate, Hub layout `attention.*`),
    GLM-5-Next, Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
-4. **RWKV 6/7, xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
+4. **xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
    DiffLlama**: their own recurrent or attention mechanisms.
 5. **LongCat-Flash** (dual sublayers with shortcut MoE), **Inkling**, **MiniMax-M3** (block-sparse index), **MiniMax-M1**
    (lightning attention).
