@@ -56,6 +56,7 @@ pub(in crate::server) fn build_status_json(state: &AppState) -> Value {
             "max_sequences": max_seqs,
             "vocab_size": state.tokenizer.vocab_size(),
             "size_bytes": state.facts.size_bytes,
+            "expert_streaming": crate::expert_cache::status_json(),
             "parameters": state.facts.parameters,
             "parameter_size": state.facts.parameter_size(),
             "quantization": state.facts.quantization,

@@ -38,6 +38,7 @@ mod cpu_spin;
 pub mod cpu_threads;
 pub mod cpu_topology;
 pub mod draft;
+pub mod expert_cache;
 pub(crate) mod kv_blocks;
 pub mod speculative;
 pub mod encoder;

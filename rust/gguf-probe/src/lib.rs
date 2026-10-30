@@ -807,6 +807,12 @@ pub struct TensorBytes {
     inner: TensorBytesInner,
 }
 impl TensorBytes {
+    /// The bytes are a view of a memory-mapped file (or other mapping), not a heap copy: reading them may fault pages in from storage, and
+    /// the operating system can drop them again under memory pressure.
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.inner, TensorBytesInner::Mmap(..))
+    }
+
     pub fn from_vec(v: Vec<u8>) -> Self {
         let len = v.len();
         Self {

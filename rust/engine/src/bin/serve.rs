@@ -86,7 +86,7 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--expert-cache-mb auto|SIZE|off] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --multi-step N (alias --num-scheduler-steps): up to N decode rounds per scheduler round while the batch does not change; off by default, CPU backend only until verified elsewhere");
     eprintln!("       --device A,B,C (two or more devices of any backends, the CPU too): the model is split over them by layers in proportion to their free memory and speed (`fllm-rs devices --split MODEL --device A,B,C` shows the plan); --tensor-parallel N|auto groups N same-backend devices per stage, --tensor-split 3,1 sets the shares");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
@@ -758,6 +758,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--gpu-layers" | "-ngl" | "--n-gpu-layers" => {
                 let flag = args[i].clone();
                 gpu_layers = value(&args, &mut i, &flag);
+            }
+            "--expert-cache-mb" | "--expert-cache" => {
+                // host memory for the expert weights of MoE models (auto from the free memory, a size such as 8G, or off); the experts of a
+                // model larger than that are read from the file on demand (docs/moe-streaming.md)
+                let flag = args[i].clone();
+                let budget = fllm_engine::expert_cache::parse_budget(&value(&args, &mut i, &flag)).unwrap_or_else(|e| usage(&e));
+                let mut options = fllm_engine::expert_cache::options();
+                options.budget = budget;
+                fllm_engine::expert_cache::configure(options);
             }
             "--generation-config" => {
                 generation_source = fllm_engine::server::gencfg::Source::parse(&value(&args, &mut i, "--generation-config"))

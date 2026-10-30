@@ -474,6 +474,7 @@ fllm_spec_speedup_estimate {:.6}",
                 self.finished[index].load(Relaxed)
             );
         }
+        crate::expert_cache::render_metrics(&mut out);
         out
     }
 }

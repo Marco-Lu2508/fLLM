@@ -95,6 +95,8 @@ struct Moe {
     /// Added to the router scores for the expert selection only (DeepSeek-V3).
     bias: Option<Vec<f32>>,
     experts: Vec<Expert>,
+    /// Read-ahead, residency and statistics of the experts in the model file (`expert_cache.rs`); `None` when they are not file data.
+    cache: Option<Arc<crate::expert_cache::LayerTable>>,
     /// Always-active expert, optionally scaled by `sigmoid(shared_gate . x)`.
     shared: Option<(Expert, Option<Vec<f32>>)>,
     /// Latent MoE (Nemotron-H): `(down, up)` projections around the routed experts.
@@ -910,6 +912,8 @@ fn run_device_sample(stream: &mut dyn crate::backend::Stream, logits: &crate::ba
 
 pub struct RustDecoder {
     mtp: Option<MtpProjection>,
+    /// Owner of the expert cache tables of the MoE layers (keeps the read-ahead thread alive).
+    expert_cache: Option<crate::expert_cache::ExpertCache>,
     cfg: ModelConfig,
     profile: bool,
     embedding: Embedding,
@@ -1432,6 +1436,7 @@ impl RustDecoder {
         } else {
             0..cfg.layers
         };
+        let expert_cache = if par.is_none() && mtp_prefix.is_none() && cfg.moe.is_some() { crate::expert_cache::ExpertCache::new(&cfg.arch) } else { None };
         let mut layers = Vec::with_capacity(layer_range.len());
         for i in layer_range {
             if par.as_ref().is_some_and(|ctx| !ctx.layer_range(cfg.layers).contains(&i)) {
@@ -1713,7 +1718,15 @@ impl RustDecoder {
                     None
                 };
                 let bias_name = format!("{p}.exp_probs_b.bias");
+                let cache = expert_cache.as_ref().and_then(|c| {
+                    let parts: Vec<Vec<fllm_gguf_probe::TensorBytes>> = experts
+                        .iter()
+                        .map(|e| [e.gate.as_ref(), Some(&e.up), Some(&e.down)].into_iter().flatten().filter_map(|l| l.packed_storage().map(|(_, b)| b.clone())).collect())
+                        .collect();
+                    c.register_layer(i, moe.used, &parts)
+                });
                 Ffn::Moe(Box::new(Moe {
+                    cache,
                     bias: if has_tensor(mapping, &bias_name) {
                         Some(vector(mapping, &bias_name, moe.experts)?)
                     } else {
@@ -1952,6 +1965,7 @@ impl RustDecoder {
             .transpose()?;
         let mut decoder = Self {
             mtp,
+            expert_cache,
             profile: std::env::var_os("FLLM_RUST_PROFILE").is_some(),
             embedding,
             layers,
@@ -2024,7 +2038,41 @@ impl RustDecoder {
             row_visible_lengths: std::sync::Mutex::new(None),
         };
         decoder.set_device(device)?;
+        decoder.plan_expert_cache(mapping);
         Ok(decoder)
+    }
+
+    /// The expert cache of a MoE model (statistics, plan); `None` for other models or with `--expert-cache-mb off`.
+    pub fn expert_cache(&self) -> Option<&crate::expert_cache::ExpertCache> {
+        self.expert_cache.as_ref()
+    }
+
+    /// Fix the budget of the expert cache once it is known which MoE layers keep their experts in host memory, and report the plan.
+    fn plan_expert_cache(&self, mapping: &MappedGguf) {
+        let Some(cache) = self.expert_cache.as_ref() else { return };
+        let mut tables = 0;
+        for (i, layer) in self.layers.iter().enumerate() {
+            let Ffn::Moe(moe) = &layer.ffn else { continue };
+            let Some(table) = moe.cache.as_ref() else { continue };
+            tables += 1;
+            // experts that were uploaded to the device are not host memory, and the device layer never routes on the host
+            if self.backend_weights.as_ref().and_then(|w| w.layers.get(i)).is_some_and(|l| l.moe.is_some()) {
+                table.mark_device_resident();
+            }
+        }
+        if tables == 0 {
+            return;
+        }
+        let (_, dense) = crate::expert_cache::split_bytes(mapping.index());
+        // the dense weights of a model on an accelerator are on the device; the processor keeps all of them in host memory
+        let dense_host = if self.backend.is_some() { 0 } else { dense };
+        let plan = cache.finalize(dense_host);
+        if plan.layers > 0 {
+            eprintln!("[fllm-rs] {}", plan.describe());
+            if plan.streaming && dense_host > plan.budget.saturating_add(plan.expert_bytes) / 2 {
+                eprintln!("[fllm-rs] warning: the dense weights ({:.1} GiB) are large for this machine's free memory; every token will page them as well", dense_host as f64 / (1u64 << 30) as f64);
+            }
+        }
     }
 
     pub fn set_tree_mask(&mut self, mask: Option<Vec<bool>>, prefix_len: usize, num_nodes: usize) {
@@ -6029,6 +6077,10 @@ impl RustDecoder {
                 };
                 routed[i].push((t, w * cfg.weight_scale));
             }
+        }
+        if let Some(cache) = &moe.cache {
+            let active: Vec<usize> = routed.iter().enumerate().filter(|(_, r)| !r.is_empty()).map(|(e, _)| e).collect();
+            cache.on_route(&active, tokens);
         }
         if std::env::var_os("FLLM_DEBUG_SUMS").is_some() {
             let picks: Vec<(usize, f32)> = routed.iter().enumerate().flat_map(|(e, v)| v.iter().filter(|(t, _)| *t == 0).map(move |&(_, w)| (e, w))).collect();
