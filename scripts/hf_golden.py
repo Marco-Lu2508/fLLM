@@ -912,6 +912,23 @@ def config_for(arch: str, vocab: int):
             norm_topk_prob=True, rms_norm_eps=1e-6,
             mlp_layer_types=["dense", "sparse", "sparse"],
         ),
+        "deepseek_v32": lambda: T.DeepseekV32Config(
+            **common, num_attention_heads=4, num_key_value_heads=4, intermediate_size=128,
+            moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=2,
+            topk_group=1, first_k_dense_replace=1, n_shared_experts=1, kv_lora_rank=16,
+            q_lora_rank=24, qk_rope_head_dim=8, qk_nope_head_dim=16, v_head_dim=16,
+            routed_scaling_factor=2.5, rms_norm_eps=1e-6,
+            index_n_heads=4, index_head_dim=16, index_topk=64,  # topk >= sequence length: the indexer keeps every key
+        ),
+        "glm_moe_dsa": lambda: T.GlmMoeDsaConfig(
+            **common, num_attention_heads=4, num_key_value_heads=4, intermediate_size=128,
+            moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=1,
+            topk_group=1, first_k_dense_replace=1, n_shared_experts=1, kv_lora_rank=16,
+            q_lora_rank=24, qk_rope_head_dim=8, qk_nope_head_dim=16, v_head_dim=16,
+            routed_scaling_factor=2.5, rms_norm_eps=1e-5,
+            index_n_heads=4, index_head_dim=16, index_topk=64,
+            indexer_types=["full", "shared", "full"],
+        ),
         "olmo2": lambda: T.Olmo2Config(**common, **dense, rms_norm_eps=1e-6, rope_theta=500000.0),
         "qwen": lambda: _qwen_config(vocab),
         "baichuan": lambda: _baichuan_config(vocab),

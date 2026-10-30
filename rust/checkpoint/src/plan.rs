@@ -166,6 +166,9 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "granite_swa" => (Family::Llama, "granite"),
         "granitemoe_swa" => (Family::Llama, "granitemoe"),
         "deepseek_v2" | "deepseek_v3" | "kimi_k2" | "glm4_moe_lite" | "bailing_moe" | "bailing_hybrid" | "sarvam_mla" => (Family::Deepseek, "deepseek2"),
+        // DeepSeek-V3.2 / GLM-5: MLA + MoE with a lightning indexer (sparse attention). The indexer tensors are dropped and attention is
+        // dense, which equals the sparse result while the context is not longer than `index_topk`.
+        "deepseek_v32" | "glm_moe_dsa" => (Family::Deepseek, "deepseek2"),
         "sarvam_moe" => (Family::Qwen, "qwen2moe"),
         "trinity" => (Family::Llama, "afmoe"),
         "mistral_large" => (Family::Llama, "mistral"),
@@ -797,6 +800,8 @@ impl Plan {
                         | "deepseek_v3"
                         | "kimi_k2"
                         | "glm4_moe_lite"
+                        | "deepseek_v32"
+                        | "glm_moe_dsa"
                         | "bailing_moe"
                         | "bailing_hybrid"
                         | "sarvam_mla"
@@ -1874,7 +1879,7 @@ impl Plan {
                 .map(|i| match raw.as_str() {
                     "deepseek_v2" | "deepseek_v3" | "kimi_k2" | "glm4_moe" | "dots1"
                     | "mistral4" | "g9v3" | "deepseek" => i >= num(cfg, "first_k_dense_replace").unwrap_or(0),
-                    "hy_v3" | "exaone_moe" | "glm4_moe_lite" | "mellum" | "laguna" | "mimo_v2_flash" => cfg
+                    "hy_v3" | "exaone_moe" | "glm4_moe_lite" | "deepseek_v32" | "glm_moe_dsa" | "mellum" | "laguna" | "mimo_v2_flash" => cfg
                         .get("mlp_layer_types")
                         .and_then(Value::as_array)
                         .and_then(|a| a.get(i as usize))
@@ -2529,6 +2534,10 @@ impl Plan {
             let idx = i
                 .parse::<u64>()
                 .map_err(|_| format!("invalid layer index in tensor {n:?}"))?;
+            if suf.starts_with("self_attn.indexer.") {
+                // DeepSeek sparse attention indexer (DeepSeek-V3.2, GLM-5), also on the appended NextN block: attention runs dense
+                return Ok(Mapped::Skip);
+            }
             if idx >= self.layers {
                 let mtp_idx = idx - self.layers;
                 return self.map_mtp(&format!("{mtp_idx}.{suf}"));
@@ -2803,6 +2812,31 @@ mod tests {
     fn base(model_type: &str) -> Value {
         json!({"model_type": model_type, "hidden_size": 32, "num_attention_heads": 4,
                "num_hidden_layers": 4, "intermediate_size": 64, "num_key_value_heads": 2})
+    }
+
+    #[test]
+    fn dsa_models_convert_as_mla_and_drop_the_indexer() {
+        for model_type in ["deepseek_v32", "glm_moe_dsa"] {
+            let mut cfg = base(model_type);
+            cfg["n_routed_experts"] = json!(4);
+            cfg["num_experts_per_tok"] = json!(2);
+            cfg["moe_intermediate_size"] = json!(16);
+            cfg["first_k_dense_replace"] = json!(1);
+            cfg["kv_lora_rank"] = json!(8);
+            cfg["q_lora_rank"] = json!(8);
+            cfg["qk_nope_head_dim"] = json!(8);
+            cfg["qk_rope_head_dim"] = json!(4);
+            cfg["v_head_dim"] = json!(8);
+            let plan = Plan::from_config(&cfg).unwrap();
+            assert_eq!(plan.arch, "deepseek2");
+            for name in ["model.layers.1.self_attn.indexer.wq_b.weight", "model.layers.4.self_attn.indexer.wk.weight", "model.layers.0.self_attn.indexer.k_norm.bias"] {
+                assert_eq!(plan.map(name).unwrap(), Mapped::Skip, "{model_type} {name}");
+            }
+            assert_eq!(
+                plan.map("model.layers.1.self_attn.q_b_proj.weight").unwrap(),
+                Mapped::Tensor { name: "blk.1.attn_q_b.weight".into(), add: 0.0 }
+            );
+        }
     }
 
     #[test]
