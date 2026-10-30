@@ -117,7 +117,10 @@
         if (!state.selectedModel) state.selectedModel = m.name || 'tiny';
         $('activeModelLabel').textContent = state.selectedModel;
         $('activeQuantChip').textContent = m.quantization || 'GGUF';
-        $('footerSimdLabel').textContent = `CPU · ${data.config?.active_cpu_tier || 'simd'}`;
+        // the device the model was started on (--device), when it is not the processor; the CPU tier is what the processor part uses
+        const loadDevice = m.load_options?.device;
+        const onAccelerator = loadDevice && !['auto', 'cpu'].includes(String(loadDevice).toLowerCase());
+        $('footerSimdLabel').textContent = `${onAccelerator ? `${loadDevice} · CPU ` : 'CPU · '}${data.config?.active_cpu_tier || 'simd'}`;
         $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} slots`;
         $('settingsVersionBadge').textContent = `fllm-rs ${data.version || '0.1.2'}`;
         $('genBuildInfoText').textContent = data.build_info || '';
