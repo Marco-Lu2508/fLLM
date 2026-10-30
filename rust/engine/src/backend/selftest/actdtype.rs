@@ -75,9 +75,30 @@ fn as_f64(v: &[f32]) -> Vec<f64> {
     v.iter().map(|&x| f64::from(x)).collect()
 }
 
+/// `scale = |ref| + magnitude of the terms + floor` per element (the error scale of two correct kernels for one product, see `term_magnitudes`)
+fn sum_scale(dt: ActDtype, reference: &[f32], mags: &[f64]) -> Vec<f64> {
+    reference.iter().zip(mags).map(|(&v, &m)| f64::from(v).abs() + m + scale_floor(dt)).collect()
+}
+
 /// `scale = |ref| + floor` per element
 fn magnitude_scale(dt: ActDtype, reference: &[f32]) -> Vec<f64> {
     reference.iter().map(|&v| f64::from(v).abs() + scale_floor(dt)).collect()
+}
+
+/// `sum_k |x[b][k]| * |w[r][k]|` for every output of a product of the weight bytes `raw` (rows x cols) with `batch` rows of `x`: the magnitude of the terms
+/// of each result. Two correct kernels for the same product differ by the rounding of the dequantized weights (Marlin rounds `scale * (code - zero)` to the
+/// narrow type, the GEMV does not), which is `u` times this sum, not `u` times the (possibly cancelled) result.
+fn term_magnitudes(kind: u32, raw: &[u8], rows: usize, cols: usize, x: &[f32], batch: usize) -> Result<Vec<f64>, BackendError> {
+    let w = crate::compute::dequantize(raw, kind, rows * cols).map_err(BackendError::DriverError)?;
+    let mut out = vec![0.0f64; batch * rows];
+    for b in 0..batch {
+        let xr = &x[b * cols..(b + 1) * cols];
+        for r in 0..rows {
+            let wr = &w[r * cols..(r + 1) * cols];
+            out[b * rows + r] = xr.iter().zip(wr).map(|(&a, &c)| (f64::from(a) * f64::from(c)).abs()).sum();
+        }
+    }
+    Ok(out)
 }
 
 impl Tester<'_> {
@@ -683,6 +704,7 @@ impl Tester<'_> {
         let (nq, nk, nv, cols) = (HEADS * DIM, KV_HEADS * DIM, KV_HEADS * DIM, 512usize);
         let (parts, merged) = self.merged_weights(kind, [nq, nk, nv], cols);
         let x = round_vec(dt, &self.rng.vector(batch * cols, 1.0));
+        let mags = [term_magnitudes(kind, &parts[0], nq, cols, &x, batch)?, term_magnitudes(kind, &parts[1], nk, cols, &x, batch)?, term_magnitudes(kind, &parts[2], nv, cols, &x, batch)?];
         let qt = QuantType::from_gguf_type_id(kind);
         self.device.set_activation_dtype(dt);
         let uploads = (|| -> Result<(Vec<DeviceWeight>, DeviceWeight), BackendError> {
@@ -716,10 +738,10 @@ impl Tester<'_> {
             stream.synchronize()?;
             let ms = start.elapsed().as_secs_f64() * 1e3;
             let mut err = 0f64;
-            for (a, b, n) in [(&dense[0], &sep[0], nq), (&dense[1], &sep[1], nk), (&dense[2], &sep[2], nv)] {
+            for (i, (a, b, n)) in [(&dense[0], &sep[0], nq), (&dense[1], &sep[1], nk), (&dense[2], &sep[2], nv)].into_iter().enumerate() {
                 let want = get_act(device, stream, b, batch * n)?;
                 let got = get_act(device, stream, a, batch * n)?;
-                err = err.max(worst(&got, &as_f64(&want), &magnitude_scale(dt, &want)) / u);
+                err = err.max(worst(&got, &as_f64(&want), &sum_scale(dt, &want, &mags[i])) / u);
             }
             return Ok(outcome(err, 3.0, ms));
         }
@@ -741,15 +763,20 @@ impl Tester<'_> {
         let ms = start.elapsed().as_secs_f64() * 1e3;
         let want_q = get_act(device, stream, &sq, batch * nq)?;
         let got_q = get_act(device, stream, &q_out, batch * nq)?;
-        let mut err = worst(&got_q, &as_f64(&want_q), &magnitude_scale(dt, &want_q)) / u;
+        // the rotation mixes the two halves of a pair: its error scale is the rotation of the scales of the unrotated results
+        let q_scale = Self::rope_scale(dt, &sum_scale(dt, &want_q, &mags[0]).iter().map(|&v| v as f32).collect::<Vec<_>>(), &positions, HEADS, &params);
+        let mut err = worst(&got_q, &as_f64(&want_q), &q_scale) / u;
         let (a, b) = (Self::pool_bytes(stream, &cache_a)?, Self::pool_bytes(stream, &cache_b)?);
         let half = a.len() / 2;
         let used = batch * KV_HEADS * DIM;
         let words = |bytes: &[u8]| -> Vec<f32> { bytes.as_chunks::<2>().0.iter().take(used).map(|c| f16::from_le_bytes(*c).to_f32()).collect() };
         // the cache words are f16 values of the same numbers; their difference is bounded by the difference of the narrow results, in units of u of the activation type
-        for offset in [0usize, half] {
+        // (rows are stored in order: the words are the rows of k, then those of v, scaled like the results they come from)
+        for (offset, part) in [(0usize, 1usize), (half, 2)] {
             let (want, got) = (words(&a[offset..]), words(&b[offset..]));
-            err = err.max(worst(&got, &as_f64(&want), &magnitude_scale(ActDtype::F16, &want)) / u);
+            let base: Vec<f32> = sum_scale(dt, &want, &mags[part]).iter().map(|&v| v as f32).collect();
+            let scale = if part == 1 { Self::rope_scale(dt, &base, &positions, KV_HEADS, &params) } else { base.iter().map(|&v| f64::from(v)).collect() };
+            err = err.max(worst(&got, &as_f64(&want), &scale) / u);
         }
         Ok(outcome(err, 3.0, ms))
     }
@@ -763,6 +790,7 @@ impl Tester<'_> {
         let up = random_kind(&mut self.rng, kind, ff, cols);
         let merged: Vec<u8> = gate.iter().chain(&up).copied().collect();
         let x = round_vec(dt, &self.rng.vector(batch * cols, 1.0));
+        let (mag_g, mag_u) = (term_magnitudes(kind, &gate, ff, cols, &x, batch)?, term_magnitudes(kind, &up, ff, cols, &x, batch)?);
         let qt = QuantType::from_gguf_type_id(kind);
         self.device.set_activation_dtype(dt);
         let uploads = (|| -> Result<[DeviceWeight; 3], BackendError> {
@@ -793,8 +821,17 @@ impl Tester<'_> {
         let ms = start.elapsed().as_secs_f64() * 1e3;
         let want = get_act(device, stream, &want_act, batch * ff)?;
         let got = get_act(device, stream, &got_act, batch * ff)?;
-        // gate and up each carry the rounding of their GEMM (u) and the product one more: 4 u
-        Ok(outcome(worst(&got, &as_f64(&want), &magnitude_scale(dt, &want)) / unit_roundoff(dt), 4.0, ms))
+        let (gv, uv) = (get_act(device, stream, &g, batch * ff)?, get_act(device, stream, &u_buf, batch * ff)?);
+        // Gate and up each differ between the merged and the separate GEMM by at most 2 u of (|result| + the magnitude of its terms) (see `term_magnitudes`).
+        // The activation silu(g) * u has the slopes 1.1 |u| in g (|(g s(g))'| <= 1.1) and |g s(g)| in u, and its own rounding adds 2 u |act|.
+        let scale: Vec<f64> = (0..batch * ff)
+            .map(|i| {
+                let (g, u) = (f64::from(gv[i]), f64::from(uv[i]));
+                let silu = g / (1.0 + (-g).exp());
+                1.1 * u.abs() * (g.abs() + mag_g[i]) + silu.abs() * (u.abs() + mag_u[i]) + f64::from(want[i]).abs() + scale_floor(dt)
+            })
+            .collect();
+        Ok(outcome(worst(&got, &as_f64(&want), &scale) / unit_roundoff(dt), 3.0, ms))
     }
 
     /// `FLLM_PDL` on against off: the same chain of kernels must give the same bits (on GPUs older than sm_90 both runs are plain launches).
