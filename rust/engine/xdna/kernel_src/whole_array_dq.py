@@ -305,7 +305,8 @@ def whole_array(
                 elem_in_b = in_b.acquire(1)
                 dq(elem_in_b, bbuf)
                 if not __import__('os').environ.get('FLLM_MM_SKIP'):
-                    matmul(elem_in_a, bbuf, elem_out)
+                    for _rep in range(int(__import__('os').environ.get('FLLM_MM_REPEAT', '1'))):
+                        matmul(elem_in_a, bbuf, elem_out)
                 in_a.release(1)
                 in_b.release(1)
             out_c.release(1)

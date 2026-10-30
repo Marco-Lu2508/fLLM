@@ -101,4 +101,47 @@ void fllm_dq_q4(const uint8_t *__restrict payload, bfloat16 *__restrict out) {
   aie::set_rounding(saved);
 }
 
+// Same expansion, but the result is block floating point (bfp16ebs8: eight values along k share an exponent) in the order the
+// block-floating-point matmul (fllm_mm_bfp.cc) reads B: [n / 8][k / 8][n % 8] blocks of 9 bytes. The 64 values of one (8 k x 8 n)
+// micro-tile are transposed to n-major so that the eight values sharing an exponent are consecutive k of one n (as in q4nx_dequant.cc).
+void fllm_dq_q4_bfp(const uint8_t *__restrict payload, bfp16ebs8 *__restrict out) {
+  aie::rounding_mode saved = aie::swap_rounding(aie::rounding_mode::conv_even);
+
+  const bfloat16 *scales = (const bfloat16 *)payload;
+  const bfloat16 *mins = scales + SCALES;
+  const uint8_t *qs = (const uint8_t *)(mins + SCALES);
+  aie::block_vector_output_buffer_stream<bfp16ebs8, 64> s_out(out);
+
+  constexpr int JJ = GROUP / 8;
+  AIE_PREPARE_FOR_PIPELINING
+  AIE_LOOP_RANGE(N8, N8)
+  for (int n8 = 0; n8 < N8; n8++) {
+    const unsigned mode = (unsigned)(T32_16x2_lo + (n8 & 1));
+    for (int g = 0; g < K_TILE / GROUP; g++) {
+      const bfloat16 *srow = scales + g * N_TILE + n8 * 8;
+      aie::vector<bfloat16, 32> sc = rep8(srow);
+      aie::vector<bfloat16, 32> mn = rep8(srow + SCALES);
+      aie::vector<bfloat16, 64> sc2 = aie::concat(sc, sc);
+      aie::vector<bfloat16, 64> mn2 = aie::concat(mn, mn);
+#pragma unroll
+      for (int jj = 0; jj < JJ; jj++) {
+        const int j = g * JJ + jj;
+        const uint32_t *q = (const uint32_t *)(qs + ((n8 >> 1) * K_TILE + j * 8) * 8);
+        aie::vector<uint32_t, 16> w = aie::load_v<16>(q);
+        aie::vector<uint32_t, 16> half = ::shuffle(w, w, mode);
+        aie::vector<uint4, 64> qv = half.template extract<8>(0).template cast_to<uint4>();
+        aie::accum<accfloat, 64> qf;
+        qf.from_vector(aie::to_float(qv, 0));
+        aie::vector<bfloat16, 64> qb = qf.template to_vector<bfloat16>();
+        aie::accum<accfloat, 64> acc(mn2);
+        acc = aie::mac(acc, sc2, qb);
+        aie::vector<bfloat16, 64> kn = acc.template to_vector<bfloat16>();
+        aie::accum<accfloat, 64> nk(aie::transpose(kn, 8, 8));
+        s_out << nk.template to_vector<bfp16ebs8>();
+      }
+    }
+  }
+  aie::set_rounding(saved);
+}
+
 } // extern "C"

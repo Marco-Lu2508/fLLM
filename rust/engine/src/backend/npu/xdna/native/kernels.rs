@@ -54,9 +54,29 @@ pub static DQ_VARIANTS: [Variant; 8] = [
     Variant { m: 512, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dq_m512_k4096_n1024.insts") },
 ];
 
+/// The program with 4-bit weights as block floating point (`kernel_src/whole_array_dqbfp.py`, `fllm_mm_bfp.cc`): the 4-bit tiles are
+/// expanded to bfp16ebs8 in the compute tile and multiplied on the native block-floating-point MAC (2.5 times the bf16 MAC); 64-row
+/// tiles, so a call takes 256 or 512 rows.
+pub static DQB_XCLBIN: &[u8] = include_bytes!("../../../../../xdna/kernels/gemm_dqb_q4_8col.xclbin");
+
+pub static DQB_VARIANTS: [Variant; 8] = [
+    Variant { m: 256, k: 1024, insts: include_bytes!("../../../../../xdna/kernels/dqb_m256_k1024_n1024.insts") },
+    Variant { m: 256, k: 2048, insts: include_bytes!("../../../../../xdna/kernels/dqb_m256_k2048_n1024.insts") },
+    Variant { m: 256, k: 3072, insts: include_bytes!("../../../../../xdna/kernels/dqb_m256_k3072_n1024.insts") },
+    Variant { m: 256, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dqb_m256_k4096_n1024.insts") },
+    Variant { m: 512, k: 1024, insts: include_bytes!("../../../../../xdna/kernels/dqb_m512_k1024_n1024.insts") },
+    Variant { m: 512, k: 2048, insts: include_bytes!("../../../../../xdna/kernels/dqb_m512_k2048_n1024.insts") },
+    Variant { m: 512, k: 3072, insts: include_bytes!("../../../../../xdna/kernels/dqb_m512_k3072_n1024.insts") },
+    Variant { m: 512, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dqb_m512_k4096_n1024.insts") },
+];
+
 /// Index into [`VARIANTS`] for `(m, k)`.
 pub fn variant_index(m: usize, k: usize) -> Option<usize> {
-    VARIANTS.iter().position(|v| v.m == m && v.k == k)
+    variant_index_in(&VARIANTS, m, k)
+}
+
+pub fn variant_index_in(list: &[Variant], m: usize, k: usize) -> Option<usize> {
+    list.iter().position(|v| v.m == m && v.k == k)
 }
 
 /// The depth chunks a weight with `cols` columns is cut into: `(first column, chunk depth)`; the last chunk is zero padded.
@@ -74,21 +94,22 @@ pub fn k_chunks(cols: usize) -> Vec<(usize, usize)> {
     chunks
 }
 
-/// Row chunks of a prompt of `batch` rows: `(first row, rows to compute, variant rows m)`. Rows left over (fewer than `min_rows`) are
-/// not covered: the caller computes them on the CPU.
-pub fn row_chunks(batch: usize, min_rows: usize) -> Vec<(usize, usize, usize)> {
+/// Row chunks of a prompt of `batch` rows for a program whose instruction streams take `big` and `small` rows (`big` a multiple of
+/// `small`): `(first row, rows to compute, rows per call)`. Rows left over (fewer than `min_rows`) are not covered: the caller computes
+/// them on the CPU.
+pub fn row_chunks(batch: usize, min_rows: usize, big: usize, small: usize) -> Vec<(usize, usize, usize)> {
     let mut chunks = Vec::new();
     let mut at = 0;
-    while batch - at >= 512 {
-        chunks.push((at, 512, 512));
-        at += 512;
+    while batch - at >= big {
+        chunks.push((at, big, big));
+        at += big;
     }
     let mut rest = batch - at;
     if rest >= min_rows.max(1) {
-        // up to 4 calls of 128 rows are cheaper than one padded call of 512 (see docs/npu-xdna.md)
+        // a few calls of the small size are cheaper than one padded call of the big size
         while rest > 0 {
-            let take = rest.min(128);
-            chunks.push((at, take, 128));
+            let take = rest.min(small);
+            chunks.push((at, take, small));
             at += take;
             rest -= take;
         }
@@ -119,12 +140,13 @@ mod tests {
 
     #[test]
     fn row_chunks_prefer_full_calls_and_leave_a_small_rest_to_the_cpu() {
-        assert_eq!(row_chunks(1024, 96), vec![(0, 512, 512), (512, 512, 512)]);
-        assert_eq!(row_chunks(600, 96), vec![(0, 512, 512)]);
-        assert_eq!(row_chunks(600, 64), vec![(0, 512, 512), (512, 88, 128)]);
-        assert_eq!(row_chunks(300, 96), vec![(0, 128, 128), (128, 128, 128), (256, 44, 128)]);
-        assert!(row_chunks(50, 96).is_empty());
-        let covered: usize = row_chunks(1337, 64).iter().map(|c| c.1).sum();
+        assert_eq!(row_chunks(1024, 96, 512, 128), vec![(0, 512, 512), (512, 512, 512)]);
+        assert_eq!(row_chunks(600, 96, 512, 128), vec![(0, 512, 512)]);
+        assert_eq!(row_chunks(600, 64, 512, 128), vec![(0, 512, 512), (512, 88, 128)]);
+        assert_eq!(row_chunks(300, 96, 512, 128), vec![(0, 128, 128), (128, 128, 128), (256, 44, 128)]);
+        assert_eq!(row_chunks(300, 96, 512, 256), vec![(0, 256, 256), (256, 44, 256)]);
+        assert!(row_chunks(50, 96, 512, 128).is_empty());
+        let covered: usize = row_chunks(1337, 64, 512, 128).iter().map(|c| c.1).sum();
         assert_eq!(covered, 1337);
     }
 
@@ -134,7 +156,10 @@ mod tests {
             assert_eq!((a.m, a.k), (b.m, b.k));
             assert!(b.insts.len() > 1000 && b.insts.len() % 4 == 0);
         }
-        assert!(DQ_XCLBIN.starts_with(b"xclbin2"));
+        assert!(DQ_XCLBIN.starts_with(b"xclbin2") && DQB_XCLBIN.starts_with(b"xclbin2"));
+        for v in &DQB_VARIANTS {
+            assert!(v.insts.len() > 1000 && v.insts.len() % 4 == 0 && variant_index_in(&DQB_VARIANTS, v.m, v.k).is_some());
+        }
     }
 
     #[test]
