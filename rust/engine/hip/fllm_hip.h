@@ -37,6 +37,8 @@ bool fllm_hip_enabled(const char *name);
 // Matrix-core GEMM (hip_gemm.cu): Y[token][row] = sum_k X[token][k] * W[row][k] (+ bias), weights of any decodable kind, FP16 operands
 // with FP32 accumulation. Returns 1 when it handled the call.
 int fllm_hip_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch);
+int fllm_hip_gemm_x16_try(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias, int rows, int cols, int batch, void *x16,
+                          size_t x16_bytes);
 
 // Skinny GEMM for F16 / BF16 weights and 1..4 tokens (hip_skinny.cu, after vLLM's wvSplitK). `scratch` holds the converted activations.
 // Returns 1 when it handled the call.

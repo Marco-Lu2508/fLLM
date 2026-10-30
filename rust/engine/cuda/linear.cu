@@ -217,6 +217,10 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
         return fllm_check_launch("linear");
     if (!old_gemv && (KIND == KIND_Q4_K || KIND == KIND_Q6_K) && fllm_gemv2_try(s, W, KIND, X, Y, bias, rows, cols, batch))
         return fllm_check_launch("linear");
+#if defined(__HIPCC__)
+    // AMD matrix-core GEMM with the activations converted to FP16 once (hip/hip_gemm.cu)
+    if (batch >= 16 && !fllm_exact_math() && fllm_hip_gemm_x16_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes)) return fllm_check_launch("linear");
+#endif
     if (batch >= 16 && !fllm_exact_math() && fllm_tc_gemm_try(s, W, KIND, X, Y, bias, rows, cols, batch)) return fllm_check_launch("linear");
     if (batch <= 8) {
         const dim3 block(128), grid((rows + 3) / 4);

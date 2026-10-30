@@ -44,6 +44,7 @@ struct GemmArgs {
     int rows, cols, batch;
     int mode;           // bit 0: Y += scale * (result + bias); bit 1: the result is FP16 (batch x rows halves), no bias
     float scale;        // multiplier of the accumulate mode
+    const __half *X16 = nullptr;  // the activations already converted to FP16 [batch][cols] (cols a multiple of 16, 16-byte aligned), else null: X is read
 };
 
 // result of one output element in the mode of GemmArgs
@@ -104,7 +105,7 @@ struct KindDecoder {
     __device__ __forceinline__ void decode(int row, int run, float *w) const { decode16<KIND>(W + (size_t)row * row_bytes, run, cols, w); }
 };
 
-template <class Dec, int G_BN>
+template <class Dec, int G_BN, bool XH>
 __global__ void __launch_bounds__(G_NT)
 mma_gemm_kernel(Dec dec, GemmArgs a) {
 #if defined(FLLM_HIP_MMA)
@@ -128,7 +129,9 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
 #pragma unroll
             for (int e = 0; e < MMA_ACC; e++) acc[i][j][e] = 0.f;
 
-    float wv[16], xv[G_XR][16];
+    float wv[16];
+    float xv[XH ? 1 : G_XR][16];   // (FP32 activations; unused when they arrive as FP16)
+    uint4 xh[XH ? G_XR : 1][2];    // 16 FP16 activations per run
     auto fetch = [&](int kt) {
         const int k = kt * G_BK + ld_q * 16;
         const int m = m0 + ld_row;
@@ -141,19 +144,38 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
 #pragma unroll
         for (int r = 0; r < G_XR; r++) {
             const int n = n0 + ld_row + r * G_BM;
-            if (n < batch) {
-                if (a.perm) load_x16_perm(a.X + (size_t)n * cols, a.perm, k, cols, xv[r]);
-                else load_x16(a.X + (size_t)n * cols, k, cols, xv[r]);
+            if constexpr (XH) {
+                if (n < batch && k < cols) {
+                    const uint4 *q = reinterpret_cast<const uint4 *>(a.X16 + (size_t)n * cols + k);
+                    xh[r][0] = q[0];
+                    xh[r][1] = q[1];
+                } else {
+                    xh[r][0] = make_uint4(0, 0, 0, 0);
+                    xh[r][1] = make_uint4(0, 0, 0, 0);
+                }
             } else {
+                if (n < batch) {
+                    if (a.perm) load_x16_perm(a.X + (size_t)n * cols, a.perm, k, cols, xv[r]);
+                    else load_x16(a.X + (size_t)n * cols, k, cols, xv[r]);
+                } else {
 #pragma unroll
-                for (int j = 0; j < 16; j++) xv[r][j] = 0.f;
+                    for (int j = 0; j < 16; j++) xv[r][j] = 0.f;
+                }
             }
         }
     };
     auto stash = [&](int buf) {
         store_h16(&As[buf][ld_row * G_LD + ld_q * 16], wv);
 #pragma unroll
-        for (int r = 0; r < G_XR; r++) store_h16(&Bs[buf][(ld_row + r * G_BM) * G_LD + ld_q * 16], xv[r]);
+        for (int r = 0; r < G_XR; r++) {
+            if constexpr (XH) {
+                uint4 *d = reinterpret_cast<uint4 *>(&Bs[buf][(ld_row + r * G_BM) * G_LD + ld_q * 16]);
+                d[0] = xh[r][0];
+                d[1] = xh[r][1];
+            } else {
+                store_h16(&Bs[buf][(ld_row + r * G_BM) * G_LD + ld_q * 16], xv[r]);
+            }
+        }
     };
 
     fetch(0);
@@ -200,12 +222,15 @@ template <class Dec>
 static inline void launch_mma_gemm(cudaStream_t s, const Dec &dec, const GemmArgs &args) {
     // a long prompt takes the wide token tile: every decoded weight feeds twice the products
     static const bool wide = !std::getenv("FLLM_HIP_NARROW_TILE");
+    const bool xh = args.X16 != nullptr;
     if (wide && args.batch > 96) {
         const dim3 grid((args.rows + G_BM - 1) / G_BM, (args.batch + 127) / 128), block(G_NT);
-        mma_gemm_kernel<Dec, 128><<<grid, block, 0, s>>>(dec, args);
+        if (xh) mma_gemm_kernel<Dec, 128, true><<<grid, block, 0, s>>>(dec, args);
+        else mma_gemm_kernel<Dec, 128, false><<<grid, block, 0, s>>>(dec, args);
     } else {
         const dim3 grid((args.rows + G_BM - 1) / G_BM, (args.batch + 63) / 64), block(G_NT);
-        mma_gemm_kernel<Dec, 64><<<grid, block, 0, s>>>(dec, args);
+        if (xh) mma_gemm_kernel<Dec, 64, true><<<grid, block, 0, s>>>(dec, args);
+        else mma_gemm_kernel<Dec, 64, false><<<grid, block, 0, s>>>(dec, args);
     }
 }
 
