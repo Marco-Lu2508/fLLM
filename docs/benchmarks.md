@@ -462,7 +462,8 @@ plans all 32 layers with a 10320-token context from an empty card (budget 7.36 o
 * An int8 matrix-core kernel (Vulkan or HIP): see above, the measured peak gives nothing to win on the 840M.
 * The HIP prompt gap (230 against 298 tok/s) and the Vulkan 3B prompt gap (265 against 293): both need a faster dot-product tiled kernel, not matrix cores. The Vulkan one is at 0.8 - 0.85 of a 2.6 TMAC/s peak.
 * Q6_K at 3 to 12 rows (decode-bound); a block-wide activation scale (Q8_K style) would take a quarter of the arithmetic out of the Q4_K / Q6_K kernels but changes the numerics of every projection.
-* One laptop per vendor, one session each.
+* One laptop per vendor, one session each. Not run on Intel, Apple or Arm GPUs: the matrix-vector range of 16 rows is the default for every vendor except NVIDIA, measured on the Radeon 840M only.
+* An unexplained intermittent self-test failure: in 2 of the first 4 full `selftest-gpu --device vulkan` runs of the new build on the Radeon laptop one to three fast-kernel checks failed (`fp8b a16 384x1024 tiles 128x128 batch 3 +bias`: one wrong element, the scalar kernel, which this pass did not touch); the next 3 full runs of the same binary, 3 of the previous build and 4 concurrent `--only linear` runs (two processes at once, both builds) had 0 failures. The laptop is shared with other agents' jobs, so a concurrent GPU job or a latent barrier hazard of the shared-input path may be behind it; it was not found.
 ## Limits
 
 * One machine per vendor, one run of each configuration (medians of three requests, but no repeated sessions); expect a few percent of noise.
