@@ -228,3 +228,7 @@ fllm-rs completions [bash|zsh|fish|powershell]   # shell completions (default ba
 - Sizing: [memory](memory.md) — failures: [troubleshooting](troubleshooting.md)
 - Talking to the server: [clients](clients.md)
 - Weight formats: [quants-and-formats](quants-and-formats.md)
+
+## agent, gateway
+
+`fllm-rs agent -p "TASK"` runs the coding agent without a browser; `fllm-rs gateway telegram --chat ID` answers Telegram messages with it. Both need a running server on the same machine. Options, permissions, exit codes and what was verified: [agent-cli.md](agent-cli.md).

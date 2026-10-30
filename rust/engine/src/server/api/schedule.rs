@@ -313,12 +313,14 @@ pub(super) struct Task {
     pub notify: bool,
     pub enabled: bool,
     pub created: i64,
+    /// Where the result is sent besides the page (`webhook:URL`, `ntfy:URL`, `telegram:CHAT`); empty: nowhere.
+    pub deliver: String,
 }
 
 impl Task {
     fn to_json(&self) -> Value {
         json!({"id": self.id, "name": self.name, "prompt": self.prompt, "when": self.when, "mode": self.mode, "folder": self.folder,
-               "notify": self.notify, "enabled": self.enabled, "created": self.created})
+               "notify": self.notify, "enabled": self.enabled, "created": self.created, "deliver": self.deliver})
     }
 
     fn from_json(v: &Value) -> Option<Task> {
@@ -332,6 +334,7 @@ impl Task {
             notify: v["notify"].as_bool().unwrap_or(false),
             enabled: v["enabled"].as_bool().unwrap_or(true),
             created: v["created"].as_i64().unwrap_or(0),
+            deliver: v["deliver"].as_str().unwrap_or_default().to_owned(),
         })
     }
 }
@@ -360,6 +363,8 @@ pub(super) fn task_from_request(body: &Value, existing: Option<&Task>, id: Strin
             return Err("an agent task needs an existing absolute folder".into());
         }
     }
+    let deliver = body["deliver"].as_str().unwrap_or_default().trim().to_owned();
+    super::schedule_deliver::parse(&deliver)?;
     Ok(Task {
         id,
         name,
@@ -370,6 +375,7 @@ pub(super) fn task_from_request(body: &Value, existing: Option<&Task>, id: Strin
         notify: body["notify"].as_bool().unwrap_or(false),
         enabled: body["enabled"].as_bool().unwrap_or(true),
         created: existing.map_or(now, |t| t.created),
+        deliver,
     })
 }
 
@@ -582,14 +588,14 @@ fn all_results() -> Vec<Value> {
     read_json_file(&results_file(), "results")
 }
 
-fn store_result(task: &Task, ok: bool, text: String, seconds: u64) {
+fn store_result(task: &Task, ok: bool, text: String, seconds: u64, delivery: Option<String>) {
     let _guard = IO.lock().unwrap_or_else(|e| e.into_inner());
     let all = all_results();
     let (mut mine, others): (Vec<Value>, Vec<Value>) = all.into_iter().partition(|r| r["task_id"] == task.id.as_str());
     push_result(
         &mut mine,
         json!({"id": new_id("res"), "task_id": task.id, "task_name": task.name, "mode": task.mode, "notify": task.notify, "time": unix_now(),
-               "ok": ok, "seconds": seconds, "text": text.chars().take(MAX_RESULT_CHARS).collect::<String>()}),
+               "ok": ok, "seconds": seconds, "delivery": delivery, "text": text.chars().take(MAX_RESULT_CHARS).collect::<String>()}),
         KEEP_RESULTS,
     );
     let mut merged = others;
@@ -643,6 +649,12 @@ fn run_with_server(task: &Task) -> Result<String, String> {
     execute(task, &Env { complete: &complete, net: &net })
 }
 
+/// Sends the result to the task's `deliver` target; `None` when it has none, else `"sent"` or `"failed: reason"`.
+fn deliver_result(task: &Task, ok: bool, text: &str) -> Option<String> {
+    let target = super::schedule_deliver::parse(&task.deliver).ok().flatten()?;
+    Some(super::schedule_deliver::deliver(&target, &task.name, ok, text, unix_now()))
+}
+
 /// Runs a task on its own thread. Fails if it is running already or the clock is not running.
 fn launch(task: Task) -> Result<(), String> {
     if CONTEXT.get().is_none() {
@@ -659,7 +671,8 @@ fn launch(task: Task) -> Result<(), String> {
             Ok(text) => (true, text),
             Err(e) => (false, e),
         };
-        store_result(&task, ok, text, started.elapsed().as_secs());
+        let delivery = deliver_result(&task, ok, &text);
+        store_result(&task, ok, text, started.elapsed().as_secs(), delivery);
         GATE.end(&task.id);
     });
     if spawned.is_err() {
@@ -678,7 +691,7 @@ fn task_view(task: &Task, last: Option<&Value>) -> Value {
     let next = if task.enabled { parse(&task.when).ok().and_then(|s| next_run_local(&s, unix_now())) } else { None };
     v["next_run"] = json!(next);
     v["running"] = json!(GATE.is_running(&task.id));
-    v["last"] = last.map_or(Value::Null, |r| json!({"time": r["time"], "ok": r["ok"]}));
+    v["last"] = last.map_or(Value::Null, |r| json!({"time": r["time"], "ok": r["ok"], "delivery": r["delivery"]}));
     v
 }
 
@@ -917,6 +930,13 @@ mod tests {
         let agent = json!({"name": "n", "prompt": "x", "when": "hourly", "mode": "agent", "folder": dir.to_str().unwrap()});
         assert_eq!(task_from_request(&agent, Some(&t), "task_1".into(), 99).unwrap().created, 5);
         assert_eq!(Task::from_json(&t.to_json()).unwrap(), t);
+        // the delivery target is validated and kept
+        let with = json!({"name": "n", "prompt": "x", "when": "hourly", "deliver": " ntfy:http://10.7.0.5:8080/t "});
+        let t2 = task_from_request(&with, None, "task_2".into(), 0).unwrap();
+        assert_eq!(t2.deliver, "ntfy:http://10.7.0.5:8080/t");
+        assert_eq!(Task::from_json(&t2.to_json()).unwrap(), t2);
+        assert!(task_from_request(&json!({"name": "n", "prompt": "x", "when": "hourly", "deliver": "mail:a@b.c"}), None, "i".into(), 0).is_err());
+        assert_eq!(t.deliver, "", "old tasks without the field deliver nowhere");
     }
 
     #[test]
@@ -932,7 +952,7 @@ mod tests {
     }
 
     fn task(id: &str, when: &str, enabled: bool) -> Task {
-        Task { id: id.into(), name: id.into(), prompt: "p".into(), when: when.into(), mode: "chat".into(), folder: String::new(), notify: false, enabled, created: 0 }
+        Task { id: id.into(), name: id.into(), prompt: "p".into(), when: when.into(), mode: "chat".into(), folder: String::new(), notify: false, enabled, created: 0, deliver: String::new() }
     }
 
     #[test]
@@ -964,6 +984,28 @@ mod tests {
         }
         assert_eq!(list.len(), KEEP_RESULTS);
         assert_eq!(list[0]["n"], 29);
+    }
+
+    #[test]
+    fn a_finished_task_delivers_its_result_and_records_how_it_went() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut got = vec![0u8; 8192];
+            let n = stream.read(&mut got).unwrap_or(0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").unwrap();
+            String::from_utf8_lossy(&got[..n]).into_owned()
+        });
+        let mut t = task("d", "hourly", true);
+        assert_eq!(deliver_result(&t, true, "x"), None, "a task without a target delivers nothing");
+        t.deliver = format!("webhook:{url}");
+        assert_eq!(deliver_result(&t, true, "the report").as_deref(), Some("sent"));
+        assert!(server.join().unwrap().contains("the report"));
+        t.deliver = "webhook:http://127.0.0.1:1/x".into();
+        assert!(deliver_result(&t, true, "x").unwrap().starts_with("failed:"), "a dead target is recorded, the task result stays");
     }
 
     #[test]

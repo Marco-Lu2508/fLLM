@@ -107,7 +107,7 @@ GLM, InternLM, Nemotron and more), mixture-of-experts (Mixtral, Qwen MoE, DeepSe
 with multi-head latent attention, gpt-oss, Llama 4, DBRX, PhiMoE and more), and recurrent or hybrid
 models (Mamba 1/2, Qwen3-Next, Qwen3.5/3.6 with gated DeltaNet in HF and llama.cpp GGUF layouts,
 Nemotron-H, Granite hybrid, LFM2). BERT, RoBERTa/XLM-R and ModernBERT serve embeddings and rerank/classify.
-The full list, with the families that are **not** supported (for example Gemma 4, Gemma 3n, Jamba,
+The full list, with the families that are **not** supported (for example Jamba,
 Falcon-H1, DeepSeek V3.2/V4), is in [docs/architectures.md](docs/architectures.md). Conversion refuses
 an unknown `model_type`.
 
@@ -117,7 +117,8 @@ models shown on artificialanalysis.ai (2026-10-13 snapshot: 43 models, 25 verifi
 supported) is in [docs/model-coverage.md](docs/model-coverage.md); the checklist against vLLM and SGLang
 architecture names is in [docs/model-coverage-vllm.md](docs/model-coverage-vllm.md).
 
-Image input: `--mmproj` loads a SigLIP/Idefics3 projector (SmolVLM). Other vision families, audio and
+Image and video input: Qwen2-VL, Qwen2.5-VL and Qwen3-VL run their vision tower in Rust (checked against `transformers` on tiny
+random checkpoints, see [docs/vision-audio.md](docs/vision-audio.md)), and `--mmproj` loads a SigLIP/Idefics3 projector (SmolVLM). Other vision families, audio and
 speech are not supported; for multimodal checkpoints only the text model is converted.
 
 ### Run and serve
@@ -157,7 +158,7 @@ GLM, Llama 3, Mistral, DeepSeek, Kimi, gpt-oss and others; `--tool-parser auto` 
 template); reasoning split into `reasoning_content` with 7 parsers; structured output (`response_format`
 JSON schema and `json_object`, GBNF, Lark and regex grammars); log probabilities; and sampling controls
 (temperature, top-p/k, min-p, typical-p, penalties, DRY, Mirostat, seed, logit bias).
-Not provided: audio, image generation, realtime, moderation, Assistants, fine-tuning and runtime LoRA switching.
+Not provided: speech-to-text (`/v1/audio/transcriptions` answers 501: the Whisper encoder exists, a text decoder does not), image generation, realtime, moderation, Assistants, fine-tuning and runtime LoRA switching.
 
 ### Quantization and conversion
 
@@ -177,7 +178,8 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   (Vulkan, Metal, DirectX 12), and optional native Vulkan, Metal, ROCm/HIP, SYCL, Intel NPU (OpenVINO) and
   TPU backends, and `--device opengl` as the last resort for graphics cards without a Vulkan/DirectX 12/Metal driver. `--device auto` takes the first GPU of CUDA, ROCm, Metal, Vulkan, DX12, OpenGL, SYCL, else the
   CPU; names like `cuda:1` pick a device. One server process uses one device: there is no
-  multi-GPU splitting of a single model. See [docs/device-selection.md](docs/device-selection.md).
+  multi-GPU splitting of a single model on a GPU (tensor, pipeline and expert parallelism exist and are proven on the CPU path only; the
+  server refuses `--tensor-parallel-size` / `--pipeline-parallel-size` on a GPU, see [docs/multi-gpu.md](docs/multi-gpu.md)). See [docs/device-selection.md](docs/device-selection.md).
 - **CUDA.** int8 dot-product and tensor-core GEMMs for quantized weights, Marlin for AWQ/GPTQ/FP4,
   CUTLASS block-scaled NVFP4 GEMM on Blackwell, FlashInfer prompt attention (f16 KV cache), split-KV decode
   attention, argmax sampling on the device, and, on by default, CUDA graphs for decode of dense models,

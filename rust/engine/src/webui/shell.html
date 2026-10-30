@@ -1429,6 +1429,7 @@
                   <select id="scMode" class="ui-input" style="width:auto;"><option value="chat">Chat answer</option><option value="agent">Agent run in a folder (read-only)</option></select>
                 </div>
                 <div class="app-card-item column" id="scFolderRow" style="display:none;"><div class="app-item-title">Folder</div><input type="text" id="scFolder" class="ui-input mono" placeholder="Absolute path" autocomplete="off"></div>
+                <div class="app-card-item column"><div class="app-item-title">Also send the result to</div><input type="text" id="scDeliver" class="ui-input mono" placeholder="webhook:https://... | ntfy:https://ntfy.host/topic | telegram:CHAT_ID" autocomplete="off"><div class="app-item-desc">Empty: only here. Telegram needs the bot token in FLLM_TELEGRAM_TOKEN on the server; the token is never stored in the task. The last result shows whether the delivery worked.</div></div>
                 <div class="app-card-item"><div class="app-item-title">Desktop notification when a result is ready</div><label class="ui-switch"><input type="checkbox" id="scNotify"><span class="ui-switch-track"></span></label></div>
                 <div class="app-card-item"><div class="app-item-title">Enabled</div><label class="ui-switch"><input type="checkbox" id="scEnabled" checked><span class="ui-switch-track"></span></label></div>
                 <div style="display:flex;gap:6px;margin-top:8px;">

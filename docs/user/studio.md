@@ -457,6 +457,8 @@ a task can ask for a desktop notification while a page is open.
 `studio.json`, so they can be found after the browser storage was cleared; it can be switched off and deleted in the same page.
 Temporary chats are never copied.
 
+A task can also send its result to a webhook, a ntfy topic or a Telegram chat (*Also send the result to*; see [agent-cli.md](agent-cli.md)). The agent can run without the page too: `fllm-rs agent -p` and `fllm-rs gateway telegram` use the same tools ([agent-cli.md](agent-cli.md)).
+
 These routes (`/api/studio/skills`, `/api/studio/sessions/*`, `/api/studio/schedule*`) work only from this machine, reads included.
 
 ## Plugins

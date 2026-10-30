@@ -1165,6 +1165,20 @@ async fn keys_are_checked_on_every_route_but_the_open_ones() {
 }
 
 #[tokio::test]
+async fn audio_routes_answer_501_instead_of_a_made_up_transcript() {
+    let h = start(Settings::default());
+    let wav = crate::vision::audio::tests::tone_wav(16000);
+    let file = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wav);
+    for path in ["/v1/audio/transcriptions", "/v1/audio/translations"] {
+        let reply = h.post(path, json!({"file": file})).await;
+        assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED, "{path}: {}", reply.text());
+        assert!(!reply.text().contains("[audio transcript"), "{path} must not return a placeholder transcript");
+        let bad = h.post(path, json!({"file": "bm90IGEgd2F2"})).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{path}: damaged input is the client's error");
+    }
+}
+
+#[tokio::test]
 async fn encoder_and_audio_routes_need_a_key() {
     let h = start(with_keys(&["alpha"]));
     for path in ["/pooling", "/classify", "/v1/score", "/v1/rerank", "/v1/audio/transcriptions", "/v1/audio/translations"] {

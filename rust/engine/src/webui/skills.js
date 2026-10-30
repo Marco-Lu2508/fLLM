@@ -101,6 +101,7 @@
         mode: { type: 'string', enum: ['chat', 'agent'], description: 'chat (default) answers from the model; agent may read the folder and the web.' },
         folder: { type: 'string', description: 'Absolute folder path, only for mode agent.' },
         notify: { type: 'boolean', description: 'Show a desktop notification when the result is ready.' },
+        deliver: { type: 'string', description: 'Optional: send the result also to webhook:URL, ntfy:URL or telegram:CHAT_ID.' },
       },
       required: ['name', 'prompt', 'when'],
     };
@@ -425,14 +426,14 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
               <span class="app-item-title">${escapeHtml(t.name)}</span>
               <span class="quant-chip">${escapeHtml(t.when)}</span><span class="quant-chip">${t.mode === 'agent' ? 'agent' : 'chat'}</span>
-              ${t.enabled ? '' : '<span class="quant-chip">off</span>'}${t.running ? '<span style="color:var(--primary);font-size:12px;">running</span>' : ''}
+              ${t.deliver ? `<span class="quant-chip">${escapeHtml(String(t.deliver).split(':')[0])}</span>` : ''}${t.enabled ? '' : '<span class="quant-chip">off</span>'}${t.running ? '<span style="color:var(--primary);font-size:12px;">running</span>' : ''}
               <span style="flex:1"></span>
               <button class="btn btn-xs btn-ghost" data-sc-act="run">Run now</button>
               <button class="btn btn-xs btn-ghost" data-sc-act="results">Results</button>
               <button class="btn btn-xs btn-ghost" data-sc-act="edit">Edit</button>
               <button class="btn btn-xs btn-ghost" data-sc-act="remove">Delete</button>
             </div>
-            <div class="app-item-desc">${t.next_run ? `Next run: ${escapeHtml(scWhen(t.next_run))}. ` : ''}${t.last ? `Last run: ${escapeHtml(scWhen(t.last.time))} (${t.last.ok ? 'ok' : 'failed'}).` : 'Has not run yet.'}${t.mode === 'agent' ? ` Folder: <code>${escapeHtml(t.folder)}</code>` : ''}</div>
+            <div class="app-item-desc">${t.next_run ? `Next run: ${escapeHtml(scWhen(t.next_run))}. ` : ''}${t.last ? `Last run: ${escapeHtml(scWhen(t.last.time))} (${t.last.ok ? 'ok' : 'failed'}${t.last.delivery ? `; delivery ${escapeHtml(t.last.delivery)}` : ''}).` : 'Has not run yet.'}${t.mode === 'agent' ? ` Folder: <code>${escapeHtml(t.folder)}</code>` : ''}</div>
             <div class="sc-results" style="display:none;"></div>
           </div>`).join('') : '<div class="app-item-desc">No scheduled tasks yet.</div>';
         window.__scTasks = data.tasks;
@@ -462,6 +463,7 @@
       $('scMode').value = t ? t.mode : 'chat';
       $('scFolder').value = t ? t.folder : '';
       $('scNotify').checked = t ? t.notify : false;
+      $('scDeliver').value = t ? (t.deliver || '') : '';
       $('scEnabled').checked = t ? t.enabled : true;
       $('scFormTitle').textContent = t ? 'Edit the task' : 'New task';
       scFolderVisibility();
@@ -482,7 +484,7 @@
     async function scSave() {
       const body = {
         id: scEditing || undefined, name: $('scName').value, prompt: $('scPrompt').value, when: $('scWhenInput').value, mode: $('scMode').value,
-        folder: $('scFolder').value, notify: $('scNotify').checked, enabled: $('scEnabled').checked,
+        folder: $('scFolder').value, notify: $('scNotify').checked, enabled: $('scEnabled').checked, deliver: $('scDeliver').value.trim(),
       };
       try {
         await skRequest('POST', '/api/studio/schedule', body);
@@ -528,7 +530,7 @@
       const ok = await askDialog({ title: 'Schedule this task?', text: summary, ok: 'Schedule' });
       if (!ok) return 'The user declined to schedule the task.';
       try {
-        await skRequest('POST', '/api/studio/schedule', { name: args.name, prompt: args.prompt, when: args.when, mode: args.mode || 'chat', folder: args.folder || '', notify: args.notify === true });
+        await skRequest('POST', '/api/studio/schedule', { name: args.name, prompt: args.prompt, when: args.when, mode: args.mode || 'chat', folder: args.folder || '', notify: args.notify === true, deliver: String(args.deliver || '') });
         scRefreshPane();
         return `Scheduled "${args.name}" (${args.when}). Next run: ${scWhen(check.next[0])}.`;
       } catch (e) {

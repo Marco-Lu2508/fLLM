@@ -100,6 +100,8 @@ fn usage(error: &str) -> ! {
     eprintln!("       fllm-rs bench-kernel --op marlin_gemv [--m 1] [--n 2048] [--k 2048] [--iters 200] (CUDA builds; --help)");
     eprintln!("       fllm-rs convert CHECKPOINT OUTPUT.gguf [--outtype preserve|f16|f32]");
     eprintln!("       fllm-rs chat | bench --url http://127.0.0.1:8000 [--model MODEL_ID]");
+    eprintln!("       fllm-rs gateway telegram --chat ID [--allow-edit] [--yes] [--once]   (token in FLLM_TELEGRAM_TOKEN)");
+    eprintln!("       fllm-rs agent -p \"TASK\" [--folder DIR] [--allow-edit] [--allow-command] [--yes] [--session NAME] [--json]");
     eprintln!(
         "       sampling: --min-p P --typical-p P --mirostat 0|1|2 --dry-multiplier M --seed S"
     );

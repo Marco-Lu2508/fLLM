@@ -4631,6 +4631,7 @@ async fn handle_audio_request(
 
     match crate::vision::audio::transcribe_audio(&audio_bytes, None) {
         Ok(text) => Json(json!({"text": text})).into_response(),
+        Err(e) if e == crate::vision::audio::TRANSCRIPTION_UNAVAILABLE => api_error(StatusCode::NOT_IMPLEMENTED, &e),
         Err(e) => api_error(StatusCode::BAD_REQUEST, &e),
     }
 }

@@ -22,6 +22,7 @@ pub(super) mod studio_embed;
 pub(super) mod studio_mode;
 pub(super) mod websearch;
 pub(super) mod schedule;
+pub(super) mod schedule_deliver;
 pub(super) mod sessions_index;
 pub(super) mod skills;
 pub(super) mod responses;

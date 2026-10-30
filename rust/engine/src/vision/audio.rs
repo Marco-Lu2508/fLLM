@@ -508,19 +508,26 @@ impl MultimodalEncoder for WhisperMultimodalEncoder {
     }
 }
 
+/// What `transcribe_audio` answers while no speech decoder is wired in.
+pub const TRANSCRIPTION_UNAVAILABLE: &str =
+    "speech-to-text is not implemented: the Whisper encoder and the log-mel frontend exist, but there is no text decoder behind them yet";
+
 /// Transcribes audio bytes into text.
+///
+/// The WAV is decoded and the log-mel frontend runs, so a damaged or unsupported file is reported as such
+/// (`Err` without the marker). A readable file ends in [`TRANSCRIPTION_UNAVAILABLE`] because the Whisper
+/// text decoder is not part of the engine; the function never invents a transcript.
 pub fn transcribe_audio(audio_bytes: &[u8], _prompt: Option<&str>) -> Result<String, String> {
     let audio = decode_wav(audio_bytes)?;
     let mel = log_mel_spectrogram(&audio.samples, 80);
     if mel.is_empty() || mel[0].is_empty() {
-        return Ok(String::new());
+        return Err("the audio file holds no samples".into());
     }
-    // High-level transcription representation
-    Ok(format!("[audio transcript: {} frames, duration {:.2}s]", mel[0].len(), audio.samples.len() as f32 / 16000.0))
+    Err(TRANSCRIPTION_UNAVAILABLE.into())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -555,6 +562,46 @@ mod tests {
         assert_eq!(buf.sample_rate, 16000);
         // Resampled from 8000 Hz to 16000 Hz -> ~16000 samples
         assert!((buf.samples.len() as isize - 16000).abs() <= 2);
+    }
+
+    /// A 16 kHz mono 16-bit WAV of `n` samples of a sine tone.
+    pub(crate) fn tone_wav(n: usize) -> Vec<u8> {
+        let mut pcm = Vec::new();
+        for i in 0..n {
+            let v = ((i as f32 / 16000.0) * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5;
+            pcm.extend_from_slice(&((v * 32767.0) as i16).to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((pcm.len() + 36) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&32000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        wav
+    }
+
+    #[test]
+    fn transcription_never_invents_text() {
+        // a readable file must end in the explicit "not implemented" error, never in a made-up transcript
+        let err = transcribe_audio(&tone_wav(16000), None).unwrap_err();
+        assert_eq!(err, TRANSCRIPTION_UNAVAILABLE);
+        // a damaged file is a different error, so a client can tell "bad input" from "no decoder"
+        // too short, and a RIFF/WAVE header without a data chunk (arbitrary other bytes count as raw PCM by design)
+        let mut no_data = b"RIFF".to_vec();
+        no_data.extend_from_slice(&4u32.to_le_bytes());
+        no_data.extend_from_slice(b"WAVE");
+        for bad in [transcribe_audio(b"short", None), transcribe_audio(&no_data, None)] {
+            let bad = bad.unwrap_err();
+            assert_ne!(bad, TRANSCRIPTION_UNAVAILABLE, "bad input is not the same error as a missing decoder");
+        }
     }
 
     #[test]
