@@ -131,7 +131,7 @@ jobs during the runs and the GPU is power-limited (about 17 W for the whole pack
 | llama.cpp ROCm | 27.9 | 38.1 | 17.9 | 16.5 |
 | Ollama (Vulkan) | 36.0 | 38.1 | 18.2 | 18.5 |
 
-A single request (3B, 380 words): Vulkan prompt 215 - 243 -> 265 tok/s, decode 29.4 -> 29.5; HIP 208 / 22.0 -> 208 / 22.0 (unchanged). Llama-3.1-8B Q4_K_M, Vulkan,
+A single request (3B, 380 words): Vulkan prompt 215 - 243 -> 265 tok/s, decode 29.4 -> 29.5; HIP prompt 208 -> 224 - 242 tok/s with the FP16-activation GEMM (the last measurement ran while other jobs loaded the laptop; one earlier run read 157), decode 22.0 unchanged; 8 requests of 380 words 30.0 -> 34.3 tok/s in total. Llama-3.1-8B Q4_K_M, Vulkan,
 547-token prompt: prompt 74.6 -> 98.0 tok/s, decode 8.5 -> 15.0 (llama.cpp Vulkan 124 / 13.2; the two fLLM figures were measured twice with 3 runs each and agreed to 0.1).
 
 What the numbers say, and how it was found:
@@ -155,7 +155,7 @@ What the numbers say, and how it was found:
   limited by its own structure, not by the weight decoding); Vulkan cooperative matrices with the weights dequantized to FP16 in shared memory: 14 ms against 10 ms for the integer dot
   product; removing the decoding and the activation conversion from that shader still left 8.4 ms, so the f16 cooperative-matrix route cannot beat the integer-dot route here
   (both have the same peak rate on RDNA 3.5; only an int8 matrix-core kernel would, and the per-block scales of the K-quants make that a larger rewrite).
-* **Not done:** the prompt gap to llama.cpp (265 against 293 tok/s on the 3B, 98 against 124 on the 8B) and the HIP prompt (208 against llama.cpp ROCm's 298).
+* **Not done:** the prompt gap to llama.cpp (265 against 293 tok/s on the 3B, 98 against 124 on the 8B) and the HIP prompt (about 230 against llama.cpp ROCm's 298).
 
 ## Limits
 
