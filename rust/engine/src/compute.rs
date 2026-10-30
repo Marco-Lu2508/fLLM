@@ -201,6 +201,9 @@ pub fn dequantize(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, Str
     if crate::cpu_mlx::handles(kind) {
         return crate::cpu_mlx::dequantize(bytes, kind, count);
     }
+    if kind == crate::quant_i2s::I2_S {
+        return crate::quant_i2s::dequantize(bytes, count);
+    }
     if matches!(kind, 16..=23 | 29) {
         return crate::quant_iq::dequantize_iq(bytes, kind, count);
     }
@@ -470,7 +473,14 @@ impl Linear {
             .iter()
             .find(|t| t.name == name)
             .ok_or_else(|| format!("missing tensor {name}"))?;
-        let packed = if let Some((block, bytes)) = quant_layout(info.type_id) {
+        let packed = if info.type_id == crate::quant_i2s::I2_S {
+            // BitNet fork ternary tensor: kept as Q8_0 blocks, which are exact for it (see `quant_i2s::to_q8_0`)
+            if !cols.is_multiple_of(128) {
+                return Err(format!("invalid packed projection {name}: I2_S needs a multiple of 128 columns"));
+            }
+            let blocks = crate::quant_i2s::to_q8_0(model.tensor_bytes(&name)?, count).map_err(|e| format!("{name}: {e}"))?;
+            Some((8u32, TensorBytes::from_vec(blocks)))
+        } else if let Some((block, bytes)) = quant_layout(info.type_id) {
             let raw = model.tensor_bytes(&name)?;
             let is_q4zp = fllm_gguf_probe::q4zp_group(info.type_id).is_some();
             let perm_bytes = if is_q4zp { cols.checked_mul(4).ok_or("cols overflow")? } else { 0 };

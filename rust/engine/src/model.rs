@@ -127,11 +127,30 @@ const ARCHITECTURE_ALIASES: &[(&str, &str)] = &[
     // DeepSeek-V3.2 / GLM-5 with the lightning indexer: the deepseek2 layer plus `blk.N.indexer.*` tensors
     ("deepseek32", "deepseek2"),
     ("glm-dsa", "deepseek2"),
+    // the BitNet fork of llama.cpp (Microsoft): the tensors and metadata of `bitnet`, weights in the I2_S type
+    ("bitnet-b1.58", "bitnet"),
+    // MiMo-V2-Flash: the metadata keys and tensor names of the converter's `mimo_v2` (per-layer KV heads, sinks, value scale)
+    ("mimo2", "mimo_v2"),
+];
+
+/// llama.cpp architectures of layouts this program does not implement: the loader says why instead of listing the supported names.
+const UNSUPPORTED_ARCHITECTURES: &[(&str, &str)] = &[
+    (
+        "step35",
+        "Step-3.5 / Step-3.7-Flash: the last layers clamp the SwiGLU of the experts and the shared expert (swiglu_clamp_exp / swiglu_clamp_shexp) and the full-attention layers use scaled partial rotary factors (rope_freqs.weight); neither is implemented (the safetensors converter refuses clamped checkpoints for the same reason)",
+    ),
+    (
+        "glm5-next",
+        "GLM-5-Next / GLM-5.3-Flash: multi-stream residuals (hyper_connection.*, Sinkhorn mixing), the sparse-attention indexer and a KDA/latent-attention hybrid are not implemented",
+    ),
 ];
 
 fn canonical_architecture(mapping: MappedGguf) -> MappedGguf {
     let arch = mapping.index().metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
     match ARCHITECTURE_ALIASES.iter().find(|(from, _)| *from == arch) {
+        // the BitNet fork writes the query and key rows in the Hugging Face order (rotate-half pairs); mainline `bitnet` files
+        // are permuted for interleaved pairs
+        Some(("bitnet-b1.58", to)) => mapping.with_architecture_alias("bitnet-b1.58", to).with_metadata(&format!("{to}.rope.neox"), Value::Bool(true)),
         Some((from, to)) => {
             let aliased = mapping.with_architecture_alias(from, to);
             if matches!(*from, "deepseek32" | "glm-dsa") {
@@ -242,6 +261,11 @@ impl GgufModel {
             return Err("context, sequence capacity, and thread count must be positive".into());
         }
         let mapping = canonical_architecture(mapping);
+        if let Some(arch) = mapping.index().metadata.get("general.architecture").and_then(Value::as_str) {
+            if let Some((_, reason)) = UNSUPPORTED_ARCHITECTURES.iter().find(|(name, _)| *name == arch) {
+                return Err(format!("the GGUF architecture '{arch}' is not supported: {reason}"));
+            }
+        }
         let config = ModelConfig::from_gguf(&mapping)?;
         if !SUPPORTED_ARCHITECTURES.contains(&config.arch.as_str()) {
             return Err(format!(
@@ -658,5 +682,16 @@ mod tests {
         merge_lora_delta(&mut base, &[2.0, 3.0], &[4.0, 5.0], 2, 2, 1, 0.5).unwrap();
         assert_eq!(base, [5.0, 8.0, 8.0, 11.5]);
         assert!(merge_lora_delta(&mut base, &[1.0], &[1.0], 2, 2, 1, 1.0).is_err());
+    }
+
+    #[test]
+    fn llama_cpp_names_resolve_to_supported_layouts_or_a_reason() {
+        for (from, to) in ARCHITECTURE_ALIASES {
+            assert!(SUPPORTED_ARCHITECTURES.contains(to), "{from} -> {to} is not a supported architecture");
+            assert!(!UNSUPPORTED_ARCHITECTURES.iter().any(|(name, _)| name == from));
+        }
+        for (name, reason) in UNSUPPORTED_ARCHITECTURES {
+            assert!(!SUPPORTED_ARCHITECTURES.contains(name) && reason.len() > 40, "{name}");
+        }
     }
 }

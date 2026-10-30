@@ -509,7 +509,7 @@ impl ModelConfig {
             // Gemma 3 GGUFs do not store the sliding-window layers' base; llama.cpp hardcodes 10000 for them
             local_base: float(meta, a, "rope.freq_base_swa").or((a == "gemma3").then_some(10_000.0)),
             local_dims: uint(meta, a, "rope.dimension_count_swa"),
-            neox: !matches!(
+            neox: key(meta, a, "rope.neox").and_then(Value::as_bool).unwrap_or(!matches!(
                 a,
                 "llama"
                     | "bitnet"
@@ -532,7 +532,7 @@ impl ModelConfig {
                     | "cohere2"
                     | "cohere2_moe"
                     | "cohere"
-            ),
+            )),
             scaling: {
                 let mut scaling = parse_scaling(meta, a)?;
                 // Phi-3 GGUFs carry no rope.scaling.type: the long / short factor tensors and rope.scaling.attn_factor
@@ -595,7 +595,8 @@ impl ModelConfig {
         let window_flags = match key(meta, a, "attention.sliding_window_pattern") {
             Some(Value::Array(values)) if values.len() == layers => values
                 .iter()
-                .map(Value::as_bool)
+                // llama.cpp writes the pattern as booleans or as 0/1 integers
+                .map(|v| v.as_bool().or_else(|| v.as_u64().map(|n| n != 0)))
                 .collect::<Option<Vec<bool>>>(),
             _ => None,
         };

@@ -388,8 +388,16 @@ fn ggml_quant_size(type_id: u32) -> Option<(u64, u64)> {
     if let Some(mlx) = mlx_affine(type_id) {
         return Some((u64::from(mlx.group), mlx.block_bytes()));
     }
+    if type_id == I2_S_TYPE {
+        // 4 elements per code byte; the per-tensor scale trailer is added in `tensor_payload_len`
+        return Some((128, 32));
+    }
     quant_types::by_id(type_id).map(|ty| (ty.block_elements as u64, ty.bytes_per_block as u64))
 }
+
+/// `I2_S` of the BitNet fork of llama.cpp (the id is one of the slots ggml removed): blocks of 128 two-bit codes (32 bytes) and
+/// a 32-byte trailer with one `f32` scale for the whole tensor.
+pub const I2_S_TYPE: u32 = 36;
 
 fn tensor_payload_len(type_id: u32, dimensions: &[u64]) -> Result<u64, String> {
     let (block_size, type_size) = ggml_quant_size(type_id)
@@ -425,6 +433,9 @@ fn tensor_payload_len(type_id: u32, dimensions: &[u64]) -> Result<u64, String> {
     let q4z_len = (elements / block_size)
         .checked_mul(type_size)
         .ok_or_else(|| "tensor payload length overflow".to_owned())?;
+    if type_id == I2_S_TYPE {
+        return q4z_len.checked_add(32).ok_or_else(|| "tensor payload length overflow".to_owned());
+    }
     if q4zp_group(type_id).is_some() {
         let perm_len = dimensions[0]
             .checked_mul(4)
@@ -625,6 +636,17 @@ impl MappedGguf {
         index.metadata.retain(|k, _| !k.starts_with(&prefix));
         index.metadata.extend(renamed);
         index.metadata.insert("general.architecture".into(), Value::String(to.into()));
+        Self {
+            mapping: Arc::clone(&self.mapping),
+            index,
+            extra_mappings: self.extra_mappings.clone(),
+        }
+    }
+
+    /// The same file with one more (or replaced) metadata entry; used to complete the metadata of files written by other programs.
+    pub fn with_metadata(&self, key: &str, value: Value) -> Self {
+        let mut index = self.index.clone();
+        index.metadata.insert(key.into(), value);
         Self {
             mapping: Arc::clone(&self.mapping),
             index,
