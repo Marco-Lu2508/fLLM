@@ -129,6 +129,42 @@ impl Provider {
     }
 }
 
+/// Lists (or updates) a server on this computer that fLLM itself starts, for example the AMD NPU runtime. The entry has no key and may use a loopback address.
+pub(in crate::server) fn register_local(id: &str, name: &str, base_url: &str, models: &[String]) -> Result<(), String> {
+    let _guard = store_lock();
+    let mut providers = load()?;
+    let entry = Provider {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        kind: "openai".to_owned(),
+        base_url: base_url.to_owned(),
+        api_key: String::new(),
+        enabled: true,
+        local: true,
+        models: models.to_vec(),
+    };
+    match providers.iter_mut().find(|p| p.id == id) {
+        Some(existing) => {
+            let enabled = existing.enabled;
+            *existing = Provider { enabled, ..entry };
+        }
+        None => providers.push(entry),
+    }
+    save(&providers)
+}
+
+/// Removes the entry made by [`register_local`] (nothing happens when there is none).
+pub(in crate::server) fn unregister(id: &str) -> Result<(), String> {
+    let _guard = store_lock();
+    let mut providers = load()?;
+    let before = providers.len();
+    providers.retain(|p| p.id != id);
+    if providers.len() == before {
+        return Ok(());
+    }
+    save(&providers)
+}
+
 fn store_lock() -> std::sync::MutexGuard<'static, ()> {
     static STORE: Mutex<()> = Mutex::new(());
     STORE.lock().unwrap_or_else(|e| e.into_inner())
@@ -985,6 +1021,15 @@ pub(in crate::server) async fn models(axum::extract::Query(query): axum::extract
     for (p, list) in enabled.iter().zip(lists) {
         match list {
             Ok(ids) => {
+                // FastFlowLM lists its whole catalogue; only the model it has loaded can answer
+                let ids = if p.id == crate::backend::npu::flm::PROVIDER_ID {
+                    match crate::backend::npu::flm::serving() {
+                        crate::backend::npu::flm::Serving::Running { tag, .. } => vec![tag],
+                        _ => Vec::new(),
+                    }
+                } else {
+                    ids
+                };
                 if refresh {
                     cache_models(&p.id, &ids);
                 }

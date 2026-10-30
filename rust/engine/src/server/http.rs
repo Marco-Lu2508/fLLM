@@ -295,6 +295,8 @@ pub fn studio_admin_blocked_for(
         || (path.starts_with("/api/studio/mcp") && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS))
         // the NPU setup downloads a native runtime that the server loads afterwards, and its removal deletes files: never from another machine
         || path == "/api/studio/npu/setup"
+        // the AMD NPU routes start FastFlowLM and download models: this machine only, reads included
+        || path == "/api/studio/npu/amd"
         // the remembered notes about the user are personal: this machine only, reads included
         || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine

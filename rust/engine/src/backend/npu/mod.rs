@@ -10,6 +10,7 @@
 
 pub mod backend;
 pub mod device_info;
+pub mod flm;
 pub mod openvino;
 pub mod probe;
 pub mod setup;

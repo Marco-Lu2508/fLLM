@@ -12,6 +12,7 @@ pub(super) mod extract;
 pub(super) mod llamacpp;
 pub(super) mod memory;
 pub(super) mod npu;
+pub mod amd_npu;
 pub(super) mod mcp;
 pub(super) mod mcp_registry;
 pub(super) mod ollama_extra;

@@ -537,6 +537,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         coalesce: crate::cache::coalescer::Coalescer::new(),
     });
     let upload_limit = api::batches::max_upload_bytes();
+    // the provider list follows the model FastFlowLM runs on an AMD NPU
+    api::amd_npu::install();
     let router = Router::new()
         .route("/", get(webui).head(api::ollama_extra::head_root))
         .route("/studio/runner.js", get(|| async { crate::webui::runner() }))
@@ -556,6 +558,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/hardware", get(api::studio::hardware))
         .route("/api/studio/npu", get(api::npu::state))
         .route("/api/studio/npu/setup", post(api::npu::start_setup).delete(api::npu::remove_runtime))
+        .route("/api/studio/npu/amd", get(api::amd_npu::state).post(api::amd_npu::action))
         .route("/api/studio/hf-account", get(api::studio::hf_account).post(api::studio::hf_login))
         .route("/api/studio/open-url", post(api::studio::open_url))
         .route("/api/studio/extract", post(api::extract::extract).layer(DefaultBodyLimit::max(api::extract::MAX_UPLOAD_BYTES)))
@@ -826,6 +829,7 @@ async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
     }
     api::mcp::shutdown();
     api::agent_browser::shutdown().await;
+    crate::backend::npu::flm::shutdown();
     tracing::info!("shutdown requested; finishing requests in flight (press Ctrl-C again to stop immediately)");
     tokio::spawn(async {
         let _ = tokio::signal::ctrl_c().await;
@@ -4681,4 +4685,14 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// restricted, low-integrity token inside a job object and returns the exit code of that command.
 pub fn run_sandbox_launcher(args: &[String]) -> i32 {
     api::run_sandbox_launcher(args)
+}
+
+/// `fllm-rs amd-npu serve --register`: lists the FastFlowLM server of the command line in the Studio as the provider "AMD NPU (FastFlowLM)".
+pub fn amd_npu_register(tag: &str, base_url: &str) -> Result<(), String> {
+    api::amd_npu::register_for_cli(base_url, tag)
+}
+
+/// The end of `fllm-rs amd-npu serve --register`.
+pub fn amd_npu_unregister() {
+    api::amd_npu::unregister_for_cli();
 }

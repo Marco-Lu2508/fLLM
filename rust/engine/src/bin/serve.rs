@@ -101,6 +101,7 @@ fn usage(error: &str) -> ! {
     eprintln!("       fllm-rs convert CHECKPOINT OUTPUT.gguf [--outtype preserve|f16|f32]");
     eprintln!("       fllm-rs chat | bench --url http://127.0.0.1:8000 [--model MODEL_ID]");
     eprintln!("       fllm-rs gateway telegram --chat ID [--allow-edit] [--yes] [--once]   (token in FLLM_TELEGRAM_TOKEN)");
+    eprintln!("       fllm-rs amd-npu status | list | pull MODEL | serve MODEL [--register]   (the NPU of an AMD Ryzen AI through FastFlowLM, which you install yourself)");
     eprintln!("       fllm-rs agent -p \"TASK\" [--folder DIR] [--allow-edit] [--allow-command] [--yes] [--session NAME] [--json]");
     eprintln!(
         "       sampling: --min-p P --typical-p P --mirostat 0|1|2 --dry-multiplier M --seed S"
@@ -416,6 +417,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("npu-setup") {
         return npu_setup(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("amd-npu") {
+        return fllm_engine::backend::npu::flm::cli(
+            &args[1..],
+            &|tag, base| fllm_engine::server::amd_npu_register(tag, base),
+            &fllm_engine::server::amd_npu_unregister,
+        )
+        .map_err(Into::into);
     }
     if args.first().map(String::as_str) == Some("devices") {
         return print_devices(&args[1..]);
