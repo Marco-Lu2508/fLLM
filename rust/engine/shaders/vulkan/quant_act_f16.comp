@@ -1,0 +1,19 @@
+#version 450
+// FLLM-SHADER: quant_act_f16 | bindings: 0 x(vec4[], batch x cols f32) 1 xh(uvec2[] out, the same values as binary16, four per element) | push: total4 | grid: ceil(total4 / 256) x 1 x 1 (x/y split at 65535)
+// Prepass of the wide cooperative-matrix shaders (mm_<fmt>_cw): the f32 activations once as binary16, so every workgroup of the matrix product reads half
+// as many bytes and does not convert in its inner loop. total4 = batch * cols / 4.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform P {
+    uint total4;
+} p;
+
+layout(std430, set = 0, binding = 0) readonly buffer XBuf { vec4 x[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer YBuf { uvec2 y[]; };
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (i >= p.total4) return;
+    const vec4 v = x[i];
+    y[i] = uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw));
+}

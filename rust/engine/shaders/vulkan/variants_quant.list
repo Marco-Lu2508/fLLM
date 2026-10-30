@@ -210,5 +210,4 @@ mv_exl2_i mv_idot.comp -DFMT_EXL2=1
 mm_exl2_s mm_scalar.comp -DFMT_EXL2=1
 mm_exl2_i mm_idot.comp -DFMT_EXL2=1
 mm_exl2_c mm_coopmat.comp -DFMT_EXL2=1 #optional
-mm_exl2_cw mm_coopmat_w.comp -DFMT_EXL2=1 #optional
 mmq_exl2_i mm_q.comp -DFMT_EXL2=1

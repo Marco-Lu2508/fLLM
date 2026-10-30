@@ -138,6 +138,8 @@ pub enum PrepassKind {
     QuantizeActivations,
     /// `quant_permute`: gathers the columns of the activations (act-order GPTQ with f32 shaders).
     PermuteActivations,
+    /// `quant_act_f16`: the f32 activations as binary16 for the wide cooperative-matrix shaders.
+    ConvertActivationsF16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,6 +532,8 @@ pub fn plan_quantized_linear_with(
         && caps.max_workgroup >= 256
         && caps.max_shared >= COOPMAT_WIDE_SHARED
         && cols32 % 64 == 0
+        && !perm
+        && available("quant_act_f16")
         && coop_wide_min_batch().is_some_and(|min| batch32 >= min)
         && available(&format!("mm_{tag}_cw"));
     let shader_name = match &mmq {
@@ -643,6 +647,27 @@ pub fn plan_quantized_linear_with(
             // a multiple of 16 bytes: mm_q.comp reads the result through a uvec4 view
             output_bytes: (xq_d as usize + blocks as usize).next_multiple_of(4) * 4,
             uses_perm: perm,
+        })
+    } else if coop_wide {
+        let total4 = (batch as u64) * (cols as u64) / 4;
+        Some(PrepassPlan {
+            kind: PrepassKind::ConvertActivationsF16,
+            shader_name: "quant_act_f16".to_string(),
+            push_constants: words(&[total4 as u32]),
+            groups: split_groups(total4.div_ceil(256)),
+            bindings: vec![
+                PrepassBinding {
+                    binding: 0,
+                    role: PrepassRole::Activations,
+                },
+                PrepassBinding {
+                    binding: 1,
+                    role: PrepassRole::Output,
+                },
+            ],
+            // a multiple of 16 bytes: the matrix shader reads the halves through a uvec4 view
+            output_bytes: (total4 as usize * 8).next_multiple_of(16),
+            uses_perm: false,
         })
     } else if perm {
         let total = (batch as u64) * (cols as u64);

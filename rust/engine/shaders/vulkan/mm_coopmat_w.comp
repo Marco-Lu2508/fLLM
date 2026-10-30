@@ -1,9 +1,9 @@
 #version 450
-// FLLM-SHADER: mm_<fmt>_cw | bindings: 0 weights(u32[]) 1 x(vec4[], batch x cols f32) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/128) x ceil(batch/64) x 1
+// FLLM-SHADER: mm_<fmt>_cw | bindings: 0 weights(u32[]) 1 xh(uvec4[], batch x cols binary16, written by the prepass quant_act_f16) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/128) x ceil(batch/64) x 1
 // Wide variant of mm_coopmat.comp for devices with 32-wide subgroups and plenty of shared memory (NVIDIA): the same cooperative-matrix product
 // (VK_KHR_cooperative_matrix, 16x16x16 float16 inputs, float32 accumulators) with a larger output tile per workgroup of NSGM x NSGN subgroups
 // (macros BM x BN, K step BK; default 128 x 64, K step 64, 8 subgroups of 32 x 32), so every dequantized weight is reused for more activation rows and every converted activation for more weight rows,
-// and the packed weights and activations of the NEXT K step are fetched into registers before the matrix multiply-adds of the current step, so their
+// and the packed weights and (binary16) activations of the NEXT K step are fetched into registers before the matrix multiply-adds of the current step, so their
 // memory latency overlaps the tensor cores. Subgroup s computes the (BM / NSGM) x (BN / NSGN) sub-tile at weight rows (s % NSGM) * (BM / NSGM) and
 // activation rows (s / NSGM) * (BN / NSGN).
 // Requires: shaderFloat16, cooperativeMatrix 16x16x16 (float16 A/B, float32 C/Result, subgroup scope), subgroup size 32 (the planner checks it).
@@ -38,9 +38,9 @@
 #define FN (WN / 16)
 #define LDS (BK + 8u)    // row stride of the f16 tiles in elements (keeps 16-byte alignment, no bank conflicts)
 #define CPR (BK / 8u)    // weight chunks per tile row
-#define QPR (BK / 4u)    // activation vec4 per tile row
+#define QPR (BK / 8u)    // activation uvec4 (8 halves) per tile row
 #define WITEMS ((BM * CPR) / WG)   // weight chunks per invocation and K step
-#define XITEMS ((BN * QPR) / WG)   // activation vec4 per invocation and K step
+#define XITEMS ((BN * QPR) / WG)   // activation uvec4 per invocation and K step
 
 layout(local_size_x = 32 * NSGM * NSGN, local_size_y = 1, local_size_z = 1) in;
 
@@ -50,7 +50,7 @@ layout(local_size_x = 32 * NSGM * NSGN, local_size_y = 1, local_size_z = 1) in;
 #error "float-chunk formats (FP8, NF4, FP4) have only the f32 shaders"
 #endif
 
-layout(std430, set = 0, binding = 1) readonly buffer XBuf { vec4 xv[]; };
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { uvec4 xh[]; };
 layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
 layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
 
@@ -63,7 +63,7 @@ uint r_p0[WITEMS];
 uint r_p1[WITEMS];
 float r_ws[WITEMS];
 float r_wm[WITEMS];
-vec4 r_x[XITEMS];
+uvec4 r_x[XITEMS];
 
 // the packed weights and the activations of K step k0 into registers
 void fetch(uint k0, uint t, uint m0, uint n0) {
@@ -82,8 +82,8 @@ void fetch(uint k0, uint t, uint m0, uint n0) {
     [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
         const uint i = t + e * WG;
         const uint token = n0 + i / QPR;
-        vec4 v = vec4(0.0);
-        if (token < p.batch) v = xv[(token * p.cols + k0 + (i % QPR) * 4u) >> 2];
+        uvec4 v = uvec4(0u);
+        if (token < p.batch) v = xh[(token * p.cols + k0 + (i % QPR) * 8u) >> 3];
         r_x[e] = v;
     }
 }
@@ -100,7 +100,9 @@ void stash(uint t) {
     }
     [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
         const uint i = t + e * WG;
-        Bs[((i / QPR) * LDS + (i % QPR) * 4u) >> 2] = f16vec4(r_x[e]);
+        const uint base = ((i / QPR) * LDS + (i % QPR) * 8u) >> 2;
+        Bs[base] = f16vec4(unpackFloat2x16(r_x[e].x), unpackFloat2x16(r_x[e].y));
+        Bs[base + 1u] = f16vec4(unpackFloat2x16(r_x[e].z), unpackFloat2x16(r_x[e].w));
     }
 }
 
