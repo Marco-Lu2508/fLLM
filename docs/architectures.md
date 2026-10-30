@@ -110,6 +110,7 @@ speculative decoding are switched off for them.
   xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama, Qwen3.8-Flash-Next. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
 * Hy4 (hyper-connections), Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
 * Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
+* GLM-5-Next (KDA variant), Kimi K3, JetMoE, Inkling, ZAYA,
   RWKV, xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama, Qwen3.8-Flash-Next. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
 * Step-3 (not 3.5/3.7): MFA attention.

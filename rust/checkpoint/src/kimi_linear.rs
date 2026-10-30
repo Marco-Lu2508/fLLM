@@ -13,8 +13,18 @@ fn num(cfg: &Value, key: &str) -> Option<u64> {
     cfg.get(key).and_then(Value::as_u64)
 }
 
+fn flt(cfg: &Value, key: &str) -> Option<f64> {
+    cfg.get(key).and_then(Value::as_f64)
+}
+
 fn first<'a>(cfg: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     keys.iter().find_map(|k| cfg.get(*k).filter(|v| !v.is_null()))
+}
+
+/// Ling-3.0 (`bailing_hybrid`): the same layer mix, but rotary latent attention with a head-wise output gate and direct (not low-rank)
+/// forget and output gate projections of the linear-attention layers.
+pub(crate) fn is_ling(cfg: &Value) -> bool {
+    cfg.get("model_type").and_then(Value::as_str) == Some("bailing_hybrid") || cfg.get("_ling").and_then(Value::as_bool) == Some(true)
 }
 
 fn attn_config(cfg: &Value) -> &Value {
@@ -73,6 +83,7 @@ fn dense_prefix(cfg: &Value) -> Result<u64, String> {
 pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
     let layers = kda_layers(cfg)?;
     let mut out = cfg.clone();
+    out["_ling"] = is_ling(cfg).into();
     out["model_type"] = "kimi_k2".into();
     out["num_hidden_layers"] = (layers.len() as u64).into();
     let copy = |out: &mut Value, to: &str, keys: &[&str]| {
@@ -81,7 +92,7 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
         }
     };
     copy(&mut out, "max_position_embeddings", &["max_position_embeddings", "model_max_length"]);
-    copy(&mut out, "num_experts", &["num_experts", "num_local_experts"]);
+    copy(&mut out, "num_experts", &["num_experts", "num_local_experts", "n_routed_experts"]);
     copy(&mut out, "num_experts_per_tok", &["num_experts_per_tok", "num_experts_per_token"]);
     copy(&mut out, "n_shared_experts", &["n_shared_experts", "num_shared_experts"]);
     copy(&mut out, "norm_topk_prob", &["norm_topk_prob", "moe_renormalize"]);
@@ -125,24 +136,46 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
         u("kda.head_count", heads),
         u("kda.head_dim", head_dim),
         (format!("{arch}.kda.layer_flags"), Meta::Bools(kda.clone())),
-        (format!("{arch}.attention.mla_no_rope"), Meta::Bool(true)),
+        (format!("{arch}.attention.mla_no_rope"), Meta::Bool(!is_ling(cfg))),
         (format!("{arch}.rope.layer_flags"), Meta::Bools(vec![false; kda.len()])),
     ]);
-    if let Some(lb) = attn.get("gate_lower_bound").and_then(Value::as_f64).or_else(|| cfg.get("safe_gate_lower_bound").and_then(Value::as_f64)).or_else(|| cfg.get("gate_lower_bound").and_then(Value::as_f64)) {
+    if is_ling(cfg) && cfg.get("kda_safe_gate").and_then(Value::as_bool).unwrap_or(true) {
+        plan.meta.push((format!("{arch}.kda.gate_lower_bound"), Meta::F32(flt(cfg, "kda_lower_bound").unwrap_or(-5.0) as f32)));
+    } else if let Some(lb) = attn.get("gate_lower_bound").and_then(Value::as_f64).or_else(|| cfg.get("safe_gate_lower_bound").and_then(Value::as_f64)).or_else(|| cfg.get("gate_lower_bound").and_then(Value::as_f64)) {
         plan.meta.push((format!("{arch}.kda.gate_lower_bound"), Meta::F32(lb as f32)));
     }
     plan.kinds = kda.iter().map(|&k| if k { b'K' } else { b'A' }).collect();
     Ok(plan)
 }
 
+/// Ling-3.0 Hub names to the transformers 5 names (the renames of its conversion mapping); `None` when `n` is not in the Hub layout.
+pub(crate) fn normalize(n: &str) -> Option<String> {
+    if !(n.contains(".attention.") || n.starts_with("model.word_embeddings.") || n.ends_with(".mlp.gate.expert_bias")) {
+        return None;
+    }
+    Some(
+        n.replacen("model.word_embeddings.", "model.embed_tokens.", 1)
+            .replace(".attention.dense.", ".self_attn.o_proj.")
+            .replace(".attention.", ".self_attn.")
+            .replace(".mlp.gate.expert_bias", ".mlp.gate.e_score_correction_bias"),
+    )
+}
+
 /// Tensor names of Kimi-Linear that the generic plan does not know. `layer` is the layer index, `suf` the name below
 /// `model.layers.<layer>.`.
-pub(crate) fn map(layer: &str, suf: &str) -> Option<Mapped> {
+pub(crate) fn map(layer: &str, suf: &str, linear: bool) -> Option<Mapped> {
     let plain = |name: &str| Some(Mapped::Tensor { name: format!("blk.{layer}.{name}"), add: 0.0 });
     let kda = suf.strip_prefix("self_attn.");
     if let Some(rest) = kda {
+        // Ling-3.0: the head-wise output gate of the latent attention layers
+        if !linear && rest == "g_proj.weight" {
+            return plain("attn_gate.weight");
+        }
         let rest = rest.strip_prefix("forget_gate.").unwrap_or(rest);
         let name = match rest {
+            "conv1d.weight" if linear => return Some(Mapped::Fused { layer: layer.parse().unwrap_or(0), part: "conv1d_qkv".into() }),
+            "f_proj.weight" => "ssm_f.weight",
+            "g_proj.weight" if linear => "ssm_g.weight",
             "q_conv1d.weight" => "ssm_conv1d_q.weight",
             "k_conv1d.weight" => "ssm_conv1d_k.weight",
             "v_conv1d.weight" => "ssm_conv1d_v.weight",
@@ -189,10 +222,17 @@ pub(crate) fn requirements(cfg: &Value, i: u64) -> Option<Vec<String>> {
     if kda {
         need.extend([
             "attn_q.weight", "attn_k.weight", "attn_v.weight", "ssm_conv1d_q.weight", "ssm_conv1d_k.weight", "ssm_conv1d_v.weight",
-            "ssm_f_a.weight", "ssm_f_b.weight", "ssm_beta.weight", "ssm_g_a.weight", "ssm_g_b.weight", "ssm_dt.bias", "ssm_a",
-            "ssm_o_norm.weight",
+            "ssm_beta.weight", "ssm_dt.bias", "ssm_a", "ssm_o_norm.weight",
         ]);
+        if is_ling(cfg) {
+            need.extend(["ssm_f.weight", "ssm_g.weight"]);
+        } else {
+            need.extend(["ssm_f_a.weight", "ssm_f_b.weight", "ssm_g_a.weight", "ssm_g_b.weight"]);
+        }
     } else {
+        if is_ling(cfg) {
+            need.push("attn_gate.weight");
+        }
         need.extend(["attn_kv_a_mqa.weight", "attn_kv_a_norm.weight", "attn_kv_b.weight"]);
         need.push(if num(cfg, "q_lora_rank").is_some_and(|r| r > 0) { "attn_q_a.weight" } else { "attn_q.weight" });
     }
@@ -254,14 +294,19 @@ mod tests {
             Some(Mapped::Fused { layer, part }) => format!("fused:{layer}:{part}"),
             other => panic!("unexpected {other:?}"),
         };
-        assert_eq!(name(map("0", "self_attn.q_conv1d.weight")), "blk.0.ssm_conv1d_q.weight");
-        assert_eq!(name(map("2", "self_attn.A_log")), "fused:2:A_log");
-        assert_eq!(name(map("2", "self_attn.forget_gate.f_a_proj.weight")), "blk.2.ssm_f_a.weight");
-        assert_eq!(name(map("1", "block_sparse_moe.experts.3.w3.weight")), "blk.1.ffn_up_exps.weight#3");
-        assert_eq!(name(map("1", "block_sparse_moe.gate.e_score_correction_bias")), "blk.1.exp_probs_b.bias");
-        assert_eq!(name(map("0", "block_sparse_moe.down_proj.weight")), "blk.0.ffn_down.weight");
-        assert!(map("1", "self_attn.q_proj.weight").is_none());
-        assert!(map("1", "mlp.gate_proj.weight").is_none());
+        assert_eq!(name(map("0", "self_attn.q_conv1d.weight", true)), "blk.0.ssm_conv1d_q.weight");
+        assert_eq!(name(map("2", "self_attn.A_log", true)), "fused:2:A_log");
+        assert_eq!(name(map("2", "self_attn.forget_gate.f_a_proj.weight", true)), "blk.2.ssm_f_a.weight");
+        assert_eq!(name(map("1", "block_sparse_moe.experts.3.w3.weight", true)), "blk.1.ffn_up_exps.weight#3");
+        assert_eq!(name(map("1", "block_sparse_moe.gate.e_score_correction_bias", true)), "blk.1.exp_probs_b.bias");
+        assert_eq!(name(map("0", "block_sparse_moe.down_proj.weight", true)), "blk.0.ffn_down.weight");
+        assert!(map("1", "self_attn.q_proj.weight", true).is_none());
+        // Ling-3.0: the same tensor name is the output gate of a latent attention layer and of a linear-attention layer
+        assert_eq!(name(map("3", "self_attn.g_proj.weight", false)), "blk.3.attn_gate.weight");
+        assert_eq!(name(map("2", "self_attn.g_proj.weight", true)), "blk.2.ssm_g.weight");
+        assert_eq!(name(map("2", "self_attn.forget_gate.f_proj.weight", true)), "blk.2.ssm_f.weight");
+        assert_eq!(name(map("2", "self_attn.conv1d.weight", true)), "fused:2:conv1d_qkv");
+        assert!(map("1", "mlp.gate_proj.weight", true).is_none());
     }
 
     #[test]

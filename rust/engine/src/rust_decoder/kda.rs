@@ -1,19 +1,21 @@
 //! Kimi Delta Attention layers in the decoder (host path): weights, state handling and the call into `cpu_kda`.
 //!
 //! GGUF tensors of a KDA layer `blk.N`: `attn_q`, `attn_k`, `attn_v` (the three projections), `ssm_conv1d_{q,k,v}.weight`
-//! (depthwise short convolutions, no bias), `ssm_f_a` / `ssm_f_b` (low-rank forget gate), `ssm_dt.bias`, `ssm_a`
-//! (`-exp(A_log)` per head, the usual Mamba convention), `ssm_beta` (write strength), `ssm_g_a` / `ssm_g_b` (low-rank output
-//! gate), `ssm_o_norm.weight` and `attn_output`.
+//! (depthwise short convolutions, no bias), `ssm_f_a` / `ssm_f_b` (low-rank forget gate) or `ssm_f` (one projection, Ling-3.0),
+//! `ssm_dt.bias`, `ssm_a` (`-exp(A_log)` per head, the usual Mamba convention), `ssm_beta` (write strength), `ssm_g_a` / `ssm_g_b`
+//! (low-rank output gate) or `ssm_g` (one projection), `ssm_o_norm.weight` and `attn_output`.
 use super::*;
 
 pub(super) struct Kda {
     q: Linear,
     k: Linear,
     v: Linear,
-    forget_down: Linear,
+    /// `None`: `forget_up` projects the layer input directly.
+    forget_down: Option<Linear>,
     forget_up: Linear,
     beta: Linear,
-    gate_down: Linear,
+    /// `None`: `gate_up` projects the layer input directly.
+    gate_down: Option<Linear>,
     gate_up: Linear,
     /// q, k, v convolution weights one after the other: `3 * heads * head_dim` rows of `kernel` taps.
     conv: Vec<f32>,
@@ -42,15 +44,17 @@ impl Kda {
             conv.extend(vector(mapping, &format!("{p}.ssm_conv1d_{part}.weight"), width * kc.conv_kernel)?);
         }
         let a = vector(mapping, &format!("{p}.ssm_a"), kc.heads)?;
+        let low_forget = has_tensor(mapping, &format!("{p}.ssm_f_a.weight"));
+        let low_gate = has_tensor(mapping, &format!("{p}.ssm_g_a.weight"));
         Ok(Some(Self {
             q: linear(&format!("{p}.attn_q"), width, h)?,
             k: linear(&format!("{p}.attn_k"), width, h)?,
             v: linear(&format!("{p}.attn_v"), width, h)?,
-            forget_down: linear(&format!("{p}.ssm_f_a"), kc.head_dim, h)?,
-            forget_up: linear(&format!("{p}.ssm_f_b"), width, kc.head_dim)?,
+            forget_down: if low_forget { Some(linear(&format!("{p}.ssm_f_a"), kc.head_dim, h)?) } else { None },
+            forget_up: if low_forget { linear(&format!("{p}.ssm_f_b"), width, kc.head_dim)? } else { linear(&format!("{p}.ssm_f"), width, h)? },
             beta: linear(&format!("{p}.ssm_beta"), kc.heads, h)?,
-            gate_down: linear(&format!("{p}.ssm_g_a"), kc.head_dim, h)?,
-            gate_up: linear(&format!("{p}.ssm_g_b"), width, kc.head_dim)?,
+            gate_down: if low_gate { Some(linear(&format!("{p}.ssm_g_a"), kc.head_dim, h)?) } else { None },
+            gate_up: if low_gate { linear(&format!("{p}.ssm_g_b"), width, kc.head_dim)? } else { linear(&format!("{p}.ssm_g"), width, h)? },
             conv,
             dt_bias: vector(mapping, &format!("{p}.ssm_dt.bias"), width)?,
             rate: a.iter().map(|v| -v).collect(),
@@ -58,17 +62,13 @@ impl Kda {
         }))
     }
 
-    pub(super) fn linears_mut(&mut self) -> [&mut Linear; 8] {
-        [
-            &mut self.q,
-            &mut self.k,
-            &mut self.v,
-            &mut self.forget_down,
-            &mut self.forget_up,
-            &mut self.beta,
-            &mut self.gate_down,
-            &mut self.gate_up,
-        ]
+    pub(super) fn linears_mut(&mut self) -> Vec<&mut Linear> {
+        let mut all = vec![&mut self.q, &mut self.k, &mut self.v];
+        all.extend(self.forget_down.iter_mut());
+        all.extend([&mut self.forget_up, &mut self.beta]);
+        all.extend(self.gate_down.iter_mut());
+        all.push(&mut self.gate_up);
+        all
     }
 }
 
@@ -152,9 +152,15 @@ impl RustDecoder {
             qkv.extend_from_slice(&kk[r * width..(r + 1) * width]);
             qkv.extend_from_slice(&v[r * width..(r + 1) * width]);
         }
-        let forget = k.forget_up.forward(&k.forget_down.forward(x)?)?;
+        let forget = match &k.forget_down {
+            Some(down) => k.forget_up.forward(&down.forward(x)?)?,
+            None => k.forget_up.forward(x)?,
+        };
         let beta = k.beta.forward(x)?;
-        let gate = k.gate_up.forward(&k.gate_down.forward(x)?)?;
+        let gate = match &k.gate_down {
+            Some(down) => k.gate_up.forward(&down.forward(x)?)?,
+            None => k.gate_up.forward(x)?,
+        };
         let mut out = vec![0.0f32; rows * width];
         let blank = || LayerState { len: 0, conv: vec![0.0; conv_dim * (kc.conv_kernel - 1)], rec: vec![0.0; kc.heads * kc.head_dim * kc.head_dim] };
         self.for_each_run(layer, tables, lengths, &blank, |start, end, state| {

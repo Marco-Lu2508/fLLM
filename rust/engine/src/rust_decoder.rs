@@ -2582,6 +2582,10 @@ impl RustDecoder {
                 }
             }
             Attn::Mla(_) => {
+                if layer.attn_gate.is_some() {
+                    // the device attention has no per-head output gate for latent attention
+                    return Some("a latent attention output gate");
+                }
                 if (layer.indexer.is_some() || layer.dsa_shared) && !self.dsa_dense {
                     if self.dsa_exact_on_device {
                         return Some("the sparse-attention indexer");
@@ -7242,6 +7246,9 @@ impl RustDecoder {
                             let sparse = cfg.indexer.is_some() && !self.dsa_dense && (layer.indexer.is_some() || layer.dsa_shared);
                             let (qkv, q_low) = self.mla_qkv_low(m, &normed, positions, table, sparse && layer.indexer.is_some())?;
                             latent_qkv = qkv;
+                            if let Some(gate) = &layer.attn_gate {
+                                gate_values = Some(gate.forward(&normed)?);
+                            }
                             if sparse {
                                 dsa_rows = Some(self.dsa_select(i, layer, &normed, q_low.as_deref(), positions, table, tables, lengths)?);
                             }

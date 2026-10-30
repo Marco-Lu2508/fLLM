@@ -931,7 +931,8 @@ impl Plan {
         if raw == "hy_v4" {
             return crate::hy4::plan(cfg);
         }
-        if matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
+        let ling_hybrid = raw == "bailing_hybrid" && cfg.get("layer_types").and_then(Value::as_array).is_some_and(|t| t.iter().any(|v| v.as_str() == Some("linear_attention")));
+        if ling_hybrid || matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
             return crate::kimi_linear::plan(cfg);
         }
         if matches!(raw.as_str(), "step3p5" | "step3p7_text") {
@@ -2638,6 +2639,18 @@ impl Plan {
         if self.arch == "deepseek4" {
             return crate::deepseek4::map(self, n);
         }
+        let ling_renamed;
+        let n = if self.arch == "kimi-linear" {
+            match crate::kimi_linear::normalize(n) {
+                Some(r) => {
+                    ling_renamed = r;
+                    ling_renamed.as_str()
+                }
+                None => n,
+            }
+        } else {
+            n
+        };
         let hy_renamed;
         let n = if self.arch == "hy4" {
             if let Some(m) = crate::hy4::map_hc(n) {
@@ -2853,7 +2866,7 @@ impl Plan {
                 }
             }
             if self.arch == "kimi-linear" {
-                if let Some(m) = crate::kimi_linear::map(i, suf) {
+                if let Some(m) = crate::kimi_linear::map(i, suf, self.kinds.get(idx as usize) == Some(&b'K')) {
                     return Ok(m);
                 }
             }

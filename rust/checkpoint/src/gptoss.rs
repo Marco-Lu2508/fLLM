@@ -286,6 +286,15 @@ pub(crate) fn split_chunked(
                     ));
                 }
             }
+            "conv1d_qkv" => {
+                // one depthwise convolution over the concatenated q, k and v channels `[3 * W, 1, K]`: GGUF keeps three tensors
+                let (total, taps) = (t.shape[0] as usize, *t.shape.last().ok_or("empty convolution")? as usize);
+                let w3 = total / 3;
+                for (n, which) in ["q", "k", "v"].iter().enumerate() {
+                    let bytes = rows_of(n * w3, w3, taps)?;
+                    result.push(out(name(&format!("ssm_conv1d_{which}.weight")), vec![taps as u64, 1, w3 as u64], &dtype, bytes));
+                }
+            }
             "experts_gate" | "experts_up" => {
                 // separate stacked tensors `[E, F, H]` (Step-3.5 Hub files)
                 let (e, f, h) = (

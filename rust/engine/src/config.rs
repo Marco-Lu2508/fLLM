@@ -576,6 +576,7 @@ impl ModelConfig {
                     | "mistral"
                     | "deepseek"
                     | "deepseek2"
+                    | "kimi-linear"
                     | "ernie4_5"
                     | "helium"
                     | "ernie4_5moe"
