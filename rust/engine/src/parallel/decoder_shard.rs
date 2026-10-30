@@ -30,6 +30,8 @@ pub(super) fn placeholder_layer() -> Layer {
         value_moe: None,
         xielu: None,
         sinks: None,
+        attn_sub_norm: None,
+        ffn_sub_norm: None,
         out: dummy_linear(),
         ffn: Ffn::None,
         attn_norm: None,
@@ -109,6 +111,9 @@ pub(super) fn shard_layer(par: &ParCtx, layer: &mut Layer, index: usize, cfg: &M
     }
     let r = par.tp_rank;
     let p = format!("blk.{index}");
+    if layer.attn_sub_norm.is_some() || layer.ffn_sub_norm.is_some() {
+        return Err(format!("{p}: sub-norms over the attention output and the feed-forward activation cannot be split across tensor-parallel ranks"));
+    }
     match &mut layer.attn {
         Attn::None => {}
         Attn::Std { q, k, v } => {

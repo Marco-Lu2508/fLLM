@@ -498,6 +498,7 @@ impl ModelConfig {
             neox: !matches!(
                 a,
                 "llama"
+                    | "bitnet"
                     | "muse-glimmer"
                     | "mistral"
                     | "deepseek"
@@ -682,7 +683,7 @@ impl ModelConfig {
                 }
                 "falcon" | "mpt" | "zamba2" => Activation::GeluErf,
                 "opt" => Activation::Relu,
-                "arcee" | "nemotron" | "nemotron_h" | "nemotron_h_moe" | "jais2" | "nanochat"
+                "arcee" | "bitnet" | "nemotron" | "nemotron_h" | "nemotron_h_moe" | "jais2" | "nanochat"
                 | "persimmon" => Activation::ReluSquared,
                 "gptneox" => Activation::GeluErf,
                 _ => Activation::Silu,

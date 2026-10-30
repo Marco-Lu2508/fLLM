@@ -90,6 +90,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "ministral3",
     "ernie4_5",
     "helium",
+    "bitnet",
     "hunyuan-dense",
     "exaone4",
     "olmo3",

@@ -2523,7 +2523,7 @@ pub(crate) fn row_permutation(
         }
         return Ok(Some(order));
     }
-    if !matches!(arch, "llama" | "mistral" | "granite" | "muse-glimmer" | "deepseek" | "exaone" | "minicpm") {
+    if !matches!(arch, "llama" | "mistral" | "granite" | "muse-glimmer" | "deepseek" | "exaone" | "minicpm" | "bitnet") {
         return Ok(None);
     }
     let count = if name.ends_with("attn_q.weight") || name.ends_with("attn_q.bias") {

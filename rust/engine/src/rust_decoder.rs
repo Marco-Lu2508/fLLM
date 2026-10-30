@@ -303,6 +303,10 @@ struct Layer {
     xielu: Option<[f32; 4]>,
     /// Learned per-head logit that joins the softmax denominator (GPT-OSS).
     sinks: Option<Vec<f32>>,
+    /// RMS norm over the attention output in front of the output projection (BitNet).
+    attn_sub_norm: Option<Vec<f32>>,
+    /// RMS norm over `act(gate) * up` in front of the down projection (BitNet).
+    ffn_sub_norm: Option<Vec<f32>>,
     out: Linear,
     ffn: Ffn,
     attn_norm: Option<Norm>,
@@ -1894,6 +1898,16 @@ impl RustDecoder {
                 value_moe,
                 xielu,
                 sinks,
+                attn_sub_norm: if has_tensor(mapping, &format!("{p}.attn_sub_norm.weight")) {
+                    Some(vector(mapping, &format!("{p}.attn_sub_norm.weight"), cfg.layer_heads(i) * cfg.layer_value_dim(i))?)
+                } else {
+                    None
+                },
+                ffn_sub_norm: if has_tensor(mapping, &format!("{p}.ffn_sub_norm.weight")) {
+                    Some(vector(mapping, &format!("{p}.ffn_sub_norm.weight"), cfg.layer_ff(i))?)
+                } else {
+                    None
+                },
                 out,
                 ffn,
                 attn_norm: load_norm(mapping, &format!("{p}.attn_norm"), hidden)?,
@@ -2401,6 +2415,9 @@ impl RustDecoder {
         }
         match &layer.attn {
             Attn::Std { .. } => {
+                if layer.attn_sub_norm.is_some() {
+                    return Some("an attention sub-norm");
+                }
                 // routed value experts (MoVA) are computed by the host reference inside an otherwise device layer
                 let gated = layer.output_gate || layer.attn_gate.is_some();
                 if gated && (!arch_ok || !gate_ok) {
@@ -2479,7 +2496,9 @@ impl RustDecoder {
                 }
             }
             Ffn::Gated { .. } => {
-                if native(cfg.activation) {
+                if layer.ffn_sub_norm.is_some() {
+                    Some("a feed-forward sub-norm")
+                } else if native(cfg.activation) {
                     None
                 } else {
                     Some("an activation without a device kernel")
@@ -6326,6 +6345,9 @@ impl RustDecoder {
                         .zip(u.par_iter())
                         .for_each(|(g, u)| *g = activate(activation, *g) * u);
                 }
+                if let Some(weight) = &layer.ffn_sub_norm {
+                    rms(g, weight, self.cfg.eps);
+                }
                 down.forward(g)
             }
             Ffn::None => Err("layer without a feed-forward".into()),
@@ -6900,6 +6922,9 @@ impl RustDecoder {
                         }
                     }
                     trace.mark(4);
+                    if let Some(weight) = &layer.attn_sub_norm {
+                        rms(&mut attn, weight, cfg.eps);
+                    }
                     dump_layer("attnout", i, &attn);
                     layer.out.forward(&attn)?
                 };

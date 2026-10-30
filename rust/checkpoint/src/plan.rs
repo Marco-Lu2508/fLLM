@@ -194,6 +194,7 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
         "ministral3" => (Family::Llama, "ministral3"),
         "ernie4_5" => (Family::Llama, "ernie4_5"),
         "helium" => (Family::Llama, "helium"),
+        "bitnet" => (Family::Llama, "bitnet"),
         "hunyuan_v1_dense" => (Family::Llama, "hunyuan-dense"),
         "exaone4" => (Family::Olmo2, "exaone4"),
         "olmo3" => (Family::Olmo2, "olmo3"),
@@ -938,7 +939,7 @@ impl Plan {
             .or_else(|| cfg.get("hidden_act"))
             .and_then(Value::as_str)
             .unwrap_or(match family {
-                _ if arch == "arcee" => "relu2",
+                _ if matches!(arch, "arcee" | "bitnet") => "relu2",
                 _ if matches!(arch, "jais2" | "nanochat" | "nemotron") => "relu2",
                 _ if arch == "persimmon" => "relu2",
                 _ if arch == "apertus" => "xielu",
@@ -950,7 +951,7 @@ impl Plan {
             })
             .to_ascii_lowercase();
         let wanted: &[&str] = match family {
-            _ if matches!(arch, "arcee" | "jais2" | "nanochat" | "nemotron" | "persimmon") => {
+            _ if matches!(arch, "arcee" | "bitnet" | "jais2" | "nanochat" | "nemotron" | "persimmon") => {
                 &["relu2"]
             }
             _ if arch == "apertus" => &["xielu"],
@@ -2729,6 +2730,8 @@ impl Plan {
                 "post_mlp_layernorm.weight" if self.arch == "afmoe" => {
                     Some(("post_ffw_norm.weight", false))
                 }
+                "self_attn.attn_sub_norm.weight" => Some(("attn_sub_norm.weight", false)),
+                "mlp.ffn_sub_norm.weight" => Some(("ffn_sub_norm.weight", false)),
                 "self_attn.gate_proj.weight" | "self_attn.g_proj.weight" => Some(("attn_gate.weight", false)),
                 "self_attn.sinks" | "self_attn.attention_sink_bias" => Some(("attn_sinks.weight", false)),
                 "post_norm1.weight" => Some(("post_attention_norm.weight", false)),
