@@ -538,7 +538,20 @@ pub fn status_json() -> Value {
         },
         "pull": {"busy": pull.busy, "model": pull.tag, "line": pull.line, "error": pull.error},
         "error": error,
+        "native": native_status(),
     })
+}
+
+/// State of fLLM's own XDNA kernels (`--device npu`), shown on the same card as FastFlowLM.
+fn native_status() -> Value {
+    #[cfg(feature = "npu-xdna-native")]
+    {
+        super::xdna::native::status()
+    }
+    #[cfg(not(feature = "npu-xdna-native"))]
+    {
+        json!({"compiled": false})
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -552,6 +565,10 @@ Runs models on the NPU of an AMD Ryzen AI processor through FastFlowLM (https://
   pull MODEL       download a model (for example llama3.2:3b)
   serve MODEL      run it until you press Ctrl-C and print the address of its OpenAI-compatible interface;
                    --register also lists it in the Studio as the provider \"AMD NPU (FastFlowLM)\" while it runs
+  build-shim       builds the small helper library over XRT that fLLM's own NPU kernels need (C++ compiler and libxrt-dev required)
+  native-bench [ROWS COLS BATCH FORMAT [ITERS]]
+                   times one projection on the NPU with fLLM's own kernels against the CPU kernels (default 3072 3072 512 q4_k);
+                   needs the XDNA shim, see docs/npu-xdna.md
 FLLM_FLM_PATH names the flm program when it is not on the PATH.";
 
 pub fn cli(args: &[String], register: &dyn Fn(&str, &str) -> Result<(), String>, unregister: &dyn Fn()) -> Result<(), String> {
@@ -564,6 +581,27 @@ pub fn cli(args: &[String], register: &dyn Fn(&str, &str) -> Result<(), String>,
         "status" => {
             println!("{}", serde_json::to_string_pretty(&status_json()).map_err(|e| e.to_string())?);
             Ok(())
+        }
+        "build-shim" => {
+            #[cfg(feature = "npu-xdna-native")]
+            {
+                let path = super::xdna::native::shim::build_from_embedded()?;
+                println!("built {}", path.display());
+                Ok(())
+            }
+            #[cfg(not(feature = "npu-xdna-native"))]
+            Err("this build has no native XDNA backend".to_owned())
+        }
+        "native-bench" => {
+            #[cfg(feature = "npu-xdna-native")]
+            {
+                let num = |i: usize, default: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(default);
+                let format = args.get(4).map_or("q4_k", String::as_str);
+                println!("{}", super::xdna::native::bench::run(num(1, 3072), num(2, 3072), num(3, 512), format, num(5, 5))?);
+                Ok(())
+            }
+            #[cfg(not(feature = "npu-xdna-native"))]
+            Err("this build has no native XDNA backend".to_owned())
         }
         "list" => {
             let path = flm_path().ok_or("FastFlowLM is not installed (see `fllm-rs amd-npu status`)")?;

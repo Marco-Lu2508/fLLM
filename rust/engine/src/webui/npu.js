@@ -56,11 +56,11 @@
       }
       if (npu.state === 'ready' && runtime.version) summary = `Ready (experimental), OpenVINO ${runtime.version}. Choose NPU under Advanced when you load a model.`;
       if (npu.state === 'unsupported_hardware' && (npu.hardware || []).some((h) => h.vendor === 'amd')) {
-        summary = 'An AMD NPU was found. fLLM drives it through FastFlowLM: see the AMD NPU card below.';
+        summary = 'An AMD NPU was found. fLLM drives it with its own kernels (long prompts) or through FastFlowLM: see the AMD NPU card below.';
       }
       const hardware = (npu.hardware || []).map((h) => ({
         label: `${h.name} (${NPU_VENDOR_NAMES[h.vendor] || NPU_VENDOR_NAMES.other})`,
-        badge: h.supported ? 'Intel NPU' : (h.vendor === 'amd' ? 'AMD NPU: through FastFlowLM, see below' : 'detected, not supported yet'),
+        badge: h.supported ? 'Intel NPU' : (h.vendor === 'amd' ? 'AMD NPU: native kernels or FastFlowLM, see below' : 'detected, not supported yet'),
         supported: !!h.supported,
         problem: h.problem || null,
       }));

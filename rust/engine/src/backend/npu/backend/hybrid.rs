@@ -13,7 +13,7 @@
 //! remove that. Verification level: L0 (the delegation is exercised by unit tests with an engine that has no runtime).
 
 use crate::backend::cpu::CpuBackend;
-use crate::backend::npu::openvino::engine::{host_linear, NpuEngine, WeightKey};
+use crate::backend::npu::openvino::engine::{host_linear, NpuEngine, NpuOutput, WeightKey};
 use crate::backend::{
     AttentionParams, Backend, BackendCapabilities, BackendError, DeltaRun, DeltaShape,
     DeltaWeights, DeviceBuffer, DeviceKvCache, DeviceWeight, QuantType, RopeParams, SamplingParams,
@@ -25,26 +25,96 @@ use std::sync::Arc;
 /// Smallest weight (in elements) the registry keeps a host copy of: smaller ones are cheap on the reference path.
 const MIN_REGISTERED_ELEMENTS: usize = 1 << 16;
 
+/// A projection registered with an offload engine.
+pub struct OffloadSlot {
+    pub rows: usize,
+    pub cols: usize,
+    pub quant: QuantType,
+    /// The raw tensor as uploaded, when the engine keeps a copy (the CPU computes the rows the engine leaves with it).
+    pub host: Option<Arc<Vec<u8>>>,
+}
+
+/// What the hybrid backend needs from an NPU engine: weights are registered at upload, and a projection with enough rows is handed to
+/// the engine. The OpenVINO engine and the native AMD XDNA engine implement it.
+pub trait LinearOffload: Send + Sync + 'static {
+    /// Device name for the capabilities.
+    fn label(&self) -> String;
+    /// Remember a projection (`raw` is the tensor as passed to `Backend::upload_weight`).
+    fn register(&self, key: WeightKey, quant: QuantType, rows: usize, cols: usize, raw: &[u8]);
+    fn unregister(&self, key: &WeightKey);
+    fn slot(&self, key: &WeightKey) -> Option<OffloadSlot>;
+    /// Compute the first rows of `x` (`batch * cols` values) through the registered projection; `None` when the engine takes nothing.
+    fn run(&self, key: &WeightKey, slot: &OffloadSlot, x: &[f32], batch: usize) -> Option<NpuOutput>;
+    /// Count `rows` rows the CPU computed although the projection was registered.
+    fn note_cpu_rows(&self, rows: u64);
+    /// End-of-run summary line, when anything was offloaded.
+    fn summary(&self) -> Option<String>;
+}
+
+impl LinearOffload for NpuEngine {
+    fn label(&self) -> String {
+        self.device.full_name.clone()
+    }
+
+    fn register(&self, key: WeightKey, quant: QuantType, rows: usize, cols: usize, raw: &[u8]) {
+        NpuEngine::register(self, key, quant, rows, cols, raw);
+    }
+
+    fn unregister(&self, key: &WeightKey) {
+        NpuEngine::unregister(self, key);
+    }
+
+    fn slot(&self, key: &WeightKey) -> Option<OffloadSlot> {
+        let slot = NpuEngine::slot(self, key)?;
+        Some(OffloadSlot {
+            rows: slot.rows,
+            cols: slot.cols,
+            quant: slot.quant,
+            host: slot.host_arc(),
+        })
+    }
+
+    fn run(&self, key: &WeightKey, _slot: &OffloadSlot, x: &[f32], batch: usize) -> Option<NpuOutput> {
+        let slot = NpuEngine::slot(self, key)?;
+        NpuEngine::run(self, &slot, x, batch)
+    }
+
+    fn note_cpu_rows(&self, rows: u64) {
+        self.stats.cpu_rows.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    fn summary(&self) -> Option<String> {
+        let stats = &self.stats;
+        (stats.npu_calls.load(Ordering::Relaxed)
+            + stats.compiled.load(Ordering::Relaxed)
+            + stats.compile_failures.load(Ordering::Relaxed)
+            > 0)
+            .then(|| NpuEngine::summary(self))
+    }
+}
+
 /// CPU backend plus NPU offload of the large projections.
-pub struct NpuHybridBackend {
+pub struct NpuHybridBackend<E: LinearOffload = NpuEngine> {
     cpu: CpuBackend,
-    engine: Arc<NpuEngine>,
+    engine: Arc<E>,
     caps: BackendCapabilities,
     index: usize,
 }
 
-impl NpuHybridBackend {
+impl NpuHybridBackend<NpuEngine> {
     /// Open the `index`-th OpenVINO NPU.
     pub fn open(index: usize) -> Result<Self, String> {
         let engine = NpuEngine::open(index)?;
         Ok(Self::with_engine(engine, index))
     }
+}
 
+impl<E: LinearOffload> NpuHybridBackend<E> {
     /// Wrap an existing engine (an offline engine in the tests).
-    pub fn with_engine(engine: Arc<NpuEngine>, index: usize) -> Self {
+    pub fn with_engine(engine: Arc<E>, index: usize) -> Self {
         let cpu = CpuBackend::new();
         let mut caps = cpu.capabilities().clone();
-        caps.name = format!("NPU ({}, hybrid with CPU)", engine.device.full_name);
+        caps.name = format!("NPU ({}, hybrid with CPU)", engine.label());
         Self {
             cpu,
             engine,
@@ -53,25 +123,20 @@ impl NpuHybridBackend {
         }
     }
 
-    pub fn engine(&self) -> &Arc<NpuEngine> {
+    pub fn engine(&self) -> &Arc<E> {
         &self.engine
     }
 }
 
-impl Drop for NpuHybridBackend {
+impl<E: LinearOffload> Drop for NpuHybridBackend<E> {
     fn drop(&mut self) {
-        let stats = &self.engine.stats;
-        if stats.npu_calls.load(Ordering::Relaxed)
-            + stats.compiled.load(Ordering::Relaxed)
-            + stats.compile_failures.load(Ordering::Relaxed)
-            > 0
-        {
-            eprintln!("[fllm-rs] {}", self.engine.summary());
+        if let Some(summary) = self.engine.summary() {
+            eprintln!("[fllm-rs] {summary}");
         }
     }
 }
 
-impl Backend for NpuHybridBackend {
+impl<E: LinearOffload> Backend for NpuHybridBackend<E> {
     fn name(&self) -> &str {
         "npu"
     }
@@ -147,12 +212,12 @@ impl Backend for NpuHybridBackend {
 }
 
 /// Stream of the hybrid backend: the CPU stream, with `quantized_linear` offloaded.
-pub struct NpuStream {
+pub struct NpuStream<E: LinearOffload = NpuEngine> {
     cpu: Box<dyn Stream>,
-    engine: Arc<NpuEngine>,
+    engine: Arc<E>,
 }
 
-impl NpuStream {
+impl<E: LinearOffload> NpuStream<E> {
     fn read_f32(&mut self, buffer: &DeviceBuffer) -> Result<Vec<f32>, BackendError> {
         let mut bytes = vec![0u8; buffer.size];
         self.cpu.download(&mut bytes, buffer)?;
@@ -173,7 +238,8 @@ impl NpuStream {
         weight: &DeviceWeight,
         bias: Option<&DeviceBuffer>,
     ) -> Result<bool, BackendError> {
-        let Some(slot) = self.engine.slot(&WeightKey::of(&weight.buffer)) else {
+        let key = WeightKey::of(&weight.buffer);
+        let Some(slot) = self.engine.slot(&key) else {
             return Ok(false);
         };
         let (rows, cols) = (weight.rows, weight.cols);
@@ -206,7 +272,7 @@ impl NpuStream {
         let bias_slice = bias_values.as_deref().map(|b| &b[..rows]);
         let mut result: Vec<f32> = Vec::with_capacity(batch * rows);
         let mut done = 0;
-        if let Some(npu) = self.engine.run(&slot, &input, batch) {
+        if let Some(npu) = self.engine.run(&key, &slot, &input, batch) {
             done = npu.rows_done;
             result = npu.values;
             if let Some(bias) = bias_slice {
@@ -219,17 +285,14 @@ impl NpuStream {
         }
         if done < batch {
             let rest = &input[done * cols..];
-            let Some(raw) = slot.host_bytes() else {
+            let Some(raw) = slot.host.as_deref() else {
                 return Ok(false);
             };
             match host_linear(raw, slot.quant, rows, cols, rest, bias_slice) {
                 Some(values) => result.extend(values),
                 None => return Ok(false),
             }
-            self.engine
-                .stats
-                .cpu_rows
-                .fetch_add((batch - done) as u64, Ordering::Relaxed);
+            self.engine.note_cpu_rows((batch - done) as u64);
         }
         let bytes: Vec<u8> = result.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.cpu.upload(out, &bytes)?;
@@ -237,7 +300,7 @@ impl NpuStream {
     }
 }
 
-impl Stream for NpuStream {
+impl<E: LinearOffload> Stream for NpuStream<E> {
     fn argmax_rows(
         &mut self,
         logits: &DeviceBuffer,

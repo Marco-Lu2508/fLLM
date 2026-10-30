@@ -62,7 +62,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 [features]
 # The x86-64 AVX-512 / AMX kernels are compiled in by default: they are #[target_feature] functions chosen at run time by CPUID,
 # so the binary still runs on any x86-64 CPU (docs/cpu-kernels.md, "Building with the avx512 feature"). `--no-default-features` leaves them out.
-default = ["avx512", "npu-openvino", "computer-use"]
+default = ["avx512", "npu-openvino", "npu-xdna-native", "computer-use"]
 rust-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 cuda = ["dep:libloading"]
 # native backends (all optional; none is in the default set). Verification level of each is in docs/backends.md
@@ -75,6 +75,9 @@ sycl = []
 # the same binary can use an NPU once the runtime is installed (`fllm-rs npu-setup`, or Settings > Hardware in the Studio).
 npu-openvino = ["dep:libloading"]
 npu-xdna = ["dep:libloading"]
+# AMD XDNA NPU driven natively through XRT (our own kernels, no vendor inference library). XRT is reached through a small C++ shim that is opened
+# at run time, so the feature adds no link-time dependency. It shares the hybrid CPU wrapper of the OpenVINO backend, hence the dependency.
+npu-xdna-native = ["npu-openvino"]
 npu-qnn = ["dep:libloading"]
 npu-ane = []
 tpu-pjrt = ["dep:libloading"]

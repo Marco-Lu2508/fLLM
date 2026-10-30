@@ -25,8 +25,17 @@ pub fn create(index: usize) -> Result<Arc<dyn Backend>, String> {
         providers.push("openvino");
         let found = super::openvino::devices::enumerate().len();
         if remaining < found {
-            let backend = hybrid::NpuHybridBackend::open(remaining)?;
+            let backend = hybrid::NpuHybridBackend::<super::openvino::engine::NpuEngine>::open(remaining)?;
             return Ok(Arc::new(backend));
+        }
+        remaining -= found;
+    }
+    #[cfg(feature = "npu-xdna-native")]
+    {
+        providers.push("xdna-native");
+        let found = super::xdna::native::list(0).len();
+        if remaining < found {
+            return super::xdna::native::create(remaining);
         }
         remaining -= found;
     }
@@ -69,7 +78,7 @@ pub fn create(index: usize) -> Result<Arc<dyn Backend>, String> {
     }
     Err(format!(
         "no NPU device {index} (providers in this build: {}); `fllm-rs devices` lists what was found. For Intel NPUs the OpenVINO runtime, the NPU \
-         plugin and the driver are required (rust/engine/src/backend/npu/OPENVINO.md)",
+         plugin and the driver are required (rust/engine/src/backend/npu/OPENVINO.md); for an AMD NPU the helper library over XRT is required (docs/npu-xdna.md)",
         providers.join(", ")
     ))
 }

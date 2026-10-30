@@ -31,6 +31,8 @@ Rust crate licences are checked by `cargo deny` (`deny.toml`, workflow `supply-c
 | rocWMMA (AMD) | MIT | `rocWMMA-MIT.txt` | header library from the ROCm install (not copied) |
 | OpenXLA PJRT / XLA | Apache-2.0 | `OpenXLA-Apache-2.0.txt` | layout facts / constants transcribed to Rust |
 | OpenVINO (Intel) | Apache-2.0 | `OpenVINO-Apache-2.0.txt` | C API signatures redeclared, library loaded at run time |
+| mlir-aie / IRON, Peano (AMD) | Apache-2.0 with LLVM exceptions | `mlir-aie-Apache-2.0-LLVM-exception.txt` | the NPU programs in `rust/engine/xdna/kernels/` are compiled output of its GEMM design (redistributed); the tools are downloaded by a script, not shipped |
+| XRT (AMD / Xilinx) | Apache-2.0 | – (not copied) | public C++ headers used to build the shim; library loaded at run time |
 | ik_llama.cpp, SGLang, FlashAttention, ONNX, onnxruntime, coremltools, StableHLO | MIT / Apache-2.0 / BSD-3-Clause | not needed | design or format reference only, no source text |
 | Qualcomm QAIRT (QNN, Genie) | proprietary | none | binary interface restated, SDK not distributed; terms not checked (see below) |
 | AMD Ryzen AI Software | proprietary | none | documentation only; terms not checked (see below) |
@@ -171,6 +173,17 @@ OpenVINO (Intel Corporation, Apache-2.0, https://github.com/openvinotoolkit/open
 redeclare signatures of the public C API (`openvino/c/*.h`) and load the library at run time (`dlopen`, no link); the IR v11 file format and the NNCF weight-decompression
 pattern (Const, Convert, Multiply, Reshape, MatMul) were rebuilt from documentation and tests (layout facts). No source text was copied and OpenVINO is not distributed with fLLM:
 the user installs it (`pip install openvino` or the Intel archives) under its own licence. The pip package `openvino` was used as a parser check during development only.
+
+### AMD NPU, fLLM's own kernels (XDNA)
+
+* mlir-aie / IRON (AMD and contributors, Apache-2.0 with LLVM exceptions, https://github.com/Xilinx/mlir-aie, v1.4.4; `licenses/mlir-aie-Apache-2.0-LLVM-exception.txt`):
+  the `.xclbin` and the instruction streams in `rust/engine/xdna/kernels/` are **compiled output** of its `whole_array.py` GEMM design and its `aie_kernels` (matrix
+  multiplication and zeroing kernels), built with `scripts/xdna-build-kernels.sh`. The generated binaries are redistributed under the same licence; the sources are not
+  copied into this repository. The build tools themselves (mlir-aie wheel, Peano / llvm-aie nightly 22.0.0.2026102001+4f5df13d, Apache-2.0 with LLVM exceptions) are
+  downloaded by the script and not distributed.
+* XRT (AMD / Xilinx, Apache-2.0, https://github.com/Xilinx/XRT, 2.21.x): the shim `rust/engine/xdna/shim/fllm_xdna_shim.cpp` is compiled against its public C++ headers
+  by the user; XRT is loaded at run time and not distributed.
+* FastFlowLM's `.xclbin` files are AMD's proprietary binaries with an undocumented ABI; the native backend does not use, copy or redistribute them.
 
 ### Other NPU probes
 

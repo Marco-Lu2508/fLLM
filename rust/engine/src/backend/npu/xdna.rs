@@ -5,9 +5,14 @@
 //! (`pci.rs`, library + provider check), a minimal ONNX emitter for a single `MatMul` (`onnx.rs`) and the probe that runs it
 //! (`probe_matmul`). What does not exist: any LLM compute path; `create` reports that and the study explains why.
 //! Verification level: L0 (compiles; never run on a Ryzen AI machine).
+//!
+//! The submodule [`native`] (feature `npu-xdna-native`, in the default set) is the other route: fLLM's own NPU kernels through XRT, no
+//! vendor inference library. It is what `--device npu` uses on a machine with an AMD NPU; see `docs/npu-xdna.md`.
 
-#[cfg(any(feature = "npu-xdna", feature = "npu-qnn"))]
+#[cfg(any(feature = "npu-xdna", feature = "npu-qnn", feature = "npu-xdna-native"))]
 pub mod dl;
+#[cfg(feature = "npu-xdna-native")]
+pub mod native;
 pub mod onnx;
 #[cfg(feature = "npu-xdna")]
 pub mod ort;

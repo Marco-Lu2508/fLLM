@@ -56,7 +56,8 @@ table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on M
 | ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
 | Intel SYCL (Level Zero, Arc/Xe) | L0 | L0 | L0 | L0 | L0† (-> f16) | L0† (-> f16) | L0 |
 | Intel NPU (OpenVINO) | Q4_0, Q8_0: L0 exact (i4/i8, group 32); Q4_1, Q5_x: L0† (requantised) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
-| AMD XDNA NPU | no kernels of fLLM: the models run in FastFlowLM, which fLLM drives and lists as a provider ([user/amd-npu.md](user/amd-npu.md)); the probe of one MatMul through ONNX Runtime/VitisAI remains | – | – | – | – | – | – |
+| AMD XDNA NPU (native) | **L1 on one Ryzen AI 5 PRO 435**: prompt projections only, bf16 x bf16 -> f32 on fLLM's own kernel; Q4_0, Q8_0, Q4_K, Q6_K, F16, BF16, F32 decoded straight to bf16, every other dequantizable format through the generic dequantizer, the rest stays on the CPU ([npu-xdna.md](npu-xdna.md)) | L1 (same kernel; 183 + 576 self-test checks of the `linear`, `host` and `embedding` groups pass) | – | – | – | – | – |
+| AMD XDNA NPU (FastFlowLM) | not fLLM's kernels: the models run in FastFlowLM, which fLLM drives and lists as a provider ([user/amd-npu.md](user/amd-npu.md)); the probe of one MatMul through ONNX Runtime/VitisAI remains | – | – | – | – | – | – |
 | Qualcomm Hexagon NPU | probe only (FP16 MatMul through QNN HTP; Genie wrapper) | – | – | – | – | – | – |
 | Apple Neural Engine | probe only (linear through Core ML) | – | – | – | – | – | – |
 | Google TPU (PJRT/StableHLO) | L0† (host decoding, upload as bf16/f32/int8) | L0† | L0† | L0† | L0† | L0† (Q4Z/Q4ZP/FP8M through `compute::dequantize`) | L0 |
@@ -148,7 +149,8 @@ expert-indexed matvec, combine, gather/scatter; **DeltaNet** = Gated DeltaNet (`
 | ROCm/HIP (RDNA3/RDNA4/CDNA) | L0 (CUDA attention kernels under hipcc; DPP reduction in `attention4.cu`; vLLM paged attention not ported) | CUDA path under hipcc; not reported individually | – (`deltanet.cu` is not built for AMD, `fllm_delta_supported` returns 0, host path) | host (Mamba kernels are built from the CUDA sources only where they compile under hipcc; not verified) |
 | Intel SYCL | L0 (scalar FP32, split-KV; head width <= 512) | L0 (`moe_linear`, top-k, combine, gather/scatter; `moe_route` on the CPU) | – (`supports_delta` = false) | – |
 | Intel NPU (OpenVINO) | CPU reference stream (hybrid backend, dense models only) | CPU | CPU | CPU |
-| AMD XDNA / Qualcomm Hexagon / Apple ANE | – (probe only) | – | – | – |
+| AMD XDNA (native kernels) | CPU reference stream (hybrid backend) or the host decoder with `FLLM_NPU_HOST=1`; only prompt projections run on the NPU | CPU | CPU | CPU |
+| Qualcomm Hexagon / Apple ANE | – (probe only) | – | – | – |
 | Google TPU | L0 (StableHLO, f16 KV only, **no q8_0**) | L0 (top-k, combine, gather/scatter); `moe_linear`, `upload_pointer_table`, `moe_expert_gemm` = `Unsupported` | – (host) | – |
 
 All columns are L0 unless "B" or another level is stated. The Metal kernels have additionally been emulated in C++ on the CPU
@@ -168,6 +170,7 @@ Apple-silicon CI runner are the exception: they execute on a GPU.
 | `aarch64-pc-windows-msvc` | not built |
 | `--device auto`, device numbers (`vulkan:N` = N-th device of the backend), `devices --json` | selection logic covered by unit tests and by runs without a GPU; L0 on hardware |
 | Self-test harness (groups, `--only`, `--quants`, `--list`, `--strict`, `--json`) | the CPU against itself (`selftest-gpu --device cpu`: 220 checks, 0 failed, 35 skipped); this checks the harness, not a GPU backend. CUDA: see the README Status table |
+| AMD XDNA native backend (`npu-xdna-native`) | L1: ran on one Ryzen AI 5 PRO 435 laptop under Linux (own `.xclbin` built with mlir-aie/Peano, run through XRT 2.21.75): the `linear`/`host`/`embedding` self test passes (183 + 576 checks, 388 projections on the NPU), Llama-3.2-3B Q4_K_M gives the processor's greedy text on a 714-token prompt and prompts run at 169-180 tok/s against 131-136 on the 6-thread processor ([npu-xdna.md](npu-xdna.md)). Windows, macOS, other XDNA chips: untested (the Windows cross-build compiles) |
 | Autotuner (`src/autotune.rs`) | L0: called by nothing, nothing measured |
 | Intel NPU backend in the release binary | the cargo feature `npu-openvino` is in the **default** feature set; the OpenVINO runtime is opened at run time (`dlopen` / `LoadLibrary`, no link-time dependency), so the same binary starts on every machine and uses an NPU once the runtime is installed (section 6). Compiled and unit tested; **L0**: it has not run on NPU hardware |
 
@@ -268,8 +271,13 @@ Ordered by area.
 * **NPU (OpenVINO):** no decode gain expected (bandwidth bound); the hybrid stream computes everything except `quantized_linear` single-threaded
   on the reference CPU, and weights are held twice; the host hook (a patch to `compute.rs`, active with `FLLM_NPU_HOST=1`) is the more usable
   route but has only been compiled as a patch; the rates of the cost model are placeholders.
-* **XDNA/Hexagon/ANE:** probes only, no compute path; `create()` always fails with a state message. The Qualcomm QAIRT headers are "Confidential
-  and Proprietary" and are not in the repository. Notes: [research/](research/README.md).
+* **AMD XDNA (native):** prompt projections only (64 or more rows, bf16); decode stays on the CPU; the NPU buffers hold bf16 copies of the
+  weights (2 bytes per weight; budget = a quarter of the free memory), so a model that does not fit streams them again for every call; the
+  `--device npu` hybrid backend needs a second quantized copy and the reference CPU backend (about 6 GB for a 3B model), the host decoder route does not.
+  Needs a helper library built from C++ against XRT (`fllm-rs amd-npu build-shim`). Tested on one machine; [npu-xdna.md](npu-xdna.md).
+* **Hexagon/ANE:** probes only, no compute path; `create()` always fails with a state message. The Qualcomm QAIRT headers are "Confidential
+  and Proprietary" and are not in the repository. Notes: [research/](research/README.md). The old ONNX Runtime / VitisAI probe for AMD
+  (`npu-xdna`, one MatMul) is still there and has no compute path.
 * **TPU:** no q8_0 KV, no DeltaNet, each new shape compiles about 12 programs, no persistent cache; `model.rs` (a whole decoder block as one
   program) is not called by the decoder (no hook); the self-test tolerances assume f32 accuracy, and single FAIL lines are expected for
   `swiglu`, `geglu`, `attention`, `rms_norm`.
@@ -288,7 +296,7 @@ only been compiled and unit tested (L0). What exists:
 | NPU | Status in the app |
 | --- | --- |
 | Intel NPU (Core Ultra, via OpenVINO) | detected; usable after the runtime is installed; **experimental** hybrid backend (L0) |
-| AMD XDNA (Ryzen AI) | detected and shown as "detected, not supported yet"; probe code only, never usable |
+| AMD XDNA (Ryzen AI) | two routes: **fLLM's own kernels** through XRT (feature `npu-xdna-native`, default; usable once the helper library is built with `fllm-rs amd-npu build-shim`; prompt projections only; L1 on one Ryzen AI 5 PRO 435, [npu-xdna.md](npu-xdna.md)) and FastFlowLM ([user/amd-npu.md](user/amd-npu.md)); both are shown on one card |
 | Qualcomm Hexagon | detected and shown as "detected, not supported yet"; probe code only, never usable |
 | Apple Neural Engine | not detected by the app; probe code only (feature `npu-ane`) |
 

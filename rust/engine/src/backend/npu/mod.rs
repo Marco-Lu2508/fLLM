@@ -11,6 +11,8 @@
 pub mod backend;
 pub mod device_info;
 pub mod flm;
+#[cfg(feature = "npu-openvino")]
+pub mod host;
 pub mod openvino;
 pub mod probe;
 pub mod setup;

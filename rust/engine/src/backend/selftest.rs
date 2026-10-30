@@ -473,7 +473,13 @@ fn run_device(name: &str, index: usize, filter: &Filter) -> Result<Result<(), St
             }
             // npu: the projections of 64 or more rows go through the NPU (fp16 compute), so the second pass checks those batch sizes
             if name == "npu" {
+                // the native AMD XDNA engine computes in bf16: the exact pass runs with its offload paused, the fast pass with it on
+                // (set FLLM_XDNA_MIN_ROWS=1 FLLM_XDNA_MIN_ELEMS=1 FLLM_XDNA_MIN_EFF=0 to send the small test shapes to the NPU)
+                #[cfg(feature = "npu-xdna-native")]
+                super::npu::xdna::native::pause_offload(true);
                 let exact = run_backend_pass(&*backend, filter, true);
+                #[cfg(feature = "npu-xdna-native")]
+                super::npu::xdna::native::pause_offload(false);
                 println!();
                 let fast = run_backend_fast_filtered(&*backend, filter);
                 return Ok(exact.and(fast));
@@ -3034,9 +3040,10 @@ impl<'a> Tester<'a> {
 
     /// Bound for the formats the NPU provider re-quantizes before its fp16 matrix multiplication (OPENVINO.md: Q4_0, Q8_0 and f16 / f32 weights are
     /// carried over exactly, every other format becomes symmetric int4, or int8 above 4.5 bits, in groups of 128). That conversion error is the
-    /// design of the backend, not a kernel defect, and shows in the fast pass only (projections of 64 or more rows). 0: no extra allowance.
+    /// design of the backend, not a kernel defect, and shows in the fast pass only (projections of 64 or more rows). 0: no extra allowance. The native
+    /// AMD XDNA engine dequantizes every format exactly into bf16, so it gets none (its error is the bf16 rounding of activations and weights).
     fn npu_requant_tol(&self, kind: u32) -> f64 {
-        if self.device.name() != "npu" || self.pass != "fast" {
+        if self.device.name() != "npu" || self.pass != "fast" || self.device.capabilities().name.contains("native XDNA") {
             return 0.0;
         }
         match kind {

@@ -851,7 +851,7 @@ impl Linear {
     fn npu_host_wants(&self, input: &[f32]) -> bool {
         self.cols != 0
             && self.packed.is_some()
-            && crate::backend::npu::openvino::host_engine().is_some_and(|e| input.len() / self.cols >= e.plan.min_batch)
+            && crate::backend::npu::host::engine().is_some_and(|e| input.len() / self.cols >= e.min_batch())
     }
 
     /// The first rows of `input` computed by the NPU engine (`FLLM_NPU_HOST=1`): `(rows done, values without bias)`.
@@ -860,11 +860,11 @@ impl Linear {
         if self.scale != 1.0 || !self.npu_host_wants(input) {
             return None;
         }
-        let engine = crate::backend::npu::openvino::host_engine()?;
+        let engine = crate::backend::npu::host::engine()?;
         let (kind, packed) = self.packed.as_ref()?;
         let quant = crate::backend::QuantType::from_gguf_type_id(*kind);
         let batch = input.len() / self.cols;
-        let done = engine.offload_host(quant, packed, self.rows, self.cols, input, batch)?;
+        let done = engine.offload(quant, packed, self.rows, self.cols, input, batch)?;
         (done.rows_done > 0).then_some((done.rows_done, done.values))
     }
 

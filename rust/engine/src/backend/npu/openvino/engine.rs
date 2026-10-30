@@ -73,6 +73,11 @@ impl Slot {
     pub fn host_bytes(&self) -> Option<&[u8]> {
         self.host.as_deref().map(Vec::as_slice)
     }
+
+    /// The same copy as a shared handle (for [`crate::backend::npu::backend::hybrid::OffloadSlot`]).
+    pub fn host_arc(&self) -> Option<Arc<Vec<u8>>> {
+        self.host.clone()
+    }
 }
 
 /// Counters for the end-of-run summary.

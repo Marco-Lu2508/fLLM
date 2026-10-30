@@ -108,4 +108,15 @@ test('a cancelled download is not shown as an error', () => {
   assert.strictEqual(m.error, null);
 });
 
+test('the card says whether fLLM\'s native kernels can drive the NPU', () => {
+  assert.strictEqual(L.amdNpuModel(base()).nativeText, '', 'a build without the native backend says nothing');
+  const ready = L.amdNpuModel(base({ native: { compiled: true, available: true, devices: 1 } }));
+  assert.match(ready.nativeText, /Native fLLM kernels: ready/);
+  assert.strictEqual(ready.nativeReady, true);
+  const missing = L.amdNpuModel(base({ native: { compiled: true, available: false, reason: 'the XDNA shim was not found' } }));
+  assert.match(missing.nativeText, /not available \(the XDNA shim was not found\)/);
+  assert.match(missing.nativeText, /FastFlowLM, below, does not need them/);
+  assert.strictEqual(missing.nativeReady, false);
+});
+
 console.log(`${n} tests passed`);

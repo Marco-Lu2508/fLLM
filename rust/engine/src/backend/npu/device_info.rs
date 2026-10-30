@@ -13,6 +13,8 @@ pub fn list(first_index: usize) -> Vec<DeviceInfo> {
     let _ = first_index;
     #[cfg(feature = "npu-openvino")]
     found.extend(super::openvino::devices::list(first_index + found.len()));
+    #[cfg(feature = "npu-xdna-native")]
+    found.extend(super::xdna::native::list(first_index + found.len()));
     #[cfg(feature = "npu-xdna")]
     found.extend(super::xdna::list(first_index + found.len()));
     #[cfg(feature = "npu-qnn")]

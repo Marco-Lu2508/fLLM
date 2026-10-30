@@ -689,10 +689,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--device" => device = value(&args, &mut i, "--device").to_lowercase(),
-            // `all`: the NPU computes every matrix product it can (the defaults send only long prompt blocks to it)
+            // `all`: the NPU computes every matrix product it can (the defaults send only long prompt blocks to it; the native AMD XDNA engine takes its three FLLM_XDNA_MIN_* settings)
             "--npu-mode" => {
                 if value(&args, &mut i, "--npu-mode").eq_ignore_ascii_case("all") {
-                    for (name, setting) in [("FLLM_NPU_MIN_BATCH", "1"), ("FLLM_NPU_CHUNK", "16"), ("FLLM_NPU_MIN_ELEMS", "1"), ("FLLM_NPU_CPU_GOPS", "0.001"), ("FLLM_NPU_OVERHEAD_US", "0")] {
+                    for (name, setting) in [("FLLM_NPU_MIN_BATCH", "1"), ("FLLM_NPU_CHUNK", "16"), ("FLLM_NPU_MIN_ELEMS", "1"), ("FLLM_NPU_CPU_GOPS", "0.001"), ("FLLM_NPU_OVERHEAD_US", "0"), ("FLLM_XDNA_MIN_ROWS", "1"), ("FLLM_XDNA_MIN_ELEMS", "1"), ("FLLM_XDNA_MIN_EFF", "0")] {
                         if env::var_os(name).is_none() {
                             env::set_var(name, setting);
                         }

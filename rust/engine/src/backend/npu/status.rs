@@ -177,6 +177,18 @@ pub fn notices() -> Vec<Notice> {
                     "ready" | "not_in_build" | "installing" => return None,
                     s => (s, state_text(s).to_owned()),
                 }
+            } else if d.vendor == Vendor::Amd && cfg!(feature = "npu-xdna-native") {
+                // an AMD NPU is usable natively when the shim and XRT are there (it is then in the device list); else say what is missing
+                #[cfg(feature = "npu-xdna-native")]
+                match super::xdna::native::available() {
+                    Ok(_) => return None,
+                    Err(reason) => (
+                        "native_unavailable",
+                        format!("native fLLM kernels are not available ({reason}; docs/npu-xdna.md); FastFlowLM can still run models on it (docs/user/amd-npu.md)"),
+                    ),
+                }
+                #[cfg(not(feature = "npu-xdna-native"))]
+                ("unsupported_hardware", state_text("unsupported_hardware").to_owned())
             } else {
                 ("unsupported_hardware", state_text("unsupported_hardware").to_owned())
             };

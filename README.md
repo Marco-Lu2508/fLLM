@@ -141,7 +141,7 @@ speech are not supported; for multimodal checkpoints only the text model is conv
 | `merge-lora`, `gguf-set`, `gguf-split`, `gguf-merge` | LoRA merge, GGUF metadata and shard tools |
 | `devices`, `selftest-cpu`, `selftest-gpu`, `completions` | device inventory, kernel self tests, shell completion |
 | `studio` | start the server and open the Studio (the browser app) |
-| `amd-npu status\|list\|pull\|serve` | the NPU of an AMD Ryzen AI processor through FastFlowLM ([docs/user/amd-npu.md](docs/user/amd-npu.md)) |
+| `amd-npu status\|list\|pull\|serve\|build-shim\|native-bench` | the NPU of an AMD Ryzen AI processor: through FastFlowLM, or with fLLM's own kernels (`build-shim` builds the helper library over XRT, `native-bench` times a projection on the NPU against the processor) ([docs/user/amd-npu.md](docs/user/amd-npu.md), [docs/npu-xdna.md](docs/npu-xdna.md)) |
 | `agent -p "TASK"`, `gateway telegram\|matrix` | the coding agent without a browser, and the same agent behind a Telegram or Matrix chat ([docs/user/agent-cli.md](docs/user/agent-cli.md)) |
 
 `fllm-rs <command> --help` prints the usage of each command; [docs/user/commands.md](docs/user/commands.md)
@@ -260,7 +260,7 @@ What has actually been run on hardware, and what has not:
 | Windows agent tools | The browser tool, computer use (screenshot, displays, refused key chords) and the sandbox ran on one Windows 11 machine with three displays; clicking and typing there were not tried |
 | AMD ROCm (HIP) | Ran on one GPU, a Radeon 840M (`gfx1153`, ROCm 7.1 from Ubuntu 26.04): `linear` passes for every weight format, 821 self-test checks ok, 13 failed (int8 W8A8 against an exact reference, one MoE case), 470 skipped (kernels that exist for NVIDIA only); dense models write the CPU's text (Llama-3.2-3B: 22 tok/s decode, 157 tok/s prompt); MoE models and host-streamed layers fail in a host-to-device copy. Building needs rocWMMA headers that Ubuntu's package lacks (see the changelog) |
 | Intel SYCL, TPU | Compile only (test level L0): not run on the hardware |
-| NPUs | Intel NPU (OpenVINO): ran on one Core Ultra laptop, slower than the processor. **AMD XDNA 2 (Ryzen AI)**: runs through FastFlowLM, which fLLM finds, drives and lists as a provider (Llama-3.2-3B at 31 tok/s decode on a Ryzen AI 5 PRO 435; tested on Linux, see [docs/user/amd-npu.md](docs/user/amd-npu.md)). Qualcomm Hexagon and the Apple Neural Engine: detection only, no compute path |
+| NPUs | Intel NPU (OpenVINO): ran on one Core Ultra laptop, slower than the processor. **AMD XDNA 2 (Ryzen AI)**: two routes, both tested on one Ryzen AI 5 PRO 435 laptop under Linux only. fLLM's **own kernels** (built with the open mlir-aie / Peano toolchain, run through XRT; no vendor library): the long-prompt projections of any GGUF model run on the NPU in bf16 (Llama-3.2-3B Q4_K_M, 1180-token prompt: 169-180 tok/s against 131-136 on the 6-thread processor and 211-216 on the iGPU; the same 60 greedy tokens as the processor; decode stays on the processor), see [docs/npu-xdna.md](docs/npu-xdna.md). And FastFlowLM, which fLLM finds, drives and lists as a provider (Llama-3.2-3B at 31 tok/s decode, 306 prompt), see [docs/user/amd-npu.md](docs/user/amd-npu.md). Qualcomm Hexagon and the Apple Neural Engine: detection only, no compute path |
 
 The test levels (L0 compiles, L1 self test passes on the device, L2 same greedy text as the CPU, L3 speed
 measured) are defined in [docs/test-levels.md](docs/test-levels.md).
@@ -273,7 +273,7 @@ decodes at 92.5 tok/s (llama.cpp 93.5, Ollama 92.5) and has the fastest prompt (
 ahead of vLLM and SGLang (decode 99.5 against 93.0 and 95.2 tok/s, prompt 5244 against 4792 and 4904). fLLM's CPU kernels are 30 to 70 % faster than
 llama.cpp's. On a Radeon 840M laptop the AMD NPU (FastFlowLM, 306 prompt / 31 decode tok/s) and llama.cpp's Vulkan and ROCm paths are faster for the
 prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 tok/s) with a prompt 25 % behind. Where fLLM is behind: its Vulkan
-backend on the NVIDIA card (35 % behind llama.cpp's Vulkan decode), and it has no backend for the NPU.
+backend on the NVIDIA card (35 % behind llama.cpp's Vulkan decode), and its own NPU kernels (prompt only) are slower than FastFlowLM's.
 
 Measured on Google Colab with a single user, greedy decoding, over HTTP (before the latest performance work):
 
@@ -327,6 +327,7 @@ The code and `--help` are authoritative where a page and the program disagree.
 - [docs/user/studio.md](docs/user/studio.md): the Studio and desktop app: chat, the coding agent, browser, computer use, sandbox, skills, MCP, settings, where files are kept
 - [docs/user/commands.md](docs/user/commands.md): every `fllm-rs` subcommand
 - [docs/user/amd-npu.md](docs/user/amd-npu.md): the NPU of an AMD Ryzen AI processor through FastFlowLM
+- [docs/npu-xdna.md](docs/npu-xdna.md): the same NPU with fLLM's own kernels (built from open tools, run through XRT): how, measurements, limits, Windows notes
 - [docs/configuration.md](docs/configuration.md): every `serve` flag and environment variable
 - [docs/user/clients.md](docs/user/clients.md), [docs/user/memory.md](docs/user/memory.md), [docs/user/troubleshooting.md](docs/user/troubleshooting.md): clients, memory planning, error messages
 
@@ -373,6 +374,7 @@ FLLM_CUDA_ARCHS=120 cargo build --release --locked -p fllm-engine --features cud
 | `cuda` | NVIDIA kernels, compiled with `nvcc` (architectures from `FLLM_CUDA_ARCHS`) |
 | `avx512` | x86-64 AVX-512 / AMX CPU kernels; **on by default** (`--no-default-features` leaves them out; chosen at run time by CPUID, so the binary still runs on any x86-64 CPU) |
 | `npu-openvino` | Intel NPU backend (experimental, L0); **on by default**, loads the OpenVINO runtime at run time (`fllm-rs npu-setup`); see [docs/backends.md](docs/backends.md) section 6 |
+| `npu-xdna-native` | AMD XDNA NPU with fLLM's own kernels through XRT (L1 on one laptop); **on by default**, opens a small helper library and XRT at run time, nothing is linked (`fllm-rs amd-npu build-shim`); see [docs/npu-xdna.md](docs/npu-xdna.md) |
 | `hip`, `sycl`, `vulkan`, `metal`, `tpu-pjrt` | optional native backends; the test level differs per backend (Metal: kernel checks in CI, others L0), see [docs/backends.md](docs/backends.md) |
 
 `make test` runs the Rust tests. On Windows see [docs/windows.md](docs/windows.md).

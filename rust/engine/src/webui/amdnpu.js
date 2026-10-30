@@ -18,6 +18,13 @@
       return 'Ready. Choose a model and run it on the NPU.';
     }
 
+    /** The status line of fLLM's own (native) XDNA kernels: `n` is the "native" object of the API state. Empty when the build has none. */
+    function amdNpuNativeText(n) {
+      if (!n || !n.compiled) return '';
+      if (n.available) return 'Native fLLM kernels: ready. Start the server with FLLM_NPU_HOST=1 and the long prompts of any model run on the NPU, the rest on the processor (or choose NPU under Advanced when you load a model).';
+      return `Native fLLM kernels: not available${n.reason ? ` (${n.reason})` : ''}. FastFlowLM, below, does not need them.`;
+    }
+
     /**
      * Everything the card shows, from the API state `s` and the model chosen in the list. No DOM here. `visible` is false when there is no AMD
      * NPU and no FastFlowLM on the computer.
@@ -40,6 +47,8 @@
       return {
         visible: true,
         summary: amdNpuText(s, serving, problems),
+        nativeText: amdNpuNativeText(s.native),
+        nativeReady: !!(s.native && s.native.available),
         tone: running ? 'good' : (s.state === 'needs_attention' || error ? 'warn' : 'muted'),
         hardware: (s.hardware || []).map((h) => ({ label: h.name, problem: h.problem || null })),
         install: s.state === 'flm_missing' ? (flm.install || null) : null,
@@ -94,6 +103,9 @@
       amdNpuChosen = m.selected;
       $('amdNpuSummary').textContent = m.summary;
       $('amdNpuSummary').style.color = m.tone === 'good' ? 'var(--primary)' : '';
+      $('amdNpuNative').textContent = m.nativeText;
+      $('amdNpuNative').style.display = m.nativeText ? '' : 'none';
+      $('amdNpuNative').style.color = m.nativeReady ? 'var(--primary)' : '';
       $('amdNpuHardware').innerHTML = m.hardware.map((h) => `<div class="app-item-desc">${escapeHtml(h.label)}${h.problem ? ` - ${escapeHtml(h.problem)}` : ''}</div>`).join('');
       const install = $('amdNpuInstall');
       install.style.display = m.install ? '' : 'none';
