@@ -1054,6 +1054,11 @@ fn vulkan_shaders() {
             println!("cargo:warning=glslc failed on {source} ({output}) with -O ({status}); compiling it without -O");
             status = compile(false);
         }
+        if !status.success() && source.starts_with("bench_") {
+            // development benchmarks (FLLM_VK_BENCH_LINEAR) may use syntax an older glslc does not know: the benchmark then reports the shader as missing
+            println!("cargo:warning=glslc cannot compile the benchmark shader {source} ({output}); it is left out");
+            continue;
+        }
         assert!(status.success(), "glslc failed on {source} ({output})");
         table.push_str(&format!("    ({output:?}, include_bytes!({:?})),\n", spv.to_string_lossy().replace('\\', "/")));
     }
