@@ -10,6 +10,18 @@
       if (!nav || !content) return;
       const call = (cmd, args) => tauri.invoke(cmd, args || {});
 
+      // A link to another site opens in the default browser; the window stays on the Studio (it has no address bar to come back with).
+      document.addEventListener('click', (e) => {
+        const a = e.target.closest && e.target.closest('a[href]');
+        if (!a) return;
+        let u;
+        try { u = new URL(a.getAttribute('href'), location.href); } catch { return; }
+        if (['http:', 'https:', 'mailto:'].includes(u.protocol) && u.origin !== location.origin) {
+          e.preventDefault();
+          call('open_external', { url: u.href }).catch(() => {});
+        }
+      }, true);
+
       const item = (title, desc, actions) =>
         `<div class="app-card-item"><div class="app-item-info"><div class="app-item-title">${title}</div>` +
         `<div class="app-item-desc">${desc}</div></div><div class="app-item-actions">${actions}</div></div>`;

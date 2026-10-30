@@ -404,20 +404,56 @@
       state.stick = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 90;
     });
 
-    /** Streaming: rewrite only the message that grows. */
+    /**
+     * Makes the children of `dst` equal to those of `src` and touches only what differs. A growing answer then changes its last
+     * block only: text the reader selected, a code block scrolled sideways or an image that has loaded all stay as they are.
+     */
+    function morphChildren(dst, src) {
+      const want = src.childNodes;
+      for (let i = 0; i < want.length; i++) {
+        const n = want[i];
+        const o = dst.childNodes[i];
+        if (!o) { dst.appendChild(n.cloneNode(true)); continue; }
+        if (o.isEqualNode(n)) continue;
+        if (o.nodeType === 3 && n.nodeType === 3) { o.nodeValue = n.nodeValue; continue; }
+        if (o.nodeType === 1 && n.nodeType === 1 && o.nodeName === n.nodeName && o.nodeName !== 'IMG') {
+          for (const a of Array.from(o.attributes)) if (!n.hasAttribute(a.name)) o.removeAttribute(a.name);
+          for (const a of Array.from(n.attributes)) {
+            if (a.name === 'open' && o.nodeName === 'DETAILS' && !o.open) continue; // a box the reader closed stays closed
+            if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+          }
+          morphChildren(o, n);
+          continue;
+        }
+        dst.replaceChild(n.cloneNode(true), o);
+      }
+      while (dst.childNodes.length > want.length) dst.removeChild(dst.lastChild);
+    }
+
+    /** Streaming: rewrite only the message that grows, and in it only the blocks that changed. */
+    const paintPending = new Set();
     let paintQueued = false;
     function paintStreaming(node) {
+      paintPending.add(node);
       if (paintQueued) return;
       paintQueued = true;
       requestAnimationFrame(() => {
         paintQueued = false;
-        const el = $('messagesColumn').querySelector(`[data-node="${node.id}"] .msg-assistant-body`);
-        if (!el) return;
-        const wasOpen = el.querySelector('details.cot-box')?.open;
-        el.innerHTML = assistantInner(node);
-        if (wasOpen === false) { const d = el.querySelector('details.cot-box'); if (d) d.open = false; }
-        const stats = $('messagesColumn').querySelector(`[data-node="${node.id}"] [data-stats]`);
-        if (stats) stats.innerHTML = statsHtml(node);
+        const nodes = Array.from(paintPending);
+        paintPending.clear();
+        for (const n of nodes) {
+          const el = $('messagesColumn').querySelector(`[data-node="${n.id}"] .msg-assistant-body`);
+          if (!el) continue;
+          const html = assistantInner(n);
+          if (el._painted !== html) {
+            el._painted = html;
+            const tpl = document.createElement('div');
+            tpl.innerHTML = html;
+            morphChildren(el, tpl);
+          }
+          const stats = $('messagesColumn').querySelector(`[data-node="${n.id}"] [data-stats]`);
+          if (stats) stats.innerHTML = statsHtml(n);
+        }
         scrollChatToEnd(false);
       });
     }

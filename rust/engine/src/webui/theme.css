@@ -801,3 +801,15 @@ html.dark .btn-destructive { color: #1c0806; }
   #searchModal { padding-top: 8vh; }
   .palette-foot .palette-help { display: none; }
 }
+
+@media (max-width: 760px) {
+  .app-card-header { flex-wrap: wrap; gap: 8px; }
+  .app-card-header > :first-child { flex: 1 1 100%; min-width: 0; }
+  .app-card-header .app-item-actions, .app-card-header > div:last-child:not(:first-child) { flex-wrap: wrap; }
+}
+
+@media (max-width: 760px) {
+  /* rows of buttons and fields that are laid out inline in the markup wrap instead of running off the screen */
+  .settings-pane [style*="display:flex"] { flex-wrap: wrap; }
+  .settings-pane .btn { max-width: 100%; }
+}
