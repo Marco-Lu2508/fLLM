@@ -82,8 +82,8 @@ the next best variant (a message is printed once).
 ## Mixture of experts
 
 There are no buffer device addresses in the core, so `upload_pointer_table` copies the experts of a projection (device to device) into **one arena**
-and returns a `uint32[]` of word offsets; the returned `DeviceBuffer`'s handle carries the arena, which `moe_linear` reads back. The experts exist twice
-on the device while the individual `DeviceWeight`s are alive (the decoder keeps them for the host-routed path). An arena must fit one storage-buffer
+and returns a `uint32[]` of word offsets; the returned `DeviceBuffer`'s handle carries the arena, which `moe_linear` reads back. The decoder then makes the individual weights slices of the arena
+(`alias_weights_into_table`), so the experts are not stored twice. An arena must fit one storage-buffer
 binding; otherwise the call fails and the decoder falls back to the slower path. `upload_bias_table` does the same for the biases. Enabling
 `bufferDeviceAddress` in the core would let `moe_linear_*_bda` replace the copy.
 
@@ -137,7 +137,7 @@ arguments and one call..
 
 * Nothing ran on a device: driver behaviour, barriers (global and conservative), the staging rings, the descriptor paths and all shaders are untested.
 * Prompt processing with float weights (`lin_float.comp`) re-reads each weight row once per eight tokens (not tiled).
-* The experts of a mixture-of-experts layer are stored twice (arena + individual weights).
+* The experts of a mixture-of-experts layer live in an arena; the individual weights are slices of it (`alias_weights_into_table`).
 * A weight, KV layer window or expert arena larger than `maxStorageBufferRange` is rejected (weights are sliced, the others are not).
 * `moe_linear` is a matrix-vector kernel; prompt processing of MoE layers should group tokens per expert as the CPU decoder does.
 * The cooperative-matrix path needs the 16x16x16 f16 shape in subgroup scope, `vulkanMemoryModel`, a pinnable subgroup size and `shaderFloat16`; otherwise it is not planned.

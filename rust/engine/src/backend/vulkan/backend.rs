@@ -159,6 +159,10 @@ impl Backend for VulkanBackend {
         upload::upload_weight(&self.shared, name, raw_bytes, quant_type, rows, cols, bias, scale)
     }
 
+    fn alias_weights_into_table(&self, table: &DeviceBuffer, weights: &mut [&mut DeviceWeight]) -> Result<(), BackendError> {
+        experts::alias_weights(&self.shared, table, weights)
+    }
+
     fn upload_pointer_table(&self, weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {
         experts::pointer_table(&self.shared, weights).inspect_err(|e| {
             log_once(

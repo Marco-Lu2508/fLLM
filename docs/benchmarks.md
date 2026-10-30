@@ -90,7 +90,7 @@ The benchmarks and the tests that came with them found these, all fixed in the s
 * Vulkan prompt matrix shaders: cooperative matrices are 2.2 times faster on the NVIDIA card, the int8 dot product 22 % faster on the Radeon. The backend
   now times both once per device (a few milliseconds) and keeps the faster one.
 * Vulkan decode: two matrix-vector rows per group on AMD instead of one (+12 % on the 840M).
-* HIP/ROCm: first run on an AMD GPU, built for `gfx1153` with the Ubuntu packages (needs rocWMMA headers from AMD's repository, patched for `gfx1153`).
+* HIP/ROCm: first run on an AMD GPU, built for `gfx1153` with the Ubuntu packages (no rocWMMA needed since 2026-10-30).
   Dense models give the CPU's text; MoE models and host-streamed layers fail with "invalid argument" on this APU.
 
 ## Limits

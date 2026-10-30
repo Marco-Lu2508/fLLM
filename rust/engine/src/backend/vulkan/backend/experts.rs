@@ -2,11 +2,11 @@
 //!
 //! The core has no buffer device addresses, so a "table of pointers" is an **arena**: the experts of one projection are copied (on the
 //! device) back to back into one storage buffer, and the table is a `uint32[n_experts]` of word offsets into it (`moe_linear_*_arena`).
-//! The table buffer's handle carries the arena (`ExpertInfo`), which `Stream::moe_linear` reads back. The experts therefore exist twice
-//! on the device (the individual weights stay valid for the host-routed path); buffer device addresses would remove the copy.
+//! The table buffer's handle carries the arena (`ExpertInfo`), which `Stream::moe_linear` reads back. The decoder then makes the individual
+//! weights slices of the arena (`alias_weights`), so the experts do not stay on the device twice.
 
 use super::convert::u32_bytes;
-use super::mem::{view_of, ExpertInfo, VkMem};
+use super::mem::{expert_info, view_of, ExpertInfo, VkMem};
 use super::shared::Shared;
 use crate::backend::vulkan::memory::BufferUsage;
 use crate::backend::vulkan::ops::moe::moe_linear_supported;
@@ -65,15 +65,17 @@ pub(crate) fn pointer_table(sh: &Shared, weights: &[&DeviceWeight]) -> Result<De
         }
     }
     let each = layout.total_bytes;
-    let total = each * weights.len();
+    // every expert starts on a storage-buffer offset boundary, so that `alias_weights` can hand the slices back as the experts' own weights
+    let stride = each.next_multiple_of(sh.align() as usize);
+    let total = stride * weights.len();
     check_arena_size(sh, total, "weights")?;
     let arena = sh.ctx.allocator().alloc_device(total as u64, BufferUsage::COMPUTE)?;
     let mut copies = Vec::with_capacity(weights.len());
     for (e, w) in weights.iter().enumerate() {
-        copies.push((view_of(&w.buffer)?, 0u64, arena.clone(), (e * each) as u64, each as u64));
+        copies.push((view_of(&w.buffer)?, 0u64, arena.clone(), (e * stride) as u64, each as u64));
     }
     sh.device_copy(&copies)?;
-    let offsets: Vec<u32> = (0..weights.len()).map(|e| (e * each / 4) as u32).collect();
+    let offsets: Vec<u32> = (0..weights.len()).map(|e| (e * stride / 4) as u32).collect();
     let info = ExpertInfo {
         arena,
         quant,
@@ -88,6 +90,24 @@ pub(crate) fn pointer_table(sh: &Shared, weights: &[&DeviceWeight]) -> Result<De
         is_bias: false,
     };
     table_buffer(sh, &offsets, info)
+}
+
+/// Makes the weights the slices of the arena behind `table` (made from them by `pointer_table`): the copies they were made from are freed
+/// once nothing else holds them, so the experts exist once on the device.
+pub(crate) fn alias_weights(sh: &Shared, table: &DeviceBuffer, weights: &mut [&mut DeviceWeight]) -> Result<(), BackendError> {
+    let info = expert_info(table)?;
+    if info.is_bias || info.count != weights.len() {
+        return Err(invalid("alias_weights: the table does not belong to these weights"));
+    }
+    let layout = DeviceLayout::new(info.quant, info.rows, info.cols)?;
+    let each = layout.total_bytes;
+    let stride = each.next_multiple_of(sh.align() as usize);
+    let whole = sh.wrap(info.arena.clone(), stride * weights.len());
+    let slices = (0..weights.len()).map(|e| whole.slice(e * stride, each)).collect::<Result<Vec<_>, _>>()?;
+    for (w, s) in weights.iter_mut().zip(slices) {
+        w.buffer = s;
+    }
+    Ok(())
 }
 
 /// Arena + float-offset table for the biases of the experts (every weight must have one).

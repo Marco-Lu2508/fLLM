@@ -300,7 +300,7 @@ pub fn studio_admin_blocked_for(
         // the remembered notes about the user are personal: this machine only, reads included
         || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || path == "/api/studio/agent/browser" || path.starts_with("/api/studio/agent/browser/") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory";
+    let reads_workspace = path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || path == "/api/studio/agent/browser" || path.starts_with("/api/studio/agent/browser/") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory" || path == "/api/studio/npu/amd";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)

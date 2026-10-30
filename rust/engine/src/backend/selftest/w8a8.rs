@@ -238,6 +238,10 @@ impl Tester<'_> {
     /// A Q8_0 weight on the int8 tensor cores (`FLLM_INT8_GEMM=1`): the activations are quantized per token and 32 values.
     fn int8_q8_engine(&mut self, rows: usize, cols: usize, batch: usize, with_bias: bool) -> Result<Outcome, BackendError> {
         self.claim = None;
+        // the int8 tensor-core GEMM exists for NVIDIA only: on other devices a Q8_0 prompt runs the regular kernel (f32 activations), which this check's recipe does not describe
+        if self.device.name() != "CPU" && device_cc(self.device.device_id()) < 75 {
+            return Err(BackendError::UnsupportedOperation("the int8 W8A8 GEMM needs an NVIDIA GPU (sm_75 or newer)".into()));
+        }
         let kind = 8u32;
         let weights = random_kind(&mut self.rng, kind, rows, cols);
         let x = token_gains(&mut self.rng, batch, cols);

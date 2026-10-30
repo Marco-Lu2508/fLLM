@@ -167,7 +167,7 @@ int fllm_cuda_device_info(int dev, char *name, size_t name_len, int *cc_major, i
 #if defined(__HIPCC__)
     snprintf(name, name_len, "%s (%s)", p.name, p.gcnArchName);
     *cc_major = 0;  // the Rust side prints "CUDA/ROCm" for 0
-    *cc_minor = 0;
+    *cc_minor = p.integrated ? 1 : 0;  // 1: an APU, its memory is the system's
 #else
     snprintf(name, name_len, "%s", p.name);
     *cc_major = p.major;
@@ -179,6 +179,14 @@ int fllm_cuda_device_info(int dev, char *name, size_t name_len, int *cc_major, i
     CHECK(cudaSetDevice(dev), "cudaSetDevice");
     CHECK(cudaMemGetInfo(free_bytes, total_bytes), "cudaMemGetInfo");
     cudaSetDevice(prev);
+#if defined(__HIPCC__)
+    // An APU reports the whole shared memory as free, but the ROCm runtime hands out only about three quarters of it to one process (a Radeon 840M with
+    // 7.7 GB reported failed with "HSA exception: MemoryRegion::BlockAllocator::alloc failed" at about 6 GB, and ran with 5.4 GB).
+    if (p.integrated) {
+        *free_bytes = *free_bytes / 4 * 3;
+        *total_bytes = *total_bytes / 4 * 3;
+    }
+#endif
     return 0;
 }
 

@@ -443,7 +443,7 @@ at run time, so the same binary also starts without it; Windows default architec
 AMD today: all integer-dot-product decode kernels (Q4_0 ... Q8_0, Q4_K/Q5_K/Q6_K, IQ4, MXFP4), the FP32 GEMM, the plain and
 split-KV attention kernels, MoE and the paged KV cache. The NVIDIA tensor-core kernels (prompt GEMMs, FlashInfer/CUTLASS paths,
 NVFP4) are compiled out (`fllm_cc()` reports 10, `hip_stubs.cu` declines the calls), so prompt processing uses the generic decode-and-multiply GEMM of
-`tc_gemm.cu` on the matrix cores of RDNA3/4 and CDNA (rocWMMA, 16x16x16 fragments; RDNA2 and older use the FP32 GEMM). The CI job `hip-build` compiles this configuration.
+`tc_gemm.cu` on the matrix cores of RDNA3/4 and CDNA (rocWMMA, 16x16x16 fragments, only with `-DFLLM_HIP_ROCWMMA`; the default HIP build uses the MFMA / WMMA GEMM of `hip_gemm.cu`; RDNA2 and older use the FP32 GEMM). The CI job `hip-build` compiles this configuration.
 
 ### bitsandbytes (NF4, FP4, LLM.int8())
 

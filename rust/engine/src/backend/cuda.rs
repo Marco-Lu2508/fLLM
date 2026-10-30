@@ -739,7 +739,7 @@ fn check(code: c_int) -> Result<(), BackendError> {
         let message = last_error();
         // the ROCm build has stubs for the kernels that exist for NVIDIA only (device MoE routing, GPU sampling, latent MLA ...): that is "not supported
         // here", which callers answer with their host path and the self test skips, not a failed driver call
-        if message.contains("needs an NVIDIA GPU") {
+        if message.contains("needs an NVIDIA GPU") || message.contains("not available in the ROCm build") {
             Err(BackendError::UnsupportedOperation(message))
         } else {
             Err(BackendError::DriverError(message))
@@ -871,7 +871,8 @@ pub fn list_devices(first_index: usize) -> Vec<DeviceInfo> {
                 index: first_index + dev as usize,
                 name,
                 description: if major == 0 { format!("CUDA/ROCm, {sms} CUs") } else { format!("CUDA, sm_{major}{minor}, {sms} SMs") },
-                dev_type: DeviceType::Gpu,
+                // an AMD APU (the C++ side sets `minor` to 1): its memory is the system's
+                dev_type: if major == 0 && minor == 1 { DeviceType::IntegratedGpu } else { DeviceType::Gpu },
                 free_memory_bytes: free as u64,
                 total_memory_bytes: total as u64,
             })
@@ -1656,6 +1657,29 @@ impl Drop for CudaStream {
 }
 
 impl CudaStream {
+    /// Copies host bytes to the device. The weights of a host-streamed layer are page-locked piece by piece (`pin`): a tensor whose first or last page
+    /// belongs to its neighbour is covered by several registered pieces. CUDA copies across pieces; the HSA runtime of ROCm refuses it ("invalid argument",
+    /// seen on a Radeon 840M with MoE experts), so with the `hip` feature such a copy is done piece by piece.
+    fn upload_host(&mut self, dst: *mut u8, src: &[u8]) -> Result<(), BackendError> {
+        if !cfg!(feature = "hip") || self.pinned.is_empty() || src.is_empty() {
+            // SAFETY: the callers sized `dst` for `src`.
+            return check(unsafe { fllm_cuda_upload(self.raw, dst.cast(), src.as_ptr().cast(), src.len()) });
+        }
+        let (start, end) = (src.as_ptr() as usize, src.as_ptr() as usize + src.len());
+        let mut cur = start;
+        while cur < end {
+            let next = match self.pinned.range(..=cur).next_back() {
+                Some((_, &e)) if e > cur => e,
+                _ => self.pinned.range(cur..).next().map_or(end, |(&s, _)| s),
+            };
+            let stop = next.min(end).max(cur + 1);
+            // SAFETY: `cur - start .. stop - start` lies inside `src`, and `dst` holds `src.len()` bytes.
+            check(unsafe { fllm_cuda_upload(self.raw, dst.add(cur - start).cast(), cur as *const c_void, stop - cur) })?;
+            cur = stop;
+        }
+        Ok(())
+    }
+
     /// Page-lock the pages of `raw` that are not locked yet (read-only file mappings qualify). Failure disables pinning:
     /// copies from pageable memory work too, at about half the speed.
     fn pin(&mut self, raw: &[u8]) {
@@ -1735,8 +1759,25 @@ impl CudaStream {
     }
 
     fn weight_to_host(&mut self, w: &DeviceWeight) -> Result<DeviceWeight, BackendError> {
+        let mut buffer = self.copy_to_host(&w.buffer)?;
+        let id = w.quant_type.to_gguf_type_id();
+        // the device stores the GGUF blocks of these formats in its own aligned layout; the CPU backend reads the GGUF one
+        if matches!(id, 2 | 3 | 6 | 7 | 8 | 14 | 20) && w.cols.is_multiple_of(if id == 14 { 256 } else { 32 }) {
+            let mut bytes = vec![0u8; buffer.size];
+            self.cpu_stream.download(&mut bytes, &buffer)?;
+            let (rows, cols) = (w.rows, w.cols);
+            let back = match id {
+                8 => q8_0_from_device_layout(&bytes, rows, cols),
+                14 => bytes.chunks_exact(224).flat_map(|b| b[..210].iter().copied()).collect(),
+                20 => legacy_from_device_layout(&bytes, rows, cols, 2),
+                k => legacy_from_device_layout(&bytes, rows, cols, k as u32),
+            };
+            let mut host = self.cpu.allocate_buffer(back.len())?;
+            self.cpu_stream.upload(&mut host, &back)?;
+            buffer = host;
+        }
         Ok(DeviceWeight {
-            buffer: self.copy_to_host(&w.buffer)?,
+            buffer,
             bias: w.bias.as_ref().map(|b| self.copy_to_host(b)).transpose()?,
             perm: w.perm.as_ref().map(|p| self.copy_to_host(p)).transpose()?,
             scale: 1.0,
@@ -2365,8 +2406,7 @@ impl Stream for CudaStream {
                 dst.size
             )));
         }
-        // SAFETY: bounds checked above.
-        check(unsafe { fllm_cuda_upload(self.raw, dev_ptr(dst)?.cast(), src.as_ptr().cast(), src.len()) })
+        self.upload_host(dev_ptr(dst)?, src)
     }
 
     fn download(&mut self, dst: &mut [u8], src: &DeviceBuffer) -> Result<(), BackendError> {
@@ -2825,15 +2865,17 @@ impl Stream for CudaStream {
                 self.staging_raw = Some(self.alloc((raw.len() + raw.len() / 4 + 255) & !255)?);
             }
             let tmp = self.staging_raw.as_ref().ok_or_else(|| invalid("staging buffer missing"))?;
-            // SAFETY: `tmp` holds at least `raw.len()` bytes; pageable memory is staged before the call returns.
-            check(unsafe { fllm_cuda_upload(self.raw, dev_ptr(tmp)?.cast(), raw.as_ptr().cast(), raw.len()) })?;
+            // `tmp` holds at least `raw.len()` bytes; pageable memory is staged before the call returns.
+            let tmp = dev_ptr(tmp)?;
+            self.upload_host(tmp, raw)?;
+            let tmp = self.staging_raw.as_ref().ok_or_else(|| invalid("staging buffer missing"))?;
             // SAFETY: both buffers cover the converted weight.
             check(unsafe {
                 fllm_cuda_repack(self.raw, dev_ptr(&staging)?.cast(), dev_ptr(tmp)?.cast(), kind as c_int, rows, cols)
             })?;
         } else {
-            // SAFETY: `staging` holds `raw.len()` bytes.
-            check(unsafe { fllm_cuda_upload(self.raw, dev_ptr(&staging)?.cast(), raw.as_ptr().cast(), raw.len()) })?;
+            // `staging` holds `raw.len()` bytes.
+            self.upload_host(dev_ptr(&staging)?, raw)?;
         }
         let weight = DeviceWeight {
             name: String::from("host-streamed"),
@@ -4737,6 +4779,56 @@ fn q8_0_device_layout(raw: &[u8], rows: usize, cols: usize) -> Vec<u8> {
         for b in 0..blocks {
             dst[b * 2..b * 2 + 2].copy_from_slice(&src[b * 34..b * 34 + 2]);
             dst[padded * 2 + b * 32..padded * 2 + (b + 1) * 32].copy_from_slice(&src[b * 34 + 2..(b + 1) * 34]);
+        }
+    }
+    out
+}
+
+/// The GGUF blocks back out of `q8_0_device_layout`.
+fn q8_0_from_device_layout(dev: &[u8], rows: usize, cols: usize) -> Vec<u8> {
+    let blocks = cols / 32;
+    let padded = padded_blocks(cols);
+    let (row_bytes, in_row) = (blocks * 34, padded * 34);
+    let mut out = vec![0u8; rows * row_bytes];
+    for r in 0..rows {
+        let src = &dev[r * in_row..(r + 1) * in_row];
+        let dst = &mut out[r * row_bytes..(r + 1) * row_bytes];
+        for b in 0..blocks {
+            dst[b * 34..b * 34 + 2].copy_from_slice(&src[b * 2..b * 2 + 2]);
+            dst[b * 34 + 2..(b + 1) * 34].copy_from_slice(&src[padded * 2 + b * 32..padded * 2 + (b + 1) * 32]);
+        }
+    }
+    out
+}
+
+/// The GGUF blocks back out of `legacy_device_layout`.
+fn legacy_from_device_layout(dev: &[u8], rows: usize, cols: usize, kind: u32) -> Vec<u8> {
+    let affine = matches!(kind, 3 | 7);
+    let five = matches!(kind, 6 | 7);
+    let blocks = cols / 32;
+    let padded = padded_blocks(cols);
+    let block_bytes = 2 + if affine { 2 } else { 0 } + if five { 4 } else { 0 } + 16;
+    let (row_bytes, in_row) = (blocks * block_bytes, padded * block_bytes);
+    let m_off = padded * 2;
+    let qh_off = padded * 2 * if affine { 2 } else { 1 };
+    let qs_off = qh_off + if five { padded * 4 } else { 0 };
+    let mut out = vec![0u8; rows * row_bytes];
+    for r in 0..rows {
+        let src = &dev[r * in_row..(r + 1) * in_row];
+        let dst = &mut out[r * row_bytes..(r + 1) * row_bytes];
+        for b in 0..blocks {
+            let blk = &mut dst[b * block_bytes..(b + 1) * block_bytes];
+            blk[..2].copy_from_slice(&src[b * 2..b * 2 + 2]);
+            let mut at = 2;
+            if affine {
+                blk[at..at + 2].copy_from_slice(&src[m_off + b * 2..m_off + b * 2 + 2]);
+                at += 2;
+            }
+            if five {
+                blk[at..at + 4].copy_from_slice(&src[qh_off + b * 4..qh_off + b * 4 + 4]);
+                at += 4;
+            }
+            blk[at..at + 16].copy_from_slice(&src[qs_off + b * 16..qs_off + b * 16 + 16]);
         }
     }
     out

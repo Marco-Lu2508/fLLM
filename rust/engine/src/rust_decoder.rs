@@ -2985,6 +2985,17 @@ impl RustDecoder {
                     } else {
                         None
                     };
+                    // a backend whose expert tables are copies (Vulkan arenas) would hold every expert twice: the experts become slices of the tables
+                    let mut experts = experts;
+                    if let Some(f) = fast.as_ref() {
+                        let mut live: Vec<&mut DeviceExpert> = experts.iter_mut().flatten().collect();
+                        let mut gates: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.gate).collect();
+                        let _ = backend.alias_weights_into_table(&f.gate, &mut gates);
+                        let mut ups: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.up).collect();
+                        let _ = backend.alias_weights_into_table(&f.up, &mut ups);
+                        let mut downs: Vec<&mut crate::backend::DeviceWeight> = live.iter_mut().map(|e| &mut e.down).collect();
+                        let _ = backend.alias_weights_into_table(&f.down, &mut downs);
+                    }
                     Some(DeviceMoe { experts, shared, fast })
                 }
                 _ => None,

@@ -2173,6 +2173,12 @@ pub trait Backend: Send + Sync {
         false
     }
 
+    /// After `upload_pointer_table(weights)` returned `table`: a backend whose table holds a copy of the weights (an arena) makes `weights`
+    /// slices of that copy, so the memory of the originals is freed. The default leaves them alone (the table points at them).
+    fn alias_weights_into_table(&self, _table: &DeviceBuffer, _weights: &mut [&mut DeviceWeight]) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// A device array holding the device addresses of `weights` (the experts of one mixture-of-experts projection) for
     /// kernels that pick their weights by expert index. The weights must outlive the table.
     fn upload_pointer_table(&self, _weights: &[&DeviceWeight]) -> Result<DeviceBuffer, BackendError> {

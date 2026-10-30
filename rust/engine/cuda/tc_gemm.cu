@@ -18,11 +18,21 @@
 #include "fllm_cuda_internal.h"
 #include "mma_util.cuh"
 
-#if defined(__HIPCC__)
+// AMD: the matrix-core GEMM of hip/hip_gemm.cu serves the prompt (MFMA on CDNA, WMMA on RDNA3 / RDNA4, written without a library). The kernel of this file
+// that goes through rocWMMA (https://github.com/ROCm/rocWMMA) is a second implementation, compiled only with -DFLLM_HIP_ROCWMMA: rocWMMA has to know the
+// architecture (7.1 does not know gfx1150..gfx1153) and distributions package it incompletely (Ubuntu's librocwmma-dev lacks its internal headers).
+#if defined(__HIPCC__) && defined(FLLM_HIP_ROCWMMA)
 // AMD: 64x64 output tiles, 256 threads (8 waves of 32 on RDNA, 4 of 64 on CDNA), rocWMMA 16x16x16 fragments
 #if !defined(__HIP_DEVICE_COMPILE__) || defined(__GFX11__) || defined(__GFX12__) || defined(__gfx908__) || defined(__gfx90a__) ||     defined(__gfx942__) || defined(__gfx950__)
 #include <rocwmma/rocwmma.hpp>
 #endif
+#define TC_BM 64
+#define TC_BN 64
+#define TC_BK 64
+#define TC_WM 2
+#define TC_WN 4
+#endif
+#if defined(__HIPCC__) && !defined(FLLM_HIP_ROCWMMA)
 #define TC_BM 64
 #define TC_BN 64
 #define TC_BK 64
@@ -205,7 +215,7 @@ tc_gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float
 #endif
 }
 
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) && defined(FLLM_HIP_ROCWMMA)
 // AMD matrix cores through rocWMMA (MIT, https://github.com/ROCm/rocWMMA): the same decode-into-shared-memory scheme as above;
 // the 16x16 output tiles of the block are dealt to the waves, A = activations (token x k), B = decoded weights (k x row).
 constexpr int TC_EPI_BYTES = 8 * 256 * sizeof(float);  // epilogue staging for up to 8 waves
@@ -320,6 +330,9 @@ tc_gemm_wmma_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, 
 template <uint32_t KIND>
 static int run(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias, int rows, int cols,
                int batch) {
+#if defined(__HIPCC__) && !defined(FLLM_HIP_ROCWMMA)
+    return 0;  // no rocWMMA kernel in this build: the caller uses the FP32 kernels
+#else
     if (TC_SMEM > (size_t)fllm_smem_limit()) return 0;
     static bool configured = false;
     if (!configured) {
@@ -333,6 +346,7 @@ static int run(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const
     tc_gemm_kernel<KIND><<<grid, block, TC_SMEM, s>>>(W, X, Y, bias, rows, cols, batch);
 #endif
     return 1;
+#endif  // rocWMMA
 }
 
 // Returns 1 when the tensor-core path handled the call, 0 when the caller should use the exact
