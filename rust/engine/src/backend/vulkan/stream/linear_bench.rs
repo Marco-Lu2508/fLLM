@@ -49,8 +49,9 @@ impl VulkanStream {
         let (coop_f16, coop_i8) = {
             use crate::backend::vulkan::instance::ComponentType as T;
             (
-                !caps.coop_matrix_for(T::F16, T::F16, T::F32, T::F32).is_empty(),
-                !caps.coop_matrix_for(T::I8, T::I8, T::I32, T::I32).is_empty(),
+                caps.coop_matrix_for(T::F16, T::F16, T::F32, T::F32).iter().any(|c| (c.m, c.n, c.k) == (16, 16, 16)),
+                // the benchmark shaders use 16 x 16 x 16 (NVIDIA offers 16 x 16 x 32 for int8)
+                caps.coop_matrix_for(T::I8, T::I8, T::I32, T::I32).iter().any(|c| (c.m, c.n, c.k) == (16, 16, 16)),
             )
         };
         let out = self.sh.new_zeroed_buffer(4096 * 4)?;
