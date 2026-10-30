@@ -17,9 +17,17 @@ const SHAPES: &[(u32, &str, usize, usize)] = &[
     (14, "Q6_K", 3072, 8192),
     (2, "Q4_0", 8192, 3072),
     (8, "Q8_0", 3072, 3072),
+    // the shape of a vocabulary projection
+    (12, "Q4_K", 32768, 3072),
+    (14, "Q6_K", 32768, 3072),
+    (12, "Q4_K", 128256, 3072),
+    (14, "Q6_K", 128256, 3072),
 ];
-const BATCHES: &[usize] = &[1, 2, 3, 4, 6, 8, 9, 12, 16, 24, 32, 64];
-const COPIES: usize = 6;
+const BATCHES: &[usize] = &[1, 2, 3, 4, 6, 8, 9, 12, 16, 24, 32, 64, 128, 512];
+/// Weight copies that rotate: enough bytes (about 100 MB) for a cache to be useless, at least 2.
+fn copies_for(bytes: u64) -> usize {
+    ((100u64 << 20) / bytes.max(1)).clamp(2, 6) as usize
+}
 
 pub(super) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -49,7 +57,8 @@ impl VulkanStream {
             let slices = slice_table(kind, rows, cols, self.sh.caps().max_storage_buffer_range, self.sh.align())?;
             let bytes = slices.last().map_or(0, |s| s.offset + s.bytes) as u64;
             let mut weights = Vec::new();
-            for _ in 0..COPIES {
+            let copies = copies_for(bytes);
+            for _ in 0..copies {
                 let buffer = self.sh.new_zeroed_buffer(bytes)?;
                 let stage = self.host.alloc(&self.sh, noise.len() as u64)?;
                 stage.write(0, &noise)?;
@@ -69,13 +78,13 @@ impl VulkanStream {
                 let mut best = f64::MAX;
                 for run in 0..4 {
                     let start = std::time::Instant::now();
-                    for w in weights.iter().cycle().take(COPIES * 2) {
+                    for w in weights.iter().cycle().take(copies * 2) {
                         self.trace = None;
                         self.linear_core(w, batch, &x, &out)?;
                     }
                     self.wait_idle()?;
                     if run > 0 {
-                        best = best.min(start.elapsed().as_secs_f64() * 1e3 / (COPIES * 2) as f64);
+                        best = best.min(start.elapsed().as_secs_f64() * 1e3 / (copies * 2) as f64);
                     }
                 }
                 let macs = (rows * cols * batch) as f64;

@@ -88,10 +88,17 @@ fn prompt_batches_use_the_tiled_kernel() {
     assert_eq!(plan.groups, [16, 8, 1]);
     assert!(plan.activation_prepass.is_some());
     // the first batch above the matrix-vector range already takes the tiled kernel (a few concurrent users, speculative drafts)
+    // (NVIDIA without cooperative matrices: the matrix-vector range is 8 rows for most formats, Q4_K 16, Q6_K and Q8_0 12)
+    let plan = plan_quantized_linear_with(QuantType::Q4_0, 2048, 2048, 16, &caps_no_coop(), &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mmq_q4_0_i");
+    let plan = plan_quantized_linear_with(QuantType::Q4_0, 2048, 2048, 9, &caps_no_coop(), &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mmq_q4_0_i");
     let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 16, &caps_no_coop(), &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mv_q4_k_g");
+    let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 17, &caps_no_coop(), &lossy_options()).unwrap();
     assert_eq!(plan.shader_name, "mmq_q4_k_i");
-    let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 9, &caps_no_coop(), &lossy_options()).unwrap();
-    assert_eq!(plan.shader_name, "mmq_q4_k_i");
+    let plan = plan_quantized_linear_with(QuantType::Q6_K, 2048, 2048, 13, &caps_no_coop(), &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mmq_q6_k_i");
     // in the matrix-vector range the matrix-vector kernels serve
     let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 2, &caps_no_coop(), &lossy_options()).unwrap();
     assert_eq!(plan.shader_name, "mv_q4_k_i");

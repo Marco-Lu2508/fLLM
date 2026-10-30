@@ -9,16 +9,32 @@ use crate::backend::{BackendError, QuantType};
 pub const PUSH_BYTES: usize = 48;
 /// Largest batch the matrix-vector shaders can serve (columns of the accumulator array); bigger batches use the tiled matrix-matrix shaders.
 pub const MATVEC_MAX_BATCH: u32 = 16;
-/// Largest batch served by the matrix-vector shaders on a device with tensor cores (the cooperative-matrix tiles take over above it).
+/// Largest batch served by the matrix-vector shaders of most formats on a device with tensor cores (the cooperative-matrix tiles take over above it).
 const MATVEC_MAX_BATCH_COOP: u32 = 8;
 
-/// Largest batch served by the matrix-vector shaders on this device: 16 where there are no tensor cores to use for the batches in between (the
-/// weights are read once for up to 16 tokens; the tiled int8 kernel costs the same for 9 as for 64 tokens, 1.9 ms against 0.9 - 1.6 ms for an 8192 x 3072
-/// Q4_K weight on a Radeon 840M), 8 on NVIDIA. `FLLM_VK_MV_MAX` (1..=16) overrides it for measuring a device.
+/// Largest batch served by the matrix-vector shaders on this device (any format): 16 where there are no tensor cores to use for the batches in
+/// between (the weights are read once for up to 16 tokens; the tiled int8 kernel costs the same for 9 as for 64 tokens, 1.9 ms against 0.5 - 0.7 ms
+/// for 9 - 16 tokens of an 8192 x 3072 Q4_K weight on a Radeon 840M), 8 on NVIDIA (see [`matvec_max_for`]). `FLLM_VK_MV_MAX` (1..=16) overrides it
+/// for measuring a device.
 pub fn matvec_max(caps: &VkCapsLike) -> u32 {
+    matvec_max_for(caps, "")
+}
+
+/// [`matvec_max`] for the weight format `tag`. With tensor cores the cooperative-matrix tile (about 0.27 ms for 9 to 32 tokens of an 8192 x 3072 weight on an
+/// RTX 2000 Ada) beats the matrix-vector kernels only where those are slow: Q4_K (row-group kernel, 0.16 - 0.24 ms for 9 - 16 rows), Q6_K (0.22 - 0.28 ms
+/// for 9 - 12 rows against 0.38 - 0.40) and Q8_0 serve up to 12 or 16 rows, the other formats (Q4_0 ...) up to 8.
+pub fn matvec_max_for(caps: &VkCapsLike, tag: &str) -> u32 {
     static MAX: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let knob = *MAX.get_or_init(|| std::env::var("FLLM_VK_MV_MAX").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=MATVEC_MAX_BATCH).contains(v)));
-    knob.unwrap_or(if caps.vendor == VENDOR_NVIDIA { MATVEC_MAX_BATCH_COOP } else { MATVEC_MAX_BATCH })
+    knob.unwrap_or(if caps.vendor != VENDOR_NVIDIA {
+        MATVEC_MAX_BATCH
+    } else {
+        match tag {
+            "q4_k" => 16,
+            "q6_k" | "q8_0" => 12,
+            _ => MATVEC_MAX_BATCH_COOP,
+        }
+    })
 }
 /// `maxComputeWorkGroupCount` that every Vulkan device offers per dimension; larger grids are split over x and y.
 pub const MAX_GROUPS_PER_DIM: u64 = 65535;
@@ -478,7 +494,7 @@ pub fn plan_quantized_linear_with(
             &default_available
         }
     };
-    let matvec = batch32 <= matvec_max(caps);
+    let matvec = batch32 <= matvec_max_for(caps, tag);
     let prefix = if matvec { "mv" } else { "mm" };
     let prepass_name = |variant: Variant| -> String {
         match variant {
