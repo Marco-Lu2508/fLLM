@@ -48,17 +48,19 @@ def reference_texts(directory: str, tokens: int) -> list[list[int]]:
     return out, tok
 
 
-def fllm_texts(fllm: str, model: str, tokens: int, threads: int) -> list[str]:
+def fllm_texts(fllm: str, model: str, tokens: int, threads: int, extra: list[str]) -> list[str]:
     port = 19500 + os.getpid() % 400
-    proc = subprocess.Popen([fllm, "serve", "--model", model, "--device", "cpu", "--port", str(port), "--ctx", "512", "--threads", str(threads)],
+    proc = subprocess.Popen([fllm, "serve", "--model", model, "--device", "cpu", "--port", str(port), "--ctx", "512", "--threads", str(threads), *extra],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
     try:
         url = f"http://127.0.0.1:{port}/v1/completions"
         texts = []
         for p in PROMPTS:
-            body = json.dumps({"model": "m", "prompt": p, "max_tokens": tokens, "temperature": 0, "seed": 1}).encode()
             for _ in range(600):
                 try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
+                        name = json.loads(r.read())["data"][0]["id"]
+                    body = json.dumps({"model": name, "prompt": p, "max_tokens": tokens, "temperature": 0, "seed": 1}).encode()
                     req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
                     with urllib.request.urlopen(req, timeout=600) as r:
                         texts.append(json.loads(r.read())["choices"][0]["text"])
@@ -83,9 +85,10 @@ def main() -> int:
     ap.add_argument("--reference")
     ap.add_argument("--tokens", type=int, default=24)
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--serve-args", default="", help="extra arguments for fllm-rs serve, e.g. \"--kv-cache-type f32\"")
     args = ap.parse_args()
     ref_dir = args.reference or (args.model if os.path.isdir(args.model) else None)
-    mine = fllm_texts(args.fllm, args.model, args.tokens, args.threads)
+    mine = fllm_texts(args.fllm, args.model, args.tokens, args.threads, args.serve_args.split())
     if not ref_dir or ref_dir == "none":
         for p, t in zip(PROMPTS, mine):
             print(json.dumps({"prompt": p, "fllm": t}))

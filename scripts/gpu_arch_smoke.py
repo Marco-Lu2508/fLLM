@@ -13,20 +13,25 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import time
 import urllib.request
 
 
 def complete(fllm: str, gguf: str, device: str, port: int, tokens: int) -> str:
+    log = tempfile.TemporaryFile(mode="w+")
     proc = subprocess.Popen([fllm, "serve", "--model", gguf, "--device", device, "--port", str(port), "--ctx", "256", "--threads", "4"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid)
+                            stdout=subprocess.DEVNULL, stderr=log, text=True, preexec_fn=os.setsid)
     try:
         url = f"http://127.0.0.1:{port}/v1/completions"
-        body = json.dumps({"model": "m", "prompt": "the cat sat on the mat and", "max_tokens": tokens, "temperature": 0, "seed": 1}).encode()
         for _ in range(120):
             if proc.poll() is not None:
-                return "FAILED: " + (proc.stderr.read() or "")[-300:].replace("\n", " ")
+                log.seek(0)
+                return "FAILED: " + log.read()[-300:].replace("\n", " ")
             try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
+                    name = json.loads(r.read())["data"][0]["id"]
+                body = json.dumps({"model": name, "prompt": "the cat sat on the mat and", "max_tokens": tokens, "temperature": 0, "seed": 1}).encode()
                 req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=60) as r:
                     return json.loads(r.read())["choices"][0]["text"]
