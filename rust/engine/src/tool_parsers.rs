@@ -1370,7 +1370,58 @@ const K2HORIZON_EXTRA: &[&str] = &[
     "</ifm|arg_value>",
 ];
 
-const HERMES: SimpleParser = simple("hermes", TOOL_CALL_PAIRS, &[], body_tool_call);
+/// Hermes 2/3, Qwen2.5/3, Granite 4: the `<tool_call>` span of [`TOOL_CALL_PAIRS`], plus the two shapes that small
+/// models of the family fall back to when they ignore the template (Qwen2.5-Coder at 1.5B to 7B does it often): the
+/// same JSON object in a fenced json block, or written as the bare reply. They count as calls only when the
+/// function is declared in the request; anything else stays content, so a JSON snippet in a normal answer is safe.
+pub struct HermesParser;
+
+impl HermesParser {
+    const BARE: &'static str = "{\"name\"";
+}
+
+const HERMES_PAIRS: &[MarkerPair] = &[
+    ("<tool_call>", Some("</tool_call>")),
+    ("```json", Some("```")),
+    (HermesParser::BARE, None),
+];
+
+impl ToolParser for HermesParser {
+    fn id(&self) -> &'static str {
+        "hermes"
+    }
+    fn pairs(&self) -> &'static [MarkerPair] {
+        HERMES_PAIRS
+    }
+    fn span_end(&self, text: &str, start: usize) -> Option<usize> {
+        let (open, close) = self.pair_at(text, start);
+        if open == Self::BARE {
+            return json_span_end(text, start);
+        }
+        let after = start + open.len();
+        match close {
+            Some(close) => text[after..].find(close).map(|offset| after + offset + close.len()),
+            None => json_span_end(text, after),
+        }
+    }
+    fn payload<'t>(&self, text: &'t str, start: usize, end: usize) -> &'t str {
+        let (open, close) = self.pair_at(text, start);
+        if open == Self::BARE {
+            return &text[start..end];
+        }
+        let from = start + open.len();
+        let to = match close {
+            Some(close) if text[..end].ends_with(close) => end - close.len(),
+            _ => end,
+        };
+        &text[from.min(to)..to]
+    }
+    fn decode(&self, payload: &str) -> Result<Vec<RawCall>, String> {
+        body_tool_call(payload)
+    }
+}
+
+const HERMES: HermesParser = HermesParser;
 const QWEN3_CODER: SimpleParser = simple("qwen3_coder", TOOL_CALL_PAIRS, &[], body_tool_call);
 const GLM: SimpleParser = simple("glm", TOOL_CALL_PAIRS, GLM_EXTRA, body_tool_call);
 const MINIMAX_M1: SimpleParser = simple("minimax_m1", TOOL_CALLS_PAIRS, &[], json_calls);
@@ -2179,6 +2230,30 @@ mod tests {
         let text = "<tool_call>{\"name\":\"weather\",\"arguments\":{}}";
         assert!(extract(p.as_ref(), text, false).calls.is_empty());
         assert_eq!(extract(p.as_ref(), text, true).calls.len(), 1);
+    }
+
+    #[test]
+    fn hermes_reads_the_fenced_and_bare_json_that_small_qwen_coders_write() {
+        let p = parser("hermes");
+        // Qwen2.5-Coder-3B answers a tool request like this although its template asks for <tool_call>
+        let fenced = "```json\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n```\n\n```json\n{\n  \"name\": \"get_weather\",\n  \"arguments\": {\"city\": \"Berlin\"}\n}\n```";
+        let out = run(p.as_ref(), fenced);
+        assert_eq!(names(&out), ["get_weather", "get_weather"]);
+        assert_eq!(args(&out.calls[1]), json!({"city":"Berlin"}));
+        assert_eq!(out.content.trim(), "");
+        let bare = "Checking now. {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}";
+        let out = run(p.as_ref(), bare);
+        assert_eq!(out.content, "Checking now. ");
+        assert_eq!(names(&out), ["get_weather"]);
+        // JSON that is not a call stays in the answer, in a fence as well as bare, and an open fence waits for its end
+        let config = "Here is the file:\n```json\n{\"version\": 1, \"private\": true}\n```\nDone.";
+        let out = run(p.as_ref(), config);
+        assert_eq!((out.content.as_str(), out.calls.len()), (config, 0));
+        let named = "Use {\"name\": \"x\"} as the key.";
+        let out = extract_filtered(p.as_ref(), named, true, &|call| call.name == "get_weather");
+        assert_eq!((out.content.as_str(), out.calls.len()), (named, 0), "a name that is not a declared function is no call");
+        assert_eq!(extract(p.as_ref(), "```json\n{\"na", false).content, "");
+        assert_eq!(extract(p.as_ref(), "text ```json\n{\"na", false).content, "text ");
     }
 
     #[test]
