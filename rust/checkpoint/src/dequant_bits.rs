@@ -464,6 +464,174 @@ pub(crate) fn split_gptq_bits(
     Ok((dense, packed))
 }
 
+// ---------------------------------------------------------------- GPTQ-Marlin repacked checkpoints
+
+/// Symmetric 4- or 8-bit weights in the Marlin layout (IST-DASLab Marlin `B` / `s` tensors, GPTQModel / vLLM
+/// `checkpoint_format: marlin`), read back to plain `[out, in]` values.
+///
+/// The permutation is the one of vLLM's `marlin_weights` / `marlin_permute_scales` (Apache-2.0): the `[in, out]` code matrix is cut
+/// into 16 x 16 tiles stored tile after tile, every run of 1024 codes is permuted (`perm`, with the interleave 0 2 4 6 1 3 5 7 for
+/// 4 bits, 0 2 1 3 for 8 bits) and `32 / bits` consecutive codes go into one int32, the first in the low bits. `qweight` is
+/// `[in / 16, out * 16 / (32 / bits)]`. Scales `[groups, out]` are permuted in runs of 64 values (grouped) or 32 values (one
+/// group, channel-wise). A code stands for `(code - 2^(bits-1)) * scale`.
+#[derive(Debug)]
+pub(crate) struct GptqMarlin {
+    qweight: Payload,
+    scales: Vec<f32>,
+    inverse_perm: Vec<usize>,
+    inverse_scale_perm: Vec<usize>,
+    bits: usize,
+    group: usize,
+    in_features: usize,
+    out_features: usize,
+}
+
+/// `perm[j]`: position in the tile-ordered run of 1024 codes that the j-th stored code comes from.
+fn marlin_weight_perm(bits: usize) -> Vec<usize> {
+    let mut perm = Vec::with_capacity(1024);
+    for i in 0..32usize {
+        let col = i / 4;
+        let mut one = Vec::with_capacity(8);
+        for block in 0..2 {
+            for row in [2 * (i % 4), 2 * (i % 4) + 1, 2 * (i % 4 + 4), 2 * (i % 4 + 4) + 1] {
+                one.push(16 * row + col + 8 * block);
+            }
+        }
+        for j in 0..4 {
+            perm.extend(one.iter().map(|p| p + 256 * j));
+        }
+    }
+    let interleave: &[usize] = if bits == 4 { &[0, 2, 4, 6, 1, 3, 5, 7] } else { &[0, 2, 1, 3] };
+    let mut out = vec![0; perm.len()];
+    for (chunk, dst) in perm.chunks(interleave.len()).zip(out.chunks_mut(interleave.len())) {
+        for (d, &k) in dst.iter_mut().zip(interleave) {
+            *d = chunk[k];
+        }
+    }
+    out
+}
+
+fn marlin_scale_perm(grouped: bool) -> Vec<usize> {
+    if grouped {
+        (0..8).flat_map(|i| (0..8).map(move |j| i + 8 * j)).collect()
+    } else {
+        (0..4).flat_map(|i| [0, 1, 8, 9, 16, 17, 24, 25].map(|j| 2 * i + j)).collect()
+    }
+}
+
+fn invert(perm: &[usize]) -> Vec<usize> {
+    let mut inv = vec![0; perm.len()];
+    for (j, &p) in perm.iter().enumerate() {
+        inv[p] = j;
+    }
+    inv
+}
+
+impl GptqMarlin {
+    pub(crate) fn new(qweight: Payload, scales: Vec<f32>, bits: usize, group: usize, in_features: usize, out_features: usize) -> Result<Self, String> {
+        if !matches!(bits, 4 | 8) || !in_features.is_multiple_of(16) || !out_features.is_multiple_of(64) || group == 0 || !in_features.is_multiple_of(group) {
+            return Err(format!("unsupported Marlin layout: {bits} bits, group {group}, {in_features} x {out_features} (needs inputs % 16 == 0, outputs % 64 == 0)"));
+        }
+        let words = in_features / 16 * out_features * 16 / (32 / bits);
+        if qweight.as_slice().len() != words * 4 {
+            return Err(format!("Marlin weight has {} bytes, expected {}", qweight.as_slice().len(), words * 4));
+        }
+        let groups = in_features / group;
+        if scales.len() != groups * out_features {
+            return Err(format!("Marlin scales have {} values, expected {}", scales.len(), groups * out_features));
+        }
+        let grouped = group < in_features;
+        Ok(Self {
+            qweight,
+            scales,
+            inverse_perm: invert(&marlin_weight_perm(bits)),
+            inverse_scale_perm: invert(&marlin_scale_perm(grouped)),
+            bits,
+            group,
+            in_features,
+            out_features,
+        })
+    }
+}
+
+impl Dequant for GptqMarlin {
+    fn element_count(&self) -> usize {
+        self.in_features * self.out_features
+    }
+
+    fn decode_chunk(&self, start: usize, dst: &mut [f32]) -> Result<(), String> {
+        let end = start.checked_add(dst.len()).filter(|&e| e <= self.element_count()).ok_or("Marlin range exceeds the tensor")?;
+        let pack = 32 / self.bits;
+        let mask = (1u32 << self.bits) - 1;
+        let bytes = self.qweight.as_slice();
+        let words_per_row = self.out_features * 16 / pack;
+        let period = self.inverse_scale_perm.len();
+        for (slot, e) in dst.iter_mut().zip(start..end) {
+            let (o, i) = (e / self.in_features, e % self.in_features);
+            // position in the tile-ordered row, then in the permuted one
+            let column = (o / 16) * 256 + (i % 16) * 16 + o % 16;
+            let stored = column / 1024 * 1024 + self.inverse_perm[column % 1024];
+            let at = ((i / 16) * words_per_row + stored / pack) * 4;
+            let word = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+            let code = (word >> (self.bits * (stored % pack))) & mask;
+            let flat = (i / self.group) * self.out_features + o;
+            let scale = self.scales[flat / period * period + self.inverse_scale_perm[flat % period]];
+            *slot = (code as i32 - (1 << (self.bits - 1))) as f32 * scale;
+        }
+        Ok(())
+    }
+}
+
+/// Marlin-format GPTQ tensors: `<name>.B` / `<name>.s` (IST-DASLab Marlin) or `<name>.qweight` / `<name>.scales` (GPTQModel); the
+/// `workspace`, empty `g_idx` and `qzeros` tensors of the second layout are dropped.
+pub(crate) fn split_gptq_marlin(
+    all: Vec<Tensor>,
+    bits: usize,
+    group: i64,
+    map: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<(Vec<Tensor>, Vec<crate::convert::PackedGroup>), String> {
+    let mut dense = Vec::new();
+    let mut weights: HashMap<String, Tensor> = HashMap::new();
+    let mut scales: HashMap<String, Tensor> = HashMap::new();
+    for t in all {
+        let n = t.name.as_str();
+        if let Some(base) = n.strip_suffix(".B").or_else(|| n.strip_suffix(".qweight")) {
+            weights.insert(base.to_owned(), t);
+        } else if let Some(base) = n.strip_suffix(".s").or_else(|| n.strip_suffix(".scales")) {
+            scales.insert(base.to_owned(), t);
+        } else if n.ends_with(".workspace") || n.ends_with(".qzeros") || n.ends_with(".g_idx") {
+            if n.ends_with(".g_idx") && t.shape.iter().product::<u64>() > 0 {
+                return Err(format!("{n}: Marlin checkpoints with activation ordering (desc_act) are not supported"));
+            }
+        } else {
+            dense.push(t);
+        }
+    }
+    let mut packed = Vec::new();
+    let mut bases: Vec<_> = weights.keys().cloned().collect();
+    bases.sort();
+    for base in bases {
+        let w = weights.remove(&base).unwrap();
+        let s = scales.remove(&base).ok_or_else(|| format!("Marlin weight {} has no scales", w.name))?;
+        if w.dtype != "I32" || w.shape.len() != 2 || s.shape.len() != 2 {
+            return Err(format!("{}: Marlin weights must be rank-2 I32 tensors with rank-2 scales", w.name));
+        }
+        let out_features = s.shape[1] as usize;
+        let in_features = w.shape[0] as usize * 16;
+        let group_size = if group <= 0 { in_features } else { group as usize };
+        let d = GptqMarlin::new(w.payload.clone(), floats(&s)?, bits, group_size, in_features, out_features).map_err(|e| format!("{base}: {e}"))?;
+        let mapped = map(&format!("{base}.weight"))?.ok_or_else(|| format!("packed tensor {base:?} maps to a skipped tensor"))?;
+        packed.push((mapped, crate::packed_quant::PackedData::Dyn(Arc::new(d)), vec![out_features as u64, in_features as u64], w.payload));
+    }
+    if let Some(left) = scales.keys().next() {
+        return Err(format!("{left}: Marlin scales without a packed weight"));
+    }
+    if packed.is_empty() {
+        return Err("quantization_config declares a Marlin checkpoint but no packed weights were found".into());
+    }
+    Ok((dense, packed))
+}
+
 // ---------------------------------------------------------------- compressed-tensors with zero points / activation order
 
 /// `compressed-tensors` integer weights that the symmetric reader (`symint.rs`) does not cover: asymmetric zero points
@@ -784,6 +952,24 @@ mod tests {
             let (scale, zero) = ([0.5f32, 2.0, 1.0, 4.0][r * 2 + g], [1, 0, 0, -1][r * 2 + g]);
             assert_eq!(got[e], (q - zero) as f32 * scale, "element {e}");
         }
+    }
+
+    #[test]
+    fn marlin_checkpoints_read_back_to_plain_values() {
+        let cases: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/quant/cases.json")).unwrap()).unwrap();
+        let mut seen = 0;
+        for (name, meta) in cases.as_object().unwrap() {
+            if meta["format"] != "gptq_marlin" {
+                continue;
+            }
+            let (tensors, expected) = fixture(name);
+            let (bits, group) = (meta["bits"].as_u64().unwrap() as usize, meta["group_size"].as_i64().unwrap());
+            let (dense, packed) = split_gptq_marlin(tensors, bits, group, &identity).unwrap();
+            assert!(dense.is_empty(), "{name}");
+            assert_close(name, &decode_all(&packed[0]), &expected, 1e-6);
+            seen += 1;
+        }
+        assert_eq!(seen, 3, "4-bit grouped, 4-bit channel-wise, 8-bit grouped");
     }
 
     #[test]

@@ -147,7 +147,7 @@ pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
         Quantization::CtAffine { .. } => "int8",
         Quantization::Mxfp4 | Quantization::CtMxfp4 => "mxfp4",
         Quantization::Bnb => "bitsandbytes",
-        Quantization::GptqBits { .. } => "gptq",
+        Quantization::GptqBits { .. } | Quantization::GptqMarlin { .. } => "gptq",
         Quantization::Mlx => "mlx",
         Quantization::Bitnet => "bitnet",
     }
@@ -1550,6 +1550,8 @@ pub(crate) enum Quantization {
     Bnb,
     /// GPTQ with 2, 3 or 8 bits, a whole-column group (`group == 0`) or `gptq_v2` zero points; expanded to F16.
     GptqBits { bits: u64, group: u64, v2: bool },
+    /// GPTQ-Marlin / IST-DASLab Marlin repacked symmetric weights (4 or 8 bits); read back to plain values, expanded to F16.
+    GptqMarlin { bits: u64, group: i64 },
     /// MLX affine quantization (`quantization: {bits, group_size}` in config.json); expanded to F16.
     Mlx,
     /// Hugging Face `bitnet` (BitNet b1.58): `uint8` weights with four ternary codes per byte and a `weight_scale`; expanded to F16.
@@ -1744,9 +1746,21 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
             let v2 = match format.as_str() {
                 "gptq" => false,
                 "gptq_v2" => true,
+                "marlin" | "gptq_marlin" => {
+                    if !matches!(bits, 4 | 8) {
+                        return Err(format!("GPTQ-Marlin with {bits} bits is not supported (4 and 8 are)"));
+                    }
+                    if q.get("desc_act").and_then(Value::as_bool) == Some(true) {
+                        return Err("GPTQ-Marlin checkpoints with desc_act (activation ordering) are not supported: the rows were permuted before repacking; use the original GPTQ files".into());
+                    }
+                    if q.get("sym").and_then(Value::as_bool) == Some(false) {
+                        return Err("GPTQ-Marlin checkpoints with zero points (sym: false) are not supported; use the original GPTQ files".into());
+                    }
+                    return Ok(Quantization::GptqMarlin { bits, group: q.get("group_size").and_then(Value::as_i64).unwrap_or(-1) });
+                }
                 other => {
                     return Err(format!(
-                        "GPTQ checkpoint_format {other:?} is not supported (gptq and gptq_v2 are); Marlin/BitBLAS/IPEX repacked checkpoints need the original GPTQ files"
+                        "GPTQ checkpoint_format {other:?} is not supported (gptq and gptq_v2 are); BitBLAS/IPEX/Ascend repacked checkpoints need the original GPTQ files; marlin is read"
                     ))
                 }
             };
@@ -2130,6 +2144,9 @@ pub(crate) fn split_packed_cfg(
     use std::collections::BTreeMap;
     if quant == Quantization::Mlx {
         return crate::dequant_bits::split_mlx(all, mlx_config, map);
+    }
+    if let Quantization::GptqMarlin { bits, group } = quant {
+        return crate::dequant_bits::split_gptq_marlin(all, bits as usize, group, map);
     }
     if let Quantization::GptqBits { bits, group, v2 } = quant {
         return crate::dequant_bits::split_gptq_bits(all, bits as usize, group as usize, v2, map);

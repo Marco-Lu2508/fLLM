@@ -268,6 +268,45 @@
   "out_features": 32,
   "v2": true
  },
+ "marlin_4bit_channel": {
+  "bits": 4,
+  "format": "gptq_marlin",
+  "group_size": -1,
+  "names": [
+   "B",
+   "s"
+  ],
+  "shape": [
+   128,
+   256
+  ]
+ },
+ "marlin_4bit_g128": {
+  "bits": 4,
+  "format": "gptq_marlin",
+  "group_size": 128,
+  "names": [
+   "B",
+   "s"
+  ],
+  "shape": [
+   128,
+   256
+  ]
+ },
+ "marlin_8bit_g64": {
+  "bits": 8,
+  "format": "gptq_marlin",
+  "group_size": 64,
+  "names": [
+   "qweight",
+   "scales"
+  ],
+  "shape": [
+   128,
+   256
+  ]
+ },
  "mlx_2bit_g32": {
   "bits": 2,
   "format": "mlx",
