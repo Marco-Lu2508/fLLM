@@ -93,8 +93,19 @@ fn prompt_batches_use_the_tiled_kernel() {
     let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 9, &caps_no_coop(), &lossy_options()).unwrap();
     assert_eq!(plan.shader_name, "mmq_q4_k_i");
     // in the matrix-vector range the matrix-vector kernels serve
-    let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 4, &caps_no_coop(), &lossy_options()).unwrap();
+    let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 2, &caps_no_coop(), &lossy_options()).unwrap();
     assert_eq!(plan.shader_name, "mv_q4_k_i");
+    // without tensor cores the range reaches 16 rows (weights read once for up to 16 tokens): the blocks-across-the-group kernel serves 1 and 2 rows,
+    // the row-group kernel from 3 rows on, the tiled one from 17
+    let amd = VkCapsLike { vendor: 0x1002, ..caps_no_coop() };
+    for batch in [3usize, 4, 9, 16] {
+        let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, batch, &amd, &lossy_options()).unwrap();
+        assert_eq!(plan.shader_name, "mv_q4_k_g", "batch {batch}");
+        // 32 invocations = 4 groups of 8, 4 rows each
+        assert_eq!(plan.groups, [2048 / 16, 1, 1]);
+    }
+    let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 17, &amd, &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mmq_q4_k_i");
     // a registry without the new kernel falls back
     let old_only = |n: &str| !n.starts_with("mmq_");
     let options = PlanOptions {
@@ -126,8 +137,12 @@ fn tile_choice_follows_the_limits_and_the_knobs() {
     let caps = caps_full();
     let knobs = MmqKnobs::DEFAULT;
     assert_eq!(mmq_tile(&caps, 505, &knobs), Some((64, 64)));
+    // NVIDIA (tensor cores): the matrix-vector range ends at 8 rows; elsewhere at 16
     assert_eq!(mmq_tile(&caps, 9, &knobs), Some((64, 64)));
     assert_eq!(mmq_tile(&caps, 8, &knobs), None);
+    let amd = VkCapsLike { vendor: 0x1002, ..caps };
+    assert_eq!(mmq_tile(&amd, 16, &knobs), None);
+    assert!(mmq_tile(&amd, 17, &knobs).is_some());
     assert_eq!(mmq_tile(&caps, 4096, &MmqKnobs { enabled: false, ..knobs }), None);
     assert_eq!(mmq_tile(&caps, 100, &MmqKnobs { min_batch: 200, ..knobs }), None);
     assert_eq!(mmq_tile(&caps, 1000, &MmqKnobs { bm: Some(128), bn: Some(64), ..knobs }), Some((128, 64)));

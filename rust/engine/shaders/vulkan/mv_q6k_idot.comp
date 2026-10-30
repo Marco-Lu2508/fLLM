@@ -1,10 +1,10 @@
 #version 450
 // FLLM-SHADER: mv_<fmt>_i | bindings: 0 weights(u32[]) 1 xq(u32[], int8 activations + block scales from quant_act_q8) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/NROWS) workgroups, split x/y at 65535
-// Q6_K matrix-vector product for 1..8 activation rows with int8 activations: same contract and results as mv_idot.comp with FMT_Q6_K, laid out
+// Q6_K matrix-vector product for 1..16 activation rows with int8 activations: same contract and results as mv_idot.comp with FMT_Q6_K, laid out
 // for memory bandwidth like mv_q4k_idot.comp. Eight invocations share one 256-value block; invocation `it` takes half n = it / 4 of the block and
 // the 8 consecutive j positions jq * 8 .. +7 (jq = it % 4) of all four groups of 32 values, so it reads 16 contiguous bytes of ql and 8 of qh
 // once (32 weights) and the scale words once.
-// Specialization constants: 0 = workgroup size (multiple of 8), 1 = NROWS, 2 = NCOLS (= batch, 1..8).
+// Specialization constants: 0 = workgroup size (multiple of 8), 1 = NROWS, 2 = NCOLS (= batch, 1..16).
 // Device layout of a block (see _q_fmt_q6_k.glsl): plane 0 = ql (128 bytes), plane 1 = qh (64 bytes), plane 2 = 16 int8 scales, plane 3 = f32 d.
 #extension GL_GOOGLE_include_directive : enable
 #include "_q_ext.glsl"
@@ -42,40 +42,38 @@ void main() {
     }
 
     for (uint b = ix; b < p.nb; b += step) {
-        uvec2 x[NCOLS][4];
-        float da[NCOLS][4];
+        uvec2 q[NROWS][4];   // 8 weights of each of the four groups, as int8 lanes (value - 32)
+        float ws[NROWS][4];  // d * scale of the group
+        [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+            const uint row = min(row0 + r, p.rows - 1u);
+            const uint g = row * p.nb + b;
+            const uint q0 = g * 32u + n * 16u + jq * 2u;
+            const uvec2 lo0 = uvec2(w[q0], w[q0 + 1u]);          // ql bytes of groups 0 (low nibbles) and 2 (high nibbles)
+            const uvec2 lo1 = uvec2(w[q0 + 8u], w[q0 + 9u]);     // groups 1 and 3
+            const uint h0 = p.off1 + g * 16u + n * 8u + jq * 2u;
+            const uvec2 qh = uvec2(w[h0], w[h0 + 1u]);
+            const uint s0 = p.off2 + g * 4u + n * 2u;
+            const uint swa = w[s0];
+            const uint swb = w[s0 + 1u];
+            const float d = uintBitsToFloat(w[p.off3 + g]);
+            [[unroll]] for (uint grp = 0; grp < 4u; ++grp) {
+                const uvec2 ql = (grp & 1u) == 0u ? lo0 : lo1;
+                const uint sh = (grp >> 1) << 2;
+                const uint hs = grp << 1;
+                q[r][grp] = uvec2(sub8(((ql.x >> sh) & 0x0F0F0F0Fu) | (((qh.x >> hs) & 0x03030303u) << 4), 32u),
+                                  sub8(((ql.y >> sh) & 0x0F0F0F0Fu) | (((qh.y >> hs) & 0x03030303u) << 4), 32u));
+                const int sc = bitfieldExtract(int(grp < 2u ? swa : swb), int(lane0 + (grp & 1u) * 16u), 8);
+                ws[r][grp] = d * float(sc);
+            }
+        }
         [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
             [[unroll]] for (uint grp = 0; grp < 4u; ++grp) {
                 const uint xi = c * xwords + b * 64u + n * 32u + grp * 8u + jq * 2u;
-                x[c][grp] = uvec2(xq[xi], xq[xi + 1u]);
-                da[c][grp] = uintBitsToFloat(xq[p.xq_d + c * xblocks + b * 8u + n * 4u + grp]);
-            }
-        }
-        [[unroll]] for (uint r = 0; r < NROWS; ++r) {
-            const uint row = row0 + r;
-            if (row < p.rows) {
-                const uint g = row * p.nb + b;
-                const uint q0 = g * 32u + n * 16u + jq * 2u;
-                const uvec2 lo0 = uvec2(w[q0], w[q0 + 1u]);          // ql bytes of groups 0 (low nibbles) and 2 (high nibbles)
-                const uvec2 lo1 = uvec2(w[q0 + 8u], w[q0 + 9u]);     // groups 1 and 3
-                const uint h0 = p.off1 + g * 16u + n * 8u + jq * 2u;
-                const uvec2 qh = uvec2(w[h0], w[h0 + 1u]);
-                const uint s0 = p.off2 + g * 4u + n * 2u;
-                const uint swa = w[s0];
-                const uint swb = w[s0 + 1u];
-                const float d = uintBitsToFloat(w[p.off3 + g]);
-                [[unroll]] for (uint grp = 0; grp < 4u; ++grp) {
-                    const uvec2 ql = (grp & 1u) == 0u ? lo0 : lo1;
-                    const uint sh = (grp >> 1) << 2;
-                    const uint hs = grp << 1;
-                    const uint p0 = sub8(((ql.x >> sh) & 0x0F0F0F0Fu) | (((qh.x >> hs) & 0x03030303u) << 4), 32u);
-                    const uint p1 = sub8(((ql.y >> sh) & 0x0F0F0F0Fu) | (((qh.y >> hs) & 0x03030303u) << 4), 32u);
-                    const int sc = bitfieldExtract(int(grp < 2u ? swa : swb), int(lane0 + (grp & 1u) * 16u), 8);
-                    const float ws = d * float(sc);
-                    [[unroll]] for (uint c = 0; c < NCOLS; ++c) {
-                        const int dot = idot4(p0, x[c][grp].x) + idot4(p1, x[c][grp].y);
-                        acc[r][c] += ws * da[c][grp] * float(dot);
-                    }
+                const uvec2 x = uvec2(xq[xi], xq[xi + 1u]);
+                const float da = uintBitsToFloat(xq[p.xq_d + c * xblocks + b * 8u + n * 4u + grp]);
+                [[unroll]] for (uint r = 0; r < NROWS; ++r) {
+                    const int dot = idot4acc(q[r][grp].y, x.y, idot4(q[r][grp].x, x.x));
+                    acc[r][c] = fma(float(dot), ws[r][grp] * da, acc[r][c]);
                 }
             }
         }

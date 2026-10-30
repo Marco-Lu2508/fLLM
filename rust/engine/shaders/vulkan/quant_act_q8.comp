@@ -3,6 +3,8 @@
 // Prepass of the `_i` (integer dot) quantized-linear shaders: quantizes the activations to int8 in blocks of 32 values with one float scale each.
 //   xq[b * cols/4 + kb * 8 + i] = four int8 (value 4i at the lowest byte) of block kb of row b
 //   xq[xq_d + b * cols/32 + kb]  = float bits of the scale d = amax / 127 (values are round(x / d))
+//   xq[xq_d + batch * cols/32 + b * cols/32 + kb] = float bits of d * (sum of the 32 quantized values): the additive term of Q4_K / Q5_K / Q2_K
+//   weights needs it for every group, so the matrix-vector shaders read it instead of summing the activations again (mm_q ignores it)
 // With PERM the value k of a block is x[b * cols + perm[kb * 32 + k]] (act-order GPTQ weights, Q4ZP).
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
@@ -37,13 +39,16 @@ void main() {
     }
     const float d = amax / 127.0;
     const float inv = amax > 0.0 ? 127.0 / amax : 0.0;
+    int isum = 0;
     for (uint i = 0; i < 8u; ++i) {
         uint word = 0u;
         for (uint j = 0; j < 4u; ++j) {
             const int q = clamp(int(roundEven(v[i * 4u + j] * inv)), -127, 127);
+            isum += q;
             word |= (uint(q) & 255u) << (8u * j);
         }
         xq[b * (p.cols >> 2) + kb * 8u + i] = word;
     }
     xq[p.xq_d + blk] = floatBitsToUint(d);
+    xq[p.xq_d + p.batch * per_row + blk] = floatBitsToUint(d * float(isum));
 }

@@ -220,10 +220,10 @@ fn float_chunk_formats_plan_only_the_f32_shaders_and_integer_formats_all_variant
     for quant in [fp8b(128, 128), fp8b(32, 16), QuantType::Nf4B64, QuantType::Nf4B128, QuantType::Fp4B64, QuantType::Fp4B128] {
         let info = format_info(quant).unwrap();
         let cols = width(&info);
-        for batch in [1usize, 8, 9, 64, 256] {
+        for batch in [1usize, 8, 9, 16, 17, 64, 256] {
             let plan = plan_quantized_linear_with(quant, 70, cols, batch, &caps, &lossy).unwrap();
             assert_eq!(plan.variant, Variant::Scalar, "{quant:?} batch {batch}");
-            assert_eq!(plan.shader_name, format!("{}_{}_s", if batch <= 8 { "mv" } else { "mm" }, info.tag));
+            assert_eq!(plan.shader_name, format!("{}_{}_s", if batch <= MATVEC_MAX_BATCH as usize { "mv" } else { "mm" }, info.tag));
             assert!(plan.activation_prepass.is_none());
         }
     }

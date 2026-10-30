@@ -302,6 +302,9 @@ impl VulkanStream {
     /// planned again.
     fn plan_with_pipelines(&mut self, w: &LinearWeight, slice: &SliceInfo, batch: usize) -> Result<Planned, BackendError> {
         let mut last_error = None;
+        if super::linear_bench::enabled() {
+            self.bench_linear_table();
+        }
         if batch >= PROMPT_TUNE_MIN_BATCH {
             self.tune_prompt_variant();
         }

@@ -59,6 +59,7 @@ mm_q3_k_cw mm_coopmat_w.comp -DFMT_Q3_K=1 #optional
 
 mv_q4_k_s mv_scalar.comp -DFMT_Q4_K=1
 mv_q4_k_i mv_q4k_idot.comp
+mv_q4_k_g mv_q4k_idot.comp -DRG=1
 mm_q4_k_s mm_scalar.comp -DFMT_Q4_K=1
 mm_q4_k_i mm_idot.comp -DFMT_Q4_K=1
 mm_q4_k_c mm_coopmat.comp -DFMT_Q4_K=1 #optional

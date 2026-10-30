@@ -393,12 +393,12 @@ fn decode_with_integer_dot_quantizes_the_activations_first() {
     };
     let plan =
         plan_quantized_linear_with(QuantType::Q4_K, 1000, 2048, 3, &caps_full(), &options).unwrap();
-    assert_eq!(plan.shader_name, "mv_q4_k_i");
+    assert_eq!(plan.shader_name, "mv_q4_k_g");
     assert_eq!(plan.kind, PlanKind::MatVec { columns: 3 });
     let pre = plan.activation_prepass.as_ref().expect("prepass");
     assert_eq!(pre.shader_name, "quant_act_q8");
     assert_eq!(pre.kind, PrepassKind::QuantizeActivations);
-    assert_eq!(pre.output_bytes, (3 * 2048 / 4 + 3 * 2048 / 32) * 4);
+    assert_eq!(pre.output_bytes, (3 * 2048 / 4 + 2 * 3 * 2048 / 32) * 4);
     assert_eq!(le_words(&pre.push_constants), [2048, 3, 3 * 2048 / 4]);
     assert_eq!(pre.groups, [(3 * 2048 / 32u32).div_ceil(128), 1, 1]);
     assert_eq!(plan.bindings[1].role, BindingRole::PrepassOutput);

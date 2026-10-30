@@ -609,7 +609,7 @@ fn no_shader_is_orphaned() {
     let always = |_: &str| true;
     for quant in planned_formats() {
         for caps in capability_profiles() {
-            for batch in [1usize, 16, 64] {
+            for batch in [1usize, 4, 16, 64] {
                 // the `mm_<fmt>_i` kernels serve the batches above the matrix-vector range when the tiled `mmq_<fmt>_i` kernel is not available
                 let no_tiled = |n: &str| !n.starts_with("mmq_");
                 let availability: [&dyn Fn(&str) -> bool; 2] = [&always, &no_tiled];

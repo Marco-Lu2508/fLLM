@@ -7,15 +7,18 @@ use crate::backend::{BackendError, QuantType};
 
 /// Size of the push-constant block of the quantized-linear shaders (`QPush` in `_q_common.glsl`).
 pub const PUSH_BYTES: usize = 48;
-/// Largest batch served by the matrix-vector shaders; bigger batches use the tiled matrix-matrix shaders.
-pub const MATVEC_MAX_BATCH: u32 = 8;
+/// Largest batch the matrix-vector shaders can serve (columns of the accumulator array); bigger batches use the tiled matrix-matrix shaders.
+pub const MATVEC_MAX_BATCH: u32 = 16;
+/// Largest batch served by the matrix-vector shaders on a device with tensor cores (the cooperative-matrix tiles take over above it).
+const MATVEC_MAX_BATCH_COOP: u32 = 8;
 
-/// Largest batch served by the matrix-vector shaders: [`MATVEC_MAX_BATCH`], or `FLLM_VK_MV_MAX` (1..=8) for measuring a device.
-pub fn matvec_max() -> u32 {
-    static MAX: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *MAX.get_or_init(|| {
-        std::env::var("FLLM_VK_MV_MAX").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=MATVEC_MAX_BATCH).contains(v)).unwrap_or(MATVEC_MAX_BATCH)
-    })
+/// Largest batch served by the matrix-vector shaders on this device: 16 where there are no tensor cores to use for the batches in between (the
+/// weights are read once for up to 16 tokens; the tiled int8 kernel costs the same for 9 as for 64 tokens, 1.9 ms against 0.9 - 1.6 ms for an 8192 x 3072
+/// Q4_K weight on a Radeon 840M), 8 on NVIDIA. `FLLM_VK_MV_MAX` (1..=16) overrides it for measuring a device.
+pub fn matvec_max(caps: &VkCapsLike) -> u32 {
+    static MAX: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let knob = *MAX.get_or_init(|| std::env::var("FLLM_VK_MV_MAX").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=MATVEC_MAX_BATCH).contains(v)));
+    knob.unwrap_or(if caps.vendor == VENDOR_NVIDIA { MATVEC_MAX_BATCH_COOP } else { MATVEC_MAX_BATCH })
 }
 /// `maxComputeWorkGroupCount` that every Vulkan device offers per dimension; larger grids are split over x and y.
 pub const MAX_GROUPS_PER_DIM: u64 = 65535;
@@ -98,7 +101,7 @@ impl Variant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanKind {
-    /// `mv_*`: `columns` (1..=8) activation rows, `columns` is specialization constant 2.
+    /// `mv_*`: `columns` (1..=[`MATVEC_MAX_BATCH`]) activation rows, `columns` is specialization constant 2.
     MatVec { columns: u32 },
     /// `mm_*`: tiled, any batch.
     MatMul,
@@ -286,9 +289,23 @@ pub fn split_groups(n: u64) -> [u32; 3] {
     }
 }
 
+/// Smallest batch for which the matrix-vector shaders of the K-quants with a row-group variant (`mv_q4_k_g`) use it: every group of 8 invocations then
+/// owns its rows and walks all their blocks (no cross-group reduction), which pays from 3 activation rows on; with 1 or 2 rows the blocks of a row
+/// are spread over the whole workgroup (more loads in flight, the memory system is the limit there).
+const ROW_GROUP_MIN_BATCH: u32 = 3;
+/// Formats that have a row-group shader.
+const ROW_GROUP_TAGS: [&str; 1] = ["q4_k"];
+
+/// Output rows one workgroup of a row-group matrix-vector shader produces: every group of 8 invocations has `per_group` rows of its own.
+fn rows_per_workgroup_rg(wg: u32, per_group: u32) -> u32 {
+    per_group * (wg / 8)
+}
+
 /// Workgroup size and rows per workgroup of the matrix-vector shaders for a device.
-fn matvec_tuning(caps: &VkCapsLike, columns: u32) -> (u32, u32) {
+fn matvec_tuning(caps: &VkCapsLike, columns: u32, row_group: bool) -> (u32, u32) {
     let (mut wg, mut rows) = match caps.vendor {
+        // row-group shader (Radeon 840M, 8192 x 3072 Q4_K, 8 rows: 32 invocations and 4 rows per group 0.37 ms, 64 and 2: 0.46 ms)
+        _ if row_group => (32u32, 4u32),
         // AMD: two rows per group decode 12 % faster than one on a Radeon 840M (Llama-3.2-3B Q4_K_M: 27.4 -> 30.8 tok/s; work groups of 32 / 128 / 256 were slower)
         0x1002 => (64u32, 2u32),
         0x10de => (128u32, 2u32),
@@ -348,7 +365,7 @@ impl MmqKnobs {
         let off = std::env::var("FLLM_VK_MM").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "legacy" | "false"));
         MmqKnobs {
             enabled: !off,
-            min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch).max(matvec_max() + 1),
+            min_batch: num("FLLM_VK_MM_MIN_BATCH").unwrap_or(Self::DEFAULT.min_batch),
             bm: num("FLLM_VK_MM_BM").filter(|v| matches!(v, 32 | 64 | 128 | 256)),
             bn: num("FLLM_VK_MM_BN").filter(|v| matches!(v, 32 | 64 | 128)),
             tm: num("FLLM_VK_MM_TM").filter(|v| matches!(v, 4 | 8)),
@@ -378,7 +395,7 @@ pub fn mmq_tile(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32,
 /// TM x 4 outputs. The default is 128 x 64 with TM 8 (256 invocations, ~18 KiB of shared memory), which suits subgroup sizes 16 to 64; the knobs
 /// override it for measuring.
 pub fn mmq_tile_tm(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u32, u32, u32, u32)> {
-    if !knobs.enabled || batch < knobs.min_batch.max(matvec_max() + 1) {
+    if !knobs.enabled || batch < knobs.min_batch.max(matvec_max(caps) + 1) {
         return None;
     }
     // 8 rows per invocation read half as many shared-memory words per dot product as 4 (measured +15-20 % prompt speed on Intel Xe-LPG)
@@ -461,7 +478,7 @@ pub fn plan_quantized_linear_with(
             &default_available
         }
     };
-    let matvec = batch32 <= matvec_max();
+    let matvec = batch32 <= matvec_max(caps);
     let prefix = if matvec { "mv" } else { "mm" };
     let prepass_name = |variant: Variant| -> String {
         match variant {
@@ -536,8 +553,10 @@ pub fn plan_quantized_linear_with(
         && available("quant_act_f16")
         && coop_wide_min_batch().is_some_and(|min| batch32 >= min)
         && available(&format!("mm_{tag}_cw"));
+    let row_group = matvec && variant == Variant::IntDot && options.force.is_none() && batch32 >= ROW_GROUP_MIN_BATCH && ROW_GROUP_TAGS.contains(&tag) && available(&format!("mv_{tag}_g"));
     let shader_name = match &mmq {
         Some((name, _)) => name.clone(),
+        None if row_group => format!("mv_{tag}_g"),
         None if coop_wide => format!("mm_{tag}_cw"),
         None => format!("{prefix}_{tag}_{}", variant.suffix()),
     };
@@ -562,7 +581,7 @@ pub fn plan_quantized_linear_with(
     };
 
     let (kind, spec_constants, groups) = if matvec {
-        let (wg, per_group) = matvec_tuning(caps, batch32);
+        let (wg, per_group) = matvec_tuning(caps, batch32, row_group);
         (
             PlanKind::MatVec { columns: batch32 },
             vec![
@@ -576,7 +595,7 @@ pub fn plan_quantized_linear_with(
                     value: batch32,
                 },
             ],
-            split_groups((rows as u64).div_ceil(per_group as u64)),
+            split_groups((rows as u64).div_ceil(u64::from(if row_group { rows_per_workgroup_rg(wg, per_group) } else { per_group }))),
         )
     } else if let Some((_, (bm, bn, tm, ks))) = &mmq {
         (
@@ -644,8 +663,8 @@ pub fn plan_quantized_linear_with(
             push_constants: words(&[cols32, batch32, xq_d]),
             groups: split_groups(blocks.div_ceil(128)),
             bindings,
-            // a multiple of 16 bytes: mm_q.comp reads the result through a uvec4 view
-            output_bytes: (xq_d as usize + blocks as usize).next_multiple_of(4) * 4,
+            // a multiple of 16 bytes: mm_q.comp reads the result through a uvec4 view; the second block of `blocks` words holds d * sum(q) per block
+            output_bytes: (xq_d as usize + 2 * blocks as usize).next_multiple_of(4) * 4,
             uses_perm: perm,
         })
     } else if coop_wide {

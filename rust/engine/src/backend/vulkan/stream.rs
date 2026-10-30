@@ -11,6 +11,7 @@
 mod exec;
 mod fallback;
 mod linear;
+mod linear_bench;
 mod mamba;
 mod ring;
 #[cfg(test)]
