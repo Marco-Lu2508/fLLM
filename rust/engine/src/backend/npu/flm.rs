@@ -10,7 +10,7 @@
 //!
 //! Everything here is plain `std` (processes and files) and `reqwest::blocking` for the readiness probe; the routes of the Studio call it from
 //! blocking tasks. The same code serves `fllm-rs amd-npu`.
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -71,6 +71,7 @@ pub fn flm_path() -> Option<PathBuf> {
 }
 
 fn command(path: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = Command::new(path);
     #[cfg(windows)]
     {
