@@ -95,6 +95,8 @@ Expected outcome of `--only hattn`: every line is `ok` or `SKIPPED`, `failed = 0
 | A100 (8.0), L4 (8.9), G4 (12.0) | `SKIPPED` (no FA3 on this device) | `[FlashInfer]`, ok | `[Cascade]`, ok |
 | T4 (7.5, optional) | `SKIPPED` | `[FlashInfer]`, ok; head width 256 was not examined for Turing shared memory: report a failure of the d256 lines | `[Cascade]`, ok |
 
+Measured: RTX 2000 Ada laptop (8.9, FlashInfer headers, CUDA 12.4) 2026-10-30, `--only hattn`: 28 checks, 21 ok, 7 skipped (the FA3 cases), 0 failed; the four cascade cases ran the `[Cascade]` path. Before that day the cascade cases failed: the merged FP16 rows were never converted into the FP32 output of the call (it kept the old contents), and a run too short to share the prefix kept the rest of its group from sharing it.
+
 A case that reaches a different path than its label expects fails with `expected the X path to run, the Y path ran`, so a silent fall back to the
 built-in kernel cannot pass. The tolerance is the fast-kernel one (`4e-3` of the error scale; FP16 queries and probabilities).
 

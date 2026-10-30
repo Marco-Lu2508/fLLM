@@ -176,16 +176,22 @@ By hand: `cargo build --release --locked -p fllm-engine --features "rust-gpu,cud
 ## Checking fLLM on an RTX 20 series card (Turing, sm_75; e.g. an RTX 2070 Super, 8 GB)
 
 **Status: not verified on real Turing hardware on Windows.** What exists: a Tesla T4 (Turing, Linux, Google Colab) showed that the fused gate/up activation of
-the quantized prompt GEMM wrote nonsense for Q4_K_M models on sm_75; the fix switches that fusion off below Ampere (sm_80), and with
-`FLLM_CUDA_NO_GLU_FUSE=1` the T4 wrote the right text. The fixed build has **not run on a T4 or any other Turing card yet**, and no CUDA build has
-run on Windows at all. If you have such a card, this is the shortest useful check (about 15 minutes, 3 GB of download), and the output of every step
-is worth sending back (issue or the changelog thread):
+the quantized prompt GEMM wrote nonsense for Q4_K_M models on sm_75, and with `FLLM_CUDA_NO_GLU_FUSE=1` the T4 wrote the right text. The cause is now
+understood and was reproduced on an RTX 2000 Ada laptop GPU by giving the kernels the 64 KB of shared memory per block that Turing has
+(`FLLM_CUDA_FORCE_SMEM=65536`): the prompt GEMMs fold the gated activation into the conversion of their input and find out only afterwards that none of their tile
+shapes fits, so the fallback kernels read the raw gate (a 20-token prompt gave a run of newlines; with the fusion off the text was right). Two changes:
+the fallback computes the activation first (the self-test group `fuse` runs the fused sequence for every legacy and K-quant format with 64 KB and passes;
+with `FLLM_CUDA_NO_GLU_RECOVER=1`, the old behaviour, it fails), and the fusion stays **off below Ampere** (sm_80) as before, because that is what the T4 run
+showed to work. The dispatch and the 64 KB limit of a Turing card were also run on the Ada GPU (`FLLM_CUDA_FORCE_CC=75 FLLM_CUDA_FORCE_SMEM=65536`, see the
+changelog); what no emulation covers is the sm_75 machine code itself (no `cp.async`, the Turing `mma` shapes). The build has **not run on a T4 or any other Turing
+card since**, and no CUDA build has run on Windows at all. If you have such a card, this is the shortest useful check (about 15 minutes, 3 GB of download), and the
+output of every step is worth sending back (issue or the changelog thread):
 
 1. **Install** the CUDA asset: `.\install.ps1 -Variant cuda -AddToPath` (needs only the NVIDIA driver, no CUDA Toolkit).
 2. **See the card:** `fllm-rs devices`. Expected: the card as `cuda:0` with `capability 7.5` and a line `kernels of this binary: sm_75 cubin` (or the
    PTX of a lower architecture). `none for sm_75: rebuild with FLLM_CUDA_ARCHS including 75` means the asset has no Turing kernels: stop and report.
-3. **Self test:** `fllm-rs selftest-gpu --device cuda:0 --failures-only --json turing-selftest.json`. Expected: no failure except the 20 known `fp8blk`
-   exact-tolerance cases (see the changelog, Known issues). Any other failed group is a finding; attach the json.
+3. **Self test:** `fllm-rs selftest-gpu --device cuda:0 --failures-only --json turing-selftest.json`. Expected: no failure (an RTX 2000 Ada laptop GPU passes every
+   check of both passes). Any failed group is a finding; attach the json.
 4. **Real model, fused path (the default):** `fllm-rs serve --model <Llama-3.2-3B-Instruct-Q4_K_M.gguf> --model-name m --device cuda:0 --port 8080`, then
    `curl.exe http://127.0.0.1:8080/v1/completions -H "content-type: application/json" -d "{\"model\":\"m\",\"prompt\":\"The capital of France is\",\"max_tokens\":24,\"temperature\":0}"`.
    Expected: a sensible sentence ("Paris ..."). Nonsense or repeated tokens = the sm_75 fix does not hold.

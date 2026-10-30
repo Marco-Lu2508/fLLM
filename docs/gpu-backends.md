@@ -371,6 +371,13 @@ The tensor-core kernels (FP16 prompt GEMMs, FlashInfer/CUTLASS paths, the Marlin
 (6.x) and Volta (7.0): there the dispatcher uses the FP32/`dp4a` kernels (single-token decode runs at
 the same bandwidth-bound speed, prompt processing is much slower). `FLLM_CUDA_FORCE_CC=61` forces that path for testing.
 
+Testing an older card's choices on a newer one: `FLLM_CUDA_FORCE_CC=75` makes the host code decide as it does on Turing (no fused gate/up activation in the prompt
+GEMMs, the vLLM split of the 4-bit Marlin launch, no cuBLASLt), `FLLM_CUDA_FORCE_SMEM=65536` gives the tile choices Turing's 64 KB of shared memory per block
+(the GEMMs then fall back to smaller tiles, or decline, and the dispatcher continues with the next kernel), and `FLLM_CUDA_NO_MARLIN_Q4K=1` keeps the Q4_K
+weights out of the Ampere-only Marlin layout. The self test sets the shared-memory limit itself for its `swiglu + prompt GEMM` cases (group `fuse`). This
+exercises the dispatcher and the fallbacks; the machine code is the real card's, so it says nothing about sm_75 instructions. `FLLM_CUDA_NO_GLU_RECOVER=1` switches
+off the repair that computes a gated activation first when its GEMM declined after the fused conversion (bisect only).
+
 ### MLX affine weights (`MLXA`)
 
 Checkpoints of mlx-lm / mlx-community (`quantization: {bits, group_size}`) stay quantized on the device: 4-bit with group 64 takes 4.5 bits per
@@ -422,14 +429,17 @@ Per-tensor / per-channel `FP8M` weights that the Marlin FP8 kernel cannot take (
 shapes (128 x 128, 64 x 64, 32 x 32, 128 x 32, 1 x 128, 16 x 16, 64 x 8 ...), rows that end inside a tile row, widths that are not a multiple of 16
 or of the tile, against the f64 reference of the dequantized weights and the CPU backend, with the FP8 tensor-core path switched off; an
 8-bit-memory check (the buffer has the size of the tensor); on sm_89+ the FP8 tensor-core path through `quantized_linear` against a host emulation
-of its activation quantization (tolerance 1e-3 of the sum of absolute terms) and against the worst-case quantization error. The `linear`, `fast
+of its activation quantization (tolerance 1e-3 of the sum of absolute terms) and against the worst-case quantization error. The group runs in both
+passes of `selftest-gpu --device cuda`; the exact pass never takes the FP8 tensor cores (exact math switches them off), so there the same cases hold the FP32
+GEMV to the *unquantized* product at the exact tolerance (a comparison with the emulation of a path that does not run failed 20 cases by 2 to 5 % on an RTX 2000
+Ada before this was understood; the tensor-core path itself matched its emulation in the fast pass all along). The `linear`, `fast
 linear` and `moe` groups carry `fp8b` entries too (`--quants fp8b`).
 
 Verified: all of `fp8_block.cu`, `moe.cu`, `api.cu`, `fp8_gemm.cu` compile with nvcc 12.8.1 for sm_61, 70, 75, 80, 89, 90 and 120 (no spills in the GEMV
 except 4 bytes at NB = 4 on sm_80; 170 registers in the tensor-core kernel), the Rust side builds and passes clippy with `--features cuda`, and host
 mirrors of the kernel arithmetic (decoder, GEMV lanes and warp reduction, tensor-core tile coverage with the constants read from the source, MoE and
-W8A8 scale addressing) match the CPU reference. **Not run on any GPU.** The first thing to do on a Colab A100 / L4 / Blackwell: `fllm-rs selftest-gpu
---only fp8blk`, then `--only linear,moe --quants fp8b`.
+W8A8 scale addressing) match the CPU reference. **Run on an RTX 2000 Ada laptop GPU (sm_89): `--only fp8blk` 172 of 172 checks in the exact pass and in the fast pass, 0 failed**
+(the tensor-core cases from sm_89; an L4 and a T4 ran it earlier, see the README). A Hopper or Blackwell card has not run it.
 
 ### AMD GPUs (ROCm / HIP)
 

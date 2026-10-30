@@ -176,7 +176,7 @@ and "now" CUDA rows for the same code differ by up to 4 %).
 
 * **CUDA, one request.** Decode speeds are within 3 to 4 % of each other on every model (the memory bandwidth of the card is the limit). The prompt of
   fLLM is the fastest for the 3B model at every length (4289 / 4904 against 3876 / 4167 tok/s for Ollama at 580 / 2100 tokens) and, on the 4-bit AWQ
-  checkpoint, ahead of vLLM and SGLang too. On Llama-3.1-8B it is **10 % behind Ollama at 600 tokens (1690 against 1887) and 3 % at 2100 tokens** and
+  checkpoint, ahead of vLLM and SGLang too. On Llama-3.1-8B it is **10 % behind Ollama at 600 tokens (1690 against 1887) and 3 % at 2100 tokens** (in tokens each engine reports: Ollama counts 34 more tokens for the same text, the time to the first token is within 3 %, see the second pass below) and
   ahead of llama.cpp. An int8 tensor-core GEMM for Q4_K that exists in the tree (`cuda/qmma4k.cu`, never built or called) was wired in for a test: after one
   fix (it ignored the fused gate/up activation) it wrote the right text but was slower than the FP16 kernel on this card (1736 against 2017 tok/s on the
   8B prompt). It stays unused; the gap is the Q4_K prompt GEMM.
@@ -184,7 +184,7 @@ and "now" CUDA rows for the same code differ by up to 4 %).
   best of the GGUF engines everywhere except **Llama-3.1-8B with four 2100-token prompts: 53 against 60 (Ollama) and 54 tok/s (llama.cpp)**; the median
   TTFT there (4.1 s) is also worse than Ollama's (2.8 s). On the AWQ checkpoint fLLM equals vLLM and SGLang with 4 requests, is 10 % behind at 8
   requests with a medium prompt (369 against 413 / 431) and 17 % behind with short prompts (523 against 632 / 646). Profiled: the weight kernels there already
-  stream at the card's bandwidth; what remains is the decode attention kernel (about 100 us per layer for 8 sequences) and the step overhead.
+  stream at the card's bandwidth; what remained was the decode attention kernel (about 100 us per layer for 8 sequences), fixed in the second pass below (8 short requests: 530 -> 655 tok/s, vLLM 632).
 * **No batching collapse on this card**, neither with CUDA nor with Vulkan: the aggregate grows with the number of requests in every row of the tables
   (Vulkan 3B: 76 -> 142 -> 182 tok/s). The collapse reported for a Radeon 840M (28 -> 10 tok/s with 8 requests) does not occur here.
 * **Vulkan on the NVIDIA card** is within 3 to 5 % of llama.cpp's Vulkan prompt on the 3B model (2660 / 2816 against 2733 / 2949 tok/s) and about 20 %
@@ -197,9 +197,72 @@ and "now" CUDA rows for the same code differ by up to 4 %).
   cooperative matrices (4.9 ms -> 0.8 ms per layer and 512 rows at 2000 tokens of context) and the matrix product uses a 128 x 64 tile with a 64-wide K
   step, a prefetch of the next step and binary16 activations (about 1.3 times faster than the 64 x 64 tile). Llama-3.2-3B, prompt of 2100 tokens:
   1431 -> 2816 tok/s; decode at that context 55 -> 68 tok/s.
-* **Still open:** the CUDA Q4_K prompt GEMM (8B, 10 % behind Ollama) and with it the aggregate of several long 8B prompts; the Vulkan matrix product reaches
+* **Still open** (see the second pass below for what was found since): the CUDA Q4_K prompt GEMM (8B) and with it the aggregate of several long 8B prompts; the Vulkan matrix product reaches
   roughly 14 TFLOPS (llama.cpp's about 20): an experiment without the weight fetch was 1.8 times faster, so the packed-weight fetch and decode in front of the
   tensor cores bound it, not the tensor cores; Vulkan decode of `Q6_K` (the output projection) streams at about 155 GB/s against 230 GB/s for the Q4_K kernels.
+
+### Second CUDA pass (2026-10-30, same RTX 2000 Ada laptop)
+
+Profiled with `nsys` (`ncu` is not available without root: the driver restricts the GPU performance counters), then changed. Same client and method as above
+(`scripts/bench_compare.py`, medians of three runs, 128 new tokens, every request a new text); "before" = the CUDA binary of the previous section, "now" = this
+tree, both built on the laptop (sm_89, FlashInfer headers, CUDA 12.4) and measured in the same session, vLLM 0.32.0 in the same session too. **The laptop is shared
+with other test jobs; no other job used the GPU during these runs as far as `nvidia-smi` and `ps` showed, but a few percent of noise between runs of one
+session is normal** (the 3B AWQ one-request prompt row moved from 4441 to 4174 tok/s between "before" and "now" on a 25 ms time to first token).
+
+**What the profile showed.** (1) The decode attention kernel took about 91 us per layer for eight sequences of 200 tokens. A CUDA graph is recorded for the longest
+context of the pool (32768 tokens for the 3B model), and the kernel sized its grid and its merge kernel for that: 64 splits for every row and head, 4096 blocks
+of which 63 in 64 had no key to read, plus a merge over 64 partial results. The rows now use the splits their own length needs and the other blocks return
+at once (about 1024 blocks at most, a row of one split writes its result directly): **Llama-3.2-3B AWQ, 8 simultaneous short requests: 530 -> 655 tok/s
+(vLLM 632 in the same session)**. (2) The weight kernels of both models stream at the card's bandwidth (mmvq / Marlin, in the 8B run 22.7 ms of a 28 ms decode
+step for 4 sequences read 5 GB of weights once), the GPU is 97 to 99 % busy in every burst of the 8B runs (no host gaps, sampling runs on the device), and
+CUDA graphs were already on for batched decode steps; nothing is left to win from launch or scheduler overhead there.
+
+Llama-3.2-3B-Instruct, the 4-bit AWQ checkpoint (aggregate tokens/s of 1, 4 and 8 simultaneous requests; decode tok/s of one request in brackets):
+
+| prompt | engine | 1 request | 4 requests | 8 requests |
+|---|---|---|---|---|
+| ~60 words (~100 tokens) | fLLM before | (106.0) | 335.0 | 530.4 |
+| | **fLLM now** | (109.4) | **374.7** | **655.3** |
+| | vLLM | (94.9) | 341.9 | 632.2 |
+| ~380 words (~546 tokens) | fLLM before | (99.0) | 268.9 | 376.1 |
+| | **fLLM now** | (107.1) | **286.2** | **425.2** |
+| | vLLM | (92.5) | 270.2 | 421.1 |
+
+(SGLang was not run again; its row in the table above, 646 tok/s for 8 short requests, was measured in a different session.)
+
+Llama-3.2-3B-Instruct Q4_K_M (GGUF, same session, ran after the AWQ runs; the GPU showed 13 % utilisation from another job once before the run started):
+
+| prompt | build | decode tok/s (1) | agg tok/s (4) | agg tok/s (8) |
+|---|---|---|---|---|
+| ~60 words | before | 96.6 | 264.7 | 393.3 |
+| | **now** | **100.9** | **293.3** | **450.4** |
+| ~380 words | before | 90.3 | 216.1 | 281.3 |
+| | **now** | **98.9** | **231.7** | **314.9** |
+
+
+**Llama-3.1-8B Q4_K_M, the two open rows.** Measured against Ollama in one session (the previous section's numbers came from another one, and both engines were slower in this one: Ollama's time to the first token at 600 tokens was 0.31 s there, 0.36 s here):
+
+| prompt | engine | prompt tokens counted | prompt tok/s | TTFT s | decode tok/s (1) | agg tok/s (4) | TTFT s (4) |
+|---|---|---|---|---|---|---|---|
+| ~380 words | fLLM before | 546 | 1471 | 0.37 | 44.5 | 101.4 | 1.44 |
+| | **fLLM now** | 546 | 1500 | 0.36 | 46.8 | 104.7 | 1.41 |
+| | Ollama | 580 | 1583 | 0.36 | 43.0 | 94.5 | 1.09 |
+| ~1500 words | fLLM before | 2092 | 1998 | 1.04 | 44.0 | 53.8 | 3.98 |
+| | **fLLM now** | 2092 | 2027 | 1.03 | 44.9 | 54.2 | 3.96 |
+| | Ollama | 2126 | 2023 | 1.05 | 41.2 | 60.6 | 2.81 |
+
+* **The "10 % behind Ollama at 600 tokens" was mostly a counting difference.** The same text is 544 tokens for llama.cpp's tokenizer and for fLLM's (checked on five of
+  the benchmark prompts: identical counts), but Ollama reports 580 (and 2126 for the 2092-token prompt: 34 more at both lengths, presumably a template wrapper it adds; not examined) and the table divides that count by the time. The
+  **time to the first token for the same text is within 3 %**: 0.36 s for both here (0.32 against 0.31 s in the previous session). Counted per token Ollama is 5 % faster
+  at 600 tokens (1583 against 1500 for tokens it really processes: 580 against 546) and equal at 2100 tokens (2023 against 2027). The change in this pass did not
+  touch the Q4_K prompt GEMM, so this stays the one place where a better kernel (int8 tensor cores: `cuda/qmma4k.cu` exists and was slower on this card when it was tried) would pay.
+* **Four simultaneous 2100-token prompts: 54.2 against 60.6 tok/s (Ollama)** remains. `nsys` of that run: GPU 97 to 99 % busy; the decode phase of the four
+  sequences takes 27.9 ms per step (bandwidth bound: 5 GB of weights plus 1.1 GB of key/value cache in 224 GB/s is 27 ms), the prompt phase 5.6 s for
+  8400 tokens (1500 tok/s; one request alone reaches 2027, so 25 % slower per token in this phase: a prompt step of 512 rows takes 330 ms next to other
+  sequences, about 250 ms alone, the GEMM kernels themselves run longer, the laptop GPU at its 60 W limit is the suspect and could not be separated from the
+  other causes without hardware counters). Ollama's lead there is the prompt phase, not the scheduler or the launches.
+* **Only the attention fix changed the 8B numbers, by 1 to 4 %** (decode of 4 sequences: 35.8 -> 37.0 tok/s each at 600 tokens): at 4 rows its 32 blocks of
+  one or three splits were not the problem.
 
 ## AMD Radeon 840M laptop
 
