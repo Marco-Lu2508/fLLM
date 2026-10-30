@@ -648,6 +648,8 @@ jobs:
     needs: prepare
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    # the macOS installer has not been built in CI before this job existed: a failure there must not cost the Windows and Linux installers
+    continue-on-error: ${{ matrix.experimental == true }}
     permissions:
       contents: write
     strategy:
@@ -656,8 +658,15 @@ jobs:
         include:
           - name: Windows
             os: windows-2022
+            features: rust-gpu,vulkan
           - name: Linux
             os: ubuntu-24.04
+            features: rust-gpu,vulkan
+          # macOS: the wgpu Metal path, like the macOS release assets; the installer is a dmg (not signed or notarized yet)
+          - name: macOS
+            os: macos-14
+            features: rust-gpu
+            experimental: true
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
@@ -689,7 +698,7 @@ jobs:
       - name: Build the server program
         shell: bash
         run: |
-          cargo build --release --locked -p fllm-engine --features rust-gpu,vulkan --bin fllm-rs
+          cargo build --release --locked -p fllm-engine --features "${{ matrix.features }}" --bin fllm-rs
           triple="$(rustc -vV | sed -n 's/^host: //p')"
           ext=""; if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
           mkdir -p desktop/src-tauri/binaries
@@ -713,10 +722,11 @@ jobs:
         run: |
           set -eu
           cd desktop/src-tauri/target/release/bundle
-          for f in nsis/*.exe msi/*.msi deb/*.deb rpm/*.rpm appimage/*.AppImage; do
+          sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+          for f in nsis/*.exe msi/*.msi deb/*.deb rpm/*.rpm appimage/*.AppImage dmg/*.dmg; do
             [ -f "$f" ] || continue
             sum="$(basename "$f").sha256"
-            sha256sum "$f" | awk '{print $1}' > "$sum.tmp"
+            sha "$f" | awk '{print $1}' > "$sum.tmp"
             printf '%s  %s\n' "$(cat "$sum.tmp")" "$(basename "$f")" > "$sum"
             gh release upload "$TAG" "$f" "$sum" --clobber
           done
