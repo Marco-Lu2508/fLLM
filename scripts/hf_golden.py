@@ -951,6 +951,15 @@ def config_for(arch: str, vocab: int):
         "bitnet": lambda: T.BitNetConfig(
             **common, **dense, hidden_act="relu2", rms_norm_eps=1e-5, rope_theta=500000.0,
         ),
+        "kimi_linear": lambda: T.KimiLinearConfig(
+            **{**common, "num_hidden_layers": 4}, num_attention_heads=4, num_key_value_heads=4, intermediate_size=128,
+            moe_intermediate_size=32, num_local_experts=8, num_experts_per_tok=2, n_group=1, topk_group=1,
+            n_shared_experts=1, kv_lora_rank=16, q_lora_rank=None, qk_rope_head_dim=8, qk_nope_head_dim=16,
+            v_head_dim=16, routed_scaling_factor=2.0, norm_topk_prob=True, rms_norm_eps=1e-5,
+            linear_head_dim=16, linear_num_heads=4, linear_conv_kernel_dim=4,
+            layer_types=["linear_attention", "linear_attention", "full_attention", "linear_attention"],
+            mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
+        ),
         "olmo2": lambda: T.Olmo2Config(**common, **dense, rms_norm_eps=1e-6, rope_theta=500000.0),
         "qwen": lambda: _qwen_config(vocab),
         "baichuan": lambda: _baichuan_config(vocab),
