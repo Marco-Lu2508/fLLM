@@ -929,6 +929,18 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=64,
             indexer_types=["full", "shared", "full"],
         ),
+        "mimo_v2_flash": lambda: T.MiMoV2FlashConfig(
+            **{**common, "num_hidden_layers": 4}, num_attention_heads=4, num_key_value_heads=2, intermediate_size=128,
+            moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=2, topk_group=1,
+            head_dim=16, v_head_dim=8, sliding_window=6, attention_value_scale=0.75, rms_norm_eps=1e-5,
+            routed_scaling_factor=1.5, norm_topk_prob=True,
+            layer_types=["full_attention", "sliding_attention", "sliding_attention", "full_attention"],
+            mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 500000.0, "partial_rotary_factor": 0.5},
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
+            },
+        ),
         "olmo2": lambda: T.Olmo2Config(**common, **dense, rms_norm_eps=1e-6, rope_theta=500000.0),
         "qwen": lambda: _qwen_config(vocab),
         "baichuan": lambda: _baichuan_config(vocab),
