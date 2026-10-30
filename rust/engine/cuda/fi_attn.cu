@@ -498,19 +498,28 @@ int fllm_fi_attention_try(cudaStream_t s, const float *q, const uint16_t *kpool,
             std::map<int64_t, std::vector<int>> by_first;
             for (size_t i = 0; i < runs.size(); i++)
                 if (runs[i].n == 1) by_first[runs[i].table[0]].push_back((int)i);
+            const int min_pages = (min_prefix + block_size - 1) / block_size;
             for (auto &kv : by_first) {
                 if (kv.second.size() < 2) continue;
-                const Run &a = runs[kv.second[0]];
+                // the longest run is the reference; a run that cannot share min_pages pages with it (too short, or another prefix) stays out of the
+                // group and runs on its own, instead of keeping the others from sharing
+                std::vector<int> &ids = kv.second;
+                std::stable_sort(ids.begin(), ids.end(), [&](int x, int y) { return runs[x].kv > runs[y].kv; });
+                const Run &a = runs[ids[0]];
+                std::vector<int> members{ids[0]};
                 int common = (a.kv - 1) / block_size;  // keep at least one suffix key in every member
-                for (size_t j = 1; j < kv.second.size(); j++) {
-                    const Run &b = runs[kv.second[j]];
-                    int lim = std::min(common, (b.kv - 1) / block_size), k = 0;
+                for (size_t j = 1; j < ids.size(); j++) {
+                    const Run &b = runs[ids[j]];
+                    const int lim = std::min(common, (b.kv - 1) / block_size);
+                    int k = 0;
                     while (k < lim && a.table[k] == b.table[k]) k++;
+                    if (k < min_pages) continue;
                     common = k;
+                    members.push_back(ids[j]);
                 }
-                if (common * block_size >= min_prefix) {
-                    groups.push_back({kv.second, common});
-                    for (int m : kv.second) grouped[m] = 1;
+                if (members.size() >= 2 && common * block_size >= min_prefix) {
+                    groups.push_back({members, common});
+                    for (int m : members) grouped[m] = 1;
                 }
             }
         }
@@ -564,6 +573,13 @@ int fllm_fi_attention_try(cudaStream_t s, const float *q, const uint16_t *kpool,
                                                         static_cast<const __half *>(st.o16a.ptr), static_cast<const float *>(st.lse1.ptr),
                                                         static_cast<__half *>(st.o16c.ptr), st.level[1].d_perm, rows, shared_rows, heads, dk);
             final16 = static_cast<const __half *>(st.o16c.ptr);
+            // the merged FP16 rows go back to the FP32 output like those of the other paths (without this the call returned the old contents of `out`)
+            if (fllm_attn_x16 != nullptr && (reinterpret_cast<uintptr_t>(fllm_attn_x16) & 15) == 0) {
+                d_to_float_copy_k<<<grid(q_elems), 256, 0, s>>>(final16, out, static_cast<__half *>(fllm_attn_x16), q_elems);
+                fllm_attn_x16_written = true;
+            } else {
+                d_to_float_k<<<grid(q_elems), 256, 0, s>>>(final16, out, q_elems);
+            }
             cascaded = true;
         } else {
             Requests rq;
