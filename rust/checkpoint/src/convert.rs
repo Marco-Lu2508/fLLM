@@ -404,6 +404,10 @@ pub fn prepare_checkpoint(
         if matches!(arch, "gemma4" | "gemma3n") && (name.contains(".attn_") || name.contains(".ffn_") || !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight")) {
             return Ok(None);
         }
+        // Kimi K3 output attention residual
+        if arch == "kimi-linear" && name.starts_with("output_res_") {
+            return Ok(None);
+        }
         // MLA attention has its own projection shapes
         if matches!(
             arch,

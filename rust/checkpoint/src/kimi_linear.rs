@@ -33,6 +33,16 @@ pub(crate) fn is_glm5next(cfg: &Value) -> bool {
     matches!(cfg.get("model_type").and_then(Value::as_str), Some("glm5_next" | "glm5_next_text")) || cfg.get("_glm5n").and_then(Value::as_bool) == Some(true)
 }
 
+/// Kimi K3: SiTU activation, block attention residuals, latent experts, full-rank output gates of the delta layers and an output gate on
+/// the latent attention layers.
+pub(crate) fn is_k3(cfg: &Value) -> bool {
+    cfg.get("attn_res_block_size").is_some_and(|v| !v.is_null()) || cfg.get("hidden_act").and_then(Value::as_str) == Some("situ")
+}
+
+fn full_rank_gate(cfg: &Value) -> bool {
+    attn_config(cfg).get("use_full_rank_gate").and_then(Value::as_bool).unwrap_or(false)
+}
+
 fn attn_config(cfg: &Value) -> &Value {
     cfg.get("linear_attn_config").filter(|v| v.is_object()).unwrap_or(&Value::Null)
 }
@@ -96,6 +106,10 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
         out["qk_rope_head_dim"] = 2.into();
     }
     out["model_type"] = "kimi_k2".into();
+    if cfg.get("hidden_act").and_then(Value::as_str) == Some("situ") {
+        // the DeepSeek plan only knows silu; the SiTU parameters travel as metadata of the kimi-linear plan
+        out["hidden_act"] = "silu".into();
+    }
     out["num_hidden_layers"] = (layers.len() as u64).into();
     let copy = |out: &mut Value, to: &str, keys: &[&str]| {
         if let Some(v) = first(cfg, keys).cloned() {
@@ -162,7 +176,30 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
     if is_glm5next(cfg) {
         glm5next_meta(cfg, &mut plan, arch);
     }
+    if is_k3(cfg) {
+        let f = |k: &str, v: f64| (format!("{arch}.{k}"), Meta::F32(v as f32));
+        if cfg.get("hidden_act").and_then(Value::as_str) == Some("situ") {
+            plan.meta.push(f("situ_beta", flt(cfg, "activation_situ_beta").unwrap_or(1.0)));
+            plan.meta.push(f("situ_linear_beta", flt(cfg, "activation_situ_linear_beta").unwrap_or(0.0)));
+        }
+        if let Some(block) = num(cfg, "attn_res_block_size") {
+            plan.meta.push((format!("{arch}.attention_residual_block_size"), Meta::U32(block as u32)));
+        }
+        if let Some(latent) = num(cfg, "routed_expert_hidden_size") {
+            plan.meta.push((format!("{arch}.moe_latent_size"), Meta::U32(latent as u32)));
+        }
+    }
     Ok(plan)
+}
+
+/// Kimi K3 tensors outside the layers.
+pub(crate) fn map_global(n: &str) -> Option<Mapped> {
+    let name = match n {
+        "model.output_attn_res_norm.weight" => "output_res_norm.weight",
+        "model.output_attn_res_proj.weight" => "output_res_proj.weight",
+        _ => return None,
+    };
+    Some(Mapped::Tensor { name: name.into(), add: 0.0 })
 }
 
 /// Ling-3.0 Hub names to the transformers 5 names (the renames of its conversion mapping); `None` when `n` is not in the Hub layout.
@@ -209,6 +246,17 @@ fn glm5next_meta(cfg: &Value, plan: &mut Plan, arch: &str) {
 /// `model.layers.<layer>.`.
 pub(crate) fn map(layer: &str, suf: &str, linear: bool) -> Option<Mapped> {
     let plain = |name: &str| Some(Mapped::Tensor { name: format!("blk.{layer}.{name}"), add: 0.0 });
+    // Kimi K3: attention-residual scoring tensors
+    let res = match suf {
+        "self_attention_res_norm.weight" => Some("attn_res_norm.weight"),
+        "self_attention_res_proj.weight" => Some("attn_res_proj.weight"),
+        "mlp_res_norm.weight" => Some("ffn_res_norm.weight"),
+        "mlp_res_proj.weight" => Some("ffn_res_proj.weight"),
+        _ => None,
+    };
+    if let Some(name) = res {
+        return plain(name);
+    }
     // hyper-connection tensors of GLM-5-Next
     if let Some(hc) = suf.strip_prefix("hc_") {
         return match hc {
@@ -250,6 +298,9 @@ pub(crate) fn map(layer: &str, suf: &str, linear: bool) -> Option<Mapped> {
         "up_proj.weight" => return plain("ffn_up.weight"),
         "down_proj.weight" => return plain("ffn_down.weight"),
         "gate.weight" => return plain("ffn_gate_inp.weight"),
+        "routed_expert_down_proj.weight" => return plain("ffn_latent_down.weight"),
+        "routed_expert_up_proj.weight" => return plain("ffn_latent_up.weight"),
+        "routed_expert_norm.weight" => return plain("ffn_latent_norm.weight"),
         "gate.e_score_correction_bias" => return plain("exp_probs_b.bias"),
         "shared_experts.gate_proj.weight" => return plain("ffn_gate_shexp.weight"),
         "shared_experts.up_proj.weight" => return plain("ffn_up_shexp.weight"),
@@ -270,6 +321,9 @@ pub(crate) fn map(layer: &str, suf: &str, linear: bool) -> Option<Mapped> {
 pub(crate) fn requirements(cfg: &Value, i: u64) -> Option<Vec<String>> {
     let kda = *kda_layers(cfg).ok()?.get(i as usize)?;
     let mut need: Vec<&str> = vec!["attn_norm.weight", "ffn_norm.weight", "attn_output.weight"];
+    if num(cfg, "attn_res_block_size").is_some() {
+        need.extend(["attn_res_norm.weight", "attn_res_proj.weight", "ffn_res_norm.weight", "ffn_res_proj.weight"]);
+    }
     if is_glm5next(cfg) {
         need.extend(["hc_attn_fn.weight", "hc_attn_base.weight", "hc_attn_scale.weight", "hc_ffn_fn.weight", "hc_ffn_base.weight", "hc_ffn_scale.weight"]);
     }
@@ -281,10 +335,11 @@ pub(crate) fn requirements(cfg: &Value, i: u64) -> Option<Vec<String>> {
         if is_ling(cfg) {
             need.extend(["ssm_f.weight", "ssm_g.weight"]);
         } else {
-            need.extend(["ssm_f_a.weight", "ssm_f_b.weight", "ssm_g_a.weight", "ssm_g_b.weight"]);
+            need.extend(["ssm_f_a.weight", "ssm_f_b.weight"]);
+            need.extend(if full_rank_gate(cfg) { vec!["ssm_g.weight"] } else { vec!["ssm_g_a.weight", "ssm_g_b.weight"] });
         }
     } else {
-        if is_ling(cfg) {
+        if is_ling(cfg) || cfg.get("mla_use_output_gate").and_then(Value::as_bool).unwrap_or(false) {
             need.push("attn_gate.weight");
         }
         need.extend(["attn_kv_a_mqa.weight", "attn_kv_a_norm.weight", "attn_kv_b.weight"]);
@@ -372,6 +427,36 @@ mod tests {
         assert!(mla.contains(&"blk.3.attn_kv_b.weight".to_owned()) && !mla.iter().any(|n| n.contains("ssm_")));
         let dense = requirements(&c, 0).unwrap();
         assert!(dense.contains(&"blk.0.ffn_gate.weight".to_owned()));
+    }
+
+    #[test]
+    fn kimi_k3_adds_situ_residual_and_latent_tensors() {
+        let mut c = hub();
+        c["hidden_act"] = "situ".into();
+        c["activation_situ_beta"] = 2.0.into();
+        c["activation_situ_linear_beta"] = 3.0.into();
+        c["attn_res_block_size"] = 2.into();
+        c["routed_expert_hidden_size"] = 12.into();
+        c["mla_use_output_gate"] = true.into();
+        c["linear_attn_config"]["use_full_rank_gate"] = true.into();
+        assert!(is_k3(&c));
+        assert!(!is_k3(&hub()));
+        let plan = plan(&c).unwrap();
+        let get = |k: &str| plan.meta.iter().find(|(n, _)| n == &format!("kimi-linear.{k}")).map(|(_, v)| v.clone());
+        assert!(matches!(get("situ_beta"), Some(Meta::F32(b)) if b == 2.0));
+        assert!(matches!(get("situ_linear_beta"), Some(Meta::F32(b)) if b == 3.0));
+        assert!(matches!(get("attention_residual_block_size"), Some(Meta::U32(2))));
+        let name = |m: Option<Mapped>| match m {
+            Some(Mapped::Tensor { name, .. }) => name,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(name(map("2", "self_attention_res_proj.weight", true)), "blk.2.attn_res_proj.weight");
+        assert_eq!(name(map("2", "mlp_res_norm.weight", true)), "blk.2.ffn_res_norm.weight");
+        assert_eq!(name(map_global("model.output_attn_res_proj.weight")), "output_res_proj.weight");
+        assert!(map_global("model.norm.weight").is_none());
+        let kda = requirements(&c, 1).unwrap();
+        assert!(kda.contains(&"blk.1.attn_res_norm.weight".to_owned()) && kda.contains(&"blk.1.ssm_g.weight".to_owned()));
+        assert!(!kda.contains(&"blk.1.ssm_g_a.weight".to_owned()));
     }
 
     #[test]

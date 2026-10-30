@@ -126,6 +126,7 @@ embeddings and rerank/classify (also BGE-M3, ColBERT, Qwen3-Embedding, Embedding
 The full list, with the families that are **not** supported (for example DeepSeek V4, Kimi K3, Ling-3.0, xLSTM), is in
 The full list, with the families that are **not** supported (for example Kimi K3, Ling-3.0, RWKV), is in
 The full list, with the families that are **not** supported (for example Kimi K3, RWKV), is in
+The full list, with the families that are **not** supported (for example RWKV), is in
 [docs/architectures.md](docs/architectures.md); the per-architecture table with devices and verification levels is
 [docs/model-coverage.md](docs/model-coverage.md). Conversion refuses an unknown `model_type`.
 

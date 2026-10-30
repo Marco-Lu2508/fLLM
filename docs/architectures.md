@@ -117,6 +117,7 @@ speculative decoding are switched off for them.
 * GLM-5-Next (KDA variant), Kimi K3, JetMoE, Inkling, ZAYA,
 * Kimi K3, JetMoE, Inkling, ZAYA,
 * Kimi K3, JetMoE, ZAYA,
+* JetMoE, ZAYA,
   RWKV, xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama, Qwen3.8-Flash-Next. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
 * LongCat-Flash-Lite (n-gram embeddings on top of the LongCat topology).
 * Step-3 (not 3.5/3.7): MFA attention.

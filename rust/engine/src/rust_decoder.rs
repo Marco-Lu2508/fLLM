@@ -106,6 +106,8 @@ struct Moe {
     shared: Option<(Expert, Option<Vec<f32>>)>,
     /// Latent MoE (Nemotron-H): `(down, up)` projections around the routed experts.
     latent: Option<(Linear, Linear)>,
+    /// Weights of the RMS norm over the routed output in the latent space (Kimi K3).
+    latent_norm: Option<Vec<f32>>,
     /// Hash routing (DeepSeek-V4's first layers): the experts of token id `t` are `table[t * used .. (t + 1) * used]`; the router scores only
     /// weight them.
     tid2eid: Option<Vec<u32>>,
@@ -294,6 +296,37 @@ struct Mla {
     kv_b: Linear,
 }
 
+/// Score weights of the two attention-residual mixtures of a layer.
+struct LayerRes {
+    attn: Vec<f32>,
+    ffn: Vec<f32>,
+}
+
+/// Softmax mixture of the earlier block sums `blocks` (each `rows x hidden`) and the running sum `prefix`: every candidate is
+/// normalised by the root mean square over its hidden values and scored with `score` (the norm weight times the projection).
+fn apply_attn_res(prefix: &[f32], blocks: &[Vec<f32>], score: &[f32], eps: f32, hidden: usize) -> Vec<f32> {
+    let rows = prefix.len() / hidden;
+    let mut out = vec![0.0f32; prefix.len()];
+    for r in 0..rows {
+        let candidates: Vec<&[f32]> = blocks.iter().map(|b| &b[r * hidden..(r + 1) * hidden]).chain(std::iter::once(&prefix[r * hidden..(r + 1) * hidden])).collect();
+        let scores: Vec<f32> = candidates
+            .iter()
+            .map(|v| {
+                let inv = (v.iter().map(|x| x * x).sum::<f32>() / hidden as f32 + eps).sqrt().recip();
+                v.iter().zip(score).map(|(x, s)| x * inv * s).sum()
+            })
+            .collect();
+        let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        let row = &mut out[r * hidden..(r + 1) * hidden];
+        for (c, e) in candidates.iter().zip(&exps) {
+            row.iter_mut().zip(*c).for_each(|(o, x)| *o += e / sum * x);
+        }
+    }
+    out
+}
+
 /// `weights` times `scale` (a scalar that follows a normalisation is folded into its weights).
 fn scaled(mut weights: Vec<f32>, scale: Option<f32>) -> Vec<f32> {
     if let Some(s) = scale {
@@ -335,6 +368,8 @@ struct Layer {
     /// next layer (`takes_shortcut`).
     shortcut: Option<Box<Moe>>,
     takes_shortcut: bool,
+    /// Block attention residual weights of this layer: `norm.weight * proj.weight` for the attention and the feed-forward input.
+    res: Option<Box<LayerRes>>,
     /// The layer attends to the tokens the last layer with an indexer selected (GLM-5 layers marked `shared`).
     dsa_shared: bool,
     /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
@@ -1043,6 +1078,8 @@ pub struct RustDecoder {
     v4: Option<Box<deepseek4::V4Model>>,
     /// MiniMax-M3 weights.
     minimax3: Option<Box<minimax3::Minimax3Model>>,
+    /// Score weights of the attention residual over the blocks at the end of the model.
+    output_res: Option<Vec<f32>>,
     /// Inkling weights.
     inkling: Option<Box<inkling::InklingModel>>,
     /// Hyper-connection weights of Hy4 and GLM-5-Next.
@@ -1891,6 +1928,10 @@ impl RustDecoder {
                         )),
                         None => None,
                     },
+                    latent_norm: match moe.latent {
+                        Some(n) if has_tensor(mapping, &format!("{p}.ffn_latent_norm.weight")) => Some(vector(mapping, &format!("{p}.ffn_latent_norm.weight"), n)?),
+                        _ => None,
+                    },
                 }))
             } else if has_tensor(mapping, &format!("{p}.ffn_gate.weight")) {
                 Ffn::Gated {
@@ -2076,6 +2117,7 @@ impl RustDecoder {
                     cache: None,
                     shared: None,
                     latent: None,
+                    latent_norm: None,
                     tid2eid: None,
                 }))
             } else {
@@ -2086,6 +2128,16 @@ impl RustDecoder {
                 indexer,
                 shortcut,
                 takes_shortcut,
+                res: if cfg.attn_res.is_some() && has_tensor(mapping, &format!("{p}.attn_res_norm.weight")) {
+                    let score = |what: &str| -> Result<Vec<f32>, String> {
+                        let norm = vector(mapping, &format!("{p}.{what}_res_norm.weight"), hidden)?;
+                        let proj = vector(mapping, &format!("{p}.{what}_res_proj.weight"), hidden)?;
+                        Ok(norm.iter().zip(&proj).map(|(n, w)| n * w).collect())
+                    };
+                    Some(Box::new(LayerRes { attn: score("attn")?, ffn: score("ffn")? }))
+                } else {
+                    None
+                },
                 dsa_shared,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
                 zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
@@ -2180,6 +2232,13 @@ impl RustDecoder {
         let hc = if cfg.hc.is_some() { Some(Box::new(hc::HcModel::load(mapping, &cfg)?)) } else { None };
         let inkling = if cfg.inkling.is_some() { Some(Box::new(inkling::InklingModel::load(model, &cfg)?)) } else { None };
         let minimax3 = if cfg.minimax3.is_some() { Some(Box::new(minimax3::Minimax3Model::load(model, &cfg)?)) } else { None };
+        let output_res = if cfg.attn_res.is_some() && has_tensor(mapping, "output_res_norm.weight") {
+            let norm = vector(mapping, "output_res_norm.weight", hidden)?;
+            let proj = vector(mapping, "output_res_proj.weight", hidden)?;
+            Some(norm.iter().zip(&proj).map(|(n, w)| n * w).collect())
+        } else {
+            None
+        };
         let mut decoder = Self {
             mtp,
             expert_cache,
@@ -2255,6 +2314,7 @@ impl RustDecoder {
             row_visible_lengths: std::sync::Mutex::new(None),
             v4,
             inkling,
+            output_res,
             minimax3,
             hc,
             row_ids: std::sync::Mutex::new(Vec::new()),
@@ -6372,7 +6432,18 @@ impl RustDecoder {
 
     fn gate_activation_clamped(&self, g: &mut [f32], u: &[f32], parallel: bool, clamp: bool) {
         let activation = self.cfg.activation;
-        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp).filter(|_| clamp) {
+        if let Some((beta, linear_beta)) = self.cfg.situ {
+            let apply = |g: &mut f32, u: &f32| {
+                let gate = *g;
+                let up = if linear_beta > 0.0 { linear_beta * (u / linear_beta).tanh() } else { *u };
+                *g = beta * (gate / beta).tanh() / (1.0 + (-gate).exp()) * up;
+            };
+            if parallel {
+                g.par_iter_mut().zip(u.par_iter()).for_each(|(g, u)| apply(g, u));
+            } else {
+                g.iter_mut().zip(u).for_each(|(g, u)| apply(g, u));
+            }
+        } else if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp).filter(|_| clamp) {
             let apply = |g: &mut f32, u: &f32| {
                 let gate = g.min(limit);
                 *g = gate / (1.0 + (-gate).exp()) * u.clamp(-limit, limit);
@@ -6785,6 +6856,9 @@ impl RustDecoder {
                 });
         }
         if let Some((_, up)) = &moe.latent {
+            if let Some(norm) = &moe.latent_norm {
+                rms(&mut out, norm, self.cfg.eps);
+            }
             out = up.forward(&out)?;
         }
         if let Some((shared, gate)) = &moe.shared {
@@ -6869,7 +6943,7 @@ impl RustDecoder {
                     let width = g.len() / (input.len() / self.cfg.hidden).max(1);
                     gemma::gaussian_top_k(g, width, factor);
                 }
-                if self.cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some() && m.swiglu_clamp_shared) {
+                if self.cfg.situ.is_some() || self.cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some() && m.swiglu_clamp_shared) {
                     // the dense layers of a model with a clamped SwiGLU clamp like its shared expert (GLM-5-Next)
                     self.gate_activation_clamped(g, u, true, true);
                 } else if self.cfg.activation == Activation::Silu {
@@ -7212,6 +7286,8 @@ impl RustDecoder {
             let mut rwkv_v_first: Vec<f32> = Vec::new();
             // LongCat-Flash: the shortcut experts of a layer join the stream after the layer that follows
             let mut pending_shortcut: Option<Vec<f32>> = None;
+            // Kimi K3: sums of the finished blocks of layers
+            let mut block_res: Vec<Vec<f32>> = Vec::new();
             for (i, layer) in self.layers.iter().enumerate().skip(range.start).take(range.len()) {
                 let (dk, dv) = (cfg.layer_head_dim(i), cfg.layer_value_dim(i));
                 let (heads, kv_heads) = (cfg.layer_heads(i), cfg.layer_kv_heads(i));
@@ -7224,7 +7300,17 @@ impl RustDecoder {
                     x = predictions[alt.active() * len..(alt.active() + 1) * len].to_vec();
                     altup_pred = Some(predictions);
                 }
-                let mut normed = x.clone();
+                let mut normed = match (cfg.attn_res, &layer.res) {
+                    (Some(block), Some(res)) => {
+                        let mixed = if block_res.is_empty() { x.clone() } else { apply_attn_res(&x, &block_res, &res.attn, cfg.eps, cfg.hidden) };
+                        if i % block == 0 {
+                            // a new block starts: the running sum so far becomes a block of its own
+                            block_res.push(std::mem::replace(&mut x, vec![0.0; rows * cfg.hidden]));
+                        }
+                        mixed
+                    }
+                    _ => x.clone(),
+                };
                 if let Some(call) = &layer.zamba {
                     let shared = self.zamba_call(call, i, &x, positions, tables, lengths, key, value)?;
                     normed.iter_mut().zip(&shared).for_each(|(n, s)| *n += s);
@@ -7527,7 +7613,10 @@ impl RustDecoder {
                         add_scaled(&mut x, &branch, residual);
                     }
                     dump_layer("attn", i, &x);
-                    let mut next = x.clone();
+                    let mut next = match (cfg.attn_res, &layer.res) {
+                        (Some(_), Some(res)) => apply_attn_res(&x, &block_res, &res.ffn, cfg.eps, cfg.hidden),
+                        _ => x.clone(),
+                    };
                     if let Some(norm) = &layer.ffn_norm {
                         self.norm(&mut next, norm);
                     }
@@ -7571,6 +7660,9 @@ impl RustDecoder {
                         }
                     }
                 }
+            }
+            if let (Some(_), Some(score)) = (cfg.attn_res, &self.output_res) {
+                x = apply_attn_res(&x, &block_res, score, cfg.eps, cfg.hidden);
             }
             Ok::<(), String>(())
         });
@@ -8024,6 +8116,30 @@ mod best_positions_tests {
         assert_eq!(best_positions(vec![(1.0, 4), (2.0, 2)], 8), vec![2, 4]);
         assert!(best_positions(Vec::new(), 4).is_empty());
         assert!(best_positions(vec![(1.0, 0)], 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod attn_res_tests {
+    use super::apply_attn_res;
+
+    #[test]
+    fn zero_scores_average_the_candidates() {
+        let blocks = vec![vec![2.0, 4.0, 6.0, 8.0]];
+        let prefix = vec![4.0, 0.0, 2.0, 0.0];
+        let out = apply_attn_res(&prefix, &blocks, &[0.0, 0.0], 1e-6, 2);
+        assert_eq!(out, [3.0, 2.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn a_dominant_score_selects_one_candidate_per_row() {
+        // row 0: the block is (1, 0) and the prefix (0, 1); the score reads the first coordinate, so the block wins
+        let blocks = vec![vec![1.0, 0.0, 0.0, 1.0]];
+        let prefix = vec![0.0, 1.0, 1.0, 0.0];
+        let out = apply_attn_res(&prefix, &blocks, &[200.0, 0.0], 1e-6, 2);
+        assert!((out[0] - 1.0).abs() < 1e-4 && out[1].abs() < 1e-4);
+        // row 1: the prefix is (1, 0) and wins
+        assert!((out[2] - 1.0).abs() < 1e-4 && out[3].abs() < 1e-4);
     }
 }
 

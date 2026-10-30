@@ -80,7 +80,8 @@ Verified column:
 | DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
-| Qwen3.8-Flash-Next (`qwen4_exp`), Motif, Kimi K3, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
+| Kimi K3 (`kimi_k3`: Kimi delta layers with full-rank gates, rotary-free latent attention with an output gate, SiTU latent MoE, block attention residuals; GGUF `kimi-linear`) | safetensors (bf16 / f32; the Hub MXFP4 weights are not read) | D | H | H | H | H | T 2.9e-5 on a tiny fixture of its latent attention layers, compared with the model repository's own `modeling_kimi_linear.py` (24 positions, f32 KV cache; see `scripts/verify_kimi_k3.py`). The delta layers of K3 were not run against their reference (it needs `fla`); they share the code verified by the Kimi-Linear, Ling-3.0 and GLM-5-Next fixtures. The real 2.8T checkpoint was not run |
+| Qwen3.8-Flash-Next (`qwen4_exp`), Motif, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 
 ## Encoders, rerankers, embedders
 
@@ -238,6 +239,7 @@ Not implemented, ordered by how many current models need them:
 4. **xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
 3. **KDA variants**: GLM-5-Next, Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
 3. **KDA variants**: Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
+3. **Kimi K3 details**: the MXFP4 compressed-tensors Hub weights are not read (convert from a bf16 export); the transformers 5 library has no K3 class and the repository's modeling file needs `fla`, so the delta layers with full-rank gates are checked only through the shared KDA code, not against K3's own reference.
 4. **RWKV 6/7, xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
    DiffLlama**: their own recurrent or attention mechanisms.
 5. **LongCat-Flash-Lite** (n-gram embeddings), **MiniMax-M1**
@@ -323,7 +325,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | MiMo-V2.6-Pro / -Flash | 1.0T / 309B | `MiMoV2ForCausalLM` | V (tiny) | The `mimo_v2_flash` layer is supported (different KV heads for sliding and global layers, sinks, value scale, partial rope) and matches transformers on a tiny checkpoint; the real checkpoints (FP8, 309B and 1.0T) were not run. Pro-specific differences, if any, are unchecked. |
 | GLM-5.3 (Max / Low) | 753B | `GlmMoeDsaForCausalLM` | V (tiny, dense attention) | MLA + MoE as before; the indexer tensors are dropped and attention is dense, which is exact up to 2048 tokens of context (see Open gaps). |
 | GLM-5.3-Flash | 320B | `Glm5NextForConditionalGeneration` | V (tiny, CPU) | KDA linear attention + k-pool DSA + multi-stream residuals (`mhc`) as in `glm5_next`; text part only, checkpoint not run. |
-| Kimi K3 | 2.8T | `KimiK3ForConditionalGeneration` | **N** | KDA layers, attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors. |
+| Kimi K3 | 2.8T | `KimiK3ForConditionalGeneration` | **T (latent attention part)** | Converter and CPU decoder for SiTU, attention residual blocks, latent MoE with norm, output-gated latent attention and full-rank KDA gates; MXFP4 Hub weights are not read. |
 | Qwen3.8 2.4T A95B | 2.4T | `Qwen3_5MoeForCausalLM` | V (arch) | Same layers as Qwen3.5-MoE; too large to run. |
 
 | Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **N** | Hyper-connections, n-gram embeddings, per-layer embeddings, sparse indexer. |

@@ -2660,6 +2660,9 @@ impl Plan {
         }
         let ling_renamed;
         let n = if self.arch == "kimi-linear" {
+            if let Some(m) = crate::kimi_linear::map_global(n) {
+                return Ok(m);
+            }
             match crate::kimi_linear::normalize(n) {
                 Some(r) => {
                     ling_renamed = r;

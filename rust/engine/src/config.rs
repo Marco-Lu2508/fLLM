@@ -432,6 +432,12 @@ pub struct ModelConfig {
     pub v4: Option<V4Config>,
     pub inkling: Option<InklingConfig>,
     pub minimax3: Option<Minimax3Config>,
+    /// SiTU gated activation (Kimi K3): `beta * tanh(gate / beta) * sigmoid(gate) * (linear_beta * tanh(up / linear_beta))`;
+    /// the second value is 0 when the up projection is left alone.
+    pub situ: Option<(f32, f32)>,
+    /// Block attention residuals (Kimi K3): the input of every block is a learned softmax mixture of the sums of earlier blocks of this many
+    /// layers and the running sum.
+    pub attn_res: Option<usize>,
     pub hc: Option<HcConfig>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
@@ -990,6 +996,8 @@ impl ModelConfig {
             v4,
             inkling,
             minimax3,
+            situ: float(meta, a, "situ_beta").map(|b| (b, float(meta, a, "situ_linear_beta").unwrap_or(0.0))),
+            attn_res: uint(meta, a, "attention_residual_block_size").filter(|&n| n > 0),
             hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
                 hc_mult,
                 magnitude: float(meta, a, "hc_magnitude"),
@@ -1497,6 +1505,8 @@ pub(crate) mod tests_support {
             v4: None,
             inkling: None,
             minimax3: None,
+            situ: None,
+            attn_res: None,
             hc: None,
             delta: None,
             mamba: None,
