@@ -210,6 +210,10 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   `--cache-type-v`). wgpu devices keep `f16` and `q8_0` only, and 4-bit and 5-bit keys can break models
   with large key outliers. For models larger than the card, `--gpu-layers` keeps attention on the GPU and
   streams feed-forward weights and MoE experts from host memory ([docs/user/memory.md](docs/user/memory.md)).
+  A mixture-of-experts model larger than the machine's memory starts at once (the GGUF is mapped) and reads the experts it routes to
+  from the file; `--expert-cache-mb auto|SIZE|off` sets the host memory for experts, the log reports the speed class, `/metrics` and the
+  Studio footer show hit ratio and bytes read per token. Run with OLMoE-1B-7B (4.2 GB) under 1 to 6 GiB limits on Linux and with a 1 GiB
+  budget on Windows; the pinned hot set on the GPU is not done ([docs/moe-streaming.md](docs/moe-streaming.md)).
 - **Scheduling.** Continuous batching, chunked prefill, prefix cache (hybrid and state-space models
   switch off prefix sharing and speculation), beam search (`use_beam_search`, CPU backend), `--multi-step N`
   (several decode rounds per scheduler round, off by default and CPU only until it is verified elsewhere) and

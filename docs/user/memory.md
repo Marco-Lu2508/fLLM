@@ -71,6 +71,13 @@ except IQ4_NL/IQ4_XS) are re-quantized to Q5_K at upload. Full numbers and
 tuning switches (`FLLM_NO_HOST_STREAM`, `FLLM_HOST_STREAM_MIN`,
 `FLLM_NO_HOST_PIN`): [gpu-backends.md](../gpu-backends.md#models-larger-than-the-card).
 
+## Mixture-of-experts models larger than memory
+
+A MoE model starts whatever its size (the file is mapped, not read). On the CPU, and for the layers that stay on the host, an expert is read from the
+file when a token routes to it. `--expert-cache-mb auto|SIZE|off` limits the memory for experts; the start-up log gives the speed class
+and `/metrics` the hit ratio and bytes read per token. Decoding speed falls with the share of experts that fit (OLMoE-1B-7B: 57 tok/s with
+92 % of the experts cached, 4 with 26 %, on an NVMe laptop). See [moe-streaming.md](../moe-streaming.md).
+
 ## KV format memory savings
 
 Relative to an FP16 cache (see

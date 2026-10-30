@@ -305,6 +305,7 @@ backend stand-in has none), else on the host.
 * **TPU:** no q8_0 KV, no DeltaNet, each new shape compiles about 12 programs, no persistent cache; `model.rs` (a whole decoder block as one
   program) is not called by the decoder (no hook); the self-test tolerances assume f32 accuracy, and single FAIL lines are expected for
   `swiglu`, `geglu`, `attention`, `rms_norm`.
+* **MoE experts larger than memory:** the experts of a layer that runs on the host are read from the mapped GGUF on demand and managed by the expert cache ([moe-streaming.md](moe-streaming.md); CPU path run on Linux and Windows with OLMoE). Not done: a hot subset of experts pinned on a CUDA/Vulkan/HIP device (the grouped kernels index a table of all experts of a layer), and a bound for CUDA's page-locking of streamed expert tensors (`CudaStream::pin` locks every streamed tensor and never unlocks it, so a model larger than RAM ends in the pageable-copy fallback).
 * **Self test:** `SKIPPED (unsupported)` changes the count for backends that do not offer operations; the default of `selftest-gpu --device` is `auto`.
   The CPU backend itself reports 7 failed q8 attention checks in the self test.
 * **Autotuner:** `src/autotune.rs` is called by nothing.

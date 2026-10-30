@@ -100,6 +100,10 @@ are valid; anything else exits with `invalid number for <flag>`.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
+| `FLLM_EXPERT_CACHE_MB` | model load | Host memory for the expert weights of MoE models: `auto` (default), a size in MiB or with `M`/`G`, or `off`; the flag `--expert-cache-mb` overrides it ([moe-streaming.md](moe-streaming.md)) |
+| `FLLM_EXPERT_EVICT` | model load | `0` stops the cache from dropping experts to stay within an explicit budget |
+| `FLLM_EXPERT_DEMAND`, `FLLM_EXPERT_PREFETCH`, `FLLM_EXPERT_RANDOM_ACCESS` | model load | `1` switches on, each: read-ahead of the chosen experts of a layer; a background thread reading the predicted experts of the next layer; `MADV_RANDOM` on expert ranges (all off by default; the last one halves the speed on NVMe) |
+| `FLLM_EXPERT_TRACE` | model load | File that receives `tick layer rows experts` for every routing call, to replay cache policies offline |
 | `FLLM_API_KEY` | `serve` (and the `chat`/`bench` clients as their default `--api-key`) | Initial value of `--api-key`; the flag overrides it |
 | `FLLM_OUTPUT_CACHE` | Server | `exact` keeps answers to deterministic requests; `off`, `0`, `no`, `false` or `none` switch the cache off |
 | `FLLM_OUTPUT_CACHE_BYTES` | Server | Byte budget of the output cache, default `268435456` (256 MiB); the least recently used answer goes first |
