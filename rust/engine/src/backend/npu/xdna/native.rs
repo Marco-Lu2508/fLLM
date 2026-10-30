@@ -13,6 +13,7 @@
 
 pub mod bench;
 pub mod dequant;
+pub mod dqpack;
 pub mod engine;
 pub mod kernels;
 pub mod shim;

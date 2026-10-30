@@ -38,6 +38,22 @@ pub static VARIANTS: [Variant; 8] = [
     Variant { m: 512, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/m512_k4096_n1024.insts") },
 ];
 
+/// The program with 4-bit weights (`kernel_src/whole_array_dq.py`): the same GEMM with B as a stream of packed tiles
+/// ([`super::dqpack`]) that every compute tile expands to bf16 before the multiply. Same instruction-stream shapes, same order as
+/// [`VARIANTS`] (so [`variant_index`] serves both).
+pub static DQ_XCLBIN: &[u8] = include_bytes!("../../../../../xdna/kernels/gemm_dq_q4_8col.xclbin");
+
+pub static DQ_VARIANTS: [Variant; 8] = [
+    Variant { m: 128, k: 1024, insts: include_bytes!("../../../../../xdna/kernels/dq_m128_k1024_n1024.insts") },
+    Variant { m: 128, k: 2048, insts: include_bytes!("../../../../../xdna/kernels/dq_m128_k2048_n1024.insts") },
+    Variant { m: 128, k: 3072, insts: include_bytes!("../../../../../xdna/kernels/dq_m128_k3072_n1024.insts") },
+    Variant { m: 128, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dq_m128_k4096_n1024.insts") },
+    Variant { m: 512, k: 1024, insts: include_bytes!("../../../../../xdna/kernels/dq_m512_k1024_n1024.insts") },
+    Variant { m: 512, k: 2048, insts: include_bytes!("../../../../../xdna/kernels/dq_m512_k2048_n1024.insts") },
+    Variant { m: 512, k: 3072, insts: include_bytes!("../../../../../xdna/kernels/dq_m512_k3072_n1024.insts") },
+    Variant { m: 512, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dq_m512_k4096_n1024.insts") },
+];
+
 /// Index into [`VARIANTS`] for `(m, k)`.
 pub fn variant_index(m: usize, k: usize) -> Option<usize> {
     VARIANTS.iter().position(|v| v.m == m && v.k == k)
@@ -110,6 +126,15 @@ mod tests {
         assert!(row_chunks(50, 96).is_empty());
         let covered: usize = row_chunks(1337, 64).iter().map(|c| c.1).sum();
         assert_eq!(covered, 1337);
+    }
+
+    #[test]
+    fn both_programs_list_the_same_shapes_in_the_same_order() {
+        for (a, b) in VARIANTS.iter().zip(DQ_VARIANTS.iter()) {
+            assert_eq!((a.m, a.k), (b.m, b.k));
+            assert!(b.insts.len() > 1000 && b.insts.len() % 4 == 0);
+        }
+        assert!(DQ_XCLBIN.starts_with(b"xclbin2"));
     }
 
     #[test]

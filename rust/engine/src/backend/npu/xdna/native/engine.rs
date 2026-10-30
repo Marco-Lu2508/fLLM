@@ -15,12 +15,13 @@
 //! Verification level: L1 on one Ryzen AI 5 PRO 435 laptop under Linux (`docs/npu-xdna.md`).
 
 use super::dequant;
-use super::kernels::{self, k_chunks, row_chunks, variant_index, TILE_N, VARIANTS};
+use super::dqpack;
+use super::kernels::{self, k_chunks, row_chunks, variant_index, Variant, TILE_N, VARIANTS};
 use super::shim::{Arg, Buf, Context, Run, Shim};
 use crate::backend::npu::backend::hybrid::{LinearOffload, OffloadSlot};
 use crate::backend::npu::openvino::engine::{NpuOutput, WeightKey};
 use crate::backend::QuantType;
-use half::bf16;
+use half::{bf16, f16};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -38,6 +39,15 @@ pub struct Settings {
     pub resident_budget: u64,
     /// Print the summary line every this many offloaded projections (`FLLM_XDNA_STATS`, 0 = never).
     pub stats_every: usize,
+    /// `FLLM_XDNA_WEIGHTS`: `auto` (4-bit packed tiles for the 4-bit formats Q4_0 / Q4_1 / Q4_K, bf16 tiles for the rest), `bf16` (never 4-bit), `q4` (the same as auto).
+    pub weights: WeightMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightMode {
+    Auto,
+    Bf16,
+    Q4,
 }
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -55,6 +65,11 @@ impl Settings {
             min_eff: std::env::var("FLLM_XDNA_MIN_EFF").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0.5),
             resident_budget: env_usize("FLLM_XDNA_RESIDENT_MB").map_or(default_budget, |mb| (mb as u64) << 20),
             stats_every: env_usize("FLLM_XDNA_STATS").unwrap_or(0),
+            weights: match std::env::var("FLLM_XDNA_WEIGHTS").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+                "bf16" => WeightMode::Bf16,
+                "q4" | "4bit" => WeightMode::Q4,
+                _ => WeightMode::Auto,
+            },
         }
     }
 }
@@ -86,6 +101,8 @@ enum Residency {
 struct Resident {
     tiles: Vec<Buf>,
     bytes: u64,
+    /// 4-bit packed tiles for the dequantizing program (`dqpack`), else bf16 tiles.
+    dq: bool,
 }
 
 struct Slot {
@@ -94,6 +111,8 @@ struct Slot {
     quant: QuantType,
     raw: RawBytes,
     resident: Mutex<Residency>,
+    /// Self check: use the 4-bit program whatever the budget says.
+    force_dq: bool,
 }
 
 /// The quantized tensor of a projection: a copy the engine owns (hybrid backend), or a view of memory that outlives the process's use of
@@ -125,18 +144,33 @@ struct VarBufs {
     c: [Buf; 2],
 }
 
-struct Inner {
+/// One loaded NPU program (an xclbin) with the buffers of its instruction streams.
+struct Prog {
     ctx: Context,
+    variants: &'static [Variant],
     vars: Vec<Option<VarBufs>>,
     scratch: Option<[Buf; 2]>,
 }
 
-impl Inner {
+struct Inner {
+    /// The bf16 program (always loaded).
+    bf16: Prog,
+    /// The program with 4-bit weights, loaded when the first 4-bit weight needs it.
+    dq: Option<Prog>,
+    /// Loading or checking the 4-bit program failed: weights stay bf16.
+    dq_failed: bool,
+}
+
+impl Prog {
+    fn new(ctx: Context, variants: &'static [Variant]) -> Prog {
+        Prog { ctx, variants, vars: (0..variants.len()).map(|_| None).collect(), scratch: None }
+    }
+
     fn ensure(&mut self, vi: usize) -> Result<(), String> {
         if self.vars[vi].is_some() {
             return Ok(());
         }
-        let v = &VARIANTS[vi];
+        let v = &self.variants[vi];
         let mut instr = self.ctx.alloc(Arg::Instructions, v.insts.len())?;
         instr.as_bytes_mut().copy_from_slice(v.insts);
         instr.to_device()?;
@@ -150,9 +184,12 @@ impl Inner {
 pub struct XdnaEngine {
     pub settings: Settings,
     pub device_name: String,
+    shim: Arc<Shim>,
+    index: usize,
     inner: Mutex<Inner>,
     slots: Mutex<HashMap<WeightKey, Arc<Slot>>>,
     resident: AtomicU64,
+    resident_dq: AtomicU64,
     consecutive_failures: AtomicUsize,
     disabled: AtomicBool,
     pub stats: Stats,
@@ -194,9 +231,12 @@ impl XdnaEngine {
         let engine = Arc::new(XdnaEngine {
             settings,
             device_name: device_name(),
-            inner: Mutex::new(Inner { ctx, vars: (0..VARIANTS.len()).map(|_| None).collect(), scratch: None }),
+            shim: Arc::clone(shim),
+            index,
+            inner: Mutex::new(Inner { bf16: Prog::new(ctx, &VARIANTS), dq: None, dq_failed: false }),
             slots: Mutex::new(HashMap::new()),
             resident: AtomicU64::new(0),
+            resident_dq: AtomicU64::new(0),
             consecutive_failures: AtomicUsize::new(0),
             disabled: AtomicBool::new(false),
             stats: Stats::default(),
@@ -219,7 +259,7 @@ impl XdnaEngine {
         let x: Vec<f32> = (0..m * k).map(|_| next()).collect();
         let w: Vec<f32> = (0..n * k).map(|_| next() * 0.1).collect();
         let raw: Vec<u8> = w.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let slot = Slot { rows: n, cols: k, quant: QuantType::F32, raw: RawBytes::Owned(Arc::new(raw)), resident: Mutex::new(Residency::Streamed) };
+        let slot = Slot { rows: n, cols: k, quant: QuantType::F32, raw: RawBytes::Owned(Arc::new(raw)), resident: Mutex::new(Residency::Streamed), force_dq: false };
         let got = self.gemm(&slot, &x, m, 1)?.ok_or("the self check was not accepted by the row plan")?;
         let xb: Vec<f32> = x.iter().map(|v| bf16::from_f32(*v).to_f32()).collect();
         let wb: Vec<f32> = w.iter().map(|v| bf16::from_f32(*v).to_f32()).collect();
@@ -242,7 +282,7 @@ impl XdnaEngine {
     pub fn summary(&self) -> String {
         let s = &self.stats;
         format!(
-            "native XDNA NPU: {} projections offloaded ({} rows, {} CPU rows), {} kernel runs, {:.2} s in the offload (of which {:.2} s waiting for the NPU, {:.2} s packing weights, {:.2} s filling activations, {:.2} s adding partial sums), resident bf16 weights {} MiB{}",
+            "native XDNA NPU: {} projections offloaded ({} rows, {} CPU rows), {} kernel runs, {:.2} s in the offload (of which {:.2} s waiting for the NPU, {:.2} s packing weights, {:.2} s filling activations, {:.2} s adding partial sums), resident weights {} MiB (4-bit packed: {} MiB){}",
             s.calls.load(Ordering::Relaxed),
             s.rows.load(Ordering::Relaxed),
             s.cpu_rows.load(Ordering::Relaxed),
@@ -253,6 +293,7 @@ impl XdnaEngine {
             s.fill_micros.load(Ordering::Relaxed) as f64 / 1e6,
             s.acc_micros.load(Ordering::Relaxed) as f64 / 1e6,
             self.resident.load(Ordering::Relaxed) >> 20,
+            self.resident_dq.load(Ordering::Relaxed) >> 20,
             if self.disabled.load(Ordering::Relaxed) { ", switched off after repeated errors" } else { "" }
         )
     }
@@ -320,14 +361,89 @@ impl XdnaEngine {
     }
 
     /// Pack N-tile `jt`, depth chunk `(k0, kt)` into its half of the scratch pair and make it visible to the NPU.
-    fn pack_into_scratch(inner: &mut Inner, slot: &Slot, jt: usize, k0: usize, kt: usize) -> Result<(), String> {
-        let scratch = inner.scratch.as_mut().ok_or("scratch missing")?;
+    fn pack_into_scratch(prog: &mut Prog, slot: &Slot, jt: usize, k0: usize, kt: usize) -> Result<(), String> {
+        let scratch = prog.scratch.as_mut().ok_or("scratch missing")?;
         let buf = &mut scratch[jt % 2];
         Self::pack_tile(slot, jt, &[(k0, kt)], &mut [&mut buf.as_u16_mut()[..TILE_N * kt]])?;
         buf.to_device()
     }
 
-    /// The resident bf16 copy of a weight, built on first use; `None` when the weight is streamed.
+    /// Load the 4-bit program on first use and check it against the CPU; `Ok(false)` when it cannot be used (weights then stay bf16).
+    fn ensure_dq(&self, inner: &mut Inner) -> bool {
+        if inner.dq.is_some() {
+            return true;
+        }
+        if inner.dq_failed {
+            return false;
+        }
+        let opened = self.shim.open_context(self.index, kernels::DQ_XCLBIN).map(|ctx| Prog::new(ctx, &kernels::DQ_VARIANTS));
+        match opened {
+            Ok(prog) => inner.dq = Some(prog),
+            Err(error) => {
+                inner.dq_failed = true;
+                crate::backend::log_once("xdna-dq", &format!("native XDNA: the 4-bit weight program did not load, weights stay bf16: {error}"));
+                return false;
+            }
+        }
+        match self.dq_selfcheck(inner) {
+            Ok(()) => true,
+            Err(error) => {
+                inner.dq = None;
+                inner.dq_failed = true;
+                crate::backend::log_once("xdna-dq", &format!("native XDNA: the 4-bit weight program failed its check, weights stay bf16: {error}"));
+                false
+            }
+        }
+    }
+
+    /// One 128 x 1024 x 1024 product with random Q4_0 weights through the 4-bit program against the CPU on the bf16-rounded values.
+    fn dq_selfcheck(&self, inner: &mut Inner) -> Result<(), String> {
+        let (m, k, n) = (128usize, 1024usize, 1024usize);
+        let mut seed = 0x1234_5678_9abc_def1_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut raw = Vec::with_capacity(n * k / 32 * 18);
+        for _ in 0..n * k / 32 {
+            raw.extend_from_slice(&f16::from_f32(0.01 + (next() % 100) as f32 / 4000.0).to_le_bytes());
+            raw.extend((0..16).map(|_| next() as u8));
+        }
+        let x: Vec<f32> = (0..m * k).map(|_| (next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0).collect();
+        let slot = Slot {
+            rows: n,
+            cols: k,
+            quant: QuantType::Q4_0,
+            raw: RawBytes::Owned(Arc::new(raw.clone())),
+            resident: Mutex::new(Residency::Unset),
+            force_dq: true,
+        };
+        let got = self.gemm_locked(inner, &slot, &x, m, 1)?.ok_or("the check was not accepted by the row plan")?;
+        let w = crate::compute::dequantize(&raw, 2, n * k)?;
+        let xb: Vec<f32> = x.iter().map(|v| bf16::from_f32(*v).to_f32()).collect();
+        let (mut worst, mut peak) = (0f32, 0f32);
+        for i in (0..m).step_by(9) {
+            for j in (0..n).step_by(7) {
+                let reference: f32 = xb[i * k..(i + 1) * k].iter().zip(&w[j * k..(j + 1) * k]).map(|(a, b)| a * bf16::from_f32(*b).to_f32()).sum();
+                worst = worst.max((reference - got.1[i * n + j]).abs());
+                peak = peak.max(reference.abs());
+            }
+        }
+        if let Ok(state) = slot.resident.lock() {
+            if let Residency::Ready(r) = &*state {
+                self.resident.fetch_sub(r.bytes.min(self.resident.load(Ordering::Relaxed)), Ordering::Relaxed);
+            }
+        }
+        if worst > 0.02 * peak.max(1e-6) {
+            return Err(format!("largest error {worst} against results up to {peak}"));
+        }
+        Ok(())
+    }
+
+    /// The resident copy of a weight, built on first use: bf16 tiles while the budget lasts, else (4-bit formats) packed 4-bit tiles for the
+    /// dequantizing program; `None` when the weight is streamed.
     fn resident_for(&self, inner: &mut Inner, slot: &Slot) -> Result<Option<Arc<Resident>>, String> {
         let mut state = slot.resident.lock().map_err(|_| "poisoned")?;
         match &*state {
@@ -337,14 +453,20 @@ impl XdnaEngine {
         }
         let chunks = k_chunks(slot.cols);
         let ntiles = slot.rows.div_ceil(TILE_N);
-        let bytes: u64 = chunks.iter().map(|c| (TILE_N * c.1 * 2) as u64).sum::<u64>() * ntiles as u64;
+        let bf16_bytes: u64 = chunks.iter().map(|c| (TILE_N * c.1 * 2) as u64).sum::<u64>() * ntiles as u64;
+        let kind = slot.quant.to_gguf_type_id();
+        let dq_possible = dqpack::supported(kind) && dqpack::row_bytes(kind, slot.cols).is_some() && self.settings.weights != WeightMode::Bf16;
+        let dq_bytes: u64 = chunks.iter().map(|c| (c.1 / dqpack::TILE_K * dqpack::NTILES * dqpack::PAYLOAD) as u64).sum::<u64>() * ntiles as u64;
         let budget = self.settings.resident_budget;
-        if self.resident.load(Ordering::Relaxed) + bytes > budget {
+        let used = self.resident.load(Ordering::Relaxed);
+        let want_dq = dq_possible;
+        let use_dq = want_dq && (used + dq_bytes <= budget || slot.force_dq) && self.ensure_dq(inner);
+        if !use_dq && used + bf16_bytes > budget {
             *state = Residency::Streamed;
             crate::backend::log_once(
                 "xdna-budget",
                 &format!(
-                    "native XDNA: bf16 weight budget of {} MiB is used up; further weights are packed again on every call (FLLM_XDNA_RESIDENT_MB)",
+                    "native XDNA: the weight budget of {} MiB is used up; further weights are packed again on every call (FLLM_XDNA_RESIDENT_MB)",
                     budget >> 20
                 ),
             );
@@ -352,28 +474,50 @@ impl XdnaEngine {
         }
         let started = Instant::now();
         let mut tiles = Vec::with_capacity(ntiles * chunks.len());
-        for _ in 0..ntiles {
-            for &(_, kt) in &chunks {
-                tiles.push(inner.ctx.alloc(Arg::B, TILE_N * kt * 2)?);
+        if use_dq {
+            let prog = inner.dq.as_mut().ok_or("dq program missing")?;
+            let raw = slot.raw.bytes();
+            for jt in 0..ntiles {
+                for &(k0, kt) in &chunks {
+                    let mut buf = prog.ctx.alloc(Arg::B, kt / dqpack::TILE_K * dqpack::NTILES * dqpack::PAYLOAD)?;
+                    dqpack::pack_group(kind, raw, slot.rows, slot.cols, jt * TILE_N, k0, kt, buf.as_bytes_mut());
+                    buf.to_device()?;
+                    tiles.push(buf);
+                }
             }
-        }
-        for jt in 0..ntiles {
-            let group = &mut tiles[jt * chunks.len()..(jt + 1) * chunks.len()];
-            let mut dst: Vec<&mut [u16]> = group.iter_mut().map(|b| b.as_u16_mut()).collect();
-            Self::pack_tile(slot, jt, &chunks, &mut dst)?;
-            for b in group.iter() {
-                b.to_device()?;
+        } else {
+            for _ in 0..ntiles {
+                for &(_, kt) in &chunks {
+                    tiles.push(inner.bf16.ctx.alloc(Arg::B, TILE_N * kt * 2)?);
+                }
+            }
+            for jt in 0..ntiles {
+                let group = &mut tiles[jt * chunks.len()..(jt + 1) * chunks.len()];
+                let mut dst: Vec<&mut [u16]> = group.iter_mut().map(|b| b.as_u16_mut()).collect();
+                Self::pack_tile(slot, jt, &chunks, &mut dst)?;
+                for b in group.iter() {
+                    b.to_device()?;
+                }
             }
         }
         self.stats.pack_micros.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        let bytes = if use_dq { dq_bytes } else { bf16_bytes };
         self.resident.fetch_add(bytes, Ordering::Relaxed);
-        let resident = Arc::new(Resident { tiles, bytes });
+        if use_dq {
+            self.resident_dq.fetch_add(bytes, Ordering::Relaxed);
+        }
+        let resident = Arc::new(Resident { tiles, bytes, dq: use_dq });
         *state = Residency::Ready(Arc::clone(&resident));
         Ok(Some(resident))
     }
 
     /// The product of the first rows of `x` with the weight. `Ok(None)` when the row plan takes nothing; otherwise `(rows done, values)`.
     fn gemm(&self, slot: &Slot, x: &[f32], batch: usize, min_rows: usize) -> Result<Option<(usize, Vec<f32>)>, String> {
+        let mut guard = self.inner.lock().map_err(|_| "poisoned")?;
+        self.gemm_locked(&mut guard, slot, x, batch, min_rows)
+    }
+
+    fn gemm_locked(&self, inner: &mut Inner, slot: &Slot, x: &[f32], batch: usize, min_rows: usize) -> Result<Option<(usize, Vec<f32>)>, String> {
         let (n, k) = (slot.rows, slot.cols);
         let plan = row_chunks(batch, min_rows);
         let Some(&(last0, lastn, _)) = plan.last() else {
@@ -382,8 +526,9 @@ impl XdnaEngine {
         let take = last0 + lastn;
         let chunks = k_chunks(k);
         let ntiles = n.div_ceil(TILE_N);
-        let mut inner = self.inner.lock().map_err(|_| "poisoned")?;
-        let resident = self.resident_for(&mut inner, slot)?;
+        let resident = self.resident_for(inner, slot)?;
+        let use_dq = resident.as_ref().is_some_and(|r| r.dq);
+        let prog: &mut Prog = if use_dq { inner.dq.as_mut().ok_or("dq program missing")? } else { &mut inner.bf16 };
         let started = Instant::now();
         let (mut pack_micros, mut fill_micros, mut wait_micros, mut acc_micros) = (0u64, 0u64, 0u64, 0u64);
         let mut runs = 0u64;
@@ -391,11 +536,11 @@ impl XdnaEngine {
         for &(r0, rn, m) in &plan {
             for (ci, &(k0, kt)) in chunks.iter().enumerate() {
                 let vi = variant_index(m, kt).ok_or("no instruction stream for this shape")?;
-                inner.ensure(vi)?;
+                prog.ensure(vi)?;
                 let valid = kt.min(k - k0);
                 let started_fill = Instant::now();
                 {
-                    let vb = inner.vars[vi].as_mut().ok_or("buffers missing")?;
+                    let vb = prog.vars[vi].as_mut().ok_or("buffers missing")?;
                     vb.a.as_u16_mut().par_chunks_mut(kt).enumerate().for_each(|(i, row)| {
                         if i < rn {
                             let s = &x[(r0 + i) * k + k0..(r0 + i) * k + k0 + valid];
@@ -412,12 +557,12 @@ impl XdnaEngine {
                 fill_micros += started_fill.elapsed().as_micros() as u64;
                 let streaming = resident.is_none();
                 if streaming {
-                    if inner.scratch.is_none() {
-                        inner.scratch = Some([inner.ctx.alloc(Arg::B, TILE_N * 4096 * 2)?, inner.ctx.alloc(Arg::B, TILE_N * 4096 * 2)?]);
+                    if prog.scratch.is_none() {
+                        prog.scratch = Some([prog.ctx.alloc(Arg::B, TILE_N * 4096 * 2)?, prog.ctx.alloc(Arg::B, TILE_N * 4096 * 2)?]);
                     }
                     // tile 0 is packed before the loop, tile jt + 1 while the NPU computes tile jt
                     let started_pack = Instant::now();
-                    Self::pack_into_scratch(&mut inner, slot, 0, k0, kt)?;
+                    Self::pack_into_scratch(prog, slot, 0, k0, kt)?;
                     pack_micros += started_pack.elapsed().as_micros() as u64;
                 }
                 let mut pending: Option<(Run, usize, usize)> = None;
@@ -426,10 +571,10 @@ impl XdnaEngine {
                     let cidx = jt % 2;
                     let b_ref: &Buf = match &resident {
                         Some(r) => &r.tiles[jt * chunks.len() + ci],
-                        None => &inner.scratch.as_ref().ok_or("scratch missing")?[jt % 2],
+                        None => &prog.scratch.as_ref().ok_or("scratch missing")?[jt % 2],
                     };
-                    let vb = inner.vars[vi].as_ref().ok_or("buffers missing")?;
-                    let run = inner.ctx.start(&vb.instr, vb.words, &vb.a, b_ref, &vb.c[cidx])?;
+                    let vb = prog.vars[vi].as_ref().ok_or("buffers missing")?;
+                    let run = prog.ctx.start(&vb.instr, vb.words, &vb.a, b_ref, &vb.c[cidx])?;
                     runs += 1;
                     if let Some((prev, prev_c, prev_n0)) = pending.replace((run, cidx, n0)) {
                         let started_wait = Instant::now();
@@ -442,7 +587,7 @@ impl XdnaEngine {
                     if streaming && jt + 1 < ntiles {
                         // the tile before this one has finished (waited just above), so its half of the scratch pair is free
                         let started_pack = Instant::now();
-                        Self::pack_into_scratch(&mut inner, slot, jt + 1, k0, kt)?;
+                        Self::pack_into_scratch(prog, slot, jt + 1, k0, kt)?;
                         pack_micros += started_pack.elapsed().as_micros() as u64;
                     }
                 }
@@ -451,7 +596,7 @@ impl XdnaEngine {
                     run.wait(30_000)?;
                     wait_micros += started_wait.elapsed().as_micros() as u64;
                     let started_acc = Instant::now();
-                    let vb = inner.vars[vi].as_ref().ok_or("buffers missing")?;
+                    let vb = prog.vars[vi].as_ref().ok_or("buffers missing")?;
                     accumulate(&mut out, n, r0, rn, n0, &vb.c[c_idx], TILE_N.min(n - n0), ci == 0);
                     acc_micros += started_acc.elapsed().as_micros() as u64;
                 }
@@ -509,7 +654,7 @@ impl LinearOffload for XdnaEngine {
         {
             return;
         }
-        let slot = Arc::new(Slot { rows, cols, quant, raw: RawBytes::Owned(Arc::new(raw.to_vec())), resident: Mutex::new(Residency::Unset) });
+        let slot = Arc::new(Slot { rows, cols, quant, raw: RawBytes::Owned(Arc::new(raw.to_vec())), resident: Mutex::new(Residency::Unset), force_dq: false });
         if let Ok(mut slots) = self.slots.lock() {
             slots.insert(key, slot);
         }
@@ -598,7 +743,7 @@ impl XdnaEngine {
                 {
                     return None;
                 }
-                let slot = Arc::new(Slot { rows, cols, quant, raw: RawBytes::Borrowed(raw.as_ptr(), raw.len()), resident: Mutex::new(Residency::Unset) });
+                let slot = Arc::new(Slot { rows, cols, quant, raw: RawBytes::Borrowed(raw.as_ptr(), raw.len()), resident: Mutex::new(Residency::Unset), force_dq: false });
                 slots.insert(key, Arc::clone(&slot));
                 slot
             }
