@@ -6,6 +6,7 @@
 thread_local bool fllm_x16_reuse = false, fllm_x16_filled = false;
 thread_local bool fllm_x8_reuse = false, fllm_x8_filled = false;
 thread_local const float *fllm_glu_up = nullptr;
+thread_local float *fllm_glu_dst = nullptr;
 thread_local int fllm_glu_mode = 0;
 
 int fllm_attention3_try(cudaStream_t, const float *, const uint16_t *, const uint16_t *, float *, const int64_t *,

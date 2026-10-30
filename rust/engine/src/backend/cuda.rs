@@ -237,6 +237,7 @@ extern "C" {
         neox: c_int,
     ) -> c_int;
     fn fllm_cuda_set_fuse(which: c_int, on: c_int) -> c_int;
+    fn fllm_cuda_force_smem(bytes: c_int) -> c_int;
     fn fllm_cuda_gptq_repack(dev: c_int, words: *const c_void, out: *mut c_void, k: c_int, n: c_int) -> c_int;
     fn fllm_cuda_linear_fp8_marlin(
         st: *mut RawStream,
@@ -800,6 +801,13 @@ pub enum Fusion {
 pub fn set_fusion(which: Fusion, on: Option<bool>) {
     // SAFETY: plain setter of a process-wide flag.
     unsafe { fllm_cuda_set_fuse(which as c_int, on.map_or(-1, c_int::from)) };
+}
+
+/// Make the kernels believe the device allows `bytes` of dynamic shared memory per block (`None`: the real limit). Self test only: it runs the tile choices
+/// of a smaller device (Turing: 64 KB) on this one.
+pub fn force_shared_memory(bytes: Option<usize>) {
+    // SAFETY: plain setter of a process-wide value.
+    unsafe { fllm_cuda_force_smem(bytes.map_or(0, |b| c_int::try_from(b).unwrap_or(c_int::MAX))) };
 }
 
 fn to_c(n: usize, what: &str) -> Result<c_int, BackendError> {

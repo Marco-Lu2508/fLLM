@@ -62,6 +62,8 @@ int fllm_mmvq_leg_try(cudaStream_t s, const void *W, int kind, const float *X, f
 // When set, the activation conversion of the next GEMM reads `gate` (its X argument) and `up` and computes the GLU
 // itself instead of reading the output of a separate glu kernel.
 extern thread_local const float *fllm_glu_up;
+// where the activation of that GLU belongs (the buffer the caller passed as X): a GEMM that cannot fold the GLU into its conversion computes it there first
+extern thread_local float *fllm_glu_dst;
 extern thread_local int fllm_glu_mode;
 // the pointers of that GLU (X and fllm_glu_up) are FP16 arrays (the NVFP4 CUTLASS path only)
 extern thread_local bool fllm_glu_half;

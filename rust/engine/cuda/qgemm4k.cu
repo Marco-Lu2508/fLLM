@@ -599,6 +599,7 @@ static int launch_sb(cudaStream_t s, const uint8_t *W, const __half *X16, float 
 thread_local bool fllm_x16_reuse = false, fllm_x16_filled = false;
 thread_local bool fllm_x8_reuse = false, fllm_x8_filled = false;
 thread_local const float *fllm_glu_up = nullptr;
+thread_local float *fllm_glu_dst = nullptr;
 thread_local int fllm_glu_mode = 0;
 
 void fllm_convert_x16_pad(cudaStream_t s, const float *X, void *x16, int batch, int cols, int cols_pad) {

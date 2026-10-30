@@ -97,9 +97,12 @@ int fllm_cc() {
 
 // Largest dynamic shared memory per block the current device allows (opt-in maximum); FLLM_CUDA_FORCE_SMEM overrides it
 // (testing a smaller device).
+static std::atomic<int> g_forced_smem{0};
 int fllm_smem_limit() {
     static int cache[16] = {0};
     int dev = 0;
+    // (the self test sets it at run time to check the paths of a device with less shared memory than this one, such as Turing's 64 KB)
+    if (const int forced = g_forced_smem.load(std::memory_order_relaxed)) return forced;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return 48 * 1024;
     if (cache[dev] == 0) {
         if (const char *forced = getenv("FLLM_CUDA_FORCE_SMEM")) {
@@ -626,11 +629,13 @@ int fllm_cuda_linear(FllmStream *st, const void *w, int kind, const float *x, fl
     fllm_x8_filled = false;
     if (fuse) {
         fllm_glu_up = st->glu_up;
+        fllm_glu_dst = const_cast<float *>(x);
         fllm_glu_mode = st->glu_mode;
         st->glu_pending = false;
     }
     const int rc = fllm_linear_launch(st->s, w, kind, fuse ? st->glu_gate : x, y, bias, rows, cols, batch, st->x16, st->x16_bytes);
     fllm_glu_up = nullptr;
+    fllm_glu_dst = nullptr;
     fllm_x16_reuse = false;
     fllm_x8_reuse = false;
     st->x16_x = x;
@@ -1229,6 +1234,11 @@ int fllm_cuda_rope_kv_f32(FllmStream *, float *, const float *, const float *, u
 #endif
 int fllm_cuda_set_fuse(int which, int on) {
     fllm_fuse_force(which, on);
+    return 0;
+}
+// Self test: pretend the device allows `bytes` of dynamic shared memory per block (0: the real limit).
+int fllm_cuda_force_smem(int bytes) {
+    g_forced_smem.store(bytes > 0 ? bytes : 0, std::memory_order_relaxed);
     return 0;
 }
 // The index of the largest logit of each row, copied to `host_out` (rows ints): greedy sampling without moving the logits.

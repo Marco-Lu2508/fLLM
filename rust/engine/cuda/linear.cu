@@ -147,6 +147,18 @@ gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
 // ---------------------------------------------------------------------------------------------
 #include "bnb.cuh"
 
+// The caller handed over a gated activation as (gate = X, up = fllm_glu_up) because the GEMM it expected folds the GLU into the conversion of its
+// activations. When that GEMM did not run (it declines a shape, or the device's shared memory is too small for any of its tile shapes, which it only finds
+// out after the conversion) the next kernel would read the raw gate: compute the activation into the buffer it belongs in and continue with that.
+static const float *glu_recover(cudaStream_t s, const float *X, int batch, int cols) {
+    if (!fllm_glu_up || !fllm_glu_dst) return X;
+    const size_t count = (size_t)batch * cols;
+    const int rc = fllm_glu_half ? fllm_glu_launch_f16(s, X, fllm_glu_up, fllm_glu_dst, count, fllm_glu_mode)
+                                 : fllm_glu_launch(s, X, fllm_glu_up, fllm_glu_dst, count, fllm_glu_mode);
+    fllm_glu_up = nullptr;
+    return rc == 0 ? fllm_glu_dst : X;
+}
+
 template <int KIND>
 static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *Y, const float *bias,
                        int rows, int cols, int batch, void *x16, size_t x16_bytes) {
@@ -189,6 +201,8 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
         fllm_mmvq_try(s, W, KIND, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
 #if !defined(__HIPCC__)
+    // (cuBLASLt and the int8 GEMM below do not fold a gated activation into their input)
+    if ((KIND == KIND_Q8_0 || KIND == KIND_F16 || KIND == KIND_BF16) && batch >= 16) X = glu_recover(s, X, batch, cols);
     // dense 16-bit weights, prompt batches: cuBLASLt loaded at run time (cublaslt_gemm.cu; Hopper / Blackwell kernels), else the built-in GEMM below
     if ((KIND == KIND_F16 || KIND == KIND_BF16) && batch >= 16) {
         const int rc = fllm_cublaslt_gemm_try(s, W, KIND, X, Y, bias, rows, cols, batch);
@@ -215,6 +229,7 @@ static int launch_kind(cudaStream_t s, const uint8_t *W, const float *X, float *
     if (KIND == KIND_Q6_K && batch >= 2 && !fllm_exact_math() &&
         fllm_qgemm6k_try(s, W, X, Y, bias, rows, cols, batch, x16, x16_bytes))
         return fllm_check_launch("linear");
+    X = glu_recover(s, X, batch, cols);  // none of the GEMMs above ran: the kernels below read the activation itself
     if (!old_gemv && (KIND == KIND_Q4_K || KIND == KIND_Q6_K) && fllm_gemv2_try(s, W, KIND, X, Y, bias, rows, cols, batch))
         return fllm_check_launch("linear");
 #if defined(__HIPCC__)

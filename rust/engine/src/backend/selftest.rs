@@ -4531,6 +4531,16 @@ impl<'a> Tester<'a> {
                 );
             }
         }
+        // A gated activation followed by a prompt GEMM that folds it into the FP16 conversion of its input. The second half of the cases gives the kernels the
+        // shared memory of a Turing GPU (64 KB): the larger tile shapes do not fit, and a GEMM that finds out after the conversion has to hand the next kernel
+        // the activation, not the raw gate.
+        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20]) {
+            for (batch, smem) in [(16usize, None), (200, None), (16, Some(65536usize)), (200, Some(65536)), (300, Some(65536))] {
+                let r = self.fuse_glu_gemm(kind, batch, 1024, smem);
+                let limit = smem.map_or(String::new(), |b| format!(", {} KB shared memory", b / 1024));
+                self.record(&format!("swiglu + prompt GEMM {}", format_name(kind)), &format!("{batch}x1024{limit}"), r);
+            }
+        }
     }
 
     /// `x += scale * branch; out = rms_norm(x)` (and a GEMM on `out` when `next` names a weight format).
@@ -4759,6 +4769,51 @@ impl<'a> Tester<'a> {
             results.push(get(s, &y, batch * out_rows)?);
         }
         Ok(Outcome { device: max_relative(&results[1], &results[0]), cpu: 0.0, tol: Self::FUSE_GEMM_TOL, cpu_tol: 1.0, ms })
+    }
+
+    /// A gated activation followed by a prompt GEMM: the fused sequence (the activation is computed by the conversion of the GEMM's input) against the same
+    /// GEMM on the activation read back from the device, with `smem` bytes of shared memory per block pretended (`None`: the device's own).
+    #[cfg(feature = "cuda")]
+    fn fuse_glu_gemm(&mut self, kind: u32, batch: usize, cols: usize, smem: Option<usize>) -> Result<Outcome, BackendError> {
+        use super::cuda::force_shared_memory;
+        let out_rows = 384usize;
+        let raw = random_kind(&mut self.rng, kind, out_rows, cols);
+        let gate = self.rng.vector(batch * cols, 4.0);
+        let up = self.rng.vector(batch * cols, 2.0);
+        let device = self.device;
+        let mut stream = device.create_stream()?;
+        let s = stream.as_mut();
+        let weight = device.upload_weight_scaled("selftest", &raw, QuantType::from_gguf_type_id(kind), out_rows, cols, None, 1.0)?;
+        s.synchronize()?;
+        let gate_buf = put(device, s, &gate)?;
+        let up_buf = put(device, s, &up)?;
+        force_shared_memory(smem);
+        let mut ms = 0.0;
+        let result = (|| -> Result<(Vec<f32>, Vec<f32>), BackendError> {
+            // reference: reading the activation back flushes it (nothing is fused), and the GEMM reads the uploaded copy
+            let mut act = device.allocate_buffer(batch * cols * 4)?;
+            s.swiglu(&mut act, &gate_buf, &up_buf)?;
+            let act_host = get(s, &act, batch * cols)?;
+            let act_copy = put(device, s, &act_host)?;
+            let mut y_ref = device.allocate_buffer(batch * out_rows * 4)?;
+            s.quantized_linear(&mut y_ref, &act_copy, &weight, None)?;
+            let mut act2 = device.allocate_buffer(batch * cols * 4)?;
+            let mut y = device.allocate_buffer(batch * out_rows * 4)?;
+            timed(&mut ms, s, |st| {
+                st.swiglu(&mut act2, &gate_buf, &up_buf)?;
+                st.quantized_linear(&mut y, &act2, &weight, None)
+            })?;
+            Ok((get(s, &y, batch * out_rows)?, get(s, &y_ref, batch * out_rows)?))
+        })();
+        force_shared_memory(None);
+        let (have, want) = result?;
+        // the activation reaches the GEMM as f16 either way; the only difference allowed is the rounding of the gated activation itself
+        Ok(Outcome { device: max_relative(&have, &want), cpu: 0.0, tol: 1e-3, cpu_tol: 1.0, ms })
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn fuse_glu_gemm(&mut self, _kind: u32, _batch: usize, _cols: usize, _smem: Option<usize>) -> Result<Outcome, BackendError> {
+        Err(BackendError::UnsupportedOperation("swiglu + prompt GEMM".into()))
     }
 
     #[cfg(not(feature = "cuda"))]
