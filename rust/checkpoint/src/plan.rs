@@ -144,6 +144,8 @@ fn family_for(model_type: &str) -> Option<(Family, &'static str)> {
     Some(match model_type {
         "llama" => (Family::Llama, "llama"),
         "mistral" => (Family::Llama, "mistral"),
+        // Ministral 8B: Mistral with a sliding/full attention pattern per layer (`layer_types`)
+        "ministral" => (Family::Llama, "mistral"),
         "mixtral" => (Family::Llama, "llama"),
         "qwen2_moe" => (Family::Qwen, "qwen2moe"),
         "qwen3_moe" => (Family::Qwen, "qwen3moe"),

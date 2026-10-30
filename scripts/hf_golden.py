@@ -351,6 +351,10 @@ def config_for(arch: str, vocab: int):
         "mistral_swa": lambda: T.MistralConfig(
             **common, **dense, rms_norm_eps=1e-5, rope_theta=10000.0, sliding_window=5
         ),
+        "ministral": lambda: T.MinistralConfig(
+            **common, **dense, head_dim=16, rms_norm_eps=1e-5, rope_theta=100000.0, sliding_window=5,
+            layer_types=["full_attention", "sliding_attention", "sliding_attention"],
+        ),
         "gemma": lambda: T.GemmaConfig(
             **common, **dense, head_dim=16, rms_norm_eps=1e-6, hidden_activation="gelu_pytorch_tanh"
         ),
