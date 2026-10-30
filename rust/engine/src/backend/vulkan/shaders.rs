@@ -7,6 +7,15 @@ include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
 
 /// SPIR-V words of the shader `name` (the bytes of the registry copied into 4-byte aligned memory).
 pub fn spirv(name: &str) -> Option<Vec<u32>> {
+    // development aid: `FLLM_VK_SHADER_DIR=<dir>` takes `<dir>/<name>.spv` (compiled with glslc, same defines as in the variants lists) instead of the
+    // built-in module, so a shader can be tried without rebuilding the program
+    if let Some(dir) = std::env::var_os("FLLM_VK_SHADER_DIR") {
+        if let Ok(bytes) = std::fs::read(std::path::Path::new(&dir).join(format!("{name}.spv"))) {
+            if bytes.len() % 4 == 0 && !bytes.is_empty() {
+                return Some(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect());
+            }
+        }
+    }
     let bytes = SHADERS.iter().find(|(n, _)| *n == name)?.1;
     Some(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect())
 }

@@ -371,6 +371,7 @@ Result to cell (examples):
 | Vulkan | `FLLM_VULKAN_VERBOSE=1` | planner capabilities, per shader once the variant, specialisation constants, grid |
 | Vulkan | `FLLM_VULKAN_EXACT=1` | only `_s`/`lin_*` (FP32); `set_exact_math(true)` in the code |
 | Vulkan | `FLLM_VULKAN_NO_IDOT=1`, `FLLM_VULKAN_NO_COOP=1` | integer-dot or coopmat variants off |
+| Vulkan | `FLLM_VK_SHADER_DIR=<dir>` | takes `<dir>/<name>.spv` instead of the built-in module of that name (compile with `glslc --target-env=vulkan1.2 -O -I shaders/vulkan <defines from variants_quant.list>`), to try a shader change without rebuilding |
 | Vulkan | `FLLM_ALLOW_SOFTWARE_GPU=1` | allow lavapipe/WARP (for logic tests only) |
 | Metal | `FLLM_METAL_SERIAL=1` | every dispatch serialised: rules out hazard/barrier errors |
 | Metal | `FLLM_METAL_FAST_MATH=0`, `FLLM_METAL_EXACT=1` | fast math off; float instead of half tiles |
@@ -378,6 +379,7 @@ Result to cell (examples):
 | Metal | `FLLM_METAL_PREWARM=1`, `FLLM_METAL_DEBUG=1` | compile all libraries at start; compiler errors per file; also: `FLLM_METAL_DUMP_DIR`, `FLLM_METAL_MEM_LIMIT_MB`, `FLLM_METAL_CB_DISPATCHES` |
 | HIP | `FLLM_HIP_NO_MMA`, `FLLM_HIP_NO_SKINNY`, `FLLM_HIP_NO_Q4Z`, `FLLM_HIP_NO_Q4Z_SKINNY` | one kernel family off each |
 | HIP | `FLLM_CUDA_EXACT`, `FLLM_CUDA_NO_TC`, `FLLM_CUDA_NO_ATTN4`, `FLLM_CUDA_NO_MMVQ` | switches shared with the CUDA sources |
+| CUDA, HIP | `FLLM_CUDA_PROFILE=1`, `FLLM_CUDA_MMVQ_MAXB=N` | GPU time per weight type and batch class of every projection, printed to stderr every 2000 projections (the run is slower: one synchronisation per projection); largest batch of the int8-dot kernels for Q4_K / Q5_K / Q6_K (default 4 on CUDA, 16 on HIP, at most 16) |
 | SYCL | `FLLM_SYCL_EXACT=1`, `ONEAPI_DEVICE_SELECTOR=level_zero:0`, `FLLM_SYCL_ALL_BACKENDS=1`, `FLLM_SYCL_AOT`, `FLLM_SYCL_FORMATS` | XMX off; device choice; list all SYCL backends; AOT compilation (unchecked) |
 | NPU | `FLLM_NPU=0`, `FLLM_NPU_HOST=1`, `FLLM_NPU_MIN_BATCH`, `FLLM_NPU_MIN_ELEMS`, `FLLM_NPU_CHUNK`, `FLLM_NPU_GROUP`, `FLLM_NPU_BUDGET_MB`, `FLLM_NPU_CACHE_DIR`, `FLLM_NPU_PROPS`, `FLLM_NPU_DEVICE`, `FLLM_NPU_DUMP_IR` | offload off; host hook; planner; quantisation; cache; properties; another OpenVINO device for practice (for example `CPU`); dump the IR |
 | TPU | `FLLM_TPU_EXACT`, `FLLM_TPU_WEIGHTS`, `FLLM_TPU_NUMERICS`, `FLLM_TPU_DEBUG`, `FLLM_TPU_DUMP_DIR`, `FLLM_TPU_LIBRARY` | see 2.8 |

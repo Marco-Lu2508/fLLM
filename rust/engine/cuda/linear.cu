@@ -1,5 +1,8 @@
 // fLLM CUDA backend: quantized linear layers (y = W x [+ bias]) and weight conversion.
+#include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <utility>
 
 #include "common.cuh"
 #include "fllm_cuda_internal.h"
@@ -268,8 +271,45 @@ extern "C" int fllm_cuda_set_exact(int on) {
     return 0;
 }
 
+static int fllm_linear_launch_impl(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias,
+                                   int rows, int cols, int batch, void *x16, size_t x16_bytes);
+
+// FLLM_CUDA_PROFILE=1: GPU time of every weight projection (events around each launch, so the stream is synchronised after each of them: the
+// run is slower than normal), summed per weight type and batch class and printed to stderr every 2000 projections
 int fllm_linear_launch(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias,
                        int rows, int cols, int batch, void *x16, size_t x16_bytes) {
+    static const bool profile = getenv("FLLM_CUDA_PROFILE") != nullptr && getenv("FLLM_CUDA_PROFILE")[0] != '0';
+    if (!profile) return fllm_linear_launch_impl(s, W, kind, X, Y, bias, rows, cols, batch, x16, x16_bytes);
+    struct Acc { double ms = 0; long calls = 0; double macs = 0; };
+    static std::map<std::pair<int, int>, Acc> table;
+    static long total_calls = 0;
+    cudaEvent_t a, b;
+    cudaEventCreate(&a);
+    cudaEventCreate(&b);
+    cudaEventRecord(a, s);
+    const int rc = fllm_linear_launch_impl(s, W, kind, X, Y, bias, rows, cols, batch, x16, x16_bytes);
+    cudaEventRecord(b, s);
+    cudaEventSynchronize(b);
+    float ms = 0.f;
+    cudaEventElapsedTime(&ms, a, b);
+    cudaEventDestroy(a);
+    cudaEventDestroy(b);
+    const int cls = batch == 1 ? 1 : batch <= 4 ? 4 : batch <= 8 ? 8 : batch <= 16 ? 16 : batch <= 32 ? 32 : batch <= 64 ? 64 : batch <= 256 ? 256 : 1024;
+    Acc &acc = table[{kind, cls}];
+    acc.ms += ms;
+    acc.calls++;
+    acc.macs += (double)rows * cols * batch;
+    if (++total_calls % 2000 == 0) {
+        fprintf(stderr, "[fllm-gpu-profile] projections: weight type, batch up to, calls, ms per call, GMAC/s\n");
+        for (const auto &e : table)
+            fprintf(stderr, "[fllm-gpu-profile] kind %d batch<=%d calls %ld %.3f ms %.1f GMAC/s total %.0f ms\n", e.first.first, e.first.second, e.second.calls,
+                    e.second.ms / e.second.calls, e.second.macs / (e.second.ms * 1e6), e.second.ms);
+    }
+    return rc;
+}
+
+static int fllm_linear_launch_impl(cudaStream_t s, const void *W, int kind, const float *X, float *Y, const float *bias,
+                                   int rows, int cols, int batch, void *x16, size_t x16_bytes) {
     const uint8_t *w = static_cast<const uint8_t *>(W);
     if (fllm_kind_is_mlx(kind)) return fllm_mlx_launch(s, W, kind, X, Y, bias, rows, cols, batch);
     switch ((uint32_t)kind) {
