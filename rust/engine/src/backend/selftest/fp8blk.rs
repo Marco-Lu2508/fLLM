@@ -155,6 +155,22 @@ impl Tester<'_> {
         let result = run();
         set_fp8_gemm_mode(-1);
         let (have, ms) = result?;
+        if crate::backend::cuda::is_exact_math() {
+            // Exact mode never takes the FP8 tensor cores (`w8a8_wanted`): the product is the FP32 GEMV on the FP32 activations, so it has to match the
+            // unquantized product at the exact tolerance, not the emulation of a path that does not run (that comparison is the fast pass's).
+            let mut scale_x = vec![0.0f64; batch * rows];
+            for b in 0..batch {
+                let row = &x[b * cols..(b + 1) * cols];
+                for r in 0..rows {
+                    let wr = &w[r * cols..(r + 1) * cols];
+                    let mag: f64 = row.iter().zip(wr).map(|(&xv, &wf)| (f64::from(xv) * f64::from(wf)).abs()).sum();
+                    scale_x[b * rows + r] = mag + bias.as_ref().map_or(0.0, |bias| f64::from(bias[r]).abs());
+                }
+            }
+            let exact = outcome(&have, &want_x, &scale_x, FP8_TOL, ms);
+            let in_bound = outcome(&have, &want_x, &bound, 1.0, ms);
+            return Ok((exact, in_bound));
+        }
         let mean = mean_error(&have, &want_q, &scale_q);
         let mut emulated = outcome(&have, &want_q, &scale_q, FP8_TOL, ms);
         if mean > FP8_TOL / 10.0 {
