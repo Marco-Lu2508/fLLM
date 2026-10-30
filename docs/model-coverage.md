@@ -1,4 +1,176 @@
-# Open-model coverage (Artificial Analysis)
+# Model and format coverage
+
+Audit of 2026-10-30 (code, `scripts/hf_golden.py` fixtures, transformers 5.22.1 as reference). Three parts: the
+architecture matrix (what runs where and how it was verified), the quantization / checkpoint formats, and the older
+snapshot against the open models listed on artificialanalysis.ai (further below). The checklist against the vLLM / SGLang
+registries is [model-coverage-vllm.md](model-coverage-vllm.md); the per-family tensor and config notes are in
+[architectures.md](architectures.md).
+
+## How to read the matrix
+
+Columns CPU / CUDA / Vulkan / HIP / Metal say what the decoder does for the layer types of the family. They are **not**
+measurements: hardware evidence is listed separately under "Runs on real devices" and everything else is the code path.
+
+* **D** the layer types have device kernels in that backend (compiled; see [backends.md](backends.md) for what ran).
+* **H** some layers run on the host between device layers (`layer_host_reason`, [gpu-backends.md](gpu-backends.md) section 3a):
+  the model runs, the host part is not accelerated.
+* **C** CPU path (the reference path) only.
+
+Verified column:
+
+* **T** the converted tiny random checkpoint of that architecture gives the same logits as `transformers` for every
+  position (`scripts/verify_architectures.py`, relative difference below 2e-3, the table shows the measured value). Where
+  the model lives in remote code, the reference is that code. Cached/batched decoding is covered by
+  `scripts/verify_generation.py` for the recurrent families only.
+* **T+G** as T and a real GGUF file of the family was compared with llama.cpp.
+* **R** a real (small) checkpoint was run.
+* **L0** mapped and compiled, no reference comparison: it may still fail on a real checkpoint.
+* **N** not supported; the converter refuses with the reason.
+
+## Decoder-only language models
+
+| Architecture (HF `model_type` / GGUF arch) | Checkpoint / GGUF | CPU | CUDA | Vulkan | HIP | Metal | Verified |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Llama 1-3, Mistral, Mixtral, Yi, Vicuna, DeepSeek-R1-Distill-Llama (`llama`, `mistral`, `mixtral`) | safetensors, GGUF | D | D | D | D | D | T 2e-4 (also `llama_wide` 1e-3, `mistral_swa`) |
+| Ministral 8B (`ministral`, Mistral with a sliding/full pattern) | safetensors | D | D | D | D | D | T 1.7e-4 (new) |
+| Ministral 3 / Mistral Medium 3.x (`ministral3`) | safetensors, GGUF | D | D | D | D | D | T 1.9e-4 |
+| Helium (`helium`, interleaved rotary pairs) | safetensors | D | D | D | D | D | T 1.8e-4 (new) |
+| BitNet b1.58 (`bitnet`: relu2, attention and FFN sub-norms) | safetensors (dense and HF-packed ternary) | D | H (sub-norm layers on the host) | H | H | H | T 2.7e-4 dense, 2.4e-4 packed (new) |
+| Granite 3/4 dense, Granite SWA (`granite`, `granite_swa`) | safetensors, GGUF | D | D | D | D | D | T 8e-5; `granite_swa` 8e-5 with a generic probe config |
+| Qwen 1 (`qwen`), Qwen2/2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen-VL text parts (`qwen2_vl_text`, `qwen3_vl_text`) | safetensors, GGUF | D | D | D | D | D | T 7e-5 / 1.5e-4 / 1.6e-4; T+G for Qwen3 |
+| Gemma 1/2/3, VaultGemma (`gemma`, `gemma2`, `gemma3_text`, `vaultgemma`) | safetensors, GGUF | D | D | D | D | D | T 2.2e-4 / 2.4e-4 / 4.6e-4 / 4.9e-4 |
+| Gemma 3n, Gemma 4 dense and MoE (`gemma3n`, `gemma4`) | safetensors, GGUF | D | H (AltUp, per-layer embeddings: the whole model runs on the host) | H | H | H | T (transformers 5.19, `scripts/verify_gemma4.py`; not re-run on 5.22) |
+| Muse Glimmer (`muse-glimmer`) | safetensors, GGUF | D | D | D | D | D | T+G 6e-4 |
+| Phi-1/2/3/3.5/4-mini (`phi`, `phi3`, LongRoPE), Phi-3.5-MoE (`phimoe`) | safetensors, GGUF | D | D | D | D | D | T 7.7e-5 / 2.1e-4 / 3.3e-4 / 2.0e-4 |
+| OLMo 1/2/3 (`olmo`, `olmo2`, `olmo3`), OLMoE, FlexOlmo | safetensors, GGUF | D | D | D | D | D | T 1.9e-4 .. 4.1e-4 |
+| OLMo hybrid (`olmo_hybrid`, gated DeltaNet + attention) | safetensors | D | D | D | H | D | T 2.1e-4 |
+| Cohere / Command-R, Command-A (`cohere`, `cohere2`, `cohere2_moe`) | safetensors, GGUF | D | D | D | D | D | T 1.3e-4 .. 1.6e-4 |
+| StarCoder2, GPT-NeoX/Pythia, StableLM, GPT-J, GPT-2, GPT-Neo, GPT-BigCode, OPT, Falcon (1/2), Bloom, MPT | safetensors, GGUF | D | D | D | D | D | T 4e-5 .. 2.2e-4 (all fixtures) |
+| GLM-4 / GLM-4-0414 (`glm`, `glm4`), ChatGLM2/3 (`chatglm`) | safetensors | D | D | D | D | D | T 1.4e-4 / 2.3e-4; the `chatglm` fixture needs the model's remote code and does not build with transformers 5.22 (earlier run 3.2e-4) |
+| Nemotron-4 (`nemotron`), InternLM2/3, Baichuan 1/2, XVERSE, Orion, Solar, MiMo (dense), IQuest, EXAONE 3/4, SmolLM3, Seed-OSS, Arcee, ERNIE 4.5, Hunyuan dense, Jais 2, CWM, HyperCLOVAX, NanoChat, Apertus, Persimmon, MiniCPM 1/2 | safetensors, GGUF | D | D | D | D | D | T 4e-5 .. 1.6e-3 (one fixture each) |
+| Llama 4 (`llama4`, chunked attention, NoPE layers) | safetensors, GGUF | D | D | D | D | D | T 1.6e-4 |
+| gpt-oss (`gpt_oss`, sinks, clamped SwiGLU) | safetensors (MXFP4), GGUF | D | D | D | D | D | T 1.2e-4 |
+| Qwen2-MoE, Qwen3-MoE, Mellum (`qwen2_moe`, `qwen3_moe`, `mellum`) | safetensors, GGUF | D | D | D | D | D | T 1.3e-4 / 2.0e-4 / 1.9e-4 |
+| GLM-4.5/4.6/4.7 (`glm4_moe`), GLM-4.x-Flash (`glm4_moe_lite`), dots.llm1, ERNIE 4.5 MoE, Hunyuan MoE/Hy3, MiniMax-M2, EXAONE-MoE, AFMoE/Trinity, Solar-Open, Sarvam-MoE, GraniteMoE (+shared, SWA) | safetensors, GGUF | D | D | D | D | D | T 1.1e-4 .. 2.7e-4 |
+| Step-3.5-Flash / Step-3.7-Flash text (`step3p5`) | safetensors (Hub layout) | D | H (attention layers: per-head gate) | H | H | H | T 6.0e-4 (new; the real 196B checkpoint was not run) |
+| MiMo-V2-Flash (`mimo_v2_flash`: per-layer KV heads, sinks, value scale) | safetensors | D | H (attention layers: value scale) | H | H | H | T 2.7e-4 (new fixture; the real 309B checkpoint was not run) |
+| DeepSeek V2/V3/R1, Kimi K2, Mistral Large 3 / Mistral 4, Youtu, Sarvam-MLA, MiniCPM3, Ling-2 (`deepseek_v2`, `deepseek_v3`, `kimi_k2`, `mistral4`, ...) | safetensors (also FP8 block), GGUF `deepseek2` | D | D | D (equal KV head count) / H | D | D | T 1.4e-4 .. 2.0e-4 |
+| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). **Dense attention:** the sparse-attention indexer is not run; that equals DSA while the context is at most `index_topk` (2048) and is approximate beyond (see Open gaps) |
+| Laguna (`laguna`, per-head attention gate) | safetensors | D | H (attention layers) | H | H | H | T 2.6e-4 |
+| K2 Horizon, G9v3 (`k2_horizon`, `g9v3`) | safetensors, GGUF | D | D | D | D | D | T 1.5e-4 .. 1.9e-4 (remote-code reference) |
+| Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | H | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
+| Kimi-Linear 48B-A3B (`kimi_linear`: KDA + latent attention without rope + MoE) | safetensors | D | D | D | H | D | T 8.2e-5 (new fixture; the KDA recurrence is also checked against `fla.ops.kda.naive` in `rust/engine/testdata`) |
+| Mamba 1/2, Falcon-Mamba (`mamba`, `mamba2`, `falcon_mamba`) | safetensors, GGUF | D | D | D (Mamba-2) / H | H | H | T 3e-7 .. 6e-7 |
+| Granite 4 hybrid, Bamba, Nemotron-H and Nemotron-3 (`granitemoehybrid`, `bamba`, `nemotron_h`, latent MoE) | safetensors, GGUF | D | D | D / H | H | H | T 3e-5 .. 1.6e-4; T+G for Nemotron-3-Nano |
+| Falcon-H1, Zamba2 | safetensors | D | H | H | H | H | T 1.8e-4 / 1.6e-3 |
+| Jamba (`jamba`) | safetensors | D | D (CUDA scan) | H | H | H | T 1.2e-4 |
+| LFM2, LFM2-MoE | safetensors | D | D (dense) / C (MoE) | H | H | H | T 1.8e-4 / 2.9e-4 |
+| DBRX | safetensors | D | C | C | C | C | T 1.3e-4 |
+| Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
+| DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
+
+## Encoders, rerankers, embedders
+
+All use the `bert` GGUF architecture family and the Rust encoder (`encoder.rs`); no generation. Reference scripts are
+`scripts/encoder_verify/*.py` (each converts a tiny random model, serves it and compares with transformers /
+sentence-transformers). Encoders run on the CPU; the GPU is used only through the helper path (`helper_model_uses_gpu`).
+
+| Family | Formats | Verified (run of 2026-10-30 on the build host) |
+| --- | --- | --- |
+| BERT, RoBERTa, XLM-R, DistilBERT, ELECTRA (embedding, cross-encoder rerank, classifier) | safetensors, GGUF | T: rerank and score within 2e-7, RoBERTa mean cosine 1.0 |
+| ModernBERT (`modernbert`) | safetensors | T: cosine 0.99999997, max error 1.4e-4 .. 3.5e-4 of the reference range |
+| NomicBERT / nomic-embed | safetensors | T (earlier run, also the real nomic-embed-text-v1.5) |
+| BGE-M3 dense / sparse / multi-vector, ColBERT v2, SPLADE-style MLM heads | safetensors | T: dense cosine 1.0, ColBERT rows 1.0, sparse entries equal, scores within 2e-6 |
+| GTE-new (`new`), Jina-XLM-R | safetensors | verification scripts need third-party remote code (`GTE_REMOTE_CODE_DIR`, `JINA_REMOTE_CODE_DIR`); not run in this audit |
+| Qwen3-Embedding / Qwen3-Reranker, LlamaBidirectional, EmbeddingGemma (bidirectional Gemma-3 + Dense modules), reward models (Qwen2/Qwen3 sequence classification) | safetensors | T: cosine 1.0, rerank score within 1e-7 |
+| sentence-transformers pipelines (pooling modes, Dense, Normalize, dimensions) | safetensors | T: cosine 1.0 (`verify_st_pipeline.py`) |
+
+## Vision, audio, speech
+
+| Part | State |
+| --- | --- |
+| Vision towers: Qwen2-VL, Qwen2.5-VL, Qwen3-VL | implemented in Rust, T against transformers ([vision-audio.md](vision-audio.md)) |
+| SmolVLM / Idefics3 through a llama.cpp `mmproj` file | implemented, unit tests only |
+| Gemma 3/4, Llama 4, Mistral 3, GLM-4V, InternVL, Pixtral, Step-3.7 and other vision towers | not imported: the text model converts, image input is not available (the tower tensors are skipped) |
+| Audio input, ASR (Whisper, Parakeet, Qwen3-ASR), TTS, audio language models | not implemented in the engine |
+| MTP / NextN heads | read for a few families (`nextn.*`), dropped for MiMo and Step-3.5 |
+
+## Quantization and checkpoint formats
+
+| Format | Read natively | Notes / verified |
+| --- | --- | --- |
+| GGUF F32/F16/BF16, Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 | yes, native kernels | the writer is byte-identical to `llama-quantize` for the classic types |
+| GGUF Q2_K..Q6_K (K-quants), IQ1..IQ4 (I-quants), TQ1_0/TQ2_0, MXFP4, NVFP4, Q1_0/Q2_0 | yes (35 types, `fllm-rs formats`) | native kernels for Q4_0..Q8_0 and Q4_K/Q5_K/Q6_K; the other types are decoded (expanded to F16/F32 at upload on GPUs) |
+| safetensors F32/F16/BF16, sharded; PyTorch `.bin`/`.pt` | yes | direct loading without writing a GGUF file |
+| GPTQ 2/3/4/8-bit, `gptq_v2`, `g_idx`, sym/asym | yes | checked against gptqmodel fixtures |
+| AWQ 4-bit GEMM, asymmetric and symmetric (`zero_point: false`) | yes | symmetric added 2026-10-30; the layout of a real AutoRound-AWQ repository was checked from its tensor headers (qzeros all 8) |
+| Intel AutoRound (`quant_method: auto-round`, `auto_round:auto_gptq`, `auto_round:auto_awq`) | yes (new) | read as GPTQ / AWQ; tensor names, shapes and the zero-point convention (stored minus one) were checked on the headers of real exports; no AutoRound checkpoint was run end to end. Other packings: refused with the reason |
+| FP8 (per tensor, block-wise), `fbgemm_fp8`, ModelOpt FP8 | yes | stays FP8 on devices that have kernels |
+| NVFP4 (ModelOpt, compressed-tensors), MXFP4 (gpt-oss, compressed-tensors) | yes | |
+| bitsandbytes NF4/FP4 (double quant), LLM.int8 | yes | checked against bitsandbytes fixtures |
+| MLX affine (2-8 bit, any group size) | yes | MLX `mxfp4`/`nvfp4` modes: refused |
+| EXL2, EXL3 | yes | [exl-formats.md](exl-formats.md) |
+| compressed-tensors int4/int8 symmetric (pack-quantized, int-quantized) | yes | asymmetric zero points and activation ordering: refused |
+| Hugging Face BitNet packed ternary (`quant_method: bitnet`) | yes (new) | T 2.4e-4 (`scripts/verify_bitnet_packed.py`, packed with transformers' own `pack_weights`); the tensor layout also matches the headers of microsoft/bitnet-b1.58-2B-4T. The reference BitLinear rounds activations to 8 bits per token; fLLM does not |
+| HQQ, torchao, Quark, EETQ, AQLM, QuIP#, SpQR, VPTQ, HIGGS, fp_quant, GPTQ-Marlin / BitBLAS repacks | no | the converter names the format and the way out (re-export as GPTQ/AWQ/compressed-tensors, or use the original weights) |
+
+## Real checkpoints run in this audit
+
+CPU only, on the shared build host, small models only (the downloads were deleted afterwards). `scripts/verify_real_model.py` compares
+greedy continuations of four short prompts (24 tokens, f16 KV cache, so near ties can flip) with transformers in float32;
+logits were compared with `verify_checkpoint` (f32 KV cache) where noted.
+
+| Model | What it exercises | Result |
+| --- | --- | --- |
+| microsoft/bitnet-b1.58-2B-4T (packed uint8 ternary weights) | `quant_method: bitnet` reader, `bitnet` architecture with sub-norms, tied embeddings | logits of 19 positions against transformers on the unpacked weights (`scripts/unpack_bitnet.py`): relative 1.7e-4, arg-max equal everywhere. Greedy text is coherent ("Paris", counting); it matches transformers on the counting prompt and diverges after 4 to 38 characters on the other three (f16 KV cache; not examined further). The reference BitLinear's 8-bit activation rounding is applied by neither side |
+| kyutai/helium-1-2b | The Hub config of this model is plain `llama`, so it runs through the Llama path (the new `helium` model type is for transformers-native Helium configs only) | logits of 18 positions: relative 5.4e-4, arg-max equal; greedy text identical on two of four prompts, the other two diverge after 9 and 23 characters |
+| Qwen/Qwen3-VL-2B-Instruct, text only | `qwen3_vl_text` path | four of four continuations identical to transformers |
+| Qwen3-VL-2B-Instruct Q8_0 GGUF of the Qwen organisation (architecture `qwen3vl`) | the new `qwen3vl` alias | loads and generates; two of four continuations identical to the float32 transformers text, the others differ after 20 and 52 characters (Q8_0 against float32) |
+
+Header-only checks (no weights downloaded) of what real repositories contain: Step-3.5-Flash Hub files use `moe.*` / `share_expert.*` names and
+stacked expert tensors, which the new reader handles (shapes and dtypes read from the safetensors headers); the AutoRound repositories
+store GPTQ tensors with zero points stored minus one, AutoRound-AWQ stores `qzeros` of all 8. llama.cpp's own GGUF architecture names
+`step35`, `mimo2`, `glm5-next` and `bitnet-b1.58` (with the `I2_S` tensor type) use other metadata and are **not** loaded; `deepseek2` and
+`kimi-linear` GGUF names are the same as fLLM's, but no such file was run.
+
+## Runs on accelerators (this audit)
+
+Only the greedy-completion smoke test `scripts/gpu_arch_smoke.py` ran the new architectures on an accelerator (tiny random models, CPU
+against the device, same text expected). Nothing else in this document claims a GPU result.
+
+Device: an NVIDIA RTX 2000 Ada Laptop GPU through the native Vulkan backend (`--device vulkan:1`, driver 595.99.02); CPU: the same machine's
+processor. Each row is one tiny random-weight model, 12 greedy tokens, the text from the device against the text from the CPU:
+
+| Model | Result |
+| --- | --- |
+| BitNet, Helium, Ministral, DeepSeek-V3.2, GLM-5 (DSA), Kimi-Linear, XVERSE | same text |
+| MiMo-V2-Flash, Step-3.5, Laguna | **different text on the first run**: `FLLM_LAYER_CHECK=1` showed layer 0 of the device differing from the host reference by 1.7 to 2.5 times its rms (a stablelm, glm4, phi, olmoe, gemma2 control showed 0.001 to 0.003). Cause found by comparing intermediate sums: the device multiplied the attention output by a per-head gate element by element (Laguna, Step-3.5) and had no value scale (MiMo-V2). Those attention layers now run on the host (`layer_host_reason`); the same text as the CPU on the second run, together with BitNet |
+
+This shows the architectures load and run on that device and found one defect of the shared device path; it is not a performance or
+accuracy measurement. CUDA, HIP and Metal were not run in this audit, the Radeon 840M laptop was in use by another benchmark and was not
+touched, and Vulkan on an AMD GPU is untested for the new architectures.
+
+## Open gaps
+
+Not implemented, ordered by how many current models need them:
+
+1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** and compressed or sparse key-value caches: DeepSeek-V4 and
+   V4.1, Hy4, Qwen3.8-Flash-Next, GLM-5-Next, Motif. A new decoder structure and new cache types in every backend.
+2. **The DeepSeek-V3.2 / GLM-5 indexer** (exact sparse attention beyond 2048 tokens of context): it needs a second key
+   stream per layer in the cache; today the dense result is used, exact up to `index_topk` tokens.
+3. **KDA variants**: Ling-3.0 (bounded forget gate, rotary latent attention with a head gate, Hub layout `attention.*`),
+   GLM-5-Next, Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
+4. **RWKV 6/7, xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
+   DiffLlama**: their own recurrent or attention mechanisms.
+5. **LongCat-Flash** (dual sublayers with shortcut MoE), **Inkling**, **MiniMax-M3** (block-sparse index), **MiniMax-M1**
+   (lightning attention).
+6. Vision towers beyond Qwen-VL; any audio model.
+7. The quantization formats listed as "no" above.
+
+A 2.8T or 1T model cannot run on a laptop whatever the architecture support is; "T" means the layer maths is right on a
+tiny random model, not that a real checkpoint of that size was run.
+
+## Snapshot against artificialanalysis.ai (2026-10-13, statuses updated 2026-10-30)
 
 Snapshot of 2026-10-13. Source: the open-weights views of <https://artificialanalysis.ai/models/open-source>
 (overall list, size classes `tiny`, `small`, `medium`, `large`). Artificial Analysis shows only the top 12 of each
@@ -26,9 +198,9 @@ into the 30 GB test machine.
 | | count |
 | --- | --- |
 | open models visible on AA (distinct) | 43 |
-| V verified (architecture, tiny checkpoint vs `transformers` or the model's remote code) | 26 |
+| V verified (architecture, tiny checkpoint vs `transformers` or the model's remote code) | 28 |
 | U supported, but not fully verified or with a documented gap | 2 (LFM2.5, K2 Horizon 375B) |
-| N not supported | 15 |
+| N not supported | 13 |
 
 Newly supported by this work: Muse Glimmer, K2 Horizon MoE/MoVA (36B A4B, and the 375B A23B text model except its
 partial rope), G9v3, Nemotron-H with latent experts (Nemotron 3 Super / Ultra), llama.cpp `nemotron_h_moe`
@@ -55,7 +227,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 
 | Model | Params | HF architecture | Status | Notes |
 | --- | --- | --- | --- | --- |
-| Ling-3.0-flash(-VL/-Fin) | 124B / 5.5B | `BailingMoeV3ForCausalLM` (`bailing_hybrid`) | **N** | MLA mixed with KDA linear-attention layers (`layer_group_size`); the converter's `bailing_hybrid` entry only knows the MLA part and refuses KDA checkpoints (missing tensors). |
+| Ling-3.0-flash(-VL/-Fin) | 124B / 5.5B | `BailingMoeV3ForCausalLM` (`bailing_hybrid`) | **N** | MLA mixed with KDA layers like Kimi-Linear (which is supported and verified), but with a bounded forget gate, direct (not low-rank) gate projections, rotary latent attention with a head-wise output gate and the Hub tensor names `attention.*`. |
 | Qwen3.5 122B A10B | | `qwen3_5_moe` | V | |
 | Mistral Medium 3.5 128B | dense | `Mistral3ForConditionalGeneration` / `ministral3` | V | Text model only. |
 | Nemotron 3 Super 120B A12B | | `NemotronHForCausalLM` | V (tiny, new) | Needs the latent expert projections added here (`moe_latent_size: 1024`). Real weights not run (120B). |
@@ -70,11 +242,12 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 
 | Model | Params | HF architecture | Status | Reason |
 | --- | --- | --- | --- | --- |
-| MiMo-V2.6-Pro / -Flash | 1.0T / 309B | `MiMoV2ForCausalLM` | **N** | Different head counts and widths for sliding and global layers, learned attention sinks, fused QKV, value scale, FP8. |
-| GLM-5.3 (Max / Low) | 753B | `GlmMoeDsaForCausalLM` | **N** | DeepSeek sparse attention indexer (shared/full indexer layers). |
+| MiMo-V2.6-Pro / -Flash | 1.0T / 309B | `MiMoV2ForCausalLM` | V (tiny) | The `mimo_v2_flash` layer is supported (different KV heads for sliding and global layers, sinks, value scale, partial rope) and matches transformers on a tiny checkpoint; the real checkpoints (FP8, 309B and 1.0T) were not run. Pro-specific differences, if any, are unchecked. |
+| GLM-5.3 (Max / Low) | 753B | `GlmMoeDsaForCausalLM` | V (tiny, dense attention) | MLA + MoE as before; the indexer tensors are dropped and attention is dense, which is exact up to 2048 tokens of context (see Open gaps). |
 | GLM-5.3-Flash | 320B | `Glm5NextForConditionalGeneration` | **N** | KDA linear attention + DSA + multi-stream residuals (`mhc`). |
 | Kimi K3 | 2.8T | `KimiK3ForConditionalGeneration` | **N** | KDA layers, attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors. |
 | Qwen3.8 2.4T A95B | 2.4T | `Qwen3_5MoeForCausalLM` | V (arch) | Same layers as Qwen3.5-MoE; too large to run. |
+
 | Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **N** | Hyper-connections, n-gram embeddings, per-layer embeddings, sparse indexer. |
 | DeepSeek V4.1 Flash, V4 Pro 0813 | 552B, 1.6T | `DeepseekV41ForCausalLM`, `DeepseekV4ForCausalLM` | **N** | Hyper-connections, engram embeddings, compressed/sparse attention. |
 | Motif 3 | 314B | `MotifForCausalLM` | **N** | GDLA attention, multi-stream residuals, PolyNorm activation. |

@@ -130,7 +130,7 @@ The table below summarizes the layer-by-layer execution path across device backe
 | `gemma`, `gemma2`, `vaultgemma` | Sandwich norms, 1+w scale, logit soft-capping, sliding window | Device | Device | None (device soft-capping & sliding window) |
 | `chatglm`, `exaone` | Fused QKV / custom projection names, RMSNorm | Device | Device | None (device execution) |
 | `minicpm` | muP scaling (`scale_emb`, `scale_depth`, `dim_model_base`) | Device | Device | None (weights pre-scaled on upload) |
-| `laguna` | Attention output gate (`attn_gate`), GQA, RMSNorm | Device | Device | Host fallback on backends without attention gate (`"an attention output gate"`) |
+| `laguna` | Per-head attention output gate (`attn_gate`), GQA, RMSNorm | Host attention layers | Host attention layers | `"a per-head attention output gate"`; MoE layers as for `mixtral` |
 | `mixtral`, `deepseek` (v1), `xverse_moe` | Standard Attention + Top-k routed MoE FFN | Device | Device | Host fallback when backend lacks MoE kernels (e.g. CPU-as-device) |
 | `mellum` | Mixed dense/sparse MoE layers, sliding window | Device | Device | MoE layers fall back to host reference on backends without MoE kernels |
 | `cohere2`, `cohere2_moe` | LayerNorm with bias, sliding window, MoE (cohere2_moe) | Device | Device | Native backends support LayerNorm with bias; wgpu falls back to host |
@@ -140,6 +140,11 @@ The table below summarizes the layer-by-layer execution path across device backe
 | `mamba`, `mamba2`, `bamba` | Recurrent SSM (Mamba-1 / Mamba-2) | Device | Device (Mamba-2) / Host | Mamba-1 with learned norms falls back (`"Mamba-1 with learned dt/B/C norms"`) |
 | `lfm2`, `lfm2moe` | ShortConv recurrent mixer | Device | Device | Requires ShortConv kernel; falls back if `parallel_residual` (`"the ShortConv mixer"`) |
 | `nemotron_h`, `nemotron_h_moe` | Mamba-2 / FFN-only / Latent-MoE | Device / Host FFN | Device / Host FFN | Latent-space MoE experts run on host reference (`"latent-space expert projections"`) |
+| `ministral`, `helium` | Standard GQA (Mistral with a per-layer sliding window; Llama with interleaved rotary pairs) | Device | Device | None |
+| `bitnet` | Standard GQA + relu2 gated FFN + RMS sub-norms over the attention output and the FFN activation | Host layers | Host layers | `"an attention sub-norm"` / `"a feed-forward sub-norm"`: those layers run on the host reference between device layers |
+| `step3p5`, `mimo_v2` | Laguna-style attention (per-layer head counts, per-head gate) + sigmoid MoE; MiMo: per-layer KV heads, sinks, value scale | Host attention layers | Host attention layers | `"a per-head attention output gate"` (Laguna, Step-3.5) and `"a value scale"` (MiMo-V2): the device gate kernels multiply element by element and there is no device value scale; before this check those layers gave wrong results on Vulkan (measured on an RTX 2000 Ada: layer output differed from the host reference by 1.7 to 2.5 times its rms) |
+| `deepseek2` (DeepSeek-V3.2, GLM-5 converted with the indexer dropped) | MLA + MoE, dense attention | Device | Device / Host | as `deepseek2` |
+| `kimi-linear` | KDA + latent attention without rope + MoE | Device (KDA kernel) | Device (KDA kernel) | host between device layers where no KDA kernel exists (`"Kimi Delta Attention"`) |
 | `falcon-h1` | Parallel Mamba-2 + Attention in every layer, muP multipliers | Host layers | Host layers | Always host reference: `"a Mamba-2 branch next to the attention"` |
 | `jamba` | Mamba-1 + Full Attention + MoE | Device (CUDA) / Host (Vulkan) | Host layers | CUDA has native Mamba-1 scan; Vulkan falls back Mamba-1 layers to host |
 | `zamba2` | Shared transformer block preceding Mamba-2 mixer | Host layers | Host layers | Always host reference: `"a shared transformer block in front of the Mamba-2 mixer"` |

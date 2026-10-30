@@ -25,6 +25,8 @@ Checkpoint output types are preserve, F16 and F32. This does not add a GGUF quan
 | Scheme | Output with `--outtype preserve` | Notes |
 | --- | --- | --- |
 | AutoGPTQ 4-bit (also act-order), AutoAWQ 4-bit GEMM with zero points | `Q4Z32/64/128`, `Q4ZP32/64/128` (fLLM-specific), else F16 | unchanged values |
+| Intel AutoRound (`quant_method` auto-round with `packing_format` `auto_round:auto_gptq` or `auto_round:auto_awq`) and symmetric AutoAWQ exports (`zero_point: false`) | as GPTQ / AWQ above | the packings are the AutoGPTQ / AutoAWQ tensors; tensor names, shapes and the stored zero points were checked on the headers of real exports, no AutoRound checkpoint was run end to end; other packings are refused |
+| Hugging Face BitNet (`quant_method` bitnet: `uint8` weights with four ternary codes per byte plus `weight_scale`) | F16 (expanded; `--quant` applies) | checked against transformers (`scripts/verify_bitnet_packed.py`, 2.4e-4); the 8-bit activation rounding of the reference BitLinear is not applied |
 | FP8 (`quant_method` fp8, ModelOpt `quant_algo` FP8, compressed-tensors float 8 bit) | `FP8M` for one scale per tensor or row; `FP8B` (fLLM-specific, below) for block-wise `weight_scale_inv` (`weight_block_size` or `block_structure`), F16 only for tiles that are not powers of two | `weight_scale_inv` multiplies the decoded value, as in the DeepSeek and transformers FP8 code |
 | ModelOpt NVFP4 | GGUF type 40 plus `<name>.scale` and `<name>.input_scale` | details in [awq-gptq-marlin.md](awq-gptq-marlin.md); other `quant_algo` values are refused |
 | compressed-tensors `pack-quantized` (symmetric int4, int8) and `int-quantized` (symmetric int8) | int4 with group 32/64/128: `Q4Z`; 8 bit with a scale per 32 or more inputs: `Q8_0`; else F16 | scales may be f16, bf16 or f32 (rounded to f16 in the blocks) |
@@ -36,7 +38,7 @@ Checkpoint output types are preserve, F16 and F32. This does not add a GGUF quan
 other than NVFP4 and FP8 (`unsupported ModelOpt quant_algo "..."`), compressed-tensors NVFP4 (`compressed-tensors NVFP4 (format
 "nvfp4-pack-quantized") is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint ...`), asymmetric or act-order or sparse
 compressed-tensors, mixed-precision `config_groups`, and other quantization methods (`unsupported quantization_config quant_method
-"..." (supported: gptq, awq, fp8, compressed-tensors, modelopt NVFP4/FP8, exl2, exl3)`).
+"..." (supported: gptq, awq, auto-round, fp8, bitsandbytes, bitnet, compressed-tensors, modelopt NVFP4/FP8, MLX affine, exl2, exl3)`). HQQ, torchao, Quark, EETQ, AQLM, QuIP#, SpQR, VPTQ, HIGGS and fp_quant checkpoints have no reader (the message names a way out).
 
 ### Block-wise FP8 (`FP8B`)
 

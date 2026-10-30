@@ -16,7 +16,7 @@ convert to their text model; vision towers are not imported.
 
 | `model_type` | Notes |
 | --- | --- |
-| `llama`, `mistral`, `mistral_large`, `granite`, `k2_horizon`, `intellect_3` | GQA, sliding window, linear/YaRN/Llama-3 rope scaling |
+| `llama`, `mistral`, `ministral` (Ministral 8B: sliding/full pattern per layer), `mistral_large`, `granite`, `k2_horizon`, `intellect_3` | GQA, sliding window, linear/YaRN/Llama-3 rope scaling |
 | `baichuan`, `qwen`, `qwen2`, `qwen3` (+ `*_vl_text`) | Q/K bias, per-head Q/K norm, fused QKV (baichuan, qwen) |
 | `gemma`, `gemma2`, `gemma3_text`, `vaultgemma` | `1+w` norms, soft-capping, local/global rope, sandwich norms (Gemma 2/3) |
 | `gemma4`, `gemma4_text`, `gemma3n` | sliding and global layers with heterogeneous head width, K = V on global layers, proportional rope, value norm, AltUp, LAuReL, per-layer embeddings, shared KV layers, layer output scale; verified against transformers 5.19 |
@@ -30,6 +30,8 @@ convert to their text model; vision towers are not imported.
 | `nemotron` | LayerNorm1p (`weight + 1`, folded at conversion), ReLU² MLP without gate, partial NeoX rope (Nemotron-4-Minitron, Nemotron-Mini-4B; also compared with the real Nemotron-Mini-4B weights) |
 | `internlm2` | InternLM2/2.5: fused `wqkv` (rows grouped per KV head) reordered into q/k/v with interleaved rotary pairs, `w1/w2/w3` MLP; dynamic NTK scaling is ignored within `max_position_embeddings`; verified against the model remote code |
 | `seed_oss`, `smollm3`, `arcee`, `ernie4_5`, `exaone4`, `hunyuan_v1_dense`, `ministral3`, `jais2`, `cwm`, `hyperclovax`, `nanochat`, `apertus` | per-layer NoPE, post-rope QK norm, query temperature, ReLU², xIELU, weightless norms, flipped rope |
+| `helium` | Llama layout with interleaved rotary pairs (like `ernie4_5`); checked against transformers 5.22 (1.8e-4) |
+| `bitnet` | BitNet b1.58: Llama layout, relu2 gated FFN, an RMS norm over the attention output before `o_proj` (`attn_sub_norm`) and over `act(gate) * up` before the down projection (`ffn_sub_norm`); the layers run on the host on GPU backends; the Hugging Face packed ternary checkpoints (`quant_method: bitnet`) are read too; checked against transformers 5.22 (2.7e-4 dense, 2.4e-4 packed) |
 | `minicpm` | muP scaling: `scale_emb` on embeddings, `residual_scale` (`scale_depth / sqrt(layers)`), `logit_scale` (`dim_model_base / hidden`); verified against transformers 5.19 (4.3e-5) |
 | `internlm3` | Llama tensor layout; dynamic NTK rope is the identity within `max_position_embeddings` (as for `internlm2`); checked against transformers 5.19 (relative logit difference 1.4e-4) |
 | `mimo` | Qwen2 layout with Q/K/V biases; `model.mtp_layers.*` (NextN heads) are dropped on import; checked against transformers 5.19 (1.9e-4) |
@@ -46,6 +48,8 @@ convert to their text model; vision towers are not imported.
 | --- | --- |
 | `mixtral`, `qwen2_moe`, `qwen3_moe`, `mellum`, `sarvam_moe`, `olmoe`, `flex_olmo`, `granitemoe(shared)`, `xverse_moe` | softmax, top-k, optional renormalisation, shared experts (sigmoid-gated for Qwen2-MoE), sliding/NoPE layers for Mellum |
 | `deepseek_v2`, `deepseek_v3`, `kimi_k2`, `glm4_moe_lite`, `bailing_moe`, `sarvam_mla`, `mistral4`, `youtu`, `minicpm3` | multi-head latent attention (the cache holds the rebuilt per-head keys/values), sigmoid or softmax routing, selection bias, group-limited experts, shared experts |
+| `deepseek_v32`, `glm_moe_dsa` (DeepSeek-V3.2, GLM-5/5.x) | the `deepseek_v3` layers; the lightning indexer (`self_attn.indexer.*`, the sparse top-k selection) is dropped and attention is dense: identical to DSA while the context holds at most `index_topk` (2048) tokens, an approximation beyond. Checked against transformers 5.22 with `index_topk` above the sequence length (2.3e-4 / 1.8e-4). The NextN block is skipped |
+| `step3p5` (Step-3.5-Flash, Step-3.7-Flash text) | the Laguna layer (per-layer head counts for sliding and full layers, per-head QK norms, per-head attention gate here with a sigmoid, sigmoid MoE with selection bias, routed scaling and a shared expert, partial rotary per layer kind) with `weight - 1` norms; the transformers and the Hub configuration and the Hub tensor names (`moe.*`, `share_expert.*`) are read; clamped SwiGLU (`swiglu_limits`) and the MTP blocks are not; checked against transformers 5.22 on a Hub-layout tiny checkpoint (6.0e-4) |
 | `glm4_moe`, `dots1`, `exaone_moe`, `solar_open`, `hy_v3`, `afmoe`, `trinity`, `minimax_m2`, `ernie4_5_moe`, `hunyuan_v1_moe`, `laguna` | DeepSeek-style sigmoid routing with bias, softplus attention gate, per-layer head counts, and dense/sparse layer patterns |
 | `dbrx` | flat experts with transposed down weights, clipped fused QKV, bias-free LayerNorm, selected-weight p-norm; CPU implementation; logits agree with transformers 5.19 on a tiny checkpoint (relative difference 1.3e-4) |
 | `gpt_oss` | attention sinks, clamped SwiGLU, biased experts, MXFP4 import, untruncated YaRN |
@@ -92,16 +96,17 @@ speculative decoding are switched off for them.
 | `lfm2` | gated ShortConv with per-sequence history + Q/K-normalized attention; CPU and CUDA; tiny fixture agrees with transformers 5.19 (1.8e-4) |
 | `mamba`, `falcon_mamba`, `mamba2` | selective state-space mixers |
 | `qwen3_next`, `qwen3_5`, `qwen3_5_moe` | gated DeltaNet + gated attention (+ MoE) |
+| `kimi_linear` (Kimi-Linear 48B-A3B) | Kimi Delta Attention layers (gated delta rule with a per-channel decay, short convolutions, low-rank gates) interleaved with latent attention without rope, dense then MoE feed-forwards; checked against transformers 5.22 (8.2e-5) |
 | GGUF `qwen35`, `qwen35moe` (llama.cpp / unsloth files) | same layers; llama.cpp stores each head's query and gate side by side, the value heads of the DeltaNet layers tiled (value head `j` belongs to key head `j % key heads`) and the MoE experts as one `ffn_gate_up_exps` tensor with `[gate; up]` rows per expert. Loaded as such (checked against fLLM's own conversion of Qwen3.5-0.8B: identical text; Qwen3.6-35B-A3B Q4_K_S runs). The DeltaNet recurrence runs on the device with the CUDA backend (`deltanet.cu`); on the other backends it runs on the CPU between device layers. |
 | `olmo_hybrid` | gated DeltaNet with separate projections + attention |
 | `granitemoehybrid`, `bamba`, `nemotron_h` | Mamba-2 + attention (+ MLP / experts). Nemotron-H with `moe_latent_size` (Nemotron 3 Super / Ultra) is supported: router on the hidden state, routed experts on a latent projection (`ffn_latent_down` / `ffn_latent_up`), shared expert on the hidden state. Expert variants are written as GGUF architecture `nemotron_h_moe` like llama.cpp; both names load, per-layer `head_count_kv` / `feed_forward_length` arrays are read, attention has no rope |
 
 ## Not supported
 
-* MiMo-V2 (Flash and Pro), Kimi-Linear (KDA), DeepSeek V3.2/V4 and GLM-5
-  (sparse attention indexer), JetMoE, Inkling, ZAYA.
+* DeepSeek V4 and Hy4 (hyper-connections, compressed/sparse caches), Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
+  RWKV, xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama, Qwen3.8-Flash-Next. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
 * LongCat Flash: dual-sublayer self-attention and MLP topology with shortcut MoE routing.
-* Step 3.5 / Step 3.7: heterogeneous per-layer attention head counts (`num_attention_heads_per_layer`).
+* Step-3 (not 3.5/3.7): MFA attention.
 * A.X-K2: Gated RMSNorm wrapper (`AXK2GatedRMSNorm`) with internal `gate_mlp` projection.
 * Encoder families beyond the BERT GGUF layout (ModernBERT and NomicBERT are supported (NomicBERT verified 2026-10-14 against transformers 5.19, fixture + nomic-embed-text-v1.5); BGE-M3 dense verified via the XLM-R path; still open: GTE-new, Jina, SPLADE, ColBERT),
   and classification heads outside BERT/RoBERTa/XLM-R.

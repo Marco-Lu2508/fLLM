@@ -93,6 +93,10 @@ costs on each backend).
 
 ## AWQ / GPTQ checkpoints (Q4Z, Marlin)
 
+Intel AutoRound exports (`quant_method: auto-round` with the `auto_round:auto_gptq` or `auto_round:auto_awq` packing) and symmetric AWQ
+(`zero_point: false`) are read as the GPTQ / AWQ formats below. Hugging Face BitNet checkpoints (`quant_method: bitnet`, packed ternary
+weights) are expanded to F16.
+
 `convert` keeps 4-bit AWQ (AutoAWQ GEMM) and GPTQ (AutoGPTQ, no act-order)
 checkpoints 4-bit. Each weight matrix becomes a `Q4Z` tensor (GGUF ids
 `0x8000_0010`/`0x8000_0011`/`0x8000_0012` for groups of 32/64/128); nothing is
