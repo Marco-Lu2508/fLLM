@@ -632,6 +632,136 @@ pub(crate) fn split_gptq_marlin(
     Ok((dense, packed))
 }
 
+// ---------------------------------------------------------------- AQLM
+
+/// Additive quantization (AQLM, `quant_method: aqlm`): every group of `out_group_size x in_group_size` weights is the sum of one
+/// codebook vector per codebook, times a scale per output group. Tensors per linear: `codes` `[out / og, in / ig, codebooks]`
+/// (int8 / int16, signed storage of `nbits`-bit codes: `code mod 2^nbits`), `codebooks` `[codebooks, 2^nbits, og, ig]`, `scales`
+/// `[out / og, 1, 1, 1]`. This is `aqlm.utils._dequantize_weight`.
+#[derive(Debug)]
+pub(crate) struct Aqlm {
+    codes: Payload,
+    wide_codes: bool,
+    codebooks: Vec<f32>,
+    scales: Vec<f32>,
+    nbits: usize,
+    num_codebooks: usize,
+    out_group: usize,
+    in_group: usize,
+    out_groups: usize,
+    in_groups: usize,
+}
+
+impl Aqlm {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        codes: Payload,
+        wide_codes: bool,
+        codebooks: Vec<f32>,
+        scales: Vec<f32>,
+        nbits: usize,
+        num_codebooks: usize,
+        out_group: usize,
+        in_group: usize,
+        out_groups: usize,
+        in_groups: usize,
+    ) -> Result<Self, String> {
+        if nbits == 0 || nbits > 16 || num_codebooks == 0 || out_group == 0 || in_group == 0 || out_groups == 0 || in_groups == 0 {
+            return Err("invalid AQLM layout".into());
+        }
+        let width = if wide_codes { 2 } else { 1 };
+        if codes.as_slice().len() != out_groups * in_groups * num_codebooks * width {
+            return Err(format!("codes have {} bytes, expected {}", codes.as_slice().len(), out_groups * in_groups * num_codebooks * width));
+        }
+        if codebooks.len() != num_codebooks * (1 << nbits) * out_group * in_group {
+            return Err(format!("codebooks have {} values, expected {}", codebooks.len(), num_codebooks * (1 << nbits) * out_group * in_group));
+        }
+        if scales.len() != out_groups {
+            return Err(format!("scales have {} values, expected {out_groups}", scales.len()));
+        }
+        Ok(Self { codes, wide_codes, codebooks, scales, nbits, num_codebooks, out_group, in_group, out_groups, in_groups })
+    }
+
+    fn code(&self, index: usize) -> usize {
+        let b = self.codes.as_slice();
+        let raw = if self.wide_codes { i32::from(i16::from_le_bytes([b[2 * index], b[2 * index + 1]])) } else { i32::from(b[index] as i8) };
+        raw.rem_euclid(1 << self.nbits) as usize
+    }
+}
+
+impl Dequant for Aqlm {
+    fn element_count(&self) -> usize {
+        self.out_groups * self.out_group * self.in_groups * self.in_group
+    }
+
+    fn decode_chunk(&self, start: usize, dst: &mut [f32]) -> Result<(), String> {
+        let end = start.checked_add(dst.len()).filter(|&e| e <= self.element_count()).ok_or("AQLM range exceeds the tensor")?;
+        let in_features = self.in_groups * self.in_group;
+        let book = (1usize << self.nbits) * self.out_group * self.in_group;
+        for (slot, e) in dst.iter_mut().zip(start..end) {
+            let (o, i) = (e / in_features, e % in_features);
+            let (og, a) = (o / self.out_group, o % self.out_group);
+            let (ig, b) = (i / self.in_group, i % self.in_group);
+            let mut sum = 0.0f32;
+            for c in 0..self.num_codebooks {
+                let code = self.code((og * self.in_groups + ig) * self.num_codebooks + c);
+                sum += self.codebooks[c * book + (code * self.out_group + a) * self.in_group + b];
+            }
+            *slot = sum * self.scales[og];
+        }
+        Ok(())
+    }
+}
+
+/// AQLM tensors `<name>.codes`, `<name>.codebooks`, `<name>.scales`; every other tensor (norms, embeddings, `lm_head`, biases) is dense.
+pub(crate) fn split_aqlm(
+    all: Vec<Tensor>,
+    nbits: usize,
+    num_codebooks: usize,
+    out_group: usize,
+    in_group: usize,
+    map: &dyn Fn(&str) -> Result<Option<String>, String>,
+) -> Result<(Vec<Tensor>, Vec<crate::convert::PackedGroup>), String> {
+    let mut dense = Vec::new();
+    let mut parts: HashMap<String, HashMap<&'static str, Tensor>> = HashMap::new();
+    for t in all {
+        let suffix = ["codes", "codebooks", "scales"].into_iter().find(|s| t.name.strip_suffix(s).is_some_and(|b| b.ends_with('.')));
+        match suffix {
+            Some(s) => {
+                let base = t.name[..t.name.len() - s.len() - 1].to_owned();
+                if parts.entry(base).or_default().insert(s, t).is_some() {
+                    return Err("duplicate AQLM component".into());
+                }
+            }
+            None => dense.push(t),
+        }
+    }
+    let mut packed = Vec::new();
+    let mut bases: Vec<_> = parts.keys().cloned().collect();
+    bases.sort();
+    for base in bases {
+        let mut p = parts.remove(&base).unwrap();
+        let mut take = |k: &'static str| p.remove(k).ok_or_else(|| format!("AQLM tensor group {base:?} is missing {k}"));
+        let (codes, codebooks, scales) = (take("codes")?, take("codebooks")?, take("scales")?);
+        if codes.shape.len() != 3 || !matches!(codes.dtype.as_str(), "I8" | "I16") {
+            return Err(format!("{}: AQLM codes must be an I8 or I16 tensor of rank 3", codes.name));
+        }
+        let (out_groups, in_groups) = (codes.shape[0] as usize, codes.shape[1] as usize);
+        if codes.shape[2] as usize != num_codebooks {
+            return Err(format!("{}: {} codebooks per group, the configuration declares {num_codebooks}", codes.name, codes.shape[2]));
+        }
+        let d = Aqlm::new(codes.payload.clone(), codes.dtype == "I16", floats(&codebooks)?, floats(&scales)?, nbits, num_codebooks, out_group, in_group, out_groups, in_groups)
+            .map_err(|e| format!("{base}: {e}"))?;
+        let (rows, cols) = (out_groups * out_group, in_groups * in_group);
+        let mapped = map(&format!("{base}.weight"))?.ok_or_else(|| format!("packed tensor {base:?} maps to a skipped tensor"))?;
+        packed.push((mapped, crate::packed_quant::PackedData::Dyn(Arc::new(d)), vec![rows as u64, cols as u64], codes.payload));
+    }
+    if packed.is_empty() {
+        return Err("quantization_config declares AQLM but no codes/codebooks/scales groups were found".into());
+    }
+    Ok((dense, packed))
+}
+
 // ---------------------------------------------------------------- compressed-tensors with zero points / activation order
 
 /// `compressed-tensors` integer weights that the symmetric reader (`symint.rs`) does not cover: asymmetric zero points
@@ -970,6 +1100,24 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, 3, "4-bit grouped, 4-bit channel-wise, 8-bit grouped");
+    }
+
+    #[test]
+    fn aqlm_matches_the_library() {
+        let cases: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/quant/cases.json")).unwrap()).unwrap();
+        let mut seen = 0;
+        for (name, meta) in cases.as_object().unwrap() {
+            if meta["format"] != "aqlm" {
+                continue;
+            }
+            let (tensors, expected) = fixture(name);
+            let get = |k: &str| meta[k].as_u64().unwrap() as usize;
+            let (dense, packed) = split_aqlm(tensors, get("nbits"), get("num_codebooks"), get("out_group_size"), get("in_group_size"), &identity).unwrap();
+            assert!(dense.is_empty(), "{name}");
+            assert_close(name, &decode_all(&packed[0]), &expected, 1e-6);
+            seen += 1;
+        }
+        assert_eq!(seen, 2, "8-bit codes in two codebooks and 12-bit codes with output groups");
     }
 
     #[test]

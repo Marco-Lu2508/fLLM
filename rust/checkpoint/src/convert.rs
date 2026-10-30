@@ -148,6 +148,7 @@ pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
         Quantization::Mxfp4 | Quantization::CtMxfp4 => "mxfp4",
         Quantization::Bnb => "bitsandbytes",
         Quantization::GptqBits { .. } | Quantization::GptqMarlin { .. } => "gptq",
+        Quantization::Aqlm { .. } => "aqlm",
         Quantization::Mlx => "mlx",
         Quantization::Bitnet => "bitnet",
     }
@@ -1552,6 +1553,8 @@ pub(crate) enum Quantization {
     GptqBits { bits: u64, group: u64, v2: bool },
     /// GPTQ-Marlin / IST-DASLab Marlin repacked symmetric weights (4 or 8 bits); read back to plain values, expanded to F16.
     GptqMarlin { bits: u64, group: i64 },
+    /// AQLM additive quantization (codes and codebooks per linear); expanded to F16.
+    Aqlm { nbits: u64, num_codebooks: u64, out_group: u64, in_group: u64 },
     /// MLX affine quantization (`quantization: {bits, group_size}` in config.json); expanded to F16.
     Mlx,
     /// Hugging Face `bitnet` (BitNet b1.58): `uint8` weights with four ternary codes per byte and a `weight_scale`; expanded to F16.
@@ -1801,6 +1804,15 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
             }
             Ok(Quantization::Bnb)
         }
+        "aqlm" => {
+            let get = |k: &str| q.get(k).and_then(Value::as_u64).filter(|&v| v > 0).ok_or_else(|| format!("AQLM quantization_config requires {k}"));
+            Ok(Quantization::Aqlm {
+                nbits: get("nbits_per_codebook")?,
+                num_codebooks: get("num_codebooks")?,
+                out_group: get("out_group_size")?,
+                in_group: get("in_group_size")?,
+            })
+        }
         "compressed-tensors" => compressed_tensors(q),
         "bitnet" => Ok(Quantization::Bitnet),
         "modelopt" => {
@@ -1825,7 +1837,7 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
         }
         other => Err(format!(
             "unsupported quantization_config quant_method {other:?} (supported: gptq, awq, auto-round, fp8, fbgemm_fp8, mxfp4, bitsandbytes, bitnet, compressed-tensors, modelopt NVFP4/FP8, \
-             MLX affine, exl2, exl3); {}",
+             aqlm, MLX affine/mxfp4/nvfp4/mxfp8, exl2, exl3); {}",
             unsupported_hint(other)
         )),
     }
@@ -1837,7 +1849,7 @@ fn unsupported_hint(method: &str) -> &'static str {
         "hqq" => "HQQ: dequantize with the hqq library (model.dequantize()) and save as safetensors, or use the original weights",
         "torchao" => "torchao checkpoints are pickled torch tensor subclasses: load the model with torchao, dequantize, save as safetensors, or use the original weights",
         "quark" | "quark-fp8" => "AMD Quark: export the model to GPTQ/AWQ/compressed-tensors/ModelOpt format with Quark, or use the original weights",
-        "eetq" | "aqlm" | "quip#" | "quipsharp" | "spqr" | "vptq" | "higgs" | "fp_quant" | "fine-grained-fp8" | "auto-round" | "autoround" | "gptqmodel" => {
+        "eetq" | "quip#" | "quipsharp" | "spqr" | "vptq" | "higgs" | "fp_quant" | "fine-grained-fp8" | "auto-round" | "autoround" | "gptqmodel" => {
             "this method has no reader; use the original (unquantized) weights or a GPTQ/AWQ/compressed-tensors/bitsandbytes/MLX export of the model"
         }
         _ => "use the original weights or a repository in one of the supported formats",
@@ -2144,6 +2156,9 @@ pub(crate) fn split_packed_cfg(
     use std::collections::BTreeMap;
     if quant == Quantization::Mlx {
         return crate::dequant_bits::split_mlx(all, mlx_config, map);
+    }
+    if let Quantization::Aqlm { nbits, num_codebooks, out_group, in_group } = quant {
+        return crate::dequant_bits::split_aqlm(all, nbits as usize, num_codebooks as usize, out_group as usize, in_group as usize, map);
     }
     if let Quantization::GptqMarlin { bits, group } = quant {
         return crate::dequant_bits::split_gptq_marlin(all, bits as usize, group, map);

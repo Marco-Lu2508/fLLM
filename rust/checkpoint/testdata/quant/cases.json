@@ -1,4 +1,22 @@
 {
+ "aqlm_1x12_og2": {
+  "format": "aqlm",
+  "in_features": 32,
+  "in_group_size": 4,
+  "nbits": 12,
+  "num_codebooks": 1,
+  "out_features": 8,
+  "out_group_size": 2
+ },
+ "aqlm_2x8": {
+  "format": "aqlm",
+  "in_features": 64,
+  "in_group_size": 8,
+  "nbits": 8,
+  "num_codebooks": 2,
+  "out_features": 16,
+  "out_group_size": 1
+ },
  "bnb_fp4_bs128": {
   "blocksize": 128,
   "double_quant": false,
