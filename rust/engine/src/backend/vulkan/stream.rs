@@ -853,7 +853,7 @@ impl Stream for VulkanStream {
             return self.attention_on_cpu(out, q, kv, block_tables, lengths, layer_idx, params);
         }
         let (layout, keys, values) = self.kv_windows(kv, layer_idx)?;
-        let plans = plan_attention(&layout, params, block_tables, lengths, &AttentionTuning::for_device(self.sh.caps().max_workgroup_invocations))?;
+        let plans = plan_attention(&layout, params, block_tables, lengths, &AttentionTuning::for_device(self.sh.caps().max_workgroup_invocations).with_coop_prefill(&self.sh.caps_like()))?;
         self.run_plans(
             &plans,
             &[

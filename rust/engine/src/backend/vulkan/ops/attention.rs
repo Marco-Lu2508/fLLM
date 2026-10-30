@@ -188,6 +188,8 @@ pub struct AttentionTuning {
     /// Query rows per workgroup of the prompt kernel: [`PREFILL_ROWS`] (128 invocations) or [`PREFILL_ROWS_WIDE`] (512 invocations, the
     /// `_r64` variants), see [`AttentionTuning::for_device`].
     pub prefill_rows: usize,
+    /// The device runs the cooperative-matrix prompt kernel (`attn_prefill_cm_d*`: 64 rows per workgroup, f16 cache, key = value width 64 or 128).
+    pub coop_prefill: bool,
 }
 
 impl Default for AttentionTuning {
@@ -199,6 +201,7 @@ impl Default for AttentionTuning {
             use_prefill_kernel: true,
             prefill_min_rows: 4,
             prefill_rows: PREFILL_ROWS,
+            coop_prefill: false,
         }
     }
 }
@@ -210,6 +213,14 @@ impl AttentionTuning {
         let narrow = *NARROW.get_or_init(|| std::env::var("FLLM_VK_ATTN_ROWS").is_ok_and(|v| v.trim() == "16"));
         let wide = !narrow && max_workgroup as usize >= 8 * PREFILL_ROWS_WIDE;
         Self { prefill_rows: if wide { PREFILL_ROWS_WIDE } else { PREFILL_ROWS }, ..Self::default() }
+    }
+
+    /// The prompt kernel on cooperative matrices where the device has them with 32-wide subgroups (NVIDIA); `FLLM_VK_ATTN_COOP=0` keeps the scalar kernel.
+    pub fn with_coop_prefill(self, caps: &crate::backend::vulkan::weights::plan::VkCapsLike) -> Self {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let off = *OFF.get_or_init(|| std::env::var("FLLM_VK_ATTN_COOP").is_ok_and(|v| matches!(v.trim(), "0" | "off")));
+        let ok = !off && !crate::backend::vulkan::backend::is_exact_math() && caps.coop_matrix && caps.fp16 && caps.vendor == 0x10de && caps.subgroup_size == 32 && caps.max_workgroup >= 128 && caps.max_shared >= 40 * 1024;
+        Self { coop_prefill: ok && self.prefill_rows == PREFILL_ROWS_WIDE, ..self }
     }
 }
 
@@ -508,6 +519,16 @@ impl Common<'_> {
     fn prefill_plan(&self, first: usize, end: usize) -> Result<OpPlan, BackendError> {
         let p = self.params;
         let wide = self.tuning.prefill_rows == PREFILL_ROWS_WIDE;
+        let cm = if self.tuning.coop_prefill && wide && !self.is_q8() && p.head_dim == p.value_dim {
+            match p.head_dim {
+                128 => Some("attn_prefill_cm_d128"),
+                64 => Some("attn_prefill_cm_d64"),
+                _ => None,
+            }
+            .filter(|n| crate::backend::vulkan::shaders::SHADERS.iter().any(|(s, _)| s == n))
+        } else {
+            None
+        };
         let name = match (self.is_q8(), p.value_dim, wide) {
             (false, 0..=128, false) => "attn_prefill_f16_d128",
             (false, 129..=256, false) => "attn_prefill_f16_d256",
@@ -522,6 +543,7 @@ impl Common<'_> {
             (true, 129..=256, true) => "attn_prefill_q8_d256_r64",
             (true, _, true) => "attn_prefill_q8_d512_r64",
         };
+        let name = cm.unwrap_or(name);
         let push = self.cache_push(
             self.head_push()
                 .u("rows_total", self.rows)

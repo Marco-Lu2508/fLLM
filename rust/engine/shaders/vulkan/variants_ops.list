@@ -82,6 +82,9 @@ attn_prefill_f16_d512_r64 attn_prefill.comp -DKV_Q8=0 -DDVMAX=512 -DBR=64
 attn_prefill_q8_d128_r64 attn_prefill.comp -DKV_Q8=1 -DDVMAX=128 -DBR=64
 attn_prefill_q8_d256_r64 attn_prefill.comp -DKV_Q8=1 -DDVMAX=256 -DBR=64
 attn_prefill_q8_d512_r64 attn_prefill.comp -DKV_Q8=1 -DDVMAX=512 -DBR=64
+# the same on cooperative matrices (NVIDIA): f16 cache, key width = value width DK
+attn_prefill_cm_d128 attn_prefill_cm.comp -DDK=128
+attn_prefill_cm_d64 attn_prefill_cm.comp -DDK=64
 
 # Gated DeltaNet recurrence per key width HK (value width is a run-time parameter, <= 128)
 delta_rec_hk32 delta_rec.comp -DHK=32

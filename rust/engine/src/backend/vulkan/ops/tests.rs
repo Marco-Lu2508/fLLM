@@ -1049,6 +1049,24 @@ fn sample_plans() -> Vec<OpPlan> {
             );
             let wide = AttentionTuning { prefill_rows: PREFILL_ROWS_WIDE, ..AttentionTuning::default() };
             v.extend(plan_attention(&kv, &params, &t, &lengths, &wide).unwrap());
+            // the cooperative-matrix prompt kernel (f16 cache, key width = value width 64)
+            let coop = AttentionTuning { coop_prefill: true, ..wide };
+            v.extend(plan_attention(&kv, &params, &t, &lengths, &coop).unwrap());
+        }
+        if kind == 1 {
+            // ... and the same with width 128
+            let kv = kv_layout(kind, 2, 128, 128, 16, 256);
+            let params = attn_params(8, 2, 128, 128, 16, 128);
+            let mut lengths = vec![2000i64];
+            lengths.extend(20..40);
+            let mut t = vec![0i64; lengths.len() * 128];
+            for r in 1..lengths.len() {
+                for b in 0..128 {
+                    t[r * 128 + b] = b as i64;
+                }
+            }
+            let coop = AttentionTuning { prefill_rows: PREFILL_ROWS_WIDE, coop_prefill: true, ..AttentionTuning::default() };
+            v.extend(plan_attention(&kv, &params, &t, &lengths, &coop).unwrap());
         }
     }
     let shape = delta_shape(2, 4, 64, 64, 4);
