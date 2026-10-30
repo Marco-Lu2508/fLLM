@@ -52,6 +52,38 @@
       } catch { /* the server is restarting: the next call asks again */ }
     }
 
+    /** The model menu in the header lists the downloaded models too, each with a button that loads it (the same steps as on the Models page). */
+    async function fillModelMenu() {
+      if (state.modelsHub) paintModelMenu(); // what was known the last time shows at once, the fresh list replaces it
+      try {
+        const res = await apiFetch('/api/studio/models');
+        if (!res.ok) return;
+        state.modelsHub = await res.json();
+      } catch { return; }
+      paintModelMenu();
+    }
+    function paintModelMenu() {
+      const hub = state.modelsHub || {};
+      const current = String(state.status?.model?.name || '').toLowerCase();
+      const rows = [
+        ...(hub.local || []).map((l) => ({ name: l.name, ref: l.path, key: l.name, size: l.size_bytes })),
+        ...(hub.cached || []).map((c) => ({ name: c.name, ref: c.name, key: baseName(c.path), size: c.size_bytes })),
+      ].filter((r) => !current || !String(r.name).toLowerCase().includes(current) && !current.includes(String(r.name).toLowerCase().replace(/\.gguf$/, '')));
+      $('modelDropdownMoreHead').style.display = rows.length ? '' : 'none';
+      $('modelDropdownMore').style.display = rows.length ? '' : 'none';
+      $('modelDropdownMore').innerHTML = rows.slice(0, 12).map((r) => `
+        <button class="nav-item" data-menu-load="${escapeHtml(r.ref)}" data-label="${escapeHtml(r.name)}" data-key="${escapeHtml(r.key)}" title="Restart the server with this model">
+          <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${escapeHtml(r.name)}</span>
+          <span class="quant-chip" style="margin-left:auto;">${formatBytes(r.size)}</span>
+        </button>`).join('');
+    }
+    document.addEventListener('click', (e) => {
+      const b = e.target.closest && e.target.closest('[data-menu-load]');
+      if (!b) return;
+      $('modelDropdownMenu').classList.remove('open');
+      loadModel(b.dataset.menuLoad, b.dataset.label, b.dataset.key);
+    });
+
     /** Whether a model of `bytes` is likely to run in the memory that is free right now. */
     function fitBadge(bytes) {
       const free = Number(state.modelsHub?.available_memory_bytes || 0);

@@ -35,7 +35,7 @@
     });
 
     // model menu
-    $('btnModelDropdown').addEventListener('click', (e) => { e.stopPropagation(); $('presetMenu').classList.remove('open'); $('modelDropdownMenu').classList.toggle('open'); });
+    $('btnModelDropdown').addEventListener('click', (e) => { e.stopPropagation(); $('presetMenu').classList.remove('open'); const open = $('modelDropdownMenu').classList.toggle('open'); if (open) fillModelMenu(); });
     $('modelDropdownItems').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-pick-model]');
       if (!btn) return;
