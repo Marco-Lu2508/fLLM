@@ -6,6 +6,8 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-10-30
+
 ### Added
 - **Vulkan: the faster prompt matrix shader is chosen per device.** The first prompt-sized projection times a 4096 x 4096 Q4_K product with the cooperative-matrix shaders and with the int8 dot-product shaders (a few milliseconds) and keeps the faster one: cooperative matrices on an RTX 2000 Ada (1.2 against 3.4 ms), the int8 dot product on a Radeon 840M (10.4 against 14.0 ms; prompt 176 -> 214 tok/s). `FLLM_VULKAN_NO_TUNE=1` keeps the old order. On AMD two matrix-vector rows per work group instead of one (+12 % decode on the 840M).
 - **The ROCm/HIP backend ran on an AMD GPU for the first time** (Radeon 840M, `gfx1153`, Ubuntu 26.04 with ROCm 7.1 from the distribution): `selftest-gpu --device hip:0` 821 checks ok, 13 failed (int8 W8A8 against an exact reference, one MoE case), 470 skipped; the text of dense models equals the CPU's. Kernels that exist for NVIDIA only (device MoE routing, GPU sampling, latent MLA, encoder attention) are now reported as unsupported, which callers answer with their host path and the self test skips, instead of as a failed driver call. MoE models and host-streamed layers still fail on this APU with "invalid argument" in a copy.

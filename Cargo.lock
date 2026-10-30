@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "fllm-checkpoint"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "fllm-gguf-probe",
  "half",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "fllm-engine"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "ahash",
  "ash",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "fllm-gguf-probe"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "half",
  "memmap2",
