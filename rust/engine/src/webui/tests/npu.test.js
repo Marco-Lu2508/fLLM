@@ -10,7 +10,7 @@ const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in npu.js');
 const L = new Function(`${src.slice(begin, end)}
-return { npuCardModel, npuProgressModel, deviceChoices, runningDevice, NPU_WARNING };`)();
+return { npuCardModel, npuProgressModel, deviceChoices, runningDevice, deviceMemory, deviceRole, NPU_WARNING };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -182,6 +182,26 @@ test('without a hardware report or with a processor choice the footer shows the 
   assert.strictEqual(L.runningDevice('auto', null, 'avx2').label, 'CPU · avx2');
   assert.strictEqual(L.runningDevice(undefined, { auto_choice: 'cpu', devices: [] }, '').label, 'CPU · simd');
   assert.strictEqual(L.runningDevice('vulkan:3', gpuHw, 'x').label, 'vulkan:3 · Vulkan');
+});
+
+test('the memory bar of a device: size known or not, and the warning levels', () => {
+  assert.deepStrictEqual(L.deviceMemory({ total_memory_bytes: 0, free_memory_bytes: 0 }), { known: false, pct: 0, level: 'ok' });
+  assert.deepStrictEqual(L.deviceMemory(null), { known: false, pct: 0, level: 'ok' });
+  assert.deepStrictEqual(L.deviceMemory({ total_memory_bytes: 100, free_memory_bytes: 60 }), { known: true, pct: 40, level: 'ok' });
+  assert.strictEqual(L.deviceMemory({ total_memory_bytes: 100, free_memory_bytes: 20 }).level, 'warn');
+  assert.strictEqual(L.deviceMemory({ total_memory_bytes: 100, free_memory_bytes: 5 }).level, 'high');
+  assert.strictEqual(L.deviceMemory({ total_memory_bytes: 100, free_memory_bytes: 500 }).pct, 0);
+});
+
+test('which device runs the model: the chosen one, or the automatic choice', () => {
+  const gpu = { id: 'vulkan:0' };
+  const cpu = { id: 'cpu' };
+  assert.strictEqual(L.deviceRole(gpu, 'auto', 'vulkan:0', true), 'running');
+  assert.strictEqual(L.deviceRole(cpu, 'auto', 'vulkan:0', true), '');
+  assert.strictEqual(L.deviceRole(cpu, 'cpu', 'vulkan:0', true), 'running');
+  assert.strictEqual(L.deviceRole(gpu, 'cpu', 'vulkan:0', true), '');
+  assert.strictEqual(L.deviceRole(gpu, 'auto', 'vulkan:0', false), 'auto');
+  assert.strictEqual(L.deviceRole(cpu, undefined, undefined, true), 'running');
 });
 
 console.log(`${n} tests passed`);

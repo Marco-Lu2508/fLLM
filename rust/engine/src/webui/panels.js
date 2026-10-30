@@ -237,23 +237,28 @@
           $('hwChoiceText').textContent = chosen
             ? `With the automatic choice fLLM runs models on: ${chosen.name} (${({ cpu: 'the processor', vulkan: 'Vulkan', hip: 'AMD ROCm', cuda: 'NVIDIA CUDA', metal: 'Metal', dx12: 'DirectX 12' })[String(chosen.backend).toLowerCase()] || chosen.backend}${chosen.id.startsWith('wgpu') ? ', generic' : ''}). The processor is the fallback.`
             : 'The processor runs the models: no usable graphics device was found.';
-          $('hwDevicesGrid').innerHTML = usable.map((d) => `
-            <div class="device-card">
+          const loadDev = String(state.status?.model?.load_options?.device || 'auto').toLowerCase();
+          $('hwDevicesGrid').innerHTML = usable.map((d) => {
+            const role = deviceRole(d, loadDev, hw.auto_choice, !state.setup);
+            const mem = deviceMemory(d);
+            return `
+            <div class="device-card${role === 'running' ? ' is-running' : ''}">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
                 <div>
                   <div style="font-weight:600;color:var(--foreground);">${escapeHtml(d.name)}</div>
                   <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                    ${d.id === hw.auto_choice ? '<span class="quant-chip" style="color:var(--primary);">in use (automatic choice)</span>' : ''}
+                    ${role === 'running' ? `<span class="quant-chip role-chip">runs the model${loadDev === 'auto' ? ' (automatic choice)' : ''}</span>` : (role === 'auto' ? '<span class="quant-chip role-chip">automatic choice</span>' : '')}
                     <span class="backend-chip"><span class="backend-chip-dot"></span>${escapeHtml(({ cpu: 'Processor', cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12' })[String(d.backend).toLowerCase()] || d.backend)}</span>
                     ${d.description ? `<span class="quant-chip">${escapeHtml(String(d.description).replace(/\bthreads\b/, 'threads'))}</span>` : ''}
                     ${d.unified_memory ? '<span class="quant-chip">shares system memory</span>' : ''}
                   </div>
                   ${d.notes ? `<details class="device-notes"><summary>Technical notes</summary><div class="app-item-desc">${escapeHtml(d.notes)}</div></details>` : ''}
                 </div>
-                <span class="mono tabular" style="font-size:12px;white-space:nowrap;">${formatBytes(d.free_memory_bytes)} free of ${formatBytes(d.total_memory_bytes)}</span>
+                <span class="mono tabular" style="font-size:12px;white-space:nowrap;">${mem.known ? `${formatBytes(d.free_memory_bytes)} free of ${formatBytes(d.total_memory_bytes)}` : 'memory not reported'}</span>
               </div>
+              ${mem.known ? `<div class="mem-bar is-${mem.level}" role="img" aria-label="${mem.pct}% of the memory is in use"><i style="width:${Math.max(2, mem.pct)}%"></i></div>` : ''}
             </div>
-          `).join('');
+          `; }).join('');
         }
         if (slotsRes.ok) {
           const sData = await slotsRes.json();

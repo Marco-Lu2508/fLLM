@@ -145,6 +145,27 @@
       const title = want === 'auto' ? `${dev ? dev.name : id}: the automatic choice (${id}); layers that do not fit run on the processor.` : `${dev ? dev.name : id}: chosen in the load options (${id}).`;
       return { label, title, auto: want === 'auto' };
     }
+
+    /** Memory use of a device for the bar on its card: { known, pct (0-100), level: ok | warn | high }. A device without a size has no bar. */
+    function deviceMemory(d) {
+      const total = Number(d && d.total_memory_bytes) || 0;
+      const free = Number(d && d.free_memory_bytes) || 0;
+      if (total <= 0) return { known: false, pct: 0, level: 'ok' };
+      const pct = Math.round(Math.min(1, Math.max(0, (total - free) / total)) * 100);
+      return { known: true, pct, level: pct >= 90 ? 'high' : (pct >= 75 ? 'warn' : 'ok') };
+    }
+
+    /**
+     * What a device does for the loaded model: 'running' (the model runs on it), 'auto' (no model is loaded; the automatic choice would use
+     * it) or ''. `loadDevice` is the --device value of the loaded model ("auto" when the server chose).
+     */
+    function deviceRole(d, loadDevice, autoChoice, modelLoaded) {
+      const id = String(d && d.id || '').toLowerCase();
+      const want = String(loadDevice || 'auto').toLowerCase();
+      const target = want === 'auto' ? String(autoChoice || 'cpu').toLowerCase() : want;
+      if (id !== target) return '';
+      return modelLoaded ? 'running' : 'auto';
+    }
     // @pure-end
 
     // ---- the card ------------------------------------------------------------------------------------------------------------

@@ -813,3 +813,18 @@ html.dark .btn-destructive { color: #1c0806; }
   .settings-pane [style*="display:flex"] { flex-wrap: wrap; }
   .settings-pane .btn { max-width: 100%; }
 }
+
+@media (max-width: 760px) {
+  .header-left > span { white-space: nowrap; flex: none; }
+  #surface-hub .header-left { flex: none; overflow: visible; }
+  #surface-hub .header-right { flex: 1 1 auto; min-width: 0; }
+  #hubSearchInput { width: auto; flex: 1 1 auto; min-width: 0; }
+}
+
+/* ---- hardware: the device that runs the model, memory bars ---------------------------------------- */
+.device-card.is-running { border-color: color-mix(in oklab, var(--primary) 55%, var(--border)); box-shadow: inset 3px 0 0 var(--primary); }
+.role-chip { color: var(--primary); border-color: color-mix(in oklab, var(--primary) 45%, var(--border)); }
+.mem-bar { height: 5px; margin-top: 12px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.mem-bar > i { display: block; height: 100%; border-radius: 3px; background: var(--ok); transition: width var(--slow); }
+.mem-bar.is-warn > i { background: var(--warn); }
+.mem-bar.is-high > i { background: var(--danger); }
