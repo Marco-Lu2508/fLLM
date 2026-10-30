@@ -760,7 +760,8 @@ impl ModelConfig {
             attention_chunk: uint(meta, a, "attention.chunk_size"),
             attn_gate: if is_k2(a) {
                 AttnGate::Softplus(std::f32::consts::LN_2)
-            } else if a == "laguna" {
+            } else if a == "laguna" && !key(meta, a, "attention.gate_sigmoid").and_then(Value::as_bool).unwrap_or(false) {
+                // Laguna gates with softplus; Step-3.5 files (same layers) say `attention.gate_sigmoid`
                 AttnGate::Softplus(1.0)
             } else {
                 AttnGate::Sigmoid

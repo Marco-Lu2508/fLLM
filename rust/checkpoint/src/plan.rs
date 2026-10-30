@@ -760,6 +760,13 @@ impl Plan {
         if matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
             return crate::kimi_linear::plan(cfg);
         }
+        if matches!(raw.as_str(), "step3p5" | "step3p7_text") {
+            // Step-3.5 / 3.7 text: the Laguna layer with `weight - 1` norms
+            let mut plan = Self::from_config(&crate::step3p5::config(cfg)?)?;
+            plan.norm_add = 1.0;
+            plan.meta.push((format!("{}.attention.gate_sigmoid", plan.arch), Meta::Bool(true)));
+            return Ok(plan);
+        }
         if let Some(plan) = crate::classic::plan_for(&raw, cfg)? {
             return Ok(plan);
         }
@@ -825,7 +832,6 @@ impl Plan {
                         | "qwen3_5_moe_text"
                         | "cohere2_moe"
                         | "xverse_moe"
-                        | "xverse"
                         | "solar_open"
                         | "hy_v3"
                         | "exaone_moe"
@@ -853,7 +859,7 @@ impl Plan {
                         | "param2_moe"
                         | "ling_moe"
                         | "jamba"
-                ) || (raw == "deepseek" && moe);
+                ) || (matches!(raw.as_str(), "deepseek" | "xverse") && moe);
         if raw != "granitemoehybrid" && raw != "k2_horizon" && moe != known_moe {
             return Err(format!(
                 "{raw}: expert configuration does not match the architecture"
@@ -1943,7 +1949,7 @@ impl Plan {
                 _ => {}
             }
         }
-        if suf == router || matches!(suf, "mlp.gate.wg.weight" | "mlp.router.gate.weight" | "mlp.router.weight") {
+        if suf == router || matches!(suf, "mlp.gate.wg.weight" | "mlp.router.gate.weight" | "mlp.router.weight" | "moe.gate.weight") {
             return plain("ffn_gate_inp.weight");
         }
         // experts stored as two fused tensors (newer transformers layouts)
@@ -1953,6 +1959,19 @@ impl Plan {
                 part: part.to_owned(),
             })
         };
+        // Step-3.5 Hub files: stacked experts `moe.{gate,up,down}_proj.weight` ([E, F, H], [E, F, H], [E, H, F]) and `share_expert.*`
+        if self.arch == "laguna" {
+            match suf {
+                "moe.router_bias" => return plain("exp_probs_b.bias"),
+                "moe.gate_proj.weight" => return fused("experts_gate"),
+                "moe.up_proj.weight" => return fused("experts_up"),
+                "moe.down_proj.weight" => return fused("experts_output"),
+                "share_expert.gate_proj.weight" => return plain("ffn_gate_shexp.weight"),
+                "share_expert.up_proj.weight" => return plain("ffn_up_shexp.weight"),
+                "share_expert.down_proj.weight" => return plain("ffn_down_shexp.weight"),
+                _ => {}
+            }
+        }
         match suf {
             "mlp.experts.gate_up_proj" => return fused("experts_input"),
             "mlp.experts.down_proj" => return fused("experts_output"),
@@ -2429,6 +2448,8 @@ impl Plan {
             || n.starts_with("multi_modal_projector.")
             || n.starts_with("model.multi_modal_projector.")
             || n.starts_with("model.vision_")
+            || n.starts_with("vision_model.")
+            || n.starts_with("vit_large_projector.")
         {
             return Ok(Mapped::Skip);
         }
@@ -2540,6 +2561,10 @@ impl Plan {
                 .map_err(|_| format!("invalid layer index in tensor {n:?}"))?;
             if suf.starts_with("self_attn.indexer.") {
                 // DeepSeek sparse attention indexer (DeepSeek-V3.2, GLM-5), also on the appended NextN block: attention runs dense
+                return Ok(Mapped::Skip);
+            }
+            if idx >= self.layers && self.arch == "laguna" {
+                // the multi-token-prediction blocks of Step-3.5 are not imported
                 return Ok(Mapped::Skip);
             }
             if idx >= self.layers {

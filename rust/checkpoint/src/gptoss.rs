@@ -286,6 +286,17 @@ pub(crate) fn split_chunked(
                     ));
                 }
             }
+            "experts_gate" | "experts_up" => {
+                // separate stacked tensors `[E, F, H]` (Step-3.5 Hub files)
+                let (e, f, h) = (
+                    t.shape[0] as usize,
+                    t.shape[1] as usize,
+                    t.shape[2] as usize,
+                );
+                let target = if part == "experts_gate" { "ffn_gate_exps.weight" } else { "ffn_up_exps.weight" };
+                let bytes = rows_of(0, e * f, h)?;
+                result.push(out(name(target), vec![h as u64, f as u64, e as u64], &dtype, bytes));
+            }
             "experts_output" => {
                 let (e, h, f) = (
                     t.shape[0] as usize,

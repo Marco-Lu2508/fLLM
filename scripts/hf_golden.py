@@ -960,6 +960,22 @@ def config_for(arch: str, vocab: int):
             layer_types=["linear_attention", "linear_attention", "full_attention", "linear_attention"],
             mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
         ),
+        "step3p5": lambda: T.Step3p7Config(
+            text_config=dict(
+                vocab_size=vocab, hidden_size=64, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+                intermediate_size=128, moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, share_expert_dim=48,
+                moe_router_scaling_factor=2.0, rms_norm_eps=1e-5, max_position_embeddings=256, sliding_window=5,
+                num_sliding_attention_heads=6, bos_token_id=1, eos_token_id=2, pad_token_id=3, tie_word_embeddings=False,
+                layer_types=["full_attention", "sliding_attention", "sliding_attention", "full_attention"],
+                mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
+                rope_parameters={
+                    "full_attention": {"rope_type": "default", "rope_theta": 500000.0, "partial_rotary_factor": 0.5},
+                    "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0},
+                },
+            ),
+            vision_config=dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=2, image_size=28, patch_size=14),
+            tie_word_embeddings=False,
+        ),
         "olmo2": lambda: T.Olmo2Config(**common, **dense, rms_norm_eps=1e-6, rope_theta=500000.0),
         "qwen": lambda: _qwen_config(vocab),
         "baichuan": lambda: _baichuan_config(vocab),

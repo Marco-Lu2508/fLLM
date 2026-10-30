@@ -30,6 +30,7 @@ mod quantize;
 mod requant;
 pub mod safetensors;
 mod st;
+mod step3p5;
 mod symint;
 mod tokenizer_import;
 mod torch_zip;
