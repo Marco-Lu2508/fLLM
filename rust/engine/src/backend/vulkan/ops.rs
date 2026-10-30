@@ -601,7 +601,6 @@ pub fn plan_scale(count: usize, factor: f32) -> Result<OpPlan, BackendError> {
     if count == 0 {
         return Err(invalid("scale of an empty tensor"));
     }
-    plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x").read_opt("gate", false))
     plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x").dummy("gate", Access::Read))
 }
 
