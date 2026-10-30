@@ -34,7 +34,10 @@ def complete(fllm: str, gguf: str, device: str, port: int, tokens: int) -> str:
                 time.sleep(1)
         return "FAILED: no response"
     finally:
-        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         proc.wait()
 
 
@@ -45,7 +48,7 @@ def main() -> int:
     ap.add_argument("--tokens", type=int, default=12)
     ap.add_argument("models", nargs="+")
     args = ap.parse_args()
-    port = 18700
+    port = 19000 + (os.getpid() % 500) * 2
     for m in args.models:
         cpu = complete(args.fllm, m, "cpu", port, args.tokens)
         gpu = complete(args.fllm, m, args.device, port + 1, args.tokens)
