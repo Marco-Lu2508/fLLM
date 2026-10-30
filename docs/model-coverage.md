@@ -35,7 +35,7 @@ Verified column:
 | Ministral 8B (`ministral`, Mistral with a sliding/full pattern) | safetensors | D | D | D | D | D | T 1.7e-4 (new) |
 | Ministral 3 / Mistral Medium 3.x (`ministral3`) | safetensors, GGUF | D | D | D | D | D | T 1.9e-4 |
 | Helium (`helium`, interleaved rotary pairs) | safetensors | D | D | D | D | D | T 1.8e-4 (new) |
-| BitNet b1.58 (`bitnet`: relu2, attention and FFN sub-norms) | safetensors (dense and HF-packed ternary) | D | H (sub-norm layers on the host) | H | H | H | T 2.7e-4 dense, 2.4e-4 packed (new) |
+| BitNet b1.58 (`bitnet`: relu2, attention and FFN sub-norms) | safetensors (dense and HF-packed ternary), GGUF `bitnet` and the BitNet fork's `bitnet-b1.58` (I2_S) | D | D | D | D | H (sub-norms use the ordinary RMS norm; not run on Metal) | T 2.7e-4 dense, 2.4e-4 packed; R: the real I2_S GGUF against transformers 5.2e-3 (see below) |
 | Granite 3/4 dense, Granite SWA (`granite`, `granite_swa`) | safetensors, GGUF | D | D | D | D | D | T 8e-5; `granite_swa` 8e-5 with a generic probe config |
 | Qwen 1 (`qwen`), Qwen2/2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen-VL text parts (`qwen2_vl_text`, `qwen3_vl_text`) | safetensors, GGUF | D | D | D | D | D | T 7e-5 / 1.5e-4 / 1.6e-4; T+G for Qwen3 |
 | Gemma 1/2/3, VaultGemma (`gemma`, `gemma2`, `gemma3_text`, `vaultgemma`) | safetensors, GGUF | D | D | D | D | D | T 2.2e-4 / 2.4e-4 / 4.6e-4 / 4.9e-4 |
@@ -52,11 +52,13 @@ Verified column:
 | gpt-oss (`gpt_oss`, sinks, clamped SwiGLU) | safetensors (MXFP4), GGUF | D | D | D | D | D | T 1.2e-4 |
 | Qwen2-MoE, Qwen3-MoE, Mellum (`qwen2_moe`, `qwen3_moe`, `mellum`) | safetensors, GGUF | D | D | D | D | D | T 1.3e-4 / 2.0e-4 / 1.9e-4 |
 | GLM-4.5/4.6/4.7 (`glm4_moe`), GLM-4.x-Flash (`glm4_moe_lite`), dots.llm1, ERNIE 4.5 MoE, Hunyuan MoE/Hy3, MiniMax-M2, EXAONE-MoE, AFMoE/Trinity, Solar-Open, Sarvam-MoE, GraniteMoE (+shared, SWA) | safetensors, GGUF | D | D | D | D | D | T 1.1e-4 .. 2.7e-4 |
-| Step-3.5-Flash / Step-3.7-Flash text (`step3p5`) | safetensors (Hub layout) | D | H (attention layers: per-head gate) | H | H | H | T 6.0e-4 (new; the real 196B checkpoint was not run) |
-| MiMo-V2-Flash (`mimo_v2_flash`: per-layer KV heads, sinks, value scale) | safetensors | D | H (attention layers: value scale) | H | H | H | T 2.7e-4 (new fixture; the real 309B checkpoint was not run) |
+| Step-3.5-Flash / Step-3.7-Flash text (`step3p5`) | safetensors (Hub layout); llama.cpp `step35` GGUFs are refused (clamped SwiGLU, scaled partial rotary factors) | D | D (per-head gate) | D | D | H (attention layers: per-head gate) | T 6.0e-4 (new; the real 196B checkpoint was not run). The clamped SwiGLU of the last layers (`swiglu_limits`) is not implemented |
+| MiMo-V2-Flash (`mimo_v2_flash`: per-layer KV heads, sinks, value scale) | safetensors, llama.cpp `mimo2` GGUF (alias) | D | D (value scale) | D | D | H (attention layers: value scale) | T 2.7e-4 (new fixture; the real 309B checkpoint was not run); the `mimo2` header of a real file was checked against the metadata keys, no such file was run |
 | DeepSeek V2/V3/R1, Kimi K2, Mistral Large 3 / Mistral 4, Youtu, Sarvam-MLA, MiniCPM3, Ling-2 (`deepseek_v2`, `deepseek_v3`, `kimi_k2`, `mistral4`, ...) | safetensors (also FP8 block), GGUF `deepseek2` | D | D | D (equal KV head count) / H | D | D | T 1.4e-4 .. 2.0e-4 |
 | DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`; GGUF `deepseek32`, `glm-dsa` by name) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 with `index_topk` above the sequence length; **T 1.7e-4 / 3.5e-4 with the indexer cutting 4 of 12 tokens** (`deepseek_v32_sparse`, `glm_moe_dsa_sparse`). The exact lightning-indexer selection runs on the CPU path; accelerators attend densely (exact up to `index_topk` tokens) unless `FLLM_DSA=exact` puts the layers on the host. No device kernel for the indexer |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | H (attention layers) | H | H | H | T 2.6e-4 |
+| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). **Dense attention:** the sparse-attention indexer is not run; that equals DSA while the context is at most `index_topk` (2048) and is approximate beyond (see Open gaps) |
+| Laguna (`laguna`, per-head attention gate) | safetensors | D | D | D | D | H (attention layers) | T 2.6e-4 |
 | K2 Horizon, G9v3 (`k2_horizon`, `g9v3`) | safetensors, GGUF | D | D | D | D | D | T 1.5e-4 .. 1.9e-4 (remote-code reference) |
 | Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | H | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
 | Kimi-Linear 48B-A3B (`kimi_linear`: KDA + latent attention without rope + MoE) | safetensors | D | D | D | H | D | T 8.2e-5 (new fixture; the KDA recurrence is also checked against `fla.ops.kda.naive` in `rust/engine/testdata`) |
@@ -127,8 +129,9 @@ logits were compared with `verify_checkpoint` (f32 KV cache) where noted.
 
 | Model | What it exercises | Result |
 | --- | --- | --- |
-| microsoft/bitnet-b1.58-2B-4T (packed uint8 ternary weights) | `quant_method: bitnet` reader, `bitnet` architecture with sub-norms, tied embeddings | logits of 19 positions against transformers on the unpacked weights (`scripts/unpack_bitnet.py`): relative 1.7e-4, arg-max equal everywhere. Greedy text is coherent ("Paris", counting); it matches transformers on the counting prompt and diverges after 4 to 38 characters on the other three (f16 KV cache; not examined further). The reference BitLinear's 8-bit activation rounding is applied by neither side |
-| kyutai/helium-1-2b | The Hub config of this model is plain `llama`, so it runs through the Llama path (the new `helium` model type is for transformers-native Helium configs only) | logits of 18 positions: relative 5.4e-4, arg-max equal; greedy text identical on two of four prompts, the other two diverge after 9 and 23 characters |
+| microsoft/bitnet-b1.58-2B-4T (packed uint8 ternary weights) | `quant_method: bitnet` reader, `bitnet` architecture with sub-norms, tied embeddings | logits of 19 positions against transformers on the unpacked weights (`scripts/unpack_bitnet.py`): relative 1.7e-4, arg-max equal everywhere. Greedy text: the first audit saw divergences after 4 to 38 characters and blamed the f16 KV cache. **That was a prompt bug, not numerics:** the converter ignored the BOS template of `tokenizer.json`, so fLLM prompted the model without BOS. With the fix, four of four continuations are identical to transformers with the f16 and with the f32 KV cache (`scripts/verify_kv_numerics.py`). The reference BitLinear's 8-bit activation rounding is applied by neither side |
+| microsoft/bitnet-b1.58-2B-4T-gguf (`ggml-model-i2_s.gguf`, architecture `bitnet-b1.58`, 1.19 GB, I2_S tensors) | the BitNet fork's GGUF layout, I2_S decoding (kept as exact Q8_0 blocks), neox rotary pairs | logits of 16 positions against transformers on the unpacked bf16 weights: relative 5.2e-3 (max abs 0.23 on a span of 45), arg-max equal everywhere. The difference is larger than for the safetensors path because the file keeps the f32 weight scale while the reference rounds it to bf16 (not isolated further). Greedy text: three of four continuations identical to transformers, the fourth differs after 48 characters (`is_prime(num)` against `is_prime(n)`). The decoded weights of four tensors of layer 0 agree with the unpacked reference up to that scale rounding (0.15 %), so the block layout is right |
+| kyutai/helium-1-2b | The Hub config of this model is plain `llama`, so it runs through the Llama path (the new `helium` model type is for transformers-native Helium configs only) | logits of 18 positions: relative 5.4e-4, arg-max equal. Greedy text: the first audit saw two of four prompts diverge. Cause: `config.json` names BOS id 0 while the tokenizer template puts `<s>` (id 1) in front; fLLM used 0. Fixed (the template wins over the configuration): four of four identical to transformers with the f16 and the f32 KV cache |
 | RWKV/RWKV7-Goose-World2.8-0.1B-HF (RWKV-7, 0.1B) | `rwkv7` converter (fla layout, bf16 weights) and the llama.cpp F16 GGUF of the same model (fused mixing vectors, `rwkv` tokenizer) | logits of 12 positions against `scripts/rwkv_reference.py` (float32 on the original weights): converted checkpoint relative 1.9e-6, llama.cpp F16 GGUF 2.4e-4, arg-max equal at every position; the GGUF completes "The Eiffel Tower is located in the city of" with " Paris, France. It is the tallest building in the world" on the CPU |
 | RWKV/v6-Finch-1B6-HF (RWKV-6, 1.6B) | `rwkv6` converter and the llama.cpp F16 GGUF (pre-scaled weights, `rescale_every_n_layers` 6) | 12 positions against the reference: converted checkpoint 1.8e-6, llama.cpp F16 GGUF 4.2e-4, arg-max equal; the reference itself is a transcription of the official recurrence, not the model's own remote code (that needs flash-linear-attention kernels) |
 | Qwen/Qwen3-VL-2B-Instruct, text only | `qwen3_vl_text` path | four of four continuations identical to transformers |
@@ -136,14 +139,23 @@ logits were compared with `verify_checkpoint` (f32 KV cache) where noted.
 
 Header-only checks (no weights downloaded) of what real repositories contain: Step-3.5-Flash Hub files use `moe.*` / `share_expert.*` names and
 stacked expert tensors, which the new reader handles (shapes and dtypes read from the safetensors headers); the AutoRound repositories
-store GPTQ tensors with zero points stored minus one, AutoRound-AWQ stores `qzeros` of all 8. llama.cpp's own GGUF architecture names
-`step35`, `mimo2`, `glm5-next` and `bitnet-b1.58` (with the `I2_S` tensor type) use other metadata and are **not** loaded; `deepseek2` and
-`kimi-linear` GGUF names are the same as fLLM's, but no such file was run.
+store GPTQ tensors with zero points stored minus one, AutoRound-AWQ stores `qzeros` of all 8.
+
+llama.cpp GGUF architecture names, checked on the headers of real files (`scripts/gguf_peek.py`, range requests, nothing downloaded except the BitNet file above):
+
+| GGUF architecture | State |
+| --- | --- |
+| `bitnet-b1.58` (BitNet fork, `I2_S`) | loads (alias of `bitnet`, neox rotary pairs, I2_S decoder); the real 2B file was run, see above |
+| `mimo2` (MiMo-V2(.6)-Flash) | loads as `mimo_v2` (same metadata keys and tensor names; the sliding-window pattern as 0/1 integers is accepted); only the header of `ggml-org/MiMo-V2.6-Flash-RL-GGUF` was read, the 160 GB model was not run |
+| `step35` (Step-3.5-Flash) | **refused with the reason**: the file clamps the SwiGLU of the experts on layers 43 and 44 (limit 7) and of the shared expert on layer 44 (limit 16), and has a `rope_freqs.weight` of 64 entries for the scaled partial rotary of the full-attention layers; neither exists in fLLM. Header of `ggml-org/Step-3.5-Flash-GGUF` read |
+| `glm5-next` (GLM-5.3-Flash) | **refused with the reason**: multi-stream residuals (`hyper_connection.*`), the sparse indexer and the KDA / latent hybrid (header of `unsloth/GLM-5.3-Flash-GGUF` read) |
+| `qwen3vl` | the text model loads (alias, earlier audit); the vision part of such files lives in a separate `clip` mmproj file (`qwen3vl_merger`, deepstack layers) that fLLM does not read |
+| `deepseek2`, `kimi-linear` | same names as fLLM's; no such file was run |
 
 ## Runs on accelerators (this audit)
 
-Only the greedy-completion smoke test `scripts/gpu_arch_smoke.py` ran the new architectures on an accelerator (tiny random models, CPU
-against the device, same text expected). Nothing else in this document claims a GPU result.
+Only the greedy-completion smoke test `scripts/gpu_arch_smoke.py`, `selftest-gpu` and `FLLM_LAYER_CHECK=1` ran the new architectures on an
+accelerator (tiny random models, CPU against the device, same text expected). Nothing else in this document claims a GPU result.
 
 Device: an NVIDIA RTX 2000 Ada Laptop GPU through the native Vulkan backend (`--device vulkan:1`, driver 595.99.02); CPU: the same machine's
 processor. Each row is one tiny random-weight model, 12 greedy tokens, the text from the device against the text from the CPU:
@@ -154,8 +166,24 @@ processor. Each row is one tiny random-weight model, 12 greedy tokens, the text 
 | MiMo-V2-Flash, Step-3.5, Laguna | **different text on the first run**: `FLLM_LAYER_CHECK=1` showed layer 0 of the device differing from the host reference by 1.7 to 2.5 times its rms (a stablelm, glm4, phi, olmoe, gemma2 control showed 0.001 to 0.003). Cause found by comparing intermediate sums: the device multiplied the attention output by a per-head gate element by element (Laguna, Step-3.5) and had no value scale (MiMo-V2). Those attention layers now run on the host (`layer_host_reason`); the same text as the CPU on the second run, together with BitNet |
 
 This shows the architectures load and run on that device and found one defect of the shared device path; it is not a performance or
-accuracy measurement. CUDA, HIP and Metal were not run in this audit, the Radeon 840M laptop was in use by another benchmark and was not
-touched, and Vulkan on an AMD GPU is untested for the new architectures.
+accuracy measurement.
+
+### Device operations for the per-head gate, the value scale and the sub-norms (2026-10-30)
+
+The host fallback was replaced by device operations (`head_gate_mul`, `scale_inplace`; the BitNet sub-norms use the ordinary device RMS
+norm). Tiny random models (`laguna`, `step3p5`, `mimo_v2_flash`, `bitnet`; f32 and f16 GGUF files, 12 greedy tokens, `scripts/gpu_arch_smoke.py`):
+
+| Device | Backend | Result |
+| --- | --- | --- |
+| Radeon 840M (RADV, gfx1153) | Vulkan, `vulkan:0` | 8 of 8 files give the CPU's text; `FLLM_LAYER_CHECK=1`: every layer of all four models equals the host reference (max/rms 0.0000; the layers run on the device, no "run on the host" line); `selftest-gpu --only arch`: 23 of 23 checks ok including the new `head_gate` (sigmoid and softplus, errors 1e-7 .. 2e-7 against an f64 reference, tolerance 2e-6) and `scale` cases |
+| RTX 2000 Ada Laptop | Vulkan, `vulkan:1` (native) | 8 of 8 files give the CPU's text; `selftest-gpu --only arch`: 23 of 23 ok, `head_gate` errors 9e-8 .. 3.6e-7, `scale` 3e-8 |
+| Radeon 840M | HIP (ROCm 7.1, gfx1153) | prompt "the cat" (3 tokens), 8 of 8 files give the CPU's text; `selftest-gpu --only arch`: 16 of 16 ok, `head_gate` and `scale` errors 9e-8 .. 1.9e-7 / 3e-8. **The MiMo-V2 attention layers stay on the host on AMD GPUs** (`supports_value_scale`; `FLLM_HIP_VALUE_SCALE=1` lifts it): with them on the device the text differed and `FLLM_LAYER_CHECK=1` showed layer 0 differing in decode steps (max/rms 0.04 .. 0.2) while prefill agreed; the text also differed with the value scale patched out of the file (1.0), so the cause is the HIP attention path for this shape (per-layer KV head counts, sinks, value width half of the key width), not the new operations; not investigated further |
+| RTX 2000 Ada Laptop (sm_89, built on the laptop with `FLLM_CUDA_ARCHS=89`) | CUDA | prompt "the cat": f32 files of all four models and `bitnet_f16` give the CPU's text; `selftest-gpu --only arch`: 26 of 26 ok, `head_gate` errors 9e-8 .. 1.3e-7, `scale` 3e-8. The f16 files of the other three models do not run on CUDA (`Unsupported quantization format` or no response; not looked into) |
+
+**Prompts of eight or more tokens fail on CUDA and HIP with an empty `Driver error:` for these tiny models** (`laguna`, `step3p5`, `bitnet`, and a plain tiny Qwen3 fixture that uses none of the new operations; `mimo_v2_flash` runs on CUDA). A build of the unmodified base commit shows the same failure on HIP (fLLM 0.1.11 does not), so it is not caused by this change; it was not looked into. Vulkan is not affected. Because of it the text comparison on CUDA and HIP uses the three-token prompt.
+
+Metal, SYCL, wgpu, the NPU and the TPU backend do not
+report `supports_head_gate` and keep the host fallback.
 
 ### Sparse-attention indexer (DeepSeek-V3.2, GLM-5): comparison and devices
 

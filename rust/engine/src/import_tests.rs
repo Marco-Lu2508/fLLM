@@ -643,8 +643,6 @@ fn unsupported_quantization_configs_fail_with_actionable_messages() {
         (json!({"quant_method": "compressed-tensors", "format": "nvfp4-pack-quantized", "config_groups":
             {"g": {"weights": {"num_bits": 4, "type": "float", "strategy": "tensor_group", "group_size": 8}}}}), "group_size"),
         (json!({"quant_method": "compressed-tensors", "format": "pack-quantized", "config_groups":
-            {"g": {"weights": {"num_bits": 4, "type": "int", "symmetric": false, "strategy": "group", "group_size": 32}}}}), "asymmetric"),
-        (json!({"quant_method": "compressed-tensors", "format": "pack-quantized", "config_groups":
             {"g": {"weights": {"num_bits": 3, "type": "int", "symmetric": true, "strategy": "group", "group_size": 32}}}}), "3-bit"),
         (json!({"quant_method": "some_new_method"}), "unsupported quantization_config quant_method"),
         (json!({"quant_method": "bitsandbytes"}), "neither load_in_4bit nor load_in_8bit"),
