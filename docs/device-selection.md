@@ -130,3 +130,10 @@ fastest wins and is stored in `<cache dir>/autotune-<device>-<hash>.json` (`$FLL
 `~/.cache/fllm`, `%LOCALAPPDATA%\fllm` on Windows). A cache made for another device, driver or engine version is ignored. `FLLM_AUTOTUNE=off`
 returns the first candidate without touching anything, `FLLM_AUTOTUNE=retune` measures again. **Nothing calls the tuner yet and nothing was
 measured**; the cache logic is covered by unit tests.
+
+## Several devices: `--device A,B,C`
+
+A comma separated list names the devices of one split model (each device once; `auto`, NPUs and TPUs cannot be in a list; the CPU can). The
+first device runs the embedding and the first layers, the last one the output head. `fllm-rs devices --split MODEL.gguf --device A,B,C`
+prints which layers each would receive, the weights and KV cache per device and the shared KV pool, without loading anything onto a device.
+Layout, flags (`--tensor-parallel`, `--tensor-split`), measurements and limits: [multi-gpu.md](multi-gpu.md).

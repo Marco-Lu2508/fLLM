@@ -1,10 +1,101 @@
 # Splitting one model over several devices (tensor, pipeline and expert parallelism)
 
-Status in one paragraph: the design below is implemented for the host (CPU) path and proven there; the communication layer
-(host-memory `LocalComm`, TCP rendezvous, NCCL loaded at run time) is in place; the CUDA forward path does **not** call the
-collectives yet, so `--tensor-parallel-size` / `--pipeline-parallel-size` run with `--device cpu` in this version and the server
-refuses them on a GPU with an explanatory message. The section "Status" lists exactly what is proven, what compiles but was never run
-on GPUs, and what is not done.
+## Several devices in one run: what works (2026-10-30)
+
+```
+fllm-rs serve --model M.gguf --device cuda:0,cuda:1            # two cards of one backend
+fllm-rs serve --model M.gguf --device cuda:0,vulkan:1,cpu      # any mix of backends, the CPU as the last stage
+fllm-rs serve --model M.gguf --device vulkan:1,vulkan:0 --tensor-parallel 2   # one tensor-parallel group over two Vulkan devices
+fllm-rs devices --split M.gguf --device cuda:0,vulkan:1,cpu    # dry run: which layers would each device get
+```
+
+| Layout | Devices | How it runs | State |
+| --- | --- | --- | --- |
+| **Layer split** (pipeline stages), `--device a,b,c` | any mix of CUDA, HIP, Vulkan, Metal, wgpu, SYCL and the CPU; every device once | each stage holds a contiguous range of layers and the KV cache of exactly those layers; the residual stream goes down to host memory at the end of a stage and up to the next device (no peer path needed); one decode step flows through the stages | **runs on real hardware** (below); equal to the single-device result on CPU stages (tests) |
+| **Tensor parallelism**, `--tensor-parallel N` (or `auto`) | N devices of the **same backend** per group | every layer is cut into N shards; the row-parallel projections give partial sums that are added with the group's all-reduce (NCCL for CUDA when libnccl is found, else host memory), the output head is cut by vocabulary rows | **runs on real hardware** with two Vulkan devices (host all-reduce); NCCL / peer-to-peer on several CUDA cards **never run** (no machine with two NVIDIA cards was available) |
+| **Expert parallelism**, `--expert-parallel` with tensor parallelism | N same-backend devices | experts are distributed over the group (or every expert is cut), routing is replicated on every rank, the partial results are added with the all-reduce; the all-to-all dispatch runs its experts through the host path | the device path of the experts is **unverified** (the CPU backend that stands in for a device in the tests has no expert kernels); only the host-computed experts are proven |
+
+What the layers get is decided by the memory planner (`backend/memory.rs::plan_pipeline`, `parallel/split.rs`): the weights are shared out
+in proportion to each device's **speed** (reported or measured memory bandwidth, else a rough figure for the class of device: 300 GB/s for a
+discrete GPU, 80 for an integrated one, 100 for other accelerators, the measured bandwidth for the CPU; `--tensor-split 3,1` replaces the
+estimates by your ratio), capped by what the device can hold next to the KV cache of one full-context sequence (free memory times
+`--gpu-memory-utilization`; an integrated GPU can use no more than the host has free). Devices of equal speed therefore receive layers in
+proportion to their memory. A local search then moves layer boundaries so that every stage fits, the shared KV pool reaches a useful size
+(4096 tokens, or one full context), and the slowest stage (weights over speed) is as fast as possible; whatever memory is left goes into
+the KV pool up to the size the server asked for. The pool is **one block table for all stages**, so its size is what the smallest stage can
+hold. When even one full-context sequence does not fit, the context is lowered (as on a single device) down to 64 blocks, and only then does
+the start fail with the numbers per device. The output head belongs to the last stage and counts there.
+
+Logged at start (and printed by `fllm-rs devices --split MODEL --device a,b,c` without loading anything onto a device):
+
+```
+Layer split over 2 stage(s): shared KV pool of 4096 blocks (65536 tokens); each stage holds the cache of its own layers
+  device vulkan:1 (NVIDIA RTX 2000 Ada Generation Laptop GPU): 7.25 GB of 8.59 GB usable | read speed 300 GB/s (estimate for this kind of device)
+  device vulkan:0 (Intel(R) Graphics (RPL-S)): 19.75 GB of 24.38 GB usable | read speed 80 GB/s (estimate for this kind of device)
+  stage 0: vulkan:1 (...) layers 0..18 of 28 | weights 1.14 GB | KV cache 4.83 GB | scratch 184 MB | budget 7.25 GB
+  stage 1: vulkan:0 (...) layers 18..28 of 28 | weights 1.00 GB (output head 0.34 GB) | KV cache 2.68 GB | ...
+```
+
+The Studio's hardware card (`GET /api/studio/hardware`, field `split` and `devices[].split`) shows every device with its stage, its layers
+and its share of the model.
+
+### Measured on real hardware (one laptop: RTX 2000 Ada 8 GB + Intel RPL-S iGPU + 28-thread CPU)
+
+Llama-3.2-3B-Instruct Q4_K_M, greedy, 64 new tokens, prompt of 87 tokens, short runs (the laptop was shared with other jobs, so treat the
+numbers as rough; the first table uses the Vulkan backend for both GPUs, the second a CUDA build for the NVIDIA GPU):
+
+| `--device` | decode tok/s | prompt tok/s | text |
+| --- | --- | --- | --- |
+| `vulkan:1` (NVIDIA alone) | 98 to 140 | 2100 to 2500 | reference |
+| `vulkan:1,cpu` (NVIDIA, last stage on the CPU) | 47 | 1600 to 1900 | coherent |
+| `cpu,vulkan:1` (CPU first) | 54 | 1600 to 2000 | coherent, equals the iGPU's text |
+| `vulkan:1,vulkan:0` (NVIDIA 18 layers, iGPU 10) | 27 | 360 to 700 | coherent |
+| `vulkan:0,vulkan:1` | 35 | 720 to 780 | coherent |
+| `vulkan:0` (iGPU alone) | 19 | 330 | coherent |
+| `vulkan:1,vulkan:0 --tensor-parallel 2` | 20 to 23 | 525 to 540 | coherent |
+
+With CUDA for the NVIDIA GPU (build with `--features rust-gpu,cuda`; the iGPU through wgpu-Vulkan, `wgpu-vulkan:0`):
+
+| `--device` | decode tok/s | prompt tok/s | text |
+| --- | --- | --- | --- |
+| `cuda:0` (alone) | 98 | 6000 | reference |
+| `cuda:0,cpu` | 69 | 4000 to 4400 | coherent |
+| `cpu,cuda:0` | 66 | 3300 | coherent |
+| `cuda:0,wgpu-vulkan:0` (CUDA first, iGPU through wgpu last) | 67.5 to 67.8 | 3700 to 3900 | **identical** to `cuda:0` alone (same hash over 64 tokens) |
+| `wgpu-vulkan:0,cuda:0` | failed to start | | `cannot create CUDA stream: out of memory`: another job on the shared laptop took the GPU memory between the planner's reading and the allocation (the planner had 7.2 GB free); not retried |
+
+This is the heterogeneous `cuda:0` + integrated-GPU run: a CUDA stage and a wgpu stage in one decode step, activations through host memory.
+
+What this shows: the split **runs and writes sensible text over three different kinds of device**, and a layer split is exactly as fast as
+its slowest stage plus the host hand-over (two stages of a pipeline take turns for a single sequence). It is **not faster than the NVIDIA GPU
+alone** here, because the second device is a slower one and the model fits the first. Real N-GPU speed-ups (the reason to split: a model that
+does not fit one card, or concurrent requests that keep all stages busy) are **unmeasured**: no machine with two equal GPUs was available. The
+texts of different device mixes differ after a few tokens because the kernels of different GPUs round differently (the same holds for the
+single NVIDIA GPU between two runs); the proof of equivalence is the CPU-stage tests below.
+
+### Equivalence tests (no GPU needed)
+
+`parallel::selftest` runs the staged **device** forward pass with the CPU backend standing in for a GPU (`RustDecoder::init_backend`), one
+thread per rank, and compares logits and greedy tokens of 16 steps with the single-device host run: layer splits in 2/3/4 stages with
+even and uneven ranges, device stages next to host stages (`DHD`), tensor parallelism 2/4 and 2x2 through device ranks, with Q4_K, Q8_0,
+F16, F32, Q4Z, NVFP4 weights, QK-norm, biases, Gemma-2 window/soft-capping/tied head, and sharded mixture-of-experts layers. Largest
+relative error 5e-2 (quantized activation rounding of the stand-in backend), tokens identical in every case; the tolerance rules are in
+`parallel/selftest.rs`. The planner has unit tests over many device counts and size combinations (`parallel/split.rs`, `backend/memory.rs`).
+
+### Limits of the device layouts
+
+* Gemma 3n / 4 style per-layer inputs (they depend on the first stage's embeddings), MTP and latent MLA cannot be a pipeline stage on a
+  device (error); a layer that reads the KV cache of an earlier layer must be on the same stage as that layer.
+* Draft-model speculation and MTP are refused with a device list; lookup speculation is not switched on by default.
+* CUDA graphs, device-side sampling and the fused residual-add kernels are off for the stages of a group (a stage hands over FP32
+  activations; the fused kernels cannot take partial sums). Block copies of the KV cache (parallel sampling `n > 1`, preemption by swap)
+  are off in a group: they would act on rank 0 only.
+* The Marlin dual weight copy of Q4_K on CUDA is off in a split (the planner does not budget it).
+* A tensor-parallel group needs devices of one backend and sizes that divide the heads and the block sizes of the weight format
+  (the start fails with the tensor name and the sizes that work); the memory of a group is planned as `N` times its smallest member.
+* Two devices that share memory (an integrated GPU and the CPU) are budgeted separately; do not list both with a big model.
+* One backend that drives one GPU twice (HIP and Vulkan on the same Radeon) is **not** two devices: `--device hip:0,vulkan:0` would put
+  two stages on one card. Only list a physical GPU once.
 
 ## Process model
 
@@ -21,22 +112,29 @@ Rank numbering is stage-major: `rank = stage * tp + tp_rank`, so a tensor-parall
 (`comm::tcp::TcpStore`) where ranks publish their addresses and the NCCL unique id, and the control group runs over a TCP mesh
 (`SocketFabric`).
 
+The audit that preceded the device work (2026-10-30): the shard slicing, the communicators, the step descriptor, the CPU decoder with
+tensor / pipeline / expert parallelism and the self test existed; `RustDecoder::load` did not call `parallel::load_main` (the flags
+were parsed and ignored), the layer ranges were an even split, every stage allocated the KV cache of all layers, the memory planner knew
+one device, and the GPU forward pass knew neither stages nor collectives. All of that is now done as described in the first section; the
+text below is the design of the underlying parts.
+
 ## Flags
 
 | Flag | Meaning |
 | --- | --- |
-| `--tensor-parallel-size N`, `-tp N` | Tensor-parallel group size (default 1). |
+| `--device A,B,C` | Two or more devices (`cuda:0`, `vulkan:1`, `hip:0`, `cpu`, ...; each once, no `auto`, no NPU/TPU): the model is split over them. One pipeline stage per device unless `--tensor-parallel` groups them. |
+| `--tensor-parallel N`, `--tensor-parallel-size N`, `-tp N` | Tensor-parallel group size (default 1). With `--device A,B,..`, N devices of one backend form a group (`auto`: all of them when they are CUDA cards and libnccl is installed, else 1 = layer split). |
+| `--tensor-split 3,1` | Relative share of the weights per listed device; replaces the speed estimates of the planner. |
 | `--pipeline-parallel-size M`, `-pp M` | Pipeline stages (default 1). World size = N x M. |
 | `--expert-parallel` (`--enable-expert-parallel`) | Distribute the experts of MoE layers over the tensor-parallel group instead of splitting every expert. |
 | `--ep-dispatch allreduce\|alltoall` | Expert-parallel combine: sum partial outputs (default) or dispatch tokens to expert owners with an all-to-all. |
-| `--devices 0,1,2,3` | Device ordinals of this node's ranks (default: the first N visible). |
+| `--devices 0,1,2,3` | Device ordinals of this node's ranks of the one backend `--device` names (default: the first N visible). `--device A,B,C` is the general form. |
 | `--distributed-backend nccl\|p2p\|local` | Traffic between devices (default: NCCL when libnccl is found, else p2p; `local` on the CPU). |
 | `--nnodes N --node-rank R --master-addr HOST --master-port P` | Multi-node rendezvous. |
 | `--pipeline-microbatches K` | Micro-batches per pipeline step (default: one per stage, split by sequence). |
 | `FLLM_VOCAB_PARALLEL_EMBED=1` | Split the embedding table by vocabulary rows (off: the table is memory-mapped and shared by all ranks anyway). |
 | `FLLM_COMM_TIMEOUT_SECS` | How long a rank waits for a message before it reports a dead peer (default 600). |
 | `FLLM_NCCL_PATH` | Path of `libnccl.so.2` when it is not in the loader path. |
-| `FLLM_PARALLEL_GPU=1` | Let the server try a GPU device with a parallel layout (not wired into the CUDA forward pass; untested). |
 
 ## Tensor parallelism
 
@@ -92,9 +190,10 @@ that fails.
 
 Per rank: weights of its layers / `tp` (the K and V projections are replicated when `tp > kv_heads`), KV cache
 `layers_in_stage x kv_heads_local x (dk + dv) x bytes per token`, activations of the batch. `--gpu-memory-utilization` applies per
-device. `plan::rank_memory` computes the figures from the GGUF index without loading it. Equal shards only: a GPU that is too small
-makes the whole run fail; use pipeline parallelism (`-pp`) to put fewer layers on a small device. Mixed GPU architectures are not
-supported.
+device. `plan::rank_memory` computes the figures from the GGUF index without loading it. The tensor shards of one group are equal, so a
+group is limited by its smallest member; put devices of different size into different stages, where the layer split gives the small one
+fewer layers (see the first section). The stages of a split run different backends and architectures side by side (tested: Vulkan on
+an NVIDIA GPU, Vulkan on an Intel iGPU, the CPU).
 
 ## Expert parallelism
 
@@ -134,8 +233,14 @@ layers; that waste does not exist on the GPU, where pools are sized per stage). 
   missing the error says to install `libnccl2`. Symbols: ncclGetVersion, ncclGetUniqueId, ncclCommInitRank, ncclCommDestroy,
   ncclAllReduce, ncclAllGather, ncclReduceScatter, ncclBroadcast, ncclSend, ncclRecv, ncclGroupStart/End, ncclGetErrorString.
   NCCL calls are stream-ordered and can be captured in CUDA graphs. Host-slice operations stage through a device buffer.
-* **Not implemented**: `P2pComm` (cudaMemcpyPeerAsync ring all-reduce with reduce kernels, staged host fallback) and the custom
-  one-shot/two-shot all-reduce behind `FLLM_CUSTOM_ALLREDUCE`. `--distributed-backend p2p` therefore fails with an explanation.
+* `P2pComm` (cudaMemcpyPeerAsync all-reduce with reduce kernels) is written and compiles; like NCCL it has **never run** on two GPUs.
+  The custom one-shot/two-shot all-reduce behind `FLLM_CUSTOM_ALLREDUCE` does not exist.
+* The device forward pass reduces through the host-slice interface (`Communicator::all_reduce` on a host buffer after a download, an
+  upload after it): two device-to-host-to-device round trips per layer. That is simple and works for every backend; a device-pointer
+  all-reduce (`DeviceCollectives`) for CUDA would remove the round trips and is the first thing to do once two NVIDIA cards are at hand.
+  For this reason a tensor-parallel group over PCIe is slower than a layer split for a single sequence (measured: 20 to 23 tok/s
+  tensor-parallel against 27 to 35 layer-split on the NVIDIA + Intel pair); `--tensor-parallel auto` therefore chooses tensor
+  parallelism only for CUDA cards with libnccl.
 
 ## Status
 
@@ -148,11 +253,14 @@ layers; that waste does not exist on the GPU, where pools are sized per stage). 
 | Expert parallelism (allreduce and alltoall), TP-split experts, shared expert | implemented, tested |
 | `NcclComm`, `comm_kernels.cu`, peer matrix | compiles (feature `cuda`, nvcc sm_75..120); never run on a GPU (L0) |
 | `selftest-comm` GPU part | compiles; to be run by hand on a multi-GPU box |
-| CUDA forward path with sharded weights and collectives | **not done** |
-| `P2pComm` (placeholder that errors), custom all-reduce, CUDA graphs with collectives | **not done** |
+| Device forward pass (any backend) with pipeline stages and tensor shards, host-staged hand-over and all-reduce | implemented; tested with the CPU backend as the device and run on Vulkan (NVIDIA + Intel iGPU) and the CPU |
+| CUDA in a split | the same code path; run on one RTX 2000 Ada as a stage next to the CPU and next to a wgpu stage (measured tables above); not on several CUDA cards |
+| HIP / Metal / SYCL in a split | the same code path; **not run** |
+| NCCL / peer-to-peer all-reduce between several CUDA cards from the device forward pass | the communicators exist, **never run**; the forward pass uses the host-slice interface |
+| Custom all-reduce, CUDA graphs with collectives, device-pointer collectives | **not done** |
 | Multi-node data plane | rendezvous and control mesh implemented and tested over loopback; no NCCL multi-node run |
-| Memory planner per device | `plan::rank_memory` computes the figures; `MemoryPlan` of the server is not changed |
-| Distributed greedy sampling on the GPU | `par_argmax` implemented for host logits; not connected to `argmax_rows` |
+| Memory planner per device | `backend::memory::plan_pipeline` / `parallel::split` (layers in proportion to memory and speed, shared KV pool), used by the server, `fllm-rs devices --split` and the log |
+| Distributed greedy sampling on the GPU | `par_argmax` implemented for host logits; not connected to `argmax_rows`; the logits of a split come to the host |
 
 Honest note on the numbers: pipeline-parallel runs reproduce the single-device logits **bit for bit**; tensor-parallel runs differ by
 the order in which partial sums are added. At the level of one projection the difference is 1e-7 (relative L2, all 31 formats, row

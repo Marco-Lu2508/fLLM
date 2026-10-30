@@ -267,6 +267,24 @@ Ordered by area.
   replaced a scalar kernel that took 41 % of a 2000-token prompt (`FLLM_VK_ATTN_COOP=0` brings that kernel back; the exact self-test pass never uses the
   new one). Llama-3.2-3B Q4_K_M prompts of 580 / 2100 tokens: 1719 -> 2615 and 1431 -> 2810 tok/s, see [benchmarks.md](benchmarks.md).
 
+### 5.7b Several devices in one run
+
+`--device A,B,C` splits one model over the devices by layers (pipeline stages), `--tensor-parallel N` cuts the layers over N devices of one backend;
+details, measurements and limits in [multi-gpu.md](multi-gpu.md). Per backend (the stage code is the device forward pass of that backend, nothing is
+special-cased, the activations cross between stages through host memory):
+
+| Backend | As a stage of a split | As a tensor-parallel rank | Test level |
+| --- | --- | --- | --- |
+| CPU | yes (also as the first or last stage next to GPUs) | yes (host path) | L2: unit and equivalence tests; L3: with an NVIDIA GPU and an Intel iGPU (Vulkan) |
+| Vulkan (native and wgpu) | yes | yes (host all-reduce) | L3: RTX 2000 Ada + Intel RPL-S iGPU + CPU, Llama-3.2-3B Q4_K_M, layer split and tensor-parallel 2 |
+| CUDA | yes (KV cache cut per stage, layered layout) | yes; NCCL / peer-to-peer all-reduce between cards is not used by the device pass (host all-reduce) | L3 as a stage next to the CPU and a wgpu-Vulkan iGPU on an RTX 2000 Ada (same text as the single GPU); several CUDA cards and tensor-parallel CUDA never run |
+| HIP, Metal, SYCL, TPU | same code path (uniform KV pools cut to the stage's layers); not run in a split | same | L0 (compiles) |
+| NPU | not in a list (refused) | no | |
+
+Two backends on one physical GPU (HIP and Vulkan on one Radeon) are one device, not two: do not list both. Mixture-of-experts layers in a
+tensor-parallel group run their experts on the device only on backends with the accumulate kernels (checked: none yet in a group; the CPU
+backend stand-in has none), else on the host.
+
 ### 5.8 Other gaps
 
 * **SYCL:** no DeltaNet, no `host_linear`, no graphs, no fused operations; attention is scalar FP32; native only after

@@ -188,9 +188,14 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 - **Backends.** CPU (runtime-selected AVX2, AVX-VNNI, AVX-512, NEON dotprod/i8mm kernels), CUDA, wgpu
   (Vulkan, Metal, DirectX 12), and optional native Vulkan, Metal, ROCm/HIP, SYCL, Intel NPU (OpenVINO) and
   TPU backends, and `--device opengl` as the last resort for graphics cards without a Vulkan/DirectX 12/Metal driver. `--device auto` takes the first GPU of CUDA, ROCm, Metal, Vulkan, DX12, OpenGL, SYCL, else the
-  CPU; names like `cuda:1` pick a device. One server process uses one device: there is no
-  multi-GPU splitting of a single model on a GPU (tensor, pipeline and expert parallelism exist and are proven on the CPU path only; the
-  server refuses `--tensor-parallel-size` / `--pipeline-parallel-size` on a GPU, see [docs/multi-gpu.md](docs/multi-gpu.md)). See [docs/device-selection.md](docs/device-selection.md).
+  CPU; names like `cuda:1` pick a device. `--device cuda:0,vulkan:1,cpu` (two or more devices, any mix of backends)
+  splits one model over them by layers in proportion to their free memory and speed: each stage holds the KV cache of its own layers and
+  the activations travel through host memory, so no peer path is needed; `--tensor-parallel N|auto` cuts every layer over N devices of one backend
+  (NCCL on CUDA cards when libnccl is found, else a host all-reduce), `--tensor-split 3,1` sets the shares, `fllm-rs devices --split MODEL
+  --device a,b` shows the plan. Run on an NVIDIA GPU, an Intel iGPU and the CPU of one laptop (Vulkan; the text is right, it is not faster than
+  the NVIDIA GPU alone); equal to the single-device result in tests with CPU stages; real N-GPU speed-ups and NCCL between several CUDA cards
+  are **unmeasured / never run**, see [docs/multi-gpu.md](docs/multi-gpu.md). Without a list one server process uses one device. See
+  [docs/device-selection.md](docs/device-selection.md).
 - **CUDA.** int8 dot-product and tensor-core GEMMs for quantized weights, Marlin for AWQ/GPTQ/FP4,
   CUTLASS block-scaled NVFP4 GEMM on Blackwell, FlashInfer prompt attention (f16 KV cache), split-KV decode
   attention, argmax sampling on the device, and, on by default, CUDA graphs for decode of dense models,
