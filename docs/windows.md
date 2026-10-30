@@ -173,6 +173,28 @@ By hand: `cargo build --release --locked -p fllm-engine --features "rust-gpu,cud
 | `fllm-rs devices` lists no GPU | install the vendor driver; wgpu uses DirectX 12 and Vulkan, the CUDA build needs `nvcuda.dll` from the NVIDIA driver |
 | first GPU test | `fllm-rs selftest-gpu --json out.json` (see [device-selection.md](device-selection.md)) and send `out.json` |
 
+## Checking fLLM on an RTX 20 series card (Turing, sm_75; e.g. an RTX 2070 Super, 8 GB)
+
+**Status: not verified on real Turing hardware on Windows.** What exists: a Tesla T4 (Turing, Linux, Google Colab) showed that the fused gate/up activation of
+the quantized prompt GEMM wrote nonsense for Q4_K_M models on sm_75; the fix switches that fusion off below Ampere (sm_80), and with
+`FLLM_CUDA_NO_GLU_FUSE=1` the T4 wrote the right text. The fixed build has **not run on a T4 or any other Turing card yet**, and no CUDA build has
+run on Windows at all. If you have such a card, this is the shortest useful check (about 15 minutes, 3 GB of download), and the output of every step
+is worth sending back (issue or the changelog thread):
+
+1. **Install** the CUDA asset: `.\install.ps1 -Variant cuda -AddToPath` (needs only the NVIDIA driver, no CUDA Toolkit).
+2. **See the card:** `fllm-rs devices`. Expected: the card as `cuda:0` with `capability 7.5` and a line `kernels of this binary: sm_75 cubin` (or the
+   PTX of a lower architecture). `none for sm_75: rebuild with FLLM_CUDA_ARCHS including 75` means the asset has no Turing kernels: stop and report.
+3. **Self test:** `fllm-rs selftest-gpu --device cuda:0 --failures-only --json turing-selftest.json`. Expected: no failure except the 20 known `fp8blk`
+   exact-tolerance cases (see the changelog, Known issues). Any other failed group is a finding; attach the json.
+4. **Real model, fused path (the default):** `fllm-rs serve --model <Llama-3.2-3B-Instruct-Q4_K_M.gguf> --model-name m --device cuda:0 --port 8080`, then
+   `curl.exe http://127.0.0.1:8080/v1/completions -H "content-type: application/json" -d "{\"model\":\"m\",\"prompt\":\"The capital of France is\",\"max_tokens\":24,\"temperature\":0}"`.
+   Expected: a sensible sentence ("Paris ..."). Nonsense or repeated tokens = the sm_75 fix does not hold.
+5. **Same prompt with the fusion forced off:** set `FLLM_CUDA_NO_GLU_FUSE=1` (`$env:FLLM_CUDA_NO_GLU_FUSE=1` in PowerShell) before starting the server and ask
+   again. The two texts should be the same; if only this one is right, the default path is still broken on Turing. Also try a prompt of about 600 tokens
+   (the fused GEMM is used from 16 prompt tokens up) and `--device vulkan` (native Vulkan, if the Vulkan SDK was there when the asset was built) for comparison.
+6. **Speed for the record:** `fllm-rs bench` or the server's `usage` numbers: decode tok/s and prompt tok/s of the 3B model (a T4 gave 46 tok/s decode with
+   Llama-3.1-8B Q4_K_M; an RTX 2070 Super has about 40 % more memory bandwidth).
+
 ## Known issues from the first runs on an AMD handheld (Ryzen Z1 Extreme, Windows 11, `fllm-rs selftest-gpu`)
 
 * Native Vulkan on the Radeon: the f16 KV cache write checks failed on the first run (AMD drivers round `packHalf2x16` toward zero; the shaders now

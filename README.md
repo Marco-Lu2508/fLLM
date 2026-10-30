@@ -274,6 +274,12 @@ ahead of vLLM and SGLang (decode 99.5 against 93.0 and 95.2 tok/s, prompt 5244 a
 llama.cpp's. On a Radeon 840M laptop the AMD NPU (FastFlowLM, 306 prompt / 31 decode tok/s) and llama.cpp's Vulkan and ROCm paths are faster for the
 prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 tok/s) with a prompt 25 % behind. Where fLLM is behind: its Vulkan
 backend on the NVIDIA card (35 % behind llama.cpp's Vulkan decode), and its own NPU kernels (prompt only) are slower than FastFlowLM's.
+prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 tok/s) with a prompt 25 % behind. Prompt lengths and 4 / 8 simultaneous requests
+(2026-10-30, same card): the aggregate of fLLM's CUDA path grows with the number of requests and is the highest of the GGUF engines (3B, short prompts: 400
+tok/s with 8 requests against 315 for llama.cpp and 128 for Ollama), except for four long Llama-3.1-8B prompts (53 against 60 for Ollama); its native Vulkan
+backend on the NVIDIA card is now within 3 to 5 % of llama.cpp's Vulkan prompt speed on the 3B model (about 20 % behind on the 8B model, 8 % behind in decode).
+Where fLLM is behind: the Q4_K prompt of Llama-3.1-8B on CUDA (10 % behind Ollama at 600 tokens), AWQ with 8 simultaneous short requests (17 % behind vLLM),
+and it has no backend for the NPU.
 
 Measured on Google Colab with a single user, greedy decoding, over HTTP (before the latest performance work):
 

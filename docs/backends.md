@@ -260,6 +260,12 @@ Ordered by area.
   work group of the matrix-vector shaders. On an AMD integrated GPU (Ryzen Z1 Extreme) the dedicated Q4_K / Q6_K matrix-vector shaders
   (`mv_q4k_idot`, `mv_q6k_idot`), 64 invocations with one row and the split of the key range from 64 keys on raised decode of a 1.5B Q4_K_M
   model from 49 to 64 tokens/s.
+* NVIDIA prompts (RTX 2000 Ada, 2026-10-30): `mm_<fmt>_cw` is a 128 x 64 cooperative-matrix tile with a 64-wide K step and a prefetch of the next step into
+  registers; it reads the activations as binary16 from the prepass `quant_act_f16` and is planned for batches from 64 on, K a multiple of 64, 32-wide
+  subgroups and NVIDIA only (`FLLM_VK_COOP_WIDE=0` keeps the 64 x 64 tile of `mm_<fmt>_c`, a number sets the smallest batch). `attn_prefill_cm_d128` /
+  `_d64` is the prompt attention on cooperative matrices (f16 cache, key = value width 64 or 128, 64 query rows per workgroup of four subgroups); it
+  replaced a scalar kernel that took 41 % of a 2000-token prompt (`FLLM_VK_ATTN_COOP=0` brings that kernel back; the exact self-test pass never uses the
+  new one). Llama-3.2-3B Q4_K_M prompts of 580 / 2100 tokens: 1719 -> 2615 and 1431 -> 2810 tok/s, see [benchmarks.md](benchmarks.md).
 
 ### 5.8 Other gaps
 
