@@ -51,7 +51,15 @@ pub(crate) enum Arch {
     MiniCPM,
     Qwen,
     Baichuan,
+    /// RWKV-7: 4 heads of 64 channels, adapters of rank 16 (32 for the gate), no attention and no KV cache
+    Rwkv7,
+    /// RWKV-6: 4 heads of 64 channels, mixing adapters of rank 16
+    Rwkv6,
 }
+
+// RWKV fixtures: head size and the rank of the low-rank adapters
+const RWKV_HEAD: usize = 64;
+const RWKV_RANK: usize = 16;
 
 // Gated DeltaNet geometry of the Qwen35 fixture
 const LIN_K_HEADS: usize = 2;
@@ -144,6 +152,91 @@ fn qwen35_layer(rng: &mut Rng, entries: &mut Vec<Entry>, p: &str, linear_layer: 
     entries.push(linear(rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
     entries.push(linear(rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
     entries.push(linear(rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+}
+
+/// The tensors of the RWKV-7 (flash-linear-attention layout) or RWKV-6 (Hugging Face layout) fixture, after `scripts/rwkv_reference.py`.
+fn rwkv_entries(rng: &mut Rng, v7: bool) -> Vec<Entry> {
+    type Spec = (String, Vec<usize>, f32, f32);
+    let c = HIDDEN;
+    let heads = c / RWKV_HEAD;
+    let mut all: Vec<Spec> = Vec::new();
+    let ln = |all: &mut Vec<Spec>, name: &str| {
+        all.push((format!("{name}.weight"), vec![c], 0.8, 1.2));
+        all.push((format!("{name}.bias"), vec![c], -0.1, 0.1));
+    };
+    // (name, rows, columns, gain)
+    let mut proj: Vec<(String, usize, usize, f32)> = Vec::new();
+    if v7 {
+        ln(&mut all, "model.layers.0.pre_norm");
+        ln(&mut all, "model.norm");
+        for i in 0..LAYERS {
+            let p = format!("model.layers.{i}.");
+            ln(&mut all, &format!("{p}attn_norm"));
+            ln(&mut all, &format!("{p}ffn_norm"));
+            for t in ["r", "w", "k", "v", "a", "g"] {
+                all.push((format!("{p}attn.x_{t}"), vec![1, 1, c], 0.0, 1.0));
+            }
+            for (n, rank, bias, has) in [("w", RWKV_RANK, true, true), ("a", RWKV_RANK, true, true), ("v", RWKV_RANK, true, i > 0), ("g", 2 * RWKV_RANK, false, true)] {
+                if !has {
+                    continue;
+                }
+                proj.push((format!("{p}attn.{n}_lora.lora.0.weight"), rank, c, 0.3));
+                proj.push((format!("{p}attn.{n}_lora.lora.2.weight"), c, rank, 0.3));
+                if bias {
+                    all.push((format!("{p}attn.{n}_lora.lora.2.bias"), vec![c], -0.5, 0.5));
+                }
+            }
+            all.push((format!("{p}attn.k_k"), vec![c], 0.5, 1.5));
+            all.push((format!("{p}attn.k_a"), vec![c], 0.0, 1.0));
+            all.push((format!("{p}attn.r_k"), vec![heads, RWKV_HEAD], -0.3, 0.3));
+            for n in ["r", "k", "v", "o"] {
+                proj.push((format!("{p}attn.{n}_proj.weight"), c, c, 1.0));
+            }
+            ln(&mut all, &format!("{p}attn.g_norm"));
+            all.push((format!("{p}ffn.x_k"), vec![1, 1, c], 0.0, 1.0));
+            proj.push((format!("{p}ffn.key.weight"), INTER, c, 1.0));
+            proj.push((format!("{p}ffn.value.weight"), c, INTER, 1.0));
+        }
+    } else {
+        let (d, dd) = (RWKV_RANK, RWKV_RANK);
+        ln(&mut all, "rwkv.blocks.0.pre_ln");
+        ln(&mut all, "rwkv.ln_out");
+        for i in 0..LAYERS {
+            let p = format!("rwkv.blocks.{i}.");
+            ln(&mut all, &format!("{p}ln1"));
+            ln(&mut all, &format!("{p}ln2"));
+            let a = format!("{p}attention.");
+            for t in ["x", "w", "k", "v", "r", "g"] {
+                all.push((format!("{a}time_maa_{t}"), vec![1, 1, c], 0.0, 1.0));
+            }
+            all.push((format!("{a}time_maa_w1"), vec![c, 5 * d], -0.3, 0.3));
+            all.push((format!("{a}time_maa_w2"), vec![5, d, c], -0.3, 0.3));
+            all.push((format!("{a}time_decay"), vec![1, 1, c], -1.0, 0.2));
+            all.push((format!("{a}time_decay_w1"), vec![c, dd], -0.3, 0.3));
+            all.push((format!("{a}time_decay_w2"), vec![dd, c], -0.3, 0.3));
+            all.push((format!("{a}time_faaaa"), vec![heads, RWKV_HEAD], -0.3, 0.3));
+            for n in ["receptance", "key", "value", "gate", "output"] {
+                proj.push((format!("{a}{n}.weight"), c, c, 1.0));
+            }
+            ln(&mut all, &format!("{a}ln_x"));
+            let f = format!("{p}feed_forward.");
+            all.push((format!("{f}time_maa_k"), vec![1, 1, c], 0.0, 1.0));
+            all.push((format!("{f}time_maa_r"), vec![1, 1, c], 0.0, 1.0));
+            proj.push((format!("{f}key.weight"), INTER, c, 1.0));
+            proj.push((format!("{f}receptance.weight"), c, c, 1.0));
+            proj.push((format!("{f}value.weight"), c, INTER, 1.0));
+        }
+    }
+    let (emb, head) = if v7 { ("model.embeddings.weight", "lm_head.weight") } else { ("rwkv.embeddings.weight", "head.weight") };
+    let mut entries = vec![Entry { name: emb.into(), shape: vec![VOCAB, c], values: (0..VOCAB * c).map(|_| rng.unit()).collect() }, linear(rng, head, VOCAB, c, 1.5)];
+    for (name, shape, lo, hi) in all {
+        let n: usize = shape.iter().product();
+        entries.push(Entry { name, shape, values: (0..n).map(|_| lo + (hi - lo) * (rng.unit() * 0.5 + 0.5)).collect() });
+    }
+    for (name, out, inp, gain) in proj {
+        entries.push(linear(rng, &name, out, inp, gain));
+    }
+    entries
 }
 
 fn write_safetensors(path: &Path, entries: &[Entry]) {
@@ -241,6 +334,21 @@ fn config_json(arch: Arch) -> Value {
             cfg["kv_channels"] = HEAD_DIM.into();
             cfg["intermediate_size"] = (2 * INTER).into();
             cfg["no_bias"] = true.into();
+        }
+        Arch::Rwkv7 => {
+            cfg = json!({
+                "architectures": ["RWKV7ForCausalLM"], "model_type": "rwkv7", "hidden_size": HIDDEN, "num_hidden_layers": LAYERS, "head_dim": RWKV_HEAD,
+                "num_heads": null, "decay_low_rank_dim": RWKV_RANK, "a_low_rank_dim": RWKV_RANK, "v_low_rank_dim": RWKV_RANK, "gate_low_rank_dim": 2 * RWKV_RANK,
+                "hidden_ratio": 2.0, "intermediate_size": INTER, "norm_eps": 1e-5, "norm_bias": true, "norm_first": true, "hidden_act": "sqrelu",
+                "vocab_size": VOCAB, "bos_token_id": 1, "eos_token_id": 2, "tie_word_embeddings": false, "max_position_embeddings": 2048, "torch_dtype": "float32"
+            });
+        }
+        Arch::Rwkv6 => {
+            cfg = json!({
+                "architectures": ["Rwkv6ForCausalLM"], "model_type": "rwkv6", "hidden_size": HIDDEN, "attention_hidden_size": HIDDEN, "num_hidden_layers": LAYERS,
+                "head_size": RWKV_HEAD, "head_size_divisor": 8, "num_attention_heads": HIDDEN / RWKV_HEAD, "intermediate_size": INTER, "layer_norm_epsilon": 1e-5,
+                "rescale_every": 0, "vocab_size": VOCAB, "bos_token_id": 1, "eos_token_id": 2, "tie_word_embeddings": false, "torch_dtype": "float32"
+            });
         }
         Arch::Baichuan => {
             cfg["model_type"] = "baichuan".into();
@@ -371,6 +479,11 @@ fn write_support_files(dir: &Path, cfg: &Value) {
 /// Write the checkpoint of a tiny random model of `arch` into `dir`.
 pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
     let mut rng = Rng(seed | 1);
+    if matches!(arch, Arch::Rwkv7 | Arch::Rwkv6) {
+        write_support_files(dir, &config_json(arch));
+        write_safetensors(&dir.join("model.safetensors"), &rwkv_entries(&mut rng, arch == Arch::Rwkv7));
+        return;
+    }
     let mut entries = Vec::new();
     let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
     let emb_name = match arch { Arch::Exaone | Arch::Qwen => "transformer.wte.weight", Arch::ChatGLM => "transformer.embedding.word_embeddings.weight", _ => "model.embed_tokens.weight" };
@@ -477,7 +590,7 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
         }
         match arch {
             Arch::Qwen35 => unreachable!("handled by qwen35_layer"),
-            Arch::Exaone | Arch::ChatGLM | Arch::VaultGemma | Arch::Qwen | Arch::Baichuan => unreachable!("handled above"),
+            Arch::Exaone | Arch::ChatGLM | Arch::VaultGemma | Arch::Qwen | Arch::Baichuan | Arch::Rwkv7 | Arch::Rwkv6 => unreachable!("handled above"),
             Arch::Mellum => {
                 if layer < 1 {
                     entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
@@ -801,6 +914,48 @@ mod tests {
     #[test]
     fn cpu_backend_matches_host_path_k2_horizon() {
         run("k2-horizon", Arch::K2Horizon, Encoding::F32, 1e-3);
+    }
+
+    #[test]
+    fn cpu_backend_matches_host_path_rwkv7() {
+        run("rwkv7-f32", Arch::Rwkv7, Encoding::F32, 1e-3);
+    }
+
+    #[test]
+    fn cpu_backend_matches_host_path_rwkv6() {
+        run("rwkv6-f32", Arch::Rwkv6, Encoding::F32, 1e-3);
+    }
+
+    /// The recurrent state of RWKV layers that run on the device (WKV matrices and token-shift vectors in one device buffer per sequence) is
+    /// copied out and back by `snapshot_state` / `restore_state`: decoding two tokens, restoring the snapshot taken after the prompt and decoding the
+    /// same tokens again gives the same logits (speculative rollback and prefix reuse rely on this).
+    #[test]
+    fn rwkv_device_state_snapshot_and_restore_replay_the_same_logits() {
+        for (label, arch) in [("rwkv7-snap", Arch::Rwkv7), ("rwkv6-snap", Arch::Rwkv6)] {
+            let dir = scratch(label);
+            let gguf = build_gguf(&dir, arch, Encoding::F32, 0x5151_aaaa_7777_1234);
+            let model = GgufModel::load(gguf.to_str().unwrap(), 64, 1, 2).unwrap();
+            let mut dec = RustDecoder::load(&model, "cpu").unwrap();
+            dec.init_backend(Arc::new(CpuBackend::new())).unwrap();
+            assert_eq!(dec.host_fallbacks(), (0, 0), "{label}: layers run on the host");
+            let mut key = vec![0u16; model.key_buffer_len().unwrap()];
+            let mut value = vec![0u16; model.value_buffer_len().unwrap()];
+            let table: Vec<i64> = (0..model.table_stride() as i64).collect();
+            let rows = PROMPT.len();
+            let tables: Vec<i64> = (0..rows).flat_map(|_| table.iter().copied()).collect();
+            let lengths: Vec<i64> = (1..=rows as i64).collect();
+            dec.forward(&PROMPT, &lengths, &tables, &mut key, &mut value, &[rows - 1], false).unwrap();
+            let snapshot = dec.snapshot_state(table[0]).unwrap().expect("a snapshot");
+            assert!(snapshot.device.is_some() && snapshot.host.iter().flatten().count() == 0, "{label}: the state should live on the device only");
+            let mut step = |token: i64, length: i64| dec.forward(&[token], &[length], &table, &mut key, &mut value, &[0], false).unwrap();
+            let first = [step(7, rows as i64 + 1), step(11, rows as i64 + 2)];
+            dec.restore_state(table[0], &snapshot).unwrap();
+            let mut step = |token: i64, length: i64| dec.forward(&[token], &[length], &table, &mut key, &mut value, &[0], false).unwrap();
+            let again = [step(7, rows as i64 + 1), step(11, rows as i64 + 2)];
+            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(first, again, "{label}: the logits after a restore differ from the first run");
+            assert!(first[0] != first[1], "{label}: the two steps gave the same logits");
+        }
     }
 
     #[test]

@@ -72,7 +72,137 @@ impl Kda {
     }
 }
 
+/// Device copy of a KDA layer (projections as device weights, the small tensors as FP32 buffers).
+pub(super) struct DeviceKda {
+    q: crate::backend::DeviceWeight,
+    k: crate::backend::DeviceWeight,
+    v: crate::backend::DeviceWeight,
+    forget_down: Option<crate::backend::DeviceWeight>,
+    forget_up: crate::backend::DeviceWeight,
+    beta: crate::backend::DeviceWeight,
+    gate_down: Option<crate::backend::DeviceWeight>,
+    gate_up: crate::backend::DeviceWeight,
+    conv: crate::backend::DeviceBuffer,
+    dt_bias: crate::backend::DeviceBuffer,
+    rate: crate::backend::DeviceBuffer,
+    norm: crate::backend::DeviceBuffer,
+    /// Index among the KDA layers (selects the slice of a sequence's state buffer).
+    ordinal: usize,
+}
+
+impl Kda {
+    /// Uploads the layer. `linear` uploads a projection, `vector` a small FP32 vector.
+    pub(super) fn upload(
+        &self,
+        ordinal: usize,
+        linear: &dyn Fn(&str, &Linear) -> Result<crate::backend::DeviceWeight, String>,
+        vector: &dyn Fn(&[f32]) -> Result<crate::backend::DeviceBuffer, String>,
+        name: &str,
+    ) -> Result<DeviceKda, String> {
+        let part = |tag: &str, l: &Linear| linear(&format!("{name}.{tag}"), l);
+        Ok(DeviceKda {
+            q: part("q", &self.q)?,
+            k: part("k", &self.k)?,
+            v: part("v", &self.v)?,
+            forget_down: self.forget_down.as_ref().map(|l| part("forget_down", l)).transpose()?,
+            forget_up: part("forget_up", &self.forget_up)?,
+            beta: part("beta", &self.beta)?,
+            gate_down: self.gate_down.as_ref().map(|l| part("gate_down", l)).transpose()?,
+            gate_up: part("gate_up", &self.gate_up)?,
+            conv: vector(&self.conv)?,
+            dt_bias: vector(&self.dt_bias)?,
+            rate: vector(&self.rate)?,
+            norm: vector(&self.norm)?,
+            ordinal,
+        })
+    }
+}
+
 impl RustDecoder {
+    /// One KDA layer on the device: the projections (q, k and v are packed into the `[q | k | v]` rows of the kernel), the convolution and recurrence
+    /// kernels, the output projection added to the residual stream.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn kda_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        shape: &crate::backend::KdaShape,
+        dk: &DeviceKda,
+        dev_layer: &DeviceLayerWeights,
+        plan: &[DeltaPlanRun],
+        normed: &crate::backend::DeviceBuffer,
+        x: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let resets = self.delta_claim(dk.ordinal, plan)?;
+        let (width, conv_dim) = (shape.heads * shape.head_dim, shape.conv_dim());
+        let project = |stream: &mut dyn crate::backend::Stream,
+                       scratch: &mut crate::backend::BufferPool,
+                       w: &crate::backend::DeviceWeight,
+                       input: &crate::backend::DeviceBuffer|
+         -> Result<crate::backend::DeviceBuffer, String> {
+            let mut out = scratch.acquire(rows * w.rows * 4).map_err(err)?;
+            stream.quantized_linear(&mut out, input, w, w.bias.as_ref()).map_err(err)?;
+            Ok(out)
+        };
+        let mut qkv = scratch.acquire(rows * conv_dim * 4).map_err(err)?;
+        for (part, w) in [&dk.q, &dk.k, &dk.v].into_iter().enumerate() {
+            let block = project(stream, scratch, w, normed)?;
+            stream.copy_columns(&mut qkv, conv_dim, part * width, &block, rows, width).map_err(err)?;
+            scratch.recycle(block);
+        }
+        let low_rank = |stream: &mut dyn crate::backend::Stream,
+                        scratch: &mut crate::backend::BufferPool,
+                        down: Option<&crate::backend::DeviceWeight>,
+                        up: &crate::backend::DeviceWeight|
+         -> Result<crate::backend::DeviceBuffer, String> {
+            match down {
+                Some(down) => {
+                    let mid = project(stream, scratch, down, normed)?;
+                    let out = project(stream, scratch, up, &mid)?;
+                    scratch.recycle(mid);
+                    Ok(out)
+                }
+                None => project(stream, scratch, up, normed),
+            }
+        };
+        let forget = low_rank(stream, scratch, dk.forget_down.as_ref(), &dk.forget_up)?;
+        let beta = project(stream, scratch, &dk.beta, normed)?;
+        let gate = low_rank(stream, scratch, dk.gate_down.as_ref(), &dk.gate_up)?;
+        let mut mixed = scratch.acquire(rows * conv_dim * 4).map_err(err)?;
+        let mut out = scratch.acquire(rows * width * 4).map_err(err)?;
+        let runs: Vec<crate::backend::DeltaRun<'_>> =
+            plan.iter().zip(&resets).map(|(p, &reset)| crate::backend::DeltaRun { state: &p.buf, first_row: p.start, rows: p.n, reset }).collect();
+        let weights = crate::backend::KdaWeights { conv: &dk.conv, dt_bias: &dk.dt_bias, rate: &dk.rate, norm: &dk.norm };
+        stream
+            .kda_layer(shape, &weights, &runs, dk.ordinal * shape.layer_state_bytes(), &qkv, &forget, &beta, &gate, &mut mixed, &mut out)
+            .map_err(err)?;
+        let residual_scale = self.cfg.residual_scale;
+        let out_w = dev_layer.out.as_ref().ok_or("KDA layer without a device output projection")?;
+        let fused = dev_layer.post_attn_norm.is_none() && stream.quantized_linear_add(x, &out, out_w, out_w.bias.as_ref(), residual_scale).map_err(err)?;
+        if !fused {
+            let mut branch = scratch.acquire(rows * self.cfg.hidden * 4).map_err(err)?;
+            stream.quantized_linear(&mut branch, &out, out_w, out_w.bias.as_ref()).map_err(err)?;
+            device_post_norm_inplace(
+                stream,
+                scratch,
+                self.cfg.norm,
+                &mut branch,
+                dev_layer.post_attn_norm.as_ref(),
+                dev_layer.post_attn_norm_b.as_ref(),
+                self.cfg.post_eps,
+                self.groups,
+            )?;
+            stream.residual_add(x, &branch, residual_scale).map_err(err)?;
+            scratch.recycle(branch);
+        }
+        for buf in [qkv, forget, beta, gate, mixed, out] {
+            scratch.recycle(buf);
+        }
+        Ok(())
+    }
+
     /// Walks the runs of consecutive tokens of each sequence in a batch (sequences are identified by their first KV block) and calls
     /// `f(start, end, state)` for each with the layer's recurrent state, which `blank` creates for a sequence that starts here. The
     /// state is checked to hold exactly the tokens before the run and counts the run in.

@@ -17,7 +17,7 @@ What the lines mean:
 - `fuse | ...`: fused decode kernels of the CUDA backend (add + RMSNorm, rotary + cache write, SwiGLU + int8 quantization, Marlin add): the Vulkan
   stream runs the unfused sequence instead.
 - `linear | nvfp4 w4a4`: activation-quantizing NVFP4 GEMM on FP4 tensor cores (Blackwell); Vulkan stores NVFP4 weights in its own layout.
-- Not skipped but also missing: `arch` ShortConv (no `supports_shortconv`, so the `shortconv` check is not run), `moe_expert_gemm` (not exercised by a
+- Not skipped but also missing: `moe_expert_gemm` (not exercised by a
   selftest check: the device path is `moe_linear` + `moe_combine`).
 
 ```expected-skips

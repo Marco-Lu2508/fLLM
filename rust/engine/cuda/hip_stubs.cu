@@ -55,16 +55,6 @@ extern "C" int fllm_cuda_mlx_force(int) { return 0; }
 // Q4_K Marlin GEMM (marlin_q4k.cu) is NVIDIA-only: decline, the portable kernels serve the call
 int fllm_marlin_q4k_try(cudaStream_t, const void *, const float *, float *, const float *, int, int, int, void *, size_t) { return 0; }
 
-// Kimi Delta Attention (kda.cu) is not built for AMD: the backend reports it as unsupported and the host path runs
-int fllm_kda_supported(int, int, int) { return 0; }
-int fllm_kda_launch(cudaStream_t, const void *, int, int, int, int, int, float, float, size_t, size_t,
-                    const float *, const float *, const float *, const float *,
-                    const float *, const float *, const float *, const float *,
-                    float *, float *) {
-    return fllm_set_error("KDA kernels need an NVIDIA GPU");
-}
-
-
 // Datacenter Blackwell NVFP4 (nvfp4_cutlass_sm100.cu) and the device report (arch_report.cu) are NVIDIA-only
 extern "C" int fllm_cuda_nvfp4_sm100_native(int) { return 0; }
 extern "C" int fllm_cuda_nvfp4_mma_native(int) { return 0; }

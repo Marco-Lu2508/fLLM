@@ -25,7 +25,8 @@ int fllm_mamba1_supported(int inner, int state, int rank, int ksz) {
 }
 
 // grid rows, block 128. split: rows x (rank + 2 state); dt_in: rows x rank. eps <= 0: no normalisation.
-__global__ void __launch_bounds__(128) mamba1_prep_kernel(float *__restrict__ split, float *__restrict__ dt_in, int rank, int state, float eps) {
+__global__ void __launch_bounds__(128) mamba1_prep_kernel(float *__restrict__ split, float *__restrict__ dt_in, int rank, int state, float eps,
+                                                          const float *w_dt, const float *w_b, const float *w_c) {
     __shared__ float scratch[32];
     const size_t row = blockIdx.x;
     float *r = split + row * (size_t)(rank + 2 * state);
@@ -46,7 +47,9 @@ __global__ void __launch_bounds__(128) mamba1_prep_kernel(float *__restrict__ sp
             inv = 1.0f / sqrtf(total / (float)len + eps);
         }
         for (int i = threadIdx.x; i < len; i += blockDim.x) {
-            const float v = r[off + i] * inv;
+            // Jamba: learned weights behind the RMS norms (null: none)
+            const float *wt = seg == 0 ? w_dt : (seg == 1 ? w_b : w_c);
+            const float v = r[off + i] * inv * (wt ? wt[i] : 1.0f);
             r[off + i] = v;
             if (seg == 0) dt_in[row * rank + i] = v;
         }
@@ -96,9 +99,10 @@ int fllm_mamba1_conv_launch(cudaStream_t s, const void *runs, int nruns, int inn
     return fllm_ssm_conv_launch(s, runs, nruns, proj, 2 * inner, 0, convw, convb, mixed, inner, ksz, state_off, rec_bytes);
 }
 
-int fllm_mamba1_prep_launch(cudaStream_t s, float *split, float *dt_in, int rows, int rank, int state, float eps) {
+int fllm_mamba1_prep_launch(cudaStream_t s, float *split, float *dt_in, int rows, int rank, int state, float eps, const float *w_dt, const float *w_b,
+                            const float *w_c) {
     if (rows <= 0) return 0;
-    mamba1_prep_kernel<<<rows, 128, 0, s>>>(split, dt_in, rank, state, eps);
+    mamba1_prep_kernel<<<rows, 128, 0, s>>>(split, dt_in, rank, state, eps, w_dt, w_b, w_c);
     return fllm_check_launch("mamba1_prep");
 }
 

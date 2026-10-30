@@ -1,0 +1,87 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: rwkv6_wkv | bindings: r,k,v,w,gate,norm_w,norm_b,first,state,out | push: hidden,row0,n,reset,state_off,eps | grid: [heads, 1, 1] per run
+// RWKV-6 recurrence of one head of one run per workgroup (Stream::rwkv6_wkv, port of rwkv6_kernel in cuda/rwkv.cu, reference cpu_rwkv.rs `wkv6`). N = head size
+// (a compile-time macro, 16 / 32 / 64 / 128, = local_size_x): invocation i owns value column i of the head's state S[j][i] (key channel j) in registers for the
+// whole run. Per token t, with w the pre-exponential decay, u = first (the bonus) and gate the SiLU of the gate projection:
+//   kv = k[j] v[i];  y[i] = sum_j r[j] (u[j] kv + S[j][i]);  S[j][i] = kv + exp(-exp(w[j])) S[j][i]
+//   out[i] = (groupnorm_head(y)[i] * norm_w[i] + norm_b[i]) * gate[i]
+// The state S[h][j][i] is FP32 at state[state_off + (h * N + j) * N + i]. reset != 0: the old state is ignored. Rows row0 .. row0+n-1, head h = workgroup x,
+// channel = h * N + i. The key channels are handled as vec4 groups so that the loops over the head have N / 4 iterations: short enough for the compiler to
+// unroll them and keep the column in registers.
+#define WG N
+#ifndef N
+#define N 64
+#endif
+#include "_ops_common.glsl"
+layout(local_size_x = N) in;
+
+layout(std430, binding = 0) readonly buffer RBuf { float rin[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kin[]; };
+layout(std430, binding = 2) readonly buffer VBuf { float vin[]; };
+layout(std430, binding = 3) readonly buffer WBuf { float win[]; };
+layout(std430, binding = 4) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 5) readonly buffer NormWBuf { float norm_w[]; };
+layout(std430, binding = 6) readonly buffer NormBBuf { float norm_b[]; };
+layout(std430, binding = 7) readonly buffer FirstBuf { float first[]; };
+layout(std430, binding = 8) buffer StateBuf { float state[]; };
+layout(std430, binding = 9) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+shared vec4 s_r[N / 4];
+shared vec4 s_w[N / 4];
+shared vec4 s_k[N / 4];
+shared vec4 s_u[N / 4];
+
+void main() {
+    const uint i = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint ch = h * N + i;
+    const uint sbase = p.state_off + h * N * N + i;
+    const uint iv = i >> 2u;
+    const uint ic = i & 3u;
+
+    vec4 s[N / 4];
+    [[unroll]] for (uint j = 0u; j < N / 4u; j++) {
+        s[j] = p.reset != 0u ? vec4(0.0) : vec4(state[sbase + (4u * j) * N], state[sbase + (4u * j + 1u) * N], state[sbase + (4u * j + 2u) * N], state[sbase + (4u * j + 3u) * N]);
+    }
+    const float lnw = norm_w[ch];
+    const float lnb = norm_b[ch];
+    s_u[iv][ic] = first[ch];
+
+    for (uint t = 0u; t < p.n; t++) {
+        const uint at = (p.row0 + t) * p.hidden + ch;
+        s_r[iv][ic] = rin[at];
+        s_k[iv][ic] = kin[at];
+        s_w[iv][ic] = exp(-exp(win[at]));
+        barrier();
+        const float v = vin[at];
+        vec4 acc4 = vec4(0.0);
+        [[unroll]] for (uint j = 0u; j < N / 4u; j++) {
+            const vec4 kv = s_k[j] * v;
+            acc4 += s_r[j] * (s_u[j] * kv + s[j]);
+            s[j] = kv + s_w[j] * s[j];
+        }
+        const float acc = acc4.x + acc4.y + acc4.z + acc4.w;
+        const float mean = wg_sum(acc) / float(N);
+        const float d = acc - mean;
+        const float var_ = wg_sum(d * d) / float(N);
+        outv[at] = (d * (1.0 / sqrt(var_ + p.eps)) * lnw + lnb) * gate[at];
+        barrier();
+    }
+    [[unroll]] for (uint j = 0u; j < N / 4u; j++) {
+        state[sbase + (4u * j) * N] = s[j].x;
+        state[sbase + (4u * j + 1u) * N] = s[j].y;
+        state[sbase + (4u * j + 2u) * N] = s[j].z;
+        state[sbase + (4u * j + 3u) * N] = s[j].w;
+    }
+}

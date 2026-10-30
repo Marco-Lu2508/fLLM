@@ -134,7 +134,7 @@ compile. Nothing has run on an AMD GPU, with or without Windows. The statements 
 | `FLLM_HIP_ARCHS` | `gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201` | build time: offload architectures (one architecture builds much faster) |
 | `ROCM_PATH` / `HIP_PATH` | `/opt/rocm` | ROCm install |
 | `FLLM_HIP_GRAPH` | off | `1` allows hipGraph capture of decode steps (new, never run on a GPU) |
-| `FLLM_HIP_NO_SSM` | off | `1` keeps DeltaNet, Mamba-1/2 and ShortConv layers on the host path (new) |
+| `FLLM_HIP_NO_SSM` | off | `1` keeps DeltaNet, Mamba-1/2 and ShortConv layers on the host path; these device paths are on by default since they passed `selftest-gpu` and the tiny-model texts on a gfx1153 GPU (`FLLM_HIP_SSM=0` does the same) |
 | `FLLM_HIP_NO_Q4Z`, `FLLM_HIP_NO_Q4Z_SKINNY`, `FLLM_HIP_NO_MMA` | off | existing: Q4Z kernels off / vLLM skinny kernel off / matrix-core GEMM off |
 | `FLLM_CUDA_EXACT=1` | off | exact (FP32) kernels instead of the FP16 matrix-core paths; text must equal the CPU |
 | `RESOURCES=1`, `JOBS`, `SOURCES` | | options of `scripts/hipcheck.sh` |

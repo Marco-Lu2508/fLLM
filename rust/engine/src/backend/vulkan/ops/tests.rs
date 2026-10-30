@@ -1197,6 +1197,37 @@ fn sample_plans() -> Vec<OpPlan> {
         )
         .unwrap(),
     );
+    {
+        use super::recurrent::{plan_rwkv6_wkv, plan_rwkv7_wkv, plan_rwkv_act, plan_rwkv_lerp, plan_rwkv_shift};
+        let run = RunSpec { first_row: 2, rows: 3, reset: false };
+        v.push(plan_rwkv_shift(1, &run, 128, 4096).unwrap());
+        for has_delta in [false, true] {
+            v.push(plan_rwkv_lerp(256, 128, has_delta).unwrap());
+        }
+        for (mode, gate) in [(0, false), (2, false), (4, true), (5, false)] {
+            v.push(plan_rwkv_act(256, mode, gate).unwrap());
+        }
+        for head_size in [16usize, 32, 64, 128] {
+            let shape = crate::backend::RwkvShape { hidden: 2 * head_size, head_size, group_eps: 1e-5, v7: true };
+            v.push(plan_rwkv7_wkv(0, &run, &shape, 0, head_size != 32).unwrap());
+            v.push(plan_rwkv6_wkv(0, &run, &shape, 256).unwrap());
+        }
+        assert!(plan_rwkv_act(0, 0, false).is_err() && plan_rwkv_act(4, 4, false).is_err() && plan_rwkv_act(4, 6, false).is_err());
+        for head_dim in [16usize, 32, 64, 128] {
+            for lower_bound in [None, Some(-5.0f32)] {
+                let shape = crate::backend::KdaShape { heads: 2, head_dim, conv_kernel: 4, eps: 1e-6, lower_bound };
+                v.extend(super::recurrent::plan_kda_layer(&shape, &[run], 0).unwrap());
+            }
+        }
+        v.push(super::recurrent::plan_copy_cols(3, 64, 192, 64).unwrap());
+        for has_bias in [false, true] {
+            v.push(super::recurrent::plan_shortconv(1, &run, 256, 3, 128, has_bias).unwrap());
+        }
+        assert!(super::recurrent::plan_shortconv(0, &run, 256, 9, 0, false).is_err());
+        assert!(super::recurrent::plan_copy_cols(3, 64, 100, 64).is_err());
+        let odd = crate::backend::RwkvShape { hidden: 96, head_size: 48, group_eps: 1e-5, v7: true };
+        assert!(plan_rwkv7_wkv(0, &run, &odd, 0, false).is_err() && !super::recurrent::rwkv_supported(&odd));
+    }
     v.extend(
         plan_moe_expert_gemm(
             &MoeLinear {

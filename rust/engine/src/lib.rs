@@ -22,6 +22,7 @@ pub mod cpu_avx512;
 pub mod cpu_elementwise;
 pub(crate) mod cpu_delta;
 pub(crate) mod cpu_kda;
+pub(crate) mod cpu_rwkv;
 pub mod cpu_float;
 pub mod cpu_fp8;
 pub mod cpu_kernels;

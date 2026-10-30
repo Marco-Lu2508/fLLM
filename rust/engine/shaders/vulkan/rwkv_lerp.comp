@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: rwkv_lerp | bindings: x,shift,mix,delta,out | push: count,hidden,has_delta | grid: [min(ceil(count/256), 65535), 1, 1]
+// RWKV interpolation between the input and the shifted input (Stream::rwkv_lerp): out[i] = x[i] + (shift[i] - x[i]) * (mix[i % hidden] + delta[i]),
+// the delta term only when has_delta != 0 (RWKV-6 data-dependent mixing; `delta` is a dummy binding otherwise). Grid-stride loop over count floats.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer ShiftBuf { float shifted[]; };
+layout(std430, binding = 2) readonly buffer MixBuf { float mixv[]; };
+layout(std430, binding = 3) readonly buffer DeltaBuf { float delta[]; };
+layout(std430, binding = 4) buffer OutBuf { float o[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint hidden;
+    uint has_delta;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const float m = mixv[i % p.hidden] + (p.has_delta != 0u ? delta[i] : 0.0);
+        o[i] = x[i] + (shifted[i] - x[i]) * m;
+    }
+}

@@ -150,11 +150,24 @@ int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, in
                       float *out);
 // Kimi Delta Attention (KDA) layer (kda.cu)
 int fllm_kda_supported(int heads, int head_dim, int ksz);
+int fllm_copy_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col);
 int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
-                    float lower_bound, float eps, size_t state_off, size_t rec_bytes,
+                    int bounded, float lower_bound, float eps, size_t state_off, size_t rec_bytes,
                     const float *qkv, const float *forget, const float *beta, const float *gate,
                     const float *convw, const float *dt_bias, const float *rate, const float *norm,
                     float *mixed, float *out);
+// RWKV-6 / RWKV-7 (rwkv.cu)
+int fllm_rwkv_supported(int hidden, int head_size);
+int fllm_rwkv_shift_launch(cudaStream_t s, const void *runs, int nruns, int total_rows, int hidden, size_t shift_off, const float *x, float *shift);
+int fllm_rwkv_lerp_launch(cudaStream_t s, const float *x, const float *shift, const float *mix, const float *delta, float *out, size_t count, int hidden);
+int fllm_rwkv_act_launch(cudaStream_t s, float *x, const float *gate, size_t count, int mode);
+int fllm_rwkv7_launch(cudaStream_t s, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
+                      const float *r, const float *k, const float *v, const float *w, const float *a, const float *vres, const float *gate,
+                      const float *norm_w, const float *norm_b, const float *k_k, const float *k_a, const float *r_k, float *v_first,
+                      float *out);
+int fllm_rwkv6_launch(cudaStream_t s, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
+                      const float *r, const float *k, const float *v, const float *w, const float *gate, const float *norm_w,
+                      const float *norm_b, const float *first, float *out);
 int fllm_rope_launch(cudaStream_t s, float *q, float *k, const int32_t *pos, const float *cs, const float *sn, int rows,
                      int heads, int kv_heads, int dim, int half_, int neox);
 int fllm_kv_write_launch(cudaStream_t s, const float *src, uint16_t *pool, const int32_t *slots, int rows, int kv,
@@ -372,7 +385,8 @@ int fllm_ssm_conv_launch(cudaStream_t s, const void *runs, int nruns, const floa
 int fllm_mamba1_supported(int inner, int state, int rank, int ksz);
 int fllm_mamba1_conv_launch(cudaStream_t s, const void *runs, int nruns, int inner, int ksz, size_t state_off, size_t rec_bytes, const float *proj,
                             const float *convw, const float *convb, float *mixed);
-int fllm_mamba1_prep_launch(cudaStream_t s, float *split, float *dt_in, int rows, int rank, int state, float eps);
+int fllm_mamba1_prep_launch(cudaStream_t s, float *split, float *dt_in, int rows, int rank, int state, float eps, const float *w_dt, const float *w_b,
+                            const float *w_c);
 int fllm_mamba1_scan_launch(cudaStream_t s, const void *runs, int nruns, int inner, int state, int rank, size_t state_off, const float *split,
                             const float *dt, const float *mixed, const float *proj, const float *decay, const float *skip, float *out);
 #if !defined(__HIPCC__)

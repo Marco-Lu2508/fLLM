@@ -1519,15 +1519,15 @@ int fllm_cuda_split_q_gate(FllmStream *st, const float *qg, float *q, float *gat
     PREP(st);
     return fllm_split_q_gate_launch(st->s, qg, q, gate, rows, heads, dk, per_head);
 }
-// AMD build: SSM / DeltaNet / Mamba / ShortConv layers stay on the host path by default until verified on AMD hardware;
-// FLLM_HIP_SSM=1 enables them on the device, and FLLM_HIP_NO_SSM=1 explicitly disables them.
+// AMD build: the SSM / DeltaNet / Mamba / ShortConv kernels are on by default (they passed selftest-gpu and the tiny-model texts on a gfx1153 GPU);
+// FLLM_HIP_NO_SSM=1 or FLLM_HIP_SSM=0 keeps those layers on the host path. The Rust side (hip_ssm_enabled_for_env) reads the same switches.
 static bool ssm_kernels_off() {
 #if defined(__HIPCC__)
     static const bool off = [] {
         const char *no_ssm = getenv("FLLM_HIP_NO_SSM");
         if (no_ssm && no_ssm[0] == '1') return true;
         const char *ssm = getenv("FLLM_HIP_SSM");
-        return !(ssm && ssm[0] == '1');
+        return ssm && ssm[0] == '0';
     }();
     return off;
 #else
@@ -1547,17 +1547,52 @@ int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n
                              convw, dt_bias, decay, norm, mixed, out);
 }
 int fllm_cuda_kda_supported(int heads, int head_dim, int ksz) { return fllm_kda_supported(heads, head_dim, ksz); }
+int fllm_cuda_copy_cols(FllmStream *st, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col) {
+    PREP(st);
+    return fllm_copy_cols_launch(st->s, dst, src, rows, width, dst_stride, dst_col);
+}
 // Kimi Delta Attention (KDA) layer: `runs` is nruns DeltaRun records in host memory.
 int fllm_cuda_kda_layer(FllmStream *st, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
-                        float lower_bound, float eps, size_t state_off, size_t rec_bytes,
+                        int bounded, float lower_bound, float eps, size_t state_off, size_t rec_bytes,
                         const float *qkv, const float *forget, const float *beta, const float *gate,
                         const float *convw, const float *dt_bias, const float *rate, const float *norm,
                         float *mixed, float *out) {
     PREP(st);
     void *d = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_kda_launch(st->s, d, nruns, max_n, heads, head_dim, ksz, lower_bound, eps, state_off, rec_bytes,
+    return fllm_kda_launch(st->s, d, nruns, max_n, heads, head_dim, ksz, bounded, lower_bound, eps, state_off, rec_bytes,
                            qkv, forget, beta, gate, convw, dt_bias, rate, norm, mixed, out);
+}
+int fllm_cuda_rwkv_supported(int hidden, int head_size) { return fllm_rwkv_supported(hidden, head_size); }
+int fllm_cuda_rwkv_shift(FllmStream *st, const void *runs, int nruns, int total_rows, int hidden, size_t shift_off, const float *x, float *shift) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_rwkv_shift_launch(st->s, d, nruns, total_rows, hidden, shift_off, x, shift);
+}
+int fllm_cuda_rwkv_lerp(FllmStream *st, const float *x, const float *shift, const float *mix, const float *delta, float *out, size_t count, int hidden) {
+    PREP(st);
+    return fllm_rwkv_lerp_launch(st->s, x, shift, mix, delta, out, count, hidden);
+}
+int fllm_cuda_rwkv_act(FllmStream *st, float *x, const float *gate, size_t count, int mode) {
+    PREP(st);
+    return fllm_rwkv_act_launch(st->s, x, gate, count, mode);
+}
+int fllm_cuda_rwkv7(FllmStream *st, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
+                    const float *r, const float *k, const float *v, const float *w, const float *a, const float *vres, const float *gate,
+                    const float *norm_w, const float *norm_b, const float *k_k, const float *k_a, const float *r_k, float *v_first, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_rwkv7_launch(st->s, d, nruns, heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate, norm_w, norm_b, k_k, k_a, r_k, v_first, out);
+}
+int fllm_cuda_rwkv6(FllmStream *st, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
+                    const float *r, const float *k, const float *v, const float *w, const float *gate, const float *norm_w,
+                    const float *norm_b, const float *first, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_rwkv6_launch(st->s, d, nruns, heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w, norm_b, first, out);
 }
 int fllm_cuda_act(FllmStream *st, const float *x, float *out, size_t n, int mode) {
     PREP(st);
@@ -1666,9 +1701,10 @@ int fllm_cuda_mamba1_conv(FllmStream *st, const void *runs, int nruns, int inner
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
     return fllm_mamba1_conv_launch(st->s, d, nruns, inner, ksz, state_off, rec_bytes, proj, convw, convb, mixed);
 }
-int fllm_cuda_mamba1_prep(FllmStream *st, float *split, float *dt_in, int rows, int rank, int state, float eps) {
+int fllm_cuda_mamba1_prep(FllmStream *st, float *split, float *dt_in, int rows, int rank, int state, float eps, const float *w_dt, const float *w_b,
+                          const float *w_c) {
     PREP(st);
-    return fllm_mamba1_prep_launch(st->s, split, dt_in, rows, rank, state, eps);
+    return fllm_mamba1_prep_launch(st->s, split, dt_in, rows, rank, state, eps, w_dt, w_b, w_c);
 }
 int fllm_cuda_mamba1_scan(FllmStream *st, const void *runs, int nruns, int inner, int state, int rank, size_t state_off, const float *split,
                           const float *dt, const float *mixed, const float *proj, const float *decay, const float *skip, float *out) {

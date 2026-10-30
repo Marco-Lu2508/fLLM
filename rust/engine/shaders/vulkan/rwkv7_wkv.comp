@@ -1,0 +1,118 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: rwkv7_wkv | bindings: r,k,v,w,a,vres,gate,norm_w,norm_b,k_k,k_a,r_k,v_first,state,out | push: hidden,row0,n,reset,state_off,has_vres,eps | grid: [heads, 1, 1] per run
+// RWKV-7 recurrence of one head of one run per workgroup (Stream::rwkv7_wkv, port of rwkv7_kernel in cuda/rwkv.cu, reference cpu_rwkv.rs `wkv7`). N = head size
+// (a compile-time macro, 16 / 32 / 64 / 128, = local_size_x): invocation i owns row i of the head's state S[i][0..N) (value channel i, key channels j) in registers
+// for the whole run, so a prompt is one dispatch per layer and run. Per token t of the run, with r k v the projections, w a v_res the pre-activation adapter
+// outputs and gate the (already sigmoid-ed) output gate:
+//   decay = exp(-0.6065306597126334 * sigmoid(w))      a = sigmoid(a_in)
+//   v     = has_vres ? v + (v_first - v) * sigmoid(v_res) : v, and v_first = v (stored) when there is no v_res
+//   kk    = normalize_head(k * k_k)    k' = k * (1 + (a - 1) * k_a)
+//   sa    = -sum_j S[i][j] kk[j];  S[i][j] = S[i][j] * decay[j] + sa * kk[j] * a[j] + v[i] * k'[j];  y[i] = sum_j S[i][j] r[j]
+//   out[i] = (groupnorm_head(y)[i] * norm_w[i] + norm_b[i] + (sum_j r[j] k'[j] r_k[j]) * v[i]) * gate[i]
+// The state S[h][i][j] is FP32 at state[state_off + (h * N + i) * N + j] (float view of the sequence's state buffer). reset != 0: the old state is ignored.
+// Rows row0 .. row0+n-1 of the [rows x hidden] inputs, head h = workgroup x, channel = h * N + i. The row and the per-channel vectors are handled as vec4
+// groups so that the loops over the head have N / 4 iterations (16 at N = 64): short enough for the compiler to unroll them and keep the row in registers.
+#define WG N
+#ifndef N
+#define N 64
+#endif
+#include "_ops_common.glsl"
+layout(local_size_x = N) in;
+
+layout(std430, binding = 0) readonly buffer RBuf { float rin[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kin[]; };
+layout(std430, binding = 2) readonly buffer VBuf { float vin[]; };
+layout(std430, binding = 3) readonly buffer WBuf { float win[]; };
+layout(std430, binding = 4) readonly buffer ABuf { float ain[]; };
+layout(std430, binding = 5) readonly buffer VResBuf { float vres[]; };
+layout(std430, binding = 6) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 7) readonly buffer NormWBuf { float norm_w[]; };
+layout(std430, binding = 8) readonly buffer NormBBuf { float norm_b[]; };
+layout(std430, binding = 9) readonly buffer KKBuf { float k_k[]; };
+layout(std430, binding = 10) readonly buffer KABuf { float k_a[]; };
+layout(std430, binding = 11) readonly buffer RKBuf { float r_k[]; };
+layout(std430, binding = 12) buffer VFirstBuf { float v_first[]; };
+layout(std430, binding = 13) buffer StateBuf { float state[]; };
+layout(std430, binding = 14) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    uint has_vres;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+shared vec4 s_r[N / 4];
+shared vec4 s_decay[N / 4];
+shared vec4 s_k[N / 4];
+shared vec4 s_kk[N / 4];
+shared vec4 s_a[N / 4];
+
+void main() {
+    const uint i = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint ch = h * N + i;
+    const uint sbase = p.state_off + (h * N + i) * N;
+    const uint iv = i >> 2u;
+    const uint ic = i & 3u;
+
+    vec4 s[N / 4];
+    [[unroll]] for (uint j = 0u; j < N / 4u; j++) {
+        s[j] = p.reset != 0u ? vec4(0.0) : vec4(state[sbase + 4u * j], state[sbase + 4u * j + 1u], state[sbase + 4u * j + 2u], state[sbase + 4u * j + 3u]);
+    }
+    const float lnw = norm_w[ch];
+    const float lnb = norm_b[ch];
+    const float kkw = k_k[ch];
+    const float kaw = k_a[ch];
+    const float rkw = r_k[ch];
+
+    for (uint t = 0u; t < p.n; t++) {
+        const uint at = (p.row0 + t) * p.hidden + ch;
+        const float a = sigmoid1(ain[at]);
+        const float decay = exp(-0.6065306597126334 * sigmoid1(win[at]));
+        const float k_raw = kin[at];
+        float v = vin[at];
+        if (p.has_vres != 0u) {
+            v += (v_first[at] - v) * sigmoid1(vres[at]);
+        } else {
+            v_first[at] = v;
+        }
+        float kk = k_raw * kkw;
+        const float ss = wg_sum(kk * kk);
+        kk *= 1.0 / max(sqrt(ss), 1e-12);
+        const float kmod = k_raw * (1.0 + (a - 1.0) * kaw);
+        const float r = rin[at];
+        s_r[iv][ic] = r;
+        s_decay[iv][ic] = decay;
+        s_k[iv][ic] = kmod;
+        s_kk[iv][ic] = kk;
+        s_a[iv][ic] = a;
+        // wg_sum starts with a barrier after its own write, which also publishes the s_* arrays
+        const float bonus = wg_sum(r * kmod * rkw);
+        vec4 sa4 = vec4(0.0);
+        [[unroll]] for (uint j = 0u; j < N / 4u; j++) sa4 += s[j] * s_kk[j];
+        const float sa = -(sa4.x + sa4.y + sa4.z + sa4.w);
+        vec4 acc4 = vec4(0.0);
+        [[unroll]] for (uint j = 0u; j < N / 4u; j++) {
+            s[j] = s[j] * s_decay[j] + (sa * s_kk[j]) * s_a[j] + v * s_k[j];
+            acc4 += s[j] * s_r[j];
+        }
+        const float acc = acc4.x + acc4.y + acc4.z + acc4.w;
+        const float mean = wg_sum(acc) / float(N);
+        const float d = acc - mean;
+        const float var_ = wg_sum(d * d) / float(N);
+        outv[at] = (d * (1.0 / sqrt(var_ + p.eps)) * lnw + lnb + bonus * v) * gate[at];
+        barrier();
+    }
+    [[unroll]] for (uint j = 0u; j < N / 4u; j++) {
+        state[sbase + 4u * j] = s[j].x;
+        state[sbase + 4u * j + 1u] = s[j].y;
+        state[sbase + 4u * j + 2u] = s[j].z;
+        state[sbase + 4u * j + 3u] = s[j].w;
+    }
+}

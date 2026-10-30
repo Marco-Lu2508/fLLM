@@ -21,6 +21,7 @@ mod hc;
 mod kv;
 mod mlx;
 mod moe;
+mod rwkv;
 #[cfg(feature = "cuda")]
 mod prefill;
 #[cfg(feature = "cuda")]
@@ -69,6 +70,7 @@ FLLM_ALLOW_SOFTWARE_GPU=1.";
 pub const GROUPS: &[(&str, &str)] = &[
     ("delta", "delta_layer (Gated DeltaNet): prefill, decode and mixed calls"),
     ("kda", "kda_layer (Kimi Delta Attention): prefill, decode and mixed calls"),
+    ("rwkv", "RWKV-6 / RWKV-7: token shift, interpolation, activations and the two WKV recurrences, prompts and decode steps of several sequences"),
     ("arch", "LayerNorm, activations beyond SiLU, clamp, MLA data movement, Mamba-1/2, ShortConv, softplus gate"),
     ("linear", "quantized_linear for every weight format (exact and fast kernels, batches, bias, shared activations)"),
     ("embedding", "embedding_lookup for the formats that can hold an embedding table"),
@@ -2270,6 +2272,9 @@ impl<'a> Tester<'a> {
         }
         if self.enter("kda") {
             self.kda_cases();
+        }
+        if self.enter("rwkv") {
+            self.rwkv_cases();
         }
         if self.enter("arch") {
             self.arch_cases();
@@ -4550,7 +4555,7 @@ impl Tester<'_> {
             let mut ms = 0.0;
             timed(&mut ms, stream.as_mut(), |s| {
                 s.mamba1_conv(shape, &conv_buf, Some(&bias_buf), &runs, offset, &proj_buf, &mut mixed_buf)?;
-                s.mamba1_prep(shape, &mut split_buf, &mut dt_in_buf, rows)?;
+                s.mamba1_prep(shape, &mut split_buf, &mut dt_in_buf, rows, None)?;
                 s.mamba1_scan(shape, &decay_buf, &skip_buf, &runs, offset, &split_buf, &dt_buf, &mixed_buf, &proj_buf, &mut out)
             })?;
             total_ms += ms;

@@ -917,6 +917,142 @@ impl Stream for CpuStream {
         Ok(())
     }
 
+    fn copy_columns(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        dst_stride: usize,
+        dst_col: usize,
+        src: &DeviceBuffer,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        let values = read_f32(src)?;
+        if dst_col + width > dst_stride || values.len() < rows * width {
+            return Err(invalid("copy_columns operands do not fit"));
+        }
+        with_typed_mut::<f32, _>(dst, |out| {
+            if out.len() < rows * dst_stride {
+                return Err(invalid("copy_columns destination is too small"));
+            }
+            for r in 0..rows {
+                out[r * dst_stride + dst_col..r * dst_stride + dst_col + width].copy_from_slice(&values[r * width..(r + 1) * width]);
+            }
+            Ok(())
+        })?
+    }
+
+    fn supports_rwkv(&self, s: &crate::backend::RwkvShape) -> bool {
+        s.head_size > 0 && s.hidden.is_multiple_of(s.head_size)
+    }
+
+    fn rwkv_shift(
+        &mut self,
+        hidden: usize,
+        runs: &[crate::backend::DeltaRun<'_>],
+        shift_offset: usize,
+        x: &DeviceBuffer,
+        shift: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let x_f32 = read_f32(x)?;
+        let mut out = read_f32(shift)?;
+        for run in runs.iter().filter(|r| r.rows > 0) {
+            let (a, b) = (run.first_row * hidden, (run.first_row + run.rows) * hidden);
+            let mut previous = if run.reset { vec![0.0; hidden] } else { read_f32_range(run.state, shift_offset, hidden)? };
+            crate::cpu_rwkv::shift(hidden, run.rows, &x_f32[a..b], &mut previous, &mut out[a..b]);
+            write_f32_range(run.state, shift_offset, &previous)?;
+        }
+        write_f32(shift, &out, "rwkv_shift out")
+    }
+
+    fn rwkv_lerp(
+        &mut self,
+        hidden: usize,
+        x: &DeviceBuffer,
+        shift: &DeviceBuffer,
+        mix: &DeviceBuffer,
+        delta: Option<&DeviceBuffer>,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let (x, shift, mix) = (read_f32(x)?, read_f32(shift)?, read_f32(mix)?);
+        let delta = delta.map(read_f32).transpose()?;
+        let values: Vec<f32> = (0..x.len())
+            .map(|i| x[i] + (shift[i] - x[i]) * (mix[i % hidden] + delta.as_ref().map_or(0.0, |d| d[i])))
+            .collect();
+        write_f32(out, &values, "rwkv_lerp out")
+    }
+
+    fn rwkv_act(&mut self, x: &mut DeviceBuffer, gate: Option<&DeviceBuffer>, mode: i32) -> Result<(), BackendError> {
+        let gate = gate.map(read_f32).transpose()?;
+        if mode == 4 && gate.is_none() {
+            return Err(invalid("rwkv_act mode 4 needs a gate"));
+        }
+        with_typed_mut::<f32, _>(x, |xs| {
+            for (i, v) in xs.iter_mut().enumerate() {
+                *v = if mode == 4 { *v / (1.0 + (-gate.as_ref().map_or(0.0, |g| g[i])).exp()) } else { crate::cpu_rwkv::activate(mode, *v, 0.0) };
+            }
+        })
+    }
+
+    fn rwkv7_wkv(
+        &mut self,
+        s: &crate::backend::RwkvShape,
+        w: &crate::backend::RwkvWeights<'_>,
+        runs: &[crate::backend::DeltaRun<'_>],
+        state_offset: usize,
+        inputs: &crate::backend::Rwkv7Inputs<'_>,
+        v_first: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let (norm_weight, norm_bias, k_k) = (read_f32(w.norm_weight)?, read_f32(w.norm_bias)?, read_f32(w.k_k)?);
+        let k_a = read_f32(w.k_a.ok_or_else(|| invalid("rwkv7_wkv needs k_a"))?)?;
+        let r_k = read_f32(w.r_k.ok_or_else(|| invalid("rwkv7_wkv needs r_k"))?)?;
+        let p = crate::cpu_rwkv::Wkv { heads: s.heads(), n: s.head_size, eps: s.group_eps, norm_weight: &norm_weight, norm_bias: &norm_bias, k_k: &k_k, k_a: &k_a, r_k: &r_k };
+        let (r, k, v, wd, a, gate) = (read_f32(inputs.r)?, read_f32(inputs.k)?, read_f32(inputs.v)?, read_f32(inputs.w)?, read_f32(inputs.a)?, read_f32(inputs.gate)?);
+        let v_res = inputs.v_res.map(read_f32).transpose()?;
+        let mut first = read_f32(v_first)?;
+        let mut out_f32 = read_f32(out)?;
+        let rec_len = s.heads() * s.head_size * s.head_size;
+        let c = s.hidden;
+        for run in runs.iter().filter(|r| r.rows > 0) {
+            let (lo, hi) = (run.first_row * c, (run.first_row + run.rows) * c);
+            let mut state = if run.reset { vec![0.0; rec_len] } else { read_f32_range(run.state, state_offset, rec_len)? };
+            let rows = crate::cpu_rwkv::Inputs7 { r: &r[lo..hi], k: &k[lo..hi], v: &v[lo..hi], w: &wd[lo..hi], a: &a[lo..hi], v_res: v_res.as_ref().map(|t| &t[lo..hi]), gate: &gate[lo..hi] };
+            crate::cpu_rwkv::wkv7(&p, &mut state, run.rows, &rows, &mut first[lo..hi], &mut out_f32[lo..hi]);
+            write_f32_range(run.state, state_offset, &state)?;
+        }
+        write_f32(v_first, &first, "rwkv7_wkv v_first")?;
+        write_f32(out, &out_f32, "rwkv7_wkv out")
+    }
+
+    fn rwkv6_wkv(
+        &mut self,
+        s: &crate::backend::RwkvShape,
+        w: &crate::backend::RwkvWeights<'_>,
+        runs: &[crate::backend::DeltaRun<'_>],
+        state_offset: usize,
+        r: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        decay: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let (norm_weight, norm_bias, first) = (read_f32(w.norm_weight)?, read_f32(w.norm_bias)?, read_f32(w.k_k)?);
+        let p = crate::cpu_rwkv::Wkv { heads: s.heads(), n: s.head_size, eps: s.group_eps, norm_weight: &norm_weight, norm_bias: &norm_bias, k_k: &first, k_a: &[], r_k: &[] };
+        let (r, k, v, decay, gate) = (read_f32(r)?, read_f32(k)?, read_f32(v)?, read_f32(decay)?, read_f32(gate)?);
+        let mut out_f32 = read_f32(out)?;
+        let rec_len = s.heads() * s.head_size * s.head_size;
+        let c = s.hidden;
+        for run in runs.iter().filter(|r| r.rows > 0) {
+            let (lo, hi) = (run.first_row * c, (run.first_row + run.rows) * c);
+            let mut state = if run.reset { vec![0.0; rec_len] } else { read_f32_range(run.state, state_offset, rec_len)? };
+            let rows = crate::cpu_rwkv::Inputs6 { r: &r[lo..hi], k: &k[lo..hi], v: &v[lo..hi], w: &decay[lo..hi], gate: &gate[lo..hi] };
+            crate::cpu_rwkv::wkv6(&p, &mut state, run.rows, &rows, &mut out_f32[lo..hi]);
+            write_f32_range(run.state, state_offset, &state)?;
+        }
+        write_f32(out, &out_f32, "rwkv6_wkv out")
+    }
+
     fn residual_add(
         &mut self,
         x: &mut DeviceBuffer,

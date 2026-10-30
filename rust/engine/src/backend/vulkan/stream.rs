@@ -30,7 +30,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer_with, plan_mamba1_bc_norms, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_with, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -507,7 +507,324 @@ impl Stream for VulkanStream {
     }
 
     fn supports_kda(&self, shape: &crate::backend::KdaShape) -> bool {
-        crate::backend::vulkan::ops::recurrent::kda_supported(shape)
+        // kda_rec binds nine storage buffers
+        crate::backend::vulkan::ops::recurrent::kda_supported(shape) && self.sh.caps().max_per_stage_storage_buffers >= 9
+    }
+
+    fn copy_columns(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        dst_stride: usize,
+        dst_col: usize,
+        src: &DeviceBuffer,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        if rows == 0 || width == 0 {
+            return Ok(());
+        }
+        if dst_col + width > dst_stride || src.size < rows * width * 4 || dst.size < rows * dst_stride * 4 {
+            return Err(invalid("copy_columns operands do not fit"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_copy_cols(rows, width, dst_stride, dst_col)?;
+        self.run_plans(&[plan], &[Arg::r("src", src), Arg::w("dst", dst)], &[], false)
+    }
+
+    fn kda_layer(
+        &mut self,
+        shape: &crate::backend::KdaShape,
+        weights: &crate::backend::KdaWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        qkv: &DeviceBuffer,
+        forget: &DeviceBuffer,
+        beta: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        mixed: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_kda(shape) {
+            return Err(BackendError::UnsupportedOperation("kda_layer for this shape".into()));
+        }
+        let waves = exec::recurrence_waves(runs);
+        if waves.len() > 1 {
+            for wave in &waves {
+                self.kda_layer(shape, weights, wave, state_offset, qkv, forget, beta, gate, mixed, out)?;
+                self.flush()?;
+            }
+            return Ok(());
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (width, conv_dim) = (shape.heads * shape.head_dim, shape.conv_dim());
+        let state_end = state_offset + shape.layer_state_bytes();
+        if qkv.size < rows * conv_dim * 4
+            || mixed.size < rows * conv_dim * 4
+            || forget.size < rows * width * 4
+            || beta.size < rows * shape.heads * 4
+            || gate.size < rows * width * 4
+            || out.size < rows * width * 4
+            || weights.conv.size < conv_dim * shape.conv_kernel * 4
+            || weights.dt_bias.size < width * 4
+            || weights.rate.size < shape.heads * 4
+            || weights.norm.size < shape.head_dim * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("KDA buffers are smaller than the layer needs"));
+        }
+        let specs: Vec<RunSpec> = runs.iter().map(|r| RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset }).collect();
+        let plans = crate::backend::vulkan::ops::recurrent::plan_kda_layer(shape, &specs, state_offset)?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+        let args = [
+            Arg::r("qkv", qkv),
+            Arg::r("conv", weights.conv),
+            Arg::r("forget", forget),
+            Arg::r("beta", beta),
+            Arg::r("gate", gate),
+            Arg::r("dt_bias", weights.dt_bias),
+            Arg::r("rate", weights.rate),
+            Arg::r("norm", weights.norm),
+            Arg::w("out", out),
+            Arg::w("mixed", mixed),
+        ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, false)
+    }
+
+    fn supports_shortconv(&self, hidden: usize, kernel: usize) -> bool {
+        crate::backend::vulkan::ops::recurrent::shortconv_supported(hidden, kernel)
+    }
+
+    fn shortconv_layer(
+        &mut self,
+        hidden: usize,
+        kernel: usize,
+        conv: &DeviceBuffer,
+        bias: Option<&DeviceBuffer>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        projected: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_shortconv(hidden, kernel) {
+            return Err(BackendError::UnsupportedOperation("shortconv_layer for this shape".into()));
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + hidden * (kernel - 1) * 4;
+        if projected.size < rows * 3 * hidden * 4
+            || out.size < rows * hidden * 4
+            || conv.size < hidden * kernel * 4
+            || bias.is_some_and(|b| b.size < hidden * 4)
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("ShortConv buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(crate::backend::vulkan::ops::recurrent::plan_shortconv(i, &spec, hidden, kernel, state_offset, bias.is_some())?);
+        }
+        let mut args = vec![Arg::r("proj", projected), Arg::r("conv", conv), Arg::w("out", out)];
+        if let Some(b) = bias {
+            args.push(Arg::r("bias", b));
+        }
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, true)
+    }
+
+    fn supports_rwkv(&self, shape: &crate::backend::RwkvShape) -> bool {
+        crate::backend::vulkan::ops::recurrent::rwkv_supported(shape)
+            && self.sh.caps().max_per_stage_storage_buffers >= crate::backend::vulkan::ops::recurrent::RWKV_BINDINGS
+    }
+
+    fn rwkv_shift(
+        &mut self,
+        hidden: usize,
+        runs: &[DeltaRun<'_>],
+        shift_offset: usize,
+        x: &DeviceBuffer,
+        shift: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        if x.size < rows * hidden * 4 || shift.size < rows * hidden * 4 || runs.iter().any(|r| r.state.size < shift_offset + hidden * 4) {
+            return Err(invalid("RWKV shift buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
+            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv_shift(i, &RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset }, hidden, shift_offset)?);
+        }
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &[Arg::r("x", x), Arg::w("shift", shift)], &states, true)
+    }
+
+    fn rwkv_lerp(
+        &mut self,
+        hidden: usize,
+        x: &DeviceBuffer,
+        shift: &DeviceBuffer,
+        mix: &DeviceBuffer,
+        delta: Option<&DeviceBuffer>,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let count = (x.size / 4).min(shift.size / 4).min(out.size / 4);
+        if count == 0 {
+            return Ok(());
+        }
+        if mix.size < hidden * 4 || delta.is_some_and(|d| d.size < count * 4) {
+            return Err(invalid("RWKV interpolation buffers are smaller than the layer needs"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_rwkv_lerp(count, hidden, delta.is_some())?;
+        let mut args = vec![Arg::r("x", x), Arg::r("shift", shift), Arg::r("mix", mix), Arg::w("out", out)];
+        if let Some(d) = delta {
+            args.push(Arg::r("delta", d));
+        }
+        self.run_plans(&[plan], &args, &[], false)
+    }
+
+    fn rwkv_act(&mut self, x: &mut DeviceBuffer, gate: Option<&DeviceBuffer>, mode: i32) -> Result<(), BackendError> {
+        let count = x.size / 4;
+        if count == 0 {
+            return Ok(());
+        }
+        if gate.is_some_and(|g| g.size < x.size) {
+            return Err(invalid("RWKV activation gate is smaller than its target"));
+        }
+        let plan = crate::backend::vulkan::ops::recurrent::plan_rwkv_act(count, mode, gate.is_some())?;
+        let mut args = vec![Arg::w("x", x)];
+        if let Some(g) = gate {
+            args.push(Arg::r("gate", g));
+        }
+        self.run_plans(&[plan], &args, &[], false)
+    }
+
+    fn rwkv7_wkv(
+        &mut self,
+        shape: &crate::backend::RwkvShape,
+        weights: &crate::backend::RwkvWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        inputs: &crate::backend::Rwkv7Inputs<'_>,
+        v_first: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rwkv(shape) {
+            return Err(BackendError::UnsupportedOperation("rwkv7_wkv for this shape".into()));
+        }
+        let waves = exec::recurrence_waves(runs);
+        if waves.len() > 1 {
+            for wave in &waves {
+                self.rwkv7_wkv(shape, weights, wave, state_offset, inputs, v_first, out)?;
+                self.flush()?;
+            }
+            return Ok(());
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (k_a, r_k) = (weights.k_a.ok_or_else(|| invalid("rwkv7_wkv needs k_a"))?, weights.r_k.ok_or_else(|| invalid("rwkv7_wkv needs r_k"))?);
+        let need = rows * shape.hidden * 4;
+        let mut all = vec![inputs.r, inputs.k, inputs.v, inputs.w, inputs.a, inputs.gate];
+        all.extend(inputs.v_res);
+        if all.iter().any(|b| b.size < need)
+            || v_first.size < need
+            || out.size < need
+            || [weights.norm_weight, weights.norm_bias, weights.k_k, k_a, r_k].iter().any(|b| b.size < shape.hidden * 4)
+            || runs.iter().any(|r| r.state.size < state_offset + shape.rec_bytes())
+        {
+            return Err(invalid("RWKV-7 buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv7_wkv(i, &spec, shape, state_offset, inputs.v_res.is_some())?);
+        }
+        let mut args = vec![
+            Arg::r("r", inputs.r),
+            Arg::r("k", inputs.k),
+            Arg::r("v", inputs.v),
+            Arg::r("w", inputs.w),
+            Arg::r("a", inputs.a),
+            Arg::r("gate", inputs.gate),
+            Arg::r("norm_w", weights.norm_weight),
+            Arg::r("norm_b", weights.norm_bias),
+            Arg::r("k_k", weights.k_k),
+            Arg::r("k_a", k_a),
+            Arg::r("r_k", r_k),
+            Arg::w("v_first", v_first),
+            Arg::w("out", out),
+        ];
+        if let Some(v) = inputs.v_res {
+            args.push(Arg::r("vres", v));
+        }
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, true)
+    }
+
+    fn rwkv6_wkv(
+        &mut self,
+        shape: &crate::backend::RwkvShape,
+        weights: &crate::backend::RwkvWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        r: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        decay: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rwkv(shape) {
+            return Err(BackendError::UnsupportedOperation("rwkv6_wkv for this shape".into()));
+        }
+        let waves = exec::recurrence_waves(runs);
+        if waves.len() > 1 {
+            for wave in &waves {
+                self.rwkv6_wkv(shape, weights, wave, state_offset, r, k, v, decay, gate, out)?;
+                self.flush()?;
+            }
+            return Ok(());
+        }
+        let rows = runs.iter().map(|x| x.first_row + x.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let need = rows * shape.hidden * 4;
+        if [r, k, v, decay, gate].iter().any(|b| b.size < need)
+            || out.size < need
+            || [weights.norm_weight, weights.norm_bias, weights.k_k].iter().any(|b| b.size < shape.hidden * 4)
+            || runs.iter().any(|x| x.state.size < state_offset + shape.rec_bytes())
+        {
+            return Err(invalid("RWKV-6 buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, x) in runs.iter().enumerate().filter(|(_, x)| x.rows > 0) {
+            let spec = RunSpec { first_row: x.first_row, rows: x.rows, reset: x.reset };
+            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv6_wkv(i, &spec, shape, state_offset)?);
+        }
+        let args = [
+            Arg::r("r", r),
+            Arg::r("k", k),
+            Arg::r("v", v),
+            Arg::r("w", decay),
+            Arg::r("gate", gate),
+            Arg::r("norm_w", weights.norm_weight),
+            Arg::r("norm_b", weights.norm_bias),
+            Arg::r("first", weights.k_k),
+            Arg::w("out", out),
+        ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|x| x.state).collect();
+        self.run_plans(&plans, &args, &states, true)
     }
 
     fn supports_arch_ops(&self) -> bool {
@@ -850,7 +1167,14 @@ impl Stream for VulkanStream {
         self.run_plans(&plans, &args, &states, false)
     }
 
-    fn mamba1_prep(&mut self, shape: &Mamba1Shape, split: &mut DeviceBuffer, dt_in: &mut DeviceBuffer, rows: usize) -> Result<(), BackendError> {
+    fn mamba1_prep(
+        &mut self,
+        shape: &Mamba1Shape,
+        split: &mut DeviceBuffer,
+        dt_in: &mut DeviceBuffer,
+        rows: usize,
+        norms: Option<[&DeviceBuffer; 3]>,
+    ) -> Result<(), BackendError> {
         let s = mamba1_shape(shape);
         if rows == 0 {
             return Ok(());
@@ -858,8 +1182,14 @@ impl Stream for VulkanStream {
         if split.size < rows * s.split_width() * 4 || dt_in.size < rows * s.rank * 4 {
             return Err(invalid("Mamba-1 prep buffers are smaller than rows x width"));
         }
-        for plan in plan_mamba1_bc_norms(&s, rows)? {
-            self.run_plans(&[plan], &[Arg::w("x", split), Arg::w("out", split)], &[], false)?;
+        if norms.is_some_and(|w| w.iter().zip([s.rank, s.state, s.state]).any(|(b, len)| b.size < len * 4)) {
+            return Err(invalid("Mamba-1 norm weights are smaller than the layer needs"));
+        }
+        for (part, plan) in plan_mamba1_bc_norms_with(&s, rows, norms.is_some())?.into_iter().enumerate() {
+            match norms {
+                Some(w) => self.run_plans(&[plan], &[Arg::w("x", split), Arg::w("out", split), Arg::r("weight", w[part])], &[], false)?,
+                None => self.run_plans(&[plan], &[Arg::w("x", split), Arg::w("out", split)], &[], false)?,
+            }
         }
         let layout = GluLayout { gate_stride: s.split_width(), gate_off: 0, up_stride: 0, up_off: 0, out_stride: s.rank };
         let plan = plan_glu_strided(GluMode::Copy, rows, s.rank, layout)?;

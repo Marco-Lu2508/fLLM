@@ -73,7 +73,7 @@ The engine handles this transparently via **One-Time Fallback Logging**:
 | `attention_paged` | native, head width <= 512 | decode and prefill rows, GQA, scale, soft cap, sliding window, chunks, sinks, ALiBi, key width != value width; wider heads fall back to the host with a logged reason |
 | `layer_norm`, `moe_*`, `sampling_logits` | host fallback | logged once per operation with the reason |
 
-Fallbacks copy their operands to a CPU stream and back and are logged once per operation (`warn_fallback_reason`). Layers whose features the device decoder path does not implement run on the host between the device layers (section 3a); the wgpu backend has no LayerNorm / element-wise architecture kernels, so those layers (and models that need them everywhere) stay on the CPU. Recurrent mixers without a device kernel (DeltaNet, Mamba-1/2 and ShortConv on wgpu) run on the host as well.
+Fallbacks copy their operands to a CPU stream and back and are logged once per operation (`warn_fallback_reason`). Layers whose features the device decoder path does not implement run on the host between the device layers (section 3a); the wgpu backend has no LayerNorm / element-wise architecture kernels, so those layers (and models that need them everywhere) stay on the CPU. Recurrent mixers without a device kernel (DeltaNet, Mamba-1/2, ShortConv, KDA and RWKV on wgpu) run on the host as well.
 
 Parameters reach the kernels through one per-stream arena buffer: each dispatch gets a 32-word header at a dynamic offset plus variable data (positions, slots, lengths, block tables, sinks) in the same buffer, written once per submit. Bind groups are cached per buffer window. Driver and validation errors are captured by an error handler and returned as `BackendError` from the next `synchronize`/`download`, never as a panic.
 
@@ -99,8 +99,8 @@ cannot be done by the device at all (for backends without grouped RMSNorm), is r
 forces layers onto the host (the output must then match `--device cpu`); `FLLM_LAYER_CHECK=1` runs every device layer a second time on
 the host from the same input and prints the deviation of the residual stream (max, mean, relative to the rms).
 
-Device kernels (CUDA, `cuda/arch_ops.cu`, `mla.cu`, `mamba1.cu`, `mamba2.cu`, `shortconv.cu`; the HIP build has stubs, `Stream::supports_arch_ops` etc.
-report them as missing so the host path runs):
+Device kernels (CUDA and HIP from the same sources `cuda/arch_ops.cu`, `mla.cu`, `mamba1.cu`, `mamba2.cu`, `shortconv.cu`, `kda.cu`, `rwkv.cu`;
+Vulkan in `rust/engine/shaders/vulkan`; a `Stream` that lacks one reports it through `Stream::supports_arch_ops`, `supports_kda`, `supports_rwkv` etc., and the layer runs on the host):
 
 | Layer type / feature | Device | Host fallback |
 | :--- | :--- | :--- |
@@ -108,8 +108,14 @@ report them as missing so the host path runs):
 | Routed value experts (K2 Horizon MoVA) | the values of the layer come from the host reference (download the normed input, upload the values); q, k, attention, output projection and FFN stay on the device | |
 | MLA (DeepSeek V2/V3, Kimi), expanded form: the cache holds the rebuilt per-head keys and values like the CPU reference | yes | when the kv head count differs from the head count |
 | Mamba-2 (Nemotron-H, Granite-Hybrid, Bamba): convolution, selective scan (state in registers, one block per sequence run and head) and gated norm; the state of all layers of a sequence lives in one device buffer (same bookkeeping as DeltaNet) | state 16/32/64/128, head width <= 256 | other shapes, and models that also contain DeltaNet |
-| LFM2 ShortConv | yes | |
-| Mamba-1 (Mamba, Falcon-Mamba, Jamba): convolution, the x_proj / dt_proj GEMMs, dt/B/C normalisation and the selective scan with one thread per channel (state in registers) | state 16/32 | other shapes, and models that also contain DeltaNet or Mamba-2 layers |
+| LFM2 ShortConv | yes (CUDA, HIP, Vulkan `shortconv.comp`) | kernel size outside 2..8 |
+| Mamba-1 (Mamba, Falcon-Mamba, Jamba): convolution, the x_proj / dt_proj GEMMs, dt/B/C normalisation (with the learned weights of Jamba) and the selective scan with one thread per channel (state in registers) | state 16/32 | other shapes, and models that also contain DeltaNet or Mamba-2 layers |
+| Kimi Delta Attention (Kimi-Linear, Ling-3.0): the projections, the packing of q/k/v (`Stream::copy_columns`), the convolution + L2 norm (`delta_conv`), the per-channel-decay delta rule (`kda_rec_hk*` / `kda_rec_kernel`) and the gated norm; the state lives in one device buffer per sequence like DeltaNet's | head width 16/32/64/128 (CUDA, HIP, Vulkan) | other widths; `FLLM_KDA_HOST=1` |
+| RWKV-6 / RWKV-7 (time mix and channel mix of the whole layer): token shift (`rwkv_shift`), interpolation (`rwkv_lerp`), the low-rank adapters as ordinary F32 GEMMs, `rwkv_act`, and the WKV recurrence with group norm, bonus and output gate (`rwkv7_wkv`, `rwkv6_wkv`); the WKV matrices and both token-shift vectors live in the per-sequence state buffer | head size 16/32/64/128 (CUDA, HIP, Vulkan with 15 storage buffers per stage) | other head sizes; `FLLM_RWKV_HOST=1` |
+
+The recurrent kernels run a whole prompt of one sequence in one launch per layer and run (the projections, adapters and norms are batched GEMMs over all rows), but
+the recurrence itself is serial over the tokens of the run inside that launch: there is no chunk-parallel scan or chunked WKV / delta-rule form yet, so prompt
+speed of these layers is bound by the length of the prompt times the per-token step of one head.
 
 Hyper-connections (Hy4; `Stream::hc_mix`, `Stream::hc_combine`): the `hc` residual streams live in a buffer of their own (`rows x hc x hidden`); before each
 mixer and each feed-forward block `hc_mix` normalises them, turns the mixes into `pre`/`post` (and the Sinkhorn mixing matrix) and writes the collapsed block input
@@ -143,8 +149,9 @@ The table below summarizes the layer-by-layer execution path across device backe
 | `qwen35`, `qwen35moe`, `qwen3next` | Hybrid Gated DeltaNet + Full Attention | Device | Device | Device where DeltaNet kernel exists (CUDA, Vulkan, Metal); host between device layers otherwise |
 | `k2_horizon` | Grouped RMSNorm + softplus output gate + routed value experts (MoVA) | Device / Host values | Device / Host values | Value experts evaluated on host reference (`host_values`), mixer on device |
 | `deepseek2`, `deepseek` (v2/v3), `minicpm3` | Multi-head Latent Attention (MLA) + MoE | Device | Device / Host | CUDA uses `cuda/mla.cu`; Vulkan uses `mla_move.comp` or falls back to host when KV head count differs (`"multi-head latent attention"`) |
-| `mamba`, `mamba2`, `bamba` | Recurrent SSM (Mamba-1 / Mamba-2) | Device | Device (Mamba-2) / Host | Mamba-1 with learned norms falls back (`"Mamba-1 with learned dt/B/C norms"`) |
-| `lfm2`, `lfm2moe` | ShortConv recurrent mixer | Device | Device | Requires ShortConv kernel; falls back if `parallel_residual` (`"the ShortConv mixer"`) |
+| `mamba`, `mamba2`, `bamba` | Recurrent SSM (Mamba-1 / Mamba-2) | Device | Device | None (Mamba-1 with learned dt/B/C norms, Jamba, runs on the device since this change) |
+| `lfm2`, `lfm2moe` | ShortConv recurrent mixer | Device | Device | Falls back if `parallel_residual` (`"the ShortConv mixer"`) |
+| `rwkv6`, `rwkv7` | Time mix + channel mix with a WKV state per head | Device (`rwkv.cu`) | Device (`rwkv_*.comp`, `rwkv7_wkv_n*`, `rwkv6_wkv_n*`) | head size not in 16/32/64/128, `FLLM_RWKV_HOST=1`: `"an RWKV time-mix / channel-mix layer (no device operations for this backend or shape)"` |
 | `nemotron_h`, `nemotron_h_moe` | Mamba-2 / FFN-only / Latent-MoE | Device / Host FFN | Device / Host FFN | Latent-space MoE experts run on host reference (`"latent-space expert projections"`) |
 | `ministral`, `helium` | Standard GQA (Mistral with a per-layer sliding window; Llama with interleaved rotary pairs) | Device | Device | None |
 | `bitnet` | Standard GQA + relu2 gated FFN + RMS sub-norms over the attention output and the FFN activation | Host layers | Host layers | `"an attention sub-norm"` / `"a feed-forward sub-norm"`: those layers run on the host reference between device layers |
@@ -153,9 +160,10 @@ The table below summarizes the layer-by-layer execution path across device backe
 | `bitnet` | Standard GQA + relu2 gated FFN + RMS sub-norms over the attention output and the FFN activation | Device | Device | None: the sub-norms use the ordinary device RMS norm (before 2026-10-30 these layers ran on the host) |
 | `step3p5`, `mimo_v2` | Laguna-style attention (per-layer head counts, per-head gate) + sigmoid MoE; MiMo: per-layer KV heads, sinks, value scale | Device (`head_gate_mul`, `scale_inplace`); HIP: MiMo-V2 layers on the host | Device (`act_head_gate`, `ewise_scale`) | Host attention layers on backends without `supports_head_gate`, and the MiMo-V2 value-scale layers on AMD GPUs (`supports_value_scale`, `FLLM_HIP_VALUE_SCALE=1` lifts it) (`"a per-head attention output gate"`, `"a value scale"`). The element-wise gate kernels cannot read a gate with one value per head; that was the cause of wrong results on Vulkan before the dedicated operations existed (an RTX 2000 Ada: layer output differed from the host reference by 1.7 to 2.5 times its rms) |
 | `deepseek2` (DeepSeek-V3.2, GLM-5 converted with the indexer dropped) | MLA + MoE, dense attention | Device | Device / Host | as `deepseek2` |
-| `kimi-linear` | KDA + latent attention without rope + MoE | Device (KDA kernel) | Device (KDA kernel) | host between device layers where no KDA kernel exists (`"Kimi Delta Attention"`) |
+| `kimi-linear` | KDA + latent attention without rope + MoE | Device (KDA kernels); the latent attention layers run on the host (`"multi-head latent attention"`, no rope) | Device (KDA kernels), attention layers on the host | `"Kimi Delta Attention (no device operations ...)"` for a backend or shape without the KDA operations; `FLLM_KDA_HOST=1` |
+| `bailing_hybrid` (Ling-3.0, GGUF `kimi-linear`) | KDA (direct gates, bounded forget gate) + rotary latent attention with a head gate + MoE | Device KDA layers; latent attention layers with the output gate on the host (`"a latent attention output gate"`) | same | as `kimi-linear` |
 | `falcon-h1` | Parallel Mamba-2 + Attention in every layer, muP multipliers | Host layers | Host layers | Always host reference: `"a Mamba-2 branch next to the attention"` |
-| `jamba` | Mamba-1 + Full Attention + MoE | Device (CUDA) / Host (Vulkan) | Host layers | CUDA has native Mamba-1 scan; Vulkan falls back Mamba-1 layers to host |
+| `jamba` | Mamba-1 (learned dt/B/C norms) + Full Attention + MoE | Device | Device | None for the mixer |
 | `zamba2` | Shared transformer block preceding Mamba-2 mixer | Host layers | Host layers | Always host reference: `"a shared transformer block in front of the Mamba-2 mixer"` |
 
 ---

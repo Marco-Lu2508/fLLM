@@ -323,6 +323,65 @@ pub struct KdaWeights<'a> {
     pub norm: &'a DeviceBuffer,
 }
 
+/// Shape and constants of an RWKV-6 or RWKV-7 layer (time-mix plus channel-mix block).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RwkvShape {
+    pub hidden: usize,
+    pub head_size: usize,
+    /// Epsilon of the group norm over the heads of the time-mix output.
+    pub group_eps: f32,
+    pub v7: bool,
+}
+
+impl RwkvShape {
+    pub fn heads(&self) -> usize {
+        self.hidden / self.head_size.max(1)
+    }
+
+    /// Bytes of the WKV matrices of one layer of one sequence (`heads x head_size x head_size`, FP32).
+    pub fn rec_bytes(&self) -> usize {
+        self.heads() * self.head_size * self.head_size * 4
+    }
+
+    /// Byte offset of the token-shift vector of the time-mix block (`hidden` floats) inside the state of a layer; the one of the
+    /// channel-mix block follows it.
+    pub fn shift_offset(&self) -> usize {
+        self.rec_bytes()
+    }
+
+    /// Bytes one layer of one sequence occupies in a state buffer: the WKV matrices, then the two token-shift vectors, rounded up to 256 bytes.
+    pub fn layer_state_bytes(&self) -> usize {
+        (self.rec_bytes() + 2 * self.hidden * 4).next_multiple_of(256)
+    }
+}
+
+/// Device-resident per-layer vectors of an RWKV layer (all FP32).
+pub struct RwkvWeights<'a> {
+    /// Weight and bias of the group norm over the heads of the time-mix output.
+    pub norm_weight: &'a DeviceBuffer,
+    pub norm_bias: &'a DeviceBuffer,
+    /// RWKV-7: `k_k`; RWKV-6: the bonus `u` (`time_mix_first`).
+    pub k_k: &'a DeviceBuffer,
+    /// RWKV-7 only: `k_a` and `r_k`.
+    pub k_a: Option<&'a DeviceBuffer>,
+    pub r_k: Option<&'a DeviceBuffer>,
+}
+
+/// The per-row inputs of [`Stream::rwkv7_wkv`] (`rows x hidden` floats each).
+pub struct Rwkv7Inputs<'a> {
+    pub r: &'a DeviceBuffer,
+    pub k: &'a DeviceBuffer,
+    pub v: &'a DeviceBuffer,
+    /// Pre-activation decay (`w` adapter output).
+    pub w: &'a DeviceBuffer,
+    /// Pre-activation in-context learning rate (`a` adapter output).
+    pub a: &'a DeviceBuffer,
+    /// Pre-activation value mix (`v` adapter output); `None` stores the values in `v_first` instead of blending with it.
+    pub v_res: Option<&'a DeviceBuffer>,
+    /// Output gate (the `g` adapter output, already through its sigmoid).
+    pub gate: &'a DeviceBuffer,
+}
+
 /// Quantization format of weights stored resident on the device.
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2056,7 +2115,15 @@ pub trait Stream: Send {
 
     /// Mamba-1 step 2: on the output `split` (`rows x (rank + 2 state)`) of x_proj, normalise the dt / B / C parts (RMS, `shape.bc_rms_eps`)
     /// and copy the dt part into `dt_in` (`rows x rank`), the input of dt_proj.
-    fn mamba1_prep(&mut self, _shape: &Mamba1Shape, _split: &mut DeviceBuffer, _dt_in: &mut DeviceBuffer, _rows: usize) -> Result<(), BackendError> {
+    /// `norms` are the learned weights of those three norms (Jamba: `rank`, `state` and `state` floats), `None` for a norm without a weight.
+    fn mamba1_prep(
+        &mut self,
+        _shape: &Mamba1Shape,
+        _split: &mut DeviceBuffer,
+        _dt_in: &mut DeviceBuffer,
+        _rows: usize,
+        _norms: Option<[&DeviceBuffer; 3]>,
+    ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("mamba1_prep".into()))
     }
 
@@ -2173,6 +2240,95 @@ pub trait Stream: Send {
         _out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("kda_layer".into()))
+    }
+
+    /// `dst[r * dst_stride + dst_col + c] = src[r * width + c]` for `rows` rows: packs separately projected blocks into the wider rows of a layer
+    /// (the `[q | k | v]` rows of [`Stream::kda_layer`]). Implemented by every stream that reports [`Stream::supports_kda`].
+    fn copy_columns(
+        &mut self,
+        _dst: &mut DeviceBuffer,
+        _dst_stride: usize,
+        _dst_col: usize,
+        _src: &DeviceBuffer,
+        _rows: usize,
+        _width: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("copy_columns".into()))
+    }
+
+    /// Does this stream implement the RWKV operations ([`Stream::rwkv_shift`], [`Stream::rwkv_lerp`], [`Stream::rwkv_act`],
+    /// [`Stream::rwkv7_wkv`], [`Stream::rwkv6_wkv`]) for layers of this shape?
+    fn supports_rwkv(&self, _shape: &RwkvShape) -> bool {
+        false
+    }
+
+    /// RWKV token shift of one block over `runs`: `shift[r]` is the previous row of `x` in the same sequence, for the first row of a run the
+    /// vector `hidden` floats long at `shift_offset` bytes into the run's state buffer (zeros when the run is `reset`); afterwards that vector
+    /// holds the last row of the run.
+    fn rwkv_shift(
+        &mut self,
+        _hidden: usize,
+        _runs: &[DeltaRun<'_>],
+        _shift_offset: usize,
+        _x: &DeviceBuffer,
+        _shift: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rwkv_shift".into()))
+    }
+
+    /// `out[r] = x[r] + (shift[r] - x[r]) * (mix + delta[r])` for every row (`hidden` floats): the interpolation of the RWKV blocks with a
+    /// mixing vector and an optional per-row correction (RWKV-6).
+    fn rwkv_lerp(
+        &mut self,
+        _hidden: usize,
+        _x: &DeviceBuffer,
+        _shift: &DeviceBuffer,
+        _mix: &DeviceBuffer,
+        _delta: Option<&DeviceBuffer>,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rwkv_lerp".into()))
+    }
+
+    /// In-place activation of the RWKV blocks. `mode`: 0 tanh, 1 sigmoid, 2 SiLU, 3 ReLU squared, 4 `x *= sigmoid(gate)` (needs `gate`), 5 `x *= 0.5` (the rescale of RWKV files that fold it into the weights).
+    fn rwkv_act(&mut self, _x: &mut DeviceBuffer, _gate: Option<&DeviceBuffer>, _mode: i32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rwkv_act".into()))
+    }
+
+    /// RWKV-7 recurrence of one layer over `runs`: value residual, key normalisation, the delta-rule update of the WKV matrices (at
+    /// `state_offset` bytes into each run's state buffer, updated in place), the group norm, the `r k r_k` bonus and the output gate.
+    /// `v_first` receives the values of the run (`inputs.v_res` is `None`) or supplies them for the blend. `out` is `rows x hidden`.
+    #[allow(clippy::too_many_arguments)]
+    fn rwkv7_wkv(
+        &mut self,
+        _shape: &RwkvShape,
+        _weights: &RwkvWeights<'_>,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _inputs: &Rwkv7Inputs<'_>,
+        _v_first: &mut DeviceBuffer,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rwkv7_wkv".into()))
+    }
+
+    /// RWKV-6 recurrence of one layer over `runs` (`w` is the pre-exponential decay, `gate` the SiLU of the gate projection); `out` is
+    /// `rows x hidden`, the group-normed output times the gate.
+    #[allow(clippy::too_many_arguments)]
+    fn rwkv6_wkv(
+        &mut self,
+        _shape: &RwkvShape,
+        _weights: &RwkvWeights<'_>,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _r: &DeviceBuffer,
+        _k: &DeviceBuffer,
+        _v: &DeviceBuffer,
+        _w: &DeviceBuffer,
+        _gate: &DeviceBuffer,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rwkv6_wkv".into()))
     }
 
     /// In-place residual addition: x = x + residual * scale
@@ -2459,12 +2615,12 @@ pub fn create_native_backend(name: &str, index: usize) -> Result<Option<Arc<dyn 
 }
 
 /// Whether the SSM / DeltaNet / Mamba-1/2 / ShortConv device paths are enabled on HIP/ROCm given `FLLM_HIP_SSM` and `FLLM_HIP_NO_SSM`.
-/// Off by default on HIP until verified on AMD hardware; `FLLM_HIP_SSM=1` enables them unless `FLLM_HIP_NO_SSM=1` overrides.
+/// On by default on HIP since the kernels passed `selftest-gpu` and the tiny-model texts on a gfx1153 GPU; `FLLM_HIP_SSM=0` or `FLLM_HIP_NO_SSM=1` turns them off (`FLLM_HIP_NO_SSM=1` wins).
 pub fn hip_ssm_enabled_for_env(hip_ssm: Option<&str>, hip_no_ssm: Option<&str>) -> bool {
     if hip_no_ssm.is_some_and(|v| v.starts_with('1')) {
         return false;
     }
-    hip_ssm.is_some_and(|v| v.starts_with('1'))
+    hip_ssm.is_none_or(|v| !v.starts_with('0'))
 }
 
 #[cfg(test)]
@@ -2472,8 +2628,8 @@ mod hip_ssm_tests {
     use super::hip_ssm_enabled_for_env;
 
     #[test]
-    fn hip_ssm_default_is_off_and_respects_overrides() {
-        assert!(!hip_ssm_enabled_for_env(None, None));
+    fn hip_ssm_default_is_on_and_respects_overrides() {
+        assert!(hip_ssm_enabled_for_env(None, None));
         assert!(!hip_ssm_enabled_for_env(Some("0"), None));
         assert!(hip_ssm_enabled_for_env(Some("1"), None));
         assert!(!hip_ssm_enabled_for_env(Some("1"), Some("1")));

@@ -34,6 +34,31 @@ fn max_macs_per_submit() -> u64 {
     static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| std::env::var("FLLM_VK_SUBMIT_MACS").ok().and_then(|v| v.trim().parse().ok()).filter(|&v| v > 0).unwrap_or(DEFAULT_MAX_MACS_PER_SUBMIT))
 }
+/// Tokens of one run that a recurrence kernel (RWKV, KDA) handles in one dispatch. Such a dispatch takes one serial step per token, so a prompt of a thousand
+/// tokens makes it last about a second per layer on a small GPU; a driver kills a dispatch or submission that runs for seconds ("device lost", seen with a 1.6B
+/// RWKV-6 model on a Radeon 840M; a Windows display driver allows two). Longer runs are cut into pieces of this size, each piece is submitted on its own, and
+/// the state in the sequence's buffer carries over, so the result is the same.
+pub(super) const RECURRENCE_CHUNK: usize = 128;
+
+/// The runs of a call cut into waves of pieces of at most [`RECURRENCE_CHUNK`] tokens: wave `k` holds piece `k` of every run that is long enough (only the first
+/// piece of a run keeps `reset`). A call whose runs are all short gives one wave equal to `runs`.
+pub(super) fn recurrence_waves<'a>(runs: &[crate::backend::DeltaRun<'a>]) -> Vec<Vec<crate::backend::DeltaRun<'a>>> {
+    let count = runs.iter().map(|r| r.rows.div_ceil(RECURRENCE_CHUNK)).max().unwrap_or(0).max(1);
+    (0..count)
+        .map(|k| {
+            runs.iter()
+                .filter(|r| r.rows > k * RECURRENCE_CHUNK)
+                .map(|r| crate::backend::DeltaRun {
+                    state: r.state,
+                    first_row: r.first_row + k * RECURRENCE_CHUNK,
+                    rows: (r.rows - k * RECURRENCE_CHUNK).min(RECURRENCE_CHUNK),
+                    reset: r.reset && k == 0,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Scratch buffers an operation can ask for (`SlotSource::Scratch { id }`).
 const MAX_SCRATCH_IDS: usize = 8;
 /// A read-back buffer larger than this is released after use.

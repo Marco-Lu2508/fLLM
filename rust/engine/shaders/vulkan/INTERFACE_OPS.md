@@ -60,6 +60,11 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `moe_expert_gemm` | `plan_moe_expert_gemm` (= `moe_linear` + `moe_combine`) | as above |
 | `gather_rows`, `scatter_add_rows` | `plan_gather_rows`, `plan_scatter_add_rows` | `moe_gather_rows`, `moe_scatter_add_rows` |
 | `delta_layer` | `delta_supported`, `plan_delta_layer` | `delta_conv`, `delta_rec_hk{32,64,96,128}` |
+| `kda_layer` (Kimi Delta Attention) | `kda_supported`, `plan_kda_layer` | `delta_conv` (same convolution, `k_heads = v_heads`), `kda_rec_hk{16,32,64,128}` (`kda_rec.comp`, bindings and push block in its `FLLM-SHADER` header) |
+| `copy_columns` | `plan_copy_cols` | `misc_copy_cols` |
+| `shortconv_layer` (LFM2) | `shortconv_supported`, `plan_shortconv` | `shortconv` |
+| `rwkv_shift`, `rwkv_lerp`, `rwkv_act` | `plan_rwkv_shift`, `plan_rwkv_lerp`, `plan_rwkv_act` | `rwkv_shift`, `rwkv_lerp`, `rwkv_act` |
+| `rwkv7_wkv`, `rwkv6_wkv` | `rwkv_supported`, `plan_rwkv7_wkv`, `plan_rwkv6_wkv` | `rwkv7_wkv_n{16,32,64,128}`, `rwkv6_wkv_n{16,32,64,128}` (15 / 10 storage buffers; bindings, push blocks and the formulas in the `FLLM-SHADER` headers of `rwkv7_wkv.comp` / `rwkv6_wkv.comp`) |
 | *(no Stream method yet)* Mamba-2 mixer | `plan_mamba2_mixer` | `mamba_conv`, `mamba_scan2_{ns16,ns32,ns64,ns128,gen}`, `mamba_gate_norm` |
 | *(no Stream method yet)* Mamba-1 mixer | `plan_mamba_conv`, `plan_mamba1_bc_norms`, `plan_mamba1_scan` | `mamba_conv`, `norm_rms`, `mamba_scan1_{ns8,ns16,ns32,gen}` |
 | `zero_buffer`, `copy_buffer` | *(not a shader)* | `vkCmdFillBuffer` / `vkCmdCopyBuffer` (`Recorder::fill`, `copy_buffer`) |

@@ -63,18 +63,21 @@ Verified column:
 | GLM-5-Next / GLM-5.3-Flash text (`glm5_next`; GGUF `kimi-linear` + hyper-connections) | safetensors (vision tower skipped) | D | C | C | C | C | T 8.7e-5 .. 9.2e-5 (new; 12..40 positions, cached decoding, server completions; the k-pool indexer cuts the context to 2 pools + tail). The device kernels for the hyper-connections exist, but this model still runs on the CPU with a notice (the streams exist on one side only, and its Kimi delta layers and pooled indexer have no device kernel); the real 320B checkpoint was not run |
 | Ling-3.0 (`bailing_hybrid`: Kimi delta layers with direct bounded gates + rotary latent attention with a head gate + MoE; GGUF `kimi-linear`) | safetensors (Hub `attention.*` and transformers 5 names) | D | H | H | H | H | T 3.9e-5 .. 4.7e-5 (new; 12..40 positions, cached decoding, server completions). The latent attention layer (output gate) now runs on the device (the gate is the element-wise sigmoid or the per-head gate operation of the standard layers); the delta layers (Kimi delta attention) still run on the host between the device layers. The tiny model gives the CPU's text on Vulkan (Radeon 840M) and on HIP; the real checkpoint was not run |
 | Hy4 (`hy_v4`; GGUF `hy4`) | safetensors (transformers and Hub names) | D | H | H | H | C | T 1.4e-4 .. 1.7e-4 (new; indexer cutting 4 keys, 12..40 positions, cached decoding, server completions). CUDA, HIP and Vulkan run the hyper-connections (`hc_mix`, `hc_combine`), the latent attention with its sigmoid output gate and sinks, and the tail-rotated lightning indexer with the sparse attention on the device; the feed-forward blocks (clamped SwiGLU, no device kernel) run on the host, one log line says so. Layer streams against the CPU on Vulkan (Radeon 840M): 0.0001 relative at every layer. See "Models added with their own decoders" for the text comparison. The real checkpoint was not run |
+| GLM-5-Next / GLM-5.3-Flash text (`glm5_next`; GGUF `kimi-linear` + hyper-connections) | safetensors (vision tower skipped) | D | C | C | C | C | T 8.7e-5 .. 9.2e-5 (new; 12..40 positions, cached decoding, server completions; the k-pool indexer cuts the context to 2 pools + tail). Accelerators run on the CPU with a notice; the real 320B checkpoint was not run |
+| Ling-3.0 (`bailing_hybrid`: Kimi delta layers with direct bounded gates + rotary latent attention with a head gate + MoE; GGUF `kimi-linear`) | safetensors (Hub `attention.*` and transformers 5 names) | D | H | H | H | H | T 3.9e-5 .. 4.7e-5 (new; 12..40 positions, cached decoding, server completions). The KDA layers run on the device (CUDA, HIP, Vulkan); the latent attention layers (output gate) run on the host between device layers. Tiny model: the same 16-token text as the CPU on `cuda:0` and `vulkan:1` (RTX 2000 Ada laptop GPU), `vulkan` and `hip:0` (Radeon 840M laptop); the real checkpoint was not run |
+| Hy4 (`hy_v4`; GGUF `hy4`) | safetensors (transformers and Hub names) | D | C | C | C | C | T 1.4e-4 .. 1.7e-4 (new; indexer cutting 4 keys, 12..40 positions, cached decoding, server completions). Accelerators run on the CPU with a notice; the real checkpoint was not run |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | H (attention layers) | H | H | H | T 2.6e-4 |
 | DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). The sparse-attention indexer runs on the CPU and on CUDA, HIP and Vulkan devices; other backends attend densely, which equals DSA while the context is at most `index_topk` (2048) and is approximate beyond |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | D | D | D | H (attention layers) | T 2.6e-4 |
 | K2 Horizon, G9v3 (`k2_horizon`, `g9v3`) | safetensors, GGUF | D | D | D | D | D | T 1.5e-4 .. 1.9e-4 (remote-code reference) |
-| Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | H | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
-| Kimi-Linear 48B-A3B (`kimi_linear`: KDA + latent attention without rope + MoE) | safetensors | D | D | D | H | D | T 8.2e-5 (new fixture; the KDA recurrence is also checked against `fla.ops.kda.naive` in `rust/engine/testdata`) |
-| RWKV-7, RWKV-6 (`rwkv7`, `rwkv6`; GGUF `rwkv7`, `rwkv6`) | safetensors (fla layout / HF RWKV-6), GGUF | D | C | C | C | C | T 4.7e-7 / 1.1e-6 against `scripts/rwkv_reference.py` (transformers has no RWKV-6/7); R: real 0.1B RWKV-7 and 1.6B RWKV-6, see below |
-| Mamba 1/2, Falcon-Mamba (`mamba`, `mamba2`, `falcon_mamba`) | safetensors, GGUF | D | D | D (Mamba-2) / H | H | H | T 3e-7 .. 6e-7 |
-| Granite 4 hybrid, Bamba, Nemotron-H and Nemotron-3 (`granitemoehybrid`, `bamba`, `nemotron_h`, latent MoE) | safetensors, GGUF | D | D | D / H | H | H | T 3e-5 .. 1.6e-4; T+G for Nemotron-3-Nano |
-| Falcon-H1, Zamba2 | safetensors | D | H | H | H | H | T 1.8e-4 / 1.6e-3 |
-| Jamba (`jamba`) | safetensors | D | D (CUDA scan) | H | H | H | T 1.2e-4 |
-| LFM2, LFM2-MoE | safetensors | D | D (dense) / C (MoE) | H | H | H | T 1.8e-4 / 2.9e-4 |
+| Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | D | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
+| Kimi-Linear 48B-A3B (`kimi_linear`: KDA + latent attention without rope + MoE) | safetensors | D | H | H | H | D | T 8.2e-5 (new fixture; the KDA recurrence is also checked against `fla.ops.kda.naive` in `rust/engine/testdata`) |
+| RWKV-7, RWKV-6 (`rwkv7`, `rwkv6`; GGUF `rwkv7`, `rwkv6`) | safetensors (fla layout / HF RWKV-6), GGUF | D | D | D | D | C | T 4.7e-7 / 1.1e-6 against `scripts/rwkv_reference.py` (transformers has no RWKV-6/7); R: real 0.1B RWKV-7 and 1.6B RWKV-6, see below |
+| Mamba 1/2, Falcon-Mamba (`mamba`, `mamba2`, `falcon_mamba`) | safetensors, GGUF | D | D | D | D | H | T 3e-7 .. 6e-7 |
+| Granite 4 hybrid, Bamba, Nemotron-H and Nemotron-3 (`granitemoehybrid`, `bamba`, `nemotron_h`, latent MoE) | safetensors, GGUF | D | D | D / H | D / H | H | T 3e-5 .. 1.6e-4; T+G for Nemotron-3-Nano |
+| Falcon-H1, Zamba2 | safetensors | D | H | H | H | H | T 1.8e-4 / 1.6e-3. Falcon-H1 (Mamba-2 branch next to the attention) runs as a whole model on the CPU on every accelerator, with a notice; Zamba2 (shared transformer block in front of the Mamba-2 mixer) runs half of its layers on the host |
+| Jamba (`jamba`) | safetensors | D | D | D | D | H | T 1.2e-4 (the learned dt/B/C norms run on the device since this change) |
+| LFM2, LFM2-MoE | safetensors | D | D (dense) / C (MoE) | D (dense) | D (dense) | H | T 1.8e-4 / 2.9e-4 |
 | DBRX | safetensors | D | C | C | C | C | T 1.3e-4 |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
@@ -196,6 +199,40 @@ norm). Tiny random models (`laguna`, `step3p5`, `mimo_v2_flash`, `bitnet`; f32 a
 
 Metal, SYCL, wgpu, the NPU and the TPU backend do not
 report `supports_head_gate` and keep the host fallback.
+
+### Recurrent and linear-attention layers on the device (2026-10-31)
+
+Devices: an RTX 2000 Ada laptop GPU (`cuda:0`, and `vulkan:1` through the NVIDIA driver) and a Radeon 840M (gfx1153; `hip:0`, and `vulkan` through RADV), both
+in laptops that other measurements ran on at the same time.
+
+* `selftest-gpu --only delta,kda,rwkv,arch` (Gated DeltaNet, KDA, RWKV-6/7, Mamba-1/2, ShortConv, the other `arch` operations) against the f64 / CPU
+  references: 45 checks, 0 failed on `cuda:0`, `vulkan:1`, `vulkan` and `hip:0` (largest error 1.3e-5 against a tolerance of 2e-3).
+* Tiny random fixtures made with `scripts/hf_golden.py` (rwkv7, rwkv6, kimi_linear, bailing_hybrid, qwen3_next, qwen3_5, mamba, mamba2, zamba2, falcon_h1,
+  granitemoehybrid, bamba, jamba, lfm2, olmo_hybrid, nemotron_h; converted with `fllm-rs convert`), 16 greedy tokens through `scripts/gpu_arch_smoke.py`: the
+  same text as the CPU for all 16 on each of the four devices. The start-up notes show what stays on the host: Kimi-Linear and Ling-3.0 their latent attention
+  layer (1 of 4 layers), Zamba2 3 of 6 layers, Falcon-H1 the whole model (on the CPU, with the notice). The random models make near-ties unlikely to matter over 16
+  tokens, but they are random weights: the text comparison proves that device and CPU agree, not that the model is meaningful.
+* Real models, F16 GGUF files made with `fllm-rs convert` from the Hugging Face checkpoints, prompt "The Eiffel Tower is located in the city of", greedy: RWKV-7
+  0.1B (`RWKV/RWKV7-Goose-World2.8-0.1B-HF`) gives the same 24 tokens as the CPU on `cuda:0`, `vulkan:1`, `vulkan` and `hip:0`. RWKV-6 1.6B
+  (`RWKV/v6-Finch-1B6-HF`) on the Radeon laptop: `hip:0` and the CPU agree for the first 15 tokens and then differ at a near tie (the HIP text also differs
+  between the default and `FLLM_CUDA_EXACT=1`); `vulkan` processed prompts of up to 1073 tokens at 20 tokens/s and answered "Vulkan device lost" for a 1135-token prompt
+  (repeatedly, also after the recurrence was cut into pieces of 128 tokens per submission) while another process used the GPU; shorter prompts worked.
+* Speed, one run each, 1130-token prompt and 96 generated tokens, while other runs used the same machines, so only the order of magnitude counts:
+
+  | model | device | prompt tok/s | decode tok/s |
+  | :--- | :--- | ---: | ---: |
+  | RWKV-7 0.1B F16 | RTX 2000 Ada, CPU (28 threads) | 345 | 117 |
+  | | `cuda:0` | 20700 | 450 |
+  | | `vulkan:1` | 3000 | 190 |
+  | | Radeon 840M laptop, CPU | 176 | 65 |
+  | | `hip:0` | 3660 | 167 |
+  | | `vulkan` (RADV) | 270 | 45 |
+  | RWKV-6 1.6B F16 | Radeon 840M laptop, CPU | 56 | 10.6 |
+  | | `hip:0` | 225 | 18.2 |
+  | | `vulkan` (RADV) | 20 | about 4 |
+
+  The recurrence is one launch per layer and run but serial over the tokens inside it, and the Vulkan shaders on the Radeon are far slower than the HIP kernel on the
+  same GPU (about 0.25 ms per token and layer there); a chunk-parallel form and a faster Vulkan recurrence are not done.
 
 ### Sparse-attention indexer (DeepSeek-V3.2, GLM-5): comparison and devices
 

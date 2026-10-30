@@ -111,3 +111,19 @@ mamba_scan1_ns8 mamba_scan1.comp -DNS=8
 mamba_scan1_ns16 mamba_scan1.comp -DNS=16
 mamba_scan1_ns32 mamba_scan1.comp -DNS=32
 mamba_scan1_gen mamba_scan1.comp -DNS=0
+
+# RWKV-6 / RWKV-7 recurrences: N = head size kept in registers (rwkv7_wkv.comp, rwkv6_wkv.comp)
+rwkv7_wkv_n16 rwkv7_wkv.comp -DN=16
+rwkv7_wkv_n32 rwkv7_wkv.comp -DN=32
+rwkv7_wkv_n64 rwkv7_wkv.comp -DN=64
+rwkv7_wkv_n128 rwkv7_wkv.comp -DN=128
+rwkv6_wkv_n16 rwkv6_wkv.comp -DN=16
+rwkv6_wkv_n32 rwkv6_wkv.comp -DN=32
+rwkv6_wkv_n64 rwkv6_wkv.comp -DN=64
+rwkv6_wkv_n128 rwkv6_wkv.comp -DN=128
+
+# Kimi Delta Attention recurrence per head width HK (the convolution is delta_conv)
+kda_rec_hk16 kda_rec.comp -DHK=16
+kda_rec_hk32 kda_rec.comp -DHK=32
+kda_rec_hk64 kda_rec.comp -DHK=64
+kda_rec_hk128 kda_rec.comp -DHK=128

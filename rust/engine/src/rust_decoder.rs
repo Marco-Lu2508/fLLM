@@ -227,6 +227,8 @@ struct DeviceMamba1 {
     dt_proj: crate::backend::DeviceWeight,
     decay: crate::backend::DeviceBuffer,
     skip: crate::backend::DeviceBuffer,
+    /// Learned weights of the RMS norms behind x_proj for the time step, B and C (Jamba).
+    norms: Option<[crate::backend::DeviceBuffer; 3]>,
     /// Index among the Mamba-1 layers (selects the slice of a sequence's state buffer).
     ordinal: usize,
 }
@@ -696,6 +698,10 @@ pub struct DeviceLayerWeights {
     shortconv: Option<DeviceShortConv>,
     /// Mamba-1 mixer resident on the device.
     mamba1: Option<DeviceMamba1>,
+    /// RWKV-6 / RWKV-7 layer (time mix and channel mix) resident on the device.
+    rwkv: Option<rwkv::DeviceRwkv>,
+    /// Kimi Delta Attention mixer resident on the device.
+    kda: Option<kda::DeviceKda>,
     /// Per-head attention sink logits (GPT-OSS).
     pub sinks: Option<Arc<Vec<f32>>>,
     /// q, k and v as one matrix (`FLLM_MERGE_PROJ`, narrow activations, Marlin 4-bit): `q`, `k` and `v` are `None` then.
@@ -750,6 +756,8 @@ impl DeviceLayerWeights {
             mamba: None,
             shortconv: None,
             mamba1: None,
+            rwkv: None,
+            kda: None,
             sinks: None,
             qkv: None,
             gate_up: None,
@@ -2874,7 +2882,7 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
     #[allow(clippy::too_many_arguments)]
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool) -> Option<&'static str> {
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
@@ -2891,6 +2899,9 @@ impl RustDecoder {
         }
         if cfg.hc.is_some() && !hc_ok {
             return Some("hyper-connections (the backend has no kernels for them, or FLLM_HC=host)");
+        }
+        if cfg.attn_res.is_some() {
+            return Some("attention residual blocks");
         }
         if cfg.qwen4.is_some() {
             return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer");
@@ -2930,9 +2941,9 @@ impl RustDecoder {
                 }
                 None
             }
-            // the time-mix and channel-mix blocks and their state exist on the host only
-            Attn::Rwkv(_) => Some("an RWKV time-mix / channel-mix layer (host only)"),
-            Attn::Mamba1(m) if m.norms.is_some() => Some("Mamba-1 with learned dt/B/C norms"),
+            // the time-mix and channel-mix blocks run on the device when the stream has the RWKV operations for the shape
+            Attn::Rwkv(_) if rwkv_ok => None,
+            Attn::Rwkv(_) => Some("an RWKV time-mix / channel-mix layer (no device operations for this backend or shape)"),
             // Recurrent mixers keep their state on the host (or in their own device buffers) and handle the residual add themselves.
             Attn::Linear(_) | Attn::Mamba(_) | Attn::Mamba1(_) => {
                 if cfg.parallel_residual {
@@ -2943,14 +2954,10 @@ impl RustDecoder {
             }
             Attn::None => None,
             Attn::Kda(_) => {
-                if let Some(_shape) = self.kda_shape() {
-                    if conv_ok && !cfg.parallel_residual {
-                        None
-                    } else {
-                        Some("Kimi Delta Attention")
-                    }
+                if kda_ok && !cfg.parallel_residual {
+                    None
                 } else {
-                    Some("Kimi Delta Attention")
+                    Some("Kimi Delta Attention (no device operations for this backend or shape)")
                 }
             }
             Attn::Mla(_) => {
@@ -3166,6 +3173,14 @@ impl RustDecoder {
                 && backend.create_stream().map(|st| st.supports_shortconv(self.cfg.hidden, sc.kernel)).unwrap_or(false)
                 && std::env::var_os("FLLM_SHORTCONV_HOST").is_none()
         });
+        // RWKV keeps the WKV matrices and the two token-shift vectors in a device state buffer (one kind of recurrent layer per model)
+        let rwkv_ok = self.rwkv_shape().is_some_and(|s| {
+            backend.create_stream().map(|st| st.supports_rwkv(&s)).unwrap_or(false) && std::env::var_os("FLLM_RWKV_HOST").is_none()
+        });
+        // Kimi Delta Attention likewise (Kimi-Linear, Ling-3.0): its state sits in a device buffer next to the latent attention's KV cache
+        let kda_ok = self.kda_shape().is_some_and(|s| {
+            backend.create_stream().map(|st| st.supports_kda(&s)).unwrap_or(false) && std::env::var_os("FLLM_KDA_HOST").is_none()
+        });
         // FLLM_HOST_LAYERS=all|3,4,5 forces layers onto the host (debugging: the output must match `--device cpu`)
         let forced = std::env::var("FLLM_HOST_LAYERS").ok();
         let stage = self.stage_range();
@@ -3184,7 +3199,7 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok)
                 }
             })
             .collect();
@@ -3392,6 +3407,8 @@ impl RustDecoder {
         let mut mamba_layers = 0usize;
         let mut conv_layers = 0usize;
         let mut mamba1_layers = 0usize;
+        let mut rwkv_layers = 0usize;
+        let mut kda_layers = 0usize;
         let mut delta_layers = 0usize;
         let mut dev_layers = Vec::with_capacity(self.layers.len());
         let mut host_summary: Vec<&'static str> = Vec::new();
@@ -3439,6 +3456,8 @@ impl RustDecoder {
             };
             // only attention and the device DeltaNet use the output projection on the device (the other mixers apply it on the host)
             let out = if matches!(layer.attn, Attn::Std { .. } | Attn::Mla(_)) || (matches!(layer.attn, Attn::ShortConv(_)) && conv_ok) || (matches!(layer.attn, Attn::Mamba1(_)) && mamba1_shape.is_some()) || (matches!(layer.attn, Attn::Linear(_)) && delta_shape.is_some())
+                || (matches!(layer.attn, Attn::Rwkv(_)) && rwkv_ok)
+                || (matches!(layer.attn, Attn::Kda(_)) && kda_ok)
                 || (matches!(layer.attn, Attn::Mamba(_)) && mamba_shape.is_some())
             {
                 Some(upload_linear(&format!("blk.{i}.attn_out"), &layer.out)?)
@@ -3493,8 +3512,26 @@ impl RustDecoder {
                         dt_proj: upload_linear(&format!("blk.{i}.ssm_dt"), &m.dt_proj)?,
                         decay: upload_vec(&m.decay)?,
                         skip: upload_vec(&m.skip)?,
+                        norms: match &m.norms {
+                            Some(w) => Some([upload_vec(&w[0])?, upload_vec(&w[1])?, upload_vec(&w[2])?]),
+                            None => None,
+                        },
                         ordinal: mamba1_layers - 1,
                     })
+                }
+                _ => None,
+            };
+            let kda = match &layer.attn {
+                Attn::Kda(k) if kda_ok => {
+                    kda_layers += 1;
+                    Some(k.upload(kda_layers - 1, &|name: &str, l: &Linear| upload_linear(name, l), &|v: &[f32]| upload_vec(&v.to_vec()), &format!("blk.{i}.kda"))?)
+                }
+                _ => None,
+            };
+            let rwkv = match &layer.attn {
+                Attn::Rwkv(rw) if rwkv_ok => {
+                    rwkv_layers += 1;
+                    Some(rw.upload(&*backend, &format!("blk.{i}.rwkv"), rwkv_layers - 1, &|name: &str, l: &Linear| upload_linear(name, l), &|v: &[f32]| upload_vec(&v.to_vec()))?)
                 }
                 _ => None,
             };
@@ -3727,6 +3764,8 @@ impl RustDecoder {
                 mamba,
                 shortconv,
                 mamba1,
+                rwkv,
+                kda,
                 sinks: layer.sinks.clone().map(Arc::new),
                 qkv: merged_qkv,
                 gate_up: merged_gate_up,
@@ -4022,6 +4061,10 @@ impl RustDecoder {
         let delta_shape = self.delta_shape();
         let mamba_shape = self.mamba_shape();
         let mamba1_shape = self.mamba1_shape();
+        let rwkv_shape = self.rwkv_shape();
+        let kda_shape = self.kda_shape();
+        // RWKV-7: the values of layer 0 of this pass, read by the value residual of every later layer
+        let mut rwkv_v_first: Option<crate::backend::DeviceBuffer> = None;
         let mut delta_plan: Option<Vec<DeltaPlanRun>> = None;
         // the norm of the next layer (or the final norm), when the residual add of this layer's feed-forward block already computed it
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
@@ -4637,6 +4680,20 @@ impl RustDecoder {
                 }
                 let plan = delta_plan.as_deref().unwrap_or(&[]);
                 self.mamba1_device(&mut **stream, &mut scratch, shape, dm, dev_layer, plan, &normed_buf, &mut x_buf, rows)?;
+            } else if let (Some(dk), Some(shape)) = (&dev_layer.kda, &kda_shape) {
+                if delta_plan.is_none() {
+                    let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Kda(_))).count();
+                    delta_plan = Some(self.state_plan(count, shape.layer_state_bytes(), tables, lengths)?);
+                }
+                let plan = delta_plan.as_deref().unwrap_or(&[]);
+                self.kda_device(&mut **stream, &mut scratch, shape, dk, dev_layer, plan, &normed_buf, &mut x_buf, rows)?;
+            } else if let (Some(dr), Some(shape)) = (&dev_layer.rwkv, &rwkv_shape) {
+                if delta_plan.is_none() {
+                    let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Rwkv(_))).count();
+                    delta_plan = Some(self.state_plan(count, shape.layer_state_bytes(), tables, lengths)?);
+                }
+                let plan = delta_plan.as_deref().unwrap_or(&[]);
+                self.rwkv_device(&mut **stream, &mut scratch, shape, dr, dev_layer, (i, plan), &normed_buf, &mut x_buf, rows, &mut rwkv_v_first)?;
             } else if matches!(layer.attn, Attn::None) {
                 // feed-forward-only layer: its norm output is the feed-forward input (below)
             } else {
@@ -5636,7 +5693,7 @@ impl RustDecoder {
         let offset = dm.ordinal * shape.layer_state_bytes();
         stream.mamba1_conv(shape, &dm.conv, dm.conv_bias.as_ref(), &runs, offset, &proj, &mut mixed).map_err(err)?;
         stream.quantized_linear(&mut split, &mixed, &dm.x_proj, dm.x_proj.bias.as_ref()).map_err(err)?;
-        stream.mamba1_prep(shape, &mut split, &mut dt_in, rows).map_err(err)?;
+        stream.mamba1_prep(shape, &mut split, &mut dt_in, rows, dm.norms.as_ref().map(|w| [&w[0], &w[1], &w[2]])).map_err(err)?;
         stream.quantized_linear(&mut dt, &dt_in, &dm.dt_proj, dm.dt_proj.bias.as_ref()).map_err(err)?;
         stream.mamba1_scan(shape, &dm.decay, &dm.skip, &runs, offset, &split, &dt, &mixed, &proj, &mut out).map_err(err)?;
         let residual_scale = self.cfg.residual_scale;

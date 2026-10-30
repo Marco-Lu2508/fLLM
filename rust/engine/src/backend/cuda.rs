@@ -436,7 +436,19 @@ extern "C" {
         convb: *const f32,
         mixed: *mut f32,
     ) -> c_int;
-    fn fllm_cuda_mamba1_prep(st: *mut RawStream, split: *mut f32, dt_in: *mut f32, rows: c_int, rank: c_int, state: c_int, eps: f32) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_mamba1_prep(
+        st: *mut RawStream,
+        split: *mut f32,
+        dt_in: *mut f32,
+        rows: c_int,
+        rank: c_int,
+        state: c_int,
+        eps: f32,
+        w_dt: *const f32,
+        w_b: *const f32,
+        w_c: *const f32,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_mamba1_scan(
         st: *mut RawStream,
@@ -526,6 +538,7 @@ extern "C" {
     fn fllm_cuda_dsa_supported(heads: c_int, dim: c_int, topk: c_int, dk: c_int) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
+    fn fllm_cuda_copy_cols(st: *mut RawStream, dst: *mut f32, src: *const f32, rows: c_int, width: c_int, dst_stride: c_int, dst_col: c_int) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_kda_layer(
         st: *mut RawStream,
@@ -535,6 +548,7 @@ extern "C" {
         heads: c_int,
         head_dim: c_int,
         ksz: c_int,
+        bounded: c_int,
         lower_bound: f32,
         eps: f32,
         state_off: usize,
@@ -548,6 +562,73 @@ extern "C" {
         rate: *const f32,
         norm: *const f32,
         mixed: *mut f32,
+        out: *mut f32,
+    ) -> c_int;
+    fn fllm_cuda_rwkv_supported(hidden: c_int, head_size: c_int) -> c_int;
+    fn fllm_cuda_rwkv_shift(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        total_rows: c_int,
+        hidden: c_int,
+        shift_off: usize,
+        x: *const f32,
+        shift: *mut f32,
+    ) -> c_int;
+    fn fllm_cuda_rwkv_lerp(
+        st: *mut RawStream,
+        x: *const f32,
+        shift: *const f32,
+        mix: *const f32,
+        delta: *const f32,
+        out: *mut f32,
+        count: usize,
+        hidden: c_int,
+    ) -> c_int;
+    fn fllm_cuda_rwkv_act(st: *mut RawStream, x: *mut f32, gate: *const f32, count: usize, mode: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_rwkv7(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        heads: c_int,
+        head_size: c_int,
+        hidden: c_int,
+        eps: f32,
+        state_off: usize,
+        r: *const f32,
+        k: *const f32,
+        v: *const f32,
+        w: *const f32,
+        a: *const f32,
+        vres: *const f32,
+        gate: *const f32,
+        norm_w: *const f32,
+        norm_b: *const f32,
+        k_k: *const f32,
+        k_a: *const f32,
+        r_k: *const f32,
+        v_first: *mut f32,
+        out: *mut f32,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_rwkv6(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        heads: c_int,
+        head_size: c_int,
+        hidden: c_int,
+        eps: f32,
+        state_off: usize,
+        r: *const f32,
+        k: *const f32,
+        v: *const f32,
+        w: *const f32,
+        gate: *const f32,
+        norm_w: *const f32,
+        norm_b: *const f32,
+        first: *const f32,
         out: *mut f32,
     ) -> c_int;
     fn fllm_cuda_delta_supported(kh: c_int, vh: c_int, hk: c_int, hv: c_int, ksz: c_int) -> c_int;
@@ -899,6 +980,30 @@ impl Drop for CudaAlloc {
         // SAFETY: `ptr` came from `fllm_cuda_malloc` and is freed exactly once.
         unsafe { fllm_cuda_free(self.ptr) };
     }
+}
+
+/// The run records the RWKV kernels read (the layout of `DeltaRun` in `cuda/rwkv.cu`).
+#[repr(C)]
+struct RwkvRun {
+    state: u64,
+    row0: i32,
+    n: i32,
+    reset: i32,
+    pad: i32,
+}
+
+fn rwkv_runs(runs: &[DeltaRun<'_>]) -> Result<Vec<RwkvRun>, BackendError> {
+    let mut list = Vec::with_capacity(runs.len());
+    for r in runs {
+        list.push(RwkvRun {
+            state: dev_ptr(r.state)? as u64,
+            row0: to_c(r.first_row, "run start")?,
+            n: to_c(r.rows, "run length")?,
+            reset: i32::from(r.reset),
+            pad: 0,
+        });
+    }
+    Ok(list)
 }
 
 fn dev_ptr(buf: &DeviceBuffer) -> Result<*mut u8, BackendError> {
@@ -4024,9 +4129,25 @@ impl Stream for CudaStream {
         })
     }
 
-    fn mamba1_prep(&mut self, s: &Mamba1Shape, split: &mut DeviceBuffer, dt_in: &mut DeviceBuffer, rows: usize) -> Result<(), BackendError> {
+    fn mamba1_prep(
+        &mut self,
+        s: &Mamba1Shape,
+        split: &mut DeviceBuffer,
+        dt_in: &mut DeviceBuffer,
+        rows: usize,
+        norms: Option<[&DeviceBuffer; 3]>,
+    ) -> Result<(), BackendError> {
         if split.size < rows * (s.rank + 2 * s.state) * 4 || dt_in.size < rows * s.rank * 4 {
             return Err(invalid("Mamba-1 projection buffers smaller than the layer needs"));
+        }
+        let mut weight_ptrs = [std::ptr::null::<f32>(); 3];
+        if let Some(weights) = norms {
+            for ((slot, w), len) in weight_ptrs.iter_mut().zip(weights).zip([s.rank, s.state, s.state]) {
+                if w.size < len * 4 {
+                    return Err(invalid("Mamba-1 norm weights smaller than the layer needs"));
+                }
+                *slot = dev_ptr(w)?.cast::<f32>().cast_const();
+            }
         }
         // SAFETY: sizes checked above.
         check(unsafe {
@@ -4038,6 +4159,9 @@ impl Stream for CudaStream {
                 to_c(s.rank, "time step rank")?,
                 to_c(s.state, "state size")?,
                 s.bc_rms_eps.unwrap_or(0.0),
+                weight_ptrs[0],
+                weight_ptrs[1],
+                weight_ptrs[2],
             )
         })
     }
@@ -4565,7 +4689,7 @@ impl Stream for CudaStream {
             });
         }
         let max_n = runs.iter().map(|r| r.rows).max().unwrap_or(0);
-        let lower_bound = s.lower_bound.unwrap_or(-1.0);
+        let (bounded, lower_bound) = (i32::from(s.lower_bound.is_some()), s.lower_bound.unwrap_or(0.0));
         check(unsafe {
             fllm_cuda_kda_layer(
                 self.raw,
@@ -4575,6 +4699,7 @@ impl Stream for CudaStream {
                 to_c(s.heads, "heads")?,
                 to_c(s.head_dim, "head_dim")?,
                 to_c(s.conv_kernel, "conv_kernel")?,
+                bounded,
                 lower_bound,
                 s.eps,
                 state_offset,
@@ -4594,7 +4719,233 @@ impl Stream for CudaStream {
     }
 
     #[allow(clippy::too_many_arguments)]
-        #[allow(clippy::too_many_arguments)]
+        fn copy_columns(
+        &mut self,
+        dst: &mut DeviceBuffer,
+        dst_stride: usize,
+        dst_col: usize,
+        src: &DeviceBuffer,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), BackendError> {
+        if rows == 0 || width == 0 {
+            return Ok(());
+        }
+        if dst_col + width > dst_stride || src.size < rows * width * 4 || dst.size < rows * dst_stride * 4 {
+            return Err(invalid("copy_columns operands do not fit"));
+        }
+        check(unsafe {
+            fllm_cuda_copy_cols(
+                self.raw,
+                dev_ptr(dst)?.cast(),
+                dev_ptr(src)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(width, "width")?,
+                to_c(dst_stride, "stride")?,
+                to_c(dst_col, "column")?,
+            )
+        })
+    }
+
+    fn supports_rwkv(&self, s: &RwkvShape) -> bool {
+        let dims = [s.hidden, s.head_size].map(|n| c_int::try_from(n).unwrap_or(0));
+        unsafe { fllm_cuda_rwkv_supported(dims[0], dims[1]) != 0 }
+    }
+
+    fn rwkv_shift(
+        &mut self,
+        hidden: usize,
+        runs: &[DeltaRun<'_>],
+        shift_offset: usize,
+        x: &DeviceBuffer,
+        shift: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        if x.size < rows * hidden * 4 || shift.size < rows * hidden * 4 || runs.iter().any(|r| r.state.size < shift_offset + hidden * 4) {
+            return Err(invalid("RWKV shift buffers smaller than the layer needs"));
+        }
+        let list = rwkv_runs(runs)?;
+        check(unsafe {
+            fllm_cuda_rwkv_shift(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(rows, "rows")?,
+                to_c(hidden, "hidden")?,
+                shift_offset,
+                dev_ptr(x)?.cast(),
+                dev_ptr(shift)?.cast(),
+            )
+        })
+    }
+
+    fn rwkv_lerp(
+        &mut self,
+        hidden: usize,
+        x: &DeviceBuffer,
+        shift: &DeviceBuffer,
+        mix: &DeviceBuffer,
+        delta: Option<&DeviceBuffer>,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let count = (x.size / 4).min(shift.size / 4).min(out.size / 4);
+        if count == 0 {
+            return Ok(());
+        }
+        if mix.size < hidden * 4 || delta.is_some_and(|d| d.size < count * 4) {
+            return Err(invalid("RWKV interpolation buffers smaller than the layer needs"));
+        }
+        let delta_ptr = match delta {
+            Some(d) => dev_ptr(d)?.cast::<f32>().cast_const(),
+            None => std::ptr::null(),
+        };
+        check(unsafe {
+            fllm_cuda_rwkv_lerp(
+                self.raw,
+                dev_ptr(x)?.cast(),
+                dev_ptr(shift)?.cast(),
+                dev_ptr(mix)?.cast(),
+                delta_ptr,
+                dev_ptr(out)?.cast(),
+                count,
+                to_c(hidden, "hidden")?,
+            )
+        })
+    }
+
+    fn rwkv_act(&mut self, x: &mut DeviceBuffer, gate: Option<&DeviceBuffer>, mode: i32) -> Result<(), BackendError> {
+        let count = x.size / 4;
+        if count == 0 {
+            return Ok(());
+        }
+        if gate.is_some_and(|g| g.size < x.size) || (mode == 4 && gate.is_none()) || !(0..=5).contains(&mode) {
+            return Err(invalid("RWKV activation operands do not fit"));
+        }
+        let gate_ptr = match gate {
+            Some(g) => dev_ptr(g)?.cast::<f32>().cast_const(),
+            None => std::ptr::null(),
+        };
+        check(unsafe { fllm_cuda_rwkv_act(self.raw, dev_ptr(x)?.cast(), gate_ptr, count, mode) })
+    }
+
+    fn rwkv7_wkv(
+        &mut self,
+        s: &RwkvShape,
+        w: &RwkvWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        inputs: &Rwkv7Inputs<'_>,
+        v_first: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rwkv(s) {
+            return Err(BackendError::UnsupportedOperation("rwkv7_wkv for this shape".into()));
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (k_a, r_k) = (w.k_a.ok_or_else(|| invalid("rwkv7_wkv needs k_a"))?, w.r_k.ok_or_else(|| invalid("rwkv7_wkv needs r_k"))?);
+        let need = rows * s.hidden * 4;
+        let mut inputs_all = vec![inputs.r, inputs.k, inputs.v, inputs.w, inputs.a, inputs.gate];
+        inputs_all.extend(inputs.v_res);
+        if inputs_all.iter().any(|b| b.size < need)
+            || v_first.size < need
+            || out.size < need
+            || [w.norm_weight, w.norm_bias, w.k_k, k_a, r_k].iter().any(|b| b.size < s.hidden * 4)
+            || runs.iter().any(|r| r.state.size < state_offset + s.rec_bytes())
+        {
+            return Err(invalid("RWKV-7 buffers smaller than the layer needs"));
+        }
+        let list = rwkv_runs(runs)?;
+        let v_res_ptr = match inputs.v_res {
+            Some(b) => dev_ptr(b)?.cast::<f32>().cast_const(),
+            None => std::ptr::null(),
+        };
+        check(unsafe {
+            fllm_cuda_rwkv7(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(s.heads(), "heads")?,
+                to_c(s.head_size, "head_size")?,
+                to_c(s.hidden, "hidden")?,
+                s.group_eps,
+                state_offset,
+                dev_ptr(inputs.r)?.cast(),
+                dev_ptr(inputs.k)?.cast(),
+                dev_ptr(inputs.v)?.cast(),
+                dev_ptr(inputs.w)?.cast(),
+                dev_ptr(inputs.a)?.cast(),
+                v_res_ptr,
+                dev_ptr(inputs.gate)?.cast(),
+                dev_ptr(w.norm_weight)?.cast(),
+                dev_ptr(w.norm_bias)?.cast(),
+                dev_ptr(w.k_k)?.cast(),
+                dev_ptr(k_a)?.cast(),
+                dev_ptr(r_k)?.cast(),
+                dev_ptr(v_first)?.cast(),
+                dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    fn rwkv6_wkv(
+        &mut self,
+        s: &RwkvShape,
+        w: &RwkvWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        r: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        decay: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rwkv(s) {
+            return Err(BackendError::UnsupportedOperation("rwkv6_wkv for this shape".into()));
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let need = rows * s.hidden * 4;
+        if [r, k, v, decay, gate].iter().any(|b| b.size < need)
+            || out.size < need
+            || [w.norm_weight, w.norm_bias, w.k_k].iter().any(|b| b.size < s.hidden * 4)
+            || runs.iter().any(|r| r.state.size < state_offset + s.rec_bytes())
+        {
+            return Err(invalid("RWKV-6 buffers smaller than the layer needs"));
+        }
+        let list = rwkv_runs(runs)?;
+        check(unsafe {
+            fllm_cuda_rwkv6(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(s.heads(), "heads")?,
+                to_c(s.head_size, "head_size")?,
+                to_c(s.hidden, "hidden")?,
+                s.group_eps,
+                state_offset,
+                dev_ptr(r)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(v)?.cast(),
+                dev_ptr(decay)?.cast(),
+                dev_ptr(gate)?.cast(),
+                dev_ptr(w.norm_weight)?.cast(),
+                dev_ptr(w.norm_bias)?.cast(),
+                dev_ptr(w.k_k)?.cast(),
+                dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn attn_encoder(
         &mut self,
         out: &mut DeviceBuffer,
@@ -5329,13 +5680,13 @@ fn ssm_runs(runs: &[DeltaRun<'_>]) -> Result<Vec<SsmRunC>, BackendError> {
 }
 
 /// Whether the SSM / DeltaNet / Mamba-1/2 / ShortConv device paths are enabled on HIP/ROCm given `FLLM_HIP_SSM` and `FLLM_HIP_NO_SSM`.
-/// Off by default on HIP until verified on AMD hardware; `FLLM_HIP_SSM=1` enables them unless `FLLM_HIP_NO_SSM=1` overrides.
+/// On by default on HIP since the kernels passed `selftest-gpu` and the tiny-model texts on a gfx1153 GPU; `FLLM_HIP_SSM=0` or `FLLM_HIP_NO_SSM=1` turns them off (`FLLM_HIP_NO_SSM=1` wins).
 #[cfg_attr(not(feature = "hip"), allow(dead_code))]
 pub(crate) fn hip_ssm_enabled_for_env(hip_ssm: Option<&str>, hip_no_ssm: Option<&str>) -> bool {
     if hip_no_ssm.is_some_and(|v| v.starts_with('1')) {
         return false;
     }
-    hip_ssm.is_some_and(|v| v.starts_with('1'))
+    hip_ssm.is_none_or(|v| !v.starts_with('0'))
 }
 
 #[inline]
@@ -5396,8 +5747,8 @@ mod nvfp4_layout_tests {
     }
 
     #[test]
-    fn hip_ssm_is_off_by_default_and_controlled_by_env_switches() {
-        assert!(!hip_ssm_enabled_for_env(None, None));
+    fn hip_ssm_is_on_by_default_and_controlled_by_env_switches() {
+        assert!(hip_ssm_enabled_for_env(None, None));
         assert!(!hip_ssm_enabled_for_env(Some("0"), None));
         assert!(hip_ssm_enabled_for_env(Some("1"), None));
         assert!(!hip_ssm_enabled_for_env(Some("1"), Some("1")));

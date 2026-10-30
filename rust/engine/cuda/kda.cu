@@ -98,7 +98,7 @@ __global__ void __launch_bounds__(256) kda_rec_kernel(const float *__restrict__ 
                                                       const DeltaRun *__restrict__ runs,
                                                       float *__restrict__ out,
                                                       int heads, int conv_dim,
-                                                      float lower_bound,
+                                                      int bounded, float lower_bound,
                                                       size_t state_off, float eps) {
     constexpr int HALF = HK / 2;
     __shared__ float scratch[32];
@@ -134,7 +134,7 @@ __global__ void __launch_bounds__(256) kda_rec_kernel(const float *__restrict__ 
                 const int idx = 4 * i + e;
                 const float raw = f_tok[idx] + bias_ptr[idx];
                 float g;
-                if (lower_bound >= 0.f) {
+                if (bounded) {  // otherwise the softplus gate
                     g = lower_bound / (1.0f + expf(-rate_h * raw));
                 } else {
                     const float sp = raw > 20.f ? raw : log1pf(expf(raw));
@@ -175,12 +175,28 @@ __global__ void __launch_bounds__(256) kda_rec_kernel(const float *__restrict__ 
     for (int i = 0; i < HALF; i++) S[(size_t)i * hv] = s[i];
 }
 
+// dst[r * dst_stride + dst_col + c] = src[r * width + c]: packs the separately projected q, k and v rows into the [q | k | v] rows of the layer
+__global__ void kda_copy_cols_kernel(float *__restrict__ dst, const float *__restrict__ src, size_t count, int width, int dst_stride, int dst_col) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < count; i += (size_t)gridDim.x * blockDim.x) {
+        const size_t r = i / width, c = i % width;
+        dst[r * dst_stride + dst_col + c] = src[i];
+    }
+}
+
+int fllm_copy_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col) {
+    const size_t count = (size_t)rows * width;
+    if (count == 0) return 0;
+    const int blocks = (int)min((count + 255) / 256, (size_t)65535);
+    kda_copy_cols_kernel<<<blocks, 256, 0, s>>>(dst, src, count, width, dst_stride, dst_col);
+    return fllm_check_launch("copy_cols");
+}
+
 int fllm_kda_supported(int heads, int head_dim, int ksz) {
     return heads > 0 && (head_dim == 16 || head_dim == 32 || head_dim == 64 || head_dim == 128) && ksz >= 2 && ksz <= 8;
 }
 
 int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
-                    float lower_bound, float eps, size_t state_off, size_t rec_bytes,
+                    int bounded, float lower_bound, float eps, size_t state_off, size_t rec_bytes,
                     const float *qkv, const float *forget, const float *beta, const float *gate,
                     const float *convw, const float *dt_bias, const float *rate, const float *norm,
                     float *mixed, float *out) {
@@ -193,12 +209,12 @@ int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int 
     if (int e = fllm_check_launch("kda_conv")) return e;
     const dim3 g2(heads, nruns);
     if (head_dim == 128)
-        kda_rec_kernel<128><<<g2, 2 * 128, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, lower_bound, state_off, eps);
+        kda_rec_kernel<128><<<g2, 2 * 128, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     else if (head_dim == 64)
-        kda_rec_kernel<64><<<g2, 2 * 64, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, lower_bound, state_off, eps);
+        kda_rec_kernel<64><<<g2, 2 * 64, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     else if (head_dim == 32)
-        kda_rec_kernel<32><<<g2, 2 * 32, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, lower_bound, state_off, eps);
+        kda_rec_kernel<32><<<g2, 2 * 32, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     else if (head_dim == 16)
-        kda_rec_kernel<16><<<g2, 2 * 16, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, lower_bound, state_off, eps);
+        kda_rec_kernel<16><<<g2, 2 * 16, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     return fllm_check_launch("kda_rec");
 }

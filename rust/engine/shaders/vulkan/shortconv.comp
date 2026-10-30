@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: shortconv | bindings: proj,conv,bias,state,out | push: hidden,ksz,row0,n,reset,state_off,has_bias | grid: [ceil(hidden/128), 1, 1] per run
+// LFM2 gated short convolution of one run (Stream::shortconv_layer, port of shortconv_kernel in cuda/shortconv.cu, reference `shortconv_forward` of the decoder):
+// the input projection gives [b | c | x] per token (3 * hidden floats); current = b * x goes through a depthwise causal convolution whose last ksz - 1 inputs
+// per channel are the layer's state, and the result is multiplied by c:
+//   value[t][ch] = bias[ch] + sum_{j < ksz-1} w[ch][j] * h[j] + w[ch][ksz-1] * current,   out[t][ch] = c[t][ch] * value[t][ch]
+// One invocation per channel walks the n tokens of the run (history in registers). The history of channel ch is state[state_off + ch * (ksz - 1) + j]
+// (oldest first; float view of the sequence's state buffer). reset != 0: the old history is ignored. ksz in 2..8. `bias` is a dummy when has_bias = 0.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer ProjBuf { float proj[]; };
+layout(std430, binding = 1) readonly buffer ConvBuf { float convw[]; };
+layout(std430, binding = 2) readonly buffer BiasBuf { float bias[]; };
+layout(std430, binding = 3) buffer StateBuf { float state[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint ksz;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    uint has_bias;
+} p;
+
+void main() {
+    const uint ch = gl_GlobalInvocationID.x;
+    if (ch >= p.hidden) return;
+    const uint hist = p.state_off + ch * (p.ksz - 1u);
+    float w[8];
+    float h[7];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) w[k] = k < p.ksz ? convw[ch * p.ksz + k] : 0.0;
+    [[unroll]] for (uint j = 0u; j < 7u; j++) h[j] = (j + 1u < p.ksz && p.reset == 0u) ? state[hist + j] : 0.0;
+    const float b0 = p.has_bias != 0u ? bias[ch] : 0.0;
+    const uint hl = p.ksz - 1u;
+    for (uint t = 0u; t < p.n; t++) {
+        const uint base = (p.row0 + t) * 3u * p.hidden;
+        const float cur = proj[base + ch] * proj[base + 2u * p.hidden + ch];
+        float value = b0;
+        [[unroll]] for (uint j = 0u; j < 7u; j++) {
+            if (j < hl) value += w[j] * h[j];
+        }
+        value += w[hl] * cur;
+        outv[(p.row0 + t) * p.hidden + ch] = proj[base + p.hidden + ch] * value;
+        [[unroll]] for (uint j = 0u; j < 6u; j++) {
+            if (j + 1u < hl) h[j] = h[j + 1u];
+        }
+        h[hl - 1u] = cur;
+    }
+    [[unroll]] for (uint j = 0u; j < 7u; j++) {
+        if (j < hl) state[hist + j] = h[j];
+    }
+}

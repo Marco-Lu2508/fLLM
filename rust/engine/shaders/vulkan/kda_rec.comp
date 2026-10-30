@@ -1,0 +1,103 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: kda_rec | bindings: mixed,forget,beta,gate,dt_bias,rate,norm,state,out | push: heads,conv_dim,row0,n,reset,state_off,bounded,lower_bound,eps | grid: [heads, 1, 1] per run
+// Kimi Delta Attention, part 2 (Stream::kda_layer, port of kda_rec_kernel in cuda/kda.cu, reference cpu_kda.rs): the delta-rule recurrence with a decay per key
+// channel for one head of one run per workgroup. HK = head width (a compile-time macro, 16 / 32 / 64 / 128 = local_size_x): invocation c owns value column c of
+// the head's state S[i][c] (key channel i) in registers for the whole run. `mixed` is the output of `delta_conv` (the convolved, normalised [q | k | v] rows).
+// Per token t, with raw = forget[t][h * HK + i] + dt_bias[h * HK + i]:
+//   g[i] = bounded != 0 ? lower_bound * sigmoid(rate[h] * raw) : -rate[h] * softplus(raw)        (the log decay; bounded = 0 for a Kimi layer)
+//   S[i][c] *= exp(g[i]);  memory[c] = sum_i S[i][c] k[i];  delta[c] = (v[c] - memory[c]) * sigmoid(beta[t][h]);  S[i][c] += k[i] delta[c];  o[c] = sum_i S[i][c] q[i]
+//   out[t][h][c] = o[c] / sqrt(mean_c(o^2) + eps) * norm[c] * sigmoid(gate[t][h * HK + c])
+// The state S[h][i][c] is FP32 at state[state_off + (h * HK + i) * HK + c] of the sequence's state buffer (float view). reset != 0: the old state is ignored.
+// The key channels are handled as vec4 groups so that the loops over the head have HK / 4 iterations: short enough for the compiler to unroll them and keep the
+// column in registers.
+#define WG HK
+#ifndef HK
+#define HK 64
+#endif
+#include "_ops_common.glsl"
+layout(local_size_x = HK) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer ForgetBuf { float forget[]; };
+layout(std430, binding = 2) readonly buffer BetaBuf { float beta[]; };
+layout(std430, binding = 3) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 4) readonly buffer DtBuf { float dt_bias[]; };
+layout(std430, binding = 5) readonly buffer RateBuf { float rate[]; };
+layout(std430, binding = 6) readonly buffer NormBuf { float norm_w[]; };
+layout(std430, binding = 7) buffer StateBuf { float state[]; };
+layout(std430, binding = 8) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint conv_dim;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+    uint bounded;
+    float lower_bound;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+shared vec4 s_q[HK / 4];
+shared vec4 s_k[HK / 4];
+shared vec4 s_dec[HK / 4];
+
+void main() {
+    const uint c = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint key_dim = p.heads * HK;
+    const uint sbase = p.state_off + h * HK * HK + c;
+    const uint cv = c >> 2u;
+    const uint cc = c & 3u;
+
+    vec4 s[HK / 4];
+    [[unroll]] for (uint i = 0u; i < HK / 4u; i++) {
+        s[i] = p.reset != 0u ? vec4(0.0) : vec4(state[sbase + (4u * i) * HK], state[sbase + (4u * i + 1u) * HK], state[sbase + (4u * i + 2u) * HK], state[sbase + (4u * i + 3u) * HK]);
+    }
+    const float rate_h = rate[h];
+    const float nw = norm_w[c];
+    const float dtb = dt_bias[h * HK + c];
+
+    for (uint t = 0u; t < p.n; t++) {
+        const uint row = p.row0 + t;
+        s_q[cv][cc] = mixed[row * p.conv_dim + h * HK + c];
+        s_k[cv][cc] = mixed[row * p.conv_dim + key_dim + h * HK + c];
+        const float raw = forget[row * key_dim + h * HK + c] + dtb;
+        float g;
+        if (p.bounded != 0u) {
+            g = p.lower_bound / (1.0 + exp(-rate_h * raw));
+        } else {
+            g = -rate_h * softplus20(raw);
+        }
+        s_dec[cv][cc] = exp(g);
+        barrier();
+        const float v = mixed[row * p.conv_dim + 2u * key_dim + h * HK + c];
+        vec4 memory4 = vec4(0.0);
+        [[unroll]] for (uint i = 0u; i < HK / 4u; i++) {
+            s[i] *= s_dec[i];
+            memory4 += s[i] * s_k[i];
+        }
+        const float memory = memory4.x + memory4.y + memory4.z + memory4.w;
+        const float sigma = 1.0 / (1.0 + exp(-beta[row * p.heads + h]));
+        const float delta = (v - memory) * sigma;
+        vec4 acc4 = vec4(0.0);
+        [[unroll]] for (uint i = 0u; i < HK / 4u; i++) {
+            s[i] += s_k[i] * delta;
+            acc4 += s[i] * s_q[i];
+        }
+        const float acc = acc4.x + acc4.y + acc4.z + acc4.w;
+        const float ss = wg_sum(acc * acc);
+        const float inv = 1.0 / sqrt(ss / float(HK) + p.eps);
+        outv[row * key_dim + h * HK + c] = acc * inv * nw * sigmoid1(gate[row * key_dim + h * HK + c]);
+        barrier();
+    }
+    [[unroll]] for (uint i = 0u; i < HK / 4u; i++) {
+        state[sbase + (4u * i) * HK] = s[i].x;
+        state[sbase + (4u * i + 1u) * HK] = s[i].y;
+        state[sbase + (4u * i + 2u) * HK] = s[i].z;
+        state[sbase + (4u * i + 3u) * HK] = s[i].w;
+    }
+}

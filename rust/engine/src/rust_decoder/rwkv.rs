@@ -477,6 +477,311 @@ impl RustDecoder {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// Device path
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+type Dev = crate::backend::DeviceBuffer;
+type Weight = crate::backend::DeviceWeight;
+
+/// A low-rank adapter on the device: the down matrix and the up matrix (which carries the bias of the adapter).
+pub(super) struct DeviceAdapter {
+    down: Weight,
+    up: Weight,
+}
+
+pub(super) struct DeviceRwkv7 {
+    /// Mixing vectors in the order r, w, k, v, a, g.
+    lerp: Vec<Dev>,
+    w: DeviceAdapter,
+    a: DeviceAdapter,
+    v: Option<DeviceAdapter>,
+    g: DeviceAdapter,
+    k_k: Dev,
+    k_a: Dev,
+    r_k: Dev,
+}
+
+pub(super) struct DeviceRwkv6 {
+    /// Mixing vectors: x (for the adapters), then w, k, v, r, g.
+    lerp: Vec<Dev>,
+    /// The five mixing-vector adapters, one pair per vector (w, k, v, r, g).
+    maa: Vec<DeviceAdapter>,
+    /// The decay adapter; the up matrix carries the base decay `time_mix_decay` as its bias.
+    decay: DeviceAdapter,
+    first: Dev,
+    gate: Weight,
+    channel_receptance: Weight,
+    channel_lerp_r: Dev,
+}
+
+pub(super) enum DeviceVersion {
+    V7(Box<DeviceRwkv7>),
+    V6(Box<DeviceRwkv6>),
+}
+
+/// Device copy of an RWKV layer (the output projection is the layer's `out`).
+pub(super) struct DeviceRwkv {
+    version: DeviceVersion,
+    receptance: Weight,
+    key: Weight,
+    value: Weight,
+    channel_key: Weight,
+    channel_value: Weight,
+    ln_x_weight: Dev,
+    ln_x_bias: Dev,
+    ln2_weight: Dev,
+    ln2_bias: Dev,
+    channel_lerp_k: Dev,
+    /// Index among the RWKV layers (selects the slice of a sequence's state buffer).
+    pub(super) ordinal: usize,
+}
+
+impl Rwkv {
+    /// Uploads the layer. `linear` uploads a projection, `vector` a small FP32 vector.
+    pub(super) fn upload(
+        &self,
+        backend: &dyn crate::backend::Backend,
+        name: &str,
+        ordinal: usize,
+        linear: &dyn Fn(&str, &Linear) -> Result<Weight, String>,
+        vector: &dyn Fn(&[f32]) -> Result<Dev, String>,
+    ) -> Result<DeviceRwkv, String> {
+        let matrix = |tag: &str, m: &Mat, bias: Option<&[f32]>| -> Result<Weight, String> {
+            backend
+                .upload_weight(&format!("{name}.{tag}"), cast_f32_to_u8(&m.data), crate::backend::QuantType::F32, m.rows, m.cols, bias)
+                .map_err(|e| e.to_string())
+        };
+        let adapter = |tag: &str, down: &Mat, up: &Mat, bias: Option<&[f32]>| -> Result<DeviceAdapter, String> {
+            Ok(DeviceAdapter { down: matrix(&format!("{tag}_down"), down, None)?, up: matrix(&format!("{tag}_up"), up, bias)? })
+        };
+        let vectors = |all: &[Vec<f32>]| -> Result<Vec<Dev>, String> { all.iter().map(|v| vector(v)).collect() };
+        let version = match &self.version {
+            Version::V7(v7) => {
+                let ad = |tag: &str, a: &Adapter| adapter(tag, &a.down, &a.up, a.bias.as_deref());
+                DeviceVersion::V7(Box::new(DeviceRwkv7 {
+                    lerp: vectors(&v7.lerp)?,
+                    w: ad("w", &v7.w)?,
+                    a: ad("a", &v7.a)?,
+                    v: v7.v.as_ref().map(|a| ad("v", a)).transpose()?,
+                    g: ad("g", &v7.g)?,
+                    k_k: vector(&v7.k_k)?,
+                    k_a: vector(&v7.k_a)?,
+                    r_k: vector(&v7.r_k)?,
+                }))
+            }
+            Version::V6(v6) => {
+                let rank = v6.maa_w1.rows / 5;
+                let mut maa = Vec::with_capacity(5);
+                for (j, up) in v6.maa_w2.iter().enumerate() {
+                    let down = Mat { rows: rank, cols: v6.maa_w1.cols, data: v6.maa_w1.data[j * rank * v6.maa_w1.cols..(j + 1) * rank * v6.maa_w1.cols].to_vec() };
+                    maa.push(adapter(&format!("maa{j}"), &down, up, None)?);
+                }
+                DeviceVersion::V6(Box::new(DeviceRwkv6 {
+                    lerp: vectors(&v6.lerp)?,
+                    maa,
+                    decay: adapter("decay", &v6.decay_w1, &v6.decay_w2, Some(&v6.decay))?,
+                    first: vector(&v6.first)?,
+                    gate: linear(&format!("{name}.gate"), &v6.gate)?,
+                    channel_receptance: linear(&format!("{name}.channel_receptance"), &v6.channel_receptance)?,
+                    channel_lerp_r: vector(&v6.channel_lerp_r)?,
+                }))
+            }
+        };
+        let bias = |n: &Norm| n.bias.clone().unwrap_or_else(|| vec![0.0; n.weight.len()]);
+        Ok(DeviceRwkv {
+            version,
+            receptance: linear(&format!("{name}.receptance"), &self.receptance)?,
+            key: linear(&format!("{name}.key"), &self.key)?,
+            value: linear(&format!("{name}.value"), &self.value)?,
+            channel_key: linear(&format!("{name}.channel_key"), &self.channel_key)?,
+            channel_value: linear(&format!("{name}.channel_value"), &self.channel_value)?,
+            ln_x_weight: vector(&self.ln_x.weight)?,
+            ln_x_bias: vector(&bias(&self.ln_x))?,
+            ln2_weight: vector(&self.ln2.weight)?,
+            ln2_bias: vector(&bias(&self.ln2))?,
+            channel_lerp_k: vector(&self.channel_lerp_k)?,
+            ordinal,
+        })
+    }
+}
+
+impl RustDecoder {
+    pub(super) fn rwkv_shape(&self) -> Option<crate::backend::RwkvShape> {
+        let rc = self.cfg.rwkv.as_ref()?;
+        self.layers.iter().any(|l| matches!(l.attn, Attn::Rwkv(_))).then_some(crate::backend::RwkvShape {
+            hidden: self.cfg.hidden,
+            head_size: rc.head_size,
+            group_eps: rc.group_eps,
+            v7: rc.v7,
+        })
+    }
+
+    /// One RWKV layer on the device: the token-shift mixes and adapters, the recurrence kernel, the output projection, then the channel
+    /// mix, each added to the residual stream `x`. `normed` is the layer norm of the time-mix block applied to `x`. `v_first` carries the
+    /// values of layer 0 (RWKV-7) from layer to layer within one pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn rwkv_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        shape: &crate::backend::RwkvShape,
+        dr: &DeviceRwkv,
+        dev_layer: &DeviceLayerWeights,
+        (index, plan): (usize, &[DeltaPlanRun]),
+        normed: &Dev,
+        x: &mut Dev,
+        rows: usize,
+        v_first: &mut Option<Dev>,
+    ) -> Result<(), String> {
+        use crate::backend::{DeltaRun, RwkvWeights};
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let rc = self.cfg.rwkv.as_ref().ok_or("missing RWKV configuration")?;
+        let c = shape.hidden;
+        let resets = self.delta_claim(dr.ordinal, plan)?;
+        let runs: Vec<DeltaRun<'_>> =
+            plan.iter().zip(&resets).map(|(p, &reset)| DeltaRun { state: &p.buf, first_row: p.start, rows: p.n, reset }).collect();
+        let state_off = dr.ordinal * shape.layer_state_bytes();
+        let mut recycle: Vec<Dev> = Vec::new();
+
+        // y = W u (+ bias) for `rows` rows
+        fn project(
+            stream: &mut dyn crate::backend::Stream,
+            scratch: &mut crate::backend::BufferPool,
+            w: &Weight,
+            input: &Dev,
+            rows: usize,
+        ) -> Result<Dev, String> {
+            let mut out = scratch.acquire(rows * w.rows * 4).map_err(|e| e.to_string())?;
+            stream.quantized_linear(&mut out, input, w, w.bias.as_ref()).map_err(|e| e.to_string())?;
+            Ok(out)
+        }
+        // up(act(down(u))) with an optional activation between the two matrices
+        let adapt = |stream: &mut dyn crate::backend::Stream,
+                     scratch: &mut crate::backend::BufferPool,
+                     a: &DeviceAdapter,
+                     input: &Dev,
+                     act: Option<i32>|
+         -> Result<Dev, String> {
+            let mut mid = project(stream, scratch, &a.down, input, rows)?;
+            if let Some(mode) = act {
+                stream.rwkv_act(&mut mid, None, mode).map_err(err)?;
+            }
+            let out = project(stream, scratch, &a.up, &mid, rows)?;
+            scratch.recycle(mid);
+            Ok(out)
+        };
+        let lerp = |stream: &mut dyn crate::backend::Stream,
+                    scratch: &mut crate::backend::BufferPool,
+                    from: &Dev,
+                    shifted: &Dev,
+                    mix: &Dev,
+                    delta: Option<&Dev>|
+         -> Result<Dev, String> {
+            let mut out = scratch.acquire(rows * c * 4).map_err(err)?;
+            stream.rwkv_lerp(c, from, shifted, mix, delta, &mut out).map_err(err)?;
+            Ok(out)
+        };
+
+        // ---- time mix
+        let mut shift = scratch.acquire(rows * c * 4).map_err(err)?;
+        stream.rwkv_shift(c, &runs, state_off + shape.shift_offset(), normed, &mut shift).map_err(err)?;
+        let mut y = scratch.acquire(rows * c * 4).map_err(err)?;
+        fn norm_weights<'a>(dr: &'a DeviceRwkv, k_k: &'a Dev, k_a: Option<&'a Dev>, r_k: Option<&'a Dev>) -> RwkvWeights<'a> {
+            RwkvWeights { norm_weight: &dr.ln_x_weight, norm_bias: &dr.ln_x_bias, k_k, k_a, r_k }
+        }
+        match &dr.version {
+            DeviceVersion::V7(d) => {
+                let mut mixed = Vec::with_capacity(6);
+                for mix in &d.lerp {
+                    mixed.push(lerp(stream, scratch, normed, &shift, mix, None)?);
+                }
+                let r = project(stream, scratch, &dr.receptance, &mixed[0], rows)?;
+                let k = project(stream, scratch, &dr.key, &mixed[2], rows)?;
+                let v = project(stream, scratch, &dr.value, &mixed[3], rows)?;
+                let w = adapt(stream, scratch, &d.w, &mixed[1], Some(0))?;
+                let a = adapt(stream, scratch, &d.a, &mixed[4], None)?;
+                let g = adapt(stream, scratch, &d.g, &mixed[5], Some(1))?;
+                let v_res = match (&d.v, index > 0) {
+                    (Some(adapter), true) => Some(adapt(stream, scratch, adapter, &mixed[3], None)?),
+                    _ => None,
+                };
+                if v_res.is_none() {
+                    // layer 0 (or a layer without a value adapter) stores its values for the later layers
+                    if let Some(old) = v_first.take() {
+                        scratch.recycle(old);
+                    }
+                    *v_first = Some(scratch.acquire(rows * c * 4).map_err(err)?);
+                } else if v_first.as_ref().is_none_or(|b| b.size < rows * c * 4) {
+                    return Err("the values of layer 0 are missing for the value residual".into());
+                }
+                let first = v_first.as_mut().ok_or("RWKV-7 value buffer")?;
+                let inputs = crate::backend::Rwkv7Inputs { r: &r, k: &k, v: &v, w: &w, a: &a, v_res: v_res.as_ref(), gate: &g };
+                let weights = norm_weights(dr, &d.k_k, Some(&d.k_a), Some(&d.r_k));
+                stream.rwkv7_wkv(shape, &weights, &runs, state_off, &inputs, first, &mut y).map_err(err)?;
+                recycle.extend([r, k, v, w, a, g]);
+                recycle.extend(v_res);
+                recycle.extend(mixed);
+            }
+            DeviceVersion::V6(d) => {
+                let xx = lerp(stream, scratch, normed, &shift, &d.lerp[0], None)?;
+                let mut mixed = Vec::with_capacity(5);
+                for (j, adapter) in d.maa.iter().enumerate() {
+                    let delta = adapt(stream, scratch, adapter, &xx, Some(0))?;
+                    mixed.push(lerp(stream, scratch, normed, &shift, &d.lerp[j + 1], Some(&delta))?);
+                    recycle.push(delta);
+                }
+                recycle.push(xx);
+                // mixed: w, k, v, r, g
+                let r = project(stream, scratch, &dr.receptance, &mixed[3], rows)?;
+                let k = project(stream, scratch, &dr.key, &mixed[1], rows)?;
+                let v = project(stream, scratch, &dr.value, &mixed[2], rows)?;
+                let mut gate = project(stream, scratch, &d.gate, &mixed[4], rows)?;
+                stream.rwkv_act(&mut gate, None, 2).map_err(err)?;
+                let w = adapt(stream, scratch, &d.decay, &mixed[0], Some(0))?;
+                let weights = norm_weights(dr, &d.first, None, None);
+                stream.rwkv6_wkv(shape, &weights, &runs, state_off, &r, &k, &v, &w, &gate, &mut y).map_err(err)?;
+                recycle.extend([r, k, v, w, gate]);
+                recycle.extend(mixed);
+            }
+        }
+        recycle.extend([shift]);
+        let out_w = dev_layer.out.as_ref().ok_or("RWKV layer without a device output projection")?;
+        if !stream.quantized_linear_add(x, &y, out_w, out_w.bias.as_ref(), 1.0).map_err(err)? {
+            let mut branch = scratch.acquire(rows * c * 4).map_err(err)?;
+            stream.quantized_linear(&mut branch, &y, out_w, out_w.bias.as_ref()).map_err(err)?;
+            stream.residual_add(x, &branch, 1.0).map_err(err)?;
+            recycle.push(branch);
+        }
+        recycle.push(y);
+
+        // ---- channel mix
+        let mut h2 = scratch.acquire(rows * c * 4).map_err(err)?;
+        device_norm(stream, self.cfg.norm, &mut h2, x, &dr.ln2_weight, Some(&dr.ln2_bias), self.cfg.eps, self.groups)?;
+        let mut shift2 = scratch.acquire(rows * c * 4).map_err(err)?;
+        stream.rwkv_shift(c, &runs, state_off + shape.shift_offset() + c * 4, &h2, &mut shift2).map_err(err)?;
+        let xk = lerp(stream, scratch, &h2, &shift2, &dr.channel_lerp_k, None)?;
+        let mut hidden = project(stream, scratch, &dr.channel_key, &xk, rows)?;
+        stream.rwkv_act(&mut hidden, None, 3).map_err(err)?;
+        let mut out = project(stream, scratch, &dr.channel_value, &hidden, rows)?;
+        if let DeviceVersion::V6(d) = &dr.version {
+            let xr = lerp(stream, scratch, &h2, &shift2, &d.channel_lerp_r, None)?;
+            let recv = project(stream, scratch, &d.channel_receptance, &xr, rows)?;
+            stream.rwkv_act(&mut out, Some(&recv), 4).map_err(err)?;
+            recycle.extend([xr, recv]);
+        }
+        stream.residual_add(x, &out, 1.0).map_err(err)?;
+        recycle.extend([h2, shift2, xk, hidden, out]);
+        if rc.rescale_every > 0 && (index + 1).is_multiple_of(rc.rescale_every) {
+            stream.rwkv_act(x, None, 5).map_err(err)?;
+        }
+        for buf in recycle {
+            scratch.recycle(buf);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

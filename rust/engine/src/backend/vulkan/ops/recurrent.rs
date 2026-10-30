@@ -189,6 +189,230 @@ pub fn plan_delta_layer_with(
     Ok(plans)
 }
 
+/// Plans of `Stream::kda_layer`: for every non-empty run the `delta_conv` dispatch of the Gated DeltaNet (the convolution, SiLU and L2 normalisation over
+/// `[q | k | v]` are the same with `k_heads = v_heads = heads` and equal key and value widths; the history sits behind the `heads x head_dim x head_dim`
+/// matrices exactly as there) and one `kda_rec_hk<head_dim>` dispatch (barrier in between). Slots of `delta_conv`: `qkv`, `conv`, `state`, `mixed` (scratch
+/// id 0), of `kda_rec`: `mixed`, `forget`, `beta`, `gate`, `dt_bias`, `rate`, `norm`, `state`, `out`.
+pub fn plan_kda_layer(shape: &crate::backend::KdaShape, runs: &[RunSpec], state_offset: usize) -> Result<Vec<OpPlan>, BackendError> {
+    if !kda_supported(shape) {
+        return Err(BackendError::UnsupportedOperation(format!(
+            "KDA shape {} heads of {} kernel {} is not supported by the Vulkan shaders",
+            shape.heads, shape.head_dim, shape.conv_kernel
+        )));
+    }
+    if !state_offset.is_multiple_of(4) {
+        return Err(invalid("KDA state offset must be a multiple of 4 bytes"));
+    }
+    let rec_name = match shape.head_dim {
+        16 => "kda_rec_hk16",
+        32 => "kda_rec_hk32",
+        64 => "kda_rec_hk64",
+        _ => "kda_rec_hk128",
+    };
+    let (heads, hd, ksz) = (shape.heads, shape.head_dim, shape.conv_kernel);
+    let conv_dim = shape.conv_dim();
+    let state_off = state_offset / 4;
+    let hist_off = (state_offset + shape.rec_bytes()) / 4;
+    let qscale = (hd as f32).powf(-0.5);
+    let value_blocks = div_up(heads * hd, 128);
+    let mut plans = Vec::with_capacity(runs.len() * 2);
+    for (i, run) in runs.iter().enumerate() {
+        if run.rows == 0 {
+            continue;
+        }
+        let mixed_bytes = (run.first_row + run.rows) * conv_dim * 4;
+        let (gx, gy) = (2 * heads + value_blocks, div_up(run.rows, CONV_CHUNK));
+        if gx > MAX_GROUPS_PER_DIM as usize || gy > MAX_GROUPS_PER_DIM as usize || heads > MAX_GROUPS_PER_DIM as usize {
+            return Err(BackendError::UnsupportedOperation("KDA run too long for one dispatch".into()));
+        }
+        let conv_push = Push::new()
+            .u("conv_dim", conv_dim)
+            .u("kh", heads)
+            .u("hk", hd)
+            .u("ksz", ksz)
+            .u("row0", run.first_row)
+            .u("n", run.rows)
+            .b("reset", run.reset)
+            .u("hist_off", hist_off)
+            .f("qscale", qscale);
+        let conv_slots = Slots::new().read("qkv").read("conv").run_state("state", i).scratch("mixed", 0, mixed_bytes, Access::ReadWrite);
+        plans.push(plan("delta_conv", conv_push, [gx as u32, gy as u32, 1], conv_slots)?);
+        let rec_push = Push::new()
+            .u("heads", heads)
+            .u("conv_dim", conv_dim)
+            .u("row0", run.first_row)
+            .u("n", run.rows)
+            .b("reset", run.reset)
+            .u("state_off", state_off)
+            .b("bounded", shape.lower_bound.is_some())
+            .f("lower_bound", shape.lower_bound.unwrap_or(0.0))
+            .f("eps", shape.eps);
+        let rec_slots = Slots::new()
+            .scratch("mixed", 0, mixed_bytes, Access::Read)
+            .read("forget")
+            .read("beta")
+            .read("gate")
+            .read("dt_bias")
+            .read("rate")
+            .read("norm")
+            .run_state("state", i)
+            .write("out");
+        plans.push(plan(rec_name, rec_push, [heads as u32, 1, 1], rec_slots)?);
+    }
+    Ok(plans)
+}
+
+/// Whether the `shortconv` shader takes this convolution (kernel 2..8).
+pub fn shortconv_supported(hidden: usize, kernel: usize) -> bool {
+    hidden > 0 && (2..=8).contains(&kernel)
+}
+
+/// `Stream::shortconv_layer` for one run (`shortconv`, slots `proj`, `conv`, `bias`, `state`, `out`); `state_offset` is the byte offset of the layer's history.
+pub fn plan_shortconv(run_index: usize, run: &RunSpec, hidden: usize, kernel: usize, state_offset: usize, has_bias: bool) -> Result<OpPlan, BackendError> {
+    if !shortconv_supported(hidden, kernel) || !state_offset.is_multiple_of(4) || run.rows == 0 {
+        return Err(invalid("ShortConv: unsupported kernel, offset or empty run"));
+    }
+    let push = Push::new()
+        .u("hidden", hidden)
+        .u("ksz", kernel)
+        .u("row0", run.first_row)
+        .u("n", run.rows)
+        .b("reset", run.reset)
+        .u("state_off", state_offset / 4)
+        .b("has_bias", has_bias);
+    plan(
+        "shortconv",
+        push,
+        [div_up(hidden, 128) as u32, 1, 1],
+        Slots::new().read("proj").read("conv").read_opt("bias", has_bias).run_state("state", run_index).write("out"),
+    )
+}
+
+/// `Stream::copy_columns` (`misc_copy_cols`): `dst[r * dst_stride + dst_col + c] = src[r * width + c]` for `rows` rows.
+pub fn plan_copy_cols(rows: usize, width: usize, dst_stride: usize, dst_col: usize) -> Result<OpPlan, BackendError> {
+    if rows == 0 || width == 0 || dst_col + width > dst_stride {
+        return Err(invalid("copy_columns: empty block or block wider than the destination row"));
+    }
+    plan(
+        "misc_copy_cols",
+        Push::new().u("count", rows * width).u("width", width).u("dst_stride", dst_stride).u("dst_col", dst_col),
+        groups_1d(rows * width, 256),
+        Slots::new().read("src").rw("dst"),
+    )
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// RWKV-6 / RWKV-7
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+/// Whether the RWKV shaders take a layer with this head size (`rwkv7_wkv_n*`, `rwkv6_wkv_n*`).
+pub fn rwkv_supported(shape: &crate::backend::RwkvShape) -> bool {
+    matches!(shape.head_size, 16 | 32 | 64 | 128) && shape.hidden > 0 && shape.hidden.is_multiple_of(shape.head_size)
+}
+
+/// Storage buffers the widest RWKV shader binds (`rwkv7_wkv`).
+pub const RWKV_BINDINGS: u32 = 15;
+
+/// `Stream::rwkv_shift` for one run (`rwkv_shift`, slots `x`, `shift`, `state`); `shift_offset` is the byte offset of the stored vector inside the run's state buffer.
+pub fn plan_rwkv_shift(run_index: usize, run: &RunSpec, hidden: usize, shift_offset: usize) -> Result<OpPlan, BackendError> {
+    if !shift_offset.is_multiple_of(4) || run.rows == 0 || hidden == 0 {
+        return Err(invalid("RWKV shift: bad offset or empty run"));
+    }
+    let push = Push::new().u("hidden", hidden).u("row0", run.first_row).u("n", run.rows).b("reset", run.reset).u("off", shift_offset / 4);
+    plan("rwkv_shift", push, groups_1d(run.rows * hidden, 256), Slots::new().read("x").write("shift").run_state("state", run_index))
+}
+
+/// `Stream::rwkv_lerp` (`rwkv_lerp`): `out = x + (shift - x) * (mix + delta)` over `count` floats.
+pub fn plan_rwkv_lerp(count: usize, hidden: usize, has_delta: bool) -> Result<OpPlan, BackendError> {
+    if count == 0 || hidden == 0 {
+        return Err(invalid("RWKV interpolation of an empty tensor"));
+    }
+    plan(
+        "rwkv_lerp",
+        Push::new().u("count", count).u("hidden", hidden).b("has_delta", has_delta),
+        groups_1d(count, 256),
+        Slots::new().read("x").read("shift").read("mix").read_opt("delta", has_delta).write("out"),
+    )
+}
+
+/// `Stream::rwkv_act` (`rwkv_act`): in-place activation of `count` floats, `mode` as documented there.
+pub fn plan_rwkv_act(count: usize, mode: i32, has_gate: bool) -> Result<OpPlan, BackendError> {
+    if count == 0 || !(0..=5).contains(&mode) || (mode == 4 && !has_gate) {
+        return Err(invalid("RWKV activation: empty tensor, unknown mode or missing gate"));
+    }
+    plan("rwkv_act", Push::new().u("count", count).u("mode", mode as usize), groups_1d(count, 256), Slots::new().rw("x").read_opt("gate", has_gate))
+}
+
+fn rwkv_wkv_shader(v7: bool, head_size: usize) -> Option<&'static str> {
+    Some(match (v7, head_size) {
+        (true, 16) => "rwkv7_wkv_n16",
+        (true, 32) => "rwkv7_wkv_n32",
+        (true, 64) => "rwkv7_wkv_n64",
+        (true, 128) => "rwkv7_wkv_n128",
+        (false, 16) => "rwkv6_wkv_n16",
+        (false, 32) => "rwkv6_wkv_n32",
+        (false, 64) => "rwkv6_wkv_n64",
+        (false, 128) => "rwkv6_wkv_n128",
+        _ => return None,
+    })
+}
+
+/// `Stream::rwkv7_wkv` for one run (`rwkv7_wkv_n*`): one workgroup per head. `state_offset` is the byte offset of the WKV matrices inside the run's state buffer.
+pub fn plan_rwkv7_wkv(run_index: usize, run: &RunSpec, shape: &crate::backend::RwkvShape, state_offset: usize, has_vres: bool) -> Result<OpPlan, BackendError> {
+    let name = rwkv_wkv_shader(true, shape.head_size).filter(|_| rwkv_supported(shape) && state_offset.is_multiple_of(4) && run.rows > 0);
+    let name = name.ok_or_else(|| invalid("RWKV-7: unsupported head size, offset or empty run"))?;
+    let push = Push::new()
+        .u("hidden", shape.hidden)
+        .u("row0", run.first_row)
+        .u("n", run.rows)
+        .b("reset", run.reset)
+        .u("state_off", state_offset / 4)
+        .b("has_vres", has_vres)
+        .f("eps", shape.group_eps);
+    let slots = Slots::new()
+        .read("r")
+        .read("k")
+        .read("v")
+        .read("w")
+        .read("a")
+        .read_opt("vres", has_vres)
+        .read("gate")
+        .read("norm_w")
+        .read("norm_b")
+        .read("k_k")
+        .read("k_a")
+        .read("r_k")
+        .rw("v_first")
+        .run_state("state", run_index)
+        .write("out");
+    plan(name, push, [shape.heads() as u32, 1, 1], slots)
+}
+
+/// `Stream::rwkv6_wkv` for one run (`rwkv6_wkv_n*`).
+pub fn plan_rwkv6_wkv(run_index: usize, run: &RunSpec, shape: &crate::backend::RwkvShape, state_offset: usize) -> Result<OpPlan, BackendError> {
+    let name = rwkv_wkv_shader(false, shape.head_size).filter(|_| rwkv_supported(shape) && state_offset.is_multiple_of(4) && run.rows > 0);
+    let name = name.ok_or_else(|| invalid("RWKV-6: unsupported head size, offset or empty run"))?;
+    let push = Push::new()
+        .u("hidden", shape.hidden)
+        .u("row0", run.first_row)
+        .u("n", run.rows)
+        .b("reset", run.reset)
+        .u("state_off", state_offset / 4)
+        .f("eps", shape.group_eps);
+    let slots = Slots::new()
+        .read("r")
+        .read("k")
+        .read("v")
+        .read("w")
+        .read("gate")
+        .read("norm_w")
+        .read("norm_b")
+        .read("first")
+        .run_state("state", run_index)
+        .write("out");
+    plan(name, push, [shape.heads() as u32, 1, 1], slots)
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // Mamba
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -549,6 +773,11 @@ pub fn plan_mamba2_mixer(
 /// The RMS norms (no weight) of the three parts of an `x_proj` row of a Mamba-1 layer (dt, B, C), in place on `split` (`rows x (rank + 2 state)`).
 /// Slots as `plan_rms_norm`: `x`, `weight` (dummy), `out` (the same buffer as `x`).
 pub fn plan_mamba1_bc_norms(shape: &Mamba1Shape, rows: usize) -> Result<Vec<OpPlan>, BackendError> {
+    plan_mamba1_bc_norms_with(shape, rows, false)
+}
+
+/// [`plan_mamba1_bc_norms`]; `weighted`: every norm has a learned weight (Jamba), bound as `weight` of its plan.
+pub fn plan_mamba1_bc_norms_with(shape: &Mamba1Shape, rows: usize, weighted: bool) -> Result<Vec<OpPlan>, BackendError> {
     shape.check()?;
     let Some(eps) = shape.bc_rms_eps else {
         return Ok(Vec::new());
@@ -565,7 +794,7 @@ pub fn plan_mamba1_bc_norms(shape: &Mamba1Shape, rows: usize) -> Result<Vec<OpPl
             rows,
             cols,
             eps,
-            false,
+            weighted,
             RowLayout {
                 x_stride: stride,
                 x_off: off,

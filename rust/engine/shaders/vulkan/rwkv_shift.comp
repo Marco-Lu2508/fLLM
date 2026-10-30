@@ -1,0 +1,38 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: rwkv_shift | bindings: x,shift,state | push: hidden,row0,n,reset,off | grid: [min(ceil(n*hidden/256), 65535), 1, 1] per run
+// RWKV token shift of one block over one run (n consecutive tokens of one sequence, rows row0 .. row0+n-1; Stream::rwkv_shift, reference cpu_rwkv.rs `shift`):
+//   shift[t] = x[t - 1]                         for t > 0
+//   shift[0] = stored vector (0 when reset)     the stored vector then becomes x[n - 1]
+// The stored vector is state[off + c] (float view of the sequence's state buffer, off = (state_offset + shift offset) / 4). Only the invocation of
+// (t = 0, c) touches state[off + c], so no ordering between invocations is needed. Grid-stride loop over n * hidden elements.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) buffer ShiftBuf { float shifted[]; };
+layout(std430, binding = 2) buffer StateBuf { float state[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint row0;
+    uint n;
+    uint reset;
+    uint off;
+} p;
+
+void main() {
+    const uint total = p.n * p.hidden;
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < total; i += grid_items) {
+        const uint t = i / p.hidden;
+        const uint c = i - t * p.hidden;
+        const uint row = p.row0 + t;
+        if (t == 0u) {
+            shifted[row * p.hidden + c] = p.reset != 0u ? 0.0 : state[p.off + c];
+            state[p.off + c] = x[(p.row0 + p.n - 1u) * p.hidden + c];
+        } else {
+            shifted[row * p.hidden + c] = x[(row - 1u) * p.hidden + c];
+        }
+    }
+}
