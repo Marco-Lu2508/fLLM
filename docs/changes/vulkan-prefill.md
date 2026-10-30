@@ -27,7 +27,7 @@ slower than other Vulkan engines, while the answer (a memory-bound matrix-vector
   accumulated with the accumulating dot instruction over a whole scale group and converted/scaled once per group
   (`acc += float(isum) * (ws * d_act) + wm * (d_act * sum(act))`; the activation sums are computed once while staging). Same inputs, bindings and
   push constants as `mm_<fmt>_i`, so the activation prepass, the slicing of big weights and the unified-memory allocation are unchanged.
-* `weights/plan.rs`: `mmq_tile`, `MmqKnobs`. The planner picks `mmq_<fmt>_i` instead of `mm_<fmt>_i` for batch >= 32 when the variant is the int8 dot
+* `weights/plan.rs`: `mmq_tile`, `MmqKnobs`. The planner picks `mmq_<fmt>_i` instead of `mm_<fmt>_i` for every batch above the matrix-vector range (9 and more) when the variant is the int8 dot
   product; spec constants are (workgroup size, BM, BN), the grid is `ceil(rows / BM) x ceil(batch / BN)`. The prepass buffer is rounded up to 16 bytes.
 * Tests: `weights/tests/mmq.rs` (arithmetic transcription for every format incl. the check that scale and offset are constant inside each scale group,
   selection and fallbacks, tile choice for several device limits, the module contains the dot instruction and its capabilities), the registry/plan
@@ -39,7 +39,7 @@ slower than other Vulkan engines, while the answer (a memory-bound matrix-vector
 | variable | effect |
 |---|---|
 | `FLLM_VK_MM=0` (or `legacy`, `off`) | never use the new kernel: `mm_<fmt>_i` as before (A/B test) |
-| `FLLM_VK_MM_MIN_BATCH=N` | smallest batch served by the new kernel (default 32, minimum 9) |
+| `FLLM_VK_MM_MIN_BATCH=N` | smallest batch served by the new kernel (default and minimum 9: the first batch above the matrix-vector range; it was 32 until 2026-10-30) |
 | `FLLM_VK_MM_BM=32\|64\|128`, `FLLM_VK_MM_BN=64\|128` | tile size; reduced automatically when the device's workgroup or shared-memory limit does not allow it |
 | `FLLM_VULKAN_NO_IDOT=1`, `FLLM_VULKAN_EXACT=1` | as before: the new kernel is an int8-dot kernel, so both switch it off (the f32 `mm_<fmt>_s` serves) |
 | `FLLM_VK_PROFILE=1` | per-pipeline GPU time table; the new kernels show up as `mmq_<fmt>_i` |

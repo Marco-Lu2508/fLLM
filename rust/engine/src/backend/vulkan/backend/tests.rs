@@ -609,15 +609,20 @@ fn no_shader_is_orphaned() {
     for quant in planned_formats() {
         for caps in capability_profiles() {
             for batch in [1usize, 16, 64] {
-                let options = PlanOptions {
-                    exact: false,
-                    available: Some(&always),
-                    ..PlanOptions::default()
-                };
-                let plan = plan_quantized_linear_with(quant, 64, 1024, batch, &caps, &options).unwrap();
-                seen.insert(plan.shader_name.clone());
-                if let Some(pp) = plan.activation_prepass {
-                    seen.insert(pp.shader_name);
+                // the `mm_<fmt>_i` kernels serve the batches above the matrix-vector range when the tiled `mmq_<fmt>_i` kernel is not available
+                let no_tiled = |n: &str| !n.starts_with("mmq_");
+                let availability: [&dyn Fn(&str) -> bool; 2] = [&always, &no_tiled];
+                for available in availability {
+                    let options = PlanOptions {
+                        exact: false,
+                        available: Some(available),
+                        ..PlanOptions::default()
+                    };
+                    let plan = plan_quantized_linear_with(quant, 64, 1024, batch, &caps, &options).unwrap();
+                    seen.insert(plan.shader_name.clone());
+                    if let Some(pp) = plan.activation_prepass {
+                        seen.insert(pp.shader_name);
+                    }
                 }
             }
         }

@@ -303,7 +303,7 @@ fn matvec_tuning(caps: &VkCapsLike, columns: u32) -> (u32, u32) {
 pub struct MmqKnobs {
     /// `FLLM_VK_MM=0` / `legacy` / `off`: never plan the `mmq_*` kernels (the `mm_*_i` kernels serve every batch above the matrix-vector range).
     pub enabled: bool,
-    /// `FLLM_VK_MM_MIN_BATCH`: smallest batch served by `mmq_*` (default 32).
+    /// `FLLM_VK_MM_MIN_BATCH`: smallest batch served by `mmq_*` (default: the first batch above the matrix-vector range).
     pub min_batch: u32,
     /// `FLLM_VK_MM_BM` (32, 64, 128 or 256): weight rows per workgroup.
     pub bm: Option<u32>,
@@ -318,7 +318,7 @@ pub struct MmqKnobs {
 impl MmqKnobs {
     pub const DEFAULT: MmqKnobs = MmqKnobs {
         enabled: true,
-        min_batch: 32,
+        min_batch: 1,
         bm: None,
         bn: None,
         tm: None,

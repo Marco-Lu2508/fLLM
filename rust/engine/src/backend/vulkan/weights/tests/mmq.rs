@@ -87,9 +87,12 @@ fn prompt_batches_use_the_tiled_kernel() {
     assert_eq!(values, [256, 128, 64, 8, 1]);
     assert_eq!(plan.groups, [16, 8, 1]);
     assert!(plan.activation_prepass.is_some());
-    // below the threshold and in the matrix-vector range the old kernels serve
+    // the first batch above the matrix-vector range already takes the tiled kernel (a few concurrent users, speculative drafts)
     let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 16, &caps_no_coop(), &lossy_options()).unwrap();
-    assert_eq!(plan.shader_name, "mm_q4_k_i");
+    assert_eq!(plan.shader_name, "mmq_q4_k_i");
+    let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 9, &caps_no_coop(), &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mmq_q4_k_i");
+    // in the matrix-vector range the matrix-vector kernels serve
     let plan = plan_quantized_linear_with(QuantType::Q4_K, 2048, 2048, 4, &caps_no_coop(), &lossy_options()).unwrap();
     assert_eq!(plan.shader_name, "mv_q4_k_i");
     // a registry without the new kernel falls back
@@ -123,8 +126,8 @@ fn tile_choice_follows_the_limits_and_the_knobs() {
     let caps = caps_full();
     let knobs = MmqKnobs::DEFAULT;
     assert_eq!(mmq_tile(&caps, 505, &knobs), Some((64, 64)));
-    assert_eq!(mmq_tile(&caps, 32, &knobs), Some((64, 64)));
-    assert_eq!(mmq_tile(&caps, 31, &knobs), None);
+    assert_eq!(mmq_tile(&caps, 9, &knobs), Some((64, 64)));
+    assert_eq!(mmq_tile(&caps, 8, &knobs), None);
     assert_eq!(mmq_tile(&caps, 4096, &MmqKnobs { enabled: false, ..knobs }), None);
     assert_eq!(mmq_tile(&caps, 100, &MmqKnobs { min_batch: 200, ..knobs }), None);
     assert_eq!(mmq_tile(&caps, 1000, &MmqKnobs { bm: Some(128), bn: Some(64), ..knobs }), Some((128, 64)));

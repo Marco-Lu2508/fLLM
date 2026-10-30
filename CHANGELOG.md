@@ -16,6 +16,8 @@ behaviour between versions).
 - Studio footer: it showed "CPU · avx-vnni" even when the model ran on a GPU or NPU; it now names the device the model was started on (`--device`) in front of the CPU tier.
 - Windows: the server also shuts down cleanly on Ctrl+Break, console close and logoff/shutdown (it handled Ctrl+C only).
 - `scripts/bench_compare.py` runs on Windows (no process groups, temp-dir log, `C:/...` binary paths in a config).
+### Fixed
+- **Vulkan: several concurrent users no longer fall off a cliff.** Batches of 9 to 31 rows (eight decoding sequences plus speculative drafts, or a short prompt) were served by the old `mm_<fmt>_i` kernels, which take 4 to 5 ms for a single projection of a 3B model on an iGPU; the tiled `mmq_<fmt>_i` kernel now serves everything above the matrix-vector range (`FLLM_VK_MM_MIN_BATCH` default 9 instead of 32), and the choice between cooperative matrices and the int8 dot product is measured from batch 9 on. Radeon 840M (4 CUs, RADV), Llama-3.2-3B Q4_K_M, `scripts/bench_compare.py`, total generated tokens per second including the prompt phase, 2 runs: 4 simultaneous requests of 60 words 23.5 -> 42.2 tok/s, 8 requests 11.4 -> 35.8; 4 requests of 380 words 14.5 -> 22.1, 8 requests 9.5 -> 15.4. A single request is unchanged (32.8 / 32.5 tok/s decode).
 
 ## [0.1.12] - 2026-10-30
 

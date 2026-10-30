@@ -112,7 +112,7 @@ pub(crate) fn plan_float_linear(
 }
 
 /// Smallest activation batch for which the choice between the cooperative-matrix and the int8 dot-product matrix shaders is measured.
-const PROMPT_TUNE_MIN_BATCH: usize = 32;
+const PROMPT_TUNE_MIN_BATCH: usize = 9;
 
 impl VulkanStream {
     /// Once per device: times the matrix-matrix product of a Q4_K weight (4096 x 4096, 512 tokens) with the cooperative-matrix shaders and with the int8
