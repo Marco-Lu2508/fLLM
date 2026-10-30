@@ -14,24 +14,25 @@
 // Waves: CDNA 4 waves in a 2x2 grid, 2x2 sub-tiles of 16x16 each; RDNA 8 waves in a 2x4 grid, 2x1 sub-tiles each. Rounding the operands
 // to FP16 costs about 1e-3 relative error, like tc_gemm.cu. Level of verification: L0 (compiles; never run on hardware).
 #pragma once
+#include <cstdlib>
+
 #include "../cuda/common.cuh"
 #include "fllm_hip.h"
 #include "hip_mma.cuh"
 
 namespace fllm_hip {
 
-constexpr int G_BM = 64, G_BN = 64, G_BK = 64;
+constexpr int G_BM = 64, G_BK = 64;   // the token tile BN is a template parameter of the kernel: 64, or 128 for long prompts (halves the weight decoding per token)
 constexpr int G_LD = G_BK + 8;          // halves per LDS row (144 bytes: 16-byte aligned rows, spread banks)
 constexpr int G_NT = 256;
 constexpr int G_RPK = G_BK / 16;        // runs of 16 per tile row
-static_assert(G_NT == G_BM * G_RPK && G_NT == G_BN * G_RPK, "one weight run and one activation run per thread and step");
+static_assert(G_NT == G_BM * G_RPK, "one weight run per thread and step");
 
 #if defined(FLLM_HIP_MMA)
 constexpr int G_WGM = 2;                                  // waves along the weight rows
 constexpr int G_WGN = G_NT / MMA_WAVE / G_WGM;            // waves along the tokens
 constexpr int G_TM = G_BM / G_WGM / 16;                   // 16-row sub-tiles per wave
-constexpr int G_TN = G_BN / G_WGN / 16;                   // 16-token sub-tiles per wave
-static_assert(G_TM >= 1 && G_TN >= 1 && G_WGM * G_TM * 16 == G_BM && G_WGN * G_TN * 16 == G_BN, "wave grid");
+static_assert(G_TM >= 1 && G_WGM * G_TM * 16 == G_BM, "wave grid");
 #endif
 
 // One call of the GEMM kernel: Y[token][row] for `batch` tokens.
@@ -103,10 +104,13 @@ struct KindDecoder {
     __device__ __forceinline__ void decode(int row, int run, float *w) const { decode16<KIND>(W + (size_t)row * row_bytes, run, cols, w); }
 };
 
-template <class Dec>
+template <class Dec, int G_BN>
 __global__ void __launch_bounds__(G_NT)
 mma_gemm_kernel(Dec dec, GemmArgs a) {
 #if defined(FLLM_HIP_MMA)
+    constexpr int G_TN = G_BN / G_WGN / 16;               // 16-token sub-tiles per wave
+    constexpr int G_XR = G_BN / G_BM;                     // activation runs per thread and step
+    static_assert(G_TN >= 1 && G_WGN * G_TN * 16 == G_BN && G_XR * G_BM == G_BN, "wave grid");
     __shared__ __align__(16) __half As[2][G_BM * G_LD];  // decoded weights  [row][k]
     __shared__ __align__(16) __half Bs[2][G_BN * G_LD];  // activations      [token][k]
     const int rows = a.rows, cols = a.cols, batch = a.batch;
@@ -124,27 +128,32 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
 #pragma unroll
             for (int e = 0; e < MMA_ACC; e++) acc[i][j][e] = 0.f;
 
-    float wv[16], xv[16];
+    float wv[16], xv[G_XR][16];
     auto fetch = [&](int kt) {
         const int k = kt * G_BK + ld_q * 16;
-        const int m = m0 + ld_row, n = n0 + ld_row;
+        const int m = m0 + ld_row;
         if (m < rows) {
             dec.decode(m, k >> 4, wv);
         } else {
 #pragma unroll
             for (int j = 0; j < 16; j++) wv[j] = 0.f;
         }
-        if (n < batch) {
-            if (a.perm) load_x16_perm(a.X + (size_t)n * cols, a.perm, k, cols, xv);
-            else load_x16(a.X + (size_t)n * cols, k, cols, xv);
-        } else {
 #pragma unroll
-            for (int j = 0; j < 16; j++) xv[j] = 0.f;
+        for (int r = 0; r < G_XR; r++) {
+            const int n = n0 + ld_row + r * G_BM;
+            if (n < batch) {
+                if (a.perm) load_x16_perm(a.X + (size_t)n * cols, a.perm, k, cols, xv[r]);
+                else load_x16(a.X + (size_t)n * cols, k, cols, xv[r]);
+            } else {
+#pragma unroll
+                for (int j = 0; j < 16; j++) xv[r][j] = 0.f;
+            }
         }
     };
     auto stash = [&](int buf) {
         store_h16(&As[buf][ld_row * G_LD + ld_q * 16], wv);
-        store_h16(&Bs[buf][ld_row * G_LD + ld_q * 16], xv);
+#pragma unroll
+        for (int r = 0; r < G_XR; r++) store_h16(&Bs[buf][(ld_row + r * G_BM) * G_LD + ld_q * 16], xv[r]);
     };
 
     fetch(0);
@@ -189,8 +198,15 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
 // Launch the kernel for `dec` on a rows x cols weight and `batch` tokens.
 template <class Dec>
 static inline void launch_mma_gemm(cudaStream_t s, const Dec &dec, const GemmArgs &args) {
-    const dim3 grid((args.rows + G_BM - 1) / G_BM, (args.batch + G_BN - 1) / G_BN), block(G_NT);
-    mma_gemm_kernel<Dec><<<grid, block, 0, s>>>(dec, args);
+    // a long prompt takes the wide token tile: every decoded weight feeds twice the products
+    static const bool wide = !std::getenv("FLLM_HIP_NARROW_TILE");
+    if (wide && args.batch > 96) {
+        const dim3 grid((args.rows + G_BM - 1) / G_BM, (args.batch + 127) / 128), block(G_NT);
+        mma_gemm_kernel<Dec, 128><<<grid, block, 0, s>>>(dec, args);
+    } else {
+        const dim3 grid((args.rows + G_BM - 1) / G_BM, (args.batch + 63) / 64), block(G_NT);
+        mma_gemm_kernel<Dec, 64><<<grid, block, 0, s>>>(dec, args);
+    }
 }
 
 }  // namespace fllm_hip
