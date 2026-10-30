@@ -207,7 +207,7 @@ does) and the builder chooses a seed in which the last kept and the first droppe
 | --- | --- |
 | Logits of every position, `scripts/verify_architectures.py`, f32 weights, f16 KV cache | `deepseek_v32_sparse` 1.7e-4 (12 tokens), 2.5e-4 (28), 1.8e-4 (33 and 36); `glm_moe_dsa_sparse` 3.5e-4 (12), 3.0e-4 (28, 33, 36), 2.2e-4 (40, 45); the selected positions of all 109 (layer, position) pairs equal those of transformers |
 | The same fixtures with `FLLM_DSA=dense` (the earlier behaviour) | 0.57 / 0.64 relative: the test discriminates |
-| `deepseek_v32_sparse` at 40 and 45 tokens | 0.13 relative at position 37 only: the attention output of that position agrees (below 1e-3) and the MoE output of layer 2 does not, a routing near-tie of the random fixture that is not related to the indexer; not counted as a pass |
+| `deepseek_v32_sparse` at 40 to 80 tokens, default f16 KV cache | 0.12 .. 0.13 relative at position 37 only: the attention output of that position agrees (below 1e-3) and the MoE output of layer 2 does not. With `FLLM_VERIFY_KV=f32` the same fixture matches at 3.3e-7 (40), 4.1e-7 (45) and 3.9e-7 (80 tokens), and transformers in float64 chooses the same experts as in float32 and matches fLLM with the f32 cache to below 1e-6 at all 45 positions (`TOKENS=45 python scripts/verify_precision.py deepseek_v32_sparse`): the flip is a near-tie of the router under the f16 rounding of the cached keys and values, not an indexer defect |
 | Cached decoding: first K tokens as a batch, then one token per call (`FLLM_VERIFY_SPLIT`) | same logits as the single batch for both fixtures |
 | Greedy server completions, 4 concurrent requests, `scripts/verify_generation.py` | 4 of 4 identical to transformers for both fixtures |
 
