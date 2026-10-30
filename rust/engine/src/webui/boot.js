@@ -11,10 +11,14 @@
 
     // On a phone the sidebar is a drawer over the page: closed at the start, closed again after a choice or a tap on the dimmed page.
     const narrowScreen = window.matchMedia('(max-width: 760px)');
+    let closedForPhone = false; // the sidebar was closed by the narrow window, not by the reader: it comes back when the window is wide again
     function closeSidebarIfNarrow() {
       if (narrowScreen.matches && !$('appShell').classList.contains('sidebar-collapsed')) toggleSidebar();
     }
-    narrowScreen.addEventListener('change', closeSidebarIfNarrow);
+    narrowScreen.addEventListener('change', () => {
+      if (narrowScreen.matches) { closedForPhone = !$('appShell').classList.contains('sidebar-collapsed'); closeSidebarIfNarrow(); }
+      else if (closedForPhone) { closedForPhone = false; if ($('appShell').classList.contains('sidebar-collapsed')) toggleSidebar(); }
+    });
     $('sidebarScrim').addEventListener('click', closeSidebarIfNarrow);
     document.querySelector('.sidebar-outer').addEventListener('click', (e) => {
       if (e.target.closest('.nav-item, .thread-row') && !e.target.closest('.thread-row-actions, .sel-box')) setTimeout(closeSidebarIfNarrow, 0);

@@ -828,3 +828,17 @@ html.dark .btn-destructive { color: #1c0806; }
 .mem-bar > i { display: block; height: 100%; border-radius: 3px; background: var(--ok); transition: width var(--slow); }
 .mem-bar.is-warn > i { background: var(--warn); }
 .mem-bar.is-high > i { background: var(--danger); }
+
+/* the open chat shows its full title; its actions appear on hover or keyboard focus, on touch screens always */
+.thread-row.active:not(:hover):not(:focus-within) .thread-row-actions { display: none; }
+@media (pointer: coarse) {
+  .thread-row.active .thread-row-actions { display: inline-flex !important; }
+}
+
+/* with the artifact panel open the chat column gets narrower: wide blocks scroll inside it instead of running under the panel */
+.messages-column, .msg-assistant-wrap, .msg-assistant-body, .msg-assistant-prose, .code-card { min-width: 0; max-width: 100%; }
+.chat-container.art-open .chat-messages-scroll { overflow-x: hidden; }
+@media (max-width: 760px) {
+  .art-toolbar { flex-wrap: wrap; row-gap: 4px; }
+  .art-tools { justify-content: flex-start; }
+}
