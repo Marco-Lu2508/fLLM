@@ -1221,6 +1221,11 @@ def stable_topk(margins=None, index_topk=None):
 def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     import transformers as T
 
+    if arch in ("rwkv6", "rwkv7"):
+        # transformers has no RWKV-6/7: the reference is scripts/rwkv_reference.py
+        import rwkv_reference
+
+        return rwkv_reference.build(arch, out, vocab, seed)
     if arch == "modernbert":
         return build_modernbert(out, vocab, seed)
     if arch == "nomic_bert":

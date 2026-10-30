@@ -24,13 +24,13 @@ PROMPTS = ["The quick brown fox", "Die Hauptstadt von", "def add(a, b):", "fLLM 
 NEW = 14
 
 
-def model_name(port):
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
-        return json.load(r)["data"][0]["id"]
+def served_model(port):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=30) as response:
+        return json.load(response)["data"][0]["id"]
 
 
-def post(port, prompt, model="x"):
-    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": NEW, "temperature": 0}).encode()
+def post(port, prompt):
+    body = json.dumps({"model": served_model(port), "prompt": prompt, "max_tokens": NEW, "temperature": 0}).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/completions", body, {"Content-Type": "application/json"}
     )
@@ -47,13 +47,24 @@ def verify(arch, fllm, work, port):
     gguf = work / f"{arch}.gguf"
     subprocess.run([fllm, "convert", str(src), str(gguf), "--outtype", "f32", "--overwrite"], check=True, capture_output=True)
     tok = Tokenizer.from_file(str(src / "tokenizer.json"))
-    model = T.AutoModelForCausalLM.from_pretrained(src, dtype=torch.float32).eval()
     want = []
-    for prompt in PROMPTS:
-        ids = torch.tensor([tok.encode(prompt, add_special_tokens=False).ids])
-        with torch.no_grad(), hf_golden.stable_topk():
-            out = model.generate(ids, max_new_tokens=NEW, do_sample=False, min_new_tokens=NEW)
-        want.append(tok.decode(out[0, ids.shape[1] :].tolist(), skip_special_tokens=True))
+    if arch in ("rwkv6", "rwkv7"):
+        # transformers has no RWKV-6/7: scripts/rwkv_reference.py is the reference
+        import rwkv_reference
+
+        model = rwkv_reference.load_dir(src)
+        for prompt in PROMPTS:
+            ids = tok.encode(prompt, add_special_tokens=False).ids
+            with torch.no_grad():
+                new = model.generate(ids, NEW)
+            want.append(tok.decode(new, skip_special_tokens=True))
+    else:
+        model = T.AutoModelForCausalLM.from_pretrained(src, dtype=torch.float32).eval()
+        for prompt in PROMPTS:
+            ids = torch.tensor([tok.encode(prompt, add_special_tokens=False).ids])
+            with torch.no_grad():
+                out = model.generate(ids, max_new_tokens=NEW, do_sample=False, min_new_tokens=NEW)
+            want.append(tok.decode(out[0, ids.shape[1] :].tolist(), skip_special_tokens=True))
     server = subprocess.Popen(
         [fllm, "serve", "--model", str(gguf), "--port", str(port), "--ctx", "128", "--max-seqs", "4", "--threads", "2"],
         stdout=subprocess.PIPE,
