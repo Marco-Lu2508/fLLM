@@ -2418,6 +2418,14 @@ impl RustDecoder {
                 if layer.attn_sub_norm.is_some() {
                     return Some("an attention sub-norm");
                 }
+                // the device gate kernels multiply element by element: a gate with one value per head would be read as garbage
+                // (Laguna, Step-3.5); the value scale of MiMo-V2 has no device operation either
+                if layer.gate_per_head {
+                    return Some("a per-head attention output gate");
+                }
+                if cfg.value_scale != 1.0 {
+                    return Some("a value scale");
+                }
                 // routed value experts (MoVA) are computed by the host reference inside an otherwise device layer
                 let gated = layer.output_gate || layer.attn_gate.is_some();
                 if gated && (!arch_ok || !gate_ok) {
