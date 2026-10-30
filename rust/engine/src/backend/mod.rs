@@ -1792,6 +1792,12 @@ pub trait Stream: Send {
         false
     }
 
+    /// May attention layers with a value scale (MiMo-V2) run on the device? Normally the same as [`Stream::supports_head_gate`]; a
+    /// backend whose attention path is known to differ from the host reference for such models says no.
+    fn supports_value_scale(&self) -> bool {
+        self.supports_head_gate()
+    }
+
     /// In-place `x = clamp(x, -limit, limit)`.
     fn clamp(&mut self, _x: &mut DeviceBuffer, _limit: f32) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("clamp".into()))

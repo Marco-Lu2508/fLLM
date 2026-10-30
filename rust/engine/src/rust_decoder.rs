@@ -2481,7 +2481,8 @@ impl RustDecoder {
     /// (`host_layers`) between device layers: the residual stream is downloaded, the layer runs on the CPU with the host KV
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, conv_ok: bool) -> Option<&'static str> {
+    #[allow(clippy::too_many_arguments)]
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
@@ -2502,7 +2503,7 @@ impl RustDecoder {
                 if layer.gate_per_head && !head_ok {
                     return Some("a per-head attention output gate");
                 }
-                if cfg.value_scale != 1.0 && !head_ok {
+                if cfg.value_scale != 1.0 && !(head_ok && value_ok) {
                     return Some("a value scale");
                 }
                 // routed value experts (MoVA) are computed by the host reference inside an otherwise device layer
@@ -2713,10 +2714,10 @@ impl RustDecoder {
                 backend.name()
             ));
         }
-        let (gate_ok, arch_ok, head_ok) = backend
+        let (gate_ok, arch_ok, head_ok, value_ok) = backend
             .create_stream()
-            .map(|s| (s.supports_attention_gate(), s.supports_arch_ops(), s.supports_head_gate()))
-            .unwrap_or((false, false, false));
+            .map(|s| (s.supports_attention_gate(), s.supports_arch_ops(), s.supports_head_gate(), s.supports_value_scale()))
+            .unwrap_or((false, false, false, false));
         let caps = backend.capabilities();
         let mut missing = self.backend_unsupported(caps.supports_layer_norm, caps.supports_grouped_rms_norm);
         // Layers without device kernels run on the host between the device layers (`host_layers`); a model in which no layer can
@@ -2746,7 +2747,7 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, conv_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok)
                 }
             })
             .collect();

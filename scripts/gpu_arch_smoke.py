@@ -18,7 +18,7 @@ import time
 import urllib.request
 
 
-def complete(fllm: str, gguf: str, device: str, port: int, tokens: int) -> str:
+def complete(fllm: str, gguf: str, device: str, port: int, tokens: int, prompt: str) -> str:
     log = tempfile.TemporaryFile(mode="w+")
     proc = subprocess.Popen([fllm, "serve", "--model", gguf, "--device", device, "--port", str(port), "--ctx", "256", "--threads", "4"],
                             stdout=subprocess.DEVNULL, stderr=log, text=True, preexec_fn=os.setsid)
@@ -31,7 +31,7 @@ def complete(fllm: str, gguf: str, device: str, port: int, tokens: int) -> str:
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
                     name = json.loads(r.read())["data"][0]["id"]
-                body = json.dumps({"model": name, "prompt": "the cat sat on the mat and", "max_tokens": tokens, "temperature": 0, "seed": 1}).encode()
+                body = json.dumps({"model": name, "prompt": prompt, "max_tokens": tokens, "temperature": 0, "seed": 1}).encode()
                 req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=60) as r:
                     return json.loads(r.read())["choices"][0]["text"]
@@ -51,12 +51,13 @@ def main() -> int:
     ap.add_argument("--fllm", required=True)
     ap.add_argument("--device", required=True)
     ap.add_argument("--tokens", type=int, default=12)
+    ap.add_argument("--prompt", default="the cat sat on the mat and", help="a short prompt (\"the cat\") keeps the prefill small")
     ap.add_argument("models", nargs="+")
     args = ap.parse_args()
     port = 19000 + (os.getpid() % 500) * 2
     for m in args.models:
-        cpu = complete(args.fllm, m, "cpu", port, args.tokens)
-        gpu = complete(args.fllm, m, args.device, port + 1, args.tokens)
+        cpu = complete(args.fllm, m, "cpu", port, args.tokens, args.prompt)
+        gpu = complete(args.fllm, m, args.device, port + 1, args.tokens, args.prompt)
         same = cpu == gpu and not cpu.startswith("FAILED")
         print(json.dumps({"model": os.path.basename(m), "device": args.device, "same_text": same, "cpu": cpu[:80], "device_text": gpu[:80]}))
     return 0

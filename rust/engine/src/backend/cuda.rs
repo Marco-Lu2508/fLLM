@@ -4085,6 +4085,13 @@ impl Stream for CudaStream {
         true
     }
 
+    /// The MiMo-V2 attention layers (per-layer KV head counts, sinks, a value width of half the key width) differ from the host reference
+    /// on AMD GPUs in decode steps of the tiny test model, with or without the value scale (CUDA and Vulkan agree; prefill agrees), so
+    /// they stay on the host there until that is understood. `FLLM_HIP_VALUE_SCALE=1` runs them on the device anyway.
+    fn supports_value_scale(&self) -> bool {
+        self.cc != 0 || std::env::var_os("FLLM_HIP_VALUE_SCALE").is_some()
+    }
+
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
         // SAFETY: the buffer is a whole number of floats.
         check(unsafe { fllm_cuda_clamp(self.raw, dev_ptr(x)?.cast(), x.size / 4, limit) })
