@@ -19,9 +19,9 @@ use super::*;
 type VecTriple = (Vec<f32>, Vec<f32>, Vec<f32>);
 
 pub(super) struct Hc {
-    mix: Linear,
-    base: Vec<f32>,
-    scale: Vec<f32>,
+    pub(super) mix: Linear,
+    pub(super) base: Vec<f32>,
+    pub(super) scale: Vec<f32>,
 }
 
 struct Comp {

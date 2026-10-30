@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_hc_combine | bindings: streams,post,comb,block | push: count,hc,hidden,has_comb | grid: [min(ceil(count/256), 65535), 1, 1]
+// Hyper-connection update of the residual streams (Stream::hc_combine), in place, for the count = rows * hidden (row, d) pairs:
+//   streams[r][k][d] = post[r][k] * block[r][d] + sum_j comb[r][j][k] * old[r][j][d]      (has_comb = 0: + old[r][k][d])
+// Each invocation reads all hc old values of its (r, d) before it writes any of them.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer StreamBuf { float streams[]; };
+layout(std430, binding = 1) readonly buffer PostBuf { float post[]; };
+layout(std430, binding = 2) readonly buffer CombBuf { float comb[]; };
+layout(std430, binding = 3) readonly buffer BlockBuf { float block[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint hc;
+    uint hidden;
+    uint has_comb;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const uint r = i / p.hidden;
+        const uint d = i % p.hidden;
+        float old[8];
+        for (uint j = 0u; j < p.hc; j++) old[j] = streams[(r * p.hc + j) * p.hidden + d];
+        const float b = block[i];
+        for (uint k = 0u; k < p.hc; k++) {
+            float mixed = old[k];
+            if (p.has_comb != 0u) {
+                mixed = 0.0;
+                for (uint j = 0u; j < p.hc; j++) mixed += comb[(r * p.hc + j) * p.hc + k] * old[j];
+            }
+            streams[(r * p.hc + k) * p.hidden + d] = post[r * p.hc + k] * b + mixed;
+        }
+    }
+}

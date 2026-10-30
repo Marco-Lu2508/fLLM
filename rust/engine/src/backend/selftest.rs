@@ -16,6 +16,8 @@ use crate::cpu_selftest::{format_name, random_weights, Lcg};
 use half::{bf16, f16};
 use std::time::Instant;
 
+mod dsa;
+mod hc;
 mod kv;
 mod mlx;
 mod moe;
@@ -2271,6 +2273,8 @@ impl<'a> Tester<'a> {
         }
         if self.enter("arch") {
             self.arch_cases();
+            self.dsa_cases();
+            self.hc_cases();
         }
         if self.enter("linear") {
             self.linear_cases();

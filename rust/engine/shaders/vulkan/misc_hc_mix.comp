@@ -1,0 +1,84 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_hc_mix | bindings: streams,mixes,base,scale,post,comb,collapsed | push: hc,hidden,mode,iters,eps,magnitude | grid: [rows, 1, 1]
+// Hyper-connection mixing weights and collapse (Stream::hc_mix; Hy4, GLM-5-Next, DeepSeek-V4, Qwen3.8-Flash-Next). One workgroup per row. `mixes` is the
+// linear output of the RMS-normalised streams (width 2 hc, (2 + hc) hc or hc), `base` and `scale` the learned offsets and scales.
+//   mode 0 independent: pre = sigmoid(m[n] s0 + b[n]) + eps, post = magnitude sigmoid(m[hc + n] s1 + b[hc + n]) + eps
+//   mode 1 Sinkhorn:    the same pre, post = 2 sigmoid(m[hc + n] s1 + b[hc + n]), comb = row softmax of m s2 + b + eps, then column / row normalisation
+//   mode 2 head:        pre only            mode 3 mean: pre = 1 / hc
+// collapsed[r] = sum_n pre[n] * streams[r][n]; post (rows x hc) and comb (rows x hc x hc, mode 1 only) are written for Stream::hc_combine.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer StreamBuf { float streams[]; };
+layout(std430, binding = 1) readonly buffer MixBuf { float mixes[]; };
+layout(std430, binding = 2) readonly buffer BaseBuf { float base[]; };
+layout(std430, binding = 3) readonly buffer ScaleBuf { float scale[]; };
+layout(std430, binding = 4) buffer PostBuf { float post[]; };
+layout(std430, binding = 5) buffer CombBuf { float comb[]; };
+layout(std430, binding = 6) buffer CollapsedBuf { float collapsed[]; };
+layout(push_constant) uniform P {
+    uint hc;
+    uint hidden;
+    uint mode;
+    uint iters;
+    float eps;
+    float magnitude;
+} p;
+
+shared float pre[8];
+
+void main() {
+    const uint r = gl_WorkGroupID.x;
+    if (gl_LocalInvocationID.x == 0u) {
+        const uint hc = p.hc;
+        const uint width = p.mode == 0u ? 2u * hc : (p.mode == 1u ? (2u + hc) * hc : hc);
+        const uint mo = r * width;
+        for (uint n = 0u; n < hc; n++) {
+            pre[n] = p.mode == 3u ? 1.0 / float(hc) : sigmoid1(mixes[mo + n] * scale[0] + base[n]) + p.eps;
+            if (p.mode == 0u) post[r * hc + n] = p.magnitude * sigmoid1(mixes[mo + hc + n] * scale[1] + base[hc + n]) + p.eps;
+            if (p.mode == 1u) post[r * hc + n] = 2.0 * sigmoid1(mixes[mo + hc + n] * scale[1] + base[hc + n]);
+        }
+        if (p.mode == 1u) {
+            float c[64];
+            for (uint j = 0u; j < hc; j++) {
+                float mx = NEG;
+                for (uint k = 0u; k < hc; k++) {
+                    c[j * hc + k] = mixes[mo + 2u * hc + j * hc + k] * scale[2] + base[2u * hc + j * hc + k];
+                    mx = max(mx, c[j * hc + k]);
+                }
+                float sum = 0.0;
+                for (uint k = 0u; k < hc; k++) {
+                    c[j * hc + k] = exp(c[j * hc + k] - mx);
+                    sum += c[j * hc + k];
+                }
+                for (uint k = 0u; k < hc; k++) c[j * hc + k] = c[j * hc + k] / sum + p.eps;
+            }
+            for (uint k = 0u; k < hc; k++) {
+                float s = 0.0;
+                for (uint j = 0u; j < hc; j++) s += c[j * hc + k];
+                for (uint j = 0u; j < hc; j++) c[j * hc + k] /= s + p.eps;
+            }
+            for (uint it = 1u; it < p.iters; it++) {
+                for (uint j = 0u; j < hc; j++) {
+                    float s = 0.0;
+                    for (uint k = 0u; k < hc; k++) s += c[j * hc + k];
+                    for (uint k = 0u; k < hc; k++) c[j * hc + k] /= s + p.eps;
+                }
+                for (uint k = 0u; k < hc; k++) {
+                    float s = 0.0;
+                    for (uint j = 0u; j < hc; j++) s += c[j * hc + k];
+                    for (uint j = 0u; j < hc; j++) c[j * hc + k] /= s + p.eps;
+                }
+            }
+            for (uint i = 0u; i < hc * hc; i++) comb[r * hc * hc + i] = c[i];
+        }
+    }
+    barrier();
+    for (uint d = gl_LocalInvocationID.x; d < p.hidden; d += WG) {
+        float acc = 0.0;
+        for (uint n = 0u; n < p.hc; n++) acc += pre[n] * streams[(r * p.hc + n) * p.hidden + d];
+        collapsed[r * p.hidden + d] = acc;
+    }
+}

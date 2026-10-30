@@ -10,10 +10,10 @@ use super::*;
 type BlockWeights = (Vec<f32>, Option<Vec<f32>>, Vec<f32>);
 
 pub(super) struct HcModel {
-    attn: Vec<Hc>,
-    ffn: Vec<Hc>,
+    pub(super) attn: Vec<Hc>,
+    pub(super) ffn: Vec<Hc>,
     /// `None`: the final collapse is the mean of the streams.
-    head: Option<Hc>,
+    pub(super) head: Option<Hc>,
 }
 
 impl HcModel {

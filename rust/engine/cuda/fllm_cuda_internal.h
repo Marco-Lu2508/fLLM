@@ -345,6 +345,22 @@ int fllm_shortconv_launch(cudaStream_t s, const void *runs, int nruns, int hidde
 int fllm_softplus_mul_launch(cudaStream_t s, float *x, const float *g, size_t n, float beta);
 int fllm_head_gate_launch(cudaStream_t s, float *x, const float *g, size_t n, size_t dv, float beta);
 int fllm_scale_launch(cudaStream_t s, float *x, size_t n, float factor);
+// Hyper-connections (hc.cu)
+int fllm_hc_supported(int hc);
+int fllm_hc_mix_launch(cudaStream_t s, const float *streams, const float *mixes, const float *base, const float *scale, float *post, float *comb,
+                       float *collapsed, int rows, int hc, int hidden, int mode, int iters, float eps, float magnitude);
+int fllm_hc_combine_launch(cudaStream_t s, float *streams, const float *post, const float *comb, const float *block, int rows, int hc, int hidden);
+// DeepSeek-V3.2 / GLM-5 lightning indexer and sparse attention (dsa.cu)
+int fllm_rotate_heads_launch(cudaStream_t s, const float *x, float *out, size_t count, int dim, int shift);
+int fllm_dsa_keys_launch(cudaStream_t s, float *store, const float *k, const int32_t *slots, int rows, int dim);
+int fllm_dsa_scores_supported(int heads, int dim);
+int fllm_dsa_select_launch(cudaStream_t s, const float *q, const float *w, const float *store, const int64_t *tables, const int64_t *lengths, float *scores,
+                           size_t score_stride, int32_t *sel, int rows, int max_len, int heads, int dim, int topk, int stride, int block_size, float scale,
+                           float head_scale);
+int fllm_dsa_attention_supported(int topk, int dk);
+int fllm_dsa_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int32_t *sel,
+                              const int64_t *tables, const float *sinks, int rows, int topk, int heads, int kv_heads, int dk, int dv, int stride, int block_size,
+                              float scale);
 // Native EXL2 / EXL3 projections (exl.cu); `kind` is the GGUF type id (0x80000030 / 0x80000031), `w` the blob of rust/gguf-probe/src/exl.rs. EXL3 needs
 // fllm_exl3_scratch_bytes(rows, cols, batch) of device scratch (EXL2 none).
 size_t fllm_exl3_scratch_bytes(int rows, int cols, int batch);

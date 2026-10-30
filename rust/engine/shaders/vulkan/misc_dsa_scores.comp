@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_dsa_scores | bindings: q,w,store,meta,scores | push: heads,dim,stride,block_size,score_stride,row0,rows_total,scale,head_scale | grid: [ceil(max_len/128), rows in this dispatch, 1]
+// Scores of the lightning indexer (Stream::dsa_select): for row r = row0 + gl_WorkGroupID.y and position p < lengths[r]
+//   scores[gl_WorkGroupID.y * score_stride + p] = sum_h relu(dot(q[r][h], store[slot(r, p)]) * scale) * w[r][h] * head_scale
+// One lane per position. q is rows x heads x dim, w rows x heads, store one dim-wide f32 row per cache slot. meta = int32: lengths[rows_total],
+// then the block tables (rows_total x stride); slot(r, p) = table[r][p / block_size] * block_size + p % block_size.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer WBuf { float w[]; };
+layout(std430, binding = 2) readonly buffer StoreBuf { float store[]; };
+layout(std430, binding = 3) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 4) buffer ScoreBuf { float scores[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint dim;
+    uint stride;
+    uint block_size;
+    uint score_stride;
+    uint row0;
+    uint rows_total;
+    float scale;
+    float head_scale;
+} p;
+
+void main() {
+    const uint r = p.row0 + gl_WorkGroupID.y;
+    const uint pos = gl_WorkGroupID.x * WG + gl_LocalInvocationID.x;
+    if (pos >= uint(meta[r])) return;
+    const uint slot = uint(meta[p.rows_total + r * p.stride + pos / p.block_size]) * p.block_size + pos % p.block_size;
+    const uint key = slot * p.dim;
+    float score = 0.0;
+    for (uint h = 0u; h < p.heads; h++) {
+        const uint qo = (r * p.heads + h) * p.dim;
+        float dotp = 0.0;
+        for (uint d = 0u; d < p.dim; d++) dotp += q[qo + d] * store[key + d];
+        dotp *= p.scale;
+        if (dotp > 0.0) score += dotp * w[r * p.heads + h] * p.head_scale;
+    }
+    scores[gl_WorkGroupID.y * p.score_stride + pos] = score;
+}

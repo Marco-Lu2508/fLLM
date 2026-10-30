@@ -50,6 +50,10 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `argmax_rows` | `plan_argmax` | `misc_argmax` |
 | `kv_cache_write` | `plan_kv_write` (2 dispatches: keys, values) | `kv_write_f16`, `kv_write_q8` |
 | `attention_paged` | `plan_attention` | `attn_decode_{f16,q8}` (+ `attn_merge`), `attn_prefill_{f16,q8}_d{128,256,512}` |
+| `dsa_select` (lightning indexer of DeepSeek-V3.2 / GLM-5: key write, scores, top-k; chunks of rows) | `dsa::plan_dsa_select` | `misc_dsa_keys`, `misc_dsa_scores`, `misc_dsa_topk` |
+| `dsa_attention` (attention over the selected positions, f16 cache) | `dsa::plan_dsa_attention` | `attn_sparse` |
+| `rotate_heads` (tail rotation of the Hy4 indexer heads) | `hc::plan_rotate_heads` | `misc_rotate_heads` |
+| `hc_mix`, `hc_combine` (hyper-connections of Hy4 / GLM-5-Next) | `hc::plan_hc_mix`, `hc::plan_hc_combine` | `misc_hc_mix`, `misc_hc_combine` |
 | `moe_topk`, `moe_route` | `plan_moe_topk`, `plan_moe_route` | `moe_topk` |
 | `moe_linear` | `plan_moe_linear` | `moe_linear_<fmt>_{arena,bda}` (12 quantized formats) |
 | `moe_combine` | `plan_moe_combine` | `moe_combine` |
@@ -1061,3 +1065,28 @@ One workgroup per (group, row); for the whole batch at once (no recurrent state 
 
 Push block: 24 bytes. Grid: `[norm_groups, rows, 1]`.
 
+
+### `misc_dsa_keys.comp`, `misc_dsa_scores.comp`, `misc_dsa_topk.comp`, `attn_sparse.comp`
+
+Lightning indexer and sparse attention of DeepSeek-V3.2 / GLM-5 (`Stream::dsa_select`, `Stream::dsa_attention`; plans in `ops/dsa.rs`). The
+bindings and push constants are listed in the `// FLLM-SHADER:` header of each file.
+
+* `misc_dsa_keys`: writes the indexer keys of the new tokens (`rows x dim` f32) into the per-slot key store (`slots` host array).
+* `misc_dsa_scores`: one lane per position, `sum_h relu(dot(q_h, key) * scale) * w_h * head_scale`; `meta` holds `lengths[rows]` then the block tables.
+  Rows are processed in chunks so that the score scratch stays at or below 32M floats (`row0`, `score_stride` select the chunk).
+* `misc_dsa_topk`: one workgroup of 256 per row, radix select of the k-th largest score (order-preserving keys of the floats, 4 x 8 bits), then
+  the positions are collected in ascending order with workgroup prefix sums; equal scores keep the lower position, unused entries are -1.
+  A row of at most `topk` tokens lists all positions without looking at scores.
+* `attn_sparse`: one workgroup of 128 per (row, head); the listed positions are scored 128 at a time into an online softmax; f16 cache only, key
+  width up to 512, value width up to 512.
+
+### `misc_hc_mix.comp`, `misc_hc_combine.comp`, `misc_rotate_heads.comp`
+
+Hyper-connections (`Stream::hc_mix`, `Stream::hc_combine`; plans in `ops/hc.rs`) and the tail rotation of the Hy4 indexer heads (`Stream::rotate_heads`).
+
+* `misc_hc_mix`: one workgroup per row. Thread 0 turns the linear output `mixes` of the RMS-normalised streams into the weights of the block (`mode` 0
+  independent, 1 Sinkhorn with `iters` normalisation steps, 2 head, 3 mean) and writes `post` (`rows x hc`) and, for mode 1, `comb`
+  (`rows x hc x hc`); then all lanes write `collapsed[r] = sum_n pre[n] streams[r][n]`. At most 8 streams.
+* `misc_hc_combine`: in place on the streams, one invocation per (row, d) reading all `hc` old values before it writes: `streams[k] = post[k] block + sum_j comb[j][k] old[j]`
+  (`has_comb = 0`: `+ old[k]`).
+* `misc_rotate_heads`: `out[g * dim + (d + shift) % dim] = x[g * dim + d]`.

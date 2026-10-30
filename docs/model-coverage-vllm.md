@@ -4,7 +4,7 @@ Snapshot of 2026-10-13. Sources: vLLM `vllm/model_executor/models/registry.py` (
 
 **Updates of 2026-10-30.** The per-name rows below are the 2026-10-13 snapshot. Since then (see [model-coverage.md](model-coverage.md), which is
 the maintained table): `Gemma3n`/`Gemma4`, `MiniCPM`, `Ministral` (8B), `Helium`, `BitNet`, `MiMoV2Flash`, `KimiLinear`
-(not the K3 variant), `DeepseekV32` and `GlmMoeDsa` (sparse indexer on the CPU, dense device attention), `Step3p5`/`Step3p7` (text), `GraniteSWA`/`GraniteMoeSWA` and
+(not the K3 variant), `DeepseekV32` and `GlmMoeDsa` (sparse indexer on the CPU and on CUDA, HIP and Vulkan devices), `Step3p5`/`Step3p7` (text), `GraniteSWA`/`GraniteMoeSWA` and
 `EmbeddingGemma`/GTE/ColBERT/SPLADE (encoders) are supported and carry the verification level given there; rows below that still say N for them are out of date.
 
 Test levels (L0-L3) are explained in [test-levels.md](test-levels.md).
@@ -377,7 +377,8 @@ compressed attention (CSA/HCA) and Engram embeddings. All 300B+ models can only 
 | separate epsilon of the post-norms, attention temperature, QKV clip | no (host layers; DBRX requires `--device cpu`) | Muse Glimmer, Llama 4, DBRX, OLMo 1 | - |
 | Per-layer KV geometry, K=V | no (prerequisite: group G in the host cache) | - | Gemma 4, MiMo-V2, Step-3.5, Laguna, Mellum, DeciLM |
 | KDA (Kimi Delta Attention) | no | - | Kimi-Linear, Ling 3.0, GLM-5-Next, Kimi K3 |
-| Sparse indexer (DSA), compressed attention, hyper-connections (mHC) | no | - | V3.2, GLM-5, V4, Qwen4-Exp, MiniMax-M3 |
+| Sparse indexer (DSA) | yes on CUDA, HIP and Vulkan (plain indexer, f16 cache) | V3.2, GLM-5 | Hy4 (tail rotation), GLM-5-Next (pooled) |
+| Compressed attention, hyper-connections (mHC) | no | - | V4, Qwen4-Exp, MiniMax-M3 |
 | Bidirectional encoder attention, ModernBERT local window | encoder: see `docs/inference-features.md` | BERT, RoBERTa | ModernBERT, Nomic, GTE |
 | AltUp, LAuReL, per-layer embeddings | no | - | Gemma 3n/4 |
 | Cross-attention | no | - | Mllama, Whisper |

@@ -459,6 +459,71 @@ extern "C" {
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
     fn fllm_cuda_head_gate_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, dv: usize, beta: f32) -> c_int;
     fn fllm_cuda_scale(st: *mut RawStream, x: *mut f32, n: usize, factor: f32) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_hc_mix(
+        st: *mut RawStream,
+        streams: *const f32,
+        mixes: *const f32,
+        base: *const f32,
+        scale: *const f32,
+        post: *mut f32,
+        comb: *mut f32,
+        collapsed: *mut f32,
+        rows: c_int,
+        hc: c_int,
+        hidden: c_int,
+        mode: c_int,
+        iters: c_int,
+        eps: f32,
+        magnitude: f32,
+    ) -> c_int;
+    fn fllm_cuda_hc_combine(st: *mut RawStream, streams: *mut f32, post: *const f32, comb: *const f32, block: *const f32, rows: c_int, hc: c_int, hidden: c_int) -> c_int;
+    fn fllm_cuda_hc_supported(hc: c_int) -> c_int;
+    fn fllm_cuda_rotate_heads(st: *mut RawStream, x: *const f32, out: *mut f32, count: usize, dim: c_int, shift: c_int) -> c_int;
+    fn fllm_cuda_dsa_keys(st: *mut RawStream, store: *mut f32, k: *const f32, slots: *const i32, rows: c_int, dim: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_dsa_select(
+        st: *mut RawStream,
+        q: *const f32,
+        w: *const f32,
+        store: *const f32,
+        tables: *const i64,
+        tables_len: usize,
+        lengths: *const i64,
+        scores: *mut f32,
+        score_stride: usize,
+        sel: *mut i32,
+        rows: c_int,
+        heads: c_int,
+        dim: c_int,
+        topk: c_int,
+        stride: c_int,
+        block_size: c_int,
+        scale: f32,
+        head_scale: f32,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_dsa_attention(
+        st: *mut RawStream,
+        q: *const f32,
+        kpool: *const u16,
+        vpool: *const u16,
+        out: *mut f32,
+        sel: *const i32,
+        tables: *const i64,
+        tables_len: usize,
+        sinks: *const f32,
+        rows: c_int,
+        topk: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        stride: c_int,
+        block_size: c_int,
+        scale: f32,
+    ) -> c_int;
+    fn fllm_cuda_dsa_supported(heads: c_int, dim: c_int, topk: c_int, dk: c_int) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
     #[allow(clippy::too_many_arguments)]
@@ -1286,6 +1351,7 @@ impl Backend for CudaBackend {
             blocks_checked: None,
             act: self.act(),
             wide: [None, None, None],
+            dsa_scores: None,
         }))
     }
 
@@ -1656,6 +1722,8 @@ pub struct CudaStream {
     act: ActDtype,
     /// Persistent FP32 copies for those operations (grown on demand, never per call once warm).
     wide: [Option<DeviceBuffer>; 3],
+    /// Scores of the lightning indexer (`dsa_select`), grown on demand.
+    dsa_scores: Option<DeviceBuffer>,
 }
 
 // SAFETY: the raw stream is only used through `&mut self`.
@@ -4089,6 +4157,241 @@ impl Stream for CudaStream {
 
     fn supports_head_gate(&self) -> bool {
         true
+    }
+
+    fn rotate_heads(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, dim: usize, shift: usize) -> Result<(), BackendError> {
+        if dim == 0 || shift >= dim || !x.size.is_multiple_of(dim * 4) || out.size < x.size {
+            return Err(invalid("head rotation does not fit its buffers"));
+        }
+        // SAFETY: both buffers hold `x.size / 4` floats (checked above).
+        check(unsafe { fllm_cuda_rotate_heads(self.raw, dev_ptr(x)?.cast(), dev_ptr(out)?.cast(), x.size / 4, to_c(dim, "dim")?, to_c(shift, "shift")?) })
+    }
+
+    fn supports_rotate_heads(&self) -> bool {
+        !self.act.is_narrow()
+    }
+
+    fn supports_hc(&self, hc: usize) -> bool {
+        // SAFETY: plain arithmetic on the argument.
+        !self.act.is_narrow() && unsafe { fllm_cuda_hc_supported(hc as c_int) } != 0
+    }
+
+    fn hc_mix(
+        &mut self,
+        collapsed: &mut DeviceBuffer,
+        post: &mut DeviceBuffer,
+        comb: &mut DeviceBuffer,
+        streams: &DeviceBuffer,
+        mixes: Option<&DeviceBuffer>,
+        base: Option<&DeviceBuffer>,
+        scale: Option<&DeviceBuffer>,
+        rows: usize,
+        hc: usize,
+        hidden: usize,
+        mode: HcMode,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        let width = mode.mix_width(hc);
+        let (code, iters, magnitude) = match mode {
+            HcMode::Independent { magnitude } => (0, 0, magnitude),
+            HcMode::Sinkhorn { iters } => (1, iters.max(1), 0.0),
+            HcMode::Head => (2, 0, 0.0),
+            HcMode::Mean => (3, 0, 0.0),
+        };
+        if rows == 0 {
+            return Ok(());
+        }
+        let needs_comb = matches!(mode, HcMode::Sinkhorn { .. });
+        if streams.size < rows * hc * hidden * 4
+            || collapsed.size < rows * hidden * 4
+            || (!matches!(mode, HcMode::Head | HcMode::Mean) && post.size < rows * hc * 4)
+            || (needs_comb && comb.size < rows * hc * hc * 4)
+            || (width > 0 && (mixes.is_none_or(|m| m.size < rows * width * 4) || base.is_none_or(|b| b.size < width * 4) || scale.is_none()))
+        {
+            return Err(invalid("hyper-connection buffers do not fit the batch"));
+        }
+        let null = std::ptr::null();
+        let ptr = |b: Option<&DeviceBuffer>| -> Result<*const f32, BackendError> { b.map_or(Ok(null), |b| dev_ptr(b).map(|p| p.cast_const().cast())) };
+        // SAFETY: sizes were checked above; the pointers of unused operands stay null and are not read in that mode.
+        check(unsafe {
+            fllm_cuda_hc_mix(
+                self.raw,
+                dev_ptr(streams)?.cast(),
+                ptr(mixes)?,
+                ptr(base)?,
+                ptr(scale)?,
+                dev_ptr(post)?.cast(),
+                dev_ptr(comb)?.cast(),
+                dev_ptr(collapsed)?.cast(),
+                to_c(rows, "rows")?,
+                to_c(hc, "streams")?,
+                to_c(hidden, "hidden")?,
+                code,
+                to_c(iters, "iterations")?,
+                eps,
+                magnitude,
+            )
+        })
+    }
+
+    fn hc_combine(
+        &mut self,
+        streams: &mut DeviceBuffer,
+        post: &DeviceBuffer,
+        comb: Option<&DeviceBuffer>,
+        block: &DeviceBuffer,
+        rows: usize,
+        hc: usize,
+        hidden: usize,
+    ) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if streams.size < rows * hc * hidden * 4 || post.size < rows * hc * 4 || block.size < rows * hidden * 4 || comb.is_some_and(|c| c.size < rows * hc * hc * 4) {
+            return Err(invalid("hyper-connection buffers do not fit the batch"));
+        }
+        let comb_ptr = match comb {
+            Some(c) => dev_ptr(c)?.cast_const().cast(),
+            None => std::ptr::null(),
+        };
+        // SAFETY: sizes were checked above.
+        check(unsafe { fllm_cuda_hc_combine(self.raw, dev_ptr(streams)?.cast(), dev_ptr(post)?.cast(), comb_ptr, dev_ptr(block)?.cast(), to_c(rows, "rows")?, to_c(hc, "streams")?, to_c(hidden, "hidden")?) })
+    }
+
+    fn supports_dsa(&self, params: &DsaParams, key_dim: usize, kv_kind: i32) -> bool {
+        !self.act.is_narrow()
+            && kv_kind == 1
+            && params.topk > 0
+            && params.heads > 0
+            && params.dim > 0
+            // SAFETY: plain arithmetic on the arguments.
+            && unsafe { fllm_cuda_dsa_supported(params.heads as c_int, params.dim as c_int, params.topk as c_int, key_dim as c_int) } != 0
+    }
+
+    fn dsa_select(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        w: &DeviceBuffer,
+        slots: &[usize],
+        block_tables: &[i64],
+        lengths: &[i64],
+        p: &DsaParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, dim, topk) = (p.heads, p.dim, p.topk);
+        let store_slots = store.size / (dim * 4);
+        if slots.len() != rows
+            || block_tables.len() != rows * p.stride
+            || q.size < rows * heads * dim * 4
+            || k.size < rows * dim * 4
+            || w.size < rows * heads * 4
+            || sel.size < rows * topk * 4
+            || slots.iter().any(|&s| s >= store_slots)
+            || lengths.iter().any(|&n| n <= 0 || (n as usize).div_ceil(p.block_size) > p.stride)
+            || lengths.iter().enumerate().any(|(r, &n)| block_tables[r * p.stride..][..(n as usize).div_ceil(p.block_size)].iter().any(|&b| b < 0 || (b as usize + 1) * p.block_size > store_slots))
+        {
+            return Err(invalid("lightning indexer: buffers, slots, lengths or block tables do not fit the batch"));
+        }
+        let ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+        // SAFETY: the sizes were checked above; the slot list is copied before the call returns.
+        check(unsafe { fllm_cuda_dsa_keys(self.raw, dev_ptr(store)?.cast(), dev_ptr(k)?.cast(), ids.as_ptr(), to_c(rows, "rows")?, to_c(dim, "dim")?) })?;
+        let max_len = lengths.iter().map(|&n| n as usize).max().unwrap_or(1);
+        // rows that need scores are scored in chunks that keep the score matrix below 32M values
+        let chunk = if max_len > topk { (32usize << 20).div_euclid(max_len).clamp(1, rows) } else { rows };
+        let score_bytes = if max_len > topk { chunk * max_len * 4 } else { 16 };
+        if self.dsa_scores.as_ref().is_none_or(|b| b.size < score_bytes) {
+            self.dsa_scores = None;
+            self.dsa_scores = Some(self.alloc(score_bytes.max(256))?);
+        }
+        let scores = self.dsa_scores.as_ref().ok_or_else(|| invalid("score buffer"))?;
+        let mut r0 = 0;
+        while r0 < rows {
+            let r1 = (r0 + chunk).min(rows);
+            let tables = &block_tables[r0 * p.stride..r1 * p.stride];
+            // SAFETY: the pointers address rows r0..r1 of buffers checked above; the host arrays are staged before the call returns.
+            check(unsafe {
+                fllm_cuda_dsa_select(
+                    self.raw,
+                    dev_ptr(q)?.add(r0 * heads * dim * 4).cast(),
+                    dev_ptr(w)?.add(r0 * heads * 4).cast(),
+                    dev_ptr(store)?.cast(),
+                    tables.as_ptr(),
+                    tables.len(),
+                    lengths[r0..r1].as_ptr(),
+                    dev_ptr(scores)?.cast(),
+                    max_len,
+                    dev_ptr(sel)?.add(r0 * topk * 4).cast(),
+                    to_c(r1 - r0, "rows")?,
+                    to_c(heads, "heads")?,
+                    to_c(dim, "dim")?,
+                    to_c(topk, "top-k")?,
+                    to_c(p.stride, "block table stride")?,
+                    to_c(p.block_size, "block size")?,
+                    p.scale,
+                    p.head_scale,
+                )
+            })?;
+            r0 = r1;
+        }
+        Ok(())
+    }
+
+    fn dsa_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        layer_idx: usize,
+        sel: &DeviceBuffer,
+        topk: usize,
+        params: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        if kv.kv_kind != 1 || params.stride == 0 || block_tables.is_empty() || !block_tables.len().is_multiple_of(params.stride) {
+            return Err(invalid("sparse attention needs an f16 cache and whole block table rows"));
+        }
+        let rows = block_tables.len() / params.stride;
+        let (heads, dk, dv) = (params.num_heads, params.head_dim, params.value_dim);
+        if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 || sel.size < rows * topk * 4 || params.num_kv_heads == 0 || !heads.is_multiple_of(params.num_kv_heads) {
+            return Err(invalid("sparse attention q / out / selection smaller than the batch"));
+        }
+        // the positions in `sel` come from `dsa_select`, which checked the blocks of the visible tokens
+        if params.sinks.as_ref().is_some_and(|s| s.len() < heads) {
+            return Err(invalid("sparse attention: fewer sink values than heads"));
+        }
+        let sinks = match &params.sinks {
+            Some(s) => self.table(s)?,
+            None => std::ptr::null(),
+        };
+        // SAFETY: sizes were checked above; the pool pointers address the requested layer.
+        check(unsafe {
+            fllm_cuda_dsa_attention(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
+                dev_ptr(out)?.cast(),
+                dev_ptr(sel)?.cast(),
+                block_tables.as_ptr(),
+                block_tables.len(),
+                sinks,
+                to_c(rows, "rows")?,
+                to_c(topk, "top-k")?,
+                to_c(heads, "heads")?,
+                to_c(params.num_kv_heads, "kv heads")?,
+                to_c(dk, "key width")?,
+                to_c(dv, "value width")?,
+                to_c(params.stride, "block table stride")?,
+                to_c(params.block_size, "block size")?,
+                params.scale,
+            )
+        })
     }
 
     /// The MiMo-V2 attention layers (per-layer KV head counts, sinks, a value width of half the key width) differ from the host reference

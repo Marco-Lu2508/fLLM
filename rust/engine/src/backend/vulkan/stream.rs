@@ -40,7 +40,7 @@ use crate::backend::vulkan::ops::{
 use crate::backend::vulkan::weights::{format_info, DeviceLayout};
 use crate::backend::{
     validate_kv_write, AttentionParams, BackendError, DeltaRun, DeltaShape, DeltaWeights, DeviceBuffer, DeviceKvCache, DeviceWeight,
-    Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, Stream,
+    DsaParams, HcMode, Mamba1Shape, MambaShape, MambaWeights, MlaShape, QuantType, RopeParams, SamplingParams, Stream,
 };
 use exec::Arg;
 use linear::LinTrace;
@@ -573,6 +573,138 @@ impl Stream for VulkanStream {
 
     fn supports_head_gate(&self) -> bool {
         true
+    }
+
+    fn rotate_heads(&mut self, out: &mut DeviceBuffer, x: &DeviceBuffer, dim: usize, shift: usize) -> Result<(), BackendError> {
+        if dim == 0 || shift >= dim || !x.size.is_multiple_of(dim * 4) || out.size < x.size {
+            return Err(invalid("head rotation does not fit its buffers"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = crate::backend::vulkan::ops::hc::plan_rotate_heads(x.size / 4, dim, shift)?;
+        self.run_plans(&[plan], &[Arg::r("x", x), Arg::w("out", out)], &[], false)
+    }
+
+    fn supports_rotate_heads(&self) -> bool {
+        true
+    }
+
+    fn supports_hc(&self, hc: usize) -> bool {
+        (1..=crate::backend::vulkan::ops::hc::MAX_STREAMS).contains(&hc)
+    }
+
+    fn hc_mix(
+        &mut self,
+        collapsed: &mut DeviceBuffer,
+        post: &mut DeviceBuffer,
+        comb: &mut DeviceBuffer,
+        streams: &DeviceBuffer,
+        mixes: Option<&DeviceBuffer>,
+        base: Option<&DeviceBuffer>,
+        scale: Option<&DeviceBuffer>,
+        rows: usize,
+        hc: usize,
+        hidden: usize,
+        mode: HcMode,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        let width = mode.mix_width(hc);
+        if streams.size < rows * hc * hidden * 4
+            || collapsed.size < rows * hidden * 4
+            || post.size < rows * hc * 4
+            || (matches!(mode, HcMode::Sinkhorn { .. }) && comb.size < rows * hc * hc * 4)
+            || (width > 0 && (mixes.is_none_or(|m| m.size < rows * width * 4) || base.is_none_or(|b| b.size < width * 4) || scale.is_none()))
+        {
+            return Err(invalid("hyper-connection buffers do not fit the batch"));
+        }
+        let plan = crate::backend::vulkan::ops::hc::plan_hc_mix(rows, hc, hidden, mode, eps)?;
+        let mut args = vec![Arg::r("streams", streams), Arg::w("post", post), Arg::w("comb", comb), Arg::w("collapsed", collapsed)];
+        for (name, buffer) in [("mixes", mixes), ("base", base), ("scale", scale)] {
+            if let Some(b) = buffer.filter(|_| width > 0) {
+                args.push(Arg::r(name, b));
+            }
+        }
+        self.run_plans(&[plan], &args, &[], false)
+    }
+
+    fn hc_combine(
+        &mut self,
+        streams: &mut DeviceBuffer,
+        post: &DeviceBuffer,
+        comb: Option<&DeviceBuffer>,
+        block: &DeviceBuffer,
+        rows: usize,
+        hc: usize,
+        hidden: usize,
+    ) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if streams.size < rows * hc * hidden * 4 || post.size < rows * hc * 4 || block.size < rows * hidden * 4 || comb.is_some_and(|c| c.size < rows * hc * hc * 4) {
+            return Err(invalid("hyper-connection buffers do not fit the batch"));
+        }
+        let plan = crate::backend::vulkan::ops::hc::plan_hc_combine(rows, hc, hidden, comb.is_some())?;
+        let mut args = vec![Arg::w("streams", streams), Arg::r("post", post), Arg::r("block", block)];
+        if let Some(c) = comb {
+            args.push(Arg::r("comb", c));
+        }
+        self.run_plans(&[plan], &args, &[], false)
+    }
+
+    fn supports_dsa(&self, params: &DsaParams, key_dim: usize, kv_kind: i32) -> bool {
+        kv_kind == 1 && params.topk > 0 && params.heads > 0 && params.dim > 0 && key_dim <= crate::backend::vulkan::ops::dsa::MAX_DK && self.sh.caps().max_workgroup_invocations >= 256
+    }
+
+    fn dsa_select(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        w: &DeviceBuffer,
+        slots: &[usize],
+        block_tables: &[i64],
+        lengths: &[i64],
+        params: &DsaParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, dim, topk) = (params.heads, params.dim, params.topk);
+        if q.size < rows * heads * dim * 4 || k.size < rows * dim * 4 || w.size < rows * heads * 4 || sel.size < rows * topk * 4 || !store.size.is_multiple_of(dim * 4) {
+            return Err(invalid("lightning indexer: buffers smaller than the batch"));
+        }
+        let plans = crate::backend::vulkan::ops::dsa::plan_dsa_select(params, slots, block_tables, lengths, store.size / (dim * 4))?;
+        self.run_plans(&plans, &[Arg::w("store", store), Arg::r("k", k), Arg::r("q", q), Arg::r("w", w), Arg::w("sel", sel)], &[], false)
+    }
+
+    fn dsa_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        layer_idx: usize,
+        sel: &DeviceBuffer,
+        topk: usize,
+        params: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        if params.stride == 0 || block_tables.is_empty() || !block_tables.len().is_multiple_of(params.stride) {
+            return Err(invalid("sparse attention: block tables are not whole rows"));
+        }
+        let rows = block_tables.len() / params.stride;
+        let (heads, dk, dv) = (params.num_heads, params.head_dim, params.value_dim);
+        if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 || sel.size < rows * topk * 4 {
+            return Err(invalid("sparse attention q / out / selection smaller than the batch"));
+        }
+        let (layout, keys, values) = self.kv_windows(kv, layer_idx)?;
+        let plan = crate::backend::vulkan::ops::dsa::plan_dsa_attention(&layout, params, topk, block_tables)?;
+        self.run_plans(&[plan], &[Arg::r("q", q), Arg::view("kpool", keys), Arg::view("vpool", values), Arg::r("sel", sel), Arg::w("out", out)], &[], false)
     }
 
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {

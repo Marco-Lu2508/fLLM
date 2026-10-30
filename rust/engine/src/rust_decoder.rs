@@ -161,6 +161,41 @@ struct DeviceMla {
     kv_b_dense: Option<crate::backend::DeviceBuffer>,
 }
 
+/// Device copy of the weights of one hyper-connection block: the mixing projection of the normalised streams and the learned offsets and scales.
+struct DeviceHc {
+    mix: crate::backend::DeviceWeight,
+    base: crate::backend::DeviceBuffer,
+    scale: crate::backend::DeviceBuffer,
+}
+
+/// Hyper-connection weights of the model on the device (Hy4, GLM-5-Next).
+struct DeviceHcModel {
+    attn: Vec<DeviceHc>,
+    ffn: Vec<DeviceHc>,
+    head: Option<DeviceHc>,
+    /// `hc * hidden` ones: the weight of the plain RMS norm over the flattened streams.
+    ones: crate::backend::DeviceBuffer,
+}
+
+/// What a hyper-connection block keeps between reading the streams and writing the branch output back.
+struct HcBlock {
+    post: crate::backend::DeviceBuffer,
+    comb: Option<crate::backend::DeviceBuffer>,
+    /// The collapsed block input (the branch adds its output to the residual buffer that started as this).
+    base: crate::backend::DeviceBuffer,
+}
+
+/// Device copy of the lightning indexer of a sparse-attention layer (DeepSeek-V3.2, GLM-5): its projections, the key norm and the per-slot f32 key store.
+struct DeviceDsa {
+    q_b: crate::backend::DeviceWeight,
+    k: crate::backend::DeviceWeight,
+    proj: crate::backend::DeviceWeight,
+    k_norm: crate::backend::DeviceBuffer,
+    k_norm_bias: crate::backend::DeviceBuffer,
+    /// One `dim`-wide f32 row per cache slot.
+    store: crate::backend::DeviceBuffer,
+}
+
 /// Device copy of a Mamba-2 layer (the input projection as a quantized weight, small tensors as FP32 buffers).
 struct DeviceMamba {
     input: crate::backend::DeviceWeight,
@@ -653,6 +688,8 @@ pub struct DeviceLayerWeights {
     delta: Option<DeviceDelta>,
     /// Multi-head latent attention projections resident on the device.
     mla: Option<DeviceMla>,
+    /// Lightning indexer of a sparse-attention layer resident on the device (`Stream::dsa_select`).
+    dsa: Option<DeviceDsa>,
     /// Mamba-2 mixer resident on the device.
     mamba: Option<DeviceMamba>,
     /// Short convolution resident on the device.
@@ -709,6 +746,7 @@ impl DeviceLayerWeights {
             moe: None,
             delta: None,
             mla: None,
+            dsa: None,
             mamba: None,
             shortconv: None,
             mamba1: None,
@@ -919,6 +957,8 @@ pub struct DeviceModelWeights {
     pub alibi: Option<Arc<Vec<f32>>>,
     /// Gemma per-layer inputs: the projection of the embeddings to `layers x width` (the rest of the path is cheap and stays on the host).
     pub ple_proj: Option<crate::backend::DeviceWeight>,
+    /// Hyper-connection weights (Hy4, GLM-5-Next); the streams then live in their own buffer during a pass.
+    hc: Option<DeviceHcModel>,
 }
 
 /// Rotary cos/sin tables shared between the decoder and device `RopeParams`.
@@ -1095,6 +1135,10 @@ pub struct RustDecoder {
     /// `FLLM_DSA=exact`: run the sparse-attention layers on the host also when a device is in use. Without it a device keeps
     /// the dense attention of its own kernels (and says so once).
     dsa_exact_on_device: bool,
+    /// The accelerator runs the lightning indexer and the sparse attention of the layers (`Stream::dsa_select`); set when the model is attached.
+    dsa_device: bool,
+    /// The accelerator runs the hyper-connections (`Stream::hc_mix`, `Stream::hc_combine`); set when the model is attached.
+    hc_device: bool,
 }
 
 /// DeepStack features: per decoder layer, (row, values) pairs.
@@ -2324,7 +2368,9 @@ impl RustDecoder {
             row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
             dsa_dense: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("dense")),
-            dsa_exact_on_device: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("exact")),
+            dsa_exact_on_device: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("exact") || v.eq_ignore_ascii_case("host")),
+            dsa_device: false,
+            hc_device: false,
         };
         decoder.set_device(device)?;
         decoder.plan_expert_cache(mapping);
@@ -2680,12 +2726,155 @@ impl RustDecoder {
         }
     }
 
+    /// Mode of the hyper-connection mixing of the blocks of this model.
+    fn hc_block_mode(&self) -> Option<crate::backend::HcMode> {
+        let h = self.cfg.hc.as_ref()?;
+        Some(match h.magnitude {
+            Some(magnitude) => crate::backend::HcMode::Independent { magnitude },
+            None => crate::backend::HcMode::Sinkhorn { iters: h.iters },
+        })
+    }
+
+    /// Start of a hyper-connection block on the device: normalises the streams, mixes them down to the block input (written to `x_buf`, the
+    /// residual buffer the layer's mixer or feed-forward adds its output to) and keeps the weights for `hc_leave`.
+    #[allow(clippy::too_many_arguments)]
+    fn hc_enter(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        weights: &DeviceHc,
+        ones: &crate::backend::DeviceBuffer,
+        streams: &crate::backend::DeviceBuffer,
+        x_buf: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<HcBlock, String> {
+        let (cfg, mode) = (&self.cfg, self.hc_block_mode().ok_or("hyper-connection mode")?);
+        let h = cfg.hc.as_ref().ok_or("hyper-connection configuration missing")?;
+        let (hc, hidden) = (h.hc_mult, cfg.hidden);
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let mut flat = scratch.acquire(rows * hc * hidden * 4).map_err(err)?;
+        stream.rms_norm(&mut flat, streams, ones, cfg.eps).map_err(err)?;
+        let mut mixes = scratch.acquire(rows * mode.mix_width(hc) * 4).map_err(err)?;
+        stream.quantized_linear(&mut mixes, &flat, &weights.mix, weights.mix.bias.as_ref()).map_err(err)?;
+        scratch.recycle(flat);
+        let sinkhorn = matches!(mode, crate::backend::HcMode::Sinkhorn { .. });
+        let mut post = scratch.acquire(rows * hc * 4).map_err(err)?;
+        let mut comb = scratch.acquire(if sinkhorn { rows * hc * hc * 4 } else { 16 }).map_err(err)?;
+        stream.hc_mix(x_buf, &mut post, &mut comb, streams, Some(&mixes), Some(&weights.base), Some(&weights.scale), rows, hc, hidden, mode, h.eps).map_err(err)?;
+        scratch.recycle(mixes);
+        let mut base = scratch.acquire(rows * hidden * 4).map_err(err)?;
+        stream.copy_buffer(&mut base, x_buf).map_err(err)?;
+        let comb = if sinkhorn {
+            Some(comb)
+        } else {
+            scratch.recycle(comb);
+            None
+        };
+        Ok(HcBlock { post, comb, base })
+    }
+
+    /// End of a hyper-connection block: `x_buf` holds the block input plus the branch output, the difference goes into the streams.
+    #[allow(clippy::too_many_arguments)]
+    fn hc_leave(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        streams: &mut crate::backend::DeviceBuffer,
+        x_buf: &mut crate::backend::DeviceBuffer,
+        block: HcBlock,
+        rows: usize,
+        layer: usize,
+        after_ffn: bool,
+    ) -> Result<(), String> {
+        let h = self.cfg.hc.as_ref().ok_or("hyper-connection configuration missing")?;
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let dump = std::env::var_os("FLLM_DUMP_LAYERS").is_some();
+        stream.residual_add(x_buf, &block.base, -1.0).map_err(err)?;
+        if dump && !after_ffn {
+            let mut host = vec![0.0f32; rows * self.cfg.hidden];
+            stream.download(cast_f32_to_u8_mut(&mut host), x_buf).map_err(err)?;
+            dump_layer("branch", layer, &host);
+        }
+        stream.hc_combine(streams, &block.post, block.comb.as_ref(), x_buf, rows, h.hc_mult, self.cfg.hidden).map_err(err)?;
+        if dump && after_ffn {
+            let mut host = vec![0.0f32; rows * h.hc_mult * self.cfg.hidden];
+            stream.download(cast_f32_to_u8_mut(&mut host), streams).map_err(err)?;
+            dump_layer("ffn", layer, &host);
+        }
+        scratch.recycle(block.post);
+        scratch.recycle(block.base);
+        if let Some(comb) = block.comb {
+            scratch.recycle(comb);
+        }
+        Ok(())
+    }
+
+    /// The final collapse of the streams into the residual buffer `x_buf`.
+    #[allow(clippy::too_many_arguments)]
+    fn hc_head(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        model: &DeviceHcModel,
+        streams: &crate::backend::DeviceBuffer,
+        x_buf: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        use crate::backend::HcMode;
+        let h = self.cfg.hc.as_ref().ok_or("hyper-connection configuration missing")?;
+        let (hc, hidden) = (h.hc_mult, self.cfg.hidden);
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let mut post = scratch.acquire(rows * hc * 4).map_err(err)?;
+        let mut comb = scratch.acquire(16).map_err(err)?;
+        match &model.head {
+            Some(head) => {
+                let mut flat = scratch.acquire(rows * hc * hidden * 4).map_err(err)?;
+                stream.rms_norm(&mut flat, streams, &model.ones, self.cfg.eps).map_err(err)?;
+                let mut mixes = scratch.acquire(rows * hc * 4).map_err(err)?;
+                stream.quantized_linear(&mut mixes, &flat, &head.mix, head.mix.bias.as_ref()).map_err(err)?;
+                stream.hc_mix(x_buf, &mut post, &mut comb, streams, Some(&mixes), Some(&head.base), Some(&head.scale), rows, hc, hidden, HcMode::Head, h.eps).map_err(err)?;
+                scratch.recycle(flat);
+                scratch.recycle(mixes);
+            }
+            None => stream.hc_mix(x_buf, &mut post, &mut comb, streams, None, None, None, rows, hc, hidden, HcMode::Mean, h.eps).map_err(err)?,
+        }
+        scratch.recycle(post);
+        scratch.recycle(comb);
+        Ok(())
+    }
+
+    /// Parameters of the lightning indexer of the sparse-attention layers (`None` without one).
+    fn dsa_params(&self) -> Option<crate::backend::DsaParams> {
+        let ic = self.cfg.indexer.as_ref()?;
+        Some(crate::backend::DsaParams {
+            heads: ic.heads,
+            dim: ic.dim,
+            topk: ic.topk,
+            stride: self.stride,
+            block_size: self.block_size,
+            scale: (ic.dim as f32).powf(-0.5),
+            head_scale: (ic.heads as f32).powf(-0.5),
+        })
+    }
+
+    /// Can the accelerator run the indexer and the sparse attention of this model? Plain indexers over the expanded MLA cache only (pooled
+    /// indexers and the tail rotation of Hy4 have no device kernel); `FLLM_DSA=host` keeps the layers on the host.
+    fn dsa_device_possible(&self, backend: &dyn crate::backend::Backend) -> bool {
+        let (Some(ic), Some(mc), Some(params)) = (self.cfg.indexer.as_ref(), self.cfg.mla.as_ref(), self.dsa_params()) else { return false };
+        if self.dsa_dense || std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("host")) || self.mla_latent || ic.kpool > 1 || self.cfg.kv_heads != self.cfg.heads {
+            return false;
+        }
+        let plain = self.layers.iter().all(|l| l.indexer.as_deref().is_none_or(|ix| ix.pool.is_none()) && (l.indexer.is_none() || l.window.is_none()));
+        let q_low = self.layers.iter().all(|l| l.indexer.is_none() || matches!(&l.attn, Attn::Mla(m) if m.q_a.is_some()));
+        plain && q_low && backend.create_stream().is_ok_and(|s| s.supports_dsa(&params, mc.nope + mc.rope, self.kv_kind) && (!ic.rope_last || s.supports_rotate_heads()))
+    }
+
     /// Why layer `i` cannot run on the device (`None`: it can). Such a layer is computed by the host reference code
     /// (`host_layers`) between device layers: the residual stream is downloaded, the layer runs on the CPU with the host KV
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
     #[allow(clippy::too_many_arguments)]
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool) -> Option<&'static str> {
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
@@ -2700,8 +2889,8 @@ impl RustDecoder {
         if cfg.minimax3.is_some() {
             return Some("MiniMax-M3 block-sparse attention");
         }
-        if cfg.hc.is_some() {
-            return Some("hyper-connections");
+        if cfg.hc.is_some() && !hc_ok {
+            return Some("hyper-connections (the backend has no kernels for them, or FLLM_HC=host)");
         }
         if cfg.qwen4.is_some() {
             return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer");
@@ -2766,12 +2955,16 @@ impl RustDecoder {
             }
             Attn::Mla(_) => {
                 if layer.attn_gate.is_some() {
-                    // the device attention has no per-head output gate for latent attention
-                    return Some("a latent attention output gate");
+                    // the gate projection is computed from the normed input like the separate gates of the standard layers; the product with the
+                    // attention output is the element-wise sigmoid gate (`sigmoid_gate_mul`) or the per-head gate (`head_gate_mul`)
+                    let device_gate = if layer.gate_per_head { head_ok } else { gate_ok && matches!(cfg.attn_gate, crate::config::AttnGate::Sigmoid) };
+                    if !device_gate {
+                        return Some("a latent attention output gate");
+                    }
                 }
-                if (layer.indexer.is_some() || layer.dsa_shared) && !self.dsa_dense {
+                if (layer.indexer.is_some() || layer.dsa_shared) && !self.dsa_dense && !dsa_ok {
                     if self.dsa_exact_on_device {
-                        return Some("the sparse-attention indexer");
+                        return Some("the sparse-attention indexer (host: FLLM_DSA=host, or no indexer kernels for this backend, shape or cache format)");
                     }
                     static NOTE: std::sync::Once = std::sync::Once::new();
                     NOTE.call_once(|| {
@@ -2801,6 +2994,10 @@ impl RustDecoder {
     fn ffn_host_reason(&self, layer: &Layer, arch_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         let native = |a: Activation| matches!(a, Activation::Silu | Activation::GeluTanh) || arch_ok;
+        // the clamped SwiGLU (Hy4, GLM-5-Next) and SiTU (Kimi K3) have no device kernel; the device GLU would apply the plain SwiGLU
+        if (cfg.situ.is_some() || cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some())) && matches!(layer.ffn, Ffn::Moe(_) | Ffn::Gated { .. }) {
+            return Some("a clamped SwiGLU or SiTU activation");
+        }
         match &layer.ffn {
             // the all-to-all combine of expert parallelism exchanges tokens between the ranks on the host (the other combines run the
             // experts on the device and add the partial results of the group)
@@ -2947,6 +3144,18 @@ impl RustDecoder {
             .map(|s| (s.supports_attention_gate(), s.supports_arch_ops(), s.supports_head_gate(), s.supports_value_scale()))
             .unwrap_or((false, false, false, false));
         let caps = backend.capabilities();
+        // the lightning indexer and the sparse attention on the device: plain indexers only (no pooling, no tail rotation), the expanded MLA cache
+        let dsa_ok = self.dsa_device_possible(&*backend);
+        self.dsa_device = dsa_ok && self.cfg.indexer.is_some();
+        // hyper-connections on the device: the streams get their own buffer and the mixing runs in two small kernels per block; the layers' own
+        // mixers and feed-forwards are the ordinary device ones (a branch output is the difference of the residual buffer before and after)
+        let hc_ok = self.hc.is_some()
+            && self.cfg.residual_scale == 1.0
+            && self.par.is_none()
+            && !std::env::var("FLLM_HC").is_ok_and(|v| v.eq_ignore_ascii_case("host"))
+            && self.cfg.hc.as_ref().is_some_and(|h| backend.create_stream().is_ok_and(|s| s.supports_hc(h.hc_mult)))
+            && self.layers.iter().all(|l| l.post_attn_norm.is_none() && l.post_ffn_norm.is_none() && !matches!(l.ffn, Ffn::None));
+        self.hc_device = hc_ok;
         let mut missing = self.backend_unsupported(caps.supports_layer_norm, caps.supports_grouped_rms_norm);
         // Layers without device kernels run on the host between the device layers (`host_layers`); a model in which no layer can
         // use the device gains nothing from it.
@@ -2960,7 +3169,7 @@ impl RustDecoder {
         // FLLM_HOST_LAYERS=all|3,4,5 forces layers onto the host (debugging: the output must match `--device cpu`)
         let forced = std::env::var("FLLM_HOST_LAYERS").ok();
         let stage = self.stage_range();
-        let layer_reasons: Vec<Option<&'static str>> = self
+        let mut layer_reasons: Vec<Option<&'static str>> = self
             .layers
             .iter()
             .enumerate()
@@ -2975,10 +3184,18 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok)
                 }
             })
             .collect();
+        // the residual streams exist on one side only: a model with hyper-connections runs completely on the device or completely on the host
+        if hc_ok && layer_reasons.iter().any(Option::is_some) {
+            self.hc_device = false;
+            if let Some(first) = layer_reasons.iter().flatten().next() {
+                eprintln!("[fllm-rs] hyper-connections stay on the host: a layer of this model needs the host ({first})");
+            }
+            layer_reasons.iter_mut().for_each(|r| *r = Some("hyper-connections (a layer of the model has no device kernels)"));
+        }
         if self.mla_latent {
             self.check_latent_mla(&*backend, &layer_reasons)?;
         }
@@ -3178,6 +3395,7 @@ impl RustDecoder {
         let mut delta_layers = 0usize;
         let mut dev_layers = Vec::with_capacity(self.layers.len());
         let mut host_summary: Vec<&'static str> = Vec::new();
+        let mut ffn_host_blocks: (usize, &'static str) = (0, "");
         let mut host_count = 0usize;
         for (i, layer) in self.layers.iter().enumerate() {
             if !stage.contains(&i) {
@@ -3194,6 +3412,10 @@ impl RustDecoder {
                 continue;
             }
             let ffn_host_exact = self.ffn_host_reason(layer, arch_ok).is_some();
+            if let Some(reason) = self.ffn_host_reason(layer, arch_ok) {
+                ffn_host_blocks.0 += 1;
+                ffn_host_blocks.1 = reason;
+            }
             let attn_norm = layer
                 .attn_norm
                 .as_ref()
@@ -3304,6 +3526,17 @@ impl RustDecoder {
                     } else {
                         None
                     },
+                }),
+                _ => None,
+            };
+            let dsa = match (&layer.attn, layer.indexer.as_deref(), self.cfg.indexer.as_ref()) {
+                (Attn::Mla(_), Some(ix), Some(ic)) if self.dsa_device => Some(DeviceDsa {
+                    q_b: upload_linear(&format!("blk.{i}.indexer.attn_q_b"), &ix.q_b)?,
+                    k: upload_linear(&format!("blk.{i}.indexer.attn_k"), &ix.k)?,
+                    proj: upload_linear(&format!("blk.{i}.indexer.proj"), &ix.proj)?,
+                    k_norm: upload_vec(&ix.k_norm)?,
+                    k_norm_bias: upload_vec(&ix.k_norm_bias)?,
+                    store: backend.allocate_buffer(self.pool_blocks * self.block_size * ic.dim * 4).map_err(|e| e.to_string())?,
                 }),
                 _ => None,
             };
@@ -3490,6 +3723,7 @@ impl RustDecoder {
                 moe: moe_dev,
                 delta,
                 mla,
+                dsa,
                 mamba,
                 shortconv,
                 mamba1,
@@ -3513,6 +3747,9 @@ impl RustDecoder {
             });
         }
 
+        if ffn_host_blocks.0 > 0 {
+            eprintln!("[fllm-rs] the feed-forward blocks of {} of {} layers run on the host: {}", ffn_host_blocks.0, self.layers.len(), ffn_host_blocks.1);
+        }
         if host_count > 0 {
             eprintln!(
                 "[fllm-rs] {host_count} of {} layers run on the host between the device layers ({})",
@@ -3531,6 +3768,19 @@ impl RustDecoder {
 
         // The input rows are built on the host (scaling, image overrides, learned positions),
         // so the token embedding table stays off the device.
+        let hc_weights = match (self.hc_device, self.hc.as_deref(), self.cfg.hc.as_ref()) {
+            (true, Some(model), Some(h)) => {
+                let vec = |v: &Vec<f32>| upload_norm("", &Norm { weight: v.clone(), bias: None });
+                let block = |name: &str, c: &deepseek4::Hc| -> Result<DeviceHc, String> {
+                    Ok(DeviceHc { mix: upload_linear(&format!("{name}_fn"), &c.mix)?, base: vec(&c.base)?, scale: vec(&c.scale)? })
+                };
+                let attn = model.attn.iter().enumerate().map(|(i, c)| block(&format!("blk.{i}.hc_attn"), c)).collect::<Result<Vec<_>, _>>()?;
+                let ffn = model.ffn.iter().enumerate().map(|(i, c)| block(&format!("blk.{i}.hc_ffn"), c)).collect::<Result<Vec<_>, _>>()?;
+                let head = model.head.as_ref().map(|c| block("output_hc", c)).transpose()?;
+                Some(DeviceHcModel { attn, ffn, head, ones: vec(&vec![1.0f32; h.hc_mult * self.cfg.hidden])? })
+            }
+            _ => None,
+        };
         let dev_weights = DeviceModelWeights {
             layers: dev_layers,
             final_norm,
@@ -3546,6 +3796,7 @@ impl RustDecoder {
                 Some(global) => Some(upload_linear_q8("per_layer_model_proj", global.projection())?),
                 None => None,
             },
+            hc: hc_weights,
         };
 
         let mut pool = crate::backend::BufferPool::new(Arc::clone(&backend));
@@ -3714,6 +3965,21 @@ impl RustDecoder {
                 .upload_activations(&mut x_buf, &host_x)
                 .map_err(err)?;
         }
+        // hyper-connections: the residual stream is `hc` copies of the embedding, kept in a buffer of its own (`x_buf` carries the block inputs)
+        let hc_dev = dev_weights.hc.as_ref().filter(|_| self.hc_device && !recording);
+        let mut hc_streams: Option<crate::backend::DeviceBuffer> = None;
+        if let (Some(_), Some(h)) = (hc_dev, cfg.hc.as_ref()) {
+            let mut expanded = Vec::with_capacity(rows * h.hc_mult * hidden);
+            for r in 0..rows {
+                for _ in 0..h.hc_mult {
+                    expanded.extend_from_slice(&host_x[r * hidden..(r + 1) * hidden]);
+                }
+            }
+            let mut buf = scratch.acquire(expanded.len() * 4).map_err(err)?;
+            stream.upload(&mut buf, cast_f32_to_u8(&expanded)).map_err(err)?;
+            hc_streams = Some(buf);
+        }
+        let mut hc_block: Option<HcBlock> = None;
         // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings; the large projection runs on the device
         let ple_host = match (self.ple.as_ref(), dev_weights.ple_proj.as_ref()) {
             (Some(global), Some(proj)) if !recording => {
@@ -3759,6 +4025,8 @@ impl RustDecoder {
         let mut delta_plan: Option<Vec<DeltaPlanRun>> = None;
         // the norm of the next layer (or the final norm), when the residual add of this layer's feed-forward block already computed it
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
+        // selection of the lightning indexer of the last layer that has one (the layers after it without an indexer reuse it)
+        let mut dsa_sel: Option<crate::backend::DeviceBuffer> = None;
         // the head GEMM reads the final norm output directly when every row's logits are wanted in order
         let head_direct = head_copy_fused() && logit_rows.len() == rows && logit_rows.iter().enumerate().all(|(j, &r)| j == r);
         // FLLM_ACT_CHECK=1: the residual stream is inspected after every layer of the first passes (largest value, NaN / Inf)
@@ -3796,6 +4064,9 @@ impl RustDecoder {
             } else {
                 None
             };
+            if let (Some(hcd), Some(streams)) = (hc_dev, hc_streams.as_ref()) {
+                hc_block = Some(self.hc_enter(&mut **stream, &mut scratch, &hcd.attn[i], &hcd.ones, streams, &mut x_buf, rows)?);
+            }
             let mut normed_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
             // parallel residual: the attention branch joins the residual stream only after the feed-forward input is taken from it
             let parallel = cfg.parallel_residual;
@@ -3835,6 +4106,8 @@ impl RustDecoder {
                 let mut k_buf = scratch.acquire(k_bytes).map_err(err)?;
                 let mut v_buf = scratch.acquire(v_bytes).map_err(err)?;
                 let mut latent_attn: Option<crate::backend::DeviceBuffer> = None;
+                // normalized low-rank query of a layer with a lightning indexer (the indexer queries are projected from it)
+                let mut q_low_dev: Option<crate::backend::DeviceBuffer> = None;
 
                 let mut gate_buf = None;
                 if let Some((q_w, k_w, v_w)) = std_qkv {
@@ -4121,7 +4394,11 @@ impl RustDecoder {
                         stream.quantized_linear(&mut low, &normed_buf, down, down.bias.as_ref()).map_err(err)?;
                         device_rms_inplace(&mut **stream, &mut scratch, &mut low, Some(norm), cfg.eps, 1)?;
                         stream.quantized_linear(&mut q_full, &low, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
-                        scratch.recycle(low);
+                        if dev_layer.dsa.is_some() {
+                            q_low_dev = Some(low);
+                        } else {
+                            scratch.recycle(low);
+                        }
                     } else {
                         stream.quantized_linear(&mut q_full, &normed_buf, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
                     }
@@ -4177,9 +4454,51 @@ impl RustDecoder {
                 };
                 if !lat {
                     let read_layer = crate::kv_geometry::KvPoolLayout::owner(cfg, i) - kv_base;
-                    stream
-                        .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
-                        .map_err(err)?;
+                    if self.dsa_device && (dev_layer.dsa.is_some() || layer.dsa_shared) {
+                        // sparse attention: the lightning indexer picks the positions of every row (its own layer's, or the layer before's), attention reads those only
+                        let (ic, mc, dp) = (cfg.indexer.as_ref(), cfg.mla.as_ref(), self.dsa_params());
+                        let (Some(ic), Some(mc), Some(dp)) = (ic, mc, dp) else { return Err("sparse attention without an indexer configuration".into()) };
+                        if let Some(ds) = &dev_layer.dsa {
+                            let low = q_low_dev.take().ok_or("the sparse-attention indexer needs the low-rank query")?;
+                            let mut iq = scratch.acquire(rows * ic.heads * ic.dim * 4).map_err(err)?;
+                            stream.quantized_linear(&mut iq, &low, &ds.q_b, ds.q_b.bias.as_ref()).map_err(err)?;
+                            scratch.recycle(low);
+                            let mut ik_raw = scratch.acquire(rows * ic.dim * 4).map_err(err)?;
+                            stream.quantized_linear(&mut ik_raw, &normed_buf, &ds.k, ds.k.bias.as_ref()).map_err(err)?;
+                            let mut ik = scratch.acquire(rows * ic.dim * 4).map_err(err)?;
+                            stream.layer_norm(&mut ik, &ik_raw, &ds.k_norm, Some(&ds.k_norm_bias), ic.norm_eps).map_err(err)?;
+                            scratch.recycle(ik_raw);
+                            if ic.rope_last {
+                                // the rotated values are the last ones of the head: move them to the front of queries and keys alike
+                                let mut moved = scratch.acquire(rows * ic.dim * 4).map_err(err)?;
+                                stream.rotate_heads(&mut moved, &ik, ic.dim, mc.rope).map_err(err)?;
+                                scratch.recycle(std::mem::replace(&mut ik, moved));
+                                let mut moved = scratch.acquire(rows * ic.heads * ic.dim * 4).map_err(err)?;
+                                stream.rotate_heads(&mut moved, &iq, ic.dim, mc.rope).map_err(err)?;
+                                scratch.recycle(std::mem::replace(&mut iq, moved));
+                            }
+                            let mut iw = scratch.acquire(rows * ic.heads * 4).map_err(err)?;
+                            stream.quantized_linear(&mut iw, &normed_buf, &ds.proj, ds.proj.bias.as_ref()).map_err(err)?;
+                            let (cos, sin) = &dev_weights.rope[layer.rope_table];
+                            let rope_params = RopeParams { heads: ic.heads, kv_heads: 1, dim: ic.dim, rope_dim: mc.rope, neox: ic.neox, cos: Arc::clone(cos), sin: Arc::clone(sin) };
+                            stream.rope(&mut iq, &mut ik, &positions, &rope_params).map_err(err)?;
+                            let mut sel = scratch.acquire(rows * ic.topk * 4).map_err(err)?;
+                            let mut store = ds.store.clone();
+                            stream.dsa_select(&mut sel, &mut store, &iq, &ik, &iw, &slots, tables, lengths, &dp).map_err(err)?;
+                            for buf in [iq, ik, iw] {
+                                scratch.recycle(buf);
+                            }
+                            if let Some(old) = dsa_sel.replace(sel) {
+                                scratch.recycle(old);
+                            }
+                        }
+                        let sel = dsa_sel.as_ref().ok_or_else(|| format!("layer {i} shares the sparse-attention selection of the layer before, which did not run"))?;
+                        stream.dsa_attention(&mut attn_buf, &q_buf, dev_kv, tables, read_layer, sel, ic.topk, &attn_params).map_err(err)?;
+                    } else {
+                        stream
+                            .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
+                            .map_err(err)?;
+                    }
                 }
                 if let Some(gate) = gate_buf.take() {
                     match (layer.gate_per_head, cfg.attn_gate) {
@@ -4200,7 +4519,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if !tp && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if !tp && hc_dev.is_none() && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -4360,6 +4679,10 @@ impl RustDecoder {
                 scratch.recycle(normed_buf);
                 continue;
             }
+            if let (Some(hcd), Some(streams), Some(block)) = (hc_dev, hc_streams.as_mut(), hc_block.take()) {
+                self.hc_leave(&mut **stream, &mut scratch, streams, &mut x_buf, block, rows, i, false)?;
+                hc_block = Some(self.hc_enter(&mut **stream, &mut scratch, &hcd.ffn[i], &hcd.ones, streams, &mut x_buf, rows)?);
+            }
             let dev_ffn = match (&dev_layer.ffn_gate, &dev_layer.ffn_up, &dev_layer.ffn_down) {
                 (g, Some(u), Some(d)) => Some((g.as_ref(), u, d)),
                 // gate and up as one matrix: the merged branch below replaces the two projections
@@ -4452,7 +4775,7 @@ impl RustDecoder {
                 // the norm of the next layer (or the final norm) can join the residual add of the down projection
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
-                let next_target = if !tp && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
+                let next_target = if !tp && hc_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -4606,6 +4929,9 @@ impl RustDecoder {
                     .map_err(err)?;
                 scratch.recycle(ffn_out_buf);
             }
+            if let (Some(streams), Some(block)) = (hc_streams.as_mut(), hc_block.take()) {
+                self.hc_leave(&mut **stream, &mut scratch, streams, &mut x_buf, block, rows, i, true)?;
+            }
             if let Some(level) = deepstack.as_ref().and_then(|d| d.get(i)).filter(|level| !level.is_empty()) {
                 let mut added = vec![0.0f32; rows * hidden];
                 for (row, values) in level {
@@ -4657,6 +4983,13 @@ impl RustDecoder {
         }
         if act_check {
             report_act_check(&mut **stream, rows, &act_stats);
+        }
+        if let Some(sel) = dsa_sel.take() {
+            scratch.recycle(sel);
+        }
+        if let (Some(hcd), Some(streams)) = (hc_dev, hc_streams.take()) {
+            self.hc_head(&mut **stream, &mut scratch, hcd, &streams, &mut x_buf, rows)?;
+            scratch.recycle(streams);
         }
 
         if !last_stage {
@@ -5101,6 +5434,25 @@ impl RustDecoder {
     /// Calls `f(layer keys, first value of the block, values per block)` for every layer with an indexer.
     fn dsa_for_blocks(&self, block: usize, mut f: impl FnMut(&mut Vec<f32>, usize, usize)) {
         let Some(ic) = &self.cfg.indexer else { return };
+        if self.dsa_device {
+            // the keys live in the device stores: the block's rows go down, `f` works on them, and they go back up
+            let (Some(weights), Some(stream)) = (self.backend_weights.as_ref(), self.backend_stream.as_ref()) else { return };
+            let Ok(mut stream) = stream.lock() else { return };
+            let per_block = self.block_size * ic.store_width();
+            for dev in &weights.layers {
+                let Some(ds) = &dev.dsa else { continue };
+                let Ok(mut region) = ds.store.slice(block * per_block * 4, per_block * 4) else { continue };
+                let mut bytes = vec![0u8; per_block * 4];
+                if stream.download(&mut bytes, &region).is_err() {
+                    continue;
+                }
+                let mut values: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+                f(&mut values, 0, per_block);
+                let out: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let _ = stream.upload(&mut region, &out);
+            }
+            return;
+        }
         let mut store = self.dsa.keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if store.len() < self.cfg.layers {
             store.resize_with(self.cfg.layers, Vec::new);

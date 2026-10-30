@@ -1,0 +1,115 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_dsa_topk | bindings: scores,meta,sel | push: topk,score_stride,row0,rows_total | grid: [rows in this dispatch, 1, 1]
+// Top-k of the indexer scores (Stream::dsa_select): one workgroup per row r = row0 + gl_WorkGroupID.x. sel[r * topk ..] receives the topk best positions
+// of the row in ascending order (equal scores: the lower position wins), -1 padded; a row with at most topk tokens lists all of them.
+// The k-th largest score is found by a radix select over the order-preserving integer keys of the floats (four passes of eight bits), then the
+// positions are collected in order with block-wide prefix sums. meta = int32: lengths[rows_total], then block tables (not read here).
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer ScoreBuf { float scores[]; };
+layout(std430, binding = 1) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 2) buffer SelBuf { int sel[]; };
+layout(push_constant) uniform P {
+    uint topk;
+    uint score_stride;
+    uint row0;
+    uint rows_total;
+} p;
+
+shared uint hist[256];
+shared int scan_buf[WG];
+shared uint s_prefix;
+shared uint s_mask;
+shared int s_remaining;
+shared int s_base_eq;
+shared int s_base_acc;
+
+uint ord_key(float f) {
+    const uint u = floatBitsToUint(f);
+    return (u & 0x80000000u) != 0u ? ~u : (u | 0x80000000u);
+}
+
+// inclusive prefix sum over the invocations of the workgroup
+int block_scan(int v) {
+    const uint t = gl_LocalInvocationID.x;
+    scan_buf[t] = v;
+    barrier();
+    for (uint off = 1u; off < WG; off <<= 1) {
+        const int add = t >= off ? scan_buf[t - off] : 0;
+        barrier();
+        scan_buf[t] += add;
+        barrier();
+    }
+    const int result = scan_buf[t];
+    barrier();
+    return result;
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint r = p.row0 + gl_WorkGroupID.x;
+    const uint n = uint(meta[r]);
+    const uint out0 = r * p.topk;
+    if (n <= p.topk) {
+        for (uint j = t; j < p.topk; j += WG) sel[out0 + j] = j < n ? int(j) : -1;
+        return;
+    }
+    const uint base = gl_WorkGroupID.x * p.score_stride;
+    if (t == 0u) {
+        s_prefix = 0u;
+        s_mask = 0u;
+        s_remaining = int(p.topk);
+    }
+    barrier();
+    for (uint pass_ = 0u; pass_ < 4u; pass_++) {
+        const uint shift = 24u - 8u * pass_;
+        for (uint i = t; i < 256u; i += WG) hist[i] = 0u;
+        barrier();
+        const uint prefix = s_prefix;
+        const uint mask = s_mask;
+        for (uint i = t; i < n; i += WG) {
+            const uint key = ord_key(scores[base + i]);
+            if ((key & mask) == prefix) atomicAdd(hist[(key >> shift) & 255u], 1u);
+        }
+        barrier();
+        if (t == 0u) {
+            int cum = 0;
+            uint bin = 255u;
+            for (; bin > 0u; bin--) {
+                if (cum + int(hist[bin]) >= s_remaining) break;
+                cum += int(hist[bin]);
+            }
+            s_remaining -= cum;
+            s_prefix = prefix | (bin << shift);
+            s_mask = mask | (255u << shift);
+        }
+        barrier();
+    }
+    const uint threshold = s_prefix;
+    const int need_eq = s_remaining;
+    if (t == 0u) {
+        s_base_eq = 0;
+        s_base_acc = 0;
+    }
+    barrier();
+    for (uint p0 = 0u; p0 < n; p0 += WG) {
+        const uint pos = p0 + t;
+        const uint key = pos < n ? ord_key(scores[base + pos]) : 0u;
+        const int gt = (pos < n && key > threshold) ? 1 : 0;
+        const int eq = (pos < n && key == threshold) ? 1 : 0;
+        const int eq_incl = block_scan(eq);
+        const int rank = s_base_eq + eq_incl - eq;
+        const int acc = (gt == 1 || (eq == 1 && rank < need_eq)) ? 1 : 0;
+        const int acc_incl = block_scan(acc);
+        if (acc == 1) sel[out0 + uint(s_base_acc + acc_incl - 1)] = int(pos);
+        barrier();
+        if (t == WG - 1u) {
+            s_base_eq += eq_incl;
+            s_base_acc += acc_incl;
+        }
+        barrier();
+    }
+}

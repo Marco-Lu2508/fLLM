@@ -936,6 +936,47 @@ pub fn validate_kv_write(
     Ok(())
 }
 
+/// How a hyper-connection block turns its learned mixes into weights (see [`Stream::hc_mix`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HcMode {
+    /// Hy4: `pre = sigmoid(..) + eps`, `post = magnitude * sigmoid(..) + eps`, no mixing matrix.
+    Independent { magnitude: f32 },
+    /// GLM-5-Next, DeepSeek-V4: `post = 2 * sigmoid(..)`, a row-softmax mixing matrix projected towards doubly stochastic with `iters` Sinkhorn steps.
+    Sinkhorn { iters: usize },
+    /// The final collapse of the streams: `pre` only.
+    Head,
+    /// The final collapse as the mean of the streams (no weights).
+    Mean,
+}
+
+impl HcMode {
+    /// Width of one row of the learned mixes for `hc` streams.
+    pub fn mix_width(&self, hc: usize) -> usize {
+        match self {
+            HcMode::Independent { .. } => 2 * hc,
+            HcMode::Sinkhorn { .. } => (2 + hc) * hc,
+            HcMode::Head => hc,
+            HcMode::Mean => 0,
+        }
+    }
+}
+
+/// Shape of the lightning indexer of a sparse-attention layer (DeepSeek-V3.2, GLM-5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DsaParams {
+    /// Indexer heads and the width of a query / key.
+    pub heads: usize,
+    pub dim: usize,
+    /// Positions kept per row.
+    pub topk: usize,
+    /// Block table stride and tokens per cache block of the batch.
+    pub stride: usize,
+    pub block_size: usize,
+    /// `dim^-0.5` and `heads^-0.5`.
+    pub scale: f32,
+    pub head_scale: f32,
+}
+
 /// Paged Attention parameters.
 ///
 /// Row `r` of a batch attends to positions `start..lengths[r]` of its block table, where
@@ -1796,6 +1837,103 @@ pub trait Stream: Send {
     /// backend whose attention path is known to differ from the host reference for such models says no.
     fn supports_value_scale(&self) -> bool {
         self.supports_head_gate()
+    }
+
+    /// `out[g][(d + shift) % dim] = x[g][d]` for every group `g` of `dim` floats: the last `shift` values of each group move to the front (the
+    /// tail rotation of the Hy4 indexer heads before the rotary embedding).
+    fn rotate_heads(&mut self, _out: &mut DeviceBuffer, _x: &DeviceBuffer, _dim: usize, _shift: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rotate_heads".into()))
+    }
+
+    /// Does this stream implement [`Stream::rotate_heads`]?
+    fn supports_rotate_heads(&self) -> bool {
+        false
+    }
+
+    /// Can this stream run hyper-connections of `hc` residual streams ([`Stream::hc_mix`], [`Stream::hc_combine`])?
+    fn supports_hc(&self, _hc: usize) -> bool {
+        false
+    }
+
+    /// Hyper-connection weights of a block and the collapsed block input. `streams` is `rows x hc x hidden`; `mixes` (`rows x mode.mix_width(hc)`)
+    /// is the linear output of the RMS-normalised streams, `base` and `scale` the learned offsets and scales (`None` for [`HcMode::Mean`]).
+    /// Writes `post` (`rows x hc`), `comb` (`rows x hc x hc`, Sinkhorn only; untouched otherwise) and `collapsed = sum_n pre[n] * streams[n]`
+    /// (`rows x hidden`).
+    #[allow(clippy::too_many_arguments)]
+    fn hc_mix(
+        &mut self,
+        _collapsed: &mut DeviceBuffer,
+        _post: &mut DeviceBuffer,
+        _comb: &mut DeviceBuffer,
+        _streams: &DeviceBuffer,
+        _mixes: Option<&DeviceBuffer>,
+        _base: Option<&DeviceBuffer>,
+        _scale: Option<&DeviceBuffer>,
+        _rows: usize,
+        _hc: usize,
+        _hidden: usize,
+        _mode: HcMode,
+        _eps: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("hc_mix".into()))
+    }
+
+    /// Hyper-connection update in place: `streams[k] = post[k] * block + sum_j comb[j][k] * old[j]` per row (`comb` is `None`: `+ old[k]`).
+    #[allow(clippy::too_many_arguments)]
+    fn hc_combine(
+        &mut self,
+        _streams: &mut DeviceBuffer,
+        _post: &DeviceBuffer,
+        _comb: Option<&DeviceBuffer>,
+        _block: &DeviceBuffer,
+        _rows: usize,
+        _hc: usize,
+        _hidden: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("hc_combine".into()))
+    }
+
+    /// Can this stream run the lightning indexer and the sparse attention of DeepSeek-V3.2 / GLM-5 ([`Stream::dsa_select`],
+    /// [`Stream::dsa_attention`]) for these shapes and this KV cache format (`kv_kind`, see [`DeviceKvCache`])?
+    fn supports_dsa(&self, _params: &DsaParams, _key_dim: usize, _kv_kind: i32) -> bool {
+        false
+    }
+
+    /// Lightning indexer. Writes the indexer keys `k` (`rows x dim`) of the new tokens into `store` (one `dim`-wide f32 row per cache slot,
+    /// `slots[r]` for row `r`), scores the `lengths[r]` visible tokens of every row (`sum_h relu(q_h . key * scale) * w_h * head_scale`;
+    /// `q` is `rows x heads x dim`, `w` is `rows x heads`) and writes the best `topk` positions of the row, ascending, to `sel`
+    /// (`rows x topk` i32). Ties go to the lower position. A row with at most `topk` tokens lists all of them; unused entries are -1.
+    #[allow(clippy::too_many_arguments)]
+    fn dsa_select(
+        &mut self,
+        _sel: &mut DeviceBuffer,
+        _store: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _k: &DeviceBuffer,
+        _w: &DeviceBuffer,
+        _slots: &[usize],
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _params: &DsaParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("dsa_select".into()))
+    }
+
+    /// Attention of every (row, head) over the positions listed in `sel` (`rows x topk` i32 as written by [`Stream::dsa_select`]); `params`
+    /// describe the attention like [`Stream::attention_paged`] (no window, sinks, ALiBi or soft cap).
+    #[allow(clippy::too_many_arguments)]
+    fn dsa_attention(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _block_tables: &[i64],
+        _layer_idx: usize,
+        _sel: &DeviceBuffer,
+        _topk: usize,
+        _params: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("dsa_attention".into()))
     }
 
     /// In-place `x = clamp(x, -limit, limit)`.

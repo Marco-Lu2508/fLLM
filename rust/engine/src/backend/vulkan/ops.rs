@@ -9,6 +9,8 @@
 //! Level of verification: **L0** (compiles, unit-tested on the CPU; no shader has ever run on a device).
 
 pub mod attention;
+pub mod dsa;
+pub mod hc;
 pub mod moe;
 pub mod recurrent;
 
@@ -600,6 +602,7 @@ pub fn plan_scale(count: usize, factor: f32) -> Result<OpPlan, BackendError> {
         return Err(invalid("scale of an empty tensor"));
     }
     plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x").read_opt("gate", false))
+    plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x").dummy("gate", Access::Read))
 }
 
 /// `Stream::head_gate_mul` (`act_head_gate_sigmoid` / `act_head_gate_softplus`): `x[i] *= act(gate[i / dv])` over `count` floats.

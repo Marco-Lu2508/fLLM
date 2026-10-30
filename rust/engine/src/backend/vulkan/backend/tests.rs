@@ -329,6 +329,29 @@ fn all_op_plans() -> Vec<OpPlan> {
     }
     }
 
+    {
+        use crate::backend::vulkan::ops::hc::{plan_hc_combine, plan_hc_mix, plan_rotate_heads};
+        plans.push(plan_rotate_heads(64, 16, 4).unwrap());
+        use crate::backend::HcMode;
+        for mode in [HcMode::Independent { magnitude: 2.0 }, HcMode::Sinkhorn { iters: 4 }, HcMode::Head, HcMode::Mean] {
+            plans.push(plan_hc_mix(3, 4, 64, mode, 1e-6).unwrap());
+        }
+        for has_comb in [false, true] {
+            plans.push(plan_hc_combine(3, 4, 64, has_comb).unwrap());
+        }
+    }
+    {
+        use crate::backend::vulkan::ops::dsa::{plan_dsa_attention, plan_dsa_select};
+        let p = crate::backend::DsaParams { heads: 4, dim: 32, topk: 8, stride: 256, block_size: 16, scale: 0.25, head_scale: 0.5 };
+        let table: Vec<i64> = (0..256i64).collect();
+        let lengths = [300i64, 5, 4000];
+        let tables: Vec<i64> = lengths.iter().flat_map(|_| table.iter().copied()).collect();
+        plans.extend(plan_dsa_select(&p, &[0, 1, 2], &tables, &lengths, 4096 * 16).unwrap());
+        let short = [3i64, 5];
+        let tables: Vec<i64> = short.iter().flat_map(|_| table.iter().copied()).collect();
+        plans.extend(plan_dsa_select(&p, &[0, 1], &tables, &short, 4096 * 16).unwrap());
+        plans.push(plan_dsa_attention(&kv_layout(1, 4, 192, 128), &attention_params(4, 4, 192, 128, false), 8, &tables).unwrap());
+    }
     plans.push(plan_moe_topk(3, 64, 8, true, 1.0).unwrap());
     plans.push(plan_moe_topk(3, 64, 8, false, 2.5).unwrap());
     for quant in [

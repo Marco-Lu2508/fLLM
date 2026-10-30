@@ -1,0 +1,23 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_dsa_keys | bindings: store,k,slots | push: count,dim | grid: [min(ceil(count/256), 65535), 1, 1]
+// Indexer keys of the new tokens into the per-slot key store (Stream::dsa_select, DeepSeek-V3.2 / GLM-5): store[slots[r] * dim + d] = k[r * dim + d]
+// for the count = rows * dim values (grid-stride loop). The store holds one dim-wide f32 row per cache slot.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer StoreBuf { float store[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kk[]; };
+layout(std430, binding = 2) readonly buffer SlotBuf { uint slots[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint dim;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        store[slots[i / p.dim] * p.dim + i % p.dim] = kk[i];
+    }
+}

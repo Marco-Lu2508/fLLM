@@ -1,0 +1,116 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_sparse | bindings: q,kpool,vpool,sel,meta,bias,out | push: topk,heads,kv_heads,dk,dv,stride,block_size,scale,k_base,v_base,flags | grid: [heads, rows, 1]
+// Attention over a selection of positions (Stream::dsa_attention, DeepSeek-V3.2 / GLM-5), f16 cache. One workgroup of 128 lanes per (row, query head):
+// the lanes score the listed positions 128 at a time (one position per lane: dot(q, key) * scale), fold the tile into an online softmax and
+// accumulate the value rows (lane l owns the value dimensions l, l + 128, ...; dv <= 512). sel = int32 rows x topk: positions, -1 after the last one.
+// meta = int32 block tables (rows x stride). q is rows x heads x dk, out rows x heads x dv. bias = float sinks[heads] (flags bit 0 = used): a sink adds
+// exp(sink) to the softmax denominator without a value.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_ops_kv.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer KPool { uint kpool[]; };
+layout(std430, binding = 2) readonly buffer VPool { uint vpool[]; };
+layout(std430, binding = 3) readonly buffer SelBuf { int sel[]; };
+layout(std430, binding = 4) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 5) readonly buffer BiasBuf { float bias_tab[]; };
+layout(std430, binding = 6) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint topk;
+    uint heads;
+    uint kv_heads;
+    uint dk;
+    uint dv;
+    uint stride;
+    uint block_size;
+    float scale;
+    uint k_base;
+    uint v_base;
+    uint flags;
+} p;
+
+shared float qs[512];
+shared float tile_p[WG];
+shared uint tile_slot[WG];
+shared float red[WG];
+
+float reduce_max(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] = max(red[t], red[t + off]);
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+float reduce_sum(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] += red[t + off];
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint r = gl_WorkGroupID.y;
+    const uint kh = h / (p.heads / p.kv_heads);
+    for (uint i = t; i < p.dk; i += WG) qs[i] = q[(r * p.heads + h) * p.dk + i];
+    barrier();
+    // with a sink the running maximum starts at the sink and the denominator at exp(sink - sink) = 1
+    float m = (p.flags & 1u) != 0u ? bias_tab[h] : NEG;
+    float l = (p.flags & 1u) != 0u ? 1.0 : 0.0;
+    float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint t0 = 0u; t0 < p.topk; t0 += WG) {
+        const uint j = t0 + t;
+        const int pos = j < p.topk ? sel[r * p.topk + j] : -1;
+        float s = NEG;
+        uint slot = 0u;
+        if (pos >= 0) {
+            slot = uint(meta[r * p.stride + uint(pos) / p.block_size]) * p.block_size + uint(pos) % p.block_size;
+            const uint base = p.k_base + slot * p.kv_heads * p.dk + kh * p.dk;
+            float dotp = 0.0;
+            for (uint d = 0u; d < p.dk; d++) dotp += qs[d] * KV_HALF(kpool, base + d);
+            s = dotp * p.scale;
+        }
+        tile_slot[t] = slot;
+        const float tmax = reduce_max(s);
+        if (tmax <= NEG) break;
+        const float mn = max(m, tmax);
+        const float corr = exp(m - mn);
+        const float pj = pos >= 0 ? exp(s - mn) : 0.0;
+        tile_p[t] = pj;
+        const float tsum = reduce_sum(pj);
+        l = l * corr + tsum;
+        for (uint i = 0u; i < 4u; i++) {
+            const uint d = t + i * WG;
+            if (d < p.dv) {
+                float a = acc[i] * corr;
+                for (uint jj = 0u; jj < WG; jj++) {
+                    const float pw = tile_p[jj];
+                    if (pw != 0.0) a += pw * KV_HALF(vpool, p.v_base + tile_slot[jj] * p.kv_heads * p.dv + kh * p.dv + d);
+                }
+                acc[i] = a;
+            }
+        }
+        barrier();
+        m = mn;
+    }
+    for (uint i = 0u; i < 4u; i++) {
+        const uint d = t + i * WG;
+        if (d < p.dv) outv[(r * p.heads + h) * p.dv + d] = l > 0.0 ? acc[i] / l : 0.0;
+    }
+}

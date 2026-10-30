@@ -55,16 +55,16 @@ Verified column:
 | Step-3.5-Flash / Step-3.7-Flash text (`step3p5`) | safetensors (Hub layout); llama.cpp `step35` GGUFs are refused (clamped SwiGLU, scaled partial rotary factors) | D | D (per-head gate) | D | D | H (attention layers: per-head gate) | T 6.0e-4 (new; the real 196B checkpoint was not run). The clamped SwiGLU of the last layers (`swiglu_limits`) is not implemented |
 | MiMo-V2-Flash (`mimo_v2_flash`: per-layer KV heads, sinks, value scale) | safetensors, llama.cpp `mimo2` GGUF (alias) | D | D (value scale) | D | H on AMD GPUs (attention layers stay on the host: the HIP decode step differs, see device runs) | H (attention layers: value scale) | T 2.7e-4 (new fixture; the real 309B checkpoint was not run); the `mimo2` header of a real file was checked against the metadata keys, no such file was run |
 | DeepSeek V2/V3/R1, Kimi K2, Mistral Large 3 / Mistral 4, Youtu, Sarvam-MLA, MiniCPM3, Ling-2 (`deepseek_v2`, `deepseek_v3`, `kimi_k2`, `mistral4`, ...) | safetensors (also FP8 block), GGUF `deepseek2` | D | D | D (equal KV head count) / H | D | D | T 1.4e-4 .. 2.0e-4 |
-| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`; GGUF `deepseek32`, `glm-dsa` by name) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 with `index_topk` above the sequence length; **T 1.7e-4 / 3.5e-4 with the indexer cutting 4 of 12 tokens** (`deepseek_v32_sparse`, `glm_moe_dsa_sparse`). The exact lightning-indexer selection runs on the CPU path; accelerators attend densely (exact up to `index_topk` tokens) unless `FLLM_DSA=exact` puts the layers on the host. No device kernel for the indexer |
+| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`; GGUF `deepseek32`, `glm-dsa` by name) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 with `index_topk` above the sequence length; **T 1.7e-4 / 3.5e-4 with the indexer cutting 4 of 12 tokens** (`deepseek_v32_sparse`, `glm_moe_dsa_sparse`). The exact lightning-indexer selection runs on the CPU path and, since 2026-10-30, on CUDA, HIP and Vulkan devices (see "Sparse-attention indexer" below); the other backends attend densely (exact up to `index_topk` tokens) unless `FLLM_DSA=exact` puts the layers on the host |
 | DeepSeek-V4 / V4.1 (`deepseek_v4`; GGUF `deepseek4`) | safetensors (transformers and Hub tensor names; bf16/f16/f32) | D | C | C | C | C | T 5e-7 .. 1e-6 (new; 12..40 positions, also cached decoding and server completions). Accelerators run on the CPU with a notice; no MTP head; FP8/FP4 Hub weights not read; the real checkpoints were not run |
 | MiniMax-M3 text (`minimax_m3_vl_text`; GGUF `minimax3`) | safetensors (vision tower not imported) | D | C | C | C | C | T 7e-7 .. 1.5e-6 (new; 12..40 positions, cached decoding, server completions; the block selection matters: dense attention is off by 0.40). Accelerators run on the CPU with a notice; the real 428B checkpoint was not run |
 | Inkling text (`inkling_text`; GGUF `inkling`) | safetensors (vision, audio and MTP tensors not imported) | D | C | C | C | C | T 1.7e-7 .. 1.8e-7 (new; 12..40 positions, cached decoding, server completions; sliding window, distance clamp, log scaling, shared experts exercised). Accelerators run on the CPU with a notice; the real 975B checkpoint was not run |
 | LongCat-Flash (`longcat_flash`; GGUF `longcat-flash`) | safetensors | D | C | C | C | C | T 1.4e-4 .. 1.7e-4 (new; 12..40 positions, cached decoding, server completions; zero experts and the cross-layer shortcut exercised). Accelerators run on the CPU with a notice; the real 560B checkpoint was not run |
-| GLM-5-Next / GLM-5.3-Flash text (`glm5_next`; GGUF `kimi-linear` + hyper-connections) | safetensors (vision tower skipped) | D | C | C | C | C | T 8.7e-5 .. 9.2e-5 (new; 12..40 positions, cached decoding, server completions; the k-pool indexer cuts the context to 2 pools + tail). Accelerators run on the CPU with a notice; the real 320B checkpoint was not run |
-| Ling-3.0 (`bailing_hybrid`: Kimi delta layers with direct bounded gates + rotary latent attention with a head gate + MoE; GGUF `kimi-linear`) | safetensors (Hub `attention.*` and transformers 5 names) | D | H | H | H | H | T 3.9e-5 .. 4.7e-5 (new; 12..40 positions, cached decoding, server completions). The latent attention layers (output gate) run on the host between device layers; Vulkan on an RTX 2000 Ada gave the same text as the CPU for the tiny model, the other devices were not run; the real checkpoint was not run |
-| Hy4 (`hy_v4`; GGUF `hy4`) | safetensors (transformers and Hub names) | D | C | C | C | C | T 1.4e-4 .. 1.7e-4 (new; indexer cutting 4 keys, 12..40 positions, cached decoding, server completions). Accelerators run on the CPU with a notice; the real checkpoint was not run |
+| GLM-5-Next / GLM-5.3-Flash text (`glm5_next`; GGUF `kimi-linear` + hyper-connections) | safetensors (vision tower skipped) | D | C | C | C | C | T 8.7e-5 .. 9.2e-5 (new; 12..40 positions, cached decoding, server completions; the k-pool indexer cuts the context to 2 pools + tail). The device kernels for the hyper-connections exist, but this model still runs on the CPU with a notice (the streams exist on one side only, and its Kimi delta layers and pooled indexer have no device kernel); the real 320B checkpoint was not run |
+| Ling-3.0 (`bailing_hybrid`: Kimi delta layers with direct bounded gates + rotary latent attention with a head gate + MoE; GGUF `kimi-linear`) | safetensors (Hub `attention.*` and transformers 5 names) | D | H | H | H | H | T 3.9e-5 .. 4.7e-5 (new; 12..40 positions, cached decoding, server completions). The latent attention layer (output gate) now runs on the device (the gate is the element-wise sigmoid or the per-head gate operation of the standard layers); the delta layers (Kimi delta attention) still run on the host between the device layers. The tiny model gives the CPU's text on Vulkan (Radeon 840M) and on HIP; the real checkpoint was not run |
+| Hy4 (`hy_v4`; GGUF `hy4`) | safetensors (transformers and Hub names) | D | H | H | H | C | T 1.4e-4 .. 1.7e-4 (new; indexer cutting 4 keys, 12..40 positions, cached decoding, server completions). CUDA, HIP and Vulkan run the hyper-connections (`hc_mix`, `hc_combine`), the latent attention with its sigmoid output gate and sinks, and the tail-rotated lightning indexer with the sparse attention on the device; the feed-forward blocks (clamped SwiGLU, no device kernel) run on the host, one log line says so. Layer streams against the CPU on Vulkan (Radeon 840M): 0.0001 relative at every layer. See "Models added with their own decoders" for the text comparison. The real checkpoint was not run |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | H (attention layers) | H | H | H | T 2.6e-4 |
-| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). **Dense attention:** the sparse-attention indexer is not run; that equals DSA while the context is at most `index_topk` (2048) and is approximate beyond (see Open gaps) |
+| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). The sparse-attention indexer runs on the CPU and on CUDA, HIP and Vulkan devices; other backends attend densely, which equals DSA while the context is at most `index_topk` (2048) and is approximate beyond |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | D | D | D | H (attention layers) | T 2.6e-4 |
 | K2 Horizon, G9v3 (`k2_horizon`, `g9v3`) | safetensors, GGUF | D | D | D | D | D | T 1.5e-4 .. 1.9e-4 (remote-code reference) |
 | Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | H | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
@@ -213,28 +213,46 @@ does) and the builder chooses a seed in which the last kept and the first droppe
 | Cached decoding: first K tokens as a batch, then one token per call (`FLLM_VERIFY_SPLIT`) | same logits as the single batch for both fixtures |
 | Greedy server completions, 4 concurrent requests, `scripts/verify_generation.py` | 4 of 4 identical to transformers for both fixtures |
 
-Devices (RTX 2000 Ada Laptop GPU through Vulkan, `vulkan:1`; tiny fixtures; `scripts/gpu_arch_smoke.py`): the default device run keeps
-the dense device attention and gives a different text from the CPU (the indexer cuts 4 of 19 tokens); with `FLLM_DSA=exact` the text equals the
-CPU text for both fixtures, and with `FLLM_DSA=dense` the device text equals the dense CPU text. CUDA, HIP, Metal and Vulkan on AMD were not run.
+Devices (tiny fixtures; 16 greedy tokens through `scripts/gpu_arch_smoke.py`-style requests, device text against CPU text, a short and a 100-character prompt;
+2026-10-30). Before the device kernels existed the default device run kept the dense device attention and gave a different text from the CPU (the
+indexer cuts 4 of 19 tokens). Now the indexer, the top-k selection and the attention over the selected positions run on the device
+(`Stream::dsa_select`, `Stream::dsa_attention`; `cuda/dsa.cu` for CUDA and HIP, `misc_dsa_keys`, `misc_dsa_scores`, `misc_dsa_topk`, `attn_sparse`
+for Vulkan) and the text equals the CPU text for both fixtures on `cuda:0` (RTX 2000 Ada Laptop), `vulkan:1` (the same GPU through Vulkan),
+`vulkan` (Radeon 840M, RADV) and `hip:0` (Radeon 840M, ROCm 7.1), with `FLLM_DSA=dense` the device text differs (the test discriminates). CUDA and HIP
+convert F32 weights to F16 for their GEMMs, which flips a router near-tie of `deepseek_v32_sparse` against an F32 CPU run; the comparison there uses a
+checkpoint whose weights were rounded to F16 first (then 8 of 8 combinations agree on both devices). Vulkan keeps F32 weights and agrees with the plain
+F32 file. `selftest-gpu --only arch` has five `dsa` cases (indexer selection against an f64 reference with exact tie handling, then attention over the
+selection against an f64 reference over the F16 cache; 4 to 64 heads, top-k 8 to 512, up to 1500 tokens, decode and prefill rows): 0 failed on all four devices
+(errors 5.8e-8 to 1.6e-7, tolerance 2e-5). Metal, SYCL, wgpu: no kernels, unchanged. No real 685B / 753B checkpoint was run. Memory: the key store costs
+`slots x index_head_dim x 4` bytes per indexer layer on the device (an f32 copy of the indexer keys, as on the host).
 
 ### Models added with their own decoders (device behaviour)
 
-Tiny random fixtures through `scripts/gpu_arch_smoke.py --device vulkan:1` (RTX 2000 Ada Laptop GPU, 12 greedy tokens, text from the device
-against text from the CPU): DeepSeek-V4, Hy4, GLM-5-Next, LongCat-Flash, Inkling, MiniMax-M3 and Qwen3.8-Flash-Next all give the same text, because the engine
-prints that the model cannot run on the backend and continues on the CPU (`--device vulkan:1: ... use --device cpu; running on the CPU
-instead`); no accelerator kernel ran for them. Ling-3.0 gave the same text with its delta layers on the device and its latent attention layers
-(output gate) on the host. CUDA, HIP and Metal were not run for any of them.
+Tiny random fixtures (weights rounded to F16 first, so that the CPU and the F16 device GEMMs read the same values), 16 greedy tokens through
+`scripts/gpu_arch_smoke.py`-style requests, a 100-character and a 7-character prompt, device text against CPU text, 2026-10-31:
+
+| Model | `cuda:0` (RTX 2000 Ada Laptop) | `vulkan:1` (same GPU) | `vulkan` (Radeon 840M) | `hip:0` (Radeon 840M) | What runs on the device |
+| --- | --- | --- | --- | --- | --- |
+| DeepSeek-V3.2, GLM-5 sparse fixtures | same | same | same | same | everything, including the indexer and the sparse attention |
+| Hy4 | same | same | same | same | hyper-connections, latent attention with gate and sinks, tail-rotated indexer with sparse attention; the feed-forward blocks run on the host (clamped SwiGLU) |
+| Ling-3.0 | same | same | same | same | the latent attention layer; its three Kimi delta layers run on the host |
+| GLM-5-Next | not run | CPU (notice; run before the hyper-connection kernels) | CPU (notice) | CPU (notice) | nothing: Kimi delta layers and the pooled indexer have no device kernel, hyper-connections need all layers on one side |
+| DeepSeek-V4, Qwen3.8-Flash-Next, Inkling, MiniMax-M3, LongCat-Flash | not run | CPU (notice; run before this change, unchanged code) | not run | not run | nothing (unchanged, see "Open gaps") |
+
+Ling-3.0 had the same text before; the table shows what changed on the device. Metal was not run for any model. A device column marked "CPU (notice)"
+means the engine printed that the model cannot run on that backend and continued on the CPU.
 
 ## Open gaps
 
 Not implemented, ordered by how many current models need them:
 
-1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** on accelerators, and for Motif at all.
-   DeepSeek-V4, Hy4, GLM-5-Next and Qwen3.8-Flash-Next have them on the CPU (see the matrix); the device kernels for the stream mixing, the compressors and the
-   per-sequence state are missing, as is its MTP head and the FP8 / FP4 Hub weight formats.
-2. **A device kernel for the DeepSeek-V3.2 / GLM-5 indexer.** The CPU path is exact at any context length (indexer keys per
-   slot beside the KV pools); accelerators keep dense attention, exact up to `index_topk` tokens, or run those layers on the
-   host (`FLLM_DSA=exact`). A real 685B / 753B checkpoint was not run.
+1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** on accelerators for the rest of the models, and for Motif at all.
+   Hy4 runs them on CUDA, HIP and Vulkan (`hc_mix`, `hc_combine`); DeepSeek-V4, GLM-5-Next and Qwen3.8-Flash-Next have them on the CPU only: the kernels for the
+   compressors and the per-sequence state of DeepSeek-V4, the Kimi delta layers and pooled indexer of GLM-5-Next, the gated streams, n-gram embeddings and token
+   indexer of Qwen3.8-Flash-Next, and the clamped SwiGLU of the Hy4 / GLM-5-Next feed-forward blocks are missing, as are the V4 MTP head and the FP8 / FP4 Hub weight formats.
+2. **The DeepSeek-V3.2 / GLM-5 indexer on Metal, SYCL and wgpu; the pooled (GLM-5-Next) and tail-rotated (Hy4) indexers on every device.** CUDA, HIP and
+   Vulkan run the plain indexer (selection and sparse attention) on the device; the other backends attend densely (exact up to `index_topk` tokens)
+   or run the layers on the host (`FLLM_DSA=exact`). A real 685B / 753B checkpoint was not run.
 3. **KDA variants**: Ling-3.0 (bounded forget gate, rotary latent attention with a head gate, Hub layout `attention.*`),
    GLM-5-Next, Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
 4. **xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
