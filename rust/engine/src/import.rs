@@ -26,7 +26,7 @@ use std::{
 };
 
 /// Bump when the converter changes in a way that changes the written file: older conversions are then not reused.
-pub const IMPORT_VERSION: u32 = 1;
+pub const IMPORT_VERSION: u32 = 2;
 
 const ARCHITECTURES_URL: &str = "https://github.com/Marco-Lu2508/fLLM/blob/main/docs/architectures.md";
 

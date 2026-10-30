@@ -2824,7 +2824,12 @@ pub(crate) fn tokenizer(
                 .map(u64::from)
                 .or_else(|| json_id(v))
         });
-        let id = from_token.or_else(|| model_config.get(config_key).and_then(json_id));
+        // the token the reference tokenizer really puts in front of a prompt (its post-processor template) wins over the
+        // model configuration, which may name another id (Helium: config 0, template `<s>` = 1)
+        let template_bos = if key == "bos_token_id" { post_processor_bos(&t).map(u64::from) } else { None };
+        let id = from_token
+            .or(template_bos)
+            .or_else(|| model_config.get(config_key).and_then(json_id));
         if let Some(id) = id {
             if id >= real_vocab as u64 {
                 return Err(format!("special token {key} id {id} is outside tokenizer's real vocabulary of {real_vocab} tokens"));
@@ -2855,8 +2860,12 @@ pub(crate) fn tokenizer(
             Meta::U32s(eos_ids),
         ));
     }
+    // an explicit `add_bos_token` of the tokenizer configuration decides; without one the template of the tokenizer.json
+    // post-processor does (it is what transformers follows: BitNet and Helium put BOS in front through it)
     if let Some(v) = tc.get("add_bos_token").and_then(Value::as_bool) {
         meta.push(("tokenizer.ggml.add_bos_token".into(), Meta::Bool(v)));
+    } else if post_processor_bos(&t).is_some() {
+        meta.push(("tokenizer.ggml.add_bos_token".into(), Meta::Bool(true)));
     }
     if let Some(v) = tc.get("add_eos_token").and_then(Value::as_bool) {
         meta.push(("tokenizer.ggml.add_eos_token".into(), Meta::Bool(v)));
@@ -2864,6 +2873,24 @@ pub(crate) fn tokenizer(
     meta.extend(chat_template_meta(dir, &tc)?);
     Ok((real_vocab, meta))
 }
+/// Id of the special token that the `single` template of a tokenizer.json post-processor puts in front of a prompt
+/// (`TemplateProcessing`, also inside a `Sequence`), if there is one.
+fn post_processor_bos(tokenizer: &Value) -> Option<u32> {
+    fn find(processor: &Value) -> Option<u32> {
+        match processor.get("type").and_then(Value::as_str) {
+            Some("TemplateProcessing") => {
+                let first = processor.get("single")?.as_array()?.first()?;
+                let name = first.get("SpecialToken")?.get("id")?.as_str()?;
+                let id = processor.get("special_tokens")?.get(name)?.get("ids")?.as_array()?.first()?.as_u64()?;
+                u32::try_from(id).ok()
+            }
+            Some("Sequence") => processor.get("processors")?.as_array()?.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(tokenizer.get("post_processor")?)
+}
+
 /// Chat templates of a checkpoint as `tokenizer.chat_template` (default) and `tokenizer.chat_template.<name>` (named,
 /// for example `tool_use`), in the precedence `transformers` uses: `chat_template.jinja`, then `chat_template.json`
 /// (`{"chat_template": ...}`), then `tokenizer_config.json` (a string, or a list of `{"name", "template"}`), plus
@@ -3210,6 +3237,30 @@ mod sampling_defaults_tests {
         std::fs::write(dir.join("generation_config.json"), "not json").unwrap();
         assert!(sampling_defaults(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod template_bos_tests {
+    use super::post_processor_bos;
+    use serde_json::json;
+
+    #[test]
+    fn bos_comes_from_the_post_processor_template() {
+        let helium = json!({"post_processor": {"type": "TemplateProcessing", "single": [{"SpecialToken": {"id": "<s>", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}],
+            "special_tokens": {"<s>": {"id": "<s>", "ids": [1], "tokens": ["<s>"]}}}});
+        assert_eq!(post_processor_bos(&helium), Some(1));
+        let llama3 = json!({"post_processor": {"type": "Sequence", "processors": [{"type": "ByteLevel"}, {"type": "TemplateProcessing",
+            "single": [{"SpecialToken": {"id": "<|begin_of_text|>", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}],
+            "special_tokens": {"<|begin_of_text|>": {"id": "<|begin_of_text|>", "ids": [128000], "tokens": ["<|begin_of_text|>"]}}}]}});
+        assert_eq!(post_processor_bos(&llama3), Some(128000));
+        // a plain byte-level processor, a template that starts with the sequence, or no post-processor: no BOS
+        assert_eq!(post_processor_bos(&json!({"post_processor": {"type": "ByteLevel"}})), None);
+        let eos_only = json!({"post_processor": {"type": "TemplateProcessing", "single": [{"Sequence": {"id": "A", "type_id": 0}}, {"SpecialToken": {"id": "</s>", "type_id": 0}}],
+            "special_tokens": {"</s>": {"id": "</s>", "ids": [2], "tokens": ["</s>"]}}}});
+        assert_eq!(post_processor_bos(&eos_only), None);
+        assert_eq!(post_processor_bos(&json!({"post_processor": null})), None);
+        assert_eq!(post_processor_bos(&json!({})), None);
     }
 }
 
