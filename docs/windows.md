@@ -180,3 +180,50 @@ By hand: `cargo build --release --locked -p fllm-engine --features "rust-gpu,cud
 * DirectX 12 (`--device dx12`, wgpu): the block-32 formats Q4_0, Q4_1, Q5_0, Q5_1 and Q8_0 produced wrong values or NaN (K-quants were correct). `--device auto`
   picks native Vulkan before DirectX 12, so a normal run does not use that path; the cause is not found.
 * Measured with Qwen2.5-1.5B Q4_K_M on that machine: CPU 28 tokens/s decode and 344 prompt tokens/s, Vulkan 46 to 50 decode and 1140 to 1240 prompt tokens/s.
+
+## AMD Ryzen AI Max (Strix Halo, `gfx1151`): checklist for a first test (unverified)
+
+**Nothing here has run on such a machine.** fLLM has not been started on a Ryzen AI Max (40 compute units, RDNA 3.5, up to 96 GB of the unified memory
+usable by the GPU); the points below come from reading the code paths and from the tests on a Radeon 840M (4 compute units, the same `gfx115x`
+family) under Linux. Treat every statement as a hypothesis, and please send the output of the commands to the maintainers whatever happens.
+
+What the code assumes for this chip:
+
+* `gfx1151` is in the default architecture list of the HIP build on Windows (`build.rs`: `gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201`);
+  the HIP code treats every `gfx11xx` as RDNA 3 (wave32, WMMA matrix cores, 64 KB of LDS); `gfx1151` additionally has its own tile table in the skinny GEMM
+  (`hip_skinny.cu`, F16 / BF16 weights only, never run).
+* The GPU is an integrated one (`hipDeviceProp.integrated`, Vulkan device type `INTEGRATED_GPU`): the memory plan treats it as unified memory.
+  The plan sums the device-local and the host-visible Vulkan heaps and, because an integrated GPU has no memory of its own, limits the result to the physical
+  memory the system still has free.
+* HIP only: for an integrated device the runtime figures are cut to 3/4 (a Linux observation on the 840M: the runtime hands out about 3/4 of the shared memory to
+  one process). Set `FLLM_HIP_FULL_APU_MEMORY=1` to keep the runtime's own figures.
+
+Known risk: a Strix Halo machine can reserve a large block of the RAM for the GPU in the BIOS or in the AMD driver settings ("variable graphics memory", up to
+96 GB of 128 GB). That block is dedicated: the system does not count it as free, so the limit "what the system still has free" would hide it and a model
+that fits the GPU's memory would be planned as a partial offload. If `Memory plan: ... (budget X GB / Y GB total ...)` in the server log shows a budget far below
+the dedicated memory, start with `FLLM_NO_HOST_MEMORY_CLAMP=1` (use the device's own figure).
+
+Checklist, Vulkan first (the plain `fllm-windows-x86_64-msvc.zip`, or `.\scripts\build-windows.ps1`), then HIP:
+
+1. **Inventory.** `fllm-rs devices`: expect the Radeon GPU as a native Vulkan entry (`--device vulkan:0`; there may be wgpu / DirectX 12 entries as well), type
+   `igpu`, a memory figure, and perhaps `Matrix cores cooperative matrix` (depends on the driver). Note the memory numbers. Install the newest AMD Adrenalin driver first.
+2. **Self test.** `fllm-rs selftest-gpu --device vulkan --failures-only` (with the number from step 1 if there are several: `vulkan:0`). The Radeon 840M under
+   Linux gives 0 failed checks; any failed check on this chip is a finding (send `--json out.json`).
+3. **A small model.** `fllm-rs serve --model Llama-3.2-3B-Instruct-Q4_K_M.gguf --device vulkan --port 8000` and watch the log: the lines `Memory plan:`,
+   `Memory split:` and `prompt matrix shaders measured on ...` (the one-time timing of cooperative matrices against the integer dot product), then
+   `python scripts/bench_compare.py --model <gguf> --concurrency 1,4,8 --prompt-words 60,380 "fllm=fllm:<path to fllm-rs.exe>:vulkan"`. The numbers to report: prompt and decode
+   tokens per second for one request, and the total tokens per second for 4 and 8 simultaneous requests.
+4. **A big model.** The point of the chip: a 30 to 70 billion parameter model in 4-bit (for example a 70B Q4_K_M of about 42 GB) on the GPU. Expect `Memory split:
+   N/N layers offloaded` (all layers). If fewer layers are offloaded although the dedicated memory is large, apply `FLLM_NO_HOST_MEMORY_CLAMP=1` (see above) and report both
+   logs. A model of this size is far beyond anything tested so far (the largest on the 840M was an 8B model of 5 GB), so allocation limits of the Windows driver may show up here.
+5. **Per-shader timing.** `set FLLM_VK_PROFILE=1` before `fllm-rs serve ...` prints a table of the GPU time per shader from time to time; with a 40-CU
+   GPU the shares may differ from the 4-CU laptop (there `mmq_q4_k_i` took 50 to 70 % of a prompt).
+6. **HIP, second.** Install the AMD HIP SDK for Windows that lists `gfx1151` as supported (check the release notes of the SDK version; if it does not, skip this
+   part). Build with `.\scripts\build-windows.ps1 -Hip` or take `fllm-windows-x86_64-msvc-hip.zip` from CI. `fllm-rs devices` must list `hip:0` with
+   `gfx1151`; then `fllm-rs selftest-gpu --device hip:0 --failures-only` (the Radeon 840M under Linux/ROCm 7.1: 0 failed, 822 ok), the same `serve` and
+   `bench_compare.py` run with `...:hip@0`, and for the time of every projection `set FLLM_CUDA_PROFILE=1` (slower; prints the GPU milliseconds per weight type and
+   batch class to stderr).
+7. **Memory under HIP.** If the plan on HIP is smaller than the GPU memory the driver reports, try `FLLM_HIP_FULL_APU_MEMORY=1`; if a large allocation fails with an
+   out-of-memory error with it, leave it off and report the figures.
+8. **What to send:** the output of steps 1 to 3 and 6 as text, `Memory plan` / `Memory split` lines for every model, the `bench_compare` result lines, the Windows and driver
+   versions (and the HIP SDK version), the BIOS setting for the GPU memory.

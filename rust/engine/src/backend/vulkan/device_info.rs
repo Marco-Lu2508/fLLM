@@ -22,6 +22,8 @@ pub struct VkDeviceReport {
     pub blocker: Option<String>,
     /// Bytes of device-local memory that look free (driver budget minus usage when available, else the heap size).
     pub free_memory_bytes: u64,
+    /// Bytes of memory the device can use: the device-local heaps, and on an integrated GPU the host-visible heaps as well.
+    pub total_memory_bytes: u64,
 }
 
 /// Probe every admitted device, usable or not. Uncached; creates and destroys a Vulkan instance.
@@ -58,6 +60,26 @@ pub fn probe_devices() -> VkResult<Vec<VkDeviceReport>> {
         } else {
             total
         };
+        // An integrated GPU draws its memory from the system RAM: next to the device-local heap (on an AMD APU the part the driver calls its VRAM
+        // plus a share of the GTT) there is a second, host-visible heap that the GPU reads at the same speed. Weights and caches fit into the sum,
+        // and the allocator already places buffers there when the device-local heap is full. The second heap of a discrete card is system memory
+        // behind the PCIe bus, which does not count.
+        let (shared_total, shared_free) = if probed.caps.device_type == VkDeviceType::Integrated {
+            let heaps = &probed.memory.memory_heaps[..probed.memory.memory_heap_count as usize];
+            let budgets = if probed.caps.memory_budget { heap_budget(&vki.instance, candidate.handle) } else { Vec::new() };
+            let (mut sum_total, mut sum_free) = (0u64, 0u64);
+            for (i, h) in heaps.iter().enumerate() {
+                if h.flags.contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL) {
+                    continue;
+                }
+                sum_total += h.size;
+                sum_free += budgets.get(i).map_or(h.size, |(budget, usage)| budget.saturating_sub(*usage));
+            }
+            (sum_total, sum_free)
+        } else {
+            (0, 0)
+        };
+        let (total, free) = (total + shared_total, free + shared_free);
         let device_index = blocker.is_none().then(|| {
             usable += 1;
             usable - 1
@@ -67,6 +89,7 @@ pub fn probe_devices() -> VkResult<Vec<VkDeviceReport>> {
             caps: probed.caps,
             blocker,
             free_memory_bytes: free,
+            total_memory_bytes: total,
         });
     }
     Ok(reports)
@@ -105,7 +128,7 @@ pub fn list(first_index: usize) -> Vec<DeviceInfo> {
             description: format!("native, {}", report.caps.describe()),
             dev_type: inventory_type(report.caps.device_type),
             free_memory_bytes: report.free_memory_bytes,
-            total_memory_bytes: report.caps.vram_bytes,
+            total_memory_bytes: report.total_memory_bytes,
         })
         .collect()
 }

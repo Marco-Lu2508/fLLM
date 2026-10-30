@@ -1190,7 +1190,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if d.dev_type != DeviceType::Cpu {
                 // an integrated GPU has no memory of its own: what it may use is what the system has left, not what the driver reports
                 let unified = d.dev_type == DeviceType::IntegratedGpu;
-                let device_free = if unified { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
+                // (FLLM_NO_HOST_MEMORY_CLAMP=1 trusts the device's own figure: on a machine whose BIOS or driver reserves a large block of the RAM for the GPU,
+                // that block is not part of the memory the system still has free, and clamping to the system's figure would hide it)
+                let host_clamp = unified && !std::env::var("FLLM_NO_HOST_MEMORY_CLAMP").is_ok_and(|v| !v.is_empty() && v != "0");
+                let device_free = if host_clamp { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
                 let plan_for = |m: &GgufModel, tokens: usize| {
                     fllm_engine::backend::memory::MemoryPlan::plan_for_backend(
                         m,

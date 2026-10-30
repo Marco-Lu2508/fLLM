@@ -182,7 +182,9 @@ int fllm_cuda_device_info(int dev, char *name, size_t name_len, int *cc_major, i
 #if defined(__HIPCC__)
     // An APU reports the whole shared memory as free, but the ROCm runtime hands out only about three quarters of it to one process (a Radeon 840M with
     // 7.7 GB reported failed with "HSA exception: MemoryRegion::BlockAllocator::alloc failed" at about 6 GB, and ran with 5.4 GB).
-    if (p.integrated) {
+    // (FLLM_HIP_FULL_APU_MEMORY=1 keeps the figures of the runtime, for a driver that hands out what it reports, such as a large dedicated block on Windows)
+    const char *full = getenv("FLLM_HIP_FULL_APU_MEMORY");
+    if (p.integrated && !(full && *full && full[0] != '0')) {
         *free_bytes = *free_bytes / 4 * 3;
         *total_bytes = *total_bytes / 4 * 3;
     }
