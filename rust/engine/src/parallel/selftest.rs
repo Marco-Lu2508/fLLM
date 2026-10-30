@@ -28,11 +28,16 @@ pub struct RunSpec {
     pub dispatch: EpDispatch,
     pub vocab_parallel_embedding: bool,
     pub steps: usize,
+    /// Layers of every pipeline stage (empty: an even split), as the layer-split planner would choose them.
+    pub ranges: Vec<std::ops::Range<usize>>,
+    /// Ranks that run their stage through the device path (the CPU backend in the role of a GPU: `init_backend`) instead of the host
+    /// path; empty: all ranks use the host path. Proves the staged device forward pass without GPU hardware.
+    pub accel: Vec<bool>,
 }
 
 impl RunSpec {
     pub fn new(tp: usize, pp: usize) -> Self {
-        Self { tp, pp, ep: false, dispatch: EpDispatch::AllReduce, vocab_parallel_embedding: false, steps: 16 }
+        Self { tp, pp, ep: false, dispatch: EpDispatch::AllReduce, vocab_parallel_embedding: false, steps: 16, ranges: Vec::new(), accel: Vec::new() }
     }
 
     pub fn label(&self) -> String {
@@ -42,6 +47,12 @@ impl RunSpec {
         }
         if self.vocab_parallel_embedding {
             s += " vocab-embed";
+        }
+        if !self.ranges.is_empty() {
+            s += &format!(" layers {}", self.ranges.iter().map(|r| format!("{}..{}", r.start, r.end)).collect::<Vec<_>>().join("|"));
+        }
+        if !self.accel.is_empty() {
+            s += &format!(" device-stages {}", self.accel.iter().map(|&a| if a { 'D' } else { 'H' }).collect::<String>());
         }
         s
     }
@@ -53,6 +64,7 @@ impl RunSpec {
             expert_parallel: self.ep,
             ep_dispatch: self.dispatch,
             vocab_parallel_embedding: self.vocab_parallel_embedding,
+            stage_ranges: self.ranges.clone(),
             ..Default::default()
         }
     }
@@ -166,7 +178,13 @@ pub fn run_parallel_forced(model: &GgufModel, spec: &RunSpec, forced: Option<&Tr
     let results = run_ranks(&world, |rank, comm| {
         let model = model.duplicate()?;
         let ctx = Arc::new(ParCtx::new_host(cfg.clone(), rank, comm)?);
-        let decoder = RustDecoder::load_sharded(&model, "cpu", ctx.clone())?;
+        let mut decoder = RustDecoder::load_sharded(&model, "cpu", ctx.clone())?;
+        if spec.accel.get(rank).copied().unwrap_or(false) {
+            decoder.init_backend(Arc::new(crate::backend::cpu::CpuBackend::new()))?;
+            if !decoder.uses_accelerator() {
+                return Err(format!("rank {rank}: the device path was not taken"));
+            }
+        }
         if rank == 0 {
             let mut key = vec![0u16; model.key_buffer_len()?];
             let mut value = vec![0u16; model.value_buffer_len()?];
@@ -209,6 +227,8 @@ pub fn tolerance_for(case: &str) -> f64 {
 pub const QUANTIZED_TOLERANCE: f64 = 1e-1;
 /// Expert routing with near-tied scores (measured up to 1.7e-1 on AVX-512 hosts); a broken layout is off by order 1.
 pub const ROUTING_TOLERANCE: f64 = 3e-1;
+/// Stages that run the device forward pass: the device kernels round differently from the host kernels (f16 weights: 1.1e-3 measured).
+pub const DEVICE_TOLERANCE: f64 = 5e-3;
 /// Float weights: the sums are added in a different order (and the f16 kernels round differently per slice).
 pub const FLOAT_TOLERANCE: f64 = 1e-3;
 
@@ -452,12 +472,48 @@ mod tests {
         let mut report = Vec::new();
         for layout in layouts {
             let result = check_layout(name, &model, &reference, layout).unwrap_or_else(|e| panic!("{name} {}: {e}", layout.label()));
-            print_result(&result, tolerance_for(name));
-            if !result.ok(tolerance_for(name)) {
+            // a device stage computes with the device kernels (here the CPU backend's): a rounding of its own on top of the layout's
+            let limit = if layout.accel.contains(&true) { tolerance_for(name).max(DEVICE_TOLERANCE) } else { tolerance_for(name) };
+            print_result(&result, limit);
+            if !result.ok(limit) {
                 report.push(format!("{name} {}: error {:.2e}, tokens equal {}", layout.label(), result.max_relative_error, result.tokens_equal));
             }
         }
         assert!(report.is_empty(), "{}", report.join("\n"));
+    }
+
+    fn spec_with(pp: usize, ranges: &[std::ops::Range<usize>], accel: &[bool]) -> RunSpec {
+        RunSpec { ranges: ranges.to_vec(), accel: accel.to_vec(), ..RunSpec::new(1, pp) }
+    }
+
+    /// Layer-split over devices: every stage runs the device forward pass (here on the CPU backend), the activations travel through
+    /// host memory, and the result equals the single-device host run. Even and uneven splits, device stages next to host stages.
+    #[test]
+    fn device_stages_match_the_single_device_run() {
+        run_case(
+            "llama-q4k",
+            &[
+                spec_with(2, &[], &[true, true]),
+                spec_with(2, &[0..1, 1..4], &[true, true]),
+                spec_with(2, &[0..3, 3..4], &[true, false]),
+                spec_with(2, &[0..2, 2..4], &[false, true]),
+                spec_with(3, &[0..1, 1..3, 3..4], &[true, false, true]),
+                spec_with(4, &[], &[true, true, true, true]),
+            ],
+        );
+        run_case("qwen3-q8", &[spec_with(2, &[0..1, 1..4], &[true, true]), spec_with(3, &[0..2, 2..3, 3..4], &[true, true, false])]);
+        run_case("llama-f16", &[spec_with(2, &[], &[true, true]), spec_with(4, &[0..1, 1..2, 2..3, 3..4], &[true, false, true, false])]);
+        run_case("gemma2-f32", &[spec_with(2, &[], &[true, true]), spec_with(2, &[0..1, 1..4], &[true, false])]);
+        run_case("qwen2-q4z", &[spec_with(2, &[0..3, 3..4], &[true, true])]);
+        run_case("llama-nvfp4", &[spec_with(2, &[], &[true, true])]);
+    }
+
+    /// Mixtures of experts split by layers with uneven ranges run on the host stages (the CPU backend has no expert kernels, so a device
+    /// stage of an MoE model can only be tried on a real GPU backend).
+    #[test]
+    fn uneven_layer_ranges_match_for_mixture_of_experts() {
+        run_case("moe-q4k", &[spec_with(2, &[0..1, 1..4], &[]), spec_with(3, &[0..2, 2..3, 3..4], &[])]);
+        run_case("moe-shared-f32", &[spec_with(2, &[0..3, 3..4], &[])]);
     }
 
     #[test]

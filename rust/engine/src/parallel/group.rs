@@ -19,12 +19,20 @@ pub fn load_main(model: &GgufModel, device: &str) -> Result<RustDecoder, String>
     }
 }
 
-/// The ordinal-specific device string of local rank `local` (`cuda:1`), or `cpu`.
-fn rank_device(backend: &str, cfg: &ParallelConfig, local: usize) -> String {
-    if backend == "cpu" {
+/// Backend and number within that backend of every local rank: what `--device a,b,c` listed, else consecutive ordinals of one backend.
+fn rank_devices(backend: &str, cfg: &ParallelConfig) -> Vec<(String, usize)> {
+    if !cfg.rank_devices.is_empty() {
+        return cfg.rank_devices.clone();
+    }
+    (0..cfg.local_world_size()).map(|local| (backend.to_owned(), cfg.device_of(local))).collect()
+}
+
+/// The ordinal-specific device string of a rank (`cuda:1`), or `cpu`.
+fn device_string(device: &(String, usize)) -> String {
+    if device.0 == "cpu" {
         "cpu".to_owned()
     } else {
-        format!("{backend}:{}", cfg.device_of(local))
+        format!("{}:{}", device.0, device.1)
     }
 }
 
@@ -73,11 +81,13 @@ fn make_ctx(
     world_rank: usize,
     local: usize,
     control: Arc<dyn Communicator>,
-    backend: &str,
+    device: &(String, usize),
     kind: BackendKind,
 ) -> Result<Arc<ParCtx>, String> {
+    let backend = device.0.as_str();
     let gpu = backend != "cpu";
-    let ctx = ParCtx::new(cfg.clone(), world_rank, control, gpu, &|group| data_plane(kind, group, backend, cfg.device_of(local)))?;
+    let ordinal = if cfg.rank_devices.is_empty() { cfg.device_of(local) } else { device.1 };
+    let ctx = ParCtx::new(cfg.clone(), world_rank, control, gpu, &|group| data_plane(kind, group, backend, ordinal))?;
     Ok(Arc::new(ctx))
 }
 
@@ -134,20 +144,34 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
     if cfg.devices.is_empty() {
         cfg.devices = (first_ordinal..first_ordinal + cfg.local_world_size()).collect();
     }
-    if backend != "cpu" && !std::env::var("FLLM_PARALLEL_GPU").is_ok_and(|v| v == "1") {
+    let devices = rank_devices(&backend, &cfg);
+    let any_gpu = devices.iter().any(|d| d.0 != "cpu");
+    if any_gpu && cfg.tp > 1 && !std::env::var("FLLM_PARALLEL_GPU").is_ok_and(|v| v == "1") {
         return Err(format!(
-            "tensor / pipeline parallelism runs on --device cpu in this version: the sharded decoder and the collectives are in place, but the {backend}              forward path does not call them yet (see docs/multi-gpu.md, \"Status\"). Set FLLM_PARALLEL_GPU=1 to try it anyway (untested)."
+            "tensor parallelism runs on --device cpu in this version: the sharded decoder and the collectives are in place, but the {backend} forward path does not call them yet (see docs/multi-gpu.md, \"Status\"). Layer splitting over several devices (--device a,b or --pipeline-parallel-size) works on every backend. Set FLLM_PARALLEL_GPU=1 to try tensor parallelism on a GPU anyway (untested)."
         ));
     }
-    let kind = cfg.backend.unwrap_or_else(|| if backend == "cpu" { BackendKind::Local } else { default_backend(&backend) });
-    let check = plan::check_model(model.mapping(), model.config(), &cfg, backend != "cpu")?;
+    // ranks of one CUDA backend can talk through NCCL; any other mix exchanges activations through host memory
+    let same_backend = devices.iter().all(|d| d.0 == devices[0].0);
+    let kind = cfg.backend.unwrap_or_else(|| if backend == "cpu" || !same_backend || cfg.tp == 1 { BackendKind::Local } else { default_backend(&backend) });
+    let check = plan::check_model(model.mapping(), model.config(), &cfg, any_gpu)?;
     for note in &check.notes {
         eprintln!("[fllm-rs] note: {note}");
     }
     if crate::rust_decoder::clear_ffn_host_from() {
         eprintln!("[fllm-rs] --gpu-layers host offload is switched off with tensor / pipeline parallelism: every rank keeps its whole share on its device");
     }
-    eprintln!("[fllm-rs] parallel group: {} on {} ({} traffic)", cfg.describe(), backend, kind.name());
+    eprintln!(
+        "[fllm-rs] parallel group: {} on {} ({} traffic)",
+        cfg.describe(),
+        devices.iter().map(|d| crate::devices::describe_choice(&d.0, d.1)).collect::<Vec<_>>().join(", "),
+        kind.name()
+    );
+    for stage in 0..cfg.pp {
+        let range = cfg.stage_layers(model.config().layers, stage);
+        let on: Vec<String> = (0..cfg.tp).map(|t| crate::devices::describe_choice(&devices[stage * cfg.tp + t].0, devices[stage * cfg.tp + t].1)).collect();
+        eprintln!("[fllm-rs]   stage {stage}: layers {}..{} on {}", range.start, range.end, on.join(" + "));
+    }
     let cfg = Arc::new(cfg);
     let world = cfg.world_size();
     let local_count = cfg.local_world_size();
@@ -184,12 +208,13 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
         let world_rank = cfg.world_rank(local);
         let control = slot.take().ok_or("control endpoint missing")?;
         let worker_model = model.duplicate()?;
-        let (cfg, backend, tx) = (cfg.clone(), backend.clone(), ready_tx.clone());
-        let device = rank_device(&backend, &cfg, local);
+        let (cfg, tx) = (cfg.clone(), ready_tx.clone());
+        let rank_dev = devices[local].clone();
+        let device = device_string(&rank_dev);
         let handle = std::thread::Builder::new()
             .name(format!("fllm-rank-{world_rank}"))
             .spawn(move || {
-                let built = make_ctx(&cfg, world_rank, local, control.clone(), &backend, kind)
+                let built = make_ctx(&cfg, world_rank, local, control.clone(), &rank_dev, kind)
                     .and_then(|ctx| RustDecoder::load_sharded(&worker_model, &device, ctx.clone()).map(|d| (ctx, d)));
                 match built {
                     Ok((ctx, decoder)) => {
@@ -210,8 +235,8 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
 
     let control0 = controls[0].take().ok_or("control endpoint missing")?;
     let rank0 = cfg.world_rank(0);
-    let device0 = rank_device(&backend, &cfg, 0);
-    let leader = make_ctx(&cfg, rank0, 0, control0.clone(), &backend, kind)
+    let device0 = device_string(&devices[0]);
+    let leader = make_ctx(&cfg, rank0, 0, control0.clone(), &devices[0], kind)
         .and_then(|ctx| RustDecoder::load_sharded(model, &device0, ctx).map_err(|e| format!("rank {rank0}: {e}")));
     let mut failure = leader.as_ref().err().cloned();
     if failure.is_some() {

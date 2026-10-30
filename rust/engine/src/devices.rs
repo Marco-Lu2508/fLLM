@@ -355,7 +355,95 @@ pub fn describe_chain(chain: &[(String, usize)]) -> String {
     chain.iter().map(|(backend, index)| describe_choice(backend, *index)).collect::<Vec<_>>().join(" -> ")
 }
 
+/// Whether `--device` names several devices (`cuda:0,cuda:1`): the model is split over them.
+pub fn is_list(spec: &str) -> bool {
+    spec.contains(',')
+}
+
+/// The devices of `--device a,b,c` in pipeline order, each as `(backend, number within that backend)`. `auto`, NPUs and TPUs cannot be
+/// part of a list, and a device may be listed once (the CPU too: it is one device however many cores it has).
+pub fn parse_device_list(spec: &str) -> Result<Vec<(String, usize)>, String> {
+    let parts: Vec<&str> = spec.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return Err(format!("--device '{spec}' lists fewer than two devices"));
+    }
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for part in parts {
+        let parsed = parse_spec(part)?;
+        if parsed.kind == "auto" {
+            return Err("--device auto cannot be part of a device list; name the devices (see `fllm-rs devices`)".into());
+        }
+        if matches!(canonical(&parsed.kind), "npu" | "tpu") {
+            return Err(format!("--device {part}: NPUs and TPUs cannot be part of a device list"));
+        }
+        let (kind, index) = select_device(part)?;
+        if out.iter().any(|(k, i)| *k == kind && *i == index) {
+            return Err(format!("--device lists {kind}:{index} twice; every device takes part once"));
+        }
+        out.push((kind, index));
+    }
+    Ok(out)
+}
+
+/// A device as the layer-split planner and the log lines see it.
+#[derive(Clone, Debug)]
+pub struct PlanningDevice {
+    pub backend: String,
+    pub index: usize,
+    /// `cuda:0 (NVIDIA RTX 2000 Ada)`.
+    pub label: String,
+    /// Free memory times `utilization` (host memory for the CPU; an integrated GPU can use no more than the host has free).
+    pub budget_bytes: u64,
+    pub total_bytes: u64,
+    /// Relative speed of reading weights in GB/s: the reported or measured bandwidth, else a rough figure for the class of device.
+    pub speed_gbs: f64,
+    /// `speed_gbs` was reported or measured (not a class default).
+    pub speed_known: bool,
+    pub integrated: bool,
+}
+
+/// Look at `backend:index` for planning (the memory figures are current).
+pub fn planning_device(backend: &str, index: usize, utilization: f64) -> Result<PlanningDevice, String> {
+    let util = utilization.clamp(0.01, 1.0);
+    if backend == "cpu" {
+        let free = host_free_memory_bytes();
+        let measured = measure_cpu_bandwidth_gbs();
+        return Ok(PlanningDevice {
+            backend: "cpu".into(),
+            index: 0,
+            label: "cpu".into(),
+            budget_bytes: (free as f64 * util.min(0.85)) as u64,
+            total_bytes: host_memory(false),
+            speed_gbs: if measured > 0.0 { measured } else { 40.0 },
+            speed_known: measured > 0.0,
+            integrated: true,
+        });
+    }
+    let entry = find_entry(backend, index).ok_or_else(|| format!("device {backend}:{index} is not in the device inventory (see `fllm-rs devices`)"))?;
+    let integrated = entry.info.dev_type == DeviceType::IntegratedGpu;
+    let free = if integrated { entry.info.free_memory_bytes.min(host_free_memory_bytes()) } else { entry.info.free_memory_bytes };
+    let reported = caps_for(entry.backend, entry.api, &entry.info).bandwidth_gbs.filter(|b| *b > 0.0);
+    let class_default = match entry.info.dev_type {
+        DeviceType::Gpu => 300.0,
+        DeviceType::IntegratedGpu => 80.0,
+        DeviceType::Accelerator => 100.0,
+        DeviceType::Cpu => 40.0,
+    };
+    Ok(PlanningDevice {
+        backend: backend.to_owned(),
+        index,
+        label: format!("{backend}:{index} ({})", entry.info.name),
+        budget_bytes: (free as f64 * util) as u64,
+        total_bytes: entry.info.total_memory_bytes,
+        speed_gbs: reported.unwrap_or(class_default),
+        speed_known: reported.is_some(),
+        integrated,
+    })
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------------------------------------------------------// ---------------------------------------------------------------------------------------------------------------------------
 // Inventory
 // ---------------------------------------------------------------------------------------------------------------------------
 
@@ -1149,6 +1237,17 @@ mod tests {
         assert_eq!(gfx_arch("rocm gfx1100, wave32"), Some("gfx1100".to_owned()));
         assert_eq!(gfx_arch("amd radeon (gfx90a:sramecc+:xnack-)"), Some("gfx90a".to_owned()));
         assert_eq!(gfx_arch("no arch"), None);
+    }
+
+    #[test]
+    fn device_lists_name_each_device_once_and_refuse_auto_and_accelerators() {
+        // device lists
+        assert!(is_list("cuda:0,cuda:1") && !is_list("cuda:1"));
+        assert!(parse_device_list("cuda:0").unwrap_err().contains("fewer than two"));
+        assert!(parse_device_list("cpu,auto").unwrap_err().contains("auto"));
+        assert!(parse_device_list("cpu,npu").unwrap_err().contains("NPUs"));
+        assert!(parse_device_list("cpu,cpu").unwrap_err().contains("twice"));
+        assert_eq!(parse_device_list("cpu, cuda").unwrap(), vec![("cpu".to_owned(), 0), ("cuda".to_owned(), 0)]);
     }
 
     #[test]

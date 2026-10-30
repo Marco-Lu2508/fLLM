@@ -56,6 +56,23 @@ impl KvPoolLayout {
         layout
     }
 
+    /// The layout of the layers `range` alone, numbered from 0: what a pipeline stage allocates for its own layers.
+    pub fn stage(&self, range: std::ops::Range<usize>) -> Self {
+        let (key_base, value_base) = (self.key_offsets[range.start], self.value_offsets[range.start]);
+        let key_offsets: Vec<usize> = self.key_offsets[range.clone()].iter().map(|o| o - key_base).collect();
+        let value_offsets: Vec<usize> = self.value_offsets[range.clone()].iter().map(|o| o - value_base).collect();
+        let key_words = self.key_words[range.clone()].to_vec();
+        let value_words = self.value_words[range].to_vec();
+        Self {
+            key_total: key_words.iter().sum(),
+            value_total: value_words.iter().sum(),
+            key_offsets,
+            value_offsets,
+            key_words,
+            value_words,
+        }
+    }
+
     /// The layer whose region `layer` reads.
     pub fn owner(cfg: &ModelConfig, layer: usize) -> usize {
         cfg.layer_kv_source(layer).unwrap_or(layer)
@@ -106,15 +123,18 @@ pub struct GeometryGroup {
     pub layers: Vec<usize>,
 }
 
+/// Bytes of cache one token takes in layer `layer` (0 for a layer that reads the cache of an earlier one).
+pub fn bytes_per_token_layer(cfg: &ModelConfig, layer: usize, key: KvFormat, value: KvFormat) -> u64 {
+    if cfg.layer_kv_source(layer).is_some() {
+        return 0;
+    }
+    let heads = cfg.layer_kv_heads(layer);
+    key.bytes_per_slot(heads, cfg.layer_head_dim(layer)) + value.bytes_per_slot(heads, cfg.layer_value_dim(layer))
+}
+
 /// Bytes of cache one token takes in all layers together (what the memory planner budgets per slot).
 pub fn bytes_per_token(cfg: &ModelConfig, key: KvFormat, value: KvFormat) -> u64 {
-    (0..cfg.layers)
-        .filter(|&l| cfg.layer_kv_source(l).is_none())
-        .map(|l| {
-            let heads = cfg.layer_kv_heads(l);
-            key.bytes_per_slot(heads, cfg.layer_head_dim(l)) + value.bytes_per_slot(heads, cfg.layer_value_dim(l))
-        })
-        .sum()
+    (0..cfg.layers).map(|l| bytes_per_token_layer(cfg, l, key, value)).sum()
 }
 
 #[cfg(test)]

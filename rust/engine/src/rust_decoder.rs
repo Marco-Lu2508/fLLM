@@ -578,6 +578,47 @@ pub struct DeviceMergedProj {
     pub parts: [usize; 3],
 }
 
+impl DeviceLayerWeights {
+    /// A layer without device weights: it runs on the host (`host`), or another pipeline stage runs it.
+    fn empty(host: bool) -> Self {
+        Self {
+            attn_norm: None,
+            q: None,
+            k: None,
+            v: None,
+            out: None,
+            ffn_norm: None,
+            attn_norm_b: None,
+            ffn_norm_b: None,
+            post_attn_norm_b: None,
+            post_ffn_norm_b: None,
+            host_layer: host,
+            host_ffn: host,
+            host_values: false,
+            attn_gate: None,
+            q_norm: None,
+            k_norm: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
+            ffn_gate: None,
+            ffn_up: None,
+            ffn_down: None,
+            moe: None,
+            delta: None,
+            mla: None,
+            mamba: None,
+            shortconv: None,
+            mamba1: None,
+            sinks: None,
+            qkv: None,
+            gate_up: None,
+            ple: None,
+            out_scale: None,
+            v_norm: None,
+        }
+    }
+}
+
 /// Tells the stream when a forward pass is over (`Stream::end_step`), on every return path of `forward_backend_inner`.
 struct StepScope<'a>(&'a std::sync::Mutex<Box<dyn crate::backend::Stream>>);
 
@@ -1927,7 +1968,11 @@ impl RustDecoder {
             kv_kind: model.kv_kind(),
             mla_latent: model.mla_latent(),
             kvl: {
-                let mut kvl = model.kv_pool_layout_for(&cfg);
+                // a pipeline stage lays out the cache of its own layers only
+                let mut kvl = match &par {
+                    Some(ctx) => model.kv_pool_layout_for(&par_shard::stage_local_kv(ctx, &cfg)?),
+                    None => model.kv_pool_layout_for(&cfg),
+                };
                 if mtp_prefix.is_some() {
                     // the MTP block owns one layer of cache
                     kvl.key_offsets.truncate(1);
@@ -1991,6 +2036,22 @@ impl RustDecoder {
     /// Number of decoder layers.
     pub fn layer_count(&self) -> usize {
         self.layers.len()
+    }
+
+    /// The layers this decoder runs: its pipeline stage, or all of them when it is not part of a parallel group.
+    fn stage_range(&self) -> std::ops::Range<usize> {
+        self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()))
+    }
+
+    /// First layer whose cache is the first layer of this decoder's device KV pool: the start of the stage when the model is split into
+    /// pipeline stages (each stage allocates cache for its own layers only), else 0.
+    fn kv_base(&self) -> usize {
+        self.par.as_ref().filter(|p| p.pp_size() > 1).map_or(0, |p| p.layer_range(self.layers.len()).start)
+    }
+
+    /// Whether this decoder is one rank of a parallel group (the other ranks hold the rest of the model).
+    pub fn is_parallel(&self) -> bool {
+        self.par.is_some()
     }
 
     /// Whether the model carries multimodal rotary sections (`fllm.rope.mrope_sections`).
@@ -2416,6 +2477,10 @@ impl RustDecoder {
     fn narrow_blocker(&self, layer_reasons: &[Option<&'static str>]) -> Option<&'static str> {
         use crate::backend::act_dtype::{eligibility, ModelShape};
         let cfg = &self.cfg;
+        if self.par.is_some() {
+            // the stages of a parallel group hand each other FP32 activations through host memory
+            return Some("tensor / pipeline parallel stages");
+        }
         let shape = ModelShape {
             all_layers_standard_attention: self.layers.iter().all(|l| matches!(l.attn, Attn::Std { .. })),
             host_layers: layer_reasons.iter().any(Option::is_some)
@@ -2462,6 +2527,13 @@ impl RustDecoder {
         &mut self,
         backend: Arc<dyn crate::backend::Backend>,
     ) -> Result<(), String> {
+        if self.par.is_some() && (self.ple.is_some() || self.altup.is_some() || self.mtp.is_some() || self.mla_latent) {
+            return Err(format!(
+                "{} cannot run on the {} backend as a pipeline stage: its per-layer inputs depend on the embeddings of the first stage",
+                self.cfg.arch,
+                backend.name()
+            ));
+        }
         let (gate_ok, arch_ok) = backend
             .create_stream()
             .map(|s| (s.supports_attention_gate(), s.supports_arch_ops()))
@@ -2479,11 +2551,16 @@ impl RustDecoder {
         });
         // FLLM_HOST_LAYERS=all|3,4,5 forces layers onto the host (debugging: the output must match `--device cpu`)
         let forced = std::env::var("FLLM_HOST_LAYERS").ok();
+        let stage = self.stage_range();
         let layer_reasons: Vec<Option<&'static str>> = self
             .layers
             .iter()
             .enumerate()
             .map(|(i, l)| {
+                // layers of another pipeline stage are placeholders: nothing to decide for them
+                if !stage.contains(&i) {
+                    return None;
+                }
                 let on = forced
                     .as_deref()
                     .is_some_and(|f| f == "all" || f.split(',').any(|n| n.trim().parse::<usize>().is_ok_and(|n| n == i)));
@@ -2515,17 +2592,24 @@ impl RustDecoder {
         let act_dtype = self.choose_activation_dtype(&*backend, &layer_reasons);
         let merge_on = merge_proj_requested(act_dtype.is_narrow(), backend.supports_merged_projections());
         let stream = backend.create_stream().map_err(|e| e.to_string())?;
+        let staged = self.par.as_ref().is_some_and(|p| p.pp_size() > 1);
+        let (kv_layers, kv_layout, kv_geoms) = if staged {
+            // the cache of this stage's layers only, numbered from 0 (`kv_base`)
+            (stage.len(), self.kvl.stage(stage.clone()), self.cfg.layer_geoms.as_ref().map(|g| g[stage.clone()].to_vec()))
+        } else {
+            (self.layers.len(), self.kvl.clone(), self.cfg.layer_geoms.clone())
+        };
         let kv = backend
             .allocate_kv_cache_layered(
-                self.layers.len(),
+                kv_layers,
                 self.pool_blocks,
                 self.block_size,
                 self.cfg.kv_heads,
                 self.cfg.head_dim,
                 self.cfg.value_dim,
                 self.kv_kind,
-                Some(self.kvl.clone()),
-                self.cfg.layer_geoms.clone(),
+                Some(kv_layout),
+                kv_geoms,
             )
             .map_err(|e| e.to_string())?;
 
@@ -2688,46 +2772,17 @@ impl RustDecoder {
         let mut host_summary: Vec<&'static str> = Vec::new();
         let mut host_count = 0usize;
         for (i, layer) in self.layers.iter().enumerate() {
+            if !stage.contains(&i) {
+                // another pipeline stage runs this layer: nothing is uploaded, the forward pass skips it
+                dev_layers.push(DeviceLayerWeights::empty(false));
+                continue;
+            }
             if let Some(reason) = layer_reasons[i] {
                 host_count += 1;
                 if !host_summary.contains(&reason) {
                     host_summary.push(reason);
                 }
-                dev_layers.push(DeviceLayerWeights {
-                    attn_norm: None,
-                    q: None,
-                    k: None,
-                    v: None,
-                    out: None,
-                    ffn_norm: None,
-                    attn_norm_b: None,
-                    ffn_norm_b: None,
-                    post_attn_norm_b: None,
-                    post_ffn_norm_b: None,
-                    host_layer: true,
-                    host_ffn: true,
-                    host_values: false,
-                    attn_gate: None,
-                    q_norm: None,
-                    k_norm: None,
-                    post_attn_norm: None,
-                    post_ffn_norm: None,
-                    ffn_gate: None,
-                    ffn_up: None,
-                    ffn_down: None,
-                    moe: None,
-                    delta: None,
-                    mla: None,
-                    mamba: None,
-                    shortconv: None,
-                    mamba1: None,
-                    sinks: None,
-                    qkv: None,
-                    gate_up: None,
-                    ple: None,
-                    out_scale: None,
-                    v_norm: None,
-                });
+                dev_layers.push(DeviceLayerWeights::empty(true));
                 continue;
             }
             let ffn_host_exact = self.ffn_host_reason(layer, arch_ok).is_some();
@@ -3208,37 +3263,42 @@ impl RustDecoder {
             GraphMode::Off => scratch.acquire(rows * hidden * 4).map_err(err)?,
         };
 
-        let mut host_x = self.embed_rows(ids)?;
-        if cfg.embedding_scale != 1.0 {
-            for v in &mut host_x {
-                *v *= cfg.embedding_scale;
-            }
-        }
-        for (r, embedding) in overrides {
-            host_x[*r * hidden..(*r + 1) * hidden].copy_from_slice(embedding);
-        }
-        if let Some(table) = &self.position_table {
-            let table_rows = table.len() / hidden;
-            for (r, &pos) in positions.iter().enumerate() {
-                let idx = pos + cfg.position_offset;
-                if idx >= table_rows {
-                    return Err("position is beyond the learned position embeddings".into());
-                }
-                for (v, p) in host_x[r * hidden..(r + 1) * hidden]
-                    .iter_mut()
-                    .zip(&table[idx * hidden..(idx + 1) * hidden])
-                {
-                    *v += p;
+        // pipeline stages: the first one embeds, the others continue from the activations of the previous stage
+        let first_stage = self.par.as_ref().is_none_or(|p| p.is_first_stage());
+        let last_stage = self.par.as_ref().is_none_or(|p| p.is_last_stage());
+        let mut host_x = if first_stage { self.embed_rows(ids)? } else { self.par_recv_activations(rows)? };
+        if first_stage {
+            if cfg.embedding_scale != 1.0 {
+                for v in &mut host_x {
+                    *v *= cfg.embedding_scale;
                 }
             }
+            for (r, embedding) in overrides {
+                host_x[*r * hidden..(*r + 1) * hidden].copy_from_slice(embedding);
+            }
+            if let Some(table) = &self.position_table {
+                let table_rows = table.len() / hidden;
+                for (r, &pos) in positions.iter().enumerate() {
+                    let idx = pos + cfg.position_offset;
+                    if idx >= table_rows {
+                        return Err("position is beyond the learned position embeddings".into());
+                    }
+                    for (v, p) in host_x[r * hidden..(r + 1) * hidden]
+                        .iter_mut()
+                        .zip(&table[idx * hidden..(idx + 1) * hidden])
+                    {
+                        *v += p;
+                    }
+                }
+            }
+            if let Some(norm) = &self.embd_norm {
+                self.norm(&mut host_x, norm);
+            }
+            if cfg.embedding_norm {
+                rms(&mut host_x, &vec![1.0; hidden], cfg.eps);
+            }
+            self.stash_embeddings(&host_x);
         }
-        if let Some(norm) = &self.embd_norm {
-            self.norm(&mut host_x, norm);
-        }
-        if cfg.embedding_norm {
-            rms(&mut host_x, &vec![1.0; hidden], cfg.eps);
-        }
-        self.stash_embeddings(&host_x);
         if !recording {
             stream
                 .upload_activations(&mut x_buf, &host_x)
@@ -3294,7 +3354,14 @@ impl RustDecoder {
         // FLLM_ACT_CHECK=1: the residual stream is inspected after every layer of the first passes (largest value, NaN / Inf)
         let act_check = !recording && act_check_pass();
         let mut act_stats: Vec<(f32, u32)> = Vec::new();
+        let stage = self.stage_range();
+        // a pipeline stage's device cache holds its own layers only: layer `i` is `i - kv_base` there
+        let kv_base = self.kv_base();
         for (i, layer) in self.layers.iter().enumerate() {
+            if !stage.contains(&i) {
+                continue;
+            }
+            let kvi = i - kv_base;
             let dev_layer = &dev_weights.layers[i];
             let layer_heads = cfg.layer_heads(i);
             let layer_kv_heads = cfg.layer_kv_heads(i);
@@ -3399,7 +3466,7 @@ impl RustDecoder {
                                 &v_buf,
                                 [q_w.bias.as_ref(), k_w.bias.as_ref(), v_w.bias.as_ref()],
                                 dev_kv,
-                                i,
+                                kvi,
                                 &positions,
                                 &slots,
                                 &rope_params,
@@ -3452,7 +3519,7 @@ impl RustDecoder {
                                 dev_layer.k_norm.as_ref(),
                                 cfg.eps,
                                 dev_kv,
-                                i,
+                                kvi,
                                 &positions,
                                 &slots,
                                 &rope_params,
@@ -3554,7 +3621,7 @@ impl RustDecoder {
                             dev_layer.k_norm.as_ref(),
                             cfg.eps,
                             dev_kv,
-                            i,
+                            kvi,
                             &positions,
                             &slots,
                             &rope_params,
@@ -3588,7 +3655,7 @@ impl RustDecoder {
                     } else {
                         if !cfg.qk_norm_after_rope && !layer.kv_shared && std::env::var_os("FLLM_DEBUG_SUMS").is_none() {
                             kv_written = stream
-                                .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, i, &positions, &slots, &rope_params)
+                                .rope_kv_write(&mut q_buf, &k_buf, &v_buf, dev_kv, kvi, &positions, &slots, &rope_params)
                                 .map_err(err)?;
                         }
                         if !kv_written {
@@ -3608,7 +3675,7 @@ impl RustDecoder {
                 }
                 if !kv_written && cfg.layer_kv_source(i).is_none() {
                     stream
-                        .kv_cache_write(dev_kv, i, &slots, &k_buf, &v_buf)
+                        .kv_cache_write(dev_kv, kvi, &slots, &k_buf, &v_buf)
                         .map_err(err)?;
                 }
                 }
@@ -3666,7 +3733,7 @@ impl RustDecoder {
                         sin: Arc::clone(sin),
                     };
                     stream.rope(&mut q_buf, &mut k_buf, &positions, &rope_params).map_err(err)?;
-                    stream.kv_cache_write(dev_kv, i, &slots, &k_buf, &v_buf).map_err(err)?;
+                    stream.kv_cache_write(dev_kv, kvi, &slots, &k_buf, &v_buf).map_err(err)?;
                 }
 
                 if let Some(g_w) = &dev_layer.attn_gate {
@@ -3693,7 +3760,7 @@ impl RustDecoder {
                     alibi_slopes: dev_weights.alibi.clone(),
                 };
                 if !lat {
-                    let read_layer = crate::kv_geometry::KvPoolLayout::owner(cfg, i);
+                    let read_layer = crate::kv_geometry::KvPoolLayout::owner(cfg, i) - kv_base;
                     stream
                         .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
                         .map_err(err)?;
@@ -4160,6 +4227,19 @@ impl RustDecoder {
             report_act_check(&mut **stream, rows, &act_stats);
         }
 
+        if !last_stage {
+            // not the last pipeline stage: the residual stream goes down to the host (no peer path between devices of different
+            // backends) and on to the next stage, which uploads it to its own device
+            if let Some(carried) = carried_norm.take() {
+                scratch.recycle(carried);
+            }
+            let mut handover = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut handover), &x_buf).map_err(err)?;
+            scratch.recycle(x_buf);
+            self.par_send_activations(&handover)?;
+            return Ok(Vec::new());
+        }
+
         let mut final_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
         if let Some(carried) = carried_norm.take() {
             scratch.recycle(std::mem::replace(&mut final_normed, carried));
@@ -4235,7 +4315,7 @@ impl RustDecoder {
             scratch.recycle(final_normed);
             return Ok(Vec::new());
         }
-        if cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none() && run_device_sample(&mut **stream, &head_out, cfg.vocab, selected) {
+        if self.par.is_none() && cfg.logit_scale == 1.0 && cfg.logit_softcap.is_none() && run_device_sample(&mut **stream, &head_out, cfg.vocab, selected) {
             scratch.recycle(head_out);
             if let Some(picked) = picked {
                 scratch.recycle(picked);
@@ -4244,7 +4324,7 @@ impl RustDecoder {
             scratch.recycle(final_normed);
             return Ok(Vec::new());
         }
-        if GREEDY_IDS_REQUEST.swap(false, std::sync::atomic::Ordering::Relaxed) && cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none() {
+        if self.par.is_none() && GREEDY_IDS_REQUEST.swap(false, std::sync::atomic::Ordering::Relaxed) && cfg.logit_scale > 0.0 && cfg.logit_softcap.is_none() {
             // argmax commutes with a positive scale and with the monotonic soft cap; only the ids travel to the host
             if let Ok(ids) = stream.argmax_rows(&head_out, selected, cfg.vocab) {
                 *GREEDY_IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ids);
@@ -6224,16 +6304,28 @@ impl RustDecoder {
 
     /// Whole-block operations on the accelerator's KV pools (`kv_blocks`): `None` when the model runs on the host.
     pub(crate) fn device_kv_copy(&self, src: usize, dst: usize) -> Option<Result<(), String>> {
+        if self.par.is_some() {
+            // the other stages hold the KV of their layers: a block operation on this rank alone would be wrong
+            return None;
+        }
         let kv = self.backend_kv.as_ref()?;
         let mut stream = self.backend_stream.as_ref()?.lock().ok()?;
         Some(crate::kv_blocks::device_copy(&mut **stream, kv, src, dst))
     }
     pub(crate) fn device_kv_export(&self, block: usize) -> Option<Result<Vec<u8>, String>> {
+        if self.par.is_some() {
+            // the other stages hold the KV of their layers: a block operation on this rank alone would be wrong
+            return None;
+        }
         let kv = self.backend_kv.as_ref()?;
         let mut stream = self.backend_stream.as_ref()?.lock().ok()?;
         Some(crate::kv_blocks::device_export(&mut **stream, kv, block))
     }
     pub(crate) fn device_kv_import(&self, block: usize, data: &[u8]) -> Option<Result<(), String>> {
+        if self.par.is_some() {
+            // the other stages hold the KV of their layers: a block operation on this rank alone would be wrong
+            return None;
+        }
         let kv = self.backend_kv.as_ref()?;
         let mut stream = self.backend_stream.as_ref()?.lock().ok()?;
         Some(crate::kv_blocks::device_import(&mut **stream, kv, block, data))
@@ -6894,7 +6986,7 @@ impl RustDecoder {
         overrides: &[(usize, Vec<f32>)],
         capture: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>, String> {
-        if capture.is_none() && self.row_positions3().is_none() && self.row_deepstack().is_none() && self.row_visible_lengths().is_none() {
+        if capture.is_none() && self.par.is_none() && self.row_positions3().is_none() && self.row_deepstack().is_none() && self.row_visible_lengths().is_none() {
             if let Some(out) = self.try_graph_decode(ids, lengths, tables, logit_rows, embeddings, overrides)? {
                 return Ok(out);
             }

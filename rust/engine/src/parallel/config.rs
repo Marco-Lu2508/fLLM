@@ -29,6 +29,14 @@ pub struct ParallelConfig {
     /// Split the embedding table by vocabulary rows and sum the lookups (`FLLM_VOCAB_PARALLEL_EMBED`); off by default because the
     /// table is memory-mapped and shared by all ranks of the process anyway.
     pub vocab_parallel_embedding: bool,
+    /// The device of every local rank as `(backend, number within that backend)`, in rank order (`--device cuda:0,vulkan:1`). Empty:
+    /// the ranks use consecutive ordinals of the single backend `--device` names. Ranks of different backends exchange activations
+    /// through host memory.
+    pub rank_devices: Vec<(String, usize)>,
+    /// Layers of every pipeline stage when the memory planner chose them (proportional to memory and speed); empty: an even split.
+    pub stage_ranges: Vec<Range<usize>>,
+    /// `--tensor-split 3,1`: relative share of the weights per device (overrides the speed the planner estimates); empty: automatic.
+    pub split_ratio: Vec<f64>,
 }
 
 impl Default for ParallelConfig {
@@ -43,6 +51,9 @@ impl Default for ParallelConfig {
             rendezvous: RendezvousConfig::single_node(),
             microbatches: 0,
             vocab_parallel_embedding: std::env::var("FLLM_VOCAB_PARALLEL_EMBED").is_ok_and(|v| matches!(v.trim(), "1" | "on" | "true")),
+            rank_devices: Vec::new(),
+            stage_ranges: Vec::new(),
+            split_ratio: Vec::new(),
         }
     }
 }
@@ -66,6 +77,11 @@ impl ParallelConfig {
         self.rendezvous.node_rank * self.local_world_size() + local
     }
 
+    /// Backend and number of the device of local rank `local` when `--device` listed them.
+    pub fn rank_device(&self, local: usize) -> Option<&(String, usize)> {
+        self.rank_devices.get(local)
+    }
+
     /// Device ordinal of local rank `local`.
     pub fn device_of(&self, local: usize) -> usize {
         self.devices.get(local).copied().unwrap_or(local)
@@ -83,6 +99,9 @@ impl ParallelConfig {
     /// The layers of pipeline stage `stage`: contiguous ranges; the first stages take the remainder, so the last stage, which also
     /// computes the logits, never holds more layers than the others.
     pub fn stage_layers(&self, layers: usize, stage: usize) -> Range<usize> {
+        if let Some(range) = self.stage_ranges.get(stage) {
+            return range.clone();
+        }
         let base = layers / self.pp;
         let extra = layers % self.pp;
         let start = stage * base + stage.min(extra);
@@ -121,6 +140,27 @@ impl ParallelConfig {
                 return Err(format!("--devices lists device {dup} twice"));
             }
         }
+        if !self.rank_devices.is_empty() && self.rank_devices.len() != self.local_world_size() {
+            return Err(format!(
+                "--device lists {} devices but this node hosts {} ranks (tensor {} x pipeline {})",
+                self.rank_devices.len(),
+                self.local_world_size(),
+                self.tp,
+                self.pp
+            ));
+        }
+        if !self.stage_ranges.is_empty() {
+            if self.stage_ranges.len() != self.pp {
+                return Err(format!("{} layer ranges for {} pipeline stages", self.stage_ranges.len(), self.pp));
+            }
+            let mut next = 0;
+            for range in &self.stage_ranges {
+                if range.start != next || range.is_empty() {
+                    return Err("the layer ranges of the pipeline stages must be contiguous and not empty".into());
+                }
+                next = range.end;
+            }
+        }
         if self.expert_parallel && self.tp == 1 {
             return Err("--expert-parallel distributes experts over the tensor-parallel group: it needs --tensor-parallel-size of 2 or more".into());
         }
@@ -145,6 +185,7 @@ impl ParallelConfig {
                 | "--master-addr"
                 | "--master-port"
                 | "--pipeline-microbatches"
+                | "--tensor-split"
         )
     }
 
@@ -188,8 +229,37 @@ impl ParallelConfig {
                     .map_err(|_| "invalid --master-port".to_owned())?
             }
             "--pipeline-microbatches" => self.microbatches = number(flag)?,
+            "--tensor-split" => {
+                let list = value.ok_or("--tensor-split needs a list such as 3,1")?;
+                self.split_ratio = list
+                    .split(',')
+                    .map(|part| part.trim().parse::<f64>().ok().filter(|r| r.is_finite() && *r > 0.0).ok_or_else(|| format!("invalid share '{part}' in --tensor-split (positive numbers)")))
+                    .collect::<Result<_, _>>()?;
+            }
             other => return Err(format!("unknown parallel option {other}")),
         }
+        Ok(())
+    }
+
+    /// `--device a,b,c`: one rank per listed device. Without explicit sizes the model is split into one pipeline stage per device; with
+    /// `--tensor-parallel-size N` (or `-pp M`) the list is grouped into `N` devices per stage.
+    pub fn apply_device_list(&mut self, list: &[(String, usize)]) -> Result<(), String> {
+        let n = list.len();
+        match (self.tp, self.pp) {
+            (1, 1) => self.pp = n,
+            (tp, 1) if n.is_multiple_of(tp) => self.pp = n / tp,
+            (1, pp) if n.is_multiple_of(pp) => self.tp = n / pp,
+            (tp, pp) if tp * pp == n => {}
+            (tp, pp) => {
+                return Err(format!(
+                    "--device lists {n} devices, which tensor-parallel {tp} x pipeline-parallel {pp} cannot use (the sizes must multiply to the number of devices)"
+                ))
+            }
+        }
+        if !self.split_ratio.is_empty() && self.split_ratio.len() != n {
+            return Err(format!("--tensor-split lists {} shares for {n} devices", self.split_ratio.len()));
+        }
+        self.rank_devices = list.to_vec();
         Ok(())
     }
 
@@ -259,6 +329,41 @@ mod tests {
         assert_eq!(ranges, vec![0..3, 3..6, 6..8]);
         let all: usize = ranges.iter().map(ExactSizeIterator::len).sum();
         assert_eq!(all, 8);
+    }
+
+    #[test]
+    fn planned_ranges_replace_the_even_split_and_are_validated() {
+        let mut c = ParallelConfig { pp: 3, ..Default::default() };
+        c.stage_ranges = vec![0..10, 10..14, 14..16];
+        assert!(c.validate().is_ok());
+        assert_eq!((c.stage_layers(16, 0), c.stage_layers(16, 2)), (0..10, 14..16));
+        c.stage_ranges = vec![0..10, 11..14, 14..16];
+        assert!(c.validate().unwrap_err().contains("contiguous"));
+        c.stage_ranges = vec![0..10, 10..16];
+        assert!(c.validate().unwrap_err().contains("pipeline stages"));
+        c.stage_ranges.clear();
+        c.rank_devices = vec![("cuda".into(), 0), ("vulkan".into(), 1)];
+        assert!(c.validate().unwrap_err().contains("--device lists 2"));
+    }
+
+    #[test]
+    fn a_device_list_sets_the_layout() {
+        let list: Vec<(String, usize)> = vec![("cuda".into(), 0), ("cuda".into(), 1), ("vulkan".into(), 0), ("cpu".into(), 0)];
+        let mut c = ParallelConfig::default();
+        c.apply_device_list(&list).unwrap();
+        assert_eq!((c.tp, c.pp, c.world_size()), (1, 4, 4));
+        assert!(c.validate().is_ok());
+        let mut c = ParallelConfig { tp: 2, ..Default::default() };
+        c.apply_device_list(&list).unwrap();
+        assert_eq!((c.tp, c.pp), (2, 2));
+        let mut c = ParallelConfig { tp: 3, ..Default::default() };
+        assert!(c.apply_device_list(&list).unwrap_err().contains("multiply"));
+        let mut c = ParallelConfig::default();
+        c.apply_flag("--tensor-split", Some("3, 1,1,1")).unwrap();
+        assert_eq!(c.split_ratio, vec![3.0, 1.0, 1.0, 1.0]);
+        assert!(c.apply_flag("--tensor-split", Some("3,x")).is_err());
+        assert!(c.apply_flag("--tensor-split", Some("0,1")).is_err());
+        c.apply_device_list(&list[..3]).unwrap_err();
     }
 
     #[test]

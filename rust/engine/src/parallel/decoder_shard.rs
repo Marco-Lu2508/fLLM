@@ -229,6 +229,46 @@ pub(super) fn localize_cfg(par: &ParCtx, cfg: &ModelConfig) -> Result<ModelConfi
     Ok(out)
 }
 
+/// Pipeline stages keep a KV cache only for their own layers: in the returned configuration the other layers get no KV heads, so the
+/// KV pool layout (host buffers; the device pools are cut from it) is as big as the stage's share of the layers. Layers that read the cache of an earlier layer have to find
+/// it on the same stage.
+pub(super) fn stage_local_kv(par: &ParCtx, cfg: &ModelConfig) -> Result<ModelConfig, String> {
+    let mut cfg = cfg.clone();
+    if par.pp_size() == 1 {
+        return Ok(cfg);
+    }
+    let range = par.layer_range(cfg.layers);
+    for layer in range.clone() {
+        if let Some(source) = cfg.layer_kv_source(layer) {
+            if !range.contains(&source) {
+                return Err(format!(
+                    "layer {layer} reads the KV cache of layer {source}, which another pipeline stage holds; this model cannot be split at that point (use fewer devices)"
+                ));
+            }
+        }
+    }
+    let mut geoms = cfg.layer_geoms.take().unwrap_or_else(|| {
+        (0..cfg.layers)
+            .map(|_| crate::config::LayerGeom {
+                heads: cfg.heads,
+                kv_heads: cfg.kv_heads,
+                head_dim: cfg.head_dim,
+                value_dim: cfg.value_dim,
+                kv_source: None,
+                ff: cfg.ff,
+            })
+            .collect()
+    });
+    for (layer, geom) in geoms.iter_mut().enumerate() {
+        if !range.contains(&layer) {
+            geom.kv_heads = 0;
+            geom.kv_source = None;
+        }
+    }
+    cfg.layer_geoms = Some(geoms);
+    Ok(cfg)
+}
+
 /// The output head: this rank's slice of the vocabulary.
 pub(super) fn shard_head(par: &ParCtx, head: Linear, vocab: usize) -> Result<Linear, String> {
     let tp = par.tp_size();

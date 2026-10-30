@@ -5,6 +5,7 @@
 //! * `ctx`: the per-rank context the decoder consults (communicators, stage, shard geometry) and the step descriptor.
 //! * `group`: the worker threads, one per rank, and the loader that builds the sharded decoders.
 //! * `decoder_shard`: the part of the decoder that shards layers and runs the collectives (a child module of `rust_decoder`).
+//! * `split`: the layer-split planner (which layers go to which device, memory and speed aware).
 //! * `selftest`: the CPU simulation that proves multi-rank runs equal the single-device run (`fllm-rs selftest-parallel`).
 pub mod config;
 pub mod ctx;
@@ -13,6 +14,7 @@ pub mod group;
 pub mod plan;
 pub mod selftest;
 pub mod shard;
+pub mod split;
 
 pub use config::{EpDispatch, ParallelConfig};
 pub use ctx::{ParCtx, StepDesc};

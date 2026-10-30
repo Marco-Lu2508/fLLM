@@ -904,11 +904,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let model_path = model_path.unwrap_or_else(|| usage("--model is required"));
+    // `--device cuda:0,vulkan:1,cpu`: the model is split over these devices; `device` names the first one for everything that is not split
+    let multi_devices: Option<Vec<(String, usize)>> = if fllm_engine::devices::is_list(&device) {
+        let list = fllm_engine::devices::parse_device_list(&device).unwrap_or_else(|e| usage(&e));
+        parallel.apply_device_list(&list).unwrap_or_else(|e| usage(&e));
+        device = if list[0].0 == "cpu" { "cpu".to_owned() } else { format!("{}:{}", list[0].0, list[0].1) };
+        if draft_model.is_some() || speculative_mtp {
+            usage("draft-model and MTP speculation are not available with several devices (--device a,b); lookup speculation is");
+        }
+        Some(list)
+    } else {
+        None
+    };
     if let Err(e) = parallel.validate() {
         usage(&e);
     }
     if parallel.is_parallel() {
-        fllm_engine::parallel::config::set_global(parallel);
+        fllm_engine::parallel::config::set_global(parallel.clone());
     }
     let mut path = fllm_engine::import::prepare(
         &model_path,
@@ -1077,7 +1089,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --ctx auto: the model's trained context, capped where it cannot be planned. A GPU run starts from the trained
     // context (at most 32768; the block tables grow with it) and the memory planner below lowers it to what fits; on the
     // CPU nothing plans the KV cache, so the cap is 8192.
-    let on_gpu = plan_device.as_ref().is_some_and(|d| d.dev_type != DeviceType::Cpu);
+    let on_gpu = plan_device.as_ref().is_some_and(|d| d.dev_type != DeviceType::Cpu)
+        || multi_devices.as_ref().is_some_and(|list| list.iter().any(|(backend, _)| backend != "cpu"));
+    // every backend that takes part (the split runs on several)
+    let run_backends: Vec<String> = multi_devices.as_ref().map_or_else(|| vec![selected_backend.clone()], |list| list.iter().map(|(b, _)| b.clone()).collect());
     let (mut context, context_origin) = match context_request {
         Some(n) => (n, "--ctx".to_owned()),
         None => {
@@ -1142,7 +1157,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         format!("keys {} / values {}", key_format.name(), value_format.name())
     };
-    if matches!(device.as_str(), "vulkan" | "dx12" | "metal" | "opengl" | "gl") && !(key_format == value_format && key_format.is_legacy()) {
+    if run_backends.iter().any(|b| matches!(b.as_str(), "vulkan" | "dx12" | "metal" | "opengl" | "gl")) && !(key_format == value_format && key_format.is_legacy()) {
         return Err(format!(
             "the {device} backend only supports the f16 and q8_0 KV cache (requested {kv_description}); use --device cuda or --device cpu for the other formats"
         )
@@ -1168,7 +1183,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     model.set_kv_formats(key_format, value_format);
     // FLLM_MLA=latent: cache the compressed latents of multi-head latent attention instead of the rebuilt per-head keys and values (CUDA only)
-    if model.config().mla.is_some() && fllm_engine::mla_latent::mode_from_env() == fllm_engine::mla_latent::MlaMode::Latent {
+    if model.config().mla.is_some() && fllm_engine::mla_latent::mode_from_env() == fllm_engine::mla_latent::MlaMode::Latent && multi_devices.is_some() {
+        eprintln!("[fllm-rs] warning: FLLM_MLA=latent is not used with several devices; keeping the expanded MLA cache");
+    } else if model.config().mla.is_some() && fllm_engine::mla_latent::mode_from_env() == fllm_engine::mla_latent::MlaMode::Latent {
         match latent_mla_unavailable(&model, &selected_backend, selected_index, key_format, value_format) {
             None => {
                 model.enable_mla_latent()?;
@@ -1197,7 +1214,70 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|p| std::fs::metadata(p).ok())
             .map_or(0, |m| m.len() + m.len() / 16 + (256 << 20))
     };
-    if device != "cpu" {
+    if let Some(list) = &multi_devices {
+        // Split the layers over the listed devices in proportion to their memory and speed; the KV pool is one block table that every
+        // stage holds for its own layers, so it has as many blocks as the smallest stage can hold.
+        let mut planning = Vec::new();
+        for (n, (backend, index)) in list.iter().enumerate() {
+            let mut d = fllm_engine::devices::planning_device(backend, *index, gpu_memory_utilization)?;
+            if n == 0 {
+                d.budget_bytes = d.budget_bytes.saturating_sub(draft_reserve);
+            }
+            planning.push(d);
+        }
+        let devices: Vec<fllm_engine::backend::memory::PipelineDevice> = planning
+            .iter()
+            .enumerate()
+            .map(|(n, d)| fllm_engine::backend::memory::PipelineDevice {
+                label: d.label.clone(),
+                budget_bytes: d.budget_bytes,
+                speed: parallel.split_ratio.get(n).copied().unwrap_or(d.speed_gbs),
+            })
+            .collect();
+        let plan = fllm_engine::backend::memory::plan_pipeline(&model, &devices, max_batched_tokens)?;
+        if plan.context_blocks > 0 {
+            let fit = plan.context_blocks * model.block_size();
+            tracing::warn!(
+                "a context of {} tokens needs more KV cache than the devices have left; using {fit} tokens (--ctx; --kv-cache-type q8_0 or fp8_e4m3 roughly doubles it)",
+                model.max_context()
+            );
+            model.limit_context(fit);
+            context = model.max_context();
+        }
+        if plan.kv_blocks < model.pool_blocks() {
+            tracing::info!("KV pool limited to {} of {} blocks to fit the devices ({} tokens)", plan.kv_blocks, model.pool_blocks(), plan.kv_blocks * model.block_size());
+            model.set_pool_blocks(plan.kv_blocks);
+        }
+        tracing::info!(
+            "Layer split over {} devices: shared KV pool of {} blocks ({} tokens); each stage holds the cache of its own layers",
+            plan.stages.len(),
+            plan.kv_blocks,
+            plan.kv_blocks * model.block_size()
+        );
+        for (n, stage) in plan.stages.iter().enumerate() {
+            let d = &planning[stage.device];
+            tracing::info!(
+                "  stage {n}: {} layers {}..{} of {} | weights {:.2} GB{} | KV cache {:.2} GB | scratch {:.0} MB | budget {:.2} GB of {:.2} GB | speed {:.0}{}",
+                d.label,
+                stage.layers.start,
+                stage.layers.end,
+                plan.total_layers,
+                (stage.weight_bytes + stage.head_bytes) as f64 / 1e9,
+                if stage.head_bytes > 0 { format!(" (output head {:.2} GB)", stage.head_bytes as f64 / 1e9) } else { String::new() },
+                stage.kv_cache_bytes as f64 / 1e9,
+                stage.scratchpad_bytes as f64 / 1e6,
+                stage.budget_bytes as f64 / 1e9,
+                d.total_bytes as f64 / 1e9,
+                devices[stage.device].speed,
+                if parallel.split_ratio.is_empty() { if d.speed_known { " GB/s" } else { " GB/s (estimate for this kind of device)" } } else { " (--tensor-split)" }
+            );
+        }
+        parallel.stage_ranges = plan.ranges();
+        parallel.validate().map_err(|e| format!("layer split: {e}"))?;
+        fllm_engine::parallel::config::set_global(parallel.clone());
+        #[cfg(feature = "cuda")]
+        fllm_engine::backend::cuda::set_marlin_q4k_enabled(false);
+    } else if device != "cpu" {
         // Size the KV pool to the device: every sequence gets its full context only if it fits
         let target_dev = plan_device.as_ref();
         if let Some(d) = target_dev {
@@ -1368,6 +1448,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         && speculative_lookup == 0
         && !speculative_mtp
         && draft_model.is_none()
+        && !parallel.is_parallel()
         && !speculative_suffix
         && !runtime.model.is_stateful()
         && matches!(selected_backend.as_str(), "cpu" | "vulkan" | "dx12" | "wgpu-vulkan" | "wgpu-dx12" | "wgpu")
@@ -1383,7 +1464,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         eprintln!("[fllm-rs] Suffix speculation enabled: up to {tokens} tokens, matches of at least {speculative_min_match} tokens across the conversation and recent generations (cache {speculative_cache_tokens} tokens)");
     }
-    if device != "cpu" {
+    if device != "cpu" && multi_devices.is_none() {
         let target_dev = plan_device.as_ref();
         if let Some(d) = target_dev {
             if let Ok(plan) = fllm_engine::backend::memory::MemoryPlan::plan_for_backend(

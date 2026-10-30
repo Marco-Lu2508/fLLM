@@ -279,6 +279,140 @@ impl MemoryPlan {
 
 }
 
+/// One device of a layer split (pipeline stages over several devices) as the memory planner sees it.
+#[derive(Clone, Debug)]
+pub struct PipelineDevice {
+    /// `cuda:0 (NVIDIA RTX 2000 Ada)` for log lines.
+    pub label: String,
+    /// Memory the stage may use: the free memory times the utilisation (host memory for the CPU).
+    pub budget_bytes: u64,
+    /// Relative speed of reading weights (GB/s, or a user ratio): the share of weights follows it.
+    pub speed: f64,
+}
+
+/// What one stage of a layer split holds.
+#[derive(Clone, Debug)]
+pub struct PipelineStage {
+    pub device: usize,
+    pub layers: std::ops::Range<usize>,
+    pub weight_bytes: u64,
+    /// Output head (last stage only).
+    pub head_bytes: u64,
+    /// KV cache of the common pool in this stage.
+    pub kv_cache_bytes: u64,
+    pub scratchpad_bytes: u64,
+    pub budget_bytes: u64,
+    /// KV blocks this stage alone could hold.
+    pub max_kv_blocks: u64,
+}
+
+/// The split of a model over several devices and the KV pool they share (one block table: the pool has as many blocks as the smallest
+/// stage can hold).
+#[derive(Clone, Debug)]
+pub struct PipelinePlan {
+    pub stages: Vec<PipelineStage>,
+    pub kv_blocks: usize,
+    pub total_layers: usize,
+    /// Blocks of a full-context sequence the plan had to give up (0: the requested context fits).
+    pub context_blocks: usize,
+}
+
+impl PipelinePlan {
+    pub fn ranges(&self) -> Vec<std::ops::Range<usize>> {
+        self.stages.iter().map(|s| s.layers.clone()).collect()
+    }
+}
+
+/// Sizes of the model for the layer-split planner: the weights and cache of every layer, the output head, and the fixed share of each
+/// device (driver context, scratch, padded weight layouts are folded into the layer sizes).
+pub fn pipeline_sizes(model: &GgufModel, max_tokens: usize, min_kv_blocks: u64) -> crate::parallel::split::ModelSizes {
+    let layers = model.layer_count();
+    let hidden = model.hidden_size();
+    let vocab = model.vocab_size();
+    let mut layer_bytes = vec![0u64; layers];
+    let (mut head_bytes, mut tied_head) = (0u64, 0u64);
+    for t in &model.mapping().index().tensors {
+        let bytes = tensor_bytes(t);
+        if let Some(rest) = t.name.strip_prefix("blk.") {
+            if let Some(index) = rest.split('.').next().and_then(|n| n.parse::<usize>().ok()).filter(|&n| n < layers) {
+                layer_bytes[index] += bytes;
+            }
+        } else if t.name == "output.weight" {
+            head_bytes = bytes;
+        } else if t.name == "token_embd.weight" {
+            tied_head = bytes;
+        }
+    }
+    let head = if head_bytes > 0 { head_bytes } else { tied_head };
+    let head_bytes = if head >= (hidden * vocab) as u64 * 2 { (hidden * vocab) as u64 * 224 / 256 } else { head };
+    // padded device layouts and backend workspaces: the single-device planner reserves a twentieth of the weights, and the recurrent
+    // states of hybrid models are spread over the layers
+    let recurrent = recurrent_state_bytes(model) / layers.max(1) as u64;
+    for b in &mut layer_bytes {
+        *b += *b / 20 + recurrent;
+    }
+    let ff = model.config().ff.max(hidden);
+    let (hid_mul, ff_mul) = if max_tokens > 512 { (28, 14) } else { (12, 6) };
+    let scratchpad_bytes = ((max_tokens * (hidden * hid_mul + ff * ff_mul) + vocab * 16) * 4) as u64;
+    let (key_format, value_format) = model.kv_formats();
+    let block_size = model.block_size() as u64;
+    let kv_block_bytes = (0..layers)
+        .map(|l| block_size * crate::kv_geometry::bytes_per_token_layer(model.config(), l, key_format, value_format))
+        .collect();
+    crate::parallel::split::ModelSizes {
+        layer_bytes,
+        kv_block_bytes,
+        head_bytes,
+        fixed_bytes: (768u64 << 20) + scratchpad_bytes,
+        min_kv_blocks,
+        wanted_kv_blocks: model.pool_blocks() as u64,
+    }
+}
+
+/// Splits `model` into `devices.len()` contiguous stages and sizes the shared KV pool. When even one sequence of the full context does
+/// not fit next to the weights, the context is given up in steps (the plan then reports how many blocks a sequence gets; the caller
+/// lowers the context to it), down to 64 blocks.
+pub fn plan_pipeline(model: &GgufModel, devices: &[PipelineDevice], max_tokens: usize) -> Result<PipelinePlan, String> {
+    let split_devices: Vec<crate::parallel::split::SplitDevice> = devices
+        .iter()
+        .map(|d| crate::parallel::split::SplitDevice { label: d.label.clone(), budget_bytes: d.budget_bytes, speed: d.speed })
+        .collect();
+    let stride = model.table_stride().max(1) as u64;
+    let mut last_error = String::new();
+    for min_blocks in [stride, 512, 256, 64] {
+        if min_blocks > stride {
+            continue;
+        }
+        let sizes = pipeline_sizes(model, max_tokens, min_blocks);
+        match crate::parallel::split::plan_split(&split_devices, &sizes) {
+            Ok(split) => {
+                let stages = split
+                    .stages
+                    .iter()
+                    .map(|s| PipelineStage {
+                        device: s.device,
+                        layers: s.layers.clone(),
+                        weight_bytes: s.weight_bytes,
+                        head_bytes: s.head_bytes,
+                        kv_cache_bytes: s.kv_block_bytes * split.kv_blocks,
+                        scratchpad_bytes: sizes.fixed_bytes - (768u64 << 20),
+                        budget_bytes: s.budget_bytes,
+                        max_kv_blocks: s.max_kv_blocks,
+                    })
+                    .collect();
+                return Ok(PipelinePlan {
+                    stages,
+                    kv_blocks: split.kv_blocks as usize,
+                    total_layers: sizes.layer_bytes.len(),
+                    context_blocks: if min_blocks < stride { min_blocks as usize } else { 0 },
+                });
+            }
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
 /// Device memory of the recurrent states (Gated DeltaNet, Mamba-2, Mamba-1 layers): the decoder keeps up to two states per sequence slot
 /// (`state_capacity`), each holding every recurrent layer. They are allocated while the server runs, so the KV pool must leave room for
 /// them (16 sequences of Qwen3.5-2B need about 600 MB; without the reserve the pool took the whole card and the first busy step failed).
@@ -308,4 +442,66 @@ fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {
         0
     };
     (layers.len() * per_layer.next_multiple_of(256) * model.max_sequences().max(1) * 2) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel::fixture::{scratch_path, TinySpec};
+
+    fn model(case: &str) -> GgufModel {
+        let path = scratch_path(&format!("memory-{case}"));
+        TinySpec::named(case).unwrap().write(&path).unwrap();
+        let model = GgufModel::load(path.to_str().unwrap(), 64, 2, 1).unwrap();
+        let _ = std::fs::remove_file(&path);
+        model
+    }
+
+    fn device(label: &str, gb: f64, speed: f64) -> PipelineDevice {
+        PipelineDevice { label: label.to_owned(), budget_bytes: (gb * 1e9) as u64, speed }
+    }
+
+    #[test]
+    fn the_sizes_add_up_to_the_file_and_the_cache() {
+        let model = model("llama-q4k");
+        let sizes = pipeline_sizes(&model, 512, 4);
+        assert_eq!(sizes.layer_bytes.len(), model.layer_count());
+        assert!(sizes.layer_bytes.iter().all(|&b| b > 0));
+        let (key, value) = model.kv_formats();
+        let per_token = crate::kv_geometry::bytes_per_token(model.config(), key, value);
+        assert_eq!(sizes.kv_block_bytes.iter().sum::<u64>(), per_token * model.block_size() as u64);
+        assert!(sizes.head_bytes > 0 && sizes.fixed_bytes > 768 << 20);
+    }
+
+    #[test]
+    fn a_model_is_split_over_one_to_four_devices() {
+        let model = model("llama-q4k");
+        for n in 1..=4usize {
+            let devices: Vec<_> = (0..n).map(|i| device(&format!("d{i}"), 4.0, 400.0)).collect();
+            let plan = plan_pipeline(&model, &devices, 512).unwrap_or_else(|e| panic!("{n} devices: {e}"));
+            assert_eq!(plan.stages.len(), n);
+            let mut next = 0;
+            for stage in &plan.stages {
+                assert_eq!(stage.layers.start, next);
+                assert!(!stage.layers.is_empty());
+                next = stage.layers.end;
+            }
+            assert_eq!(next, model.layer_count());
+            assert!(plan.kv_blocks >= 1);
+            assert!(plan.stages.last().unwrap().head_bytes > 0);
+            assert!(plan.stages.iter().rev().skip(1).all(|s| s.head_bytes == 0));
+        }
+    }
+
+    #[test]
+    fn faster_devices_take_more_layers_and_small_budgets_are_refused() {
+        let model = model("llama-q4k");
+        let plan = plan_pipeline(&model, &[device("fast", 4.0, 900.0), device("slow", 4.0, 100.0)], 512).unwrap();
+        assert!(plan.stages[0].layers.len() >= plan.stages[1].layers.len());
+        let error = plan_pipeline(&model, &[device("tiny0", 0.2, 400.0), device("tiny1", 0.2, 400.0)], 512).unwrap_err();
+        assert!(error.contains("does not fit"), "{error}");
+        // more devices than layers
+        let many: Vec<_> = (0..9).map(|i| device(&format!("d{i}"), 2.0, 100.0)).collect();
+        assert!(plan_pipeline(&model, &many, 512).unwrap_err().contains("every device needs at least one layer"));
+    }
 }

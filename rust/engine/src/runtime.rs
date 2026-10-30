@@ -1351,9 +1351,11 @@ impl InferenceRuntime {
             key_format.check_dim(self.model.config().layer_head_dim(l))?;
             value_format.check_dim(self.model.config().layer_value_dim(l))?;
         }
-        self.decoder = Some(crate::rust_decoder::RustDecoder::load(&self.model, device)?);
-        // the host CPU runs the model unless an accelerator backend took it (`auto` falls back to the CPU on machines without a usable GPU)
-        self.shared_choices_cpu = self.decoder.as_ref().is_some_and(|decoder| !decoder.uses_accelerator());
+        // one decoder, or rank 0 of the group the command line asked for (`--tensor-parallel-size`, `--pipeline-parallel-size`, `--device a,b`)
+        self.decoder = Some(crate::parallel::load_main(&self.model, device)?);
+        // the host CPU runs the model unless an accelerator backend took it (`auto` falls back to the CPU on machines without a usable GPU);
+        // a parallel group keeps the KV of every layer on the rank that runs it, so block copies on rank 0 alone would be wrong
+        self.shared_choices_cpu = self.decoder.as_ref().is_some_and(|decoder| !decoder.uses_accelerator() && !decoder.is_parallel());
         if self.model.mla_latent() && self.shared_choices_cpu {
             return Err("FLLM_MLA=latent runs on the CUDA backend only, and the model is on the host; unset FLLM_MLA or use FLLM_MLA=expanded".into());
         }
