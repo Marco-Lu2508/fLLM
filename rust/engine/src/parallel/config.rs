@@ -37,6 +37,8 @@ pub struct ParallelConfig {
     pub stage_ranges: Vec<Range<usize>>,
     /// `--tensor-split 3,1`: relative share of the weights per device (overrides the speed the planner estimates); empty: automatic.
     pub split_ratio: Vec<f64>,
+    /// `--tensor-parallel auto`: the size of the tensor-parallel groups is chosen from the devices (`group::auto_tensor_parallel`).
+    pub tp_auto: bool,
 }
 
 impl Default for ParallelConfig {
@@ -54,6 +56,7 @@ impl Default for ParallelConfig {
             rank_devices: Vec::new(),
             stage_ranges: Vec::new(),
             split_ratio: Vec::new(),
+            tp_auto: false,
         }
     }
 }
@@ -172,6 +175,7 @@ impl ParallelConfig {
         matches!(
             flag,
             "--tensor-parallel-size"
+                | "--tensor-parallel"
                 | "-tp"
                 | "--pipeline-parallel-size"
                 | "-pp"
@@ -200,7 +204,8 @@ impl ParallelConfig {
             value.ok_or_else(|| format!("{what} needs a value"))?.trim().parse::<usize>().map_err(|_| format!("invalid value for {what}"))
         };
         match flag {
-            "--tensor-parallel-size" | "-tp" => self.tp = number(flag)?,
+            "--tensor-parallel" | "--tensor-parallel-size" | "-tp" if value.is_some_and(|v| v.trim().eq_ignore_ascii_case("auto")) => self.tp_auto = true,
+            "--tensor-parallel-size" | "--tensor-parallel" | "-tp" => self.tp = number(flag)?,
             "--pipeline-parallel-size" | "-pp" => self.pp = number(flag)?,
             "--expert-parallel" | "--enable-expert-parallel" => self.expert_parallel = true,
             "--ep-dispatch" => {
@@ -245,6 +250,9 @@ impl ParallelConfig {
     /// `--tensor-parallel-size N` (or `-pp M`) the list is grouped into `N` devices per stage.
     pub fn apply_device_list(&mut self, list: &[(String, usize)]) -> Result<(), String> {
         let n = list.len();
+        if self.tp_auto {
+            self.tp = crate::parallel::group::auto_tensor_parallel(list);
+        }
         match (self.tp, self.pp) {
             (1, 1) => self.pp = n,
             (tp, 1) if n.is_multiple_of(tp) => self.pp = n / tp,
@@ -358,6 +366,11 @@ mod tests {
         assert_eq!((c.tp, c.pp), (2, 2));
         let mut c = ParallelConfig { tp: 3, ..Default::default() };
         assert!(c.apply_device_list(&list).unwrap_err().contains("multiply"));
+        // `auto` picks layer splitting where no fast collective exists (here: no CUDA devices)
+        let mut c = ParallelConfig::default();
+        c.apply_flag("--tensor-parallel", Some("auto")).unwrap();
+        c.apply_device_list(&list).unwrap();
+        assert_eq!((c.tp, c.pp), (1, 4));
         let mut c = ParallelConfig::default();
         c.apply_flag("--tensor-split", Some("3, 1,1,1")).unwrap();
         assert_eq!(c.split_ratio, vec![3.0, 1.0, 1.0, 1.0]);

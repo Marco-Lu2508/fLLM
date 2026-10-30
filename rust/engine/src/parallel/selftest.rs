@@ -516,6 +516,36 @@ mod tests {
         run_case("moe-shared-f32", &[spec_with(2, &[0..3, 3..4], &[])]);
     }
 
+    fn tp_spec(tp: usize, pp: usize, accel: &[bool]) -> RunSpec {
+        RunSpec { accel: accel.to_vec(), ..RunSpec::new(tp, pp) }
+    }
+
+    /// Tensor parallelism through the device forward pass: row-parallel projections give partial sums that are added over the group
+    /// (host-staged all-reduce), the output head is cut by vocabulary rows and its logits gathered.
+    #[test]
+    fn device_ranks_with_tensor_parallelism_match_the_single_device_run() {
+        run_case(
+            "llama-q4k",
+            &[tp_spec(2, 1, &[true, true]), tp_spec(4, 1, &[true; 4]), tp_spec(2, 2, &[true; 4]), tp_spec(2, 1, &[true, false])],
+        );
+        run_case("qwen3-q8", &[tp_spec(2, 1, &[true, true]), tp_spec(4, 1, &[true; 4])]);
+        run_case("llama-f16", &[tp_spec(2, 1, &[true, true])]);
+        run_case("gemma2-f32", &[tp_spec(2, 1, &[true, true])]);
+        run_case("qwen2-q4z", &[tp_spec(2, 1, &[true, true])]);
+    }
+
+    /// Experts of a tensor-parallel group are computed through the host path (sharded experts, summed over the group), also with expert
+    /// parallelism; the attention around them runs on the device ranks.
+    #[test]
+    fn device_ranks_with_sharded_experts_match() {
+        run_case(
+            "moe-q4k",
+            &[tp_spec(2, 1, &[true, true]), RunSpec { ep: true, dispatch: EpDispatch::AllReduce, accel: vec![true; 4], ..RunSpec::new(4, 1) }],
+        );
+        // not run for "moe-shared-f32": its router has near-ties, and the device kernels' rounding sends tokens to other experts (measured
+        // error 0.55 against a host tolerance of 0.3); the host-only layouts of that recipe are covered above
+    }
+
     #[test]
     fn llama_q4k_matches_for_tp_pp_and_both() {
         run_case("llama-q4k", &layouts_for("llama-q4k"));

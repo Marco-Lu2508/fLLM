@@ -2043,6 +2043,16 @@ impl RustDecoder {
         self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()))
     }
 
+    /// Sum the partial result of a row-parallel projection over the tensor-parallel group: the buffer goes down to the host, the
+    /// group's all-reduce (NCCL for CUDA when present, else host memory) adds the partial sums, and the sum goes back up.
+    fn device_tp_reduce(&self, stream: &mut dyn crate::backend::Stream, buf: &mut crate::backend::DeviceBuffer, len: usize) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let mut host = vec![0.0f32; len];
+        stream.download(cast_f32_to_u8_mut(&mut host), buf).map_err(err)?;
+        self.par_tp_reduce(&mut host)?;
+        stream.upload(buf, cast_f32_to_u8(&host)).map_err(err)
+    }
+
     /// First layer whose cache is the first layer of this decoder's device KV pool: the start of the stage when the model is split into
     /// pipeline stages (each stage allocates cache for its own layers only), else 0.
     fn kv_base(&self) -> usize {
@@ -2399,6 +2409,11 @@ impl RustDecoder {
         let cfg = &self.cfg;
         let native = |a: Activation| matches!(a, Activation::Silu | Activation::GeluTanh) || arch_ok;
         match &layer.ffn {
+            // the all-to-all combine of expert parallelism exchanges tokens between the ranks on the host (the other combines run the
+            // experts on the device and add the partial results of the group)
+            Ffn::Moe(_) if self.par.as_ref().is_some_and(|p| p.tp_size() > 1 && p.cfg.expert_parallel && p.cfg.ep_dispatch == crate::parallel::EpDispatch::AllToAll) => {
+                Some("all-to-all expert dispatch of a tensor-parallel group")
+            }
             Ffn::Moe(moe) => {
                 if moe.latent.is_some() || cfg.moe.as_ref().is_some_and(|m| m.latent.is_some()) {
                     Some("latent-space expert projections")
@@ -3357,6 +3372,8 @@ impl RustDecoder {
         let stage = self.stage_range();
         // a pipeline stage's device cache holds its own layers only: layer `i` is `i - kv_base` there
         let kv_base = self.kv_base();
+        // tensor parallelism: the output and down projections give partial sums; the fused residual-add kernels cannot take them
+        let tp = self.par.as_ref().is_some_and(|p| p.tp_size() > 1);
         for (i, layer) in self.layers.iter().enumerate() {
             if !stage.contains(&i) {
                 continue;
@@ -3779,7 +3796,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if !tp && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -3802,7 +3819,8 @@ impl RustDecoder {
                 }
                 // the output projection is added straight into the residual stream when nothing sits between them
                 if !fused {
-                    fused = dev_layer.post_attn_norm.is_none()
+                    fused = !tp
+                        && dev_layer.post_attn_norm.is_none()
                         && !parallel
                         && stream
                             .quantized_linear_add(&mut x_buf, &attn_buf, out_w, out_w.bias.as_ref(), cfg.residual_scale)
@@ -3817,6 +3835,9 @@ impl RustDecoder {
                             out_w.bias.as_ref(),
                         )
                         .map_err(err)?;
+                    if tp {
+                        self.device_tp_reduce(&mut **stream, &mut out_buf, rows * hidden)?;
+                    }
                     if i == 0 {
                         debug_sum(&mut **stream, "attn_out-0", &out_buf);
                     }
@@ -4024,7 +4045,7 @@ impl RustDecoder {
                 // the norm of the next layer (or the final norm) can join the residual add of the down projection
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
-                let next_target = if dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
+                let next_target = if !tp && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -4051,7 +4072,8 @@ impl RustDecoder {
                     }
                 }
                 if !fused {
-                    fused = dev_layer.post_ffn_norm.is_none()
+                    fused = !tp
+                        && dev_layer.post_ffn_norm.is_none()
                         && stream
                             .quantized_linear_add(&mut x_buf, &act_buf, down_w, down_w.bias.as_ref(), cfg.residual_scale)
                             .map_err(err)?;
@@ -4060,6 +4082,9 @@ impl RustDecoder {
                     stream
                         .quantized_linear(&mut ffn_out_buf, &act_buf, down_w, down_w.bias.as_ref())
                         .map_err(err)?;
+                    if tp {
+                        self.device_tp_reduce(&mut **stream, &mut ffn_out_buf, rows * hidden)?;
+                    }
                     device_post_norm_inplace(
                         &mut **stream,
                         &mut scratch,
@@ -4300,7 +4325,9 @@ impl RustDecoder {
             }
             Some(picked)
         };
-        let mut head_out = scratch.acquire(selected * cfg.vocab * 4).map_err(err)?;
+        // a tensor-parallel rank holds a slice of the vocabulary rows
+        let head_rows = dev_weights.head.rows;
+        let mut head_out = scratch.acquire(selected * head_rows * 4).map_err(err)?;
         let head = &dev_weights.head;
         stream
             .quantized_linear_wide(&mut head_out, picked.as_ref().unwrap_or(&final_normed), head, head.bias.as_ref())
@@ -4337,7 +4364,7 @@ impl RustDecoder {
                 return Ok(Vec::new());
             }
         }
-        let mut logits = vec![0.0f32; selected * cfg.vocab];
+        let mut logits = vec![0.0f32; selected * head_rows];
         stream
             .download(cast_f32_to_u8_mut(&mut logits), &head_out)
             .map_err(err)?;
@@ -4348,6 +4375,7 @@ impl RustDecoder {
         }
         scratch.recycle(x_buf);
         scratch.recycle(final_normed);
+        let mut logits = self.par_head_gather(logits, selected)?;
 
         if cfg.logit_scale != 1.0 {
             for l in &mut logits {
@@ -5591,6 +5619,11 @@ impl RustDecoder {
         let Some(cfg) = self.cfg.moe.as_ref() else {
             return false;
         };
+        // the ranks of a tensor-parallel group hold shards (or a subset) of the experts: their routing runs on the host, where the
+        // routes to experts of other ranks are dropped
+        if self.par.as_ref().is_some_and(|p| p.tp_size() > 1) {
+            return false;
+        }
         if device {
             return moe.latent.is_none()
                 && matches!(cfg.gating, Gating::Softmax | Gating::Sigmoid)
@@ -5683,7 +5716,9 @@ impl RustDecoder {
             return Ok(None);
         };
         let hidden = self.cfg.hidden;
-        let routed = self.moe_route(moe, host_in)?;
+        let mut routed = self.moe_route(moe, host_in)?;
+        // expert parallelism: this rank computes the experts it holds; the rest of the group adds its share in `device_tp_reduce`
+        self.par_filter_routes(&mut routed);
         let mut plan = Vec::new();
         for (n, (expert, assigned)) in moe.experts.iter().zip(&routed).enumerate() {
             if assigned.is_empty() {
@@ -5706,7 +5741,11 @@ impl RustDecoder {
         };
         let err = |e: crate::backend::BackendError| e.to_string();
         let mut acc = scratch.acquire(rows * hidden * 4).map_err(err)?;
-        stream.zero_buffer(&mut acc).map_err(err)?;
+        if stream.zero_buffer(&mut acc).is_err() {
+            // a backend without the accumulate kernels: the host computes the layer
+            scratch.recycle(acc);
+            return Ok(None);
+        }
         for (src, assigned) in plan {
             let idx: Vec<i32> = assigned.iter().map(|&(t, _)| t as i32).collect();
             let weights: Vec<f32> = assigned.iter().map(|&(_, wt)| wt).collect();
@@ -5746,6 +5785,9 @@ impl RustDecoder {
                 .scatter_add_rows(&mut acc, &result, &idx, scales.as_deref(), hidden)
                 .map_err(err)?;
             scratch.recycle(result);
+        }
+        if self.par.as_ref().is_some_and(|p| p.tp_size() > 1) {
+            self.device_tp_reduce(stream, &mut acc, rows * hidden)?;
         }
         Ok(Some(acc))
     }

@@ -1225,15 +1225,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             planning.push(d);
         }
+        // a tensor-parallel group of `tp` devices is one pipeline stage: equal shards, so it holds `tp` times the smallest budget and reads
+        // `tp` times as fast as its slowest member
+        let tp = parallel.tp.max(1);
         let devices: Vec<fllm_engine::backend::memory::PipelineDevice> = planning
-            .iter()
+            .chunks(tp)
             .enumerate()
-            .map(|(n, d)| fllm_engine::backend::memory::PipelineDevice {
-                label: d.label.clone(),
-                budget_bytes: d.budget_bytes,
-                speed: parallel.split_ratio.get(n).copied().unwrap_or(d.speed_gbs),
+            .map(|(stage, group)| {
+                let speed_of = |k: usize, d: &fllm_engine::devices::PlanningDevice| parallel.split_ratio.get(stage * tp + k).copied().unwrap_or(d.speed_gbs);
+                fllm_engine::backend::memory::PipelineDevice {
+                    label: group.iter().map(|d| d.label.clone()).collect::<Vec<_>>().join(" + "),
+                    budget_bytes: group.iter().map(|d| d.budget_bytes).min().unwrap_or(0) * group.len() as u64,
+                    speed: group.iter().enumerate().map(|(k, d)| speed_of(k, d)).fold(f64::MAX, f64::min) * group.len() as f64,
+                }
             })
             .collect();
+        for d in &planning {
+            tracing::info!(
+                "  device {}: {:.2} GB of {:.2} GB usable | read speed {:.0} GB/s ({})",
+                d.label,
+                d.budget_bytes as f64 / 1e9,
+                d.total_bytes as f64 / 1e9,
+                d.speed_gbs,
+                if d.speed_known { "reported or measured" } else { "estimate for this kind of device" }
+            );
+        }
         let plan = fllm_engine::backend::memory::plan_pipeline(&model, &devices, max_batched_tokens)?;
         if plan.context_blocks > 0 {
             let fit = plan.context_blocks * model.block_size();
@@ -1255,10 +1271,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             plan.kv_blocks * model.block_size()
         );
         for (n, stage) in plan.stages.iter().enumerate() {
-            let d = &planning[stage.device];
             tracing::info!(
-                "  stage {n}: {} layers {}..{} of {} | weights {:.2} GB{} | KV cache {:.2} GB | scratch {:.0} MB | budget {:.2} GB of {:.2} GB | speed {:.0}{}",
-                d.label,
+                "  stage {n}: {} layers {}..{} of {} | weights {:.2} GB{} | KV cache {:.2} GB | scratch {:.0} MB | budget {:.2} GB | weight on this stage / speed {:.0}{}",
+                devices[stage.device].label,
                 stage.layers.start,
                 stage.layers.end,
                 plan.total_layers,
@@ -1267,9 +1282,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 stage.kv_cache_bytes as f64 / 1e9,
                 stage.scratchpad_bytes as f64 / 1e6,
                 stage.budget_bytes as f64 / 1e9,
-                d.total_bytes as f64 / 1e9,
                 devices[stage.device].speed,
-                if parallel.split_ratio.is_empty() { if d.speed_known { " GB/s" } else { " GB/s (estimate for this kind of device)" } } else { " (--tensor-split)" }
+                if parallel.split_ratio.is_empty() { " GB/s" } else { " (--tensor-split)" }
             );
         }
         parallel.stage_ranges = plan.ranges();

@@ -36,6 +36,20 @@ fn device_string(device: &(String, usize)) -> String {
     }
 }
 
+/// `--tensor-parallel auto` for the devices of `--device a,b,c`: one tensor-parallel group over all of them when they are CUDA devices
+/// and NCCL is installed (a fast collective between the cards), else 1: layer splitting, which moves one activation vector per layer
+/// boundary instead of two all-reduces per layer.
+pub fn auto_tensor_parallel(devices: &[(String, usize)]) -> usize {
+    #[cfg(all(feature = "cuda", not(feature = "hip")))]
+    {
+        if devices.len() > 1 && devices.iter().all(|d| d.0 == "cuda") && crate::comm::nccl::NcclLib::open().is_ok() {
+            return devices.len();
+        }
+    }
+    let _ = devices;
+    1
+}
+
 /// The communicator that carries tensors between the devices of a group, on top of the host-memory group used for control.
 fn data_plane(kind: BackendKind, host_group: &Arc<dyn Communicator>, backend: &str, ordinal: usize) -> Result<Arc<dyn Communicator>, String> {
     match kind {
@@ -146,10 +160,18 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
     }
     let devices = rank_devices(&backend, &cfg);
     let any_gpu = devices.iter().any(|d| d.0 != "cpu");
-    if any_gpu && cfg.tp > 1 && !std::env::var("FLLM_PARALLEL_GPU").is_ok_and(|v| v == "1") {
-        return Err(format!(
-            "tensor parallelism runs on --device cpu in this version: the sharded decoder and the collectives are in place, but the {backend} forward path does not call them yet (see docs/multi-gpu.md, \"Status\"). Layer splitting over several devices (--device a,b or --pipeline-parallel-size) works on every backend. Set FLLM_PARALLEL_GPU=1 to try tensor parallelism on a GPU anyway (untested)."
-        ));
+    // the ranks of one tensor-parallel group cut every layer into equal shards: they must run the same backend
+    if cfg.tp > 1 {
+        for stage in 0..cfg.pp {
+            let group = &devices[stage * cfg.tp..(stage + 1) * cfg.tp];
+            if group.iter().any(|d| d.0 != group[0].0) {
+                return Err(format!(
+                    "tensor parallelism needs devices of one backend in each group, but stage {stage} lists {}; list the devices so that each group of {} neighbours shares a backend, or use layer splitting (--tensor-parallel 1)",
+                    group.iter().map(device_string).collect::<Vec<_>>().join(", "),
+                    cfg.tp
+                ));
+            }
+        }
     }
     // ranks of one CUDA backend can talk through NCCL; any other mix exchanges activations through host memory
     let same_backend = devices.iter().all(|d| d.0 == devices[0].0);
