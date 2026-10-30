@@ -44,8 +44,7 @@ Supported: `system` (string or blocks), text and image (base64 or URL) blocks, `
 as `thinking` blocks. `budget_tokens` is accepted and ignored. Server tools (web search and
 similar) and prompt caching fields are ignored.
 
-The `message_start` event reports `input_tokens: 0`; the final `message_delta` carries the real
-input and output token counts.
+`message_start` reports the size of the rendered prompt; the final `message_delta` carries the real input and output token counts, with the part served from the prefix cache in `cache_read_input_tokens`. `max_tokens` is cut to what the context still holds (Claude Code asks for 32000). A `claude-*` model name the server does not serve is answered by the loaded model. `{"role":"system"}` entries inside `messages` (Claude Code) are accepted: before the first turn they join the system prompt, later ones become a `<system-reminder>` user message; the `x-anthropic-billing-header` system block and `defer_loading` tools are dropped. Long waits send `ping` events every ten seconds.
 
 ## Responses (OpenAI)
 
@@ -61,6 +60,8 @@ and `reasoning` items, `instructions`, function `tools`, `tool_choice`, `max_out
 (forwarded as `chat_template_kwargs.reasoning_effort`), `chat_template_kwargs`, `stream`, `store`
 and `previous_response_id`. Built-in tools (web search, file search, code interpreter) are not
 available and are ignored.
+
+`max_output_tokens` is cut to what the context still holds, and a silent stream repeats `response.in_progress` every ten seconds (Codex counts events, not SSE comments, against its 300 s idle limit).
 
 Stored responses live in memory. `FLLM_RESPONSE_STORE_SIZE` sets how many are kept (default 256);
 they are lost on restart.
@@ -91,7 +92,7 @@ curl http://127.0.0.1:8000/infill -H 'Authorization: Bearer KEY' -H 'content-typ
 
 `/infill` builds the FIM prompt from the GGUF `tokenizer.ggml.fim_*_token_id` metadata (falling
 back to the token strings of the Qwen2.5-Coder, StarCoder, CodeLlama and DeepSeek-Coder
-families), prefixes `input_extra` as repository context and orders the blocks per family. Models
+families: Qwen2.5-Coder, CodeGemma, StarCoder/StarCoder2, CodeLlama, DeepSeek-Coder, Codestral), prefixes `input_extra` as repository context and orders the blocks per family (markers before the text they announce). Models
 without FIM tokens and without an explicit `prompt` answer `501`.
 
 `GET /props` reports `default_generation_settings`, `total_slots`, `model_path`, `chat_template`,

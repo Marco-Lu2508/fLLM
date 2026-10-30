@@ -146,6 +146,7 @@ speech are not supported; for multimodal checkpoints only the text model is conv
 | `devices`, `selftest-cpu`, `selftest-gpu`, `completions` | device inventory, kernel self tests, shell completion |
 | `studio` | start the server and open the Studio (the browser app) |
 | `amd-npu status\|list\|pull\|serve\|build-shim\|native-bench` | the NPU of an AMD Ryzen AI processor: through FastFlowLM, or with fLLM's own kernels (`build-shim` builds the helper library over XRT, `native-bench` times a projection on the NPU against the processor) ([docs/user/amd-npu.md](docs/user/amd-npu.md), [docs/npu-xdna.md](docs/npu-xdna.md)) |
+| `connect TOOL` | prints (and with `--write` writes) the settings that point Claude Code, Codex, OpenCode, Aider, Continue, Cline or an SDK at the running server ([docs/user/coding.md](docs/user/coding.md)) |
 | `agent -p "TASK"`, `gateway telegram\|matrix` | the coding agent without a browser, and the same agent behind a Telegram or Matrix chat ([docs/user/agent-cli.md](docs/user/agent-cli.md)) |
 
 `fllm-rs <command> --help` prints the usage of each command; [docs/user/commands.md](docs/user/commands.md)
@@ -258,6 +259,7 @@ the log folder when the engine does not start.
 - **Operation**: Docker images and Compose files, Kubernetes manifests and a Helm chart in [deploy/](deploy), and
   `fllm-router`, a prefix-aware router for several servers ([docs/router.md](docs/router.md)).
 
+- **Coding tools**: Claude Code, Codex CLI, OpenCode and the OpenAI and Anthropic SDKs were run against the server (Messages and Responses APIs, streamed tool calls, `/infill` for autocomplete); `fllm-rs connect TOOL` and the Studio section *Connect a coding tool* give the exact settings, the output ceilings of the agents are cut to the context, and the conversation prefix is reused between turns (10th turn of a tool session: first token after 17 s instead of 174 s on a laptop processor). What was run, with versions, and what only has a config: [docs/user/coding.md](docs/user/coding.md).
 - **Without a browser**: `fllm-rs agent -p "task"` runs the coding agent in the terminal (reading is always allowed; edits, commands, network and memory only with `--allow-*` flags), `fllm-rs gateway telegram|matrix` puts it behind a chat with a required allowlist, and scheduled tasks can send their result to a webhook, a ntfy topic or a Telegram chat ([docs/user/agent-cli.md](docs/user/agent-cli.md)). The gateway ran against stubs only, not against the real services.
 
 `fllm-rs chat` and `bench` talk to any running OpenAI-compatible server;

@@ -229,6 +229,10 @@ fllm-rs completions [bash|zsh|fish|powershell]   # shell completions (default ba
 - Talking to the server: [clients](clients.md)
 - Weight formats: [quants-and-formats](quants-and-formats.md)
 
+## connect
+
+`fllm-rs connect TOOL [--url URL] [--model ID] [--ctx N] [--write]` prints the environment and config that point a coding tool (`claude-code`, `codex`, `opencode`, `aider`, `continue`, `cline`, `openai-sdk`, `anthropic-sdk`, `env`) at the server, shows the diff of the files it would change and writes them only with `--write`. Setup per tool and what was tested: [coding.md](coding.md).
+
 ## agent, gateway
 
 `fllm-rs agent -p "TASK"` runs the coding agent without a browser; `fllm-rs gateway telegram --chat ID` answers Telegram messages with it. Both need a running server on the same machine. Options, permissions, exit codes and what was verified: [agent-cli.md](agent-cli.md).

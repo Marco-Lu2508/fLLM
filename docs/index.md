@@ -15,6 +15,7 @@ Start with the [README](../README.md) for what fLLM is and its current status. T
 * [Studio: the browser app (chat, coding agent, models)](user/studio.md)
 * [Desktop app (installer for Windows and Linux)](user/desktop.md)
 * [Clients: SDKs, editors, chat front-ends](user/clients.md)
+* [Coding tools: Claude Code, Codex, OpenCode, Aider, Continue (`fllm-rs connect`)](user/coding.md)
 * [Configuration: flags and environment variables](configuration.md)
 * [Inference features: sampling, structured output, tools, LoRA, speculation, vision](inference-features.md)
 * [Memory planning: VRAM and RAM](user/memory.md)

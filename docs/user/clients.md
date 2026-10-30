@@ -3,7 +3,8 @@
 fLLM serves OpenAI, Anthropic, Ollama, SGLang/TGI and llama.cpp dialects from
 one port (route list: [server-api.md](../server-api.md), [api-compat.md](../api-compat.md)).
 This guide covers the three verified SDK clients plus curl and program
-integrations.
+integrations. Coding tools (Claude Code, Codex, OpenCode, Aider, Continue) have
+their own page: [coding.md](coding.md).
 
 ## Basics (all clients)
 
