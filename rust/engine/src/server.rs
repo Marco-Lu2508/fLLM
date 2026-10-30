@@ -822,7 +822,22 @@ async fn shutdown_signal(mut shutdown: tokio::sync::oneshot::Receiver<()>) {
             _ = terminate.recv() => {},
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Ctrl-Break, closing the console window and logoff / system shutdown end the server as cleanly as Ctrl-C
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let mut brk = ctrl_break().expect("register Ctrl-Break handler");
+        let mut close = ctrl_close().expect("register console close handler");
+        let mut system = ctrl_shutdown().expect("register system shutdown handler");
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = tokio::signal::ctrl_c() => {},
+            _ = brk.recv() => {},
+            _ = close.recv() => {},
+            _ = system.recv() => {},
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     tokio::select! {
         _ = &mut shutdown => return,
         _ = tokio::signal::ctrl_c() => {},

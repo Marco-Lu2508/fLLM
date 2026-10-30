@@ -1,9 +1,9 @@
 # fLLM on Windows (native, MSVC)
 
-Level of verification: **L0**. `build.rs`, `scripts/build-windows.ps1`, `install.ps1` and the workflows were written and checked without a Windows
-build machine: `build.rs` was dry-run with a fake `nvcc`, `hipcc` and `lib.exe` (argument lists, object and library names, link directives), the
-Rust code compiles for `x86_64-pc-windows-gnu`, the PowerShell scripts parse and their `-DryRun` runs under PowerShell 5.1 and 7. No MSVC build,
-no `nvcc` on Windows, no Vulkan SDK on Windows has run yet; the first Windows test round will find mistakes.
+Level of verification: **L1 for CPU, native Vulkan and the Intel NPU on one machine** (Intel Core Ultra 5 235U, Windows 11): the cross-built `fllm-rs.exe` ran the
+self tests, a Studio session and benchmarks there (section "Test guide" below). **L0 for NVIDIA (CUDA) and AMD (HIP, XDNA2 NPU) on Windows**: `build.rs`,
+`scripts/build-windows.ps1`, `install.ps1` and the workflows compile and package them in CI, but no CUDA or HIP kernel has run on Windows yet; the first test
+round on such hardware will find mistakes.
 
 ## Which build do I get?
 
@@ -30,6 +30,100 @@ fllm-rs run unsloth/Qwen3.5-9B-GGUF:Q4_K_M       # --device auto: the best GPU, 
 
 The binary is not code-signed. A file that the installer downloads carries no "downloaded from the internet" mark, but a zip saved from the browser does: unblock it
 (`Unblock-File`) before extracting, or expect a SmartScreen prompt. Defender may scan the first start. The installer never changes Defender or SmartScreen settings.
+
+## Test guide for Windows testers (one page)
+
+What is checked on which hardware (2026-10-30):
+
+| Part | Status |
+|---|---|
+| Windows build (`x86_64-pc-windows-msvc`, CPU + Vulkan + wgpu DirectX 12), CI on GitHub runners | builds and passes the unit and CPU self tests (workflows `platforms`, `windows-package`) |
+| CPU, native Vulkan, Studio, `selftest-gpu`, OpenVINO NPU on an **Intel Core Ultra 5 235U** (Intel Graphics, Intel AI Boost), Windows 11 | **ran**, see "Measured on Intel" below |
+| NVIDIA GPUs on Windows (CUDA build; RTX 2070 Super, Turing `sm_75`, is in the default architecture list) | **unverified**: compiles in CI, never ran on an NVIDIA GPU under Windows |
+| AMD GPUs on Windows, HIP (`hip:0`) and Radeon 8060S / `gfx1151` | **unverified**: HIP compiles in CI, never ran on Windows. Native Vulkan on a Radeon (Ryzen Z1 Extreme handheld) ran, see the last section |
+| AMD XDNA2 NPU through FastFlowLM on Windows | **unverified**: fLLM's `amd-npu` route ran on Linux only; on the Intel machine it correctly reports `no_npu` |
+
+### 1. Get a binary
+
+* Easiest: the newest release (<https://github.com/Marco-Lu2508/fLLM/releases>) has the zips; no account is needed.
+  * RTX 2070 Super (or any NVIDIA card): `fllm-windows-x86_64-msvc-cuda.zip` (needs only the NVIDIA driver).
+  * Ryzen AI Max 365 (Radeon 8060S): `fllm-windows-x86_64-msvc.zip` (CPU, Vulkan, DirectX 12; works with the normal AMD driver) and, to try the HIP route,
+    `fllm-windows-x86_64-msvc-hip.zip` (contains the HIP runtime DLLs; `gfx1151` is in its architecture list).
+  * Anyone: `fllm-windows-x86_64-msvc.zip`, or the desktop installer `fLLM_<version>_x64-setup.exe`.
+  * Check the download against its `.sha256` file. The binary is unsigned: right-click the zip, Properties, Unblock, then extract.
+* Newer than the release: workflow artifacts (needs a GitHub login; `gh run download <run id>` works too). Workflows:
+  `windows-package` (artifact `fllm-windows-x86_64-msvc`, CPU + Vulkan, about 10 minutes), `windows-cuda-package` (artifact
+  `fllm-windows-x86_64-msvc-cuda`; input `archs`, for example `75;80;89;120`, builds faster than the default list `61;70;75;80;86;89;90;100;110;120`),
+  `windows-hip-package` (artifact `fllm-windows-x86_64-msvc-hip`; input `archs`, for example `gfx1151`). Start one with Actions, the workflow, *Run workflow*.
+  Every zip contains `fllm-rs.exe` and `windows-check.ps1` (the artifact of `windows-package` carries the script next to the zip).
+
+### 2. Run the commands (PowerShell, in the folder of the extracted zip)
+
+```powershell
+.\fllm-rs.exe --version                      # prints the features of this build: cuda / hip / vulkan / ...
+.\fllm-rs.exe devices                        # every device with the exact --device value on its "Select:" line
+.\fllm-rs.exe pull hf://bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q4_K_M.gguf   # 0.8 GB into %USERPROFILE%\.cache\huggingface
+.\fllm-rs.exe selftest-gpu --device cuda:0 --json selftest.json      # or hip:0 / vulkan:0; expect "0 failed"
+.\fllm-rs.exe serve --model <the .gguf path printed by pull> --device cuda:0 --port 8000
+```
+
+In a second window, with the server running:
+
+```powershell
+curl.exe http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" -d "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":16}"
+.\fllm-rs.exe bench --url http://127.0.0.1:8000 --model <id shown by /v1/models> --scenarios prefill,decode-single --prompt-lens 256 --gen-len 64
+```
+
+Studio (the browser app) instead of `serve`: `.\fllm-rs.exe studio --model <gguf> --device cuda:0` (`--no-open` does not start a browser).
+The server listens on `127.0.0.1` only, so Windows Firewall does not ask; `--host 0.0.0.0` makes it reachable from the network (and the firewall prompt appears).
+Stop it with Ctrl+C (Ctrl+Break, closing the window and logoff also shut it down cleanly since 2026-10-30).
+
+**Choosing the device**: `--device auto` (default) takes the best GPU in the order CUDA, HIP, Metal, Vulkan, DirectX 12, else the CPU. Force one with
+`--device cuda:0` (NVIDIA), `--device hip:0` (AMD, HIP build only), `--device vulkan:0` (native Vulkan, any GPU), `--device cpu`. The number counts the devices of
+one backend from 0; `fllm-rs devices` prints the value to use. With two GPUs (an iGPU plus a discrete card) check that the line you select names the intended card.
+
+### 3. One command that collects everything
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\windows-check.ps1 -Model C:\path\to\model.gguf          # devices, nvidia-smi, amd-npu status, CPU and GPU self tests, speed per device
+.\windows-check.ps1 -Model C:\path\to\model.gguf -Devices cpu,cuda:0    # only these devices for the speed part
+```
+
+It writes **`fllm-report.txt`** next to the script (hardware names, driver versions, self test tables and speeds; no prompts, no file names of yours). Send that
+one file. Without `-Model` only the devices and self tests run (a few minutes). The DirectX 12 (wgpu) self test is in the report too and is experimental: failures
+there are known (end of this page); failures on `cuda`, `hip` or `vulkan` are what we want to hear about.
+
+Expected: `devices` lists the GPU with a `Select:` line of the backend you installed; `selftest-gpu` ends with `... 0 failed`; the speed part prints a table with
+prefill and decode tokens/s per device. A Q4_K_M 1B model should decode at tens of tokens/s on an RTX 2070 Super and a Radeon 8060S (an expectation, not a measurement).
+
+### 4. The AMD NPU (Ryzen AI Max 365, XDNA2): FastFlowLM
+
+fLLM does not drive the XDNA2 NPU itself on Windows; it talks to FastFlowLM (`flm`), which you install:
+
+1. Install the current AMD Ryzen AI / NPU driver (NPU driver 32.0.203.x or newer).
+2. Install FastFlowLM with `flm-setup.msi` from <https://github.com/FastFlowLM/FastFlowLM/releases> (its own licence terms apply; fLLM does not install it).
+3. `.\fllm-rs.exe amd-npu status` shows the NPU, the FastFlowLM version and what `flm validate` says.
+4. `.\fllm-rs.exe amd-npu list`, then `.\fllm-rs.exe amd-npu pull llama3.2:1b` and `.\fllm-rs.exe amd-npu serve llama3.2:1b --register`. FastFlowLM has its own model
+   files, not GGUF files. Status: **unverified on Windows**; please send the output of `amd-npu status` before and after the install (the report script includes it).
+
+### 5. Measured on Intel (Core Ultra 5 235U, Windows 11, 2026-10-30)
+
+Cross-built `fllm-rs.exe` (features `avx512,computer-use,npu-openvino,rust-gpu,vulkan`), also started from a folder with a space and non-ASCII letters in its path.
+
+| Check | Result |
+|---|---|
+| `devices` | CPU, wgpu Vulkan, wgpu DirectX 12, native Vulkan (`vulkan:0`), Intel AI Boost NPU (OpenVINO runtime from `~/.fllm/openvino`, platform 3720) |
+| `selftest-cpu` | 0 failed (tiers scalar, avx2, avx-vnni) |
+| `selftest-gpu --device vulkan:0` | 1092 checks, **0 failed**, 227 skipped (unsupported on Vulkan), 865 ok |
+| `selftest-gpu --device npu:0` | 1092 checks, 0 failed, 230 skipped; 18 NPU model compilations took 195 s (the compiling is the slow part) |
+| `selftest-gpu --device dx12:0` (wgpu) | 786 checks, **35 failed** (the known DirectX 12 problem, here on Intel too) |
+| Studio (`studio --device vulkan:0 --no-open`, browser) | page loads, chat works on the iGPU |
+| model path with spaces and non-ASCII letters | `inspect` and `serve` fine |
+| `amd-npu status` | `no_npu`, with the install hint for FastFlowLM |
+| speed | [benchmarks.md](benchmarks.md), Intel Core Ultra 5 235U section: Qwen2.5-0.5B Q4_K_M decode 49 tokens/s on the iGPU against 21 to 29 on the CPU |
+
+Not run: the CUDA and HIP builds (no such hardware), Windows on ARM, the desktop installer.
 
 ## Building from source
 

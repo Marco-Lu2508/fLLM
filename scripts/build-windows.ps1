@@ -220,6 +220,8 @@ $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("fllm-pack-" + [System.Gui
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 try {
     Copy-Item $Binary (Join-Path $stage "fllm-rs.exe")
+    # the test script (devices, self tests, speed per device -> fllm-report.txt) travels with the binary
+    if (Test-Path (Join-Path $Root "scripts\windows-check.ps1")) { Copy-Item (Join-Path $Root "scripts\windows-check.ps1") (Join-Path $stage "windows-check.ps1") }
     Copy-Item (Join-Path $Root "LICENSE") (Join-Path $stage "LICENSE")
     if (Test-Path (Join-Path $Root "NOTICE")) { Copy-Item (Join-Path $Root "NOTICE") (Join-Path $stage "NOTICE") }
     if (Test-Path (Join-Path $Root "THIRD_PARTY.md")) { Copy-Item (Join-Path $Root "THIRD_PARTY.md") (Join-Path $stage "THIRD_PARTY.md") }

@@ -21,7 +21,7 @@ Every engine is started once per config, warmed up, then asked `--runs` times fo
 decode speed = (generated tokens - 1) / (last token - first token). The median of the runs is reported. Every request is a new text, so no prompt
 cache helps; the three engines see exactly the same texts.
 """
-import argparse, json, os, signal, statistics, subprocess, sys, threading, time, urllib.request
+import argparse, json, os, signal, statistics, subprocess, sys, tempfile, threading, time, urllib.request
 
 PORT = 18123
 WORDS = ("river stone window garden copper winter harvest lantern meadow compass velvet thunder orchard marble whisper anchor canyon ember "
@@ -130,7 +130,7 @@ def start(engine, binary, device, model, env_extra, log, slots=1, ctx=4096):
         ready, name = "/v1/models", device
     else:
         raise SystemExit(f"unknown engine {engine}")
-    proc = subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    proc = subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env, **({} if os.name == "nt" else {"start_new_session": True}))
     if not wait_ready(base, ready, proc, 1200 if engine in ("vllm", "sglang") else 600):
         stop(proc)
         raise RuntimeError(f"{engine} did not start, see {log}")
@@ -167,6 +167,15 @@ def burst(base, model, words, gen, engine, n, seed):
 
 
 def stop(proc):
+    if os.name == "nt":
+        # no process groups here: taskkill /T ends the server and anything it started
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        try:
+            proc.wait(timeout=20)
+        except Exception:
+            pass
+        time.sleep(3)
+        return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.wait(timeout=20)
@@ -176,6 +185,14 @@ def stop(proc):
         except Exception:
             pass
     time.sleep(3)
+
+
+def split_config(spec):
+    """engine:binary[:device[:ENV]] -> parts; a Windows drive letter in the binary path (fllm:C:/x/fllm-rs.exe:cpu) is not a separator."""
+    parts = spec.split(":")
+    if len(parts) > 2 and len(parts[1]) == 1 and parts[1].isalpha() and parts[2][:1] in ("\\", "/"):
+        parts[1:3] = [parts[1] + ":" + parts[2]]
+    return parts
 
 
 def main():
@@ -195,13 +212,13 @@ def main():
     print(f"model {os.path.basename(a.model)}  prompt ~{lengths} words  concurrency {levels}  gen {a.gen}  runs {a.runs}", flush=True)
     for cfg in a.configs:
         label, spec = cfg.split("=", 1)
-        parts = spec.split(":")
+        parts = split_config(spec)
         engine, binary = parts[0], parts[1]
         device = parts[2].replace("@", ":") if len(parts) > 2 else "auto"
         env_extra = dict(kv.split("=", 1) for kv in parts[3].split(",")) if len(parts) > 3 and parts[3] else {}
         row = {"label": label, "engine": engine, "device": device, "model": os.path.basename(a.model), "tag": a.tag}
         try:
-            proc, base, name = start(engine, os.path.expanduser(binary), device, a.model, env_extra, f"/tmp/bench_{label}.log", max(levels), ctx)
+            proc, base, name = start(engine, os.path.expanduser(binary), device, a.model, env_extra, os.path.join(tempfile.gettempdir(), f"bench_{label}.log"), max(levels), ctx)
             try:
                 one_run(base, name, make_prompt(99, 60), 16, engine)                # warm-up (shader / graph / kernel compilation, model load)
                 grid = []

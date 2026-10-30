@@ -2,14 +2,16 @@
 Collects what is needed to judge fLLM on a Windows machine: devices, CPU and GPU self tests and, with -Model, a short speed
 measurement per device. Everything goes to fllm-report.txt (next to this script); send that file back.
 
-    .\amd-check.ps1                                  # devices and self tests
-    .\amd-check.ps1 -Model C:\models\model.gguf      # plus decode and prompt speed on cpu and vulkan
+    .\windows-check.ps1                              # devices and self tests
+    .\windows-check.ps1 -Model C:\models\model.gguf  # plus decode and prompt speed on cpu and every GPU device found
+    .\windows-check.ps1 -Model m.gguf -Devices cpu,cuda:0   # only these devices
 
 Run it from the folder that contains fllm-rs.exe (the unpacked zip). Nothing is installed and nothing leaves the machine.
 #>
 param(
     [string]$Model = "",
-    [int]$Port = 8199
+    [int]$Port = 8199,
+    [string[]]$Devices = @()
 )
 $ErrorActionPreference = "Continue"
 $exe = Join-Path $PSScriptRoot "fllm-rs.exe"
@@ -32,15 +34,25 @@ Section "system" {
     [System.Environment]::OSVersion.VersionString
 }
 Section "version" { & $exe --version }
-Section "devices" { & $exe devices }
+Section "nvidia-smi (NVIDIA driver, if present)" { if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { nvidia-smi } else { "not found" } }
+$inventory = & $exe devices 2>&1 | Out-String
+Section "devices" { $inventory }
+Section "amd-npu status" { & $exe amd-npu status }
 Section "selftest cpu" { & $exe selftest-cpu }
-Section "selftest gpu vulkan" { & $exe selftest-gpu --device vulkan }
-Section "selftest gpu dx12" { & $exe selftest-gpu --device dx12 }
+# every native GPU backend that the inventory lists gets the GPU self test; the speed test below uses the same list
+$gpu = @()
+foreach ($m in [regex]::Matches($inventory, '(?m)Select:\s+--device ((cuda|hip|vulkan|metal)(:\d+)?)\s*$')) { $gpu += $m.Groups[1].Value }
+$gpu = $gpu | Select-Object -Unique
+if ($gpu.Count -eq 0) { $gpu = @("vulkan") }
+foreach ($d in $gpu) { Section "selftest gpu $d" { & $exe selftest-gpu --device $d } }
+Section "selftest gpu dx12 (wgpu, experimental)" { & $exe selftest-gpu --device dx12 }
+$Devices = @($Devices | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # -File passes a,b as one string
+if ($Devices.Count -eq 0) { $Devices = @("cpu") + $gpu }
 
 if ($Model -ne "") {
-    foreach ($device in @("cpu", "vulkan")) {
+    foreach ($device in $Devices) {
         Section "speed on $device" {
-            $log = Join-Path (Split-Path $exe) "fllm-server-$device.log"
+            $log = Join-Path (Split-Path $exe) ("fllm-server-" + ($device -replace "[^A-Za-z0-9]", "_") + ".log")
             $p = Start-Process -FilePath $exe -ArgumentList @("serve", "--model", $Model, "--device", $device, "--port", $Port, "--model-name", "m", "--ctx", "4096") `
                 -RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru -WindowStyle Hidden
             $ready = $false
@@ -62,3 +74,4 @@ if ($Model -ne "") {
     }
 }
 Write-Host "Done. Send this file: $report"
+Write-Host "(it holds the hardware names, driver versions and speeds from above; no files of yours and no prompts)"

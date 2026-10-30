@@ -79,6 +79,27 @@ which is split between GPU and CPU, is 36 % behind) and 25 to 40 % behind for th
 decode the CPU reaches 55 to 95 % of the GPU paths. The numbers say nothing about a
 Ryzen AI Max (Strix Halo: 8 to 10 times the compute units and twice the memory bandwidth); it was not available.
 
+## Intel Core Ultra 5 235U laptop (Windows 11, no discrete GPU)
+
+Measured 2026-10-30 with the Windows cross build of fLLM (`fllm-rs.exe`, features `rust-gpu,vulkan`, version 0.1.12 plus the changes of that day),
+`scripts/bench_compare.py` on Windows (python 3.12), Q4_K_M files, 64 new tokens (not 128), 3 requests per row, medians, one request at a time, context 4096.
+Machine: Core Ultra 5 235U (2 performance + 8 efficiency + 2 low-power cores, 14 threads, AVX2 and AVX-VNNI, no AVX-512), 32 GB RAM, Intel Graphics
+(Arrow Lake-U iGPU, Vulkan 1.3, driver 32.0.101.8991, memory shared with the system), Intel AI Boost NPU. Prompt tok/s / decode tok/s; the prompt rows are
+about 111 tokens (60 words) and 545 tokens (380 words).
+
+| Model | Device | prompt 111 tokens | prompt 545 tokens | decode (545-token prompt) |
+|---|---|---|---|---|
+| Qwen2.5-0.5B-Instruct Q4_K_M | CPU | 125 | 196 | 29.0 (20.6 in the short-prompt run) |
+| Qwen2.5-0.5B-Instruct Q4_K_M | **Vulkan (native, iGPU)** | 434 | 625 | 49.2 |
+| Llama-3.2-1B-Instruct Q4_K_M | CPU | 117 | 149 | 20.9 (22.7 in the short-prompt run) |
+| Llama-3.2-1B-Instruct Q4_K_M | **Vulkan (native, iGPU)** | 229 | 411 | 29.9 |
+
+Reading: the iGPU is 1.5 to 2.8 times faster than the CPU for the prompt and 1.4 to 2.4 times for decode. CPU decode varies between runs on this hybrid processor
+(the same request gave 20.6 and 29.0 tokens/s for the 0.5B model, depending on which core types the worker threads landed on; `--pin-cores` and `--threads` were not tuned).
+The built-in `fllm-rs bench` (256-token prompt, chat endpoint, Qwen2.5-0.5B) gave 247 prompt tokens/s on the CPU and 1273 on the Vulkan iGPU; its prompt is shorter and it times
+differently, so do not compare it with the table. The NPU path (OpenVINO, prefill matmul offload only) was run through `selftest-gpu` only, not timed; no llama.cpp or Ollama
+number exists for this machine.
+
 ## What the night changed in fLLM
 
 The benchmarks and the tests that came with them found these, all fixed in the same state (`CHANGELOG.md`):

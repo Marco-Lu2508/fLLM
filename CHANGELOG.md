@@ -6,6 +6,15 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- **Windows run on an Intel Core Ultra 5 235U** (CPU, native Vulkan on the Intel iGPU, OpenVINO NPU, Studio): `selftest-gpu` 0 failed on `vulkan:0` and `npu:0` (35 failed on the experimental wgpu DirectX 12 path, the known block-32 problem); Qwen2.5-0.5B Q4_K_M decodes 49 tokens/s on the iGPU against 21 to 29 on the CPU. Numbers in `docs/benchmarks.md`, a one-page tester guide (binaries, commands, device choice, AMD NPU through FastFlowLM, what is unverified: NVIDIA and AMD on Windows) in `docs/windows.md`.
+- `windows-check.ps1` (now inside every Windows zip): also runs `nvidia-smi` and `amd-npu status`, self-tests every `cuda`/`hip`/`vulkan` device that `devices` lists, takes `-Devices cpu,cuda:0` for the speed part.
+- Workflow `windows-cuda-package` takes an `archs` input (`75;80;89;120` for a quick Turing to Blackwell build).
+
+### Fixed
+- Windows: the server also shuts down cleanly on Ctrl+Break, console close and logoff/shutdown (it handled Ctrl+C only).
+- `scripts/bench_compare.py` runs on Windows (no process groups, temp-dir log, `C:/...` binary paths in a config).
+
 ## [0.1.12] - 2026-10-30
 
 ### Added
