@@ -1776,9 +1776,9 @@ impl CudaStream {
             let (rows, cols) = (w.rows, w.cols);
             let back = match id {
                 8 => q8_0_from_device_layout(&bytes, rows, cols),
-                14 => bytes.chunks_exact(224).flat_map(|b| b[..210].iter().copied()).collect(),
+                14 => bytes.as_chunks::<224>().0.iter().flat_map(|b| b[..210].iter().copied()).collect(),
                 20 => legacy_from_device_layout(&bytes, rows, cols, 2),
-                k => legacy_from_device_layout(&bytes, rows, cols, k as u32),
+                k => legacy_from_device_layout(&bytes, rows, cols, k),
             };
             let mut host = self.cpu.allocate_buffer(back.len())?;
             self.cpu_stream.upload(&mut host, &back)?;
