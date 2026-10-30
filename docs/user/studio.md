@@ -10,11 +10,17 @@ fllm-rs studio                                # later starts reuse the last mode
 fllm-rs serve --model model.gguf              # the same page is served at / by every fllm-rs server
 ```
 
+![The Studio in the dark theme: a chat with a table, a code block and a collapsed reasoning block](../img/studio-chat-dark.webp)
+
 `studio` is `serve` plus two conveniences: it remembers the model it started with (and the one you switch to in the page) and opens the
 page in your default browser (`--no-open` keeps it closed). All other `serve` options work unchanged.
 
 ## Chat
 
+* The answer grows block by block while it streams: text you select, a code block you scrolled sideways and an image that has loaded
+  stay as they are. Code blocks have *Wrap* and *Copy*, tables scroll inside the column, and the line under an answer shows tokens per
+  second, the number of tokens, the time to the first token and the speed of reading the prompt (Settings, Appearance turns it off).
+  *Stop* (the square button, or Esc) ends the answer at once and keeps what was written.
 * Every chat is a tree. Editing one of your messages or regenerating an answer keeps the old version; switch between versions with the
   arrows under the message.
 * Markdown with tables, lists and highlighted code, collapsible reasoning blocks, a context meter, and live tokens-per-second.
@@ -326,6 +332,13 @@ The logic of assistants, memory and project retrieval is tested by `node rust/en
 
 ## Models
 
+![The Models page on the first start: the computer, the models that fit and one button each](../img/studio-first-run-models.webp)
+
+The model menu in the header (the button with the model name) lists the loaded model and the downloaded ones; a click on a
+downloaded model asks the same question as *Load* on this page and restarts the server with it.
+
+![The model menu with the loaded model and a downloaded one](../img/studio-model-menu.webp)
+
 Shows the loaded model, downloaded models and suggestions. Search Hugging Face (GGUF repositories, most downloaded first), look at the
 files with a hint whether they fit into the free memory, and download with a progress bar. **Load** restarts the server with another
 model: the page asks first, the server starts a new process with the same options and the new model, and the page reloads when it is
@@ -374,7 +387,12 @@ take a model, the model runs on the processor and the card shows why. AMD and Qu
 installer of this system and start it (Windows: the setup program, Linux: the AppImage or the package).
 ## Settings
 
-Grouped as General, Appearance, Models (models folder, idle unload), Hardware (devices, the NPU card, a speed test of the loaded model, processor
+The search box above the list of pages finds a setting by what it says (type "speed" and the pages that mention it stay in the list,
+best match first; Enter opens the first one and marks the row). On a phone the list is a row of tabs.
+
+![Searching the settings for "speed"](../img/studio-settings-search.webp)
+
+Grouped as General, Appearance, Models (models folder, idle unload), Hardware (every device with a memory bar, the one that runs the model marked, the NPU card, a speed test of the loaded model, processor
 feature limit, memory speed, a processor check), Server and API (address, request limits, API keys, a tester), Logs (the latest
 server messages with refresh and copy), Usage and cost (tokens per model counted in this browser, with the prices you enter),
 and under More: model details, text tools and ready-made examples for connecting Claude Code,
@@ -702,7 +720,18 @@ composer, another marks it done. `to` narrows a note to one chat title; empty me
 That is deliberately not a fake message bus: nothing runs in the background, the note simply waits. Routes:
 `GET`/`POST`/`DELETE /api/studio/agent/messages`.
 
+## The command palette
+
+Ctrl+K (Cmd+K on a Mac) opens one list for everything: commands (new chat, regenerate, export the chat, switch the theme, open Models or
+Settings, keyboard shortcuts, the welcome tour; their keys are shown on the right), your chats (by title, and by words inside them) and
+every page of the settings. Type to narrow the list, Up and Down move, Enter runs the highlighted entry, Esc closes. Letters you type
+need to start a word or sit close together ("kbd" finds "Keyboard shortcuts"), so the list does not fill up with chance matches.
+
+![The command palette searching for "hard"](../img/studio-palette.webp)
+
 ## The first start
+
+![The chat without a model: one button downloads the model that suits this computer](../img/studio-first-run.webp)
 
 Install, open, and the chat screen says what is missing instead of showing an empty box: *No model loaded* with one
 button — *Download and start* — for the model the hub recommends for this machine (name, quantization and size are on the
@@ -712,6 +741,18 @@ Hugging Face search and a field for a GGUF that is already on disk. Nothing has 
 downloaded without a click.
 
 ## The look
+
+The theme follows the light or dark setting of your system until you pick one (Settings, Appearance); the page does not flash the other
+theme while it loads. Below 760 px the sidebar is a drawer over the page (it closes after you choose something or tap the dimmed
+page), the composer shows its options as icons, and the settings pages are a row of tabs. Buttons and rows are at least 36 px high on
+touch screens. All text pairs meet the 4.5:1 contrast of WCAG AA (checked on the chat, Models and Settings pages in both themes), the
+sidebar chats are reachable with Tab and open with Enter, and every control shows a focus ring.
+
+![The Studio in the light theme](../img/studio-chat-light.webp)
+
+![On a phone: the chat, the sidebar drawer and the settings](../img/studio-phone-chat.webp)
+![](../img/studio-phone-drawer.webp)
+![](../img/studio-phone-settings.webp)
 
 `webui/theme.css` is the design system and is loaded after the older sheets, so it refines them without a rewrite: one accent
 colour per personality (**copper** by default — the colour of the material, since this is a Rust engine — with seven
@@ -732,6 +773,9 @@ browser, no address bar, no tab; the window is a webview of the running server, 
 It passes `--no-open` and removes `FLLM_OPEN_BROWSER` from the server's environment, so a browser cannot open even if the
 variable is set globally. The tray menu only handles the server and the window: *Open fLLM* brings the window forward,
 *Restart server* restarts it, *Open log folder*, *Quit*.
+
+If the engine does not start, the window says so with two buttons, *Restart the engine* and *Open the log folder*. A link in the
+page to another site opens in your default browser; the window stays on the Studio. [docs/user/desktop.md](desktop.md) has the rest.
 
 The command line version is separate: `fllm-rs studio` opens your browser once (for people who downloaded only the binary
 or run it in Docker) and `fllm-rs studio --no-open` does not; `fllm-rs serve` opens nothing at all.

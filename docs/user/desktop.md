@@ -5,7 +5,7 @@ from the menu, and pick a model on the first start. No terminal is needed.
 
 * **Windows:** run the setup (`.exe`) or the `.msi`.
 * **Linux:** install the `.deb` or `.rpm`, or make the `.AppImage` executable and start it.
-* **macOS:** planned.
+* **macOS:** the installer (`.dmg`, Apple silicon) is built by the `desktop` workflow and by the release workflow; it has not been run on a Mac yet and is not signed or notarized, so macOS asks you to confirm the first start (right click, Open).
 
 The installers are attached to every [release](https://github.com/Marco-Lu2508/fLLM/releases); the `desktop` workflow builds them for every change (Actions, then the artifacts of a run). They are not signed yet, so
 Windows may show a warning on the first start.
@@ -54,7 +54,15 @@ build with `cargo tauri build --config tauri.cuda.conf.json` after copying the C
   field and press the keys (Ctrl, Alt or Cmd is required). If another program already uses the combination the page says so and keeps
   the old hotkey. Some Linux desktops (Wayland) do not allow global hotkeys.
 * **Window place:** size and position are remembered between starts.
-* **If the server stops,** the window shows the loading page with a message. Use Restart server in the tray menu (the log is in the log folder, `server.log`).
+* **If the server stops,** the window shows the loading page with the reason and two buttons, *Restart the engine* and *Open the log folder*
+  (`server.log`); the tray menu has the same two entries. While the engine starts the page shows a quiet progress bar and, for a long model
+  load, the seconds so far.
+* **Links to other sites** (sources under an answer, links in a reply) open in your default browser; only `http`, `https` and `mailto`
+  links are handed to the system. The window never leaves the Studio.
+* **Light or dark:** the loading page and the Studio follow the system setting until you choose a theme.
+
+![The loading page while the engine starts](../img/desktop-loading.webp)
+![The loading page when the engine did not start](../img/desktop-error.webp)
 
 The options are in the Studio under Settings, Desktop app (the section only exists inside the app). The same page has the buttons
 Open log folder and Restart server.

@@ -223,6 +223,13 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 model manager (the desktop app shows the same page in its own window): [docs/user/studio.md](docs/user/studio.md).
 Inside the Studio:
 
+![The Studio: a chat with a table and a code block, dark theme](docs/img/studio-chat-dark.webp)
+
+The page follows the light or dark setting of your system, works down to a phone-sized window, has a command palette (Ctrl+K) and a
+settings search, and its footer and Hardware page show which device runs the model and how full each device's memory is
+([screenshots](docs/user/studio.md)). The desktop app has the same page in its own window, with a loading page that offers a restart and
+the log folder when the engine does not start.
+
 - **Chat**: projects, assistants, documents, web access and research, sampling controls, thinking levels.
 - **Coding agent** (Code page): reads, searches and edits files and runs commands in one folder, with permission
   rules, plan and build modes, sub-agents the agent can create itself, hooks, plugins, memory, skills and MCP tools.

@@ -29,8 +29,8 @@
   --muted-fg: #616874;
   --border: rgba(14, 17, 22, 0.10);
   --border-strong: rgba(14, 17, 22, 0.18);
-  --primary: #b4541f;
-  --primary-hover: #96440f;
+  --primary: #a64b1a;
+  --primary-hover: #8a3d12;
   --on-primary: #ffffff;
   --primary-soft: color-mix(in oklab, var(--primary) 14%, transparent);
   --accent-2: #2f5bb7;

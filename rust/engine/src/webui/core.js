@@ -2,7 +2,7 @@
     // One accent per personality; the first is copper — the colour of the material (Rust, patina),
     // not the acid green every AI tool reaches for.
     const ACCENT_COLORS = [
-      { name: 'Copper',  value: 'patina',  thumb: '#e08a4b', primary: '#e08a4b', primaryLight: '#b4541f', sidebar: { light: '#ffffff', dark: '#12151c' } },
+      { name: 'Copper',  value: 'patina',  thumb: '#e08a4b', primary: '#e08a4b', primaryLight: '#a64b1a', sidebar: { light: '#ffffff', dark: '#12151c' } },
       { name: 'Signal',  value: 'emerald', thumb: '#4ade80', primary: '#4ade80', primaryLight: '#15803d', sidebar: { light: '#ffffff', dark: '#12151c' } },
       { name: 'Indigo',  value: 'indigo',  thumb: '#8b8cf9', primary: '#8b8cf9', primaryLight: '#4338ca', sidebar: { light: '#ffffff', dark: '#12151c' } },
       { name: 'Cyan',    value: 'cyan',    thumb: '#22d3ee', primary: '#22d3ee', primaryLight: '#0e7490', sidebar: { light: '#ffffff', dark: '#12151c' } },
