@@ -1,0 +1,159 @@
+#version 450
+// FLLM-SHADER: mm_<fmt>_cw | bindings: 0 weights(u32[]) 1 x(vec4[], batch x cols f32) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/128) x ceil(batch/64) x 1
+// Wide variant of mm_coopmat.comp for devices with 32-wide subgroups and plenty of shared memory (NVIDIA): the same cooperative-matrix product
+// (VK_KHR_cooperative_matrix, 16x16x16 float16 inputs, float32 accumulators) with a larger output tile per workgroup of NSGM x NSGN subgroups
+// (macros BM x BN, K step BK; default 128 x 64, K step 64, 8 subgroups of 32 x 32), so every dequantized weight is reused for more activation rows and every converted activation for more weight rows,
+// and the packed weights and activations of the NEXT K step are fetched into registers before the matrix multiply-adds of the current step, so their
+// memory latency overlaps the tensor cores. Subgroup s computes the (BM / NSGM) x (BN / NSGN) sub-tile at weight rows (s % NSGM) * (BM / NSGM) and
+// activation rows (s / NSGM) * (BN / NSGN).
+// Requires: shaderFloat16, cooperativeMatrix 16x16x16 (float16 A/B, float32 C/Result, subgroup scope), subgroup size 32 (the planner checks it).
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#define FLLM_NO_HW_DOT 1
+#include "_q_ext.glsl"
+
+#ifndef BM
+#define BM 128
+#endif
+#ifndef BN
+#define BN 64
+#endif
+#ifndef BK
+#define BK 64
+#endif
+#ifndef NSGM
+#define NSGM 4
+#endif
+#ifndef NSGN
+#define NSGN 2
+#endif
+#define NSG (NSGM * NSGN)
+#define WG (NSG * 32u)
+#define WM (BM / NSGM)   // sub-tile of one subgroup
+#define WN (BN / NSGN)
+#define FM (WM / 16)     // 16 x 16 fragments of it
+#define FN (WN / 16)
+#define LDS (BK + 8u)    // row stride of the f16 tiles in elements (keeps 16-byte alignment, no bank conflicts)
+#define CPR (BK / 8u)    // weight chunks per tile row
+#define QPR (BK / 4u)    // activation vec4 per tile row
+#define WITEMS ((BM * CPR) / WG)   // weight chunks per invocation and K step
+#define XITEMS ((BN * QPR) / WG)   // activation vec4 per invocation and K step
+
+layout(local_size_x = 32 * NSGM * NSGN, local_size_y = 1, local_size_z = 1) in;
+
+#include "_q_common.glsl"
+#include "_q_formats.glsl"
+#ifdef FLOAT_CHUNK
+#error "float-chunk formats (FP8, NF4, FP4) have only the f32 shaders"
+#endif
+
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { vec4 xv[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+// the f16 tiles are arrays of f16vec4 (a chunk of 8 weights is two 8-byte stores, not eight 2-byte stores)
+shared f16vec4 As[BM * LDS / 4u];   // As[m * LDS + k] in halves
+shared f16vec4 Bs[BN * LDS / 4u];   // Bs[n * LDS + k] in halves
+shared float Cs[NSG * 256];         // one 16 x 16 staging tile per subgroup
+
+uint r_p0[WITEMS];
+uint r_p1[WITEMS];
+float r_ws[WITEMS];
+float r_wm[WITEMS];
+vec4 r_x[XITEMS];
+
+// the packed weights and the activations of K step k0 into registers
+void fetch(uint k0, uint t, uint m0, uint n0) {
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint row = m0 + i / CPR;
+        const uint kk = k0 + (i % CPR) * 8u;
+        uint p0 = 0u, p1 = 0u;
+        float ws = 0.0, wm = 0.0;
+        if (row < p.rows) wchunk(row * p.nb + kk / QK, (kk % QK) >> 3, p0, p1, ws, wm);
+        r_p0[e] = p0;
+        r_p1[e] = p1;
+        r_ws[e] = ws;
+        r_wm[e] = wm;
+    }
+    [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint token = n0 + i / QPR;
+        vec4 v = vec4(0.0);
+        if (token < p.batch) v = xv[(token * p.cols + k0 + (i % QPR) * 4u) >> 2];
+        r_x[e] = v;
+    }
+}
+
+// the registers to the shared f16 tiles
+void stash(uint t) {
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        float vals[8];
+        chunk_floats(r_p0[e], r_p1[e], r_ws[e], r_wm[e], vals);
+        const uint base = ((i / CPR) * LDS + (i % CPR) * 8u) >> 2;
+        As[base] = f16vec4(vals[0], vals[1], vals[2], vals[3]);
+        As[base + 1u] = f16vec4(vals[4], vals[5], vals[6], vals[7]);
+    }
+    [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
+        const uint i = t + e * WG;
+        Bs[((i / QPR) * LDS + (i % QPR) * 4u) >> 2] = f16vec4(r_x[e]);
+    }
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint sg = gl_SubgroupID;
+    const uint lane = gl_SubgroupInvocationID;
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+    const uint sm = (sg % NSGM) * WM;   // weight-row offset of this subgroup's sub-tile
+    const uint sn = (sg / NSGM) * WN;   // activation-row offset
+
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc[FM * FN];
+    [[unroll]] for (uint i = 0; i < FM * FN; ++i) acc[i] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+
+    fetch(0u, t, m0, n0);
+    for (uint k0 = 0; k0 < p.cols; k0 += BK) {
+        stash(t);
+        barrier();
+        if (k0 + BK < p.cols) fetch(k0 + BK, t, m0, n0);
+        [[unroll]] for (uint kk = 0; kk < BK / 16; ++kk) {
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> ma[FM];
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> mb[FN];
+            [[unroll]] for (uint i = 0; i < FM; ++i)
+                coopMatLoad(ma[i], As, ((sm + i * 16u) * LDS + kk * 16u) >> 2, LDS >> 2, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0; j < FN; ++j)
+                coopMatLoad(mb[j], Bs, ((sn + j * 16u) * LDS + kk * 16u) >> 2, LDS >> 2, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0; i < FM; ++i) {
+                [[unroll]] for (uint j = 0; j < FN; ++j) acc[i * FN + j] = coopMatMulAdd(ma[i], mb[j], acc[i * FN + j]);
+            }
+        }
+        barrier();
+    }
+
+    // epilogue: stage each 16 x 16 accumulator through shared memory, apply scale and bias, write the output (row-contiguous)
+    [[unroll]] for (uint i = 0; i < FM; ++i) {
+        [[unroll]] for (uint j = 0; j < FN; ++j) {
+            coopMatStore(acc[i * FN + j], Cs, sg * 256u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            for (uint idx = lane; idx < 256u; idx += 32u) {
+                const uint m = idx & 15u;
+                const uint n = idx >> 4;
+                const uint row = m0 + sm + i * 16u + m;
+                const uint token = n0 + sn + j * 16u + n;
+                if (row < p.rows && token < p.batch) {
+                    float v = Cs[sg * 256u + idx] * p.scale;
+                    if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+                    outv[token * p.out_stride + p.row_base + row] = v;
+                }
+            }
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+        }
+    }
+}

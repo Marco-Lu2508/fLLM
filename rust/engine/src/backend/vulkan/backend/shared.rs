@@ -253,7 +253,7 @@ impl Shared {
         let words = self.spirv_words(name)?;
         let constants: Vec<PipeConst> = spec.iter().map(|&(id, value)| PipeConst::u32(id, value)).collect();
         let mut pipeline_spec = PipelineSpec::new(name, &words, bindings, push_bytes).with_spec_constants(&constants);
-        if name.starts_with("mm_") && name.ends_with("_c") {
+        if (name.starts_with("mm_") && (name.ends_with("_c") || name.ends_with("_cw"))) || name.starts_with("attn_prefill_cm_") {
             if let Some(size) = self.coop_pin {
                 pipeline_spec = pipeline_spec.with_subgroup_size(size);
             }

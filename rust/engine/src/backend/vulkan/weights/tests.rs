@@ -421,11 +421,22 @@ fn prefill_prefers_cooperative_matrices_then_integer_dot_then_f32() {
     .unwrap();
     assert_eq!(
         (plan.shader_name.as_str(), plan.variant),
-        ("mm_q6_k_c", Variant::CoopMat)
+        ("mm_q6_k_cw", Variant::CoopMat)
     );
-    assert_eq!(plan.spec_constants, [SpecConstant { id: 0, value: 128 }]);
-    assert_eq!(plan.groups, [64, 8, 1]);
+    // NVIDIA, 32-wide subgroups, K a multiple of 64: the wide 128 x 64 tile (no specialization constant, fixed workgroup of 256)
+    assert!(plan.spec_constants.is_empty());
+    assert_eq!(plan.groups, [32, 8, 1]);
     assert!(plan.activation_prepass.is_none());
+    // a small batch, a K that is no multiple of 64 and other vendors keep the 64 x 64 tile
+    for (cols, batch, vendor) in [(4096, 32, 0x10de), (4096, 512, 0x1002)] {
+        let caps = VkCapsLike { vendor, ..caps_full() };
+        let plan = plan_quantized_linear_with(QuantType::Q6_K, 4096, cols, batch, &caps, &lossy_options()).unwrap();
+        assert_eq!(plan.shader_name, "mm_q6_k_c", "{cols} {batch} {vendor:#x}");
+        assert_eq!(plan.spec_constants, [SpecConstant { id: 0, value: 128 }]);
+        assert_eq!(plan.groups, [64, (batch as u32).div_ceil(64), 1]);
+    }
+    let plan = plan_quantized_linear_with(QuantType::Q4_0, 128, 288, 512, &caps_full(), &lossy_options()).unwrap();
+    assert_eq!(plan.shader_name, "mm_q4_0_c", "K = 288 is no multiple of the 64-wide K step");
 
     let no_coop = VkCapsLike {
         coop_matrix: false,

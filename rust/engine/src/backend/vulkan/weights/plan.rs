@@ -22,6 +22,21 @@ pub const MAX_GROUPS_PER_DIM: u64 = 65535;
 
 /// Shared memory (bytes) the cooperative-matrix shader needs: two f16 tiles of 64 x 40 and four 16 x 16 f32 staging tiles.
 const COOPMAT_SHARED: u32 = 2 * 64 * 40 * 2 + 4 * 256 * 4;
+/// Shared memory of the wide cooperative-matrix shader (`mm_<fmt>_cw`): f16 tiles of 128 + 64 rows x 72 and eight 16 x 16 f32 staging tiles.
+const COOPMAT_WIDE_SHARED: u32 = (128 + 64) * 72 * 2 + 8 * 256 * 4;
+/// PCI vendor id of NVIDIA.
+const VENDOR_NVIDIA: u32 = 0x10de;
+
+/// Smallest batch served by the wide 128 x 64 cooperative-matrix tile (`mm_<fmt>_cw`, NVIDIA): `FLLM_VK_COOP_WIDE` = `0` / `off` never uses it, a number
+/// sets the threshold (default 64); smaller batches keep the 64 x 64 tile of `mm_<fmt>_c`.
+fn coop_wide_min_batch() -> Option<u32> {
+    static MIN: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| match std::env::var("FLLM_VK_COOP_WIDE") {
+        Ok(v) if matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "off" | "no" | "false") => None,
+        Ok(v) => Some(v.trim().parse::<u32>().ok().filter(|&n| n > 0).unwrap_or(64)),
+        Err(_) => Some(64),
+    })
+}
 /// Shared memory of the tiled f32 / int8 matrix-matrix shaders.
 const MM_SCALAR_SHARED: u32 = 2 * 16 * 16 * 16;
 const MM_IDOT_SHARED: u32 = 64 * 8 * 4 * 2 + 64 * 4 * 4 * 2 + 64 * 4;
@@ -507,8 +522,19 @@ pub fn plan_quantized_linear_with(
     } else {
         None
     };
+    // NVIDIA: the 128 x 64 cooperative-matrix tile (K step 64) for prompt-sized batches
+    let coop_wide = !matvec
+        && variant == Variant::CoopMat
+        && caps.vendor == VENDOR_NVIDIA
+        && caps.subgroup_size == 32
+        && caps.max_workgroup >= 256
+        && caps.max_shared >= COOPMAT_WIDE_SHARED
+        && cols32 % 64 == 0
+        && coop_wide_min_batch().is_some_and(|min| batch32 >= min)
+        && available(&format!("mm_{tag}_cw"));
     let shader_name = match &mmq {
         Some((name, _)) => name.clone(),
+        None if coop_wide => format!("mm_{tag}_cw"),
         None => format!("{prefix}_{tag}_{}", variant.suffix()),
     };
     let out_stride = options.out_stride.unwrap_or(rows32);
@@ -568,7 +594,7 @@ pub fn plan_quantized_linear_with(
             ],
         )
     } else {
-        let spec = if variant == Variant::CoopMat {
+        let spec = if variant == Variant::CoopMat && !coop_wide {
             vec![SpecConstant {
                 id: 0,
                 value: 4 * caps.subgroup_size,
@@ -579,11 +605,14 @@ pub fn plan_quantized_linear_with(
         (
             PlanKind::MatMul,
             spec,
-            [
-                (rows as u64).div_ceil(64) as u32,
-                (batch as u64).div_ceil(64) as u32,
-                1,
-            ],
+            {
+                let (tm, tn) = if coop_wide { (128, 64) } else { (64, 64) };
+                [
+                    (rows as u64).div_ceil(tm) as u32,
+                    (batch as u64).div_ceil(tn) as u32,
+                    1,
+                ]
+            },
         )
     };
 
