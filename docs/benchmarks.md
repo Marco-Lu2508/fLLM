@@ -362,8 +362,107 @@ What the numbers say, and how it was found:
   limited by its own structure, not by the weight decoding); Vulkan cooperative matrices with the weights dequantized to FP16 in shared memory: 14 ms against 10 ms for the integer dot
   product; removing the decoding and the activation conversion from that shader still left 8.4 ms, so the f16 cooperative-matrix route cannot beat the integer-dot route here
   (both have the same peak rate on RDNA 3.5; only an int8 matrix-core kernel would, and the per-block scales of the K-quants make that a larger rewrite).
-* **Not done:** the prompt gap to llama.cpp (265 against 293 tok/s on the 3B, 98 against 124 on the 8B) and the HIP prompt (about 230 against llama.cpp ROCm's 298).
+* **Not done:** the prompt gap to llama.cpp (265 against 293 tok/s on the 3B, 98 against 124 on the 8B) and the HIP prompt (about 230 against llama.cpp ROCm's 298). The decode kernels of 9 to 16 rows (the 8-request gap above) and the int8 matrix-core question are in the third pass below.
 
+## Third pass (2026-10-30, evening): small-batch kernels, the matrix units, the memory plan
+
+Same two laptops. New: `FLLM_VK_BENCH_LINEAR=1` times typical projections once at the first projection (random weights, several copies rotated so that no cache holds them, best of three runs of
+twelve products) and prints `ms / TMAC/s / GB/s` per number of activation rows. All numbers below come from it unless a table says otherwise; the clock of the 840M varies by run (power limit), so
+compare columns of one run and read differences below 10 % as noise.
+
+### Radeon 840M: matrix-vector kernels for 1 to 16 rows
+
+Before this pass the matrix-vector shaders served up to 8 rows and the tiled int8 kernel (`mmq_<fmt>_i`) everything above. The tiled kernel costs the same for 9 as for 64 rows (a Q4_K
+8192 x 3072 weight: 1.9 ms for 9 .. 32 rows, 2.0 ms for 64: it is limited by decoding the weights, 0.12 TMAC/s at 9 rows). Eight decoding sequences plus a speculative draft are 9 to 16 rows, so the
+default case of eight users sat on the slow side. Now the matrix-vector range is 1 to 16 rows (without tensor cores), and the Q4_K shader got a row-group variant. ms per product:
+
+| rows | 1 | 2 | 3 | 4 | 6 | 8 | 9 | 12 | 16 |
+|---|---|---|---|---|---|---|---|---|---|
+| Q4_K 8192x3072, before | 0.209 | 0.248 | 0.305 | 0.364 | 0.547 | 0.803 | 1.889 | 1.882 | 1.896 |
+| Q4_K 8192x3072, after | 0.195 | 0.189 | 0.230 | 0.238 | 0.311 | 0.375 | 0.446 | 0.553 | 0.679 |
+| Q4_K 3072x3072, before / after | 0.091 / 0.097 | 0.104 / 0.081 | 0.110 / 0.088 | 0.131 / 0.091 | 0.202 / 0.110 | 0.279 / 0.135 | 0.653 / 0.150 | 0.655 / 0.191 | 0.666 / 0.229 |
+| Q6_K 3072x8192, before / after | 0.264 / 0.252 | 0.266 / 0.260 | 0.279 / 0.294 | 0.316 / 0.335 | 0.420 / 0.447 | 0.536 / 0.573 | 3.448 / 0.520 | 3.446 / 0.682 | 3.449 / 0.740 |
+| Q4_0 8192x3072, before / after | 0.283 / 0.242 | 0.288 / 0.255 | 0.299 / 0.273 | 0.324 / 0.300 | 0.420 / 0.421 | 0.529 / 0.536 | 1.742 / 0.665 | 1.741 / 0.905 | 1.702 / 1.220 |
+| Q8_0 3072x3072, before / after | 0.156 / 0.144 | 0.145 / 0.146 | 0.148 / 0.149 | 0.153 / 0.152 | 0.184 / 0.189 | 0.224 / 0.236 | 0.974 / 0.289 | 1.049 / 0.368 | 1.078 / 0.487 |
+
+The Q4_K product now runs at 0.13 / 0.26 / 0.41 / 0.54 / 0.60 TMAC/s for 1 / 2 / 4 / 8 / 16 rows (before: 0.12 / 0.20 / 0.28 / 0.25 / 0.22, the last through the tiled
+kernel); the peak of the integer dot product on this GPU is 2.6 TMAC/s (measured below), the tiled prompt kernel reaches 0.8 - 0.85. What it took, in the order it was found (the ISA from `RADV_DEBUG=shaders` showed
+about 330 instructions for 512 multiply-adds): (1) the sum of the quantized activations of a group, which the additive term of Q4_K needs, was computed again by every invocation (8 of the
+24 dot products per block and column): the prepass `quant_act_q8` writes `d * sum(q)` per block now; (2) accumulating dot products (`OpSDotAccSat`) instead of dot product + add; (3) the work-group
+reduction in shared memory (233 LDS instructions, a third of the shader at K = 3072) disappears when every group of 8 invocations owns its rows (`mv_q4_k_g`); (4) groups start at different blocks:
+row strides that are multiples of a power of two put the concurrent reads of a step on one memory channel (the row-group variant of Q6_K, 8192 columns, was 3.4 times slower without it; it did
+not help Q6_K and is not used for it). The row-group kernel is slower than the old layout for 1 and 2 rows (fewer loads in flight), so those keep the old one.
+Q6_K and the other formats gain only from the larger range (9 to 16 rows 3 to 7 times faster); their 3 .. 8 row speed is unchanged because it is limited by decoding the weights.
+
+Whole model (`scripts/bench_compare.py`, medians of 2 runs, 128 new tokens, total tok/s of all requests including the prompt phase, native Vulkan, Radeon 840M, the machine otherwise idle):
+
+| Llama-3.2-3B Q4_K_M | 1 request, 60 words: decode | 4 requests, 60 words | 8 requests, 60 words | 1 request, 380 words: prompt / decode | 4 requests, 380 words | 8 requests, 380 words |
+|---|---|---|---|---|---|---|
+| before this pass | 32.4 | 43.7 | 36.0 | 264.5 / 29.6 | 24.5 | 21.8 |
+| after | 35.0 | 61.4 | 59.0 | 264.6 / 32.5 | 30.0 | 31.0 |
+| llama.cpp Vulkan (earlier today) | | 37.1 | 59.0 | | 30.0 | 34.4 |
+
+Llama-3.1-8B Q4_K_M (all layers on the GPU, 380-word prompts): one request 96.6 -> 100.3 tok/s prompt and 14.4 -> 15.2 decode; 8 requests 9.6 -> 14.6 tok/s in total (the prompt phase dominates: median
+time to the first token 43 s for eight 545-token prompts). The prompt rate itself is unchanged by this pass (the same kernels), the 3B prompt gap to llama.cpp (265 against 293) is still open.
+
+### Int8 matrix cores (WMMA) on the 840M: measured, not built
+
+The note of the second pass said that only an int8 matrix-core kernel could beat the integer dot product. RADV exposes `16x16x16 I8*I8+I32` cooperative matrices on this GPU. `FLLM_VK_BENCH_LINEAR=1` now
+measures the raw rates on registers (the fragments come from shared memory, nothing else is read), TMAC/s, three identical repetitions:
+
+| unit | 32 x 32 subgroup tile (4 products per 16-deep step) | 64 x 64 subgroup tile (16 products per step) |
+|---|---|---|
+| float16 cooperative matrices (float32 accumulators) | 1.63 | 2.55 |
+| **int8 cooperative matrices (int32 accumulators)** | 2.04 | 2.50 |
+| int8 matrices + per quantization group: convert the int32 accumulator, multiply by a row-scale and a column-scale matrix, add (what a K-quant tile must do) | 1.56 | 1.67 |
+| int8 dot product (`OpSDotAccSat`, four independent chains) | 2.60 | |
+
+So on this RDNA 3.5 part the int8 matrix unit has **the same peak as float16 (2.5 TMAC/s) and as the dot product (2.6)**; it is not twice as fast, and the per-group scaling of a K-quant costs a third of it. A
+kernel built on it cannot beat the tiled dot-product kernel (0.85 TMAC/s) by more than the margin that kernel itself loses to decoding, and the float16 matrix-core experiment of the second pass (14 against 10 ms,
+the same peak) showed that this margin is not there. **No int8 matrix-core kernel was written**: the measured rates do not support it on this GPU, and the planner keeps choosing between the cooperative-matrix and the dot-product tile with the
+existing timing at the first prompt. The same benchmark prints the shapes of a device (an RTX 2000 Ada offers int8 only as 16 x 16 x 32, which the benchmark shaders do not use; an RDNA 4 or Xe2 device could show a 2x
+int8 rate: run the benchmark there before writing anything). HIP uses the same WMMA unit (`v_wmma_i32_16x16x16_iu8`); it was not measured separately, the conclusion follows from the identical hardware. The HIP prompt gap (about 230 against llama.cpp ROCm's
+298 tok/s, whose quantized kernels use the dot product, not matrix cores) would need a dot-product tiled kernel like the Vulkan `mmq_<fmt>_i` ported to HIP; that was **not done**.
+
+### RTX 2000 Ada (Vulkan): matrix-vector range, Q4_K loader, Q6_K
+
+Matrix-vector kernels against the cooperative-matrix tile (8192 x 3072 Q4_K, ms): 6 / 8 / 9 / 12 / 16 rows 0.285 / 0.397 / 0.270 / 0.274 / 0.276 before (the tile from 9 rows), 0.134 / 0.159 / 0.160 / 0.214 / 0.235 with the row-group
+kernel for 6 to 16 rows. Where the matrix-vector kernels lose they keep the old range: a per-format table gives 16 rows to Q4_K, 12 to Q6_K and Q8_0 and 8 to the others (Q4_0 at 12 / 16 rows: 0.28 / 0.38 ms as
+matrix-vector against 0.24 / 0.25 with the tile). Whole model, Llama-3.2-3B, 8 requests of 380 words: 148.4 -> 162.4 tok/s in total (8 requests of 1500 words 83.7 -> 81.7, within noise); Llama-3.1-8B 73.0 / 72.7 and 30.4 / 31.2.
+
+Q4_K loader of the wide tile (`mm_q4_k_cw`; one K step of 64 is one pair of scale groups, an invocation reads 16 bytes of qs with one wide load and the scales, minimums and d / dmin of the pair once, instead of five
+loads per chunk of 8 weights): isolated, 64 tokens: 8192 x 3072 5.0 -> 5.7 - 6.3 TMAC/s, 3072 x 3072 3.7 -> 5.5, 32768 x 3072 5.8 -> 6.3. From 128 tokens on the tile runs at 7.7 - 8.6 TMAC/s (128) and 9.9 - 10.8 (512 tokens), about
+20 TFLOPS, which is the rate of this card's tensor cores for float16 products with float32 accumulation (GeForce parts run those at half rate), so the loader cannot help there. Whole model: prompt of 380 words 2274 -> 2316 tok/s (3B), 835 -> 853 (8B), 1500 words
+2959 -> 2964 and 1127 -> 1156: **+0 to 3 %, inside the run-to-run noise**. A Q4_K_M model is about a third Q6_K (and some Q5_K / Q8_0) by weight, which still use the generic loader. The "roughly 14 TFLOPS limited by the weight fetch"
+of the earlier note is 11 - 13 TFLOPS at 64 tokens and about 20 at 512 tokens in isolation now; the distance to llama.cpp's matmul that note mentioned is not in the loader.
+
+Q6_K: the claim that its decode streams at 155 against 230 GB/s for Q4_K did not reproduce in isolation. The vocabulary projection (128256 x 3072, 323 MB) streams at 233 - 235 GB/s with 1 and 2 rows, the Q4_K one at 229 GB/s; the
+dip is at 3 to 12 rows (Q6_K 160 -> 59 GB/s, 0.6 - 0.9 TMAC/s against Q4_K's 1.4 - 1.7 TMAC/s), where decoding the 6-bit weights is the limit. A cheaper decode (a sign trick that saves a third of the instructions), a row-group variant and
+the larger range were tried: only the range change (9 .. 12 rows) helped; neither changed the 3 .. 8 row speed on the 840M or on the RTX.
+
+### Memory plan under memory pressure
+
+Measured on the 14 GB Radeon 840M laptop (Llama-3.1-8B Q4_K_M, 5.0 GB of weights; another process holds N GB; two 380-word prompts after the start; the 17-word vocabulary of the prompt makes the
+n-gram speculation accept a lot, so read the decode column relatively):
+
+| RAM available at start | plan | prompt tok/s | decode tok/s |
+|---|---|---|---|
+| 13.6 GB | all 32 layers on the GPU, context 10256 | 97 / 106 | 29.9 / 32.8 |
+| 7.7 GB | all 32 layers, context 9920 | 96 / 105 | 26.1 / 28.9 |
+| 5.8 GB | **17 of 32 layers**, the feed-forward weights of the other 15 stay on the host | 76 / 99 | 12.7 / 9.5 |
+
+The plan is deterministic for a given figure; what moved between runs was the figure (page cache, a browser tab). The planner now rounds the memory it may use down to steps of 256 MiB and logs
+`memory for the plan: X MiB free on <device> (device reports Y MiB, clamped to the free system memory), taken as Z MiB`, so a small fluctuation does not flip a plan from "everything on the device" to "15 layers on the CPU"
+(2.5 to 3 times slower decode) unless it crosses a step. It does not invent memory: when the weights, a context of at least 4096 tokens and the scratch memory (about 6 GB for the 8B model) do not fit, the plan still moves
+feed-forward weights to the host (on this iGPU: to the CPU), and the decode speed drops by that factor; `--ctx N` trades the other way. On the 8 GB RTX 2000 Ada the same 8B model
+plans all 32 layers with a 10320-token context from an empty card (budget 7.36 of 8.59 GB). Not measured: an 8 GB card with another process holding VRAM (the card was free), a CUDA run of this plan test.
+
+### Not done in this pass
+
+* An int8 matrix-core kernel (Vulkan or HIP): see above, the measured peak gives nothing to win on the 840M.
+* The HIP prompt gap (230 against 298 tok/s) and the Vulkan 3B prompt gap (265 against 293): both need a faster dot-product tiled kernel, not matrix cores. The Vulkan one is at 0.8 - 0.85 of a 2.6 TMAC/s peak.
+* Q6_K at 3 to 12 rows (decode-bound); a block-wide activation scale (Q8_K style) would take a quarter of the arithmetic out of the Q4_K / Q6_K kernels but changes the numerics of every projection.
+* One laptop per vendor, one session each.
 ## Limits
 
 * One machine per vendor, one run of each configuration (medians of three requests, but no repeated sessions); expect a few percent of noise.

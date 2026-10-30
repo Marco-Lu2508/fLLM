@@ -257,7 +257,13 @@ Ordered by area.
   `FLLM_VULKAN_EXACT=1` for comparisons; the Vulkan self test passes only with it.
 * Tuning and measuring a device: `FLLM_VK_PROFILE=1` times every dispatch with GPU timestamps and prints a table of the biggest shaders to stderr
   every 256 submissions; `FLLM_VK_MV_WG` (32..256, power of two) and `FLLM_VK_MV_ROWS` (1..8) override the work-group size and the rows per
-  work group of the matrix-vector shaders. On an AMD integrated GPU (Ryzen Z1 Extreme) the dedicated Q4_K / Q6_K matrix-vector shaders
+  work group of the matrix-vector shaders; `FLLM_VK_MV_MAX` (1..16) the largest batch they serve (default 16, on NVIDIA a per-format table: Q4_K 16, Q6_K and Q8_0 12,
+  the rest 8, because the cooperative-matrix tile wins above that). `FLLM_VK_BENCH_LINEAR=1` prints, at the first projection, the time of typical projections
+  (milliseconds, TMAC/s and GB/s for 1 .. 512 rows of Q4_K / Q6_K / Q4_0 / Q8_0 weights, vocabulary-sized ones included), the cooperative-matrix shapes of the device and the raw
+  rates of the matrix units (float16 and int8 cooperative matrices, with and without the conversion and scaling of a quantization group, and the int8 dot product).
+  Q4_K from 3 rows on uses `mv_q4_k_g`, a row-group variant: every group of 8 invocations owns its rows and walks all their blocks, so the sum over the blocks needs no
+  work-group reduction (3 to 4 times faster from 9 rows on than the shared-memory tree on a Radeon 840M). The planner's memory budget is taken in steps of 256 MiB and the
+  server logs the figures it used (`memory for the plan: ...`), see [benchmarks.md](benchmarks.md). On an AMD integrated GPU (Ryzen Z1 Extreme) the dedicated Q4_K / Q6_K matrix-vector shaders
   (`mv_q4k_idot`, `mv_q6k_idot`), 64 invocations with one row and the split of the key range from 64 keys on raised decode of a 1.5B Q4_K_M
   model from 49 to 64 tokens/s.
 * NVIDIA prompts (RTX 2000 Ada, 2026-10-30): `mm_<fmt>_cw` is a 128 x 64 cooperative-matrix tile with a 64-wide K step and a prefetch of the next step into
