@@ -70,6 +70,17 @@ pub static DQB_VARIANTS: [Variant; 8] = [
     Variant { m: 512, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dqb_m512_k4096_n1024.insts") },
 ];
 
+/// The same program built with 16-row tiles (`MT=16`): a call takes 64 rows, so small batches (concurrent decode streams, the tail of a
+/// prompt) do not pay for 256 padded rows. Reads the same packed weight tiles as [`DQB_XCLBIN`].
+pub static DQBS_XCLBIN: &[u8] = include_bytes!("../../../../../xdna/kernels/gemm_dqbs_q4_8col.xclbin");
+
+pub static DQBS_VARIANTS: [Variant; 4] = [
+    Variant { m: 64, k: 1024, insts: include_bytes!("../../../../../xdna/kernels/dqbs_m64_k1024_n1024.insts") },
+    Variant { m: 64, k: 2048, insts: include_bytes!("../../../../../xdna/kernels/dqbs_m64_k2048_n1024.insts") },
+    Variant { m: 64, k: 3072, insts: include_bytes!("../../../../../xdna/kernels/dqbs_m64_k3072_n1024.insts") },
+    Variant { m: 64, k: 4096, insts: include_bytes!("../../../../../xdna/kernels/dqbs_m64_k4096_n1024.insts") },
+];
+
 /// Index into [`VARIANTS`] for `(m, k)`.
 pub fn variant_index(m: usize, k: usize) -> Option<usize> {
     variant_index_in(&VARIANTS, m, k)

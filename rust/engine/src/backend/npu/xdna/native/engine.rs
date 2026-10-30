@@ -41,6 +41,8 @@ pub struct Settings {
     pub stats_every: usize,
     /// `FLLM_XDNA_PRECISION`: `fast` (default: 4-bit weights as block floating point on the native bfp16 MAC), `exact` (bf16 products).
     pub weights: WeightMode,
+    /// `FLLM_XDNA_SMALL=0` switches the 64-row program for small batches off.
+    pub small: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +66,7 @@ impl Settings {
             min_eff: std::env::var("FLLM_XDNA_MIN_EFF").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0.5),
             resident_budget: env_usize("FLLM_XDNA_RESIDENT_MB").map_or(default_budget, |mb| (mb as u64) << 20),
             stats_every: env_usize("FLLM_XDNA_STATS").unwrap_or(0),
+            small: std::env::var("FLLM_XDNA_SMALL").map(|v| !matches!(v.trim(), "0" | "off" | "false")).unwrap_or(true),
             weights: match std::env::var("FLLM_XDNA_PRECISION").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
                 "exact" | "bf16" => WeightMode::Exact,
                 _ => WeightMode::Fast,
@@ -149,11 +152,13 @@ enum Kind {
     Bf16 = 0,
     Dq = 1,
     Dqb = 2,
+    /// The block-floating-point program with 16-row tiles (64 rows per call) for small batches; reads the tiles of `Dqb`.
+    DqbS = 3,
 }
 
 impl Kind {
     fn packed(self) -> bool {
-        self != Kind::Bf16
+        matches!(self, Kind::Dq | Kind::Dqb | Kind::DqbS)
     }
 
     fn variants(self) -> &'static [Variant] {
@@ -161,6 +166,7 @@ impl Kind {
             Kind::Bf16 => &VARIANTS,
             Kind::Dq => &kernels::DQ_VARIANTS,
             Kind::Dqb => &kernels::DQB_VARIANTS,
+            Kind::DqbS => &kernels::DQBS_VARIANTS,
         }
     }
 
@@ -169,6 +175,7 @@ impl Kind {
             Kind::Bf16 => kernels::XCLBIN,
             Kind::Dq => kernels::DQ_XCLBIN,
             Kind::Dqb => kernels::DQB_XCLBIN,
+            Kind::DqbS => kernels::DQBS_XCLBIN,
         }
     }
 
@@ -183,6 +190,7 @@ impl Kind {
             Kind::Bf16 => "bf16 weights",
             Kind::Dq => "4-bit weights, exact products",
             Kind::Dqb => "4-bit weights, block floating point",
+            Kind::DqbS => "4-bit weights, block floating point, small batches",
         }
     }
 }
@@ -197,9 +205,9 @@ struct Prog {
 
 struct Inner {
     /// Indexed by [`Kind`]; the bf16 program is always loaded, the others when the first weight needs them.
-    progs: [Option<Prog>; 3],
+    progs: [Option<Prog>; 4],
     /// Loading or checking a program failed: its weights stay in the next best form.
-    failed: [bool; 3],
+    failed: [bool; 4],
 }
 
 impl Prog {
@@ -279,7 +287,7 @@ impl XdnaEngine {
             device_name: device_name(),
             shim: Arc::clone(shim),
             index,
-            inner: Mutex::new(Inner { progs: [Some(Prog::new(ctx, Kind::Bf16)), None, None], failed: [false; 3] }),
+            inner: Mutex::new(Inner { progs: [Some(Prog::new(ctx, Kind::Bf16)), None, None, None], failed: [false; 4] }),
             slots: Mutex::new(HashMap::new()),
             resident: AtomicU64::new(0),
             resident_dq: AtomicU64::new(0),
@@ -484,7 +492,7 @@ impl XdnaEngine {
             }
         }
         // block floating point carries 8-bit mantissas: about 0.75 % of the largest result
-        let allowed = if kind == Kind::Dqb { 0.03 } else { 0.01 };
+        let allowed = if matches!(kind, Kind::Dqb | Kind::DqbS) { 0.03 } else { 0.01 };
         if worst > allowed * peak.max(1e-6) {
             return Err(format!("largest error {worst} against results up to {peak}"));
         }
@@ -583,8 +591,10 @@ impl XdnaEngine {
     fn gemm_locked(&self, inner: &mut Inner, slot: &Slot, x: &[f32], batch: usize, min_rows: usize) -> Result<Option<(usize, Vec<f32>)>, String> {
         let (n, k) = (slot.rows, slot.cols);
         let (resident, kind) = self.resident_for(inner, slot)?;
+        // a small batch of 4-bit tiles runs on the 64-row program
+        let kind = if kind == Kind::Dqb && batch <= 64 && self.settings.small && self.ensure_prog(inner, Kind::DqbS) { Kind::DqbS } else { kind };
         let (big, small) = kind.row_sizes();
-        let plan = row_chunks(batch, min_rows.max(small / 2), big, small);
+        let plan = row_chunks(batch, min_rows, big, small);
         let Some(&(last0, lastn, _)) = plan.last() else {
             return Ok(None);
         };

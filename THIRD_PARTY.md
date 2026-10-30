@@ -181,6 +181,7 @@ the user installs it (`pip install openvino` or the Intel archives) under its ow
   multiplication and zeroing kernels), built with `scripts/xdna-build-kernels.sh`. The generated binaries are redistributed under the same licence; the sources are not
   copied into this repository. The build tools themselves (mlir-aie wheel, Peano / llvm-aie nightly 22.0.0.2026102001+4f5df13d, Apache-2.0 with LLVM exceptions) are
   downloaded by the script and not distributed.
+* Adapted from mlir-aie (same licence, headers kept in the files): `rust/engine/xdna/kernel_src/fllm_mm_bfp.cc` (from `mm_bfp_mixed.cc`), the unpack in `fllm_dq.cc` (from `q4nx_dequant.cc`), `whole_array_dq.py`, `whole_array_dqbfp.py` (from `whole_array.py`).
 * XRT (AMD / Xilinx, Apache-2.0, https://github.com/Xilinx/XRT, 2.21.x): the shim `rust/engine/xdna/shim/fllm_xdna_shim.cpp` is compiled against its public C++ headers
   by the user; XRT is loaded at run time and not distributed.
 * FastFlowLM's `.xclbin` files are AMD's proprietary binaries with an undocumented ABI; the native backend does not use, copy or redistribute them.

@@ -55,3 +55,28 @@ for shape in "512 1024" "512 2048" "512 3072" "512 4096" "128 1024" "128 2048" "
   if [ "$1 $2" = "512 1024" ]; then cp "$work/a.xclbin" "$out/gemm_bf16_f32_8col.xclbin"; fi
 done
 echo "wrote $out"
+
+# ---- programs with 4-bit weights expanded inside the compute tiles (rust/engine/xdna/kernel_src/) ----------------------
+# dq:   bf16 products, weight tiles packed 4-bit (fllm_dq.cc, whole_array_dq.py), tile m = 32 (128 / 512 rows per call)
+# dqb:  block-floating-point products, f32 sums (fllm_mm_bfp.cc, whole_array_dqbfp.py), tile m = 64 (256 / 512 rows per call)
+# dqbs: the same with m = 16 (64 rows per call)
+src="$here/../rust/engine/xdna/kernel_src"
+export FLLM_DQ_SRC="$(cd "$src" && pwd)"
+build_dq() { # prefix design m_tile rows...
+  local prefix="$1" design="$2" mt="$3"
+  shift 3
+  for rows in "$@"; do
+    for k in 1024 2048 3072 4096; do
+      work="$tools/build/${prefix}_m${rows}_k${k}"
+      mkdir -p "$work"
+      (cd "$work" && python3 "$FLLM_DQ_SRC/$design.py" --dev npu2 -M "$rows" -K "$k" -N 1024 -m "$mt" -k 64 -n 64 --n-aie-cols 8 \
+          --dtype_in bf16 --dtype_out f32 --xclbin-path "$work/a.xclbin" --insts-path "$work/a.bin")
+      cp "$work/a.bin" "$out/${prefix}_m${rows}_k${k}_n1024.insts"
+      if [ "$k" = 1024 ] && [ ! -e "$out/gemm_${prefix}_q4_8col.xclbin" ]; then cp "$work/a.xclbin" "$out/gemm_${prefix}_q4_8col.xclbin"; fi
+    done
+  done
+}
+build_dq dq whole_array_dq 32 512 128
+build_dq dqb whole_array_dqbfp 64 512 256
+build_dq dqbs whole_array_dqbfp 16 64
+echo "wrote the 4-bit programs to $out"

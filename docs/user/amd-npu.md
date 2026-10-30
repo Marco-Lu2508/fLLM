@@ -5,8 +5,7 @@ Ryzen AI 300 / 400 and AI Max processors have an NPU (XDNA 2). There are two way
 * **FastFlowLM** (this page, below): a separate program with AMD's own kernels that runs whole models; fLLM drives it.
 * **fLLM's own kernels** (experimental, Linux, one machine tested; [../npu-xdna.md](../npu-xdna.md)): fLLM's matrix program for the NPU, written and built from open
   tools and run through XRT. It computes the long-prompt part of any GGUF model that fLLM runs on the processor (`FLLM_NPU_HOST=1`), keeps fLLM's
-  features and model files, needs no FastFlowLM, and is faster than the processor (Llama-3.2-3B, 1180-token prompt: 169-180 against 131-136 tok/s) but
-  slower than FastFlowLM (306). It needs XRT's development files once to build a small helper library; the Studio card says whether it is ready.
+  features and model files, needs no FastFlowLM, and is faster than the processor (Llama-3.2-3B Q4_K_M, prompt tokens/s: 400-token prompt 310-314 against 155-168, 1180-token prompt 222-227 against 117-131; 4-bit weights stay 4-bit in memory) and, for prompts of a few hundred tokens, as fast as FastFlowLM (306), but slower than FastFlowLM (306). It needs XRT's development files once to build a small helper library; the Studio card says whether it is ready.
 
 The rest of this page is about FastFlowLM. fLLM has no kernels for it in that route; [FastFlowLM](https://github.com/FastFlowLM/FastFlowLM)
 does: it runs Llama, Qwen, Gemma, gpt-oss and other models on the NPU and serves them over an OpenAI-compatible interface. fLLM finds it, downloads

@@ -11,20 +11,25 @@ Point, Strix Halo), XDNA 1 (Phoenix / Hawk Point: a different architecture, `npu
 ## What it does and what it does not
 
 * **Prompt processing: yes.** The large projections `y = x . W^T` of a prompt chunk (64 or more rows) run on the NPU; everything else runs on
-  the processor. The weights stay quantized in memory (GGUF blocks, as loaded) and are expanded to bf16 when a tile is packed.
-* **Decode (one row at a time): no.** It is memory bound, the NPU is slower than the processor for it (below), so the rows stay on the CPU.
-* **Precision.** Activations and weights are rounded to bf16, products accumulate in f32 on the NPU, the result is f32. Against an f64
-  reference the error of a projection is about 4e-4 of the error scale (the self test allows 4e-3); a 714-token prompt through Llama-3.2-3B
-  gives the same 60 greedy tokens on the NPU and on the processor.
-* **Formats.** Q4_0, Q8_0, Q4_K, Q6_K, F16, BF16, F32 are decoded straight to bf16 (fast loops, AVX2 chosen at run time); every other
-  format the engine can dequantize goes through the generic dequantizer (same values, slower): Q4_1, Q5_x, Q2_K, Q3_K, IQ*, MXFP4, NVFP4 ...
-  Formats without a dequantizer (Q4Z, bitsandbytes, EXL2/3 ...) are computed on the processor.
+  the processor.
+* **Q4_0, Q4_1 and Q4_K weights stay 4-bit** (0.625 byte per weight with group scales; 1.4 GiB for the 3B model) in NPU-visible buffers and are
+  expanded inside the compute tiles, right before the multiply, on the NPU itself (round 2 below). **Other formats** (Q6_K, Q8_0, F16 ...) are
+  decoded to bf16 by the processor (fast loops for Q4_0, Q8_0, Q4_K, Q6_K, F16, BF16, F32, the generic dequantizer for the rest), held as bf16
+  tiles while the budget lasts and multiplied with bf16 products at 2 TFLOPS; formats without a dequantizer (Q4Z, bitsandbytes, EXL2/3 ...)
+  are computed on the processor.
+* **Decode (one row at a time): no.** The NPU is slower than the processor for it in every setup measured (round 2), so the rows stay on the CPU.
+* **Precision.** Default (`FLLM_XDNA_PRECISION=fast`): 4-bit weights are expanded to block floating point (eight values share an exponent, 8-bit
+  mantissas) and the activations are converted the same way inside the tile; products accumulate in f32. A projection is off by about 0.75 % of
+  its largest result (about the size of int8 activation quantization); the self test passes its 4e-3 tolerance, and a 714-token prompt through
+  Llama-3.2-3B gives the same 60 greedy tokens as the processor. `exact`: bf16 products (error about 4e-4 of the error scale), at 2 to 2.5 times
+  lower speed.
 
 ## Parts
 
 | Part | Where | What |
 |---|---|---|
-| NPU programs | `rust/engine/xdna/kernels/` | one `.xclbin` (bf16 x bf16 -> f32 GEMM on the 8 x 4 compute tiles, `B` stored `[n][k]`, tile 32 x 64 x 64) and eight instruction streams `m{128,512}_k{1024,2048,3072,4096}_n1024.insts`; embedded in the binary |
+| NPU programs | `rust/engine/xdna/kernels/` | four `.xclbin`s, each with instruction streams per `(rows, depth)`, embedded in the binary: bf16 x bf16 -> f32 GEMM (`gemm_bf16_f32_8col`, tile 32 x 64 x 64, `B` stored `[n][k]`); the same with 4-bit weights expanded to bf16 in the tile (`gemm_dq_q4_8col`); 4-bit weights expanded to block floating point and multiplied on the native bfp16 MAC (`gemm_dqb_q4_8col`, tile 64 x 64 x 64, 256 / 512 rows per call; `gemm_dqbs_q4_8col`, tile 16, 64 rows per call, for small batches) |
+| Tile kernels | `rust/engine/xdna/kernel_src/` | `fllm_dq.cc` (4-bit tile -> bf16 or bfp16), `fllm_mm_bfp.cc` (bf16 x bfp16 matmul with f32 C), `whole_array_dq*.py` (the array designs, derived from mlir-aie's `whole_array.py`), `dq_pack.py` (host reference of the packed layout) |
 | Shim | `rust/engine/xdna/shim/fllm_xdna_shim.cpp` | 12 C functions over the C++ API of XRT (device, hardware context, kernel, buffers); built by `fllm-rs amd-npu build-shim` (or `scripts/build-xdna-shim.sh`) into `libfllm_xdna_shim.so` |
 | Binding | `backend/npu/xdna/native/shim.rs` | opens the shim at run time (`libloading`); finds it via `FLLM_XDNA_SHIM`, the folder of the executable, `~/.cache/fllm/npu` |
 | Engine | `backend/npu/xdna/native/engine.rs`, `dequant.rs`, `kernels.rs` | row/depth tiling, bf16 packing, resident or streamed weights, double-buffered runs |
@@ -56,7 +61,9 @@ default set and only loads a library at run time) **and at run time**: with no s
 | `FLLM_XDNA_SHIM` | the shim library file |
 | `FLLM_XDNA_MIN_ROWS` | fewest prompt rows worth an NPU call (default 64); the rest of a prompt chunk goes to the CPU |
 | `FLLM_XDNA_MIN_ELEMS`, `FLLM_XDNA_MIN_EFF` | smallest weight offloaded (65536 elements) and smallest useful share after padding to the tile sizes (0.5) |
-| `FLLM_XDNA_RESIDENT_MB` | bf16 copies of weights kept for the NPU (default: 25 % of the free memory at start). Weights over the budget are packed again for every call ("streamed") |
+| `FLLM_XDNA_RESIDENT_MB` | weight memory the NPU may hold (default: 25 % of the free memory at start; 4-bit weights count 0.625 byte, bf16 tiles 2). Weights over the budget are packed again for every call ("streamed", bf16 program) |
+| `FLLM_XDNA_PRECISION` | `fast` (default: block floating point on the native MAC for 4-bit weights) or `exact` (bf16 products) |
+| `FLLM_XDNA_SMALL=0` | do not use the 64-row program for batches of up to 64 rows |
 | `FLLM_XDNA_STATS` | print a summary line every N offloaded projections |
 | `FLLM_NPU_HOST=1` | the host decoder offloads (picks this engine when it is usable, else the OpenVINO one) |
 
@@ -119,6 +126,87 @@ converting activations, 1.3 s packing; the rest of the prompt (attention, norms)
 
 The `--device npu` hybrid backend was checked by the self test only: loading Llama-3.2-3B into it needed more than 9 GB (the reference CPU
 backend's copies plus the NPU registry) on a 14 GB machine that also hosts the GPU, so a whole-model run was not made.
+
+## Round 2: weights packed on the NPU, the block-floating-point MAC (2026-10-30)
+
+Goal set after the first round: close the gap to FastFlowLM (306 prompt tokens/s on this 3B model). What was measured and built, in the order it
+was found.
+
+**Where the time went (profile of round 1, bf16 weights resident, 1180-token prompt, 6.6 s).** The NPU itself ran at 2.0 TFLOPS and was busy
+(2.9 s of waiting, 44 %); the processor spent 2.0 s on attention (30 %), 0.2 s on norms and RoPE, 1.1 s converting activations and adding partial sums.
+An ablation of the array design (kernels with the data movement removed, the multiply repeated 1, 2 and 4 times) showed that the **bf16 matmul
+kernel of the compute tile is the limit**: one k-step of a 32 x 64 x 64 tile (131 072 MACs) takes about 3 us, far below what the MAC array can do, and the
+time grows linearly with repeats, while the DMAs alone finish in a quarter of the time. Tile shapes (16 to 64), 4 or 8 columns and bf16 with bfp16
+emulation (`--emulate-bf16-mmul-with-bfp16`) did not change it by more than 15 %; an int8 design of the same array reaches 3.1 to 5.8 TOPS.
+
+**Weights packed on the NPU.** `fllm_dq.cc` expands a 64 x 64 tile of 4-bit codes with bf16 group scales and minima to bf16 inside the compute tile
+(it follows `q4nx_dequant.cc` of mlir-aie; the layout is `dqpack.rs` / `dq_pack.py`: 2560 bytes per tile, 0.625 byte per weight). The engine
+repacks GGUF Q4_0, Q4_1 and Q4_K blocks into that stream once. Checked on the NPU against the host reference: relative error 5e-7 of the result
+(the products are exact bf16 products), 1.6 to 2.3 TFLOPS, at the speed of the bf16 program with 3.2 times less memory (the 3B model needs 1.4 GiB
+for its 4-bit tensors instead of 5.4 GiB of bf16). The unpack costs about 20 % of the run time (the same array with the unpack removed was 20 % faster).
+
+**The native block-floating-point MAC.** mlir-aie's `mm_bfp_mixed.cc` multiplies a bf16 A tile (converted to bfp16 in the core) with a bfp16ebs8 B
+tile on the bfp16 MAC of AIE2P, which is 2.5 times faster than the bf16 MAC on this array: 4.5 to 5.7 TFLOPS in a whole-array test with 64 x 64 x 64
+tiles. `fllm_mm_bfp.cc` is that kernel with an f32 C tile (so the partial sums of the K reduction are not rounded to bf16 between the k-steps), and
+`fllm_dq.cc` now also writes the expanded tile as bfp16ebs8 (`fllm_dq_q4_bfp`). Together: 4-bit weights in, native MAC, f32 out.
+
+| One projection of 8192 x 3072 Q4_K (rows of `x`) | NPU | CPU (6 threads, AVX-512) |
+|---|---|---|
+| 512 | 4.55 ms = 5.7 TFLOPS | 21.5 ms = 1.2 TFLOPS |
+| 256 | 2.20 ms = 5.9 TFLOPS | 11.9 ms |
+| 128 | 1.95 ms | 6.7 ms |
+| 64 | 1.27 ms | 4.1 ms |
+| 16 | 1.24 ms | 2.6 ms |
+| 8 / 4 | 1.22 ms | 2.5 / 2.7 ms |
+| 3 / 2 / 1 | 1.22 ms | 1.0 / 0.94 / 0.91 ms |
+
+(quiet machine, best of 10, resident weights; 3072 x 3072: 1.93 ms at 512 rows against 9.4 ms.) The 64-row program has a floor of about 1.2 ms for a
+projection of 8192 outputs because every call computes 64 padded rows.
+
+**Whole model, Llama-3.2-3B-Instruct Q4_K_M, prompt tokens per second of the whole request** (`scripts/npu_prompt_bench.py`, random-word prompts, one
+request at a time, no other benchmark process seen in `ps`; two series each):
+
+| prompt | processor | NPU, exact products (round 1 + 4-bit) | NPU, default (block floating point) | FastFlowLM |
+|---|---|---|---|---|
+| ~1180 tokens | 117-131 | 167-169 | **222-227** | 306 (other prompt) |
+| ~400 tokens | 155-168 | 187-190 | **310-314** | 306 (other prompt) |
+| ~160 tokens | 146-171 | 136 | **261-265** | |
+
+For a prompt of a few hundred tokens the NPU path now reaches the 306 tokens/s of FastFlowLM (the figures are not for the same prompt, and
+FastFlowLM's include its own attention on the NPU); for a 1180-token prompt it does not. The 4-bit tensors (1.4 GiB) plus the bf16 tiles of the
+Q6_K tensors fit the default budget, so nothing is streamed.
+
+**Where the time goes now** (`FLLM_RUST_PROFILE=1`, `FLLM_XDNA_STATS`; ms of one request):
+
+| phase | 400 tokens | 1180 tokens | the same 1180 tokens on the processor |
+|---|---|---|---|
+| attention (processor) | 244 | 1850 | 2077 |
+| MLP (gate, up, down) | 649 | 2032 | 4854 |
+| q, k, v and output projections | 323 | 1018 | 1618 |
+| norms, RoPE, KV write | 79 | 227 | 434 |
+| total | 1304 | 5139 | 8998 |
+| of the NPU phases: waiting for the NPU | about 660 | 1840 | |
+| of the NPU phases: activation conversion + copy of the result tiles | about 270 | 840 | |
+
+At 1180 tokens the **attention on the processor is now the largest single part (36 %)** and grows with the square of the prompt; the 306 tokens/s
+target there (3.85 s) is out of reach without attention on the NPU or faster processor attention. mlir-aie has a flash-attention prefill kernel,
+but only for head dimensions 256 and 512 (Gemma); Llama has 128, so it would need a kernel of its own, which was not written. Second: the NPU
+phases cost 840 ms of processor work around 1840 ms of NPU time (converting x to bf16 for every projection, copying the f32 tiles into the
+result); batching the q/k/v and gate/up projections of a layer into one submission would save the conversion but the host decoder calls them one
+by one with the same input, so it was not done.
+
+**Decode.** One row cannot use the array: a call computes at least 64 rows, 1.2 ms for an 8192 x 3072 projection against 0.9 ms on the
+processor, and a 3072 x 3072 one is a tie (0.51 against 0.68 ms). From 4 rows up the NPU call is 2 times faster than the processor, but the whole
+decode step did not profit: with the host decoder at `FLLM_XDNA_MIN_ROWS=4`, 4 simultaneous 48-token requests produced 14.3 tokens/s against 19.7
+on the processor and 8 requests 21.2 against 23.1 (default settings: 16.0 and 26.2, within the noise of a machine that other jobs share). The
+weight stream is not the limit (8192 x 3072 in 4-bit is 15.7 MB per 1.2 ms, 13 GB/s, far below the LPDDR); the padded rows and about 200 calls
+per token are. A matrix-vector design that splits the output columns over all 32 tiles instead of the rows was not built. **Decode stays on the
+processor; the target "decode at least as fast as the processor" was not reached, and with this design it cannot be.**
+
+**What is not done:** attention on the NPU, batching projections into one submission, a decode matrix-vector design, 4-bit programs for Q6_K and
+Q8_0 (they use the 2 TFLOPS bf16 program), the bf16 and exact 4-bit programs with 64-row tiles. Other agents' jobs shared the laptop during most
+of the session; a run was only used when `ps` showed nothing else (the earlier figures of up to 30 % lower NPU throughput under load are not in
+the tables).
 
 ## Making the programs
 
