@@ -38,8 +38,11 @@ pub struct ModelSizes {
     pub fixed_bytes: u64,
     /// Blocks every stage must be able to hold (one sequence of the full context).
     pub min_kv_blocks: u64,
-    /// Blocks the planner tries to reach (the pool the context asks for); more adds nothing to the score.
+    /// Blocks the planner tries to reach before it lets speed decide (a window that is long enough to be useful); more adds nothing to
+    /// the score, so that a huge requested pool does not push layers off the fast device.
     pub wanted_kv_blocks: u64,
+    /// Blocks of the pool the server asked for: what is left of the memory after the layers goes into the cache up to this size.
+    pub pool_blocks: u64,
 }
 
 /// The result for one device.
@@ -286,7 +289,7 @@ pub fn plan_split(devices: &[SplitDevice], sizes: &ModelSizes) -> Result<SplitPl
             lines.join("; ")
         ));
     }
-    let kv_blocks = stages.iter().map(|s| s.max_kv_blocks).min().unwrap_or(0).min(sizes.wanted_kv_blocks);
+    let kv_blocks = stages.iter().map(|s| s.max_kv_blocks).min().unwrap_or(0).min(sizes.pool_blocks.max(sizes.wanted_kv_blocks));
     Ok(SplitPlan { stages, kv_blocks })
 }
 
@@ -308,6 +311,7 @@ mod tests {
             fixed_bytes: GB / 2,
             min_kv_blocks: 256,
             wanted_kv_blocks: 2048,
+            pool_blocks: 2048,
         }
     }
 
@@ -378,14 +382,29 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_pool_wish_does_not_move_layers_off_the_fast_device() {
+        // 8 GB fast card, big slow device: the pool the server asked for (4096 blocks of 0.5 MB per layer) would not fit next to
+        // the layers the speed ratio gives the fast card, but a 256-block window does
+        let devices = vec![dev("fast", 8.0, 900.0), dev("slow", 40.0, 100.0)];
+        let mut sizes = uniform(30, 0.2, 500, 0.3);
+        sizes.wanted_kv_blocks = 256;
+        sizes.pool_blocks = 4096;
+        let plan = plan_split(&devices, &sizes).unwrap();
+        assert!(plan.stages[0].layers.len() >= 20, "{:?}", plan.ranges());
+        assert!(plan.kv_blocks >= 256);
+    }
+
+    #[test]
     fn the_pool_is_the_smallest_any_stage_holds_and_is_capped_by_the_wish() {
         let devices = vec![dev("a", 4.0, 500.0), dev("b", 4.0, 500.0)];
         let mut sizes = uniform(20, 0.12, 40, 0.1);
         sizes.wanted_kv_blocks = 100_000;
+        sizes.pool_blocks = 100_000;
         let plan = plan_split(&devices, &sizes).unwrap();
         let smallest = plan.stages.iter().map(|s| s.max_kv_blocks).min().unwrap();
         assert_eq!(plan.kv_blocks, smallest);
         sizes.wanted_kv_blocks = 300;
+        sizes.pool_blocks = 300;
         let capped = plan_split(&devices, &sizes).unwrap();
         assert_eq!(capped.kv_blocks, 300);
     }

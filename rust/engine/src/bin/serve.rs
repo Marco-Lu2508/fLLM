@@ -86,8 +86,9 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel-size N | -tp N] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --multi-step N (alias --num-scheduler-steps): up to N decode rounds per scheduler round while the batch does not change; off by default, CPU backend only until verified elsewhere");
+    eprintln!("       --device A,B,C (two or more devices of any backends, the CPU too): the model is split over them by layers in proportion to their free memory and speed (`fllm-rs devices --split MODEL --device A,B,C` shows the plan); --tensor-parallel N|auto groups N same-backend devices per stage, --tensor-split 3,1 sets the shares");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
     eprintln!("       MODEL: a .gguf file, a Hugging Face link or owner/repo[:QUANT], or a checkpoint (safetensors / PyTorch: unquantized, AWQ, GPTQ, FP8, ModelOpt NVFP4, MXFP4, bitsandbytes, MLX, EXL2, EXL3) as repository or directory: a verified safetensors checkpoint is loaded directly without writing a GGUF file (--direct forces that, --no-direct-load converts to a cached GGUF file instead); --quant ({}) re-encodes an unquantized checkpoint while loading", fllm_checkpoint::Preset::NAMES);
     eprintln!("       KV cache TYPE (keys and values separately with --cache-type-k/-v): auto|{}", KvFormat::NAMES);
@@ -118,19 +119,60 @@ fn usage(error: &str) -> ! {
 
 fn print_devices_help() {
     println!("usage: fllm-rs devices [--json] [--measure]");
+    println!("       fllm-rs devices --split MODEL.gguf --device a,b,c [--tensor-parallel N] [--tensor-split 3,1] [--gpu-memory-utilization 0.9]");
     println!("Lists every compute device of every backend compiled into this binary, with memory and capabilities");
     println!("(FP16, BF16, int8 dot product, matrix cores, unified memory, bandwidth) and the `--device` value that selects it.");
     println!("  --json      machine-readable output");
     println!("  --measure   measure the host memory bandwidth (about a second); GPU bandwidth is shown only where the backend reports it");
     println!("Device numbers: the [n] in front of a device is its position in this list. `--device <backend>:<N>` counts the devices of that");
     println!("backend from 0 (vulkan:1 is the second Vulkan device); see the `Select` line of each device.");
+    println!("--split MODEL --device a,b,c  dry run of the layer split: which layers each listed device would get (proportional to its free memory and");
+    println!("                              speed), the weights and KV cache per device and the size of the shared KV pool; loads nothing onto a device");
     println!("`--device auto` takes the first of CUDA > ROCm > Metal > Vulkan > DX12 > CPU that has a GPU (FLLM_AUTO_ORDER changes the order,");
     println!("FLLM_AUTO_IGPU=0 leaves integrated GPUs other than Apple's out).");
+}
+
+/// `fllm-rs devices --split MODEL --device a,b,c`: the layer split the server would choose, without loading anything onto a device.
+fn print_split_plan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut model, mut device, mut tp, mut split, mut utilization) = (None, None, 1usize, Vec::new(), 0.90f64);
+    let mut i = 0;
+    let take = |i: &mut usize, flag: &str| -> Result<String, String> {
+        *i += 1;
+        args.get(*i).cloned().ok_or_else(|| format!("{flag} needs a value"))
+    };
+    while i < args.len() {
+        match args[i].as_str() {
+            "--split" => model = Some(take(&mut i, "--split")?),
+            "--device" => device = Some(take(&mut i, "--device")?.to_lowercase()),
+            "--tensor-parallel" | "--tensor-parallel-size" | "-tp" => tp = take(&mut i, "--tensor-parallel")?.parse().map_err(|_| "invalid --tensor-parallel")?,
+            "--gpu-memory-utilization" => utilization = take(&mut i, "--gpu-memory-utilization")?.parse().map_err(|_| "invalid --gpu-memory-utilization")?,
+            "--tensor-split" => {
+                let mut c = fllm_engine::parallel::ParallelConfig::default();
+                c.apply_flag("--tensor-split", Some(&take(&mut i, "--tensor-split")?))?;
+                split = c.split_ratio;
+            }
+            other => return Err(format!("unknown option {other} for `fllm-rs devices --split`").into()),
+        }
+        i += 1;
+    }
+    let model_path = model.ok_or("--split needs a model file")?;
+    let device = device.ok_or("--split needs --device a,b,c")?;
+    let list = fllm_engine::devices::parse_device_list(&device)?;
+    let model = GgufModel::load(&model_path, 8192, 16, 1)?;
+    let listed = fllm_engine::backend::memory::plan_device_list(&model, &list, tp, utilization, &split, 0, 512)?;
+    println!("Model {} ({} layers) over {}", model_path, model.layer_count(), device);
+    for line in listed.describe(model.block_size()) {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use fllm_engine::devices::{auto_chain, describe_choice, inventory, measure_cpu_bandwidth_gbs, Api, AutoPolicy};
     let (mut json, mut measure) = (false, false);
+    if args.iter().any(|a| a == "--split") {
+        return print_split_plan(args);
+    }
     for arg in args {
         match arg.as_str() {
             "--json" => json = true,
@@ -1217,40 +1259,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(list) = &multi_devices {
         // Split the layers over the listed devices in proportion to their memory and speed; the KV pool is one block table that every
         // stage holds for its own layers, so it has as many blocks as the smallest stage can hold.
-        let mut planning = Vec::new();
-        for (n, (backend, index)) in list.iter().enumerate() {
-            let mut d = fllm_engine::devices::planning_device(backend, *index, gpu_memory_utilization)?;
-            if n == 0 {
-                d.budget_bytes = d.budget_bytes.saturating_sub(draft_reserve);
-            }
-            planning.push(d);
-        }
-        // a tensor-parallel group of `tp` devices is one pipeline stage: equal shards, so it holds `tp` times the smallest budget and reads
-        // `tp` times as fast as its slowest member
-        let tp = parallel.tp.max(1);
-        let devices: Vec<fllm_engine::backend::memory::PipelineDevice> = planning
-            .chunks(tp)
-            .enumerate()
-            .map(|(stage, group)| {
-                let speed_of = |k: usize, d: &fllm_engine::devices::PlanningDevice| parallel.split_ratio.get(stage * tp + k).copied().unwrap_or(d.speed_gbs);
-                fllm_engine::backend::memory::PipelineDevice {
-                    label: group.iter().map(|d| d.label.clone()).collect::<Vec<_>>().join(" + "),
-                    budget_bytes: group.iter().map(|d| d.budget_bytes).min().unwrap_or(0) * group.len() as u64,
-                    speed: group.iter().enumerate().map(|(k, d)| speed_of(k, d)).fold(f64::MAX, f64::min) * group.len() as f64,
-                }
-            })
-            .collect();
-        for d in &planning {
-            tracing::info!(
-                "  device {}: {:.2} GB of {:.2} GB usable | read speed {:.0} GB/s ({})",
-                d.label,
-                d.budget_bytes as f64 / 1e9,
-                d.total_bytes as f64 / 1e9,
-                d.speed_gbs,
-                if d.speed_known { "reported or measured" } else { "estimate for this kind of device" }
-            );
-        }
-        let plan = fllm_engine::backend::memory::plan_pipeline(&model, &devices, max_batched_tokens)?;
+        let listed = fllm_engine::backend::memory::plan_device_list(
+            &model,
+            list,
+            parallel.tp,
+            gpu_memory_utilization,
+            &parallel.split_ratio,
+            draft_reserve,
+            max_batched_tokens,
+        )?;
+        let plan = listed.plan.clone();
         if plan.context_blocks > 0 {
             let fit = plan.context_blocks * model.block_size();
             tracing::warn!(
@@ -1264,27 +1282,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("KV pool limited to {} of {} blocks to fit the devices ({} tokens)", plan.kv_blocks, model.pool_blocks(), plan.kv_blocks * model.block_size());
             model.set_pool_blocks(plan.kv_blocks);
         }
-        tracing::info!(
-            "Layer split over {} devices: shared KV pool of {} blocks ({} tokens); each stage holds the cache of its own layers",
-            plan.stages.len(),
-            plan.kv_blocks,
-            plan.kv_blocks * model.block_size()
-        );
-        for (n, stage) in plan.stages.iter().enumerate() {
-            tracing::info!(
-                "  stage {n}: {} layers {}..{} of {} | weights {:.2} GB{} | KV cache {:.2} GB | scratch {:.0} MB | budget {:.2} GB | weight on this stage / speed {:.0}{}",
-                devices[stage.device].label,
-                stage.layers.start,
-                stage.layers.end,
-                plan.total_layers,
-                (stage.weight_bytes + stage.head_bytes) as f64 / 1e9,
-                if stage.head_bytes > 0 { format!(" (output head {:.2} GB)", stage.head_bytes as f64 / 1e9) } else { String::new() },
-                stage.kv_cache_bytes as f64 / 1e9,
-                stage.scratchpad_bytes as f64 / 1e6,
-                stage.budget_bytes as f64 / 1e9,
-                devices[stage.device].speed,
-                if parallel.split_ratio.is_empty() { " GB/s" } else { " (--tensor-split)" }
-            );
+        for line in listed.describe(model.block_size()) {
+            tracing::info!("{line}");
         }
         parallel.stage_ranges = plan.ranges();
         parallel.validate().map_err(|e| format!("layer split: {e}"))?;

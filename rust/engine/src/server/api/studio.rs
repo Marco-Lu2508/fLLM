@@ -368,6 +368,17 @@ pub(in crate::server) async fn hardware(
                 "notes": notice.text,
             }));
         }
+        // a model split over several devices: each device says which layers it holds
+        let layout = crate::parallel::config::global().and_then(|c| c.layout_json());
+        if let Some(stages) = layout.as_ref().and_then(|l| l["stages"].as_array()) {
+            for d in devices.iter_mut() {
+                let spec = d["id"].as_str().unwrap_or_default().to_owned();
+                let key = |s: &str| s.strip_prefix("wgpu-").unwrap_or(s).to_owned();
+                if let Some(stage) = stages.iter().find(|s| s["devices"].as_array().is_some_and(|l| l.iter().any(|x| x.as_str().is_some_and(|x| key(x) == key(&spec))))) {
+                    d["split"] = json!({ "stage": stage["stage"], "layers": stage["layers"], "share": stage["share"] });
+                }
+            }
+        }
         let measured_bw = if run_bench {
             Some(crate::devices::measure_cpu_bandwidth_gbs())
         } else {
@@ -400,6 +411,7 @@ pub(in crate::server) async fn hardware(
             "auto_order": crate::devices::auto_order(),
             "auto_choice": crate::devices::device_candidates("auto").ok().and_then(|chain| chain.first().map(|(backend, index)| if backend == "cpu" { "cpu".to_owned() } else { format!("{backend}:{index}") })),
             "measured_cpu_bandwidth_gbs": measured_bw,
+            "split": layout,
             "devices": devices,
         })
     });

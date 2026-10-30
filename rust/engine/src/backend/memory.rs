@@ -365,7 +365,10 @@ pub fn pipeline_sizes(model: &GgufModel, max_tokens: usize, min_kv_blocks: u64) 
         head_bytes,
         fixed_bytes: (768u64 << 20) + scratchpad_bytes,
         min_kv_blocks,
-        wanted_kv_blocks: model.pool_blocks() as u64,
+        // the split tries to leave room for a window of 4096 tokens (or one full context, if that is longer); the rest of the memory goes into
+        // the pool up to the size the server asked for
+        wanted_kv_blocks: (model.pool_blocks() as u64).min(min_kv_blocks.max(256)),
+        pool_blocks: model.pool_blocks() as u64,
     }
 }
 
@@ -413,7 +416,95 @@ pub fn plan_pipeline(model: &GgufModel, devices: &[PipelineDevice], max_tokens: 
     Err(last_error)
 }
 
-/// Device memory of the recurrent states (Gated DeltaNet, Mamba-2, Mamba-1 layers): the decoder keeps up to two states per sequence slot
+/// The split of a model over the devices of `--device a,b,c`, with what the planner knew about each device (for the log, `fllm-rs
+/// devices --split` and the Studio).
+#[derive(Clone, Debug)]
+pub struct DeviceListPlan {
+    pub plan: PipelinePlan,
+    /// One entry per pipeline stage (a tensor-parallel group counts as one).
+    pub stages: Vec<PipelineDevice>,
+    /// One entry per listed device.
+    pub devices: Vec<crate::devices::PlanningDevice>,
+}
+
+impl DeviceListPlan {
+    /// The lines the log and `fllm-rs devices --split` print.
+    pub fn describe(&self, block_size: usize) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Layer split over {} stage(s): shared KV pool of {} blocks ({} tokens); each stage holds the cache of its own layers",
+            self.plan.stages.len(),
+            self.plan.kv_blocks,
+            self.plan.kv_blocks * block_size
+        )];
+        for d in &self.devices {
+            lines.push(format!(
+                "  device {}: {:.2} GB of {:.2} GB usable | read speed {:.0} GB/s ({})",
+                d.label,
+                d.budget_bytes as f64 / 1e9,
+                d.total_bytes as f64 / 1e9,
+                d.speed_gbs,
+                if d.speed_known { "reported or measured" } else { "estimate for this kind of device" }
+            ));
+        }
+        for (n, stage) in self.plan.stages.iter().enumerate() {
+            lines.push(format!(
+                "  stage {n}: {} layers {}..{} of {} | weights {:.2} GB{} | KV cache {:.2} GB | scratch {:.0} MB | budget {:.2} GB",
+                self.stages[stage.device].label,
+                stage.layers.start,
+                stage.layers.end,
+                self.plan.total_layers,
+                (stage.weight_bytes + stage.head_bytes) as f64 / 1e9,
+                if stage.head_bytes > 0 { format!(" (output head {:.2} GB)", stage.head_bytes as f64 / 1e9) } else { String::new() },
+                stage.kv_cache_bytes as f64 / 1e9,
+                stage.scratchpad_bytes as f64 / 1e6,
+                stage.budget_bytes as f64 / 1e9
+            ));
+        }
+        lines
+    }
+}
+
+/// Plan the split of `model` over `list` (backend and number of each device, in pipeline order; `tp` devices form one stage).
+/// `split_ratio` (`--tensor-split`) replaces the estimated speeds; `reserve_first` takes memory away from the first device (a draft model).
+pub fn plan_device_list(
+    model: &GgufModel,
+    list: &[(String, usize)],
+    tp: usize,
+    utilization: f64,
+    split_ratio: &[f64],
+    reserve_first: u64,
+    max_tokens: usize,
+) -> Result<DeviceListPlan, String> {
+    let tp = tp.max(1);
+    let mut devices = Vec::new();
+    for (n, (backend, index)) in list.iter().enumerate() {
+        let mut d = crate::devices::planning_device(backend, *index, utilization)?;
+        if n == 0 {
+            d.budget_bytes = d.budget_bytes.saturating_sub(reserve_first);
+        }
+        devices.push(d);
+    }
+    // a tensor-parallel group of `tp` devices is one pipeline stage: equal shards, so it holds `tp` times the smallest budget and reads
+    // `tp` times as fast as its slowest member
+    let stages: Vec<PipelineDevice> = devices
+        .chunks(tp)
+        .enumerate()
+        .map(|(stage, group)| PipelineDevice {
+            label: group.iter().map(|d| d.label.clone()).collect::<Vec<_>>().join(" + "),
+            budget_bytes: group.iter().map(|d| d.budget_bytes).min().unwrap_or(0) * group.len() as u64,
+            speed: group
+                .iter()
+                .enumerate()
+                .map(|(k, d)| split_ratio.get(stage * tp + k).copied().unwrap_or(d.speed_gbs))
+                .fold(f64::MAX, f64::min)
+                * group.len() as f64,
+        })
+        .collect();
+    let plan = plan_pipeline(model, &stages, max_tokens)?;
+    Ok(DeviceListPlan { plan, stages, devices })
+}
+
+/// Device memory of the recurrent states/// Device memory of the recurrent states (Gated DeltaNet, Mamba-2, Mamba-1 layers): the decoder keeps up to two states per sequence slot
 /// (`state_capacity`), each holding every recurrent layer. They are allocated while the server runs, so the KV pool must leave room for
 /// them (16 sequences of Qwen3.5-2B need about 600 MB; without the reserve the pool took the whole card and the first busy step failed).
 fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {

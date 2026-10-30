@@ -271,6 +271,36 @@ impl ParallelConfig {
         Ok(())
     }
 
+    /// The layout as the Studio and the status routes show it: which devices run which layers. `None` for a single device.
+    pub fn layout_json(&self) -> Option<serde_json::Value> {
+        if !self.is_parallel() {
+            return None;
+        }
+        let total = self.stage_ranges.last().map(|r| r.end);
+        let stages: Vec<serde_json::Value> = (0..self.pp)
+            .map(|stage| {
+                let devices: Vec<String> = (0..self.tp)
+                    .filter_map(|t| self.rank_devices.get(stage * self.tp + t))
+                    .map(|(backend, index)| if backend == "cpu" { "cpu".to_owned() } else { format!("{backend}:{index}") })
+                    .collect();
+                let range = self.stage_ranges.get(stage);
+                serde_json::json!({
+                    "stage": stage,
+                    "devices": devices,
+                    "layers": range.map(|r| [r.start, r.end]),
+                    "share": range.zip(total).map(|(r, t)| (r.len() as f64 / t.max(1) as f64 * 1000.0).round() / 1000.0),
+                })
+            })
+            .collect();
+        Some(serde_json::json!({
+            "tensor_parallel": self.tp,
+            "pipeline_parallel": self.pp,
+            "expert_parallel": self.expert_parallel,
+            "total_layers": total,
+            "stages": stages,
+        }))
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "tensor-parallel {} x pipeline-parallel {} = {} ranks{}{}",
@@ -377,6 +407,20 @@ mod tests {
         assert!(c.apply_flag("--tensor-split", Some("3,x")).is_err());
         assert!(c.apply_flag("--tensor-split", Some("0,1")).is_err());
         c.apply_device_list(&list[..3]).unwrap_err();
+    }
+
+    #[test]
+    fn the_layout_report_names_devices_layers_and_share() {
+        assert!(ParallelConfig::default().layout_json().is_none());
+        let mut c = ParallelConfig::default();
+        c.apply_device_list(&[("cuda".into(), 0), ("vulkan".into(), 1), ("cpu".into(), 0)]).unwrap();
+        c.stage_ranges = vec![0..20, 20..30, 30..32];
+        let json = c.layout_json().unwrap();
+        assert_eq!(json["pipeline_parallel"], 3);
+        assert_eq!(json["stages"][1]["devices"][0], "vulkan:1");
+        assert_eq!(json["stages"][2]["devices"][0], "cpu");
+        assert_eq!(json["stages"][0]["layers"], serde_json::json!([0, 20]));
+        assert_eq!(json["stages"][0]["share"], 0.625);
     }
 
     #[test]
