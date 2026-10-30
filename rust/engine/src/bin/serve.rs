@@ -105,6 +105,7 @@ fn usage(error: &str) -> ! {
     eprintln!("       fllm-rs gateway telegram --chat ID [--allow-edit] [--yes] [--once]   (token in FLLM_TELEGRAM_TOKEN)");
     eprintln!("       fllm-rs amd-npu status | list | pull MODEL | serve MODEL [--register]   (the NPU of an AMD Ryzen AI through FastFlowLM, which you install yourself)");
     eprintln!("       fllm-rs agent -p \"TASK\" [--folder DIR] [--allow-edit] [--allow-command] [--yes] [--session NAME] [--json]");
+    eprintln!("       fllm-rs connect claude-code|codex|opencode|aider|continue|cline|openai-sdk|anthropic-sdk [--url URL] [--write]   (settings for a coding tool)");
     eprintln!(
         "       sampling: --min-p P --typical-p P --mirostat 0|1|2 --dry-multiplier M --seed S"
     );

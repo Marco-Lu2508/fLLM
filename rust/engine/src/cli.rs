@@ -92,6 +92,13 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             }
             Ok(true)
         }
+        "connect" => {
+            let code = crate::connect_cli::run(&args[1..])?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(true)
+        }
         "cp" => {
             cp(&args[1..])?;
             Ok(true)
@@ -145,6 +152,7 @@ TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float 
         "formats" => "usage: fllm-rs formats\nLists registered GGML storage types and the Rust decoder class; registration does not promise inference support.",
         "gateway" => crate::gateway::HELP,
         "agent" => crate::agent_cli::HELP,
+        "connect" => crate::connect_cli::HELP,
         "chat" => "usage: fllm-rs chat [--url http://127.0.0.1:8000] [--model MODEL_ID] [--api-key KEY] [--max-new N] [--temperature T] [--top-p P]\nConnects to an already running OpenAI-compatible chat-completions server.",
         "cp" => "usage: fllm-rs cp SOURCE DEST\nCopy or alias a model in the local server catalog or registry.",
         "create" => "usage: fllm-rs create MODEL [-f Modelfile]\nCreate a model definition or alias from a Modelfile.",
