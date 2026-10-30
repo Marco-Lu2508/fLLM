@@ -774,7 +774,7 @@ async fn anthropic_messages_non_streaming_and_streaming() {
 #[tokio::test]
 async fn anthropic_errors_use_the_anthropic_shape() {
     let h = shared();
-    let reply = h.post("/v1/messages", json!({"model": "claude-x", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]})).await;
+    let reply = h.post("/v1/messages", json!({"model": "gpt-x", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]})).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert_eq!(reply.json()["type"], "error");
     assert_eq!(reply.json()["error"]["type"], "not_found_error");
@@ -784,6 +784,33 @@ async fn anthropic_errors_use_the_anthropic_shape() {
     // models in the Anthropic shape
     let models = h.call(Method::GET, "/v1/models", None, &[("anthropic-version", "2023-06-01")]).await;
     assert_eq!(models.json()["data"][0]["type"], "model");
+}
+
+#[tokio::test]
+async fn coding_agents_get_their_claude_model_names_and_output_ceilings_served() {
+    let h = shared();
+    // Claude Code asks for claude-haiku-* for background work and for 32000 output tokens; the test model has a context of 256
+    let body = json!({"model": "claude-haiku-4-5", "max_tokens": 32000, "temperature": 0,
+        "messages": [{"role": "user", "content": "hello"}]});
+    let reply = h.post("/v1/messages", body.clone()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.json()["model"], "claude-haiku-4-5");
+    let usage = &reply.json()["usage"];
+    let prompt = usage["input_tokens"].as_u64().unwrap() + usage["cache_read_input_tokens"].as_u64().unwrap();
+    assert!(prompt + usage["output_tokens"].as_u64().unwrap() <= 256, "the ceiling was cut to the context: {usage}");
+    let counted = h.post("/v1/messages/count_tokens", body).await;
+    assert_eq!(counted.status, StatusCode::OK, "{}", counted.text());
+    // the same on the Responses route; chat completions keep OpenAI's strict check
+    let reply = h.post("/v1/responses", json!({"model": "tiny", "input": "hello", "max_output_tokens": 32000, "temperature": 0})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let strict = h.chat(json!({"max_tokens": 32000})).await;
+    assert_eq!(strict.status, StatusCode::BAD_REQUEST, "{}", strict.text());
+    // a system entry inside `messages` (Claude Code) is accepted
+    let reply = h
+        .post("/v1/messages", json!({"model": "tiny", "max_tokens": 3, "messages": [
+            {"role": "user", "content": "hello"}, {"role": "system", "content": [{"type": "text", "text": "note"}]}]}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
 }
 
 // ---------------------------------------------------------------------------------------------------------------

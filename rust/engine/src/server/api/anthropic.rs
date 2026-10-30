@@ -63,7 +63,19 @@ fn image_url(block: &Value) -> Option<String> {
 /// `metadata`, `service_tier`, `container` and `mcp_servers`.
 pub(super) fn to_chat_body(body: &Value) -> Result<Value, String> {
     let mut messages: Vec<Value> = Vec::new();
-    let system = plain_text(body.get("system").unwrap_or(&Value::Null));
+    // Claude Code starts the system prompt with a block `x-anthropic-billing-header: cc_version=...; cch=...` for
+    // Anthropic's accounting. It means nothing to a local model, and a part that changes per request would defeat the
+    // prefix cache, so it is dropped
+    let system = match body.get("system") {
+        Some(Value::Array(blocks)) => plain_text(&Value::Array(
+            blocks
+                .iter()
+                .filter(|b| !b["text"].as_str().is_some_and(|t| t.trim_start().starts_with("x-anthropic-billing-header")))
+                .cloned()
+                .collect(),
+        )),
+        other => plain_text(other.unwrap_or(&Value::Null)),
+    };
     if !system.is_empty() {
         messages.push(json!({"role":"system","content":system}));
     }
@@ -74,8 +86,34 @@ pub(super) fn to_chat_body(body: &Value) -> Result<Value, String> {
     for message in input {
         let role = message["role"]
             .as_str()
-            .filter(|r| matches!(*r, "user" | "assistant"))
+            .filter(|r| matches!(*r, "user" | "assistant" | "system" | "developer"))
             .ok_or("messages.role must be \"user\" or \"assistant\"")?;
+        // Claude Code puts its environment notes into `{"role":"system"}` entries of `messages` (the API calls them
+        // mid-conversation system messages). Chat templates take a system message only at the start, so a note
+        // before the first turn joins the system prompt and a later one becomes a user message at the same place
+        if matches!(role, "system" | "developer") {
+            let text = plain_text(&message["content"]);
+            if text.trim().is_empty() {
+                continue;
+            }
+            let started = messages.iter().any(|m| m["role"] != "system");
+            if !started {
+                match messages.first_mut().filter(|m| m["role"] == "system") {
+                    Some(first) => {
+                        let joined = format!("{}
+
+{text}", first["content"].as_str().unwrap_or_default());
+                        first["content"] = json!(joined);
+                    }
+                    None => messages.push(json!({"role":"system","content":text})),
+                }
+            } else {
+                messages.push(json!({"role":"user","content":format!("<system-reminder>
+{text}
+</system-reminder>")}));
+            }
+            continue;
+        }
         match &message["content"] {
             Value::String(text) => messages.push(json!({"role":role,"content":text})),
             Value::Array(blocks) => {
@@ -146,7 +184,8 @@ pub(super) fn to_chat_body(body: &Value) -> Result<Value, String> {
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
         let functions: Vec<Value> = tools
             .iter()
-            .filter(|t| t.get("input_schema").is_some())
+            // `defer_loading` tools are loaded on demand by Anthropic's tool search, which this server does not have
+            .filter(|t| t.get("input_schema").is_some() && t["defer_loading"] != true)
             .map(|t| {
                 json!({"type":"function","function":{
                     "name": t["name"],
@@ -178,7 +217,23 @@ pub(super) fn to_chat_body(body: &Value) -> Result<Value, String> {
     if chat["stream"].as_bool() == Some(true) {
         chat["stream_options"] = json!({"include_usage":true});
     }
+    // Claude Code asks for 32000 output tokens whatever the model: cut that to what the context holds
+    chat["x_fllm_clamp_max_tokens"] = json!(true);
     Ok(chat)
+}
+
+/// A Claude model name that this server does not serve (Claude Code asks for `claude-haiku-*` for its small
+/// background requests, SDK examples for `claude-sonnet-*`) is answered by the loaded model instead of a 404: the
+/// server holds one model, and the client has no way to know its name unless it is configured for it.
+fn answer_claude_names_with_the_loaded_model(state: &AppState, chat: &mut Value) {
+    let unknown_claude = chat["model"]
+        .as_str()
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("claude") && !state.knows_model(name));
+    if unknown_claude {
+        if let Some(object) = chat.as_object_mut() {
+            object.remove("model");
+        }
+    }
 }
 
 fn stop_reason(finish: &str) -> &'static str {
@@ -348,10 +403,11 @@ pub(in crate::server) async fn messages(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Response {
-    let chat = match to_chat_body(&body) {
+    let mut chat = match to_chat_body(&body) {
         Ok(chat) => chat,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
+    answer_claude_names_with_the_loaded_model(&state, &mut chat);
     let stream = chat["stream"] == true;
     let model = body["model"]
         .as_str()
@@ -377,11 +433,12 @@ pub(in crate::server) async fn count_tokens(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Response {
-    let chat = match to_chat_body(&body) {
+    let mut chat = match to_chat_body(&body) {
         Ok(chat) => chat,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
-    if let Err(response) = state.resolve_model(&body) {
+    answer_claude_names_with_the_loaded_model(&state, &mut chat);
+    if let Err(response) = state.resolve_model(&chat) {
         return convert_error(response).await;
     }
     match prompt_token_count(&state, &chat) {
@@ -429,6 +486,39 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_requests_are_understood() {
+        // as sent by Claude Code 2.1: a billing block in the system prompt, a system entry inside `messages`,
+        // `thinking: adaptive`, and a 32000 token ceiling
+        let body = json!({
+            "model": "claude-sonnet-4-5", "max_tokens": 32000, "stream": true,
+            "thinking": {"type":"adaptive","display":"omitted"},
+            "context_management": {"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},
+            "output_config": {"effort":"high"},
+            "system": [
+                {"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.314.ee8; cc_entrypoint=cli; cch=1a2b3;"},
+                {"type":"text","text":"You are a coding agent.","cache_control":{"type":"ephemeral"}}],
+            "tools": [{"name":"DeferredToolPlaceholder","description":"x","input_schema":{"type":"object","properties":{}},"defer_loading":true}],
+            "messages": [
+                {"role":"system","content":[{"type":"text","text":"Platform: linux"}]},
+                {"role":"user","content":"hello"},
+                {"role":"system","content":[{"type":"text","text":"Today is Friday."}]},
+                {"role":"assistant","content":[{"type":"text","text":"hi"}]},
+                {"role":"user","content":[{"type":"text","text":"go on"}]},
+            ],
+        });
+        let chat = to_chat_body(&body).unwrap();
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(messages[0], json!({"role":"system","content":"You are a coding agent.\n\nPlatform: linux"}));
+        assert_eq!(messages[1], json!({"role":"user","content":"hello"}));
+        assert_eq!(messages[2]["role"], "user", "a later system note keeps its place as a reminder");
+        assert!(messages[2]["content"].as_str().unwrap().contains("Today is Friday."));
+        assert_eq!(messages.len(), 5);
+        assert!(chat.get("tools").is_none(), "the deferred-loading placeholder is not offered to the model");
+        assert_eq!(chat["x_fllm_clamp_max_tokens"], true, "the 32000 ceiling is cut to the context");
+        assert!(chat.get("chat_template_kwargs").is_none(), "adaptive thinking leaves the template default");
+    }
+
+    #[test]
     fn reply_becomes_message_blocks() {
         let chat = json!({"choices":[{"finish_reason":"tool_calls","message":{
             "reasoning_content":"think","content":"ok",
@@ -445,7 +535,7 @@ mod tests {
 
     #[test]
     fn invalid_requests_are_rejected() {
-        assert!(to_chat_body(&json!({"messages":[{"role":"system","content":"x"}]})).is_err());
+        assert!(to_chat_body(&json!({"messages":[{"role":"tool","content":"x"}]})).is_err());
         assert!(to_chat_body(&json!({"model":"m"})).is_err());
     }
 }

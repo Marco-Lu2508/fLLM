@@ -223,6 +223,8 @@ pub(super) fn to_chat_body(body: &Value, history: Vec<Value>) -> Result<(Value, 
     if chat["stream"].as_bool() == Some(true) {
         chat["stream_options"] = json!({"include_usage":true});
     }
+    // `max_output_tokens` is a ceiling here, not a promise: cut it to what the context still holds
+    chat["x_fllm_clamp_max_tokens"] = json!(true);
     Ok((chat, input_messages))
 }
 

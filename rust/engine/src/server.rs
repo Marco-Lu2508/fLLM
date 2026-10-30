@@ -2816,6 +2816,14 @@ async fn openai_generate(
             }
         },
     };
+    // Coding agents ask for a fixed output ceiling (Claude Code sends 32000, OpenCode 32000) that is larger than the
+    // context of a small local server. The Messages and Responses routes mark their requests so the ceiling is cut to
+    // what the context still holds instead of failing the whole turn; the reply then ends with `length` as usual.
+    let max_tokens = if body["x_fllm_clamp_max_tokens"].as_bool() == Some(true) && prompt.len() < state.max_context {
+        max_tokens.min(state.max_context - prompt.len())
+    } else {
+        max_tokens
+    };
     if sampling.min_tokens > max_tokens {
         return api_error(
             StatusCode::BAD_REQUEST,

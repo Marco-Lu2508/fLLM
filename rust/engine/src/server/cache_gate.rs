@@ -14,7 +14,7 @@ use std::time::Duration;
 
 /// The sampling parameters that change the text. Everything else in the body is either checked separately or is a
 /// presentation detail.
-const SAMPLING_KEYS: [&str; 14] = [
+const SAMPLING_KEYS: [&str; 15] = [
     "temperature",
     "top_p",
     "top_k",
@@ -26,6 +26,8 @@ const SAMPLING_KEYS: [&str; 14] = [
     "repetition_penalty",
     "max_tokens",
     "max_completion_tokens",
+    // a clamped ceiling answers differently from a strict one when the context is short
+    "x_fllm_clamp_max_tokens",
     "seed",
     "n",
     "best_of",
