@@ -826,6 +826,10 @@ impl InferenceRuntime {
     }
 
     fn copy_prompt_block(&mut self, src: usize, dst: usize) -> Result<(), String> {
+        if let Some(d) = self.decoder.as_ref() {
+            // the indexer keys of sparse-attention layers live beside the KV pools
+            d.dsa_copy_block(src, dst);
+        }
         if !self.model.config().uniform_geometry() {
             return self.copy_prompt_block_layered(src, dst);
         }
@@ -890,12 +894,24 @@ impl InferenceRuntime {
     }
     /// Export the KV data of a block (all layers, keys and values) to host memory.
     fn kv_export_block(&mut self, block: usize) -> Result<Vec<u8>, String> {
-        if let Some(result) = self.decoder.as_ref().and_then(|d| d.device_kv_export(block)) {
-            return result;
+        let mut data = match self.decoder.as_ref().and_then(|d| d.device_kv_export(block)) {
+            Some(result) => result?,
+            None => crate::kv_blocks::host_export(&self.key, &self.value, &self.host_block_pieces(block)?)?,
+        };
+        if let Some(d) = self.decoder.as_ref() {
+            d.dsa_export_block(block, &mut data);
         }
-        crate::kv_blocks::host_export(&self.key, &self.value, &self.host_block_pieces(block)?)
+        Ok(data)
     }
     fn kv_import_block(&mut self, block: usize, data: &[u8]) -> Result<(), String> {
+        // sparse-attention layers append their indexer keys to an exported block
+        let extra = self.decoder.as_ref().map_or(0, |d| d.dsa_block_bytes());
+        let (data, tail) = data.split_at(data.len().saturating_sub(extra));
+        if extra > 0 {
+            if let Some(d) = self.decoder.as_ref() {
+                d.dsa_import_block(block, tail);
+            }
+        }
         if let Some(result) = self.decoder.as_ref().and_then(|d| d.device_kv_import(block, data)) {
             return result;
         }

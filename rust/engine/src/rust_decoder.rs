@@ -284,8 +284,35 @@ struct Mla {
     kv_b: Linear,
 }
 
+/// Queries, keys and values of an MLA layer.
+type MlaQkv = [Vec<f32>; 3];
+
+/// Lightning indexer of a sparse-attention layer (DeepSeek-V3.2, GLM-5): scores every earlier token and keeps the best `topk`.
+struct Indexer {
+    /// Queries from the normalized low-rank query of the layer: `heads * dim` rows.
+    q_b: Linear,
+    /// Key of the token from the layer input: `dim` rows.
+    k: Linear,
+    k_norm: Vec<f32>,
+    k_norm_bias: Vec<f32>,
+    /// Per-head score weights from the layer input: `heads` rows.
+    proj: Linear,
+}
+
+/// Indexer keys of the sparse-attention layers, one `dim`-wide row per cache slot (the slot numbering of the KV pools, so a block
+/// copy or swap moves them with the block), and the selection of the layer before for the layers that share it.
+#[derive(Default)]
+struct DsaStore {
+    keys: std::sync::Mutex<Vec<Vec<f32>>>,
+    selection: std::sync::Mutex<Vec<Option<Vec<u32>>>>,
+}
+
 struct Layer {
     attn: Attn,
+    /// Sparse-attention indexer of an MLA layer.
+    indexer: Option<Box<Indexer>>,
+    /// The layer attends to the tokens the last layer with an indexer selected (GLM-5 layers marked `shared`).
+    dsa_shared: bool,
     /// A second mixer that runs next to the attention of this layer (Falcon-H1: Mamba-2 and attention in parallel).
     parallel: Option<Box<hybrid::ParallelMixer>>,
     /// Zamba2: this layer starts with a call of a shared transformer block whose output joins the input of its Mamba mixer.
@@ -348,6 +375,9 @@ impl Layer {
                 }
                 all.extend([&mut m.q, &mut m.kv_a, &mut m.kv_b]);
             }
+        }
+        if let Some(ix) = &mut self.indexer {
+            all.extend([&mut ix.q_b, &mut ix.k, &mut ix.proj]);
         }
         if has_attention {
             all.push(&mut self.out);
@@ -978,6 +1008,13 @@ pub struct RustDecoder {
     row_deepstack: std::sync::Mutex<Option<Arc<DeepstackLevels>>>,
     /// Custom visible lengths per row in attention (bidirectional image attention, prefix-LM mask).
     row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
+    /// Indexer keys of the sparse-attention layers (host path).
+    dsa: DsaStore,
+    /// `FLLM_DSA=dense`: attend to every token (exact up to `top_k` tokens of context, an approximation beyond).
+    dsa_dense: bool,
+    /// `FLLM_DSA=exact`: run the sparse-attention layers on the host also when a device is in use. Without it a device keeps
+    /// the dense attention of its own kernels (and says so once).
+    dsa_exact_on_device: bool,
 }
 
 /// DeepStack features: per decoder layer, (row, values) pairs.
@@ -990,6 +1027,19 @@ type AxisTables = Vec<(Arc<Vec<f32>>, Arc<Vec<f32>>)>;
 struct MropeState {
     axes: Vec<u8>,
     axis_tables: std::sync::OnceLock<AxisTables>,
+}
+
+/// The positions of the `k` highest scores, ascending. Equal scores keep the lower position (the score of a key whose indexer heads
+/// are all in the ReLU's dead zone is exactly 0, so ties are common when a query has fewer than `k` positive keys).
+fn best_positions(mut scored: Vec<(f32, u32)>, k: usize) -> Vec<u32> {
+    if k == 0 || scored.is_empty() {
+        return Vec::new();
+    }
+    let k = k.min(scored.len());
+    scored.select_nth_unstable_by(k - 1, |a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut best: Vec<u32> = scored[..k].iter().map(|s| s.1).collect();
+    best.sort_unstable();
+    best
 }
 
 fn rms(x: &mut [f32], weight: &[f32], eps: f32) {
@@ -1442,6 +1492,7 @@ impl RustDecoder {
         };
         let expert_cache = if par.is_none() && mtp_prefix.is_none() && cfg.moe.is_some() { crate::expert_cache::ExpertCache::new(&cfg.arch) } else { None };
         let mut layers = Vec::with_capacity(layer_range.len());
+        let mut saw_indexer = false;
         for i in layer_range {
             if par.as_ref().is_some_and(|ctx| !ctx.layer_range(cfg.layers).contains(&i)) {
                 // another pipeline stage runs this layer
@@ -1887,7 +1938,29 @@ impl RustDecoder {
                 ffn_norm = post_attn_norm.take();
             }
             let gemma_layer = gemma::load_layer(model, &cfg, &p)?;
+            let indexer = match (&cfg.indexer, &cfg.mla) {
+                (Some(ic), Some(mc)) if mtp_prefix.is_none() && has_tensor(mapping, &format!("{p}.indexer.attn_k.weight")) => {
+                    let q_low = mc.q_lora.ok_or("a sparse-attention indexer needs a low-rank query")?;
+                    Some(Box::new(Indexer {
+                        q_b: linear(&format!("{p}.indexer.attn_q_b"), ic.heads * ic.dim, q_low)?,
+                        k: linear(&format!("{p}.indexer.attn_k"), ic.dim, hidden)?,
+                        k_norm: vector(mapping, &format!("{p}.indexer.k_norm.weight"), ic.dim)?,
+                        k_norm_bias: if has_tensor(mapping, &format!("{p}.indexer.k_norm.bias")) {
+                            vector(mapping, &format!("{p}.indexer.k_norm.bias"), ic.dim)?
+                        } else {
+                            vec![0.0; ic.dim]
+                        },
+                        proj: linear(&format!("{p}.indexer.proj"), ic.heads, hidden)?,
+                    }))
+                }
+                _ => None,
+            };
+            // a layer of a model with an indexer that has none of its own reuses the selection of the layer before
+            let dsa_shared = indexer.is_none() && cfg.indexer.is_some() && mtp_prefix.is_none() && saw_indexer && matches!(attn, Attn::Mla(_));
+            saw_indexer |= indexer.is_some();
             let mut layer = Layer {
+                indexer,
+                dsa_shared,
                 parallel: hybrid::ParallelMixer::load(&cfg, mapping, &p, i, &linear)?,
                 zamba: zamba::ZambaCall::load(&cfg, mapping, i, &linear)?,
                 attn,
@@ -2050,6 +2123,9 @@ impl RustDecoder {
             row_positions3: std::sync::Mutex::new(None),
             row_deepstack: std::sync::Mutex::new(None),
             row_visible_lengths: std::sync::Mutex::new(None),
+            dsa: DsaStore::default(),
+            dsa_dense: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("dense")),
+            dsa_exact_on_device: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("exact")),
         };
         decoder.set_device(device)?;
         decoder.plan_expert_cache(mapping);
@@ -2461,6 +2537,18 @@ impl RustDecoder {
                 }
             }
             Attn::Mla(_) => {
+                if (layer.indexer.is_some() || layer.dsa_shared) && !self.dsa_dense {
+                    if self.dsa_exact_on_device {
+                        return Some("the sparse-attention indexer");
+                    }
+                    static NOTE: std::sync::Once = std::sync::Once::new();
+                    NOTE.call_once(|| {
+                        eprintln!(
+                            "[fllm-rs] this model has a sparse-attention indexer; the device layers attend to every token, which equals the sparse result up to {} tokens of context. FLLM_DSA=exact runs those layers on the host instead",
+                            cfg.indexer.as_ref().map_or(0, |i| i.topk)
+                        );
+                    });
+                }
                 if arch_ok && cfg.mla.as_ref().is_some_and(|m| m.rotary) && (cfg.kv_heads == cfg.heads || self.mla_latent) && !cfg.parallel_residual {
                     None
                 } else {
@@ -4477,6 +4565,21 @@ impl RustDecoder {
         tables: &[i64],
         lengths: &[i64],
     ) -> Vec<f32> {
+        self.attention_selected(layer, q, key, value, tables, lengths, None)
+    }
+
+    /// `attention_reference` over a chosen set of tokens per row (`select[r]`, sorted positions; `None`: all visible tokens).
+    #[allow(clippy::too_many_arguments)]
+    fn attention_selected(
+        &self,
+        layer: usize,
+        q: &[f32],
+        key: &[u16],
+        value: &[u16],
+        tables: &[i64],
+        lengths: &[i64],
+        select: Option<&[Option<Vec<u32>>]>,
+    ) -> Vec<f32> {
         let cfg = &self.cfg;
         let (dk, dv, heads, kv_heads) = (cfg.layer_head_dim(layer), cfg.layer_value_dim(layer), cfg.layer_heads(layer), cfg.layer_kv_heads(layer));
         let group = heads / kv_heads;
@@ -4495,10 +4598,15 @@ impl RustDecoder {
                     Some(c) => (n - 1) / c * c,
                     None => window.map_or(0, |w| n.saturating_sub(w)),
                 };
-                let count = n - start;
+                let chosen: Option<&Vec<u32>> = select.and_then(|s| s.get(r)).and_then(Option::as_ref);
+                let visible: Vec<usize> = match chosen {
+                    Some(list) => list.iter().map(|&p| p as usize).filter(|&p| p >= start && p < n).collect(),
+                    None => (start..n).collect(),
+                };
+                let count = visible.len();
                 let mut k_rows = vec![0.0f32; count * kv_heads * dk];
                 let mut v_rows = vec![0.0f32; count * kv_heads * dv];
-                for (i, p) in (start..n).enumerate() {
+                for (i, &p) in visible.iter().enumerate() {
                     let block = tables[r * self.stride + p / self.block_size] as usize;
                     let slot = block * self.block_size + p % self.block_size;
                     self.read_slot(
@@ -4521,7 +4629,7 @@ impl RustDecoder {
                     let kh = h / group;
                     let query = &q[(r * heads + h) * dk..(r * heads + h + 1) * dk];
                     for (i, score) in scores.iter_mut().enumerate() {
-                        let p = start + i;
+                        let p = visible[i];
                         if let Some(mask) = &self.tree_mask {
                             if p >= self.tree_prefix_len && r >= self.tree_prefix_len {
                                 let qi = r - self.tree_prefix_len;
@@ -4535,7 +4643,7 @@ impl RustDecoder {
                         let k = &k_rows[(i * kv_heads + kh) * dk..(i * kv_heads + kh + 1) * dk];
                         let mut s = compute::dot(query, k) * scale;
                         if let Some(slopes) = &cfg.alibi_slopes {
-                            s += slopes[h] * ((start + i) as f32 - (n - 1) as f32);
+                            s += slopes[h] * (p as f32 - (n - 1) as f32);
                         }
                         if let Some(cap) = cfg.attention_softcap {
                             s = cap * (s / cap).tanh();
@@ -4568,13 +4676,14 @@ impl RustDecoder {
     /// Queries, keys and values of one MLA layer for a batch of tokens, with rotary embeddings
     /// applied. Each head is laid out `[rotary | content]` for queries and keys; the dot product
     /// does not depend on the order as long as both sides agree.
-    fn mla_qkv(
+    fn mla_qkv_low(
         &self,
         m: &Mla,
         x: &[f32],
         positions: &[usize],
         table: &RopeTables,
-    ) -> Result<[Vec<f32>; 3], String> {
+        keep_low: bool,
+    ) -> Result<(MlaQkv, Option<Vec<f32>>), String> {
         let cfg = &self.cfg;
         let mc = cfg
             .mla
@@ -4584,11 +4693,16 @@ impl RustDecoder {
         let heads = cfg.heads;
         let (nope, rope, value) = (mc.nope, mc.rope, mc.value);
         let dk = nope + rope;
+        let mut low_kept = None;
         let q_full = match &m.q_a {
             Some((down, norm)) => {
                 let mut low = down.forward(x)?;
                 rms(&mut low, norm, cfg.eps);
-                m.q.forward(&low)?
+                let q = m.q.forward(&low)?;
+                if keep_low {
+                    low_kept = Some(low);
+                }
+                q
             }
             None => m.q.forward(x)?,
         };
@@ -4621,7 +4735,161 @@ impl RustDecoder {
             apply_rope(&mut q, heads, dk, rope, cfg.rope.neox, positions, table);
             apply_rope(&mut k, heads, dk, rope, cfg.rope.neox, positions, table);
         }
-        Ok([q, k, v])
+        Ok(([q, k, v], low_kept))
+    }
+
+    /// The attention tokens of every row of a sparse-attention layer: `None` for a row that attends to all of its `lengths[r]` tokens (at
+    /// most `top_k` of them), otherwise the positions the lightning indexer ranks best. A layer without an indexer of its own returns the
+    /// selection of the layer before. The keys of the indexer are written to the side store first (they are needed by later tokens).
+    #[allow(clippy::too_many_arguments)]
+    fn dsa_select(
+        &self,
+        i: usize,
+        layer: &Layer,
+        normed: &[f32],
+        q_low: Option<&[f32]>,
+        positions: &[usize],
+        table: &RopeTables,
+        tables: &[i64],
+        lengths: &[i64],
+    ) -> Result<Vec<Option<Vec<u32>>>, String> {
+        let rows = positions.len();
+        let (Some(ic), Some(mc)) = (&self.cfg.indexer, &self.cfg.mla) else {
+            return Err("sparse attention without an indexer configuration".into());
+        };
+        let Some(ix) = layer.indexer.as_deref() else {
+            let previous = self.dsa.selection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            if previous.len() != rows {
+                return Err(format!("layer {i} shares the sparse-attention selection of the layer before, which did not run on these tokens"));
+            }
+            return Ok(previous);
+        };
+        let q_low = q_low.ok_or("sparse attention needs the low-rank query")?;
+        let (heads, dim) = (ic.heads, ic.dim);
+        let mut q = ix.q_b.forward(q_low)?;
+        let mut k = ix.k.forward(normed)?;
+        layer_norm(&mut k, &ix.k_norm, Some(&ix.k_norm_bias), 1e-6);
+        let weights = ix.proj.forward(normed)?;
+        apply_rope(&mut q, heads, dim, mc.rope, ic.neox, positions, table);
+        apply_rope(&mut k, 1, dim, mc.rope, ic.neox, positions, table);
+        let slot_of = |r: usize, p: usize| tables[r * self.stride + p / self.block_size] as usize * self.block_size + p % self.block_size;
+        let mut store = self.dsa.keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if store.len() < self.cfg.layers {
+            store.resize_with(self.cfg.layers, Vec::new);
+        }
+        if store[i].is_empty() {
+            store[i] = vec![0.0; self.pool_blocks * self.block_size * dim];
+        }
+        let keys = &mut store[i];
+        for (r, &position) in positions.iter().enumerate() {
+            let slot = slot_of(r, position);
+            keys[slot * dim..(slot + 1) * dim].copy_from_slice(&k[r * dim..(r + 1) * dim]);
+        }
+        let keys: &[f32] = keys;
+        let (scale, head_scale) = ((dim as f32).powf(-0.5), (heads as f32).powf(-0.5));
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var_os("FLLM_DSA_TRACE").is_some());
+        let selected: Vec<Option<Vec<u32>>> = (0..rows)
+            .into_par_iter()
+            .map(|r| {
+                let n = lengths[r] as usize;
+                if n <= ic.topk {
+                    return None;
+                }
+                let scored: Vec<(f32, u32)> = (0..n)
+                    .map(|p| {
+                        let slot = slot_of(r, p);
+                        let key = &keys[slot * dim..(slot + 1) * dim];
+                        let mut score = 0.0f32;
+                        for h in 0..heads {
+                            let dot = compute::dot(&q[(r * heads + h) * dim..(r * heads + h + 1) * dim], key) * scale;
+                            if dot > 0.0 {
+                                score += dot * weights[r * heads + h] * head_scale;
+                            }
+                        }
+                        (score, p as u32)
+                    })
+                    .collect();
+                if trace {
+                    let mut all = scored.clone();
+                    all.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                    eprintln!("[dsa-scores] layer {i} position {}: {:?}", positions[r], &all[..all.len().min(ic.topk + 3)]);
+                }
+                Some(best_positions(scored, ic.topk))
+            })
+            .collect();
+        if trace {
+            eprintln!("[dsa] indexer {ic:?}");
+            for (r, rows_selection) in selected.iter().enumerate() {
+                eprintln!("[dsa] layer {i} position {}: {:?}", positions[r], rows_selection);
+            }
+        }
+        *self.dsa.selection.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = selected.clone();
+        Ok(selected)
+    }
+
+    /// Bytes one cache block adds to an exported block for the indexer keys (0 without sparse attention).
+    pub(crate) fn dsa_block_bytes(&self) -> usize {
+        match (&self.cfg.indexer, self.dsa_dense) {
+            (Some(ic), false) => self.layers.iter().filter(|l| l.indexer.is_some()).count() * self.block_size * ic.dim * 4,
+            _ => 0,
+        }
+    }
+
+    /// Calls `f(layer keys, first value of the block, values per block)` for every layer with an indexer.
+    fn dsa_for_blocks(&self, block: usize, mut f: impl FnMut(&mut Vec<f32>, usize, usize)) {
+        let Some(ic) = &self.cfg.indexer else { return };
+        let mut store = self.dsa.keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if store.len() < self.cfg.layers {
+            store.resize_with(self.cfg.layers, Vec::new);
+        }
+        let per_block = self.block_size * ic.dim;
+        for (i, layer) in self.layers.iter().enumerate() {
+            if layer.indexer.is_none() {
+                continue;
+            }
+            if store[i].is_empty() {
+                store[i] = vec![0.0; self.pool_blocks * per_block];
+            }
+            f(&mut store[i], block * per_block, per_block);
+        }
+    }
+
+    /// A copy of a cache block (the fork of `n > 1` choices) takes the indexer keys along.
+    pub(crate) fn dsa_copy_block(&self, src: usize, dst: usize) {
+        let mut moved: Vec<Vec<f32>> = Vec::new();
+        self.dsa_for_blocks(src, |keys, at, n| moved.push(keys[at..at + n].to_vec()));
+        let mut it = moved.into_iter();
+        self.dsa_for_blocks(dst, |keys, at, n| {
+            if let Some(values) = it.next() {
+                keys[at..at + n].copy_from_slice(&values);
+            }
+        });
+    }
+
+    /// The indexer keys of a block as little-endian f32 values (appended to an exported block).
+    pub(crate) fn dsa_export_block(&self, block: usize, out: &mut Vec<u8>) {
+        if self.dsa_dense {
+            return;
+        }
+        self.dsa_for_blocks(block, |keys, at, n| {
+            for v in &keys[at..at + n] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        });
+    }
+
+    /// Restores the indexer keys of a block from the tail of an exported block.
+    pub(crate) fn dsa_import_block(&self, block: usize, data: &[u8]) {
+        let mut at = 0;
+        self.dsa_for_blocks(block, |keys, first, n| {
+            for v in &mut keys[first..first + n] {
+                if let Some(b) = data.get(at..at + 4) {
+                    *v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                }
+                at += 4;
+            }
+        });
     }
 
     /// Shape of the Gated DeltaNet layers, when the model has any.
@@ -6715,6 +6983,7 @@ impl RustDecoder {
                 } else {
                     let table = &self.rope[layer.rope_table];
                     let mut gate_values: Option<Vec<f32>> = None;
+                    let mut dsa_rows: Option<Vec<Option<Vec<u32>>>> = None;
                     let mut latent_qkv: [Vec<f32>; 3];
                     let mut moe_values: Vec<f32>;
                     let mut shared_kv: Vec<f32> = Vec::new();
@@ -6859,7 +7128,12 @@ impl RustDecoder {
                             unreachable!("handled above")
                         }
                         Attn::Mla(m) => {
-                            latent_qkv = self.mla_qkv(m, &normed, positions, table)?;
+                            let sparse = cfg.indexer.is_some() && !self.dsa_dense && (layer.indexer.is_some() || layer.dsa_shared);
+                            let (qkv, q_low) = self.mla_qkv_low(m, &normed, positions, table, sparse && layer.indexer.is_some())?;
+                            latent_qkv = qkv;
+                            if sparse {
+                                dsa_rows = Some(self.dsa_select(i, layer, &normed, q_low.as_deref(), positions, table, tables, lengths)?);
+                            }
                             trace.mark(2);
                             let [q, k, v] = &mut latent_qkv;
                             (q, k, v)
@@ -6883,6 +7157,7 @@ impl RustDecoder {
                         && layer.sinks.is_none()
                         && cfg.attention_softcap.is_none()
                         && dk == dv
+                        && dsa_rows.is_none()
                         && matches!(self.kv_kind, 1 | 2)
                         && self.row_visible_lengths().is_none();
                     let attn = if tiled {
@@ -6913,7 +7188,7 @@ impl RustDecoder {
                     };
                     let mut attn = match attn {
                         Some(out) => out,
-                        None => self.attention_reference(i, q, key, value, tables, lengths),
+                        None => self.attention_selected(i, q, key, value, tables, lengths, dsa_rows.as_deref()),
                     };
                     if let Some(gate) = &gate_values {
                         if layer.gate_per_head {
@@ -7420,6 +7695,31 @@ fn dump_layer(tag: &str, layer: usize, x: &[f32]) {
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
         let _ = file.write_all(&bytes);
+    }
+}
+
+#[cfg(test)]
+mod best_positions_tests {
+    use super::best_positions;
+
+    #[test]
+    fn keeps_the_highest_scores_in_position_order() {
+        let scored = vec![(0.1, 0), (0.9, 1), (0.3, 2), (0.8, 3), (-0.5, 4), (0.7, 5)];
+        assert_eq!(best_positions(scored, 3), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn equal_scores_keep_the_lower_position() {
+        // three keys score 0 and only two of them fit next to the positive one
+        let scored = vec![(0.0, 7), (0.5, 3), (0.0, 1), (0.0, 5), (-0.2, 0)];
+        assert_eq!(best_positions(scored, 3), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn handles_k_larger_than_the_candidates_and_empty_input() {
+        assert_eq!(best_positions(vec![(1.0, 4), (2.0, 2)], 8), vec![2, 4]);
+        assert!(best_positions(Vec::new(), 4).is_empty());
+        assert!(best_positions(vec![(1.0, 0)], 0).is_empty());
     }
 }
 

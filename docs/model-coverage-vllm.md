@@ -4,7 +4,7 @@ Snapshot of 2026-10-13. Sources: vLLM `vllm/model_executor/models/registry.py` (
 
 **Updates of 2026-10-30.** The per-name rows below are the 2026-10-13 snapshot. Since then (see [model-coverage.md](model-coverage.md), which is
 the maintained table): `Gemma3n`/`Gemma4`, `MiniCPM`, `Ministral` (8B), `Helium`, `BitNet`, `MiMoV2Flash`, `KimiLinear`
-(not the K3 variant), `DeepseekV32` and `GlmMoeDsa` (dense attention, exact to 2048 tokens), `Step3p5`/`Step3p7` (text), `GraniteSWA`/`GraniteMoeSWA` and
+(not the K3 variant), `DeepseekV32` and `GlmMoeDsa` (sparse indexer on the CPU, dense device attention), `Step3p5`/`Step3p7` (text), `GraniteSWA`/`GraniteMoeSWA` and
 `EmbeddingGemma`/GTE/ColBERT/SPLADE (encoders) are supported and carry the verification level given there; rows below that still say N for them are out of date.
 
 Test levels (L0-L3) are explained in [test-levels.md](test-levels.md).

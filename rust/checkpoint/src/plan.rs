@@ -1022,6 +1022,14 @@ impl Plan {
                 u!("attention.q_lora_rank", rank);
             }
             u!("rope.dimension_count", rope_dims);
+            // DeepSeek sparse attention (DeepSeek-V3.2, GLM-5): the lightning indexer of the layers
+            if let (Some(h), Some(d), Some(k)) = (num(cfg, "index_n_heads"), num(cfg, "index_head_dim"), num(cfg, "index_topk")) {
+                u!("attention.indexer.head_count", h);
+                u!("attention.indexer.key_length", d);
+                u!("attention.indexer.top_k", k);
+                // DeepSeek-V3.2 rotates half-split pairs in the indexer, GLM-5 interleaved pairs
+                meta.push((format!("{arch}.attention.indexer.rope_neox"), Meta::Bool(raw == "deepseek_v32")));
+            }
         }
         let eps = [
             "rms_norm_eps",
@@ -2559,9 +2567,20 @@ impl Plan {
             let idx = i
                 .parse::<u64>()
                 .map_err(|_| format!("invalid layer index in tensor {n:?}"))?;
-            if suf.starts_with("self_attn.indexer.") {
-                // DeepSeek sparse attention indexer (DeepSeek-V3.2, GLM-5), also on the appended NextN block: attention runs dense
-                return Ok(Mapped::Skip);
+            if let Some(tensor) = suf.strip_prefix("self_attn.indexer.") {
+                // DeepSeek sparse attention indexer (DeepSeek-V3.2, GLM-5). The appended NextN block keeps no indexer: it attends densely.
+                let name = match tensor {
+                    "wq_b.weight" => "attn_q_b.weight",
+                    "wk.weight" => "attn_k.weight",
+                    "k_norm.weight" => "k_norm.weight",
+                    "k_norm.bias" => "k_norm.bias",
+                    "weights_proj.weight" => "proj.weight",
+                    _ => return Ok(Mapped::Skip),
+                };
+                if idx >= self.layers {
+                    return Ok(Mapped::Skip);
+                }
+                return Ok(Mapped::Tensor { name: format!("blk.{idx}.indexer.{name}"), add: 0.0 });
             }
             if idx >= self.layers && self.arch == "laguna" {
                 // the multi-token-prediction blocks of Step-3.5 are not imported
@@ -2846,7 +2865,7 @@ mod tests {
     }
 
     #[test]
-    fn dsa_models_convert_as_mla_and_drop_the_indexer() {
+    fn dsa_models_convert_as_mla_and_keep_the_indexer() {
         for model_type in ["deepseek_v32", "glm_moe_dsa"] {
             let mut cfg = base(model_type);
             cfg["n_routed_experts"] = json!(4);
@@ -2858,11 +2877,30 @@ mod tests {
             cfg["qk_nope_head_dim"] = json!(8);
             cfg["qk_rope_head_dim"] = json!(4);
             cfg["v_head_dim"] = json!(8);
+            cfg["index_n_heads"] = json!(2);
+            cfg["index_head_dim"] = json!(8);
+            cfg["index_topk"] = json!(16);
             let plan = Plan::from_config(&cfg).unwrap();
             assert_eq!(plan.arch, "deepseek2");
-            for name in ["model.layers.1.self_attn.indexer.wq_b.weight", "model.layers.4.self_attn.indexer.wk.weight", "model.layers.0.self_attn.indexer.k_norm.bias"] {
-                assert_eq!(plan.map(name).unwrap(), Mapped::Skip, "{model_type} {name}");
+            let meta = |key: &str| plan.meta.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+            assert!(matches!(meta("deepseek2.attention.indexer.head_count"), Some(Meta::U32(2))));
+            assert!(matches!(meta("deepseek2.attention.indexer.key_length"), Some(Meta::U32(8))));
+            assert!(matches!(meta("deepseek2.attention.indexer.top_k"), Some(Meta::U32(16))));
+            // DeepSeek-V3.2 rotates half-split pairs in the indexer, GLM-5 interleaved pairs
+            assert!(matches!(
+                meta("deepseek2.attention.indexer.rope_neox"),
+                Some(Meta::Bool(neox)) if *neox == (model_type == "deepseek_v32")
+            ));
+            for (name, gguf) in [
+                ("model.layers.1.self_attn.indexer.wq_b.weight", "blk.1.indexer.attn_q_b.weight"),
+                ("model.layers.3.self_attn.indexer.wk.weight", "blk.3.indexer.attn_k.weight"),
+                ("model.layers.0.self_attn.indexer.k_norm.bias", "blk.0.indexer.k_norm.bias"),
+                ("model.layers.2.self_attn.indexer.weights_proj.weight", "blk.2.indexer.proj.weight"),
+            ] {
+                assert_eq!(plan.map(name).unwrap(), Mapped::Tensor { name: gguf.into(), add: 0.0 }, "{model_type} {name}");
             }
+            // the NextN block (index == layer count) keeps no indexer
+            assert_eq!(plan.map("model.layers.4.self_attn.indexer.wk.weight").unwrap(), Mapped::Skip);
             assert_eq!(
                 plan.map("model.layers.1.self_attn.q_b_proj.weight").unwrap(),
                 Mapped::Tensor { name: "blk.1.attn_q_b.weight".into(), add: 0.0 }

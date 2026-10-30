@@ -24,6 +24,8 @@ pub(super) fn placeholder_expert() -> Expert {
 pub(super) fn placeholder_layer() -> Layer {
     Layer {
         attn: Attn::None,
+        indexer: None,
+        dsa_shared: false,
         output_gate: false,
         chunk: None,
         attn_gate: None,

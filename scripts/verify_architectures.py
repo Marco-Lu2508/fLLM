@@ -40,12 +40,15 @@ def verify(arch: str, fllm: str, example: str, workdir: Path, outtype: str, keep
         return {"arch": arch, "ok": False, "error": f"logit count {len(mine)} != {len(want)}"}
     positions, vocab = golden["shape"]
     worst = 0.0
+    worst_at = 0
     span = max(want) - min(want)
     mismatches = 0
     for p in range(positions):
         a = mine[p * vocab : (p + 1) * vocab]
         b = want[p * vocab : (p + 1) * vocab]
-        worst = max(worst, max(abs(x - y) for x, y in zip(a, b)))
+        position_worst = max(abs(x - y) for x, y in zip(a, b))
+        if position_worst > worst:
+            worst, worst_at = position_worst, p
         # a different arg-max only counts when the reference prefers it clearly (not a near-tie)
         mine_top = max(range(vocab), key=a.__getitem__)
         ref_top = max(range(vocab), key=b.__getitem__)
@@ -57,6 +60,7 @@ def verify(arch: str, fllm: str, example: str, workdir: Path, outtype: str, keep
         "relative": worst / span if span else 0.0,
         "argmax_mismatches": mismatches,
         "positions": positions,
+        "worst_position": worst_at,
     }
     result["ok"] = result["relative"] < 2e-3 and mismatches == 0
     if not keep:

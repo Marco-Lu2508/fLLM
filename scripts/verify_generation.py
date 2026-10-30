@@ -24,8 +24,13 @@ PROMPTS = ["The quick brown fox", "Die Hauptstadt von", "def add(a, b):", "fLLM 
 NEW = 14
 
 
-def post(port, prompt):
-    body = json.dumps({"model": "x", "prompt": prompt, "max_tokens": NEW, "temperature": 0}).encode()
+def model_name(port):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
+        return json.load(r)["data"][0]["id"]
+
+
+def post(port, prompt, model="x"):
+    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": NEW, "temperature": 0}).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/completions", body, {"Content-Type": "application/json"}
     )
@@ -46,7 +51,7 @@ def verify(arch, fllm, work, port):
     want = []
     for prompt in PROMPTS:
         ids = torch.tensor([tok.encode(prompt, add_special_tokens=False).ids])
-        with torch.no_grad():
+        with torch.no_grad(), hf_golden.stable_topk():
             out = model.generate(ids, max_new_tokens=NEW, do_sample=False, min_new_tokens=NEW)
         want.append(tok.decode(out[0, ids.shape[1] :].tolist(), skip_special_tokens=True))
     server = subprocess.Popen(
@@ -64,7 +69,8 @@ def verify(arch, fllm, work, port):
                     return {"arch": arch, "ok": False, "error": server.stdout.read().decode()[-400:]}
                 time.sleep(0.5)
         with concurrent.futures.ThreadPoolExecutor(4) as pool:
-            got = list(pool.map(lambda p: post(port, p), PROMPTS))
+            name = model_name(port)
+            got = list(pool.map(lambda p: post(port, p, name), PROMPTS))
     finally:
         server.terminate()
     # a random model may emit the end-of-sequence token that transformers was told to suppress

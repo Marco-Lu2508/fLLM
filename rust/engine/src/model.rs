@@ -124,12 +124,24 @@ const ARCHITECTURE_ALIASES: &[(&str, &str)] = &[
     ("qwen3vl", "qwen3"),
     ("qwen3vlmoe", "qwen3moe"),
     ("qwen2vl", "qwen2"),
+    // DeepSeek-V3.2 / GLM-5 with the lightning indexer: the deepseek2 layer plus `blk.N.indexer.*` tensors
+    ("deepseek32", "deepseek2"),
+    ("glm-dsa", "deepseek2"),
 ];
 
 fn canonical_architecture(mapping: MappedGguf) -> MappedGguf {
     let arch = mapping.index().metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
     match ARCHITECTURE_ALIASES.iter().find(|(from, _)| *from == arch) {
-        Some((from, to)) => mapping.with_architecture_alias(from, to),
+        Some((from, to)) => {
+            let aliased = mapping.with_architecture_alias(from, to);
+            if matches!(*from, "deepseek32" | "glm-dsa") {
+                // the indexer of DeepSeek-V3.2 rotates half-split (NeoX) pairs, the one of GLM-5 interleaved pairs; files of other
+                // writers do not say so
+                aliased.with_metadata_default("deepseek2.attention.indexer.rope_neox", Value::Bool(*from == "deepseek32"))
+            } else {
+                aliased
+            }
+        }
         None => mapping,
     }
 }

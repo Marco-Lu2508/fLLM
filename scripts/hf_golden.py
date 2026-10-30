@@ -12,6 +12,7 @@ Requires torch, transformers and tokenizers (see docs/architectures.md).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -933,6 +934,24 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=64,
             indexer_types=["full", "shared", "full"],
         ),
+        # the indexer keeps 4 of the 12 tokens: the sparse selection decides the result (index_topk 64 above never drops a key)
+        "deepseek_v32_sparse": lambda: T.DeepseekV32Config(
+            **common, num_attention_heads=4, num_key_value_heads=4, intermediate_size=128,
+            moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=2,
+            topk_group=1, first_k_dense_replace=1, n_shared_experts=1, kv_lora_rank=16,
+            q_lora_rank=24, qk_rope_head_dim=8, qk_nope_head_dim=16, v_head_dim=16,
+            routed_scaling_factor=2.5, rms_norm_eps=1e-6,
+            index_n_heads=4, index_head_dim=16, index_topk=4,
+        ),
+        "glm_moe_dsa_sparse": lambda: T.GlmMoeDsaConfig(
+            **common, num_attention_heads=4, num_key_value_heads=4, intermediate_size=128,
+            moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=1,
+            topk_group=1, first_k_dense_replace=1, n_shared_experts=1, kv_lora_rank=16,
+            q_lora_rank=24, qk_rope_head_dim=8, qk_nope_head_dim=16, v_head_dim=16,
+            routed_scaling_factor=2.5, rms_norm_eps=1e-5,
+            index_n_heads=4, index_head_dim=16, index_topk=4,
+            indexer_types=["full", "shared", "full"],
+        ),
         "mimo_v2_flash": lambda: T.MiMoV2FlashConfig(
             **{**common, "num_hidden_layers": 4}, num_attention_heads=4, num_key_value_heads=2, intermediate_size=128,
             moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_group=2, topk_group=1,
@@ -1170,6 +1189,35 @@ def build_xlm_roberta(out: Path, vocab: int, seed: int, arch: str = "xlm_roberta
     return golden
 
 
+@contextlib.contextmanager
+def stable_topk(margins=None, index_topk=None):
+    """`topk` that keeps the lower index among equal values, for 3-dimensional float32 inputs (the DSA indexer scores).
+
+    The score of a key is `sum_h w_h * relu(q_h . k)`: when all heads of a key are in the ReLU's dead zone it is exactly 0, and a query
+    with fewer than `index_topk` positive keys then cuts among such ties. Which of them `torch.topk` returns is implementation defined,
+    so fixtures compare against this deterministic choice (the same one fLLM makes); the maths of the scores is what is verified.
+    With a list as `margins`, the gap between the last kept and the first dropped score of every query that has to cut is appended to it:
+    a fixture whose gap is within the floating-point noise of two engines would compare the noise, so the builder picks another seed.
+    """
+    original = torch.Tensor.topk
+
+    def stable(self, k, dim=-1, largest=True, sorted=True):
+        if self.dim() != 3 or self.dtype != torch.float32 or not largest or (index_topk is not None and k != index_topk):
+            return original(self, k, dim=dim, largest=largest, sorted=sorted)
+        values, index = torch.sort(self, dim=dim, descending=True, stable=True)
+        if margins is not None and dim in (-1, 2):
+            for q in range(values.shape[1]):
+                if q + 1 > k:
+                    margins.append(float(values[0, q, k - 1] - values[0, q, k]))
+        return torch.return_types.topk((values.narrow(dim, 0, k), index.narrow(dim, 0, k)))
+
+    torch.Tensor.topk = stable
+    try:
+        yield
+    finally:
+        torch.Tensor.topk = original
+
+
 def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     import transformers as T
 
@@ -1376,8 +1424,11 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
         cfg_path.write_text(json.dumps(data, indent=2) + "\n")
     g = torch.Generator().manual_seed(seed + 1)
     ids = torch.randint(4, vocab, (1, TOKENS), generator=g)
-    with torch.no_grad():
+    margins: list[float] = []
+    with torch.no_grad(), stable_topk(margins, getattr(cfg, "index_topk", None)):
         logits = model(ids).logits[0].float()
+    if arch.endswith("_sparse") and margins and min(margins) < 5e-4 and seed < 1234 + 60:
+        return build(arch, out, vocab, seed + 1)
     golden = {
         "arch": arch,
         "ids": ids[0].tolist(),

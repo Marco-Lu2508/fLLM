@@ -600,6 +600,17 @@ impl MappedGguf {
             extra_mappings,
         })
     }
+    /// The same file with metadata key `key` set to `value` when the file does not carry it (a default for keys that
+    /// files of another writer leave out).
+    pub fn with_metadata_default(&self, key: &str, value: Value) -> Self {
+        let mut index = self.index.clone();
+        index.metadata.entry(key.to_owned()).or_insert(value);
+        Self {
+            mapping: Arc::clone(&self.mapping),
+            index,
+            extra_mappings: self.extra_mappings.clone(),
+        }
+    }
     /// A view of a file written for architecture `from` as one of architecture `to`: `general.architecture` and
     /// every `<from>.` metadata key are renamed, tensors and payloads are shared. For llama.cpp architecture names
     /// whose layout equals one this program implements under another name.

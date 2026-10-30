@@ -55,7 +55,7 @@ Verified column:
 | Step-3.5-Flash / Step-3.7-Flash text (`step3p5`) | safetensors (Hub layout) | D | H (attention layers: per-head gate) | H | H | H | T 6.0e-4 (new; the real 196B checkpoint was not run) |
 | MiMo-V2-Flash (`mimo_v2_flash`: per-layer KV heads, sinks, value scale) | safetensors | D | H (attention layers: value scale) | H | H | H | T 2.7e-4 (new fixture; the real 309B checkpoint was not run) |
 | DeepSeek V2/V3/R1, Kimi K2, Mistral Large 3 / Mistral 4, Youtu, Sarvam-MLA, MiniCPM3, Ling-2 (`deepseek_v2`, `deepseek_v3`, `kimi_k2`, `mistral4`, ...) | safetensors (also FP8 block), GGUF `deepseek2` | D | D | D (equal KV head count) / H | D | D | T 1.4e-4 .. 2.0e-4 |
-| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 (new). **Dense attention:** the sparse-attention indexer is not run; that equals DSA while the context is at most `index_topk` (2048) and is approximate beyond (see Open gaps) |
+| DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`; GGUF `deepseek32`, `glm-dsa` by name) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 with `index_topk` above the sequence length; **T 1.7e-4 / 3.5e-4 with the indexer cutting 4 of 12 tokens** (`deepseek_v32_sparse`, `glm_moe_dsa_sparse`). The exact lightning-indexer selection runs on the CPU path; accelerators attend densely (exact up to `index_topk` tokens) unless `FLLM_DSA=exact` puts the layers on the host. No device kernel for the indexer |
 | Laguna (`laguna`, per-head attention gate) | safetensors | D | H (attention layers) | H | H | H | T 2.6e-4 |
 | K2 Horizon, G9v3 (`k2_horizon`, `g9v3`) | safetensors, GGUF | D | D | D | D | D | T 1.5e-4 .. 1.9e-4 (remote-code reference) |
 | Qwen3-Next, Qwen3.5/3.6/3.8, MoE (`qwen3_next`, `qwen3_5`, `qwen3_5_moe`; GGUF `qwen35`, `qwen35moe`) | safetensors, GGUF | D | D | D | H | D | T 1.2e-4 .. 3.0e-4; T+G for the Qwen3.5/3.8 GGUFs |
@@ -143,12 +143,32 @@ processor. Each row is one tiny random-weight model, 12 greedy tokens, the text 
 
 | Model | Result |
 | --- | --- |
-| BitNet, Helium, Ministral, DeepSeek-V3.2, GLM-5 (DSA), Kimi-Linear, XVERSE | same text |
+| BitNet, Helium, Ministral, DeepSeek-V3.2, GLM-5 (DSA, index_topk above the sequence length), Kimi-Linear, XVERSE | same text |
 | MiMo-V2-Flash, Step-3.5, Laguna | **different text on the first run**: `FLLM_LAYER_CHECK=1` showed layer 0 of the device differing from the host reference by 1.7 to 2.5 times its rms (a stablelm, glm4, phi, olmoe, gemma2 control showed 0.001 to 0.003). Cause found by comparing intermediate sums: the device multiplied the attention output by a per-head gate element by element (Laguna, Step-3.5) and had no value scale (MiMo-V2). Those attention layers now run on the host (`layer_host_reason`); the same text as the CPU on the second run, together with BitNet |
 
 This shows the architectures load and run on that device and found one defect of the shared device path; it is not a performance or
 accuracy measurement. CUDA, HIP and Metal were not run in this audit, the Radeon 840M laptop was in use by another benchmark and was not
 touched, and Vulkan on an AMD GPU is untested for the new architectures.
+
+### Sparse-attention indexer (DeepSeek-V3.2, GLM-5): comparison and devices
+
+`scripts/hf_golden.py` has the fixtures `deepseek_v32_sparse` and `glm_moe_dsa_sparse` (`index_topk` 4, so from the fifth token on the
+indexer drops keys; the older fixtures with `index_topk` 64 never drop one). Reference: transformers 5.22.1 on the build host, float32.
+The indexer score of a key is `sum_h w_h * relu(q_h . k)`; keys whose heads are all in the ReLU dead zone score exactly 0 and
+transformers' `topk` picks among such ties in an undefined order, so the fixtures use a stable `topk` (lower position first, as fLLM
+does) and the builder chooses a seed in which the last kept and the first dropped score differ by more than 5e-4.
+
+| Check | Result |
+| --- | --- |
+| Logits of every position, `scripts/verify_architectures.py`, f32 weights, f16 KV cache | `deepseek_v32_sparse` 1.7e-4 (12 tokens), 2.5e-4 (28), 1.8e-4 (33 and 36); `glm_moe_dsa_sparse` 3.5e-4 (12), 3.0e-4 (28, 33, 36), 2.2e-4 (40, 45); the selected positions of all 109 (layer, position) pairs equal those of transformers |
+| The same fixtures with `FLLM_DSA=dense` (the earlier behaviour) | 0.57 / 0.64 relative: the test discriminates |
+| `deepseek_v32_sparse` at 40 and 45 tokens | 0.13 relative at position 37 only: the attention output of that position agrees (below 1e-3) and the MoE output of layer 2 does not, a routing near-tie of the random fixture that is not related to the indexer; not counted as a pass |
+| Cached decoding: first K tokens as a batch, then one token per call (`FLLM_VERIFY_SPLIT`) | same logits as the single batch for both fixtures |
+| Greedy server completions, 4 concurrent requests, `scripts/verify_generation.py` | 4 of 4 identical to transformers for both fixtures |
+
+Devices (RTX 2000 Ada Laptop GPU through Vulkan, `vulkan:1`; tiny fixtures; `scripts/gpu_arch_smoke.py`): the default device run keeps
+the dense device attention and gives a different text from the CPU (the indexer cuts 4 of 19 tokens); with `FLLM_DSA=exact` the text equals the
+CPU text for both fixtures, and with `FLLM_DSA=dense` the device text equals the dense CPU text. CUDA, HIP, Metal and Vulkan on AMD were not run.
 
 ## Open gaps
 
@@ -156,8 +176,9 @@ Not implemented, ordered by how many current models need them:
 
 1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** and compressed or sparse key-value caches: DeepSeek-V4 and
    V4.1, Hy4, Qwen3.8-Flash-Next, GLM-5-Next, Motif. A new decoder structure and new cache types in every backend.
-2. **The DeepSeek-V3.2 / GLM-5 indexer** (exact sparse attention beyond 2048 tokens of context): it needs a second key
-   stream per layer in the cache; today the dense result is used, exact up to `index_topk` tokens.
+2. **A device kernel for the DeepSeek-V3.2 / GLM-5 indexer.** The CPU path is exact at any context length (indexer keys per
+   slot beside the KV pools); accelerators keep dense attention, exact up to `index_topk` tokens, or run those layers on the
+   host (`FLLM_DSA=exact`). A real 685B / 753B checkpoint was not run.
 3. **KDA variants**: Ling-3.0 (bounded forget gate, rotary latent attention with a head gate, Hub layout `attention.*`),
    GLM-5-Next, Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
 4. **RWKV 6/7, xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,

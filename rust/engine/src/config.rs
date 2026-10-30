@@ -222,6 +222,18 @@ pub struct MlaConfig {
     pub rotary: bool,
 }
 
+/// DeepSeek sparse attention (DeepSeek-V3.2, GLM-5): a lightning indexer scores every earlier token with
+/// `sum_h w_h * relu(q_h . k) * scale` and the layer attends to the `topk` best only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexerConfig {
+    pub heads: usize,
+    /// Width of the indexer queries and keys; the first `MlaConfig::rope` values are rotated.
+    pub dim: usize,
+    pub topk: usize,
+    /// The rotation pairs `(i, i + rope / 2)` (DeepSeek-V3.2) instead of `(2i, 2i + 1)` (GLM-5).
+    pub neox: bool,
+}
+
 /// Attention geometry of one layer. A model whose layers differ in head count, head width, KV heads or
 /// KV sharing carries one entry per layer in `ModelConfig::layer_geoms`; the scalar fields of
 /// `ModelConfig` then describe the first layer that owns a cache.
@@ -287,6 +299,8 @@ pub struct ModelConfig {
     /// Queries, keys and values are clamped to `[-clip, clip]` after projection.
     pub qkv_clip: Option<f32>,
     pub mla: Option<MlaConfig>,
+    /// Sparse-attention indexer of the MLA layers (a layer without `blk.N.indexer.*` tensors reuses the selection of the layer before).
+    pub indexer: Option<IndexerConfig>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
     pub mamba1: Option<Mamba1Config>,
@@ -620,6 +634,15 @@ impl ModelConfig {
         } else {
             None
         };
+        let indexer = match (&mla, uint(meta, a, "attention.indexer.head_count"), uint(meta, a, "attention.indexer.key_length"), uint(meta, a, "attention.indexer.top_k")) {
+            (Some(m), Some(heads), Some(dim), Some(topk)) if heads > 0 && topk > 0 && dim >= m.rope => Some(IndexerConfig {
+                heads,
+                dim,
+                topk,
+                neox: key(meta, a, "attention.indexer.rope_neox").and_then(Value::as_bool).unwrap_or(false),
+            }),
+            _ => None,
+        };
         let (kv_heads, head_dim, value_dim) = match &mla {
             Some(m) => (heads, m.nope + m.rope, m.value),
             None => (kv_heads, head_dim, value_dim),
@@ -726,6 +749,7 @@ impl ModelConfig {
                 .and_then(Value::as_bool)
                 .unwrap_or(a == "muse-glimmer"),
             mla,
+            indexer,
             shortconv: parse_shortconv(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
@@ -1206,6 +1230,7 @@ pub(crate) mod tests_support {
             alibi_slopes: None,
             qkv_clip: None,
             mla: None,
+            indexer: None,
             delta: None,
             mamba: None,
             mamba1: None,

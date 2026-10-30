@@ -33,15 +33,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut value = vec![0; model.value_buffer_len()?];
     let rows = (0..ids.len()).collect::<Vec<_>>();
     let lengths = (1..=ids.len()).map(|n| n as i64).collect::<Vec<_>>();
-    let logits = decoder.forward(
-        &ids,
-        &lengths,
-        &table.repeat(ids.len()),
+    // FLLM_VERIFY_SPLIT=K runs the first K tokens as one batch and every later token as a batch of its own (cached decoding)
+    let split = std::env::var("FLLM_VERIFY_SPLIT").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&k| k >= 1 && k < ids.len());
+    let first = split.unwrap_or(ids.len());
+    let mut logits = decoder.forward(
+        &ids[..first],
+        &lengths[..first],
+        &table.repeat(first),
         &mut key,
         &mut value,
-        &rows,
+        &rows[..first],
         false,
     )?;
+    for n in first..ids.len() {
+        logits.extend(decoder.forward(&ids[n..=n], &lengths[n..=n], &table, &mut key, &mut value, &[0], false)?);
+    }
     let tokenizer = TokenizerBundle::from_gguf(model.mapping())?;
     let text = input["text"].as_str().unwrap_or("hello");
     println!(
