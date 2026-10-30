@@ -735,11 +735,17 @@ fn last_error() -> String {
         .into_owned()
 }
 
+#[track_caller]
 fn check(code: c_int) -> Result<(), BackendError> {
     if code == 0 {
         Ok(())
     } else {
-        let message = last_error();
+        let mut message = last_error();
+        if message.is_empty() {
+            // a kernel entry point that gave up without recording why: name the call site and the code instead of an empty "Driver error:"
+            let at = std::panic::Location::caller();
+            message = format!("device call at {}:{} returned code {code} without an error message", at.file(), at.line());
+        }
         // the ROCm build has stubs for the kernels that exist for NVIDIA only (device MoE routing, GPU sampling, latent MLA ...): that is "not supported
         // here", which callers answer with their host path and the self test skips, not a failed driver call
         if message.contains("needs an NVIDIA GPU") || message.contains("not available in the ROCm build") {
