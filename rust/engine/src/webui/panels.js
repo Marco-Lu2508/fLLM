@@ -93,6 +93,7 @@
     }
 
     // --- Studio Status Sync ---
+    let hardwareFetching = false; // one request for the hardware report from the footer at a time
     async function refreshStudioStatus() {
       try {
         const res = await apiFetch('/api/studio/status');
@@ -117,11 +118,15 @@
         if (!state.selectedModel) state.selectedModel = m.name || 'tiny';
         $('activeModelLabel').textContent = state.selectedModel;
         $('activeQuantChip').textContent = m.quantization || 'GGUF';
-        // the device the model was started on (--device), when it is not the processor; the CPU tier is what the processor part uses
-        const loadDevice = m.load_options?.device;
-        const onAccelerator = loadDevice && !['auto', 'cpu'].includes(String(loadDevice).toLowerCase());
-        $('footerSimdLabel').textContent = `${onAccelerator ? `${loadDevice} · CPU ` : 'CPU · '}${data.config?.active_cpu_tier || 'simd'}`;
-        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} slots`;
+        // where the model runs: the device it was started on, or the one the automatic choice picks (npu.js)
+        const where = runningDevice(m.load_options?.device, state.hardware, data.config?.active_cpu_tier);
+        $('footerSimdLabel').textContent = where.label;
+        $('footerSimdLabel').title = where.title;
+        if (!state.hardware && !state.hardwareError && !hardwareFetching) {
+          hardwareFetching = true; // the footer shows the processor until the report arrives, then the device
+          apiFetch('/api/studio/hardware').then((r) => (r.ok ? r.json() : null)).then((hw) => { if (hw) { state.hardware = hw; refreshStudioStatus(); } }).catch(() => {}).finally(() => { hardwareFetching = false; });
+        }
+        $('footerSlotsLabel').textContent = `${data.metrics?.slots_running || 0}/${data.metrics?.slots_total || 8} busy`;
         $('settingsVersionBadge').textContent = `fllm-rs ${data.version || '0.1.2'}`;
         $('genBuildInfoText').textContent = data.build_info || '';
         $('serverEndpointUrlText').textContent = `${window.location.origin}/v1`;

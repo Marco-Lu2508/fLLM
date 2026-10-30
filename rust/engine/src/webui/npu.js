@@ -125,6 +125,26 @@
       }
       return out;
     }
+
+    /**
+     * What the footer says about where the model runs. `loadDevice` is the --device value the model was started with ("auto" when
+     * the server chose), `hw` the hardware report (its `auto_choice` is the device the automatic choice picks), `tier` the CPU kernel tier.
+     * Returns { label, title, auto }. Without a hardware report an automatic choice can only be shown as the processor part.
+     */
+    function runningDevice(loadDevice, hw, tier) {
+      const want = String(loadDevice || 'auto').toLowerCase();
+      const cpu = { label: `CPU · ${tier || 'simd'}`, title: 'The model runs on the processor.', auto: want === 'auto' };
+      if (want === 'cpu') return cpu;
+      const names = { cuda: 'CUDA', vulkan: 'Vulkan', hip: 'ROCm', metal: 'Metal', dx12: 'DirectX 12', sycl: 'SYCL', npu: 'NPU' };
+      const id = want === 'auto' ? String((hw && hw.auto_choice) || 'cpu').toLowerCase() : want;
+      if (id === 'cpu') return cpu;
+      const dev = ((hw && hw.devices) || []).find((d) => d && String(d.id).toLowerCase() === id);
+      const backend = String((dev && dev.backend) || id.split(':')[0]);
+      const plain = dev ? String(dev.name).replace(/\((R|TM)\)/gi, '').replace(/\s+/g, ' ').trim() : id;
+      const label = `${plain} · ${names[backend] || backend}`;
+      const title = want === 'auto' ? `${dev ? dev.name : id}: the automatic choice (${id}); layers that do not fit run on the processor.` : `${dev ? dev.name : id}: chosen in the load options (${id}).`;
+      return { label, title, auto: want === 'auto' };
+    }
     // @pure-end
 
     // ---- the card ------------------------------------------------------------------------------------------------------------

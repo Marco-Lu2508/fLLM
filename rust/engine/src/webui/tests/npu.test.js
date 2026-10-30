@@ -10,7 +10,7 @@ const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in npu.js');
 const L = new Function(`${src.slice(begin, end)}
-return { npuCardModel, npuProgressModel, deviceChoices, NPU_WARNING };`)();
+return { npuCardModel, npuProgressModel, deviceChoices, runningDevice, NPU_WARNING };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -157,6 +157,31 @@ test('the device choice survives missing data and keeps the current value', () =
   assert.strictEqual(npuSaved[npuSaved.length - 1].value, 'npu');
   assert.match(npuSaved[npuSaved.length - 1].warning, /Experimental/);
   assert.strictEqual(L.deviceChoices(hw, base({ state: 'ready' }), 'npu').filter((c) => c.value === 'npu').length, 1);
+});
+
+const gpuHw = { auto_choice: 'vulkan:0', devices: [
+  { id: 'cpu', backend: 'cpu', name: 'Intel(R) Core(TM) Ultra 5 235U' },
+  { id: 'vulkan:0', backend: 'vulkan', name: 'Intel(R) Graphics' },
+  { id: 'cuda:0', backend: 'cuda', name: 'NVIDIA RTX 2000 Ada' },
+] };
+
+test('the footer names the device the automatic choice picks', () => {
+  const r = L.runningDevice('auto', gpuHw, 'avx-vnni');
+  assert.strictEqual(r.label, 'Intel Graphics · Vulkan');
+  assert.strictEqual(r.auto, true);
+  assert.match(r.title, /automatic choice/);
+});
+
+test('an explicit device and the processor are named as chosen', () => {
+  assert.strictEqual(L.runningDevice('cuda:0', gpuHw, 'x').label, 'NVIDIA RTX 2000 Ada · CUDA');
+  assert.match(L.runningDevice('cuda:0', gpuHw, 'x').title, /load options/);
+  assert.strictEqual(L.runningDevice('cpu', gpuHw, 'avx2').label, 'CPU · avx2');
+});
+
+test('without a hardware report or with a processor choice the footer shows the processor', () => {
+  assert.strictEqual(L.runningDevice('auto', null, 'avx2').label, 'CPU · avx2');
+  assert.strictEqual(L.runningDevice(undefined, { auto_choice: 'cpu', devices: [] }, '').label, 'CPU · simd');
+  assert.strictEqual(L.runningDevice('vulkan:3', gpuHw, 'x').label, 'vulkan:3 · Vulkan');
 });
 
 console.log(`${n} tests passed`);
