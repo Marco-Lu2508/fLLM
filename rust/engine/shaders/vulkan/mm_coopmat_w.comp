@@ -42,6 +42,16 @@
 #define WITEMS ((BM * CPR) / WG)   // weight chunks per invocation and K step
 #define XITEMS ((BN * QPR) / WG)   // activation uvec4 per invocation and K step
 
+// Q4_K with a K step of 64 has its own weight loader: one K step of a row is exactly one pair of scale groups, 32 bytes of qs whose low nibbles are the first and
+// whose high nibbles are the second group of 32 values. An invocation reads 16 of those bytes with one wide load and the scales, minimums and d / dmin of the
+// pair once (instead of two words, a scale word, a minimum word and the d word for every chunk of 8 weights).
+#if defined(FMT_Q4_K) && !defined(FLLM_NO_Q4K_LOADER)
+#define Q4K_LOADER 1
+#if BK != 64
+#error "the Q4_K loader needs a K step of 64"
+#endif
+#endif
+
 layout(local_size_x = 32 * NSGM * NSGN, local_size_y = 1, local_size_z = 1) in;
 
 #include "_q_common.glsl"
@@ -59,14 +69,42 @@ shared f16vec4 As[BM * LDS / 4u];   // As[m * LDS + k] in halves
 shared f16vec4 Bs[BN * LDS / 4u];   // Bs[n * LDS + k] in halves
 shared float Cs[NSG * 256];         // one 16 x 16 staging tile per subgroup
 
+#ifdef Q4K_LOADER
+#define QITEMS ((BM * 2u) / WG)   // (row, half) units per invocation and K step
+uvec4 r_q[QITEMS];
+vec4 r_k[QITEMS];   // scale and minimum of the first group, then of the second group: weight = k.x * q + k.y, k.z * q + k.w
+#else
 uint r_p0[WITEMS];
 uint r_p1[WITEMS];
 float r_ws[WITEMS];
 float r_wm[WITEMS];
+#endif
 uvec4 r_x[XITEMS];
 
 // the packed weights and the activations of K step k0 into registers
 void fetch(uint k0, uint t, uint m0, uint n0) {
+#ifdef Q4K_LOADER
+    [[unroll]] for (uint e = 0; e < QITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint row = m0 + (i >> 1);
+        uvec4 q = uvec4(0u);
+        vec4 k = vec4(0.0);
+        if (row < p.rows) {
+            const uint g = row * p.nb + (k0 >> 8);
+            const uint pair = (k0 >> 6) & 3u;
+            const uint q0 = g * 32u + pair * 8u + (i & 1u) * 4u;
+            q = uvec4(w[q0], w[q0 + 1u], w[q0 + 2u], w[q0 + 3u]);
+            const uint q1 = p.off1 + g * 4u + (pair >> 1);
+            const uint sh = (pair & 1u) << 4;
+            const uint scw = w[q1] >> sh;
+            const uint mnw = w[q1 + 2u] >> sh;
+            const vec2 dm = unpackHalf2x16(w[p.off2 + g]);
+            k = vec4(dm.x * float(scw & 255u), -dm.y * float(mnw & 255u), dm.x * float((scw >> 8) & 255u), -dm.y * float((mnw >> 8) & 255u));
+        }
+        r_q[e] = q;
+        r_k[e] = k;
+    }
+#else
     [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
         const uint i = t + e * WG;
         const uint row = m0 + i / CPR;
@@ -79,6 +117,7 @@ void fetch(uint k0, uint t, uint m0, uint n0) {
         r_ws[e] = ws;
         r_wm[e] = wm;
     }
+#endif
     [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
         const uint i = t + e * WG;
         const uint token = n0 + i / QPR;
@@ -90,6 +129,23 @@ void fetch(uint k0, uint t, uint m0, uint n0) {
 
 // the registers to the shared f16 tiles
 void stash(uint t) {
+#ifdef Q4K_LOADER
+    [[unroll]] for (uint e = 0; e < QITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint base = (((i >> 1) * LDS) + (i & 1u) * 16u) >> 2;   // first group at tile columns 0 .. 31, the second at 32 .. 63
+        const vec4 ka = vec4(r_k[e].x, r_k[e].x, r_k[e].x, r_k[e].x);
+        const vec4 ma = vec4(r_k[e].y, r_k[e].y, r_k[e].y, r_k[e].y);
+        const vec4 kb = vec4(r_k[e].z, r_k[e].z, r_k[e].z, r_k[e].z);
+        const vec4 mb = vec4(r_k[e].w, r_k[e].w, r_k[e].w, r_k[e].w);
+        [[unroll]] for (uint c = 0; c < 4u; ++c) {
+            const uint x = r_q[e][c];
+            const vec4 lo = vec4(uvec4(x, x >> 8, x >> 16, x >> 24) & 15u);
+            const vec4 hi = vec4(uvec4(x >> 4, x >> 12, x >> 20, x >> 28) & 15u);
+            As[base + c] = f16vec4(fma(lo, ka, ma));
+            As[base + 8u + c] = f16vec4(fma(hi, kb, mb));
+        }
+    }
+#else
     [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
         const uint i = t + e * WG;
         float vals[8];
@@ -98,6 +154,7 @@ void stash(uint t) {
         As[base] = f16vec4(vals[0], vals[1], vals[2], vals[3]);
         As[base + 1u] = f16vec4(vals[4], vals[5], vals[6], vals[7]);
     }
+#endif
     [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
         const uint i = t + e * WG;
         const uint base = ((i / QPR) * LDS + (i % QPR) * 8u) >> 2;
