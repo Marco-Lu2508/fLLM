@@ -105,6 +105,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "deepseek",
     "deepseek2",
     "deepseek4",
+    "hy4",
     "k2_horizon",
     "k2-horizon",
     "k2horizon",

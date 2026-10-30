@@ -928,6 +928,9 @@ impl Plan {
         if raw == "deepseek_v4" {
             return crate::deepseek4::plan(cfg);
         }
+        if raw == "hy_v4" {
+            return crate::hy4::plan(cfg);
+        }
         if matches!(raw.as_str(), "kimi_linear" | "kimi_k3" | "bailing_moe_v3" | "bailingmoev3" | "ling3" | "ling" | "glm5_flash" | "glm_5_3_flash" | "glm5_next") {
             return crate::kimi_linear::plan(cfg);
         }
@@ -2635,6 +2638,21 @@ impl Plan {
         if self.arch == "deepseek4" {
             return crate::deepseek4::map(self, n);
         }
+        let hy_renamed;
+        let n = if self.arch == "hy4" {
+            if let Some(m) = crate::hy4::map_hc(n) {
+                return Ok(m);
+            }
+            match crate::hy4::rename(n) {
+                Some(r) => {
+                    hy_renamed = r;
+                    hy_renamed.as_str()
+                }
+                None => n,
+            }
+        } else {
+            n
+        };
         if self.arch == "gemma4" {
             return crate::gemma::map(self, n);
         }

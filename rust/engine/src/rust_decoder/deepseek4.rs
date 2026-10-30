@@ -139,8 +139,63 @@ fn rope_tail(v: &mut [f32], rope: usize, position: usize, freq: &[f32], sign: f3
     }
 }
 
+/// `streams[k] = post[k] * block + sum_j comb[j][k] * old[j]` per row; without `comb` the old stream of `k` is kept as it is.
+pub(super) fn combine_streams(streams: &mut [f32], post: &[f32], comb: Option<&[f32]>, block: &[f32], rows: usize, hc: usize, hidden: usize) {
+    let old = streams.to_vec();
+    for r in 0..rows {
+        for k in 0..hc {
+            let out = &mut streams[(r * hc + k) * hidden..(r * hc + k + 1) * hidden];
+            let b = &block[r * hidden..(r + 1) * hidden];
+            let pk = post[r * hc + k];
+            for (d, o) in out.iter_mut().enumerate() {
+                let mixed = match comb {
+                    Some(comb) => (0..hc).map(|j| comb[(r * hc + j) * hc + k] * old[(r * hc + j) * hidden + d]).sum::<f32>(),
+                    None => old[(r * hc + k) * hidden + d],
+                };
+                *o = pk * b[d] + mixed;
+            }
+        }
+    }
+}
+
 impl Hc {
-    fn load(mapping: &MappedGguf, p: &str, hc: usize, hidden: usize, outputs: usize, scales: usize) -> Result<Self, String> {
+    /// Independent hyper-connection (Hy4): `(post [rows x hc], collapsed [rows x hidden])`, `post = magnitude * sigmoid(..) + eps`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compute_independent(&self, x: &[f32], rows: usize, hc: usize, hidden: usize, norm_eps: f32, eps: f32, magnitude: f32) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let mut flat = x.to_vec();
+        rms_plain(&mut flat, hc * hidden, norm_eps);
+        let mixes = self.mix.forward(&flat)?;
+        let mut post = vec![0.0f32; rows * hc];
+        let mut collapsed = vec![0.0f32; rows * hidden];
+        for r in 0..rows {
+            let m = &mixes[r * 2 * hc..(r + 1) * 2 * hc];
+            for n in 0..hc {
+                let pre = sigmoid(m[n] * self.scale[0] + self.base[n]) + eps;
+                post[r * hc + n] = magnitude * sigmoid(m[hc + n] * self.scale[1] + self.base[hc + n]) + eps;
+                let stream = &x[(r * hc + n) * hidden..(r * hc + n + 1) * hidden];
+                collapsed[r * hidden..(r + 1) * hidden].iter_mut().zip(stream).for_each(|(o, s)| *o += pre * s);
+            }
+        }
+        Ok((post, collapsed))
+    }
+
+    /// The final collapse of the streams: weights `sigmoid(scale * fn(rms(streams)) + base) + eps`.
+    pub(super) fn collapse_head(&self, streams: &[f32], rows: usize, hc: usize, hidden: usize, norm_eps: f32, eps: f32) -> Result<Vec<f32>, String> {
+        let mut flat = streams.to_vec();
+        rms_plain(&mut flat, hc * hidden, norm_eps);
+        let mixes = self.mix.forward(&flat)?;
+        let mut out = vec![0.0f32; rows * hidden];
+        for r in 0..rows {
+            for n in 0..hc {
+                let pre = sigmoid(mixes[r * hc + n] * self.scale[0] + self.base[n]) + eps;
+                let stream = &streams[(r * hc + n) * hidden..(r * hc + n + 1) * hidden];
+                out[r * hidden..(r + 1) * hidden].iter_mut().zip(stream).for_each(|(o, s)| *o += pre * s);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn load(mapping: &MappedGguf, p: &str, hc: usize, hidden: usize, outputs: usize, scales: usize) -> Result<Self, String> {
         let mut mix = Linear::load(mapping, &format!("{p}_fn"), outputs, hc * hidden)?;
         mix.enable_fast_cpu();
         Ok(Self { mix, base: vector(mapping, &format!("{p}_base.weight"), outputs)?, scale: vector(mapping, &format!("{p}_scale.weight"), scales)? })
@@ -326,49 +381,20 @@ impl RustDecoder {
         }
         let mut workspace = compute::ProjectionGroupWorkspace::default();
         for (i, (layer, vl)) in self.layers.iter().zip(&model.layers).enumerate() {
-            let combine = |streams: &mut Vec<f32>, post: &[f32], comb: &[f32], block: &[f32]| {
-                let old = streams.clone();
-                for r in 0..rows {
-                    for k in 0..hc {
-                        let out = &mut streams[(r * hc + k) * hidden..(r * hc + k + 1) * hidden];
-                        let b = &block[r * hidden..(r + 1) * hidden];
-                        let pk = post[r * hc + k];
-                        for (d, o) in out.iter_mut().enumerate() {
-                            let mut mixed = 0.0;
-                            for j in 0..hc {
-                                mixed += comb[(r * hc + j) * hc + k] * old[(r * hc + j) * hidden + d];
-                            }
-                            *o = pk * b[d] + mixed;
-                        }
-                    }
-                }
-            };
             let (post, comb, mut normed) = vl.hc_attn.compute(&streams, rows, hc, hidden, cfg.eps, v.hc_eps, v.hc_iters)?;
             if let Some(norm) = &layer.attn_norm {
                 self.norm(&mut normed, norm);
             }
             let attn = self.v4_attention(i, vl, &normed, positions, tables, lengths)?;
-            combine(&mut streams, &post, &comb, &attn);
+            combine_streams(&mut streams, &post, Some(&comb), &attn, rows, hc, hidden);
             let (post, comb, mut normed) = vl.hc_ffn.compute(&streams, rows, hc, hidden, cfg.eps, v.hc_eps, v.hc_iters)?;
             if let Some(norm) = &layer.ffn_norm {
                 self.norm(&mut normed, norm);
             }
             let mlp = self.ffn_forward(layer, &normed, &mut workspace)?;
-            combine(&mut streams, &post, &comb, &mlp);
+            combine_streams(&mut streams, &post, Some(&comb), &mlp, rows, hc, hidden);
         }
-        // collapse the streams: sigmoid(scale * fn(rms(streams)) + base) + eps as weights
-        let mut flat = streams.clone();
-        rms_plain(&mut flat, hc * hidden, cfg.eps);
-        let mixes = model.head.mix.forward(&flat)?;
-        let mut out = vec![0.0f32; rows * hidden];
-        for r in 0..rows {
-            for n in 0..hc {
-                let pre = sigmoid(mixes[r * hc + n] * model.head.scale[0] + model.head.base[n]) + v.hc_eps;
-                let stream = &streams[(r * hc + n) * hidden..(r * hc + n + 1) * hidden];
-                out[r * hidden..(r + 1) * hidden].iter_mut().zip(stream).for_each(|(o, s)| *o += pre * s);
-            }
-        }
-        Ok(out)
+        model.head.collapse_head(&streams, rows, hc, hidden, cfg.eps, v.hc_eps)
     }
 
     /// One attention block for a batch; returns the projected output (rows x hidden).

@@ -143,6 +143,8 @@ pub struct MoeConfig {
     pub swiglu_oai: Option<(f32, f32)>,
     /// DeepSeek-V4 clamped SwiGLU: the gate is limited above, the up projection on both sides, `silu(gate) * up`.
     pub swiglu_clamp: Option<f32>,
+    /// The shared expert is clamped too (DeepSeek-V4); Hy4 clamps the routed experts only.
+    pub swiglu_clamp_shared: bool,
     /// Nemotron-H latent MoE: the routed experts work on a `latent`-wide projection of the hidden state.
     pub latent: Option<usize>,
     /// Router logits go through `cap * tanh(logit / cap)` before the gating function (Laguna).
@@ -250,6 +252,19 @@ pub struct IndexerConfig {
     pub topk: usize,
     /// The rotation pairs `(i, i + rope / 2)` (DeepSeek-V3.2) instead of `(2i, 2i + 1)` (GLM-5).
     pub neox: bool,
+    /// The rotated values are the last `MlaConfig::rope` of the head instead of the first (Hy4).
+    pub rope_last: bool,
+    /// Epsilon of the LayerNorm over the indexer keys.
+    pub norm_eps: f32,
+}
+
+/// Hy4: independent hyper-connections, `hc_mult` residual streams without a mixing matrix.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hy4Config {
+    pub hc_mult: usize,
+    /// Scale of the expansion weight: `post = magnitude * sigmoid(..) + eps`.
+    pub magnitude: f32,
+    pub eps: f32,
 }
 
 /// DeepSeek-V4: several residual streams per token (manifold-constrained hyper-connections), shared-KV multi-query attention with a
@@ -343,6 +358,7 @@ pub struct ModelConfig {
     /// Sparse-attention indexer of the MLA layers (a layer without `blk.N.indexer.*` tensors reuses the selection of the layer before).
     pub indexer: Option<IndexerConfig>,
     pub v4: Option<V4Config>,
+    pub hy4: Option<Hy4Config>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
     pub mamba1: Option<Mamba1Config>,
@@ -684,6 +700,8 @@ impl ModelConfig {
                 dim,
                 topk,
                 neox: key(meta, a, "attention.indexer.rope_neox").and_then(Value::as_bool).unwrap_or(false),
+                rope_last: key(meta, a, "attention.indexer.rope_last").and_then(Value::as_bool).unwrap_or(false),
+                norm_eps: float(meta, a, "attention.indexer.norm_eps").unwrap_or(1e-6),
             }),
             _ => None,
         };
@@ -825,6 +843,15 @@ impl ModelConfig {
             mla,
             indexer,
             v4,
+            hy4: if a == "hy4" {
+                Some(Hy4Config {
+                    hc_mult: uint(meta, a, "hc_mult").ok_or("Hy4 needs hy4.hc_mult")?,
+                    magnitude: float(meta, a, "hc_magnitude").unwrap_or(2.0),
+                    eps: float(meta, a, "hc_eps").unwrap_or(1e-6),
+                })
+            } else {
+                None
+            },
             shortconv: parse_shortconv(meta, a, layers)?,
             delta: parse_delta(meta, a),
             mamba: parse_mamba(meta, a),
@@ -1212,6 +1239,7 @@ fn parse_moe(mapping: &MappedGguf, arch: &str, ff: usize) -> Result<Option<MoeCo
         latent: uint(meta, arch, "moe_latent_size").filter(|&n| n > 0),
         router_softcap: float(meta, arch, "router_logit_softcapping").filter(|c| *c > 0.0),
         swiglu_clamp: float(meta, arch, "expert_swiglu_clamp").filter(|l| *l > 0.0),
+        swiglu_clamp_shared: key(meta, arch, "expert_swiglu_clamp_shared").and_then(Value::as_bool).unwrap_or(true),
         swiglu_oai: match (arch, float(meta, arch, "expert_swiglu_limit")) {
             (_, Some(limit)) => Some((
                 float(meta, arch, "expert_swiglu_alpha").unwrap_or(1.702),
@@ -1320,6 +1348,7 @@ pub(crate) mod tests_support {
             mla: None,
             indexer: None,
             v4: None,
+            hy4: None,
             delta: None,
             mamba: None,
             mamba1: None,

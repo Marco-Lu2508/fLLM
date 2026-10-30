@@ -952,6 +952,14 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=4,
             indexer_types=["full", "shared", "full"],
         ),
+        # six layers (indexer pattern full, full, shared x3, full), the indexer keeps 4 keys, three residual streams, a dense first layer
+        "hy_v4": lambda: T.HYV4Config(
+            **{**common, "num_hidden_layers": 6}, num_attention_heads=4, intermediate_size=128, moe_intermediate_size=32,
+            n_routed_experts=8, num_experts_per_tok=2, n_group=2, topk_group=1, q_lora_rank=24, kv_lora_rank=16,
+            qk_nope_head_dim=16, qk_rope_head_dim=8, v_head_dim=16, routed_scaling_factor=1.5, rms_norm_eps=1e-5,
+            index_n_heads=4, index_head_dim=16, index_topk=4, hc_mult=3, hc_magnitude=2.0, swiglu_limit=1.5,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        ),
         # four layers: window only, compressed sparse (rate 2, indexer keeps 3), heavily compressed (rate 4), compressed sparse again;
         # three residual streams, the first two feed-forwards hash-routed, YaRN on the compressing layers' rotary embedding
         "deepseek_v4": lambda: T.DeepseekV4Config(
@@ -1427,11 +1435,11 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 p.copy_(0.2 * torch.randn_like(p))
             if name.endswith(".gate.bias") or name.endswith("v_router.bias"):
                 p.normal_(std=0.3)  # K2 Horizon selection biases
-            if arch == "deepseek_v4" and name.endswith((".base", ".hc_base")):
+            if arch in ("deepseek_v4", "hy_v4") and name.endswith((".base", ".hc_base")):
                 p.normal_(std=0.5)
-            if arch == "deepseek_v4" and name.endswith((".scale", ".hc_scale")):
+            if arch in ("deepseek_v4", "hy_v4") and name.endswith((".scale", ".hc_scale")):
                 p.copy_(1.0 + 0.3 * torch.randn_like(p))
-        if arch == "deepseek_v4":
+        if arch in ("deepseek_v4", "hy_v4"):
             g4 = torch.Generator().manual_seed(seed + 7)
             for name, buffer in model.named_buffers():
                 if name.endswith("e_score_correction_bias"):

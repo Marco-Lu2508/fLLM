@@ -21,6 +21,7 @@ mod gptoss;
 mod mistral_native;
 mod hybrid;
 mod deepseek4;
+mod hy4;
 mod kimi_linear;
 mod modernbert;
 mod nomic;

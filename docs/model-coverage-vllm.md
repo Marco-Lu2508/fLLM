@@ -118,7 +118,7 @@ Column **Device path**: derived from `backend_unsupported()`, `layer_host_reason
 | `HunYuanDenseV1ForCausalLM` | SGLang+vLLM | tencent/Hunyuan-7B-Instruct (21 k dl, 90 likes)<br>tencent/Hunyuan-1.8B-Instruct (4 k dl, 604 likes) | hunyuan_v1_dense | V (hunyuan_v1_dense) | - | - | - | device | - |  |
 | `HunYuanMoEV1ForCausalLM` | SGLang+vLLM | tencent/Hunyuan-A13B-Instruct (73 k dl, 795 likes) | hunyuan_v1_moe | V (hunyuan_v1_moe) | - | - | - | device | - | Hunyuan-A13B |
 | `HYV3ForCausalLM` | SGLang+vLLM | tencent/Hy3 (578 k dl, 980 likes) | hy_v3 | V (hy_v3) | - | - | - | device | - |  |
-| `HYV4ForCausalLM` | SGLang+vLLM | tencent/Hy4-preview (25 k dl, 506 likes) | hy_v4 | N | L | E | New Hunyuan generation (transformers: hy_v4); details not checked | - | ? |  |
+| `HYV4ForCausalLM` | SGLang+vLLM | tencent/Hy4-preview (25 k dl, 506 likes) | hy_v4 | V (tiny, CPU) | L | E | MLA + indexer + independent hyper-connections (transformers: hy_v4), see model-coverage.md | - | ? |  |
 | `Ernie4_5ForCausalLM`, `Ernie4_5_ForCausalLM` | SGLang+vLLM | baidu/ERNIE-4.5-0.3B-PT (14 k dl, 112 likes) | ernie4_5 | V (ernie4_5) | - | - | - | device | - |  |
 | `Ernie4_5_MoeForCausalLM` | SGLang+vLLM | baidu/ERNIE-4.5-21B-A3B-PT (18 k dl, 178 likes)<br>baidu/ERNIE-4.5-300B-A47B-PT (3 k dl, 78 likes) | ernie4_5_moe | V (ernie4_5_moe) | - | - | - | device | - |  |
 | `ExaoneForCausalLM` | SGLang+vLLM | LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct (250 k dl, 159 likes)<br>LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct (53 k dl, 198 likes) | exaone | V (exaone) | - | - | - | device | - | EXAONE 3.x: Llama skeleton with its own tensor names (transformer.h.N.attn.attention.*), Llama-3 RoPE scaling. Remote code via EXAONE_DIR |

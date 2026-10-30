@@ -381,6 +381,9 @@ pub fn prepare_checkpoint(
             return Ok(None);
         }
         // DeepSeek-V4 has its own attention, hyper-connection and routing tensors
+        if arch == "hy4" && name.starts_with("output_hc_") {
+            return Ok(None);
+        }
         if arch == "deepseek4" && !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight") {
             return Ok(None);
         }
@@ -394,7 +397,7 @@ pub fn prepare_checkpoint(
         // MLA attention has its own projection shapes
         if matches!(
             arch,
-            "deepseek2" | "minicpm3" | "qwen3next" | "g9v3" | "mamba2" | "nemotron_h" | "nemotron_h_moe" | "kimi-linear"
+            "deepseek2" | "hy4" | "minicpm3" | "qwen3next" | "g9v3" | "mamba2" | "nemotron_h" | "nemotron_h_moe" | "kimi-linear"
         ) && name.contains(".attn_")
         {
             return Ok(None);

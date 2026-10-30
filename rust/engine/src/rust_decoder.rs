@@ -24,6 +24,7 @@ mod hybrid;
 mod kda;
 mod rwkv;
 mod deepseek4;
+mod hy4;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -1023,6 +1024,8 @@ pub struct RustDecoder {
     row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
     /// DeepSeek-V4 attention and hyper-connection weights.
     v4: Option<Box<deepseek4::V4Model>>,
+    /// Hy4 hyper-connection weights.
+    hy4: Option<Box<hy4::Hy4Model>>,
     /// Token ids of the rows of the current pass (hash-routed experts).
     row_ids: std::sync::Mutex<Vec<i64>>,
     /// Indexer keys of the sparse-attention layers (host path).
@@ -1906,7 +1909,7 @@ impl RustDecoder {
             };
             let gate_rows = tensor_rows(mapping, &format!("{p}.attn_gate.weight"));
             let gate_per_head = !cfg.gate_per_element && gate_rows == Some(heads) && heads != heads * dv;
-            let attn_gate = if gate_rows.is_some() && matches!(attn, Attn::Std { .. }) {
+            let attn_gate = if gate_rows.is_some() && matches!(attn, Attn::Std { .. } | Attn::Mla(_)) {
                 Some(linear(&format!("{p}.attn_gate"), if gate_per_head { heads } else { heads * dv }, hidden)?)
             } else {
                 None
@@ -2081,6 +2084,7 @@ impl RustDecoder {
             })
             .transpose()?;
         let v4 = if cfg.v4.is_some() { Some(Box::new(deepseek4::V4Model::load(model, &cfg)?)) } else { None };
+        let hy4 = if cfg.hy4.is_some() { Some(Box::new(hy4::Hy4Model::load(mapping, &cfg)?)) } else { None };
         let mut decoder = Self {
             mtp,
             expert_cache,
@@ -2155,6 +2159,7 @@ impl RustDecoder {
             row_deepstack: std::sync::Mutex::new(None),
             row_visible_lengths: std::sync::Mutex::new(None),
             v4,
+            hy4,
             row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
             dsa_dense: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("dense")),
@@ -2514,6 +2519,9 @@ impl RustDecoder {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
+        }
+        if cfg.hy4.is_some() {
+            return Some("Hy4 hyper-connections");
         }
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
@@ -4817,8 +4825,15 @@ impl RustDecoder {
         let (heads, dim) = (ic.heads, ic.dim);
         let mut q = ix.q_b.forward(q_low)?;
         let mut k = ix.k.forward(normed)?;
-        layer_norm(&mut k, &ix.k_norm, Some(&ix.k_norm_bias), 1e-6);
+        layer_norm(&mut k, &ix.k_norm, Some(&ix.k_norm_bias), ic.norm_eps);
         let weights = ix.proj.forward(normed)?;
+        if ic.rope_last {
+            // the rotated values are the last ones of the head: move them to the front of queries and keys alike (dot products do not
+            // depend on the order of the values as long as both sides agree)
+            for head in q.chunks_exact_mut(dim).chain(k.chunks_exact_mut(dim)) {
+                head.rotate_right(mc.rope);
+            }
+        }
         apply_rope(&mut q, heads, dim, mc.rope, ic.neox, positions, table);
         apply_rope(&mut k, 1, dim, mc.rope, ic.neox, positions, table);
         let slot_of = |r: usize, p: usize| tables[r * self.stride + p / self.block_size] as usize * self.block_size + p % self.block_size;
@@ -6190,6 +6205,17 @@ impl RustDecoder {
         input: &[f32],
         workspace: &mut compute::ProjectionGroupWorkspace,
     ) -> Result<Vec<f32>, String> {
+        self.expert_forward_clamped(e, input, workspace, true)
+    }
+
+    /// `expert_forward`; `clamp` false skips the clamp of the SwiGLU limit (a shared expert that is not clamped).
+    fn expert_forward_clamped(
+        &self,
+        e: &Expert,
+        input: &[f32],
+        workspace: &mut compute::ProjectionGroupWorkspace,
+        clamp: bool,
+    ) -> Result<Vec<f32>, String> {
         let Some(gate) = &e.gate else {
             let mut hidden = e.up.forward(input)?;
             let activation = self.cfg.activation;
@@ -6202,7 +6228,7 @@ impl RustDecoder {
         let [g, u] = projected else {
             return Err("invalid expert projection group".into());
         };
-        self.gate_activation(g, u, true);
+        self.gate_activation_clamped(g, u, true, clamp);
         e.down.forward(g)
     }
 
@@ -6210,8 +6236,12 @@ impl RustDecoder {
     /// the fused expert passes, where the vectors are too short for a fork/join) gives the
     /// same bits as the parallel one.
     fn gate_activation(&self, g: &mut [f32], u: &[f32], parallel: bool) {
+        self.gate_activation_clamped(g, u, parallel, true);
+    }
+
+    fn gate_activation_clamped(&self, g: &mut [f32], u: &[f32], parallel: bool, clamp: bool) {
         let activation = self.cfg.activation;
-        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp) {
+        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp).filter(|_| clamp) {
             let apply = |g: &mut f32, u: &f32| {
                 let gate = g.min(limit);
                 *g = gate / (1.0 + (-gate).exp()) * u.clamp(-limit, limit);
@@ -6600,7 +6630,7 @@ impl RustDecoder {
             out = up.forward(&out)?;
         }
         if let Some((shared, gate)) = &moe.shared {
-            let result = self.expert_forward(shared, input, workspace)?;
+            let result = self.expert_forward_clamped(shared, input, workspace, cfg.swiglu_clamp_shared)?;
             for t in 0..tokens {
                 let x = &input[t * hidden..(t + 1) * hidden];
                 let scale = gate.as_ref().map_or(1.0, |g| {
@@ -6943,6 +6973,8 @@ impl RustDecoder {
             let stage_layers = self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()));
             if cfg.v4.is_some() {
                 x = self.v4_layers(&x, ids, &positions, tables, lengths)?;
+            } else if cfg.hy4.is_some() {
+                x = self.hy4_layers(&x, &positions, tables, lengths, key, value)?;
             } else {
                 self.host_layers(stage_layers, &mut x, &positions, tables, lengths, key, value, &mut trace, ple_inputs.as_deref(), &mut streams)?;
             }
