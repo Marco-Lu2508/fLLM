@@ -151,7 +151,9 @@ gemm_kernel(const uint8_t *__restrict__ W, const float *__restrict__ X, float *_
 // activations. When that GEMM did not run (it declines a shape, or the device's shared memory is too small for any of its tile shapes, which it only finds
 // out after the conversion) the next kernel would read the raw gate: compute the activation into the buffer it belongs in and continue with that.
 static const float *glu_recover(cudaStream_t s, const float *X, int batch, int cols) {
-    if (!fllm_glu_up || !fllm_glu_dst) return X;
+    // (FLLM_CUDA_NO_GLU_RECOVER=1: the behaviour before this function existed, for bisecting and for checking that the self test sees the defect)
+    static const bool off = getenv("FLLM_CUDA_NO_GLU_RECOVER") != nullptr;
+    if (!fllm_glu_up || !fllm_glu_dst || off) return X;
     const size_t count = (size_t)batch * cols;
     const int rc = fllm_glu_half ? fllm_glu_launch_f16(s, X, fllm_glu_up, fllm_glu_dst, count, fllm_glu_mode)
                                  : fllm_glu_launch(s, X, fllm_glu_up, fllm_glu_dst, count, fllm_glu_mode);
