@@ -55,9 +55,12 @@
         summary = `An Intel NPU was found. The runtime that drives it (OpenVINO ${setup.pinned_version || ''}${mb}) is not installed yet.`;
       }
       if (npu.state === 'ready' && runtime.version) summary = `Ready (experimental), OpenVINO ${runtime.version}. Choose NPU under Advanced when you load a model.`;
+      if (npu.state === 'unsupported_hardware' && (npu.hardware || []).some((h) => h.vendor === 'amd')) {
+        summary = 'An AMD NPU was found. fLLM drives it through FastFlowLM: see the AMD NPU card below.';
+      }
       const hardware = (npu.hardware || []).map((h) => ({
         label: `${h.name} (${NPU_VENDOR_NAMES[h.vendor] || NPU_VENDOR_NAMES.other})`,
-        badge: h.supported ? 'Intel NPU' : 'detected, not supported yet',
+        badge: h.supported ? 'Intel NPU' : (h.vendor === 'amd' ? 'AMD NPU: through FastFlowLM, see below' : 'detected, not supported yet'),
         supported: !!h.supported,
         problem: h.problem || null,
       }));

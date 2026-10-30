@@ -46,12 +46,19 @@ test('an Intel NPU without the runtime offers the install with its size', () => 
   assert.strictEqual(m.cancel, false);
 });
 
-test('AMD and Qualcomm NPUs are shown as detected, never usable, and get no button', () => {
-  const m = L.npuCardModel(base({ state: 'unsupported_hardware', hardware: [amd, { vendor: 'qualcomm', name: 'Hexagon', supported: false }] }));
+test('a Qualcomm NPU is shown as detected, never usable, and gets no button', () => {
+  const m = L.npuCardModel(base({ state: 'unsupported_hardware', hardware: [{ vendor: 'qualcomm', name: 'Hexagon', supported: false }] }));
   assert.match(m.summary, /not supported yet/);
   assert.strictEqual(m.button, null);
-  assert.deepStrictEqual(m.hardware.map((h) => h.badge), ['detected, not supported yet', 'detected, not supported yet']);
+  assert.deepStrictEqual(m.hardware.map((h) => h.badge), ['detected, not supported yet']);
   assert.ok(m.hardware.every((h) => !h.supported));
+});
+
+test('an AMD NPU is pointed to the FastFlowLM card instead of "not supported"', () => {
+  const m = L.npuCardModel(base({ state: 'unsupported_hardware', hardware: [amd] }));
+  assert.match(m.summary, /FastFlowLM/);
+  assert.strictEqual(m.button, null);
+  assert.match(m.hardware[0].badge, /FastFlowLM/);
 });
 
 test('a running setup shows progress and a cancel button instead of the install button', () => {

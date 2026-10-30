@@ -931,6 +931,21 @@ mod studio_gate_tests {
     }
 
     #[test]
+    fn the_amd_npu_routes_start_programs_and_stay_on_this_machine() {
+        let remote = addr("192.168.1.20:5000");
+        let h = headers("192.168.1.5:8000", None);
+        let local = headers("127.0.0.1:8000", None);
+        let here = addr("127.0.0.1:1");
+        for method in [Method::GET, Method::POST] {
+            for auth in [false, true] {
+                assert!(studio_admin_blocked(auth, &method, "/api/studio/npu/amd", remote, &h), "{method} from another machine (key: {auth})");
+                assert!(!studio_admin_blocked(auth, &method, "/api/studio/npu/amd", here, &local), "{method} from this machine (key: {auth})");
+            }
+        }
+        assert!(studio_admin_blocked(false, &Method::POST, "/api/studio/npu/amd", here, &headers("127.0.0.1:8000", Some("https://evil.example"))));
+    }
+
+    #[test]
     fn the_memory_stays_on_this_machine_for_reads_and_writes() {
         let remote = addr("192.168.1.20:5000");
         let h = headers("192.168.1.5:8000", None);

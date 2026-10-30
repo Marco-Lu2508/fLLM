@@ -1217,6 +1217,25 @@
                 </details>
               </div>
 
+              <!-- AMD NPU through FastFlowLM (amdnpu.js) -->
+              <div class="app-card" id="amdNpuCard" style="display:none;">
+                <div class="app-card-title">AMD NPU (Ryzen AI), through FastFlowLM</div>
+                <p class="app-item-desc" id="amdNpuSummary"></p>
+                <div id="amdNpuHardware"></div>
+                <div id="amdNpuInstall" style="display:none;"></div>
+                <div id="amdNpuProblems"></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;">
+                  <select class="ui-input" id="amdNpuModel" style="min-width:240px;display:none;"></select>
+                  <button class="btn btn-primary" id="amdNpuStart" style="display:none;">Run on the NPU</button>
+                  <button class="btn btn-ghost" id="amdNpuStop" style="display:none;">Stop</button>
+                  <button class="btn btn-primary" id="amdNpuPull" style="display:none;">Download</button>
+                  <button class="btn btn-ghost" id="amdNpuCancelPull" style="display:none;">Cancel the download</button>
+                </div>
+                <p class="app-item-desc" id="amdNpuPullText" style="display:none;"></p>
+                <div class="msg-error" id="amdNpuError" style="display:none;margin:8px 0;"></div>
+                <p class="app-item-desc" id="amdNpuNote"></p>
+              </div>
+
               <!-- Live Scheduler Slots -->
               <div class="app-card">
                 <div class="app-card-title">Chats answered at the same time</div>
