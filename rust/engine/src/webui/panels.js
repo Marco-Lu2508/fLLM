@@ -116,12 +116,13 @@
 
         const m = data.model || {};
         if (!state.selectedModel) state.selectedModel = m.name || 'tiny';
-        $('activeModelLabel').textContent = state.selectedModel;
+        $('activeModelLabel').textContent = state.setup ? 'No model loaded' : state.selectedModel;
         $('activeQuantChip').textContent = m.quantization || 'GGUF';
+        $('activeQuantChip').style.display = state.setup ? 'none' : '';
         // where the model runs: the device it was started on, or the one the automatic choice picks (npu.js)
         const where = runningDevice(m.load_options?.device, state.hardware, data.config?.active_cpu_tier);
-        $('footerSimdLabel').textContent = where.label;
-        $('footerSimdLabel').title = where.title;
+        $('footerSimdLabel').textContent = state.setup ? 'No model loaded' : where.label;
+        $('footerSimdLabel').title = state.setup ? 'Pick a model on the Models page to start.' : where.title;
         if (!state.hardware && !state.hardwareError && !hardwareFetching) {
           hardwareFetching = true; // the footer shows the processor until the report arrives, then the device
           apiFetch('/api/studio/hardware').then((r) => (r.ok ? r.json() : null)).then((hw) => { if (hw) { state.hardware = hw; refreshStudioStatus(); } }).catch(() => {}).finally(() => { hardwareFetching = false; });

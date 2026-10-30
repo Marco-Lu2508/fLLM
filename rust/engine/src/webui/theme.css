@@ -595,9 +595,8 @@ header, .app-header {
 .sidebar-header { padding: 12px 12px 10px; }
 
 /* chat starter cards: two columns on wide screens, one on narrow */
-.chat-container.is-empty .chat-starter-pills { display: flex; flex-wrap: wrap; gap: 8px; max-width: none; }
+.chat-container.is-empty .chat-starter-pills { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-width: 760px; }
 .chat-starter-pills > * {
-  flex: 1 1 320px;
   align-items: flex-start;
   text-align: left;
   white-space: normal;
@@ -733,7 +732,7 @@ input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px va
   .toolbar-left .composer-chip.active > span#thinkingChipLabel { display: inline; }
   .toolbar-right { flex: none; }
   .chat-container:not(.is-empty) .chat-starter-pills { display: none; }
-  .chat-container.is-empty .chat-starter-pills > * { flex-basis: 100%; }
+  .chat-container.is-empty .chat-starter-pills { grid-template-columns: 1fr; }
   .chat-empty-hero h1 { font-size: clamp(26px, 8vw, 36px); }
   .md-table, .code-card { max-width: calc(100vw - 24px); }
   .settings-menu { width: auto; }
@@ -777,6 +776,10 @@ input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px va
   .app-item-desc.mono, .mono { overflow-wrap: anywhere; }
 }
 
-.sidebar-footer { gap: 8px; }
-.sidebar-footer #footerSimdLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-footer #footerSlotsLabel { flex: none; white-space: nowrap; }
+.sidebar-footer { flex-direction: column; align-items: stretch; gap: 2px; }
+.sidebar-footer #footerSimdLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-soft); }
+.sidebar-footer #footerSlotsLabel { white-space: nowrap; color: var(--muted-fg); }
+
+/* contrast (WCAG AA): the key hints are as readable as other secondary text, and the light red of the dark theme carries dark text */
+.kbd-group { opacity: 1; font-size: var(--text-2xs); }
+html.dark .btn-destructive { color: #1c0806; }
