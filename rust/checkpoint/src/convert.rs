@@ -1688,9 +1688,9 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
         .or_else(|| cfg.get("quantization_config").filter(|q| q.get("quant_method").is_none() && q.get("bits").is_some() && q.get("group_size").is_some()));
     if let Some(q) = mlx {
         return match q.get("mode").and_then(Value::as_str).unwrap_or("affine") {
-            "affine" => Ok(Quantization::Mlx),
+            "affine" | "mxfp4" | "nvfp4" | "mxfp8" => Ok(Quantization::Mlx),
             other => Err(format!(
-                "MLX quantization mode {other:?} is not supported: only the affine mode (scales and biases per group) is read; the mxfp4 and nvfp4 modes of MLX (E8M0 / E4M3 block scales, no biases) need their own reader. Use an affine export of the model or convert the original weights"
+                "MLX quantization mode {other:?} is not supported: the affine, mxfp4, nvfp4 and mxfp8 modes are read. Use an export in one of those modes or convert the original weights"
             )),
         };
     }
@@ -3352,9 +3352,10 @@ mod quantization_config_tests {
         assert_eq!(quantization(&affine).unwrap(), Quantization::Mlx);
         assert_eq!(quantization(&json!({"quantization": {"group_size": 64, "bits": 4, "mode": "affine"}})).unwrap(), Quantization::Mlx);
         for mode in ["mxfp4", "nvfp4", "mxfp8"] {
-            let err = quantization(&json!({"quantization": {"group_size": 32, "bits": 4, "mode": mode}})).unwrap_err();
-            assert!(err.contains(mode) && err.contains("only the affine mode"), "{err}");
+            assert_eq!(quantization(&json!({"quantization": {"group_size": 32, "bits": 4, "mode": mode}})).unwrap(), Quantization::Mlx);
         }
+        let err = quantization(&json!({"quantization": {"group_size": 32, "bits": 4, "mode": "mxfp6"}})).unwrap_err();
+        assert!(err.contains("mxfp6") && err.contains("not supported"), "{err}");
     }
 
     #[test]

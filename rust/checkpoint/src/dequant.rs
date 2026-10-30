@@ -358,7 +358,7 @@ pub struct Mxfp4 {
 }
 
 /// Value of an E8M0 scale byte: `2^(e - 127)`; the lowest exponent is the f32 subnormal `2^-127`.
-fn e8m0(e: u8) -> f32 {
+pub(crate) fn e8m0(e: u8) -> f32 {
     if e == 0 {
         f32::from_bits(1 << 22)
     } else {
@@ -366,7 +366,7 @@ fn e8m0(e: u8) -> f32 {
     }
 }
 
-const E2M1: [f32; 16] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0];
+pub(crate) const E2M1: [f32; 16] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0];
 
 impl Mxfp4 {
     pub(crate) fn new(weight: Payload, scales: Payload, rows: usize, cols: usize) -> Result<Self, String> {

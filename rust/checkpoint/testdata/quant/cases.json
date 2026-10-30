@@ -327,5 +327,35 @@
   "bits": 8,
   "format": "mlx",
   "group_size": 64
+ },
+ "mlx_mxfp4": {
+  "bits": 4,
+  "format": "mlx_fp",
+  "group_size": 32,
+  "mode": "mxfp4",
+  "shape": [
+   8,
+   128
+  ]
+ },
+ "mlx_mxfp8": {
+  "bits": 8,
+  "format": "mlx_fp",
+  "group_size": 32,
+  "mode": "mxfp8",
+  "shape": [
+   8,
+   128
+  ]
+ },
+ "mlx_nvfp4": {
+  "bits": 4,
+  "format": "mlx_fp",
+  "group_size": 16,
+  "mode": "nvfp4",
+  "shape": [
+   8,
+   128
+  ]
  }
 }

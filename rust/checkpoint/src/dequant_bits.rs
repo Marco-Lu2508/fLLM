@@ -256,6 +256,86 @@ pub(crate) fn mlx_dtype_id(name: &str) -> Option<u32> {
     let m = fllm_gguf_probe::MlxAffine { bits: bits.parse().ok()?, group: group.parse().ok()?, bf16 };
     fllm_gguf_probe::mlx_affine_supported(m.bits, m.group).then(|| m.type_id())
 }
+/// MLX `mxfp4` / `nvfp4` / `mxfp8` modes of `mx.quantize`: `weight` `[out, in * bits / 32]` uint32 holds the codes of one row
+/// (E2M1 nibbles, the even element in the low nibble, or E4M3 bytes), `scales` `[out, in / group]` uint8 one block scale:
+/// E8M0 (`2^(e-127)`) for `mxfp4` / `mxfp8` (group 32), E4M3 for `nvfp4` (group 16). There are no biases and no per-tensor factor.
+#[derive(Debug)]
+pub(crate) struct MlxFp {
+    weight: Payload,
+    scales: Payload,
+    mode: MlxFpMode,
+    rows: usize,
+    cols: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MlxFpMode {
+    Mxfp4,
+    Nvfp4,
+    Mxfp8,
+}
+
+impl MlxFpMode {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "mxfp4" => Some(Self::Mxfp4),
+            "nvfp4" => Some(Self::Nvfp4),
+            "mxfp8" => Some(Self::Mxfp8),
+            _ => None,
+        }
+    }
+    fn group(self) -> usize {
+        if self == Self::Nvfp4 { 16 } else { 32 }
+    }
+    fn code_bits(self) -> usize {
+        if self == Self::Mxfp8 { 8 } else { 4 }
+    }
+}
+
+impl MlxFp {
+    fn new(weight: Payload, scales: Payload, mode: MlxFpMode, rows: usize, cols: usize) -> Result<Self, String> {
+        let group = mode.group();
+        if cols == 0 || !cols.is_multiple_of(group) || !(cols * mode.code_bits()).is_multiple_of(32) {
+            return Err(format!("{mode:?} needs a multiple of {group} inputs per row, found {cols}"));
+        }
+        if weight.as_slice().len() != rows * cols * mode.code_bits() / 8 {
+            return Err(format!("{mode:?} weight has {} bytes, expected {}", weight.as_slice().len(), rows * cols * mode.code_bits() / 8));
+        }
+        if scales.as_slice().len() != rows * cols / group {
+            return Err(format!("{mode:?} scales have {} entries, expected {}", scales.as_slice().len(), rows * cols / group));
+        }
+        Ok(Self { weight, scales, mode, rows, cols })
+    }
+}
+
+impl Dequant for MlxFp {
+    fn element_count(&self) -> usize {
+        self.rows * self.cols
+    }
+
+    fn decode_chunk(&self, start: usize, dst: &mut [f32]) -> Result<(), String> {
+        let end = start.checked_add(dst.len()).filter(|&e| e <= self.element_count()).ok_or("MLX range exceeds the tensor")?;
+        let (w, s) = (self.weight.as_slice(), self.scales.as_slice());
+        for (slot, e) in dst.iter_mut().zip(start..end) {
+            let block = s[e / self.mode.group()];
+            *slot = match self.mode {
+                MlxFpMode::Mxfp4 | MlxFpMode::Nvfp4 => {
+                    let byte = w[e / 2];
+                    let code = if e % 2 == 0 { byte & 0x0f } else { byte >> 4 };
+                    let scale = if self.mode == MlxFpMode::Mxfp4 { crate::dequant::e8m0(block) } else { crate::nvfp4::e4m3_value(block) };
+                    crate::dequant::E2M1[code as usize] * scale
+                }
+                MlxFpMode::Mxfp8 => {
+                    let code = w[e];
+                    let magnitude = crate::nvfp4::e4m3_value(code & 0x7f);
+                    (if code & 0x80 != 0 { -magnitude } else { magnitude }) * crate::dequant::e8m0(block)
+                }
+            };
+        }
+        Ok(())
+    }
+}
+
 /// Bits and group size of one MLX module: the global `quantization` entry, overridden per module path.
 fn mlx_params(config: &Value, base: &str) -> Option<(usize, usize)> {
     let get = |v: &Value| -> Option<(usize, usize)> { Some((v.get("bits")?.as_u64()? as usize, v.get("group_size")?.as_u64()? as usize)) };
@@ -293,9 +373,21 @@ pub(crate) fn split_mlx(
         }
     }
     let mut packed = Vec::new();
+    let fp_mode = config.get("mode").and_then(Value::as_str).and_then(MlxFpMode::parse);
     for w in weights {
         let base = w.name.strip_suffix(".weight").unwrap_or(&w.name).to_owned();
         let s = scales.remove(&base).ok_or_else(|| format!("MLX weight {} has no {base}.scales", w.name))?;
+        if let Some(mode) = fp_mode {
+            if w.shape.len() != 2 || s.dtype != "U8" {
+                return Err(format!("{}: {mode:?} needs a matrix with U8 block scales (found {:?}, scales {})", w.name, w.shape, s.dtype));
+            }
+            let rows = w.shape[0] as usize;
+            let cols = w.shape[1] as usize * 32 / mode.code_bits();
+            let m = MlxFp::new(w.payload.clone(), s.payload, mode, rows, cols).map_err(|e| format!("{}: {e}", w.name))?;
+            let mapped = map(&w.name)?.ok_or_else(|| format!("packed tensor {:?} maps to a skipped tensor", w.name))?;
+            packed.push((mapped, crate::packed_quant::PackedData::Dyn(Arc::new(m)), vec![rows as u64, cols as u64], w.payload));
+            continue;
+        }
         let b = biases.remove(&base).ok_or_else(|| format!("MLX weight {} has no {base}.biases", w.name))?;
         if w.shape.len() != 2 {
             return Err(format!("{}: MLX weight must be a matrix, found shape {:?} (stacked expert weights are not supported)", w.name, w.shape));
@@ -692,6 +784,24 @@ mod tests {
             let (scale, zero) = ([0.5f32, 2.0, 1.0, 4.0][r * 2 + g], [1, 0, 0, -1][r * 2 + g]);
             assert_eq!(got[e], (q - zero) as f32 * scale, "element {e}");
         }
+    }
+
+    #[test]
+    fn mlx_floating_point_modes_match_mlx() {
+        let cases: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/quant/cases.json")).unwrap()).unwrap();
+        let mut seen = 0;
+        for (name, meta) in cases.as_object().unwrap() {
+            if meta["format"] != "mlx_fp" {
+                continue;
+            }
+            let (tensors, expected) = fixture(name);
+            let config = serde_json::json!({"mode": meta["mode"], "bits": meta["bits"], "group_size": meta["group_size"]});
+            let (dense, packed) = split_mlx(tensors, &config, &identity).unwrap();
+            assert!(dense.is_empty(), "{name}");
+            assert_close(name, &decode_all(&packed[0]), &expected, 1e-6);
+            seen += 1;
+        }
+        assert_eq!(seen, 3, "mxfp4, nvfp4 and mxfp8");
     }
 
     #[test]
