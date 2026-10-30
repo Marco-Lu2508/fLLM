@@ -1664,17 +1664,46 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
             if (rcf >= 0) return rcf;
         }
         static const bool no_flash = getenv("FLLM_CUDA_NO_FLASH") != nullptr;
+        // The per-row decode kernels (attention4, attention2) for rows [r0, r1) of the batch: rows that are no part of a run of 16 or more
+        // rows of one sequence (decode rows and verify rows), or all rows when the tensor-core kernel does not cover the shape.
+        auto decode_rows = [&](int r0, int r1) -> int {
+            if (cached && !dt) {
+                if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+            }
+            int max_len = 1;
+            for (int r = r0; r < r1; r++) max_len = lengths_host[r] > max_len ? (int)lengths_host[r] : max_len;
+            if (st->capture) max_len = st->capture->max_len;  // a graph is replayed with other lengths: size the splits for the longest context
+            const int64_t *tabs = static_cast<const int64_t *>(dt) + (size_t)r0 * stride;
+            const int64_t *lens = static_cast<const int64_t *>(dl) + r0;
+            const float *qr = q + (size_t)r0 * heads * dk;
+            float *outr = out + (size_t)r0 * heads * dv;
+            const int rc4 = fllm_attention4_try(st->s, qr, kpool_layer, vpool_layer, outr, tabs, lens, max_len, sinks, alibi, r1 - r0, heads, kv_heads, dk, dv,
+                                                stride, block_size, kind, scale, softcap, window, chunk, st->ws, st->ws_bytes, kscale_base, vscale_base);
+            if (rc4 >= 0) return rc4;
+            const int rc = fllm_attention2_try(st->s, qr, kpool_layer, vpool_layer, outr, tabs, lens, max_len, sinks, alibi, r1 - r0, heads, kv_heads, dk, dv,
+                                               stride, block_size, kind, scale, softcap, window, chunk, st->ws, st->ws_bytes, kscale_base, vscale_base);
+            if (rc >= 0) return rc;
+            return -1;
+        };
         if (!st->capture && !no_flash && !alibi && softcap == 0.f && window == 0 && chunk == 0 && rows >= 16 && !fllm_exact_math()) {
-            // rows of one sequence (same block table, lengths growing by one) go to the tensor-core kernel
+            // rows of one sequence (same block table, lengths growing by one) go to the tensor-core kernel; the other rows of the batch
+            // (the decode rows next to a prompt chunk) go to the decode kernels, so a running request does not slow a prompt down
+            std::vector<std::pair<int, int>> rest;  // row ranges for the decode kernels
+            auto later = [&](int r0, int r1) {
+                if (!rest.empty() && rest.back().second == r0) rest.back().second = r1;
+                else rest.emplace_back(r0, r1);
+            };
             if (cached) {
                 // the rows are grouped once per forward pass; a run needs only its first block table, so one table per run is staged
                 step_runs(st, tables_host, lengths_host, rows, stride);
                 const auto &runs = st->step.runs;
-                bool all = true;
-                for (const auto &run : runs)
+                bool all = true, any = false;
+                for (const auto &run : runs) {
                     if (run.second - run.first < 16) all = false;
+                    else any = true;
+                }
                 void *dc = nullptr;
-                if (all) {
+                if (any) {
                     auto &compact = st->step.compact_tables;
                     if (int e = stage_step(st, st->step.compact, 2, compact.data(), compact.size() * sizeof(int64_t), &dc)) return e;
                 }
@@ -1682,8 +1711,12 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
                 // comes next (FLLM_FUSE_PREFILL_ATTN_F16)
                 const size_t out16 = (size_t)rows * heads * dv * 2;
                 const bool f16 = all && runs.size() == 1 && fllm_opt(FLLM_OPT_FUSE_ATTN_F16) != 0 && st->q4z_io != nullptr && out16 <= st->q4z_io_bytes;
-                for (size_t i = 0; all && i < runs.size(); i++) {
+                for (size_t i = 0; any && i < runs.size(); i++) {
                     const int r0 = runs[i].first, r1 = runs[i].second;
+                    if (r1 - r0 < 16) {
+                        later(r0, r1);
+                        continue;
+                    }
                     fllm_attn_x16 = f16 ? st->q4z_io : nullptr;
                     fllm_attn_x16_written = false;
                     const int rc = fllm_attention3_try(st->s, q + (size_t)r0 * heads * dk, kpool_layer, vpool_layer,
@@ -1693,8 +1726,8 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
                                                        (int)lengths_host[r1 - 1]);
                     fllm_attn_x16 = nullptr;
                     if (rc < 0) {
-                        all = false;
-                        break;
+                        later(r0, r1);
+                        continue;
                     }
                     if (rc > 0) return rc;
                     if (fllm_attn_x16_written) {
@@ -1705,10 +1738,16 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
                         st->q4z_ready = true;
                     }
                 }
-                if (all) return 0;
+                if (any) {
+                    for (const auto &range : rest) {
+                        const int rc = decode_rows(range.first, range.second);
+                        if (rc != 0) return rc;
+                    }
+                    return 0;
+                }
             } else {
                 int r0 = 0;
-                bool all = true;
+                bool any = false;
                 while (r0 < rows) {
                     int r1 = r0 + 1;
                     while (r1 < rows && lengths_host[r1] == lengths_host[r1 - 1] + 1 &&
@@ -1725,31 +1764,26 @@ int fllm_cuda_attention(FllmStream *st, const float *q, const uint16_t *kpool_la
                                                  stride, block_size, kind, scale, kscale_base, vscale_base,
                                                  (int)lengths_host[r1 - 1]);
                     if (rc < 0) {
-                        all = false;
-                        break;
+                        later(r0, r1);
+                    } else {
+                        if (rc > 0) return rc;
+                        any = true;
                     }
-                    if (rc > 0) return rc;
                     r0 = r1;
                 }
-                if (all) return 0;
+                if (any) {
+                    for (const auto &range : rest) {
+                        const int rc = decode_rows(range.first, range.second);
+                        if (rc != 0) return rc;
+                    }
+                    return 0;
+                }
             }
         }
-        if (cached) {
-            if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+        {
+            const int rc = decode_rows(0, rows);
+            if (rc >= 0) return rc;
         }
-        int max_len = 1;
-        for (int r = 0; r < rows; r++) max_len = lengths_host[r] > max_len ? (int)lengths_host[r] : max_len;
-        if (st->capture) max_len = st->capture->max_len;  // a graph is replayed with other lengths: size the splits for the longest context
-        const int rc4 = fllm_attention4_try(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
-                                            static_cast<const int64_t *>(dl), max_len, sinks, alibi, rows, heads,
-                                            kv_heads, dk, dv, stride, block_size, kind, scale, softcap, window, chunk,
-                                            st->ws, st->ws_bytes, kscale_base, vscale_base);
-        if (rc4 >= 0) return rc4;
-        const int rc = fllm_attention2_try(st->s, q, kpool_layer, vpool_layer, out, static_cast<const int64_t *>(dt),
-                                           static_cast<const int64_t *>(dl), max_len, sinks, alibi, rows, heads,
-                                           kv_heads, dk, dv, stride, block_size, kind, scale, softcap, window, chunk,
-                                           st->ws, st->ws_bytes, kscale_base, vscale_base);
-        if (rc >= 0) return rc;
     }
     if (cached && !dt) {
         if (int e = stage_step(st, st->step.tables, 2, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
