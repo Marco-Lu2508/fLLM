@@ -368,7 +368,9 @@ pub fn mmq_tile_tm(caps: &VkCapsLike, batch: u32, knobs: &MmqKnobs) -> Option<(u
     let tm = knobs.tm.unwrap_or(8);
     let ks = knobs.ks.unwrap_or(1);
     let mut bm = knobs.bm.unwrap_or(if tm == 8 { 128 } else { 64 });
-    let mut bn = knobs.bn.unwrap_or(64);
+    // AMD with a long prompt: 128 tokens per tile (the rows then drop to 64 for a workgroup of 256): every weight is read from memory half as often
+    // (Radeon 840M, Llama-3.2-3B Q4_K_M, 500-token prompt, interleaved runs: 225 -> 249 tok/s)
+    let mut bn = knobs.bn.unwrap_or(if caps.vendor == 0x1002 && tm == 8 && batch >= 128 { 128 } else { 64 });
     let wg = |bm: u32, bn: u32| bm * bn / (tm * 4);
     while wg(bm, bn) > caps.max_workgroup && bm > 32 {
         bm /= 2;

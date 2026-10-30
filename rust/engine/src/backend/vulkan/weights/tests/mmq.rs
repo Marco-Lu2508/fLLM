@@ -132,6 +132,13 @@ fn tile_choice_follows_the_limits_and_the_knobs() {
     assert_eq!(mmq_tile(&caps, 100, &MmqKnobs { min_batch: 200, ..knobs }), None);
     assert_eq!(mmq_tile(&caps, 1000, &MmqKnobs { bm: Some(128), bn: Some(64), ..knobs }), Some((128, 64)));
     assert_eq!(mmq_tile(&caps, 1000, &MmqKnobs { bm: Some(32), bn: Some(128), ..knobs }), Some((32, 128)));
+    // AMD takes 128 tokens per tile for long prompts (and 64 rows to keep the workgroup at 256 invocations), other vendors 128 x 64
+    let amd = VkCapsLike { vendor: 0x1002, max_workgroup: 256, ..caps };
+    assert_eq!(mmq_tile_tm(&amd, 512, &knobs), Some((64, 128, 8, 1)));
+    assert_eq!(mmq_tile_tm(&amd, 64, &knobs), Some((128, 64, 8, 1)));
+    assert_eq!(mmq_tile_tm(&caps, 512, &knobs), Some((128, 64, 8, 1)));
+    assert_eq!(mmq_tile_tm(&amd, 512, &MmqKnobs { bn: Some(64), ..knobs }), Some((128, 64, 8, 1)));
+    assert_eq!(mmq_tile_tm(&caps, 512, &MmqKnobs { bn: Some(64), ..knobs }), Some((128, 64, 8, 1)));
     // a device with small workgroups or little shared memory gets a smaller tile (or none)
     let small_wg = VkCapsLike { max_workgroup: 128, ..caps };
     assert_eq!(mmq_tile(&small_wg, 1000, &knobs), Some((32, 64)));
