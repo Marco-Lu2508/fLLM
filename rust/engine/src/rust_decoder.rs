@@ -26,6 +26,7 @@ mod rwkv;
 mod deepseek4;
 mod hc;
 mod inkling;
+mod minimax3;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -1040,6 +1041,8 @@ pub struct RustDecoder {
     row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
     /// DeepSeek-V4 attention and hyper-connection weights.
     v4: Option<Box<deepseek4::V4Model>>,
+    /// MiniMax-M3 weights.
+    minimax3: Option<Box<minimax3::Minimax3Model>>,
     /// Inkling weights.
     inkling: Option<Box<inkling::InklingModel>>,
     /// Hyper-connection weights of Hy4 and GLM-5-Next.
@@ -1537,7 +1540,7 @@ impl RustDecoder {
             Some(m) => m.nope + m.rope,
             None => cfg.head_dim,
         };
-        if cfg.v4.is_none() && cfg.inkling.is_none() && (0..cfg.layers).any(|l| {
+        if cfg.v4.is_none() && cfg.inkling.is_none() && cfg.minimax3.is_none() && (0..cfg.layers).any(|l| {
             let (d, r) = if cfg.mla.is_some() { (dk, cfg.rope.dims) } else { (cfg.layer_head_dim(l), cfg.layer_rope_dims(l)) };
             !d.is_multiple_of(2) || !r.is_multiple_of(2) || r > d
         }) {
@@ -2176,6 +2179,7 @@ impl RustDecoder {
         let v4 = if cfg.v4.is_some() { Some(Box::new(deepseek4::V4Model::load(model, &cfg)?)) } else { None };
         let hc = if cfg.hc.is_some() { Some(Box::new(hc::HcModel::load(mapping, &cfg)?)) } else { None };
         let inkling = if cfg.inkling.is_some() { Some(Box::new(inkling::InklingModel::load(model, &cfg)?)) } else { None };
+        let minimax3 = if cfg.minimax3.is_some() { Some(Box::new(minimax3::Minimax3Model::load(model, &cfg)?)) } else { None };
         let mut decoder = Self {
             mtp,
             expert_cache,
@@ -2251,6 +2255,7 @@ impl RustDecoder {
             row_visible_lengths: std::sync::Mutex::new(None),
             v4,
             inkling,
+            minimax3,
             hc,
             row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
@@ -2627,6 +2632,9 @@ impl RustDecoder {
         }
         if cfg.inkling.is_some() {
             return Some("Inkling convolutions and relative position bias");
+        }
+        if cfg.minimax3.is_some() {
+            return Some("MiniMax-M3 block-sparse attention");
         }
         if cfg.hc.is_some() {
             return Some("hyper-connections");
@@ -7128,6 +7136,8 @@ impl RustDecoder {
                 x = self.v4_layers(&x, ids, &positions, tables, lengths)?;
             } else if cfg.inkling.is_some() {
                 x = self.inkling_layers(&x, &positions, tables, lengths)?;
+            } else if cfg.minimax3.is_some() {
+                x = self.minimax3_layers(&x, &positions, tables, lengths)?;
             } else if cfg.hc.is_some() {
                 x = self.hc_layers(&x, &positions, tables, lengths, key, value)?;
             } else {

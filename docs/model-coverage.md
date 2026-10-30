@@ -57,6 +57,7 @@ Verified column:
 | DeepSeek V2/V3/R1, Kimi K2, Mistral Large 3 / Mistral 4, Youtu, Sarvam-MLA, MiniCPM3, Ling-2 (`deepseek_v2`, `deepseek_v3`, `kimi_k2`, `mistral4`, ...) | safetensors (also FP8 block), GGUF `deepseek2` | D | D | D (equal KV head count) / H | D | D | T 1.4e-4 .. 2.0e-4 |
 | DeepSeek-V3.2, GLM-5 / GLM-5.x (`deepseek_v32`, `glm_moe_dsa`; GGUF `deepseek32`, `glm-dsa` by name) | safetensors | D | D | D / H | D | D | T 2.3e-4 / 1.8e-4 with `index_topk` above the sequence length; **T 1.7e-4 / 3.5e-4 with the indexer cutting 4 of 12 tokens** (`deepseek_v32_sparse`, `glm_moe_dsa_sparse`). The exact lightning-indexer selection runs on the CPU path; accelerators attend densely (exact up to `index_topk` tokens) unless `FLLM_DSA=exact` puts the layers on the host. No device kernel for the indexer |
 | DeepSeek-V4 / V4.1 (`deepseek_v4`; GGUF `deepseek4`) | safetensors (transformers and Hub tensor names; bf16/f16/f32) | D | C | C | C | C | T 5e-7 .. 1e-6 (new; 12..40 positions, also cached decoding and server completions). Accelerators run on the CPU with a notice; no MTP head; FP8/FP4 Hub weights not read; the real checkpoints were not run |
+| MiniMax-M3 text (`minimax_m3_vl_text`; GGUF `minimax3`) | safetensors (vision tower not imported) | D | C | C | C | C | T 7e-7 .. 1.5e-6 (new; 12..40 positions, cached decoding, server completions; the block selection matters: dense attention is off by 0.40). Accelerators run on the CPU with a notice; the real 428B checkpoint was not run |
 | Inkling text (`inkling_text`; GGUF `inkling`) | safetensors (vision, audio and MTP tensors not imported) | D | C | C | C | C | T 1.7e-7 .. 1.8e-7 (new; 12..40 positions, cached decoding, server completions; sliding window, distance clamp, log scaling, shared experts exercised). Accelerators run on the CPU with a notice; the real 975B checkpoint was not run |
 | LongCat-Flash (`longcat_flash`; GGUF `longcat-flash`) | safetensors | D | C | C | C | C | T 1.4e-4 .. 1.7e-4 (new; 12..40 positions, cached decoding, server completions; zero experts and the cross-layer shortcut exercised). Accelerators run on the CPU with a notice; the real 560B checkpoint was not run |
 | GLM-5-Next / GLM-5.3-Flash text (`glm5_next`; GGUF `kimi-linear` + hyper-connections) | safetensors (vision tower skipped) | D | C | C | C | C | T 8.7e-5 .. 9.2e-5 (new; 12..40 positions, cached decoding, server completions; the k-pool indexer cuts the context to 2 pools + tail). Accelerators run on the CPU with a notice; the real 320B checkpoint was not run |
@@ -79,7 +80,7 @@ Verified column:
 | DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
-| Qwen3.8-Flash-Next (`qwen4_exp`), Motif, Kimi K3, MiniMax-M3, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
+| Qwen3.8-Flash-Next (`qwen4_exp`), Motif, Kimi K3, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 
 ## Encoders, rerankers, embedders
 
@@ -231,7 +232,7 @@ Not implemented, ordered by how many current models need them:
 3. **KDA variants**: Kimi K3 (attention residual blocks, `situ` activation, latent MoE, MXFP4 compressed-tensors).
 4. **RWKV 6/7, xLSTM, RecurrentGemma, HRM-Text, ZAYA (CCA attention), JetMoE (mixture of attention heads), Doge,
    DiffLlama**: their own recurrent or attention mechanisms.
-5. **LongCat-Flash-Lite** (n-gram embeddings), **MiniMax-M3** (block-sparse index), **MiniMax-M1**
+5. **LongCat-Flash-Lite** (n-gram embeddings), **MiniMax-M1**
    (lightning attention).
 6. Vision towers beyond Qwen-VL; any audio model.
 7. The quantization formats listed as "no" above (HQQ, torchao, Quark, EETQ, QuIP#, SpQR, VPTQ, HIGGS, fp_quant, BitBLAS / IPEX repacks): each has a clear converter error.
@@ -320,7 +321,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **N** | Hyper-connections, n-gram embeddings, per-layer embeddings, sparse indexer. |
 | DeepSeek V4.1 Flash, V4 Pro 0813 | 552B, 1.6T | `DeepseekV41ForCausalLM`, `DeepseekV4ForCausalLM` | V (tiny, CPU) | Hyper-connections, compressed/sparse attention, hash routing as in `deepseek_v4`; the V4.1 engram embeddings are not implemented. Checkpoints not run. |
 | Motif 3 | 314B | `MotifForCausalLM` | **N** | GDLA attention, multi-stream residuals, PolyNorm activation. |
-| MiniMax-M3 | 428B | `MiniMaxM3SparseForConditionalGeneration` | **N** | Block-sparse attention index on top of MiniMax-M2, `swigluoai`. |
+| MiniMax-M3 | 428B | `MiniMaxM3SparseForConditionalGeneration` | V (tiny, CPU) | Block-sparse attention index on top of MiniMax-M2, `swigluoai`, as in `minimax_m3_vl_text`; text part only, checkpoint not run. |
 | Inkling | 975B | `InklingForConditionalGeneration` | V (tiny, CPU) | Short convs, relative position tables, log scaling, shared expert sink as in `inkling_text`; text part only, checkpoint not run. |
 | Nemotron 3 Ultra | 550B / 55B | `NemotronHForCausalLM` | V (tiny, new) | Latent MoE, same code as Super. MTP head is not imported. |
 | K2 Horizon 375B A23B | 375B / 23B | `K2HorizonForCausalLM` | U | MoE path verified (tiny). The checkpoint uses `rope_head_dim: 64` < `head_dim: 128` with an interleaved partial layout; the converter rejects it instead of guessing. |

@@ -108,6 +108,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "hy4",
     "longcat-flash",
     "inkling",
+    "minimax3",
     "k2_horizon",
     "k2-horizon",
     "k2horizon",
@@ -522,6 +523,7 @@ impl GgufModel {
         self.config.delta.is_some()
             || self.config.v4.is_some()
             || self.config.inkling.is_some()
+            || self.config.minimax3.is_some()
             || self.config.mamba.is_some()
             || self.config.mamba1.is_some()
             || self.config.rwkv.is_some()

@@ -934,6 +934,9 @@ impl Plan {
         if raw == "longcat_flash" {
             return crate::longcat::plan(cfg);
         }
+        if matches!(raw.as_str(), "minimax_m3_vl_text" | "minimax_m3_text" | "minimax_m3") {
+            return crate::minimax3::plan(cfg);
+        }
         if matches!(raw.as_str(), "inkling" | "inkling_text") {
             return crate::inkling::plan(cfg);
         }
@@ -2651,6 +2654,9 @@ impl Plan {
         }
         if self.arch == "inkling" {
             return crate::inkling::map(self, n);
+        }
+        if self.arch == "minimax3" {
+            return crate::minimax3::map(self, n);
         }
         let ling_renamed;
         let n = if self.arch == "kimi-linear" {

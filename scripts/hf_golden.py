@@ -952,6 +952,17 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=4,
             indexer_types=["full", "shared", "full"],
         ),
+        # MiniMax-M3 text: Gemma-style q/k norms, partial rotary pairs, block-sparse attention selected by a small indexer (blocks of 4 keys,
+        # 2 blocks + the local one per query and KV head), sigmoid MoE with gpt-oss style SwiGLU and a shared expert, dense first layer
+        "minimax_m3_vl_text": lambda: T.MiniMaxM3VLTextConfig(
+            **{**common, "num_hidden_layers": 4}, num_attention_heads=4, num_key_value_heads=2, head_dim=16, rotary_dim=8,
+            intermediate_size=32, dense_intermediate_size=128, shared_intermediate_size=32, num_local_experts=8, num_experts_per_tok=2,
+            routed_scaling_factor=1.5, swiglu_alpha=1.702, swiglu_limit=3.0, rms_norm_eps=1e-5,
+            mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
+            layer_types=["full_attention", "minimax_m3_sparse", "minimax_m3_sparse", "full_attention"],
+            index_n_heads=2, index_head_dim=16, index_block_size=4, index_topk_blocks=2, index_local_blocks=1,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
+        ),
         # Inkling: no rotary embeddings (a learned relative bias from the hidden state), short convolutions on k, v and both branches,
         # sliding layers with other head counts, log-scaled global attention, sigmoid MoE with sink-style shared experts, mu-P logits
         "inkling": lambda: T.InklingTextConfig(

@@ -271,6 +271,31 @@ impl IndexerConfig {
     }
 }
 
+/// MiniMax-M3: block-sparse attention selected by an indexer, gpt-oss style SwiGLU, shared expert. The pool geometry of the model is a
+/// placeholder: keys and values live in the per-sequence layer states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Minimax3Config {
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    /// Rotated values per head.
+    pub rot: usize,
+    pub theta: f32,
+    pub idx_heads: usize,
+    pub idx_dim: usize,
+    pub block: usize,
+    pub topk: usize,
+    pub local: usize,
+    pub alpha: f32,
+    pub limit: f32,
+    pub experts: usize,
+    pub used: usize,
+    pub moe_ff: usize,
+    pub shared_ff: usize,
+    pub route_scale: f32,
+    pub sparse_attn: Vec<bool>,
+    pub sparse_mlp: Vec<bool>,
+}
+
 /// Inkling: attention without rotary embeddings (a learned distance profile mixed per token), short convolutions, own head counts on the
 /// sliding layers. The pool geometry of the model is a placeholder: the keys and values live in the per-sequence layer states.
 #[derive(Clone, Debug, PartialEq)]
@@ -406,6 +431,7 @@ pub struct ModelConfig {
     pub mla_scales: Option<(f32, f32)>,
     pub v4: Option<V4Config>,
     pub inkling: Option<InklingConfig>,
+    pub minimax3: Option<Minimax3Config>,
     pub hc: Option<HcConfig>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
@@ -817,11 +843,42 @@ impl ModelConfig {
         } else {
             None
         };
-        let (kv_heads, head_dim, value_dim) = match (&mla, &v4, &inkling) {
-            (Some(m), _, _) => (heads, m.nope + m.rope, m.value),
+        let minimax3 = if a == "minimax3" {
+            let flags = |name: &str| -> Result<Vec<bool>, String> {
+                match key(meta, a, name) {
+                    Some(Value::Array(values)) if values.len() == layers => Ok(values.iter().map(|v| v.as_bool().unwrap_or(false)).collect()),
+                    _ => Err(format!("MiniMax-M3 needs {a}.{name} with one entry per layer")),
+                }
+            };
+            let need = |name: &str| uint(meta, a, name).ok_or_else(|| format!("MiniMax-M3 needs {a}.{name}"));
+            Some(Minimax3Config {
+                kv_heads,
+                head_dim,
+                rot: rope_dims,
+                theta: float(meta, a, "rope.freq_base").unwrap_or(10000.0),
+                idx_heads: need("index.head_count")?,
+                idx_dim: need("index.head_dim")?,
+                block: need("index.block_size")?,
+                topk: need("index.topk_blocks")?,
+                local: need("index.local_blocks")?,
+                alpha: float(meta, a, "swiglu_alpha").unwrap_or(1.702),
+                limit: float(meta, a, "swiglu_limit").unwrap_or(7.0),
+                experts: need("moe.experts")?,
+                used: need("moe.used")?,
+                moe_ff: need("moe.feed_forward_length")?,
+                shared_ff: need("moe.shared_feed_forward_length")?,
+                route_scale: float(meta, a, "moe.route_scale").unwrap_or(1.0),
+                sparse_attn: flags("layer_sparse_attention")?,
+                sparse_mlp: flags("layer_sparse_mlp")?,
+            })
+        } else {
+            None
+        };
+        let (kv_heads, head_dim, value_dim) = match (&mla, &v4, &inkling, &minimax3) {
+            (Some(m), _, _, _) => (heads, m.nope + m.rope, m.value),
             // placeholder cache geometry: the attention state of these models is kept per sequence outside the KV pools
-            (None, Some(_), _) | (None, _, Some(_)) => (1, 2, 2),
-            (None, None, None) => (kv_heads, head_dim, value_dim),
+            (None, Some(_), _, _) | (None, _, Some(_), _) | (None, _, _, Some(_)) => (1, 2, 2),
+            (None, None, None, None) => (kv_heads, head_dim, value_dim),
         };
         let swa_flag = |l: usize| {
             sliding_window.is_some()
@@ -932,6 +989,7 @@ impl ModelConfig {
             },
             v4,
             inkling,
+            minimax3,
             hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
                 hc_mult,
                 magnitude: float(meta, a, "hc_magnitude"),
@@ -1438,6 +1496,7 @@ pub(crate) mod tests_support {
             mla_scales: None,
             v4: None,
             inkling: None,
+            minimax3: None,
             hc: None,
             delta: None,
             mamba: None,

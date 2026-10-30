@@ -22,6 +22,7 @@ mod mistral_native;
 mod hybrid;
 mod deepseek4;
 mod hy4;
+mod minimax3;
 mod inkling;
 mod longcat;
 mod kimi_linear;
