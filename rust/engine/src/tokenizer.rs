@@ -29,6 +29,8 @@ pub struct TokenizerBundle {
     sentencepiece: Option<SentencePieceOptions>,
     /// llama.cpp's SentencePiece (bigram merge) encoder for `tokenizer.ggml.model == "llama"`.
     spm: Option<Box<SpmEncoder>>,
+    /// The RWKV world vocabulary (`tokenizer.ggml.model == "rwkv"`): greedy longest match over byte strings.
+    rwkv: Option<Box<crate::tokenizer_rwkv::RwkvVocab>>,
     fim: Option<Box<Fim>>,
 }
 
@@ -135,7 +137,19 @@ impl TokenizerBundle {
             .unwrap_or_default();
         let serialized_hf = metadata.get("tokenizer.huggingface.json");
         let mut spm: Option<Box<SpmEncoder>> = None;
-        let (tokenizer, sentencepiece, grammar_byte_fallback) = if let Some(json) = serialized_hf {
+        let mut rwkv: Option<Box<crate::tokenizer_rwkv::RwkvVocab>> = None;
+        let rwkv_model = serialized_hf.is_none() && metadata.get("tokenizer.ggml.model").and_then(Value::as_str) == Some("rwkv");
+        let (tokenizer, sentencepiece, grammar_byte_fallback) = if rwkv_model {
+            // encoding and decoding go through `RwkvVocab`; the HF object only fills the field
+            rwkv = Some(Box::new(crate::tokenizer_rwkv::RwkvVocab::new(&tokens)?));
+            let vocab = tokens.iter().enumerate().map(|(id, t)| (t.clone(), id as u32)).collect();
+            let model = tokenizers::models::wordlevel::WordLevel::builder()
+                .vocab(vocab)
+                .unk_token(tokens[0].clone())
+                .build()
+                .map_err(|e| format!("RWKV tokenizer: {e}"))?;
+            (Tokenizer::new(model), None, false)
+        } else if let Some(json) = serialized_hf {
             let json = json
                 .as_str()
                 .ok_or_else(|| "tokenizer.huggingface.json must be a string".to_owned())?;
@@ -280,6 +294,8 @@ impl TokenizerBundle {
                     let mut bytes = vec![0xff];
                     bytes.extend_from_slice(token.as_bytes());
                     bytes
+                } else if let Some(vocab) = &rwkv {
+                    vocab.token_bytes(id as u32).to_vec()
                 } else if grammar_byte_fallback {
                     byte_fallback_token(token)
                         .map(|byte| vec![byte])
@@ -318,6 +334,7 @@ impl TokenizerBundle {
             grammar_bytes,
             sentencepiece,
             spm,
+            rwkv,
             fim,
         })
     }
@@ -406,6 +423,9 @@ impl TokenizerBundle {
 
     /// Encodes text with the model's tokenizer, without BOS, EOS or special-token parsing.
     pub fn encode_plain(&self, text: &str) -> Result<Vec<u32>, String> {
+        if let Some(rwkv) = &self.rwkv {
+            return Ok(rwkv.encode(text));
+        }
         if let (Some(spm), Some(options)) = (&self.spm, self.sentencepiece) {
             return Ok(spm.encode(text, options.add_space_prefix));
         }
@@ -449,6 +469,10 @@ impl TokenizerBundle {
     }
 
     pub fn decode(&self, ids: &[u32], skip_special: bool) -> Result<String, String> {
+        if let Some(rwkv) = &self.rwkv {
+            let kept: Vec<u32> = ids.iter().copied().filter(|id| !(skip_special && self.skipped_special_ids.contains(id))).collect();
+            return Ok(rwkv.decode(&kept));
+        }
         if !skip_special || self.skipped_special_ids.is_empty() {
             return self
                 .tokenizer

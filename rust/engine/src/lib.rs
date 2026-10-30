@@ -73,6 +73,7 @@ pub mod tiny_model;
 pub use runtime::{BatchStats, InferenceRuntime, TokenEvent};
 
 pub mod tokenizer;
+mod tokenizer_rwkv;
 
 #[cfg(test)]
 mod import_tests;

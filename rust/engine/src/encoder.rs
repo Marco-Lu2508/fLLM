@@ -34,6 +34,7 @@ pub(crate) fn apply_act_dtype(values: &mut [f32]) {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum EncoderTokenizer {
     WordPiece(Tokenizer),
     Other(crate::tokenizer::TokenizerBundle),
