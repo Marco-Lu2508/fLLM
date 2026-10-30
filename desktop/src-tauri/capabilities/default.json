@@ -1,7 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The window only shows the local server; it needs no access to the app itself.",
+  "description": "The loading page of the window may restart the engine and open the log folder when the engine did not start; nothing else.",
   "windows": ["main"],
-  "permissions": []
+  "permissions": [
+    "allow-restart-server",
+    "allow-open-log-folder"
+  ]
 }

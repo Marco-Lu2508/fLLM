@@ -4,11 +4,10 @@
 //! (CPU, Vulkan, DirectX; always there) and optional ones (CUDA, later HIP). At the start the app picks the best variant whose hardware is
 //! present, using cheap checks that do not load any GPU stack (a file exists, a PCI device is listed).
 //!
-//! To add a variant (for example `hip`):
-//!   1. add one entry to `VARIANTS` (before the base entry; the order is the order of preference),
-//!   2. add the field it needs to `Probe` and fill it in `Probe::detect`,
-//!   3. list the sidecar in the config of the build that bundles it (`tauri.<name>.conf.json`, see `tauri.cuda.conf.json`) and let the
-//!      release workflow copy the binary to `desktop/src-tauri/binaries/<sidecar>-<target triple>[.exe]`.
+//! To add a variant (for example `hip`): add one entry to `VARIANTS` (before the base entry; the order is the order of preference); add the
+//! field it needs to `Probe` and fill it in `Probe::detect`; list the sidecar in the config of the build that bundles it
+//! (`tauri.<name>.conf.json`, see `tauri.cuda.conf.json`) and let the release workflow copy the binary to
+//! `desktop/src-tauri/binaries/<sidecar>-<target triple>[.exe]`.
 //! Nothing else changes: the settings page lists `VARIANTS`, the fallback goes to the base variant for every other one.
 
 use std::path::PathBuf;
@@ -198,6 +197,18 @@ fn nvidia_device_listed() -> Option<bool> {
     None
 }
 
+impl PartialEq for Variant {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl std::fmt::Debug for Variant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Variant({})", self.name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,17 +292,5 @@ mod tests {
         assert_eq!(VARIANTS.last().unwrap().name, BASE);
         assert_eq!(VARIANTS.iter().filter(|v| v.name == BASE).count(), 1);
         assert_eq!(base().sidecar, "fllm-rs");
-    }
-}
-
-impl PartialEq for Variant {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
-impl std::fmt::Debug for Variant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Variant({})", self.name)
     }
 }

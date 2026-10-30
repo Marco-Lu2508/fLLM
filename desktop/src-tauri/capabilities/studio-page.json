@@ -11,6 +11,7 @@
     "allow-set-keep-in-tray",
     "allow-set-autostart",
     "allow-open-log-folder",
+    "allow-open-external",
     "allow-restart-server",
     "allow-set-quick-entry",
     "allow-set-variant"

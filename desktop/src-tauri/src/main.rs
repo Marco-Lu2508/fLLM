@@ -202,7 +202,7 @@ fn wait_until_answers(app: &AppHandle, generation: u64) -> Result<(), Wait> {
         if started.elapsed() - last_note >= Duration::from_secs(2) && started.elapsed() > Duration::from_secs(6) {
             last_note = started.elapsed();
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval(&format!(
+                let _ = window.eval(format!(
                     "var n=document.getElementById('note'); if(n) n.textContent='Loading the last model ... {} s'",
                     started.elapsed().as_secs()
                 ));
@@ -210,7 +210,7 @@ fn wait_until_answers(app: &AppHandle, generation: u64) -> Result<(), Wait> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    Err(Wait::Failed("The server did not start in time.".to_owned()))
+    Err(Wait::Failed(stopped_message("The server did not start in time.")))
 }
 
 /// Why the wait for the server ended without an answer.
@@ -222,8 +222,10 @@ enum Wait {
     Failed(String),
 }
 
+/// The text of the loading page when the engine is not running. The leading "!" tells the page to show the two buttons (restart, open the
+/// log folder); the tray menu has the same two entries.
 fn stopped_message(what: &str) -> String {
-    format!("{what} Choose \"Restart server\" in the menu of the tray icon, or start the app again. The log is in the log folder of the app (server.log).")
+    format!("!{what} Restart the engine, or open the log folder to see why (server.log).")
 }
 
 /// Starts (or restarts) the server, then shows its page once it answers, and shows the loading page again if the server stops.
@@ -445,6 +447,28 @@ fn open_log_folder(app: AppHandle) -> Result<(), String> {
     open_logs(&app)
 }
 
+/// Whether a link from the Studio page may be handed to the system: web and mail links only, no control characters.
+fn external_url_ok(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    ["http://", "https://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme)) && url.len() <= 4096 && !url.chars().any(char::is_control)
+}
+
+/// Opens a link of the Studio page in the default browser (the window itself must stay on the Studio). Only web and mail links.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    if !external_url_ok(&url) {
+        return Err("Only web and mail links can be opened.".to_owned());
+    }
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(program).arg(&url).spawn().map(|_| ()).map_err(|e| format!("The link could not be opened: {e}"))
+}
+
 #[tauri::command]
 fn restart_server(app: AppHandle) {
     show_loading(&app, "Restarting the server ...");
@@ -505,7 +529,7 @@ fn main() {
             settings: Mutex::new(Settings::default()),
             active: Mutex::new(Active::default()),
         })
-        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, restart_server, set_quick_entry, set_variant])
+        .invoke_handler(tauri::generate_handler![get_desktop_settings, set_keep_in_tray, set_autostart, open_log_folder, open_external, restart_server, set_quick_entry, set_variant])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" && window.state::<Shell>().settings.lock().unwrap().keep_in_tray {
@@ -558,5 +582,22 @@ mod settings_lock_tests {
             });
             assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "reading the settings blocked");
         });
+    }
+}
+
+#[cfg(test)]
+mod external_link_tests {
+    use super::external_url_ok;
+
+    #[test]
+    fn only_web_and_mail_links_are_opened() {
+        assert!(external_url_ok("https://github.com/Marco-Lu2508/fLLM"));
+        assert!(external_url_ok("HTTP://example.com/a?b=c&d=e"));
+        assert!(external_url_ok("mailto:someone@example.com"));
+        assert!(!external_url_ok("file:///C:/Windows/System32/cmd.exe"));
+        assert!(!external_url_ok("javascript:alert(1)"));
+        assert!(!external_url_ok("C:\\Windows\\notepad.exe"));
+        assert!(!external_url_ok("https://example.com/\nnext"));
+        assert!(!external_url_ok(&format!("https://example.com/{}", "a".repeat(5000))));
     }
 }
