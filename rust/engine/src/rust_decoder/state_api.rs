@@ -172,6 +172,9 @@ impl RustDecoder {
 
     /// Forgets the recurrent state of a finished sequence.
     pub fn forget_state(&self, first: i64) {
+        if let Some(model) = &self.qwen4 {
+            model.forget(first);
+        }
         if let Ok(mut store) = self.states.lock() {
             store.map.remove(&first);
         }

@@ -81,7 +81,8 @@ Verified column:
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | Kimi K3 (`kimi_k3`: Kimi delta layers with full-rank gates, rotary-free latent attention with an output gate, SiTU latent MoE, block attention residuals; GGUF `kimi-linear`) | safetensors (bf16 / f32; the Hub MXFP4 weights are not read) | D | H | H | H | H | T 2.9e-5 on a tiny fixture of its latent attention layers, compared with the model repository's own `modeling_kimi_linear.py` (24 positions, f32 KV cache; see `scripts/verify_kimi_k3.py`). The delta layers of K3 were not run against their reference (it needs `fla`); they share the code verified by the Kimi-Linear, Ling-3.0 and GLM-5-Next fixtures. The real 2.8T checkpoint was not run |
-| Qwen3.8-Flash-Next (`qwen4_exp`), Motif, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
+| Qwen3.8-Flash-Next (`qwen4_exp`: Qwen3.5 delta / gated attention layers + MoE in gated residual streams, hashed n-gram embeddings (PLE), token indexer; GGUF `qwen3next` with extra metadata) | safetensors (text part; n-gram table as one tensor or `shard_N`) | D | H | H | H | H | T 2.0e-6 .. 5.1e-6 with a float32 KV cache and 2.2e-4 .. 2.5e-4 with the default half-precision cache (12, 20, 33, 40 positions, cached decoding too; the dense indexer is 0.34 off). Greedy server completions identical (4 concurrent requests); Vulkan on an RTX 2000 Ada gave the same text as the CPU (host fallback). The real 180B checkpoint was not run |
+| Motif, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 
 ## Encoders, rerankers, embedders
 
@@ -219,7 +220,7 @@ CPU text for both fixtures, and with `FLLM_DSA=dense` the device text equals the
 ### Models added with their own decoders (device behaviour)
 
 Tiny random fixtures through `scripts/gpu_arch_smoke.py --device vulkan:1` (RTX 2000 Ada Laptop GPU, 12 greedy tokens, text from the device
-against text from the CPU): DeepSeek-V4, Hy4, GLM-5-Next, LongCat-Flash, Inkling and MiniMax-M3 all give the same text, because the engine
+against text from the CPU): DeepSeek-V4, Hy4, GLM-5-Next, LongCat-Flash, Inkling, MiniMax-M3 and Qwen3.8-Flash-Next all give the same text, because the engine
 prints that the model cannot run on the backend and continues on the CPU (`--device vulkan:1: ... use --device cpu; running on the CPU
 instead`); no accelerator kernel ran for them. Ling-3.0 gave the same text with its delta layers on the device and its latent attention layers
 (output gate) on the host. CUDA, HIP and Metal were not run for any of them.
@@ -228,8 +229,8 @@ instead`); no accelerator kernel ran for them. Ling-3.0 gave the same text with 
 
 Not implemented, ordered by how many current models need them:
 
-1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** on accelerators, and for Qwen3.8-Flash-Next and
-   Motif at all. DeepSeek-V4, Hy4 and GLM-5-Next have them on the CPU (see the matrix); the device kernels for the stream mixing, the compressors and the
+1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** on accelerators, and for Motif at all.
+   DeepSeek-V4, Hy4, GLM-5-Next and Qwen3.8-Flash-Next have them on the CPU (see the matrix); the device kernels for the stream mixing, the compressors and the
    per-sequence state are missing, as is its MTP head and the FP8 / FP4 Hub weight formats.
 2. **A device kernel for the DeepSeek-V3.2 / GLM-5 indexer.** The CPU path is exact at any context length (indexer keys per
    slot beside the KV pools); accelerators keep dense attention, exact up to `index_topk` tokens, or run those layers on the
@@ -328,7 +329,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | Kimi K3 | 2.8T | `KimiK3ForConditionalGeneration` | **T (latent attention part)** | Converter and CPU decoder for SiTU, attention residual blocks, latent MoE with norm, output-gated latent attention and full-rank KDA gates; MXFP4 Hub weights are not read. |
 | Qwen3.8 2.4T A95B | 2.4T | `Qwen3_5MoeForCausalLM` | V (arch) | Same layers as Qwen3.5-MoE; too large to run. |
 
-| Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **N** | Hyper-connections, n-gram embeddings, per-layer embeddings, sparse indexer. |
+| Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **T** | Text part on the CPU (streams, n-gram embeddings, token indexer); the vision tower is not imported; the 90 GiB n-gram table needs a machine with that much memory. |
 | DeepSeek V4.1 Flash, V4 Pro 0813 | 552B, 1.6T | `DeepseekV41ForCausalLM`, `DeepseekV4ForCausalLM` | V (tiny, CPU) | Hyper-connections, compressed/sparse attention, hash routing as in `deepseek_v4`; the V4.1 engram embeddings are not implemented. Checkpoints not run. |
 | Motif 3 | 314B | `MotifForCausalLM` | **N** | GDLA attention, multi-stream residuals, PolyNorm activation. |
 | MiniMax-M3 | 428B | `MiniMaxM3SparseForConditionalGeneration` | V (tiny, CPU) | Block-sparse attention index on top of MiniMax-M2, `swigluoai`, as in `minimax_m3_vl_text`; text part only, checkpoint not run. |

@@ -314,6 +314,7 @@ pub(crate) fn layer_requirements(arch: &str, i: u64, cfg: &Value) -> Option<Vec<
         "longcat-flash" => return crate::longcat::requirements(cfg, i),
         "inkling" => return crate::inkling::requirements(cfg, i),
         "minimax3" => return crate::minimax3::requirements(cfg, i),
+        "qwen3next" if crate::qwen4_exp::is_qwen4(cfg) => return crate::qwen4_exp::requirements(cfg, i),
         _ => return None,
     }
     Some(need.into_iter().map(|n| format!("blk.{i}.{n}")).collect())

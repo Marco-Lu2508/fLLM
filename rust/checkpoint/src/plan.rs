@@ -934,6 +934,9 @@ impl Plan {
         if raw == "longcat_flash" {
             return crate::longcat::plan(cfg);
         }
+        if raw.starts_with("qwen4_exp") {
+            return crate::qwen4_exp::plan(cfg);
+        }
         if matches!(raw.as_str(), "minimax_m3_vl_text" | "minimax_m3_text" | "minimax_m3") {
             return crate::minimax3::plan(cfg);
         }
@@ -2657,6 +2660,11 @@ impl Plan {
         }
         if self.arch == "minimax3" {
             return crate::minimax3::map(self, n);
+        }
+        if self.arch == "qwen3next" && crate::qwen4_exp::is_plan(self) {
+            if let Some(m) = crate::qwen4_exp::map(n) {
+                return Ok(m);
+            }
         }
         let ling_renamed;
         let n = if self.arch == "kimi-linear" {

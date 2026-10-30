@@ -963,6 +963,18 @@ def config_for(arch: str, vocab: int):
             index_n_heads=2, index_head_dim=16, index_block_size=4, index_topk_blocks=2, index_local_blocks=1,
             rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
         ),
+        # Qwen3.8-Flash-Next text model: Qwen3.5 delta / gated attention layers and MoE in 3 gated residual streams, hashed n-gram embeddings
+        # (PLE) on two delta layers, and a token indexer that keeps 2 of the finished blocks of 4 tokens (plus the unfinished last block)
+        "qwen4_exp": lambda: T.Qwen4ExpTextConfig(
+            **{**common, "num_hidden_layers": 6}, num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+            linear_conv_kernel_dim=4, linear_key_head_dim=8, linear_value_head_dim=8, linear_num_key_heads=2, linear_num_value_heads=4,
+            moe_intermediate_size=32, shared_expert_intermediate_size=32, num_experts=8, num_experts_per_tok=2, rms_norm_eps=1e-6,
+            layer_types=["linear_attention", "linear_attention", "linear_attention", "indexed_attention", "linear_attention", "indexed_attention"],
+            hc_count=3, hc_lowrank=16, ple_layer_ids=[2, 5], ple_embed_dim=32, ple_conv_kernel_size=4, ngram_size=3, heads_per_ngram=2,
+            ngram_vocab_size_base=200, make_ngram_vocab_size_divisible_by=16, seed=1234, split_ngram_parts=1,
+            indexer_n_heads=2, indexer_kv_heads=1, indexer_head_dim=16, indexer_budget=8, indexer_compress_ratio=4,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5, "mrope_section": [2, 1, 1]},
+        ),
         # Inkling: no rotary embeddings (a learned relative bias from the hidden state), short convolutions on k, v and both branches,
         # sliding layers with other head counts, log-scaled global attention, sigmoid MoE with sink-style shared experts, mu-P logits
         "inkling": lambda: T.InklingTextConfig(
@@ -1263,7 +1275,8 @@ def build_xlm_roberta(out: Path, vocab: int, seed: int, arch: str = "xlm_roberta
 
 @contextlib.contextmanager
 def stable_topk(margins=None, index_topk=None):
-    """`topk` that keeps the lower index among equal values, for 3-dimensional float32 inputs (the DSA indexer scores).
+    """`topk` that keeps the lower index among equal values, for 3-dimensional float32 inputs (the DSA indexer scores) and 1-dimensional
+    ones (the block scores of the Qwen3.8-Flash-Next token indexer).
 
     The score of a key is `sum_h w_h * relu(q_h . k)`: when all heads of a key are in the ReLU's dead zone it is exactly 0, and a query
     with fewer than `index_topk` positive keys then cuts among such ties. Which of them `torch.topk` returns is implementation defined,
@@ -1274,10 +1287,14 @@ def stable_topk(margins=None, index_topk=None):
     original = torch.Tensor.topk
 
     def stable(self, k, dim=-1, largest=True, sorted=True):
-        if self.dim() != 3 or self.dtype != torch.float32 or not largest or (index_topk is not None and k != index_topk):
+        if self.dim() not in (1, 3) or self.dtype != torch.float32 or not largest or (index_topk is not None and k != index_topk):
             return original(self, k, dim=dim, largest=largest, sorted=sorted)
         values, index = torch.sort(self, dim=dim, descending=True, stable=True)
-        if margins is not None and dim in (-1, 2) and values.shape[-1] > k:
+        if margins is not None and self.dim() == 1 and values.shape[0] > k:
+            kept, dropped = float(values[k - 1]), float(values[k])
+            if kept > float("-inf") and dropped > float("-inf"):
+                margins.append(kept - dropped)
+        if margins is not None and self.dim() == 3 and dim in (-1, 2) and values.shape[-1] > k:
             for q in range(values.shape[1]):
                 kept, dropped = float(values[0, q, k - 1]), float(values[0, q, k])
                 if kept > float("-inf") and dropped > float("-inf"):
@@ -1458,7 +1475,7 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
                 if name.endswith("expert_bias"):
                     buffer.copy_(torch.linspace(-0.2, 0.2, buffer.numel()).reshape_as(buffer))
         for name, p in model.named_parameters():
-            if name.endswith("norm.weight") or name.endswith("ln_1.weight") or name.endswith("ln_2.weight") or name.endswith("ln_f.weight"):
+            if name.endswith(("norm_key.weight", "norm_query.weight", "norm_conv.weight")) or name.endswith("norm.weight") or name.endswith("ln_1.weight") or name.endswith("ln_2.weight") or name.endswith("ln_f.weight"):
                 p.copy_(0.8 + 0.4 * torch.rand_like(p))
             if not bool(torch.isfinite(p).all()):
                 p.normal_(std=0.2)
@@ -1517,6 +1534,8 @@ def build(arch: str, out: Path, vocab: int = 320, seed: int = 1234) -> dict:
     margins: list[float] = []
     topk_k = getattr(cfg, "index_topk", None)
     text = getattr(cfg, "text_config", None)
+    if topk_k is None and getattr(cfg, "indexer_budget", None):
+        topk_k = cfg.indexer_budget // cfg.indexer_compress_ratio  # Qwen3.8-Flash-Next selects blocks of tokens
     if topk_k is None and getattr(text, "index_kpool", None):
         topk_k = text.index_topk // text.index_kpool  # GLM-5-Next selects pools of keys
     with torch.no_grad(), stable_topk(margins, topk_k):

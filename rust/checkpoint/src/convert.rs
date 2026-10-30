@@ -256,6 +256,8 @@ pub fn prepare_checkpoint(
         crate::inkling::config(&cfg)?
     } else if arch == "minimax3" {
         crate::minimax3::config(&cfg)?
+    } else if arch == "qwen3next" && crate::qwen4_exp::is_qwen4(&cfg) {
+        crate::qwen4_exp::config(&cfg)?
     } else if matches!(plan.family, Family::Mamba | Family::Nemotron) {
         // no attention or feed-forward sizes: give the shape checks harmless values
         let mut patched = cfg.clone();
@@ -391,7 +393,7 @@ pub fn prepare_checkpoint(
         if matches!(arch, "inkling" | "minimax3") && !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight") {
             return Ok(None);
         }
-        if arch == "hy4" && name.starts_with("output_hc_") {
+        if matches!(arch, "hy4" | "qwen3next") && name.starts_with("output_hc_") {
             return Ok(None);
         }
         if arch == "deepseek4" && !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight") {
@@ -743,7 +745,12 @@ pub fn prepare_checkpoint(
         let count = first.shape.iter().product::<u64>();
         let width = if dtype == "F32" { 4 } else { 2 };
         let mut dims: Vec<u64> = first.shape.iter().rev().copied().collect();
-        dims.push(list.len() as u64);
+        if name.ends_with(".ple_embd.weight") && dims.len() == 2 {
+            // shards of one embedding table along its rows
+            dims[1] *= list.len() as u64;
+        } else {
+            dims.push(list.len() as u64);
+        }
         let data_len = count * width * list.len() as u64;
         let mut payloads = list.into_iter().map(|(_, t)| t.payload);
         let data = payloads.next().expect("at least one expert");

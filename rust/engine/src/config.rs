@@ -271,6 +271,29 @@ impl IndexerConfig {
     }
 }
 
+/// Qwen3.8-Flash-Next: Qwen3.5 layers whose residual stream is `hc` streams mixed by learned gates, per-layer hashed n-gram embeddings
+/// (PLE) added to the streams of some delta layers, and a token indexer on the attention layers that keeps the best blocks of
+/// `ratio` tokens (`budget / ratio` of them) plus the unfinished last block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Qwen4Config {
+    pub hc: usize,
+    pub lowrank: usize,
+    /// `(heads, head_dim, budget, ratio)` of the token indexer.
+    pub indexer: Option<(usize, usize, usize, usize)>,
+    /// Per layer: n-gram embedding.
+    pub ple: Vec<bool>,
+    pub ple_embed: usize,
+    pub ple_kernel: usize,
+    pub ngram: usize,
+    pub heads_per_ngram: usize,
+    pub vocab_base: u64,
+    pub divisible: usize,
+    pub seed: u64,
+    pub eos: i64,
+    /// Rows of the token embedding: the unigram vocabulary of the hash.
+    pub vocab: u64,
+}
+
 /// MiniMax-M3: block-sparse attention selected by an indexer, gpt-oss style SwiGLU, shared expert. The pool geometry of the model is a
 /// placeholder: keys and values live in the per-sequence layer states.
 #[derive(Clone, Debug, PartialEq)]
@@ -432,6 +455,7 @@ pub struct ModelConfig {
     pub v4: Option<V4Config>,
     pub inkling: Option<InklingConfig>,
     pub minimax3: Option<Minimax3Config>,
+    pub qwen4: Option<Qwen4Config>,
     /// SiTU gated activation (Kimi K3): `beta * tanh(gate / beta) * sigmoid(gate) * (linear_beta * tanh(up / linear_beta))`;
     /// the second value is 0 when the up projection is left alone.
     pub situ: Option<(f32, f32)>,
@@ -849,6 +873,36 @@ impl ModelConfig {
         } else {
             None
         };
+        let qwen4 = if a == "qwen3next" && uint(meta, a, "hc.count").is_some() {
+            let need = |name: &str| uint(meta, a, name).ok_or_else(|| format!("Qwen3.8-Flash-Next needs {a}.{name}"));
+            let indexer = match uint(meta, a, "indexer.heads") {
+                Some(heads) => Some((heads, need("indexer.head_dim")?, need("indexer.budget")?, need("indexer.compress_ratio")?)),
+                None => None,
+            };
+            let ple = match key(meta, a, "ple.layer_flags") {
+                Some(Value::Array(values)) if values.len() == layers => values.iter().map(|v| v.as_bool().unwrap_or(false)).collect(),
+                _ => vec![false; layers],
+            };
+            let any_ple = ple.iter().any(|&f| f);
+            let ple_key = |name: &str| if any_ple { need(name) } else { Ok(0) };
+            Some(Qwen4Config {
+                hc: need("hc.count")?,
+                lowrank: need("hc.lowrank")?,
+                indexer,
+                ple,
+                ple_embed: ple_key("ple.embed_dim")?,
+                ple_kernel: ple_key("ple.conv_kernel")?,
+                ngram: ple_key("ple.ngram_size")?,
+                heads_per_ngram: ple_key("ple.heads_per_ngram")?,
+                vocab_base: ple_key("ple.vocab_base")? as u64,
+                divisible: ple_key("ple.divisible")?,
+                seed: ple_key("ple.seed")? as u64,
+                eos: ple_key("ple.eos")? as i64,
+                vocab: ple_key("ple.vocab")? as u64,
+            })
+        } else {
+            None
+        };
         let minimax3 = if a == "minimax3" {
             let flags = |name: &str| -> Result<Vec<bool>, String> {
                 match key(meta, a, name) {
@@ -996,6 +1050,7 @@ impl ModelConfig {
             v4,
             inkling,
             minimax3,
+            qwen4,
             situ: float(meta, a, "situ_beta").map(|b| (b, float(meta, a, "situ_linear_beta").unwrap_or(0.0))),
             attn_res: uint(meta, a, "attention_residual_block_size").filter(|&n| n > 0),
             hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
@@ -1505,6 +1560,7 @@ pub(crate) mod tests_support {
             v4: None,
             inkling: None,
             minimax3: None,
+            qwen4: None,
             situ: None,
             attn_res: None,
             hc: None,

@@ -23,6 +23,7 @@ mod hybrid;
 mod deepseek4;
 mod hy4;
 mod minimax3;
+mod qwen4_exp;
 mod inkling;
 mod longcat;
 mod kimi_linear;

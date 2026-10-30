@@ -27,6 +27,7 @@ mod deepseek4;
 mod hc;
 mod inkling;
 mod minimax3;
+mod qwen4;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -1078,6 +1079,7 @@ pub struct RustDecoder {
     v4: Option<Box<deepseek4::V4Model>>,
     /// MiniMax-M3 weights.
     minimax3: Option<Box<minimax3::Minimax3Model>>,
+    qwen4: Option<Box<qwen4::Qwen4Model>>,
     /// Score weights of the attention residual over the blocks at the end of the model.
     output_res: Option<Vec<f32>>,
     /// Inkling weights.
@@ -2232,6 +2234,7 @@ impl RustDecoder {
         let hc = if cfg.hc.is_some() { Some(Box::new(hc::HcModel::load(mapping, &cfg)?)) } else { None };
         let inkling = if cfg.inkling.is_some() { Some(Box::new(inkling::InklingModel::load(model, &cfg)?)) } else { None };
         let minimax3 = if cfg.minimax3.is_some() { Some(Box::new(minimax3::Minimax3Model::load(model, &cfg)?)) } else { None };
+        let qwen4 = if cfg.qwen4.is_some() { Some(Box::new(qwen4::Qwen4Model::load(model, &cfg)?)) } else { None };
         let output_res = if cfg.attn_res.is_some() && has_tensor(mapping, "output_res_norm.weight") {
             let norm = vector(mapping, "output_res_norm.weight", hidden)?;
             let proj = vector(mapping, "output_res_proj.weight", hidden)?;
@@ -2316,6 +2319,7 @@ impl RustDecoder {
             inkling,
             output_res,
             minimax3,
+            qwen4,
             hc,
             row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
@@ -2698,6 +2702,9 @@ impl RustDecoder {
         }
         if cfg.hc.is_some() {
             return Some("hyper-connections");
+        }
+        if cfg.qwen4.is_some() {
+            return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer");
         }
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
@@ -7212,6 +7219,8 @@ impl RustDecoder {
                 x = self.inkling_layers(&x, &positions, tables, lengths)?;
             } else if cfg.minimax3.is_some() {
                 x = self.minimax3_layers(&x, &positions, tables, lengths)?;
+            } else if cfg.qwen4.is_some() {
+                x = self.qwen4_layers(&x, ids, &positions, tables, lengths, key, value)?;
             } else if cfg.hc.is_some() {
                 x = self.hc_layers(&x, &positions, tables, lengths, key, value)?;
             } else {
@@ -7224,7 +7233,10 @@ impl RustDecoder {
             if self.altup.is_some() {
                 x = self.altup_merge(&streams)?;
             }
-            self.norm(&mut x, &self.final_norm);
+            // Qwen3.8-Flash-Next has no output norm: the gate that collapses the streams already normalised them
+            if cfg.qwen4.is_none() {
+                self.norm(&mut x, &self.final_norm);
+            }
             if let Some(capture) = &mut capture {
                 capture.clear();
                 capture.extend_from_slice(&x);

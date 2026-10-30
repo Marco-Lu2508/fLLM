@@ -38,7 +38,7 @@ def post(port, prompt):
         return json.load(response)["choices"][0]["text"]
 
 
-def verify(arch, fllm, work, port):
+def verify(arch, fllm, work, port, workers=4):
     import transformers as T
     from tokenizers import Tokenizer
 
@@ -84,6 +84,9 @@ def verify(arch, fllm, work, port):
                 time.sleep(0.5)
         with concurrent.futures.ThreadPoolExecutor(4) as pool:
             got = list(pool.map(lambda p: post(port, p), PROMPTS))
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            name = model_name(port)
+            got = list(pool.map(lambda p: post(port, p, name), PROMPTS))
     finally:
         server.terminate()
     # a random model may emit the end-of-sequence token that transformers was told to suppress
@@ -97,11 +100,12 @@ def main():
     parser.add_argument("archs", nargs="+")
     parser.add_argument("--fllm", required=True)
     parser.add_argument("--port", type=int, default=8741)
+    parser.add_argument("--workers", type=int, default=4, help="concurrent requests (1: one after the other)")
     args = parser.parse_args()
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         for arch in args.archs:
-            r = verify(arch, args.fllm, Path(tmp), args.port)
+            r = verify(arch, args.fllm, Path(tmp), args.port, args.workers)
             failed += not r["ok"]
             print(json.dumps(r, ensure_ascii=False))
     return 1 if failed else 0
