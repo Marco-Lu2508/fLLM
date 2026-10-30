@@ -29,7 +29,8 @@ struct Attn4Args {
     float *ws;
     const int64_t *tables, *lengths;
     const float *sinks;
-    int heads, kv_heads, stride, block_size, per_split, splits;
+    int heads, kv_heads, stride, block_size, splits;
+    int min_splits;  // splits every row gets when it has more than 128 keys (enough blocks to fill the GPU)
     float scale, softcap;
     int window, chunk;
     int kscale_base, vscale_base;  // q8_0 cache: first scale (16-bit words) of the layer's key / value pool
@@ -67,6 +68,20 @@ __device__ __forceinline__ void a4_unpack(const uint4 &v, float f[8]) {
     }
 }
 
+// The number of splits row `r` really uses. The grid has `a.splits` blocks per row and head (one launch shape for every context length, which a CUDA graph
+// needs: it is recorded for the longest context), the row uses as many of them as its own number of keys asks for: about 512 keys per block, at least
+// `min_splits` once it has more than 128 keys. The blocks of the other splits leave at once.
+__device__ __forceinline__ int a4_row_splits(const Attn4Args &a, int keys) {
+    if (a.splits <= 1 || keys <= 128) return 1;
+    const int want = max(a.min_splits, (keys + 511) / 512);
+    return max(1, min(min(want, a.splits), (keys + 63) / 64));
+}
+__device__ __forceinline__ int a4_row_start(const Attn4Args &a, int n) {
+    if (a.chunk != 0) return (n - 1) / a.chunk * a.chunk;
+    if (a.window != 0 && n > a.window) return n - a.window;
+    return 0;
+}
+
 template <int D, int G, bool Q8>
 __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
     constexpr int LPK = D / 8;              // lanes that read one key row (8 values each)
@@ -79,11 +94,12 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
     const int grp = lane / LPK, sub = lane % LPK;
     const int gid = warp * GPW + grp;
     const int n = (int)a.lengths[r];
-    int start = 0;
-    if (a.chunk != 0) start = (n - 1) / a.chunk * a.chunk;
-    else if (a.window != 0 && n > a.window) start = n - a.window;
-    const int begin = start + sp * a.per_split;
-    const int end = min(n, begin + a.per_split);
+    const int start = a4_row_start(a, n);
+    const int seff = a4_row_splits(a, n - start);
+    if (sp >= seff) return;
+    const int per_split = (n - start + seff - 1) / seff;
+    const int begin = start + sp * per_split;
+    const int end = min(n, begin + per_split);
 
     float qv[G][8], acc[G][8], m[G], l[G];
 #pragma unroll
@@ -199,7 +215,7 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
                 v += sm_acc[s][g][d] * f;
             }
             const int h = kh * G + g;
-            if (a.splits == 1) {
+            if (seff == 1) {
                 if (a.sinks) {
                     const float Mf = fmaxf(M, a.sinks[h]);
                     const float rescale = __expf(M - Mf);
@@ -222,11 +238,14 @@ __global__ void __launch_bounds__(A4_WARPS * 32) attn4_kernel(Attn4Args a) {
 template <int D>
 __global__ void __launch_bounds__(D) attn4_merge_kernel(Attn4Args a) {
     const int h = blockIdx.x, r = blockIdx.y;
+    const int n = (int)a.lengths[r];
+    const int splits = a4_row_splits(a, n - a4_row_start(a, n));
+    if (splits == 1) return;  // the single block of the row wrote the result itself
     const float *src = a.ws + ((size_t)r * a.heads + h) * a.splits * (D + 2);
     float M = a.sinks ? a.sinks[h] : A4_FLOOR;
-    for (int s = 0; s < a.splits; s++) M = fmaxf(M, src[(size_t)s * (D + 2) + D]);
+    for (int s = 0; s < splits; s++) M = fmaxf(M, src[(size_t)s * (D + 2) + D]);
     float L = a.sinks ? __expf(a.sinks[h] - M) : 0.f, v = 0.f;
-    for (int s = 0; s < a.splits; s++) {
+    for (int s = 0; s < splits; s++) {
         const float *p = src + (size_t)s * (D + 2);
         const float f = __expf(p[D] - M);
         L += p[D + 1] * f;
@@ -237,20 +256,24 @@ __global__ void __launch_bounds__(D) attn4_merge_kernel(Attn4Args a) {
 
 template <int D, int G, bool Q8>
 static int launch4(cudaStream_t st, Attn4Args a, int rows, int max_len, float *ws, size_t ws_bytes) {
-    // enough blocks to fill the GPU, and no more than ~512 keys per block
+    // enough blocks to fill the GPU, and no more than ~512 keys per block. The grid is sized for `max_len` (a CUDA graph is recorded for the longest
+    // context); each row takes the splits its own length needs (a4_row_splits), the others return at once. At most about 1024 blocks are launched.
     int splits = 1;
     const int blocks = rows * a.kv_heads;
+    a.min_splits = 1;
     if (max_len > 128) {
-        splits = (92 + blocks - 1) / blocks;
-        splits = splits < (max_len + 511) / 512 ? (max_len + 511) / 512 : splits;
+        a.min_splits = (92 + blocks - 1) / blocks;
+        splits = a.min_splits < (max_len + 511) / 512 ? (max_len + 511) / 512 : a.min_splits;
         const int cap = (max_len + 63) / 64;
         if (splits > cap) splits = cap;
         if (splits > 64) splits = 64;
+        const int grid_cap = 1024 / blocks > a.min_splits ? 1024 / blocks : a.min_splits;
+        if (splits > grid_cap) splits = grid_cap;
         while (splits > 1 && (size_t)rows * a.heads * splits * (D + 2) * 4 > ws_bytes) splits--;
         if (splits < 1) splits = 1;
+        if (a.min_splits > splits) a.min_splits = splits;
     }
     a.splits = splits;
-    a.per_split = (max_len + splits - 1) / splits;
     a.ws = ws;
     attn4_kernel<D, G, Q8><<<dim3(a.kv_heads, rows, splits), A4_WARPS * 32, 0, st>>>(a);
     if (splits > 1) attn4_merge_kernel<D><<<dim3(a.heads, rows), D, 0, st>>>(a);
