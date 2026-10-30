@@ -147,6 +147,7 @@ pub fn check_config(root: &Path) -> Result<ConfigCheck, CheckpointError> {
         Quantization::Bnb => "bitsandbytes",
         Quantization::GptqBits { .. } => "gptq",
         Quantization::Mlx => "mlx",
+        Quantization::Bitnet => "bitnet",
     }
     .to_owned();
     let architecture = if crate::jina_xlmr::supports(&cfg) {
@@ -1546,6 +1547,8 @@ pub(crate) enum Quantization {
     GptqBits { bits: u64, group: u64, v2: bool },
     /// MLX affine quantization (`quantization: {bits, group_size}` in config.json); expanded to F16.
     Mlx,
+    /// Hugging Face `bitnet` (BitNet b1.58): `uint8` weights with four ternary codes per byte and a `weight_scale`; expanded to F16.
+    Bitnet,
 }
 
 /// `hf_quant_config.json` of ModelOpt exports as a `quantization_config` object (`quant_method: modelopt`).
@@ -1691,6 +1694,30 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
         .and_then(Value::as_str)
         .ok_or("quantization_config requires quant_method")?
         .to_ascii_lowercase();
+    // Intel AutoRound exports with `packing_format` auto_round:auto_gptq / auto_round:auto_awq write the tensors of AutoGPTQ / AutoAWQ
+    // (`qweight`, `qzeros`, `scales`; GPTQ zeros stored minus one), so they are read as those formats
+    let rewritten;
+    let (q, method) = if matches!(method.as_str(), "auto-round" | "autoround" | "auto_round") {
+        let packing = q.get("packing_format").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+        let target = if packing.contains("gptq") {
+            "gptq"
+        } else if packing.contains("awq") {
+            "awq"
+        } else {
+            return Err(format!(
+                "AutoRound packing_format {packing:?} is not supported (auto_round:auto_gptq and auto_round:auto_awq are); export the model with one of those formats"
+            ));
+        };
+        let mut copy = q.clone();
+        copy["quant_method"] = target.into();
+        if target == "awq" {
+            copy["version"] = "gemm".into();
+        }
+        rewritten = copy;
+        (&rewritten, target.to_owned())
+    } else {
+        (q, method)
+    };
     match method.as_str() {
         "exl2" => Ok(Quantization::Exl2),
         "exl3" => Ok(Quantization::Exl3),
@@ -1731,9 +1758,10 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
             {
                 return Err("only explicitly declared AutoAWQ GEMM packing is supported".into());
             }
-            if q.get("zero_point").and_then(Value::as_bool) != Some(true) {
+            // `zero_point: false` (symmetric) exports still store the zero points (all 8), so they read like the others
+            if q.get("zero_point").and_then(Value::as_bool).is_none() {
                 return Err(
-                    "only AutoAWQ checkpoints with explicit zero points are supported".into(),
+                    "only AutoAWQ checkpoints with a declared zero_point are supported".into(),
                 );
             }
             let group = q
@@ -1752,6 +1780,7 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
             Ok(Quantization::Bnb)
         }
         "compressed-tensors" => compressed_tensors(q),
+        "bitnet" => Ok(Quantization::Bitnet),
         "modelopt" => {
             let algo = q
                 .get("quant_algo")
@@ -1773,7 +1802,7 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
             }
         }
         other => Err(format!(
-            "unsupported quantization_config quant_method {other:?} (supported: gptq, awq, fp8, fbgemm_fp8, mxfp4, bitsandbytes, compressed-tensors, modelopt NVFP4/FP8, \
+            "unsupported quantization_config quant_method {other:?} (supported: gptq, awq, auto-round, fp8, fbgemm_fp8, mxfp4, bitsandbytes, bitnet, compressed-tensors, modelopt NVFP4/FP8, \
              MLX affine, exl2, exl3); {}",
             unsupported_hint(other)
         )),
@@ -1786,7 +1815,7 @@ fn unsupported_hint(method: &str) -> &'static str {
         "hqq" => "HQQ: dequantize with the hqq library (model.dequantize()) and save as safetensors, or use the original weights",
         "torchao" => "torchao checkpoints are pickled torch tensor subclasses: load the model with torchao, dequantize, save as safetensors, or use the original weights",
         "quark" | "quark-fp8" => "AMD Quark: export the model to GPTQ/AWQ/compressed-tensors/ModelOpt format with Quark, or use the original weights",
-        "eetq" | "bitnet" | "aqlm" | "quip#" | "quipsharp" | "spqr" | "vptq" | "higgs" | "fp_quant" | "fine-grained-fp8" | "auto-round" | "autoround" | "gptqmodel" => {
+        "eetq" | "aqlm" | "quip#" | "quipsharp" | "spqr" | "vptq" | "higgs" | "fp_quant" | "fine-grained-fp8" | "auto-round" | "autoround" | "gptqmodel" => {
             "this method has no reader; use the original (unquantized) weights or a GPTQ/AWQ/compressed-tensors/bitsandbytes/MLX export of the model"
         }
         _ => "use the original weights or a repository in one of the supported formats",
@@ -2102,6 +2131,9 @@ pub(crate) fn split_packed_cfg(
     }
     if quant == Quantization::Bnb {
         return crate::dequant::split_bnb(all, map);
+    }
+    if quant == Quantization::Bitnet {
+        return crate::bitnet_packed::split_bitnet(all, map);
     }
     if quant == Quantization::CtMxfp4 {
         return crate::dequant::split_ct_mxfp4(all, map);
@@ -3207,6 +3239,21 @@ mod quantization_config_tests {
         let oss = json!({"quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": ["self_attn"]}});
         assert_eq!(quantization(&oss).unwrap(), Quantization::Mxfp4);
         assert_eq!(quantization(&json!({})).unwrap(), Quantization::Dense);
+    }
+
+    #[test]
+    fn autoround_exports_read_as_gptq_or_awq() {
+        let gptq = json!({"quantization_config": {"quant_method": "auto-round", "bits": 4, "group_size": 128, "sym": true, "packing_format": "auto_round:auto_gptq", "extra_config": {}}});
+        assert_eq!(quantization(&gptq).unwrap(), Quantization::Gptq { group: 128 });
+        let awq = json!({"quantization_config": {"quant_method": "auto-round", "bits": 4, "group_size": 64, "packing_format": "auto_round:auto_awq", "zero_point": true}});
+        assert_eq!(quantization(&awq).unwrap(), Quantization::Awq { group: 64 });
+        let native = json!({"quantization_config": {"quant_method": "auto-round", "bits": 4, "group_size": 128, "packing_format": "auto_round:exllamav2"}});
+        assert!(quantization(&native).unwrap_err().contains("packing_format"));
+        // symmetric AutoAWQ-style export (AutoRound "W4A16-AWQ"): zero_point false, qzeros all 8
+        let sym = json!({"quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 128, "version": "gemm", "zero_point": false}});
+        assert_eq!(quantization(&sym).unwrap(), Quantization::Awq { group: 128 });
+        let undeclared = json!({"quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 128, "version": "gemm"}});
+        assert!(quantization(&undeclared).is_err());
     }
 
     #[test]

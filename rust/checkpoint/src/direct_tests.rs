@@ -86,6 +86,10 @@ fn llama(dir: &Path, store: Store, shards: usize, seed: u64) {
 enum Packed {
     Gptq { bits: usize },
     Awq,
+    /// The tensors of `Gptq { bits: 4 }` under an Intel AutoRound `quantization_config`.
+    AutoRoundGptq,
+    /// The tensors of `Awq` under a symmetric (`zero_point: false`) configuration.
+    AwqSymmetric,
 }
 
 const GROUP: usize = 32;
@@ -100,6 +104,8 @@ fn llama_quantized(dir: &Path, store: Store, shards: usize, seed: u64, packed: O
     match packed {
         Some(Packed::Gptq { bits }) => cfg["quantization_config"] = json!({"quant_method": "gptq", "bits": bits, "group_size": GROUP, "desc_act": false, "sym": false}),
         Some(Packed::Awq) => cfg["quantization_config"] = json!({"quant_method": "awq", "bits": 4, "group_size": GROUP, "version": "gemm", "zero_point": true}),
+        Some(Packed::AwqSymmetric) => cfg["quantization_config"] = json!({"quant_method": "awq", "bits": 4, "group_size": GROUP, "version": "gemm", "zero_point": false}),
+        Some(Packed::AutoRoundGptq) => cfg["quantization_config"] = json!({"quant_method": "auto-round", "bits": 4, "group_size": GROUP, "sym": true, "packing_format": "auto_round:auto_gptq", "extra_config": {}}),
         None => {}
     }
     fs::write(dir.join("config.json"), cfg.to_string()).unwrap();
@@ -116,11 +122,12 @@ fn llama_quantized(dir: &Path, store: Store, shards: usize, seed: u64, packed: O
             let words = |rng: &mut Rng, count: usize| -> Vec<u8> { (0..count).flat_map(|_| ((rng.unit() * 2e9) as i32).to_le_bytes()).collect() };
             let scales: Vec<u8> = (0..inp / GROUP * out).flat_map(|_| f16::from_f32(0.01 + 0.01 * rng.unit().abs()).to_le_bytes()).collect();
             let (qweight, qzeros) = match layout {
-                Packed::Gptq { bits } => {
+                Packed::Gptq { .. } | Packed::AutoRoundGptq => {
+                    let bits = if let Packed::Gptq { bits } = layout { bits } else { 4 };
                     let per = 32 / bits;
                     ((vec![inp / per, out], words(&mut rng, inp / per * out)), (vec![inp / GROUP, out / per], words(&mut rng, inp / GROUP * out / per)))
                 }
-                Packed::Awq => ((vec![inp, out / 8], words(&mut rng, inp * out / 8)), (vec![inp / GROUP, out / 8], words(&mut rng, inp / GROUP * out / 8))),
+                Packed::Awq | Packed::AwqSymmetric => ((vec![inp, out / 8], words(&mut rng, inp * out / 8)), (vec![inp / GROUP, out / 8], words(&mut rng, inp / GROUP * out / 8))),
             };
             entries.push((format!("{prefix}.qweight"), "I32", qweight.0, qweight.1));
             entries.push((format!("{prefix}.qzeros"), "I32", qzeros.0, qzeros.1));
@@ -246,6 +253,24 @@ fn packed_gptq_and_awq_checkpoints_load_identically_to_the_converted_file() {
         let file = MappedGguf::open(convert_to(&dir, "ref.gguf", OutputDType::Preserve)).unwrap();
         assert_same(&direct, &file, label);
         let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn autoround_and_symmetric_awq_exports_load_like_their_plain_formats() {
+    for (plain, alias, label) in [(Packed::Gptq { bits: 4 }, Packed::AutoRoundGptq, "autoround"), (Packed::Awq, Packed::AwqSymmetric, "awqsym")] {
+        let (a, b) = (scratch(&format!("{label}-plain")), scratch(&format!("{label}-alias")));
+        llama_quantized(&a, Store::F16, 1, 9, Some(plain));
+        llama_quantized(&b, Store::F16, 1, 9, Some(alias));
+        let options = ConvertOptions::default();
+        let (x, y) = (load_checkpoint_as_gguf(&a, options).unwrap(), load_checkpoint_as_gguf(&b, options).unwrap());
+        // the metadata carries the directory name; the tensors must be identical
+        assert_eq!(x.index().tensors.len(), y.index().tensors.len(), "{label}: tensor count");
+        for t in &x.index().tensors {
+            assert!(x.tensor_bytes(&t.name).unwrap() == y.tensor_bytes(&t.name).unwrap(), "{label}: bytes of {}", t.name);
+        }
+        let _ = fs::remove_dir_all(a);
+        let _ = fs::remove_dir_all(b);
     }
 }
 

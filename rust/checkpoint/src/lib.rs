@@ -1,5 +1,6 @@
 //! Safe, mmap-backed Hugging Face safetensors to GGUF conversion.
 mod bert;
+mod bitnet_packed;
 mod classic;
 mod convert;
 mod dequant;
