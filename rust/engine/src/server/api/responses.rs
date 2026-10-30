@@ -228,6 +228,9 @@ pub(super) fn to_chat_body(body: &Value, history: Vec<Value>) -> Result<(Value, 
     Ok((chat, input_messages))
 }
 
+/// How long a Responses stream may stay silent before it repeats `response.in_progress`.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
+
 struct Output {
     items: Vec<Value>,
     /// the assistant turn in chat format, kept for `previous_response_id`
@@ -386,7 +389,17 @@ fn stream_events(
         let mut turn_calls: Vec<Value> = Vec::new();
         let mut finish = String::from("stop");
         let mut chat_usage = Value::Null;
-        while let Some(chunk) = chunks.next().await {
+        loop {
+            // A long prompt on slow hardware can take minutes before the first token. Codex counts only events, not SSE
+            // comments, as life signs (its stream idle timeout is 300 s), so a repeated `response.in_progress` keeps it waiting.
+            let chunk = match tokio::time::timeout(HEARTBEAT, chunks.next()).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    yield Ok(sse("response.in_progress", &mut sequence, json!({"response":skeleton})));
+                    continue;
+                }
+            };
             let value = match chunk {
                 Chunk::Data(value) => value,
                 Chunk::Error(message) => {

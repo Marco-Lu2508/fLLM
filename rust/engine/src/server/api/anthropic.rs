@@ -314,7 +314,16 @@ fn stream_events(chunks: ChunkStream, model: String, input_tokens: usize) -> Res
         let mut index = 0usize;
         let mut finish = String::from("stop");
         let mut final_usage = message_usage(&Value::Null);
-        while let Some(chunk) = chunks.next().await {
+        loop {
+            // `ping` events keep a client with an idle timeout waiting while a long prompt is read on slow hardware
+            let chunk = match tokio::time::timeout(std::time::Duration::from_secs(10), chunks.next()).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    yield Ok(event("ping", json!({})));
+                    continue;
+                }
+            };
             let value = match chunk {
                 Chunk::Data(value) => value,
                 Chunk::Error(message) => {

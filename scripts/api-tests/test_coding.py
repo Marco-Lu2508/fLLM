@@ -80,8 +80,8 @@ def test_claude_code_shaped_request(base_url, api_key, model):
     assert reply.json()["type"] == "message"
 
 
-def test_anthropic_errors_and_key_header(base_url, api_key):
-    reply = requests.post(base_url + "/v1/messages", json={"model": "x", "max_tokens": 1, "messages": []},
+def test_anthropic_errors_and_key_header(base_url, api_key, model):
+    reply = requests.post(base_url + "/v1/messages", json={"model": model, "max_tokens": 1, "messages": []},
                           headers={"x-api-key": api_key or "unused", "anthropic-version": "2023-06-01"}, timeout=60)
     assert reply.status_code == 400
     assert reply.json()["type"] == "error" and reply.json()["error"]["type"] == "invalid_request_error"
@@ -106,7 +106,7 @@ def test_forced_tool_call_roundtrip_openai(oa, model):
     assert choice.finish_reason == "tool_calls"
     call = choice.message.tool_calls[0]
     assert call.type == "function" and call.id and json.loads(call.function.arguments)["city"]
-    second = oa.chat.completions.create(model=model, tools=[WEATHER], max_tokens=40, temperature=0, messages=[
+    second = oa.chat.completions.create(model=model, tools=[WEATHER], tool_choice="none", max_tokens=40, temperature=0, messages=[
         {"role": "user", "content": "Weather in Paris?"}, choice.message.model_dump(exclude_none=True),
         {"role": "tool", "tool_call_id": call.id, "content": "sunny, 21 C"}])
     assert second.choices[0].message.content

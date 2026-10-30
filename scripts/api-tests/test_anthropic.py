@@ -38,7 +38,7 @@ def test_count_tokens(client, model):
 
 def test_unknown_model_is_not_found(client):
     with pytest.raises(anthropic.NotFoundError) as caught:
-        client.messages.create(model="claude-nope", max_tokens=4, messages=[{"role": "user", "content": "hi"}])
+        client.messages.create(model="gpt-nope", max_tokens=4, messages=[{"role": "user", "content": "hi"}])
     assert caught.value.body["error"]["type"] == "not_found_error"
 
 

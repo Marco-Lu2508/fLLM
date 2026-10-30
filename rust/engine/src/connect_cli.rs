@@ -178,6 +178,8 @@ pub fn plan(tool: &str, s: &Settings, t: &Targets) -> Result<Plan, String> {
                 ("CLAUDE_CODE_SUBAGENT_MODEL".into(), s.model.clone()),
                 ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), limit),
                 ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()),
+                // reading a long prompt on a CPU takes minutes; the default is 10 minutes per request
+                ("API_TIMEOUT_MS".into(), "3600000".into()),
             ];
             let path = if t.global { t.home.join(".claude").join("settings.json") } else { t.folder.join(".claude").join("settings.local.json") };
             let env = plan.env.clone();
@@ -208,6 +210,8 @@ name = \"fLLM\"
 base_url = {}
 wire_api = \"responses\"
 env_key = \"FLLM_API_KEY\"
+stream_idle_timeout_ms = 1800000
+request_max_retries = 1
 ",
                 toml_string(&s.model),
                 toml_string(&s.openai_url()),

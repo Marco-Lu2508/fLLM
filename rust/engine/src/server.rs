@@ -3133,7 +3133,8 @@ async fn openai_generate(
                 };
                 let mut msg = json!({"role":"assistant","content":content});
                 if !calls.is_empty() {
-                    if content.is_empty() {
+                    // whitespace between two calls (a blank line between fenced blocks) is not an answer
+                    if content.trim().is_empty() {
                         msg["content"] = Value::Null;
                     }
                     msg["tool_calls"] = json!(calls);
