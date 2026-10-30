@@ -145,7 +145,10 @@ impl Tester<'_> {
         let r = r.and_then(|mut o| {
             // The tensor-core kernels round the probabilities and the output to f16 (the budget of the reference is that of an FP32 kernel): one f16
             // unit roundoff of the output scale on top, 2.5 times what the runs on an L4 showed
-            if matches!(path, AttnPath::FlashInfer | AttnPath::Cascade) {
+            // The built-in prompt kernel (`attention3.cu`, 16 or more rows of a sequence, no window / soft cap) is a tensor-core kernel of the same kind:
+            // probabilities and output in f16 (a case of 64 rows at head width 128 measured 1.3e-4 of the scale on an RTX 2000 Ada, against the 9.1e-5 of the FP32 budget).
+            let tensor_core_prompt = path == AttnPath::Builtin && case.prefill >= 16 && case.window.is_none() && case.softcap.is_none();
+            if matches!(path, AttnPath::FlashInfer | AttnPath::Cascade) || tensor_core_prompt {
                 o.tol += 4.8828125e-4;
             }
             Ok(o)
