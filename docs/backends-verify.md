@@ -371,6 +371,7 @@ Result to cell (examples):
 | Vulkan | `FLLM_VULKAN_VERBOSE=1` | planner capabilities, per shader once the variant, specialisation constants, grid |
 | Vulkan | `FLLM_VULKAN_EXACT=1` | only `_s`/`lin_*` (FP32); `set_exact_math(true)` in the code |
 | Vulkan | `FLLM_VULKAN_NO_IDOT=1`, `FLLM_VULKAN_NO_COOP=1` | integer-dot or coopmat variants off |
+| Vulkan | `FLLM_VK_SUBMIT_EVERY=N` | dispatches per command-buffer submission during a decode step (default 32; 0 = one submission per step, the slowest on both the RTX 2000 Ada and the Radeon 840M; 16 to 128 are within the noise there, [benchmarks.md](benchmarks.md)) |
 | Vulkan | `FLLM_VK_SHADER_DIR=<dir>` | takes `<dir>/<name>.spv` instead of the built-in module of that name (compile with `glslc --target-env=vulkan1.2 -O -I shaders/vulkan <defines from variants_quant.list>`), to try a shader change without rebuilding |
 | Vulkan | `FLLM_ALLOW_SOFTWARE_GPU=1` | allow lavapipe/WARP (for logic tests only) |
 | Metal | `FLLM_METAL_SERIAL=1` | every dispatch serialised: rules out hazard/barrier errors |

@@ -68,7 +68,7 @@ so the 8B does not fit and every engine splits it between GPU and CPU.
 | llama.cpp, ROCm (`HSA_OVERRIDE_GFX_VERSION=11.5.1`) | 300 / 20.1 | not run |
 | llama.cpp, Vulkan | 287 / 28.6 | 124 / 13.2 |
 | Ollama, ROCm (same override) | 224 / 15.5 | not run |
-| **fLLM, Vulkan (native)** | 213 / 28.4 | 75 / 8.5 |
+| **fLLM, Vulkan (native)** | 213 / 28.4 (2026-10-30, second pass: 265 / 29.5) | 75 / 8.5 (second pass: 98 / 15.0) |
 | fLLM, HIP (ROCm) | 157 / 22.0 | 67 / 9.8 |
 | fLLM, CPU | 146 / 16.7 | 65 / 7.8 |
 | Ollama (CPU; it does not take `gfx1153`) | 122 / 19.0 | 51 / 8.7 |
@@ -113,6 +113,49 @@ The benchmarks and the tests that came with them found these, all fixed in the s
 * Vulkan decode: two matrix-vector rows per group on AMD instead of one (+12 % on the 840M).
 * HIP/ROCm: first run on an AMD GPU, built for `gfx1153` with the Ubuntu packages (no rocWMMA needed since 2026-10-30).
   Dense models give the CPU's text; MoE models and host-streamed layers fail with "invalid argument" on this APU.
+
+## AMD Radeon 840M laptop, second pass (2026-10-30): concurrent users, the 8B model, what did not help
+
+Same laptop, same client (`scripts/bench_compare.py`, medians of 2 runs, 128 generated tokens, prompts of 60 and 380 random words = about 110 and 550 tokens; the
+`agg` figures are all generated tokens of the simultaneous requests divided by the wall time **including the prompt phase**). The laptop was shared with other
+jobs during the runs and the GPU is power-limited (about 17 W for the whole package, clock 1.4 - 1.65 GHz while busy): single runs of the same binary differ by
+5 to 15 %, so read differences below that as noise. Before = the commit before this pass, after = this pass.
+
+| Llama-3.2-3B Q4_K_M, total tok/s | 4 requests, 60 words | 8 requests, 60 words | 4 requests, 380 words | 8 requests, 380 words |
+|---|---|---|---|---|
+| fLLM Vulkan before | 22.2 - 23.5 | 11.4 - 12.8 | 14.1 - 14.5 | 9.5 - 9.7 |
+| **fLLM Vulkan after** | 42.2 | 35.0 | 24.2 | 22.1 |
+| fLLM HIP before | 46.9 | 24.4 | 26.0 | 13.0 - 17.5 |
+| **fLLM HIP after** | 46.9 | 60.6 | 26.0 | 30.0 |
+| llama.cpp Vulkan (measured earlier the same day) | 37.1 | 59.0 | 30.0 | 34.4 |
+| llama.cpp ROCm | 27.9 | 38.1 | 17.9 | 16.5 |
+| Ollama (Vulkan) | 36.0 | 38.1 | 18.2 | 18.5 |
+
+A single request (3B, 380 words): Vulkan prompt 215 - 243 -> 265 tok/s, decode 29.4 -> 29.5; HIP 208 / 22.0 -> 208 / 22.0 (unchanged). Llama-3.1-8B Q4_K_M, Vulkan,
+547-token prompt: prompt 74.6 -> 98.0 tok/s, decode 8.5 -> 15.0 (llama.cpp Vulkan 124 / 13.2; the two fLLM figures were measured twice with 3 runs each and agreed to 0.1).
+
+What the numbers say, and how it was found:
+
+* **Eight users were slow because 9 to 31 activation rows left the fast kernels.** A decode step of eight sequences plus speculative drafts has 9 or more rows. On
+  Vulkan those went to the old `mm_<fmt>_i` kernels (4 to 5 ms per projection of the 3B model; `FLLM_VK_PROFILE=1` showed them as 67 % of the GPU time of a step with 8
+  sequences), on HIP to the FP32 GEMV (1 ms per Q4_K and 3.9 ms per Q6_K projection at 8 rows; `FLLM_CUDA_PROFILE=1`, new). Vulkan now uses the tiled kernel from 9 rows on; HIP the
+  int8-dot kernel up to 16 rows (0.37 ms and 0.67 ms at 8 rows). Speculative drafting was not the cause (8 requests with `--speculative off`: the same).
+* **What is left on Vulkan** (8 requests, 380 words: 22 against llama.cpp's 34): a decode step with 8 rows costs about 150 ms of GPU time, of which the matrix-vector kernel
+  is 95 ms (0.45 TMAC/s of int8 dot products; the 4096 x 4096 Q4_K prompt timing is 0.8 - 0.9 TMAC/s on zero data, lower on real data because of the power limit).
+* **The 8B model now stays on the GPU.** The memory plan only counted the device-local Vulkan heap (5.1 GB of the 7.6 GB the GPU can address on this 14 GB laptop) and moved 21 of 32
+  layers' feed-forward weights to the CPU. It now counts the host-visible heap too (see the changelog). With the system's other processes using 6 GB or more
+  of the RAM the same binary was 40 % slower in some runs and the planner fell back to the CPU for some layers, so keep the machine quiet when measuring an 8B model.
+* **`FLLM_VK_SUBMIT_EVERY`** (dispatches per submission, default 32), 3B decode, 3 runs each, tok/s: 0 (one submission per token) 45.0 / 42.0 / 43.6; 16: 50.1 / 50.1 / 53.2;
+  32: 48.4 / 51.1 / 46.9; 64: 48.8 / 42.2 / 53.3; 128: 46.1 / 48.6 / 43.7. One submission per step is clearly the worst (as on the NVIDIA card), 16 to 64 are the
+  same within the noise; the default stays 32. (These short 32-token runs read higher than the 28 tok/s of the long runs above: the GPU clocks up for a burst.)
+* **Tried without gain (kept out of the code):** a 16-byte-per-read shared-memory layout of the tiled prompt kernel (11.3 - 11.7 against 10.3 - 10.7 ms, slightly slower: the kernel is not
+  limited by the number of shared-memory instructions); wave32 for all kernels (`RADV_PERFTEST=cswave32`: prompt 175 - 200 against 200 - 225 tok/s); wave32 for the
+  cooperative-matrix kernel (17 against 14 ms); work-group size 32 / 64 / 128 / 256 and 1 / 2 / 4 rows per group for the matrix-vector kernel at 8 requests (all inside the noise);
+  on HIP, decoding every quantized weight once into a FP16 matrix before the matrix-core GEMM (11.9 ms per Q4_K projection of a 500-token prompt without it, 16.1 ms with it: the GEMM is
+  limited by its own structure, not by the weight decoding); Vulkan cooperative matrices with the weights dequantized to FP16 in shared memory: 14 ms against 10 ms for the integer dot
+  product; removing the decoding and the activation conversion from that shader still left 8.4 ms, so the f16 cooperative-matrix route cannot beat the integer-dot route here
+  (both have the same peak rate on RDNA 3.5; only an int8 matrix-core kernel would, and the per-block scales of the K-quants make that a larger rewrite).
+* **Not done:** the prompt gap to llama.cpp (265 against 293 tok/s on the 3B, 98 against 124 on the 8B) and the HIP prompt (208 against llama.cpp ROCm's 298).
 
 ## Limits
 
