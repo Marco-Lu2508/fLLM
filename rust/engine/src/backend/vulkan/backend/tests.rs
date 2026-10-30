@@ -636,7 +636,7 @@ fn no_shader_is_orphaned() {
     let registry: BTreeSet<String> = shaders::SHADERS.iter().map(|(n, _)| (*n).to_owned()).collect();
     let orphans: Vec<&String> = registry.iter().filter(|n| !seen.contains(*n)).collect();
     // the buffer-address variants need bufferDeviceAddress, which the core does not enable; scaffold_fill is the scaffold's test shader
-    let allowed = |n: &str| n.ends_with("_bda") || n == "scaffold_fill";
+    let allowed = |n: &str| n.ends_with("_bda") || n == "scaffold_fill" || n.starts_with("bench_mma_");
     let unexpected: Vec<&&String> = orphans.iter().filter(|n| !allowed(n)).collect();
     assert!(unexpected.is_empty(), "shaders that no plan ever uses: {unexpected:?}");
     let missing: Vec<&String> = seen.iter().filter(|n| !registry.contains(*n)).collect();

@@ -1310,7 +1310,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // (FLLM_NO_HOST_MEMORY_CLAMP=1 trusts the device's own figure: on a machine whose BIOS or driver reserves a large block of the RAM for the GPU,
                 // that block is not part of the memory the system still has free, and clamping to the system's figure would hide it)
                 let host_clamp = unified && !std::env::var("FLLM_NO_HOST_MEMORY_CLAMP").is_ok_and(|v| !v.is_empty() && v != "0");
-                let device_free = if host_clamp { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
+                let device_free_raw = if host_clamp { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
+                // the figure moves by tens of megabytes between two starts of the same machine (page cache, a browser tab, the compositor); a plan that
+                // flips between "every layer on the device" and "some feed-forward weights on the host" on such noise decodes up to three times slower
+                // in one of the runs. The memory the plan may use is therefore taken in steps of 256 MiB (rounded down).
+                let device_free = plan_memory_step(device_free_raw);
+                tracing::info!(
+                    "memory for the plan: {} MiB free on {} (device reports {} MiB{}), taken as {} MiB",
+                    device_free_raw >> 20,
+                    d.name,
+                    d.free_memory_bytes >> 20,
+                    if host_clamp { ", clamped to the free system memory" } else { "" },
+                    device_free >> 20
+                );
                 let plan_for = |m: &GgufModel, tokens: usize| {
                     fllm_engine::backend::memory::MemoryPlan::plan_for_backend(
                         m,
@@ -1673,5 +1685,15 @@ fn npu_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 _ => Err(p.error.unwrap_or_else(|| "the setup failed".to_owned()).into()),
             };
         }
+    }
+}
+
+/// Memory the planner may use, in steps of 256 MiB (rounded down): small differences between two starts do not change the plan.
+fn plan_memory_step(bytes: u64) -> u64 {
+    const STEP: u64 = 256 << 20;
+    if bytes < 2 * STEP {
+        bytes
+    } else {
+        bytes / STEP * STEP
     }
 }

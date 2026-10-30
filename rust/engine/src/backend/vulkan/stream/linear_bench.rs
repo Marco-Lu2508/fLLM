@@ -41,7 +41,74 @@ impl VulkanStream {
         }
     }
 
+    /// Raw rates of the matrix units (`bench_mma.comp`): float16 and int8 cooperative-matrix products, the int8 products with the per-group
+    /// conversion / scaling of a K-quant tile, and the int8 dot product, all on registers.
+    fn bench_mma(&mut self) -> Result<(), BackendError> {
+        let caps = self.sh.caps();
+        let sg = caps.subgroup_size.max(32);
+        let (coop_f16, coop_i8) = {
+            use crate::backend::vulkan::instance::ComponentType as T;
+            (
+                !caps.coop_matrix_for(T::F16, T::F16, T::F32, T::F32).is_empty(),
+                !caps.coop_matrix_for(T::I8, T::I8, T::I32, T::I32).is_empty(),
+            )
+        };
+        let out = self.sh.new_zeroed_buffer(4096 * 4)?;
+        let (groups, iterations) = (4096u32, 512u32);
+        let mut line = String::from("[fllm-vulkan-bench] raw matrix-unit rates (TMAC/s):");
+        for (name, macs_per_iter_group, usable) in [
+            ("bench_mma_f16", 4.0 * 4096.0 * 4.0, coop_f16),
+            ("bench_mma_i8", 4.0 * 4096.0 * 4.0, coop_i8),
+            ("bench_mma_i8s", 4.0 * 4096.0 * 4.0, coop_i8),
+            ("bench_mma_f16b", 16.0 * 4096.0 * 4.0, coop_f16),
+            ("bench_mma_i8b", 16.0 * 4096.0 * 4.0, coop_i8),
+            ("bench_mma_i8sb", 16.0 * 4096.0 * 4.0, coop_i8),
+            ("bench_mma_dp4a", 4.0 * 4.0 * 4.0 * f64::from(sg), true),
+        ] {
+            if !usable {
+                line.push_str(&format!(" {name}: unsupported;"));
+                continue;
+            }
+            let pipeline = match self.sh.pipeline(name, &[(0, 4 * sg)], 1, 4) {
+                Ok(p) => p,
+                Err(e) => {
+                    line.push_str(&format!(" {name}: {e};"));
+                    continue;
+                }
+            };
+            let mut best = f64::MAX;
+            for run in 0..4 {
+                let start = std::time::Instant::now();
+                for _ in 0..3 {
+                    self.rec.bind_pipeline(&pipeline)?;
+                    self.rec.set_buffers(&[&out])?;
+                    self.rec.push_constants(&iterations.to_le_bytes())?;
+                    self.rec.dispatch(groups, 1, 1)?;
+                }
+                self.wait_idle()?;
+                if run > 0 {
+                    best = best.min(start.elapsed().as_secs_f64() / 3.0);
+                }
+            }
+            let macs = macs_per_iter_group * f64::from(iterations) * f64::from(groups);
+            line.push_str(&format!(" {name}: {:.2};", macs / best / 1e12));
+        }
+        log_once("vulkan-bench-mma", &line);
+        Ok(())
+    }
+
     fn bench_linear_inner(&mut self) -> Result<(), BackendError> {
+        if let Err(e) = self.bench_mma() {
+            log_once("vulkan-bench-mma-error", &format!("[fllm-vulkan-bench] matrix-unit rates stopped: {e}"));
+        }
+        let shapes: Vec<String> = self
+            .sh
+            .caps()
+            .coop_matrix
+            .iter()
+            .map(|c| format!("{}x{}x{} {:?}*{:?}+{:?}->{:?} {:?}", c.m, c.n, c.k, c.a, c.b, c.c, c.result, c.scope))
+            .collect();
+        log_once("vulkan-bench-coop-shapes", &format!("[fllm-vulkan-bench] cooperative-matrix shapes: {}", shapes.join("; ")));
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         let noise: Vec<u8> = (0..1 << 20)
             .map(|_| {

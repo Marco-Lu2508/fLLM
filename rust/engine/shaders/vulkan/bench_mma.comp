@@ -1,0 +1,126 @@
+#version 450
+// FLLM-SHADER: bench_mma_* | bindings: 0 out(f32[]) | push: iterations | grid: any number of workgroups
+// Development benchmark (FLLM_VK_BENCH_LINEAR=1), not used by any projection: the raw rate of the matrix units against the integer dot product, on registers only.
+//   MODE 0: 16x16x16 binary16 cooperative-matrix products with float32 accumulators (a 32 x 32 subgroup tile: four products per 16-deep step, fragments loaded from shared memory)
+//   MODE 1: the same with int8 fragments and int32 accumulators
+//   MODE 2: MODE 1, and after every two products (one 32-value quantization group) the int32 accumulator is converted to float32, multiplied by a row scale
+//           matrix and a column scale matrix and added to a float32 accumulator: the work a K-quant tile would do per group
+//   MODE 3: 4 x int8 dot products (one OpSDot per step and invocation), four independent accumulators
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#include "_q_ext.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform P { uint iterations; } p;
+layout(std430, set = 0, binding = 0) buffer OutBuf { float outv[]; };
+
+#ifndef MODE
+#define MODE 0
+#endif
+#ifndef FM
+#define FM 2   // 16-row fragments of the subgroup tile
+#endif
+#ifndef FN
+#define FN 2
+#endif
+
+int idot4acc(uint a, uint b, int acc) {
+#if FLLM_HW_DOT == 1
+    return dotPacked4x8AccSatEXT(int(a), int(b), acc);
+#elif FLLM_HW_DOT == 2
+    return fllm_sdot_acc(int(a), int(b), acc, 0);
+#else
+    ivec4 x = (ivec4(int(a)) << ivec4(24, 16, 8, 0)) >> 24;
+    ivec4 y = (ivec4(int(b)) << ivec4(24, 16, 8, 0)) >> 24;
+    return acc + x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
+#endif
+}
+
+shared float stage[1280];
+#if MODE == 0
+shared f16vec4 tiles[4 * 256 / 4];   // per subgroup: 16 x 16 halves of A and B fragments, re-read with a changing offset
+#elif MODE == 1 || MODE == 2
+shared i8vec4 tiles[4 * 256 / 4];
+#endif
+
+void main() {
+    const uint sg = gl_SubgroupID;
+#if MODE < 3
+    for (uint i = gl_LocalInvocationID.x; i < 1024u; i += gl_WorkGroupSize.x) stage[i] = 1.0 + float(i & 15u) * 0.001;
+    for (uint i = gl_LocalInvocationID.x; i < 256u; i += gl_WorkGroupSize.x) {
+#if MODE == 0
+        tiles[i] = f16vec4(0.01, 0.02, 0.03, 0.04);
+#else
+        tiles[i] = i8vec4(1, -2, 3, -4);
+#endif
+    }
+    barrier();
+    // a 32 x 32 subgroup tile: two A and two B fragments per 16-deep step, four products. The fragments come from shared memory with an offset that
+    // changes every step, so that nothing can be hoisted out of the loop.
+#if MODE == 0
+#define EA float16_t
+#define AC float
+#define ZERO 0.0
+#else
+#define EA int8_t
+#define AC int32_t
+#define ZERO 0
+#endif
+    coopmat<EA, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> fa[FM];
+    coopmat<EA, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> fb[FN];
+    coopmat<AC, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> cc[FM * FN];
+    [[unroll]] for (uint j = 0; j < FM * FN; ++j) cc[j] = coopmat<AC, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(ZERO);
+#if MODE == 2
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> ff[FM * FN];
+    [[unroll]] for (uint j = 0; j < FM * FN; ++j) ff[j] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> sw[FM], sx[FN];
+#endif
+    for (uint i = 0; i < p.iterations; ++i) {
+        const uint o = ((i * 7u) & 15u) * 4u;   // element offset in vec4 units: 0 .. 60 of 64
+        [[unroll]] for (uint m = 0; m < FM; ++m) coopMatLoad(fa[m], tiles, o + (m & 3u), 4u, gl_CooperativeMatrixLayoutRowMajor);
+        [[unroll]] for (uint n = 0; n < FN; ++n) coopMatLoad(fb[n], tiles, o + 2u + (n & 1u), 4u, gl_CooperativeMatrixLayoutColumnMajor);
+        [[unroll]] for (uint m = 0; m < FM; ++m) {
+            [[unroll]] for (uint n = 0; n < FN; ++n) cc[m * FN + n] = coopMatMulAdd(fa[m], fb[n], cc[m * FN + n]);
+        }
+#if MODE == 2
+        if ((i & 1u) == 1u) {
+            // end of a 32-value group: scales of the weight row blocks and the token blocks, converted accumulators scaled and summed, restart
+            [[unroll]] for (uint m = 0; m < FM; ++m) coopMatLoad(sw[m], stage, (m & 3u) * 256u + (i & 3u) * 16u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint n = 0; n < FN; ++n) coopMatLoad(sx[n], stage, (n & 3u) * 256u + (i & 3u) * 16u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint m = 0; m < FM; ++m) {
+                [[unroll]] for (uint n = 0; n < FN; ++n) {
+                    ff[m * FN + n] += coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(cc[m * FN + n]) * sw[m] * sx[n];
+                    cc[m * FN + n] = coopmat<AC, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(ZERO);
+                }
+            }
+        }
+#endif
+    }
+#if MODE == 2
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c = ff[0];
+    [[unroll]] for (uint j = 1; j < FM * FN; ++j) c += ff[j];
+#else
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(cc[0]);
+    [[unroll]] for (uint j = 1; j < FM * FN; ++j) c += coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(cc[j]);
+#endif
+    coopMatStore(c, stage, sg * 256u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+#else
+    int s0 = int(gl_LocalInvocationID.x), s1 = s0 + 1, s2 = s0 + 2, s3 = s0 + 3;
+    const int x = int(0x05050505u) + int(gl_LocalInvocationID.x & 3u);
+    const int y = int(0x03030303u);
+    for (uint i = 0; i < p.iterations; ++i) {
+        s0 = idot4acc(uint(x), uint(y), s0);
+        s1 = idot4acc(uint(x), uint(y), s1);
+        s2 = idot4acc(uint(x), uint(y), s2);
+        s3 = idot4acc(uint(x), uint(y), s3);
+    }
+    stage[gl_LocalInvocationID.x & 1023u] = float(s0 + s1 + s2 + s3);
+#endif
+    barrier();
+    if (gl_LocalInvocationID.x == 0u) outv[gl_WorkGroupID.x & 1023u] = stage[0] + stage[17];
+}

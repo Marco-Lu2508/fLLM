@@ -212,3 +212,12 @@ mm_exl2_s mm_scalar.comp -DFMT_EXL2=1
 mm_exl2_i mm_idot.comp -DFMT_EXL2=1
 mm_exl2_c mm_coopmat.comp -DFMT_EXL2=1 #optional
 mmq_exl2_i mm_q.comp -DFMT_EXL2=1
+
+# Development benchmark of the matrix units (FLLM_VK_BENCH_LINEAR=1): raw rates of float16 and int8 cooperative-matrix products, with the per-group conversion and scaling, and of the int8 dot product.
+bench_mma_f16 bench_mma.comp -DMODE=0
+bench_mma_i8 bench_mma.comp -DMODE=1
+bench_mma_i8s bench_mma.comp -DMODE=2
+bench_mma_dp4a bench_mma.comp -DMODE=3
+bench_mma_f16b bench_mma.comp -DMODE=0 -DFM=4 -DFN=4
+bench_mma_i8b bench_mma.comp -DMODE=1 -DFM=4 -DFN=4
+bench_mma_i8sb bench_mma.comp -DMODE=2 -DFM=4 -DFN=4

@@ -1255,6 +1255,8 @@ fn plans_match_the_shader_headers() {
                 && !stem.starts_with("mm_")
                 && !stem.starts_with("quant_")
                 && !stem.starts_with("lin_")
+                // the matrix-unit benchmark of `FLLM_VK_BENCH_LINEAR=1` is not a projection
+                && !stem.starts_with("bench_")
             {
                 all.push(stem.to_string());
             }
