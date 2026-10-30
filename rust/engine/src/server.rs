@@ -615,6 +615,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/hooks", get(api::hooks::list).post(api::hooks::save_handler))
         .route("/api/studio/hooks/test", post(api::hooks::test))
         .route("/api/studio/agents", get(api::agents::list).post(api::agents::write).delete(api::agents::remove_route))
+        .route("/api/studio/connect", get(api::connect::connect))
         .route("/api/studio/prices", get(api::prices::list).post(api::prices::save_handler))
         .route("/api/studio/agent/sandbox", get(api::agent_sandbox::status))
         .route("/api/studio/agent/worktree", post(api::agent_worktree::route))

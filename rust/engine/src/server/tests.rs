@@ -813,6 +813,19 @@ async fn coding_agents_get_their_claude_model_names_and_output_ceilings_served()
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
 }
 
+#[tokio::test]
+async fn studio_connect_describes_a_coding_tool_for_this_server() {
+    let h = shared();
+    let reply = h.call(Method::GET, "/api/studio/connect?tool=claude-code", None, &[("host", "127.0.0.1:8123")]).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let plan = reply.json();
+    assert!(plan["env"]["sh"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("ANTHROPIC_BASE_URL='http://")), "{plan}");
+    assert!(plan["env"]["powershell"][0].as_str().unwrap().starts_with("$env:"));
+    assert!(plan["files"][0]["content"].as_str().unwrap().contains("\"ANTHROPIC_MODEL\": \"tiny\""));
+    assert!(plan["tools"].as_array().unwrap().len() >= 8);
+    assert_eq!(h.get("/api/studio/connect?tool=nope").await.status, StatusCode::BAD_REQUEST);
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Ollama
 

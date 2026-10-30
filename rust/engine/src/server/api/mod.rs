@@ -18,6 +18,7 @@ pub(super) mod mcp_registry;
 pub(super) mod ollama_extra;
 pub(super) mod providers;
 pub(super) mod plugins;
+pub(super) mod connect;
 pub(super) mod prices;
 pub(super) mod studio_embed;
 pub(super) mod studio_mode;

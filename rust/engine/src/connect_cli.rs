@@ -25,7 +25,7 @@ tool where it has one (claude-code, codex, opencode, continue). --shell: the syn
 /// The tools that have a setup page, with the one-line description of `--list`.
 pub const TOOLS: [(&str, &str); 8] = [
     ("claude-code", "Claude Code (Anthropic Messages API): environment variables or .claude/settings.local.json"),
-    ("codex", "Codex CLI (OpenAI Responses API): a provider and a profile in config.toml"),
+    ("codex", "Codex CLI (OpenAI Responses API): a profile file with the provider"),
     ("opencode", "OpenCode (OpenAI-compatible): opencode.json"),
     ("aider", "Aider (OpenAI-compatible): .aider.conf.yml and a model metadata file"),
     ("continue", "Continue (VS Code, JetBrains): config.yaml with a chat and an autocomplete model"),
@@ -142,30 +142,7 @@ fn object_entry<'a>(object: &'a mut Map<String, Value>, key: &str) -> &'a mut Ma
     slot.as_object_mut().expect("just made an object")
 }
 
-const BLOCK_BEGIN: &str = "# >>> fllm connect (written by `fllm-rs connect codex`) >>>";
-const BLOCK_END: &str = "# <<< fllm connect <<<";
-
-/// `current` with the block between the fLLM markers replaced by `block` (appended when there is none).
-fn replace_block(current: &str, block: &str) -> String {
-    let mut kept = current.to_owned();
-    if let (Some(begin), Some(end)) = (current.find(BLOCK_BEGIN), current.find(BLOCK_END)) {
-        if begin < end {
-            let mut after = end + BLOCK_END.len();
-            if current[after..].starts_with("\r\n") {
-                after += 2;
-            } else if current[after..].starts_with('\n') {
-                after += 1;
-            }
-            kept = format!("{}{}", &current[..begin], &current[after..]);
-        }
-    }
-    let kept = kept.trim_end().to_owned();
-    if kept.is_empty() {
-        format!("{BLOCK_BEGIN}\n{block}{BLOCK_END}\n")
-    } else {
-        format!("{kept}\n\n{BLOCK_BEGIN}\n{block}{BLOCK_END}\n")
-    }
-}
+const CODEX_MARK: &str = "# written by `fllm-rs connect codex`";
 
 /// `key: value` lines of a flat YAML file: an existing line of the key is replaced, a missing one is appended.
 fn set_yaml_keys(current: &str, pairs: &[(&str, String)]) -> String {
@@ -214,37 +191,41 @@ pub fn plan(tool: &str, s: &Settings, t: &Targets) -> Result<Plan, String> {
                 }),
             });
             plan.start.push("claude".into());
-            plan.notes.push("Claude Code sends the tool list and instructions of a full coding session (roughly 15,000 to 25,000 tokens), so start the server with --ctx 32768 or more.".into());
+            plan.notes.push("Claude Code sends the tool list and instructions of a full coding session (about 12,000 tokens, more with MCP servers or long CLAUDE.md files), so start the server with --ctx 32768 or more.".into());
             plan.notes.push("Requests for any claude-* model name that the server does not serve are answered by the loaded model.".into());
             plan.notes.push("A key in the file is stored in clear text; the environment lines keep it out of the file.".into());
         }
         "codex" => {
             plan.env = vec![("FLLM_API_KEY".into(), s.key.clone())];
             let window = s.context.map(|c| format!("model_context_window = {c}\nmodel_auto_compact_token_limit = {}\n", c * 8 / 10)).unwrap_or_default();
-            let block = format!(
-                "[model_providers.fllm]\nname = \"fLLM\"\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"FLLM_API_KEY\"\n\n[profiles.fllm]\nmodel = {}\nmodel_provider = \"fllm\"\n{window}",
-                toml_string(&s.openai_url()),
+            let body = format!(
+                "{CODEX_MARK}
+model = {}
+model_provider = \"fllm\"
+{window}
+[model_providers.fllm]
+name = \"fLLM\"
+base_url = {}
+wire_api = \"responses\"
+env_key = \"FLLM_API_KEY\"
+",
                 toml_string(&s.model),
+                toml_string(&s.openai_url()),
             );
             let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| t.home.join(".codex"));
+            // Codex 0.16x reads a named profile from its own file `NAME.config.toml`, so the file is ours alone
             plan.files.push(FileEdit {
-                path: home.join("config.toml"),
+                path: home.join("fllm.config.toml"),
                 apply: Box::new(move |current| {
-                    let outside = match (current.find(BLOCK_BEGIN), current.find(BLOCK_END)) {
-                        (Some(a), Some(b)) if a < b => format!("{}{}", &current[..a], &current[b..]),
-                        _ => current.to_owned(),
-                    };
-                    for table in ["[model_providers.fllm]", "[profiles.fllm]"] {
-                        if outside.contains(table) {
-                            return Err(format!("it already defines {table} outside the block of this command; remove it or edit it by hand"));
-                        }
+                    if !current.trim().is_empty() && !current.contains(CODEX_MARK) {
+                        return Err("it exists and was not written by this command; remove it or edit it by hand".into());
                     }
-                    Ok(replace_block(current, &block))
+                    Ok(body.clone())
                 }),
             });
             plan.start.push("codex --profile fllm".into());
             plan.start.push("codex exec --profile fllm \"explain this repository\"".into());
-            plan.notes.push("The profile leaves your default provider alone. Codex warns that it has no metadata for the model name; that is harmless.".into());
+            plan.notes.push("The profile file leaves your default provider alone. Codex warns that it has no metadata for the model name; that is harmless.".into());
             plan.notes.push("Codex sends about 6,000 tokens of instructions and tool descriptions with every request; the first turn is the slowest, later turns reuse the cached prefix.".into());
         }
         "opencode" => {
@@ -365,6 +346,29 @@ pub fn plan(tool: &str, s: &Settings, t: &Targets) -> Result<Plan, String> {
         other => return Err(format!("unknown tool {other:?}; `fllm-rs connect --list` names them")),
     }
     Ok(plan)
+}
+
+/// The plan of one tool as JSON for the Studio: environment lines in every shell syntax, the content each file would get
+/// when it does not exist yet, the notes and the start commands. Same source as the command, so both always agree.
+pub fn describe(tool: &str, s: &Settings, t: &Targets) -> Result<Value, String> {
+    let p = plan(tool, s, t)?;
+    let lines = |shell: Shell| p.env.iter().map(|(n, v)| shell.set(n, v)).collect::<Vec<_>>();
+    let files: Vec<Value> = p
+        .files
+        .iter()
+        .map(|f| match (f.apply)("") {
+            Ok(text) => json!({"path": show_path(&f.path), "content": text}),
+            Err(why) => json!({"path": show_path(&f.path), "problem": why}),
+        })
+        .collect();
+    Ok(json!({
+        "tool": tool,
+        "env": {"powershell": lines(Shell::Powershell), "sh": lines(Shell::Sh), "cmd": lines(Shell::Cmd)},
+        "files": files,
+        "notes": p.notes,
+        "start": p.start,
+        "snippet": p.snippet.map(|(title, text)| json!({"title": title, "text": text})),
+    }))
 }
 
 /// A unified diff of two texts, line by line (the files involved are small, so a plain longest-common-subsequence is enough).
@@ -674,18 +678,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_block_is_replaced_not_duplicated_and_foreign_tables_are_respected() {
+    fn codex_gets_its_own_profile_file_and_never_takes_over_a_foreign_one() {
         let p = plan("codex", &settings(), &targets()).unwrap();
-        let once = edit(&p, 0, "model = \"x\"\n\n[tui]\nnotifications = true\n").unwrap();
-        assert!(once.starts_with("model = \"x\""));
-        assert!(once.contains("[model_providers.fllm]") && once.contains("wire_api = \"responses\""));
+        assert!(p.files[0].path.ends_with("fllm.config.toml"));
+        let once = edit(&p, 0, "").unwrap();
+        assert!(once.contains("model_provider = \"fllm\"") && once.contains("wire_api = \"responses\""));
         assert!(once.contains("base_url = \"http://127.0.0.1:8000/v1\""));
         assert!(once.contains("model_context_window = 32768"));
-        let twice = edit(&p, 0, &once).unwrap();
-        assert_eq!(once, twice, "running it again changes nothing");
-        assert_eq!(twice.matches("[profiles.fllm]").count(), 1);
-        let err = edit(&p, 0, "[profiles.fllm]\nmodel = \"mine\"\n").unwrap_err();
-        assert!(err.contains("already defines"));
+        assert_eq!(once, edit(&p, 0, &once).unwrap(), "running it again changes nothing");
+        assert!(edit(&p, 0, "model = \"mine\"
+").unwrap_err().contains("not written by this command"));
     }
 
     #[test]
