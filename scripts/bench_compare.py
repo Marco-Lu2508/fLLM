@@ -12,12 +12,16 @@ A CONFIG is  label=engine:binary[:device]  with engine one of
     flm        binary = flm                device = FastFlowLM model tag, e.g. llama3.2@3b ("@" stands for ":")   (AMD NPU; its own model files)
 Environment variables for one config can be given as  label=engine:binary:device:KEY=VAL,KEY=VAL.
 
+With `--prompt-words 60,380,1500` and `--concurrency 1,4,8` the same server is measured for every prompt length and for every number of requests
+sent at the same moment (batching): the row then holds one entry per combination, `agg_tps` being all generated tokens divided by the time until the
+last request finished (the throughput a service would see), `tg` the decode speed one request got, `ttft` the median time to the first token.
+
 Every engine is started once per config, warmed up, then asked `--runs` times for a continuation of a different ~`--prompt-words` word text with
 `--gen` new tokens (temperature 0, streaming). Prompt speed = prompt tokens / time to the first token (this includes the first generated token),
 decode speed = (generated tokens - 1) / (last token - first token). The median of the runs is reported. Every request is a new text, so no prompt
 cache helps; the three engines see exactly the same texts.
 """
-import argparse, json, os, signal, statistics, subprocess, sys, time, urllib.request
+import argparse, json, os, signal, statistics, subprocess, sys, threading, time, urllib.request
 
 PORT = 18123
 WORDS = ("river stone window garden copper winter harvest lantern meadow compass velvet thunder orchard marble whisper anchor canyon ember "
@@ -91,7 +95,7 @@ def wait_ready(base, path, proc, seconds=600):
     return False
 
 
-def start(engine, binary, device, model, env_extra, log):
+def start(engine, binary, device, model, env_extra, log, slots=1, ctx=4096):
     env = dict(os.environ)
     env.update(env_extra)
     base = f"http://127.0.0.1:{PORT}"
@@ -99,25 +103,25 @@ def start(engine, binary, device, model, env_extra, log):
         cmd = [binary, "serve", "--model", model, "--model-name", "m", "--device", device, "--port", str(PORT)]
         ready, name = "/ready", "m"
     elif engine == "llamacpp":
-        cmd = [binary, "-m", model, "--port", str(PORT), "--host", "127.0.0.1", "-c", "4096", "-ngl", "99" if device != "cpu" else "0",
-               "--no-webui", "--parallel", "1"]
+        cmd = [binary, "-m", model, "--port", str(PORT), "--host", "127.0.0.1", "-c", str(ctx * slots), "-ngl", "99" if device != "cpu" else "0",
+               "--no-webui", "--parallel", str(slots)]
         ready, name = "/health", "m"
     elif engine == "ollama":
         env["OLLAMA_HOST"] = f"127.0.0.1:{PORT}"
         env["OLLAMA_MODELS"] = os.path.expanduser("~/bench/ollama-models")
-        env["OLLAMA_NUM_PARALLEL"] = "1"
+        env["OLLAMA_NUM_PARALLEL"] = str(slots)
         env["OLLAMA_KEEP_ALIVE"] = "30m"
-        env["OLLAMA_CONTEXT_LENGTH"] = "4096"
+        env["OLLAMA_CONTEXT_LENGTH"] = str(ctx)
         cmd = [binary, "serve"]
         ready, name = "/api/tags", "bench"
     elif engine in ("vllm", "sglang"):
         # binary = the python of the engine's environment, device = the model directory (a Hugging Face snapshot, e.g. an AWQ checkpoint)
         if engine == "vllm":
             cmd = [binary, "-m", "vllm.entrypoints.openai.api_server", "--model", device, "--served-model-name", "m", "--port", str(PORT),
-                   "--max-model-len", "4096", "--gpu-memory-utilization", "0.85", "--dtype", "float16"]
+                   "--max-model-len", str(ctx), "--gpu-memory-utilization", "0.85", "--dtype", "float16"]
         else:
             cmd = [binary, "-m", "sglang.launch_server", "--model-path", device, "--served-model-name", "m", "--port", str(PORT),
-                   "--context-length", "4096", "--mem-fraction-static", "0.8", "--dtype", "float16",
+                   "--context-length", str(ctx), "--mem-fraction-static", "0.8", "--dtype", "float16",
                    "--attention-backend", "triton", "--sampling-backend", "pytorch"]
         ready, name = "/health", "m"
     elif engine == "flm":
@@ -132,9 +136,34 @@ def start(engine, binary, device, model, env_extra, log):
         raise RuntimeError(f"{engine} did not start, see {log}")
     if engine == "ollama":
         mf = os.path.expanduser("~/bench/Modelfile")
-        open(mf, "w").write(f"FROM {model}\nPARAMETER num_ctx 4096\n")
+        open(mf, "w").write(f"FROM {model}\nPARAMETER num_ctx {ctx}\n")
         subprocess.run([binary, "create", "bench", "-f", mf], env=env, check=True, capture_output=True)
     return proc, base, name
+
+
+def burst(base, model, words, gen, engine, n, seed):
+    """n requests at the same moment, each with its own text."""
+    res, errs = [None] * n, []
+
+    def work(i):
+        try:
+            res[i] = one_run(base, model, make_prompt(seed * 100 + i, words), gen, engine)
+        except Exception as e:  # noqa: BLE001
+            errs.append(str(e)[:100])
+
+    t0 = time.time()
+    ts = [threading.Thread(target=work, args=(i,)) for i in range(n)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    wall = time.time() - t0
+    ok = [r for r in res if r]
+    if not ok:
+        raise RuntimeError("all requests failed: " + (errs[0] if errs else "?"))
+    return {"n": n, "ok": len(ok), "wall": wall, "agg_tps": sum(r["gen_tokens"] for r in ok) / wall,
+            "tg": statistics.median(r["tg"] for r in ok), "ttft": statistics.median(r["ttft"] for r in ok),
+            "prompt_tokens": ok[0]["prompt_tokens"]}
 
 
 def stop(proc):
@@ -154,12 +183,16 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", default="bench_results.jsonl")
     ap.add_argument("--runs", type=int, default=3)
-    ap.add_argument("--prompt-words", type=int, default=380, help="about 512 tokens")
+    ap.add_argument("--prompt-words", default="380", help="about 512 tokens; a comma separated list measures several prompt lengths")
+    ap.add_argument("--concurrency", default="1", help="comma separated numbers of simultaneous requests (batching)")
     ap.add_argument("--gen", type=int, default=128)
     ap.add_argument("--tag", default="", help="free text stored with every result (machine, model)")
     ap.add_argument("configs", nargs="+")
     a = ap.parse_args()
-    print(f"model {os.path.basename(a.model)}  prompt ~{a.prompt_words} words  gen {a.gen}  runs {a.runs}", flush=True)
+    lengths = [int(x) for x in a.prompt_words.split(",")]
+    levels = [int(x) for x in a.concurrency.split(",")]
+    ctx = max(4096, int(max(lengths) * 1.6) + a.gen + 256)
+    print(f"model {os.path.basename(a.model)}  prompt ~{lengths} words  concurrency {levels}  gen {a.gen}  runs {a.runs}", flush=True)
     for cfg in a.configs:
         label, spec = cfg.split("=", 1)
         parts = spec.split(":")
@@ -168,15 +201,30 @@ def main():
         env_extra = dict(kv.split("=", 1) for kv in parts[3].split(",")) if len(parts) > 3 and parts[3] else {}
         row = {"label": label, "engine": engine, "device": device, "model": os.path.basename(a.model), "tag": a.tag}
         try:
-            proc, base, name = start(engine, os.path.expanduser(binary), device, a.model, env_extra, f"/tmp/bench_{label}.log")
+            proc, base, name = start(engine, os.path.expanduser(binary), device, a.model, env_extra, f"/tmp/bench_{label}.log", max(levels), ctx)
             try:
                 one_run(base, name, make_prompt(99, 60), 16, engine)                # warm-up (shader / graph / kernel compilation, model load)
-                one_run(base, name, make_prompt(98, a.prompt_words), 16, engine)
-                runs = [one_run(base, name, make_prompt(i + 1, a.prompt_words), a.gen, engine) for i in range(a.runs)]
+                grid = []
+                for words in lengths:
+                    one_run(base, name, make_prompt(98, words), 16, engine)
+                    for n in levels:
+                        if n == 1:
+                            runs = [one_run(base, name, make_prompt(i + 1, words), a.gen, engine) for i in range(a.runs)]
+                            grid.append({"n": 1, "words": words, "prompt_tokens": runs[0]["prompt_tokens"], "pp": round(statistics.median(r["pp"] for r in runs), 1),
+                                         "tg": round(statistics.median(r["tg"] for r in runs), 1), "ttft": round(statistics.median(r["ttft"] for r in runs), 2),
+                                         "agg_tps": round(statistics.median(r["tg"] for r in runs), 1), "gen_tokens": runs[0]["gen_tokens"]})
+                        else:
+                            try:
+                                b = burst(base, name, words, a.gen, engine, n, 7 + n)
+                                grid.append({"n": n, "words": words, "prompt_tokens": b["prompt_tokens"], "agg_tps": round(b["agg_tps"], 1), "tg": round(b["tg"], 1),
+                                             "ttft": round(b["ttft"], 2), "ok": b["ok"]})
+                            except Exception as e:  # noqa: BLE001
+                                grid.append({"n": n, "words": words, "error": str(e)[:120]})
             finally:
                 stop(proc)
-            row.update(pp=round(statistics.median(r["pp"] for r in runs), 1), tg=round(statistics.median(r["tg"] for r in runs), 1),
-                       prompt_tokens=runs[0]["prompt_tokens"], gen_tokens=runs[0]["gen_tokens"], ttft=round(statistics.median(r["ttft"] for r in runs), 2))
+            first = next((g for g in grid if g["n"] == 1), grid[0])
+            row.update(pp=first.get("pp", 0), tg=first.get("tg", 0), prompt_tokens=first.get("prompt_tokens", 0), gen_tokens=first.get("gen_tokens", 0),
+                       ttft=first.get("ttft", 0), grid=grid)
         except Exception as e:
             row["error"] = str(e)[:200]
         print(json.dumps(row), flush=True)

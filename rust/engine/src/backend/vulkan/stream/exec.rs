@@ -10,6 +10,16 @@ use std::sync::Arc;
 
 /// Dispatches recorded before a submission is forced (bounds the size of one command buffer and the latency of the first result).
 const MAX_DISPATCHES_PER_SUBMIT: u64 = 4096;
+
+/// Dispatches recorded before the GPU is handed the work so far, so that it runs the first layers while the host still records the others (a decode token
+/// of a 3B model is about 560 dispatches; recording all of them before the first submission left an RTX 2000 Ada idle for a third of every token).
+/// `FLLM_VK_SUBMIT_EVERY` overrides it, 0 submits only at the end. Measured on that card with a 3B model (decode tok/s): 59 with one submission, 78-82 with 16 to 64 dispatches per submission.
+const DEFAULT_SUBMIT_EVERY: u64 = 32;
+
+fn submit_every() -> u64 {
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| std::env::var("FLLM_VK_SUBMIT_EVERY").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_SUBMIT_EVERY))
+}
 /// Host scratch bytes of one submission before it is forced.
 const MAX_HOST_BYTES_PER_SUBMIT: u64 = 256 << 20;
 /// Device scratch bytes of one submission before it is forced.
@@ -295,7 +305,9 @@ impl VulkanStream {
     /// Submit early when a command buffer or its scratch memory grows too large.
     pub(super) fn after_op(&mut self) -> Result<(), BackendError> {
         let pending = self.rec.stats().dispatches.saturating_sub(self.flushed_dispatches);
+        let every = submit_every();
         if pending >= MAX_DISPATCHES_PER_SUBMIT
+            || (every > 0 && pending >= every)
             || self.pending_macs >= max_macs_per_submit()
             || self.host.used() > MAX_HOST_BYTES_PER_SUBMIT
             || self.dev.used() > MAX_DEVICE_BYTES_PER_SUBMIT
