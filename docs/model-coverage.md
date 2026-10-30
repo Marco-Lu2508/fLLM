@@ -108,11 +108,15 @@ sentence-transformers). Encoders run on the CPU; the GPU is used only through th
 | FP8 (per tensor, block-wise), `fbgemm_fp8`, ModelOpt FP8 | yes | stays FP8 on devices that have kernels |
 | NVFP4 (ModelOpt, compressed-tensors), MXFP4 (gpt-oss, compressed-tensors) | yes | |
 | bitsandbytes NF4/FP4 (double quant), LLM.int8 | yes | checked against bitsandbytes fixtures |
-| MLX affine (2-8 bit, any group size) | yes | MLX `mxfp4`/`nvfp4` modes: refused |
+| MLX affine (2-8 bit, any group size) | yes | |
+| MLX `mxfp4`, `nvfp4`, `mxfp8` modes | yes (new), expanded to F16 | decoded values equal `mx.dequantize` on tiny matrices (`scripts/make_mlx_fp_fixtures.py`, mlx 0.32.4 CPU); no real MLX fp-mode repository was run |
 | EXL2, EXL3 | yes | [exl-formats.md](exl-formats.md) |
-| compressed-tensors int4/int8 symmetric (pack-quantized, int-quantized) | yes | asymmetric zero points and activation ordering: refused |
+| compressed-tensors int4/int8 symmetric (pack-quantized, int-quantized) | yes | native `Q4Z` / `Q8_0` |
+| compressed-tensors integer weights with zero points (asymmetric) or `weight_g_idx` (activation order), 1-8 bits | yes (new), expanded to F16 | zero points: decoded values equal the compressed-tensors 0.20.1 library's own decompression (4 and 8 bits, group and channel strategies, `scripts/make_ct_int_fixtures.py`). **Activation order is covered only by a hand-made unit test** of the group-per-column rule: compressed-tensors 0.20.1 no longer writes `weight_g_idx`, so no library reference exists, and no real act-order repository was run |
+| GPTQ-Marlin / IST-DASLab Marlin repacked checkpoints (`checkpoint_format: marlin`; tensors `B`/`s` or `qweight`/`scales`), symmetric 4 and 8 bits | yes (new), read back to plain values and expanded to F16 | the inverse of vLLM's tile and scale permutation, checked against that permutation code on tiny matrices (`scripts/make_marlin_fixtures.py`) and on a real 4-bit TinyLlama Marlin repository (`B`/`s` layout, group 128): the converted model (CPU, f16) writes coherent, correct text on four prompts (Paris, counting, `fibonacci(n-1) + fibonacci(n-2)`, 100 degrees C); none of the four greedy texts is identical to the unquantized model's, they share 5 to 35 leading characters (4-bit quantization, not checked further); a wrong tile permutation would produce noise. `desc_act` and zero-point (`sym: false`) Marlin checkpoints are refused |
+| AQLM (`quant_method: aqlm`, codes + codebooks + scales) | yes (new), expanded to F16 | decoded values equal `aqlm.utils._dequantize_weight` on tiny layers (8-bit codes in 2 codebooks; 12-bit codes with output groups, `scripts/make_aqlm_fixtures.py`); the tensor names, dtypes and shapes were checked on the header of a real 2-bit Llama-2 repository (`scripts/st_peek.py`, I16 codes `[4096, 512, 1]`, 1 x 16-bit codebooks); that 2.4 GB repository was not converted or run |
 | Hugging Face BitNet packed ternary (`quant_method: bitnet`) | yes (new) | T 2.4e-4 (`scripts/verify_bitnet_packed.py`, packed with transformers' own `pack_weights`); the tensor layout also matches the headers of microsoft/bitnet-b1.58-2B-4T. The reference BitLinear rounds activations to 8 bits per token; fLLM does not |
-| HQQ, torchao, Quark, EETQ, AQLM, QuIP#, SpQR, VPTQ, HIGGS, fp_quant, GPTQ-Marlin / BitBLAS repacks | no | the converter names the format and the way out (re-export as GPTQ/AWQ/compressed-tensors, or use the original weights) |
+| HQQ, torchao, Quark, EETQ, QuIP#, SpQR, VPTQ, HIGGS, fp_quant, BitBLAS / IPEX repacks | no | the converter names the method, the reason and the way out (re-export as GPTQ/AWQ/compressed-tensors, or use the original weights). Header checks of real repositories: HQQ repositories ship pickled `qmodel.pt` files (Python `meta` dicts); a torchao "HQQ" export (`SocialLocalMobile/Qwen3.5-35B-A3B-HQQ-INT4`) stores `Int4TilePackedTo4dTensor` inner tensors (`__qdata` I32 `[n/8, k/128, 32, 4]`, `__scale_and_zero`) in the device-specific tinygemm tile layout under ExecuTorch tensor names; EETQ and the rotation-based methods (QuIP#, HIGGS, fp_quant) cannot be expanded layer by layer. Not decoded: no reference could be built in the time available, and guessing a layout would give wrong weights |
 
 ## Real checkpoints run in this audit
 
@@ -186,7 +190,7 @@ Not implemented, ordered by how many current models need them:
 5. **LongCat-Flash** (dual sublayers with shortcut MoE), **Inkling**, **MiniMax-M3** (block-sparse index), **MiniMax-M1**
    (lightning attention).
 6. Vision towers beyond Qwen-VL; any audio model.
-7. The quantization formats listed as "no" above.
+7. The quantization formats listed as "no" above (HQQ, torchao, Quark, EETQ, QuIP#, SpQR, VPTQ, HIGGS, fp_quant, BitBLAS / IPEX repacks): each has a clear converter error.
 
 A 2.8T or 1T model cannot run on a laptop whatever the architecture support is; "T" means the layer maths is right on a
 tiny random model, not that a real checkpoint of that size was run.

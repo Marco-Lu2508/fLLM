@@ -31,14 +31,19 @@ Checkpoint output types are preserve, F16 and F32. This does not add a GGUF quan
 | ModelOpt NVFP4 | GGUF type 40 plus `<name>.scale` and `<name>.input_scale` | details in [awq-gptq-marlin.md](awq-gptq-marlin.md); other `quant_algo` values are refused |
 | compressed-tensors `pack-quantized` (symmetric int4, int8) and `int-quantized` (symmetric int8) | int4 with group 32/64/128: `Q4Z`; 8 bit with a scale per 32 or more inputs: `Q8_0`; else F16 | scales may be f16, bf16 or f32 (rounded to f16 in the blocks) |
 | bitsandbytes 4-bit (NF4, FP4, block 64 or more, with or without double quantization) and LLM.int8() | `NF4B64`, `NF4B128`, `FP4B64`, `FP4B128`, `INT8R` (fLLM-specific, the packed codes are kept); F16 for a row that is not a multiple of 64 values or a code book that is not the standard one | see "bitsandbytes (NF4, FP4, int8)" below |
+| compressed-tensors integer weights with `weight_zero_point` (asymmetric) or `weight_g_idx` | F16 (values `(code - zero) * scale`, columns grouped by `weight_g_idx`) | `scripts/make_ct_int_fixtures.py` |
+| GPTQ-Marlin / Marlin (`checkpoint_format: marlin`, `B`/`s` or `qweight`/`scales`), symmetric 4 / 8 bit | F16 (tiles unpermuted) | `desc_act` and `sym: false` are refused |
+| AQLM | F16 (codebook sums times the group scale) | `scripts/make_aqlm_fixtures.py` |
+| MLX `mxfp4`, `nvfp4`, `mxfp8` (`quantization: {mode, bits, group_size}`) | F16 | E2M1 / E4M3 codes with E8M0 / E4M3 block scales, no biases |
 | MLX affine (`quantization: {bits, group_size}`, 2/3/4/5/6/8 bits) | `MLXA<bits>G<group>[B]` (fLLM-specific, see below), else F16 | words, scales and biases are copied as they are |
 | EXL2, EXL3, gpt-oss MXFP4 | see [exl-formats.md](exl-formats.md) | |
 
 `--outtype f16` or `f32` expands every quantized weight. Refused with a message that says what to use instead: ModelOpt algorithms
 other than NVFP4 and FP8 (`unsupported ModelOpt quant_algo "..."`), compressed-tensors NVFP4 (`compressed-tensors NVFP4 (format
-"nvfp4-pack-quantized") is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint ...`), asymmetric or act-order or sparse
-compressed-tensors, mixed-precision `config_groups`, and other quantization methods (`unsupported quantization_config quant_method
-"..." (supported: gptq, awq, auto-round, fp8, bitsandbytes, bitnet, compressed-tensors, modelopt NVFP4/FP8, MLX affine, exl2, exl3)`). HQQ, torchao, Quark, EETQ, AQLM, QuIP#, SpQR, VPTQ, HIGGS and fp_quant checkpoints have no reader (the message names a way out).
+"nvfp4-pack-quantized") is not supported; use an NVIDIA ModelOpt NVFP4 checkpoint ...`), sparse
+compressed-tensors, mixed-precision `config_groups`, Marlin checkpoints with `desc_act` or zero points, and other quantization methods
+(`unsupported quantization_config quant_method "..." (supported: gptq, awq, auto-round, fp8, bitsandbytes, bitnet, compressed-tensors, modelopt NVFP4/FP8, aqlm, MLX affine/mxfp4/nvfp4/mxfp8, exl2, exl3)`).
+HQQ, torchao, Quark, EETQ, QuIP#, SpQR, VPTQ, HIGGS and fp_quant checkpoints have no reader (the message names the method, the reason and a way out).
 
 ### Block-wise FP8 (`FP8B`)
 
