@@ -1033,16 +1033,27 @@ fn vulkan_shaders() {
     let mut table = String::from("/// (name, SPIR-V bytes) of every compiled shader\npub static SHADERS: &[(&str, &[u8])] = &[\n");
     for (output, source, defines) in &jobs {
         let spv = out.join(format!("{output}.spv"));
-        let status = Command::new(&glslc)
-            .args(["--target-env=vulkan1.2", "-O", "-I"])
-            .arg(&dir)
-            .args(defines)
-            .args(no_spirv_dot.then_some("-DFLLM_NO_SPIRV_DOT=1"))
-            .arg("-o")
-            .arg(&spv)
-            .arg(dir.join(source))
-            .status()
-            .unwrap_or_else(|e| panic!("cannot run {glslc}: {e} (install the Vulkan SDK / glslc, set VULKAN_SDK or GLSLC)"));
+        let compile = |optimize: bool| {
+            Command::new(&glslc)
+                .arg("--target-env=vulkan1.2")
+                .args(optimize.then_some("-O"))
+                .arg("-I")
+                .arg(&dir)
+                .args(defines)
+                .args(no_spirv_dot.then_some("-DFLLM_NO_SPIRV_DOT=1"))
+                .arg("-o")
+                .arg(&spv)
+                .arg(dir.join(source))
+                .status()
+                .unwrap_or_else(|e| panic!("cannot run {glslc}: {e} (install the Vulkan SDK / glslc, set VULKAN_SDK or GLSLC)"))
+        };
+        let mut status = compile(true);
+        if !status.success() {
+            // the optimizer of older shaderc releases (2023.8, Ubuntu 24.04) crashes on some of the cooperative-matrix shaders: the plain
+            // SPIR-V is bigger but runs the same
+            println!("cargo:warning=glslc failed on {source} ({output}) with -O ({status}); compiling it without -O");
+            status = compile(false);
+        }
         assert!(status.success(), "glslc failed on {source} ({output})");
         table.push_str(&format!("    ({output:?}, include_bytes!({:?})),\n", spv.to_string_lossy().replace('\\', "/")));
     }

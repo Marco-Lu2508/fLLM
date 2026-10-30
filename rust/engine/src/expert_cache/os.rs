@@ -16,7 +16,7 @@ fn page_range(ptr: usize, len: usize, inward: bool) -> Option<(usize, usize)> {
     let page = page_size();
     let end = ptr.checked_add(len)?;
     let (start, end) = if inward { (ptr.checked_add(page - 1)? & !(page - 1), end & !(page - 1)) } else { (ptr & !(page - 1), end.checked_add(page - 1)? & !(page - 1)) };
-    (end > start).then_some((start, end - start))
+    (end > start).then(|| (start, end - start))
 }
 
 /// Bytes of the page cache that a fault on `ptr..ptr + len` could read in one piece, rounded to pages.
