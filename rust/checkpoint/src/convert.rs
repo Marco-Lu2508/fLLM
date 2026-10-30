@@ -1846,10 +1846,16 @@ fn quantization(cfg: &Value) -> Result<Quantization, String> {
 /// What to do with a quantization method the converter cannot read.
 fn unsupported_hint(method: &str) -> &'static str {
     match method {
-        "hqq" => "HQQ: dequantize with the hqq library (model.dequantize()) and save as safetensors, or use the original weights",
-        "torchao" => "torchao checkpoints are pickled torch tensor subclasses: load the model with torchao, dequantize, save as safetensors, or use the original weights",
-        "quark" | "quark-fp8" => "AMD Quark: export the model to GPTQ/AWQ/compressed-tensors/ModelOpt format with Quark, or use the original weights",
-        "eetq" | "quip#" | "quipsharp" | "spqr" | "vptq" | "higgs" | "fp_quant" | "fine-grained-fp8" | "auto-round" | "autoround" | "gptqmodel" => {
+        "hqq" => "HQQ (Half-Quadratic Quantization) saves a pickled state dict of HQQLinear modules (`qmodel.pt`: bit-packed `W_q` plus a Python `meta` dict), or, exported by torchao, device-specific packed tensors; neither is a plain tensor layout. Load the model with the hqq library, call model.dequantize() and save it as safetensors, or use the original weights",
+        "torchao" => "torchao weight-only checkpoints store tensor subclasses: pickled `.bin` files, or safetensors whose inner tensors (`__qdata`, `__scale_and_zero`) are in a device-specific tile-packed layout (Int4TilePackedTo4dTensor, tinygemm). Load the model with torchao, dequantize, save as safetensors, or use the original weights",
+        "quark" | "quark-fp8" => "AMD Quark exports use their own packing (`pack_method`, per-layer `weight_scale` / `weight_zero_point` and quantization specs in the config) that has no reader here. Re-export the model from Quark as GPTQ, AWQ or compressed-tensors, or use the original weights",
+        "eetq" => "EETQ quantizes a dense checkpoint to int8 when transformers loads it, and its int8 weights are stored in the interleaved layout of the mixed-precision CUDA kernel; a checkpoint saved after loading is not a plain int8 layout. Use the original (dense) weights of the model",
+        "quip#" | "quipsharp" | "quip_sharp" => "QuIP# quantizes with E8 lattice codebooks behind random Hadamard rotations of the inputs and outputs that the runtime must apply around every layer, so the weights cannot be expanded layer by layer. Use the original weights or a GPTQ/AWQ/compressed-tensors export",
+        "vptq" => "VPTQ stores vector-quantized weights as indices into per-layer centroid tables with a residual stage and outliers, followed by a permutation and optional rotation; there is no reader. Use the original weights or a GPTQ/AWQ/compressed-tensors export",
+        "higgs" => "HIGGS (transformers' HiggsConfig) rotates the weights with a Hadamard transform and quantizes them to a grid; the rotation is undone at run time by the HIGGS kernels, which this engine does not have. Use the original weights or a GPTQ/AWQ/compressed-tensors export",
+        "spqr" => "SpQR stores 3-bit groups with quantized scales plus sparse fp16 outliers in a compressed row format that has no reader. Use the original weights or a GPTQ/AWQ/compressed-tensors export",
+        "fp_quant" => "FP-Quant (transformers' FPQuantConfig) combines MXFP4 / NVFP4 weights with Hadamard rotations applied at run time; the rotation has no counterpart here. Use the original weights, or a plain MXFP4 / NVFP4 export (compressed-tensors, ModelOpt)",
+        "fine-grained-fp8" | "gptqmodel" | "auto-round" | "autoround" => {
             "this method has no reader; use the original (unquantized) weights or a GPTQ/AWQ/compressed-tensors/bitsandbytes/MLX export of the model"
         }
         _ => "use the original weights or a repository in one of the supported formats",
@@ -3376,6 +3382,24 @@ mod quantization_config_tests {
         assert!(compressed_tensors(&mixed).unwrap_err().contains("mixed-precision"));
         let sparse = json!({"quant_method": "compressed-tensors", "sparsity_config": {"format": "sparse-24-bitmask"}, "config_groups": {}});
         assert!(compressed_tensors(&sparse).unwrap_err().contains("sparse"));
+    }
+
+    #[test]
+    fn unreadable_methods_are_named_with_the_reason_and_a_way_out() {
+        for (method, word) in [
+            ("hqq", "qmodel.pt"),
+            ("torchao", "tile-packed"),
+            ("quark", "pack_method"),
+            ("eetq", "when transformers loads it"),
+            ("quip#", "Hadamard"),
+            ("vptq", "centroid"),
+            ("higgs", "Hadamard"),
+            ("spqr", "outliers"),
+            ("fp_quant", "rotations"),
+        ] {
+            let err = quantization(&json!({"quantization_config": {"quant_method": method}})).unwrap_err();
+            assert!(err.contains(&format!("{method:?}")) && err.contains(word) && err.contains("original"), "{method}: {err}");
+        }
     }
 
     #[test]
