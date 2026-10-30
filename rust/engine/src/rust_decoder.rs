@@ -25,6 +25,7 @@ mod kda;
 mod rwkv;
 mod deepseek4;
 mod hc;
+mod inkling;
 mod state_api;
 mod zamba;
 pub use state_api::{LayerStateSnapshot, RecurrentState, SequenceSnapshot};
@@ -1039,6 +1040,8 @@ pub struct RustDecoder {
     row_visible_lengths: std::sync::Mutex<Option<Vec<usize>>>,
     /// DeepSeek-V4 attention and hyper-connection weights.
     v4: Option<Box<deepseek4::V4Model>>,
+    /// Inkling weights.
+    inkling: Option<Box<inkling::InklingModel>>,
     /// Hyper-connection weights of Hy4 and GLM-5-Next.
     hc: Option<Box<hc::HcModel>>,
     /// Token ids of the rows of the current pass (hash-routed experts).
@@ -1534,7 +1537,7 @@ impl RustDecoder {
             Some(m) => m.nope + m.rope,
             None => cfg.head_dim,
         };
-        if cfg.v4.is_none() && (0..cfg.layers).any(|l| {
+        if cfg.v4.is_none() && cfg.inkling.is_none() && (0..cfg.layers).any(|l| {
             let (d, r) = if cfg.mla.is_some() { (dk, cfg.rope.dims) } else { (cfg.layer_head_dim(l), cfg.layer_rope_dims(l)) };
             !d.is_multiple_of(2) || !r.is_multiple_of(2) || r > d
         }) {
@@ -2172,6 +2175,7 @@ impl RustDecoder {
             .transpose()?;
         let v4 = if cfg.v4.is_some() { Some(Box::new(deepseek4::V4Model::load(model, &cfg)?)) } else { None };
         let hc = if cfg.hc.is_some() { Some(Box::new(hc::HcModel::load(mapping, &cfg)?)) } else { None };
+        let inkling = if cfg.inkling.is_some() { Some(Box::new(inkling::InklingModel::load(model, &cfg)?)) } else { None };
         let mut decoder = Self {
             mtp,
             expert_cache,
@@ -2246,6 +2250,7 @@ impl RustDecoder {
             row_deepstack: std::sync::Mutex::new(None),
             row_visible_lengths: std::sync::Mutex::new(None),
             v4,
+            inkling,
             hc,
             row_ids: std::sync::Mutex::new(Vec::new()),
             dsa: DsaStore::default(),
@@ -2619,6 +2624,9 @@ impl RustDecoder {
         if layer.shortcut.is_some() || layer.takes_shortcut {
             // the shortcut experts join the stream two sublayers later: the pass over the layers keeps them on the host
             return Some("shortcut experts across layers");
+        }
+        if cfg.inkling.is_some() {
+            return Some("Inkling convolutions and relative position bias");
         }
         if cfg.hc.is_some() {
             return Some("hyper-connections");
@@ -7118,6 +7126,8 @@ impl RustDecoder {
             let stage_layers = self.par.as_ref().map_or(0..self.layers.len(), |p| p.layer_range(self.layers.len()));
             if cfg.v4.is_some() {
                 x = self.v4_layers(&x, ids, &positions, tables, lengths)?;
+            } else if cfg.inkling.is_some() {
+                x = self.inkling_layers(&x, &positions, tables, lengths)?;
             } else if cfg.hc.is_some() {
                 x = self.hc_layers(&x, &positions, tables, lengths, key, value)?;
             } else {

@@ -271,6 +271,34 @@ impl IndexerConfig {
     }
 }
 
+/// Inkling: attention without rotary embeddings (a learned distance profile mixed per token), short convolutions, own head counts on the
+/// sliding layers. The pool geometry of the model is a placeholder: the keys and values live in the per-sequence layer states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InklingConfig {
+    /// Key/value heads and head width of the global layers (`ModelConfig::heads` is their query head count).
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub swa_heads: usize,
+    pub swa_kv_heads: usize,
+    pub swa_dim: usize,
+    pub window: usize,
+    pub d_rel: usize,
+    pub rel_extent: usize,
+    /// Queries and the position bias of global layers are scaled by `1 + alpha * ln(max(1, (position + 1) / floor))`; 0: off.
+    pub log_floor: usize,
+    pub log_alpha: f32,
+    /// Taps of the convolutions on keys and values / on the outputs of the two blocks.
+    pub conv_kernel: usize,
+    pub block_conv_kernel: usize,
+    pub sliding: Vec<bool>,
+    pub sparse: Vec<bool>,
+    pub routed: usize,
+    pub used: usize,
+    pub moe_ff: usize,
+    pub shared: usize,
+    pub route_scale: f32,
+}
+
 /// Hyper-connections around the blocks of an ordinary decoder (Hy4, GLM-5-Next): `hc_mult` residual streams.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HcConfig {
@@ -377,6 +405,7 @@ pub struct ModelConfig {
     /// LongCat-Flash: scalings of the normalised low-rank query and key/value latents `(sqrt(hidden / q_lora), sqrt(hidden / kv_lora))`.
     pub mla_scales: Option<(f32, f32)>,
     pub v4: Option<V4Config>,
+    pub inkling: Option<InklingConfig>,
     pub hc: Option<HcConfig>,
     pub delta: Option<DeltaConfig>,
     pub mamba: Option<MambaConfig>,
@@ -756,11 +785,43 @@ impl ModelConfig {
         } else {
             None
         };
-        let (kv_heads, head_dim, value_dim) = match (&mla, &v4) {
-            (Some(m), _) => (heads, m.nope + m.rope, m.value),
-            // placeholder cache geometry: the attention state of V4 is kept per sequence outside the KV pools
-            (None, Some(_)) => (1, 2, 2),
-            (None, None) => (kv_heads, head_dim, value_dim),
+        let inkling = if a == "inkling" {
+            let flags = |name: &str| -> Result<Vec<bool>, String> {
+                match key(meta, a, name) {
+                    Some(Value::Array(values)) if values.len() == layers => Ok(values.iter().map(|v| v.as_bool().unwrap_or(false)).collect()),
+                    _ => Err(format!("Inkling needs {a}.{name} with one entry per layer")),
+                }
+            };
+            let need = |name: &str| uint(meta, a, name).ok_or_else(|| format!("Inkling needs {a}.{name}"));
+            Some(InklingConfig {
+                kv_heads,
+                head_dim,
+                swa_heads: need("swa.head_count")?,
+                swa_kv_heads: need("swa.head_count_kv")?,
+                swa_dim: need("swa.head_dim")?,
+                window: need("swa.window")?,
+                d_rel: need("rel.dim")?,
+                rel_extent: need("rel.extent")?,
+                log_floor: uint(meta, a, "log_scaling_floor").unwrap_or(0),
+                log_alpha: float(meta, a, "log_scaling_alpha").unwrap_or(0.1),
+                conv_kernel: need("conv_kernel")?,
+                block_conv_kernel: need("block_conv_kernel")?,
+                sliding: flags("layer_sliding")?,
+                sparse: flags("layer_sparse")?,
+                routed: uint(meta, a, "moe.routed").unwrap_or(0),
+                used: uint(meta, a, "moe.used").unwrap_or(0),
+                moe_ff: uint(meta, a, "moe.feed_forward_length").unwrap_or(0),
+                shared: uint(meta, a, "moe.shared").unwrap_or(0),
+                route_scale: float(meta, a, "moe.route_scale").unwrap_or(1.0),
+            })
+        } else {
+            None
+        };
+        let (kv_heads, head_dim, value_dim) = match (&mla, &v4, &inkling) {
+            (Some(m), _, _) => (heads, m.nope + m.rope, m.value),
+            // placeholder cache geometry: the attention state of these models is kept per sequence outside the KV pools
+            (None, Some(_), _) | (None, _, Some(_)) => (1, 2, 2),
+            (None, None, None) => (kv_heads, head_dim, value_dim),
         };
         let swa_flag = |l: usize| {
             sliding_window.is_some()
@@ -870,6 +931,7 @@ impl ModelConfig {
                 _ => None,
             },
             v4,
+            inkling,
             hc: uint(meta, a, "hc_mult").filter(|&n| n > 0).map(|hc_mult| HcConfig {
                 hc_mult,
                 magnitude: float(meta, a, "hc_magnitude"),
@@ -1375,6 +1437,7 @@ pub(crate) mod tests_support {
             indexer: None,
             mla_scales: None,
             v4: None,
+            inkling: None,
             hc: None,
             delta: None,
             mamba: None,

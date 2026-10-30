@@ -252,6 +252,8 @@ pub fn prepare_checkpoint(
         crate::deepseek4::config(&cfg)?
     } else if arch == "longcat-flash" {
         crate::longcat::config(&cfg)?
+    } else if arch == "inkling" {
+        crate::inkling::config(&cfg)?
     } else if matches!(plan.family, Family::Mamba | Family::Nemotron) {
         // no attention or feed-forward sizes: give the shape checks harmless values
         let mut patched = cfg.clone();
@@ -383,6 +385,10 @@ pub fn prepare_checkpoint(
             return Ok(None);
         }
         // DeepSeek-V4 has its own attention, hyper-connection and routing tensors
+        // Inkling's layers differ in head counts and widths; the engine checks the shapes against the per-layer metadata
+        if arch == "inkling" && !matches!(name, "token_embd.weight" | "output_norm.weight" | "output.weight") {
+            return Ok(None);
+        }
         if arch == "hy4" && name.starts_with("output_hc_") {
             return Ok(None);
         }

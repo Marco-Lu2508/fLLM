@@ -952,6 +952,16 @@ def config_for(arch: str, vocab: int):
             index_n_heads=4, index_head_dim=16, index_topk=4,
             indexer_types=["full", "shared", "full"],
         ),
+        # Inkling: no rotary embeddings (a learned relative bias from the hidden state), short convolutions on k, v and both branches,
+        # sliding layers with other head counts, log-scaled global attention, sigmoid MoE with sink-style shared experts, mu-P logits
+        "inkling": lambda: T.InklingTextConfig(
+            **{k: v for k, v in common.items() if k not in ("tie_word_embeddings", "num_hidden_layers")}, num_hidden_layers=4,
+            num_attention_heads=4, num_key_value_heads=2, head_dim=16, swa_num_attention_heads=4, swa_num_key_value_heads=1, swa_head_dim=8, sliding_window_size=6, d_rel=4, rel_extent=10,
+            log_scaling_n_floor=4, log_scaling_alpha=0.3, conv_kernel_size=4, sconv_kernel_size=4,
+            layer_types=["hybrid_sliding", "hybrid", "hybrid_sliding", "hybrid"], mlp_layer_types=["dense", "sparse", "sparse", "sparse"],
+            intermediate_size=128, moe_intermediate_size=32, n_routed_experts=8, num_experts_per_tok=2, n_shared_experts=2, route_scale=2.0,
+            logits_mup_width_multiplier=4.0, rms_norm_eps=1e-5,
+        ),
         # LongCat-Flash: two attention + dense MLP sublayers per layer and a shortcut MoE with identity ("zero") experts
         "longcat_flash": lambda: T.LongcatFlashConfig(
             **{k: v for k, v in common.items() if k != "num_hidden_layers"}, num_layers=2, num_attention_heads=4, num_key_value_heads=4,

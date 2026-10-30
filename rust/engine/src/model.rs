@@ -107,6 +107,7 @@ const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "deepseek4",
     "hy4",
     "longcat-flash",
+    "inkling",
     "k2_horizon",
     "k2-horizon",
     "k2horizon",
@@ -520,6 +521,7 @@ impl GgufModel {
     pub fn is_stateful(&self) -> bool {
         self.config.delta.is_some()
             || self.config.v4.is_some()
+            || self.config.inkling.is_some()
             || self.config.mamba.is_some()
             || self.config.mamba1.is_some()
             || self.config.rwkv.is_some()

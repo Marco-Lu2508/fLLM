@@ -74,7 +74,7 @@ impl SequenceSnapshot {
 impl RustDecoder {
     /// Whether the model keeps state that a snapshot has to cover.
     pub fn has_recurrent_state(&self) -> bool {
-        self.v4.is_some() || self.layers.iter().any(|l| !matches!(l.attn, Attn::Std { .. } | Attn::Mla(_) | Attn::None) || l.parallel.is_some())
+        self.v4.is_some() || self.inkling.is_some() || self.layers.iter().any(|l| !matches!(l.attn, Attn::Std { .. } | Attn::Mla(_) | Attn::None) || l.parallel.is_some())
     }
 
     /// Copies the recurrent state of the sequence whose first KV block is `first`. `None`: the sequence holds no state yet.

@@ -312,6 +312,7 @@ pub(crate) fn layer_requirements(arch: &str, i: u64, cfg: &Value) -> Option<Vec<
         "kimi-linear" => return crate::kimi_linear::requirements(cfg, i),
         "deepseek4" => return crate::deepseek4::requirements(cfg, i),
         "longcat-flash" => return crate::longcat::requirements(cfg, i),
+        "inkling" => return crate::inkling::requirements(cfg, i),
         _ => return None,
     }
     Some(need.into_iter().map(|n| format!("blk.{i}.{n}")).collect())
