@@ -599,7 +599,7 @@ pub fn plan_scale(count: usize, factor: f32) -> Result<OpPlan, BackendError> {
     if count == 0 {
         return Err(invalid("scale of an empty tensor"));
     }
-    plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x"))
+    plan("ewise_scale", Push::new().u("count", count).f("param", factor), groups_1d(count, 256), Slots::new().rw("x").read_opt("gate", false))
 }
 
 /// `Stream::head_gate_mul` (`act_head_gate_sigmoid` / `act_head_gate_softplus`): `x[i] *= act(gate[i / dv])` over `count` floats.
