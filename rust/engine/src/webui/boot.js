@@ -97,78 +97,12 @@
       setSamplerUI({ temperature: 0.7, top_p: 0.95, top_k: 20, min_p: 0, repetition_penalty: 1.0, presence_penalty: 0, frequency_penalty: 0, dry_multiplier: 0, mirostat: 0, seed: -1 });
     });
 
-    // ---- search (Ctrl+K): chats by title and content, plus places in the app ----
-    function openSearchModal() {
-      $('searchModal').classList.add('open');
-      $('searchModalInput').value = '';
-      renderSearchResults('');
-      $('searchModalInput').focus();
-    }
+    // ---- search (Ctrl+K): the command palette is in palette.js ----
     function snippet(text, q) {
       const i = text.toLowerCase().indexOf(q);
       if (i < 0) return '';
       return `${i > 30 ? '…' : ''}${text.slice(Math.max(0, i - 30), i + q.length + 50).replace(/\s+/g, ' ')}…`;
     }
-    function renderSearchResults(q) {
-      const query = q.toLowerCase().trim();
-      const places = [
-        { type: 'Page', title: 'Coding agent (Code)', run: () => switchSurface('code') },
-        { type: 'Page', title: 'Models and Hugging Face', run: () => switchSurface('hub') },
-        { type: 'Page', title: 'Settings: local API server and keys', run: () => switchSurface('settings', 'local-api-server') },
-        { type: 'Page', title: 'Settings: hardware', run: () => switchSurface('settings', 'hardware') },
-        { type: 'Page', title: 'Settings: appearance and colors', run: () => switchSurface('settings', 'appearance') },
-        { type: 'Page', title: 'Keyboard shortcuts', run: openShortcuts },
-        { type: 'Page', title: 'Settings: tokenizer and Jinja templates', run: () => switchSurface('settings', 'tokenizer') },
-      ];
-      const chats = state.threads.slice().sort((a, b) => b.updatedAt - a.updatedAt).map((t) => {
-        const hit = query && !t.title.toLowerCase().includes(query) ? snippet(threadText(t), query) : '';
-        return { type: 'Chat', title: t.title, sub: hit, match: !query || t.title.toLowerCase().includes(query) || Boolean(hit), run: () => openThread(t.id) };
-      });
-      const items = [...chats.filter((c) => c.match), ...places.filter((p) => !query || p.title.toLowerCase().includes(query))].slice(0, 30);
-      $('searchModalResults').innerHTML = items.length ? items.map((it, i) => `
-        <button class="nav-item" data-sres="${i}">
-          <span class="search-title">${escapeHtml(it.title)}${it.sub ? `<small>${escapeHtml(it.sub)}</small>` : ''}</span>
-          <span class="quant-chip" style="margin-left:auto;">${it.type}</span>
-        </button>`).join('') : '<div class="thread-empty">Nothing found</div>';
-      $('searchModalResults')._items = items;
-      // sessions.js: full-text hits in all chats and code sessions (also those only the server remembers); added when they arrive
-      if (query.length >= 2 && window.fllmSessionSearch) {
-        const stamp = (renderSearchResults._stamp = (renderSearchResults._stamp || 0) + 1);
-        window.fllmSessionSearch(query, { limit: 8 }).then((hits) => {
-          if (renderSearchResults._stamp !== stamp || !$('searchModal').classList.contains('open')) return;
-          const shown = new Set(items.map((it) => it.title));
-          const more = (hits || []).filter((h) => !shown.has(h.title)).map((h) => ({
-            type: h.kind === 'code' ? 'Code session' : 'Chat',
-            title: h.title || 'Untitled',
-            sub: h.snippet || '',
-            match: true,
-            run: () => { if (h.threadId && state.threads.some((t) => t.id === h.threadId)) openThread(h.threadId); else if (h.kind === 'code') switchSurface('code'); else toast('This chat is only in the search index of the app, not in this browser.'); },
-          }));
-          if (!more.length) return;
-          const all = [...items, ...more].slice(0, 30);
-          $('searchModalResults').innerHTML = all.map((it, i) => `
-        <button class="nav-item" data-sres="${i}">
-          <span class="search-title">${escapeHtml(it.title)}${it.sub ? `<small>${escapeHtml(it.sub)}</small>` : ''}</span>
-          <span class="quant-chip" style="margin-left:auto;">${it.type}</span>
-        </button>`).join('');
-          $('searchModalResults')._items = all;
-        }).catch(() => { /* the plain list stays */ });
-      }
-    }
-    $('navOpenSearch').addEventListener('click', openSearchModal);
-    $('searchModalInput').addEventListener('input', (e) => renderSearchResults(e.target.value));
-    $('searchModalInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') $('searchModalResults').querySelector('[data-sres]')?.click();
-    });
-    $('searchModal').addEventListener('click', (e) => {
-      if (e.target === $('searchModal')) $('searchModal').classList.remove('open');
-      const btn = e.target.closest('[data-sres]');
-      if (btn) {
-        const it = $('searchModalResults')._items[Number(btn.dataset.sres)];
-        $('searchModal').classList.remove('open');
-        it.run();
-      }
-    });
     // ---- keyboard shortcuts: one registry (ids, default keys, descriptions), rebindable, stored in localStorage ----
     // A key combination is a text such as "Mod+Shift+K": Mod is Ctrl (Cmd on macOS), then Ctrl (macOS only), Alt, Shift, and one key.
     // @pure-begin
@@ -352,7 +286,7 @@
     }
     const SHORTCUT_ACTIONS = {
       newChat: () => { if (state.surface === 'code') newCodeSession(); else startNewChat(); },
-      search: openSearchModal,
+      search: () => window.openSearchModal(),
       focusComposer: () => { if (state.surface === 'code') $('codeTextarea').focus(); else if (state.surface === 'chat') $('chatTextarea').focus(); else switchSurface('chat'); },
       toggleSidebar,
       stop: () => {

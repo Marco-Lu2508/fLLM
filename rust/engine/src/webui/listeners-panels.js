@@ -4,6 +4,8 @@
       localStorage.setItem(STORAGE.theme, state.theme);
       applyAppearance();
     });
+    // with "Same as the system" the page follows the system when it switches between light and dark
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (state.theme === 'system') applyAppearance(); });
     $('selFontSize').addEventListener('change', () => {
       state.fontSize = $('selFontSize').value;
       localStorage.setItem(STORAGE.fontSize, state.fontSize);

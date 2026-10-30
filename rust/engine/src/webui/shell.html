@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>fLLM Studio</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%23121a21%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%268%27 fill=%27%2343c0aa%27/%3E%3C/svg%3E">
+  <meta name="color-scheme" content="dark light">
+  <script>try{var t=localStorage.getItem('fllm.studio.theme.v2')||'system';document.documentElement.classList.toggle('dark',t==='dark'||(t==='system'&&matchMedia('(prefers-color-scheme: dark)').matches))}catch(e){}</script>
   <style>/*__STYLE__*/</style>
 </head>
 <body class="colored-user-bubble">
@@ -900,10 +902,11 @@
                 <div class="app-card-item">
                   <div class="app-item-info">
                     <div class="app-item-title">Theme</div>
-                    <div class="app-item-desc">Dark or light.</div>
+                    <div class="app-item-desc">By default the page follows the light or dark setting of your system.</div>
                   </div>
                   <div class="app-item-actions">
                     <select id="selThemeMode" class="ui-select">
+                      <option value="system">Same as the system</option>
                       <option value="dark">Dark</option>
                       <option value="light">Light</option>
                     </select>
@@ -1515,9 +1518,13 @@
 
   <!-- Search Dialog Modal (Ctrl+K — containers/dialogs/SearchDialog.tsx) -->
   <div class="modal-backdrop" id="searchModal">
-    <div class="search-dialog">
-      <input type="text" class="search-dialog-input" id="searchModalInput" placeholder="Search chats, models and settings (Esc closes)">
-      <div class="search-results" id="searchModalResults"></div>
+    <div class="search-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
+      <input type="text" class="search-dialog-input" id="searchModalInput" role="combobox" aria-expanded="true" aria-controls="searchModalResults" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Type a command, or search chats and settings">
+      <div class="search-results" id="searchModalResults" role="listbox" aria-label="Results"></div>
+      <div class="palette-foot">
+        <span class="palette-help"><kbd>Up</kbd> <kbd>Down</kbd> to move, <kbd>Enter</kbd> to open, <kbd>Esc</kbd> to close</span>
+        <span id="searchModalCount" aria-live="polite"></span>
+      </div>
     </div>
   </div>
 

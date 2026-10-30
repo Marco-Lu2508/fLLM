@@ -39,7 +39,7 @@
       hardware: null,
       selectedModel: '',
       apiKey: localStorage.getItem(STORAGE.apiKey) || '',
-      theme: localStorage.getItem(STORAGE.theme) || 'dark',
+      theme: localStorage.getItem(STORAGE.theme) || 'system', // 'system' follows the operating system
       accent: localStorage.getItem(STORAGE.accent) || 'patina',
       fontSize: localStorage.getItem(STORAGE.fontSize) || '15px',
       coloredBubble: localStorage.getItem(STORAGE.coloredBubble) !== 'false',
@@ -125,7 +125,7 @@
 
     // --- Theme & Accent Colors ---
     function applyAppearance() {
-      const isDark = state.theme === 'dark';
+      const isDark = state.theme === 'dark' || (state.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       document.documentElement.classList.toggle('dark', isDark);
       document.documentElement.style.setProperty('--font-size-base', state.fontSize);
       document.body.classList.toggle('colored-user-bubble', state.coloredBubble);
