@@ -514,7 +514,18 @@ static void step_runs(FllmStream *st, const int64_t *tables, const int64_t *leng
 
 int fllm_cuda_upload(FllmStream *st, void *dst, const void *src, size_t bytes) {
     PREP(st);
-    CHECK(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, st->s), "upload");
+    const cudaError_t e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, st->s);
+    if (e != cudaSuccess) {
+        // "invalid argument" seen on an AMD APU (HIP): say what the two pointers are
+        cudaPointerAttributes a{}, b{};
+        const cudaError_t pd = cudaPointerGetAttributes(&a, dst);
+        cudaGetLastError();
+        const cudaError_t ps = cudaPointerGetAttributes(&b, src);
+        cudaGetLastError();
+        return fllm_set_error("upload: %s (dst %p: %s type %d device %d, src %p: %s type %d, %zu bytes, stream device %d)", cudaGetErrorString(e), dst,
+                              pd == cudaSuccess ? "known" : cudaGetErrorString(pd), pd == cudaSuccess ? (int)a.type : -1, pd == cudaSuccess ? a.device : -1,
+                              src, ps == cudaSuccess ? "known" : cudaGetErrorString(ps), ps == cudaSuccess ? (int)b.type : -1, bytes, st->dev);
+    }
     return 0;
 }
 int fllm_cuda_download(FllmStream *st, void *dst, const void *src, size_t bytes) {
