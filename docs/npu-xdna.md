@@ -144,7 +144,7 @@ same size that differs from the shipped one only in header bytes (it starts at b
 
 ## Windows (written down, not tested)
 
-Nothing below has been run by us. It restates what mlir-aie's native-Windows guide (`docs/buildHostWinNative.md`, v1.4.4) and XRT say.
+Nothing below has been run by us. It restates what mlir-aie's native-Windows guide (`buildHostWinNative.md` in its docs folder, v1.4.4) and XRT say.
 
 * Driver: the AMD NPU driver from AMD Software / Adrenalin; mlir-aie names 32.0.20101.3760 (XRT 2.21.0) as the minimum. `C:\Windows\System32\AMD\xrt-smi.exe examine` shows the NPU.
 * XRT: the Windows XRT SDK (`xrt_windows_sdk.zip` of the XRT 2.21.75 release on GitHub, unpacked to `C:\Xilinx\XRT` in that guide) supplies the headers
