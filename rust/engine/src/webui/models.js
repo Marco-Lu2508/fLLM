@@ -192,9 +192,9 @@
           <div class="app-item-actions">
             <button class="btn btn-sm btn-outline" data-inspect="${escapeHtml(entry.default_repo || entry.gguf_repo || '')}">Files</button>
             ${entry.installed
-              ? `<button class="btn btn-sm btn-primary" data-load="${escapeHtml(entry.installed.ref)}" data-label="${escapeHtml(entry.display_name)}" data-key="${escapeHtml(baseName(entry.installed.path))}">Load</button>`
-              : `<button class="btn btn-sm btn-secondary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}">Download</button>
-            <button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and load</button>`}
+              ? `<button class="btn btn-sm btn-secondary" data-load="${escapeHtml(entry.installed.ref)}" data-label="${escapeHtml(entry.display_name)}" data-key="${escapeHtml(baseName(entry.installed.path))}">Load</button>`
+              : `<button class="btn btn-sm btn-ghost" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}">Download</button>
+            <button class="btn btn-sm btn-secondary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and load</button>`}
           </div>
         </div>`).join('') + (tooLarge ? `<p class="app-item-desc" style="margin-top:10px;"><button class="btn btn-sm btn-ghost" data-toggle-large="1">${state.showLarge ? 'Hide' : 'Show'} ${tooLarge} models that are too large for this computer</button></p>` : '');
     }

@@ -1435,8 +1435,6 @@
     .header-page { height: 52px; padding: 0 20px; }
     .model-pill { border-color: var(--border); background: var(--card); border-radius: 6px; padding: 4px 10px; }
     .quant-chip { border-radius: 4px; background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); }
-    .btn { border-radius: 6px; }
-    .btn-primary:hover { filter: brightness(1.1); }
     .popover-panel { border-radius: 10px; }
 
     /* Start screen: left-aligned readout of the engine, then the composer */

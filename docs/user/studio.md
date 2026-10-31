@@ -428,6 +428,10 @@ API: `GET /api/studio/mcp/servers`, `POST` and `DELETE /api/studio/mcp/servers`,
 `GET /api/studio/mcp/tools` (`{tools: [{server, name, description, input_schema}]}`) and `POST /api/studio/mcp/call`
 (`{server, name, arguments}` gives `{content, is_error}`). Everything except the two GET routes is administration (see below).
 
+## Buttons and controls
+
+One set of controls is used on every page. *Primary* (accent fill) is the one main action of a card or dialog; everything else is neutral (*secondary*, with a border) or *ghost* (no fill, for quiet actions in rows); *destructive* has a danger fill. Buttons are 34, 30 or 26 px high with the same radius, hover changes the fill by one step (nothing glows), keyboard focus draws a 2 px ring, and selects, text fields and switches share the same height, radius and focus. The rules live at the end of `theme.css`.
+
 ## Model providers
 
 Settings has a Model providers page for models that do not run on this computer: cloud services and other servers. A provider is an

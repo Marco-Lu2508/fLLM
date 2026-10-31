@@ -900,3 +900,92 @@ html.dark {
 .code-input-box:focus-within { border-color: var(--border-strong); box-shadow: none; }
 
 body.colored-user-bubble .msg-user-bubble { background: color-mix(in srgb, var(--primary) 7%, var(--surface-3)); border-color: var(--border-strong); }
+
+/* ---- one control system: buttons, icon buttons, fields, switches (loaded last) ---------------------
+   Variants      primary      accent fill: the one main action of a card or dialog
+                 secondary    neutral filled with a border: the default for every other button (a bare .btn is one)
+                 outline      same look as secondary
+                 ghost        no fill, muted text: quiet actions in rows and toolbars
+                 destructive  danger fill; .btn-danger-text is the quiet form (danger text, no fill)
+   Sizes         .btn 34px, .btn-sm 30px, .btn-xs 26px; one radius for all; icon buttons are square at 34 / 26
+   States        hover = a step on the neutral ramp or the darker accent (no filter, no glow, no shadow);
+                 focus-visible = a 2px ring outside the control (the only outline that is ever drawn);
+                 disabled = 50% and no hover; loading = .is-loading or aria-busy (spinner, no clicks)
+   Nothing here may glow: no accent box-shadow, no brightness filter, no blur. */
+:root {
+  --btn-h: 34px;
+  --btn-h-sm: 30px;
+  --btn-h-xs: 26px;
+  --btn-r: var(--r-sm);
+}
+.btn, .btn-icon, .btn-icon-xs, .send-circle-btn, .composer-chip, .cs-btn {
+  box-shadow: none;
+  filter: none;
+}
+.btn {
+  height: var(--btn-h);
+  border-radius: var(--btn-r);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--fg);
+  font-weight: 550;
+  padding: 0 var(--space-3);
+}
+.btn-sm { height: var(--btn-h-sm); padding: 0 10px; border-radius: var(--btn-r); }
+.btn-xs { height: var(--btn-h-xs); padding: 0 8px; border-radius: var(--btn-r); }
+.btn:hover:not(:disabled), .btn-secondary:hover:not(:disabled), .btn-outline:hover:not(:disabled) {
+  background: var(--surface-3); border-color: var(--muted-fg); color: var(--fg); filter: none;
+}
+.btn-secondary, .btn-outline { background: var(--surface-3); color: var(--fg); border: 1px solid var(--border-strong); }
+
+.btn.btn-primary { background: var(--primary); color: var(--on-primary); border-color: transparent; }
+.btn.btn-primary:hover:not(:disabled) { background: var(--primary-hover); border-color: transparent; color: var(--on-primary); filter: none; }
+
+.btn.btn-ghost { background: transparent; color: var(--muted-fg); border-color: transparent; }
+.btn.btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); border-color: transparent; }
+
+.btn.btn-destructive { background: var(--danger); color: #fff; border-color: transparent; }
+html.dark .btn.btn-destructive { color: #1c0806; }
+.btn.btn-destructive:hover:not(:disabled) { background: var(--danger); filter: none; box-shadow: inset 0 0 0 999px rgba(0, 0, 0, 0.12); }
+.btn.btn-danger-text { color: var(--danger); }
+.btn.btn-danger-text:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
+
+.btn:disabled, .btn-icon:disabled, .btn-icon-xs:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:active:not(:disabled) { transform: none; }
+
+/* loading: the label stays, a small ring turns in front of it */
+.btn.is-loading, .btn[aria-busy="true"] { position: relative; pointer-events: none; opacity: 0.8; }
+.btn.is-loading::before, .btn[aria-busy="true"]::before {
+  content: ""; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent; animation: btn-spin 0.8s linear infinite;
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+/* icon buttons: square, the same radius */
+.btn-icon, .btn-icon-xs { border-radius: var(--btn-r); }
+.btn-icon { width: var(--btn-h); height: var(--btn-h); }
+.btn-icon-xs { width: var(--btn-h-xs); height: var(--btn-h-xs); }
+.btn-icon:hover:not(:disabled), .btn-icon-xs:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
+
+/* the send button is a primary button in a square */
+.send-circle-btn { border-radius: var(--btn-r); background: var(--primary); color: var(--on-primary); border: 1px solid transparent; }
+.send-circle-btn:not(:disabled):hover { background: var(--primary-hover); transform: none; }
+
+/* one focus ring for every control */
+.btn:focus-visible, .btn-icon:focus-visible, .btn-icon-xs:focus-visible, .send-circle-btn:focus-visible,
+.composer-chip:focus-visible, .cs-btn:focus-visible, .settings-nav-btn:focus-visible, .nav-item:focus-visible, .nav-tab:focus-visible,
+.ui-switch input:focus-visible + .ui-switch-track {
+  outline: 2px solid var(--ring); outline-offset: 2px; box-shadow: none;
+}
+
+/* fields: selects, text inputs and text areas share the buttons' height and radius; focus = accent border and a hard 1px ring, no blur */
+.ui-input, .ui-select, .cs-btn.ui-input, .cs-btn.ui-select { border-radius: var(--btn-r); min-height: var(--btn-h); }
+.ui-input:focus, .ui-select:focus, .ui-textarea:focus, .cs-btn:focus-visible {
+  border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); outline: none; background: var(--surface);
+}
+.cs-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; box-shadow: none; }
+
+/* switches */
+.ui-switch { width: 36px; height: 20px; }
+.ui-switch-track { box-shadow: none; }
+.ui-switch input:disabled + .ui-switch-track { opacity: 0.5; cursor: not-allowed; }
