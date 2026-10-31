@@ -648,12 +648,12 @@ workgroup per CU).
    With it the HIP prompt of the 3B model was 85 % projections, 9 % attention (`attention4`, 6.4 ms per call), 2 % norms.
 2. **Vulkan: the cooperative-matrix prompt attention on AMD** (`attn_prefill_cm_d128`): the kernel needs 32-wide subgroups; RDNA's default for compute is 64, so it was NVIDIA-only. It is now pinned to 32 with
    `VK_EXT_subgroup_size_control` on AMD as well. Per layer, 460-token prompt: 5.1 -> 2.5 ms (the 3B prompt +2 to +4 % on its own). `FLLM_VK_ATTN_COOP=0` brings the scalar kernel back.
-3. **Vulkan: a cooperative-matrix GEMM for Q4_K on AMD** (`mm_q4_k_cx`, `mm_coopmat_w.comp`). The existing wide kernel `mm_q4_k_cw` (NVIDIA) at subgroup 32 reached 0.72 TMAC/s; its ISA showed 255 registers, 8-byte
+3. **Vulkan: a cooperative-matrix GEMM for Q4_K on AMD** (`mm_q4_k_cx`, its own file `mm_q4_k_cx.comp`, derived from `mm_coopmat_w.comp` as it was before the NVIDIA loader rewrite). The wide kernel `mm_q4_k_cw` (NVIDIA) at subgroup 32 reached 0.72 TMAC/s; its ISA showed 255 registers, 8-byte
    LDS reads (`f16vec4` tiles) and one-by-one half conversions. Steps (same weight, 512 tokens): `uvec4` tiles and `packFloat2x16` 0.82; K slices not unrolled (111 registers) 0.90; 64 x 128 tile instead of
    128 x 64 (every decoded weight serves 128 tokens) with the epilogue staged inside the weight tile 0.94 - 0.97 (the int8 kernel: 0.86); the byte-wise `v_cvt_f32_ubyte` extraction changed nothing. The pipelines of
    the cooperative-matrix GEMMs ask for subgroup 32 on AMD too (`FLLM_VK_COOP_SG64=1` keeps 64). It is planned for Q4_K only, from 128 tokens on, K a multiple of 64 and at most a quarter of the last 128-token tile empty;
    the device-wide timing at the first prompt still decides between it and the integer dot product (8.8 against 8.9 ms for 4096 x 4096 Q4_K, 512 tokens, on this laptop, so it is chosen), and every other
-   format and batch keeps `mmq_<fmt>_i`. The NVIDIA kernel `mm_<fmt>_cw` is unchanged (the new code is behind a macro; its SPIR-V differs only by the dead guard of the loader), **not re-run on an NVIDIA card in this pass**.
+   format and batch keeps `mmq_<fmt>_i`. The NVIDIA kernel `mm_<fmt>_cw` is not touched (separate shader file). After the rebase onto the NVIDIA rewrite (weights loaded ahead of the tensor cores): RTX 2000 Ada Vulkan, 546-token prompt, before -> after 2448 / 2422 -> 2417 / 2438 tok/s (3B), 1069 -> 1064 (8B), `selftest-gpu --device vulkan:1` 0 failed; Radeon 840M 3B 246 -> 268 tok/s on top of the attention commit (llama.cpp Vulkan 288 - 293 in the same hour), 8B 101 -> 106 (llama.cpp 125), `selftest-gpu` 0 failed.
 
 ### What did not help (kept out of the code)
 
