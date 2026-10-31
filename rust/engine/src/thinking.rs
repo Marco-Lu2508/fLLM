@@ -86,6 +86,25 @@ fn default_on(template: &str, variable: &str) -> bool {
         || template.contains(&format!("set {variable} = true"))
 }
 
+/// `true` when the template itself puts the model into a reasoning block (a template without a switch).
+///
+/// Almost every Qwen3 template mentions `<think>` and `</think>` to show earlier reasoning in the history, including the
+/// non-thinking Instruct-2507 releases, so the mention alone proves nothing. What makes a model think all the time is a
+/// generation prompt that opens the block (`<|im_start|>assistant\n<think>\n`): the text after the last
+/// `add_generation_prompt` decides. A template without that variable falls back to any mention of a reasoning tag.
+fn writes_reasoning_block(template: &str) -> bool {
+    const TAGS: [&str; 3] = ["<think", "</think", "<|channel>thought"];
+    let any = |text: &str| TAGS.iter().any(|tag| text.contains(tag));
+    match template.rfind("add_generation_prompt") {
+        Some(at) => {
+            let tail = &template[at..];
+            // an `if` before the generation prompt may also open with a tag of its own; only the part after it counts
+            tail.contains("<think") || tail.contains("<|channel>thought")
+        }
+        None => any(template),
+    }
+}
+
 impl ThinkingCaps {
     fn none() -> Self {
         Self { control: Control::None, variable: "", levels: Vec::new(), default: "off" }
@@ -113,7 +132,7 @@ impl ThinkingCaps {
         }
         // No switch. A model whose template writes or expects a reasoning block thinks all the time; a family that was named
         // explicitly (`--reasoning-parser`) or found by a template marker other than `<think>` counts as one.
-        let block = chat_template.contains("<think") || chat_template.contains("</think") || chat_template.contains("<|channel>thought");
+        let block = writes_reasoning_block(chat_template);
         let marked = !matches!(family, Family::None | Family::Think);
         if block || marked {
             return Self { control: Control::Always, variable: "", levels: vec!["high"], default: "high" };
@@ -296,6 +315,44 @@ mod tests {
         let c = caps(DEEPSEEK_R1, Family::Think, "qwen2");
         assert_eq!((c.control, c.levels.as_slice(), c.default), (Control::Always, ["high"].as_slice(), "high"));
         assert_eq!(caps("{{ x }}", Family::Mistral, "mistral3").control, Control::Always);
+    }
+
+    // Qwen3 2507 releases: both show earlier reasoning in the history (`<think>` and `</think>` appear in the text),
+    // only the Thinking one opens the block in the generation prompt.
+    const QWEN3_HISTORY: &str = "{%- if '</think>' in content %}{%- set reasoning_content = content.split('</think>')[0].split('<think>')[-1] %}{%- endif %}\
+        {{- '<|im_start|>assistant\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}";
+    const QWEN3_INSTRUCT_2507: &str = concat!(
+        "{%- if '</think>' in content %}{%- set reasoning_content = content.split('</think>')[0].split('<think>')[-1] %}{%- endif %}",
+        "{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}"
+    );
+    const QWEN3_THINKING_2507: &str = concat!(
+        "{%- if '</think>' in content %}{%- set reasoning_content = content.split('</think>')[0].split('<think>')[-1] %}{%- endif %}",
+        "{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n<think>\\n' }}\n{%- endif %}"
+    );
+    const R1_DISTILL: &str = "{% if add_generation_prompt and not ns.is_tool %}{{'<｜Assistant｜><think>\\n'}}{% endif %}";
+    const QWEN3_HYBRID: &str = concat!(
+        "{%- if '</think>' in content %}{%- set reasoning_content = content.split('</think>')[0] %}{%- endif %}",
+        "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}",
+        "{%- if enable_thinking is defined and enable_thinking is false %}{{- '<think>\\n\\n</think>\\n\\n' }}{%- endif %}{%- endif %}"
+    );
+
+    #[test]
+    fn template_detection_table_by_family() {
+        // (name, template, family the server picks, arch, expected control)
+        let table: [(&str, &str, Family, &str, Control); 7] = [
+            ("Qwen3 hybrid", QWEN3_HYBRID, Family::Think, "qwen3", Control::Toggle),
+            ("Qwen3-Instruct-2507 never thinks", QWEN3_INSTRUCT_2507, Family::Think, "qwen3", Control::None),
+            ("Qwen3-Thinking-2507 always thinks", QWEN3_THINKING_2507, Family::Think, "qwen3", Control::Always),
+            ("DeepSeek-R1 distill", R1_DISTILL, Family::Think, "qwen2", Control::Always),
+            ("gpt-oss harmony", GPT_OSS, Family::GptOss, "gpt-oss", Control::Effort),
+            ("GLM with switch", GLM, Family::Think, "glm4moe", Control::Toggle),
+            ("Gemma 3", GEMMA3, Family::Think, "gemma3", Control::None),
+        ];
+        for (name, template, family, arch, expected) in table {
+            assert_eq!(caps(template, family, arch).control, expected, "{name}");
+        }
+        // a history-only mention without a generation prompt in the text still counts as a reasoning template
+        assert_eq!(caps(QWEN3_HISTORY, Family::Think, "qwen3").control, Control::Always);
     }
 
     #[test]
