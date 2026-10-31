@@ -1,10 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: misc_dsa_topk | bindings: scores,meta,sel | push: topk,score_stride,row0,rows_total | grid: [rows in this dispatch, 1, 1]
+// FLLM-SHADER: misc_dsa_topk | bindings: scores,meta,sel | push: topk,score_stride,row0,rows_total,len_div,out_stride | grid: [rows in this dispatch, 1, 1]
 // Top-k of the indexer scores (Stream::dsa_select): one workgroup per row r = row0 + gl_WorkGroupID.x. sel[r * topk ..] receives the topk best positions
 // of the row in ascending order (equal scores: the lower position wins), -1 padded; a row with at most topk tokens lists all of them.
 // The k-th largest score is found by a radix select over the order-preserving integer keys of the floats (four passes of eight bits), then the
-// positions are collected in order with block-wide prefix sums. meta = int32: lengths[rows_total], then block tables (not read here).
+// positions are collected in order with block-wide prefix sums. Row r of sel starts at r * out_stride. len_div > 1 (the k-pool indexer): the row has lengths[r] / len_div entries (pools). meta = int32: lengths[rows_total], then block tables (not read here).
 #define WG 256
 #include "_ops_common.glsl"
 layout(local_size_x = WG) in;
@@ -17,6 +17,8 @@ layout(push_constant) uniform P {
     uint score_stride;
     uint row0;
     uint rows_total;
+    uint len_div;
+    uint out_stride;
 } p;
 
 shared uint hist[256];
@@ -51,8 +53,8 @@ int block_scan(int v) {
 void main() {
     const uint t = gl_LocalInvocationID.x;
     const uint r = p.row0 + gl_WorkGroupID.x;
-    const uint n = uint(meta[r]);
-    const uint out0 = r * p.topk;
+    const uint n = uint(meta[r]) / p.len_div;
+    const uint out0 = r * p.out_stride;
     if (n <= p.topk) {
         for (uint j = t; j < p.topk; j += WG) sel[out0 + j] = j < n ? int(j) : -1;
         return;

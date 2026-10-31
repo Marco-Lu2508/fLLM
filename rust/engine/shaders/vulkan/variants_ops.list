@@ -26,6 +26,9 @@ mla_move_k mla_move.comp -DMODE=1
 mla_move_v mla_move.comp -DMODE=2
 mla_move_latent mla_move.comp -DMODE=3
 
+misc_dsa_scores misc_dsa_scores.comp
+misc_dsa_scores_v4 misc_dsa_scores.comp -DVEC4=1
+
 # embedding lookup: raw float tables and the planar quantized layouts
 embed_f32 embed.comp -DRAW_F32
 embed_f16 embed.comp -DRAW_F16

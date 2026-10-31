@@ -976,6 +976,9 @@ fn sample_plans() -> Vec<OpPlan> {
     v.push(super::plan_scale(64, 0.5).unwrap());
     {
         use crate::backend::vulkan::ops::hc::{plan_hc_combine, plan_hc_mix, plan_rotate_heads};
+        for kind in [crate::backend::ClampedGlu::Clamp(2.0), crate::backend::ClampedGlu::Situ(2.0, 1.0)] {
+            v.push(crate::backend::vulkan::ops::plan_glu_ext(kind, 64).unwrap());
+        }
         v.push(plan_rotate_heads(64, 16, 4).unwrap());
         use crate::backend::HcMode;
         for mode in [HcMode::Independent { magnitude: 2.0 }, HcMode::Sinkhorn { iters: 4 }, HcMode::Head, HcMode::Mean] {
@@ -987,15 +990,22 @@ fn sample_plans() -> Vec<OpPlan> {
     }
     {
         use crate::backend::vulkan::ops::dsa::{plan_dsa_attention, plan_dsa_select};
-        let p = crate::backend::DsaParams { heads: 4, dim: 32, topk: 8, stride: 128, block_size: 16, scale: 0.25, head_scale: 0.5 };
+        let p = crate::backend::DsaParams { heads: 4, dim: 32, topk: 8, stride: 128, block_size: 16, scale: 0.25, head_scale: 0.5, kpool: 1, always_tail: false };
         let table: Vec<i64> = (0..128i64).collect();
         for lengths in [vec![300i64, 5, 1000], vec![3i64, 5]] {
             let tables: Vec<i64> = lengths.iter().flat_map(|_| table.iter().copied()).collect();
             let slots: Vec<usize> = (0..lengths.len()).collect();
-            v.extend(plan_dsa_select(&p, &slots, &tables, &lengths, 128 * 16).unwrap());
+            v.extend(plan_dsa_select(&p, &slots, &tables, &lengths, 128 * 16).unwrap().into_iter().flatten());
+        }
+        let odd = crate::backend::DsaParams { dim: 30, ..p };
+        v.extend(plan_dsa_select(&odd, &[0, 1], &table.iter().chain(table.iter()).copied().collect::<Vec<_>>(), &[300, 5], 128 * 16).unwrap().into_iter().flatten());
+        let pooled = crate::backend::DsaParams { topk: 16, kpool: 4, always_tail: true, ..p };
+        for lengths in [vec![300i64, 5, 1000], vec![3i64, 5, 9]] {
+            let t3: Vec<i64> = lengths.iter().flat_map(|_| table.iter().copied()).collect();
+            v.extend(plan_dsa_select(&pooled, &[0, 1, 2], &t3, &lengths, 128 * 16 * 2).unwrap().into_iter().flatten());
         }
         let tables: Vec<i64> = table.iter().chain(table.iter()).copied().collect();
-        v.push(plan_dsa_attention(&kv_layout(1, 4, 192, 128, 16, 128), &attn_params(4, 4, 192, 128, 16, 128), 8, &tables).unwrap());
+        v.extend(plan_dsa_attention(&kv_layout(1, 4, 192, 128, 16, 128), &attn_params(4, 4, 192, 128, 16, 128), 8, &tables).unwrap());
     }
     for beta in [None, Some(0.5)] {
         v.push(super::plan_head_gate(64, 8, beta).unwrap());
@@ -1282,7 +1292,8 @@ fn plans_match_the_shader_headers() {
             })
             .collect();
         // gemm / route rename a few slots after the fact: compare counts for those
-        let renamed = matches!(p.shader_name, "moe_topk" | "moe_combine")
+        // misc_dsa_topk writes the chosen pools to scratch named psel (a scratch slot named like an argument would alias it) when the indexer pools
+        let renamed = matches!(p.shader_name, "moe_topk" | "moe_combine" | "misc_dsa_topk")
             || p.shader_name.starts_with("moe_linear");
         if renamed {
             assert_eq!(names.len(), bindings.len(), "{}", p.shader_name);

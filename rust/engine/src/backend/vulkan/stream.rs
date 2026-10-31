@@ -912,6 +912,21 @@ impl Stream for VulkanStream {
         true
     }
 
+    fn glu_clamped(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer, kind: crate::backend::ClampedGlu) -> Result<(), BackendError> {
+        if !out.size.is_multiple_of(4) || gate.size < out.size || up.size < out.size {
+            return Err(invalid("clamped gated activation does not fit its buffers"));
+        }
+        if out.size == 0 {
+            return Ok(());
+        }
+        let plan = crate::backend::vulkan::ops::plan_glu_ext(kind, out.size / 4)?;
+        self.run_plans(&[plan], &[Arg::r("gate", gate), Arg::r("up", up), Arg::w("out", out)], &[], false)
+    }
+
+    fn supports_glu_clamped(&self) -> bool {
+        true
+    }
+
     fn supports_hc(&self, hc: usize) -> bool {
         (1..=crate::backend::vulkan::ops::hc::MAX_STREAMS).contains(&hc)
     }
@@ -978,7 +993,7 @@ impl Stream for VulkanStream {
     }
 
     fn supports_dsa(&self, params: &DsaParams, key_dim: usize, kv_kind: i32) -> bool {
-        kv_kind == 1 && params.topk > 0 && params.heads > 0 && params.dim > 0 && key_dim <= crate::backend::vulkan::ops::dsa::MAX_DK && self.sh.caps().max_workgroup_invocations >= 256
+        kv_kind == 1 && params.topk > 0 && params.heads > 0 && params.dim > 0 && (params.kpool <= 1 || (params.dim <= 128 && params.kpool <= 16 && params.topk >= params.kpool)) && key_dim <= crate::backend::vulkan::ops::dsa::MAX_DK && self.sh.caps().max_workgroup_invocations >= 256
     }
 
     fn dsa_select(
@@ -987,6 +1002,8 @@ impl Stream for VulkanStream {
         store: &mut DeviceBuffer,
         q: &DeviceBuffer,
         k: &DeviceBuffer,
+        gate: Option<&DeviceBuffer>,
+        ape: Option<&DeviceBuffer>,
         w: &DeviceBuffer,
         slots: &[usize],
         block_tables: &[i64],
@@ -997,12 +1014,33 @@ impl Stream for VulkanStream {
         if rows == 0 {
             return Ok(());
         }
-        let (heads, dim, topk) = (params.heads, params.dim, params.topk);
-        if q.size < rows * heads * dim * 4 || k.size < rows * dim * 4 || w.size < rows * heads * 4 || sel.size < rows * topk * 4 || !store.size.is_multiple_of(dim * 4) {
+        let (heads, dim) = (params.heads, params.dim);
+        let width = params.store_width();
+        let pooled = params.kpool > 1;
+        if q.size < rows * heads * dim * 4
+            || k.size < rows * dim * 4
+            || w.size < rows * heads * 4
+            || sel.size < rows * params.sel_width() * 4
+            || !store.size.is_multiple_of(width * 4)
+            || (pooled && (gate.is_none_or(|g| g.size < rows * dim * 4) || ape.is_none_or(|a| a.size < params.kpool * dim * 4)))
+        {
             return Err(invalid("lightning indexer: buffers smaller than the batch"));
         }
-        let plans = crate::backend::vulkan::ops::dsa::plan_dsa_select(params, slots, block_tables, lengths, store.size / (dim * 4))?;
-        self.run_plans(&plans, &[Arg::w("store", store), Arg::r("k", k), Arg::r("q", q), Arg::r("w", w), Arg::w("sel", sel)], &[], false)
+        let groups = crate::backend::vulkan::ops::dsa::plan_dsa_select(params, slots, block_tables, lengths, store.size / (width * 4))?;
+        let mut args = vec![Arg::w("store", store), Arg::r("k", k), Arg::r("q", q), Arg::r("w", w), Arg::w("sel", sel)];
+        if let (true, Some(g), Some(a)) = (pooled, gate, ape) {
+            args.push(Arg::r("gate", g));
+            args.push(Arg::r("ape", a));
+        }
+        // each group of rows is its own submission: a long job on a small GPU that other programs share makes the driver reset the device
+        let last = groups.len() - 1;
+        for (index, group) in groups.iter().enumerate() {
+            self.run_plans(group, &args, &[], false)?;
+            if groups.len() > 2 && index < last {
+                self.flush()?;
+            }
+        }
+        Ok(())
     }
 
     fn dsa_attention(
@@ -1025,8 +1063,14 @@ impl Stream for VulkanStream {
             return Err(invalid("sparse attention q / out / selection smaller than the batch"));
         }
         let (layout, keys, values) = self.kv_windows(kv, layer_idx)?;
-        let plan = crate::backend::vulkan::ops::dsa::plan_dsa_attention(&layout, params, topk, block_tables)?;
-        self.run_plans(&[plan], &[Arg::r("q", q), Arg::view("kpool", keys), Arg::view("vpool", values), Arg::r("sel", sel), Arg::w("out", out)], &[], false)
+        let plans = crate::backend::vulkan::ops::dsa::plan_dsa_attention(&layout, params, topk, block_tables)?;
+        for (index, plan) in plans.iter().enumerate() {
+            self.run_plans(std::slice::from_ref(plan), &[Arg::r("q", q), Arg::view("kpool", keys.clone()), Arg::view("vpool", values.clone()), Arg::r("sel", sel), Arg::w("out", out)], &[], false)?;
+            if plans.len() > 1 && index + 1 < plans.len() {
+                self.flush()?;
+            }
+        }
+        Ok(())
     }
 
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {

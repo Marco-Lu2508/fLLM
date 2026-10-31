@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: act_glu_ext | bindings: gate,up,out | push: count,kind,p0,p1 | grid: [min(ceil(count/256), 65535), 1, 1]
+// Gated activations with a clamp (Stream::glu_clamped; Hy4, GLM-5-Next and Kimi K3 feed-forward blocks), dense buffers, grid-stride loop over count floats:
+//   kind 0 clamped SwiGLU: g = min(gate, p0); out = g * sigmoid(g) * clamp(up, -p0, p0)
+//   kind 1 SiTU:           out = p0 * tanh(gate / p0) * sigmoid(gate) * u, u = p1 > 0 ? p1 * tanh(up / p1) : up
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 1) readonly buffer UpBuf { float up[]; };
+layout(std430, binding = 2) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint kind;
+    float p0;
+    float p1;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const float g0 = gate[i];
+        if (p.kind == 0u) {
+            const float g = min(g0, p.p0);
+            outv[i] = g * sigmoid1(g) * clamp(up[i], -p.p0, p.p0);
+        } else {
+            const float u = p.p1 > 0.0 ? p.p1 * tanh(clamp(up[i] / p.p1, -15.0, 15.0)) : up[i];
+            outv[i] = p.p0 * tanh(clamp(g0 / p.p0, -15.0, 15.0)) * sigmoid1(g0) * u;
+        }
+    }
+}

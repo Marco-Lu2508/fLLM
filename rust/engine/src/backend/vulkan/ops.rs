@@ -596,6 +596,21 @@ pub fn plan_ewise(softplus: bool, count: usize, param: f32) -> Result<OpPlan, Ba
     )
 }
 
+/// `Stream::glu_clamped` (`act_glu_ext`): kind 0 clamped SwiGLU with limit `p0`, kind 1 SiTU with `p0` = beta and `p1` = linear beta, over `count` floats.
+pub fn plan_glu_ext(kind: crate::backend::ClampedGlu, count: usize) -> Result<OpPlan, BackendError> {
+    if count == 0 {
+        return Err(invalid("clamped activation of an empty tensor"));
+    }
+    let (code, p0, p1) = match kind {
+        crate::backend::ClampedGlu::Clamp(limit) => (0, limit, 0.0),
+        crate::backend::ClampedGlu::Situ(beta, linear_beta) => (1, beta, linear_beta),
+    };
+    if p0 <= 0.0 || !p0.is_finite() {
+        return Err(invalid("clamped activation: the limit or beta must be a positive number"));
+    }
+    plan("act_glu_ext", Push::new().u("count", count).u("kind", code).f("p0", p0).f("p1", p1), groups_1d(count, 256), Slots::new().read("gate").read("up").write("out"))
+}
+
 /// `Stream::scale_inplace` (`ewise_scale`: `x *= factor`).
 pub fn plan_scale(count: usize, factor: f32) -> Result<OpPlan, BackendError> {
     if count == 0 {

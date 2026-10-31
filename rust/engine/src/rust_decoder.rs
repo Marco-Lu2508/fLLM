@@ -79,6 +79,8 @@ enum GluMode {
     Geglu,
     /// gpt-oss: alpha and clamp limit.
     SwigluOai(f32, f32),
+    /// Hy4 / GLM-5-Next clamped SwiGLU, Kimi K3 SiTU.
+    Clamped(crate::backend::ClampedGlu),
 }
 
 /// Where the three projections of a gated FFN / expert come from when it is computed on the device.
@@ -192,7 +194,9 @@ struct DeviceDsa {
     proj: crate::backend::DeviceWeight,
     k_norm: crate::backend::DeviceBuffer,
     k_norm_bias: crate::backend::DeviceBuffer,
-    /// One `dim`-wide f32 row per cache slot.
+    /// K-pool indexer: the projection of the gate scores of the pooling and the position bias (`kpool x dim`).
+    pool: Option<(crate::backend::DeviceWeight, crate::backend::DeviceBuffer)>,
+    /// One `store_width`-wide f32 row per cache slot (key, and with pools the gate score).
     store: crate::backend::DeviceBuffer,
 }
 
@@ -2868,6 +2872,8 @@ impl RustDecoder {
             block_size: self.block_size,
             scale: (ic.dim as f32).powf(-0.5),
             head_scale: (ic.heads as f32).powf(-0.5),
+            kpool: ic.kpool.max(1),
+            always_tail: ic.always_tail,
         })
     }
 
@@ -2875,10 +2881,10 @@ impl RustDecoder {
     /// indexers and the tail rotation of Hy4 have no device kernel); `FLLM_DSA=host` keeps the layers on the host.
     fn dsa_device_possible(&self, backend: &dyn crate::backend::Backend) -> bool {
         let (Some(ic), Some(mc), Some(params)) = (self.cfg.indexer.as_ref(), self.cfg.mla.as_ref(), self.dsa_params()) else { return false };
-        if self.dsa_dense || std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("host")) || self.mla_latent || ic.kpool > 1 || self.cfg.kv_heads != self.cfg.heads {
+        if self.dsa_dense || std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("host")) || self.mla_latent || self.cfg.kv_heads != self.cfg.heads {
             return false;
         }
-        let plain = self.layers.iter().all(|l| l.indexer.as_deref().is_none_or(|ix| ix.pool.is_none()) && (l.indexer.is_none() || l.window.is_none()));
+        let plain = self.layers.iter().all(|l| l.indexer.as_deref().is_none_or(|ix| ix.pool.is_some() == (ic.kpool > 1)) && (l.indexer.is_none() || l.window.is_none()));
         let q_low = self.layers.iter().all(|l| l.indexer.is_none() || matches!(&l.attn, Attn::Mla(m) if m.q_a.is_some()));
         plain && q_low && backend.create_stream().is_ok_and(|s| s.supports_dsa(&params, mc.nope + mc.rope, self.kv_kind) && (!ic.rope_last || s.supports_rotate_heads()))
     }
@@ -2892,10 +2898,6 @@ impl RustDecoder {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
-        }
-        if layer.shortcut.is_some() || layer.takes_shortcut {
-            // the shortcut experts join the stream two sublayers later: the pass over the layers keeps them on the host
-            return Some("shortcut experts across layers");
         }
         if cfg.inkling.is_some() {
             return Some("Inkling convolutions and relative position bias");
@@ -3004,12 +3006,12 @@ impl RustDecoder {
     }
 
     /// Why the feed-forward of `layer` has to use the host reference code although the mixer runs on the device.
-    fn ffn_host_reason(&self, layer: &Layer, arch_ok: bool) -> Option<&'static str> {
+    fn ffn_host_reason(&self, layer: &Layer, arch_ok: bool, clamp_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         let native = |a: Activation| matches!(a, Activation::Silu | Activation::GeluTanh) || arch_ok;
         // the clamped SwiGLU (Hy4, GLM-5-Next) and SiTU (Kimi K3) have no device kernel; the device GLU would apply the plain SwiGLU
-        if (cfg.situ.is_some() || cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some())) && matches!(layer.ffn, Ffn::Moe(_) | Ffn::Gated { .. }) {
-            return Some("a clamped SwiGLU or SiTU activation");
+        if !clamp_ok && (cfg.situ.is_some() || cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some())) && matches!(layer.ffn, Ffn::Moe(_) | Ffn::Gated { .. }) {
+            return Some("a clamped SwiGLU or SiTU activation (the backend has no kernel for it)");
         }
         match &layer.ffn {
             // the all-to-all combine of expert parallelism exchanges tokens between the ranks on the host (the other combines run the
@@ -3102,7 +3104,7 @@ impl RustDecoder {
         let shape = ModelShape {
             all_layers_standard_attention: self.layers.iter().all(|l| matches!(l.attn, Attn::Std { .. })),
             host_layers: layer_reasons.iter().any(Option::is_some)
-                || self.layers.iter().any(|l| l.value_moe.is_some() || self.ffn_host_reason(l, true).is_some())
+                || self.layers.iter().any(|l| l.value_moe.is_some() || self.ffn_host_reason(l, true, true).is_some())
                 || FFN_HOST_FROM.lock().ok().and_then(|slot| *slot).is_some_and(|(layers, _)| layers == self.layers.len()),
             moe: self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe(_))),
             mla: cfg.mla.is_some(),
@@ -3162,6 +3164,7 @@ impl RustDecoder {
         self.dsa_device = dsa_ok && self.cfg.indexer.is_some();
         // hyper-connections on the device: the streams get their own buffer and the mixing runs in two small kernels per block; the layers' own
         // mixers and feed-forwards are the ordinary device ones (a branch output is the difference of the residual buffer before and after)
+        let clamp_ok = backend.create_stream().is_ok_and(|s| s.supports_glu_clamped());
         let hc_ok = self.hc.is_some()
             && self.cfg.residual_scale == 1.0
             && self.par.is_none()
@@ -3220,6 +3223,12 @@ impl RustDecoder {
                 }
             })
             .collect();
+        // LongCat-Flash: the shortcut experts of a layer join the stream after the layer that follows. The pending result lives in the pass over the
+        // layers (device or host), so the model runs completely on one side; the shortcut MoE itself is computed by the host reference code
+        // (routing with zero experts has no device kernel) between the device layers.
+        if self.layers.iter().any(|l| l.shortcut.is_some() || l.takes_shortcut) && layer_reasons.iter().any(Option::is_some) {
+            layer_reasons.iter_mut().for_each(|r| *r = Some("shortcut experts across layers (a layer of the model has no device kernels)"));
+        }
         // the residual streams exist on one side only: a model with hyper-connections runs completely on the device or completely on the host
         if hc_ok && layer_reasons.iter().any(Option::is_some) {
             self.hc_device = false;
@@ -3445,8 +3454,8 @@ impl RustDecoder {
                 dev_layers.push(DeviceLayerWeights::empty(true));
                 continue;
             }
-            let ffn_host_exact = self.ffn_host_reason(layer, arch_ok).is_some();
-            if let Some(reason) = self.ffn_host_reason(layer, arch_ok) {
+            let ffn_host_exact = self.ffn_host_reason(layer, arch_ok, clamp_ok).is_some();
+            if let Some(reason) = self.ffn_host_reason(layer, arch_ok, clamp_ok) {
                 ffn_host_blocks.0 += 1;
                 ffn_host_blocks.1 = reason;
             }
@@ -3614,7 +3623,11 @@ impl RustDecoder {
                     proj: upload_linear(&format!("blk.{i}.indexer.proj"), &ix.proj)?,
                     k_norm: upload_vec(&ix.k_norm)?,
                     k_norm_bias: upload_vec(&ix.k_norm_bias)?,
-                    store: backend.allocate_buffer(self.pool_blocks * self.block_size * ic.dim * 4).map_err(|e| e.to_string())?,
+                    pool: match &ix.pool {
+                        Some((gate, ape)) => Some((upload_linear(&format!("blk.{i}.indexer.pool_gate"), gate)?, upload_vec(ape)?)),
+                        None => None,
+                    },
+                    store: backend.allocate_buffer(self.pool_blocks * self.block_size * ic.store_width() * 4).map_err(|e| e.to_string())?,
                 }),
                 _ => None,
             };
@@ -3634,7 +3647,7 @@ impl RustDecoder {
                     .and_then(|slot| *slot)
                     .is_some_and(|(layers, first)| layers == self.layers.len() && i >= first);
             let merged_gate_up = match &layer.ffn {
-                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) => {
+                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) && !matches!(self.dense_glu_mode(), Some(GluMode::Clamped(_))) => {
                     upload_merged(&format!("blk.{i}.ffn_gate_up"), &[gate, up])?
                 }
                 _ => None,
@@ -3829,6 +3842,10 @@ impl RustDecoder {
             });
         }
 
+        let shortcut_layers = self.layers.iter().filter(|l| l.shortcut.is_some()).count();
+        if shortcut_layers > 0 {
+            eprintln!("[fllm-rs] the shortcut experts of {shortcut_layers} layers run on the host (their routing has zero experts, which no device kernel handles); the rest of the model runs on the device");
+        }
         if ffn_host_blocks.0 > 0 {
             eprintln!("[fllm-rs] the feed-forward blocks of {} of {} layers run on the host: {}", ffn_host_blocks.0, self.layers.len(), ffn_host_blocks.1);
         }
@@ -4111,6 +4128,8 @@ impl RustDecoder {
         let mut delta_plan: Option<Vec<DeltaPlanRun>> = None;
         // the norm of the next layer (or the final norm), when the residual add of this layer's feed-forward block already computed it
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
+        // LongCat-Flash: the shortcut experts of the layer before, added after the feed-forward block of the layer that follows
+        let mut pending_shortcut_dev: Option<crate::backend::DeviceBuffer> = None;
         // selection of the lightning indexer of the last layer that has one (the layers after it without an indexer reuse it)
         let mut dsa_sel: Option<crate::backend::DeviceBuffer> = None;
         // the head GEMM reads the final norm output directly when every row's logits are wanted in order
@@ -4529,8 +4548,8 @@ impl RustDecoder {
                         cos: Arc::clone(cos),
                         sin: Arc::clone(sin),
                     };
-                    // NoPE latent attention (Kimi-Linear) has no rotary part: nothing to rotate
-                    if mc.rope > 0 {
+                    // a latent attention without rotary values (GLM-5-Next, Kimi-Linear, Kimi K3) stores the keys as assembled
+                    if mc.rotary && mc.rope > 0 {
                         stream.rope(&mut q_buf, &mut k_buf, &positions, &rope_params).map_err(err)?;
                     }
                     stream.kv_cache_write(dev_kv, kvi, &slots, &k_buf, &v_buf).map_err(err)?;
@@ -4588,10 +4607,23 @@ impl RustDecoder {
                             stream.quantized_linear(&mut iw, &normed_buf, &ds.proj, ds.proj.bias.as_ref()).map_err(err)?;
                             let (cos, sin) = &dev_weights.rope[layer.rope_table];
                             let rope_params = RopeParams { heads: ic.heads, kv_heads: 1, dim: ic.dim, rope_dim: mc.rope, neox: ic.neox, cos: Arc::clone(cos), sin: Arc::clone(sin) };
-                            stream.rope(&mut iq, &mut ik, &positions, &rope_params).map_err(err)?;
-                            let mut sel = scratch.acquire(rows * ic.topk * 4).map_err(err)?;
+                            if mc.rotary && mc.rope > 0 {
+                                stream.rope(&mut iq, &mut ik, &positions, &rope_params).map_err(err)?;
+                            }
+                            let mut sel = scratch.acquire(rows * dp.sel_width() * 4).map_err(err)?;
                             let mut store = ds.store.clone();
-                            stream.dsa_select(&mut sel, &mut store, &iq, &ik, &iw, &slots, tables, lengths, &dp).map_err(err)?;
+                            let gate = match &ds.pool {
+                                Some((gate_w, _)) => {
+                                    let mut g = scratch.acquire(rows * ic.dim * 4).map_err(err)?;
+                                    stream.quantized_linear(&mut g, &normed_buf, gate_w, gate_w.bias.as_ref()).map_err(err)?;
+                                    Some(g)
+                                }
+                                None => None,
+                            };
+                            stream.dsa_select(&mut sel, &mut store, &iq, &ik, gate.as_ref(), ds.pool.as_ref().map(|(_, ape)| ape), &iw, &slots, tables, lengths, &dp).map_err(err)?;
+                            if let Some(g) = gate {
+                                scratch.recycle(g);
+                            }
                             for buf in [iq, ik, iw] {
                                 scratch.recycle(buf);
                             }
@@ -4600,7 +4632,7 @@ impl RustDecoder {
                             }
                         }
                         let sel = dsa_sel.as_ref().ok_or_else(|| format!("layer {i} shares the sparse-attention selection of the layer before, which did not run"))?;
-                        stream.dsa_attention(&mut attn_buf, &q_buf, dev_kv, tables, read_layer, sel, ic.topk, &attn_params).map_err(err)?;
+                        stream.dsa_attention(&mut attn_buf, &q_buf, dev_kv, tables, read_layer, sel, dp.sel_width(), &attn_params).map_err(err)?;
                     } else {
                         stream
                             .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
@@ -4834,6 +4866,17 @@ impl RustDecoder {
                 stream.residual_add(&mut x_buf, &branch, cfg.residual_scale).map_err(err)?;
                 scratch.recycle(branch);
             }
+            if let Some(moe) = &layer.shortcut {
+                let mut host_in = vec![0.0f32; rows * hidden];
+                stream.download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed).map_err(err)?;
+                let mut workspace = compute::ProjectionGroupWorkspace::default();
+                let out = self.shortcut_forward(moe, &host_in, &mut workspace)?;
+                let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                stream.upload(&mut buf, cast_f32_to_u8(&out)).map_err(err)?;
+                if let Some(old) = pending_shortcut_dev.replace(buf) {
+                    scratch.recycle(old);
+                }
+            }
             if i == 0 {
                 debug_sum(&mut **stream, "attn_post_norm-0 (ffn input)", &ffn_normed);
             }
@@ -4857,7 +4900,12 @@ impl RustDecoder {
                 // NVFP4 prompts and 4-bit Marlin: both GEMMs leave FP16 and the gated activation reads it (folded into the activation
                 // quantization / conversion of the down projection)
                 let mut half_glu = false;
-                if Self::half_out_weight(gate_w)
+                let dense_clamped = match self.dense_glu_mode() {
+                    Some(GluMode::Clamped(kind)) => Some(kind),
+                    _ => None,
+                };
+                if dense_clamped.is_none()
+                    && Self::half_out_weight(gate_w)
                     && matches!(cfg.activation, Activation::Silu | Activation::GeluTanh)
                     && !crate::backend::env_flag_once!("FLLM_NO_F16_FFN")
                     && gate_w.bias.is_none()
@@ -4885,10 +4933,14 @@ impl RustDecoder {
                 stream
                     .quantized_linear(&mut up_buf, &ffn_normed, up_w, up_w.bias.as_ref())
                     .map_err(err)?;
+                if let Some(kind) = dense_clamped {
+                    stream.glu_clamped(&mut act_buf, &gate_buf, &up_buf, kind).map_err(err)?;
+                } else {
                 match cfg.activation {
                     Activation::GeluTanh => stream.geglu(&mut act_buf, &gate_buf, &up_buf).map_err(err)?,
                     Activation::Silu => stream.swiglu(&mut act_buf, &gate_buf, &up_buf).map_err(err)?,
                     _ => stream.activation_glu(&mut act_buf, &gate_buf, &up_buf, act).map_err(err)?,
+                }
                 }
                 }
                 } else {
@@ -4993,7 +5045,7 @@ impl RustDecoder {
                     match &layer.ffn {
                         Ffn::Gated { gate, up, down } if big => {
                             if let (Some(mode), Some(w)) =
-                                (self.device_glu_mode(), Self::gated_weights(&**stream, gate, up, down))
+                                (self.dense_glu_mode(), Self::gated_weights(&**stream, gate, up, down))
                             {
                                 streamed = Some(Self::gated_run(
                                     &mut **stream,
@@ -5058,6 +5110,12 @@ impl RustDecoder {
                     .residual_add(&mut x_buf, &ffn_out_buf, cfg.residual_scale)
                     .map_err(err)?;
                 scratch.recycle(ffn_out_buf);
+            }
+            if layer.takes_shortcut {
+                if let Some(buf) = pending_shortcut_dev.take() {
+                    stream.residual_add(&mut x_buf, &buf, 1.0).map_err(err)?;
+                    scratch.recycle(buf);
+                }
             }
             if let (Some(streams), Some(block)) = (hc_streams.as_mut(), hc_block.take()) {
                 self.hc_leave(&mut **stream, &mut scratch, streams, &mut x_buf, block, rows, i, true)?;
@@ -6600,6 +6658,25 @@ impl RustDecoder {
 
     /// The gated activation of the device path (SwiGLU, GeGLU, gpt-oss SwiGLU); the others stay on the host.
     fn device_glu_mode(&self) -> Option<GluMode> {
+        // routed experts: SiTU, or the clamped SwiGLU
+        if let Some((beta, linear_beta)) = self.cfg.situ {
+            return Some(GluMode::Clamped(crate::backend::ClampedGlu::Situ(beta, linear_beta)));
+        }
+        if let Some(limit) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_clamp) {
+            return Some(GluMode::Clamped(crate::backend::ClampedGlu::Clamp(limit)));
+        }
+        self.plain_glu_mode()
+    }
+
+    /// The gated activation of the dense feed-forward layers and of the shared expert: like the routed experts' unless only they are clamped.
+    fn dense_glu_mode(&self) -> Option<GluMode> {
+        if self.cfg.situ.is_some() || self.cfg.moe.as_ref().is_some_and(|m| m.swiglu_clamp.is_some() && m.swiglu_clamp_shared) {
+            return self.device_glu_mode();
+        }
+        self.plain_glu_mode()
+    }
+
+    fn plain_glu_mode(&self) -> Option<GluMode> {
         if let Some((alpha, limit)) = self.cfg.moe.as_ref().and_then(|m| m.swiglu_oai) {
             return Some(GluMode::SwigluOai(alpha, limit));
         }
@@ -6627,6 +6704,7 @@ impl RustDecoder {
             GluMode::Swiglu => stream.swiglu(out, gate, up),
             GluMode::Geglu => stream.geglu(out, gate, up),
             GluMode::SwigluOai(alpha, limit) => stream.swiglu_oai(out, gate, up, alpha, limit),
+            GluMode::Clamped(kind) => stream.glu_clamped(out, gate, up, kind),
         }
         .map_err(|e| e.to_string())
     }
@@ -6863,7 +6941,7 @@ impl RustDecoder {
             scratch.recycle(result);
         }
         if let Some((src, gate_vec)) = shared {
-            let result = Self::gated_run(stream, scratch, mode, &src, x, rows)?;
+            let result = Self::gated_run(stream, scratch, self.dense_glu_mode().unwrap_or(mode), &src, x, rows)?;
             let idx: Vec<i32> = (0..rows as i32).collect();
             let scales: Option<Vec<f32>> = gate_vec.as_ref().map(|g| {
                 (0..rows)

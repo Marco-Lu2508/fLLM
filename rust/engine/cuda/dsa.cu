@@ -8,23 +8,27 @@
 //   dsa_attn    attention of (row, head) over the listed positions of an f16 KV cache
 //
 // FP32 CUDA-core code with block-level primitives only (no warp intrinsics), so the same file builds for AMD GPUs.
+#include <stdlib.h>
 #include "common.cuh"
 #include "fllm_cuda_internal.h"
 
 #define DSA_TOPK_THREADS 512
 #define DSA_ATTN_THREADS 128
 
-__global__ void dsa_keys_kernel(float *__restrict__ store, const float *__restrict__ k, const int32_t *__restrict__ slots, int rows, int dim) {
+// store row of a slot: `width` floats, the key (dim) and, for the k-pool indexer, the gate scores of the pooling (dim more)
+__global__ void dsa_keys_kernel(float *__restrict__ store, const float *__restrict__ k, const float *__restrict__ gate, const int32_t *__restrict__ slots, int rows,
+                                int dim, int width) {
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)rows * dim; i += (size_t)gridDim.x * blockDim.x) {
         const size_t r = i / dim, d = i % dim;
-        store[(size_t)slots[r] * dim + d] = k[i];
+        store[(size_t)slots[r] * width + d] = k[i];
+        if (gate) store[(size_t)slots[r] * width + dim + d] = gate[i];
     }
 }
 
 // grid (ceil(max_len / blockDim), rows); dynamic shared memory: heads * dim query values and heads weights of the row
 __global__ void dsa_scores_kernel(const float *__restrict__ q, const float *__restrict__ w, const float *__restrict__ store, const int64_t *__restrict__ tables,
-                                  const int64_t *__restrict__ lengths, float *__restrict__ scores, size_t score_stride, int heads, int dim, int stride,
-                                  int block_size, float scale, float head_scale) {
+                                  const int64_t *__restrict__ lengths, float *__restrict__ scores, size_t score_stride, int heads, int dim, int width, int stride,
+                                  int block_size, float scale, float head_scale, int vec) {
     extern __shared__ float dsa_sm[];
     float *qs = dsa_sm;
     float *ws = dsa_sm + (size_t)heads * dim;
@@ -37,12 +41,49 @@ __global__ void dsa_scores_kernel(const float *__restrict__ q, const float *__re
     if (p >= n) return;
     const int64_t block = tables[(size_t)r * stride + p / block_size];
     const size_t slot = (size_t)block * block_size + p % block_size;
-    const float *key = store + slot * dim;
+    const float *key = store + slot * width;
     float score = 0.f;
+    float4 kr[32];
+    const bool in_regs = vec && (dim & 3) == 0 && dim <= 128;
+    if (in_regs) {
+#pragma unroll
+        for (int d = 0; d < 32; d++) kr[d] = d < dim / 4 ? reinterpret_cast<const float4 *>(key)[d] : make_float4(0.f, 0.f, 0.f, 0.f);
+    }
     for (int h = 0; h < heads; h++) {
         float dot = 0.f;
         const float *qh = qs + (size_t)h * dim;
-        for (int d = 0; d < dim; d++) dot += qh[d] * key[d];
+        if (in_regs) {
+            // the key row stays in registers across the heads (dim <= 128): the loads per head are the broadcast query row only
+            float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+            const float4 *q4 = reinterpret_cast<const float4 *>(qh);
+#pragma unroll
+            for (int d = 0; d < 32; d++) {
+                if (d < dim / 4) {
+                    const float4 qv = q4[d];
+                    a0 += qv.x * kr[d].x;
+                    a1 += qv.y * kr[d].y;
+                    a2 += qv.z * kr[d].z;
+                    a3 += qv.w * kr[d].w;
+                }
+            }
+            dot = (a0 + a1) + (a2 + a3);
+        } else if (vec && (dim & 3) == 0) {
+            // four independent sums over 16-byte loads (the query row is a shared-memory broadcast, the key row 16-byte aligned)
+            float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+            const float4 *q4 = reinterpret_cast<const float4 *>(qh);
+            const float4 *k4 = reinterpret_cast<const float4 *>(key);
+#pragma unroll 4
+            for (int d = 0; d < dim / 4; d++) {
+                const float4 qv = q4[d], kv = k4[d];
+                a0 += qv.x * kv.x;
+                a1 += qv.y * kv.y;
+                a2 += qv.z * kv.z;
+                a3 += qv.w * kv.w;
+            }
+            dot = (a0 + a1) + (a2 + a3);
+        } else {
+            for (int d = 0; d < dim; d++) dot += qh[d] * key[d];
+        }
         dot *= scale;
         if (dot > 0.f) score += dot * ws[h] * head_scale;
     }
@@ -72,13 +113,14 @@ __device__ __forceinline__ int dsa_scan(int v, int *buf) {
 }
 
 // one block per row
-__global__ void dsa_topk_kernel(const float *__restrict__ scores, size_t score_stride, const int64_t *__restrict__ lengths, int32_t *__restrict__ sel, int topk) {
+__global__ void dsa_topk_kernel(const float *__restrict__ scores, size_t score_stride, const int64_t *__restrict__ lengths, int32_t *__restrict__ sel, int topk,
+                                int len_div) {
     __shared__ int hist[256];
     __shared__ int scan_buf[DSA_TOPK_THREADS];
     __shared__ uint32_t s_prefix, s_mask;
     __shared__ int s_remaining, s_base_eq, s_base_acc;
     const int r = blockIdx.x, t = threadIdx.x;
-    const int n = (int)lengths[r];
+    const int n = (int)(lengths[r] / len_div);
     int32_t *out = sel + (size_t)r * topk;
     if (n <= topk) {
         for (int j = t; j < topk; j += blockDim.x) out[j] = j < n ? j : -1;
@@ -219,6 +261,77 @@ __global__ void rotate_heads_kernel(const float *__restrict__ x, float *__restri
     }
 }
 
+#define DSA_POOL_MAX_DIM 128
+#define DSA_POOL_MAX_KPOOL 16
+
+// k-pool indexer (GLM-5-Next), like `pooled_selection` of rust_decoder.rs: the score of the complete pool `pool` of row r is
+// sum_h relu(dot(q_h, pooled) * scale) * w_h * head_scale, `pooled[c]` the softmax over the pool's tokens j of (gate[j][c] + ape[j][c]) weighting key[j][c]
+__global__ void dsa_pool_scores_kernel(const float *__restrict__ q, const float *__restrict__ w, const float *__restrict__ store, const float *__restrict__ ape,
+                                       const int64_t *__restrict__ tables, const int64_t *__restrict__ lengths, float *__restrict__ scores,
+                                       size_t score_stride, int heads, int dim, int width, int stride, int block_size, int kpool, float scale,
+                                       float head_scale) {
+    extern __shared__ float dsa_sm3[];
+    float *qs = dsa_sm3;
+    float *ws = dsa_sm3 + (size_t)heads * dim;
+    const int r = blockIdx.y;
+    for (int i = threadIdx.x; i < heads * dim; i += blockDim.x) qs[i] = q[(size_t)r * heads * dim + i];
+    for (int i = threadIdx.x; i < heads; i += blockDim.x) ws[i] = w[(size_t)r * heads + i];
+    __syncthreads();
+    const int pool = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pool >= (int)(lengths[r] / kpool)) return;
+    size_t slot_of[DSA_POOL_MAX_KPOOL];
+    for (int j = 0; j < kpool; j++) {
+        const int p = pool * kpool + j;
+        slot_of[j] = (size_t)tables[(size_t)r * stride + p / block_size] * block_size + p % block_size;
+    }
+    float pooled[DSA_POOL_MAX_DIM];
+    for (int c = 0; c < dim; c++) {
+        float lg[DSA_POOL_MAX_KPOOL];
+        float mx = -3.0e38f;
+        for (int j = 0; j < kpool; j++) {
+            lg[j] = store[slot_of[j] * width + dim + c] + ape[j * dim + c];
+            mx = fmaxf(mx, lg[j]);
+        }
+        float sum = 0.f;
+        for (int j = 0; j < kpool; j++) {
+            lg[j] = expf(lg[j] - mx);
+            sum += lg[j];
+        }
+        float acc = 0.f;
+        for (int j = 0; j < kpool; j++) acc += lg[j] / sum * store[slot_of[j] * width + c];
+        pooled[c] = acc;
+    }
+    float score = 0.f;
+    for (int h = 0; h < heads; h++) {
+        float dot = 0.f;
+        for (int c = 0; c < dim; c++) dot += qs[(size_t)h * dim + c] * pooled[c];
+        dot *= scale;
+        if (dot > 0.f) score += dot * ws[h] * head_scale;
+    }
+    scores[(size_t)r * score_stride + pool] = score;
+}
+
+// the chosen pools (ascending, -1 padded; `kp` entries per row) become token positions, then the tokens of the incomplete last pool
+__global__ void dsa_expand_kernel(const int32_t *__restrict__ psel, const int64_t *__restrict__ lengths, int32_t *__restrict__ sel, int kp, int kpool,
+                                  int width_out, int always_tail) {
+    __shared__ int s_cnt;
+    const int r = blockIdx.x, t = threadIdx.x;
+    if (t == 0) {
+        int c = 0;
+        while (c < kp && psel[(size_t)r * kp + c] >= 0) c++;
+        s_cnt = c;
+    }
+    __syncthreads();
+    const int cnt = s_cnt, n = (int)lengths[r];
+    const int tail = always_tail ? n % kpool : 0;
+    for (int idx = t; idx < width_out; idx += blockDim.x) {
+        int v = -1;
+        if (idx < cnt * kpool) v = psel[(size_t)r * kp + idx / kpool] * kpool + idx % kpool;
+        else if (idx - cnt * kpool < tail) v = (n - tail) + (idx - cnt * kpool);
+        sel[(size_t)r * width_out + idx] = v;
+    }
+}
+
 static unsigned dsa_grid(size_t n) {
     size_t g = (n + 255) / 256;
     return (unsigned)(g > 65535 ? 65535 : (g == 0 ? 1 : g));
@@ -230,9 +343,9 @@ int fllm_rotate_heads_launch(cudaStream_t s, const float *x, float *out, size_t 
     return fllm_check_launch("rotate_heads");
 }
 
-int fllm_dsa_keys_launch(cudaStream_t s, float *store, const float *k, const int32_t *slots, int rows, int dim) {
+int fllm_dsa_keys_launch(cudaStream_t s, float *store, const float *k, const float *gate, const int32_t *slots, int rows, int dim, int width) {
     if (rows <= 0) return 0;
-    dsa_keys_kernel<<<dsa_grid((size_t)rows * dim), 256, 0, s>>>(store, k, slots, rows, dim);
+    dsa_keys_kernel<<<dsa_grid((size_t)rows * dim), 256, 0, s>>>(store, k, gate, slots, rows, dim, width);
     return fllm_check_launch("dsa_keys");
 }
 
@@ -241,18 +354,39 @@ int fllm_dsa_keys_launch(cudaStream_t s, float *store, const float *k, const int
 
 int fllm_dsa_scores_supported(int heads, int dim) { return ((size_t)heads * dim + heads) * sizeof(float) <= DSA_MAX_SCORE_SMEM; }
 
-int fllm_dsa_select_launch(cudaStream_t s, const float *q, const float *w, const float *store, const int64_t *tables, const int64_t *lengths, float *scores,
-                           size_t score_stride, int32_t *sel, int rows, int max_len, int heads, int dim, int topk, int stride, int block_size, float scale,
-                           float head_scale) {
+int fllm_dsa_pool_supported(int dim, int kpool) { return dim <= DSA_POOL_MAX_DIM && kpool >= 2 && kpool <= DSA_POOL_MAX_KPOOL; }
+
+int fllm_dsa_select_launch(cudaStream_t s, const float *q, const float *w, const float *store, const float *ape, const int64_t *tables, const int64_t *lengths,
+                           float *scores, size_t score_stride, int32_t *sel, int32_t *psel, int rows, int max_len, int heads, int dim, int width, int topk,
+                           int kpool, int always_tail, int stride, int block_size, float scale, float head_scale) {
     if (rows <= 0) return 0;
+    if (kpool > 1) {
+        if (!fllm_dsa_pool_supported(dim, kpool) || !fllm_dsa_scores_supported(heads, dim))
+            return fllm_set_error("dsa_select: the k-pool indexer with %d heads x %d values and pools of %d is not supported", heads, dim, kpool);
+        const int kp = topk / kpool;
+        const int width_out = kp * kpool + (always_tail ? kpool - 1 : 0);
+        const size_t smem = ((size_t)heads * dim + heads) * sizeof(float);
+        if (max_len / kpool > kp) {
+            dim3 grid((max_len / kpool + 63) / 64, rows);
+            dsa_pool_scores_kernel<<<grid, 64, smem, s>>>(q, w, store, ape, tables, lengths, scores, score_stride, heads, dim, width, stride, block_size, kpool, scale,
+                                                         head_scale);
+            if (int e = fllm_check_launch("dsa_pool_scores")) return e;
+        }
+        dsa_topk_kernel<<<rows, DSA_TOPK_THREADS, 0, s>>>(scores, score_stride, lengths, psel, kp, kpool);
+        if (int e = fllm_check_launch("dsa_pool_topk")) return e;
+        dsa_expand_kernel<<<rows, 128, 0, s>>>(psel, lengths, sel, kp, kpool, width_out, always_tail);
+        return fllm_check_launch("dsa_expand");
+    }
     if (!fllm_dsa_scores_supported(heads, dim)) return fllm_set_error("dsa_select: %d heads x %d values do not fit shared memory", heads, dim);
     if (max_len > topk) {
         const size_t smem = ((size_t)heads * dim + heads) * sizeof(float);
+        // FLLM_DSA_SCALAR=1: the one-float-at-a-time scoring loop (comparison of the 16-byte loads)
+        static const int vec = getenv("FLLM_DSA_SCALAR") ? 0 : 1;
         dim3 grid((max_len + 127) / 128, rows);
-        dsa_scores_kernel<<<grid, 128, smem, s>>>(q, w, store, tables, lengths, scores, score_stride, heads, dim, stride, block_size, scale, head_scale);
+        dsa_scores_kernel<<<grid, 128, smem, s>>>(q, w, store, tables, lengths, scores, score_stride, heads, dim, width, stride, block_size, scale, head_scale, vec);
         if (int e = fllm_check_launch("dsa_scores")) return e;
     }
-    dsa_topk_kernel<<<rows, DSA_TOPK_THREADS, 0, s>>>(scores, score_stride, lengths, sel, topk);
+    dsa_topk_kernel<<<rows, DSA_TOPK_THREADS, 0, s>>>(scores, score_stride, lengths, sel, topk, 1);
     return fllm_check_launch("dsa_topk");
 }
 

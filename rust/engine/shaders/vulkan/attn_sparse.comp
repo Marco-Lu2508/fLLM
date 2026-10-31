@@ -1,10 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: attn_sparse | bindings: q,kpool,vpool,sel,meta,bias,out | push: topk,heads,kv_heads,dk,dv,stride,block_size,scale,k_base,v_base,flags | grid: [heads, rows, 1]
+// FLLM-SHADER: attn_sparse | bindings: q,kpool,vpool,sel,meta,bias,out | push: topk,heads,kv_heads,dk,dv,stride,block_size,scale,k_base,v_base,flags,row0 | grid: [heads, rows in this dispatch, 1]
 // Attention over a selection of positions (Stream::dsa_attention, DeepSeek-V3.2 / GLM-5), f16 cache. One workgroup of 128 lanes per (row, query head):
 // the lanes score the listed positions 128 at a time (one position per lane: dot(q, key) * scale), fold the tile into an online softmax and
 // accumulate the value rows (lane l owns the value dimensions l, l + 128, ...; dv <= 512). sel = int32 rows x topk: positions, -1 after the last one.
-// meta = int32 block tables (rows x stride). q is rows x heads x dk, out rows x heads x dv. bias = float sinks[heads] (flags bit 0 = used): a sink adds
+// Row r = row0 + gl_WorkGroupID.y (the plan splits long batches into several dispatches). meta = int32 block tables (rows x stride). q is rows x heads x dk, out rows x heads x dv. bias = float sinks[heads] (flags bit 0 = used): a sink adds
 // exp(sink) to the softmax denominator without a value.
 #define WG 128
 #include "_ops_common.glsl"
@@ -30,6 +30,7 @@ layout(push_constant) uniform P {
     uint k_base;
     uint v_base;
     uint flags;
+    uint row0;
 } p;
 
 shared float qs[512];
@@ -66,7 +67,7 @@ float reduce_sum(float v) {
 void main() {
     const uint t = gl_LocalInvocationID.x;
     const uint h = gl_WorkGroupID.x;
-    const uint r = gl_WorkGroupID.y;
+    const uint r = p.row0 + gl_WorkGroupID.y;
     const uint kh = h / (p.heads / p.kv_heads);
     for (uint i = t; i < p.dk; i += WG) qs[i] = q[(r * p.heads + h) * p.dk + i];
     barrier();

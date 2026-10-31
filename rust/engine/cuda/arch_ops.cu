@@ -60,6 +60,22 @@ __global__ void arch_scale_kernel(float *__restrict__ x, size_t n, float factor)
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) x[i] *= factor;
 }
 
+// Clamped gated activations (Hy4 / GLM-5-Next clamped SwiGLU, Kimi K3 SiTU), like `gate_activation_clamped` of rust_decoder.rs:
+//   kind 0: g = min(gate, p0); out = g * sigmoid(g) * clamp(up, -p0, p0)
+//   kind 1: out = p0 * tanh(gate / p0) * sigmoid(gate) * u, u = p1 > 0 ? p1 * tanh(up / p1) : up
+__global__ void arch_glu_ext_kernel(const float *__restrict__ gate, const float *__restrict__ up, float *__restrict__ out, size_t n, int kind, float p0, float p1) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+        const float g0 = gate[i];
+        if (kind == 0) {
+            const float g = fminf(g0, p0);
+            out[i] = g / (1.0f + expf(-g)) * fminf(fmaxf(up[i], -p0), p0);
+        } else {
+            const float u = p1 > 0.f ? p1 * tanhf(up[i] / p1) : up[i];
+            out[i] = p0 * tanhf(g0 / p0) / (1.0f + expf(-g0)) * u;
+        }
+    }
+}
+
 static unsigned arch_grid(size_t n) {
     size_t g = (n + 255) / 256;
     return (unsigned)(g > 65535 ? 65535 : (g == 0 ? 1 : g));
@@ -89,6 +105,11 @@ int fllm_head_gate_launch(cudaStream_t s, float *x, const float *g, size_t n, si
     if (n == 0) return 0;
     arch_head_gate_kernel<<<arch_grid(n), 256, 0, s>>>(x, g, n, dv, beta);
     return fllm_check_launch("head_gate");
+}
+int fllm_glu_ext_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t n, int kind, float p0, float p1) {
+    if (n == 0) return 0;
+    arch_glu_ext_kernel<<<arch_grid(n), 256, 0, s>>>(gate, up, out, n, kind, p0, p1);
+    return fllm_check_launch("glu_ext");
 }
 int fllm_scale_launch(cudaStream_t s, float *x, size_t n, float factor) {
     if (n == 0) return 0;

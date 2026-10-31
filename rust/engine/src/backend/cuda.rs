@@ -472,6 +472,7 @@ extern "C" {
     fn fllm_cuda_softplus_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, beta: f32) -> c_int;
     fn fllm_cuda_head_gate_mul(st: *mut RawStream, x: *mut f32, g: *const f32, n: usize, dv: usize, beta: f32) -> c_int;
     fn fllm_cuda_scale(st: *mut RawStream, x: *mut f32, n: usize, factor: f32) -> c_int;
+    fn fllm_cuda_glu_ext(st: *mut RawStream, gate: *const f32, up: *const f32, out: *mut f32, n: usize, kind: c_int, p0: f32, p1: f32) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_hc_mix(
         st: *mut RawStream,
@@ -493,23 +494,29 @@ extern "C" {
     fn fllm_cuda_hc_combine(st: *mut RawStream, streams: *mut f32, post: *const f32, comb: *const f32, block: *const f32, rows: c_int, hc: c_int, hidden: c_int) -> c_int;
     fn fllm_cuda_hc_supported(hc: c_int) -> c_int;
     fn fllm_cuda_rotate_heads(st: *mut RawStream, x: *const f32, out: *mut f32, count: usize, dim: c_int, shift: c_int) -> c_int;
-    fn fllm_cuda_dsa_keys(st: *mut RawStream, store: *mut f32, k: *const f32, slots: *const i32, rows: c_int, dim: c_int) -> c_int;
+    fn fllm_cuda_dsa_keys(st: *mut RawStream, store: *mut f32, k: *const f32, gate: *const f32, slots: *const i32, rows: c_int, dim: c_int, width: c_int) -> c_int;
+    fn fllm_cuda_dsa_pool_supported(dim: c_int, kpool: c_int) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fllm_cuda_dsa_select(
         st: *mut RawStream,
         q: *const f32,
         w: *const f32,
         store: *const f32,
+        ape: *const f32,
         tables: *const i64,
         tables_len: usize,
         lengths: *const i64,
         scores: *mut f32,
         score_stride: usize,
         sel: *mut i32,
+        psel: *mut i32,
         rows: c_int,
         heads: c_int,
         dim: c_int,
+        width: c_int,
         topk: c_int,
+        kpool: c_int,
+        always_tail: c_int,
         stride: c_int,
         block_size: c_int,
         scale: f32,
@@ -1458,6 +1465,7 @@ impl Backend for CudaBackend {
             act: self.act(),
             wide: [None, None, None],
             dsa_scores: None,
+            dsa_psel: None,
         }))
     }
 
@@ -1830,6 +1838,8 @@ pub struct CudaStream {
     wide: [Option<DeviceBuffer>; 3],
     /// Scores of the lightning indexer (`dsa_select`), grown on demand.
     dsa_scores: Option<DeviceBuffer>,
+    /// Chosen pools of the k-pool indexer (`dsa_select`).
+    dsa_psel: Option<DeviceBuffer>,
 }
 
 // SAFETY: the raw stream is only used through `&mut self`.
@@ -4297,6 +4307,22 @@ impl Stream for CudaStream {
         !self.act.is_narrow()
     }
 
+    fn glu_clamped(&mut self, out: &mut DeviceBuffer, gate: &DeviceBuffer, up: &DeviceBuffer, kind: ClampedGlu) -> Result<(), BackendError> {
+        if !out.size.is_multiple_of(4) || gate.size < out.size || up.size < out.size {
+            return Err(invalid("clamped gated activation does not fit its buffers"));
+        }
+        let (code, p0, p1) = match kind {
+            ClampedGlu::Clamp(limit) => (0, limit, 0.0),
+            ClampedGlu::Situ(beta, linear_beta) => (1, beta, linear_beta),
+        };
+        // SAFETY: the three buffers hold at least `out.size / 4` floats (checked above).
+        check(unsafe { fllm_cuda_glu_ext(self.raw, dev_ptr(gate)?.cast(), dev_ptr(up)?.cast(), dev_ptr(out)?.cast(), out.size / 4, code, p0, p1) })
+    }
+
+    fn supports_glu_clamped(&self) -> bool {
+        !self.act.is_narrow()
+    }
+
     fn supports_hc(&self, hc: usize) -> bool {
         // SAFETY: plain arithmetic on the argument.
         !self.act.is_narrow() && unsafe { fllm_cuda_hc_supported(hc as c_int) } != 0
@@ -4390,6 +4416,7 @@ impl Stream for CudaStream {
             && params.topk > 0
             && params.heads > 0
             && params.dim > 0
+            && (params.kpool <= 1 || (params.topk >= params.kpool && unsafe { fllm_cuda_dsa_pool_supported(params.dim as c_int, params.kpool as c_int) } != 0))
             // SAFETY: plain arithmetic on the arguments.
             && unsafe { fllm_cuda_dsa_supported(params.heads as c_int, params.dim as c_int, params.topk as c_int, key_dim as c_int) } != 0
     }
@@ -4400,6 +4427,8 @@ impl Stream for CudaStream {
         store: &mut DeviceBuffer,
         q: &DeviceBuffer,
         k: &DeviceBuffer,
+        gate: Option<&DeviceBuffer>,
+        ape: Option<&DeviceBuffer>,
         w: &DeviceBuffer,
         slots: &[usize],
         block_tables: &[i64],
@@ -4411,13 +4440,19 @@ impl Stream for CudaStream {
             return Ok(());
         }
         let (heads, dim, topk) = (p.heads, p.dim, p.topk);
-        let store_slots = store.size / (dim * 4);
+        let width = p.store_width();
+        let sel_width = p.sel_width();
+        let pooled = p.kpool > 1;
+        if pooled && (gate.is_none_or(|g| g.size < rows * dim * 4) || ape.is_none_or(|a| a.size < p.kpool * dim * 4)) {
+            return Err(invalid("k-pool indexer: gate scores or position bias missing"));
+        }
+        let store_slots = store.size / (width * 4);
         if slots.len() != rows
             || block_tables.len() != rows * p.stride
             || q.size < rows * heads * dim * 4
             || k.size < rows * dim * 4
             || w.size < rows * heads * 4
-            || sel.size < rows * topk * 4
+            || sel.size < rows * sel_width * 4
             || slots.iter().any(|&s| s >= store_slots)
             || lengths.iter().any(|&n| n <= 0 || (n as usize).div_ceil(p.block_size) > p.stride)
             || lengths.iter().enumerate().any(|(r, &n)| block_tables[r * p.stride..][..(n as usize).div_ceil(p.block_size)].iter().any(|&b| b < 0 || (b as usize + 1) * p.block_size > store_slots))
@@ -4426,16 +4461,30 @@ impl Stream for CudaStream {
         }
         let ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
         // SAFETY: the sizes were checked above; the slot list is copied before the call returns.
-        check(unsafe { fllm_cuda_dsa_keys(self.raw, dev_ptr(store)?.cast(), dev_ptr(k)?.cast(), ids.as_ptr(), to_c(rows, "rows")?, to_c(dim, "dim")?) })?;
+        let gate_ptr = match gate {
+            Some(g) if pooled => dev_ptr(g)?.cast_const().cast(),
+            _ => std::ptr::null(),
+        };
+        check(unsafe { fllm_cuda_dsa_keys(self.raw, dev_ptr(store)?.cast(), dev_ptr(k)?.cast(), gate_ptr, ids.as_ptr(), to_c(rows, "rows")?, to_c(dim, "dim")?, to_c(width, "width")?) })?;
         let max_len = lengths.iter().map(|&n| n as usize).max().unwrap_or(1);
-        // rows that need scores are scored in chunks that keep the score matrix below 32M values
-        let chunk = if max_len > topk { (32usize << 20).div_euclid(max_len).clamp(1, rows) } else { rows };
+        // rows that need scores are scored in chunks of at most 4M (row, position) pairs, so that one launch stays short (display watchdogs)
+        let chunk = if max_len > topk { (4usize << 20).div_euclid(max_len).clamp(1, rows) } else { rows };
         let score_bytes = if max_len > topk { chunk * max_len * 4 } else { 16 };
         if self.dsa_scores.as_ref().is_none_or(|b| b.size < score_bytes) {
             self.dsa_scores = None;
             self.dsa_scores = Some(self.alloc(score_bytes.max(256))?);
         }
+        let psel_bytes = if pooled { rows * (topk / p.kpool).max(1) * 4 } else { 16 };
+        if self.dsa_psel.as_ref().is_none_or(|b| b.size < psel_bytes) {
+            self.dsa_psel = None;
+            self.dsa_psel = Some(self.alloc(psel_bytes.max(256))?);
+        }
         let scores = self.dsa_scores.as_ref().ok_or_else(|| invalid("score buffer"))?;
+        let psel = self.dsa_psel.as_ref().ok_or_else(|| invalid("pool selection buffer"))?;
+        let ape_ptr = match ape {
+            Some(a) if pooled => dev_ptr(a)?.cast_const().cast(),
+            _ => std::ptr::null(),
+        };
         let mut r0 = 0;
         while r0 < rows {
             let r1 = (r0 + chunk).min(rows);
@@ -4447,16 +4496,21 @@ impl Stream for CudaStream {
                     dev_ptr(q)?.add(r0 * heads * dim * 4).cast(),
                     dev_ptr(w)?.add(r0 * heads * 4).cast(),
                     dev_ptr(store)?.cast(),
+                    ape_ptr,
                     tables.as_ptr(),
                     tables.len(),
                     lengths[r0..r1].as_ptr(),
                     dev_ptr(scores)?.cast(),
                     max_len,
-                    dev_ptr(sel)?.add(r0 * topk * 4).cast(),
+                    dev_ptr(sel)?.add(r0 * sel_width * 4).cast(),
+                    dev_ptr(psel)?.add(r0 * (topk / p.kpool.max(1)).max(1) * 4).cast(),
                     to_c(r1 - r0, "rows")?,
                     to_c(heads, "heads")?,
                     to_c(dim, "dim")?,
+                    to_c(width, "width")?,
                     to_c(topk, "top-k")?,
+                    to_c(p.kpool.max(1), "pool size")?,
+                    c_int::from(p.always_tail),
                     to_c(p.stride, "block table stride")?,
                     to_c(p.block_size, "block size")?,
                     p.scale,

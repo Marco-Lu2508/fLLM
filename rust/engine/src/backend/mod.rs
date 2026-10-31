@@ -998,6 +998,15 @@ pub fn validate_kv_write(
     Ok(())
 }
 
+/// A gated activation with a clamp, for the feed-forward blocks of Hy4, GLM-5-Next and Kimi K3 (see [`Stream::glu_clamped`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClampedGlu {
+    /// `g = min(gate, limit); out = g * sigmoid(g) * clamp(up, -limit, limit)`.
+    Clamp(f32),
+    /// SiTU: `out = beta * tanh(gate / beta) * sigmoid(gate) * u`, `u = linear_beta * tanh(up / linear_beta)` (`up` itself when `linear_beta` is 0).
+    Situ(f32, f32),
+}
+
 /// How a hyper-connection block turns its learned mixes into weights (see [`Stream::hc_mix`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HcMode {
@@ -1037,6 +1046,22 @@ pub struct DsaParams {
     /// `dim^-0.5` and `heads^-0.5`.
     pub scale: f32,
     pub head_scale: f32,
+    /// K-pool indexer (GLM-5-Next): tokens per pool (1: no pools). The store then holds `2 * dim` floats per slot (key, gate score), the selection keeps
+    /// `topk / kpool` pools and, with `always_tail`, the tokens of the incomplete last pool.
+    pub kpool: usize,
+    pub always_tail: bool,
+}
+
+impl DsaParams {
+    /// Floats the key store keeps per cache slot.
+    pub fn store_width(&self) -> usize {
+        if self.kpool > 1 { 2 * self.dim } else { self.dim }
+    }
+
+    /// Entries per row of the selection written by [`Stream::dsa_select`].
+    pub fn sel_width(&self) -> usize {
+        if self.kpool > 1 { self.topk / self.kpool * self.kpool + if self.always_tail { self.kpool - 1 } else { 0 } } else { self.topk }
+    }
 }
 
 /// Paged Attention parameters.
@@ -1912,6 +1937,16 @@ pub trait Stream: Send {
         false
     }
 
+    /// `out = act(gate, up)` element-wise for a clamped gated activation ([`ClampedGlu`]).
+    fn glu_clamped(&mut self, _out: &mut DeviceBuffer, _gate: &DeviceBuffer, _up: &DeviceBuffer, _kind: ClampedGlu) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("glu_clamped".into()))
+    }
+
+    /// Does this stream implement [`Stream::glu_clamped`]?
+    fn supports_glu_clamped(&self) -> bool {
+        false
+    }
+
     /// Can this stream run hyper-connections of `hc` residual streams ([`Stream::hc_mix`], [`Stream::hc_combine`])?
     fn supports_hc(&self, _hc: usize) -> bool {
         false
@@ -1961,10 +1996,12 @@ pub trait Stream: Send {
         false
     }
 
-    /// Lightning indexer. Writes the indexer keys `k` (`rows x dim`) of the new tokens into `store` (one `dim`-wide f32 row per cache slot,
+    /// Lightning indexer. Writes the indexer keys `k` (`rows x dim`) of the new tokens into `store` (one `store_width`-wide f32 row per cache slot,
     /// `slots[r]` for row `r`), scores the `lengths[r]` visible tokens of every row (`sum_h relu(q_h . key * scale) * w_h * head_scale`;
     /// `q` is `rows x heads x dim`, `w` is `rows x heads`) and writes the best `topk` positions of the row, ascending, to `sel`
-    /// (`rows x topk` i32). Ties go to the lower position. A row with at most `topk` tokens lists all of them; unused entries are -1.
+    /// (`rows x sel_width` i32). Ties go to the lower position. A row with at most `topk` tokens lists all of them; unused entries are -1. With the k-pool
+    /// indexer (`params.kpool > 1`) `gate` (`rows x dim` gate scores of the pooling) and `ape` (`kpool x dim` position bias) are given and the best pools are
+    /// selected (after the key store held `[key, gate]` per slot).
     #[allow(clippy::too_many_arguments)]
     fn dsa_select(
         &mut self,
@@ -1972,6 +2009,8 @@ pub trait Stream: Send {
         _store: &mut DeviceBuffer,
         _q: &DeviceBuffer,
         _k: &DeviceBuffer,
+        _gate: Option<&DeviceBuffer>,
+        _ape: Option<&DeviceBuffer>,
         _w: &DeviceBuffer,
         _slots: &[usize],
         _block_tables: &[i64],

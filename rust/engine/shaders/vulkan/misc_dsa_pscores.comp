@@ -1,0 +1,66 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_dsa_pscores | bindings: q,w,store,ape,meta,scores | push: heads,dim,width,stride,block_size,kpool,score_stride,row0,rows_total,scale,head_scale | grid: [ceil(max_len/kpool/64), rows in this dispatch, 1]
+// Scores of the pools of the k-pool indexer (Stream::dsa_select, GLM-5-Next), like pooled_selection of rust_decoder.rs: one lane per complete pool of row
+// r = row0 + gl_WorkGroupID.y. pooled[c] = sum_j softmax_j(gate[j][c] + ape[j][c]) * key[j][c] over the kpool tokens of the pool (store row: key, then gate
+// scores), score = sum_h relu(dot(q[r][h], pooled) * scale) * w[r][h] * head_scale, written to scores[gl_WorkGroupID.y * score_stride + pool].
+// dim <= 128, kpool <= 16. meta = int32: lengths[rows_total], then the block tables (rows_total x stride).
+#define WG 64
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer WBuf { float w[]; };
+layout(std430, binding = 2) readonly buffer StoreBuf { float store[]; };
+layout(std430, binding = 3) readonly buffer ApeBuf { float ape[]; };
+layout(std430, binding = 4) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 5) buffer ScoreBuf { float scores[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint dim;
+    uint width;
+    uint stride;
+    uint block_size;
+    uint kpool;
+    uint score_stride;
+    uint row0;
+    uint rows_total;
+    float scale;
+    float head_scale;
+} p;
+
+void main() {
+    const uint r = p.row0 + gl_WorkGroupID.y;
+    const uint pool = gl_WorkGroupID.x * WG + gl_LocalInvocationID.x;
+    if (pool >= uint(meta[r]) / p.kpool) return;
+    uint slot_of[16];
+    for (uint j = 0u; j < p.kpool; j++) {
+        const uint pos = pool * p.kpool + j;
+        slot_of[j] = uint(meta[p.rows_total + r * p.stride + pos / p.block_size]) * p.block_size + pos % p.block_size;
+    }
+    float pooled[128];
+    for (uint c = 0u; c < p.dim; c++) {
+        float lg[16];
+        float mx = NEG;
+        for (uint j = 0u; j < p.kpool; j++) {
+            lg[j] = store[slot_of[j] * p.width + p.dim + c] + ape[j * p.dim + c];
+            mx = max(mx, lg[j]);
+        }
+        float sum = 0.0;
+        for (uint j = 0u; j < p.kpool; j++) {
+            lg[j] = exp(lg[j] - mx);
+            sum += lg[j];
+        }
+        float acc = 0.0;
+        for (uint j = 0u; j < p.kpool; j++) acc += lg[j] / sum * store[slot_of[j] * p.width + c];
+        pooled[c] = acc;
+    }
+    float score = 0.0;
+    for (uint h = 0u; h < p.heads; h++) {
+        float dotp = 0.0;
+        for (uint c = 0u; c < p.dim; c++) dotp += q[(r * p.heads + h) * p.dim + c] * pooled[c];
+        dotp *= p.scale;
+        if (dotp > 0.0) score += dotp * w[r * p.heads + h] * p.head_scale;
+    }
+    scores[gl_WorkGroupID.y * p.score_stride + pool] = score;
+}

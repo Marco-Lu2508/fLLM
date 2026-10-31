@@ -122,7 +122,9 @@ Hyper-connections (Hy4; `Stream::hc_mix`, `Stream::hc_combine`): the `hc` residu
 mixer and each feed-forward block `hc_mix` normalises them, turns the mixes into `pre`/`post` (and the Sinkhorn mixing matrix) and writes the collapsed block input
 to the ordinary residual buffer, the layer runs as usual, and `hc_combine` adds the branch output (residual buffer after minus before) to the streams. The fused
 residual-add-and-norm paths are off for such models. A model with hyper-connections runs completely on the device or completely on the host (`FLLM_HC=host`).
-The clamped SwiGLU and SiTU feed-forward blocks (Hy4, GLM-5-Next, Kimi K3) have no device kernel and run on the host inside otherwise device layers.
+The clamped SwiGLU and SiTU feed-forward blocks (Hy4, GLM-5-Next, Kimi K3) run through `Stream::glu_clamped` (separate gate and up GEMMs, then one element-wise kernel) on CUDA, HIP and Vulkan; other backends run them on the host inside otherwise device layers.
+
+LongCat-Flash: the shortcut experts of every second layer join the stream after the layer that follows; the device pass downloads the normed feed-forward input, runs the host reference `shortcut_forward` (zero experts return their input) and uploads the result, everything else of the layer stays on the device.
 
 With `--gpu-layers N` the feed-forward weights of the layers after N stay in host memory. Gated FFNs and MoE experts stream over PCIe for large
 batches; plain (non-gated) MLPs and the exact host FFN of the features above run on the CPU. Layers of the types in this section keep their

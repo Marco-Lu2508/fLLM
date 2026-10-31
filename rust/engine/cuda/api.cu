@@ -1610,6 +1610,10 @@ int fllm_cuda_head_gate_mul(FllmStream *st, float *x, const float *g, size_t n, 
     PREP(st);
     return fllm_head_gate_launch(st->s, x, g, n, dv, beta);
 }
+int fllm_cuda_glu_ext(FllmStream *st, const float *gate, const float *up, float *out, size_t n, int kind, float p0, float p1) {
+    PREP(st);
+    return fllm_glu_ext_launch(st->s, gate, up, out, n, kind, p0, p1);
+}
 int fllm_cuda_scale(FllmStream *st, float *x, size_t n, float factor) {
     PREP(st);
     return fllm_scale_launch(st->s, x, n, factor);
@@ -1628,23 +1632,24 @@ int fllm_cuda_rotate_heads(FllmStream *st, const float *x, float *out, size_t co
     PREP(st);
     return fllm_rotate_heads_launch(st->s, x, out, count, dim, shift);
 }
-int fllm_cuda_dsa_keys(FllmStream *st, float *store, const float *k, const int32_t *slots_host, int rows, int dim) {
+int fllm_cuda_dsa_pool_supported(int dim, int kpool) { return fllm_dsa_pool_supported(dim, kpool); }
+int fllm_cuda_dsa_keys(FllmStream *st, float *store, const float *k, const float *gate, const int32_t *slots_host, int rows, int dim, int width) {
     PREP(st);
     void *ds = nullptr;
     if (int e = stage(st, -1, slots_host, (size_t)rows * sizeof(int32_t), &ds)) return e;
-    return fllm_dsa_keys_launch(st->s, store, k, static_cast<const int32_t *>(ds), rows, dim);
+    return fllm_dsa_keys_launch(st->s, store, k, gate, static_cast<const int32_t *>(ds), rows, dim, width);
 }
-int fllm_cuda_dsa_select(FllmStream *st, const float *q, const float *w, const float *store, const int64_t *tables_host, size_t tables_len,
-                         const int64_t *lengths_host, float *scores, size_t score_stride, int32_t *sel, int rows, int heads, int dim, int topk, int stride,
-                         int block_size, float scale, float head_scale) {
+int fllm_cuda_dsa_select(FllmStream *st, const float *q, const float *w, const float *store, const float *ape, const int64_t *tables_host, size_t tables_len,
+                         const int64_t *lengths_host, float *scores, size_t score_stride, int32_t *sel, int32_t *psel, int rows, int heads, int dim, int width,
+                         int topk, int kpool, int always_tail, int stride, int block_size, float scale, float head_scale) {
     PREP(st);
     void *dt = nullptr, *dl = nullptr;
     if (int e = stage(st, -1, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
     if (int e = stage(st, -1, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
     int max_len = 1;
     for (int r = 0; r < rows; r++) max_len = lengths_host[r] > max_len ? (int)lengths_host[r] : max_len;
-    return fllm_dsa_select_launch(st->s, q, w, store, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), scores, score_stride, sel, rows,
-                                  max_len, heads, dim, topk, stride, block_size, scale, head_scale);
+    return fllm_dsa_select_launch(st->s, q, w, store, ape, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), scores, score_stride, sel, psel,
+                                  rows, max_len, heads, dim, width, topk, kpool, always_tail, stride, block_size, scale, head_scale);
 }
 int fllm_cuda_dsa_attention(FllmStream *st, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int32_t *sel,
                             const int64_t *tables_host, size_t tables_len, const float *sinks, int rows, int topk, int heads, int kv_heads, int dk, int dv,

@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_dsa_expand | bindings: meta,sel | push: kp,kpool,width_out,always_tail,rows_total | grid: [rows, 1, 1]
+// Positions of the chosen pools of the k-pool indexer (Stream::dsa_select): the first kp entries of row r of sel are the chosen pool numbers (ascending, -1
+// padded; written there by misc_dsa_topk). The row is rewritten in place (the pool numbers are read into shared memory first): the tokens of those pools in
+// order and, with always_tail, the tokens of the incomplete last pool, -1 padded to width_out. kp <= 1024. meta = int32: lengths[rows_total], then block tables.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 1) buffer SelBuf { int sel[]; };
+layout(push_constant) uniform P {
+    uint kp;
+    uint kpool;
+    uint width_out;
+    uint always_tail;
+    uint rows_total;
+} p;
+
+shared int pools[1024];
+shared uint s_cnt;
+
+void main() {
+    const uint r = gl_WorkGroupID.x;
+    const uint t = gl_LocalInvocationID.x;
+    for (uint j = t; j < p.kp; j += WG) pools[j] = sel[r * p.width_out + j];
+    barrier();
+    if (t == 0u) {
+        uint c = 0u;
+        while (c < p.kp && pools[c] >= 0) c++;
+        s_cnt = c;
+    }
+    barrier();
+    const uint cnt = s_cnt;
+    const uint n = uint(meta[r]);
+    const uint tail = p.always_tail != 0u ? n % p.kpool : 0u;
+    for (uint idx = t; idx < p.width_out; idx += WG) {
+        int v = -1;
+        if (idx < cnt * p.kpool) v = pools[idx / p.kpool] * int(p.kpool) + int(idx % p.kpool);
+        else if (idx - cnt * p.kpool < tail) v = int((n - tail) + (idx - cnt * p.kpool));
+        // every invocation has read its pool numbers before the first write: the barriers above end the read phase
+        sel[r * p.width_out + idx] = v;
+    }
+}

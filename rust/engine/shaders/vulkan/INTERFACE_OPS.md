@@ -1078,7 +1078,7 @@ bindings and push constants are listed in the `// FLLM-SHADER:` header of each f
 
 * `misc_dsa_keys`: writes the indexer keys of the new tokens (`rows x dim` f32) into the per-slot key store (`slots` host array).
 * `misc_dsa_scores`: one lane per position, `sum_h relu(dot(q_h, key) * scale) * w_h * head_scale`; `meta` holds `lengths[rows]` then the block tables.
-  Rows are processed in chunks so that the score scratch stays at or below 32M floats (`row0`, `score_stride` select the chunk).
+  Rows are processed in chunks of at most 4M (row, position) pairs per dispatch (`row0`, `score_stride` select the chunk).
 * `misc_dsa_topk`: one workgroup of 256 per row, radix select of the k-th largest score (order-preserving keys of the floats, 4 x 8 bits), then
   the positions are collected in ascending order with workgroup prefix sums; equal scores keep the lower position, unused entries are -1.
   A row of at most `topk` tokens lists all positions without looking at scores.
@@ -1095,3 +1095,10 @@ Hyper-connections (`Stream::hc_mix`, `Stream::hc_combine`; plans in `ops/hc.rs`)
 * `misc_hc_combine`: in place on the streams, one invocation per (row, d) reading all `hc` old values before it writes: `streams[k] = post[k] block + sum_j comb[j][k] old[j]`
   (`has_comb = 0`: `+ old[k]`).
 * `misc_rotate_heads`: `out[g * dim + (d + shift) % dim] = x[g * dim + d]`.
+
+### `act_glu_ext.comp`, `misc_dsa_pscores.comp`, `misc_dsa_expand.comp`
+
+* `act_glu_ext`: clamped gated activations (`Stream::glu_clamped`), kind 0 clamped SwiGLU (`p0` = limit), kind 1 SiTU (`p0` = beta, `p1` = linear beta); dense gate, up and out buffers.
+* `misc_dsa_pscores`: scores of the complete pools of the k-pool indexer (GLM-5-Next): per channel the softmax over the pool's tokens of gate score plus position bias weights the keys, then the usual head sum. At most 128 channels and 16 tokens per pool.
+* `misc_dsa_expand`: the first `kp` entries of a row of `sel` (written by `misc_dsa_topk` with `len_div = kpool` and `out_stride = sel_width`) are the chosen pools; the row is rewritten in place as their tokens plus the tokens of the incomplete last pool.
+* `dsa_select` and `dsa_attention` return their plans in groups; the stream runs each group and submits it on its own (about 2e9 multiply-adds per scoring group, 512k position triples per attention group).

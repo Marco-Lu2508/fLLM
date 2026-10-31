@@ -8,6 +8,14 @@ fn sigmoid(x: f64) -> f64 {
 
 impl Tester<'_> {
     pub(super) fn hc_cases(&mut self) {
+        if self.device.create_stream().map(|s| s.supports_glu_clamped()).unwrap_or(false) {
+            for kind in [ClampedGlu::Clamp(1.5), ClampedGlu::Clamp(0.2), ClampedGlu::Situ(3.0, 2.0), ClampedGlu::Situ(1.0, 0.0)] {
+                let r = self.glu_clamped_check(kind, 3001);
+                self.record("glu_clamped", &format!("{kind:?} 3001 values"), r);
+            }
+        } else {
+            self.record_skip("glu_clamped", "clamped SwiGLU, SiTU", "supports_glu_clamped is false");
+        }
         if self.device.create_stream().map(|s| s.supports_rotate_heads()).unwrap_or(false) {
             for (groups, dim, shift) in [(3usize, 16usize, 4usize), (7, 128, 64), (5, 33, 1)] {
                 let r = self.rotate_check(groups, dim, shift);
@@ -37,6 +45,39 @@ impl Tester<'_> {
                 self.record("hc_combine", &format!("{} {rows} rows x {hc} streams x {hidden}", if comb { "with mixing matrix" } else { "post only" }), r);
             }
         }
+    }
+
+    fn glu_clamped_check(&mut self, kind: ClampedGlu, n: usize) -> Result<Outcome, BackendError> {
+        let gate = self.rng.vector(n, 4.0);
+        let up = self.rng.vector(n, 3.0);
+        let want: Vec<f64> = gate
+            .iter()
+            .zip(&up)
+            .map(|(&g, &u)| {
+                let (g, u) = (f64::from(g), f64::from(u));
+                match kind {
+                    ClampedGlu::Clamp(limit) => {
+                        let limit = f64::from(limit);
+                        let g = g.min(limit);
+                        g / (1.0 + (-g).exp()) * u.clamp(-limit, limit)
+                    }
+                    ClampedGlu::Situ(beta, linear) => {
+                        let (beta, linear) = (f64::from(beta), f64::from(linear));
+                        let up = if linear > 0.0 { linear * (u / linear).tanh() } else { u };
+                        beta * (g / beta).tanh() / (1.0 + (-g).exp()) * up
+                    }
+                }
+            })
+            .collect();
+        let mut stream = self.device.create_stream()?;
+        let gb = put(self.device, stream.as_mut(), &gate)?;
+        let ub = put(self.device, stream.as_mut(), &up)?;
+        let mut out = put(self.device, stream.as_mut(), &vec![f32::NAN; n])?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.glu_clamped(&mut out, &gb, &ub, kind))?;
+        let have = get(stream.as_mut(), &out, n)?;
+        let scale: Vec<f64> = want.iter().map(|v| v.abs().max(1.0)).collect();
+        Ok(Outcome { device: worst(&have, &want, &scale), cpu: 0.0, tol: 3e-5, cpu_tol: 1.0, ms })
     }
 
     fn rotate_check(&mut self, groups: usize, dim: usize, shift: usize) -> Result<Outcome, BackendError> {
