@@ -124,6 +124,27 @@ to the ordinary residual buffer, the layer runs as usual, and `hc_combine` adds 
 residual-add-and-norm paths are off for such models. A model with hyper-connections runs completely on the device or completely on the host (`FLLM_HC=host`).
 The clamped SwiGLU and SiTU feed-forward blocks (Hy4, GLM-5-Next, Kimi K3) run through `Stream::glu_clamped` (separate gate and up GEMMs, then one element-wise kernel) on CUDA, HIP and Vulkan; other backends run them on the host inside otherwise device layers.
 
+Qwen3.8-Flash-Next (`Stream::supports_qwen4`, `q4_act`, `q4_gate_mix`, `q4_ple_gate`, `q4_ple_conv`, `q4_pool_keys`; CUDA and HIP `cuda/qwen4.cu`, Vulkan `misc_q4_*`;
+host side in `rust_decoder/qwen4/device.rs`): its layers are the ordinary Qwen3.5 device layers (DeltaNet, gated attention with the output gate, MoE); around them
+* the `hc` residual streams live in a buffer of their own like those of Hy4. A block starts with a group-wise RMS norm of the streams (`rms_norm_grouped`), the low-rank
+  gate (two GEMMs and `q4_act`), `q4_gate_mix` (the mean of the normalised streams times their per-element sigmoid gates becomes the block input) and the injection
+  weights (one GEMM, `q4_act`); the layer adds its output to the block input in the residual buffer, and the difference goes into every stream with `hc_combine`
+  (no mixing matrix). The collapse before the head is the same gate without injection weights; there is no output norm (the final norm is skipped);
+* the hashed n-gram embedding of a delta layer: the hash of the last `ngram` token ids (with the end-of-sequence rule) runs on the host and gives one table row per head
+  and token; the rows are looked up on the device (`embedding_lookup`; tables up to 2 GiB per model stay on the device, larger ones, the real checkpoint has about 90 GiB,
+  stay on the host and only the gathered rows of a step go up, one log line says so; `FLLM_QWEN4_TABLE=host|device` forces either), then key / value projections,
+  `q4_ple_gate`, the dilated convolution `q4_ple_conv` (the last `(kernel - 1) * ngram` inputs of every channel live in the sequence's state buffer behind the DeltaNet
+  states; Vulkan walks runs of more than 1024 rows in pieces that are submitted one after the other) and the add into the streams;
+* the token indexer of an attention layer: the query and key projections, the query norm and rotary step, then `q4_pool_keys` turns the raw keys of the rows that
+  complete a block into the block key (mean of the block's keys, RMS norm, rotary at the block start) and `dsa_select` (the pooled k-pool indexer of GLM-5-Next with
+  pools of `compress_ratio` tokens, `budget / ratio` kept, the unfinished last pool kept) scores the pooled keys. The block key is stored at the slot of the block's last token, and
+  the gate score of the pooling is 0 for last tokens and -1e4 for all others, so that the softmax pooling of `dsa_select` returns that key exactly. `dsa_attention` attends to the chosen tokens
+  (the indexer key store is `slots x 2 x index_head_dim x 4` bytes per attention layer). `FLLM_DSA=dense` attends to every key on the device too.
+
+The model runs completely on the device or completely on the host (`FLLM_QWEN4=host`, a missing kernel or a layer that needs the host: one log line names what is missing).
+It needs the DeltaNet device kernels, so the key width of its delta heads must be one they take (64 or 128 on CUDA and HIP, 32 to 128 on Vulkan): the tiny CPU fixture `qwen4_exp`
+(key width 8) runs on the host, `scripts/hf_golden.py qwen4_exp_wide` has the same model with delta heads of 64 x 32.
+
 LongCat-Flash: the shortcut experts of every second layer join the stream after the layer that follows (the pending result lives in the device pass, so the fused "residual add and next norm" is off for the layer that receives it). On CUDA the routing runs on the device (`moe_route_ex`, then `Stream::moe_zero_fold` sums the weights of the zero experts, whose ids lie beyond the stored experts, into a per-row scale that enters `moe_combine_ex` as the term `scale * x`; the sort skips those ids). On HIP and Vulkan, which have no device routing, the router runs on the host and the experts on the device (`moe_on_device`), and the zero experts are added with `gather_rows` / `scatter_add_rows`.
 
 MiniMax-M3 (`Stream::block_select`, `Stream::block_attention`; CUDA/HIP `cuda/block_sparse.cu`, Vulkan `misc_block_scores.comp` + `misc_dsa_topk.comp` + `attn_block_sparse.comp`): the layers are the generic ones (grouped-query attention with per-head norms and partial half-split rotary, sigmoid-routed experts with a shared expert, `swiglu_oai` also in the dense layers); on a block-sparse layer a second small projection pair (indexer queries and keys, norm, the attention's rotation) writes the indexer keys into an f32 store per cache slot, scores every key per indexer head, pools the scores per block (maximum), forces the newest blocks and keeps the best (lower block on ties), and the attention reads those blocks of the f16 KV cache. Needs an f16 cache, an indexer at least as wide as the rotary part, `heads` divisible by the indexer heads; otherwise the model runs on the CPU (`FLLM_M3=host` forces it). CUDA scores in chunks of 1M (row, head, key) triples per launch; Vulkan in groups of about 2e9 multiply-adds, each its own submission. The step cannot be recorded in a CUDA graph.

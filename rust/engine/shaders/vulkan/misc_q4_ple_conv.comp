@@ -1,0 +1,50 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_q4_ple_conv | bindings: gated,normed,conv,state,out | push: width,ksz,dilation,row0,n,reset,state_off | grid: [ceil(width/128), 1, 1] per run
+// Stream::q4_ple_conv (Qwen3.8-Flash-Next hashed n-gram embedding) for one run: a dilated causal depthwise convolution over the normalised gated feature,
+//   out[t][c] = gated[t][c] + silu(sum_{j < ksz - 1} w[c][j] * h[j * dilation] + w[c][ksz - 1] * normed[t][c])
+// h = the last H = (ksz - 1) * dilation inputs of channel c, oldest first. One invocation per channel walks the n tokens of the run with h in registers.
+// The history of channel c is state[state_off + c * H + i] (float view of the sequence's state buffer); reset != 0: the old history is ignored.
+// H <= 32.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer GatedBuf { float gated[]; };
+layout(std430, binding = 1) readonly buffer NormedBuf { float normed[]; };
+layout(std430, binding = 2) readonly buffer ConvBuf { float convw[]; };
+layout(std430, binding = 3) buffer StateBuf { float state[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint width;
+    uint ksz;
+    uint dilation;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+} p;
+
+void main() {
+    const uint c = gl_GlobalInvocationID.x;
+    if (c >= p.width) return;
+    const uint hl = (p.ksz - 1u) * p.dilation;
+    const uint hist = p.state_off + c * hl;
+    float h[32];
+    for (uint i = 0u; i < 32u; i++) h[i] = (i < hl && p.reset == 0u) ? state[hist + i] : 0.0;
+    for (uint t = 0u; t < p.n; t++) {
+        const uint at = (p.row0 + t) * p.width + c;
+        const float cur = normed[at];
+        float value = 0.0;
+        for (uint j = 0u; j + 1u < p.ksz; j++) value += convw[c * p.ksz + j] * h[j * p.dilation];
+        value += convw[c * p.ksz + p.ksz - 1u] * cur;
+        outv[at] = gated[at] + silu(value);
+        for (uint i = 0u; i < 31u; i++) {
+            if (i + 1u < hl) h[i] = h[i + 1u];
+        }
+        h[hl - 1u] = cur;
+    }
+    for (uint i = 0u; i < 32u; i++) {
+        if (i < hl) state[hist + i] = h[i];
+    }
+}

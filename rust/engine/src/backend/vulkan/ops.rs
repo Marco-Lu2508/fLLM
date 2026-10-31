@@ -14,6 +14,7 @@ pub mod dsa;
 pub mod hc;
 pub mod inkling;
 pub mod moe;
+pub mod qwen4;
 pub mod recurrent;
 pub mod v4;
 

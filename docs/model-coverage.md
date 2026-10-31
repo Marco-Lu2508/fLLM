@@ -80,11 +80,11 @@ Verified column:
 | LFM2, LFM2-MoE | safetensors | D | D (dense) / C (MoE) | D (dense) | D (dense) | H | T 1.8e-4 / 2.9e-4 |
 | DBRX | safetensors | D | C | C | C | C | T 1.3e-4 |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
-| DeepSeek-V4, Qwen3.8-Flash-Next (`qwen4_exp`), Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
+| DeepSeek-V4, Inkling, Motif, Kimi K3, GLM-5-Next, Ling-3.0, MiniMax-M3, LongCat-Flash, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, Hy4, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | Grok-1, JetMoE, Step-3 (not 3.5), PLaMo, TeleChat, Param2, A.X, GigaChat3.5, Pangu, xLSTM, RWKV 6/7, HRM-Text, ZAYA | - | - | - | - | - | - | N (config name recognised, no decoder: the converter or the loader refuses with the reason) |
 | Kimi K3 (`kimi_k3`: Kimi delta layers with full-rank gates, rotary-free latent attention with an output gate, SiTU latent MoE, block attention residuals; GGUF `kimi-linear`) | safetensors (bf16 / f32; the Hub MXFP4 weights are not read) | D | H | H | H | H | T 2.9e-5 on a tiny fixture of its latent attention layers, compared with the model repository's own `modeling_kimi_linear.py` (24 positions, f32 KV cache; see `scripts/verify_kimi_k3.py`). The delta layers of K3 were not run against their reference (it needs `fla`); they share the code verified by the Kimi-Linear, Ling-3.0 and GLM-5-Next fixtures. The real 2.8T checkpoint was not run |
-| Qwen3.8-Flash-Next (`qwen4_exp`: Qwen3.5 delta / gated attention layers + MoE in gated residual streams, hashed n-gram embeddings (PLE), token indexer; GGUF `qwen3next` with extra metadata) | safetensors (text part; n-gram table as one tensor or `shard_N`) | D | H | H | H | H | T 2.0e-6 .. 5.1e-6 with a float32 KV cache and 2.2e-4 .. 2.5e-4 with the default half-precision cache (12, 20, 33, 40 positions, cached decoding too; the dense indexer is 0.34 off). Greedy server completions identical (4 concurrent requests); Vulkan on an RTX 2000 Ada gave the same text as the CPU (host fallback). The real 180B checkpoint was not run |
+| Qwen3.8-Flash-Next (`qwen4_exp`: Qwen3.5 delta / gated attention layers + MoE in gated residual streams, hashed n-gram embeddings (PLE), token indexer; GGUF `qwen3next` with extra metadata) | safetensors (text part; n-gram table as one tensor or `shard_N`) | D | D | D | D | C | T 2.0e-6 .. 5.1e-6 with a float32 KV cache and 2.2e-4 .. 2.5e-4 with the default half-precision cache (12, 20, 33, 40 positions, cached decoding too; the dense indexer is 0.34 off). Greedy server completions identical (4 concurrent requests); Runs completely on CUDA, HIP and Vulkan devices (streams, n-gram embeddings, token indexer; see "Models added with their own decoders"); delta heads must be 64 or 128 wide on CUDA / HIP (32 to 128 on Vulkan), so the key-width-8 fixture stays on the host and `qwen4_exp_wide` is the device fixture. The real 180B checkpoint was not run |
 | Motif, DiffLlama, Doge, Kolibri1, RecurrentGemma, MiniMax-M1 | - | - | - | - | - | - | N (see Open gaps) |
 
 ## Encoders, rerankers, embedders
@@ -280,7 +280,7 @@ Tiny random fixtures (weights rounded to F16 first, so that the CPU and the F16 
 | MiniMax-M3 | same | same | same | same | everything: block indexer, block-sparse attention, sigmoid-routed experts, dense layers (see below) |
 | Inkling | same | same | same | same | everything: convolutions, relative-position attention, experts (routing on the host) (see below) |
 | DeepSeek-V4 | same (7-, 100- and 294-character prompts; three different prompts at once also) | same | same | same | everything: hyper-connections, the compressors, window and compressed attention with the indexer selection, the per-sequence state, the clamped SwiGLU experts; the routers and hash tables of the MoE layers run on the host (one log line) |
-| Qwen3.8-Flash-Next | not run | CPU (notice; run before this change, unchanged code) | not run | not run | nothing (unchanged, see "Open gaps") |
+| Qwen3.8-Flash-Next (`qwen4_exp_wide`) | same | same | same | same | everything: gated streams, n-gram embeddings (hash on the host), token indexer with sparse attention, delta and MoE layers. A 300-character prompt is the same on both Vulkan devices and on `cuda:0` / `hip:0` with `FLLM_CUDA_EXACT=1`; with the default F16 prompt GEMMs those two differ after about 5 tokens (near-tied router of the random model, see the CHANGELOG) |
 
 #### MiniMax-M3, Inkling and LongCat-Flash on devices (2026-10-31)
 
@@ -299,8 +299,8 @@ Not implemented, ordered by how many current models need them:
 
 1. **Multi-stream residuals ("hyper-connections", mHC/iHC)** on accelerators for the rest of the models, and for Motif at all.
 
-   Hy4, GLM-5-Next and DeepSeek-V4 run them on CUDA, HIP and Vulkan (`hc_mix`, `hc_combine`); Qwen3.8-Flash-Next has them on the CPU only. Missing device
-   kernels: the MTP head of DeepSeek-V4 and its FP8 / FP4 Hub weight formats, the device routing of its sqrtsoftplus and hash-routed MoE layers (they are routed on the host), the gated streams, n-gram embeddings and token indexer of Qwen3.8-Flash-Next, and, on Metal, SYCL, wgpu and the NPUs, the block-sparse attention of MiniMax-M3 and the convolutions and
+   Hy4, GLM-5-Next and DeepSeek-V4 run them on CUDA, HIP and Vulkan (`hc_mix`, `hc_combine`); Qwen3.8-Flash-Next has its own gated streams on the devices. Missing device
+   kernels: the MTP head of DeepSeek-V4 and its FP8 / FP4 Hub weight formats, the device routing of its sqrtsoftplus and hash-routed MoE layers (they are routed on the host), and, on Metal, SYCL, wgpu and the NPUs, the block-sparse attention of MiniMax-M3 and the convolutions and
    relative position bias of Inkling (those models run on the CPU there). The routing of the Inkling experts, and of the LongCat-Flash shortcut experts on HIP and Vulkan, runs on the host.
 2. **The DeepSeek-V3.2 / GLM-5 indexer on Metal, SYCL and wgpu; the pooled (GLM-5-Next) and tail-rotated (Hy4) indexers on every device.** CUDA, HIP and
    Vulkan run the plain indexer (selection and sparse attention) on the device; the other backends attend densely (exact up to `index_topk` tokens)
@@ -399,7 +399,7 @@ GGUFs (Nemotron 3 Nano), and Qwen3.8 27B GGUF checks.
 | Kimi K3 | 2.8T | `KimiK3ForConditionalGeneration` | **T (latent attention part)** | Converter and CPU decoder for SiTU, attention residual blocks, latent MoE with norm, output-gated latent attention and full-rank KDA gates; MXFP4 Hub weights are not read. |
 | Qwen3.8 2.4T A95B | 2.4T | `Qwen3_5MoeForCausalLM` | V (arch) | Same layers as Qwen3.5-MoE; too large to run. |
 
-| Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **T** | Text part on the CPU (streams, n-gram embeddings, token indexer); the vision tower is not imported; the 90 GiB n-gram table needs a machine with that much memory. |
+| Qwen3.8-Flash-Next | 180B / 6B | `Qwen4ExpForConditionalGeneration` | **T** | Text part on the CPU and on CUDA, HIP and Vulkan devices (streams, n-gram embeddings, token indexer); the vision tower is not imported; the 90 GiB n-gram table needs a machine with that much memory. |
 | DeepSeek V4.1 Flash, V4 Pro 0813 | 552B, 1.6T | `DeepseekV41ForCausalLM`, `DeepseekV4ForCausalLM` | V (tiny, CPU, CUDA, HIP, Vulkan) | Hyper-connections, compressed/sparse attention, hash routing as in `deepseek_v4`; the V4.1 engram embeddings are not implemented. Checkpoints not run. |
 | Motif 3 | 314B | `MotifForCausalLM` | **N** | GDLA attention, multi-stream residuals, PolyNorm activation. |
 | MiniMax-M3 | 428B | `MiniMaxM3SparseForConditionalGeneration` | V (tiny, CPU) | Block-sparse attention index on top of MiniMax-M2, `swigluoai`, as in `minimax_m3_vl_text`; text part only, checkpoint not run. |

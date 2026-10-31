@@ -1008,6 +1008,8 @@ pub struct DeviceModelWeights {
     hc: Option<DeviceHcModel>,
     /// DeepSeek-V4: `head_dim` ones, the weight of the plain RMS norm of every query head.
     v4_ones: Option<crate::backend::DeviceBuffer>,
+    /// Gates, n-gram embeddings and token indexers of Qwen3.8-Flash-Next; its streams likewise live in a buffer of their own.
+    q4: Option<qwen4::DeviceQwen4>,
 }
 
 /// Rotary cos/sin tables shared between the decoder and device `RopeParams`.
@@ -1196,6 +1198,8 @@ pub struct RustDecoder {
     ink_device: bool,
     /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
     v4_device: bool,
+    /// Qwen3.8-Flash-Next runs on the device (streams, n-gram embeddings and token indexer included).
+    q4_device: bool,
 }
 
 /// DeepStack features: per decoder layer, (row, values) pairs.
@@ -2435,6 +2439,7 @@ impl RustDecoder {
             ink_device: false,
             hc_device: false,
             v4_device: false,
+            q4_device: false,
         };
         decoder.set_device(device)?;
         decoder.plan_expert_cache(mapping);
@@ -2859,7 +2864,11 @@ impl RustDecoder {
         layer: usize,
         after_ffn: bool,
     ) -> Result<(), String> {
-        let h = self.hc_params().ok_or("hyper-connection configuration missing")?;
+        let hc = match (self.hc_params(), &self.cfg.qwen4) {
+            (Some(h), _) => h.hc_mult,
+            (_, Some(q)) => q.hc,
+            _ => return Err("hyper-connection configuration missing".into()),
+        };
         let err = |e: crate::backend::BackendError| e.to_string();
         let dump = std::env::var_os("FLLM_DUMP_LAYERS").is_some();
         stream.residual_add(x_buf, &block.base, -1.0).map_err(err)?;
@@ -2868,9 +2877,9 @@ impl RustDecoder {
             stream.download(cast_f32_to_u8_mut(&mut host), x_buf).map_err(err)?;
             dump_layer("branch", layer, &host);
         }
-        stream.hc_combine(streams, &block.post, block.comb.as_ref(), x_buf, rows, h.hc_mult, self.cfg.hidden).map_err(err)?;
+        stream.hc_combine(streams, &block.post, block.comb.as_ref(), x_buf, rows, hc, self.cfg.hidden).map_err(err)?;
         if dump && after_ffn {
-            let mut host = vec![0.0f32; rows * h.hc_mult * self.cfg.hidden];
+            let mut host = vec![0.0f32; rows * hc * self.cfg.hidden];
             stream.download(cast_f32_to_u8_mut(&mut host), streams).map_err(err)?;
             dump_layer("ffn", layer, &host);
         }
@@ -2949,7 +2958,7 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
     #[allow(clippy::too_many_arguments)]
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool) -> Option<&'static str> {
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool, q4_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return if self.v4_device { None } else { Some("DeepSeek-V4 hyper-connections and compressed attention (the backend has no kernels for them, or FLLM_V4=host)") };
@@ -2968,8 +2977,8 @@ impl RustDecoder {
         if cfg.attn_res.is_some() {
             return Some("attention residual blocks");
         }
-        if cfg.qwen4.is_some() {
-            return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer");
+        if cfg.qwen4.is_some() && !q4_ok {
+            return Some("Qwen3.8-Flash-Next streams, n-gram embeddings and token indexer (the backend has no kernels for them, or FLLM_QWEN4=host)");
         }
         // the device pass has no kernels for the Gemma 3n / Gemma 4 extras. They carry state from layer to layer (per-layer inputs,
         // AltUp streams) that only the host pass keeps, so one such layer sends every layer to the host.
@@ -3250,6 +3259,9 @@ impl RustDecoder {
         if self.v4_device {
             self.hc_device = true;
         }
+        // Qwen3.8-Flash-Next: gated streams, n-gram embeddings and the token indexer on the device (the layers are the ordinary delta / attention / MoE ones)
+        let q4_ok = self.qwen4_device_possible(&*backend);
+        self.q4_device = q4_ok;
         let mut missing = self.backend_unsupported(caps.supports_layer_norm, caps.supports_grouped_rms_norm);
         // Layers without device kernels run on the host between the device layers (`host_layers`); a model in which no layer can
         // use the device gains nothing from it.
@@ -3297,7 +3309,7 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok, mamba_ok, zamba_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok, mamba_ok, zamba_ok, q4_ok)
                 }
             })
             .collect();
@@ -3320,6 +3332,14 @@ impl RustDecoder {
             self.v4_device = false;
             self.hc_device = false;
             layer_reasons.iter_mut().for_each(|r| *r = Some("DeepSeek-V4 (a layer of the model has no device kernels)"));
+        }
+        // likewise the streams of Qwen3.8-Flash-Next
+        if q4_ok && layer_reasons.iter().any(Option::is_some) {
+            self.q4_device = false;
+            if let Some(first) = layer_reasons.iter().flatten().next() {
+                eprintln!("[fllm-rs] Qwen3.8-Flash-Next stays on the host: a layer of this model needs the host ({first})");
+            }
+            layer_reasons.iter_mut().for_each(|r| *r = Some("Qwen3.8-Flash-Next streams (a layer of the model has no device kernels)"));
         }
         if self.mla_latent {
             self.check_latent_mla(&*backend, &layer_reasons)?;
@@ -3547,6 +3567,7 @@ impl RustDecoder {
             let attn_norm = layer
                 .attn_norm
                 .as_ref()
+                .filter(|_| self.cfg.qwen4.is_none())
                 .map(|n| upload_norm(&format!("blk.{i}.attn_norm"), n))
                 .transpose()?;
             // FLLM_MERGE_PROJ: q/k/v and gate/up as one Marlin matrix each (instead of seven GEMMs per layer, four)
@@ -3780,6 +3801,7 @@ impl RustDecoder {
             let ffn_norm = layer
                 .ffn_norm
                 .as_ref()
+                .filter(|_| self.cfg.qwen4.is_none())
                 .map(|n| upload_norm(&format!("blk.{i}.ffn_norm"), n))
                 .transpose()?;
             let host_ffn = ffn_host_exact
@@ -4052,6 +4074,20 @@ impl RustDecoder {
             }
             _ => v4_hc,
         };
+        let q4_weights = match (self.q4_device, self.qwen4.as_deref()) {
+            (true, Some(model)) => {
+                let vec = |v: &[f32]| upload_norm("", &Norm { weight: v.to_vec(), bias: None });
+                let dev = model.upload_device(self, &*backend, &|name: &str, l: &Linear| upload_linear(name, l), &vec)?;
+                let table_note = if self.cfg.qwen4.as_ref().is_some_and(|q| q.ple.iter().any(|&f| f)) {
+                    "; the hash of the n-gram token ids stays on the host"
+                } else {
+                    ""
+                };
+                eprintln!("[fllm-rs] Qwen3.8-Flash-Next runs on the device: streams, gates, n-gram embeddings and token indexer{table_note}");
+                Some(dev)
+            }
+            _ => None,
+        };
         let dev_weights = DeviceModelWeights {
             layers: dev_layers,
             final_norm,
@@ -4069,6 +4105,7 @@ impl RustDecoder {
             },
             hc: hc_weights,
             v4_ones,
+            q4: q4_weights,
         };
 
         let mut pool = crate::backend::BufferPool::new(Arc::clone(&backend));
@@ -4252,6 +4289,22 @@ impl RustDecoder {
             hc_streams = Some(buf);
         }
         let mut hc_block: Option<HcBlock> = None;
+        // Qwen3.8-Flash-Next: its streams likewise (the block weights of the layer in flight are kept in `hc_block`)
+        let q4_dev = dev_weights.q4.as_ref().filter(|_| self.q4_device && !recording);
+        let mut q4_streams: Option<crate::backend::DeviceBuffer> = None;
+        let mut q4_block: Option<HcBlock> = None;
+        let mut q4_step: Option<qwen4::Q4Step> = None;
+        if let (Some(_), Some(qc)) = (q4_dev, cfg.qwen4.as_ref()) {
+            let mut expanded = Vec::with_capacity(rows * qc.hc * hidden);
+            for r in 0..rows {
+                for _ in 0..qc.hc {
+                    expanded.extend_from_slice(&host_x[r * hidden..(r + 1) * hidden]);
+                }
+            }
+            let mut buf = scratch.acquire(expanded.len() * 4).map_err(err)?;
+            stream.upload(&mut buf, cast_f32_to_u8(&expanded)).map_err(err)?;
+            q4_streams = Some(buf);
+        }
         // Gemma per-layer inputs (rows x layers x width) from the token ids and the scaled embeddings; the large projection runs on the device
         let ple_host = match (self.ple.as_ref(), dev_weights.ple_proj.as_ref()) {
             (Some(global), Some(proj)) if !recording => {
@@ -4362,6 +4415,18 @@ impl RustDecoder {
             }
             if let (Some(hcd), Some(streams)) = (hc_dev, hc_streams.as_ref()) {
                 hc_block = Some(self.hc_enter(&mut **stream, &mut scratch, &hcd.attn[i], &hcd.ones, streams, &mut x_buf, rows)?);
+            }
+            if let (Some(q4), Some(streams)) = (q4_dev, q4_streams.as_mut()) {
+                let ql = &q4.layers[i];
+                if let Some(ple) = &ql.ple {
+                    if delta_plan.is_none() {
+                        let shape = delta_shape.as_ref().ok_or("an n-gram embedding without DeltaNet layers")?;
+                        delta_plan = Some(self.delta_plan(shape, tables, lengths)?);
+                    }
+                    let plan = delta_plan.as_deref().unwrap_or(&[]);
+                    self.q4_ple_device(&mut **stream, &mut scratch, (i, ple), plan, streams, ids, tables, lengths)?;
+                }
+                q4_block = Some(self.q4_enter(&mut **stream, &mut scratch, &ql.attn, streams, &mut x_buf, rows)?);
             }
             let mut normed_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
             // parallel residual: the attention branch joins the residual stream only after the feed-forward input is taken from it
@@ -4826,6 +4891,16 @@ impl RustDecoder {
                         }
                         let sel = dsa_sel.as_ref().ok_or_else(|| format!("layer {i} shares the sparse-attention selection of the layer before, which did not run"))?;
                         stream.dsa_attention(&mut attn_buf, &q_buf, dev_kv, tables, read_layer, sel, dp.sel_width(), &attn_params).map_err(err)?;
+                    } else if let Some(ix) = q4_dev.and_then(|q| q.layers[i].index.as_ref()) {
+                        // Qwen3.8-Flash-Next: the token indexer picks the best blocks of tokens (and the unfinished last block) of every row
+                        if q4_step.is_none() {
+                            q4_step = Some(self.q4_step(&mut **stream, &mut scratch, &positions, tables, lengths)?);
+                        }
+                        let step = q4_step.as_ref().ok_or("token indexer step vanished")?;
+                        let width = self.q4_dsa_params().ok_or("token indexer configuration missing")?.sel_width();
+                        let sel = self.q4_select_device(&mut **stream, &mut scratch, ix, step, &dev_weights.rope[layer.rope_table], &normed_buf, (i, &positions, &slots, tables, lengths))?;
+                        stream.dsa_attention(&mut attn_buf, &q_buf, dev_kv, tables, read_layer, &sel, width, &attn_params).map_err(err)?;
+                        scratch.recycle(sel);
                     } else {
                         stream
                             .attention_paged(&mut attn_buf, &q_buf, dev_kv, tables, lengths, read_layer, &attn_params)
@@ -4851,7 +4926,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if !tp && hc_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -5038,6 +5113,10 @@ impl RustDecoder {
                 self.hc_leave(&mut **stream, &mut scratch, streams, &mut x_buf, block, rows, i, false)?;
                 hc_block = Some(self.hc_enter(&mut **stream, &mut scratch, &hcd.ffn[i], &hcd.ones, streams, &mut x_buf, rows)?);
             }
+            if let (Some(q4), Some(streams), Some(block)) = (q4_dev, q4_streams.as_mut(), q4_block.take()) {
+                self.hc_leave(&mut **stream, &mut scratch, streams, &mut x_buf, block, rows, i, false)?;
+                q4_block = Some(self.q4_enter(&mut **stream, &mut scratch, &q4.layers[i].ffn, streams, &mut x_buf, rows)?);
+            }
             let dev_ffn = match (&dev_layer.ffn_gate, &dev_layer.ffn_up, &dev_layer.ffn_down) {
                 (g, Some(u), Some(d)) => Some((g.as_ref(), u, d)),
                 // gate and up as one matrix: the merged branch below replaces the two projections
@@ -5153,7 +5232,7 @@ impl RustDecoder {
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
                 // (the shortcut experts of LongCat-Flash are added to the stream after this block: the norm computed in the add would miss them)
-                let next_target = if !tp && hc_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
+                let next_target = if !tp && hc_dev.is_none() && q4_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -5313,7 +5392,8 @@ impl RustDecoder {
                     scratch.recycle(buf);
                 }
             }
-            if let (Some(streams), Some(block)) = (hc_streams.as_mut(), hc_block.take()) {
+            let leaving = if hc_streams.is_some() { hc_block.take() } else { q4_block.take() };
+            if let (Some(streams), Some(block)) = (hc_streams.as_mut().or(q4_streams.as_mut()), leaving) {
                 self.hc_leave(&mut **stream, &mut scratch, streams, &mut x_buf, block, rows, i, true)?;
             }
             if let Some(level) = deepstack.as_ref().and_then(|d| d.get(i)).filter(|level| !level.is_empty()) {
@@ -5383,6 +5463,13 @@ impl RustDecoder {
             self.hc_head(&mut **stream, &mut scratch, hcd, &streams, &mut x_buf, rows)?;
             scratch.recycle(streams);
         }
+        if let (Some(q4), Some(streams)) = (q4_dev, q4_streams.take()) {
+            self.q4_head(&mut **stream, &mut scratch, q4, &streams, &mut x_buf, rows)?;
+            scratch.recycle(streams);
+        }
+        if let Some(step) = q4_step.take() {
+            step.recycle(&mut scratch);
+        }
 
         if !last_stage {
             // not the last pipeline stage: the residual stream goes down to the host (no peer path between devices of different
@@ -5400,6 +5487,9 @@ impl RustDecoder {
         let mut final_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
         if let Some(carried) = carried_norm.take() {
             scratch.recycle(std::mem::replace(&mut final_normed, carried));
+        } else if q4_dev.is_some() {
+            // Qwen3.8-Flash-Next has no output norm: the gate that collapsed the streams normalised them
+            stream.copy_buffer(&mut final_normed, &x_buf).map_err(err)?;
         } else {
             device_norm(
                 &mut **stream,
@@ -6188,13 +6278,19 @@ impl RustDecoder {
         lengths: &[i64],
     ) -> Result<Vec<DeltaPlanRun>, String> {
         let layers = self.layers.iter().filter(|l| matches!(l.attn, Attn::Linear(_))).count();
-        self.state_plan(layers, shape.layer_state_bytes(), tables, lengths)
+        // Qwen3.8-Flash-Next keeps the convolution history of its n-gram embeddings behind the DeltaNet states
+        let (extra, extra_bytes) = self.q4_state_extra();
+        self.state_plan_sized(layers + extra, layers * shape.layer_state_bytes() + extra * extra_bytes, tables, lengths)
     }
 
     /// `delta_plan` for any recurrent mixer kept in a device state buffer: `layers` layers of `layer_bytes` bytes each.
     fn state_plan(&self, layers: usize, layer_bytes: usize, tables: &[i64], lengths: &[i64]) -> Result<Vec<DeltaPlanRun>, String> {
+        self.state_plan_sized(layers, layers * layer_bytes, tables, lengths)
+    }
+
+    /// `state_plan` for a state buffer of `bytes` bytes that tracks `layers` token counts.
+    fn state_plan_sized(&self, layers: usize, bytes: usize, tables: &[i64], lengths: &[i64]) -> Result<Vec<DeltaPlanRun>, String> {
         let backend = self.backend.as_ref().ok_or("accelerator backend is not initialised")?;
-        let bytes = layers * layer_bytes;
         let rows = lengths.len();
         let mut store = self
             .device_states

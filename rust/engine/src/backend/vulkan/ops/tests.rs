@@ -1272,6 +1272,17 @@ fn sample_plans() -> Vec<OpPlan> {
             v.push(super::recurrent::plan_shortconv(1, &run, 256, 3, 128, has_bias).unwrap());
         }
         assert!(super::recurrent::plan_shortconv(0, &run, 256, 9, 0, false).is_err());
+        {
+            use super::qwen4::{plan_q4_act, plan_q4_gate_mix, plan_q4_ple_conv, plan_q4_ple_gate, plan_q4_pool_keys};
+            for mode in [0, 1] {
+                v.push(plan_q4_act(64, mode, 0.25, 2.0).unwrap());
+            }
+            v.push(plan_q4_gate_mix(3, 4, 64).unwrap());
+            v.push(plan_q4_ple_gate(3, 4, 64).unwrap());
+            v.push(plan_q4_ple_conv(1, &run, 96, 4, 3, 64).unwrap());
+            v.push(plan_q4_pool_keys(&[-1, 0, 0, 0, 0, 8, -1, -2, 0, 1], 16, 32, 4, 4, true, 1e-6).unwrap());
+            assert!(plan_q4_ple_conv(0, &run, 96, 4, 11, 0).is_err() && plan_q4_pool_keys(&[-1, 0, 0], 16, 32, 4, 4, true, 1e-6).is_err());
+        }
         assert!(super::recurrent::plan_copy_cols(3, 64, 100, 64).is_err());
         let odd = crate::backend::RwkvShape { hidden: 96, head_size: 48, group_eps: 1e-5, v7: true };
         assert!(plan_rwkv7_wkv(0, &run, &odd, 0, false).is_err() && !super::recurrent::rwkv_supported(&odd));

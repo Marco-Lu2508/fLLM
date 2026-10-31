@@ -24,6 +24,7 @@ mod v4;
 mod kv;
 mod mlx;
 mod moe;
+mod qwen4;
 mod rwkv;
 #[cfg(feature = "cuda")]
 mod prefill;
@@ -2296,6 +2297,7 @@ impl<'a> Tester<'a> {
             self.inkling_cases();
             self.hc_cases();
             self.v4_cases();
+            self.q4_cases();
         }
         if self.enter("linear") {
             self.linear_cases();

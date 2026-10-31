@@ -1,0 +1,77 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_q4_pool_keys | bindings: out,k,store,norm,cos,sin,meta | push: rows,dim,width,ratio,rope_half,neox,eps | grid: [rows split over x/y (x <= 65535), 1, 1]
+// Stream::q4_pool_keys (token indexer of Qwen3.8-Flash-Next), one workgroup of 256 per row r (dim <= 256). meta = int32, ratio + 1 entries per row: the
+// rotary position of the first token of the block the row completes (-1: out[r] = k[r]), then the ratio sources of the block's keys (>= 0: row of k;
+// < 0: store slot -1 - value, `width` floats per slot). A completing row gets mean(keys), RMS-normalised with `norm` (eps inside the root) and rotated
+// at that position: NeoX pairs (i, i + rope_half) or interleaved pairs (2i, 2i + 1) over the first 2 * rope_half values; cos/sin are tables of rope_half per position.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer OutBuf { float outv[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kk[]; };
+layout(std430, binding = 2) readonly buffer StoreBuf { float store[]; };
+layout(std430, binding = 3) readonly buffer NormBuf { float nw[]; };
+layout(std430, binding = 4) readonly buffer CosBuf { float cs[]; };
+layout(std430, binding = 5) readonly buffer SinBuf { float sn[]; };
+layout(std430, binding = 6) readonly buffer MetaBuf { int meta[]; };
+layout(push_constant) uniform P {
+    uint rows;
+    uint dim;
+    uint width;
+    uint ratio;
+    uint rope_half;
+    uint neox;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+shared float g_rot[WG];
+
+void main() {
+    const uint r = group_index();
+    if (r >= p.rows) return;
+    const uint c = gl_LocalInvocationID.x;
+    const uint m0 = r * (p.ratio + 1u);
+    if (meta[m0] < 0) {
+        if (c < p.dim) outv[r * p.dim + c] = kk[r * p.dim + c];
+        return;
+    }
+    float mean = 0.0;
+    if (c < p.dim) {
+        for (uint j = 0u; j < p.ratio; j++) {
+            const int src = meta[m0 + 1u + j];
+            mean += src >= 0 ? kk[uint(src) * p.dim + c] : store[uint(-1 - src) * p.width + c];
+        }
+        mean /= float(p.ratio);
+    }
+    const float ss = wg_sum(mean * mean);
+    const float inv = 1.0 / sqrt(ss / float(p.dim) + p.eps);
+    if (c < p.dim) g_rot[c] = mean * inv * nw[c];
+    barrier();
+    if (c >= p.dim) return;
+    float v = g_rot[c];
+    if (c < 2u * p.rope_half) {
+        const uint pos = uint(meta[m0]);
+        float a;
+        float b;
+        uint i;
+        if (p.neox != 0u) {
+            i = c < p.rope_half ? c : c - p.rope_half;
+            a = g_rot[i];
+            b = g_rot[i + p.rope_half];
+        } else {
+            i = c / 2u;
+            a = g_rot[2u * i];
+            b = g_rot[2u * i + 1u];
+        }
+        const float co = cs[pos * p.rope_half + i];
+        const float si = sn[pos * p.rope_half + i];
+        const float ra = a * co - b * si;
+        const float rb = b * co + a * si;
+        v = p.neox != 0u ? (c < p.rope_half ? ra : rb) : ((c & 1u) != 0u ? rb : ra);
+    }
+    outv[r * p.dim + c] = v;
+}

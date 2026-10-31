@@ -10,6 +10,9 @@
 //! KV block: the last token ids and the convolution history of every n-gram layer, and the indexer keys of every attention layer.
 use super::*;
 use std::collections::HashMap;
+
+mod device;
+pub(super) use device::{DeviceQwen4, Q4Step};
 use std::sync::Mutex;
 
 /// Gate of a block: reads the normalised streams, mixes them into one input and weights the injection of the block output.
@@ -22,6 +25,8 @@ struct Gate {
 
 struct Indexer {
     qk: Linear,
+    /// The query rows and the key row of `qk` as two projections (the device keeps them apart).
+    split: (Linear, Linear),
     q_norm: Vec<f32>,
     k_norm: Vec<f32>,
 }
@@ -231,11 +236,22 @@ impl Qwen4Model {
                 Ok(l)
             };
             let indexer = match qc.indexer {
-                Some((heads, dim, _, _)) if has_tensor(mapping, &format!("{p}.indexer.qk.weight")) => Some(Indexer {
-                    qk: load("indexer.qk", (heads + 1) * dim, hidden)?,
-                    q_norm: vector(mapping, &format!("{p}.indexer.q_norm.weight"), dim)?,
-                    k_norm: vector(mapping, &format!("{p}.indexer.k_norm.weight"), dim)?,
-                }),
+                Some((heads, dim, _, _)) if has_tensor(mapping, &format!("{p}.indexer.qk.weight")) => {
+                    let name = format!("{p}.indexer.qk.weight");
+                    let adapted = model.adapted_projection(&name);
+                    let part = |first: usize, rows: usize| -> Result<Linear, String> {
+                        let mut l = Linear::load_rows(mapping, &name, None, first, rows, hidden)?;
+                        l.replace_weights(adapted.as_ref().map(|all| all[first * hidden..(first + rows) * hidden].to_vec()))?;
+                        l.enable_fast_cpu();
+                        Ok(l)
+                    };
+                    Some(Indexer {
+                        qk: load("indexer.qk", (heads + 1) * dim, hidden)?,
+                        split: (part(0, heads * dim)?, part(heads * dim, dim)?),
+                        q_norm: vector(mapping, &format!("{p}.indexer.q_norm.weight"), dim)?,
+                        k_norm: vector(mapping, &format!("{p}.indexer.k_norm.weight"), dim)?,
+                    })
+                }
                 _ => None,
             };
             let ple = if qc.ple.get(i).copied().unwrap_or(false) {
@@ -337,6 +353,7 @@ impl RustDecoder {
         for (i, (layer, ql)) in self.layers.iter().zip(&model.layers).enumerate() {
             if let Some(ple) = &ql.ple {
                 let add = self.q4_ple(model, qc, i, ple, &streams, ids, tables, lengths)?;
+                dump_layer("ple", i, &add);
                 streams.iter_mut().zip(&add).for_each(|(s, a)| *s += a);
             }
             let (normed, weights) = ql.attn.mix(&streams, hc, hidden, cfg.eps)?;
@@ -476,28 +493,24 @@ impl RustDecoder {
         Ok(selection)
     }
 
-    /// The feature of the hashed n-gram embedding of PLE layer `i` for every stream (rows x hc x hidden).
+    /// The rows of the n-gram table that every head of every token reads (`rows x heads` ids, token by token), hashed from the last `ngram` token ids of
+    /// the sequence; advances the token history of PLE layer `i`. `history`: the state also keeps the convolution history (the host path; the device keeps
+    /// that in its state buffers).
     #[allow(clippy::too_many_arguments)]
-    fn q4_ple(&self, model: &Qwen4Model, qc: &crate::config::Qwen4Config, i: usize, ple: &Ple, streams: &[f32], ids: &[i64], tables: &[i64], lengths: &[i64]) -> Result<Vec<f32>, String> {
-        let cfg = &self.cfg;
-        let (rows, hidden, hc) = (lengths.len(), cfg.hidden, qc.hc);
-        let width = hc * hidden;
+    fn q4_ple_ids(&self, model: &Qwen4Model, qc: &crate::config::Qwen4Config, i: usize, ple: &Ple, ids: &[i64], tables: &[i64], lengths: &[i64], history: bool) -> Result<Vec<i64>, String> {
+        let width = qc.hc * self.cfg.hidden;
         let context = qc.ngram - 1;
         let heads = context * qc.heads_per_ngram;
-        let head_dim = qc.ple_embed / heads;
         let eos = qc.eos;
-        let dilation = qc.ngram;
-        let history = (qc.ple_kernel - 1) * dilation;
-        let runs = self.q4_runs(tables, lengths);
+        let hist_len = if history { (qc.ple_kernel - 1) * qc.ngram * width } else { 0 };
         let mut store = model.seqs.lock().map_err(|_| "state lock poisoned")?;
-        // the hashed embedding rows of every token
-        let mut embeddings = vec![0.0f32; rows * qc.ple_embed];
-        for &(start, end, first, position) in &runs {
+        let mut rows_of = vec![0i64; lengths.len() * heads];
+        for (start, end, first, position) in self.q4_runs(tables, lengths) {
             let seq = self.q4_seq(&mut store, first);
             if position == 0 {
                 seq.ple[i] = None;
             }
-            let state = seq.ple[i].get_or_insert_with(|| PleState { len: 0, ids: vec![eos; context], hist: vec![0.0; history * width] });
+            let state = seq.ple[i].get_or_insert_with(|| PleState { len: 0, ids: vec![eos; context], hist: vec![0.0; hist_len] });
             if state.len != position {
                 return Err(format!("n-gram state out of sync (holds {} tokens, got position {position})", state.len));
             }
@@ -516,16 +529,34 @@ impl RustDecoder {
                     }
                     for h in 0..qc.heads_per_ngram {
                         let head = (n - 2) * qc.heads_per_ngram + h;
-                        let id = (mixed.rem_euclid(ple.sizes[head] as i64) as u64 + ple.offsets[head]) as usize;
-                        let row = ple.embedding.row(id)?;
-                        let out = (start + t) * qc.ple_embed + head * head_dim;
-                        embeddings[out..out + head_dim].copy_from_slice(&row);
+                        rows_of[(start + t) * heads + head] = (mixed.rem_euclid(ple.sizes[head] as i64) as u64 + ple.offsets[head]) as i64;
                     }
                 }
             }
             state.len += end - start;
             state.ids = tokens[tokens.len() - context..].to_vec();
         }
+        Ok(rows_of)
+    }
+
+    /// The feature of the hashed n-gram embedding of PLE layer `i` for every stream (rows x hc x hidden).
+    #[allow(clippy::too_many_arguments)]
+    fn q4_ple(&self, model: &Qwen4Model, qc: &crate::config::Qwen4Config, i: usize, ple: &Ple, streams: &[f32], ids: &[i64], tables: &[i64], lengths: &[i64]) -> Result<Vec<f32>, String> {
+        let cfg = &self.cfg;
+        let (rows, hidden, hc) = (lengths.len(), cfg.hidden, qc.hc);
+        let width = hc * hidden;
+        let heads = (qc.ngram - 1) * qc.heads_per_ngram;
+        let head_dim = qc.ple_embed / heads;
+        let dilation = qc.ngram;
+        let runs = self.q4_runs(tables, lengths);
+        // the hashed embedding rows of every token
+        let row_ids = self.q4_ple_ids(model, qc, i, ple, ids, tables, lengths, true)?;
+        let mut embeddings = vec![0.0f32; rows * qc.ple_embed];
+        for (slot, &id) in row_ids.iter().enumerate() {
+            let row = ple.embedding.row(id as usize)?;
+            embeddings[slot * head_dim..(slot + 1) * head_dim].copy_from_slice(&row);
+        }
+        let mut store = model.seqs.lock().map_err(|_| "state lock poisoned")?;
         let key = group_rms(&ple.key.forward(&embeddings)?, &ple.norm_key, hidden, cfg.eps);
         let value = ple.value.forward(&embeddings)?;
         let query = group_rms(streams, &ple.norm_query, hidden, cfg.eps);

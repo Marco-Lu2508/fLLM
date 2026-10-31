@@ -402,6 +402,16 @@ int fllm_rel_attention_supported(int hd, int d_rel);
 int fllm_rel_attention_launch(cudaStream_t s, const float *q, const float *rel, const float *profile, const uint16_t *kpool, const uint16_t *vpool, float *out,
                               const int64_t *tables, const int64_t *lengths, int rows, int heads, int kv_heads, int hd, int d_rel, int extent, int window,
                               int log_floor, float log_alpha, float scale, int stride, int block_size);
+// Qwen3.8-Flash-Next (qwen4.cu)
+int fllm_q4_supported(int hc, int kernel, int dilation);
+int fllm_q4_pool_supported(int dim, int rope_half);
+int fllm_q4_act_launch(cudaStream_t s, float *x, size_t n, int mode, float scale, float factor);
+int fllm_q4_gate_mix_launch(cudaStream_t s, float *out, const float *normed, const float *gates, int rows, int hc, int hidden);
+int fllm_q4_ple_gate_launch(cudaStream_t s, float *out, const float *key, const float *query, const float *value, int rows, int hc, int hidden);
+int fllm_q4_ple_conv_launch(cudaStream_t s, const void *runs, int nruns, int width, int kernel, int dilation, size_t state_off, const float *gated,
+                            const float *normed, const float *convw, float *out);
+int fllm_q4_pool_keys_launch(cudaStream_t s, float *out, const float *k, const float *store, const float *norm, const float *cs, const float *sn,
+                             const int32_t *meta, int rows, int dim, int width, int ratio, int rope_half, int neox, float eps);
 // Native EXL2 / EXL3 projections (exl.cu); `kind` is the GGUF type id (0x80000030 / 0x80000031), `w` the blob of rust/gguf-probe/src/exl.rs. EXL3 needs
 // fllm_exl3_scratch_bytes(rows, cols, batch) of device scratch (EXL2 none).
 size_t fllm_exl3_scratch_bytes(int rows, int cols, int batch);

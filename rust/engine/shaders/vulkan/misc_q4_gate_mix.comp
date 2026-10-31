@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_q4_gate_mix | bindings: out,normed,gates | push: count,hc,hidden | grid: [min(ceil(count/256), 65535), 1, 1]
+// Stream::q4_gate_mix (Qwen3.8-Flash-Next), for the count = rows * hidden (row, d) pairs: the block input from the normalised residual streams,
+//   out[r][d] = sum_n sigmoid(gates[r][n][d]) * normed[r][n][d] / hc      (normed, gates: rows x hc x hidden)
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer OutBuf { float outv[]; };
+layout(std430, binding = 1) readonly buffer NormedBuf { float normed[]; };
+layout(std430, binding = 2) readonly buffer GatesBuf { float gates[]; };
+layout(push_constant) uniform P {
+    uint count;
+    uint hc;
+    uint hidden;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += grid_items) {
+        const uint r = i / p.hidden;
+        const uint d = i % p.hidden;
+        float acc = 0.0;
+        for (uint n = 0u; n < p.hc; n++) {
+            const uint at = (r * p.hc + n) * p.hidden + d;
+            acc += sigmoid1(gates[at]) * normed[at] / float(p.hc);
+        }
+        outv[i] = acc;
+    }
+}

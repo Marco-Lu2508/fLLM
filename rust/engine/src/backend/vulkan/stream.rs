@@ -1372,6 +1372,131 @@ impl Stream for VulkanStream {
         self.run_plans(&plans, &[Arg::r("kv", kv)], &states, false)
     }
 
+    fn supports_qwen4(&self, hc: usize, kernel: usize, dilation: usize) -> bool {
+        crate::backend::vulkan::ops::qwen4::qwen4_supported(hc, kernel, dilation)
+            && self.sh.caps().max_per_stage_storage_buffers >= crate::backend::vulkan::ops::qwen4::MAX_BINDINGS
+            && self.sh.caps().max_workgroup_invocations >= 256
+    }
+
+    fn q4_act(&mut self, x: &mut DeviceBuffer, mode: i32, scale: f32, factor: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) {
+            return Err(invalid("q4_act target is not a whole number of floats"));
+        }
+        if x.size == 0 {
+            return Ok(());
+        }
+        let plan = crate::backend::vulkan::ops::qwen4::plan_q4_act(x.size / 4, mode, scale, factor)?;
+        self.run_plans(&[plan], &[Arg::w("x", x)], &[], false)
+    }
+
+    fn q4_gate_mix(&mut self, out: &mut DeviceBuffer, normed: &DeviceBuffer, gates: &DeviceBuffer, rows: usize, hc: usize, hidden: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if out.size < rows * hidden * 4 || normed.size < rows * hc * hidden * 4 || gates.size < rows * hc * hidden * 4 {
+            return Err(invalid("q4_gate_mix buffers do not fit the batch"));
+        }
+        let plan = crate::backend::vulkan::ops::qwen4::plan_q4_gate_mix(rows, hc, hidden)?;
+        self.run_plans(&[plan], &[Arg::w("out", out), Arg::r("normed", normed), Arg::r("gates", gates)], &[], false)
+    }
+
+    fn q4_ple_gate(&mut self, out: &mut DeviceBuffer, key: &DeviceBuffer, query: &DeviceBuffer, value: &DeviceBuffer, rows: usize, hc: usize, hidden: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if out.size < rows * hc * hidden * 4 || key.size < rows * hc * hidden * 4 || query.size < rows * hc * hidden * 4 || value.size < rows * hidden * 4 {
+            return Err(invalid("q4_ple_gate buffers do not fit the batch"));
+        }
+        let plan = crate::backend::vulkan::ops::qwen4::plan_q4_ple_gate(rows, hc, hidden)?;
+        self.run_plans(&[plan], &[Arg::w("out", out), Arg::r("key", key), Arg::r("query", query), Arg::r("value", value)], &[], false)
+    }
+
+    fn q4_ple_conv(
+        &mut self,
+        out: &mut DeviceBuffer,
+        gated: &DeviceBuffer,
+        normed: &DeviceBuffer,
+        conv: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        width: usize,
+        kernel: usize,
+        dilation: usize,
+    ) -> Result<(), BackendError> {
+        if !self.supports_qwen4(1, kernel, dilation) {
+            return Err(BackendError::UnsupportedOperation("q4_ple_conv for this shape".into()));
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + width * (kernel - 1) * dilation * 4;
+        if out.size < rows * width * 4
+            || gated.size < rows * width * 4
+            || normed.size < rows * width * 4
+            || conv.size < width * kernel * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("q4_ple_conv buffers are smaller than the layer needs"));
+        }
+        // one invocation walks the tokens of its channel: a long run is cut into pieces that are submitted one after the other (the history lives in
+        // the state buffer between them), so that no dispatch lasts long on a small GPU that other programs share
+        let piece = crate::backend::vulkan::ops::qwen4::CONV_PIECE_ROWS;
+        let longest = runs.iter().map(|r| r.rows).max().unwrap_or(0);
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        let mut done = 0;
+        while done < longest {
+            let mut plans = Vec::with_capacity(runs.len());
+            for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > done) {
+                let spec = crate::backend::vulkan::ops::recurrent::RunSpec { first_row: r.first_row + done, rows: piece.min(r.rows - done), reset: r.reset && done == 0 };
+                plans.push(crate::backend::vulkan::ops::qwen4::plan_q4_ple_conv(i, &spec, width, kernel, dilation, state_offset)?);
+            }
+            self.run_plans(&plans, &[Arg::r("gated", gated), Arg::r("normed", normed), Arg::r("conv", conv), Arg::w("out", out)], &states, true)?;
+            done += piece;
+            if done < longest {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn q4_pool_keys(
+        &mut self,
+        out: &mut DeviceBuffer,
+        k: &DeviceBuffer,
+        store: &DeviceBuffer,
+        store_width: usize,
+        norm: &DeviceBuffer,
+        rope: &RopeParams,
+        meta: &[i32],
+        ratio: usize,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        let (dim, half) = (rope.dim, rope.rope_dim / 2);
+        if ratio == 0 || meta.is_empty() || !meta.len().is_multiple_of(ratio + 1) {
+            return Err(invalid("q4_pool_keys: the metadata is not whole rows"));
+        }
+        let rows = meta.len() / (ratio + 1);
+        let table_rows = rope.cos.len().checked_div(half).unwrap_or(0);
+        let slots = store.size.checked_div(store_width * 4).unwrap_or(0);
+        if out.size < rows * dim * 4
+            || k.size < rows * dim * 4
+            || norm.size < dim * 4
+            || !store.size.is_multiple_of(store_width.max(1) * 4)
+            || meta.chunks(ratio + 1).any(|m| (m[0] >= 0 && m[0] as usize >= table_rows) || (m[0] >= 0 && m[1..].iter().any(|&s| (s >= 0 && s as usize >= rows) || (s < 0 && (-1 - s) as usize >= slots))))
+        {
+            return Err(invalid("q4_pool_keys buffers, positions or sources do not fit the batch"));
+        }
+        let plan = crate::backend::vulkan::ops::qwen4::plan_q4_pool_keys(meta, dim, store_width, ratio, half, rope.neox, eps)?;
+        let (cos, sin) = (self.table(&rope.cos)?, self.table(&rope.sin)?);
+        self.run_plans(
+            &[plan],
+            &[Arg::w("out", out), Arg::r("k", k), Arg::r("store", store), Arg::r("norm", norm), Arg::view("cos", cos), Arg::view("sin", sin)],
+            &[],
+            false,
+        )
+    }
+
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
         if !x.size.is_multiple_of(4) {
             return Err(invalid("clamp target is not a whole number of floats"));

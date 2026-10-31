@@ -975,6 +975,18 @@ def config_for(arch: str, vocab: int):
             indexer_n_heads=2, indexer_kv_heads=1, indexer_head_dim=16, indexer_budget=8, indexer_compress_ratio=4,
             rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5, "mrope_section": [2, 1, 1]},
         ),
+        # The same model with delta heads of the widths the CUDA / HIP / Vulkan DeltaNet kernels take (key width 64, value width 32), so that all of its
+        # layers can run on a device
+        "qwen4_exp_wide": lambda: T.Qwen4ExpTextConfig(
+            **{**common, "num_hidden_layers": 6}, num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+            linear_conv_kernel_dim=4, linear_key_head_dim=64, linear_value_head_dim=32, linear_num_key_heads=2, linear_num_value_heads=4,
+            moe_intermediate_size=32, shared_expert_intermediate_size=32, num_experts=8, num_experts_per_tok=2, rms_norm_eps=1e-6,
+            layer_types=["linear_attention", "linear_attention", "linear_attention", "indexed_attention", "linear_attention", "indexed_attention"],
+            hc_count=3, hc_lowrank=16, ple_layer_ids=[2, 5], ple_embed_dim=32, ple_conv_kernel_size=4, ngram_size=3, heads_per_ngram=2,
+            ngram_vocab_size_base=200, make_ngram_vocab_size_divisible_by=16, seed=1234, split_ngram_parts=1,
+            indexer_n_heads=2, indexer_kv_heads=1, indexer_head_dim=16, indexer_budget=8, indexer_compress_ratio=4,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5, "mrope_section": [2, 1, 1]},
+        ),
         # Inkling: no rotary embeddings (a learned relative bias from the hidden state), short convolutions on k, v and both branches,
         # sliding layers with other head counts, log-scaled global attention, sigmoid MoE with sink-style shared experts, mu-P logits
         "inkling": lambda: T.InklingTextConfig(

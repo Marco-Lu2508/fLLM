@@ -356,6 +356,13 @@ fn all_op_plans() -> Vec<OpPlan> {
             plans.extend(plan_v4_attention(&shape, &runs, 4096, has_sel, 705).unwrap().into_iter().flatten());
         }
         plans.extend(plan_v4_ring(&shape, &runs, 4096).unwrap());
+        use crate::backend::vulkan::ops::qwen4::{plan_q4_act, plan_q4_gate_mix, plan_q4_ple_gate, plan_q4_pool_keys};
+        for mode in [0, 1] {
+            plans.push(plan_q4_act(64, mode, 0.25, 2.0).unwrap());
+        }
+        plans.push(plan_q4_gate_mix(3, 4, 64).unwrap());
+        plans.push(plan_q4_ple_gate(3, 4, 64).unwrap());
+        plans.push(plan_q4_pool_keys(&[-1, 0, 0, 0, 0, 8, -1, -2, 0, 1], 16, 32, 4, 4, true, 1e-6).unwrap());
     }
     {
         use crate::backend::vulkan::ops::dsa::{plan_dsa_attention, plan_dsa_select};
@@ -714,7 +721,7 @@ fn no_shader_is_orphaned() {
     // the three passes of an EXL3 product are recorded by the stream, not planned by `plan_quantized_linear`
     seen.extend(["exl3_pre", "exl3_mm", "exl3_post"].map(str::to_owned));
     // recurrent-model ops recorded directly by the stream (RWKV, KDA recurrence, column copy, ShortConv)
-    seen.extend(["misc_copy_cols", "rwkv_act", "rwkv_lerp", "rwkv_shift", "shortconv"].map(str::to_owned));
+    seen.extend(["misc_copy_cols", "rwkv_act", "rwkv_lerp", "rwkv_shift", "shortconv", "misc_q4_ple_conv"].map(str::to_owned));
     for width in [16, 32, 64, 128] {
         seen.extend([format!("kda_rec_hk{width}"), format!("rwkv6_wkv_n{width}"), format!("rwkv7_wkv_n{width}")]);
     }

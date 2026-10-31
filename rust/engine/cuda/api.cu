@@ -1781,6 +1781,36 @@ int fllm_cuda_rel_attention(FllmStream *st, const float *q, const float *rel, co
     return fllm_rel_attention_launch(st->s, q, rel, profile, kpool, vpool, out, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), rows, heads, kv_heads,
                                      hd, d_rel, extent, window, log_floor, log_alpha, scale, stride, block_size);
 }
+// Qwen3.8-Flash-Next (qwen4.cu)
+int fllm_cuda_q4_supported(int hc, int kernel, int dilation) { return !ssm_kernels_off() && fllm_q4_supported(hc, kernel, dilation); }
+int fllm_cuda_q4_pool_supported(int dim, int rope_half) { return fllm_q4_pool_supported(dim, rope_half); }
+int fllm_cuda_q4_act(FllmStream *st, float *x, size_t n, int mode, float scale, float factor) {
+    PREP(st);
+    return fllm_q4_act_launch(st->s, x, n, mode, scale, factor);
+}
+int fllm_cuda_q4_gate_mix(FllmStream *st, float *out, const float *normed, const float *gates, int rows, int hc, int hidden) {
+    PREP(st);
+    return fllm_q4_gate_mix_launch(st->s, out, normed, gates, rows, hc, hidden);
+}
+int fllm_cuda_q4_ple_gate(FllmStream *st, float *out, const float *key, const float *query, const float *value, int rows, int hc, int hidden) {
+    PREP(st);
+    return fllm_q4_ple_gate_launch(st->s, out, key, query, value, rows, hc, hidden);
+}
+// `runs` is nruns Q4Run records (24 bytes each, see qwen4.cu) in host memory.
+int fllm_cuda_q4_ple_conv(FllmStream *st, const void *runs, int nruns, int width, int kernel, int dilation, size_t state_off, const float *gated,
+                          const float *normed, const float *convw, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_q4_ple_conv_launch(st->s, d, nruns, width, kernel, dilation, state_off, gated, normed, convw, out);
+}
+int fllm_cuda_q4_pool_keys(FllmStream *st, float *out, const float *k, const float *store, const float *norm, const float *cs, const float *sn,
+                           const int32_t *meta_host, int rows, int dim, int width, int ratio, int rope_half, int neox, float eps) {
+    PREP(st);
+    void *dm = nullptr;
+    if (int e = stage(st, -1, meta_host, (size_t)rows * (ratio + 1) * sizeof(int32_t), &dm)) return e;
+    return fllm_q4_pool_keys_launch(st->s, out, k, store, norm, cs, sn, static_cast<const int32_t *>(dm), rows, dim, width, ratio, rope_half, neox, eps);
+}
 int fllm_cuda_clamp(FllmStream *st, float *x, size_t n, float limit) {
     PREP(st);
     return fllm_clamp_launch(st->s, x, n, limit);

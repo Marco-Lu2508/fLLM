@@ -678,6 +678,43 @@ extern "C" {
         scale: f32,
     ) -> c_int;
     fn fllm_cuda_v4_ring(st: *mut RawStream, state: *mut f32, kv: *const f32, row0: c_int, n: c_int, position0: c_int, hd: c_int, window: c_int, off_ring: usize) -> c_int;
+    fn fllm_cuda_q4_supported(hc: c_int, kernel: c_int, dilation: c_int) -> c_int;
+    fn fllm_cuda_q4_pool_supported(dim: c_int, rope_half: c_int) -> c_int;
+    fn fllm_cuda_q4_act(st: *mut RawStream, x: *mut f32, n: usize, mode: c_int, scale: f32, factor: f32) -> c_int;
+    fn fllm_cuda_q4_gate_mix(st: *mut RawStream, out: *mut f32, normed: *const f32, gates: *const f32, rows: c_int, hc: c_int, hidden: c_int) -> c_int;
+    fn fllm_cuda_q4_ple_gate(st: *mut RawStream, out: *mut f32, key: *const f32, query: *const f32, value: *const f32, rows: c_int, hc: c_int, hidden: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_q4_ple_conv(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        width: c_int,
+        kernel: c_int,
+        dilation: c_int,
+        state_off: usize,
+        gated: *const f32,
+        normed: *const f32,
+        convw: *const f32,
+        out: *mut f32,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_q4_pool_keys(
+        st: *mut RawStream,
+        out: *mut f32,
+        k: *const f32,
+        store: *const f32,
+        norm: *const f32,
+        cs: *const f32,
+        sn: *const f32,
+        meta: *const i32,
+        rows: c_int,
+        dim: c_int,
+        width: c_int,
+        ratio: c_int,
+        rope_half: c_int,
+        neox: c_int,
+        eps: f32,
+    ) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
     fn fllm_cuda_copy_cols(st: *mut RawStream, dst: *mut f32, src: *const f32, rows: c_int, width: c_int, dst_stride: c_int, dst_col: c_int) -> c_int;
@@ -5187,6 +5224,158 @@ impl Stream for CudaStream {
                 p.scale,
                 to_c(p.stride, "block table stride")?,
                 to_c(p.block_size, "page size")?,
+            )
+        })
+    }
+
+    fn supports_qwen4(&self, hc: usize, kernel: usize, dilation: usize) -> bool {
+        let c = |n: usize| c_int::try_from(n).unwrap_or(0);
+        // SAFETY: plain arithmetic on the arguments.
+        !self.act.is_narrow() && unsafe { fllm_cuda_q4_supported(c(hc), c(kernel), c(dilation)) } != 0
+    }
+
+    fn q4_act(&mut self, x: &mut DeviceBuffer, mode: i32, scale: f32, factor: f32) -> Result<(), BackendError> {
+        if !x.size.is_multiple_of(4) || !(0..=1).contains(&mode) {
+            return Err(invalid("q4_act: not a whole number of floats, or an unknown activation"));
+        }
+        // SAFETY: the buffer holds `x.size / 4` floats.
+        check(unsafe { fllm_cuda_q4_act(self.raw, dev_ptr(x)?.cast(), x.size / 4, mode, scale, factor) })
+    }
+
+    fn q4_gate_mix(&mut self, out: &mut DeviceBuffer, normed: &DeviceBuffer, gates: &DeviceBuffer, rows: usize, hc: usize, hidden: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if out.size < rows * hidden * 4 || normed.size < rows * hc * hidden * 4 || gates.size < rows * hc * hidden * 4 {
+            return Err(invalid("q4_gate_mix buffers do not fit the batch"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe { fllm_cuda_q4_gate_mix(self.raw, dev_ptr(out)?.cast(), dev_ptr(normed)?.cast(), dev_ptr(gates)?.cast(), to_c(rows, "rows")?, to_c(hc, "streams")?, to_c(hidden, "hidden")?) })
+    }
+
+    fn q4_ple_gate(&mut self, out: &mut DeviceBuffer, key: &DeviceBuffer, query: &DeviceBuffer, value: &DeviceBuffer, rows: usize, hc: usize, hidden: usize) -> Result<(), BackendError> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if out.size < rows * hc * hidden * 4 || key.size < rows * hc * hidden * 4 || query.size < rows * hc * hidden * 4 || value.size < rows * hidden * 4 {
+            return Err(invalid("q4_ple_gate buffers do not fit the batch"));
+        }
+        // SAFETY: sizes checked above.
+        check(unsafe {
+            fllm_cuda_q4_ple_gate(self.raw, dev_ptr(out)?.cast(), dev_ptr(key)?.cast(), dev_ptr(query)?.cast(), dev_ptr(value)?.cast(), to_c(rows, "rows")?, to_c(hc, "streams")?, to_c(hidden, "hidden")?)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn q4_ple_conv(
+        &mut self,
+        out: &mut DeviceBuffer,
+        gated: &DeviceBuffer,
+        normed: &DeviceBuffer,
+        conv: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        width: usize,
+        kernel: usize,
+        dilation: usize,
+    ) -> Result<(), BackendError> {
+        if !self.supports_qwen4(1, kernel, dilation) {
+            return Err(BackendError::UnsupportedOperation("q4_ple_conv for this shape".into()));
+        }
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + width * (kernel - 1) * dilation * 4;
+        if out.size < rows * width * 4
+            || gated.size < rows * width * 4
+            || normed.size < rows * width * 4
+            || conv.size < width * kernel * 4
+            || runs.iter().any(|r| r.state.size < state_end || r.first_row + r.rows > rows)
+        {
+            return Err(invalid("q4_ple_conv buffers smaller than the layer needs"));
+        }
+        // mirrors Q4Run in qwen4.cu
+        #[repr(C)]
+        struct RunC {
+            state: u64,
+            row0: i32,
+            n: i32,
+            reset: i32,
+            pad: i32,
+        }
+        let mut list = Vec::with_capacity(runs.len());
+        for r in runs {
+            list.push(RunC { state: dev_ptr(r.state)? as u64, row0: to_c(r.first_row, "run start")?, n: to_c(r.rows, "run length")?, reset: i32::from(r.reset), pad: 0 });
+        }
+        // SAFETY: sizes checked above; `list` outlives the call (the C side copies it before returning).
+        check(unsafe {
+            fllm_cuda_q4_ple_conv(
+                self.raw,
+                list.as_ptr().cast(),
+                to_c(list.len(), "runs")?,
+                to_c(width, "width")?,
+                to_c(kernel, "convolution kernel")?,
+                to_c(dilation, "dilation")?,
+                state_offset,
+                dev_ptr(gated)?.cast(),
+                dev_ptr(normed)?.cast(),
+                dev_ptr(conv)?.cast(),
+                dev_ptr(out)?.cast(),
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn q4_pool_keys(
+        &mut self,
+        out: &mut DeviceBuffer,
+        k: &DeviceBuffer,
+        store: &DeviceBuffer,
+        store_width: usize,
+        norm: &DeviceBuffer,
+        rope: &RopeParams,
+        meta: &[i32],
+        ratio: usize,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        let (dim, half) = (rope.dim, rope.rope_dim / 2);
+        if ratio == 0 || meta.is_empty() || !meta.len().is_multiple_of(ratio + 1) {
+            return Err(invalid("q4_pool_keys: the metadata is not whole rows"));
+        }
+        let rows = meta.len() / (ratio + 1);
+        // SAFETY: plain arithmetic on the arguments.
+        if unsafe { fllm_cuda_q4_pool_supported(to_c(dim, "key width")?, to_c(half, "rotary width")?) } == 0 || store_width < dim || self.act.is_narrow() {
+            return Err(BackendError::UnsupportedOperation("q4_pool_keys for this key width".into()));
+        }
+        let table_rows = rope.cos.len().checked_div(half).unwrap_or(0);
+        let in_range = |p: i32| p < 0 || (p as usize) < table_rows;
+        if out.size < rows * dim * 4 || k.size < rows * dim * 4 || norm.size < dim * 4 || !store.size.is_multiple_of(store_width * 4) || !meta.chunks(ratio + 1).all(|m| in_range(m[0])) {
+            return Err(invalid("q4_pool_keys buffers or positions do not fit the batch"));
+        }
+        let slots = store.size / (store_width * 4);
+        if meta.chunks(ratio + 1).any(|m| m[0] >= 0 && m[1..].iter().any(|&s| (s >= 0 && s as usize >= rows) || (s < 0 && (-1 - s) as usize >= slots))) {
+            return Err(invalid("q4_pool_keys: a source lies outside the batch or the key store"));
+        }
+        let (cs, sn) = (self.table(&rope.cos)?, self.table(&rope.sin)?);
+        // SAFETY: sizes and sources checked above; the metadata is staged before the call returns.
+        check(unsafe {
+            fllm_cuda_q4_pool_keys(
+                self.raw,
+                dev_ptr(out)?.cast(),
+                dev_ptr(k)?.cast(),
+                dev_ptr(store)?.cast(),
+                dev_ptr(norm)?.cast(),
+                cs,
+                sn,
+                meta.as_ptr(),
+                to_c(rows, "rows")?,
+                to_c(dim, "key width")?,
+                to_c(store_width, "store width")?,
+                to_c(ratio, "block size")?,
+                to_c(half, "rotary width")?,
+                c_int::from(rope.neox),
+                eps,
             )
         })
     }

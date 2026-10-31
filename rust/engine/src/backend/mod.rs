@@ -2372,6 +2372,70 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("v4_ring_write".into()))
     }
 
+    /// Can this stream run the operations of Qwen3.8-Flash-Next ([`Stream::q4_act`], [`Stream::q4_gate_mix`], [`Stream::q4_ple_gate`],
+    /// [`Stream::q4_ple_conv`], [`Stream::q4_pool_keys`]) for `hc` residual streams and an n-gram convolution of `kernel` taps `dilation` rows apart?
+    fn supports_qwen4(&self, _hc: usize, _kernel: usize, _dilation: usize) -> bool {
+        false
+    }
+
+    /// In place `x = factor * act(x * scale)`; `mode` 0 SiLU, 1 sigmoid (the gate projections of the residual streams).
+    fn q4_act(&mut self, _x: &mut DeviceBuffer, _mode: i32, _scale: f32, _factor: f32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("q4_act".into()))
+    }
+
+    /// Block input of a gated residual-stream block: `out[r][d] = sum_n sigmoid(gates[r][n][d]) * normed[r][n][d] / hc` (`normed`, `gates`:
+    /// `rows x hc x hidden`; `out`: `rows x hidden`).
+    fn q4_gate_mix(&mut self, _out: &mut DeviceBuffer, _normed: &DeviceBuffer, _gates: &DeviceBuffer, _rows: usize, _hc: usize, _hidden: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("q4_gate_mix".into()))
+    }
+
+    /// Gate of the hashed n-gram embedding: `out[r][n][d] = sigmoid(g) * value[r][d]` with `s = dot(key[r][n], query[r][n]) / sqrt(hidden)` and
+    /// `g = sign(s) * sqrt(max(|s|, 1e-6))` (0 for `s = 0`). `key`, `query`, `out`: `rows x hc x hidden`; `value`: `rows x hidden`.
+    #[allow(clippy::too_many_arguments)]
+    fn q4_ple_gate(&mut self, _out: &mut DeviceBuffer, _key: &DeviceBuffer, _query: &DeviceBuffer, _value: &DeviceBuffer, _rows: usize, _hc: usize, _hidden: usize) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("q4_ple_gate".into()))
+    }
+
+    /// Dilated causal depthwise convolution of the n-gram embedding: for every channel `c` of `width` and token `t` of a run,
+    /// `out[t][c] = gated[t][c] + silu(sum_j conv[c][j] * ext[t + j * dilation][c])`, where `ext` is the channel's history (`(kernel - 1) * dilation`
+    /// values, oldest first, kept from `state_offset` bytes on in each run's state buffer and updated in place; ignored when the run resets)
+    /// followed by the run's `normed` values.
+    #[allow(clippy::too_many_arguments)]
+    fn q4_ple_conv(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _gated: &DeviceBuffer,
+        _normed: &DeviceBuffer,
+        _conv: &DeviceBuffer,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _width: usize,
+        _kernel: usize,
+        _dilation: usize,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("q4_ple_conv".into()))
+    }
+
+    /// Token indexer of Qwen3.8-Flash-Next: the key a row hands to the store. `meta` holds `ratio + 1` ints per row: the rotary position of
+    /// the first token of the block the row completes (-1: the row only keeps its raw key), then the `ratio` sources of that block's keys
+    /// (`>= 0`: row of `k`; `< 0`: store slot `-1 - value`, `store_width` floats per slot). A completing row gets the mean of its block's keys, RMS-normalised with
+    /// `norm` and rotated by `rope` (`rope.dim` is the key width); every other row gets its `k` row. `out`, `k`: `rows x dim`.
+    #[allow(clippy::too_many_arguments)]
+    fn q4_pool_keys(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _k: &DeviceBuffer,
+        _store: &DeviceBuffer,
+        _store_width: usize,
+        _norm: &DeviceBuffer,
+        _rope: &RopeParams,
+        _meta: &[i32],
+        _ratio: usize,
+        _eps: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("q4_pool_keys".into()))
+    }
+
     /// In-place `x = clamp(x, -limit, limit)`.
     fn clamp(&mut self, _x: &mut DeviceBuffer, _limit: f32) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("clamp".into()))

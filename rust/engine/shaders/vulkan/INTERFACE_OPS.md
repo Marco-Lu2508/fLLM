@@ -54,6 +54,9 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `dsa_attention` (attention over the selected positions, f16 cache) | `dsa::plan_dsa_attention` | `attn_sparse` |
 | `rotate_heads` (tail rotation of the Hy4 indexer heads) | `hc::plan_rotate_heads` | `misc_rotate_heads` |
 | `hc_mix`, `hc_combine` (hyper-connections of Hy4 / GLM-5-Next / DeepSeek-V4) | `hc::plan_hc_mix`, `hc::plan_hc_combine` | `misc_hc_mix`, `misc_hc_combine` |
+| `q4_act`, `q4_gate_mix`, `q4_ple_gate` (gates of the residual streams and the n-gram embedding of Qwen3.8-Flash-Next) | `qwen4::plan_q4_act`, `plan_q4_gate_mix`, `plan_q4_ple_gate` | `misc_q4_act`, `misc_q4_gate_mix`, `misc_q4_ple_gate` |
+| `q4_ple_conv` (dilated causal convolution of the n-gram embedding, history in the sequence's state buffer; runs longer than 1024 rows are submitted in pieces) | `qwen4::plan_q4_ple_conv` (one plan per run piece, recorded by the stream) | `misc_q4_ple_conv` |
+| `q4_pool_keys` (pooled, normalised, rotated block keys of the token indexer; the pooled `dsa_select` then scores them) | `qwen4::plan_q4_pool_keys` | `misc_q4_pool_keys` |
 | `dsa_score_select` (scores and top-k over keys that are already in the store) | `dsa::plan_dsa_scores` | `misc_dsa_scores`, `misc_dsa_topk` |
 | `v4_rope`, `v4_compress`, `v4_attention`, `v4_ring_write` (DeepSeek-V4 attention) | `v4::plan_v4_rope`, `plan_v4_compress`, `plan_v4_attention`, `plan_v4_ring` | `v4_rope`, `v4_compress`, `v4_attn`, `v4_ring` |
 | `moe_topk`, `moe_route` | `plan_moe_topk`, `plan_moe_route` | `moe_topk` |
@@ -1135,3 +1138,19 @@ DeepSeek-V4 attention (`Stream::v4_rope`, `v4_compress`, `v4_attention`, `v4_rin
   2^17 (row, head, key) triples, each submitted on its own.
 * `v4_ring`: the last `window` key vectors of a run go to ring slot `position % window`.
 * The indexer selection of a layer is `dsa_score_select` (`misc_dsa_scores`, `misc_dsa_topk` on the entries stored by `v4_compress`: one block of `max_entries` keys per sequence, block table `[0]`).
+
+### `misc_q4_act.comp`, `misc_q4_gate_mix.comp`, `misc_q4_ple_gate.comp`, `misc_q4_ple_conv.comp`, `misc_q4_pool_keys.comp`
+
+Qwen3.8-Flash-Next (`Stream::q4_act`, `q4_gate_mix`, `q4_ple_gate`, `q4_ple_conv`, `q4_pool_keys`; plans in `ops/qwen4.rs`). The bindings and push constants are listed in
+the `// FLLM-SHADER:` header of each file.
+
+* `misc_q4_act`: in place over `count` floats, `x = factor * act(x * scale)` with `mode` 0 SiLU or 1 sigmoid (low-rank gate projection, injection weights `2 sigmoid(x / hc)`).
+* `misc_q4_gate_mix`: `out[r][d] = sum_n sigmoid(gates[r][n][d]) * normed[r][n][d] / hc` (the block input from the normalised streams); `normed` and `gates` are `rows x hc x hidden`.
+* `misc_q4_ple_gate`: one workgroup of 128 per (row, stream): `s = dot(key, query) / sqrt(hidden)`, `g = sign(s) sqrt(max(|s|, 1e-6))`, `out[r][n][d] = sigmoid(g) value[r][d]`.
+* `misc_q4_ple_conv`: one invocation per channel walks the `n` tokens of a run with the last `H = (ksz - 1) * dilation` inputs in registers (`H <= 32`):
+  `out[t][c] = gated[t][c] + silu(sum_{j < ksz - 1} w[c][j] h[j * dilation] + w[c][ksz - 1] normed[t][c])`. The history of channel `c` is `state[state_off + c * H + i]`
+  (oldest first) in the run's state buffer; `reset` ignores it. Grid `[ceil(width / 128), 1, 1]` per run piece.
+* `misc_q4_pool_keys`: one workgroup of 256 per row (`dim <= 256`). `meta` holds `ratio + 1` ints per row: the rotary position of the first token of the block the row
+  completes (-1: the row keeps its raw key), then the sources of the block's keys (`>= 0` a row of `k`, `< 0` the store slot `-1 - value`). A completing row gets the mean
+  of the keys, RMS-normalised with `norm` and rotated at that position (NeoX or interleaved pairs over the first `2 * rope_half` values). The decoder stores that key at
+  the slot of the block's last token and gives the pooled `dsa_select` a gate score of 0 for last tokens and -1e4 for all others, so that its softmax pooling returns exactly that key.
