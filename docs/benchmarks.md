@@ -573,8 +573,106 @@ plans all 32 layers with a 10320-token context from an empty card (budget 7.36 o
 * An int8 matrix-core kernel (Vulkan or HIP): see above, the measured peak gives nothing to win on the 840M.
 * The HIP prompt gap (230 against 298 tok/s) and the Vulkan 3B prompt gap (265 against 293): both need a faster dot-product tiled kernel, not matrix cores. The Vulkan one is at 0.8 - 0.85 of a 2.6 TMAC/s peak.
 * Q6_K at 3 to 12 rows (decode-bound); a block-wide activation scale (Q8_K style) would take a quarter of the arithmetic out of the Q4_K / Q6_K kernels but changes the numerics of every projection.
+* (Update 2026-10-31: the HIP prompt gap is closed and the Vulkan one is smaller, see the fourth pass below.)
 * One laptop per vendor, one session each. Not run on Intel, Apple or Arm GPUs: the matrix-vector range of 16 rows is the default for every vendor except NVIDIA, measured on the Radeon 840M only.
 * An unexplained intermittent self-test failure: in 2 of the first 4 full `selftest-gpu --device vulkan` runs of the new build on the Radeon laptop one to three fast-kernel checks failed (`fp8b a16 384x1024 tiles 128x128 batch 3 +bias`: one wrong element, the scalar kernel, which this pass did not touch); the next 3 full runs of the same binary, 3 of the previous build and 4 concurrent `--only linear` runs (two processes at once, both builds) had 0 failures. The laptop is shared with other agents' jobs, so a concurrent GPU job or a latent barrier hazard of the shared-input path may be behind it; it was not found.
+## Fourth pass (2026-10-31): prompt processing on the Radeon 840M
+
+The open item of the passes above: the prompt on the Radeon 840M was behind llama.cpp (3B 265 against 293 tok/s on Vulkan, about 230 against 298 on ROCm; 8B on Vulkan 98 against 124). Same laptop
+(Ryzen AI 5 PRO 435, Radeon 840M `gfx1153` with 4 compute units, 14 GB shared, Ubuntu 26.04, Mesa 26.0.8 RADV, ROCm 7.1), same client (`scripts/bench_compare.py`, 380-word prompt = 546 tokens,
+64 new tokens), the configurations of a table run one after the other in one session. The laptop was shared with other jobs and its GPU clock depends on temperature: the same binary read 232 to 264 tok/s
+in different hours, so compare only numbers of one table. Runs that overlapped with a foreign build or self test were repeated (one 8B Vulkan run read 98.7 / 11.8 tok/s that way and is left out).
+
+### Result
+
+Prompt / decode tok/s, medians (3B: 5 runs, 8B: 3 runs; "before" is the commit this work started from):
+
+| Model | engine | before | after | llama.cpp (same session) |
+|---|---|---|---|---|
+| Llama-3.2-3B Q4_K_M | fLLM Vulkan | 241 / 32.7 (repeat 236 / 32.3) | **270 / 34.0** (repeat 269 / 34.1) | Vulkan 290 / 28.6 |
+| Llama-3.2-3B Q4_K_M | fLLM HIP | 226 / 22.0 | **307 / 22.0** | ROCm 303 / 20.1 |
+| Llama-3.1-8B Q4_K_M | fLLM Vulkan | 98.5 / 15.6 (repeat 98.2) | **106 / 15.6** (repeat 106.1) | Vulkan 125 / 13.2 |
+| Llama-3.1-8B Q4_K_M | fLLM HIP | 94.7 / 6.9 | **129 / 7.0** | ROCm 130 / 10.0 |
+
+HIP now equals llama.cpp's ROCm on both models. **Vulkan does not reach llama.cpp's prompt speed: 7 % behind on the 3B and 15 % on the 8B** (decode is ahead in both). In an earlier, cooler hour of the same day
+the Vulkan 3B read 263.6 -> 311.0 and the HIP 3B 258.9 -> 348.5 tok/s (before -> after, 2 runs, no llama.cpp in that session), so the ratio, not the absolute number, is what to take from these tables. The text of
+greedy decoding is the same before and after (four prompts of 6 to 546 tokens, 48 tokens each, both backends). `selftest-gpu --device vulkan` 0 failed in the exact and in the fast pass (also with
+`FLLM_VULKAN_NO_TUNE=1`, which forces the cooperative-matrix path), `--device hip:0` 0 failed (976 + 1365 checks).
+
+Concurrent requests and decode did not regress (Llama-3.2-3B Q4_K_M, 128 new tokens, medians of 2 runs, total tok/s of all requests including the prompt phase; decode tok/s of one request in the first column):
+
+| | 60 words: 1 request (decode) | 4 requests | 8 requests | 380 words: 1 request (prompt / decode) | 4 requests | 8 requests |
+|---|---|---|---|---|---|---|
+| Vulkan before | 34.2 | 59.6 | 58.6 | 263.6 / 31.8 | 29.4 | 31.2 |
+| Vulkan after | 35.3 | 63.2 | 60.7 | 311.0 / 34.1 | 33.5 | 35.1 |
+| Vulkan before, repeat | 35.1 | 62.2 | 58.7 | 263.7 / 32.1 | 30.3 | 31.8 |
+| Vulkan after, repeat | 35.6 | 64.1 | 62.6 | 311.6 / 34.6 | 34.1 | 35.2 |
+| HIP before | 22.6 | 49.2 | 64.7 | 258.9 / 22.0 | 29.1 | 34.2 |
+| HIP after | 22.6 | 51.8 | 68.8 | 348.5 / 22.0 | 33.3 | 40.1 |
+
+### Where the time went (measured before changing anything)
+
+**Vulkan, 460-token prompt, `FLLM_VK_PROFILE=1`, share of the GPU time:** the tiled int8 kernel `mmq_q4_k_i` 74.5 % (8.5 ms per call), `mmq_q6_k_i` 12.9 %, the scalar prompt attention 7.4 % (5.1 ms per call),
+everything else 5 %. After this pass: `mm_q4_k_cx` 75.3 % (7.5 ms per call), `mmq_q6_k_i` 14.5 %, `attn_prefill_cm_d128` 4.1 % (2.5 ms per call). The 8B model: 78.4 % / 15.5 % / 2.5 %.
+
+**Why the int8 dot-product kernel stops at 0.86 TMAC/s although the raw rate is 2.6** (Q4_K 8192 x 3072 weight, 512 tokens, `FLLM_VK_BENCH_LINEAR=1`; shader variants through `FLLM_VK_SHADER_DIR`
+with parts of the kernel removed; RADV's ISA dump, `RADV_DEBUG=shaders`, for the instruction counts):
+
+| variant of `mm_q.comp` | TMAC/s |
+|---|---|
+| as shipped (per K step of 32: 256 dot instructions + 128 conversion / scale / offset instructions + about 150 for loading and decoding + 62 LDS reads) | 0.86 |
+| without the scale / offset arithmetic after the dot products | 1.07 |
+| without the global loads and the decoding of the weights | 1.02 |
+| without the shared-memory reads (constants instead) | 0.96 |
+| without those three | 1.55 |
+| without loads and scale arithmetic | 1.24 |
+| `RADV_PERFTEST=cswave32` (wave32 for everything) | 0.76 |
+| 8 x 8 outputs per invocation (237 registers, 2 waves per SIMD) | 0.62 - 0.69 |
+| address arithmetic of the loader computed before the loop; loads issued before the arithmetic and decoded after it; K step of 64; 64 / 128 / 256-row and 64 / 128-token tiles | 0.81 - 0.90 (no change beyond noise) |
+
+The kernel issues about 670 instructions per 256 dot products; every one of them occupies the vector unit, and the dot product itself is a third of them. There is no single culprit to remove and the
+conversion and scaling of a K-quant group cannot be skipped, so the integer-dot route ends near 1.0 TMAC/s here. The float16 matrix units have the same peak (2.5) but need far fewer instructions per
+product, which is why the cooperative-matrix route was worth a second look (the earlier "no faster" verdict compared the peak rates, not what the kernels get).
+
+**HIP** (`hip_gemm.cuh`; standalone timing of the GEMM, Q4_K 8192 x 3072 weight, 512 tokens, ms): as shipped 14.7 (0.87 TMAC/s); without the activation loads 11.6; without the weight loads 10.0; without both
+7.7; without both and without the matrix instructions 2.7. The weight decoding was not the cost (replacing it by a constant read changed nothing); the latency of the global loads of the next step
+was, with one workgroup per compute unit to hide it. The compiler also held the fragments of all four 16-wide K slices of a step in registers (224 VGPRs, 4 waves per SIMD, 55 KB of LDS: one
+workgroup per CU).
+
+### What changed
+
+1. **HIP: the matrix-core GEMM on RDNA3** (`hip_gemm.cuh`, `common.cuh`). The loop over the K slices of a step is no longer unrolled (224 -> 149 VGPRs), the LDS tiles are single buffered (27 KB; the second
+   barrier per step is the price) so that two workgroups share a CU, and the Q4_K / Q6_K decoders read the 16 quantized bytes of a run with one 16-byte load and extract the nibbles word-wise instead of 16 byte loads.
+   Q4_K 8192 x 3072, 512 tokens: 14.7 -> 8.6 ms (0.87 -> 1.50 TMAC/s); Q6_K 3072 x 8192: 16.3 -> 14.3 ms; 128 tokens: Q4_K 1.41 TMAC/s. Step by step (ms): not unrolled 11.2, + single buffer 8.9, + vector
+   loads 8.4 - 8.6. Other architectures (CDNA, RDNA4) keep the old structure (not run). `FLLM_CUDA_PROFILE=all` is new: wall time between consecutive launches per operation (device synchronised at every launch).
+   With it the HIP prompt of the 3B model was 85 % projections, 9 % attention (`attention4`, 6.4 ms per call), 2 % norms.
+2. **Vulkan: the cooperative-matrix prompt attention on AMD** (`attn_prefill_cm_d128`): the kernel needs 32-wide subgroups; RDNA's default for compute is 64, so it was NVIDIA-only. It is now pinned to 32 with
+   `VK_EXT_subgroup_size_control` on AMD as well. Per layer, 460-token prompt: 5.1 -> 2.5 ms (the 3B prompt +2 to +4 % on its own). `FLLM_VK_ATTN_COOP=0` brings the scalar kernel back.
+3. **Vulkan: a cooperative-matrix GEMM for Q4_K on AMD** (`mm_q4_k_cx`, `mm_coopmat_w.comp`). The existing wide kernel `mm_q4_k_cw` (NVIDIA) at subgroup 32 reached 0.72 TMAC/s; its ISA showed 255 registers, 8-byte
+   LDS reads (`f16vec4` tiles) and one-by-one half conversions. Steps (same weight, 512 tokens): `uvec4` tiles and `packFloat2x16` 0.82; K slices not unrolled (111 registers) 0.90; 64 x 128 tile instead of
+   128 x 64 (every decoded weight serves 128 tokens) with the epilogue staged inside the weight tile 0.94 - 0.97 (the int8 kernel: 0.86); the byte-wise `v_cvt_f32_ubyte` extraction changed nothing. The pipelines of
+   the cooperative-matrix GEMMs ask for subgroup 32 on AMD too (`FLLM_VK_COOP_SG64=1` keeps 64). It is planned for Q4_K only, from 128 tokens on, K a multiple of 64 and at most a quarter of the last 128-token tile empty;
+   the device-wide timing at the first prompt still decides between it and the integer dot product (8.8 against 8.9 ms for 4096 x 4096 Q4_K, 512 tokens, on this laptop, so it is chosen), and every other
+   format and batch keeps `mmq_<fmt>_i`. The NVIDIA kernel `mm_<fmt>_cw` is unchanged (the new code is behind a macro; its SPIR-V differs only by the dead guard of the loader), **not re-run on an NVIDIA card in this pass**.
+
+### What did not help (kept out of the code)
+
+* Vulkan int8 kernel: see the table above (loader hoisting, load / decode split, 8 x 8 outputs, wave32, tile sweeps).
+* Cooperative-matrix kernel `cx`: loads of the next two steps held in two register sets (0.68: worse), loads issued before the barrier instead of after it (0.86), cache-warming loads two steps ahead (0.92), a Q6_K
+  loader of the same shape (0.76 - 0.83 against 0.79 for the integer kernel: not kept, Q6_K stays on `mmq_q6_k_i`). With the loads, the decoding and the stores removed the kernel runs at 1.74 TMAC/s, so about
+  half of its time is the exposed latency of the weight and activation loads plus the decoding: the next step would be a longer K step (128) per barrier, which needs 52 KB of shared memory and one workgroup per CU.
+* HIP: a ring-rotated K start per workgroup (against memory-channel conflicts of the row stride) changed nothing; 64-token tile 10.2 ms against 8.6 for 128.
+
+### Open
+
+* Vulkan prompt: 7 % (3B) and 15 % (8B) behind llama.cpp. What is left: Q6_K (13 - 15 % of the time) at 0.79 TMAC/s, the loads and decoding of the cooperative-matrix kernel, the 34-token tail chunk of a
+  546-token prompt (512 + 34: it costs as much as 14 % of the 512-token chunk because a tile of 64 tokens is mostly empty; llama.cpp has the same chunking), the attention (4 %).
+* Not run: the new Vulkan code on NVIDIA and Intel; the HIP changes on CDNA and RDNA4; any Windows ROCm / Vulkan-on-AMD run. Q4_K models with Q5_K / Q8_0 tensors take the integer kernel.
+* Self test: one full `selftest-gpu --device vulkan` run (fast pass) of about ten had 3 failed checks, directly after a `FLLM_VK_BENCH_LINEAR` run that ended in "Vulkan device lost"; the failing rows were not
+  kept, and 3 full runs, 6 `--only linear` runs and 8 concurrent ones afterwards, with that build and the final one, had 0 failures. The known intermittent failure of the third pass may be the same thing.
+* Unit tests: `cargo test backend::vulkan` has two failures that exist at the commit this work started from (`no_shader_is_orphaned` lists 24 shaders of CPU-only models, `plans_match_the_shader_headers`
+  fails on the `ewise_scale` binding names); everything else passes, the planner test for AMD (`prefill_prefers_cooperative_matrices_then_integer_dot_then_f32`) was extended.
+
 ## Limits
 
 * One machine per vendor, one run of each configuration (medians of three requests, but no repeated sessions); expect a few percent of noise.
