@@ -63,6 +63,7 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `gather_rows`, `scatter_add_rows` | `plan_gather_rows`, `plan_scatter_add_rows` | `moe_gather_rows`, `moe_scatter_add_rows` |
 | `delta_layer` | `delta_supported`, `plan_delta_layer` | `delta_conv`, `delta_rec_hk{32,64,96,128}` |
 | `kda_layer` (Kimi Delta Attention) | `kda_supported`, `plan_kda_layer` | `delta_conv` (same convolution, `k_heads = v_heads`), `kda_rec_hk{16,32,64,128}` (`kda_rec.comp`, bindings and push block in its `FLLM-SHADER` header) |
+| chunk-parallel scan of long runs of `delta_layer`, `kda_layer`, `rwkv7_wkv`, `rwkv6_wkv`, Mamba-2 | `ops::scan::{plan_scan_core, plan_scan_delta_run, plan_scan_kda_run, plan_scan_rwkv7_run, plan_scan_rwkv6_run, plan_scan_mamba2_run}` | `scan_cum`, `scan_pairs`, `scan_tm`, `scan_wide`, `scan_pm`, `scan_state` (one scratch buffer, layout in `_scan_common.glsl`) and `scan_{delta,kda,rwkv7,rwkv6,mamba2}_prep` / `scan_{delta,kda,rwkv7,rwkv6}_post` / `scan_copy_out` |
 | `copy_columns` | `plan_copy_cols` | `misc_copy_cols` |
 | `shortconv_layer` (LFM2) | `shortconv_supported`, `plan_shortconv` | `shortconv` |
 | `rwkv_shift`, `rwkv_lerp`, `rwkv_act` | `plan_rwkv_shift`, `plan_rwkv_lerp`, `plan_rwkv_act` | `rwkv_shift`, `rwkv_lerp`, `rwkv_act` |
