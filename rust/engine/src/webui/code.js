@@ -2601,7 +2601,8 @@
           const key = argText.toLowerCase();
           if (!PERSONALITIES[key]) { codeNotice(`There is no style "${argText}". Choose one of: ${Object.keys(PERSONALITIES).join(', ')}.`); return true; }
           code.personality = key; saveCodeSettings(); renderCodeSide(true);
-          codeNotice(`Style: ${PERSONALITIES[key].label}${PERSONALITIES[key].note ? '. ' + PERSONALITIES[key].note.replace(/^Style: /, '') : '.'}`);
+          const detail = PERSONALITIES[key].note.replace(/^Style: /, '');
+          codeNotice(`Style: ${PERSONALITIES[key].label}${detail ? `. ${detail.charAt(0).toUpperCase()}${detail.slice(1)}` : '.'}`);
           return true;
         }
         case 'autoreview': {

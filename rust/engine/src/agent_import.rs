@@ -126,8 +126,30 @@ fn import_permissions(ctx: &mut Ctx, rules: &Rules, dest: &Path, what: &str) -> 
     if rules.is_empty() && rules.mode.is_none() {
         return Ok(());
     }
-    let text = serde_json::to_string_pretty(&rules_to_json(rules)).map_err(|e| e.to_string())?;
-    ctx.put(dest, &format!("{text}\n"), &format!("{} rule(s) from {what}", rules.allow.len() + rules.deny.len() + rules.ask.len()))
+    // an existing settings file is extended, never replaced: only rules it does not have yet are added
+    let mut merged = Rules::default();
+    let mut added = rules.clone();
+    if let Some(existing) = read(dest) {
+        let Ok(value) = serde_json::from_str::<Value>(&existing) else {
+            ctx.say(format!("kept   rules from {what}: {} is not valid JSON, fix it first", dest.display()));
+            return Ok(());
+        };
+        merged = Rules::from_json(&value);
+        let missing = |have: &[Rule], new: &[Rule]| new.iter().filter(|r| !have.contains(r)).cloned().collect::<Vec<_>>();
+        added = Rules { allow: missing(&merged.allow, &rules.allow), deny: missing(&merged.deny, &rules.deny), ask: missing(&merged.ask, &rules.ask), mode: rules.mode.clone() };
+        if added.is_empty() && (added.mode.is_none() || added.mode == merged.mode) {
+            ctx.say(format!("kept   rules from {what}: already in {}", dest.display()));
+            return Ok(());
+        }
+    }
+    let count = added.allow.len() + added.deny.len() + added.ask.len();
+    merged.merge(added);
+    let text = serde_json::to_string_pretty(&rules_to_json(&merged)).map_err(|e| e.to_string())?;
+    let force = ctx.force;
+    ctx.force = true; // the merge above is the protection against overwriting
+    let result = ctx.put(dest, &format!("{text}\n"), &format!("{count} rule(s) from {what}"));
+    ctx.force = force;
+    result
 }
 
 fn import_markdown_dir(ctx: &mut Ctx, from: &Path, to: &Path, what: &str) -> Result<(), String> {
@@ -453,6 +475,13 @@ mod tests {
         let mut again = ctx(&dir, true);
         import_claude(&mut again, &home).unwrap();
         assert!(again.lines.iter().any(|l| l.starts_with("kept")), "{:?}", again.lines);
+        // a second tool's rules are added to the existing file
+        std::fs::create_dir_all(home.join(".codex/rules")).unwrap();
+        std::fs::write(home.join(".codex/rules/a.rules"), "prefix_rule(pattern=[\"git\",\"status\"], decision=\"allow\")\nprefix_rule(pattern=[\"curl\"], decision=\"forbidden\")\n").unwrap();
+        let mut codex = ctx(&dir, true);
+        import_codex(&mut codex, &home).unwrap();
+        let merged = std::fs::read_to_string(studio.join("permissions.json")).unwrap();
+        assert!(merged.contains("bash: npm test*") && merged.contains("bash: git status*") && merged.contains("bash: curl*") && merged.contains("read: .env"), "{merged}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

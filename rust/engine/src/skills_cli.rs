@@ -76,6 +76,16 @@ pub fn rewrite(text: &str, fallback_name: &str, standard: bool) -> (String, Stri
     let (name, description, when) = read_meta(text);
     let body = split(text).map_or_else(|| text.trim().to_owned(), |(_, b)| b.trim_start_matches('\n').to_owned());
     let name = if name.is_empty() { fallback_name.to_owned() } else { name };
+    // the other front matter keys of the standard travel with the skill (fLLM ignores them, the other tools use them)
+    let mut extra = String::new();
+    if let Some((head, _)) = split(text) {
+        for key in ["license", "compatibility", "allowed-tools"] {
+            let v = head_value(&head, key);
+            if !v.is_empty() {
+                extra.push_str(&format!("{key}: {}\n", one_line(&v)));
+            }
+        }
+    }
     if standard {
         let mut description = description;
         if !when.is_empty() {
@@ -86,16 +96,6 @@ pub fn rewrite(text: &str, fallback_name: &str, standard: bool) -> (String, Stri
         }
         let description: String = description.chars().take(1024).collect();
         let slug = standard_name(&name);
-        // keep the other front matter keys that the standard allows
-        let mut extra = String::new();
-        if let Some((head, _)) = split(text) {
-            for key in ["license", "compatibility", "allowed-tools"] {
-                let v = head_value(&head, key);
-                if !v.is_empty() {
-                    extra.push_str(&format!("{key}: {v}\n"));
-                }
-            }
-        }
         (slug.clone(), format!("---\nname: {slug}\ndescription: {}\n{extra}---\n{}\n", one_line(&description), body.trim_end()))
     } else {
         let slug = local_name(&name);
@@ -103,6 +103,7 @@ pub fn rewrite(text: &str, fallback_name: &str, standard: bool) -> (String, Stri
         if !when.is_empty() {
             file.push_str(&format!("when: {}\n", one_line(&when)));
         }
+        file.push_str(&extra);
         file.push_str(&format!("---\n{}\n", body.trim_end()));
         (slug, file)
     }
@@ -175,6 +176,10 @@ pub fn skills_root(studio: &Path, folder: Option<&Path>) -> PathBuf {
 /// Copies the skills found below `from` into `dest_root` (names made valid for fLLM). Returns one line per skill.
 pub fn import_skills(from: &Path, dest_root: &Path, dry_run: bool, force: bool) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
+    // a tool that has no skills folder simply has nothing to bring over
+    if !from.is_dir() {
+        return Ok(lines);
+    }
     for dir in find_skills(from) {
         let text = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|e| format!("{}: {e}", dir.display()))?;
         if text.len() > 64 * 1024 {
@@ -304,6 +309,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
         Some("import") => {
             let from = args.get(1).filter(|a| !a.starts_with("--")).ok_or("give a folder with skills")?;
+            if !Path::new(from).is_dir() {
+                return Err(format!("{from} is not a folder"));
+            }
             for line in import_skills(Path::new(from), &root, dry, force)? {
                 println!("{line}");
             }
@@ -389,6 +397,7 @@ mod tests {
         let (n, d, _) = read_meta(&file);
         assert_eq!((n.as_str(), d.as_str()), ("pdf-processing", "Extract text from PDFs"));
         assert!(file.ends_with("# Steps\nUse the script.\n"));
+        assert!(file.contains("license: MIT\n") && file.contains("allowed-tools: Read, Bash\n"), "an import keeps the keys other tools use: {file}");
         // no front matter at all: the folder name is used
         let (name, file) = rewrite("Just steps\n", "from-folder", false);
         assert_eq!(name, "from-folder");
@@ -415,7 +424,9 @@ mod tests {
         assert!(import_skills(&dir.join("claude"), &dest, false, false).unwrap()[0].starts_with("kept"));
         let out = export_skill(&dest.join("deploy-it"), &dir.join("out"), true).unwrap();
         assert!(out.join("SKILL.md").is_file() && out.join("scripts/go.sh").is_file());
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
         assert!(import_skills(&dir.join("empty"), &dest, true, false).unwrap()[0].starts_with("no SKILL.md"));
+        assert!(import_skills(&dir.join("nothing-here"), &dest, true, false).unwrap().is_empty(), "a missing folder is nothing to import");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

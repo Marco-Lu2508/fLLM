@@ -304,6 +304,31 @@ mod tests {
         assert!(argv(&Terminal::Local, "x", Path::new("/r"), Path::new("/r"), "n", None).is_none());
     }
 
+    /// Runs against a real Docker: `FLLM_TEST_DOCKER_DIR=/a/folder/that/the/docker/daemon/sees cargo test real_docker -- --ignored`.
+    #[test]
+    #[ignore = "needs a Docker daemon and FLLM_TEST_DOCKER_DIR"]
+    fn real_docker_runs_a_command_in_the_mapped_folder() {
+        let Some(dir) = std::env::var_os("FLLM_TEST_DOCKER_DIR").map(PathBuf::from) else { panic!("set FLLM_TEST_DOCKER_DIR") };
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("hello.txt"), "from the host").unwrap();
+        let t = Terminal::Docker { image: std::env::var("FLLM_TEST_DOCKER_IMAGE").unwrap_or_else(|_| "alpine:3".into()), network: false };
+        let line = "pwd; cat hello.txt; echo made > new.txt; cd sub; printf '\\n__MARK__%s\\n' \"$(pwd)\"; (wget -q -T 2 -O- http://example.com >/dev/null 2>&1 && echo net-ok || echo net-blocked)";
+        let a = argv(&t, line, &dir, &dir, "fllm-agent-test-real", owner(&dir)).unwrap();
+        let out = Command::new(&a[0]).args(&a[1..]).output().expect("docker could not be started");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("/workspace\nfrom the host"), "the folder is mounted at /workspace and the file is there: {text}");
+        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap().trim(), "made", "a file made in the container is in the host folder");
+        assert!(text.contains("net-blocked"), "no network: {text}");
+        let reported = text.lines().find_map(|l| l.strip_prefix("__MARK__")).unwrap_or_else(|| panic!("no folder report in: {text}"));
+        assert_eq!(to_local(&t, reported, &dir), dir.join("sub"), "the reported folder maps back");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(dir.join("new.txt")).unwrap().uid(), std::fs::metadata(&dir).unwrap().uid(), "files belong to the workspace owner");
+        }
+    }
+
     #[test]
     fn a_container_is_tracked_by_the_pid_of_its_client() {
         let mut c = Command::new("docker");

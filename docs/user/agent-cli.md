@@ -40,7 +40,7 @@ How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.m
 * **Output.** The final answer goes to standard output, progress (one line per tool call) to standard error. `--json` prints one
   object with `answer`, `status`, `steps`, `folder` and the list of tool calls with their status
   (`ok`, `error`, `denied`, `unknown`, `bad_args`, `repeated`).
-* **Exit codes.** 0 finished, 1 error (server not reachable, empty answer ...), 3 stopped at `--max-steps`. In the last case the
+* **Exit codes.** 0 finished, 1 error (server not reachable, empty answer ...), 3 stopped at `--max-steps`, 4 the `--verify` command still fails after the run (see [self-review](#self-review---review)). In the last case the
   model is asked for a report without tools; if it gives none, the report lists the tool calls so far and says it did not finish.
 * **Sessions.** `--session NAME` keeps the conversation in `agent-sessions/NAME.json` of the Studio folder and continues it the
   next time (at most the last 120 messages, cut at a user message). A damaged session file is reported, not replaced.
@@ -247,3 +247,37 @@ for an hour, at most three waiting per platform) and runs nothing; you approve o
 lets nobody in. `--user` and `--pair` work for Telegram and Matrix too.
 
 WhatsApp, Signal and Email are not there: see [code-mode-gap.md](../code-mode-gap.md#why-some-things-stay-missing).
+
+## What was verified
+
+Checked on a Windows 11 PC (Intel integrated graphics through Vulkan) with Qwen2.5-Coder-3B-Instruct Q4_K_M, a 24k context, and a small
+JavaScript project whose test fails because `add` subtracts:
+
+* `fllm-rs agent --review --verify "node test.js" --output-format stream-json`: the model called `read_file` and `edit_file`, the review
+  round ran (diff, diagnostics, the model re-read its change), the verify command passed and the exit code was 0. A 3B model does this in
+  some runs and not in others: other runs of the same task ended with the model describing a fix it never made (the review then
+  caught it through the failing `--verify`, but the model kept insisting) or with a loop of identical edit calls. Use a larger model for
+  real work; the review step is a safety net, not a substitute.
+* Also run with that model and server: `--continue`, `sessions list|search`, `insights`, `doctor`, `update --check` (GitHub had no
+  release to compare with), `--plan` (two attempted writes were refused, the file stayed unchanged), a deny rule against `--yes`
+  (the read was refused), `mcp-server` over a pipe (`initialize`, `tools/list`, `read_file`, a refused `bash`, and `fllm_agent`
+  answering from the model), `acp` over a pipe (`initialize`, `session/new`, `session/prompt` with a tool call, its result and the answer,
+  stop reason `end_turn`), `import claude` and `import codex` against a made-up home folder (dry run wrote nothing; `--apply` wrote
+  skills, memory entries, merged rules and a sub-agent; the API key in the made-up `settings.json` appeared nowhere), `skills
+  export|import`, `gateway pair list`.
+* The Studio (Playwright against the same server): `/autoreview`, `/personality`, `/insights`, `/search` (it found the headless runs),
+  the settings persisting over a reload, a real edit followed by the notice "Reviewing my own changes" and the model's review
+  answer, `/retry` (reverted the file and sent the message again), and the refusal to attach a picture while a model without
+  vision is loaded.
+* Docker backend: the command line it builds ran against a real Docker daemon on a Linux machine (alpine image): the workspace
+  appeared at `/workspace`, a file created in the container belonged to the workspace owner, `cd` was mapped back, `--network none`
+  blocked the network (the ignored test `real_docker_runs_a_command_in_the_mapped_folder`, see its comment for how to run it).
+* Unit tests for the rules, the review feedback, stream events, skills, import, session search, gateway chats against stub servers
+  (Discord and Slack through the real HTTP client), pairing, terminal backends, the MCP server and ACP against scripted clients.
+
+**Not verified:** a model that can see (the picture path ends at the refusal), the self-proposed skill with a real model (it needs a run of
+eight tool calls, which the 3B model did not reach), the Discord, Slack, Telegram and Matrix gateways against the real services, the ACP
+adapter in an editor, the MCP server inside Claude Code or Codex, the SSH backend against a real host, the Docker backend on Windows,
+and the importers against real installations of the other tools. With Qwen3-4B-Instruct-2507 the first headless runs answered with
+sentences about what it would do instead of calling tools, and a run with `tool_choice: required` produced no answer within ten
+minutes (the server logged `thinking: always` for that model); that model was not used for the checks above.

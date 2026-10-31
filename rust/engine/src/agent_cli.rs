@@ -53,7 +53,7 @@ Rules (allow / deny / ask, `bash: npm test*`, `edit: src/**`, or `Bash(npm test:
 fix what is found before the run counts as done (at most --review-rounds, default 2). --image FILE (repeatable) attaches a png/jpg/gif/webp picture to the task; the loaded model must be able to see.
 --propose-skills: after a long run the model may
 write a skill; it waits in skills-proposed/ (fllm-rs skills approve NAME), --auto-skills saves it at once.
-The answer is printed on standard output. Exit codes: 0 finished, 1 error, 3 stopped at --max-steps (a report is still printed).
+The answer is printed on standard output. Exit codes: 0 finished, 1 error, 3 stopped at --max-steps (a report is still printed), 4 the --verify command still fails after the run.
 The agent tools only accept requests from the machine the server runs on, so --url must name this machine.";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,7 +366,7 @@ pub fn system_prompt(folder: &str, allow: &BTreeSet<String>, extra: Option<&str>
     let mut text = format!(
         "You are a coding agent that runs without a person watching: nobody can answer questions, so never ask for confirmation. \
          Work in the folder {folder} (system: {}, local time: {now}). Read a file before you change it, make the smallest change that solves the task and \
-         check your work when a check is available. Allowed kinds of action: {}. A tool call outside them is refused with a message; do not retry it, \
+         check your work when a check is available. Act through tool calls: never ask the user to paste a file, read it with read_file. Allowed kinds of action: {}. A tool call outside them is refused with a message; do not retry it, \
          choose another way or say in the report what could not be done. Finish with a short report of what you found or changed.",
         std::env::consts::OS,
         allowed.join(", ")
@@ -495,6 +495,17 @@ impl TerminalApprover {
     }
 }
 
+/// True when an answer without a tool call only announces the next step: it ends in a colon, or no tool has been used yet and the
+/// text talks about what the model is going to do ("Let me start by ...", "I'll check ...").
+pub fn announces(text: &str, no_tool_used_yet: bool) -> bool {
+    let t = text.trim_end();
+    if t.ends_with(':') {
+        return true;
+    }
+    let lower = t.to_lowercase();
+    no_tool_used_yet && t.chars().count() < 600 && ["let me ", "let's ", "i'll ", "i will ", "i need to ", "first, i", "to do this"].iter().any(|p| lower.contains(p))
+}
+
 /// Runs the agent until the model answers without a tool call or `max_steps` model calls are used.
 /// `progress` receives one line per tool call and result.
 pub fn run_loop(
@@ -542,6 +553,9 @@ pub fn run_loop_full(
     // again without it. Without the grammar a model that writes a number as text ("1") makes the server refuse the whole reply (HTTP 422).
     let mut grammar = true;
     let mut bad_calls = 0usize;
+    let mut announcements = 0usize;
+    // after an announcement without a tool call the next request must call a tool (`tool_choice: required`); a server that refuses the field is asked again without it
+    let force_tool = std::cell::Cell::new(false);
     let request = |messages: &[Value], with_tools: bool, grammar: bool| {
         let mut all = vec![json!({"role": "system", "content": system})];
         all.extend_from_slice(messages);
@@ -550,6 +564,9 @@ pub fn run_loop_full(
             body["tools"] = json!(schemas);
             if grammar {
                 body["tool_call_grammar"] = json!(true);
+            }
+            if force_tool.get() {
+                body["tool_choice"] = json!("required");
             }
         }
         if let Some(model) = &cfg.model {
@@ -564,6 +581,10 @@ pub fn run_loop_full(
         }
         let reply = match backend.complete(request(&messages, true, grammar)) {
             Ok(reply) => reply,
+            Err(e) if force_tool.get() && e.contains("HTTP 400") => {
+                force_tool.set(false);
+                backend.complete(request(&messages, true, grammar))?
+            }
             Err(e) if grammar && e.contains("HTTP 400") => {
                 grammar = false;
                 backend.complete(request(&messages, true, false))?
@@ -576,6 +597,7 @@ pub fn run_loop_full(
             }
             Err(e) => return Err(e),
         };
+        force_tool.set(false);
         let message = reply["choices"][0]["message"].clone();
         if message.is_null() {
             return Err(format!("the server answer has no message: {}", clip(&reply.to_string(), 300)));
@@ -585,6 +607,17 @@ pub fn run_loop_full(
         if calls.is_empty() {
             if text.trim().is_empty() {
                 return Err("the model gave an empty answer".into());
+            }
+            // a small model often announces what it will do ("First, let's read the file:") and stops: ask it to do it, twice at most
+            if announces(&text, records.is_empty()) && announcements < 2 && step < cfg.max_steps {
+                announcements += 1;
+                let note = json!({"role": "assistant", "content": text});
+                observe(&note);
+                messages.push(note);
+                messages.push(json!({"role": "user", "content": "You described the next step but did not do it. Call the tool now; do not describe it."}));
+                // nothing has been done yet: the next reply has to be a tool call
+                force_tool.set(records.is_empty());
+                continue;
             }
             let final_message = json!({"role": "assistant", "content": text});
             observe(&final_message);
@@ -907,17 +940,21 @@ pub fn self_review(backend: &mut dyn Backend, edited: &[String], verify: Option<
         }
     }
     if let Some(command) = verify {
-        let args = json!({"command": command});
-        report.verify = Some(if rules.decide("bash", "command", &args) == Some(Decision::Deny) {
-            (false, "the verification command is blocked by a deny rule".to_owned())
-        } else {
-            match backend.run_tool("bash", &args) {
-                Ok(out) => (true, out),
-                Err(e) => (false, e),
-            }
-        });
+        report.verify = Some(run_verify(backend, command, rules));
     }
     report
+}
+
+/// Runs the verification command of `--verify`: `(passed, output)`. A deny rule blocks it (and counts as failed).
+pub fn run_verify(backend: &mut dyn Backend, command: &str, rules: &Rules) -> (bool, String) {
+    let args = json!({"command": command});
+    if rules.decide("bash", "command", &args) == Some(Decision::Deny) {
+        return (false, "the verification command is blocked by a deny rule".to_owned());
+    }
+    match backend.run_tool("bash", &args) {
+        Ok(out) => (true, out),
+        Err(e) => (false, e),
+    }
 }
 
 /// After a long run: ask the model for a skill (without tools) and store it as a proposal, or as a skill when `auto` is set.
@@ -1060,11 +1097,15 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     if options.review {
         let mut round = 1;
         while let Ok(done) = &outcome {
-            if done.status != Status::Done || done.edited.is_empty() || round > options.review_rounds {
+            // without edits only a failing --verify command counts: a model that claims it fixed something it never touched is caught by the tests
+            if done.status != Status::Done || (done.edited.is_empty() && options.verify.is_none()) || round > options.review_rounds {
                 break;
             }
             progress(&format!("[review {round}] checking {} changed file(s)", done.edited.len()));
             let report = self_review(&mut http, &done.edited, options.verify.as_deref(), &rules);
+            if done.edited.is_empty() && !report.objective_problems() {
+                break;
+            }
             let Some(feedback) = agent_extras::review_feedback(&report, round) else { break };
             let mut next = done.messages.clone();
             next.push(json!({"role": "user", "content": feedback}));
@@ -1090,6 +1131,21 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 }
             }
             round += 1;
+        }
+    }
+
+    // the last word is the verify command itself, not the model's claim: run it once more after the final round
+    let mut verify_failed = false;
+    if options.review {
+        if let (Some(command), Ok(done)) = (options.verify.as_deref(), &outcome) {
+            if done.status == Status::Done {
+                let (passed, output) = run_verify(&mut http, command, &rules);
+                verify_failed = !passed;
+                progress(&format!("[verify] {} {}", command, if passed { "passed" } else { "FAILED" }));
+                if !passed && !quiet {
+                    eprintln!("{}", clip(output.trim(), 800));
+                }
+            }
         }
     }
 
@@ -1168,6 +1224,10 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     if out_of_steps {
         eprintln!("[stopped at --max-steps {}; the report above is what was found so far]", options.max_steps);
         return Ok(3);
+    }
+    if verify_failed {
+        eprintln!("[the --verify command still fails; the work is not done although the agent said so]");
+        return Ok(4);
     }
     Ok(0)
 }
@@ -1642,6 +1702,24 @@ mod tests {
 
     fn rules_from(value: Value) -> Rules {
         Rules::from_json(&value)
+    }
+
+    #[test]
+    fn an_announcement_without_a_tool_call_is_sent_back_twice_at_most() {
+        let mut b = scripted(vec![text("First, let's read the file:"), calls(&[("read_file", json!({"path": "a"}))]), text("Now I will edit:"), text("Still talking:"), text("And again:"), text("done")]);
+        let out = run(&mut b, &["read"], 12);
+        assert_eq!(b.ran.len(), 1, "after the nudge the tool call ran");
+        assert!(b.bodies[1]["messages"].to_string().contains("did not do it"));
+        assert_eq!(b.bodies[1]["tool_choice"], "required", "nothing was done yet: the next reply must be a tool call");
+        assert!(b.bodies[0].get("tool_choice").is_none() && b.bodies[2].get("tool_choice").is_none());
+        assert_eq!(out.answer, "Still talking:", "after two nudges the next announcement is taken as the answer");
+        assert_eq!(out.status, Status::Done);
+        assert!(announces("I'll help you fix this. Let me start by examining the files.\n\n", true));
+        assert!(!announces("I'll help you fix this. Let me start by examining the files.", false), "after a tool was used a plain sentence is an answer");
+        assert!(!announces("The bug is fixed: add used a minus sign.", true), "a finished report is no announcement");
+        // a final answer that merely ends in a colon at the step limit is not nudged
+        let mut last = scripted(vec![text("Result:")]);
+        assert_eq!(run(&mut last, &["read"], 1).answer, "Result:");
     }
 
     #[test]

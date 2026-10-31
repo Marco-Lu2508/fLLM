@@ -70,7 +70,7 @@ proposals) it is off by default and the good default for a small model is named 
 | Sub-agents | delegation | subagents | agents | **works**: `task` tool, own agents in `agents/`, parallel runs | done |
 | MCP client | yes | yes | yes | **works**: tools, resources | done |
 | MCP server | ACP/MCP | `claude mcp serve` | `codex mcp-server` (replaced by app-server) | **works** (*new*): `fllm-rs mcp-server` with the agent tools and `fllm_agent` | high |
-| ACP (editor protocol) | yes | via adapter | via adapter | **works** (*new*): `fllm-rs acp`. Checked with a scripted client only, not with a real editor | medium |
+| ACP (editor protocol) | yes | via adapter | via adapter | **works** (*new*): `fllm-rs acp`. Run over a pipe with a scripted client and a real model; not tried in a real editor | medium |
 | Programmatic access from scripts | tool RPC from scripts | Agent SDK, `-p` | `codex exec`, SDK | **partly**: `fllm-rs agent -p`, `--output-format json` and `stream-json` (*new*), the MCP server; the tool route `/api/studio/agent/tool` on this machine. No separate SDK | medium |
 | Headless mode | `-q` | `-p`, `--output-format` | `exec --json` | **works**: `fllm-rs agent -p`, `--output-format text|json|stream-json` (*new*), exit codes, stdin | done |
 | Self-review before "done" | no | `/review`, GitHub review | `/review`, `codex review` | **works**: `/review`, `/security-review`; (*new*) automatic *Review before done* (Settings box, `/autoreview on`) and `--review` with `--verify COMMAND` | high |
@@ -125,7 +125,9 @@ proposals) it is off by default and the good default for a small model is named 
 * Unit tests for every new module (rules, extras, import, skills, operations, MCP server, ACP, gateway chats, pairing, terminal
   backends) and for the page logic (`node --test`).
 * A real small model (Qwen2.5-Coder-3B-Instruct, Q4_K_M) driving `fllm-rs agent` and the Studio on a Windows PC: see the verified
-  list in [agent-cli.md](user/agent-cli.md#what-was-verified) and [studio.md](user/studio.md).
+  list in [agent-cli.md](user/agent-cli.md#what-was-verified). A 3B model completes the fix-the-test task in some runs and not in
+  others; that is the model, and the page says where a larger one is needed.
+* The Docker backend against a real Docker daemon on Linux (alpine image).
 * Not run against the real service: Discord, Slack (stub servers only), Telegram and Matrix as before; ACP against a real editor;
-  the importers against real installations of the other agents; the Docker and SSH backends beyond argument building and, where
-  noted, a local Docker run.
+  the MCP server inside Claude Code or Codex; the importers against real installations of the other agents; the SSH backend beyond
+  argument building; picture input with a model that can see.
