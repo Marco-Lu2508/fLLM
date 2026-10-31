@@ -6,6 +6,21 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-31
+
+The first day with 0.2.0 in real use. The Studio and the desktop app had bugs that the release checks did not catch; they are fixed here, together with the coding-agent work of the same day.
+
+### Highlights
+- **The first message of a new chat no longer fails** with "maximum context length ... you requested ..." (the page estimated the prompt too low and sent an exact-fit `max_tokens`).
+- **One card per graphics card** in the hardware page, the device choice and the footer (the wgpu and the native Vulkan entry of one GPU were shown twice).
+- **A model you already have is found** (models folder, Downloads, LM Studio, llama.cpp, GPT4All, Ollama): "Load <name>" instead of a download offer; no more "tiny" in the model chip.
+- **One button system** in every settings page (no glow, no accent fills on secondary actions), a calm neutral palette instead of warm brown next to blue-black.
+- **API keys are made by the server**, never typed; they survive a model switch and a restart (stored hashed).
+- **Providers**: cloud APIs first, local servers (Ollama, LM Studio ...) only in an optional section; **sub-agents** page is a real manager.
+- **Qwen3-Instruct-2507 and other Qwen3 models make tool calls** in the agent loop (the call grammar had masked `<tool_call>`), the thinking label is read from the chat template, forced calls end quickly.
+- **Coding agent**: self-review (`--review --verify`), plan mode, permission rules, session search, skills in the Claude Code / agentskills.io format, `fllm-rs mcp-server` and `acp`, Discord and Slack gateways, Docker and SSH terminal backends, importers for Claude Code, Codex and Hermes.
+
+
 ### Added
 - **Code mode gap analysis and what it led to.** [docs/code-mode-gap.md](docs/code-mode-gap.md) compares fLLM's coding side feature by feature with Hermes Agent, Claude Code and Codex CLI (works / partly / missing, with the exact command, and why the rest stays missing). Everything below came out of it.
 - **`fllm-rs agent` is closer to Claude Code's `-p` and Codex's `exec`:** `--output-format text|json|stream-json` (events in the shape of Claude Code's stream-json), every run saved as a session with `--continue` / `--resume NAME`, `--image FILE` for models that can see, `--plan` (read-only planning; on a terminal it asks before running the plan), permission rules with `allow`, `deny` and `ask` lists in `permissions.json` (Studio folder, then `.fllm/permissions.json`, then `.fllm/permissions.local.json`) and `--allow-rule` / `--deny-rule` / `--ask-rule`, the Claude Code spelling (`Bash(npm test:*)`) understood. A deny rule beats `--yes`; a damaged settings file stops the run.
