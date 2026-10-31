@@ -163,7 +163,7 @@ The table below summarizes the layer-by-layer execution path across device backe
 | `deepseek2` (DeepSeek-V3.2, GLM-5 converted with the indexer dropped) | MLA + MoE, dense attention | Device | Device / Host | as `deepseek2` |
 | `kimi-linear` | KDA + latent attention without rope + MoE | Device (KDA kernels); the latent attention layers run on the host (`"multi-head latent attention"`, no rope) | Device (KDA kernels), attention layers on the host | `"Kimi Delta Attention (no device operations ...)"` for a backend or shape without the KDA operations; `FLLM_KDA_HOST=1` |
 | `bailing_hybrid` (Ling-3.0, GGUF `kimi-linear`) | KDA (direct gates, bounded forget gate) + rotary latent attention with a head gate + MoE | Device KDA layers; latent attention layers with the output gate on the host (`"a latent attention output gate"`) | same | as `kimi-linear` |
-| `falcon-h1` | Parallel Mamba-2 + Attention in every layer, muP multipliers | Host layers | Host layers | Always host reference: `"a Mamba-2 branch next to the attention"` |
+| `falcon-h1` | Parallel Mamba-2 + Attention in every layer, muP multipliers | Device | Device | Mamba-2 branch on the device (also HIP); host reference with `FLLM_MAMBA_HOST=1`, with another Mamba-2 gate/norm order than the stream supports, or with a norm behind the summed branches: `"a Mamba-2 branch next to the attention"` |
 | `jamba` | Mamba-1 (learned dt/B/C norms) + Full Attention + MoE | Device | Device | None for the mixer |
 | `zamba2` | Shared transformer block preceding Mamba-2 mixer | Host layers | Host layers | Always host reference: `"a shared transformer block in front of the Mamba-2 mixer"` |
 
