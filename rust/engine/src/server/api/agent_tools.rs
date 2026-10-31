@@ -213,6 +213,17 @@ fn base_catalog() -> Vec<Value> {
         ),
         tool("bash_kill", "read", "Stop a background job.", json!({"job_id": {"type": "string"}}), &["job_id"]),
         tool(
+            "session_search",
+            "read",
+            "Search your earlier chats and coding sessions (all projects) by their words, best match first, with a snippet. Use it when the user refers to earlier work (\"like last time\", \"the bug we fixed\") or when you want to know how a problem was solved before. Give `query` to search, or the `id` of a hit to read how that session started and ended.",
+            json!({
+                "query": {"type": "string", "description": "Words to look for."},
+                "id": {"type": "string", "description": "A session id from an earlier result: show its start and end."},
+                "limit": {"type": "integer", "description": "Maximum hits (default 5, maximum 20)."},
+            }),
+            &[],
+        ),
+        tool(
             "memory",
             "memory",
             "Your long-term memory for this workspace (scope workspace) and for this user in every workspace (scope global). Entries are short facts you will want next time: user preferences, project conventions, commands that work, mistakes to avoid. Save one when you learn something durable that is not obvious from the code, or when the user asks you to remember something. Do not store secrets, long text or things that only matter for the current task. Actions: list, add (text), update (id, text), remove (id). List before you add so you do not store duplicates.",

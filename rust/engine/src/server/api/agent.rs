@@ -301,6 +301,7 @@ impl AgentSession {
             "notebook_edit" => super::agent_notebook::run(self, args),
             "mcp_resource" => super::mcp::read_tool(args),
             "session_note" => super::agent_messages::tool(self, args),
+            "session_search" => super::sessions_index::tool(args),
             "memory" => super::agent_mem::tool(self, args),
             "edit_file" => self.edit_file(
                 need("path")?,

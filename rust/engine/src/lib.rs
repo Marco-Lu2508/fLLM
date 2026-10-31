@@ -2,6 +2,12 @@
 // compiler, so the lint that compares them with the MSRV is silenced there.
 #![cfg_attr(target_arch = "aarch64", allow(clippy::incompatible_msrv))]
 pub mod agent_cli;
+pub mod agent_extras;
+pub mod agent_import;
+pub mod agent_ops;
+pub mod mcp_server;
+pub mod skills_cli;
+pub mod agent_rules;
 pub mod connect_cli;
 pub mod gateway;
 pub mod autotune;

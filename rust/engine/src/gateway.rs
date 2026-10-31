@@ -577,7 +577,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     }
     let cfg = GatewayConfig {
         allowed: options.chats,
-        loop_cfg: LoopConfig { model: Some(model), allow: parsed.allow.clone(), max_steps: parsed.max_steps, max_tokens: agent_cli::effective_max_tokens(parsed.max_tokens, context), temperature: parsed.temperature },
+        loop_cfg: LoopConfig { model: Some(model), allow: parsed.allow.clone(), rules: crate::agent_rules::load_hierarchy(&agent_cli::studio_folder(), &folder)?, max_steps: parsed.max_steps, max_tokens: agent_cli::effective_max_tokens(parsed.max_tokens, context), temperature: parsed.temperature },
         folder: folder.display().to_string(),
         system_extra: parsed.system.clone(),
         sessions_dir: base.clone(),
@@ -675,7 +675,7 @@ mod tests {
     fn config(dir: &Path, allowed: &[i64]) -> GatewayConfig {
         GatewayConfig {
             allowed: allowed.iter().map(|c| c.to_string()).collect(),
-            loop_cfg: LoopConfig { model: Some("m".into()), allow: BTreeSet::from(["read".to_owned()]), max_steps: 4, max_tokens: 50, temperature: 0.0 },
+            loop_cfg: LoopConfig { model: Some("m".into()), allow: BTreeSet::from(["read".to_owned()]), rules: Default::default(), max_steps: 4, max_tokens: 50, temperature: 0.0 },
             folder: "/work".into(),
             system_extra: None,
             sessions_dir: dir.to_path_buf(),

@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::agent_extras::{self, OutputFormat};
+use crate::agent_rules::{self, Decision, Rules};
+
 pub const DEFAULT_MAX_STEPS: usize = 30;
 const MAX_TOOL_OUTPUT: usize = 30_000;
 /// The permission categories the headless agent knows. A tool in any other category (computer use) is never offered.
@@ -27,7 +30,9 @@ const MAX_SESSION_MESSAGES: usize = 120;
 pub const HELP: &str = "usage: fllm-rs agent -p \"TASK\" [--folder DIR] [--url http://127.0.0.1:8000] [--model ID] [--api-key KEY]
                   [--allow-edit] [--allow-command] [--allow-network] [--allow-memory] [--yes]
                   [--max-steps N] [--max-tokens N] [--temperature T] [--system TEXT]
-                  [--session NAME] [--profile NAME] [--ask] [--trajectory FILE] [--json] [--quiet]
+                  [--session NAME] [--continue] [--resume NAME] [--profile NAME] [--ask] [--trajectory FILE] [--json] [--quiet]
+                  [--output-format text|json|stream-json] [--plan] [--allow-rule RULE] [--deny-rule RULE] [--ask-rule RULE]
+                  [--review] [--review-rounds N] [--verify COMMAND] [--propose-skills] [--auto-skills]
 Runs the coding agent of the Studio without a browser against a running fllm-rs server on this machine.
 TASK: the text after -p; `-p -` reads it from standard input. Reading and searching files is always allowed.
 Everything else is refused unless you allow it: --allow-edit (write_file, edit_file, patch ...), --allow-command (bash),
@@ -39,6 +44,14 @@ Studio folder (agent-sessions/NAME.json) and continues it next time. --profile N
 --ask asks in the terminal before a call that the flags do not allow (y/n/a); without a terminal it stays refused. --trajectory FILE appends one JSON line per run
 (time, folder, model, status, tool calls and the whole conversation) for later analysis or training data. --json prints one JSON object (answer, status,
 steps, tool calls) instead of the plain answer. Progress goes to standard error unless --quiet.
+--output-format json is --json; stream-json prints one event per line while the run goes on (system init, assistant, user tool results, result).
+--continue continues the newest session, --resume NAME a named one (every run is saved as run-<time> unless --session names it).
+--plan: read-only planning; the answer is a plan, and on a terminal you are asked whether to run it with the allowed actions.
+Rules (allow / deny / ask, `bash: npm test*`, `edit: src/**`, or `Bash(npm test:*)`) come from permissions.json in the Studio folder, then
+.fllm/permissions.json, then .fllm/permissions.local.json of the folder, then these flags. A deny rule always wins.
+--review: when the run changed files, check them (review tool, diagnostics, --verify COMMAND when commands are allowed) and let the agent
+fix what is found before the run counts as done (at most --review-rounds, default 2). --propose-skills: after a long run the model may
+write a skill; it waits in skills-proposed/ (fllm-rs skills approve NAME), --auto-skills saves it at once.
 The answer is printed on standard output. Exit codes: 0 finished, 1 error, 3 stopped at --max-steps (a report is still printed).
 The agent tools only accept requests from the machine the server runs on, so --url must name this machine.";
 
@@ -60,6 +73,15 @@ pub struct Options {
     pub trajectory: Option<PathBuf>,
     pub json: bool,
     pub quiet: bool,
+    pub format: OutputFormat,
+    pub continue_last: bool,
+    pub plan: bool,
+    pub rule_flags: Vec<(&'static str, String)>,
+    pub review: bool,
+    pub review_rounds: usize,
+    pub verify: Option<String>,
+    pub propose_skills: bool,
+    pub auto_skills: bool,
 }
 
 fn value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a String, String> {
@@ -93,6 +115,15 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         trajectory: None,
         json: false,
         quiet: false,
+        format: OutputFormat::Text,
+        continue_last: false,
+        plan: false,
+        rule_flags: Vec::new(),
+        review: false,
+        review_rounds: 2,
+        verify: None,
+        propose_skills: false,
+        auto_skills: false,
     };
     let mut loose: Vec<String> = Vec::new();
     let mut i = 0;
@@ -143,7 +174,40 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--temperature" => {
                 o.temperature = value(args, &mut i, flag)?.parse().ok().filter(|t: &f64| *t >= 0.0).ok_or("--temperature is a number >= 0")?;
             }
-            "--json" => o.json = true,
+            "--json" => {
+                o.json = true;
+                o.format = OutputFormat::Json;
+            }
+            "--output-format" => {
+                o.format = OutputFormat::parse(value(args, &mut i, flag)?).ok_or("--output-format is text, json or stream-json")?;
+                o.json = o.format == OutputFormat::Json;
+            }
+            "--continue" | "-c" => o.continue_last = true,
+            "--resume" | "-r" => {
+                let name = value(args, &mut i, flag)?.clone();
+                if !valid_session_name(&name) {
+                    return Err("--resume needs the name of a session (lowercase letters, digits, - and _)".into());
+                }
+                o.session = Some(name);
+            }
+            "--plan" => o.plan = true,
+            "--allow-rule" => o.rule_flags.push(("allow", value(args, &mut i, flag)?.clone())),
+            "--deny-rule" => o.rule_flags.push(("deny", value(args, &mut i, flag)?.clone())),
+            "--ask-rule" => o.rule_flags.push(("ask", value(args, &mut i, flag)?.clone())),
+            "--review" => o.review = true,
+            "--review-rounds" => {
+                o.review = true;
+                o.review_rounds = value(args, &mut i, flag)?.parse().ok().filter(|n| (1..=5).contains(n)).ok_or("--review-rounds is a number from 1 to 5")?;
+            }
+            "--verify" => {
+                o.review = true;
+                o.verify = Some(value(args, &mut i, flag)?.clone());
+            }
+            "--propose-skills" => o.propose_skills = true,
+            "--auto-skills" => {
+                o.propose_skills = true;
+                o.auto_skills = true;
+            }
             "--quiet" | "-q" => o.quiet = true,
             "--help" | "-h" => return Err(HELP.to_owned()),
             other if other.starts_with('-') && other != "-" => return Err(format!("unknown agent option: {other}")),
@@ -200,11 +264,15 @@ pub struct Outcome {
     pub tool_calls: Vec<ToolRecord>,
     /// The whole conversation without the system message, to continue it later.
     pub messages: Vec<Value>,
+    /// The files that edit tools changed successfully (for the self-review).
+    pub edited: Vec<String>,
 }
 
 pub struct LoopConfig {
     pub model: Option<String>,
     pub allow: BTreeSet<String>,
+    /// allow / deny / ask rules; a deny rule beats the flags, an allow rule beats a missing flag, an ask rule asks.
+    pub rules: Rules,
     pub max_steps: usize,
     pub max_tokens: usize,
     pub temperature: f64,
@@ -430,9 +498,23 @@ pub fn run_loop_with(
     progress: &mut dyn FnMut(&str),
     approve: &mut dyn FnMut(&str, &str, &Value) -> bool,
 ) -> Result<Outcome, String> {
+    run_loop_full(backend, cfg, system, history, progress, approve, &mut |_| {})
+}
+
+/// Like [`run_loop_with`], and `observe` sees every message the loop appends (assistant messages and tool results) as it happens.
+pub fn run_loop_full(
+    backend: &mut dyn Backend,
+    cfg: &LoopConfig,
+    system: &str,
+    history: Vec<Value>,
+    progress: &mut dyn FnMut(&str),
+    approve: &mut dyn FnMut(&str, &str, &Value) -> bool,
+    observe: &mut dyn FnMut(&Value),
+) -> Result<Outcome, String> {
     let (schemas, categories) = prepare_tools(backend.tools()?);
     let mut messages = history;
     let mut records: Vec<ToolRecord> = Vec::new();
+    let mut edited: Vec<String> = Vec::new();
     let mut last_call = String::new();
     let mut repeats = 0usize;
     let mut next_id = 0usize;
@@ -482,8 +564,10 @@ pub fn run_loop_with(
             if text.trim().is_empty() {
                 return Err("the model gave an empty answer".into());
             }
-            messages.push(json!({"role": "assistant", "content": text}));
-            return Ok(Outcome { answer: text, status: Status::Done, steps: step, tool_calls: records, messages });
+            let final_message = json!({"role": "assistant", "content": text});
+            observe(&final_message);
+            messages.push(final_message);
+            return Ok(Outcome { answer: text, status: Status::Done, steps: step, tool_calls: records, messages, edited });
         }
         // every call needs an id so that the tool results can be matched to it
         let calls: Vec<Value> = calls
@@ -496,7 +580,9 @@ pub fn run_loop_with(
                 call
             })
             .collect();
-        messages.push(json!({"role": "assistant", "content": text, "tool_calls": calls}));
+        let assistant = json!({"role": "assistant", "content": text, "tool_calls": calls});
+        observe(&assistant);
+        messages.push(assistant);
         for call in &calls {
             let name = call["function"]["name"].as_str().unwrap_or_default().to_owned();
             let id = call["id"].as_str().unwrap_or_default().to_owned();
@@ -506,30 +592,64 @@ pub fn run_loop_with(
             repeats = if key == last_call { repeats + 1 } else { 1 };
             last_call = key;
 
+            // the rules first: deny beats everything, ask puts the call to the question, allow lifts a missing flag
             let mut approved = false;
-            if categories.contains_key(&name) && !cfg.allow.contains(&category) {
-                if let Ok(shown) = &parsed {
-                    approved = approve(&name, &category, shown);
+            let mut blocked: Option<String> = None;
+            let known = categories.contains_key(&name);
+            let decision = if known { parsed.as_ref().ok().and_then(|a| cfg.rules.decide(&name, &category, a)) } else { None };
+            match decision {
+                Some(Decision::Deny) => {
+                    blocked = Some(format!("Error: '{name}' is blocked by a deny rule of the permission settings. Do not retry; use another way or report it."));
+                }
+                Some(Decision::Ask) => {
+                    if let Ok(shown) = &parsed {
+                        approved = approve(&name, &category, shown);
+                    }
+                    if !approved {
+                        blocked = Some(format!("Error: '{name}' matches an ask rule and nobody approved it. Do not retry; use another way or report it."));
+                    }
+                }
+                Some(Decision::Allow) => approved = !cfg.allow.contains(&category),
+                None => {
+                    if known && !cfg.allow.contains(&category) {
+                        if let Ok(shown) = &parsed {
+                            approved = approve(&name, &category, shown);
+                        }
+                        if !approved {
+                            blocked = Some(format!("Error: '{name}' needs the permission '{category}', which is not granted in this headless run (it would need {}). Do not retry; use another way or report it.", flag_for(&category)));
+                        }
+                    }
                 }
             }
-            let (status, output) = if !categories.contains_key(&name) {
+            let (status, output) = if !known {
                 ("unknown", format!("Error: there is no tool '{name}'. Tools: {}", { let mut n: Vec<_> = categories.keys().cloned().collect(); n.sort(); n.join(", ") }))
-            } else if !cfg.allow.contains(&category) && !approved {
-                ("denied", format!("Error: '{name}' needs the permission '{category}', which is not granted in this headless run (it would need {}). Do not retry; use another way or report it.", flag_for(&category)))
+            } else if let Some(reason) = blocked {
+                ("denied", reason)
             } else if repeats >= REPEAT_LIMIT {
                 ("repeated", "Error: this exact call was already made several times in a row; it is not run again. Try something different.".to_owned())
             } else {
                 match parsed {
                     Err(e) => ("bad_args", format!("Error: {e}")),
                     Ok(args) => match backend.run_tool(&name, &args) {
-                        Ok(out) => (if approved { "approved" } else { "ok" }, out),
+                        Ok(out) => {
+                            if category == "edit" {
+                                for path in agent_rules::subjects_of(&name, &category, &args).1 {
+                                    if !edited.contains(&path) {
+                                        edited.push(path);
+                                    }
+                                }
+                            }
+                            (if approved { "approved" } else { "ok" }, out)
+                        }
                         Err(e) => ("error", format!("Error: {e}")),
                     },
                 }
             };
             progress(&format!("[{step}] {name} -> {status}"));
             records.push(ToolRecord { name: name.clone(), category, status, detail: clip(&output, 200) });
-            messages.push(json!({"role": "tool", "tool_call_id": id, "content": clip(&output, MAX_TOOL_OUTPUT)}));
+            let result = json!({"role": "tool", "tool_call_id": id, "content": clip(&output, MAX_TOOL_OUTPUT)});
+            observe(&result);
+            messages.push(result);
         }
     }
     // out of steps: ask for the report with what was found, without tools
@@ -541,8 +661,10 @@ pub fn run_loop_with(
         .ok()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| fallback_report(cfg.max_steps, &records));
-    messages.push(json!({"role": "assistant", "content": text}));
-    Ok(Outcome { answer: text, status: Status::OutOfSteps, steps: cfg.max_steps, tool_calls: records, messages })
+    let final_message = json!({"role": "assistant", "content": text});
+    observe(&final_message);
+    messages.push(final_message);
+    Ok(Outcome { answer: text, status: Status::OutOfSteps, steps: cfg.max_steps, tool_calls: records, messages, edited })
 }
 
 /// The report of a run that used all its steps and got no written report from the model. It only states facts the
@@ -586,6 +708,12 @@ pub(crate) fn load_session_in(base: &std::path::Path, name: &str) -> Result<Vec<
 }
 
 pub(crate) fn save_session_in(base: &std::path::Path, name: &str, messages: &[Value]) -> Result<(), String> {
+    save_session_with(base, name, messages, json!({}))
+}
+
+/// Like [`save_session_in`], plus facts about the run (`folder`, `model`, `updated`, `edited` ...) that `fllm-rs insights` reads.
+/// Loading ignores them, so older builds still read the file.
+pub(crate) fn save_session_with(base: &std::path::Path, name: &str, messages: &[Value], meta: Value) -> Result<(), String> {
     if !valid_session_name(name) {
         return Err("invalid session name".into());
     }
@@ -594,7 +722,9 @@ pub(crate) fn save_session_in(base: &std::path::Path, name: &str, messages: &[Va
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let tmp = file.with_extension("json.tmp");
-    std::fs::write(&tmp, json!({"messages": messages}).to_string()).map_err(|e| e.to_string())?;
+    let mut body = meta;
+    body["messages"] = json!(messages);
+    std::fs::write(&tmp, body.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
 }
 
@@ -640,6 +770,10 @@ impl HttpBackend {
             return Err(format!("{path}: HTTP {status}: {message}"));
         }
         Ok(parsed)
+    }
+
+    pub(crate) fn get_json(&self, path: &str) -> Result<Value, String> {
+        self.call(reqwest::Method::GET, path, None)
     }
 
     /// The served model's id and its context length (`max_model_len`), when the server tells it.
@@ -739,6 +873,61 @@ pub fn trim_history(messages: Vec<Value>, max: usize) -> Vec<Value> {
     }
 }
 
+/// The checks of `--review`: the diff with the findings of the fixed rules (`review` tool), `diagnostics` for each changed file and the
+/// verification command. The command is typed by the user, so it runs without `--allow-command`, but a deny rule still stops it.
+pub fn self_review(backend: &mut dyn Backend, edited: &[String], verify: Option<&str>, rules: &Rules) -> agent_extras::ReviewReport {
+    let mut report = agent_extras::ReviewReport { review: backend.run_tool("review", &json!({})).unwrap_or_default(), ..Default::default() };
+    for path in edited.iter().take(12) {
+        if let Ok(out) = backend.run_tool("diagnostics", &json!({"path": path})) {
+            if !agent_extras::is_clean_diagnostic(&out) {
+                report.problems.push((path.clone(), out));
+            }
+        }
+    }
+    if let Some(command) = verify {
+        let args = json!({"command": command});
+        report.verify = Some(if rules.decide("bash", "command", &args) == Some(Decision::Deny) {
+            (false, "the verification command is blocked by a deny rule".to_owned())
+        } else {
+            match backend.run_tool("bash", &args) {
+                Ok(out) => (true, out),
+                Err(e) => (false, e),
+            }
+        });
+    }
+    report
+}
+
+/// After a long run: ask the model for a skill (without tools) and store it as a proposal, or as a skill when `auto` is set.
+fn propose_skill(http: &mut HttpBackend, cfg: &LoopConfig, system: &str, outcome: &Outcome, base: &std::path::Path, auto: bool, progress: &mut dyn FnMut(&str)) {
+    let mut messages = vec![json!({"role": "system", "content": system})];
+    messages.extend(outcome.messages.iter().cloned());
+    messages.push(json!({"role": "user", "content": agent_extras::SKILL_PROMPT}));
+    let mut body = json!({"messages": messages, "max_tokens": cfg.max_tokens.min(1500), "temperature": 0.2, "stream": false});
+    if let Some(model) = &cfg.model {
+        body["model"] = json!(model);
+    }
+    let Ok(reply) = http.complete(body) else { return };
+    let Some((name, file)) = agent_extras::parse_skill(&message_text(&reply["choices"][0]["message"])) else {
+        progress("[skills] the model found nothing worth saving");
+        return;
+    };
+    match agent_extras::save_skill(base, &name, &file, auto) {
+        Ok(path) if auto => progress(&format!("[skills] saved skill '{name}' at {}", path.display())),
+        Ok(path) => progress(&format!("[skills] proposed skill '{name}' at {} (fllm-rs skills approve {name})", path.display())),
+        Err(e) => progress(&format!("[skills] {e}")),
+    }
+}
+
+/// Copies the text of a run into the search index of the Studio (best effort: an older server or a missing route is ignored).
+fn index_session(http: &HttpBackend, id: &str, messages: &[Value], now: i64) {
+    let (title, text) = agent_extras::session_text(messages);
+    if text.trim().is_empty() {
+        return;
+    }
+    let _ = http.call(reqwest::Method::POST, "/api/studio/sessions/index", Some(&json!({"id": format!("cli:{id}"), "title": title, "text": text, "kind": "code", "updated": now * 1000})));
+}
+
 /// `fllm-rs agent ...`: returns the exit code.
 pub fn run(args: &[String]) -> Result<i32, String> {
     let mut options = match parse_args(args) {
@@ -778,40 +967,150 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     }
 
     let base = profile_base(options.profile.as_deref())?;
+    let started = std::time::Instant::now();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    if options.continue_last && options.session.is_none() {
+        options.session = agent_extras::latest_session(&base);
+        if options.session.is_none() {
+            return Err("--continue: there is no earlier session to continue".into());
+        }
+    }
+    let session_id = options.session.clone().unwrap_or_else(|| agent_extras::fresh_session_name(now));
     let mut history = match &options.session {
         Some(name) => trim_history(load_session_in(&base, name)?, MAX_SESSION_MESSAGES),
         None => Vec::new(),
     };
     history.push(json!({"role": "user", "content": options.prompt}));
-    let system = full_system(&mut http, &folder_text, &options.allow, options.system.as_deref(), load_soul(&base).as_deref());
-    let cfg = LoopConfig {
+
+    // permission rules: the settings files (user < project < local), then the flags; plan mode is read-only whatever else is allowed
+    let mut rules = agent_rules::load_hierarchy(&studio_folder(), &folder)?;
+    for (kind, text) in &options.rule_flags {
+        rules.merge(Rules::from_json(&json!({ *kind: [text] })));
+    }
+    let base_rules = rules.clone();
+    let plan = options.plan || rules.mode.as_deref() == Some("plan");
+    let mut allow = options.allow.clone();
+    let mut extra = options.system.clone().unwrap_or_default();
+    if plan {
+        allow = BTreeSet::from(["read".to_owned()]);
+        rules.merge(Rules::from_json(&json!({"deny": ["bash: *", "edit: **", "network: *", "memory: *"]})));
+        extra.push_str("\n\nPLAN MODE: you may only read and search; every other action is refused. Investigate, then finish with a numbered plan: the files to change, what to change in each, and how to check it. Do not claim that anything was changed.");
+    }
+    let system = full_system(&mut http, &folder_text, &allow, Some(extra.as_str()), load_soul(&base).as_deref());
+    let mut cfg = LoopConfig {
         model: Some(model),
-        allow: options.allow.clone(),
+        allow: allow.clone(),
+        rules: rules.clone(),
         max_steps: options.max_steps,
         max_tokens: effective_max_tokens(options.max_tokens, context),
         temperature: options.temperature,
     };
     let quiet = options.quiet;
+    let streaming = options.format == OutputFormat::StreamJson;
     let mut progress = |line: &str| {
         if !quiet {
             eprintln!("{line}");
         }
     };
+    if streaming {
+        let names: Vec<String> = http.tools().unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
+        println!("{}", agent_extras::init_event(&session_id, cfg.model.as_deref().unwrap_or_default(), &folder_text, &names, if plan { "plan" } else { "default" }));
+    }
     let mut approver = TerminalApprover::default();
     let ask = options.ask;
-    let outcome = run_loop_with(&mut http, &cfg, &system, history, &mut progress, &mut |name, category, args| ask && approver.ask(name, category, args));
+    let rules_for_ask = rules.clone();
+    let mut approve = |name: &str, category: &str, args: &Value| {
+        let rule_ask = rules_for_ask.decide(name, category, args) == Some(Decision::Ask);
+        (ask || rule_ask) && approver.ask(name, category, args)
+    };
+    let mut observe = |m: &Value| {
+        if streaming {
+            for event in agent_extras::message_events(m, &session_id) {
+                println!("{event}");
+            }
+        }
+    };
+    let mut outcome = run_loop_full(&mut http, &cfg, &system, history, &mut progress, &mut approve, &mut observe);
+
+    // self-review: look at the work before it counts as done, and let the agent fix what the checks find
+    if options.review {
+        let mut round = 1;
+        while let Ok(done) = &outcome {
+            if done.status != Status::Done || done.edited.is_empty() || round > options.review_rounds {
+                break;
+            }
+            progress(&format!("[review {round}] checking {} changed file(s)", done.edited.len()));
+            let report = self_review(&mut http, &done.edited, options.verify.as_deref(), &rules);
+            let Some(feedback) = agent_extras::review_feedback(&report, round) else { break };
+            let mut next = done.messages.clone();
+            next.push(json!({"role": "user", "content": feedback}));
+            let (calls_before, steps_before, edited_before) = (done.tool_calls.clone(), done.steps, done.edited.clone());
+            outcome = run_loop_full(&mut http, &cfg, &system, next, &mut progress, &mut approve, &mut observe).map(|mut again| {
+                again.tool_calls.splice(0..0, calls_before);
+                again.steps += steps_before;
+                for p in edited_before {
+                    if !again.edited.contains(&p) {
+                        again.edited.push(p);
+                    }
+                }
+                again
+            });
+            round += 1;
+        }
+    }
+
+    // plan mode on a terminal: show the plan and run it after a yes
+    let mut planned = plan;
+    if plan {
+        if let Ok(done) = &outcome {
+            use std::io::IsTerminal;
+            if done.status == Status::Done && io::stdin().is_terminal() && io::stdout().is_terminal() && !streaming && !options.json {
+                println!("{}\n", done.answer.trim_end());
+                eprint!("Run this plan now? Each action will be asked first. [y/N]: ");
+                io::stderr().flush().ok();
+                let mut line = String::new();
+                if io::stdin().read_line(&mut line).unwrap_or(0) > 0 && parse_answer(&line) == Answer::Yes {
+                    cfg.allow = options.allow.clone();
+                    cfg.rules = base_rules.clone();
+                    let mut next = done.messages.clone();
+                    next.push(json!({"role": "user", "content": "The plan is approved. Carry it out now."}));
+                    let build_system = full_system(&mut http, &folder_text, &options.allow, options.system.as_deref(), load_soul(&base).as_deref());
+                    let mut ask_each = |name: &str, category: &str, args: &Value| approver.ask(name, category, args);
+                    outcome = run_loop_full(&mut http, &cfg, &build_system, next, &mut progress, &mut ask_each, &mut observe);
+                    planned = false;
+                }
+            }
+        }
+    }
     http.end();
+    if let Err(e) = &outcome {
+        if streaming {
+            println!("{}", agent_extras::result_event("", "error", 0, &session_id, started.elapsed().as_millis(), Some(e)));
+        }
+    }
     let outcome = outcome?;
 
-    if let Some(name) = &options.session {
-        save_session_in(&base, name, &outcome.messages)?;
+    // a long run may leave a skill behind: proposed (waits for approval) or saved at once
+    if options.propose_skills && outcome.status == Status::Done && outcome.tool_calls.len() >= 8 {
+        propose_skill(&mut http, &cfg, &system, &outcome, &base, options.auto_skills, &mut progress);
+    }
+
+    // every run is kept (sessions of the same name continue), so `--resume`, `--continue` and the search can find it again
+    if !outcome.messages.is_empty() {
+        save_session_with(&base, &session_id, &outcome.messages, json!({"folder": folder_text, "model": cfg.model, "updated": now, "steps": outcome.steps, "edited": outcome.edited}))?;
+        if options.session.is_none() {
+            agent_extras::prune_auto_sessions(&base, 200);
+        }
+        index_session(&http, &session_id, &outcome.messages, now);
     }
     if let Some(file) = &options.trajectory {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         append_trajectory(file, &trajectory_line(&folder_text, cfg.model.as_deref().unwrap_or_default(), &system, &outcome, now))?;
     }
     let out_of_steps = outcome.status == Status::OutOfSteps;
-    if options.json {
+    let status_text = if out_of_steps { "out_of_steps" } else { "done" };
+    if streaming {
+        println!("{}", agent_extras::result_event(&outcome.answer, status_text, outcome.steps, &session_id, started.elapsed().as_millis(), None));
+    } else if options.format == OutputFormat::Json {
         let calls: Vec<Value> = outcome
             .tool_calls
             .iter()
@@ -819,10 +1118,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             .collect();
         let report = json!({
             "answer": outcome.answer,
-            "status": if out_of_steps { "out_of_steps" } else { "done" },
+            "status": status_text,
             "steps": outcome.steps,
             "folder": folder_text,
-            "session": options.session,
+            "session": session_id,
+            "plan": planned,
+            "edited": outcome.edited,
             "tool_calls": calls,
         });
         println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
@@ -905,6 +1206,7 @@ mod tests {
         LoopConfig {
             model: Some("m".into()),
             allow: allow.iter().map(|a| (*a).to_owned()).collect(),
+            rules: Rules::default(),
             max_steps,
             max_tokens: 100,
             temperature: 0.0,
@@ -1298,5 +1600,108 @@ mod tests {
         let allow = BTreeSet::from(["read".to_owned(), "edit".to_owned()]);
         let p = system_prompt("/work/app", &allow, Some("Use tabs."));
         assert!(p.contains("/work/app") && p.contains("read, edit") && !p.contains("command") && p.ends_with("Use tabs."));
+    }
+
+    fn cfg_with(allow: &[&str], rules: Rules) -> LoopConfig {
+        LoopConfig { rules, ..cfg(allow, 5) }
+    }
+
+    fn rules_from(value: Value) -> Rules {
+        Rules::from_json(&value)
+    }
+
+    #[test]
+    fn a_deny_rule_beats_yes_and_an_allow_rule_lifts_a_missing_flag() {
+        let history = || vec![json!({"role": "user", "content": "t"})];
+        let all = ["read", "edit", "command", "network", "memory"];
+        let mut b = scripted(vec![calls(&[("bash", json!({"command": "git push origin main"}))]), text("ok")]);
+        let out = run_loop(&mut b, &cfg_with(&all, rules_from(json!({"deny": ["bash: git push*"]}))), "s", history(), &mut |_| {}).unwrap();
+        assert!(b.ran.is_empty(), "the denied call did not run even with every flag");
+        assert_eq!(out.tool_calls[0].status, "denied");
+        assert!(b.bodies[1]["messages"].to_string().contains("deny rule"));
+
+        let mut b = scripted(vec![calls(&[("bash", json!({"command": "npm test"}))]), text("ok")]);
+        let out = run_loop(&mut b, &cfg_with(&["read"], rules_from(json!({"allow": ["bash: npm test*"]}))), "s", history(), &mut |_| {}).unwrap();
+        assert_eq!(b.ran.len(), 1, "an allow rule runs a command no flag allows");
+        assert_eq!(out.tool_calls[0].status, "approved");
+
+        let mut b = scripted(vec![calls(&[("bash", json!({"command": "npm test && rm -rf /"}))]), text("ok")]);
+        let out = run_loop(&mut b, &cfg_with(&["read"], rules_from(json!({"allow": ["bash: npm test*"]}))), "s", history(), &mut |_| {}).unwrap();
+        assert!(b.ran.is_empty());
+        assert_eq!(out.tool_calls[0].status, "denied", "an allow rule does not cover a compound line");
+    }
+
+    #[test]
+    fn an_ask_rule_asks_even_when_the_flag_allows_it() {
+        let history = vec![json!({"role": "user", "content": "t"})];
+        let all = ["read", "edit", "command"];
+        let rules = rules_from(json!({"ask": ["edit: src/**"]}));
+        let mut b = scripted(vec![calls(&[("write_file", json!({"path": "src/a.rs", "content": "x"}))]), text("ok")]);
+        let mut asked = Vec::new();
+        let out = run_loop_with(&mut b, &cfg_with(&all, rules.clone()), "s", history.clone(), &mut |_| {}, &mut |n, c, _| {
+            asked.push(format!("{n}/{c}"));
+            true
+        })
+        .unwrap();
+        assert_eq!(asked, vec!["write_file/edit"]);
+        assert_eq!(out.tool_calls[0].status, "approved");
+        assert_eq!(out.edited, vec!["src/a.rs"]);
+
+        let mut b = scripted(vec![calls(&[("write_file", json!({"path": "src/a.rs", "content": "x"}))]), text("ok")]);
+        let out = run_loop(&mut b, &cfg_with(&all, rules), "s", history, &mut |_| {}).unwrap();
+        assert!(b.ran.is_empty(), "nobody to ask: it stays refused");
+        assert_eq!(out.tool_calls[0].status, "denied");
+    }
+
+    #[test]
+    fn the_observer_sees_every_message_in_order() {
+        let mut b = scripted(vec![calls(&[("read_file", json!({"path": "a"}))]), text("done")]);
+        let mut roles = Vec::new();
+        run_loop_full(&mut b, &cfg(&["read"], 5), "s", vec![json!({"role": "user", "content": "t"})], &mut |_| {}, &mut |_, _, _| false, &mut |m| roles.push(m["role"].as_str().unwrap().to_owned())).unwrap();
+        assert_eq!(roles, vec!["assistant", "tool", "assistant"]);
+    }
+
+    #[test]
+    fn the_new_flags_parse() {
+        let o = parse_args(&s(&["-p", "x", "--output-format", "stream-json", "--continue", "--plan", "--allow-rule", "bash: ls*", "--deny-rule", "Read(.env)", "--review-rounds", "3", "--verify", "cargo test", "--auto-skills"])).unwrap();
+        assert_eq!(o.format, OutputFormat::StreamJson);
+        assert!(o.continue_last && o.plan && o.review && o.propose_skills && o.auto_skills);
+        assert_eq!(o.review_rounds, 3);
+        assert_eq!(o.verify.as_deref(), Some("cargo test"));
+        assert_eq!(o.rule_flags, vec![("allow", "bash: ls*".to_owned()), ("deny", "Read(.env)".to_owned())]);
+        assert_eq!(parse_args(&s(&["-p", "x", "--resume", "my-run"])).unwrap().session.as_deref(), Some("my-run"));
+        assert!(parse_args(&s(&["-p", "x", "--output-format", "xml"])).is_err());
+        assert!(parse_args(&s(&["-p", "x", "--resume", "../x"])).is_err());
+        assert!(parse_args(&s(&["-p", "x", "--review-rounds", "9"])).is_err());
+        assert_eq!(parse_args(&s(&["-p", "x", "--json"])).unwrap().format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn the_self_review_collects_findings_diagnostics_and_the_verify_result() {
+        struct Checks;
+        impl Backend for Checks {
+            fn tools(&mut self) -> Result<Vec<Value>, String> {
+                Ok(vec![])
+            }
+            fn complete(&mut self, _: Value) -> Result<Value, String> {
+                Err("no model".into())
+            }
+            fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
+                match name {
+                    "review" => Ok("Review (diff): 1 file(s), +1/-0 lines, 0 finding(s)".into()),
+                    "diagnostics" if args["path"] == "bad.py" => Ok("Problems found (python -m py_compile, exit code 1):\nSyntaxError".into()),
+                    "diagnostics" => Ok("No problems found (python -m py_compile).".into()),
+                    "bash" => Err("exit code 1\n2 tests failed".into()),
+                    _ => Err("unknown".into()),
+                }
+            }
+        }
+        let report = self_review(&mut Checks, &["good.py".into(), "bad.py".into()], Some("pytest"), &Rules::default());
+        assert_eq!(report.problems.len(), 1);
+        assert_eq!(report.problems[0].0, "bad.py");
+        assert_eq!(report.verify.as_ref().map(|v| v.0), Some(false));
+        assert!(report.objective_problems());
+        let blocked = self_review(&mut Checks, &[], Some("pytest"), &rules_from(json!({"deny": ["bash: pytest*"]})));
+        assert!(blocked.verify.unwrap().1.contains("deny rule"));
     }
 }

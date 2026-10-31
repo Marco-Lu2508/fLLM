@@ -248,9 +248,66 @@ pub(in crate::server) async fn search(Query(query): Query<HashMap<String, String
     }
 }
 
+/// A short deterministic summary of a stored session: how it starts and how it ends.
+fn digest(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= 700 {
+        return chars.iter().collect::<String>().trim().to_owned();
+    }
+    let head: String = chars[..350].iter().collect();
+    let tail: String = chars[chars.len() - 350..].iter().collect();
+    format!("{}\n[...]\n{}", head.trim(), tail.trim())
+}
+
+/// The agent tool `session_search`: finds earlier chats and code sessions by their words (`query`), or reads the start and end of one
+/// (`id`). The index is the one the Studio page and `fllm-rs agent` write, so it reaches back across sessions and projects.
+pub(super) fn tool(args: &Value) -> Result<String, String> {
+    tool_in(&data_file(), args)
+}
+
+pub(super) fn tool_in(file: &Path, args: &Value) -> Result<String, String> {
+    if let Some(id) = args.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let docs = latest(read_all(file));
+        let d = docs.iter().find(|d| d.id == id).ok_or_else(|| format!("no stored session '{id}'"))?;
+        return Ok(format!("Session {} ({}): {}\n\n{}", d.id, d.kind, d.title, digest(&d.text)));
+    }
+    let query = args.get("query").and_then(Value::as_str).map(str::trim).filter(|q| !q.is_empty()).ok_or("give a query or an id")?;
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5).clamp(1, 20) as usize;
+    let docs = latest(read_all(file));
+    if docs.is_empty() {
+        return Ok("No sessions are stored yet (the search index fills while you use the Studio or fllm-rs agent).".to_owned());
+    }
+    let hits = rank(&docs, query);
+    if hits.is_empty() {
+        return Ok(format!("No stored session mentions '{query}'."));
+    }
+    let mut out = format!("{} stored session(s) match '{query}' (best first; read one with {{\"id\": ...}}):\n", hits.len().min(limit));
+    for h in hits.into_iter().take(limit) {
+        let d = &docs[h.index];
+        out.push_str(&format!("\n- id {} [{}] {}\n  {}\n", d.id, d.kind, d.title, snippet(&d.text, query)));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_tool_searches_and_reads_stored_sessions() {
+        let file = temp_file();
+        assert!(tool_in(&file, &json!({"query": "x"})).unwrap().contains("No sessions are stored"));
+        append(&file, &rec("cli:run-1", "Fix the parser", "user asked to fix the tokenizer bug in lexer.rs", 1), MAX_FILE_BYTES, COMPACT_TO_BYTES).unwrap();
+        append(&file, &rec("c2", "Recipes", "pasta and basil", 2), MAX_FILE_BYTES, COMPACT_TO_BYTES).unwrap();
+        let found = tool_in(&file, &json!({"query": "tokenizer bug"})).unwrap();
+        assert!(found.contains("cli:run-1") && !found.contains("c2"), "{found}");
+        assert!(tool_in(&file, &json!({"query": "zzzz"})).unwrap().contains("No stored session"));
+        assert!(tool_in(&file, &json!({"id": "cli:run-1"})).unwrap().contains("lexer.rs"));
+        assert!(tool_in(&file, &json!({"id": "nope"})).is_err());
+        assert!(tool_in(&file, &json!({})).is_err());
+        let long = format!("start {} end", "middle ".repeat(300));
+        assert!(digest(&long).contains("[...]") && digest(&long).starts_with("start") && digest(&long).ends_with("end"));
+    }
 
     fn rec(id: &str, title: &str, text: &str, updated: u64) -> Record {
         Record { id: id.into(), title: title.into(), text: text.into(), kind: "chat".into(), updated }

@@ -92,6 +92,22 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             }
             Ok(true)
         }
+        "skills" | "import" | "doctor" | "update" | "insights" | "usage" | "sessions" | "mcp-server" => {
+            let rest = &args[1..];
+            let code = match command {
+                "skills" => crate::skills_cli::run(rest)?,
+                "import" => crate::agent_import::run(rest)?,
+                "doctor" => crate::agent_ops::doctor(rest)?,
+                "update" => crate::agent_ops::update(rest)?,
+                "insights" | "usage" => crate::agent_ops::insights(rest)?,
+                "sessions" => crate::agent_ops::sessions(rest)?,
+                _ => crate::mcp_server::run(rest)?,
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(true)
+        }
         "connect" => {
             let code = crate::connect_cli::run(&args[1..])?;
             if code != 0 {
@@ -152,6 +168,12 @@ TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float 
         "formats" => "usage: fllm-rs formats\nLists registered GGML storage types and the Rust decoder class; registration does not promise inference support.",
         "gateway" => crate::gateway::HELP,
         "agent" => crate::agent_cli::HELP,
+        "skills" => crate::skills_cli::HELP,
+        "import" => crate::agent_import::HELP,
+        "doctor" => crate::agent_ops::DOCTOR_HELP,
+        "insights" | "usage" => crate::agent_ops::INSIGHTS_HELP,
+        "sessions" => crate::agent_ops::SESSIONS_HELP,
+        "mcp-server" => crate::mcp_server::HELP,
         "connect" => crate::connect_cli::HELP,
         "chat" => "usage: fllm-rs chat [--url http://127.0.0.1:8000] [--model MODEL_ID] [--api-key KEY] [--max-new N] [--temperature T] [--top-p P]\nConnects to an already running OpenAI-compatible chat-completions server.",
         "cp" => "usage: fllm-rs cp SOURCE DEST\nCopy or alias a model in the local server catalog or registry.",
