@@ -196,6 +196,7 @@ pub mod quant_iq;
 
 pub mod cli;
 pub mod hub;
+pub mod model_scan;
 pub mod version;
 pub mod import;
 pub mod kv_format;

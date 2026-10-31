@@ -133,7 +133,8 @@
     $('btnAddAlias').addEventListener('click', async () => {
       const dest = $('inpNewAlias').value.trim();
       if (!dest) return;
-      const src = state.status?.model?.name || 'tiny';
+      const src = state.status?.model?.name || '';
+      if (!src) { toast('Load a model first; an alias points to the loaded model.'); return; }
       const res = await apiFetch('/api/copy', { method: 'POST', body: { source: src, destination: dest } });
       if (res.ok) { $('inpNewAlias').value = ''; toast(`Alias "${dest}" added`); refreshStudioStatus(); }
     });

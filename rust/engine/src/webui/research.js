@@ -161,7 +161,7 @@
     // ---- requests to the model and the web ----------------------------------------------------------
     state.research = false;
     const researchCtx = () => state.status?.model?.max_context || 4096;
-    const researchModel = () => state.selectedModel || state.status?.model?.name || 'tiny';
+    const researchModel = () => state.selectedModel || state.status?.model?.name || '';
     const researchAbortError = () => Object.assign(new Error('Stopped'), { name: 'AbortError' });
 
     /** Runs `fn` for every item, at most `limit` at a time. Errors that `fn` does not catch (a stop) end the whole run. */

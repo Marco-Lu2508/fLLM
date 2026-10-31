@@ -46,6 +46,7 @@
 
     /** What the label of the picker shows for a selection. */
     function modelLabel(selected, remoteModels) {
+      if (!selected) return 'Choose a model';
       const r = parseRemoteModelId(selected);
       if (!r) return selected;
       const known = (remoteModels || []).find((m) => m.provider === r.provider && m.id === r.model);
@@ -112,7 +113,7 @@
       const local = [state.status?.model?.name, ...(state.status?.model?.aliases || [])].filter(Boolean);
       const entries = mergeModelEntries(local, provState.models, state.selectedModel);
       if (provState.loaded) {
-        const kept = resolveSelection(state.selectedModel, entries, local[0] || 'tiny');
+        const kept = resolveSelection(state.selectedModel, entries, local[0] || '');
         if (kept !== state.selectedModel) { state.selectedModel = kept; entries.forEach((e) => { e.active = e.id === kept; }); }
       }
       const remote = isRemoteSelected();

@@ -1125,7 +1125,7 @@
       let title = '';
       try {
         const body = {
-          model: codeModelName() || 'tiny',
+          model: codeModelName() || '',
           messages: [
             { role: 'system', content: 'You write very short titles for coding sessions.' },
             { role: 'user', content: `Write a title of at most six words for a coding session that starts with this request. Reply with the title only, without quotes.\n\n${heuristicTitle([first])}` },
@@ -1700,7 +1700,7 @@
     async function streamAssistant(item, ctx) {
       const p = getSampler();
       const body = {
-        model: ctx.model || state.selectedModel || state.status?.model?.name || 'tiny',
+        model: ctx.model || state.selectedModel || state.status?.model?.name || '',
         messages: [{ role: 'system', content: ctx.system }, ...toWireMessages(ctx.messages)],
         stream: true, stream_options: { include_usage: true },
         temperature: Math.min(p.temperature, 0.4), top_p: 0.9,
@@ -2026,7 +2026,7 @@
 
     async function summarise(messages, system, tools, signal, focus) {
       const ask = 'Summarise the conversation above so that work can continue from your summary alone. Include: what the user wants, decisions made, files read or changed (paths) and what changed, commands run and their results, open errors, and the next steps. Keep it under 500 words. Do not call tools.' + (focus ? ` Pay special attention to: ${focus}` : '');
-      const body = { model: state.selectedModel || state.status?.model?.name || 'tiny', messages: [{ role: 'system', content: system }, ...withoutImages(messages), { role: 'user', content: ask }], stream: false, temperature: 0.2 };
+      const body = { model: state.selectedModel || state.status?.model?.name || '', messages: [{ role: 'system', content: system }, ...withoutImages(messages), { role: 'user', content: ask }], stream: false, temperature: 0.2 };
       const room = computeMaxTokens(ctxMax(), Math.round((estimateTokens(system) + estimateTokens(JSON.stringify(tools)) + estimateMessages(body.messages.slice(1))) * code.calib), 1200);
       if (!room) throw new Error(TOO_SMALL);
       body.max_tokens = room;

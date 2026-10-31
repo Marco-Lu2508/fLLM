@@ -49,6 +49,8 @@ test('a model of a removed provider falls back to the local one', () => {
 
 test('labels name the provider', () => {
   assert.strictEqual(L.modelLabel('qwen3', remote), 'qwen3');
+  assert.strictEqual(L.modelLabel('', remote), 'Choose a model');
+  assert.strictEqual(L.modelLabel(undefined, remote), 'Choose a model');
   assert.strictEqual(L.modelLabel('remote:openai/gpt-x', remote), 'OpenAI · gpt-x');
   assert.strictEqual(L.modelLabel('remote:unknown/m', remote), 'unknown · m');
 });

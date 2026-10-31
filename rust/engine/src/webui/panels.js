@@ -1,52 +1,120 @@
     // --- Start screen: what the engine is doing right now ---
     const heroTrace = { samples: [], lastTokens: null, lastUptime: null, size: 60 };
 
-    /** The first start: recommend one model and download it with a click, so nobody has to know what a quant is. */
+    // @pure-begin
+    /** The name of a model file for a person: the file name without folders and `.gguf` (an Ollama model keeps its `name:tag`). */
+    function modelFileTitle(text) {
+      const last = String(text || '').split(/[\\/]/).pop();
+      return last.replace(/\.gguf$/i, '');
+    }
+
+    /**
+     * What the start screen offers when no model is loaded. Every model that is on this computer counts: downloads, files the user added,
+     * and files found in the usual places (Downloads, LM Studio, Ollama ...). `mode` is "load" when there is at least one, otherwise
+     * "download" with the recommended model. The one to load first is the model used last, then the recommended one when it is on disk,
+     * then the largest that fits into the free memory. A recommended model that is already on disk is never offered as a download.
+     * Returns { mode, primary, others, download }.
+     */
+    function startPlan(hub, lastModel) {
+      const h = hub || {};
+      const free = Number(h.available_memory_bytes || 0);
+      const catalog = h.catalog || [];
+      const rec = catalog.find((c) => c.id === (h.recommended || [])[0]) || null;
+      const recRef = rec && rec.installed ? rec.installed.ref : '';
+      const last = String(lastModel || '');
+      const lastTitle = modelFileTitle(last).toLowerCase();
+      const seen = new Set();
+      const all = [];
+      const add = (ref, name, size, where) => {
+        const key = String(ref || '').toLowerCase();
+        if (!ref || seen.has(key)) return;
+        seen.add(key);
+        all.push({ ref, name, title: modelFileTitle(name), size: Number(size || 0), where });
+      };
+      for (const c of h.cached || []) add(c.name, c.path || c.name, c.size_bytes, 'downloaded');
+      for (const l of h.local || []) add(l.path, l.name || l.path, l.size_bytes, 'added');
+      for (const f of h.found || []) add(f.path, f.name, f.size_bytes, f.source || 'found');
+      const lastEntry = catalog.find((c) => c.id === last);
+      const lastRef = lastEntry && lastEntry.installed ? lastEntry.installed.ref : '';
+      const isLast = (m) => !!last && (m.ref === last || m.ref === lastRef || m.title.toLowerCase() === lastTitle);
+      const fits = (m) => !free || !m.size || m.size * 1.15 < free;
+      const rank = (m) => (isLast(m) ? 0 : m.ref === recRef ? 1 : fits(m) ? 2 : 3);
+      all.sort((x, y) => rank(x) - rank(y) || y.size - x.size || x.title.localeCompare(y.title));
+      if (all.length) {
+        const primary = Object.assign({}, all[0], { last: isLast(all[0]), fits: fits(all[0]) });
+        return { mode: 'load', primary, others: all.slice(1), download: null };
+      }
+      return { mode: 'download', primary: null, others: [], download: rec };
+    }
+    // @pure-end
+
     let heroStartFor = '';
+    let heroHubAsked = false;
+    function sizeText(bytes) {
+      const b = Number(bytes || 0);
+      return b ? (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`) : '';
+    }
+
+    /** The empty start screen: load a model that is already here (one button), or download the recommended one. */
     function renderHeroStart() {
       const box = document.getElementById('heroStart');
       if (!box) return;
       const hub = state.modelsHub;
-      const rec = (hub?.recommended || [])[0] || '';
-      const entry = (hub?.catalog || []).find((c) => c.id === rec) || null;
-      if (!entry) {
+      if (!hub) {
+        if (!heroHubAsked) { heroHubAsked = true; refreshHub(); }
         box.style.display = 'none';
         return;
       }
-      const quant = entry.default_quant || '';
-      const variant = (entry.variants || []).find((v) => v.quant === quant) || (entry.variants || [])[0] || null;
-      const bytes = Number(variant?.estimated_bytes || entry.estimated_bytes || 0);
-      const size = bytes ? (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`) : '';
-      const label = [entry.display_name || rec, quant, size].filter(Boolean).join(', ');
-      const fits = variant?.fits_memory ?? entry.fits;
-      const key = `${rec}:${quant}:${size}`;
+      const plan = startPlan(hub, state.status?.last_model);
+      const key = JSON.stringify([plan.mode, plan.primary && plan.primary.ref, plan.others.map((o) => o.ref), plan.download && plan.download.id, plan.download && plan.download.default_quant]);
       if (heroStartFor === key) return; // the hero is redrawn on every status poll
       heroStartFor = key;
+      const chooseFile = '<button class="btn btn-sm btn-ghost" id="btnHeroPick">Choose a file ...</button>';
+      const browse = '<button class="btn btn-sm btn-ghost" id="btnHeroBrowse">Browse models</button>';
       box.style.display = '';
-      box.innerHTML =
-        '<div style="display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;">' +
-        '  <button class="btn btn-primary" id="btnHeroDownload">Download and start</button>' +
-        '  <span class="app-item-desc mono" style="font-size:11px;">' + escapeHtml(label) +
-        (fits === false ? ', may not fit into free memory' : '') + '</span>' +
-        '</div>';
-      const button = box.querySelector('#btnHeroDownload');
-      if (button) {
+      if (plan.mode === 'load') {
+        const p = plan.primary;
+        box.innerHTML =
+          '<div class="hero-start-main"><button class="btn btn-primary" id="btnHeroLoad" title="' + escapeHtml(p.ref) + '">Load ' + escapeHtml(p.title) + '</button>' +
+          '<span class="app-item-desc mono hero-start-meta">' + escapeHtml([sizeText(p.size), p.last ? 'used last' : p.where].filter(Boolean).join(', ')) + (p.fits ? '' : ', may not fit into free memory') + '</span></div>' +
+          (plan.others.length ? '<div class="hero-start-list">' + plan.others.slice(0, 4).map((o, i) =>
+            '<div class="hero-start-row"><span class="mono hero-start-name" title="' + escapeHtml(o.ref) + '">' + escapeHtml(o.title) + '</span><span class="app-item-desc mono">' + escapeHtml(sizeText(o.size)) + '</span>' +
+            '<button class="btn btn-xs btn-ghost" data-hero-load="' + i + '">Load</button></div>').join('') +
+            (plan.others.length > 4 ? '<div class="app-item-desc">and ' + (plan.others.length - 4) + ' more on the Models page</div>' : '') + '</div>' : '') +
+          '<div class="hero-start-more">' + chooseFile + browse + '</div>';
+        box.querySelector('#btnHeroLoad').addEventListener('click', () => window.fllmLoadModelNow(p.ref, p.title));
+        box.querySelectorAll('[data-hero-load]').forEach((btn) => btn.addEventListener('click', () => { const o = plan.others[Number(btn.dataset.heroLoad)]; window.fllmLoadModelNow(o.ref, o.title); }));
+      } else if (plan.download) {
+        const rec = plan.download;
+        const quant = rec.default_quant || '';
+        const variant = (rec.variants || []).find((v) => v.quant === quant) || (rec.variants || [])[0] || null;
+        const bytes = Number((variant && variant.estimated_bytes) || rec.estimated_bytes || 0);
+        const label = [rec.display_name || rec.id, quant, sizeText(bytes)].filter(Boolean).join(', ');
+        const fitsMem = variant && variant.fits_memory !== undefined ? variant.fits_memory : rec.fits;
+        box.innerHTML =
+          '<div class="hero-start-main"><button class="btn btn-primary" id="btnHeroDownload">Download and start</button>' +
+          '<span class="app-item-desc mono hero-start-meta">' + escapeHtml(label) + (fitsMem === false ? ', may not fit into free memory' : '') + '</span></div>' +
+          '<div class="hero-start-more">' + chooseFile + browse + '</div>';
+        const button = box.querySelector('#btnHeroDownload');
         button.addEventListener('click', async () => {
           button.disabled = true;
           button.textContent = 'Downloading ...';
           try {
-            const ok = await window.fllmDownloadModel(rec, quant, true);
-            if (!ok) {
-              button.disabled = false;
-              button.textContent = 'Download and start';
-            }
+            const ok = await window.fllmDownloadModel(rec.id, quant, true);
+            if (!ok) { button.disabled = false; button.textContent = 'Download and start'; }
           } catch (e) {
             button.disabled = false;
             button.textContent = 'Download and start';
             if (typeof toast === 'function') toast((e && e.message) || 'The download failed.');
           }
         });
+      } else {
+        box.innerHTML = '<div class="hero-start-more">' + chooseFile + browse + '</div>';
       }
+      const pick = box.querySelector('#btnHeroPick');
+      if (pick) pick.addEventListener('click', () => window.fllmPickModelFile());
+      const br = box.querySelector('#btnHeroBrowse');
+      if (br) br.addEventListener('click', () => switchSurface('hub'));
     }
 
     function updateHero(data) {
@@ -58,7 +126,10 @@
       const facts = [size, m.quantization, m.max_context ? `${nf(m.max_context, 0)} tokens of context` : ''].filter(Boolean);
       if (data.setup) {
         $('welcomeHeading').textContent = 'No model loaded';
-        $('welcomeSub').textContent = 'Download one below, or open Models and pick your own.';
+        const plan = startPlan(state.modelsHub, data.last_model);
+        $('welcomeSub').textContent = !state.modelsHub ? 'Looking for models on this computer ...'
+          : plan.mode === 'load' ? 'A model that is already on this computer is ready to load. Nothing needs to be downloaded.'
+          : 'Download one, or choose a model file you already have.';
         renderHeroStart();
       } else {
         $('welcomeHeading').textContent = state.selectedModel || m.name || 'Ready';
@@ -115,8 +186,8 @@
         updateHero(data);
 
         const m = data.model || {};
-        if (!state.selectedModel) state.selectedModel = m.name || 'tiny';
-        $('activeModelLabel').textContent = state.setup ? 'No model loaded' : state.selectedModel;
+        if (!state.selectedModel) state.selectedModel = m.name || '';
+        $('activeModelLabel').textContent = state.setup ? 'Choose a model' : state.selectedModel;
         $('activeQuantChip').textContent = m.quantization || 'GGUF';
         $('activeQuantChip').style.display = state.setup ? 'none' : '';
         // where the model runs: the device it was started on, or the one the automatic choice picks (npu.js)
@@ -351,7 +422,7 @@
 
     function updateRouteTesterSample() {
       const v = $('selRouteTest').value;
-      const model = state.selectedModel || state.status?.model?.name || 'tiny';
+      const model = state.selectedModel || state.status?.model?.name || 'your-model';
       const map = {
         'POST:/v1/chat/completions': { model, messages: [{ role: 'user', content: 'Hello! Answer briefly.' }], max_tokens: 48 },
         'POST:/v1/messages': { model, max_tokens: 48, messages: [{ role: 'user', content: 'Hello via Anthropic API!' }] },

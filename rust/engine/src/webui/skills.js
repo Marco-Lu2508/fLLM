@@ -329,7 +329,7 @@
         const res = await apiFetch(ep.url, {
           method: 'POST',
           body: ep.transform({
-            model: state.selectedModel || (state.status && state.status.model && state.status.model.name) || 'tiny', stream: false, temperature: 0.3, max_tokens: 1600,
+            model: state.selectedModel || (state.status && state.status.model && state.status.model.name) || '', stream: false, temperature: 0.3, max_tokens: 1600,
             messages: [{ role: 'user', content: skProposalPrompt(text) }],
           }),
         });

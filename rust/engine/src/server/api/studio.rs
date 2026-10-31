@@ -498,6 +498,31 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
         })
         .collect();
 
+    // model files that are on this computer but not in the Studio's own list (Downloads, LM Studio, Ollama, a file in the models folder)
+    let local_list = crate::hub::local_models();
+    let known: std::collections::HashSet<String> = local_list.iter().map(|(p, _)| p.clone()).chain(cached.iter().filter_map(|c| c["path"].as_str().map(str::to_owned))).collect();
+    let found: Vec<crate::model_scan::Found> = crate::model_scan::scan().into_iter().filter(|f| !known.contains(&f.path.display().to_string())).collect();
+    // what is on disk for a catalog model: its cached download, an added file or a found file
+    let installed_of = |entry: &crate::catalog::CatalogEntry| -> Option<Value> {
+        let repo = format!("hf://{}/", entry.repo.to_ascii_lowercase());
+        cached
+            .iter()
+            .find(|c| c["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().starts_with(&repo)))
+            .map(|c| json!({"ref": c["name"], "path": c["path"], "size_bytes": c["size_bytes"], "where": "downloaded"}))
+            .or_else(|| {
+                local_list
+                    .iter()
+                    .find(|(p, _)| crate::model_scan::file_is_entry(&file_name_of(p), &entry.name))
+                    .map(|(p, s)| json!({"ref": p, "path": p, "size_bytes": s, "where": "added"}))
+            })
+            .or_else(|| {
+                found
+                    .iter()
+                    .find(|f| crate::model_scan::file_is_entry(&f.name, &entry.name))
+                    .map(|f| json!({"ref": f.path.display().to_string(), "path": f.path.display().to_string(), "size_bytes": f.size, "where": f.source}))
+            })
+    };
+
     let catalog: Vec<Value> = crate::catalog::catalog()
         .iter()
         .map(|entry| {
@@ -539,6 +564,7 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
                 "fits": (avail_mem > 0).then_some(est_bytes as f64 * 1.15 <= avail_mem as f64 && !very_low_quality),
                 "tags": quants_list,
                 "variants": variants,
+                "installed": installed_of(entry),
             })
         })
         .collect();
@@ -579,8 +605,16 @@ pub(in crate::server) fn models_hub_json(loaded: Value) -> Value {
             .into_iter()
             .map(|(path, size)| json!({"path": path, "name": std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), "size_bytes": size}))
             .collect::<Vec<_>>(),
+        "found": found
+            .iter()
+            .map(|f| json!({"path": f.path.display().to_string(), "name": f.name, "size_bytes": f.size, "source": f.source}))
+            .collect::<Vec<_>>(),
         "catalog": catalog,
     })
+}
+
+fn file_name_of(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 pub(in crate::server) async fn hf_files(

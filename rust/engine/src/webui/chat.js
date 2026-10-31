@@ -528,7 +528,7 @@
     function requestBody(messages) {
       const p = getSampler();
       const body = {
-        model: state.selectedModel || state.status?.model?.name || 'tiny',
+        model: state.selectedModel || state.status?.model?.name || '',
         messages, stream: true, stream_options: { include_usage: true },
         temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, min_p: p.min_p,
         repetition_penalty: p.repetition_penalty, presence_penalty: p.presence_penalty, frequency_penalty: p.frequency_penalty,
@@ -698,7 +698,7 @@
           // prompts.js: a short prompt that does not reveal the system prompt; thinking is switched off so that a small
           // answer budget is not used up by reasoning (templates without the switch ignore it; stray think blocks are cut below)
           body: ep.transform({
-            model: state.selectedModel || state.status?.model?.name || 'tiny', stream: false, temperature: 0.3, max_tokens: 40,
+            model: state.selectedModel || state.status?.model?.name || '', stream: false, temperature: 0.3, max_tokens: 40,
             chat_template_kwargs: { enable_thinking: false },
             messages: spTitleMessages(splitReasoning(first.content).answer || first.content, splitReasoning(reply.content).answer || reply.content),
           }),

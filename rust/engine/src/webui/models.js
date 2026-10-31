@@ -107,10 +107,12 @@
           <div class="catalog-name">
             <strong>${escapeHtml(entry.display_name)}</strong>
             <span class="quant-chip">${escapeHtml(entry.recommended_quant)}</span>${entry.vision ? '<span class="quant-chip">vision</span>' : ''}
-            <small class="mono">about ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB</small>
+            ${entry.installed ? '<span class="quant-chip">on this computer</span>' : `<small class="mono">about ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB</small>`}
           </div>
           <div class="app-item-actions">
-            <button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and start</button>
+            ${entry.installed
+              ? `<button class="btn btn-sm btn-primary" data-load="${escapeHtml(entry.installed.ref)}" data-label="${escapeHtml(entry.display_name)}" data-key="${escapeHtml(baseName(entry.installed.path))}">Load</button>`
+              : `<button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and start</button>`}
           </div>
         </div>`).join('')}` : '';
     }
@@ -157,7 +159,21 @@
             <button class="btn btn-sm btn-secondary" data-load="${escapeHtml(c.name)}" data-key="${escapeHtml(baseName(c.path))}" title="Restart the server with this model">Load</button>
             <button class="btn btn-sm btn-ghost" data-del-cache="${escapeHtml(c.name)}">Delete</button>
           </div>
-        </div>`).join('') : (local ? '' : '<p class="app-item-desc">No downloaded models yet. Search for one above.</p>'));
+        </div>`).join('') : '');
+
+      const found = (hub.found || []).map((f) => `
+        <div class="app-card-item">
+          <div class="app-item-info">
+            <div class="app-item-title mono">${escapeHtml(f.name)} ${fitBadge(f.size_bytes)} <span class="quant-chip">${escapeHtml(f.source)}</span></div>
+            <div class="app-item-desc mono">${formatBytes(f.size_bytes)} · ${escapeHtml(f.path)}</div>
+          </div>
+          <div class="app-item-actions">
+            <button class="btn btn-sm btn-secondary" data-load="${escapeHtml(f.path)}" data-label="${escapeHtml(f.name)}" data-key="${escapeHtml(f.name)}">Load</button>
+            <button class="btn btn-sm btn-ghost" data-add-found="${escapeHtml(f.path)}" title="Keeps it in this list; the file stays where it is">Add to my models</button>
+          </div>
+        </div>`).join('');
+      $('cachedModelsHubList').innerHTML += found ? `<p class="app-item-desc" style="margin-top:12px;">Found on this computer (the files stay where they are):</p>${found}` : '';
+      if (!cached.length && !local && !found) $('cachedModelsHubList').innerHTML = '<p class="app-item-desc">No models on this computer yet. Download one below or add a file you already have.</p>';
 
       const q = ($('hubSearchInput').value || '').toLowerCase().trim();
       const all = (hub.catalog || []).filter((item) => !q || item.id.toLowerCase().includes(q) || item.architecture.toLowerCase().includes(q));
@@ -171,12 +187,14 @@
           <div class="catalog-name">
             <strong>${escapeHtml(entry.display_name)}</strong>
             <span class="quant-chip">${escapeHtml(entry.architecture)}</span>${entry.vision ? '<span class="quant-chip">vision</span>' : ''}
-            <small class="mono">${escapeHtml(entry.recommended_quant)}, about ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB ${fitBadge(entry.estimated_bytes)}</small>
+            ${entry.installed ? '<span class="quant-chip">on this computer</span>' : `<small class="mono">${escapeHtml(entry.recommended_quant)}, about ${(Number(entry.estimated_bytes || 0) / 1073741824).toFixed(1)} GB ${fitBadge(entry.estimated_bytes)}</small>`}
           </div>
           <div class="app-item-actions">
             <button class="btn btn-sm btn-outline" data-inspect="${escapeHtml(entry.default_repo || entry.gguf_repo || '')}">Files</button>
-            <button class="btn btn-sm btn-secondary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}">Download</button>
-            <button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and load</button>
+            ${entry.installed
+              ? `<button class="btn btn-sm btn-primary" data-load="${escapeHtml(entry.installed.ref)}" data-label="${escapeHtml(entry.display_name)}" data-key="${escapeHtml(baseName(entry.installed.path))}">Load</button>`
+              : `<button class="btn btn-sm btn-secondary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}">Download</button>
+            <button class="btn btn-sm btn-primary" data-download="${escapeHtml(entry.id)}" data-quant="${escapeHtml(entry.recommended_quant)}" data-then-load="1">Download and load</button>`}
           </div>
         </div>`).join('') + (tooLarge ? `<p class="app-item-desc" style="margin-top:10px;"><button class="btn btn-sm btn-ghost" data-toggle-large="1">${state.showLarge ? 'Hide' : 'Show'} ${tooLarge} models that are too large for this computer</button></p>` : '');
     }
@@ -439,7 +457,7 @@
      * back. `text` is kept across the restart in the session storage of this tab.
      */
     async function loadLastModelFor(text, surface) {
-      const reference = state.status?.last_model;
+      const reference = state.status?.last_model || startPlan(state.modelsHub, '').primary?.ref;
       if (!reference) return false;
       sessionStorage.setItem('fllm.pendingSend', JSON.stringify({ text, surface }));
       $('switchTitle').textContent = 'Loading the model';
@@ -456,6 +474,31 @@
       return true;
     }
     window.fllmLoadLastModelFor = loadLastModelFor;
+
+    /** Loads a model that is on this computer with its saved options (one click from the start screen). */
+    window.fllmLoadModelNow = async (reference, title) => {
+      $('switchTitle').textContent = 'Loading the model';
+      $('switchText').textContent = `${title || baseName(reference)} loads now. This takes a few seconds ...`;
+      $('switchOverlay').classList.add('open');
+      const res = await apiFetch('/api/studio/models/load', { method: 'POST', body: { model: reference } });
+      if (!res.ok) {
+        $('switchOverlay').classList.remove('open');
+        toast((await res.json().catch(() => ({}))).error?.message || 'The model could not be loaded.');
+        return false;
+      }
+      await waitForRestart((d) => !d.setup, 'Loading the model ...');
+      return true;
+    };
+
+    /** "Choose a file ...": the file dialog of the system, then the file is added to the models and loaded. */
+    window.fllmPickModelFile = async () => {
+      const path = await browse('gguf');
+      if (!path) return;
+      const res = await apiFetch('/api/studio/models/local', { method: 'POST', body: { path } });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast(d.error?.message || 'The file could not be added.'); return; }
+      await window.fllmLoadModelNow(d.added[0], baseName(d.added[0]));
+    };
 
     async function unloadModel() {
       const ok = await askDialog({ title: 'Unload the model?', text: 'The model is removed from memory. You can load it again from Models.', ok: 'Unload' });
@@ -636,6 +679,8 @@
       const load = e.target.closest('[data-load]');
       if (load) { await loadModel(load.dataset.load, load.dataset.label || load.dataset.load, load.dataset.key); return; }
       const delLocal = e.target.closest('[data-del-local]');
+      const addFound = e.target.closest('[data-add-found]');
+      if (addFound) { await apiFetch('/api/studio/models/local', { method: 'POST', body: { path: addFound.dataset.addFound } }); refreshHub(); return; }
       if (delLocal) { await apiFetch('/api/studio/models/local', { method: 'DELETE', body: { path: delLocal.dataset.delLocal } }); refreshHub(); return; }
       const del = e.target.closest('[data-del-cache]');
       if (del) {
