@@ -1595,7 +1595,7 @@ int fllm_cuda_delta_supported(int kh, int vh, int hk, int hv, int ksz) { return 
 // Runs of at least FLLM_CHUNKED_SCAN_MIN rows (default 64) may take it. FLLM_CHUNKED_SCAN=0 keeps the serial kernels for everything, =1 (or "always") takes the scan
 // for every such run, unset or "auto" lets the device decide: the chunked form does more arithmetic than the serial one and wins where the serial kernels are bound by
 // the per-token dependency chain (many SMs idle, per-token reductions) and loses where the device is already busy with them, so the first calls of every layer
-// shape are timed (one warm-up call and one timed call of the serial kernels, one timed call of the scan, on the rows of the prompt itself) and the faster one is kept
+// shape are timed (a warm-up call and a timed call of the serial kernels, a warm-up call and a timed call of the scan, on the rows of the prompt itself) and the faster one is kept
 // for the rest of the process (the scan has to be at least 8 % faster). The same switch at run time: FLLM_OPT_CHUNKED_SCAN (0, 1, 2).
 static int scan_min_rows(const FllmStream *st) {
     if (st->capture || fllm_opt(FLLM_OPT_CHUNKED_SCAN) == 0) return 0;
