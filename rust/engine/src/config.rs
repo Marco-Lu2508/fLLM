@@ -964,11 +964,13 @@ impl ModelConfig {
         } else {
             None
         };
-        let (kv_heads, head_dim, value_dim) = match (&mla, &v4, &inkling, &minimax3) {
-            (Some(m), _, _, _) => (heads, m.nope + m.rope, m.value),
-            // placeholder cache geometry: the attention state of these models is kept per sequence outside the KV pools
-            (None, Some(_), _, _) | (None, _, Some(_), _) | (None, _, _, Some(_)) => (1, 2, 2),
-            (None, None, None, None) => (kv_heads, head_dim, value_dim),
+        // MiniMax-M3 and Inkling keep keys and values in the KV pools on a device (the host path keeps them per sequence and ignores the pools); Inkling's
+        // sliding layers have their own geometry (`layer_geoms` below)
+        let (kv_heads, head_dim, value_dim) = match (&mla, &v4) {
+            (Some(m), _) => (heads, m.nope + m.rope, m.value),
+            // placeholder cache geometry: the attention state of this model is kept per sequence outside the KV pools
+            (None, Some(_)) => (1, 2, 2),
+            (None, None) => (kv_heads, head_dim, value_dim),
         };
         let swa_flag = |l: usize| {
             sliding_window.is_some()
@@ -977,7 +979,7 @@ impl ModelConfig {
                     None => window_pattern <= 1 || l % window_pattern < window_pattern - 1,
                 }
         };
-        let layer_geoms = if mla.is_none() {
+        let layer_geoms = if mla.is_none() && inkling.is_none() {
             parse_geometry(meta, a, layers, (heads, kv_heads, head_dim, value_dim, ff), swa_flag)?
         } else {
             None
@@ -986,6 +988,22 @@ impl ModelConfig {
         let (heads, kv_heads, head_dim, value_dim, ff) = match layer_geoms.as_ref().and_then(|g| g.first()) {
             Some(g) => (g.heads, g.kv_heads, g.head_dim, g.value_dim, g.ff),
             None => (heads, kv_heads, head_dim, value_dim, ff),
+        };
+        // Inkling: the sliding layers have their own head counts and width; the scalar fields keep the global layers' (what `InklingConfig` documents)
+        let layer_geoms = match &inkling {
+            Some(ic) => Some(
+                ic.sliding
+                    .iter()
+                    .map(|&sliding| {
+                        if sliding {
+                            LayerGeom { heads: ic.swa_heads, kv_heads: ic.swa_kv_heads, head_dim: ic.swa_dim, value_dim: ic.swa_dim, kv_source: None, ff }
+                        } else {
+                            LayerGeom { heads, kv_heads, head_dim, value_dim, kv_source: None, ff }
+                        }
+                    })
+                    .collect(),
+            ),
+            None => layer_geoms,
         };
         let gemma_cfg = parse_gemma(meta, a, mapping, layers);
         let mut attention_scale = float(meta, a, "attention.scale");

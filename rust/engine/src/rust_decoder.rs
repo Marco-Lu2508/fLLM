@@ -26,6 +26,7 @@ mod rwkv;
 mod deepseek4;
 mod hc;
 mod inkling;
+mod inkling_device;
 mod minimax3;
 mod qwen4;
 mod state_api;
@@ -200,7 +201,6 @@ struct DeviceDsa {
     store: crate::backend::DeviceBuffer,
 }
 
-/// Device copy of a Mamba-2 layer (the input projection as a quantized weight, small tensors as FP32 buffers).
 /// Device copy of the block indexer of a MiniMax-M3 block-sparse attention layer: its two projections, the per-head norms and the per-slot f32 key store.
 struct DeviceM3 {
     q: crate::backend::DeviceWeight,
@@ -211,6 +211,7 @@ struct DeviceM3 {
     store: crate::backend::DeviceBuffer,
 }
 
+/// Device copy of a Mamba-2 layer (the input projection as a quantized weight, small tensors as FP32 buffers).
 struct DeviceMamba {
     input: crate::backend::DeviceWeight,
     conv: crate::backend::DeviceBuffer,
@@ -706,11 +707,11 @@ pub struct DeviceLayerWeights {
     mla: Option<DeviceMla>,
     /// Lightning indexer of a sparse-attention layer resident on the device (`Stream::dsa_select`).
     dsa: Option<DeviceDsa>,
-    /// Mamba-2 mixer resident on the device.
     /// Block indexer of a MiniMax-M3 block-sparse attention layer resident on the device (`Stream::block_select`).
     m3: Option<DeviceM3>,
     /// An Inkling layer resident on the device.
     ink: Option<inkling_device::DeviceInk>,
+    /// Mamba-2 mixer resident on the device.
     mamba: Option<DeviceMamba>,
     /// Short convolution resident on the device.
     shortconv: Option<DeviceShortConv>,
@@ -775,6 +776,8 @@ impl DeviceLayerWeights {
             delta: None,
             mla: None,
             dsa: None,
+            m3: None,
+            ink: None,
             mamba: None,
             shortconv: None,
             mamba1: None,
@@ -1171,15 +1174,15 @@ pub struct RustDecoder {
     dsa_device: bool,
     /// The accelerator runs the hyper-connections (`Stream::hc_mix`, `Stream::hc_combine`); set when the model is attached.
     hc_device: bool,
-}
-
-/// DeepStack features: per decoder layer, (row, values) pairs.
     /// MiniMax-M3 on the accelerator: the block indexer and the block-sparse attention run on the device (`Stream::block_select`); set when the model is attached.
     m3_device: bool,
     /// MiniMax-M3 runs on the accelerator at all (`m3_device`, or dense attention with `FLLM_DSA=dense`).
     m3_run: bool,
     /// Inkling runs on the accelerator (convolutions, relative-position attention, experts); set when the model is attached.
     ink_device: bool,
+}
+
+/// DeepStack features: per decoder layer, (row, values) pairs.
 type DeepstackLevels = Vec<Vec<(usize, Vec<f32>)>>;
 /// Per position axis, the (cos, sin) rotary tables of the device path.
 type AxisTables = Vec<(Arc<Vec<f32>>, Arc<Vec<f32>>)>;
@@ -2259,11 +2262,11 @@ impl RustDecoder {
                 k_eq_v,
                 gemma: gemma_layer,
             };
-            if let Some(ctx) = &par {
-                par_shard::shard_layer(ctx, &mut layer, i, &cfg)?;
-            }
             if cfg.minimax3.is_some() {
                 minimax3::patch_layer(model, &cfg, i, &mut layer)?;
+            }
+            if let Some(ctx) = &par {
+                par_shard::shard_layer(ctx, &mut layer, i, &cfg)?;
             }
             layers.push(layer);
         }
@@ -2411,12 +2414,12 @@ impl RustDecoder {
             dsa_dense: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("dense")),
             dsa_exact_on_device: std::env::var("FLLM_DSA").is_ok_and(|v| v.eq_ignore_ascii_case("exact") || v.eq_ignore_ascii_case("host")),
             dsa_device: false,
-            hc_device: false,
-        };
-        decoder.set_device(device)?;
             m3_device: false,
             m3_run: false,
             ink_device: false,
+            hc_device: false,
+        };
+        decoder.set_device(device)?;
         decoder.plan_expert_cache(mapping);
         Ok(decoder)
     }
@@ -2925,8 +2928,9 @@ impl RustDecoder {
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
         }
-        if cfg.inkling.is_some() {
-            return Some("Inkling convolutions and relative position bias");
+        if cfg.inkling.is_some() && !self.ink_device {
+            // the host pass of this model is a pass of its own over all layers: one layer that needs it sends them all there
+            return Some("Inkling convolutions and relative position bias (no kernels for this backend or shape, or FLLM_INKLING=host)");
         }
         if cfg.minimax3.is_some() && !self.m3_run {
             // the host pass of this model is a pass of its own over all layers: one layer that needs it sends them all there
@@ -3189,10 +3193,6 @@ impl RustDecoder {
         // the lightning indexer and the sparse attention on the device: plain indexers only (no pooling, no tail rotation), the expanded MLA cache
         let dsa_ok = self.dsa_device_possible(&*backend);
         self.dsa_device = dsa_ok && self.cfg.indexer.is_some();
-        // hyper-connections on the device: the streams get their own buffer and the mixing runs in two small kernels per block; the layers' own
-        // mixers and feed-forwards are the ordinary device ones (a branch output is the difference of the residual buffer before and after)
-        let clamp_ok = backend.create_stream().is_ok_and(|s| s.supports_glu_clamped());
-        let hc_ok = self.hc.is_some()
         // MiniMax-M3: the block indexer and the attention over the selected blocks (f16 cache, the indexer queries rotate like the attention heads)
         let (m3_run, m3_device) = match self.cfg.minimax3.as_ref() {
             Some(mc) => {
@@ -3210,6 +3210,10 @@ impl RustDecoder {
         self.m3_run = m3_run;
         self.m3_device = m3_device;
         self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
+        // hyper-connections on the device: the streams get their own buffer and the mixing runs in two small kernels per block; the layers' own
+        // mixers and feed-forwards are the ordinary device ones (a branch output is the difference of the residual buffer before and after)
+        let clamp_ok = backend.create_stream().is_ok_and(|s| s.supports_glu_clamped());
+        let hc_ok = self.hc.is_some()
             && self.cfg.residual_scale == 1.0
             && self.par.is_none()
             && !std::env::var("FLLM_HC").is_ok_and(|v| v.eq_ignore_ascii_case("host"))
@@ -3675,6 +3679,54 @@ impl RustDecoder {
                 }),
                 _ => None,
             };
+            let m3 = match (self.minimax3.as_deref().and_then(|m| m.indexers.get(i)).and_then(Option::as_ref), self.cfg.minimax3.as_ref()) {
+                (Some(ix), Some(mc)) if self.m3_device => Some(DeviceM3 {
+                    q: upload_linear(&format!("blk.{i}.indexer.attn_q"), &ix.q)?,
+                    k: upload_linear(&format!("blk.{i}.indexer.attn_k"), &ix.k)?,
+                    qn: upload_vec(&ix.qn)?,
+                    kn: upload_vec(&ix.kn)?,
+                    store: backend.allocate_buffer(self.pool_blocks * self.block_size * mc.idx_dim * 4).map_err(|e| e.to_string())?,
+                }),
+                _ => None,
+            };
+            let ink = match (self.inkling.as_deref().and_then(|m| m.layers.get(i)), self.ink_device) {
+                (Some(il), true) => {
+                    let up_expert = |e: &Expert, tag: &str| -> Result<DeviceExpert, String> {
+                        let gate = e.gate.as_ref().ok_or("an Inkling expert without a gate projection")?;
+                        Ok(DeviceExpert {
+                            gate: upload_linear(&format!("blk.{i}.{tag}.gate"), gate)?,
+                            up: upload_linear(&format!("blk.{i}.{tag}.up"), &e.up)?,
+                            down: upload_linear(&format!("blk.{i}.{tag}.down"), &e.down)?,
+                        })
+                    };
+                    let (mut experts, mut shared) = (Vec::new(), Vec::new());
+                    if let Some(im) = &il.moe {
+                        for (n, e) in im.experts.iter().enumerate() {
+                            experts.push(up_expert(e, &format!("exp{n}"))?);
+                        }
+                        for (n, e) in im.shared.iter().enumerate() {
+                            shared.push(up_expert(e, &format!("shared{n}"))?);
+                        }
+                    }
+                    Some(inkling_device::DeviceInk {
+                        q: upload_linear(&format!("blk.{i}.attn_query"), &il.q)?,
+                        k: upload_linear(&format!("blk.{i}.attn_key"), &il.k)?,
+                        v: upload_linear(&format!("blk.{i}.attn_value"), &il.v)?,
+                        r: upload_linear(&format!("blk.{i}.attn_rel"), &il.r)?,
+                        o: upload_linear(&format!("blk.{i}.attn_out"), &il.o)?,
+                        qn: upload_vec(&il.qn)?,
+                        kn: upload_vec(&il.kn)?,
+                        profile: upload_vec(&il.profile)?,
+                        k_conv: upload_vec(&il.k_conv.weights)?,
+                        v_conv: upload_vec(&il.v_conv.weights)?,
+                        attn_conv: upload_vec(&il.attn_conv.weights)?,
+                        ffn_conv: upload_vec(&il.ffn_conv.weights)?,
+                        experts,
+                        shared,
+                    })
+                }
+                _ => None,
+            };
             let q_norm = layer.q_norm.as_ref().map(upload_vec).transpose()?;
             let k_norm = layer.k_norm.as_ref().map(upload_vec).transpose()?;
             let post_attn_norm = layer.post_attn_norm.as_ref().map(|n| upload_norm("post_attn", n)).transpose()?;
@@ -3691,7 +3743,7 @@ impl RustDecoder {
                     .and_then(|slot| *slot)
                     .is_some_and(|(layers, first)| layers == self.layers.len() && i >= first);
             let merged_gate_up = match &layer.ffn {
-                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) && !matches!(self.dense_glu_mode(), Some(GluMode::Clamped(_))) => {
+                Ffn::Gated { gate, up, .. } if merge_on && !host_ffn && self.cfg.inkling.is_none() && matches!(self.cfg.activation, Activation::Silu | Activation::GeluTanh) && !matches!(self.dense_glu_mode(), Some(GluMode::Clamped(_) | GluMode::SwigluOai(..))) => {
                     upload_merged(&format!("blk.{i}.ffn_gate_up"), &[gate, up])?
                 }
                 _ => None,
@@ -3866,6 +3918,8 @@ impl RustDecoder {
                 delta,
                 mla,
                 dsa,
+                m3,
+                ink,
                 mamba,
                 shortconv,
                 mamba1,
@@ -4182,6 +4236,8 @@ impl RustDecoder {
         let mut carried_norm: Option<crate::backend::DeviceBuffer> = None;
         // LongCat-Flash: the shortcut experts of the layer before, added after the feed-forward block of the layer that follows
         let mut pending_shortcut_dev: Option<crate::backend::DeviceBuffer> = None;
+        // FLLM_LAYER_CHECK: the input of the layer that made the shortcut experts, for the host run of the pair
+        let mut check_pair: Option<Vec<f32>> = None;
         // selection of the lightning indexer of the last layer that has one (the layers after it without an indexer reuse it)
         let mut dsa_sel: Option<crate::backend::DeviceBuffer> = None;
         // the head GEMM reads the final norm output directly when every row's logits are wanted in order
@@ -4221,6 +4277,18 @@ impl RustDecoder {
             } else {
                 None
             };
+            if let Some(ink) = &dev_layer.ink {
+                // Inkling: the whole layer (attention with convolutions, feed-forward) is one device function; the convolution histories are recurrent state
+                if delta_plan.is_none() {
+                    delta_plan = Some(self.state_plan(cfg.layers, self.ink_layer_bytes(), tables, lengths)?);
+                }
+                let plan = delta_plan.as_deref().unwrap_or(&[]);
+                self.inkling_layer_device(&mut **stream, &mut scratch, i, kvi, dev_layer, ink, &mut x_buf, (&slots, tables, lengths), plan, dev_kv)?;
+                if let Some(host_in) = check_in {
+                    self.layer_check(&mut **stream, (i, i), &x_buf, host_in, &positions, tables, lengths, key, value)?;
+                }
+                continue;
+            }
             if let (Some(hcd), Some(streams)) = (hc_dev, hc_streams.as_ref()) {
                 hc_block = Some(self.hc_enter(&mut **stream, &mut scratch, &hcd.attn[i], &hcd.ones, streams, &mut x_buf, rows)?);
             }
@@ -4280,8 +4348,6 @@ impl RustDecoder {
                 let mut q_buf = scratch.acquire(q_bytes).map_err(err)?;
                 let mut k_buf = scratch.acquire(k_bytes).map_err(err)?;
                 let mut v_buf = scratch.acquire(v_bytes).map_err(err)?;
-        // FLLM_LAYER_CHECK: the input of the layer that made the shortcut experts, for the host run of the pair
-        let mut check_pair: Option<Vec<f32>> = None;
                 let mut latent_attn: Option<crate::backend::DeviceBuffer> = None;
                 // normalized low-rank query of a layer with a lightning indexer (the indexer queries are projected from it)
                 let mut q_low_dev: Option<crate::backend::DeviceBuffer> = None;
@@ -4991,6 +5057,8 @@ impl RustDecoder {
                     .map_err(err)?;
                 if let Some(kind) = dense_clamped {
                     stream.glu_clamped(&mut act_buf, &gate_buf, &up_buf, kind).map_err(err)?;
+                } else if let Some((alpha, limit)) = dense_oai {
+                    stream.swiglu_oai(&mut act_buf, &gate_buf, &up_buf, alpha, limit).map_err(err)?;
                 } else {
                 match cfg.activation {
                     Activation::GeluTanh => stream.geglu(&mut act_buf, &gate_buf, &up_buf).map_err(err)?,
@@ -5057,8 +5125,6 @@ impl RustDecoder {
                     device_post_norm_inplace(
                         &mut **stream,
                         &mut scratch,
-                } else if let Some((alpha, limit)) = dense_oai {
-                    stream.swiglu_oai(&mut act_buf, &gate_buf, &up_buf, alpha, limit).map_err(err)?;
                         cfg.norm,
                         &mut ffn_out_buf,
                         dev_layer.post_ffn_norm.as_ref(),
@@ -5778,12 +5844,21 @@ impl RustDecoder {
         value: &mut [u16],
     ) -> Result<(), String> {
         let mut trace = crate::cpu_profile::Trace::new(false, positions.len());
-        self.host_layers(i..i + 1, &mut host_x, positions, tables, lengths, key, value, &mut trace, None, &mut Vec::new())?;
+        if self.cfg.inkling.is_some() {
+            // likewise (its convolution histories are fed step by step like a host run would)
+            host_x = self.inkling_layers(&host_x, positions, tables, lengths, first..i + 1)?;
+        } else if self.cfg.minimax3.is_some() {
+            // the host pass of this model has its own layer loop (and keeps its own per-sequence state, which the check feeds step by step like a host run would)
+            host_x = self.minimax3_layers(&host_x, positions, tables, lengths, first..i + 1)?;
+        } else {
+            self.host_layers(first..i + 1, &mut host_x, positions, tables, lengths, key, value, &mut trace, None, &mut Vec::new())?;
+        }
         let mut dev = vec![0.0f32; host_x.len()];
         stream.download(cast_f32_to_u8_mut(&mut dev), x).map_err(|e| e.to_string())?;
         let rms = (host_x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / host_x.len().max(1) as f64).sqrt();
         let worst = dev.iter().zip(&host_x).map(|(a, b)| f64::from((a - b).abs())).fold(0.0, f64::max);
         let mean = dev.iter().zip(&host_x).map(|(a, b)| f64::from((a - b).abs())).sum::<f64>() / host_x.len().max(1) as f64;
+        let name = if first < i { format!("{first}..{i}") } else { i.to_string() };
         eprintln!(
             "[layer-check] layer {name} rows {}: max|dev-host| {worst:.5} mean {mean:.6} rms {rms:.4} (max/rms {:.4})",
             positions.len(),
@@ -5858,7 +5933,6 @@ impl RustDecoder {
         })
     }
 
-        let name = if first < i { format!("{first}..{i}") } else { i.to_string() };
     /// A Mamba-1 layer on the device: input projection, convolution kernel, x_proj, dt/B/C normalisation, dt_proj, selective scan, output
     /// projection added to the residual stream.
     #[allow(clippy::too_many_arguments)]
@@ -6865,6 +6939,8 @@ impl RustDecoder {
         }
         if device {
             return moe.latent.is_none()
+                // zero experts (LongCat-Flash) fold into the combination's shared slot: a router with both, or with scaled inputs, keeps the other paths
+                && (cfg.zero_experts == 0 || (moe.shared.is_none() && !cfg.input_scaled && cfg.experts > cfg.zero_experts))
                 && matches!(cfg.gating, Gating::Softmax | Gating::Sigmoid)
                 && cfg.weight_norm_p.is_none()
                 && (1..=32).contains(&cfg.used)
@@ -6993,8 +7069,6 @@ impl RustDecoder {
             let direct = n == rows && !cfg.input_scaled && idx.iter().enumerate().all(|(i, &t)| t as usize == i);
             let mut gathered = None;
             if !direct {
-                // zero experts (LongCat-Flash) fold into the combination's shared slot: a router with both, or with scaled inputs, keeps the other paths
-                && (cfg.zero_experts == 0 || (moe.shared.is_none() && !cfg.input_scaled && cfg.experts > cfg.zero_experts))
                 let mut xe = scratch.acquire(n * hidden * 4).map_err(err)?;
                 stream
                     .gather_rows(&mut xe, x, &idx, cfg.input_scaled.then_some(weights.as_slice()), hidden)
@@ -7009,6 +7083,23 @@ impl RustDecoder {
                 scratch.recycle(xe);
             }
             scratch.recycle(result);
+        }
+        // zero experts (LongCat-Flash): the routes beyond the stored experts return the input, weighted; one pass for all of them
+        if cfg.zero_experts > 0 {
+            let mut total = vec![0.0f32; rows];
+            for assigned in routed.iter().skip(moe.experts.len()) {
+                for &(t, wt) in assigned {
+                    total[t] += wt;
+                }
+            }
+            let idx: Vec<i32> = (0..rows as i32).filter(|&t| total[t as usize] != 0.0).collect();
+            if !idx.is_empty() {
+                let weights: Vec<f32> = idx.iter().map(|&t| total[t as usize]).collect();
+                let mut xe = scratch.acquire(idx.len() * hidden * 4).map_err(err)?;
+                stream.gather_rows(&mut xe, x, &idx, None, hidden).map_err(err)?;
+                stream.scatter_add_rows(&mut acc, &xe, &idx, Some(&weights), hidden).map_err(err)?;
+                scratch.recycle(xe);
+            }
         }
         if let Some((src, gate_vec)) = shared {
             let result = Self::gated_run(stream, scratch, self.dense_glu_mode().unwrap_or(mode), &src, x, rows)?;
@@ -7138,23 +7229,6 @@ impl RustDecoder {
         workspace: &mut compute::ProjectionGroupWorkspace,
     ) -> bool {
         let mut members = Vec::with_capacity(self.cfg.moe.as_ref().map_or(8, |m| m.used));
-        // zero experts (LongCat-Flash): the routes beyond the stored experts return the input, weighted; one pass for all of them
-        if cfg.zero_experts > 0 {
-            let mut total = vec![0.0f32; rows];
-            for assigned in routed.iter().skip(moe.experts.len()) {
-                for &(t, wt) in assigned {
-                    total[t] += wt;
-                }
-            }
-            let idx: Vec<i32> = (0..rows as i32).filter(|&t| total[t as usize] != 0.0).collect();
-            if !idx.is_empty() {
-                let weights: Vec<f32> = idx.iter().map(|&t| total[t as usize]).collect();
-                let mut xe = scratch.acquire(idx.len() * hidden * 4).map_err(err)?;
-                stream.gather_rows(&mut xe, x, &idx, None, hidden).map_err(err)?;
-                stream.scatter_add_rows(&mut acc, &xe, &idx, Some(&weights), hidden).map_err(err)?;
-                scratch.recycle(xe);
-            }
-        }
         let mut weights = Vec::with_capacity(members.capacity());
         for (expert, assigned) in moe.experts.iter().zip(routed) {
             let Some(&(_, weight)) = assigned.first() else {
@@ -7182,6 +7256,41 @@ impl RustDecoder {
             }
         }
         true
+    }
+
+    /// The shortcut experts of a LongCat-Flash layer for the normed input `x` on the device: the device routing (`moe_fast`) where the backend has it,
+    /// else routing on the host with the experts on the device (`moe_on_device`, as for every other mixture-of-experts layer), else the host reference.
+    fn shortcut_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        moe: &Moe,
+        dev: Option<&DeviceMoe>,
+        x: &crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<crate::backend::DeviceBuffer, String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let hidden = self.cfg.hidden;
+        let mut host_in = Vec::new();
+        if let Some(dm) = dev {
+            if let Some(buf) = self.moe_fast(stream, scratch, dm, x, rows)? {
+                return Ok(buf);
+            }
+            host_in = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
+            if let Some(buf) = self.moe_on_device(stream, scratch, moe, Some(dm), x, &host_in, rows)? {
+                return Ok(buf);
+            }
+        }
+        if host_in.is_empty() {
+            host_in = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
+        }
+        let mut workspace = compute::ProjectionGroupWorkspace::default();
+        let out = self.shortcut_forward(moe, &host_in, &mut workspace)?;
+        let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
+        stream.upload(&mut buf, cast_f32_to_u8(&out)).map_err(err)?;
+        Ok(buf)
     }
 
     /// LongCat-Flash shortcut experts: the routed experts as usual, a zero expert (index beyond the stored experts) returns its input.
@@ -7312,41 +7421,6 @@ impl RustDecoder {
                         let value = if moe.bias.is_some() || cfg.group_top2 {
                             group.iter().take(2).sum()
                         } else {
-    /// The shortcut experts of a LongCat-Flash layer for the normed input `x` on the device: the device routing (`moe_fast`) where the backend has it,
-    /// else routing on the host with the experts on the device (`moe_on_device`, as for every other mixture-of-experts layer), else the host reference.
-    fn shortcut_device(
-        &self,
-        stream: &mut dyn crate::backend::Stream,
-        scratch: &mut crate::backend::BufferPool,
-        moe: &Moe,
-        dev: Option<&DeviceMoe>,
-        x: &crate::backend::DeviceBuffer,
-        rows: usize,
-    ) -> Result<crate::backend::DeviceBuffer, String> {
-        let err = |e: crate::backend::BackendError| e.to_string();
-        let hidden = self.cfg.hidden;
-        let mut host_in = Vec::new();
-        if let Some(dm) = dev {
-            if let Some(buf) = self.moe_fast(stream, scratch, dm, x, rows)? {
-                return Ok(buf);
-            }
-            host_in = vec![0.0f32; rows * hidden];
-            stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
-            if let Some(buf) = self.moe_on_device(stream, scratch, moe, Some(dm), x, &host_in, rows)? {
-                return Ok(buf);
-            }
-        }
-        if host_in.is_empty() {
-            host_in = vec![0.0f32; rows * hidden];
-            stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
-        }
-        let mut workspace = compute::ProjectionGroupWorkspace::default();
-        let out = self.shortcut_forward(moe, &host_in, &mut workspace)?;
-        let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
-        stream.upload(&mut buf, cast_f32_to_u8(&out)).map_err(err)?;
-        Ok(buf)
-    }
-
                             group[0]
                         };
                         (g, value)
@@ -7904,7 +7978,7 @@ impl RustDecoder {
             if cfg.v4.is_some() {
                 x = self.v4_layers(&x, ids, &positions, tables, lengths)?;
             } else if cfg.inkling.is_some() {
-                x = self.inkling_layers(&x, &positions, tables, lengths)?;
+                x = self.inkling_layers(&x, &positions, tables, lengths, 0..cfg.layers)?;
             } else if cfg.minimax3.is_some() {
                 x = self.minimax3_layers(&x, &positions, tables, lengths, 0..cfg.layers)?;
             } else if cfg.qwen4.is_some() {
@@ -8497,6 +8571,8 @@ impl RustDecoder {
         // parallel residual and QKV clipping take buffers from the pool in the middle of a step: not recordable
         !self.cfg.parallel_residual
             && self.cfg.qkv_clip.is_none()
+            // the block selection stages host arrays (slots, tables, lengths) that a recorded step cannot take
+            && !self.m3_device
             && self.layers.len() == weights.layers.len()
             && self.layers.iter().zip(&weights.layers).all(|(layer, dev)| {
                 matches!(layer.attn, Attn::Std { .. })
@@ -8571,8 +8647,6 @@ impl RustDecoder {
         if cfg.embedding_scale != 1.0 {
             for v in &mut host_x {
                 *v *= cfg.embedding_scale;
-            // the block selection stages host arrays (slots, tables, lengths) that a recorded step cannot take
-            && !self.m3_device
             }
         }
         if let Some(table) = &self.position_table {

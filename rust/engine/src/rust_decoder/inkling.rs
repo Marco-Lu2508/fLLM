@@ -20,9 +20,9 @@ macro_rules! tri {
 }
 
 /// Depthwise causal convolution whose result is added to its input: `x + sum_j w[c][j] * x[t - (taps - 1) + j]`.
-struct Conv {
-    taps: usize,
-    weights: Vec<f32>,
+pub(super) struct Conv {
+    pub(super) taps: usize,
+    pub(super) weights: Vec<f32>,
 }
 
 impl Conv {
@@ -51,44 +51,44 @@ impl Conv {
     }
 }
 
-struct InkMoe {
+pub(super) struct InkMoe {
     router: Linear,
     scale: f32,
     bias: Vec<f32>,
-    experts: Vec<Expert>,
-    shared: Vec<Expert>,
+    pub(super) experts: Vec<Expert>,
+    pub(super) shared: Vec<Expert>,
 }
 
-struct InkLayer {
-    sliding: bool,
-    heads: usize,
-    kv_heads: usize,
-    hd: usize,
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    r: Linear,
-    o: Linear,
-    qn: Vec<f32>,
-    kn: Vec<f32>,
+pub(super) struct InkLayer {
+    pub(super) sliding: bool,
+    pub(super) heads: usize,
+    pub(super) kv_heads: usize,
+    pub(super) hd: usize,
+    pub(super) q: Linear,
+    pub(super) k: Linear,
+    pub(super) v: Linear,
+    pub(super) r: Linear,
+    pub(super) o: Linear,
+    pub(super) qn: Vec<f32>,
+    pub(super) kn: Vec<f32>,
     /// `d_rel x extent` distance profiles.
-    profile: Vec<f32>,
-    extent: usize,
-    k_conv: Conv,
-    v_conv: Conv,
-    attn_conv: Conv,
-    ffn_conv: Conv,
-    moe: Option<InkMoe>,
+    pub(super) profile: Vec<f32>,
+    pub(super) extent: usize,
+    pub(super) k_conv: Conv,
+    pub(super) v_conv: Conv,
+    pub(super) attn_conv: Conv,
+    pub(super) ffn_conv: Conv,
+    pub(super) moe: Option<InkMoe>,
     /// Scale of a dense feed-forward.
-    dense_scale: f32,
+    pub(super) dense_scale: f32,
 }
 
 pub(super) struct InklingModel {
-    layers: Vec<InkLayer>,
+    pub(super) layers: Vec<InkLayer>,
 }
 
 impl InkLayer {
-    fn kv_width(&self) -> usize {
+    pub(super) fn kv_width(&self) -> usize {
         self.kv_heads * self.hd
     }
     /// Offsets of the four convolution states in `LayerState::conv`: keys, values, attention output, feed-forward output.
@@ -173,13 +173,13 @@ impl InklingModel {
 }
 
 impl RustDecoder {
-    /// All layers of an Inkling model for a batch of embeddings (rows x hidden); the result is the final stream before the output norm.
-    pub(super) fn inkling_layers(&self, x: &[f32], positions: &[usize], tables: &[i64], lengths: &[i64]) -> Result<Vec<f32>, String> {
+    /// The layers `range` of an Inkling model for a batch of embeddings (rows x hidden); with all layers the result is the final stream before the output norm.
+    pub(super) fn inkling_layers(&self, x: &[f32], positions: &[usize], tables: &[i64], lengths: &[i64], range: std::ops::Range<usize>) -> Result<Vec<f32>, String> {
         let (cfg, model) = (&self.cfg, self.inkling.as_deref().ok_or("Inkling weights missing")?);
         let ic = cfg.inkling.as_ref().ok_or("Inkling configuration missing")?;
         let (rows, hidden, eps) = (positions.len(), cfg.hidden, cfg.eps);
         let mut x = x.to_vec();
-        for (i, (layer, il)) in self.layers.iter().zip(&model.layers).enumerate() {
+        for (i, (layer, il)) in self.layers.iter().zip(&model.layers).enumerate().skip(range.start).take(range.len()) {
             let mut normed = x.clone();
             if let Some(norm) = &layer.attn_norm {
                 self.norm(&mut normed, norm);
@@ -274,7 +274,8 @@ impl RustDecoder {
 
     /// Sigmoid routing: the best `used` routed experts by score plus bias, then the log-sigmoid logits of the chosen experts and of the shared
     /// experts are normalised together (a softmax over the log-probabilities) and scaled by `route_scale * global_scale`.
-    fn ink_moe(&self, moe: &InkMoe, f: &[f32], ic: &crate::config::InklingConfig) -> Result<Vec<f32>, String> {
+    /// The experts a token goes to (best `used` routed ones by score plus bias) and the weights of those and of the shared experts (in this order).
+    pub(super) fn ink_route(&self, moe: &InkMoe, f: &[f32], ic: &crate::config::InklingConfig) -> Result<(Vec<usize>, Vec<f32>), String> {
         let logits = moe.router.forward(f)?;
         let routed = &logits[..ic.routed];
         let scores: Vec<f32> = routed.iter().map(|l| 1.0 / (1.0 + (-l).exp())).collect();
@@ -288,6 +289,11 @@ impl RustDecoder {
         let max = logp.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let lse = max + logp.iter().map(|l| (l - max).exp()).sum::<f32>().ln();
         let weights: Vec<f32> = logp.iter().map(|l| (l - lse).exp() * ic.route_scale * moe.scale).collect();
+        Ok((order, weights))
+    }
+
+    fn ink_moe(&self, moe: &InkMoe, f: &[f32], ic: &crate::config::InklingConfig) -> Result<Vec<f32>, String> {
+        let (order, weights) = self.ink_route(moe, f, ic)?;
         let hidden = f.len();
         let mut out = vec![0.0f32; hidden];
         let mut workspace = compute::ProjectionGroupWorkspace::default();
