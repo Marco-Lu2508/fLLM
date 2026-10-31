@@ -1081,6 +1081,34 @@
       border-bottom: 1px solid var(--border);
     }
 
+    /* settings > sub-agents */
+    .agents-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+    .agents-section { margin: 18px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+    .agent-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .agent-row-name { font-weight: 600; color: var(--foreground); display: flex; align-items: center; gap: 8px; }
+    .agent-reach { margin-top: 2px; }
+    .btn-danger-text { color: var(--destructive); }
+    .agent-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .agents-empty { padding: 10px 0; max-width: 60ch; }
+    .agents-notice { margin-top: 10px; font-size: 13px; color: var(--foreground); }
+    .agents-stored { margin-top: 16px; font-size: 12px; }
+    .agents-path { background: none; border: 0; padding: 0; font: inherit; color: var(--primary); text-decoration: underline; cursor: pointer; }
+    .agent-form { margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-lg, 12px); display: flex; flex-direction: column; gap: 14px; }
+    .agent-form-title { font-weight: 600; font-size: 15px; }
+    .agent-field { display: flex; flex-direction: column; gap: 4px; border: 0; padding: 0; margin: 0; min-width: 0; }
+    .agent-field > span, .agent-field > legend { font-size: 13px; font-weight: 600; color: var(--foreground); padding: 0; }
+    .agent-field small { color: var(--muted-foreground); font-size: 12px; }
+    .agent-field textarea { width: 100%; resize: vertical; font-family: inherit; }
+    .agent-field-row { display: grid; grid-template-columns: 1fr 160px; gap: 14px; }
+    .agent-tools-label { font-size: 12px; color: var(--muted-foreground); margin: 6px 0 2px; }
+    .agent-tools { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+    .agent-tool, .agent-radio { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+    .agent-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .agent-try summary { cursor: pointer; font-size: 13px; color: var(--muted-foreground); }
+    .agent-try textarea { width: 100%; margin: 6px 0; }
+    .agent-try-out { margin-top: 8px; padding: 10px; white-space: pre-wrap; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; max-height: 240px; overflow: auto; }
+    @media (max-width: 640px) { .agents-head { flex-direction: column; } .agent-field-row { grid-template-columns: 1fr; } }
+
     .app-card-item {
       display: flex;
       align-items: center;

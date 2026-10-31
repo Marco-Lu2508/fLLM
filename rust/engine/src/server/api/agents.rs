@@ -250,6 +250,41 @@ mod tests {
     }
 
     #[test]
+    fn create_edit_and_delete_go_through_the_file_in_the_workspace_folder() {
+        let dir = temp("flow");
+        let ws = dir.to_str().unwrap();
+        let body = json!({"name": "code-reviewer", "description": "Reviews a change", "tools": ["read_file", "grep"], "model": "", "max_steps": 8,
+                          "body": "You review.", "scope": "workspace", "workspace": ws});
+        let listed = save(&body).unwrap();
+        let file = dir.join(".fllm").join("agents").join("code-reviewer.md");
+        assert!(file.is_file(), "creating writes the file");
+        let mine: Vec<_> = listed["agents"].as_array().unwrap().iter().filter(|a| a["scope"] == "workspace").collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["tools"], json!(["read_file", "grep"]));
+        // editing the same name rewrites the same file
+        let mut edited = body.clone();
+        edited["description"] = json!("Reviews a diff");
+        edited["tools"] = json!(["read_file"]);
+        edited["body"] = json!("You review carefully.");
+        save(&edited).unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("description: Reviews a diff") && text.contains("You review carefully.") && !text.contains("grep"));
+        // empty instructions and bad names are refused, nothing is written
+        let mut empty = body.clone();
+        empty["body"] = json!("  ");
+        assert!(save(&empty).is_err());
+        let mut bad = body.clone();
+        bad["name"] = json!("../evil");
+        assert!(save(&bad).is_err());
+        assert_eq!(fs::read_dir(dir.join(".fllm").join("agents")).unwrap().count(), 1);
+        // deleting removes the file; deleting again is an error, not a crash
+        remove("workspace", "code-reviewer", Some(ws)).unwrap();
+        assert!(!file.exists());
+        assert!(remove("workspace", "code-reviewer", Some(ws)).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_workspace_scope_needs_an_existing_absolute_folder() {
         assert!(base_for("workspace", None).is_err());
         assert!(base_for("workspace", Some("relative/path")).is_err());

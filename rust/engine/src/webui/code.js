@@ -716,6 +716,8 @@
       } catch { /* no custom agents: the two built-in types stay */ }
     }
 
+    window.fllmReloadAgents = () => loadAgents().catch(() => {});
+
     /** The sub-agent by name: a custom one (`agents/*.md`) or a built-in type (`explore`, `general`). */
     const customAgent = (name) => (code.agents || []).find((a) => a.name === name) || null;
     const agentNames = () => ['explore', 'general', ...(code.agents || []).map((a) => a.name)];
