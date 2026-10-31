@@ -371,27 +371,41 @@
 
     const estimateTokens = (text) => Math.ceil(String(text || '').length / 3.6);
 
-    function contextUsed(t) {
-      if (!t) return 0;
-      const path = pathOf(t);
-      let total = estimateTokens(prjComposeSystem(t, $('txtSystemPrompt').value.trim())) + 8;
-      const lastUser = path.filter((n) => n.role === 'user').pop();
-      for (const n of path) total += estimateTokens(n.content) + 6 + (n.images ? n.images.length * 256 : 0) + (n.files || []).reduce((s, f) => s + estimateTokens(f.text), 0) + (n === lastUser ? ragTokens(n) : 0);
-      return total;
+    function nodeTokens(n, lastUser) {
+      return estimateTokens(n.content) + 6 + (n.images ? n.images.length * 256 : 0) + (n.files || []).reduce((s, f) => s + estimateTokens(f.text), 0) + (n === lastUser ? ragTokens(n) : 0);
     }
 
-    function setMeter(fillId, textId, used, max) {
+    /** What the counter shows for a chat: the server's count of the last answer plus an estimate for what came after it. */
+    function contextMeter(t) {
+      if (!t) return contextMeterModel(0, null, 0);
+      const path = pathOf(t);
+      const lastUser = path.filter((n) => n.role === 'user').pop();
+      const system = estimateTokens(prjComposeSystem(t, $('txtSystemPrompt').value.trim())) + 8;
+      let lastReal = -1;
+      path.forEach((n, i) => { if (n.role === 'assistant' && n.usage && n.usage.total_tokens && !n.streaming) lastReal = i; });
+      if (lastReal >= 0) {
+        const since = path.slice(lastReal + 1).reduce((s, n) => s + nodeTokens(n, lastUser), 0);
+        return contextMeterModel(0, path[lastReal].usage, since);
+      }
+      return contextMeterModel(path.reduce((s, n) => s + nodeTokens(n, lastUser), system), null, 0);
+    }
+
+    function contextUsed(t) { return contextMeter(t).used; }
+
+    function setMeter(fillId, textId, used, max, approx) {
       const ratio = Math.min(1, used / Math.max(1, max));
       $(fillId).style.width = `${(ratio * 100).toFixed(0)}%`;
       $(fillId).parentElement.parentElement.classList.toggle('is-high', ratio > 0.8);
-      $(textId).textContent = `${used.toLocaleString('en-US')} / ${max.toLocaleString('en-US')}`;
+      $(textId).textContent = `${approx ? '~' : ''}${used.toLocaleString('en-US')} / ${max.toLocaleString('en-US')}`;
     }
 
     function updateContextMeter() {
       syncMaxTokensRange();
-      if (window.fllmRemoteMeter && window.fllmRemoteMeter(contextUsed(currentThread()))) return; // providers hook: no local limit for a provider's model
+      const m = contextMeter(currentThread());
+      if (window.fllmRemoteMeter && window.fllmRemoteMeter(m.used)) return; // providers hook: no local limit for a provider's model
       const max = state.status?.model?.max_context || 4096;
-      setMeter('ctxFill', 'ctxText', contextUsed(currentThread()), max);
+      setMeter('ctxFill', 'ctxText', m.used, max, !m.exact);
+      $('ctxText').parentElement.title = m.title;
     }
 
     function scrollChatToEnd(force) {
@@ -484,28 +498,43 @@
       return out;
     }
 
+    // @pure-begin
+    /**
+     * The output-length fields of a chat request. Automatic (nothing chosen): no max_tokens at all, the server then lets the
+     * answer use what is left of the context window after its own count of the prompt (the page can only estimate that count).
+     * A chosen number is a ceiling: `x_fllm_clamp_max_tokens` makes the server cut it to what fits instead of failing the turn.
+     * A provider's model has no local window: it gets the number or a safe 4096.
+     */
+    function outputLimitFields(requested, remote, hasTools, windowTokens) {
+      const wanted = Number(requested) > 0 ? Math.floor(Number(requested)) : 0;
+      if (remote) return { max_tokens: wanted || 4096 };
+      const out = { x_fllm_clamp_max_tokens: true };
+      // an answer with tools may think, write a search and then write the answer: a chosen ceiling needs room for all of that
+      if (wanted) out.max_tokens = hasTools ? Math.max(wanted, Math.min(2048, Math.floor((Number(windowTokens) || 4096) / 2))) : wanted;
+      return out;
+    }
+
+    /**
+     * The context counter. `estimate`: the page's own count of the conversation; `usage`: the server's usage of the last
+     * answer and `since`: the estimate for what was added after that answer. The server's number is exact, the other is not.
+     */
+    function contextMeterModel(estimate, usage, since) {
+      const real = Number(usage && usage.total_tokens) || 0;
+      if (real > 0) return { used: real + Math.max(0, Number(since) || 0), exact: !since, title: 'Tokens in the conversation, counted by the model server after the last answer.' };
+      return { used: Math.max(0, Math.round(Number(estimate) || 0)), exact: false, title: 'An estimate. The exact count comes with the first answer.' };
+    }
+    // @pure-end
+
     function requestBody(messages) {
       const p = getSampler();
       const body = {
         model: state.selectedModel || state.status?.model?.name || 'tiny',
         messages, stream: true, stream_options: { include_usage: true },
-        temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, min_p: p.min_p, max_tokens: p.max_tokens,
+        temperature: p.temperature, top_p: p.top_p, top_k: p.top_k, min_p: p.min_p,
         repetition_penalty: p.repetition_penalty, presence_penalty: p.presence_penalty, frequency_penalty: p.frequency_penalty,
       };
-      if (!p.max_tokens) {
-        // automatic: what is left of the context window after the prompt (a provider's model: a safe 4096)
-        const remote = Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected());
-        const window_ = Number(state.status?.model?.max_context) || 4096;
-        const text = JSON.stringify(messages);
-        const images = (text.match(/data:image/g) || []).length;
-        const used = estimateTokens(text.replace(/data:[^"]{200,}/g, '')) + images * 512;
-        body.max_tokens = remote ? 4096 : Math.max(64, Math.min(131072, Math.floor(window_ - used * 1.2 - 256)));
-      }
-      // The engine rejects a request whose prompt plus max_tokens exceeds the context (OpenAI's behaviour). The page's
-      // estimate of the prompt is rough, so for a small context it asks for a share of the window instead of the
-      // sampler's number: a 512-token model then answers shorter instead of failing the whole request.
-      const ctxWindow = Number(state.status?.model?.max_context) || 4096;
-      if (ctxWindow < 4096) body.max_tokens = Math.min(body.max_tokens, Math.max(32, Math.floor(ctxWindow / 4)));
+      Object.assign(body, outputLimitFields(p.max_tokens, Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected()), false));
+      if (!body.max_tokens) delete body.max_tokens;
       if (p.seed >= 0) body.seed = p.seed;
       if (p.stop.length) body.stop = p.stop;
       if (p.dry_multiplier > 0) body.dry_multiplier = p.dry_multiplier;
@@ -568,7 +597,7 @@
       const ep = window.fllmChatEndpoint(state.selectedModel); // providers hook: a provider's model goes through the proxy route
       const body = { ...requestBody(messages), ...(extra || {}) };
       // an answer with tools may think, write a search and then write the answer: it needs room for all of that
-      if (extra && extra.tools) body.max_tokens = Math.max(body.max_tokens, Math.min(2048, Math.floor((Number(state.status?.model?.max_context) || 4096) / 2)));
+      if (extra && extra.tools) Object.assign(body, outputLimitFields(getSampler().max_tokens, Boolean(window.fllmRemoteSelected && window.fllmRemoteSelected()), true, Number(state.status?.model?.max_context) || 4096));
       const res = await apiFetch(ep.url, { method: 'POST', body: ep.transform(body), signal });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -649,7 +678,7 @@
         saveThreads();
         renderChatArea();
         refreshStudioStatus();
-        if (aNode.usage?.total_tokens && !(window.fllmRemoteMeter && window.fllmRemoteMeter(aNode.usage.total_tokens))) setMeter('ctxFill', 'ctxText', aNode.usage.total_tokens, state.status?.model?.max_context || 4096);
+        updateContextMeter();
         maybeTitle(t);
       }
     }

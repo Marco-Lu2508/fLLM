@@ -6,6 +6,9 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- **Studio: the first chat message no longer fails with "maximum context length ... you requested 32833 tokens".** The chat page guessed the prompt size and asked for an exact-fit `max_tokens`; the real prompt (system prompt, template, tools) was larger. In automatic mode the page now sends no `max_tokens` and the server uses what is left of the window; a chosen number is sent with `x_fllm_clamp_max_tokens`, which cuts it to what fits (the API keeps rejecting an explicit absurd `max_tokens`). The context counter uses the server's token count after each answer and shows a `~` estimate before the first one.
+
 ## [0.2.0] - 2026-10-31
 
 The big release of 2026-10-30/31. Version 0.1.12 was prepared but never tagged: its entries (below) are part of this release.

@@ -337,6 +337,28 @@ async fn too_long_requests_name_the_context_limit() {
 }
 
 #[tokio::test]
+async fn studio_requests_are_cut_to_the_context_instead_of_failing() {
+    let h = shared();
+    // the chat page marks its requests: an exact-fit guess that is a little too large must not fail the turn
+    let reply = h
+        .post(
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hello"}], "max_tokens": 10_000, "x_fllm_clamp_max_tokens": true, "temperature": 0, "ignore_eos": true}),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.json()["usage"]["total_tokens"], 256);
+    assert_eq!(reply.json()["choices"][0]["finish_reason"], "length");
+    // a prompt that alone fills the window is still refused with the OpenAI error
+    let long = "x".repeat(2000);
+    let reply = h
+        .post("/v1/chat/completions", json!({"messages": [{"role": "user", "content": long}], "x_fllm_clamp_max_tokens": true}))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.json()["error"]["code"], "context_length_exceeded");
+}
+
+#[tokio::test]
 async fn completions_accept_text_and_token_prompts() {
     let h = shared();
     let reply = h.post("/v1/completions", json!({"model": "tiny", "prompt": "abc", "max_tokens": 4, "temperature": 0, "echo": true})).await;
