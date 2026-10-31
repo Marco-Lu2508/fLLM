@@ -548,57 +548,8 @@ impl Stream for VulkanStream {
         mixed: &mut DeviceBuffer,
         out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
-        if !self.supports_kda(shape) {
-            return Err(BackendError::UnsupportedOperation("kda_layer for this shape".into()));
-        }
-        let shared = self.scan_shared();
-        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_dim, shape.head_dim, shape.heads));
-        if waves.len() > 1 {
-            for wave in &waves {
-                self.kda_layer(shape, weights, wave, state_offset, qkv, forget, beta, gate, mixed, out)?;
-                self.flush()?;
-            }
-            return Ok(());
-        }
-        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
-        if rows == 0 {
-            return Ok(());
-        }
-        let (width, conv_dim) = (shape.heads * shape.head_dim, shape.conv_dim());
-        let state_end = state_offset + shape.layer_state_bytes();
-        if qkv.size < rows * conv_dim * 4
-            || mixed.size < rows * conv_dim * 4
-            || forget.size < rows * width * 4
-            || beta.size < rows * shape.heads * 4
-            || gate.size < rows * width * 4
-            || out.size < rows * width * 4
-            || weights.conv.size < conv_dim * shape.conv_kernel * 4
-            || weights.dt_bias.size < width * 4
-            || weights.rate.size < shape.heads * 4
-            || weights.norm.size < shape.head_dim * 4
-            || runs.iter().any(|r| r.state.size < state_end)
-        {
-            return Err(invalid("KDA buffers are smaller than the layer needs"));
-        }
-        let specs: Vec<RunSpec> = runs.iter().map(|r| RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset }).collect();
-        let plans = crate::backend::vulkan::ops::recurrent::plan_kda_layer_scan(shape, &specs, state_offset, shared)?;
-        if plans.is_empty() {
-            return Ok(());
-        }
-        let args = [
-            Arg::r("qkv", qkv),
-            Arg::r("conv", weights.conv),
-            Arg::r("forget", forget),
-            Arg::r("beta", beta),
-            Arg::r("gate", gate),
-            Arg::r("dt_bias", weights.dt_bias),
-            Arg::r("rate", weights.rate),
-            Arg::r("norm", weights.norm),
-            Arg::w("out", out),
-            Arg::w("mixed", mixed),
-        ];
-        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
-        self.run_plans(&plans, &args, &states, false)
+        let (shared, pick) = self.scan_pick("kda", [shape.head_dim, shape.head_dim, shape.heads], runs.iter().map(|r| r.rows));
+        self.kda_layer_with(shared, Some(&pick), shape, weights, runs, state_offset, qkv, forget, beta, gate, mixed, out)
     }
 
     fn supports_shortconv(&self, hidden: usize, kernel: usize) -> bool {
@@ -723,63 +674,8 @@ impl Stream for VulkanStream {
         v_first: &mut DeviceBuffer,
         out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
-        if !self.supports_rwkv(shape) {
-            return Err(BackendError::UnsupportedOperation("rwkv7_wkv for this shape".into()));
-        }
-        let shared = self.scan_shared();
-        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_size, shape.head_size, shape.heads()));
-        if waves.len() > 1 {
-            for wave in &waves {
-                self.rwkv7_wkv(shape, weights, wave, state_offset, inputs, v_first, out)?;
-                self.flush()?;
-            }
-            return Ok(());
-        }
-        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
-        if rows == 0 {
-            return Ok(());
-        }
-        let (k_a, r_k) = (weights.k_a.ok_or_else(|| invalid("rwkv7_wkv needs k_a"))?, weights.r_k.ok_or_else(|| invalid("rwkv7_wkv needs r_k"))?);
-        let need = rows * shape.hidden * 4;
-        let mut all = vec![inputs.r, inputs.k, inputs.v, inputs.w, inputs.a, inputs.gate];
-        all.extend(inputs.v_res);
-        if all.iter().any(|b| b.size < need)
-            || v_first.size < need
-            || out.size < need
-            || [weights.norm_weight, weights.norm_bias, weights.k_k, k_a, r_k].iter().any(|b| b.size < shape.hidden * 4)
-            || runs.iter().any(|r| r.state.size < state_offset + shape.rec_bytes())
-        {
-            return Err(invalid("RWKV-7 buffers are smaller than the layer needs"));
-        }
-        let mut plans = Vec::with_capacity(runs.len());
-        for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
-            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
-            if crate::backend::vulkan::ops::scan::wanted(shared, r.rows, shape.head_size, shape.head_size, shape.heads()) {
-                plans.extend(crate::backend::vulkan::ops::scan::plan_scan_rwkv7_run(shape, i, &spec, state_offset, inputs.v_res.is_some())?);
-                continue;
-            }
-            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv7_wkv(i, &spec, shape, state_offset, inputs.v_res.is_some())?);
-        }
-        let mut args = vec![
-            Arg::r("r", inputs.r),
-            Arg::r("k", inputs.k),
-            Arg::r("v", inputs.v),
-            Arg::r("w", inputs.w),
-            Arg::r("a", inputs.a),
-            Arg::r("gate", inputs.gate),
-            Arg::r("norm_w", weights.norm_weight),
-            Arg::r("norm_b", weights.norm_bias),
-            Arg::r("k_k", weights.k_k),
-            Arg::r("k_a", k_a),
-            Arg::r("r_k", r_k),
-            Arg::w("v_first", v_first),
-            Arg::w("out", out),
-        ];
-        if let Some(v) = inputs.v_res {
-            args.push(Arg::r("vres", v));
-        }
-        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
-        self.run_plans(&plans, &args, &states, !plans.iter().any(|p| p.shader_name.starts_with("scan_")))  // the runs are independent of each other, the dispatches of a scan are not
+        let (shared, pick) = self.scan_pick("rwkv7", [shape.head_size, shape.head_size, shape.heads()], runs.iter().map(|r| r.rows));
+        self.rwkv7_wkv_with(shared, Some(&pick), shape, weights, runs, state_offset, inputs, v_first, out)
     }
 
     fn rwkv6_wkv(
@@ -795,52 +691,8 @@ impl Stream for VulkanStream {
         gate: &DeviceBuffer,
         out: &mut DeviceBuffer,
     ) -> Result<(), BackendError> {
-        if !self.supports_rwkv(shape) {
-            return Err(BackendError::UnsupportedOperation("rwkv6_wkv for this shape".into()));
-        }
-        let shared = self.scan_shared();
-        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_size, shape.head_size, shape.heads()));
-        if waves.len() > 1 {
-            for wave in &waves {
-                self.rwkv6_wkv(shape, weights, wave, state_offset, r, k, v, decay, gate, out)?;
-                self.flush()?;
-            }
-            return Ok(());
-        }
-        let rows = runs.iter().map(|x| x.first_row + x.rows).max().unwrap_or(0);
-        if rows == 0 {
-            return Ok(());
-        }
-        let need = rows * shape.hidden * 4;
-        if [r, k, v, decay, gate].iter().any(|b| b.size < need)
-            || out.size < need
-            || [weights.norm_weight, weights.norm_bias, weights.k_k].iter().any(|b| b.size < shape.hidden * 4)
-            || runs.iter().any(|x| x.state.size < state_offset + shape.rec_bytes())
-        {
-            return Err(invalid("RWKV-6 buffers are smaller than the layer needs"));
-        }
-        let mut plans = Vec::with_capacity(runs.len());
-        for (i, x) in runs.iter().enumerate().filter(|(_, x)| x.rows > 0) {
-            let spec = RunSpec { first_row: x.first_row, rows: x.rows, reset: x.reset };
-            if crate::backend::vulkan::ops::scan::wanted(shared, x.rows, shape.head_size, shape.head_size, shape.heads()) {
-                plans.extend(crate::backend::vulkan::ops::scan::plan_scan_rwkv6_run(shape, i, &spec, state_offset)?);
-                continue;
-            }
-            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv6_wkv(i, &spec, shape, state_offset)?);
-        }
-        let args = [
-            Arg::r("r", r),
-            Arg::r("k", k),
-            Arg::r("v", v),
-            Arg::r("w", decay),
-            Arg::r("gate", gate),
-            Arg::r("norm_w", weights.norm_weight),
-            Arg::r("norm_b", weights.norm_bias),
-            Arg::r("first", weights.k_k),
-            Arg::w("out", out),
-        ];
-        let states: Vec<&DeviceBuffer> = runs.iter().map(|x| x.state).collect();
-        self.run_plans(&plans, &args, &states, !plans.iter().any(|p| p.shader_name.starts_with("scan_")))  // the runs are independent of each other, the dispatches of a scan are not
+        let (shared, pick) = self.scan_pick("rwkv6", [shape.head_size, shape.head_size, shape.heads()], runs.iter().map(|r| r.rows));
+        self.rwkv6_wkv_with(shared, Some(&pick), shape, weights, runs, state_offset, r, k, v, decay, gate, out)
     }
 
     fn supports_arch_ops(&self) -> bool {
@@ -1658,7 +1510,8 @@ impl Stream for VulkanStream {
         let caps = self.sh.caps();
         let min_subgroup = if caps.min_subgroup_size > 0 { caps.min_subgroup_size } else { caps.subgroup_size };
         let cols = crate::backend::vulkan::ops::recurrent::delta_cols_usable(caps.subgroup_ops.shuffle, min_subgroup);
-        let plans = plan_delta_layer_scan(shape, &specs, state_offset, cols, self.scan_shared())?;
+        let (shared, pick) = self.scan_pick("delta", [shape.k_dim, shape.v_dim, shape.v_heads], runs.iter().map(|r| r.rows));
+        let plans = plan_delta_layer_scan(shape, &specs, state_offset, cols, shared)?;
         if plans.is_empty() {
             return Ok(());
         }
@@ -1675,7 +1528,7 @@ impl Stream for VulkanStream {
             Arg::w("mixed", mixed),
         ];
         let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
-        self.run_plans(&plans, &args, &states, false)
+        self.scan_timed(Some(&pick), |s| s.run_plans(&plans, &args, &states, false))
     }
 
     fn attention_paged(
@@ -1933,5 +1786,211 @@ impl Stream for VulkanStream {
             return Ok(());
         }
         self.sampling_on_cpu(token_ids_out, logits, params)
+    }
+}
+
+impl VulkanStream {
+    #[allow(clippy::too_many_arguments)]
+    fn kda_layer_with(
+        &mut self,
+        shared: Option<u32>,
+        pick: Option<&crate::backend::vulkan::ops::scan::ScanPick>,
+        shape: &crate::backend::KdaShape,
+        weights: &crate::backend::KdaWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        qkv: &DeviceBuffer,
+        forget: &DeviceBuffer,
+        beta: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        mixed: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_kda(shape) {
+            return Err(BackendError::UnsupportedOperation("kda_layer for this shape".into()));
+        }
+        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_dim, shape.head_dim, shape.heads));
+        if waves.len() > 1 {
+            for wave in &waves {
+                self.kda_layer_with(shared, None, shape, weights, wave, state_offset, qkv, forget, beta, gate, mixed, out)?;
+                self.flush()?;
+            }
+            return Ok(());
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (width, conv_dim) = (shape.heads * shape.head_dim, shape.conv_dim());
+        let state_end = state_offset + shape.layer_state_bytes();
+        if qkv.size < rows * conv_dim * 4
+            || mixed.size < rows * conv_dim * 4
+            || forget.size < rows * width * 4
+            || beta.size < rows * shape.heads * 4
+            || gate.size < rows * width * 4
+            || out.size < rows * width * 4
+            || weights.conv.size < conv_dim * shape.conv_kernel * 4
+            || weights.dt_bias.size < width * 4
+            || weights.rate.size < shape.heads * 4
+            || weights.norm.size < shape.head_dim * 4
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("KDA buffers are smaller than the layer needs"));
+        }
+        let specs: Vec<RunSpec> = runs.iter().map(|r| RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset }).collect();
+        let plans = crate::backend::vulkan::ops::recurrent::plan_kda_layer_scan(shape, &specs, state_offset, shared)?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+        let args = [
+            Arg::r("qkv", qkv),
+            Arg::r("conv", weights.conv),
+            Arg::r("forget", forget),
+            Arg::r("beta", beta),
+            Arg::r("gate", gate),
+            Arg::r("dt_bias", weights.dt_bias),
+            Arg::r("rate", weights.rate),
+            Arg::r("norm", weights.norm),
+            Arg::w("out", out),
+            Arg::w("mixed", mixed),
+        ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.scan_timed(pick, |s| s.run_plans(&plans, &args, &states, false))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rwkv7_wkv_with(
+        &mut self,
+        shared: Option<u32>,
+        pick: Option<&crate::backend::vulkan::ops::scan::ScanPick>,
+        shape: &crate::backend::RwkvShape,
+        weights: &crate::backend::RwkvWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        inputs: &crate::backend::Rwkv7Inputs<'_>,
+        v_first: &mut DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rwkv(shape) {
+            return Err(BackendError::UnsupportedOperation("rwkv7_wkv for this shape".into()));
+        }
+        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_size, shape.head_size, shape.heads()));
+        if waves.len() > 1 {
+            for wave in &waves {
+                self.rwkv7_wkv_with(shared, None, shape, weights, wave, state_offset, inputs, v_first, out)?;
+                self.flush()?;
+            }
+            return Ok(());
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (k_a, r_k) = (weights.k_a.ok_or_else(|| invalid("rwkv7_wkv needs k_a"))?, weights.r_k.ok_or_else(|| invalid("rwkv7_wkv needs r_k"))?);
+        let need = rows * shape.hidden * 4;
+        let mut all = vec![inputs.r, inputs.k, inputs.v, inputs.w, inputs.a, inputs.gate];
+        all.extend(inputs.v_res);
+        if all.iter().any(|b| b.size < need)
+            || v_first.size < need
+            || out.size < need
+            || [weights.norm_weight, weights.norm_bias, weights.k_k, k_a, r_k].iter().any(|b| b.size < shape.hidden * 4)
+            || runs.iter().any(|r| r.state.size < state_offset + shape.rec_bytes())
+        {
+            return Err(invalid("RWKV-7 buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            if crate::backend::vulkan::ops::scan::wanted(shared, r.rows, shape.head_size, shape.head_size, shape.heads()) {
+                plans.extend(crate::backend::vulkan::ops::scan::plan_scan_rwkv7_run(shape, i, &spec, state_offset, inputs.v_res.is_some())?);
+                continue;
+            }
+            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv7_wkv(i, &spec, shape, state_offset, inputs.v_res.is_some())?);
+        }
+        let mut args = vec![
+            Arg::r("r", inputs.r),
+            Arg::r("k", inputs.k),
+            Arg::r("v", inputs.v),
+            Arg::r("w", inputs.w),
+            Arg::r("a", inputs.a),
+            Arg::r("gate", inputs.gate),
+            Arg::r("norm_w", weights.norm_weight),
+            Arg::r("norm_b", weights.norm_bias),
+            Arg::r("k_k", weights.k_k),
+            Arg::r("k_a", k_a),
+            Arg::r("r_k", r_k),
+            Arg::w("v_first", v_first),
+            Arg::w("out", out),
+        ];
+        if let Some(v) = inputs.v_res {
+            args.push(Arg::r("vres", v));
+        }
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        let independent = !plans.iter().any(|p| p.shader_name.starts_with("scan_"));
+        self.scan_timed(pick, |s| s.run_plans(&plans, &args, &states, independent))  // the runs are independent of each other, the dispatches of a scan are not
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rwkv6_wkv_with(
+        &mut self,
+        shared: Option<u32>,
+        pick: Option<&crate::backend::vulkan::ops::scan::ScanPick>,
+        shape: &crate::backend::RwkvShape,
+        weights: &crate::backend::RwkvWeights<'_>,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        r: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        decay: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_rwkv(shape) {
+            return Err(BackendError::UnsupportedOperation("rwkv6_wkv for this shape".into()));
+        }
+        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_size, shape.head_size, shape.heads()));
+        if waves.len() > 1 {
+            for wave in &waves {
+                self.rwkv6_wkv_with(shared, None, shape, weights, wave, state_offset, r, k, v, decay, gate, out)?;
+                self.flush()?;
+            }
+            return Ok(());
+        }
+        let rows = runs.iter().map(|x| x.first_row + x.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let need = rows * shape.hidden * 4;
+        if [r, k, v, decay, gate].iter().any(|b| b.size < need)
+            || out.size < need
+            || [weights.norm_weight, weights.norm_bias, weights.k_k].iter().any(|b| b.size < shape.hidden * 4)
+            || runs.iter().any(|x| x.state.size < state_offset + shape.rec_bytes())
+        {
+            return Err(invalid("RWKV-6 buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, x) in runs.iter().enumerate().filter(|(_, x)| x.rows > 0) {
+            let spec = RunSpec { first_row: x.first_row, rows: x.rows, reset: x.reset };
+            if crate::backend::vulkan::ops::scan::wanted(shared, x.rows, shape.head_size, shape.head_size, shape.heads()) {
+                plans.extend(crate::backend::vulkan::ops::scan::plan_scan_rwkv6_run(shape, i, &spec, state_offset)?);
+                continue;
+            }
+            plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv6_wkv(i, &spec, shape, state_offset)?);
+        }
+        let args = [
+            Arg::r("r", r),
+            Arg::r("k", k),
+            Arg::r("v", v),
+            Arg::r("w", decay),
+            Arg::r("gate", gate),
+            Arg::r("norm_w", weights.norm_weight),
+            Arg::r("norm_b", weights.norm_bias),
+            Arg::r("first", weights.k_k),
+            Arg::w("out", out),
+        ];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|x| x.state).collect();
+        let independent = !plans.iter().any(|p| p.shader_name.starts_with("scan_"));
+        self.scan_timed(pick, |s| s.run_plans(&plans, &args, &states, independent))  // the runs are independent of each other, the dispatches of a scan are not
     }
 }

@@ -152,8 +152,10 @@ void main() {
             sc[w + y.o_qk + t * SC + u] = (live && (qp ? u < t : u <= t)) ? aq[e] * sc2 : 0.0;
             if (r1) {
                 sc[w + y.o_bm + t * SC + u] = (live && u < t) ? ab[e] * sc1 : 0.0;
-                sc[w + y.o_xi + t * SC + u] = (live && u < t) ? (bs ? ab[e] : ax[e]) * sc1 : 0.0;
-                sc[w + y.o_qb + t * SC + u] = (live && u <= t) ? (bs ? aq[e] : aqb[e]) * sc2 : 0.0;
+                if (!bs) {  // with b = kp the matrices Xi and Qb are Bm and Qk (the same offsets)
+                    sc[w + y.o_xi + t * SC + u] = (live && u < t) ? ax[e] * sc1 : 0.0;
+                    sc[w + y.o_qb + t * SC + u] = (live && u <= t) ? aqb[e] * sc2 : 0.0;
+                }
             }
         }
     }

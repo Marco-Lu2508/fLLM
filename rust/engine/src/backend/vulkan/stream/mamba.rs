@@ -66,7 +66,8 @@ impl VulkanStream {
             ));
         }
         let specs: Vec<RunSpec> = runs.iter().map(|(spec, _)| *spec).collect();
-        let plans = plan_mamba2_mixer_scan(shape, &specs, rows, state_offset, self.scan_shared())?;
+        let (shared, pick) = self.scan_pick("mamba2", [shape.state, shape.head_dim(), shape.heads], specs.iter().map(|spec| spec.rows));
+        let plans = plan_mamba2_mixer_scan(shape, &specs, rows, state_offset, shared)?;
         // a layer without a convolution bias reads zeros
         let zeros = match weights.conv_bias {
             Some(_) => None,
@@ -95,6 +96,6 @@ impl VulkanStream {
             (None, None) => {}
         }
         let states: Vec<&DeviceBuffer> = runs.iter().map(|(_, state)| *state).collect();
-        self.run_plans(&plans, &args, &states, false)
+        self.scan_timed(Some(&pick), |s| s.run_plans(&plans, &args, &states, false))
     }
 }

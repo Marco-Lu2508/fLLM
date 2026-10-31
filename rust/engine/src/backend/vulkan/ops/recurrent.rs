@@ -796,7 +796,7 @@ pub fn plan_mamba2_mixer_scan(
             scratch,
         )?);
         if super::scan::wanted(scan, run.rows, shape.state, shape.head_dim(), shape.heads) {
-            let mixed = scratch.unwrap_or((1u8, 0));
+            let mixed = (1u8, rows * shape.conv_dim() * 4);
             plans.extend(super::scan::plan_scan_mamba2_run(shape, i, run, width, shape.inner + shape.conv_dim(), rec_off, mixed)?);
             continue;
         }

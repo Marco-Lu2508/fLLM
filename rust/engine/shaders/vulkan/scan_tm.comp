@@ -1,0 +1,76 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_tm | bindings: scratch | push: hk,hv,heads,flags,n,reset,slots | grid: [ceil(n/64), heads, 1] per run window
+// Chunk-parallel scan (see _scan_common.glsl), step 3 (port of scan_tm_kernel in cuda/scan_core.cuh), only with rank-one terms (SF_RANK1): per (chunk, head)
+// T = (I + Bm)^-1 (forward substitution, one column per invocation), M = T Xi, W2 = Qb T and N = Qk - Qb M, all 64 x 64, into the workspace.
+#define WG 256
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hk;
+    uint hv;
+    uint heads;
+    uint flags;
+    uint n;
+    uint reset;
+    uint slots;
+} p;
+
+#include "_scan_tile.glsl"
+
+void main() {
+    const uint ch = gl_WorkGroupID.x;
+    if (ch * SC >= p.n) return;
+    const uint h = gl_WorkGroupID.y;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint ty = tid >> 4u;
+    const uint tx = tid & 15u;
+    const ScanLay y = scan_layout(p.hk, p.hv, p.heads, p.flags, p.slots);
+    const uint w = y.ws + (ch * p.heads + h) * y.chunk;
+    tile_rows(false, w + y.o_bm, 64u, 64u, 64u);
+    wg_sync();
+    if (tid < 64u) {  // column `tid` of T into tY[t][tid]
+        for (uint t = 0u; t < SC; t++) {
+            float acc = (t == tid) ? 1.0 : 0.0;
+            for (uint u = tid; u < t; u++) acc -= tX[t * 64u + u] * tY[u * 64u + tid];
+            tY[t * 64u + tid] = t >= tid ? acc : 0.0;
+        }
+    }
+    wg_sync();
+    for (uint e = tid; e < 4096u; e += WG) sc[w + y.o_tt + e] = tY[e];
+    tile_rows(false, w + y.o_xi, 64u, 64u, 64u);
+    wg_sync();
+    float am[16];
+    float a2[16];
+    float an[16];
+    [[unroll]] for (uint e = 0u; e < 16u; e++) {
+        am[e] = 0.0;
+        a2[e] = 0.0;
+        an[e] = 0.0;
+    }
+    tile_gemm_sa(am);  // M = T Xi
+    wg_sync();
+    for (uint e = tid; e < 4096u; e += WG) tX[e] = tY[e];  // B = T
+    wg_sync();
+    tile_gemm_ga(w + y.o_qb, 64u, a2);  // W2 = Qb T
+    wg_sync();
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        [[unroll]] for (uint j = 0u; j < 4u; j++) {
+            const uint at = (ty * 4u + i) * 64u + tx * 4u + j;
+            tX[at] = am[i * 4u + j];
+            sc[w + y.o_w2 + at] = a2[i * 4u + j];
+            sc[w + y.o_mt + (tx * 4u + j) * 64u + ty * 4u + i] = am[i * 4u + j];  // M^T
+        }
+    }
+    wg_sync();
+    tile_gemm_ga(w + y.o_qb, 64u, an);  // Qb M
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        [[unroll]] for (uint j = 0u; j < 4u; j++) {
+            const uint at = (ty * 4u + i) * 64u + tx * 4u + j;
+            sc[w + y.o_nn + at] = sc[w + y.o_qk + at] - an[i * 4u + j];
+        }
+    }
+}

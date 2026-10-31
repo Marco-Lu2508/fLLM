@@ -2,7 +2,7 @@
 //!
 //! Gated DeltaNet, Kimi Delta Attention, RWKV-7, RWKV-6 and Mamba-2 run a long prompt run through the chunked form of their recurrence
 //! (`rust/engine/src/chunked_scan.rs` proves it equal to the token-by-token form): a per-architecture `*_prep` shader brings the inputs of a window of the
-//! run into the layout of the scan, `scan_cum`, `scan_pairs`, `scan_solve`, `scan_out` work on all chunks of 64 tokens at once, `scan_state` walks the
+//! run into the layout of the scan, `scan_cum`, `scan_pairs`, `scan_tm`, `scan_wide`, `scan_pm` work on all chunks of 64 tokens at once, `scan_state` walks the
 //! chunks in order, a `*_post` shader applies the output norm and gate. The serial shaders (`delta_rec_*`, `kda_rec_*`, `rwkv*_wkv_*`, `mamba_scan2_*`)
 //! stay for decode and for runs shorter than [`min_rows`]; `FLLM_CHUNKED_SCAN=0` keeps them for everything, `FLLM_CHUNKED_SCAN_MIN=<rows>` moves the
 //! threshold (default 64).
@@ -20,8 +20,8 @@ pub const SCAN_CHUNK: usize = 64;
 const SCAN_COLUMNS: usize = 32;
 /// Scratch id of the scan (ids 0 and 1 hold the convolution output of the delta / KDA and Mamba plans).
 pub const SCAN_SCRATCH_ID: u8 = 3;
-/// Shared memory the largest scan shader needs (`scan_pairs`), bytes.
-pub const SCAN_SHARED_BYTES: u32 = 26_624;
+/// Shared memory the largest scan shaders need (`scan_tm`, `scan_wide`, `scan_pm`: two 64 x 64 tiles), bytes.
+pub const SCAN_SHARED_BYTES: u32 = 32_768;
 /// Most chunks of a window.
 const MAX_WINDOW_CHUNKS: usize = 8;
 /// Scratch of a window, floats (96 MiB).
@@ -33,10 +33,133 @@ pub const LWV: usize = 4;
 pub const QPREV: usize = 8;
 pub const HASC: usize = 16;
 
-/// Is the chunk-parallel scan allowed (`FLLM_CHUNKED_SCAN` is not `0`, `off` or `false`)?
+/// What `FLLM_CHUNKED_SCAN` asks for: `0` / `off` / `false` never, `1` / `on` / `true` / `always` for every long run, unset or `auto` the faster of the two
+/// forms per layer shape, measured on the device ([`pick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Policy {
+    Never = 0,
+    Auto = 1,
+    Always = 2,
+}
+
+static POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
+
+pub fn policy() -> Policy {
+    use std::sync::atomic::Ordering;
+    match POLICY.load(Ordering::Relaxed) {
+        0 => Policy::Never,
+        1 => Policy::Auto,
+        2 => Policy::Always,
+        _ => {
+            let p = match std::env::var("FLLM_CHUNKED_SCAN").ok().as_deref().map(str::trim) {
+                Some("0" | "off" | "false") => Policy::Never,
+                Some("1" | "on" | "true" | "always") => Policy::Always,
+                _ => Policy::Auto,
+            };
+            POLICY.store(p as u8, Ordering::Relaxed);
+            p
+        }
+    }
+}
+
+/// Overrides the environment (the self test forces the scan on).
+pub fn set_policy(p: Policy) {
+    POLICY.store(p as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is the chunk-parallel scan allowed at all?
 pub fn scan_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !std::env::var("FLLM_CHUNKED_SCAN").is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false")))
+    policy() != Policy::Never
+}
+
+/// The measurement state of one layer shape: a warm-up call and one timed call of the serial shaders, a warm-up call and one timed call of the scan, then the
+/// faster one stays (stages 0 to 4).
+#[derive(Default)]
+struct Tune {
+    stage: u8,
+    rows: usize,
+    serial_secs: f64,
+    chunked: bool,
+    tries: u8,
+}
+
+static TUNE: std::sync::Mutex<Option<std::collections::HashMap<String, Tune>>> = std::sync::Mutex::new(None);
+
+/// What one call of a layer does with its long runs.
+#[derive(Clone, Debug)]
+pub struct ScanPick {
+    pub chunked: bool,
+    /// The call is one of the measured ones: its time goes to [`report`].
+    pub timed: bool,
+    key: String,
+    rows: usize,
+}
+
+impl ScanPick {
+    pub fn never() -> Self {
+        Self { chunked: false, timed: false, key: String::new(), rows: 0 }
+    }
+}
+
+/// The decision for a call with `long_rows` rows in runs that may take the scan; `key` names the layer shape (and the device).
+pub fn pick(key: String, long_rows: usize) -> ScanPick {
+    let mut pick = ScanPick { chunked: false, timed: false, key, rows: long_rows };
+    if long_rows == 0 {
+        return pick;
+    }
+    match policy() {
+        Policy::Never => return pick,
+        Policy::Always => {
+            pick.chunked = true;
+            return pick;
+        }
+        Policy::Auto => {}
+    }
+    let mut guard = TUNE.lock().unwrap_or_else(|e| e.into_inner());
+    let tune = guard.get_or_insert_with(Default::default).entry(pick.key.clone()).or_default();
+    match tune.stage {
+        0 => tune.stage = 1,
+        1 => pick.timed = true,
+        2 => {
+            pick.chunked = true;
+            tune.stage = 3;
+        }
+        3 => {
+            pick.chunked = true;
+            pick.timed = true;
+        }
+        _ => pick.chunked = tune.chunked,
+    }
+    pick
+}
+
+/// The time of a measured call. The scan has to be at least 8 % faster to be kept.
+pub fn report(pick: &ScanPick, secs: f64) {
+    let mut guard = TUNE.lock().unwrap_or_else(|e| e.into_inner());
+    let tune = guard.get_or_insert_with(Default::default).entry(pick.key.clone()).or_default();
+    if !pick.chunked {
+        tune.rows = pick.rows;
+        tune.serial_secs = secs;
+        tune.stage = 2;
+    } else if pick.rows.abs_diff(tune.rows) <= tune.rows / 10 {
+        tune.chunked = secs < 0.92 * tune.serial_secs;
+        tune.stage = 4;
+        if std::env::var_os("FLLM_CHUNKED_SCAN_LOG").is_some() {
+            eprintln!(
+                "[fllm-rs] chunked scan {}: serial {:.3} ms, chunked {:.3} ms for {} rows -> {}",
+                pick.key,
+                tune.serial_secs * 1e3,
+                secs * 1e3,
+                pick.rows,
+                if tune.chunked { "chunked" } else { "serial" }
+            );
+        }
+    } else {
+        // the batches differed in size: measure again
+        tune.tries += 1;
+        tune.stage = if tune.tries >= 4 { 4 } else { 1 };
+        tune.chunked = false;
+    }
 }
 
 /// Rows of a run from which the chunked scan is used (`FLLM_CHUNKED_SCAN_MIN`, default 64).
@@ -52,17 +175,24 @@ fn up4(x: usize) -> usize {
 /// Floats of scratch for `slots` chunk slots of a head set (the same arithmetic as `scan_layout` in `_scan_common.glsl`).
 pub fn scan_floats(hk: usize, hv: usize, heads: usize, flags: usize, slots: usize) -> usize {
     let r1 = flags & RANK1 != 0;
+    let bs = r1 && flags & BSAME != 0;
     let gw = if flags & LWV != 0 { hk } else { 1 };
     let r = |x: usize| if r1 { x } else { 0 };
+    let m64 = r(SCAN_CHUNK * SCAN_CHUNK);
     let chunk = up4(SCAN_CHUNK * gw)
-        + 3 * up4(r(SCAN_CHUNK * SCAN_CHUNK))
+        + up4(m64)
+        + if bs { 0 } else { up4(m64) }
         + up4(SCAN_CHUNK * SCAN_CHUNK)
-        + up4(r(SCAN_CHUNK * hv))
+        + if bs { 0 } else { up4(m64) }
+        + 4 * up4(m64)
         + up4(r(SCAN_CHUNK * hk))
         + up4(SCAN_CHUNK * hk)
+        + up4(r(SCAN_CHUNK * hk))
+        + up4(SCAN_CHUNK * hk)
+        + up4(r(SCAN_CHUNK * hk))
         + up4(SCAN_CHUNK * hv)
-        + up4(SCAN_CHUNK * hk)
-        + up4(r(SCAN_CHUNK * hk))
+        + up4(hk * hv)
+        + up4(r(hk * hk))
         + up4(hk);
     let rh = slots * SCAN_CHUNK * heads;
     let inputs = 2 * up4(rh * hk)
@@ -76,7 +206,7 @@ pub fn scan_floats(hk: usize, hv: usize, heads: usize, flags: usize, slots: usiz
 
 /// Can the shaders take heads of this size on a device with `max_shared` bytes of shared memory per workgroup?
 pub fn scan_usable(hk: usize, hv: usize, heads: usize, max_shared: u32) -> bool {
-    hk >= 16 && hk <= 128 && hk.is_multiple_of(16) && (1..=256).contains(&hv) && heads > 0 && max_shared >= SCAN_SHARED_BYTES + 2048
+    (16..=128).contains(&hk) && hk.is_multiple_of(16) && (1..=256).contains(&hv) && heads > 0 && max_shared >= SCAN_SHARED_BYTES
 }
 
 /// Rows of one window of a run for these head sizes.
@@ -124,23 +254,28 @@ fn core_push(spec: &ScanSpec, n: usize, reset: bool) -> Push {
         .u("slots", div_up(n, SCAN_CHUNK))
 }
 
-/// The five shaders of the chunk algebra for one window of `n` rows (`scan_cum`, `scan_pairs`, [`scan_solve`], `scan_out`, `scan_state`).
+/// The shaders of the chunk algebra for one window of `n` rows: `scan_cum`, `scan_pairs`, [`scan_tm`], `scan_wide`, `scan_pm`, `scan_state`.
 pub fn plan_scan_core(spec: &ScanSpec, n: usize, reset: bool, run_index: usize, state: &ScanState) -> Result<Vec<OpPlan>, BackendError> {
     if n == 0 || spec.heads > MAX_GROUPS_PER_DIM as usize {
         return Err(invalid("scan of an empty window"));
     }
     let slots = div_up(n, SCAN_CHUNK);
     let r1 = spec.flags & RANK1 != 0;
-    let mut plans = Vec::with_capacity(5);
+    let (tk, tv) = (div_up(spec.hk, 64), div_up(spec.hv, 64));
+    let mut plans = Vec::with_capacity(6);
     let grid = [slots as u32, spec.heads as u32, 1];
     plans.push(plan("scan_cum", core_push(spec, n, reset), grid, scratch_slots(spec, n))?);
     plans.push(plan("scan_pairs", core_push(spec, n, reset), grid, scratch_slots(spec, n))?);
     if r1 {
-        let cb = div_up(spec.hv + spec.hk, 64);
-        plans.push(plan("scan_solve", core_push(spec, n, reset), [slots as u32, (spec.heads * cb) as u32, 1], scratch_slots(spec, n))?);
+        plans.push(plan("scan_tm", core_push(spec, n, reset), grid, scratch_slots(spec, n))?);
     }
-    let cb = div_up(if r1 { spec.hk + spec.hv } else { spec.hv }, 64);
-    plans.push(plan("scan_out", core_push(spec, n, reset), [slots as u32, (spec.heads * cb) as u32, 1], scratch_slots(spec, n))?);
+    let wide = spec.heads * if r1 { 3 * tk + tv } else { tv };
+    let pm = spec.heads * (tk * tv + if r1 { tk * tk } else { 0 });
+    if wide > MAX_GROUPS_PER_DIM as usize || pm > MAX_GROUPS_PER_DIM as usize {
+        return Err(BackendError::UnsupportedOperation("too many heads for one scan dispatch".into()));
+    }
+    plans.push(plan("scan_wide", core_push(spec, n, reset), [slots as u32, wide as u32, 1], scratch_slots(spec, n))?);
+    plans.push(plan("scan_pm", core_push(spec, n, reset), [slots as u32, pm as u32, 1], scratch_slots(spec, n))?);
     let push = core_push(spec, n, reset).u("state_off", state.off).u("hstride", state.hstride).u("kstride", state.kstride).u("vstride", state.vstride);
     plans.push(plan(
         "scan_state",
@@ -366,7 +501,7 @@ mod tests {
         }
         // the window of a big model stays within the scratch budget
         let rows = window_rows(128, 128, 32, RANK1 | BSAME);
-        assert!(rows % SCAN_CHUNK == 0 && rows >= SCAN_CHUNK && rows <= MAX_WINDOW_CHUNKS * SCAN_CHUNK);
+        assert!(rows.is_multiple_of(SCAN_CHUNK) && (SCAN_CHUNK..=MAX_WINDOW_CHUNKS * SCAN_CHUNK).contains(&rows));
         assert!(scan_floats(128, 128, 32, RANK1 | BSAME, rows / SCAN_CHUNK) <= BUDGET_FLOATS || rows == SCAN_CHUNK);
     }
 
@@ -387,11 +522,58 @@ mod tests {
         let state = ScanState { off: 64, hstride: 4096, kstride: 64, vstride: 1 };
         let plans = plan_scan_core(&spec, 130, true, 2, &state).unwrap();
         let names: Vec<&str> = plans.iter().map(|p| p.shader_name).collect();
-        assert_eq!(names, ["scan_cum", "scan_pairs", "scan_solve", "scan_out", "scan_state"]);
+        assert_eq!(names, ["scan_cum", "scan_pairs", "scan_tm", "scan_wide", "scan_pm", "scan_state"]);
         assert_eq!(plans[0].groups, [3, 4, 1]);
-        assert_eq!(plans[2].groups, [3, 4 * 2, 1]);
-        assert_eq!(plans[4].groups, [4, 2, 1]);
+        // 3 products over hk = 64 and one over hv = 64: four tiles of 64 columns per head; Pc: one tile, Mst: one tile
+        assert_eq!(plans[3].groups, [3, 4 * 4, 1]);
+        assert_eq!(plans[4].groups, [3, 4 * 2, 1]);
+        assert_eq!(plans[5].groups, [4, 2, 1]);
         let plain = plan_scan_core(&ScanSpec { flags: HASC, ..spec }, 64, false, 0, &state).unwrap();
-        assert_eq!(plain.iter().map(|p| p.shader_name).collect::<Vec<_>>(), ["scan_cum", "scan_pairs", "scan_out", "scan_state"]);
+        assert_eq!(plain.iter().map(|p| p.shader_name).collect::<Vec<_>>(), ["scan_cum", "scan_pairs", "scan_wide", "scan_pm", "scan_state"]);
+    }
+
+    #[test]
+    fn the_faster_form_is_kept_per_layer_shape() {
+        set_policy(Policy::Auto);
+        // warm-up call, timed serial call, timed scan call, then the decision
+        let key = "test/scan-faster".to_string();
+        let p = pick(key.clone(), 512);
+        assert!(!p.chunked && !p.timed);
+        let p = pick(key.clone(), 512);
+        assert!(!p.chunked && p.timed);
+        report(&p, 0.010);
+        let p = pick(key.clone(), 512);
+        assert!(p.chunked && !p.timed, "the first call of the scan is a warm-up");
+        let p = pick(key.clone(), 512);
+        assert!(p.chunked && p.timed);
+        report(&p, 0.005);
+        for _ in 0..3 {
+            let p = pick(key.clone(), 512);
+            assert!(p.chunked && !p.timed);
+        }
+        // a scan that is not clearly faster loses
+        let key = "test/scan-slower".to_string();
+        pick(key.clone(), 512);
+        report(&pick(key.clone(), 512), 0.010);
+        pick(key.clone(), 512);
+        report(&pick(key.clone(), 512), 0.0095);
+        let p = pick(key.clone(), 512);
+        assert!(!p.chunked && !p.timed);
+        // batches of different sizes are measured again
+        let key = "test/scan-rows".to_string();
+        pick(key.clone(), 512);
+        report(&pick(key.clone(), 512), 0.010);
+        pick(key.clone(), 100);
+        report(&pick(key.clone(), 100), 0.001);
+        let p = pick(key.clone(), 512);
+        assert!(!p.chunked && p.timed, "the serial form is timed again");
+        // no long run: nothing to decide
+        let p = pick("test/scan-none".to_string(), 0);
+        assert!(!p.chunked && !p.timed);
+        set_policy(Policy::Always);
+        assert!(pick("test/scan-always".to_string(), 64).chunked);
+        set_policy(Policy::Never);
+        assert!(!pick("test/scan-never".to_string(), 64).chunked);
+        set_policy(Policy::Auto);
     }
 }

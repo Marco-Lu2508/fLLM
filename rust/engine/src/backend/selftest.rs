@@ -2290,6 +2290,12 @@ impl<'a> Tester<'a> {
     }
 
     fn run_all(&mut self) {
+        // the recurrent layers take the chunk-parallel scan for their long runs in these checks (by default a device times both forms on the first calls and keeps
+        // the faster one, which would leave it to the order of the calls which form a check meets)
+        #[cfg(feature = "cuda")]
+        crate::backend::cuda::set_prefill_switch(crate::backend::cuda::PrefillSwitch::ChunkedScan, 2);
+        #[cfg(feature = "vulkan")]
+        crate::backend::vulkan::ops::scan::set_policy(crate::backend::vulkan::ops::scan::Policy::Always);
         if self.enter("delta") {
             self.delta_cases();
         }

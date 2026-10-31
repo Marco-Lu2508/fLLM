@@ -1,9 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 // FLLM-SHADER: scan_state | bindings: scratch,state | push: hk,hv,heads,flags,n,reset,slots,state_off,hstride,kstride,vstride | grid: [heads, ceil(hv/32), 1] per run window
-// Chunk-parallel scan (see _scan_common.glsl), step 5, the serial part (port of scan_state_kernel in cuda/scan.cu): the state of 32 value columns of one head
+// Chunk-parallel scan (see _scan_common.glsl), step 6, the serial part (port of scan_state_kernel in cuda/scan_core.cuh): the state of 32 value columns of one head
 // lives in shared memory while the workgroup walks the chunks of the run window in order:
-//   R = R0 + Wr P,   O = O0 + Qe P,   P = diag(dE) P + Kd^T V - Bd^T R
+//   O = O1 + Qe P,    P = Mst P + Pc     (P = dE P + Pc without rank-one terms)
 // O goes to the output part of the scratch. hk <= 128. The state element (h, i, j) (key channel i, value channel j) is state[state_off + h * hstride + i * kstride
 // + j * vstride] (float view of the sequence's state buffer); reset != 0 ignores the old state.
 #define WG 256
@@ -29,7 +29,6 @@ layout(push_constant) uniform P {
 
 const uint PS = 33u;
 shared float sP[128 * 33];
-shared float sRm[64 * 33];
 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
@@ -47,53 +46,66 @@ void main() {
         sP[i * PS + c] = (p.reset != 0u || c >= ncol) ? 0.0 : state[sbase + i * p.kstride + (c0 + c) * p.vstride];
     }
     const uint nch = (p.n + SC - 1u) / SC;
-    const uint t = tid & 63u;
-    const uint cg = tid >> 6u;
     for (uint ch = 0u; ch < nch; ch++) {
         const uint L = min(SC, p.n - ch * SC);
         const uint lr0 = ch * SC;
         const uint w = y.ws + (ch * p.heads + h) * y.chunk;
-        wg_sync();
-        float ar[8];
-        float ao[8];
-        [[unroll]] for (uint k = 0u; k < 8u; k++) {
-            const uint c = cg * 8u + k;
-            ar[k] = (r1 && c < ncol) ? sc[w + y.o_r0 + t * hv + c0 + c] : 0.0;
-            ao[k] = (c < ncol) ? sc[w + y.o_o0 + t * hv + c0 + c] : 0.0;
-        }
-        const uint wr = w + y.o_wr + t * hk;
-        const uint qe = w + y.o_qe + t * hk;
-        for (uint i = 0u; i < hk; i++) {
-            const float qv = sc[qe + i];
-            const float wv = r1 ? sc[wr + i] : 0.0;
-            [[unroll]] for (uint k = 0u; k < 8u; k++) {
-                const float pv = sP[i * PS + cg * 8u + k];
-                ao[k] += qv * pv;
-                ar[k] += wv * pv;
-            }
-        }
-        [[unroll]] for (uint k = 0u; k < 8u; k++) {
-            const uint c = cg * 8u + k;
-            sRm[t * PS + c] = ar[k];
-            if (t < L && c < ncol) sc[y.o + ((lr0 + t) * p.heads + h) * hv + c0 + c] = ao[k];
-        }
-        wg_sync();
-        for (uint item = tid; item < hk * 4u; item += WG) {
-            const uint i = item % hk;
-            const uint g = item / hk;
-            const float de = sc[w + y.o_de + i];
+        wg_sync();  // the state is complete
+        {  // O = O1 + Qe P: invocation (ty, tx) owns rows ty * 4 .. +3 and columns tx * 2, tx * 2 + 1
+            const uint ty = tid >> 4u;
+            const uint tx = tid & 15u;
             float acc[8];
-            [[unroll]] for (uint k = 0u; k < 8u; k++) acc[k] = sP[i * PS + g * 8u + k] * de;
-            for (uint s = 0u; s < L; s++) {
-                const float kv = sc[w + y.o_kd + s * hk + i];
-                const float bv = r1 ? sc[w + y.o_bd + s * hk + i] : 0.0;
-                const uint vrow = y.v + ((lr0 + s) * p.heads + h) * hv + c0 + g * 8u;
-                [[unroll]] for (uint k = 0u; k < 8u; k++) {
-                    const float vv = (g * 8u + k < ncol) ? sc[vrow + k] : 0.0;
-                    acc[k] += kv * vv - bv * sRm[s * PS + g * 8u + k];
+            [[unroll]] for (uint e = 0u; e < 8u; e++) acc[e] = 0.0;
+            const uint a0 = w + y.o_qe + ty * 4u * hk;
+            for (uint k = 0u; k < hk; k++) {
+                const float b0 = sP[k * PS + tx * 2u];
+                const float b1 = sP[k * PS + tx * 2u + 1u];
+                [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                    const float a = sc[a0 + i * hk + k];
+                    acc[i * 2u] += a * b0;
+                    acc[i * 2u + 1u] += a * b1;
                 }
             }
-            [[unroll]] for (uint k = 0u; k < 8u; k++) sP[i * PS + g * 8u + k] = acc[k];
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                const uint t = ty * 4u + i;
+                [[unroll]] for (uint j = 0u; j < 2u; j++) {
+                    const uint c = tx * 2u + j;
+                    if (t < L && c < ncol) sc[y.o + ((lr0 + t) * p.heads + h) * hv + c0 + c] = acc[i * 2u + j] + sc[w + y.o_o1 + t * hv + c0 + c];
+                }
+            }
+        }
+        if (r1) {  // P = Mst P + Pc: invocation (ty, tx) owns rows ty * 4 .. +3 and columns tx * 4 .. +3
+            const uint ty = tid >> 3u;
+            const uint tx = tid & 7u;
+            float acc[16];
+            [[unroll]] for (uint e = 0u; e < 16u; e++) acc[e] = 0.0;
+            const uint a0 = w + y.o_mst + ty * 4u * hk;
+            if (ty * 4u < hk) {
+                for (uint k = 0u; k < hk; k++) {
+                    float bv[4];
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) bv[j] = sP[k * PS + tx * 4u + j];
+                    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                        const float a = sc[a0 + i * hk + k];
+                        [[unroll]] for (uint j = 0u; j < 4u; j++) acc[i * 4u + j] += a * bv[j];
+                    }
+                }
+            }
+            wg_sync();  // everybody is done with the old state
+            [[unroll]] for (uint i = 0u; i < 4u; i++) {
+                const uint m = ty * 4u + i;
+                if (m >= hk) continue;
+                [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                    const uint c = tx * 4u + j;
+                    sP[m * PS + c] = (c0 + c < hv) ? acc[i * 4u + j] + sc[w + y.o_pc + m * hv + c0 + c] : 0.0;
+                }
+            }
+        } else {
+            wg_sync();
+            for (uint e = tid; e < hk * SCW; e += WG) {
+                const uint i = e / SCW;
+                const uint c = e % SCW;
+                sP[i * PS + c] = (c0 + c < hv) ? sc[w + y.o_de + i] * sP[i * PS + c] + sc[w + y.o_pc + i * hv + c0 + c] : 0.0;
+            }
         }
     }
     wg_sync();

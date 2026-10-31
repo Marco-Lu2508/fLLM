@@ -721,7 +721,7 @@ fn no_shader_is_orphaned() {
     // the chunk-parallel scan of the recurrent layers (`ops/scan.rs`), planned by the stream for runs of 64 rows and more
     seen.extend(
         [
-            "scan_cum", "scan_pairs", "scan_solve", "scan_out", "scan_state", "scan_delta_prep", "scan_delta_post", "scan_kda_prep", "scan_kda_post",
+            "scan_cum", "scan_pairs", "scan_tm", "scan_wide", "scan_pm", "scan_state", "scan_delta_prep", "scan_delta_post", "scan_kda_prep", "scan_kda_post",
             "scan_rwkv7_prep", "scan_rwkv7_post", "scan_rwkv6_prep", "scan_rwkv6_post", "scan_mamba2_prep", "scan_copy_out",
         ]
         .map(str::to_owned),
