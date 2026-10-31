@@ -3034,6 +3034,23 @@ impl Stream for CudaStream {
         quant_type: QuantType,
         rows: usize,
         cols: usize,
+    fn moe_zero_fold(
+        &mut self,
+        zero_scale: &mut DeviceBuffer,
+        ids: &mut DeviceBuffer,
+        weights: &mut DeviceBuffer,
+        rows: usize,
+        k: usize,
+        routed: usize,
+        rewrite: bool,
+    ) -> Result<(), BackendError> {
+        moe::zero_fold(self.raw, zero_scale, ids, weights, rows, k, routed, rewrite)
+    }
+
+    fn supports_moe_zero(&self) -> bool {
+        self.cc >= 75 && moe::moe_enabled()
+    }
+
         bias: Option<&[f32]>,
     ) -> Result<(), BackendError> {
         let kind = quant_type.to_gguf_type_id();

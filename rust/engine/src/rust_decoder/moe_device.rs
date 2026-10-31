@@ -87,13 +87,24 @@ impl RustDecoder {
         };
         let err = |e: crate::backend::BackendError| e.to_string();
         let shared_mode = self.dense_glu_mode().unwrap_or(mode);
-        let (experts, k, hidden, ff) = (cfg.experts, cfg.used, self.cfg.hidden, fast.ff);
+        let (scored, k, hidden, ff) = (cfg.experts, cfg.used, self.cfg.hidden, fast.ff);
+        // LongCat-Flash: the router also scores `zero_experts` experts without weights that return their input; the tables hold the others
+        let zero = cfg.zero_experts;
+        let experts = scored - zero;
         let pairs = rows * k;
         let mut logits = scratch.acquire(rows * experts * 4).map_err(err)?;
         stream.quantized_linear(&mut logits, x, &fast.router, fast.router.bias.as_ref()).map_err(err)?;
         let mut ids = scratch.acquire(pairs * 4).map_err(err)?;
         let mut weights = scratch.acquire(pairs * 4).map_err(err)?;
-        stream.moe_route_ex(&logits, dev.bias.as_ref(), &mut ids, &mut weights, rows, experts, k, &dev.route).map_err(err)?;
+        stream.moe_route_ex(&logits, dev.bias.as_ref(), &mut ids, &mut weights, rows, scored, k, &dev.route).map_err(err)?;
+        // the weights of the zero experts leave the pairs: `zero_scale[r] * x[r]` is their whole contribution. The decode kernels index their tables by
+        // id, so those pairs are redirected to expert 0 with weight 0; the sorted path skips ids beyond the local experts (their rows of `y` stay zero)
+        let mut zero_scale = None;
+        if zero > 0 {
+            let mut zs = scratch.acquire(rows * 4).map_err(err)?;
+            stream.moe_zero_fold(&mut zs, &mut ids, &mut weights, rows, k, experts, decode).map_err(err)?;
+            zero_scale = Some(zs);
+        }
         let mut y = scratch.acquire(pairs * hidden * 4).map_err(err)?;
         let mut temps = vec![logits];
         if decode {
@@ -225,9 +236,15 @@ impl RustDecoder {
                 }
             }
         }
-        stream
-            .moe_combine_ex(out, &y, (!cfg.input_scaled).then_some(&weights), shared.as_ref(), gate_scale.as_ref(), rows, k, hidden)
-            .map_err(err)?;
+        if let Some(zs) = zero_scale {
+            // no shared expert in such a router (`device_routing_ok`): its slot carries the zero experts' identity term
+            stream.moe_combine_ex(out, &y, Some(&weights), Some(x), Some(&zs), rows, k, hidden).map_err(err)?;
+            temps.push(zs);
+        } else {
+            stream
+                .moe_combine_ex(out, &y, (!cfg.input_scaled).then_some(&weights), shared.as_ref(), gate_scale.as_ref(), rows, k, hidden)
+                .map_err(err)?;
+        }
         temps.extend([ids, weights, y]);
         temps.extend(shared);
         temps.extend(gate_scale);

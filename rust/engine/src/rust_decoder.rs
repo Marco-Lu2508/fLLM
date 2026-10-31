@@ -3667,8 +3667,13 @@ impl RustDecoder {
                 ),
                 _ => (None, None, None),
             };
-            let moe_dev = match &layer.ffn {
-                Ffn::Moe(moe) if !host_ffn && self.device_glu_mode().is_some() => {
+            // the shortcut experts of LongCat-Flash sit next to a dense feed-forward and are uploaded like the experts of a mixture-of-experts layer
+            let moe_src: Option<&Moe> = match &layer.ffn {
+                Ffn::Moe(moe) => Some(moe),
+                _ => layer.shortcut.as_deref(),
+            };
+            let moe_dev = match moe_src {
+                Some(moe) if !host_ffn && self.device_glu_mode().is_some() => {
                     let up_expert = |e: &Expert, tag: &str| -> Result<Option<DeviceExpert>, String> {
                         let Some(gate) = e.gate.as_ref() else {
                             return Ok(None);
@@ -3687,7 +3692,9 @@ impl RustDecoder {
                         Some((e, _)) => up_expert(e, "shared")?,
                         None => None,
                     };
-                    let device_moe = backend.moe_device_available();
+                    // zero experts need `moe_zero_fold` next to the device routing
+                    let device_moe = backend.moe_device_available()
+                        && (self.cfg.moe.as_ref().is_none_or(|m| m.zero_experts == 0) || backend.create_stream().is_ok_and(|s| s.supports_moe_zero()));
                     let fast = if self.device_routing_ok(moe, device_moe) && (moe.shared.is_none() || shared.is_some()) {
                         let all: Option<Vec<&DeviceExpert>> = experts.iter().map(|e| e.as_ref()).collect();
                         match all {
@@ -3843,8 +3850,9 @@ impl RustDecoder {
         }
 
         let shortcut_layers = self.layers.iter().filter(|l| l.shortcut.is_some()).count();
-        if shortcut_layers > 0 {
-            eprintln!("[fllm-rs] the shortcut experts of {shortcut_layers} layers run on the host (their routing has zero experts, which no device kernel handles); the rest of the model runs on the device");
+        let shortcut_host = self.layers.iter().zip(&dev_layers).filter(|(l, d)| l.shortcut.is_some() && d.moe.is_none()).count();
+        if shortcut_host > 0 {
+            eprintln!("[fllm-rs] the shortcut experts of {shortcut_host} of {shortcut_layers} layers run on the host (device expert weights are not available for them); the rest of the model runs on the device");
         }
         if ffn_host_blocks.0 > 0 {
             eprintln!("[fllm-rs] the feed-forward blocks of {} of {} layers run on the host: {}", ffn_host_blocks.0, self.layers.len(), ffn_host_blocks.1);
@@ -4228,6 +4236,8 @@ impl RustDecoder {
                 let mut q_buf = scratch.acquire(q_bytes).map_err(err)?;
                 let mut k_buf = scratch.acquire(k_bytes).map_err(err)?;
                 let mut v_buf = scratch.acquire(v_bytes).map_err(err)?;
+        // FLLM_LAYER_CHECK: the input of the layer that made the shortcut experts, for the host run of the pair
+        let mut check_pair: Option<Vec<f32>> = None;
                 let mut latent_attn: Option<crate::backend::DeviceBuffer> = None;
                 // normalized low-rank query of a layer with a lightning indexer (the indexer queries are projected from it)
                 let mut q_low_dev: Option<crate::backend::DeviceBuffer> = None;
@@ -4867,12 +4877,7 @@ impl RustDecoder {
                 scratch.recycle(branch);
             }
             if let Some(moe) = &layer.shortcut {
-                let mut host_in = vec![0.0f32; rows * hidden];
-                stream.download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed).map_err(err)?;
-                let mut workspace = compute::ProjectionGroupWorkspace::default();
-                let out = self.shortcut_forward(moe, &host_in, &mut workspace)?;
-                let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
-                stream.upload(&mut buf, cast_f32_to_u8(&out)).map_err(err)?;
+                let buf = self.shortcut_device(&mut **stream, &mut scratch, moe, dev_layer.moe.as_ref(), &ffn_normed, rows)?;
                 if let Some(old) = pending_shortcut_dev.replace(buf) {
                     scratch.recycle(old);
                 }
@@ -4957,7 +4962,8 @@ impl RustDecoder {
                 // the norm of the next layer (or the final norm) can join the residual add of the down projection
                 // (a layer that receives DeepStack features adds them after its residual, so the norm cannot join the add)
                 let ds_here = deepstack.as_ref().is_some_and(|d| d.get(i).is_some_and(|level| !level.is_empty()));
-                let next_target = if !tp && hc_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
+                // (the shortcut experts of LongCat-Flash are added to the stream after this block: the norm computed in the add would miss them)
+                let next_target = if !tp && hc_dev.is_none() && dev_layer.post_ffn_norm.is_none() && !parallel && !ds_here && !layer.takes_shortcut && matches!(cfg.norm, NormKind::Rms) && self.groups == 1 {
                     match dev_weights.layers.get(i + 1) {
                         Some(next) if !next.host_layer && next.attn_norm_b.is_none() => next.attn_norm.as_ref().map(|w| {
                             let first = if self.layers.get(i + 1).is_some_and(|l| matches!(l.attn, Attn::Std { .. })) { next.q.as_ref() } else { None };
@@ -5164,7 +5170,15 @@ impl RustDecoder {
                 }
             }
             if let Some(host_in) = check_in {
-                self.layer_check(&mut **stream, i, &x_buf, host_in, &positions, tables, lengths, key, value)?;
+                // LongCat-Flash: the shortcut experts of a layer join the stream after the layer that follows, so that one is checked together with it
+                let (first, host_in) = match (layer.takes_shortcut, check_pair.take()) {
+                    (true, Some(previous)) => (i - 1, previous),
+                    _ => (i, host_in),
+                };
+                if layer.shortcut.is_some() {
+                    check_pair = Some(host_in.clone());
+                }
+                self.layer_check(&mut **stream, (first, i), &x_buf, host_in, &positions, tables, lengths, key, value)?;
             }
             scratch.recycle(ffn_normed);
             scratch.recycle(normed_buf);
@@ -6831,7 +6845,7 @@ impl RustDecoder {
         if let Some(device) = fast.device.as_ref() {
             return self.moe_device(stream, scratch, dm, fast, device, x, rows);
         }
-        if rows == 0 || rows > 4 {
+        if rows == 0 || rows > 4 || cfg.zero_experts > 0 {
             return Ok(None);
         }
         let err = |e: crate::backend::BackendError| e.to_string();
@@ -6925,6 +6939,8 @@ impl RustDecoder {
             let direct = n == rows && !cfg.input_scaled && idx.iter().enumerate().all(|(i, &t)| t as usize == i);
             let mut gathered = None;
             if !direct {
+                // zero experts (LongCat-Flash) fold into the combination's shared slot: a router with both, or with scaled inputs, keeps the other paths
+                && (cfg.zero_experts == 0 || (moe.shared.is_none() && !cfg.input_scaled && cfg.experts > cfg.zero_experts))
                 let mut xe = scratch.acquire(n * hidden * 4).map_err(err)?;
                 stream
                     .gather_rows(&mut xe, x, &idx, cfg.input_scaled.then_some(weights.as_slice()), hidden)
@@ -7068,6 +7084,23 @@ impl RustDecoder {
         workspace: &mut compute::ProjectionGroupWorkspace,
     ) -> bool {
         let mut members = Vec::with_capacity(self.cfg.moe.as_ref().map_or(8, |m| m.used));
+        // zero experts (LongCat-Flash): the routes beyond the stored experts return the input, weighted; one pass for all of them
+        if cfg.zero_experts > 0 {
+            let mut total = vec![0.0f32; rows];
+            for assigned in routed.iter().skip(moe.experts.len()) {
+                for &(t, wt) in assigned {
+                    total[t] += wt;
+                }
+            }
+            let idx: Vec<i32> = (0..rows as i32).filter(|&t| total[t as usize] != 0.0).collect();
+            if !idx.is_empty() {
+                let weights: Vec<f32> = idx.iter().map(|&t| total[t as usize]).collect();
+                let mut xe = scratch.acquire(idx.len() * hidden * 4).map_err(err)?;
+                stream.gather_rows(&mut xe, x, &idx, None, hidden).map_err(err)?;
+                stream.scatter_add_rows(&mut acc, &xe, &idx, Some(&weights), hidden).map_err(err)?;
+                scratch.recycle(xe);
+            }
+        }
         let mut weights = Vec::with_capacity(members.capacity());
         for (expert, assigned) in moe.experts.iter().zip(routed) {
             let Some(&(_, weight)) = assigned.first() else {
@@ -7225,6 +7258,41 @@ impl RustDecoder {
                         let value = if moe.bias.is_some() || cfg.group_top2 {
                             group.iter().take(2).sum()
                         } else {
+    /// The shortcut experts of a LongCat-Flash layer for the normed input `x` on the device: the device routing (`moe_fast`) where the backend has it,
+    /// else routing on the host with the experts on the device (`moe_on_device`, as for every other mixture-of-experts layer), else the host reference.
+    fn shortcut_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        moe: &Moe,
+        dev: Option<&DeviceMoe>,
+        x: &crate::backend::DeviceBuffer,
+        rows: usize,
+    ) -> Result<crate::backend::DeviceBuffer, String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let hidden = self.cfg.hidden;
+        let mut host_in = Vec::new();
+        if let Some(dm) = dev {
+            if let Some(buf) = self.moe_fast(stream, scratch, dm, x, rows)? {
+                return Ok(buf);
+            }
+            host_in = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
+            if let Some(buf) = self.moe_on_device(stream, scratch, moe, Some(dm), x, &host_in, rows)? {
+                return Ok(buf);
+            }
+        }
+        if host_in.is_empty() {
+            host_in = vec![0.0f32; rows * hidden];
+            stream.download(cast_f32_to_u8_mut(&mut host_in), x).map_err(err)?;
+        }
+        let mut workspace = compute::ProjectionGroupWorkspace::default();
+        let out = self.shortcut_forward(moe, &host_in, &mut workspace)?;
+        let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
+        stream.upload(&mut buf, cast_f32_to_u8(&out)).map_err(err)?;
+        Ok(buf)
+    }
+
                             group[0]
                         };
                         (g, value)

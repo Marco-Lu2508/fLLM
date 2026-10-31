@@ -571,3 +571,28 @@ int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, cons
     moe_gate_scale_kernel<<<tokens, 256, 0, s>>>(gate, x, g, hidden);
     return fllm_check_launch("moe_gate_scale");
 }
+
+// Zero experts of the LongCat-Flash router: ids >= routed return their input. zs[r] = sum of the weights of those pairs of row r (in pair order); with
+// `rewrite` the pairs are redirected to expert 0 with weight 0 (the decode kernels index the expert tables by id).
+__global__ void moe_zero_fold_kernel(int32_t *__restrict__ ids, float *__restrict__ w, float *__restrict__ zs, int rows, int k, int routed, int rewrite) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= rows) return;
+    float sum = 0.f;
+    for (int j = 0; j < k; j++) {
+        const size_t p = (size_t)r * k + j;
+        if (ids[p] >= routed) {
+            sum += w[p];
+            if (rewrite) {
+                ids[p] = 0;
+                w[p] = 0.f;
+            }
+        }
+    }
+    zs[r] = sum;
+}
+
+int fllm_moe_zero_fold_launch(cudaStream_t s, float *zs, int32_t *ids, float *w, int rows, int k, int routed, int rewrite) {
+    if (rows <= 0) return 0;
+    moe_zero_fold_kernel<<<(rows + 127) / 128, 128, 0, s>>>(ids, w, zs, rows, k, routed, rewrite);
+    return fllm_check_launch("moe_zero_fold");
+}

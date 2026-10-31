@@ -72,6 +72,7 @@ extern "C" {
         hidden: c_int,
     ) -> c_int;
     fn fllm_cuda_moe_gate_scale(st: *mut RawStream, gate: *mut f32, x: *const f32, g: *const f32, tokens: c_int, hidden: c_int) -> c_int;
+    fn fllm_cuda_moe_zero_fold(st: *mut RawStream, zs: *mut f32, ids: *mut i32, w: *mut f32, rows: c_int, k: c_int, routed: c_int, rewrite: c_int) -> c_int;
 }
 
 /// `FLLM_CUDA_MOE` (default on): the device MoE operations of this file.
@@ -253,6 +254,35 @@ pub(super) fn gate_scale(raw: *mut RawStream, gate: &mut DeviceBuffer, x: &Devic
     }
     // SAFETY: sizes checked above.
     check(unsafe { fllm_cuda_moe_gate_scale(raw, dev_ptr(gate)?.cast(), dev_ptr(x)?.cast(), dev_ptr(g)?.cast(), to_c(tokens, "tokens")?, to_c(hidden, "hidden")?) })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn zero_fold(
+    raw: *mut RawStream,
+    zero_scale: &mut DeviceBuffer,
+    ids: &mut DeviceBuffer,
+    weights: &mut DeviceBuffer,
+    rows: usize,
+    k: usize,
+    routed: usize,
+    rewrite: bool,
+) -> Result<(), BackendError> {
+    if zero_scale.size < rows * 4 || ids.size < rows * k * 4 || weights.size < rows * k * 4 {
+        return Err(invalid("moe_zero_fold: buffers too small"));
+    }
+    // SAFETY: sizes checked above.
+    check(unsafe {
+        fllm_cuda_moe_zero_fold(
+            raw,
+            dev_ptr(zero_scale)?.cast(),
+            dev_ptr(ids)?.cast(),
+            dev_ptr(weights)?.cast(),
+            to_c(rows, "rows")?,
+            to_c(k, "k")?,
+            to_c(routed, "routed experts")?,
+            c_int::from(rewrite),
+        )
+    })
 }
 
 impl CudaStream {

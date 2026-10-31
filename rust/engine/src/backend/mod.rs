@@ -1824,6 +1824,29 @@ pub trait Stream: Send {
         _gate: &DeviceBuffer,
         _up: &DeviceBuffer,
         _alpha: f32,
+    /// Zero experts of a router (LongCat-Flash): an expert id of at least `routed` returns its input. For every row `zero_scale[r]` receives the sum of the
+    /// weights `weights[r * k + j]` of the pairs whose `ids[r * k + j] >= routed` (the caller adds `zero_scale[r] * x[r]` to the row, e.g. as the
+    /// "shared" term of [`Stream::moe_combine_ex`]). With `rewrite` those pairs are then redirected to expert 0 with weight 0, so that a kernel that indexes
+    /// the expert tables by id (`moe_linear`) stays inside them; without it the ids stay for `moe_align`, which skips ids outside the local experts.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_zero_fold(
+        &mut self,
+        _zero_scale: &mut DeviceBuffer,
+        _ids: &mut DeviceBuffer,
+        _weights: &mut DeviceBuffer,
+        _rows: usize,
+        _k: usize,
+        _routed: usize,
+        _rewrite: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_zero_fold".into()))
+    }
+
+    /// Does this stream implement [`Stream::moe_zero_fold`]?
+    fn supports_moe_zero(&self) -> bool {
+        false
+    }
+
         _limit: f32,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("swiglu_oai".into()))

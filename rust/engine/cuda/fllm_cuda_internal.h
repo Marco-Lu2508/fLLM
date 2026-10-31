@@ -102,6 +102,7 @@ int fllm_moe_grouped_launch(cudaStream_t s, uint32_t kind, int glu, const void *
 int fllm_moe_combine2_launch(cudaStream_t s, float *out, const float *y, const float *w, const float *shared, const float *gate, int tokens,
                              int k, int hidden);
 int fllm_moe_gate_scale_launch(cudaStream_t s, float *gate, const float *x, const float *g, int tokens, int hidden);
+int fllm_moe_zero_fold_launch(cudaStream_t s, float *zs, int32_t *ids, float *w, int rows, int k, int routed, int rewrite);
 int fllm_swiglu_oai_launch(cudaStream_t s, const float *gate, const float *up, float *out, size_t count, float alpha, float limit);
 void fllm_convert_x16_pad(cudaStream_t s, const float *X, void *x16, int batch, int cols, int cols_pad);
 int fllm_repack_launch(cudaStream_t s, void *dst, const void *src, int kind, size_t rows, size_t cols);

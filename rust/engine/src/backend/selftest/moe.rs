@@ -124,6 +124,15 @@ impl Tester<'_> {
                 self.record("moe route", &format!("{name} {rows}x{experts} k{k}{}", if bias { " +bias" } else { "" }), r);
             }
         }
+        // zero experts of the LongCat-Flash router: 64 routed experts and 32 that return their input
+        if self.device.create_stream().map(|s| s.supports_moe_zero()).unwrap_or(false) {
+            for (rows, k, routed, zero, rewrite) in [(1usize, 12usize, 64usize, 32usize, true), (37, 12, 64, 32, false), (130, 3, 6, 2, true), (5, 4, 8, 0, false)] {
+                let r = self.moe_zero_fold_check(rows, k, routed, zero, rewrite);
+                self.record("moe zero fold", &format!("{rows} rows k{k} {routed}+{zero}{}", if rewrite { " rewrite" } else { "" }), r);
+            }
+        } else {
+            self.record_skip("moe zero fold", "zero experts", "supports_moe_zero is false");
+        }
         // the older whole-call operations of the trait, which CUDA now serves on the device
         for (rows, experts, k) in [(1usize, 8usize, 2usize), (37, 64, 8)] {
             let r = self.moe_route_legacy_check(rows, experts, k);
@@ -318,6 +327,43 @@ impl Tester<'_> {
             }
         }
         Ok(Outcome { device: worst_err, cpu: 0.0, tol: 2e-5, cpu_tol: 1.0, ms })
+    }
+
+    /// `Stream::moe_zero_fold`: the per-row sum of the weights of the pairs with an id beyond the routed experts (f64 reference; the device adds in pair order
+    /// in f32, so the relative error stays below a few ulp), and with `rewrite` those pairs become expert 0 with weight 0 while all others stay bit for bit.
+    fn moe_zero_fold_check(&mut self, rows: usize, k: usize, routed: usize, zero: usize, rewrite: bool) -> Result<Outcome, BackendError> {
+        let ids = self.route_ids(rows, k.min(routed + zero), routed + zero);
+        let k = k.min(routed + zero);
+        let weights: Vec<f32> = self.rng.vector(rows * k, 1.0).iter().map(|v| v.abs() + 0.01).collect();
+        let mut stream = self.device.create_stream()?;
+        let mut ib = self.alloc(rows * k * 4)?;
+        stream.upload(&mut ib, &i32_bytes(&ids))?;
+        let mut wb = put(self.device, stream.as_mut(), &weights)?;
+        let mut zs = self.alloc(rows * 4)?;
+        let mut ms = 0.0;
+        timed(&mut ms, stream.as_mut(), |s| s.moe_zero_fold(&mut zs, &mut ib, &mut wb, rows, k, routed, rewrite))?;
+        let have_zs = get(stream.as_mut(), &zs, rows)?;
+        let have_ids = get_i32(stream.as_mut(), &ib, rows * k)?;
+        let have_w = get(stream.as_mut(), &wb, rows * k)?;
+        let mut want_zs = vec![0.0f64; rows];
+        for r in 0..rows {
+            for j in 0..k {
+                if ids[r * k + j] as usize >= routed {
+                    want_zs[r] += f64::from(weights[r * k + j]);
+                }
+            }
+        }
+        let mut exact = true;
+        for p in 0..rows * k {
+            let zero_pair = ids[p] as usize >= routed;
+            let (want_id, want_w) = if rewrite && zero_pair { (0, 0.0) } else { (ids[p], weights[p]) };
+            exact &= have_ids[p] == want_id && have_w[p] == want_w;
+        }
+        if !exact {
+            return Err(BackendError::DriverError("moe_zero_fold changed ids or weights other than the pairs of the zero experts (or not as asked)".into()));
+        }
+        let scale: Vec<f64> = want_zs.iter().map(|v| v.abs().max(1.0)).collect();
+        Ok(Outcome { device: worst(&have_zs, &want_zs, &scale), cpu: 0.0, tol: 1e-6, cpu_tol: 1.0, ms })
     }
 
     /// `Stream::moe_route`: softmax, best `k`, renormalised; indices as u32.

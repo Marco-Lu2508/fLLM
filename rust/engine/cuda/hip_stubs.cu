@@ -105,6 +105,9 @@ int fllm_moe_combine2_launch(cudaStream_t, float *, const float *, const float *
 int fllm_moe_gate_scale_launch(cudaStream_t, float *, const float *, const float *, int, int) {
     return fllm_set_error("device MoE gate needs an NVIDIA GPU");
 }
+int fllm_moe_zero_fold_launch(cudaStream_t, float *, int32_t *, float *, int, int, int, int) {
+    return fllm_set_error("device MoE zero experts need an NVIDIA GPU");
+}
 
 // Kernels that exist only in the NVIDIA build (sampling, tree attention, speculative verification, encoder attention, Q4Z accumulate).
 int fllm_q4z_acc_launch(cudaStream_t s, const void *y16, const float *bias, float *out, int rows, int batch, float scale) {

@@ -1544,6 +1544,10 @@ int fllm_cuda_moe_gate_scale(FllmStream *st, float *gate, const float *x, const 
     PREP(st);
     return fllm_moe_gate_scale_launch(st->s, gate, x, g, tokens, hidden);
 }
+int fllm_cuda_moe_zero_fold(FllmStream *st, float *zs, int32_t *ids, float *w, int rows, int k, int routed, int rewrite) {
+    PREP(st);
+    return fllm_moe_zero_fold_launch(st->s, zs, ids, w, rows, k, routed, rewrite);
+}
 int fllm_cuda_swiglu_oai(FllmStream *st, const float *gate, const float *up, float *out, size_t count, float alpha, float limit) {
     PREP(st);
     return fllm_swiglu_oai_launch(st->s, gate, up, out, count, alpha, limit);
