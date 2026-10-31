@@ -32,7 +32,7 @@ pub const HELP: &str = "usage: fllm-rs agent -p \"TASK\" [--folder DIR] [--url h
                   [--max-steps N] [--max-tokens N] [--temperature T] [--system TEXT]
                   [--session NAME] [--continue] [--resume NAME] [--profile NAME] [--ask] [--trajectory FILE] [--json] [--quiet]
                   [--output-format text|json|stream-json] [--plan] [--allow-rule RULE] [--deny-rule RULE] [--ask-rule RULE]
-                  [--review] [--review-rounds N] [--verify COMMAND] [--propose-skills] [--auto-skills]
+                  [--review] [--review-rounds N] [--verify COMMAND] [--propose-skills] [--auto-skills] [--image FILE]...
 Runs the coding agent of the Studio without a browser against a running fllm-rs server on this machine.
 TASK: the text after -p; `-p -` reads it from standard input. Reading and searching files is always allowed.
 Everything else is refused unless you allow it: --allow-edit (write_file, edit_file, patch ...), --allow-command (bash),
@@ -50,7 +50,8 @@ steps, tool calls) instead of the plain answer. Progress goes to standard error 
 Rules (allow / deny / ask, `bash: npm test*`, `edit: src/**`, or `Bash(npm test:*)`) come from permissions.json in the Studio folder, then
 .fllm/permissions.json, then .fllm/permissions.local.json of the folder, then these flags. A deny rule always wins.
 --review: when the run changed files, check them (review tool, diagnostics, --verify COMMAND when commands are allowed) and let the agent
-fix what is found before the run counts as done (at most --review-rounds, default 2). --propose-skills: after a long run the model may
+fix what is found before the run counts as done (at most --review-rounds, default 2). --image FILE (repeatable) attaches a png/jpg/gif/webp picture to the task; the loaded model must be able to see.
+--propose-skills: after a long run the model may
 write a skill; it waits in skills-proposed/ (fllm-rs skills approve NAME), --auto-skills saves it at once.
 The answer is printed on standard output. Exit codes: 0 finished, 1 error, 3 stopped at --max-steps (a report is still printed).
 The agent tools only accept requests from the machine the server runs on, so --url must name this machine.";
@@ -82,6 +83,7 @@ pub struct Options {
     pub verify: Option<String>,
     pub propose_skills: bool,
     pub auto_skills: bool,
+    pub images: Vec<PathBuf>,
 }
 
 fn value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a String, String> {
@@ -124,6 +126,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         verify: None,
         propose_skills: false,
         auto_skills: false,
+        images: Vec::new(),
     };
     let mut loose: Vec<String> = Vec::new();
     let mut i = 0;
@@ -203,6 +206,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.review = true;
                 o.verify = Some(value(args, &mut i, flag)?.clone());
             }
+            "--image" | "-i" => o.images.push(PathBuf::from(value(args, &mut i, flag)?)),
             "--propose-skills" => o.propose_skills = true,
             "--auto-skills" => {
                 o.propose_skills = true;
@@ -254,7 +258,12 @@ pub struct ToolRecord {
 pub enum Status {
     Done,
     OutOfSteps,
+    /// Ended by [`CANCEL`] (the editor pressed stop in the ACP adapter).
+    Cancelled,
 }
+
+/// Set by a front end (the ACP adapter) to end the running loop before its next model call; the caller resets it.
+pub static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Debug)]
 pub struct Outcome {
@@ -540,6 +549,9 @@ pub fn run_loop_full(
     };
 
     for step in 1..=cfg.max_steps {
+        if CANCEL.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Outcome { answer: "Stopped.".into(), status: Status::Cancelled, steps: step - 1, tool_calls: records, messages, edited });
+        }
         let reply = match backend.complete(request(&messages, true, grammar)) {
             Ok(reply) => reply,
             Err(e) if grammar && e.contains("HTTP 400") => {
@@ -837,7 +849,7 @@ pub fn context_warning(tool_schema_chars: usize, context: Option<u64>) -> Option
 /// is part of what the model saw; API keys are never part of any of it.
 pub fn trajectory_line(folder: &str, model: &str, system: &str, outcome: &Outcome, time: i64) -> String {
     let mut messages = vec![json!({"role": "system", "content": system})];
-    messages.extend(outcome.messages.iter().cloned());
+    messages.extend(agent_extras::strip_images(&outcome.messages));
     let calls: Vec<Value> = outcome.tool_calls.iter().map(|c| json!({"tool": c.name, "permission": c.category, "status": c.status})).collect();
     json!({
         "time": time,
@@ -980,7 +992,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         Some(name) => trim_history(load_session_in(&base, name)?, MAX_SESSION_MESSAGES),
         None => Vec::new(),
     };
-    history.push(json!({"role": "user", "content": options.prompt}));
+    let pictures: Vec<Value> = options.images.iter().map(|p| agent_extras::image_part(p)).collect::<Result<_, _>>()?;
+    history.push(json!({"role": "user", "content": agent_extras::user_content(&options.prompt, &pictures)}));
 
     // permission rules: the settings files (user < project < local), then the flags; plan mode is read-only whatever else is allowed
     let mut rules = agent_rules::load_hierarchy(&studio_folder(), &folder)?;
@@ -1097,7 +1110,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
     // every run is kept (sessions of the same name continue), so `--resume`, `--continue` and the search can find it again
     if !outcome.messages.is_empty() {
-        save_session_with(&base, &session_id, &outcome.messages, json!({"folder": folder_text, "model": cfg.model, "updated": now, "steps": outcome.steps, "edited": outcome.edited}))?;
+        save_session_with(&base, &session_id, &agent_extras::strip_images(&outcome.messages), json!({"folder": folder_text, "model": cfg.model, "updated": now, "steps": outcome.steps, "edited": outcome.edited}))?;
         if options.session.is_none() {
             agent_extras::prune_auto_sessions(&base, 200);
         }

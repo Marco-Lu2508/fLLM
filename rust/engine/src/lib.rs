@@ -1,6 +1,7 @@
 // The NEON dot-product and f16 intrinsics were stabilised after the MSRV of the x86 builds (1.89); only aarch64 builds need the newer
 // compiler, so the lint that compares them with the MSRV is silenced there.
 #![cfg_attr(target_arch = "aarch64", allow(clippy::incompatible_msrv))]
+pub mod acp;
 pub mod agent_cli;
 pub mod agent_extras;
 pub mod agent_import;

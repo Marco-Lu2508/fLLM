@@ -146,6 +146,55 @@ pub fn fresh_session_name(now: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// pictures
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A chat-completions image part (`image_url` with a data URL) from a picture file. Only png, jpeg, gif and webp, at most 10 MB.
+pub fn image_part(path: &Path) -> Result<Value, String> {
+    use base64::Engine as _;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return Err(format!("{}: only png, jpg, gif and webp pictures can be attached", path.display())),
+    };
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.len() > 10 << 20 {
+        return Err(format!("{}: the picture is larger than 10 MB", path.display()));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(json!({"type": "image_url", "image_url": {"url": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))}}))
+}
+
+/// Messages for the session file: a picture is replaced by a note (the data would only bloat the file).
+pub fn strip_images(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|m| match m["content"].as_array() {
+            Some(parts) if parts.iter().any(|p| p["type"] == "image_url") => {
+                let text: Vec<&str> = parts.iter().filter_map(|p| p["text"].as_str()).collect();
+                let mut copy = m.clone();
+                copy["content"] = json!(format!("{}\n[a picture was attached here]", text.join("\n")).trim().to_owned());
+                copy
+            }
+            _ => m.clone(),
+        })
+        .collect()
+}
+
+/// The content of the user message: the text alone, or the text followed by the pictures.
+pub fn user_content(text: &str, images: &[Value]) -> Value {
+    if images.is_empty() {
+        return json!(text);
+    }
+    let mut parts = vec![json!({"type": "text", "text": text})];
+    parts.extend(images.iter().cloned());
+    json!(parts)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // self-review
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -326,6 +375,25 @@ mod tests {
         let mut left: Vec<String> = std::fs::read_dir(&sessions).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         left.sort();
         assert_eq!(left, vec!["nightly.json", "run-3.json", "run-4.json"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pictures_become_image_parts_and_other_files_are_refused() {
+        let dir = std::env::temp_dir().join(format!("fllm-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), [137, 80, 78, 71]).unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let part = image_part(&dir.join("a.png")).unwrap();
+        assert_eq!(part["type"], "image_url");
+        assert_eq!(part["image_url"]["url"], "data:image/png;base64,iVBORw==");
+        assert!(image_part(&dir.join("notes.txt")).is_err() && image_part(&dir.join("missing.png")).is_err());
+        assert_eq!(user_content("hi", &[]), json!("hi"));
+        let both = user_content("look", &[part]);
+        assert_eq!((both[0]["type"].as_str(), both[1]["type"].as_str()), (Some("text"), Some("image_url")));
+        let stripped = strip_images(&[json!({"role": "user", "content": both}), json!({"role": "assistant", "content": "ok"})]);
+        assert_eq!(stripped[0]["content"], "look\n[a picture was attached here]");
+        assert_eq!(stripped[1]["content"], "ok");
         std::fs::remove_dir_all(&dir).ok();
     }
 
