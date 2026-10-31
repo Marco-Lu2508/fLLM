@@ -169,8 +169,9 @@ int fllm_delta_supported(int kh, int vh, int hk, int hv, int ksz) {
     return (hk == 64 || hk == 128) && hv >= 32 && hv <= 128 && hv % 32 == 0 && kh > 0 && vh > 0 && vh % kh == 0 && ksz >= 2 && ksz <= 8;
 }
 
-int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
-                      float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
+// `runs`: every run (the convolution handles all of them); `rec_runs`: the runs the serial recurrence handles (the others take the chunked scan of scan.cu).
+int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, const void *rec_runs, int nrec, int kh, int vh, int hk, int hv, int ksz,
+                      int tiled, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
                       const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
                       float *out) {
     if (nruns <= 0 || max_n <= 0) return 0;
@@ -181,12 +182,14 @@ int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, in
     const dim3 grid((conv_dim + hk - 1) / hk, nruns, (max_n + DELTA_CHUNK - 1) / DELTA_CHUNK);
     delta_conv_kernel<<<grid, hk, 0, s>>>(qkv, convw, r, mixed, conv_dim, kh, ksz, state_off, rec_bytes, 1.0f / sqrtf((float)hk));
     if (int e = fllm_check_launch("delta_conv")) return e;
-    const dim3 g2(vh, nruns);
+    if (nrec <= 0) return 0;
+    const DeltaRun *rr = static_cast<const DeltaRun *>(rec_runs);
+    const dim3 g2(vh, nrec);
     if (hk == 128)
-        delta_rec_kernel<128><<<g2, 2 * hv, 0, s>>>(mixed, z, beta, alpha, dt_bias, decay, norm, r, out, kh, vh, conv_dim, tiled, state_off,
+        delta_rec_kernel<128><<<g2, 2 * hv, 0, s>>>(mixed, z, beta, alpha, dt_bias, decay, norm, rr, out, kh, vh, conv_dim, tiled, state_off,
                                                 beta_scale, eps);
     else
-        delta_rec_kernel<64><<<g2, 2 * hv, 0, s>>>(mixed, z, beta, alpha, dt_bias, decay, norm, r, out, kh, vh, conv_dim, tiled, state_off,
+        delta_rec_kernel<64><<<g2, 2 * hv, 0, s>>>(mixed, z, beta, alpha, dt_bias, decay, norm, rr, out, kh, vh, conv_dim, tiled, state_off,
                                                beta_scale, eps);
     return fllm_check_launch("delta_rec");
 }

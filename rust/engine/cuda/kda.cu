@@ -195,7 +195,8 @@ int fllm_kda_supported(int heads, int head_dim, int ksz) {
     return heads > 0 && (head_dim == 16 || head_dim == 32 || head_dim == 64 || head_dim == 128) && ksz >= 2 && ksz <= 8;
 }
 
-int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
+// `runs`: every run (the convolution handles all of them); `rec_runs`: the runs the serial recurrence handles (the others take the chunked scan of scan.cu).
+int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, const void *rec_runs, int nrec, int heads, int head_dim, int ksz,
                     int bounded, float lower_bound, float eps, size_t state_off, size_t rec_bytes,
                     const float *qkv, const float *forget, const float *beta, const float *gate,
                     const float *convw, const float *dt_bias, const float *rate, const float *norm,
@@ -207,14 +208,16 @@ int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int 
     const dim3 grid((conv_dim + head_dim - 1) / head_dim, nruns, (max_n + DELTA_CHUNK - 1) / DELTA_CHUNK);
     kda_conv_kernel<<<grid, head_dim, 0, s>>>(qkv, convw, r, mixed, conv_dim, heads, head_dim, ksz, state_off, rec_bytes, 1.0f / sqrtf((float)head_dim));
     if (int e = fllm_check_launch("kda_conv")) return e;
-    const dim3 g2(heads, nruns);
+    if (nrec <= 0) return 0;
+    const DeltaRun *rr = static_cast<const DeltaRun *>(rec_runs);
+    const dim3 g2(heads, nrec);
     if (head_dim == 128)
-        kda_rec_kernel<128><<<g2, 2 * 128, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
+        kda_rec_kernel<128><<<g2, 2 * 128, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, rr, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     else if (head_dim == 64)
-        kda_rec_kernel<64><<<g2, 2 * 64, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
+        kda_rec_kernel<64><<<g2, 2 * 64, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, rr, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     else if (head_dim == 32)
-        kda_rec_kernel<32><<<g2, 2 * 32, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
+        kda_rec_kernel<32><<<g2, 2 * 32, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, rr, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     else if (head_dim == 16)
-        kda_rec_kernel<16><<<g2, 2 * 16, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, r, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
+        kda_rec_kernel<16><<<g2, 2 * 16, 0, s>>>(mixed, forget, beta, gate, dt_bias, rate, norm, rr, out, heads, conv_dim, bounded, lower_bound, state_off, eps);
     return fllm_check_launch("kda_rec");
 }

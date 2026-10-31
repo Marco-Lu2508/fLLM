@@ -4,6 +4,7 @@
 // describes the last failure of the calling thread. The library links the CUDA runtime
 // statically and loads the driver (libcuda) lazily, so a binary built with it still starts on a
 // machine without NVIDIA drivers (device_count then reports an error and fLLM falls back).
+#include <algorithm>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
@@ -169,6 +170,7 @@ static void opt_init() {
     g_opt[FLLM_OPT_FUSE_ATTN_F16] = flag("FLLM_FUSE_PREFILL_ATTN_F16");
     const char *cfg = getenv("FLLM_MARLIN_PREFILL_CFG");
     g_opt[FLLM_OPT_MARLIN_CFG] = cfg != nullptr && strcmp(cfg, "fllm") == 0;
+    g_opt[FLLM_OPT_CHUNKED_SCAN] = flag("FLLM_CHUNKED_SCAN");
     g_opt_init.store(true);
 }
 int fllm_opt(int id) {
@@ -277,6 +279,8 @@ struct FllmStream {
     size_t cap, off;
     float *ws;        // scratch for split-KV attention partials
     size_t ws_bytes;
+    float *scan_ws = nullptr;  // scratch of the chunk-parallel scan of the recurrent layers (scan.cu), grown on demand
+    size_t scan_floats = 0;
     void *x16;        // FP16 copy of the activations for the tensor-core GEMM
     size_t x16_bytes;
     // recently staged metadata: layers of one step upload identical positions, slots, tables and lengths
@@ -407,6 +411,7 @@ void fllm_cuda_stream_destroy(FllmStream *st) {
     cudaFree(st->arena);
     for (void *p : st->retired_arenas) cudaFree(p);
     cudaFree(st->ws);
+    cudaFree(st->scan_ws);
     cudaFree(st->x16);
         st->epoch++;
     cudaFree(st->q4z_io);
@@ -1576,16 +1581,101 @@ static bool ssm_kernels_off() {
 #endif
 }
 int fllm_cuda_delta_supported(int kh, int vh, int hk, int hv, int ksz) { return !ssm_kernels_off() && fllm_delta_supported(kh, vh, hk, hv, ksz); }
+
+} // extern "C"
+
+// ---- chunk-parallel scan of the recurrent layers (scan.cu) -------------------------------------------------------------------------------------------
+// Runs of at least FLLM_CHUNKED_SCAN_MIN rows (default 64) take it; FLLM_CHUNKED_SCAN=0 keeps the serial kernels for everything (the same switch
+// at run time: FLLM_OPT_CHUNKED_SCAN). Scratch grows on demand and stays; a window of runs uses at most SCAN_BUDGET_FLOATS of it.
+static int scan_min_rows(const FllmStream *st) {
+    if (st->capture || fllm_opt(FLLM_OPT_CHUNKED_SCAN) == 0) return 0;
+    static const int rows = [] {
+        const char *e = getenv("FLLM_CHUNKED_SCAN_MIN");
+        const int v = e ? atoi(e) : 64;
+        return v > 0 ? v : 64;
+    }();
+    return rows;
+}
+constexpr size_t SCAN_BUDGET_FLOATS = size_t(48) << 20;
+constexpr int SCAN_MAX_WINDOW_CHUNKS = 16;
+
+static int scan_reserve(FllmStream *st, size_t floats) {
+    if (floats <= st->scan_floats) return 0;
+    CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+    cudaFree(st->scan_ws);
+    st->scan_ws = nullptr;
+    st->scan_floats = 0;
+    CHECK(cudaMalloc(&st->scan_ws, floats * sizeof(float)), "cudaMalloc(scan scratch)");
+    st->scan_floats = floats;
+    return 0;
+}
+
+// Cuts the long runs into windows (a window holds at most `cw` chunks of every run, the scratch of its chunk slots at most SCAN_BUDGET_FLOATS) and calls
+// launch(window runs, device list, number of runs, longest run in chunks, slots) for each one in order; the state of a run carries over from window to window.
+// `floats(slots)`: scratch floats the architecture needs for that many chunk slots.
+template <class Floats, class Launch>
+static int scan_windows(FllmStream *st, const std::vector<FllmRun> &longr, Floats floats, Launch launch) {
+    const size_t per_slot = floats(1);
+    const int cap = (int)std::max<size_t>(1, SCAN_BUDGET_FLOATS / std::max<size_t>(per_slot, 1));
+    for (size_t g0 = 0; g0 < longr.size(); g0 += cap) {
+        const size_t g1 = std::min(longr.size(), g0 + cap);
+        const int cw = std::min(SCAN_MAX_WINDOW_CHUNKS, std::max(1, cap / (int)(g1 - g0)));
+        int longest = 0;
+        for (size_t i = g0; i < g1; i++) longest = std::max(longest, longr[i].n);
+        for (int start = 0; start < longest; start += cw * 64) {
+            std::vector<FllmRun> win;
+            int slots = 0, max_chunks = 0;
+            for (size_t i = g0; i < g1; i++) {
+                if (longr[i].n <= start) continue;
+                FllmRun r = longr[i];
+                r.row0 += start;
+                r.n = std::min(cw * 64, longr[i].n - start);
+                r.reset = start == 0 ? longr[i].reset : 0;
+                r.pad = slots;
+                const int chunks = (r.n + 63) / 64;
+                slots += chunks;
+                max_chunks = std::max(max_chunks, chunks);
+                win.push_back(r);
+            }
+            if (win.empty()) continue;
+            if (int e = scan_reserve(st, floats(slots))) return e;
+            void *d = nullptr;
+            if (int e = stage(st, 4, win.data(), win.size() * sizeof(FllmRun), &d)) return e;
+            if (int e = launch(win, d, (int)win.size(), max_chunks, slots)) return e;
+        }
+    }
+    return 0;
+}
+
+extern "C" {
+
 // Gated DeltaNet layer: `runs` is nruns DeltaRun records (24 bytes each, see deltanet.cu) in host memory.
 int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
                           float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
                           const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay,
                           const float *norm, float *mixed, float *out) {
     PREP(st);
-    void *d = nullptr;
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    const int min_rows = fllm_scan_delta_supported(kh, vh, hk, hv) ? scan_min_rows(st) : 0;
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    int max_short = 0;
+    for (const FllmRun &r : shortr) max_short = std::max(max_short, r.n);
+    void *d = nullptr, *ds = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_delta_launch(st->s, d, nruns, max_n, kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z, beta, alpha,
-                             convw, dt_bias, decay, norm, mixed, out);
+    if (!shortr.empty() && shortr.size() == (size_t)nruns) ds = d;
+    else if (!shortr.empty()) {
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
+    }
+    if (int e = fllm_delta_launch(st->s, d, nruns, max_n, ds, (int)shortr.size(), kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z,
+                                  beta, alpha, convw, dt_bias, decay, norm, mixed, out))
+        return e;
+    return scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_delta_floats(vh, hk, hv, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_delta_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, kh, vh, hk, hv, tiled, beta_scale, eps, state_off, mixed, z, beta,
+                                          alpha, dt_bias, decay, norm, out);
+        });
 }
 int fllm_cuda_kda_supported(int heads, int head_dim, int ksz) { return fllm_kda_supported(heads, head_dim, ksz); }
 int fllm_cuda_copy_cols(FllmStream *st, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col) {
@@ -1599,10 +1689,26 @@ int fllm_cuda_kda_layer(FllmStream *st, const void *runs, int nruns, int max_n, 
                         const float *convw, const float *dt_bias, const float *rate, const float *norm,
                         float *mixed, float *out) {
     PREP(st);
-    void *d = nullptr;
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    const int min_rows = fllm_scan_kda_supported(heads, head_dim) ? scan_min_rows(st) : 0;
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    void *d = nullptr, *ds = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_kda_launch(st->s, d, nruns, max_n, heads, head_dim, ksz, bounded, lower_bound, eps, state_off, rec_bytes,
-                           qkv, forget, beta, gate, convw, dt_bias, rate, norm, mixed, out);
+    if (shortr.size() == (size_t)nruns) {
+        ds = d;
+    } else if (!shortr.empty()) {
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
+    }
+    if (int e = fllm_kda_launch(st->s, d, nruns, max_n, ds, (int)shortr.size(), heads, head_dim, ksz, bounded, lower_bound, eps, state_off, rec_bytes,
+                                qkv, forget, beta, gate, convw, dt_bias, rate, norm, mixed, out))
+        return e;
+    return scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_kda_floats(heads, head_dim, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_kda_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, heads, head_dim, bounded, lower_bound, eps, state_off, mixed, forget,
+                                        beta, gate, dt_bias, rate, norm, out);
+        });
 }
 int fllm_cuda_rwkv_supported(int hidden, int head_size) { return fllm_rwkv_supported(hidden, head_size); }
 int fllm_cuda_rwkv_shift(FllmStream *st, const void *runs, int nruns, int total_rows, int hidden, size_t shift_off, const float *x, float *shift) {
@@ -1623,17 +1729,43 @@ int fllm_cuda_rwkv7(FllmStream *st, const void *runs, int nruns, int heads, int 
                     const float *r, const float *k, const float *v, const float *w, const float *a, const float *vres, const float *gate,
                     const float *norm_w, const float *norm_b, const float *k_k, const float *k_a, const float *r_k, float *v_first, float *out) {
     PREP(st);
-    void *d = nullptr;
-    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_rwkv7_launch(st->s, d, nruns, heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate, norm_w, norm_b, k_k, k_a, r_k, v_first, out);
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    const int min_rows = fllm_scan_rwkv_supported(hidden, head_size) ? scan_min_rows(st) : 0;
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!shortr.empty()) {
+        void *d = nullptr;
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &d)) return e;
+        if (int e = fllm_rwkv7_launch(st->s, d, (int)shortr.size(), heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate, norm_w, norm_b, k_k, k_a,
+                                      r_k, v_first, out))
+            return e;
+    }
+    return scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_rwkv7_floats(heads, head_size, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_rwkv7_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate,
+                                          norm_w, norm_b, k_k, k_a, r_k, v_first, out);
+        });
 }
 int fllm_cuda_rwkv6(FllmStream *st, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
                     const float *r, const float *k, const float *v, const float *w, const float *gate, const float *norm_w,
                     const float *norm_b, const float *first, float *out) {
     PREP(st);
-    void *d = nullptr;
-    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_rwkv6_launch(st->s, d, nruns, heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w, norm_b, first, out);
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    const int min_rows = fllm_scan_rwkv_supported(hidden, head_size) ? scan_min_rows(st) : 0;
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!shortr.empty()) {
+        void *d = nullptr;
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &d)) return e;
+        if (int e = fllm_rwkv6_launch(st->s, d, (int)shortr.size(), heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w, norm_b, first, out)) return e;
+    }
+    return scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_rwkv6_floats(heads, head_size, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_rwkv6_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w,
+                                          norm_b, first, out);
+        });
 }
 int fllm_cuda_act(FllmStream *st, const float *x, float *out, size_t n, int mode) {
     PREP(st);
@@ -1803,10 +1935,29 @@ int fllm_cuda_mamba2_layer(FllmStream *st, const void *runs, int nruns, int rows
                            const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
                            const float *norm, float *mixed, float *out) {
     PREP(st);
-    void *d = nullptr;
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    const int min_rows = fllm_scan_mamba2_supported(inner, state, heads, groups) ? scan_min_rows(st) : 0;
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    void *d = nullptr, *ds = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_mamba2_launch(st->s, d, nruns, rows, inner, state, heads, groups, ksz, norm_groups, norm_mode, step_min, eps, state_off, rec_bytes, proj,
-                              convw, convb, dt_bias, decay, skip, norm, mixed, out);
+    if (shortr.size() == (size_t)nruns) {
+        ds = d;
+    } else if (!shortr.empty()) {
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
+    }
+    if (int e = fllm_mamba2_launch(st->s, d, nruns, ds, (int)shortr.size(), inner, state, heads, groups, ksz, norm_groups, state_off, rec_bytes, step_min, proj,
+                                   convw, convb, dt_bias, decay, skip, mixed, out))
+        return e;
+    const int conv_dim = inner + 2 * groups * state, width = inner + conv_dim + heads;
+    if (int e = scan_windows(
+            st, longr, [&](int slots) { return fllm_scan_mamba2_floats(inner, state, heads, slots); },
+            [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+                return fllm_scan_mamba2_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, inner, state, heads, groups, step_min, state_off, proj, width,
+                                               inner + conv_dim, mixed, conv_dim, dt_bias, decay, skip, out);
+            }))
+        return e;
+    return fllm_mamba2_norm_launch(st->s, rows, inner, heads, norm_groups, norm_mode, eps, conv_dim, proj, norm, out);
 }
 int fllm_cuda_shortconv_supported(int hidden, int ksz) { return !ssm_kernels_off() && fllm_shortconv_supported(hidden, ksz); }
 // ShortConv layer: `runs` is nruns ConvRun records (24 bytes each, see shortconv.cu) in host memory.

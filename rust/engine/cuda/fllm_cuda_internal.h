@@ -28,6 +28,7 @@ enum FllmOpt {
     FLLM_OPT_FUSE_NORM_F16,   // the RMS norm also writes the FP16 activations that the next Marlin GEMM needs
     FLLM_OPT_FUSE_ATTN_F16,   // the prompt attention also writes the FP16 activations that the output projection needs
     FLLM_OPT_MARLIN_CFG,      // 0: Marlin launch configuration as vLLM selects it, 1: fLLM variant (the M tail rides in the last tile)
+    FLLM_OPT_CHUNKED_SCAN,    // runs of 64 rows or more of the recurrent layers take the chunk-parallel scan (scan.cu); 0: always the serial kernels
     FLLM_OPT_COUNT
 };
 int fllm_opt(int id);
@@ -145,14 +146,33 @@ int fllm_split_q_gate_launch(cudaStream_t s, const float *qg, float *q, float *g
 int fllm_sigmoid_mul_launch(cudaStream_t s, float *x, const float *g, size_t n);
 // Gated DeltaNet layer (deltanet.cu)
 int fllm_delta_supported(int kh, int vh, int hk, int hv, int ksz);
-int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
-                      float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
+int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, const void *rec_runs, int nrec, int kh, int vh, int hk, int hv, int ksz,
+                      int tiled, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
                       const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
                       float *out);
+// Chunk-parallel scan of the recurrent layers (scan.cu). A window is a list of runs of at most 64 * max_chunks rows; `pad` is the run's first chunk slot
+// (the slots of a window are numbered 0, 1, ... in the order of the runs), `ws` the scratch of fllm_scan_*_floats(.., slots) floats.
+struct FllmRun {
+    unsigned long long state;  // device address of the sequence's state buffer
+    int row0;                  // first row of the run in the activations
+    int n;                     // number of rows (consecutive positions)
+    int reset;                 // 1: the sequence starts here, the old state is ignored
+    int pad;
+};
+int fllm_scan_delta_supported(int kh, int vh, int hk, int hv);
+size_t fllm_scan_delta_floats(int vh, int hk, int hv, int slots);
+int fllm_scan_delta_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int kh, int vh, int hk, int hv,
+                           int tiled, float beta_scale, float eps, size_t state_off, const float *mixed, const float *z, const float *beta,
+                           const float *alpha, const float *dt_bias, const float *decay, const float *norm, float *out);
 // Kimi Delta Attention (KDA) layer (kda.cu)
 int fllm_kda_supported(int heads, int head_dim, int ksz);
 int fllm_copy_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col);
-int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, int heads, int head_dim, int ksz,
+int fllm_scan_kda_supported(int heads, int head_dim);
+size_t fllm_scan_kda_floats(int heads, int head_dim, int slots);
+int fllm_scan_kda_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int heads, int head_dim, int bounded,
+                         float lower_bound, float eps, size_t state_off, const float *mixed, const float *forget, const float *beta, const float *gate,
+                         const float *dt_bias, const float *rate, const float *norm, float *out);
+int fllm_kda_launch(cudaStream_t s, const void *runs, int nruns, int max_n, const void *rec_runs, int nrec, int heads, int head_dim, int ksz,
                     int bounded, float lower_bound, float eps, size_t state_off, size_t rec_bytes,
                     const float *qkv, const float *forget, const float *beta, const float *gate,
                     const float *convw, const float *dt_bias, const float *rate, const float *norm,
@@ -169,6 +189,16 @@ int fllm_rwkv7_launch(cudaStream_t s, const void *runs, int nruns, int heads, in
 int fllm_rwkv6_launch(cudaStream_t s, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
                       const float *r, const float *k, const float *v, const float *w, const float *gate, const float *norm_w,
                       const float *norm_b, const float *first, float *out);
+int fllm_scan_rwkv_supported(int hidden, int head_size);
+size_t fllm_scan_rwkv7_floats(int heads, int n, int slots);
+size_t fllm_scan_rwkv6_floats(int heads, int n, int slots);
+int fllm_scan_rwkv7_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int heads, int n, int hidden,
+                           float eps, size_t state_off, const float *r, const float *k, const float *v, const float *w, const float *a, const float *vres,
+                           const float *gate, const float *norm_w, const float *norm_b, const float *k_k, const float *k_a, const float *r_k, float *v_first,
+                           float *out);
+int fllm_scan_rwkv6_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int heads, int n, int hidden,
+                           float eps, size_t state_off, const float *r, const float *k, const float *v, const float *w, const float *gate,
+                           const float *norm_w, const float *norm_b, const float *first, float *out);
 int fllm_rope_launch(cudaStream_t s, float *q, float *k, const int32_t *pos, const float *cs, const float *sn, int rows,
                      int heads, int kv_heads, int dim, int half_, int neox);
 int fllm_kv_write_launch(cudaStream_t s, const float *src, uint16_t *pool, const int32_t *slots, int rows, int kv,
@@ -348,10 +378,16 @@ int fllm_mla_assemble_launch(cudaStream_t s, const float *q_full, const float *k
                              int heads, int nope, int rope, int value, int kv_lora);
 // Mamba-2 selective state space layer (mamba2.cu); `runs` points to device memory
 int fllm_mamba2_supported(int inner, int state, int heads, int groups, int ksz, int norm_groups);
-int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
-                       int norm_groups, int norm_mode, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
-                       const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
-                       const float *norm, float *mixed, float *out);
+int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, const void *rec_runs, int nrec, int inner, int state, int heads, int groups, int ksz,
+                       int norm_groups, size_t state_off, size_t rec_bytes, float step_min, const float *proj, const float *convw, const float *convb,
+                       const float *dt_bias, const float *decay, const float *skip, float *mixed, float *out);
+int fllm_mamba2_norm_launch(cudaStream_t s, int rows, int inner, int heads, int norm_groups, int norm_mode, float eps, int conv_dim, const float *proj,
+                            const float *norm, float *out);
+int fllm_scan_mamba2_supported(int inner, int state, int heads, int groups);
+size_t fllm_scan_mamba2_floats(int inner, int state, int heads, int slots);
+int fllm_scan_mamba2_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int inner, int state, int heads,
+                            int groups, float step_min, size_t state_off, const float *proj, int width, int dt_off, const float *mixed, int conv_dim,
+                            const float *dt_bias, const float *decay, const float *skip, float *out);
 // LFM2 gated short convolution (shortconv.cu); `runs` points to device memory
 int fllm_shortconv_supported(int hidden, int ksz);
 int fllm_shortconv_launch(cudaStream_t s, const void *runs, int nruns, int hidden, int ksz, size_t state_off, const float *proj,
