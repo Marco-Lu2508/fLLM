@@ -512,6 +512,10 @@ impl Stream for VulkanStream {
         crate::backend::vulkan::ops::recurrent::kda_supported(shape) && self.sh.caps().max_per_stage_storage_buffers >= 9
     }
 
+    fn supports_copy_columns(&self) -> bool {
+        true
+    }
+
     fn copy_columns(
         &mut self,
         dst: &mut DeviceBuffer,

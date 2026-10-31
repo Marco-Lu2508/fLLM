@@ -2259,6 +2259,11 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("copy_columns".into()))
     }
 
+    /// Does this stream implement [`Stream::copy_columns`]?
+    fn supports_copy_columns(&self) -> bool {
+        false
+    }
+
     /// Does this stream implement the RWKV operations ([`Stream::rwkv_shift`], [`Stream::rwkv_lerp`], [`Stream::rwkv_act`],
     /// [`Stream::rwkv7_wkv`], [`Stream::rwkv6_wkv`]) for layers of this shape?
     fn supports_rwkv(&self, _shape: &RwkvShape) -> bool {

@@ -75,7 +75,7 @@ Verified column:
 | RWKV-7, RWKV-6 (`rwkv7`, `rwkv6`; GGUF `rwkv7`, `rwkv6`) | safetensors (fla layout / HF RWKV-6), GGUF | D | D | D | D | C | T 4.7e-7 / 1.1e-6 against `scripts/rwkv_reference.py` (transformers has no RWKV-6/7); R: real 0.1B RWKV-7 and 1.6B RWKV-6, see below |
 | Mamba 1/2, Falcon-Mamba (`mamba`, `mamba2`, `falcon_mamba`) | safetensors, GGUF | D | D | D | D | H | T 3e-7 .. 6e-7 |
 | Granite 4 hybrid, Bamba, Nemotron-H and Nemotron-3 (`granitemoehybrid`, `bamba`, `nemotron_h`, latent MoE) | safetensors, GGUF | D | D | D / H | D / H | H | T 3e-5 .. 1.6e-4; T+G for Nemotron-3-Nano |
-| Falcon-H1, Zamba2 | safetensors | D | D / H | D / H | D / H | H | T 1.8e-4 / 1.6e-3. Falcon-H1 (Mamba-2 branch next to the attention, any order of gate and norm) is D on CUDA, HIP and Vulkan; Zamba2 (shared transformer block in front of the Mamba-2 mixer) runs half of its layers (the shared blocks) on the host |
+| Falcon-H1, Zamba2 | safetensors | D | D | D | D | H | T 1.8e-4 / 1.6e-3. Falcon-H1 (Mamba-2 branch next to the attention, any order of gate and norm) is D on CUDA, HIP and Vulkan; Zamba2 (shared transformer block with per-call adapters in front of the Mamba-2 mixer) runs on the device too: the block (concatenation with the embeddings, norm, attention with the model's KV cache, GELU-gated MLP, per-call linear layer) is a device path of its own |
 | Jamba (`jamba`) | safetensors | D | D | D | D | H | T 1.2e-4 (the learned dt/B/C norms run on the device since this change) |
 | LFM2, LFM2-MoE | safetensors | D | D (dense) / C (MoE) | D (dense) | D (dense) | H | T 1.8e-4 / 2.9e-4 |
 | DBRX | safetensors | D | C | C | C | C | T 1.3e-4 |

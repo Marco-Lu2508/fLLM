@@ -917,6 +917,10 @@ impl Stream for CpuStream {
         Ok(())
     }
 
+    fn supports_copy_columns(&self) -> bool {
+        true
+    }
+
     fn copy_columns(
         &mut self,
         dst: &mut DeviceBuffer,

@@ -698,6 +698,8 @@ pub struct DeviceLayerWeights {
     shortconv: Option<DeviceShortConv>,
     /// Mamba-1 mixer resident on the device.
     mamba1: Option<DeviceMamba1>,
+    /// The shared transformer block call in front of the Mamba-2 mixer (Zamba2).
+    zamba: Option<zamba::DeviceZamba>,
     /// The Mamba-2 branch next to the attention (Falcon-H1) and its output projection.
     par_mamba: Option<(DeviceMamba, crate::backend::DeviceWeight)>,
     /// RWKV-6 / RWKV-7 layer (time mix and channel mix) resident on the device.
@@ -760,6 +762,7 @@ impl DeviceLayerWeights {
             mamba1: None,
             rwkv: None,
             kda: None,
+            zamba: None,
             par_mamba: None,
             sinks: None,
             qkv: None,
@@ -2885,7 +2888,7 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
     #[allow(clippy::too_many_arguments)]
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool) -> Option<&'static str> {
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
@@ -2918,7 +2921,7 @@ impl RustDecoder {
             // without the Mamba-2 kernels (or with a norm behind the summed branches) the layer is computed by the host reference code
             return Some("a Mamba-2 branch next to the attention");
         }
-        if layer.zamba.is_some() {
+        if layer.zamba.is_some() && !zamba_ok {
             return Some("a shared transformer block in front of the Mamba-2 mixer");
         }
         match &layer.attn {
@@ -3190,6 +3193,11 @@ impl RustDecoder {
                 && backend.create_stream().map(|st| st.supports_mamba2(&s)).unwrap_or(false)
                 && std::env::var_os("FLLM_MAMBA_HOST").is_none()
         });
+        // Zamba2's shared transformer blocks: attention with the model's KV cache on the device, in front of the device Mamba-2 mixers
+        let zamba_ok = mamba_ok
+            && self.cfg.hybrid.zamba.is_some()
+            && backend.create_stream().map(|st| st.supports_copy_columns()).unwrap_or(false)
+            && std::env::var_os("FLLM_ZAMBA_HOST").is_none();
         // FLLM_HOST_LAYERS=all|3,4,5 forces layers onto the host (debugging: the output must match `--device cpu`)
         let forced = std::env::var("FLLM_HOST_LAYERS").ok();
         let stage = self.stage_range();
@@ -3208,7 +3216,7 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok, mamba_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok, mamba_ok, zamba_ok)
                 }
             })
             .collect();
@@ -3510,6 +3518,10 @@ impl RustDecoder {
                 }
                 _ => None,
             };
+            let zamba_dev = match (&layer.zamba, zamba_ok) {
+                (Some(call), true) => Some(call.upload(&format!("blk.{i}.zamba"), &|name: &str, l: &Linear| upload_linear(name, l), &|v: &[f32]| upload_vec(&v.to_vec()))?),
+                _ => None,
+            };
             let par_mamba = match (&layer.parallel, mamba_shape.as_ref()) {
                 (Some(par), Some(_)) if mamba_ok => {
                     mamba_layers += 1;
@@ -3795,6 +3807,7 @@ impl RustDecoder {
                 mamba1,
                 rwkv,
                 kda,
+                zamba: zamba_dev,
                 par_mamba,
                 sinks: layer.sinks.clone().map(Arc::new),
                 qkv: merged_qkv,
@@ -4147,10 +4160,28 @@ impl RustDecoder {
             // the feed-forward norm of this layer, when the output projection's residual add already computed it
             let mut ffn_pre: Option<crate::backend::DeviceBuffer> = None;
 
+            // Zamba2: the shared block's output joins the stream in front of the layer's norm (the residual stream itself stays as it is)
+            let zamba_in = match &dev_layer.zamba {
+                Some(dz) => {
+                    if let Some(carried) = carried_norm.take() {
+                        scratch.recycle(carried);
+                    }
+                    let shared = self.zamba_device(&mut **stream, &mut scratch, dz, (i, kvi), layer, &x_buf, (&positions, &slots, tables, lengths), dev_kv, dev_weights)?;
+                    let mut sum = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    stream.copy_buffer(&mut sum, &x_buf).map_err(err)?;
+                    stream.residual_add(&mut sum, &shared, 1.0).map_err(err)?;
+                    scratch.recycle(shared);
+                    Some(sum)
+                }
+                None => None,
+            };
             if let Some(carried) = carried_norm.take() {
                 scratch.recycle(std::mem::replace(&mut normed_buf, carried));
             } else if let Some(norm_buf) = &dev_layer.attn_norm {
-                device_norm(&mut **stream, cfg.norm, &mut normed_buf, &x_buf, norm_buf, dev_layer.attn_norm_b.as_ref(), cfg.eps, self.groups)?;
+                device_norm(&mut **stream, cfg.norm, &mut normed_buf, zamba_in.as_ref().unwrap_or(&x_buf), norm_buf, dev_layer.attn_norm_b.as_ref(), cfg.eps, self.groups)?;
+                if let Some(sum) = zamba_in {
+                    scratch.recycle(sum);
+                }
             } else {
                 stream.copy_buffer(&mut normed_buf, &x_buf).map_err(err)?;
             }

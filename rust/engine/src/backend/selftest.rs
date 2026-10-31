@@ -1131,6 +1131,16 @@ impl<'a> Tester<'a> {
                 message = Some(describe_failure(o));
             }
         }
+        // A lost device (the driver killed a job that ran too long, often while the GPU is shared) stays lost: every later check fails with the same error
+        // without having run. They stay failures (nothing was verified), but the text says so, and the first one names the check that took the device down.
+        if status == Status::Failed && message.as_deref().is_some_and(|m| m.contains("device lost")) {
+            static LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if LOST.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                message = Some("not run: the device was lost earlier in this run (see the first \"device lost\" failure)".to_owned());
+            } else {
+                message = message.map(|m| format!("{m}; every later check fails with \"not run\" because the device stays lost"));
+            }
+        }
         WORST_LOG.with(|l| l.borrow_mut().clear());
         let quiet = status != Status::Failed && FAILURES_ONLY.load(std::sync::atomic::Ordering::Relaxed);
         if !quiet && self.printed_group != self.group {

@@ -171,3 +171,176 @@ impl RustDecoder {
         call.linear.forward(&call.down.forward(&gate)?)
     }
 }
+
+type Dev = crate::backend::DeviceBuffer;
+type Weight = crate::backend::DeviceWeight;
+
+/// Device copy of one call of a shared block (the host keeps one `ZambaCall` per layer, so the shared weights are uploaded once per call).
+pub(super) struct DeviceZamba {
+    attn_norm: Dev,
+    q: Weight,
+    k: Weight,
+    v: Weight,
+    o: Weight,
+    qkv_adapters: Option<[(Weight, Weight); 3]>,
+    ffn_norm: Dev,
+    gate: Weight,
+    up: Weight,
+    down: Weight,
+    ffn_adapter: Option<(Weight, Weight, Weight)>,
+    linear: Weight,
+}
+
+impl ZambaCall {
+    /// Uploads the call. `linear` uploads a projection, `vector` a small FP32 vector.
+    pub(super) fn upload(
+        &self,
+        name: &str,
+        linear: &dyn Fn(&str, &Linear) -> Result<Weight, String>,
+        vector: &dyn Fn(&[f32]) -> Result<Dev, String>,
+    ) -> Result<DeviceZamba, String> {
+        let part = |tag: &str, l: &Linear| linear(&format!("{name}.{tag}"), l);
+        let pair = |tag: &str, a: &Adapter| -> Result<(Weight, Weight), String> { Ok((part(&format!("{tag}_down"), &a.down)?, part(&format!("{tag}_up"), &a.up)?)) };
+        let qkv_adapters = match &self.qkv_adapters {
+            Some([q, k, v]) => Some([pair("q_adapter", q)?, pair("k_adapter", k)?, pair("v_adapter", v)?]),
+            None => None,
+        };
+        let ffn_adapter = match &self.ffn_adapter {
+            Some((a, g, u)) => Some((part("ffn_adapter_a", a)?, part("ffn_adapter_gate", g)?, part("ffn_adapter_up", u)?)),
+            None => None,
+        };
+        Ok(DeviceZamba {
+            attn_norm: vector(&self.attn_norm)?,
+            q: part("q", &self.q)?,
+            k: part("k", &self.k)?,
+            v: part("v", &self.v)?,
+            o: part("o", &self.o)?,
+            qkv_adapters,
+            ffn_norm: vector(&self.ffn_norm)?,
+            gate: part("gate", &self.gate)?,
+            up: part("up", &self.up)?,
+            down: part("down", &self.down)?,
+            ffn_adapter,
+            linear: part("linear", &self.linear)?,
+        })
+    }
+}
+
+fn project(stream: &mut dyn crate::backend::Stream, scratch: &mut crate::backend::BufferPool, w: &Weight, input: &Dev, rows: usize) -> Result<Dev, String> {
+    let mut out = scratch.acquire(rows * w.rows * 4).map_err(|e| e.to_string())?;
+    stream.quantized_linear(&mut out, input, w, w.bias.as_ref()).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+impl RustDecoder {
+    /// Device counterpart of [`RustDecoder::zamba_call`]: the output of the shared-block call of layer `i` for the residual stream `x`
+    /// (`rows x hidden`), to be added to `x` in front of the layer's Mamba-2 mixer. The call writes its keys and values into the cache layer
+    /// `kvi` of the device KV cache.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn zamba_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        dz: &DeviceZamba,
+        (i, kvi): (usize, usize),
+        layer: &Layer,
+        x: &Dev,
+        (positions, slots, tables, lengths): (&[usize], &[usize], &[i64], &[i64]),
+        dev_kv: &crate::backend::DeviceKvCache,
+        dev_weights: &DeviceModelWeights,
+    ) -> Result<Dev, String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let cfg = &self.cfg;
+        let (h, rows) = (cfg.hidden, positions.len());
+        let wide = 2 * h;
+        let (dk, dv) = (cfg.head_dim, cfg.value_dim);
+        // [x | embeddings], normed over the doubled width
+        let original = self.embed_stash.get(rows * h)?;
+        let mut orig_buf = scratch.acquire(rows * h * 4).map_err(err)?;
+        stream.upload(&mut orig_buf, cast_f32_to_u8(&original)).map_err(err)?;
+        let mut cat = scratch.acquire(rows * wide * 4).map_err(err)?;
+        stream.copy_columns(&mut cat, wide, 0, x, rows, h).map_err(err)?;
+        stream.copy_columns(&mut cat, wide, h, &orig_buf, rows, h).map_err(err)?;
+        scratch.recycle(orig_buf);
+        let mut normed = scratch.acquire(rows * wide * 4).map_err(err)?;
+        stream.rms_norm(&mut normed, &cat, &dz.attn_norm, cfg.eps).map_err(err)?;
+        scratch.recycle(cat);
+        let mut q = project(stream, scratch, &dz.q, &normed, rows)?;
+        let mut k = project(stream, scratch, &dz.k, &normed, rows)?;
+        let mut v = project(stream, scratch, &dz.v, &normed, rows)?;
+        if let Some(adapters) = &dz.qkv_adapters {
+            for (target, (down, up)) in [&mut q, &mut k, &mut v].into_iter().zip(adapters) {
+                let low = project(stream, scratch, down, &normed, rows)?;
+                let add = project(stream, scratch, up, &low, rows)?;
+                stream.residual_add(target, &add, 1.0).map_err(err)?;
+                scratch.recycle(low);
+                scratch.recycle(add);
+            }
+        }
+        scratch.recycle(normed);
+        if cfg.layer_rotates(i) {
+            let (cos, sin) = &dev_weights.rope[0];
+            let params = crate::backend::RopeParams {
+                heads: cfg.heads,
+                kv_heads: cfg.kv_heads,
+                dim: dk,
+                rope_dim: cfg.rope.dims,
+                neox: cfg.rope.neox,
+                cos: Arc::clone(cos),
+                sin: Arc::clone(sin),
+            };
+            stream.rope(&mut q, &mut k, positions, &params).map_err(err)?;
+        }
+        stream.kv_cache_write(dev_kv, kvi, slots, &k, &v).map_err(err)?;
+        scratch.recycle(k);
+        scratch.recycle(v);
+        let mut attn = scratch.acquire(rows * cfg.heads * dv * 4).map_err(err)?;
+        let params = crate::backend::AttentionParams {
+            num_heads: cfg.heads,
+            num_kv_heads: cfg.kv_heads,
+            head_dim: dk,
+            value_dim: dv,
+            stride: self.stride,
+            block_size: self.block_size,
+            scale: cfg.attention_scale.unwrap_or(1.0 / (dk as f32).sqrt()),
+            softcap: cfg.attention_softcap,
+            window: layer.window,
+            chunk: layer.chunk,
+            sinks: None,
+            alibi_slopes: dev_weights.alibi.clone(),
+        };
+        let read_layer = crate::kv_geometry::KvPoolLayout::owner(cfg, i) - self.kv_base();
+        stream.attention_paged(&mut attn, &q, dev_kv, tables, lengths, read_layer, &params).map_err(err)?;
+        scratch.recycle(q);
+        let y = project(stream, scratch, &dz.o, &attn, rows)?;
+        scratch.recycle(attn);
+        let mut y_norm = scratch.acquire(rows * h * 4).map_err(err)?;
+        stream.rms_norm(&mut y_norm, &y, &dz.ffn_norm, cfg.eps).map_err(err)?;
+        scratch.recycle(y);
+        let mut gate = project(stream, scratch, &dz.gate, &y_norm, rows)?;
+        let mut up = project(stream, scratch, &dz.up, &y_norm, rows)?;
+        if let Some((a, gate_b, up_b)) = &dz.ffn_adapter {
+            let low = project(stream, scratch, a, &y_norm, rows)?;
+            for (target, b) in [(&mut gate, gate_b), (&mut up, up_b)] {
+                let add = project(stream, scratch, b, &low, rows)?;
+                stream.residual_add(target, &add, 1.0).map_err(err)?;
+                scratch.recycle(add);
+            }
+            scratch.recycle(low);
+        }
+        scratch.recycle(y_norm);
+        let mut act = scratch.acquire(rows * cfg.ff * 4).map_err(err)?;
+        match cfg.activation {
+            Activation::GeluTanh => stream.geglu(&mut act, &gate, &up).map_err(err)?,
+            Activation::Silu => stream.swiglu(&mut act, &gate, &up).map_err(err)?,
+            other => stream.activation_glu(&mut act, &gate, &up, act_code(other)).map_err(err)?,
+        }
+        scratch.recycle(gate);
+        scratch.recycle(up);
+        let down = project(stream, scratch, &dz.down, &act, rows)?;
+        scratch.recycle(act);
+        let out = project(stream, scratch, &dz.linear, &down, rows)?;
+        scratch.recycle(down);
+        Ok(out)
+    }
+}

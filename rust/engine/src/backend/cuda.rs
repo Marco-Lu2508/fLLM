@@ -4721,7 +4721,11 @@ impl Stream for CudaStream {
     }
 
     #[allow(clippy::too_many_arguments)]
-        fn copy_columns(
+        fn supports_copy_columns(&self) -> bool {
+        true
+    }
+
+    fn copy_columns(
         &mut self,
         dst: &mut DeviceBuffer,
         dst_stride: usize,

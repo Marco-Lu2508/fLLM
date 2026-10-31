@@ -6,6 +6,11 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added (recurrent layers on devices, third part)
+- **Zamba2 runs on CUDA, HIP and Vulkan** (half of its layers, the shared transformer blocks, ran on the host): the block is a device path of its own (`zamba_device`: the residual stream joined with the saved embeddings, norm over the doubled width, q/k/v with the per-call low-rank adapters, rotary, KV cache write, attention, norm, GELU-gated MLP with its adapter, the per-call linear layer), added to the stream in front of the layer's Mamba-2 norm. `FLLM_ZAMBA_HOST=1` keeps it on the host.
+- `selftest-gpu`: after a "device lost" failure the later checks that fail with the same error say "not run: the device was lost earlier in this run" instead of repeating the driver message (they stay failures: nothing was verified). The check that takes the device down (seen with the DSA scoring case on a shared 840M) is named in the first message.
+- Not done: chunk-parallel prompt processing for the recurrences (see the entry above).
+
 ### Added (recurrent layers on devices, second part)
 - **Falcon-H1 runs on CUDA, HIP and Vulkan** (the whole model fell back to the CPU): the Mamba-2 branch next to the attention uses the device Mamba-2 kernels and is added to the residual stream before the feed-forward norm. The device Mamba-2 mixer gained the other two orders of gate and norm (`MambaShape::norm_mode`: `y * silu(z)` without a norm, which is Falcon-H1's default, and `norm(y) * silu(z)`) in `mamba2.cu` and `mamba_gate_norm.comp`, with `selftest-gpu` cases; a Mamba-2 model with such a norm was computed with the wrong order on the device before. The Metal backend reports only the default order as supported.
 - **Kimi-Linear's latent attention without rotary embeddings runs on the device** (it ran on the host between the KDA layers); the rotary step is skipped when the rotary width is 0.

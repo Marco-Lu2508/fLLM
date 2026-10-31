@@ -165,7 +165,7 @@ The table below summarizes the layer-by-layer execution path across device backe
 | `bailing_hybrid` (Ling-3.0, GGUF `kimi-linear`) | KDA (direct gates, bounded forget gate) + rotary latent attention with a head gate + MoE | Device KDA layers; latent attention layers with the output gate on the host (`"a latent attention output gate"`) | same | as `kimi-linear` |
 | `falcon-h1` | Parallel Mamba-2 + Attention in every layer, muP multipliers | Device | Device | Mamba-2 branch on the device (also HIP); host reference with `FLLM_MAMBA_HOST=1`, with another Mamba-2 gate/norm order than the stream supports, or with a norm behind the summed branches: `"a Mamba-2 branch next to the attention"` |
 | `jamba` | Mamba-1 (learned dt/B/C norms) + Full Attention + MoE | Device | Device | None for the mixer |
-| `zamba2` | Shared transformer block preceding Mamba-2 mixer | Host layers | Host layers | Always host reference: `"a shared transformer block in front of the Mamba-2 mixer"` |
+| `zamba2` | Shared transformer block preceding Mamba-2 mixer | Device | Device | The block runs on the device (`zamba_device`: `[x, embeddings]` through `copy_columns`, norm over the doubled width, q/k/v with per-call adapters, rotary, KV write, attention, norm, gated MLP with adapter, per-call linear layer); `FLLM_ZAMBA_HOST=1`, a backend without `supports_copy_columns` (Metal) or without the Mamba-2 kernels: `"a shared transformer block in front of the Mamba-2 mixer"` |
 
 ---
 
