@@ -110,6 +110,14 @@ These are the shapes the file instantiates today; the autotuner candidates `fllm
 (`run` in `fllm_qgemm4k_try`: 128x128x8x1x3, 128x128x4x2x4, 128x192x4x2x3, 128x256x4x2x2,
 256x128x8x2x2, 128x96x4x1x4, 64x128x4x2x4) were not re-measured per variant here.
 
+## Measured on an RTX 2000 Ada laptop (sm_89, 2026-10-31)
+
+`nsys` of four 2100-token Llama-3.1-8B prompts: the wide kernel (128 x 256 tile, 14336 weight rows, 512 tokens) takes 2.35 ms = 25.6 TFLOPS, 79 % of a cuBLAS
+float16 product of the same size at the same 60 W power limit (1.86 ms, 32.3 TFLOPS). `QG_VARIANT=4` changed the kernel times by -1 to -6 %, inside the 4 % by which an
+unchanged kernel differed between two profiles, and the bursts by +1 % (53.6 / 52.8 against 52.6 / 52.7 tok/s): it stays off by default. `QG_TOKFAST` (default on,
+`-DQG_TOKFAST=0` for the old order) numbers the blocks token tile first, so that the token tiles of one block of weight rows run next to each other and read the
+weights from memory once (+1.5 % on the burst; the same greedy text with `FLLM_CUDA_NO_AUTOTUNE=1`, since the arithmetic of a block is unchanged). Details in [benchmarks.md](benchmarks.md#third-pass-2026-10-31-same-rtx-2000-ada-laptop).
+
 ## Deferred: a repacked device layout
 
 The remaining lever is the device-side weight layout. Q4_K is currently uploaded verbatim: a

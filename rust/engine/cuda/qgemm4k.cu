@@ -116,7 +116,8 @@ qgemm4k_kernel(const uint8_t *__restrict__ W, const __half *__restrict__ X16, fl
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int wm = warp % WM, wn = warp / WM;
     const int g = lane >> 2, t4 = lane & 3;
-    const int m0 = blockIdx.x * BM, n0 = blockIdx.y * BN;
+    int m0, n0;
+    qg_tile_origin(BM, BN, batch, m0, n0);
     const int nsb = cols >> 8;
     const size_t row_bytes = (size_t)nsb * 144;
     const int ktiles_all = cols >> 6;

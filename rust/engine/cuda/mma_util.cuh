@@ -92,3 +92,22 @@ __device__ __forceinline__ uint32_t dequant_pair_lop3(uint32_t bytes_ab, uint32_
     return half2_as_u32(__hfma2(n, s2, __hneg2(o2)));
 }
 #endif  // !__HIPCC__
+
+// Origin (weight row, token) of the output tile of a GEMM block. With QG_TOKFAST (the default) consecutive blocks share a block of weight rows: the token
+// tiles of one row block run next to each other, so the block is fetched from memory once and the other token tiles find it in the L2 cache. With the
+// row blocks varying fastest the whole weight matrix streams past between two token tiles of the same rows and is read from memory once per token tile.
+// (-DQG_TOKFAST=0 restores the old order.)
+#ifndef QG_TOKFAST
+#define QG_TOKFAST 1
+#endif
+__device__ __forceinline__ void qg_tile_origin(int BM, int BN, int batch, int &m0, int &n0) {
+#if QG_TOKFAST
+    const int tok_tiles = (batch + BN - 1) / BN;
+    const int lin = blockIdx.y * gridDim.x + blockIdx.x;
+    m0 = (lin / tok_tiles) * BM;
+    n0 = (lin % tok_tiles) * BN;
+#else
+    m0 = blockIdx.x * BM;
+    n0 = blockIdx.y * BN;
+#endif
+}
