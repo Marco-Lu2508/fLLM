@@ -10,8 +10,9 @@
       if (!hw && state.hardwareError) return `The hardware could not be read: ${state.hardwareError}`;
       const devices = hw?.devices || [];
       const names = [];
-      for (const d of devices) {
-        if (d.backend === 'cpu') { names.unshift(d.name); continue; }
+      for (const d of devices.filter((x) => x.backend === 'cpu')) names.unshift(d.name);
+      // one entry per physical device: the same chip is listed once per driver interface
+      for (const d of mergeDevices(devices.filter((x) => x.backend !== 'cpu' && x.backend !== 'npu' && x.available !== false), '')) {
         const label = `${d.name}${d.dev_type === 'gpu' ? ` (${formatBytes(d.total_memory_bytes)})` : ''}`;
         if (!names.includes(label)) names.push(label);
       }

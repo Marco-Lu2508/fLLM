@@ -8,6 +8,7 @@ behaviour between versions).
 
 ### Fixed
 - **Studio: the first chat message no longer fails with "maximum context length ... you requested 32833 tokens".** The chat page guessed the prompt size and asked for an exact-fit `max_tokens`; the real prompt (system prompt, template, tools) was larger. In automatic mode the page now sends no `max_tokens` and the server uses what is left of the window; a chosen number is sent with `x_fllm_clamp_max_tokens`, which cuts it to what fits (the API keeps rejecting an explicit absurd `max_tokens`). The context counter uses the server's token count after each answer and shows a `~` estimate before the first one.
+- **Studio hardware: one card per physical device.** The same graphics chip was listed once per driver interface (native Vulkan, generic Vulkan through wgpu, DirectX 12 ...). Entries with the same name and a similar memory size now merge into one card (also in the device choice of the load options and the computer summary); the interface the model runs on is marked and the others are listed under "Also reachable through". Two identical cards stay two cards.
 
 ## [0.2.0] - 2026-10-31
 

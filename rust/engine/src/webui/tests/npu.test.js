@@ -10,7 +10,7 @@ const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in npu.js');
 const L = new Function(`${src.slice(begin, end)}
-return { npuCardModel, npuProgressModel, deviceChoices, runningDevice, deviceMemory, deviceRole, NPU_WARNING };`)();
+return { npuCardModel, npuProgressModel, mergeDevices, deviceBackendLabel, deviceChoices, runningDevice, deviceMemory, deviceRole, NPU_WARNING };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -202,6 +202,69 @@ test('which device runs the model: the chosen one, or the automatic choice', () 
   assert.strictEqual(L.deviceRole(gpu, 'cpu', 'vulkan:0', true), '');
   assert.strictEqual(L.deviceRole(gpu, 'auto', 'vulkan:0', false), 'auto');
   assert.strictEqual(L.deviceRole(cpu, undefined, undefined, true), 'running');
+});
+
+// the same graphics chip once per driver interface (native Vulkan, generic Vulkan, DirectX 12) and a CUDA twin
+const dup = [
+  { id: 'cpu', backend: 'cpu', name: 'Intel(R) Core(TM) Ultra 7 265U', total_memory_bytes: 64e9 },
+  { id: 'vulkan:0', backend: 'vulkan', api: 'native', name: 'Intel(R) Graphics', total_memory_bytes: 32e9, free_memory_bytes: 30e9 },
+  { id: 'wgpu-vulkan:0', backend: 'vulkan', api: 'wgpu', name: 'Intel(R) Graphics', total_memory_bytes: 31.8e9 },
+  { id: 'wgpu-dx12:0', backend: 'dx12', api: 'wgpu', name: 'Intel(R)  Graphics', total_memory_bytes: 32e9 },
+];
+
+test('one card per physical device: the driver interfaces of one chip merge, the processor stays', () => {
+  const g = L.mergeDevices(dup, 'auto');
+  assert.deepStrictEqual(g.map((d) => d.id), ['cpu', 'vulkan:0']);
+  assert.deepStrictEqual(g[1].others.map((o) => o.id).sort(), ['wgpu-dx12:0', 'wgpu-vulkan:0']);
+  assert.strictEqual(g[1].members.length, 3);
+});
+
+test('the entry the model runs on stands for its device', () => {
+  const g = L.mergeDevices(dup, 'wgpu-vulkan:0');
+  assert.strictEqual(g[1].id, 'wgpu-vulkan:0');
+  assert.strictEqual(L.deviceBackendLabel(g[1]), 'Vulkan (generic)');
+  assert.ok(g[1].others.some((o) => o.id === 'vulkan:0'));
+});
+
+test('two identical cards stay two devices; a CUDA twin joins its own card', () => {
+  const two = [
+    { id: 'cuda:0', backend: 'cuda', api: 'native', name: 'NVIDIA GeForce RTX 3090', total_memory_bytes: 24e9 },
+    { id: 'cuda:1', backend: 'cuda', api: 'native', name: 'NVIDIA GeForce RTX 3090', total_memory_bytes: 24e9 },
+    { id: 'vulkan:0', backend: 'vulkan', api: 'native', name: 'NVIDIA GeForce RTX 3090', total_memory_bytes: 24e9 },
+    { id: 'vulkan:1', backend: 'vulkan', api: 'native', name: 'NVIDIA GeForce RTX 3090', total_memory_bytes: 24e9 },
+  ];
+  const g = L.mergeDevices(two, '');
+  assert.deepStrictEqual(g.map((d) => d.id), ['cuda:0', 'cuda:1']);
+  assert.ok(g.every((d) => d.others.length === 1));
+});
+
+test('different chips and very different memory sizes do not merge', () => {
+  const g = L.mergeDevices([
+    { id: 'vulkan:0', backend: 'vulkan', api: 'native', name: 'GPU A', total_memory_bytes: 8e9 },
+    { id: 'wgpu-vulkan:0', backend: 'vulkan', api: 'wgpu', name: 'GPU B', total_memory_bytes: 8e9 },
+    { id: 'wgpu-vulkan:1', backend: 'vulkan', api: 'wgpu', name: 'GPU A', total_memory_bytes: 2e9 },
+  ], '');
+  assert.strictEqual(g.length, 3);
+});
+
+test('the device choice and the role use the merged cards', () => {
+  const c = L.deviceChoices({ devices: dup }, null, 'auto');
+  assert.deepStrictEqual(c.map((x) => x.value), ['auto', 'cpu', 'vulkan:0']);
+  assert.strictEqual(c[2].label, 'Intel(R) Graphics (Vulkan)');
+  const g = L.mergeDevices(dup, 'auto')[1];
+  assert.strictEqual(L.deviceRole(g, 'auto', 'wgpu-vulkan:0', true), 'running');
+  assert.strictEqual(L.deviceRole(g, 'cpu', 'wgpu-vulkan:0', true), '');
+});
+
+test('a vendor interface of the same chip is offered as an alternative, a generic one is not', () => {
+  const both = [
+    { id: 'cuda:0', backend: 'cuda', api: 'native', name: 'NVIDIA RTX', total_memory_bytes: 8e9 },
+    { id: 'vulkan:0', backend: 'vulkan', api: 'native', name: 'NVIDIA RTX', total_memory_bytes: 8e9 },
+    { id: 'wgpu-vulkan:0', backend: 'vulkan', api: 'wgpu', name: 'NVIDIA RTX', total_memory_bytes: 8e9 },
+  ];
+  const c = L.deviceChoices({ devices: both }, null, 'auto');
+  assert.deepStrictEqual(c.map((x) => x.value), ['auto', 'cpu', 'cuda:0', 'vulkan:0']);
+  assert.strictEqual(c[3].alternative, true);
 });
 
 console.log(`${n} tests passed`);

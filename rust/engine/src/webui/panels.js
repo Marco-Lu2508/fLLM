@@ -234,15 +234,17 @@
             sel.value = wanted.includes(cur) ? cur : 'auto';
           }
 
-          // a device that reports no memory cannot hold a model: it stays out of the list (the details for a bug report still name it)
-          const usable = devs.filter((d) => d.backend === 'cpu' || Number(d.total_memory_bytes) > 0);
-          const chosen = usable.find((d) => d.id === hw.auto_choice);
+          // a device that reports no memory cannot hold a model: it stays out of the list (the details for a bug report still name it).
+          // The same chip is listed once per driver interface: it is one card, with the interface in use marked.
+          const loadDev = String(state.status?.model?.load_options?.device || 'auto').toLowerCase();
+          const target = loadDev === 'auto' ? hw.auto_choice : loadDev;
+          const usable = mergeDevices(devs.filter((d) => d.backend === 'cpu' || Number(d.total_memory_bytes) > 0), target);
+          const chosen = usable.find((d) => (d.members || []).some((m) => m.id === hw.auto_choice));
           $('hwChoiceText').textContent = hw.split
             ? `The model is split over ${hw.split.stages.length} stage(s) (tensor-parallel ${hw.split.tensor_parallel} x pipeline-parallel ${hw.split.pipeline_parallel}): ${hw.split.stages.map((s) => `${(s.devices || []).join(' + ')}${s.layers ? ` layers ${s.layers[0]}-${s.layers[1] - 1}` : ''}`).join(' | ')}.`
             : chosen
-            ? `With the automatic choice fLLM runs models on: ${chosen.name} (${({ cpu: 'the processor', vulkan: 'Vulkan', hip: 'AMD ROCm', cuda: 'NVIDIA CUDA', metal: 'Metal', dx12: 'DirectX 12' })[String(chosen.backend).toLowerCase()] || chosen.backend}${chosen.id.startsWith('wgpu') ? ', generic' : ''}). The processor is the fallback.`
+            ? `With the automatic choice fLLM runs models on: ${chosen.name} (${chosen.backend === 'cpu' ? 'the processor' : deviceBackendLabel(chosen)}). The processor is the fallback.`
             : 'The processor runs the models: no usable graphics device was found.';
-          const loadDev = String(state.status?.model?.load_options?.device || 'auto').toLowerCase();
           $('hwDevicesGrid').innerHTML = usable.map((d) => {
             const role = deviceRole(d, loadDev, hw.auto_choice, !state.setup);
             const mem = deviceMemory(d);
@@ -253,11 +255,12 @@
                   <div style="font-weight:600;color:var(--foreground);">${escapeHtml(d.name)}</div>
                   <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
                     ${role === 'running' ? `<span class="quant-chip role-chip">runs the model${loadDev === 'auto' ? ' (automatic choice)' : ''}</span>` : (role === 'auto' ? '<span class="quant-chip role-chip">automatic choice</span>' : '')}
-                    ${d.split ? `<span class="quant-chip" style="color:var(--primary);">stage ${Number(d.split.stage) + 1}: ${d.split.layers ? `layers ${d.split.layers[0]}-${d.split.layers[1] - 1}` : 'layers'}${d.split.share != null ? ` (${(Number(d.split.share) * 100).toFixed(0)} % of the model)` : ''}</span>` : (d.id === hw.auto_choice && !hw.split ? '<span class="quant-chip" style="color:var(--primary);">in use (automatic choice)</span>' : '')}
-                    <span class="backend-chip"><span class="backend-chip-dot"></span>${escapeHtml(({ cpu: 'Processor', cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12' })[String(d.backend).toLowerCase()] || d.backend)}</span>
+                    ${d.split ? `<span class="quant-chip" style="color:var(--primary);">stage ${Number(d.split.stage) + 1}: ${d.split.layers ? `layers ${d.split.layers[0]}-${d.split.layers[1] - 1}` : 'layers'}${d.split.share != null ? ` (${(Number(d.split.share) * 100).toFixed(0)} % of the model)` : ''}</span>` : ''}
+                    <span class="backend-chip"><span class="backend-chip-dot"></span>${escapeHtml(deviceBackendLabel(d))}</span>
                     ${d.description ? `<span class="quant-chip">${escapeHtml(String(d.description).replace(/\bthreads\b/, 'threads'))}</span>` : ''}
                     ${d.unified_memory ? '<span class="quant-chip">shares system memory</span>' : ''}
                   </div>
+                  ${(d.others || []).length ? `<details class="device-notes"><summary>Also reachable through ${(d.others || []).length === 1 ? 'another backend' : `${d.others.length} other backends`}</summary><div class="app-item-desc">${d.others.map((o) => `${escapeHtml(o.label)} (${escapeHtml(o.id)})`).join(', ')}. The same chip, listed once per driver interface. The card shows the one the model runs on, or the one fLLM prefers.</div></details>` : ''}
                   ${d.notes ? `<details class="device-notes"><summary>Technical notes</summary><div class="app-item-desc">${escapeHtml(d.notes)}</div></details>` : ''}
                 </div>
                 <span class="mono tabular" style="font-size:12px;white-space:nowrap;">${mem.known ? `${formatBytes(d.free_memory_bytes)} free of ${formatBytes(d.total_memory_bytes)}` : 'memory not reported'}</span>

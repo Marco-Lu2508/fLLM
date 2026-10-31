@@ -101,6 +101,58 @@
       };
     }
 
+    const DEVICE_BACKEND_NAMES = { cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12', sycl: 'Intel SYCL' };
+
+    /** The name of a graphics device with the trademark marks and spacing removed, to compare the entries of several drivers. */
+    function deviceKey(d) {
+      return String((d && d.name) || '').replace(/\((R|TM)\)/gi, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    /** Lower is better: the vendor's own interface first, then the native graphics API, the generic (wgpu) entries last. */
+    function deviceRank(d) {
+      if (d.api === 'wgpu') return 3;
+      return ['cuda', 'hip', 'metal', 'sycl'].includes(String(d.backend).toLowerCase()) ? 0 : 1;
+    }
+
+    /**
+     * One entry per physical device. The same graphics chip is listed once per driver interface (Vulkan, generic Vulkan through wgpu,
+     * DirectX 12, CUDA ...); entries with the same name and a similar memory size are one device. Two identical cards stay two devices:
+     * an entry joins a group only when the group has no entry of the same backend and interface yet. The processor and NPUs are never merged.
+     * `wantedId` (the device the model runs on, or the automatic choice) becomes the entry that stands for its group.
+     * Each result is the primary entry plus `members` (id, backend, api of every entry of the device) and `others` (the members besides it).
+     */
+    function mergeDevices(devices, wantedId) {
+      const wanted = String(wantedId || '').toLowerCase();
+      const groups = [];
+      const list = (devices || []).filter((d) => d && d.id);
+      const mergeable = (d) => !['cpu', 'npu'].includes(String(d.backend).toLowerCase()) && deviceKey(d);
+      for (const d of list) {
+        const group = mergeable(d) && groups.find((g) => {
+          if (!g.mergeable || deviceKey(g.items[0]) !== deviceKey(d)) return false;
+          if (g.items.some((o) => o.backend === d.backend && o.api === d.api)) return false;
+          const a = Number(g.items[0].total_memory_bytes) || 0;
+          const b = Number(d.total_memory_bytes) || 0;
+          return a === 0 || b === 0 || Math.min(a, b) / Math.max(a, b) >= 0.5;
+        });
+        if (group) group.items.push(d);
+        else groups.push({ mergeable: !!mergeable(d), items: [d] });
+      }
+      return groups.map((g) => {
+        const ordered = g.items.slice().sort((a, b) => deviceRank(a) - deviceRank(b));
+        const primary = g.items.find((d) => String(d.id).toLowerCase() === wanted) || ordered[0];
+        const members = g.items.map((d) => ({ id: d.id, backend: d.backend, api: d.api }));
+        const others = ordered.filter((d) => d !== primary).map((d) => ({ id: d.id, backend: d.backend, api: d.api, label: deviceBackendLabel(d) }));
+        return { ...primary, members, others };
+      });
+    }
+
+    /** How a driver interface is named for a person: "Vulkan", "Vulkan (generic)", "NVIDIA CUDA". */
+    function deviceBackendLabel(d) {
+      const b = String((d && d.backend) || '').toLowerCase();
+      if (b === 'cpu') return 'Processor';
+      return `${DEVICE_BACKEND_NAMES[b] || b}${d && d.api === 'wgpu' ? ' (generic)' : ''}`;
+    }
+
     /**
      * The entries of the device choice in the load options: automatic, the processor, every graphics device that reports memory, and the NPU
      * when it is ready. `current` (the device value the server runs with or the saved one) is kept in the list even when it is unknown here.
@@ -110,13 +162,18 @@
         { value: 'auto', label: 'Automatic (recommended)', warning: null },
         { value: 'cpu', label: 'Processor only', warning: null },
       ];
-      const names = { cuda: 'NVIDIA CUDA', vulkan: 'Vulkan', hip: 'AMD ROCm', metal: 'Metal', dx12: 'DirectX 12', sycl: 'Intel SYCL' };
-      for (const d of (hw && hw.devices) || []) {
-        if (!d || d.backend === 'cpu' || d.backend === 'npu' || d.available === false || !(Number(d.total_memory_bytes) > 0)) continue;
+      const usable = ((hw && hw.devices) || []).filter((d) => d && d.backend !== 'cpu' && d.backend !== 'npu' && d.available !== false && Number(d.total_memory_bytes) > 0);
+      const groups = mergeDevices(usable, current);
+      for (const d of groups) {
         if (out.some((o) => o.value === d.id)) continue;
-        // the same graphics chip shows up once per driver interface: say which one this entry is
-        const kind = d.api === 'wgpu' ? ', generic' : (d.api === 'native' ? ', native' : '');
-        out.push({ value: d.id, label: `${d.name} (${names[String(d.backend).toLowerCase()] || d.backend}${kind})`, warning: null });
+        out.push({ value: d.id, label: `${d.name} (${deviceBackendLabel(d)})`, warning: null });
+      }
+      // the same chip through another vendor interface (for example CUDA and Vulkan) can be chosen too; the generic entries are not offered
+      for (const d of groups) {
+        for (const o of d.others) {
+          if (o.api === 'wgpu' || out.some((x) => x.value === o.id)) continue;
+          out.push({ value: o.id, label: `${d.name} (${deviceBackendLabel(o)}, other backend)`, warning: null, alternative: true });
+        }
       }
       if (npu && npu.state === 'ready') out.push({ value: 'npu', label: 'NPU (experimental)', warning: npu.warning || NPU_WARNING });
       const wanted = String(current || '').toLowerCase();
@@ -160,10 +217,10 @@
      * it) or ''. `loadDevice` is the --device value of the loaded model ("auto" when the server chose).
      */
     function deviceRole(d, loadDevice, autoChoice, modelLoaded) {
-      const id = String(d && d.id || '').toLowerCase();
+      const ids = (d && Array.isArray(d.members) && d.members.length ? d.members.map((m) => m.id) : [d && d.id]).map((x) => String(x || '').toLowerCase());
       const want = String(loadDevice || 'auto').toLowerCase();
       const target = want === 'auto' ? String(autoChoice || 'cpu').toLowerCase() : want;
-      if (id !== target) return '';
+      if (!ids.includes(target)) return '';
       return modelLoaded ? 'running' : 'auto';
     }
     // @pure-end
