@@ -355,9 +355,21 @@ impl TokenizerBundle {
     }
 
     pub fn grammar_factory(&self) -> Result<llguidance::ParserFactory, String> {
+        self.grammar_factory_with(&[])
+    }
+
+    /// Like [`grammar_factory`](Self::grammar_factory), and the special tokens whose text is one of `literals` (the call
+    /// markers of the tool parser; `<tool_call>` and `</tool_call>` always) are matched as the text they stand for.
+    ///
+    /// A special token is otherwise a byte string that no grammar literal can spell, so a grammar for tool calls could only
+    /// reach `<tool_call>` through the plain pieces `<`, `tool`, `_call`, `>`. A model that was trained to write the single
+    /// token then finds its call blocked, answers in prose and the call never comes.
+    pub fn grammar_factory_with(&self, literals: &[&str]) -> Result<llguidance::ParserFactory, String> {
         use llguidance::toktrie::{ApproximateTokEnv, TokEnv, TokRxInfo, TokTrie};
         let info = TokRxInfo::new(self.vocab_size as u32, self.eos_ids[0]);
-        let trie = TokTrie::from(&info, &self.grammar_bytes).with_eos_tokens(&self.eos_ids);
+        let mut bytes = self.grammar_bytes.clone();
+        plain_call_markers(&mut bytes, literals);
+        let trie = TokTrie::from(&info, &bytes).with_eos_tokens(&self.eos_ids);
         let env: TokEnv = std::sync::Arc::new(ApproximateTokEnv::new(trie));
         llguidance::ParserFactory::new_simple(&env)
             .map_err(|e| format!("cannot initialize grammar tokenizer: {e}"))
@@ -1289,10 +1301,36 @@ fn default_add_bos(model: Option<&str>, pre: Option<&str>, has_bos: bool) -> boo
     spm && has_bos
 }
 
+/// Special tokens are stored for the grammar as `0xff` + their text, which no grammar literal matches. The tokens whose text
+/// is `<tool_call>`, `</tool_call>` or one of `literals` become plain bytes, so a literal of a call format reaches them.
+fn plain_call_markers(grammar_bytes: &mut [Vec<u8>], literals: &[&str]) {
+    for entry in grammar_bytes.iter_mut() {
+        if entry.first() == Some(&0xff) {
+            let text = &entry[1..];
+            if text == b"<tool_call>" || text == b"</tool_call>" || literals.iter().any(|l| l.as_bytes() == text) {
+                *entry = text.to_vec();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn call_markers_become_text_for_the_grammar_and_other_special_tokens_stay_hidden() {
+        let mut bytes: Vec<Vec<u8>> = vec![
+            b"\xff<tool_call>".to_vec(),
+            b"\xff</tool_call>".to_vec(),
+            b"\xff[TOOL_CALLS]".to_vec(),
+            b"\xff<|im_end|>".to_vec(),
+            b"hello".to_vec(),
+        ];
+        plain_call_markers(&mut bytes, &["[TOOL_CALLS]"]);
+        assert_eq!(bytes, [b"<tool_call>".to_vec(), b"</tool_call>".to_vec(), b"[TOOL_CALLS]".to_vec(), b"\xff<|im_end|>".to_vec(), b"hello".to_vec()]);
+    }
 
     #[test]
     fn bos_default_follows_llama_cpp() {

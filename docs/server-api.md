@@ -420,11 +420,18 @@ Small models often write a command as plain text or break the JSON of a call. Se
   call by accident), or
 - one call, or several unless `parallel_tool_calls` is `false`, in the exact format of the
   model's tool parser, with a declared function name and arguments that follow that
-  function's JSON schema (required keys, types, enums).
+  function's JSON schema (required keys, types, enums). For the `<tool_call>` formats
+  (`hermes`, `qwen3_coder`) a sentence may come before the first call ("Let me read the
+  file." followed by the call), because models such as Qwen3-4B-Instruct-2507 write one.
 
 `tool_choice: "required"` removes the text branch, `{"type":"function","function":{"name":…}}`
 also limits the names to that function. Without `tool_call_grammar`, a required call is
-generated as bare JSON as before.
+generated as bare, compact JSON (no free whitespace). A forced call without `max_tokens` is
+limited to 8192 tokens, not to the rest of the context; when the limit ends it before the
+call is complete, the reply is the error "generation ended before a complete function call
+was produced; increase max_tokens". If the chat template opens the reasoning block itself
+(Qwen3-Thinking-2507, DeepSeek-R1 distills), a forced call or a `response_format` request
+gets the block closed empty first, so the JSON is the answer and not reasoning.
 
 Formats with a grammar: `hermes` (also Qwen2.5/3, Granite 4), `qwen3_coder` (XML; integer,
 number, boolean and enum parameters are typed, nested values use their JSON schema; other
@@ -482,7 +489,11 @@ model can do about thinking. The server reads it from the chat template (the var
 | `none` | Llama, Mistral, Gemma 3 and others without a thinking mode (`supported` is `false`) | nothing; the Studio hides its Thinking chip |
 | `toggle` | Qwen3, Qwen3.5, GLM, Gemma 4, Granite 3.3 and other templates with a switch | `off`, or `low` / `medium` / `high`, where the levels are budgets enforced by the server |
 | `effort` | gpt-oss and other templates that take `reasoning_effort` | `low`, `medium`, `high`, handed to the template; the model scales its own thinking |
-| `always` | DeepSeek-R1 style templates that always open a reasoning block | nothing to switch (an explicit `thinking_budget` still applies) |
+| `always` | DeepSeek-R1 distills, QwQ and Qwen3-Thinking-2507: templates whose generation prompt opens a reasoning block | nothing to switch (an explicit `thinking_budget` still applies) |
+
+A template that merely mentions `<think>` and `</think>` (Qwen3 templates do, to show earlier reasoning in the history) is not `always`:
+what counts is the part after the last `add_generation_prompt`. Qwen3-4B-Instruct-2507 therefore reports `none`, Qwen3-4B-Thinking-2507
+`always` and the hybrid Qwen3-4B `toggle`.
 
 `variable` is the template variable the switch or level goes into, `default` the level the model uses when a request says nothing.
 The detection is a reading of the template, not a test of the model: a template that handles thinking in a way the reader does not
