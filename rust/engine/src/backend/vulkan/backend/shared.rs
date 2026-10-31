@@ -81,6 +81,30 @@ fn coop_subgroup(caps: &VkCaps) -> Option<(u32, bool)> {
     (caps.min_subgroup_size == size && caps.max_subgroup_size == size).then_some((size, false))
 }
 
+/// Subgroup size (32) the cooperative-matrix attention kernel runs with, `None` when the device cannot run it: the kernel needs 16x16x16 float16
+/// cooperative matrices, subgroup basic / shuffle / vote operations, a 32-wide subgroup (pinned with `VK_EXT_subgroup_size_control` where the
+/// device's default is wider, as on AMD RDNA with its 64-wide default) and 40 KiB of shared memory. NVIDIA and AMD only (not measured elsewhere).
+fn attn_coop_subgroup(caps: &VkCaps) -> Option<u32> {
+    let vendor_ok = matches!(caps.vendor_id, 0x10de | 0x1002);
+    let ops = caps.subgroup_ops.basic && caps.subgroup_ops.shuffle && caps.subgroup_ops.vote;
+    let sized = if caps.subgroup_size == 32 {
+        true
+    } else {
+        caps.subgroup_size_control && caps.min_subgroup_size <= 32 && caps.max_subgroup_size >= 32
+    };
+    (vendor_ok
+        && ops
+        && sized
+        && caps.coop_matrix_supported
+        && caps.fp16
+        && caps.vulkan_memory_model
+        && has_coop_16x16x16(caps)
+        && !env_on("FLLM_VULKAN_NO_COOP")
+        && caps.max_shared_memory >= 40 * 1024
+        && caps.max_workgroup_invocations.min(caps.max_workgroup_size[0]) >= 128)
+        .then_some(32)
+}
+
 fn has_coop_16x16x16(caps: &VkCaps) -> bool {
     caps.coop_matrix_for(ComponentType::F16, ComponentType::F16, ComponentType::F32, ComponentType::F32)
         .iter()
@@ -162,6 +186,12 @@ impl Shared {
 
     pub fn caps(&self) -> &VkCaps {
         self.ctx.caps()
+    }
+
+    /// The device runs the cooperative-matrix attention kernel (see [`attn_coop_subgroup`]); independent of the GEMM tuning, which may
+    /// prefer the integer dot product for the projections.
+    pub fn attn_coop(&self) -> bool {
+        self.disabled.load(Ordering::Relaxed) & DISABLED_COOP == 0 && attn_coop_subgroup(self.ctx.caps()).is_some()
     }
 
     /// Planner capabilities minus the variants whose pipelines the driver refused.
@@ -253,7 +283,12 @@ impl Shared {
         let words = self.spirv_words(name)?;
         let constants: Vec<PipeConst> = spec.iter().map(|&(id, value)| PipeConst::u32(id, value)).collect();
         let mut pipeline_spec = PipelineSpec::new(name, &words, bindings, push_bytes).with_spec_constants(&constants);
-        if (name.starts_with("mm_") && (name.ends_with("_c") || name.ends_with("_cw"))) || name.starts_with("attn_prefill_cm_") {
+        if name.starts_with("attn_prefill_cm_") {
+            // pinned even where the device's default subgroup is 32: a default of 64 (AMD) needs the pin to reach 32
+            if self.ctx.caps().subgroup_size_control {
+                pipeline_spec = pipeline_spec.with_subgroup_size(32);
+            }
+        } else if name.starts_with("mm_") && (name.ends_with("_c") || name.ends_with("_cw")) {
             if let Some(size) = self.coop_pin {
                 pipeline_spec = pipeline_spec.with_subgroup_size(size);
             }

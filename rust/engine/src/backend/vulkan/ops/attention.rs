@@ -215,11 +215,12 @@ impl AttentionTuning {
         Self { prefill_rows: if wide { PREFILL_ROWS_WIDE } else { PREFILL_ROWS }, ..Self::default() }
     }
 
-    /// The prompt kernel on cooperative matrices where the device has them with 32-wide subgroups (NVIDIA); `FLLM_VK_ATTN_COOP=0` keeps the scalar kernel.
-    pub fn with_coop_prefill(self, caps: &crate::backend::vulkan::weights::plan::VkCapsLike) -> Self {
+    /// The prompt kernel on cooperative matrices where the device can run it (`device_ok`: NVIDIA, or AMD with the subgroup pinned to 32);
+    /// `FLLM_VK_ATTN_COOP=0` keeps the scalar kernel.
+    pub fn with_coop_prefill(self, device_ok: bool) -> Self {
         static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let off = *OFF.get_or_init(|| std::env::var("FLLM_VK_ATTN_COOP").is_ok_and(|v| matches!(v.trim(), "0" | "off")));
-        let ok = !off && !crate::backend::vulkan::backend::is_exact_math() && caps.coop_matrix && caps.fp16 && caps.vendor == 0x10de && caps.subgroup_size == 32 && caps.max_workgroup >= 128 && caps.max_shared >= 40 * 1024;
+        let ok = !off && !crate::backend::vulkan::backend::is_exact_math() && device_ok;
         Self { coop_prefill: ok && self.prefill_rows == PREFILL_ROWS_WIDE, ..self }
     }
 }
