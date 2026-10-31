@@ -681,3 +681,15 @@ workgroup per CU).
   they differ it is at a near tie of two tokens.
 * The 840M is a very small GPU. The NVIDIA card is a laptop part with 8 GB; models above about 7 GB of weights do not fit it.
 * llama.cpp's ROCm binary and Ollama needed `HSA_OVERRIDE_GFX_VERSION` for `gfx1153`; without it they fall back to the CPU. FastFlowLM's models are not the same quantization.
+
+## Release check against vLLM and SGLang (RTX 2000 Ada, 2026-10-31)
+
+Llama-3.2-3B as the same 4-bit AWQ checkpoint, `scripts/bench_compare.py --prompt-words 60,380 --concurrency 1,4,8`, three runs per single-stream cell, fLLM from the CI build of the release commit (CUDA architectures 75, 80, 89, 120). Single stream: prompt tok/s / decode tok/s. Several requests: all generated tokens per second, from the first request sent to the last one finished.
+
+| Engine | 60 words, 1 request | 380 words, 1 request | 60 words, 4 / 8 requests | 380 words, 4 / 8 requests |
+|---|---|---|---|---|
+| **fLLM, CUDA** | **4224** / **109.7** | **6078** / **107.2** | 376 / **658** | 287 / 426 |
+| vLLM | 3146 / 95.0 | 5548 / 92.6 | 342 / 637 | 271 / 415 |
+| SGLang | 3541 / 96.8 | 5659 / 94.9 | 352 / 646 | 276 / **432** |
+
+Reading: with one request fLLM is ahead of both on prompt and decode speed. With four and eight simultaneous requests the three are within a few percent of each other (fLLM leads with short prompts, SGLang is 1.5 % ahead with eight medium prompts). One card, one model, short runs: differences of 3 % or less are noise.

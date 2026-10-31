@@ -6,6 +6,19 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-31
+
+The big release of 2026-10-30/31. Version 0.1.12 was prepared but never tagged: its entries (below) are part of this release.
+
+### Highlights
+- **AMD XDNA 2 NPU with fLLM's own kernels**, next to the FastFlowLM route; the Intel NPU is faster to start and usable (opt-in).
+- **Several devices for one model** (layer split over any mix of CUDA, HIP, Vulkan and the CPU, tensor and expert parallelism) and **mixture-of-experts models larger than memory** (expert cache).
+- **Many new architectures**, about 25: DeepSeek-V3.2, GLM-5, DeepSeek-V4, Hy4, Kimi K3, Qwen3.8-Flash-Next, MiniMax-M3, Inkling, LongCat-Flash, Ling-3.0, GLM-5-Next, MiMo-V2-Flash, Step-3.5, BitNet, RWKV-6/7 and more. Verified against the reference implementations with tiny random checkpoints; no checkpoint of full size was run. Most of them run on the GPU backends (see `docs/model-coverage.md` for what runs where).
+- **Speed:** Vulkan decode on NVIDIA +35 %, the Vulkan prompt on NVIDIA and AMD clearly faster, HIP on RDNA 3.5 on par with llama.cpp ROCm, concurrent requests no longer collapse on AMD, CUDA decode attention for batches.
+- **Correctness fixes found on the way:** the fused gate/up fallback that produced garbage on Turing (T4), cascade attention, a missing Vulkan barrier between submissions, a CUDA/HIP prompt failure for unusual head widths.
+- **Studio and desktop app reworked**, `fllm-rs connect` for coding tools (Claude Code, Codex, OpenCode ...), Windows, macOS and Linux installers.
+
+
 ### Added (chunk-parallel prompt processing of the recurrent layers)
 - **A chunk-parallel form of the recurrences of Gated DeltaNet (Qwen3-Next, Qwen3.5), Kimi Delta Attention (Kimi-Linear, Ling-3.0), RWKV-7, RWKV-6 and Mamba-2**, proven equal to the token-by-token recurrence. All five are one recurrence per head, `P_t = (diag(w_t) - b_t a_t^T) P_(t-1) + k_t v_t^T`, `o_t = P_t^T q_t + c_t v_t`; `src/chunked_scan.rs` maps each layer type onto it and holds the f64 reference of the chunked form (chunks of 64 tokens: pairwise decayed products, the triangular solve of the rank-one terms, one state update per chunk). Property tests compare it with the sequential form and with the layers' own recurrences for chunk sizes 16, 32 and 64, lengths with odd tails, with and without an initial state, decays down to e^-40 and the final state.
 - **CUDA and HIP: `cuda/scan.cu`, `cuda/scan_core.cuh`.** Per layer a `*_prep` kernel, five generic kernels (`scan_cum`, `scan_pairs`, `scan_tm`, `scan_wide`, `scan_pm`: 64 x 64 FP32 tile products on shared memory), the serial walk over the chunks (`scan_state`) and a `*_post` kernel (output norm, gate). Runs of 64 rows or more are processed in windows of up to 16 chunks; the scratch (up to 192 MiB, one buffer per stream) is reserved before the layer launches anything, without memory the serial kernels run. Decode steps, shorter runs and CUDA graph captures keep the serial kernels. The Mamba-2 scan of `mamba2.cu` was serial as well and takes the same path.
