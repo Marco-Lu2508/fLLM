@@ -129,7 +129,7 @@ CUDA and HIP, `shaders/vulkan/scan_*.comp` planned by `ops/scan.rs` for Vulkan);
   equal to the token-by-token recurrence (chunks of 16, 32 and 64, lengths with odd tails, with and without an initial state, outputs and final states, decays down to e^-40).
 * *Windows and memory.* A run is processed in windows (CUDA and HIP: up to 16 chunks, Vulkan: up to 8) whose scratch stays below 192 MiB (CUDA, HIP; one buffer per stream, grown
   on demand and checked before a layer launches anything: without memory the layer uses the serial kernels) or 96 MiB (Vulkan; scratch id 3 of the operation). The state carries
-  over from window to window in the sequence's state buffer. Every Vulkan dispatch of a window is short (the largest, `scan_state`, took about 0.5 ms per window of 384 rows on the RTX 2000 Ada).
+  over from window to window in the sequence's state buffer. Every Vulkan dispatch of a window is short (the longest, `scan_state`, takes about 0.5 ms per window of 384 rows on the RTX 2000 Ada and 2.9 ms on the Radeon 840M).
 * *Limits.* Key width 16, 32, 64 or 128 (Vulkan: multiples of 16 up to 128), value width up to 256 (Gated DeltaNet on CUDA and HIP: multiples of 32), up to 256 value heads
   (Gated DeltaNet) and 512 heads (Mamba-2), Vulkan devices with at least 32 KiB of shared memory per workgroup. Other shapes keep the serial kernels. Mamba-1 has no scan form here.
 * *Switches.* `FLLM_CHUNKED_SCAN=0` keeps the serial kernels, `=1` (or `always`) takes the scan for every run of `FLLM_CHUNKED_SCAN_MIN` rows (default 64) and more, unset or `auto` (the
