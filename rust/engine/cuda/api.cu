@@ -4,6 +4,7 @@
 // describes the last failure of the calling thread. The library links the CUDA runtime
 // statically and loads the driver (libcuda) lazily, so a binary built with it still starts on a
 // machine without NVIDIA drivers (device_count then reports an error and fLLM falls back).
+#include <algorithm>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <map>
 #include <vector>
 
 #include "common.cuh"
@@ -169,6 +171,13 @@ static void opt_init() {
     g_opt[FLLM_OPT_FUSE_ATTN_F16] = flag("FLLM_FUSE_PREFILL_ATTN_F16");
     const char *cfg = getenv("FLLM_MARLIN_PREFILL_CFG");
     g_opt[FLLM_OPT_MARLIN_CFG] = cfg != nullptr && strcmp(cfg, "fllm") == 0;
+    {
+        const char *scan = getenv("FLLM_CHUNKED_SCAN");
+        int mode = 1;  // auto
+        if (scan && (!strcmp(scan, "0") || !strcmp(scan, "off") || !strcmp(scan, "false"))) mode = 0;
+        else if (scan && (!strcmp(scan, "1") || !strcmp(scan, "on") || !strcmp(scan, "true") || !strcmp(scan, "always"))) mode = 2;
+        g_opt[FLLM_OPT_CHUNKED_SCAN] = mode;
+    }
     g_opt_init.store(true);
 }
 int fllm_opt(int id) {
@@ -277,6 +286,8 @@ struct FllmStream {
     size_t cap, off;
     float *ws;        // scratch for split-KV attention partials
     size_t ws_bytes;
+    float *scan_ws = nullptr;  // scratch of the chunk-parallel scan of the recurrent layers (scan.cu), grown on demand
+    size_t scan_floats = 0;
     void *x16;        // FP16 copy of the activations for the tensor-core GEMM
     size_t x16_bytes;
     // recently staged metadata: layers of one step upload identical positions, slots, tables and lengths
@@ -407,6 +418,7 @@ void fllm_cuda_stream_destroy(FllmStream *st) {
     cudaFree(st->arena);
     for (void *p : st->retired_arenas) cudaFree(p);
     cudaFree(st->ws);
+    cudaFree(st->scan_ws);
     cudaFree(st->x16);
         st->epoch++;
     cudaFree(st->q4z_io);
@@ -1576,16 +1588,248 @@ static bool ssm_kernels_off() {
 #endif
 }
 int fllm_cuda_delta_supported(int kh, int vh, int hk, int hv, int ksz) { return !ssm_kernels_off() && fllm_delta_supported(kh, vh, hk, hv, ksz); }
+
+} // extern "C"
+
+// ---- chunk-parallel scan of the recurrent layers (scan.cu) -------------------------------------------------------------------------------------------
+// Runs of at least FLLM_CHUNKED_SCAN_MIN rows (default 64) may take it. FLLM_CHUNKED_SCAN=0 keeps the serial kernels for everything, =1 (or "always") takes the scan
+// for every such run, unset or "auto" lets the device decide: the chunked form does more arithmetic than the serial one and wins where the serial kernels are bound by
+// the per-token dependency chain (many SMs idle, per-token reductions) and loses where the device is already busy with them, so the first calls of every layer
+// shape are timed (a warm-up call and a timed call of the serial kernels, a warm-up call and a timed call of the scan, on the rows of the prompt itself) and the faster one is kept
+// for the rest of the process (the scan has to be at least 8 % faster). The same switch at run time: FLLM_OPT_CHUNKED_SCAN (0, 1, 2).
+static int scan_min_rows(const FllmStream *st) {
+    if (st->capture || fllm_opt(FLLM_OPT_CHUNKED_SCAN) == 0) return 0;
+    static const int rows = [] {
+        const char *e = getenv("FLLM_CHUNKED_SCAN_MIN");
+        const int v = e ? atoi(e) : 64;
+        return v > 0 ? v : 64;
+    }();
+    return rows;
+}
+
+struct ScanTune {
+    int stage = 0;  // 0 warm-up (serial), 1 serial timed, 2 warm-up (scan), 3 scan timed, 4 decided
+    int rows = 0;   // rows of the timed serial call
+    double serial_ms = 0;
+    bool chunked = false;
+    int tries = 0;
+};
+static std::mutex g_tune_mu;
+static std::map<std::string, ScanTune> g_tune;
+
+// What one call of a layer does with its long runs, and the timing of it when the call is one of the measured ones.
+struct ScanChoice {
+    bool chunked = false;
+    bool timed = false;
+    std::string key;
+    int rows = 0;
+    cudaStream_t s = nullptr;
+    cudaEvent_t ev[2] = {nullptr, nullptr};
+    ScanChoice() = default;
+    ScanChoice(const ScanChoice &) = delete;
+    ScanChoice &operator=(const ScanChoice &) = delete;
+    ~ScanChoice() { release(); }
+    void release() {
+        for (auto &e : ev)
+            if (e) cudaEventDestroy(e);
+        ev[0] = ev[1] = nullptr;
+        timed = false;
+    }
+    // call right before the first launch of the layer
+    void begin(cudaStream_t stream) {
+        s = stream;
+        if (!timed) return;
+        if (cudaEventCreate(&ev[0]) != cudaSuccess || cudaEventCreate(&ev[1]) != cudaSuccess) {
+            cudaGetLastError();
+            release();
+            return;
+        }
+        cudaEventRecord(ev[0], s);
+    }
+    // call right after the last launch of the recurrence (serial kernels or scan windows)
+    void end(bool ok) {
+        if (!timed || !ev[0]) return;
+        cudaEventRecord(ev[1], s);
+        float ms = 0.f;
+        if (ok && cudaEventSynchronize(ev[1]) == cudaSuccess && cudaEventElapsedTime(&ms, ev[0], ev[1]) == cudaSuccess) {
+            std::lock_guard<std::mutex> lock(g_tune_mu);
+            ScanTune &t = g_tune[key];
+            if (chunked) {
+                const bool same_rows = std::abs(rows - t.rows) <= t.rows / 10;
+                if (same_rows) {
+                    t.chunked = ms < 0.92 * t.serial_ms;
+                    t.stage = 4;
+                    if (getenv("FLLM_CHUNKED_SCAN_LOG"))
+                        fprintf(stderr, "[fllm-rs] chunked scan %s: serial %.3f ms, chunked %.3f ms for %d rows -> %s\n", key.c_str(), t.serial_ms, ms, rows,
+                                t.chunked ? "chunked" : "serial");
+                } else if (++t.tries >= 4) {
+                    t.chunked = false;
+                    t.stage = 4;
+                } else {
+                    t.stage = 1;  // the batches differed: measure again
+                }
+            } else {
+                t.rows = rows;
+                t.serial_ms = ms;
+                t.stage = 2;
+            }
+        } else {
+            cudaGetLastError();
+        }
+        release();
+    }
+};
+
+// `key`: layer kind and shape; `long_rows`: rows of the runs of min_rows rows and more in this call.
+static void scan_choose(ScanChoice &c, const FllmStream *st, const char *kind, int a, int b, int d, int e, int long_rows) {
+    char key[96];
+    snprintf(key, sizeof(key), "%s/%d/%d/%d/%d/%d", kind, st->dev, a, b, d, e);
+    c.key = key;
+    c.rows = long_rows;
+    if (long_rows <= 0) return;
+    if (fllm_opt(FLLM_OPT_CHUNKED_SCAN) == 2) {
+        c.chunked = true;
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_tune_mu);
+    ScanTune &t = g_tune[c.key];
+    switch (t.stage) {
+        case 0:  // the first call of a shape pays for first-launch costs: not timed
+            t.stage = 1;
+            break;
+        case 1:
+            c.timed = true;
+            break;
+        case 2:  // the first call of the scan loads its kernels: not timed
+            c.chunked = true;
+            t.stage = 3;
+            break;
+        case 3:
+            c.chunked = true;
+            c.timed = true;
+            break;
+        default:
+            c.chunked = t.chunked;
+            break;
+    }
+}
+
+constexpr size_t SCAN_BUDGET_FLOATS = size_t(48) << 20;
+constexpr int SCAN_MAX_WINDOW_CHUNKS = 16;
+
+static int scan_reserve(FllmStream *st, size_t floats) {
+    if (floats <= st->scan_floats) return 0;
+    CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
+    cudaFree(st->scan_ws);
+    st->scan_ws = nullptr;
+    st->scan_floats = 0;
+    CHECK(cudaMalloc(&st->scan_ws, floats * sizeof(float)), "cudaMalloc(scan scratch)");
+    st->scan_floats = floats;
+    return 0;
+}
+
+// Cuts the long runs into windows (a window holds at most `cw` chunks of every run, the scratch of its chunk slots at most SCAN_BUDGET_FLOATS) and calls
+// each(window runs, number of runs, longest run in chunks, slots) for each one in order; the state of a run carries over from window to window.
+// `floats(slots)`: scratch floats the architecture needs for that many chunk slots.
+template <class Floats, class Each>
+static int scan_for_windows(const std::vector<FllmRun> &longr, Floats floats, Each each) {
+    const size_t per_slot = floats(1);
+    const int cap = (int)std::max<size_t>(1, SCAN_BUDGET_FLOATS / std::max<size_t>(per_slot, 1));
+    for (size_t g0 = 0; g0 < longr.size(); g0 += cap) {
+        const size_t g1 = std::min(longr.size(), g0 + cap);
+        const int cw = std::min(SCAN_MAX_WINDOW_CHUNKS, std::max(1, cap / (int)(g1 - g0)));
+        int longest = 0;
+        for (size_t i = g0; i < g1; i++) longest = std::max(longest, longr[i].n);
+        for (int start = 0; start < longest; start += cw * 64) {
+            std::vector<FllmRun> win;
+            int slots = 0, max_chunks = 0;
+            for (size_t i = g0; i < g1; i++) {
+                if (longr[i].n <= start) continue;
+                FllmRun r = longr[i];
+                r.row0 += start;
+                r.n = std::min(cw * 64, longr[i].n - start);
+                r.reset = start == 0 ? longr[i].reset : 0;
+                r.pad = slots;
+                const int chunks = (r.n + 63) / 64;
+                slots += chunks;
+                max_chunks = std::max(max_chunks, chunks);
+                win.push_back(r);
+            }
+            if (win.empty()) continue;
+            if (int e = each(win, (int)win.size(), max_chunks, slots)) return e;
+        }
+    }
+    return 0;
+}
+
+// Reserves the scratch of the largest window before anything of the layer is launched; false (and the runs stay on the serial kernels) when the device has no
+// memory left for it.
+template <class Floats>
+static bool scan_preflight(FllmStream *st, const std::vector<FllmRun> &longr, Floats floats) {
+    size_t most = 0;
+    scan_for_windows(longr, floats, [&](const std::vector<FllmRun> &, int, int, int slots) {
+        most = std::max(most, floats(slots));
+        return 0;
+    });
+    if (scan_reserve(st, most) == 0) return true;
+    cudaGetLastError();
+    return false;
+}
+
+template <class Floats, class Launch>
+static int scan_windows(FllmStream *st, const std::vector<FllmRun> &longr, Floats floats, Launch launch) {
+    return scan_for_windows(longr, floats, [&](const std::vector<FllmRun> &win, int n, int chunks, int slots) {
+        if (int e = scan_reserve(st, floats(slots))) return e;
+        void *d = nullptr;
+        if (int e = stage(st, 4, win.data(), win.size() * sizeof(FllmRun), &d)) return e;
+        return launch(win, d, n, chunks, slots);
+    });
+}
+
+extern "C" {
+
 // Gated DeltaNet layer: `runs` is nruns DeltaRun records (24 bytes each, see deltanet.cu) in host memory.
 int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
                           float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
                           const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay,
                           const float *norm, float *mixed, float *out) {
     PREP(st);
-    void *d = nullptr;
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    int min_rows = fllm_scan_delta_supported(kh, vh, hk, hv) ? scan_min_rows(st) : 0;
+    ScanChoice pick;
+    if (min_rows > 0) {
+        int long_rows = 0;
+        for (int i = 0; i < nruns; i++) long_rows += hr[i].n >= min_rows ? hr[i].n : 0;
+        scan_choose(pick, st, "delta", kh * 1000 + vh, hk, hv, tiled, long_rows);
+        if (!pick.chunked) min_rows = 0;
+    }
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!longr.empty() && !scan_preflight(st, longr, [&](int slots) { return fllm_scan_delta_floats(vh, hk, hv, slots); })) {
+        shortr.insert(shortr.end(), longr.begin(), longr.end());
+        longr.clear();
+        pick.release();
+    }
+    pick.begin(st->s);
+    int max_short = 0;
+    for (const FllmRun &r : shortr) max_short = std::max(max_short, r.n);
+    void *d = nullptr, *ds = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_delta_launch(st->s, d, nruns, max_n, kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z, beta, alpha,
-                             convw, dt_bias, decay, norm, mixed, out);
+    if (!shortr.empty() && shortr.size() == (size_t)nruns) ds = d;
+    else if (!shortr.empty()) {
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
+    }
+    if (int e = fllm_delta_launch(st->s, d, nruns, max_n, ds, (int)shortr.size(), kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z,
+                                  beta, alpha, convw, dt_bias, decay, norm, mixed, out))
+        return e;
+    const int rc = scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_delta_floats(vh, hk, hv, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_delta_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, kh, vh, hk, hv, tiled, beta_scale, eps, state_off, mixed, z, beta,
+                                          alpha, dt_bias, decay, norm, out);
+        });
+    pick.end(rc == 0);
+    return rc;
 }
 int fllm_cuda_kda_supported(int heads, int head_dim, int ksz) { return fllm_kda_supported(heads, head_dim, ksz); }
 int fllm_cuda_copy_cols(FllmStream *st, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col) {
@@ -1599,10 +1843,41 @@ int fllm_cuda_kda_layer(FllmStream *st, const void *runs, int nruns, int max_n, 
                         const float *convw, const float *dt_bias, const float *rate, const float *norm,
                         float *mixed, float *out) {
     PREP(st);
-    void *d = nullptr;
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    int min_rows = fllm_scan_kda_supported(heads, head_dim) ? scan_min_rows(st) : 0;
+    ScanChoice pick;
+    if (min_rows > 0) {
+        int long_rows = 0;
+        for (int i = 0; i < nruns; i++) long_rows += hr[i].n >= min_rows ? hr[i].n : 0;
+        scan_choose(pick, st, "kda", heads, head_dim, bounded, 0, long_rows);
+        if (!pick.chunked) min_rows = 0;
+    }
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!longr.empty() && !scan_preflight(st, longr, [&](int slots) { return fllm_scan_kda_floats(heads, head_dim, slots); })) {
+        shortr.insert(shortr.end(), longr.begin(), longr.end());
+        longr.clear();
+        pick.release();
+    }
+    pick.begin(st->s);
+    void *d = nullptr, *ds = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_kda_launch(st->s, d, nruns, max_n, heads, head_dim, ksz, bounded, lower_bound, eps, state_off, rec_bytes,
-                           qkv, forget, beta, gate, convw, dt_bias, rate, norm, mixed, out);
+    if (shortr.size() == (size_t)nruns) {
+        ds = d;
+    } else if (!shortr.empty()) {
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
+    }
+    if (int e = fllm_kda_launch(st->s, d, nruns, max_n, ds, (int)shortr.size(), heads, head_dim, ksz, bounded, lower_bound, eps, state_off, rec_bytes,
+                                qkv, forget, beta, gate, convw, dt_bias, rate, norm, mixed, out))
+        return e;
+    const int rc = scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_kda_floats(heads, head_dim, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_kda_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, heads, head_dim, bounded, lower_bound, eps, state_off, mixed, forget,
+                                        beta, gate, dt_bias, rate, norm, out);
+        });
+    pick.end(rc == 0);
+    return rc;
 }
 int fllm_cuda_rwkv_supported(int hidden, int head_size) { return fllm_rwkv_supported(hidden, head_size); }
 int fllm_cuda_rwkv_shift(FllmStream *st, const void *runs, int nruns, int total_rows, int hidden, size_t shift_off, const float *x, float *shift) {
@@ -1623,17 +1898,73 @@ int fllm_cuda_rwkv7(FllmStream *st, const void *runs, int nruns, int heads, int 
                     const float *r, const float *k, const float *v, const float *w, const float *a, const float *vres, const float *gate,
                     const float *norm_w, const float *norm_b, const float *k_k, const float *k_a, const float *r_k, float *v_first, float *out) {
     PREP(st);
-    void *d = nullptr;
-    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_rwkv7_launch(st->s, d, nruns, heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate, norm_w, norm_b, k_k, k_a, r_k, v_first, out);
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    int min_rows = fllm_scan_rwkv_supported(hidden, head_size) ? scan_min_rows(st) : 0;
+    ScanChoice pick;
+    if (min_rows > 0) {
+        int long_rows = 0;
+        for (int i = 0; i < nruns; i++) long_rows += hr[i].n >= min_rows ? hr[i].n : 0;
+        scan_choose(pick, st, "rwkv7", heads, head_size, 0, 0, long_rows);
+        if (!pick.chunked) min_rows = 0;
+    }
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!longr.empty() && !scan_preflight(st, longr, [&](int slots) { return fllm_scan_rwkv7_floats(heads, head_size, slots); })) {
+        shortr.insert(shortr.end(), longr.begin(), longr.end());
+        longr.clear();
+        pick.release();
+    }
+    pick.begin(st->s);
+    if (!shortr.empty()) {
+        void *d = nullptr;
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &d)) return e;
+        if (int e = fllm_rwkv7_launch(st->s, d, (int)shortr.size(), heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate, norm_w, norm_b, k_k, k_a,
+                                      r_k, v_first, out))
+            return e;
+    }
+    const int rc = scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_rwkv7_floats(heads, head_size, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_rwkv7_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, heads, head_size, hidden, eps, state_off, r, k, v, w, a, vres, gate,
+                                          norm_w, norm_b, k_k, k_a, r_k, v_first, out);
+        });
+    pick.end(rc == 0);
+    return rc;
 }
 int fllm_cuda_rwkv6(FllmStream *st, const void *runs, int nruns, int heads, int head_size, int hidden, float eps, size_t state_off,
                     const float *r, const float *k, const float *v, const float *w, const float *gate, const float *norm_w,
                     const float *norm_b, const float *first, float *out) {
     PREP(st);
-    void *d = nullptr;
-    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_rwkv6_launch(st->s, d, nruns, heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w, norm_b, first, out);
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    int min_rows = fllm_scan_rwkv_supported(hidden, head_size) ? scan_min_rows(st) : 0;
+    ScanChoice pick;
+    if (min_rows > 0) {
+        int long_rows = 0;
+        for (int i = 0; i < nruns; i++) long_rows += hr[i].n >= min_rows ? hr[i].n : 0;
+        scan_choose(pick, st, "rwkv6", heads, head_size, 0, 0, long_rows);
+        if (!pick.chunked) min_rows = 0;
+    }
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!longr.empty() && !scan_preflight(st, longr, [&](int slots) { return fllm_scan_rwkv6_floats(heads, head_size, slots); })) {
+        shortr.insert(shortr.end(), longr.begin(), longr.end());
+        longr.clear();
+        pick.release();
+    }
+    pick.begin(st->s);
+    if (!shortr.empty()) {
+        void *d = nullptr;
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &d)) return e;
+        if (int e = fllm_rwkv6_launch(st->s, d, (int)shortr.size(), heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w, norm_b, first, out)) return e;
+    }
+    const int rc = scan_windows(
+        st, longr, [&](int slots) { return fllm_scan_rwkv6_floats(heads, head_size, slots); },
+        [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+            return fllm_scan_rwkv6_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, heads, head_size, hidden, eps, state_off, r, k, v, w, gate, norm_w,
+                                          norm_b, first, out);
+        });
+    pick.end(rc == 0);
+    return rc;
 }
 int fllm_cuda_act(FllmStream *st, const float *x, float *out, size_t n, int mode) {
     PREP(st);
@@ -1833,10 +2164,43 @@ int fllm_cuda_mamba2_layer(FllmStream *st, const void *runs, int nruns, int rows
                            const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
                            const float *norm, float *mixed, float *out) {
     PREP(st);
-    void *d = nullptr;
+    const FllmRun *hr = static_cast<const FllmRun *>(runs);
+    int min_rows = fllm_scan_mamba2_supported(inner, state, heads, groups) ? scan_min_rows(st) : 0;
+    ScanChoice pick;
+    if (min_rows > 0) {
+        int long_rows = 0;
+        for (int i = 0; i < nruns; i++) long_rows += hr[i].n >= min_rows ? hr[i].n : 0;
+        scan_choose(pick, st, "mamba2", inner / heads, state, heads, groups, long_rows);
+        if (!pick.chunked) min_rows = 0;
+    }
+    std::vector<FllmRun> shortr, longr;
+    for (int i = 0; i < nruns; i++) (min_rows > 0 && hr[i].n >= min_rows ? longr : shortr).push_back(hr[i]);
+    if (!longr.empty() && !scan_preflight(st, longr, [&](int slots) { return fllm_scan_mamba2_floats(inner, state, heads, slots); })) {
+        shortr.insert(shortr.end(), longr.begin(), longr.end());
+        longr.clear();
+        pick.release();
+    }
+    pick.begin(st->s);
+    void *d = nullptr, *ds = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_mamba2_launch(st->s, d, nruns, rows, inner, state, heads, groups, ksz, norm_groups, norm_mode, step_min, eps, state_off, rec_bytes, proj,
-                              convw, convb, dt_bias, decay, skip, norm, mixed, out);
+    if (shortr.size() == (size_t)nruns) {
+        ds = d;
+    } else if (!shortr.empty()) {
+        if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
+    }
+    if (int e = fllm_mamba2_launch(st->s, d, nruns, ds, (int)shortr.size(), inner, state, heads, groups, ksz, norm_groups, state_off, rec_bytes, step_min, proj,
+                                   convw, convb, dt_bias, decay, skip, mixed, out))
+        return e;
+    const int conv_dim = inner + 2 * groups * state, width = inner + conv_dim + heads;
+    if (int e = scan_windows(
+            st, longr, [&](int slots) { return fllm_scan_mamba2_floats(inner, state, heads, slots); },
+            [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
+                return fllm_scan_mamba2_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, inner, state, heads, groups, step_min, state_off, proj, width,
+                                               inner + conv_dim, mixed, conv_dim, dt_bias, decay, skip, out);
+            }))
+        return e;
+    pick.end(true);
+    return fllm_mamba2_norm_launch(st->s, rows, inner, heads, norm_groups, norm_mode, eps, conv_dim, proj, norm, out);
 }
 int fllm_cuda_shortconv_supported(int hidden, int ksz) { return !ssm_kernels_off() && fllm_shortconv_supported(hidden, ksz); }
 // ShortConv layer: `runs` is nruns ConvRun records (24 bytes each, see shortconv.cu) in host memory.

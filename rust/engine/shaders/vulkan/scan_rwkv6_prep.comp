@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_rwkv6_prep | bindings: r,k,v,w,first,scratch | push: hidden,heads,hn,row0,n,slots | grid: [heads, n, 1] per run window
+// RWKV-6, chunk-parallel scan (see _scan_common.glsl; port of scan_rwkv6_prep_kernel in cuda/scan.cu): P_t = diag(exp(-exp(w))) P + k v^T, the readout sees the state
+// before the token (SF_QPREV) plus the bonus c = sum_j r u k (u = `first`) times v. One workgroup (hn <= 128 invocations) per head of a token.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer RBuf { float rin[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kin[]; };
+layout(std430, binding = 2) readonly buffer VBuf { float vin[]; };
+layout(std430, binding = 3) readonly buffer WBuf { float win[]; };
+layout(std430, binding = 4) readonly buffer FirstBuf { float first[]; };
+layout(std430, binding = 5) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint heads;
+    uint hn;
+    uint row0;
+    uint n;
+    uint slots;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint h = gl_WorkGroupID.x;
+    const uint t = gl_WorkGroupID.y;
+    if (t >= p.n) return;
+    const uint i = gl_LocalInvocationID.x;
+    const bool live = i < p.hn;
+    const ScanLay y = scan_layout(p.hn, p.hn, p.heads, SF_LWV | SF_QPREV | SF_HASC, p.slots);
+    const uint ch = h * p.hn + i;
+    const uint at = (p.row0 + t) * p.hidden + ch;
+    const uint la = t * p.hidden + ch;
+    const float r = live ? rin[at] : 0.0;
+    const float k = live ? kin[at] : 0.0;
+    const float bonus = wg_sum(live ? r * first[ch] * k : 0.0);
+    if (live) {
+        sc[y.q + la] = r;
+        sc[y.kp + la] = k;
+        sc[y.lw + la] = max(-exp(win[at]), SLW_MIN);
+        sc[y.v + la] = vin[at];
+        if (i == 0u) sc[y.c + t * p.heads + h] = bonus;
+    }
+}

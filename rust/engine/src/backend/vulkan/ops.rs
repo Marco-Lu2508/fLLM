@@ -17,6 +17,7 @@ pub mod moe;
 pub mod qwen4;
 pub mod recurrent;
 pub mod v4;
+pub mod scan;
 
 #[cfg(test)]
 mod mirror;

@@ -1,0 +1,77 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_rwkv7_prep | bindings: r,k,v,w,a,vres,k_k,k_a,r_k,v_first,scratch | push: hidden,heads,hn,row0,n,slots,has_vres | grid: [heads, n, 1] per run window
+// RWKV-7, chunk-parallel scan (see _scan_common.glsl; port of scan_rwkv7_prep_kernel in cuda/scan.cu, per-token part of rwkv7_wkv): P_t = (diag(w) - (kk a) kk^T) P + k v^T
+// with w = exp(-0.6065306597126334 * sigmoid(w_in)) (as lw), the value residual blend (v_first written when there is no v_res), kk = normalize_head(k * k_k),
+// k' = k * (1 + (a - 1) * k_a) and the bonus sum_j r k' r_k (kept for the post shader). One workgroup (hn <= 128 invocations) per head of a token.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer RBuf { float rin[]; };
+layout(std430, binding = 1) readonly buffer KBuf { float kin[]; };
+layout(std430, binding = 2) readonly buffer VBuf { float vin[]; };
+layout(std430, binding = 3) readonly buffer WBuf { float win[]; };
+layout(std430, binding = 4) readonly buffer ABuf { float ain[]; };
+layout(std430, binding = 5) readonly buffer VResBuf { float vres[]; };
+layout(std430, binding = 6) readonly buffer KKBuf { float k_k[]; };
+layout(std430, binding = 7) readonly buffer KABuf { float k_a[]; };
+layout(std430, binding = 8) readonly buffer RKBuf { float r_k[]; };
+layout(std430, binding = 9) buffer VFirstBuf { float v_first[]; };
+layout(std430, binding = 10) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint heads;
+    uint hn;
+    uint row0;
+    uint n;
+    uint slots;
+    uint has_vres;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint h = gl_WorkGroupID.x;
+    const uint t = gl_WorkGroupID.y;
+    if (t >= p.n) return;
+    const uint i = gl_LocalInvocationID.x;
+    const bool live = i < p.hn;
+    const ScanLay y = scan_layout(p.hn, p.hn, p.heads, SF_RANK1 | SF_LWV, p.slots);
+    const uint ch = h * p.hn + i;
+    const uint at = (p.row0 + t) * p.hidden + ch;
+    const uint la = t * p.hidden + ch;
+    float a = 0.0;
+    float lw = 0.0;
+    float k_in = 0.0;
+    float v = 0.0;
+    float kk = 0.0;
+    float r = 0.0;
+    if (live) {
+        a = sigmoid1(ain[at]);
+        lw = -0.6065306597126334 * sigmoid1(win[at]);
+        k_in = kin[at];
+        v = vin[at];
+        if (p.has_vres != 0u) {
+            v += (v_first[at] - v) * sigmoid1(vres[at]);
+        } else {
+            v_first[at] = v;
+        }
+        kk = k_in * k_k[ch];
+        r = rin[at];
+    }
+    const float ss = wg_sum(kk * kk);
+    kk *= 1.0 / max(sqrt(ss), 1e-12);
+    const float k = live ? k_in * (1.0 + (a - 1.0) * k_a[ch]) : 0.0;
+    const float bonus = wg_sum(live ? r * k * r_k[ch] : 0.0);
+    if (live) {
+        sc[y.q + la] = r;
+        sc[y.kp + la] = k;
+        sc[y.a + la] = kk;
+        sc[y.b + la] = kk * a;
+        sc[y.lw + la] = lw;
+        sc[y.v + la] = v;
+        if (i == 0u) sc[y.c + t * p.heads + h] = bonus;
+    }
+}

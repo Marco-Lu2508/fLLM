@@ -1,0 +1,46 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_rwkv7_post | bindings: gate,norm_w,norm_b,scratch,out | push: hidden,heads,hn,row0,n,slots,eps | grid: [heads, n, 1] per run window
+// RWKV-7, chunk-parallel scan (port of scan_rwkv7_post_kernel in cuda/scan.cu): out = (groupnorm_head(y) * norm_w + norm_b + bonus * v) * gate, with y the head
+// output of the scan, v the (blended) value and bonus the sum written by scan_rwkv7_prep. One workgroup (hn <= 128 invocations) per head of a token.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 1) readonly buffer NormWBuf { float norm_w[]; };
+layout(std430, binding = 2) readonly buffer NormBBuf { float norm_b[]; };
+layout(std430, binding = 3) buffer ScratchBuf { float sc[]; };
+layout(std430, binding = 4) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint hidden;
+    uint heads;
+    uint hn;
+    uint row0;
+    uint n;
+    uint slots;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint h = gl_WorkGroupID.x;
+    const uint t = gl_WorkGroupID.y;
+    if (t >= p.n) return;
+    const uint i = gl_LocalInvocationID.x;
+    const bool live = i < p.hn;
+    const ScanLay y = scan_layout(p.hn, p.hn, p.heads, SF_RANK1 | SF_LWV, p.slots);
+    const uint ch = h * p.hn + i;
+    const uint at = (p.row0 + t) * p.hidden + ch;
+    const uint la = t * p.hidden + ch;
+    const float acc = live ? sc[y.o + la] : 0.0;
+    const float mean = wg_sum(acc) / float(p.hn);
+    const float d = live ? acc - mean : 0.0;
+    const float var = wg_sum(d * d) / float(p.hn);
+    if (live) {
+        const float normed = d * (1.0 / sqrt(var + p.eps)) * norm_w[ch] + norm_b[ch];
+        outv[at] = (normed + sc[y.c + t * p.heads + h] * sc[y.v + la]) * gate[at];
+    }
+}

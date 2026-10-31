@@ -7,7 +7,7 @@
 
 use super::exec::Arg;
 use super::VulkanStream;
-use crate::backend::vulkan::ops::recurrent::{plan_mamba2_mixer, Mamba2Shape, RunSpec};
+use crate::backend::vulkan::ops::recurrent::{plan_mamba2_mixer_scan, Mamba2Shape, RunSpec};
 use crate::backend::{BackendError, DeviceBuffer};
 
 /// Device-resident parameters of a Mamba-2 layer (all FP32).
@@ -66,7 +66,8 @@ impl VulkanStream {
             ));
         }
         let specs: Vec<RunSpec> = runs.iter().map(|(spec, _)| *spec).collect();
-        let plans = plan_mamba2_mixer(shape, &specs, rows, state_offset)?;
+        let (shared, pick) = self.scan_pick("mamba2", [shape.state, shape.head_dim(), shape.heads], specs.iter().map(|spec| spec.rows));
+        let plans = plan_mamba2_mixer_scan(shape, &specs, rows, state_offset, shared)?;
         // a layer without a convolution bias reads zeros
         let zeros = match weights.conv_bias {
             Some(_) => None,
@@ -95,6 +96,6 @@ impl VulkanStream {
             (None, None) => {}
         }
         let states: Vec<&DeviceBuffer> = runs.iter().map(|(_, state)| *state).collect();
-        self.run_plans(&plans, &args, &states, false)
+        self.scan_timed(Some(&pick), |s| s.run_plans(&plans, &args, &states, false))
     }
 }

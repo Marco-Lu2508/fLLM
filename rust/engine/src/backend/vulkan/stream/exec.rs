@@ -41,18 +41,29 @@ fn max_macs_per_submit() -> u64 {
 pub(super) const RECURRENCE_CHUNK: usize = 128;
 
 /// The runs of a call cut into waves of pieces of at most [`RECURRENCE_CHUNK`] tokens: wave `k` holds piece `k` of every run that is long enough (only the first
-/// piece of a run keeps `reset`). A call whose runs are all short gives one wave equal to `runs`.
-pub(super) fn recurrence_waves<'a>(runs: &[crate::backend::DeltaRun<'a>]) -> Vec<Vec<crate::backend::DeltaRun<'a>>> {
-    let count = runs.iter().map(|r| r.rows.div_ceil(RECURRENCE_CHUNK)).max().unwrap_or(0).max(1);
+/// piece of a run keeps `reset`). A call whose runs are all short gives one wave equal to `runs`. A run for which `whole(rows)` holds is not cut: it goes into
+/// wave 0 in one piece (the runs the chunk-parallel scan takes, which cuts them into windows itself).
+pub(super) fn recurrence_waves_with<'a>(
+    runs: &[crate::backend::DeltaRun<'a>],
+    whole: impl Fn(usize) -> bool,
+) -> Vec<Vec<crate::backend::DeltaRun<'a>>> {
+    let pieces = |r: &crate::backend::DeltaRun<'a>| if whole(r.rows) { 1 } else { r.rows.div_ceil(RECURRENCE_CHUNK) };
+    let count = runs.iter().map(pieces).max().unwrap_or(0).max(1);
     (0..count)
         .map(|k| {
             runs.iter()
-                .filter(|r| r.rows > k * RECURRENCE_CHUNK)
-                .map(|r| crate::backend::DeltaRun {
-                    state: r.state,
-                    first_row: r.first_row + k * RECURRENCE_CHUNK,
-                    rows: (r.rows - k * RECURRENCE_CHUNK).min(RECURRENCE_CHUNK),
-                    reset: r.reset && k == 0,
+                .filter(|r| if whole(r.rows) { k == 0 } else { r.rows > k * RECURRENCE_CHUNK })
+                .map(|r| {
+                    if whole(r.rows) {
+                        crate::backend::DeltaRun { state: r.state, first_row: r.first_row, rows: r.rows, reset: r.reset }
+                    } else {
+                        crate::backend::DeltaRun {
+                            state: r.state,
+                            first_row: r.first_row + k * RECURRENCE_CHUNK,
+                            rows: (r.rows - k * RECURRENCE_CHUNK).min(RECURRENCE_CHUNK),
+                            reset: r.reset && k == 0,
+                        }
+                    }
                 })
                 .collect()
         })
@@ -112,6 +123,43 @@ fn missing(plan: &OpPlan, name: &str) -> BackendError {
 }
 
 impl VulkanStream {
+    /// The shared memory per workgroup of the device when the chunk-parallel scan of the recurrent layers is allowed (`FLLM_CHUNKED_SCAN`), else `None`.
+    pub(super) fn scan_shared(&self) -> Option<u32> {
+        crate::backend::vulkan::ops::scan::scan_enabled().then(|| self.sh.caps().max_shared_memory)
+    }
+
+    /// The form of the recurrence this call of a layer uses for its long runs (`rows` of every run, `shape` the layer's head sizes): the shared memory of the
+    /// device when the scan is to be used, and the pick (which says whether the call is timed).
+    pub(super) fn scan_pick(&self, kind: &str, shape: [usize; 3], rows: impl Iterator<Item = usize>) -> (Option<u32>, crate::backend::vulkan::ops::scan::ScanPick) {
+        use crate::backend::vulkan::ops::scan;
+        let shared = self.scan_shared();
+        let long: usize = rows.filter(|&r| scan::wanted(shared, r, shape[0], shape[1], shape[2])).sum();
+        if long == 0 {
+            // decode steps and short runs: nothing to decide, and no key to build for every layer of every token
+            return (None, scan::ScanPick::never());
+        }
+        let key = format!("{kind}/{}/{}/{}/{}", self.sh.device_id, shape[0], shape[1], shape[2]);
+        let pick = scan::pick(key, long);
+        (pick.chunked.then_some(shared).flatten(), pick)
+    }
+
+    /// Runs `run`; a measured call (see `ScanPick::timed`) is waited for and its time reported.
+    pub(super) fn scan_timed(
+        &mut self,
+        pick: Option<&crate::backend::vulkan::ops::scan::ScanPick>,
+        run: impl FnOnce(&mut Self) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        let Some(pick) = pick.filter(|p| p.timed) else {
+            return run(self);
+        };
+        self.wait_idle()?;
+        let start = std::time::Instant::now();
+        run(self)?;
+        self.wait_idle()?;
+        crate::backend::vulkan::ops::scan::report(pick, start.elapsed().as_secs_f64());
+        Ok(())
+    }
+
     /// Forget what the previous linear projection left (called by everything that is not a linear projection).
     pub(super) fn touch(&mut self) {
         self.trace = None;

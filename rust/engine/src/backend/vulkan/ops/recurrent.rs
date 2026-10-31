@@ -79,6 +79,18 @@ pub fn plan_delta_layer_with(
     state_offset: usize,
     cols: bool,
 ) -> Result<Vec<OpPlan>, BackendError> {
+    plan_delta_layer_scan(shape, runs, state_offset, cols, None)
+}
+
+/// [`plan_delta_layer_with`]; `scan`: the shared memory of the device when the runs of [`super::scan::min_rows`] rows and more may take the chunk-parallel scan
+/// (`scan_delta_prep`, `scan_cum` .. `scan_state`, `scan_delta_post` after the `delta_conv` of the run, see [`super::scan`]).
+pub fn plan_delta_layer_scan(
+    shape: &DeltaShape,
+    runs: &[RunSpec],
+    state_offset: usize,
+    cols: bool,
+    scan: Option<u32>,
+) -> Result<Vec<OpPlan>, BackendError> {
     if !delta_supported(shape) {
         return Err(BackendError::UnsupportedOperation(format!(
             "DeltaNet shape {}/{} heads {}x{} kernel {} is not supported by the Vulkan shaders",
@@ -140,6 +152,10 @@ pub fn plan_delta_layer_with(
             conv_slots,
         )?);
 
+        if vh <= 256 && super::scan::wanted(scan, run.rows, hk, hv, vh) {
+            plans.extend(super::scan::plan_scan_delta_run(shape, i, run, state_offset, mixed_bytes)?);
+            continue;
+        }
         let rec_push = Push::new()
             .u("kh", kh)
             .u("vh", vh)
@@ -194,6 +210,11 @@ pub fn plan_delta_layer_with(
 /// matrices exactly as there) and one `kda_rec_hk<head_dim>` dispatch (barrier in between). Slots of `delta_conv`: `qkv`, `conv`, `state`, `mixed` (scratch
 /// id 0), of `kda_rec`: `mixed`, `forget`, `beta`, `gate`, `dt_bias`, `rate`, `norm`, `state`, `out`.
 pub fn plan_kda_layer(shape: &crate::backend::KdaShape, runs: &[RunSpec], state_offset: usize) -> Result<Vec<OpPlan>, BackendError> {
+    plan_kda_layer_scan(shape, runs, state_offset, None)
+}
+
+/// [`plan_kda_layer`]; `scan`: the shared memory of the device when long runs may take the chunk-parallel scan ([`super::scan`]).
+pub fn plan_kda_layer_scan(shape: &crate::backend::KdaShape, runs: &[RunSpec], state_offset: usize, scan: Option<u32>) -> Result<Vec<OpPlan>, BackendError> {
     if !kda_supported(shape) {
         return Err(BackendError::UnsupportedOperation(format!(
             "KDA shape {} heads of {} kernel {} is not supported by the Vulkan shaders",
@@ -237,6 +258,10 @@ pub fn plan_kda_layer(shape: &crate::backend::KdaShape, runs: &[RunSpec], state_
             .f("qscale", qscale);
         let conv_slots = Slots::new().read("qkv").read("conv").run_state("state", i).scratch("mixed", 0, mixed_bytes, Access::ReadWrite);
         plans.push(plan("delta_conv", conv_push, [gx as u32, gy as u32, 1], conv_slots)?);
+        if super::scan::wanted(scan, run.rows, hd, hd, heads) {
+            plans.extend(super::scan::plan_scan_kda_run(shape, i, run, state_offset, mixed_bytes)?);
+            continue;
+        }
         let rec_push = Push::new()
             .u("heads", heads)
             .u("conv_dim", conv_dim)
@@ -734,6 +759,17 @@ pub fn plan_mamba2_mixer(
     rows: usize,
     state_offset: usize,
 ) -> Result<Vec<OpPlan>, BackendError> {
+    plan_mamba2_mixer_scan(shape, runs, rows, state_offset, None)
+}
+
+/// [`plan_mamba2_mixer`]; `scan`: the shared memory of the device when long runs may take the chunk-parallel scan ([`super::scan`]).
+pub fn plan_mamba2_mixer_scan(
+    shape: &Mamba2Shape,
+    runs: &[RunSpec],
+    rows: usize,
+    state_offset: usize,
+    scan: Option<u32>,
+) -> Result<Vec<OpPlan>, BackendError> {
     shape.check()?;
     if !state_offset.is_multiple_of(4) {
         return Err(invalid("Mamba state offset must be a multiple of 4 bytes"));
@@ -759,6 +795,11 @@ pub fn plan_mamba2_mixer(
             true,
             scratch,
         )?);
+        if shape.heads <= 512 && super::scan::wanted(scan, run.rows, shape.state, shape.head_dim(), shape.heads) {
+            let mixed = (1u8, rows * shape.conv_dim() * 4);
+            plans.extend(super::scan::plan_scan_mamba2_run(shape, i, run, width, shape.inner + shape.conv_dim(), rec_off, mixed)?);
+            continue;
+        }
         plans.push(plan_mamba2_scan(
             i,
             run,

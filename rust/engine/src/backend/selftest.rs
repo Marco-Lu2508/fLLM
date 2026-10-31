@@ -2067,7 +2067,7 @@ impl<'a> Tester<'a> {
             KdaShape { heads: 2, head_dim: 32, conv_kernel: 4, eps: 1e-6, lower_bound: None },
             KdaShape { heads: 2, head_dim: 64, conv_kernel: 4, eps: 1e-6, lower_bound: None },
             KdaShape { heads: 2, head_dim: 128, conv_kernel: 4, eps: 1e-6, lower_bound: None },
-            KdaShape { heads: 2, head_dim: 32, conv_kernel: 4, eps: 1e-6, lower_bound: Some(0.5) },
+            KdaShape { heads: 2, head_dim: 32, conv_kernel: 4, eps: 1e-6, lower_bound: Some(-0.5) },
         ];
         for shape in shapes {
             let label = format!("{} heads {}x{} ksz={}{}", shape.heads, shape.head_dim, shape.head_dim, shape.conv_kernel, if shape.lower_bound.is_some() { " bounded" } else { "" });
@@ -2107,13 +2107,19 @@ impl<'a> Tester<'a> {
             rate: &rate,
             norm: &norm,
         };
-        let calls: [&[(usize, usize)]; 6] = [
+        // runs of 64 rows and more take the chunk-parallel scan on the devices that have one (partial and exact chunks, runs that continue a state,
+        // a long run next to short ones that take the serial kernel)
+        let calls: [&[(usize, usize)]; 10] = [
             &[(0, 37), (1, 5), (2, 2)],
             &[(0, 1), (1, 1), (2, 1)],
             &[(0, 1), (1, 1), (2, 1)],
             &[(0, 20), (1, 1)],
             &[(2, 6), (0, 1), (1, 3)],
             &[(1, 1), (0, 1), (2, 1)],
+            &[(0, 150), (1, 64), (2, 3)],
+            &[(1, 65), (2, 130)],
+            &[(0, 1), (2, 64), (1, 1)],
+            &[(0, 70), (1, 2), (2, 1)],
         ];
         let mut stream = self.device.create_stream()?;
         let conv_buf = put(self.device, stream.as_mut(), &conv)?;
@@ -2209,13 +2215,17 @@ impl<'a> Tester<'a> {
             norm: &norm,
         };
         // (sequence, tokens) per call
-        let calls: [&[(usize, usize)]; 6] = [
+        let calls: [&[(usize, usize)]; 10] = [
             &[(0, 37), (1, 5), (2, 2)],
             &[(0, 1), (1, 1), (2, 1)],
             &[(0, 1), (1, 1), (2, 1)],
             &[(0, 20), (1, 1)],
             &[(2, 6), (0, 1), (1, 3)],
             &[(1, 1), (0, 1), (2, 1)],
+            &[(0, 150), (1, 64), (2, 3)],
+            &[(1, 65), (2, 130)],
+            &[(0, 1), (2, 64), (1, 1)],
+            &[(0, 70), (1, 2), (2, 1)],
         ];
         let mut stream = self.device.create_stream()?;
         let conv_buf = put(self.device, stream.as_mut(), &conv)?;
@@ -2281,6 +2291,12 @@ impl<'a> Tester<'a> {
     }
 
     fn run_all(&mut self) {
+        // the recurrent layers take the chunk-parallel scan for their long runs in these checks (by default a device times both forms on the first calls and keeps
+        // the faster one, which would leave it to the order of the calls which form a check meets)
+        #[cfg(feature = "cuda")]
+        crate::backend::cuda::set_prefill_switch(crate::backend::cuda::PrefillSwitch::ChunkedScan, 2);
+        #[cfg(feature = "vulkan")]
+        crate::backend::vulkan::ops::scan::set_policy(crate::backend::vulkan::ops::scan::Policy::Always);
         if self.enter("delta") {
             self.delta_cases();
         }
@@ -4333,13 +4349,17 @@ impl Tester<'_> {
         let decay: Vec<f32> = (0..heads).map(|_| -(0.2 + self.rng.unit().abs() * 2.0)).collect();
         let skip = self.rng.vector(heads, 1.0);
         let norm: Vec<f32> = (0..inner).map(|_| 1.0 + 0.25 * self.rng.unit()).collect();
-        let calls: [&[(usize, usize)]; 6] = [
+        let calls: [&[(usize, usize)]; 10] = [
             &[(0, 37), (1, 5), (2, 2)],
             &[(0, 1), (1, 1), (2, 1)],
             &[(0, 1), (1, 1), (2, 1)],
             &[(0, 20), (1, 1)],
             &[(2, 6), (0, 1), (1, 3)],
             &[(1, 1), (0, 1), (2, 1)],
+            &[(0, 150), (1, 64), (2, 3)],
+            &[(1, 65), (2, 130)],
+            &[(0, 1), (2, 64), (1, 1)],
+            &[(0, 70), (1, 2), (2, 1)],
         ];
         let mut stream = self.device.create_stream()?;
         let conv_buf = put(self.device, stream.as_mut(), &conv)?;

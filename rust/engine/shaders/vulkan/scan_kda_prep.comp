@@ -1,0 +1,55 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_kda_prep | bindings: mixed,forget,beta,dt_bias,rate,scratch | push: heads,hd,conv_dim,row0,n,slots,bounded,lower_bound | grid: [n, 1, 1] per run window
+// Kimi Delta Attention, chunk-parallel scan (see _scan_common.glsl; port of scan_kda_prep_kernel in cuda/scan.cu): the rows row0 .. row0+n-1 of `mixed` (output of
+// delta_conv) in the layout of the scan. The delta rule with a decay per key channel: w = g (vector), a = g * k, b = kp = sigma k, with
+// g = bounded ? lower_bound * sigmoid(rate[h] * raw) : -rate[h] * softplus(raw) (clamped), raw = forget + dt_bias, sigma = sigmoid(beta). One workgroup per token.
+#define WG 256
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer ForgetBuf { float forget[]; };
+layout(std430, binding = 2) readonly buffer BetaBuf { float beta[]; };
+layout(std430, binding = 3) readonly buffer DtBuf { float dt_bias[]; };
+layout(std430, binding = 4) readonly buffer RateBuf { float rate[]; };
+layout(std430, binding = 5) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint hd;
+    uint conv_dim;
+    uint row0;
+    uint n;
+    uint slots;
+    uint bounded;
+    float lower_bound;
+} p;
+
+void main() {
+    const uint t = gl_WorkGroupID.x;
+    if (t >= p.n) return;
+    const ScanLay y = scan_layout(p.hd, p.hd, p.heads, SF_RANK1 | SF_BSAME | SF_LWV, p.slots);
+    const uint key_dim = p.heads * p.hd;
+    const uint row = p.row0 + t;
+    const uint m = row * p.conv_dim;
+    for (uint e = gl_LocalInvocationID.x; e < key_dim; e += WG) {
+        const uint h = e / p.hd;
+        const float raw = forget[row * key_dim + e] + dt_bias[e];
+        float g;
+        if (p.bounded != 0u) {
+            g = p.lower_bound / (1.0 + exp(-rate[h] * raw));
+        } else {
+            g = -rate[h] * softplus20(raw);
+        }
+        g = max(g, SLW_MIN);
+        const float sigma = 1.0 / (1.0 + exp(-beta[row * p.heads + h]));
+        const float k = mixed[m + key_dim + e];
+        const uint at = t * key_dim + e;
+        sc[y.lw + at] = g;
+        sc[y.q + at] = mixed[m + e];
+        sc[y.kp + at] = k * sigma;
+        sc[y.a + at] = k * exp(g);
+        sc[y.v + at] = mixed[m + 2u * key_dim + e];
+    }
+}

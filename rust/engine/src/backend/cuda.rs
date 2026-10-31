@@ -6486,6 +6486,9 @@ pub enum PrefillSwitch {
     FuseAttnF16 = 3,
     /// `FLLM_MARLIN_PREFILL_CFG` (0: vllm, 1: fllm)
     MarlinCfg = 4,
+    /// `FLLM_CHUNKED_SCAN` (0: the recurrent layers always run their prompts through the serial kernels, 1: the faster form is measured per layer shape, 2: the
+    /// chunk-parallel scan for every run of 64 rows and more)
+    ChunkedScan = 5,
 }
 
 pub fn prefill_switch(which: PrefillSwitch) -> i32 {

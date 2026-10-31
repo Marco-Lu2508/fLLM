@@ -1,0 +1,85 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_wide | bindings: scratch | push: hk,hv,heads,flags,n,reset,slots | grid: [ceil(n/64), heads * tiles, 1] per run window
+// Chunk-parallel scan (see _scan_common.glsl), step 4 (port of scan_wide_kernel in cuda/scan_core.cuh): per (chunk, head) and tile of 64 columns one of the products
+//   op 0  Wr = T AG       op 1  Qe -= W2 AG       op 2  Kd -= M^T Bd       (rank-one terms; hk columns each)
+//   op 3  O1 = N V + c V  (N = Qk without rank-one terms; hv columns)
+// tiles = 3 * ceil(hk/64) + ceil(hv/64) with rank-one terms (the ops in this order, ceil(hk/64) tiles each), else ceil(hv/64).
+#define WG 256
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hk;
+    uint hv;
+    uint heads;
+    uint flags;
+    uint n;
+    uint reset;
+    uint slots;
+} p;
+
+#include "_scan_tile.glsl"
+
+void main() {
+    const uint ch = gl_WorkGroupID.x;
+    const uint t0 = ch * SC;
+    if (t0 >= p.n) return;
+    const bool r1 = (p.flags & SF_RANK1) != 0u;
+    const uint tk = (p.hk + 63u) / 64u;
+    const uint tv = (p.hv + 63u) / 64u;
+    const uint tiles = r1 ? 3u * tk + tv : tv;
+    const uint h = gl_WorkGroupID.y / tiles;
+    uint z = gl_WorkGroupID.y % tiles;
+    const uint L = min(SC, p.n - t0);
+    const uint hk = p.hk;
+    const uint hv = p.hv;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint ty = tid >> 4u;
+    const uint tx = tid & 15u;
+    const ScanLay y = scan_layout(hk, hv, p.heads, p.flags, p.slots);
+    const uint w = y.ws + (ch * p.heads + h) * y.chunk;
+    uint op = 3u;
+    if (r1 && z < 3u * tk) {
+        op = z / tk;
+        z -= op * tk;
+    } else if (r1) {
+        z -= 3u * tk;
+    }
+    const uint n0 = z * 64u;
+    const uint cols = (op == 3u ? hv : hk) - n0;
+    uint a_src;
+    uint b_src;
+    uint out_at;
+    if (op == 0u) { a_src = w + y.o_tt; b_src = w + y.o_ag; out_at = w + y.o_wr; }
+    else if (op == 1u) { a_src = w + y.o_w2; b_src = w + y.o_ag; out_at = w + y.o_qe; }
+    else if (op == 2u) { a_src = w + y.o_mt; b_src = w + y.o_bd; out_at = w + y.o_kd; }  // Mt[m][k] = M[k][m]
+    else { a_src = r1 ? w + y.o_nn : w + y.o_qk; b_src = y.v + (t0 * p.heads + h) * hv; out_at = w + y.o_o1; }
+    const uint b_ld = op == 3u ? p.heads * hv : hk;
+    tile_rows(false, b_src + n0, b_ld, L, cols);
+    wg_sync();
+    float acc[16];
+    [[unroll]] for (uint e = 0u; e < 16u; e++) acc[e] = 0.0;
+    tile_gemm_ga(a_src, 64u, acc);
+    const uint width = op == 3u ? hv : hk;
+    const bool hc = op == 3u && (p.flags & SF_HASC) != 0u;
+    const uint cc = y.c + t0 * p.heads + h;
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        const uint m = ty * 4u + i;
+        [[unroll]] for (uint j = 0u; j < 4u; j++) {
+            const uint n = n0 + tx * 4u + j;
+            if (n >= width) continue;
+            float v = acc[i * 4u + j];
+            if (op == 0u) {
+                sc[out_at + m * width + n] = v;
+            } else if (op == 3u) {
+                if (hc && m < L) v += sc[cc + m * p.heads] * sc[b_src + m * b_ld + n];
+                sc[out_at + m * width + n] = v;
+            } else {
+                sc[out_at + m * width + n] -= v;
+            }
+        }
+    }
+}

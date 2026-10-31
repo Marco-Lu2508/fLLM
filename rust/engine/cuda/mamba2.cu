@@ -140,18 +140,19 @@ int fllm_ssm_conv_launch(cudaStream_t s, const void *runs, int nruns, const floa
     return fllm_check_launch("ssm_conv");
 }
 
-int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
-                       int norm_groups, int norm_mode, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
-                       const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
-                       const float *norm, float *mixed, float *out) {
+// Convolution of every run and the serial scan of `rec_runs` (the runs the chunked scan of scan.cu does not take). The norm follows in fllm_mamba2_norm_launch.
+int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, const void *rec_runs, int nrec, int inner, int state, int heads, int groups, int ksz,
+                       int norm_groups, size_t state_off, size_t rec_bytes, float step_min, const float *proj, const float *convw, const float *convb,
+                       const float *dt_bias, const float *decay, const float *skip, float *mixed, float *out) {
     if (!fllm_mamba2_supported(inner, state, heads, groups, ksz, norm_groups)) return fllm_set_error("mamba2: unsupported shape");
-    if (nruns <= 0 || rows <= 0) return 0;
+    if (nruns <= 0) return 0;
     const int conv_dim = inner + 2 * groups * state;
     const int width = inner + conv_dim + heads;
     const int head_dim = inner / heads;
-    const SsmRun *r = static_cast<const SsmRun *>(runs);
     if (int e = fllm_ssm_conv_launch(s, runs, nruns, proj, width, inner, convw, convb, mixed, conv_dim, ksz, state_off, rec_bytes)) return e;
-    const dim3 grid(heads, nruns);
+    if (nrec <= 0) return 0;
+    const SsmRun *r = static_cast<const SsmRun *>(rec_runs);
+    const dim3 grid(heads, nrec);
     switch (state) {
         case 16:
             mamba_scan_kernel<16><<<grid, head_dim, 0, s>>>(proj, width, inner + conv_dim, mixed, dt_bias, decay, skip, r, out, inner, conv_dim, heads, groups, step_min, state_off);
@@ -166,7 +167,13 @@ int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, int rows, in
             mamba_scan_kernel<128><<<grid, head_dim, 0, s>>>(proj, width, inner + conv_dim, mixed, dt_bias, decay, skip, r, out, inner, conv_dim, heads, groups, step_min, state_off);
             break;
     }
-    if (int e = fllm_check_launch("mamba_scan")) return e;
+    return fllm_check_launch("mamba_scan");
+}
+
+int fllm_mamba2_norm_launch(cudaStream_t s, int rows, int inner, int heads, int norm_groups, int norm_mode, float eps, int conv_dim, const float *proj,
+                            const float *norm, float *out) {
+    if (rows <= 0) return 0;
+    const int width = inner + conv_dim + heads;
     mamba_norm_kernel<<<dim3(rows, norm_groups), 256, 0, s>>>(proj, width, out, norm, inner, inner / norm_groups, eps, norm_mode);
     return fllm_check_launch("mamba_norm");
 }
