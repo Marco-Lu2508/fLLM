@@ -176,19 +176,19 @@ and "now" CUDA rows for the same code differ by up to 4 %).
 
 * **CUDA, one request.** Decode speeds are within 3 to 4 % of each other on every model (the memory bandwidth of the card is the limit). The prompt of
   fLLM is the fastest for the 3B model at every length (4289 / 4904 against 3876 / 4167 tok/s for Ollama at 580 / 2100 tokens) and, on the 4-bit AWQ
-  checkpoint, ahead of vLLM and SGLang too. On Llama-3.1-8B it is **10 % behind Ollama at 600 tokens (1690 against 1887) and 3 % at 2100 tokens** (in tokens each engine reports: Ollama counts 34 more tokens for the same text, the time to the first token is within 3 %, see the second pass below) and
-  ahead of llama.cpp. An int8 tensor-core GEMM for Q4_K that exists in the tree (`cuda/qmma4k.cu`, never built or called) was wired in for a test: after one
+  checkpoint, ahead of vLLM and SGLang too. On Llama-3.1-8B it is **10 % behind Ollama at 600 tokens (1690 against 1887) and 3 % at 2100 tokens** (in tokens each engine reports: Ollama counts 34 more tokens for the same text because it adds its chat template; with identical token ids fLLM is 7 to 9 %
+  behind llama.cpp and Ollama, see the third pass below). An int8 tensor-core GEMM for Q4_K that exists in the tree (`cuda/qmma4k.cu`, never built or called) was wired in for a test: after one
   fix (it ignored the fused gate/up activation) it wrote the right text but was slower than the FP16 kernel on this card (1736 against 2017 tok/s on the
   8B prompt). It stays unused; the gap is the Q4_K prompt GEMM.
 * **CUDA, simultaneous requests.** The aggregate rises with 4 and 8 requests (3B, short prompts: 97 -> 270 -> 400 tok/s; Ollama 94 -> 83 -> 128) and is the
-  best of the GGUF engines everywhere except **Llama-3.1-8B with four 2100-token prompts: 53 against 60 (Ollama) and 54 tok/s (llama.cpp)**; the median
-  TTFT there (4.1 s) is also worse than Ollama's (2.8 s). On the AWQ checkpoint fLLM equals vLLM and SGLang with 4 requests, is 10 % behind at 8
+  best of the GGUF engines everywhere, **Llama-3.1-8B with four 2100-token prompts included (55 to 57 against 51 to 52 for Ollama and 53 for llama.cpp when the
+  three run one after the other on a quiet GPU, third pass below; the second pass had measured 54 against 61 for Ollama, which was not seen again)**. On the AWQ checkpoint fLLM equals vLLM and SGLang with 4 requests, is 10 % behind at 8
   requests with a medium prompt (369 against 413 / 431) and 17 % behind with short prompts (523 against 632 / 646). Profiled: the weight kernels there already
   stream at the card's bandwidth; what remained was the decode attention kernel (about 100 us per layer for 8 sequences), fixed in the second pass below (8 short requests: 530 -> 655 tok/s, vLLM 632).
 * **No batching collapse on this card**, neither with CUDA nor with Vulkan: the aggregate grows with the number of requests in every row of the tables
   (Vulkan 3B: 76 -> 142 -> 182 tok/s). The collapse reported for a Radeon 840M (28 -> 10 tok/s with 8 requests) does not occur here.
-* **Vulkan on the NVIDIA card** is within 3 to 5 % of llama.cpp's Vulkan prompt on the 3B model (2660 / 2816 against 2733 / 2949 tok/s) and about 20 %
-  behind on the 8B model (996 / 1094 against 1253 / 1352). Decode: 8 % behind on the 3B model (76.5 against 82.8), ahead on the 8B model (41.5 against 38.3).
+* **Vulkan on the NVIDIA card** (numbers of the first session; the third pass below raised the 8B prompt speed by 25 %) is within 3 to 5 % of llama.cpp's
+  Vulkan prompt on the 3B model (2660 / 2816 against 2733 / 2949 tok/s) and about 20 % behind on the 8B model (996 / 1094 against 1253 / 1352). Decode: 8 % behind on the 3B model (76.5 against 82.8), ahead on the 8B model (41.5 against 38.3).
   With several requests fLLM's Vulkan aggregates more than llama.cpp's for short prompts (182 against 108 with 8 requests), about the same for medium ones,
   and less for 2100-token prompts (74 against 82). CUDA is 1.3 (decode) to 1.7 (prompt) times faster than Vulkan on the same card.
 * **What changed for these numbers** (see the changelog): (1) CUDA: a batch that held one prompt chunk and the decode rows of other requests sent the
@@ -263,6 +263,117 @@ Llama-3.2-3B-Instruct Q4_K_M (GGUF, same session, ran after the AWQ runs; the GP
   other causes without hardware counters). Ollama's lead there is the prompt phase, not the scheduler or the launches.
 * **Only the attention fix changed the 8B numbers, by 1 to 4 %** (decode of 4 sequences: 35.8 -> 37.0 tok/s each at 600 tokens): at 4 rows its 32 blocks of
   one or three splits were not the problem.
+
+### Third pass (2026-10-31, same RTX 2000 Ada laptop)
+
+Four 2100-token prompts, timings of identical token ids, the Vulkan prompt matrix product.
+
+Llama-3.1-8B Q4_K_M. Bursts as before (four requests of ~2100 tokens at the same moment, 128 new tokens, every prompt new, medians of three bursts), and the
+time to the first token of one prompt given as **token ids** (`/v1/completions` with an array for fLLM and llama.cpp, `/api/generate` with `raw` for Ollama,
+which does not take ids). Every run waited until no other process computed on the GPU or held GPU memory. Two things the earlier sessions did not control
+matter: (1) **the temperature**: the same fLLM binary reached 56.7 tok/s with the GPU at 45 degrees C at the start and 52.6 tok/s at 66 to 72 degrees C (the card
+runs at its power limit, below), so only engines run one after the other in the same state are compared; (2) **free memory**: another process holding 150 to
+200 MiB makes the KV pool fall from 9488 to 7648 tokens, below the ~8900 that four prompts of 2100 tokens plus 128 new tokens need, and the aggregate drops to
+42 tok/s because the last prompt waits for a finished sequence.
+
+**The gap to Ollama is not reproducible.** Aggregate tok/s (three bursts per run, the engines one after the other, then again; GPU 45 to 57 degrees C at the
+start) and the TTFT of the four requests:
+
+| engine | run 1 | run 2 | TTFT of the four requests (s) |
+|---|---|---|---|
+| **fLLM CUDA** | **56.7** | **54.6** | 1.6 / 3.2 / 4.5 / 5.5 |
+| Ollama | 51.1 | 51.6 | 1.9 / 3.2 / 4.5 / 5.6 |
+| llama.cpp CUDA | 53.3 | 53.0 | 2.8 / 3.9 / 5.1 / 5.3 |
+
+Ollama stayed between 51 and 54.4 tok/s in all its bursts of this pass; the 60.6 tok/s and the 2.8 s median TTFT of the second pass were not seen again. The four
+TTFTs of fLLM and Ollama have the same shape: the prompts are processed one after the other, a prompt of 2100 tokens takes 1.2 to 1.6 s.
+
+**The card is at its power limit with every engine.** `nvidia-smi -q -d PERFORMANCE`: power limit 60 W (the maximum is 97 W, setting it needs root), "SW Power
+Cap" active. `nvidia-smi dmon` during the bursts: fLLM 59 to 60 W in both phases, SM clock 1700 to 1740 MHz in the prompt phase and 1480 to 1600 MHz in the
+decode phase (memory unit 99 % busy at 7801 MHz); Ollama 59 to 60 W, about 1700 and 1500 MHz. A cuBLAS float16 matrix product (PyTorch, `512 x 4096 x 14336`)
+reaches 32 TFLOPS at 1410 MHz and 60 W. The throughput of every engine is set by the energy it needs per token, not by a clock it could reach.
+
+**Scheduler** (fLLM, 4 x 2100 tokens, cool card): prompt chunk of 256 / 512 (default) tokens 55.3 / 55.6 tok/s, `--chunked-prefill-policy prefill-first` 55.7 (the
+four prompts then finish together, TTFT 5.3 s each) - no difference in the aggregate, because the GPU is busy all the time and the prompt phase (8400 tokens) plus the
+decode phase (128 steps) cost the same in any order. Explicit `--max-batched-tokens 1024` / `2048` give 32.8 / 18.8 tok/s: the memory plan then no longer keeps every
+layer on the device and streams feed-forward weights over PCIe (`nsys`: 2.7 GB of host-to-device copies per 2121-token prompt; one prompt takes 1.58 / 1.74 s
+against 1.39 s); the automatic choice (512 here) refuses such sizes. 1.8 GB of the 8 GB stay unused at the default `--gpu-memory-utilization 0.90` (6350 of 8188 MiB in
+use during a burst); with 0.97 the pool holds 13792 instead of 9488 tokens and the burst gave 56.5 tok/s on a cool card. A larger pool is what protects this load
+against a second process on the card.
+
+**Kernel level** (`nsys` of one burst; `ncu` still needs root): in the prompt phase (5.8 s) the GPU is 98.8 % busy, in the decode phase (3.6 s) 97.3 %; the idle
+gaps between kernels add up to 51 ms and 96 ms (2.7 % of the decode phase). 83 % of the prompt phase are the Q4_K / Q6_K GEMMs: `qgemm4k` for 14336 weight rows x
+4096 columns and 512 tokens takes 2.35 ms = 25.6 TFLOPS, the cuBLAS float16 product of the same size 1.86 ms = 32.3 TFLOPS (79 %); the down projection takes
+2.50 ms (24 TFLOPS). The rest of the prompt phase: activation conversion 3.4 %, FlashInfer attention 3.1 %, split-K reduction 1.6 %. The decode phase streams
+6.1 GB (5 GB of weights, 1.1 GB of KV cache) in 27.9 ms = 98 % of the card's 224 GB/s. `QG_VARIANT=4` (fewer shared-memory reads per mma, built for this test)
+changed the kernel times by -1 to -6 % (2325 against 2346 us, 753 against 806 us, 2400 against 2495 us), within the 4 % by which the unchanged Q6_K kernel differed
+between the two profiles; the bursts gave 53.6 / 52.8 against 52.6 / 52.7 tok/s. It is not made the default.
+
+**One prompt, the same token ids** (561 and 2121 tokens, medians of five requests):
+
+| engine | 561 tokens: TTFT s (tok/s) | 2121 tokens: TTFT s (tok/s) |
+|---|---|---|
+| fLLM CUDA | 0.381 (1472) | 1.427 (1486) |
+| llama.cpp CUDA | 0.356 (1576) | 1.321 (1606) |
+| Ollama, `raw` (561 and 2070 tokens) | 0.349 (1607) | 1.313 (1577) |
+
+Ollama's `prompt_eval_count` is 595 instead of 561 without `raw` (2104 instead of 2070 for the long text): it applies the chat template of the model, 34 tokens, to a
+completion request. That, not a speed difference, is why Ollama "counted 34 more tokens"; the table of the second pass divided a larger token count by a time that
+covered more work. **With identical tokens fLLM's CUDA prompt of the 8B model is 7 to 9 % behind llama.cpp and Ollama**; the cause measured above is the Q4_K GEMM
+at 79 % of cuBLAS float16 under the same power limit. A prompt chunk of 256 tokens instead of 512 was 3.4 % faster for one prompt (1.342 against 1.389 s; the fp32
+intermediate of the feed-forward is 29 MB per matrix at 512 rows and then fits the 32 MB L2 cache) and equal for four prompts, so the default stays.
+
+**What was changed on CUDA.** The blocks of `qgemm4k` / `qgemm6k` were numbered with the row blocks of the weight matrix varying fastest, so the whole weight matrix
+streamed through the 32 MB L2 cache between two token tiles of the same rows and was read from memory once per token tile. They are now numbered token tile first
+(`QG_TOKFAST`, `-DQG_TOKFAST=0` for the old order; the arithmetic of a block is unchanged). Three alternating pairs of bursts: 56.4 / 55.7 / 55.3 tok/s against
+55.9 / 54.8 / 54.2 before (+1.5 %), the TTFT of the first prompt about 3 % shorter; `selftest-gpu --device cuda:0`: 1643 checks, 0 failed. With only two token tiles of
+256 per 512-token chunk the effect on CUDA is small. **Greedy text**: with `FLLM_CUDA_NO_AUTOTUNE=1` the first 64 tokens of two prompts are identical with and without the
+change (the arithmetic of a block did not change). With the tile autotuner on, the tile a process picks depends on timing noise and, through split-K, changes the order of
+the fp32 sums: the old build wrote the same text in 7 of 7 processes, the new one in 5 of 8 and another continuation of the same first words in the other 3 (not examined
+which is closer to the f64 reference); the effect belongs to the tuner, not to the order of the blocks.
+
+**Vulkan on the NVIDIA card, 8B prompt: the bottleneck and a 25 % gain.** The same token ids, `vulkan:1`, one run after the other, GPU 51 to 67 degrees C,
+llama.cpp's Vulkan build is b11988:
+
+| model | prompt tokens | fLLM before | **fLLM after** | llama.cpp Vulkan |
+|---|---|---|---|---|
+| Llama-3.1-8B Q4_K_M | 561 | 0.641 s (875 tok/s) | **0.522 s (1074)** | 0.435 s (1291) |
+| | 2121 | 2.379 s (891) | **1.896 s (1119)** | 1.532 s (1384) |
+| | decode tok/s | 41.3 | 41.2 | 39.0 |
+| Llama-3.2-3B Q4_K_M | 561 | 0.249 s (2254) | **0.232 s (2417)** | 0.192 s (2922) |
+| | 2121 | 0.901 s (2355) | **0.826 s (2567)** | 0.707 s (3000) |
+
+(+25 % on the 8B model, +9 % on the 3B model; the first 24 tokens of the check prompt are identical before and after on both; two runs of each differed by less than
+1 %. The table was measured with the new shaders loaded through `FLLM_VK_SHADER_DIR`; the program built from this tree with them compiled in, a later session with the card
+at 47 degrees C, gave 0.503 / 0.515 s for 561 tokens and 1.811 / 1.855 s for 2121 (1116 / 1171 tok/s, two runs) against 0.623 / 0.635 s and 2.319 / 2.342 s for the old
+build of the same session, and `selftest-gpu --device vulkan:1` with it: 1153 checks, 0 failed, 272 skipped as unsupported.) With `FLLM_VK_PROFILE` the matrix products (`mm_q4_k_cw`, `mm_q6_k_cw`) are 70 % of the GPU time of the prompt before and 74 % after. The cooperative-matrix units
+are not the limit (`FLLM_VK_BENCH_LINEAR`: 25 to 29 TMAC/s on registers; the products reached about 8.5 TMAC/s before and 10.5 after). Taking parts of the shader away
+one at a time (time of the 2121-token prompt, before the changes) shows where the time went:
+
+| removed from `mm_coopmat_w.comp` | prompt | change |
+|---|---|---|
+| nothing | 2.35 s | |
+| the global loads of the packed weights and their scales (replaced by arithmetic) | 1.51 s | -36 % |
+| the matrix multiply-adds | 1.83 s | -22 % |
+| the dequantization and the store of the weight tile | 2.07 s | -12 % |
+| the global loads of the activations | 2.16 s | -8 % |
+| the store of the activations | 2.37 s | 0 % |
+| (a 128 x 128 tile instead of 128 x 64, to halve the dequantization per product) | 3.24 s | +38 % |
+| (a 64 x 64 tile, compiled with `-O0`) | 2.36 s | 0 % |
+
+So the tensor cores wait for the weights, and two things were wrong with how they arrive. (1) **Workgroup order**: the row blocks varied fastest, so for one
+512-token chunk (eight token tiles of 64) the 33 MB of a feed-forward weight matrix streamed through the L2 cache eight times; the workgroups are now numbered token
+tile first (2.353 -> 2.085 s). (2) **The scale words were loaded and turned into floats inside the loader of the next K step**, so the warp stalled on the load
+right in front of the matrix multiply-adds instead of overlapping with them (without these loads the prompt took 1.58 s). The raw words are now kept in registers
+and converted after the products of the step (2.085 -> 2.03 s), and the scale and minimum words of a Q4_K super-block, which serve four K steps, are loaded once per
+super-block as one `uvec4` instead of three scalar loads per step (2.03 -> 1.84 s). Q6_K got the same split between loading and decoding (1.908 -> 1.896 s).
+
+**What is left on Vulkan** (19 to 20 % behind llama.cpp's prompt on the 8B model, 14 % on the 3B model): the matrix products are still 74 % of the prompt, at about
+21 TFLOPS (18 before, 32 for cuBLAS); the loads of the activations (8 %) and of the packed weights (5 %) are not fully hidden, the dequantization and the weight store
+cost 12 %, and larger tiles are slower (probably register pressure; not examined). The card also offers `VK_NV_cooperative_matrix2`, which llama.cpp's Vulkan build can
+use for quantized tiles (which path it took was not checked); fLLM uses the portable `VK_KHR_cooperative_matrix` with a shared-memory tile and has not tried a
+coopmat2 port. `glslc` 2026.1 with `-O` gave wrong results for 64-row tile variants of the shader where `-O0` was right (only the 128 x 64 tile ships and it is
+checked by the self-test).
 
 ## AMD Radeon 840M laptop
 

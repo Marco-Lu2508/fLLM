@@ -95,6 +95,22 @@ behaviour between versions).
 - `docs/windows.md`: a check list for an RTX 20 series card (Turing). The sm_75 fix below is still **unverified on real Turing hardware**.
 
 ### Fixed
+- **Vulkan on NVIDIA: the prompt matrix product (`mm_<fmt>_cw`) is 25 % faster on Llama-3.1-8B Q4_K_M** (2121 token ids: 2.379 -> 1.896 s, 891 -> 1119 tok/s; Llama-3.2-3B
+  2355 -> 2567 tok/s; decode unchanged, the first 24 greedy tokens identical; `selftest-gpu --device vulkan:1` 0 failed). Ablations of the shader showed that the tensor
+  cores waited for the packed weights: (1) the workgroups are numbered token tile first, so the token tiles of one block of weight rows run next to each other and the block
+  is fetched from memory once instead of once per token tile; (2) the scale words of a Q4_K super-block are loaded once per four K steps as one `uvec4` and turned into
+  floats only after the matrix products of the step, so no arithmetic waits for the loads (Q6_K got the same split between loading and decoding). The remaining gap to
+  llama.cpp's Vulkan build is 19 % (8B) and 14 % (3B), see [docs/benchmarks.md](docs/benchmarks.md#third-pass-2026-10-31-same-rtx-2000-ada-laptop).
+  `FLLM_VK_COOP_WIDE_TILE=<bm>x<bn>x<subgroups>` tells the planner about a differently built module (`FLLM_VK_SHADER_DIR`).
+- **CUDA: the blocks of the Q4_K / Q6_K prompt GEMM run token tile first** (`QG_TOKFAST`, `-DQG_TOKFAST=0` restores the old order), so the weights of a block of rows are
+  read from memory once and found in the L2 cache by the other token tiles: four 2100-token prompts on Llama-3.1-8B 56.4 / 55.7 / 55.3 against 55.9 / 54.8 / 54.2 tok/s in
+  alternating runs (+1.5 %), the first prompt's time to the first token about 3 % shorter; the arithmetic of a block is unchanged (same greedy text with `FLLM_CUDA_NO_AUTOTUNE=1`; with the tile
+  autotuner on, the picked tile varies with timing noise and 3 of 8 processes wrote another continuation of the check prompt, where the old build's 7 of 7 did not), `selftest-gpu --device cuda:0` 0 failed.
+- **Benchmark claims corrected again** ([third pass](docs/benchmarks.md#third-pass-2026-10-31-same-rtx-2000-ada-laptop)):
+  the "four 2100-token prompts: 54 against 61 tok/s for Ollama" gap was not reproduced (fLLM 54.6 to 57, Ollama 51 to 54.4, llama.cpp 53 in runs one after the other); the
+  card runs at its 60 W power limit with every engine and the temperature of the GPU moves the same binary by 7 %. Ollama's 34 extra prompt tokens are its chat template; with
+  identical token ids fLLM's CUDA prompt on the 8B model is 7 to 9 % behind llama.cpp and Ollama (Q4_K GEMM at 79 % of cuBLAS float16 at the same power limit). Explicit
+  `--max-batched-tokens 1024` / `2048` on this 8 GB card make the plan stream weights over PCIe (32.8 / 18.8 tok/s for four prompts); the automatic choice avoids them.
 - **CUDA: a running request slowed down every prompt processed next to it.** A batch with a prompt chunk and the decode rows of other requests sent all rows, the prompt rows too, to the per-row decode attention kernel (36 % of the GPU time in a profile); only batches without decode rows used the tensor-core prompt kernel. The prompt runs now keep it. Llama-3.2-3B Q4_K_M, four simultaneous 2100-token requests on an RTX 2000 Ada: 103 -> 131 tok/s aggregate (8 requests: 111 -> 155), median time to the first token 1.9 -> 1.3 s; the AWQ checkpoint 119 -> 159 tok/s.
 - **`selftest-gpu --device cuda:0` has 0 failures on an RTX 2000 Ada laptop GPU (sm_89): 1002 of 1002 checks in the exact pass, 1627 checks in the fast pass (1593 ok, 34 skipped as unsupported on this device, 0 failed; FlashInfer build).** The failures that were listed as known were looked at one by one; six of them were mistakes of the checks, two were real defects:
   * *`fp8blk`, 20 cases of 2 to 5 %*: the exact pass never takes the FP8 tensor cores (exact math switches them off) but compared the FP32 GEMV with the emulation of their activation rounding. The exact pass now holds the product to the unquantized result (tolerance 1e-3); the tensor-core path matched its emulation in the fast pass all along. The earlier explanation ("the rounding the path does on purpose") was right about the size and wrong about where it came from.

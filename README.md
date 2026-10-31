@@ -307,10 +307,13 @@ prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 t
 backend on the NVIDIA card (35 % behind llama.cpp's Vulkan decode), and its own NPU kernels (prompt only) are slower than FastFlowLM's.
 prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 tok/s) with a prompt 25 % behind. Prompt lengths and 4 / 8 simultaneous requests
 (2026-10-30, same card): the aggregate of fLLM's CUDA path grows with the number of requests and is the highest of the GGUF engines (3B, short prompts: 400
-tok/s with 8 requests against 315 for llama.cpp and 128 for Ollama), except for four long Llama-3.1-8B prompts (54 against 61 for Ollama); its native Vulkan
-backend on the NVIDIA card is now within 3 to 5 % of llama.cpp's Vulkan prompt speed on the 3B model (about 20 % behind on the 8B model, 8 % behind in decode).
-Where fLLM is behind: four simultaneous 2100-token Llama-3.1-8B prompts on CUDA (54 against 61 tok/s for Ollama; one such prompt takes the same time to the first
-token as with Ollama, 1.03 against 1.05 s, and the Q4_K prompt GEMM is within 5 % per token at 600 tokens), and it has no backend for the NPU. After the second CUDA pass
+tok/s with 8 requests against 315 for llama.cpp and 128 for Ollama), four long Llama-3.1-8B prompts included (55 to 57 against 51 to 52 for Ollama and 53 for
+llama.cpp, the three measured one after the other on a quiet GPU; an earlier session's 61 for Ollama was not seen again). Third pass of 2026-10-31 (identical token
+ids): fLLM's native Vulkan prompt on the NVIDIA card is 25 % faster than before (Llama-3.1-8B 891 -> 1119 tok/s, now 19 % behind llama.cpp's Vulkan 1384; Llama-3.2-3B
+2355 -> 2567, 14 % behind 3000), decode is level (41.2 against 39.0 tok/s on the 8B model).
+Where fLLM is behind: with identical token ids its CUDA prompt of the 8B model is 7 to 9 % slower than llama.cpp's and Ollama's (the Q4_K prompt GEMM reaches 79 % of a
+cuBLAS float16 product under the card's 60 W power limit, which every engine runs at; the 34 extra prompt tokens that Ollama reported were its chat template, not
+speed), and it has no backend for the NPU. After the second CUDA pass
 of 2026-10-30 (decode attention in CUDA graphs) AWQ with 8 simultaneous short requests is ahead of vLLM (655 against 632 tok/s in the same session; it was 17 % behind).
 
 Measured on Google Colab with a single user, greedy decoding, over HTTP (before the latest performance work):
