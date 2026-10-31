@@ -2090,6 +2090,39 @@ async fn status_reports_what_the_model_can_do_about_thinking() {
     assert_eq!(models["data"][0]["capabilities"]["thinking"]["control"], "toggle");
 }
 
+/// Tiny models with Qwen3-2507 style templates: both show earlier reasoning in the history (`<think>` appears in the text),
+/// only the Thinking one opens the block in the generation prompt.
+fn template_harness(file: &str, history_tail: &str) -> Harness {
+    let path = tiny_gguf().with_file_name(file);
+    let template = format!(
+        "{{%- for m in messages -%}}{{{{ m['role'] }}}}: {{{{ m['content'] | replace('<think>', '') }}}}\n{{% endfor -%}}{{#- reasoning is shown as <think>...</think> in the history -#}}{history_tail}"
+    );
+    let options = tiny_model::Options { chat_template: template, ..Default::default() };
+    tiny_model::write_gguf(&path, &options).unwrap();
+    start_with(path, Settings::default())
+}
+
+#[tokio::test]
+async fn only_a_template_that_opens_the_block_counts_as_always_thinking() {
+    let instruct = template_harness("tiny-instruct-2507.gguf", "{%- if add_generation_prompt -%}assistant:{%- endif -%}");
+    let caps = instruct.get("/api/studio/status").await.json()["model"]["capabilities"]["thinking"].clone();
+    assert_eq!((caps["supported"].clone(), caps["control"].clone()), (json!(false), json!("none")), "{caps}");
+    let thinking = template_harness("tiny-thinking-2507.gguf", "{%- if add_generation_prompt -%}assistant:<think>\n{%- endif -%}");
+    let caps = thinking.get("/api/studio/status").await.json()["model"]["capabilities"]["thinking"].clone();
+    assert_eq!(caps["control"], "always", "{caps}");
+    // a forced tool call on the always-thinking model is served (the unit test of `close_open_reasoning` shows the prompt)
+    let forced = thinking.chat(json!({"max_tokens": 200, "tools": mode_tools(), "tool_choice": "required", "seed": 1})).await;
+    assert!(forced.status == StatusCode::OK || forced.text().contains("increase max_tokens"), "{}", forced.text());
+}
+
+#[tokio::test]
+async fn a_forced_call_without_max_tokens_ends_within_the_default_limit() {
+    let h = shared();
+    let reply = h.chat(json!({"tools": mode_tools(), "tool_choice": "required", "temperature": 1.0, "seed": 5})).await;
+    // the random tiny model may not finish a call, but the request must end with a call or the clear "increase max_tokens" error
+    assert!(reply.status == StatusCode::OK || reply.text().contains("increase max_tokens"), "{}", reply.text());
+}
+
 #[tokio::test]
 async fn thinking_budget_is_validated() {
     let h = thinking_harness();

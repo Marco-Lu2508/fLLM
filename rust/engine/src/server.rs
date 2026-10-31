@@ -402,6 +402,8 @@ pub struct ServerConfig {
 /// Temperature of an OpenAI-style request that sets none and whose model ships no `generation_config.json` sampling
 /// values: the OpenAI and vLLM default (the engine used to answer greedily).
 const OPENAI_DEFAULT_TEMPERATURE: f64 = 1.0;
+/// Token limit of a request that forces a tool call (`tool_choice` required or a named function) and sets no `max_tokens`.
+const FORCED_CALL_DEFAULT_MAX_TOKENS: usize = 8192;
 
 /// Ollama built-in sampling defaults, used on `/api/chat` and `/api/generate` when neither the request, the command
 /// line nor the model sets a value.
@@ -462,7 +464,10 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
     });
     server_metrics.observability.set_model_name(&config.model_name);
     let (worker_tx, worker_rx) = std_mpsc::channel::<WorkerCommand>();
-    let grammar_factory = Arc::new(tokenizer.grammar_factory()?);
+    let tool_parser = crate::tool_parsers::select(&model_arch, &format!("{chat_template}\n{tool_chat_template}"), config.tool_parser.as_deref())?;
+    // the call markers of the formats that have a tool-call grammar must be reachable by that grammar (see `grammar_factory_with`)
+    let grammar_markers = if matches!(tool_parser.id(), "hermes" | "qwen3_coder" | "llama3" | "mistral" | "granite3") { tool_parser.markers() } else { Vec::new() };
+    let grammar_factory = Arc::new(tokenizer.grammar_factory_with(&grammar_markers)?);
     let tokenizer = Arc::new(tokenizer);
     let jump_forward = config.jump_forward.then(|| {
         let encoder = tokenizer.clone();
@@ -471,7 +476,6 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
             Some(Box::new(move |text: &str| encoder.encode_plain(text).ok())),
         ))
     });
-    let tool_parser = crate::tool_parsers::select(&model_arch, &format!("{chat_template}\n{tool_chat_template}"), config.tool_parser.as_deref())?;
     let reasoning_family = Family::select(&chat_template, config.reasoning_parser.as_deref())?;
     let thinking = crate::thinking::ThinkingCaps::detect(&chat_template, reasoning_family, &model_arch);
     tracing::info!("tool parser: {}, reasoning parser: {:?}, thinking: {}", tool_parser.id(), reasoning_family, thinking.control.name());
@@ -1975,7 +1979,7 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
             template_kwargs.insert(state.thinking.variable.into(), json!(!off));
         }
     }
-    let prompt = match render_messages(
+    let mut prompt = match render_messages(
         &state,
         Value::Array(messages.clone()),
         if tool_spec.disabled {
@@ -1988,11 +1992,19 @@ async fn chat_completions(State(state): State<Arc<AppState>>, Json(body): Json<V
         Ok(prompt) => prompt,
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
     };
+    let mut reasoning = ReasoningSpec::for_request(&state, &prompt, &tool_spec);
+    // A constrained reply (forced tool call, response_format) starts with the first generated token. A template that opens
+    // the reasoning block itself (Qwen3-Thinking-2507, DeepSeek-R1) cannot be switched off with `enable_thinking`, so the
+    // constrained text would land inside the block and be taken for reasoning: the block is closed empty instead.
+    if (tool_spec.forced_schema.is_some() || body.get("response_format").is_some_and(|f| f["type"] != "text"))
+        && close_open_reasoning(&mut prompt, &reasoning)
+    {
+        reasoning = ReasoningSpec::for_request(&state, &prompt, &tool_spec);
+    }
     let prompt_ids = match state.tokenizer.encode(&prompt) {
         Ok(ids) => ids.into_iter().map(i64::from).collect::<Vec<_>>(),
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
     };
-    let mut reasoning = ReasoningSpec::for_request(&state, &prompt, &tool_spec);
     reasoning.budget = thinking_budget;
     openai_generate(
         state,
@@ -2805,7 +2817,12 @@ async fn openai_generate(
             if remaining == 0 {
                 return context_length_error(state.max_context, prompt.len(), 0);
             }
-            remaining
+            // a forced tool call is one JSON object: a request without a limit must end in minutes, not fill a 256k context
+            if tool_spec.forces_call() {
+                remaining.min(FORCED_CALL_DEFAULT_MAX_TOKENS)
+            } else {
+                remaining
+            }
         }
         Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
             Some(n) => n,
@@ -3345,6 +3362,20 @@ impl ReasoningSpec {
     fn split_views(&self, text: &str, complete: bool) -> ReasoningParts {
         self.parser.split(text, complete)
     }
+}
+
+/// When the prompt ends inside an open reasoning block, writes the closing tag after an empty reasoning (the shape of
+/// `<think>\n\n</think>\n\n`) and returns `true`; the caller then has to build the reasoning spec again from the new prompt.
+fn close_open_reasoning(prompt: &mut String, reasoning: &ReasoningSpec) -> bool {
+    if !reasoning.starts_in_reasoning() {
+        return false;
+    }
+    let tail_start = prompt.char_indices().rev().nth(80).map_or(0, |(i, _)| i);
+    let Some(close) = reasoning.parser.close_tag(&prompt[tail_start..]) else {
+        return false;
+    };
+    prompt.push_str(&format!("\n{close}\n\n"));
+    true
 }
 
 /// The token ids of the given literals, for the literals that are special tokens.
@@ -4489,6 +4520,23 @@ mod chat_template_tests {
         assert_eq!(plain.content, "No thinking here");
         let closed = ReasoningSpec::from_prompt("x<think>\n\n</think>\n\n");
         assert!(!closed.split_views("Answer", true).reasoning_found);
+    }
+
+    #[test]
+    fn a_prompt_that_opens_the_reasoning_block_is_closed_for_constrained_replies() {
+        // Qwen3-Thinking-2507 / DeepSeek-R1 style: the template writes the opening tag itself
+        let mut prompt = "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n".to_owned();
+        let spec = ReasoningSpec::from_prompt(&prompt);
+        assert!(close_open_reasoning(&mut prompt, &spec));
+        assert!(prompt.ends_with("<think>\n\n</think>\n\n"), "{prompt:?}");
+        let closed = ReasoningSpec::from_prompt(&prompt);
+        assert!(!closed.starts_in_reasoning());
+        // nothing to close when the prompt did not open a block, or the block is closed already
+        let mut plain = "<|im_start|>assistant\n".to_owned();
+        let spec = ReasoningSpec::from_prompt(&plain);
+        assert!(!close_open_reasoning(&mut plain, &spec));
+        assert_eq!(plain, "<|im_start|>assistant\n");
+        assert!(!close_open_reasoning(&mut prompt, &closed));
     }
 }
 

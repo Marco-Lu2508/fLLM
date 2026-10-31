@@ -180,7 +180,9 @@ One port, several dialects, all translated onto the same chat pipeline
 
 Common to the chat routes: streaming (SSE); tool calling with 19 tool-call parsers (Hermes/Qwen, Qwen3-Coder,
 GLM, Llama 3, Mistral, DeepSeek, Kimi, gpt-oss and others; `--tool-parser auto` picks from the chat
-template); reasoning split into `reasoning_content` with 7 parsers; structured output (`response_format`
+template; `tool_call_grammar` limits a reply to text or valid calls, checked in the coding agent with
+Qwen3-4B-Instruct-2507, Qwen3-4B-Thinking-2507, Qwen3-4B and Qwen2.5-Coder-3B on a Windows PC, see
+[docs/server-api.md](docs/server-api.md#constrained-tool-calls)); reasoning split into `reasoning_content` with 7 parsers; structured output (`response_format`
 JSON schema and `json_object`, GBNF, Lark and regex grammars); log probabilities; and sampling controls
 (temperature, top-p/k, min-p, typical-p, penalties, DRY, Mirostat, seed, logit bias).
 Not provided: speech-to-text (`/v1/audio/transcriptions` answers 501: the Whisper encoder exists, a text decoder does not), image generation, realtime, moderation, Assistants, fine-tuning and runtime LoRA switching.

@@ -72,9 +72,12 @@ impl ToolSpec {
                 return Err("tool_choice selects an undeclared tool".into());
             }
         }
+        // Compact JSON (`whitespace_flexible: false`): with free whitespace the grammar lets a model that wants to write
+        // something the schema forbids (a closing `</tool_call>`, a sentence) emit blank space and newlines for as long as
+        // the token limit allows, which without `max_tokens` is the rest of the context. Compact JSON leaves it no such way.
         let forced_schema = required.then(|| json!({"oneOf":functions.iter().filter(|f| named.is_none_or(|n| f["name"] == n)).map(|f|
             json!({"type":"object","properties":{"name":{"const":f["name"]},"arguments":f.get("parameters").cloned().unwrap_or(json!({"type":"object"}))},"required":["name","arguments"],"additionalProperties":false})
-        ).collect::<Vec<_>>()}));
+        ).collect::<Vec<_>>(),"x-guidance":{"whitespace_flexible":false}}));
         let parallel = match body.get("parallel_tool_calls") {
             None => true,
             Some(v) => v.as_bool().ok_or("parallel_tool_calls must be a boolean")?,
@@ -134,6 +137,11 @@ impl ToolSpec {
         self.native_grammar
             .as_ref()
             .map(|lark| llguidance::api::TopLevelGrammar::from_lark(lark.clone()))
+    }
+
+    /// `true` when the reply must be a tool call (`tool_choice` `required` or a named function).
+    pub fn forces_call(&self) -> bool {
+        self.active() && self.required
     }
 
     /// `true` when the request declares tools the model may call.
@@ -271,6 +279,19 @@ mod tests {
         body["tool_choice"] = json!({"type":"function","function":{"name":"missing"}});
         assert!(ToolSpec::from_request(&body).is_err());
     }
+    #[test]
+    fn forced_calls_use_compact_json_and_are_flagged() {
+        let mut body = request();
+        assert!(!ToolSpec::from_request(&body).unwrap().forces_call());
+        body["tool_choice"] = json!("required");
+        let spec = ToolSpec::from_request(&body).unwrap();
+        assert!(spec.forces_call());
+        // no free whitespace: a model cannot stall on blank space until the context is full
+        assert_eq!(spec.forced_schema.unwrap()["x-guidance"]["whitespace_flexible"], false);
+        body["tool_choice"] = json!("none");
+        assert!(!ToolSpec::from_request(&body).unwrap().forces_call());
+    }
+
     fn spec_with(parser: &str, body: Value) -> ToolSpec {
         ToolSpec::from_request(&body)
             .unwrap()
