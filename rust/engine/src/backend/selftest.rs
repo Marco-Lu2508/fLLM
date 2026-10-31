@@ -16,7 +16,9 @@ use crate::cpu_selftest::{format_name, random_weights, Lcg};
 use half::{bf16, f16};
 use std::time::Instant;
 
+mod blocksparse;
 mod dsa;
+mod inkling;
 mod hc;
 mod kv;
 mod mlx;
@@ -71,7 +73,7 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("delta", "delta_layer (Gated DeltaNet): prefill, decode and mixed calls"),
     ("kda", "kda_layer (Kimi Delta Attention): prefill, decode and mixed calls"),
     ("rwkv", "RWKV-6 / RWKV-7: token shift, interpolation, activations and the two WKV recurrences, prompts and decode steps of several sequences"),
-    ("arch", "LayerNorm, activations beyond SiLU, clamp, MLA data movement, Mamba-1/2, ShortConv, softplus gate"),
+    ("arch", "LayerNorm, activations beyond SiLU, clamp, MLA data movement, Mamba-1/2, ShortConv, softplus gate, per-head gate, clamped GLU, hyper-connections, lightning indexer and sparse attention, MiniMax-M3 block-sparse attention, Inkling convolution and relative-position attention"),
     ("linear", "quantized_linear for every weight format (exact and fast kernels, batches, bias, shared activations)"),
     ("embedding", "embedding_lookup for the formats that can hold an embedding table"),
     ("norm", "rms_norm"),
@@ -2289,6 +2291,8 @@ impl<'a> Tester<'a> {
         if self.enter("arch") {
             self.arch_cases();
             self.dsa_cases();
+            self.block_sparse_cases();
+            self.inkling_cases();
             self.hc_cases();
         }
         if self.enter("linear") {

@@ -1102,3 +1102,17 @@ Hyper-connections (`Stream::hc_mix`, `Stream::hc_combine`; plans in `ops/hc.rs`)
 * `misc_dsa_pscores`: scores of the complete pools of the k-pool indexer (GLM-5-Next): per channel the softmax over the pool's tokens of gate score plus position bias weights the keys, then the usual head sum. At most 128 channels and 16 tokens per pool.
 * `misc_dsa_expand`: the first `kp` entries of a row of `sel` (written by `misc_dsa_topk` with `len_div = kpool` and `out_stride = sel_width`) are the chosen pools; the row is rewritten in place as their tokens plus the tokens of the incomplete last pool.
 * `dsa_select` and `dsa_attention` return their plans in groups; the stream runs each group and submits it on its own (about 2e9 multiply-adds per scoring group, 512k position triples per attention group).
+
+### `misc_block_scores.comp`, `attn_block_sparse.comp` (MiniMax-M3 block-sparse attention; `Stream::block_select`, `Stream::block_attention`; plans in `ops/block.rs`)
+
+* `misc_block_scores`: one workgroup of 128 per (row, indexer head, block): the maximum over the keys of the block of `dot(q, key)` (plain dot product, no scale, no ReLU) from
+  the per-slot f32 key store, and `3e38` (a finite stand-in for +infinity) for the newest `local` blocks of the row. Grid `[blocks of the longest row, heads, rows of the group]`; `meta` holds
+  `lengths[rows_total]`, then the block tables. Rows are cut into groups of about 2e9 multiply-adds, each its own submission (`ops::dsa::GROUP_MACS`).
+* The selection is `misc_dsa_topk` over rows * heads rows of block scores (`len_div = 1`, `out_stride = topk`, row lengths = blocks per row in its own `meta`): ascending block numbers, `-1` after the last, equal scores keep the lower block, a row with at most `topk` blocks lists all of them.
+* `attn_block_sparse`: like `attn_sparse`, but `sel` is `rows x groups x topk` block numbers (blocks of `block` keys): head `h` reads the list of indexer head `h / (heads / groups)`, and keys at or beyond `lengths[r]` (the unfinished last block) are skipped. One dispatch holds at most 512k (row, head, key) triples.
+* The indexer keys are written by `misc_dsa_keys` (width = dim, no gate).
+
+### `conv_resid.comp`, `attn_rel.comp` (Inkling; `Stream::conv_resid`, `Stream::rel_attention`; plans in `ops/inkling.rs`)
+
+* `conv_resid`: `out = x + depthwise causal convolution of x` for one run (like `shortconv` without the gating and the bias): one invocation per channel walks the tokens, the history of the last `taps - 1` inputs per channel is `state[state_off + ch * (taps - 1) + j]` (oldest first), `reset` ignores the old history, taps 2..8.
+* `attn_rel`: attention without rotary embeddings, one workgroup of 128 per (row, head), tiles of 128 keys with an online softmax: `score(j) = dot(q * tau, key_j) * scale + tau * sum_c rel[c] * profile[c][distance]` (the bias exists for `distance < extent`), `tau = 1 + log_alpha * ln(max(1, (position + 1) / log_floor))` when `log_floor > 0`; the visible keys are the last `window` ones (0: all). `rel` holds `d_rel <= 128` values per row and head, `profile` is `d_rel x extent`; key and value width `hd <= 512`; at most 512k (row, head, visible key) triples per dispatch.

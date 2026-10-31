@@ -201,6 +201,16 @@ struct DeviceDsa {
 }
 
 /// Device copy of a Mamba-2 layer (the input projection as a quantized weight, small tensors as FP32 buffers).
+/// Device copy of the block indexer of a MiniMax-M3 block-sparse attention layer: its two projections, the per-head norms and the per-slot f32 key store.
+struct DeviceM3 {
+    q: crate::backend::DeviceWeight,
+    k: crate::backend::DeviceWeight,
+    qn: crate::backend::DeviceBuffer,
+    kn: crate::backend::DeviceBuffer,
+    /// One `index_head_dim` f32 row per cache slot.
+    store: crate::backend::DeviceBuffer,
+}
+
 struct DeviceMamba {
     input: crate::backend::DeviceWeight,
     conv: crate::backend::DeviceBuffer,
@@ -697,6 +707,10 @@ pub struct DeviceLayerWeights {
     /// Lightning indexer of a sparse-attention layer resident on the device (`Stream::dsa_select`).
     dsa: Option<DeviceDsa>,
     /// Mamba-2 mixer resident on the device.
+    /// Block indexer of a MiniMax-M3 block-sparse attention layer resident on the device (`Stream::block_select`).
+    m3: Option<DeviceM3>,
+    /// An Inkling layer resident on the device.
+    ink: Option<inkling_device::DeviceInk>,
     mamba: Option<DeviceMamba>,
     /// Short convolution resident on the device.
     shortconv: Option<DeviceShortConv>,
@@ -1160,6 +1174,12 @@ pub struct RustDecoder {
 }
 
 /// DeepStack features: per decoder layer, (row, values) pairs.
+    /// MiniMax-M3 on the accelerator: the block indexer and the block-sparse attention run on the device (`Stream::block_select`); set when the model is attached.
+    m3_device: bool,
+    /// MiniMax-M3 runs on the accelerator at all (`m3_device`, or dense attention with `FLLM_DSA=dense`).
+    m3_run: bool,
+    /// Inkling runs on the accelerator (convolutions, relative-position attention, experts); set when the model is attached.
+    ink_device: bool,
 type DeepstackLevels = Vec<Vec<(usize, Vec<f32>)>>;
 /// Per position axis, the (cos, sin) rotary tables of the device path.
 type AxisTables = Vec<(Arc<Vec<f32>>, Arc<Vec<f32>>)>;
@@ -2242,6 +2262,9 @@ impl RustDecoder {
             if let Some(ctx) = &par {
                 par_shard::shard_layer(ctx, &mut layer, i, &cfg)?;
             }
+            if cfg.minimax3.is_some() {
+                minimax3::patch_layer(model, &cfg, i, &mut layer)?;
+            }
             layers.push(layer);
         }
         let head_name = if has_tensor(mapping, "output.weight") {
@@ -2391,6 +2414,9 @@ impl RustDecoder {
             hc_device: false,
         };
         decoder.set_device(device)?;
+            m3_device: false,
+            m3_run: false,
+            ink_device: false,
         decoder.plan_expert_cache(mapping);
         Ok(decoder)
     }
@@ -2902,8 +2928,9 @@ impl RustDecoder {
         if cfg.inkling.is_some() {
             return Some("Inkling convolutions and relative position bias");
         }
-        if cfg.minimax3.is_some() {
-            return Some("MiniMax-M3 block-sparse attention");
+        if cfg.minimax3.is_some() && !self.m3_run {
+            // the host pass of this model is a pass of its own over all layers: one layer that needs it sends them all there
+            return Some("MiniMax-M3 block-sparse attention (no kernels for this backend or shape, FLLM_M3=host, or an indexer narrower than the rotary part)");
         }
         if cfg.hc.is_some() && !hc_ok {
             return Some("hyper-connections (the backend has no kernels for them, or FLLM_HC=host)");
@@ -3166,6 +3193,23 @@ impl RustDecoder {
         // mixers and feed-forwards are the ordinary device ones (a branch output is the difference of the residual buffer before and after)
         let clamp_ok = backend.create_stream().is_ok_and(|s| s.supports_glu_clamped());
         let hc_ok = self.hc.is_some()
+        // MiniMax-M3: the block indexer and the attention over the selected blocks (f16 cache, the indexer queries rotate like the attention heads)
+        let (m3_run, m3_device) = match self.cfg.minimax3.as_ref() {
+            Some(mc) => {
+                let host = std::env::var("FLLM_M3").is_ok_and(|v| v.eq_ignore_ascii_case("host"));
+                let params = self.block_sparse_params(mc);
+                let supported = !host
+                    && self.par.is_none()
+                    && mc.idx_dim >= mc.rot
+                    && backend.create_stream().is_ok_and(|s| s.supports_block_sparse(&params, self.cfg.heads, mc.kv_heads, mc.head_dim, self.kv_kind));
+                // FLLM_DSA=dense: every sparse layer attends to all keys (the plain device attention)
+                (!host && self.par.is_none() && (self.dsa_dense || supported), supported && !self.dsa_dense)
+            }
+            None => (false, false),
+        };
+        self.m3_run = m3_run;
+        self.m3_device = m3_device;
+        self.ink_device = self.cfg.inkling.is_some() && self.ink_device_possible(&*backend);
             && self.cfg.residual_scale == 1.0
             && self.par.is_none()
             && !std::env::var("FLLM_HC").is_ok_and(|v| v.eq_ignore_ascii_case("host"))
@@ -4590,7 +4634,9 @@ impl RustDecoder {
                 };
                 if !lat {
                     let read_layer = crate::kv_geometry::KvPoolLayout::owner(cfg, i) - kv_base;
-                    if self.dsa_device && (dev_layer.dsa.is_some() || layer.dsa_shared) {
+                    if let Some(m3) = &dev_layer.m3 {
+                        self.minimax3_sparse_attention(&mut **stream, &mut scratch, m3, dev_weights, layer.rope_table, &normed_buf, &q_buf, &mut attn_buf, dev_kv, read_layer, &positions, &slots, tables, lengths, &attn_params)?;
+                    } else if self.dsa_device && (dev_layer.dsa.is_some() || layer.dsa_shared) {
                         // sparse attention: the lightning indexer picks the positions of every row (its own layer's, or the layer before's), attention reads those only
                         let (ic, mc, dp) = (cfg.indexer.as_ref(), cfg.mla.as_ref(), self.dsa_params());
                         let (Some(ic), Some(mc), Some(dp)) = (ic, mc, dp) else { return Err("sparse attention without an indexer configuration".into()) };
@@ -4846,7 +4892,7 @@ impl RustDecoder {
                     scratch.recycle(branch);
                 }
                 if let Some(host_in) = check_in {
-                    self.layer_check(&mut **stream, i, &x_buf, host_in, &positions, tables, lengths, key, value)?;
+                    self.layer_check(&mut **stream, (i, i), &x_buf, host_in, &positions, tables, lengths, key, value)?;
                 }
                 scratch.recycle(normed_buf);
                 continue;
@@ -4909,7 +4955,12 @@ impl RustDecoder {
                     Some(GluMode::Clamped(kind)) => Some(kind),
                     _ => None,
                 };
-                if dense_clamped.is_none()
+                // the clamped SwiGLU of gpt-oss and MiniMax-M3 (also in their dense layers)
+                let dense_oai = match self.dense_glu_mode() {
+                    Some(GluMode::SwigluOai(alpha, limit)) => Some((alpha, limit)),
+                    _ => None,
+                };
+                if dense_clamped.is_none() && dense_oai.is_none()
                     && Self::half_out_weight(gate_w)
                     && matches!(cfg.activation, Activation::Silu | Activation::GeluTanh)
                     && !crate::backend::env_flag_once!("FLLM_NO_F16_FFN")
@@ -5006,6 +5057,8 @@ impl RustDecoder {
                     device_post_norm_inplace(
                         &mut **stream,
                         &mut scratch,
+                } else if let Some((alpha, limit)) = dense_oai {
+                    stream.swiglu_oai(&mut act_buf, &gate_buf, &up_buf, alpha, limit).map_err(err)?;
                         cfg.norm,
                         &mut ffn_out_buf,
                         dev_layer.post_ffn_norm.as_ref(),
@@ -5715,7 +5768,7 @@ impl RustDecoder {
     fn layer_check(
         &self,
         stream: &mut dyn crate::backend::Stream,
-        i: usize,
+        (first, i): (usize, usize),
         x: &crate::backend::DeviceBuffer,
         mut host_x: Vec<f32>,
         positions: &[usize],
@@ -5732,7 +5785,7 @@ impl RustDecoder {
         let worst = dev.iter().zip(&host_x).map(|(a, b)| f64::from((a - b).abs())).fold(0.0, f64::max);
         let mean = dev.iter().zip(&host_x).map(|(a, b)| f64::from((a - b).abs())).sum::<f64>() / host_x.len().max(1) as f64;
         eprintln!(
-            "[layer-check] layer {i} rows {}: max|dev-host| {worst:.5} mean {mean:.6} rms {rms:.4} (max/rms {:.4})",
+            "[layer-check] layer {name} rows {}: max|dev-host| {worst:.5} mean {mean:.6} rms {rms:.4} (max/rms {:.4})",
             positions.len(),
             worst / rms.max(1e-12)
         );
@@ -5805,6 +5858,7 @@ impl RustDecoder {
         })
     }
 
+        let name = if first < i { format!("{first}..{i}") } else { i.to_string() };
     /// A Mamba-1 layer on the device: input projection, convolution kernel, x_proj, dt/B/C normalisation, dt_proj, selective scan, output
     /// projection added to the residual stream.
     #[allow(clippy::too_many_arguments)]
@@ -7852,7 +7906,7 @@ impl RustDecoder {
             } else if cfg.inkling.is_some() {
                 x = self.inkling_layers(&x, &positions, tables, lengths)?;
             } else if cfg.minimax3.is_some() {
-                x = self.minimax3_layers(&x, &positions, tables, lengths)?;
+                x = self.minimax3_layers(&x, &positions, tables, lengths, 0..cfg.layers)?;
             } else if cfg.qwen4.is_some() {
                 x = self.qwen4_layers(&x, ids, &positions, tables, lengths, key, value)?;
             } else if cfg.hc.is_some() {
@@ -8517,6 +8571,8 @@ impl RustDecoder {
         if cfg.embedding_scale != 1.0 {
             for v in &mut host_x {
                 *v *= cfg.embedding_scale;
+            // the block selection stages host arrays (slots, tables, lengths) that a recorded step cannot take
+            && !self.m3_device
             }
         }
         if let Some(table) = &self.position_table {

@@ -1,0 +1,51 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: conv_resid | bindings: x,conv,state,out | push: channels,taps,row0,n,reset,state_off | grid: [ceil(channels/128), 1, 1] per run
+// Inkling convolution of one run (Stream::conv_resid, port of conv_resid_kernel in cuda/inkling.cu, reference `Conv::step` of rust_decoder/inkling.rs): the input is
+// added back to a depthwise causal convolution whose last taps - 1 inputs per channel are the layer's state:
+//   out[t][ch] = x[t][ch] + sum_{j < taps-1} w[ch][j] * h[j] + w[ch][taps-1] * x[t][ch]
+// One invocation per channel walks the n tokens of the run (history in registers). The history of channel ch is state[state_off + ch * (taps - 1) + j]
+// (oldest first; float view of the sequence's state buffer). reset != 0: the old history is ignored. taps in 2..8.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer ConvBuf { float convw[]; };
+layout(std430, binding = 2) buffer StateBuf { float state[]; };
+layout(std430, binding = 3) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint channels;
+    uint taps;
+    uint row0;
+    uint n;
+    uint reset;
+    uint state_off;
+} p;
+
+void main() {
+    const uint ch = gl_GlobalInvocationID.x;
+    if (ch >= p.channels) return;
+    const uint hl = p.taps - 1u;
+    const uint hist = p.state_off + ch * hl;
+    float w[8];
+    float h[7];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) w[k] = k < p.taps ? convw[ch * p.taps + k] : 0.0;
+    [[unroll]] for (uint j = 0u; j < 7u; j++) h[j] = (j < hl && p.reset == 0u) ? state[hist + j] : 0.0;
+    for (uint t = 0u; t < p.n; t++) {
+        const float cur = x[(p.row0 + t) * p.channels + ch];
+        float value = 0.0;
+        [[unroll]] for (uint j = 0u; j < 7u; j++) {
+            if (j < hl) value += w[j] * h[j];
+        }
+        value += w[hl] * cur;
+        outv[(p.row0 + t) * p.channels + ch] = value + cur;
+        [[unroll]] for (uint j = 0u; j < 6u; j++) {
+            if (j + 1u < hl) h[j] = h[j + 1u];
+        }
+        h[hl - 1u] = cur;
+    }
+    [[unroll]] for (uint j = 0u; j < 7u; j++) {
+        if (j < hl) state[hist + j] = h[j];
+    }
+}

@@ -377,6 +377,21 @@ int fllm_dsa_attention_supported(int topk, int dk);
 int fllm_dsa_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int32_t *sel,
                               const int64_t *tables, const float *sinks, int rows, int topk, int heads, int kv_heads, int dk, int dv, int stride, int block_size,
                               float scale);
+int fllm_dsa_topk_launch(cudaStream_t s, const float *scores, size_t score_stride, const int64_t *lengths, int32_t *sel, int rows, int topk, int len_div);
+// MiniMax-M3 block-sparse attention (block_sparse.cu)
+int fllm_block_sparse_supported(int heads, int dim, int topk, int block, int dk);
+int fllm_block_scores_launch(cudaStream_t s, const float *q, const float *store, const int64_t *tables, const int64_t *lengths, float *scores, size_t score_stride,
+                             int row0, int rows, int blocks, int heads, int dim, int block, int local, int stride, int block_size);
+int fllm_block_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int32_t *sel, const int64_t *tables,
+                                const int64_t *lengths, int rows, int topk, int groups, int block, int heads, int kv_heads, int dk, int dv, int stride,
+                                int block_size, float scale);
+// Inkling convolutions and relative-position attention (inkling.cu)
+int fllm_conv_resid_supported(int channels, int taps);
+int fllm_conv_resid_launch(cudaStream_t s, const void *runs, int nruns, int channels, int taps, size_t state_off, const float *x, const float *convw, float *out);
+int fllm_rel_attention_supported(int hd, int d_rel);
+int fllm_rel_attention_launch(cudaStream_t s, const float *q, const float *rel, const float *profile, const uint16_t *kpool, const uint16_t *vpool, float *out,
+                              const int64_t *tables, const int64_t *lengths, int rows, int heads, int kv_heads, int hd, int d_rel, int extent, int window,
+                              int log_floor, float log_alpha, float scale, int stride, int block_size);
 // Native EXL2 / EXL3 projections (exl.cu); `kind` is the GGUF type id (0x80000030 / 0x80000031), `w` the blob of rust/gguf-probe/src/exl.rs. EXL3 needs
 // fllm_exl3_scratch_bytes(rows, cols, batch) of device scratch (EXL2 none).
 size_t fllm_exl3_scratch_bytes(int rows, int cols, int batch);

@@ -1007,6 +1007,29 @@ fn sample_plans() -> Vec<OpPlan> {
         let tables: Vec<i64> = table.iter().chain(table.iter()).copied().collect();
         v.extend(plan_dsa_attention(&kv_layout(1, 4, 192, 128, 16, 128), &attn_params(4, 4, 192, 128, 16, 128), 8, &tables).unwrap());
     }
+    {
+        use crate::backend::vulkan::ops::block::{plan_block_attention, plan_block_select};
+        let bp = crate::backend::BlockSparseParams { heads: 2, dim: 16, topk: 3, block: 4, local: 1, stride: 128, block_size: 16 };
+        let table: Vec<i64> = (0..128i64).collect();
+        for lengths in [vec![300i64, 5, 1000], vec![3i64, 5]] {
+            let tables: Vec<i64> = lengths.iter().flat_map(|_| table.iter().copied()).collect();
+            let slots: Vec<usize> = (0..lengths.len()).collect();
+            v.extend(plan_block_select(&bp, &slots, &tables, &lengths, 128 * 16).unwrap().into_iter().flatten());
+            v.extend(plan_block_attention(&kv_layout(1, 4, 192, 128, 16, 128), &attn_params(4, 4, 192, 128, 16, 128), &bp, &tables, &lengths).unwrap());
+        }
+    }
+    {
+        use crate::backend::vulkan::ops::{inkling::{plan_conv_resid, plan_rel_attention}, recurrent::RunSpec};
+        for taps in [2usize, 4, 8] {
+            v.push(plan_conv_resid(0, &RunSpec { first_row: 0, rows: 3, reset: true }, 40, taps, 256).unwrap());
+        }
+        let rp = crate::backend::RelAttnParams { heads: 4, kv_heads: 4, head_dim: 192, d_rel: 4, extent: 10, window: 6, log_floor: 4, log_alpha: 0.3, scale: 0.01, stride: 128, block_size: 16 };
+        let table: Vec<i64> = (0..128i64).collect();
+        for lengths in [vec![300i64, 5, 1000], vec![3i64, 5]] {
+            let tables: Vec<i64> = lengths.iter().flat_map(|_| table.iter().copied()).collect();
+            v.extend(plan_rel_attention(&kv_layout(1, 4, 192, 192, 16, 128), &rp, &tables, &lengths).unwrap());
+        }
+    }
     for beta in [None, Some(0.5)] {
         v.push(super::plan_head_gate(64, 8, beta).unwrap());
     }

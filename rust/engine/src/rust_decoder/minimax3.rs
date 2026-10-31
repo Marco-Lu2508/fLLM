@@ -13,34 +13,64 @@ fn swiglu_alpha(gate: &mut [f32], up: &[f32], alpha: f32, limit: f32) {
     }
 }
 
-struct M3Moe {
-    router: Linear,
-    bias: Vec<f32>,
-    experts: Vec<Expert>,
-    shared: Expert,
-}
-
-struct M3Indexer {
-    q: Linear,
-    k: Linear,
-    qn: Vec<f32>,
-    kn: Vec<f32>,
-}
-
-struct M3Layer {
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    o: Linear,
-    qn: Vec<f32>,
-    kn: Vec<f32>,
-    indexer: Option<M3Indexer>,
-    moe: Option<M3Moe>,
+pub(super) struct M3Indexer {
+    pub(super) q: Linear,
+    pub(super) k: Linear,
+    pub(super) qn: Vec<f32>,
+    pub(super) kn: Vec<f32>,
 }
 
 pub(super) struct Minimax3Model {
-    layers: Vec<M3Layer>,
+    /// The indexer of every block-sparse attention layer.
+    pub(super) indexers: Vec<Option<M3Indexer>>,
     freq: Vec<f32>,
+}
+
+/// Loads a projection of layer `i` (the names of this model: `attn_query`, `ffn_router`, ...), with the adapters merged at load time.
+fn load_linear(model: &GgufModel, i: usize, name: &str, rows: usize, cols: usize) -> Result<Linear, String> {
+    let p = format!("blk.{i}");
+    let mut l = Linear::load(model.mapping(), &format!("{p}.{name}"), rows, cols)?;
+    l.replace_weights(model.adapted_projection(&format!("{p}.{name}.weight")))?;
+    l.enable_fast_cpu();
+    Ok(l)
+}
+
+/// Gives layer `i` the generic attention and feed-forward structures of this model: grouped-query attention with per-head query / key norms (`Attn::Std`; the
+/// block selection of the sparse layers is added by `minimax3_layers` and by the device pass), and the sigmoid-routed mixture of experts with a shared expert
+/// (`Ffn::Moe`). The dense feed-forward layers are loaded by the generic loader. Both passes, host and device, read these structures, so no weight is held twice.
+pub(super) fn patch_layer(model: &GgufModel, cfg: &ModelConfig, i: usize, layer: &mut Layer) -> Result<(), String> {
+    let mc = cfg.minimax3.as_ref().ok_or("not a MiniMax-M3 model")?;
+    let mapping = model.mapping();
+    let (hidden, p) = (cfg.hidden, format!("blk.{i}"));
+    let rows = |name: &str, e: usize, n: usize, cols: usize| -> Result<Linear, String> {
+        let mut l = Linear::load_rows(mapping, &format!("{p}.{name}.weight"), None, e * n, n, cols)?;
+        l.enable_fast_cpu();
+        Ok(l)
+    };
+    layer.attn = Attn::Std {
+        q: load_linear(model, i, "attn_query", cfg.heads * mc.head_dim, hidden)?,
+        k: load_linear(model, i, "attn_key", mc.kv_heads * mc.head_dim, hidden)?,
+        v: load_linear(model, i, "attn_value", mc.kv_heads * mc.head_dim, hidden)?,
+    };
+    layer.out = load_linear(model, i, "attn_out", hidden, cfg.heads * mc.head_dim)?;
+    layer.q_norm = Some(vector(mapping, &format!("{p}.attn_qn.weight"), mc.head_dim)?);
+    layer.k_norm = Some(vector(mapping, &format!("{p}.attn_kn.weight"), mc.head_dim)?);
+    if mc.sparse_mlp[i] {
+        let (ff, sff) = (mc.moe_ff, mc.shared_ff);
+        layer.ffn = Ffn::Moe(Box::new(Moe {
+            router: load_linear(model, i, "ffn_router", mc.experts, hidden)?,
+            bias: Some(vector(mapping, &format!("{p}.ffn_router_bias.bias"), mc.experts)?),
+            experts: (0..mc.experts)
+                .map(|e| Ok(Expert { gate: Some(rows("ffn_gate_exps", e, ff, hidden)?), up: rows("ffn_up_exps", e, ff, hidden)?, down: rows("ffn_down_exps", e, hidden, ff)? }))
+                .collect::<Result<_, String>>()?,
+            cache: None,
+            shared: Some((Expert { gate: Some(rows("ffn_gate_shexp", 0, sff, hidden)?), up: rows("ffn_up_shexp", 0, sff, hidden)?, down: rows("ffn_shared_down", 0, hidden, sff)? }, None)),
+            latent: None,
+            latent_norm: None,
+            tid2eid: None,
+        }));
+    }
+    Ok(())
 }
 
 impl Minimax3Model {
@@ -48,57 +78,23 @@ impl Minimax3Model {
         let mc = cfg.minimax3.as_ref().ok_or("not a MiniMax-M3 model")?;
         let mapping = model.mapping();
         let hidden = cfg.hidden;
-        let mut layers = Vec::with_capacity(cfg.layers);
+        let mut indexers = Vec::with_capacity(cfg.layers);
         for i in 0..cfg.layers {
             let p = format!("blk.{i}");
-            let load = |name: &str, rows: usize, cols: usize| -> Result<Linear, String> {
-                let mut l = Linear::load(mapping, &format!("{p}.{name}"), rows, cols)?;
-                l.replace_weights(model.adapted_projection(&format!("{p}.{name}.weight")))?;
-                l.enable_fast_cpu();
-                Ok(l)
-            };
-            let rows = |name: &str, e: usize, n: usize, cols: usize| -> Result<Linear, String> {
-                let mut l = Linear::load_rows(mapping, &format!("{p}.{name}.weight"), None, e * n, n, cols)?;
-                l.enable_fast_cpu();
-                Ok(l)
-            };
-            let moe = if mc.sparse_mlp[i] {
-                let (ff, sff) = (mc.moe_ff, mc.shared_ff);
-                Some(M3Moe {
-                    router: load("ffn_router", mc.experts, hidden)?,
-                    bias: vector(mapping, &format!("{p}.ffn_router_bias.bias"), mc.experts)?,
-                    experts: (0..mc.experts)
-                        .map(|e| Ok(Expert { gate: Some(rows("ffn_gate_exps", e, ff, hidden)?), up: rows("ffn_up_exps", e, ff, hidden)?, down: rows("ffn_down_exps", e, hidden, ff)? }))
-                        .collect::<Result<_, String>>()?,
-                    shared: Expert { gate: Some(rows("ffn_gate_shexp", 0, sff, hidden)?), up: rows("ffn_up_shexp", 0, sff, hidden)?, down: rows("ffn_shared_down", 0, hidden, sff)? },
-                })
-            } else {
-                None
-            };
-            let indexer = if mc.sparse_attn[i] {
+            indexers.push(if mc.sparse_attn[i] {
                 Some(M3Indexer {
-                    q: load("indexer.attn_q", mc.idx_heads * mc.idx_dim, hidden)?,
-                    k: load("indexer.attn_k", mc.idx_dim, hidden)?,
+                    q: load_linear(model, i, "indexer.attn_q", mc.idx_heads * mc.idx_dim, hidden)?,
+                    k: load_linear(model, i, "indexer.attn_k", mc.idx_dim, hidden)?,
                     qn: vector(mapping, &format!("{p}.indexer.q_norm.weight"), mc.idx_dim)?,
                     kn: vector(mapping, &format!("{p}.indexer.k_norm.weight"), mc.idx_dim)?,
                 })
             } else {
                 None
-            };
-            layers.push(M3Layer {
-                q: load("attn_query", cfg.heads * mc.head_dim, hidden)?,
-                k: load("attn_key", mc.kv_heads * mc.head_dim, hidden)?,
-                v: load("attn_value", mc.kv_heads * mc.head_dim, hidden)?,
-                o: load("attn_out", hidden, cfg.heads * mc.head_dim)?,
-                qn: vector(mapping, &format!("{p}.attn_qn.weight"), mc.head_dim)?,
-                kn: vector(mapping, &format!("{p}.attn_kn.weight"), mc.head_dim)?,
-                indexer,
-                moe,
             });
         }
         let half = mc.rot / 2;
         let freq = (0..half).map(|i| mc.theta.powf(-2.0 * i as f32 / mc.rot as f32)).collect();
-        Ok(Self { layers, freq })
+        Ok(Self { indexers, freq })
     }
 }
 
@@ -115,25 +111,87 @@ fn rotate_half_pairs(v: &mut [f32], rot: usize, position: usize, freq: &[f32]) {
 }
 
 impl RustDecoder {
-    /// All layers of a MiniMax-M3 model for a batch of embeddings (rows x hidden); the result is the stream before the output norm.
-    pub(super) fn minimax3_layers(&self, x: &[f32], positions: &[usize], tables: &[i64], lengths: &[i64]) -> Result<Vec<f32>, String> {
+    /// The parameters of the block indexer and the block-sparse attention (`Stream::block_select`, `Stream::block_attention`).
+    pub(super) fn block_sparse_params(&self, mc: &crate::config::Minimax3Config) -> crate::backend::BlockSparseParams {
+        crate::backend::BlockSparseParams {
+            heads: mc.idx_heads,
+            dim: mc.idx_dim,
+            block: mc.block,
+            topk: mc.topk,
+            local: mc.local,
+            stride: self.stride,
+            block_size: self.block_size,
+        }
+    }
+
+    /// The attention of a block-sparse layer on the device: the indexer queries and keys (projection, per-head norm, the same half-split rotation as the
+    /// attention heads) select the blocks of every row, and the attention reads those blocks of the KV cache. `q` holds the rotated queries, the keys and values of
+    /// the rows are in the cache already; the result is written to `out`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn minimax3_sparse_attention(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        dm: &DeviceM3,
+        dev_weights: &DeviceModelWeights,
+        rope_table: usize,
+        normed: &crate::backend::DeviceBuffer,
+        q: &crate::backend::DeviceBuffer,
+        out: &mut crate::backend::DeviceBuffer,
+        kv: &crate::backend::DeviceKvCache,
+        kv_layer: usize,
+        positions: &[usize],
+        slots: &[usize],
+        tables: &[i64],
+        lengths: &[i64],
+        attn: &crate::backend::AttentionParams,
+    ) -> Result<(), String> {
+        let mc = self.cfg.minimax3.as_ref().ok_or("MiniMax-M3 configuration missing")?;
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let rows = lengths.len();
+        let mut iq = scratch.acquire(rows * mc.idx_heads * mc.idx_dim * 4).map_err(err)?;
+        stream.quantized_linear(&mut iq, normed, &dm.q, dm.q.bias.as_ref()).map_err(err)?;
+        device_rms_inplace(stream, scratch, &mut iq, Some(&dm.qn), self.cfg.eps, 1)?;
+        let mut ik = scratch.acquire(rows * mc.idx_dim * 4).map_err(err)?;
+        stream.quantized_linear(&mut ik, normed, &dm.k, dm.k.bias.as_ref()).map_err(err)?;
+        device_rms_inplace(stream, scratch, &mut ik, Some(&dm.kn), self.cfg.eps, 1)?;
+        let (cos, sin) = &dev_weights.rope[rope_table];
+        let rope = crate::backend::RopeParams { heads: mc.idx_heads, kv_heads: 1, dim: mc.idx_dim, rope_dim: mc.rot, neox: true, cos: Arc::clone(cos), sin: Arc::clone(sin) };
+        stream.rope(&mut iq, &mut ik, positions, &rope).map_err(err)?;
+        let params = self.block_sparse_params(mc);
+        let mut sel = scratch.acquire(rows * params.heads * params.topk * 4).map_err(err)?;
+        let mut store = dm.store.clone();
+        stream.block_select(&mut sel, &mut store, &iq, &ik, slots, tables, lengths, &params).map_err(err)?;
+        stream.block_attention(out, q, kv, tables, lengths, kv_layer, &sel, &params, attn).map_err(err)?;
+        for buf in [iq, ik, sel] {
+            scratch.recycle(buf);
+        }
+        Ok(())
+    }
+
+    /// The layers `range` of a MiniMax-M3 model for a batch of embeddings (rows x hidden); with all layers the result is the stream before the output norm.
+    pub(super) fn minimax3_layers(&self, x: &[f32], positions: &[usize], tables: &[i64], lengths: &[i64], range: std::ops::Range<usize>) -> Result<Vec<f32>, String> {
         let (cfg, model) = (&self.cfg, self.minimax3.as_deref().ok_or("MiniMax-M3 weights missing")?);
         let mc = cfg.minimax3.as_ref().ok_or("MiniMax-M3 configuration missing")?;
         let (hidden, eps, heads) = (cfg.hidden, cfg.eps, cfg.heads);
         let (hd, kv, rot) = (mc.head_dim, mc.kv_heads, mc.rot);
         let group = heads / kv;
         let mut x = x.to_vec();
-        for (i, (layer, ml)) in self.layers.iter().zip(&model.layers).enumerate() {
+        for (i, layer) in self.layers.iter().enumerate().skip(range.start).take(range.len()) {
+            let (Attn::Std { q: wq, k: wk, v: wv }, Some(qn), Some(kn)) = (&layer.attn, layer.q_norm.as_deref(), layer.k_norm.as_deref()) else {
+                return Err("MiniMax-M3 layer without grouped-query attention weights".into());
+            };
+            let indexer = model.indexers[i].as_ref();
             let mut normed = x.clone();
             if let Some(norm) = &layer.attn_norm {
                 self.norm(&mut normed, norm);
             }
-            let mut q = ml.q.forward(&normed)?;
-            rms(&mut q, &ml.qn, eps);
-            let mut k = ml.k.forward(&normed)?;
-            rms(&mut k, &ml.kn, eps);
-            let v = ml.v.forward(&normed)?;
-            let (mut iq, mut ik) = match &ml.indexer {
+            let mut q = wq.forward(&normed)?;
+            rms(&mut q, qn, eps);
+            let mut k = wk.forward(&normed)?;
+            rms(&mut k, kn, eps);
+            let v = wv.forward(&normed)?;
+            let (mut iq, mut ik) = match indexer {
                 Some(ix) => {
                     let mut iq = ix.q.forward(&normed)?;
                     rms(&mut iq, &ix.qn, eps);
@@ -150,28 +208,28 @@ impl RustDecoder {
                 for h in 0..kv {
                     rotate_half_pairs(&mut k[(t * kv + h) * hd..(t * kv + h + 1) * hd], rot, position, &model.freq);
                 }
-                if ml.indexer.is_some() {
+                if indexer.is_some() {
                     for h in 0..mc.idx_heads {
                         rotate_half_pairs(&mut iq[(t * mc.idx_heads + h) * mc.idx_dim..(t * mc.idx_heads + h + 1) * mc.idx_dim], rot.min(mc.idx_dim), position, &model.freq);
                     }
                     rotate_half_pairs(&mut ik[t * mc.idx_dim..(t + 1) * mc.idx_dim], rot.min(mc.idx_dim), position, &model.freq);
                 }
             }
-            let width = 2 * kv * hd + if ml.indexer.is_some() { mc.idx_dim } else { 0 };
+            let width = 2 * kv * hd + if indexer.is_some() { mc.idx_dim } else { 0 };
             let mut attn = vec![0.0f32; positions.len() * heads * hd];
             let scale = (hd as f32).powf(-0.5);
             self.for_each_run(i, tables, lengths, &|| LayerState { len: 0, conv: Vec::new(), rec: Vec::new() }, |start, end, state| {
                 for t in start..end {
                     state.rec.extend_from_slice(&k[t * kv * hd..(t + 1) * kv * hd]);
                     state.rec.extend_from_slice(&v[t * kv * hd..(t + 1) * kv * hd]);
-                    if ml.indexer.is_some() {
+                    if indexer.is_some() {
                         state.rec.extend_from_slice(&ik[t * mc.idx_dim..(t + 1) * mc.idx_dim]);
                     }
                     let n = state.rec.len() / width;
                     let position = n - 1;
                     // block selection per indexer head
                     // `FLLM_DSA=dense` attends to every key (an approximation: the model selects blocks)
-                    let selected: Vec<Vec<bool>> = if ml.indexer.is_some() && !self.dsa_dense {
+                    let selected: Vec<Vec<bool>> = if indexer.is_some() && !self.dsa_dense {
                         let blocks = n.div_ceil(mc.block);
                         (0..mc.idx_heads)
                             .map(|h| {
@@ -220,23 +278,21 @@ impl RustDecoder {
                     }
                 }
             })?;
-            let projected = ml.o.forward(&attn)?;
+            let projected = layer.out.forward(&attn)?;
             x.iter_mut().zip(&projected).for_each(|(a, b)| *a += b);
             let mut f = x.clone();
             if let Some(norm) = &layer.ffn_norm {
                 self.norm(&mut f, norm);
             }
-            let mlp = match &ml.moe {
-                Some(moe) => self.m3_moe(moe, &f, mc)?,
-                None => {
-                    let Ffn::Gated { gate, up, down } = &layer.ffn else {
-                        return Err("MiniMax-M3 dense layer without gate, up and down projections".into());
-                    };
+            let mlp = match &layer.ffn {
+                Ffn::Moe(moe) => self.m3_moe(moe, &f, mc)?,
+                Ffn::Gated { gate, up, down } => {
                     let mut g = gate.forward(&f)?;
                     let u = up.forward(&f)?;
                     swiglu_alpha(&mut g, &u, mc.alpha, mc.limit);
                     down.forward(&g)?
                 }
+                _ => return Err("MiniMax-M3 layer without a feed-forward block".into()),
             };
             x.iter_mut().zip(&mlp).for_each(|(a, b)| *a += b);
             let _ = hidden;
@@ -253,7 +309,7 @@ impl RustDecoder {
     }
 
     /// Sigmoid routing with a selection bias, weights renormalised over the chosen experts, routed output scaled, plus the shared expert.
-    fn m3_moe(&self, moe: &M3Moe, f: &[f32], mc: &crate::config::Minimax3Config) -> Result<Vec<f32>, String> {
+    fn m3_moe(&self, moe: &Moe, f: &[f32], mc: &crate::config::Minimax3Config) -> Result<Vec<f32>, String> {
         let hidden = self.cfg.hidden;
         let rows = f.len() / hidden;
         let logits = moe.router.forward(f)?;
@@ -262,7 +318,8 @@ impl RustDecoder {
             let row = &f[t * hidden..(t + 1) * hidden];
             let scores: Vec<f32> = logits[t * mc.experts..(t + 1) * mc.experts].iter().map(|l| 1.0 / (1.0 + (-l).exp())).collect();
             let mut order: Vec<usize> = (0..mc.experts).collect();
-            order.sort_by(|&a, &b| (scores[b] + moe.bias[b]).total_cmp(&(scores[a] + moe.bias[a])).then(a.cmp(&b)));
+            let bias = moe.bias.as_deref().ok_or("MiniMax-M3 router without a selection bias")?;
+            order.sort_by(|&a, &b| (scores[b] + bias[b]).total_cmp(&(scores[a] + bias[a])).then(a.cmp(&b)));
             order.truncate(mc.used);
             let total: f32 = order.iter().map(|&e| scores[e]).sum();
             let o = &mut out[t * hidden..(t + 1) * hidden];
@@ -270,7 +327,8 @@ impl RustDecoder {
                 let result = self.m3_expert(&moe.experts[e], row, mc)?;
                 o.iter_mut().zip(&result).for_each(|(a, r)| *a += scores[e] / total * mc.route_scale * r);
             }
-            let shared = self.m3_expert(&moe.shared, row, mc)?;
+            let (shared, _) = moe.shared.as_ref().ok_or("MiniMax-M3 mixture of experts without a shared expert")?;
+            let shared = self.m3_expert(shared, row, mc)?;
             o.iter_mut().zip(&shared).for_each(|(a, r)| *a += r);
         }
         Ok(out)

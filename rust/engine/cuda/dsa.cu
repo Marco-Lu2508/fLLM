@@ -390,6 +390,13 @@ int fllm_dsa_select_launch(cudaStream_t s, const float *q, const float *w, const
     return fllm_check_launch("dsa_topk");
 }
 
+// the top-k kernel for callers outside this file (block_sparse.cu): `rows` rows of `score_stride` scores, row r has lengths[r] / len_div entries
+int fllm_dsa_topk_launch(cudaStream_t s, const float *scores, size_t score_stride, const int64_t *lengths, int32_t *sel, int rows, int topk, int len_div) {
+    if (rows <= 0) return 0;
+    dsa_topk_kernel<<<rows, DSA_TOPK_THREADS, 0, s>>>(scores, score_stride, lengths, sel, topk, len_div);
+    return fllm_check_launch("dsa_topk");
+}
+
 int fllm_dsa_attention_supported(int topk, int dk) { return (size_t)(dk + 2 * topk + DSA_ATTN_THREADS) * sizeof(float) <= 48000; }
 
 int fllm_dsa_attention_launch(cudaStream_t s, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int32_t *sel,

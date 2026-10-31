@@ -1,0 +1,131 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: attn_rel | bindings: q,rel,profile,kpool,vpool,meta,out | push: heads,kv_heads,hd,d_rel,extent,window,log_floor,log_alpha,scale,stride,block_size,k_base,v_base,row0,rows_total | grid: [heads, rows in this dispatch, 1]
+// Inkling attention (Stream::rel_attention), f16 cache, no rotary embeddings. One workgroup of 128 lanes per (row, query head): the lanes score the visible keys
+// 128 at a time (one key per lane), fold the tile into an online softmax and accumulate the value rows (lane l owns the value dimensions l, l + 128, ...; hd <= 512).
+//   score(j) = dot(q * tau, key_j) * scale + tau * sum_c rel[c] * profile[c][distance]   (the bias only for distance = position - j below `extent`)
+//   tau = 1 + log_alpha * ln(max(1, (position + 1) / log_floor)) when log_floor > 0 (else 1); position = lengths[r] - 1
+// The visible keys are the last `window` ones (window = 0: all). Row r = row0 + gl_WorkGroupID.y (the plan splits long batches into several dispatches).
+// meta = int32: lengths[rows_total], then the block tables (rows_total x stride). q and out are rows x heads x hd, rel rows x heads x d_rel (d_rel <= 128),
+// profile d_rel x extent.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_ops_kv.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer RelBuf { float rel[]; };
+layout(std430, binding = 2) readonly buffer ProfileBuf { float profile[]; };
+layout(std430, binding = 3) readonly buffer KPool { uint kpool[]; };
+layout(std430, binding = 4) readonly buffer VPool { uint vpool[]; };
+layout(std430, binding = 5) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 6) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint kv_heads;
+    uint hd;
+    uint d_rel;
+    uint extent;
+    uint window;
+    uint log_floor;
+    float log_alpha;
+    float scale;
+    uint stride;
+    uint block_size;
+    uint k_base;
+    uint v_base;
+    uint row0;
+    uint rows_total;
+} p;
+
+shared float qs[512];
+shared float rs[128];
+shared float tile_p[WG];
+shared uint tile_slot[WG];
+shared float red[WG];
+
+float reduce_max(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] = max(red[t], red[t + off]);
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+float reduce_sum(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] += red[t + off];
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint r = p.row0 + gl_WorkGroupID.y;
+    const uint kh = h / (p.heads / p.kv_heads);
+    const uint n = uint(meta[r]);
+    const uint position = n - 1u;
+    const float tau = p.log_floor > 0u ? 1.0 + p.log_alpha * log(max(float(position + 1u) / float(p.log_floor), 1.0)) : 1.0;
+    const uint first = (p.window > 0u && n > p.window) ? n - p.window : 0u;
+    for (uint i = t; i < p.hd; i += WG) qs[i] = q[(r * p.heads + h) * p.hd + i] * tau;
+    for (uint i = t; i < p.d_rel; i += WG) rs[i] = rel[(r * p.heads + h) * p.d_rel + i];
+    barrier();
+    float m = NEG;
+    float l = 0.0;
+    float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint t0 = first; t0 < n; t0 += WG) {
+        const uint j = t0 + t;
+        float s = NEG;
+        uint slot = 0u;
+        if (j < n) {
+            slot = uint(meta[p.rows_total + r * p.stride + j / p.block_size]) * p.block_size + j % p.block_size;
+            const uint base = p.k_base + slot * p.kv_heads * p.hd + kh * p.hd;
+            float dotp = 0.0;
+            for (uint d = 0u; d < p.hd; d++) dotp += qs[d] * KV_HALF(kpool, base + d);
+            const uint dist = position - j;
+            float bias = 0.0;
+            if (dist < p.extent) {
+                for (uint d = 0u; d < p.d_rel; d++) bias += rs[d] * profile[d * p.extent + dist];
+                bias *= tau;
+            }
+            s = dotp * p.scale + bias;
+        }
+        tile_slot[t] = slot;
+        const float tmax = reduce_max(s);
+        const float mn = max(m, tmax);
+        const float corr = exp(m - mn);
+        const float pj = j < n ? exp(s - mn) : 0.0;
+        tile_p[t] = pj;
+        const float tsum = reduce_sum(pj);
+        l = l * corr + tsum;
+        for (uint i = 0u; i < 4u; i++) {
+            const uint d = t + i * WG;
+            if (d < p.hd) {
+                float a = acc[i] * corr;
+                for (uint jj = 0u; jj < WG; jj++) {
+                    const float pw = tile_p[jj];
+                    if (pw != 0.0) a += pw * KV_HALF(vpool, p.v_base + tile_slot[jj] * p.kv_heads * p.hd + kh * p.hd + d);
+                }
+                acc[i] = a;
+            }
+        }
+        barrier();
+        m = mn;
+    }
+    for (uint i = 0u; i < 4u; i++) {
+        const uint d = t + i * WG;
+        if (d < p.hd) outv[(r * p.heads + h) * p.hd + d] = l > 0.0 ? acc[i] / l : 0.0;
+    }
+}

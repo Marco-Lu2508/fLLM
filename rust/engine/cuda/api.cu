@@ -1702,6 +1702,62 @@ int fllm_cuda_dsa_attention(FllmStream *st, const float *q, const uint16_t *kpoo
                                      block_size, scale);
 }
 int fllm_cuda_dsa_supported(int heads, int dim, int topk, int dk) { return fllm_dsa_scores_supported(heads, dim) && fllm_dsa_attention_supported(topk, dk); }
+int fllm_cuda_block_sparse_supported(int heads, int dim, int topk, int block, int dk) { return fllm_block_sparse_supported(heads, dim, topk, block, dk); }
+// MiniMax-M3 block selection for `rows` rows: block scores in chunks of `chunk` rows (`scores` holds chunk * heads * ceil(max_len / block) floats), then the top-k blocks
+// of every (row, head) into `sel` (rows * heads * topk ints).
+int fllm_cuda_block_select(FllmStream *st, const float *q, const float *store, float *scores, int32_t *sel, const int64_t *tables_host, size_t tables_len,
+                           const int64_t *lengths_host, int rows, int chunk, int heads, int dim, int block, int topk, int local, int stride, int block_size) {
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr, *dn = nullptr;
+    if (int e = stage(st, -1, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, -1, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    int64_t max_len = 1;
+    std::vector<int64_t> blocks((size_t)rows * heads);
+    for (int r = 0; r < rows; r++) {
+        max_len = lengths_host[r] > max_len ? lengths_host[r] : max_len;
+        for (int h = 0; h < heads; h++) blocks[(size_t)r * heads + h] = (lengths_host[r] + block - 1) / block;
+    }
+    if (int e = stage(st, -1, blocks.data(), blocks.size() * sizeof(int64_t), &dn)) return e;
+    const int nb = (int)((max_len + block - 1) / block);
+    for (int r0 = 0; r0 < rows; r0 += chunk) {
+        const int n = rows - r0 < chunk ? rows - r0 : chunk;
+        if (int e = fllm_block_scores_launch(st->s, q, store, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), scores, (size_t)nb, r0, n, nb, heads, dim,
+                                             block, local, stride, block_size))
+            return e;
+        if (int e = fllm_dsa_topk_launch(st->s, scores, (size_t)nb, static_cast<const int64_t *>(dn) + (size_t)r0 * heads, sel + (size_t)r0 * heads * topk, n * heads, topk, 1))
+            return e;
+    }
+    return 0;
+}
+int fllm_cuda_block_attention(FllmStream *st, const float *q, const uint16_t *kpool, const uint16_t *vpool, float *out, const int32_t *sel, const int64_t *tables_host,
+                              size_t tables_len, const int64_t *lengths_host, int rows, int topk, int groups, int block, int heads, int kv_heads, int dk, int dv,
+                              int stride, int block_size, float scale) {
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr;
+    if (int e = stage(st, -1, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, -1, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    return fllm_block_attention_launch(st->s, q, kpool, vpool, out, sel, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), rows, topk, groups, block, heads,
+                                       kv_heads, dk, dv, stride, block_size, scale);
+}
+int fllm_cuda_conv_resid_supported(int channels, int taps) { return !ssm_kernels_off() && fllm_conv_resid_supported(channels, taps); }
+// Inkling convolution: `runs` is nruns InkRun records (24 bytes each, see inkling.cu) in host memory.
+int fllm_cuda_conv_resid(FllmStream *st, const void *runs, int nruns, int channels, int taps, size_t state_off, const float *x, const float *convw, float *out) {
+    PREP(st);
+    void *d = nullptr;
+    if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
+    return fllm_conv_resid_launch(st->s, d, nruns, channels, taps, state_off, x, convw, out);
+}
+int fllm_cuda_rel_attention_supported(int hd, int d_rel) { return fllm_rel_attention_supported(hd, d_rel); }
+int fllm_cuda_rel_attention(FllmStream *st, const float *q, const float *rel, const float *profile, const uint16_t *kpool, const uint16_t *vpool, float *out,
+                            const int64_t *tables_host, size_t tables_len, const int64_t *lengths_host, int rows, int heads, int kv_heads, int hd, int d_rel,
+                            int extent, int window, int log_floor, float log_alpha, float scale, int stride, int block_size) {
+    PREP(st);
+    void *dt = nullptr, *dl = nullptr;
+    if (int e = stage(st, -1, tables_host, tables_len * sizeof(int64_t), &dt)) return e;
+    if (int e = stage(st, -1, lengths_host, (size_t)rows * sizeof(int64_t), &dl)) return e;
+    return fllm_rel_attention_launch(st->s, q, rel, profile, kpool, vpool, out, static_cast<const int64_t *>(dt), static_cast<const int64_t *>(dl), rows, heads, kv_heads,
+                                     hd, d_rel, extent, window, log_floor, log_alpha, scale, stride, block_size);
+}
 int fllm_cuda_clamp(FllmStream *st, float *x, size_t n, float limit) {
     PREP(st);
     return fllm_clamp_launch(st->s, x, n, limit);

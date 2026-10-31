@@ -9,8 +9,10 @@
 //! Level of verification: **L0** (compiles, unit-tested on the CPU; no shader has ever run on a device).
 
 pub mod attention;
+pub mod block;
 pub mod dsa;
 pub mod hc;
+pub mod inkling;
 pub mod moe;
 pub mod recurrent;
 

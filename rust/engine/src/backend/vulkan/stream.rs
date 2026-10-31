@@ -1073,6 +1073,156 @@ impl Stream for VulkanStream {
         Ok(())
     }
 
+    fn supports_conv_resid(&self, channels: usize, taps: usize) -> bool {
+        crate::backend::vulkan::ops::inkling::conv_resid_supported(channels, taps)
+    }
+
+    fn conv_resid(
+        &mut self,
+        channels: usize,
+        taps: usize,
+        weights: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        x: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_conv_resid(channels, taps) {
+            return Err(BackendError::UnsupportedOperation("conv_resid for this shape".into()));
+        }
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + channels * (taps - 1) * 4;
+        if x.size < rows * channels * 4 || out.size < rows * channels * 4 || weights.size < channels * taps * 4 || runs.iter().any(|r| r.state.size < state_end) {
+            return Err(invalid("convolution buffers are smaller than the layer needs"));
+        }
+        let mut plans = Vec::with_capacity(runs.len());
+        for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
+            let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            plans.push(crate::backend::vulkan::ops::inkling::plan_conv_resid(i, &spec, channels, taps, state_offset)?);
+        }
+        let args = [Arg::r("x", x), Arg::r("conv", weights), Arg::w("out", out)];
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &args, &states, true)
+    }
+
+    fn supports_rel_attention(&self, p: &crate::backend::RelAttnParams, kv_kind: i32) -> bool {
+        kv_kind == 1 && crate::backend::vulkan::ops::inkling::rel_attention_supported(p)
+    }
+
+    fn rel_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        rel: &DeviceBuffer,
+        profile: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        p: &crate::backend::RelAttnParams,
+    ) -> Result<(), BackendError> {
+        if p.stride == 0 || block_tables.is_empty() || !block_tables.len().is_multiple_of(p.stride) {
+            return Err(invalid("relative-position attention: block tables are not whole rows"));
+        }
+        let rows = block_tables.len() / p.stride;
+        if q.size < rows * p.heads * p.head_dim * 4 || out.size < rows * p.heads * p.head_dim * 4 || rel.size < rows * p.heads * p.d_rel * 4 || profile.size < p.d_rel * p.extent * 4 {
+            return Err(invalid("relative-position attention buffers are smaller than the batch"));
+        }
+        let (layout, keys, values) = self.kv_windows(kv, layer_idx)?;
+        let plans = crate::backend::vulkan::ops::inkling::plan_rel_attention(&layout, p, block_tables, lengths)?;
+        for (index, plan) in plans.iter().enumerate() {
+            self.run_plans(
+                std::slice::from_ref(plan),
+                &[Arg::r("q", q), Arg::r("rel", rel), Arg::r("profile", profile), Arg::view("kpool", keys.clone()), Arg::view("vpool", values.clone()), Arg::w("out", out)],
+                &[],
+                false,
+            )?;
+            if plans.len() > 1 && index + 1 < plans.len() {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn supports_block_sparse(&self, p: &crate::backend::BlockSparseParams, heads: usize, kv_heads: usize, head_dim: usize, kv_kind: i32) -> bool {
+        kv_kind == 1
+            && p.heads > 0
+            && p.dim > 0
+            && p.topk > 0
+            && p.block > 0
+            && heads.is_multiple_of(p.heads.max(1))
+            && kv_heads > 0
+            && heads.is_multiple_of(kv_heads)
+            && head_dim <= crate::backend::vulkan::ops::dsa::MAX_DK
+            && self.sh.caps().max_workgroup_invocations >= 256
+    }
+
+    fn block_select(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        slots: &[usize],
+        block_tables: &[i64],
+        lengths: &[i64],
+        params: &crate::backend::BlockSparseParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, dim) = (params.heads, params.dim);
+        if q.size < rows * heads * dim * 4 || k.size < rows * dim * 4 || sel.size < rows * heads * params.topk * 4 || !store.size.is_multiple_of(dim * 4) {
+            return Err(invalid("block indexer: buffers smaller than the batch"));
+        }
+        let groups = crate::backend::vulkan::ops::block::plan_block_select(params, slots, block_tables, lengths, store.size / (dim * 4))?;
+        let args = [Arg::w("store", store), Arg::r("k", k), Arg::r("q", q), Arg::w("sel", sel)];
+        // each group of rows is its own submission: a long job on a small GPU that other programs share makes the driver reset the device
+        let last = groups.len() - 1;
+        for (index, group) in groups.iter().enumerate() {
+            self.run_plans(group, &args, &[], false)?;
+            if groups.len() > 2 && index < last {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn block_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        sel: &DeviceBuffer,
+        p: &crate::backend::BlockSparseParams,
+        params: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        if params.stride == 0 || block_tables.is_empty() || !block_tables.len().is_multiple_of(params.stride) {
+            return Err(invalid("block-sparse attention: block tables are not whole rows"));
+        }
+        let rows = block_tables.len() / params.stride;
+        let (heads, dk, dv) = (params.num_heads, params.head_dim, params.value_dim);
+        if q.size < rows * heads * dk * 4 || out.size < rows * heads * dv * 4 || sel.size < rows * p.heads * p.topk * 4 {
+            return Err(invalid("block-sparse attention q / out / selection smaller than the batch"));
+        }
+        let (layout, keys, values) = self.kv_windows(kv, layer_idx)?;
+        let plans = crate::backend::vulkan::ops::block::plan_block_attention(&layout, params, p, block_tables, lengths)?;
+        for (index, plan) in plans.iter().enumerate() {
+            self.run_plans(std::slice::from_ref(plan), &[Arg::r("q", q), Arg::view("kpool", keys.clone()), Arg::view("vpool", values.clone()), Arg::r("sel", sel), Arg::w("out", out)], &[], false)?;
+            if plans.len() > 1 && index + 1 < plans.len() {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
         if !x.size.is_multiple_of(4) {
             return Err(invalid("clamp target is not a whole number of floats"));

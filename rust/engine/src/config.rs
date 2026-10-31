@@ -319,6 +319,36 @@ pub struct Minimax3Config {
     pub sparse_mlp: Vec<bool>,
 }
 
+impl Minimax3Config {
+    /// The expert layout as a [`MoeConfig`]: sigmoid scores with a selection bias, the chosen scores renormalised and scaled, a shared expert, the gpt-oss
+    /// style clamped SwiGLU everywhere (`swiglu_alpha`, `swiglu_limit`). The device mixture-of-experts operations read this; the host reference reads the
+    /// fields of `Minimax3Config` it was written for.
+    pub fn moe_config(&self) -> MoeConfig {
+        MoeConfig {
+            experts: self.experts,
+            used: self.used,
+            expert_ff: self.moe_ff,
+            gating: Gating::Sigmoid,
+            normalize: true,
+            weight_norm_p: None,
+            weight_scale: self.route_scale,
+            shared: 1,
+            shared_ff: self.shared_ff,
+            dense_layers: self.sparse_mlp.iter().take_while(|&&sparse| !sparse).count(),
+            groups: 1,
+            groups_used: 1,
+            group_top2: false,
+            input_scaled: false,
+            swiglu_oai: Some((self.alpha, self.limit)),
+            swiglu_clamp: None,
+            swiglu_clamp_shared: true,
+            latent: None,
+            zero_experts: 0,
+            router_softcap: None,
+        }
+    }
+}
+
 /// Inkling: attention without rotary embeddings (a learned distance profile mixed per token), short convolutions, own head counts on the
 /// sliding layers. The pool geometry of the model is a placeholder: the keys and values live in the per-sequence layer states.
 #[derive(Clone, Debug, PartialEq)]
@@ -1028,7 +1058,10 @@ impl ModelConfig {
             },
             residual_scale: float(meta, a, "residual_scale").unwrap_or(1.0),
             tied_embeddings: tied,
-            moe: parse_moe(mapping, a, ff)?,
+            moe: match &minimax3 {
+                Some(m) => Some(m.moe_config()),
+                None => parse_moe(mapping, a, ff)?,
+            },
             position_offset: uint(meta, a, "position_embedding_offset").unwrap_or(0),
             alibi_slopes: match key(meta, a, "attention.alibi_slopes") {
                 Some(Value::Array(values)) if values.len() == heads => values

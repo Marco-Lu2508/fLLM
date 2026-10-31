@@ -1,0 +1,63 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: misc_block_scores | bindings: q,store,meta,scores | push: heads,dim,block,local,stride,block_size,score_stride,row0,rows_total | grid: [blocks of the longest row, heads, rows in this dispatch]
+// Block scores of the MiniMax-M3 indexer (Stream::block_select): for row r = row0 + gl_WorkGroupID.z, indexer head h = gl_WorkGroupID.y and block
+// b = gl_WorkGroupID.x (keys b * block .. b * block + block - 1 below lengths[r])
+//   scores[(gl_WorkGroupID.z * heads + h) * score_stride + b] = max over the keys j of the block of dot(q[r][h], store[slot(r, j)])
+// and a finite stand-in for +infinity (3e38) for the newest `local` blocks of the row (they are always kept). One workgroup of 128 lanes per
+// (row, head, block); the lanes take the keys of the block 128 at a time and reduce their maxima. q is rows x heads x dim, store one dim-wide f32 row per
+// cache slot. meta = int32: lengths[rows_total], then the block tables (rows_total x stride); slot(r, j) = table[r][j / block_size] * block_size + j % block_size.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer StoreBuf { float store[]; };
+layout(std430, binding = 2) readonly buffer MetaBuf { int meta[]; };
+layout(std430, binding = 3) buffer ScoreBuf { float scores[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint dim;
+    uint block;
+    uint local;
+    uint stride;
+    uint block_size;
+    uint score_stride;
+    uint row0;
+    uint rows_total;
+} p;
+
+shared float red[WG];
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint b = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint r = p.row0 + gl_WorkGroupID.z;
+    const uint n = uint(meta[r]);
+    const uint nb = (n + p.block - 1u) / p.block;
+    if (b >= nb) return;
+    const uint first = b * p.block;
+    const uint last = min(first + p.block, n);
+    const uint qo = (r * p.heads + h) * p.dim;
+    float best = NEG;
+    for (uint pos = first + t; pos < last; pos += WG) {
+        const uint slot = uint(meta[p.rows_total + r * p.stride + pos / p.block_size]) * p.block_size + pos % p.block_size;
+        const uint key = slot * p.dim;
+        float dotp = 0.0;
+        for (uint d = 0u; d < p.dim; d++) dotp += q[qo + d] * store[key + d];
+        best = max(best, dotp);
+    }
+    red[t] = best;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] = max(red[t], red[t + off]);
+        barrier();
+    }
+    if (t == 0u) {
+        const uint qb = (n - 1u) / p.block;
+        // the newest `local` blocks are always kept (a finite value above every score keeps the radix select free of infinities)
+        const float v = (b <= qb && qb - b < p.local) ? 3.0e38 : red[0];
+        scores[(gl_WorkGroupID.z * p.heads + h) * p.score_stride + b] = v;
+    }
+}

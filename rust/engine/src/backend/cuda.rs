@@ -544,6 +544,89 @@ extern "C" {
         scale: f32,
     ) -> c_int;
     fn fllm_cuda_dsa_supported(heads: c_int, dim: c_int, topk: c_int, dk: c_int) -> c_int;
+    fn fllm_cuda_block_sparse_supported(heads: c_int, dim: c_int, topk: c_int, block: c_int, dk: c_int) -> c_int;
+    fn fllm_cuda_conv_resid_supported(channels: c_int, taps: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_conv_resid(
+        st: *mut RawStream,
+        runs: *const c_void,
+        nruns: c_int,
+        channels: c_int,
+        taps: c_int,
+        state_off: usize,
+        x: *const f32,
+        convw: *const f32,
+        out: *mut f32,
+    ) -> c_int;
+    fn fllm_cuda_rel_attention_supported(hd: c_int, d_rel: c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_rel_attention(
+        st: *mut RawStream,
+        q: *const f32,
+        rel: *const f32,
+        profile: *const f32,
+        kpool: *const u16,
+        vpool: *const u16,
+        out: *mut f32,
+        tables: *const i64,
+        tables_len: usize,
+        lengths: *const i64,
+        rows: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        hd: c_int,
+        d_rel: c_int,
+        extent: c_int,
+        window: c_int,
+        log_floor: c_int,
+        log_alpha: f32,
+        scale: f32,
+        stride: c_int,
+        block_size: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_block_select(
+        st: *mut RawStream,
+        q: *const f32,
+        store: *const f32,
+        scores: *mut f32,
+        sel: *mut i32,
+        tables: *const i64,
+        tables_len: usize,
+        lengths: *const i64,
+        rows: c_int,
+        chunk: c_int,
+        heads: c_int,
+        dim: c_int,
+        block: c_int,
+        topk: c_int,
+        local: c_int,
+        stride: c_int,
+        block_size: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_block_attention(
+        st: *mut RawStream,
+        q: *const f32,
+        kpool: *const u16,
+        vpool: *const u16,
+        out: *mut f32,
+        sel: *const i32,
+        tables: *const i64,
+        tables_len: usize,
+        lengths: *const i64,
+        rows: c_int,
+        topk: c_int,
+        groups: c_int,
+        block: c_int,
+        heads: c_int,
+        kv_heads: c_int,
+        dk: c_int,
+        dv: c_int,
+        stride: c_int,
+        block_size: c_int,
+        scale: f32,
+    ) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
     fn fllm_cuda_copy_cols(st: *mut RawStream, dst: *mut f32, src: *const f32, rows: c_int, width: c_int, dst_stride: c_int, dst_col: c_int) -> c_int;
@@ -2951,6 +3034,23 @@ impl Stream for CudaStream {
         moe::gate_scale(self.raw, gate, x, g, tokens, hidden)
     }
 
+    fn moe_zero_fold(
+        &mut self,
+        zero_scale: &mut DeviceBuffer,
+        ids: &mut DeviceBuffer,
+        weights: &mut DeviceBuffer,
+        rows: usize,
+        k: usize,
+        routed: usize,
+        rewrite: bool,
+    ) -> Result<(), BackendError> {
+        moe::zero_fold(self.raw, zero_scale, ids, weights, rows, k, routed, rewrite)
+    }
+
+    fn supports_moe_zero(&self) -> bool {
+        self.cc >= 75 && moe::moe_enabled()
+    }
+
     fn gather_rows(
         &mut self,
         dst: &mut DeviceBuffer,
@@ -3034,23 +3134,6 @@ impl Stream for CudaStream {
         quant_type: QuantType,
         rows: usize,
         cols: usize,
-    fn moe_zero_fold(
-        &mut self,
-        zero_scale: &mut DeviceBuffer,
-        ids: &mut DeviceBuffer,
-        weights: &mut DeviceBuffer,
-        rows: usize,
-        k: usize,
-        routed: usize,
-        rewrite: bool,
-    ) -> Result<(), BackendError> {
-        moe::zero_fold(self.raw, zero_scale, ids, weights, rows, k, routed, rewrite)
-    }
-
-    fn supports_moe_zero(&self) -> bool {
-        self.cc >= 75 && moe::moe_enabled()
-    }
-
         bias: Option<&[f32]>,
     ) -> Result<(), BackendError> {
         let kind = quant_type.to_gguf_type_id();
@@ -4587,6 +4670,245 @@ impl Stream for CudaStream {
                 to_c(params.stride, "block table stride")?,
                 to_c(params.block_size, "block size")?,
                 params.scale,
+            )
+        })
+    }
+
+    fn supports_block_sparse(&self, p: &BlockSparseParams, heads: usize, kv_heads: usize, head_dim: usize, kv_kind: i32) -> bool {
+        !self.act.is_narrow()
+            && kv_kind == 1
+            && p.heads > 0
+            && heads.is_multiple_of(p.heads.max(1))
+            && kv_heads > 0
+            && heads.is_multiple_of(kv_heads)
+            // SAFETY: plain arithmetic on the arguments.
+            && unsafe { fllm_cuda_block_sparse_supported(p.heads as c_int, p.dim as c_int, p.topk as c_int, p.block as c_int, head_dim as c_int) } != 0
+    }
+
+    fn block_select(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        slots: &[usize],
+        block_tables: &[i64],
+        lengths: &[i64],
+        p: &BlockSparseParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, dim) = (p.heads, p.dim);
+        let store_slots = store.size / (dim * 4);
+        if slots.len() != rows
+            || block_tables.len() != rows * p.stride
+            || q.size < rows * heads * dim * 4
+            || k.size < rows * dim * 4
+            || sel.size < rows * heads * p.topk * 4
+            || slots.iter().any(|&s| s >= store_slots)
+            || lengths.iter().any(|&n| n <= 0 || (n as usize).div_ceil(p.block_size) > p.stride)
+            || lengths.iter().enumerate().any(|(r, &n)| block_tables[r * p.stride..][..(n as usize).div_ceil(p.block_size)].iter().any(|&b| b < 0 || (b as usize + 1) * p.block_size > store_slots))
+        {
+            return Err(invalid("block indexer: buffers smaller than the batch, or a block outside the key store"));
+        }
+        let ids: Vec<i32> = slots.iter().map(|&s| s as i32).collect();
+        // SAFETY: the sizes were checked above; the slot list is copied before the call returns.
+        check(unsafe { fllm_cuda_dsa_keys(self.raw, dev_ptr(store)?.cast(), dev_ptr(k)?.cast(), std::ptr::null(), ids.as_ptr(), to_c(rows, "rows")?, to_c(dim, "dim")?, to_c(dim, "width")?) })?;
+        let max_len = lengths.iter().map(|&n| n as usize).max().unwrap_or(1);
+        let nb = max_len.div_ceil(p.block);
+        // rows are scored in chunks of at most 1M (row, head, position) triples (about 1.3e8 multiply-adds at 128 values), so that one launch stays short (display watchdogs)
+        let chunk = (1usize << 20).div_euclid(max_len * heads).clamp(1, rows);
+        let score_bytes = chunk * heads * nb * 4;
+        if self.dsa_scores.as_ref().is_none_or(|b| b.size < score_bytes) {
+            self.dsa_scores = None;
+            self.dsa_scores = Some(self.alloc(score_bytes.max(256))?);
+        }
+        let scores = self.dsa_scores.as_ref().ok_or_else(|| invalid("score buffer"))?;
+        // SAFETY: sizes checked above; the tables and lengths are staged by the call, `scores` holds a chunk of block scores.
+        check(unsafe {
+            fllm_cuda_block_select(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(store)?.cast(),
+                dev_ptr(scores)?.cast(),
+                dev_ptr(sel)?.cast(),
+                block_tables.as_ptr(),
+                block_tables.len(),
+                lengths.as_ptr(),
+                to_c(rows, "rows")?,
+                to_c(chunk, "chunk")?,
+                to_c(heads, "indexer heads")?,
+                to_c(dim, "dim")?,
+                to_c(p.block, "block")?,
+                to_c(p.topk, "top-k")?,
+                to_c(p.local, "local blocks")?,
+                to_c(p.stride, "block table stride")?,
+                to_c(p.block_size, "page size")?,
+            )
+        })
+    }
+
+    fn block_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        sel: &DeviceBuffer,
+        p: &BlockSparseParams,
+        params: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        if kv.kv_kind != 1 || params.stride == 0 || block_tables.is_empty() || !block_tables.len().is_multiple_of(params.stride) {
+            return Err(invalid("block-sparse attention needs an f16 cache and whole block table rows"));
+        }
+        let rows = block_tables.len() / params.stride;
+        let (heads, dk, dv) = (params.num_heads, params.head_dim, params.value_dim);
+        if lengths.len() != rows
+            || q.size < rows * heads * dk * 4
+            || out.size < rows * heads * dv * 4
+            || sel.size < rows * p.heads * p.topk * 4
+            || params.num_kv_heads == 0
+            || !heads.is_multiple_of(params.num_kv_heads)
+            || p.heads == 0
+            || !heads.is_multiple_of(p.heads)
+        {
+            return Err(invalid("block-sparse attention q / out / selection smaller than the batch"));
+        }
+        // SAFETY: sizes were checked above; the pool pointers address the requested layer; `sel` comes from `block_select` for the same rows.
+        check(unsafe {
+            fllm_cuda_block_attention(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
+                dev_ptr(out)?.cast(),
+                dev_ptr(sel)?.cast(),
+                block_tables.as_ptr(),
+                block_tables.len(),
+                lengths.as_ptr(),
+                to_c(rows, "rows")?,
+                to_c(p.topk, "top-k")?,
+                to_c(p.heads, "indexer heads")?,
+                to_c(p.block, "block")?,
+                to_c(heads, "heads")?,
+                to_c(params.num_kv_heads, "kv heads")?,
+                to_c(dk, "key width")?,
+                to_c(dv, "value width")?,
+                to_c(params.stride, "block table stride")?,
+                to_c(params.block_size, "page size")?,
+                params.scale,
+            )
+        })
+    }
+
+    fn supports_conv_resid(&self, channels: usize, taps: usize) -> bool {
+        // SAFETY: plain arithmetic on the arguments.
+        !self.act.is_narrow() && ssm_enabled_on_build() && unsafe { fllm_cuda_conv_resid_supported(channels as c_int, taps as c_int) } != 0
+    }
+
+    fn conv_resid(
+        &mut self,
+        channels: usize,
+        taps: usize,
+        weights: &DeviceBuffer,
+        runs: &[DeltaRun<'_>],
+        state_offset: usize,
+        x: &DeviceBuffer,
+        out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        if !self.supports_conv_resid(channels, taps) {
+            return Err(BackendError::UnsupportedOperation("conv_resid for this shape".into()));
+        }
+        let rows: usize = runs.iter().map(|r| r.rows).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+        let state_end = state_offset + channels * (taps - 1) * 4;
+        if x.size < rows * channels * 4 || out.size < rows * channels * 4 || weights.size < channels * taps * 4 || runs.iter().any(|r| r.state.size < state_end || r.first_row + r.rows > rows) {
+            return Err(invalid("convolution buffers smaller than the layer needs"));
+        }
+        // mirrors InkRun in inkling.cu
+        #[repr(C)]
+        struct RunC {
+            state: u64,
+            row0: i32,
+            n: i32,
+            reset: i32,
+            pad: i32,
+        }
+        let mut list = Vec::with_capacity(runs.len());
+        for r in runs {
+            list.push(RunC { state: dev_ptr(r.state)? as u64, row0: to_c(r.first_row, "run start")?, n: to_c(r.rows, "run length")?, reset: i32::from(r.reset), pad: 0 });
+        }
+        // SAFETY: sizes checked above; `list` outlives the call (the C side copies it before returning).
+        check(unsafe {
+            fllm_cuda_conv_resid(self.raw, list.as_ptr().cast(), to_c(list.len(), "runs")?, to_c(channels, "channels")?, to_c(taps, "taps")?, state_offset, dev_ptr(x)?.cast(), dev_ptr(weights)?.cast(), dev_ptr(out)?.cast())
+        })
+    }
+
+    fn supports_rel_attention(&self, p: &RelAttnParams, kv_kind: i32) -> bool {
+        // SAFETY: plain arithmetic on the arguments.
+        !self.act.is_narrow()
+            && kv_kind == 1
+            && p.kv_heads > 0
+            && p.heads.is_multiple_of(p.kv_heads)
+            && unsafe { fllm_cuda_rel_attention_supported(p.head_dim as c_int, p.d_rel as c_int) } != 0
+    }
+
+    fn rel_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        rel: &DeviceBuffer,
+        profile: &DeviceBuffer,
+        kv: &DeviceKvCache,
+        block_tables: &[i64],
+        lengths: &[i64],
+        layer_idx: usize,
+        p: &RelAttnParams,
+    ) -> Result<(), BackendError> {
+        if kv.kv_kind != 1 || p.stride == 0 || block_tables.is_empty() || !block_tables.len().is_multiple_of(p.stride) {
+            return Err(invalid("relative-position attention needs an f16 cache and whole block table rows"));
+        }
+        let rows = block_tables.len() / p.stride;
+        if lengths.len() != rows
+            || q.size < rows * p.heads * p.head_dim * 4
+            || out.size < rows * p.heads * p.head_dim * 4
+            || rel.size < rows * p.heads * p.d_rel * 4
+            || profile.size < p.d_rel * p.extent * 4
+            || !self.supports_rel_attention(p, kv.kv_kind)
+        {
+            return Err(invalid("relative-position attention buffers smaller than the batch"));
+        }
+        // SAFETY: sizes were checked above; the pool pointers address the requested layer.
+        check(unsafe {
+            fllm_cuda_rel_attention(
+                self.raw,
+                dev_ptr(q)?.cast(),
+                dev_ptr(rel)?.cast(),
+                dev_ptr(profile)?.cast(),
+                dev_ptr(&kv.key_pool)?.add(kv.layer_key_offset(layer_idx) * 2).cast(),
+                dev_ptr(&kv.value_pool)?.add(kv.layer_value_offset(layer_idx) * 2).cast(),
+                dev_ptr(out)?.cast(),
+                block_tables.as_ptr(),
+                block_tables.len(),
+                lengths.as_ptr(),
+                to_c(rows, "rows")?,
+                to_c(p.heads, "heads")?,
+                to_c(p.kv_heads, "kv heads")?,
+                to_c(p.head_dim, "head width")?,
+                to_c(p.d_rel, "relative channels")?,
+                to_c(p.extent, "extent")?,
+                to_c(p.window, "window")?,
+                to_c(p.log_floor, "log floor")?,
+                p.log_alpha,
+                p.scale,
+                to_c(p.stride, "block table stride")?,
+                to_c(p.block_size, "page size")?,
             )
         })
     }

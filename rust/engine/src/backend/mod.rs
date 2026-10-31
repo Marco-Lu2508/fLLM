@@ -1064,6 +1064,42 @@ impl DsaParams {
     }
 }
 
+/// Block-sparse attention of MiniMax-M3 (see [`Stream::block_select`], [`Stream::block_attention`]): a small indexer with `heads` query heads and one key
+/// per token scores the keys of a sequence, pools the scores per `block` keys (their maximum), keeps the newest `local` blocks and the best `topk` blocks in all
+/// (ties: the lower block) for every indexer head; attention head `h` reads the blocks of indexer head `h / (attention heads / heads)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockSparseParams {
+    pub heads: usize,
+    pub dim: usize,
+    pub block: usize,
+    pub topk: usize,
+    pub local: usize,
+    /// Block table stride and page size of the KV cache.
+    pub stride: usize,
+    pub block_size: usize,
+}
+
+/// Attention of Inkling (see [`Stream::rel_attention`]): no rotary embeddings; the score of a key at distance `d` is `dot(q * tau, k) * scale + tau * sum_c rel[c] *
+/// profile[c][d]` (the bias exists for `d < extent`), with `tau = 1 + log_alpha * ln(max(1, (position + 1) / log_floor))` when `log_floor > 0` (else 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RelAttnParams {
+    pub heads: usize,
+    pub kv_heads: usize,
+    /// Key and value width.
+    pub head_dim: usize,
+    /// Channels of the relative bias (`rel` has `d_rel` values per head and row; `profile` is `d_rel x extent`).
+    pub d_rel: usize,
+    pub extent: usize,
+    /// Keys visible to a row: the newest `window` (0: all).
+    pub window: usize,
+    pub log_floor: usize,
+    pub log_alpha: f32,
+    pub scale: f32,
+    /// Block table stride and page size of the KV cache.
+    pub stride: usize,
+    pub block_size: usize,
+}
+
 /// Paged Attention parameters.
 ///
 /// Row `r` of a batch attends to positions `start..lengths[r]` of its block table, where
@@ -1788,6 +1824,29 @@ pub trait Stream: Send {
         Err(BackendError::UnsupportedOperation("moe_gate_scale".into()))
     }
 
+    /// Zero experts of a router (LongCat-Flash): an expert id of at least `routed` returns its input. For every row `zero_scale[r]` receives the sum of the
+    /// weights `weights[r * k + j]` of the pairs whose `ids[r * k + j] >= routed` (the caller adds `zero_scale[r] * x[r]` to the row, e.g. as the
+    /// "shared" term of [`Stream::moe_combine_ex`]). With `rewrite` those pairs are then redirected to expert 0 with weight 0, so that a kernel that indexes
+    /// the expert tables by id (`moe_linear`) stays inside them; without it the ids stay for `moe_align`, which skips ids outside the local experts.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_zero_fold(
+        &mut self,
+        _zero_scale: &mut DeviceBuffer,
+        _ids: &mut DeviceBuffer,
+        _weights: &mut DeviceBuffer,
+        _rows: usize,
+        _k: usize,
+        _routed: usize,
+        _rewrite: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("moe_zero_fold".into()))
+    }
+
+    /// Does this stream implement [`Stream::moe_zero_fold`]?
+    fn supports_moe_zero(&self) -> bool {
+        false
+    }
+
     /// `dst[i] = src[idx[i]] * weights[i]` for `idx.len()` rows of `row_len` floats (weights optional).
     fn gather_rows(
         &mut self,
@@ -1824,29 +1883,6 @@ pub trait Stream: Send {
         _gate: &DeviceBuffer,
         _up: &DeviceBuffer,
         _alpha: f32,
-    /// Zero experts of a router (LongCat-Flash): an expert id of at least `routed` returns its input. For every row `zero_scale[r]` receives the sum of the
-    /// weights `weights[r * k + j]` of the pairs whose `ids[r * k + j] >= routed` (the caller adds `zero_scale[r] * x[r]` to the row, e.g. as the
-    /// "shared" term of [`Stream::moe_combine_ex`]). With `rewrite` those pairs are then redirected to expert 0 with weight 0, so that a kernel that indexes
-    /// the expert tables by id (`moe_linear`) stays inside them; without it the ids stay for `moe_align`, which skips ids outside the local experts.
-    #[allow(clippy::too_many_arguments)]
-    fn moe_zero_fold(
-        &mut self,
-        _zero_scale: &mut DeviceBuffer,
-        _ids: &mut DeviceBuffer,
-        _weights: &mut DeviceBuffer,
-        _rows: usize,
-        _k: usize,
-        _routed: usize,
-        _rewrite: bool,
-    ) -> Result<(), BackendError> {
-        Err(BackendError::UnsupportedOperation("moe_zero_fold".into()))
-    }
-
-    /// Does this stream implement [`Stream::moe_zero_fold`]?
-    fn supports_moe_zero(&self) -> bool {
-        false
-    }
-
         _limit: f32,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("swiglu_oai".into()))
@@ -2058,6 +2094,95 @@ pub trait Stream: Send {
         _params: &AttentionParams,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("dsa_attention".into()))
+    }
+
+    /// Can this stream run the block-sparse attention of MiniMax-M3 ([`Stream::block_select`], [`Stream::block_attention`]) for these shapes and this KV cache
+    /// format (`kv_kind`, see [`DeviceKvCache`])?
+    fn supports_block_sparse(&self, _params: &BlockSparseParams, _heads: usize, _kv_heads: usize, _head_dim: usize, _kv_kind: i32) -> bool {
+        false
+    }
+
+    /// Block indexer of MiniMax-M3. Writes the indexer keys `k` (`rows x dim`) of the new tokens into `store` (one `dim`-wide f32 row per cache slot, `slots[r]`
+    /// for row `r`), scores the `lengths[r]` visible tokens of every row for every indexer head (`q` is `rows x heads x dim`, the score of a key is the plain dot
+    /// product), pools the scores per block (maximum) and writes the selected blocks of every (row, head), ascending, to `sel` (`rows x heads x topk` i32, -1 after
+    /// the last): the newest `local` blocks first, then the best by score, `topk` in all; a row with at most `topk` blocks lists all of them.
+    #[allow(clippy::too_many_arguments)]
+    fn block_select(
+        &mut self,
+        _sel: &mut DeviceBuffer,
+        _store: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _k: &DeviceBuffer,
+        _slots: &[usize],
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _params: &BlockSparseParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("block_select".into()))
+    }
+
+    /// Attention of every (row, head) over the keys of the blocks listed in `sel` (as written by [`Stream::block_select`]; keys beyond `lengths[r]` are
+    /// skipped); `attn` describes the attention like [`Stream::attention_paged`] (no window, sinks, ALiBi or soft cap).
+    #[allow(clippy::too_many_arguments)]
+    fn block_attention(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _layer_idx: usize,
+        _sel: &DeviceBuffer,
+        _params: &BlockSparseParams,
+        _attn: &AttentionParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("block_attention".into()))
+    }
+
+    /// Can this stream run [`Stream::conv_resid`] for `channels` channels and `taps` taps?
+    fn supports_conv_resid(&self, _channels: usize, _taps: usize) -> bool {
+        false
+    }
+
+    /// Inkling convolution on the rows of consecutive runs: `out = x + c(x)` where `c` is the depthwise causal convolution `c(x)[t][ch] = sum_{j < taps} w[ch][j] *
+    /// x[t - (taps - 1) + j][ch]` over the sequence (inputs before the run come from the state, zeros at its start). The state of a run is the last `taps - 1`
+    /// inputs of every channel at `state_offset` bytes in the run's state buffer (rewritten by the call; ignored when the run is `reset`). `x` and `out` are
+    /// `rows x channels`; `weights` is `channels x taps`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_resid(
+        &mut self,
+        _channels: usize,
+        _taps: usize,
+        _weights: &DeviceBuffer,
+        _runs: &[DeltaRun<'_>],
+        _state_offset: usize,
+        _x: &DeviceBuffer,
+        _out: &mut DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("conv_resid".into()))
+    }
+
+    /// Can this stream run [`Stream::rel_attention`] for these shapes and this KV cache format (`kv_kind`)?
+    fn supports_rel_attention(&self, _params: &RelAttnParams, _kv_kind: i32) -> bool {
+        false
+    }
+
+    /// Inkling attention for every (row, head) over the f16 KV cache of layer `layer_idx`: `q` is `rows x heads x head_dim`, `rel` is `rows x heads x d_rel`,
+    /// `profile` is `d_rel x extent`; the row's position is `lengths[r] - 1`.
+    #[allow(clippy::too_many_arguments)]
+    fn rel_attention(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _rel: &DeviceBuffer,
+        _profile: &DeviceBuffer,
+        _kv: &DeviceKvCache,
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _layer_idx: usize,
+        _params: &RelAttnParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("rel_attention".into()))
     }
 
     /// In-place `x = clamp(x, -limit, limit)`.

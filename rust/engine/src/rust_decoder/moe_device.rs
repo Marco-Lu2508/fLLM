@@ -92,7 +92,7 @@ impl RustDecoder {
         let zero = cfg.zero_experts;
         let experts = scored - zero;
         let pairs = rows * k;
-        let mut logits = scratch.acquire(rows * experts * 4).map_err(err)?;
+        let mut logits = scratch.acquire(rows * scored * 4).map_err(err)?;
         stream.quantized_linear(&mut logits, x, &fast.router, fast.router.bias.as_ref()).map_err(err)?;
         let mut ids = scratch.acquire(pairs * 4).map_err(err)?;
         let mut weights = scratch.acquire(pairs * 4).map_err(err)?;
@@ -106,6 +106,9 @@ impl RustDecoder {
             zero_scale = Some(zs);
         }
         let mut y = scratch.acquire(pairs * hidden * 4).map_err(err)?;
+        if zero > 0 && !decode {
+            stream.zero_buffer(&mut y).map_err(err)?;
+        }
         let mut temps = vec![logits];
         if decode {
             let mut gate = scratch.acquire(pairs * ff * 4).map_err(err)?;
