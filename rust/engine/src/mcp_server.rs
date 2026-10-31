@@ -206,7 +206,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
         i += 1;
     }
-    let folder = folder.map_or_else(std::env::current_dir, Ok).map_err(|e| e.to_string())?.canonicalize().map_err(|e| format!("the folder cannot be used: {e}"))?;
+    let folder = folder.map_or_else(std::env::current_dir, Ok).map_err(|e| e.to_string())?.canonicalize().map(|p| agent_cli::plain_path(&p)).map_err(|e| format!("the folder cannot be used: {e}"))?;
     let folder_text = folder.display().to_string();
     let rules = crate::agent_rules::load_hierarchy(&agent_cli::studio_folder(), &folder)?;
     let mut http = agent_cli::HttpBackend::new(&url, key.clone())?;

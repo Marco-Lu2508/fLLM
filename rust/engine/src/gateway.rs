@@ -638,7 +638,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         Some(f) => f.clone(),
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
-    let folder = folder.canonicalize().map_err(|e| format!("the folder {} cannot be used: {e}", folder.display()))?;
+    let folder = folder.canonicalize().map(|p| agent_cli::plain_path(&p)).map_err(|e| format!("the folder {} cannot be used: {e}", folder.display()))?;
     let mut http = agent_cli::HttpBackend::new(&parsed.url, parsed.api_key.clone())?;
     let base = agent_cli::profile_base(parsed.profile.as_deref())?;
     let (served, context) = http.model_info()?;

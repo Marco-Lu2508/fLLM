@@ -32,6 +32,10 @@ tool added later is covered by the same rule; a tool without a known category is
 
 Other options: `--profile NAME`, `--ask`, `--url` (default `http://127.0.0.1:8000`), `--model`, `--api-key` (or `FLLM_API_KEY`), `--max-steps N` (default 30),
 `--max-tokens N` (limited to a quarter of the model's context), `--temperature`, `--system TEXT`, `--quiet`.
+Newer options have their own sections below: `--plan`, `--allow-rule`/`--deny-rule`/`--ask-rule` ([rules](#permission-rules-plan-mode-and-settings-files)),
+`--review` and `--verify` ([self-review](#self-review---review)), `--output-format`, `--continue`, `--resume`, `--image`
+([formats](#output-formats-sessions-and-pictures)), `--propose-skills` ([skills](#skills-proposals-and-exchange)).
+How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.md](../code-mode-gap.md).
 
 * **Output.** The final answer goes to standard output, progress (one line per tool call) to standard error. `--json` prints one
   object with `answer`, `status`, `steps`, `folder` and the list of tool calls with their status
@@ -106,3 +110,140 @@ A task of the Studio ([studio.md](studio.md)) can send its result somewhere besi
 `telegram:CHAT_ID` (the token comes from `FLLM_TELEGRAM_TOKEN` of the server). Whether it worked is stored with the result
 (`sent` or `failed: reason`) and shown under the task. Addresses inside the home network are allowed on purpose; the schedule
 routes are reachable from this machine only. Tasks still run only while the app is open and a model is loaded.
+
+## Permission rules, plan mode and settings files
+
+The `--allow-*` flags decide by kind of action. Rules decide by pattern, in a settings file or on the command line:
+
+```json
+{ "allow": ["bash: npm test*", "edit: src/**"],
+  "deny":  ["bash: git push*", "read: .env"],
+  "ask":   ["bash: npm publish*"],
+  "mode":  "default" }
+```
+
+* **Where.** `permissions.json` in the Studio folder (yours, every project), then `.fllm/permissions.json` in the project (shared, can be
+  committed), then `.fllm/permissions.local.json` (yours, not committed). The lists of all three are joined. `--allow-rule`,
+  `--deny-rule` and `--ask-rule` add one rule each for a single run. A file that is not valid JSON stops the run: a typo must not
+  silently drop a deny rule.
+* **Order.** A **deny** rule always wins, also over `--yes`. Next an **ask** rule: the call is put to the question (a terminal with
+  `y/n/a`; without a terminal it stays refused). Then an **allow** rule: the call runs even when no `--allow-*` flag covers it. A call
+  no rule mentions falls back to the flags.
+* **Patterns.** `category: pattern` with the categories `bash`, `edit`, `read`, `network`, `memory` as in the Studio
+  ([studio.md](studio.md)). `*` matches anything inside a command; in paths `*` stops at `/` and `**` does not. A patch is judged by
+  every file it touches. An allow rule never covers a command with shell operators (`;`, `&&`, `|`, redirects, substitutions) unless
+  the rule is that exact command, and a risky program (`rm`, `curl`, `sudo`, `git`, shells ...) is only covered by a rule that names
+  it. A deny rule looks at every part of a compound command.
+* **Claude Code spelling.** `Bash(npm test:*)`, `Edit(src/**)`, `Read(.env)`, `WebFetch(domain:example.com)` and the bare tool names
+  are read too, and so is a `permissions` object (with `defaultMode: "plan"`), so a project's `.claude/settings.json` can be copied as
+  it is. `fllm-rs import claude` does that for you.
+* **Plan mode.** `--plan` (or `"mode": "plan"`) allows reading only, whatever the flags say, and asks for a numbered plan. On a terminal
+  the plan is shown and `Run this plan now?` starts a second pass with your flags (each action asked unless allowed). Without a
+  terminal the plan is the answer, and `--json` marks it with `"plan": true`.
+
+Honest limit: a rule is a pattern on the text of a command, not an analysis of what it does. `bash: npm test*` allows `npm test --
+--eval ...` if the project's test script does something odd. Keep the sandbox on ([studio.md](studio.md)) and use deny rules for what
+must never happen.
+
+## Self-review: `--review`
+
+A small model often says "done" with a typo in the file. With `--review`, when a run has changed files the command checks them before
+it counts as finished: the `review` tool (the diff plus the findings of a fixed rule set), `diagnostics` for every changed file
+and, with `--verify "COMMAND"`, your own test command (it runs even without `--allow-command`, because you typed it; deny rules still
+stop it). The results go back to the model as a message and the agent works again. Round one is always sent (the model reads its own
+diff once more); a second round (`--review-rounds N`, at most 5, default 2) only happens when a machine-stated problem remains: a
+diagnostics error, a failing verify command or a high-severity finding. A clean run costs one extra model step. The Studio has the same
+switch, *Review my work before it counts as done* (Settings box of the Code page, or `/autoreview on`).
+
+Good default for local models: on, with `--verify` set to the project's quick test command. Honest limit: the rule set is small
+(secrets, `eval`, merge markers, leftover debug output ...) and the "read your diff again" step depends on the model; it catches typos
+and unfinished edits much more often than design mistakes. The `review` tool needs a git repository; without one only the
+diagnostics and the verify command are used.
+
+## Output formats, sessions and pictures
+
+* `--output-format text|json|stream-json`. `json` is `--json`. `stream-json` prints one JSON object per line while the run goes on, in
+  the shape of Claude Code's: `{"type":"system","subtype":"init",...}`, `{"type":"assistant","message":{"content":[text,
+  tool_use...]}}`, `{"type":"user","message":{"content":[tool_result]}}` and finally `{"type":"result","subtype":"success"` or
+  `"error_max_turns"` or `"error_during_execution"`, `"result":...}`.
+* **Every run is saved** as `agent-sessions/run-<time>.json` (the newest 200 automatic ones are kept; a run with `--session NAME` is
+  kept for ever). `--continue` continues the newest session, `--resume NAME` a named one. The file also records the folder, the model
+  and the files changed, which `fllm-rs insights` reads. A picture is not kept in the file.
+* `--image FILE` (repeatable) attaches a png, jpeg, gif or webp picture to the task. The loaded model must be able to see; the server
+  answers with an error otherwise.
+
+## Search of earlier sessions
+
+Every headless run is copied into the search index of the Studio (the same BM25 index the Code and chat pages use). The agent has a
+read-only tool `session_search`: `{query}` lists the best matches with a snippet, `{id}` shows how a session started and ended. You can
+use it too: `fllm-rs sessions search WORDS` (against the running server) and `fllm-rs sessions list`; in the Studio `/search WORDS`.
+The "summary" is the start and end of a session, not a model-written summary: with a small model one more call per hit costs more than
+it gives.
+
+## Skills: proposals and exchange
+
+* `--propose-skills`: after a successful run with at least eight tool calls the model is asked once whether the way it worked is worth
+  keeping and, if so, to write it as a skill. The result waits in `skills-proposed/` of the Studio folder: `fllm-rs skills proposed`
+  lists it, `fllm-rs skills approve NAME` moves it into your skills, `reject NAME` deletes it. `--auto-skills` saves it at once
+  (never over an existing skill). In the Studio the same idea is `/skill`, which shows the draft and saves nothing before you approve.
+* A skill is a folder with `SKILL.md` and a `name`, `description`, `when` front matter: the format of the
+  [agentskills.io](https://agentskills.io) standard and of Claude Code, Codex and Hermes. `fllm-rs skills export NAME --to claude`
+  (or `codex`, `hermes`, `agentskills`, a folder) writes it in the other layout (a valid hyphenated name, the `when` line folded into
+  the description, other files copied); `fllm-rs skills import PATH` and `fllm-rs skills install OWNER/REPO[/SUBFOLDER]` read every
+  `SKILL.md` below a folder or a git repository (`--dry-run` first). Existing skills are kept unless `--force`. fLLM only reads
+  `SKILL.md`; scripts that ship with a skill are copied but the model has to be told to run them.
+
+## `doctor`, `update`, `insights`, `import`
+
+* `fllm-rs doctor` checks the server and model, the tool list against the context window, the sandbox, git, the Studio folder, the
+  permission files, skills and the terminal programs (bubblewrap, docker, ssh). Exit code 1 when something fails.
+* `fllm-rs update --check` asks GitHub for the newest release (exit code 10 when it is newer than this build). It never downloads or
+  replaces anything; the desktop app installs updates.
+* `fllm-rs insights [--days N]` (also `usage`): runs, steps, tool calls by tool, edited files and folders of the saved sessions, and
+  an approximate token count (characters / 4).
+* `fllm-rs import claude|codex|hermes [--from HOME] [--folder PROJECT] [--apply] [--force]` shows what it would bring over and writes
+  nothing without `--apply`: skills, custom commands, sub-agents, permission rules (`settings.json`, Codex rules, a Hermes command
+  allowlist), the persona (`SOUL.md`) and memories (`CLAUDE.md`, `AGENTS.md`, `MEMORY.md`, `USER.md`) as short memory entries. Hooks and
+  model settings are not converted; API keys and tokens are never read. The file layouts come from those tools' documentation and
+  were not checked against a real installation of each.
+
+## As an MCP server and as an ACP agent
+
+`fllm-rs mcp-server [--folder DIR] [--allow-edit] ...` speaks MCP on standard input and output, so Claude Code, Codex, Cursor or Zed
+can use fLLM's tools: `claude mcp add fllm -- fllm-rs mcp-server --folder /path/to/project`. The tools are those of the running fLLM
+server (only the kinds you allow with the same `--allow-*` flags are listed; reading is always there), plus `fllm_agent`, which runs the
+whole coding agent on a task with the local model and returns its report (`--no-agent` removes it). Deny rules apply; an ask rule cannot
+be answered over MCP and refuses.
+
+`fllm-rs acp` runs the agent as an [Agent Client Protocol](https://agentclientprotocol.com) agent for editors such as Zed: the editor
+starts it as a subprocess, sends `session/new` with the folder and `session/prompt` with the text, and receives `session/update`
+messages (text, tool calls with their results). Actions that the flags and rules do not allow are put to the editor with
+`session/request_permission` (allow once, allow always for this kind, reject); `session/cancel` stops the run before its next model call.
+It supports no session loading, no pictures and no editor-side file access. It was written from the public protocol pages and tested
+against a scripted client, not against an editor.
+
+## Discord, Slack and who may use a chat
+
+```sh
+export FLLM_DISCORD_TOKEN=...                 # Developer Portal > Bot > Reset Token
+fllm-rs gateway discord --chat 123456789012345678 --user 111222333444555666 --folder ~/project
+export FLLM_SLACK_TOKEN=xoxb-...              # OAuth & Permissions > Bot User OAuth Token
+fllm-rs gateway slack --chat C024BE91L --pair --folder ~/project
+```
+
+Both poll over HTTPS with the bot token (no websocket, no inbound port). Discord: `GET /channels/{id}/messages?after=` and
+`POST /channels/{id}/messages`; answers carry an empty `allowed_mentions`, so no answer pings anybody; reading text in a server channel
+needs the *Message Content* intent in the bot's settings, direct messages do not. Slack: `conversations.history` and `chat.postMessage`;
+the bot needs `channels:history` (or `groups:history`, `im:history`) and `chat:write`, and Slack limits `conversations.history` to one
+call a minute for apps distributed outside a workspace (an app made for your own workspace is not limited). `--chat` takes channel ids
+(for Slack the id such as `C024BE91L`, not the name) and is required. The first poll of a channel only records its newest message.
+Same session per channel, same permission flags and rules as `agent`.
+
+A chat on the list can still hold people you do not know. `--user ID[,ID]` limits the agent to those senders. `--pair` lets a stranger
+ask for access: the bot answers once with an 8-character code (no look-alike letters, from the operating system's random source, valid
+for an hour, at most three waiting per platform) and runs nothing; you approve on the machine with
+`fllm-rs gateway pair approve discord CODE`, list with `pair list`, remove with `pair revoke discord SENDER`. The store is
+`gateway-pairing.json` in the Studio (or profile) folder and is read on every message, so an approval works at once; a damaged file
+lets nobody in. `--user` and `--pair` work for Telegram and Matrix too.
+
+WhatsApp, Signal and Email are not there: see [code-mode-gap.md](../code-mode-gap.md#why-some-things-stay-missing).

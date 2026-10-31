@@ -93,6 +93,15 @@ the printed text). Chat and edit use the OpenAI provider; autocomplete uses the 
 `fllm-rs connect openai-sdk` (`OPENAI_BASE_URL`, `OPENAI_API_KEY`), `anthropic-sdk` (`ANTHROPIC_BASE_URL`, no `/v1`) and `env` (all of them).
 With `--api-key` on the server the key is a real one; without it any value is accepted.
 
+### The other direction: fLLM's agent inside those tools
+
+Besides serving the model to them, fLLM can be one of their tools. `fllm-rs mcp-server --folder PROJECT` is an MCP server (standard input
+and output) with fLLM's file, search and shell tools and `fllm_agent`, which hands a whole job to the local model: in Claude Code
+`claude mcp add fllm -- fllm-rs mcp-server --folder /path/to/project --allow-edit`; Codex and Cursor take the same command in their MCP
+settings. `fllm-rs acp` is an Agent Client Protocol agent for editors such as Zed. Both need a running fLLM server and are described,
+with their limits, in [agent-cli.md](agent-cli.md#as-an-mcp-server-and-as-an-acp-agent). They were run against scripted clients, not
+against Claude Code, Codex or an editor.
+
 ## Autocomplete: `/infill`
 
 `POST /infill` builds the fill-in-the-middle prompt from the model's FIM tokens (GGUF `tokenizer.ggml.fim_*_token_id`, else the literals of

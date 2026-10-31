@@ -91,6 +91,15 @@ fn value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a String
     args.get(*i).ok_or_else(|| format!("missing value for {flag}"))
 }
 
+/// A canonical path without the `\\?\` prefix Windows adds (`\\?\C:\work` is shown and sent as `C:\work`); other paths are unchanged.
+pub fn plain_path(path: &std::path::Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.len() > 2 && rest.as_bytes()[1] == b':' => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// A session name is a slug, because it becomes a file name.
 pub fn valid_session_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -277,6 +286,7 @@ pub struct Outcome {
     pub edited: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct LoopConfig {
     pub model: Option<String>,
     pub allow: BTreeSet<String>,
@@ -966,6 +976,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     if !folder.is_dir() {
         return Err(format!("{} is not a folder", folder.display()));
     }
+    let folder = plain_path(&folder);
     let folder_text = folder.display().to_string();
 
     let mut http = HttpBackend::new(&options.url, options.api_key.clone())?;
@@ -1057,17 +1068,27 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let Some(feedback) = agent_extras::review_feedback(&report, round) else { break };
             let mut next = done.messages.clone();
             next.push(json!({"role": "user", "content": feedback}));
-            let (calls_before, steps_before, edited_before) = (done.tool_calls.clone(), done.steps, done.edited.clone());
-            outcome = run_loop_full(&mut http, &cfg, &system, next, &mut progress, &mut approve, &mut observe).map(|mut again| {
-                again.tool_calls.splice(0..0, calls_before);
-                again.steps += steps_before;
-                for p in edited_before {
-                    if !again.edited.contains(&p) {
-                        again.edited.push(p);
+            let previous = Outcome { answer: done.answer.clone(), status: Status::Done, steps: done.steps, tool_calls: done.tool_calls.clone(), messages: done.messages.clone(), edited: done.edited.clone() };
+            // a review round answers briefly or makes a small fix: it must not run into the full answer budget of the first pass
+            let review_cfg = LoopConfig { max_tokens: cfg.max_tokens.min(2048), ..cfg.clone() };
+            match run_loop_full(&mut http, &review_cfg, &system, next, &mut progress, &mut approve, &mut observe) {
+                Ok(mut again) => {
+                    again.tool_calls.splice(0..0, previous.tool_calls);
+                    again.steps += previous.steps;
+                    for p in previous.edited {
+                        if !again.edited.contains(&p) {
+                            again.edited.push(p);
+                        }
                     }
+                    outcome = Ok(again);
                 }
-                again
-            });
+                Err(e) => {
+                    // the work of the first pass is not thrown away because the check afterwards failed
+                    progress(&format!("[review {round}] stopped: {e}; the result of the run before the review stands"));
+                    outcome = Ok(previous);
+                    break;
+                }
+            }
             round += 1;
         }
     }
@@ -1621,6 +1642,13 @@ mod tests {
 
     fn rules_from(value: Value) -> Rules {
         Rules::from_json(&value)
+    }
+
+    #[test]
+    fn the_windows_verbatim_prefix_is_dropped() {
+        assert_eq!(plain_path(std::path::Path::new(r"\\?\C:\work\app")), PathBuf::from(r"C:\work\app"));
+        assert_eq!(plain_path(std::path::Path::new("/home/me/app")), PathBuf::from("/home/me/app"));
+        assert_eq!(plain_path(std::path::Path::new(r"\\?\UNC\server\share")), PathBuf::from(r"\\?\UNC\server\share"), "a network share keeps its form");
     }
 
     #[test]

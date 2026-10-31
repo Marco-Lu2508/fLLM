@@ -235,4 +235,4 @@ fllm-rs completions [bash|zsh|fish|powershell]   # shell completions (default ba
 
 ## agent, gateway
 
-`fllm-rs agent -p "TASK"` runs the coding agent without a browser; `fllm-rs gateway telegram --chat ID` answers Telegram messages with it. Both need a running server on the same machine. Options, permissions, exit codes and what was verified: [agent-cli.md](agent-cli.md).
+`fllm-rs agent -p "TASK"` runs the coding agent without a browser; `fllm-rs gateway telegram --chat ID` answers Telegram messages with it. Both need a running server on the same machine. Options, permissions, exit codes and what was verified: [agent-cli.md](agent-cli.md). The same page covers `fllm-rs gateway discord|slack|pair`, `skills`, `import claude|codex|hermes`, `doctor`, `update --check`, `insights` (`usage`), `sessions list|search`, `mcp-server` and `acp`.

@@ -219,6 +219,26 @@ model is told to try something else.
 first problems are added to the edit result (and shown on the card). It is off by default because it can take seconds per edit.
 `/check [path]` runs the same check by hand.
 
+**Review my work before it counts as done.** Also in the *Settings* box (or `/autoreview on|off`), off by default. When a run has
+changed files, the agent reads its own change once more before it finishes: the page collects the `review` tool (the diff plus the
+findings of a fixed rule set) and `diagnostics` for each changed file, sends them back as a message ("Self-review before you finish ...")
+and lets the agent fix what is wrong. Round one always happens (a clean run costs one extra step); a second round only when a check
+found a problem. It matches `/review` and the review step of Claude Code and Codex, run automatically. For small models it is the
+cheapest way to catch a typo or a half-finished edit; it does not replace running the tests. The terminal agent has the same step:
+`fllm-rs agent --review --verify "cargo test"` ([agent-cli.md](agent-cli.md#self-review---review)).
+
+**Style of the agent.** *Style of the agent* in the same box (or `/personality concise|teacher|reviewer|pair|default`) adds one line to the
+system prompt about how the agent talks: short, explaining, strictly self-critical or thinking aloud. It never changes what the agent may
+do. (Hermes calls this a personality, Claude Code an output style.)
+
+**Pictures.** The picture button next to the input, or pasting an image into it, attaches up to four pictures to the next message.
+Only a model that can see takes them (the page says so otherwise); pictures are not kept in the saved session.
+
+**Search and recovery.** `/search words` looks through the chats and code sessions the app has stored (the same index the agent's
+`session_search` tool uses, so the agent can also find "how we fixed that last month" itself); `/retry` takes your last message back
+with its file changes and sends it again; `/stop` (or Esc) stops the agent, also while it is working; `/insights` counts the agent's
+steps, tool calls and edits in the saved sessions of the folder.
+
 **Sub-agents.** The model can hand a self-contained job to a sub-agent with a fresh context and gets back only its report. `task` with
 `agent: "explore"` (default) can only read and search; `agent: "general"` may also change files and run commands (the usual questions
 still apply; the Plan agent can only start explore agents). Several started in one turn run in parallel as nested cards with live
@@ -269,7 +289,7 @@ plain Markdown lists (`- entry`), at most 100 entries of 400 characters each.
 
 Commands (type `/` for the list, with search): `/init`, `/compact`, `/resume`, `/fork`, `/revert`, `/rename`, `/export`, `/rewind` (undo
 file changes back to a chosen point), `/undo [n]`, `/plan`, `/build`, `/ask`, `/edit`, `/agent`, `/model`, `/remember`, `/memory`,
-`/check`, `/diff`, `/review` (the changes with the findings of a fixed set of rules; `/review staged` and `/review branch <base>` too), `/security-review` (only the security rules), `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/clear`. Your own commands are Markdown files in
+`/check`, `/diff`, `/review` (the changes with the findings of a fixed set of rules; `/review staged` and `/review branch <base>` too), `/security-review` (only the security rules), `/status`, `/cd path`, `/allow`, `/deny`, `/rules`, `/search`, `/retry`, `/stop`, `/insights`, `/personality`, `/autoreview`, `/clear`. Your own commands are Markdown files in
 `.fllm/commands/` of the folder: `review.md` becomes `/review` (a built-in command of the same name wins), an optional `description:`
 front matter line is shown in the list, and
 `$ARGUMENTS` (or `$1` ... `$9`) is replaced by what follows the command. Keyboard: Alt+B switches the agent, Alt+L picks a session,
@@ -305,6 +325,27 @@ there and you switch it on under Settings > Runtime or with `FLLM_SANDBOX=worksp
   write into the allowed folder works and a write outside fails. If that does not hold, the status says why and commands run unwrapped
   (as with a missing `bwrap` on Linux). If the sandbox works but cannot start one particular command, the command fails with the
   reason; it never silently runs unsandboxed.
+
+**Where commands run: terminal backends.** By default `bash` runs on this machine. Two other places exist, chosen by the environment
+variable `FLLM_TERMINAL` or by `terminal.json` in the Studio folder:
+
+```json
+{ "default": "docker:python:3.12",
+  "network": "none",
+  "projects": { "/home/me/app": "ssh://me@buildbox/srv/app" } }
+```
+
+* `docker:IMAGE`: every command is a `docker run --rm` of that image with the workspace bind-mounted at `/workspace` (working directory
+  mapped, files created as your user on Linux, all capabilities dropped, `no-new-privileges`). `"network": "none"` (or
+  `FLLM_TERMINAL_NETWORK=none`) cuts the network. The container is the isolation, so the local sandbox is not stacked on top. A stopped or
+  timed-out command removes its container. The image must have `sh`; build tools you need have to be in the image.
+* `ssh://[user@]host[:port]/REMOTE/ROOT`: every command runs on that host (key login only, no password prompt) in the folder that
+  corresponds to the local one. The file tools still read and write the **local** workspace, so the remote folder has to show the same
+  files (a shared mount, sshfs, a synchronised folder); fLLM maps the folder, it does not copy anything.
+* The working directory a command ends in is mapped back (`/workspace/src` is `<workspace>/src`), so `cd` keeps working; a `cd` out of
+  the mapped folder is ignored. Diagnostics, hooks and language servers always run on this machine.
+* The setting is read from your Studio folder only. A `terminal.json` inside a downloaded project is **not** read: a repository must not be
+  able to send the agent's commands to a host of its choice. `GET /api/studio/agent/sandbox` shows the backend in use (`terminal`).
 
 On **macOS** a Seatbelt (`sandbox-exec`) profile exists for the three modes, also off by default and **unverified** (profile text and
 arguments are unit-tested, no Mac was available; the same self-test guards it). Diagnostics and hook commands are not sandboxed on any system.
