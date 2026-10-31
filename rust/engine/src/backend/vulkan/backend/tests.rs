@@ -660,6 +660,11 @@ fn no_shader_is_orphaned() {
     }
     // the three passes of an EXL3 product are recorded by the stream, not planned by `plan_quantized_linear`
     seen.extend(["exl3_pre", "exl3_mm", "exl3_post"].map(str::to_owned));
+    // recurrent-model ops recorded directly by the stream (RWKV, KDA recurrence, column copy, ShortConv)
+    seen.extend(["misc_copy_cols", "rwkv_act", "rwkv_lerp", "rwkv_shift", "shortconv"].map(str::to_owned));
+    for width in [16, 32, 64, 128] {
+        seen.extend([format!("kda_rec_hk{width}"), format!("rwkv6_wkv_n{width}"), format!("rwkv7_wkv_n{width}")]);
+    }
     let registry: BTreeSet<String> = shaders::SHADERS.iter().map(|(n, _)| (*n).to_owned()).collect();
     let orphans: Vec<&String> = registry.iter().filter(|n| !seen.contains(*n)).collect();
     // the buffer-address variants need bufferDeviceAddress, which the core does not enable; scaffold_fill is the scaffold's test shader
