@@ -842,3 +842,59 @@ html.dark .btn-destructive { color: #1c0806; }
   .art-toolbar { flex-wrap: wrap; row-gap: 4px; }
   .art-tools { justify-content: flex-start; }
 }
+
+/* ---- one calm palette (loaded last) --------------------------------------------------------------
+   The sidebar, the header bar and the chat area share one neutral background family in both themes.
+   The copper accent is kept for primary buttons, the logo dot, thin indicators and text colour; it is never
+   a large fill. Earlier sheets tinted the sidebar tab, the active rows and the background with the accent
+   (and a warm glow in the corner next to a cool blue-black body), which looked like two palettes. */
+:root {
+  --bg: #f4f4f5;
+  --bg-glow: none;
+  --surface: #ffffff;
+  --surface-2: #f7f7f8;
+  --surface-3: #ececee;
+  --fg: #141416;
+  --fg-soft: #35373c;
+  --muted-fg: #62656d;
+  --border: rgba(20, 20, 22, 0.10);
+  --border-strong: rgba(20, 20, 22, 0.20);
+  --primary: #bf5416;
+  --primary-hover: #a24611;
+  --accent-2: #3b5fb0;
+  --shadow-2: 0 4px 16px rgba(20, 20, 22, 0.07);
+}
+html.dark {
+  --bg: #131416;
+  --bg-glow: none;
+  --surface: #18191c;
+  --surface-2: #1e1f23;
+  --surface-3: #27282d;
+  --fg: #ececee;
+  --fg-soft: #c6c8ce;
+  --muted-fg: #9496a0;
+  --border: rgba(236, 236, 238, 0.09);
+  --border-strong: rgba(236, 236, 238, 0.19);
+  --primary: #e8934f;
+  --primary-hover: #f2a76b;
+  --accent-2: #8aa9ee;
+}
+
+/* Chat | Code switch: a neutral track, the chosen side is a neutral raised segment with a thin accent line */
+.nav-tabs { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 2px; }
+.nav-tab { border-radius: 6px; color: var(--muted-fg); position: relative; }
+.nav-tab:hover { color: var(--fg); background: var(--surface-3); }
+.nav-tab.active { background: var(--surface-3); color: var(--fg); box-shadow: none; }
+.nav-tab.active::after { content: ""; position: absolute; left: 22%; right: 22%; bottom: 1px; height: 2px; border-radius: 2px; background: var(--primary); }
+
+/* rows: neutral fills; the chosen row gets the thin accent bar */
+.nav-item:hover { background: var(--surface-2); }
+.nav-item.active, .thread-row.active, .thread-row.is-active { background: var(--surface-3); }
+.settings-nav-btn.is-active, .settings-nav-btn[aria-selected="true"], .settings-nav-btn.active { background: var(--surface-3); box-shadow: inset 2px 0 0 var(--primary); }
+.palette-item.is-active { background: var(--surface-3); }
+.brand-dot { box-shadow: none; }
+.quant-chip { background: var(--surface-3); color: var(--fg-soft); }
+.role-chip { background: transparent; }
+.msg-user-bubble { background: var(--surface-3); border-color: var(--border); }
+.chat-input-box:focus-within { border-color: var(--border-strong); box-shadow: none; }
+.code-input-box:focus-within { border-color: var(--border-strong); box-shadow: none; }
