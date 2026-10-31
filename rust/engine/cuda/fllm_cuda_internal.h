@@ -28,7 +28,7 @@ enum FllmOpt {
     FLLM_OPT_FUSE_NORM_F16,   // the RMS norm also writes the FP16 activations that the next Marlin GEMM needs
     FLLM_OPT_FUSE_ATTN_F16,   // the prompt attention also writes the FP16 activations that the output projection needs
     FLLM_OPT_MARLIN_CFG,      // 0: Marlin launch configuration as vLLM selects it, 1: fLLM variant (the M tail rides in the last tile)
-    FLLM_OPT_CHUNKED_SCAN,    // runs of 64 rows or more of the recurrent layers take the chunk-parallel scan (scan.cu); 0: always the serial kernels
+    FLLM_OPT_CHUNKED_SCAN,    // chunk-parallel scan of long runs of the recurrent layers (scan.cu): 0 never, 1 auto (measured per layer shape), 2 always
     FLLM_OPT_COUNT
 };
 int fllm_opt(int id);
