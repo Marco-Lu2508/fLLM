@@ -11,7 +11,7 @@ const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in codeprompts.js');
 const P = new Function(`${src.slice(begin, end)}
-return { codeModelFamily, codeModelBillions, codePromptTier, codeEnvironment, memoryBlock, instructionsBlock, buildSystemPrompt, subAgentPrompt, FAMILY_NOTES };`)();
+return { codeModelFamily, codeModelBillions, codePromptTier, codeEnvironment, memoryBlock, instructionsBlock, buildSystemPrompt, subAgentPrompt, FAMILY_NOTES, PERSONALITIES, personalityNote, isCleanDiagnostic, reviewFeedback, sessionInsights, searchHitsText };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -133,6 +133,48 @@ test('all page scripts together are valid JavaScript', () => {
   const all = files.map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('');
   // syntax only: the function is built, never called
   new Function(`(() => {\n'use strict';\n${all}\n})();`);
+});
+
+test('a personality changes the style line and nothing else', () => {
+  const base = { agent: 'build', tier: 'full', family: 'qwen', tools: ALL_TOOLS };
+  const plain = P.buildSystemPrompt(base);
+  const concise = P.buildSystemPrompt({ ...base, personality: 'concise' });
+  assert.ok(concise.includes(P.PERSONALITIES.concise.note) && !plain.includes('Style:'));
+  const squeeze = (t) => t.split('\n').filter((l) => l.trim() !== '').join('\n');
+  assert.strictEqual(squeeze(concise.split(P.PERSONALITIES.concise.note).join('')), squeeze(plain), 'only the style line differs');
+  assert.strictEqual(P.personalityNote('nonsense'), '');
+  assert.strictEqual(P.buildSystemPrompt({ ...base, personality: 'nonsense' }), plain, 'an unknown name is the default');
+  for (const [name, p] of Object.entries(P.PERSONALITIES)) assert.ok(name === 'default' || p.note.startsWith('Style:'), name);
+});
+
+test('the self-review asks once when clean and again only for real problems', () => {
+  const clean = { review: 'Review (diff): 1 file(s), +1/-0 lines, 0 finding(s)', problems: [] };
+  assert.ok(P.reviewFeedback(clean, 1).includes('Re-read the diff'));
+  assert.strictEqual(P.reviewFeedback(clean, 2), null);
+  const bad = { review: '- [low] x', problems: [{ path: 'a.py', output: 'Problems found (python): SyntaxError' }] };
+  const text = P.reviewFeedback(bad, 2);
+  assert.ok(text.includes('a.py') && text.includes('Fix every real problem'));
+  assert.ok(P.reviewFeedback({ review: '- [high] secret', problems: [] }, 2));
+  assert.ok(P.isCleanDiagnostic('No problems found (node --check).'));
+  assert.ok(P.isCleanDiagnostic('The check (cargo check) is not available here: the tool is not installed'));
+  assert.ok(!P.isCleanDiagnostic('Problems found (node --check, exit code 1): x'));
+});
+
+test('insights count tools and edits of saved sessions', () => {
+  const call = (n) => ({ function: { name: n } });
+  const ins = P.sessionInsights([
+    { messages: [{ role: 'user', content: 'a' }, { role: 'assistant', tool_calls: [call('read_file'), call('edit_file')] }, { role: 'tool' }, { role: 'assistant', content: 'done' }] },
+    { messages: [{ role: 'user', content: 'b' }, { role: 'assistant', tool_calls: [call('read_file')] }] },
+  ]);
+  assert.deepStrictEqual([ins.sessions, ins.userMessages, ins.steps, ins.edits], [2, 2, 3, 1]);
+  assert.deepStrictEqual(ins.top[0], ['read_file', 2]);
+  assert.strictEqual(P.sessionInsights(null).sessions, 0);
+});
+
+test('search hits become readable text', () => {
+  assert.ok(P.searchHitsText([], 'lexer').includes('No stored session'));
+  const t = P.searchHitsText([{ title: 'Fix the lexer', kind: 'code', updated: 0, snippet: '...tokenizer bug...' }], 'lexer');
+  assert.ok(t.includes('1 stored session for') && t.includes('Fix the lexer') && t.includes('tokenizer bug'));
 });
 
 console.log(`${n} tests passed`);

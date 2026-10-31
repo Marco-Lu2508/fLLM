@@ -26,7 +26,8 @@
       line-height: 1.5;
     }
     .code-input-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 10px 10px 16px; }
-    .code-hint { font-size: 12px; color: var(--muted-foreground); }
+    .code-hint { font-size: 12px; color: var(--muted-foreground); flex: 1; min-width: 0; }
+    .code-attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px 0; }
     .code-side {
       width: 270px;
       flex-shrink: 0;

@@ -216,6 +216,8 @@
           : 'Browser: you have a real browser that the user can watch and take over. browser_open opens a page and returns a text snapshot; every element you can operate has a ref number, which browser_click, browser_type, browser_select and browser_scroll take. Refs are only valid for the page they came from: after the page changed, use the refs of the newest result, or read the page again with browser_snapshot. Each result also lists console errors and failed requests of the page. Use the browser to test the app you are building (open the dev server, for example http://localhost:3000, click through it, check the errors) and for pages that need a real browser; for plain reading of documentation web_fetch is cheaper. Use browser_screenshot only when the layout matters. The user can leave comments on elements of the page; they arrive at the start of their message with the ref of the element. Never type a password or secret that the user did not give you.');
       }
       out.push('', ...FAMILY_NOTES[family]);
+      const style = personalityNote(opts.personality);
+      if (style) out.push('', style);
       if (opts.env) out.push('', opts.env);
       const instructions = instructionsBlock(opts.files, tier === 'compact' ? 2500 : 9000);
       if (instructions) out.push('', instructions);
@@ -228,5 +230,71 @@
     function subAgentPrompt(args, type) {
       const kind = type === 'general' ? SUB_GENERAL : SUB_EXPLORE;
       return [...SUB_COMMON, ...kind, '', `Job: ${args.description}`, '', args.prompt].join('\n');
+    }
+
+    // ---- personalities: how the agent talks, not what it may do ----
+    const PERSONALITIES = {
+      default: { label: 'Default', note: '' },
+      concise: { label: 'Concise', note: 'Style: use as few words as the job allows. No preamble and no recap of the request. Report what changed, what you checked and what is left.' },
+      teacher: { label: 'Teacher', note: 'Style: explain your reasoning in a sentence or two as you go and name the idea behind each change, so the user learns the codebase. Never lecture.' },
+      reviewer: { label: 'Strict reviewer', note: 'Style: be critical of your own work. Before you call something done, look for the bug you did not think of: edge cases, error paths, missing tests. Say plainly what is weak.' },
+      pair: { label: 'Pair programmer', note: 'Style: think aloud in short lines, say what you will do next when the choice is not obvious, and ask one question instead of guessing.' },
+    };
+
+    /** The system prompt line for a personality name; empty for the default and for unknown names. */
+    function personalityNote(name) {
+      return (PERSONALITIES[name] || PERSONALITIES.default).note;
+    }
+
+    // ---- self-review: look at the work before it counts as done ----
+    /** True when a diagnostics result says there is nothing to fix (or nothing could be checked). */
+    function isCleanDiagnostic(output) {
+      const o = String(output || '').trimStart();
+      return o.startsWith('No problems found') || o.includes('is not available here') || o.includes('no automatic check is known') || o.startsWith('No ');
+    }
+
+    /**
+     * The message that goes back to the model after its edits. report: { review: text of the review tool, problems: [{ path, output }] }.
+     * Round 1 is always sent (the model reads its own diff once more); later rounds only when a check found something, so a clean run
+     * costs one extra step. Returns null when nothing is to be sent.
+     */
+    function reviewFeedback(report, round) {
+      const problems = report.problems || [];
+      const review = String(report.review || '').trim();
+      const objective = problems.length > 0 || review.includes('[high]');
+      if (round > 1 && !objective) return null;
+      const parts = ['Self-review before you finish. Check your own work against the task now.'];
+      if (problems.length) parts.push(`Diagnostics of the files you changed:\n${problems.map((p) => `- ${p.path}: ${String(p.output).trim().slice(0, 1500)}`).join('\n')}`);
+      if (review) parts.push(`Your changes and the findings of a fixed rule set:\n${review.slice(0, 12000)}`);
+      parts.push(objective
+        ? 'Fix every real problem above, check again, then give the final report. If a finding is a false alarm, say so in one line.'
+        : 'Nothing was flagged automatically. Re-read the diff: does it do exactly what the task asked, with no leftover debug code, no unrelated change and no missing case? Fix what is wrong, otherwise give the final report.');
+      return parts.join('\n\n');
+    }
+
+    /** Counts over saved code sessions: [{ messages, time }] -> sessions, messages, tool calls by name. */
+    function sessionInsights(sessions) {
+      const out = { sessions: 0, userMessages: 0, steps: 0, tools: {}, edits: 0 };
+      for (const s of sessions || []) {
+        out.sessions++;
+        for (const m of s.messages || []) {
+          if (m.role === 'user') out.userMessages++;
+          if (m.role !== 'assistant') continue;
+          out.steps++;
+          for (const c of m.tool_calls || []) {
+            const name = c.function?.name || '?';
+            out.tools[name] = (out.tools[name] || 0) + 1;
+            if (['write_file', 'edit_file', 'multi_edit', 'patch', 'notebook_edit'].includes(name)) out.edits++;
+          }
+        }
+      }
+      out.top = Object.entries(out.tools).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
+      return out;
+    }
+
+    /** The hits of the session search as text for a notice. */
+    function searchHitsText(hits, query) {
+      if (!hits || !hits.length) return `No stored session mentions "${query}".`;
+      return `${hits.length} stored session${hits.length === 1 ? '' : 's'} for "${query}":\n${hits.map((h) => `- ${h.title || h.id} (${h.kind === 'code' ? 'code' : 'chat'}, ${h.updated ? new Date(h.updated).toLocaleDateString() : 'undated'})\n  ${h.snippet || ''}`).join('\n')}`;
     }
     // @pure-end

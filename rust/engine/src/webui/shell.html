@@ -481,8 +481,13 @@
               <div class="code-queue" id="codeQueue" style="display:none;"></div>
               <div class="code-input-box">
                 <div class="mention-pop" id="mentionPop"></div>
+                <div class="code-attachments" id="codeAttachments" style="display:none;"></div>
                 <textarea id="codeTextarea" rows="1" placeholder="Describe the task. @ adds a file, / shows commands, ! runs a shell command."></textarea>
                 <div class="code-input-bar">
+                  <input type="file" id="codeImageInput" multiple accept="image/*" style="display:none;">
+                  <button class="btn-icon btn-icon-xs" id="btnCodeAttach" title="Attach a picture (or paste it). Needs a model that can see.">
+                    <svg viewBox="0 0 24 24" class="icon"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>
+                  </button>
                   <span class="code-hint" id="codeHint">Enter sends, Shift+Enter adds a new line</span>
                   <button class="send-circle-btn" id="btnCodeSend" title="Send (Enter)">
                     <svg viewBox="0 0 24 24" class="icon icon-sm"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>

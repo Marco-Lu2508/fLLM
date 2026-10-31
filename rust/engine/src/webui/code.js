@@ -610,6 +610,9 @@
       git: '', // short working tree state for the system prompt
       modes: {}, // { build: { edit: 'ask' ... }, plan: {...} } overrides of DEFAULT_MODES
       autoCheck: false, // run diagnostics after every edit and append the first problems
+      autoReview: false, // before a run counts as done: review the diff and the diagnostics, let the agent fix what is found
+      personality: 'default', // how the agent talks (PERSONALITIES in codeprompts.js)
+      attachments: [], // images (data URLs) waiting for the next message
       queue: [], // messages typed while the agent was busy
       reverted: null, // what /revert took away, so it can be put back
       sessionQuery: '',
@@ -630,12 +633,14 @@
     try {
       const saved = JSON.parse(localStorage.getItem(CODE_SETTINGS_KEY) || '{}');
       code.autoCheck = Boolean(saved.autoCheck);
+      code.autoReview = Boolean(saved.autoReview);
+      code.personality = typeof saved.personality === 'string' && PERSONALITIES[saved.personality] ? saved.personality : 'default';
       const modes = JSON.parse(localStorage.getItem(CODE_MODES_KEY) || '{}');
       if (modes && typeof modes === 'object') code.modes = modes;
     } catch { /* unreadable settings: defaults */ }
     const saveCodeSettings = () => {
       try {
-        localStorage.setItem(CODE_SETTINGS_KEY, JSON.stringify({ autoCheck: code.autoCheck }));
+        localStorage.setItem(CODE_SETTINGS_KEY, JSON.stringify({ autoCheck: code.autoCheck, autoReview: code.autoReview, personality: code.personality }));
         localStorage.setItem(CODE_MODES_KEY, JSON.stringify(code.modes));
       } catch { /* storage full */ }
     };
@@ -758,6 +763,7 @@
         files: code.instructions,
         memory: code.memory,
         tools: new Set(code.registry.keys()),
+        personality: code.personality,
       });
     }
 
@@ -1006,7 +1012,7 @@
       const all = readSessions();
       const mine = (all[code.workspace.root] || []).filter((s) => s.id !== code.sessionId);
       const view = clipForSave(code.view.filter((i) => !(i.kind === 'notice' && i.choices)));
-      mine.unshift({ id: code.sessionId, title: sessionTitleNow(), titleLocked: code.titleLocked, time: Date.now(), messages: withoutImages(code.messages).map((m) => (Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url') ? { ...m, content: '[a screenshot of the browser was here]' } : m)), view, todos: code.todos, used: code.used });
+      mine.unshift({ id: code.sessionId, title: sessionTitleNow(), titleLocked: code.titleLocked, time: Date.now(), messages: withoutImages(code.messages).map((m) => (Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url') ? { ...m, content: `${m.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n')}\n[an image was here]`.trim() } : m)), view, todos: code.todos, used: code.used });
       all[code.workspace.root] = mine.slice(0, MAX_SESSIONS);
       writeSessions(all);
     }
@@ -1588,7 +1594,12 @@
           <button class="btn btn-sm btn-secondary" data-rules-save>Save rules</button></details></section>
         <section class="side-block"><details class="rules-box" data-k="settings"${open('settings')}><summary><h4>Settings</h4></summary>
           <label class="check-row"><input type="checkbox" data-auto-check${code.autoCheck ? ' checked' : ''}> Check my edits automatically</label>
-          <p class="side-empty">After every edit the agent runs a quick syntax or build check (python, node, cargo check, tsc, go vet, JSON) and gets the first errors with the result. Slower, but it catches mistakes at once.</p></details></section>`;
+          <p class="side-empty">After every edit the agent runs a quick syntax or build check (python, node, cargo check, tsc, go vet, JSON) and gets the first errors with the result. Slower, but it catches mistakes at once.</p>
+          <label class="check-row"><input type="checkbox" data-auto-review${code.autoReview ? ' checked' : ''}> Review my work before it counts as done</label>
+          <p class="side-empty">When a run changed files, the agent reads its own diff once more together with the findings of a fixed rule set and the diagnostics, and fixes what is wrong (two rounds at most). It costs one extra step per run. Switch it on with <span class="mono">/autoreview on</span>.</p>
+          <label class="rules-label" for="codePersonality">Style of the agent</label>
+          <select class="ui-select" id="codePersonality" data-personality>${Object.entries(PERSONALITIES).map(([k, p]) => `<option value="${k}"${code.personality === k ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}</select>
+          <p class="side-empty">Only changes how the agent talks, not what it may do. <span class="mono">/personality name</span> does the same.</p></details></section>`;
     }
 
     function updateCodeMeter() {
@@ -2161,7 +2172,11 @@
       await computerBegin();
       const mark = code.changes ? Math.max(0, ...code.changes.map((c) => c.id)) : 0;
       // the new message is appended to a conversation that is valid for every template; its index is kept for fork and revert
-      const messages = repairMessages([...code.messages, { role: 'user', content: expanded }]).messages;
+      // pictures the user attached go with the message as image parts (only for a model that can see)
+      const pictures = code.attachments.splice(0);
+      renderCodeAttachments();
+      const content = pictures.length ? [{ type: 'text', text: expanded }, ...pictures.map((p) => ({ type: 'image_url', image_url: { url: p.dataUrl } }))] : expanded;
+      const messages = repairMessages([...code.messages, { role: 'user', content }]).messages;
       code.messages = messages;
       const turn = { kind: 'user', id: cid(), text: display || userText, msgIndex: messages.length - 1, changeMark: mark, todosBefore: code.todos.map((t) => ({ ...t })) };
       code.view.push(turn);
@@ -2176,6 +2191,7 @@
       let stopped = false;
       try {
         await runLoop(ctx);
+        if (code.autoReview && code.perm !== 'plan' && code.running) await selfReview(ctx, mark);
         const lastItem = [...code.view].reverse().find((i) => i.kind === 'assistant');
         if (lastItem && code.perm === 'plan' && lastItem.content && code.view[code.view.length - 1] === lastItem) { lastItem.planDone = true; paintItem(lastItem); }
       } catch (e) {
@@ -2208,6 +2224,34 @@
       }
     }
 
+    /**
+     * "Review before done": when the run changed files, collect the review tool's diff and findings and the diagnostics of each changed
+     * file, send them back as a message and let the agent run again (two rounds at most; the second only for problems a machine can state).
+     */
+    async function selfReview(ctx, mark) {
+      for (let round = 1; round <= 2 && code.running; round++) {
+        await refreshChanges();
+        const files = [...new Set((code.changes || []).filter((c) => c.id > mark).map((c) => c.path))].slice(0, 12);
+        if (!files.length) return;
+        const report = { review: '', problems: [] };
+        if (serverHas('review')) {
+          const r = await toolCall('review', {}).catch(() => null);
+          if (r?.ok) report.review = r.output;
+        }
+        if (serverHas('diagnostics')) {
+          for (const path of files) {
+            const r = await toolCall('diagnostics', { path }).catch(() => null);
+            if (r?.ok && !isCleanDiagnostic(r.output)) report.problems.push({ path, output: r.output });
+          }
+        }
+        const feedback = reviewFeedback(report, round);
+        if (!feedback) return;
+        codeNotice(round === 1 ? `Reviewing my own changes (${files.length} file${files.length === 1 ? '' : 's'}) before finishing.` : `The review found problems: another round (${report.problems.length} file${report.problems.length === 1 ? '' : 's'} with diagnostics).`);
+        ctx.messages.push({ role: 'user', content: feedback });
+        await runLoop(ctx);
+      }
+    }
+
     function stopAgent() {
       if (!code.running) return;
       code.running = false;
@@ -2215,6 +2259,25 @@
       cancelWaiters();
       // commands the server started keep running after the browser gave up the request: end them
       apiFetch('/api/studio/agent/cancel', { method: 'POST', body: {} }).catch(() => {});
+    }
+
+    // ---- pictures ---------------------------------------------------------------------------------------------------
+    const MAX_CODE_IMAGES = 4;
+    function renderCodeAttachments() {
+      const box = $('codeAttachments');
+      box.style.display = code.attachments.length ? 'flex' : 'none';
+      box.innerHTML = code.attachments.map((a, i) => `<div class="att-item"><img src="${a.dataUrl}" alt="${escapeHtml(a.name)}"><button class="att-remove" data-code-rm-att="${i}" title="Remove">✕</button></div>`).join('');
+    }
+    /** Pasted or chosen pictures. A model that cannot see would only answer about the file name, so it is told instead. */
+    async function addCodeImages(fileList) {
+      const images = Array.from(fileList || []).filter((f) => f.type.startsWith('image/'));
+      if (!images.length) return;
+      if (!state.status?.model?.capabilities?.vision) { toast('The loaded model cannot see pictures. Load a vision model (Models) or describe the picture in words.'); return; }
+      for (const file of images) {
+        if (code.attachments.length >= MAX_CODE_IMAGES) { toast(`At most ${MAX_CODE_IMAGES} pictures per message.`); break; }
+        try { code.attachments.push({ name: file.name || 'Picture', dataUrl: await shrinkImage(file) }); } catch { toast(`${file.name || 'The picture'} could not be read.`); }
+      }
+      renderCodeAttachments();
     }
 
     // ---- message queue ---------------------------------------------------------------------------------------------
@@ -2307,7 +2370,7 @@
       ['rewind', 'Undo file changes back to a chosen point'], ['undo', 'Undo the last file change (/undo 3 for three)'],
       ['plan', 'Plan agent: read only'], ['build', 'Build agent'], ['ask', 'Build agent, ask before every change'], ['edit', 'Build agent, auto-edit'], ['agent', 'Switch between build and plan'], ['model', 'Pick the model'],
       ['skill', 'Turn this session into a reusable skill'], ['remember', 'Save a fact to memory (/remember global ...)'], ['memory', 'Show and edit the memory'], ['check', 'Check the code for errors (diagnostics)'],
-      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['help', 'List the commands'],
+      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['search', 'Search earlier chats and code sessions (/search words)'], ['retry', 'Take the last message back, files included, and send it again'], ['stop', 'Stop the agent'], ['insights', 'What the agent did in your saved sessions of this folder'], ['personality', 'How the agent talks (/personality concise)'], ['autoreview', 'Review my work before it counts as done (/autoreview on|off)'], ['help', 'List the commands'],
     ];
 
     /** Rows for a pick list of the user messages of this session, newest first. */
@@ -2506,6 +2569,46 @@
           }
           return true;
         }
+        case 'search': {
+          if (!argText) { codeNotice('Usage: /search words. It looks through the chats and code sessions this app has stored (Settings > Skills and schedules keeps the index).'); return true; }
+          try {
+            const res = await apiFetch(`/api/studio/sessions/search?q=${encodeURIComponent(argText)}&limit=8`);
+            const data = await res.json();
+            codeNotice(searchHitsText(data.hits || [], argText));
+          } catch (e) { codeNotice(`The search failed: ${(e && e.message) || e}`); }
+          return true;
+        }
+        case 'retry': {
+          const last = [...code.view].reverse().find((i) => i.kind === 'user' && Number.isInteger(i.msgIndex));
+          if (!last) { codeNotice('There is no message to retry.'); return true; }
+          const before = code.reverted;
+          await revertToMessage(last.id);
+          const ta = $('codeTextarea');
+          const text = ta.value.trim();
+          if (code.reverted && code.reverted !== before && text && !code.running) { ta.value = ''; ta.style.height = 'auto'; await submitText(text); }
+          return true;
+        }
+        case 'stop': if (code.running) stopAgent(); else codeNotice('The agent is not running.'); return true;
+        case 'insights': {
+          const saved = workspaceSessions().filter((s) => s.id !== code.sessionId);
+          const ins = sessionInsights([...saved, { messages: code.messages }]);
+          if (!ins.sessions || !ins.steps) { codeNotice('No agent work saved for this folder yet.'); return true; }
+          codeNotice(`This folder, ${ins.sessions} saved session${ins.sessions === 1 ? '' : 's'} (the browser keeps the newest ${MAX_SESSIONS}): ${ins.userMessages} message${ins.userMessages === 1 ? '' : 's'} from you, ${ins.steps} agent step${ins.steps === 1 ? '' : 's'}, ${ins.edits} file edit${ins.edits === 1 ? '' : 's'}.\nMost used tools: ${ins.top.map(([n, c]) => `${n} ${c}`).join(', ')}.\nTokens and cost: /cost. The terminal agent has the same overview over its own sessions: fllm-rs insights.`);
+          return true;
+        }
+        case 'personality': {
+          if (!argText) { codeNotice(`Style: ${PERSONALITIES[code.personality].label}. Choose one of: ${Object.keys(PERSONALITIES).join(', ')}.`); return true; }
+          const key = argText.toLowerCase();
+          if (!PERSONALITIES[key]) { codeNotice(`There is no style "${argText}". Choose one of: ${Object.keys(PERSONALITIES).join(', ')}.`); return true; }
+          code.personality = key; saveCodeSettings(); renderCodeSide(true);
+          codeNotice(`Style: ${PERSONALITIES[key].label}${PERSONALITIES[key].note ? '. ' + PERSONALITIES[key].note.replace(/^Style: /, '') : '.'}`);
+          return true;
+        }
+        case 'autoreview': {
+          if (['on', 'off'].includes(argText.toLowerCase())) { code.autoReview = argText.toLowerCase() === 'on'; saveCodeSettings(); renderCodeSide(true); }
+          codeNotice(`Review before done: ${code.autoReview ? 'on. When a run changes files the agent reads its own diff and the diagnostics once more and fixes what is wrong.' : 'off.'}`);
+          return true;
+        }
         case 'cd': case 'folder': if (rest.length) await setWorkspace(rest.join(' ')); else await pickWorkspace(); return true;
         case 'allow': case 'deny': {
           if (!parseRules(argText).length) { codeNotice(`Usage: /${name} category: pattern, for example /${name} bash: npm test*`); return true; }
@@ -2610,7 +2713,7 @@
       const ta = $('codeTextarea');
       const text = ta.value.trim();
       if (code.running) {
-        if (viaButton || !text) { stopAgent(); return; }
+        if (viaButton || !text || text.toLowerCase() === '/stop') { if (text.toLowerCase() === '/stop') { ta.value = ''; ta.style.height = 'auto'; closeMention(); } stopAgent(); return; }
         // the agent is busy: the message waits and is sent when it has finished
         code.queue.push(text);
         ta.value = '';
@@ -2648,6 +2751,16 @@
       if (b) { e.preventDefault(); pickMention(Number(b.dataset.mention)); }
     });
     $('btnCodeSend').addEventListener('click', () => submitCode(true));
+    $('btnCodeAttach').addEventListener('click', () => $('codeImageInput').click());
+    $('codeImageInput').addEventListener('change', async (e) => { await addCodeImages(e.target.files); e.target.value = ''; });
+    $('codeAttachments').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-code-rm-att]');
+      if (b) { code.attachments.splice(Number(b.dataset.codeRmAtt), 1); renderCodeAttachments(); }
+    });
+    $('codeTextarea').addEventListener('paste', (e) => {
+      const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
+      if (files.length) { e.preventDefault(); addCodeImages(files); }
+    });
     $('btnWorkspace').addEventListener('click', pickWorkspace);
     $('btnCodeUndo').addEventListener('click', () => undoChange());
     $('btnCodeNew').addEventListener('click', newCodeSession);
@@ -2784,6 +2897,8 @@
         renderCodeSide(true);
       }
       if (t.dataset.autoCheck !== undefined) { code.autoCheck = t.checked; saveCodeSettings(); }
+      if (t.dataset.autoReview !== undefined) { code.autoReview = t.checked; saveCodeSettings(); }
+      if (t.dataset.personality !== undefined && PERSONALITIES[t.value]) { code.personality = t.value; saveCodeSettings(); }
     });
     $('codeSide').addEventListener('click', async (e) => {
       if (e.target.closest('[data-memory-save]')) { await saveMemoryDraft(); return; }
