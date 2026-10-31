@@ -10,7 +10,7 @@ fllm-rs studio                                # later starts reuse the last mode
 fllm-rs serve --model model.gguf              # the same page is served at / by every fllm-rs server
 ```
 
-![The Studio in the dark theme: a chat with a table, a code block and a collapsed reasoning block](../img/studio-chat-dark.webp)
+![The Studio in the dark theme with a model loaded and a new chat open](../img/studio-chat-dark.webp)
 
 `studio` is `serve` plus two conveniences: it remembers the model it started with (and the one you switch to in the page) and opens the
 page in your default browser (`--no-open` keeps it closed). All other `serve` options work unchanged.

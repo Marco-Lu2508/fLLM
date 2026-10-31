@@ -246,7 +246,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 model manager (the desktop app shows the same page in its own window): [docs/user/studio.md](docs/user/studio.md).
 Inside the Studio:
 
-![The Studio: a chat with a table and a code block, dark theme](docs/img/studio-chat-dark.webp)
+![The Studio with a model loaded and the new chat open, dark theme](docs/img/studio-chat-dark.webp)
 
 The page follows the light or dark setting of your system, works down to a phone-sized window, has a command palette (Ctrl+K) and a
 settings search, and its footer and Hardware page show which device runs the model and how full each device's memory is

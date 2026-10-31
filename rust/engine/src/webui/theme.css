@@ -898,3 +898,5 @@ html.dark {
 .msg-user-bubble { background: var(--surface-3); border-color: var(--border); }
 .chat-input-box:focus-within { border-color: var(--border-strong); box-shadow: none; }
 .code-input-box:focus-within { border-color: var(--border-strong); box-shadow: none; }
+
+body.colored-user-bubble .msg-user-bubble { background: color-mix(in srgb, var(--primary) 7%, var(--surface-3)); border-color: var(--border-strong); }
