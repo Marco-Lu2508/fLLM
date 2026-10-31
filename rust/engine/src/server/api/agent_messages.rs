@@ -112,7 +112,8 @@ pub(in crate::server) async fn route_list(State(state): State<Arc<AppState>>, Qu
     let chat = query.get("chat").cloned().unwrap_or_default();
     let worker = state.clone();
     match tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let root = worker.agent.root_dir()?;
+        // without a chosen folder there are no notes (an empty list, not an error: the page may ask before a folder is chosen)
+        let Ok(root) = worker.agent.root_dir() else { return Ok(json!({"messages": []})) };
         Ok(json!({"messages": for_chat(&root, &chat)}))
     })
     .await

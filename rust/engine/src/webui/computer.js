@@ -139,6 +139,7 @@
 
     async function refreshComputer() {
       const was = computerOn();
+      if (!agentRoutesUp()) { computer.status = null; scheduleComputerPoll(); return; }
       try {
         const res = await apiFetch('/api/studio/agent/computer');
         computer.status = res.ok ? await res.json() : null;

@@ -35,6 +35,7 @@
 
     // Local API Server & Keys events
     $('btnCreateKey').addEventListener('click', async () => {
+      if (state.setup) { toast('Load a model first: keys are made by the running server.'); return; }
       const label = $('inpKeyLabel').value.trim() || 'My key';
       const rpm = parseFloat($('inpKeyRpm').value) || null;
       const tpm = parseFloat($('inpKeyTpm').value) || null;

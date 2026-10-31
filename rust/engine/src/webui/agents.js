@@ -14,6 +14,8 @@
     ];
     const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
     const AGENT_HIDDEN_TOOLS = new Set(['task', 'spawn_agent', 'create_agent']);
+    // the tools that change things or start processes; a sub-agent that may call one of them is not read-only (the coding agent uses the same list)
+    const AGENT_ACTING_TOOLS = new Set(['write_file', 'edit_file', 'multi_edit', 'patch', 'bash', 'bash_kill', 'memory']);
 
     /** The tools a sub-agent can be given, in two groups: what only reads (the default) and what changes things. */
     function agentToolGroups(tools) {
@@ -21,7 +23,7 @@
       const act = [];
       for (const t of tools || []) {
         if (!t || !t.name || AGENT_HIDDEN_TOOLS.has(t.name) || t.permission === 'computer') continue;
-        (t.permission === 'read' ? read : act).push({ name: t.name, description: String(t.description || '').split('\n')[0].slice(0, 140) });
+        (t.permission === 'read' && !AGENT_ACTING_TOOLS.has(t.name) ? read : act).push({ name: t.name, description: String(t.description || '').split('\n')[0].slice(0, 140) });
       }
       const byName = (a, b) => a.name.localeCompare(b.name);
       return { read: read.sort(byName), act: act.sort(byName) };
@@ -56,8 +58,8 @@
     function agentReach(agent, groups) {
       const tools = agent.tools || [];
       if (!tools.length) return 'reads and searches only';
-      const actNames = new Set((groups ? groups.act : []).map((t) => t.name));
-      const writes = tools.filter((t) => actNames.has(t) || /^(write|edit|multi_edit|patch|bash)/.test(t));
+      const actNames = new Set([...AGENT_ACTING_TOOLS, ...(groups ? groups.act : []).map((t) => t.name)]);
+      const writes = tools.filter((t) => actNames.has(t));
       return writes.length ? `can change files or run commands (${tools.length} tools)` : `reads and searches (${tools.length} tools)`;
     }
     // @pure-end
@@ -102,6 +104,12 @@
 
       async function loadTools() {
         try {
+          if (!agentRoutesUp()) {
+            // without a model the server has no tool route: the built-in list of the coding agent names the tools
+            const defs = typeof TOOL_DEFS !== 'undefined' ? TOOL_DEFS : {};
+            toolGroups = agentToolGroups(Object.entries(defs).map(([name, d]) => ({ name, permission: d.permission, description: d.description })));
+            return;
+          }
           const res = await apiFetch('/api/studio/agent/tools');
           if (!res.ok) return;
           const data = await res.json();

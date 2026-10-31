@@ -2018,7 +2018,8 @@ async fn studio_control_plane_manages_config_hardware_models_and_keys() {
     assert_eq!(created.json()["auth_required"], true);
     let secret = created.json()["secret"].as_str().unwrap().to_owned();
     assert!(secret.starts_with("fllm-sk-") && secret.len() >= 40 && secret != "fllm-sk-test123456", "{secret}");
-    let second = h.post("/api/studio/keys", json!({"label": "Other"})).await;
+    let bearer = format!("Bearer {secret}");
+    let second = h.call(Method::POST, "/api/studio/keys", Some(json!({"label": "Other"})), &[("authorization", bearer.as_str())]).await;
     assert_ne!(second.json()["secret"].as_str().unwrap(), secret, "every key is new");
     let second_id = second.json()["key"]["id"].as_str().unwrap().to_owned();
 

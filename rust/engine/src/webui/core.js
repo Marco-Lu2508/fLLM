@@ -50,6 +50,9 @@
 
     const $ = (id) => document.getElementById(id);
 
+    /** The coding-agent routes (tools, browser, computer use) exist only while a model is loaded; without one they answer 404, so the page does not ask. */
+    const agentRoutesUp = () => Boolean(state.status) && !state.setup;
+
     function escapeHtml(str) {
       return String(str ?? '')
         .replace(/&/g, '&amp;')

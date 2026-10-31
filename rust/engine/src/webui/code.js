@@ -667,6 +667,7 @@
     async function loadRegistry() {
       let map = null;
       try {
+        if (!agentRoutesUp()) throw new Error('no model is loaded');
         const res = await apiFetch('/api/studio/agent/tools');
         if (res.ok) {
           const data = await res.json();

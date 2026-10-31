@@ -133,6 +133,7 @@
 
       // ---- talking to the server ----
       async function loadStatus() {
+        if (!agentRoutesUp()) { br.status = null; renderState(); return; }
         try {
           const res = await apiFetch('/api/studio/agent/browser');
           if (!res.ok) { br.status = null; return; }
@@ -422,6 +423,7 @@
       }
 
       async function load() {
+        if (!agentRoutesUp()) { q('#brsFound').textContent = 'The browser settings are available once a model is loaded (the coding agent starts with a model).'; return; }
         try {
           const res = await apiFetch('/api/studio/agent/browser');
           if (!res.ok) {

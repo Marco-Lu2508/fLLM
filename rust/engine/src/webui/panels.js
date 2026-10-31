@@ -128,7 +128,7 @@
         $('welcomeHeading').textContent = 'No model loaded';
         const plan = startPlan(state.modelsHub, data.last_model);
         $('welcomeSub').textContent = !state.modelsHub ? 'Looking for models on this computer ...'
-          : plan.mode === 'load' ? 'A model that is already on this computer is ready to load. Nothing needs to be downloaded.'
+          : plan.mode === 'load' ? 'A model on this computer is ready. Nothing to download.'
           : 'Download one, or choose a model file you already have.';
         renderHeroStart();
       } else {
@@ -184,6 +184,7 @@
           $('setupText').textContent = 'No model is loaded. The last model loads when you send your first message, or load another one below.';
         }
         updateHero(data);
+        if (typeof updateContextMeter === 'function') updateContextMeter(); // the window of a model that was just loaded
 
         const m = data.model || {};
         if (!state.selectedModel) state.selectedModel = m.name || '';
@@ -243,6 +244,11 @@
 
     // --- API Keys ---
     async function refreshApiKeys() {
+      if (state.setup) {
+        // without a model the server has no key routes (the keys belong to the running server)
+        $('apiKeysTableContainer').innerHTML = '<div class="app-item-desc">Keys are made by the running server. Load a model first (Models page), then create a key here.</div>';
+        return;
+      }
       try {
         const res = await apiFetch('/api/studio/keys');
         if (!res.ok) return;

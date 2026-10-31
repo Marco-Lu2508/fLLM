@@ -23,7 +23,7 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   *Stop* (the square button, or Esc) ends the answer at once and keeps what was written.
 * Every chat is a tree. Editing one of your messages or regenerating an answer keeps the old version; switch between versions with the
   arrows under the message.
-* Markdown with tables, lists and highlighted code, collapsible reasoning blocks, a context meter, and live tokens-per-second.
+* Markdown with tables, lists and highlighted code, collapsible reasoning blocks, a context meter (the server's own token count after each answer; a `~` marks the estimate before the first one), and live tokens-per-second. With *Max tokens* on automatic the page sends no limit and the server lets the answer use what is left of the context window; a number you choose is cut to what fits (the request field `x_fllm_clamp_max_tokens`), while the API keeps rejecting an explicit `max_tokens` that does not fit.
 * Attach images (for vision models), documents and text or code files by button, drag and drop or paste. A long paste becomes a file.
 * **Documents.** Attach PDF (with a text layer), DOCX, XLSX, EPUB, HTML, CSV, Markdown, code and other text files by button, drag and
   drop or paste. The server reads them (`POST /api/studio/extract`, up to 50 MB; a scanned PDF without a text layer, an encrypted PDF
@@ -225,7 +225,7 @@ still apply; the Plan agent can only start explore agents). Several started in o
 status. They have a step and context budget and stop when you stop the agent. All requests share the same system prompt and tool list,
 so the server can reuse its prompt cache.
 
-**Your own sub-agents.** Settings, *Sub-agents* defines further agents as Markdown files: `agents/<name>.md` in the Studio folder (all
+**Your own sub-agents.** Settings, *Sub-agents* is a small manager: the two built-in agents (`explore` reads only, `general` may also edit and run commands) and your own are listed, *New sub-agent* opens a form (name, when to use it, instructions, the tools it may call as checkboxes, model, step limit, all folders or the open folder only), each of your agents has *Edit* and *Delete*, and *Try the instructions* sends a sample job to the loaded model (without tools). A new agent starts with the reading tools only. The folder with the files is named at the bottom of the page (click to copy the path). The agents are Markdown files: `agents/<name>.md` in the Studio folder (all
 folders) or `.fllm/agents/<name>.md` in a workspace. The front matter holds `name`, `description`, `tools` (a comma-separated list of
 tool names; empty keeps the tools of the session), `model` (empty uses the model of the session, so one agent can run on another model or
 provider) and `max_steps`; the body is the instruction the sub-agent starts with. The `task` tool lists them by name, and an agent whose
@@ -392,8 +392,8 @@ best match first; Enter opens the first one and marks the row). On a phone the l
 
 ![Searching the settings for "speed"](../img/studio-settings-search.webp)
 
-Grouped as General, Appearance, Models (models folder, idle unload), Hardware (every device with a memory bar, the one that runs the model marked, the NPU card, a speed test of the loaded model, processor
-feature limit, memory speed, a processor check), Server and API (address, request limits, API keys, a tester), Logs (the latest
+Grouped as General, Appearance, Models (models folder, idle unload), Hardware (every physical device once, with a memory bar and the driver interface that runs the model marked, the other interfaces of the same chip folded under it, the NPU card, a speed test of the loaded model, processor
+feature limit, memory speed, a processor check), Server and API (address, request limits, API keys that fLLM makes for you and shows once, a tester), Logs (the latest
 server messages with refresh and copy), Usage and cost (tokens per model counted in this browser, with the prices you enter),
 and under More: model details, text tools and ready-made examples for connecting Claude Code,
 the OpenAI libraries and curl.
@@ -432,8 +432,8 @@ API: `GET /api/studio/mcp/servers`, `POST` and `DELETE /api/studio/mcp/servers`,
 
 Settings has a Model providers page for models that do not run on this computer: cloud services and other servers. A provider is an
 OpenAI-compatible address (OpenAI, OpenRouter, Groq, Together, Mistral, the Google Gemini OpenAI-compatible endpoint, LM Studio, vLLM and
-many more), Anthropic, or an Ollama server. Pick a template (it fills in the address only), enter a key if the service needs one and press
-Test: fLLM lists the models of the provider and tells you plainly what went wrong (for example "the key was not accepted"). Providers can be
+many more), Anthropic, or an Ollama server. The templates are grouped: *Cloud APIs* (OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, Groq, OpenRouter, Together AI, Fireworks AI, Cerebras, xAI, Ollama Cloud and any other OpenAI-compatible address) and, folded away as optional, *Other servers on your network* (Ollama, LM Studio, vLLM and llama.cpp servers that you run yourself; fLLM needs none of them). A template fills in the address only; the key field links to the page where that service hands out keys. Enter the key and press
+Test connection: fLLM lists the models of the provider and tells you plainly what went wrong (for example "the key was not accepted"). Providers can be
 switched off, edited, refreshed and removed. Their models appear in the model menu of the header after the local ones, as
 "Provider · model". Choosing one sends that conversation to the provider; streaming, the stop button and the token meter work as usual.
 Settings of the local engine (top-k, min-p, mirostat, DRY, grammars, speculative decoding) are not sent to other services, and the context
@@ -733,9 +733,13 @@ need to start a word or sit close together ("kbd" finds "Keyboard shortcuts"), s
 
 ![The chat without a model: one button downloads the model that suits this computer](../img/studio-first-run.webp)
 
-Install, open, and the chat screen says what is missing instead of showing an empty box: *No model loaded* with one
-button — *Download and start* — for the model the hub recommends for this machine (name, quantization and size are on the
-button, and it says when the file may not fit into the free memory). The download runs with progress, speed and an ETA,
+Install, open, and the chat screen says what is missing instead of showing an empty box: *No model loaded*. If a model is already on
+this computer, the one button is *Load <name>* (the model used last, else the recommended one when it is on disk, else the largest
+that fits the free memory), with the other models it found listed under it. fLLM looks in its own models folder (also for a GGUF put
+straight into it), the Downloads folder, a `models` folder in your home folder, LM Studio, llama.cpp and GPT4All folders and the
+models pulled by Ollama; it only reads them, the files stay where they are, and *Choose a file ...* picks a GGUF from anywhere. Only
+when nothing usable exists the button is *Download and start* — for the model the hub recommends for this machine (name, quantization and size are on the
+button, and it says when the file may not fit into the free memory); a recommended model that is on disk is never offered as a download. The download runs with progress, speed and an ETA,
 can be paused and resumed, and loads the model when it is done. The Models page does the same with the whole catalog,
 Hugging Face search and a field for a GGUF that is already on disk. Nothing has to be typed in a terminal, and nothing is
 downloaded without a click.
@@ -793,7 +797,7 @@ same for a single run. The GPU tuning results and the compiled shaders are cache
 
 ## Who may change things
 
-Reading (status, hardware, models) is open like the rest of the API. Changing the server through `/api/studio/*` (settings, model downloads, loading and
+Keys made on the Settings page are random (the server makes them, you never type one), shown once and kept only as a SHA-256 digest in `api-keys.json` next to `studio.json`, so they survive a restart (`FLLM_KEY_STORE=off` keeps them in memory). Reading (status, hardware, models) is open like the rest of the API. Changing the server through `/api/studio/*` (settings, model downloads, loading and
 deletions, updates, API keys, the engine options) needs, when API keys are in use, a key with the **admin right** (Settings > Server and API: tick
 "Admin"; keys given with `--api-key` have it). A key made for chatting cannot do any of that, so one user cannot change what everybody else uses. Without
 keys the changes are accepted only from the same machine, from the page of this server, addressed by `localhost` or an IP address. Other websites in your

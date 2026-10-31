@@ -31,6 +31,14 @@ test('tools are grouped into reading and acting; sub-agent and screen tools are 
   assert.strictEqual(g.read[1].description, 'Reads a file.');
 });
 
+test('process and file tools are never in the reading group, even when the server calls them read', () => {
+  const g = A.agentToolGroups([{ name: 'bash_kill', permission: 'read' }, { name: 'memory', permission: 'read' }, { name: 'glob', permission: 'read' }]);
+  assert.deepStrictEqual(g.read.map((t) => t.name), ['glob']);
+  assert.deepStrictEqual(g.act.map((t) => t.name), ['bash_kill', 'memory']);
+  assert.match(A.agentReach({ tools: ['glob', 'bash_kill'] }, g), /change files/);
+  assert.match(A.agentReach({ tools: ['bash_output', 'glob'] }, g), /reads and searches/);
+});
+
 test('a new agent starts with the reading tools checked, an existing one with its own list', () => {
   const g = A.agentToolGroups(tools);
   assert.deepStrictEqual([...A.agentCheckedTools({}, g)].sort(), ['grep', 'read_file']);

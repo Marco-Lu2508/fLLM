@@ -58,8 +58,8 @@
 
       async function refresh() {
         chatKey = currentChat();
-        if (!chatKey) {
-          // no chat is open yet: nothing to ask the server about
+        if (!chatKey || !(window.fllmCodeWorkspace && window.fllmCodeWorkspace())) {
+          // no chat is open yet, or no folder is chosen for the coding agent: the notes live in that folder, there is nothing to ask
           notes = [];
           button.style.display = 'none';
           hide();
