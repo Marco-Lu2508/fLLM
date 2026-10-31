@@ -523,6 +523,8 @@ fn capability_profiles() -> Vec<VkCapsLike> {
             });
         }
     }
+    // AMD with the cooperative-matrix pipelines pinned to 32-wide subgroups (plans the wide 64 x 128 tile `mm_q4_k_cx` from 128 tokens on)
+    profiles.push(VkCapsLike { coop_matrix: true, int_dot: true, subgroup_size: 32, fp16: true, max_shared: 65536, max_workgroup: 1024, vendor: 0x1002 });
     profiles.push(VkCapsLike {
         coop_matrix: false,
         int_dot: false,
@@ -673,7 +675,7 @@ fn no_shader_is_orphaned() {
     let always = |_: &str| true;
     for quant in planned_formats() {
         for caps in capability_profiles() {
-            for batch in [1usize, 4, 16, 64] {
+            for batch in [1usize, 4, 16, 64, 512] {
                 // the `mm_<fmt>_i` kernels serve the batches above the matrix-vector range when the tiled `mmq_<fmt>_i` kernel is not available
                 let no_tiled = |n: &str| !n.starts_with("mmq_");
                 let availability: [&dyn Fn(&str) -> bool; 2] = [&always, &no_tiled];

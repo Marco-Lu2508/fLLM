@@ -67,7 +67,9 @@ const DISABLED_COOP: u32 = 2;
 
 /// Subgroup size the cooperative-matrix shaders run with and whether the pipeline has to pin it (`None`: cooperative matrices are not usable).
 fn coop_subgroup(caps: &VkCaps) -> Option<(u32, bool)> {
-    let size = caps.subgroup_size;
+    // AMD RDNA runs compute at 64 invocations per subgroup by default, but its matrix instructions are 32 wide: the cooperative-matrix pipelines ask for 32
+    let amd32 = caps.vendor_id == 0x1002 && caps.subgroup_size_control && caps.min_subgroup_size <= 32 && caps.max_subgroup_size >= 32 && !env_on("FLLM_VK_COOP_SG64");
+    let size = if amd32 { 32 } else { caps.subgroup_size };
     if !size.is_power_of_two()
         || 4 * size > caps.max_workgroup_invocations
         || 4 * size > caps.max_workgroup_size[0]
@@ -288,7 +290,7 @@ impl Shared {
             if self.ctx.caps().subgroup_size_control {
                 pipeline_spec = pipeline_spec.with_subgroup_size(32);
             }
-        } else if name.starts_with("mm_") && (name.ends_with("_c") || name.ends_with("_cw")) {
+        } else if name.starts_with("mm_") && (name.ends_with("_c") || name.ends_with("_cw") || name.ends_with("_cx")) {
             if let Some(size) = self.coop_pin {
                 pipeline_spec = pipeline_spec.with_subgroup_size(size);
             }

@@ -1,0 +1,301 @@
+#version 450
+// FLLM-SHADER: mm_<fmt>_cx | bindings: 0 weights(u32[]) 1 xh(uvec4[], batch x cols binary16, written by the prepass quant_act_f16) 2 out(f32[]) 3 bias(f32[]) | push: QPush(48 B) | grid: ceil(rows/64) x ceil(batch/128) x 1
+// Wide variant of mm_coopmat.comp for devices with 32-wide subgroups and plenty of shared memory (NVIDIA): the same cooperative-matrix product
+// (VK_KHR_cooperative_matrix, 16x16x16 float16 inputs, float32 accumulators) with a larger output tile per workgroup of NSGM x NSGN subgroups
+// (macros BM x BN, K step BK; default 128 x 64, K step 64, 8 subgroups of 32 x 32), so every dequantized weight is reused for more activation rows and every converted activation for more weight rows,
+// and the packed weights and (binary16) activations of the NEXT K step are fetched into registers before the matrix multiply-adds of the current step, so their
+// memory latency overlaps the tensor cores. Subgroup s computes the (BM / NSGM) x (BN / NSGN) sub-tile at weight rows (s % NSGM) * (BM / NSGM) and
+// activation rows (s / NSGM) * (BN / NSGN).
+// Requires: shaderFloat16, cooperativeMatrix 16x16x16 (float16 A/B, float32 C/Result, subgroup scope), subgroup size 32 (the planner checks it).
+// AMD RDNA 3.5 variant of mm_coopmat_w.comp (kept apart so that the NVIDIA kernel stays as it is; Q4_K only, planned on AMD): tile 64 weight rows x 128 activation rows (NSGM 2 x NSGN 4) so that every decoded weight serves 128
+// activation rows, tiles stored as uvec4 (16-byte stores for the loader, 16-byte reads for the matrix loads: with f16vec4 tiles the compiler issued 8-byte reads),
+// the epilogue staging memory aliased with the weight tile (27 KiB of shared memory) and, with KK_LOOP, the loop over the four
+// 16-wide K slices of a step not unrolled (one slice's fragments in registers instead of four: 255 -> 111 registers). Measured on a Radeon 840M (4 CUs, gfx1153),
+// Q4_K 8192 x 3072 weight, 512 tokens: 0.72 -> 0.94 TMAC/s (the integer-dot kernel mm_q.comp: 0.86).
+#extension GL_GOOGLE_include_directive : enable
+#define LDS_U4 1
+#define KK_LOOP 1
+#define BM 64
+#define BN 128
+#define NSGM 2
+#define NSGN 4
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#define FLLM_NO_HW_DOT 1
+#include "_q_ext.glsl"
+
+#ifndef BM
+#define BM 128
+#endif
+#ifndef BN
+#define BN 64
+#endif
+#ifndef BK
+#define BK 64
+#endif
+#ifndef NSGM
+#define NSGM 4
+#endif
+#ifndef NSGN
+#define NSGN 2
+#endif
+#define NSG (NSGM * NSGN)
+#define WG (NSG * 32u)
+#define WM (BM / NSGM)   // sub-tile of one subgroup
+#define WN (BN / NSGN)
+#define FM (WM / 16)     // 16 x 16 fragments of it
+#define FN (WN / 16)
+#define LDS (BK + 8u)    // row stride of the f16 tiles in elements (keeps 16-byte alignment, no bank conflicts)
+#define CPR (BK / 8u)    // weight chunks per tile row
+#define QPR (BK / 8u)    // activation uvec4 (8 halves) per tile row
+#define WITEMS ((BM * CPR) / WG)   // weight chunks per invocation and K step
+#define XITEMS ((BN * QPR) / WG)   // activation uvec4 per invocation and K step
+
+// Q4_K with a K step of 64 has its own weight loader: one K step of a row is exactly one pair of scale groups, 32 bytes of qs whose low nibbles are the first and
+// whose high nibbles are the second group of 32 values. An invocation reads 16 of those bytes with one wide load and the scales, minimums and d / dmin of the
+// pair once (instead of two words, a scale word, a minimum word and the d word for every chunk of 8 weights).
+#if defined(FMT_Q4_K) && !defined(FLLM_NO_Q4K_LOADER)
+#define Q4K_LOADER 1
+#if BK != 64
+#error "the Q4_K loader needs a K step of 64"
+#endif
+#endif
+
+layout(local_size_x = 32 * NSGM * NSGN, local_size_y = 1, local_size_z = 1) in;
+
+#include "_q_common.glsl"
+#include "_q_formats.glsl"
+#ifdef FLOAT_CHUNK
+#error "float-chunk formats (FP8, NF4, FP4) have only the f32 shaders"
+#endif
+
+layout(std430, set = 0, binding = 1) readonly buffer XBuf { uvec4 xh[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
+
+#ifdef LDS_U4
+// the f16 tiles are arrays of uvec4 (8 halves): a chunk of 8 weights is one 16-byte store, and the 16-byte alignment lets the compiler read 16 bytes per lane
+// in the cooperative-matrix loads (an f16vec4 array made them 8-byte reads, twice as many LDS instructions)
+shared uvec4 As[BM * LDS / 8u];   // As[m * LDS + k] in halves
+shared uvec4 Bs[BN * LDS / 8u];   // Bs[n * LDS + k] in halves
+// the epilogue stages the accumulators in the memory of the tile As (free after the last K step): one 16 x 16 float tile per subgroup
+#define LSH 3
+#else
+// the f16 tiles are arrays of f16vec4 (a chunk of 8 weights is two 8-byte stores, not eight 2-byte stores)
+shared f16vec4 As[BM * LDS / 4u];   // As[m * LDS + k] in halves
+shared f16vec4 Bs[BN * LDS / 4u];   // Bs[n * LDS + k] in halves
+shared float Cs[NSG * 256];         // one 16 x 16 staging tile per subgroup
+#define LSH 2
+#endif
+
+#ifdef Q4K_LOADER
+#if (BM * 2) % (NSG * 32) == 0
+#define QITEMS ((BM * 2u) / WG)   // (row, half) units per invocation and K step
+#define Q_IN_TILE(i) true
+#elif defined(LDS_U4)
+#define QITEMS (((BM * 2u) + WG - 1u) / WG)   // the invocations past the last unit idle
+#define Q_IN_TILE(i) ((i) < BM * 2u)
+#else
+#error "the Q4_K loader needs BM * 2 to be a multiple of the workgroup size"
+#endif
+uvec4 r_q[QITEMS];
+vec4 r_k[QITEMS];   // scale and minimum of the first group, then of the second group: weight = k.x * q + k.y, k.z * q + k.w
+#else
+uint r_p0[WITEMS];
+uint r_p1[WITEMS];
+float r_ws[WITEMS];
+float r_wm[WITEMS];
+#endif
+uvec4 r_x[XITEMS];
+
+// the packed weights and the activations of K step k0 into registers
+void fetch(uint k0, uint t, uint m0, uint n0) {
+#ifdef Q4K_LOADER
+    [[unroll]] for (uint e = 0; e < QITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint row = m0 + (i >> 1);
+        uvec4 q = uvec4(0u);
+        vec4 k = vec4(0.0);
+        if (Q_IN_TILE(i) && row < p.rows) {
+            const uint g = row * p.nb + (k0 >> 8);
+            const uint pair = (k0 >> 6) & 3u;
+            const uint q0 = g * 32u + pair * 8u + (i & 1u) * 4u;
+            q = uvec4(w[q0], w[q0 + 1u], w[q0 + 2u], w[q0 + 3u]);
+            const uint q1 = p.off1 + g * 4u + (pair >> 1);
+            const uint sh = (pair & 1u) << 4;
+            const uint scw = w[q1] >> sh;
+            const uint mnw = w[q1 + 2u] >> sh;
+            const vec2 dm = unpackHalf2x16(w[p.off2 + g]);
+            k = vec4(dm.x * float(scw & 255u), -dm.y * float(mnw & 255u), dm.x * float((scw >> 8) & 255u), -dm.y * float((mnw >> 8) & 255u));
+        }
+        r_q[e] = q;
+        r_k[e] = k;
+    }
+#else
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint row = m0 + i / CPR;
+        const uint kk = k0 + (i % CPR) * 8u;
+        uint p0 = 0u, p1 = 0u;
+        float ws = 0.0, wm = 0.0;
+        if (row < p.rows) wchunk(row * p.nb + kk / QK, (kk % QK) >> 3, p0, p1, ws, wm);
+        r_p0[e] = p0;
+        r_p1[e] = p1;
+        r_ws[e] = ws;
+        r_wm[e] = wm;
+    }
+#endif
+    [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint token = n0 + i / QPR;
+        uvec4 v = uvec4(0u);
+        if (token < p.batch) v = xh[(token * p.cols + k0 + (i % QPR) * 8u) >> 3];
+        r_x[e] = v;
+    }
+}
+
+// the registers to the shared f16 tiles
+#ifdef LDS_U4
+void stash(uint t) {
+#ifdef Q4K_LOADER
+    [[unroll]] for (uint e = 0; e < QITEMS; ++e) {
+        const uint i = t + e * WG;
+        if (!Q_IN_TILE(i)) continue;
+        const uint base = (((i >> 1) * LDS) + (i & 1u) * 16u) >> 3;   // first group at tile columns 0 .. 31, the second at 32 .. 63
+        const vec4 ka = vec4(r_k[e].x);
+        const vec4 ma = vec4(r_k[e].y);
+        const vec4 kb = vec4(r_k[e].z);
+        const vec4 mb = vec4(r_k[e].w);
+        [[unroll]] for (uint c = 0; c < 4u; c += 2u) {
+            const uint x = r_q[e][c];
+            const uint y = r_q[e][c + 1u];
+            const uint xl = x & 0x0F0F0F0Fu, xh = (x >> 4) & 0x0F0F0F0Fu, yl = y & 0x0F0F0F0Fu, yh = (y >> 4) & 0x0F0F0F0Fu;
+            const vec4 lo0 = vec4(float(xl & 255u), float((xl >> 8) & 255u), float((xl >> 16) & 255u), float(xl >> 24));
+            const vec4 lo1 = vec4(float(yl & 255u), float((yl >> 8) & 255u), float((yl >> 16) & 255u), float(yl >> 24));
+            const vec4 hi0 = vec4(float(xh & 255u), float((xh >> 8) & 255u), float((xh >> 16) & 255u), float(xh >> 24));
+            const vec4 hi1 = vec4(float(yh & 255u), float((yh >> 8) & 255u), float((yh >> 16) & 255u), float(yh >> 24));
+            const vec4 l0 = fma(lo0, ka, ma), l1 = fma(lo1, ka, ma), h0 = fma(hi0, kb, mb), h1 = fma(hi1, kb, mb);
+            As[base + (c >> 1)] = uvec4(packFloat2x16(f16vec2(l0.xy)), packFloat2x16(f16vec2(l0.zw)), packFloat2x16(f16vec2(l1.xy)), packFloat2x16(f16vec2(l1.zw)));
+            As[base + 4u + (c >> 1)] = uvec4(packFloat2x16(f16vec2(h0.xy)), packFloat2x16(f16vec2(h0.zw)), packFloat2x16(f16vec2(h1.xy)), packFloat2x16(f16vec2(h1.zw)));
+        }
+    }
+#else
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        float vals[8];
+        chunk_floats(r_p0[e], r_p1[e], r_ws[e], r_wm[e], vals);
+        const uint base = ((i / CPR) * LDS + (i % CPR) * 8u) >> 3;
+        As[base] = uvec4(packFloat2x16(f16vec2(vals[0], vals[1])), packFloat2x16(f16vec2(vals[2], vals[3])), packFloat2x16(f16vec2(vals[4], vals[5])), packFloat2x16(f16vec2(vals[6], vals[7])));
+    }
+#endif
+    [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
+        const uint i = t + e * WG;
+        Bs[((i / QPR) * LDS + (i % QPR) * 8u) >> 3] = r_x[e];
+    }
+}
+#else
+void stash(uint t) {
+#ifdef Q4K_LOADER
+    [[unroll]] for (uint e = 0; e < QITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint base = (((i >> 1) * LDS) + (i & 1u) * 16u) >> 2;   // first group at tile columns 0 .. 31, the second at 32 .. 63
+        const vec4 ka = vec4(r_k[e].x, r_k[e].x, r_k[e].x, r_k[e].x);
+        const vec4 ma = vec4(r_k[e].y, r_k[e].y, r_k[e].y, r_k[e].y);
+        const vec4 kb = vec4(r_k[e].z, r_k[e].z, r_k[e].z, r_k[e].z);
+        const vec4 mb = vec4(r_k[e].w, r_k[e].w, r_k[e].w, r_k[e].w);
+        [[unroll]] for (uint c = 0; c < 4u; ++c) {
+            const uint x = r_q[e][c];
+            const vec4 lo = vec4(uvec4(x, x >> 8, x >> 16, x >> 24) & 15u);
+            const vec4 hi = vec4(uvec4(x >> 4, x >> 12, x >> 20, x >> 28) & 15u);
+            As[base + c] = f16vec4(fma(lo, ka, ma));
+            As[base + 8u + c] = f16vec4(fma(hi, kb, mb));
+        }
+    }
+#else
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        float vals[8];
+        chunk_floats(r_p0[e], r_p1[e], r_ws[e], r_wm[e], vals);
+        const uint base = ((i / CPR) * LDS + (i % CPR) * 8u) >> 2;
+        As[base] = f16vec4(vals[0], vals[1], vals[2], vals[3]);
+        As[base + 1u] = f16vec4(vals[4], vals[5], vals[6], vals[7]);
+    }
+#endif
+    [[unroll]] for (uint e = 0; e < XITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint base = ((i / QPR) * LDS + (i % QPR) * 8u) >> 2;
+        Bs[base] = f16vec4(unpackFloat2x16(r_x[e].x), unpackFloat2x16(r_x[e].y));
+        Bs[base + 1u] = f16vec4(unpackFloat2x16(r_x[e].z), unpackFloat2x16(r_x[e].w));
+    }
+}
+
+#endif
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint sg = gl_SubgroupID;
+    const uint lane = gl_SubgroupInvocationID;
+    const uint m0 = gl_WorkGroupID.x * BM;
+    const uint n0 = gl_WorkGroupID.y * BN;
+    const uint sm = (sg % NSGM) * WM;   // weight-row offset of this subgroup's sub-tile
+    const uint sn = (sg / NSGM) * WN;   // activation-row offset
+
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc[FM * FN];
+    [[unroll]] for (uint i = 0; i < FM * FN; ++i) acc[i] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+
+    fetch(0u, t, m0, n0);
+    for (uint k0 = 0; k0 < p.cols; k0 += BK) {
+        stash(t);
+        barrier();
+        if (k0 + BK < p.cols) fetch(k0 + BK, t, m0, n0);
+#ifdef KK_LOOP
+        [[dont_unroll]]
+#else
+        [[unroll]]
+#endif
+        for (uint kk = 0; kk < BK / 16; ++kk) {
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> ma[FM];
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> mb[FN];
+            [[unroll]] for (uint i = 0; i < FM; ++i)
+                coopMatLoad(ma[i], As, ((sm + i * 16u) * LDS + kk * 16u) >> LSH, LDS >> LSH, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0; j < FN; ++j)
+                coopMatLoad(mb[j], Bs, ((sn + j * 16u) * LDS + kk * 16u) >> LSH, LDS >> LSH, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0; i < FM; ++i) {
+                [[unroll]] for (uint j = 0; j < FN; ++j) acc[i * FN + j] = coopMatMulAdd(ma[i], mb[j], acc[i * FN + j]);
+            }
+        }
+        barrier();
+    }
+
+    // epilogue: stage each 16 x 16 accumulator through shared memory, apply scale and bias, write the output (row-contiguous)
+    [[unroll]] for (uint i = 0; i < FM; ++i) {
+        [[unroll]] for (uint j = 0; j < FN; ++j) {
+#ifdef LDS_U4
+            coopMatStore(acc[i * FN + j], As, sg * 64u, 4u, gl_CooperativeMatrixLayoutColumnMajor);
+#else
+            coopMatStore(acc[i * FN + j], Cs, sg * 256u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+#endif
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            for (uint idx = lane; idx < 256u; idx += 32u) {
+                const uint m = idx & 15u;
+                const uint n = idx >> 4;
+                const uint row = m0 + sm + i * 16u + m;
+                const uint token = n0 + sn + j * 16u + n;
+                if (row < p.rows && token < p.batch) {
+#ifdef LDS_U4
+                    float v = uintBitsToFloat(As[sg * 64u + (idx >> 2)][idx & 3u]) * p.scale;
+#else
+                    float v = Cs[sg * 256u + idx] * p.scale;
+#endif
+                    if ((p.flags & 1u) != 0u) v += biasv[p.row_base + row];
+                    outv[token * p.out_stride + p.row_base + row] = v;
+                }
+            }
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+        }
+    }
+}

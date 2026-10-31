@@ -60,6 +60,12 @@ fn coop_wide_shared(tile: (u32, u32, u32)) -> u32 {
 }
 /// PCI vendor id of NVIDIA.
 const VENDOR_NVIDIA: u32 = 0x10de;
+/// PCI vendor id of AMD.
+const VENDOR_AMD: u32 = 0x1002;
+/// Formats that have the AMD wide shader `mm_<fmt>_cx` (a loader of the right shape; for the others the integer-dot kernel is faster on AMD).
+const AMD_CX_TAGS: [&str; 1] = ["q4_k"];
+/// Shared memory of the AMD wide shader `mm_<fmt>_cx` (`mm_q4_k_cx.comp`): f16 tiles of 64 + 128 rows x 72; the epilogue staging lives inside the weight tile.
+const AMD_WIDE_SHARED: u32 = (64 + 128) * 72 * 2;
 
 /// Smallest batch served by the wide 128 x 64 cooperative-matrix tile (`mm_<fmt>_cw`, NVIDIA): `FLLM_VK_COOP_WIDE` = `0` / `off` never uses it, a number
 /// sets the threshold (default 64); smaller batches keep the 64 x 64 tile of `mm_<fmt>_c`.
@@ -519,6 +525,16 @@ pub fn plan_quantized_linear_with(
             _ => String::new(),
         }
     };
+    let amd_wide_ok = caps.subgroup_size == 32
+        && caps.max_workgroup >= 256
+        && caps.max_shared >= AMD_WIDE_SHARED
+        && cols32 % 64 == 0
+        && !perm
+        && available("quant_act_f16")
+        && coop_wide_min_batch().is_some_and(|min| batch32 >= min)
+        // the 128-token tile wastes the padding of the last tile: from 128 tokens on, and at most a quarter of the tile columns empty
+        && batch32 >= 128
+        && batch32.div_ceil(128) * 128 * 4 <= batch32 * 5;
     let usable = |variant: Variant| -> bool {
         let name = format!("{prefix}_{tag}_{}", variant.suffix());
         let needs_prepass = variant == Variant::IntDot || perm;
@@ -532,7 +548,12 @@ pub fn plan_quantized_linear_with(
             Variant::Scalar => true,
             Variant::IntDot => caps.int_dot,
             Variant::CoopMat => {
-                !matvec && caps.coop_matrix && caps.fp16 && (8..=128).contains(&caps.subgroup_size)
+                !matvec
+                    && caps.coop_matrix
+                    && caps.fp16
+                    && (8..=128).contains(&caps.subgroup_size)
+                    // AMD: only the wide 64 x 128 tile (`mm_<fmt>_cx`, formats with a fast loader) beats the integer dot product; the 64 x 64 tile does not
+                    && (caps.vendor != VENDOR_AMD || (amd_wide_ok && AMD_CX_TAGS.contains(&tag) && available(&format!("mm_{tag}_cx"))))
             }
         };
         // float-chunk formats (FP8, NF4, FP4) have the f32 shaders only
@@ -575,20 +596,20 @@ pub fn plan_quantized_linear_with(
     // NVIDIA: the 128 x 64 cooperative-matrix tile (K step 64) for prompt-sized batches
     let coop_wide = !matvec
         && variant == Variant::CoopMat
-        && caps.vendor == VENDOR_NVIDIA
+        && (caps.vendor == VENDOR_NVIDIA || (caps.vendor == VENDOR_AMD && amd_wide_ok && AMD_CX_TAGS.contains(&tag)))
         && caps.subgroup_size == 32
         && caps.max_workgroup >= 256
-        && caps.max_shared >= coop_wide_shared(coop_wide_tile())
+        && caps.max_shared >= (if caps.vendor == VENDOR_AMD { AMD_WIDE_SHARED } else { coop_wide_shared(coop_wide_tile()) })
         && cols32 % 64 == 0
         && !perm
         && available("quant_act_f16")
         && coop_wide_min_batch().is_some_and(|min| batch32 >= min)
-        && available(&format!("mm_{tag}_cw"));
+        && available(&format!("mm_{tag}_{}", if caps.vendor == VENDOR_AMD { "cx" } else { "cw" }));
     let row_group = matvec && variant == Variant::IntDot && options.force.is_none() && batch32 >= ROW_GROUP_MIN_BATCH && ROW_GROUP_TAGS.contains(&tag) && available(&format!("mv_{tag}_g"));
     let shader_name = match &mmq {
         Some((name, _)) => name.clone(),
         None if row_group => format!("mv_{tag}_g"),
-        None if coop_wide => format!("mm_{tag}_cw"),
+        None if coop_wide => format!("mm_{tag}_{}", if caps.vendor == VENDOR_AMD { "cx" } else { "cw" }),
         None => format!("{prefix}_{tag}_{}", variant.suffix()),
     };
     let out_stride = options.out_stride.unwrap_or(rows32);
@@ -660,7 +681,13 @@ pub fn plan_quantized_linear_with(
             PlanKind::MatMul,
             spec,
             {
-                let (tm, tn) = if coop_wide { let t = coop_wide_tile(); (u64::from(t.0), u64::from(t.1)) } else { (64, 64) };
+                // NVIDIA: the tile of the shader module (see coop_wide_tile); AMD: 64 x 128 (every weight decoded once per 128 tokens: decoding is what
+                // limits RDNA 3.5); else 64 x 64
+                let (tm, tn) = if coop_wide {
+                    if caps.vendor == VENDOR_AMD { (64, 128) } else { let t = coop_wide_tile(); (u64::from(t.0), u64::from(t.1)) }
+                } else {
+                    (64, 64)
+                };
                 [
                     (rows as u64).div_ceil(tm) as u32,
                     (batch as u64).div_ceil(tn) as u32,

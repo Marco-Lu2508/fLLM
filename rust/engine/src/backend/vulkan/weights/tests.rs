@@ -432,14 +432,25 @@ fn prefill_prefers_cooperative_matrices_then_integer_dot_then_f32() {
     assert_eq!(le_words(&pre.push_constants), [512 * 4096 / 4]);
     assert_eq!(pre.output_bytes, 512 * 4096 * 2);
     assert_eq!(plan.bindings[1].role, BindingRole::PrepassOutput);
-    // a small batch, a K that is no multiple of 64 and other vendors keep the 64 x 64 tile
-    for (cols, batch, vendor) in [(4096, 32, 0x10de), (4096, 512, 0x1002)] {
+    // a small batch keeps the 64 x 64 tile
+    for (cols, batch, vendor) in [(4096, 32, 0x10de)] {
         let caps = VkCapsLike { vendor, ..caps_full() };
         let plan = plan_quantized_linear_with(QuantType::Q6_K, 4096, cols, batch, &caps, &lossy_options()).unwrap();
         assert_eq!(plan.shader_name, "mm_q6_k_c", "{cols} {batch} {vendor:#x}");
         assert_eq!(plan.spec_constants, [SpecConstant { id: 0, value: 128 }]);
         assert_eq!(plan.groups, [64, (batch as u32).div_ceil(64), 1]);
         assert!(plan.activation_prepass.is_none());
+    }
+    // AMD: the cooperative-matrix path only exists as the wide 64 x 128 tile of a format with a fast loader (Q4_K), from 128 tokens on and with at most a
+    // quarter of the last tile empty; every other case (Q6_K, 64 or 129 tokens) takes the integer dot product
+    let amd = VkCapsLike { vendor: 0x1002, ..caps_full() };
+    let plan = plan_quantized_linear_with(QuantType::Q4_K, 4096, 4096, 512, &amd, &lossy_options()).unwrap();
+    assert_eq!((plan.shader_name.as_str(), plan.variant), ("mm_q4_k_cx", Variant::CoopMat));
+    assert_eq!(plan.groups, [64, 4, 1]);
+    assert_eq!(plan.activation_prepass.as_ref().unwrap().shader_name, "quant_act_f16");
+    for (quant, batch) in [(QuantType::Q6_K, 512), (QuantType::Q4_K, 64), (QuantType::Q4_K, 129), (QuantType::Q4_K, 8)] {
+        let plan = plan_quantized_linear_with(quant, 4096, 4096, batch, &amd, &lossy_options()).unwrap();
+        assert_ne!(plan.variant, Variant::CoopMat, "{quant:?} {batch}");
     }
     let plan = plan_quantized_linear_with(QuantType::Q4_0, 128, 288, 512, &caps_full(), &lossy_options()).unwrap();
     assert_eq!(plan.shader_name, "mm_q4_0_c", "K = 288 is no multiple of the 64-wide K step");

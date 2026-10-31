@@ -274,6 +274,13 @@ Ordered by area.
   `_d64` is the prompt attention on cooperative matrices (f16 cache, key = value width 64 or 128, 64 query rows per workgroup of four subgroups); it
   replaced a scalar kernel that took 41 % of a 2000-token prompt (`FLLM_VK_ATTN_COOP=0` brings that kernel back; the exact self-test pass never uses the
   new one). Llama-3.2-3B Q4_K_M prompts of 580 / 2100 tokens: 1719 -> 2615 and 1431 -> 2810 tok/s, see [benchmarks.md](benchmarks.md).
+* AMD prompts (Radeon 840M, RDNA 3.5, 2026-10-31): the cooperative-matrix pipelines ask for 32-wide subgroups (the default of RDNA compute is 64, which halves
+  the matrix instructions; `FLLM_VK_COOP_SG64=1` keeps the default). `mm_q4_k_cx` is the 64 x 128 tile of the same source as `mm_<fmt>_cw` (uvec4 tiles, 16-byte
+  matrix loads, the epilogue staging inside the weight tile, the K slices of a step not unrolled): 0.94 - 0.97 TMAC/s against 0.86 for `mmq_q4_k_i` on a
+  8192 x 3072 Q4_K weight with 512 tokens. It is planned for Q4_K only, from 128 tokens on and when at most a quarter of the last 128-token tile is empty; the
+  device-wide timing at the first prompt (4096 x 4096 Q4_K, 512 tokens) still decides between it and the integer dot product, every other format and
+  batch keeps `mmq_<fmt>_i`. The prompt attention on cooperative matrices (`FLLM_VK_ATTN_COOP=0` switches it off) now runs on AMD as well, pinned to 32-wide
+  subgroups: 4.9 -> 2.5 ms per layer for a 460-token prompt. Numbers and the measurements that led there: [benchmarks.md](benchmarks.md).
 
 ### 5.7b Several devices in one run
 
