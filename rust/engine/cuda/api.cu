@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "common.cuh"
@@ -63,9 +66,43 @@ int fllm_set_error(const char *fmt, ...) {
     va_end(ap);
     return 1;
 }
+// FLLM_CUDA_PROFILE=all: wall time between consecutive launches, charged to the operation named by the check that ends it (the device is synchronised at every
+// check, so the run is much slower; gaps above 100 ms are collected in a row of their own: idle time or a long host phase). A table is printed to stderr every 4000 checks.
+static void profile_all(const char *what) {
+    static const bool on = getenv("FLLM_CUDA_PROFILE") != nullptr && strcmp(getenv("FLLM_CUDA_PROFILE"), "all") == 0;
+    if (!on) return;
+    struct Row { double ms = 0; long calls = 0; };
+    static std::mutex lock;
+    static std::vector<std::pair<std::string, Row>> rows;
+    static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    static long checks = 0;
+    cudaDeviceSynchronize();
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> guard(lock);
+    const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+    last = now;
+    const char *label = ms > 100.0 ? "(gap above 100 ms)" : what;  // idle time between requests, or a long host phase
+    Row *row = nullptr;
+    for (auto &r : rows)
+        if (r.first == label) row = &r.second;
+    if (!row) {
+        rows.emplace_back(label, Row());
+        row = &rows.back().second;
+    }
+    row->ms += ms;
+    row->calls++;
+    if (++checks % 4000 == 0) {
+        double total = 0;
+        for (const auto &r : rows) total += r.second.ms;
+        fprintf(stderr, "[fllm-gpu-profile-all] operation, calls, ms per call, share of %.0f ms\n", total);
+        for (const auto &r : rows)
+            fprintf(stderr, "[fllm-gpu-profile-all] %-24s %7ld %9.3f ms %5.1f %%\n", r.first.c_str(), r.second.calls, r.second.ms / r.second.calls, 100.0 * r.second.ms / total);
+    }
+}
 int fllm_check_launch(const char *what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) return fllm_set_error("%s: %s", what, cudaGetErrorString(e));
+    profile_all(what);
     return 0;
 }
 static int fail(const char *what, cudaError_t e) { return fllm_set_error("%s: %s", what, cudaGetErrorString(e)); }

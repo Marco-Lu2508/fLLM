@@ -41,6 +41,7 @@
 #define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
+#define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaGetLastError hipGetLastError
 #define cudaGetErrorString hipGetErrorString
 // dynamic shared memory up to the LDS size needs no opt-in on AMD

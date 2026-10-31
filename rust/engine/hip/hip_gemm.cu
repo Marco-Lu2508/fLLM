@@ -7,7 +7,7 @@
 // It replaces the rocWMMA path of ../cuda/tc_gemm.cu (which stays as the fallback): no library dependency, direct builtins, the wave grid
 // chosen per architecture. The kernel is in hip_gemm.cuh. Weights stay quantized in global memory and are decoded into LDS.
 // FLLM_HIP_NO_MMA=1 switches it off. The caller (linear.cu) offers it batches of 16 tokens and more, like the CUDA tensor-core path.
-// Level of verification: L0 (compiles; never run on hardware).
+// Level of verification: run and timed on RDNA3 (gfx1153, Radeon 840M), `selftest-gpu --device hip:0` 0 failed; CDNA and RDNA4 only compiled.
 #include <cstdlib>
 
 #include "../cuda/common.cuh"

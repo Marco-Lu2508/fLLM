@@ -269,6 +269,23 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         const uint8_t *qs = b + (five ? 48 : 16) + (g >> 1) * 32 + (local & 31);
         const int shift = (g & 1) * 4;
         const uint8_t *qh = b + 16 + (local & 31);
+#if defined(__HIPCC__)
+        if (!five) {
+            // the 16 quantized bytes of the run are 16-byte aligned (144-byte blocks, 16-byte header): one vector load and word-wide nibble
+            // extraction instead of 16 byte loads
+            const uint4 v = *reinterpret_cast<const uint4 *>(qs);
+            const uint32_t words[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+            for (int k = 0; k < 4; k++) {
+                const uint32_t x = (words[k] >> shift) & 0x0F0F0F0Fu;
+                w[4 * k] = ds * (float)(x & 255u) - dm;
+                w[4 * k + 1] = ds * (float)((x >> 8) & 255u) - dm;
+                w[4 * k + 2] = ds * (float)((x >> 16) & 255u) - dm;
+                w[4 * k + 3] = ds * (float)(x >> 24) - dm;
+            }
+            return;
+        }
+#endif
 #pragma unroll
         for (int i = 0; i < 16; i++) {
             uint32_t q = (qs[i] >> shift) & 15u;
@@ -363,6 +380,23 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
         const uint8_t *ql = b + n * 64 + (g & 1) * 32 + j;
         const uint8_t *qh = b + 128 + n * 32 + j;
         const int lshift = (g >> 1) * 4, hshift = g * 2;
+#if defined(__HIPCC__)
+        {
+            // 16 low and 16 high bits-pairs bytes, both 16-byte aligned (224-byte blocks): vector loads and word-wide extraction
+            const uint4 vl = *reinterpret_cast<const uint4 *>(ql), vh = *reinterpret_cast<const uint4 *>(qh);
+            const uint32_t lo[4] = {vl.x, vl.y, vl.z, vl.w}, hi[4] = {vh.x, vh.y, vh.z, vh.w};
+            const float ds = d * sc, nds = -32.f * ds;   // ds * (q - 32) = ds * q + nds, one rounding either way
+#pragma unroll
+            for (int k = 0; k < 4; k++) {
+                const uint32_t x = ((lo[k] >> lshift) & 0x0F0F0F0Fu) | (((hi[k] >> hshift) & 0x03030303u) << 4);
+                w[4 * k] = fmaf(ds, (float)(x & 255u), nds);
+                w[4 * k + 1] = fmaf(ds, (float)((x >> 8) & 255u), nds);
+                w[4 * k + 2] = fmaf(ds, (float)((x >> 16) & 255u), nds);
+                w[4 * k + 3] = fmaf(ds, (float)(x >> 24), nds);
+            }
+            return;
+        }
+#endif
 #pragma unroll
         for (int i = 0; i < 16; i++) {
             const uint32_t q = ((ql[i] >> lshift) & 15u) | ((((uint32_t)qh[i] >> hshift) & 3u) << 4);

@@ -11,8 +11,12 @@
 //
 // so one kernel serves every GGUF kind (KindDecoder) and the group-quantized Q4Z weights.
 //
-// Waves: CDNA 4 waves in a 2x2 grid, 2x2 sub-tiles of 16x16 each; RDNA 8 waves in a 2x4 grid, 2x1 sub-tiles each. Rounding the operands
-// to FP16 costs about 1e-3 relative error, like tc_gemm.cu. Level of verification: L0 (compiles; never run on hardware).
+// Waves: CDNA 4 waves in a 2x2 grid, 2x2 sub-tiles of 16x16 each; RDNA 8 waves in a 2x4 grid, 2x1 sub-tiles each.
+// RDNA3 (measured on a Radeon 840M, gfx1153): the kernel is limited by the latency of the global loads of the next step, which one workgroup per CU
+// cannot hide. Two changes made it 1.66 times faster (Q4_K 8192 x 3072, 512 tokens: 14.8 -> 8.9 ms): the loop over the four 16-wide K slices of a
+// step is not unrolled (the compiler otherwise holds the fragments of all four slices in registers: 224 -> 149 VGPRs) and the tiles are single
+// buffered (27 KB of LDS instead of 55 KB, one barrier more per step), so that two workgroups share a CU and one computes while the other waits. Rounding the operands
+// to FP16 costs about 1e-3 relative error, like tc_gemm.cu. Level of verification: run and timed on RDNA3 (gfx1153, Radeon 840M); CDNA and RDNA4 only compiled.
 #pragma once
 #include <cstdlib>
 
@@ -25,6 +29,11 @@ namespace fllm_hip {
 constexpr int G_BM = 64, G_BK = 64;   // the token tile BN is a template parameter of the kernel: 64, or 128 for long prompts (halves the weight decoding per token)
 constexpr int G_LD = G_BK + 8;          // halves per LDS row (144 bytes: 16-byte aligned rows, spread banks)
 constexpr int G_NT = 256;
+#if defined(FLLM_HIP_RDNA3)
+constexpr int G_NBUF = 1;   // LDS tile buffers (see above)
+#else
+constexpr int G_NBUF = 2;
+#endif
 constexpr int G_RPK = G_BK / 16;        // runs of 16 per tile row
 static_assert(G_NT == G_BM * G_RPK, "one weight run per thread and step");
 
@@ -112,8 +121,8 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
     constexpr int G_TN = G_BN / G_WGN / 16;               // 16-token sub-tiles per wave
     constexpr int G_XR = G_BN / G_BM;                     // activation runs per thread and step
     static_assert(G_TN >= 1 && G_WGN * G_TN * 16 == G_BN && G_XR * G_BM == G_BN, "wave grid");
-    __shared__ __align__(16) __half As[2][G_BM * G_LD];  // decoded weights  [row][k]
-    __shared__ __align__(16) __half Bs[2][G_BN * G_LD];  // activations      [token][k]
+    __shared__ __align__(16) __half As[G_NBUF][G_BM * G_LD];  // decoded weights  [row][k]
+    __shared__ __align__(16) __half Bs[G_NBUF][G_BN * G_LD];  // activations      [token][k]
     const int rows = a.rows, cols = a.cols, batch = a.batch;
     const int tid = threadIdx.x, wave = tid / MMA_WAVE, lane = tid % MMA_WAVE;
     const int wm = wave % G_WGM, wn = wave / G_WGM;
@@ -183,10 +192,14 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
     __syncthreads();
     const int frag_row = lane & 15, k0 = mma_k0(lane);
     for (int kt = 0; kt < ktiles; kt++) {
-        const int buf = kt & 1;
+        const int buf = G_NBUF == 1 ? 0 : (kt & 1);
         if (kt + 1 < ktiles) fetch(kt + 1);
         const __half *as = As[buf], *bs = Bs[buf];
+#if defined(FLLM_HIP_RDNA3)
+#pragma unroll 1
+#else
 #pragma unroll
+#endif
         for (int kk = 0; kk < G_BK; kk += 16) {
             MmaFrag af[G_TM], bf[G_TN];
 #pragma unroll
@@ -198,7 +211,8 @@ mma_gemm_kernel(Dec dec, GemmArgs a) {
 #pragma unroll
                 for (int j = 0; j < G_TN; j++) acc[i][j] = mma16(af[i], bf[j], acc[i][j]);
         }
-        if (kt + 1 < ktiles) stash(buf ^ 1);
+        if (G_NBUF == 1) __syncthreads();   // everyone has read the tile before it is overwritten
+        if (kt + 1 < ktiles) stash(G_NBUF == 1 ? 0 : buf ^ 1);
         __syncthreads();
     }
 
