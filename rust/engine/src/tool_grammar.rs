@@ -2,7 +2,7 @@
 //!
 //! Small models often write a command as prose or break the JSON of a call. With
 //! `tool_call_grammar` the server constrains decoding to
-//! `text | call (separator call)*`, where `text` cannot contain the opening marker of a call
+//! `text | [text] call (separator call)*`, where `text` cannot contain the opening marker of a call
 //! (so prose never turns into a call by accident), the function name is one of the declared
 //! tools and the arguments follow that tool's JSON schema. The result is a Lark grammar for
 //! llguidance; `%json` embeds the schema of the arguments.
@@ -112,6 +112,17 @@ fn xml_function(function: &Value) -> String {
     format!("{} {} {}", lit(&format!("<function={}>\n", name_of(function))), body, lit("</function>"))
 }
 
+/// What follows the opening `<tool_call>\n` of a call, one alternative per function, for the formats where a sentence may lead
+/// into the first call (see `lark_for`). `None` for the other formats.
+fn spoken_bodies(parser: &str, functions: &[Value]) -> Option<Vec<String>> {
+    let close = lit("\n</tool_call>");
+    match parser {
+        "hermes" => Some(vec![format!("{} {}", json_item(&call_object_schema(functions, "arguments")), close)]),
+        "qwen3_coder" => Some(functions.iter().map(|f| format!("{} {}", xml_function(f), close)).collect()),
+        _ => None,
+    }
+}
+
 /// Lark grammar for the tool-call format of `parser`, or `None` when the parser has no grammar.
 ///
 /// `functions` are the declared functions the model may call (already narrowed by
@@ -189,7 +200,26 @@ pub fn lark_for(parser: &str, functions: &[Value], parallel: bool, allow_text: b
     }
     if allow_text {
         out.push_str(&text_terminal("TEXT", markers, first));
-        out.push_str("start: TEXT | calls\n");
+        // Models such as Qwen3-Instruct-2507 write a sentence ("Let me read the file.") and then the call. A grammar of
+        // "text or calls" would end the reply after the sentence and drop the call, so for the `<tool_call>` formats a
+        // sentence may lead into the first call: `lead` is lazy text that ends with the opening tag (llguidance `suffix`),
+        // which keeps the tag itself in the output and out of the text.
+        match spoken_bodies(parser, functions) {
+            Some(bodies) => {
+                // not starting with `<`: a reply that is the call itself belongs to `calls`, and a half-read `lead` next to it
+                // would keep the grammar from ending after the last call
+                out.push_str(&format!("lead[suffix={}]: /[^<](?s:.*)/\n", lit("<tool_call>\n")));
+                for (index, body) in bodies.iter().enumerate() {
+                    out.push_str(&format!("body_{index}: {body}\n"));
+                }
+                let names: Vec<String> = (0..bodies.len()).map(|i| format!("body_{i}")).collect();
+                out.push_str(&format!("first_body: {}\n", names.join(" | ")));
+                let more = if repeat { format!(" ({separator} call_one)*") } else { String::new() };
+                out.push_str(&format!("spoken: lead first_body{more}\n"));
+                out.push_str("start: TEXT | calls | spoken\n");
+            }
+            None => out.push_str("start: TEXT | calls\n"),
+        }
     } else {
         out.push_str("start: calls\n");
     }
@@ -247,6 +277,13 @@ mod tests {
         assert_eq!(parses("hermes", call)[0].name, "get_weather");
         assert!(accepts(&g, &format!("{call}\n{call}")));
         assert!(accepts(&g, "I will list the files for you."));
+        // a sentence before the call is how Qwen3-Instruct-2507 answers: it must not end the reply without the call
+        let spoken = format!("Let me read the file first.\n{call}");
+        assert!(accepts(&g, &spoken));
+        assert_eq!(parses("hermes", &spoken)[0].name, "get_weather");
+        assert!(accepts(&g, &format!("Sure.\n{call}\n{call}")));
+        assert!(!accepts(&g, &format!("Sure.\n{call}\ntrailing words")));
+        assert!(!accepts(&g, "Sure.\n<tool_call>\nnot json\n</tool_call>"));
         // prose cannot contain the marker, and a call cannot name another tool or break the schema
         assert!(!accepts(&g, "sure <tool_call>"));
         assert!(!accepts(&g, "<tool_call>\n{\"name\":\"rm\",\"arguments\":{}}\n</tool_call>"));
@@ -293,6 +330,7 @@ mod tests {
         assert!(accepts(&g, call), "failed: stopped after {done} of {} bytes at {:?}; grammar {:?}", call.len(), &call[done.min(call.len())..], g);
         let calls = parses("qwen3_coder", call);
         assert_eq!(calls[0].name, "get_weather");
+        assert!(accepts(&g, &format!("Okay, one moment.\n{call}")));
         let args = tool_parsers::arguments_json(&calls[0].args, Some(&tools()[0]["parameters"])).unwrap();
         assert_eq!(args, json!({"city":"Oslo","days":3,"unit":"f"}));
         assert!(accepts(&g, "<tool_call>\n<function=ping>\n</function>\n</tool_call>"));
