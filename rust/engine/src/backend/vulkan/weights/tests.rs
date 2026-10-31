@@ -433,7 +433,8 @@ fn prefill_prefers_cooperative_matrices_then_integer_dot_then_f32() {
     assert_eq!(pre.output_bytes, 512 * 4096 * 2);
     assert_eq!(plan.bindings[1].role, BindingRole::PrepassOutput);
     // a small batch keeps the 64 x 64 tile
-    for (cols, batch, vendor) in [(4096, 32, 0x10de)] {
+    {
+        let (cols, batch, vendor) = (4096, 32, 0x10de);
         let caps = VkCapsLike { vendor, ..caps_full() };
         let plan = plan_quantized_linear_with(QuantType::Q6_K, 4096, cols, batch, &caps, &lossy_options()).unwrap();
         assert_eq!(plan.shader_name, "mm_q6_k_c", "{cols} {batch} {vendor:#x}");

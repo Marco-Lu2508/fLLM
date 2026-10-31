@@ -3366,6 +3366,7 @@ mod tests {
                     let marker_bits = marker & 15;
                     let marker_group = ((marker >> 4) & 255) * 32;
                     let marker_bf16 = (marker >> 12) & 1 != 0;
+                    #[allow(clippy::needless_range_loop)]
                     for index in 0..rows * cols {
                         let cb = marker_group * marker_bits / 8;
                         let start = (index / marker_group as usize) * (cb as usize + 4);
@@ -3447,6 +3448,7 @@ mod tests {
             assert_eq!(per_block, block);
             let book: &[u32; 16] = if family == 0 { &nf4 } else { &fp4 };
             let reference = fllm_gguf_probe::bnb::dequantize(&bytes, id, rows * cols).expect("reference");
+            #[allow(clippy::needless_range_loop)]
             for index in 0..rows * cols {
                 let local = index % per_block;
                 let start = (index / per_block) * (4 + per_block / 2);
@@ -3454,7 +3456,7 @@ mod tests {
                     bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3],
                 ]);
                 let byte = bytes[start + 4 + local / 2];
-                let nib = if local % 2 == 0 { byte >> 4 } else { byte & 15 };
+                let nib = if local.is_multiple_of(2) { byte >> 4 } else { byte & 15 };
                 let mine = f32::from_bits(book[nib as usize]) * scale;
                 assert_eq!(mine, reference[index], "block {per_block}, index {index}");
             }
@@ -3472,6 +3474,7 @@ mod tests {
         let marker = bnb_native_kind(id, &bytes, rows, cols).expect("int8 native");
         assert_eq!((marker >> 5) & 3, 2);
         let reference = fllm_gguf_probe::bnb::dequantize(&bytes, id, rows * cols).expect("reference");
+        #[allow(clippy::needless_range_loop)]
         for index in 0..rows * cols {
             let local = index % 64;
             let start = (index / 64) * 68;
