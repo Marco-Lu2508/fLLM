@@ -27,9 +27,14 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::agent_cli::{self, Backend, LoopConfig, Status};
+use crate::gateway_pair;
 
 pub const HELP: &str = "usage: fllm-rs gateway telegram --chat ID[,ID...] [--url http://127.0.0.1:8000] [--model ID] [--api-key KEY]
        fllm-rs gateway matrix --homeserver URL --chat '!room:server'[,...] [same options]
+       fllm-rs gateway discord --chat CHANNEL_ID[,...]      (token: FLLM_DISCORD_TOKEN)
+       fllm-rs gateway slack --chat C024BE91L[,...]          (token: FLLM_SLACK_TOKEN, a bot token xoxb-...)
+       fllm-rs gateway pair list | approve PLATFORM CODE | revoke PLATFORM SENDER
+                  [--user ID[,ID...]] [--pair]   only these senders (and, with --pair, people the owner approves with a one-time code) may use an allowed chat
                   [--folder DIR] [--profile NAME] [--allow-edit] [--allow-command] [--allow-network] [--allow-memory] [--yes]
                   [--max-steps N] [--max-tokens N] [--system TEXT] [--once]
 Answers messages with the coding agent of a running fllm-rs server on this machine.
@@ -59,6 +64,8 @@ pub struct Incoming {
     /// Telegram: the chat id; Matrix: the room id.
     pub key: String,
     pub text: String,
+    /// Who wrote it (Telegram user id, Matrix user id, Discord or Slack user id); empty when the messenger did not say.
+    pub sender: String,
 }
 
 pub trait Chat {
@@ -79,10 +86,18 @@ pub struct GatewayConfig {
     pub sessions_dir: PathBuf,
     /// The persona (`SOUL.md`) of the profile, if any.
     pub soul: Option<String>,
+    /// The messenger's name (`telegram`, `matrix`, `discord`, `slack`), the key of the pairing store.
+    pub platform: String,
+    /// People who may talk to the agent inside an allowed chat (`--user`); with `pair` also those approved by pairing. Empty and
+    /// `pair` off: everybody in an allowed chat.
+    pub users: BTreeSet<String>,
+    pub pair: bool,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Handled {
+    /// A sender who is not allowed (and got a pairing code if pairing is on).
+    Denied,
     /// Not on the list, or empty.
     Ignored,
     Command,
@@ -132,6 +147,31 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
         return Handled::Ignored;
     }
     let key = incoming.key.as_str();
+    if !cfg.users.is_empty() || cfg.pair {
+        // fail closed: an unreadable pairing store lets nobody in
+        let mut store = match gateway_pair::Store::load(&gateway_pair::store_file(&cfg.sessions_dir)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[gateway] {e}");
+                return Handled::Denied;
+            }
+        };
+        let sender = incoming.sender.as_str();
+        if sender.is_empty() || !(cfg.users.contains(sender) || store.is_approved(&cfg.platform, sender)) {
+            if cfg.pair && !sender.is_empty() {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+                let answer = match store.request(&cfg.platform, sender, key, now) {
+                    Ok(code) => match store.save(&gateway_pair::store_file(&cfg.sessions_dir)) {
+                        Ok(()) => format!("This agent only answers approved people. Your pairing code is {code} (valid for an hour). The owner approves it on the machine with: fllm-rs gateway pair approve {} {code}", cfg.platform),
+                        Err(e) => format!("Error: {e}"),
+                    },
+                    Err(e) => format!("Error: {e}"),
+                };
+                reply(chat, key, &answer);
+            }
+            return Handled::Denied;
+        }
+    }
     let name = chat.session_name(key);
     match text.split_whitespace().next().unwrap_or_default().split('@').next().unwrap_or_default() {
         "/start" | "/help" => {
@@ -209,7 +249,7 @@ pub fn incoming_from_update(update: &Value) -> Option<Incoming> {
     let message = &update["message"];
     let id = message["chat"]["id"].as_i64()?;
     let text = message["text"].as_str()?.trim();
-    (!text.is_empty()).then(|| Incoming { key: id.to_string(), text: text.to_owned() })
+    (!text.is_empty()).then(|| Incoming { key: id.to_string(), text: text.to_owned(), sender: message["from"]["id"].as_i64().map(|i| i.to_string()).unwrap_or_default() })
 }
 
 /// The messages of a `getUpdates` answer and the next offset. The offset moves past every update, also past those that are
@@ -326,7 +366,7 @@ pub fn parse_sync(sync: &Value, own_user: &str) -> SyncBatch {
                         if event["sender"].as_str() == Some(own_user) || edit || body.trim().is_empty() {
                             continue;
                         }
-                        batch.events.push(Incoming { key: room.clone(), text: body.to_owned() });
+                        batch.events.push(Incoming { key: room.clone(), text: body.to_owned(), sender: event["sender"].as_str().unwrap_or_default().to_owned() });
                     }
                     _ => {}
                 }
@@ -474,6 +514,8 @@ pub struct Options {
     pub homeserver: Option<String>,
     pub agent: Vec<String>,
     pub once: bool,
+    pub users: BTreeSet<String>,
+    pub pair: bool,
 }
 
 fn valid_room(room: &str) -> bool {
@@ -486,6 +528,8 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
     let mut homeserver = None;
     let mut agent = Vec::new();
     let mut once = false;
+    let mut pair = false;
+    let mut users = BTreeSet::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -493,7 +537,17 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
                 i += 1;
                 let list = args.get(i).ok_or("missing value for --chat")?;
                 for item in list.split(',').map(str::trim) {
-                    if kind == "matrix" {
+                    if kind == "discord" {
+                        if !crate::gateway_chat::valid_discord_channel(item) {
+                            return Err(format!("'{item}' is not a Discord channel id (a long number: enable developer mode, right-click the channel, Copy Channel ID)"));
+                        }
+                        chats.insert(item.to_owned());
+                    } else if kind == "slack" {
+                        if !crate::gateway_chat::valid_slack_channel(item) {
+                            return Err(format!("'{item}' is not a Slack channel id (like C024BE91L, not the name; open the channel details to copy it)"));
+                        }
+                        chats.insert(item.to_owned());
+                    } else if kind == "matrix" {
                         if !valid_room(item) {
                             return Err(format!("'{item}' is not a Matrix room id (like !abc:server; an alias such as #room:server is not accepted)"));
                         }
@@ -509,6 +563,13 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
                 homeserver = Some(args.get(i).ok_or("missing value for --homeserver")?.clone());
             }
             "--once" => once = true,
+            "--pair" => pair = true,
+            "--user" => {
+                i += 1;
+                for item in args.get(i).ok_or("missing value for --user")?.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    users.insert(item.to_owned());
+                }
+            }
             "-p" | "--prompt" | "--session" | "--trajectory" | "--json" | "--ask" => return Err(format!("{} does not apply to the gateway", args[i])),
             other => {
                 agent.push(other.to_owned());
@@ -532,7 +593,7 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
     } else if homeserver.is_some() {
         return Err("--homeserver only applies to Matrix".into());
     }
-    Ok(Options { chats, homeserver, agent, once })
+    Ok(Options { chats, homeserver, agent, once, users, pair })
 }
 
 pub fn run(args: &[String]) -> Result<i32, String> {
@@ -541,8 +602,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         return Ok(0);
     }
     let kind = args[0].as_str();
-    if !matches!(kind, "telegram" | "matrix") {
-        return Err(format!("unknown gateway '{kind}' (telegram, matrix)"));
+    if kind == "pair" {
+        let profile = args.iter().position(|a| a == "--profile").and_then(|i| args.get(i + 1)).cloned();
+        let rest: Vec<String> = args[1..].iter().filter(|a| a.as_str() != "--profile" && Some(*a) != profile.as_ref()).cloned().collect();
+        return gateway_pair::run(&rest, &agent_cli::profile_base(profile.as_deref())?);
+    }
+    if !matches!(kind, "telegram" | "matrix" | "discord" | "slack") {
+        return Err(format!("unknown gateway '{kind}' (telegram, matrix, discord, slack, pair)"));
     }
     let options = parse_args(kind, &args[1..])?;
     // reuse the option parser of `agent` for url, model, permissions and limits (a placeholder task satisfies it)
@@ -554,6 +620,14 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         let token = std::env::var(TELEGRAM_TOKEN_ENV).unwrap_or_default();
         let api = std::env::var("FLLM_TELEGRAM_API").unwrap_or_else(|_| "https://api.telegram.org".to_owned());
         Box::new(TelegramHttp::new(&api, &token)?.with_poll_seconds(poll))
+    } else if kind == "discord" {
+        let token = std::env::var(crate::gateway_chat::DISCORD_TOKEN_ENV).unwrap_or_default();
+        let api = std::env::var("FLLM_DISCORD_API").unwrap_or_else(|_| "https://discord.com/api/v10".to_owned());
+        Box::new(crate::gateway_chat::DiscordHttp::connect(&api, &token, options.chats.clone())?.with_poll_seconds(poll))
+    } else if kind == "slack" {
+        let token = std::env::var(crate::gateway_chat::SLACK_TOKEN_ENV).unwrap_or_default();
+        let api = std::env::var("FLLM_SLACK_API").unwrap_or_else(|_| "https://slack.com/api".to_owned());
+        Box::new(crate::gateway_chat::SlackHttp::connect(&api, &token, options.chats.clone())?.with_poll_seconds(poll))
     } else {
         let token = std::env::var(MATRIX_TOKEN_ENV).unwrap_or_default();
         let homeserver = options.homeserver.clone().unwrap_or_default();
@@ -582,6 +656,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         system_extra: parsed.system.clone(),
         sessions_dir: base.clone(),
         soul: agent_cli::load_soul(&base),
+        platform: kind.to_owned(),
+        users: options.users.clone(),
+        pair: options.pair,
     };
     eprintln!("[gateway] {kind}: {} chat(s) allowed, folder {}, permissions {:?}", cfg.allowed.len(), cfg.folder, cfg.loop_cfg.allow);
     let file = cursor_file(&base, kind);
@@ -669,7 +746,7 @@ mod tests {
     }
 
     fn msg(chat: i64, text: &str) -> Incoming {
-        Incoming { key: chat.to_string(), text: text.to_owned() }
+        Incoming { key: chat.to_string(), text: text.to_owned(), sender: String::new() }
     }
 
     fn config(dir: &Path, allowed: &[i64]) -> GatewayConfig {
@@ -680,6 +757,9 @@ mod tests {
             system_extra: None,
             sessions_dir: dir.to_path_buf(),
             soul: None,
+            platform: "telegram".into(),
+            users: BTreeSet::new(),
+            pair: false,
         }
     }
 
@@ -692,6 +772,55 @@ mod tests {
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|x| (*x).to_owned()).collect()
+    }
+
+    fn from(chat: i64, sender: &str, text: &str) -> Incoming {
+        Incoming { key: chat.to_string(), text: text.to_owned(), sender: sender.to_owned() }
+    }
+
+    #[test]
+    fn a_user_list_and_pairing_decide_who_inside_an_allowed_chat_gets_an_answer() {
+        let dir = tmp("pair");
+        let mut cfg = config(&dir, &[42]);
+        cfg.users = BTreeSet::from(["owner".to_owned()]);
+        let mut model = Model { replies: VecDeque::from([answer("hello owner"), answer("hello guest")]), bodies: vec![] };
+        let mut chat = FakeChat::new();
+        assert_eq!(handle_update(&from(42, "stranger", "run rm"), &cfg, &mut model, &mut chat), Handled::Denied);
+        assert!(model.bodies.is_empty(), "a stranger costs no model call");
+        assert!(chat.sent.is_empty(), "without --pair a stranger gets no answer at all");
+        assert_eq!(handle_update(&from(42, "", "anonymous"), &cfg, &mut model, &mut chat), Handled::Denied, "no sender id, no answer");
+        assert_eq!(handle_update(&from(42, "owner", "hi"), &cfg, &mut model, &mut chat), Handled::Answered);
+
+        cfg.pair = true;
+        assert_eq!(handle_update(&from(42, "guest", "let me in"), &cfg, &mut model, &mut chat), Handled::Denied);
+        let note = chat.sent.last().unwrap().1.clone();
+        let code = note.split("pairing code is ").nth(1).unwrap().split_whitespace().next().unwrap().to_owned();
+        assert!(note.contains(&format!("fllm-rs gateway pair approve telegram {code}")));
+        assert_eq!(model.bodies.len(), 1, "still only the owner's call");
+        // the owner approves on the machine; the next message goes through
+        let file = gateway_pair::store_file(&dir);
+        let mut store = gateway_pair::Store::load(&file).unwrap();
+        assert_eq!(store.approve("telegram", &code, i64::MAX / 4).unwrap_err(), "no such pairing code (it may have expired)", "an absurdly late time is expired");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let mut store = gateway_pair::Store::load(&file).unwrap();
+        store.approve("telegram", &code, now).unwrap();
+        store.save(&file).unwrap();
+        assert_eq!(handle_update(&from(42, "guest", "now?"), &cfg, &mut model, &mut chat), Handled::Answered);
+        // a damaged store lets nobody in
+        std::fs::write(&file, "{oops").unwrap();
+        assert_eq!(handle_update(&from(42, "owner", "hi again"), &cfg, &mut model, &mut chat), Handled::Denied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discord_and_slack_chat_ids_and_the_user_options_are_parsed() {
+        let o = parse_args("discord", &s(&["--chat", "1234567890", "--user", "u1,u2", "--pair", "--allow-edit"])).unwrap();
+        assert_eq!(o.chats, BTreeSet::from(["1234567890".to_owned()]));
+        assert_eq!((o.users.len(), o.pair, o.agent.clone()), (2, true, vec!["--allow-edit".to_owned()]));
+        assert!(parse_args("discord", &s(&["--chat", "general"])).is_err());
+        assert!(parse_args("slack", &s(&["--chat", "#general"])).is_err());
+        assert!(parse_args("slack", &s(&["--chat", "C024BE91L,D01ABC"])).is_ok());
+        assert!(parse_args("slack", &s(&["--chat", "C024BE91L", "--homeserver", "x"])).is_err());
     }
 
     #[test]
@@ -888,7 +1017,7 @@ mod tests {
             ]}}},
             "invite": {"!invited:srv": {}}}});
         let batch = parse_sync(&sync, "@bot:srv");
-        assert_eq!(batch.events, vec![Incoming { key: "!room:srv".into(), text: "first".into() }, Incoming { key: "!room:srv".into(), text: "second".into() }]);
+        assert_eq!(batch.events, vec![Incoming { key: "!room:srv".into(), text: "first".into(), sender: "@marco:srv".into() }, Incoming { key: "!room:srv".into(), text: "second".into(), sender: "@marco:srv".into() }]);
         assert_eq!((batch.next.as_str(), batch.encrypted, batch.invites.clone()), ("s2", 1, vec!["!invited:srv".to_owned()]));
         assert_eq!(parse_sync(&json!({}), "@bot:srv"), SyncBatch::default());
     }

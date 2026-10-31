@@ -344,6 +344,7 @@ pub(crate) fn status_json() -> Value {
         "not_enforced": description.not_enforced,
         "verification": description.verification,
         "default_mode": DEFAULT_MODE,
+        "terminal": super::agent_terminal::status_json(),
     })
 }
 

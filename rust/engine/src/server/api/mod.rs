@@ -34,6 +34,7 @@ mod agent_edit;
 mod agent_ignore;
 mod agent_jobs;
 mod agent_review;
+pub(super) mod agent_terminal;
 pub(super) mod agent_messages;
 mod agent_notebook;
 pub(super) mod agent_lsp;

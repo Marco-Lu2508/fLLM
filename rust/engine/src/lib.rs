@@ -10,6 +10,8 @@ pub mod skills_cli;
 pub mod agent_rules;
 pub mod connect_cli;
 pub mod gateway;
+pub mod gateway_chat;
+pub mod gateway_pair;
 pub mod autotune;
 pub mod beam;
 pub mod backend;

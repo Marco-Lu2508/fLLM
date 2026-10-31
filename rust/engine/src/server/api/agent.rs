@@ -887,13 +887,16 @@ impl AgentSession {
         let root = self.root()?;
         let dir = self.shell_dir()?;
         let limit = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1000, MAX_TIMEOUT_MS));
-        let mut cmd = super::agent_jobs::shell_command_in(&super::agent_jobs::with_cwd_report(command, CWD_MARK), &root, &dir)?;
+        let terminal = super::agent_terminal::select(&root);
+        let remote = super::agent_terminal::is_remote(&terminal);
+        let mut cmd = super::agent_jobs::shell_command_in(&super::agent_jobs::with_cwd_report(command, CWD_MARK, remote), &root, &dir)?;
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot start the command: {e}"))?;
+        super::agent_terminal::note_spawn(&cmd, child.id());
         let out_reader = collect_output(child.stdout.take());
         let err_reader = collect_output(child.stderr.take());
         let pid = child.id();
@@ -929,7 +932,7 @@ impl AgentSession {
         let stderr = err_reader.join().unwrap_or_default();
         let (stdout, reported) = split_cwd_report(&stdout, CWD_MARK);
         let mut moved = String::new();
-        if let Some(new_dir) = reported.and_then(|p| fs::canonicalize(p).ok()).map(plain) {
+        if let Some(new_dir) = reported.map(|p| super::agent_terminal::to_local(&terminal, &p.to_string_lossy(), &root)).and_then(|p| fs::canonicalize(p).ok()).map(plain) {
             // a `cd` out of the workspace is ignored: the next command starts where this one started
             if new_dir.starts_with(&root) && new_dir.is_dir() && new_dir != dir {
                 moved = format!("\n(working directory is now {})", match self.shown(&new_dir).as_str() {

@@ -23,6 +23,10 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// that stays writable, `cwd` the folder the command starts in. An error means the command must not run: a sandbox that is
 /// switched on but cannot start it is never a reason to run it unsandboxed.
 pub(super) fn shell_command_in(line: &str, root: &Path, cwd: &Path) -> Result<Command, String> {
+    // a container or a remote host runs the command instead (FLLM_TERMINAL / terminal.json); that is the isolation then
+    if let Some(command) = super::agent_terminal::command(line, root, cwd) {
+        return Ok(command);
+    }
     match super::agent_sandbox::wrap(line, root, cwd)? {
         Some(argv) => {
             let mut command = Command::new(&argv[0]);
@@ -65,8 +69,8 @@ pub(super) fn shell_command(line: &str) -> Command {
 }
 
 /// The command followed by a line that reports the final working directory and keeps the exit code.
-pub(super) fn with_cwd_report(command: &str, mark: &str) -> String {
-    if cfg!(windows) {
+pub(super) fn with_cwd_report(command: &str, mark: &str, posix: bool) -> String {
+    if cfg!(windows) && !posix {
         format!("{} & echo. & echo {mark}!cd! & exit /b !errorlevel!", windows_one_line(command))
     } else {
         // stderr joins stdout so that the output keeps the order in which the program wrote it
@@ -133,6 +137,8 @@ impl Job {
 }
 
 pub(super) fn kill_tree(pid: u32) {
+    // the docker client dies with the tree, its container would not
+    super::agent_terminal::stop_container_of(pid);
     #[cfg(windows)]
     let mut c = {
         let mut c = Command::new("taskkill");
@@ -185,12 +191,14 @@ impl Jobs {
                 jobs.remove(&id);
             }
         }
-        let mut child = shell_command_in(command, dir, dir)?
+        let mut cmd = shell_command_in(command, dir, dir)?;
+        let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot start the command: {e}"))?;
+        super::agent_terminal::note_spawn(&cmd, child.id());
         let buffer = Arc::new(Mutex::new(Buffer::default()));
         pump(child.stdout.take(), buffer.clone());
         pump(child.stderr.take(), buffer.clone());
