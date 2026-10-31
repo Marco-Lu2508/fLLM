@@ -6,6 +6,8 @@
 // and the packed weights and (binary16) activations of the NEXT K step are fetched into registers before the matrix multiply-adds of the current step, so their
 // memory latency overlaps the tensor cores. Subgroup s computes the (BM / NSGM) x (BN / NSGN) sub-tile at weight rows (s % NSGM) * (BM / NSGM) and
 // activation rows (s / NSGM) * (BN / NSGN).
+// The workgroups are dispatched as a (row blocks) x (token tiles) grid but numbered with the token tiles of one block of rows next to each other (see main()), and the scale
+// words of a Q4_K super-block are loaded once per four K steps and turned into floats only after the matrix products of the step, so that no arithmetic waits for them.
 // Requires: shaderFloat16, cooperativeMatrix 16x16x16 (float16 A/B, float32 C/Result, subgroup scope), subgroup size 32 (the planner checks it).
 #extension GL_GOOGLE_include_directive : enable
 #extension GL_KHR_cooperative_matrix : require
@@ -52,6 +54,12 @@
 #endif
 #endif
 
+// Q6_K has its own weight loader too: the raw words of a chunk of 8 weights (low bits, high bits, scale word, d) are loaded in fetch() and decoded in stash(), after the
+// matrix products, so no arithmetic waits for the loads.
+#if defined(FMT_Q6_K) && !defined(FLLM_NO_Q6K_LOADER)
+#define Q6K_LOADER 1
+#endif
+
 layout(local_size_x = 32 * NSGM * NSGN, local_size_y = 1, local_size_z = 1) in;
 
 #include "_q_common.glsl"
@@ -72,7 +80,11 @@ shared float Cs[NSG * 256];         // one 16 x 16 staging tile per subgroup
 #ifdef Q4K_LOADER
 #define QITEMS ((BM * 2u) / WG)   // (row, half) units per invocation and K step
 uvec4 r_q[QITEMS];
-vec4 r_k[QITEMS];   // scale and minimum of the first group, then of the second group: weight = k.x * q + k.y, k.z * q + k.w
+uvec4 r_sv[QITEMS]; // the scale words (x, y) and minimum words (z, w) of the row's super-block, and its d / dmin word: loaded once per super-block (every fourth K step),
+uint r_d[QITEMS];   // turned into floats in stash(), after the matrix products, so no arithmetic waits for these loads and they stay in flight while the tensor cores work
+#elif defined(Q6K_LOADER)
+uvec4 r_l[WITEMS];   // ql words (x, y) and qh words (z, w) of the chunk of 8 weights
+uvec2 r_t[WITEMS];   // the word with the chunk's scale and the bits of the block's d
 #else
 uint r_p0[WITEMS];
 uint r_p1[WITEMS];
@@ -88,21 +100,44 @@ void fetch(uint k0, uint t, uint m0, uint n0) {
         const uint i = t + e * WG;
         const uint row = m0 + (i >> 1);
         uvec4 q = uvec4(0u);
-        vec4 k = vec4(0.0);
         if (row < p.rows) {
             const uint g = row * p.nb + (k0 >> 8);
             const uint pair = (k0 >> 6) & 3u;
             const uint q0 = g * 32u + pair * 8u + (i & 1u) * 4u;
             q = uvec4(w[q0], w[q0 + 1u], w[q0 + 2u], w[q0 + 3u]);
-            const uint q1 = p.off1 + g * 4u + (pair >> 1);
-            const uint sh = (pair & 1u) << 4;
-            const uint scw = w[q1] >> sh;
-            const uint mnw = w[q1 + 2u] >> sh;
-            const vec2 dm = unpackHalf2x16(w[p.off2 + g]);
-            k = vec4(dm.x * float(scw & 255u), -dm.y * float(mnw & 255u), dm.x * float((scw >> 8) & 255u), -dm.y * float((mnw >> 8) & 255u));
+            if (pair == 0u) {   // the scales of a super-block serve its four K steps
+                const uint q1 = p.off1 + g * 4u;
+                r_sv[e] = uvec4(w[q1], w[q1 + 1u], w[q1 + 2u], w[q1 + 3u]);
+                r_d[e] = w[p.off2 + g];
+            }
+        } else {
+            r_sv[e] = uvec4(0u);
+            r_d[e] = 0u;
         }
         r_q[e] = q;
-        r_k[e] = k;
+    }
+#elif defined(Q6K_LOADER)
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint row = m0 + i / CPR;
+        const uint kk = k0 + (i % CPR) * 8u;
+        uvec4 l = uvec4(0u);
+        uvec2 tt = uvec2(0u);
+        if (row < p.rows) {
+            const uint g = row * p.nb + kk / QK;
+            const uint cin = (kk % QK) >> 3;
+            const uint n = cin >> 4;
+            const uint r = cin & 15u;
+            const uint grp = r >> 2;
+            const uint j4 = r & 3u;
+            const uint b = g * 32u + (n << 4) + ((grp & 1u) << 3) + (j4 << 1);
+            const uint h = p.off1 + g * 16u + (n << 3) + (j4 << 1);
+            const uint si = (n << 3) + (j4 >> 1) + (grp << 1);
+            l = uvec4(w[b], w[b + 1u], w[h], w[h + 1u]);
+            tt = uvec2(w[p.off2 + g * 4u + (si >> 2)], w[p.off3 + g]);
+        }
+        r_l[e] = l;
+        r_t[e] = tt;
     }
 #else
     [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
@@ -128,15 +163,22 @@ void fetch(uint k0, uint t, uint m0, uint n0) {
 }
 
 // the registers to the shared f16 tiles
-void stash(uint t) {
+void stash(uint t, uint k0) {
 #ifdef Q4K_LOADER
     [[unroll]] for (uint e = 0; e < QITEMS; ++e) {
         const uint i = t + e * WG;
         const uint base = (((i >> 1) * LDS) + (i & 1u) * 16u) >> 2;   // first group at tile columns 0 .. 31, the second at 32 .. 63
-        const vec4 ka = vec4(r_k[e].x, r_k[e].x, r_k[e].x, r_k[e].x);
-        const vec4 ma = vec4(r_k[e].y, r_k[e].y, r_k[e].y, r_k[e].y);
-        const vec4 kb = vec4(r_k[e].z, r_k[e].z, r_k[e].z, r_k[e].z);
-        const vec4 mb = vec4(r_k[e].w, r_k[e].w, r_k[e].w, r_k[e].w);
+        // scale and minimum of the first group, then of the second group: weight = k.x * q + k.y, k.z * q + k.w
+        const uint sh = ((k0 >> 6) & 1u) << 4;
+        const bool hi = ((k0 >> 7) & 1u) != 0u;   // scale groups 4 .. 7 of the super-block sit in the second word
+        const uint scw = (hi ? r_sv[e].y : r_sv[e].x) >> sh;
+        const uint mnw = (hi ? r_sv[e].w : r_sv[e].z) >> sh;
+        const vec2 dm = unpackHalf2x16(r_d[e]);
+        const vec4 kq = vec4(dm.x * float(scw & 255u), -dm.y * float(mnw & 255u), dm.x * float((scw >> 8) & 255u), -dm.y * float((mnw >> 8) & 255u));
+        const vec4 ka = vec4(kq.x);
+        const vec4 ma = vec4(kq.y);
+        const vec4 kb = vec4(kq.z);
+        const vec4 mb = vec4(kq.w);
         [[unroll]] for (uint c = 0; c < 4u; ++c) {
             const uint x = r_q[e][c];
             const vec4 lo = vec4(uvec4(x, x >> 8, x >> 16, x >> 24) & 15u);
@@ -144,6 +186,27 @@ void stash(uint t) {
             As[base + c] = f16vec4(fma(lo, ka, ma));
             As[base + 8u + c] = f16vec4(fma(hi, kb, mb));
         }
+    }
+#elif defined(Q6K_LOADER)
+    [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
+        const uint i = t + e * WG;
+        const uint cin = (((k0 + (i % CPR) * 8u) % QK)) >> 3;
+        const uint r = cin & 15u;
+        const uint grp = r >> 2;
+        const uint j4 = r & 3u;
+        const uint sh = (grp >> 1) << 2;
+        const uint hs = grp << 1;
+        const uvec4 l = r_l[e];
+        const uint p0 = sub8(((l.x >> sh) & 0x0F0F0F0Fu) | (((l.z >> hs) & 0x03030303u) << 4), 32u);
+        const uint p1 = sub8(((l.y >> sh) & 0x0F0F0F0Fu) | (((l.w >> hs) & 0x03030303u) << 4), 32u);
+        const uint si = ((cin >> 4) << 3) + (j4 >> 1) + (grp << 1);
+        const int sc = bitfieldExtract(int(r_t[e].x), int((si & 3u) << 3), 8);
+        const float ws = uintBitsToFloat(r_t[e].y) * float(sc);
+        float vals[8];
+        chunk_floats(p0, p1, ws, 0.0, vals);
+        const uint base = ((i / CPR) * LDS + (i % CPR) * 8u) >> 2;
+        As[base] = f16vec4(vals[0], vals[1], vals[2], vals[3]);
+        As[base + 1u] = f16vec4(vals[4], vals[5], vals[6], vals[7]);
     }
 #else
     [[unroll]] for (uint e = 0; e < WITEMS; ++e) {
@@ -167,8 +230,13 @@ void main() {
     const uint t = gl_LocalInvocationID.x;
     const uint sg = gl_SubgroupID;
     const uint lane = gl_SubgroupInvocationID;
-    const uint m0 = gl_WorkGroupID.x * BM;
-    const uint n0 = gl_WorkGroupID.y * BN;
+    // consecutive workgroups share a block of weight rows: all token tiles of one block run next to each other, so the block is fetched from memory once
+    // and the other token tiles find it in the L2 cache (with the row blocks varying fastest, the whole weight matrix streams past between two token tiles
+    // of the same rows and is read from memory once per token tile)
+    const uint tok_tiles = (p.batch + BN - 1u) / BN;
+    const uint wg_id = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    const uint m0 = (wg_id / tok_tiles) * BM;
+    const uint n0 = (wg_id % tok_tiles) * BN;
     const uint sm = (sg % NSGM) * WM;   // weight-row offset of this subgroup's sub-tile
     const uint sn = (sg / NSGM) * WN;   // activation-row offset
 
@@ -177,7 +245,7 @@ void main() {
 
     fetch(0u, t, m0, n0);
     for (uint k0 = 0; k0 < p.cols; k0 += BK) {
-        stash(t);
+        stash(t, k0);
         barrier();
         if (k0 + BK < p.cols) fetch(k0 + BK, t, m0, n0);
         [[unroll]] for (uint kk = 0; kk < BK / 16; ++kk) {

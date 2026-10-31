@@ -41,8 +41,23 @@ pub const MAX_GROUPS_PER_DIM: u64 = 65535;
 
 /// Shared memory (bytes) the cooperative-matrix shader needs: two f16 tiles of 64 x 40 and four 16 x 16 f32 staging tiles.
 const COOPMAT_SHARED: u32 = 2 * 64 * 40 * 2 + 4 * 256 * 4;
-/// Shared memory of the wide cooperative-matrix shader (`mm_<fmt>_cw`): f16 tiles of 128 + 64 rows x 72 and eight 16 x 16 f32 staging tiles.
-const COOPMAT_WIDE_SHARED: u32 = (128 + 64) * 72 * 2 + 8 * 256 * 4;
+/// Weight rows, tokens and subgroups per workgroup of the wide cooperative-matrix shader. The shader module decides (macros `BM`, `BN`, `NSGM`, `NSGN` of
+/// `mm_coopmat_w.comp`, 128 x 64 and 8 subgroups as built in); `FLLM_VK_COOP_WIDE_TILE=<bm>x<bn>x<subgroups>` tells the planner about a module built with
+/// other values (`FLLM_VK_SHADER_DIR`), for measuring tile shapes without rebuilding the program.
+fn coop_wide_tile() -> (u32, u32, u32) {
+    static TILE: std::sync::OnceLock<(u32, u32, u32)> = std::sync::OnceLock::new();
+    *TILE.get_or_init(|| {
+        let parsed = std::env::var("FLLM_VK_COOP_WIDE_TILE").ok().and_then(|v| {
+            let parts: Vec<u32> = v.split('x').filter_map(|p| p.trim().parse().ok()).collect();
+            (parts.len() == 3 && parts.iter().all(|&n| n >= 16 && n % 16 == 0)).then(|| (parts[0], parts[1], parts[2]))
+        });
+        parsed.unwrap_or((128, 64, 8))
+    })
+}
+/// Shared memory of the wide shader for a tile: f16 tiles of `bm + bn` rows x 72 and one 16 x 16 f32 staging tile per subgroup.
+fn coop_wide_shared(tile: (u32, u32, u32)) -> u32 {
+    (tile.0 + tile.1) * 72 * 2 + tile.2 * 256 * 4
+}
 /// PCI vendor id of NVIDIA.
 const VENDOR_NVIDIA: u32 = 0x10de;
 
@@ -563,7 +578,7 @@ pub fn plan_quantized_linear_with(
         && caps.vendor == VENDOR_NVIDIA
         && caps.subgroup_size == 32
         && caps.max_workgroup >= 256
-        && caps.max_shared >= COOPMAT_WIDE_SHARED
+        && caps.max_shared >= coop_wide_shared(coop_wide_tile())
         && cols32 % 64 == 0
         && !perm
         && available("quant_act_f16")
@@ -645,7 +660,7 @@ pub fn plan_quantized_linear_with(
             PlanKind::MatMul,
             spec,
             {
-                let (tm, tn) = if coop_wide { (128, 64) } else { (64, 64) };
+                let (tm, tn) = if coop_wide { let t = coop_wide_tile(); (u64::from(t.0), u64::from(t.1)) } else { (64, 64) };
                 [
                     (rows as u64).div_ceil(tm) as u32,
                     (batch as u64).div_ceil(tn) as u32,

@@ -373,6 +373,7 @@ Result to cell (examples):
 | Vulkan | `FLLM_VULKAN_NO_IDOT=1`, `FLLM_VULKAN_NO_COOP=1` | integer-dot or coopmat variants off |
 | Vulkan | `FLLM_VK_SUBMIT_EVERY=N` | dispatches per command-buffer submission during a decode step (default 32; 0 = one submission per step, the slowest on both the RTX 2000 Ada and the Radeon 840M; 16 to 128 are within the noise there, [benchmarks.md](benchmarks.md)) |
 | Vulkan | `FLLM_VK_SHADER_DIR=<dir>` | takes `<dir>/<name>.spv` instead of the built-in module of that name (compile with `glslc --target-env=vulkan1.2 -O -I shaders/vulkan <defines from variants_quant.list>`), to try a shader change without rebuilding |
+| Vulkan | `FLLM_VK_COOP_WIDE_TILE=<bm>x<bn>x<subgroups>` | the planner's view of the wide cooperative-matrix shader module (default `128x64x8`, as built); for a module built with other `-DBM` / `-DBN` / `-DNSGM` / `-DNSGN` through `FLLM_VK_SHADER_DIR`. Tiles other than 128 x 64 were slower on the RTX 2000 Ada |
 | Vulkan | `FLLM_ALLOW_SOFTWARE_GPU=1` | allow lavapipe/WARP (for logic tests only) |
 | Metal | `FLLM_METAL_SERIAL=1` | every dispatch serialised: rules out hazard/barrier errors |
 | Metal | `FLLM_METAL_FAST_MATH=0`, `FLLM_METAL_EXACT=1` | fast math off; float instead of half tiles |
