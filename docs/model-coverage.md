@@ -279,7 +279,7 @@ Tiny random fixtures (weights rounded to F16 first, so that the CPU and the F16 
 | LongCat-Flash | same | same | same | same | everything; the shortcut experts: device routing on CUDA, host routing with device experts on HIP and Vulkan (2026-10-31, see below) |
 | MiniMax-M3 | same | same | same | same | everything: block indexer, block-sparse attention, sigmoid-routed experts, dense layers (see below) |
 | Inkling | same | same | same | same | everything: convolutions, relative-position attention, experts (routing on the host) (see below) |
-| DeepSeek-V4 | same (7-, 100- and 294-character prompts) | same | same | same | everything: hyper-connections, the compressors, window and compressed attention with the indexer selection, the per-sequence state, the clamped SwiGLU experts; the routers and hash tables of the MoE layers run on the host (one log line) |
+| DeepSeek-V4 | same (7-, 100- and 294-character prompts; three different prompts at once also) | same | same | same | everything: hyper-connections, the compressors, window and compressed attention with the indexer selection, the per-sequence state, the clamped SwiGLU experts; the routers and hash tables of the MoE layers run on the host (one log line) |
 | Qwen3.8-Flash-Next | not run | CPU (notice; run before this change, unchanged code) | not run | not run | nothing (unchanged, see "Open gaps") |
 
 #### MiniMax-M3, Inkling and LongCat-Flash on devices (2026-10-31)
