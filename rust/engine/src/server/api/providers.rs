@@ -34,17 +34,27 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u64 = 8192;
 
 /// One-click templates of the settings page: URLs only, never keys.
-const PRESETS: [(&str, &str, &str, &str, bool); 10] = [
-    ("openai", "OpenAI", "openai", "https://api.openai.com/v1", false),
-    ("openrouter", "OpenRouter", "openai", "https://openrouter.ai/api/v1", false),
-    ("groq", "Groq", "openai", "https://api.groq.com/openai/v1", false),
-    ("together", "Together AI", "openai", "https://api.together.xyz/v1", false),
-    ("mistral", "Mistral", "openai", "https://api.mistral.ai/v1", false),
-    ("gemini", "Google Gemini", "openai", "https://generativelanguage.googleapis.com/v1beta/openai", false),
-    ("anthropic", "Anthropic", "anthropic", "https://api.anthropic.com/v1", false),
-    ("ollama", "Ollama", "ollama", "http://localhost:11434", true),
-    ("lmstudio", "LM Studio", "openai", "http://localhost:1234/v1", true),
-    ("vllm", "vLLM", "openai", "http://localhost:8000/v1", true),
+///
+/// `(id, name, kind, address, local, group, page where the key is made)`. The group is `cloud` (a service with an API key) or `network`
+/// (another server you run yourself; optional, since fLLM is the local engine already). `custom` has no address: the user types it.
+const PRESETS: [(&str, &str, &str, &str, bool, &str, &str); 17] = [
+    ("openai", "OpenAI", "openai", "https://api.openai.com/v1", false, "cloud", "https://platform.openai.com/api-keys"),
+    ("anthropic", "Anthropic", "anthropic", "https://api.anthropic.com/v1", false, "cloud", "https://console.anthropic.com/settings/keys"),
+    ("gemini", "Google Gemini", "openai", "https://generativelanguage.googleapis.com/v1beta/openai", false, "cloud", "https://aistudio.google.com/apikey"),
+    ("mistral", "Mistral", "openai", "https://api.mistral.ai/v1", false, "cloud", "https://console.mistral.ai/api-keys"),
+    ("deepseek", "DeepSeek", "openai", "https://api.deepseek.com/v1", false, "cloud", "https://platform.deepseek.com/api_keys"),
+    ("groq", "Groq", "openai", "https://api.groq.com/openai/v1", false, "cloud", "https://console.groq.com/keys"),
+    ("openrouter", "OpenRouter", "openai", "https://openrouter.ai/api/v1", false, "cloud", "https://openrouter.ai/keys"),
+    ("together", "Together AI", "openai", "https://api.together.xyz/v1", false, "cloud", "https://api.together.ai/settings/api-keys"),
+    ("fireworks", "Fireworks AI", "openai", "https://api.fireworks.ai/inference/v1", false, "cloud", "https://fireworks.ai/account/api-keys"),
+    ("cerebras", "Cerebras", "openai", "https://api.cerebras.ai/v1", false, "cloud", "https://cloud.cerebras.ai/platform"),
+    ("xai", "xAI", "openai", "https://api.x.ai/v1", false, "cloud", "https://console.x.ai"),
+    ("ollama-cloud", "Ollama Cloud", "ollama", "https://ollama.com", false, "cloud", "https://ollama.com/settings/keys"),
+    ("custom", "Other OpenAI-compatible service", "openai", "", false, "cloud", ""),
+    ("ollama", "Ollama server", "ollama", "http://localhost:11434", true, "network", ""),
+    ("lmstudio", "LM Studio server", "openai", "http://localhost:1234/v1", true, "network", ""),
+    ("vllm", "vLLM server", "openai", "http://localhost:8000/v1", true, "network", ""),
+    ("llamacpp", "llama.cpp server", "openai", "http://localhost:8080/v1", true, "network", ""),
 ];
 
 /// The request fields that are forwarded to OpenAI-compatible providers. Everything else (the engine-specific
@@ -823,7 +833,7 @@ fn presets_json() -> Value {
     Value::Array(
         PRESETS
             .iter()
-            .map(|(id, name, kind, url, local)| json!({"id": id, "name": name, "kind": kind, "base_url": url, "local": local}))
+            .map(|(id, name, kind, url, local, group, key_url)| json!({"id": id, "name": name, "kind": kind, "base_url": url, "local": local, "group": group, "key_url": key_url}))
             .collect(),
     )
 }
@@ -1436,10 +1446,15 @@ mod tests {
 
     #[test]
     fn presets_carry_urls_and_no_keys() {
-        for (_, _, kind, url, _) in PRESETS {
+        for (id, _, kind, url, local, group, key_url) in PRESETS {
             assert!(KINDS.contains(&kind));
-            assert!(parse_base_url(url).is_ok(), "{url}");
+            assert!(url.is_empty() && id == "custom" || parse_base_url(url).is_ok(), "{url}");
+            assert!(group == "cloud" || group == "network");
+            // a server on the network is the only kind of preset that may point at this computer
+            assert_eq!(local, group == "network", "{id}");
+            assert!(key_url.is_empty() || key_url.starts_with("https://"), "{key_url}");
         }
+        assert!(PRESETS.iter().take(1).all(|p| p.5 == "cloud"), "the list starts with a cloud service, not a local server");
         assert!(!presets_json().to_string().contains("api_key"));
     }
 

@@ -44,6 +44,34 @@
       return entries.some((e) => e.id === selected) ? selected : fallback;
     }
 
+    /** The templates in two groups: cloud services (an API key) first, then servers you run yourself (optional). */
+    function providerPresetGroups(presets) {
+      const list = Array.isArray(presets) ? presets : [];
+      const groupOf = (p) => (p.group === 'network' || (!p.group && p.local) ? 'network' : 'cloud');
+      return [
+        { id: 'cloud', title: 'Cloud APIs', items: list.filter((p) => groupOf(p) === 'cloud') },
+        { id: 'network', title: 'Other servers on your network', items: list.filter((p) => groupOf(p) === 'network') },
+      ];
+    }
+
+    /** Where the key of a template is made: `{url, host}` or null (https pages only). */
+    function providerKeyLink(preset) {
+      try {
+        const u = new URL(String((preset && preset.key_url) || ''));
+        return u.protocol === 'https:' ? { url: u.href, host: u.host } : null;
+      } catch { return null; }
+    }
+
+    /** The line shown after "Test connection": the models that were found, as many as fit. */
+    function providerTestSummary(r) {
+      if (!r || !r.ok) return (r && r.error) || 'The test failed.';
+      const models = Array.isArray(r.models) ? r.models : [];
+      const count = Number.isFinite(r.count) ? r.count : models.length;
+      if (!count) return 'Connected, but the service lists no models for this key.';
+      const shown = models.slice(0, 8).join(', ');
+      return `Connected. ${count} model${count === 1 ? '' : 's'} found${shown ? `: ${shown}${count > 8 ? ` and ${count - 8} more` : ''}` : ''}.`;
+    }
+
     /** What the label of the picker shows for a selection. */
     function modelLabel(selected, remoteModels) {
       if (!selected) return 'Choose a model';
@@ -165,7 +193,7 @@
     function provRender() {
       const box = $('provList');
       if (!provState.providers.length) {
-        box.innerHTML = '<div class="app-item-desc">No providers yet. Pick a template below.</div>';
+        box.innerHTML = '<div class="app-item-desc">No providers yet. Choose a service below, paste its key and test the connection.</div>';
         return;
       }
       box.innerHTML = provState.providers.map((p) => `
@@ -184,8 +212,19 @@
     }
 
     function provRenderPresets() {
-      $('provPresets').innerHTML = provState.presets.map((t) =>
-        `<button class="btn btn-xs btn-ghost" data-prov-preset="${escapeHtml(t.id)}">${escapeHtml(t.name)}</button>`).join('');
+      const [cloud, network] = providerPresetGroups(provState.presets);
+      const button = (t) => `<button class="btn btn-xs btn-outline" data-prov-preset="${escapeHtml(t.id)}">${escapeHtml(t.name)}</button>`;
+      $('provPresets').innerHTML = cloud.items.map(button).join('');
+      $('provPresetsNet').innerHTML = network.items.map(button).join('');
+      $('provNetwork').style.display = network.items.length ? '' : 'none';
+    }
+
+    /** The link under the key field: where this service hands out keys. */
+    function provShowKeyLink(preset) {
+      const link = providerKeyLink(preset);
+      const a = $('provKeyLink');
+      a.style.display = link ? '' : 'none';
+      if (link) { a.href = link.url; a.textContent = `Get a key at ${link.host}`; }
     }
 
     async function provRefresh() {
@@ -208,8 +247,9 @@
       $('provLocal').checked = false;
       $('provClearKey').checked = false;
       $('provClearKeyRow').style.display = 'none';
-      $('provKey').placeholder = 'sk-...';
+      $('provKey').placeholder = 'Paste the key here';
       $('provFormTitle').textContent = 'Add a provider';
+      provShowKeyLink(null);
     }
 
     function provEdit(id) {
@@ -246,8 +286,7 @@
       provShow('Testing...', true);
       try {
         const r = await provRequest('POST', '/api/studio/providers/test', body);
-        if (r.ok) provShow(`Connected. ${r.count} model${r.count === 1 ? '' : 's'} found.`, true);
-        else provShow(r.error || 'The test failed.', false);
+        provShow(providerTestSummary(r), Boolean(r.ok));
         return r.ok;
       } catch (e) {
         provShow(e.message, false);
@@ -281,7 +320,7 @@
     $('settingsMenuNav').addEventListener('click', (e) => {
       if (e.target.closest('[data-spane="providers"]')) provRefresh();
     });
-    $('provPresets').addEventListener('click', (e) => {
+    $('provPresetBox').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-prov-preset]');
       const t = btn && provState.presets.find((x) => x.id === btn.dataset.provPreset);
       if (!t) return;
@@ -290,7 +329,9 @@
       $('provKind').value = t.kind;
       $('provUrl').value = t.base_url;
       $('provLocal').checked = Boolean(t.local);
-      $('provKey').focus();
+      provShowKeyLink(t);
+      $('provKey').placeholder = t.local ? '(usually no key)' : 'Paste the key here';
+      $(t.base_url ? 'provKey' : 'provUrl').focus();
     });
     $('provList').addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-prov-act]');

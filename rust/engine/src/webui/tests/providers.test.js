@@ -10,7 +10,7 @@ const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in providers.js');
 const L = new Function(`${src.slice(begin, end)}
-return { remoteModelId, parseRemoteModelId, mergeModelEntries, resolveSelection, modelLabel, cleanRemoteRequest, chatEndpoint };`)();
+return { providerPresetGroups, providerKeyLink, providerTestSummary, remoteModelId, parseRemoteModelId, mergeModelEntries, resolveSelection, modelLabel, cleanRemoteRequest, chatEndpoint };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -76,6 +76,40 @@ test('local models keep the local route, provider models use the proxy', () => {
   assert.strictEqual(ep.url, '/api/studio/providers/chat');
   assert.strictEqual(ep.remote, true);
   assert.deepStrictEqual(ep.transform({ model: 'x', messages: [], top_k: 3 }), { provider: 'openai', request: { model: 'gpt-x', messages: [] } });
+});
+
+const presets = [
+  { id: 'openai', name: 'OpenAI', group: 'cloud', key_url: 'https://platform.openai.com/api-keys' },
+  { id: 'custom', name: 'Other', group: 'cloud', key_url: '' },
+  { id: 'ollama', name: 'Ollama server', group: 'network', local: true },
+  { id: 'old-local', name: 'Old', local: true }, // a server from before the groups existed
+  { id: 'old-cloud', name: 'Older' },
+];
+
+test('templates are grouped: cloud services first, own servers in a separate group', () => {
+  const [cloud, network] = L.providerPresetGroups(presets);
+  assert.strictEqual(cloud.title, 'Cloud APIs');
+  assert.deepStrictEqual(cloud.items.map((p) => p.id), ['openai', 'custom', 'old-cloud']);
+  assert.strictEqual(network.title, 'Other servers on your network');
+  assert.deepStrictEqual(network.items.map((p) => p.id), ['ollama', 'old-local']);
+  assert.deepStrictEqual(L.providerPresetGroups(null).map((g) => g.items.length), [0, 0]);
+});
+
+test('the key link is an https page of the service', () => {
+  assert.deepStrictEqual(L.providerKeyLink(presets[0]), { url: 'https://platform.openai.com/api-keys', host: 'platform.openai.com' });
+  assert.strictEqual(L.providerKeyLink(presets[1]), null);
+  assert.strictEqual(L.providerKeyLink({ key_url: 'javascript:alert(1)' }), null);
+  assert.strictEqual(L.providerKeyLink({ key_url: 'http://example.org/k' }), null);
+  assert.strictEqual(L.providerKeyLink(null), null);
+});
+
+test('the test result names the models or the problem', () => {
+  assert.strictEqual(L.providerTestSummary({ ok: true, count: 2, models: ['a', 'b'] }), 'Connected. 2 models found: a, b.');
+  assert.match(L.providerTestSummary({ ok: true, count: 12, models: Array.from({ length: 12 }, (_, i) => `m${i}`) }), /12 models found: m0.*m7 and 4 more\.$/);
+  assert.strictEqual(L.providerTestSummary({ ok: true, count: 1, models: ['x'] }), 'Connected. 1 model found: x.');
+  assert.match(L.providerTestSummary({ ok: true, count: 0, models: [] }), /no models/);
+  assert.strictEqual(L.providerTestSummary({ ok: false, error: 'HTTP 401' }), 'HTTP 401');
+  assert.strictEqual(L.providerTestSummary(null), 'The test failed.');
 });
 
 console.log(`${n} tests passed`);

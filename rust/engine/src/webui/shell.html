@@ -1352,7 +1352,7 @@
             <div class="settings-pane" id="spane-providers">
               <div class="app-card">
                 <div class="app-card-title">Model providers</div>
-                <p class="app-item-desc" style="margin-bottom:8px;">Use models of other servers and cloud services (OpenAI-compatible services, Anthropic, Ollama, LM Studio, vLLM) in the chat, next to the model on this computer. They appear in the model menu as "Provider · model".</p>
+                <p class="app-item-desc" style="margin-bottom:8px;">fLLM runs models on this computer. Add a cloud service here only if you also want its models in the chat, for example a large model that does not fit your hardware. They appear in the model menu as "Provider · model".</p>
                 <p class="app-item-desc" style="margin-bottom:12px;"><strong>Privacy:</strong> everything you type in a chat with such a model is sent to that service. Keys are stored in a file on this computer and are never shown again; this page never receives them, fLLM adds them when it passes your request on.</p>
                 <div id="provList"></div>
                 <div style="display:flex;gap:6px;margin-top:8px;align-items:center;">
@@ -1362,9 +1362,14 @@
               </div>
               <div class="app-card">
                 <div class="app-card-title" id="provFormTitle">Add a provider</div>
-                <div class="app-card-item column">
-                  <div class="app-item-title">Start from a template</div>
+                <div class="app-card-item column" id="provPresetBox">
+                  <div class="app-item-title">Choose a service</div>
                   <div id="provPresets" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+                  <details id="provNetwork" class="prov-network">
+                    <summary>Other servers on your network (optional)</summary>
+                    <div class="app-item-desc">Only if you already run Ollama, LM Studio, vLLM or llama.cpp on this computer or another one and want its models here. fLLM itself needs none of them.</div>
+                    <div id="provPresetsNet" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"></div>
+                  </details>
                 </div>
                 <div class="app-card-item column">
                   <div class="app-item-title">Name</div>
@@ -1384,7 +1389,8 @@
                 </div>
                 <div class="app-card-item column">
                   <div class="app-item-title">Key</div>
-                  <input type="password" id="provKey" class="ui-input mono" placeholder="sk-..." autocomplete="new-password">
+                  <input type="password" id="provKey" class="ui-input mono" placeholder="Paste the key here" autocomplete="new-password">
+                  <a id="provKeyLink" class="app-item-desc" href="#" target="_blank" rel="noopener noreferrer" style="display:none;"></a>
                   <label class="app-item-desc" id="provClearKeyRow" style="display:none;"><input type="checkbox" id="provClearKey"> Remove the saved key</label>
                 </div>
                 <div class="app-card-item column">
@@ -1393,7 +1399,7 @@
                 </div>
                 <div style="display:flex;gap:6px;margin-top:8px;">
                   <button class="btn btn-sm btn-primary" id="btnProvSave">Save</button>
-                  <button class="btn btn-sm btn-ghost" id="btnProvTestForm">Test</button>
+                  <button class="btn btn-sm btn-ghost" id="btnProvTestForm">Test connection</button>
                   <button class="btn btn-sm btn-ghost" id="btnProvCancel">Clear</button>
                 </div>
                 <div class="app-item-desc" id="provFileInfo" style="margin-top:8px;"></div>
