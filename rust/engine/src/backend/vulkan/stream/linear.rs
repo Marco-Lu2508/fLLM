@@ -180,7 +180,11 @@ impl VulkanStream {
 
     /// `Stream::quantized_linear` for a weight described by `w`: `out[b][r] = scale * dot(x[b], w[r]) + bias[r]`, `x` and `out` already valid views.
     pub(super) fn linear_core(&mut self, w: &LinearWeight, batch: usize, x: &Buffer, out: &Buffer) -> Result<(), BackendError> {
-        self.pending_macs = self.pending_macs.saturating_add((w.rows as u64).saturating_mul(w.cols as u64).saturating_mul(batch as u64));
+        // The budget of a submission (`DEFAULT_MAX_MACS_PER_SUBMIT`) was calibrated on quantized weights. The float kernels (`lin_f16`, `lin_f32`: models in
+        // F16 / BF16, RWKV adapters) ran at about 80 GMAC/s on a Radeon 840M, so a submission at the quantized budget lasted seconds there and the driver
+        // reported "Vulkan device lost" on prompts of a 1.6B F16 model: a multiply-add of a float weight counts eightfold.
+        let weight = if matches!(w.quant, QuantType::F32 | QuantType::F16 | QuantType::BF16) { 8 } else { 1 };
+        self.pending_macs = self.pending_macs.saturating_add((w.rows as u64).saturating_mul(w.cols as u64).saturating_mul(batch as u64).saturating_mul(weight));
         let kind = WeightKind::of(w.quant).ok_or(BackendError::UnsupportedQuant(w.quant))?;
         let slices = slice_table(kind, w.rows, w.cols, self.sh.caps().max_storage_buffer_range, self.sh.align())?;
         if slices.last().is_some_and(|s| (s.offset + s.bytes) as u64 > w.weights.size()) {

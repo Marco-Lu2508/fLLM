@@ -729,7 +729,11 @@ impl Recorder {
             _pipelines: std::mem::take(&mut self.retained_pipelines),
         });
         self.epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
-        self.pending_writes = false;
+        // Two submissions to one queue are not ordered in memory: the next command buffer may start its first dispatch while the GPU still runs the
+        // end of this one (the submissions carry no wait semaphore). Its first dependent command must therefore begin with a full barrier, whose first
+        // scope reaches back over earlier submissions of the queue. Clearing this flag here let a dispatch read what the previous submission was still
+        // writing (intermittent wrong results with early submission, `FLLM_VK_SUBMIT_EVERY`).
+        self.pending_writes = true;
         self.pipeline = None;
         self.buffers_bound = false;
         Ok(value)
