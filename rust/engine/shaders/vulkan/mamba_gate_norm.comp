@@ -1,8 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: mamba_gate_norm | bindings: y,projected,norm | push: inner,norm_groups,rows,proj_stride,proj_gate_off,eps | grid: [norm_groups, rows, 1]
+// FLLM-SHADER: mamba_gate_norm | bindings: y,projected,norm | push: inner,norm_groups,rows,proj_stride,proj_gate_off,mode,eps | grid: [norm_groups, rows, 1]
 // Mamba-2 gated group RMS norm (end of `mamba_forward` in rust_decoder.rs), in place on y (rows x inner): v = y * silu(gate), then for every group of
 // size = inner / norm_groups values  y = v * (1 / sqrt(mean(v^2) + eps)) * norm[g * size + i]. gate = projected[t * proj_stride + proj_gate_off + i].
+// mode 0 is that; mode 1 only y = y * silu(gate); mode 2 normalises first and multiplies by the gate behind the norm weight (Falcon-H1).
 // One workgroup per (group, row); for the whole batch at once (no recurrent state involved).
 #define WG 256
 #include "_ops_common.glsl"
@@ -17,6 +18,7 @@ layout(push_constant) uniform P {
     uint rows;
     uint proj_stride;
     uint proj_gate_off;
+    uint mode;
     float eps;
 } p;
 
@@ -28,15 +30,22 @@ void main() {
     const uint row = gl_WorkGroupID.y;
     if (row >= p.rows) return;
     const uint size = p.inner / p.norm_groups;
+    if (p.mode == 1u) {
+        for (uint i = lane; i < size; i += WG) {
+            y[row * p.inner + g * size + i] *= silu(projected[row * p.proj_stride + p.proj_gate_off + g * size + i]);
+        }
+        return;
+    }
     float ss = 0.0;
     for (uint i = lane; i < size; i += WG) {
-        const float v = y[row * p.inner + g * size + i] * silu(projected[row * p.proj_stride + p.proj_gate_off + g * size + i]);
+        const float v = p.mode == 2u ? y[row * p.inner + g * size + i] : y[row * p.inner + g * size + i] * silu(projected[row * p.proj_stride + p.proj_gate_off + g * size + i]);
         ss += v * v;
     }
     ss = wg_sum(ss);
     const float inv = 1.0 / sqrt(ss / float(size) + p.eps);
     for (uint i = lane; i < size; i += WG) {
-        const float v = y[row * p.inner + g * size + i] * silu(projected[row * p.proj_stride + p.proj_gate_off + g * size + i]);
-        y[row * p.inner + g * size + i] = v * inv * norm_w[g * size + i];
+        const float gate = silu(projected[row * p.proj_stride + p.proj_gate_off + g * size + i]);
+        const float v = p.mode == 2u ? y[row * p.inner + g * size + i] : y[row * p.inner + g * size + i] * gate;
+        y[row * p.inner + g * size + i] = v * inv * norm_w[g * size + i] * (p.mode == 2u ? gate : 1.0);
     }
 }

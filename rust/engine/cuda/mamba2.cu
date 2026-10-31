@@ -96,18 +96,25 @@ __global__ void __launch_bounds__(256) mamba_scan_kernel(const float *__restrict
     for (int n = 0; n < N; n++) rec[n] = cell[n];
 }
 
-// grid (rows, norm_groups), block 256: y = rmsnorm_group(y * silu(gate)) * weight
+// grid (rows, norm_groups), block 256. mode 0: y = rmsnorm_group(y * silu(gate)) * weight; 1: y = y * silu(gate); 2: y = rmsnorm_group(y) * weight * silu(gate)
 __global__ void __launch_bounds__(256) mamba_norm_kernel(const float *__restrict__ proj, int width, float *__restrict__ y,
-                                                         const float *__restrict__ weight, int inner, int group_size, float eps) {
+                                                         const float *__restrict__ weight, int inner, int group_size, float eps, int mode) {
     __shared__ float scratch[32];
     const size_t row = blockIdx.x;
     const int base = blockIdx.y * group_size;
     float* yr = y + row * inner;
     const float *gate = proj + row * width;
+    if (mode == 1) {
+        for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+            const float g = gate[base + i];
+            yr[base + i] *= g / (1.0f + expf(-g));
+        }
+        return;
+    }
     float sum = 0.f;
     for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
         const float g = gate[base + i];
-        const float v = yr[base + i] * (g / (1.0f + expf(-g)));
+        const float v = mode == 2 ? yr[base + i] : yr[base + i] * (g / (1.0f + expf(-g)));
         sum += v * v;
     }
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, warps = blockDim.x >> 5;
@@ -119,8 +126,8 @@ __global__ void __launch_bounds__(256) mamba_norm_kernel(const float *__restrict
     const float inv = 1.0f / sqrtf(total / (float)group_size + eps);
     for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
         const float g = gate[base + i];
-        const float v = yr[base + i] * (g / (1.0f + expf(-g)));
-        yr[base + i] = v * inv * weight[base + i];
+        const float v = mode == 2 ? yr[base + i] : yr[base + i] * (g / (1.0f + expf(-g)));
+        yr[base + i] = v * inv * weight[base + i] * (mode == 2 ? g / (1.0f + expf(-g)) : 1.0f);
     }
 }
 
@@ -134,7 +141,7 @@ int fllm_ssm_conv_launch(cudaStream_t s, const void *runs, int nruns, const floa
 }
 
 int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
-                       int norm_groups, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
+                       int norm_groups, int norm_mode, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
                        const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
                        const float *norm, float *mixed, float *out) {
     if (!fllm_mamba2_supported(inner, state, heads, groups, ksz, norm_groups)) return fllm_set_error("mamba2: unsupported shape");
@@ -160,6 +167,6 @@ int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, int rows, in
             break;
     }
     if (int e = fllm_check_launch("mamba_scan")) return e;
-    mamba_norm_kernel<<<dim3(rows, norm_groups), 256, 0, s>>>(proj, width, out, norm, inner, inner / norm_groups, eps);
+    mamba_norm_kernel<<<dim3(rows, norm_groups), 256, 0, s>>>(proj, width, out, norm, inner, inner / norm_groups, eps, norm_mode);
     return fllm_check_launch("mamba_norm");
 }

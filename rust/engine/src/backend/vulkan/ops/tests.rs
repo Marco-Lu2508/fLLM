@@ -749,6 +749,7 @@ fn mamba2() -> Mamba2Shape {
         norm_groups: 2,
         step_min: 0.001,
         eps: 1e-5,
+        norm_mode: 0,
     }
 }
 

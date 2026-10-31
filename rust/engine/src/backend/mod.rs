@@ -163,6 +163,9 @@ pub struct MambaShape {
     pub norm_groups: usize,
     pub step_min: f32,
     pub eps: f32,
+    /// Order of the gate and the RMS norm behind the scan: 0 `norm(y * silu(z))` (Mamba-2, Bamba, Nemotron-H), 1 `y * silu(z)` without a norm
+    /// (Falcon-H1 default), 2 `norm(y) * silu(z)`.
+    pub norm_mode: u8,
 }
 
 impl MambaShape {

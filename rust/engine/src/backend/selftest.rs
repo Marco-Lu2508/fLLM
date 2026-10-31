@@ -4078,16 +4078,22 @@ impl Tester<'_> {
             let r = self.shortconv_check(hidden, kernel);
             self.record("shortconv", &format!("{hidden} channels kernel {kernel}"), r);
         }
-        for (inner, state, heads, groups, norm_groups) in
-            [(128usize, 16usize, 4usize, 2usize, 2usize), (256, 64, 8, 1, 1), (512, 128, 8, 2, 2), (192, 32, 3, 3, 1)]
-        {
-            let shape = MambaShape { inner, state, heads, groups, conv_kernel: 4, norm_groups, step_min: 0.0, eps: 1e-5 };
+        for (inner, state, heads, groups, norm_groups, norm_mode) in [
+            (128usize, 16usize, 4usize, 2usize, 2usize, 0u8),
+            (256, 64, 8, 1, 1, 0),
+            (512, 128, 8, 2, 2, 0),
+            (192, 32, 3, 3, 1, 0),
+            (128, 16, 4, 2, 2, 1),
+            (256, 64, 8, 1, 1, 2),
+            (192, 32, 3, 3, 3, 2),
+        ] {
+            let shape = MambaShape { inner, state, heads, groups, conv_kernel: 4, norm_groups, step_min: 0.0, eps: 1e-5, norm_mode };
             match self.device.create_stream() {
                 Ok(st) if st.supports_mamba2(&shape) => {}
                 _ => continue,
             }
             let r = self.mamba2_check(&shape);
-            self.record("mamba2", &format!("inner {inner} state {state} {heads} heads {groups} groups, {norm_groups} norm groups"), r);
+            self.record("mamba2", &format!("inner {inner} state {state} {heads} heads {groups} groups, {norm_groups} norm groups{}", ["", ", no norm", ", norm before the gate"][usize::from(norm_mode)]), r);
         }
     }
 
@@ -4384,14 +4390,24 @@ impl Tester<'_> {
                             y_row[h * head_dim + p] = acc + skip[h] * xp;
                         }
                     }
-                    for (v, g) in y_row.iter_mut().zip(gate) {
-                        *v *= g / (1.0 + (-g).exp());
+                    let silu = |g: f32| g / (1.0 + (-g).exp());
+                    if shape.norm_mode != 2 {
+                        for (v, g) in y_row.iter_mut().zip(gate) {
+                            *v *= silu(*g);
+                        }
                     }
                     let size = inner / shape.norm_groups;
-                    for (chunk, weight) in y_row.chunks_mut(size).zip(norm.chunks(size)) {
-                        let inv = (chunk.iter().map(|v| v * v).sum::<f32>() / size as f32 + shape.eps).sqrt().recip();
-                        for (v, w) in chunk.iter_mut().zip(weight) {
-                            *v *= inv * w;
+                    if shape.norm_mode != 1 {
+                        for (chunk, weight) in y_row.chunks_mut(size).zip(norm.chunks(size)) {
+                            let inv = (chunk.iter().map(|v| v * v).sum::<f32>() / size as f32 + shape.eps).sqrt().recip();
+                            for (v, w) in chunk.iter_mut().zip(weight) {
+                                *v *= inv * w;
+                            }
+                        }
+                    }
+                    if shape.norm_mode == 2 {
+                        for (v, g) in y_row.iter_mut().zip(gate) {
+                            *v *= silu(*g);
                         }
                     }
                 }

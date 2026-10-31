@@ -698,6 +698,8 @@ pub struct DeviceLayerWeights {
     shortconv: Option<DeviceShortConv>,
     /// Mamba-1 mixer resident on the device.
     mamba1: Option<DeviceMamba1>,
+    /// The Mamba-2 branch next to the attention (Falcon-H1) and its output projection.
+    par_mamba: Option<(DeviceMamba, crate::backend::DeviceWeight)>,
     /// RWKV-6 / RWKV-7 layer (time mix and channel mix) resident on the device.
     rwkv: Option<rwkv::DeviceRwkv>,
     /// Kimi Delta Attention mixer resident on the device.
@@ -758,6 +760,7 @@ impl DeviceLayerWeights {
             mamba1: None,
             rwkv: None,
             kda: None,
+            par_mamba: None,
             sinks: None,
             qkv: None,
             gate_up: None,
@@ -2882,7 +2885,7 @@ impl RustDecoder {
     /// cache, and the stream goes back up. `gate_ok` / `arch_ok` / `head_ok`: the stream has the attention-gate / element-wise /
     /// per-head gate and value-scale kernels.
     #[allow(clippy::too_many_arguments)]
-    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool) -> Option<&'static str> {
+    fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
             return Some("DeepSeek-V4 hyper-connections and compressed attention");
@@ -2911,8 +2914,8 @@ impl RustDecoder {
         if let Some(gap) = std::iter::once(layer).chain(&self.layers).find_map(|l| l.gemma.as_ref().and_then(|g| g.device_gap())) {
             return Some(gap);
         }
-        if layer.parallel.is_some() {
-            // the Mamba-2 branch keeps its state on the host; the layer is computed by the host reference code
+        if layer.parallel.is_some() && !(mamba_ok && layer.post_attn_norm.is_none() && matches!(layer.attn, Attn::Std { .. })) {
+            // without the Mamba-2 kernels (or with a norm behind the summed branches) the layer is computed by the host reference code
             return Some("a Mamba-2 branch next to the attention");
         }
         if layer.zamba.is_some() {
@@ -2981,7 +2984,7 @@ impl RustDecoder {
                         );
                     });
                 }
-                if arch_ok && cfg.mla.as_ref().is_some_and(|m| m.rotary) && (cfg.kv_heads == cfg.heads || self.mla_latent) && !cfg.parallel_residual {
+                if arch_ok && cfg.mla.is_some() && (cfg.kv_heads == cfg.heads || self.mla_latent) && !cfg.parallel_residual {
                     None
                 } else {
                     Some("multi-head latent attention")
@@ -3181,6 +3184,12 @@ impl RustDecoder {
         let kda_ok = self.kda_shape().is_some_and(|s| {
             backend.create_stream().map(|st| st.supports_kda(&s)).unwrap_or(false) && std::env::var_os("FLLM_KDA_HOST").is_none()
         });
+        // Mamba-2 mixers, also the branch next to the attention of Falcon-H1: the state sits in a device buffer, which excludes DeltaNet layers on the device
+        let mamba_ok = self.mamba_shape().is_some_and(|s| {
+            self.delta_shape().is_none()
+                && backend.create_stream().map(|st| st.supports_mamba2(&s)).unwrap_or(false)
+                && std::env::var_os("FLLM_MAMBA_HOST").is_none()
+        });
         // FLLM_HOST_LAYERS=all|3,4,5 forces layers onto the host (debugging: the output must match `--device cpu`)
         let forced = std::env::var("FLLM_HOST_LAYERS").ok();
         let stage = self.stage_range();
@@ -3199,7 +3208,7 @@ impl RustDecoder {
                 if on {
                     Some("forced by FLLM_HOST_LAYERS")
                 } else {
-                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok)
+                    self.layer_host_reason(i, l, gate_ok, arch_ok, head_ok, value_ok, conv_ok, dsa_ok, hc_ok, rwkv_ok, kda_ok, mamba_ok)
                 }
             })
             .collect();
@@ -3495,9 +3504,29 @@ impl RustDecoder {
                         dt_bias: upload_vec(&m.dt_bias)?,
                         decay: upload_vec(&m.decay)?,
                         skip: upload_vec(&m.skip)?,
-                        norm: upload_vec(&m.norm)?,
+                        norm: if m.norm.is_empty() { upload_vec(&vec![1.0; self.cfg.mamba.as_ref().map_or(0, |c| c.inner)])? } else { upload_vec(&m.norm)? },
                         ordinal: mamba_layers - 1,
                     })
+                }
+                _ => None,
+            };
+            let par_mamba = match (&layer.parallel, mamba_shape.as_ref()) {
+                (Some(par), Some(_)) if mamba_ok => {
+                    mamba_layers += 1;
+                    let m = &par.mamba;
+                    Some((
+                        DeviceMamba {
+                            input: upload_linear(&format!("blk.{i}.ssm_in"), &m.input)?,
+                            conv: upload_vec(&m.conv)?,
+                            conv_bias: m.conv_bias.as_ref().map(upload_vec).transpose()?,
+                            dt_bias: upload_vec(&m.dt_bias)?,
+                            decay: upload_vec(&m.decay)?,
+                            skip: upload_vec(&m.skip)?,
+                            norm: if m.norm.is_empty() { upload_vec(&vec![1.0; self.cfg.mamba.as_ref().map_or(0, |c| c.inner)])? } else { upload_vec(&m.norm)? },
+                            ordinal: mamba_layers - 1,
+                        },
+                        upload_linear(&format!("blk.{i}.ssm_out"), &par.out)?,
+                    ))
                 }
                 _ => None,
             };
@@ -3766,6 +3795,7 @@ impl RustDecoder {
                 mamba1,
                 rwkv,
                 kda,
+                par_mamba,
                 sinks: layer.sinks.clone().map(Arc::new),
                 qkv: merged_qkv,
                 gate_up: merged_gate_up,
@@ -4468,7 +4498,10 @@ impl RustDecoder {
                         cos: Arc::clone(cos),
                         sin: Arc::clone(sin),
                     };
-                    stream.rope(&mut q_buf, &mut k_buf, &positions, &rope_params).map_err(err)?;
+                    // NoPE latent attention (Kimi-Linear) has no rotary part: nothing to rotate
+                    if mc.rope > 0 {
+                        stream.rope(&mut q_buf, &mut k_buf, &positions, &rope_params).map_err(err)?;
+                    }
                     stream.kv_cache_write(dev_kv, kvi, &slots, &k_buf, &v_buf).map_err(err)?;
                 }
 
@@ -4562,7 +4595,7 @@ impl RustDecoder {
                 let mut out_buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
                 let out_w = dev_layer.out.as_ref().ok_or("attention layer without a device output projection")?;
                 // the feed-forward norm (and the activation format of its first GEMM) can join the residual add of the output projection
-                let ffn_target = if !tp && hc_dev.is_none() && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
+                let ffn_target = if !tp && hc_dev.is_none() && dev_layer.par_mamba.is_none() && dev_layer.post_attn_norm.is_none() && !parallel && !matches!(layer.ffn, Ffn::None) && matches!(cfg.norm, NormKind::Rms) && dev_layer.ffn_norm_b.is_none() && self.groups == 1 {
                     dev_layer
                         .ffn_norm
                         .as_ref()
@@ -4643,6 +4676,15 @@ impl RustDecoder {
                         }
                     }
                 }
+                // Falcon-H1: the Mamba-2 branch reads the same normed input; both branches are added to the residual stream before the feed-forward norm
+                if let (Some((dm, out_w)), Some(shape)) = (&dev_layer.par_mamba, &mamba_shape) {
+                    if delta_plan.is_none() {
+                        let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Mamba(_)) || l.parallel.is_some()).count();
+                        delta_plan = Some(self.state_plan(count, shape.layer_state_bytes(), tables, lengths)?);
+                    }
+                    let plan = delta_plan.as_deref().unwrap_or(&[]);
+                    self.mamba_device(&mut **stream, &mut scratch, shape, dm, dev_layer, Some(out_w), plan, &normed_buf, &mut x_buf, rows)?;
+                }
                 if i == 0 {
                     debug_sum(&mut **stream, "ffn_inp-0", &x_buf);
                 }
@@ -4660,11 +4702,11 @@ impl RustDecoder {
                 self.delta_device(&mut **stream, &mut scratch, shape, dd, dev_layer, (i, plan), &normed_buf, &mut x_buf, rows)?;
             } else if let (Some(dm), Some(shape)) = (&dev_layer.mamba, &mamba_shape) {
                 if delta_plan.is_none() {
-                    let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Mamba(_))).count();
+                    let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::Mamba(_)) || l.parallel.is_some()).count();
                     delta_plan = Some(self.state_plan(count, shape.layer_state_bytes(), tables, lengths)?);
                 }
                 let plan = delta_plan.as_deref().unwrap_or(&[]);
-                self.mamba_device(&mut **stream, &mut scratch, shape, dm, dev_layer, plan, &normed_buf, &mut x_buf, rows)?;
+                self.mamba_device(&mut **stream, &mut scratch, shape, dm, dev_layer, None, plan, &normed_buf, &mut x_buf, rows)?;
             } else if let (Some(dc), Some(sc)) = (&dev_layer.shortconv, cfg.shortconv.as_ref()) {
                 if delta_plan.is_none() {
                     let count = self.layers.iter().filter(|l| matches!(l.attn, Attn::ShortConv(_))).count();
@@ -5724,7 +5766,7 @@ impl RustDecoder {
 
     fn mamba_shape(&self) -> Option<crate::backend::MambaShape> {
         let mc = self.cfg.mamba.as_ref()?;
-        self.layers.iter().any(|l| matches!(l.attn, Attn::Mamba(_))).then(|| crate::backend::MambaShape {
+        self.layers.iter().any(|l| matches!(l.attn, Attn::Mamba(_)) || l.parallel.is_some()).then(|| crate::backend::MambaShape {
             inner: mc.inner,
             state: mc.state,
             heads: mc.heads,
@@ -5733,6 +5775,11 @@ impl RustDecoder {
             norm_groups: mc.norm_groups.max(1),
             step_min: mc.step_min,
             eps: self.cfg.eps,
+            norm_mode: match mc.norm {
+                crate::config::MambaNorm::GateThenNorm => 0,
+                crate::config::MambaNorm::NoNorm => 1,
+                crate::config::MambaNorm::NormThenGate => 2,
+            },
         })
     }
 
@@ -5746,6 +5793,7 @@ impl RustDecoder {
         shape: &crate::backend::MambaShape,
         dm: &DeviceMamba,
         dev_layer: &DeviceLayerWeights,
+        out_override: Option<&crate::backend::DeviceWeight>,
         plan: &[DeltaPlanRun],
         normed: &crate::backend::DeviceBuffer,
         x: &mut crate::backend::DeviceBuffer,
@@ -5776,7 +5824,7 @@ impl RustDecoder {
             .mamba2_layer(shape, &weights, &runs, dm.ordinal * shape.layer_state_bytes(), &proj, &mut mixed, &mut out)
             .map_err(err)?;
         let residual_scale = self.cfg.residual_scale;
-        let out_w = dev_layer.out.as_ref().ok_or("Mamba layer without a device output projection")?;
+        let out_w = out_override.or(dev_layer.out.as_ref()).ok_or("Mamba layer without a device output projection")?;
         let fused = dev_layer.post_attn_norm.is_none()
             && stream
                 .quantized_linear_add(x, &out, out_w, out_w.bias.as_ref(), residual_scale)

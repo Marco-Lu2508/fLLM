@@ -429,6 +429,8 @@ pub struct Mamba2Shape {
     pub step_min: f32,
     /// Epsilon of the group RMS norm (the model's `rms_norm_eps`).
     pub eps: f32,
+    /// 0 `norm(y * silu(z))`, 1 `y * silu(z)`, 2 `norm(y) * silu(z)` (see `MambaShape::norm_mode`).
+    pub norm_mode: u8,
 }
 
 impl Mamba2Shape {
@@ -703,6 +705,7 @@ pub fn plan_mamba_gate_norm(
         .u("rows", rows)
         .u("proj_stride", proj_stride)
         .u("proj_gate_off", proj_gate_off)
+        .u("mode", usize::from(shape.norm_mode))
         .f("eps", shape.eps);
     plan(
         "mamba_gate_norm",

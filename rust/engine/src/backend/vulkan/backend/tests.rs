@@ -428,6 +428,7 @@ fn all_op_plans() -> Vec<OpPlan> {
             norm_groups: 2,
             step_min: 0.0,
             eps: 1e-5,
+            norm_mode: 0,
         };
         let runs = [RunSpec {
             first_row: 0,

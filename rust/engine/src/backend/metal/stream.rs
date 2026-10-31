@@ -398,7 +398,7 @@ impl Stream for MetalStream {
     }
 
     fn supports_mamba2(&self, shape: &MambaShape) -> bool {
-        recurrent_plan::mamba2_supported(&recurrent::mamba2_shape(shape))
+        shape.norm_mode == 0 && recurrent_plan::mamba2_supported(&recurrent::mamba2_shape(shape))
     }
 
     fn mamba2_layer(

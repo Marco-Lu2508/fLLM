@@ -1674,13 +1674,13 @@ int fllm_cuda_mamba2_supported(int inner, int state, int heads, int groups, int 
 }
 // Mamba-2 layer: `runs` is nruns SsmRun records (24 bytes each, see mamba2.cu) in host memory.
 int fllm_cuda_mamba2_layer(FllmStream *st, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
-                           int norm_groups, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
+                           int norm_groups, int norm_mode, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
                            const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
                            const float *norm, float *mixed, float *out) {
     PREP(st);
     void *d = nullptr;
     if (int e = stage(st, 4, runs, (size_t)nruns * 24, &d)) return e;
-    return fllm_mamba2_launch(st->s, d, nruns, rows, inner, state, heads, groups, ksz, norm_groups, step_min, eps, state_off, rec_bytes, proj,
+    return fllm_mamba2_launch(st->s, d, nruns, rows, inner, state, heads, groups, ksz, norm_groups, norm_mode, step_min, eps, state_off, rec_bytes, proj,
                               convw, convb, dt_bias, decay, skip, norm, mixed, out);
 }
 int fllm_cuda_shortconv_supported(int hidden, int ksz) { return !ssm_kernels_off() && fllm_shortconv_supported(hidden, ksz); }

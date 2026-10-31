@@ -348,7 +348,7 @@ int fllm_mla_assemble_launch(cudaStream_t s, const float *q_full, const float *k
 // Mamba-2 selective state space layer (mamba2.cu); `runs` points to device memory
 int fllm_mamba2_supported(int inner, int state, int heads, int groups, int ksz, int norm_groups);
 int fllm_mamba2_launch(cudaStream_t s, const void *runs, int nruns, int rows, int inner, int state, int heads, int groups, int ksz,
-                       int norm_groups, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
+                       int norm_groups, int norm_mode, float step_min, float eps, size_t state_off, size_t rec_bytes, const float *proj,
                        const float *convw, const float *convb, const float *dt_bias, const float *decay, const float *skip,
                        const float *norm, float *mixed, float *out);
 // LFM2 gated short convolution (shortconv.cu); `runs` points to device memory

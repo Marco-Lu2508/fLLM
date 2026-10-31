@@ -58,6 +58,7 @@ fn mamba2_shape(s: &MambaShape) -> Mamba2Shape {
         norm_groups: s.norm_groups,
         step_min: s.step_min,
         eps: s.eps,
+        norm_mode: s.norm_mode,
     }
 }
 
