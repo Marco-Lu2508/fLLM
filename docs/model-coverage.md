@@ -231,10 +231,51 @@ in laptops that other measurements ran on at the same time.
   | | `hip:0` | 225 | 18.2 |
   | | `vulkan` (RADV) | 20 | about 4 |
 
-  The recurrence is one launch per layer and run but serial over the tokens inside it; a chunk-parallel form is not done. The slow Vulkan numbers on the Radeon are
+  The recurrence of these runs is the serial kernel (one launch per layer and run, serial over the tokens inside it); the chunk-parallel form that came after is measured in
+  the next list. The slow Vulkan numbers on the Radeon are
   not the recurrence: `FLLM_VK_PROFILE=8` for RWKV-7 0.1B shows `lin_f16` 85 %, `lin_f32` 12 % and `rwkv7_wkv_n64` 1.5 % of the GPU time, i.e. the F16 matrix
   product of the Vulkan backend (about 80 GMAC/s on this GPU) is what limits it. After the submission budget counted float weights eightfold, RWKV-6 1.6B
   processed prompts of 1192 and 1198 tokens on `vulkan` of the Radeon at 20 tok/s (it answered "Vulkan device lost" before).
+
+### Chunk-parallel scan of the recurrent layers: comparison and devices
+
+Gated DeltaNet, Kimi Delta Attention, RWKV-7, RWKV-6 and Mamba-2 are one recurrence per head, and `src/chunked_scan.rs` proves its chunked form equal to the
+token-by-token form (f64, chunks of 16, 32 and 64, odd tails, with and without an initial state, final state included). Runs of 64 rows and more of these layers can
+use it on CUDA, HIP and Vulkan devices ([gpu-backends.md](gpu-backends.md) section 3a); `FLLM_CHUNKED_SCAN` selects the form (`0` serial kernels, `1` scan, unset: the
+device times both on the first prompt calls of every layer shape and keeps the faster one).
+
+* `selftest-gpu --only delta,kda,rwkv,arch`, scan forced, prompts of 64 to 150 rows next to short runs and continued states, against the CPU references: 80 checks, 0 failed
+  on `cuda:0`, `hip:0`, `vulkan:1` and `vulkan` (largest difference 2e-5, tolerance 2e-3).
+* Tiny fixtures from `scripts/hf_golden.py` (rwkv7, rwkv6, kimi_linear, qwen3_next, qwen3_5, mamba2, bamba, granitemoehybrid, nemotron_h, falcon_h1, zamba2; f32 GGUF files
+  made with `fllm-rs convert`), 16 greedy tokens through `scripts/gpu_arch_smoke.py` with a 26-character and a 146-character prompt, `FLLM_CHUNKED_SCAN=0` and
+  `FLLM_CHUNKED_SCAN=1 FLLM_CHUNKED_SCAN_MIN=2` (the scan from 2 rows on): identical to the CPU's text on `vulkan:1` and `vulkan` (44 of 44 runs each) and on `cuda:0` and `hip:0` (42 of 44 each). The two exceptions on each of those are
+  the Zamba2 fixture with one of the two prompts (the 26-character one on `cuda:0`, the 146-character one on `hip:0`), which differs in the same way with the serial kernels
+  (`FLLM_CHUNKED_SCAN=0`): a near tie of that fixture's random weights between the CPU and the device, not the scan.
+* Prompt speed, `fllm-rs bench --scenarios prefill` against `fllm-rs serve` (completions endpoint, 512-token batches, 2 repetitions, tokens per second for prompts of 512 /
+  2048 / 8192 tokens), serial kernels, scan forced, and the default `auto`. Machines: an RTX 2000 Ada laptop GPU (24 multiprocessors) and a Radeon 840M (4 compute units); other
+  work ran on the same machines between and sometimes during the runs, the Radeon in particular (so only differences of ten percent and more mean anything, and the
+  Radeon rows may be missing where the machine was never idle):
+
+| model | device | serial kernels | scan forced (`FLLM_CHUNKED_SCAN=1`) | default (`auto`) |
+| :--- | :--- | ---: | ---: | ---: |
+| RWKV-7 0.1B F16 | RTX 2000 Ada, `cuda:0` | 19138 / 24578 / 25396 | 28065 / 30806 / 31067 | 28176 / 30737 / 31127 |
+|  | RTX 2000 Ada, `vulkan:1` | 2923 / 2869 / 2866 | 3037 / 2970 / 2989 | 2997 / 2866 / 2871 |
+|  | Radeon 840M, `hip:0` | 3685 / 3499 / 3513 | 2224 / 2236 / 2217 | - / - / - |
+| RWKV-6 1.6B F16 | RTX 2000 Ada, `cuda:0` | 3760 / 3737 / 3777 | 3766 / 3696 / 3734 | 3760 / 3686 / 3742 |
+|  | RTX 2000 Ada, `vulkan:1` | 268 / 267 / 266 | 267 / 266 / 265 | 268 / 246 / 255 |
+| Qwen3.5-0.8B Q4_K_M | RTX 2000 Ada, `cuda:0` | 10328 / 8223 / 5158 | 8616 / 7437 / 4860 | 10316 / 8356 / 5160 |
+|  | RTX 2000 Ada, `vulkan:1` | 7436 / 6145 / 3569 | 5304 / 5000 / 3092 | 7095 / 6149 / 3562 |
+| Qwen3.5-2B Q4_K_M | RTX 2000 Ada, `cuda:0` | 5773 / 5138 / 3734 | 5305 / 4820 / 3627 | 5781 / 5172 / 3739 |
+|  | RTX 2000 Ada, `vulkan:1` | 4130 / 3694 / 2597 | 3437 / 3241 / 2340 | 4106 / 3719 / 2587 |
+
+  On the Radeon only RWKV-7 0.1B on `hip:0` was measured on an idle machine: the scan is 40 % slower there (4 compute units: the extra arithmetic of the scan costs more
+  than the serial chain), and `auto` chose the serial kernels. The other combinations on that GPU, and `vulkan` there, were not measured: other work used the GPU all the time.
+
+  Where the scan wins the layers are bound by the per-token chain of the serial kernels (RWKV-7: three block-wide reductions per token), where it loses the serial kernel is
+  already close to what the device can do and the scan, which does about twice the arithmetic, only adds work (Gated DeltaNet on the 24-multiprocessor GPU: 1.07 ms for the
+  serial convolution and recurrence of a 533-row call of Qwen3.5-0.8B against 1.27 ms for the scan). The default therefore keeps the serial kernels there, and the measurement
+  costs the first prompt a few percent. The scan is expected to win more often on GPUs with many more multiprocessors, where the serial kernels leave most of the device idle;
+  that is not measured here.
 
 ### Sparse-attention indexer (DeepSeek-V3.2, GLM-5): comparison and devices
 

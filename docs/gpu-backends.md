@@ -114,9 +114,31 @@ Vulkan in `rust/engine/shaders/vulkan`; a `Stream` that lacks one reports it thr
 | Kimi Delta Attention (Kimi-Linear, Ling-3.0): the projections, the packing of q/k/v (`Stream::copy_columns`), the convolution + L2 norm (`delta_conv`), the per-channel-decay delta rule (`kda_rec_hk*` / `kda_rec_kernel`) and the gated norm; the state lives in one device buffer per sequence like DeltaNet's | head width 16/32/64/128 (CUDA, HIP, Vulkan) | other widths; `FLLM_KDA_HOST=1` |
 | RWKV-6 / RWKV-7 (time mix and channel mix of the whole layer): token shift (`rwkv_shift`), interpolation (`rwkv_lerp`), the low-rank adapters as ordinary F32 GEMMs, `rwkv_act`, and the WKV recurrence with group norm, bonus and output gate (`rwkv7_wkv`, `rwkv6_wkv`); the WKV matrices and both token-shift vectors live in the per-sequence state buffer | head size 16/32/64/128 (CUDA, HIP, Vulkan with 15 storage buffers per stage) | other head sizes; `FLLM_RWKV_HOST=1` |
 
-The recurrent kernels run a whole prompt of one sequence in one launch per layer and run (the projections, adapters and norms are batched GEMMs over all rows), but
-the recurrence itself is serial over the tokens of the run inside that launch: there is no chunk-parallel scan or chunked WKV / delta-rule form yet, so prompt
-speed of these layers is bound by the length of the prompt times the per-token step of one head.
+**Chunk-parallel prompt processing of the recurrent layers.** The serial kernels (`deltanet.cu`, `kda.cu`, `rwkv.cu`, `mamba2.cu`; Vulkan `delta_rec_*`, `kda_rec_*`,
+`rwkv*_wkv_*`, `mamba_scan2_*`) run a whole prompt of one sequence in one launch per layer and run, but serially over its tokens: one dependent step per token and head. Runs of
+64 rows or more of Gated DeltaNet, Kimi Delta Attention, RWKV-7, RWKV-6 and Mamba-2 layers can instead go through a chunk-parallel scan (`cuda/scan.cu` and `scan_core.cuh` for
+CUDA and HIP, `shaders/vulkan/scan_*.comp` planned by `ops/scan.rs` for Vulkan); decode steps and shorter runs always use the serial kernels.
+
+* *The form.* All five layer types are one recurrence per head, `P_t = (diag(w_t) - b_t a_t^T) P_(t-1) + k_t v_t^T`, `o_t = P_t^T q_t + c_t v_t` (`P`: key width x value width;
+  `src/chunked_scan.rs` lists the mapping of every layer type). The chunked form cuts a run into chunks of 64 tokens. Everything that does not depend on the incoming state
+  is computed for all chunks at once: the cumulative decay, the 64 x 64 matrices of pairwise decayed products (per-channel decays are applied inside the products as
+  `exp(G_t - G_s)` with `t >= s`, so nothing overflows however strong the decay is), the triangular solve of the rank-one terms (the WY representation of the delta rule) and
+  the products with the keys and values, as small FP32 matrix products on shared-memory tiles (`scan_cum`, `scan_pairs`, `scan_tm`, `scan_wide`, `scan_pm`). Only the walk over
+  the chunks is serial (`scan_state`: two products with the state of a chunk, `O = O1 + Qe P`, `P = Mst P + Pc`). A per-architecture `*_prep` kernel brings the inputs of the run
+  into this layout and a `*_post` kernel applies the output norm and gate. `src/chunked_scan.rs` holds the f64 reference of the chunked form and the property tests that prove it
+  equal to the token-by-token recurrence (chunks of 16, 32 and 64, lengths with odd tails, with and without an initial state, outputs and final states, decays down to e^-40).
+* *Windows and memory.* A run is processed in windows (CUDA and HIP: up to 16 chunks, Vulkan: up to 8) whose scratch stays below 192 MiB (CUDA, HIP; one buffer per stream, grown
+  on demand and checked before a layer launches anything: without memory the layer uses the serial kernels) or 96 MiB (Vulkan; scratch id 3 of the operation). The state carries
+  over from window to window in the sequence's state buffer. Every Vulkan dispatch of a window is short (the largest, `scan_state`, took about 0.5 ms per window of 384 rows on the RTX 2000 Ada).
+* *Limits.* Key width 16, 32, 64 or 128 (Vulkan: multiples of 16 up to 128), value width up to 256 (Gated DeltaNet on CUDA and HIP: multiples of 32), up to 256 value heads
+  (Gated DeltaNet) and 512 heads (Mamba-2), Vulkan devices with at least 32 KiB of shared memory per workgroup. Other shapes keep the serial kernels. Mamba-1 has no scan form here.
+* *Switches.* `FLLM_CHUNKED_SCAN=0` keeps the serial kernels, `=1` (or `always`) takes the scan for every run of `FLLM_CHUNKED_SCAN_MIN` rows (default 64) and more, unset or `auto` (the
+  default) lets every device decide per layer shape: the chunked form does about twice the arithmetic of the serial one, and which of the two is faster depends on the layer and on
+  the device (see the table in [model-coverage.md](model-coverage.md)), so the first prompt calls of a layer shape are timed (a warm-up and a timed call of the serial kernels, a
+  warm-up and a timed call of the scan, on the rows of the prompt itself) and the scan is kept when it is at least 8 % faster. `FLLM_CHUNKED_SCAN_LOG=1` prints the decisions.
+  A CUDA graph capture and decode steps never use the scan.
+* *Verification.* `selftest-gpu --only delta,kda,rwkv,arch` (the self test forces the scan) runs prompts of 64 to 150 rows next to short runs against the CPU references (largest
+  difference 2e-5 against a tolerance of 2e-3); tiny fixtures of the five layer types give the CPU's text on `cuda:0`, `hip:0`, `vulkan:1` and `vulkan` with the scan forced from 2 rows on.
 
 Hyper-connections (Hy4; `Stream::hc_mix`, `Stream::hc_combine`): the `hc` residual streams live in a buffer of their own (`rows x hc x hidden`); before each
 mixer and each feed-forward block `hc_mix` normalises them, turns the mixes into `pre`/`post` (and the Sinkhorn mixing matrix) and writes the collapsed block input

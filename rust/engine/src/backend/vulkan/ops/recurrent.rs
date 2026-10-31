@@ -152,7 +152,7 @@ pub fn plan_delta_layer_scan(
             conv_slots,
         )?);
 
-        if super::scan::wanted(scan, run.rows, hk, hv, vh) {
+        if vh <= 256 && super::scan::wanted(scan, run.rows, hk, hv, vh) {
             plans.extend(super::scan::plan_scan_delta_run(shape, i, run, state_offset, mixed_bytes)?);
             continue;
         }
@@ -795,7 +795,7 @@ pub fn plan_mamba2_mixer_scan(
             true,
             scratch,
         )?);
-        if super::scan::wanted(scan, run.rows, shape.state, shape.head_dim(), shape.heads) {
+        if shape.heads <= 512 && super::scan::wanted(scan, run.rows, shape.state, shape.head_dim(), shape.heads) {
             let mixed = (1u8, rows * shape.conv_dim() * 4);
             plans.extend(super::scan::plan_scan_mamba2_run(shape, i, run, width, shape.inner + shape.conv_dim(), rec_off, mixed)?);
             continue;

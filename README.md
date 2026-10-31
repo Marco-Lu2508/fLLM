@@ -123,7 +123,8 @@ Nemotron-H, Granite hybrid, LFM2, Kimi-Linear, RWKV-6 and RWKV-7 on the CPU). Ad
 packed Hugging Face checkpoints), DeepSeek-V3.2 and GLM-5 (the lightning indexer and the sparse attention run on the device), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear; the per-head attention gate (Laguna, Step-3.5), the MiMo value scale and the BitNet sub-norms run on CUDA, HIP (not MiMo) and Vulkan devices. BERT, RoBERTa/XLM-R and ModernBERT serve
 embeddings and rerank/classify (also BGE-M3, ColBERT, Qwen3-Embedding, EmbeddingGemma).
 The recurrent and linear-attention layers (RWKV-6/7, Kimi Delta Attention of Kimi-Linear and Ling-3.0, gated DeltaNet, Mamba 1/2, LFM2 ShortConv) run on CUDA, HIP and Vulkan devices with their state kept in device memory;
-Zamba2 and Falcon-H1 included; the recurrences are serial over the tokens of a prompt (no chunk-parallel form yet), see [docs/gpu-backends.md](docs/gpu-backends.md) section 3a.
+Zamba2 and Falcon-H1 included. Prompts of 64 tokens and more can go through a chunk-parallel form of the recurrences (RWKV-7/6, Gated DeltaNet, Kimi Delta Attention, Mamba-2; the device times it
+against the serial kernels and keeps the faster one, `FLLM_CHUNKED_SCAN=0|1`), see [docs/gpu-backends.md](docs/gpu-backends.md) section 3a.
 The full list, with the families that are **not** supported (for example DeepSeek V4, Kimi K3, Ling-3.0, xLSTM), is in
 The full list, with the families that are **not** supported (for example Kimi K3, Ling-3.0, RWKV), is in
 The full list, with the families that are **not** supported (for example Kimi K3, RWKV), is in

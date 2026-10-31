@@ -206,7 +206,7 @@ pub fn scan_floats(hk: usize, hv: usize, heads: usize, flags: usize, slots: usiz
 
 /// Can the shaders take heads of this size on a device with `max_shared` bytes of shared memory per workgroup?
 pub fn scan_usable(hk: usize, hv: usize, heads: usize, max_shared: u32) -> bool {
-    (16..=128).contains(&hk) && hk.is_multiple_of(16) && (1..=256).contains(&hv) && heads > 0 && max_shared >= SCAN_SHARED_BYTES
+    (16..=128).contains(&hk) && hk.is_multiple_of(16) && (1..=256).contains(&hv) && (1..=4096).contains(&heads) && max_shared >= SCAN_SHARED_BYTES
 }
 
 /// Rows of one window of a run for these head sizes.

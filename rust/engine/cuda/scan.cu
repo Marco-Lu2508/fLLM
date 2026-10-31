@@ -6,8 +6,8 @@
 // a run of tokens into steps of 64 tokens. The serial kernels of deltanet.cu / kda.cu / rwkv.cu / mamba2.cu walk the tokens one by one, so a
 // prompt costs one dependent chain of `n` steps per layer; here only the chain of `n / 64` state updates is serial.
 //
-// Per layer: a small per-architecture kernel brings the inputs of the run into the canonical layout (scan_*_prep), five generic kernels do
-// the chunk algebra (scan_cum, scan_pairs, scan_solve, scan_out, scan_state), a small per-architecture kernel applies the output norm / gate
+// Per layer: a small per-architecture kernel brings the inputs of the run into the canonical layout (scan_*_prep), six generic kernels do
+// the chunk algebra (scan_cum, scan_pairs, scan_tm, scan_wide, scan_pm, scan_state; scan_core.cuh), a small per-architecture kernel applies the output norm / gate
 // (scan_*_post). Everything is FP32 CUDA-core code with static shared memory, no warp primitives: it runs on Turing and on the HIP targets.
 //
 // Layout. Rows of a run sit in the scratch at `lr = run.pad * 64 + t` (`run.pad` = the run's first chunk slot); the arrays are

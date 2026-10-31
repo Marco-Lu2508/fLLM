@@ -134,6 +134,10 @@ impl VulkanStream {
         use crate::backend::vulkan::ops::scan;
         let shared = self.scan_shared();
         let long: usize = rows.filter(|&r| scan::wanted(shared, r, shape[0], shape[1], shape[2])).sum();
+        if long == 0 {
+            // decode steps and short runs: nothing to decide, and no key to build for every layer of every token
+            return (None, scan::ScanPick::never());
+        }
         let key = format!("{kind}/{}/{}/{}/{}", self.sh.device_id, shape[0], shape[1], shape[2]);
         let pick = scan::pick(key, long);
         (pick.chunked.then_some(shared).flatten(), pick)
