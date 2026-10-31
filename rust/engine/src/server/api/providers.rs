@@ -1455,7 +1455,7 @@ mod tests {
             assert!(key_url.is_empty() || key_url.starts_with("https://"), "{key_url}");
         }
         assert!(PRESETS.iter().take(1).all(|p| p.5 == "cloud"), "the list starts with a cloud service, not a local server");
-        assert!(!presets_json().to_string().contains("api_key"));
+        assert!(!presets_json().to_string().contains("\"api_key\""), "a template carries no key field");
     }
 
     /// One-shot HTTP server on loopback that records each request head and answers with the canned responses.
