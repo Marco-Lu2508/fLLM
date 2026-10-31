@@ -875,18 +875,10 @@ pub(in crate::server) async fn create_key(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Response {
-    let raw_key = match body
-        .get("key")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-    {
-        Some(key) => key,
-        None => match generate_random_api_key() {
-            Ok(key) => key,
-            Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
-        },
+    // The server makes the secret (192 random bits) and shows it once; a `key` in the request is ignored, nobody has to invent one.
+    let raw_key = match generate_random_api_key() {
+        Ok(key) => key,
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
     };
     let label = body
         .get("label")

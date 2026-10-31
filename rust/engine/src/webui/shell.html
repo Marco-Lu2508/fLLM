@@ -1069,25 +1069,24 @@
                 <div class="app-card-header">
                   <div>
                     <h2 style="font-size:15px;font-weight:600;color:var(--foreground);">API keys</h2>
-                    <p class="app-item-desc">With at least one key, apps must send a key to use the server. Create a key for each app and revoke it when you no longer need it.</p>
+                    <p class="app-item-desc">fLLM makes the key for you; you never type one. Make one key per app, copy it into that app, and revoke it when you stop using it. As soon as one key exists, every app must send a key.</p>
                   </div>
                 </div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
-                  <input type="text" id="inpKeyLabel" class="ui-input" style="flex:1;min-width:140px;" placeholder="Key label (e.g. Cursor IDE, Claude Code)">
-                  <input type="text" id="inpKeyCustom" class="ui-input mono" style="flex:1;min-width:150px;" placeholder="Your own key (leave empty to make one)">
-                  <input type="number" id="inpKeyRpm" class="ui-input mono" style="width:95px;" placeholder="RPM">
-                  <input type="number" id="inpKeyTpm" class="ui-input mono" style="width:95px;" placeholder="TPM">
-                  <label class="app-item-desc" style="display:flex;gap:6px;align-items:center;" title="An admin key may also use the administration routes (drain, empty the cache, settings) and make or remove keys from another computer."><input type="checkbox" id="chkKeyAdmin"> Admin</label>
+                  <input type="text" id="inpKeyLabel" class="ui-input" style="flex:1;min-width:140px;" placeholder="Name, for example Cursor or Claude Code" aria-label="Name of the key">
+                  <input type="number" id="inpKeyRpm" class="ui-input mono" style="width:130px;" placeholder="Requests/min" aria-label="Requests per minute (optional)" title="Optional: most requests per minute for this key">
+                  <input type="number" id="inpKeyTpm" class="ui-input mono" style="width:130px;" placeholder="Tokens/min" aria-label="Tokens per minute (optional)" title="Optional: most tokens per minute for this key">
+                  <label class="app-item-desc" style="display:flex;gap:6px;align-items:center;" title="An admin key may also use the administration routes (drain, empty the cache, settings) and make or remove keys from another computer."><input type="checkbox" id="chkKeyAdmin"> Admin rights</label>
                   <button class="btn btn-primary" id="btnCreateKey">Create key</button>
                 </div>
 
                 <div id="newKeyBanner" style="display:none;padding:10px 12px;border-radius:8px;border:1px solid var(--primary);background:color-mix(in srgb, var(--primary) 12%, transparent);margin-bottom:12px;align-items:center;justify-content:space-between;gap:10px;">
                   <div>
-                    <div style="font-size:11.5px;font-weight:600;color:var(--primary);">New key created. Copy it now; it is only shown once:</div>
+                    <div style="font-size:11.5px;font-weight:600;color:var(--primary);">Your new key. Copy it now; it is shown only once and cannot be looked up later:</div>
                     <code class="mono" style="font-size:13px;" id="newKeySecretText"></code>
                   </div>
-                  <button class="btn btn-sm btn-secondary" id="btnCopyNewKey">Copy Key</button>
+                  <button class="btn btn-sm btn-secondary" id="btnCopyNewKey">Copy key</button>
                 </div>
 
                 <div id="apiKeysTableContainer"></div>

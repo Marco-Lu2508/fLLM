@@ -70,6 +70,8 @@ pub struct HttpOptions {
     pub config_path: Option<PathBuf>,
     /// Server-level settings parsed from `fllm.toml` (`model`, `host`, `port`, `ctx`, `device`, etc.).
     pub server_overrides: BTreeMap<String, String>,
+    /// Where the keys made on the Studio page are kept (hashed), so they survive a restart; `None`: they live in memory only.
+    pub key_store: Option<PathBuf>,
 }
 
 impl Default for HttpOptions {
@@ -100,6 +102,7 @@ impl Default for HttpOptions {
             model_memory_budget_bytes: None,
             config_path: None,
             server_overrides: BTreeMap::new(),
+            key_store: None,
         }
     }
 }
@@ -560,6 +563,10 @@ impl HttpOptions {
 
     /// Keys from `FLLM_API_KEY` (comma separated) and config from `FLLM_CONFIG` when no flag supplied any.
     pub fn apply_environment(&mut self) {
+        // keys made on the Studio page are kept next to its settings; FLLM_KEY_STORE=off keeps them in memory only
+        if self.key_store.is_none() && std::env::var("FLLM_KEY_STORE").map_or(true, |v| !v.eq_ignore_ascii_case("off")) {
+            self.key_store = Some(crate::hub::studio_data_file("api-keys.json"));
+        }
         if self.config_path.is_none() {
             if let Ok(path) = std::env::var("FLLM_CONFIG") {
                 let path = path.trim();

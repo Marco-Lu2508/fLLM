@@ -2010,11 +2010,17 @@ async fn studio_control_plane_manages_config_hardware_models_and_keys() {
     let created = h
         .post(
             "/api/studio/keys",
+            // a `key` in the request is ignored: the server makes the secret
             json!({"label": "Cursor IDE", "key": "fllm-sk-test123456", "rpm": 120.0}),
         )
         .await;
     assert_eq!(created.status, StatusCode::OK);
     assert_eq!(created.json()["auth_required"], true);
+    let secret = created.json()["secret"].as_str().unwrap().to_owned();
+    assert!(secret.starts_with("fllm-sk-") && secret.len() >= 40 && secret != "fllm-sk-test123456", "{secret}");
+    let second = h.post("/api/studio/keys", json!({"label": "Other"})).await;
+    assert_ne!(second.json()["secret"].as_str().unwrap(), secret, "every key is new");
+    let second_id = second.json()["key"]["id"].as_str().unwrap().to_owned();
 
     // Unauthenticated call to /v1/models is now rejected with 401
     assert_eq!(h.get("/v1/models").await.status, StatusCode::UNAUTHORIZED);
@@ -2024,22 +2030,28 @@ async fn studio_control_plane_manages_config_hardware_models_and_keys() {
             Method::GET,
             "/v1/models",
             None,
-            &[("authorization", "Bearer fllm-sk-test123456")],
+            &[("authorization", format!("Bearer {secret}").as_str())],
         )
         .await;
     assert_eq!(authed.status, StatusCode::OK);
+    // the key that was typed in the request does not exist
+    let guessed = h.call(Method::GET, "/v1/models", None, &[("authorization", "Bearer fllm-sk-test123456")]).await;
+    assert_eq!(guessed.status, StatusCode::UNAUTHORIZED);
+    // the list shows only a masked form of the secret
+    let listed = h.call(Method::GET, "/api/studio/keys", None, &[("authorization", format!("Bearer {secret}").as_str())]).await;
+    assert!(!listed.text().contains(&secret) && listed.text().contains("fllm-s"), "{}", listed.text());
 
     // Revoke the key: server returns to open access
     let key_id = created.json()["key"]["id"].as_str().unwrap().to_owned();
     let revoked = h
-        .call(
-            Method::DELETE,
-            &format!("/api/studio/keys/{key_id}"),
-            None,
-            &[("authorization", "Bearer fllm-sk-test123456")],
-        )
+        .call(Method::DELETE, &format!("/api/studio/keys/{key_id}"), None, &[("authorization", format!("Bearer {secret}").as_str())])
         .await;
     assert_eq!(revoked.status, StatusCode::OK);
+    assert_eq!(revoked.json()["auth_required"], true, "the second key is still there");
+    let second_secret = second.json()["secret"].as_str().unwrap().to_owned();
+    let revoked = h
+        .call(Method::DELETE, &format!("/api/studio/keys/{second_id}"), None, &[("authorization", format!("Bearer {second_secret}").as_str())])
+        .await;
     assert_eq!(revoked.json()["auth_required"], false);
     assert_eq!(h.get("/v1/models").await.status, StatusCode::OK);
 }

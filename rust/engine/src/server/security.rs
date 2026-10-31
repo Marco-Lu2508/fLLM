@@ -107,6 +107,43 @@ fn mask_secret(raw: &str) -> String {
     }
 }
 
+struct StoredKey {
+    digest: [u8; 32],
+    label: String,
+    masked: String,
+    admin: bool,
+    created_at: u64,
+    rpm: Option<f64>,
+    tpm: Option<f64>,
+}
+
+/// The keys of the key store; a missing or damaged file gives none.
+fn read_store(path: &std::path::Path) -> Vec<StoredKey> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return Vec::new() };
+    rows.iter()
+        .filter_map(|row| {
+            let hex = row["digest"].as_str()?;
+            if hex.len() != 64 {
+                return None;
+            }
+            let mut digest = [0u8; 32];
+            for (i, byte) in digest.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+            }
+            Some(StoredKey {
+                digest,
+                label: row["label"].as_str().unwrap_or("Studio Key").to_owned(),
+                masked: row["masked"].as_str().unwrap_or("").to_owned(),
+                admin: row["admin"].as_bool().unwrap_or(false),
+                created_at: row["created_at"].as_u64().unwrap_or(0),
+                rpm: row["rpm"].as_f64(),
+                tpm: row["tpm"].as_f64(),
+            })
+        })
+        .collect()
+}
+
 fn unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -122,6 +159,8 @@ pub struct KeyState {
     /// the operator's and have it; keys made on the Studio page have it only when asked for.
     pub admin: bool,
     pub created_at: u64,
+    /// Made on the Studio page (kept in the key store), not given on the command line.
+    pub runtime: bool,
     pub rpm_limit: Option<f64>,
     pub tpm_limit: Option<f64>,
     requests: Option<Bucket>,
@@ -143,6 +182,7 @@ impl KeyState {
             masked,
             admin,
             created_at: unix_secs(),
+            runtime: false,
             rpm_limit: spec.requests_per_minute,
             tpm_limit: spec.tokens_per_minute,
             requests: spec.requests_per_minute.map(Bucket::new),
@@ -214,6 +254,8 @@ pub struct Security {
     public: Vec<String>,
     default_rate_limit: Mutex<RateLimitSpec>,
     next_id: AtomicU64,
+    /// File that holds the keys made at run time (hashed, never the secret).
+    store: Option<std::path::PathBuf>,
 }
 
 fn presented_key(headers: &HeaderMap) -> Option<&str> {
@@ -250,13 +292,55 @@ impl Security {
                 ));
             }
         }
-        let count = keys.len() as u64 + 1;
+        let mut next = keys.len() as u64 + 1;
+        // keys made on the Studio page in an earlier run
+        if let Some(path) = &options.key_store {
+            for stored in read_store(path) {
+                if keys.iter().any(|(known, _)| ct_eq(known, &stored.digest)) {
+                    continue;
+                }
+                let mut state = KeyState::with_meta(format!("key-{next}"), stored.label, stored.masked, &RateLimitSpec { requests_per_minute: stored.rpm, tokens_per_minute: stored.tpm }, stored.admin);
+                state.runtime = true;
+                state.created_at = stored.created_at;
+                keys.push((stored.digest, Arc::new(state)));
+                next += 1;
+            }
+        }
         Self {
             keys: Mutex::new(keys),
             open: Mutex::new(Arc::new(KeyState::new("anonymous".into(), &options.rate_limit))),
             public: options.public_routes.clone(),
             default_rate_limit: Mutex::new(options.rate_limit),
-            next_id: AtomicU64::new(count),
+            next_id: AtomicU64::new(next),
+            store: options.key_store.clone(),
+        }
+    }
+
+    /// Writes the keys made at run time (digest, label, limits; never the secret) to the key store.
+    fn save(&self, keys: &[([u8; 32], Arc<KeyState>)]) {
+        let Some(path) = &self.store else { return };
+        let rows: Vec<serde_json::Value> = keys
+            .iter()
+            .filter(|(_, s)| s.runtime)
+            .map(|(d, s)| {
+                serde_json::json!({
+                    "digest": d.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    "label": s.label, "masked": s.masked, "admin": s.admin, "created_at": s.created_at,
+                    "rpm": s.rpm_limit, "tpm": s.tpm_limit,
+                })
+            })
+            .collect();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let temp = path.with_extension("json.tmp");
+        if std::fs::write(&temp, serde_json::Value::Array(rows).to_string()).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::rename(&temp, path);
         }
     }
 
@@ -330,13 +414,9 @@ impl Security {
         } else {
             label.trim().to_owned()
         };
-        let state = Arc::new(KeyState::with_meta(
-            id.clone(),
-            clean_label.clone(),
-            mask_secret(raw_key),
-            &spec,
-            admin,
-        ));
+        let mut made = KeyState::with_meta(id.clone(), clean_label.clone(), mask_secret(raw_key), &spec, admin);
+        made.runtime = true;
+        let state = Arc::new(made);
         let info = serde_json::json!({
             "id": state.id,
             "label": state.label,
@@ -350,6 +430,7 @@ impl Security {
             "rejected": 0,
         });
         guard.push((d, state));
+        self.save(&guard);
         Ok(info)
     }
 
@@ -357,7 +438,11 @@ impl Security {
         let mut guard = lock(&self.keys);
         let before = guard.len();
         guard.retain(|(_, state)| state.id != id_or_label && state.label != id_or_label);
-        guard.len() < before
+        let removed = guard.len() < before;
+        if removed {
+            self.save(&guard);
+        }
+        removed
     }
 
     fn is_public(&self, method: &Method, path: &str) -> bool {
@@ -439,6 +524,34 @@ mod tests {
             map.insert(*name, HeaderValue::from_str(value).unwrap());
         }
         map
+    }
+
+    #[test]
+    fn keys_made_at_run_time_survive_a_restart_as_digests_only() {
+        let dir = std::env::temp_dir().join(format!("fllm-keystore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = dir.join("api-keys.json");
+        let options = HttpOptions { key_store: Some(store.clone()), api_keys: vec!["from-the-command-line".into()], ..Default::default() };
+        let first = Security::new(&options);
+        let info = first.add_key("fllm-sk-secret-value-0123456789", "Cursor", Some(60.0), None, false).unwrap();
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert!(!text.contains("secret-value"), "the secret itself is never written: {text}");
+        assert!(!text.contains("from-the-command-line"), "keys of the command line are not stored");
+        let id = info["id"].as_str().unwrap().to_owned();
+        // a new process: the key works, with its label and limit, and the command line key is still there
+        let second = Security::new(&options);
+        let auth = |s: &Security, key: &str| matches!(s.check(&Method::POST, "/v1/models", &headers(&[("authorization", &format!("Bearer {key}"))])), Verdict::Allowed(_));
+        assert!(auth(&second, "fllm-sk-secret-value-0123456789") && auth(&second, "from-the-command-line") && !auth(&second, "fllm-sk-secret-value-0123456780"));
+        let listed = second.list_keys();
+        let mine = listed.iter().find(|k| k["label"] == "Cursor").unwrap();
+        assert_eq!(mine["rpm_limit"], 60.0);
+        assert_eq!(mine["masked"], "fllm-s••••6789");
+        // revoking removes it from the store as well
+        let revoke = mine["id"].as_str().unwrap().to_owned();
+        assert!(second.remove_key(&revoke));
+        assert!(!auth(&Security::new(&options), "fllm-sk-secret-value-0123456789"));
+        let _ = id;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

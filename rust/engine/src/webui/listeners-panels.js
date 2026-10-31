@@ -35,11 +35,10 @@
 
     // Local API Server & Keys events
     $('btnCreateKey').addEventListener('click', async () => {
-      const label = $('inpKeyLabel').value.trim() || 'Studio Key';
-      const key = $('inpKeyCustom').value.trim();
+      const label = $('inpKeyLabel').value.trim() || 'My key';
       const rpm = parseFloat($('inpKeyRpm').value) || null;
       const tpm = parseFloat($('inpKeyTpm').value) || null;
-      const res = await apiFetch('/api/studio/keys', { method: 'POST', body: { label, key, rpm, tpm, admin: $('chkKeyAdmin').checked } });
+      const res = await apiFetch('/api/studio/keys', { method: 'POST', body: { label, rpm, tpm, admin: $('chkKeyAdmin').checked } });
       const data = await res.json();
       if (!res.ok) { toast(data.error?.message || 'The key could not be created'); return; }
       state.apiKey = data.secret;
@@ -47,15 +46,15 @@
       $('newKeySecretText').textContent = data.secret;
       $('newKeyBanner').style.display = 'flex';
       $('inpKeyLabel').value = '';
-      $('inpKeyCustom').value = '';
+      $('inpKeyRpm').value = '';
+      $('inpKeyTpm').value = '';
       $('chkKeyAdmin').checked = false;
       refreshApiKeys();
       updateCliAndSdkSnippets();
       toast(`API key "${data.key.label}" created`);
     });
     $('btnCopyNewKey').addEventListener('click', async () => {
-      await navigator.clipboard.writeText($('newKeySecretText').textContent);
-      toast('API key copied');
+      try { await navigator.clipboard.writeText($('newKeySecretText').textContent); toast('API key copied'); } catch { toast('The browser did not allow copying. Select the key and copy it by hand.'); }
     });
     $('apiKeysTableContainer').addEventListener('click', async (e) => {
       const rev = e.target.closest('[data-revoke-key]');
