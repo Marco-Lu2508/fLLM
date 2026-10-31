@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_kda_post | bindings: gate,norm,scratch,out | push: heads,hd,row0,n,slots,eps | grid: [heads, n, 1] per run window
+// Kimi Delta Attention, chunk-parallel scan (port of scan_kda_post_kernel in cuda/scan.cu): out[row0 + t][h * hd + c] = o / sqrt(mean_c(o^2) + eps) * norm[c] *
+// sigmoid(gate[row0 + t][h * hd + c]); one workgroup (hd <= 128 invocations) per head of a token.
+#define WG 128
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer GateBuf { float gate[]; };
+layout(std430, binding = 1) readonly buffer NormBuf { float norm_w[]; };
+layout(std430, binding = 2) buffer ScratchBuf { float sc[]; };
+layout(std430, binding = 3) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint heads;
+    uint hd;
+    uint row0;
+    uint n;
+    uint slots;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint h = gl_WorkGroupID.x;
+    const uint t = gl_WorkGroupID.y;
+    if (t >= p.n) return;
+    const uint c = gl_LocalInvocationID.x;
+    const ScanLay y = scan_layout(p.hd, p.hd, p.heads, SF_RANK1 | SF_BSAME | SF_LWV, p.slots);
+    const uint key_dim = p.heads * p.hd;
+    const bool live = c < p.hd;
+    const float acc = live ? sc[y.o + t * key_dim + h * p.hd + c] : 0.0;
+    const float ss = wg_sum(acc * acc);
+    const float inv = 1.0 / sqrt(ss / float(p.hd) + p.eps);
+    const uint row = p.row0 + t;
+    if (live) outv[row * key_dim + h * p.hd + c] = acc * inv * norm_w[c] * sigmoid1(gate[row * key_dim + h * p.hd + c]);
+}

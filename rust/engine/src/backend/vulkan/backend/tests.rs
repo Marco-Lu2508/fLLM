@@ -718,6 +718,14 @@ fn no_shader_is_orphaned() {
     for width in [16, 32, 64, 128] {
         seen.extend([format!("kda_rec_hk{width}"), format!("rwkv6_wkv_n{width}"), format!("rwkv7_wkv_n{width}")]);
     }
+    // the chunk-parallel scan of the recurrent layers (`ops/scan.rs`), planned by the stream for runs of 64 rows and more
+    seen.extend(
+        [
+            "scan_cum", "scan_pairs", "scan_solve", "scan_out", "scan_state", "scan_delta_prep", "scan_delta_post", "scan_kda_prep", "scan_kda_post",
+            "scan_rwkv7_prep", "scan_rwkv7_post", "scan_rwkv6_prep", "scan_rwkv6_post", "scan_mamba2_prep", "scan_copy_out",
+        ]
+        .map(str::to_owned),
+    );
     let registry: BTreeSet<String> = shaders::SHADERS.iter().map(|(n, _)| (*n).to_owned()).collect();
     let orphans: Vec<&String> = registry.iter().filter(|n| !seen.contains(*n)).collect();
     // the buffer-address variants need bufferDeviceAddress, which the core does not enable; scaffold_fill is the scaffold's test shader

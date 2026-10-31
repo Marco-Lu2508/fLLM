@@ -1,0 +1,160 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_pairs | bindings: scratch | push: hk,hv,heads,flags,n,reset,slots | grid: [ceil(n/64), heads, 1] per run window
+// Chunk-parallel scan (see _scan_common.glsl), step 2 (port of scan_pairs_kernel in cuda/scan.cu): the four 64 x 64 matrices of pairwise decayed products of
+// every (chunk, head), see rust/engine/src/chunked_scan.rs:
+//   Bm[t][s] = sum_i a[t][i] b[s][i]  exp(Gp[t][i] - G[s][i])   s < t          Xi: the same with kp instead of b
+//   Qk[t][s] = sum_i q[t][i] kp[s][i] exp(Gq[t][i] - G[s][i])   s <= t (s < t for the early readout)          Qb: the same with b
+// Invocation (ty, tx) of 16 x 16 owns the 4 x 4 pairs t = ty + 16 x, s = tx + 16 y; the key channels come in tiles of 16 through shared memory.
+#define WG 256
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hk;
+    uint hv;
+    uint heads;
+    uint flags;
+    uint n;
+    uint reset;
+    uint slots;
+} p;
+
+const uint TS = 17u;  // row stride of a tile (16 channels + 1)
+shared float sq[64 * 17];
+shared float sk[64 * 17];
+shared float sa[64 * 17];
+shared float sb[64 * 17];
+shared float sg[64 * 17];
+shared float sgp[64 * 17];
+shared float gs[64];
+shared float gps[64];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint tx = tid & 15u;
+    const uint ty = tid >> 4u;
+    const uint ch = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint t0 = ch * SC;
+    if (t0 >= p.n) return;
+    const uint L = min(SC, p.n - t0);
+    const ScanLay y = scan_layout(p.hk, p.hv, p.heads, p.flags, p.slots);
+    const uint hk = p.hk;
+    const bool lv = (p.flags & SF_LWV) != 0u;
+    const bool r1 = (p.flags & SF_RANK1) != 0u;
+    const bool bs = (p.flags & SF_BSAME) != 0u;
+    const bool qp = (p.flags & SF_QPREV) != 0u;
+    const uint w = y.ws + (ch * p.heads + h) * y.chunk;
+    const uint lww = lv ? hk : 1u;
+    const uint lws = p.heads * lww;
+    const uint lw0 = y.lw + (t0 * p.heads + h) * lww;
+    const uint rs = p.heads * hk;
+    const uint q0 = y.q + (t0 * p.heads + h) * hk;
+    const uint k0 = y.kp + (t0 * p.heads + h) * hk;
+    const uint a0 = y.a + (t0 * p.heads + h) * hk;
+    const uint b0 = y.b + (t0 * p.heads + h) * hk;
+    if (!lv) {
+        for (uint r = tid; r < SC; r += WG) {
+            const float g = r < L ? sc[w + y.o_g + r] : 0.0;
+            gs[r] = g;
+            gps[r] = r < L ? g - sc[lw0 + r * lws] : 0.0;
+        }
+    }
+    float aq[16];
+    float ab[16];
+    float ax[16];
+    float aqb[16];
+    [[unroll]] for (uint e = 0u; e < 16u; e++) {
+        aq[e] = 0.0;
+        ab[e] = 0.0;
+        ax[e] = 0.0;
+        aqb[e] = 0.0;
+    }
+    for (uint i0 = 0u; i0 < hk; i0 += 16u) {
+        wg_sync();
+        for (uint e = tid; e < SC * 16u; e += WG) {
+            const uint r = e >> 4u;
+            const uint ci = e & 15u;
+            const bool ok = r < L;
+            sq[r * TS + ci] = ok ? sc[q0 + r * rs + i0 + ci] : 0.0;
+            sk[r * TS + ci] = ok ? sc[k0 + r * rs + i0 + ci] : 0.0;
+            if (r1) {
+                sa[r * TS + ci] = ok ? sc[a0 + r * rs + i0 + ci] : 0.0;
+                sb[r * TS + ci] = bs ? sk[r * TS + ci] : (ok ? sc[b0 + r * rs + i0 + ci] : 0.0);
+            }
+            if (lv) {
+                const float g = ok ? sc[w + y.o_g + r * hk + i0 + ci] : 0.0;
+                sg[r * TS + ci] = g;
+                sgp[r * TS + ci] = (ok && (r1 || qp)) ? g - sc[lw0 + r * lws + i0 + ci] : 0.0;
+            }
+        }
+        wg_sync();
+        for (uint ci = 0u; ci < 16u; ci++) {
+            float qt[4];
+            float at[4];
+            float gt[4];
+            float gpt[4];
+            float ku[4];
+            float bu[4];
+            float gu[4];
+            [[unroll]] for (uint x = 0u; x < 4u; x++) {
+                const uint t = ty + 16u * x;
+                qt[x] = sq[t * TS + ci];
+                at[x] = r1 ? sa[t * TS + ci] : 0.0;
+                gt[x] = lv ? sg[t * TS + ci] : 0.0;
+                gpt[x] = lv ? sgp[t * TS + ci] : 0.0;
+                const uint u = tx + 16u * x;
+                ku[x] = sk[u * TS + ci];
+                bu[x] = r1 ? sb[u * TS + ci] : 0.0;
+                gu[x] = lv ? sg[u * TS + ci] : 0.0;
+            }
+            [[unroll]] for (uint x = 0u; x < 4u; x++) {
+                [[unroll]] for (uint z = 0u; z < 4u; z++) {
+                    const uint e = x * 4u + z;
+                    if (lv) {
+                        const float e2 = exp((qp ? gpt[x] : gt[x]) - gu[z]);
+                        aq[e] += qt[x] * ku[z] * e2;
+                        if (r1) {
+                            if (!bs) aqb[e] += qt[x] * bu[z] * e2;
+                            const float e1 = exp(gpt[x] - gu[z]);
+                            ab[e] += at[x] * bu[z] * e1;
+                            if (!bs) ax[e] += at[x] * ku[z] * e1;
+                        }
+                    } else {
+                        aq[e] += qt[x] * ku[z];
+                        if (r1) {
+                            ab[e] += at[x] * bu[z];
+                            if (!bs) {
+                                aqb[e] += qt[x] * bu[z];
+                                ax[e] += at[x] * ku[z];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    [[unroll]] for (uint x = 0u; x < 4u; x++) {
+        [[unroll]] for (uint z = 0u; z < 4u; z++) {
+            const uint e = x * 4u + z;
+            const uint t = ty + 16u * x;
+            const uint u = tx + 16u * z;
+            const bool live = t < L;
+            float sc1 = 1.0;
+            float sc2 = 1.0;
+            if (!lv && live && u <= t) {
+                sc2 = exp((qp ? gps[t] : gs[t]) - gs[u]);
+                sc1 = exp(gps[t] - gs[u]);
+            }
+            sc[w + y.o_qk + t * SC + u] = (live && (qp ? u < t : u <= t)) ? aq[e] * sc2 : 0.0;
+            if (r1) {
+                sc[w + y.o_bm + t * SC + u] = (live && u < t) ? ab[e] * sc1 : 0.0;
+                sc[w + y.o_xi + t * SC + u] = (live && u < t) ? (bs ? ab[e] : ax[e]) * sc1 : 0.0;
+                sc[w + y.o_qb + t * SC + u] = (live && u <= t) ? (bs ? aq[e] : aqb[e]) * sc2 : 0.0;
+            }
+        }
+    }
+}

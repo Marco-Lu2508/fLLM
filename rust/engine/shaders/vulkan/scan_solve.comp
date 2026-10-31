@@ -1,0 +1,59 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_solve | bindings: scratch | push: hk,hv,heads,flags,n,reset,slots | grid: [ceil(n/64), heads * ceil((hv + hk)/64), 1] per run window
+// Chunk-parallel scan (see _scan_common.glsl), step 3 (port of scan_solve_kernel in cuda/scan.cu), only with rank-one terms (SF_RANK1): per (chunk, head) and
+// column the forward substitution of Y = (I + Bm)^-1 [Xi V | a exp(Gp)]; the columns below hv give R0 (workspace part o_r0), the others Wr (o_wr). One
+// invocation per column (64 per workgroup), the 64 tokens in order; an invocation reads back only what it wrote itself.
+#define WG 64
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hk;
+    uint hv;
+    uint heads;
+    uint flags;
+    uint n;
+    uint reset;
+    uint slots;
+} p;
+
+void main() {
+    const uint ch = gl_WorkGroupID.x;
+    const uint t0 = ch * SC;
+    if (t0 >= p.n) return;
+    const uint colblocks = (p.hv + p.hk + 63u) / 64u;
+    const uint h = gl_WorkGroupID.y / colblocks;
+    const uint col = (gl_WorkGroupID.y % colblocks) * 64u + gl_LocalInvocationID.x;
+    if (col >= p.hv + p.hk) return;
+    const uint L = min(SC, p.n - t0);
+    const ScanLay y = scan_layout(p.hk, p.hv, p.heads, p.flags, p.slots);
+    const uint hk = p.hk;
+    const uint hv = p.hv;
+    const bool lwv = (p.flags & SF_LWV) != 0u;
+    const uint w = y.ws + (ch * p.heads + h) * y.chunk;
+    const uint lww = lwv ? hk : 1u;
+    const uint lws = p.heads * lww;
+    const uint lw0 = y.lw + (t0 * p.heads + h) * lww;
+    const bool is_v = col < hv;
+    const uint j = is_v ? col : col - hv;
+    const uint yb = w + (is_v ? y.o_r0 : y.o_wr) + j;
+    const uint yw = is_v ? hv : hk;
+    const uint vb = y.v + (t0 * p.heads + h) * hv + j;
+    const uint vs = p.heads * hv;
+    const uint ab = y.a + (t0 * p.heads + h) * hk + j;
+    const uint as_ = p.heads * hk;
+    for (uint t = 0u; t < L; t++) {
+        float x = 0.0;
+        if (is_v) {
+            for (uint u = 0u; u < t; u++) x += sc[w + y.o_xi + t * SC + u] * sc[vb + u * vs];
+        } else {
+            const float gp = lwv ? sc[w + y.o_g + t * hk + j] - sc[lw0 + t * lws + j] : sc[w + y.o_g + t] - sc[lw0 + t * lws];
+            x = sc[ab + t * as_] * exp(gp);
+        }
+        for (uint u = 0u; u < t; u++) x -= sc[w + y.o_bm + t * SC + u] * sc[yb + u * yw];
+        sc[yb + t * yw] = x;
+    }
+}

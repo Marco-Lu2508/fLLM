@@ -1,0 +1,28 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_copy_out | bindings: scratch,out | push: ns,head_dim,heads,inner,row0,n,slots | grid: [n, 1, 1] per run window
+// Mamba-2, chunk-parallel scan (port of scan_copy_out_kernel in cuda/scan.cu): out[row0 + t][0 .. inner) = the head outputs of the scan (the skip term is in them);
+// mamba_gate_norm follows for all rows.
+#define WG 256
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer ScratchBuf { float sc[]; };
+layout(std430, binding = 1) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint ns;
+    uint head_dim;
+    uint heads;
+    uint inner;
+    uint row0;
+    uint n;
+    uint slots;
+} p;
+
+void main() {
+    const uint t = gl_WorkGroupID.x;
+    if (t >= p.n) return;
+    const ScanLay y = scan_layout(p.ns, p.head_dim, p.heads, SF_HASC, p.slots);
+    for (uint e = gl_LocalInvocationID.x; e < p.inner; e += WG) outv[(p.row0 + t) * p.inner + e] = sc[y.o + t * p.inner + e];
+}

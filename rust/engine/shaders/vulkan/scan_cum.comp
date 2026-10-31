@@ -1,0 +1,71 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_cum | bindings: scratch | push: hk,hv,heads,flags,n,reset,slots | grid: [ceil(n/64), heads, 1] per run window
+// Chunk-parallel scan (see _scan_common.glsl), step 1 (port of scan_cum_kernel in cuda/scan.cu): for every (chunk, head) the cumulative log decay G of the
+// chunk, the decay-scaled factors of the state update (Kd = kp * exp(Gend - G), Bd = b * exp(Gend - G), dE = exp(Gend)) and the state-independent part of
+// the output weights (Qe = q * exp(G), or exp(G - lw) for the early readout). hk <= 128 invocations (one per key channel).
+#define WG 128
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint hk;
+    uint hv;
+    uint heads;
+    uint flags;
+    uint n;
+    uint reset;
+    uint slots;
+} p;
+
+void main() {
+    const uint ch = gl_WorkGroupID.x;
+    const uint h = gl_WorkGroupID.y;
+    const uint i = gl_LocalInvocationID.x;
+    const uint t0 = ch * SC;
+    if (t0 >= p.n) return;
+    const uint L = min(SC, p.n - t0);
+    const ScanLay y = scan_layout(p.hk, p.hv, p.heads, p.flags, p.slots);
+    const uint hk = p.hk;
+    const bool lwv = (p.flags & SF_LWV) != 0u;
+    const bool r1 = (p.flags & SF_RANK1) != 0u;
+    const bool qp = (p.flags & SF_QPREV) != 0u;
+    const uint w = y.ws + (ch * p.heads + h) * y.chunk;
+    const uint lww = lwv ? hk : 1u;
+    const uint lws = p.heads * lww;
+    const uint lw0 = y.lw + (t0 * p.heads + h) * lww;
+    if (lwv) {
+        if (i < hk) {
+            float acc = 0.0;
+            for (uint t = 0u; t < SC; t++) {
+                if (t < L) acc += sc[lw0 + t * lws + i];
+                sc[w + y.o_g + t * hk + i] = acc;
+            }
+        }
+    } else if (i == 0u) {
+        float acc = 0.0;
+        for (uint t = 0u; t < SC; t++) {
+            if (t < L) acc += sc[lw0 + t * lws];
+            sc[w + y.o_g + t] = acc;
+        }
+    }
+    wg_sync();
+    if (i >= hk) return;
+    const float gend = lwv ? sc[w + y.o_g + (L - 1u) * hk + i] : sc[w + y.o_g + (L - 1u)];
+    sc[w + y.o_de + i] = exp(gend);
+    const uint rs = p.heads * hk;
+    const uint q0 = y.q + (t0 * p.heads + h) * hk + i;
+    const uint k0 = y.kp + (t0 * p.heads + h) * hk + i;
+    const uint b0 = y.b + (t0 * p.heads + h) * hk + i;
+    for (uint t = 0u; t < L; t++) {
+        const float gt = lwv ? sc[w + y.o_g + t * hk + i] : sc[w + y.o_g + t];
+        float gq = gt;
+        if (qp) gq -= sc[lw0 + t * lws + (lwv ? i : 0u)];
+        const float dec = exp(gend - gt);
+        sc[w + y.o_kd + t * hk + i] = sc[k0 + t * rs] * dec;
+        if (r1) sc[w + y.o_bd + t * hk + i] = sc[b0 + t * rs] * dec;
+        sc[w + y.o_qe + t * hk + i] = sc[q0 + t * rs] * exp(gq);
+    }
+}

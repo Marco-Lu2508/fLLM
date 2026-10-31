@@ -1276,6 +1276,26 @@ fn sample_plans() -> Vec<OpPlan> {
         let odd = crate::backend::RwkvShape { hidden: 96, head_size: 48, group_eps: 1e-5, v7: true };
         assert!(plan_rwkv7_wkv(0, &run, &odd, 0, false).is_err() && !super::recurrent::rwkv_supported(&odd));
     }
+    {
+        // runs of 64 rows and more take the chunk-parallel scan (`scan_*` shaders)
+        use super::recurrent::{plan_delta_layer_scan, plan_kda_layer_scan, plan_mamba2_mixer_scan};
+        use super::scan::{plan_scan_rwkv6_run, plan_scan_rwkv7_run};
+        let shared = Some(65536u32);
+        let long = RunSpec { first_row: 3, rows: 700, reset: true };
+        v.extend(plan_delta_layer_scan(&delta_shape(2, 4, 64, 64, 4), &[long], 0, false, shared).unwrap());
+        for lower_bound in [None, Some(-5.0f32)] {
+            let shape = crate::backend::KdaShape { heads: 2, head_dim: 32, conv_kernel: 4, eps: 1e-6, lower_bound };
+            v.extend(plan_kda_layer_scan(&shape, &[long], 0, shared).unwrap());
+        }
+        for has_vres in [false, true] {
+            let shape = crate::backend::RwkvShape { hidden: 128, head_size: 64, group_eps: 1e-5, v7: true };
+            v.extend(plan_scan_rwkv7_run(&shape, 0, &long, 0, has_vres).unwrap());
+        }
+        let shape = crate::backend::RwkvShape { hidden: 128, head_size: 64, group_eps: 1e-5, v7: false };
+        v.extend(plan_scan_rwkv6_run(&shape, 0, &long, 256).unwrap());
+        let s = Mamba2Shape { state: 64, ..mamba2() };
+        v.extend(plan_mamba2_mixer_scan(&s, &[long], 703, 0, shared).unwrap());
+    }
     v.extend(
         plan_moe_expert_gemm(
             &MoeLinear {

@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_delta_post | bindings: z,norm,scratch,out | push: vh,hk,hv,row0,n,slots,eps | grid: [vh, n, 1] per run window
+// Gated DeltaNet, chunk-parallel scan (port of scan_delta_post_kernel in cuda/scan.cu): the gated RMS norm of the head outputs of the scan,
+//   out[row0 + t][j * hv + c] = o / sqrt(mean_c(o^2) + eps) * norm[c] * silu(z[row0 + t][j * hv + c]),   hv <= 128 invocations per workgroup (one head of one token)
+#define WG 128
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer ZBuf { float zin[]; };
+layout(std430, binding = 1) readonly buffer NormBuf { float norm_w[]; };
+layout(std430, binding = 2) buffer ScratchBuf { float sc[]; };
+layout(std430, binding = 3) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint vh;
+    uint hk;
+    uint hv;
+    uint row0;
+    uint n;
+    uint slots;
+    float eps;
+} p;
+
+#include "_ops_reduce.glsl"
+
+void main() {
+    const uint j = gl_WorkGroupID.x;
+    const uint t = gl_WorkGroupID.y;
+    if (t >= p.n) return;
+    const uint c = gl_LocalInvocationID.x;
+    const ScanLay y = scan_layout(p.hk, p.hv, p.vh, SF_RANK1 | SF_BSAME, p.slots);
+    const uint value_dim = p.vh * p.hv;
+    const bool live = c < p.hv;
+    const float acc = live ? sc[y.o + t * value_dim + j * p.hv + c] : 0.0;
+    const float ss = wg_sum(acc * acc);
+    const float inv = 1.0 / sqrt(ss / float(p.hv) + p.eps);
+    const uint row = p.row0 + t;
+    if (live) outv[row * value_dim + j * p.hv + c] = acc * inv * norm_w[c] * silu(zin[row * value_dim + j * p.hv + c]);
+}

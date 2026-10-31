@@ -30,7 +30,7 @@ use crate::backend::vulkan::ops::moe::{
     plan_gather_rows, plan_moe_combine, plan_moe_linear, plan_moe_topk, plan_scatter_add_rows, ExpertAccess, MoeLinear,
 };
 use crate::backend::vulkan::ops::recurrent::{
-    delta_supported, plan_delta_layer_with, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
+    delta_supported, plan_delta_layer_scan, plan_mamba1_bc_norms_with, plan_mamba1_scan, plan_mamba2_mixer, plan_mamba_conv, Mamba1Shape as VkMamba1,
     Mamba2Shape, RunSpec,
 };
 use crate::backend::vulkan::ops::{
@@ -551,7 +551,8 @@ impl Stream for VulkanStream {
         if !self.supports_kda(shape) {
             return Err(BackendError::UnsupportedOperation("kda_layer for this shape".into()));
         }
-        let waves = exec::recurrence_waves(runs);
+        let shared = self.scan_shared();
+        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_dim, shape.head_dim, shape.heads));
         if waves.len() > 1 {
             for wave in &waves {
                 self.kda_layer(shape, weights, wave, state_offset, qkv, forget, beta, gate, mixed, out)?;
@@ -580,7 +581,7 @@ impl Stream for VulkanStream {
             return Err(invalid("KDA buffers are smaller than the layer needs"));
         }
         let specs: Vec<RunSpec> = runs.iter().map(|r| RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset }).collect();
-        let plans = crate::backend::vulkan::ops::recurrent::plan_kda_layer(shape, &specs, state_offset)?;
+        let plans = crate::backend::vulkan::ops::recurrent::plan_kda_layer_scan(shape, &specs, state_offset, shared)?;
         if plans.is_empty() {
             return Ok(());
         }
@@ -725,7 +726,8 @@ impl Stream for VulkanStream {
         if !self.supports_rwkv(shape) {
             return Err(BackendError::UnsupportedOperation("rwkv7_wkv for this shape".into()));
         }
-        let waves = exec::recurrence_waves(runs);
+        let shared = self.scan_shared();
+        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_size, shape.head_size, shape.heads()));
         if waves.len() > 1 {
             for wave in &waves {
                 self.rwkv7_wkv(shape, weights, wave, state_offset, inputs, v_first, out)?;
@@ -752,6 +754,10 @@ impl Stream for VulkanStream {
         let mut plans = Vec::with_capacity(runs.len());
         for (i, r) in runs.iter().enumerate().filter(|(_, r)| r.rows > 0) {
             let spec = RunSpec { first_row: r.first_row, rows: r.rows, reset: r.reset };
+            if crate::backend::vulkan::ops::scan::wanted(shared, r.rows, shape.head_size, shape.head_size, shape.heads()) {
+                plans.extend(crate::backend::vulkan::ops::scan::plan_scan_rwkv7_run(shape, i, &spec, state_offset, inputs.v_res.is_some())?);
+                continue;
+            }
             plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv7_wkv(i, &spec, shape, state_offset, inputs.v_res.is_some())?);
         }
         let mut args = vec![
@@ -773,7 +779,7 @@ impl Stream for VulkanStream {
             args.push(Arg::r("vres", v));
         }
         let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
-        self.run_plans(&plans, &args, &states, true)
+        self.run_plans(&plans, &args, &states, !plans.iter().any(|p| p.shader_name.starts_with("scan_")))  // the runs are independent of each other, the dispatches of a scan are not
     }
 
     fn rwkv6_wkv(
@@ -792,7 +798,8 @@ impl Stream for VulkanStream {
         if !self.supports_rwkv(shape) {
             return Err(BackendError::UnsupportedOperation("rwkv6_wkv for this shape".into()));
         }
-        let waves = exec::recurrence_waves(runs);
+        let shared = self.scan_shared();
+        let waves = exec::recurrence_waves_with(runs, |rows| crate::backend::vulkan::ops::scan::wanted(shared, rows, shape.head_size, shape.head_size, shape.heads()));
         if waves.len() > 1 {
             for wave in &waves {
                 self.rwkv6_wkv(shape, weights, wave, state_offset, r, k, v, decay, gate, out)?;
@@ -815,6 +822,10 @@ impl Stream for VulkanStream {
         let mut plans = Vec::with_capacity(runs.len());
         for (i, x) in runs.iter().enumerate().filter(|(_, x)| x.rows > 0) {
             let spec = RunSpec { first_row: x.first_row, rows: x.rows, reset: x.reset };
+            if crate::backend::vulkan::ops::scan::wanted(shared, x.rows, shape.head_size, shape.head_size, shape.heads()) {
+                plans.extend(crate::backend::vulkan::ops::scan::plan_scan_rwkv6_run(shape, i, &spec, state_offset)?);
+                continue;
+            }
             plans.push(crate::backend::vulkan::ops::recurrent::plan_rwkv6_wkv(i, &spec, shape, state_offset)?);
         }
         let args = [
@@ -829,7 +840,7 @@ impl Stream for VulkanStream {
             Arg::w("out", out),
         ];
         let states: Vec<&DeviceBuffer> = runs.iter().map(|x| x.state).collect();
-        self.run_plans(&plans, &args, &states, true)
+        self.run_plans(&plans, &args, &states, !plans.iter().any(|p| p.shader_name.starts_with("scan_")))  // the runs are independent of each other, the dispatches of a scan are not
     }
 
     fn supports_arch_ops(&self) -> bool {
@@ -1647,7 +1658,7 @@ impl Stream for VulkanStream {
         let caps = self.sh.caps();
         let min_subgroup = if caps.min_subgroup_size > 0 { caps.min_subgroup_size } else { caps.subgroup_size };
         let cols = crate::backend::vulkan::ops::recurrent::delta_cols_usable(caps.subgroup_ops.shuffle, min_subgroup);
-        let plans = plan_delta_layer_with(shape, &specs, state_offset, cols)?;
+        let plans = plan_delta_layer_scan(shape, &specs, state_offset, cols, self.scan_shared())?;
         if plans.is_empty() {
             return Ok(());
         }

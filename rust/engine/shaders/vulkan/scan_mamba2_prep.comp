@@ -1,0 +1,59 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: scan_mamba2_prep | bindings: mixed,projected,dt_bias,decay,skip,scratch | push: inner,ns,heads,groups,head_dim,conv_dim,proj_stride,proj_dt_off,row0,n,slots,step_min | grid: [n, 1, 1] per run window
+// Mamba-2, chunk-parallel scan (see _scan_common.glsl; port of scan_mamba2_prep_kernel in cuda/scan.cu): the rows row0 .. row0+n-1 of `mixed` (output of mamba_conv,
+// [x | B | C]) and of `projected` in the layout of the scan. P[k][p] = P exp(dt A) + dt B[k] x[p], y[p] = sum_k P[k][p] C[k] + D x[p]: w = exp(dt * decay[h]) (scalar,
+// as lw, clamped), kp = dt * B[g], q = C[g], v = x, c = skip[h], dt = max(softplus(projected[row][proj_dt_off + h] + dt_bias[h]), step_min). heads <= 512.
+#define WG 256
+#include "_ops_common.glsl"
+#include "_scan_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer MixedBuf { float mixed[]; };
+layout(std430, binding = 1) readonly buffer ProjBuf { float projected[]; };
+layout(std430, binding = 2) readonly buffer DtBiasBuf { float dt_bias[]; };
+layout(std430, binding = 3) readonly buffer DecayBuf { float decay[]; };
+layout(std430, binding = 4) readonly buffer SkipBuf { float skip_d[]; };
+layout(std430, binding = 5) buffer ScratchBuf { float sc[]; };
+layout(push_constant) uniform P {
+    uint inner;
+    uint ns;
+    uint heads;
+    uint groups;
+    uint head_dim;
+    uint conv_dim;
+    uint proj_stride;
+    uint proj_dt_off;
+    uint row0;
+    uint n;
+    uint slots;
+    float step_min;
+} p;
+
+shared float s_dt[512];
+
+void main() {
+    const uint t = gl_WorkGroupID.x;
+    if (t >= p.n) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const ScanLay y = scan_layout(p.ns, p.head_dim, p.heads, SF_HASC, p.slots);
+    const uint row = p.row0 + t;
+    for (uint h = tid; h < p.heads; h += WG) {
+        const float raw = projected[row * p.proj_stride + p.proj_dt_off + h] + dt_bias[h];
+        const float dt = max(softplus20(raw), p.step_min);
+        s_dt[h] = dt;
+        sc[y.lw + t * p.heads + h] = max(dt * decay[h], SLW_MIN);
+        sc[y.c + t * p.heads + h] = skip_d[h];
+    }
+    barrier();
+    const uint m = row * p.conv_dim;
+    const uint per_group = p.heads / p.groups;
+    for (uint e = tid; e < p.heads * p.ns; e += WG) {
+        const uint h = e / p.ns;
+        const uint k = e - h * p.ns;
+        const uint g = h / per_group;
+        sc[y.q + t * p.heads * p.ns + e] = mixed[m + p.inner + p.groups * p.ns + g * p.ns + k];
+        sc[y.kp + t * p.heads * p.ns + e] = s_dt[h] * mixed[m + p.inner + g * p.ns + k];
+    }
+    for (uint e = tid; e < p.inner; e += WG) sc[y.v + t * p.inner + e] = mixed[m + e];
+}
