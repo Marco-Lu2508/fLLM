@@ -173,7 +173,7 @@ jobs:
             dlopen_check: true
           - target: aarch64-apple-darwin
             asset: fllm-macos-aarch64.tar.gz
-            runner: macos-14
+            runner: macos-15
             features: rust-gpu,metal
             glslc: false
             dlopen_check: false
@@ -216,7 +216,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends glslc
 
       # Native Metal backend in the Apple-silicon asset: off by default. Switch it on with the repository variable FLLM_RELEASE_METAL=1
-      # (Settings > Secrets and variables > Actions > Variables) once the whole-model tests of the macOS 14 job of platforms.yml passed; see
+      # (Settings > Secrets and variables > Actions > Variables) once the whole-model tests of the macOS 15 job of platforms.yml passed; see
       # docs/changes/metal.md. The macOS Intel asset and all other targets keep the wgpu feature set.
       - name: Build
         env:
@@ -664,7 +664,7 @@ jobs:
             features: rust-gpu,vulkan
           # macOS: the wgpu Metal path, like the macOS release assets; the installer is a dmg (not signed or notarized yet)
           - name: macOS
-            os: macos-14
+            os: macos-15
             features: rust-gpu
             experimental: true
     env:

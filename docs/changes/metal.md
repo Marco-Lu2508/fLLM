@@ -7,7 +7,7 @@ called "verified" below was verified on Linux (CPU emulation of the MSL text, un
 
 ## 1. Features
 
-### Whole-model tests (run by the macOS 14 job of `platforms.yml`)
+### Whole-model tests (run by the macOS 15 job of `platforms.yml`)
 
 `rust/engine/src/tiny_models.rs` builds tiny random models in the test (F32 safetensors in the Hugging Face layout, converted with
 `fllm_checkpoint::convert_checkpoint`, optionally re-encoded with a quantization preset). `rust/engine/src/backend/metal/whole_model_tests.rs`
@@ -35,7 +35,7 @@ The fixtures, the converter and the comparison itself run on every platform: `ti
 the device (`cpu_backend_matches_host_path_*`) and checks that the MoE and Qwen3.5 fixtures load and decode on the host path.
 
 Run on a Mac: `cargo test --release -p fllm-engine --lib --features metal whole_model -- --nocapture --test-threads=1`
-(`FLLM_METAL_SERIAL=1` first when a model fails: it rules out missing barriers). `platforms.yml` runs exactly this in an extra step of the macOS 14 job
+(`FLLM_METAL_SERIAL=1` first when a model fails: it rules out missing barriers). `platforms.yml` runs exactly this in an extra step of the macOS 15 job
 (`--nocapture`, so that the result lines are in the log); the tests also run inside the normal "Unit tests" step.
 
 ### Arch ops on the device (`Stream::supports_arch_ops` is now true)

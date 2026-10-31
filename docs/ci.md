@@ -6,7 +6,7 @@ the GPU and benchmark workflows are manual and need a self-hosted runner (see th
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci` | push to `main`, pull requests, manual | `cargo clippy --locked --workspace --all-targets -- -D warnings` and `cargo test --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe` on `ubuntu-24.04`, CPU build, no CUDA |
-| `platforms` | push to `main`, pull requests, manual | build, unit tests, clippy, `devices --json`, `selftest-cpu` and `selftest-gpu --device cpu` on **Windows 2022 (MSVC)**, **macOS 14 (Apple silicon)**, **Linux aarch64** and **Linux x86_64**. The Linux and Windows runners have no GPU (compile and CPU level, L0 / L1-CPU of [test-levels.md](test-levels.md)); the Apple-silicon runner also runs the unit tests of the native Metal backend (`--features rust-gpu,metal`) and, as separate steps, the whole-model tests and `metal_quant_kernels` (every quantized-linear kernel against the CPU dequantization, one result line per format, kernel and batch size; this is the first hardware run of the MLX, block-wise FP8, bitsandbytes and EXL2 kernels), whose GPU kernel checks give the Metal backend its L1 statement. Manual only: `windows-cuda` (nvcc with the MSVC host compiler, compile and link) and `windows-package` (`scripts/build-windows.ps1` end to end) |
+| `platforms` | push to `main`, pull requests, manual | build, unit tests, clippy, `devices --json`, `selftest-cpu` and `selftest-gpu --device cpu` on **Windows 2022 (MSVC)**, **macOS 15 (Apple silicon)**, **Linux aarch64** and **Linux x86_64**. The Linux and Windows runners have no GPU (compile and CPU level, L0 / L1-CPU of [test-levels.md](test-levels.md)); the Apple-silicon runner also runs the unit tests of the native Metal backend (`--features rust-gpu,metal`) and, as separate steps, the whole-model tests and `metal_quant_kernels` (every quantized-linear kernel against the CPU dequantization, one result line per format, kernel and batch size; this is the first hardware run of the MLX, block-wise FP8, bitsandbytes and EXL2 kernels), whose GPU kernel checks give the Metal backend its L1 statement. Manual only: `windows-cuda` (nvcc with the MSVC host compiler, compile and link) and `windows-package` (`scripts/build-windows.ps1` end to end) |
 | `release` | tag `v*`, manual with a tag | builds the release binaries on hosted runners and attaches them to the GitHub release of the tag |
 | `docker-image` | tag `v*`, manual | CPU image for `linux/amd64` and `linux/arm64` to `ghcr.io/<owner>/fllm` |
 | `docker-image-cuda` | tag `v*`, manual | CUDA image (`linux/amd64` and `linux/arm64`) to `ghcr.io/<owner>/fllm:cuda` |
@@ -50,7 +50,7 @@ The tag starts three workflows in parallel: `release` (binaries), `docker-image`
 | --- | --- | --- |
 | `fllm-linux-x86_64-musl.tar.gz` | `ubuntu-24.04` | static musl build (`musl-tools`), feature `rust-gpu` |
 | `fllm-linux-aarch64-musl.tar.gz` | `ubuntu-24.04-arm` | native ARM64 runner, same recipe |
-| `fllm-macos-aarch64.tar.gz` | `macos-14` | Apple silicon, feature `rust-gpu` (wgpu uses Metal) |
+| `fllm-macos-aarch64.tar.gz` | `macos-15` | Apple silicon, feature `rust-gpu` (wgpu uses Metal) |
 | `fllm-macos-x86_64.tar.gz` | `macos-15-intel` | Intel Mac |
 | `fllm-windows-x86_64-msvc.zip` | `windows-2022` | `scripts/build-windows.ps1`: MSVC, static C runtime, with the native Vulkan backend (Vulkan SDK installed in the job) |
 | `fllm-windows-x86_64-msvc-cuda.zip` | `windows-2022` | plus the CUDA kernels (toolkit 12.8 installed in the job); **optional**: if the job fails the release is still published and `install.ps1` uses the plain Windows asset |
@@ -94,7 +94,7 @@ evicted.
 | Runner | Features |
 | --- | --- |
 | `windows-2022` | `rust-gpu,vulkan` (Vulkan SDK installed for `glslc`) |
-| `macos-14` | `rust-gpu,metal` |
+| `macos-15` | `rust-gpu,metal` |
 | `ubuntu-24.04-arm` | `rust-gpu,vulkan,arm-simd` (`glslc` from apt); the CPU self tests (`selftest-cpu`) run on the ARM hardware, so the NEON kernels are exercised, the opt-in SVE kernel is not |
 | `ubuntu-24.04` | `rust-gpu,vulkan,avx512` (`glslc` from apt) |
 

@@ -166,7 +166,7 @@ Apple-silicon CI runner are the exception: they execute on a GPU.
 | `x86_64-pc-windows-gnu` | cross-check (`check`/`clippy`) green for all features; MinGW + CUDA aborts in `build.rs` with a message |
 | Windows MSVC (CPU, wgpu, native Vulkan, CUDA, HIP) | CI builds, runs unit tests and the CPU self tests on `windows-2022`; the CUDA build is compile-only; no GPU run on Windows |
 | `aarch64-unknown-linux-gnu` | CI builds, runs unit tests and the CPU self tests on `ubuntu-24.04-arm` |
-| `aarch64-apple-darwin` | CI builds and runs unit tests, the CPU self tests and the Metal kernel checks on `macos-14` (Apple silicon) |
+| `aarch64-apple-darwin` | CI builds and runs unit tests, the CPU self tests and the Metal kernel checks on `macos-15` (Apple silicon) |
 | `aarch64-pc-windows-msvc` | not built |
 | `--device auto`, device numbers (`vulkan:N` = N-th device of the backend), `devices --json` | selection logic covered by unit tests and by runs without a GPU; L0 on hardware |
 | Self-test harness (groups, `--only`, `--quants`, `--list`, `--strict`, `--json`) | the CPU against itself (`selftest-gpu --device cpu`: 220 checks, 0 failed, 35 skipped); this checks the harness, not a GPU backend. CUDA: see the README Status table |

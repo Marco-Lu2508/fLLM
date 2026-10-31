@@ -11,6 +11,7 @@ behaviour between versions).
 The first day with 0.2.0 in real use. The Studio and the desktop app had bugs that the release checks did not catch; they are fixed here, together with the coding-agent work of the same day.
 
 ### Highlights
+- **CI and release builds run on macOS 15**: GitHub retires the `macos-14` runner image on 2026-11-02 and already fails jobs on it during brownouts (the macOS installer and the platform check were cancelled for that reason).
 - **The first message of a new chat no longer fails** with "maximum context length ... you requested ..." (the page estimated the prompt too low and sent an exact-fit `max_tokens`).
 - **One card per graphics card** in the hardware page, the device choice and the footer (the wgpu and the native Vulkan entry of one GPU were shown twice).
 - **A model you already have is found** (models folder, Downloads, LM Studio, llama.cpp, GPT4All, Ollama): "Load <name>" instead of a download offer; no more "tiny" in the model chip.

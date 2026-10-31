@@ -51,8 +51,8 @@ jobs:
             runner: windows-2022
             features: "rust-gpu,vulkan"
             vulkan_sdk: true
-          - name: macOS 14 (Apple silicon)
-            runner: macos-14
+          - name: macOS 15 (Apple silicon)
+            runner: macos-15
             features: "rust-gpu,metal"
           - name: Linux aarch64
             runner: ubuntu-24.04-arm
@@ -107,14 +107,14 @@ jobs:
       # Tiny random models (dense, quantized, MoE, hybrid) on the Apple GPU against the host path; --nocapture prints one result line per model
       # (see docs/changes/metal.md for the expected lines). The same tests also ran in the step above, where their output is hidden.
       - name: Metal whole-model tests (Apple GPU)
-        if: always() && matrix.runner == 'macos-14'
+        if: always() && matrix.runner == 'macos-15'
         shell: bash
         run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- whole_model device_arch_ops --nocapture --test-threads=1
 
       # Every quantized-linear kernel of the Metal backend (including the block-wise FP8 and bitsandbytes ones, written without a Mac at hand) against
       # the CPU dequantization as reference: one line per format, kernel and batch size. A runner without a Metal device prints "[skip]".
       - name: Metal quantized kernels (Apple GPU, CPU reference)
-        if: always() && matrix.runner == 'macos-14'
+        if: always() && matrix.runner == 'macos-15'
         shell: bash
         run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- metal_quant_kernels --nocapture --test-threads=1
 

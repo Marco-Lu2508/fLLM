@@ -38,7 +38,7 @@ jobs:
             features: rust-gpu,vulkan
           # macOS uses the wgpu Metal path (the same feature set as the macOS release assets); no Vulkan SDK is involved
           - name: macOS
-            os: macos-14
+            os: macos-15
             features: rust-gpu
     steps:
       - name: Checkout
