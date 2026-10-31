@@ -279,6 +279,114 @@ pub struct DeltaRun<'a> {
     pub reset: bool,
 }
 
+/// The lightning indexer of a DeepSeek-V4 layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct V4Index {
+    pub heads: usize,
+    pub dim: usize,
+    pub topk: usize,
+}
+
+/// Shape of the attention of one DeepSeek-V4 layer (see [`Stream::v4_compress`], [`Stream::v4_attention`], [`Stream::v4_ring_write`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct V4Shape {
+    pub heads: usize,
+    /// Width of the one key / value head; the trailing `rope` values are rotated.
+    pub head_dim: usize,
+    pub rope: usize,
+    /// Keys of the sliding window.
+    pub window: usize,
+    /// Tokens per compressed entry (0: the layer attends to the window only).
+    pub ratio: usize,
+    pub index: Option<V4Index>,
+    /// Entries a sequence can hold per store (the context length divided by `ratio`).
+    pub max_entries: usize,
+    /// Groups of the output projection: the attention output is written group-major, `[group][row][heads / groups * head_dim]`.
+    pub o_groups: usize,
+}
+
+/// Float offsets of the regions of one layer's state inside the sequence's state buffer (see [`V4Shape::layout`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct V4Layout {
+    /// Compressed entries of the indexer (`max_entries x index.dim`).
+    pub index_entries: usize,
+    /// Compressed entries of the attention (`max_entries x head_dim`).
+    pub entries: usize,
+    /// Ring of the last `window` key vectors, slot `position % window`.
+    pub ring: usize,
+    /// Projections of the last `ratio` tokens before they are pooled, slot `position % ratio` (kv, gate; `coff * dim` wide).
+    pub buf_kv: usize,
+    pub buf_gate: usize,
+    /// Overlap series of the last pooled window (`ratio x dim`) of a two-series compressor.
+    pub ov_kv: usize,
+    pub ov_gate: usize,
+    pub index_buf_kv: usize,
+    pub index_buf_gate: usize,
+    pub index_ov_kv: usize,
+    pub index_ov_gate: usize,
+    /// Floats of the layer's state.
+    pub total: usize,
+}
+
+impl V4Shape {
+    /// 2 for a compressed sparse layer (two series with overlapping windows), 1 otherwise.
+    pub fn coff(&self) -> usize {
+        if self.index.is_some() { 2 } else { 1 }
+    }
+
+    /// Entries of the largest sequence per store, at least 1.
+    pub fn entry_cap(&self) -> usize {
+        self.max_entries.max(1)
+    }
+
+    /// The regions of the layer's state, each starting at a multiple of 1024 floats (4 KiB, so that a region is a valid storage-buffer view on every device).
+    pub fn layout(&self) -> V4Layout {
+        let mut at = 0usize;
+        let mut take = |n: usize| -> usize {
+            let start = at;
+            at += n.div_ceil(1024) * 1024;
+            start
+        };
+        let (hd, ratio) = (self.head_dim, self.ratio);
+        let idim = self.index.map_or(0, |i| i.dim);
+        let compressed = ratio > 0;
+        let cap = self.entry_cap();
+        let w = self.coff() * hd;
+        let iw = 2 * idim;
+        let index_entries = take(if self.index.is_some() { cap * idim } else { 0 });
+        let entries = take(if compressed { cap * hd } else { 0 });
+        let ring = take(self.window * hd);
+        let buf_kv = take(if compressed { ratio * w } else { 0 });
+        let buf_gate = take(if compressed { ratio * w } else { 0 });
+        let ov_kv = take(if compressed && self.coff() == 2 { ratio * hd } else { 0 });
+        let ov_gate = take(if compressed && self.coff() == 2 { ratio * hd } else { 0 });
+        let index_buf_kv = take(ratio * iw);
+        let index_buf_gate = take(ratio * iw);
+        let index_ov_kv = take(ratio * idim);
+        let index_ov_gate = take(ratio * idim);
+        V4Layout { index_entries, entries, ring, buf_kv, buf_gate, ov_kv, ov_gate, index_buf_kv, index_buf_gate, index_ov_kv, index_ov_gate, total: at }
+    }
+}
+
+/// Which compressor of a layer [`Stream::v4_compress`] runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V4Pool {
+    /// The compressor of the attention (`head_dim` wide entries).
+    Attention,
+    /// The compressor of the indexer (`index.dim` wide entries, two series).
+    Index,
+}
+
+/// Consecutive rows of one sequence handed to the DeepSeek-V4 operations.
+pub struct V4Run<'a> {
+    /// State buffer of the sequence (all layers; the layer starts at the byte offset given to the operation).
+    pub state: &'a DeviceBuffer,
+    pub first_row: usize,
+    pub rows: usize,
+    /// Position of the first row of the run.
+    pub position: usize,
+}
+
 /// Device-resident parameters of a DeltaNet layer (all FP32).
 pub struct DeltaWeights<'a> {
     /// `conv_dim x conv_kernel`
@@ -2183,6 +2291,85 @@ pub trait Stream: Send {
         _params: &RelAttnParams,
     ) -> Result<(), BackendError> {
         Err(BackendError::UnsupportedOperation("rel_attention".into()))
+    }
+
+    /// The scoring and the top-k selection of [`Stream::dsa_select`] over keys that are already in `store` (`params.block_size` keys of `dim` floats per
+    /// block of the table; the keys of the indexer of DeepSeek-V4 are written by [`Stream::v4_compress`]). `block_tables` and `lengths` are as there.
+    #[allow(clippy::too_many_arguments)]
+    fn dsa_score_select(
+        &mut self,
+        _sel: &mut DeviceBuffer,
+        _store: &DeviceBuffer,
+        _q: &DeviceBuffer,
+        _w: &DeviceBuffer,
+        _block_tables: &[i64],
+        _lengths: &[i64],
+        _params: &DsaParams,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("dsa_score_select".into()))
+    }
+
+    /// Can this stream run the DeepSeek-V4 attention operations ([`Stream::v4_rope`], [`Stream::v4_compress`], [`Stream::v4_attention`],
+    /// [`Stream::v4_ring_write`], and for a layer with an indexer [`Stream::dsa_score_select`]) for layers of this shape?
+    fn supports_v4(&self, _shape: &V4Shape) -> bool {
+        false
+    }
+
+    /// Rotary embedding of the trailing `rope` values of every `dim`-wide group of `x` (`rows x groups x dim`, in place): pairs `(2i, 2i + 1)`,
+    /// `x0' = x0 c - x1 s`, `x1' = x1 c + x0 s` with `c`, `s` = `cs[row][i]` (`rows x rope / 2` pairs of cosine, sine; the sine is multiplied by `sign`,
+    /// -1 undoes the rotation).
+    #[allow(clippy::too_many_arguments)]
+    fn v4_rope(&mut self, _x: &mut DeviceBuffer, _cs: &DeviceBuffer, _rows: usize, _groups: usize, _dim: usize, _rope: usize, _sign: f32) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("v4_rope".into()))
+    }
+
+    /// Feeds the projections of the rows of every run into a compressor of the layer and pools every complete window of `ratio` tokens into an entry
+    /// (softmax over the window of `gate + pos` weighting `kv`, with the first series of the previous window in front for a two-series compressor,
+    /// RMS-normalised with `norm`, rotated at the position of the window's first token): `kv` and `gate` are `rows x coff * dim`, `pos` is
+    /// `ratio x coff * dim`, `cs_entry[row]` holds the rotation (as for [`Stream::v4_rope`]) for the window a row completes. The state of the layer
+    /// (offset `state_offset` bytes in every run's buffer, regions of [`V4Shape::layout`]) takes the buffered projections, the overlap and the entries.
+    #[allow(clippy::too_many_arguments)]
+    fn v4_compress(
+        &mut self,
+        _which: V4Pool,
+        _shape: &V4Shape,
+        _runs: &[V4Run<'_>],
+        _state_offset: usize,
+        _kv: &DeviceBuffer,
+        _gate: &DeviceBuffer,
+        _pos: &DeviceBuffer,
+        _norm: &DeviceBuffer,
+        _cs_entry: &DeviceBuffer,
+        _eps: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("v4_compress".into()))
+    }
+
+    /// Attention of every (row, head) of the runs over the last `window` key vectors (`kv`, `rows x head_dim`, already rotated; earlier ones come from the
+    /// ring of the state), the compressed entries the row sees (`sel` is `None`: all `(position + 1) / ratio` of them; else the entries listed in the
+    /// row of `sel`, `rows x topk` i32 as written by [`Stream::dsa_score_select`], ascending, -1 padded, entries the row does not see ignored) and a
+    /// per-head sink (`sinks`, `heads` floats). Key and value are the same vectors. The rotation of the trailing values is undone with `cs` (as
+    /// [`Stream::v4_rope`] with sign -1) and the result is written group-major (`[o_groups][rows][heads / o_groups * head_dim]`). Run before
+    /// [`Stream::v4_ring_write`] of the same rows.
+    #[allow(clippy::too_many_arguments)]
+    fn v4_attention(
+        &mut self,
+        _out: &mut DeviceBuffer,
+        _q: &DeviceBuffer,
+        _kv: &DeviceBuffer,
+        _shape: &V4Shape,
+        _runs: &[V4Run<'_>],
+        _state_offset: usize,
+        _sinks: &DeviceBuffer,
+        _sel: Option<&DeviceBuffer>,
+        _cs: &DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("v4_attention".into()))
+    }
+
+    /// Stores the last `window` key vectors of every run into the ring of the layer's state (slot `position % window`).
+    fn v4_ring_write(&mut self, _shape: &V4Shape, _runs: &[V4Run<'_>], _state_offset: usize, _kv: &DeviceBuffer) -> Result<(), BackendError> {
+        Err(BackendError::UnsupportedOperation("v4_ring_write".into()))
     }
 
     /// In-place `x = clamp(x, -limit, limit)`.

@@ -1701,6 +1701,29 @@ int fllm_cuda_dsa_attention(FllmStream *st, const float *q, const uint16_t *kpoo
     return fllm_dsa_attention_launch(st->s, q, kpool, vpool, out, sel, static_cast<const int64_t *>(dt), sinks, rows, topk, heads, kv_heads, dk, dv, stride,
                                      block_size, scale);
 }
+int fllm_cuda_v4_supported(int head_dim, int rope, int window, int heads, int o_groups) { return fllm_v4_supported(head_dim, rope, window, heads, o_groups); }
+int fllm_cuda_v4_rope(FllmStream *st, float *x, const float *cs, int rows, int groups, int dim, int rope, float sign) {
+    PREP(st);
+    return fllm_v4_rope_launch(st->s, x, cs, rows, groups, dim, rope, sign);
+}
+int fllm_cuda_v4_compress(FllmStream *st, float *state, const float *kv, const float *gate, const float *pos, const float *norm, const float *cs, int row0, int n,
+                          int position0, int dim, int coff, int ratio, int rope, float eps, size_t off_buf_kv, size_t off_buf_gate, size_t off_ov_kv,
+                          size_t off_ov_gate, size_t off_entries) {
+    PREP(st);
+    return fllm_v4_compress_launch(st->s, state, kv, gate, pos, norm, cs, row0, n, position0, dim, coff, ratio, rope, eps, off_buf_kv, off_buf_gate, off_ov_kv,
+                                   off_ov_gate, off_entries);
+}
+int fllm_cuda_v4_attention(FllmStream *st, float *out, const float *q, const float *kv, const float *state, const float *sinks, const int32_t *sel,
+                           const float *cs, int row0, int n, int position0, int heads, int hd, int rope, int window, int ratio, int topk, int o_groups,
+                           int rows_total, size_t off_ring, size_t off_entries, float scale) {
+    PREP(st);
+    return fllm_v4_attention_launch(st->s, out, q, kv, state, sinks, sel, cs, row0, n, position0, heads, hd, rope, window, ratio, topk, o_groups, rows_total,
+                                    off_ring, off_entries, scale);
+}
+int fllm_cuda_v4_ring(FllmStream *st, float *state, const float *kv, int row0, int n, int position0, int hd, int window, size_t off_ring) {
+    PREP(st);
+    return fllm_v4_ring_launch(st->s, state, kv, row0, n, position0, hd, window, off_ring);
+}
 int fllm_cuda_dsa_supported(int heads, int dim, int topk, int dk) { return fllm_dsa_scores_supported(heads, dim) && fllm_dsa_attention_supported(topk, dk); }
 int fllm_cuda_block_sparse_supported(int heads, int dim, int topk, int block, int dk) { return fllm_block_sparse_supported(heads, dim, topk, block, dk); }
 // MiniMax-M3 block selection for `rows` rows: block scores in chunks of `chunk` rows (`scores` holds chunk * heads * ceil(max_len / block) floats), then the top-k blocks

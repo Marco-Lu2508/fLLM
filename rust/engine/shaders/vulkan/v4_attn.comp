@@ -1,0 +1,174 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: v4_attn | bindings: q,kv,sinks,sel,cs,state,out | push: row0,position0,run_row0,run_position0,heads,hd,rope,window,ratio,topk,hpg,rows_total,off_ring,off_entries,scale,has_sel | grid: [heads, rows in this dispatch, 1] per run piece
+// Attention of DeepSeek-V4 (Stream::v4_attention, port of v4_attn_kernel in cuda/v4.cu; reference `v4_attention` of rust_decoder/deepseek4.rs). One workgroup
+// of 128 lanes per (row, head): row = row0 + gl_WorkGroupID.y at position0 + gl_WorkGroupID.y (the piece of the run that starts at run_row0 / run_position0). Keys, one shared head (K = V, hd <= 512 wide): the last
+// min(position + 1, window) key vectors (rows of kv of the same run, or the ring of the state for earlier positions: slot position % window), then the
+// compressed entries the row sees: entries[0 .. (position + 1) / ratio) (has_sel = 0) or those listed in sel[row * topk ..] (ascending, -1 padded, entries
+// at or past the visible count are ignored). The lanes score 128 keys at a time (one key per lane), fold the tile into an online softmax that starts with
+// the per-head sink (a denominator term without a value) and accumulate the key rows (lane l owns the dimensions l, l + 128, ...). The result is rotated back
+// (trailing rope values, sine negated: cs[row] holds cosine and sine per pair) and written group-major: out[((head / hpg) * rows_total + row) * hpg * hd +
+// (head % hpg) * hd + d]. q is rows x heads x hd. Offsets are floats into the sequence's state buffer (read only here).
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer QBuf { float q[]; };
+layout(std430, binding = 1) readonly buffer KvBuf { float kv[]; };
+layout(std430, binding = 2) readonly buffer SinkBuf { float sinks[]; };
+layout(std430, binding = 3) readonly buffer SelBuf { int sel[]; };
+layout(std430, binding = 4) readonly buffer CsBuf { float cs[]; };
+layout(std430, binding = 5) buffer StateBuf { float state[]; };
+layout(std430, binding = 6) buffer OutBuf { float outv[]; };
+layout(push_constant) uniform P {
+    uint row0;
+    uint position0;
+    uint run_row0;
+    uint run_position0;
+    uint heads;
+    uint hd;
+    uint rope;
+    uint window;
+    uint ratio;
+    uint topk;
+    uint hpg;
+    uint rows_total;
+    uint off_ring;
+    uint off_entries;
+    float scale;
+    uint has_sel;
+} p;
+
+shared float qs[512];
+shared float tile_p[WG];
+shared uint tile_off[WG];
+shared uint tile_src[WG];
+shared float red[WG];
+
+float reduce_max(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] = max(red[t], red[t + off]);
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+float reduce_sum(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] += red[t + off];
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x;
+    const uint row = p.row0 + gl_WorkGroupID.y;
+    const uint position = p.position0 + gl_WorkGroupID.y;
+    const uint nwin = min(position + 1u, p.window);
+    const uint wfirst = position + 1u - nwin;
+    const uint cnt = p.ratio > 0u ? (position + 1u) / p.ratio : 0u;
+    for (uint d = t; d < p.hd; d += WG) qs[d] = q[(row * p.heads + h) * p.hd + d];
+    uint nent = cnt;
+    if (p.has_sel != 0u) {
+        float local = 0.0;
+        for (uint j = t; j < p.topk; j += WG) {
+            const int s = sel[row * p.topk + j];
+            if (s >= 0 && uint(s) < cnt) local += 1.0;
+        }
+        nent = uint(reduce_sum(local) + 0.5);
+    }
+    const uint nk = nwin + nent;
+    float m = sinks[h];
+    float l = 1.0;
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+    float acc2 = 0.0;
+    float acc3 = 0.0;
+    barrier();
+    for (uint base = 0u; base < nk; base += WG) {
+        const uint cn = min(WG, nk - base);
+        if (t < cn) {
+            const uint j = base + t;
+            if (j < nwin) {
+                const uint qpos = wfirst + j;
+                if (qpos >= p.run_position0) {
+                    tile_src[t] = 0u;
+                    tile_off[t] = (p.run_row0 + qpos - p.run_position0) * p.hd;
+                } else {
+                    tile_src[t] = 1u;
+                    tile_off[t] = p.off_ring + (qpos % p.window) * p.hd;
+                }
+            } else {
+                const uint e = p.has_sel != 0u ? uint(sel[row * p.topk + (j - nwin)]) : (j - nwin);
+                tile_src[t] = 1u;
+                tile_off[t] = p.off_entries + e * p.hd;
+            }
+        }
+        barrier();
+        float s = NEG;
+        if (t < cn) {
+            float dot = 0.0;
+            const uint o = tile_off[t];
+            if (tile_src[t] == 0u) {
+                for (uint d = 0u; d < p.hd; d++) dot += qs[d] * kv[o + d];
+            } else {
+                for (uint d = 0u; d < p.hd; d++) dot += qs[d] * state[o + d];
+            }
+            s = dot * p.scale;
+        }
+        const float cm = reduce_max(s);
+        const float mn = max(m, cm);
+        const float a = exp(m - mn);
+        const float pr = t < cn ? exp(s - mn) : 0.0;
+        tile_p[t] = pr;
+        const float lsum = reduce_sum(pr);
+        l = l * a + lsum;
+        barrier();
+        acc0 *= a;
+        acc1 *= a;
+        acc2 *= a;
+        acc3 *= a;
+        for (uint j = 0u; j < cn; j++) {
+            const float pj = tile_p[j];
+            const uint o = tile_off[j];
+            const bool from_kv = tile_src[j] == 0u;
+            if (t < p.hd) acc0 += pj * (from_kv ? kv[o + t] : state[o + t]);
+            if (t + WG < p.hd) acc1 += pj * (from_kv ? kv[o + t + WG] : state[o + t + WG]);
+            if (t + 2u * WG < p.hd) acc2 += pj * (from_kv ? kv[o + t + 2u * WG] : state[o + t + 2u * WG]);
+            if (t + 3u * WG < p.hd) acc3 += pj * (from_kv ? kv[o + t + 3u * WG] : state[o + t + 3u * WG]);
+        }
+        m = mn;
+        barrier();
+    }
+    // the result, then the inverse rotation of the trailing values; qs is free again
+    if (t < p.hd) qs[t] = acc0 / l;
+    if (t + WG < p.hd) qs[t + WG] = acc1 / l;
+    if (t + 2u * WG < p.hd) qs[t + 2u * WG] = acc2 / l;
+    if (t + 3u * WG < p.hd) qs[t + 3u * WG] = acc3 / l;
+    barrier();
+    const uint g = h / p.hpg;
+    const uint lh = h % p.hpg;
+    const uint half_rope = p.rope / 2u;
+    const uint dst = (g * p.rows_total + row) * (p.hpg * p.hd) + lh * p.hd;
+    for (uint d = t; d < p.hd - p.rope; d += WG) outv[dst + d] = qs[d];
+    for (uint j = t; j < half_rope; j += WG) {
+        const float c = cs[(row * half_rope + j) * 2u];
+        const float s = -cs[(row * half_rope + j) * 2u + 1u];
+        const float a = qs[p.hd - p.rope + 2u * j];
+        const float b = qs[p.hd - p.rope + 2u * j + 1u];
+        outv[dst + p.hd - p.rope + 2u * j] = a * c - b * s;
+        outv[dst + p.hd - p.rope + 2u * j + 1u] = b * c + a * s;
+    }
+}

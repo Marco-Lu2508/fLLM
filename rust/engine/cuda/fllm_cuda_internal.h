@@ -365,6 +365,16 @@ int fllm_hc_supported(int hc);
 int fllm_hc_mix_launch(cudaStream_t s, const float *streams, const float *mixes, const float *base, const float *scale, float *post, float *comb,
                        float *collapsed, int rows, int hc, int hidden, int mode, int iters, float eps, float magnitude);
 int fllm_hc_combine_launch(cudaStream_t s, float *streams, const float *post, const float *comb, const float *block, int rows, int hc, int hidden);
+// DeepSeek-V4 attention (v4.cu)
+int fllm_v4_supported(int head_dim, int rope, int window, int heads, int o_groups);
+int fllm_v4_rope_launch(cudaStream_t s, float *x, const float *cs, int rows, int groups, int dim, int rope, float sign);
+int fllm_v4_compress_launch(cudaStream_t s, float *state, const float *kv, const float *gate, const float *pos, const float *norm, const float *cs, int row0, int n,
+                            int position0, int dim, int coff, int ratio, int rope, float eps, size_t off_buf_kv, size_t off_buf_gate, size_t off_ov_kv,
+                            size_t off_ov_gate, size_t off_entries);
+int fllm_v4_attention_launch(cudaStream_t s, float *out, const float *q, const float *kv, const float *state, const float *sinks, const int32_t *sel,
+                             const float *cs, int row0, int n, int position0, int heads, int hd, int rope, int window, int ratio, int topk, int o_groups,
+                             int rows_total, size_t off_ring, size_t off_entries, float scale);
+int fllm_v4_ring_launch(cudaStream_t s, float *state, const float *kv, int row0, int n, int position0, int hd, int window, size_t off_ring);
 // DeepSeek-V3.2 / GLM-5 lightning indexer and sparse attention (dsa.cu)
 int fllm_rotate_heads_launch(cudaStream_t s, const float *x, float *out, size_t count, int dim, int shift);
 int fllm_dsa_keys_launch(cudaStream_t s, float *store, const float *k, const float *gate, const int32_t *slots, int rows, int dim, int width);

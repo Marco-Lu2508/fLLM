@@ -1,0 +1,120 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: v4_compress | bindings: kv,gate,pos,norm,cs,state | push: row0,n,position0,dim,coff,ratio,rope,eps,off_buf_kv,off_buf_gate,off_ov_kv,off_ov_gate,off_entries | grid: [1, 1, 1] per run piece
+// Compressor of DeepSeek-V4 (Stream::v4_compress, port of v4_compress_kernel in cuda/v4.cu; reference `pool_window` of rust_decoder/deepseek4.rs). One
+// workgroup walks the n tokens of a run piece (rows row0 .. row0 + n, the first at position0): the projections kv and gate (n x coff * dim) go to the buffer
+// of the last `ratio` tokens (slot position % ratio); when a token completes a window of `ratio` tokens (position % ratio == ratio - 1) the window is pooled
+// to entry e = (position + 1) / ratio - 1: for every channel a softmax over the logits (gate + pos) of the window (and, with coff = 2 and e > 0, the first
+// series of the previous window in front: ov_gate / ov_kv) weights the values; the entry is RMS-normalised with `norm`, its trailing `rope` values are
+// rotated with cs[row] and it is stored at entries[e * dim]. With coff = 2 the first series (kv, gate + pos columns 0 .. dim) of the window is kept as the
+// overlap. Offsets are floats into the sequence's state buffer. Pieces of one run are dispatched one after the other.
+#define WG 128
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer KvBuf { float kvp[]; };
+layout(std430, binding = 1) readonly buffer GateBuf { float gatep[]; };
+layout(std430, binding = 2) readonly buffer PosBuf { float pos[]; };
+layout(std430, binding = 3) readonly buffer NormBuf { float norm[]; };
+layout(std430, binding = 4) readonly buffer CsBuf { float cs[]; };
+layout(std430, binding = 5) coherent buffer StateBuf { float state[]; };
+layout(push_constant) uniform P {
+    uint row0;
+    uint n;
+    uint position0;
+    uint dim;
+    uint coff;
+    uint ratio;
+    uint rope;
+    float eps;
+    uint off_buf_kv;
+    uint off_buf_gate;
+    uint off_ov_kv;
+    uint off_ov_gate;
+    uint off_entries;
+} p;
+
+shared float red[WG];
+
+void sync() {
+    memoryBarrierBuffer();
+    barrier();
+}
+
+float reduce_sum(float v) {
+    const uint t = gl_LocalInvocationID.x;
+    red[t] = v;
+    barrier();
+    for (uint off = WG / 2u; off > 0u; off >>= 1) {
+        if (t < off) red[t] += red[t + off];
+        barrier();
+    }
+    const float result = red[0];
+    barrier();
+    return result;
+}
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint w = p.coff * p.dim;
+    const uint half_rope = p.rope / 2u;
+    const uint off = p.coff == 2u ? p.dim : 0u;
+    for (uint i = 0u; i < p.n; i++) {
+        const uint position = p.position0 + i;
+        const uint row = p.row0 + i;
+        const uint slot = position % p.ratio;
+        for (uint c = t; c < w; c += WG) {
+            state[p.off_buf_kv + slot * w + c] = kvp[row * w + c];
+            state[p.off_buf_gate + slot * w + c] = gatep[row * w + c];
+        }
+        sync();
+        if ((position + 1u) % p.ratio != 0u) continue;
+        const uint e = (position + 1u) / p.ratio - 1u;
+        const uint entry = p.off_entries + e * p.dim;
+        const bool prev = p.coff == 2u && e > 0u;
+        float ss = 0.0;
+        for (uint c = t; c < p.dim; c += WG) {
+            float mx = NEG;
+            if (prev) {
+                for (uint j = 0u; j < p.ratio; j++) mx = max(mx, state[p.off_ov_gate + j * p.dim + c]);
+            }
+            for (uint j = 0u; j < p.ratio; j++) mx = max(mx, state[p.off_buf_gate + j * w + off + c] + pos[j * w + off + c]);
+            float sum = 0.0;
+            float acc = 0.0;
+            if (prev) {
+                for (uint j = 0u; j < p.ratio; j++) sum += exp(state[p.off_ov_gate + j * p.dim + c] - mx);
+            }
+            for (uint j = 0u; j < p.ratio; j++) sum += exp(state[p.off_buf_gate + j * w + off + c] + pos[j * w + off + c] - mx);
+            if (prev) {
+                for (uint j = 0u; j < p.ratio; j++) acc += exp(state[p.off_ov_gate + j * p.dim + c] - mx) / sum * state[p.off_ov_kv + j * p.dim + c];
+            }
+            for (uint j = 0u; j < p.ratio; j++) {
+                acc += exp(state[p.off_buf_gate + j * w + off + c] + pos[j * w + off + c] - mx) / sum * state[p.off_buf_kv + j * w + off + c];
+            }
+            state[entry + c] = acc;
+            ss += acc * acc;
+        }
+        const float total = reduce_sum(ss);
+        const float inv = inversesqrt(total / float(p.dim) + p.eps);
+        for (uint c = t; c < p.dim; c += WG) state[entry + c] = state[entry + c] * inv * norm[c];
+        sync();
+        for (uint j = t; j < half_rope; j += WG) {
+            const float cc = cs[(row * half_rope + j) * 2u];
+            const float sn = cs[(row * half_rope + j) * 2u + 1u];
+            const uint at = entry + (p.dim - p.rope) + 2u * j;
+            const float a = state[at];
+            const float b = state[at + 1u];
+            state[at] = a * cc - b * sn;
+            state[at + 1u] = b * cc + a * sn;
+        }
+        if (p.coff == 2u) {
+            for (uint idx = t; idx < p.ratio * p.dim; idx += WG) {
+                const uint j = idx / p.dim;
+                const uint c = idx % p.dim;
+                state[p.off_ov_kv + idx] = state[p.off_buf_kv + j * w + c];
+                state[p.off_ov_gate + idx] = state[p.off_buf_gate + j * w + c] + pos[j * w + c];
+            }
+        }
+        sync();
+    }
+}

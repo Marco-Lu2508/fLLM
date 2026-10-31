@@ -20,6 +20,7 @@ mod blocksparse;
 mod dsa;
 mod inkling;
 mod hc;
+mod v4;
 mod kv;
 mod mlx;
 mod moe;
@@ -2294,6 +2295,7 @@ impl<'a> Tester<'a> {
             self.block_sparse_cases();
             self.inkling_cases();
             self.hc_cases();
+            self.v4_cases();
         }
         if self.enter("linear") {
             self.linear_cases();

@@ -17,14 +17,24 @@ pub const MAX_DK: usize = 512;
 /// the k-pool indexer: the pool scores, the top-k of pools into the first entries of the row of `sel`, and a last group that expands the chosen pools to positions). Slots: `store` (rw), `k`, `gate`, `ape`, `q`, `w`, `sel`; `slots`/`meta` are host
 /// arrays, `scores` is scratch (id 0).
 pub fn plan_dsa_select(p: &DsaParams, slots: &[usize], block_tables: &[i64], lengths: &[i64], store_slots: usize) -> Result<Vec<Vec<OpPlan>>, BackendError> {
+    plan_dsa_select_keys(p, Some(slots), block_tables, lengths, store_slots)
+}
+
+/// `dsa_score_select`: the scoring and the selection of [`plan_dsa_select`] over a store that already holds the keys (no key write; slots `store` (read), `q`, `w`,
+/// `sel`).
+pub fn plan_dsa_scores(p: &DsaParams, block_tables: &[i64], lengths: &[i64], store_slots: usize) -> Result<Vec<Vec<OpPlan>>, BackendError> {
+    plan_dsa_select_keys(p, None, block_tables, lengths, store_slots)
+}
+
+fn plan_dsa_select_keys(p: &DsaParams, slots: Option<&[usize]>, block_tables: &[i64], lengths: &[i64], store_slots: usize) -> Result<Vec<Vec<OpPlan>>, BackendError> {
     let rows = lengths.len();
-    if rows == 0 || slots.len() != rows {
+    if rows == 0 || slots.is_some_and(|s| s.len() != rows) {
         return Err(invalid("indexer: no rows, or one slot per row expected"));
     }
     if p.heads == 0 || p.dim == 0 || p.topk == 0 || p.stride == 0 || p.block_size == 0 || block_tables.len() != rows * p.stride {
         return Err(invalid("indexer: empty shape or block tables of the wrong size"));
     }
-    if slots.iter().any(|&s| s >= store_slots) {
+    if slots.is_some_and(|slots| slots.iter().any(|&s| s >= store_slots)) {
         return Err(invalid("indexer: a slot lies outside the key store"));
     }
     let need = |n: i64| (n as usize).div_ceil(p.block_size);
@@ -45,12 +55,15 @@ pub fn plan_dsa_select(p: &DsaParams, slots: &[usize], block_tables: &[i64], len
     if pooled && (p.dim > 128 || p.kpool > 16 || p.topk < p.kpool || p.topk / p.kpool > 1024) {
         return Err(BackendError::UnsupportedOperation("k-pool indexer: dim over 128, pools over 16 tokens, fewer kept tokens than one pool or over 1024 kept pools".into()));
     }
-    let mut groups = vec![vec![plan(
-        "misc_dsa_keys",
-        Push::new().u("count", rows * p.dim).u("dim", p.dim).u("width", width).b("has_gate", pooled),
-        groups_1d(rows * p.dim, 256),
-        Slots::new().rw("store").read("k").read_opt("gate", pooled).host("slots", Arc::new(pack_u32(slots)?)),
-    )?]];
+    let mut groups = match slots {
+        Some(slots) => vec![vec![plan(
+            "misc_dsa_keys",
+            Push::new().u("count", rows * p.dim).u("dim", p.dim).u("width", width).b("has_gate", pooled),
+            groups_1d(rows * p.dim, 256),
+            Slots::new().rw("store").read("k").read_opt("gate", pooled).host("slots", Arc::new(pack_u32(slots)?)),
+        )?]],
+        None => Vec::new(),
+    };
     // pools: the topk kernel selects `topk / kpool` pools among `length / kpool`
     let kp = if pooled { p.topk / p.kpool } else { p.topk };
     let units = |n: usize| if pooled { n / p.kpool } else { n };

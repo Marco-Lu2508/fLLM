@@ -53,7 +53,9 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `dsa_select` (lightning indexer of DeepSeek-V3.2 / GLM-5: key write, scores, top-k; chunks of rows) | `dsa::plan_dsa_select` | `misc_dsa_keys`, `misc_dsa_scores`, `misc_dsa_topk` |
 | `dsa_attention` (attention over the selected positions, f16 cache) | `dsa::plan_dsa_attention` | `attn_sparse` |
 | `rotate_heads` (tail rotation of the Hy4 indexer heads) | `hc::plan_rotate_heads` | `misc_rotate_heads` |
-| `hc_mix`, `hc_combine` (hyper-connections of Hy4 / GLM-5-Next) | `hc::plan_hc_mix`, `hc::plan_hc_combine` | `misc_hc_mix`, `misc_hc_combine` |
+| `hc_mix`, `hc_combine` (hyper-connections of Hy4 / GLM-5-Next / DeepSeek-V4) | `hc::plan_hc_mix`, `hc::plan_hc_combine` | `misc_hc_mix`, `misc_hc_combine` |
+| `dsa_score_select` (scores and top-k over keys that are already in the store) | `dsa::plan_dsa_scores` | `misc_dsa_scores`, `misc_dsa_topk` |
+| `v4_rope`, `v4_compress`, `v4_attention`, `v4_ring_write` (DeepSeek-V4 attention) | `v4::plan_v4_rope`, `plan_v4_compress`, `plan_v4_attention`, `plan_v4_ring` | `v4_rope`, `v4_compress`, `v4_attn`, `v4_ring` |
 | `moe_topk`, `moe_route` | `plan_moe_topk`, `plan_moe_route` | `moe_topk` |
 | `moe_linear` | `plan_moe_linear` | `moe_linear_<fmt>_{arena,bda}` (12 quantized formats) |
 | `moe_combine` | `plan_moe_combine` | `moe_combine` |
@@ -1116,3 +1118,20 @@ Hyper-connections (`Stream::hc_mix`, `Stream::hc_combine`; plans in `ops/hc.rs`)
 
 * `conv_resid`: `out = x + depthwise causal convolution of x` for one run (like `shortconv` without the gating and the bias): one invocation per channel walks the tokens, the history of the last `taps - 1` inputs per channel is `state[state_off + ch * (taps - 1) + j]` (oldest first), `reset` ignores the old history, taps 2..8.
 * `attn_rel`: attention without rotary embeddings, one workgroup of 128 per (row, head), tiles of 128 keys with an online softmax: `score(j) = dot(q * tau, key_j) * scale + tau * sum_c rel[c] * profile[c][distance]` (the bias exists for `distance < extent`), `tau = 1 + log_alpha * ln(max(1, (position + 1) / log_floor))` when `log_floor > 0`; the visible keys are the last `window` ones (0: all). `rel` holds `d_rel <= 128` values per row and head, `profile` is `d_rel x extent`; key and value width `hd <= 512`; at most 512k (row, head, visible key) triples per dispatch.
+
+### `v4_rope.comp`, `v4_compress.comp`, `v4_attn.comp`, `v4_ring.comp`
+
+DeepSeek-V4 attention (`Stream::v4_rope`, `v4_compress`, `v4_attention`, `v4_ring_write`; plans in `ops/v4.rs`). All offsets are floats into the sequence's state buffer (a
+`run_state` binding); the layer's regions (indexer entries, entries, ring, buffered projections, overlap series, each at a multiple of 1024 floats) are given by `V4Shape::layout`.
+
+* `v4_rope`: in place on `rows x groups x dim`: the trailing `rope` values of each group are rotated pairwise `(2j, 2j + 1)` with `(cos, sin)` read from `cs[row][j]`
+  (interleaved floats), the sine multiplied by `sign`. Grid-stride loop over `rows * groups * rope / 2` pairs.
+* `v4_compress`: one workgroup of 128 walks the (at most 512) tokens of a run piece, writing the projections `kv`, `gate` (`n x coff * dim`) into the buffer of the last `ratio` tokens;
+  a token that completes a window pools it (softmax over `gate + pos` weighting `kv`, plus the first series of the previous window for `coff = 2`), RMS-normalises the entry
+  with `norm`, rotates its trailing `rope` values with `cs[row]` and stores it; for `coff = 2` the first series of the window is kept as the overlap. Pieces of a run are separate dispatches.
+* `v4_attn`: one workgroup of 128 per (row, head). Keys: the last `window` key vectors (rows of `kv` of the run or the ring), then the compressed entries the row sees
+  (`(position + 1) / ratio` of them, or those listed in `sel`, ascending and -1 padded). Online softmax over tiles of 128 keys, started with the per-head sink; K = V.
+  The output is rotated back and written group-major (`[o_groups][rows][heads / o_groups * hd]`). Head width up to 512. The plan splits long batches into groups of at most
+  2^17 (row, head, key) triples, each submitted on its own.
+* `v4_ring`: the last `window` key vectors of a run go to ring slot `position % window`.
+* The indexer selection of a layer is `dsa_score_select` (`misc_dsa_scores`, `misc_dsa_topk` on the entries stored by `v4_compress`: one block of `max_entries` keys per sequence, block table `[0]`).

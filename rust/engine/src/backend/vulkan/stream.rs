@@ -1223,6 +1223,155 @@ impl Stream for VulkanStream {
         Ok(())
     }
 
+    fn dsa_score_select(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &DeviceBuffer,
+        q: &DeviceBuffer,
+        w: &DeviceBuffer,
+        block_tables: &[i64],
+        lengths: &[i64],
+        params: &DsaParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, dim) = (params.heads, params.dim);
+        if params.kpool > 1 || q.size < rows * heads * dim * 4 || w.size < rows * heads * 4 || sel.size < rows * params.topk * 4 || !store.size.is_multiple_of(dim * 4) {
+            return Err(invalid("lightning indexer: buffers smaller than the batch"));
+        }
+        let groups = crate::backend::vulkan::ops::dsa::plan_dsa_scores(params, block_tables, lengths, store.size / (dim * 4))?;
+        let args = [Arg::r("store", store), Arg::r("q", q), Arg::r("w", w), Arg::w("sel", sel)];
+        let last = groups.len() - 1;
+        for (index, group) in groups.iter().enumerate() {
+            self.run_plans(group, &args, &[], false)?;
+            if groups.len() > 1 && index < last {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn supports_v4(&self, shape: &crate::backend::V4Shape) -> bool {
+        crate::backend::vulkan::ops::v4::v4_supported(shape)
+            && self.sh.caps().max_workgroup_invocations >= 128
+            && shape.index.is_none_or(|i| {
+                self.supports_dsa(
+                    &DsaParams { heads: i.heads, dim: i.dim, topk: i.topk, stride: 1, block_size: 1, scale: 1.0, head_scale: 1.0, kpool: 1, always_tail: false },
+                    shape.head_dim,
+                    1,
+                )
+            })
+    }
+
+    fn v4_rope(&mut self, x: &mut DeviceBuffer, cs: &DeviceBuffer, rows: usize, groups: usize, dim: usize, rope: usize, sign: f32) -> Result<(), BackendError> {
+        if rows == 0 || groups == 0 {
+            return Ok(());
+        }
+        if x.size < rows * groups * dim * 4 || cs.size < rows * (rope / 2) * 8 {
+            return Err(invalid("DeepSeek-V4 rotation does not fit its buffers"));
+        }
+        let plan = crate::backend::vulkan::ops::v4::plan_v4_rope(rows, groups, dim, rope, sign)?;
+        self.run_plans(&[plan], &[Arg::w("x", x), Arg::r("cs", cs)], &[], false)
+    }
+
+    fn v4_compress(
+        &mut self,
+        which: crate::backend::V4Pool,
+        shape: &crate::backend::V4Shape,
+        runs: &[crate::backend::V4Run<'_>],
+        state_offset: usize,
+        kv: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        pos: &DeviceBuffer,
+        norm: &DeviceBuffer,
+        cs_entry: &DeviceBuffer,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (dim, coff) = match which {
+            crate::backend::V4Pool::Attention => (shape.head_dim, shape.coff()),
+            crate::backend::V4Pool::Index => (shape.index.map_or(0, |i| i.dim), 2),
+        };
+        let lay = shape.layout();
+        let state_end = state_offset + lay.total * 4;
+        let w = coff * dim;
+        if kv.size < rows * w * 4 || gate.size < rows * w * 4 || pos.size < shape.ratio * w * 4 || norm.size < dim * 4 || cs_entry.size < rows * (shape.rope / 2) * 8 || runs.iter().any(|r| r.state.size < state_end) {
+            return Err(invalid("DeepSeek-V4 compressor buffers are smaller than the layer needs"));
+        }
+        let specs: Vec<_> = runs.iter().map(|r| crate::backend::vulkan::ops::v4::V4RunSpec { first_row: r.first_row, rows: r.rows, position: r.position }).collect();
+        let plans = crate::backend::vulkan::ops::v4::plan_v4_compress(which, shape, &specs, state_offset, eps)?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &[Arg::r("kv", kv), Arg::r("gate", gate), Arg::r("pos", pos), Arg::r("norm", norm), Arg::r("cs", cs_entry)], &states, false)
+    }
+
+    fn v4_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceBuffer,
+        shape: &crate::backend::V4Shape,
+        runs: &[crate::backend::V4Run<'_>],
+        state_offset: usize,
+        sinks: &DeviceBuffer,
+        sel: Option<&DeviceBuffer>,
+        cs: &DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, hd) = (shape.heads, shape.head_dim);
+        let topk = shape.index.map_or(0, |i| i.topk);
+        let state_end = state_offset + shape.layout().total * 4;
+        if q.size < rows * heads * hd * 4
+            || kv.size < rows * hd * 4
+            || out.size < rows * heads * hd * 4
+            || sinks.size < heads * 4
+            || cs.size < rows * (shape.rope / 2) * 8
+            || sel.is_some_and(|s| topk == 0 || s.size < rows * topk * 4)
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("DeepSeek-V4 attention buffers are smaller than the batch needs"));
+        }
+        let specs: Vec<_> = runs.iter().map(|r| crate::backend::vulkan::ops::v4::V4RunSpec { first_row: r.first_row, rows: r.rows, position: r.position }).collect();
+        let groups = crate::backend::vulkan::ops::v4::plan_v4_attention(shape, &specs, state_offset, sel.is_some(), rows)?;
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        let mut args = vec![Arg::r("q", q), Arg::r("kv", kv), Arg::r("sinks", sinks), Arg::r("cs", cs), Arg::w("out", out)];
+        if let Some(s) = sel {
+            args.push(Arg::r("sel", s));
+        }
+        let last = groups.len().saturating_sub(1);
+        for (index, group) in groups.iter().enumerate() {
+            self.run_plans(group, &args, &states, false)?;
+            if groups.len() > 1 && index < last {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn v4_ring_write(&mut self, shape: &crate::backend::V4Shape, runs: &[crate::backend::V4Run<'_>], state_offset: usize, kv: &DeviceBuffer) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        if kv.size < rows * shape.head_dim * 4 || runs.iter().any(|r| r.state.size < state_offset + shape.layout().total * 4) {
+            return Err(invalid("DeepSeek-V4 ring buffers are smaller than the layer needs"));
+        }
+        let specs: Vec<_> = runs.iter().map(|r| crate::backend::vulkan::ops::v4::V4RunSpec { first_row: r.first_row, rows: r.rows, position: r.position }).collect();
+        let plans = crate::backend::vulkan::ops::v4::plan_v4_ring(shape, &specs, state_offset)?;
+        let states: Vec<&DeviceBuffer> = runs.iter().map(|r| r.state).collect();
+        self.run_plans(&plans, &[Arg::r("kv", kv)], &states, false)
+    }
+
     fn clamp(&mut self, x: &mut DeviceBuffer, limit: f32) -> Result<(), BackendError> {
         if !x.size.is_multiple_of(4) {
             return Err(invalid("clamp target is not a whole number of floats"));

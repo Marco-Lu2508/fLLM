@@ -1,0 +1,30 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: v4_ring | bindings: kv,state | push: row0,n,position0,hd,window,off_ring | grid: [min(ceil(min(n, window) * hd / 256), 65535), 1, 1] per run
+// Stream::v4_ring_write (DeepSeek-V4): the last `window` key vectors of a run (rows row0 .. row0 + n of kv, first row at `position0`) go to the ring of the
+// layer's state, float view of the sequence's state buffer: ring[(position % window) * hd + d] = kv[row][d]. Grid-stride loop over min(n, window) * hd floats.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer KvBuf { float kv[]; };
+layout(std430, binding = 1) buffer StateBuf { float state[]; };
+layout(push_constant) uniform P {
+    uint row0;
+    uint n;
+    uint position0;
+    uint hd;
+    uint window;
+    uint off_ring;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    const uint m = min(p.n, p.window);
+    const uint first = p.n - m;
+    for (uint idx = gl_GlobalInvocationID.x; idx < m * p.hd; idx += grid_items) {
+        const uint i = first + idx / p.hd;
+        const uint d = idx % p.hd;
+        state[p.off_ring + ((p.position0 + i) % p.window) * p.hd + d] = kv[(p.row0 + i) * p.hd + d];
+    }
+}

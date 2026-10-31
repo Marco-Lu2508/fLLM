@@ -627,6 +627,57 @@ extern "C" {
         block_size: c_int,
         scale: f32,
     ) -> c_int;
+    fn fllm_cuda_v4_supported(head_dim: c_int, rope: c_int, window: c_int, heads: c_int, o_groups: c_int) -> c_int;
+    fn fllm_cuda_v4_rope(st: *mut RawStream, x: *mut f32, cs: *const f32, rows: c_int, groups: c_int, dim: c_int, rope: c_int, sign: f32) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_v4_compress(
+        st: *mut RawStream,
+        state: *mut f32,
+        kv: *const f32,
+        gate: *const f32,
+        pos: *const f32,
+        norm: *const f32,
+        cs: *const f32,
+        row0: c_int,
+        n: c_int,
+        position0: c_int,
+        dim: c_int,
+        coff: c_int,
+        ratio: c_int,
+        rope: c_int,
+        eps: f32,
+        off_buf_kv: usize,
+        off_buf_gate: usize,
+        off_ov_kv: usize,
+        off_ov_gate: usize,
+        off_entries: usize,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn fllm_cuda_v4_attention(
+        st: *mut RawStream,
+        out: *mut f32,
+        q: *const f32,
+        kv: *const f32,
+        state: *const f32,
+        sinks: *const f32,
+        sel: *const i32,
+        cs: *const f32,
+        row0: c_int,
+        n: c_int,
+        position0: c_int,
+        heads: c_int,
+        hd: c_int,
+        rope: c_int,
+        window: c_int,
+        ratio: c_int,
+        topk: c_int,
+        o_groups: c_int,
+        rows_total: c_int,
+        off_ring: usize,
+        off_entries: usize,
+        scale: f32,
+    ) -> c_int;
+    fn fllm_cuda_v4_ring(st: *mut RawStream, state: *mut f32, kv: *const f32, row0: c_int, n: c_int, position0: c_int, hd: c_int, window: c_int, off_ring: usize) -> c_int;
     fn fllm_cuda_clamp(st: *mut RawStream, x: *mut f32, n: usize, limit: f32) -> c_int;
     fn fllm_cuda_kda_supported(heads: c_int, head_dim: c_int, ksz: c_int) -> c_int;
     fn fllm_cuda_copy_cols(st: *mut RawStream, dst: *mut f32, src: *const f32, rows: c_int, width: c_int, dst_stride: c_int, dst_col: c_int) -> c_int;
@@ -2478,6 +2529,82 @@ impl CudaStream {
             )
         };
         fused_result(rc)
+    }
+}
+
+impl CudaStream {
+    /// The scoring and the top-k selection of `dsa_select` once the keys are in the store (shapes checked by the callers).
+    #[allow(clippy::too_many_arguments)]
+    fn dsa_scores_topk(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &DeviceBuffer,
+        q: &DeviceBuffer,
+        w: &DeviceBuffer,
+        ape: Option<&DeviceBuffer>,
+        block_tables: &[i64],
+        lengths: &[i64],
+        p: &DsaParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        let (heads, dim, topk) = (p.heads, p.dim, p.topk);
+        let width = p.store_width();
+        let sel_width = p.sel_width();
+        let pooled = p.kpool > 1;
+        let max_len = lengths.iter().map(|&n| n as usize).max().unwrap_or(1);
+        // rows that need scores are scored in chunks of at most 4M (row, position) pairs, so that one launch stays short (display watchdogs)
+        let chunk = if max_len > topk { (4usize << 20).div_euclid(max_len).clamp(1, rows) } else { rows };
+        let score_bytes = if max_len > topk { chunk * max_len * 4 } else { 16 };
+        if self.dsa_scores.as_ref().is_none_or(|b| b.size < score_bytes) {
+            self.dsa_scores = None;
+            self.dsa_scores = Some(self.alloc(score_bytes.max(256))?);
+        }
+        let psel_bytes = if pooled { rows * (topk / p.kpool).max(1) * 4 } else { 16 };
+        if self.dsa_psel.as_ref().is_none_or(|b| b.size < psel_bytes) {
+            self.dsa_psel = None;
+            self.dsa_psel = Some(self.alloc(psel_bytes.max(256))?);
+        }
+        let scores = self.dsa_scores.as_ref().ok_or_else(|| invalid("score buffer"))?;
+        let psel = self.dsa_psel.as_ref().ok_or_else(|| invalid("pool selection buffer"))?;
+        let ape_ptr = match ape {
+            Some(a) if pooled => dev_ptr(a)?.cast_const().cast(),
+            _ => std::ptr::null(),
+        };
+        let mut r0 = 0;
+        while r0 < rows {
+            let r1 = (r0 + chunk).min(rows);
+            let tables = &block_tables[r0 * p.stride..r1 * p.stride];
+            // SAFETY: the pointers address rows r0..r1 of buffers checked above; the host arrays are staged before the call returns.
+            check(unsafe {
+                fllm_cuda_dsa_select(
+                    self.raw,
+                    dev_ptr(q)?.add(r0 * heads * dim * 4).cast(),
+                    dev_ptr(w)?.add(r0 * heads * 4).cast(),
+                    dev_ptr(store)?.cast(),
+                    ape_ptr,
+                    tables.as_ptr(),
+                    tables.len(),
+                    lengths[r0..r1].as_ptr(),
+                    dev_ptr(scores)?.cast(),
+                    max_len,
+                    dev_ptr(sel)?.add(r0 * sel_width * 4).cast(),
+                    dev_ptr(psel)?.add(r0 * (topk / p.kpool.max(1)).max(1) * 4).cast(),
+                    to_c(r1 - r0, "rows")?,
+                    to_c(heads, "heads")?,
+                    to_c(dim, "dim")?,
+                    to_c(width, "width")?,
+                    to_c(topk, "top-k")?,
+                    to_c(p.kpool.max(1), "pool size")?,
+                    c_int::from(p.always_tail),
+                    to_c(p.stride, "block table stride")?,
+                    to_c(p.block_size, "block size")?,
+                    p.scale,
+                    p.head_scale,
+                )
+            })?;
+            r0 = r1;
+        }
+        Ok(())
     }
 }
 
@@ -4539,7 +4666,7 @@ impl Stream for CudaStream {
         if rows == 0 {
             return Ok(());
         }
-        let (heads, dim, topk) = (p.heads, p.dim, p.topk);
+        let (heads, dim) = (p.heads, p.dim);
         let width = p.store_width();
         let sel_width = p.sel_width();
         let pooled = p.kpool > 1;
@@ -4566,58 +4693,209 @@ impl Stream for CudaStream {
             _ => std::ptr::null(),
         };
         check(unsafe { fllm_cuda_dsa_keys(self.raw, dev_ptr(store)?.cast(), dev_ptr(k)?.cast(), gate_ptr, ids.as_ptr(), to_c(rows, "rows")?, to_c(dim, "dim")?, to_c(width, "width")?) })?;
-        let max_len = lengths.iter().map(|&n| n as usize).max().unwrap_or(1);
-        // rows that need scores are scored in chunks of at most 4M (row, position) pairs, so that one launch stays short (display watchdogs)
-        let chunk = if max_len > topk { (4usize << 20).div_euclid(max_len).clamp(1, rows) } else { rows };
-        let score_bytes = if max_len > topk { chunk * max_len * 4 } else { 16 };
-        if self.dsa_scores.as_ref().is_none_or(|b| b.size < score_bytes) {
-            self.dsa_scores = None;
-            self.dsa_scores = Some(self.alloc(score_bytes.max(256))?);
+        self.dsa_scores_topk(sel, store, q, w, ape, block_tables, lengths, p)
+    }
+
+    fn dsa_score_select(
+        &mut self,
+        sel: &mut DeviceBuffer,
+        store: &DeviceBuffer,
+        q: &DeviceBuffer,
+        w: &DeviceBuffer,
+        block_tables: &[i64],
+        lengths: &[i64],
+        p: &DsaParams,
+    ) -> Result<(), BackendError> {
+        let rows = lengths.len();
+        if rows == 0 {
+            return Ok(());
         }
-        let psel_bytes = if pooled { rows * (topk / p.kpool).max(1) * 4 } else { 16 };
-        if self.dsa_psel.as_ref().is_none_or(|b| b.size < psel_bytes) {
-            self.dsa_psel = None;
-            self.dsa_psel = Some(self.alloc(psel_bytes.max(256))?);
+        let store_slots = store.size / (p.dim * 4);
+        if p.kpool > 1
+            || block_tables.len() != rows * p.stride
+            || q.size < rows * p.heads * p.dim * 4
+            || w.size < rows * p.heads * 4
+            || sel.size < rows * p.topk * 4
+            || lengths.iter().any(|&n| n <= 0 || (n as usize).div_ceil(p.block_size) > p.stride)
+            || lengths.iter().enumerate().any(|(r, &n)| block_tables[r * p.stride..][..(n as usize).div_ceil(p.block_size)].iter().any(|&b| b < 0 || (b as usize + 1) * p.block_size > store_slots))
+        {
+            return Err(invalid("lightning indexer: buffers, lengths or block tables do not fit the batch"));
         }
-        let scores = self.dsa_scores.as_ref().ok_or_else(|| invalid("score buffer"))?;
-        let psel = self.dsa_psel.as_ref().ok_or_else(|| invalid("pool selection buffer"))?;
-        let ape_ptr = match ape {
-            Some(a) if pooled => dev_ptr(a)?.cast_const().cast(),
-            _ => std::ptr::null(),
+        self.dsa_scores_topk(sel, store, q, w, None, block_tables, lengths, p)
+    }
+
+    fn supports_v4(&self, s: &V4Shape) -> bool {
+        // SAFETY: plain arithmetic on the arguments.
+        !self.act.is_narrow()
+            && unsafe { fllm_cuda_v4_supported(s.head_dim as c_int, s.rope as c_int, s.window as c_int, s.heads as c_int, s.o_groups as c_int) } != 0
+            && s.index.is_none_or(|i| self.supports_dsa(&DsaParams { heads: i.heads, dim: i.dim, topk: i.topk, stride: 1, block_size: 1, scale: 1.0, head_scale: 1.0, kpool: 1, always_tail: false }, s.head_dim, 1))
+    }
+
+    fn v4_rope(&mut self, x: &mut DeviceBuffer, cs: &DeviceBuffer, rows: usize, groups: usize, dim: usize, rope: usize, sign: f32) -> Result<(), BackendError> {
+        if rows == 0 || groups == 0 {
+            return Ok(());
+        }
+        if rope == 0 || rope > dim || !rope.is_multiple_of(2) || x.size < rows * groups * dim * 4 || cs.size < rows * (rope / 2) * 8 {
+            return Err(invalid("DeepSeek-V4 rotation does not fit its buffers"));
+        }
+        // SAFETY: sizes were checked above.
+        check(unsafe { fllm_cuda_v4_rope(self.raw, dev_ptr(x)?.cast(), dev_ptr(cs)?.cast(), to_c(rows, "rows")?, to_c(groups, "groups")?, to_c(dim, "dim")?, to_c(rope, "rope")?, sign) })
+    }
+
+    fn v4_compress(
+        &mut self,
+        which: V4Pool,
+        shape: &V4Shape,
+        runs: &[V4Run<'_>],
+        state_offset: usize,
+        kv: &DeviceBuffer,
+        gate: &DeviceBuffer,
+        pos: &DeviceBuffer,
+        norm: &DeviceBuffer,
+        cs_entry: &DeviceBuffer,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        let (dim, coff, ratio) = match which {
+            V4Pool::Attention => (shape.head_dim, shape.coff(), shape.ratio),
+            V4Pool::Index => (shape.index.map_or(0, |i| i.dim), 2, shape.ratio),
         };
-        let mut r0 = 0;
-        while r0 < rows {
-            let r1 = (r0 + chunk).min(rows);
-            let tables = &block_tables[r0 * p.stride..r1 * p.stride];
-            // SAFETY: the pointers address rows r0..r1 of buffers checked above; the host arrays are staged before the call returns.
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let lay = shape.layout();
+        let state_end = state_offset + lay.total * 4;
+        let w = coff * dim;
+        if dim == 0 || ratio == 0 || kv.size < rows * w * 4 || gate.size < rows * w * 4 || pos.size < ratio * w * 4 || norm.size < dim * 4 || cs_entry.size < rows * (shape.rope / 2) * 8 || runs.iter().any(|r| r.state.size < state_end) {
+            return Err(invalid("DeepSeek-V4 compressor buffers are smaller than the layer needs"));
+        }
+        let (buf_kv, buf_gate, ov_kv, ov_gate, entries) = match which {
+            V4Pool::Attention => (lay.buf_kv, lay.buf_gate, lay.ov_kv, lay.ov_gate, lay.entries),
+            V4Pool::Index => (lay.index_buf_kv, lay.index_buf_gate, lay.index_ov_kv, lay.index_ov_gate, lay.index_entries),
+        };
+        let base = state_offset / 4;
+        for run in runs.iter().filter(|r| r.rows > 0) {
+            // SAFETY: sizes were checked above; the offsets lie inside the state of the layer.
             check(unsafe {
-                fllm_cuda_dsa_select(
+                fllm_cuda_v4_compress(
                     self.raw,
-                    dev_ptr(q)?.add(r0 * heads * dim * 4).cast(),
-                    dev_ptr(w)?.add(r0 * heads * 4).cast(),
-                    dev_ptr(store)?.cast(),
-                    ape_ptr,
-                    tables.as_ptr(),
-                    tables.len(),
-                    lengths[r0..r1].as_ptr(),
-                    dev_ptr(scores)?.cast(),
-                    max_len,
-                    dev_ptr(sel)?.add(r0 * sel_width * 4).cast(),
-                    dev_ptr(psel)?.add(r0 * (topk / p.kpool.max(1)).max(1) * 4).cast(),
-                    to_c(r1 - r0, "rows")?,
-                    to_c(heads, "heads")?,
+                    dev_ptr(run.state)?.cast(),
+                    dev_ptr(kv)?.cast(),
+                    dev_ptr(gate)?.cast(),
+                    dev_ptr(pos)?.cast(),
+                    dev_ptr(norm)?.cast(),
+                    dev_ptr(cs_entry)?.cast(),
+                    to_c(run.first_row, "run start")?,
+                    to_c(run.rows, "run length")?,
+                    to_c(run.position, "position")?,
                     to_c(dim, "dim")?,
-                    to_c(width, "width")?,
-                    to_c(topk, "top-k")?,
-                    to_c(p.kpool.max(1), "pool size")?,
-                    c_int::from(p.always_tail),
-                    to_c(p.stride, "block table stride")?,
-                    to_c(p.block_size, "block size")?,
-                    p.scale,
-                    p.head_scale,
+                    to_c(coff, "series")?,
+                    to_c(ratio, "ratio")?,
+                    to_c(shape.rope, "rope")?,
+                    eps,
+                    base + buf_kv,
+                    base + buf_gate,
+                    base + ov_kv,
+                    base + ov_gate,
+                    base + entries,
                 )
             })?;
-            r0 = r1;
+        }
+        Ok(())
+    }
+
+    fn v4_attention(
+        &mut self,
+        out: &mut DeviceBuffer,
+        q: &DeviceBuffer,
+        kv: &DeviceBuffer,
+        shape: &V4Shape,
+        runs: &[V4Run<'_>],
+        state_offset: usize,
+        sinks: &DeviceBuffer,
+        sel: Option<&DeviceBuffer>,
+        cs: &DeviceBuffer,
+    ) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let (heads, hd) = (shape.heads, shape.head_dim);
+        let lay = shape.layout();
+        let topk = shape.index.map_or(0, |i| i.topk);
+        let state_end = state_offset + lay.total * 4;
+        if q.size < rows * heads * hd * 4
+            || kv.size < rows * hd * 4
+            || out.size < rows * heads * hd * 4
+            || sinks.size < heads * 4
+            || cs.size < rows * (shape.rope / 2) * 8
+            || sel.is_some_and(|s| topk == 0 || s.size < rows * topk * 4)
+            || runs.iter().any(|r| r.state.size < state_end)
+        {
+            return Err(invalid("DeepSeek-V4 attention buffers are smaller than the batch needs"));
+        }
+        let sel_ptr = match sel {
+            Some(s) => dev_ptr(s)?.cast_const().cast(),
+            None => std::ptr::null(),
+        };
+        let base = state_offset / 4;
+        let scale = (hd as f32).powf(-0.5);
+        for run in runs.iter().filter(|r| r.rows > 0) {
+            // SAFETY: sizes were checked above; the ring and entries lie inside the state of the layer.
+            check(unsafe {
+                fllm_cuda_v4_attention(
+                    self.raw,
+                    dev_ptr(out)?.cast(),
+                    dev_ptr(q)?.cast(),
+                    dev_ptr(kv)?.cast(),
+                    dev_ptr(run.state)?.cast_const().cast(),
+                    dev_ptr(sinks)?.cast(),
+                    sel_ptr,
+                    dev_ptr(cs)?.cast(),
+                    to_c(run.first_row, "run start")?,
+                    to_c(run.rows, "run length")?,
+                    to_c(run.position, "position")?,
+                    to_c(heads, "heads")?,
+                    to_c(hd, "head width")?,
+                    to_c(shape.rope, "rope")?,
+                    to_c(shape.window, "window")?,
+                    to_c(shape.ratio, "ratio")?,
+                    to_c(topk, "top-k")?,
+                    to_c(shape.o_groups, "groups")?,
+                    to_c(rows, "rows")?,
+                    base + lay.ring,
+                    base + lay.entries,
+                    scale,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn v4_ring_write(&mut self, shape: &V4Shape, runs: &[V4Run<'_>], state_offset: usize, kv: &DeviceBuffer) -> Result<(), BackendError> {
+        let rows = runs.iter().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        if rows == 0 {
+            return Ok(());
+        }
+        let lay = shape.layout();
+        if kv.size < rows * shape.head_dim * 4 || runs.iter().any(|r| r.state.size < state_offset + lay.total * 4) {
+            return Err(invalid("DeepSeek-V4 ring buffers are smaller than the layer needs"));
+        }
+        for run in runs.iter().filter(|r| r.rows > 0) {
+            // SAFETY: sizes were checked above.
+            check(unsafe {
+                fllm_cuda_v4_ring(
+                    self.raw,
+                    dev_ptr(run.state)?.cast(),
+                    dev_ptr(kv)?.cast(),
+                    to_c(run.first_row, "run start")?,
+                    to_c(run.rows, "run length")?,
+                    to_c(run.position, "position")?,
+                    to_c(shape.head_dim, "head width")?,
+                    to_c(shape.window, "window")?,
+                    state_offset / 4 + lay.ring,
+                )
+            })?;
         }
         Ok(())
     }

@@ -180,6 +180,15 @@ struct DeviceHcModel {
     ones: crate::backend::DeviceBuffer,
 }
 
+/// The parameters of the hyper-connections of a model.
+struct HcParams {
+    hc_mult: usize,
+    eps: f32,
+    iters: usize,
+    /// `Some`: independent connections (Hy4).
+    magnitude: Option<f32>,
+}
+
 /// What a hyper-connection block keeps between reading the streams and writing the branch output back.
 struct HcBlock {
     post: crate::backend::DeviceBuffer,
@@ -725,6 +734,8 @@ pub struct DeviceLayerWeights {
     rwkv: Option<rwkv::DeviceRwkv>,
     /// Kimi Delta Attention mixer resident on the device.
     kda: Option<kda::DeviceKda>,
+    /// DeepSeek-V4 attention resident on the device.
+    v4: Option<deepseek4::DeviceV4Layer>,
     /// Per-head attention sink logits (GPT-OSS).
     pub sinks: Option<Arc<Vec<f32>>>,
     /// q, k and v as one matrix (`FLLM_MERGE_PROJ`, narrow activations, Marlin 4-bit): `q`, `k` and `v` are `None` then.
@@ -783,6 +794,7 @@ impl DeviceLayerWeights {
             mamba1: None,
             rwkv: None,
             kda: None,
+            v4: None,
             zamba: None,
             par_mamba: None,
             sinks: None,
@@ -992,8 +1004,10 @@ pub struct DeviceModelWeights {
     pub alibi: Option<Arc<Vec<f32>>>,
     /// Gemma per-layer inputs: the projection of the embeddings to `layers x width` (the rest of the path is cheap and stays on the host).
     pub ple_proj: Option<crate::backend::DeviceWeight>,
-    /// Hyper-connection weights (Hy4, GLM-5-Next); the streams then live in their own buffer during a pass.
+    /// Hyper-connection weights (Hy4, GLM-5-Next, DeepSeek-V4); the streams then live in their own buffer during a pass.
     hc: Option<DeviceHcModel>,
+    /// DeepSeek-V4: `head_dim` ones, the weight of the plain RMS norm of every query head.
+    v4_ones: Option<crate::backend::DeviceBuffer>,
 }
 
 /// Rotary cos/sin tables shared between the decoder and device `RopeParams`.
@@ -1180,6 +1194,8 @@ pub struct RustDecoder {
     m3_run: bool,
     /// Inkling runs on the accelerator (convolutions, relative-position attention, experts); set when the model is attached.
     ink_device: bool,
+    /// The accelerator runs DeepSeek-V4 completely (`hc_device` is set with it); set when the model is attached.
+    v4_device: bool,
 }
 
 /// DeepStack features: per decoder layer, (row, values) pairs.
@@ -2418,6 +2434,7 @@ impl RustDecoder {
             m3_run: false,
             ink_device: false,
             hc_device: false,
+            v4_device: false,
         };
         decoder.set_device(device)?;
         decoder.plan_expert_cache(mapping);
@@ -2773,9 +2790,18 @@ impl RustDecoder {
         }
     }
 
+    /// The hyper-connection parameters of the model (Hy4, GLM-5-Next and DeepSeek-V4 have them).
+    fn hc_params(&self) -> Option<HcParams> {
+        if let Some(h) = self.cfg.hc.as_ref() {
+            return Some(HcParams { hc_mult: h.hc_mult, eps: h.eps, iters: h.iters, magnitude: h.magnitude });
+        }
+        let v = self.cfg.v4.as_ref()?;
+        Some(HcParams { hc_mult: v.hc_mult, eps: v.hc_eps, iters: v.hc_iters, magnitude: None })
+    }
+
     /// Mode of the hyper-connection mixing of the blocks of this model.
     fn hc_block_mode(&self) -> Option<crate::backend::HcMode> {
-        let h = self.cfg.hc.as_ref()?;
+        let h = self.hc_params()?;
         Some(match h.magnitude {
             Some(magnitude) => crate::backend::HcMode::Independent { magnitude },
             None => crate::backend::HcMode::Sinkhorn { iters: h.iters },
@@ -2796,7 +2822,7 @@ impl RustDecoder {
         rows: usize,
     ) -> Result<HcBlock, String> {
         let (cfg, mode) = (&self.cfg, self.hc_block_mode().ok_or("hyper-connection mode")?);
-        let h = cfg.hc.as_ref().ok_or("hyper-connection configuration missing")?;
+        let h = self.hc_params().ok_or("hyper-connection configuration missing")?;
         let (hc, hidden) = (h.hc_mult, cfg.hidden);
         let err = |e: crate::backend::BackendError| e.to_string();
         let mut flat = scratch.acquire(rows * hc * hidden * 4).map_err(err)?;
@@ -2833,7 +2859,7 @@ impl RustDecoder {
         layer: usize,
         after_ffn: bool,
     ) -> Result<(), String> {
-        let h = self.cfg.hc.as_ref().ok_or("hyper-connection configuration missing")?;
+        let h = self.hc_params().ok_or("hyper-connection configuration missing")?;
         let err = |e: crate::backend::BackendError| e.to_string();
         let dump = std::env::var_os("FLLM_DUMP_LAYERS").is_some();
         stream.residual_add(x_buf, &block.base, -1.0).map_err(err)?;
@@ -2868,7 +2894,7 @@ impl RustDecoder {
         rows: usize,
     ) -> Result<(), String> {
         use crate::backend::HcMode;
-        let h = self.cfg.hc.as_ref().ok_or("hyper-connection configuration missing")?;
+        let h = self.hc_params().ok_or("hyper-connection configuration missing")?;
         let (hc, hidden) = (h.hc_mult, self.cfg.hidden);
         let err = |e: crate::backend::BackendError| e.to_string();
         let mut post = scratch.acquire(rows * hc * 4).map_err(err)?;
@@ -2926,7 +2952,7 @@ impl RustDecoder {
     fn layer_host_reason(&self, i: usize, layer: &Layer, gate_ok: bool, arch_ok: bool, head_ok: bool, value_ok: bool, conv_ok: bool, dsa_ok: bool, hc_ok: bool, rwkv_ok: bool, kda_ok: bool, mamba_ok: bool, zamba_ok: bool) -> Option<&'static str> {
         let cfg = &self.cfg;
         if cfg.v4.is_some() {
-            return Some("DeepSeek-V4 hyper-connections and compressed attention");
+            return if self.v4_device { None } else { Some("DeepSeek-V4 hyper-connections and compressed attention (the backend has no kernels for them, or FLLM_V4=host)") };
         }
         if cfg.inkling.is_some() && !self.ink_device {
             // the host pass of this model is a pass of its own over all layers: one layer that needs it sends them all there
@@ -3220,6 +3246,10 @@ impl RustDecoder {
             && self.cfg.hc.as_ref().is_some_and(|h| backend.create_stream().is_ok_and(|s| s.supports_hc(h.hc_mult)))
             && self.layers.iter().all(|l| l.post_attn_norm.is_none() && l.post_ffn_norm.is_none() && !matches!(l.ffn, Ffn::None));
         self.hc_device = hc_ok;
+        self.v4_device = self.v4_device_possible(&*backend, clamp_ok);
+        if self.v4_device {
+            self.hc_device = true;
+        }
         let mut missing = self.backend_unsupported(caps.supports_layer_norm, caps.supports_grouped_rms_norm);
         // Layers without device kernels run on the host between the device layers (`host_layers`); a model in which no layer can
         // use the device gains nothing from it.
@@ -3284,6 +3314,12 @@ impl RustDecoder {
                 eprintln!("[fllm-rs] hyper-connections stay on the host: a layer of this model needs the host ({first})");
             }
             layer_reasons.iter_mut().for_each(|r| *r = Some("hyper-connections (a layer of the model has no device kernels)"));
+        }
+        // DeepSeek-V4 likewise: its streams, attention states and the experts of a layer exist on one side only
+        if self.v4_device && layer_reasons.iter().any(Option::is_some) {
+            self.v4_device = false;
+            self.hc_device = false;
+            layer_reasons.iter_mut().for_each(|r| *r = Some("DeepSeek-V4 (a layer of the model has no device kernels)"));
         }
         if self.mla_latent {
             self.check_latent_mla(&*backend, &layer_reasons)?;
@@ -3483,6 +3519,7 @@ impl RustDecoder {
         let mut mamba1_layers = 0usize;
         let mut rwkv_layers = 0usize;
         let mut kda_layers = 0usize;
+        let mut v4_state_floats = 0usize;
         let mut delta_layers = 0usize;
         let mut dev_layers = Vec::with_capacity(self.layers.len());
         let mut host_summary: Vec<&'static str> = Vec::new();
@@ -3727,6 +3764,15 @@ impl RustDecoder {
                 }
                 _ => None,
             };
+            let v4 = match (self.v4_device, self.v4.as_deref(), self.v4_shape(i)) {
+                (true, Some(model), Some(shape)) => {
+                    let offset = v4_state_floats * 4;
+                    v4_state_floats += shape.layout().total;
+                    let sinks = layer.sinks.as_deref().filter(|s| s.len() == self.cfg.heads).ok_or("DeepSeek-V4 layer without attention sinks")?;
+                    Some(model.layers[i].upload(&format!("blk.{i}"), shape, offset, sinks, &|name: &str, l: &Linear| upload_linear(name, l), &|v: &[f32]| upload_vec(&v.to_vec()))?)
+                }
+                _ => None,
+            };
             let q_norm = layer.q_norm.as_ref().map(upload_vec).transpose()?;
             let k_norm = layer.k_norm.as_ref().map(upload_vec).transpose()?;
             let post_attn_norm = layer.post_attn_norm.as_ref().map(|n| upload_norm("post_attn", n)).transpose()?;
@@ -3925,6 +3971,7 @@ impl RustDecoder {
                 mamba1,
                 rwkv,
                 kda,
+                v4,
                 zamba: zamba_dev,
                 par_mamba,
                 sinks: layer.sinks.clone().map(Arc::new),
@@ -3973,6 +4020,25 @@ impl RustDecoder {
 
         // The input rows are built on the host (scaling, image overrides, learned positions),
         // so the token embedding table stays off the device.
+        let v4_weights = match (self.v4_device, self.v4.as_deref()) {
+            (true, Some(model)) => {
+                let vec = |v: &Vec<f32>| upload_norm("", &Norm { weight: v.clone(), bias: None });
+                let block = |name: &str, c: &deepseek4::Hc| -> Result<DeviceHc, String> {
+                    Ok(DeviceHc { mix: upload_linear(&format!("{name}_fn"), &c.mix)?, base: vec(&c.base)?, scale: vec(&c.scale)? })
+                };
+                let hc_mult = self.cfg.v4.as_ref().map_or(1, |v| v.hc_mult);
+                let attn = model.layers.iter().enumerate().map(|(i, l)| block(&format!("blk.{i}.hc_attn"), &l.hc_attn)).collect::<Result<Vec<_>, _>>()?;
+                let ffn = model.layers.iter().enumerate().map(|(i, l)| block(&format!("blk.{i}.hc_ffn"), &l.hc_ffn)).collect::<Result<Vec<_>, _>>()?;
+                let head = Some(block("output_hc", &model.head)?);
+                let hd = self.cfg.v4.as_ref().map_or(1, |v| v.head_dim);
+                Some((DeviceHcModel { attn, ffn, head, ones: vec(&vec![1.0f32; hc_mult * self.cfg.hidden])? }, vec(&vec![1.0f32; hd])?))
+            }
+            _ => None,
+        };
+        let (v4_hc, v4_ones) = match v4_weights {
+            Some((hc, ones)) => (Some(hc), Some(ones)),
+            None => (None, None),
+        };
         let hc_weights = match (self.hc_device, self.hc.as_deref(), self.cfg.hc.as_ref()) {
             (true, Some(model), Some(h)) => {
                 let vec = |v: &Vec<f32>| upload_norm("", &Norm { weight: v.clone(), bias: None });
@@ -3984,7 +4050,7 @@ impl RustDecoder {
                 let head = model.head.as_ref().map(|c| block("output_hc", c)).transpose()?;
                 Some(DeviceHcModel { attn, ffn, head, ones: vec(&vec![1.0f32; h.hc_mult * self.cfg.hidden])? })
             }
-            _ => None,
+            _ => v4_hc,
         };
         let dev_weights = DeviceModelWeights {
             layers: dev_layers,
@@ -4002,6 +4068,7 @@ impl RustDecoder {
                 None => None,
             },
             hc: hc_weights,
+            v4_ones,
         };
 
         let mut pool = crate::backend::BufferPool::new(Arc::clone(&backend));
@@ -4173,7 +4240,7 @@ impl RustDecoder {
         // hyper-connections: the residual stream is `hc` copies of the embedding, kept in a buffer of its own (`x_buf` carries the block inputs)
         let hc_dev = dev_weights.hc.as_ref().filter(|_| self.hc_device && !recording);
         let mut hc_streams: Option<crate::backend::DeviceBuffer> = None;
-        if let (Some(_), Some(h)) = (hc_dev, cfg.hc.as_ref()) {
+        if let (Some(_), Some(h)) = (hc_dev, self.hc_params()) {
             let mut expanded = Vec::with_capacity(rows * h.hc_mult * hidden);
             for r in 0..rows {
                 for _ in 0..h.hc_mult {
@@ -4250,7 +4317,11 @@ impl RustDecoder {
         let kv_base = self.kv_base();
         // tensor parallelism: the output and down projections give partial sums; the fused residual-add kernels cannot take them
         let tp = self.par.as_ref().is_some_and(|p| p.tp_size() > 1);
-        for (i, layer) in self.layers.iter().enumerate() {
+        if self.v4_device {
+            let streams = hc_streams.as_mut().ok_or("DeepSeek-V4 needs the residual streams on the device")?;
+            self.v4_device_layers(&mut **stream, &mut scratch, dev_weights, streams, &mut x_buf, ids, &positions, tables, lengths)?;
+        }
+        for (i, layer) in self.layers.iter().enumerate().filter(|_| !self.v4_device) {
             if !stage.contains(&i) {
                 continue;
             }
@@ -6941,6 +7012,7 @@ impl RustDecoder {
             return moe.latent.is_none()
                 // zero experts (LongCat-Flash) fold into the combination's shared slot: a router with both, or with scaled inputs, keeps the other paths
                 && (cfg.zero_experts == 0 || (moe.shared.is_none() && !cfg.input_scaled && cfg.experts > cfg.zero_experts))
+                && moe.tid2eid.is_none()
                 && matches!(cfg.gating, Gating::Softmax | Gating::Sigmoid)
                 && cfg.weight_norm_p.is_none()
                 && (1..=32).contains(&cfg.used)

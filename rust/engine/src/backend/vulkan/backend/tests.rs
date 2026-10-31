@@ -344,6 +344,20 @@ fn all_op_plans() -> Vec<OpPlan> {
         }
     }
     {
+        use crate::backend::vulkan::ops::v4::{plan_v4_attention, plan_v4_compress, plan_v4_ring, plan_v4_rope, V4RunSpec};
+        use crate::backend::{V4Index, V4Pool, V4Shape};
+        let shape = V4Shape { heads: 4, head_dim: 32, rope: 8, window: 6, ratio: 4, index: Some(V4Index { heads: 3, dim: 16, topk: 3 }), max_entries: 100, o_groups: 2 };
+        plans.push(plan_v4_rope(3, 4, 32, 8, 1.0).unwrap());
+        let runs = [V4RunSpec { first_row: 0, rows: 5, position: 0 }, V4RunSpec { first_row: 5, rows: 700, position: 9 }];
+        for which in [V4Pool::Attention, V4Pool::Index] {
+            plans.extend(plan_v4_compress(which, &shape, &runs, 4096, 1e-6).unwrap());
+        }
+        for has_sel in [false, true] {
+            plans.extend(plan_v4_attention(&shape, &runs, 4096, has_sel, 705).unwrap().into_iter().flatten());
+        }
+        plans.extend(plan_v4_ring(&shape, &runs, 4096).unwrap());
+    }
+    {
         use crate::backend::vulkan::ops::dsa::{plan_dsa_attention, plan_dsa_select};
         let p = crate::backend::DsaParams { heads: 4, dim: 32, topk: 8, stride: 256, block_size: 16, scale: 0.25, head_scale: 0.5, kpool: 1, always_tail: false };
         let table: Vec<i64> = (0..256i64).collect();

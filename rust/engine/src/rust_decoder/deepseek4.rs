@@ -46,15 +46,15 @@ pub(super) struct V4Layer {
     kv_norm: Vec<f32>,
     o_a: Vec<Linear>,
     o_b: Linear,
-    hc_attn: Hc,
-    hc_ffn: Hc,
+    pub(super) hc_attn: Hc,
+    pub(super) hc_ffn: Hc,
     comp: Option<Comp>,
     indexer: Option<Indexer>,
 }
 
 pub(super) struct V4Model {
-    layers: Vec<V4Layer>,
-    head: Hc,
+    pub(super) layers: Vec<V4Layer>,
+    pub(super) head: Hc,
     freq_main: Vec<f32>,
     freq_compress: Vec<f32>,
 }
@@ -386,6 +386,7 @@ impl RustDecoder {
                 self.norm(&mut normed, norm);
             }
             let attn = self.v4_attention(i, vl, &normed, positions, tables, lengths)?;
+            dump_layer("branch", i, &attn);
             combine_streams(&mut streams, &post, Some(&comb), &attn, rows, hc, hidden);
             let (post, comb, mut normed) = vl.hc_ffn.compute(&streams, rows, hc, hidden, cfg.eps, v.hc_eps, v.hc_iters)?;
             if let Some(norm) = &layer.ffn_norm {
@@ -393,6 +394,7 @@ impl RustDecoder {
             }
             let mlp = self.ffn_forward(layer, &normed, &mut workspace)?;
             combine_streams(&mut streams, &post, Some(&comb), &mlp, rows, hc, hidden);
+            dump_layer("ffn", i, &streams);
         }
         model.head.collapse_head(&streams, rows, hc, hidden, cfg.eps, v.hc_eps)
     }
@@ -571,6 +573,363 @@ impl RustDecoder {
             }
         }
         vl.o_b.forward(&grouped)
+    }
+}
+
+/// The compressor of a layer on the device.
+pub(super) struct DeviceV4Comp {
+    kv: crate::backend::DeviceWeight,
+    gate: crate::backend::DeviceWeight,
+    pos: crate::backend::DeviceBuffer,
+    norm: crate::backend::DeviceBuffer,
+}
+
+/// The lightning indexer of a layer on the device.
+pub(super) struct DeviceV4Index {
+    comp: DeviceV4Comp,
+    q_b: crate::backend::DeviceWeight,
+    proj: crate::backend::DeviceWeight,
+}
+
+/// The attention of a DeepSeek-V4 layer on the device.
+pub(super) struct DeviceV4Layer {
+    q_a: crate::backend::DeviceWeight,
+    q_a_norm: crate::backend::DeviceBuffer,
+    q_b: crate::backend::DeviceWeight,
+    kv: crate::backend::DeviceWeight,
+    kv_norm: crate::backend::DeviceBuffer,
+    o_a: Vec<crate::backend::DeviceWeight>,
+    o_b: crate::backend::DeviceWeight,
+    comp: Option<DeviceV4Comp>,
+    index: Option<DeviceV4Index>,
+    sinks: crate::backend::DeviceBuffer,
+    shape: crate::backend::V4Shape,
+    /// Byte offset of the layer's state in the sequence's state buffer.
+    state_offset: usize,
+}
+
+/// Rotation tables of a pass (cosine, sine per row and pair): at the positions of the rows with the frequencies of the layers without and with
+/// compression, and for the window a row completes, per compression ratio.
+struct V4Rotations {
+    main: crate::backend::DeviceBuffer,
+    compress: crate::backend::DeviceBuffer,
+    entry: Vec<(usize, crate::backend::DeviceBuffer)>,
+}
+
+impl Comp {
+    fn upload(&self, name: &str, linear: &dyn Fn(&str, &Linear) -> Result<crate::backend::DeviceWeight, String>, vec: &dyn Fn(&[f32]) -> Result<crate::backend::DeviceBuffer, String>) -> Result<DeviceV4Comp, String> {
+        Ok(DeviceV4Comp { kv: linear(&format!("{name}_kv"), &self.kv)?, gate: linear(&format!("{name}_gate"), &self.gate)?, pos: vec(&self.pos)?, norm: vec(&self.norm)? })
+    }
+}
+
+impl V4Layer {
+    pub(super) fn upload(
+        &self,
+        name: &str,
+        shape: crate::backend::V4Shape,
+        state_offset: usize,
+        sinks: &[f32],
+        linear: &dyn Fn(&str, &Linear) -> Result<crate::backend::DeviceWeight, String>,
+        vec: &dyn Fn(&[f32]) -> Result<crate::backend::DeviceBuffer, String>,
+    ) -> Result<DeviceV4Layer, String> {
+        Ok(DeviceV4Layer {
+            q_a: linear(&format!("{name}.attn_q_a"), &self.q_a)?,
+            q_a_norm: vec(&self.q_a_norm)?,
+            q_b: linear(&format!("{name}.attn_q_b"), &self.q_b)?,
+            kv: linear(&format!("{name}.attn_kv"), &self.kv)?,
+            kv_norm: vec(&self.kv_norm)?,
+            o_a: self.o_a.iter().enumerate().map(|(g, l)| linear(&format!("{name}.attn_output_a.{g}"), l)).collect::<Result<Vec<_>, _>>()?,
+            o_b: linear(&format!("{name}.attn_output_b"), &self.o_b)?,
+            comp: self.comp.as_ref().map(|c| c.upload(&format!("{name}.attn_comp"), linear, vec)).transpose()?,
+            index: self
+                .indexer
+                .as_ref()
+                .map(|ix| {
+                    Ok::<_, String>(DeviceV4Index {
+                        comp: ix.comp.upload(&format!("{name}.indexer.comp"), linear, vec)?,
+                        q_b: linear(&format!("{name}.indexer.attn_q_b"), &ix.q_b)?,
+                        proj: linear(&format!("{name}.indexer.proj"), &ix.proj)?,
+                    })
+                })
+                .transpose()?,
+            sinks: vec(sinks)?,
+            shape,
+            state_offset,
+        })
+    }
+}
+
+/// `[cos, sin]` per pair of the rotary embedding at each position (as `rope_tail` computes them).
+fn rotation_table(freq: &[f32], rope: usize, positions: impl Iterator<Item = usize>) -> Vec<f32> {
+    let mut out = Vec::new();
+    for position in positions {
+        for &f in freq.iter().take(rope / 2) {
+            let angle = position as f32 * f;
+            out.push(angle.cos());
+            out.push(angle.sin());
+        }
+    }
+    out
+}
+
+impl RustDecoder {
+    /// Shape of the attention of layer `li` for the device operations.
+    pub(super) fn v4_shape(&self, li: usize) -> Option<crate::backend::V4Shape> {
+        let v = self.cfg.v4.as_ref()?;
+        let model = self.v4.as_deref()?;
+        let ratio = v.ratios[li];
+        let context = self.stride * self.block_size;
+        Some(crate::backend::V4Shape {
+            heads: self.cfg.heads,
+            head_dim: v.head_dim,
+            rope: self.cfg.rope.dims,
+            window: v.window,
+            ratio,
+            index: model.layers[li].indexer.as_ref().map(|_| crate::backend::V4Index { heads: v.index_heads, dim: v.index_dim, topk: v.index_topk }),
+            max_entries: context.checked_div(ratio).map_or(0, |n| n + 1),
+            o_groups: v.o_groups,
+        })
+    }
+
+    /// Can the accelerator run the whole DeepSeek-V4 model (streams, attention, states, experts)? `FLLM_V4=host` keeps it on the CPU.
+    pub(super) fn v4_device_possible(&self, backend: &dyn crate::backend::Backend, clamp_ok: bool) -> bool {
+        let (Some(v), Some(_)) = (self.cfg.v4.as_ref(), self.v4.as_deref()) else { return false };
+        if self.par.is_some() || std::env::var("FLLM_V4").is_ok_and(|x| x.eq_ignore_ascii_case("host")) {
+            return false;
+        }
+        let Ok(stream) = backend.create_stream() else { return false };
+        let shapes: Vec<_> = (0..self.cfg.layers).filter_map(|i| self.v4_shape(i)).collect();
+        let state_bytes: usize = shapes.iter().map(|s| s.layout().total * 4).sum();
+        let ok = clamp_ok
+            && shapes.len() == self.cfg.layers
+            && stream.supports_hc(v.hc_mult)
+            && stream.supports_copy_columns()
+            && shapes.iter().all(|s| stream.supports_v4(s))
+            && self.device_glu_mode().is_some();
+        if ok && state_bytes > (16usize << 30) {
+            eprintln!("[fllm-rs] DeepSeek-V4 stays on the host: the per-sequence state for a context of {} tokens would take {} MiB of device memory", self.stride * self.block_size, state_bytes >> 20);
+            return false;
+        }
+        if ok {
+            eprintln!(
+                "[fllm-rs] DeepSeek-V4 runs completely on the device ({} MiB of attention state per sequence); the routers and hash tables of its mixture-of-experts layers are evaluated on the host",
+                state_bytes >> 20
+            );
+        }
+        ok
+    }
+
+    /// One DeepSeek-V4 attention block on the device: `x` receives the output added to it (the hyper-connection around the block takes the difference).
+    #[allow(clippy::too_many_arguments)]
+    fn v4_attention_device(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        li: usize,
+        dv: &DeviceV4Layer,
+        ones_hd: &crate::backend::DeviceBuffer,
+        rot: &V4Rotations,
+        plan: &[DeltaPlanRun],
+        normed: &crate::backend::DeviceBuffer,
+        x: &mut crate::backend::DeviceBuffer,
+        rows: usize,
+        positions: &[usize],
+    ) -> Result<(), String> {
+        use crate::backend::{V4Pool, V4Run};
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (cfg, eps) = (&self.cfg, self.cfg.eps);
+        let v = cfg.v4.as_ref().ok_or("DeepSeek-V4 configuration missing")?;
+        let shape = &dv.shape;
+        let (heads, hd, rope) = (shape.heads, shape.head_dim, shape.rope);
+        let ratio = shape.ratio;
+        let cs = if ratio == 0 { &rot.main } else { &rot.compress };
+        let cs_entry = rot.entry.iter().find(|(r, _)| *r == ratio).map(|(_, b)| b);
+        let project = |stream: &mut dyn crate::backend::Stream, scratch: &mut crate::backend::BufferPool, w: &crate::backend::DeviceWeight, input: &crate::backend::DeviceBuffer| {
+            let mut out = scratch.acquire(rows * w.rows * 4).map_err(err)?;
+            stream.quantized_linear(&mut out, input, w, w.bias.as_ref()).map_err(err)?;
+            Ok::<_, String>(out)
+        };
+        let normalise = |stream: &mut dyn crate::backend::Stream, scratch: &mut crate::backend::BufferPool, input: crate::backend::DeviceBuffer, weight: &crate::backend::DeviceBuffer| {
+            let mut out = scratch.acquire(input.size).map_err(err)?;
+            stream.rms_norm(&mut out, &input, weight, eps).map_err(err)?;
+            scratch.recycle(input);
+            Ok::<_, String>(out)
+        };
+        let q_resid = project(stream, scratch, &dv.q_a, normed)?;
+        let q_resid = normalise(stream, scratch, q_resid, &dv.q_a_norm)?;
+        let q = project(stream, scratch, &dv.q_b, &q_resid)?;
+        let mut q = normalise(stream, scratch, q, ones_hd)?;
+        stream.v4_rope(&mut q, cs, rows, heads, hd, rope, 1.0).map_err(err)?;
+        let kv = project(stream, scratch, &dv.kv, normed)?;
+        let mut kv = normalise(stream, scratch, kv, &dv.kv_norm)?;
+        stream.v4_rope(&mut kv, cs, rows, 1, hd, rope, 1.0).map_err(err)?;
+        let runs: Vec<V4Run<'_>> = plan.iter().map(|p| V4Run { state: &p.buf, first_row: p.start, rows: p.n, position: p.position }).collect();
+        let layout = shape.layout();
+        if let (Some(comp), Some(entry)) = (&dv.comp, cs_entry) {
+            let ckv = project(stream, scratch, &comp.kv, normed)?;
+            let cgate = project(stream, scratch, &comp.gate, normed)?;
+            stream.v4_compress(V4Pool::Attention, shape, &runs, dv.state_offset, &ckv, &cgate, &comp.pos, &comp.norm, entry, eps).map_err(err)?;
+            scratch.recycle(ckv);
+            scratch.recycle(cgate);
+        }
+        let mut sel: Option<crate::backend::DeviceBuffer> = None;
+        if let (Some(ix), Some(index), Some(entry)) = (&dv.index, shape.index, cs_entry) {
+            let ikv = project(stream, scratch, &ix.comp.kv, normed)?;
+            let igate = project(stream, scratch, &ix.comp.gate, normed)?;
+            stream.v4_compress(V4Pool::Index, shape, &runs, dv.state_offset, &ikv, &igate, &ix.comp.pos, &ix.comp.norm, entry, eps).map_err(err)?;
+            scratch.recycle(ikv);
+            scratch.recycle(igate);
+            // a batch in which no row sees more entries than the indexer keeps attends to all of them: no selection needed
+            if positions.iter().any(|&p| (p + 1) / ratio > index.topk) {
+                let mut iq = project(stream, scratch, &ix.q_b, &q_resid)?;
+                stream.v4_rope(&mut iq, cs, rows, index.heads, index.dim, rope, 1.0).map_err(err)?;
+                let iw = project(stream, scratch, &ix.proj, normed)?;
+                let picked = scratch.acquire(rows * index.topk * 4).map_err(err)?;
+                let params = crate::backend::DsaParams {
+                    heads: index.heads,
+                    dim: index.dim,
+                    topk: index.topk,
+                    stride: 1,
+                    block_size: shape.entry_cap(),
+                    scale: (index.dim as f32).powf(-0.5),
+                    head_scale: (index.heads as f32).powf(-0.5),
+                    kpool: 1,
+                    always_tail: false,
+                };
+                for (run, p) in runs.iter().zip(plan) {
+                    // rows that see no entry yet score a single (unused) key: the selection needs a length of at least one
+                    let lengths: Vec<i64> = (0..run.rows).map(|i| ((p.position + i + 1) / ratio).max(1) as i64).collect();
+                    let store = run.state.slice(dv.state_offset + layout.index_entries * 4, shape.entry_cap() * index.dim * 4).map_err(err)?;
+                    let q_run = iq.slice(run.first_row * index.heads * index.dim * 4, run.rows * index.heads * index.dim * 4).map_err(err)?;
+                    let w_run = iw.slice(run.first_row * index.heads * 4, run.rows * index.heads * 4).map_err(err)?;
+                    let mut sel_run = picked.slice(run.first_row * index.topk * 4, run.rows * index.topk * 4).map_err(err)?;
+                    stream.dsa_score_select(&mut sel_run, &store, &q_run, &w_run, &vec![0i64; run.rows], &lengths, &params).map_err(err)?;
+                }
+                scratch.recycle(iq);
+                scratch.recycle(iw);
+                sel = Some(picked);
+            }
+        }
+        scratch.recycle(q_resid);
+        let mut attn = scratch.acquire(rows * heads * hd * 4).map_err(err)?;
+        stream.v4_attention(&mut attn, &q, &kv, shape, &runs, dv.state_offset, &dv.sinks, sel.as_ref(), cs).map_err(err)?;
+        stream.v4_ring_write(shape, &runs, dv.state_offset, &kv).map_err(err)?;
+        for buf in [q, kv].into_iter().chain(sel) {
+            scratch.recycle(buf);
+        }
+        // grouped output projection: the attention output is group-major, one block of rows x group_in values per group
+        let group_in = heads * hd / v.o_groups;
+        let mut grouped = scratch.acquire(rows * v.o_groups * v.o_lora * 4).map_err(err)?;
+        for (g, o_a) in dv.o_a.iter().enumerate() {
+            let block = attn.slice(g * rows * group_in * 4, rows * group_in * 4).map_err(err)?;
+            let projected = project(stream, scratch, o_a, &block)?;
+            stream.copy_columns(&mut grouped, v.o_groups * v.o_lora, g * v.o_lora, &projected, rows, v.o_lora).map_err(err)?;
+            scratch.recycle(projected);
+        }
+        scratch.recycle(attn);
+        let branch = project(stream, scratch, &dv.o_b, &grouped)?;
+        scratch.recycle(grouped);
+        stream.residual_add(x, &branch, 1.0).map_err(err)?;
+        scratch.recycle(branch);
+        let _ = li;
+        Ok(())
+    }
+
+    /// All layers of a DeepSeek-V4 model on the device for a batch: `streams` (rows x hc x hidden) holds the residual streams, `x_buf` is the block
+    /// input / residual buffer of the hyper-connections. The collapse of the streams at the end is left to the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn v4_device_layers(
+        &self,
+        stream: &mut dyn crate::backend::Stream,
+        scratch: &mut crate::backend::BufferPool,
+        dev_weights: &DeviceModelWeights,
+        streams: &mut crate::backend::DeviceBuffer,
+        x_buf: &mut crate::backend::DeviceBuffer,
+        ids: &[i64],
+        positions: &[usize],
+        tables: &[i64],
+        lengths: &[i64],
+    ) -> Result<(), String> {
+        let err = |e: crate::backend::BackendError| e.to_string();
+        let (cfg, model) = (&self.cfg, self.v4.as_deref().ok_or("DeepSeek-V4 weights missing")?);
+        let v = cfg.v4.as_ref().ok_or("DeepSeek-V4 configuration missing")?;
+        let hcd = dev_weights.hc.as_ref().ok_or("DeepSeek-V4 hyper-connection weights missing")?;
+        let ones_hd = dev_weights.v4_ones.as_ref().ok_or("DeepSeek-V4 weights missing on the device")?;
+        let (rows, hidden, rope) = (positions.len(), cfg.hidden, cfg.rope.dims);
+        // hash-routed layers read the token ids of the rows
+        *self.row_ids.lock().map_err(|_| "row id lock poisoned")? = ids.to_vec();
+        let state_bytes = dev_weights.layers.iter().filter_map(|l| l.v4.as_ref()).map(|d| d.shape.layout().total * 4).sum::<usize>();
+        let plan = self.state_plan(1, state_bytes, tables, lengths)?;
+        self.delta_claim(0, &plan)?;
+        let upload = |stream: &mut dyn crate::backend::Stream, scratch: &mut crate::backend::BufferPool, table: &[f32]| -> Result<crate::backend::DeviceBuffer, String> {
+            let mut buf = scratch.acquire(table.len().max(1) * 4).map_err(err)?;
+            stream.upload(&mut buf, cast_f32_to_u8(table)).map_err(err)?;
+            Ok(buf)
+        };
+        let main = upload(stream, scratch, &rotation_table(&model.freq_main, rope, positions.iter().copied()))?;
+        let compress = upload(stream, scratch, &rotation_table(&model.freq_compress, rope, positions.iter().copied()))?;
+        let mut entry = Vec::new();
+        for &ratio in v.ratios.iter().filter(|&&r| r > 0) {
+            if !entry.iter().any(|(r, _)| *r == ratio) {
+                let table = rotation_table(&model.freq_compress, rope, positions.iter().map(|&p| (p + 1).saturating_sub(ratio)));
+                entry.push((ratio, upload(stream, scratch, &table)?));
+            }
+        }
+        let rot = V4Rotations { main, compress, entry };
+        for (i, layer) in self.layers.iter().enumerate() {
+            let dev_layer = &dev_weights.layers[i];
+            let dv = dev_layer.v4.as_ref().ok_or("DeepSeek-V4 layer without device weights")?;
+            // attention
+            let block = self.hc_enter(stream, scratch, &hcd.attn[i], &hcd.ones, streams, x_buf, rows)?;
+            let mut normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            match &dev_layer.attn_norm {
+                Some(norm) => device_norm(stream, cfg.norm, &mut normed, x_buf, norm, dev_layer.attn_norm_b.as_ref(), cfg.eps, self.groups)?,
+                None => stream.copy_buffer(&mut normed, x_buf).map_err(err)?,
+            }
+            self.v4_attention_device(stream, scratch, i, dv, ones_hd, &rot, &plan, &normed, x_buf, rows, positions)?;
+            scratch.recycle(normed);
+            self.hc_leave(stream, scratch, streams, x_buf, block, rows, i, false)?;
+            // feed-forward
+            let block = self.hc_enter(stream, scratch, &hcd.ffn[i], &hcd.ones, streams, x_buf, rows)?;
+            let mut ffn_normed = scratch.acquire(rows * hidden * 4).map_err(err)?;
+            match &dev_layer.ffn_norm {
+                Some(norm) => device_norm(stream, cfg.norm, &mut ffn_normed, x_buf, norm, dev_layer.ffn_norm_b.as_ref(), cfg.eps, self.groups)?,
+                None => stream.copy_buffer(&mut ffn_normed, x_buf).map_err(err)?,
+            }
+            let mut out = None;
+            if let (Ffn::Moe(_), Some(dm)) = (&layer.ffn, dev_layer.moe.as_ref()) {
+                out = self.moe_fast(stream, scratch, dm, &ffn_normed, rows)?;
+            }
+            if out.is_none() && !dev_layer.host_ffn {
+                if let (Ffn::Moe(moe), Some(_)) = (&layer.ffn, dev_layer.moe.as_ref()) {
+                    let mut host_in = vec![0.0f32; rows * hidden];
+                    stream.download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed).map_err(err)?;
+                    out = self.moe_on_device(stream, scratch, moe, dev_layer.moe.as_ref(), &ffn_normed, &host_in, rows)?;
+                }
+            }
+            let out = match out {
+                Some(buf) => buf,
+                None => {
+                    let mut host_in = vec![0.0f32; rows * hidden];
+                    stream.download(cast_f32_to_u8_mut(&mut host_in), &ffn_normed).map_err(err)?;
+                    let mut workspace = compute::ProjectionGroupWorkspace::default();
+                    let host_out = self.ffn_forward(layer, &host_in, &mut workspace)?;
+                    let mut buf = scratch.acquire(rows * hidden * 4).map_err(err)?;
+                    stream.upload(&mut buf, cast_f32_to_u8(&host_out)).map_err(err)?;
+                    buf
+                }
+            };
+            stream.residual_add(x_buf, &out, 1.0).map_err(err)?;
+            scratch.recycle(out);
+            scratch.recycle(ffn_normed);
+            self.hc_leave(stream, scratch, streams, x_buf, block, rows, i, true)?;
+        }
+        scratch.recycle(rot.main);
+        scratch.recycle(rot.compress);
+        for (_, buf) in rot.entry {
+            scratch.recycle(buf);
+        }
+        Ok(())
     }
 }
 

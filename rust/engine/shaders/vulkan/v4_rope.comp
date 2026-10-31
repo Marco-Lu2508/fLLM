@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// FLLM-SHADER: v4_rope | bindings: x,cs | push: pairs,groups,dim,rope,sign | grid: [min(ceil(pairs/256), 65535), 1, 1]
+// Rotary embedding of the trailing `rope` values of groups of `dim` floats (Stream::v4_rope; DeepSeek-V4), in place on x = rows x groups x dim. Pair j of
+// a group is (2j, 2j + 1) within the trailing rope values: x0' = x0 c - x1 s, x1' = x1 c + x0 s with (c, s) = cs[row][j] (cosine, sine; interleaved
+// floats, `rope / 2` pairs per row) and the sine multiplied by `sign` (-1 undoes the rotation). `pairs` = rows * groups * rope / 2; grid-stride loop.
+#define WG 256
+#include "_ops_common.glsl"
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) buffer XBuf { float x[]; };
+layout(std430, binding = 1) readonly buffer CsBuf { float cs[]; };
+layout(push_constant) uniform P {
+    uint pairs;
+    uint groups;
+    uint dim;
+    uint rope;
+    float sign;
+} p;
+
+void main() {
+    const uint grid_items = gl_NumWorkGroups.x * WG;
+    const uint half_rope = p.rope / 2u;
+    for (uint i = gl_GlobalInvocationID.x; i < p.pairs; i += grid_items) {
+        const uint g = i / half_rope;
+        const uint j = i % half_rope;
+        const uint r = g / p.groups;
+        const float c = cs[(r * half_rope + j) * 2u];
+        const float s = cs[(r * half_rope + j) * 2u + 1u] * p.sign;
+        const uint at = g * p.dim + (p.dim - p.rope) + 2u * j;
+        const float a = x[at];
+        const float b = x[at + 1u];
+        x[at] = a * c - b * s;
+        x[at + 1u] = b * c + a * s;
+    }
+}

@@ -15,6 +15,7 @@ pub mod hc;
 pub mod inkling;
 pub mod moe;
 pub mod recurrent;
+pub mod v4;
 
 #[cfg(test)]
 mod mirror;
