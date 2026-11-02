@@ -871,6 +871,47 @@
                 </div>
               </div>
 
+              <div class="app-card" id="lnProfileCard">
+                <div class="app-card-title">What the coding agent learned about you</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-title">Your profile</div>
+                    <div class="app-item-desc">A plain text file: preferences, skill level, languages, conventions, tool habits. With <strong>Learn from this session</strong> on, the agent proposes lines here; a line is added only when you say yes. Edit it freely: it is put (up to 1,200 characters) into the system prompt of the coding agent, nothing else is kept about you. Secrets are refused.</div>
+                  </div>
+                  <textarea id="lnProfileText" class="ui-textarea mono" rows="9" style="width:100%;" spellcheck="false" placeholder="## Preferences&#10;- Short answers, no filler&#10;## Languages&#10;- Writes Rust and Python"></textarea>
+                  <div style="display:flex;justify-content:space-between;align-items:center;width:100%;gap:8px;flex-wrap:wrap;">
+                    <span class="mono" style="font-size:11px;color:var(--muted-foreground);" id="lnProfileCount">0 / 3000</span>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Use the profile in the agent's prompt
+                      <span class="ui-switch"><input type="checkbox" id="lnProfileOn" checked><span class="ui-switch-track"></span></span></label>
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-sm btn-primary" id="lnProfileSave">Save</button>
+                    <button class="btn btn-sm btn-secondary" id="lnProfileExport">Export</button>
+                    <button class="btn btn-sm btn-destructive" id="lnProfileDelete">Delete</button>
+                  </div>
+                  <div class="app-item-title">Lines that wait for your yes</div>
+                  <div id="lnProfileProposals"></div>
+                </div>
+              </div>
+
+              <div class="app-card" id="lnMemoryCard">
+                <div class="app-card-title">Memory of the coding agent</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-desc">Short notes the coding agent keeps for later sessions (<span class="mono">agent-memory.md</span> in the Studio folder, <span class="mono">.fllm/memory.md</span> in a project). With <strong>Learn from this session</strong> on, a short reflective step proposes entries after a run: project facts, your preferences, commands that worked, mistakes to avoid. Repeats are dropped, secrets are never stored, and an entry is written only after your yes. Each learned entry shows the session it came from.</div>
+                  </div>
+                  <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Save memory and profile lines without asking
+                    <span class="ui-switch"><input type="checkbox" id="lnAuto"><span class="ui-switch-track"></span></span></label>
+                  <div class="app-item-desc" id="lnPendingPersonal"></div>
+                  <div class="app-item-desc" id="lnLastPersonal"></div>
+                  <div class="app-item-title">Waiting for your yes</div>
+                  <div id="lnMemProposals"></div>
+                  <div class="app-item-title">Entries</div>
+                  <div class="mem-list" id="lnMemList"></div>
+                  <div style="display:flex;justify-content:flex-end;width:100%;"><button class="btn btn-sm btn-destructive" id="lnForgetAll">Forget everything that was learned</button></div>
+                </div>
+              </div>
+
               <div class="app-card">
                 <div class="app-card-title">System prompt</div>
                 <div class="app-card-item column">
@@ -1423,6 +1464,14 @@
                 <div id="skList"></div>
                 <div class="app-item-desc" id="skFolderInfo" style="margin-top:8px;"></div>
               </div>
+              <div class="app-card" id="lnSkillCard">
+                <div class="app-card-title">Skill improvements</div>
+                <p class="app-item-desc" style="margin-bottom:8px;">With <strong>Learn from this session</strong> on (Code page), the agent notes how a skill fared each time it is used: finished or failed, whether the checks passed, retries, and your thumbs. After a failure, or after five uses, it drafts a revised version with the reason. A draft changes nothing until you approve it; every approved revision keeps the text it replaced, so you can roll back. The draft is written by the model that is loaded, so a small model drafts small changes.</p>
+                <div class="app-item-desc" id="lnPendingSkills"></div>
+                <div class="app-item-desc" id="lnLastSkills"></div>
+                <div id="lnSkillList"></div>
+                <div style="display:flex;gap:6px;margin-top:8px;"><button class="btn btn-sm btn-secondary" id="lnConsolidate" title="Draft the revisions that are due and propose to remove repeated memory entries, now">Consolidate now</button><span class="app-item-desc">The same job can run every night: add a task of the kind "Consolidate memory and skills" below.</span></div>
+              </div>
               <div class="app-card">
                 <div class="app-card-title">Write a skill</div>
                 <div class="app-card-item column">
@@ -1463,7 +1512,7 @@
                   <div class="app-item-desc">Also accepted: "every 2 hours", "hourly at :15", or a cron line (minute hour day month weekday). Local time.</div>
                 </div>
                 <div class="app-card-item column"><div class="app-item-title">Kind</div>
-                  <select id="scMode" class="ui-input" style="width:auto;"><option value="chat">Chat answer</option><option value="agent">Agent run in a folder (read-only)</option></select>
+                  <select id="scMode" class="ui-input" style="width:auto;"><option value="chat">Chat answer</option><option value="agent">Agent run in a folder (read-only)</option><option value="learn">Consolidate memory and skills (no prompt needed)</option></select>
                 </div>
                 <div class="app-card-item column" id="scFolderRow" style="display:none;"><div class="app-item-title">Folder</div><input type="text" id="scFolder" class="ui-input mono" placeholder="Absolute path" autocomplete="off"></div>
                 <div class="app-card-item column"><div class="app-item-title">Also send the result to</div><input type="text" id="scDeliver" class="ui-input mono" placeholder="webhook:https://... | ntfy:https://ntfy.host/topic | telegram:CHAT_ID" autocomplete="off"><div class="app-item-desc">Empty: only here. Telegram needs the bot token in FLLM_TELEGRAM_TOKEN on the server; the token is never stored in the task. The last result shows whether the delivery worked.</div></div>

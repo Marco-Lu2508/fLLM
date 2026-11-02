@@ -173,6 +173,13 @@
       return `Memory (facts saved in earlier sessions)\n${text.length > maxChars ? `${text.slice(0, maxChars)}\n...` : text}`;
     }
 
+    /** The profile of the user (a short text kept in Settings > Personalization) as a prompt block, capped. */
+    function profileBlock(profile, maxChars = 1200) {
+      const text = String(profile || '').trim();
+      if (!text) return '';
+      return `About the user (notes from earlier sessions and the user's own edits; adapt to them, do not mention them unless asked)\n${text.length > maxChars ? `${text.slice(0, maxChars)}\n...` : text}`;
+    }
+
     /** Project instruction files as a prompt block, nearest first. */
     function instructionsBlock(files, maxChars = 9000) {
       if (!files || !files.length) return '';
@@ -223,6 +230,8 @@
       if (instructions) out.push('', instructions);
       const memory = memoryBlock(opts.memory, tier === 'compact' ? 1200 : 3000);
       if (memory) out.push('', memory);
+      const profile = profileBlock(opts.profile, tier === 'compact' ? 600 : 1200);
+      if (profile) out.push('', profile);
       return out.join('\n');
     }
 

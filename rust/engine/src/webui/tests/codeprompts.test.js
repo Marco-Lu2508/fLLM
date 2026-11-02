@@ -11,7 +11,7 @@ const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in codeprompts.js');
 const P = new Function(`${src.slice(begin, end)}
-return { codeModelFamily, codeModelBillions, codePromptTier, codeEnvironment, memoryBlock, instructionsBlock, buildSystemPrompt, subAgentPrompt, FAMILY_NOTES, PERSONALITIES, personalityNote, isCleanDiagnostic, reviewFeedback, sessionInsights, searchHitsText };`)();
+return { codeModelFamily, codeModelBillions, codePromptTier, codeEnvironment, memoryBlock, profileBlock, instructionsBlock, buildSystemPrompt, subAgentPrompt, FAMILY_NOTES, PERSONALITIES, personalityNote, isCleanDiagnostic, reviewFeedback, sessionInsights, searchHitsText };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -93,6 +93,17 @@ test('instructions and memory are capped and labelled', () => {
   const mem = P.memoryBlock({ workspace: ['tests: npm test'], global: ['likes short answers'] });
   assert.ok(mem.includes('About this workspace') && mem.includes('likes short answers'));
   assert.strictEqual(P.memoryBlock({ workspace: [], global: [] }), '');
+{
+  // the profile of the user reaches the system prompt, capped, and only when there is one
+  assert.strictEqual(P.profileBlock(''), '');
+  assert.strictEqual(P.profileBlock('   '), '');
+  const block = P.profileBlock('- Languages: Rust');
+  assert(block.startsWith('About the user') && block.includes('- Languages: Rust'));
+  assert(P.profileBlock('x'.repeat(5000), 100).length < 400);
+  const base = { agent: 'build', tier: 'full', family: 'generic', tools: new Set(['memory']) };
+  assert(P.buildSystemPrompt({ ...base, profile: '- Prefers short answers' }).includes('- Prefers short answers'));
+  assert(!P.buildSystemPrompt(base).includes('About the user (notes'));
+}
   const p = P.buildSystemPrompt({ agent: 'build', tier: 'full', family: 'generic', tools: ALL_TOOLS, files, memory: { workspace: ['w'], global: [] } });
   assert.ok(p.indexOf('Instructions of this project') > p.indexOf('Safety') && p.indexOf('Memory (facts') > p.indexOf('Instructions of this project'));
 });

@@ -284,7 +284,8 @@ pub trait Backend {
         Ok(json!({}))
     }
     /// Called by a front end after a run was answered (the gateway uses it so that a learning backend can note the run).
-    fn after_run(&mut self, _outcome: &Outcome, _session: &str) {}
+    /// `from` is the index in `outcome.messages` of the first message of this run (earlier ones belong to a continued session).
+    fn after_run(&mut self, _outcome: &Outcome, _session: &str, _from: usize) {}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1167,6 +1168,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             }
         }
     };
+    // the first message of this run: what comes before it belongs to a continued session and is not learned from again
+    let run_from = history.len().saturating_sub(1);
     let mut outcome = run_loop_full(&mut lb, &cfg, &system, history, &mut progress, &mut approve, &mut observe);
 
     // self-review: look at the work before it counts as done, and let the agent fix what the checks find
@@ -1300,7 +1303,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     // the answer is out: now the agent learns from the run (skill notes and revisions, memory and profile proposals)
     if options.learn {
         let verify = if options.review { options.verify.as_ref().map(|_| !verify_failed) } else { None };
-        for line in lb.finish(&outcome, &session_id, verify) {
+        for line in lb.finish(&outcome, &session_id, verify, run_from) {
             progress(&line);
         }
     }

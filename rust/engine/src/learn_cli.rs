@@ -119,7 +119,7 @@ impl<'a> LearnBackend<'a> {
     }
 
     /// After the run was answered: note the skills it used, draft revisions that are due, reflect on memory and profile.
-    pub fn finish(&mut self, outcome: &Outcome, session: &str, verify: Option<bool>) -> Vec<String> {
+    pub fn finish(&mut self, outcome: &Outcome, session: &str, verify: Option<bool>, from: usize) -> Vec<String> {
         if !self.cfg.learn {
             return Vec::new();
         }
@@ -135,6 +135,7 @@ impl<'a> LearnBackend<'a> {
         for e in errors.iter().take(3) {
             note.push_str(&format!("{}: {}; ", e.name, e.detail.lines().next().unwrap_or_default()));
         }
+        let run = &outcome.messages[from.min(outcome.messages.len())..];
         let info = RunInfo {
             session: session.to_owned(),
             workspace: Some(self.workspace.clone()),
@@ -142,7 +143,7 @@ impl<'a> LearnBackend<'a> {
             verify,
             retries: errors.len() as u32,
             note,
-            skills: learn::skills_read_in(&outcome.messages),
+            skills: learn::skills_read_in(run),
             matched: self.matched.clone(),
             feedback: None,
         };
@@ -154,7 +155,7 @@ impl<'a> LearnBackend<'a> {
             body["model"] = json!(model);
             inner.complete_within(&body, 240)
         };
-        let lines = learn_flow::after_run(&studio, &info, &outcome.messages, &opts, &mut complete);
+        let lines = learn_flow::after_run(&studio, &info, run, &opts, &mut complete);
         self.fresh = true;
         lines
     }
@@ -227,8 +228,8 @@ impl Backend for LearnBackend<'_> {
         Ok(answer)
     }
 
-    fn after_run(&mut self, outcome: &Outcome, session: &str) {
-        for line in self.finish(outcome, session, None) {
+    fn after_run(&mut self, outcome: &Outcome, session: &str, from: usize) {
+        for line in self.finish(outcome, session, None, from) {
             self.say(&line);
         }
     }
@@ -727,7 +728,7 @@ mod tests {
             messages: messages[1..].iter().cloned().chain([json!({"role": "assistant", "content": "built with cargo"})]).collect(),
             edited: Vec::new(),
         };
-        let lines = lb.finish(&outcome, "run-7", Some(true));
+        let lines = lb.finish(&outcome, "run-7", Some(true), 0);
         assert!(lines.iter().any(|l| l.contains("skill 'build' used")), "{lines:?}");
         let seen = server.join().unwrap();
         assert_eq!(seen.len(), 6);
@@ -741,7 +742,7 @@ mod tests {
         assert!(learn::read_memory(&studio, "workspace", Some(&ws)).is_empty(), "nothing is written without approval");
         // a run without --learn does nothing
         let mut off = LearnBackend::new(&mut http, &studio, &ws, "", LearnConfig { learn: false, skills: false, auto_memory: false, nudge_every: 0, quiet: true, secrets: Vec::new(), small_context: false, model: None });
-        assert!(off.finish(&outcome, "x", None).is_empty());
+        assert!(off.finish(&outcome, "x", None, 0).is_empty());
         let _ = std::fs::remove_dir_all(&studio);
         let _ = std::fs::remove_dir_all(&ws);
     }

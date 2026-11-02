@@ -196,6 +196,7 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
         }
     };
     history.push(json!({"role": "user", "content": text}));
+    let from = history.len() - 1;
     let system = agent_cli::full_system(backend, &cfg.folder, &cfg.loop_cfg.allow, cfg.system_extra.as_deref(), cfg.soul.as_deref());
     match agent_cli::run_loop(backend, &cfg.loop_cfg, &system, history, &mut |_| {}) {
         Ok(outcome) => {
@@ -206,7 +207,7 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
             }
             reply(chat, key, &answer);
             // the answer is delivered; a learning backend (--learn) notes the run now
-            backend.after_run(&outcome, &name);
+            backend.after_run(&outcome, &name, from);
             Handled::Answered
         }
         Err(e) => {
