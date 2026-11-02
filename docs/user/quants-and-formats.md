@@ -184,3 +184,8 @@ fllm-rs merge-lora BASE.gguf ADAPTER OUT.gguf [--scale S] [--outtype f16|f32|TYP
 - `merge-lora`: `ADAPTER` is a PEFT directory (with `adapter_config.json`) or
   a `.safetensors` file beside it. Defaults `--scale 1`, `--outtype f16`.
   Existing outputs are refused.
+
+## Choosing these in the Studio
+
+The Studio's *Choose a model* dialog accepts a GGUF file (or the first part of a split one), a Hugging Face folder with `config.json` and `.safetensors`
+files, and a Hugging Face name, and shows the format, size, architecture and quantization it found before loading (see [studio.md](studio.md)).

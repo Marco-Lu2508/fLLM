@@ -543,12 +543,12 @@
             </div>
 
             <div class="app-card" id="localFileCard">
-              <div class="app-card-title">Add a model file</div>
-              <p class="app-item-desc">Already have a GGUF file? Paste its path (a folder works too). The file stays where it is.</p>
+              <div class="app-card-title">Add a model</div>
+              <p class="app-item-desc">Already have one? Choose a GGUF file, a Hugging Face model folder (config.json with .safetensors files), or type a Hugging Face name such as <code>owner/name</code>. Files stay where they are; fLLM shows what it found before anything is loaded.</p>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <input type="text" id="localPathInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="C:\Models\my-model-Q4_K_M.gguf" autocomplete="off">
-                <button class="btn btn-outline" id="btnBrowseLocal">Browse ...</button>
-                <button class="btn btn-primary" id="btnAddLocal">Add</button>
+                <input type="text" id="localPathInput" class="ui-input mono" style="flex:1;min-width:240px;" placeholder="C:\Models\model.gguf, a model folder, or owner/name" autocomplete="off" aria-label="Path or Hugging Face name of a model">
+                <button class="btn btn-outline" id="btnBrowseLocal">Choose ...</button>
+                <button class="btn btn-primary" id="btnAddLocal">Check</button>
               </div>
             </div>
 
@@ -1596,7 +1596,8 @@
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="loadOptionsTitle" style="width:min(480px,calc(100vw - 32px));">
       <h3 id="loadOptionsTitle">Load model</h3>
       <p id="loadOptionsText" class="app-item-desc"></p>
-          <details id="loadAdvanced">
+      <div id="loadFacts" class="mp-found" style="display:none;"></div>
+      <details id="loadAdvanced">
         <summary class="app-item-desc" style="cursor:pointer;">Advanced</summary>
         <div style="display:grid;grid-template-columns:1fr 150px;gap:8px 12px;align-items:center;margin-top:10px;">
           <label for="optDevice" class="app-item-desc">Run on</label>
@@ -1657,6 +1658,30 @@
     <div class="dialog" style="text-align:center;">
       <h3 id="switchTitle">Switching model</h3>
       <p id="switchText">The server restarts with the new model. Your chats stay in this browser.</p>
+    </div>
+  </div>
+
+  <!-- Choose a model (modelpicker.js) -->
+  <div class="modal-backdrop" id="modelPickerModal">
+    <div class="dialog mp-dialog" role="dialog" aria-modal="true" aria-labelledby="mpTitle">
+      <h3 id="mpTitle">Choose a model</h3>
+      <p class="app-item-desc">A <b>.gguf</b> file (the first part of a split file is enough), a Hugging Face model <b>folder</b> with config.json and .safetensors files, or a Hugging Face name like <span class="mono">owner/name</span> or <span class="mono">owner/name:Q4_K_M</span>.</p>
+      <div class="mp-path">
+        <input type="text" class="ui-input mono" id="mpPath" data-autofocus autocomplete="off" spellcheck="false" placeholder="Path, folder or owner/name" aria-label="Path, folder or Hugging Face name">
+        <button class="btn btn-outline" id="mpCheck">Check</button>
+      </div>
+      <div class="mp-ways">
+        <button class="btn btn-sm btn-secondary" id="mpPickFile">Choose a file ...</button>
+        <button class="btn btn-sm btn-secondary" id="mpPickFolder">Choose a folder ...</button>
+        <button class="btn btn-sm btn-ghost" id="mpBrowse" aria-expanded="false" aria-controls="mpList">Look through folders</button>
+      </div>
+      <div class="mp-list" id="mpList" hidden></div>
+      <div id="mpResult" aria-live="polite"></div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" id="mpCancel" data-dialog-cancel>Cancel</button>
+        <button class="btn btn-secondary" id="mpAdd" disabled>Add to my models</button>
+        <button class="btn btn-primary" id="mpLoad" disabled>Load</button>
+      </div>
     </div>
   </div>
 

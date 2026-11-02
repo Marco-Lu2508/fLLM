@@ -376,7 +376,7 @@
 
     // any GGUF file on the computer can be the draft model; the server checks that it is smaller and has the same vocabulary
     $('btnBrowseDraft').addEventListener('click', async () => {
-      const path = await browse('gguf');
+      const path = await browse('model');
       if (!path) return;
       const select = $('optDraftModel');
       if (![...select.options].some((o) => o.value === path)) {
@@ -411,11 +411,45 @@
       $('switchText').textContent = 'Check the terminal where fLLM runs. If it stopped, start it again, then reload this page.';
     }
 
+    /** What the server found out about a model on this computer (format, size, heads for multi-token prediction); `null` for a download. */
+    async function modelFactsFor(reference) {
+      if (!reference || /^(hf|https?):/i.test(reference) || !/^([A-Za-z]:[\\/]|[\\/]|~)/.test(reference)) return null;
+      try {
+        const res = await apiFetch('/api/studio/models/inspect', { method: 'POST', body: { path: reference } });
+        return res.ok ? await res.json() : null;
+      } catch { return null; }
+    }
+
+    /**
+     * The facts at the top of the load dialog, and the multi-token prediction choice that goes with them: found heads are offered with one
+     * click, a model without heads says so and cannot select the mode.
+     */
+    function showLoadFacts(facts) {
+      const box = $('loadFacts');
+      const mtpOption = [...$('optSpeculative').options].find((o) => o.value === 'mtp');
+      mtpOption.disabled = false;
+      mtpOption.textContent = 'Multi-token prediction (models with built-in heads)';
+      if (!facts || !facts.ok) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      const rows = factRows(facts).map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd class="mono">${escapeHtml(v)}</dd>`).join('');
+      const usable = facts.mtp === true && !facts.speculation_blocked;
+      box.innerHTML = `<dl class="mp-facts">${rows}</dl><p class="app-item-desc mp-mtp">${escapeHtml(mtpSummary(facts))}</p>`
+        + (usable ? '<button type="button" class="btn btn-sm btn-secondary" id="btnUseMtp">Use the prediction heads</button>' : '');
+      box.style.display = '';
+      if (facts.mtp === false || facts.speculation_blocked) {
+        mtpOption.disabled = true;
+        mtpOption.textContent = 'Multi-token prediction (not available for this model)';
+      }
+      const use = $('btnUseMtp');
+      if (use) use.addEventListener('click', () => { $('loadAdvanced').open = true; $('optSpeculative').value = 'mtp'; syncSpeculative(); $('optSpeculative').focus(); });
+    }
+
     /** Asks how to load the model (with the advanced options), then restarts the server with it. `key` finds the options saved for the model. */
     async function loadModel(reference, label, key) {
       const saved = state.modelsHub?.model_options?.[key] || {};
+      const facts = await modelFactsFor(reference);
       fillDraftChoices(saved.draft_model);
       for (const [name, id] of Object.entries(optionFields)) $(id).value = saved[name] ?? '';
+      showLoadFacts(facts);
       syncSpeculative();
       $('loadAdvanced').open = Object.values(saved).some((v) => v !== null && v !== undefined);
       await fillDeviceChoices(saved.device);
@@ -490,16 +524,6 @@
       return true;
     };
 
-    /** "Choose a file ...": the file dialog of the system, then the file is added to the models and loaded. */
-    window.fllmPickModelFile = async () => {
-      const path = await browse('gguf');
-      if (!path) return;
-      const res = await apiFetch('/api/studio/models/local', { method: 'POST', body: { path } });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok) { toast(d.error?.message || 'The file could not be added.'); return; }
-      await window.fllmLoadModelNow(d.added[0], baseName(d.added[0]));
-    };
-
     async function unloadModel() {
       const ok = await askDialog({ title: 'Unload the model?', text: 'The model is removed from memory. You can load it again from Models.', ok: 'Unload' });
       if (!ok) return;
@@ -544,13 +568,11 @@
     $('hubSearchInput').addEventListener('input', renderHub);
     $('btnCopyDiag').addEventListener('click', () => { navigator.clipboard.writeText($('computerDetails').textContent).then(() => toast('Copied')); });
     $('btnRefreshHub').addEventListener('click', refreshHub);
+    // the card on the Models page hands what was typed to the dialog, which says what it found before anything is added
     async function addLocal() {
-      const res = await apiFetch('/api/studio/models/local', { method: 'POST', body: { path: $('localPathInput').value } });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok) { toast(d.error?.message || 'The file could not be added.'); return; }
+      const typed = $('localPathInput').value;
       $('localPathInput').value = '';
-      toast(d.added.length === 1 ? 'Model added' : `Added ${d.added.length} models`);
-      refreshHub();
+      window.fllmChooseModel(typed);
     }
     $('btnAddLocal').addEventListener('click', addLocal);
 
@@ -561,10 +583,7 @@
       if (!res.ok) { toast(d.error?.message || 'The file dialog could not be opened.'); return null; }
       return d.path || null;
     }
-    $('btnBrowseLocal').addEventListener('click', async () => {
-      const path = await browse('gguf');
-      if (path) { $('localPathInput').value = path; addLocal(); }
-    });
+    $('btnBrowseLocal').addEventListener('click', () => window.fllmChooseModel($('localPathInput').value));
 
     // ---- Settings: models folder, idle unload, logs, speed test ---------------------------------------------
     async function loadModelSettings() {

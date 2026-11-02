@@ -247,6 +247,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 
 `fllm-rs studio` starts the server and opens the Studio, the built-in browser app with chat, a coding agent and a
 model manager (the desktop app shows the same page in its own window): [docs/user/studio.md](docs/user/studio.md).
+The model manager loads a GGUF file (also a split one), a Hugging Face folder with `.safetensors`, or an `owner/name` from Hugging Face, and tells you what it found before loading.
 Inside the Studio:
 
 ![The Studio with a model loaded and the new chat open, dark theme](docs/img/studio-chat-dark.webp)

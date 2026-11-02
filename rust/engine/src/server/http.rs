@@ -285,7 +285,7 @@ pub fn studio_admin_blocked_for(
     }
     // the agent tools read and write files and run programs: never from another machine, with or without a key
     // (the file picker opens a window on this machine's screen; the web fetch and search routes reach out from this machine and read files of the agent: same rule)
-    let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file"
+    let agent = path.starts_with("/api/studio/agent/") || path.starts_with("/api/studio/web/") || path == "/api/studio/pick-file" || path == "/api/studio/models/inspect" || path == "/api/studio/fs/browse"
         // the model providers hold keys of other services and relay requests with them: same rule, reads included
         || is_providers_path(path)
         || is_personal_path(path)
@@ -300,7 +300,7 @@ pub fn studio_admin_blocked_for(
         // the remembered notes about the user are personal: this machine only, reads included
         || path == "/api/studio/memory";
     // the list of changes names files of the workspace, so even this read stays on this machine
-    let reads_workspace = path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || path == "/api/studio/agent/browser" || path.starts_with("/api/studio/agent/browser/") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory" || path == "/api/studio/npu/amd";
+    let reads_workspace = path == "/api/studio/fs/browse" || path == "/api/studio/models/inspect" || path == "/api/studio/agent/changes" || path.starts_with("/api/studio/agent/computer") || path == "/api/studio/agent/browser" || path.starts_with("/api/studio/agent/browser/") || is_providers_path(path) || is_personal_path(path) || is_agent_config_path(path) || path == "/api/studio/memory" || path == "/api/studio/npu/amd";
     if (auth_required && !agent)
         || !path.starts_with("/api/studio/")
         || (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !reads_workspace)

@@ -393,6 +393,13 @@ is also checked before the server is restarted with it.
 `all`), processor threads, the memory type of the conversation (f16, q8_0, q4_0, ...) and how many chats are answered at once.
 Everything left on *auto* is chosen by the server. The choices are remembered per model file and shown on the loaded-model card.
 *Speculative decoding* (guessing ahead to answer faster, a start option of the server, so it is chosen here and not per chat) can be off, *prompt lookup* (no extra model; guesses from the text of the conversation, good for code edits, summaries and quoted text), *draft model* (pick a smaller downloaded model of the same family) or *multi-token prediction* (only models that have the heads, on the processor or a CUDA graphics card). The answers are the same as without it, only the speed changes, and it can also be slower when the guesses are rarely right. Models with recurrent layers (for example Qwen3.5 or Mamba) cannot use it. The choice is remembered per model.
+The load dialog starts with the facts of the model. **Multi-token prediction** (MTP) uses prediction heads that are part of the model files
+(Qwen3-Next style `mtp.*`, DeepSeek and GLM `nextn` layers; there is no separate file to add). For a GGUF file fLLM looks for the
+`nextn` tensors; for a Hugging Face folder it reads `num_nextn_predict_layers` / `num_mtp_layers` from `config.json` and the weight index. If
+the heads are there, *Use the prediction heads* switches the option on; if not, the dialog says so and the option is disabled instead of
+failing later. A model whose architecture keeps a running state (Qwen3.5, Mamba and the other recurrent families) cannot speculate at all,
+and the dialog gives that reason. Several families ship heads that fLLM does not import yet (see `docs/model-coverage.md`), so a checkpoint
+whose config names heads can still be refused at the restart. MTP runs on the processor and on CUDA only.
 Combinations that cannot work (for example q4_0 conversation memory on a Vulkan, DirectX 12 or Metal device, or GPU layers while
 running on the processor) are refused with a message. There is no switch for prefix caching: the engine has no such option, so none is offered.
 
@@ -405,14 +412,29 @@ disk, so a later download continues where it stopped. The list shows speed and t
 same after a page reload (but not after the server restarts). *Settings > Models* sets the models folder for new downloads
 (models that are already downloaded stay where they are).
 
-**Browse.** The *Browse* buttons open the file or folder dialog of the operating system on the machine that runs fLLM (PowerShell on
-Windows, `osascript` on macOS, `zenity` or `kdialog` on Linux; without one the button explains that and you type the path). It works
-from that machine only.
+**Choose a model.** *Choose a model ...* on the start screen and *Choose ...* in the *Add a model* card of the Models page open one dialog
+for everything fLLM can load: a **.gguf** file (the first part of a split file is enough; if you pick another part, the set is loaded from
+part 1), a **folder in the Hugging Face layout** (`config.json`, the tokenizer files and one or more `.safetensors` files, also sharded
+with an index; unquantized, AWQ, GPTQ, FP8, NVFP4, bitsandbytes, MLX, EXL2 and EXL3 checkpoints), a single `.safetensors` or `config.json`
+file of such a folder (the whole folder is used), or a **Hugging Face name** such as `owner/name` or `owner/name:Q4_K_M` typed or pasted.
+Before anything is loaded the dialog says what it found: format, size, architecture, quantization, context length, whether it fits into the
+free memory and whether it has multi-token prediction heads. When the choice is not a model it says why and what to do: a folder without
+`config.json`, weights without a tokenizer, a split file with a missing part, a vision projector (`mmproj`), a file that does not start with the GGUF
+header, a repository without GGUF files or weights, an unsupported architecture. A folder with several models or models in sub-folders lists
+them to pick from. *Add to my models* keeps the path on the list (the files stay where they are; *Remove* only takes them off the list),
+*Load* goes on to the load options, and a Hugging Face name offers *Download and load*.
+
+**Browse.** *Choose a file ...* and *Choose a folder ...* open the file or folder dialog of the operating system on the machine that
+runs fLLM (PowerShell on Windows, `osascript` on macOS, `zenity` or `kdialog` on Linux; the file dialog offers `.gguf`, `.safetensors`
+and `.json`). When the page is in a browser and that dialog is on another screen, or no dialog program exists, *Look through folders*
+lists the folders of the computer inside the page (start places such as Home and Downloads, the drives, a mark on model folders); the
+route behind it (`GET /api/studio/fs/browse`) and the check (`POST /api/studio/models/inspect`) answer requests from the same
+machine only. Typing or pasting the path always works.
 
 **Model details.** The file list of a Hugging Face repository shows the start of the model card, the quantization of each file, its
 size and whether it should fit into the free memory, with the files that fit first.
 
-**Your own GGUF files.** The *Add a model file* card takes the path of a .gguf file, or of a folder (its .gguf files are added). The files stay where they are and appear in the list of models on the computer; *Remove* only takes them off the list.
+**Your own models.** The *Add a model* card takes a .gguf file, a folder of .gguf files or a Hugging Face model folder, checks it as described under *Choose a model* and lists it among the models on the computer. The files stay where they are.
 
 **Hugging Face account.** Private and gated models need an access token: paste one (read access is enough) into the Hugging Face card
 of the Models page. It is checked with Hugging Face and kept in the same file the Hugging Face tools use (`~/.cache/huggingface/token`),

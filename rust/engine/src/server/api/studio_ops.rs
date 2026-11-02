@@ -33,11 +33,7 @@ pub(in crate::server) struct LoadOptions {
     pub speculative_tokens: Option<usize>,
 }
 
-/// Architectures with recurrent layers: rejected draft tokens would advance the recurrent state, so they cannot speculate.
-const STATEFUL_ARCHITECTURES: &[&str] = &[
-    "qwen3next", "qwen35", "qwen35moe", "olmo_hybrid", "mamba", "mamba2", "jamba", "granitehybrid", "bamba", "nemotron_h",
-    "nemotron_h_moe", "falcon-h1", "zamba2", "lfm2", "lfm2moe", "rwkv6", "rwkv7",
-];
+use crate::model_inspect::STATEFUL_ARCHITECTURES;
 
 const CONTEXT_FLAGS: &[&str] = &["--ctx", "--ctx-size", "--max-model-len"];
 const GPU_LAYER_FLAGS: &[&str] = &["--gpu-layers", "-ngl", "--n-gpu-layers"];
@@ -245,6 +241,27 @@ impl LoadOptions {
     /// Refuses a speculative decoding choice that cannot work with the model file `target` (checked before the server restarts).
     pub fn check_with_model(&self, target: &Path) -> Result<(), String> {
         let Some(mode) = self.speculative.as_deref().filter(|m| *m != "off") else { return Ok(()) };
+        // a folder or .safetensors file is judged by its config; a GGUF file by its header and tensors
+        if !target.is_file() || !target.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")) {
+            let found = crate::model_inspect::inspect(&target.display().to_string());
+            if let Some(reason) = &found.speculation_blocked {
+                return Err(format!("{reason} Choose off."));
+            }
+            return match mode {
+                "mtp" if found.mtp != Some(true) => {
+                    Err("This model has no multi-token prediction heads. Choose prompt lookup or a draft model instead.".into())
+                }
+                "draft" => {
+                    let draft = self.draft_model.as_deref().unwrap_or_default();
+                    let small = fllm_gguf_probe::MappedGguf::open(Path::new(draft)).map_err(|e| format!("The draft model cannot be read: {e}"))?;
+                    if small.index().file_len >= found.size_bytes {
+                        return Err("The draft model must be smaller than the model it drafts for, or speculation only slows it down.".into());
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
         let probe = fllm_gguf_probe::MappedGguf::open(target).map_err(|e| e.to_string())?;
         let index = probe.index();
         let arch = index.metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
@@ -778,7 +795,7 @@ fn pick_commands(kind: &str, os: &str) -> Vec<PickCommand> {
             let dialog = if folder {
                 "$d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder'; $r = $d.ShowDialog($o); $p = $d.SelectedPath"
             } else {
-                "$d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose a model file'; $d.Filter = 'GGUF models (*.gguf)|*.gguf|All files (*.*)|*.*'; $r = $d.ShowDialog($o); $p = $d.FileName"
+                "$d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose a model file'; $d.Filter = 'Models (*.gguf;*.safetensors;*.json)|*.gguf;*.safetensors;*.json|GGUF models (*.gguf)|*.gguf|Safetensors weights (*.safetensors)|*.safetensors|All files (*.*)|*.*'; $r = $d.ShowDialog($o); $p = $d.FileName"
             };
             let script = format!(
                 "Add-Type -AssemblyName System.Windows.Forms; $o = New-Object System.Windows.Forms.Form; $o.TopMost = $true; {dialog}; if ($r -eq 'OK') {{ [Console]::Out.Write($p) }}"
@@ -789,7 +806,7 @@ fn pick_commands(kind: &str, os: &str) -> Vec<PickCommand> {
             let script = if folder {
                 "POSIX path of (choose folder with prompt \"Choose a folder\")"
             } else {
-                "POSIX path of (choose file with prompt \"Choose a model file\" of type {\"gguf\"})"
+                "POSIX path of (choose file with prompt \"Choose a model file\" of type {\"gguf\", \"safetensors\", \"json\"})"
             };
             vec![command("osascript", &["-e", script])]
         }
@@ -801,8 +818,8 @@ fn pick_commands(kind: &str, os: &str) -> Vec<PickCommand> {
                 ]
             } else {
                 vec![
-                    command("zenity", &["--file-selection", "--title=Choose a model file", "--file-filter=GGUF models | *.gguf", "--file-filter=All files | *"]),
-                    command("kdialog", &["--getopenfilename", ".", "*.gguf|GGUF models", "--title", "Choose a model file"]),
+                    command("zenity", &["--file-selection", "--title=Choose a model file", "--file-filter=Models | *.gguf *.safetensors *.json", "--file-filter=GGUF models | *.gguf", "--file-filter=Safetensors weights | *.safetensors", "--file-filter=All files | *"]),
+                    command("kdialog", &["--getopenfilename", ".", "*.gguf *.safetensors *.json|Models (gguf, safetensors, config)", "--title", "Choose a model file"]),
                 ]
             }
         }
@@ -849,12 +866,12 @@ fn run_picker(kind: &str) -> Result<Option<String>, PickError> {
     Err(PickError::Unavailable)
 }
 
-/// `POST /api/studio/pick-file` with `{kind: "gguf" | "folder"}`: opens the dialog of the operating system on this machine and answers
+/// `POST /api/studio/pick-file` with `{kind: "model" | "gguf" | "folder"}` (`model` and `gguf` choose a model file: .gguf, .safetensors or config.json; `folder` a folder, for example a Hugging Face model): opens the dialog of the operating system on this machine and answers
 /// with `{path}` (`null` when the dialog was closed).
 pub(in crate::server) async fn pick_file(Json(body): Json<Value>) -> Response {
     let kind = body.get("kind").and_then(Value::as_str).unwrap_or("gguf").to_owned();
-    if kind != "gguf" && kind != "folder" {
-        return api_error(StatusCode::BAD_REQUEST, "kind must be \"gguf\" or \"folder\"");
+    if !matches!(kind.as_str(), "model" | "gguf" | "folder") {
+        return api_error(StatusCode::BAD_REQUEST, "kind must be \"model\", \"gguf\" or \"folder\"");
     }
     match tokio::task::spawn_blocking(move || run_picker(&kind)).await {
         Ok(Ok(path)) => Json(json!({"path": path})).into_response(),
