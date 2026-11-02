@@ -2912,10 +2912,10 @@ impl Stream for WgpuStream {
             return Err(invalid("attention q/out smaller than rows x heads x dim"));
         }
         if dk > MAX_ATTENTION_DIM || dv > MAX_ATTENTION_DIM {
-            warn_fallback_reason(
+            crate::backend::fallback_checked(
                 "attention_paged",
                 &format!("head width {dk}/{dv} exceeds the WGSL kernel's {MAX_ATTENTION_DIM}; the whole KV pool is copied every call"),
-            );
+            )?;
             return self.attention_host(out, q, kv, block_tables, lengths, layer_idx, params);
         }
         let slots = kv.slots();
@@ -3042,7 +3042,7 @@ impl Stream for WgpuStream {
         num_experts: usize,
         top_k: usize,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason("moe_route", "no WGSL router kernel yet");
+        crate::backend::fallback_checked("moe_route", "no WGSL router kernel yet")?;
         let cl = self.copy_to_host(router_logits)?;
         let mut cw = self.cpu.allocate_buffer(weights_out.size)?;
         let mut ci = self.cpu.allocate_buffer(indices_out.size)?;
@@ -3061,10 +3061,10 @@ impl Stream for WgpuStream {
         expert_weights_buf: &DeviceBuffer,
         top_k: usize,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason(
+        crate::backend::fallback_checked(
             "moe_expert_gemm",
             "no WGSL expert kernel yet; expert weights are copied every call",
-        );
+        )?;
         let cx = self.copy_to_host(x)?;
         let cidx = self.copy_to_host(expert_indices)?;
         let cwts = self.copy_to_host(expert_weights_buf)?;
@@ -3084,7 +3084,7 @@ impl Stream for WgpuStream {
         logits: &DeviceBuffer,
         params: &SamplingParams,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason("sampling_logits", "no WGSL sampling kernel yet");
+        crate::backend::fallback_checked("sampling_logits", "no WGSL sampling kernel yet")?;
         let cl = self.copy_to_host(logits)?;
         self.cpu_stream.sampling_logits(token_ids_out, &cl, params)
     }

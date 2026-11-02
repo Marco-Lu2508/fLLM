@@ -4,7 +4,7 @@
 use super::VulkanStream;
 use crate::backend::cpu::{CpuBackend, CpuStream};
 use crate::backend::vulkan::backend::mem::view_of;
-use crate::backend::{warn_fallback_reason, AttentionParams, Backend, BackendError, DeviceBuffer, DeviceKvCache, SamplingParams, Stream};
+use crate::backend::{AttentionParams, Backend, BackendError, DeviceBuffer, DeviceKvCache, SamplingParams, Stream};
 
 /// The CPU backend used for the fallbacks (created on first use).
 pub(super) struct Cpu {
@@ -50,10 +50,10 @@ impl VulkanStream {
         num_experts: usize,
         top_k: usize,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason(
+        crate::backend::fallback_checked(
             "moe_route",
             "the Vulkan backend routes with moe_topk; this stand-alone call runs on the host",
-        );
+        )?;
         let mut cpu = self.take_cpu();
         let result = (|| {
             let logits = self.copy_to_host(&mut cpu, router_logits)?;
@@ -73,10 +73,10 @@ impl VulkanStream {
         logits: &DeviceBuffer,
         params: &SamplingParams,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason(
+        crate::backend::fallback_checked(
             "sampling_logits",
             "sampling with temperature is not implemented on the Vulkan device (argmax_rows is)",
-        );
+        )?;
         let mut cpu = self.take_cpu();
         let result = (|| {
             let host = self.copy_to_host(&mut cpu, logits)?;
@@ -97,13 +97,13 @@ impl VulkanStream {
         layer_idx: usize,
         params: &AttentionParams,
     ) -> Result<(), BackendError> {
-        warn_fallback_reason(
+        crate::backend::fallback_checked(
             "attention_paged",
             &format!(
                 "head width {}/{} exceeds the Vulkan kernels' 512; the whole KV pool is copied to the host on every call",
                 params.head_dim, params.value_dim
             ),
-        );
+        )?;
         // the pools must be single allocations
         view_of(&kv.key_pool)?;
         view_of(&kv.value_pool)?;

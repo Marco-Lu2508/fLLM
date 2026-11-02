@@ -47,6 +47,8 @@ pub(in crate::server) fn build_status_json(state: &AppState) -> Value {
         "ready": state.ready.load(Ordering::Relaxed),
         "version": env!("CARGO_PKG_VERSION"),
         "build_info": crate::version::long_version(),
+        // what runs on the CPU although a GPU was chosen (layers, feed-forward blocks, whole model, single operations) and why
+        "device_fallbacks": crate::placement::report().to_json(),
         "model": {
             "name": state.model_name,
             "arch": state.model_arch,
@@ -412,6 +414,7 @@ pub(in crate::server) async fn hardware(
             "auto_order": crate::devices::auto_order(),
             "auto_choice": crate::devices::device_candidates("auto").ok().and_then(|chain| chain.first().map(|(backend, index)| if backend == "cpu" { "cpu".to_owned() } else { format!("{backend}:{index}") })),
             "measured_cpu_bandwidth_gbs": measured_bw,
+            "device_fallbacks": crate::placement::report().to_json(),
             "split": layout,
             "devices": devices,
         })
@@ -421,6 +424,19 @@ pub(in crate::server) async fn hardware(
         Ok(Ok(val)) => Json(val).into_response(),
         Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("the hardware check failed: {e}")),
         Err(_) => api_error(StatusCode::GATEWAY_TIMEOUT, "the hardware check did not finish within 60 seconds (a graphics driver may not answer)"),
+    }
+}
+
+/// `POST /api/studio/gpu-check {"device": "cuda:0" | "all"}`: the "Test this GPU" button. Runs a quantized matrix product on the GPU and on the CPU
+/// (`gpu_check.rs`) and answers one verdict per device.
+pub(in crate::server) async fn gpu_check(body: Option<Json<Value>>) -> Response {
+    let device = body.and_then(|Json(b)| b.get("device").and_then(Value::as_str).map(str::to_owned)).filter(|d| !d.is_empty());
+    let work = tokio::task::spawn_blocking(move || crate::gpu_check::check(device.as_deref()));
+    match tokio::time::timeout(std::time::Duration::from_secs(120), work).await {
+        Ok(Ok(Ok(verdicts))) => Json(json!({ "results": verdicts.iter().map(crate::gpu_check::Verdict::to_json).collect::<Vec<_>>() })).into_response(),
+        Ok(Ok(Err(e))) => api_error(StatusCode::BAD_REQUEST, &e),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("the GPU check failed: {e}")),
+        Err(_) => api_error(StatusCode::GATEWAY_TIMEOUT, "the GPU check did not finish within 120 seconds (a graphics driver may not answer)"),
     }
 }
 

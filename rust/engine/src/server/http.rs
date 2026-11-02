@@ -226,7 +226,7 @@ impl<F: FnOnce() + Unpin> Drop for Watched<F> {
 
 /// The Studio routes that change the server for everybody who uses it.
 fn is_server_change(path: &str) -> bool {
-    ["/api/studio/keys", "/api/studio/config", "/api/studio/settings", "/api/studio/engine", "/api/studio/restart", "/api/studio/models", "/api/studio/update", "/api/studio/selftest-cpu", "/api/studio/open-url"]
+    ["/api/studio/keys", "/api/studio/config", "/api/studio/settings", "/api/studio/engine", "/api/studio/restart", "/api/studio/models", "/api/studio/update", "/api/studio/selftest-cpu", "/api/studio/gpu-check", "/api/studio/open-url"]
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
 }

@@ -5884,10 +5884,10 @@ fn attention_paged(
             return self.narrow_into(out, &of, on);
         }
         if dk > MAX_ATTENTION_DIM || dv > MAX_ATTENTION_DIM {
-            warn_fallback_reason(
+            crate::backend::fallback_checked(
                 "attention_paged",
                 &format!("head width {dk}/{dv} exceeds the CUDA kernel's {MAX_ATTENTION_DIM}; the whole KV pool is copied every call"),
-            );
+            )?;
             let cq = self.copy_to_host(q)?;
             let host_kv = DeviceKvCache {
                 key_pool: self.copy_to_host(&kv.key_pool)?,
@@ -6062,7 +6062,7 @@ fn attention_paged(
                 return moe::route_ex(self.raw, router_logits, None, indices_out, weights_out, rows, num_experts, top_k, &MoeRoute::softmax(true, 1.0));
             }
         }
-        warn_fallback_reason("moe_route", "device routing is off (FLLM_CUDA_MOE=0), not available for this shape or GPU");
+        crate::backend::fallback_checked("moe_route", "device routing is off (FLLM_CUDA_MOE=0), not available for this shape or GPU")?;
         let cl = self.copy_to_host(router_logits)?;
         let mut cw = self.cpu.allocate_buffer(weights_out.size)?;
         let mut ci = self.cpu.allocate_buffer(indices_out.size)?;
@@ -6083,7 +6083,7 @@ fn attention_paged(
         if self.expert_gemm_device(out, x, expert_weights, expert_indices, expert_weights_buf, top_k)? {
             return Ok(());
         }
-        warn_fallback_reason("moe_expert_gemm", "no grouped kernel for this weight type or GPU (or FLLM_CUDA_MOE=0); expert weights are copied every call");
+        crate::backend::fallback_checked("moe_expert_gemm", "no grouped kernel for this weight type or GPU (or FLLM_CUDA_MOE=0)?; expert weights are copied every call");
         let cx = self.copy_to_host(x)?;
         let cidx = self.copy_to_host(expert_indices)?;
         let cwts = self.copy_to_host(expert_weights_buf)?;
@@ -6094,7 +6094,7 @@ fn attention_paged(
     }
 
     fn sampling_logits(&mut self, token_ids_out: &mut [u32], logits: &DeviceBuffer, params: &SamplingParams) -> Result<(), BackendError> {
-        warn_fallback_reason("sampling_logits", "no CUDA sampling kernel yet");
+        crate::backend::fallback_checked("sampling_logits", "no CUDA sampling kernel yet")?;
         let cl = self.copy_to_host(logits)?;
         self.cpu_stream.sampling_logits(token_ids_out, &cl, params)
     }

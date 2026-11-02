@@ -828,6 +828,14 @@ html.dark .btn-destructive { color: #1c0806; }
 .mem-bar { height: 5px; margin-top: 12px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
 .mem-bar > i { display: block; height: 100%; border-radius: 3px; background: var(--ok); transition: width var(--slow); }
 .mem-bar.is-warn > i { background: var(--warn); }
+/* a part of the model runs on the CPU although a GPU was chosen (gpucheck.js) */
+.fallback-notice { border: 1px solid color-mix(in oklab, var(--warn) 60%, var(--border)); background: color-mix(in oklab, var(--warn) 12%, transparent); color: var(--foreground); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 13px; }
+.fallback-title { font-weight: 600; color: var(--warn); margin-bottom: 4px; }
+.fallback-chip { color: var(--warn); cursor: pointer; font-size: 11px; text-decoration: underline dotted; }
+.gpu-verdict { font-size: 12px; font-family: var(--font-mono, monospace); }
+.gpu-verdict.is-ok { color: var(--primary); }
+.gpu-verdict.is-warn { color: var(--warn); }
+.gpu-verdict.is-bad { color: var(--destructive); font-weight: 600; }
 .mem-bar.is-high > i { background: var(--danger); }
 
 /* the open chat shows its full title; its actions appear on hover or keyboard focus, on touch screens always */

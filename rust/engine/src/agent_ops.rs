@@ -6,7 +6,8 @@ use std::path::Path;
 
 pub const DOCTOR_HELP: &str = "usage: fllm-rs doctor [--url http://127.0.0.1:8000] [--api-key KEY] [--folder DIR]
 Checks what the coding agent needs: the server and its model, the tool list, the command sandbox, git, the Studio folder, the
-permission settings, skills and the terminal programs (bubblewrap, docker, ssh). Exit code 1 when a check fails.";
+permission settings, skills and the terminal programs (bubblewrap, docker, ssh). Exit code 1 when a check fails.
+`fllm-rs doctor --gpu` checks the graphics cards instead: does the GPU do the work, or does the CPU?";
 
 pub const INSIGHTS_HELP: &str = "usage: fllm-rs insights [--days N] [--profile NAME] [--json]
 What the headless agent did in the last N days (default 30), from the sessions in the Studio folder: runs, steps, tool calls by
@@ -74,7 +75,13 @@ pub fn local_checks(studio: &Path, folder: &Path) -> Vec<Check> {
 pub fn doctor(args: &[String]) -> Result<i32, String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{DOCTOR_HELP}");
+        println!();
+        println!("{}", crate::gpu_check::HELP);
         return Ok(0);
+    }
+    // `doctor --gpu`: one line per GPU, does it do the work or does the CPU
+    if args.iter().any(|a| a == "--gpu") {
+        return crate::gpu_check::run_cli(args);
     }
     let folder = arg(args, "--folder").map(std::path::PathBuf::from).map_or_else(std::env::current_dir, Ok).map_err(|e| e.to_string())?;
     let studio = crate::agent_cli::studio_folder();
@@ -97,6 +104,13 @@ pub fn doctor(args: &[String]) -> Result<i32, String> {
                     }
                 }
                 Err(e) => checks.push(check("fail", format!("{e} (start one with `fllm-rs serve --model ...` or the desktop app)"))),
+            }
+            // a model that is on the GPU but computes on the CPU is the most common reason for "it is slow"
+            if let Ok(s) = http.get_json("/api/studio/status") {
+                let f = &s["device_fallbacks"];
+                if f["fallback"].as_bool().unwrap_or(false) {
+                    checks.push(check("warn", format!("{} (details: /api/studio/status, `fllm-rs doctor --gpu`)", f["headline"].as_str().unwrap_or("part of the model runs on the CPU"))));
+                }
             }
             if let Ok(s) = http.get_json("/api/studio/agent/sandbox") {
                 let active = s["active"].as_bool().unwrap_or(false);

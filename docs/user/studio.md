@@ -440,6 +440,8 @@ size and whether it should fit into the free memory, with the files that fit fir
 of the Models page. It is checked with Hugging Face and kept in the same file the Hugging Face tools use (`~/.cache/huggingface/token`),
 so downloads from the page, `fllm-rs pull` and `fllm-rs run` all use it. A `HF_TOKEN` variable wins over the saved token.
 
+**Is the card doing the work?** When part of the model runs on the CPU although a graphics card was chosen, the footer, Settings, Hardware and the Models page show an amber notice with the reason. *Test this GPU* on a device card runs a few seconds of real work on the card and on the processor and shows one line: `OK (12 times faster than the CPU)` or `FALLS BACK: ...` (the same check as `fllm-rs doctor --gpu`; [troubleshooting](troubleshooting.md#the-model-is-in-the-gpu-memory-but-runs-on-the-cpu)).
+
 **NPU (experimental).** If your computer has an Intel NPU, Settings, Hardware shows an NPU card. When the NPU is found but its runtime (OpenVINO,
 a download of about 60 to 85 MB from the official Python package host, checked against a fixed checksum) is missing, the card has an **Install the runtime**
 button with a progress bar and a Cancel button, and **Remove the runtime** takes it away again. Once the card says *Ready*, the load dialog of the

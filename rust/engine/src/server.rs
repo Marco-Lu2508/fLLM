@@ -569,6 +569,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/update", get(api::studio::update_status))
         .route("/api/studio/update/install", post(api::studio::update_install))
         .route("/api/studio/selftest-cpu", post(api::studio::selftest_cpu))
+        .route("/api/studio/gpu-check", post(api::studio::gpu_check))
         .route("/api/studio/models", get(api::studio::models_hub))
         .route("/api/studio/hf-files", get(api::studio::hf_files))
         .route("/api/studio/models/pull", post(api::studio::pull_model))
@@ -1739,6 +1740,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         );
     // the output cache reports itself: hits, misses, evictions, bytes
     body.push_str(&state.cache.prometheus());
+    body.push_str(&crate::placement::report().prometheus());
     let (leaders, followers) = state.coalesce.counters();
     body.push_str(&format!(
         "# HELP fllm_draining Whether the server refuses new work (1) or not (0)\n# TYPE fllm_draining gauge\nfllm_draining {}\n\
