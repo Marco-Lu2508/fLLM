@@ -306,7 +306,7 @@ pub(super) struct Task {
     pub name: String,
     pub prompt: String,
     pub when: String,
-    /// `chat` or `agent`.
+    /// `chat`, `agent` or `learn` (consolidate the memory and the skills; see `learn_flow::consolidate`).
     pub mode: String,
     /// The folder of an agent run.
     pub folder: String,
@@ -329,7 +329,12 @@ impl Task {
             name: v["name"].as_str()?.to_owned(),
             prompt: v["prompt"].as_str()?.to_owned(),
             when: v["when"].as_str()?.to_owned(),
-            mode: if v["mode"].as_str() == Some("agent") { "agent" } else { "chat" }.to_owned(),
+            mode: match v["mode"].as_str() {
+                Some("agent") => "agent",
+                Some("learn") => "learn",
+                _ => "chat",
+            }
+            .to_owned(),
             folder: v["folder"].as_str().unwrap_or_default().to_owned(),
             notify: v["notify"].as_bool().unwrap_or(false),
             enabled: v["enabled"].as_bool().unwrap_or(true),
@@ -354,10 +359,11 @@ pub(super) fn task_from_request(body: &Value, existing: Option<&Task>, id: Strin
     let mode = match body["mode"].as_str().unwrap_or("chat") {
         "chat" => "chat",
         "agent" => "agent",
-        other => return Err(format!("unknown mode '{other}' (chat or agent)")),
+        "learn" => "learn",
+        other => return Err(format!("unknown mode '{other}' (chat, agent or learn)")),
     };
     let folder = body["folder"].as_str().unwrap_or_default().trim().to_owned();
-    if mode == "agent" {
+    if mode == "agent" || (mode == "learn" && !folder.is_empty()) {
         let path = Path::new(&folder);
         if !path.is_absolute() || !path.is_dir() {
             return Err("an agent task needs an existing absolute folder".into());
@@ -371,7 +377,7 @@ pub(super) fn task_from_request(body: &Value, existing: Option<&Task>, id: Strin
         prompt,
         when,
         mode: mode.to_owned(),
-        folder: if mode == "agent" { folder } else { String::new() },
+        folder: if mode == "agent" || mode == "learn" { folder } else { String::new() },
         notify: body["notify"].as_bool().unwrap_or(false),
         enabled: body["enabled"].as_bool().unwrap_or(true),
         created: existing.map_or(now, |t| t.created),
@@ -539,8 +545,22 @@ fn run_agent(task: &Task, env: &Env) -> Result<String, String> {
     Ok(text)
 }
 
+/// The nightly job: draft the skill revisions that are due and propose the removal of repeated memory entries. It writes nothing
+/// that is used before a person approves it (Settings > Skills, Settings > Personalization, `fllm-rs learn review`).
+fn run_learn(task: &Task, env: &Env) -> Result<String, String> {
+    let studio = crate::agent_cli::studio_folder();
+    let workspace = (!task.folder.is_empty()).then(|| PathBuf::from(&task.folder));
+    let mut complete = |body: Value| (env.complete)(body);
+    Ok(crate::learn_flow::consolidate(&studio, workspace.as_deref(), &mut complete).join("
+"))
+}
+
 pub(super) fn execute(task: &Task, env: &Env) -> Result<String, String> {
-    if task.mode == "agent" { run_agent(task, env) } else { run_chat(task, env) }
+    match task.mode.as_str() {
+        "agent" => run_agent(task, env),
+        "learn" => run_learn(task, env),
+        _ => run_chat(task, env),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -909,6 +929,20 @@ mod tests {
             assert!(n > at && n - at <= 2 * 3600);
             at = n;
         }
+    }
+
+    #[test]
+    fn a_learn_task_needs_no_folder_but_a_given_one_must_exist() {
+        let ok = json!({"name": "Nightly", "prompt": "Consolidate memory and skills", "when": "daily at 03:00", "mode": "learn"});
+        let t = task_from_request(&ok, None, "task_2".into(), 5).unwrap();
+        assert_eq!((t.mode.as_str(), t.folder.as_str()), ("learn", ""));
+        assert_eq!(Task::from_json(&t.to_json()).unwrap().mode, "learn");
+        let mut bad = ok.clone();
+        bad["folder"] = json!("relative");
+        assert!(task_from_request(&bad, None, "task_3".into(), 5).is_err());
+        let mut here = ok;
+        here["folder"] = json!(std::env::temp_dir().to_str().unwrap());
+        assert_eq!(task_from_request(&here, None, "task_4".into(), 5).unwrap().folder, std::env::temp_dir().to_str().unwrap());
     }
 
     #[test]

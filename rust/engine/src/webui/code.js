@@ -606,11 +606,13 @@
       sessionId: null,
       instructions: [], // [{ file, text }] AGENTS.md / FLLM.md / CLAUDE.md, nearest first
       memory: { workspace: [], global: [] },
+      profile: '', // the profile of the user, from Settings > Personalization (put into the system prompt by the server's answer)
       memDraft: null, // { workspace, global } text being edited in the memory panel
       git: '', // short working tree state for the system prompt
       modes: {}, // { build: { edit: 'ask' ... }, plan: {...} } overrides of DEFAULT_MODES
       autoCheck: false, // run diagnostics after every edit and append the first problems
       autoReview: false, // before a run counts as done: review the diff and the diagnostics, let the agent fix what is found
+      learn: false, // "Learn from this session": skill notes and revisions, memory and profile proposals (learn.js)
       personality: 'default', // how the agent talks (PERSONALITIES in codeprompts.js)
       attachments: [], // images (data URLs) waiting for the next message
       queue: [], // messages typed while the agent was busy
@@ -634,13 +636,14 @@
       const saved = JSON.parse(localStorage.getItem(CODE_SETTINGS_KEY) || '{}');
       code.autoCheck = Boolean(saved.autoCheck);
       code.autoReview = Boolean(saved.autoReview);
+      code.learn = Boolean(saved.learn);
       code.personality = typeof saved.personality === 'string' && PERSONALITIES[saved.personality] ? saved.personality : 'default';
       const modes = JSON.parse(localStorage.getItem(CODE_MODES_KEY) || '{}');
       if (modes && typeof modes === 'object') code.modes = modes;
     } catch { /* unreadable settings: defaults */ }
     const saveCodeSettings = () => {
       try {
-        localStorage.setItem(CODE_SETTINGS_KEY, JSON.stringify({ autoCheck: code.autoCheck, autoReview: code.autoReview, personality: code.personality }));
+        localStorage.setItem(CODE_SETTINGS_KEY, JSON.stringify({ autoCheck: code.autoCheck, autoReview: code.autoReview, learn: code.learn, personality: code.personality }));
         localStorage.setItem(CODE_MODES_KEY, JSON.stringify(code.modes));
       } catch { /* storage full */ }
     };
@@ -762,6 +765,7 @@
         env: codeEnvironment({ ...(code.workspace || {}), git_status: code.git }),
         files: code.instructions,
         memory: code.memory,
+        profile: code.profile,
         tools: new Set(code.registry.keys()),
         personality: code.personality,
       });
@@ -878,12 +882,14 @@
     async function loadInstructions() {
       code.instructions = [];
       code.memory = { workspace: [], global: [] };
+      code.profile = '';
       try {
         const res = await apiFetch('/api/studio/agent/instructions', { method: 'POST', body: {} });
         if (res.ok) {
           const d = await res.json();
           code.instructions = Array.isArray(d.files) ? d.files : [];
           code.memory = { workspace: d.memory?.workspace || [], global: d.memory?.global || [] };
+          code.profile = typeof d.profile === 'string' ? d.profile : '';
         }
       } catch { /* an older server: no instructions, no memory */ }
       if (!code.memDraft) renderCodeSide();
@@ -1597,6 +1603,9 @@
           <p class="side-empty">After every edit the agent runs a quick syntax or build check (python, node, cargo check, tsc, go vet, JSON) and gets the first errors with the result. Slower, but it catches mistakes at once.</p>
           <label class="check-row"><input type="checkbox" data-auto-review${code.autoReview ? ' checked' : ''}> Review my work before it counts as done</label>
           <p class="side-empty">When a run changed files, the agent reads its own diff once more together with the findings of a fixed rule set and the diagnostics, and fixes what is wrong (two rounds at most). It costs one extra step per run. Switch it on with <span class="mono">/autoreview on</span>.</p>
+          <label class="check-row"><input type="checkbox" data-learn${code.learn ? ' checked' : ''}> Learn from this session</label>
+          <p class="side-empty">After each run, in the background: how the skills it used fared is noted (a failed skill gets a revision drafted), and a short reflective step proposes memory entries and lines for your profile. Nothing is saved until you say yes in Settings &gt; Skills and Settings &gt; Personalization. It uses the loaded model once or twice per run. <span class="mono">/learn on|off</span>; <span class="mono">/good</span> and <span class="mono">/bad</span> tell it whether the skills of the last run helped.</p>
+          <div style="display:flex;gap:6px;margin:4px 0 8px;"><button class="btn btn-xs btn-ghost" data-learn-fb="up" title="The skills the agent used in the last run helped">Skills helped</button><button class="btn btn-xs btn-ghost" data-learn-fb="down" title="The skills the agent used in the last run did not help: a revision is drafted">Skills did not help</button></div>
           <label class="rules-label" for="codePersonality">Style of the agent</label>
           <select class="ui-select" id="codePersonality" data-personality>${Object.entries(PERSONALITIES).map(([k, p]) => `<option value="${k}"${code.personality === k ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}</select>
           <p class="side-empty">Only changes how the agent talks, not what it may do. <span class="mono">/personality name</span> does the same.</p></details></section>`;
@@ -2189,13 +2198,15 @@
         onUsage: (n) => { code.used = n; code.lastUsed = n; },
       };
       let stopped = false;
+      let runFailed = false;
+      const learnFrom = turn.msgIndex;
       try {
         await runLoop(ctx);
         if (code.autoReview && code.perm !== 'plan' && code.running) await selfReview(ctx, mark);
         const lastItem = [...code.view].reverse().find((i) => i.kind === 'assistant');
         if (lastItem && code.perm === 'plan' && lastItem.content && code.view[code.view.length - 1] === lastItem) { lastItem.planDone = true; paintItem(lastItem); }
       } catch (e) {
-        if (e.name !== 'AbortError') code.view.push({ kind: 'assistant', id: cid(), content: '', error: e.message });
+        if (e.name !== 'AbortError') { runFailed = true; code.view.push({ kind: 'assistant', id: cid(), content: '', error: e.message }); }
       } finally {
         stopped = !code.running;
         cancelWaiters();
@@ -2216,6 +2227,11 @@
         return;
       }
       generateTitle();
+      // the answer is delivered: now the server learns from the run in the background (learn.js), without holding the user up
+      if (code.learn && typeof window.fllmLearnAfterRun === 'function') {
+        const lastView = [...code.view].reverse().find((i) => i.kind === 'assistant');
+        window.fllmLearnAfterRun({ messages: code.messages, from: learnFrom, session: code.sessionId, workspace: code.workspace && code.workspace.root, failed: runFailed || Boolean(lastView && lastView.error) });
+      }
       if (code.queue.length) {
         const next = code.queue.shift();
         renderQueue();
@@ -2370,7 +2386,7 @@
       ['rewind', 'Undo file changes back to a chosen point'], ['undo', 'Undo the last file change (/undo 3 for three)'],
       ['plan', 'Plan agent: read only'], ['build', 'Build agent'], ['ask', 'Build agent, ask before every change'], ['edit', 'Build agent, auto-edit'], ['agent', 'Switch between build and plan'], ['model', 'Pick the model'],
       ['skill', 'Turn this session into a reusable skill'], ['remember', 'Save a fact to memory (/remember global ...)'], ['memory', 'Show and edit the memory'], ['check', 'Check the code for errors (diagnostics)'],
-      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['search', 'Search earlier chats and code sessions (/search words)'], ['retry', 'Take the last message back, files included, and send it again'], ['stop', 'Stop the agent'], ['insights', 'What the agent did in your saved sessions of this folder'], ['personality', 'How the agent talks (/personality concise)'], ['autoreview', 'Review my work before it counts as done (/autoreview on|off)'], ['help', 'List the commands'],
+      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['search', 'Search earlier chats and code sessions (/search words)'], ['retry', 'Take the last message back, files included, and send it again'], ['stop', 'Stop the agent'], ['insights', 'What the agent did in your saved sessions of this folder'], ['personality', 'How the agent talks (/personality concise)'], ['autoreview', 'Review my work before it counts as done (/autoreview on|off)'], ['learn', 'Learn from this session: skills, memory, profile (/learn on|off)'], ['good', 'The skills of the last run helped'], ['bad', 'The skills of the last run did not help'], ['help', 'List the commands'],
     ];
 
     /** Rows for a pick list of the user messages of this session, newest first. */
@@ -2603,6 +2619,16 @@
           code.personality = key; saveCodeSettings(); renderCodeSide(true);
           const detail = PERSONALITIES[key].note.replace(/^Style: /, '');
           codeNotice(`Style: ${PERSONALITIES[key].label}${detail ? `. ${detail.charAt(0).toUpperCase()}${detail.slice(1)}` : '.'}`);
+          return true;
+        }
+        case 'learn': {
+          if (['on', 'off'].includes(argText.toLowerCase())) { code.learn = argText.toLowerCase() === 'on'; saveCodeSettings(); renderCodeSide(true); }
+          const st = typeof window.fllmLearnStatus === 'function' ? await window.fllmLearnStatus() : null;
+          codeNotice(`Learn from this session: ${code.learn ? 'on. After each run the skills used are noted, a revision may be drafted, and memory entries and profile lines are proposed; nothing is saved without your yes (Settings > Skills, Settings > Personalization).' : 'off.'}${st ? ` ${st.pending ? `${st.pending} proposal${st.pending === 1 ? '' : 's'} wait${st.pending === 1 ? 's' : ''} for a decision.` : 'Nothing waits for a decision.'}` : ''}`);
+          return true;
+        }
+        case 'good': case 'bad': {
+          if (typeof window.fllmLearnFeedback === 'function') await window.fllmLearnFeedback(name === 'good' ? 'up' : 'down');
           return true;
         }
         case 'autoreview': {
@@ -2899,9 +2925,12 @@
       }
       if (t.dataset.autoCheck !== undefined) { code.autoCheck = t.checked; saveCodeSettings(); }
       if (t.dataset.autoReview !== undefined) { code.autoReview = t.checked; saveCodeSettings(); }
+      if (t.dataset.learn !== undefined) { code.learn = t.checked; saveCodeSettings(); }
       if (t.dataset.personality !== undefined && PERSONALITIES[t.value]) { code.personality = t.value; saveCodeSettings(); }
     });
     $('codeSide').addEventListener('click', async (e) => {
+      const feedback = e.target.closest('[data-learn-fb]');
+      if (feedback) { if (typeof window.fllmLearnFeedback === 'function') await window.fllmLearnFeedback(feedback.dataset.learnFb); return; }
       if (e.target.closest('[data-memory-save]')) { await saveMemoryDraft(); return; }
       if (e.target.closest('[data-memory-reset]')) { code.memDraft = null; renderCodeSide(); return; }
       const sAct = e.target.closest('[data-session-act]');

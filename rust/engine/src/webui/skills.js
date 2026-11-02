@@ -425,7 +425,7 @@
           <div class="app-card-item column" data-sc="${escapeHtml(t.id)}" style="border-bottom:1px solid var(--border);padding-bottom:8px;">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
               <span class="app-item-title">${escapeHtml(t.name)}</span>
-              <span class="quant-chip">${escapeHtml(t.when)}</span><span class="quant-chip">${t.mode === 'agent' ? 'agent' : 'chat'}</span>
+              <span class="quant-chip">${escapeHtml(t.when)}</span><span class="quant-chip">${t.mode === 'agent' ? 'agent' : t.mode === 'learn' ? 'consolidate' : 'chat'}</span>
               ${t.deliver ? `<span class="quant-chip">${escapeHtml(String(t.deliver).split(':')[0])}</span>` : ''}${t.enabled ? '' : '<span class="quant-chip">off</span>'}${t.running ? '<span style="color:var(--primary);font-size:12px;">running</span>' : ''}
               <span style="flex:1"></span>
               <button class="btn btn-xs btn-ghost" data-sc-act="run">Run now</button>
@@ -470,7 +470,12 @@
       scPreview();
     }
 
-    function scFolderVisibility() { $('scFolderRow').style.display = $('scMode').value === 'agent' ? 'flex' : 'none'; }
+    function scFolderVisibility() {
+      const mode = $('scMode').value;
+      $('scFolderRow').style.display = mode === 'agent' || mode === 'learn' ? 'flex' : 'none';
+      // consolidating needs no prompt of its own; the field only has to hold something
+      if (mode === 'learn' && !$('scPrompt').value.trim()) $('scPrompt').value = 'Consolidate memory and skills';
+    }
 
     async function scPreview() {
       const when = $('scWhenInput').value.trim();

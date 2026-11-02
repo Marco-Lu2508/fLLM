@@ -249,7 +249,7 @@ fn is_agent_config_path(path: &str) -> bool {
 
 fn is_personal_path(path: &str) -> bool {
     path.starts_with("/api/studio/sessions/")
-        || ["/api/studio/skills", "/api/studio/schedule"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
+        || ["/api/studio/skills", "/api/studio/schedule", "/api/studio/learn"].iter().any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
 }
 
 /// The Studio routes that change something (settings, model downloads and deletions, API keys) are
@@ -897,6 +897,8 @@ mod studio_gate_tests {
         for path in [
             "/api/studio/skills", "/api/studio/skills/read", "/api/studio/sessions/index", "/api/studio/sessions/search",
             "/api/studio/schedule", "/api/studio/schedule/run", "/api/studio/schedule/results", "/api/studio/schedule/check",
+            "/api/studio/learn", "/api/studio/learn/skills", "/api/studio/learn/memory", "/api/studio/learn/profile", "/api/studio/learn/after-run",
+            "/api/studio/learn/feedback", "/api/studio/learn/consolidate",
         ] {
             for method in [Method::GET, Method::POST, Method::DELETE] {
                 for auth in [false, true] {
@@ -908,6 +910,7 @@ mod studio_gate_tests {
         }
         assert!(!is_personal_path("/api/studio/skillset"));
         assert!(!is_personal_path("/api/studio/scheduled"));
+        assert!(!is_personal_path("/api/studio/learned"));
         assert!(!is_personal_path("/api/studio/sessions"));
     }
 

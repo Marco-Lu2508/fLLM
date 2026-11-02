@@ -33,6 +33,7 @@ pub const HELP: &str = "usage: fllm-rs agent -p \"TASK\" [--folder DIR] [--url h
                   [--session NAME] [--continue] [--resume NAME] [--profile NAME] [--ask] [--trajectory FILE] [--json] [--quiet]
                   [--output-format text|json|stream-json] [--plan] [--allow-rule RULE] [--deny-rule RULE] [--ask-rule RULE]
                   [--review] [--review-rounds N] [--verify COMMAND] [--propose-skills] [--auto-skills] [--image FILE]...
+                  [--learn] [--auto-memory] [--skills] [--nudge-every N]
 Runs the coding agent of the Studio without a browser against a running fllm-rs server on this machine.
 TASK: the text after -p; `-p -` reads it from standard input. Reading and searching files is always allowed.
 Everything else is refused unless you allow it: --allow-edit (write_file, edit_file, patch ...), --allow-command (bash),
@@ -53,6 +54,10 @@ Rules (allow / deny / ask, `bash: npm test*`, `edit: src/**`, or `Bash(npm test:
 fix what is found before the run counts as done (at most --review-rounds, default 2). --image FILE (repeatable) attaches a png/jpg/gif/webp picture to the task; the loaded model must be able to see.
 --propose-skills: after a long run the model may
 write a skill; it waits in skills-proposed/ (fllm-rs skills approve NAME), --auto-skills saves it at once.
+--learn: the agent learns from the run. It can read your skills (the skill tool), notes how they fared, drafts a revised skill after a failure or
+several uses, and a short reflective step proposes memory entries and lines for your profile (also every N tool steps in a long run, default 12, 0 = only
+at the end); it implies --propose-skills. Nothing is written without your approval (fllm-rs learn review); --auto-memory writes memory entries and
+profile lines at once. --skills only lets the agent read your skills.
 The answer is printed on standard output. Exit codes: 0 finished, 1 error, 3 stopped at --max-steps (a report is still printed), 4 the --verify command still fails after the run.
 The agent tools only accept requests from the machine the server runs on, so --url must name this machine.";
 
@@ -84,6 +89,12 @@ pub struct Options {
     pub propose_skills: bool,
     pub auto_skills: bool,
     pub images: Vec<PathBuf>,
+    /// `--learn`: the self-improvement loop (skill usage notes and revisions, memory and profile reflection).
+    pub learn: bool,
+    pub auto_memory: bool,
+    /// `--skills` (also on with `--learn`): the agent can read the skills of the Studio folder and the project.
+    pub skills: bool,
+    pub nudge_every: usize,
 }
 
 fn value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a String, String> {
@@ -136,6 +147,10 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         propose_skills: false,
         auto_skills: false,
         images: Vec::new(),
+        learn: false,
+        auto_memory: false,
+        skills: false,
+        nudge_every: 12,
     };
     let mut loose: Vec<String> = Vec::new();
     let mut i = 0;
@@ -221,6 +236,21 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.propose_skills = true;
                 o.auto_skills = true;
             }
+            "--learn" => {
+                o.learn = true;
+                o.skills = true;
+                o.propose_skills = true;
+            }
+            "--auto-memory" => {
+                o.learn = true;
+                o.skills = true;
+                o.propose_skills = true;
+                o.auto_memory = true;
+            }
+            "--skills" => o.skills = true,
+            "--nudge-every" => {
+                o.nudge_every = value(args, &mut i, flag)?.parse().ok().filter(|n| *n <= 500).ok_or("--nudge-every is a number from 0 to 500")?;
+            }
             "--quiet" | "-q" => o.quiet = true,
             "--help" | "-h" => return Err(HELP.to_owned()),
             other if other.starts_with('-') && other != "-" => return Err(format!("unknown agent option: {other}")),
@@ -253,6 +283,9 @@ pub trait Backend {
     fn instructions(&mut self) -> Result<Value, String> {
         Ok(json!({}))
     }
+    /// Called by a front end after a run was answered (the gateway uses it so that a learning backend can note the run).
+    /// `from` is the index in `outcome.messages` of the first message of this run (earlier ones belong to a continued session).
+    fn after_run(&mut self, _outcome: &Outcome, _session: &str, _from: usize) {}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,7 +437,22 @@ pub fn instructions_block(answer: &Value) -> String {
             text.push_str(&format!("\n\n# {title}\n{}", entries.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n")));
         }
     }
-    clip(&text, MAX_INSTRUCTIONS_CHARS)
+    let mut text = clip(&text, MAX_INSTRUCTIONS_CHARS);
+    // the profile and the skill index are short and capped where they are made, so the cut above never takes them away
+    if let Some(profile) = answer["profile"].as_str().map(str::trim).filter(|p| !p.is_empty()) {
+        text.push_str(&format!("
+
+# About the user (profile)
+These notes come from earlier sessions and from the user's own edits. Adapt to them; do not mention them unless asked.
+{profile}"));
+    }
+    if let Some(skills) = answer["skills"].as_str().map(str::trim).filter(|p| !p.is_empty()) {
+        text.push_str(&format!("
+
+# Skills
+{skills}"));
+    }
+    text
 }
 
 /// The Studio folder, or `profiles/NAME` inside it: where the sessions and the persona (`SOUL.md`) of a profile live.
@@ -809,7 +857,15 @@ impl HttpBackend {
     }
 
     fn call(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        self.call_within(method, path, body, None)
+    }
+
+    /// Like `call`, with its own time limit (the reflective steps must not hold a run up for long).
+    fn call_within(&self, method: reqwest::Method, path: &str, body: Option<&Value>, limit: Option<Duration>) -> Result<Value, String> {
         let mut request = self.client.request(method, format!("{}{path}", self.base));
+        if let Some(limit) = limit {
+            request = request.timeout(limit);
+        }
         if let Some(key) = &self.key {
             request = request.bearer_auth(key);
         }
@@ -825,6 +881,11 @@ impl HttpBackend {
             return Err(format!("{path}: HTTP {status}: {message}"));
         }
         Ok(parsed)
+    }
+
+    /// One chat-completions request that gives up after `seconds`.
+    pub(crate) fn complete_within(&self, body: &Value, seconds: u64) -> Result<Value, String> {
+        self.call_within(reqwest::Method::POST, "/v1/chat/completions", Some(body), Some(Duration::from_secs(seconds)))
     }
 
     pub(crate) fn get_json(&self, path: &str) -> Result<Value, String> {
@@ -958,7 +1019,7 @@ pub fn run_verify(backend: &mut dyn Backend, command: &str, rules: &Rules) -> (b
 }
 
 /// After a long run: ask the model for a skill (without tools) and store it as a proposal, or as a skill when `auto` is set.
-fn propose_skill(http: &mut HttpBackend, cfg: &LoopConfig, system: &str, outcome: &Outcome, base: &std::path::Path, auto: bool, progress: &mut dyn FnMut(&str)) {
+fn propose_skill(http: &mut dyn Backend, cfg: &LoopConfig, system: &str, outcome: &Outcome, base: &std::path::Path, auto: bool, progress: &mut dyn FnMut(&str)) {
     let mut messages = vec![json!({"role": "system", "content": system})];
     messages.extend(outcome.messages.iter().cloned());
     messages.push(json!({"role": "user", "content": agent_extras::SKILL_PROMPT}));
@@ -1026,6 +1087,22 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
     }
 
+    let mut lb = crate::learn_cli::LearnBackend::new(
+        &mut http,
+        &studio_folder(),
+        &folder,
+        &options.prompt,
+        crate::learn_cli::LearnConfig {
+            learn: options.learn,
+            skills: options.skills,
+            auto_memory: options.auto_memory,
+            nudge_every: options.nudge_every,
+            quiet: options.quiet,
+            secrets: options.api_key.iter().cloned().collect(),
+            small_context: context.is_some_and(|c| c < 8192),
+            model: Some(model.clone()),
+        },
+    );
     let base = profile_base(options.profile.as_deref())?;
     let started = std::time::Instant::now();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -1057,7 +1134,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         rules.merge(Rules::from_json(&json!({"deny": ["bash: *", "edit: **", "network: *", "memory: *"]})));
         extra.push_str("\n\nPLAN MODE: you may only read and search; every other action is refused. Investigate, then finish with a numbered plan: the files to change, what to change in each, and how to check it. Do not claim that anything was changed.");
     }
-    let system = full_system(&mut http, &folder_text, &allow, Some(extra.as_str()), load_soul(&base).as_deref());
+    let system = full_system(&mut lb, &folder_text, &allow, Some(extra.as_str()), load_soul(&base).as_deref());
     let mut cfg = LoopConfig {
         model: Some(model),
         allow: allow.clone(),
@@ -1074,7 +1151,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
     };
     if streaming {
-        let names: Vec<String> = http.tools().unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
+        let names: Vec<String> = lb.tools().unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
         println!("{}", agent_extras::init_event(&session_id, cfg.model.as_deref().unwrap_or_default(), &folder_text, &names, if plan { "plan" } else { "default" }));
     }
     let mut approver = TerminalApprover::default();
@@ -1091,7 +1168,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             }
         }
     };
-    let mut outcome = run_loop_full(&mut http, &cfg, &system, history, &mut progress, &mut approve, &mut observe);
+    // the first message of this run: what comes before it belongs to a continued session and is not learned from again
+    let run_from = history.len().saturating_sub(1);
+    let mut outcome = run_loop_full(&mut lb, &cfg, &system, history, &mut progress, &mut approve, &mut observe);
 
     // self-review: look at the work before it counts as done, and let the agent fix what the checks find
     if options.review {
@@ -1102,7 +1181,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 break;
             }
             progress(&format!("[review {round}] checking {} changed file(s)", done.edited.len()));
-            let report = self_review(&mut http, &done.edited, options.verify.as_deref(), &rules);
+            let report = self_review(&mut lb, &done.edited, options.verify.as_deref(), &rules);
             if done.edited.is_empty() && !report.objective_problems() {
                 break;
             }
@@ -1112,7 +1191,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let previous = Outcome { answer: done.answer.clone(), status: Status::Done, steps: done.steps, tool_calls: done.tool_calls.clone(), messages: done.messages.clone(), edited: done.edited.clone() };
             // a review round answers briefly or makes a small fix: it must not run into the full answer budget of the first pass
             let review_cfg = LoopConfig { max_tokens: cfg.max_tokens.min(2048), ..cfg.clone() };
-            match run_loop_full(&mut http, &review_cfg, &system, next, &mut progress, &mut approve, &mut observe) {
+            match run_loop_full(&mut lb, &review_cfg, &system, next, &mut progress, &mut approve, &mut observe) {
                 Ok(mut again) => {
                     again.tool_calls.splice(0..0, previous.tool_calls);
                     again.steps += previous.steps;
@@ -1139,7 +1218,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     if options.review {
         if let (Some(command), Ok(done)) = (options.verify.as_deref(), &outcome) {
             if done.status == Status::Done {
-                let (passed, output) = run_verify(&mut http, command, &rules);
+                let (passed, output) = run_verify(&mut lb, command, &rules);
                 verify_failed = !passed;
                 progress(&format!("[verify] {} {}", command, if passed { "passed" } else { "FAILED" }));
                 if !passed && !quiet {
@@ -1164,15 +1243,15 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                     cfg.rules = base_rules.clone();
                     let mut next = done.messages.clone();
                     next.push(json!({"role": "user", "content": "The plan is approved. Carry it out now."}));
-                    let build_system = full_system(&mut http, &folder_text, &options.allow, options.system.as_deref(), load_soul(&base).as_deref());
+                    let build_system = full_system(&mut lb, &folder_text, &options.allow, options.system.as_deref(), load_soul(&base).as_deref());
                     let mut ask_each = |name: &str, category: &str, args: &Value| approver.ask(name, category, args);
-                    outcome = run_loop_full(&mut http, &cfg, &build_system, next, &mut progress, &mut ask_each, &mut observe);
+                    outcome = run_loop_full(&mut lb, &cfg, &build_system, next, &mut progress, &mut ask_each, &mut observe);
                     planned = false;
                 }
             }
         }
     }
-    http.end();
+    lb.http().end();
     if let Err(e) = &outcome {
         if streaming {
             println!("{}", agent_extras::result_event("", "error", 0, &session_id, started.elapsed().as_millis(), Some(e)));
@@ -1182,7 +1261,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
     // a long run may leave a skill behind: proposed (waits for approval) or saved at once
     if options.propose_skills && outcome.status == Status::Done && outcome.tool_calls.len() >= 8 {
-        propose_skill(&mut http, &cfg, &system, &outcome, &base, options.auto_skills, &mut progress);
+        propose_skill(&mut lb, &cfg, &system, &outcome, &base, options.auto_skills, &mut progress);
     }
 
     // every run is kept (sessions of the same name continue), so `--resume`, `--continue` and the search can find it again
@@ -1191,7 +1270,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         if options.session.is_none() {
             agent_extras::prune_auto_sessions(&base, 200);
         }
-        index_session(&http, &session_id, &outcome.messages, now);
+        index_session(lb.http(), &session_id, &outcome.messages, now);
     }
     if let Some(file) = &options.trajectory {
         append_trajectory(file, &trajectory_line(&folder_text, cfg.model.as_deref().unwrap_or_default(), &system, &outcome, now))?;
@@ -1221,6 +1300,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         println!("{}", outcome.answer.trim_end());
     }
     io::stdout().flush().ok();
+    // the answer is out: now the agent learns from the run (skill notes and revisions, memory and profile proposals)
+    if options.learn {
+        let verify = if options.review { options.verify.as_ref().map(|_| !verify_failed) } else { None };
+        for line in lb.finish(&outcome, &session_id, verify, run_from) {
+            progress(&line);
+        }
+    }
     if out_of_steps {
         eprintln!("[stopped at --max-steps {}; the report above is what was found so far]", options.max_steps);
         return Ok(3);
@@ -1552,6 +1638,24 @@ mod tests {
         assert!(context_warning(14_000, Some(512)).unwrap().contains("4000"));
         assert!(context_warning(14_000, Some(32768)).is_none());
         assert!(context_warning(14_000, None).is_none());
+    }
+
+    #[test]
+    fn the_learning_flags_turn_the_loop_on_and_the_profile_and_skills_reach_the_prompt() {
+        let o = parse_args(&s(&["-p", "x"])).unwrap();
+        assert!(!o.learn && !o.skills && !o.auto_memory && !o.propose_skills && o.nudge_every == 12, "off by default");
+        let o = parse_args(&s(&["-p", "x", "--learn"])).unwrap();
+        assert!(o.learn && o.skills && o.propose_skills && !o.auto_memory && !o.auto_skills, "proposals only");
+        let o = parse_args(&s(&["-p", "x", "--auto-memory", "--nudge-every", "0"])).unwrap();
+        assert!(o.learn && o.auto_memory && o.nudge_every == 0);
+        assert!(parse_args(&s(&["-p", "x", "--skills"])).unwrap().skills);
+        assert!(!parse_args(&s(&["-p", "x", "--skills"])).unwrap().learn, "reading skills does not learn");
+        assert!(parse_args(&s(&["-p", "x", "--nudge-every", "9999"])).is_err());
+        let block = instructions_block(&json!({"profile": "- Languages: Rust", "skills": "- build: Build it"}));
+        assert!(block.contains("# About the user (profile)") && block.contains("- Languages: Rust") && block.contains("# Skills\n- build: Build it"), "{block}");
+        let huge = json!({"files": [{"file": "A.md", "text": "x".repeat(50_000)}], "profile": "- keep me"});
+        assert!(instructions_block(&huge).contains("- keep me"), "a long instruction file never cuts the profile away");
+        assert_eq!(instructions_block(&json!({"profile": "  "})), "");
     }
 
     #[test]

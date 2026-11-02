@@ -46,7 +46,7 @@ proposals) it is off by default and the good default for a small model is named 
 | Feature | Hermes | Claude Code | Codex | fLLM today | Priority |
 | --- | --- | --- | --- | --- | --- |
 | Project instructions | context files | `CLAUDE.md` (reads `AGENTS.md`) | `AGENTS.md` | **works**: `AGENTS.md`, `FLLM.md`, `CLAUDE.md`, nearest first | done |
-| Memory | agent-curated, user model (Honcho) | `/memory`, auto memory | no | **works**: `memory` tool, `/remember`, `/memory`. A learned user model (Honcho style) is **missing** | low |
+| Memory | agent-curated, user model (Honcho) | `/memory`, auto memory | no | **works**: `memory` tool, `/remember`, `/memory`; (*new*) with `--learn` a reflective step proposes entries after a run and every 12 tool steps, deduped and with the source session, and keeps an editable profile of the user (see [Self-improvement](#self-improvement-learning-from-use)). A Honcho-style dialectic model is **missing** | done |
 | Context compression | `/compress` | `/compact`, auto | auto | **works**: `/compact`, automatic at 70% of the context | done |
 | Cross-session search | FTS5 with model summaries | `/resume` search | `resume` picker | **works** (*new* for the agent): `session_search` tool, `/search`, `fllm-rs sessions search`; every headless run is indexed. Ranking is BM25 (no SQLite); the "summary" is the start and end of the session, not a model summary | high |
 | Resume, continue, fork | yes | `-c`, `-r`, `/resume` | `resume`, `fork` | **works**: Studio `/resume`, `/fork`; headless (*new*) `--continue`, `--resume NAME`, `--session NAME`. Forking a headless session is **missing** (copy the file) | medium |
@@ -63,6 +63,7 @@ proposals) it is off by default and the good default for a small model is named 
 | --- | --- | --- | --- | --- | --- |
 | Skills as `SKILL.md` | agentskills.io | yes | yes | **works**: library, user and project folders, plugins; (*new*) `fllm-rs skills import/export/install` in both directions | done |
 | Skills the agent creates itself | yes, autonomously | no (skill-creator on request) | no | **works**: Studio `/skill` (user approves); headless (*new*) `--propose-skills` waits in `skills-proposed/` for `fllm-rs skills approve`, `--auto-skills` saves at once | high |
+| Skills improve during use | "improves them during use" | no | no | **works** (*new*): usage log per skill, revision drafted after a failure or five uses, diff, approve or reject, history and rollback (below) | high |
 | Skills hub | Skills Hub | marketplace for plugins | no | **partly**: built-in library of six, import from URL, (*new*) `fllm-rs skills install OWNER/REPO` for any repository with `SKILL.md` files. No hosted search page: a hub needs a service that someone runs | low |
 | Custom slash commands | yes | `.claude/commands` | custom prompts | **works**: `.fllm/commands/*.md` with `$ARGUMENTS` | done |
 | Hooks | plugin hooks | many events | notify | **partly**: five events (`pre_tool_call`, `post_tool_call`, `on_file_edit`, session start and end). Missing: prompt submit, stop, notification, before compaction | medium |
@@ -78,6 +79,25 @@ proposals) it is off by default and the good default for a small model is named 
 | Scheduled / recurring tasks | cron in plain language | `/loop`, cloud tasks | no | **partly**: schedules (`daily at 08:30`, cron lines), only while the app runs; no free-text parsing; results to webhook, ntfy, Telegram | medium |
 | GitHub Action / CI | no | yes | yes | **missing**: `fllm-rs agent` can run in CI (documented) but there is no published action | low |
 | Cloud tasks | Modal, Daytona | Claude Code on the web | Codex cloud | **missing** on purpose: fLLM runs on your hardware | low |
+
+### Self-improvement (learning from use)
+
+Hermes calls itself the self-improving agent: its README lists skills created after complex tasks, skills that improve during use, memory
+with periodic nudges, a deepening user model (Honcho) and session search with model summaries. fLLM's loop does the same steps with
+approval in front of every write and with prompts that a 3B model can follow.
+
+| Hermes claim | fLLM today |
+| --- | --- |
+| Creates skills after complex tasks | **works**: `--propose-skills` (proposal, `--auto-skills` saves at once); `--learn` implies the proposal |
+| Skills improve during use | **works** (*new*): `fllm-rs agent --learn` and the Studio's *Learn from this session*. The skill is preloaded when the task matches it or read with the `skill` tool; each use is logged (outcome, `--verify`, retries, thumbs); a failure or five uses trigger a draft `SKILL.md` with reason and diff; nothing replaces a skill without approval; versions and `rollback` |
+| Nudges itself to persist knowledge | **works** (*new*): reflective step after the run and every N tool results; dedup (normalised words plus BM25, no embeddings), secret refusal, caps, source session; proposals unless `--auto-memory`; `learn forget` |
+| Deepening user model (Honcho dialectic) | **partly** (*new*): a plain-text profile derived from the same step, editable, exportable, deletable, in the prompt within 1,200 characters. No dialectic reasoning about the user, no second model, nothing hidden |
+| Session search with LLM summaries | **partly**: BM25 search of sessions as before; the summary is still the start and end of a session, not a model summary |
+| Runs on weak models | **works** (*new*): `response_format` JSON schema, fallback without it, validation that drops what does not fit, token and time caps, run after the answer; proof and limits in [What was run](#what-was-run) |
+| Scheduled housekeeping | **works** (*new*): a schedule task of the kind "Consolidate memory and skills" (never on by default) |
+
+Defaults that are safe with a small model: everything off; proposals instead of writes; the profile stays empty unless the user wrote something
+about themselves; no skill or memory entry is applied without a yes.
 
 ### Where the agent can be reached
 
@@ -117,8 +137,9 @@ proposals) it is off by default and the good default for a small model is named 
   use without running a service.
 * **More hook events, a status line, a TUI, a VS Code extension, a published GitHub Action.** Real work with real value, not done in
   this change; the order above says which matter most.
-* **Honcho-style user modelling.** It depends on a second model call after every session; with local models that costs more than
-  the memory tool and `SOUL.md` give back.
+* **Honcho-style dialectic user modelling.** The profile file is derived from the same reflective step and is fully visible; a separate
+  model that reasons about the user over many turns would cost another call per message and hide state, which this design avoids.
+* **Model-written session summaries.** They need a call per stored session; the search keeps ranking the text itself.
 
 ## What was run
 
@@ -127,6 +148,11 @@ proposals) it is off by default and the good default for a small model is named 
 * A real small model (Qwen2.5-Coder-3B-Instruct, Q4_K_M) driving `fllm-rs agent` and the Studio on a Windows PC: see the verified
   list in [agent-cli.md](user/agent-cli.md#what-was-verified). A 3B model completes the fix-the-test task in some runs and not in
   others; that is the model, and the page says where a larger one is needed.
+* The learning loop (`--learn`) with Qwen3-4B-Instruct-2507 Q4_K_M on the same PC: two runs used a skill, each followed by a 13 s reflective step; a
+  revision was drafted, approved, listed in the history and rolled back. The draft did not fix the planted flaw, the profile stayed empty, and the
+  third run and the five-use trigger were not reached (details in [agent-cli.md](user/agent-cli.md#what-was-verified)). Unit tests cover the usage
+  log, the proposal flow, rollback, dedup, redaction, schema validation and the caps; the routes were run by `scripts/api-tests/test_learn.py` against a
+  server with the tiny test model; the Studio pages have page tests but were not clicked through in a browser.
 * The Docker backend against a real Docker daemon on Linux (alpine image).
 * Not run against the real service: Discord, Slack (stub servers only), Telegram and Matrix as before; ACP against a real editor;
   the MCP server inside Claude Code or Codex; the importers against real installations of the other agents; the SSH backend beyond
