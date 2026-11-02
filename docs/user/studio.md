@@ -473,6 +473,14 @@ API: `GET /api/studio/mcp/servers`, `POST` and `DELETE /api/studio/mcp/servers`,
 
 One set of controls is used on every page. *Primary* (accent fill) is the one main action of a card or dialog; everything else is neutral (*secondary*, with a border) or *ghost* (no fill, for quiet actions in rows); *destructive* has a danger fill. Buttons are 34, 30 or 26 px high with the same radius, hover changes the fill by one step (nothing glows), keyboard focus draws a 2 px ring, and selects, text fields and switches share the same height, radius and focus. The rules live at the end of `theme.css`.
 
+**Dialogs.** Every dialog (load options, choose a model, assistants, projects, shortcuts, the welcome tour, confirmations and the rest) is one
+box: at most the height of the window minus 16 pixels at the top and bottom, its content scrolls inside, and its buttons stay at the bottom edge,
+so *OK* and *Load* are always reachable on a 1366 x 768 screen, at 125 or 150 percent Windows scaling and on a phone. The dark area around the box
+scrolls as a second safety. Escape closes a dialog, Tab and Shift+Tab stay inside it, focus goes into it when it opens and back to where it was when it
+closes. The rules are in `chat.css` (`.dialog`, `.dialog-actions`) and `style.css` (`.modal-backdrop`), and `tests/dialogs.test.js` fails when a
+dialog is added without them. The desktop window opens at 1180 x 760, cannot be made smaller than 640 x 460 and is shrunk to fit when a remembered size is
+larger than the screen.
+
 ## Model providers
 
 Settings has a Model providers page for models that do not run on this computer: cloud services and other servers. A provider is an

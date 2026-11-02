@@ -12,10 +12,10 @@
       {
         "label": "main",
         "title": "fLLM",
-        "width": 1280,
-        "height": 820,
-        "minWidth": 720,
-        "minHeight": 520,
+        "width": 1180,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 460,
         "center": true
       }
     ],

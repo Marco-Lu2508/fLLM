@@ -1337,11 +1337,16 @@
       background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(4px);
       z-index: 100;
-      align-items: flex-start;
+      /* the dialog contract: the dialog is centered, never taller than the screen, and the overlay itself scrolls as a fallback */
+      align-items: center;
       justify-content: center;
-      padding-top: 14vh;
+      padding: 16px;
+      box-sizing: border-box;
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .modal-backdrop.open { display: flex; }
+    .modal-backdrop > .dialog, .modal-backdrop > .search-dialog { margin: auto; }
     .search-dialog {
       width: 520px;
       max-width: calc(100vw - 32px);
@@ -1544,7 +1549,7 @@
     .shortcuts .sc-wait { color: var(--primary); font-size: 12px; }
     .shortcuts .sc-fixed td { opacity: 0.7; }
     .sc-message { min-height: 18px; margin: 8px 0 0; font-size: 12.5px; }
-    .dialog.tour { width: min(520px, 92vw); }
+    .dialog.tour { width: min(520px, calc(100vw - 32px)); }
     .tour-dots { display: flex; gap: 6px; margin-bottom: 10px; }
     .tour-dots span { width: 22px; height: 4px; border-radius: 2px; background: var(--border); }
     .tour-dots span.on { background: var(--primary); }

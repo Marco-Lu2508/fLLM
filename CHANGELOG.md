@@ -6,6 +6,13 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- **Dialog buttons below the edge of the screen.** All dialogs now share one box that is never taller than the window, scrolls inside and keeps its buttons at the bottom (also checked at 1366x768, 1280x720, 1024x600, 390x700 and at 150 percent scaling sizes); Escape closes, Tab stays inside. The load-options and the "switching model" dialogs sat inside a hidden page section and could not show from the start screen; they are top-level now.
+- **Desktop window**: default 1180 x 760, minimum 640 x 460 (was 720 x 520), and a remembered size larger than the screen is shrunk to fit.
+
+### Added
+- **Tests for the dialog contract** (`tests/dialogs.test.js`).
+
 ## [0.2.1] - 2026-10-31
 
 The first day with 0.2.0 in real use. The Studio and the desktop app had bugs that the release checks did not catch; they are fixed here, together with the coding-agent work of the same day.

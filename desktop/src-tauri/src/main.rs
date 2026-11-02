@@ -506,6 +506,25 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// A window that is larger than the screen (a remembered size from a bigger monitor, or a small screen at 125 to 150 percent scaling) is
+/// brought back to a size that fits, so no button lies outside the screen.
+fn fit_to_screen(window: &tauri::WebviewWindow) {
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => monitor,
+        _ => match window.primary_monitor() {
+            Ok(Some(monitor)) => monitor,
+            _ => return,
+        },
+    };
+    let (Ok(size), screen) = (window.outer_size(), monitor.size()) else { return };
+    // leave room for the task bar and the title bar
+    let (max_w, max_h) = ((screen.width as f64 * 0.96) as u32, (screen.height as f64 * 0.88) as u32);
+    if size.width > max_w || size.height > max_h {
+        let _ = window.set_size(tauri::PhysicalSize::new(size.width.min(max_w), size.height.min(max_h)));
+        let _ = window.center();
+    }
+}
+
 fn main() {
     let app = tauri::Builder::default()
         // must be the first plugin: a second start only brings the first window to the front
@@ -543,6 +562,7 @@ fn main() {
             let shell = app.state::<Shell>();
             *shell.settings.lock().unwrap() = load_settings(&handle);
             let window = app.get_webview_window("main").expect("main window");
+            fit_to_screen(&window);
             *shell.loading_url.lock().unwrap() = window.url().ok();
             let keys = shell.settings.lock().unwrap().quick_entry.clone();
             if let Err(e) = register_quick_entry(&handle, &keys) {
