@@ -6,6 +6,19 @@ behaviour between versions).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-02
+
+Fixes for what the first users of 0.2.1 found, and the self-improvement loop of the coding agent.
+
+### Highlights
+- **A model of the Qwen3.5 / DeltaNet kind no longer ends up half on the CPU on an 8 GB card.** The recurrent state of 16 sequence slots (1.6 GiB for Qwen3.5-9B) was taken from the same video memory as the layers, so the plan found room for 10 of 32 layers and the processor computed the feed-forward part of the rest (about 23 tok/s). The plan now lowers the number of slots first: all 32 layers on the card, about 41 tok/s on an RTX 2000 Ada.
+- **Nothing falls back to the processor silently any more.** One warning at load ("GPU ...: N of M operations run on the CPU: reasons"), an amber notice in the Studio (footer, Settings, Hardware, Models), `device_fallbacks` in the status and in `/metrics`, `--strict-device` (fail instead of falling back), and `fllm-rs doctor --gpu` with the *Test this GPU* button (one verdict per card: OK, falls back, slower than the CPU).
+- **Load any model from the Studio:** GGUF (also the parts of a split GGUF), a Hugging Face folder, a single `.safetensors`, `owner/repo[:quant]`, with a preview of what was found (format, size, architecture, fit, prediction heads) and a folder browser; the dialog for the load options offers the prediction-head (MTP) mode only when the checkpoint has heads.
+- **Every dialog fits the window** (maximum height, scrolling body, buttons always visible, Escape and focus handling); the desktop window can no longer be smaller than usable.
+- **The coding agent learns** (all off by default, nothing written without your yes): revised skills with a diff, usage log and rollback, memory suggestions after a run, an editable user profile (`fllm-rs agent --learn`, `fllm-rs learn ...`, Studio *Learn from this session*).
+- **CI runs on the newest runner images**; the three security advisories for `zip` in the fuzz lock file are closed (zip 9.2.2).
+
+
 ### Added
 - **The coding agent can improve itself, with your approval.** `fllm-rs agent --learn` (and **Learn from this session** on the Studio's Code page) closes the loop that `--propose-skills` started: the agent reads your skills (a `skill` tool and a skill index in its prompt), notes in a small usage log how each skill fared (finished or failed, `--verify` result, retries, thumbs), and after a failure or five uses drafts a revised `SKILL.md` with the reason and a diff. A draft never replaces a skill by itself; every approved revision and rollback keeps the old text (`fllm-rs skills usage|improve|diff|approve-revision|reject-revision|history|rollback`). After a run (and every 12 tool results of a long run) a short reflective step proposes memory entries (project facts, preferences, commands that worked, mistakes to avoid), deduplicated against the memory with normalised text and BM25, refused when they look like a secret, capped in number and size, each with the session it came from. The same step keeps a transparent, editable profile of you (`user-profile.md`) that goes into the prompt within 1,200 characters. The reflective steps ask for a JSON schema (`response_format`) so a 3B model answers in the right shape, fall back without it, cap tokens and time, and run after the answer is delivered (in the Studio as a background job of the server). `fllm-rs learn status|review|accept|reject|memory|profile|forget|consolidate` decides in bulk; Settings > Skills (revisions, diff, usage, rollback) and Settings > Personalization (profile, learned memory with sources) do the same in the Studio; a task of the kind "Consolidate memory and skills" can run nightly. Everything is off by default and writes nothing without a yes unless `--auto-memory`. See [docs/user/agent-cli.md](docs/user/agent-cli.md#learning-from-runs---learn) and [docs/code-mode-gap.md](docs/code-mode-gap.md).
 
