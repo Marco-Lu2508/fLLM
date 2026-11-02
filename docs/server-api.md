@@ -225,6 +225,11 @@ curl -s http://127.0.0.1:8000/health
 No parameters; unauthenticated. Returns `text/plain; version=0.0.4` Prometheus exposition
 with two groups of series.
 
+Device placement (`placement.rs`): gauges `fllm_device_fallback_operations` (layer halves that run on the CPU although a GPU was chosen) and
+`fllm_device_fallback_whole_model`, counter `fllm_device_fallback_calls_total{operation="..."}`. The same data, with the reasons, is
+`device_fallbacks` in `GET /api/studio/status` (`mode`: `device`, `partial`, `mostly_cpu`, `cpu`, `none`). `POST /api/studio/gpu-check`
+(`{"device":"cuda:0"}` or `"all"`) runs the GPU check of `fllm-rs doctor --gpu` and answers `results` with one verdict per device.
+
 Model/scheduler counters and gauges: `fllm_requests_total`, `fllm_completion_tokens_total`,
 `fllm_model_forward_calls_total`, `fllm_model_batch_rows_total`,
 `fllm_model_multirow_calls_total`, gauge `fllm_model_batch_max_rows`,

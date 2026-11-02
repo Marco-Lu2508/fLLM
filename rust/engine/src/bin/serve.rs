@@ -86,7 +86,7 @@ fn usage(error: &str) -> ! {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--expert-cache-mb auto|SIZE|off] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
+    eprintln!("usage: fllm-rs [serve] --model MODEL [--quant TYPE] [--outtype preserve|f16|f32] [--device auto|cpu|cuda|hip|metal|vulkan|dx12|sycl|npu|tpu|BACKEND:N|DEV,DEV,...] [--gpu-memory-utilization 0.90] [--gpu-layers auto|N] [--strict-device] [--expert-cache-mb auto|SIZE|off] [--kv-cache-type TYPE | --kv-cache-dtype TYPE] [--cache-type-k TYPE] [--cache-type-v TYPE] [--speculative off|ngram|draft|mtp|suffix|N] [--speculative-lookup N] [--speculative-window W] [--pin-cores N] [--speculative-model PATH_OR_HF] [--num-speculative-tokens N] [--host 127.0.0.1] [--port 8000] [--ctx auto|N] [--max-seqs 16] [--max-batched-tokens 512] [--threads auto|N] [--tensor-parallel N|auto | --tensor-parallel-size N | -tp N] [--tensor-split 3,1] [--pipeline-parallel-size N | -pp N] [--expert-parallel] [--devices 0,1,..] [--distributed-backend nccl|p2p|local] [--nnodes N --node-rank R --master-addr HOST --master-port P] [--api-key KEY] [--model-name NAME[,ALIAS...]] [--tool-parser auto|ID] [--reasoning-parser auto|ID] [--no-repack] [--no-jump-forward] [--temp T] [--top-p P] [--top-k K]");
     eprintln!("       --multi-step N (alias --num-scheduler-steps): up to N decode rounds per scheduler round while the batch does not change; off by default, CPU backend only until verified elsewhere");
     eprintln!("       --device A,B,C (two or more devices of any backends, the CPU too): the model is split over them by layers in proportion to their free memory and speed (`fllm-rs devices --split MODEL --device A,B,C` shows the plan); --tensor-parallel N|auto groups N same-backend devices per stage, --tensor-split 3,1 sets the shares");
     eprintln!("       --device: BACKEND:N counts the devices of that backend from 0 (vulkan:1 = second Vulkan device; `fllm-rs devices` prints the value to use); auto = best GPU (CUDA > ROCm > Metal > Vulkan > DX12 > SYCL), else CPU");
@@ -504,6 +504,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut context_request: Option<usize> = None;
     let mut max_sequences = 16usize;
     let mut max_seqs_auto = false;
+    let mut max_seqs_explicit = false;
     let mut scheduling_policy = fllm_engine::scheduler::SchedulingPolicy::Fcfs;
     let mut sched_watermark: Option<usize> = None;
     let mut max_partial_prefills = 0usize;
@@ -616,6 +617,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--embeddings" => embeddings = true,
             "--mmproj" => mmproj = Some(value(&args, &mut i, "--mmproj")),
             "--no-vision" => no_vision = true,
+            "--strict-device" => fllm_engine::placement::set_strict(true),
             "--max-image-pixels" => {
                 media_limits.max_image_pixels = value(&args, &mut i, "--max-image-pixels")
                     .parse()
@@ -717,6 +719,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 max_seqs_auto = true;
             }
             "--max-seqs" => {
+                max_seqs_explicit = true;
                 max_sequences = value(&args, &mut i, "--max-seqs")
                     .parse()
                     .unwrap_or_else(|_| usage("invalid --max-seqs"))
@@ -1338,6 +1341,49 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if let Err(e) = &planned {
                     tracing::warn!("memory plan for the device failed: {e}");
                 }
+                // A model with a recurrent state (Qwen3.5, Qwen3-Next, Mamba hybrids ...) keeps two states per sequence slot on the device: for 16 slots that is
+                // more than a gigabyte, enough to push the feed-forward weights of two thirds of the layers out of an 8 GB card, where they then run on the CPU
+                // (the model "is in the GPU memory but runs on the CPU"). The number of slots is lowered, as far as it takes, before any layer is given up.
+                if !max_seqs_explicit && fllm_engine::backend::memory::recurrent_state_bytes(&model) > 0 {
+                    let wanted_ok = |p: &fllm_engine::backend::memory::MemoryPlan| {
+                        p.offload_layers == p.total_layers || (context_request.is_none() && p.all_on_device_kv_blocks >= 256)
+                    };
+                    if let Ok(first) = planned.clone() {
+                        if !wanted_ok(&first) {
+                            let original = model.max_sequences();
+                            let saved = model.sequences_state();
+                            let reserve_mib = fllm_engine::backend::memory::recurrent_state_bytes(&model) >> 20;
+                            let mut best: Option<(usize, usize, fllm_engine::backend::memory::MemoryPlan)> = None;
+                            for n in [8usize, 4, 2, 1].into_iter().filter(|n| *n < original) {
+                                model.set_sequences(n, saved.1);
+                                if let Ok(p) = plan_for(&model, max_batched_tokens) {
+                                    let good = wanted_ok(&p);
+                                    if good || best.as_ref().is_none_or(|(layers, _, _)| p.offload_layers > *layers) {
+                                        best = Some((p.offload_layers, n, p));
+                                    }
+                                    if good {
+                                        break;
+                                    }
+                                }
+                            }
+                            match best {
+                                Some((layers, n, plan)) if layers > first.offload_layers || wanted_ok(&plan) => {
+                                    model.set_sequences(n, saved.1);
+                                    max_sequences = n;
+                                    tracing::info!(
+                                        "{original} sequence slots would reserve {reserve_mib} MiB of recurrent states on the device and leave {} of {} layers there; {n} slots (--max-seqs N sets it) keep {} of {} layers on the device",
+                                        first.offload_layers,
+                                        first.total_layers,
+                                        plan.offload_layers,
+                                        plan.total_layers
+                                    );
+                                    planned = Ok(plan);
+                                }
+                                _ => model.set_sequences(saved.0, saved.1),
+                            }
+                        }
+                    }
+                }
                 if let Ok(p) = &planned {
                     // the pool must hold one sequence of the full context: otherwise lower the context instead of failing
                     // (and with an automatic context, also when the full context would only fit next to some layers whose feed-forward weights
@@ -1415,6 +1461,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             plan.offload_layers,
                             plan.total_layers,
                             plan.total_layers - plan.offload_layers
+                        );
+                        if fllm_engine::placement::strict() {
+                            return Err(fllm_engine::placement::strict_error(&format!(
+                                "the model does not fit into the memory of {}: the feed-forward blocks of {} of {} layers would run on the CPU",
+                                d.name,
+                                plan.total_layers - plan.offload_layers,
+                                plan.total_layers
+                            ))
+                            .into());
+                        }
+                        tracing::warn!(
+                            "GPU {} ({}): the model does not fit into its free memory ({} MiB planned): the feed-forward blocks of {} of {} layers will run on the CPU. Close other programs that use GPU memory, use a smaller quantization or --ctx, or a GPU with more memory",
+                            d.name,
+                            selected_backend,
+                            device_free >> 20,
+                            plan.total_layers - plan.offload_layers,
+                            plan.total_layers
                         );
                         fllm_engine::rust_decoder::set_ffn_host_from(plan.total_layers, plan.offload_layers);
                     }
@@ -1537,6 +1600,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     runtime.attach_compute(&device)?;
+    // where every layer lives and how fast that can be: the answer to "is my GPU doing the work?" (the numbers of a device: `fllm-rs doctor --gpu`)
+    if device != "cpu" {
+        let placed = fllm_engine::placement::report();
+        for line in fllm_engine::placement::layer_summary() {
+            tracing::info!("{line}");
+        }
+        if placed.device.is_some() {
+            tracing::info!("placement: expected speed class: {}", fllm_engine::placement::speed_class());
+        }
+    }
     if multi_step > 1 {
         let effective = runtime.set_multi_step(multi_step)?;
         if effective == multi_step {

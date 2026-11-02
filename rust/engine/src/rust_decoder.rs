@@ -2667,11 +2667,15 @@ impl RustDecoder {
     pub fn set_device(&mut self, device: &str) -> Result<(), String> {
         let automatic = crate::devices::is_auto(device);
         let mut last_error = String::from("no usable compute device");
-        let mut skipped = false;
+        let mut skipped: Option<(String, String, String)> = None;
         for (backend, index) in crate::devices::device_candidates(device)? {
             if backend == "cpu" {
-                if skipped {
+                if let Some((name, kind, why)) = &skipped {
                     eprintln!("[fllm-rs] --device auto: no accelerator could take the model; running on the CPU");
+                    if crate::placement::strict() {
+                        return Err(crate::placement::strict_error(&format!("{name} ({kind}) could not take the model ({why})")));
+                    }
+                    crate::placement::note_whole_model_on_cpu(name, kind, why);
                 }
                 return Ok(());
             }
@@ -2682,25 +2686,35 @@ impl RustDecoder {
                         "[fllm-rs] --device auto: {} is not usable ({error}); trying the next device",
                         crate::devices::describe_choice(&backend, index)
                     );
+                    if skipped.is_none() {
+                        skipped = Some((Self::device_name(&backend, index), backend.clone(), error.clone()));
+                    }
                     last_error = error;
-                    skipped = true;
                 }
                 // an NPU is experimental and often not usable (no runtime, no driver, a model it cannot take): the server must not end
                 // because of it, so the model runs on the CPU and the reason is logged and shown on the Hardware page
-                Err(error) if backend == "npu" => {
+                Err(error) if backend == "npu" && !crate::placement::strict() => {
                     let message = crate::backend::npu::status::record_fallback(&error);
                     eprintln!("[fllm-rs] --device npu: {message} (details: {error})");
+                    crate::placement::note_whole_model_on_cpu(&Self::device_name(&backend, index), &backend, &message);
                     return Ok(());
                 }
                 // the device works but has no kernels for this model: run it on the CPU rather than refuse to start
-                Err(error) if error.contains("cannot run on the") => {
+                Err(error) if error.contains("cannot run on the") && !crate::placement::strict() => {
                     eprintln!("[fllm-rs] --device {device}: {error}; running on the CPU instead");
+                    crate::placement::note_whole_model_on_cpu(&Self::device_name(&backend, index), &backend, &error);
                     return Ok(());
                 }
+                Err(error) if crate::placement::strict() => return Err(crate::placement::strict_error(&format!("{} could not take the model ({error})", Self::device_name(&backend, index)))),
                 Err(error) => return Err(error),
             }
         }
         Err(last_error)
+    }
+
+    /// The marketing name of device `index` of `backend` (the backend id when the inventory does not know it).
+    fn device_name(backend: &str, index: usize) -> String {
+        crate::devices::find_entry(backend, index).map_or_else(|| backend.to_owned(), |e| e.info.name)
     }
 
     /// Whether an accelerator backend (not the host CPU path) runs the model.
@@ -2722,6 +2736,7 @@ impl RustDecoder {
     fn attach_accelerator(&mut self, selected_backend: &str, selected_dev_id: usize) -> Result<(), String> {
         // `wgpu-<api>`: the wgpu implementation of that API even where a native backend exists
         let wgpu_only = selected_backend.strip_prefix("wgpu-");
+        crate::placement::begin_load(&Self::device_name(selected_backend, selected_dev_id), selected_backend);
         // native backends (features vulkan, metal, hip, sycl, npu-*, tpu-pjrt); `Ok(None)` when `selected_backend` is none of them
         if wgpu_only.is_none() {
             match crate::backend::create_native_backend(selected_backend, selected_dev_id) {
@@ -2733,10 +2748,11 @@ impl RustDecoder {
                 Ok(None) => {}
                 Err(error) => {
                     // the wgpu backend serves vulkan and metal too when it is compiled in
-                    if !(cfg!(feature = "rust-gpu") && matches!(selected_backend, "vulkan" | "metal")) {
+                    if !(cfg!(feature = "rust-gpu") && matches!(selected_backend, "vulkan" | "metal")) || crate::placement::strict() {
                         return Err(error);
                     }
                     eprintln!("[fllm-rs] native {selected_backend} backend unavailable ({error}); falling back to wgpu");
+                    crate::placement::note_notice(&format!("The native {selected_backend} backend could not be used ({error}); the slower wgpu path runs the model instead"));
                 }
             }
         }
@@ -4107,6 +4123,49 @@ impl RustDecoder {
             v4_ones,
             q4: q4_weights,
         };
+
+        // where every layer of this stage runs, for the log, /api/studio/status and the strict device mode (placement.rs)
+        {
+            use crate::placement::LayerPlace;
+            let mut places = Vec::new();
+            let mut reasons: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let planner_cut = FFN_HOST_FROM.lock().ok().and_then(|slot| *slot).filter(|(layers, _)| *layers == self.layers.len());
+            for i in stage.clone() {
+                let dl = &dev_weights.layers[i];
+                let layer = &self.layers[i];
+                if dl.host_layer {
+                    *reasons.entry(layer_reasons[i].unwrap_or("no device kernels for this layer").to_owned()).or_default() += 2;
+                    places.push(LayerPlace::Host);
+                    continue;
+                }
+                // a recurrent mixer without device kernels for this backend or shape runs on the host while the rest of its layer is on the device
+                let mixer_host = match &layer.attn {
+                    Attn::Linear(_) => dl.delta.is_none(),
+                    Attn::Mamba(_) => dl.mamba.is_none() && dl.par_mamba.is_none(),
+                    Attn::Mamba1(_) => dl.mamba1.is_none(),
+                    _ => false,
+                };
+                if mixer_host {
+                    *reasons.entry("a recurrent (DeltaNet / Mamba) mixer without device kernels for this backend or shape, or FLLM_DELTA_HOST / FLLM_MAMBA_HOST".to_owned()).or_default() += 1;
+                }
+                if dl.host_ffn {
+                    let why = match self.ffn_host_reason(layer, arch_ok, clamp_ok) {
+                        Some(r) => r.to_owned(),
+                        None if planner_cut.is_some_and(|(_, first)| i >= first) => "not enough device memory: the feed-forward weights of these layers stay in host memory (see the memory plan above; a smaller --ctx or --max-seqs, a smaller quantization or a bigger GPU keeps them on the device)".to_owned(),
+                        None => "feed-forward block forced to the host".to_owned(),
+                    };
+                    *reasons.entry(why).or_default() += 1;
+                    places.push(if mixer_host { LayerPlace::Host } else { LayerPlace::FfnOnHost });
+                } else {
+                    places.push(if mixer_host { LayerPlace::MixerOnHost } else { LayerPlace::Device });
+                }
+            }
+            if crate::placement::strict() && !reasons.is_empty() {
+                let list = reasons.iter().map(|(r, n)| format!("{r} ({n})")).collect::<Vec<_>>().join("; ");
+                return Err(crate::placement::strict_error(&format!("{} of {} operations would run on the CPU: {list}", reasons.values().sum::<usize>(), places.len() * 2)));
+            }
+            crate::placement::note_layers(places, reasons);
+        }
 
         let mut pool = crate::backend::BufferPool::new(Arc::clone(&backend));
         // FLLM_WORKSPACE_ROWS=N (default 0 = off): the buffer pool and the library scratch are sized once for batches of N rows

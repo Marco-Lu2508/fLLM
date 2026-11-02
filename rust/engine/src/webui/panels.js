@@ -184,6 +184,7 @@
           $('setupText').textContent = 'No model is loaded. The last model loads when you send your first message, or load another one below.';
         }
         updateHero(data);
+        renderFallbackNotice(data.device_fallbacks); // amber notice when a part of the model runs on the CPU although a GPU was chosen (gpucheck.js)
         if (typeof updateContextMeter === 'function') updateContextMeter(); // the window of a model that was just loaded
 
         const m = data.model || {};
@@ -342,6 +343,7 @@
                 </div>
                 <span class="mono tabular" style="font-size:12px;white-space:nowrap;">${mem.known ? `${formatBytes(d.free_memory_bytes)} free of ${formatBytes(d.total_memory_bytes)}` : 'memory not reported'}</span>
               </div>
+              ${gpuCheckHtml(d)}
               ${mem.known ? `<div class="mem-bar is-${mem.level}" role="img" aria-label="${mem.pct}% of the memory is in use"><i style="width:${Math.max(2, mem.pct)}%"></i></div>` : ''}
             </div>
           `; }).join('');

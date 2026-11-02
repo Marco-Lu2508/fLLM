@@ -434,6 +434,10 @@ Q2_K, Q3_K and the IQ family are decoded natively (generic decoders in `iq_decod
 
 EXL2 / EXL3 tensors are the exception to "native or converted": CUDA reads the packed blob in place (`cuda/exl.cu`, see [exl-formats.md](exl-formats.md)); Metal reads EXL2 natively ([below](#metal-block-wise-fp8-bitsandbytes-and-exl2); EXL3 is expanded); the native Vulkan backend reads both ([below](#native-vulkan-block-wise-fp8-bitsandbytes-mlx-affine-and-exl2--exl3)); every other backend (wgpu, SYCL, TPU, NPU, AMD HIP, NVIDIA below sm_60) does not list the type as supported, so the decoder expands the blob to F16 once, at upload, and prints one notice. That keeps those backends correct but gives them no memory saving.
 
+### Where a model really runs
+
+`placement.rs` keeps the ledger of everything a GPU backend hands to the CPU: layers and feed-forward blocks without device kernels, recurrent mixers (DeltaNet, Mamba) without device kernels for the shape, feed-forward weights the memory plan kept in host memory, a whole model a device could not take, and single operations that copy their inputs to the host (`fallback_checked` in the CUDA, Vulkan and wgpu backends; the SYCL and Metal backends still use the log-only `warn_fallback_reason`, which is counted too but cannot be refused). Host sampling of a token is by design and not a fallback. `FLLM_STRICT_DEVICE=1` / `--strict-device` refuses all of them. `fllm-rs doctor --gpu` times a Q4_K matrix product (1 and 64 tokens) on each device against the CPU kernels.
+
 ### Older GPUs
 
 The tensor-core kernels (FP16 prompt GEMMs, FlashInfer/CUTLASS paths, the Marlin Q4Z GEMM) need compute capability 7.5 (Turing) or newer; a few paths need 8.0 (Ampere), for example the Marlin Q4_K layout, and the FP4 kernels need sm_12x. The same binary also contains code for Pascal

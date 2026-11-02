@@ -111,6 +111,8 @@ mod msl_check;
 mod tiny_models;
 
 pub mod devices;
+pub mod placement;
+pub mod gpu_check;
 pub mod lowbit;
 pub mod mla_latent;
 pub mod model;

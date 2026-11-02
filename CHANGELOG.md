@@ -6,6 +6,13 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Fixed
+- **"The model is in the GPU memory but runs on the CPU"** (reported on an RTX 2070 Super, 8 GB, with a Qwen3.5-9B Q4_K_M): the memory plan reserved the recurrent states of 16 conversations (Gated DeltaNet layers; more than 1.5 GB for this model) next to the weights, found no room for the feed-forward weights of two thirds of the layers and kept them in host memory, where the CPU computed them for every token, without a word in the Studio. The plan now lowers the number of sequence slots (`--max-seqs` sets it by hand) before it gives up layers. Reproduced and measured on an RTX 2000 Ada laptop (8 GB): see [troubleshooting](docs/user/troubleshooting.md#the-model-is-in-the-gpu-memory-but-runs-on-the-cpu).
+
+### Added
+- **Fallbacks to the CPU can no longer go unnoticed.** Everything a GPU backend hands to the CPU is counted per run (layers without device kernels, recurrent mixers, feed-forward blocks the memory plan kept in host memory, a whole model a device could not take, single operations such as expert products) and reported once as `GPU <name> (<backend>): <N> of <M> operations run on the CPU: <reasons>`. `GET /api/studio/status` has `device_fallbacks` (mode `device` / `partial` / `mostly_cpu` / `cpu`, counts, reasons), `/metrics` has `fllm_device_fallback_*`; the Studio shows an amber notice in the footer, in Settings, Hardware and on the Models page; `fllm-rs serve` prints where every layer lives and the expected speed class. `FLLM_STRICT_DEVICE=1` / `--strict-device` fails the load with the reason instead of falling back.
+- **`fllm-rs doctor --gpu`** and the Studio button *Test this GPU*: a few seconds of a quantized matrix product on every GPU and on the CPU, and one line per device: `OK (12 times faster than the CPU)`, `FALLS BACK: <reason>`, `SLOWER THAN THE CPU` or `WRONG RESULT`. `fllm-rs doctor` also warns when the running server has part of its model on the CPU.
+
 ## [0.2.1] - 2026-10-31
 
 The first day with 0.2.0 in real use. The Studio and the desktop app had bugs that the release checks did not catch; they are fixed here, together with the coding-agent work of the same day.

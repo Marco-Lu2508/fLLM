@@ -114,6 +114,7 @@
         <!-- Subtle Footer: Engine Status & Active SIMD Tier -->
         <div class="sidebar-footer">
           <span class="mono" id="footerSimdLabel" title="Where the model runs">CPU</span>
+          <span class="mono fallback-chip" id="footerFallback" style="display:none;" role="button" tabindex="0"></span>
           <span class="mono tabular" id="footerSlotsLabel" title="Requests being answered right now, out of the number the server handles at once">0/8 busy</span>
         </div>
       </div>
@@ -528,6 +529,8 @@
                 <span class="app-item-desc mono" id="updateProgress"></span>
               </div>
             </div>
+
+            <div class="fallback-notice" id="modelsFallbackNotice" style="display:none;" role="alert"></div>
 
             <div class="app-card" id="setupBanner" style="display:none;">
               <div class="msg-error" id="setupError" style="display:none;margin-bottom:8px;"></div>
@@ -1200,6 +1203,12 @@
               <!-- Detected Devices List (GpuGroupCard style) -->
               <div class="app-card">
                 <div class="app-card-title">Compute devices</div>
+              <div class="fallback-notice" id="hwFallbackNotice" style="display:none;" role="alert">
+                  <div class="fallback-title" id="hwFallbackTitle"></div>
+                  <div class="app-item-desc" id="hwFallbackText"></div>
+                  <div class="app-item-desc" id="hwFallbackLines"></div>
+                  <details class="device-notes"><summary>Details</summary><div class="app-item-desc mono" id="hwFallbackDetail"></div><div class="app-item-desc">Run <span class="mono">fllm-rs doctor --gpu</span> in a terminal, or press "Test this GPU" below, to see in one line whether the card does the work.</div></details>
+              </div>
               <p class="app-item-desc" id="hwChoiceText"></p>
                 <div id="hwDevicesGrid" style="display:flex;flex-direction:column;gap:10px;"></div>
               </div>

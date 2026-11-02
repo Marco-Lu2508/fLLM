@@ -38,6 +38,42 @@ and before the CPU, but never takes a software renderer (llvmpipe, softpipe). Ex
 memory or an old integrated chip the CPU can be faster: compare with `--device cpu`. It has been tested on a software OpenGL (Mesa
 llvmpipe) only, not on an old card. Quantized weights without a portable kernel are expanded when they are uploaded (the log says so).
 
+## The model is in the GPU memory but runs on the CPU
+
+**Symptom:** the graphics card's memory fills up when a model loads, but answers are slow and the processor is busy.
+
+**How to see what runs where** (three places, all say the same):
+
+* The Studio shows an amber notice when part of a model runs on the CPU although a GPU was chosen: a line in the footer (click it for the
+  hardware page), a box at the top of Settings, Hardware and on the Models page. Typical wording: *Weights in GPU memory, compute mostly on the
+  CPU*, *Part of this model runs on the CPU* or *The whole model runs on the CPU*, followed by the count and the reason.
+* The log (`server.log` in the Studio folder, or the terminal of `fllm-rs serve`) has one line `GPU <name> (<backend>): <N> of <M> operations run on
+  the CPU: <reasons>` at load, and `fllm-rs serve` prints where every layer lives (`placement: layers 0-9: on the GPU (cuda)`, `placement: layers
+  10-31: attention on the GPU, feed-forward on the CPU`) and the expected speed class. An *operation* here is the attention (or other mixer) half
+  or the feed-forward half of one layer; a model has two per layer. Single device operations that fall back (an expert product, an attention
+  with a head wider than 512) are counted per call and logged when the first one happens.
+* `GET /api/studio/status` has `device_fallbacks` (`mode`: `device`, `partial`, `mostly_cpu`, `cpu`; the counts; `reasons`; `operation_fallbacks`
+  with call counts), `/metrics` has `fllm_device_fallback_operations`, `fllm_device_fallback_whole_model` and `fllm_device_fallback_calls_total`.
+
+**One line per graphics card: `fllm-rs doctor --gpu`** (or the button *Test this GPU* on every device card in Settings, Hardware). It multiplies a
+quantized matrix with one token and with 64 tokens on the GPU and on the CPU and prints `OK (12 times faster than the CPU)`, `FALLS BACK: <reason>`
+(the device cannot be created, a kernel fails or an operation goes to the CPU), `SLOWER THAN THE CPU` or `WRONG RESULT`. Send this line, the output
+of `fllm-rs devices` and the log when you ask for help.
+
+**Causes, most likely first:**
+
+| Cause | What the notice says | What to do |
+| --- | --- | --- |
+| The model does not fit into the free GPU memory, so the memory plan keeps the feed-forward weights of the last layers in host memory and the CPU computes them every token | `not enough device memory: the feed-forward weights of these layers stay in host memory` and `N of M layers fit on the device completely` in the log | close programs that use GPU memory (browsers, games, a second model), use a smaller quantization (Q4_K_M instead of Q6_K/Q8_0) or a smaller model, a smaller context (`--ctx 4096`), fewer sequences (`--max-seqs 2`); Windows keeps about 0.5 to 1 GB of the card for the display |
+| A model with a recurrent part (Qwen3.5 / Qwen3-Next DeltaNet layers, Mamba hybrids) reserved device memory for 16 conversations | the same notice; the log says `16 sequence slots would reserve ... MiB of recurrent states` | fixed: the plan lowers the slots itself before it gives up layers (a Qwen3.5-9B Q4_K_M on an 8 GB card went from 10 of 32 layers on the GPU to all 32); `--max-seqs N` sets the number by hand |
+| Layers of the model have no kernels for this backend (a recurrent mixer, an attention variant, a gate) | the reason names the feature (`a recurrent (DeltaNet / Mamba) mixer without device kernels ...`) | try another backend (`--device cuda` / `vulkan`), see [architectures.md](../architectures.md); `--strict-device` makes the load fail instead of running them on the CPU |
+| The graphics driver is too old or missing, so the CUDA/ROCm backend cannot start and the model runs on another backend or the CPU | `the whole model runs on the CPU: ...` or a `native vulkan backend could not be used` notice | update the NVIDIA/AMD driver; `fllm-rs devices` shows what the program can see |
+| It only looks like the CPU | the notice is absent and `doctor --gpu` says OK | the Windows Task Manager shows the *3D* engine by default; compute work (CUDA, Vulkan) is under *Compute_0* / *Cuda* (change one of the graph titles), and the GPU memory (*Dedicated GPU memory*) is the reliable sign |
+
+`FLLM_STRICT_DEVICE=1` (or `fllm-rs serve --strict-device`) turns every one of these hand-overs into an error: the load stops with the reason
+instead of running part of the model on the CPU. Use it in scripts that must never run slowly by accident. Sampling a token from the logits on
+the host (a few microseconds) is by design and is listed but never an error.
+
 ## Docker / GPU host problems
 
 | Symptom | Cause / fix |
@@ -122,5 +158,6 @@ fllm-rs --help            # usage summary (note: --max-batched-tokens 1024 there
 fllm-rs devices           # compiled backends, detected devices, CPU ISA
 fllm-rs selftest-cpu      # CPU kernels vs scalar references
 fllm-rs selftest-gpu --device cuda    # every GPU op vs CPU reference (CUDA builds)
+fllm-rs doctor --gpu      # per graphics card: does it do the work, or does the CPU? (one line each)
 fllm-rs <command> --help  # per-command usage
 ```

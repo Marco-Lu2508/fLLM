@@ -89,10 +89,19 @@ pub fn warn_fallback_once(op_name: &str) {
 
 /// Warn once per `op_name` that it runs on the host instead of the device, and why.
 pub fn warn_fallback_reason(op_name: &str, reason: &str) {
+    crate::placement::note_op(op_name, reason);
     log_once(
         op_name,
         &format!("'{op_name}' falls back to the CPU: {reason}."),
     );
+}
+
+/// [`warn_fallback_reason`] for a fallback that can be refused: with `FLLM_STRICT_DEVICE=1` the caller gets the error to return instead of a
+/// silent hand-over to the CPU.
+pub fn fallback_checked(op_name: &str, reason: &str) -> Result<(), BackendError> {
+    crate::placement::op_fallback(op_name, reason).map_err(BackendError::UnsupportedOperation)?;
+    log_once(op_name, &format!("'{op_name}' falls back to the CPU: {reason}."));
+    Ok(())
 }
 
 /// Print `message` to stderr the first time `key` is seen in this process.

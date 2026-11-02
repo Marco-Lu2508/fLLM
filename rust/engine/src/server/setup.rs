@@ -36,6 +36,7 @@ fn router(context: Arc<http::HttpContext>) -> Router {
         .route("/api/studio/status", get(|| async { Json(status()) }))
         .route("/api/studio/models", get(|| api::studio::models_hub_with(Value::Null)))
         .route("/api/studio/hardware", get(api::studio::hardware))
+        .route("/api/studio/gpu-check", post(api::studio::gpu_check))
         .route("/api/studio/npu", get(api::npu::state))
         .route("/api/studio/npu/setup", post(api::npu::start_setup).delete(api::npu::remove_runtime))
         .route("/api/studio/hf-account", get(api::studio::hf_account).post(api::studio::hf_login))
