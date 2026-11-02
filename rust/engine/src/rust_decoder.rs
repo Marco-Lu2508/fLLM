@@ -4148,10 +4148,12 @@ impl RustDecoder {
                 if mixer_host {
                     *reasons.entry("a recurrent (DeltaNet / Mamba) mixer without device kernels for this backend or shape, or FLLM_DELTA_HOST / FLLM_MAMBA_HOST".to_owned()).or_default() += 1;
                 }
-                if dl.host_ffn {
+                // the memory plan keeps the feed-forward weights of the last layers in host memory: the layer has no device feed-forward weights
+                let cut = !matches!(layer.ffn, Ffn::None) && dl.ffn_up.is_none() && dl.gate_up.is_none() && dl.moe.is_none();
+                if dl.host_ffn || cut {
                     let why = match self.ffn_host_reason(layer, arch_ok, clamp_ok) {
                         Some(r) => r.to_owned(),
-                        None if planner_cut.is_some_and(|(_, first)| i >= first) => "not enough device memory: the feed-forward weights of these layers stay in host memory (see the memory plan above; a smaller --ctx or --max-seqs, a smaller quantization or a bigger GPU keeps them on the device)".to_owned(),
+                        None if planner_cut.is_some_and(|(_, first)| i >= first) => "not enough device memory: the feed-forward weights of these layers stay in host memory; a smaller --ctx or --max-seqs, a smaller quantization or a bigger GPU keeps them on the device".to_owned(),
                         None => "feed-forward block forced to the host".to_owned(),
                     };
                     *reasons.entry(why).or_default() += 1;
