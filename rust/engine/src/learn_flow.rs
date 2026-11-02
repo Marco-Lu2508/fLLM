@@ -182,12 +182,14 @@ pub fn reflect_body(transcript: &str, known_memory: &[String], profile: &str, ma
     }
     let user = format!(
         "Session:\n{transcript}\n\nAlready remembered (do not repeat):\n{}\nProfile of the user so far:\n{}\n\n\
-         Task: list what is worth keeping for FUTURE sessions in \"memory\": facts about this project (how to build, test and run it, where things are), preferences of the user, \
-         commands that worked, mistakes to avoid. Rules: at most {} entries, each one short sentence that is true and useful without this session; \
-         no secrets, passwords or keys; nothing that only matters for this one task; nothing that the session does not show. \
+         Task: list what is worth keeping for FUTURE sessions in \"memory\": how to build, test and run this project (exact commands that worked), conventions of the project, \
+         preferences the user stated, mistakes or traps that cost time here. Rules: at most {} entries, each one short sentence that is true and useful without this session; \
+         no secrets, passwords or keys. Do NOT describe what files contain or what the code does, do not retell the task, and do not note general programming advice. \
+         Good: \"Tests run with node test.js.\" Bad: \"math.js has two functions.\" \
          \"scope\" is \"workspace\" for facts about this project and \"global\" for facts about the user. \
-         In \"profile\" list at most 4 durable things about the USER (preferences, skill_level, languages, conventions, tool_habits) that the session clearly shows. \
-         When there is nothing, use empty lists.\n\
+         In \"profile\" list durable facts about the USER, taken only from what the user wrote (lines starting with USER:), never from what the agent did: \
+         a stated preference, skill level, language, convention or tool habit. A user who only gave a task has shown nothing: then \"profile\" is empty. \
+         When there is nothing worth keeping, use empty lists; that is the usual case.\n\
          Answer as JSON: {{\"memory\":[{{\"text\":\"...\",\"kind\":\"project|preference|command|mistake|fact\",\"scope\":\"workspace|global\"}}],\"profile\":[{{\"section\":\"preferences|skill_level|languages|conventions|tool_habits\",\"text\":\"...\"}}]}}",
         if known.is_empty() { "(nothing yet)\n" } else { &known },
         if profile.trim().is_empty() { "(empty)" } else { profile.trim() },

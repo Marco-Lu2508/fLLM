@@ -102,6 +102,10 @@ settings. `fllm-rs acp` is an Agent Client Protocol agent for editors such as Ze
 with their limits, in [agent-cli.md](agent-cli.md#as-an-mcp-server-and-as-an-acp-agent). They were run against scripted clients, not
 against Claude Code, Codex or an editor.
 
+With `--learn`, `fllm-rs agent` also improves over time: it reads your skills, drafts a better version of a skill that failed, and proposes
+memory entries and profile lines after a run, all as proposals you accept with `fllm-rs learn review`
+([agent-cli.md](agent-cli.md#learning-from-runs---learn)). It is off by default and costs one or two short extra model calls per run.
+
 ## Autocomplete: `/infill`
 
 `POST /infill` builds the fill-in-the-middle prompt from the model's FIM tokens (GGUF `tokenizer.ggml.fim_*_token_id`, else the literals of

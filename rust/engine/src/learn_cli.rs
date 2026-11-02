@@ -78,6 +78,8 @@ pub struct LearnBackend<'a> {
     workspace: PathBuf,
     cfg: LearnConfig,
     matched: Vec<String>,
+    /// Skills whose text was put into the system prompt because the task matched them; they count as used.
+    preloaded: Vec<String>,
     nudge_seen: usize,
     fresh: bool,
 }
@@ -95,7 +97,7 @@ impl<'a> LearnBackend<'a> {
         } else {
             Vec::new()
         };
-        LearnBackend { inner, studio, workspace: workspace.to_path_buf(), cfg, matched, nudge_seen: 0, fresh: true }
+        LearnBackend { inner, studio, workspace: workspace.to_path_buf(), cfg, matched, preloaded: Vec::new(), nudge_seen: 0, fresh: true }
     }
 
     pub(crate) fn http(&mut self) -> &mut HttpBackend {
@@ -136,6 +138,13 @@ impl<'a> LearnBackend<'a> {
             note.push_str(&format!("{}: {}; ", e.name, e.detail.lines().next().unwrap_or_default()));
         }
         let run = &outcome.messages[from.min(outcome.messages.len())..];
+        let mut skills = learn::skills_read_in(run);
+        for name in &self.preloaded {
+            if !skills.contains(name) {
+                skills.push(name.clone());
+            }
+        }
+        let started = std::time::Instant::now();
         let info = RunInfo {
             session: session.to_owned(),
             workspace: Some(self.workspace.clone()),
@@ -143,7 +152,7 @@ impl<'a> LearnBackend<'a> {
             verify,
             retries: errors.len() as u32,
             note,
-            skills: learn::skills_read_in(run),
+            skills,
             matched: self.matched.clone(),
             feedback: None,
         };
@@ -155,7 +164,8 @@ impl<'a> LearnBackend<'a> {
             body["model"] = json!(model);
             inner.complete_within(&body, 240)
         };
-        let lines = learn_flow::after_run(&studio, &info, run, &opts, &mut complete);
+        let mut lines = learn_flow::after_run(&studio, &info, run, &opts, &mut complete);
+        lines.push(format!("[learn] finished in {} s", started.elapsed().as_secs()));
         self.fresh = true;
         lines
     }
@@ -216,7 +226,16 @@ impl Backend for LearnBackend<'_> {
         }
         if self.cfg.skills {
             let skills = learn::list_skills(&self.studio, Some(&self.workspace));
-            let index = learn_flow::skills_index(&skills, &self.matched, 1800);
+            let mut index = learn_flow::skills_index(&skills, self.matched.get(1..).unwrap_or_default(), 1800);
+            // a small model rarely asks for a skill on its own: the one that matches the task best is put into the prompt
+            if let Some(info) = self.matched.first().and_then(|n| skills.iter().find(|s| &s.skill.name == n)) {
+                if let Ok(text) = info.skill.read(&self.studio) {
+                    index.push_str(&format!("\n\nThe skill '{}' matches this task. Follow it unless it is wrong for what you see:\n{}", info.skill.name, learn::clip_chars(text.trim(), 2500)));
+                    if !self.preloaded.contains(&info.skill.name) {
+                        self.preloaded.push(info.skill.name.clone());
+                    }
+                }
+            }
             if !index.is_empty() {
                 answer["skills"] = json!(index);
             }
@@ -701,7 +720,7 @@ mod tests {
         assert_eq!(names, ["bash", "skill"]);
         // the system prompt gets the skill index (the task matches the skill) and the profile
         let answer = lb.instructions().unwrap();
-        assert!(answer["skills"].as_str().unwrap().contains("- build: Build the project") && answer["skills"].as_str().unwrap().contains("read them first: build"), "{answer}");
+        assert!(answer["skills"].as_str().unwrap().contains("- build: Build the project") && answer["skills"].as_str().unwrap().contains("The skill 'build' matches this task") && answer["skills"].as_str().unwrap().contains("1. run make"), "{answer}");
         assert_eq!(answer["profile"], "- Languages: Writes Rust");
         let block = crate::agent_cli::instructions_block(&answer);
         assert!(block.contains("# Skills") && block.contains("# About the user (profile)\n"), "{block}");
