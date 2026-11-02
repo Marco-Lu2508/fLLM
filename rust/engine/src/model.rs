@@ -589,6 +589,16 @@ impl GgufModel {
         self.table_stride = tokens.div_ceil(self.block_size);
         self.pool_blocks = self.pool_blocks.min(self.table_stride.saturating_mul(self.max_sequences));
     }
+    /// `(max_sequences, pool_blocks)`: what [`Self::set_sequences`] takes back.
+    pub fn sequences_state(&self) -> (usize, usize) {
+        (self.max_sequences, self.pool_blocks)
+    }
+    /// Sets the number of sequence slots (and with it the recurrent-state reserve of the memory plan) and the KV pool, which never holds more
+    /// than a full-context sequence per slot. The memory planner uses it to try fewer slots; `sequences_state` gives the way back.
+    pub fn set_sequences(&mut self, sequences: usize, pool_blocks: usize) {
+        self.max_sequences = sequences.max(1);
+        self.pool_blocks = pool_blocks.min(self.table_stride.saturating_mul(self.max_sequences)).max(self.table_stride);
+    }
     /// Shrinks the KV pool (never below one full-context sequence).
     pub fn set_pool_blocks(&mut self, blocks: usize) {
         self.pool_blocks = blocks.clamp(self.table_stride, self.pool_blocks.max(self.table_stride));

@@ -507,7 +507,7 @@ pub fn plan_device_list(
 /// Device memory of the recurrent states/// Device memory of the recurrent states (Gated DeltaNet, Mamba-2, Mamba-1 layers): the decoder keeps up to two states per sequence slot
 /// (`state_capacity`), each holding every recurrent layer. They are allocated while the server runs, so the KV pool must leave room for
 /// them (16 sequences of Qwen3.5-2B need about 600 MB; without the reserve the pool took the whole card and the first busy step failed).
-fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {
+pub fn recurrent_state_bytes(model: &crate::model::GgufModel) -> u64 {
     let cfg = model.config();
     let mut layers = std::collections::BTreeSet::new();
     for t in &model.mapping().index().tensors {
