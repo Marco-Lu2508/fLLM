@@ -92,10 +92,11 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             }
             Ok(true)
         }
-        "skills" | "import" | "doctor" | "update" | "insights" | "usage" | "sessions" | "mcp-server" | "acp" => {
+        "skills" | "learn" | "import" | "doctor" | "update" | "insights" | "usage" | "sessions" | "mcp-server" | "acp" => {
             let rest = &args[1..];
             let code = match command {
                 "skills" => crate::skills_cli::run(rest)?,
+                "learn" => crate::learn_cli::run(rest)?,
                 "import" => crate::agent_import::run(rest)?,
                 "doctor" => crate::agent_ops::doctor(rest)?,
                 "update" => crate::agent_ops::update(rest)?,
@@ -170,6 +171,7 @@ TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float 
         "gateway" => crate::gateway::HELP,
         "agent" => crate::agent_cli::HELP,
         "skills" => crate::skills_cli::HELP,
+        "learn" => crate::learn_cli::HELP,
         "import" => crate::agent_import::HELP,
         "doctor" => crate::agent_ops::DOCTOR_HELP,
         "insights" | "usage" => crate::agent_ops::INSIGHTS_HELP,

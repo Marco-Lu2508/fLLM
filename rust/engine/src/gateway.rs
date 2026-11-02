@@ -205,6 +205,8 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
                 answer.push_str("\n\n(stopped at the step limit)");
             }
             reply(chat, key, &answer);
+            // the answer is delivered; a learning backend (--learn) notes the run now
+            backend.after_run(&outcome, &name);
             Handled::Answered
         }
         Err(e) => {
@@ -660,11 +662,27 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         users: options.users.clone(),
         pair: options.pair,
     };
+    let mut lb = crate::learn_cli::LearnBackend::new(
+        &mut http,
+        &agent_cli::studio_folder(),
+        &folder,
+        "",
+        crate::learn_cli::LearnConfig {
+            learn: parsed.learn,
+            skills: parsed.skills,
+            auto_memory: parsed.auto_memory,
+            nudge_every: parsed.nudge_every,
+            quiet: false,
+            secrets: parsed.api_key.iter().cloned().collect(),
+            small_context: context.is_some_and(|c| c < 8192),
+            model: cfg.loop_cfg.model.clone(),
+        },
+    );
     eprintln!("[gateway] {kind}: {} chat(s) allowed, folder {}, permissions {:?}", cfg.allowed.len(), cfg.folder, cfg.loop_cfg.allow);
     let file = cursor_file(&base, kind);
     let mut cursor = load_cursor(&file);
     loop {
-        match poll_once(&cursor, &cfg, &mut http, &mut *chat) {
+        match poll_once(&cursor, &cfg, &mut lb, &mut *chat) {
             Ok(next) => {
                 if next != cursor {
                     if let Err(e) = save_cursor(&file, &next) {
@@ -682,7 +700,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             }
         }
         if options.once {
-            http.end();
+            lb.http().end();
             return Ok(0);
         }
     }

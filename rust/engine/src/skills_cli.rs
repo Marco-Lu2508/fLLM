@@ -14,8 +14,15 @@ pub const HELP: &str = "usage: fllm-rs skills list [--folder DIR]
        fllm-rs skills export NAME --to claude|codex|hermes|agentskills|DIR [--folder DIR] [--out DIR]
        fllm-rs skills import PATH [--folder DIR] [--dry-run] [--force]
        fllm-rs skills install OWNER/REPO[/SUBFOLDER] | GIT-URL [--folder DIR] [--dry-run] [--force]
+       fllm-rs skills usage [NAME] [--folder DIR]
+       fllm-rs skills improve NAME [--folder DIR] [--url URL] [--api-key KEY]
+       fllm-rs skills diff NAME | approve-revision NAME [--force] | reject-revision NAME [--folder DIR]
+       fllm-rs skills history NAME [--folder DIR]
+       fllm-rs skills rollback NAME [VERSION] [--folder DIR]
 Skills are folders with a SKILL.md (agentskills.io / Claude Code format). Skills of the Studio folder are yours in every project,
---folder DIR uses DIR/.fllm/skills instead. import and install copy; a skill that already exists is kept unless --force is given.";
+--folder DIR uses DIR/.fllm/skills instead. import and install copy; a skill that already exists is kept unless --force is given.
+improve asks the loaded model to revise a skill from how it was used; the draft waits as a proposal (diff and reason) and the skill is not
+changed before approve-revision. Every approved revision and every rollback keeps the text it replaced: history lists the versions.";
 
 const MAX_SKILL_FILES_BYTES: u64 = 2 << 20;
 
@@ -45,7 +52,7 @@ pub fn local_name(name: &str) -> String {
 }
 
 /// The front matter lines and the body of a SKILL.md (`None` when there is no front matter block).
-fn split(text: &str) -> Option<(Vec<String>, String)> {
+pub(crate) fn split(text: &str) -> Option<(Vec<String>, String)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
     let rest = text.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
@@ -55,7 +62,7 @@ fn split(text: &str) -> Option<(Vec<String>, String)> {
 }
 
 /// The value of a one-line `key: value` or a YAML block (`key: >` / `|` followed by indented lines).
-fn head_value(head: &[String], key: &str) -> String {
+pub(crate) fn head_value(head: &[String], key: &str) -> String {
     let prefix = format!("{key}:");
     let Some(at) = head.iter().position(|l| l.starts_with(&prefix)) else { return String::new() };
     let first = head[at][prefix.len()..].trim();
@@ -238,6 +245,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     let root = skills_root(&studio, folder.as_deref());
     let dry = args.iter().any(|a| a == "--dry-run");
     let force = args.iter().any(|a| a == "--force");
+    if let Some(done) = args.first().and_then(|verb| crate::learn_cli::skills_verb(verb, &args[1..])) {
+        return done;
+    }
     match args.first().map(String::as_str) {
         Some("list") => {
             let found = find_skills(&root);

@@ -182,7 +182,9 @@ pub(in crate::server) async fn instructions(State(state): State<Arc<AppState>>) 
         None => Vec::new(),
     };
     let memory = |scope| entries(&read(scope, root.as_deref()));
-    Json(json!({"files": files, "memory": {"workspace": memory(Scope::Workspace), "global": memory(Scope::Global)}})).into_response()
+    // the profile the user keeps (and edits) in Settings > Personalization: short, capped, off with one switch
+    let profile = crate::learn::profile_for_prompt(&crate::agent_cli::studio_folder());
+    Json(json!({"files": files, "memory": {"workspace": memory(Scope::Workspace), "global": memory(Scope::Global)}, "profile": profile})).into_response()
 }
 
 /// `POST /api/studio/agent/memory`: `{scope, op: get | set | append, text}` reads or writes one memory file as text.
