@@ -797,8 +797,9 @@ html.dark .btn-destructive { color: #1c0806; }
 .palette-foot { display: flex; gap: 14px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--border); font-size: var(--text-xs); color: var(--muted-fg); }
 .palette-foot kbd { font-family: var(--font-mono); font-size: var(--text-2xs); border: 1px solid var(--border-strong); border-radius: var(--r-xs); padding: 0 5px; background: var(--surface-2); color: var(--fg-soft); }
 .palette-foot #searchModalCount { margin-left: auto; }
+#searchModal { align-items: flex-start; padding-top: max(16px, min(14vh, 120px)); }
 @media (max-width: 760px) {
-  #searchModal { padding-top: 8vh; }
+  #searchModal { padding-top: 16px; }
   .palette-foot .palette-help { display: none; }
 }
 

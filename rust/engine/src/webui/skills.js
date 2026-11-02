@@ -274,7 +274,7 @@
       el = document.createElement('div');
       el.className = 'modal-backdrop';
       el.id = 'skProposalModal';
-      el.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="skProposalTitle" style="max-width:640px;width:92vw;">
+      el.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="skProposalTitle" style="width:min(640px,calc(100vw - 32px));">
         <h3 id="skProposalTitle">Save this as a skill?</h3>
         <p class="app-item-desc" id="skProposalNote" style="margin-bottom:8px;">The model wrote this skill from the session. Edit it if needed; it is only saved when you press Save.</p>
         <div style="display:flex;gap:8px;margin-bottom:8px;">
@@ -282,7 +282,7 @@
           <select class="ui-input" id="skProposalScope" style="width:auto;"><option value="user">For every project</option><option value="workspace">This folder only</option></select>
         </div>
         <textarea class="ui-input mono" id="skProposalText" rows="16" spellcheck="false"></textarea>
-        <div class="dialog-actions"><button class="btn btn-ghost" id="skProposalCancel">Discard</button><button class="btn btn-primary" id="skProposalSave">Save skill</button></div>
+        <div class="dialog-actions"><button class="btn btn-ghost" id="skProposalCancel" data-dialog-cancel>Discard</button><button class="btn btn-primary" id="skProposalSave">Save skill</button></div>
       </div>`;
       document.body.appendChild(el);
       return el;

@@ -1880,19 +1880,52 @@ fn is_gguf_file(path: &Path) -> bool {
 pub fn local_models() -> Vec<(String, u64)> {
     read_local_models()
         .into_iter()
-        .filter_map(|p| fs::metadata(&p).ok().filter(|m| m.is_file()).map(|m| (p, m.len())))
+        .filter_map(|p| {
+            let meta = fs::metadata(&p).ok()?;
+            if meta.is_file() {
+                Some((p, meta.len()))
+            } else if meta.is_dir() && is_checkpoint_dir(Path::new(&p)) {
+                let size = checkpoint_dir_bytes(Path::new(&p));
+                Some((p, size))
+            } else {
+                None
+            }
+        })
         .collect()
+}
+
+fn is_weight_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".safetensors") || (lower.starts_with("pytorch_model") && lower.ends_with(".bin"))
+}
+
+/// A Hugging Face checkpoint folder: `config.json` (or `params.json`) next to `.safetensors` or `pytorch_model*.bin` weights.
+pub fn is_checkpoint_dir(dir: &Path) -> bool {
+    (dir.join("config.json").is_file() || dir.join("params.json").is_file())
+        && fs::read_dir(dir).is_ok_and(|entries| entries.flatten().any(|e| is_weight_name(&e.file_name().to_string_lossy())))
+}
+
+/// The size of the weight files of a checkpoint folder.
+fn checkpoint_dir_bytes(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries.flatten().filter(|e| is_weight_name(&e.file_name().to_string_lossy())).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()
+        })
+        .unwrap_or(0)
 }
 
 /// Adds a GGUF file, or every GGUF file in a folder (one level of sub-folders is searched too). Returns the files that were added.
 pub fn add_local_model(input: &str) -> Result<Vec<String>, String> {
     let cleaned = input.trim().trim_matches(|c| c == '"' || c == '\'').trim();
     if cleaned.is_empty() {
-        return Err("type or paste the path of a .gguf file".into());
+        return Err("type or paste the path of a model file or folder".into());
     }
     let path = PathBuf::from(cleaned);
     let mut found = Vec::new();
-    if path.is_dir() {
+    let has_direct_gguf = |dir: &Path| fs::read_dir(dir).is_ok_and(|e| e.flatten().any(|f| f.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("gguf"))));
+    if path.is_dir() && is_checkpoint_dir(&path) && !has_direct_gguf(&path) {
+        found.push(path.clone());
+    } else if path.is_dir() {
         let mut stack = vec![(path.clone(), 0)];
         while let Some((dir, depth)) = stack.pop() {
             for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
@@ -1905,13 +1938,22 @@ pub fn add_local_model(input: &str) -> Result<Vec<String>, String> {
             }
         }
         if found.is_empty() {
-            return Err("this folder has no .gguf files".into());
+            return Err("this folder is not a model: it has no .gguf file and no Hugging Face checkpoint (config.json together with .safetensors files)".into());
         }
     } else if path.is_file() {
-        if !is_gguf_file(&path) {
-            return Err("this is not a GGUF file (it does not start with the GGUF header)".into());
+        let lower = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let folder = path.parent().filter(|p| is_checkpoint_dir(p));
+        let weights_or_config = lower.ends_with(".safetensors") || lower.ends_with(".json") || lower.ends_with(".bin");
+        if let Some(folder) = folder.filter(|_| weights_or_config) {
+            // a model is the whole folder, not one weight file
+            found.push(folder.to_path_buf());
+        } else if lower.ends_with(".safetensors") || lower.ends_with(".json") {
+            return Err("this file belongs to a Hugging Face model, but its folder has no config.json and weights together; choose the model's folder".into());
+        } else if !is_gguf_file(&path) {
+            return Err("this is not a model file (a GGUF file starts with the GGUF header; for a Hugging Face model choose its folder)".into());
+        } else {
+            found.push(path);
         }
-        found.push(path);
     } else {
         return Err("no such file or folder".into());
     }

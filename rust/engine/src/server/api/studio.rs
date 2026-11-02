@@ -662,7 +662,7 @@ pub(in crate::server) use super::studio_ops::{model_progress, pull_model};
 /// A catalog name, a Hugging Face reference (`owner/repo[:QUANT]`, `hf://owner/repo/file.gguf`) or a local file, resolved to a file
 /// on disk; downloads what is missing.
 pub(super) fn resolve_model(spec: &str, quant: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
-    if std::path::Path::new(spec).is_file() {
+    if std::path::Path::new(spec).exists() {
         return Ok((std::path::PathBuf::from(spec), spec.to_owned()));
     }
     let reference = if let Some(entry) = crate::catalog::find(spec) {
@@ -685,6 +685,25 @@ pub(in crate::server) async fn add_local_model(Json(body): Json<Value>) -> Respo
     let path = body.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
     match tokio::task::spawn_blocking(move || crate::hub::add_local_model(&path)).await {
         Ok(Ok(added)) => Json(json!({"added": added})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::BAD_REQUEST, &error),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `POST /api/studio/models/inspect` with `{path}`: what the path (a file, a folder or a Hugging Face name) is, before it is loaded.
+pub(in crate::server) async fn inspect_model(Json(body): Json<Value>) -> Response {
+    let path = body.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+    match tokio::task::spawn_blocking(move || crate::model_inspect::inspect(&path).to_json()).await {
+        Ok(found) => Json(found).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// `GET /api/studio/fs/browse?path=`: the folders and the model files of a folder of this computer (local requests only).
+pub(in crate::server) async fn browse_files(Query(query): Query<HashMap<String, String>>) -> Response {
+    let path = query.get("path").cloned().unwrap_or_default();
+    match tokio::task::spawn_blocking(move || crate::model_inspect::browse(&path)).await {
+        Ok(Ok(listing)) => Json(listing).into_response(),
         Ok(Err(error)) => api_error(StatusCode::BAD_REQUEST, &error),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -805,18 +824,22 @@ pub(in crate::server) async fn load_model(Json(body): Json<Value>) -> Response {
         Ok(Err(err)) => return api_error(StatusCode::BAD_REQUEST, &err),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    // a model the engine cannot use is turned down here, while the current one is still running
-    let checked = path.clone();
-    let usable = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mapping = fllm_gguf_probe::MappedGguf::open(&checked).map_err(|e| e.to_string())?;
-        crate::tokenizer::TokenizerBundle::from_gguf(&mapping).map(|_| ())
-    })
-    .await;
-    match usable {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => return api_error(StatusCode::BAD_REQUEST, &format!("fLLM cannot use this model yet: {reason}")),
+    // a model the engine cannot use is turned down here, while the current one is still running; a folder, a .safetensors file or the
+    // part of a split file is turned into what the server is started with
+    let checked = path.display().to_string();
+    let found = tokio::task::spawn_blocking(move || crate::model_inspect::inspect(&checked)).await;
+    let path = match found {
+        Ok(found) if found.ok => std::path::PathBuf::from(&found.path),
+        Ok(found) => {
+            let problem = found.problem.unwrap_or_else(|| "fLLM cannot use this model.".into());
+            let message = match found.fix {
+                Some(fix) => format!("{problem} {fix}"),
+                None => problem,
+            };
+            return api_error(StatusCode::BAD_REQUEST, &message);
+        }
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    };
     let model = path.display().to_string();
     let speculative = {
         let (requested, model, path) = (requested.clone(), model.clone(), path.clone());

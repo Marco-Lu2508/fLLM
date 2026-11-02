@@ -205,6 +205,7 @@ pub mod quant_iq;
 
 pub mod cli;
 pub mod hub;
+pub mod model_inspect;
 pub mod model_scan;
 pub mod version;
 pub mod import;

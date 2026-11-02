@@ -580,6 +580,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/models/unload", post(api::studio_ops::unload_model))
         .route("/api/studio/models/downloads", post(api::studio_ops::download_action))
         .route("/api/studio/pick-file", post(api::studio_ops::pick_file))
+        .route("/api/studio/models/inspect", post(api::studio::inspect_model))
+        .route("/api/studio/fs/browse", get(api::studio::browse_files))
         .route("/api/studio/settings", get(api::studio_ops::get_settings).post(api::studio_ops::update_settings))
         .route("/api/studio/engine", get(api::studio_ops::get_engine).post(api::studio_ops::update_engine))
         .route("/api/studio/restart", post(api::studio_ops::restart_server))

@@ -9,6 +9,15 @@ behaviour between versions).
 ### Changed
 - CI (not the release builds, which stay on the older images for their glibc baseline) runs on the newest GitHub runner images: Ubuntu 26.04 (also arm64), macOS 26 and Windows Server 2025.
 - `fuzz/Cargo.lock` moves `zip` from 2.4.2 to 9.2.2 (three advisories).
+### Added
+- **One dialog to choose a model.** The start screen, the Models page and the draft-model picker accept a `.gguf` file, the first part of a split GGUF, a Hugging Face folder (`config.json` + `.safetensors`, sharded or not), a single `.safetensors` or `config.json` of such a folder, and a typed `owner/name[:quant]`. The server checks the choice first (`POST /api/studio/models/inspect`) and shows format, size, architecture, quantization, context length, fit and multi-token prediction heads, or the reason it is not a model and how to fix it. The system file dialog offers `.gguf`, `.safetensors` and `.json` and a separate *Choose a folder*; `GET /api/studio/fs/browse` lists folders for the browser version (this machine only).
+- **Multi-token prediction is visible in the load dialog**: found heads are offered with one click, a model without heads (or with a recurrent architecture) says so and the option is disabled; checkpoint folders are judged from `config.json` and the weight index.
+- **Tests for the dialog contract** (`tests/dialogs.test.js`) and for the model dialog texts (`tests/modelpicker.test.js`).
+
+### Fixed
+- **Only GGUF files could be loaded from the Studio.** The load route rejected folders and `.safetensors` before the engine saw them; the engine itself already loaded them. Folders and `.safetensors` checkpoints now load from the Studio (tried with Qwen2.5-0.5B-Instruct as a folder and as a GGUF, and a GGUF split into three parts).
+- **Dialog buttons below the edge of the screen.** All dialogs now share one box that is never taller than the window, scrolls inside and keeps its buttons at the bottom (also checked at 1366x768, 1280x720, 1024x600, 390x700 and at 150 percent scaling sizes); Escape closes, Tab stays inside. The load-options and the "switching model" dialogs sat inside a hidden page section and could not show from the start screen; they are top-level now.
+- **Desktop window**: default 1180 x 760, minimum 640 x 460 (was 720 x 520), and a remembered size larger than the screen is shrunk to fit.
 
 ## [0.2.1] - 2026-10-31
 

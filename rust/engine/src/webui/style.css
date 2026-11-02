@@ -1337,11 +1337,16 @@
       background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(4px);
       z-index: 100;
-      align-items: flex-start;
+      /* the dialog contract: the dialog is centered, never taller than the screen, and the overlay itself scrolls as a fallback */
+      align-items: center;
       justify-content: center;
-      padding-top: 14vh;
+      padding: 16px;
+      box-sizing: border-box;
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .modal-backdrop.open { display: flex; }
+    .modal-backdrop > .dialog, .modal-backdrop > .search-dialog { margin: auto; }
     .search-dialog {
       width: 520px;
       max-width: calc(100vw - 32px);
@@ -1544,10 +1549,33 @@
     .shortcuts .sc-wait { color: var(--primary); font-size: 12px; }
     .shortcuts .sc-fixed td { opacity: 0.7; }
     .sc-message { min-height: 18px; margin: 8px 0 0; font-size: 12.5px; }
-    .dialog.tour { width: min(520px, 92vw); }
+    .dialog.tour { width: min(520px, calc(100vw - 32px)); }
     .tour-dots { display: flex; gap: 6px; margin-bottom: 10px; }
     .tour-dots span { width: 22px; height: 4px; border-radius: 2px; background: var(--border); }
     .tour-dots span.on { background: var(--primary); }
     .tour-box { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--muted); color: var(--foreground); }
     .tour-tips { margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.55; color: var(--muted-foreground); }
     .tour-tips li { margin-bottom: 8px; }
+    /* Choose a model (modelpicker.js) and the facts in the load dialog */
+    .mp-dialog { width: min(600px, calc(100vw - 32px)); }
+    .mp-path { display: flex; gap: 8px; }
+    .mp-path .ui-input { flex: 1; min-width: 0; }
+    .mp-ways { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+    .mp-list { border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+    .mp-list[hidden] { display: none; }
+    .mp-roots { display: flex; flex-wrap: wrap; gap: 4px; }
+    .mp-here { font-size: 12px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+    .mp-entries { max-height: min(240px, 34vh); overflow-y: auto; display: flex; flex-direction: column; }
+    .mp-entry { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; text-align: left; font-size: 13px; color: var(--foreground); }
+    .mp-entry:hover, .mp-entry:focus-visible { background: color-mix(in srgb, var(--foreground) 8%, transparent); }
+    .mp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mp-problem { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--danger, #d4483b) 45%, var(--border)); background: color-mix(in srgb, var(--danger, #d4483b) 8%, transparent); font-size: 13px; line-height: 1.45; }
+    .mp-found { margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); }
+    .mp-title { font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
+    .mp-facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; font-size: 12.5px; }
+    .mp-facts dt { color: var(--muted-foreground); }
+    .mp-facts dd { margin: 0; overflow-wrap: anywhere; }
+    .mp-found p { margin: 8px 0 0; }
+    .mp-candidates { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; max-height: 160px; overflow-y: auto; }
+    .mp-candidate { text-align: left; padding: 6px 8px; border-radius: 6px; font-size: 12.5px; border: 1px solid var(--border); overflow-wrap: anywhere; }
+    .mp-candidate:hover, .mp-candidate:focus-visible { background: color-mix(in srgb, var(--foreground) 8%, transparent); }

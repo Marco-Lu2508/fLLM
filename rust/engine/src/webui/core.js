@@ -74,7 +74,7 @@
       return new Promise((resolve) => {
         const back = document.createElement('div');
         back.className = 'modal-backdrop open';
-        back.style.cssText = 'z-index:200;align-items:center;padding-top:0;';
+        back.style.cssText = 'z-index:200;';
         const box = document.createElement('div');
         box.className = 'dialog';
         const text = document.createElement('p');
