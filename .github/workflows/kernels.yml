@@ -19,9 +19,9 @@ env:
 jobs:
   hip-build:
     name: AMD ROCm build (compile only)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 180
-    container: rocm/dev-ubuntu-24.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe # latest when written; update together with the ROCm version you test
+    container: rocm/dev-ubuntu-26.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe # latest when written; update together with the ROCm version you test
     steps:
       - name: Tools
         run: |
@@ -44,7 +44,7 @@ jobs:
 
   cuda-build:
     name: CUDA build (no GPU needed to compile)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 180
     container: nvidia/cuda:12.8.1-devel-ubuntu22.04
     steps:

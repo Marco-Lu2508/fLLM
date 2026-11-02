@@ -6,6 +6,10 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Changed
+- CI (not the release builds, which stay on the older images for their glibc baseline) runs on the newest GitHub runner images: Ubuntu 26.04 (also arm64), macOS 26 and Windows Server 2025.
+- `fuzz/Cargo.lock` moves `zip` from 2.4.2 to 9.2.2 (three advisories).
+
 ## [0.2.1] - 2026-10-31
 
 The first day with 0.2.0 in real use. The Studio and the desktop app had bugs that the release checks did not catch; they are fixed here, together with the coding-agent work of the same day.

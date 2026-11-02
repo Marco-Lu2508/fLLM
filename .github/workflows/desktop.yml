@@ -31,14 +31,14 @@ jobs:
       matrix:
         include:
           - name: Windows
-            os: windows-2022
+            os: windows-2025
             features: rust-gpu,vulkan
           - name: Linux
-            os: ubuntu-24.04
+            os: ubuntu-26.04
             features: rust-gpu,vulkan
           # macOS uses the wgpu Metal path (the same feature set as the macOS release assets); no Vulkan SDK is involved
           - name: macOS
-            os: macos-15
+            os: macos-26
             features: rust-gpu
     steps:
       - name: Checkout

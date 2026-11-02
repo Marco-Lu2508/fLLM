@@ -40,7 +40,7 @@ env:
 jobs:
   http-tests:
     name: HTTP layer tests (in process)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -65,7 +65,7 @@ jobs:
 
   sdk-tests:
     name: SDK tests (OpenAI, Anthropic, Ollama)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       FLLM_API_KEY: ci-sdk-test-key
@@ -128,7 +128,7 @@ jobs:
 
   actionlint:
     name: actionlint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - name: Checkout
