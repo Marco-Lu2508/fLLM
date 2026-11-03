@@ -6,7 +6,7 @@
 //! https://github.com/ggerganov/llama.cpp/blob/b1ff4ca23630ac7c5a275405353ddb5c486332c9/LICENSE.
 
 #[path = "quant_iq_tables.rs"]
-mod tables;
+pub(crate) mod tables;
 
 const QK_K: usize = 256;
 

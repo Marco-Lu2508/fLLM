@@ -50,6 +50,8 @@ mod chunked_scan;
 pub mod cpu_float;
 pub mod cpu_fp8;
 pub mod cpu_kernels;
+#[cfg_attr(not(any(target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little"))), allow(dead_code))]
+mod cpu_iqgrid;
 #[cfg(target_arch = "x86_64")]
 mod cpu_kquant;
 mod cpu_profile;
