@@ -165,6 +165,8 @@ pub struct DeltaConfig {
     pub beta_scale: f32,
     /// Epsilon of the gated output norm when it differs from the model's.
     pub norm_eps: Option<f32>,
+    /// The gated output norm multiplies with `sigmoid(z)` instead of `silu(z)` (Qwen3.8-Flash-Next, `output_gate_type: sigmoid`).
+    pub sigmoid_gate: bool,
 }
 
 /// Mamba-2 state-space layers: a recurrent state replaces the KV cache.
@@ -292,6 +294,19 @@ pub struct Qwen4Config {
     pub eos: i64,
     /// Rows of the token embedding: the unigram vocabulary of the hash.
     pub vocab: u64,
+    /// Hash constants stored in the file (llama.cpp layout); `None`: derived from `vocab_base`, `seed` and `vocab`.
+    pub tables: Option<PleTables>,
+}
+
+/// Constants of the n-gram hash of a file that carries them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PleTables {
+    /// One odd multiplier per n-gram position.
+    pub multipliers: Vec<i64>,
+    /// Rows of every head's slice of the table.
+    pub sizes: Vec<u64>,
+    /// First row of every head's slice of the table.
+    pub offsets: Vec<u64>,
 }
 
 /// MiniMax-M3: block-sparse attention selected by an indexer, gpt-oss style SwiGLU, shared expert. The pool geometry of the model is a
@@ -903,7 +918,7 @@ impl ModelConfig {
         } else {
             None
         };
-        let qwen4 = if a == "qwen3next" && uint(meta, a, "hc.count").is_some() {
+        let qwen4 = if matches!(a, "qwen3next" | "qwen35moe") && uint(meta, a, "hc.count").is_some() {
             let need = |name: &str| uint(meta, a, name).ok_or_else(|| format!("Qwen3.8-Flash-Next needs {a}.{name}"));
             let indexer = match uint(meta, a, "indexer.heads") {
                 Some(heads) => Some((heads, need("indexer.head_dim")?, need("indexer.budget")?, need("indexer.compress_ratio")?)),
@@ -914,7 +929,20 @@ impl ModelConfig {
                 _ => vec![false; layers],
             };
             let any_ple = ple.iter().any(|&f| f);
-            let ple_key = |name: &str| if any_ple { need(name) } else { Ok(0) };
+            let list = |name: &str| match key(meta, a, name) {
+                Some(Value::Array(values)) => Some(values.clone()),
+                _ => None,
+            };
+            let tables = match (list("ple.multipliers"), list("ple.head_sizes"), list("ple.head_offsets")) {
+                (Some(m), Some(s), Some(o)) if any_ple => Some(PleTables {
+                    multipliers: m.iter().filter_map(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64))).collect(),
+                    sizes: s.iter().filter_map(Value::as_u64).collect(),
+                    offsets: o.iter().filter_map(Value::as_u64).collect(),
+                }),
+                _ => None,
+            };
+            // a file that carries the hash constants needs none of the values they are derived from
+            let ple_key = |name: &str| if !any_ple { Ok(0) } else if tables.is_some() { Ok(uint(meta, a, name).unwrap_or(0)) } else { need(name) };
             Some(Qwen4Config {
                 hc: need("hc.count")?,
                 lowrank: need("hc.lowrank")?,
@@ -929,6 +957,7 @@ impl ModelConfig {
                 seed: ple_key("ple.seed")? as u64,
                 eos: ple_key("ple.eos")? as i64,
                 vocab: ple_key("ple.vocab")? as u64,
+                tables,
             })
         } else {
             None
@@ -1431,6 +1460,7 @@ fn parse_delta(meta: &Map<String, Value>, arch: &str) -> Option<DeltaConfig> {
         v_dim: uint(meta, arch, "ssm.inner_size")? / v_heads.max(1),
         beta_scale: float(meta, arch, "ssm.beta_scale").unwrap_or(1.0),
         norm_eps: float(meta, arch, "ssm.norm_eps"),
+        sigmoid_gate: key(meta, arch, "delta.gate_sigmoid").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 

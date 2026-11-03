@@ -28,6 +28,8 @@ pub(crate) struct Layer<'a> {
     pub beta_scale: f32,
     pub eps: f32,
     pub tiled_heads: bool,
+    /// Gate the head output with `sigmoid(z)` instead of `silu(z)`.
+    pub sigmoid_gate: bool,
     /// `conv_dim x kernel`
     pub conv: &'a [f32],
     pub dt_bias: &'a [f32],
@@ -210,10 +212,14 @@ pub(crate) fn run(
         }
     }
 
-    // gated RMS norm: norm(o) * weight * silu(z)
+    // gated RMS norm: norm(o) * weight * silu(z) (sigmoid(z) for Qwen3.8-Flash-Next)
     let finish = |t: usize, o: &mut [f32]| {
         let mut gates = z[t * value_dim..(t + 1) * value_dim].to_vec();
-        silu(&mut gates);
+        if l.sigmoid_gate {
+            gates.iter_mut().for_each(|g| *g = 1.0 / (1.0 + (-*g).exp()));
+        } else {
+            silu(&mut gates);
+        }
         for j in 0..vh {
             let o = &mut o[j * hv..(j + 1) * hv];
             let inv = (o.iter().map(|x| x * x).sum::<f32>() / hv as f32 + l.eps)

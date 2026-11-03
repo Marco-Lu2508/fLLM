@@ -156,7 +156,7 @@ impl Tester<'_> {
         }
         // the grouped GEMM: every format of the kernel, both tiles, with bias; K-quants need widths of 256
         let mode_swiglu = MoeGlu { mode: 0, alpha: 0.0, limit: 0.0 };
-        for kind in self.kinds(&[1u32, 30, 2, 3, 6, 7, 8, 12, 13, 14, 20, 39, 0x8000_0021]) {
+        for kind in self.kinds(&[1u32, 30, 2, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42, 0x8000_0021]) {
             for block in [16usize, 64] {
                 let tokens = if block == 16 { 6 } else { 70 };
                 let r = self.moe_grouped_check(kind, 8, tokens, 2, 130, 512, block, 2, None, true, false, usize::MAX);

@@ -349,6 +349,7 @@ static int fllm_linear_launch_impl(cudaStream_t s, const void *W, int kind, cons
         case KIND_Q5_K: return launch_kind<KIND_Q5_K>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_Q6_K: return launch_kind<KIND_Q6_K>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_Q2_K: return launch_kind<KIND_Q2_K>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
+        case KIND_Q2_0: return launch_kind<KIND_Q2_0>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_Q3_K: return launch_kind<KIND_Q3_K>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_IQ2_XXS: return launch_kind<KIND_IQ2_XXS>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);
         case KIND_IQ2_XS: return launch_kind<KIND_IQ2_XS>(s, w, X, Y, bias, rows, cols, batch, x16, x16_bytes);

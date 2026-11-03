@@ -667,6 +667,7 @@ fn delta_shape(kh: usize, vh: usize, hk: usize, hv: usize, ksz: usize) -> DeltaS
         v_dim: hv,
         conv_kernel: ksz,
         tiled_heads: true,
+        sigmoid_gate: false,
         beta_scale: 1.0,
         eps: 1e-6,
     }
@@ -1066,6 +1067,7 @@ fn sample_plans() -> Vec<OpPlan> {
         QuantType::Q6_K,
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
+        QuantType::Q2_0,
     ] {
         v.push(
             plan_embedding(

@@ -1281,6 +1281,12 @@ impl InferenceRuntime {
         self.batch_stats
     }
 
+    /// Test hook: the draft tokens the next scheduler step verifies for `sid` (what a draft source would have proposed).
+    #[cfg(test)]
+    pub(crate) fn set_test_draft(&mut self, sid: i64, tokens: Vec<i64>) {
+        self.scheduler.external_drafts.insert(sid, tokens);
+    }
+
     /// Speculation method in use, the draft length it was configured with and the cumulative statistics.
     pub fn speculative_status(&self) -> (crate::speculative::SpeculativeMethod, usize, crate::speculative::SpecStats) {
         (self.spec_method, self.spec_tokens, self.spec_stats)
@@ -1995,9 +2001,17 @@ impl InferenceRuntime {
                 decode_rows += 1;
             }
             let first_block = sequence.blocks.first().copied().map(|b| b as i64);
-            let state_snapshot = first_block.and_then(|first| {
-                self.decoder.as_ref().and_then(|d| d.snapshot_state(first).ok().flatten())
-            });
+            // A model with recurrent layers cannot truncate its state like a KV cache: copy it now, so that the rejected draft tokens
+            // can be undone (restore, then run the accepted prefix again) after the verification pass. Skipping the copy would leave
+            // the state ahead of the sequence after a rejection, so a missing copy is an error.
+            let state_snapshot = match (&self.decoder, first_block) {
+                (Some(decoder), Some(first)) if decoder.has_recurrent_state() => Some(
+                    decoder
+                        .snapshot_state(first)?
+                        .ok_or_else(|| format!("sequence {sid} has no recurrent state to roll back to"))?,
+                ),
+                _ => None,
+            };
             let mut q = self.draft_q.remove(sid).unwrap_or_default();
             q.resize(draft.len(), None);
             verify_candidates.push(VerifyCandidate {
@@ -2540,7 +2554,8 @@ impl InferenceRuntime {
                             adv_lens.push((cand.position + 2 + idx) as i64);
                         }
                         let adv_table = cand.table.repeat(adv_ids.len());
-                        let _ = decoder.forward_with_hidden(
+                        // the tokens of the accepted prefix go through the layers again, now alone: state and KV end at the sequence
+                        decoder.forward_with_hidden(
                             &adv_ids,
                             &adv_lens,
                             &adv_table,
@@ -2550,7 +2565,7 @@ impl InferenceRuntime {
                             false,
                             &[],
                             None,
-                        );
+                        )?;
                     }
                 }
             }

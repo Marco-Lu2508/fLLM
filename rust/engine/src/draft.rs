@@ -10,6 +10,15 @@ use std::collections::{HashMap, HashSet};
 struct DraftSequence {
     tokens: Vec<i64>,
     logits: Vec<f32>,
+    /// A draft model with recurrent layers cannot drop the tail of `tokens` like a KV cache: its state after the history of the last
+    /// call (before that call's draft tokens), to go back to when some of those draft tokens were rejected.
+    saved: Option<SavedState>,
+}
+
+struct SavedState {
+    tokens: usize,
+    state: crate::rust_decoder::SequenceSnapshot,
+    logits: Vec<f32>,
 }
 pub struct DraftEngine {
     model: GgufModel,
@@ -89,6 +98,7 @@ impl DraftEngine {
                 DraftSequence {
                     tokens: Vec::new(),
                     logits: Vec::new(),
+                    saved: None,
                 },
             );
         }
@@ -98,17 +108,6 @@ impl DraftEngine {
             .ok_or("draft compute is not initialized (call attach_compute)")?;
         let sequence = self.sequences.get_mut(&sid).unwrap();
         let matched = common_prefix(&sequence.tokens, history);
-        // The last matching row needs to be evaluated again when its saved logits
-        // were produced from a later, rejected draft continuation.
-        let start = if matched == history.len()
-            && matched == sequence.tokens.len()
-            && !sequence.logits.is_empty()
-        {
-            matched
-        } else {
-            matched.saturating_sub(1)
-        };
-        sequence.tokens.truncate(start);
         self.blocks
             .ensure_blocks(sid, (history.len() + count) as i64)
             .map_err(|e| e.to_string())?;
@@ -121,6 +120,29 @@ impl DraftEngine {
         for (slot, id) in table.iter_mut().zip(blocks) {
             *slot = *id as i64;
         }
+        let start = if decoder.has_recurrent_state() {
+            // The state cannot step back by one token, so there is no "evaluate the last row again": keep the state when the tokens
+            // it holds are all in the history, go back to the copy taken before the last draft tokens when they were not, and start
+            // over (position 0 resets the state) when the history changed earlier than that.
+            let held = sequence.tokens.len();
+            if matched == held && (matched < history.len() || !sequence.logits.is_empty()) {
+                matched
+            } else if let Some(saved) = sequence.saved.take().filter(|s| s.tokens <= matched) {
+                decoder.restore_state(table[0], &saved.state)?;
+                sequence.logits = saved.logits;
+                saved.tokens
+            } else {
+                sequence.logits.clear();
+                0
+            }
+        } else if matched == history.len() && matched == sequence.tokens.len() && !sequence.logits.is_empty() {
+            // The last matching row needs to be evaluated again when its saved logits were produced from a later, rejected draft
+            // continuation.
+            matched
+        } else {
+            matched.saturating_sub(1)
+        };
+        sequence.tokens.truncate(start);
         for chunk_start in (start..history.len()).step_by(128) {
             let end = (chunk_start + 128).min(history.len());
             let lengths: Vec<i64> = (chunk_start + 1..=end).map(|n| n as i64).collect();
@@ -138,6 +160,11 @@ impl DraftEngine {
                 .tokens
                 .extend_from_slice(&history[chunk_start..end]);
         }
+        sequence.saved = if decoder.has_recurrent_state() {
+            decoder.snapshot_state(table[0])?.map(|state| SavedState { tokens: sequence.tokens.len(), state, logits: sequence.logits.clone() })
+        } else {
+            None
+        };
         let mut draft = Vec::with_capacity(count);
         let mut q = Vec::with_capacity(count);
         let mut context = history.to_vec();

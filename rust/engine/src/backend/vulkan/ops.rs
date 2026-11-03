@@ -760,6 +760,7 @@ pub fn format_tag(quant: crate::backend::QuantType) -> Option<(&'static str, usi
         Q::Q6_K => ("q6_k", 256),
         Q::IQ4_NL => ("iq4_nl", 32),
         Q::Mxfp4 => ("mxfp4", 32),
+        Q::Q2_0 => ("q2_0", 64),
         _ => return None,
     })
 }
@@ -782,6 +783,7 @@ fn embed_shader(tag: &str) -> Option<&'static str> {
         "q6_k" => "embed_q6_k",
         "iq4_nl" => "embed_iq4_nl",
         "mxfp4" => "embed_mxfp4",
+        "q2_0" => "embed_q2_0",
         _ => return None,
     })
 }

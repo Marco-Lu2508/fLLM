@@ -28,6 +28,8 @@
 #include "_q_fmt_iq4_nl.glsl"
 #elif defined(FMT_MXFP4)
 #include "_q_fmt_mxfp4.glsl"
+#elif defined(FMT_Q2_0)
+#include "_q_fmt_q2_0.glsl"
 #elif defined(FMT_NVFP4)
 #include "_q_fmt_nvfp4.glsl"
 #elif defined(FMT_Q4Z)

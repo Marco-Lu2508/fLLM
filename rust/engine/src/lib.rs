@@ -111,6 +111,8 @@ mod tokenizer_convert_tests;
 mod gemma_tests;
 #[cfg(test)]
 mod spec_tests;
+#[cfg(test)]
+mod spec_state_tests;
 
 pub mod hybrid_config;
 
@@ -217,6 +219,7 @@ mod nvfp4_tests {
 }
 
 pub mod quant_extra;
+mod qwen4_gguf;
 pub mod quant_i2s;
 pub mod quant_iq;
 

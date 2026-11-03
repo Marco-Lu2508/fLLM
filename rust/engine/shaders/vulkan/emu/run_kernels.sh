@@ -13,7 +13,7 @@ JOBS=${JOBS:-6}
 E=$W/kernels; S=$HERE
 rm -rf "$E"; mkdir -p "$E/T"; cp "$SH"/*.comp "$SH"/*.glsl "$E/T/"
 sed -i '/^#version/d;/^#extension/d' "$E"/T/*
-FMTS="q4_0:-DFMT_Q4_0=1 q4_1:-DFMT_Q4_1=1 q5_0:-DFMT_Q5_0=1 q5_1:-DFMT_Q5_1=1 q8_0:-DFMT_Q8_0=1 q2_k:-DFMT_Q2_K=1 q3_k:-DFMT_Q3_K=1 q4_k:-DFMT_Q4_K=1 q5_k:-DFMT_Q5_K=1 q6_k:-DFMT_Q6_K=1 iq4_nl:-DFMT_IQ4_NL=1 mxfp4:-DFMT_MXFP4=1 nvfp4:-DFMT_NVFP4=1 q4z32:-DFMT_Q4Z=1,-DQ4Z_GROUP=32 q4z64:-DFMT_Q4Z=1,-DQ4Z_GROUP=64 q4z128:-DFMT_Q4Z=1,-DQ4Z_GROUP=128"
+FMTS="q4_0:-DFMT_Q4_0=1 q4_1:-DFMT_Q4_1=1 q5_0:-DFMT_Q5_0=1 q5_1:-DFMT_Q5_1=1 q8_0:-DFMT_Q8_0=1 q2_k:-DFMT_Q2_K=1 q3_k:-DFMT_Q3_K=1 q4_k:-DFMT_Q4_K=1 q5_k:-DFMT_Q5_K=1 q6_k:-DFMT_Q6_K=1 iq4_nl:-DFMT_IQ4_NL=1 mxfp4:-DFMT_MXFP4=1 nvfp4:-DFMT_NVFP4=1 q2_0:-DFMT_Q2_0=1 q4z32:-DFMT_Q4Z=1,-DQ4Z_GROUP=32 q4z64:-DFMT_Q4Z=1,-DQ4Z_GROUP=64 q4z128:-DFMT_Q4Z=1,-DQ4Z_GROUP=128"
 # config: kind,NROWS (spec constant 1),NCOLS (spec constant 2),workgroup size,batch,relative tolerance
 CFGS="mv_s,2,1,64,1,2e-5 mv_s,2,3,64,3,2e-5 mv_s,1,8,32,8,2e-5 mv_i,2,1,64,1,0.01 mv_i,2,5,64,5,0.01 mm_s,0,0,256,70,2e-5 mm_i,0,0,256,70,0.01 mm_c32,0,0,128,70,0.004 mm_c16,0,0,64,70,0.004 mm_c64,0,0,256,70,0.004"
 PERMCFGS="mv_s_perm,2,3,64,3,2e-5 mv_i_perm,2,5,64,5,0.01 mm_s_perm,0,0,256,70,2e-5 mm_i_perm,0,0,256,70,0.01 mm_c32_perm,0,0,128,70,0.004"

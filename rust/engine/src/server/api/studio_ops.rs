@@ -244,8 +244,8 @@ impl LoadOptions {
         // a folder or .safetensors file is judged by its config; a GGUF file by its header and tensors
         if !target.is_file() || !target.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")) {
             let found = crate::model_inspect::inspect(&target.display().to_string());
-            if let Some(reason) = &found.speculation_blocked {
-                return Err(format!("{reason} Choose off."));
+            if let Some(reason) = found.speculation_blocked.as_ref().filter(|_| mode == "mtp") {
+                return Err(format!("{reason} Choose prompt lookup, a draft model or off."));
             }
             return match mode {
                 "mtp" if found.mtp != Some(true) => {
@@ -265,8 +265,8 @@ impl LoadOptions {
         let probe = fllm_gguf_probe::MappedGguf::open(target).map_err(|e| e.to_string())?;
         let index = probe.index();
         let arch = index.metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
-        if STATEFUL_ARCHITECTURES.contains(&arch) {
-            return Err(format!("Speculative decoding does not work with this model: its architecture ({arch}) keeps a running state that cannot be rolled back when a guess is wrong. Choose off."));
+        if mode == "mtp" && STATEFUL_ARCHITECTURES.contains(&arch) {
+            return Err(format!("Multi-token prediction does not work with this model: its architecture ({arch}) has recurrent layers, and the prediction heads are only supported for the DeepSeek and GLM families. Choose prompt lookup, a draft model or off."));
         }
         match mode {
             "mtp" if !index.tensors.iter().any(|t| t.name.contains(".nextn.")) => {

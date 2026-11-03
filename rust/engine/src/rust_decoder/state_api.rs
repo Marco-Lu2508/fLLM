@@ -54,6 +54,8 @@ pub struct SequenceSnapshot {
     pub host: Vec<Option<LayerStateSnapshot>>,
     /// Bytes of the device state buffer (all layers of the kind that runs on the device) and the tokens folded into each layer.
     pub device: Option<(Vec<u8>, Vec<usize>)>,
+    /// Qwen3.8-Flash-Next: the n-gram ids, convolution histories and indexer keys that live beside the layer states.
+    pub(super) qwen4: Option<qwen4::Q4Snapshot>,
 }
 
 impl SequenceSnapshot {
@@ -67,7 +69,7 @@ impl SequenceSnapshot {
     /// Memory held by the snapshot.
     pub fn bytes(&self) -> usize {
         let host: usize = self.host.iter().flatten().map(|l| (l.conv.len() + l.rec.len()) * 4).sum();
-        host + self.device.as_ref().map_or(0, |(b, _)| b.len())
+        host + self.device.as_ref().map_or(0, |(b, _)| b.len()) + self.qwen4.as_ref().map_or(0, qwen4::Q4Snapshot::bytes)
     }
 }
 
@@ -99,10 +101,14 @@ impl RustDecoder {
                 _ => None,
             }
         };
-        if host.is_none() && device.is_none() {
+        let qwen4 = match &self.qwen4 {
+            Some(model) => model.snapshot(first)?,
+            None => None,
+        };
+        if host.is_none() && device.is_none() && qwen4.is_none() {
             return Ok(None);
         }
-        Ok(Some(SequenceSnapshot { host: host.unwrap_or_default(), device }))
+        Ok(Some(SequenceSnapshot { host: host.unwrap_or_default(), device, qwen4 }))
     }
 
     /// Puts a snapshot back as the state of the sequence whose first KV block is `first` (creating the entry when needed).
@@ -135,6 +141,9 @@ impl RustDecoder {
                     (_, None) => *slot = None,
                 }
             }
+        }
+        if let Some(model) = &self.qwen4 {
+            model.restore(first, snapshot.qwen4.as_ref(), self.state_capacity)?;
         }
         if let Some((bytes, lens)) = &snapshot.device {
             let (Some(backend), Some(stream)) = (&self.backend, &self.backend_stream) else {
@@ -205,7 +214,7 @@ mod tests {
     #[test]
     fn sequence_snapshot_reports_tokens_and_bytes() {
         let layer = |tokens| Some(LayerStateSnapshot { tokens, conv: vec![0.0; 2], rec: vec![0.0; 6] });
-        let snap = SequenceSnapshot { host: vec![layer(5), None, layer(4)], device: Some((vec![0; 16], vec![7])) };
+        let snap = SequenceSnapshot { host: vec![layer(5), None, layer(4)], device: Some((vec![0; 16], vec![7])), qwen4: None };
         assert_eq!(snap.tokens(), Some(4));
         assert_eq!(snap.bytes(), 2 * 8 * 4 + 16);
         assert_eq!(SequenceSnapshot::default().tokens(), None);

@@ -23,7 +23,7 @@ exceeds its tolerance. Projections are compared with the 8-bit activations they 
 on 197 real tensors of Llama-3.2-3B Q4_K_M: 4e-7); attention and element-wise kernels at 1e-4.
 
 `--tiers` (a list of tier names or `all`) and `--full` add the ragged grid for every quantized
-format (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS, MXFP4, Q4Z and Q4ZP with groups of 32, 64
+format (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS, MXFP4, Q4Z and Q4ZP with groups of 32, 64
 and 128) and F32/F16/BF16: 1, 7, 15, 17, 33 and 50 rows, one to ten 256-value blocks (or
 1 to 25 groups) per row, prompts of 1, 4, 9, 17 and 33 tokens, and a saturation stress (every
 payload byte at 0x00, 0x7f, 0x80 or 0xff against activations that quantize to +127, -127 or
@@ -84,6 +84,8 @@ Order of preference, left to right; the last entry is the fallback.
 | Q4Z, Q4ZP (AWQ, GPTQ int4; groups of 32, 64, 128), decode and prompt | AVX-512 VNNI or BW (512-bit, 4 records per step); AVX-VNNI; AVX2 (256-bit, 2 records per step); 4 rows x 1 token for decode, 4 rows x 4 tokens for prompts; see "Q4Z" below | the generic f32 path (slow) |
 | Q2_K, Q3_K, IQ4_XS, decode | AVX-VNNI; AVX-512 VNNI (EVEX, 256-bit); AVX2 | `sdot`, 4 rows, groups decoded into registers (L0) |
 | IQ4_XS, prompt | as decode | unpacked group panels with `smmla` or `sdot` (L0) |
+| Q2_0 (GGML type 42), decode | AVX-VNNI, AVX-512 VNNI (256-bit vectors) or AVX2: a 64-value block is decoded into two 32-byte code vectors and meets two consecutive Q8_0 records; the code offset (`-1`) enters as the initial value of the dot; 4 rows | NEON: two 32-value groups per block, `sdot` (compiled for aarch64, not run) |
+| Q2_0, prompt (2+ tokens) | the W-panel path of the classic formats: a four-row panel is unpacked once (two records per block, codes minus one plus 128) and the AVX-512 / AVX-VNNI / AVX2 4x2 tile runs every token pair over it. No AVX-512 GEMM or AMX decoder | the NEON W-panel tile (compiled for aarch64, not run) |
 | IQ4_NL, MXFP4 | AVX2 codebook kernel | `tbl` codebook decode with `sdot` / `smmla` (L0) |
 | F32, F16, BF16 | AVX2 + FMA | NEON FMA, `bfdot` for BF16 with FEAT_BF16 (L0) |
 | Gated DeltaNet step | AVX2 | NEON, bit-identical to scalar (L0) |
@@ -407,6 +409,7 @@ run the old path.
 | AVX2-level projections and attention (AVX2, AVX-VNNI) | run on hardware by us; existing unit tests |
 | Prompt repacking: Q4_0/Q5_0 Q8_0 tiles, Q2_K..Q6_K decoded panels | AVX2 kernels run by us (unit tests against the f64 reference and the streaming kernels, rows of 1 to 11 blocks, 1 to 9 tokens; `selftest-cpu --tier avx2` with batches 1 to 64); the AVX-VNNI instances are compiled and share the code through macros, their unit tests skip unless AVX-VNNI is present; the AVX-512 tile calls are the Q8_0 ones |
 | NEON `sdot` and `smmla` paths (Q8_0, Q4_0..Q6_K) | compiled for aarch64-unknown-linux-gnu and run on hardware by us |
+| Q2_0 kernels (`cpu_quantized.rs`) | x86-64: unit tests against the scalar f64 reference at 1 to 11 blocks, 1 to 13 rows, 1 to 33 tokens and 1, 3 and 10 threads, the unpacked values against the format definition, fused expert pass bit for bit against the per-projection path, run on the build server and `selftest-cpu` (with `--full`) on a Windows PC; the AVX-VNNI and AVX-512 VNNI instances only on CPUs that have them. AArch64: compiled and clippy-clean for `aarch64-unknown-linux-gnu`, **not run on ARM hardware** |
 | NEON Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, float formats, DeltaNet step, SVE Q8_0 decode | compiled (check, clippy, codegen) for aarch64-unknown-linux-gnu; the layout and lane algebra is tested on x86 through scalar models; **not run on ARM hardware** (L0, see [cpu-arm.md](cpu-arm.md)) |
 | AVX-512 BW/VNNI kernels (Q8_0, classic, K panels, attention, `exp_shifted`), the `avx512` feature kernels (16-row VNNI GEMM, 512-bit codebook, Q2_K/Q3_K/IQ4_XS, float, BF16, DeltaNet), AMX tiles | **Real silicon**: AMD EPYC 9B45 (Zen 5, Colab): `selftest-cpu` 413 checks per tier, three models (avx512bw, avx512-vnni, avx512-bf16; no AMX there). **Emulated**: Intel SDE 9.58 executes the whole unit-test suite (`-spr`: 325 tests, including the AVX-512 and AMX ones, which skip themselves on other hardware), `selftest-cpu --tiers all` (`-spr`: 22 101 checks on the tiers avx2 to amx; `-icl`, `-skx`, `-adl` for their tiers; 0 failed) and runs two models end to end (Llama-3.2-3B Q4_K_M and Qwen2.5-3B AWQ on avx512bw and avx512-vnni); SDE is a functional emulator, so alignment, encoding and result bits are checked but speed is not. Intel silicon, AMX silicon and Zen 4 are untested |
 | bitsandbytes kernels (`cpu_bnb`): AVX2 + FMA and portable | run by us on an AMD EPYC 9255 VM (AVX2 + FMA, no AVX-512): unit tests against the f64 reference at 1 to 17 blocks per row, 1 to 13 rows, 1 to 17 tokens for all five types, `selftest-cpu` per tier, the whole decoder on a tiny model (`import_tests`); no aarch64 run, no AVX-512 specific kernel (AVX2 is used there) |
