@@ -104,10 +104,10 @@ Where the weight formats run natively ([docs/gpu-backends.md](docs/gpu-backends.
 
 | Device | Native kernels | Everything else |
 | --- | --- | --- |
-| CPU (x86-64, AArch64) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K ... Q6_K; on x86-64 also Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4; MLX affine `MLXA` (all widths and groups, f32 activations, AVX2 where present) | rows decoded on demand (functional, slow): the other IQ/TQ types, NVFP4, Q4Z/Q4ZP |
-| CUDA | all of the above, the IQ family, MXFP4, NVFP4 (FP4 tensor cores on Blackwell sm_12x, Marlin FP4 on other GPUs from Turing), AWQ/GPTQ `Q4Z`/`Q4ZP` through Marlin (Turing and newer, shapes in multiples of 128), block-wise FP8 `FP8B`, bitsandbytes, EXL2 / EXL3, MLX affine `MLXA` (own kernels on the packed words; the self tests pass on an RTX 2000 Ada and an L4, the formats of `linear` also on a T4) | expanded at upload |
+| CPU (x86-64, AArch64) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K ... Q6_K; on x86-64 also Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4; Q2_0 (GGML type 42, 2-bit codes; packed kernels on x86-64; the AArch64 kernel compiles and passes clippy but has not run); MLX affine `MLXA` (all widths and groups, f32 activations, AVX2 where present) | rows decoded on demand (functional, slow): the other IQ/TQ types, NVFP4, Q4Z/Q4ZP |
+| CUDA | all of the above, the IQ family, MXFP4, Q2_0 (kept 2-bit packed; written and compiled with nvcc and hipcc, never run on a GPU), NVFP4 (FP4 tensor cores on Blackwell sm_12x, Marlin FP4 on other GPUs from Turing), AWQ/GPTQ `Q4Z`/`Q4ZP` through Marlin (Turing and newer, shapes in multiples of 128), block-wise FP8 `FP8B`, bitsandbytes, EXL2 / EXL3, MLX affine `MLXA` (own kernels on the packed words; the self tests pass on an RTX 2000 Ada and an L4, the formats of `linear` also on a T4) | expanded at upload |
 | wgpu (Vulkan, Metal, DX12, OpenGL) | F32/F16/BF16, Q4_0 ... Q8_0, Q4_K, Q5_K, Q6_K; decoded in the shaders: block-wise FP8 `FP8B` / `FP8M`, bitsandbytes, MLX affine, EXL2, EXL3 (the self tests pass on software Vulkan and OpenGL against the CPU; not tried on a GPU) | expanded to F32 at upload |
-| Vulkan (native) | the planar formats of [docs/gpu-backends.md](docs/gpu-backends.md), plus MLX affine `MLXA` (2 to 8 bits, every group), block-wise FP8 `FP8B` / `FP8M`, bitsandbytes `NF4B64/128` `FP4B64/128` `INT8R`, EXL2 and EXL3 (the self test of every shader passes on a Radeon 840M (Mesa RADV) and on an RTX 2000 Ada (NVIDIA driver); escape hatch `FLLM_VULKAN_NO_EXT_FORMATS=1`) | expanded at upload (shapes without a kernel included) |
+| Vulkan (native) | the planar formats of [docs/gpu-backends.md](docs/gpu-backends.md) (Q2_0 included, kept 2-bit packed: matvec, matrix and expert kernels pass `selftest-gpu --quants q2_0` on an Intel Iris Xe), plus MLX affine `MLXA` (2 to 8 bits, every group), block-wise FP8 `FP8B` / `FP8M`, bitsandbytes `NF4B64/128` `FP4B64/128` `INT8R`, EXL2 and EXL3 (the self test of every shader passes on a Radeon 840M (Mesa RADV) and on an RTX 2000 Ada (NVIDIA driver); escape hatch `FLLM_VULKAN_NO_EXT_FORMATS=1`) | expanded at upload (shapes without a kernel included) |
 | Metal (native) | the formats of the table in [docs/gpu-backends.md](docs/gpu-backends.md), MLX affine `MLXA`, block-wise FP8 `FP8B` (all tile shapes), bitsandbytes `NF4B64/128` `FP4B64/128` `INT8R`, EXL2 (kernels written, checked as C++ on the CPU, awaiting the Apple-silicon run; escape hatches `FLLM_METAL_NO_MLX` / `_NO_FP8B` / `_NO_BNB` / `_NO_EXL`) | expanded at upload (EXL3 and EXL2 with groups that are not a multiple of 8 inputs included) |
 
 ### Architectures
@@ -117,7 +117,7 @@ GLM, InternLM, Nemotron and more), mixture-of-experts (Mixtral, Qwen MoE, DeepSe
 with multi-head latent attention, gpt-oss, Llama 4, DBRX, PhiMoE and more), and recurrent or hybrid
 models (Mamba 1/2, Qwen3-Next, Qwen3.5/3.6 with gated DeltaNet in HF and llama.cpp GGUF layouts,
 Nemotron-H, Granite hybrid, LFM2, Kimi-Linear). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
-packed Hugging Face checkpoints), DeepSeek-V4 (hyper-connections, compressed attention and its per-sequence state on CUDA, HIP and Vulkan devices; the routers of its mixture-of-experts layers run on the host) and GLM-5-Next (hyper-connections; CPU), Hy4 (hyper-connections, latent attention and indexer on CUDA, HIP and Vulkan; feed-forward on the host), LongCat-Flash, Inkling and MiniMax-M3 (CUDA, HIP and Vulkan devices; experts of Inkling and, on HIP and Vulkan, of LongCat-Flash routed on the host), Ling-3.0 (Kimi delta layers with direct gates plus rotary latent attention), Qwen3.8-Flash-Next (residual streams, n-gram embeddings and a token indexer; CPU, and completely on CUDA, HIP and Vulkan devices), DeepSeek-V3.2 and GLM-5 (with the sparse lightning indexer, exact at any context length; on CUDA, HIP and Vulkan devices the
+packed Hugging Face checkpoints), DeepSeek-V4 (hyper-connections, compressed attention and its per-sequence state on CUDA, HIP and Vulkan devices; the routers of its mixture-of-experts layers run on the host) and GLM-5-Next (hyper-connections; CPU), Hy4 (hyper-connections, latent attention and indexer on CUDA, HIP and Vulkan; feed-forward on the host), LongCat-Flash, Inkling and MiniMax-M3 (CUDA, HIP and Vulkan devices; experts of Inkling and, on HIP and Vulkan, of LongCat-Flash routed on the host), Ling-3.0 (Kimi delta layers with direct gates plus rotary latent attention), Qwen3.8-Flash-Next (residual streams, n-gram embeddings and a token indexer; fLLM's own GGUF and llama.cpp's `qwen4exp` layout, split files included; CPU, and with the silu delta gate of the tiny test models completely on CUDA, HIP and Vulkan devices; the released model gates with sigmoid and runs on the host until the device kernels learn that), DeepSeek-V3.2 and GLM-5 (with the sparse lightning indexer, exact at any context length; on CUDA, HIP and Vulkan devices the
 indexer, its top-k selection and the sparse attention run on the device, see [docs/architectures.md](docs/architectures.md)), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear. BERT, RoBERTa/XLM-R and ModernBERT serve
 Nemotron-H, Granite hybrid, LFM2, Kimi-Linear, RWKV-6 and RWKV-7 on the CPU). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
 packed Hugging Face checkpoints), DeepSeek-V3.2 and GLM-5 (the lightning indexer and the sparse attention run on the device), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear; the per-head attention gate (Laguna, Step-3.5), the MiMo value scale and the BitNet sub-norms run on CUDA, HIP (not MiMo) and Vulkan devices. BERT, RoBERTa/XLM-R and ModernBERT serve
@@ -238,7 +238,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   Studio footer show hit ratio and bytes read per token. Run with OLMoE-1B-7B (4.2 GB) under 1 to 6 GiB limits on Linux and with a 1 GiB
   budget on Windows; the pinned hot set on the GPU is not done ([docs/moe-streaming.md](docs/moe-streaming.md)).
 - **Scheduling.** Continuous batching, chunked prefill, prefix cache (hybrid and state-space models
-  switch off prefix sharing and speculation), beam search (`use_beam_search`, CPU backend), `--multi-step N`
+  switch off prefix sharing), beam search (`use_beam_search`, CPU backend), `--multi-step N`
   (several decode rounds per scheduler round, off by default and CPU only until it is verified elsewhere) and
   jump-forward decoding for grammar-constrained requests (text identical to token-by-token decoding; large gains
   only with compact JSON schemas). Optional: prompt blocks saved on disk (`FLLM_KV_DISK_DIR`) and an output cache
@@ -246,8 +246,10 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 - **Speculative decoding.** `--speculative off|ngram|suffix|draft|mtp`: conversation lookup (`suffix`, on by default on
   the CPU and on Vulkan/DirectX; on CUDA, HIP and Metal it stays off until its kernels have been checked on hardware),
   prompt lookup, a draft model of your own (`--speculative-model`, browse for it in the load dialog) and the
-  multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only); greedy requests only,
-  and not for models with a recurrent state (Qwen3.5, Mamba).
+  multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only). Models with a recurrent
+  state (Qwen3.5, Mamba, RWKV) speculate too with lookup or a draft model, by copying the state before each verification
+  pass and putting it back after a rejection (checked with small random models on the CPU, not with real checkpoints or a
+  graphics card; not on by default there, `--speculative suffix` turns it on).
 
 ### Tools and clients
 

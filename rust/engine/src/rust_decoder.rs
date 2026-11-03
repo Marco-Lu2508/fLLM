@@ -2357,8 +2357,12 @@ impl RustDecoder {
             embedding,
             layers,
             head,
-            final_norm: load_norm(mapping, &final_norm_name, hidden)?
-                .ok_or("missing output_norm.weight")?,
+            final_norm: match load_norm(mapping, &final_norm_name, hidden)? {
+                Some(norm) => norm,
+                // Qwen3.8-Flash-Next has no output norm (its last hyper-connection mixer is one); llama.cpp files omit the tensor
+                None if cfg.qwen4.is_some() => Norm { weight: vec![1.0; hidden], bias: None },
+                None => return Err("missing output_norm.weight".into()),
+            },
             ple: gemma::load_global(model, &cfg)?,
             altup: gemma::load_altup(model, &cfg)?,
             rope: model.rope_shared(),
@@ -6332,6 +6336,7 @@ impl RustDecoder {
             v_dim: dc.v_dim,
             conv_kernel: dc.conv_kernel,
             tiled_heads: self.cfg.arch.starts_with("qwen35"),
+            sigmoid_gate: dc.sigmoid_gate,
             beta_scale: dc.beta_scale,
             eps: dc.norm_eps.unwrap_or(self.cfg.eps),
         })
@@ -6472,6 +6477,7 @@ impl RustDecoder {
             beta_scale: shape.beta_scale,
             eps: shape.eps,
             tiled_heads: shape.tiled_heads,
+            sigmoid_gate: shape.sigmoid_gate,
             conv: &d.conv,
             dt_bias: &d.dt_bias,
             decay: &d.decay,
@@ -6621,6 +6627,7 @@ impl RustDecoder {
             // HF checkpoints (and fLLM's converter) group the value heads by key head; llama.cpp's
             // Qwen3.5 files store them tiled (value head j belongs to key head j % key heads)
             tiled_heads: cfg.arch.starts_with("qwen35"),
+            sigmoid_gate: dc.sigmoid_gate,
             conv: &d.conv,
             dt_bias: &d.dt_bias,
             decay: &d.decay,

@@ -611,6 +611,43 @@ impl MappedGguf {
             extra_mappings,
         })
     }
+    /// A tensor-name view with extra names for row ranges of two-dimensional tensors. Entries are
+    /// `(alias, existing_name, first_row, rows)` where a row is one output of the matrix (the
+    /// fast-moving dimension holds the input width). Quantized blocks never straddle rows, so a row
+    /// range is a plain byte range of the source and shares its mapping; this is how one fused weight
+    /// (`[a | b]` stacked along the rows) is read as the two weights it was made from.
+    pub fn with_row_slices(&self, slices: &[(String, String, usize, usize)]) -> Result<Self, String> {
+        let mut index = self.index.clone();
+        let mut extra_mappings = self.extra_mappings.clone();
+        let mut names: HashSet<_> = index.tensors.iter().map(|t| t.name.clone()).collect();
+        for (alias, source, first, rows) in slices {
+            if !names.insert(alias.clone()) {
+                return Err(format!("duplicate GGUF tensor alias {alias}"));
+            }
+            let mut info = self
+                .index
+                .tensors
+                .iter()
+                .find(|t| &t.name == source)
+                .cloned()
+                .ok_or_else(|| format!("missing GGUF alias source {source}"))?;
+            let [cols, total] = info.dimensions[..] else {
+                return Err(format!("tensor {source} is not a matrix"));
+            };
+            let (first, rows) = (*first as u64, *rows as u64);
+            if rows == 0 || first.checked_add(rows).is_none_or(|end| end > total) || info.payload_len % total != 0 {
+                return Err(format!("rows {first}..{} are outside tensor {source} ({total} rows)", first.saturating_add(rows)));
+            }
+            let row_bytes = info.payload_len / total;
+            info.name.clone_from(alias);
+            info.dimensions = vec![cols, rows];
+            info.data_offset += first * row_bytes;
+            info.payload_len = rows * row_bytes;
+            index.tensors.push(info);
+            extra_mappings.insert(alias.clone(), Arc::clone(self.extra_mappings.get(source).unwrap_or(&self.mapping)));
+        }
+        Ok(Self { mapping: Arc::clone(&self.mapping), index, extra_mappings })
+    }
     /// The same file with metadata key `key` set to `value` when the file does not carry it (a default for keys that
     /// files of another writer leave out).
     pub fn with_metadata_default(&self, key: &str, value: Value) -> Self {
@@ -1010,6 +1047,42 @@ mod tests {
         let mut truncated = bytes.clone();
         truncated.pop();
         assert!(parse(&truncated).unwrap_err().contains("payload range"));
+    }
+
+    #[test]
+    fn row_slices_are_byte_ranges_of_the_source() {
+        // an f32 matrix of 3 columns and 5 rows, row r holding the values r * 10 + c
+        let mut bytes = b"GGUF".to_vec();
+        put_u32(&mut bytes, 3);
+        put_u64(&mut bytes, 1);
+        put_u64(&mut bytes, 0);
+        put_str(&mut bytes, "fused.weight");
+        put_u32(&mut bytes, 2);
+        put_u64(&mut bytes, 3);
+        put_u64(&mut bytes, 5);
+        put_u32(&mut bytes, 0);
+        put_u64(&mut bytes, 0);
+        bytes.resize((bytes.len() + 31) & !31, 0);
+        for r in 0..5 {
+            for c in 0..3 {
+                bytes.extend_from_slice(&((r * 10 + c) as f32).to_le_bytes());
+            }
+        }
+        let parsed = parse(&bytes).unwrap();
+        let mut anonymous = MmapOptions::new().len(bytes.len()).map_anon().unwrap();
+        anonymous.copy_from_slice(&bytes);
+        let mapped = MappedGguf { mapping: Arc::new(anonymous.make_read_only().unwrap()), index: parsed, extra_mappings: HashMap::new() };
+        let view = mapped
+            .with_row_slices(&[("a.weight".into(), "fused.weight".into(), 0, 2), ("b.weight".into(), "fused.weight".into(), 2, 3)])
+            .unwrap();
+        let floats = |name: &str| -> Vec<f32> { view.tensor_bytes(name).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect() };
+        assert_eq!(floats("a.weight"), [0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
+        assert_eq!(floats("b.weight"), [20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0]);
+        let b = view.index().tensors.iter().find(|t| t.name == "b.weight").unwrap();
+        assert_eq!((b.dimensions.clone(), b.payload_len), (vec![3, 3], 36));
+        assert!(mapped.with_row_slices(&[("c".into(), "fused.weight".into(), 3, 3)]).is_err(), "past the last row");
+        assert!(mapped.with_row_slices(&[("c".into(), "fused.weight".into(), 0, 0)]).is_err(), "no rows");
+        assert!(view.with_row_slices(&[("a.weight".into(), "fused.weight".into(), 0, 1)]).is_err(), "name taken");
     }
 
     #[test]

@@ -20,9 +20,39 @@ Other flags: `--num-speculative-tokens N` (1 to 32, the largest number of draft 
 (n-gram index window). `FLLM_SPEC_ADAPTIVE=0` switches the adaptive draft length off (default on: every sequence shrinks and grows
 its draft length between 1 and the configured maximum from its recent acceptance rate).
 
-Draft and suffix speculation (and MTP) are refused for stateful models (Qwen3.5 / Qwen3-Next DeltaNet, Mamba, Nemotron-H, LFM2):
-verifying rejected draft tokens would advance the recurrent state past the accepted prefix, and the state snapshot/rollback that
-would fix this is not implemented. The n-gram source was already off for them.
+## Models with recurrent layers
+
+Prompt lookup (`ngram`), conversation lookup (`suffix`) and a draft model work with models that keep a recurrent state besides (or
+instead of) a KV cache: Gated DeltaNet (Qwen3.5, Qwen3-Next, Qwen3.8-Flash-Next), Mamba 1 and 2 (also inside Jamba, Falcon-H1,
+Nemotron-H, Granite-hybrid), Zamba2, LFM2 short convolutions, Kimi Delta Attention and RWKV 6 / 7. A rejected draft token has already
+been folded into such a state, and unlike a KV cache it cannot be cut back to a shorter length. So the engine copies the state of the
+sequence before every verification pass (`RustDecoder::snapshot_state`); when draft tokens are rejected it puts the copy back
+(`restore_state`) and runs the verified token and the accepted draft tokens through the layers once more. The sequence ends up exactly
+where plain decoding would have it. A pass whose draft is accepted completely needs no restore. For Qwen3.8-Flash-Next the copy also
+holds the n-gram ids and convolution histories and the token-indexer keys, which live next to the layer states.
+
+The alternative, a checkpoint of the state after every token of the verification pass, would avoid the second run, but it needs a
+state copy per draft token inside every kernel of every backend. The copy before the pass costs one state-sized copy per verified
+sequence and per pass plus a short second run only after a rejection. It is the same code for every layer kind and every device.
+
+A draft model with recurrent layers keeps its own copy of the state taken before its draft tokens and goes back to it, or starts over
+when the history changed earlier.
+
+What this costs: one state copy per verification pass, on the processor a memory copy, on a graphics card a download of the state
+buffer with a synchronisation. For a big hybrid model the state is tens of megabytes, so lookup speculation can be slower than plain
+decoding when the drafts are rarely right. Because that has not been measured on real models, conversation lookup stays **off by
+default** for models with recurrent layers (`--speculative suffix` turns it on), and the Studio offers all choices except
+multi-token prediction.
+
+Not available for these models: **multi-token prediction** (`mtp`), whose heads are only implemented for DeepSeek and GLM
+checkpoints, and `n > 1` / forked sequences.
+
+What has been run: greedy output with scripted drafts that are wrong at different positions is token-for-token the output of plain
+decoding on small random models of Gated DeltaNet + attention (the Qwen3.5 layout), RWKV 6, RWKV 7, Mamba 2 + attention (Falcon-H1),
+Mamba 1 + MoE (Jamba) and Zamba2, on the processor; and with a draft model that is a Qwen3.5-layout model itself
+(`rust/engine/src/spec_state_tests.rs`). Not run: any real checkpoint, a graphics card (the device state buffers are copied by the same
+call, but only the RWKV copy has a test, on the CPU backend standing in for a device), Kimi Delta Attention, DeepSeek-V4, Inkling,
+MiniMax-M3 and a whole-model Qwen3.8-Flash-Next (the copy of its extra state is tested on its own).
 
 ## Exactness
 
@@ -118,6 +148,6 @@ cover.
 ## Not implemented
 
 EAGLE, EAGLE-3 and Medusa heads, tree verification of the draft (the verification, `speculative::verify_tree`, is implemented and
-tested, but the decoder has no tree attention mask), recurrent-state snapshots for hybrid models (so no speculation and no `n > 1` for them),
+tested, but the decoder has no tree attention mask), `n > 1` for models with recurrent layers,
 the stateful prefix cache, prompt log-probabilities / `echo` log-probabilities, host-memory prefix-cache tiers.
 See [changes/spec.md](changes/spec.md) for the full list.

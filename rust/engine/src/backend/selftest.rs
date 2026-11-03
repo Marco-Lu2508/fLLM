@@ -106,7 +106,7 @@ const QUANT_GROUPS: &[&str] = &["linear", "embedding", "moe", "host"];
 
 /// Weight formats the self test knows (GGUF type ids; `format_name` gives the names).
 const KINDS: &[u32] = &[
-    0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
+    0, 1, 30, 2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 29, 20, 23, 39, 42, 40, 0x8000_0010, 0x8000_0011, 0x8000_0012, 0x8000_0014,
     0x8000_0015, 0x8000_0016, 0x8000_0020, 0x8000_0021, 0x8000_0030, 0x8000_0031, fllm_gguf_probe::bnb::NF4_B64, fllm_gguf_probe::bnb::NF4_B128,
     fllm_gguf_probe::bnb::FP4_B64, fllm_gguf_probe::bnb::FP4_B128, fllm_gguf_probe::bnb::INT8_ROW,
 ];
@@ -1331,7 +1331,7 @@ impl<'a> Tester<'a> {
     fn fast_linear_cases(&mut self) {
         // widths that are multiples of 256 take the aligned device layouts; batches select the single-token,
         // integer dot-product, small-tile and (auto-tuned) large-tile kernels
-        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 23, 39, 10, 11, 16, 17, 18, 19, 21, 22, 29]) {
+        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 23, 39, 42, 10, 11, 16, 17, 18, 19, 21, 22, 29]) {
             for batch in [1usize, 2, 3, 4, 5, 8, 16, 40, 129, 356] {
                 let with_bias = batch == 3 || batch == 129;
                 let r = self.linear(kind, 259, 1024, batch, with_bias).map(|mut o| {
@@ -1534,7 +1534,7 @@ impl<'a> Tester<'a> {
             }
         }
         // 32-value formats at a width that is no multiple of 256 (2880 = 90 blocks, like gpt-oss): padded device layout
-        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 20, 39]) {
+        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 20, 39, 42]) {
             for batch in [1usize, 3, 5, 40, 356] {
                 let r = self.linear(kind, 131, 2880, batch, batch == 3).map(|mut o| {
                     o.tol = o.tol.max(Self::FAST_TOL);
@@ -1859,7 +1859,7 @@ impl<'a> Tester<'a> {
             let r = self.moe_topk(3, 64, 8, normalize);
             self.record("moe top-k", &format!("3 rows 64 experts k8{}", if normalize { " norm" } else { "" }), r);
         }
-        for kind in self.kinds(&[12u32, 13, 14, 2, 8, 20, 39]) {
+        for kind in self.kinds(&[12u32, 13, 14, 2, 8, 20, 39, 42]) {
             let r = self.moe_linear(kind, 130, 512, 6, 3, kind == 39 || kind == 12);
             self.record(
                 &format!("moe linear {}", format_name(kind)),
@@ -2071,6 +2071,7 @@ impl<'a> Tester<'a> {
                 v_dim: hv,
                 conv_kernel: 4,
                 tiled_heads: tiled,
+                sigmoid_gate: false,
                 beta_scale: 1.0,
                 eps: 1e-6,
             };
@@ -2239,6 +2240,7 @@ impl<'a> Tester<'a> {
             beta_scale: shape.beta_scale,
             eps: shape.eps,
             tiled_heads: shape.tiled_heads,
+            sigmoid_gate: shape.sigmoid_gate,
             conv: &conv,
             dt_bias: &dt_bias,
             decay: &decay,
@@ -2401,10 +2403,11 @@ impl<'a> Tester<'a> {
         // Projections: every native format, two converted at upload (Q2_K, IQ4_NL); 13 rows,
         // batches 1/2/5 (the kernel tiles four batch rows), odd column counts for floats and
         // odd block counts for quants, a bias, and more output rows than one grid dimension.
-        for kind in self.kinds(&[0u32, 1, 30, 2, 3, 6, 7, 8, 12, 13, 14, 10, 11, 16, 17, 18, 19, 21, 22, 29, 20, 39, BNB[0], BNB[1], BNB[2], BNB[3], BNB[4]]) {
+        for kind in self.kinds(&[0u32, 1, 30, 2, 3, 6, 7, 8, 12, 13, 14, 10, 11, 16, 17, 18, 19, 21, 22, 29, 20, 39, 42, BNB[0], BNB[1], BNB[2], BNB[3], BNB[4]]) {
             let block = match kind {
                 0 | 1 | 30 => 1,
                 10..=14 | 16..=19 | 21 | 22 | 29 => 256,
+                42 => 64,
                 k if fllm_gguf_probe::bnb::is_bnb(k) => fllm_gguf_probe::bnb::layout(k).map_or(64, |l| l.block),
                 _ => 32,
             };
@@ -2423,7 +2426,7 @@ impl<'a> Tester<'a> {
         }
         // Rows whose width is a multiple of 256 use the aligned device layouts of the legacy and Q8_0 formats
         // (and the tensor-core / int8 paths when they are not disabled by the exact-math switch).
-        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 39]) {
+        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42]) {
             for batch in [1, 2, 5] {
                 let r = self.linear(kind, 13, 768, batch, batch == 5);
                 self.record(
@@ -2508,6 +2511,7 @@ impl<'a> Tester<'a> {
             (12, 256),
             (14, 256),
             (20, 96),
+            (42, 128),
         ] {
             if !self.filter.wants_kind(kind) {
                 continue;
@@ -2831,7 +2835,7 @@ impl<'a> Tester<'a> {
         // the error scale; the CPU backend is still held to the exact tolerance.
         let supported = self.device.capabilities().supports_quant(QuantType::from_gguf_type_id(kind));
         let converted = !supported
-            && ((cols.is_multiple_of(256) && !matches!(kind, 20 | 23 | 39)) // 20, 23, 39 run natively through the shared 16-entry grid kernels
+            && ((cols.is_multiple_of(256) && !matches!(kind, 20 | 23 | 39 | 42)) // 20, 23, 39 run natively through the shared 16-entry grid kernels
                 || fllm_gguf_probe::bnb::is_bnb(kind)) // expanded to 16-bit values on upload by backends without a decoder
             && self.device.name() != "CPU";
         // block-wise FP8 on a device without a kernel for it is expanded to binary16 at upload: the weights are rounded (2^-11 relative)

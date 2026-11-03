@@ -482,6 +482,7 @@ static int moe_tc_kind(cudaStream_t s, uint32_t kind, const MoeGemmArgs &a) {
         case KIND_Q5_K: return moe_tc_run<KIND_Q5_K, BN, GLU>(s, a);
         case KIND_Q6_K: return moe_tc_run<KIND_Q6_K, BN, GLU>(s, a);
         case KIND_Q2_K: return moe_tc_run<KIND_Q2_K, BN, GLU>(s, a);
+        case KIND_Q2_0: return moe_tc_run<KIND_Q2_0, BN, GLU>(s, a);
         case KIND_Q3_K: return moe_tc_run<KIND_Q3_K, BN, GLU>(s, a);
         case KIND_IQ2_XXS: return moe_tc_run<KIND_IQ2_XXS, BN, GLU>(s, a);
         case KIND_IQ2_XS: return moe_tc_run<KIND_IQ2_XS, BN, GLU>(s, a);
@@ -504,7 +505,7 @@ int fllm_moe_grouped_supported(uint32_t kind, int cols, int block) {
         case KIND_F16: case KIND_BF16: case KIND_Q4_0: case KIND_Q4_1: case KIND_Q5_0: case KIND_Q5_1: case KIND_Q8_0:
         case KIND_IQ4_NL: case KIND_MXFP4: case KIND_Q4_K: case KIND_Q5_K: case KIND_Q6_K:
         case KIND_Q2_K: case KIND_Q3_K: case KIND_IQ2_XXS: case KIND_IQ2_XS: case KIND_IQ3_XXS: case KIND_IQ1_S:
-        case KIND_IQ3_S: case KIND_IQ2_S: case KIND_IQ1_M: case KIND_NVFP4:
+        case KIND_IQ3_S: case KIND_IQ2_S: case KIND_IQ1_M: case KIND_NVFP4: case KIND_Q2_0:
         case KIND_Q4Z32: case KIND_Q4Z64: case KIND_Q4Z128:
         case KIND_FP8B: break;  // 128 x 128 tiles; FP8M (row scales behind the codes, or the W8A8 / Marlin layouts) has no grouped kernel
         default: return 0;

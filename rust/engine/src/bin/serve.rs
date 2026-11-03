@@ -1364,14 +1364,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     device_free >> 20
                 );
                 let plan_for = |m: &GgufModel, tokens: usize| {
-                    fllm_engine::backend::memory::MemoryPlan::plan_for_backend(
+                    fllm_engine::backend::memory::MemoryPlan::plan_for_device(
                         m,
                         device_free.saturating_sub(draft_reserve),
                         d.total_memory_bytes,
                         gpu_memory_utilization,
                         Some(&gpu_layers),
                         tokens,
-                        selected_backend == "cuda",
+                        &selected_backend,
                     )
                 };
                 let mut planned = plan_for(&model, max_batched_tokens);
@@ -1578,7 +1578,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Conversation lookup is on unless the user chose something else: it costs nothing when it finds no match and about doubles the speed on
     // text that repeats (code edits, summaries, quotes, agent loops), with the same text as without. Only where it has been run: the
     // processor and the Vulkan / DirectX chips (the CUDA, HIP and Metal verification kernels have not been run on hardware yet), and not
-    // for models with a recurrent state. `--speculative off` or FLLM_SPECULATIVE_DEFAULT=off keeps it away.
+    // by default for models with a recurrent state: they can speculate when asked (`--speculative suffix|ngram|draft`, the state is copied
+    // before each verification pass and put back after a rejection), but that copy costs time that has not been measured on real models.
+    // `--speculative off` or FLLM_SPECULATIVE_DEFAULT=off keeps it away.
     if speculative_method.is_none()
         && speculative_lookup == 0
         && !speculative_mtp
@@ -1602,14 +1604,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if device != "cpu" && multi_devices.is_none() {
         let target_dev = plan_device.as_ref();
         if let Some(d) = target_dev {
-            if let Ok(plan) = fllm_engine::backend::memory::MemoryPlan::plan_for_backend(
+            if let Ok(plan) = fllm_engine::backend::memory::MemoryPlan::plan_for_device(
                 &runtime.model,
                 d.free_memory_bytes,
                 d.total_memory_bytes,
                 gpu_memory_utilization,
                 Some(&gpu_layers),
                 max_batched_tokens,
-                selected_backend == "cuda",
+                &selected_backend,
             ) {
                 #[cfg(feature = "cuda")]
                 if selected_backend == "cuda" {

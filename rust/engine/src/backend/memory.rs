@@ -32,17 +32,30 @@ pub struct MemoryPlan {
 /// Bytes the weights of a model occupy on a device of `backend`: the stored sizes, except that block-wise and per-row FP8 tensors are expanded
 /// to F16 on the HIP backend (it has no FP8 kernel yet), which doubles them.
 pub fn device_weight_bytes(tensors: &[fllm_gguf_probe::TensorInfo], backend: &str) -> u64 {
-    tensors
-        .iter()
-        .map(|t| {
-            let expanded = backend == "hip" && (fllm_gguf_probe::fp8b_type(t.type_id) || fllm_gguf_probe::fp8m_type(t.type_id));
-            if expanded {
-                t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0).saturating_mul(2)
-            } else {
-                tensor_bytes(t)
-            }
-        })
-        .sum()
+    tensors.iter().map(|t| device_tensor_bytes(t, backend)).sum()
+}
+
+/// GGML types the Vulkan shaders have no decoder for: the IQ1 / IQ2 / IQ3 families, Q8_1 / Q8_K and the ternary and 1-bit formats (Q2_0 has
+/// shaders).
+/// Their tensors are dequantized on the host and uploaded again (see `upload.rs` of the Vulkan backend), so they take more room on the
+/// device than in the file. Drop a type from this list when a shader reads it natively.
+fn vulkan_expands(type_id: u32) -> bool {
+    matches!(type_id, 9 | 15 | 16..=19 | 21 | 22 | 29 | 34 | 35 | 41)
+}
+
+/// Bytes one tensor occupies on the device of `backend` ("vulkan", "cuda", ...): the stored size, unless the backend expands the format at
+/// upload. A Vulkan tensor of a format without a shader is re-quantized to Q5_K when its rows are whole 256-value blocks (176 bytes per block)
+/// and stored as binary16 otherwise, so a 3-bit expert tensor takes 5.5 bits per weight there, and a 2-bit one with 640-value rows 16 bits.
+pub fn device_tensor_bytes(t: &fllm_gguf_probe::TensorInfo, backend: &str) -> u64 {
+    if backend == "hip" && (fllm_gguf_probe::fp8b_type(t.type_id) || fllm_gguf_probe::fp8m_type(t.type_id)) {
+        return t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0).saturating_mul(2);
+    }
+    if backend == "vulkan" && vulkan_expands(t.type_id) {
+        let elems = t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0);
+        let cols = t.dimensions.first().copied().unwrap_or(0);
+        return if cols > 0 && cols % 256 == 0 { elems / 256 * 176 } else { elems.saturating_mul(2) };
+    }
+    tensor_bytes(t)
 }
 
 pub fn tensor_bytes(t: &fllm_gguf_probe::TensorInfo) -> u64 {
@@ -92,6 +105,23 @@ impl MemoryPlan {
         max_tokens: usize,
         marlin_q4k_allowed: bool,
     ) -> Result<Self, String> {
+        Self::plan_for_device(model, free_vram, total_vram, utilization, gpu_layers_arg, max_tokens, if marlin_q4k_allowed { "cuda" } else { "" })
+    }
+
+    /// `plan_for_backend` for a named backend ("cuda", "vulkan", ...): the weights count with the size they take on that device after the
+    /// upload step (`device_tensor_bytes`), so a model whose formats the backend has to expand is planned with the expanded sizes and the
+    /// layers that do not fit keep their feed-forward weights in host memory (memory-mapped, through the expert cache) instead of
+    /// running the device out of memory halfway through the upload.
+    pub fn plan_for_device(
+        model: &GgufModel,
+        free_vram: u64,
+        total_vram: u64,
+        utilization: f64,
+        gpu_layers_arg: Option<&str>,
+        max_tokens: usize,
+        backend: &str,
+    ) -> Result<Self, String> {
+        let marlin_q4k_allowed = backend == "cuda";
         let util = utilization.clamp(0.01, 1.0);
         let budget_bytes = ((free_vram as f64) * util) as u64;
 
@@ -103,7 +133,7 @@ impl MemoryPlan {
         let (mut layer_attn, mut layer_ffn, mut total_model_bytes, mut head_bytes) = (0u64, 0u64, 0u64, 0u64);
         let mut tied_head = 0u64;
         for t in &model.mapping().index().tensors {
-            let bytes = tensor_bytes(t);
+            let bytes = device_tensor_bytes(t, backend);
             total_model_bytes += bytes;
             if t.name.starts_with("blk.") {
                 if t.name.contains(".ffn_") {
@@ -610,5 +640,31 @@ mod tests {
         // more devices than layers
         let many: Vec<_> = (0..9).map(|i| device(&format!("d{i}"), 2.0, 100.0)).collect();
         assert!(plan_pipeline(&model, &many, 512).unwrap_err().contains("every device needs at least one layer"));
+    }
+
+    #[test]
+    fn vulkan_counts_expanded_formats_with_their_device_size() {
+        let tensor = |type_id: u32, dimensions: &[u64]| fllm_gguf_probe::TensorInfo {
+            name: "blk.0.ffn_up_exps.weight".into(),
+            dimensions: dimensions.to_vec(),
+            type_id,
+            data_offset: 0,
+            payload_len: 0,
+        };
+        // IQ3_XXS with 256-wide blocks: 98 bytes per block in the file, a Q5_K block of 176 bytes on Vulkan
+        let iq3 = tensor(18, &[2560, 640, 512]);
+        assert_eq!(tensor_bytes(&iq3), 2560 * 640 * 512 / 256 * 98);
+        assert_eq!(device_tensor_bytes(&iq3, "vulkan"), 2560 * 640 * 512 / 256 * 176);
+        // rows that are not whole 256-value blocks are stored as binary16
+        let iq2_xs = tensor(17, &[640, 2560, 512]);
+        assert_eq!(device_tensor_bytes(&iq2_xs, "vulkan"), 640 * 2560 * 512 * 2);
+        // Q2_0 has Vulkan shaders: the stored size (18 bytes per 64 values)
+        let q2_0 = tensor(42, &[640, 2560, 512]);
+        assert_eq!(device_tensor_bytes(&q2_0, "vulkan"), 640 * 2560 * 512 / 64 * 18);
+        // formats with a kernel, and every format on a backend that reads it, keep the stored size
+        let q4k = tensor(12, &[2560, 640, 512]);
+        assert_eq!(device_tensor_bytes(&q4k, "vulkan"), tensor_bytes(&q4k));
+        assert_eq!(device_tensor_bytes(&iq3, "cuda"), tensor_bytes(&iq3));
+        assert_eq!(device_weight_bytes(&[iq3.clone(), q4k.clone()], "vulkan"), device_tensor_bytes(&iq3, "vulkan") + tensor_bytes(&q4k));
     }
 }

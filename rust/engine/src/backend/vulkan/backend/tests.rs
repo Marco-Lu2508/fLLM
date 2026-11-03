@@ -247,6 +247,7 @@ fn all_op_plans() -> Vec<OpPlan> {
         QuantType::Q6_K,
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
+        QuantType::Q2_0,
     ] {
         plans.push(
             plan_embedding(
@@ -424,6 +425,7 @@ fn all_op_plans() -> Vec<OpPlan> {
         QuantType::Q6_K,
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
+        QuantType::Q2_0,
     ] {
         for has_bias in [false, true] {
             let call = MoeLinear {
@@ -457,6 +459,7 @@ fn all_op_plans() -> Vec<OpPlan> {
             v_dim: 64,
             conv_kernel: 4,
             tiled_heads: false,
+            sigmoid_gate: false,
             beta_scale: 1.0,
             eps: 1e-6,
         };
