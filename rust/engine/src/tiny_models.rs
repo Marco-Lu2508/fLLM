@@ -55,11 +55,21 @@ pub(crate) enum Arch {
     Rwkv7,
     /// RWKV-6: 4 heads of 64 channels, mixing adapters of rank 16
     Rwkv6,
+    /// Qwen3.8-Flash-Next: three gated DeltaNet layers (the third with the hashed n-gram embedding) and one attention layer with the token
+    /// indexer, two residual streams, a gated MoE in every layer
+    Qwen4,
 }
 
 // RWKV fixtures: head size and the rank of the low-rank adapters
 const RWKV_HEAD: usize = 64;
 const RWKV_RANK: usize = 16;
+
+// Qwen3.8-Flash-Next fixture
+const Q4_LAYERS: usize = 4;
+const Q4_HC: usize = 2;
+const Q4_PLE_EMBED: usize = 64;
+const Q4_IX_HEADS: usize = 2;
+const Q4_IX_DIM: usize = 32;
 
 // Gated DeltaNet geometry of the Qwen35 fixture
 const LIN_K_HEADS: usize = 2;
@@ -114,33 +124,38 @@ fn zero_norm(rng: &mut Rng, name: &str, n: usize) -> Entry {
     Entry { name: name.into(), shape: vec![n], values: (0..n).map(|_| 0.1 * rng.unit()).collect() }
 }
 
+/// The tensors of one gated DeltaNet mixer (`linear_attn.*`) of the layer with prefix `p`.
+fn delta_entries(rng: &mut Rng, entries: &mut Vec<Entry>, p: &str) {
+    let key_total = LIN_K_HEADS * LIN_K_DIM;
+    let value_total = LIN_V_HEADS * LIN_V_DIM;
+    let conv_dim = 2 * key_total + value_total;
+    let a = format!("{p}.linear_attn");
+    entries.push(linear(rng, &format!("{a}.in_proj_qkv.weight"), conv_dim, HIDDEN, 1.0));
+    entries.push(linear(rng, &format!("{a}.in_proj_z.weight"), value_total, HIDDEN, 1.0));
+    entries.push(linear(rng, &format!("{a}.in_proj_b.weight"), LIN_V_HEADS, HIDDEN, 1.0));
+    entries.push(linear(rng, &format!("{a}.in_proj_a.weight"), LIN_V_HEADS, HIDDEN, 1.0));
+    let conv_amp = 1.0 / (LIN_CONV as f32).sqrt();
+    entries.push(Entry {
+        name: format!("{a}.conv1d.weight"),
+        shape: vec![conv_dim, 1, LIN_CONV],
+        values: (0..conv_dim * LIN_CONV).map(|_| conv_amp * rng.unit()).collect(),
+    });
+    entries.push(Entry { name: format!("{a}.dt_bias"), shape: vec![LIN_V_HEADS], values: (0..LIN_V_HEADS).map(|_| 0.5 * rng.unit()).collect() });
+    entries.push(Entry {
+        name: format!("{a}.A_log"),
+        shape: vec![LIN_V_HEADS],
+        values: (0..LIN_V_HEADS).map(|_| 0.5 * (rng.unit() + 1.0) - 1.0).collect(),
+    });
+    entries.push(norm(rng, &format!("{a}.norm.weight"), LIN_V_DIM));
+    entries.push(linear(rng, &format!("{a}.out_proj.weight"), HIDDEN, value_total, 1.0));
+}
+
 /// One layer of the Qwen3.5 fixture: a gated DeltaNet mixer (`linear`) or full attention with a query gate, and a dense MLP.
 fn qwen35_layer(rng: &mut Rng, entries: &mut Vec<Entry>, p: &str, linear_layer: bool) {
     entries.push(zero_norm(rng, &format!("{p}.input_layernorm.weight"), HIDDEN));
     entries.push(zero_norm(rng, &format!("{p}.post_attention_layernorm.weight"), HIDDEN));
     if linear_layer {
-        let key_total = LIN_K_HEADS * LIN_K_DIM;
-        let value_total = LIN_V_HEADS * LIN_V_DIM;
-        let conv_dim = 2 * key_total + value_total;
-        let a = format!("{p}.linear_attn");
-        entries.push(linear(rng, &format!("{a}.in_proj_qkv.weight"), conv_dim, HIDDEN, 1.0));
-        entries.push(linear(rng, &format!("{a}.in_proj_z.weight"), value_total, HIDDEN, 1.0));
-        entries.push(linear(rng, &format!("{a}.in_proj_b.weight"), LIN_V_HEADS, HIDDEN, 1.0));
-        entries.push(linear(rng, &format!("{a}.in_proj_a.weight"), LIN_V_HEADS, HIDDEN, 1.0));
-        let conv_amp = 1.0 / (LIN_CONV as f32).sqrt();
-        entries.push(Entry {
-            name: format!("{a}.conv1d.weight"),
-            shape: vec![conv_dim, 1, LIN_CONV],
-            values: (0..conv_dim * LIN_CONV).map(|_| conv_amp * rng.unit()).collect(),
-        });
-        entries.push(Entry { name: format!("{a}.dt_bias"), shape: vec![LIN_V_HEADS], values: (0..LIN_V_HEADS).map(|_| 0.5 * rng.unit()).collect() });
-        entries.push(Entry {
-            name: format!("{a}.A_log"),
-            shape: vec![LIN_V_HEADS],
-            values: (0..LIN_V_HEADS).map(|_| 0.5 * (rng.unit() + 1.0) - 1.0).collect(),
-        });
-        entries.push(norm(rng, &format!("{a}.norm.weight"), LIN_V_DIM));
-        entries.push(linear(rng, &format!("{a}.out_proj.weight"), HIDDEN, value_total, 1.0));
+        delta_entries(rng, entries, p);
     } else {
         entries.push(linear(rng, &format!("{p}.self_attn.q_proj.weight"), 2 * HEADS * HEAD_DIM, HIDDEN, 1.0));
         entries.push(linear(rng, &format!("{p}.self_attn.k_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
@@ -152,6 +167,68 @@ fn qwen35_layer(rng: &mut Rng, entries: &mut Vec<Entry>, p: &str, linear_layer: 
     entries.push(linear(rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
     entries.push(linear(rng, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN, 1.0));
     entries.push(linear(rng, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER, 1.0));
+}
+
+/// The tensors of the Qwen3.8-Flash-Next fixture (Hugging Face layout of the text model).
+fn qwen4_entries(rng: &mut Rng) -> Vec<Entry> {
+    let width = Q4_HC * HIDDEN;
+    let mut entries = vec![Entry { name: "model.embed_tokens.weight".into(), shape: vec![VOCAB, HIDDEN], values: (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect() }];
+    entries.push(linear(rng, "lm_head.weight", VOCAB, HIDDEN, 1.5));
+    let gate = |rng: &mut Rng, entries: &mut Vec<Entry>, p: &str, inject: bool| {
+        entries.push(zero_norm(rng, &format!("{p}.hc_norm.weight"), width));
+        entries.push(linear(rng, &format!("{p}.input_mix_weight_down.weight"), 16, width, 1.0));
+        entries.push(linear(rng, &format!("{p}.input_mix_weight_up.weight"), width, 16, 1.0));
+        if inject {
+            entries.push(linear(rng, &format!("{p}.block_inject_weight.weight"), Q4_HC, width, 1.0));
+        }
+    };
+    gate(rng, &mut entries, "model.hyper_connection_mixer", false);
+    for layer in 0..Q4_LAYERS {
+        let p = format!("model.layers.{layer}");
+        gate(rng, &mut entries, &format!("{p}.attn_hyper_connection"), true);
+        gate(rng, &mut entries, &format!("{p}.mlp_hyper_connection"), true);
+        if layer + 1 < Q4_LAYERS {
+            delta_entries(rng, &mut entries, &p);
+        } else {
+            let a = format!("{p}.self_attn");
+            entries.push(linear(rng, &format!("{a}.q_proj.weight"), 2 * HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(rng, &format!("{a}.k_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(rng, &format!("{a}.v_proj.weight"), KV_HEADS * HEAD_DIM, HIDDEN, 1.0));
+            entries.push(linear(rng, &format!("{a}.o_proj.weight"), HIDDEN, HEADS * HEAD_DIM, 1.0));
+            entries.push(zero_norm(rng, &format!("{a}.q_norm.weight"), HEAD_DIM));
+            entries.push(zero_norm(rng, &format!("{a}.k_norm.weight"), HEAD_DIM));
+            entries.push(linear(rng, &format!("{a}.indexer.index_qk_proj.weight"), (Q4_IX_HEADS + 1) * Q4_IX_DIM, HIDDEN, 1.0));
+            entries.push(zero_norm(rng, &format!("{a}.indexer.q_layernorm.weight"), Q4_IX_DIM));
+            entries.push(zero_norm(rng, &format!("{a}.indexer.k_layernorm.weight"), Q4_IX_DIM));
+        }
+        if layer == 2 {
+            let q = format!("{p}.ple");
+            entries.push(linear(rng, &format!("{q}.key_proj.weight"), width, Q4_PLE_EMBED, 1.0));
+            entries.push(linear(rng, &format!("{q}.value_proj.weight"), HIDDEN, Q4_PLE_EMBED, 1.0));
+            for n in ["key", "query", "conv"] {
+                entries.push(zero_norm(rng, &format!("{q}.norm_{n}.weight"), width));
+            }
+            let kernel = 4;
+            let amp = 1.0 / (kernel as f32).sqrt();
+            entries.push(Entry { name: format!("{q}.conv1d.weight"), shape: vec![width, 1, kernel], values: (0..width * kernel).map(|_| amp * rng.unit()).collect() });
+            let rows = 1200;
+            let head_dim = Q4_PLE_EMBED / 4;
+            entries.push(Entry {
+                name: format!("{q}.ple_embedding.ngram_embedding.shard_0.weight"),
+                shape: vec![rows, head_dim],
+                values: (0..rows * head_dim).map(|_| rng.unit()).collect(),
+            });
+        }
+        entries.push(linear(rng, &format!("{p}.mlp.gate.weight"), EXPERTS, HIDDEN, 2.0));
+        entries.push(linear(rng, &format!("{p}.mlp.shared_expert_gate.weight"), 1, HIDDEN, 1.0));
+        for (name, out, inp) in [("gate_proj", MOE_INTER, HIDDEN), ("up_proj", MOE_INTER, HIDDEN), ("down_proj", HIDDEN, MOE_INTER)] {
+            entries.push(linear(rng, &format!("{p}.mlp.shared_expert.{name}.weight"), out, inp, 1.0));
+            for e in 0..EXPERTS {
+                entries.push(linear(rng, &format!("{p}.mlp.experts.{e}.{name}.weight"), out, inp, 1.0));
+            }
+        }
+    }
+    entries
 }
 
 /// The tensors of the RWKV-7 (flash-linear-attention layout) or RWKV-6 (Hugging Face layout) fixture, after `scripts/rwkv_reference.py`.
@@ -303,6 +380,40 @@ fn config_json(arch: Arch) -> Value {
             cfg["norm_topk_prob"] = true.into();
             cfg["decoder_sparse_step"] = 1.into();
             cfg["mlp_only_layers"] = json!([]);
+        }
+        Arch::Qwen4 => {
+            cfg["model_type"] = "qwen4_exp_text".into();
+            cfg["architectures"] = json!(["Qwen4ExpForCausalLM"]);
+            cfg["head_dim"] = HEAD_DIM.into();
+            cfg["num_hidden_layers"] = Q4_LAYERS.into();
+            cfg["layer_types"] = json!(["linear_attention", "linear_attention", "linear_attention", "full_attention"]);
+            cfg["attn_output_gate"] = true.into();
+            cfg["output_gate_type"] = "sigmoid".into();
+            cfg["linear_num_key_heads"] = LIN_K_HEADS.into();
+            cfg["linear_num_value_heads"] = LIN_V_HEADS.into();
+            cfg["linear_key_head_dim"] = LIN_K_DIM.into();
+            cfg["linear_value_head_dim"] = LIN_V_DIM.into();
+            cfg["linear_conv_kernel_dim"] = LIN_CONV.into();
+            cfg["num_experts"] = EXPERTS.into();
+            cfg["num_experts_per_tok"] = TOP_K.into();
+            cfg["moe_intermediate_size"] = MOE_INTER.into();
+            cfg["shared_expert_intermediate_size"] = MOE_INTER.into();
+            cfg["hc_count"] = Q4_HC.into();
+            cfg["hc_lowrank"] = 16.into();
+            cfg["ple_layer_ids"] = json!([3]);
+            cfg["ple_embed_dim"] = Q4_PLE_EMBED.into();
+            cfg["ple_conv_kernel_size"] = 4.into();
+            cfg["ngram_size"] = 3.into();
+            cfg["heads_per_ngram"] = 2.into();
+            cfg["ngram_vocab_size_base"] = 200.into();
+            cfg["make_ngram_vocab_size_divisible_by"] = 16.into();
+            cfg["seed"] = 1234.into();
+            cfg["indexer_n_heads"] = Q4_IX_HEADS.into();
+            cfg["indexer_kv_heads"] = 1.into();
+            cfg["indexer_head_dim"] = Q4_IX_DIM.into();
+            cfg["indexer_budget"] = 8.into();
+            cfg["indexer_compress_ratio"] = 4.into();
+            cfg["rope_parameters"] = json!({"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5, "mrope_section": [8, 4, 4]});
         }
         Arch::K2Horizon => {
             cfg["model_type"] = "k2_horizon".into();
@@ -484,6 +595,11 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
         write_safetensors(&dir.join("model.safetensors"), &rwkv_entries(&mut rng, arch == Arch::Rwkv7));
         return;
     }
+    if arch == Arch::Qwen4 {
+        write_support_files(dir, &config_json(arch));
+        write_safetensors(&dir.join("model.safetensors"), &qwen4_entries(&mut rng));
+        return;
+    }
     let mut entries = Vec::new();
     let embed: Vec<f32> = (0..VOCAB * HIDDEN).map(|_| rng.unit()).collect();
     let emb_name = match arch { Arch::Exaone | Arch::Qwen => "transformer.wte.weight", Arch::ChatGLM => "transformer.embedding.word_embeddings.weight", _ => "model.embed_tokens.weight" };
@@ -590,7 +706,7 @@ pub(crate) fn write_checkpoint(dir: &Path, arch: Arch, seed: u64) {
         }
         match arch {
             Arch::Qwen35 => unreachable!("handled by qwen35_layer"),
-            Arch::Exaone | Arch::ChatGLM | Arch::VaultGemma | Arch::Qwen | Arch::Baichuan | Arch::Rwkv7 | Arch::Rwkv6 => unreachable!("handled above"),
+            Arch::Exaone | Arch::ChatGLM | Arch::VaultGemma | Arch::Qwen | Arch::Baichuan | Arch::Rwkv7 | Arch::Rwkv6 | Arch::Qwen4 => unreachable!("handled above"),
             Arch::Mellum => {
                 if layer < 1 {
                     entries.push(linear(&mut rng, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN, 1.0));
@@ -732,7 +848,7 @@ pub(crate) struct Run {
     pub logits: Vec<Vec<f32>>,
 }
 
-fn argmax(x: &[f32]) -> usize {
+pub(crate) fn argmax(x: &[f32]) -> usize {
     x.iter().enumerate().fold((0, f32::NEG_INFINITY), |b, (i, &v)| if v > b.1 { (i, v) } else { b }).0
 }
 
@@ -772,14 +888,14 @@ pub(crate) fn decode(dec: &RustDecoder, model: &GgufModel, prompt: &[i64], steps
     Ok(run)
 }
 
-fn margin(x: &[f32]) -> f32 {
+pub(crate) fn margin(x: &[f32]) -> f32 {
     let top = argmax(x);
     let second = x.iter().enumerate().filter(|(i, _)| *i != top).fold(f32::NEG_INFINITY, |m, (_, &v)| m.max(v));
     x[top] - second
 }
 
 /// Largest absolute difference over the largest absolute value of `want`, and where the largest difference is.
-fn relative_difference(got: &[f32], want: &[f32]) -> (f32, usize) {
+pub(crate) fn relative_difference(got: &[f32], want: &[f32]) -> (f32, usize) {
     let scale = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
     let mut worst = (0f32, 0usize);
     for (i, (g, w)) in got.iter().zip(want).enumerate() {

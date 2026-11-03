@@ -249,7 +249,10 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only). Models with a recurrent
   state (Qwen3.5, Mamba, RWKV) speculate too with lookup or a draft model, by copying the state before each verification
   pass and putting it back after a rejection (checked with small random models on the CPU, not with real checkpoints or a
-  graphics card; not on by default there, `--speculative suffix` turns it on).
+  graphics card; not on by default there, `--speculative suffix` turns it on). On the CPU the verification pass runs with
+  batch-invariant kernels, so a greedy request gives the same text with and without speculation (bit-identical logits on the AVX2
+  tier in 12 small random models; other CPU tiers and graphics cards unchecked, see
+  [docs/speculative-decoding.md](docs/speculative-decoding.md#greedy-output-and-rounding); `FLLM_SPEC_EXACT=0` turns it off).
 
 ### Tools and clients
 

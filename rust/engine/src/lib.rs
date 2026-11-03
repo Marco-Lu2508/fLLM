@@ -116,6 +116,8 @@ mod gemma_tests;
 mod spec_tests;
 #[cfg(test)]
 mod spec_state_tests;
+#[cfg(test)]
+mod spec_exact_tests;
 
 pub mod hybrid_config;
 

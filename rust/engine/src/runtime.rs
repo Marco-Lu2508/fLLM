@@ -2089,6 +2089,8 @@ impl InferenceRuntime {
         let batch_logits = if rows.is_empty() {
             Vec::new()
         } else {
+            // the verification of draft tokens must give each row the bits single-token decoding gives it (see `BatchInvariant`)
+            let _invariant = (!verify_candidates.is_empty() && crate::speculative::exact_verification()).then(crate::cpu_kernels::BatchInvariant::enter);
             let mut ids = Vec::with_capacity(rows.len());
             let mut lengths = Vec::with_capacity(rows.len());
             let mut table = Vec::with_capacity(rows.len() * self.model.table_stride());
@@ -2545,6 +2547,7 @@ impl InferenceRuntime {
                 if let (Some(snap), Some(first)) = (&cand.state_snapshot, cand.first_block) {
                     if let Some(decoder) = &self.decoder {
                         decoder.restore_state(first, snap)?;
+                        let _invariant = crate::speculative::exact_verification().then(crate::cpu_kernels::BatchInvariant::enter);
                         let mut adv_ids = Vec::with_capacity(1 + accepted);
                         let mut adv_lens = Vec::with_capacity(1 + accepted);
                         adv_ids.push(cand.token_id);

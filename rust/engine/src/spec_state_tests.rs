@@ -20,20 +20,20 @@ use std::path::{Path, PathBuf};
 const SCHEDULE: [(usize, Option<usize>); 9] =
     [(3, None), (4, Some(0)), (4, Some(2)), (2, Some(1)), (4, None), (4, Some(3)), (1, Some(0)), (3, Some(2)), (4, None)];
 
-struct Job {
-    id: &'static str,
-    prompt: Vec<i64>,
-    tokens: usize,
+pub(crate) struct Job {
+    pub(crate) id: &'static str,
+    pub(crate) prompt: Vec<i64>,
+    pub(crate) tokens: usize,
 }
 
-fn jobs() -> Vec<Job> {
+pub(crate) fn jobs() -> Vec<Job> {
     vec![
         Job { id: "a", prompt: vec![1, 5, 9, 3, 17, 40], tokens: 40 },
         Job { id: "b", prompt: vec![1, 7, 21, 30, 4, 12, 8], tokens: 33 },
     ]
 }
 
-fn runtime(gguf: &Path) -> InferenceRuntime {
+pub(crate) fn runtime(gguf: &Path) -> InferenceRuntime {
     let model = GgufModel::load(gguf.to_str().unwrap(), 64, 4, 2).unwrap();
     let mut rt = InferenceRuntime::with_speculative(model, 4, 64, Vec::new(), 0, 0).unwrap();
     rt.attach_compute("cpu").unwrap();
@@ -42,15 +42,15 @@ fn runtime(gguf: &Path) -> InferenceRuntime {
 
 /// Counts of what the scripted drafts promise: tokens proposed, tokens that are right, chunks of every kind.
 #[derive(Default, Debug)]
-struct Plan {
-    proposed: u64,
-    accepted: u64,
-    complete_chunks: usize,
-    rejected_at: [usize; 4],
+pub(crate) struct Plan {
+    pub(crate) proposed: u64,
+    pub(crate) accepted: u64,
+    pub(crate) complete_chunks: usize,
+    pub(crate) rejected_at: [usize; 4],
 }
 
 /// Serves all `jobs` together. With `reference` the script feeds the wrong-at-a-position drafts of `SCHEDULE`; the plan says what was fed.
-fn serve(rt: &mut InferenceRuntime, jobs: &[Job], reference: Option<&[Vec<i64>]>, vocab: i64) -> (Vec<Vec<i64>>, Plan) {
+pub(crate) fn serve(rt: &mut InferenceRuntime, jobs: &[Job], reference: Option<&[Vec<i64>]>, vocab: i64) -> (Vec<Vec<i64>>, Plan) {
     let params = SamplingParams { ignore_eos: true, ..Default::default() };
     let sids: Vec<i64> =
         jobs.iter().map(|j| rt.submit_with_sampling(j.id.into(), j.prompt.clone(), j.tokens, params.clone()).unwrap()).collect();
@@ -109,12 +109,16 @@ fn serve(rt: &mut InferenceRuntime, jobs: &[Job], reference: Option<&[Vec<i64>]>
 
 /// Plain greedy decoding of every job on its own, then the same jobs served together with the scripted drafts.
 fn check(label: &str, gguf: &Path, vocab: i64) {
-    let jobs = jobs();
+    check_jobs(label, gguf, vocab, &jobs());
+}
+
+/// `check` for any list of jobs.
+pub(crate) fn check_jobs(label: &str, gguf: &Path, vocab: i64, jobs: &[Job]) {
     let reference: Vec<Vec<i64>> = jobs.iter().map(|j| serve(&mut runtime(gguf), std::slice::from_ref(j), None, vocab).0.remove(0)).collect();
     assert!(reference.iter().all(|r| r.windows(2).any(|w| w[0] != w[1])), "{label}: the plain output is constant, the test would prove little");
 
     let mut rt = runtime(gguf);
-    let (tokens, plan) = serve(&mut rt, &jobs, Some(&reference), vocab);
+    let (tokens, plan) = serve(&mut rt, jobs, Some(&reference), vocab);
     let stats = rt.speculative_status().2;
     for (i, job) in jobs.iter().enumerate() {
         assert_eq!(tokens[i], reference[i], "{label}: speculative decoding changed the output of sequence {}", job.id);

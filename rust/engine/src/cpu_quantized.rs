@@ -440,6 +440,8 @@ fn linear_x86(
 ) -> Vec<Vec<f32>> {
     use crate::cpu_kernels::Avx512;
     let batch = validate(projections, kinds, x, cols);
+    // read here, on the calling thread: the kernels run on pool workers
+    let invariant = crate::cpu_kernels::batch_invariant();
     let rows = projections.iter().map(|p| p.rows).collect::<Vec<_>>();
     let mut output = rows
         .iter()
@@ -450,10 +452,12 @@ fn linear_x86(
     }
     // Prompts on AMX tiles or the 16-row VNNI GEMM (the `avx512` feature).
     #[cfg(feature = "avx512")]
-    if let Some(prompt) =
-        crate::cpu_avx512::prompt_linear_group(projections, kinds, x, cols, batch)
-    {
-        return prompt;
+    if !invariant {
+        if let Some(prompt) =
+            crate::cpu_avx512::prompt_linear_group(projections, kinds, x, cols, batch)
+        {
+            return prompt;
+        }
     }
     let nb = cols / 32;
     let kind = kinds[0];
@@ -467,6 +471,7 @@ fn linear_x86(
     if activation(kind) == Some(Activation::Q8K) {
         // Prompts through Q4_K, Q5_K and Q6_K: eight-row panels with the rows in the vector lanes.
         if batch >= r8_min_batch()
+            && !invariant
             && wide.is_none()
             && crate::cpu_kernels::repack_enabled()
             && !r8_disabled()
@@ -481,8 +486,10 @@ fn linear_x86(
         let size = if eight { 8 } else { 4 };
         // Prompts: a worker decodes its four-row panel once and every token pair reuses it.
         // The AVX-512 tier keeps its own streaming kernels.
-        let predecode =
-            batch >= PREDECODE_MIN_BATCH && wide.is_none() && crate::cpu_kernels::repack_enabled();
+        let predecode = batch >= PREDECODE_MIN_BATCH
+            && wide.is_none()
+            && crate::cpu_kernels::repack_enabled()
+            && !invariant;
         let decoded = |kind: u32| predecode && PREDECODED_KINDS.contains(&kind);
         let sums = |half: bool| {
             kinds
@@ -549,7 +556,16 @@ fn linear_x86(
                 // read, `isa`/`avx512` checked their features, and the scheduler gives `out`
                 // these output columns exclusively until the joined queue completes.
                 unsafe {
-                    k_stream_panel(w, kind, wide, vnni, first, valid, &packed, nb, batch, out);
+                    if invariant && batch > 1 && matches!(kind, 12..=14) && wide.is_none() && !vnni {
+                        // the batch-one kernel adds the terms of a token in its own order: a batch that must equal single-token
+                        // decoding takes it token by token
+                        for token in 0..batch {
+                            let x = &packed[token * nb..(token + 1) * nb];
+                            crate::cpu_kquant::gemv_avx2(w, kind, first, valid, x, nb, &mut out.token_view(token));
+                        }
+                    } else {
+                        k_stream_panel(w, kind, wide, vnni, first, valid, &packed, nb, batch, out);
+                    }
                 }
                 add_bias(out, p.bias, first, batch);
             },
@@ -560,6 +576,7 @@ fn linear_x86(
     // plain AVX2 tier keeps the streaming kernel.)
     if kind == 20
         && vnni
+        && !invariant
         && batch >= PREDECODE_MIN_BATCH
         && cols.is_multiple_of(256)
         && wide.is_none()

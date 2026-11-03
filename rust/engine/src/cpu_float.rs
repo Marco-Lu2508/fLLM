@@ -134,7 +134,7 @@ pub fn linear_group(
             crate::cpu_avx512::float::run(projections, kind, &x, cols, batch, kernels, &mut output);
             return Some(output);
         }
-        if batch >= PANEL_MIN_BATCH && !panel_disabled() {
+        if batch >= PANEL_MIN_BATCH && !panel_disabled() && !crate::cpu_kernels::batch_invariant() {
             // Prompts: sixteen rows in the vector lanes, six tokens per pass over a decoded chunk.
             crate::cpu_schedule::row_panels(
                 &mut output,

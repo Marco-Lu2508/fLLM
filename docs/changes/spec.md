@@ -65,6 +65,8 @@ raises the CUDA graph buckets to 128 / 256 rows. Also fixes a scheduler error af
 | `--speculative-min-match N`, `--speculative-cache-tokens N` | 3, 1048576 | suffix source |
 | `--speculative-tree` | | only `off` accepted (no tree attention yet) |
 | `FLLM_SPEC_ADAPTIVE` | on | `0` fixes the draft length |
+| `FLLM_SPEC_EXACT` | on | `0` lets the verification pass use the prompt kernels (faster on some CPUs, greedy text can then differ from plain decoding on a near-tie); see [../speculative-decoding.md](../speculative-decoding.md#exactness) |
+| `FLLM_BATCH_INVARIANT` | off | `1` keeps the batch-invariant CPU kernels for every call, so that a request gives the same bits whatever else runs beside it (slower prompts) |
 | `FLLM_SAMPLER_RNG` | `philox` | `xorshift` = previous generator |
 | `FLLM_DEVICE_SAMPLING` | off | `1` samples decode steps on the CUDA device |
 | `--scheduling-policy` | `fcfs` | `priority`: smaller `priority` first, with preemption |

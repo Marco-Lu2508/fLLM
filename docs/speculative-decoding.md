@@ -50,13 +50,16 @@ checkpoints, and `n > 1` / forked sequences.
 What has been run: greedy output with scripted drafts that are wrong at different positions is token-for-token the output of plain
 decoding on small random models of Gated DeltaNet + attention (the Qwen3.5 layout), RWKV 6, RWKV 7, Mamba 2 + attention (Falcon-H1),
 Mamba 1 + MoE (Jamba) and Zamba2, on the processor; and with a draft model that is a Qwen3.5-layout model itself
-(`rust/engine/src/spec_state_tests.rs`). Not run: any real checkpoint, a graphics card (the device state buffers are copied by the same
-call, but only the RWKV copy has a test, on the CPU backend standing in for a device), Kimi Delta Attention, DeepSeek-V4, Inkling,
-MiniMax-M3 and a whole-model Qwen3.8-Flash-Next (the copy of its extra state is tested on its own).
+(`rust/engine/src/spec_state_tests.rs`). A small random Qwen3.8-Flash-Next model (two residual streams, three delta layers, an n-gram
+layer, an attention layer whose token indexer has more blocks than it selects, a MoE in every layer) is run the same way, in F32 and
+as Q4_K_M (`rust/engine/src/spec_exact_tests.rs`). Not run: any real checkpoint, a graphics card (the device state buffers are copied
+by the same call, but only the RWKV copy has a test, on the CPU backend standing in for a device), Kimi Delta Attention, DeepSeek-V4,
+Inkling and MiniMax-M3.
 
 ## Exactness
 
-* **Greedy requests** produce exactly the tokens of plain decoding; a draft token is accepted when it is the target's argmax.
+* **Greedy requests** produce the tokens of plain decoding; a draft token is accepted when it is the target's argmax. How exact that
+  is depends on the kernels, see [Greedy output and rounding](#greedy-output-and-rounding) below.
 * **Sampled requests** (temperature, top-k, top-p, min-p, typical-p, repetition / presence / frequency penalties, logit bias,
   `allowed_token_ids`, `bad_words`, `min_tokens`) are verified with the speculative sampling rule of Leviathan et al. and Chen et al.
   (accept token `x` with probability `min(1, p(x) / q(x))`, otherwise draw from `norm(max(0, p - q))`, plus a bonus token when all
@@ -70,6 +73,58 @@ MiniMax-M3 and a whole-model Qwen3.8-Flash-Next (the copy of its extra state is 
 * **Logprobs** of the emitted tokens come from the target distribution at their position, never from the draft.
 * A request opts out with `"speculative": false` in its body.
 * Mirostat requests, requests with `n > 1` and requests with image embeddings do not speculate.
+
+### Greedy output and rounding
+
+A report of a Qwen3.8-Flash-Next `IQ3_XXS` file on the CPU gave 189 tokens with `--speculative suffix` and 176 without it for the same
+greedy prompt. The state copy and rollback were not the cause (see the tests below). The cause was rounding. A verification pass runs
+the target on several rows at once, and the CPU kernels that are fast for several rows add the terms of a dot product in another
+order than the kernels of a single-token step: the 16-row float panels (F32, F16 and BF16 weights: the router, the gates of the
+hyper-connections, small tensors that stay unquantized in every file), the predecoded and eight-row panels of Q2_K, Q3_K, Q4_K, Q5_K
+and Q6_K (the 4-bit to 6-bit formats of nearly every mixed quantization), the batch-one AVX2 kernel of Q4_K to Q6_K, and the
+expert kernels of a batch of tokens. A last-bit difference is harmless in a float model, but the quantized kernels round their input
+to 8 bits, and a last-bit difference moves some of those roundings by a whole step. On small random models the logits of a six-row
+pass differed from single-token decoding by up to 1.2e-2 (Q8_0), 1.5e-2 (Q4_K_M), 1.8e-2 (Q2_K) and 4.4e-2 (Q4_K_M, Qwen3.8-Flash-Next
+layout) of the largest logit, and flipped a greedy token (`NOISE` lines of `spec_exact_tests`). Where two tokens are close, the text
+then differs after that token, and the length with it.
+
+What the engine does now: the passes that verify draft tokens, and the re-run of the accepted prefix after a rejection, run with
+batch-invariant CPU kernels (`cpu_kernels::BatchInvariant`). With them every row of a pass gets exactly the bits it gets as the only
+row of a call: no prompt panels, the batch-one AVX2 kernel per token, the experts of one token at a time. Plain decoding is unchanged;
+it uses the single-token kernels already. `FLLM_SPEC_EXACT=0` switches this off (the prompt kernels are used, the text is then equal up
+to rounding only), `FLLM_BATCH_INVARIANT=1` keeps the invariant kernels for every call (a request then gives the same bits whatever
+else the server runs beside it, at the price of slower prompts).
+
+Measured on a 10-thread AVX2 CPU (no AVX-VNNI, no AVX-512), tiny random models of 256 channels:
+
+| Check | Prompt kernels (before) | Batch-invariant kernels (now) |
+|---|---|---|
+| Logits of a 6-row pass against single-token steps, 12 models (Qwen3.5 layout F32, Q8_0, Q4_K_M, Q2_K; Qwen3.8-Flash-Next layout F32, Q4_K_M; Llama F32, Q8_0, Q4_K_M; Qwen3 Q8_0; Qwen3-MoE Q8_0; RWKV 7), 47 positions each | bit-identical only for Llama and Qwen3 Q8_0 (47/47) and nearly for Qwen3-MoE Q8_0 (46/47); the other nine models 0 to 17 of 47 | bit-identical at all 47 positions in all 12 models |
+| Requests (12 per model, each alone, scripted drafts wrong at every position in turn) whose text changed | Qwen3.8-Flash-Next layout Q4_K_M 4 of 12, Llama Q4_K_M 1 of 12, Qwen3.5 Q2_K / Q4_K_M and Qwen3.8 F32 0 of 12 | 0 of 12 everywhere |
+| Projection kernels, token alone against the same token in a batch of 2 to 16 rows (22 formats) | F32, F16, BF16 from 4 rows, Q3_K from 4, Q2_K from 8, Q4_K / Q5_K / Q6_K from 2 differ; Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, the lattice IQ formats (IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S), IQ4_NL, IQ4_XS, MXFP4 and Q2_0 already agree | all agree |
+
+Cost of a 7-row verification pass in units of a 1-row step (one 4096-column projection of 320 MB, fastest of 25 runs, a shared build
+host, so the spread is about 30 %): Q4_K 2.1 before and 3.5 after, Q6_K 3.2 and 3.4, Q3_K 2.9 and 3.0, Q2_K 3.4 and 3.7, IQ3_XXS 2.5 and
+2.6, F32 1.7 and 1.3, BF16 2.2 and 2.1. Only Q4_K on a CPU without AVX-VNNI pays visibly (the batch-one kernel runs per token). On
+CPUs with AVX-VNNI or AVX-512 the batch-one and the streaming kernels are the same code, so no cost is expected there; that was not measured.
+Nothing was measured end to end with speculation on a real model.
+
+What this does not prove:
+
+* The check ran on the AVX2 tier only. The AVX-VNNI, AVX-512 (also the `avx512` build feature with its AMX and 16-row prompt GEMMs)
+  and NEON kernels are not tested for bit equality; for VNNI and AVX-512 the code reading says the streaming kernels do not depend on
+  the batch size below four rows, and the prompt kernels are skipped under the guard, but the figures are not measured. The test
+  `projection_kernels_give_a_token_the_same_bits_alone_and_in_a_batch` runs on whatever CPU runs the test suite and fails if a kernel
+  breaks the rule there.
+* Graphics-card backends (CUDA, HIP, Vulkan, Metal) keep their own verification kernels. Rounding differences between a one-row and
+  a multi-row pass on a device are not removed, so on a device the text can differ from plain decoding on a near-tie.
+* No real checkpoint was run, in particular not the 76 GB `IQ3_XXS` file of the report. Attention over long contexts (the tests use
+  at most 64 positions) and grammar-constrained requests are not covered by a bit-equality test.
+* A request that shares the server with others is only equal to its solo run when `FLLM_BATCH_INVARIANT=1` is set: plain
+  decoding of several sequences in one pass uses the multi-row kernels too.
+
+The tests are `rust/engine/src/spec_exact_tests.rs` (kernels, 6-row noise, scripted speculation on Qwen3.5, Qwen3.8-Flash-Next, Llama and
+Qwen3-MoE layouts in F32, Q8_0, Q4_K_M and Q2_K) and `rust/engine/src/spec_state_tests.rs` (state rollback).
 
 ## Metrics
 
