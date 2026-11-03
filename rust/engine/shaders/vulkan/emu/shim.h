@@ -53,6 +53,7 @@ static float half_to_float(uint16_t h) {
 inline vec2 unpackHalf2x16(uint v) { return vec2{half_to_float(v & 0xffff), half_to_float(v >> 16)}; }
 inline float uintBitsToFloat(uint v) { float f; memcpy(&f, &v, 4); return f; }
 inline uint floatBitsToUint(float f) { uint v; memcpy(&v, &f, 4); return v; }
+inline uint bitCount(uint v) { return (uint)__builtin_popcount(v); }
 inline int bitfieldExtract(int v, int off, int bits) { return (int)((unsigned)v << (32 - off - bits)) >> (32 - bits); }
 inline float roundEven(float x) { return std::nearbyint(x); }
 inline int clamp(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }

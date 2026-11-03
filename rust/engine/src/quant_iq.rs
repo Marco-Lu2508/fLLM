@@ -280,7 +280,7 @@ pub fn dequantize_iq(bytes: &[u8], kind: u32, count: usize) -> Result<Vec<f32>, 
 
 #[cfg(test)]
 mod tests {
-    use super::dequantize_iq;
+    use super::{dequantize_iq, packed_bytes_u64};
 
     fn block(kind: u32, len: usize) -> Vec<u8> {
         let mut b = vec![0u8; len];
@@ -349,6 +349,51 @@ mod tests {
         b[32] = 0x08;
         let x = dequantize_iq(&b, 29, 256).unwrap();
         assert_eq!(&x[..8], &[-1.125; 8]);
+    }
+
+    /// The words of `const uint NAME[N] = uint[N](...)` in a generated Vulkan grid file.
+    fn glsl_words(text: &str, name: &str) -> Vec<u32> {
+        let start = text.find(&format!("const uint {name}[")).unwrap_or_else(|| panic!("{name} is missing"));
+        let body = &text[start..];
+        let open = body.find("(
+").expect("array body") + 1;
+        let close = body.find(");").expect("end of array");
+        body[open..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| u32::from_str_radix(t.trim_start_matches("0x").trim_end_matches('u'), 16).expect("hex word"))
+            .collect()
+    }
+
+    /// The grids the Vulkan shaders read (`shaders/vulkan/_iq_grid_*.glsl`, written by `scripts/gen_vulkan_iq_tables.py`) hold exactly the entries
+    /// of the Rust tables the CPU decoder uses: the 2-bit magnitude / value codes of the IQ2 and IQ1 grids unpack to the table bytes, the IQ3 grids are equal.
+    #[test]
+    fn vulkan_iq_grids_match_the_rust_tables() {
+        use super::tables;
+        let packed2 = |text: &str, name: &str, table: &[u64], map: &dyn Fn(u32) -> u8| {
+            let words = glsl_words(text, name);
+            assert_eq!(words.len() * 2, table.len(), "{name}: entries");
+            for (i, &entry) in table.iter().enumerate() {
+                let codes = (words[i / 2] >> (16 * (i % 2))) & 0xffff;
+                for j in 0..8 {
+                    let code = (codes >> (2 * j)) & 3;
+                    assert_eq!(map(code), packed_bytes_u64(entry, j), "{name}[{i}] value {j}");
+                }
+            }
+        };
+        let mag = |c: u32| [8u8, 25, 43, 0][c as usize];
+        let step = |c: u32| [0xffu8, 0, 1, 0][c as usize];
+        packed2(include_str!("../shaders/vulkan/_iq_grid_iq2xxs.glsl"), "IQ2XXS_GRID2", &tables::IQ2XXS_GRID, &mag);
+        packed2(include_str!("../shaders/vulkan/_iq_grid_iq2xs.glsl"), "IQ2XS_GRID2", &tables::IQ2XS_GRID, &mag);
+        packed2(include_str!("../shaders/vulkan/_iq_grid_iq2s.glsl"), "IQ2S_GRID2", &tables::IQ2S_GRID, &mag);
+        packed2(include_str!("../shaders/vulkan/_iq_grid_iq1s.glsl"), "IQ1S_GRID2", &tables::IQ1S_GRID[..], &step);
+        assert_eq!(glsl_words(include_str!("../shaders/vulkan/_iq_grid_iq3xxs.glsl"), "IQ3XXS_GRID"), tables::IQ3XXS_GRID);
+        assert_eq!(glsl_words(include_str!("../shaders/vulkan/_iq_grid_iq3s.glsl"), "IQ3S_GRID"), tables::IQ3S_GRID);
+        // the sign table of the 7-bit fields is the parity extension the shaders compute
+        for (s7, &want) in tables::KSIGNS_IQ2XS.iter().enumerate() {
+            assert_eq!(want as u32, s7 as u32 | ((s7.count_ones() & 1) << 7), "ksigns_iq2xs[{s7}]");
+        }
     }
 
     #[test]

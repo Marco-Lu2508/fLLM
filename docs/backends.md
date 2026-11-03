@@ -37,6 +37,7 @@ Numbers in square brackets refer to the notes below the table.
 CUDA decode GEMV and tensor-core prompt path, compiled for sm_80/89/90/120 and never run on a GPU (L0); Metal has its own kernels (L0, see the
 table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on Mesa lavapipe, never on a GPU; `FLLM_VULKAN_NO_EXT_FORMATS=1` converts instead); every other backend, including wgpu, the NPU and the TPU path, takes them through a conversion at upload (L0†,
 3.6 times the packed size in 16-bit, 7 times in F32; `docs/gpu-backends.md`).
+**IQ1 / IQ2 / IQ3** (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S; no column): CUDA decodes them natively (note 4); Vulkan native keeps them packed (matrix-vector, integer-dot, matrix, cooperative-matrix, embedding and expert shaders; `selftest-gpu --device vulkan --quants ...` passes on an Intel Core Ultra iGPU, the cooperative-matrix variants only compiled; `docs/gpu-backends.md`); the other backends convert them at upload.
 
 | Hardware | L | K | IQ4 | MX | NV | Q4Z | F |
 | --- | --- | --- | --- | --- | --- | --- | --- |

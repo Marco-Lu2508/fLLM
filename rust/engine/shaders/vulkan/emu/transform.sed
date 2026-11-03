@@ -10,3 +10,5 @@ s/out \(uint\|float\) \([a-z0-9]*\)/\1\& \2/g
 s/\bvoid main()/void main_()/
 /^const int KV/ s/= int\[16\](/= {/
 /^const int KV/ s/);$/};/
+s/^\(const uint [A-Z0-9_]*\[[0-9]*\] = \)uint\[[0-9]*\]($/\1{/
+s/^);$/};/

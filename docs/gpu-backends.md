@@ -647,6 +647,35 @@ Self test on lavapipe: `fllm-rs selftest-gpu --device vulkan --only linear,fp8bl
 `fp8blk` group runs on every backend that lists `FP8B` (the tensor-core checks only on CUDA). Unit tests: `backend::vulkan::weights::tests::ext`,
 `backend::vulkan::weights::exl3`, `backend::vulkan::backend::{upload,tests}`.
 
+### Native Vulkan: the IQ1 / IQ2 / IQ3 families
+
+IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S (GGML types 19, 29, 16, 17, 22, 18, 21) stay packed on the native Vulkan backend. Before, `upload_weight` dequantized
+them on the host and stored Q5_K (5.5 bits per weight, rows of whole 256-value blocks) or F16, so a 2-bit or 3-bit model grew 1.3 to 8 times. The device image is the file block split
+into planes (the index, sign and scale bytes unchanged; the binary16 `d` in a plane of its own, IQ3_S and IQ1_M carry two padding bytes more), 256 weights per block:
+
+| Format | Planes (bytes per block) | Device bytes | Scale of a chunk of 8 weights |
+| --- | --- | --- | --- |
+| `IQ2_XXS` | qs 64, d 2 | 66 (2.06 bit) | 4-bit scale per 32 values |
+| `IQ2_XS` | qs 64, scales 8, d 2 | 74 (2.31 bit) | 4-bit scale per 16 values |
+| `IQ2_S` | qs 64 (indices, then sign bytes), qh + scales 16, d 2 | 82 (2.56 bit) | 4-bit scale per 16 values |
+| `IQ3_XXS` | qs 64, signs + scale 32, d 2 | 98 (3.06 bit) | 4-bit scale per 32 values |
+| `IQ3_S` | qs 64, signs 32, qh + scales + d 16 | 112 (3.5 bit) | 4-bit scale per 32 values |
+| `IQ1_S` | qs 32, qh 16, d 2 | 50 (1.56 bit) | 3-bit scale and the shift sign per 32 values (additive term) |
+| `IQ1_M` | qs 32, qh 16, scales 8, d 2 (assembled on the host) | 58 (1.81 bit) | 3-bit scale per 16 values, shift sign per 8 values (additive term) |
+
+One chunk of 8 weights is one grid entry (IQ3: two entries of four) with its sign bits. The grids are the `ggml-common.h` tables of `quant_iq_tables.rs`, written into the shaders as constant arrays by
+`scripts/gen_vulkan_iq_tables.py` (`shaders/vulkan/_iq_grid_*.glsl`; the IQ2 and IQ1 grids hold three levels and are stored as 2-bit codes, two entries per 32-bit word, the IQ3 grids as the
+file's four magnitude bytes). The unit test `vulkan_iq_grids_match_the_rust_tables` (`quant_iq.rs`) decodes the generated files again and compares every entry with the Rust tables, and
+`python scripts/gen_vulkan_iq_tables.py --check` fails when a file is out of date. The shaders are the usual family (`mv_<fmt>_{s,i}`, `mm_<fmt>_{s,i,c,cw}`, `mmq_<fmt>_i`, `embed_<fmt>`,
+`moe_linear_<fmt>_{arena,bda}`); `IQ1_M` has no `mmq_iq1_m_i` (the tiled prompt kernel assumes one additive term per scale group), `mm_iq1_m_i` serves its prompts. IQ4_NL and IQ4_XS (converted to IQ4_NL at upload) are unchanged.
+
+**What ran:** `fllm-rs selftest-gpu --device vulkan --quants iq2_xxs,iq2_xs,iq2_s,iq3_xxs,iq3_s,iq1_s,iq1_m` on the integrated GPU of an Intel Core Ultra 5 235U (native Vulkan 1.3, subgroup 32, fp16 + int8 dot
+product, no cooperative matrices): exact pass (f32 shaders) linear 13x768 with batches 1, 2 and 5 (bias at 5) and embedding 300x256, fast pass (int8 dot products, tiled prompt kernel) linear 259x1024 with batches 1, 2, 3, 4, 5, 8, 16, 40, 129
+and 356 (bias at 3 and 129) and the expert product (6 experts 130x512), for each of the seven formats; 0 failed (the same run covered Q2_0 and IQ4_NL: 63 exact and 117 fast checks ok, 70 expert-GEMM checks skipped as unsupported). On the CPU: the repacking and the Rust transcription of the decoders against `compute::dequantize`, the GLSL
+decoders compiled as C++ (`emu/check_decoders.sh`: 6912 values per format, bit-identical), and the `mv_s`, `mm_s` and `mm_c16/32/64` shaders in the CPU emulation (`emu/run_kernels.sh`, relative error below 3e-7 for `_s`, below 1e-4 for `_c`);
+all variants compile with `glslc` and pass `spirv-val`. **What did not run:** the cooperative-matrix variants (`mm_*_c`, `mm_*_cw`) on a device, the `_i` shaders in the CPU emulation (that part of the harness aborts in the
+build environment used, for every format), any other GPU, and speed measurements. The memory plan (`device_tensor_bytes`) counts the packed sizes.
+
 ### NVFP4 models
 
 Checkpoints produced with NVIDIA ModelOpt (`quant_algo: NVFP4`, e.g. `nvidia/Llama-3.1-8B-Instruct-NVFP4`)

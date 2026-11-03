@@ -35,12 +35,23 @@ static int bitfieldExtract(int v, int off, int bits) { return (int)((unsigned)v 
 // _q_common.glsl helpers, textually the same bodies
 static float f16at(uint base, uint i) { return unpackHalf2x16(w[base + (i >> 1)])[i & 1u]; }
 static uint sub8(uint x, uint c) { return ((x | 0x80808080u) - c * 0x01010101u) ^ 0x80808080u; }
+static uint bitCount(uint v) { return (uint)__builtin_popcount(v); }
 EOF
+# the grid tables and helpers of the IQ formats (#include "_iq_*.glsl") are pasted in place of the include line
+inline_includes() {
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      '#include "_iq_'*) inc=${line#*\"}; inc=${inc%\"*}; cat "$SH/$inc";;
+      *) printf '%s\n' "$line";;
+    esac
+  done < "$1"
+}
 run_fmt() { # tag file-stem extra-g++-flags...
   tag=$1; f=$2; shift 2
-  sed -e 's/out \(uint\|float\) \([a-z0-9]*\)/\1\& \2/g' \
+  inline_includes "$SH/_q_fmt_$f.glsl" | sed -e 's/out \(uint\|float\) \([a-z0-9]*\)/\1\& \2/g' \
       -e '/^const int KV/ s/= int\[16\](/= {/' -e '/^const int KV/ s/);$/};/' \
-      "$SH/_q_fmt_$f.glsl" > fmt_$tag.h
+      -e 's/^\(const uint [A-Z0-9_]*\[[0-9]*\] = \)uint\[[0-9]*\]($/\1{/' -e 's/^);$/};/' \
+      > fmt_$tag.h
   cat > run_$tag.cpp <<EOF
 #include "shim.h"
 #include "fmt_$tag.h"
@@ -74,7 +85,7 @@ EOF
   ./run_$tag "$D/$tag.bin"
 }
 fails=0
-for t in q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q2_0; do run_fmt $t $t || fails=$((fails+1)); done
+for t in q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq1_s iq1_m; do run_fmt $t $t || fails=$((fails+1)); done
 for g in 32 64 128; do run_fmt q4z$g q4z -DQ4Z_GROUP=$g || fails=$((fails+1)); done
 echo "decoder failures=$fails"
 [ $fails = 0 ]

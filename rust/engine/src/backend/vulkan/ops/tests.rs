@@ -261,7 +261,7 @@ fn embedding_plans() {
     assert!(matches!(
         plan_embedding(
             &EmbeddingTable {
-                quant: QuantType::IQ2_XS,
+                quant: QuantType::Q8_K,
                 ..table
             },
             &[1]
@@ -1081,6 +1081,13 @@ fn sample_plans() -> Vec<OpPlan> {
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
         QuantType::Q2_0,
+        QuantType::IQ2_XXS,
+        QuantType::IQ2_XS,
+        QuantType::IQ2_S,
+        QuantType::IQ3_XXS,
+        QuantType::IQ3_S,
+        QuantType::IQ1_S,
+        QuantType::IQ1_M,
     ] {
         v.push(
             plan_embedding(

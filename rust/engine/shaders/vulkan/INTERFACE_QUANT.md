@@ -21,8 +21,8 @@ against the CPU reference, which is execution of the shader code but not on a GP
 | `exl3_pre.comp`, `exl3_mm.comp`, `exl3_post.comp` | the three passes of an ExLlamaV3 product (not part of the chunk model, see the end of this file) |
 | `emu/` | CPU-only checks: compile + validate all variants, run the decoders and the whole shaders as C++ against the dequantized reference (`emu/README.md`) |
 
-`<fmt>` = `q4_0 q4_1 q5_0 q5_1 q8_0 q2_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q4z32 q4z64 q4z128` (`Q4ZP32/64/128` use the `q4z*` shaders and a prepass).
-Not covered here: F32/F16/BF16 weights, the other IQ formats, FP8M. There is no cooperative-matrix matrix-vector shader on purpose: with batch <= 8 a 16-wide
+`<fmt>` = `q4_0 q4_1 q5_0 q5_1 q8_0 q2_0 q2_k q3_k q4_k q5_k q6_k iq4_nl iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq1_s iq1_m mxfp4 nvfp4 q4z32 q4z64 q4z128` (`Q4ZP32/64/128` use the `q4z*` shaders and a prepass).
+`iq1_m` has no `mmq_` variant (its additive term changes every 8 values, `mm_q.comp` keeps one per scale group). Not covered here: F32/F16/BF16 weights, Q8_1 / Q8_K / TQ, FP8M. There is no cooperative-matrix matrix-vector shader on purpose: with batch <= 8 a 16-wide
 matrix tile would waste at least half of the math and the decode is memory bound; `mm_*_c` serves batch >= 9.
 
 ## Variants and device requirements
@@ -108,12 +108,21 @@ The buffer is a concatenation of planes, each starting at a word offset that is 
 | Q6_K (256) | 128: ql | 64: qh | 16: int8 scales | 4: f32 d |
 | IQ4_NL (32) | 16: qs | 2: f16 d | | |
 | MXFP4 (32) | 16: qs | 1: E8M0 scale byte (4 blocks per word) | | |
+| IQ2_XXS (256) | 64: qs as in the file (per group of 32: a word of 4 grid indices, a word of 4 x 7 sign bits + 4-bit scale) | 2: f16 d | | |
+| IQ2_XS (256) | 64: qs (u16: 9-bit index, 7-bit signs) | 8: 4-bit scales | 2: f16 d | |
+| IQ2_S (256) | 64: qs (32 index bytes, 32 sign bytes) | 16: qh (8) + scales (8) | 2: f16 d | |
+| IQ3_XXS (256) | 64: qs (grid indices) | 32: per group a word of 4 x 7 sign bits + 4-bit scale | 2: f16 d | |
+| IQ3_S (256) | 64: qs (index low bytes) | 32: sign bytes | 16: qh (8), scales (4), f16 d, 2 unused | |
+| IQ1_S (256) | 32: qs (index low bytes) | 16: qh (u16 per group of 32) | 2: f16 d | |
+| IQ1_M (256) | 32: qs | 16: qh | 8: scale words | 2: f16 d (assembled from the top nibbles of the scale words) |
 | NVFP4 (64) | 32: qs | 4: the four UE4M3 scales (one word) | | |
 | Q4Z32/64/128 (32/64/128) | `group/2`: codes, repacked per chunk | 4: word `f16 scale \| zero << 16` | | |
 
 Notes: nibble formats keep the file's order (value `j` = low nibble of byte `j`, `j + 16` = high nibble) except Q4Z, which is repacked per chunk of 8 values into one word
 (byte `k`: value `k` in the low and value `k + 4` in the high nibble) because the file stores consecutive values in the two nibbles of one byte. `Q4ZP*` blocks are the same as `Q4Z*`;
 the permutation table that follows the blocks in the file is split off into `PackedWeight::perm`. Weight values: see the comment at the top of each `_q_fmt_*.glsl`.
+The IQ formats share the pure helpers of `_iq_common.glsl` (sign expansion, 2-bit code spreading) and the grids of `_iq_grid_*.glsl`, which `scripts/gen_vulkan_iq_tables.py` generates from `quant_iq_tables.rs`:
+the IQ2 grids (three magnitudes 8 / 25 / 43) and the IQ1 grid (-1, 0, 1) as 2-bit codes, two 16-bit entries per word, the IQ3 grids as four magnitude bytes per word. Scale groups for `mm_q.comp`: 32 values, 16 for IQ2_XS / IQ2_S.
 Memory use: the file size, plus the widened K-quant scales (Q3_K +5 %, Q4_K +3 %, Q5_K +2 %, Q6_K +1 %), plus 16-byte plane padding.
 
 ## Reference semantics

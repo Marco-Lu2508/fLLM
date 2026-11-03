@@ -152,6 +152,13 @@ pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
         QuantType::IQ4_NL => ("iq4_nl", 32, 18, [16, 2, 0, 0]),
         QuantType::Mxfp4 => ("mxfp4", 32, 17, [16, 1, 0, 0]),
         QuantType::Q2_0 => ("q2_0", 64, 18, [16, 2, 0, 0]),
+        QuantType::IQ2_XXS => ("iq2_xxs", 256, 66, [64, 2, 0, 0]),
+        QuantType::IQ2_XS => ("iq2_xs", 256, 74, [64, 8, 2, 0]),
+        QuantType::IQ2_S => ("iq2_s", 256, 82, [64, 16, 2, 0]),
+        QuantType::IQ3_XXS => ("iq3_xxs", 256, 98, [64, 32, 2, 0]),
+        QuantType::IQ3_S => ("iq3_s", 256, 110, [64, 32, 16, 0]),
+        QuantType::IQ1_S => ("iq1_s", 256, 50, [32, 16, 2, 0]),
+        QuantType::IQ1_M => ("iq1_m", 256, 56, [32, 16, 8, 2]),
         QuantType::NvFp4 => ("nvfp4", 64, 36, [32, 4, 0, 0]),
         QuantType::Q4Z32 | QuantType::Q4ZP32 => ("q4z32", 32, 19, [16, 4, 0, 0]),
         QuantType::Q4Z64 | QuantType::Q4ZP64 => ("q4z64", 64, 35, [32, 4, 0, 0]),
@@ -190,6 +197,13 @@ pub fn supported_formats() -> &'static [QuantType] {
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
         QuantType::Q2_0,
+        QuantType::IQ2_XXS,
+        QuantType::IQ2_XS,
+        QuantType::IQ2_S,
+        QuantType::IQ3_XXS,
+        QuantType::IQ3_S,
+        QuantType::IQ1_S,
+        QuantType::IQ1_M,
         QuantType::NvFp4,
         QuantType::Q4Z32,
         QuantType::Q4Z64,
@@ -390,6 +404,12 @@ fn put(out: &mut [u8], at: usize, data: &[u8]) {
 
 fn f16_to_f32_bytes(b: &[u8]) -> [u8; 4] {
     f16::from_le_bytes([b[0], b[1]]).to_f32().to_le_bytes()
+}
+
+/// The binary16 super-block scale of an IQ1_M block: its four nibbles sit in the top four bits of the four 16-bit scale words (`sc` = the 8 scale bytes).
+pub fn iq1_m_scale(sc: &[u8]) -> u16 {
+    let w = |i: usize| u16::from_le_bytes([sc[2 * i], sc[2 * i + 1]]);
+    (w(0) >> 12) | ((w(1) >> 8) & 0x00f0) | ((w(2) >> 4) & 0x0f00) | (w(3) & 0xf000)
 }
 
 /// The 16 sub-block scales of a Q3_K block as int8 (`scale - 32`) from its 12 packed bytes.
@@ -699,6 +719,45 @@ pub fn pack_weight(
             QuantType::Q2_0 => {
                 put(&mut out, at(0, g), &b[2..18]);
                 put(&mut out, at(1, g), &b[0..2]);
+            }
+            // IQ2 / IQ3 / IQ1: `d` (and for IQ1_M the scale bytes) move to planes of their own; the index and sign bytes stay in the order of the file
+            QuantType::IQ2_XXS => {
+                put(&mut out, at(0, g), &b[2..66]);
+                put(&mut out, at(1, g), &b[0..2]);
+            }
+            QuantType::IQ2_XS => {
+                put(&mut out, at(0, g), &b[2..66]);
+                put(&mut out, at(1, g), &b[66..74]);
+                put(&mut out, at(2, g), &b[0..2]);
+            }
+            QuantType::IQ2_S => {
+                put(&mut out, at(0, g), &b[2..66]);
+                put(&mut out, at(1, g), &b[66..82]);
+                put(&mut out, at(2, g), &b[0..2]);
+            }
+            QuantType::IQ3_XXS => {
+                put(&mut out, at(0, g), &b[2..66]);
+                put(&mut out, at(1, g), &b[66..98]);
+                put(&mut out, at(2, g), &b[0..2]);
+            }
+            QuantType::IQ3_S => {
+                put(&mut out, at(0, g), &b[2..66]);
+                put(&mut out, at(1, g), &b[74..106]);
+                // qh (8 bytes), scales (4 bytes), d, two unused bytes
+                put(&mut out, at(2, g), &b[66..74]);
+                put(&mut out, at(2, g) + 8, &b[106..110]);
+                put(&mut out, at(2, g) + 12, &b[0..2]);
+            }
+            QuantType::IQ1_S => {
+                put(&mut out, at(0, g), &b[2..34]);
+                put(&mut out, at(1, g), &b[34..50]);
+                put(&mut out, at(2, g), &b[0..2]);
+            }
+            QuantType::IQ1_M => {
+                put(&mut out, at(0, g), &b[0..32]);
+                put(&mut out, at(1, g), &b[32..48]);
+                put(&mut out, at(2, g), &b[48..56]);
+                put(&mut out, at(3, g), &iq1_m_scale(&b[48..56]).to_le_bytes());
             }
             // bitsandbytes: `[f32 scale][codes]` into a plane of codes and a plane of scales
             QuantType::Nf4B64 | QuantType::Nf4B128 | QuantType::Fp4B64 | QuantType::Fp4B128 | QuantType::Int8Row => {

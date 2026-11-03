@@ -4,7 +4,7 @@
 // Embedding lookup (Stream::embedding_lookup): out[t][c] = weight[ids[t]][c] for t < n_ids, c < cols (= hidden size); ids are token ids (uint32, checked
 // < vocab on the host). The format is selected by one macro per entry of variants_ops.list:
 //   RAW_F32 / RAW_F16 / RAW_BF16   row-major table of f32 / binary16 / bfloat16, element (row, c) at index row * cols + c
-//   FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4 FMT_Q2_0
+//   FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4 FMT_Q2_0 FMT_IQ2_XXS FMT_IQ2_XS FMT_IQ2_S FMT_IQ3_XXS FMT_IQ3_S FMT_IQ1_S FMT_IQ1_M
 //                                  planar device layout of the quantized weights (see _ops_wq.glsl); nb = blocks per row = cols / QK, off1..off3 = word
 //                                  offsets of the planes 1..3. One invocation decodes one chunk of 8 weights (cols is a multiple of QK, so of 8).
 // Table rows must lie inside the bound range (word indices are 32-bit: tables up to 4 GiB / 16 GiB of words).
