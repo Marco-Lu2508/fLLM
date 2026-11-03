@@ -1578,7 +1578,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Conversation lookup is on unless the user chose something else: it costs nothing when it finds no match and about doubles the speed on
     // text that repeats (code edits, summaries, quotes, agent loops), with the same text as without. Only where it has been run: the
     // processor and the Vulkan / DirectX chips (the CUDA, HIP and Metal verification kernels have not been run on hardware yet), and not
-    // for models with a recurrent state. `--speculative off` or FLLM_SPECULATIVE_DEFAULT=off keeps it away.
+    // by default for models with a recurrent state: they can speculate when asked (`--speculative suffix|ngram|draft`, the state is copied
+    // before each verification pass and put back after a rejection), but that copy costs time that has not been measured on real models.
+    // `--speculative off` or FLLM_SPECULATIVE_DEFAULT=off keeps it away.
     if speculative_method.is_none()
         && speculative_lookup == 0
         && !speculative_mtp
