@@ -93,9 +93,7 @@ pub fn kda_supported(shape: &crate::backend::KdaShape) -> bool {
 }
 
 pub fn delta_supported(shape: &DeltaShape) -> bool {
-    // the kernels gate the head output with silu(z); Qwen3.8-Flash-Next gates with sigmoid(z)
-    !shape.sigmoid_gate
-        && matches!(shape.k_dim, 32 | 64 | 96 | 128)
+    matches!(shape.k_dim, 32 | 64 | 96 | 128)
         && (1..=128).contains(&shape.v_dim)
         && shape.k_heads > 0
         && shape.v_heads > 0
@@ -192,7 +190,8 @@ pub fn plan_delta_layer(
             .b("reset", run.reset)
             .u("state_off", state_off)
             .f("beta_scale", shape.beta_scale)
-            .f("eps", shape.eps);
+            .f("eps", shape.eps)
+            .b("sigmoid_gate", shape.sigmoid_gate);
         plans.push(plan(
             rec_name,
             rec_consts,
@@ -709,6 +708,10 @@ mod tests {
         assert!(delta_supported(&DeltaShape {
             tiled_heads: true,
             sigmoid_gate: false,
+            ..qwen_shape()
+        }));
+        assert!(delta_supported(&DeltaShape {
+            sigmoid_gate: true,
             ..qwen_shape()
         }));
     }

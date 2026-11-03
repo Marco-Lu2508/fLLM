@@ -885,7 +885,7 @@ Gated DeltaNet, part 2 (port of delta_rec_kernel in cuda/deltanet.cu, reference 
 one sequence) for one value head per workgroup, per token t:
   forget = exp(decay[j] * softplus(alpha[t][j] + dt_bias[j])),  sigma = beta_scale * sigmoid(beta[t][j])
   S = S * forget;  S += k (x) ((v - S^T k) * sigma);  o = S^T q            (q, k: the normalised query / key head of mixed, v: its value channels)
-  out[t][j][c] = o[c] * (1 / sqrt(mean_c(o^2) + eps)) * norm[c] * silu(z[t][j][c])        (gated RMS norm of the head output)
+  out[t][j][c] = o[c] * (1 / sqrt(mean_c(o^2) + eps)) * norm[c] * gate(z[t][j][c])        (gated RMS norm of the head output; gate = silu, or sigmoid when sigmoid_gate != 0)
 The recurrent state S[j][i][c] (value head j, key row i < HK, value column c < hv) is FP32 at state[state_off + (j * HK + i) * hv + c] of the sequence's
 state buffer (float view; state_off = state_offset / 4 of the layer). Value column c is handled by two neighbouring lanes (lane = 2 c + half): half 0
 holds the first HK/2 rows of the column in registers, half 1 the others; the dot products over the key dimension meet in shared memory. Lanes with
@@ -918,8 +918,9 @@ Key head of value head j: tiled != 0 ? j % kh : j / (vh / kh). reset != 0: the o
 | 32 | `uint` | `state_off` |
 | 36 | `float` | `beta_scale` |
 | 40 | `float` | `eps` |
+| 44 | `uint` | `sigmoid_gate` |
 
-Push block: 44 bytes. Grid: `[vh, 1, 1] per run`.
+Push block: 48 bytes. Grid: `[vh, 1, 1] per run`.
 
 ### `mamba_conv.comp`
 

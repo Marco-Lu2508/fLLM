@@ -1,8 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-// FLLM-SHADER: scan_delta_post | bindings: z,norm,scratch,out | push: vh,hk,hv,row0,n,slots,eps | grid: [vh, n, 1] per run window
+// FLLM-SHADER: scan_delta_post | bindings: z,norm,scratch,out | push: vh,hk,hv,row0,n,slots,eps,sigmoid_gate | grid: [vh, n, 1] per run window
 // Gated DeltaNet, chunk-parallel scan (port of scan_delta_post_kernel in cuda/scan.cu): the gated RMS norm of the head outputs of the scan,
-//   out[row0 + t][j * hv + c] = o / sqrt(mean_c(o^2) + eps) * norm[c] * silu(z[row0 + t][j * hv + c]),   hv <= 128 invocations per workgroup (one head of one token)
+//   out[row0 + t][j * hv + c] = o / sqrt(mean_c(o^2) + eps) * norm[c] * gate(z[row0 + t][j * hv + c]),  gate = silu, or sigmoid when sigmoid_gate != 0,   hv <= 128 invocations per workgroup (one head of one token)
 #define WG 128
 #include "_ops_common.glsl"
 #include "_scan_common.glsl"
@@ -20,6 +20,7 @@ layout(push_constant) uniform P {
     uint n;
     uint slots;
     float eps;
+    uint sigmoid_gate;
 } p;
 
 #include "_ops_reduce.glsl"
@@ -36,5 +37,8 @@ void main() {
     const float ss = wg_sum(acc * acc);
     const float inv = 1.0 / sqrt(ss / float(p.hv) + p.eps);
     const uint row = p.row0 + t;
-    if (live) outv[row * value_dim + j * p.hv + c] = acc * inv * norm_w[c] * silu(zin[row * value_dim + j * p.hv + c]);
+    if (live) {
+        const float zv = zin[row * value_dim + j * p.hv + c];
+        outv[row * value_dim + j * p.hv + c] = acc * inv * norm_w[c] * (p.sigmoid_gate != 0u ? sigmoid1(zv) : silu(zv));
+    }
 }
