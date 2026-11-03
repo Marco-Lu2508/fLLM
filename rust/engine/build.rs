@@ -917,7 +917,7 @@ fn hip_kernels() {
     println!("cargo:rustc-env=FLLM_HIP_BUILT_ARCHS={}", archs.join(";"));
     let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu", "rwkv.cu", "kda.cu", "scan.cu", "comm_kernels.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
-    let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
+    let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu", "hip_gfx950.cu"];
     let mut objects = Vec::new();
     for (dir, source) in sources.iter().map(|s| ("cuda", *s)).chain(hip_sources.iter().map(|s| ("hip", *s))) {
         let object = out.join(target.object_name(source));

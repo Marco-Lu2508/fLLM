@@ -67,6 +67,7 @@ pub mod webui;
 #[cfg(feature = "rust-gpu")]
 pub mod gpu;
 pub mod mem;
+pub mod mx_ref;
 pub mod parallel;
 pub mod parameters;
 pub mod reasoning;
