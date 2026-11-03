@@ -14,8 +14,10 @@
 #   BASE_IMAGE        ROCm development image of the builder. The default is the digest that .github/workflows/kernels.yml compiles with
 #                     (ROCm 7.x core SDK layout, /opt/rocm, packages amdrocm-*). For the classic layout use e.g.
 #                     rocm/dev-ubuntu-24.04:6.4.3 together with RUNTIME_PACKAGES=hip-runtime-amd.
-#   HIP_ARCHS         offload architectures, separated by semicolons (gfx906 is Vega 20, gfx90a MI200, gfx942 MI300, gfx950 MI350,
-#                     gfx1030 RDNA2, gfx1100-1102 RDNA3, gfx1151 Strix Halo, gfx1200/1201 RDNA4). A single one shortens the build a lot.
+#   HIP_ARCHS         offload architectures, separated by semicolons. Empty (the default) = every gfx target of the compiler plus its generic
+#                     targets (rust/engine/hip/default_archs.txt: Vega, CDNA, RDNA1 to RDNA4, gfx9-generic ... gfx12-5-generic), so that no AMD
+#                     GPU is left out for lack of a name; the code is compressed in the binary. A single one (gfx1100, gfx1030, gfx1151 ...)
+#                     shortens the build a lot. docs/hip.md lists the families.
 #   RUNTIME_PACKAGES  apt package(s) of the runtime stage that provide libamdhip64 and the libraries it loads. The repository definition and
 #                     key are taken from the builder image, so builder and runtime come from the same ROCm repository.
 #   JOBS              cargo parallelism
@@ -27,7 +29,7 @@ ARG UBUNTU=24.04
 # ---------------------------------------------------------------- builder
 FROM ${BASE_IMAGE} AS builder
 ARG JOBS=4
-ARG HIP_ARCHS="gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
+ARG HIP_ARCHS=""
 ARG RUST_FEATURES="rust-gpu,hip"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -83,7 +85,8 @@ WORKDIR /home/fllm
 # Models downloaded by `run` / `serve --model owner/repo` land in $HF_HOME/hub (= /home/fllm/.cache/huggingface/hub).
 ENV HF_HOME=/home/fllm/.cache/huggingface
 # Cards the ROCm release does not list officially can sometimes run the kernels of a close relative, e.g. HSA_OVERRIDE_GFX_VERSION=11.0.0
-# for gfx1101/gfx1102 or 10.3.0 for gfx1031/gfx1032 (see docs/changes/hip.md). Unset by default.
+# for gfx1101/gfx1102 or 10.3.0 for gfx1031/gfx1032 (see docs/hip.md). Unset by default; the default build has code objects (exact or generic) for all of
+# these already, and fLLM sets the variable itself when a GPU has none (FLLM_HIP_ARCH_OVERRIDE=gfxNNNN does it on request).
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 CMD curl -fsS http://127.0.0.1:${FLLM_PORT:-8000}/health || exit 1
 ENTRYPOINT ["fllm-rs"]

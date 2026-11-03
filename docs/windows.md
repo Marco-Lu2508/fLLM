@@ -152,9 +152,11 @@ By hand: `cargo build --release --locked -p fllm-engine --features "rust-gpu,cud
 * **HIP** (`FLLM_HIP=1`, `build-windows.ps1 -Hip`, AMD HIP SDK for Windows): `ROCM_PATH` / `HIP_PATH` or the newest `Program Files\AMD\ROCm\X.Y`, no `-fPIC`,
   `-fms-runtime-lib=dll` (`static` with `crt-static`), `amdhip64.lib` from the SDK's `lib`. The compiler is `bin\hipcc.exe`, or the SDK's
   `lib\llvm\bin\clang++.exe` driven as a HIP compiler (`--rocm-path`, `--hip-device-lib-path`) when the SDK has no `hipcc.exe`. The default
-  architecture list on Windows is `gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201` (no Vega / Instinct: there is no
-  Windows runtime for them); `FLLM_HIP_ARCHS` / `-HipArchs` overrides it, and entries for which the SDK has no `oclc_isa_version_*.bc`
-  device library are skipped with a build warning. Every build records its list; at run time a GPU outside it is not listed.
+  architecture list on Windows is `rust/engine/hip/default_archs.txt` (`windows=`): Vega, RDNA 1 to 4 and the RDNA 3.5 / `gfx117x` APUs and the generic targets of
+  their families, without the Instinct targets (there is no Windows runtime for them); `FLLM_HIP_ARCHS` / `-HipArchs` overrides it, and entries for which the SDK has
+  no `oclc_isa_version_*.bc` device library (the generic targets have their own, e.g. `oclc_isa_version_10-3-generic.bc`) or the compiler does not know the target
+  are skipped with a build warning. Every build records its list. At run time a GPU outside it gets the generic code object of its family, else it is reported as
+  "present but not usable" with what to rebuild with ([hip.md](hip.md)).
   The HIP runtime is **delay-loaded** (`/DELAYLOAD:amdhip64_N.dll`, the name is read from `amdhip64.lib`), so `fllm-rs.exe` starts on a machine without
   it; `FLLM_HIP_DELAYLOAD=0` links it the ordinary way. Details and the search order of the DLL: [docs/changes/hip.md](changes/hip.md).
   CI: `windows-hip-package.yml` (artifact `fllm-windows-x86_64-msvc-hip`) and the optional `windows-hip` job of the release workflow.
@@ -217,8 +219,8 @@ family) under Linux. Treat every statement as a hypothesis, and please send the 
 
 What the code assumes for this chip:
 
-* `gfx1151` is in the default architecture list of the HIP build on Windows (`build.rs`: `gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201`);
-  the HIP code treats every `gfx11xx` as RDNA 3 (wave32, WMMA matrix cores, 64 KB of LDS); `gfx1151` additionally has its own tile table in the skinny GEMM
+* `gfx1151` is in the default architecture list of the HIP build on Windows (`rust/engine/hip/default_archs.txt`);
+  the HIP code treats the `gfx110x` and `gfx115x` chips as RDNA 3 (wave32, WMMA matrix cores, 64 KB of LDS); `gfx1151` additionally has its own tile table in the skinny GEMM
   (`hip_skinny.cu`, F16 / BF16 weights only, never run).
 * The GPU is an integrated one (`hipDeviceProp.integrated`, Vulkan device type `INTEGRATED_GPU`): the memory plan treats it as unified memory.
   The plan sums the device-local and the host-visible Vulkan heaps and, because an integrated GPU has no memory of its own, limits the result to the physical

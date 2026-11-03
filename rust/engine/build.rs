@@ -785,15 +785,19 @@ stderr:
     }
 }
 
-/// Offload architectures built when `FLLM_HIP_ARCHS` is not set. Linux: everything the kernels were checked for. Windows: only the
-/// GPUs a Windows driver and the HIP SDK run (RDNA2 to RDNA4 consumer / workstation cards and the RDNA3.5 APUs); the Instinct and Vega
-/// targets have no Windows runtime, so compiling them only costs build time.
-fn default_hip_archs(windows: bool) -> &'static str {
-    if windows {
-        "gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201"
-    } else {
-        "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201"
-    }
+/// Offload architectures built when `FLLM_HIP_ARCHS` is not set: every gfx target the HIP compiler can build for, so that no AMD GPU is
+/// left out for lack of a name in a list, plus the generic targets of newer clang (`gfx9-generic`, `gfx10-1-generic`, `gfx10-3-generic`,
+/// `gfx11-generic`, `gfx11-7-generic`, `gfx12-generic`, `gfx12-5-generic`), whose code object the HIP runtime loads for a chip of the family
+/// that has no code object of its own. The text is `hip/default_archs.txt` (the file the CI jobs and `scripts/hip_arch_check.sh` read as well).
+/// Names the installed compiler or device libraries do not know are dropped one by one (`probe_hip_archs`). The Windows list leaves out the
+/// Instinct targets: the Windows driver has no runtime for them, so compiling them only costs build time.
+fn default_hip_archs(windows: bool) -> String {
+    let key = if windows { "windows=" } else { "linux=" };
+    include_str!("hip/default_archs.txt")
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(key))
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// `requested` (`a;b;c`) as a list without blanks and duplicates.
@@ -877,6 +881,64 @@ fn hip_compiler(rocm: &Path, target: &Target) -> (PathBuf, Vec<String>) {
     (hipcc, Vec::new())
 }
 
+/// How many sources are compiled at the same time: `FLLM_HIP_JOBS`, else cargo's job count, at most 8 (every compiler process builds all
+/// the offload targets one after the other and takes about a gigabyte).
+fn hip_jobs() -> usize {
+    let from = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0);
+    from("FLLM_HIP_JOBS").or_else(|| from("NUM_JOBS").map(|n| n.min(8))).unwrap_or(2)
+}
+
+/// Splits `archs` into the ones the HIP compiler builds for and the others, by compiling an empty kernel for each (device pass only).
+fn probe_hip_archs(hipcc: &Path, driver_args: &[String], archs: &[String], dir: &Path) -> (Vec<String>, Vec<String>) {
+    let source = dir.join("fllm_arch_probe.hip");
+    if std::fs::write(&source, "__global__ void fllm_probe() {}\n").is_err() {
+        return (archs.to_vec(), Vec::new());
+    }
+    let ok: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = archs
+            .iter()
+            .map(|arch| {
+                let source = &source;
+                scope.spawn(move || {
+                    Command::new(hipcc)
+                        .args(["-x", "hip", "--cuda-device-only", "-c"])
+                        .args(driver_args)
+                        .arg(format!("--offload-arch={arch}"))
+                        .arg("-o")
+                        .arg(dir.join(format!("fllm_probe_{arch}.o")))
+                        .arg(source)
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or(false)).collect()
+    });
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for (arch, good) in archs.iter().zip(ok) {
+        if good { kept.push(arch.clone()) } else { dropped.push(arch.clone()) }
+    }
+    (kept, dropped)
+}
+
+/// The gfx targets of the AMD GPUs in this machine, from `rocm_agent_enumerator` or `amdgpu-arch` (empty when neither finds one).
+fn native_hip_archs(rocm: &Path) -> Vec<String> {
+    let tools = [rocm.join("bin").join(host_exe("rocm_agent_enumerator")), rocm.join("lib").join("llvm").join("bin").join(host_exe("amdgpu-arch")), PathBuf::from("amdgpu-arch")];
+    for tool in tools {
+        if let Ok(output) = Command::new(&tool).output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let found = parse_hip_archs(&text.lines().map(|l| l.split(':').next().unwrap_or("").trim()).filter(|l| l.starts_with("gfx") && *l != "gfx000").collect::<Vec<_>>().join(";"));
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// AMD GPUs: the same kernel sources compiled with hipcc (`FLLM_HIP=1`, `--features cuda`). The tensor-core kernels are
 /// compiled out (cuda/hip_compat.h). Linux links libamdhip64 from the ROCm install. Windows links the HIP runtime lazily (see below).
 /// `FLLM_HIP_ARCHS` lists the offload architectures (default: `default_hip_archs`), `ROCM_PATH` the install
@@ -899,8 +961,21 @@ fn hip_kernels() {
     let rocm = rocm_home(&target);
     let (hipcc, driver_args) = hip_compiler(&rocm, &target);
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    let requested = std::env::var("FLLM_HIP_ARCHS").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default_hip_archs(target.windows).into());
+    println!("cargo:rerun-if-env-changed=FLLM_HIP_COMPRESS");
+    println!("cargo:rerun-if-env-changed=FLLM_HIP_JOBS");
+    let explicit = std::env::var("FLLM_HIP_ARCHS").ok().filter(|v| !v.trim().is_empty());
+    let requested = explicit.clone().unwrap_or_else(|| default_hip_archs(target.windows));
     let mut archs = parse_hip_archs(&requested);
+    // `FLLM_HIP_ARCHS=native`: the GPUs of this machine (quick builds while developing)
+    if archs.iter().any(|a| a == "native") {
+        let found = native_hip_archs(&rocm);
+        if found.is_empty() {
+            println!("cargo:warning=FLLM_HIP_ARCHS=native: no AMD GPU found on this machine (rocm_agent_enumerator / amdgpu-arch); building the default list");
+            archs = parse_hip_archs(&default_hip_archs(target.windows));
+        } else {
+            archs = found;
+        }
+    }
     if target.windows {
         // the Windows SDK may ship device libraries for fewer targets than the Linux one: skip what it cannot build
         let files: Option<Vec<String>> = hip_bitcode_dir(&rocm)
@@ -913,34 +988,63 @@ fn hip_kernels() {
         assert!(!kept.is_empty(), "no usable GPU architecture in FLLM_HIP_ARCHS={requested:?} for the HIP SDK at {}", rocm.display());
         archs = kept;
     }
-    // the architectures this binary carries code for: the runtime lists only devices it can run (src/backend/cuda.rs, list_devices)
+    // the default list names every target of the newest ROCm: the installed compiler may know fewer (older ROCm, the Windows SDK); an explicit
+    // list is the user's word and fails loudly instead
+    if explicit.is_none() {
+        let (kept, dropped) = probe_hip_archs(&hipcc, &driver_args, &archs, &out);
+        if !dropped.is_empty() {
+            println!("cargo:warning=HIP compiler does not know {}: left out of the default list", dropped.join(", "));
+        }
+        assert!(!kept.is_empty(), "the HIP compiler {} builds for none of the default GPU architectures", hipcc.display());
+        archs = kept;
+    }
+    // the architectures this binary carries code for (src/backend/hip_arch.rs decides from it what a GPU without its own code object gets)
     println!("cargo:rustc-env=FLLM_HIP_BUILT_ARCHS={}", archs.join(";"));
+    println!("cargo:warning=HIP code objects for: {}", archs.join(" "));
     let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu", "rwkv.cu", "kda.cu", "scan.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
     let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
-    let mut objects = Vec::new();
-    for (dir, source) in sources.iter().map(|s| ("cuda", *s)).chain(hip_sources.iter().map(|s| ("hip", *s))) {
-        let object = out.join(target.object_name(source));
-        let mut command = Command::new(&hipcc);
-        command.args(["-x", "hip", "-c", "-O3", "-std=c++17", "-DFLLM_NO_FP4", "-Wno-unused-value", "-Wno-unused-result"]);
-        command.args(&driver_args);
-        if source != "kv_quant.cu" { command.arg("-ffast-math"); }
-        command.args(target.hipcc_platform_flags());
-        for arch in &archs {
-            command.arg(format!("--offload-arch={arch}"));
+    // The code objects are compressed in the fat binary (zstd, `-offload-compress`; the runtime of ROCm 6.2 and newer unpacks them): with
+    // dozens of targets the uncompressed device code would be several hundred MB. FLLM_HIP_COMPRESS=0 builds uncompressed objects for an older runtime.
+    let compress = std::env::var("FLLM_HIP_COMPRESS").map_or(true, |v| v != "0");
+    let jobs = hip_jobs();
+    let work: Vec<(&str, &str)> = sources.iter().map(|s| ("cuda", *s)).chain(hip_sources.iter().map(|s| ("hip", *s))).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failure: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.min(work.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some((dir, source)) = work.get(i).copied() else { break };
+                if failure.lock().is_ok_and(|f| f.is_some()) {
+                    break;
+                }
+                let mut command = Command::new(&hipcc);
+                command.args(["-x", "hip", "-c", "-O3", "-std=c++17", "-DFLLM_NO_FP4", "-Wno-unused-value", "-Wno-unused-result"]);
+                command.args(&driver_args);
+                if source != "kv_quant.cu" { command.arg("-ffast-math"); }
+                if compress { command.arg("--offload-compress"); }
+                command.args(target.hipcc_platform_flags());
+                for arch in &archs {
+                    command.arg(format!("--offload-arch={arch}"));
+                }
+                let result = command.arg("-o").arg(out.join(target.object_name(source))).arg(PathBuf::from(dir).join(source)).output();
+                let message = match result {
+                    Err(e) => Some(format!("cannot run {}: {e} (set ROCM_PATH / HIP_PATH)", hipcc.display())),
+                    Ok(o) if !o.status.success() => Some(format!("{} failed on {source}:\n{}\n{}", hipcc.display(), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+                    Ok(_) => None,
+                };
+                if let (Some(m), Ok(mut f)) = (message, failure.lock()) {
+                    f.get_or_insert(m);
+                }
+            });
         }
-        let output = command
-            .arg("-o")
-            .arg(&object)
-            .arg(PathBuf::from(dir).join(source))
-            .output()
-            .unwrap_or_else(|e| panic!("cannot run {}: {e} (set ROCM_PATH / HIP_PATH)", hipcc.display()));
-        if !output.status.success() {
-            eprintln!("{} failed on {source}:\n{}\n{}", hipcc.display(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            panic!("hipcc failed on {source}");
-        }
-        objects.push(object);
+    });
+    if let Some(message) = failure.into_inner().ok().flatten() {
+        eprintln!("{message}");
+        panic!("hipcc failed (see above)");
     }
+    let objects: Vec<PathBuf> = work.iter().map(|(_, source)| out.join(target.object_name(source))).collect();
     let library = out.join(target.library_name("fllmcuda"));
     archive(&target, &library, &objects);
     println!("cargo:rustc-link-search=native={}", out.display());
@@ -1333,17 +1437,32 @@ mod tests {
     fn hip_arch_lists() {
         assert_eq!(parse_hip_archs(" gfx1100;gfx1151 ;;gfx1100,gfx1201"), ["gfx1100", "gfx1151", "gfx1201"]);
         assert!(parse_hip_archs("").is_empty());
-        // Windows default: no Vega / Instinct, but the APUs and RDNA4
-        let win = parse_hip_archs(default_hip_archs(true));
-        assert!(win.iter().all(|a| a.starts_with("gfx1")));
-        assert!(win.contains(&"gfx1151".to_owned()) && win.contains(&"gfx1201".to_owned()) && win.contains(&"gfx1200".to_owned()));
-        // Linux default unchanged
-        assert!(parse_hip_archs(default_hip_archs(false)).contains(&"gfx942".to_owned()));
+        // Windows default: no Instinct targets, but Vega, the APUs, RDNA4 and the generic targets
+        let win = parse_hip_archs(&default_hip_archs(true));
+        assert!(!win.iter().any(|a| matches!(a.as_str(), "gfx908" | "gfx90a" | "gfx942" | "gfx950")));
+        assert!(win.contains(&"gfx900".to_owned()) && win.contains(&"gfx1151".to_owned()) && win.contains(&"gfx1201".to_owned()) && win.contains(&"gfx1200".to_owned()));
+        assert!(win.contains(&"gfx10-3-generic".to_owned()) && win.contains(&"gfx11-generic".to_owned()));
+        // Linux default: everything the old list had, the Vega / RDNA1 / RDNA2 members, and a generic target of every family
+        let lin = parse_hip_archs(&default_hip_archs(false));
+        for a in ["gfx906", "gfx908", "gfx90a", "gfx942", "gfx950", "gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151", "gfx1200", "gfx1201"] {
+            assert!(lin.contains(&a.to_owned()), "{a}");
+        }
+        for a in ["gfx900", "gfx1010", "gfx1011", "gfx1012", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1152", "gfx1153", "gfx9-generic", "gfx9-4-generic", "gfx10-1-generic", "gfx10-3-generic", "gfx11-generic", "gfx11-7-generic", "gfx12-generic"] {
+            assert!(lin.contains(&a.to_owned()), "{a}");
+        }
+        assert_eq!(lin.len(), { let mut l = lin.clone(); l.sort(); l.dedup(); l.len() });
+        // generic targets need their own isa bitcode of the device libraries (oclc_isa_version_10-3-generic.bc)
+        assert_eq!(isa_bitcode_name("gfx10-3-generic"), "oclc_isa_version_10-3-generic.bc");
+        assert_eq!(isa_bitcode_name("gfx9-4-generic"), "oclc_isa_version_9-4-generic.bc");
         assert_eq!(isa_bitcode_name("gfx1100"), "oclc_isa_version_1100.bc");
         assert_eq!(isa_bitcode_name("gfx90a"), "oclc_isa_version_90a.bc");
         let files: Vec<String> = ["oclc_isa_version_1100.bc", "oclc_isa_version_1151.bc", "ocml.bc"].iter().map(|s| s.to_string()).collect();
         let want = parse_hip_archs("gfx1030;gfx1100;gfx1151");
         assert_eq!(split_supported_archs(&want, Some(files.as_slice())), (vec!["gfx1100".to_owned(), "gfx1151".to_owned()], vec!["gfx1030".to_owned()]));
+        // an SDK with the generic isa files keeps the generic targets, one without drops them
+        let sdk: Vec<String> = ["oclc_isa_version_1030.bc", "oclc_isa_version_10-3-generic.bc"].iter().map(|s| s.to_string()).collect();
+        let both = parse_hip_archs("gfx1030;gfx10-3-generic;gfx11-generic");
+        assert_eq!(split_supported_archs(&both, Some(sdk.as_slice())), (vec!["gfx1030".to_owned(), "gfx10-3-generic".to_owned()], vec!["gfx11-generic".to_owned()]));
         assert_eq!(split_supported_archs(&want, None), (want.clone(), Vec::new()));
     }
 

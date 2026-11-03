@@ -33,8 +33,12 @@ pub enum ArchFamily {
     Rdna3,
     /// gfx115x (RDNA3.5, Strix Point / Halo): wave32, WMMA.
     Rdna35,
+    /// gfx117x: wave32, WMMA in the gfx12 encoding (fLLM does not use it there: the layouts were never run on it).
+    Gfx117,
     /// gfx120x (RDNA4): wave32, WMMA (gfx12 encoding), FP8.
     Rdna4,
+    /// gfx125x: wave32, a different matrix unit (not used).
+    Gfx125,
     /// Anything else (including future architectures).
     Unknown,
 }
@@ -52,7 +56,9 @@ impl ArchFamily {
             a if a.starts_with("gfx103") => Self::Rdna2,
             a if a.starts_with("gfx110") => Self::Rdna3,
             a if a.starts_with("gfx115") => Self::Rdna35,
+            a if a.starts_with("gfx117") => Self::Gfx117,
             a if a.starts_with("gfx120") => Self::Rdna4,
+            a if a.starts_with("gfx125") => Self::Gfx125,
             _ => Self::Unknown,
         }
     }
@@ -63,11 +69,12 @@ impl ArchFamily {
             Self::Vega | Self::Cdna1 | Self::Cdna2 | Self::Cdna3 | Self::Cdna4 | Self::Unknown => {
                 64
             }
-            Self::Rdna1 | Self::Rdna2 | Self::Rdna3 | Self::Rdna35 | Self::Rdna4 => 32,
+            Self::Rdna1 | Self::Rdna2 | Self::Rdna3 | Self::Rdna35 | Self::Gfx117 | Self::Rdna4 | Self::Gfx125 => 32,
         }
     }
 
-    /// Matrix instruction set: `Some("MFMA")` (CDNA) or `Some("WMMA")` (RDNA3 and newer).
+    /// The matrix instruction set fLLM's kernels use: `Some("MFMA")` (CDNA) or `Some("WMMA")` (RDNA3, RDNA3.5, RDNA4); `None` where the
+    /// plain kernels run (Vega, RDNA1/2, gfx117x, gfx125x, unknown chips). `hip/arch_table.csv` is the full table.
     pub fn matrix_cores(self) -> Option<&'static str> {
         match self {
             Self::Cdna1 | Self::Cdna2 | Self::Cdna3 | Self::Cdna4 => Some("MFMA"),
@@ -81,7 +88,7 @@ impl ArchFamily {
         format!(
             "wave{}, {}",
             self.wave_size(),
-            self.matrix_cores().unwrap_or("no matrix cores")
+            self.matrix_cores().unwrap_or("plain kernels (no matrix cores used)")
         )
     }
 }
@@ -161,12 +168,13 @@ pub fn list(first_index: usize) -> Vec<DeviceInfo> {
         .collect()
 }
 
-/// Architecture of HIP device `ordinal` (`gfx1100`), from the CUDA inventory.
+/// Architecture of HIP device `ordinal` (`gfx1100`), from the CUDA inventory (the entry's index is the HIP ordinal, also when another AMD
+/// GPU was left out of the list as not usable).
 pub fn arch_of_device(ordinal: usize) -> Option<String> {
     crate::backend::cuda::list_devices(0)
         .into_iter()
         .filter(is_rocm_entry)
-        .nth(ordinal)
+        .find(|d| d.index == ordinal)
         .and_then(|d| gcn_arch(&d.name))
 }
 
@@ -209,7 +217,15 @@ mod tests {
         assert_eq!(ArchFamily::from_arch("gfx90a"), ArchFamily::Cdna2);
         assert_eq!(ArchFamily::from_arch("gfx942"), ArchFamily::Cdna3);
         assert_eq!(ArchFamily::from_arch("gfx906"), ArchFamily::Vega);
+        assert_eq!(ArchFamily::from_arch("gfx1171"), ArchFamily::Gfx117);
+        assert_eq!(ArchFamily::from_arch("gfx1250"), ArchFamily::Gfx125);
         assert_eq!(ArchFamily::from_arch("gfx9999"), ArchFamily::Unknown);
+        // the family and the table agree on what is used
+        for row in crate::backend::hip_arch::table() {
+            let family = ArchFamily::from_arch(&row.gfx);
+            assert_eq!(family.wave_size(), row.wave, "{}", row.gfx);
+            assert_eq!(family.matrix_cores().is_some(), row.kernels != crate::backend::hip_arch::KernelSet::Plain, "{}", row.gfx);
+        }
         assert_eq!(ArchFamily::Rdna3.wave_size(), 32);
         assert_eq!(ArchFamily::Cdna3.wave_size(), 64);
         assert_eq!(ArchFamily::Cdna1.matrix_cores(), Some("MFMA"));

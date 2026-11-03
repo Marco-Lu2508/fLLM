@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
     inputs:
       hip_archs:
-        description: "GPU architectures, separated by semicolons"
-        default: "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
+        description: "GPU architectures, separated by semicolons; empty = the default list (every gfx and generic target)"
+        default: ""
         type: string
 
 permissions:
@@ -85,6 +85,6 @@ jobs:
           provenance: false
           build-args: |
             JOBS=3
-            HIP_ARCHS=${{ inputs.hip_archs || 'gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201' }}
+            HIP_ARCHS=${{ inputs.hip_archs }}
           cache-from: type=gha,scope=rocm
           cache-to: type=gha,mode=max,scope=rocm

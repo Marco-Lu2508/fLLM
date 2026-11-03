@@ -87,6 +87,15 @@ jobs:
             exit 1
           }
 
+      - name: Which GPU targets were built
+        if: always()
+        shell: pwsh
+        run: |
+          $lines = @()
+          if (Test-Path build.log) { $lines = Select-String -Path build.log -Pattern 'HIP (code objects for|compiler does not know|SDK has no device libraries)' | ForEach-Object { $_.Line.Trim() } }
+          "### Windows HIP package: GPU targets`n" + '```' + "`n" + ($lines -join "`n") + "`n" + '```' | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $lines | ForEach-Object { Write-Host $_ }
+
       - name: Show what is in the package
         if: always()
         shell: pwsh

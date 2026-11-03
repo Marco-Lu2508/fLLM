@@ -97,6 +97,9 @@ extern "C" {
     ) -> c_int;
     fn fllm_cuda_last_error() -> *const c_char;
     fn fllm_cuda_device_count() -> c_int;
+    /// hip/hip_device.cu: 0 when the AMD device runs the code objects of this binary, else 1 and `msg` says why.
+    #[cfg(feature = "hip")]
+    fn fllm_hip_selfcheck(dev: c_int, msg: *mut c_char, msg_len: usize, info: *mut c_int) -> c_int;
     fn fllm_cuda_device_info(
         dev: c_int,
         name: *mut c_char,
@@ -1196,6 +1199,9 @@ fn dev_ptr(buf: &DeviceBuffer) -> Result<*mut u8, BackendError> {
 
 /// CUDA devices as inventory entries, numbered from `first_index`.
 pub fn list_devices(first_index: usize) -> Vec<DeviceInfo> {
+    // AMD: decide before the runtime starts which code object each GPU will get (HSA_OVERRIDE_GFX_VERSION, FLLM_HIP_ARCH_OVERRIDE)
+    #[cfg(feature = "hip")]
+    crate::backend::hip_arch::prepare_runtime();
     // Windows HIP build: the runtime DLL is loaded lazily and may be missing (then no AMD device is listed, the other backends stay)
     #[cfg(feature = "hip")]
     if let Err(message) = crate::backend::hip_runtime::check() {
@@ -1218,17 +1224,39 @@ pub fn list_devices(first_index: usize) -> Vec<DeviceInfo> {
             }
             // SAFETY: `fllm_cuda_device_info` wrote a NUL-terminated name.
             let name = unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned();
-            // an AMD GPU this binary has no code for is not a device (it would fail at the first kernel); `auto` then goes on to Vulkan
+            // an AMD GPU: the HIP runtime loads the exact or the generic code object of its chip; a small check on the device (hip/hip_device.cu)
+            // proves that the code runs before the GPU counts as a device. One that fails is "present but not usable" (fllm-rs devices, the
+            // placement ledger), never a silent skip, and the model runs on the next device.
             #[cfg(feature = "hip")]
             if major == 0 {
-                use crate::backend::{hip::device_info::gcn_arch, hip_runtime::{arch_is_built, built_archs}};
-                let override_set = std::env::var_os("HSA_OVERRIDE_GFX_VERSION").is_some();
-                if let Some(arch) = gcn_arch(&name) {
-                    if !arch_is_built(&arch, built_archs(), override_set) {
-                        // (with several AMD GPUs of which only some are built for, the ordinals of the later ones shift)
-                        static ONCE: std::sync::Once = std::sync::Once::new();
-                        ONCE.call_once(|| eprintln!("[fllm-rs] hip: {name} is not in this build's GPU list ({}); skipped (rebuild with FLLM_HIP_ARCHS={arch})", built_archs().unwrap_or("")));
-                        return None;
+                use crate::backend::hip_arch;
+                let arch = crate::backend::hip::device_info::gcn_arch(&name).unwrap_or_default();
+                let mut msg = [0 as c_char; 320];
+                let mut info = [0 as c_int; 6];
+                // SAFETY: `msg` and `info` are valid for the sizes passed; the function writes a NUL-terminated message.
+                let rc = unsafe { fllm_hip_selfcheck(dev, msg.as_mut_ptr(), msg.len(), info.as_mut_ptr()) };
+                if rc != 0 {
+                    // SAFETY: `fllm_hip_selfcheck` wrote a NUL-terminated message.
+                    let reason = unsafe { CStr::from_ptr(msg.as_ptr()) }.to_string_lossy().into_owned();
+                    hip_arch::note_unusable(dev as usize, &name, &arch, &reason);
+                    return None;
+                }
+                static LOGGED: std::sync::Mutex<Vec<c_int>> = std::sync::Mutex::new(Vec::new());
+                if let Ok(mut logged) = LOGGED.lock() {
+                    if !logged.contains(&dev) {
+                        logged.push(dev);
+                        let code = match hip_arch::coverage(&arch, &hip_arch::built_archs()) {
+                            hip_arch::Coverage::Exact => "its own code object".to_owned(),
+                            hip_arch::Coverage::Generic(g) => format!("the generic {g} code object"),
+                            hip_arch::Coverage::Missing => "another chip's code object (HSA_OVERRIDE_GFX_VERSION)".to_owned(),
+                        };
+                        eprintln!(
+                            "[fllm-rs] hip: {name}: {code}, wave{}, kernels: {} ({}; matrix-core check {})",
+                            info[1],
+                            hip_arch::KernelSet::from_code(info[5]).label(),
+                            match info[2] { 2 => "dp4a v_dot4_i32_iu8", 1 => "dp4a v_dot4_i32_i8", _ => "no dot product, byte loop" },
+                            match info[4] { 1 => "passed", 0 => "failed: plain kernels", _ => "not applicable" },
+                        );
                     }
                 }
             }
@@ -1272,6 +1300,8 @@ pub struct CudaBackend {
 impl CudaBackend {
     pub fn new(device: usize) -> Result<Self, BackendError> {
         #[cfg(feature = "hip")]
+        crate::backend::hip_arch::prepare_runtime();
+        #[cfg(feature = "hip")]
         crate::backend::hip_runtime::check().map_err(BackendError::DeviceNotFound)?;
         // SAFETY: plain query.
         let count = unsafe { fllm_cuda_device_count() };
@@ -1283,7 +1313,12 @@ impl CudaBackend {
                 "CUDA device {device} requested, {count} present"
             )));
         }
-        let info = list_devices(0).into_iter().nth(device).ok_or_else(|| {
+        // (by ordinal: a GPU left out of the list, see `list_devices`, must not shift the others)
+        let info = list_devices(0).into_iter().find(|d| d.index == device).ok_or_else(|| {
+            #[cfg(feature = "hip")]
+            if let Some(reason) = crate::backend::hip_arch::unusable_reason(device) {
+                return BackendError::DeviceNotFound(format!("AMD GPU {device} is present but not usable: {reason}"));
+            }
             BackendError::DeviceNotFound(format!("CUDA device {device} cannot be queried"))
         })?;
         let cc = info
@@ -6083,7 +6118,7 @@ fn attention_paged(
         if self.expert_gemm_device(out, x, expert_weights, expert_indices, expert_weights_buf, top_k)? {
             return Ok(());
         }
-        crate::backend::fallback_checked("moe_expert_gemm", "no grouped kernel for this weight type or GPU (or FLLM_CUDA_MOE=0)?; expert weights are copied every call");
+        crate::backend::fallback_checked("moe_expert_gemm", "no grouped kernel for this weight type or GPU (or FLLM_CUDA_MOE=0)?; expert weights are copied every call")?;
         let cx = self.copy_to_host(x)?;
         let cidx = self.copy_to_host(expert_indices)?;
         let cwts = self.copy_to_host(expert_weights_buf)?;

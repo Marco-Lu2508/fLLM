@@ -101,16 +101,6 @@ pub fn hsa_override_applies() -> bool {
     !cfg!(windows)
 }
 
-/// Can a GPU of architecture `arch` run this binary's kernels? `built` is the `;` separated list the kernels were compiled for (`None`
-/// or empty: unknown, assume yes). `override_set`: `HSA_OVERRIDE_GFX_VERSION` is set (the user asked for another chip's code).
-pub fn arch_is_built(arch: &str, built: Option<&str>, override_set: bool) -> bool {
-    let Some(list) = built.map(str::trim).filter(|l| !l.is_empty()) else { return true };
-    if override_set && hsa_override_applies() {
-        return true;
-    }
-    list.split(';').any(|a| a.trim() == arch)
-}
-
 /// The architectures the kernels of this binary were built for (`None` when the build script did not record them).
 pub fn built_archs() -> Option<&'static str> {
     option_env!("FLLM_HIP_BUILT_ARCHS")
@@ -351,16 +341,5 @@ mod tests {
         let m = missing_message("amdhip64_7.dll", &candidate_paths(&env(), "amdhip64_7.dll")[..2]);
         assert!(m.contains("Adrenalin") && m.contains("HIP SDK") && m.contains("FLLM_HIP_DLL") && m.contains("Vulkan"));
         assert!(m.contains("next to fllm-rs.exe"));
-    }
-
-    #[test]
-    fn built_arch_filter() {
-        let built = Some("gfx1100;gfx1151");
-        assert!(arch_is_built("gfx1100", built, false));
-        assert!(!arch_is_built("gfx1102", built, false));
-        assert!(arch_is_built("gfx1102", None, false));
-        assert!(arch_is_built("gfx1102", Some(""), false));
-        // the override lets another chip's code run, but only where the runtime honours it
-        assert_eq!(arch_is_built("gfx1102", built, true), hsa_override_applies());
     }
 }

@@ -73,19 +73,44 @@
 #define cudaPointerGetAttributes hipPointerGetAttributes
 
 // ---- Architecture families, as the device pass of hipcc sees them (the host pass defines none of these macros) ----------------
-//   FLLM_HIP_CDNA    gfx908 / gfx90a / gfx94x / gfx950: wave64, MFMA matrix cores, v_dot2c / sdot4
-//   FLLM_HIP_RDNA3   gfx11xx: wave32 (the default), WMMA with 16-element fragments, v_dot2 / sudot4
-//   FLLM_HIP_RDNA4   gfx12xx: wave32, WMMA with 8-element fragments (gfx12 encoding), v_dot2 / sudot4
-// The kernels of hip/*.cu use them to pick instructions; on every other architecture (and in the host pass) their bodies are empty
-// and the host-side dispatcher (fllm_hip_arch() in hip/hip_common.cuh) never launches them.
-#if defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__)
+// One code object exists per target of FLLM_HIP_ARCHS, and the HIP runtime hands a GPU the exact one, else the generic one of its family
+// (gfx9-generic, gfx9-4-generic, gfx10-1-generic, gfx10-3-generic, gfx11-generic, gfx11-7-generic, gfx12-generic, gfx12-5-generic). The
+// names below therefore test the specific targets AND their generic target; the table is hip/arch_table.csv (scripts/hip_arch_check.sh
+// compiles every row and compares).
+//   FLLM_HIP_CDNA    gfx908 / gfx90a / gfx94x / gfx950 / gfx9-4-generic: wave64, MFMA 16x16x16 on FP16 (hip/hip_mma.cuh)
+//   FLLM_HIP_RDNA3   gfx11xx except gfx117x: wave32, WMMA with 16-element fragments (wmma_f32_16x16x16_f16_w32)
+//   FLLM_HIP_RDNA4   gfx1200 / gfx1201 / gfx12-generic: wave32, WMMA with 8-element fragments (the gfx12 encoding)
+//   FLLM_HIP_DOT2    packed FP16 dot product into FP32 (v_dot2c_f32_f16 on gfx9, v_dot2_f32_f16 on gfx11 / gfx12): the skinny GEMM kernels
+//   FLLM_HIP_SDOT4   v_dot4_i32_i8 (gfx906, gfx908, gfx90a, gfx94x, gfx950, gfx1011, gfx1012, gfx103x and their generic targets)
+//   FLLM_HIP_SUDOT4  v_dot4_i32_iu8 (gfx11, gfx12)
+// Every other target (gfx900 .. gfx90c, gfx1010, gfx117x, gfx125x, whatever comes later) gets none of them: the kernels of hip/*.cu and the
+// dispatchers of cuda/*.cu then run the plain FP32 / byte-loop code, which uses no matrix-core, dot or DPP-restricted instruction.
+// gfx117x has WMMA (gfx12 encoding) but the layouts of hip_mma.cuh were never run on it, and gfx125x has a different matrix unit.
+// The kernels of hip/*.cu use these to pick instructions; in the host pass their bodies are empty and the host-side dispatcher
+// (fllm_hip_device() in hip/hip_device.cu, which asks the device-side probe what the loaded code object is) never launches them.
+#if defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx9_4_generic__) ||     defined(__gfx950__)
 #define FLLM_HIP_CDNA 1
 #endif
-#if defined(__GFX11__)
+#if defined(__gfx1170__) || defined(__gfx1171__) || defined(__gfx1172__) || defined(__gfx11_7_generic__)
+#define FLLM_HIP_GFX117X 1
+#endif
+#if defined(__GFX11__) && !defined(FLLM_HIP_GFX117X)
 #define FLLM_HIP_RDNA3 1
 #endif
-#if defined(__GFX12__)
+#if defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx12_generic__)
 #define FLLM_HIP_RDNA4 1
+#endif
+#if defined(__gfx12_5_generic__) || defined(__gfx1250__) || defined(__gfx1251__) || defined(__GFX13__)
+#define FLLM_HIP_GFX125X 1
+#endif
+#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) ||     defined(__gfx9_4_generic__) || defined(__gfx950__) || defined(__gfx1011__) || defined(__gfx1012__) ||     defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) ||     defined(__gfx1036__) || defined(__gfx10_3_generic__)
+#define FLLM_HIP_SDOT4 1
+#endif
+#if (defined(__GFX11__) || defined(__GFX12__)) && !defined(__GFX13__)
+#define FLLM_HIP_SUDOT4 1
+#endif
+#if defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || defined(__gfx9_4_generic__) || defined(__gfx950__) ||     ((defined(__GFX11__) || defined(__GFX12__)) && !defined(FLLM_HIP_GFX125X))
+#define FLLM_HIP_DOT2 1
 #endif
 
 // HIP wants 64-bit lane masks for the _sync variants; the unmasked forms are equivalent for the full-warp uses here
@@ -102,12 +127,12 @@ __device__ __forceinline__ T __shfl_sync(unsigned int, T var, int src_lane, int 
     return __shfl(var, src_lane, width);
 }
 
-// 8-bit integer dot product with 32-bit accumulation: v_dot4_i32_i8 on CDNA2+ and RDNA2 (sdot4), v_dot4_i32_iu8 on RDNA3/4
-// (sudot4); a byte loop elsewhere.
+// 8-bit integer dot product with 32-bit accumulation: v_dot4_i32_iu8 (sudot4) on RDNA3 and newer, v_dot4_i32_i8 (sdot4) where the target has
+// it (see FLLM_HIP_SDOT4), a byte loop elsewhere (Vega 10, RDNA1 gfx1010, gfx125x ...). Same result in every branch.
 __device__ __forceinline__ int fllm_dp4a(int a, int b, int c) {
-#if defined(__GFX11__) || defined(__GFX12__)
+#if defined(FLLM_HIP_SUDOT4)
     return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
-#elif defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__) || defined(__gfx1030__) ||     defined(__gfx1031__) || defined(__gfx1032__) || defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) ||     defined(__gfx1036__)
+#elif defined(FLLM_HIP_SDOT4)
     return __builtin_amdgcn_sdot4(a, b, c, false);
 #else
     int r = c;

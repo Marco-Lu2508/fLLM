@@ -54,6 +54,7 @@ table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on M
 | ROCm/HIP RDNA3 (gfx11) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (`hip_q4z.cu`, Int4 skinny) | L0 (skinny 1-4 tokens + WMMA) |
 | ROCm/HIP RDNA4 (gfx12) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (Int4 skinny + WMMA gfx12) | L0 |
 | ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
+| ROCm/HIP Vega, RDNA1/2, gfx117x, gfx125x, unknown chips (plain kernels, generic code objects) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (the plain Q4Z GEMV for every batch) | L0 (FP32 GEMM, no matrix cores) |
 | Intel SYCL (Level Zero, Arc/Xe) | L0 | L0 | L0 | L0 | L0† (-> f16) | L0† (-> f16) | L0 |
 | Intel NPU (OpenVINO) | all integer formats as INT8 per channel: Q4_K/Q6_K (Llama-3.2-1B Q4_K_M), Q4_K (Qwen2.5-0.5B): L2 on one Core Ultra 5 235U; the others L0† (requantised; `FLLM_NPU_WEIGHTS=exact` keeps Q4_0/Q8_0 bit for bit) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
 | AMD XDNA NPU (native) | **L1 on one Ryzen AI 5 PRO 435**: prompt projections only, bf16 x bf16 -> f32 on fLLM's own kernel; Q4_0, Q8_0, Q4_K, Q6_K, F16, BF16, F32 decoded straight to bf16, every other dequantizable format through the generic dequantizer, the rest stays on the CPU ([npu-xdna.md](npu-xdna.md)) | L1 (same kernel; 183 + 576 self-test checks of the `linear`, `host` and `embedding` groups pass) | – | – | – | – | – |
@@ -125,8 +126,9 @@ Notes:
    DX12 through wgpu are not validated.
 6. **HIP:** the backend is `CudaBackend` with the HIP translation of the CUDA kernels (`hip_kernels()` in `build.rs`: 10 sources plus the
    `hip/*.cu` files). `hip_gemm.cu` (decode-in-LDS GEMM) is stated to cover all GGUF kinds; which format runs through which path is not
-   established case by case. Syntax and code generation down to GCN assembler were checked for gfx908, gfx90a, gfx942, gfx950, gfx1030,
-   gfx1100, gfx1151, gfx1201 - no execution. Q4Z on AMD requires `rows % 64 == 0` and `cols % 64 == 0` (otherwise expansion to F32).
+   established case by case. Code generation down to GCN assembler is checked in CI for every gfx target of the compiler and for its generic targets
+   (`gfx9-generic` ... `gfx12-5-generic`; [hip.md](hip.md) has the family table and what each family runs) - no execution except one `gfx1153`
+   GPU (README). Q4Z on AMD requires `rows % 64 == 0` and `cols % 64 == 0` (otherwise expansion to F32).
 7. HIP NVFP4: the build runs with `-DFLLM_NO_FP4`; NVFP4/FP8 Marlin remain stubs. Whether NVFP4 weights run on AMD through the generic path
    is not established.
 

@@ -12,24 +12,32 @@
 #include "../cuda/hip_compat.h"
 
 enum FllmHipArch {
-    FLLM_HIP_ARCH_OTHER = 0,   // no matrix cores we use (Vega, RDNA1/2, unknown)
-    FLLM_HIP_ARCH_CDNA = 1,    // gfx908 / gfx90a / gfx94x / gfx950: wave64, MFMA
-    FLLM_HIP_ARCH_RDNA3 = 2,   // gfx11xx: wave32, WMMA (16-element fragments)
-    FLLM_HIP_ARCH_RDNA4 = 3,   // gfx120x: wave32, WMMA (8-element fragments)
+    FLLM_HIP_ARCH_OTHER = 0,   // plain kernels only: Vega, RDNA1/2, gfx117x, gfx125x, unknown and future chips (hip/arch_table.csv)
+    FLLM_HIP_ARCH_CDNA = 1,    // gfx908 / gfx90a / gfx94x / gfx950 and gfx9-4-generic: wave64, MFMA
+    FLLM_HIP_ARCH_RDNA3 = 2,   // gfx11xx except gfx117x: wave32, WMMA (16-element fragments)
+    FLLM_HIP_ARCH_RDNA4 = 3,   // gfx1200 / gfx1201: wave32, WMMA (8-element fragments)
 };
 
 struct FllmHipDevice {
-    int arch;        // FllmHipArch
+    int arch;        // FllmHipArch: the matrix-core kernel set the host launches (decided from the loaded code object, see hip_device.cu)
     int cus;         // compute units
     int lds_bytes;   // LDS usable by one workgroup
-    int wave;        // wavefront size the code objects target: 64 on GCN / CDNA, 32 on RDNA
-    bool dot2;       // v_dot2 on packed FP16 (gfx90a, gfx94x, gfx950, gfx11, gfx12)
+    int wave;        // wavefront size the loaded code object runs with: 64 on GCN / CDNA, 32 on RDNA
+    bool dot2;       // the loaded code has the packed FP16 dot product the skinny kernels use (FLLM_HIP_DOT2 of cuda/hip_compat.h)
+    int dot4;        // 8-bit integer dot product of the loaded code: 0 byte loop, 1 v_dot4_i32_i8, 2 v_dot4_i32_iu8
+    bool big_lds;    // the loaded code is the gfx950 one, which uses 160 KiB of LDS (the generic gfx9-4 code and every other target use 64 KiB)
+    bool usable;     // the device runs the code objects of this binary (self-check of hip_device.cu); false: nothing may be launched
     bool gfx1151;    // Strix Halo: tuned tile table in the skinny GEMM
     char gcn[48];    // gcnArchName, e.g. "gfx1100" or "gfx90a:sramecc+:xnack-"
 };
 
 // Properties of the current HIP device (cached per device ordinal; thread-safe).
 const FllmHipDevice &fllm_hip_device();
+
+// Device check for the Rust side (list_devices): 0 when the device runs this binary's code (a small FP32 product, the integer dot product and,
+// where the code object has them, one matrix-core step are compared with the host), else 1 and `msg` says why. `info`: six ints (kernel set of
+// the loaded code, wave size, dot kind, dot2, matrix-core step -1 none / 0 wrong / 1 right, kernel set the host launches). Cached per device.
+extern "C" int fllm_hip_selfcheck(int dev, char *msg, size_t msg_len, int *info);
 
 // false when the environment variable FLLM_HIP_NO_<name> is set (e.g. FLLM_HIP_NO_MMA=1): switch a kernel family off at run time.
 bool fllm_hip_enabled(const char *name);

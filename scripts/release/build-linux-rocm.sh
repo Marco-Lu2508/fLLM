@@ -8,13 +8,14 @@
 #   scripts/release/build-linux-rocm.sh
 #
 # Environment overrides:
-#   HIP_ARCHS  gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201   offload architectures
+#   HIP_ARCHS  (empty)     offload architectures; empty = the default list of rust/engine/hip/default_archs.txt (every gfx target of the
+#                          compiler plus the generic targets: Vega, CDNA, RDNA1 to RDNA4), compressed in the binary
 #   OUT        dist-rocm   output directory that receives fllm-rs
 #   JOBS       4           cargo job slots
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-HIP_ARCHS=${HIP_ARCHS:-"gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"}
+HIP_ARCHS=${HIP_ARCHS:-}
 OUT=${OUT:-dist-rocm}
 JOBS=${JOBS:-4}
 IMAGE=fllm-rocm-build

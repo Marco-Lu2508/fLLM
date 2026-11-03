@@ -187,8 +187,8 @@ expert arena. Reproduce shader errors without a GPU with `rust/engine/shaders/vu
 To test the slicing logic for large weights use a device with only 128 MiB `maxStorageBufferRange`, for example lavapipe with
 `FLLM_ALLOW_SOFTWARE_GPU=1`.
 
-**ROCm/HIP** (RDNA3 gfx11, RDNA4 gfx12, CDNA gfx908/90a/942/950; ROCm 6.2 or newer, 7.x recommended; gfx950 needs 6.4 or newer and belongs in
-`FLLM_HIP_ARCHS`):
+**ROCm/HIP** (every family in [hip.md](hip.md): Vega, CDNA, RDNA 1 to 4; ROCm 6.2 or newer, 7.x recommended; the default build covers all of them, a single
+`FLLM_HIP_ARCHS=gfx1100` or `native` builds faster):
 ```sh
 FLLM_HIP=1 ROCM_PATH=/opt/rocm FLLM_HIP_ARCHS="gfx1100;gfx90a" cargo build --release -p fllm-engine --features hip --bin fllm-rs
 scripts/hip-verify.sh MODEL.gguf target/release/fllm-rs hip:0                                       # helper script of the HIP backend
