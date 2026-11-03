@@ -101,7 +101,12 @@ evicted.
 Only the macOS row has a usable GPU (Apple silicon); `devices --json` and the self-test JSON are kept as artifacts of the run.
 
 `kernels.yml` (manual) compiles the CUDA kernels (Ampere, Hopper, Blackwell, plus clippy with the `cuda` feature) in the
-`nvidia/cuda` development container and the HIP kernels in the `rocm/dev-ubuntu` container. The containers are large; if a hosted
+`nvidia/cuda` development container and the HIP kernels in the `rocm/dev-ubuntu` container: the whole default target list in one build
+(`hip-build`, which also prints the size of the binary) and, in `hip-targets`, every gfx target and every generic target of the compiler
+(Vega, CDNA, RDNA1 to RDNA4, `gfx9-generic` ... `gfx12-5-generic`) on its own, with one `PASS` / `FAIL` / `SKIP` line per target in the job
+summary (`scripts/hip_arch_matrix.sh`; `SKIP` is a target the container's compiler does not know). The same jobs compare the architecture
+table `rust/engine/hip/arch_table.csv` with the macros the compiler defines for each target (`scripts/hip_arch_check.sh`). Nothing runs on a
+GPU: a green line means "compiles for this target", see [hip.md](hip.md) for what is verified on hardware. The containers are large; if a hosted
 runner runs out of disk space, build with a smaller architecture list or use the Docker workflow, which frees disk space first.
 
 ## Running the GPU tests on your own machine (self-hosted runner)

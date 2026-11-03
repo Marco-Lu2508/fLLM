@@ -38,11 +38,12 @@
 #include "../cuda/fllm_cuda_internal.h"
 #include "fllm_hip.h"
 
-// architectures with a kernel body: v_dot2c (gfx9) or v_dot2 (gfx11 / gfx12)
-#if defined(__HIP_DEVICE_COMPILE__) && (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+// architectures with a kernel body: v_dot2c (gfx90a, gfx94x, gfx950 and gfx9-4-generic) or v_dot2 (gfx11 / gfx12 except gfx125x); FLLM_HIP_DOT2 of
+// cuda/hip_compat.h says which targets they are
+#if defined(__HIP_DEVICE_COMPILE__) && defined(FLLM_HIP_DOT2) && defined(__GFX9__)
 #define FLLM_SK_GFX9 1
 #define FLLM_SK_WAVE 64
-#elif defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+#elif defined(__HIP_DEVICE_COMPILE__) && defined(FLLM_HIP_DOT2) && (defined(__GFX11__) || defined(__GFX12__))
 #define FLLM_SK_GFX1X 1
 #define FLLM_SK_WAVE 32
 #else
@@ -277,7 +278,7 @@ int run(cudaStream_t s, const void *W, const float *X, float *Y, const float *bi
     T *a16 = static_cast<T *>(scratch);
     const size_t n = (size_t)batch * cols;
     convert_x_kernel<T><<<(unsigned)((n + 255) / 256 < 1024 ? (n + 255) / 256 : 1024), 256, 0, s>>>(X, a16, n);
-    const int max_lds_len = (dev.lds_bytes > 64 * 1024 && std::string(dev.gcn).rfind("gfx95", 0) == 0 ? 160 * 1024 : 64 * 1024) / 2;
+    const int max_lds_len = (dev.big_lds && dev.lds_bytes > 64 * 1024 ? 160 * 1024 : 64 * 1024) / 2;
     const bool fit = (size_t)cols * batch <= (size_t)max_lds_len;
     const int sYT = (rows + dev.cus * 4 - 1) / (dev.cus * 4);
     const SkCfg cfg = pick_cfg(dev.gfx1151, sYT, batch, cols, fit);
@@ -294,16 +295,14 @@ int fllm_hip_skinny_try(cudaStream_t s, const void *W, int kind, const float *X,
     static const bool enabled = fllm_hip_enabled("SKINNY");
     if (!enabled || (kind != KIND_F16 && kind != KIND_BF16)) return 0;
     const FllmHipDevice &dev = fllm_hip_device();
-    // kernel bodies exist for gfx90a / gfx94x / gfx950 and gfx11 / gfx12 (v_dot2); wave size 64 resp. 32
-    const bool gfx9 = dev.arch == FLLM_HIP_ARCH_CDNA && dev.dot2;
-    const bool gfx1x = dev.arch == FLLM_HIP_ARCH_RDNA3 || dev.arch == FLLM_HIP_ARCH_RDNA4;
-    if (!(gfx9 || gfx1x) || dev.cus <= 0) return 0;
+    // kernel bodies exist where the loaded code object has v_dot2 (FLLM_HIP_DOT2): gfx90a / gfx94x / gfx950 (wave 64) and gfx11 / gfx12 (wave 32)
+    if (!dev.usable || !dev.dot2 || (dev.wave != 64 && dev.wave != 32) || dev.cus <= 0) return 0;
     if (batch < 1 || batch > 4 || rows <= 0 || cols <= 0 || (cols & 7) != 0) return 0;
     if ((reinterpret_cast<uintptr_t>(W) & 15) != 0 || scratch == nullptr || (reinterpret_cast<uintptr_t>(scratch) & 15) != 0) return 0;
     if ((size_t)batch * cols * 2 > scratch_bytes) return 0;
     // the kernel keeps the first 64 KiB (160 KiB on gfx950) of the activations in LDS; a few percent more are read from memory, much
     // more is the job of the original's `big` variant, which is not ported
-    const int lds_elems = (dev.lds_bytes > 64 * 1024 && std::string(dev.gcn).rfind("gfx95", 0) == 0 ? 160 * 1024 : 64 * 1024) / 2;
+    const int lds_elems = (dev.big_lds && dev.lds_bytes > 64 * 1024 ? 160 * 1024 : 64 * 1024) / 2;
     if ((double)cols * batch > 1.2 * lds_elems) return 0;
     return kind == KIND_F16 ? run<sk_half>(s, W, X, Y, bias, rows, cols, batch, scratch)
                             : run<sk_bf16>(s, W, X, Y, bias, rows, cols, batch, scratch);

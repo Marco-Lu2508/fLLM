@@ -371,6 +371,28 @@ pub(in crate::server) async fn hardware(
                 "notes": notice.text,
             }));
         }
+        // AMD GPUs that are present but cannot run this binary's code (hip/hip_device.cu): listed as unavailable, with the reason
+        #[cfg(feature = "hip")]
+        for gpu in crate::backend::hip_arch::unusable() {
+            let text = format!("present but not usable: {}", gpu.reason);
+            devices.push(json!({
+                "id": format!("hip:{}", gpu.ordinal),
+                "backend": "hip",
+                "api": "native",
+                "index": gpu.ordinal,
+                "name": gpu.name,
+                "description": text,
+                "dev_type": "gpu",
+                "available": false,
+                "status": "not_usable",
+                "free_memory_bytes": 0,
+                "total_memory_bytes": 0,
+                "compute_units": text,
+                "bandwidth_gbs": Value::Null,
+                "unified_memory": Value::Null,
+                "notes": text,
+            }));
+        }
         // a model split over several devices: each device says which layers it holds
         let layout = crate::parallel::config::global().and_then(|c| c.layout_json());
         if let Some(stages) = layout.as_ref().and_then(|l| l["stages"].as_array()) {

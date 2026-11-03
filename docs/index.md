@@ -34,6 +34,7 @@ Start with the [README](../README.md) for what fLLM is and its current status. T
 * [Device selection](device-selection.md)
 * [MoE models larger than memory (expert cache)](moe-streaming.md)
 * [GPU backends (CUDA, ROCm, Vulkan, Metal, ...)](gpu-backends.md) and [backend status matrix](backends.md)
+* [AMD GPUs (ROCm / HIP): supported families, generic targets, overrides, how to report a result](hip.md)
 * [CPU kernels](cpu-kernels.md), [Arm](cpu-arm.md), [AVX-512 and AMX](cpu-avx512-amx.md)
 * [CUDA Q4_K prompt GEMM](cuda-qgemm4k.md), [performance notes](performance-notes.md)
 * [Benchmarking](benchmarking.md)

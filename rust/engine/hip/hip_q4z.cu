@@ -447,7 +447,8 @@ bool launch_skinny(cudaStream_t s, const Q4zView &v, const GemmArgs &args, void 
 // ---- entry points (the ones declared in fllm_cuda_internal.h for the Marlin path) ------------------------------------------------
 bool fllm_q4z_supported(int rows, int cols, int group) {
     static const bool enabled = fllm_hip_enabled("Q4Z");
-    if (!enabled || fllm_hip_device().arch == FLLM_HIP_ARCH_OTHER) return false;
+    // (devices without matrix cores take the plain GEMV kernel for every batch size: launch_gemv, which uses no matrix-core or dot instruction)
+    if (!enabled || !fllm_hip_device().usable) return false;
     if (group != 32 && group != 64 && group != 128) return false;
     // the host-side rearrangement (backend/q4z.rs) works in blocks of 64 rows and 64 inputs
     return rows > 0 && cols > 0 && rows % 8 == 0 && cols % 32 == 0 && cols % group == 0;
@@ -473,7 +474,7 @@ int fllm_q4z_launch(cudaStream_t s, int, int, const void *w, int group, const fl
     static const bool no_mma = !fllm_hip_enabled("MMA");
     if (batch <= 4 && launch_skinny(s, v, args, io)) {
         // vLLM wvSplitK_int4 kernel (RDNA3 / RDNA4)
-    } else if (batch > 4 && !no_mma && (reinterpret_cast<uintptr_t>(x) & 15) == 0 && (cols & 15) == 0) {
+    } else if (batch > 4 && !no_mma && fllm_hip_device().arch != FLLM_HIP_ARCH_OTHER && (reinterpret_cast<uintptr_t>(x) & 15) == 0 && (cols & 15) == 0) {
         launch_mma_gemm(s, v, args);
     } else {
         launch_gemv(s, v, args);

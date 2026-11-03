@@ -275,9 +275,31 @@ fn targets(only: Option<&str>) -> Result<Vec<(String, String)>, String> {
     }
 }
 
+/// AMD GPUs the HIP runtime lists whose code does not run (they are not in the inventory): one verdict each, so that `doctor --gpu` and the Studio
+/// say "present but not usable" instead of staying silent. `only` (a `--device` value) narrows them down like it does the others.
+#[cfg(feature = "hip")]
+fn unusable_amd(only: Option<&str>) -> Vec<Verdict> {
+    crate::backend::hip_arch::unusable()
+        .into_iter()
+        .filter(|g| only.is_none_or(|o| o == "all" || o.eq_ignore_ascii_case(&format!("hip:{}", g.ordinal)) || o.eq_ignore_ascii_case(&format!("cuda:{}", g.ordinal))))
+        .map(|g| {
+            let remedy = crate::backend::hip_arch::remedy(&g.arch, &crate::backend::hip_arch::built_archs());
+            Verdict::bad(&format!("hip:{}", g.ordinal), &g.name, "hip", "falls_back", format!("FALLS BACK: present but not usable: {}. To try: {remedy}", g.reason))
+        })
+        .collect()
+}
+
 /// Checks `only` (or every GPU) and returns one verdict per device.
 pub fn check(only: Option<&str>) -> Result<Vec<Verdict>, String> {
-    Ok(targets(only)?.into_iter().map(|(spec, name)| check_device(&spec, &name)).collect())
+    #[cfg(feature = "hip")]
+    let targets_result = targets(only).or_else(|e| if unusable_amd(only).is_empty() { Err(e) } else { Ok(Vec::new()) })?;
+    #[cfg(not(feature = "hip"))]
+    let targets_result = targets(only)?;
+    #[allow(unused_mut)]
+    let mut verdicts: Vec<Verdict> = targets_result.into_iter().map(|(spec, name)| check_device(&spec, &name)).collect();
+    #[cfg(feature = "hip")]
+    verdicts.extend(unusable_amd(only));
+    Ok(verdicts)
 }
 
 pub const HELP: &str = "usage: fllm-rs doctor --gpu [--device cuda:0|vulkan:1|all]
@@ -292,8 +314,15 @@ Exit code 1 when a device falls back or gives wrong results.";
 /// `fllm-rs doctor --gpu`
 pub fn run_cli(args: &[String]) -> Result<i32, String> {
     let only = args.iter().position(|a| a == "--device").and_then(|i| args.get(i + 1)).map(String::as_str);
-    let targets = targets(only)?;
-    if targets.is_empty() {
+    let targets = targets(only);
+    #[cfg(feature = "hip")]
+    let targets = targets.or_else(|e| if unusable_amd(only).is_empty() { Err(e) } else { Ok(Vec::new()) });
+    let targets = targets?;
+    #[cfg(feature = "hip")]
+    let unusable = unusable_amd(only);
+    #[cfg(not(feature = "hip"))]
+    let unusable: Vec<Verdict> = Vec::new();
+    if targets.is_empty() && unusable.is_empty() {
         println!("no GPU found: every model runs on the CPU (`fllm-rs devices` shows what the program can see; install the vendor driver)");
         return Ok(0);
     }
@@ -302,6 +331,10 @@ pub fn run_cli(args: &[String]) -> Result<i32, String> {
         let verdict = check_device(&spec, &name);
         println!("{}", verdict.line());
         failed |= matches!(verdict.status, "falls_back" | "wrong");
+    }
+    for verdict in unusable {
+        println!("{}", verdict.line());
+        failed = true;
     }
     Ok(i32::from(failed))
 }

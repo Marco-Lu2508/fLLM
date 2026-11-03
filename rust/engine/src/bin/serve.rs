@@ -168,6 +168,19 @@ fn print_split_plan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// AMD GPUs that are present but cannot run this binary's code (empty without the `hip` feature).
+fn unusable_amd_gpus_json() -> Vec<serde_json::Value> {
+    #[cfg(feature = "hip")]
+    {
+        return fllm_engine::backend::hip_arch::unusable()
+            .iter()
+            .map(|g| serde_json::json!({"ordinal": g.ordinal, "name": g.name, "arch": g.arch, "status": "present but not usable", "reason": g.reason}))
+            .collect();
+    }
+    #[allow(unreachable_code)]
+    Vec::new()
+}
+
 fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use fllm_engine::devices::{auto_chain, describe_choice, inventory, measure_cpu_bandwidth_gbs, Api, AutoPolicy};
     let (mut json, mut measure) = (false, false);
@@ -225,6 +238,7 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "cpu_topology": fllm_engine::cpu_topology::detect().to_json(),
             "threads": fllm_engine::cpu_topology::detect().default_threads(),
             "unusable_npus": fllm_engine::backend::npu::status::notices().iter().map(|n| serde_json::json!({"name": n.name, "vendor": n.vendor, "status": n.status, "text": n.text})).collect::<Vec<_>>(),
+            "unusable_amd_gpus": unusable_amd_gpus_json(),
             "auto_order": policy.order,
             "auto_integrated_gpus": policy.integrated,
             "auto_chain": chain.iter().map(|(backend, index)| format!("{backend}:{index}")).collect::<Vec<_>>(),
@@ -309,6 +323,17 @@ fn print_devices(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     for notice in &notices {
         println!("  [-] {} ({})
       Status:       {}", notice.name, notice.vendor, notice.text);
+    }
+    // AMD GPUs the HIP runtime lists but whose code does not run (the check of hip/hip_device.cu): shown instead of dropped
+    #[cfg(feature = "hip")]
+    for gpu in fllm_engine::backend::hip_arch::unusable() {
+        println!(
+            "  [-] {} ({})\n      Status:       present but not usable: {}\n      To try:       {}",
+            gpu.name,
+            gpu.arch,
+            gpu.reason,
+            fllm_engine::backend::hip_arch::remedy(&gpu.arch, &fllm_engine::backend::hip_arch::built_archs())
+        );
     }
     println!();
     let described: Vec<String> = chain.iter().map(|(backend, index)| describe_choice(backend, *index)).collect();

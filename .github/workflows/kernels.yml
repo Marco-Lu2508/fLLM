@@ -1,5 +1,5 @@
-# Compile-only checks of the GPU kernel builds (no GPU needed): CUDA (Ampere, Hopper, Blackwell) and AMD ROCm/HIP, each in the vendor's
-# development container. Manual only (Actions -> kernels -> Run workflow): the containers are several GB and the kernels take a while on
+# Compile-only checks of the GPU kernel builds (no GPU needed): CUDA (Ampere, Hopper, Blackwell) and AMD ROCm/HIP (the whole default target
+# list in one build, and every gfx target and generic target on its own, reported per target), each in the vendor's development container. Manual only (Actions -> kernels -> Run workflow): the containers are several GB and the kernels take a while on
 # a 4-core hosted runner. The release images (docker-cuda.yml) compile the CUDA kernels for every tag anyway. See docs/ci.md.
 name: kernels
 
@@ -17,11 +17,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The whole default list of GPU targets (rust/engine/hip/default_archs.txt: every gfx target of the compiler plus the generic ones) in one
+  # binary: proves that the list assembles, links and how big the result is. Per-target results are in `hip-targets` below.
   hip-build:
-    name: AMD ROCm build (compile only)
+    name: AMD ROCm build, all GPU targets (compile only)
     runs-on: ubuntu-26.04
-    timeout-minutes: 180
-    container: rocm/dev-ubuntu-26.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe # latest when written; update together with the ROCm version you test
+    timeout-minutes: 360
+    container: rocm/dev-ubuntu-24.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe # HIP 7.16 (ROCm 10.1), the image docker/Dockerfile.rocm builds with
     steps:
       - name: Tools
         run: |
@@ -34,13 +36,64 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build with the HIP kernels (RDNA2-4, CDNA2/3)
+      - name: "Build with the HIP kernels (default list - Vega, CDNA, RDNA1-4, generic targets)"
         env:
           FLLM_HIP: "1"
-          FLLM_HIP_ARCHS: "gfx1030;gfx1100;gfx1201;gfx942"
+          FLLM_HIP_JOBS: "4"
         run: |
           . "$HOME/.cargo/env"
-          cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs
+          cargo build --release --locked --features cuda -p fllm-engine --bin fllm-rs -vv 2>&1 | tee build.log | grep -E "cargo:warning|Finished|error" || true
+          test -x target/release/fllm-rs
+
+      - name: Size and targets
+        run: |
+          {
+            echo "### HIP build, default target list"
+            echo
+            echo '```'
+            grep -E "cargo:warning=HIP" build.log | sed 's/.*cargo:warning=//' || true
+            ls -l target/release/fllm-rs | awk '{print "fllm-rs: " $5 " bytes"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One job per GPU family: every HIP source is compiled for each gfx target on its own (device pass only), so a broken family shows up as its own
+  # line in the job summary. Nothing runs on a GPU. scripts/hip_arch_matrix.sh; the table check compares rust/engine/hip/arch_table.csv with the
+  # macros the compiler defines for every target (scripts/hip_arch_check.sh).
+  hip-targets:
+    name: HIP targets ${{ matrix.family }} (compile only)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    container: rocm/dev-ubuntu-24.04@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: "gfx9 (Vega, CDNA)"
+            archs: "gfx900 gfx902 gfx904 gfx906 gfx908 gfx909 gfx90a gfx90c gfx942 gfx950 gfx9-generic gfx9-4-generic"
+          - family: "gfx10 (RDNA1, RDNA2)"
+            archs: "gfx1010 gfx1011 gfx1012 gfx1013 gfx10-1-generic gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036 gfx10-3-generic"
+          - family: "gfx11 (RDNA3, RDNA3.5)"
+            archs: "gfx1100 gfx1101 gfx1102 gfx1103 gfx1150 gfx1151 gfx1152 gfx1153 gfx1154 gfx11-generic"
+          - family: "gfx117 and gfx12 (RDNA4 and newer)"
+            archs: "gfx1170 gfx1171 gfx1172 gfx11-7-generic gfx1200 gfx1201 gfx12-generic gfx1250 gfx1251 gfx12-5-generic"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Table against the compiler (once)
+        if: ${{ startsWith(matrix.family, 'gfx9') }}
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends g++
+          bash scripts/hip_arch_check.sh 2>&1 | tee check.txt
+          { echo "### hip_arch_table.csv against the compiler"; echo '```'; cat check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile every source for every target of the family
+        run: |
+          bash scripts/hip_arch_matrix.sh --opt O1 --jobs 4 --summary matrix.txt ${{ matrix.archs }} || status=$?
+          { echo "### ${{ matrix.family }}"; echo '```'; cat matrix.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit ${status:-0}
 
   cuda-build:
     name: CUDA build (no GPU needed to compile)

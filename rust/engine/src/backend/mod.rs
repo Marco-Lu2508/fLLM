@@ -20,6 +20,8 @@ pub mod metal;
 pub mod hip;
 // DLL search order and delay-load hooks of the HIP runtime (Windows); the pure parts are tested without the feature
 #[cfg(any(feature = "hip", test))]
+pub mod hip_arch;
+#[cfg(any(feature = "hip", test))]
 pub mod hip_runtime;
 #[cfg(feature = "sycl")]
 pub mod sycl;

@@ -12,7 +12,7 @@
 set -u
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root/rust/engine" || exit 2
-archs="${1:-gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201}"
+archs="${1:-$(sed -n 's/^linux=//p' "$root/rust/engine/hip/default_archs.txt")}"   # scripts/hip_arch_matrix.sh reports one line per target instead
 jobs="${JOBS:-3}"
 hipcc="${ROCM_PATH:-/opt/rocm}/bin/hipcc"
 [ -x "$hipcc" ] || hipcc="$(command -v hipcc || true)"

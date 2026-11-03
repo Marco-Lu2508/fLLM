@@ -104,9 +104,9 @@ compile. Nothing has run on an AMD GPU, with or without Windows. The statements 
   and gfx1103 are in the build list so that unlisted but working cards can run, with no promise.
 * **`HSA_OVERRIDE_GFX_VERSION`** is read by the Linux ROCm user-mode stack. The Windows runtime does not use that stack, so it is not expected to
   have any effect there (not tested); the engine does not let it override the architecture check on Windows.
-* **GPUs outside the build list**: on every platform a GPU whose architecture is not in the list the binary was built for is no longer listed (it would
-  fail at the first kernel); one stderr line names it and says to rebuild with `FLLM_HIP_ARCHS`. On Linux `HSA_OVERRIDE_GFX_VERSION` keeps the
-  old behaviour (device listed). With several AMD GPUs of which only some are built for, the device numbers of the later ones shift.
+* **GPUs outside the build list**: a GPU is no longer skipped because its name is not in a list. It gets the exact code object, else the generic one of its family,
+  else (Linux) the code of the nearest chip through `HSA_OVERRIDE_GFX_VERSION`; every AMD GPU then has to pass a check on the device, and one that does not is
+  reported as "present but not usable" with the reason instead of being dropped silently. The ordinals of the other AMD GPUs do not shift. See [hip.md](../hip.md).
 * **Redistribution**: the package bundles from the SDK only `amdhip64*.dll`, `amd_comgr*.dll`, `rocm_kpack*.dll` (as llama.cpp's package does), plus
   the license files found in the SDK (`licenses\rocm`). These are open-source ROCm components; the build prints which files it took, and
   `README-HIP.txt` in the archive lists them. Not bundled: the graphics driver, rocBLAS / hipBLAS (not used), the MSVC runtime (statically linked).
@@ -119,19 +119,22 @@ compile. Nothing has run on an AMD GPU, with or without Windows. The statements 
   numbers in this fragment are from that image. Older classic layouts (6.4.x, 7.0.x with `hip-runtime-amd`) should work with
   `--build-arg BASE_IMAGE=rocm/dev-ubuntu-24.04:6.4.3 --build-arg RUNTIME_PACKAGES=hip-runtime-amd`; they were not tried. The ROCm 6.2
   compatibility notes of the vLLM kernels (FNUZ fp8 types) are not relevant here, fLLM uses no fp8 on AMD.
-* The kernels need gfx900 or newer for the portable path, gfx908+ (MFMA) or gfx11/gfx12 (WMMA) for the matrix-core GEMM; gfx906 and RDNA1/2
-  (gfx1030) use the FP32 GEMM and the dot-product GEMV.
+* The kernels need gfx900 or newer for the portable path, gfx908+ (MFMA) or gfx11/gfx12 (WMMA, not gfx117x / gfx125x) for the matrix-core GEMM; Vega, RDNA1/2
+  (gfx1030) use the FP32 GEMM and the dot-product GEMV ([hip.md](../hip.md) has the table per family).
 * A consumer card that the ROCm release does not list can often run the code of a close relative:
   `HSA_OVERRIDE_GFX_VERSION=11.0.0` (gfx1101/1102/1103, then build with `FLLM_HIP_ARCHS=gfx1100`), `10.3.0` (gfx1031..1036, build gfx1030),
   `9.4.2` is not meaningful for consumer cards. This makes the runtime load the other chip's code object; it is unsupported by AMD and by fLLM.
-  APUs (gfx1151 Strix Halo, gfx1150) have their own targets in the default list.
+  With the default build (every gfx target plus the generic ones) none of this is needed in the normal case; `FLLM_HIP_ARCH_OVERRIDE=gfxNNNN` does it from
+  inside fLLM ([hip.md](../hip.md)).
 
 ## Environment variables
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `FLLM_HIP` | unset | build time: `1` compiles the kernel library with hipcc (with `--features hip`) |
-| `FLLM_HIP_ARCHS` | `gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201` | build time: offload architectures (one architecture builds much faster) |
+| `FLLM_HIP_ARCHS` | `rust/engine/hip/default_archs.txt`: every gfx target of the compiler plus the generic targets | build time: offload architectures (one architecture builds much faster; `native` = the GPUs of this machine) |
+| `FLLM_HIP_COMPRESS`, `FLLM_HIP_JOBS` | `1`, cargo's jobs | build time: compressed device code (`0` for a HIP runtime older than 6.2); sources compiled at once |
+| `FLLM_HIP_ARCH_OVERRIDE` | unset | run time: treat every AMD GPU as this gfx chip ([hip.md](../hip.md)) |
 | `ROCM_PATH` / `HIP_PATH` | `/opt/rocm` | ROCm install |
 | `FLLM_HIP_GRAPH` | off | `1` allows hipGraph capture of decode steps (new, never run on a GPU) |
 | `FLLM_HIP_NO_SSM` | off | `1` keeps DeltaNet, Mamba-1/2 and ShortConv layers on the host path; these device paths are on by default since they passed `selftest-gpu` and the tiny-model texts on a gfx1153 GPU (`FLLM_HIP_SSM=0` does the same) |
