@@ -42,7 +42,7 @@ planners. This file describes what sits on top of them: `backend.rs` (+ `backend
 | `graph_*`, `linear_f16_out`, `glu_f16`, `rope_kv_write_f16`, `quantized_linear_add` | defaults ("not done"): the caller takes the unfused path |
 | Mamba layers | no trait method yet; `VulkanStream::mamba2_layer` is ready (see below) |
 
-`capabilities()`: `supported_quants` = the 20 formats (Q2_0 included) of `weights::supported_formats()` + F32 / F16 / BF16 + IQ4_XS (converted exactly).
+`capabilities()`: `supported_quants` = the 27 formats (Q2_0 and the IQ1 / IQ2 / IQ3 families included) of `weights::supported_formats()` + F32 / F16 / BF16 + IQ4_XS (converted exactly).
 `supports_moe` and `supports_device_sampling` are `false` like on CUDA (they describe `moe_route` / `moe_expert_gemm` / `sampling_logits`).
 
 ## Submissions

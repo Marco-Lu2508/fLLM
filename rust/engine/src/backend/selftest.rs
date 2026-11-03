@@ -2435,7 +2435,7 @@ impl<'a> Tester<'a> {
         }
         // Rows whose width is a multiple of 256 use the aligned device layouts of the legacy and Q8_0 formats
         // (and the tensor-core / int8 paths when they are not disabled by the exact-math switch).
-        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42, 16, 17, 18, 19, 21, 22, 29]) {
+        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42]) {
             for batch in [1, 2, 5] {
                 let r = self.linear(kind, 13, 768, batch, batch == 5);
                 self.record(

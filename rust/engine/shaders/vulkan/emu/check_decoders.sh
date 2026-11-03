@@ -39,7 +39,7 @@ static uint bitCount(uint v) { return (uint)__builtin_popcount(v); }
 EOF
 # the grid tables and helpers of the IQ formats (#include "_iq_*.glsl") are pasted in place of the include line
 inline_includes() {
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case $line in
       '#include "_iq_'*) inc=${line#*\"}; inc=${inc%\"*}; cat "$SH/$inc";;
       *) printf '%s\n' "$line";;

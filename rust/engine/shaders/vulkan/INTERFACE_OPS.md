@@ -40,7 +40,7 @@ the header and the push block of its shader, so the plans cannot drift from the 
 | `rms_norm_grouped` | `plan_rms_norm_grouped` | `norm_rms_grouped` |
 | `layer_norm` | `plan_layer_norm` | `norm_layer` |
 | `rope` | `plan_rope` | `rope_apply` |
-| `embedding_lookup` | `plan_embedding` | `embed_{f32,f16,bf16,q4_0,q4_1,q5_0,q5_1,q8_0,q2_k,q3_k,q4_k,q5_k,q6_k,iq4_nl,mxfp4}` |
+| `embedding_lookup` | `plan_embedding` | `embed_{f32,f16,bf16,q4_0,q4_1,q5_0,q5_1,q8_0,q2_k,q3_k,q4_k,q5_k,q6_k,iq4_nl,mxfp4,q2_0,iq2_xxs,iq2_xs,iq2_s,iq3_xxs,iq3_s,iq1_s,iq1_m}` |
 | `swiglu`, `geglu`, `swiglu_oai` (+ plain activations) | `plan_glu`, `plan_glu_strided` | `act_{swiglu,geglu,swiglu_oai,silu,gelu,relu2,relu}` |
 | `residual_add` | `plan_residual_add` | `misc_residual` |
 | `split_q_gate` | `plan_split_q_gate` | `misc_split_q_gate` |
@@ -295,7 +295,8 @@ Compiled as:
 Embedding lookup (Stream::embedding_lookup): out[t][c] = weight[ids[t]][c] for t < n_ids, c < cols (= hidden size); ids are token ids (uint32, checked
 < vocab on the host). The format is selected by one macro per entry of variants_ops.list:
   RAW_F32 / RAW_F16 / RAW_BF16   row-major table of f32 / binary16 / bfloat16, element (row, c) at index row * cols + c
-  FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4
+  FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4 FMT_Q2_0
+  FMT_IQ2_XXS FMT_IQ2_XS FMT_IQ2_S FMT_IQ3_XXS FMT_IQ3_S FMT_IQ1_S FMT_IQ1_M
                                  planar device layout of the quantized weights (see _ops_wq.glsl); nb = blocks per row = cols / QK, off1..off3 = word
                                  offsets of the planes 1..3. One invocation decodes one chunk of 8 weights (cols is a multiple of QK, so of 8).
 Table rows must lie inside the bound range (word indices are 32-bit: tables up to 4 GiB / 16 GiB of words).
