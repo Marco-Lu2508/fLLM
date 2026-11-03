@@ -23,6 +23,8 @@ pub enum VkError {
     OutOfMemory { requested: u64 },
     /// `vkDeviceLost`: the device is gone (driver reset, TDR, unplugged). The context cannot be used any more.
     DeviceLost,
+    /// A submission did not finish within the wait limit (`FLLM_VK_WAIT_TIMEOUT_S`): a hung shader, a driver stall, or a machine that swaps.
+    Hung { device: String, submission: u64, waited_secs: u64, free_host_mib: u64 },
     /// A Vulkan call failed.
     Vulkan { call: &'static str, result: vk::Result },
     /// The caller passed something invalid (size 0, out-of-range slice, too many bindings, ...).
@@ -40,6 +42,10 @@ impl fmt::Display for VkError {
             Self::OutOfMemory { requested: 0 } => write!(f, "Vulkan: out of memory"),
             Self::OutOfMemory { requested } => write!(f, "Vulkan: out of memory (requested {requested} bytes)"),
             Self::DeviceLost => write!(f, "Vulkan device lost"),
+            Self::Hung { device, submission, waited_secs, free_host_mib } => write!(
+                f,
+                "Vulkan device '{device}' did not finish GPU submission {submission} within {waited_secs} s (a hung shader, a driver stall, or the machine is out of memory and swapping; {free_host_mib} MiB of host memory free).                  FLLM_VK_WAIT_TIMEOUT_S sets the limit (0 = wait forever), FLLM_VK_TRACE=1 logs uploads and shader compiles"
+            ),
             Self::Vulkan { call, result } => write!(f, "{call} failed: {result:?}"),
             Self::InvalidArgument(msg) => write!(f, "Vulkan: invalid argument: {msg}"),
             Self::Io(msg) => write!(f, "Vulkan pipeline cache I/O: {msg}"),

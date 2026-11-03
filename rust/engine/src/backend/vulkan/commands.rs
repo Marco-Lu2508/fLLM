@@ -114,12 +114,33 @@ impl Timeline {
         }
     }
 
-    /// Wait for submission `value` (up to ten minutes, which only a hung GPU reaches: then it is reported as device loss).
+    /// Wait for submission `value`. A GPU that does not answer within the limit (`FLLM_VK_WAIT_TIMEOUT_S`, three minutes by default) is reported as
+    /// [`VkError::Hung`] with the device name; while it waits, a line every 20 seconds says what is pending, so a stall is never silent.
     pub fn wait(&self, value: u64) -> VkResult<()> {
-        if self.wait_timeout(value, Duration::from_secs(600))? {
-            Ok(())
-        } else {
-            Err(VkError::DeviceLost)
+        const NOTE_EVERY: Duration = Duration::from_secs(20);
+        let limit = super::diag::wait_timeout();
+        let start = std::time::Instant::now();
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= limit {
+                return Err(VkError::Hung {
+                    device: self.core.device_name.clone(),
+                    submission: value,
+                    waited_secs: elapsed.as_secs(),
+                    free_host_mib: crate::devices::host_free_memory_bytes() >> 20,
+                });
+            }
+            if self.wait_timeout(value, (limit - elapsed).min(NOTE_EVERY))? {
+                return Ok(());
+            }
+            eprintln!(
+                "[fllm-vk] {}: still waiting for GPU submission {value} after {} s ({} submitted, {} complete, {} MiB of host memory free)",
+                self.core.device_name,
+                start.elapsed().as_secs(),
+                self.last_submitted(),
+                self.completed.load(Ordering::Acquire),
+                crate::devices::host_free_memory_bytes() >> 20
+            );
         }
     }
 

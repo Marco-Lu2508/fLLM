@@ -221,6 +221,8 @@ pub struct DeviceCore {
     pub memory: vk::PhysicalDeviceMemoryProperties,
     /// `VK_EXT_memory_budget` is enabled.
     pub memory_budget: bool,
+    /// Name the driver reports (for messages).
+    pub device_name: String,
 }
 
 // SAFETY: see `VkInstance`; the queue (the only externally synchronised object) is guarded by `submit_lock` wherever it is used.
@@ -310,6 +312,7 @@ impl DeviceCore {
             external_memory_host,
             memory: probe.memory,
             memory_budget: has_ext(ash::ext::memory_budget::NAME),
+            device_name: probe.caps.device_name.clone(),
         }))
     }
 
@@ -435,16 +438,22 @@ impl VkContext {
 
     /// Block until the queue is idle.
     pub fn wait_idle(&self) -> VkResult<()> {
-        let _guard = self.core.submit_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: the queue is externally synchronised by `submit_lock`.
-        unsafe { self.core.device.queue_wait_idle(self.core.queue) }.map_err(vk_call("vkQueueWaitIdle"))
+        // every submission signals the timeline and the queue is in order: waiting for the last value is waiting for idle, with the watchdog
+        let last = self.timeline.last_submitted();
+        if last == 0 {
+            return Ok(());
+        }
+        self.timeline.wait(last)
     }
 }
 
 impl Drop for VkContext {
     fn drop(&mut self) {
         // pipelines, buffers of the allocator and the timeline are destroyed after this body: nothing may be in flight
-        let _ = self.wait_idle();
+        // (the queue itself, not the timeline: after a reported hang the timeline would only time out again)
+        let _guard = self.core.submit_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: the queue is externally synchronised by `submit_lock`.
+        let _ = unsafe { self.core.device.queue_wait_idle(self.core.queue) };
     }
 }
 

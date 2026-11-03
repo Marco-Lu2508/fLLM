@@ -3411,8 +3411,13 @@ impl RustDecoder {
             )
             .map_err(|e| e.to_string())?;
 
+        // an integrated GPU keeps its weights in the RAM the model file is mapped in: once a weight is copied, its mapped pages are dropped
+        // (FLLM_KEEP_HOST_PAGES=1 keeps them) so that the file and the device copy are not both resident
+        let release_pages = backend.shares_host_memory() && std::env::var_os("FLLM_KEEP_HOST_PAGES").is_none_or(|v| v.is_empty() || v == "0");
+        crate::load_progress::start(backend.name(), self.layers.len(), backend.shares_host_memory());
         let upload_linear =
             |name: &str, linear: &Linear| -> Result<crate::backend::DeviceWeight, String> {
+                crate::load_progress::copying(name);
                 if let Some((kind, bytes)) = linear.packed_weights() {
                     // packed EXL2 / EXL3 blobs are expanded to F16 here when the backend has no native kernel for them
                     if fllm_gguf_probe::exl::is_exl_type(kind) && !backend.capabilities().supports_quant(crate::backend::QuantType::from_gguf_type_id(kind)) {
@@ -3442,6 +3447,16 @@ impl RustDecoder {
                         )
                         .map_err(|e| e.to_string());
                     crate::backend::set_next_nvfp4_input_scale(0.0);
+                    if uploaded.is_ok() {
+                        crate::load_progress::note_uploaded(bytes.len());
+                        if release_pages {
+                            if let Some((_, storage)) = linear.packed_storage() {
+                                if crate::expert_cache::release_mapped_pages(storage) {
+                                    crate::load_progress::note_released(storage.len());
+                                }
+                            }
+                        }
+                    }
                     uploaded
                 } else {
                     let bytes = cast_f32_to_u8(&linear.weight.data);
@@ -4042,6 +4057,7 @@ impl RustDecoder {
                     None
                 },
             });
+            crate::load_progress::layer_done(i + 1, self.layers.len());
         }
 
         let shortcut_layers = self.layers.iter().filter(|l| l.shortcut.is_some()).count();

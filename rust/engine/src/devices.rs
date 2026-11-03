@@ -421,7 +421,11 @@ pub fn planning_device(backend: &str, index: usize, utilization: f64) -> Result<
     }
     let entry = find_entry(backend, index).ok_or_else(|| format!("device {backend}:{index} is not in the device inventory (see `fllm-rs devices`)"))?;
     let integrated = entry.info.dev_type == DeviceType::IntegratedGpu;
-    let free = if integrated { entry.info.free_memory_bytes.min(host_free_memory_bytes()) } else { entry.info.free_memory_bytes };
+    let free = if integrated {
+        crate::backend::memory::unified_device_budget(entry.info.free_memory_bytes, host_free_memory_bytes(), host_memory(false))
+    } else {
+        entry.info.free_memory_bytes
+    };
     let reported = caps_for(entry.backend, entry.api, &entry.info).bandwidth_gbs.filter(|b| *b > 0.0);
     let class_default = match entry.info.dev_type {
         DeviceType::Gpu => 300.0,
@@ -515,6 +519,11 @@ fn cpu_info() -> DeviceInfo {
 /// Physical memory of the host that is free right now (what an integrated GPU can still be given).
 pub fn host_free_memory_bytes() -> u64 {
     host_memory(true)
+}
+
+/// Physical memory of the host (installed, as the system reports it).
+pub fn host_total_memory_bytes() -> u64 {
+    host_memory(false)
 }
 
 /// Free (`available`) or total physical memory of the host: `/proc/meminfo` on Linux, the system call of the platform elsewhere.

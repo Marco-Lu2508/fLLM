@@ -7,6 +7,7 @@
 pub mod backend;
 pub mod commands;
 pub mod device_info;
+pub mod diag;
 pub mod instance;
 pub mod memory;
 #[cfg(test)]

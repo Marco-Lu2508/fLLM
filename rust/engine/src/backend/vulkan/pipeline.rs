@@ -498,7 +498,9 @@ impl PipelineCache {
                 stage = stage.flags(vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS);
             }
             let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
+            let started = std::time::Instant::now();
             let created = device.create_compute_pipelines(self.cache, &[info], None);
+            super::diag::note_duration(&format!("compiled pipeline {}", spec.name), started.elapsed());
             device.destroy_shader_module(module, None);
             match created {
                 Ok(pipelines) => {

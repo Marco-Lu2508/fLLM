@@ -23,6 +23,14 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
 
 pub use os::disk_read_bytes;
 
+/// Drop the pages of a memory-mapped weight from memory after a copy of it went to a device that shares the host's RAM (an integrated GPU): the
+/// copy and the file pages would otherwise both stay resident. Only pages that lie completely inside `bytes` are dropped; a later read of the range
+/// returns the same bytes (read from the file again). Linux: `MADV_PAGEOUT`; Windows: the pages leave the working set (and become standby
+/// pages the system reclaims first); macOS: no effect. Returns whether the system call was made.
+pub fn release_mapped_pages(bytes: &TensorBytes) -> bool {
+    bytes.is_mapped() && os::evict(bytes.as_ptr() as usize, bytes.len())
+}
+
 /// More rows than this in one routing call are a prompt batch, not decoding: they warm the statistics only a little and are not
 /// used to predict the next layer.
 const BULK_ROWS: usize = 24;

@@ -2909,6 +2909,12 @@ pub trait Backend: Send + Sync {
         false
     }
 
+    /// The device draws its memory from the same RAM as the host (an integrated GPU, an APU): weights uploaded to it are a second copy in
+    /// system memory, so the host copy (the memory-mapped model file) is released after the upload and the memory plan counts against RAM.
+    fn shares_host_memory(&self) -> bool {
+        false
+    }
+
     /// Whether the streams of this backend implement the merged-projection operations (`split_columns`, `rope_kv_write_qkv`, `glu_merged`):
     /// q/k/v and gate/up uploaded as one matrix each (`FLLM_MERGE_PROJ`).
     fn supports_merged_projections(&self) -> bool {

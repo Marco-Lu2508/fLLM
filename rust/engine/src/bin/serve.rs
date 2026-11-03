@@ -1350,7 +1350,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // (FLLM_NO_HOST_MEMORY_CLAMP=1 trusts the device's own figure: on a machine whose BIOS or driver reserves a large block of the RAM for the GPU,
                 // that block is not part of the memory the system still has free, and clamping to the system's figure would hide it)
                 let host_clamp = unified && !std::env::var("FLLM_NO_HOST_MEMORY_CLAMP").is_ok_and(|v| !v.is_empty() && v != "0");
-                let device_free_raw = if host_clamp { d.free_memory_bytes.min(fllm_engine::devices::host_free_memory_bytes()) } else { d.free_memory_bytes };
+                let host_total = fllm_engine::devices::host_total_memory_bytes();
+                let device_free_raw = if host_clamp {
+                    fllm_engine::backend::memory::unified_device_budget(d.free_memory_bytes, fllm_engine::devices::host_free_memory_bytes(), host_total)
+                } else {
+                    d.free_memory_bytes
+                };
                 // the figure moves by tens of megabytes between two starts of the same machine (page cache, a browser tab, the compositor); a plan that
                 // flips between "every layer on the device" and "some feed-forward weights on the host" on such noise decodes up to three times slower
                 // in one of the runs. The memory the plan may use is therefore taken in steps of 256 MiB (rounded down).
@@ -1360,7 +1365,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     device_free_raw >> 20,
                     d.name,
                     d.free_memory_bytes >> 20,
-                    if host_clamp { ", clamped to the free system memory" } else { "" },
+                    if host_clamp { ", clamped to the free system memory less a reserve: the device shares the RAM of the host" } else { "" },
                     device_free >> 20
                 );
                 let plan_for = |m: &GgufModel, tokens: usize| {
@@ -1376,7 +1381,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let mut planned = plan_for(&model, max_batched_tokens);
                 if let Err(e) = &planned {
+                    // (a discrete card reports an allocation error if the upload does not fit; a device that shares the RAM would start copying and push
+                    // the machine into swap, so it refuses here)
+                    if unified && host_clamp {
+                        return Err(format!(
+                            "{e}; the {} shares the {} MiB of system memory ({} MiB free), so there is no room for this model next to the system. Use a smaller quantization, a shorter --ctx or the CPU",
+                            d.name,
+                            host_total >> 20,
+                            fllm_engine::devices::host_free_memory_bytes() >> 20
+                        )
+                        .into());
+                    }
                     tracing::warn!("memory plan for the device failed: {e}");
+                }
+                if unified && host_clamp {
+                    let weights: u64 = model.mapping().index().tensors.iter().map(|t| fllm_engine::backend::memory::device_tensor_bytes(t, &selected_backend)).sum();
+                    let over = fllm_engine::backend::memory::unified_oversubscription(weights, host_total);
+                    if over > 0 {
+                        tracing::warn!(
+                            "the weights are {} MiB larger than the {} MiB of system memory that {} shares with the host: the part that stays in the model file is read from the disk again and again (expect seconds per token); a smaller quantization avoids that",
+                            over >> 20,
+                            host_total >> 20,
+                            d.name
+                        );
+                    }
                 }
                 // A model with a recurrent state (Qwen3.5, Qwen3-Next, Mamba hybrids ...) keeps two states per sequence slot on the device: for 16 slots that is
                 // more than a gigabyte, enough to push the feed-forward weights of two thirds of the layers out of an 8 GB card, where they then run on the CPU

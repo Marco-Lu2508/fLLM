@@ -38,8 +38,10 @@ pub(crate) fn upload_weight(
             return Err(invalid(format!("{name}: bias has {} values for {rows} rows", b.len())));
         }
     }
+    let started = std::time::Instant::now();
     let prepared = prepare(name, raw, quant, rows, cols, scale, sh.caps().max_storage_buffer_range)?;
     let (buffer, perm) = place(sh, name, &prepared, rows, cols)?;
+    crate::backend::vulkan::diag::note_duration(&format!("uploaded {name} ({quant:?} {rows} x {cols}, {} MiB in the file)", raw.len() >> 20), started.elapsed());
     let bias = bias.map(|b| upload_bytes(sh, &to_f32_bytes(b))).transpose()?;
     let perm = perm.map(|p| upload_bytes(sh, &u32_bytes(&p))).transpose()?;
     Ok(DeviceWeight {
@@ -316,6 +318,42 @@ mod tests {
             assert_eq!(prepared.quant, quant);
             assert_eq!(prepared.bytes.len(), raw.len());
         }
+    }
+
+    /// The memory plan counts every weight with `device_tensor_bytes`; the upload allocates `table_bytes(slice_table(..))` of the type `prepare`
+    /// chose. The two must agree for every format (the plan was once 38 % too high because it still counted the Q5_K expansion of the IQ formats):
+    /// the buffer is the plan's figure plus at most the 16-byte alignment of its planes.
+    #[test]
+    fn the_planned_device_bytes_match_what_the_upload_allocates() {
+        let mut rng = crate::cpu_selftest::Lcg(11);
+        let (rows, cols) = (8usize, 1024usize);
+        // formats with a test layout (random but valid blocks), and Q8_K, which the shaders cannot read (zero blocks are enough to expand it to Q5_K)
+        let native = [2u32, 3, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 29, 39, 42];
+        let expanded = [15u32];
+        let mut bad = Vec::new();
+        for (kind, shape_cols) in native.iter().map(|k| (*k, cols)).chain(expanded.iter().map(|k| (*k, cols))).chain([(42u32, 192usize)]) {
+            let info = fllm_gguf_probe::TensorInfo {
+                name: "blk.0.ffn_up.weight".into(),
+                dimensions: vec![shape_cols as u64, rows as u64],
+                type_id: kind,
+                data_offset: 0,
+                payload_len: 0,
+            };
+            let raw = if native.contains(&kind) {
+                crate::cpu_selftest::random_weights(kind, rows, shape_cols, &mut rng)
+            } else {
+                vec![0u8; crate::backend::memory::tensor_bytes(&info) as usize]
+            };
+            let quant = QuantType::from_gguf_type_id(kind);
+            let prepared = prepare("w", &raw, quant, rows, shape_cols, 1.0, u64::MAX).unwrap();
+            let slices = slice_table(WeightKind::of(prepared.quant).unwrap(), rows, shape_cols, u64::MAX, 256).unwrap();
+            let allocated = table_bytes(&slices) as u64;
+            let planned = crate::backend::memory::device_tensor_bytes(&info, "vulkan");
+            if !(allocated >= planned && allocated - planned <= 64) {
+                bad.push(format!("type {kind} {rows} x {shape_cols}: planned {planned} bytes, allocated {allocated} (device type {:?})", prepared.quant));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("; "));
     }
 
     /// FP8M (codes and a binary16 scale per row) is block-wise FP8 with tiles of one row: the same weights, the scales widened to f32.

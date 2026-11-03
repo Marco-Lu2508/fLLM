@@ -74,6 +74,35 @@ of `fllm-rs devices` and the log when you ask for help.
 instead of running part of the model on the CPU. Use it in scripts that must never run slowly by accident. Sampling a token from the logits on
 the host (a few microseconds) is by design and is listed but never an error.
 
+## A big model on an integrated GPU: no token, nothing in the log
+
+**Symptom:** `--device vulkan` on an integrated GPU (Intel Iris Xe / Arc graphics, an AMD APU) with a model that is as large as the RAM or larger:
+the first token does not come for many minutes, the free memory of the machine drops to zero, and the log was silent.
+
+**Why:** an integrated GPU has no memory of its own. Everything it holds is taken from the RAM that the model file is memory-mapped in, so a weight that
+is copied to the GPU exists twice (the mapped file pages and the device copy) until the mapped pages are dropped, and a model larger than the RAM
+cannot be resident at all. Earlier versions also dequantized the lattice formats (IQ1 / IQ2 / IQ3) and Q2_0 on the host while uploading them and
+planned with the expanded size (a 75.8 GB file was planned as 104.9 GB); these formats stay packed on the device now and the plan counts the real size.
+
+**What fLLM does now** (all devices that report a unified memory, nothing machine specific):
+
+* The memory plan counts the weights against the free system memory less a reserve (1/32 of the RAM, at least 512 MiB), not against the figure the driver
+  reports. When even the attention weights and one sequence do not fit, the load stops with an error that names the device and the memory instead of copying
+  until the machine swaps. When the weights are larger than the RAM, the log says by how much (`the weights are N MiB larger than ...`): the layers that
+  stay in the file are then read from the disk again and again.
+* After a weight has been copied to the device its mapped file pages are dropped (Linux `MADV_PAGEOUT`; Windows: they leave the working set; macOS: no
+  effect), so the file and the copy are not both resident. `FLLM_KEEP_HOST_PAGES=1` turns that off.
+* The load prints a line every five seconds: `weights on the device: layer 12/48, 21.40 GiB copied (310 MiB/s), 20.90 GiB of mapped pages released, 1840 MiB
+  of host memory free, 69 s`, or `copying blk.7.ffn_up_exps.weight` while one large weight is on its way. A load that stands still shows which weight it stands on.
+* A GPU submission that does not finish is no longer silent: after 20 seconds the log says `<device>: still waiting for GPU submission N after 20 s (... MiB
+  of host memory free)` every 20 seconds, and after 180 seconds the request fails with `Vulkan device '<name>' did not finish GPU submission N within 180 s`.
+  `FLLM_VK_WAIT_TIMEOUT_S=N` sets the limit (`0`: wait forever).
+* `FLLM_VK_TRACE=1` logs every uploaded weight and every compiled shader with its time in milliseconds; without it, anything slower than three seconds
+  (`FLLM_VK_SLOW_MS`) is logged. A first token that is slow because the driver compiles many shaders (one per format and shape) shows up there.
+
+**What to do:** a smaller quantization or a shorter `--ctx`, `--gpu-layers N` to put fewer layers on the GPU, or `--device cpu`. If the log stops at
+`copying <weight>` or at `still waiting for GPU submission`, send the log with `FLLM_VK_TRACE=1` and the output of `fllm-rs devices`.
+
 ## Docker / GPU host problems
 
 | Symptom | Cause / fix |

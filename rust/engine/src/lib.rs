@@ -67,6 +67,7 @@ pub mod cpu_threads;
 pub mod cpu_topology;
 pub mod draft;
 pub mod expert_cache;
+pub mod load_progress;
 pub(crate) mod kv_blocks;
 pub mod kv_transfer;
 pub mod speculative;

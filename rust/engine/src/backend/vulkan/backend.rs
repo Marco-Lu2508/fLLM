@@ -115,6 +115,10 @@ impl Backend for VulkanBackend {
         self.shared.device_id
     }
 
+    fn shares_host_memory(&self) -> bool {
+        self.shared.caps().unified_memory
+    }
+
     fn capabilities(&self) -> &BackendCapabilities {
         &self.capabilities
     }

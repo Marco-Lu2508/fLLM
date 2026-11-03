@@ -43,7 +43,7 @@ fn vulkan_expands(type_id: u32) -> bool {
 }
 
 /// Bytes one tensor occupies on the device of `backend` ("vulkan", "cuda", ...): the stored size, unless the backend expands the format at
-/// upload. A Vulkan tensor of a format without a shader is re-quantized to Q5_K when its rows are whole 256-value blocks (176 bytes per block)
+/// upload. A Vulkan tensor of a format without a shader is re-quantized to Q5_K when its rows are whole 256-value blocks (180 bytes per block in the planar layout)
 /// and stored as binary16 otherwise (the IQ1 / IQ2 / IQ3 families stay packed: their device layouts are the file blocks, except IQ3_S, whose 110-byte
 /// blocks take 112, and IQ1_M, whose 56-byte blocks take 58).
 pub fn device_tensor_bytes(t: &fllm_gguf_probe::TensorInfo, backend: &str) -> u64 {
@@ -53,13 +53,45 @@ pub fn device_tensor_bytes(t: &fllm_gguf_probe::TensorInfo, backend: &str) -> u6
     if backend == "vulkan" && vulkan_expands(t.type_id) {
         let elems = t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0);
         let cols = t.dimensions.first().copied().unwrap_or(0);
-        return if cols > 0 && cols % 256 == 0 { elems / 256 * 176 } else { elems.saturating_mul(2) };
+        return if cols > 0 && cols % 256 == 0 { elems / 256 * 180 } else { elems.saturating_mul(2) };
     }
-    if backend == "vulkan" && matches!(t.type_id, 21 | 29) {
-        let elems = t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0);
-        return elems.div_ceil(256) * if t.type_id == 21 { 112 } else { 58 };
+    if backend == "vulkan" {
+        // planar device layouts that are not the file blocks (measured against the upload by `the_planned_device_bytes_match_what_the_upload_allocates`)
+        let (block, bytes) = match t.type_id {
+            11 => (256, 116),
+            12 => (256, 148),
+            13 => (256, 180),
+            14 => (256, 212),
+            21 => (256, 112),
+            29 => (256, 58),
+            39 => (32, 17),
+            _ => (0, 0),
+        };
+        if block > 0 {
+            let elems = t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0);
+            return elems.div_ceil(block) * bytes;
+        }
     }
     tensor_bytes(t)
+}
+
+/// Host memory kept back for the system, the page cache of the host-side weights and the allocator of a device that shares the host's RAM:
+/// 1/32 of the memory, at least 512 MiB.
+pub fn unified_host_reserve(host_total: u64) -> u64 {
+    (host_total / 32).max(512 << 20)
+}
+
+/// Memory a plan may spend on a device that shares RAM with the host (an integrated GPU, an APU). The device reports its own free figure, but
+/// every byte the device holds is a byte the host no longer has, so the plan counts against what the system has free, less a reserve
+/// (`unified_host_reserve`); the weights that stay on the host are mapped from the file and come out of the same pool.
+pub fn unified_device_budget(device_free: u64, host_free: u64, host_total: u64) -> u64 {
+    device_free.min(host_free.saturating_sub(unified_host_reserve(host_total)))
+}
+
+/// Bytes by which the weights of a model exceed the memory a shared-memory device and the host can hold together (0: they fit). With a
+/// positive result some weights are read from the disk again and again; the load says so instead of silently swapping.
+pub fn unified_oversubscription(weights: u64, host_total: u64) -> u64 {
+    weights.saturating_sub(host_total.saturating_sub(unified_host_reserve(host_total)))
 }
 
 pub fn tensor_bytes(t: &fllm_gguf_probe::TensorInfo) -> u64 {
@@ -647,6 +679,20 @@ mod tests {
     }
 
     #[test]
+    fn a_device_that_shares_the_host_ram_plans_with_what_the_system_has_left() {
+        let gib = 1u64 << 30;
+        // 64 GiB machine: reserve 2 GiB; the device's own figure (it reports about half of the RAM) and the system's free memory both cap the plan
+        assert_eq!(unified_host_reserve(64 * gib), 2 * gib);
+        assert_eq!(unified_host_reserve(8 * gib), 512 << 20);
+        assert_eq!(unified_device_budget(32 * gib, 50 * gib, 64 * gib), 32 * gib);
+        assert_eq!(unified_device_budget(32 * gib, 10 * gib, 64 * gib), 8 * gib);
+        assert_eq!(unified_device_budget(32 * gib, gib / 4, 64 * gib), 0);
+        // a 76 GB model on a 64 GiB machine is larger than the memory it has; one that fits is not
+        assert!(unified_oversubscription(76 * gib, 64 * gib) > 0);
+        assert_eq!(unified_oversubscription(40 * gib, 64 * gib), 0);
+    }
+
+    #[test]
     fn vulkan_counts_expanded_formats_with_their_device_size() {
         let tensor = |type_id: u32, dimensions: &[u64]| fllm_gguf_probe::TensorInfo {
             name: "blk.0.ffn_up_exps.weight".into(),
@@ -655,10 +701,10 @@ mod tests {
             data_offset: 0,
             payload_len: 0,
         };
-        // Q8_K with 256-wide blocks: 292 bytes per block in the file, a Q5_K block of 176 bytes on Vulkan
+        // Q8_K with 256-wide blocks: 292 bytes per block in the file, a Q5_K block of 180 bytes on Vulkan
         let q8k = tensor(15, &[2560, 640, 512]);
         assert_eq!(tensor_bytes(&q8k), 2560 * 640 * 512 / 256 * 292);
-        assert_eq!(device_tensor_bytes(&q8k, "vulkan"), 2560 * 640 * 512 / 256 * 176);
+        assert_eq!(device_tensor_bytes(&q8k, "vulkan"), 2560 * 640 * 512 / 256 * 180);
         // rows that are not whole 256-value blocks are stored as binary16
         let q8_1 = tensor(9, &[640, 2560, 512]);
         assert_eq!(device_tensor_bytes(&q8_1, "vulkan"), 640 * 2560 * 512 * 2);
@@ -676,8 +722,10 @@ mod tests {
         assert_eq!(device_tensor_bytes(&q2_0, "vulkan"), 640 * 2560 * 512 / 64 * 18);
         // formats with a kernel, and every format on a backend that reads it, keep the stored size
         let q4k = tensor(12, &[2560, 640, 512]);
-        assert_eq!(device_tensor_bytes(&q4k, "vulkan"), tensor_bytes(&q4k));
+        // the planar layouts of the K-quants differ from the file blocks by a few bytes per block (Q4_K 148 instead of 144, Q6_K 212 instead of 224)
+        assert_eq!(device_tensor_bytes(&q4k, "vulkan"), 2560 * 640 * 512 / 256 * 148);
+        assert_eq!(device_tensor_bytes(&tensor(14, &[2560, 640, 512]), "vulkan"), 2560 * 640 * 512 / 256 * 212);
         assert_eq!(device_tensor_bytes(&iq3, "cuda"), tensor_bytes(&iq3));
-        assert_eq!(device_weight_bytes(&[q8k.clone(), q4k.clone()], "vulkan"), device_tensor_bytes(&q8k, "vulkan") + tensor_bytes(&q4k));
+        assert_eq!(device_weight_bytes(&[q8k.clone(), q4k.clone()], "vulkan"), device_tensor_bytes(&q8k, "vulkan") + device_tensor_bytes(&q4k, "vulkan"));
     }
 }
