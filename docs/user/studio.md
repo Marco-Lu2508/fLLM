@@ -97,12 +97,11 @@ page in your default browser (`--no-open` keeps it closed). All other `serve` op
   next to `studio.json` (`GET`/`PUT /api/studio/memory`, this machine only); a browser with no stored personalization restores it from
   that copy. The *search_chats* tool lets the model look through the titles and text of your earlier chats when you refer to one; the
   page asks once per chat whether to allow it, and temporary chats are never searched.
-* **What the coding agent learned** (Settings > Personalization, two more cards). *Your profile* is a plain text file (`user-profile.md` in the
-  Studio folder: preferences, skill level, languages, conventions, tool habits, at most 3,000 characters) that you can edit, export and delete;
-  up to 1,200 characters of it go into the system prompt of the coding agent, and a switch keeps it out. *Memory of the coding agent* lists the
-  entries the agent keeps (`agent-memory.md`, and `.fllm/memory.md` of the open folder) with the session each learned entry came from, lets you edit
-  or delete them, shows the entries and profile lines that wait for a yes, and has *Forget everything that was learned* (entries you wrote
-  stay). This is separate from the chat memory above, which is for the chat page.
+* **What the coding agent learned** (Settings > Personalization, three more cards). *Learning from my sessions* holds the switch, *Ask me first* and the *What I learned* feed
+  with Undo. *Your profile* is a plain text file (`user-profile.md` in the Studio folder: preferences, skill level, languages, conventions, tool habits, at most 3,000 characters)
+  with short dated lines that the agent adds from your own messages; edit, export and delete it; up to 1,200 characters go into the system prompt of the coding agent, and a switch keeps it
+  out. *Memory of the coding agent* lists the entries the agent keeps (`agent-memory.md`, and `.fllm/memory.md` of the open folder) with the session each learned entry came from, lets you
+  edit or delete them, and has *Forget everything that was learned* (entries you wrote stay). This is separate from the chat memory above, which is for the chat page.
 * **Prompt library.** Save prompts with a title in Settings > Personalization, then type `/` in the message box to list them, filter by
   typing, and insert one with Enter or Tab.
 * **Organizing chats.** The select button above the chat list allows bulk delete, move, archive and export. Drag a chat onto the
@@ -233,14 +232,16 @@ found a problem. It matches `/review` and the review step of Claude Code and Cod
 cheapest way to catch a typo or a half-finished edit; it does not replace running the tests. The terminal agent has the same step:
 `fllm-rs agent --review --verify "cargo test"` ([agent-cli.md](agent-cli.md#self-review---review)).
 
-**Learn from this session.** Also in the *Settings* box (or `/learn on|off`), off by default. After each run, in the background and after
-the answer is shown, the server uses the loaded model for up to two short steps (each capped in tokens and time): it notes how the skills the
-agent read fared, drafts a revised skill after a failure or after five uses, and asks what is worth remembering. The steps use a JSON
-schema, so a small model cannot answer in the wrong shape; an answer that does not fit is dropped. Nothing is saved before you say yes:
-the results wait in *Settings > Skills* (skill revisions with the reason and a diff) and *Settings > Personalization* (memory entries with the
-session they came from, and lines for your profile). *Skills helped* / *Skills did not help* in the box (or `/good`, `/bad`) give the skills of
-the last run a thumb; a thumb down makes a revision due. *Save memory and profile lines without asking* in Settings > Personalization skips the yes for
-those two (still deduped, redacted and capped). The same loop for the terminal: `fllm-rs agent --learn` ([agent-cli.md](agent-cli.md#learning-from-runs---learn)).
+**Learn from my sessions.** On by default, in the *Settings* box (or `/learn on|off`; `/learn project off|on|default` for the open folder only, kept in
+`.fllm/learn.json` there). The first time, a notice says in one sentence what it does. After each run, in the background and after the answer is shown, the server
+uses the loaded model for up to four short steps (each capped in tokens and time) and saves what it found **without asking**: it writes a skill after a complex task that
+went well, revises a skill that failed (the old text is kept, and the revision is taken back if one of the next two uses goes badly), saves notes about the project and adds
+short dated lines to your profile that rest on your own messages. A skill you wrote or edited is never overwritten; the revision becomes a copy named `NAME-agent`. The steps use a
+JSON schema, so a small model cannot answer in the wrong shape, and an answer that does not fit writes nothing. A toast says what was learned ("Learned: updated skill ..., saved 2
+notes"). Everything is listed under *What I learned* (Settings > Personalization, skills also in Settings > Skills) with time, session, reason, the diff of a skill and an **Undo**
+button. *Skills helped* / *Skills did not help* in the box (or `/good`, `/bad`) give the skills of the last run a thumb; a thumb down on a revised skill puts the old text back. *Ask me first*
+in Settings > Personalization turns every change into a proposal that waits for your yes. The Code page learns after a run; the notes every few tool steps of a long run exist in
+`fllm-rs agent` only. The same loop for the terminal: [agent-cli.md](agent-cli.md#learning-from-runs-on-by-default).
 
 **Style of the agent.** *Style of the agent* in the same box (or `/personality concise|teacher|reviewer|pair|default`) adds one line to the
 system prompt about how the agent talks: short, explaining, strictly self-critical or thinking aloud. It never changes what the agent may
@@ -556,13 +557,11 @@ steps. Your own skills are kept in the `skills` folder next to `studio.json`; th
 lists, edits and deletes them. The model can read them with the `skill` tool and, after a task worth repeating, propose a new one that you
 approve before it is saved.
 
-**Skill improvements.** The same page has a card *Skill improvements*. With *Learn from this session* on, each use of a skill leaves a line
-in `learn/skills/<name>/usage.jsonl` of the Studio folder (finished or failed, checks passed, retries, your thumbs). After a failure, or
-after five uses since the last revision, the loaded model drafts a revised `SKILL.md` with a reason; the card shows the usage numbers, the
-draft as a diff, *Approve* and *Reject*, and a version list with *Roll back*. A draft changes nothing until approved, an edit you made in
-the meantime blocks it, and each approved revision or rollback keeps the text it replaced (the newest 20 versions). *Improve now* asks
-for a draft at once, *Consolidate now* does it for all skills that are due and proposes to remove repeated memory entries. From the
-terminal: `fllm-rs skills usage|improve|diff|approve-revision|reject-revision|history|rollback`, `fllm-rs learn status|review|accept|reject`.
+**Skill improvements.** The same page has a card *Skill improvements*. With *Learn from my sessions* on (the default), each use of a skill leaves a line
+in `learn/skills/<name>/usage.jsonl` of the Studio folder (finished or failed, checks passed, retries, your thumbs). After a failure, a thumb down, many retries or five uses since the last revision,
+the loaded model revises the skill itself; the draft is applied only after a second call of the model confirmed that it still does the same job, the previous text is kept as a version, and a bad use among
+the next two puts it back. The card shows the numbers, the changes the agent made (with the diff and an Undo), and a version list with *Roll back*. *Improve now* asks for a revision at once,
+*Consolidate now* does it for all skills that are due and removes repeated memory entries. From the terminal: `fllm-rs skills usage|improve|history|rollback`, `fllm-rs learn log|undo`.
 
 **Scheduled tasks.** A task runs a prompt on a schedule (`every 30 minutes`, `hourly`, `daily at 08:30`, `weekdays at 09:00`,
 `weekly on mon,thu at 18:00`, or a cron line) in local time, either as a chat answer or as an agent run in a folder that may only read,
@@ -576,8 +575,8 @@ Temporary chats are never copied.
 
 A task can also send its result to a webhook, a ntfy topic or a Telegram chat (*Also send the result to*; see [agent-cli.md](agent-cli.md)). The agent can run without the page too: `fllm-rs agent -p` and `fllm-rs gateway telegram` use the same tools ([agent-cli.md](agent-cli.md)).
 
-A task of the kind *Consolidate memory and skills* (off until you add it, for example `daily at 03:00`) runs that consolidation on the clock; it
-needs no prompt of its own and, like everything above, only drafts proposals.
+A task of the kind *Consolidate memory and skills* (not there until you add it, for example `daily at 03:00`) runs that consolidation on the clock; it
+needs no prompt of its own and its changes are logged like the rest.
 
 These routes (`/api/studio/skills`, `/api/studio/sessions/*`, `/api/studio/schedule*`, `/api/studio/learn*`) work only from this machine, reads included.
 

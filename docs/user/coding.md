@@ -102,9 +102,10 @@ settings. `fllm-rs acp` is an Agent Client Protocol agent for editors such as Ze
 with their limits, in [agent-cli.md](agent-cli.md#as-an-mcp-server-and-as-an-acp-agent). They were run against scripted clients, not
 against Claude Code, Codex or an editor.
 
-With `--learn`, `fllm-rs agent` also improves over time: it reads your skills, drafts a better version of a skill that failed, and proposes
-memory entries and profile lines after a run, all as proposals you accept with `fllm-rs learn review`
-([agent-cli.md](agent-cli.md#learning-from-runs---learn)). It is off by default and costs one or two short extra model calls per run.
+`fllm-rs agent` also improves over time, and does so by default: it reads your skills, writes a skill after a complex task that went well, revises a skill that failed
+(and puts the old text back if the revision does not hold up), saves notes about the project and dated lines for a profile of you, and logs every change so that you can undo it
+(`fllm-rs learn log`, `learn undo`). It costs one to four short extra model calls after the answer. Switch it off with `--no-learn`, `fllm-rs learn off` or `FLLM_NO_LEARN=1`
+([agent-cli.md](agent-cli.md#learning-from-runs-on-by-default)).
 
 ## Autocomplete: `/infill`
 

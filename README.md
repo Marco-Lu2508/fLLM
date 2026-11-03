@@ -156,8 +156,8 @@ speech are not supported; for multimodal checkpoints only the text model is conv
 | `studio` | start the server and open the Studio (the browser app) |
 | `amd-npu status\|list\|pull\|serve\|build-shim\|native-bench` | the NPU of an AMD Ryzen AI processor: through FastFlowLM, or with fLLM's own kernels (`build-shim` builds the helper library over XRT, `native-bench` times a projection on the NPU against the processor) ([docs/user/amd-npu.md](docs/user/amd-npu.md), [docs/npu-xdna.md](docs/npu-xdna.md)) |
 | `connect TOOL` | prints (and with `--write` writes) the settings that point Claude Code, Codex, OpenCode, Aider, Continue, Cline or an SDK at the running server ([docs/user/coding.md](docs/user/coding.md)) |
-| `agent -p "TASK"`, `gateway telegram\|matrix\|discord\|slack` | the coding agent without a browser (plan mode, permission rules, self-review, `stream-json`, resume, `--learn` to improve skills and propose memory and profile lines), and the same agent behind a Telegram, Matrix, Discord or Slack chat with an allowlist and pairing codes ([docs/user/agent-cli.md](docs/user/agent-cli.md)) |
-| `learn status\|review\|accept\|reject\|memory\|profile\|forget\|consolidate` | what the agent learned from your sessions and still waits for your yes: revised skills with a diff, memory entries with their source session, profile lines ([docs/user/agent-cli.md](docs/user/agent-cli.md#learning-from-runs---learn)) |
+| `agent -p "TASK"`, `gateway telegram\|matrix\|discord\|slack` | the coding agent without a browser (plan mode, permission rules, self-review, `stream-json`, resume, learning from runs on by default: skills, notes and a profile that it saves on its own and you can undo), and the same agent behind a Telegram, Matrix, Discord or Slack chat with an allowlist and pairing codes ([docs/user/agent-cli.md](docs/user/agent-cli.md)) |
+| `learn log\|undo\|on\|off\|mode\|status\|review\|accept\|reject\|memory\|profile\|forget\|consolidate` | what the agent learned from your sessions (on by default): every automatic change with its reason and a diff, one-step undo, the switch (also per project), an ask-first mode, memory entries with their source session, the profile ([docs/user/agent-cli.md](docs/user/agent-cli.md#learning-from-runs-on-by-default)) |
 | `mcp-server`, `acp`, `skills`, `import`, `doctor`, `update --check`, `insights`, `sessions` | fLLM's agent as an MCP server and as an editor (ACP) agent, skills in the agentskills.io format, import of Claude Code / Codex / Hermes settings, health check, usage overview, search of earlier sessions ([docs/user/agent-cli.md](docs/user/agent-cli.md)) |
 
 `fllm-rs <command> --help` prints the usage of each command; [docs/user/commands.md](docs/user/commands.md)
@@ -265,8 +265,8 @@ the log folder when the engine does not start.
   DevTools protocol, shown live in a panel where you can click and leave comments), **computer use** (screenshots,
   mouse and keyboard, every action asked first, a STOP button and a panic key) and a **command sandbox** (bubblewrap on
   Linux; a restricted token and job object on Windows, checked on one Windows 11 machine; Seatbelt on macOS, unchecked).
-  With **Learn from this session** (off by default) it also improves over time: it notes how skills fared and drafts better versions
-  (with a diff, a reason and a rollback), and proposes memory entries and lines for a profile of you; nothing is saved before you say yes.
+  It also **learns from your sessions, on by default** (a switch in the Code settings, per project too): it writes a skill after a complex task that went well, revises a skill that failed (the old text is kept and
+  comes back if the revision does not hold up; a skill you wrote is never overwritten), saves notes about the project and dated lines about you from your own messages. Every change is in a *What I learned* feed with Undo.
 - **Skills and MCP servers**: install skills from any GitHub repository or the skills.sh directory, and find MCP servers
   in the official registry or on Smithery; nothing runs before you read the command and save it.
 - **Settings > Engine** for the output cache, prompt sharing, telemetry (OTLP) and the disk tier; **API keys with an

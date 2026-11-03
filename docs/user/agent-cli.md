@@ -35,7 +35,7 @@ Other options: `--profile NAME`, `--ask`, `--url` (default `http://127.0.0.1:800
 Newer options have their own sections below: `--plan`, `--allow-rule`/`--deny-rule`/`--ask-rule` ([rules](#permission-rules-plan-mode-and-settings-files)),
 `--review` and `--verify` ([self-review](#self-review---review)), `--output-format`, `--continue`, `--resume`, `--image`
 ([formats](#output-formats-sessions-and-pictures)), `--propose-skills` ([skills](#skills-proposals-and-exchange)),
-`--learn`, `--auto-memory`, `--skills`, `--nudge-every` ([learning from runs](#learning-from-runs---learn)).
+`--no-learn`, `--ask-first`, `--skills`, `--nudge-every` ([learning from runs, on by default](#learning-from-runs-on-by-default)).
 How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.md](../code-mode-gap.md).
 
 * **Output.** The final answer goes to standard output, progress (one line per tool call) to standard error. `--json` prints one
@@ -194,63 +194,62 @@ it gives.
   `SKILL.md` below a folder or a git repository (`--dry-run` first). Existing skills are kept unless `--force`. fLLM only reads
   `SKILL.md`; scripts that ship with a skill are copied but the model has to be told to run them.
 
-## Learning from runs: `--learn`
+## Learning from runs: on by default
 
-`--learn` closes the loop that a one-off `--propose-skills` leaves open. The agent can read your skills, notes how they fared, drafts a
-better version when one failed, and asks the model after a run what is worth remembering about the project and about you. It is off
-unless you ask for it, it runs **after the answer is printed**, and **nothing it finds is used before you say yes** (`--auto-memory` is
-the only way to skip the yes, and only for memory entries and profile lines).
+The agent learns from what it does, the way Hermes Agent does: **on its own, without asking**. After the answer is printed (so the
+answer is never held up) it spends one to four short model calls on the run, and every change it makes is written to a log from which you can undo it.
+A one-sentence notice explains this the first time. It runs in `fllm-rs agent`, `fllm-rs gateway` and the Studio's Code page.
 
 ```
-fllm-rs agent --learn --allow-edit --allow-command -p "add a --verbose flag"
-fllm-rs learn status            # what waits for a decision
-fllm-rs learn review            # show each item (diff, reason, source session) and ask accept / reject / skip
-fllm-rs learn accept --all --memory
+fllm-rs agent -p "add a --verbose flag" --allow-edit --allow-command    # learns, unless you say no
+fllm-rs agent --no-learn -p "..."                                       # not this time
+fllm-rs learn off                                                       # never (fllm-rs learn on brings it back)
+fllm-rs learn off --folder ~/work/secret-project                        # not in this project (.fllm/learn.json)
+fllm-rs learn log                                                       # what it learned, with reason, session and id
+fllm-rs learn undo chg-1a2b3c4d                                         # take one change back
 ```
 
-What `--learn` turns on (`--skills` alone only gives the first point):
+`FLLM_NO_LEARN=1` switches it off for a process. `--ask-first` (or `fllm-rs learn mode ask`) turns every change into a proposal that waits for your
+yes (`fllm-rs learn review`, `accept`, `reject`); that was the only mode of the first version of this feature.
 
-1. **Skills are usable.** The agent gets a `skill` tool (`list`, `read`) and a one-line index of your skills and the skills of the
-   folder (`.fllm/skills`) in its system prompt. A skill whose name, description or `when` line shares words with the task is named as
-   "looks relevant, read it first", because small models rarely look for a skill on their own.
-2. **Skill usage is logged.** When the model read a skill, one line goes to `learn/skills/<name>/usage.jsonl` in the Studio folder: how the
-   run ended (finished or failed), whether the `--verify` command passed, how many tool calls failed (retries), a short redacted note,
-   and later your thumbs from the Studio. A run counts as failed when it hit `--max-steps`, when `--verify` still failed, or when it ended in an error.
-3. **A skill gets a revision proposal.** After a failure or after five uses since the last revision the model is asked, with the skill,
-   the last uses and an excerpt of the session, for a better `SKILL.md`. The answer is a small JSON object (`change`, `reason`,
-   `description`, `when`, `steps`); the name and extra front matter keys are kept from the original, a revision that drops most of the skill
-   or contains a secret is refused. The draft waits in `learn/skills/<name>/revision.json`; `fllm-rs skills improve NAME` asks for one by hand,
-   `fllm-rs skills diff NAME` shows reason and diff, `approve-revision` applies it, `reject-revision` drops it. An edit you made to the skill after the draft
-   blocks the approval (`--force` overrides). Every approved revision and every rollback keeps the text it replaced as a version
-   (`fllm-rs skills history NAME`, `fllm-rs skills rollback NAME [VERSION]`); the newest 20 versions are kept. `fllm-rs skills usage [NAME]` prints the numbers.
-4. **Memory nudges.** After the run, and every `--nudge-every N` tool results of a long run (default 12, 0 = only at the end), a short
-   reflective step asks what is worth keeping for later: facts about the project, your preferences, commands that worked, mistakes to
-   avoid (at most five entries). Each candidate is cleaned (one line, 400 characters), refused when it looks like a secret (keys, tokens,
-   passwords, private keys, credentials in URLs), and compared with the memory files, the waiting proposals and the other candidates:
-   same words after normalising, or a BM25 score of at least 75 % of the candidate's own score, counts as a repeat (no embeddings).
-   What is left becomes a proposal (`fllm-rs learn status`); with `--auto-memory` it is written to the memory file at once. Caps: 100
-   entries and 24 KB per memory file, 40 waiting proposals. `fllm-rs learn memory` lists the entries and the session each learned one came
-   from; `fllm-rs learn forget WORDS` removes entries, profile lines and proposals that contain the words, `forget --all-learned` removes
-   everything the loop wrote (entries you wrote yourself stay).
-5. **A profile of you.** The same step may propose durable facts about you: preferences, skill level, languages, conventions, tool
-   habits. They go into `user-profile.md` in the Studio folder, a plain Markdown file with those five headings (8 lines per heading, 3,000
-   characters). Edit it by hand any time; up to 1,200 characters of it go into the system prompt of `fllm-rs agent`, the gateway and
-   the Studio's Code page. `fllm-rs learn profile` shows it, `profile off` keeps it out of the prompt, `profile export FILE` copies
-   it, `profile delete` removes it. Nothing else about you is kept.
+**What it does after a run**
 
-**For small models.** The reflective steps ask for a small JSON object and send it as `response_format` (a JSON schema that the server
-turns into a grammar), so even a 3B model cannot answer in the wrong shape. A server that refuses the field is asked again without it and
-with thinking off; an answer that still does not fit (not JSON, wrong fields, empty text) is dropped item by item and the run goes on. Each
-step has a token cap (700 for memory, 1,500 for a skill revision), a time limit (2 to 4 minutes), and at most two skill revisions are drafted per run.
-The transcript the model sees is a short account (what was asked, which tools ran and how they ended, what was answered), cut in the
-middle at 6,000 characters (3,500 with a context below 8,192), and passes through the same redaction as the notes: keys, tokens,
-passwords, private keys, credentials in URLs, and the API key of the run itself.
+1. **Skills are used.** The agent gets a `skill` tool (`list`, `read`) and a one-line index of your skills (and those in `.fllm/skills` of the folder). The
+   skill that matches the task best is put into the prompt, because small models rarely look for one themselves. Each use is logged in
+   `learn/skills/<name>/usage.jsonl` of the Studio folder: finished or failed, the `--verify` result, failed tool calls (retries), a short redacted note, later your thumbs.
+2. **A skill is written after a complex task.** A run that finished, whose `--verify` passed (if there was one), that used at least 6 tool calls and no existing skill, is shown to
+   the model with a JSON schema (`save`, `name`, `description`, `when`, `steps`, `pitfalls`). If it says the procedure is worth keeping, the skill is saved in
+   the Studio folder and logged. One skill per run at most; a name that exists is never taken again.
+3. **A skill is revised when it is due:** after a failed run, a failed `--verify`, a thumb down, a use with 3 or more failed tool calls, or every 5 uses. The model drafts a new `SKILL.md`
+   (JSON: `change`, `reason`, `description`, `when`, `steps`). The draft is applied only if it passes the checks: valid front matter (the name stays), at most 64 KB, not
+   dropping most of the old content, no secret, **and** a second model call (`ok`, `problem`) confirms that it still does the same job, keeps what worked and answers
+   the stated reason. Otherwise nothing is written. The old text is kept as a version.
+4. **Automatic rollback.** A revised skill is watched for its next two uses. If one of them fails, fails its `--verify`, gets a thumb down or needs 3 or more retries, the previous
+   text is put back at once, the reason is logged (`skill_rollback`) and no new revision is drafted for that failure. Two good uses confirm the revision.
+5. **A skill you wrote is not overwritten.** The agent only replaces a skill it wrote itself and that nobody changed since (it remembers a hash of what it wrote). A skill you
+   wrote, imported or edited by hand gets a sibling named `NAME-agent`, described as the agent's revised copy; the original stays as it is. Later revisions go into the sibling
+   (unless you edited that one, too).
+6. **Notes.** A reflective step (also every `--nudge-every N` tool results of a long run, default 12, `0` = only at the end) saves up to five facts about the project: how to build,
+   test and run it, conventions, your stated preferences, traps. Each is cleaned (one line, 400 characters), refused when it looks like a secret (keys, tokens, passwords, private keys,
+   credentials in URLs, the API key of the run), compared with the memory files and the other candidates (same words after normalising, or a BM25 score of at least 75 % of
+   its own score; no embeddings) and written to `agent-memory.md` (or `.fllm/memory.md` of the project). Caps: 100 entries and 24 KB per file. `fllm-rs learn memory`
+   shows the entries and the session each came from; `fllm-rs learn forget WORDS` and `forget --all-learned` remove them.
+7. **A profile of you.** From the same step, at most five short dated lines (`- Prefers short answers (2026-11-03)`) in `user-profile.md`, under the headings Preferences, Skill level,
+   Languages, Conventions, Tool habits (8 lines each, 3,000 characters). The model sees the messages **you** wrote as a separate block, and a line is kept only if at least two of its
+   words and 40 % of them appear in what you wrote: nothing is taken from tool output, from the agent's own words or from text the loop added (review feedback). Edit the file any time; up
+   to 1,200 characters go into the system prompt. `fllm-rs learn profile` shows it, `profile off` keeps it out of the prompt, `export FILE` copies it, `delete` removes it.
 
-**The nightly job.** In the Studio (Settings > Skills and schedules) a task of the kind "Consolidate memory and skills" drafts the
-revisions that are due and proposes to remove memory entries that repeat an earlier one. It never writes a skill or memory entry itself.
-`fllm-rs learn consolidate` runs the same job once.
+**What you see.** The last line of a run says what changed, for example `[learn] Learned: created skill 'release-build', saved 2 notes.` (shown unless `--quiet`);
+the Studio shows the same as a toast. `fllm-rs learn log` lists every change with time, session, reason and id (`--json` adds the diff of a skill); `undo ID` takes one back:
+a created skill is removed, a revised one gets its old text, a note or profile line is deleted, a removed duplicate comes back. A skill that was edited after the change is not touched by the undo.
 
-**The gateway.** `fllm-rs gateway ... --learn` learns from every answered chat message the same way (proposals only unless `--auto-memory`).
+**Limits that always hold.** One reflection (5 notes, 4 profile lines), at most one new skill and two revisions per run; every step has a token cap (700 for notes, 1,200 for a new skill,
+1,500 for a revision, 200 for the check) and a time limit of two to four minutes; the transcript the model sees is a short account of the run (what was asked, which tools ran and how they ended,
+what was answered), cut in the middle at 6,000 characters (3,500 with a context below 8,192) and redacted the same way as the notes. The steps send a JSON schema as
+`response_format`; a server that refuses it is asked again without it and with thinking off; an answer that does not fit the schema writes nothing.
+
+**Nightly.** In the Studio a schedule task of the kind "Consolidate memory and skills" revises the skills that are due and removes memory entries that repeat an earlier one, logged like the rest.
+`fllm-rs learn consolidate` runs it once. **Gateway:** every answered chat message is learned from the same way.
 
 ## `doctor`, `update`, `insights`, `import`
 
@@ -334,24 +333,22 @@ JavaScript project whose test fails because `add` subtracts:
 * Unit tests for the rules, the review feedback, stream events, skills, import, session search, gateway chats against stub servers
   (Discord and Slack through the real HTTP client), pairing, terminal backends, the MCP server and ACP against scripted clients.
 
-**Learning loop, run for real** (Windows 11 PC, Intel integrated graphics through Vulkan, Qwen3-4B-Instruct-2507 Q4_K_M, a 20k context, a tiny
-Node.js project): `fllm-rs agent --learn --verify "node test.js"` with a skill in the Studio folder whose last step wrongly said `npm test`
-(the project has no `package.json`; the flaw was put there by hand so that there was something to improve).
+**Learning loop, run for real** (Windows 11 PC, Intel integrated graphics through Vulkan, Qwen3-4B-Instruct-2507 Q4_K_M, a context of 8,192, one run at a time because the PC had
+little free memory; learning left at its default). A tiny Node.js project whose test fails, and a skill in the Studio folder that was written by hand with a planted flaw (its last step said `npm test`; the project has no `package.json`).
 
-* Run 1 (fix a failing test) and run 2 (add a function and a test): the task matched the skill, so it was put into the prompt and counted as
-  used; both runs ended with `[verify] node test.js passed`. The `bash` call that followed the skill (`npm test`) failed in both runs and the model
-  recovered by itself, so the usage log shows two uses with one retry each. A third run was cut short by the machine running out of memory
-  and was not repeated; the "five uses" trigger and the second pass over the three tasks were **not** run.
-* After each run the reflective step took 13 s and proposed one memory entry ("Tests can be run directly with node test.js ...", the second run
-  proposed nothing new). In an earlier run of the same task, before the prompt was tightened, the same model proposed four entries that retold what
-  the files contain and three profile lines that described what the agent did instead of the user; the prompt now says what is not worth keeping and
-  that a user who only gave a task has shown nothing for the profile. The profile stayed empty, which is the right outcome for these runs.
-* `fllm-rs skills improve` drafted a revision. It noticed the failing step ("fails to report test outcomes ... when npm test fails") but its fix
-  only added error reporting; it did **not** replace `npm test` by `node test.js`. The diff and reason were shown, `approve-revision` applied it
-  (the old text became version 1), `history` listed it and `rollback` restored the original text (kept as version 2). So the machinery works and
-  a 4B model drafts a plausible, small, not necessarily correct change: that is why a draft is never applied without a yes.
-* Not run with a real model: the Studio pages (checked by the page tests and the route tests, not clicked through in a browser), the gateway,
-  `--auto-memory`, the mid-run nudge (stub server only), the nightly task.
+* Run 1 (fix the failing test, `--verify "node test.js"`): the first-run notice appeared, the skill matched and was put into the prompt (logged as used), `npm test` failed, the model recovered, `[verify] node test.js passed`.
+  The reflective step took 27 s and saved one note on its own ("Tests run with npm test after a package.json is created": plausible, but not the lesson one would want).
+* A thumb down on the skill through the Studio route made a revision due.
+* Run 2 (add a function and a test): the skill was used again; the revision was drafted, passed the second check and, because the skill is hand-written, was **written as the sibling
+  `node-project-workflow-agent`** (original untouched, `[learn] 'node-project-workflow' is yours, so the revision was written as the skill ...`). It did what was needed in substance
+  (fall back to `node test.js` when `npm test` fails) but copied details of the task into the steps, which is the typical weakness of a 4B model. One more note was saved
+  (`Tests run with node test.js`), one suggestion was dropped (not from the user's words), the profile stayed empty. The whole learning step took 161 s on this GPU.
+* `fllm-rs learn log` listed all three changes with reason and session; `learn undo` removed the sibling skill, a second undo said it was undone already.
+* Run 3 (a rename across files, with no skill present, to see a skill being created) ended with an HTTP 504 from the server's own 600 s request timeout before any learning step: **skill creation and the
+  automatic rollback were not seen with a real model**. They are covered by unit tests with scripted model answers.
+* The Studio (Playwright against a server with the tiny test model and a made-up log): Settings > Personalization shows the switch, *Ask me first*, the *What I learned* feed, the profile and the
+  memory list; *Undo* on a note, a revised skill and a profile line each restored the earlier state (checked through the API); the switch changed the server's setting and back; Settings > Skills shows the
+  feed, the usage numbers and the version list; the Code settings show *Learn from my sessions* checked by default.
 
 **Not verified:** a model that can see (the picture path ends at the refusal), the self-proposed skill with a real model (it needs a run of
 eight tool calls, which the 3B model did not reach), the Discord, Slack, Telegram and Matrix gateways against the real services, the ACP
