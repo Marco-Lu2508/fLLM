@@ -71,6 +71,17 @@
 // api.cu (fllm_cuda_download) asks what a failing pointer is; hipPointerAttribute_t has the same `type` and `device` fields
 #define cudaPointerAttributes hipPointerAttribute_t
 #define cudaPointerGetAttributes hipPointerGetAttributes
+// the communication layer (comm_kernels.cu): peer access and peer copies between the GPUs of one node
+#define cudaDeviceCanAccessPeer hipDeviceCanAccessPeer
+#define cudaDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define cudaDeviceDisablePeerAccess hipDeviceDisablePeerAccess
+#define cudaErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
+#define cudaErrorPeerAccessNotEnabled hipErrorPeerAccessNotEnabled
+#define cudaMemcpyPeerAsync hipMemcpyPeerAsync
+#define cudaErrorInvalidValue hipErrorInvalidValue
+#define cudaDeviceGetP2PAttribute hipDeviceGetP2PAttribute
+#define cudaDevP2PAttrPerformanceRank hipDevP2PAttrPerformanceRank
+#define cudaDevP2PAttrNativeAtomicSupported hipDevP2PAttrNativeAtomicSupported
 
 // ---- Architecture families, as the device pass of hipcc sees them (the host pass defines none of these macros) ----------------
 // One code object exists per target of FLLM_HIP_ARCHS, and the HIP runtime hands a GPU the exact one, else the generic one of its family

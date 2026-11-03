@@ -22,6 +22,7 @@ FllmStream *fllm_cuda_stream_create(int dev);
 void fllm_cuda_stream_destroy(FllmStream *st);
 int fllm_cuda_stream_sync(FllmStream *st);
 int fllm_cuda_stream_wait_stream(FllmStream *waiter, FllmStream *target);
+void *fllm_cuda_stream_native(FllmStream *st);
 int fllm_cuda_upload(FllmStream *st, void *dst, const void *src, size_t bytes);
 int fllm_cuda_download(FllmStream *st, void *dst, const void *src, size_t bytes);
 int fllm_cuda_copy(FllmStream *st, void *dst, const void *src, size_t bytes);

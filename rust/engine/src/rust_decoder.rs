@@ -2499,6 +2499,14 @@ impl RustDecoder {
     /// group's all-reduce (NCCL for CUDA when present, else host memory) adds the partial sums, and the sum goes back up.
     fn device_tp_reduce(&self, stream: &mut dyn crate::backend::Stream, buf: &mut crate::backend::DeviceBuffer, len: usize) -> Result<(), String> {
         let err = |e: crate::backend::BackendError| e.to_string();
+        // a device-pointer all-reduce (NCCL / RCCL, or the one-shot kernel) on the compute stream: no copy through host memory
+        if let Some(par) = self.par.as_ref().filter(|p| p.tp_size() > 1 && p.device_collectives_enabled()) {
+            if let Some(group) = par.tp.device() {
+                if stream.device_all_reduce(buf, len, group).map_err(err)? {
+                    return Ok(());
+                }
+            }
+        }
         let mut host = vec![0.0f32; len];
         stream.download(cast_f32_to_u8_mut(&mut host), buf).map_err(err)?;
         self.par_tp_reduce(&mut host)?;

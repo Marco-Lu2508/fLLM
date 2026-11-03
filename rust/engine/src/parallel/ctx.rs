@@ -81,6 +81,12 @@ impl ParCtx {
         self.cfg.stage_layers(layers, self.stage)
     }
 
+    /// Whether the device forward pass may reduce through the group's device-pointer collectives. On by default for communicators that have
+    /// them (NCCL / RCCL, the peer-to-peer reducer); `FLLM_HOST_ALLREDUCE=1` forces the old path through host memory.
+    pub fn device_collectives_enabled(&self) -> bool {
+        self.gpu && self.tp.device().is_some() && !matches!(std::env::var("FLLM_HOST_ALLREDUCE").ok().as_deref().map(str::trim), Some("1" | "on" | "true" | "yes"))
+    }
+
     /// Sum of the partial results of the tensor-parallel group, in place; a no-op for a group of one.
     pub fn tp_reduce(&self, data: &mut [f32]) -> Result<(), String> {
         if self.cfg.tp > 1 {

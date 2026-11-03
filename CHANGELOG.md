@@ -23,6 +23,25 @@ behaviour between versions).
 - **`fllm-rs review`**: review a pull request (`--pr N`, through `gh`, `--comment` to post it), a branch (`--base`) or the staged changes read-only; `.github/workflows/fllm-review.yml.example` for GitHub Actions.
 - **`fllm-rs plugins add|list|remove`**: install plugins from `owner/repo`, a git address or a folder; a repository with `marketplace.json` works as a small marketplace; the contents (hooks run commands) are shown and confirmed first.
 - Configuration snippets for Zed and JetBrains (`fllm-rs acp`) and a VS Code extension skeleton in `contrib/vscode` (syntax-checked only). [docs/code-mode-gap.md](docs/code-mode-gap.md) gets a second matrix (Kiro, Pi, OpenClaw, newer Claude Code, Hermes and Codex features) with a decision for each.
+- **Data-center nodes (8 large GPUs).** `docs/datacenter-gap.md` compares fLLM with TensorRT-LLM and vLLM / SGLang feature by feature (what was
+  verified in the code, priority, decision) and holds the checklist for a person with an 8x MI355X node. Nothing here ran on more than one GPU.
+- **Device-pointer all-reduce for tensor parallelism** on CUDA and HIP: the row-parallel reductions run as NCCL / RCCL collectives on the
+  compute stream instead of two host copies per layer (`FLLM_HOST_ALLREDUCE=1` restores the old path). Checked with NCCL 2.30.7 and one rank; between several GPUs it has
+  not run.
+- **RCCL** for AMD GPUs by `dlopen` of `librccl.so.1`; the communication layer, `comm_kernels.cu` and peer access now build in HIP builds
+  (compiled for gfx942, gfx950, gfx1100; never run).
+- **One-shot custom all-reduce** (`FLLM_CUSTOM_ALLREDUCE=1`): a single kernel over peer-mapped buffers for decode-sized messages; `selftest-comm`
+  runs it with 1, 2, 4 and 8 ranks sharing a GPU. The previous peer-to-peer communicator (`--distributed-backend p2p`) was unsound and is replaced.
+- **`fllm-rs plan-cluster`** and `--tensor-parallel auto` for identical GPUs: tensor / expert / pipeline / attention-data layouts, memory per rank,
+  roofline estimate, and which layout this build can run.
+- **gfx950 (MI350 / MI355X)**: OCP and FNUZ FP8, E8M0 and E2M1 formats in software with a bit-exact Rust twin, an MXFP4 x MXFP8 GEMM on the scaled
+  matrix instruction `v_mfma_scale_f32_16x16x128_f8f6f4` (compiled; `selftest-gpu` checks it against a scalar reference on a gfx950).
+- **Disaggregated prefill / decode**: KV blocks of a prefilled prompt are exported, shipped (HTTP or shared directory) and imported by a decode
+  server (`/admin/disagg/export`, `/admin/disagg/import`), and `fllm-router --prefill ... --decode ...` orchestrates it.
+- **Multi-node**: nodes other than the first run headless and stop with the first node.
+- **`fllm-rs bench-serve`**: length distributions, Poisson request rate or concurrency sweeps, TTFT / ITL / TPOT percentiles, goodput, JSON and
+  Markdown output, `--suggest` for `--max-seqs` / `--max-batched-tokens`.
+- **Expert-parallel load balancing arithmetic** (`parallel/eplb.rs`): router statistics and a replicating placement; the runtime half is not built.
 
 ## [0.2.2] - 2026-11-02
 

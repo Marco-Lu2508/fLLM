@@ -536,6 +536,29 @@ split-KV attention kernels, MoE and the paged KV cache. The NVIDIA tensor-core k
 NVFP4) are compiled out (`fllm_cc()` reports 10, `hip_stubs.cu` declines the calls), so prompt processing uses the generic decode-and-multiply GEMM of
 `tc_gemm.cu` on the matrix cores of RDNA3/4 and CDNA (rocWMMA, 16x16x16 fragments, only with `-DFLLM_HIP_ROCWMMA`; the default HIP build uses the MFMA / WMMA GEMM of `hip_gemm.cu`; RDNA2 and older use the FP32 GEMM). The CI job `hip-build` compiles this configuration.
 
+### AMD Instinct MI355X (gfx950, CDNA4) and nodes of data-center GPUs
+
+Layouts, planner, collectives and the checklist for an 8-GPU node: [datacenter-gap.md](datacenter-gap.md). What the kernels do on gfx950:
+
+* **Today every CDNA GPU runs the same kernels.** gfx950 is built with the default architecture list and uses the `v_mfma_f32_16x16x16_f16`
+  GEMM of `hip/hip_gemm.cu`, the skinny GEMM (`hip/hip_skinny.cu` keeps the first 160 KiB instead of 64 KiB of the activations in the larger LDS of
+  gfx950), the integer dot-product decode kernels and the portable attention. L0 (compiled), never run on an MI350 / MI355X.
+* **Scaled MFMA, new (`hip/hip_gfx950.cu`, L0).** `v_mfma_scale_f32_16x16x128_f8f6f4` multiplies FP8 / FP6 / FP4 operands with an E8M0 block scale per
+  32 values. The kernel multiplies MXFP4 weights (E2M1 nibbles + E8M0 per 32) with MXFP8 activations (E4M3 + E8M0 per 32, quantized by
+  `fllm_gfx950_quant_act_mxfp8`), one wavefront per 16 x 16 output tile; GPUs other than gfx950 get the scalar reference kernel from the same entry
+  point. Compiled with `hipcc` for gfx942, gfx950 and gfx1100 (the assembly for gfx950 contains the instruction with `cbsz:4`). The lane layout of the
+  instruction is taken from AMD's documentation and **has not run**: `fllm-rs selftest-gpu --device hip:N` on a gfx950 runs the kernel against the
+  scalar reference and prints `PASS  gfx950: scaled MFMA ...` or `FAIL`. The loader does not use the kernel yet.
+* **FP8 formats (`hip/hip_mx.cuh`, `src/mx_ref.rs`).** gfx942 (MI300) matrix cores read FNUZ E4M3 (bias 8, maximum 240, NaN `0x80`, no negative zero),
+  gfx950 reads OCP E4M3 (bias 7, maximum 448). Checkpoints are OCP; the header converts both ways in software (`float_to_e4m3_ocp`,
+  `float_to_e4m3_fnuz`, `e4m3_ocp_to_fnuz`) without the hardware conversion instructions, so every architecture agrees bit for bit. The Rust twin is
+  checked on all 256 codes and against a checksum of 2 million inputs computed from the C++ header. The FP8 **KV cache** (`kv_quant.cu`) decodes OCP in
+  software on every GPU and is not affected.
+* **FP8 and FP4 weights on AMD.** Block-wise and per-row FP8 weights are expanded to F16 when they are loaded (twice the memory), NVFP4 has no AMD
+  kernel (`-DFLLM_NO_FP4`), MXFP4 runs through the lookup-table path of the F16 matrix-core GEMM. `fllm-rs plan-cluster` plans AMD FP8 at 2 bytes per
+  parameter unless `--native-fp8` is given.
+* **Not used:** AITER, hipBLASLt, MoRI / rocSHMEM, FlashMLA-style MLA kernels on AMD (MLA runs through the portable kernels).
+
 ### bitsandbytes (NF4, FP4, LLM.int8())
 
 Checkpoints quantized with bitsandbytes keep their packed codes on the device (types `NF4B64`, `NF4B128`, `FP4B64`, `FP4B128`, `INT8R`,

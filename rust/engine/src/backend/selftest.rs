@@ -448,6 +448,34 @@ fn run_selected(options: &Options, ran: &mut (String, usize)) -> Result<(), Stri
     Err(last)
 }
 
+/// The gfx950-only check of `hip/hip_gfx950.cu` (v_mfma_scale_f32_16x16x128_f8f6f4 against the scalar reference). Skipped on other GPUs.
+#[cfg(feature = "hip")]
+fn hip_gfx950_selftest(index: usize) -> Result<(), String> {
+    extern "C" {
+        fn fllm_gfx950_selftest(msg: *mut std::ffi::c_char, len: usize) -> std::ffi::c_int;
+    }
+    crate::comm::cuda_ffi::set_device(index)?;
+    let mut buf = vec![0u8; 512];
+    // SAFETY: the buffer is 512 bytes and the function writes a NUL-terminated message of at most that length.
+    let code = unsafe { fllm_gfx950_selftest(buf.as_mut_ptr().cast(), buf.len()) };
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let text = String::from_utf8_lossy(&buf[..end]).into_owned();
+    match code {
+        -1 => {
+            println!("SKIP  gfx950 scaled MFMA: {text}");
+            Ok(())
+        }
+        0 => {
+            println!("PASS  gfx950: {text}");
+            Ok(())
+        }
+        _ => {
+            println!("FAIL  gfx950: {text}");
+            Err(text)
+        }
+    }
+}
+
 /// Create the backend `name`:`index` and run the checks on it. `Err`: the backend could not be created.
 fn run_device(name: &str, index: usize, filter: &Filter) -> Result<Result<(), String>, String> {
     // `wgpu-<api>`: the wgpu implementation of that API even where a native backend exists
@@ -464,7 +492,9 @@ fn run_device(name: &str, index: usize, filter: &Filter) -> Result<Result<(), St
                 super::cuda::set_exact_math(false);
                 println!();
                 let fast = run_backend_fast_filtered(&*backend, filter);
-                return Ok(exact.and(fast));
+                // CDNA4 (gfx950, MI350 / MI355X): the scaled matrix instruction against the scalar reference on the device
+                let gfx950 = hip_gfx950_selftest(index);
+                return Ok(exact.and(fast).and(gfx950));
             }
             // vulkan: like cuda, the exact FP32 shaders against the FP32 error bound, then the fast variants (cooperative-matrix and
             // integer dot-product kernels, fp16 / int8 activations) against the error their approximations allow

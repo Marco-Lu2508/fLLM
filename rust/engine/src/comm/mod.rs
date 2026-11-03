@@ -6,8 +6,9 @@
 //!
 //! * [`local::LocalComm`] and [`mesh::MeshComm`]: threads and queues in host memory, the reference for tests and the control plane
 //!   of the other back ends. Reductions add in rank order, so every rank gets the same bits.
-//! * `nccl::NcclComm` (feature `cuda`): libnccl loaded at run time.
-//! * `p2p::P2pComm` (feature `cuda`): peer-to-peer copies and small reduce kernels, no NCCL needed.
+//! * `nccl::NcclComm` (feature `cuda`): libnccl loaded at run time (RCCL, `librccl.so.1`, in HIP builds), device-pointer collectives on the
+//!   compute stream, plus the optional custom one-shot all-reduce (`oneshot::CustomAllReduce`) for small messages.
+//! * `p2p::P2pComm` (feature `cuda`): the one-shot all-reduce over peer access alone, no NCCL / RCCL needed.
 //!
 //! The same trait serves host slices (`f32`) and, through [`DeviceCollectives`], device buffers.
 
@@ -17,13 +18,15 @@ pub mod mesh;
 pub mod selftest;
 pub mod tcp;
 
-#[cfg(all(feature = "cuda", not(feature = "hip")))]
+#[cfg(feature = "cuda")]
 pub mod cuda_ffi;
-#[cfg(all(feature = "cuda", not(feature = "hip")))]
+#[cfg(feature = "cuda")]
 pub mod nccl;
-#[cfg(all(feature = "cuda", not(feature = "hip")))]
+#[cfg(feature = "cuda")]
+pub mod oneshot;
+#[cfg(feature = "cuda")]
 pub mod p2p;
-#[cfg(all(feature = "cuda", not(feature = "hip")))]
+#[cfg(feature = "cuda")]
 pub mod topology;
 
 use std::sync::Arc;

@@ -11,6 +11,12 @@
 //! ```text
 //! fllm-router --listen 127.0.0.1:8080 --backend http://10.0.0.5:8000 --backend http://10.0.0.6:8000
 //! ```
+//!
+//! **Disaggregated prefill / decode** (`--prefill URL` and `--decode URL`, each repeatable): a chat or completion request is first prefilled
+//! on a prefill server (the same prefix-hash choice as above, so a prefill server keeps its prefix cache warm), whose KV blocks are pushed to
+//! the decode server chosen for the request (`/admin/disagg/export`, `/admin/disagg/import`); then the original request goes to the decode
+//! server, which finds the prompt in its prefix cache and only computes the last partial block. If any step of the hand-over fails the decode
+//! server simply prefills the prompt itself: the answer is the same, only slower. The answer carries `x-fllm-disagg: transferred|fallback`.
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -63,9 +69,65 @@ impl Backend {
 
 struct State_ {
     backends: Vec<Arc<Backend>>,
+    /// Disaggregated mode: prefill servers (empty = off); the decode servers are then `backends`.
+    prefill: Vec<Arc<Backend>>,
     client: reqwest::Client,
     api_key: Option<String>,
     routed: AtomicU64,
+    disagg_transferred: AtomicU64,
+    disagg_fallback: AtomicU64,
+}
+
+/// A JSON POST to `base + path` that carries the caller's credentials along.
+fn authed_post(state: &State_, base: &str, path: &str, headers: &HeaderMap, payload: Value) -> reqwest::RequestBuilder {
+    let mut request = state.client.post(format!("{base}{path}")).json(&payload);
+    for name in [axum::http::header::AUTHORIZATION.as_str(), "x-api-key"] {
+        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            request = request.header(name, value);
+        }
+    }
+    request
+}
+
+/// Token ids of a request's prompt as the prefill server will see them: from the chat template for `messages`, from the tokenizer for a
+/// text prompt, as given for a token array. `None` for a request this cannot be done for (it then goes to the decode server as it is).
+async fn prompt_ids(state: &State_, prefill: &Backend, headers: &HeaderMap, body: &Value) -> Option<Vec<i64>> {
+    let post = |path: &str, payload: Value| authed_post(state, &prefill.url, path, headers, payload);
+    if body.get("messages").is_some() {
+        let reply: Value = post("/v1/chat/completions/render", body.clone()).send().await.ok()?.json().await.ok()?;
+        return ids_from(&reply[1][0]["prompt_token_ids"]);
+    }
+    match body.get("prompt")? {
+        Value::String(text) => {
+            let reply: Value = post("/tokenize", json!({"content": text})).send().await.ok()?.json().await.ok()?;
+            ids_from(&reply["tokens"])
+        }
+        array @ Value::Array(_) => ids_from(array),
+        _ => None,
+    }
+}
+
+fn ids_from(value: &Value) -> Option<Vec<i64>> {
+    let ids: Vec<i64> = value.as_array()?.iter().map(Value::as_i64).collect::<Option<_>>()?;
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// Prefill the prompt on `prefill` and push its KV blocks to `decode`. `true`: the blocks arrived.
+async fn hand_over(state: &State_, prefill: &Backend, decode: &Backend, headers: &HeaderMap, body: &Value) -> bool {
+    let Some(ids) = prompt_ids(state, prefill, headers, body).await else { return false };
+    let post = |path: &str, payload: Value| authed_post(state, &prefill.url, path, headers, payload);
+    let mut prefill_request = json!({"prompt": ids, "max_tokens": 1, "temperature": 0, "stream": false});
+    if let Some(model) = body.get("model") {
+        prefill_request["model"] = model.clone();
+    }
+    match post("/v1/completions", prefill_request).send().await {
+        Ok(r) if r.status().is_success() => {}
+        _ => return false,
+    }
+    match post("/admin/disagg/export", json!({"tokens": ids, "target": decode.url})).send().await {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.is_ok_and(|v| v["blocks"].as_u64().is_some_and(|n| n > 0)),
+        _ => false,
+    }
 }
 
 /// The text whose hash decides the backend: system message, then the first user message, then the raw prompt.
@@ -144,6 +206,18 @@ async fn proxy(State(state): State<Arc<State_>>, request: Request) -> Response {
     let Some(first) = pick(&prefix, &state.backends) else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": {"message": "no healthy backend"}}))).into_response();
     };
+    let mut disagg_tag = None;
+    if !state.prefill.is_empty() && parts.method == axum::http::Method::POST && matches!(parts.uri.path(), "/v1/chat/completions" | "/v1/completions") {
+        if let (Some(body), Some(prefill)) = (parsed.as_ref(), pick(&prefix, &state.prefill)) {
+            let moved = hand_over(&state, &prefill, &first, &parts.headers, body).await;
+            if moved {
+                state.disagg_transferred.fetch_add(1, Ordering::Relaxed);
+            } else {
+                state.disagg_fallback.fetch_add(1, Ordering::Relaxed);
+            }
+            disagg_tag = Some(if moved { "transferred" } else { "fallback" });
+        }
+    }
     let mut candidates = vec![first.clone()];
     for backend in &state.backends {
         if backend.url != first.url && backend.healthy() {
@@ -187,6 +261,9 @@ async fn proxy(State(state): State<Arc<State_>>, request: Request) -> Response {
                     out.headers_mut().insert(name, value);
                 }
                 out.headers_mut().insert("x-fllm-backend", HeaderValue::from_str(&backend.url).unwrap_or(HeaderValue::from_static("?")));
+                if let Some(tag) = disagg_tag {
+                    out.headers_mut().insert("x-fllm-disagg", HeaderValue::from_static(tag));
+                }
                 return out;
             }
             Err(e) => {
@@ -213,6 +290,10 @@ async fn stats(State(state): State<Arc<State_>>) -> Response {
         .collect();
     Json(json!({
         "routed": state.routed.load(Ordering::Relaxed),
+        "disaggregated": !state.prefill.is_empty(),
+        "prefill_servers": state.prefill.iter().map(|b| b.url.clone()).collect::<Vec<_>>(),
+        "kv_transferred": state.disagg_transferred.load(Ordering::Relaxed),
+        "kv_fallback": state.disagg_fallback.load(Ordering::Relaxed),
         "backends": backends,
         "prefix_chars": PREFIX_CHARS,
     }))
@@ -260,6 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut listen = "127.0.0.1:8080".to_string();
     let mut backends: Vec<Arc<Backend>> = Vec::new();
+    let mut prefill: Vec<Arc<Backend>> = Vec::new();
     let mut api_key: Option<String> = None;
     let mut index = 1;
     while index < args.len() {
@@ -268,9 +350,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 listen = args.get(index + 1).cloned().unwrap_or(listen);
                 index += 2;
             }
-            "--backend" => {
+            "--backend" | "--decode" => {
                 if let Some(url) = args.get(index + 1) {
                     backends.push(Arc::new(Backend::new(url.trim_end_matches('/').to_owned())));
+                }
+                index += 2;
+            }
+            "--prefill" => {
+                if let Some(url) = args.get(index + 1) {
+                    prefill.push(Arc::new(Backend::new(url.trim_end_matches('/').to_owned())));
                 }
                 index += 2;
             }
@@ -280,13 +368,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!("usage: fllm-router --listen 127.0.0.1:8080 --backend http://host:port [--backend ...] [--api-key KEY]");
+                println!("       fllm-router --listen 127.0.0.1:8080 --prefill http://host:port [--prefill ...] --decode http://host:port [--decode ...] [--api-key KEY]");
+                println!("  --prefill / --decode: disaggregated serving, prompts are prefilled on a prefill server and generated on a decode server (see the header of this file)");
                 return Ok(());
             }
             _ => index += 1,
         }
     }
     if backends.is_empty() {
-        eprintln!("no backend given: --backend http://host:port (repeat it for every server)");
+        eprintln!("no backend given: --backend http://host:port (repeat it for every server; with --prefill the servers are --decode)");
         std::process::exit(2);
     }
     let client = reqwest::Client::builder()
@@ -295,9 +385,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let state = Arc::new(State_ {
         backends: backends.clone(),
+        prefill: prefill.clone(),
         client,
         api_key,
         routed: AtomicU64::new(0),
+        disagg_transferred: AtomicU64::new(0),
+        disagg_fallback: AtomicU64::new(0),
     });
     let app = Router::new()
         .route("/router/stats", get(stats))
@@ -305,7 +398,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fallback(any(proxy))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
-    println!("fllm-router listening on http://{listen} with {} backend(s)", backends.len());
+    if prefill.is_empty() {
+        println!("fllm-router listening on http://{listen} with {} backend(s)", backends.len());
+    } else {
+        println!("fllm-router listening on http://{listen}, disaggregated: {} prefill and {} decode server(s)", prefill.len(), backends.len());
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -356,6 +453,17 @@ mod tests {
     #[test]
     fn a_completion_prompt_works_too() {
         assert_eq!(prefix_text(&json!({"prompt": "ein satz"})), "ein satz");
+    }
+
+    #[test]
+    fn token_ids_are_read_strictly() {
+        assert_eq!(ids_from(&json!([1, 2, 3])), Some(vec![1, 2, 3]));
+        assert_eq!(ids_from(&json!([])), None);
+        assert_eq!(ids_from(&json!([1, "x"])), None);
+        assert_eq!(ids_from(&json!(null)), None);
+        // the render route answers [conversation, [{prompt_token_ids}]]
+        let reply = json!([[], [{"prompt": "x", "prompt_token_ids": [5, 6]}]]);
+        assert_eq!(ids_from(&reply[1][0]["prompt_token_ids"]), Some(vec![5, 6]));
     }
 
     #[test]

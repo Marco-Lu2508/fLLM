@@ -1551,6 +1551,91 @@ impl InferenceRuntime {
         Ok(registered)
     }
 
+    /// Geometry of this server's KV cache: a chain exported by another server is only taken when this matches.
+    pub fn kv_fingerprint(&self) -> String {
+        let (key_format, value_format) = self.model.kv_formats();
+        let cfg = self.model.config();
+        format!(
+            "{}:{}x{}x{}x{}:{}:{}:{}",
+            cfg.arch,
+            cfg.layers,
+            cfg.kv_heads,
+            cfg.head_dim,
+            cfg.value_dim,
+            self.model.block_size(),
+            key_format.name(),
+            value_format.name()
+        )
+    }
+
+    /// Disaggregated serving, prefill side: the full KV blocks the prefix cache holds for the start of `tokens` (a prompt this server has
+    /// just prefilled), exported to host memory. Stops at the first block that is not cached.
+    pub fn kv_export_prompt(&mut self, tokens: &[i64]) -> Result<crate::kv_transfer::KvChain, String> {
+        let mut blocks = Vec::new();
+        for (_, segment, block) in self.scheduler.cached_prompt_chain(tokens) {
+            let Some(block) = block else { break };
+            blocks.push(crate::kv_transfer::KvBlock { tokens: segment, bytes: self.kv_export_block(block as usize)? });
+        }
+        Ok(crate::kv_transfer::KvChain { fingerprint: self.kv_fingerprint(), salt: 0, block_size: self.scheduler.cfg.block_size, blocks })
+    }
+
+    /// Disaggregated serving, decode side: take a chain exported by a prefill server into this server's paged cache and prefix cache.
+    /// Returns `(blocks imported, blocks that were cached already)`. A request for the same prompt then reuses all of them.
+    pub fn kv_import_chain(&mut self, chain: &crate::kv_transfer::KvChain) -> Result<(usize, usize), String> {
+        if chain.fingerprint != self.kv_fingerprint() || chain.block_size != self.scheduler.cfg.block_size {
+            return Err(format!(
+                "the KV chain comes from a different cache layout ({}, blocks of {}); this server has {}, blocks of {}",
+                chain.fingerprint,
+                chain.block_size,
+                self.kv_fingerprint(),
+                self.scheduler.cfg.block_size
+            ));
+        }
+        if crate::scheduler::prefix_seed() != 0 || chain.salt != 0 {
+            return Err("disaggregated serving needs the default prefix identity (no FLLM_PREFIX_SALT and no cache_salt): blocks under another identity would never be reused".into());
+        }
+        if !self.scheduler.cfg.prefix_cache {
+            return Err("this server runs without a prefix cache; imported blocks could not be reused".into());
+        }
+        let mut path: Vec<(u64, Vec<i64>, i64)> = Vec::new();
+        let mut taken: Vec<i64> = Vec::new();
+        let mut prev = 0u64;
+        let (mut present, mut stopped) = (0usize, None);
+        for block in &chain.blocks {
+            if block.tokens.len() != chain.block_size {
+                return Err("the KV chain holds a block of the wrong size".into());
+            }
+            prev = crate::mem::prefix_cache::PrefixCache::hash_chain(prev, &block.tokens);
+            if let Some(existing) = self.scheduler.prefix_block_of(prev) {
+                path.push((prev, block.tokens.clone(), existing));
+                present += 1;
+                continue;
+            }
+            let Ok(fresh) = self.scheduler.alloc_free_block() else {
+                stopped = Some("no free KV block left");
+                break;
+            };
+            if let Err(error) = self.kv_import_block(fresh as usize, &block.bytes) {
+                self.scheduler.free_block(fresh);
+                stopped = Some("a block could not be written");
+                tracing::warn!("KV import stopped: {error}");
+                break;
+            }
+            path.push((prev, block.tokens.clone(), fresh));
+            taken.push(fresh);
+        }
+        let registered = self.scheduler.extend_prefix_chain(&path).map_err(|e| e.to_string());
+        // the cache took its own reference on every block it registered; give back the one from the allocation
+        for block in &taken {
+            self.scheduler.free_block(*block);
+        }
+        registered?;
+        if let Some(why) = stopped {
+            tracing::warn!("KV import took {} of {} blocks: {why}", taken.len(), chain.blocks.len());
+        }
+        Ok((taken.len(), present))
+    }
+
     /// Writes the blocks the scheduler just registered in the prefix cache to the disk tier, when one is configured.
     /// They are alive (the cache holds a reference), so their KV is still exactly what belongs to their hash.
     fn spill_pending(&mut self) {
@@ -2844,3 +2929,7 @@ mod tests {
 #[cfg(test)]
 #[path = "beam_tests.rs"]
 mod beam_tests;
+
+#[cfg(test)]
+#[path = "kv_transfer_tests.rs"]
+mod kv_transfer_tests;

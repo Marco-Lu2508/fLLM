@@ -1001,9 +1001,9 @@ fn hip_kernels() {
     // the architectures this binary carries code for (src/backend/hip_arch.rs decides from it what a GPU without its own code object gets)
     println!("cargo:rustc-env=FLLM_HIP_BUILT_ARCHS={}", archs.join(";"));
     println!("cargo:warning=HIP code objects for: {}", archs.join(" "));
-    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu", "rwkv.cu", "kda.cu", "scan.cu"];
+    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu", "rwkv.cu", "kda.cu", "scan.cu", "comm_kernels.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
-    let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
+    let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu", "hip_gfx950.cu"];
     // The code objects are compressed in the fat binary (zstd, `-offload-compress`; the runtime of ROCm 6.2 and newer unpacks them): with
     // dozens of targets the uncompressed device code would be several hundred MB. FLLM_HIP_COMPRESS=0 builds uncompressed objects for an older runtime.
     let compress = std::env::var("FLLM_HIP_COMPRESS").map_or(true, |v| v != "0");

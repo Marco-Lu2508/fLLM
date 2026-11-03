@@ -150,6 +150,8 @@ speech are not supported; for multimodal checkpoints only the text model is conv
 | `serve --model MODEL` | HTTP server (the word `serve` is optional) |
 | `pull`, `list`, `rm`, `ps`, `show`, `search` | model cache and catalog: download, list, remove, running servers, details, catalog names |
 | `chat`, `bench`, `bench-report`, `ppl` | terminal client for a running server, load benchmark and comparison, perplexity |
+| `bench-serve` | deployment sizing like `trtllm-bench` / `vllm bench serve`: input / output length distributions, Poisson request rate or concurrency sweep, TTFT / ITL / TPOT percentiles, goodput against objectives, JSON + Markdown, `--suggest` for `--max-seqs` / `--max-batched-tokens` ([docs/datacenter-gap.md](docs/datacenter-gap.md)) |
+| `plan-cluster` | how a model would be spread over a node of identical GPUs (TP x EP x PP x attention DP, memory per rank, roofline estimate; MI355X, B200, H200, H100 ...) |
 | `convert`, `quantize`, `inspect`, `formats` | checkpoint to GGUF, quantizer, file inspection, type list |
 | `merge-lora`, `gguf-set`, `gguf-split`, `gguf-merge` | LoRA merge, GGUF metadata and shard tools |
 | `devices`, `selftest-cpu`, `selftest-gpu`, `completions` | device inventory, kernel self tests, shell completion |
@@ -210,10 +212,12 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   CPU; names like `cuda:1` pick a device. `--device cuda:0,vulkan:1,cpu` (two or more devices, any mix of backends)
   splits one model over them by layers in proportion to their free memory and speed: each stage holds the KV cache of its own layers and
   the activations travel through host memory, so no peer path is needed; `--tensor-parallel N|auto` cuts every layer over N devices of one backend
-  (NCCL on CUDA cards when libnccl is found, else a host all-reduce), `--tensor-split 3,1` sets the shares, `fllm-rs devices --split MODEL
+  (NCCL on CUDA cards and RCCL on AMD cards when the library is found, device-pointer all-reduce on the compute stream, else a host all-reduce;
+  `auto` lets the planner choose tensor / pipeline / expert parallelism for identical GPUs, `fllm-rs plan-cluster` shows it), `--tensor-split 3,1` sets the shares, `fllm-rs devices --split MODEL
   --device a,b` shows the plan. Run on an NVIDIA GPU, an Intel iGPU and the CPU of one laptop (Vulkan; the text is right, it is not faster than
-  the NVIDIA GPU alone); equal to the single-device result in tests with CPU stages; real N-GPU speed-ups and NCCL between several CUDA cards
-  are **unmeasured / never run**, see [docs/multi-gpu.md](docs/multi-gpu.md). Without a list one server process uses one device. See
+  the NVIDIA GPU alone); equal to the single-device result in tests with CPU stages; real N-GPU speed-ups, NCCL between several CUDA cards and
+  RCCL on AMD cards (MI300 / MI350 / MI355X nodes) are **unmeasured / never run**; what 8-GPU data-center nodes need and how fLLM compares with
+  TensorRT-LLM and vLLM is in [docs/datacenter-gap.md](docs/datacenter-gap.md), the split itself in [docs/multi-gpu.md](docs/multi-gpu.md). Without a list one server process uses one device. See
   [docs/device-selection.md](docs/device-selection.md).
 - **CUDA.** int8 dot-product and tensor-core GEMMs for quantized weights, Marlin for AWQ/GPTQ/FP4,
   CUTLASS block-scaled NVFP4 GEMM on Blackwell, FlashInfer prompt attention (f16 KV cache), split-KV decode
@@ -274,7 +278,9 @@ the log folder when the engine does not start.
   admin right** protect the server's own settings. Settings, plugins, agents and notes live in fLLM's own folder
   (`%LOCALAPPDATA%\fLLM`, `~/.local/share/fllm`, or `FLLM_HOME`).
 - **Operation**: Docker images and Compose files, Kubernetes manifests and a Helm chart in [deploy/](deploy), and
-  `fllm-router`, a prefix-aware router for several servers ([docs/router.md](docs/router.md)).
+  `fllm-router`, a prefix-aware router for several servers, which can also run disaggregated prefill / decode ([docs/router.md](docs/router.md),
+  [docs/datacenter-gap.md](docs/datacenter-gap.md)), and `fllm-rs bench-serve`, a throughput benchmark with length distributions, request rate or
+  concurrency sweeps, TTFT / ITL / TPOT percentiles and goodput.
 
 - **Coding tools**: Claude Code, Codex CLI, OpenCode and the OpenAI and Anthropic SDKs were run against the server (Messages and Responses APIs, streamed tool calls, `/infill` for autocomplete); `fllm-rs connect TOOL` and the Studio section *Connect a coding tool* give the exact settings, the output ceilings of the agents are cut to the context, and the conversation prefix is reused between turns (10th turn of a tool session: first token after 17 s instead of 174 s on a laptop processor). What was run, with versions, and what only has a config: [docs/user/coding.md](docs/user/coding.md).
 - **Without a browser**: `fllm-rs agent -p "task"` runs the coding agent in the terminal (reading is always allowed; edits, commands, network and memory only with `--allow-*` flags), `fllm-rs gateway telegram|matrix` puts it behind a chat with a required allowlist, and scheduled tasks can send their result to a webhook, a ntfy topic or a Telegram chat ([docs/user/agent-cli.md](docs/user/agent-cli.md)). The gateways (Telegram, Matrix, Discord, Slack) ran against stubs only, not against the real services. Around that: spec-driven planning (`fllm-rs spec`, a Specs block in the Studio), steering files with inclusion modes, eleven hook events and file-change hooks, an auto mode that lets the model judge risky actions, a gateway heartbeat (`HEARTBEAT.md`) and per-chat routes, a JSON-RPC mode with Python and TypeScript clients, `fllm-rs review --pr N` and plugins from git repositories ([docs/user/agent-workflows.md](docs/user/agent-workflows.md)); the parts were run with unit tests and stub servers, and the spec flow, the steering and the auto judge also with Qwen3-4B-Instruct-2507 (what ran and what did not: the same page). How the coding side compares with Hermes Agent, Claude Code, Codex CLI, Kiro, Pi and OpenClaw, feature by feature with what is missing and why: [docs/code-mode-gap.md](docs/code-mode-gap.md).

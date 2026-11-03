@@ -13,6 +13,13 @@ use std::sync::Arc;
 
 /// `RustDecoder::load` for the main model: one rank of a parallel group when the command line asked for one.
 pub fn load_main(model: &GgufModel, device: &str) -> Result<RustDecoder, String> {
+    // a node other than the first of a multi-node run holds its share of the model and executes the steps rank 0 announces; it serves nothing
+    if let Some(cfg) = crate::parallel::config::global().filter(|c| c.rendezvous.nnodes > 1 && c.rendezvous.node_rank > 0) {
+        eprintln!("[fllm-rs] node {} of {}: waiting for the first node to drive the model (no HTTP server on this node)", cfg.rendezvous.node_rank, cfg.rendezvous.nnodes);
+        launch_follower(model, device, cfg)?;
+        eprintln!("[fllm-rs] the first node ended the run; this node stops");
+        std::process::exit(0);
+    }
     match config::global() {
         None => RustDecoder::load(model, device),
         Some(cfg) => launch(model, device, cfg),
@@ -40,9 +47,9 @@ fn device_string(device: &(String, usize)) -> String {
 /// and NCCL is installed (a fast collective between the cards), else 1: layer splitting, which moves one activation vector per layer
 /// boundary instead of two all-reduces per layer.
 pub fn auto_tensor_parallel(devices: &[(String, usize)]) -> usize {
-    #[cfg(all(feature = "cuda", not(feature = "hip")))]
+    #[cfg(feature = "cuda")]
     {
-        if devices.len() > 1 && devices.iter().all(|d| d.0 == "cuda") && crate::comm::nccl::NcclLib::open().is_ok() {
+        if devices.len() > 1 && devices.iter().all(|d| d.0 == "cuda" || d.0 == "hip") && crate::comm::nccl::NcclLib::open().is_ok() {
             return devices.len();
         }
     }
@@ -55,10 +62,10 @@ fn data_plane(kind: BackendKind, host_group: &Arc<dyn Communicator>, backend: &s
     match kind {
         BackendKind::Local => Ok(host_group.clone()),
         BackendKind::Nccl | BackendKind::P2p => {
-            #[cfg(all(feature = "cuda", not(feature = "hip")))]
+            #[cfg(feature = "cuda")]
             {
-                if backend != "cuda" {
-                    return Err(format!("--distributed-backend {} needs --device cuda (this run uses {backend}); use --distributed-backend local", kind.name()));
+                if backend != "cuda" && backend != "hip" {
+                    return Err(format!("--distributed-backend {} needs --device cuda or hip (this run uses {backend}); use --distributed-backend local", kind.name()));
                 }
                 if kind == BackendKind::Nccl {
                     crate::comm::nccl::NcclComm::connect(host_group, ordinal).map(|c| c as Arc<dyn Communicator>)
@@ -66,7 +73,7 @@ fn data_plane(kind: BackendKind, host_group: &Arc<dyn Communicator>, backend: &s
                     crate::comm::p2p::P2pComm::connect(host_group, ordinal).map(|c| c as Arc<dyn Communicator>)
                 }
             }
-            #[cfg(not(all(feature = "cuda", not(feature = "hip"))))]
+            #[cfg(not(feature = "cuda"))]
             {
                 let _ = (host_group, backend, ordinal);
                 Err(format!("--distributed-backend {} needs a build with the cuda feature; use --distributed-backend local", kind.name()))
@@ -77,10 +84,10 @@ fn data_plane(kind: BackendKind, host_group: &Arc<dyn Communicator>, backend: &s
 
 /// Which communicator to use when `--distributed-backend` was not given.
 fn default_backend(backend: &str) -> BackendKind {
-    if backend != "cuda" {
+    if backend != "cuda" && backend != "hip" {
         return BackendKind::Local;
     }
-    #[cfg(all(feature = "cuda", not(feature = "hip")))]
+    #[cfg(feature = "cuda")]
     {
         match crate::comm::nccl::NcclLib::open() {
             Ok(_) => return BackendKind::Nccl,
@@ -151,6 +158,16 @@ pub(crate) fn worker_loop(decoder: &RustDecoder, ctx: &ParCtx) {
 /// Start the group described by `cfg` for `model`; returns rank 0's decoder. The other ranks live in their own threads until the
 /// returned decoder is dropped.
 pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<RustDecoder, String> {
+    launch_inner(model, device, cfg, false)?.ok_or_else(|| "internal error: no decoder for rank 0".to_owned())
+}
+
+/// A node other than the first of a multi-node run: loads the shares of its local ranks, runs their worker loops and returns when the
+/// first node ends the run (or a rank fails).
+pub fn launch_follower(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<(), String> {
+    launch_inner(model, device, cfg, true).map(|_| ())
+}
+
+fn launch_inner(model: &GgufModel, device: &str, cfg: ParallelConfig, follower: bool) -> Result<Option<RustDecoder>, String> {
     cfg.validate()?;
     let chain = crate::devices::device_candidates(device)?;
     let (backend, first_ordinal) = chain.first().cloned().ok_or("no compute device")?;
@@ -161,13 +178,17 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
     let devices = rank_devices(&backend, &cfg);
     let any_gpu = devices.iter().any(|d| d.0 != "cpu");
     // the ranks of one tensor-parallel group cut every layer into equal shards: they must run the same backend
+    // (on several nodes this node knows only its own ranks, so the groups are built from the local ranks by stage)
+    let mut local_by_stage: std::collections::BTreeMap<usize, Vec<&(String, usize)>> = std::collections::BTreeMap::new();
+    for (local, device) in devices.iter().enumerate() {
+        local_by_stage.entry(cfg.stage_of(cfg.world_rank(local))).or_default().push(device);
+    }
     if cfg.tp > 1 {
-        for stage in 0..cfg.pp {
-            let group = &devices[stage * cfg.tp..(stage + 1) * cfg.tp];
+        for (stage, group) in &local_by_stage {
             if group.iter().any(|d| d.0 != group[0].0) {
                 return Err(format!(
                     "tensor parallelism needs devices of one backend in each group, but stage {stage} lists {}; list the devices so that each group of {} neighbours shares a backend, or use layer splitting (--tensor-parallel 1)",
-                    group.iter().map(device_string).collect::<Vec<_>>().join(", "),
+                    group.iter().map(|d| device_string(d)).collect::<Vec<_>>().join(", "),
                     cfg.tp
                 ));
             }
@@ -191,8 +212,9 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
     );
     for stage in 0..cfg.pp {
         let range = cfg.stage_layers(model.config().layers, stage);
-        let on: Vec<String> = (0..cfg.tp).map(|t| crate::devices::describe_choice(&devices[stage * cfg.tp + t].0, devices[stage * cfg.tp + t].1)).collect();
-        eprintln!("[fllm-rs]   stage {stage}: layers {}..{} on {}", range.start, range.end, on.join(" + "));
+        let on: Vec<String> = local_by_stage.get(&stage).map(|group| group.iter().map(|d| crate::devices::describe_choice(&d.0, d.1)).collect()).unwrap_or_default();
+        let place = if on.is_empty() { "other nodes".to_owned() } else { on.join(" + ") };
+        eprintln!("[fllm-rs]   stage {stage}: layers {}..{} on {place}", range.start, range.end);
     }
     let cfg = Arc::new(cfg);
     let world = cfg.world_size();
@@ -226,7 +248,7 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
 
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(usize, Result<(), String>)>();
     let mut handles = Vec::new();
-    for (local, slot) in controls.iter_mut().enumerate().skip(1) {
+    for (local, slot) in controls.iter_mut().enumerate().skip(usize::from(!follower)) {
         let world_rank = cfg.world_rank(local);
         let control = slot.take().ok_or("control endpoint missing")?;
         let worker_model = model.duplicate()?;
@@ -255,6 +277,19 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
     }
     drop(ready_tx);
 
+    if follower {
+        // every local rank is a worker: report failures, then keep serving steps until the first node ends the run
+        let mut failure = None;
+        while let Ok((rank, status)) = ready_rx.recv() {
+            if let Err(e) = status {
+                failure.get_or_insert(format!("rank {rank}: {e}"));
+            }
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+        return failure.map_or(Ok(None), Err);
+    }
     let control0 = controls[0].take().ok_or("control endpoint missing")?;
     let rank0 = cfg.world_rank(0);
     let device0 = device_string(&devices[0]);
@@ -281,5 +316,5 @@ pub fn launch(model: &GgufModel, device: &str, cfg: ParallelConfig) -> Result<Ru
     }
     let decoder = leader?;
     decoder.attach_group_threads(handles);
-    Ok(decoder)
+    Ok(Some(decoder))
 }

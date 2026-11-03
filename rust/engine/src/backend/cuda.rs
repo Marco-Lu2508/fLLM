@@ -118,6 +118,7 @@ extern "C" {
     fn fllm_cuda_stream_destroy(st: *mut RawStream);
     fn fllm_cuda_stream_sync(st: *mut RawStream) -> c_int;
     fn fllm_cuda_stream_wait_stream(waiter: *mut RawStream, target: *mut RawStream) -> c_int;
+    fn fllm_cuda_stream_native(st: *mut RawStream) -> *mut c_void;
     fn fllm_cuda_upload(st: *mut RawStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> c_int;
     fn fllm_cuda_download(st: *mut RawStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> c_int;
     fn fllm_cuda_copy(st: *mut RawStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> c_int;
@@ -2869,6 +2870,29 @@ impl Stream for CudaStream {
 
     fn raw_stream_ptr(&mut self) -> *mut std::ffi::c_void {
         self.raw.cast()
+    }
+
+    fn device_all_reduce(&mut self, buf: &mut DeviceBuffer, len: usize, group: &dyn crate::comm::DeviceCollectives) -> Result<bool, BackendError> {
+        use crate::comm::DType;
+        let dtype = match self.act {
+            ActDtype::F32 => DType::F32,
+            ActDtype::F16 => DType::F16,
+            ActDtype::Bf16 => DType::Bf16,
+        };
+        if len == 0 {
+            return Ok(true);
+        }
+        if len * dtype.size() > buf.size {
+            return Err(invalid(format!("all-reduce of {len} values on a {} byte buffer", buf.size)));
+        }
+        let ptr = dev_ptr(buf)? as u64;
+        // SAFETY: live stream; the call enqueues the deferred work of the stream and returns the native handle (null on error).
+        let native = unsafe { fllm_cuda_stream_native(self.raw) };
+        if native.is_null() {
+            return Err(BackendError::BufferError("cannot get the native stream for the all-reduce".into()));
+        }
+        group.all_reduce(ptr, len, dtype, native as u64).map_err(BackendError::BufferError)?;
+        Ok(true)
     }
 
     fn wait_stream(&mut self, other: &mut dyn Stream) -> Result<(), BackendError> {

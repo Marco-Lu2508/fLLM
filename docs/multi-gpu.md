@@ -1,5 +1,9 @@
 # Splitting one model over several devices (tensor, pipeline and expert parallelism)
 
+Nodes of 8 large GPUs (MI355X, B200, H200, H100): the comparison with TensorRT-LLM and vLLM / SGLang, the layouts the planner chooses
+(`fllm-rs plan-cluster`), RCCL, the one-shot all-reduce, disaggregated prefill / decode and the checklist for a person with such a node are in
+[datacenter-gap.md](datacenter-gap.md). This page describes the parts shared by every node size.
+
 ## Several devices in one run: what works (2026-10-30)
 
 ```
@@ -12,7 +16,7 @@ fllm-rs devices --split M.gguf --device cuda:0,vulkan:1,cpu    # dry run: which 
 | Layout | Devices | How it runs | State |
 | --- | --- | --- | --- |
 | **Layer split** (pipeline stages), `--device a,b,c` | any mix of CUDA, HIP, Vulkan, Metal, wgpu, SYCL and the CPU; every device once | each stage holds a contiguous range of layers and the KV cache of exactly those layers; the residual stream goes down to host memory at the end of a stage and up to the next device (no peer path needed); one decode step flows through the stages | **runs on real hardware** (below); equal to the single-device result on CPU stages (tests) |
-| **Tensor parallelism**, `--tensor-parallel N` (or `auto`) | N devices of the **same backend** per group | every layer is cut into N shards; the row-parallel projections give partial sums that are added with the group's all-reduce (NCCL for CUDA when libnccl is found, else host memory), the output head is cut by vocabulary rows | **runs on real hardware** with two Vulkan devices (host all-reduce); NCCL / peer-to-peer on several CUDA cards **never run** (no machine with two NVIDIA cards was available) |
+| **Tensor parallelism**, `--tensor-parallel N` (or `auto`) | N devices of the **same backend** per group | every layer is cut into N shards; the row-parallel projections give partial sums that are added with the group's all-reduce: for CUDA and HIP a device-pointer collective on the compute stream (NCCL / RCCL, or the one-shot kernel with `FLLM_CUSTOM_ALLREDUCE=1`), else host memory; the output head is cut by vocabulary rows. `auto` asks the planner (`parallel/cluster_plan.rs`) when the model and identical GPUs are known | **runs on real hardware** with two Vulkan devices (host all-reduce). On CUDA: NCCL 2.30.7 ran with **one** rank; a real model through the device path ran once with two ranks sharing one RTX 2000 Ada (`FLLM_ALLOW_SHARED_DEVICE=1`) and then deadlocked in repeated runs of that arrangement (see [datacenter-gap.md](datacenter-gap.md)); NCCL / peer-to-peer between several cards and RCCL **never run** |
 | **Expert parallelism**, `--expert-parallel` with tensor parallelism | N same-backend devices | experts are distributed over the group (or every expert is cut), routing is replicated on every rank, the partial results are added with the all-reduce; the all-to-all dispatch runs its experts through the host path | the device path of the experts is **unverified** (the CPU backend that stands in for a device in the tests has no expert kernels); only the host-computed experts are proven |
 
 What the layers get is decided by the memory planner (`backend/memory.rs::plan_pipeline`, `parallel/split.rs`): the weights are shared out
@@ -123,18 +127,21 @@ text below is the design of the underlying parts.
 | Flag | Meaning |
 | --- | --- |
 | `--device A,B,C` | Two or more devices (`cuda:0`, `vulkan:1`, `hip:0`, `cpu`, ...; each once, no `auto`, no NPU/TPU): the model is split over them. One pipeline stage per device unless `--tensor-parallel` groups them. |
-| `--tensor-parallel N`, `--tensor-parallel-size N`, `-tp N` | Tensor-parallel group size (default 1). With `--device A,B,..`, N devices of one backend form a group (`auto`: all of them when they are CUDA cards and libnccl is installed, else 1 = layer split). |
+| `--tensor-parallel N`, `--tensor-parallel-size N`, `-tp N` | Tensor-parallel group size (default 1). With `--device A,B,..`, N devices of one backend form a group. `auto`: for identical CUDA or HIP cards with NCCL / RCCL installed, the planner picks tensor-parallel size, pipeline stages and expert parallelism from the model's shape and the cards' memory (the choice is logged; `fllm-rs plan-cluster` shows the reasoning); otherwise 1 = layer split. |
 | `--tensor-split 3,1` | Relative share of the weights per listed device; replaces the speed estimates of the planner. |
 | `--pipeline-parallel-size M`, `-pp M` | Pipeline stages (default 1). World size = N x M. |
 | `--expert-parallel` (`--enable-expert-parallel`) | Distribute the experts of MoE layers over the tensor-parallel group instead of splitting every expert. |
 | `--ep-dispatch allreduce\|alltoall` | Expert-parallel combine: sum partial outputs (default) or dispatch tokens to expert owners with an all-to-all. |
 | `--devices 0,1,2,3` | Device ordinals of this node's ranks of the one backend `--device` names (default: the first N visible). `--device A,B,C` is the general form. |
 | `--distributed-backend nccl\|p2p\|local` | Traffic between devices (default: NCCL when libnccl is found, else p2p; `local` on the CPU). |
-| `--nnodes N --node-rank R --master-addr HOST --master-port P` | Multi-node rendezvous. |
+| `--nnodes N --node-rank R --master-addr HOST --master-port P` | Multi-node rendezvous. Node 0 serves HTTP; every other node loads its ranks, prints that it waits for the first node, has no HTTP server and exits when node 0 ends the run. Start the same command on every node, changing `--node-rank` (and `--devices` if the GPUs differ). |
 | `--pipeline-microbatches K` | Micro-batches per pipeline step (default: one per stage, split by sequence). |
 | `FLLM_VOCAB_PARALLEL_EMBED=1` | Split the embedding table by vocabulary rows (off: the table is memory-mapped and shared by all ranks anyway). |
 | `FLLM_COMM_TIMEOUT_SECS` | How long a rank waits for a message before it reports a dead peer (default 600). |
-| `FLLM_NCCL_PATH` | Path of `libnccl.so.2` when it is not in the loader path. |
+| `FLLM_NCCL_PATH`, `FLLM_RCCL_PATH` | Path of `libnccl.so.2` (CUDA builds) or `librccl.so.1` (HIP builds) when it is not in the loader path. |
+| `FLLM_HOST_ALLREDUCE=1` | Reduce through host memory as before (two device-to-host-to-device copies per layer) instead of the device-pointer collective. For comparisons and as an escape hatch. |
+| `FLLM_CUSTOM_ALLREDUCE=1`, `FLLM_CUSTOM_ALLREDUCE_MAX_BYTES` | Use the one-shot all-reduce kernel for messages up to this size (default 1 MiB) when every rank can reach every other by peer access; larger messages go to NCCL / RCCL. Off by default until it has been measured on a multi-GPU machine. |
+| `FLLM_ALLOW_SHARED_DEVICE=1` | Allow `--devices 0,0`: several ranks on one GPU. A test setup for the sharded forward pass on a machine with one GPU, never faster. Works with the host reduction; with a device reduction that waits for the other rank (the one-shot kernel) it can deadlock (not diagnosed; most likely allocations of one rank synchronize the whole device). |
 
 ## Tensor parallelism
 
@@ -233,14 +240,27 @@ layers; that waste does not exist on the GPU, where pools are sized per stage). 
   missing the error says to install `libnccl2`. Symbols: ncclGetVersion, ncclGetUniqueId, ncclCommInitRank, ncclCommDestroy,
   ncclAllReduce, ncclAllGather, ncclReduceScatter, ncclBroadcast, ncclSend, ncclRecv, ncclGroupStart/End, ncclGetErrorString.
   NCCL calls are stream-ordered and can be captured in CUDA graphs. Host-slice operations stage through a device buffer.
-* `P2pComm` (cudaMemcpyPeerAsync all-reduce with reduce kernels) is written and compiles; like NCCL it has **never run** on two GPUs.
-  The custom one-shot/two-shot all-reduce behind `FLLM_CUSTOM_ALLREDUCE` does not exist.
-* The device forward pass reduces through the host-slice interface (`Communicator::all_reduce` on a host buffer after a download, an
-  upload after it): two device-to-host-to-device round trips per layer. That is simple and works for every backend; a device-pointer
-  all-reduce (`DeviceCollectives`) for CUDA would remove the round trips and is the first thing to do once two NVIDIA cards are at hand.
-  For this reason a tensor-parallel group over PCIe is slower than a layer split for a single sequence (measured: 20 to 23 tok/s
-  tensor-parallel against 27 to 35 layer-split on the NVIDIA + Intel pair); `--tensor-parallel auto` therefore chooses tensor
-  parallelism only for CUDA cards with libnccl.
+* `P2pComm` (`--distributed-backend p2p`, no NCCL needed): host-memory collectives plus a device-pointer all-reduce built on the one-shot
+  kernel below. Its earlier version (cudaMemcpyPeerAsync copies; it sent device addresses as `f32` and let ranks read buffers that others
+  were still writing) was replaced; the other device collectives (all-gather, reduce-scatter, all-to-all, send/recv) exist only in
+  `NcclComm` and report so here.
+* **One-shot custom all-reduce** (`comm/oneshot.rs`, `fllm_comm_ar_oneshot`): every rank stages its input in a buffer all peers can read,
+  signals them with 64-bit epoch flags, waits for their flags and sums all staged inputs itself in rank order (bit-identical on every rank), in
+  one kernel launch of up to 8 blocks; two alternating staging halves make a closing barrier unnecessary. f32, f16, bf16. For decode-sized
+  messages it avoids the latency of a ring; larger ones use NCCL / RCCL. Verified: `selftest-comm` runs 55 exact checks per rank with 1, 2, 4
+  and 8 ranks that share GPU 0 of an RTX 2000 Ada (the protocol and the kernel run for real; peer access between different GPUs and the speed are
+  not covered), and the kernel compiles for gfx942, gfx950, gfx1100. The two-shot variant and the fusion with the residual add and RMSNorm
+  are not built.
+* **Device-pointer reductions.** The row-parallel projections of the device forward pass call `Stream::device_all_reduce`: the collective is
+  enqueued on the compute stream behind the deferred work of that stream (fused adds, norms, GLU), with the activation type of the stream
+  (f32, f16, bf16); no copy through host memory. A backend or communicator without device collectives keeps the host path, and
+  `FLLM_HOST_ALLREDUCE=1` forces it. The older host path made a tensor-parallel group over PCIe slower than a layer split for a single
+  sequence (measured: 20 to 23 tok/s tensor-parallel against 27 to 35 layer-split on the NVIDIA + Intel pair, Vulkan devices, host path);
+  the device path has not been measured against it on several GPUs.
+* **RCCL.** In a HIP build `NcclLib` opens `librccl.so.1` (or `rccl.dll`, or `FLLM_RCCL_PATH`) instead of `libnccl.so.2`; RCCL has the same
+  API, so the communicator is the same code. `comm_kernels.cu` is built by `hipcc` (peer access, topology queries, the one-shot kernel; the
+  flag memory comes from `hipExtMallocWithFlags(hipDeviceMallocUncached)` as in the vLLM ROCm all-reduce). Compiled for gfx942 / gfx950 /
+  gfx1100 and linked into the engine in the ROCm 7 image; **never run on an AMD GPU**.
 
 ## Status
 
@@ -256,9 +276,15 @@ layers; that waste does not exist on the GPU, where pools are sized per stage). 
 | Device forward pass (any backend) with pipeline stages and tensor shards, host-staged hand-over and all-reduce | implemented; tested with the CPU backend as the device and run on Vulkan (NVIDIA + Intel iGPU) and the CPU |
 | CUDA in a split | the same code path; run on one RTX 2000 Ada as a stage next to the CPU and next to a wgpu stage (measured tables above); not on several CUDA cards |
 | HIP / Metal / SYCL in a split | the same code path; **not run** |
-| NCCL / peer-to-peer all-reduce between several CUDA cards from the device forward pass | the communicators exist, **never run**; the forward pass uses the host-slice interface |
-| Custom all-reduce, CUDA graphs with collectives, device-pointer collectives | **not done** |
-| Multi-node data plane | rendezvous and control mesh implemented and tested over loopback; no NCCL multi-node run |
+| NCCL / peer-to-peer all-reduce between several CUDA cards from the device forward pass | wired (device-pointer collective on the compute stream); NCCL ran with one rank, the one-shot reducer ran in `selftest-comm` with ranks sharing one GPU; a real model hung in repeated runs of that shared-GPU arrangement; **between several cards never run** |
+| RCCL on AMD GPUs | same code as NCCL, `dlopen` of `librccl.so.1`; compiled for gfx942 / gfx950 / gfx1100, **never run** |
+| Custom all-reduce | one-shot kernel (L1 on one GPU, off by default); two-shot and fused add + RMSNorm **not done** |
+| CUDA graphs with collectives | **not done** (graphs stay off in a group) |
+| Device all-to-all for the expert dispatch | the NCCL / RCCL send/recv primitive exists; the MoE layer still dispatches through the host |
+| Expert load balancing | statistics and replicating placement planner (`parallel/eplb.rs`, tested); no runtime weight movement |
+| Planner for a node of identical GPUs | `fllm-rs plan-cluster`, `--tensor-parallel auto` (`parallel/cluster_plan.rs`), unit-tested; estimates are a roofline, not measurements |
+| Disaggregated prefill / decode | prefix-chain transfer, `fllm-router --prefill ... --decode ...`; tested with the CPU runtime, see [datacenter-gap.md](datacenter-gap.md) |
+| Multi-node data plane | rendezvous, control mesh and headless follower nodes implemented and tested with local processes on the CPU stand-in; no NCCL multi-node run |
 | Memory planner per device | `backend::memory::plan_pipeline` / `parallel::split` (layers in proportion to memory and speed, shared KV pool), used by the server, `fllm-rs devices --split` and the log |
 | Distributed greedy sampling on the GPU | `par_argmax` implemented for host logits; not connected to `argmax_rows`; the logits of a split come to the host |
 
@@ -281,7 +307,8 @@ cargo test --release -p fllm-engine --lib parallel:: comm::      # the matrix be
 fllm-rs selftest-parallel --all                                   # same matrix, prints one line per layout
 fllm-rs selftest-parallel --tp 2 --pp 1 --case llama-q4k          # one layout
 fllm-rs selftest-parallel --tp 4 --model some.gguf                # a real model (CPU, needs RAM for one copy of the mapped file)
-fllm-rs selftest-comm                                             # collectives, exact results; NCCL part on a CUDA build with >= 2 GPUs
+fllm-rs selftest-comm                                             # collectives, exact results; NCCL / RCCL part on a GPU build, one-shot kernel, >= 2 GPUs for the multi-rank part
+fllm-rs plan-cluster --model deepseek-v3 --gpu mi355x --gpus 8   # what the planner would choose for a node
 ```
 
 Matrix: Llama-style Q4_K (TP 2/4/8, PP 2/4, TP2xPP2, vocab-parallel embedding), Qwen3 Q8_0, Qwen2 Q4Z with bias, Gemma-2 F32

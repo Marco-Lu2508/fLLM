@@ -1295,6 +1295,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map_or(0, |m| m.len() + m.len() / 16 + (256 << 20))
     };
     if let Some(list) = &multi_devices {
+        // `--tensor-parallel auto`: with the model known, choose tensor / pipeline / expert parallelism for a node of identical large GPUs
+        if parallel.tp_auto {
+            let weight_bytes = fllm_engine::backend::memory::device_weight_bytes(&model.mapping().index().tensors, &list[0].0);
+            match fllm_engine::parallel::cluster_plan::apply_auto(&mut parallel, model.config(), weight_bytes, list, gpu_memory_utilization, model.max_context()) {
+                Ok(Some(text)) => {
+                    eprintln!("[fllm-rs] {text}");
+                    parallel.validate().map_err(|e| format!("--tensor-parallel auto: {e}"))?;
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[fllm-rs] --tensor-parallel auto: {e}; keeping the device-based choice"),
+            }
+        }
         // Split the layers over the listed devices in proportion to their memory and speed; the KV pool is one block table that every
         // stage holds for its own layers, so it has as many blocks as the smallest stage can hold.
         let listed = fllm_engine::backend::memory::plan_device_list(

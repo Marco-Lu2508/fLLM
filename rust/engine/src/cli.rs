@@ -140,6 +140,10 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             crate::bench::run(&args[1..])?;
             Ok(true)
         }
+        "bench-serve" => {
+            crate::bench_serve::run(&args[1..])?;
+            Ok(true)
+        }
         "selftest-cpu" => {
             crate::cpu_selftest::run(&args[1..])?;
             Ok(true)
@@ -150,6 +154,10 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
         }
         "selftest-comm" => {
             crate::comm::selftest::run(&args[1..])?;
+            Ok(true)
+        }
+        "plan-cluster" => {
+            crate::parallel::cluster_plan::run(&args[1..])?;
             Ok(true)
         }
         _ => Ok(false),
@@ -190,9 +198,11 @@ TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float 
         "create" => "usage: fllm-rs create MODEL [-f Modelfile]\nCreate a model definition or alias from a Modelfile.",
         "push" => "usage: fllm-rs push MODEL\nPush a model to an upstream registry.",
         "bench" => crate::bench::HELP,
+        "bench-serve" => crate::bench_serve::HELP,
         "selftest-cpu" => crate::cpu_selftest::HELP,
         "selftest-parallel" => crate::parallel::selftest::HELP,
         "selftest-comm" => crate::comm::selftest::HELP,
+        "plan-cluster" => crate::parallel::cluster_plan::HELP,
         _ => "",
     }
 }
@@ -1097,8 +1107,8 @@ fn completions(args: &[String]) -> Result<(), String> {
     let shell = args.first().map(String::as_str).unwrap_or("bash");
     let commands = [
         "serve", "run", "pull", "list", "rm", "ps", "show", "search", "convert", "quantize",
-        "inspect", "formats", "chat", "bench", "bench-report", "devices", "completions",
-        "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu", "selftest-parallel", "selftest-comm",
+        "inspect", "formats", "chat", "bench", "bench-serve", "bench-report", "devices", "completions",
+        "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu", "selftest-parallel", "selftest-comm", "plan-cluster",
     ];
     match shell {
         "bash" | "zsh" => {

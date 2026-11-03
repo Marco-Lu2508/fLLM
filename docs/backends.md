@@ -53,7 +53,7 @@ table below the MLXA one); Vulkan native has f32 shaders for them (L0*: ran on M
 | Metal native | L1 for the kernel checks on the Apple-silicon CI runner (see [ci.md](ci.md)); no whole model run | same | same | L0 (planar layout) | same | L0 (Q4ZP with a pre-step) | L1 (F32/F16/BF16, FP8) |
 | ROCm/HIP RDNA3 (gfx11) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (`hip_q4z.cu`, Int4 skinny) | L0 (skinny 1-4 tokens + WMMA) |
 | ROCm/HIP RDNA4 (gfx12) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (Int4 skinny + WMMA gfx12) | L0 |
-| ROCm/HIP CDNA (gfx908/90a/942/950) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
+| ROCm/HIP CDNA (gfx908/90a/942/950; gfx950 also has the scaled-MFMA MXFP4 x MXFP8 kernel, L0, see [datacenter-gap.md](datacenter-gap.md)) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (own GEMV + MFMA GEMM; Int4 skinny only RDNA3/4) | L0 (skinny + MFMA) |
 | ROCm/HIP Vega, RDNA1/2, gfx117x, gfx125x, unknown chips (plain kernels, generic code objects) | L0 [6] | L0 [6] | L0 [6] | L0 [6] | ? [7] | L0 (the plain Q4Z GEMV for every batch) | L0 (FP32 GEMM, no matrix cores) |
 | Intel SYCL (Level Zero, Arc/Xe) | L0 | L0 | L0 | L0 | L0† (-> f16) | L0† (-> f16) | L0 |
 | Intel NPU (OpenVINO) | all integer formats as INT8 per channel: Q4_K/Q6_K (Llama-3.2-1B Q4_K_M), Q4_K (Qwen2.5-0.5B): L2 on one Core Ultra 5 235U; the others L0† (requantised; `FLLM_NPU_WEIGHTS=exact` keeps Q4_0/Q8_0 bit for bit) | L0† | L0† | L0† | L0† | L0† (Q4ZP not registered) | L0 (-> FP16) |
