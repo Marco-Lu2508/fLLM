@@ -366,6 +366,42 @@ pub fn isa() -> &'static str {
     "scalar"
 }
 
+thread_local! {
+    /// Number of live [`BatchInvariant`] guards of this thread.
+    static BATCH_INVARIANT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// While a guard lives, the CPU projection kernels pick, for a batch of any size, the variant that gives every token exactly the bits it
+/// gets when it is the only row of a call: no prompt panels (16-row float panels, predecoded or eight-row K-quant panels, AMX or
+/// 16-row VNNI prompt GEMMs), and the batch-one AVX2 K-quant kernel for each token. Speculative decoding verifies several draft tokens
+/// in one pass and wants the logits plain single-token decoding would have produced; the prompt kernels add the same terms in another
+/// order, and 8-bit activation quantization turns that last-bit difference into a logit difference of up to a few percent. The variants
+/// are slower for large batches (a prompt), so the guard is held only for the passes that verify drafts.
+///
+/// The guard belongs to the thread that created it, and so does the choice: the kernels read it where a projection is dispatched (the
+/// thread that calls `forward`), not on their pool workers.
+pub struct BatchInvariant(std::marker::PhantomData<*const ()>);
+
+impl BatchInvariant {
+    pub fn enter() -> Self {
+        BATCH_INVARIANT.with(|c| c.set(c.get() + 1));
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for BatchInvariant {
+    fn drop(&mut self) {
+        BATCH_INVARIANT.with(|c| c.set(c.get() - 1));
+    }
+}
+
+/// Is a [`BatchInvariant`] guard of this thread alive (or `FLLM_BATCH_INVARIANT=1` set, which keeps the invariant variants for every call)?
+pub fn batch_invariant() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    BATCH_INVARIANT.with(std::cell::Cell::get) > 0
+        || *FORCED.get_or_init(|| std::env::var_os("FLLM_BATCH_INVARIANT").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 /// Whether `q8_linear*` and `cpu_quantized::linear*` have a SIMD kernel on this CPU (and quantize
 /// activations to 8 bits). Without one they return `None` and callers keep their f32 path.
 pub(crate) fn packed_simd() -> bool {

@@ -7781,6 +7781,15 @@ impl RustDecoder {
             .ok_or("MoE layer without MoE configuration")?;
         let hidden = self.cfg.hidden;
         let tokens = input.len() / hidden;
+        // A pass that must give every token the bits of single-token decoding (the verification of draft tokens) runs the experts of
+        // one token at a time: the fused decode kernels and the batched expert kernels add the terms in different orders.
+        if tokens > 1 && crate::cpu_kernels::batch_invariant() {
+            let mut out = Vec::with_capacity(input.len());
+            for row in input.chunks_exact(hidden) {
+                out.extend(self.moe_forward(moe, row, workspace)?);
+            }
+            return Ok(out);
+        }
         let mut routed = self.moe_route(moe, input)?;
         self.par_filter_routes(&mut routed);
         let latent_in;
@@ -8170,7 +8179,10 @@ impl RustDecoder {
             .iter()
             .map(|&n| n as usize - 1 + usize::from(self.mtp.is_some()))
             .collect();
+        // the pool runs the closure on one of its workers: hand the batch-invariant choice of this thread over
+        let invariant = crate::cpu_kernels::batch_invariant();
         self.pool_for(rows).install(|| {
+            let _invariant = invariant.then(crate::cpu_kernels::BatchInvariant::enter);
             let mut trace = crate::cpu_profile::Trace::new(self.profile, rows);
             let first_stage = self.par.as_ref().is_none_or(|p| p.is_first_stage());
             let last_stage = self.par.as_ref().is_none_or(|p| p.is_last_stage());
@@ -8296,7 +8308,9 @@ impl RustDecoder {
         let deepstack = self.row_deepstack();
         let (fmt_k, fmt_v) = self.kv_formats();
         let mut x = std::mem::take(x_io);
+        let invariant = crate::cpu_kernels::batch_invariant();
         let done = self.pool_for(rows).install(|| {
+            let _invariant = invariant.then(crate::cpu_kernels::BatchInvariant::enter);
             let mut qkv_workspace = compute::ProjectionGroupWorkspace::default();
             let mut ffn_workspace = compute::ProjectionGroupWorkspace::default();
             let residual = cfg.residual_scale;

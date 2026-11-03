@@ -71,6 +71,32 @@ pub struct ChainOutcome {
     pub next: i64,
 }
 
+/// Do the passes that verify draft tokens run with the batch-invariant CPU kernels (`cpu_kernels::BatchInvariant`), so that greedy output is
+/// bit for bit the output of plain decoding? On by default; `FLLM_SPEC_EXACT=0` keeps the faster prompt kernels for those passes (the
+/// output is then the same only up to rounding differences, which 8-bit activations can turn into a different token on a near-tie).
+pub fn exact_verification() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_EXACT.with(std::cell::Cell::get) {
+        return forced;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("FLLM_SPEC_EXACT").as_deref(), Ok("0") | Ok("off")))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_EXACT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` on this thread with `exact_verification()` forced to `on`.
+#[cfg(test)]
+pub(crate) fn with_exact_verification<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    let before = TEST_EXACT.with(|c| c.replace(Some(on)));
+    let result = f();
+    TEST_EXACT.with(|c| c.set(before));
+    result
+}
+
 /// Verify a chain of draft tokens. `target(i)` is the processed target distribution at draft position `i` (given the accepted
 /// draft tokens before it; `i == draft.len()` is the bonus position) and is evaluated lazily, only for positions that are reached.
 /// `q[i]` is the distribution `draft[i]` was drawn from, `None` for a point mass. `uniform` yields numbers in (0, 1).

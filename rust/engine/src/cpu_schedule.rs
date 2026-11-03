@@ -113,6 +113,13 @@ impl Rows<'_> {
         // rows within this claim; outputs cannot be resized until workers join.
         unsafe { std::slice::from_raw_parts_mut(self.output.pointer.add(start), self.width) }
     }
+
+    /// The same columns of one token as a view of its own, in which that token is token 0 (for the batch-one kernels).
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn token_view(&mut self, token: usize) -> Rows<'_> {
+        assert!(token < self.batch);
+        Rows { output: self.output, first: self.first + token * self.stride, width: self.width, stride: self.stride, batch: 1 }
+    }
 }
 
 pub(crate) fn row_panels<S, I, F>(
