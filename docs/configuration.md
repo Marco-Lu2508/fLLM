@@ -103,6 +103,9 @@ are valid; anything else exits with `invalid number for <flag>`.
 | `FLLM_EXPERT_CACHE_MB` | model load | Host memory for the expert weights of MoE models: `auto` (default), a size in MiB or with `M`/`G`, or `off`; the flag `--expert-cache-mb` overrides it ([moe-streaming.md](moe-streaming.md)) |
 | `FLLM_EXPERT_EVICT` | model load | `0` stops the cache from dropping experts to stay within an explicit budget |
 | `FLLM_EXPERT_DEMAND`, `FLLM_EXPERT_PREFETCH`, `FLLM_EXPERT_RANDOM_ACCESS` | model load | `1` switches on, each: read-ahead of the chosen experts of a layer; a background thread reading the predicted experts of the next layer; `MADV_RANDOM` on expert ranges (all off by default; the last one halves the speed on NVMe) |
+| `FLLM_CPU_OPS` | forward pass on the host | `1` prints one JSON line per pass on stderr with the milliseconds spent in each kind of work (embedding, n-gram layer, hyper-connection mixes, delta layers, attention, router, routed and shared experts, output head); `scripts/bench_cpu_moe.py` reads it |
+| `FLLM_MOE_BATCH_MIN` | MoE layers on the host | Smallest number of rows of a pass for which the experts run as one batch over all experts the rows chose (default 2; 16 is the earlier behaviour; a single row always takes the fused decode pass) |
+| `FLLM_TABLE_READAHEAD` | model load | `1` keeps the default read-ahead on large memory-mapped lookup tables (token and n-gram embeddings); by default tables of 64 MiB and more get `MADV_RANDOM` |
 | `FLLM_EXPERT_TRACE` | model load | File that receives `tick layer rows experts` for every routing call, to replay cache policies offline |
 | `FLLM_API_KEY` | `serve` (and the `chat`/`bench` clients as their default `--api-key`) | Initial value of `--api-key`; the flag overrides it |
 | `FLLM_OUTPUT_CACHE` | Server | `exact` keeps answers to deterministic requests; `off`, `0`, `no`, `false` or `none` switch the cache off |

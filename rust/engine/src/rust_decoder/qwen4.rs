@@ -221,14 +221,16 @@ impl Gate {
         let normed = group_rms(streams, &self.norm, hidden, eps);
         let mut low = self.down.forward(&normed)?;
         low.iter_mut().for_each(|v| *v = silu(*v / hc as f32));
-        let gates = self.up.forward(&low)?;
+        let mut gates = self.up.forward(&low)?;
+        // vector exponential: the scalar sigmoid of 4 x 2560 gates per token was a tenth of a millisecond of every mix
+        crate::cpu_elementwise::sigmoid(&mut gates);
         let mut input = vec![0.0f32; rows * hidden];
         for r in 0..rows {
             let out = &mut input[r * hidden..(r + 1) * hidden];
             for n in 0..hc {
                 let at = (r * hc + n) * hidden;
                 for d in 0..hidden {
-                    out[d] += sigmoid(gates[at + d]) * normed[at + d] / hc as f32;
+                    out[d] += gates[at + d] * normed[at + d] / hc as f32;
                 }
             }
         }
@@ -424,23 +426,45 @@ impl RustDecoder {
         let mut workspace = compute::ProjectionGroupWorkspace::default();
         for (i, (layer, ql)) in self.layers.iter().zip(&model.layers).enumerate() {
             if let Some(ple) = &ql.ple {
+                let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::PLE);
                 let add = self.q4_ple(model, qc, i, ple, &streams, ids, tables, lengths)?;
                 dump_layer("ple", i, &add);
                 streams.iter_mut().zip(&add).for_each(|(s, a)| *s += a);
             }
-            let (normed, weights) = ql.attn.mix(&streams, hc, hidden, cfg.eps)?;
+            let mixed = {
+                let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::MIX);
+                ql.attn.mix(&streams, hc, hidden, cfg.eps)?
+            };
+            let (normed, weights) = mixed;
             let branch = match &layer.attn {
-                Attn::Linear(delta) => self.delta_forward(delta, &layer.out, i, &normed, tables, lengths)?,
-                Attn::Std { .. } => self.q4_attention(model, qc, i, layer, ql, &normed, positions, tables, lengths, key, value)?,
+                Attn::Linear(delta) => {
+                    let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::DELTA);
+                    self.delta_forward(delta, &layer.out, i, &normed, tables, lengths)?
+                }
+                Attn::Std { .. } => {
+                    let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::ATTENTION);
+                    self.q4_attention(model, qc, i, layer, ql, &normed, positions, tables, lengths, key, value)?
+                }
                 _ => return Err("a Qwen3.8-Flash-Next layer that is neither delta nor attention".into()),
             };
             dump_layer("branch", i, &branch);
-            inject(&mut streams, &branch, &weights, hc, hidden);
-            let (normed, weights) = ql.ffn.mix(&streams, hc, hidden, cfg.eps)?;
+            {
+                let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::INJECT);
+                inject(&mut streams, &branch, &weights, hc, hidden);
+            }
+            let mixed = {
+                let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::MIX);
+                ql.ffn.mix(&streams, hc, hidden, cfg.eps)?
+            };
+            let (normed, weights) = mixed;
             let mlp = self.ffn_forward(layer, &normed, &mut workspace)?;
-            inject(&mut streams, &mlp, &weights, hc, hidden);
+            {
+                let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::INJECT);
+                inject(&mut streams, &mlp, &weights, hc, hidden);
+            }
             dump_layer("ffn", i, &streams);
         }
+        let _span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::MIX);
         Ok(model.head.mix(&streams, hc, hidden, cfg.eps)?.0)
     }
 

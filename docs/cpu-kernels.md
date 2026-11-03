@@ -377,6 +377,26 @@ one token, gated experts with K-format or lattice IQ weights (Q2_K..Q6_K, IQ4_XS
 reads each expert once. Q8_0/classic experts, aarch64, shared experts and plain up/down experts
 run the old path.
 
+### Passes of several rows (verification, short prompts)
+
+A pass of two or more rows (`FLLM_MOE_BATCH_MIN`, default 2) runs the routed experts of a layer as one batch: every expert that at least one row
+chose is read once for all of its rows, in two joined work queues (gate and up, then down) over all experts, with ragged row counts per expert.
+This is the pass that verifies draft tokens of speculative decoding, so a verification of four tokens reads about the union of their experts, not
+four times the experts of one token. Experts with lattice IQ gate and up projections, and a K-format, lattice or Q2_0 down projection, take it on
+every AVX2 host (the Q2_0 down kernel handles tokens one after the other over a panel of a few rows, whose weights stay in the first-level cache);
+the expert width has to be a multiple of 256, or of 64 with a Q2_0 down projection (Qwen3.8-Flash-Next: 640). Other formats (IQ4_NL down
+projections, Q8_0, aarch64) keep the loop over the experts.
+
+### Where a step goes (`FLLM_CPU_OPS`, `scripts/bench_cpu_moe.py`)
+
+`FLLM_CPU_OPS=1` prints one JSON line per forward pass with the time of each kind of work; `scripts/bench_cpu_moe.py --binary fllm-rs --model M.gguf
+--threads N` prints the split of a decode step and of passes of 2, 4, 8, 16 rows. `scripts/synth_qwen4exp_gguf.py` writes a stand-in with the sizes of
+Qwen3.8-Flash-Next and random weights (`python3 synth_qwen4exp_gguf.py URL_OR_FIRST_SHARD out.gguf --layers 12`). Split of one decode token on the
+12-layer stand-in (10-core AMD EPYC 9255 VM, 10 threads, warm page cache, shared host, one run): 53.7 ms = experts 16.7, delta layers 12.9, hyper-connection
+mixes 7.8, output head 5.4, router 4.0, attention 2.7, shared experts 2.5, n-gram layer 1.6. The lattice IQ kernels run at about 20 GB/s of weights over 10
+threads there (the output head, a K format, reaches about 80 GB/s), so decode of such a model is partly bound by decoding the lattices, not by memory
+bandwidth. NUMA placement of the weights is not handled (`numactl --interleave=all` is the user-side remedy on multi-socket machines; untested here).
+
 ## Accuracy
 
 - The packed integer kernels quantize activations to 8 bits: Q8_0-style records with an
