@@ -1,0 +1,44 @@
+# Pull request review by your own model. Copy this file to .github/workflows/fllm-review.yml in the repository you want reviewed.
+#
+# It needs a machine that runs an fLLM server with a model that can call tools (fllm-rs serve ...) and that the runner can reach. The
+# simplest setup is a self-hosted runner on that machine with the server on 127.0.0.1:8000; with a hosted runner give the server an
+# address and an API key and store both as repository secrets (FLLM_URL, FLLM_API_KEY). The review run is read-only: the agent can read
+# the checkout but cannot edit files, run commands or use the network. Its answer is posted as one comment that is replaced on every push.
+#
+# Setup of the runner machine: docs/user/coding.md ("Review pull requests with your own model").
+name: fLLM review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# one review per pull request at a time; a new push cancels the one that is running
+concurrency:
+  group: fllm-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # self-hosted when the server runs on the runner machine; use ubuntu-latest and FLLM_URL for a server somewhere else
+    runs-on: self-hosted
+    timeout-minutes: 30
+    # pull requests from forks do not get the secrets and must not run a model on your machine
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FLLM_API_KEY: ${{ secrets.FLLM_API_KEY }}
+          FLLM_URL: ${{ secrets.FLLM_URL || 'http://127.0.0.1:8000' }}
+        run: |
+          # replace an earlier comment of this job so the thread does not fill up
+          old=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --jq '[.[] | select(.body | startswith("<!-- fllm-review -->"))] | .[].id' || true)
+          for id in $old; do gh api -X DELETE "repos/${{ github.repository }}/issues/comments/$id" || true; done
+          fllm-rs review --pr ${{ github.event.pull_request.number }} --comment --url "$FLLM_URL" --max-steps 25

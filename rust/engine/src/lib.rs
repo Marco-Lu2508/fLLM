@@ -2,6 +2,7 @@
 // compiler, so the lint that compares them with the MSRV is silenced there.
 #![cfg_attr(target_arch = "aarch64", allow(clippy::incompatible_msrv))]
 pub mod acp;
+pub mod agent_auto;
 pub mod agent_cli;
 pub mod agent_extras;
 pub mod agent_import;
@@ -12,10 +13,18 @@ pub mod learn;
 pub mod learn_cli;
 pub mod learn_flow;
 pub mod agent_rules;
+pub mod agent_rpc;
+pub mod agent_watch;
+pub mod plugins_cli;
+pub mod review_cli;
+pub mod spec;
+pub mod steering;
 pub mod connect_cli;
 pub mod gateway;
 pub mod gateway_chat;
+pub mod gateway_heartbeat;
 pub mod gateway_pair;
+pub mod gateway_route;
 pub mod autotune;
 pub mod beam;
 pub mod backend;

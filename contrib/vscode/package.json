@@ -1,0 +1,30 @@
+{
+  "name": "fllm-agent",
+  "displayName": "fLLM Agent",
+  "description": "Start the fLLM coding agent, the spec workflow and the pull request review from VS Code (skeleton, runs fllm-rs in the terminal).",
+  "version": "0.0.1",
+  "publisher": "fllm",
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Other"],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "fllm.runTask", "title": "fLLM: Run a task with the agent" },
+      { "command": "fllm.askAboutSelection", "title": "fLLM: Ask about the selection (read only)" },
+      { "command": "fllm.reviewChanges", "title": "fLLM: Review my uncommitted changes" },
+      { "command": "fllm.specNew", "title": "fLLM: Plan a feature as a spec" },
+      { "command": "fllm.specRun", "title": "fLLM: Do the next task of a spec" }
+    ],
+    "configuration": {
+      "title": "fLLM Agent",
+      "properties": {
+        "fllm.executable": { "type": "string", "default": "fllm-rs", "description": "The fllm-rs program (a full path if it is not on PATH)." },
+        "fllm.serverUrl": { "type": "string", "default": "http://127.0.0.1:8000", "description": "The running fLLM server (it must run on this computer)." },
+        "fllm.allowEdits": { "type": "boolean", "default": false, "description": "Let the agent change files (--allow-edit). Off: it reads and answers only." },
+        "fllm.allowCommands": { "type": "boolean", "default": false, "description": "Let the agent run commands such as tests (--allow-command)." }
+      }
+    }
+  }
+}

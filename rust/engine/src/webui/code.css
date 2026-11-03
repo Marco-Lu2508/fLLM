@@ -44,6 +44,17 @@
     .changed-list { list-style: none; display: grid; gap: 4px; font-size: 12px; }
     .changed-list li { display: flex; align-items: baseline; gap: 6px; overflow: hidden; }
     .changed-list .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* specs: one box per feature; the three small marks say which of requirements, design and tasks are written */
+    .spec-box { padding: 8px 0 10px; border-top: 1px solid var(--border); }
+    .spec-box:first-of-type { border-top: 0; padding-top: 0; }
+    .spec-head { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+    .spec-files { display: flex; gap: 10px; margin: 3px 0 6px; font-size: 11px; color: var(--muted-foreground); }
+    .spec-file::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; border: 1px solid var(--muted-foreground); vertical-align: 1px; }
+    .spec-file.on::before { background: var(--copper); border-color: var(--copper); }
+    .spec-tasks { list-style: none; display: grid; gap: 4px; margin-bottom: 8px; font-size: 12.5px; line-height: 1.4; }
+    .spec-tasks label { display: flex; gap: 7px; align-items: baseline; cursor: pointer; }
+    .spec-tasks li.done span { color: var(--muted-foreground); text-decoration: line-through; }
+    .spec-tasks input:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
     .todo-list { list-style: none; display: grid; gap: 5px; font-size: 13px; }
     .todo-list li { display: flex; gap: 8px; align-items: baseline; }
     .todo-list li span:first-child { width: 14px; flex-shrink: 0; color: var(--muted-foreground); }

@@ -36,7 +36,9 @@ Newer options have their own sections below: `--plan`, `--allow-rule`/`--deny-ru
 `--review` and `--verify` ([self-review](#self-review---review)), `--output-format`, `--continue`, `--resume`, `--image`
 ([formats](#output-formats-sessions-and-pictures)), `--propose-skills` ([skills](#skills-proposals-and-exchange)),
 `--no-learn`, `--ask-first`, `--skills`, `--nudge-every` ([learning from runs, on by default](#learning-from-runs-on-by-default)).
-How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.md](../code-mode-gap.md).
+How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.md](../code-mode-gap.md). Specs (`fllm-rs spec`), steering files (`--steering`), `--auto`,
+`--watch` (file-change hooks), `--rpc` (JSON-RPC server), `fllm-rs review` and `fllm-rs plugins`, plus the gateway's `--heartbeat` and `--routes`, are on
+[agent-workflows.md](agent-workflows.md).
 
 * **Output.** The final answer goes to standard output, progress (one line per tool call) to standard error. `--json` prints one
   object with `answer`, `status`, `steps`, `folder` and the list of tool calls with their status
@@ -307,6 +309,9 @@ lets nobody in. `--user` and `--pair` work for Telegram and Matrix too.
 WhatsApp, Signal and Email are not there: see [code-mode-gap.md](../code-mode-gap.md#why-some-things-stay-missing).
 
 ## What was verified
+
+The additions around the agent (specs, steering, hook events, `--auto`, `--rpc`, heartbeat, routes, review, plugins) have their own list in
+[agent-workflows.md](agent-workflows.md#what-was-verified).
 
 Checked on a Windows 11 PC (Intel integrated graphics through Vulkan) with Qwen2.5-Coder-3B-Instruct Q4_K_M, a 24k context, and a small
 JavaScript project whose test fails because `add` subtracts:

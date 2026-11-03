@@ -37,6 +37,8 @@ pub const HELP: &str = "usage: fllm-rs gateway telegram --chat ID[,ID...] [--url
                   [--user ID[,ID...]] [--pair]   only these senders (and, with --pair, people the owner approves with a one-time code) may use an allowed chat
                   [--folder DIR] [--profile NAME] [--allow-edit] [--allow-command] [--allow-network] [--allow-memory] [--yes]
                   [--max-steps N] [--max-tokens N] [--system TEXT] [--once]
+                  [--routes FILE]   different chats get different profiles, folders and permissions (default: gateway-routes.json of the profile folder)
+                  [--heartbeat 30m --heartbeat-chat ID[,ID...] [--heartbeat-hours 08:00-22:00] [--heartbeat-file PATH] [--heartbeat-act] [--heartbeat-idle 10m]]
 Answers messages with the coding agent of a running fllm-rs server on this machine.
 Tokens are read from the environment, never from the command line: FLLM_TELEGRAM_TOKEN (a bot from @BotFather) or
 FLLM_MATRIX_TOKEN (the access token of the bot's Matrix account; FLLM_MATRIX_HOMESERVER may replace --homeserver).
@@ -46,7 +48,11 @@ the gateway cannot read encrypted messages. Permissions work as for `fllm-rs age
 with the matching --allow-* flag. In the chat: /new starts a fresh conversation, /help shows the commands.
 --once handles the messages that are waiting and exits (for cron); without it the gateway runs until stopped. The position in
 the message stream is kept in gateway-<kind>.cursor, so nothing is answered twice. The first Matrix start only records it.
-FLLM_TELEGRAM_API changes the Bot API address (default https://api.telegram.org).";
+FLLM_TELEGRAM_API changes the Bot API address (default https://api.telegram.org).
+--routes FILE: {\"routes\": [{\"chat\": \"123\", \"profile\": \"home\", \"folder\": \"/srv/notes\", \"allow\": [\"edit\"], \"system\": \"...\", \"model\": \"...\"}]}. A chat with a route is
+allowed and runs with that profile (persona and sessions), folder and permissions; other allowed chats use the command line defaults.
+--heartbeat INTERVAL: the agent reads HEARTBEAT.md in the folder every INTERVAL (30m, 2h), checks the list with its tools and messages the --heartbeat-chat
+chats only when something needs attention (an answer of HEARTBEAT_OK is dropped). A heartbeat run may only read unless --heartbeat-act is given; it never runs with --once.";
 
 const TELEGRAM_LIMIT: usize = 4000;
 const MATRIX_LIMIT: usize = 8000;
@@ -92,6 +98,8 @@ pub struct GatewayConfig {
     /// `pair` off: everybody in an allowed chat.
     pub users: BTreeSet<String>,
     pub pair: bool,
+    /// Chats with their own profile, folder and permissions (`--routes`).
+    pub routes: std::collections::HashMap<String, crate::gateway_route::Route>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -173,13 +181,26 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
         }
     }
     let name = chat.session_name(key);
+    // a chat with a route runs with its own folder, persona, sessions and permissions
+    let route = cfg.routes.get(key);
+    let folder = route.map_or(cfg.folder.as_str(), |r| r.folder.as_str());
+    let sessions_dir = route.map_or(&cfg.sessions_dir, |r| &r.sessions_dir);
+    let soul = route.map_or(cfg.soul.as_deref(), |r| r.soul.as_deref());
+    let loop_cfg = route.map_or(&cfg.loop_cfg, |r| &r.loop_cfg);
+    let system_extra = route.map_or(cfg.system_extra.as_deref(), |r| r.system_extra.as_deref());
+    if !cfg.routes.is_empty() {
+        if let Err(e) = backend.switch_folder(folder) {
+            reply(chat, key, &format!("Error: the folder of this chat cannot be used: {e}"));
+            return Handled::Failed;
+        }
+    }
     match text.split_whitespace().next().unwrap_or_default().split('@').next().unwrap_or_default() {
         "/start" | "/help" => {
             reply(chat, key, CHAT_HELP);
             return Handled::Command;
         }
         "/new" => {
-            let result = agent_cli::save_session_in(&cfg.sessions_dir, &name, &[]);
+            let result = agent_cli::save_session_in(sessions_dir, &name, &[]);
             reply(chat, key, &match result {
                 Ok(()) => "New conversation started.".to_owned(),
                 Err(e) => format!("Error: {e}"),
@@ -188,7 +209,7 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
         }
         _ => {}
     }
-    let mut history = match agent_cli::load_session_in(&cfg.sessions_dir, &name) {
+    let mut history = match agent_cli::load_session_in(sessions_dir, &name) {
         Ok(h) => agent_cli::trim_history(h, 120),
         Err(e) => {
             reply(chat, key, &format!("Error: {e}"));
@@ -197,10 +218,10 @@ pub fn handle_update(incoming: &Incoming, cfg: &GatewayConfig, backend: &mut dyn
     };
     history.push(json!({"role": "user", "content": text}));
     let from = history.len() - 1;
-    let system = agent_cli::full_system(backend, &cfg.folder, &cfg.loop_cfg.allow, cfg.system_extra.as_deref(), cfg.soul.as_deref());
-    match agent_cli::run_loop(backend, &cfg.loop_cfg, &system, history, &mut |_| {}) {
+    let system = agent_cli::full_system(backend, folder, &loop_cfg.allow, system_extra, soul);
+    match agent_cli::run_loop(backend, loop_cfg, &system, history, &mut |_| {}) {
         Ok(outcome) => {
-            let _ = agent_cli::save_session_in(&cfg.sessions_dir, &name, &outcome.messages);
+            let _ = agent_cli::save_session_in(sessions_dir, &name, &outcome.messages);
             let mut answer = outcome.answer.trim_end().to_owned();
             if outcome.status == Status::OutOfSteps {
                 answer.push_str("\n\n(stopped at the step limit)");
@@ -519,6 +540,8 @@ pub struct Options {
     pub once: bool,
     pub users: BTreeSet<String>,
     pub pair: bool,
+    pub routes: Option<PathBuf>,
+    pub heartbeat: Option<crate::gateway_heartbeat::Heartbeat>,
 }
 
 fn valid_room(room: &str) -> bool {
@@ -533,9 +556,41 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
     let mut once = false;
     let mut pair = false;
     let mut users = BTreeSet::new();
+    let mut routes: Option<PathBuf> = None;
+    let mut beat: Option<std::time::Duration> = None;
+    let mut beat_chats: Vec<String> = Vec::new();
+    let mut beat_file: Option<String> = None;
+    let mut beat_hours: Option<(u32, u32)> = None;
+    let mut beat_act = false;
+    let mut beat_idle = std::time::Duration::ZERO;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--routes" => {
+                i += 1;
+                routes = Some(PathBuf::from(args.get(i).ok_or("missing value for --routes")?));
+            }
+            "--heartbeat" => {
+                i += 1;
+                beat = Some(crate::gateway_heartbeat::parse_interval(args.get(i).ok_or("missing value for --heartbeat")?)?);
+            }
+            "--heartbeat-chat" => {
+                i += 1;
+                beat_chats.extend(args.get(i).ok_or("missing value for --heartbeat-chat")?.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
+            }
+            "--heartbeat-file" => {
+                i += 1;
+                beat_file = Some(args.get(i).ok_or("missing value for --heartbeat-file")?.clone());
+            }
+            "--heartbeat-hours" => {
+                i += 1;
+                beat_hours = Some(crate::gateway_heartbeat::parse_hours(args.get(i).ok_or("missing value for --heartbeat-hours")?)?);
+            }
+            "--heartbeat-idle" => {
+                i += 1;
+                beat_idle = crate::gateway_heartbeat::parse_interval(args.get(i).ok_or("missing value for --heartbeat-idle")?)?;
+            }
+            "--heartbeat-act" => beat_act = true,
             "--chat" => {
                 i += 1;
                 let list = args.get(i).ok_or("missing value for --chat")?;
@@ -585,7 +640,13 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
         }
         i += 1;
     }
-    if chats.is_empty() {
+    let heartbeat = match beat {
+        Some(every) if !beat_chats.is_empty() => Some(crate::gateway_heartbeat::Heartbeat { every, chats: beat_chats, file: beat_file, hours: beat_hours, act: beat_act, idle: beat_idle }),
+        Some(_) => return Err("--heartbeat needs --heartbeat-chat: name the chats that get the alerts".into()),
+        None if !beat_chats.is_empty() || beat_file.is_some() || beat_hours.is_some() || beat_act => return Err("--heartbeat-chat, --heartbeat-file, --heartbeat-hours and --heartbeat-act need --heartbeat INTERVAL".into()),
+        None => None,
+    };
+    if chats.is_empty() && routes.is_none() {
         return Err("--chat is required: name the chats that may talk to the agent (without a list the bot would answer everyone)".into());
     }
     if kind == "matrix" {
@@ -596,7 +657,7 @@ pub fn parse_args(kind: &str, args: &[String]) -> Result<Options, String> {
     } else if homeserver.is_some() {
         return Err("--homeserver only applies to Matrix".into());
     }
-    Ok(Options { chats, homeserver, agent, once, users, pair })
+    Ok(Options { chats, homeserver, agent, once, users, pair, routes, heartbeat })
 }
 
 pub fn run(args: &[String]) -> Result<i32, String> {
@@ -652,7 +713,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             eprintln!("[warning] {warning}");
         }
     }
-    let cfg = GatewayConfig {
+    let mut cfg = GatewayConfig {
         allowed: options.chats,
         loop_cfg: LoopConfig { model: Some(model), allow: parsed.allow.clone(), rules: crate::agent_rules::load_hierarchy(&agent_cli::studio_folder(), &folder)?, max_steps: parsed.max_steps, max_tokens: agent_cli::effective_max_tokens(parsed.max_tokens, context), temperature: parsed.temperature },
         folder: folder.display().to_string(),
@@ -662,7 +723,25 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         platform: kind.to_owned(),
         users: options.users.clone(),
         pair: options.pair,
+        routes: std::collections::HashMap::new(),
     };
+    // routes: chats with their own profile, folder and permissions; a routed chat is allowed
+    if let Some(file) = crate::gateway_route::file_for(options.routes.as_deref(), &base) {
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("cannot read the routes file {}: {e}", file.display()))?;
+        let specs = crate::gateway_route::parse_routes(&text)?;
+        cfg.routes = crate::gateway_route::build_all(&specs, &cfg.loop_cfg, &cfg.folder, cfg.system_extra.as_deref())?;
+        cfg.allowed.extend(cfg.routes.keys().cloned());
+        eprintln!("[gateway] {} route(s) from {}", cfg.routes.len(), file.display());
+    }
+    if cfg.allowed.is_empty() {
+        return Err("--chat is required: name the chats that may talk to the agent (without a list the bot would answer everyone)".into());
+    }
+    if let Some(hb) = &options.heartbeat {
+        if let Some(stray) = hb.chats.iter().find(|c| !cfg.allowed.contains(*c)) {
+            return Err(format!("--heartbeat-chat {stray} is not an allowed chat: alerts only go to chats in --chat or in the routes"));
+        }
+        eprintln!("[gateway] heartbeat every {} s to {} chat(s)", hb.every.as_secs(), hb.chats.len());
+    }
     let mut lb = crate::learn_cli::LearnBackend::new(
         &mut http,
         &agent_cli::studio_folder(),
@@ -682,10 +761,26 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     eprintln!("[gateway] {kind}: {} chat(s) allowed, folder {}, permissions {:?}", cfg.allowed.len(), cfg.folder, cfg.loop_cfg.allow);
     let file = cursor_file(&base, kind);
     let mut cursor = load_cursor(&file);
+    let mut beat = options.heartbeat.as_ref().filter(|_| !options.once).map(|hb| crate::gateway_heartbeat::Clock::new(hb.every, std::time::Instant::now()));
+    let mut last_activity = std::time::Instant::now();
     loop {
+        if let (Some(hb), Some(clock)) = (options.heartbeat.as_ref(), beat.as_mut()) {
+            let now = std::time::Instant::now();
+            let local = chrono::Local::now();
+            let minute = chrono::Timelike::hour(&local) * 60 + chrono::Timelike::minute(&local);
+            if clock.due(now) && crate::gateway_heartbeat::in_window(hb.hours, minute) && now.duration_since(last_activity) >= hb.idle {
+                // the tools work in the default folder, whatever chat was served last
+                let _ = lb.switch_folder(&cfg.folder);
+                let system = agent_cli::full_system(&mut lb, &cfg.folder, &BTreeSet::from(["read".to_owned()]), cfg.system_extra.as_deref(), cfg.soul.as_deref());
+                let note = crate::gateway_heartbeat::run_once(hb, Path::new(&cfg.folder), &cfg.loop_cfg, &system, &mut lb, &mut *chat, &local.format("%A, %Y-%m-%d %H:%M").to_string());
+                eprintln!("[heartbeat] {note}");
+                clock.done(hb.every, std::time::Instant::now());
+            }
+        }
         match poll_once(&cursor, &cfg, &mut lb, &mut *chat) {
             Ok(next) => {
                 if next != cursor {
+                    last_activity = std::time::Instant::now();
                     if let Err(e) = save_cursor(&file, &next) {
                         eprintln!("[gateway] cannot save the position ({e}); after a restart messages may be answered twice");
                     }
@@ -779,7 +874,57 @@ mod tests {
             platform: "telegram".into(),
             users: BTreeSet::new(),
             pair: false,
+            routes: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn a_routed_chat_runs_with_its_own_folder_sessions_and_permissions() {
+        struct Spy {
+            inner: Model,
+            folders: Vec<String>,
+            systems: Vec<String>,
+        }
+        impl Backend for Spy {
+            fn tools(&mut self) -> Result<Vec<Value>, String> {
+                self.inner.tools()
+            }
+            fn complete(&mut self, body: Value) -> Result<Value, String> {
+                self.systems.push(body["messages"][0]["content"].as_str().unwrap_or_default().to_owned());
+                self.inner.complete(body)
+            }
+            fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
+                self.inner.run_tool(name, args)
+            }
+            fn switch_folder(&mut self, folder: &str) -> Result<(), String> {
+                self.folders.push(folder.to_owned());
+                Ok(())
+            }
+        }
+        let default_dir = tmp("route-default");
+        let work_dir = tmp("route-work");
+        let mut cfg = config(&default_dir, &[1, 2]);
+        cfg.routes.insert(
+            "2".into(),
+            crate::gateway_route::Route {
+                profile: Some("work".into()),
+                folder: "/srv/app".into(),
+                sessions_dir: work_dir.clone(),
+                soul: Some("You are the work agent.".into()),
+                loop_cfg: LoopConfig { allow: BTreeSet::from(["read".to_owned(), "edit".to_owned()]), ..cfg.loop_cfg.clone() },
+                system_extra: Some("Answer in German.".into()),
+            },
+        );
+        let mut spy = Spy { inner: Model { replies: VecDeque::from([answer("plain"), answer("routed")]), bodies: vec![] }, folders: vec![], systems: vec![] };
+        let mut chat = FakeChat::new();
+        handle_update(&Incoming { key: "1".into(), text: "hello".into(), sender: String::new() }, &cfg, &mut spy, &mut chat);
+        handle_update(&Incoming { key: "2".into(), text: "hallo".into(), sender: String::new() }, &cfg, &mut spy, &mut chat);
+        assert_eq!(spy.folders, vec!["/work", "/srv/app"], "the tools follow the chat");
+        assert!(!spy.systems[0].contains("work agent") && spy.systems[1].contains("You are the work agent.") && spy.systems[1].contains("Answer in German.") && spy.systems[1].contains("/srv/app"));
+        assert!(spy.systems[1].contains("read, edit"), "the route's permissions are in the prompt: {}", spy.systems[1]);
+        assert!(work_dir.join("agent-sessions").join("tg-2.json").exists() && default_dir.join("agent-sessions").join("tg-1.json").exists());
+        assert!(!default_dir.join("agent-sessions").join("tg-2.json").exists());
+        assert_eq!(chat.sent.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), vec!["plain", "routed"]);
     }
 
     fn tmp(name: &str) -> PathBuf {

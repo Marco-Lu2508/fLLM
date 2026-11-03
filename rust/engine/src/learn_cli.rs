@@ -260,6 +260,14 @@ impl Backend for LearnBackend<'_> {
             self.say(&line);
         }
     }
+
+    fn switch_folder(&mut self, folder: &str) -> Result<(), String> {
+        self.inner.switch_folder(folder)
+    }
+
+    fn fire_hook(&mut self, event: &str, tool: &str, args: &Value) -> crate::agent_cli::HookReply {
+        self.inner.fire_hook(event, tool, args)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

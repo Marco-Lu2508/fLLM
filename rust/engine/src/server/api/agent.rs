@@ -72,6 +72,8 @@ pub(in crate::server) struct AgentSession {
     jobs: super::agent_jobs::Jobs,
     /// Process ids of the foreground commands that run right now, so that a stop in the page can end them.
     foreground: Mutex<Vec<u32>>,
+    /// Steering files (`inclusion: fileMatch`) already shown to the agent in this session.
+    steering_seen: Mutex<std::collections::HashSet<String>>,
 }
 
 /// What `undo` put back.
@@ -192,6 +194,7 @@ impl AgentSession {
                 inner.changes.clear();
                 inner.redo.clear();
                 inner.cwd = None;
+                self.steering_seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
             }
             inner.root = Some(root.clone());
             changed
@@ -277,6 +280,7 @@ impl AgentSession {
     pub(in crate::server) fn run_tool(&self, name: &str, args: &Value) -> ToolResult {
         let dir = self.current_root();
         let result = self.run_tool_inner(name, args);
+        let result = self.with_steering(name, args, dir.as_deref(), result);
         let post = super::hooks::dispatch("post_tool_call", name, args, dir.as_deref());
         let result = super::hooks::with_notes(result, &post);
         if super::hooks::is_edit_tool(name) && result.is_ok() {
@@ -284,6 +288,32 @@ impl AgentSession {
             return super::hooks::with_notes(result, &edited);
         }
         result
+    }
+
+    /// A successful read or edit of a file that file-matching steering covers brings that steering along, once per session.
+    fn with_steering(&self, name: &str, args: &Value, root: Option<&Path>, result: ToolResult) -> ToolResult {
+        let (Some(root), Ok(text)) = (root, &result) else { return result };
+        let path = match name {
+            "read_file" | "write_file" | "edit_file" | "multi_edit" | "notebook_edit" => args.get("path").and_then(Value::as_str),
+            _ => None,
+        };
+        let Some(path) = path else { return result };
+        let shown = self.resolve(path).map(|p| shown_under(Some(root), &p)).unwrap_or_else(|_| path.to_owned());
+        let all = crate::steering::load(root, Some(&crate::hub::studio_data_file("steering")));
+        if all.is_empty() {
+            return result;
+        }
+        let notes = {
+            let mut seen = self.steering_seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::steering::notes_for_path(&all, &shown, &mut seen)
+        };
+        if notes.is_empty() {
+            return result;
+        }
+        Ok(format!("{text}
+
+[steering]
+{notes}"))
     }
 
     fn run_tool_inner(&self, name: &str, args: &Value) -> ToolResult {

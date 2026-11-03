@@ -1,10 +1,12 @@
-# Code mode compared with Hermes Agent, Claude Code and Codex CLI
+# Code mode compared with Hermes Agent, Claude Code, Codex CLI, Kiro, Pi and OpenClaw
 
 This page lists what the coding agent of fLLM (the Studio *Code* surface, `fllm-rs agent`, `fllm-rs gateway`, hooks, skills,
 plugins, sub-agents, scheduled tasks, MCP) does and does not do next to three agents it is measured against:
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research), [Claude Code](https://code.claude.com/docs/en/overview)
-and [Codex CLI](https://github.com/openai/codex). The reference columns come from their public documentation and READMEs; they were
-read in October 2026 and are summaries, not a promise that every detail is current. The fLLM column was checked against the code
+and [Codex CLI](https://github.com/openai/codex); the [second matrix](#second-matrix-kiro-pi-openclaw-and-newer-claude-code-features) adds
+[Kiro](https://kiro.dev/docs/), [Pi](https://github.com/badlogic/pi-mono), [OpenClaw](https://github.com/openclaw/openclaw) and what Claude Code,
+Hermes and Codex shipped since. The reference columns come from their public documentation and READMEs; the first matrix was read in October 2026,
+the second in early November 2026. They are summaries, not a promise that every detail is current. The fLLM column was checked against the code
 and, for everything marked *new*, run for real (see [What was run](#what-was-run)).
 
 Marks in the fLLM column: **works** (used and tested), **partly** (some of it, the gap is named), **missing** (not there; the reason
@@ -64,20 +66,20 @@ proposals) it is off by default and the good default for a small model is named 
 | Skills as `SKILL.md` | agentskills.io | yes | yes | **works**: library, user and project folders, plugins; (*new*) `fllm-rs skills import/export/install` in both directions | done |
 | Skills the agent creates itself | yes, autonomously | no (skill-creator on request) | no | **works**: Studio `/skill` (user approves); headless (*new*) `--propose-skills` waits in `skills-proposed/` for `fllm-rs skills approve`, `--auto-skills` saves at once | high |
 | Skills improve during use | "improves them during use" | no | no | **works** (*new*): usage log per skill, automatic revision after a failure or five uses with checks, history, automatic and manual rollback (below) | high |
-| Skills hub | Skills Hub | marketplace for plugins | no | **partly**: built-in library of six, import from URL, (*new*) `fllm-rs skills install OWNER/REPO` for any repository with `SKILL.md` files. No hosted search page: a hub needs a service that someone runs | low |
+| Skills hub | Skills Hub | marketplace for plugins | no | **partly**: built-in library of six, import from URL, `fllm-rs skills install OWNER/REPO` for any repository with `SKILL.md` files, (*new*) `fllm-rs plugins add owner/repo` for plugin repositories and for git repositories that act as a marketplace (`marketplace.json`). No hosted search page: a hub needs a service that someone runs | low |
 | Custom slash commands | yes | `.claude/commands` | custom prompts | **works**: `.fllm/commands/*.md` with `$ARGUMENTS` | done |
-| Hooks | plugin hooks | many events | notify | **partly**: five events (`pre_tool_call`, `post_tool_call`, `on_file_edit`, session start and end). Missing: prompt submit, stop, notification, before compaction | medium |
+| Hooks | plugin hooks, `pre_llm_call` | many events (33 in the newest docs) | notify | **works** (*new*): eleven events (`pre_tool_call`, `post_tool_call`, `on_file_edit`, session start and end, `user_prompt_submit`, `stop`, `subagent_stop`, `notification`, `pre_compact`, `file_changed`), a hook can be a command or a prompt for the agent, Claude Code and Kiro spellings are read, `fllm-rs agent --watch` fires file events. Not there: the HTTP, MCP-tool and model-judged hook kinds, rewriting a tool call's arguments, most of the 33 events (permission, worktree, elicitation ...) | medium |
 | Plugins | yes | yes | yes | **works**: folders with skills, commands, hooks, agents | done |
 | Sub-agents | delegation | subagents | agents | **works**: `task` tool, own agents in `agents/`, parallel runs | done |
 | MCP client | yes | yes | yes | **works**: tools, resources | done |
 | MCP server | ACP/MCP | `claude mcp serve` | `codex mcp-server` (replaced by app-server) | **works** (*new*): `fllm-rs mcp-server` with the agent tools and `fllm_agent` | high |
 | ACP (editor protocol) | yes | via adapter | via adapter | **works** (*new*): `fllm-rs acp`. Run over a pipe with a scripted client and a real model; not tried in a real editor | medium |
-| Programmatic access from scripts | tool RPC from scripts | Agent SDK, `-p` | `codex exec`, SDK | **partly**: `fllm-rs agent -p`, `--output-format json` and `stream-json` (*new*), the MCP server; the tool route `/api/studio/agent/tool` on this machine. No separate SDK | medium |
+| Programmatic access from scripts | tool RPC from scripts | Agent SDK, `-p` | `codex exec`, SDK | **works** (*new*): `fllm-rs agent -p`, `--output-format json` and `stream-json`, the MCP server, and `fllm-rs agent --rpc` (JSON-RPC over standard input and output) with a Python and a TypeScript client in `scripts/sdk/` | done |
 | Headless mode | `-q` | `-p`, `--output-format` | `exec --json` | **works**: `fllm-rs agent -p`, `--output-format text|json|stream-json` (*new*), exit codes, stdin | done |
 | Self-review before "done" | no | `/review`, GitHub review | `/review`, `codex review` | **works**: `/review`, `/security-review`; (*new*) automatic *Review before done* (Settings box, `/autoreview on`) and `--review` with `--verify COMMAND` | high |
 | Worktrees | no | `--worktree` | `exec --worktree` | **works**: `/worktree`, `/batch` | done |
-| Scheduled / recurring tasks | cron in plain language | `/loop`, cloud tasks | no | **partly**: schedules (`daily at 08:30`, cron lines), only while the app runs; no free-text parsing; results to webhook, ntfy, Telegram | medium |
-| GitHub Action / CI | no | yes | yes | **missing**: `fllm-rs agent` can run in CI (documented) but there is no published action | low |
+| Scheduled / recurring tasks | cron in plain language | `/loop`, cloud tasks | no | **partly**: schedules (`daily at 08:30`, cron lines), only while the app runs; no free-text parsing; results to webhook, ntfy, Telegram. (*new*) The gateway's heartbeat wakes the agent on an interval with a checklist (`HEARTBEAT.md`) and messages only when something needs attention | medium |
+| GitHub Action / CI | no | yes | yes | **partly** (*new*): `fllm-rs review --pr N [--comment]` (through `gh`) and `.github/workflows/fllm-review.yml.example`; `fllm-rs agent` runs in CI as before. No published action; the workflow has not run on a real runner | low |
 | Cloud tasks | Modal, Daytona | Claude Code on the web | Codex cloud | **missing** on purpose: fLLM runs on your hardware | low |
 
 ### Self-improvement (learning from use)
@@ -107,11 +109,68 @@ plausible but wrong note or skill that no check catches; the log and the undo ar
 | Feature | Hermes | Claude Code | Codex | fLLM today | Priority |
 | --- | --- | --- | --- | --- | --- |
 | Terminal UI | yes | yes | yes | **partly**: `fllm-rs agent` runs one task and prints; `fllm-rs run` is a plain chat. No full-screen TUI | medium |
-| Messaging | Telegram, Discord, Slack, WhatsApp, Signal, Email | channels (Telegram, Discord), Slack app | no | **partly**: Telegram, Matrix (before); Discord, Slack (*new*). WhatsApp, Signal, Email missing | medium |
-| IDE | ACP | VS Code, JetBrains | IDE extension | **partly**: ACP (*new*); no VS Code extension. [coding.md](user/coding.md) shows how to point other agents at fLLM | medium |
+| Messaging | Telegram, Discord, Slack, WhatsApp, Signal, Email | channels (Telegram, Discord), Slack app | no | **partly**: Telegram, Matrix (before); Discord, Slack; (*new*) routes give chats their own profile, folder and permissions, and a heartbeat sends alerts. WhatsApp, Signal, Email missing | medium |
+| IDE | ACP | VS Code, JetBrains | IDE extension | **partly**: ACP; (*new*) tested-against-the-docs configuration for Zed and JetBrains in [agent-workflows.md](user/agent-workflows.md#editors), a VS Code extension skeleton in `contrib/vscode`, and the RPC mode for your own integration. [coding.md](user/coding.md) shows how to point other agents at fLLM | medium |
 | `doctor` / `update` | yes | `/doctor`, `claude update` | `doctor`, `update` | **works** (*new*): `fllm-rs doctor`, `fllm-rs update --check` (looks, never replaces) | medium |
 | Import from other agents | `import-agent` | no | no | **works** (*new*): `fllm-rs import claude|codex|hermes` (dry run by default). Formats taken from the documentation, not checked against a real installation | medium |
 | Status line | no | yes | no | **missing**: the Code page has a context meter | low |
+
+## Second matrix: Kiro, Pi, OpenClaw and newer Claude Code features
+
+Read in November 2026 from the documentation of each tool (Kiro: specs, steering, hooks; Pi: README and its sessions, slash-command and RPC pages;
+OpenClaw: README and heartbeat page; Claude Code: hooks, permission modes and the weekly digest up to week 37; Codex 0.166; Hermes 0.22.6), then
+checked against the code of fLLM. "Who has it" names the tools whose documentation describes the feature. *Decision* says what was done on this
+page's change (**built**), what stays out and why (**skip**), or what is left for later (**later**).
+
+| Feature | Who has it | fLLM today (checked in the code) | Priority | Decision |
+| --- | --- | --- | --- | --- |
+| Spec-driven development: requirements, design, tasks files, tasks run one by one | Kiro | before: none. Now `fllm-rs spec new/run/list/tick`, `/spec` and a Specs block in the Studio side panel (`rust/engine/src/spec.rs`) | high | **built**; the runner ticks the box, not the model |
+| Bugfix specs (current, expected, unchanged behaviour) | Kiro | none; a bug is a spec whose requirements describe the failing case | low | **skip**: same files, other headings |
+| Run independent spec tasks in parallel waves | Kiro | tasks run one after the other | low | **skip**: a local model serves one run at a time anyway |
+| Steering files with inclusion modes (always, fileMatch, manual, auto), user and workspace level | Kiro | before: `AGENTS.md`, `FLLM.md`, `CLAUDE.md` only. Now `.fllm/steering/*.md` and `steering/` of the Studio folder (`steering.rs`) | high | **built**; no `#[[file:...]]` references |
+| `AGENTS.md` in sub folders | Kiro, Codex, Claude Code | nearest first up to the repository root (`agent_mem.rs`) | done | exists |
+| Hooks on file events (save, create, delete) with a prompt or a command | Kiro, Claude Code (`FileChanged`) | before: `on_file_edit` for the agent's own edits only. Now `file_changed` and `fllm-rs agent --watch` (`agent_watch.rs`) | high | **built** (polling, no OS watcher) |
+| Hook events for prompt submit, stop, sub-agent stop, notification, pre-compact | Claude Code, Kiro (`Stop`), Hermes (`pre_llm_call`) | before: five events. Now eleven (`hooks.rs`); headless and RPC fire `user_prompt_submit` and `stop`, the Studio fires those plus `notification` and `pre_compact` | medium | **built**; `subagent_stop` is declared but nothing fires it yet (**later**) |
+| Hook kinds beyond a command: HTTP, MCP tool, model-judged, sub-agent | Claude Code | a command, or a prompt text for the agent | low | **skip**: a command can call curl; a judged hook costs a model call per event |
+| Hooks rewriting tool input or output (`updatedInput`) | Claude Code | no | low | **skip** |
+| Autopilot and supervised modes | Kiro | Plan, ask, auto-edit, Turbo in the Studio; flags and rules headless | done | exists |
+| Auto mode: a classifier decides risky actions | Claude Code | before: none. Now `fllm-rs agent --auto` (`agent_auto.rs`): rules first, hard blocks, then a short model call that sees the task and the action but no tool results | high | **built** |
+| Checkpoints and rewind | Kiro, Claude Code | Studio `/rewind`, `/undo`, `/revert`; none headless | medium | **later** (headless) |
+| Context providers `#file`, `#codebase`, `#docs` | Kiro | `@file` mentions with fuzzy search and `!command` in the Studio; no semantic code index, no docs index | medium | **later**: an index needs embeddings and a store |
+| Powers (tools plus knowledge that load on demand) | Kiro | skills load on demand (the `skill` tool), plugins bundle skills, commands, agents and hooks | low | **skip**: covered by plugins and skills |
+| Ignore file for secrets | Kiro (`.kiroignore`) | `.gitignore` handling and deny rules (`agent_ignore.rs`, permission rules) | done | exists |
+| Extensions in TypeScript that add tools, commands and events | Pi | plugins add skills, commands, agents and hooks; MCP servers add tools in any language; no in-process script API | medium | **later**: a script-tool type needs its own permission design; MCP covers it for now |
+| Session tree: branch inside one file (`/tree`), `/fork`, `/clone` | Pi | Studio `/fork` copies a session, `/rewind` goes back; no tree view | low | **skip** |
+| Prompt templates | Pi, Claude Code | `.fllm/commands/*.md` with `$ARGUMENTS`, plugin commands | done | exists |
+| Packages of extensions, skills and templates shared through npm or git | Pi, Claude Code marketplaces | before: install by folder or one git URL. Now `fllm-rs plugins add owner/repo`, repositories with `marketplace.json` as indexes (`plugins_cli.rs`) | medium | **built** |
+| RPC mode and an SDK for embedding | Pi, Claude Code (Agent SDK), Codex | before: `-p`, stream-json, MCP server, ACP. Now `fllm-rs agent --rpc` plus Python and TypeScript clients in `scripts/sdk/` | high | **built** |
+| Minimal system prompt for small models | Pi | compact prompts with explicit steps for small models, a fuller form for large ones (`codeprompts.js`) | done | exists |
+| Messages queued while the agent works | Pi, Codex | Studio: Enter queues, Esc stops | done | exists |
+| Proactive heartbeat: wake up on a schedule, tell the owner only when needed | OpenClaw | before: schedules deliver results every time. Now the gateway's `--heartbeat` with `HEARTBEAT.md` (`gateway_heartbeat.rs`) | high | **built** |
+| Many messaging channels | OpenClaw (20+), Hermes (6) | Telegram, Matrix, Discord, Slack | medium | **skip** for WhatsApp, Signal, iMessage, Email: see the end of this page |
+| Multi-agent routing: channels or chats mapped to different agents | OpenClaw, Hermes (profiles) | before: one agent per gateway process. Now `--routes` (`gateway_route.rs`): profile, folder, permissions, model per chat | medium | **built** |
+| DM pairing for unknown senders | OpenClaw, Hermes | `--pair`, `gateway pair approve` | done | exists |
+| Canvas (an agent-drawn live surface) | OpenClaw | the chat's artifact panel previews HTML, SVG, Markdown and CSV blocks with versions and a sandboxed runner (`artifacts.js`); the agent does not drive it | low | **skip**: partly covered |
+| Companion apps for phone and desktop (nodes), voice wake | OpenClaw | the Studio runs in a browser and in the desktop app; voice input and output in the chat (`voice.js`); no phone app, no wake word | low | **skip**: apps are a product of their own |
+| Remote control and phone access to a running session | Claude Code (`remote-control`), Hermes (`webapp`) | the Studio can be opened from another device only with an API key; no pairing flow, no QR code | medium | **later**: needs a pairing design (keys, read-only first); not done to avoid a half-safe version |
+| Background agents with a board of tasks | Claude Code (`claude agents`, background sub-agents), Kiro | sub-agents run in parallel inside one run; `/batch` runs a task in its own worktree; no board | medium | **later** |
+| Status line and themes in the terminal | Claude Code, Pi | the Studio shows a context meter; there is no full-screen terminal UI to put a line into | low | **skip** |
+| Output styles | Claude Code | five styles in the Studio (`/personality`), `SOUL.md`; a manual steering file can be added with `--steering NAME` | medium | exists (partly) |
+| GitHub integration: review pull requests, comment, run in CI | Claude Code (Action, `ultrareview`), Codex, Kiro | before: none. Now `fllm-rs review --pr N --comment` and a workflow example | medium | **built** (not run on a real runner) |
+| IDE integration | Claude Code, Kiro, Codex, Zed through ACP | ACP agent, configuration for Zed and JetBrains, a VS Code skeleton | medium | **built** as documentation and a skeleton |
+| Sub-agents with their own model | Claude Code, Kiro | `.fllm/agents/NAME.md` with `tools`, `model`, `max_steps` | done | exists |
+| Memory the agent writes itself | Claude Code (auto memory), Hermes | `--learn`, `/remember`, proposals with approval | done | exists |
+| Per-skill locks against autonomous writes | Hermes 0.22 | skill changes always wait for approval; no per-skill lock | low | **skip**: approval already covers it |
+| Scheduled routines in the cloud | Claude Code, Codex | local schedules and the heartbeat; no cloud | low | **skip** on purpose |
+| Skills with their own tool limits and model | Claude Code | `SKILL.md` carries a name, a description and a body | low | **later** |
+
+**Other tools in this class**, one line each for what they have that is not above (from their public descriptions; these were not re-read for this
+page): Cline (a plan/act split with step-by-step approval inside the editor, and a browser tool), Aider (a repository map, automatic git commits for
+every change, voice input), OpenCode (a client/server split so a terminal UI and other front ends share one session, a themeable TUI), Goose
+(recipes: shareable, parameterised agent runs, and MCP as the extension mechanism), Continue (rules files and a model-agnostic autocomplete), Cursor
+agent (background agents on cloud machines, a checkpoint per prompt), Amp (threads that can be shared and searched by a team), Droid (specialised
+droids for review, migration and incident work). None of these needed a change beyond the table; the repository map of Aider and the shared threads of
+Amp are the two ideas that may be worth a later look.
 
 ## What was added with this page
 
@@ -127,6 +186,7 @@ plausible but wrong note or skill that no check catches; the log and the undo ar
 | Terminal backends | `FLLM_TERMINAL`, `terminal.json` | [studio.md](user/studio.md) |
 | Everyday commands | `doctor`, `update --check`, `insights`, `usage`, `import` | [agent-cli.md](user/agent-cli.md) |
 | Studio | `/search`, `/retry`, `/stop`, `/insights`, `/personality`, pictures | [studio.md](user/studio.md) |
+| Specs, steering, hooks, auto mode, heartbeat, routes, RPC mode, review, plugins from git | `fllm-rs spec`, `.fllm/steering/`, `agent --watch`, `agent --auto`, `gateway --heartbeat --routes`, `agent --rpc`, `review`, `plugins add` | [agent-workflows.md](user/agent-workflows.md) |
 
 ## Why some things stay missing
 
@@ -138,8 +198,13 @@ plausible but wrong note or skill that no check catches; the log and the undo ar
   a Docker or SSH backend reaches your own machines.
 * **A skills hub page.** A search page needs a hosted index. Installing from any repository with `fllm-rs skills install` covers the
   use without running a service.
-* **More hook events, a status line, a TUI, a VS Code extension, a published GitHub Action.** Real work with real value, not done in
-  this change; the order above says which matter most.
+* **A status line, a TUI, a published GitHub Action.** A status line needs a full-screen terminal UI to live in; the Studio has its meter. The review
+  workflow is an example file, because an action would need a place to host and version it.
+* **Script tools, remote access from a phone, a board of background agents, a semantic code index.** Judged in the second matrix as worth doing and left for
+  later: a script tool type needs its own permission design (MCP servers cover tools in any language meanwhile), phone access needs a pairing design with read-only
+  first, the board is a Studio feature of its own, and `#codebase` needs an embeddings index.
+* **Per-skill tool limits, `subagent_stop` firing, HTTP and model-judged hook kinds, rewriting tool input in a hook.** Small, and each adds more surface than it
+  saves for a local model; the event name `subagent_stop` is reserved so that hook files written now keep working.
 * **Honcho-style dialectic user modelling.** The profile file is derived from the same reflective step and is fully visible; a separate
   model that reasons about the user over many turns would cost another call per message and hide state, which this design avoids.
 * **Model-written session summaries.** They need a call per stored session; the search keeps ranking the text itself.
@@ -157,6 +222,9 @@ plausible but wrong note or skill that no check catches; the log and the undo ar
   [agent-cli.md](user/agent-cli.md#what-was-verified). The Studio pages were clicked through with Playwright (feed, undo of a note, a skill revision and a profile line, the switch).
   Unit tests cover the usage log, creation, revision with the self-check, the watch and rollback, protection of hand-written skills, dedup, redaction, schema validation, the caps, the log and undo,
   the switches; the routes were run by `scripts/api-tests/test_learn.py` against a server with the tiny test model.
+* The additions of the second matrix: unit tests for each module, route checks against a real server, and a real Qwen3-4B-Instruct-2507 run that wrote the
+  three spec files (the task run itself did not finish on this machine) and, for `--auto`, a real judge; the list of what was and was not run is at the end of
+  [agent-workflows.md](user/agent-workflows.md#what-was-verified).
 * The Docker backend against a real Docker daemon on Linux (alpine image).
 * Not run against the real service: Discord, Slack (stub servers only), Telegram and Matrix as before; ACP against a real editor;
   the MCP server inside Claude Code or Codex; the importers against real installations of the other agents; the SSH backend beyond

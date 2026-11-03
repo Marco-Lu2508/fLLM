@@ -46,6 +46,7 @@ mod agent_sandbox_native;
 mod agent_sandbox_win;
 pub(super) mod agent_worktree;
 pub(super) mod agent_mem;
+pub(super) mod agent_specs;
 pub(super) mod agent_net;
 pub(super) mod agent_computer;
 #[cfg(all(feature = "computer-use", target_os = "linux"))]
