@@ -183,6 +183,7 @@ Amp are the two ideas that may be worth a later look.
 | Terminal backends | `FLLM_TERMINAL`, `terminal.json` | [studio.md](user/studio.md) |
 | Everyday commands | `doctor`, `update --check`, `insights`, `usage`, `import` | [agent-cli.md](user/agent-cli.md) |
 | Studio | `/search`, `/retry`, `/stop`, `/insights`, `/personality`, pictures | [studio.md](user/studio.md) |
+| Specs, steering, hooks, auto mode, heartbeat, routes, RPC mode, review, plugins from git | `fllm-rs spec`, `.fllm/steering/`, `agent --watch`, `agent --auto`, `gateway --heartbeat --routes`, `agent --rpc`, `review`, `plugins add` | [agent-workflows.md](user/agent-workflows.md) |
 
 ## Why some things stay missing
 
@@ -194,8 +195,13 @@ Amp are the two ideas that may be worth a later look.
   a Docker or SSH backend reaches your own machines.
 * **A skills hub page.** A search page needs a hosted index. Installing from any repository with `fllm-rs skills install` covers the
   use without running a service.
-* **More hook events, a status line, a TUI, a VS Code extension, a published GitHub Action.** Real work with real value, not done in
-  this change; the order above says which matter most.
+* **A status line, a TUI, a published GitHub Action.** A status line needs a full-screen terminal UI to live in; the Studio has its meter. The review
+  workflow is an example file, because an action would need a place to host and version it.
+* **Script tools, remote access from a phone, a board of background agents, a semantic code index.** Judged in the second matrix as worth doing and left for
+  later: a script tool type needs its own permission design (MCP servers cover tools in any language meanwhile), phone access needs a pairing design with read-only
+  first, the board is a Studio feature of its own, and `#codebase` needs an embeddings index.
+* **Per-skill tool limits, `subagent_stop` firing, HTTP and model-judged hook kinds, rewriting tool input in a hook.** Small, and each adds more surface than it
+  saves for a local model; the event name `subagent_stop` is reserved so that hook files written now keep working.
 * **Honcho-style dialectic user modelling.** The profile file is derived from the same reflective step and is fully visible; a separate
   model that reasons about the user over many turns would cost another call per message and hide state, which this design avoids.
 * **Model-written session summaries.** They need a call per stored session; the search keeps ranking the text itself.
@@ -212,6 +218,9 @@ Amp are the two ideas that may be worth a later look.
   third run and the five-use trigger were not reached (details in [agent-cli.md](user/agent-cli.md#what-was-verified)). Unit tests cover the usage
   log, the proposal flow, rollback, dedup, redaction, schema validation and the caps; the routes were run by `scripts/api-tests/test_learn.py` against a
   server with the tiny test model; the Studio pages have page tests but were not clicked through in a browser.
+* The additions of the second matrix: unit tests for each module, route checks against a real server, and a real Qwen3-4B-Instruct-2507 run that wrote the
+  three spec files (the task run itself did not finish on this machine) and, for `--auto`, a real judge; the list of what was and was not run is at the end of
+  [agent-workflows.md](user/agent-workflows.md#what-was-verified).
 * The Docker backend against a real Docker daemon on Linux (alpine image).
 * Not run against the real service: Discord, Slack (stub servers only), Telegram and Matrix as before; ACP against a real editor;
   the MCP server inside Claude Code or Codex; the importers against real installations of the other agents; the SSH backend beyond

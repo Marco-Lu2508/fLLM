@@ -348,11 +348,16 @@ pub fn do_task(root: &Path, name: &str, index: usize, verify: Option<&str>, allo
     }
     args.extend_from_slice(forward);
     let (code, report) = runner(&args)?;
-    let answer = report["answer"].as_str().unwrap_or_default().trim().to_owned();
+    let mut answer = report["answer"].as_str().unwrap_or_default().trim().to_owned();
+    let changed_nothing = report["edited"].as_array().is_none_or(Vec::is_empty);
     // exit 4 = the --verify command still fails; 3 = out of steps; both leave the box open
     let ok = code == 0;
     if ok {
         tick(root, name, index, true)?;
+        if changed_nothing {
+            // the check passed on code that was there already (an earlier run, your own edit): say so, the report above may say otherwise
+            answer.push_str("\n\n[note] this run changed no files; the box is ticked because the run finished and the check passed on the existing code.");
+        }
     }
     Ok((ok, answer))
 }
@@ -638,6 +643,24 @@ mod tests {
         assert!(!specs_dir(&root).join("x").join("requirements.md").exists());
         // the design needs the requirements first
         assert!(make_phase(&root, "x", Phase::Design, "thing", &[], &mut runner).unwrap_err().contains("requirements.md first"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_ticked_task_says_when_the_run_changed_no_files() {
+        let root = temp_root("note");
+        let dir = specs_dir(&root).join("e");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tasks.md"), "# Tasks
+- [ ] 1. A
+- [ ] 2. B
+").unwrap();
+        let mut idle = |_: &[String]| -> Result<(i32, Value), String> { Ok((0, json!({"answer": "done", "edited": []}))) };
+        let (ok, answer) = do_task(&root, "e", 1, Some("true"), false, &[], &mut idle).unwrap();
+        assert!(ok && answer.contains("changed no files"));
+        let mut busy = |_: &[String]| -> Result<(i32, Value), String> { Ok((0, json!({"answer": "done", "edited": ["a.rs"]}))) };
+        let (ok, answer) = do_task(&root, "e", 2, None, false, &[], &mut busy).unwrap();
+        assert!(ok && !answer.contains("changed no files"));
         let _ = std::fs::remove_dir_all(root);
     }
 

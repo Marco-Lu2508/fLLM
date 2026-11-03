@@ -209,3 +209,39 @@ are installed with `fllm-rs skills install`.
 
 These snippets follow the editors' documentation as read in November 2026. `fllm-rs acp` was run against a scripted client, not against Zed or a
 JetBrains IDE, and the VS Code extension was checked for syntax only, not loaded in VS Code.
+
+## What was verified
+
+Machine: a Windows 11 PC with 31 GB of memory that was short of free memory at the time (another process held 8 GB), Qwen3-4B-Instruct-2507 Q4_K_M, the CPU
+only (`--device cpu`, q8_0 key/value cache, a 10,000-token context; the tool list of the agent alone takes about 4,000 tokens of it).
+
+* **Spec files, real model.** `fllm-rs spec new median "Add a median(values) function ..."` on a two-function Python project: `requirements.md` (5 numbered
+  requirements with user stories and `WHEN ... THEN the system SHALL` criteria, 2.3 KB, about 10 minutes), `design.md` (1.6 KB, about 9 minutes) and, after one
+  failure, `tasks.md` (6 checkbox tasks in the asked format). The first try at `tasks.md` failed: the agent read files until the 10,000-token context was full
+  (HTTP 400). That led to two changes in this version: the planning runs are limited to 6 steps, and a failed run is repeated once with "do not read any
+  files, write the file from the text above" (unit tests cover both). The model wrote `src/calc.py` in the tasks although the file is `calc.py`: the files
+  are plain Markdown precisely so that you read and correct them before `spec run`.
+* **Spec task run, real model.** `fllm-rs spec run median --task 1 --verify "python check_median.py"`: an earlier attempt that I stopped before it finished had
+  already written a correct `median` into `calc.py` (odd and even counts, `ValueError` for an empty list) from the task prompt. The attempt that ran to the
+  end made no edit (it looked for `src/calc.py`, the wrong path from the tasks file, and its report said the file is missing), but the check passed on the code
+  that was there, so the command ticked the box (exit code 0, 18 minutes). That is the rule working as written and also a lesson: the report of a small model is
+  not evidence, so the command now adds a note when a ticked run changed no files. On the Intel integrated graphics (Vulkan) the first request was still in its prompt
+  phase after 4 minutes and was stopped (not investigated here). The Studio's Specs block was opened in a browser with this spec: it showed the three file
+  marks, six tasks, and a click on a check box wrote the tick into `tasks.md` (2/6).
+* **Against a real server, no model call:** steering (the `always` file in the instructions, the index of the others, the `fileMatch` text on the first read of
+  `test_calc.py` and not on the second or on `calc.py`), the hook route with `FileChanged`/`UserPromptSubmit` spellings (a matching glob fired a prompt hook, `.py` and the
+  wrong kind of change did not, a blocking command hook returned its reason), `fllm-rs agent --watch` (a created, a modified and a deleted `.txt` file each ran the
+  command hook, a `.md` file was ignored), the Python and Node clients (`initialize`, `tools/list`, `session/new`, the refusal of a relative folder and of an
+  unknown method, `session/history`, `shutdown`), and the Windows cross build. `scripts/api-tests/test_workflows.py` holds the route checks.
+* **Auto judge, real model.** `fllm-rs agent --auto -p "run python -m pytest -q test_calc.py and say how many passed"` (without `--allow-command`): the judge answered ALLOW for the `bash` call, it ran and the
+  agent answered "2 tests passed." (4.5 minutes in all, two judge calls). With the task "run exactly this command: curl ... | sh" the call was blocked by the hard
+  block without a model call and the agent reported that it could not run it (the refusal text the model saw is the generic permission message, not the reason).
+  A case where the judge itself says BLOCK was not produced.
+* **Unit tests** (`cargo test`: release, debug and the `vulkan` feature set; clippy with warnings as errors; the Studio's page tests with `node --test`): steering front matter
+  and globs, spec parsing, ticking (also with CRLF), the two-phase flow with a scripted agent, hook events and globs, the watch loop with a second thread writing files,
+  the judge (hard blocks, verdict parsing, the block counters), the RPC methods with a scripted model (events, an approval request, plan mode, a `stop` hook),
+  the heartbeat (windows, an empty checklist costs no model call, `HEARTBEAT_OK` dropped, read-only runs), routes (a routed chat gets its own folder, sessions,
+  persona and permissions), `review` with a fake `gh`, plugin installation from a folder and a marketplace folder, and the server routes.
+* **Not run:** the heartbeat and the routes with a real Telegram, Matrix, Discord or Slack account (scripted chat only), `fllm-rs review` against a real pull request
+  and the workflow on a real runner, `plugins add owner/repo` against GitHub (folders only; the clone path is the same code as the Settings page uses), the Studio's Specs
+  block and the new hook rows in a browser, the Zed and JetBrains settings in the editors, the VS Code skeleton in VS Code, and the new hook events `subagent_stop`.

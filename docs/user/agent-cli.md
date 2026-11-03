@@ -311,6 +311,9 @@ WhatsApp, Signal and Email are not there: see [code-mode-gap.md](../code-mode-ga
 
 ## What was verified
 
+The additions around the agent (specs, steering, hook events, `--auto`, `--rpc`, heartbeat, routes, review, plugins) have their own list in
+[agent-workflows.md](agent-workflows.md#what-was-verified).
+
 Checked on a Windows 11 PC (Intel integrated graphics through Vulkan) with Qwen2.5-Coder-3B-Instruct Q4_K_M, a 24k context, and a small
 JavaScript project whose test fails because `add` subtracts:
 
