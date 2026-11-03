@@ -6,14 +6,6 @@ behaviour between versions).
 
 ## [Unreleased]
 
-### Changed
-- **The coding agent learns from your sessions by default and on its own** (Hermes style), instead of proposing and waiting. After the answer, `fllm-rs agent`, the gateway and the Studio's Code page spend one to four short, capped model calls on the run and apply what they find; each change is logged with its reason, session and diff and can be undone (`fllm-rs learn log`, `learn undo ID`, the *What I learned* feed in Settings > Personalization and Settings > Skills, a toast in the Studio, a `Learned: ...` line in the terminal).
-  - A skill is written after a complex successful run (6 or more tool calls, `--verify` passed, no skill used).
-  - A skill is revised after a failure, a thumb down, many retries or five uses. The draft is applied only after the checks (valid front matter, size cap, most of the old content kept, no secret) and a second model call that confirms the skill still does the same job. The previous text is kept; if one of the next two uses fails or gets a thumb down, the previous text is put back automatically. A skill you wrote or edited is never overwritten: the revision becomes a sibling skill `NAME-agent`.
-  - Notes (at most five per run, deduplicated by normalised words and BM25, secrets refused, source session kept) are saved on their own, and so are short dated lines in `user-profile.md` that rest on your own messages only (never on tool output).
-  - All steps ask for a JSON schema (`response_format`), fall back without it, and write nothing when the answer does not fit; per-run limits and token and time caps hold.
-  - Off with `--no-learn`, `fllm-rs learn off` (`--folder DIR` for one project, `.fllm/learn.json`), `FLLM_NO_LEARN=1` or the toggle in the Code settings; `--ask-first` or `fllm-rs learn mode ask` restores the 0.2.2 behaviour (proposals that wait for a yes). `--learn` is the default now and `--auto-memory` is accepted and does nothing. A one-sentence notice explains it the first time. See [docs/user/agent-cli.md](docs/user/agent-cli.md#learning-from-runs-on-by-default).
-
 ## [0.2.2] - 2026-11-02
 
 Fixes for what the first users of 0.2.1 found, and the self-improvement loop of the coding agent.
@@ -23,7 +15,7 @@ Fixes for what the first users of 0.2.1 found, and the self-improvement loop of 
 - **Nothing falls back to the processor silently any more.** One warning at load ("GPU ...: N of M operations run on the CPU: reasons"), an amber notice in the Studio (footer, Settings, Hardware, Models), `device_fallbacks` in the status and in `/metrics`, `--strict-device` (fail instead of falling back), and `fllm-rs doctor --gpu` with the *Test this GPU* button (one verdict per card: OK, falls back, slower than the CPU).
 - **Load any model from the Studio:** GGUF (also the parts of a split GGUF), a Hugging Face folder, a single `.safetensors`, `owner/repo[:quant]`, with a preview of what was found (format, size, architecture, fit, prediction heads) and a folder browser; the dialog for the load options offers the prediction-head (MTP) mode only when the checkpoint has heads.
 - **Every dialog fits the window** (maximum height, scrolling body, buttons always visible, Escape and focus handling); the desktop window can no longer be smaller than usable.
-- **The coding agent learns** (all off by default, nothing written without your yes): revised skills with a diff, usage log and rollback, memory suggestions after a run, an editable user profile (`fllm-rs agent --learn`, `fllm-rs learn ...`, Studio *Learn from this session*).
+- **The coding agent learns on its own, like Hermes** (on by default; switch off with `--no-learn`, `fllm-rs learn off` or the Studio toggle): it writes skills after complex successful runs, revises them when they fail (with an automatic rollback after two bad uses), saves memory notes and keeps an editable user profile built from your own messages; every change is in the *What I learned* feed with Undo (`fllm-rs learn log`, `learn undo ID`).
 - **CI runs on the newest runner images**; the three security advisories for `zip` in the fuzz lock file are closed (zip 9.2.2).
 
 
@@ -48,6 +40,15 @@ Fixes for what the first users of 0.2.1 found, and the self-improvement loop of 
 ### Added
 - **Fallbacks to the CPU can no longer go unnoticed.** Everything a GPU backend hands to the CPU is counted per run (layers without device kernels, recurrent mixers, feed-forward blocks the memory plan kept in host memory, a whole model a device could not take, single operations such as expert products) and reported once as `GPU <name> (<backend>): <N> of <M> operations run on the CPU: <reasons>`. `GET /api/studio/status` has `device_fallbacks` (mode `device` / `partial` / `mostly_cpu` / `cpu`, counts, reasons), `/metrics` has `fllm_device_fallback_*`; the Studio shows an amber notice in the footer, in Settings, Hardware and on the Models page; `fllm-rs serve` prints where every layer lives and the expected speed class. `FLLM_STRICT_DEVICE=1` / `--strict-device` fails the load with the reason instead of falling back.
 - **`fllm-rs doctor --gpu`** and the Studio button *Test this GPU*: a few seconds of a quantized matrix product on every GPU and on the CPU, and one line per device: `OK (12 times faster than the CPU)`, `FALLS BACK: <reason>`, `SLOWER THAN THE CPU` or `WRONG RESULT`. `fllm-rs doctor` also warns when the running server has part of its model on the CPU.
+
+
+### Changed
+- **The coding agent learns from your sessions by default and on its own** (Hermes style), instead of proposing and waiting. After the answer, `fllm-rs agent`, the gateway and the Studio's Code page spend one to four short, capped model calls on the run and apply what they find; each change is logged with its reason, session and diff and can be undone (`fllm-rs learn log`, `learn undo ID`, the *What I learned* feed in Settings > Personalization and Settings > Skills, a toast in the Studio, a `Learned: ...` line in the terminal).
+  - A skill is written after a complex successful run (6 or more tool calls, `--verify` passed, no skill used).
+  - A skill is revised after a failure, a thumb down, many retries or five uses. The draft is applied only after the checks (valid front matter, size cap, most of the old content kept, no secret) and a second model call that confirms the skill still does the same job. The previous text is kept; if one of the next two uses fails or gets a thumb down, the previous text is put back automatically. A skill you wrote or edited is never overwritten: the revision becomes a sibling skill `NAME-agent`.
+  - Notes (at most five per run, deduplicated by normalised words and BM25, secrets refused, source session kept) are saved on their own, and so are short dated lines in `user-profile.md` that rest on your own messages only (never on tool output).
+  - All steps ask for a JSON schema (`response_format`), fall back without it, and write nothing when the answer does not fit; per-run limits and token and time caps hold.
+  - Off with `--no-learn`, `fllm-rs learn off` (`--folder DIR` for one project, `.fllm/learn.json`), `FLLM_NO_LEARN=1` or the toggle in the Code settings; `--ask-first` or `fllm-rs learn mode ask` restores the 0.2.2 behaviour (proposals that wait for a yes). `--learn` is the default now and `--auto-memory` is accepted and does nothing. A one-sentence notice explains it the first time. See [docs/user/agent-cli.md](docs/user/agent-cli.md#learning-from-runs-on-by-default).
 
 ## [0.2.1] - 2026-10-31
 
