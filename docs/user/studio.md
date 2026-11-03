@@ -267,8 +267,9 @@ provider) and `max_steps`; the body is the instruction the sub-agent starts with
 tool list contains no writing, command or memory tool is treated as read-only. The list is read when a folder is opened, so a new agent
 shows up without a restart.
 
-**Hooks.** Settings, *Hooks* attaches shell commands to five points of the loop: `pre_tool_call`, `post_tool_call`, `on_file_edit`,
-`on_session_start` and `on_session_end`. A hook gets one JSON object on stdin (`event`, `tool`, `arguments`, `workspace`) and runs in the
+**Hooks.** Settings, *Hooks* attaches shell commands (or a prompt for the agent) to eleven points of the loop: `pre_tool_call`, `post_tool_call`,
+`on_file_edit`, `on_session_start`, `on_session_end`, `user_prompt_submit`, `stop`, `subagent_stop`, `notification`, `pre_compact` and `file_changed`
+(the new ones are described in [agent-workflows.md](agent-workflows.md#hooks-more-events-prompts-and-file-changes)). A hook gets one JSON object on stdin (`event`, `tool`, `arguments`, `workspace`) and runs in the
 workspace folder with your rights; its exit code decides: `0` passes and its output is added to the tool result as notes, `2` blocks the
 call and its stderr is the reason the model reads, any other code is reported as a failed hook without stopping the agent. A hook may
 also print `{"decision": "block", "reason": "..."}` or `{"context": "..."}`. The matcher is a comma-separated list of tool names, a
@@ -385,6 +386,16 @@ the memory tool and secret refusal by `tools.test.js`; system prompts, titles an
 The pure logic of this page (rule matching, permission modes, compaction, message repair, session cutting, command expansion, the
 prompts) has tests: `node rust/engine/src/webui/tests/code.test.js` and `node rust/engine/src/webui/tests/codeprompts.test.js`.
 The logic of assistants, memory and project retrieval is tested by `node rust/engine/src/webui/tests/projects.test.js`.
+
+### Specs and steering files
+
+`/spec NAME what you want` makes the agent plan a feature in three files under `.fllm/specs/NAME/` (`requirements.md`, `design.md`, `tasks.md`) and
+stop after each for your review; `/spec run NAME [N]` does the next unchecked task (or task N), and `/spec` alone lists the specs. The side panel has a
+**Specs** block: three dots per spec show which files exist, every task is a check box (a click ticks or unticks the line in `tasks.md`), and *Run next
+task* starts the agent on it; the agent ticks the box when the task is done. The same files are made and run from a terminal with `fllm-rs spec`.
+Files in `.fllm/steering/` (or `steering/` of the Studio folder) are standing instructions like `AGENTS.md`, each with an optional `inclusion:`
+(`always`, `fileMatch` with a pattern, `manual`, `auto`); a file-matching one is added to the result of the first read or edit of a matching file. Both are
+described, with what was tried, in [agent-workflows.md](agent-workflows.md).
 
 ## Models
 

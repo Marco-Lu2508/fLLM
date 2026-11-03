@@ -36,7 +36,9 @@ Newer options have their own sections below: `--plan`, `--allow-rule`/`--deny-ru
 `--review` and `--verify` ([self-review](#self-review---review)), `--output-format`, `--continue`, `--resume`, `--image`
 ([formats](#output-formats-sessions-and-pictures)), `--propose-skills` ([skills](#skills-proposals-and-exchange)),
 `--learn`, `--auto-memory`, `--skills`, `--nudge-every` ([learning from runs](#learning-from-runs---learn)).
-How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.md](../code-mode-gap.md).
+How this compares with Hermes Agent, Claude Code and Codex CLI: [code-mode-gap.md](../code-mode-gap.md). Specs (`fllm-rs spec`), steering files (`--steering`), `--auto`,
+`--watch` (file-change hooks), `--rpc` (JSON-RPC server), `fllm-rs review` and `fllm-rs plugins`, plus the gateway's `--heartbeat` and `--routes`, are on
+[agent-workflows.md](agent-workflows.md).
 
 * **Output.** The final answer goes to standard output, progress (one line per tool call) to standard error. `--json` prints one
   object with `answer`, `status`, `steps`, `folder` and the list of tool calls with their status

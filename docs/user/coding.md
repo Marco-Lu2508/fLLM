@@ -106,6 +106,16 @@ With `--learn`, `fllm-rs agent` also improves over time: it reads your skills, d
 memory entries and profile lines after a run, all as proposals you accept with `fllm-rs learn review`
 ([agent-cli.md](agent-cli.md#learning-from-runs---learn)). It is off by default and costs one or two short extra model calls per run.
 
+## Review pull requests with your own model
+
+`fllm-rs review --pr 42 --comment` lets the agent read pull request 42 (through the GitHub CLI `gh`) and the repository, and posts its findings as one
+comment; `fllm-rs review --base main` and `--staged` do the same for a branch or the staged changes without GitHub. The agent cannot change anything during
+a review. For GitHub Actions copy [.github/workflows/fllm-review.yml.example](../../.github/workflows/fllm-review.yml.example) into
+the `.github/workflows` folder of your repository and drop the `.example` ending; it needs a machine with `fllm-rs`, `gh` and a running fLLM server (a self-hosted runner on that machine is the
+simplest setup, or put the server's address and API key into the secrets `FLLM_URL` and `FLLM_API_KEY`). Details, options and what was tried:
+[agent-workflows.md](agent-workflows.md#review-a-pull-request-fllm-rs-review). Zed and JetBrains IDEs take `fllm-rs acp` as a custom agent; the settings
+are in [agent-workflows.md](agent-workflows.md#editors).
+
 ## Autocomplete: `/infill`
 
 `POST /infill` builds the fill-in-the-middle prompt from the model's FIM tokens (GGUF `tokenizer.ggml.fim_*_token_id`, else the literals of

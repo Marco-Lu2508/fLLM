@@ -301,11 +301,18 @@ pub fn make_phase(root: &Path, name: &str, phase: Phase, description: &str, forw
     let mut prompt = phase_prompt(phase, name, description, &docs);
     let mut last_problem = String::new();
     for attempt in 0..2 {
-        let mut args: Vec<String> = vec!["-p".into(), prompt.clone(), "--folder".into(), root.display().to_string(), "--output-format".into(), "json".into(), "--quiet".into()];
+        // a few reading steps are enough to plan; options the user gave come later and win
+        let mut args: Vec<String> = vec!["-p".into(), prompt.clone(), "--folder".into(), root.display().to_string(), "--output-format".into(), "json".into(), "--quiet".into(), "--max-steps".into(), "6".into()];
         args.extend_from_slice(forward);
         let (code, report) = runner(&args)?;
         if code != 0 && code != 3 {
-            return Err(format!("the agent ended with exit code {code}"));
+            // most often the context ran full while the agent read files: one more try from the given text alone
+            if attempt == 0 {
+                prompt = format!("{}\n\nDo not read any files this time: write the file from the text above.", phase_prompt(phase, name, description, &docs));
+                last_problem = format!("the agent ended with exit code {code}");
+                continue;
+            }
+            return Err(format!("the agent ended with exit code {code} (a model with a larger context may be needed; the tool list alone takes about 4,000 tokens)"));
         }
         let doc = clean_doc(report["answer"].as_str().unwrap_or_default());
         match validate(phase, &doc) {
@@ -631,6 +638,23 @@ mod tests {
         assert!(!specs_dir(&root).join("x").join("requirements.md").exists());
         // the design needs the requirements first
         assert!(make_phase(&root, "x", Phase::Design, "thing", &[], &mut runner).unwrap_err().contains("requirements.md first"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_run_is_tried_once_more_without_reading_files() {
+        let root = temp_root("fail");
+        let prompts = std::cell::RefCell::new(Vec::<String>::new());
+        let mut runner = |args: &[String]| -> Result<(i32, Value), String> {
+            prompts.borrow_mut().push(args[1].clone());
+            if prompts.borrow().len() == 1 {
+                return Ok((1, json!({"answer": ""})));
+            }
+            Ok((0, json!({"answer": "# Requirements: X\n\n1. As a user, I want it, so that it works.\n   WHEN a THEN the system SHALL b."})))
+        };
+        let file = make_phase(&root, "x", Phase::Requirements, "thing", &["--max-steps".into(), "3".into()], &mut runner).unwrap();
+        assert!(file.exists());
+        assert!(prompts.borrow()[1].contains("Do not read any files this time"));
         let _ = std::fs::remove_dir_all(root);
     }
 

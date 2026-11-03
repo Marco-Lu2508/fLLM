@@ -6,6 +6,17 @@ behaviour between versions).
 
 ## [Unreleased]
 
+### Added
+- **Spec-driven development.** `fllm-rs spec new NAME "what you want"` has the agent write `requirements.md`, `design.md` and `tasks.md` under `.fllm/specs/NAME/` (the agent only reads the code; the command writes the files, one retry with the reason for an unusable answer, `--phase` for one file at a time), and `fllm-rs spec run NAME [--task N | --all] [--verify COMMAND]` builds the unchecked tasks one by one, each in its own run; the command ticks the box only when the run finished and the check passed. The Studio has `/spec`, `/spec run` and a **Specs** block in the Code side panel with the tasks as check boxes. Run with Qwen3-4B-Instruct-2507: see [docs/user/agent-workflows.md](docs/user/agent-workflows.md).
+- **Steering files.** `.fllm/steering/*.md` and `steering/` of the Studio folder, with `inclusion: always | fileMatch | manual | auto`; a file-matching one is added to the first read or edit of a matching file, `fllm-rs agent --steering NAME` adds one by hand.
+- **Eleven hook events and file-change hooks.** New: `user_prompt_submit`, `stop` (a block sends the reason back as the next instruction), `subagent_stop`, `notification`, `pre_compact`, `file_changed`; a hook can carry a prompt for the agent instead of a command; the Claude Code and Kiro spellings are read. `fllm-rs agent --watch` fires `file_changed` for created, changed and deleted files (polling) and starts an agent run for prompt hooks. `POST /api/studio/agent/hook` fires an event (this machine only).
+- **`fllm-rs agent --auto`**: a short model call judges the actions the flags do not cover (it sees the task and the one action, never tool results); deny and ask rules win, a list of hard blocks (`curl | sh`, `rm -rf /`, forced push, disk devices, credentials) never reaches the model, an unreadable answer blocks, and after three blocks in a row it stops judging.
+- **Gateway heartbeat and routes.** `--heartbeat 30m --heartbeat-chat ID` makes the agent read `HEARTBEAT.md` on an interval and message the chat only when something needs attention (`HEARTBEAT_OK` is dropped; read-only unless `--heartbeat-act`; `--heartbeat-hours`, `--heartbeat-idle`). `--routes FILE` gives chats their own profile, folder, permissions, model and system text.
+- **`fllm-rs agent --rpc`**: the agent as a JSON-RPC 2.0 server on standard input and output (`session/new`, `session/prompt` with events and approval requests, `session/cancel`), with dependency-free clients `scripts/sdk/fllm_agent.py` and `scripts/sdk/fllm-agent.mjs` (with types).
+- **`fllm-rs review`**: review a pull request (`--pr N`, through `gh`, `--comment` to post it), a branch (`--base`) or the staged changes read-only; `.github/workflows/fllm-review.yml.example` for GitHub Actions.
+- **`fllm-rs plugins add|list|remove`**: install plugins from `owner/repo`, a git address or a folder; a repository with `marketplace.json` works as a small marketplace; the contents (hooks run commands) are shown and confirmed first.
+- Configuration snippets for Zed and JetBrains (`fllm-rs acp`) and a VS Code extension skeleton in `contrib/vscode` (syntax-checked only). [docs/code-mode-gap.md](docs/code-mode-gap.md) gets a second matrix (Kiro, Pi, OpenClaw, newer Claude Code, Hermes and Codex features) with a decision for each.
+
 ## [0.2.2] - 2026-11-02
 
 Fixes for what the first users of 0.2.1 found, and the self-improvement loop of the coding agent.
