@@ -111,6 +111,8 @@ mod tokenizer_convert_tests;
 mod gemma_tests;
 #[cfg(test)]
 mod spec_tests;
+#[cfg(test)]
+mod spec_state_tests;
 
 pub mod hybrid_config;
 

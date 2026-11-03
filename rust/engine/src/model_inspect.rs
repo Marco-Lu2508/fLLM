@@ -28,7 +28,7 @@ pub struct Inspection {
     pub context_length: Option<u64>,
     /// `Some(true)`: the model has multi-token prediction heads; `Some(false)`: it has none; `None`: not known without downloading.
     pub mtp: Option<bool>,
-    /// Why speculative decoding with the heads of the model or a draft model cannot work for this architecture.
+    /// Why multi-token prediction with the heads of the model cannot work for this architecture (prompt lookup and a draft model can).
     pub speculation_blocked: Option<String>,
     pub fits: Option<bool>,
     pub notes: Vec<String>,
@@ -55,7 +55,9 @@ impl Inspection {
     }
 }
 
-/// Architectures with recurrent layers: rejected draft tokens would advance the recurrent state, so they cannot speculate.
+/// Architectures with recurrent layers. Prompt lookup and draft models work with them (the recurrent state is copied before a
+/// verification pass and put back when draft tokens are rejected); multi-token prediction does not, because its heads are only
+/// implemented for the DeepSeek and GLM families.
 pub const STATEFUL_ARCHITECTURES: &[&str] = &[
     "qwen3next", "qwen35", "qwen35moe", "qwen4exp", "olmo_hybrid", "mamba", "mamba2", "jamba", "granitehybrid", "bamba", "nemotron_h",
     "nemotron_h_moe", "falcon-h1", "zamba2", "lfm2", "lfm2moe", "rwkv6", "rwkv7",
@@ -64,7 +66,7 @@ pub const STATEFUL_ARCHITECTURES: &[&str] = &[
 fn blocked_text(architecture: &str) -> Option<String> {
     STATEFUL_ARCHITECTURES.contains(&architecture).then(|| {
         format!(
-            "Speculative decoding does not work with this model: its architecture ({architecture}) keeps a running state that cannot be rolled back when a guess is wrong."
+            "Multi-token prediction does not work with this model: its architecture ({architecture}) has recurrent layers, and the prediction heads are only supported for the DeepSeek and GLM families. Prompt lookup and a draft model work."
         )
     })
 }

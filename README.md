@@ -238,7 +238,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   Studio footer show hit ratio and bytes read per token. Run with OLMoE-1B-7B (4.2 GB) under 1 to 6 GiB limits on Linux and with a 1 GiB
   budget on Windows; the pinned hot set on the GPU is not done ([docs/moe-streaming.md](docs/moe-streaming.md)).
 - **Scheduling.** Continuous batching, chunked prefill, prefix cache (hybrid and state-space models
-  switch off prefix sharing and speculation), beam search (`use_beam_search`, CPU backend), `--multi-step N`
+  switch off prefix sharing), beam search (`use_beam_search`, CPU backend), `--multi-step N`
   (several decode rounds per scheduler round, off by default and CPU only until it is verified elsewhere) and
   jump-forward decoding for grammar-constrained requests (text identical to token-by-token decoding; large gains
   only with compact JSON schemas). Optional: prompt blocks saved on disk (`FLLM_KV_DISK_DIR`) and an output cache
@@ -246,8 +246,10 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
 - **Speculative decoding.** `--speculative off|ngram|suffix|draft|mtp`: conversation lookup (`suffix`, on by default on
   the CPU and on Vulkan/DirectX; on CUDA, HIP and Metal it stays off until its kernels have been checked on hardware),
   prompt lookup, a draft model of your own (`--speculative-model`, browse for it in the load dialog) and the
-  multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only); greedy requests only,
-  and not for models with a recurrent state (Qwen3.5, Mamba).
+  multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only). Models with a recurrent
+  state (Qwen3.5, Mamba, RWKV) speculate too with lookup or a draft model, by copying the state before each verification
+  pass and putting it back after a rejection (checked with small random models on the CPU, not with real checkpoints or a
+  graphics card; not on by default there, `--speculative suffix` turns it on).
 
 ### Tools and clients
 

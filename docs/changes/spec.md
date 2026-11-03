@@ -21,7 +21,7 @@ change was run on a GPU**: every CUDA statement is L0. CPU statements say `cargo
 * Adaptive draft length per sequence (`speculative::AdaptiveDraft`), `FLLM_SPEC_ADAPTIVE=0` disables it.
 * Grammar masks, `min_tokens`, `allowed_token_ids`, `bad_words`, penalties and bias are applied to the target distribution at every verified
   position; the grammar advances with each accepted token. Log-probabilities come from the target distribution of the emitted position.
-* Draft, suffix and MTP speculation are refused for stateful models (the recurrent state would run past the accepted prefix).
+* Models with recurrent layers speculate with prompt lookup, suffix and a draft model: the state is copied before a verification pass and put back after a rejection (see the user guide). MTP stays refused for them.
 * Metrics: `fllm_spec_*` (see the user guide).
 
 ### 1.2 Sampling
@@ -105,7 +105,7 @@ and agreed with `device_sample_reference` on every token, log-probability and al
 ## 5. Known limits / not done
 
 * EAGLE, EAGLE-3, Medusa, tree attention (`cuda/attn_tree.cu`) and KV compaction of tree branches: not implemented. `speculative::verify_tree` is ready for them.
-* Speculation and `n > 1` for stateful (hybrid / recurrent) models, recurrent-state snapshots, prefix cache for stateful models, `--prefix-state-interval`: not implemented.
+* `n > 1` for stateful (hybrid / recurrent) models, prefix cache for stateful models, `--prefix-state-interval`: not implemented.
 * MTP stays CPU-only with one candidate; multi-candidate MTP, MTP on the GPU: not implemented.
 * Prompt logprobs, `echo` log-probabilities, `include_stop_str_in_output`, `skip_special_tokens`, `logits_processors`: not implemented (`best_of`,
   `bad_words`, `allowed_token_ids`, `logprobs_mode`, `min_tokens`, `ignore_eos`, `stop_token_ids` are).

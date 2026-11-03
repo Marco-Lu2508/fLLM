@@ -54,6 +54,7 @@ struct Q4Layer {
     ple: Option<Ple>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct PleState {
     len: usize,
     /// The last `ngram - 1` token ids (the end-of-sequence id before the first token).
@@ -62,7 +63,7 @@ struct PleState {
     hist: Vec<f32>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct IndexState {
     len: usize,
     /// Raw indexer key of every token.
@@ -81,6 +82,41 @@ struct SeqState {
 struct Store {
     clock: u64,
     map: HashMap<i64, SeqState>,
+}
+
+/// A copy of what one sequence keeps in [`Qwen4Model::seqs`] (n-gram ids and convolution history per n-gram layer, indexer keys per
+/// attention layer), taken before draft tokens are verified and put back when some of them are rejected.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Q4Snapshot {
+    ple: Vec<Option<PleState>>,
+    index: Vec<Option<IndexState>>,
+}
+
+impl Q4Snapshot {
+    /// Memory held by the copy.
+    pub(super) fn bytes(&self) -> usize {
+        let ple: usize = self.ple.iter().flatten().map(|p| p.ids.len() * 8 + p.hist.len() * 4).sum();
+        let index: usize = self.index.iter().flatten().map(|i| (i.raw.len() + i.blocks.len()) * 4).sum();
+        ple + index
+    }
+}
+
+impl Store {
+    fn snapshot(&self, first: i64) -> Option<Q4Snapshot> {
+        self.map.get(&first).map(|seq| Q4Snapshot { ple: seq.ple.clone(), index: seq.index.clone() })
+    }
+
+    /// Makes the entry of `first` equal to `snapshot`, evicting the least recently used sequence when `capacity` is reached.
+    fn restore(&mut self, first: i64, snapshot: &Q4Snapshot, capacity: usize) {
+        self.clock += 1;
+        let clock = self.clock;
+        if !self.map.contains_key(&first) && self.map.len() >= capacity {
+            if let Some(oldest) = self.map.iter().min_by_key(|(_, s)| s.used).map(|(k, _)| *k) {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(first, SeqState { used: clock, ple: snapshot.ple.clone(), index: snapshot.index.clone() });
+    }
 }
 
 pub(super) struct Qwen4Model {
@@ -312,6 +348,23 @@ impl Qwen4Model {
             });
         }
         Ok(Self { layers, head: Gate::load(model, "output_hc", hc, qc.lowrank, hidden, false)?, seqs: Mutex::new(Store::default()) })
+    }
+
+    /// Copies what the sequence whose first KV block is `first` keeps. `None`: it holds nothing yet.
+    pub(super) fn snapshot(&self, first: i64) -> Result<Option<Q4Snapshot>, String> {
+        Ok(self.seqs.lock().map_err(|_| "state lock poisoned")?.snapshot(first))
+    }
+
+    /// Puts a copy taken by [`Self::snapshot`] back (`None`: the sequence held nothing then, so it holds nothing now).
+    pub(super) fn restore(&self, first: i64, snapshot: Option<&Q4Snapshot>, capacity: usize) -> Result<(), String> {
+        let mut store = self.seqs.lock().map_err(|_| "state lock poisoned")?;
+        match snapshot {
+            Some(snapshot) => store.restore(first, snapshot, capacity),
+            None => {
+                store.map.remove(&first);
+            }
+        }
+        Ok(())
     }
 
     /// Forgets what a finished sequence kept.
@@ -624,6 +677,41 @@ impl RustDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(len: usize) -> SeqState {
+        SeqState {
+            used: 0,
+            ple: vec![None, Some(PleState { len, ids: vec![2, 7], hist: vec![0.5; 6] })],
+            index: vec![Some(IndexState { len, raw: vec![1.0; len * 2], blocks: vec![3.0; 4] }), None],
+        }
+    }
+
+    #[test]
+    fn sequence_state_snapshot_rolls_back_ngram_and_indexer_state() {
+        let mut store = Store::default();
+        assert!(store.snapshot(10).is_none());
+        store.map.insert(10, sample(5));
+        let saved = store.snapshot(10).unwrap();
+        assert_eq!(saved.bytes(), 2 * 8 + 6 * 4 + (10 + 4) * 4);
+        // the sequence advances (a verification pass over draft tokens) ...
+        let seq = store.map.get_mut(&10).unwrap();
+        seq.ple[1].as_mut().unwrap().len = 9;
+        seq.ple[1].as_mut().unwrap().ids = vec![8, 8];
+        seq.ple[1].as_mut().unwrap().hist.fill(-1.0);
+        seq.index[0].as_mut().unwrap().raw.extend_from_slice(&[9.0; 8]);
+        assert_ne!(store.snapshot(10).unwrap(), saved);
+        // ... and goes back
+        store.restore(10, &saved, 8);
+        assert_eq!(store.snapshot(10).unwrap(), saved);
+        // a copy of a sequence that was evicted meanwhile brings it back, and the capacity is kept
+        store.map.remove(&10);
+        store.restore(10, &saved, 1);
+        assert_eq!(store.snapshot(10).unwrap(), saved);
+        store.map.remove(&10);
+        store.map.insert(11, sample(2));
+        store.restore(10, &saved, 1);
+        assert_eq!((store.map.len(), store.map.contains_key(&11)), (1, false), "the least recently used sequence makes room");
+    }
 
     #[test]
     fn primes_follow_the_start_value() {
