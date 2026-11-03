@@ -63,6 +63,7 @@ pub(crate) fn layout(kind: u32) -> (usize, usize) {
         20 => (32, 18),
         23 => (256, 136),
         39 => (32, 17),
+        42 => (64, 18),
         0x8000_0020 => (1, 1),
         k if fllm_gguf_probe::fp8b_type(k) => (1, 1),
         k if fllm_gguf_probe::bnb::is_bnb(k) => fllm_gguf_probe::bnb::layout(k).map_or((1, 1), |l| (l.block, l.bytes)),
@@ -96,6 +97,7 @@ pub(crate) fn format_name(kind: u32) -> &'static str {
         30 => "bf16",
         39 => "mxfp4",
         40 => "nvfp4",
+        42 => "q2_0",
         0x8000_0010 => "q4z32",
         0x8000_0011 => "q4z64",
         0x8000_0012 => "q4z128",
@@ -159,7 +161,7 @@ pub(crate) fn random_weights(kind: u32, rows: usize, cols: usize, rng: &mut Lcg)
         let d = f16::from_f32(0.001 + (rng.next() % 100) as f32 / 4000.0).to_le_bytes();
         let m = f16::from_f32((rng.next() % 100) as f32 / 4000.0).to_le_bytes();
         match kind {
-            2 | 6 | 8 | 20 | 23 => b[..2].copy_from_slice(&d),
+            2 | 6 | 8 | 20 | 23 | 42 => b[..2].copy_from_slice(&d),
             3 | 7 | 12 | 13 => {
                 b[..2].copy_from_slice(&d);
                 b[2..4].copy_from_slice(&m);
@@ -793,7 +795,7 @@ fn q4z_dense_case(tier: CpuTier, report: &mut Report, rng: &mut Lcg, kind: u32) 
 /// Byte ranges of a block that hold floating-point scales (everything else may take any value).
 fn scale_fields(kind: u32) -> std::ops::Range<usize> {
     match kind {
-        2 | 6 | 8 | 20 | 23 => 0..2,
+        2 | 6 | 8 | 20 | 23 | 42 => 0..2,
         3 | 7 | 12 | 13 => 0..4,
         10 => 80..84,
         11 => 108..110,
@@ -809,8 +811,12 @@ fn scale_fields(kind: u32) -> std::ops::Range<usize> {
 /// products of a `maddubs` pair then reach their maximum, which is where a kernel that
 /// saturates (instead of widening first) loses bits.
 fn saturation_cases(tier: CpuTier, report: &mut Report, rng: &mut Lcg) {
-    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39] {
-        let cols = if layout(kind).0 == 256 { 768 } else { 352 };
+    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42] {
+        let cols = match layout(kind).0 {
+            256 => 768,
+            64 => 384,
+            _ => 352,
+        };
         let width = layout(kind).1;
         let rows = 9;
         for fill in [0x00u8, 0x7f, 0x80, 0xff] {
@@ -884,7 +890,7 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     // repack the weights of a panel once and run over all tokens from batch 4 on).
     for (kind, rows) in Q4Z_KINDS
         .into_iter()
-        .chain([8, 2, 3, 6, 7, 20, 39, 10, 11, 12, 13, 14, 23])
+        .chain([8, 2, 3, 6, 7, 20, 39, 42, 10, 11, 12, 13, 14, 23])
         .flat_map(|kind| [(kind, 13), (kind, 16)])
     {
         let cols = match layout(kind).0 {
@@ -937,7 +943,7 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     // the 16-token tile. Besides `linear`, the 16-row VNNI GEMM and the AMX GEMM run directly on
     // every format that has a decoder, whatever their default format lists say.
     if full {
-        for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39]
+        for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42]
             .into_iter()
             .chain(Q4Z_KINDS)
         {
@@ -946,6 +952,8 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
                 [1, 3, 7, 25].map(|blocks| blocks * group).to_vec()
             } else if group == 256 {
                 vec![256, 768, 2560]
+            } else if group == 64 {
+                vec![64, 192, 704, 1088]
             } else {
                 vec![32, 96, 352, 1056]
             };
@@ -1316,7 +1324,7 @@ fn scan_gguf(
     let mut picked = Vec::new();
     for info in &model.index().tensors {
         let kind = info.type_id;
-        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 20 | 23 | 39);
+        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 20 | 23 | 39 | 42);
         if info.dimensions.len() == 2
             && supported
             && (info.dimensions[0] as usize).is_multiple_of(layout(kind).0)
