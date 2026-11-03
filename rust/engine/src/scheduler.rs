@@ -668,6 +668,43 @@ impl Scheduler {
         let _ = self.bm.allocator.dec_ref(bid);
     }
 
+    /// The chain of the full blocks of `tokens` as the cache registers them (the registered chain starts from 0), with the block that holds
+    /// each one when it is cached: `(chain hash, tokens of the block, block)`.
+    pub fn cached_prompt_chain(&self, tokens: &[i64]) -> Vec<(u64, Vec<i64>, Option<i64>)> {
+        let size = self.cfg.block_size;
+        let mut prev = 0u64;
+        (0..tokens.len() / size)
+            .map(|b| {
+                let seg = tokens[b * size..(b + 1) * size].to_vec();
+                prev = PrefixCache::hash_chain(prev, &seg);
+                (prev, seg, self.pc.as_ref().and_then(|pc| pc.block_of(prev)))
+            })
+            .collect()
+    }
+
+    /// The block a chain hash points at in the prefix cache.
+    pub fn prefix_block_of(&self, hash: u64) -> Option<i64> {
+        self.pc.as_ref().and_then(|pc| pc.block_of(hash))
+    }
+
+    /// Registers a chain whose blocks hold their KV already (the radix path from the root; blocks that are in the tree stay as they are).
+    /// Unlike `register_prefix_chain` it also accepts a chain that starts with cached blocks. `false`: the prefix cache is off.
+    pub fn extend_prefix_chain(&mut self, chain: &[(u64, Vec<i64>, i64)]) -> Result<bool, SchedulerError> {
+        let Some(pc) = self.pc.as_mut() else {
+            return Ok(false);
+        };
+        let entries: Vec<PrefixEntry> = chain
+            .iter()
+            .map(|(hash, tokens, block)| PrefixEntry { chain_hash: *hash, block_id: *block, tokens: tokens.clone() })
+            .collect();
+        let bm = &mut self.bm;
+        let cell = std::cell::RefCell::new(&mut *bm);
+        let mut claim = |bid: i64| cell.borrow_mut().allocator.inc_ref(bid).map_err(PrefixCacheError::from);
+        let mut release = |bid: i64| cell.borrow_mut().allocator.dec_ref(bid).map_err(PrefixCacheError::from);
+        pc.insert_path(&entries, &mut claim, &mut release)?;
+        Ok(true)
+    }
+
     pub fn has_prefix_hash(&self, hash: u64) -> bool {
         self.pc.as_ref().is_some_and(|pc| pc.contains(hash))
     }

@@ -56,6 +56,7 @@ pub mod cpu_topology;
 pub mod draft;
 pub mod expert_cache;
 pub(crate) mod kv_blocks;
+pub mod kv_transfer;
 pub mod speculative;
 pub mod encoder;
 pub mod encoder_decoder;

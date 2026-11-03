@@ -156,6 +156,16 @@ enum WorkerCommand {
     ClearPrefixCache {
         output: tokio::sync::oneshot::Sender<Result<usize, String>>,
     },
+    /// `POST /admin/disagg/export`: the cached KV blocks of a prompt, for a decode server.
+    KvExport {
+        tokens: Vec<i64>,
+        output: tokio::sync::oneshot::Sender<Result<crate::kv_transfer::KvChain, String>>,
+    },
+    /// `POST /admin/disagg/import`: KV blocks computed by a prefill server.
+    KvImport {
+        chain: Box<crate::kv_transfer::KvChain>,
+        output: tokio::sync::oneshot::Sender<Result<(usize, usize), String>>,
+    },
     /// `GET /admin/kv-tier`: the disk tier's counters.
     KvTierStats {
         output: tokio::sync::oneshot::Sender<Value>,
@@ -555,6 +565,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/admin/config", get(admin_config))
         .route("/admin/prefix-cache", get(admin_prefix_cache).delete(admin_prefix_cache_clear))
         .route("/admin/kv-tier", get(admin_kv_tier).delete(admin_kv_tier_clear))
+        .route("/admin/disagg/export", post(admin_disagg_export))
+        .route("/admin/disagg/import", post(admin_disagg_import).layer(DefaultBodyLimit::max(DISAGG_MAX_BODY.min(usize::MAX as u64) as usize)))
         .route("/version", get(api::vllm::version))
         .route("/is_sleeping", get(api::vllm::is_sleeping))
         .route("/api/studio/status", get(api::studio::status))
@@ -1131,6 +1143,16 @@ fn accept_command(
         WorkerCommand::KvTierStats { output } => {
             let _ = output.send(runtime.kv_tier_stats());
         }
+        WorkerCommand::KvExport { tokens, output } => {
+            let result = catch_unwind(AssertUnwindSafe(|| runtime.kv_export_prompt(&tokens)))
+                .unwrap_or_else(|payload| Err(record_panic(metrics, "exporting KV blocks", payload.as_ref())));
+            let _ = output.send(result);
+        }
+        WorkerCommand::KvImport { chain, output } => {
+            let result = catch_unwind(AssertUnwindSafe(|| runtime.kv_import_chain(&chain)))
+                .unwrap_or_else(|payload| Err(record_panic(metrics, "importing KV blocks", payload.as_ref())));
+            let _ = output.send(result);
+        }
         WorkerCommand::ClearKvTier { output } => {
             let _ = output.send(runtime.clear_kv_tier());
         }
@@ -1637,6 +1659,62 @@ async fn admin_prefix_cache_clear(State(state): State<Arc<AppState>>) -> Respons
     match answer.await {
         Ok(Ok(dropped)) => Json(json!({"dropped": dropped})).into_response(),
         Ok(Err(error)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    }
+}
+
+/// Largest KV chain the import route takes (a long prompt of a big model is many gigabytes; the limit stops a runaway sender).
+const DISAGG_MAX_BODY: u64 = 64 << 30;
+
+/// `POST /admin/disagg/export` `{"tokens":[..], "target":"http://decode:8000"}`: prefill side of disaggregated serving. The prompt must have
+/// been prefilled on this server just before (e.g. a completion with `max_tokens` 1); its cached KV blocks go to `target` over the transport
+/// the target string names (an HTTP URL, or a shared directory with `dir:PATH`). Without `target` the reply is the encoded chain itself.
+async fn admin_disagg_export(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let Some(tokens) = body.get("tokens").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect::<Vec<i64>>()).filter(|t| !t.is_empty()) else {
+        return api_error(StatusCode::BAD_REQUEST, "tokens must be a non-empty array of token ids");
+    };
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::KvExport { tokens, output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    let chain = match answer.await {
+        Ok(Ok(chain)) => chain,
+        Ok(Err(error)) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        Err(_) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    };
+    let (blocks, bytes) = (chain.blocks.len(), chain.payload_bytes());
+    let started = Instant::now();
+    let payload = chain.encode();
+    let Some(target) = body.get("target").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_owned) else {
+        return ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], payload).into_response();
+    };
+    let sent = tokio::task::spawn_blocking(move || {
+        let transport = crate::kv_transfer::transport_for(&target);
+        let name = transport.name();
+        let destination = crate::kv_transfer::strip_dir_prefix(&target).to_owned();
+        transport.send(&destination, &payload).map(|()| name)
+    })
+    .await;
+    match sent {
+        Ok(Ok(transport)) => Json(json!({"blocks": blocks, "bytes": bytes, "transport": transport, "seconds": started.elapsed().as_secs_f64()})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::BAD_GATEWAY, &error),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+/// `POST /admin/disagg/import` (body: an encoded KV chain): decode side of disaggregated serving.
+async fn admin_disagg_import(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    let chain = match crate::kv_transfer::KvChain::decode(&body) {
+        Ok(chain) => chain,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+    };
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::KvImport { chain: Box::new(chain), output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    match answer.await {
+        Ok(Ok((imported, present))) => Json(json!({"imported": imported, "already_cached": present})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::CONFLICT, &error),
         Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
     }
 }
