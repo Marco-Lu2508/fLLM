@@ -16,7 +16,7 @@ use std::{
 };
 
 const VERSION: &str = "1.0.0";
-const WORDS: &[&str] = &[
+pub(crate) const WORDS: &[&str] = &[
     "river", "stone", "forest", "cloud", "window", "garden", "paper", "bridge", "orange", "silver",
     "quiet", "morning", "planet", "harbor", "meadow", "copper", "basket", "shadow", "winter",
     "summer", "pebble", "valley", "lantern", "pencil", "ocean", "branch", "island", "cotton",
@@ -228,7 +228,7 @@ fn parameters(o: &Options) -> Value {
         "length_control_requested":o.length_control,"label":o.label,"notes":o.notes,"json":o.output,
         "temperature":0,"top_p":1,"n":1,"stream":true,"include_usage":true,"prompt_generator":"word-list-splitmix64-v1"})
 }
-fn mix(state: &mut u64) -> u64 {
+pub(crate) fn mix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e3779b97f4a7c15);
     let mut z = *state;
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -306,21 +306,21 @@ fn cases(o: &Options) -> Vec<Case> {
 }
 
 #[derive(Default)]
-struct Sample {
-    index: usize,
-    seed: u64,
-    words: usize,
-    status: Option<u16>,
-    model: Option<String>,
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-    usage: Option<Value>,
-    events: Vec<f64>,
-    first_event_tokens: Option<u64>,
-    finish_reason: Option<String>,
-    elapsed: f64,
-    done: bool,
-    error: Option<String>,
+pub(crate) struct Sample {
+    pub(crate) index: usize,
+    pub(crate) seed: u64,
+    pub(crate) words: usize,
+    pub(crate) status: Option<u16>,
+    pub(crate) model: Option<String>,
+    pub(crate) prompt_tokens: Option<u64>,
+    pub(crate) completion_tokens: Option<u64>,
+    pub(crate) usage: Option<Value>,
+    pub(crate) events: Vec<f64>,
+    pub(crate) first_event_tokens: Option<u64>,
+    pub(crate) finish_reason: Option<String>,
+    pub(crate) elapsed: f64,
+    pub(crate) done: bool,
+    pub(crate) error: Option<String>,
 }
 impl Sample {
     fn ttft(&self) -> Option<f64> {
@@ -359,7 +359,7 @@ fn rate(tokens: f64, seconds: f64) -> Option<f64> {
         .then_some(tokens / seconds)
         .filter(|n| n.is_finite())
 }
-fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
+pub(crate) fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
     if sorted.is_empty() {
         return None;
     }
@@ -503,72 +503,75 @@ fn request(
         req = req.bearer_auth(key);
     }
     let started = Instant::now();
-    let result = (|| -> Result<(), String> {
-        let mut response = req
-            .send()
-            .map_err(|e| format!("connection failed or timed out: {}", e.without_url()))?;
-        sample.status = Some(response.status().as_u16());
-        if !response.status().is_success() {
-            let mut text = String::new();
-            let _ = Read::by_ref(&mut response)
-                .take(8192)
-                .read_to_string(&mut text);
-            return Err(format!("HTTP {}: {text}", response.status()));
-        }
-        if !response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|s| s.to_str().ok())
-            .is_some_and(|s| s.to_ascii_lowercase().starts_with("text/event-stream"))
-        {
-            return Err("server did not return text/event-stream".into());
-        }
-        let mut reader = BufReader::new(response);
-        let mut line = Vec::new();
-        let mut data = String::new();
-        let mut at = 0.0;
-        while read_line(&mut reader, &mut line)? {
-            let text = std::str::from_utf8(&line)
-                .map_err(|e| format!("invalid SSE UTF-8: {e}"))?
-                .trim_end_matches(['\r', '\n']);
-            if text.is_empty() {
-                if !data.is_empty() {
-                    consume(&data, at, &mut sample)?;
-                    data.clear();
-                    if sample.done {
-                        break;
-                    }
-                }
-            } else if let Some(value) = text.strip_prefix("data:") {
-                at = started.elapsed().as_secs_f64();
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                if data.len() + value.len() > 16 * 1024 * 1024 {
-                    return Err("SSE event exceeds 16 MiB".into());
-                }
-                data.push_str(value.strip_prefix(' ').unwrap_or(value));
-            }
-        }
-        if !data.is_empty() && !sample.done {
-            consume(&data, at, &mut sample)?;
-        }
-        if !sample.done {
-            return Err("stream closed before [DONE]".into());
-        }
-        if sample.prompt_tokens.is_none() || sample.completion_tokens.is_none() {
-            return Err("stream has no valid usage.prompt_tokens and usage.completion_tokens; token counts are never estimated".into());
-        }
-        if sample.completion_tokens.is_some_and(|n| n > 0) && sample.events.is_empty() {
-            return Err(
-                "server reports generated tokens but no observable content/token event".into(),
-            );
-        }
-        Ok(())
-    })();
+    let result = stream_sample(req, started, &mut sample);
     sample.elapsed = started.elapsed().as_secs_f64();
     sample.error = result.err();
     sample
+}
+
+/// Send `req` (a streaming chat / completions request), read the server-sent events and record the arrival times in `sample`.
+pub(crate) fn stream_sample(req: reqwest::blocking::RequestBuilder, started: Instant, sample: &mut Sample) -> Result<(), String> {
+    let mut response = req
+        .send()
+        .map_err(|e| format!("connection failed or timed out: {}", e.without_url()))?;
+    sample.status = Some(response.status().as_u16());
+    if !response.status().is_success() {
+        let mut text = String::new();
+        let _ = Read::by_ref(&mut response)
+            .take(8192)
+            .read_to_string(&mut text);
+        return Err(format!("HTTP {}: {text}", response.status()));
+    }
+    if !response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|s| s.to_str().ok())
+        .is_some_and(|s| s.to_ascii_lowercase().starts_with("text/event-stream"))
+    {
+        return Err("server did not return text/event-stream".into());
+    }
+    let mut reader = BufReader::new(response);
+    let mut line = Vec::new();
+    let mut data = String::new();
+    let mut at = 0.0;
+    while read_line(&mut reader, &mut line)? {
+        let text = std::str::from_utf8(&line)
+            .map_err(|e| format!("invalid SSE UTF-8: {e}"))?
+            .trim_end_matches(['\r', '\n']);
+        if text.is_empty() {
+            if !data.is_empty() {
+                consume(&data, at, sample)?;
+                data.clear();
+                if sample.done {
+                    break;
+                }
+            }
+        } else if let Some(value) = text.strip_prefix("data:") {
+            at = started.elapsed().as_secs_f64();
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            if data.len() + value.len() > 16 * 1024 * 1024 {
+                return Err("SSE event exceeds 16 MiB".into());
+            }
+            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+    if !data.is_empty() && !sample.done {
+        consume(&data, at, sample)?;
+    }
+    if !sample.done {
+        return Err("stream closed before [DONE]".into());
+    }
+    if sample.prompt_tokens.is_none() || sample.completion_tokens.is_none() {
+        return Err("stream has no valid usage.prompt_tokens and usage.completion_tokens; token counts are never estimated".into());
+    }
+    if sample.completion_tokens.is_some_and(|n| n > 0) && sample.events.is_empty() {
+        return Err(
+            "server reports generated tokens but no observable content/token event".into(),
+        );
+    }
+    Ok(())
 }
 
 fn batch(
