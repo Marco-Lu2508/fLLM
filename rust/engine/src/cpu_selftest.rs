@@ -796,7 +796,7 @@ fn q4z_dense_case(tier: CpuTier, report: &mut Report, rng: &mut Lcg, kind: u32) 
 /// Byte ranges of a block that hold floating-point scales (everything else may take any value).
 fn scale_fields(kind: u32) -> std::ops::Range<usize> {
     match kind {
-        2 | 6 | 8 | 20 | 23 | 42 => 0..2,
+        2 | 6 | 8 | 20 | 23 | 42 | 16 | 17 | 18 | 21 | 22 => 0..2,
         3 | 7 | 12 | 13 => 0..4,
         10 => 80..84,
         11 => 108..110,
@@ -812,7 +812,7 @@ fn scale_fields(kind: u32) -> std::ops::Range<usize> {
 /// products of a `maddubs` pair then reach their maximum, which is where a kernel that
 /// saturates (instead of widening first) loses bits.
 fn saturation_cases(tier: CpuTier, report: &mut Report, rng: &mut Lcg) {
-    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42] {
+    for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42, 16, 17, 18, 21, 22] {
         let cols = match layout(kind).0 {
             256 => 768,
             64 => 384,
@@ -891,7 +891,7 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     // repack the weights of a panel once and run over all tokens from batch 4 on).
     for (kind, rows) in Q4Z_KINDS
         .into_iter()
-        .chain([8, 2, 3, 6, 7, 20, 39, 42, 10, 11, 12, 13, 14, 23])
+        .chain([8, 2, 3, 6, 7, 20, 39, 42, 10, 11, 12, 13, 14, 23, 16, 17, 18, 21, 22])
         .flat_map(|kind| [(kind, 13), (kind, 16)])
     {
         let cols = match layout(kind).0 {
@@ -944,7 +944,7 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     // the 16-token tile. Besides `linear`, the 16-row VNNI GEMM and the AMX GEMM run directly on
     // every format that has a decoder, whatever their default format lists say.
     if full {
-        for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42]
+        for kind in [2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 20, 23, 39, 42, 16, 17, 18, 21, 22]
             .into_iter()
             .chain(Q4Z_KINDS)
         {
@@ -1000,10 +1000,13 @@ fn check_tier(tier: CpuTier, report: &mut Report, full: bool) {
     }
 
     // Q/K/V-like groups mixing K formats (Q4_K, Q6_K, Q5_K; then Q2_K, Q3_K and IQ4_XS with
-    // Q4_K and Q6_K) with one activation packing.
+    // Q4_K and Q6_K; then the lattice IQ formats alone and with K formats) with one activation packing.
     for (kinds, rows) in [
         (vec![12, 14, 13], vec![13, 5, 9]),
         (vec![10, 11, 12, 14, 23], vec![7, 16, 5, 9, 13]),
+        // lattice IQ formats (IQ2_XXS, IQ2_XS, IQ3_XXS, IQ3_S, IQ2_S) next to K formats
+        (vec![16, 17, 18, 21, 22], vec![7, 16, 5, 9, 13]),
+        (vec![21, 12, 22, 14, 16], vec![9, 13, 4, 6, 17]),
     ] {
         let cols = 768;
         let weights = kinds
@@ -1325,7 +1328,7 @@ fn scan_gguf(
     let mut picked = Vec::new();
     for info in &model.index().tensors {
         let kind = info.type_id;
-        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 20 | 23 | 39 | 42);
+        let supported = matches!(kind, 2 | 3 | 6 | 7 | 10..=14 | 16 | 17 | 18 | 20 | 21 | 22 | 23 | 39 | 42);
         if info.dimensions.len() == 2
             && supported
             && (info.dimensions[0] as usize).is_multiple_of(layout(kind).0)

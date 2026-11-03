@@ -23,7 +23,7 @@ exceeds its tolerance. Projections are compared with the 8-bit activations they 
 on 197 real tensors of Llama-3.2-3B Q4_K_M: 4e-7); attention and element-wise kernels at 1e-4.
 
 `--tiers` (a list of tier names or `all`) and `--full` add the ragged grid for every quantized
-format (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS, MXFP4, Q4Z and Q4ZP with groups of 32, 64
+format (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_0, Q2_K..Q6_K, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, MXFP4, Q4Z and Q4ZP with groups of 32, 64
 and 128) and F32/F16/BF16: 1, 7, 15, 17, 33 and 50 rows, one to ten 256-value blocks (or
 1 to 25 groups) per row, prompts of 1, 4, 9, 17 and 33 tokens, and a saturation stress (every
 payload byte at 0x00, 0x7f, 0x80 or 0xff against activations that quantize to +127, -127 or
@@ -86,6 +86,7 @@ Order of preference, left to right; the last entry is the fallback.
 | IQ4_XS, prompt | as decode | unpacked group panels with `smmla` or `sdot` (L0) |
 | Q2_0 (GGML type 42), decode | AVX-VNNI, AVX-512 VNNI (256-bit vectors) or AVX2: a 64-value block is decoded into two 32-byte code vectors and meets two consecutive Q8_0 records; the code offset (`-1`) enters as the initial value of the dot; 4 rows | NEON: two 32-value groups per block, `sdot` (compiled for aarch64, not run) |
 | Q2_0, prompt (2+ tokens) | the W-panel path of the classic formats: a four-row panel is unpacked once (two records per block, codes minus one plus 128) and the AVX-512 / AVX-VNNI / AVX2 4x2 tile runs every token pair over it. No AVX-512 GEMM or AMX decoder | the NEON W-panel tile (compiled for aarch64, not run) |
+| IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, decode and prompt | AVX2 (also taken on AVX-VNNI and AVX-512 CPUs): see "Lattice IQ formats" below | NEON: signed weights through `sdot`, 4 rows (compiled for aarch64, not run) |
 | IQ4_NL, MXFP4 | AVX2 codebook kernel | `tbl` codebook decode with `sdot` / `smmla` (L0) |
 | F32, F16, BF16 | AVX2 + FMA | NEON FMA, `bfdot` for BF16 with FEAT_BF16 (L0) |
 | Gated DeltaNet step | AVX2 | NEON, bit-identical to scalar (L0) |
@@ -94,13 +95,56 @@ Order of preference, left to right; the last entry is the fallback.
 | `exp_shifted` (softmax) | AVX-512 (masked tail); AVX2 | NEON |
 | Activation packing, Q8 KV encode | AVX2 | NEON |
 
-All other packed formats (IQ1/IQ2/IQ3, TQ, NVFP4, ...) decode one f32 row per output row on
+All other packed formats (IQ1_S, IQ1_M, TQ, NVFP4, ...) decode one f32 row per output row on
 demand (`compute.rs`), as does every format on a CPU without a kernel.
 
 Sibling projections (Q/K/V, gate/up) share one activation packing and one work queue:
 Q8_0 groups, float groups, and packed groups whose formats consume the same activation
 records. The K formats (Q2_K..Q6_K, IQ4_XS) mix freely, so the Q4_K and Q6_K members of a
 Q4_K_M layer share one packing; every other packed format groups only with itself.
+
+## Lattice IQ formats (`cpu_iqgrid`)
+
+IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21) and IQ2_S (22) store each weight as an index into a
+small lattice (`quant_iq_tables.rs`) plus sign bits and a 4-bit scale per 16 or 32 values. Their
+activations are the Q8_K records of the K formats, so they share the packing, the work queues and the
+fused expert passes with Q2_K..Q6_K and IQ4_XS and mix with them in one group. A kernel decodes one
+256-value block into eight groups of 32 (unsigned lattice bytes, a vector of +-1 sign bytes, two
+integer scales; the decode is plain Rust shared with the NEON kernel and checked against
+`quant_iq::dequantize_iq`) and computes `d_w * C * d_x * sum(scale * lattice * sign * q8)` with exact
+integer sums (`vpsignb`, `vpmaddubsw`, `vpmaddwd`; lattice bytes are at most 62 and scales at most 31, so
+nothing saturates): `C` is 1/8 (IQ2_XXS, IQ2_XS, IQ2_S), 1/4 (IQ3_XXS) or 1 (IQ3_S). For prompts the decoded block
+stays in registers while up to 16 tokens run over it, so the lookups are paid once per 16 tokens.
+A row's result does not depend on the batch size, the panel it was in or the thread count. There is
+no AVX-512 or AVX-VNNI variant: with per-16 scales a `vpdpbusd` needs the same number of
+instructions as `vpmaddubsw` + `vpmaddwd`, and AVX-512 machines run the AVX2 kernel. IQ1_S and IQ1_M
+(ternary-like lattices with a per-block delta) have no kernel yet.
+
+Measured with `fllm-rs bench-kernel --op cpu_iq --n 2048 --k 2048 [--m 32] [--iq all|ref]` (random
+packed weights, release build; the "row decode" column is the generic path the formats took before:
+every output element dequantizes its weight row to f32 and takes an f32 dot). One thread
+(`RAYON_NUM_THREADS=1`), rows/s of weights for one token (decode) and rows x tokens/s for 32 tokens:
+
+| CPU, tier | format | decode kernel | decode row-decode | speed-up | prompt kernel | prompt row-decode |
+| --- | --- | --- | --- | --- | --- | --- |
+| AMD EPYC 9255 VM (Zen 5), avx2 | IQ2_XXS | 5.09 M/s (2.7 GB/s) | 0.126 M/s | 40x | 24.1 M/s | 0.127 M/s |
+| | IQ2_XS | 4.68 M/s | 0.122 M/s | 39x | 23.7 M/s | 0.123 M/s |
+| | IQ3_XXS | 4.25 M/s (3.3 GB/s) | 0.124 M/s | 34x | 23.0 M/s | 0.125 M/s |
+| | IQ3_S | 3.44 M/s (3.0 GB/s) | 0.117 M/s | 29x | 21.0 M/s | 0.118 M/s |
+| | IQ2_S | 4.85 M/s | 0.119 M/s | 41x | 23.1 M/s | 0.120 M/s |
+| | Q4_K (yardstick) | 19.3 M/s (22 GB/s) | 0.294 M/s | 66x | 46.5 M/s | 0.304 M/s |
+| Intel Core Ultra 5 235U (Windows), avx-vnni | IQ2_XXS | 4.00 M/s (2.1 GB/s) | 0.079 M/s | 51x | 18.1 M/s | 0.078 M/s |
+| | IQ2_XS | 3.71 M/s | 0.081 M/s | 46x | 9.1 M/s | 0.079 M/s |
+| | IQ3_XXS | 3.36 M/s (2.6 GB/s) | 0.084 M/s | 40x | 8.4 M/s | 0.081 M/s |
+| | IQ3_S | 2.66 M/s (2.3 GB/s) | 0.077 M/s | 34x | 8.6 M/s | 0.072 M/s |
+| | IQ2_S | 3.58 M/s | 0.077 M/s | 47x | 8.5 M/s | 0.069 M/s |
+| | Q4_K (yardstick) | 12.8 M/s (15 GB/s) | 0.180 M/s | 71x | 31.5 M/s | 0.148 M/s |
+
+The build server was shared with other jobs (load average 6 to 12) and the PC is a hybrid laptop
+CPU, so single runs vary by roughly 20 % and the multi-thread numbers (10 and 14 threads) mostly
+measure the scheduler on these short calls (0.08 to 0.2 ms): treat the table as the per-core rate.
+The lattice formats decode about 6 to 8 times slower than the K formats per weight byte (about 4 times per value); they are
+bound by the lookups, not by memory.
 
 ## Prompt-time repacking
 
@@ -328,7 +372,7 @@ prefetcher barely ramps up inside it.
 Every output row is computed by the same kernel from the same activation records as before, and
 the experts are accumulated in ascending expert order, so the result is bit for bit that of the
 per-expert path (`fused_experts_equal_the_per_projection_path_bit_for_bit`). The path applies to
-one token, gated experts with K-format weights (Q2_K..Q6_K, IQ4_XS) on x86-64, without
+one token, gated experts with K-format or lattice IQ weights (Q2_K..Q6_K, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S) on x86-64, without
 `input_scaled`; prompts (several tokens per expert group) keep the grouped per-expert loop, which
 reads each expert once. Q8_0/classic experts, aarch64, shared experts and plain up/down experts
 run the old path.
@@ -410,6 +454,7 @@ run the old path.
 | Prompt repacking: Q4_0/Q5_0 Q8_0 tiles, Q2_K..Q6_K decoded panels | AVX2 kernels run by us (unit tests against the f64 reference and the streaming kernels, rows of 1 to 11 blocks, 1 to 9 tokens; `selftest-cpu --tier avx2` with batches 1 to 64); the AVX-VNNI instances are compiled and share the code through macros, their unit tests skip unless AVX-VNNI is present; the AVX-512 tile calls are the Q8_0 ones |
 | NEON `sdot` and `smmla` paths (Q8_0, Q4_0..Q6_K) | compiled for aarch64-unknown-linux-gnu and run on hardware by us |
 | Q2_0 kernels (`cpu_quantized.rs`) | x86-64: unit tests against the scalar f64 reference at 1 to 11 blocks, 1 to 13 rows, 1 to 33 tokens and 1, 3 and 10 threads, the unpacked values against the format definition, fused expert pass bit for bit against the per-projection path, run on the build server and `selftest-cpu` (with `--full`) on a Windows PC; the AVX-VNNI and AVX-512 VNNI instances only on CPUs that have them. AArch64: compiled and clippy-clean for `aarch64-unknown-linux-gnu`, **not run on ARM hardware** |
+| Lattice IQ kernels (`cpu_iqgrid.rs`) | x86-64 AVX2: unit tests (decoded groups against `dequantize_iq`, projections against the f64 reference at 1 to 33 rows, 1 to 10 blocks, batches 1 to 40 around the 16-token tile, 1, 3 and 10 threads, a token alone equals the same token in a batch, mixed groups with K formats, fused expert decode and prompt passes) and `selftest-cpu --full --tiers all` (576 checks of the five formats per tier: avx2 on the build server, avx2 and avx-vnni on the PC; 0 failed), run on the build server (AMD EPYC 9255 VM) and benchmarked there and on a Windows PC (Intel Core Ultra 5 235U, AVX-VNNI tier, `bench-kernel`). The AVX-512 tiers use the same AVX2 code and were not run. AArch64: compiled and clippy-clean for `aarch64-unknown-linux-gnu`, **not run on ARM hardware** |
 | NEON Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, float formats, DeltaNet step, SVE Q8_0 decode | compiled (check, clippy, codegen) for aarch64-unknown-linux-gnu; the layout and lane algebra is tested on x86 through scalar models; **not run on ARM hardware** (L0, see [cpu-arm.md](cpu-arm.md)) |
 | AVX-512 BW/VNNI kernels (Q8_0, classic, K panels, attention, `exp_shifted`), the `avx512` feature kernels (16-row VNNI GEMM, 512-bit codebook, Q2_K/Q3_K/IQ4_XS, float, BF16, DeltaNet), AMX tiles | **Real silicon**: AMD EPYC 9B45 (Zen 5, Colab): `selftest-cpu` 413 checks per tier, three models (avx512bw, avx512-vnni, avx512-bf16; no AMX there). **Emulated**: Intel SDE 9.58 executes the whole unit-test suite (`-spr`: 325 tests, including the AVX-512 and AMX ones, which skip themselves on other hardware), `selftest-cpu --tiers all` (`-spr`: 22 101 checks on the tiers avx2 to amx; `-icl`, `-skx`, `-adl` for their tiers; 0 failed) and runs two models end to end (Llama-3.2-3B Q4_K_M and Qwen2.5-3B AWQ on avx512bw and avx512-vnni); SDE is a functional emulator, so alignment, encoding and result bits are checked but speed is not. Intel silicon, AMX silicon and Zen 4 are untested |
 | bitsandbytes kernels (`cpu_bnb`): AVX2 + FMA and portable | run by us on an AMD EPYC 9255 VM (AVX2 + FMA, no AVX-512): unit tests against the f64 reference at 1 to 17 blocks per row, 1 to 13 rows, 1 to 17 tokens for all five types, `selftest-cpu` per tier, the whole decoder on a tiny model (`import_tests`); no aarch64 run, no AVX-512 specific kernel (AVX2 is used there) |

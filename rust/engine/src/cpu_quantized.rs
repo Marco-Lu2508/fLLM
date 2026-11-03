@@ -1,4 +1,5 @@
-//! Packed integer projections for Q4_0, Q4_1, Q5_0, Q5_1, Q2_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS and MXFP4.
+//! Packed integer projections for Q4_0, Q4_1, Q5_0, Q5_1, Q2_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS, MXFP4 and the
+//! lattice formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S (`cpu_iqgrid`).
 //!
 //! `linear_mixed` packs the input once into 32-value 8-bit records (`X`): Q8_0-style records with
 //! an fp16 scale for the 32-value formats (plus the fp16 Q8_1 sum for Q4_1/Q5_1), Q8_K-style
@@ -44,7 +45,7 @@ pub(crate) fn prepare_into(x: &[f32], cols: usize, kind: u32, packed: &mut Vec<X
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let fast = crate::cpu_kernels::neon();
     let pack_row = |dst: &mut [X], row: &[f32]| {
-        let k = matches!(kind, 10..=14 | 23);
+        let k = matches!(kind, 10..=14 | 23) || crate::cpu_iqgrid::handles(kind);
         let group = if k { 256 } else { 32 };
         for (chunk, out) in row.chunks_exact(group).zip(dst.chunks_mut(group / 32)) {
             #[cfg(target_arch = "x86_64")]
@@ -207,6 +208,8 @@ fn activation(kind: u32) -> Option<Activation> {
         2 | 6 | 20 | 39 | 42 => Some(Activation::Q8_0),
         3 | 7 => Some(Activation::Q8_1),
         10..=14 | 23 => Some(Activation::Q8K),
+        // the grid IQ formats take the Q8_K records too
+        16 | 17 | 18 | 21 | 22 => Some(Activation::Q8K),
         _ => None,
     }
 }
@@ -225,6 +228,7 @@ fn layout(kind: u32) -> Option<(usize, usize)> {
         14 => (256, 210),
         20 => (32, 18),
         23 => (256, 136),
+        16 | 17 | 18 | 21 | 22 => (256, crate::cpu_iqgrid::block_bytes(kind)),
         39 => (32, 17),
         // Q2_0: 64 values, an fp16 scale and 16 bytes of 2-bit codes; the activation records stay
         // 32 values wide, so one block meets two consecutive records.
@@ -350,7 +354,9 @@ pub fn linear_mixed(
         && kinds
             .iter()
             .all(|&kind| {
-                matches!(kind, 2 | 3 | 6 | 7 | 12..=14 | 42) || crate::cpu_arm::quant::handles(kind)
+                matches!(kind, 2 | 3 | 6 | 7 | 12..=14 | 42)
+                    || crate::cpu_arm::quant::handles(kind)
+                    || crate::cpu_iqgrid::handles(kind)
             })
     {
         return Some(linear_neon(projections, kinds, x, cols));
@@ -864,6 +870,15 @@ fn linear_experts_prompt_x86(
 ) -> Option<Vec<Vec<f32>>> {
     use crate::cpu_kquant as k;
     let isa = crate::cpu_kernels::isa();
+    // Lattice IQ experts stream their rows through `k_stream_panel` on any AVX2 host.
+    if isa != "scalar"
+        && cols.is_multiple_of(256)
+        && experts
+            .iter()
+            .any(|e| e.experts.kinds.iter().any(|&kind| crate::cpu_iqgrid::handles(kind)))
+    {
+        return experts_prompt_stream(experts, cols, activate, isa == "avx-vnni");
+    }
     if experts.is_empty()
         || isa == "scalar"
         || crate::cpu_kernels::avx512().is_some()
@@ -985,6 +1000,140 @@ fn linear_experts_prompt_x86(
     Some(output)
 }
 
+/// `linear_experts_prompt` for experts with a lattice IQ projection (`cpu_iqgrid`), whose members
+/// may also be K formats: gate and up rows of all experts in one queue, the activation, then the
+/// down rows, every panel on the streaming kernel of its format. `None` (nothing computed) for
+/// formats with other activation records or inconsistent shapes.
+#[cfg(target_arch = "x86_64")]
+fn experts_prompt_stream(
+    experts: &[ExpertRows<'_>],
+    cols: usize,
+    activate: &(dyn Fn(&mut [f32], &[f32]) + Sync),
+    vnni: bool,
+) -> Option<Vec<Vec<f32>>> {
+    let ff = experts.first()?.experts.gate.rows;
+    for e in experts {
+        let [g, u, d] = e.experts.kinds;
+        let ok = e.input.len() >= cols
+            && e.input.len().is_multiple_of(cols)
+            && ff.is_multiple_of(256)
+            && e.experts.gate.rows == ff
+            && e.experts.up.rows == ff
+            && e.experts.down.rows > 0
+            && [g, u, d]
+                .iter()
+                .all(|&kind| activation(kind) == Some(Activation::Q8K));
+        if !ok {
+            return None;
+        }
+        check_projection(&e.experts.gate, g, cols);
+        check_projection(&e.experts.up, u, cols);
+        check_projection(&e.experts.down, d, ff);
+    }
+    let wide = crate::cpu_kernels::avx512();
+    let batches = experts
+        .iter()
+        .map(|e| e.input.len() / cols)
+        .collect::<Vec<_>>();
+    // Gate and up of an expert share one Q8_K packing.
+    let gate_records = experts
+        .par_iter()
+        .map(|e| prepare(e.input, cols, e.experts.kinds[0]))
+        .collect::<Vec<_>>();
+    let mut hidden = Vec::with_capacity(2 * experts.len());
+    let mut rows = Vec::with_capacity(2 * experts.len());
+    let mut member_batches = Vec::with_capacity(2 * experts.len());
+    for &batch in &batches {
+        for _ in 0..2 {
+            hidden.push(vec![0.0f32; batch * ff]);
+            rows.push(ff);
+            member_batches.push(batch);
+        }
+    }
+    crate::cpu_schedule::row_panels_ragged(
+        &mut hidden,
+        &rows,
+        &member_batches,
+        4,
+        || (),
+        |_, member, first, out| {
+            let (i, up) = (member / 2, member % 2 == 1);
+            let e = &experts[i].experts;
+            let (p, kind) = if up {
+                (&e.up, e.kinds[1])
+            } else {
+                (&e.gate, e.kinds[0])
+            };
+            let valid = (p.rows - first).min(4);
+            // SAFETY: `check_projection` bounded the weight rows, `gate_records[i]` holds
+            // `batches[i] * cols / 32` records and the scheduler gives `out` these columns.
+            unsafe {
+                k_stream_panel(
+                    p.weights,
+                    kind,
+                    wide,
+                    vnni,
+                    first,
+                    valid,
+                    &gate_records[i],
+                    cols / 32,
+                    batches[i],
+                    out,
+                );
+            }
+            add_bias(out, p.bias, first, batches[i]);
+        },
+    );
+    let mut pairs = hidden.chunks_mut(2).collect::<Vec<_>>();
+    pairs.par_iter_mut().for_each(|pair| {
+        let (gate, up) = pair.split_at_mut(1);
+        activate(&mut gate[0], &up[0]);
+    });
+    let activated = hidden.into_iter().step_by(2).collect::<Vec<_>>();
+    let down_records = experts
+        .par_iter()
+        .zip(activated.par_iter())
+        .map(|(e, act)| prepare(act, ff, e.experts.kinds[2]))
+        .collect::<Vec<_>>();
+    let mut output = experts
+        .iter()
+        .zip(&batches)
+        .map(|(e, &batch)| vec![0.0f32; batch * e.experts.down.rows])
+        .collect::<Vec<_>>();
+    let rows = experts
+        .iter()
+        .map(|e| e.experts.down.rows)
+        .collect::<Vec<_>>();
+    crate::cpu_schedule::row_panels_ragged(
+        &mut output,
+        &rows,
+        &batches,
+        4,
+        || (),
+        |_, i, first, out| {
+            let e = &experts[i].experts;
+            let valid = (e.down.rows - first).min(4);
+            // SAFETY: as above, with `ff / 32` records per token.
+            unsafe {
+                k_stream_panel(
+                    e.down.weights,
+                    e.kinds[2],
+                    wide,
+                    vnni,
+                    first,
+                    valid,
+                    &down_records[i],
+                    ff / 32,
+                    batches[i],
+                    out,
+                );
+            }
+            add_bias(out, e.down.bias, first, batches[i]);
+        },
+    );
+    Some(output)
+}
+
 /// One streaming K-format panel (`valid` rows from `first`, every token of `x`) on the widest
 /// kernel the CPU has.
 ///
@@ -1008,6 +1157,11 @@ unsafe fn k_stream_panel(
 ) {
     use crate::cpu_kernels::Avx512;
     use crate::cpu_kquant as k;
+    // IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S: lattice kernels, decode and prompts alike.
+    if crate::cpu_iqgrid::handles(kind) {
+        crate::cpu_iqgrid::x86::panel(w, kind, first, valid, x, nb, batch, out);
+        return;
+    }
     // A Q2_0 down projection of a mixed expert FFN (decode only: one token).
     if kind == 42 {
         debug_assert_eq!(batch, 1);
@@ -1305,7 +1459,10 @@ fn linear_neon(
                 // SAFETY: `validate` bounds the weight rows and activation records, dotprod
                 // was detected, and `out` owns these output columns until the queue joins.
                 unsafe {
-                    if crate::cpu_arm::quant::handles(kind) {
+                    if crate::cpu_iqgrid::handles(kind) {
+                        let valid = (p.rows - first).min(4);
+                        crate::cpu_iqgrid::neon::panel(p.weights, kind, first, valid, &packed, nb, 1, out);
+                    } else if crate::cpu_arm::quant::handles(kind) {
                         crate::cpu_arm::quant::gemv(p.weights, kind, &packed, first, out.row(0));
                     } else {
                         neon::gemv(p.weights, kind, &packed, first, out.row(0));
@@ -1328,6 +1485,15 @@ fn linear_neon(
             let (block, bytes) = layout(kind).expect("validated");
             let width = cols / block * bytes;
             let valid = (p.rows - first).min(4);
+            if crate::cpu_iqgrid::handles(kind) {
+                // SAFETY: dotprod was detected; `validate` bounds the weight rows and the
+                // `batch * nb` activation records; `out` owns these columns.
+                unsafe {
+                    crate::cpu_iqgrid::neon::panel(p.weights, kind, first, valid, &packed, nb, batch, out);
+                }
+                add_bias(out, p.bias, first, batch);
+                return;
+            }
             if crate::cpu_arm::quant::handles(kind) {
                 // SAFETY: dotprod (and i8mm for `i8mm`) were detected; `validate` bounds the
                 // weight rows and the `batch * nb` activation records; `out` owns these columns.
@@ -2733,6 +2899,11 @@ mod tests {
             // Q2_0 down projections (mixed expert FFN): their own Q8_0 activation records
             ([12, 12, 42], 512, 768, 37, false),
             ([14, 14, 42], 512, 1024, 63, true),
+            // lattice IQ formats, alone and mixed with K formats
+            ([16, 16, 18], 512, 768, 37, false),
+            ([21, 21, 22], 512, 1024, 63, true),
+            ([17, 12, 21], 768, 512, 21, true),
+            ([22, 16, 14], 512, 256, 100, false),
         ];
         for (kinds, cols, ff, out_rows, bias) in configs {
             let weights = (0..8)
@@ -3448,6 +3619,70 @@ mod tests {
                     assert!(
                         (a - b).abs() <= 2e-3 * peak,
                         "kinds {gate_up}/{down} expert {e} cell {i}: {a} vs {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Experts with lattice IQ projections take the streaming prompt path (any AVX2 host): the same
+    // panel kernels as the per-expert projections, so the results are equal bit for bit.
+    #[test]
+    fn prompt_experts_with_lattice_formats_equal_the_per_expert_path() {
+        if crate::cpu_kernels::isa() == "scalar" {
+            return;
+        }
+        let mut rng = Lcg(9);
+        let (cols, ff, hidden) = (512usize, 512usize, 768usize);
+        let activate = |g: &mut [f32], u: &[f32]| {
+            for (g, u) in g.iter_mut().zip(u) {
+                *g = *g * *u * 0.05;
+            }
+        };
+        for kinds in [[16u32, 16, 18], [21, 22, 21], [17, 17, 22], [17, 17, 12], [12, 12, 22]] {
+            let weights: Vec<_> = (0..3)
+                .map(|_| {
+                    (
+                        random_weights(kinds[0], ff, cols, &mut rng),
+                        random_weights(kinds[1], ff, cols, &mut rng),
+                        random_weights(kinds[2], hidden, ff, &mut rng),
+                    )
+                })
+                .collect();
+            let gate_bias = rng.vector(ff, 0.5);
+            let tokens = [5usize, 33, 1];
+            let inputs: Vec<Vec<f32>> = tokens.iter().map(|&t| rng.vector(t * cols, 1.0)).collect();
+            let experts: Vec<ExpertRows<'_>> = weights
+                .iter()
+                .zip(&inputs)
+                .map(|((g, u, d), input)| ExpertRows {
+                    experts: ExpertProjections {
+                        gate: Projection { weights: g, rows: ff, bias: Some(&gate_bias) },
+                        up: Projection { weights: u, rows: ff, bias: None },
+                        down: Projection { weights: d, rows: hidden, bias: None },
+                        kinds,
+                    },
+                    input,
+                })
+                .collect();
+            let got = linear_experts_prompt(&experts, cols, &activate)
+                .unwrap_or_else(|| panic!("the prompt path declined kinds {kinds:?}"));
+            for (e, (rows, input)) in experts.iter().zip(&inputs).enumerate() {
+                let run = |p: &Projection<'_>, kind, x: &[f32], k| {
+                    linear_group(std::slice::from_ref(p), kind, x, k).unwrap().pop().unwrap()
+                };
+                let mut g = run(&rows.experts.gate, kinds[0], input, cols);
+                let u = run(&rows.experts.up, kinds[1], input, cols);
+                activate(&mut g, &u);
+                let want = run(&rows.experts.down, kinds[2], &g, ff);
+                if kinds.iter().all(|&k| crate::cpu_iqgrid::handles(k)) {
+                    assert_eq!(got[e], want, "kinds {kinds:?} expert {e}");
+                } else {
+                    // K members take other kernels alone (eight-row panels): equal up to rounding
+                    let peak = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+                    assert!(
+                        got[e].iter().zip(&want).all(|(a, b)| (a - b).abs() <= 2e-3 * peak),
+                        "kinds {kinds:?} expert {e}"
                     );
                 }
             }
