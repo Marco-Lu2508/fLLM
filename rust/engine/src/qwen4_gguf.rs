@@ -62,19 +62,21 @@ fn translated(meta: &Map<String, Value>) -> Result<Translated, String> {
     put("block_count", Value::from(layers as u64));
     put("hc.count", Value::from(need(meta, "hyper_connection.count")?));
     put("hc.lowrank", Value::from(need(meta, "hyper_connection.low_rank")?));
-    put("indexer.heads", Value::from(need(meta, "attention.indexer.head_count")?));
-    put("indexer.head_dim", Value::from(need(meta, "attention.indexer.key_length")?));
     let budget = need(meta, "attention.indexer.top_k")?;
-    put("indexer.budget", Value::from(budget));
     let ratios: Vec<u64> = list(meta, "attention.compress_ratios").map(|a| a.iter().take(layers).map(|v| v.as_u64().unwrap_or(0)).collect()).unwrap_or_default();
-    let ratio = ratios.iter().copied().find(|&r| r > 0).ok_or("qwen4exp GGUF needs attention.compress_ratios with a block size for the attention layers")?;
-    if ratios.iter().any(|&r| r > 0 && r != ratio) {
-        return Err("the attention layers of a qwen4exp GGUF must share one compress ratio".into());
+    // no layer with a block size: the trunk has no attention layer that selects blocks (a slice of the first layers of a model)
+    if let Some(ratio) = ratios.iter().copied().find(|&r| r > 0) {
+        if ratios.iter().any(|&r| r > 0 && r != ratio) {
+            return Err("the attention layers of a qwen4exp GGUF must share one compress ratio".into());
+        }
+        if ratio < 2 || !budget.is_multiple_of(ratio) {
+            return Err(format!("qwen4exp indexer budget {budget} must be a multiple of the compress ratio {ratio} (above 1)"));
+        }
+        put("indexer.heads", Value::from(need(meta, "attention.indexer.head_count")?));
+        put("indexer.head_dim", Value::from(need(meta, "attention.indexer.key_length")?));
+        put("indexer.budget", Value::from(budget));
+        put("indexer.compress_ratio", Value::from(ratio));
     }
-    if ratio < 2 || !budget.is_multiple_of(ratio) {
-        return Err(format!("qwen4exp indexer budget {budget} must be a multiple of the compress ratio {ratio} (above 1)"));
-    }
-    put("indexer.compress_ratio", Value::from(ratio));
     let ple_layers: Vec<usize> = list(meta, "ple.layers").map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect()).unwrap_or_default();
     if let Some(bad) = ple_layers.iter().find(|&&l| l >= layers) {
         return Err(format!("qwen4exp ple.layers holds {bad}, outside 0..{layers}"));

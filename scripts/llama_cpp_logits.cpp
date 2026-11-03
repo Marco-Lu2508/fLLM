@@ -4,11 +4,36 @@
 //   g++ -O2 -std=c++17 llama_cpp_logits.cpp -I<llama.cpp>/include -I<llama.cpp>/ggml/include -L<llama.cpp>/build/bin -lllama -lggml -lggml-base \
 //       -Wl,-rpath,<llama.cpp>/build/bin -o llama_cpp_logits
 // usage: llama_cpp_logits MODEL.gguf TOKEN_ID...
+// With the environment variable LLAMA_DUMP_LAYERS=DIR the hyper-connection streams after every layer of a `qwen4exp` model are written to
+// DIR/l<layer>_ffn.f32 (raw f32, token x stream x hidden), the files fLLM writes with FLLM_DUMP_LAYERS (compare with scripts/cmpdump.py).
 #include "llama.h"
+#include "ggml-backend.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <vector>
+
+static std::string g_dump_dir;
+
+static bool dump_callback(struct ggml_tensor * t, bool ask, void *) {
+    if (strncmp(t->name, "l_last-", 7) != 0) {
+        return ask ? false : true;
+    }
+    if (ask) {
+        return true;
+    }
+    std::vector<char> bytes(ggml_nbytes(t));
+    ggml_backend_tensor_get(t, bytes.data(), 0, bytes.size());
+    const std::string path = g_dump_dir + "/l" + std::to_string(atoi(t->name + 7)) + "_ffn.f32";
+    FILE * f = fopen(path.c_str(), "ab");
+    if (f) {
+        fwrite(bytes.data(), 1, bytes.size(), f);
+        fclose(f);
+    }
+    return true;
+}
 
 int main(int argc, char ** argv) {
     if (argc < 3) {
@@ -35,6 +60,10 @@ int main(int argc, char ** argv) {
     cp.type_k = GGML_TYPE_F32;
     cp.type_v = GGML_TYPE_F32;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    if (const char * dir = getenv("LLAMA_DUMP_LAYERS")) {
+        g_dump_dir = dir;
+        cp.cb_eval = dump_callback;
+    }
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) {
         fprintf(stderr, "cannot create a context\n");

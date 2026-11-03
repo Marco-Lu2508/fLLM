@@ -54,10 +54,22 @@ def main() -> int:
     ap.add_argument("--fllm", required=True)
     ap.add_argument("--example", required=True)
     ap.add_argument("--llama-logits", help="binary built from llama_cpp_logits.cpp")
+    ap.add_argument("--gguf", help="compare fLLM with llama.cpp on this qwen4exp GGUF (for example a slice of a real file made by slice_qwen4exp_gguf.py) and nothing else; needs --llama-logits")
+    ap.add_argument("--ids", default="17,2023,31,590,40117,5,992,13,271,80,1500,6", help="token ids for --gguf")
     ap.add_argument("--workdir")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
     here = Path(__file__).parent
+    if args.gguf:
+        ids = [int(x) for x in args.ids.split(",")]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ids.json"
+            path.write_text(json.dumps({"ids": ids, "text": "hello"}))
+            mine = json.loads(run([args.example, args.gguf, str(path)]).stdout.strip().splitlines()[-1])["logits"]
+        ref = json.loads(run([args.llama_logits, args.gguf] + [str(i) for i in ids]).stdout.strip().splitlines()[-1])["logits"]
+        result = compare("fLLM vs llama.cpp on " + Path(args.gguf).name, mine, ref, len(ids), len(ref) // len(ids))
+        print(json.dumps(result))
+        return 0 if result["ok"] else 1
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(args.workdir or tmp)
         work.mkdir(parents=True, exist_ok=True)
