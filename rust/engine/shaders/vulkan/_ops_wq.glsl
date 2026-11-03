@@ -6,7 +6,7 @@
 // The includer provides, before including this file:
 //   WQ_W(i)     the 32-bit word i of the weight buffer (a macro, so the same decoders serve a bound buffer and a buffer reference)
 //   WQ_OFF1, WQ_OFF2, WQ_OFF3   word offsets of planes 1..3 (push constants)
-//   exactly one of FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4
+//   exactly one of FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4 FMT_Q2_0
 // This file defines QK (weights per block), HAS_WM and
 //   void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm)
 // g = global block index (row * blocks_per_row + block), cin = chunk (8 consecutive weights) inside the block: eight small signed integers q[0..7] as
@@ -234,6 +234,19 @@ void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float 
     p0 = wq_lut_fp4((WQ_W(b) >> sh) & 0x0F0F0F0Fu);
     p1 = wq_lut_fp4((WQ_W(b + 1u) >> sh) & 0x0F0F0F0Fu);
     ws = wq_e8m0_half((WQ_W(WQ_OFF1 + (g >> 2)) >> ((g & 3u) << 3)) & 255u);
+    wm = 0.0;
+}
+#elif defined(FMT_Q2_0)
+// Q2_0: plane 0 = qs (16 bytes per block of 64 values, as in the file), plane 1 = d (binary16). value j = bits 2 * (j % 4) of byte j / 4; d * (q - 1).
+#define QK 64
+uint wq_spread2(uint x) {
+    return (x | (x << 6) | (x << 12) | (x << 18)) & 0x03030303u;
+}
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint h = (WQ_W(g * 4u + (cin >> 1)) >> ((cin & 1u) << 4)) & 0xFFFFu;
+    p0 = wq_sub8(wq_spread2(h & 0xFFu), 1u);
+    p1 = wq_sub8(wq_spread2(h >> 8), 1u);
+    ws = wq_f16at(WQ_OFF1, g);
     wm = 0.0;
 }
 #else

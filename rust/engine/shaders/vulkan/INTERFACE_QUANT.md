@@ -21,7 +21,7 @@ against the CPU reference, which is execution of the shader code but not on a GP
 | `exl3_pre.comp`, `exl3_mm.comp`, `exl3_post.comp` | the three passes of an ExLlamaV3 product (not part of the chunk model, see the end of this file) |
 | `emu/` | CPU-only checks: compile + validate all variants, run the decoders and the whole shaders as C++ against the dequantized reference (`emu/README.md`) |
 
-`<fmt>` = `q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q4z32 q4z64 q4z128` (`Q4ZP32/64/128` use the `q4z*` shaders and a prepass).
+`<fmt>` = `q4_0 q4_1 q5_0 q5_1 q8_0 q2_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q4z32 q4z64 q4z128` (`Q4ZP32/64/128` use the `q4z*` shaders and a prepass).
 Not covered here: F32/F16/BF16 weights, the other IQ formats, FP8M. There is no cooperative-matrix matrix-vector shader on purpose: with batch <= 8 a 16-wide
 matrix tile would waste at least half of the math and the decode is memory bound; `mm_*_c` serves batch >= 9.
 
@@ -100,6 +100,7 @@ The buffer is a concatenation of planes, each starting at a word offset that is 
 | Q5_0 (32) | 16: qs | 4: qh word | 2: f16 d | |
 | Q5_1 (32) | 16: qs | 4: qh word | 4: word `d \| m << 16` | |
 | Q8_0 (32) | 32: int8 qs | 2: f16 d | | |
+| Q2_0 (64) | 16: qs as in the file (value `j` = bits `2 * (j % 4)` of byte `j / 4`) | 2: f16 d | | |
 | Q2_K (256) | 64: qs | 16: scales (low nibble scale, high nibble min) | 4: word `d \| dmin << 16` | |
 | Q3_K (256) | 64: qs | 32: hmask | 16: int8 scales (`scale - 32`, decoded) | 4: f32 d |
 | Q4_K (256) | 128: qs | 16: eight u8 6-bit scales, eight u8 6-bit mins (decoded) | 4: word `d \| dmin << 16` | |

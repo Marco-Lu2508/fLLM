@@ -74,7 +74,7 @@ EOF
   ./run_$tag "$D/$tag.bin"
 }
 fails=0
-for t in q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4; do run_fmt $t $t || fails=$((fails+1)); done
+for t in q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq4_nl mxfp4 nvfp4 q2_0; do run_fmt $t $t || fails=$((fails+1)); done
 for g in 32 64 128; do run_fmt q4z$g q4z -DQ4Z_GROUP=$g || fails=$((fails+1)); done
 echo "decoder failures=$fails"
 [ $fails = 0 ]
