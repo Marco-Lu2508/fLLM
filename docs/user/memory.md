@@ -39,7 +39,7 @@ Budget   = Free VRAM × --gpu-memory-utilization
 Required = W(embeddings+head) + N(layers) × W(layer) + M(scratch) + M(KV cache)
 ```
 
-- Weights come from the mapped GGUF tensor byte sizes, except for the formats a backend expands at upload: on Vulkan the IQ1 family, Q8_1 / Q8_K and the ternary formats (and, until it has shaders, the IQ2 / IQ3 families) are counted as Q5_K (rows of whole 256-value blocks) or binary16, the size they take on the device. A 2-bit or 3-bit mixture-of-experts file therefore plans with its real device size: the layers that do not fit keep their feed-forward weights in host memory (see "Mixture-of-experts models larger than memory" below) instead of the upload running the device out of memory.
+- Weights come from the mapped GGUF tensor byte sizes, except for the formats a backend expands at upload: on Vulkan Q8_1 / Q8_K and the ternary and 1-bit formats (the only ones left without shaders) are counted as Q5_K (rows of whole 256-value blocks) or binary16, the size they take on the device. A 2-bit or 3-bit mixture-of-experts file therefore plans with its real device size: the layers that do not fit keep their feed-forward weights in host memory (see "Mixture-of-experts models larger than memory" below) instead of the upload running the device out of memory.
 - Scratch: `max_batched_tokens × (d_model + d_intermediate + d_vocab) × 4 bytes`.
 - KV cache per layer: `block_size × kv_heads × (d_head + d_value) × bytes_per_elem`,
   where `bytes_per_elem` follows the cache format (keys and values counted
