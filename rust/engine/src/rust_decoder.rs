@@ -551,6 +551,14 @@ fn upload_mlx_expanded(
         .map_err(|e| e.to_string())
 }
 
+/// Smallest number of rows of a pass for which the experts of a MoE layer run as one batch over all experts the rows chose (the weights
+/// of an expert that several rows share are read once). A single row takes the fused decode pass. `FLLM_MOE_BATCH_MIN=N` changes it
+/// (16 was the value before verification passes of two to fifteen rows used the batch; for comparisons).
+fn moe_batch_min_rows() -> usize {
+    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| std::env::var("FLLM_MOE_BATCH_MIN").ok().and_then(|v| v.trim().parse().ok()).filter(|&n| n >= 2).unwrap_or(2))
+}
+
 struct Embedding {
     data: fllm_gguf_probe::TensorBytes,
     kind: u32,
@@ -586,6 +594,10 @@ impl Embedding {
             return Err("invalid embedding byte count".into());
         }
         let row_bytes = data.len() / rows;
+        // a tied token embedding is also the output head, which reads all of it for every token
+        if name != "token_embd.weight" || map.index().tensors.iter().any(|t| t.name == "output.weight") {
+            crate::expert_cache::gather_table(&data);
+        }
         // Validate one full row with the same reader used for lookup.
         compute::dequantize(&data[..row_bytes], info.type_id, cols)?;
         Ok(Self {
@@ -2471,7 +2483,8 @@ impl RustDecoder {
         if tables == 0 {
             return;
         }
-        let (_, dense) = crate::expert_cache::split_bytes(mapping.index());
+        // lookup tables (token and n-gram embeddings) are not dense weights: a token reads a few rows of them
+        let dense = crate::expert_cache::split_mapped(mapping).dense;
         // the dense weights of a model on an accelerator are on the device; the processor keeps all of them in host memory
         let dense_host = if self.backend.is_some() { 0 } else { dense };
         let plan = cache.finalize(dense_host);
@@ -7797,8 +7810,11 @@ impl RustDecoder {
             .ok_or("MoE layer without MoE configuration")?;
         let hidden = self.cfg.hidden;
         let tokens = input.len() / hidden;
+        let router_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::ROUTER);
         let mut routed = self.moe_route(moe, input)?;
         self.par_filter_routes(&mut routed);
+        drop(router_span);
+        let experts_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::EXPERTS);
         let latent_in;
         let (expert_input, width): (&[f32], usize) = match &moe.latent {
             Some((down, _)) => {
@@ -7815,7 +7831,9 @@ impl RustDecoder {
             && self.fused_experts(moe, &routed, expert_input, &mut out, workspace);
         // A prompt batch keeps every expert's rows and combines them per token afterwards, in
         // ascending expert order like the sequential accumulation, but spread over the pool.
-        let batched = !fused && tokens >= 16;
+        // Also for a handful of tokens (the verification pass of speculative decoding): the experts the tokens share are then read
+        // once for all of them, in two joined work queues, instead of expert by expert.
+        let batched = !fused && tokens >= moe_batch_min_rows();
         let mut results: Vec<Vec<f32>> = Vec::new();
         let mut pending: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); if batched { tokens } else { 0 }];
         // All experts at once when the batch qualifies; `done` then replaces the per-expert loop.
@@ -7890,6 +7908,8 @@ impl RustDecoder {
             }
             out = up.forward(&out)?;
         }
+        drop(experts_span);
+        let _shared_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::SHARED);
         if let Some((shared, gate)) = &moe.shared {
             let result = self.expert_forward_clamped(shared, input, workspace, cfg.swiglu_clamp_shared)?;
             for t in 0..tokens {
@@ -8188,6 +8208,7 @@ impl RustDecoder {
             .collect();
         self.pool_for(rows).install(|| {
             let mut trace = crate::cpu_profile::Trace::new(self.profile, rows);
+            let _ops_report = crate::cpu_profile::ops::ReportOnDrop(rows);
             let first_stage = self.par.as_ref().is_none_or(|p| p.is_first_stage());
             let last_stage = self.par.as_ref().is_none_or(|p| p.is_last_stage());
             let mut x = Vec::with_capacity(rows * cfg.hidden);
@@ -8195,9 +8216,11 @@ impl RustDecoder {
                 // the embedding and the position tables belong to the first stage: continue from its activations
                 x = self.par_recv_activations(rows)?;
             }
+            let embed_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::EMBED);
             for &id in ids.iter().filter(|_| first_stage) {
                 x.extend_from_slice(&self.embedding.row(id as usize)?);
             }
+            drop(embed_span);
             if first_stage {
                 self.par_embed_reduce(&mut x)?;
             }
@@ -8273,7 +8296,9 @@ impl RustDecoder {
             if selected.is_empty() {
                 return Ok(Vec::new());
             }
+            let head_span = crate::cpu_profile::ops::span(crate::cpu_profile::ops::HEAD);
             let mut logits = self.head.forward(&selected)?;
+            drop(head_span);
             logits = self.par_head_gather(logits, logit_rows.len())?;
             trace.mark(9);
             if cfg.logit_scale != 1.0 {

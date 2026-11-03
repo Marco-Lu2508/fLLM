@@ -34,6 +34,11 @@ were the budget, the statistics, a way to see what it costs, a start-up report, 
   the bytes a token needs and the most it reads from storage when the cache is cold. `auto` is 95 % of the available memory (Linux:
   `MemAvailable`, further limited by the cgroup `memory.max` minus anonymous memory and kernel memory; other systems: the free physical
   memory) minus the dense weights (all non-expert tensors) minus a reserve. A number is MiB (`4096`), or `512M`, `8G`. `off` removes the layer.
+  Dense means the tensors every token reads. Tensors that are views of other tensors (name aliases, row slices of a fused tensor) are counted once, and the lookup tables
+  (token embedding with its own output head, `per_layer_token_embd` / n-gram tables) are left out: a token reads a few rows of them, and they get
+  `MADV_RANDOM` from 64 MiB on so that a row fault does not pull the 128 KiB around it into the page cache (`FLLM_TABLE_READAHEAD=1`: default read-ahead).
+  Before this, the 26.8 GiB n-gram table of Qwen3.8-Flash-Next was counted twice and the plan called the 75.8 GB file `disk-bound` and warned about 57.5 GiB of dense weights
+  (about 3.8 GiB is). The residency sampling of the statistics runs every fourth pass when streaming.
   The dense part is not checked against the budget: a model starts whenever the file can be mapped; if the dense weights are large for
   the machine a warning says every token pages them too.
 * **Explicit budgets are enforced, automatic ones are not.** With an explicit size smaller than the experts, the cache drops experts from

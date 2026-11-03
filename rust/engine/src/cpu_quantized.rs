@@ -870,12 +870,12 @@ fn linear_experts_prompt_x86(
 ) -> Option<Vec<Vec<f32>>> {
     use crate::cpu_kquant as k;
     let isa = crate::cpu_kernels::isa();
-    // Lattice IQ experts stream their rows through `k_stream_panel` on any AVX2 host.
+    // Lattice IQ experts, and experts with a Q2_0 down projection, stream their rows through `k_stream_panel` on any AVX2 host.
     if isa != "scalar"
         && cols.is_multiple_of(256)
         && experts
             .iter()
-            .any(|e| e.experts.kinds.iter().any(|&kind| crate::cpu_iqgrid::handles(kind)))
+            .any(|e| e.experts.kinds.iter().any(|&kind| crate::cpu_iqgrid::handles(kind) || kind == 42))
     {
         return experts_prompt_stream(experts, cols, activate, isa == "avx-vnni");
     }
@@ -1016,13 +1016,14 @@ fn experts_prompt_stream(
         let [g, u, d] = e.experts.kinds;
         let ok = e.input.len() >= cols
             && e.input.len().is_multiple_of(cols)
-            && ff.is_multiple_of(256)
             && e.experts.gate.rows == ff
             && e.experts.up.rows == ff
             && e.experts.down.rows > 0
-            && [g, u, d]
-                .iter()
-                .all(|&kind| activation(kind) == Some(Activation::Q8K));
+            // the width of the experts is the column count of the down projection: whole blocks of its format (256 for the K
+            // formats and the lattice formats, 64 for Q2_0 as `d == 42` below checks)
+            && (ff.is_multiple_of(256) || (d == 42 && ff.is_multiple_of(64)))
+            && [g, u].iter().all(|&kind| activation(kind) == Some(Activation::Q8K))
+            && (activation(d) == Some(Activation::Q8K) || (d == 42 && ff.is_multiple_of(64)));
         if !ok {
             return None;
         }
@@ -1162,10 +1163,12 @@ unsafe fn k_stream_panel(
         crate::cpu_iqgrid::x86::panel(w, kind, first, valid, x, nb, batch, out);
         return;
     }
-    // A Q2_0 down projection of a mixed expert FFN (decode only: one token).
+    // A Q2_0 down projection of a mixed expert FFN. Tokens run one after the other over the same few rows: the panel is a
+    // few hundred bytes of weights, read from the first level cache after the first token.
     if kind == 42 {
-        debug_assert_eq!(batch, 1);
-        x86::gemv_q2(w, x, first, &mut out.row(0)[..valid], wide, vnni);
+        for token in 0..batch {
+            x86::gemv_q2(w, &x[token * nb..(token + 1) * nb], first, &mut out.row(token)[..valid], wide, vnni);
+        }
         return;
     }
     // Q2_K, Q3_K and IQ4_XS on 512-bit vectors (the `avx512` feature), ahead of the 256-bit AVX-VNNI
@@ -3633,13 +3636,26 @@ mod tests {
             return;
         }
         let mut rng = Lcg(9);
-        let (cols, ff, hidden) = (512usize, 512usize, 768usize);
+        let (cols, hidden) = (512usize, 768usize);
         let activate = |g: &mut [f32], u: &[f32]| {
             for (g, u) in g.iter_mut().zip(u) {
                 *g = *g * *u * 0.05;
             }
         };
-        for kinds in [[16u32, 16, 18], [21, 22, 21], [17, 17, 22], [17, 17, 12], [12, 12, 22]] {
+        // 42: the Q2_0 down projection of the Qwen3.8-Flash-Next quantizations (tokens run one after the other over a panel)
+        for (kinds, ff) in [
+            ([16u32, 16, 18], 512usize),
+            ([21, 22, 21], 512),
+            ([17, 17, 22], 512),
+            ([17, 17, 12], 512),
+            ([12, 12, 22], 512),
+            ([17, 17, 42], 512),
+            ([18, 18, 42], 512),
+            ([12, 12, 42], 512),
+            // an expert width of 320 (640 in Qwen3.8-Flash-Next) is a multiple of 64 but not of 256: only a Q2_0 down projection takes it
+            ([17, 17, 42], 320),
+            ([18, 16, 42], 640),
+        ] {
             let weights: Vec<_> = (0..3)
                 .map(|_| {
                     (
@@ -3650,7 +3666,9 @@ mod tests {
                 })
                 .collect();
             let gate_bias = rng.vector(ff, 0.5);
-            let tokens = [5usize, 33, 1];
+            // 2, 3 and 4 tokens are the shape of the verification pass of speculative decoding
+            let tokens = [5usize, 33, 1, 2, 3, 4];
+            let weights: Vec<_> = weights.iter().cycle().take(tokens.len()).cloned().collect();
             let inputs: Vec<Vec<f32>> = tokens.iter().map(|&t| rng.vector(t * cols, 1.0)).collect();
             let experts: Vec<ExpertRows<'_>> = weights
                 .iter()

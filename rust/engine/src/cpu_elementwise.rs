@@ -41,6 +41,30 @@ fn swiglu_chunk(g: &mut [f32], u: &[f32]) {
     }
 }
 
+/// `x = 1 / (1 + exp(-x))` for every value, with the vector exponential of [`swiglu`] where the CPU has one. The scalar loop costs
+/// about 20 ns per value, which for the 10240 gates of one token of a model with four residual streams is a tenth of a millisecond.
+pub(crate) fn sigmoid(values: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::cpu_kernels::isa() != "scalar" {
+        // SAFETY: `isa()` confirmed AVX2/FMA.
+        unsafe {
+            x86::sigmoid(values);
+        }
+        return;
+    }
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if crate::cpu_kernels::neon() {
+        // SAFETY: NEON was detected.
+        unsafe {
+            neon::sigmoid(values);
+        }
+        return;
+    }
+    for v in values {
+        *v = 1.0 / (1.0 + (-*v).exp());
+    }
+}
+
 pub(crate) fn exp_shifted(scores: &mut [f32], maximum: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if crate::cpu_kernels::avx512().is_some() {
@@ -116,6 +140,18 @@ mod x86 {
         }
         for (g, &u) in gate[end..].iter_mut().zip(&up[end..]) {
             *g = *g / (1.0 + (-*g).exp()) * u;
+        }
+    }
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn sigmoid(values: &mut [f32]) {
+        let end = values.len() / 8 * 8;
+        for j in (0..end).step_by(8) {
+            let v = _mm256_loadu_ps(values.as_ptr().add(j));
+            let e = exp(_mm256_sub_ps(_mm256_setzero_ps(), v));
+            _mm256_storeu_ps(values.as_mut_ptr().add(j), _mm256_div_ps(_mm256_set1_ps(1.0), _mm256_add_ps(_mm256_set1_ps(1.0), e)));
+        }
+        for v in &mut values[end..] {
+            *v = 1.0 / (1.0 + (-*v).exp());
         }
     }
     #[target_feature(enable = "avx2,fma")]
@@ -247,6 +283,18 @@ mod neon {
         }
     }
     #[target_feature(enable = "neon")]
+    pub(super) unsafe fn sigmoid(values: &mut [f32]) {
+        let end = values.len() / 4 * 4;
+        for j in (0..end).step_by(4) {
+            let v = vld1q_f32(values.as_ptr().add(j));
+            let e = exp(vsubq_f32(vdupq_n_f32(0.0), v));
+            vst1q_f32(values.as_mut_ptr().add(j), vdivq_f32(vdupq_n_f32(1.0), vaddq_f32(vdupq_n_f32(1.0), e)));
+        }
+        for v in &mut values[end..] {
+            *v = 1.0 / (1.0 + (-*v).exp());
+        }
+    }
+    #[target_feature(enable = "neon")]
     pub(super) unsafe fn exp_shifted(scores: &mut [f32], maximum: f32) -> f32 {
         let end = scores.len() / 4 * 4;
         let mut sum = vdupq_n_f32(0.0);
@@ -271,6 +319,24 @@ mod neon {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sigmoid_matches_the_scalar_formula_for_every_tail_length() {
+        for len in 0..40 {
+            let values = (0..len).map(|j| (j as f32 - 17.0) * 1.37).collect::<Vec<_>>();
+            let mut fast = values.clone();
+            super::sigmoid(&mut fast);
+            for (x, y) in values.iter().zip(&fast) {
+                let reference = 1.0 / (1.0 + (-f64::from(*x)).exp());
+                assert!((f64::from(*y) - reference).abs() <= 2e-7, "sigmoid({x}) = {y}, want {reference}");
+            }
+        }
+        // extreme inputs saturate instead of overflowing
+        let mut tails = [-200.0f32, -90.0, 90.0, 200.0, f32::NEG_INFINITY, f32::INFINITY, 0.0, 1.0];
+        super::sigmoid(&mut tails);
+        assert!(tails[0] < 1e-30 && tails[1] < 1e-30 && tails[2] == 1.0 && tails[3] == 1.0 && tails[4] == 0.0 && tails[5] == 1.0);
+        assert!((tails[6] - 0.5).abs() < 1e-7);
+    }
+
     // The masked AVX-512 exp: every tail length of the final partial vector.
     #[cfg(target_arch = "x86_64")]
     #[test]

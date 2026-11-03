@@ -168,3 +168,28 @@ fn deepseek_logits_do_not_depend_on_the_expert_budget() {
 fn mixtral_logits_do_not_depend_on_the_expert_budget() {
     same_logits_for_every_budget("budget-mixtral", Arch::Mixtral, Encoding::Quant("q4_0"));
 }
+
+#[test]
+fn views_of_a_tensor_are_counted_once_and_gather_tables_apart() {
+    let dir = scratch("split");
+    let gguf = build_gguf(&dir, Arch::Qwen3Moe, Encoding::Quant("q8_0"), 7);
+    let model = GgufModel::load(gguf.to_str().unwrap(), 64, 1, 2).unwrap();
+    let plain = split_mapped(model.mapping());
+    assert!(plain.experts > 0 && plain.dense + plain.lookup > 0, "{plain:?}");
+    // names that point at the bytes of another tensor (what the loader of llama.cpp's Qwen3.8 layout adds) are not more weights
+    let aliased = model
+        .mapping()
+        .with_tensor_aliases(&[("blk.0.again_exps.weight".into(), "blk.0.ffn_down_exps.weight".into()), ("again.weight".into(), "token_embd.weight".into())])
+        .unwrap();
+    assert!(aliased.index().tensors.len() > model.mapping().index().tensors.len());
+    assert_eq!(split_mapped(&aliased), plain);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn lookup_tables_are_the_embeddings_a_token_reads_a_few_rows_of() {
+    assert!(is_lookup_table("per_layer_token_embd.weight", true) && is_lookup_table("blk.1.ple_embd.weight", true));
+    assert!(is_lookup_table("token_embd.weight", true), "with its own output head the token embedding is a lookup table");
+    assert!(!is_lookup_table("token_embd.weight", false), "a tied embedding is the output head: every token reads all of it");
+    assert!(!is_lookup_table("blk.0.ffn_up_exps.weight", true) && !is_lookup_table("output.weight", true));
+}

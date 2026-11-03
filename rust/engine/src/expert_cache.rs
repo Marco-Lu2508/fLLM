@@ -162,6 +162,20 @@ pub fn will_need(bytes: &[u8]) {
     }
 }
 
+/// Turn the operating system's read-ahead off for a memory-mapped gather table (token or n-gram embedding) that is larger than this: a
+/// token reads a few rows spread over the table, and a fault would otherwise read the 128 KiB (Linux default) around every row, which at
+/// tens of rows per token costs megabytes of storage reads and pushes the experts out of the page cache of a machine that is short of
+/// memory. A table that is smaller stays cached after a short time anyway.
+const RANDOM_ACCESS_TABLE_BYTES: usize = 64 << 20;
+
+/// `MADV_RANDOM` for the rows of a large gather table (see `RANDOM_ACCESS_TABLE_BYTES`); nothing for a table that is not file data, and
+/// nothing where the platform has no such hint. `FLLM_TABLE_READAHEAD=1` keeps the default read-ahead (for comparisons).
+pub fn gather_table(bytes: &fllm_gguf_probe::TensorBytes) {
+    if bytes.is_mapped() && bytes.len() >= RANDOM_ACCESS_TABLE_BYTES && !std::env::var("FLLM_TABLE_READAHEAD").is_ok_and(|v| matches!(v.trim(), "1" | "on" | "true")) {
+        os::random_access(bytes.as_ptr() as usize, bytes.len());
+    }
+}
+
 /// Memory the machine can give to cached file data: the available physical memory, and under a cgroup memory limit (containers,
 /// `systemd-run -p MemoryMax=`) what that limit leaves besides the anonymous memory in use.
 pub fn effective_available_bytes() -> u64 {
@@ -535,7 +549,9 @@ impl LayerTable {
         }
         let tick = core.tick.load(Relaxed);
         trace(self.layer, tick, rows, active);
-        let probe = plan.streaming || tick <= 32 || tick.is_multiple_of(8);
+        // Sampling residency costs a `mincore` call per sampled page (a hundred per layer and token); the statistics need only every
+        // fourth pass, unless the answer decides what is read ahead.
+        let probe = (plan.streaming && (core.opts.demand || tick.is_multiple_of(4))) || tick <= 32 || tick.is_multiple_of(8);
         let mut bytes_in_use = 0u64;
         for &e in active {
             let Some(entry) = self.entries.get(e) else { continue };
@@ -869,8 +885,58 @@ pub fn status_json() -> serde_json::Value {
 #[cfg(test)]
 mod tests;
 
-/// `(expert bytes, other bytes)` of the tensors of a GGUF index: the other tensors (attention, shared experts, embeddings, head) are the
-/// dense part that has to fit in memory.
-pub fn split_bytes(index: &fllm_gguf_probe::GgufIndex) -> (u64, u64) {
-    index.tensors.iter().fold((0, 0), |(exp, dense), t| if t.name.contains("_exps.") { (exp + t.payload_len, dense) } else { (exp, dense + t.payload_len) })
+/// The bytes of a model file by what a token has to have in memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Split {
+    /// Routed expert weights (stacked `_exps` tensors).
+    pub experts: u64,
+    /// Everything every token reads: attention and delta projections, shared experts, routers, mixers, the output head.
+    pub dense: u64,
+    /// Gather tables (token embedding, n-gram / per-layer embeddings): a token reads a few rows of them, so they need no residency.
+    pub lookup: u64,
+}
+
+/// Whether a tensor is a table of which a token reads a few rows (`separate_head`: the model has its own `output.weight`; without one the
+/// token embedding is also the output head and every token reads all of it).
+fn is_lookup_table(name: &str, separate_head: bool) -> bool {
+    name.contains("per_layer_token_embd") || name.ends_with(".ple_embd.weight") || (name == "token_embd.weight" && separate_head)
+}
+
+/// Split the tensors of a model file into experts, dense weights and lookup tables. Tensors that are views of other tensors (the name
+/// aliases and the row slices of a fused tensor that the engine adds for some layouts) are counted once.
+pub fn split_mapped(mapping: &fllm_gguf_probe::MappedGguf) -> Split {
+    let index = mapping.index();
+    let separate_head = index.tensors.iter().any(|t| t.name == "output.weight");
+    // (mapping, start, end, class) of every tensor; a range inside an earlier one is a view of it
+    let mut ranges: Vec<(usize, u64, u64, u8)> = index
+        .tensors
+        .iter()
+        .map(|t| {
+            let owner = mapping.extra_mappings().get(&t.name).unwrap_or(mapping.mapping());
+            let class = if t.name.contains("_exps.") {
+                0
+            } else if is_lookup_table(&t.name, separate_head) {
+                2
+            } else {
+                1
+            };
+            (std::sync::Arc::as_ptr(owner) as usize, t.data_offset, t.data_offset.saturating_add(t.payload_len), class)
+        })
+        .collect();
+    ranges.sort_by_key(|r| (r.0, r.1, std::cmp::Reverse(r.2)));
+    let mut split = Split::default();
+    let (mut owner_now, mut covered_end) = (None::<usize>, 0u64);
+    for (owner, start, end, class) in ranges {
+        // bytes of this range that no earlier tensor of the same file covers
+        let from = if owner_now == Some(owner) { start.max(covered_end) } else { start };
+        let bytes = end.saturating_sub(from);
+        match class {
+            0 => split.experts += bytes,
+            2 => split.lookup += bytes,
+            _ => split.dense += bytes,
+        }
+        covered_end = if owner_now == Some(owner) { covered_end.max(end) } else { end };
+        owner_now = Some(owner);
+    }
+    split
 }
