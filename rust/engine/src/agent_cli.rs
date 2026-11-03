@@ -33,7 +33,9 @@ pub const HELP: &str = "usage: fllm-rs agent -p \"TASK\" [--folder DIR] [--url h
                   [--session NAME] [--continue] [--resume NAME] [--profile NAME] [--ask] [--trajectory FILE] [--json] [--quiet]
                   [--output-format text|json|stream-json] [--plan] [--allow-rule RULE] [--deny-rule RULE] [--ask-rule RULE]
                   [--review] [--review-rounds N] [--verify COMMAND] [--propose-skills] [--auto-skills] [--image FILE]...
-                  [--learn] [--auto-memory] [--skills] [--nudge-every N]
+                  [--learn] [--auto-memory] [--skills] [--nudge-every N] [--steering NAME]... [--auto]
+       fllm-rs agent --watch [--folder DIR] [--interval MS] [--max-runs N] [AGENT OPTIONS]   (file_changed hooks; see --watch --help)
+       fllm-rs agent --rpc [--url URL] [--model ID]   (JSON-RPC server on standard input and output; see --rpc --help)
 Runs the coding agent of the Studio without a browser against a running fllm-rs server on this machine.
 TASK: the text after -p; `-p -` reads it from standard input. Reading and searching files is always allowed.
 Everything else is refused unless you allow it: --allow-edit (write_file, edit_file, patch ...), --allow-command (bash),
@@ -50,6 +52,8 @@ steps, tool calls) instead of the plain answer. Progress goes to standard error 
 --plan: read-only planning; the answer is a plan, and on a terminal you are asked whether to run it with the allowed actions.
 Rules (allow / deny / ask, `bash: npm test*`, `edit: src/**`, or `Bash(npm test:*)`) come from permissions.json in the Studio folder, then
 .fllm/permissions.json, then .fllm/permissions.local.json of the folder, then these flags. A deny rule always wins.
+--auto: instead of refusing what the flags do not allow, a short model call judges each such action against your task (hard blocks such as
+`curl | sh` or a forced push never reach the model; deny and ask rules still win; after 3 blocks in a row it stops judging). With --ask a blocked action is put to you.
 --review: when the run changed files, check them (review tool, diagnostics, --verify COMMAND when commands are allowed) and let the agent
 fix what is found before the run counts as done (at most --review-rounds, default 2). --image FILE (repeatable) attaches a png/jpg/gif/webp picture to the task; the loaded model must be able to see.
 --propose-skills: after a long run the model may
@@ -95,6 +99,10 @@ pub struct Options {
     /// `--skills` (also on with `--learn`): the agent can read the skills of the Studio folder and the project.
     pub skills: bool,
     pub nudge_every: usize,
+    /// `--steering NAME`: steering files (any inclusion mode) added to the system prompt.
+    pub steering: Vec<String>,
+    /// `--auto`: a model call judges the actions that the flags and rules do not decide (see `agent_auto`).
+    pub auto: bool,
 }
 
 fn value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a String, String> {
@@ -151,6 +159,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         auto_memory: false,
         skills: false,
         nudge_every: 12,
+        steering: Vec::new(),
+        auto: false,
     };
     let mut loose: Vec<String> = Vec::new();
     let mut i = 0;
@@ -251,6 +261,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--nudge-every" => {
                 o.nudge_every = value(args, &mut i, flag)?.parse().ok().filter(|n| *n <= 500).ok_or("--nudge-every is a number from 0 to 500")?;
             }
+            "--auto" => o.auto = true,
+            "--steering" => o.steering.push(value(args, &mut i, flag)?.clone()),
             "--quiet" | "-q" => o.quiet = true,
             "--help" | "-h" => return Err(HELP.to_owned()),
             other if other.starts_with('-') && other != "-" => return Err(format!("unknown agent option: {other}")),
@@ -286,6 +298,45 @@ pub trait Backend {
     /// Called by a front end after a run was answered (the gateway uses it so that a learning backend can note the run).
     /// `from` is the index in `outcome.messages` of the first message of this run (earlier ones belong to a continued session).
     fn after_run(&mut self, _outcome: &Outcome, _session: &str, _from: usize) {}
+    /// Points the tools at another folder (the gateway does it per chat when routes give chats their own folders).
+    fn switch_folder(&mut self, _folder: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Fires the hooks of an event that the loop itself reaches (`user_prompt_submit`, `stop`); a backend without hooks passes.
+    fn fire_hook(&mut self, _event: &str, _tool: &str, _args: &Value) -> HookReply {
+        HookReply::default()
+    }
+}
+
+/// What the hooks of an event decided: whether to stop, why, and the text they want the agent to see.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct HookReply {
+    pub blocked: bool,
+    pub reason: String,
+    pub context: String,
+    /// The texts of `prompt` hooks (instructions for the agent), apart from the notes of command hooks.
+    pub prompts: Vec<String>,
+}
+
+/// The task text with the notes of the `user_prompt_submit` hooks appended.
+pub fn with_hook_context(prompt: &str, reply: &HookReply) -> String {
+    if reply.context.trim().is_empty() {
+        prompt.to_owned()
+    } else {
+        format!("{prompt}\n\n[hooks]\n{}", reply.context.trim())
+    }
+}
+
+/// Joins a follow-up round (a review, a `stop` hook) to the run before it.
+pub fn merge_rounds(previous: Outcome, mut again: Outcome) -> Outcome {
+    again.tool_calls.splice(0..0, previous.tool_calls);
+    again.steps += previous.steps;
+    for p in previous.edited {
+        if !again.edited.contains(&p) {
+            again.edited.push(p);
+        }
+    }
+    again
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -923,6 +974,23 @@ impl Backend for HttpBackend {
         self.call(reqwest::Method::POST, "/api/studio/agent/instructions", Some(&json!({})))
     }
 
+    fn switch_folder(&mut self, folder: &str) -> Result<(), String> {
+        self.set_folder(folder)
+    }
+
+    fn fire_hook(&mut self, event: &str, tool: &str, args: &Value) -> HookReply {
+        // an older server without the route, or a failing request, means "no hooks": the agent never fails because of them
+        match self.call(reqwest::Method::POST, "/api/studio/agent/hook", Some(&json!({"event": event, "tool": tool, "arguments": args}))) {
+            Ok(answer) => HookReply {
+                blocked: answer["blocked"].as_bool().unwrap_or(false),
+                reason: answer["reason"].as_str().unwrap_or_default().to_owned(),
+                context: answer["context"].as_str().unwrap_or_default().to_owned(),
+                prompts: answer["prompts"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_owned)).collect(),
+            },
+            Err(_) => HookReply::default(),
+        }
+    }
+
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let answer = self.call(reqwest::Method::POST, "/api/studio/agent/tool", Some(&json!({"name": name, "args": args})))?;
         if answer["ok"].as_bool().unwrap_or(false) {
@@ -1050,6 +1118,14 @@ fn index_session(http: &HttpBackend, id: &str, messages: &[Value], now: i64) {
 
 /// `fllm-rs agent ...`: returns the exit code.
 pub fn run(args: &[String]) -> Result<i32, String> {
+    // modes that are not one task: the folder watcher and the JSON-RPC server
+    if args.iter().any(|a| a == "--rpc") {
+        return crate::agent_rpc::run(args);
+    }
+    if args.iter().any(|a| a == "--watch") {
+        let rest: Vec<String> = args.iter().filter(|a| *a != "--watch").cloned().collect();
+        return crate::agent_watch::run(&rest);
+    }
     let mut options = match parse_args(args) {
         Ok(o) => o,
         Err(e) if e == HELP => {
@@ -1118,7 +1194,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         None => Vec::new(),
     };
     let pictures: Vec<Value> = options.images.iter().map(|p| agent_extras::image_part(p)).collect::<Result<_, _>>()?;
-    history.push(json!({"role": "user", "content": agent_extras::user_content(&options.prompt, &pictures)}));
+    // hooks on the task itself: one may refuse it, others add notes
+    let submitted = lb.fire_hook("user_prompt_submit", "", &json!({"prompt": options.prompt}));
+    if submitted.blocked {
+        lb.http().end();
+        return Err(format!("a user_prompt_submit hook blocked the task: {}", submitted.reason));
+    }
+    history.push(json!({"role": "user", "content": agent_extras::user_content(&with_hook_context(&options.prompt, &submitted), &pictures)}));
 
     // permission rules: the settings files (user < project < local), then the flags; plan mode is read-only whatever else is allowed
     let mut rules = agent_rules::load_hierarchy(&studio_folder(), &folder)?;
@@ -1133,6 +1215,19 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         allow = BTreeSet::from(["read".to_owned()]);
         rules.merge(Rules::from_json(&json!({"deny": ["bash: *", "edit: **", "network: *", "memory: *"]})));
         extra.push_str("\n\nPLAN MODE: you may only read and search; every other action is refused. Investigate, then finish with a numbered plan: the files to change, what to change in each, and how to check it. Do not claim that anything was changed.");
+    }
+    if !options.steering.is_empty() {
+        let all = crate::steering::load(&folder, Some(&studio_folder().join("steering")));
+        for name in &options.steering {
+            let Some(found) = all.iter().find(|s| &s.name == name) else {
+                lb.http().end();
+                return Err(format!("--steering: there is no steering file '{name}' in .fllm/steering or the steering folder of the Studio"));
+            };
+            extra.push_str(&format!("
+
+# Steering: {}
+{}", found.name, found.body));
+        }
     }
     let system = full_system(&mut lb, &folder_text, &allow, Some(extra.as_str()), load_soul(&base).as_deref());
     let mut cfg = LoopConfig {
@@ -1157,9 +1252,30 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     let mut approver = TerminalApprover::default();
     let ask = options.ask;
     let rules_for_ask = rules.clone();
+    let judge_http = if options.auto { Some(HttpBackend::new(&options.url, options.api_key.clone())?) } else { None };
+    let mut judge = judge_http.as_ref().map(|h| crate::agent_auto::AutoJudge::new(&options.prompt, cfg.model.clone(), Box::new(move |body: &Value| h.complete_within(body, 90))));
     let mut approve = |name: &str, category: &str, args: &Value| {
         let rule_ask = rules_for_ask.decide(name, category, args) == Some(Decision::Ask);
-        (ask || rule_ask) && approver.ask(name, category, args)
+        // an explicit ask rule is always for a person, never for the judge
+        if rule_ask {
+            return approver.ask(name, category, args);
+        }
+        if let Some(j) = judge.as_mut().filter(|j| !j.exhausted()) {
+            match j.decide(name, category, args) {
+                crate::agent_auto::Verdict::Allow => {
+                    if !quiet {
+                        eprintln!("[auto] allowed {name}");
+                    }
+                    return true;
+                }
+                crate::agent_auto::Verdict::Block(reason) => {
+                    if !quiet {
+                        eprintln!("[auto] blocked {name}: {reason}");
+                    }
+                }
+            }
+        }
+        ask && approver.ask(name, category, args)
     };
     let mut observe = |m: &Value| {
         if streaming {
@@ -1192,15 +1308,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             // a review round answers briefly or makes a small fix: it must not run into the full answer budget of the first pass
             let review_cfg = LoopConfig { max_tokens: cfg.max_tokens.min(2048), ..cfg.clone() };
             match run_loop_full(&mut lb, &review_cfg, &system, next, &mut progress, &mut approve, &mut observe) {
-                Ok(mut again) => {
-                    again.tool_calls.splice(0..0, previous.tool_calls);
-                    again.steps += previous.steps;
-                    for p in previous.edited {
-                        if !again.edited.contains(&p) {
-                            again.edited.push(p);
-                        }
-                    }
-                    outcome = Ok(again);
+                Ok(again) => {
+                    outcome = Ok(merge_rounds(previous, again));
                 }
                 Err(e) => {
                     // the work of the first pass is not thrown away because the check afterwards failed
@@ -1210,6 +1319,30 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 }
             }
             round += 1;
+        }
+    }
+
+    // `stop` hooks: the agent is about to finish; a hook that blocks sends its reason back as the next instruction (twice at most)
+    for round in 1..=2 {
+        let Ok(done) = &outcome else { break };
+        if done.status != Status::Done {
+            break;
+        }
+        let reply = lb.fire_hook("stop", "", &json!({"answer": done.answer, "edited": done.edited, "round": round}));
+        if !reply.blocked {
+            break;
+        }
+        progress(&format!("[stop hook {round}] {}", reply.reason));
+        let mut next = done.messages.clone();
+        next.push(json!({"role": "user", "content": format!("A stop hook asks you to continue before you finish: {}", reply.reason)}));
+        let previous = Outcome { answer: done.answer.clone(), status: Status::Done, steps: done.steps, tool_calls: done.tool_calls.clone(), messages: done.messages.clone(), edited: done.edited.clone() };
+        match run_loop_full(&mut lb, &cfg, &system, next, &mut progress, &mut approve, &mut observe) {
+            Ok(again) => outcome = Ok(merge_rounds(previous, again)),
+            Err(e) => {
+                progress(&format!("[stop hook {round}] stopped: {e}; the result before it stands"));
+                outcome = Ok(previous);
+                break;
+            }
         }
     }
 
@@ -1926,5 +2059,21 @@ mod tests {
         assert!(report.objective_problems());
         let blocked = self_review(&mut Checks, &[], Some("pytest"), &rules_from(json!({"deny": ["bash: pytest*"]})));
         assert!(blocked.verify.unwrap().1.contains("deny rule"));
+    }
+
+    #[test]
+    fn hook_notes_join_the_task_and_rounds_are_merged() {
+        let reply = HookReply { context: "- ticket is FL-12
+".into(), ..HookReply::default() };
+        assert_eq!(with_hook_context("fix it", &reply), "fix it
+
+[hooks]
+- ticket is FL-12");
+        assert_eq!(with_hook_context("fix it", &HookReply::default()), "fix it");
+        let first = Outcome { answer: "a".into(), status: Status::Done, steps: 2, tool_calls: vec![ToolRecord { name: "read_file".into(), category: "read".into(), status: "ok", detail: String::new() }], messages: vec![], edited: vec!["a.rs".into()] };
+        let second = Outcome { answer: "b".into(), status: Status::Done, steps: 1, tool_calls: vec![], messages: vec![], edited: vec!["a.rs".into(), "b.rs".into()] };
+        let merged = merge_rounds(first, second);
+        assert_eq!((merged.answer.as_str(), merged.steps, merged.tool_calls.len()), ("b", 3, 1));
+        assert_eq!(merged.edited, vec!["a.rs", "b.rs"]);
     }
 }

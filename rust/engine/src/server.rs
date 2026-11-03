@@ -619,6 +619,8 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/api/studio/agent/files", post(api::agent::files))
         .route("/api/studio/agent/memory", post(api::agent_mem::memory))
         .route("/api/studio/agent/instructions", post(api::agent_mem::instructions))
+        .route("/api/studio/agent/hook", post(api::hooks::fire))
+        .route("/api/studio/agent/specs", get(api::agent_specs::list).post(api::agent_specs::act))
         .route("/api/studio/hooks", get(api::hooks::list).post(api::hooks::save_handler))
         .route("/api/studio/hooks/test", post(api::hooks::test))
         .route("/api/studio/agents", get(api::agents::list).post(api::agents::write).delete(api::agents::remove_route))

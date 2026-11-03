@@ -1,6 +1,7 @@
 // ==========================================================================
     // Hooks: shell commands that run at fixed points of the agent loop.
     //  - pre_tool_call / post_tool_call / on_file_edit / on_session_start / on_session_end
+    //  - user_prompt_submit / stop / subagent_stop / notification / pre_compact / file_changed (a hook may carry a prompt for the agent instead of a command)
     //  - a hook gets one JSON object on stdin (event, tool, arguments, workspace) and decides with its exit code:
     //    0 = pass (stdout is added to the tool result as notes), 2 = block the call (stderr is the reason),
     //    anything else = a failure that is reported but does not stop the agent.
@@ -18,6 +19,12 @@
         ['on_file_edit', 'After a file was changed', 'Runs only when an edit succeeded. Exit 2 reports a problem without undoing the edit. Good for: a formatter, a linter, a build check.'],
         ['on_session_start', 'When a workspace is opened', 'Runs when the agent switches folder. Output is shown once in the Code page. Good for: preparing an environment, printing a reminder.'],
         ['on_session_end', 'When the session ends', 'Runs when the agent session is closed. Good for: cleanup, a summary of the work.'],
+        ['user_prompt_submit', 'When you send a message', 'Can block the message (exit 2) or add notes the agent sees with it. Good for: adding the ticket number, refusing prompts with secrets.'],
+        ['stop', 'When the agent is about to finish', 'Exit 2 (or a block decision) sends the reason back to the agent as the next instruction, once. Good for: "run the tests before you finish".'],
+        ['subagent_stop', 'When a sub-agent finishes', 'Runs when a sub-agent has reported back. Good for: logging, checking its result.'],
+        ['notification', 'When the agent waits for you', 'Runs when a permission question or a choice is waiting. Good for: a sound, a desktop notice, a message to your phone.'],
+        ['pre_compact', 'Before the conversation is compacted', 'Runs before older turns are summarised. Good for: saving the transcript.'],
+        ['file_changed', 'When a watched file changes', 'Fired by fllm-rs agent --watch. The matcher is a list of globs (src/**/*.rs, *.md); "on" limits it to created, modified or deleted. With a prompt, the agent starts a run with that text; {{file}} is the path.'],
       ];
 
       const button = document.createElement('button');
@@ -53,8 +60,10 @@
 
       const rowHtml = (event, hook, index) =>
         '<div class="app-card-item" data-event="' + event + '" data-index="' + index + '" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">' +
-        '  <input class="ui-input mono" data-field="matcher" value="' + escAttr(hook.matcher || '') + '" placeholder="tools (empty = all)" style="width:170px;" title="Tool names, comma separated; a trailing * matches a prefix. Empty or * means every tool.">' +
+        '  <input class="ui-input mono" data-field="matcher" value="' + escAttr(hook.matcher || '') + '" placeholder="' + (event === 'file_changed' ? 'globs, e.g. src/**/*.rs' : 'tools (empty = all)') + '" style="width:170px;" title="' + (event === 'file_changed' ? 'Globs for the path of the file, comma separated. Empty means every file.' : 'Tool names, comma separated; a trailing * matches a prefix. Empty or * means every tool.') + '">' +
         '  <input class="ui-input mono" data-field="command" value="' + escAttr(hook.command || '') + '" placeholder="command, e.g. cargo fmt --quiet" style="flex:1;min-width:220px;">' +
+        '  <input class="ui-input" data-field="prompt" value="' + escAttr(hook.prompt || '') + '" placeholder="or a prompt for the agent" style="flex:1;min-width:200px;" title="Instead of a command: this text goes to the agent as context. {{file}} is replaced by the path.">' +
+        (event === 'file_changed' ? '  <input class="ui-input mono" data-field="on" value="' + escAttr(hook.on || '') + '" placeholder="created, modified, deleted" style="width:170px;" title="Only for these kinds of change. Empty means all.">' : '') +
         '  <input class="ui-input mono" data-field="timeout_seconds" type="number" min="1" max="300" value="' + (hook.timeout_seconds || 30) + '" style="width:70px;" title="Timeout in seconds">' +
         '  <label class="ui-switch" title="Enabled"><input type="checkbox" data-field="enabled"' + (hook.enabled === false ? '' : ' checked') + '><span class="ui-switch-track"></span></label>' +
         '  <button class="btn btn-sm btn-ghost" data-action="test">Test</button>' +
@@ -86,10 +95,12 @@
           const entry = {
             matcher: value('matcher').value.trim(),
             command: value('command').value.trim(),
+            prompt: value('prompt').value.trim(),
+            on: value('on') ? value('on').value.trim() : '',
             timeout_seconds: Number(value('timeout_seconds').value) || 30,
             enabled: value('enabled').checked,
           };
-          if (!entry.command) return;
+          if (!entry.command && !entry.prompt) return;
           if (!next[event]) next[event] = [];
           next[event][index] = entry;
         });
@@ -146,6 +157,8 @@
 
       function sampleFor(event) {
         if (event === 'on_file_edit') return { tool: 'edit_file', arguments: { path: 'README.md' } };
+        if (event === 'file_changed') return { tool: 'README.md', arguments: { path: 'README.md', kind: 'modified' } };
+        if (event === 'user_prompt_submit') return { tool: '', arguments: { prompt: 'hello' } };
         if (event === 'pre_tool_call' || event === 'post_tool_call') return { tool: 'bash', arguments: { command: 'echo hello' } };
         return { tool: '', arguments: {} };
       }
@@ -156,7 +169,7 @@
         const hook = (draft[event] || [])[index];
         if (!hook) return;
         const sample = sampleFor(event);
-        say('Running ' + hook.command + ' ...');
+        say('Running ' + (hook.command || hook.prompt) + ' ...');
         try {
           // save first so the server runs exactly what is on screen
           await apiFetch('/api/studio/hooks', { method: 'POST', body: { hooks: draft } });
@@ -166,7 +179,7 @@
           });
           const data = await res.json();
           const ran = (data.ran || []).map((r) =>
-            '  ' + r.command + ' -> exit ' + r.exit_code + ' (' + r.milliseconds + ' ms)' +
+            '  ' + (r.command || ('prompt: ' + (r.prompt || ''))) + ' -> exit ' + r.exit_code + ' (' + r.milliseconds + ' ms)' +
             (r.stdout ? '\n    stdout: ' + r.stdout : '') +
             (r.stderr ? '\n    stderr: ' + r.stderr : '')).join('\n');
           say((data.blocked ? 'BLOCKED: ' + (data.reason || '') + '\n' : 'passed\n') + (ran || '  (no hook matched)'));
@@ -182,7 +195,7 @@
           collect();
           const event = e.target.dataset.event;
           if (!draft[event]) draft[event] = [];
-          draft[event].push({ matcher: '', command: '', timeout_seconds: 30, enabled: true });
+          draft[event].push({ matcher: '', command: '', prompt: '', on: '', timeout_seconds: 30, enabled: true });
           render();
           return;
         }

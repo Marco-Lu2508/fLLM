@@ -1973,6 +1973,64 @@ async fn studio_agent_tools_work_inside_one_workspace_and_only_on_this_machine()
 }
 
 #[tokio::test]
+async fn studio_specs_steering_and_extra_hook_events_work_on_this_machine() {
+    let h = start(Settings::default());
+    let dir = std::env::temp_dir().join(format!("fllm-agent-spec-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join(".fllm").join("steering")).unwrap();
+    std::fs::create_dir_all(dir.join(".fllm").join("specs").join("export")).unwrap();
+    std::fs::write(dir.join(".fllm").join("steering").join("style.md"), "Always use tabs.").unwrap();
+    std::fs::write(dir.join(".fllm").join("steering").join("ts.md"), "---
+inclusion: fileMatch
+fileMatchPattern: \"**/*.ts\"
+---
+Use strict mode.").unwrap();
+    std::fs::write(dir.join(".fllm").join("steering").join("rel.md"), "---
+inclusion: manual
+description: release steps
+---
+Tag first.").unwrap();
+    std::fs::write(dir.join(".fllm").join("specs").join("export").join("tasks.md"), "# Tasks
+- [ ] 1. Parser
+- [ ] 2. CLI
+").unwrap();
+    std::fs::write(dir.join("a.ts"), "let x = 1;
+").unwrap();
+    let chosen = h.post("/api/studio/agent/workspace", json!({"path": dir.to_str().unwrap()})).await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.text());
+
+    // steering: the always file is an instruction, the others are listed; a matching file brings its steering once
+    let instructions = h.post("/api/studio/agent/instructions", json!({})).await.json();
+    let files = instructions["files"].as_array().unwrap();
+    assert!(files.iter().any(|f| f["text"] == "Always use tabs."), "{instructions}");
+    assert!(files.iter().any(|f| f["file"] == "steering index" && f["text"].as_str().unwrap().contains("rel.md")), "{instructions}");
+    assert!(!files.iter().any(|f| f["text"] == "Use strict mode."));
+    let first = h.post("/api/studio/agent/tool", json!({"name": "read_file", "args": {"path": "a.ts"}})).await.json();
+    assert!(first["output"].as_str().unwrap().contains("[steering]") && first["output"].as_str().unwrap().contains("Use strict mode."), "{first}");
+    let second = h.post("/api/studio/agent/tool", json!({"name": "read_file", "args": {"path": "a.ts"}})).await.json();
+    assert!(!second["output"].as_str().unwrap().contains("[steering]"), "{second}");
+
+    // specs: listed with their tasks, ticked by hand, prompts for the page
+    let list = h.get("/api/studio/agent/specs").await.json();
+    assert_eq!((list["specs"][0]["name"].as_str(), list["specs"][0]["total"].as_u64(), list["specs"][0]["done"].as_u64()), (Some("export"), Some(2), Some(0)));
+    let ticked = h.post("/api/studio/agent/specs", json!({"action": "tick", "name": "export", "index": 2})).await.json();
+    assert_eq!(ticked["specs"][0]["done"], 1);
+    assert!(std::fs::read_to_string(dir.join(".fllm/specs/export/tasks.md")).unwrap().contains("- [x] 2. CLI"));
+    assert_eq!(h.post("/api/studio/agent/specs", json!({"action": "tick", "name": "export", "index": 9})).await.status, StatusCode::BAD_REQUEST);
+    let prompt = h.post("/api/studio/agent/specs", json!({"action": "task_prompt", "name": "export", "index": 1})).await.json();
+    assert!(prompt["prompt"].as_str().unwrap().contains("Parser"));
+    let new = h.post("/api/studio/agent/specs", json!({"action": "new_prompt", "name": "CSV Export", "description": "export as csv"})).await.json();
+    assert_eq!(new["name"], "csv-export");
+    assert_eq!(h.post("/api/studio/agent/specs", json!({"action": "new_prompt", "name": "x"})).await.status, StatusCode::BAD_REQUEST);
+
+    // the event route knows the new events and refuses others
+    let stop = h.post("/api/studio/agent/hook", json!({"event": "Stop"})).await;
+    assert_eq!(stop.status, StatusCode::OK, "{}", stop.text());
+    assert!(stop.json()["blocked"].is_boolean());
+    assert_eq!(h.post("/api/studio/agent/hook", json!({"event": "whatever"})).await.status, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn studio_control_plane_manages_config_hardware_models_and_keys() {
     let h = start(Settings::default());
     let status = h.get("/api/studio/status").await;

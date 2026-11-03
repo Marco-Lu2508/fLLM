@@ -177,10 +177,19 @@ pub(in crate::server) async fn instructions(State(state): State<Arc<AppState>>) 
         return disabled_reply();
     }
     let root = state.agent.current_root();
-    let files: Vec<Value> = match &root {
+    let mut files: Vec<Value> = match &root {
         Some(r) => instruction_files(r).into_iter().map(|(file, text)| json!({"file": file, "text": text})).collect(),
         None => Vec::new(),
     };
+    // steering files: the `always` ones are instructions like AGENTS.md, the others are listed so the agent can read them when needed
+    if let Some(r) = &root {
+        let steering = crate::steering::load(r, Some(&crate::hub::studio_data_file("steering")));
+        files.extend(crate::steering::always_files(&steering).into_iter().map(|(file, text)| json!({"file": file, "text": text})));
+        let index = crate::steering::index_text(&steering);
+        if !index.is_empty() {
+            files.push(json!({"file": "steering index", "text": index}));
+        }
+    }
     let memory = |scope| entries(&read(scope, root.as_deref()));
     // the profile the user keeps (and edits) in Settings > Personalization: short, capped, off with one switch
     let profile = crate::learn::profile_for_prompt(&crate::agent_cli::studio_folder());

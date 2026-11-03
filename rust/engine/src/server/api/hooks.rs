@@ -15,6 +15,14 @@
 //! `0` passes (its stdout is added to the tool result as notes), `2` blocks the tool call (its stderr is the reason),
 //! anything else is a failure that is reported but does not stop the agent. A hook can also print
 //! `{"decision": "block", "reason": "..."}` or `{"context": "..."}` instead of using the exit code.
+//!
+//! More events (the headless agent, the Studio and `fllm-rs agent --watch` fire them through `POST /api/studio/agent/hook`):
+//! `user_prompt_submit` (may block or add context), `stop` (the agent is about to finish: a block sends the reason back as
+//! the next instruction), `subagent_stop`, `notification` (the agent waits for a person), `pre_compact` and `file_changed`
+//! (a watched file was created, changed or deleted; the matcher is a list of globs, `on` limits it to `created`, `modified`
+//! or `deleted`). A hook can carry a `prompt` instead of a `command`: its text (with `{{file}}` replaced) is handed to the
+//! agent as context, the way Kiro's agent hooks steer the conversation. The Claude Code and Kiro spellings of the events
+//! (`PreToolUse`, `UserPromptSubmit`, `Stop`, `PostFileSave`, ...) are accepted in the files.
 use super::*;
 use std::{
     fs,
@@ -25,7 +33,37 @@ use std::{
 };
 
 /// The events a hook can listen to, in the order the page lists them.
-pub(super) const EVENTS: [&str; 5] = ["pre_tool_call", "post_tool_call", "on_file_edit", "on_session_start", "on_session_end"];
+pub(super) const EVENTS: [&str; 11] = [
+    "pre_tool_call",
+    "post_tool_call",
+    "on_file_edit",
+    "on_session_start",
+    "on_session_end",
+    "user_prompt_submit",
+    "stop",
+    "subagent_stop",
+    "notification",
+    "pre_compact",
+    "file_changed",
+];
+
+/// The name of an event as this program spells it; the spellings of Claude Code and Kiro are accepted too.
+pub(super) fn canonical(name: &str) -> &str {
+    match name {
+        "PreToolUse" => "pre_tool_call",
+        "PostToolUse" => "post_tool_call",
+        "SessionStart" => "on_session_start",
+        "SessionEnd" => "on_session_end",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "Stop" => "stop",
+        "SubagentStop" => "subagent_stop",
+        "Notification" => "notification",
+        "PreCompact" => "pre_compact",
+        "FileChanged" => "file_changed",
+        "PostFileSave" => "on_file_edit",
+        other => other,
+    }
+}
 /// Tool names that change files: their successful call fires `on_file_edit`.
 const EDIT_TOOLS: [&str; 4] = ["write_file", "edit_file", "multi_edit", "patch"];
 
@@ -44,6 +82,10 @@ pub(super) struct Hook {
     pub event: String,
     pub matcher: String,
     pub command: String,
+    /// Text for the agent instead of a command (empty when the hook runs a command).
+    pub prompt: String,
+    /// `file_changed` only: `created`, `modified`, `deleted` (comma separated); empty means all.
+    pub on: String,
     pub timeout_seconds: u64,
     pub enabled: bool,
     /// Set when the hook comes from a plugin: its folder, handed to the command as `FLLM_PLUGIN_DIR`.
@@ -56,6 +98,7 @@ pub(super) struct Outcome {
     pub blocked: bool,
     pub reason: String,
     pub context: String,
+    pub prompts: Vec<String>,
     pub ran: Vec<Value>,
 }
 
@@ -104,16 +147,24 @@ fn parse(value: &Value, plugin: Option<&str>) -> Vec<Hook> {
     };
     let mut hooks = Vec::new();
     for event in EVENTS {
-        let Some(Value::Array(items)) = list.get(event) else { continue };
+        let items: Vec<&Value> = list
+            .iter()
+            .filter(|(key, _)| canonical(key) == event)
+            .filter_map(|(_, v)| v.as_array())
+            .flatten()
+            .collect();
         for item in items {
             let command = item.get("command").and_then(Value::as_str).unwrap_or("").trim().to_owned();
-            if command.is_empty() {
+            let prompt = item.get("prompt").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+            if command.is_empty() && prompt.is_empty() {
                 continue;
             }
             hooks.push(Hook {
                 event: event.to_owned(),
                 matcher: item.get("matcher").and_then(Value::as_str).unwrap_or("").trim().to_owned(),
                 command: command.chars().take(MAX_COMMAND_CHARS).collect(),
+                prompt: prompt.chars().take(MAX_COMMAND_CHARS).collect(),
+                on: item.get("on").and_then(Value::as_str).unwrap_or("").trim().to_owned(),
                 timeout_seconds: item.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(30).clamp(1, 300),
                 enabled: item.get("enabled").and_then(Value::as_bool).unwrap_or(true),
                 plugin: plugin.map(str::to_owned),
@@ -136,6 +187,8 @@ pub(super) fn list_json() -> Value {
                 "event": h.event,
                 "matcher": h.matcher,
                 "command": h.command,
+                "prompt": h.prompt,
+                "on": h.on,
                 "timeout_seconds": h.timeout_seconds,
                 "enabled": h.enabled,
             });
@@ -167,7 +220,7 @@ pub(super) fn save(body: &Value) -> Result<Value, String> {
             // flat form -> group by event
             let mut grouped = serde_json::Map::new();
             for item in source.as_array().cloned().unwrap_or_default() {
-                let event = item.get("event").and_then(Value::as_str).unwrap_or("").to_owned();
+                let event = canonical(item.get("event").and_then(Value::as_str).unwrap_or("")).to_owned();
                 if !EVENTS.contains(&event.as_str()) {
                     return Err(format!("unknown event '{event}'; known: {}", EVENTS.join(", ")));
                 }
@@ -183,15 +236,20 @@ pub(super) fn save(body: &Value) -> Result<Value, String> {
     let mut out = serde_json::Map::new();
     let mut total = 0usize;
     for (event, items) in &map {
+        let event = &canonical(event).to_owned();
         if !EVENTS.contains(&event.as_str()) {
             return Err(format!("unknown event '{event}'; known: {}", EVENTS.join(", ")));
         }
         let Some(items) = items.as_array() else { return Err(format!("'{event}' must be a list")) };
-        let mut cleaned = Vec::new();
+        let mut cleaned: Vec<Value> = out.get(event.as_str()).and_then(Value::as_array).cloned().unwrap_or_default();
         for item in items {
             let command = item.get("command").and_then(Value::as_str).unwrap_or("").trim();
-            if command.is_empty() {
+            let prompt = item.get("prompt").and_then(Value::as_str).unwrap_or("").trim();
+            if command.is_empty() && prompt.is_empty() {
                 continue;
+            }
+            if prompt.chars().count() > MAX_COMMAND_CHARS {
+                return Err(format!("a prompt is longer than {MAX_COMMAND_CHARS} characters"));
             }
             if command.chars().count() > MAX_COMMAND_CHARS {
                 return Err(format!("a command is longer than {MAX_COMMAND_CHARS} characters"));
@@ -203,6 +261,8 @@ pub(super) fn save(body: &Value) -> Result<Value, String> {
             cleaned.push(json!({
                 "matcher": item.get("matcher").and_then(Value::as_str).unwrap_or("").trim(),
                 "command": command,
+                "prompt": prompt,
+                "on": item.get("on").and_then(Value::as_str).unwrap_or("").trim(),
                 "timeout_seconds": item.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(30).clamp(1, 300),
                 "enabled": item.get("enabled").and_then(Value::as_bool).unwrap_or(true),
             }));
@@ -226,6 +286,10 @@ fn matches(hook: &Hook, tool: &str) -> bool {
     if matcher.is_empty() || matcher == "*" {
         return true;
     }
+    // file events match the path of the file with globs (`src/**/*.rs, *.md`); braces keep their commas
+    if hook.event == "file_changed" {
+        return split_globs(matcher).iter().any(|g| crate::steering::glob_matches(g, tool));
+    }
     matcher
         .split(',')
         .map(str::trim)
@@ -234,6 +298,27 @@ fn matches(hook: &Hook, tool: &str) -> bool {
             Some(prefix) => tool.starts_with(prefix),
             None => part == tool,
         })
+}
+
+/// Splits `a, b` at the commas that are not inside `{...}`.
+fn split_globs(text: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(last) = out.last_mut() {
+            last.push(c);
+        }
+    }
+    out.into_iter().map(|g| g.trim().to_owned()).filter(|g| !g.is_empty()).collect()
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -326,8 +411,19 @@ fn payload(event: &str, tool: &str, args: &Value, dir: Option<&Path>) -> Value {
 pub(super) fn dispatch(event: &str, tool: &str, args: &Value, dir: Option<&Path>) -> Outcome {
     let mut outcome = Outcome::default();
     let hooks = load();
-    for hook in hooks.iter().filter(|h| h.enabled && h.event == event && matches(h, tool)) {
-        let body = payload(event, tool, args, dir);
+    for hook in hooks.iter().filter(|h| h.enabled && h.event == event && matches(h, tool) && kind_matches(h, args)) {
+        if hook.command.is_empty() {
+            // a prompt hook: its text goes to the agent as context
+            let text = hook.prompt.replace("{{file}}", tool);
+            outcome.context.push_str(&format!("- {}\n", clip(text.trim(), MAX_OUTPUT_CHARS)));
+            outcome.prompts.push(clip(text.trim(), MAX_OUTPUT_CHARS));
+            outcome.ran.push(json!({"prompt": clip(&hook.prompt, 1_000), "exit_code": 0, "blocked": false, "milliseconds": 0}));
+            continue;
+        }
+        let mut body = payload(event, tool, args, dir);
+        if !hook.prompt.is_empty() {
+            body["prompt"] = json!(hook.prompt.replace("{{file}}", tool));
+        }
         let plugin_dir = hook.plugin.as_deref().and_then(super::plugins::folder);
         let (code, stdout, stderr, millis) =
             run_command(&hook.command, &body, dir, Duration::from_secs(hook.timeout_seconds), plugin_dir.as_deref());
@@ -382,6 +478,15 @@ pub(super) fn dispatch(event: &str, tool: &str, args: &Value, dir: Option<&Path>
     outcome
 }
 
+/// `file_changed` hooks can limit themselves to `created`, `modified` or `deleted`.
+fn kind_matches(hook: &Hook, args: &Value) -> bool {
+    if hook.event != "file_changed" || hook.on.trim().is_empty() {
+        return true;
+    }
+    let kind = args.get("kind").and_then(Value::as_str).unwrap_or("modified");
+    hook.on.split(',').map(str::trim).any(|k| k == kind || (k == "save" && kind != "deleted") || (k == "create" && kind == "created") || (k == "delete" && kind == "deleted"))
+}
+
 pub(super) fn is_edit_tool(name: &str) -> bool {
     EDIT_TOOLS.contains(&name)
 }
@@ -406,6 +511,23 @@ pub(super) fn with_notes(result: Result<String, String>, outcome: &Outcome) -> R
             text.push_str(&notes);
             Err(text)
         }
+    }
+}
+
+/// `POST /api/studio/agent/hook`: `{event, tool, arguments}` fires the hooks of an event in the open workspace. The headless agent
+/// (prompt submit, stop) and the Studio (notification, compaction, sub-agent end) use it; this machine only, like the other agent routes.
+pub(in crate::server) async fn fire(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let event = canonical(body.get("event").and_then(Value::as_str).unwrap_or("")).to_owned();
+    if !EVENTS.contains(&event.as_str()) {
+        return api_error(StatusCode::BAD_REQUEST, &format!("unknown event '{event}'; known: {}", EVENTS.join(", ")));
+    }
+    let tool = body.get("tool").and_then(Value::as_str).unwrap_or("").to_owned();
+    let args = body.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let dir = state.agent.current_root();
+    let outcome = tokio::task::spawn_blocking(move || dispatch(&event, &tool, &args, dir.as_deref())).await;
+    match outcome {
+        Ok(o) => Json(json!({"blocked": o.blocked, "reason": o.reason, "context": o.notes(), "prompts": o.prompts, "ran": o.ran.len()})).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
@@ -454,6 +576,8 @@ mod tests {
             event: "pre_tool_call".to_owned(),
             matcher: matcher.to_owned(),
             command: "true".to_owned(),
+            prompt: String::new(),
+            on: String::new(),
             timeout_seconds: 5,
             enabled: true,
             plugin: None,
@@ -473,6 +597,29 @@ mod tests {
         assert!(matches(&hook("edit*,multi_edit"), "edit_file"));
         assert!(matches(&hook("edit_file, write_file"), "write_file"));
         assert!(!matches(&hook("edit_file"), "read_file"));
+    }
+
+    #[test]
+    fn file_events_match_globs_and_kinds() {
+        let mut h = hook("src/**/*.rs, *.{md,txt}");
+        h.event = "file_changed".to_owned();
+        assert!(matches(&h, "src/a/b.rs") && matches(&h, "docs/readme.md") && !matches(&h, "docs/readme.py"));
+        h.on = "created, deleted".to_owned();
+        assert!(kind_matches(&h, &json!({"kind": "created"})) && !kind_matches(&h, &json!({"kind": "modified"})));
+        h.on = "save".to_owned();
+        assert!(kind_matches(&h, &json!({"kind": "modified"})) && !kind_matches(&h, &json!({"kind": "deleted"})));
+        assert_eq!(split_globs("a/{x,y}.rs, b"), vec!["a/{x,y}.rs", "b"]);
+    }
+
+    #[test]
+    fn other_spellings_of_events_are_accepted_and_prompts_need_no_command() {
+        assert_eq!(canonical("PreToolUse"), "pre_tool_call");
+        assert_eq!(canonical("Stop"), "stop");
+        assert_eq!(canonical("stop"), "stop");
+        let value = json!({"hooks": {"UserPromptSubmit": [{"prompt": "Mention the ticket number."}], "file_changed": [{"matcher": "*.md", "prompt": "Check {{file}} for dead links", "on": "modified"}], "Stop": [{}]}});
+        let hooks = parse(&value, None);
+        assert_eq!(hooks.len(), 2);
+        assert!(hooks.iter().any(|h| h.event == "user_prompt_submit" && h.command.is_empty()));
     }
 
     #[test]

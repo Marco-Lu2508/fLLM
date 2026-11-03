@@ -606,6 +606,7 @@
       sessionId: null,
       instructions: [], // [{ file, text }] AGENTS.md / FLLM.md / CLAUDE.md, nearest first
       memory: { workspace: [], global: [] },
+      specs: [], // specs of the folder: { name, total, done, tasks: [{ index, text, done, depth }] }
       profile: '', // the profile of the user, from Settings > Personalization (put into the system prompt by the server's answer)
       memDraft: null, // { workspace, global } text being edited in the memory panel
       git: '', // short working tree state for the system prompt
@@ -810,7 +811,7 @@
 
     /** Everything that belongs to the opened folder: instructions, tools, commands, rules, last session. */
     async function onWorkspaceOpened() {
-      await Promise.all([loadInstructions(), loadRegistry(), loadAgents(), loadCustomCommands(), loadGitState(), loadRuntime()]);
+      await Promise.all([loadInstructions(), loadRegistry(), loadAgents(), loadCustomCommands(), loadGitState(), loadRuntime(), loadSpecs()]);
       loadRules();
       restoreCodeSession();
       refreshChanges();
@@ -893,6 +894,76 @@
         }
       } catch { /* an older server: no instructions, no memory */ }
       if (!code.memDraft) renderCodeSide();
+    }
+
+    /** Fires the hooks of an event (user_prompt_submit, stop, notification, pre_compact ...). A server without the route means no hooks. */
+    async function fireHook(event, tool, args) {
+      try {
+        const res = await apiFetch('/api/studio/agent/hook', { method: 'POST', body: { event, tool: tool || '', arguments: args || {} } });
+        if (!res.ok) return { blocked: false, reason: '', context: '' };
+        const d = await res.json();
+        return { blocked: Boolean(d.blocked), reason: d.reason || '', context: d.context || '' };
+      } catch { return { blocked: false, reason: '', context: '' }; }
+    }
+
+    // ---- specs (.fllm/specs/<name>/requirements.md, design.md, tasks.md) --------------------------------------------
+    async function loadSpecs() {
+      try {
+        const res = await apiFetch('/api/studio/agent/specs');
+        code.specs = res.ok ? ((await res.json()).specs || []) : [];
+      } catch { code.specs = []; }
+      renderCodeSide();
+    }
+    async function specAction(body) {
+      const res = await apiFetch('/api/studio/agent/specs', { method: 'POST', body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.error && data.error.message) || 'The spec action failed.');
+      return data;
+    }
+    function specsHtml() {
+      if (!code.specs.length) return '<p class="side-empty">Plan a feature before coding it: <span class="mono">/spec name what you want</span> writes requirements, design and a task list under <span class="mono">.fllm/specs/</span> and builds it task by task.</p>';
+      return code.specs.map((sp) => {
+        const next = sp.tasks.find((t) => !t.done);
+        const files = ['requirements', 'design', 'tasks_file'].map((k, i) => `<span class="spec-file${sp[k] ? ' on' : ''}" title="${['requirements.md', 'design.md', 'tasks.md'][i]}${sp[k] ? '' : ' (not written yet)'}">${['Req', 'Design', 'Tasks'][i]}</span>`).join('');
+        return `<div class="spec-box"><div class="spec-head"><strong>${escapeHtml(sp.name)}</strong><span class="side-count">${sp.done}/${sp.total}</span></div>
+          <div class="spec-files">${files}</div>
+          ${sp.tasks.length ? `<ul class="spec-tasks">${sp.tasks.map((t) => `<li class="${t.done ? 'done' : ''}" style="margin-left:${t.depth * 12}px"><label><input type="checkbox" data-spec-tick="${escapeHtml(sp.name)}:${t.index}"${t.done ? ' checked' : ''}> <span>${escapeHtml(t.text)}</span></label></li>`).join('')}</ul>` : ''}
+          ${next ? `<button class="btn btn-xs btn-secondary" data-spec-run="${escapeHtml(sp.name)}:${next.index}" title="The agent does this task and ticks it">Run next task</button>` : (sp.total ? '<span class="side-empty">Every task is done.</span>' : '')}</div>`;
+      }).join('');
+    }
+    async function runSpecTask(name, index) {
+      try {
+        const data = await specAction({ action: 'task_prompt', name, index });
+        await agentRun(data.prompt, `/spec run ${name} ${index}`);
+      } catch (e) { codeNotice(e.message); }
+      loadSpecs();
+    }
+    async function specCommand(argText) {
+      const words = argText.split(/\s+/).filter(Boolean);
+      if (!words.length) {
+        await loadSpecs();
+        codeNotice(code.specs.length ? `Specs of this folder:\n${code.specs.map((sp) => `${sp.name}: ${sp.done}/${sp.total} tasks done`).join('\n')}\n/spec run NAME [N] does the next open task (or task N); /spec NAME what you want starts a new spec.` : 'No specs yet. /spec NAME what you want writes requirements.md, design.md and tasks.md under .fllm/specs/NAME and stops after each file for your review.');
+        return;
+      }
+      if (words[0] === 'run') {
+        const name = words[1];
+        const sp = code.specs.find((x) => x.name === name);
+        if (!sp) { await loadSpecs(); }
+        const spec = code.specs.find((x) => x.name === name);
+        if (!spec) { codeNotice(`There is no spec "${name || ''}". /spec lists them.`); return; }
+        const index = Number(words[2]) || (spec.tasks.find((t) => !t.done) || {}).index;
+        if (!index) { codeNotice('Every task of this spec is done.'); return; }
+        await runSpecTask(spec.name, index);
+        return;
+      }
+      const name = words[0];
+      const description = words.slice(1).join(' ');
+      if (!description) { codeNotice('Usage: /spec NAME what you want. Example: /spec csv-export Export the report as CSV.'); return; }
+      try {
+        const data = await specAction({ action: 'new_prompt', name, description });
+        await agentRun(data.prompt, `/spec ${argText}`);
+      } catch (e) { codeNotice(e.message); }
+      loadSpecs();
     }
 
     /** One line about the working tree for the system prompt. */
@@ -1588,6 +1659,7 @@
           ${code.todos.length ? todoListHtml(code.todos) : '<p class="side-empty">For bigger jobs the agent keeps a task list here.</p>'}</section>
         <section class="side-block"><h4>Changed files${uniqueFiles.length ? `<span class="side-count">${uniqueFiles.length}</span>` : ''}</h4>
           ${uniqueFiles.length ? `<ul class="changed-list">${uniqueFiles.slice(-30).map(([p, k]) => `<li><span class="mono">${escapeHtml(p)}</span>${k ? `<span class="side-count">${escapeHtml(k)}</span>` : ''}</li>`).join('')}</ul>${code.changes ? '<button class="btn btn-xs btn-ghost" data-code-command="/rewind">Rewind ...</button>' : ''}` : '<p class="side-empty">Nothing changed yet.</p>'}</section>
+        <section class="side-block"><h4>Specs${code.specs.length ? `<span class="side-count">${code.specs.length}</span>` : ''}</h4>${specsHtml()}</section>
         <section class="side-block"><h4>Background jobs${code.jobs.length ? `<span class="side-count">${code.jobs.length}</span>` : ''}</h4>${jobsHtml()}</section>
         <section class="side-block"><h4>Sessions</h4>${sessionsHtml()}</section>
         <section class="side-block"><details class="rules-box" data-k="memory"${open('memory')}><summary><h4>Memory${nMemory ? `<span class="side-count">${nMemory}</span>` : ''}</h4></summary>${memoryHtml()}</details></section>
@@ -1653,6 +1725,7 @@
     function waitFor(item, cancel) {
       return new Promise((resolve) => {
         code.waiters.set(item.id, { resolve, cancel });
+        fireHook('notification', item.name || '', { kind: item.kind, name: item.name || '' });
         item.status = 'pending';
         paintItem(item);
         $('codeScroll').scrollTop = $('codeScroll').scrollHeight;
@@ -2069,6 +2142,7 @@
       if (!plan) { if (force) codeNotice('There is not enough conversation to compact yet.'); return false; }
       if (!force && code.messages.length < code.compactedAt + 4) return false;
       const before = codeEstimate();
+      fireHook('pre_compact', '', { tokens: before });
       const note = { kind: 'notice', id: cid(), text: 'Compacting the conversation ...' };
       code.view.push(note);
       paintItem(note);
@@ -2176,7 +2250,10 @@
       if (!code.workspace) { await pickWorkspace(); if (!code.workspace) return; }
       code.reverted = null;
       const notes = typeof window.fllmBrowserTakeComments === 'function' ? window.fllmBrowserTakeComments() : '';
-      const expanded = await expandMentions(takePending() + notes + userText);
+      const submitted = await fireHook('user_prompt_submit', '', { prompt: userText });
+      if (submitted.blocked) { codeNotice(`A hook blocked this message: ${submitted.reason}`); return; }
+      const expandedBase = await expandMentions(takePending() + notes + userText);
+      const expanded = submitted.context ? `${expandedBase}\n\n[hooks]\n${submitted.context}` : expandedBase;
       await refreshChanges();
       await computerBegin();
       const mark = code.changes ? Math.max(0, ...code.changes.map((c) => c.id)) : 0;
@@ -2203,6 +2280,11 @@
       try {
         await runLoop(ctx);
         if (code.autoReview && code.perm !== 'plan' && code.running) await selfReview(ctx, mark);
+        // a stop hook may send the agent back once before it counts as done
+        if (code.running) {
+          const stopHook = await fireHook('stop', '', {});
+          if (stopHook.blocked) { codeNotice(`A stop hook asks the agent to continue: ${stopHook.reason}`); ctx.messages.push({ role: 'user', content: `A stop hook asks you to continue before you finish: ${stopHook.reason}` }); await runLoop(ctx); }
+        }
         const lastItem = [...code.view].reverse().find((i) => i.kind === 'assistant');
         if (lastItem && code.perm === 'plan' && lastItem.content && code.view[code.view.length - 1] === lastItem) { lastItem.planDone = true; paintItem(lastItem); }
       } catch (e) {
@@ -2221,6 +2303,7 @@
         refreshStudioStatus();
         loadInstructions();
         loadGitState();
+        loadSpecs();
       }
       if (stopped) {
         if (code.queue.length) { $('codeTextarea').value = code.queue.join('\n\n'); code.queue = []; renderQueue(); codeNotice('Stopped. The messages you had queued are back in the input.'); }
@@ -2381,7 +2464,7 @@
 
     const INIT_PROMPT = 'Explore this workspace and write a file named AGENTS.md in its root with instructions for future coding sessions. Cover: what the project is, how to build, test and run it (exact commands, checked against the build files), the layout of the important folders, code style and conventions you can see, and pitfalls. Keep it under 80 lines, concrete, with no filler. If AGENTS.md, FLLM.md or CLAUDE.md already exists, read it and improve that file instead of starting over.';
     const BUILTIN_COMMANDS = [
-      ['clear', 'Start a new session'], ['compact', 'Summarise older turns to free context'], ['init', 'Let the agent write AGENTS.md'], ['resume', 'Pick an earlier session'],
+      ['clear', 'Start a new session'], ['compact', 'Summarise older turns to free context'], ['init', 'Let the agent write AGENTS.md'], ['spec', 'Plan a feature in files, then build it task by task (/spec name what you want, /spec run name)'], ['resume', 'Pick an earlier session'],
       ['fork', 'New session from an earlier message'], ['revert', 'Go back to before a message, files included'], ['rename', 'Rename this session'], ['export', 'Save this session as Markdown'],
       ['rewind', 'Undo file changes back to a chosen point'], ['undo', 'Undo the last file change (/undo 3 for three)'],
       ['plan', 'Plan agent: read only'], ['build', 'Build agent'], ['ask', 'Build agent, ask before every change'], ['edit', 'Build agent, auto-edit'], ['agent', 'Switch between build and plan'], ['model', 'Pick the model'],
@@ -2436,6 +2519,7 @@
           try { await compactSession({ system: codeSystemPrompt(), tools: toolList(), signal: code.abort.signal }, { force: true, focus: argText }); } catch (e) { if (e.name !== 'AbortError') codeNotice(`Compacting failed: ${e.message}`); } finally { code.abort = null; setCodeBusy(false); saveCodeSession(); renderCode(); }
           return true;
         case 'init': await agentRun(INIT_PROMPT, '/init'); return true;
+        case 'spec': await specCommand(argText); return true;
         case 'resume': case 'sessions': {
           const rows = workspaceSessions().filter((s) => s.id !== code.sessionId).map((s) => ({ label: `${s.title}  (${new Date(s.time).toLocaleString()})`, data: s.id }));
           if (rows.length) pushChoices('Pick a session to continue:', 'resume', rows); else codeNotice('There is no earlier session for this folder.');
@@ -2924,6 +3008,10 @@
         renderCodeSide(true);
       }
       if (t.dataset.autoCheck !== undefined) { code.autoCheck = t.checked; saveCodeSettings(); }
+      if (t.dataset.specTick !== undefined) {
+        const [name, index] = t.dataset.specTick.split(':');
+        specAction({ action: t.checked ? 'tick' : 'untick', name, index: Number(index) }).then((d) => { code.specs = d.specs || []; renderCodeSide(true); }).catch((err) => { toast(err.message); loadSpecs(); });
+      }
       if (t.dataset.autoReview !== undefined) { code.autoReview = t.checked; saveCodeSettings(); }
       if (t.dataset.learn !== undefined) { code.learn = t.checked; saveCodeSettings(); }
       if (t.dataset.personality !== undefined && PERSONALITIES[t.value]) { code.personality = t.value; saveCodeSettings(); }
@@ -2933,6 +3021,8 @@
       if (feedback) { if (typeof window.fllmLearnFeedback === 'function') await window.fllmLearnFeedback(feedback.dataset.learnFb); return; }
       if (e.target.closest('[data-memory-save]')) { await saveMemoryDraft(); return; }
       if (e.target.closest('[data-memory-reset]')) { code.memDraft = null; renderCodeSide(); return; }
+      const specRun = e.target.closest('[data-spec-run]');
+      if (specRun) { const [n, i] = specRun.dataset.specRun.split(':'); runSpecTask(n, Number(i)); return; }
       const sAct = e.target.closest('[data-session-act]');
       if (sAct) {
         const [act, id] = sAct.dataset.sessionAct.split(':');
