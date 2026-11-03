@@ -1,10 +1,10 @@
-// FLLM-KERNEL: delta_rec_hk<HK> | constants: kh,vh,hv,conv_dim,tiled,row0,n,reset,state_off,beta_scale,eps | buffers: 1 mixed(r), 2 z(r), 3 beta(r), 4 alpha(r), 5 dt_bias(r), 6 decay(r), 7 norm(r), 8 state(rw), 9 out(w) | threads: 256,1,1
+// FLLM-KERNEL: delta_rec_hk<HK> | constants: kh,vh,hv,conv_dim,tiled,row0,n,reset,state_off,beta_scale,eps,sigmoid_gate | buffers: 1 mixed(r), 2 z(r), 3 beta(r), 4 alpha(r), 5 dt_bias(r), 6 decay(r), 7 norm(r), 8 state(rw), 9 out(w) | threads: 256,1,1
 // (HK = 32, 64, 96, 128; the constants struct is buffer 0; grid per run: [vh, 1, 1] threadgroups)
 // Gated DeltaNet, part 2 (port of shaders/vulkan/delta_rec.comp and delta_rec_kernel in cuda/deltanet.cu, reference cpu_delta.rs): the delta-rule recurrence
 // of one run (n consecutive tokens of one sequence) for one value head per threadgroup, per token t:
 //   forget = exp(decay[j] * softplus(alpha[t][j] + dt_bias[j])),  sigma = beta_scale * sigmoid(beta[t][j])
 //   S = S * forget;  S += k (x) ((v - S^T k) * sigma);  o = S^T q            (q, k: the normalised query / key head of mixed, v: its value channels)
-//   out[t][j][c] = o[c] * (1 / sqrt(mean_c(o^2) + eps)) * norm[c] * silu(z[t][j][c])        (gated RMS norm of the head output)
+//   out[t][j][c] = o[c] * (1 / sqrt(mean_c(o^2) + eps)) * norm[c] * gate(z[t][j][c])        (gated RMS norm of the head output; gate = silu, or sigmoid when sigmoid_gate != 0)
 // The recurrent state S[j][i][c] (value head j, key row i < HK, value column c < hv) is FP32 at state[state_off + (j * HK + i) * hv + c] of the sequence's
 // state buffer (float view; state_off = state_offset / 4 of the layer). Value column c is handled by two neighbouring threads (lane = 2 c + half): half 0
 // holds the first HK/2 rows of the column in registers, half 1 the others; the dot products over the key dimension meet in threadgroup memory. Threads with
@@ -25,6 +25,7 @@ struct delta_rec_params {
     uint state_off;
     float beta_scale;
     float eps;
+    uint sigmoid_gate;
 };
 
 template <uint HK>
@@ -96,7 +97,8 @@ template <uint HK>
         const float ss = r_tg_sum<DELTA_REC_WG>((half_id == 0u && col_ok) ? acc * acc : 0.0f, red, lane);
         const float inv = 1.0f / sqrt(ss / float(p.hv) + p.eps);
         if (half_id == 0u && col_ok) {
-            const float gate = r_silu(z[row * value_dim + j * p.hv + c]);
+            const float zv = z[row * value_dim + j * p.hv + c];
+            const float gate = p.sigmoid_gate != 0u ? r_sigmoid(zv) : r_silu(zv);
             outv[row * value_dim + j * p.hv + c] = acc * inv * nw * gate;
         }
     }

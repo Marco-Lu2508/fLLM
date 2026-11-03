@@ -167,7 +167,8 @@ pub fn plan_delta_layer_scan(
             .b("reset", run.reset)
             .u("state_off", state_off)
             .f("beta_scale", shape.beta_scale)
-            .f("eps", shape.eps);
+            .f("eps", shape.eps)
+            .b("sigmoid_gate", shape.sigmoid_gate);
         let rec_slots = Slots::new()
             .scratch("mixed", 0, mixed_bytes, Access::Read)
             .read("z")
@@ -199,7 +200,7 @@ pub fn plan_delta_layer_scan(
         if run.rows > MAX_GROUPS_PER_DIM as usize {
             return Err(BackendError::UnsupportedOperation("DeltaNet run too long for one dispatch".into()));
         }
-        let norm_push = Push::new().u("vh", vh).u("hv", hv).u("row0", run.first_row).f("eps", shape.eps);
+        let norm_push = Push::new().u("vh", vh).u("hv", hv).u("row0", run.first_row).f("eps", shape.eps).b("sigmoid_gate", shape.sigmoid_gate);
         plans.push(plan("delta_gnorm", norm_push, [vh as u32, run.rows as u32, 1], Slots::new().read("z").read("norm").write("out"))?);
     }
     Ok(plans)

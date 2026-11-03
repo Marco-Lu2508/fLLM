@@ -1343,7 +1343,7 @@ pub(super) fn delta_rec_head(
     out: &mut [f32],
     (kh, vh, hv, hk, conv_dim): (usize, usize, usize, usize, usize),
     (tiled, row0, n, reset, state_off): (bool, usize, usize, bool, usize),
-    (beta_scale, eps): (f32, f32),
+    (beta_scale, eps, sigmoid_gate): (f32, f32, bool),
 ) {
     const WGR: usize = 256;
     let half = hk / 2;
@@ -1427,7 +1427,8 @@ pub(super) fn delta_rec_head(
         for lane in 0..WGR {
             let (c, hid) = (lane >> 1, lane & 1);
             if hid == 0 && c < hv {
-                let gate = silu(z[row * value_dim + j * hv + c]);
+                let zv = z[row * value_dim + j * hv + c];
+                let gate = if sigmoid_gate { 1.0 / (1.0 + (-zv).exp()) } else { silu(zv) };
                 out[row * value_dim + j * hv + c] = acc2[lane] * inv * norm_w[c] * gate;
             }
         }
@@ -1501,12 +1502,15 @@ fn moe_topk_matches_the_cpu_backend() {
 fn delta_net_matches_the_cpu_reference() {
     use crate::cpu_delta::{run, Layer};
     let mut rng = Lcg(77);
-    for (kh, vh, hk, hv, ksz, tiled) in [
-        (2usize, 2usize, 64usize, 64usize, 4usize, false),
-        (2, 4, 64, 32, 4, true),
-        (4, 8, 128, 96, 4, false),
-        (1, 2, 32, 17, 2, true),
-        (2, 4, 96, 128, 8, false),
+    for (kh, vh, hk, hv, ksz, tiled, sigmoid) in [
+        (2usize, 2usize, 64usize, 64usize, 4usize, false, false),
+        (2, 4, 64, 32, 4, true, false),
+        (4, 8, 128, 96, 4, false, false),
+        (1, 2, 32, 17, 2, true, false),
+        (2, 4, 96, 128, 8, false, false),
+        // sigmoid output gate (Qwen3.8-Flash-Next)
+        (2, 4, 64, 32, 4, true, true),
+        (4, 8, 128, 96, 4, false, true),
     ] {
         let conv_dim = 2 * kh * hk + vh * hv;
         let value_dim = vh * hv;
@@ -1523,7 +1527,7 @@ fn delta_net_matches_the_cpu_reference() {
             beta_scale: 1.0,
             eps: 1e-6,
             tiled_heads: tiled,
-            sigmoid_gate: false,
+            sigmoid_gate: sigmoid,
             conv: &conv,
             dt_bias: &dt_bias,
             decay: &decay,
@@ -1602,13 +1606,13 @@ fn delta_net_matches_the_cpu_reference() {
                     &mut have,
                     (kh, vh, hv, hk, conv_dim),
                     (tiled, row0, n, reset, 0),
-                    (1.0, 1e-6),
+                    (1.0, 1e-6, sigmoid),
                 );
             }
             check_close(
                 &have[row0 * value_dim..],
                 &want,
-                &format!("delta {kh}/{vh} {hk}x{hv} k{ksz} tiled {tiled} run n={n}"),
+                &format!("delta {kh}/{vh} {hk}x{hv} k{ksz} tiled {tiled} sigmoid {sigmoid} run n={n}"),
             );
             row0 += n;
         }

@@ -736,6 +736,19 @@ fn delta_plans() {
         SlotSource::RunState(1)
     );
     assert_eq!(plans[3].groups, [8, 1, 1]);
+    assert_eq!(field(r, "sigmoid_gate"), 0);
+    // the sigmoid output gate (Qwen3.8-Flash-Next) is a push flag of the recurrence and of the gated norm of the column-split and scan paths
+    let sigmoid = DeltaShape { sigmoid_gate: true, ..shape };
+    assert!(delta_supported(&sigmoid));
+    let plans = plan_delta_layer(&sigmoid, &runs, offset).unwrap();
+    assert_eq!(field(&plans[1], "sigmoid_gate"), 1);
+    for cols in [false, true] {
+        for p in plan_delta_layer_with(&sigmoid, &runs, offset, cols).unwrap() {
+            if matches!(p.shader_name, "delta_gnorm" | "scan_delta_post" | "delta_rec_hk128" | "delta_recc_hk128") {
+                assert_eq!(field(&p, "sigmoid_gate"), 1, "{}", p.shader_name);
+            }
+        }
+    }
     assert!(plan_delta_layer(&shape, &runs, 3).is_err());
     assert!(plan_delta_layer(&delta_shape(4, 8, 100, 96, 4), &runs, 0).is_err());
 }

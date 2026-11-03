@@ -2056,13 +2056,17 @@ impl<'a> Tester<'a> {
     /// Gated DeltaNet layer against `cpu_delta` (the host reference): prefill runs of several lengths (shorter than the
     /// convolution history too), decode steps of three sequences in one batch, continued prefill mixed with decode.
     fn delta_cases(&mut self) {
-        for (kh, vh, hk, hv, tiled) in [
-            (2usize, 2usize, 64usize, 64usize, false),
-            (2, 4, 64, 32, true),
-            (4, 8, 128, 128, false),
-            (4, 8, 128, 128, true),
-            (16, 32, 128, 128, true),
-            (2, 4, 128, 96, false),
+        for (kh, vh, hk, hv, tiled, sigmoid) in [
+            (2usize, 2usize, 64usize, 64usize, false, false),
+            (2, 4, 64, 32, true, false),
+            (4, 8, 128, 128, false, false),
+            (4, 8, 128, 128, true, false),
+            (16, 32, 128, 128, true, false),
+            (2, 4, 128, 96, false, false),
+            // sigmoid output gate (Qwen3.8-Flash-Next)
+            (2, 4, 64, 32, true, true),
+            (4, 8, 128, 128, true, true),
+            (2, 4, 128, 96, false, true),
         ] {
             let shape = DeltaShape {
                 k_heads: kh,
@@ -2071,11 +2075,15 @@ impl<'a> Tester<'a> {
                 v_dim: hv,
                 conv_kernel: 4,
                 tiled_heads: tiled,
-                sigmoid_gate: false,
+                sigmoid_gate: sigmoid,
                 beta_scale: 1.0,
                 eps: 1e-6,
             };
-            let label = format!("{kh}/{vh} heads {hk}x{hv} {}", if tiled { "tiled" } else { "grouped" });
+            let label = format!(
+                "{kh}/{vh} heads {hk}x{hv} {}{}",
+                if tiled { "tiled" } else { "grouped" },
+                if sigmoid { " sigmoid gate" } else { "" }
+            );
             match self.device.create_stream() {
                 Ok(s) if s.supports_delta(&shape) => {}
                 Ok(_) => {

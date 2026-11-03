@@ -2,14 +2,14 @@
 #extension GL_GOOGLE_include_directive : enable
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_KHR_shader_subgroup_shuffle : enable
-// FLLM-SHADER: delta_recc | bindings: mixed,beta,alpha,dt_bias,decay,state,out | push: kh,vh,hv,conv_dim,tiled,row0,n,reset,state_off,beta_scale,eps | grid: [vh, ceil(hv / 16), 1] per run
+// FLLM-SHADER: delta_recc | bindings: mixed,beta,alpha,dt_bias,decay,state,out | push: kh,vh,hv,conv_dim,tiled,row0,n,reset,state_off,beta_scale,eps,sigmoid_gate | grid: [vh, ceil(hv / 16), 1] per run
 // Gated DeltaNet, part 2 without the output norm: the same delta-rule recurrence as delta_rec.comp, for 16 value columns of one value head per
 // workgroup, writing the head output o before its gated RMS norm (delta_gnorm.comp applies it afterwards). Value column c is handled by
 // four neighbouring lanes, each holding HK/4 rows of the column's state in registers; their dot products over the key dimension meet through
 // subgroup shuffles, and every lane reads its quarter of the query and key head straight from `mixed` (the lanes of a quarter read the same
 // words). So a token costs no barrier at all, where delta_rec.comp needs about a dozen for the shared exchanges and the norm, and a head runs
 // as ceil(hv / 16) workgroups instead of one. Needs subgroup shuffles and a subgroup size of at least 4 (the planner checks).
-// The recurrent state S[j][i][c] is FP32 at state[state_off + (j * HK + i) * hv + c]; eps is not read (the norm pass applies it).
+// The recurrent state S[j][i][c] is FP32 at state[state_off + (j * HK + i) * hv + c]; eps and sigmoid_gate are not read (the norm pass applies them; they only keep the push block the same as delta_rec's).
 #define WG 64
 #define LPC 4u               // lanes per value column
 #define CW (WG / LPC)        // value columns per workgroup
@@ -39,6 +39,7 @@ layout(push_constant) uniform P {
     uint state_off;
     float beta_scale;
     float eps;
+    uint sigmoid_gate;
 } p;
 
 void main() {

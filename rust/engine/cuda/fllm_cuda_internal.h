@@ -147,8 +147,8 @@ int fllm_sigmoid_mul_launch(cudaStream_t s, float *x, const float *g, size_t n);
 // Gated DeltaNet layer (deltanet.cu)
 int fllm_delta_supported(int kh, int vh, int hk, int hv, int ksz);
 int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, const void *rec_runs, int nrec, int kh, int vh, int hk, int hv, int ksz,
-                      int tiled, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
-                      const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
+                      int tiled, int sigmoid_gate, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
+                      const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
                       float *out);
 // Chunk-parallel scan of the recurrent layers (scan.cu). A window is a list of runs of at most 64 * max_chunks rows; `pad` is the run's first chunk slot
 // (the slots of a window are numbered 0, 1, ... in the order of the runs), `ws` the scratch of fllm_scan_*_floats(.., slots) floats.
@@ -162,8 +162,8 @@ struct FllmRun {
 int fllm_scan_delta_supported(int kh, int vh, int hk, int hv);
 size_t fllm_scan_delta_floats(int vh, int hk, int hv, int slots);
 int fllm_scan_delta_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int kh, int vh, int hk, int hv,
-                           int tiled, float beta_scale, float eps, size_t state_off, const float *mixed, const float *z, const float *beta,
-                           const float *alpha, const float *dt_bias, const float *decay, const float *norm, float *out);
+                           int tiled, int sigmoid_gate, float beta_scale, float eps, size_t state_off, const float *mixed, const float *z,
+                           const float *beta, const float *alpha, const float *dt_bias, const float *decay, const float *norm, float *out);
 // Kimi Delta Attention (KDA) layer (kda.cu)
 int fllm_kda_supported(int heads, int head_dim, int ksz);
 int fllm_copy_cols_launch(cudaStream_t s, float *dst, const float *src, int rows, int width, int dst_stride, int dst_col);

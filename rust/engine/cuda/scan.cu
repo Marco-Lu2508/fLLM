@@ -84,7 +84,7 @@ __global__ void __launch_bounds__(256) scan_delta_prep_kernel(ScanP p, ScanIn in
 
 // grid (vh, max_n, runs), block hv: the gated RMS norm of the head output.
 __global__ void __launch_bounds__(256) scan_delta_post_kernel(ScanP p, ScanIn in, const ScanRun *__restrict__ runs, const float *__restrict__ z,
-                                                              const float *__restrict__ norm, float *__restrict__ out, float eps) {
+                                                              const float *__restrict__ norm, float *__restrict__ out, float eps, int sigmoid_gate) {
     __shared__ float scratch[256];
     const ScanRun run = runs[blockIdx.z];
     const int t = blockIdx.y;
@@ -94,7 +94,8 @@ __global__ void __launch_bounds__(256) scan_delta_post_kernel(ScanP p, ScanIn in
     const float acc = in.o[lr * value_dim + (size_t)j * hv + c];
     const float ss = sc_block_sum(acc * acc, scratch);
     const float inv = 1.0f / sqrtf(ss / (float)hv + eps);
-    out[row * value_dim + (size_t)j * hv + c] = acc * inv * norm[c] * sc_silu(z[row * value_dim + (size_t)j * hv + c]);
+    const float zv = z[row * value_dim + (size_t)j * hv + c];
+    out[row * value_dim + (size_t)j * hv + c] = acc * inv * norm[c] * (sigmoid_gate ? 1.0f / (1.0f + expf(-zv)) : sc_silu(zv));
 }
 
 static int scan_slots(const ScanRun *runs, int nruns) {
@@ -112,8 +113,8 @@ size_t fllm_scan_delta_floats(int vh, int hk, int hv, int slots) { return scan_p
 
 // `d_runs`: the window's runs on the device (row0 = first row of the window, n <= 64 * max_chunks, pad = first chunk slot), `h_runs` the same on the host.
 int fllm_scan_delta_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, const void *d_runs, int nruns, int max_chunks, int kh, int vh, int hk, int hv,
-                           int tiled, float beta_scale, float eps, size_t state_off, const float *mixed, const float *z, const float *beta,
-                           const float *alpha, const float *dt_bias, const float *decay, const float *norm, float *out) {
+                           int tiled, int sigmoid_gate, float beta_scale, float eps, size_t state_off, const float *mixed, const float *z,
+                           const float *beta, const float *alpha, const float *dt_bias, const float *decay, const float *norm, float *out) {
     const int slots = scan_slots(h_runs, nruns);
     ScanPlan sp = scan_plan(ws, hk, hv, vh, SF_RANK1 | SF_BSAME, slots);
     sp.p.state_off = state_off;
@@ -125,7 +126,7 @@ int fllm_scan_delta_launch(cudaStream_t s, float *ws, const FllmRun *h_runs, con
     scan_delta_prep_kernel<<<dim3(max_chunks * SC, nruns), 256, 0, s>>>(sp.p, sp.in, r, mixed, beta, alpha, dt_bias, decay, kh, conv_dim, tiled, beta_scale);
     if (int e = fllm_check_launch("scan_delta_prep")) return e;
     if (int e = scan_core(s, sp.p, sp.in, r, nruns, max_chunks)) return e;
-    scan_delta_post_kernel<<<dim3(vh, max_chunks * SC, nruns), hv, 0, s>>>(sp.p, sp.in, r, z, norm, out, eps);
+    scan_delta_post_kernel<<<dim3(vh, max_chunks * SC, nruns), hv, 0, s>>>(sp.p, sp.in, r, z, norm, out, eps, sigmoid_gate);
     return fllm_check_launch("scan_delta_post");
 }
 

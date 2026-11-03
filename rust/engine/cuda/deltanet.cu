@@ -3,7 +3,7 @@
 // Mirrors rust/engine/src/cpu_delta.rs (the reference): causal convolution with SiLU over the channels [q|k|v], L2 normalisation of q
 // and k per head, decay exp(A * softplus(alpha + dt_bias)), write strength beta_scale * sigmoid(beta), the delta-rule update
 //     S = S * decay;  S += k (x) ((v - S^T k) * strength);  o = S^T q
-// and the gated RMS norm norm(o) * weight * silu(z). Two kernels per layer:
+// and the gated RMS norm norm(o) * weight * silu(z) (sigmoid(z) when sigmoid_gate is set: Qwen3.8-Flash-Next). Two kernels per layer:
 //   1. delta_conv_kernel: convolution + SiLU + head normalisation, tokens of a run in chunks; keeps the convolution history in VRAM.
 //   2. delta_rec_kernel<HK>: one block per (run, value head), one thread per value column; the column of the state (HK values) lives
 //      in registers while the block walks the tokens of the run in order. Gates, readout and the gated norm are fused in.
@@ -95,7 +95,7 @@ __global__ void __launch_bounds__(256) delta_rec_kernel(const float *__restrict_
                                                         const float *__restrict__ dt_bias, const float *__restrict__ decay,
                                                         const float *__restrict__ norm, const DeltaRun *__restrict__ runs,
                                                         float *__restrict__ out, int kh, int vh, int conv_dim, int tiled,
-                                                        size_t state_off, float beta_scale, float eps) {
+                                                        size_t state_off, float beta_scale, float eps, int sigmoid_gate) {
     constexpr int HALF = HK / 2;
     __shared__ float scratch[32];
     const DeltaRun run = runs[blockIdx.y];
@@ -157,7 +157,8 @@ __global__ void __launch_bounds__(256) delta_rec_kernel(const float *__restrict_
         const float ss = block_sum_n(half == 0 ? acc * acc : 0.f, scratch);
         const float inv = 1.0f / sqrtf(ss / (float)hv + eps);
         if (half == 0) {
-            const float gate = silu_f(z[row * value_dim + j * hv + c]);
+            const float zv = z[row * value_dim + j * hv + c];
+            const float gate = sigmoid_gate ? 1.0f / (1.0f + expf(-zv)) : silu_f(zv);
             out[row * value_dim + j * hv + c] = acc * inv * nw * gate;
         }
     }
@@ -171,8 +172,8 @@ int fllm_delta_supported(int kh, int vh, int hk, int hv, int ksz) {
 
 // `runs`: every run (the convolution handles all of them); `rec_runs`: the runs the serial recurrence handles (the others take the chunked scan of scan.cu).
 int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, const void *rec_runs, int nrec, int kh, int vh, int hk, int hv, int ksz,
-                      int tiled, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z, const float *beta,
-                      const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
+                      int tiled, int sigmoid_gate, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
+                      const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay, const float *norm, float *mixed,
                       float *out) {
     if (nruns <= 0 || max_n <= 0) return 0;
     if (!fllm_delta_supported(kh, vh, hk, hv, ksz)) return fllm_set_error("DeltaNet shape not supported by the CUDA kernels");
@@ -187,9 +188,9 @@ int fllm_delta_launch(cudaStream_t s, const void *runs, int nruns, int max_n, co
     const dim3 g2(vh, nrec);
     if (hk == 128)
         delta_rec_kernel<128><<<g2, 2 * hv, 0, s>>>(mixed, z, beta, alpha, dt_bias, decay, norm, rr, out, kh, vh, conv_dim, tiled, state_off,
-                                                beta_scale, eps);
+                                                beta_scale, eps, sigmoid_gate);
     else
         delta_rec_kernel<64><<<g2, 2 * hv, 0, s>>>(mixed, z, beta, alpha, dt_bias, decay, norm, rr, out, kh, vh, conv_dim, tiled, state_off,
-                                               beta_scale, eps);
+                                               beta_scale, eps, sigmoid_gate);
     return fllm_check_launch("delta_rec");
 }

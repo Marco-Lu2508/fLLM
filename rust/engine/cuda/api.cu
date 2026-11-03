@@ -1798,8 +1798,8 @@ extern "C" {
 
 // Gated DeltaNet layer: `runs` is nruns DeltaRun records (24 bytes each, see deltanet.cu) in host memory.
 int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n, int kh, int vh, int hk, int hv, int ksz, int tiled,
-                          float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv, const float *z,
-                          const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay,
+                          int sigmoid_gate, float beta_scale, float eps, size_t state_off, size_t rec_bytes, const float *qkv,
+                          const float *z, const float *beta, const float *alpha, const float *convw, const float *dt_bias, const float *decay,
                           const float *norm, float *mixed, float *out) {
     PREP(st);
     const FllmRun *hr = static_cast<const FllmRun *>(runs);
@@ -1827,14 +1827,14 @@ int fllm_cuda_delta_layer(FllmStream *st, const void *runs, int nruns, int max_n
     else if (!shortr.empty()) {
         if (int e = stage(st, 4, shortr.data(), shortr.size() * sizeof(FllmRun), &ds)) return e;
     }
-    if (int e = fllm_delta_launch(st->s, d, nruns, max_n, ds, (int)shortr.size(), kh, vh, hk, hv, ksz, tiled, beta_scale, eps, state_off, rec_bytes, qkv, z,
-                                  beta, alpha, convw, dt_bias, decay, norm, mixed, out))
+    if (int e = fllm_delta_launch(st->s, d, nruns, max_n, ds, (int)shortr.size(), kh, vh, hk, hv, ksz, tiled, sigmoid_gate, beta_scale, eps, state_off, rec_bytes,
+                                  qkv, z, beta, alpha, convw, dt_bias, decay, norm, mixed, out))
         return e;
     const int rc = scan_windows(
         st, longr, [&](int slots) { return fllm_scan_delta_floats(vh, hk, hv, slots); },
         [&](const std::vector<FllmRun> &win, void *dw, int n, int chunks, int) {
-            return fllm_scan_delta_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, kh, vh, hk, hv, tiled, beta_scale, eps, state_off, mixed, z, beta,
-                                          alpha, dt_bias, decay, norm, out);
+            return fllm_scan_delta_launch(st->s, st->scan_ws, win.data(), dw, n, chunks, kh, vh, hk, hv, tiled, sigmoid_gate, beta_scale, eps, state_off, mixed, z,
+                                          beta, alpha, dt_bias, decay, norm, out);
         });
     pick.end(rc == 0);
     return rc;

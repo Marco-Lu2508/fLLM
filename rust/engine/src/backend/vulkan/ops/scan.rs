@@ -330,7 +330,7 @@ pub fn plan_scan_delta_run(shape: &DeltaShape, run_index: usize, run: &RunSpec, 
             .scratch("scratch", SCAN_SCRATCH_ID, scan_floats(spec.hk, spec.hv, spec.heads, flags, slots) * 4, Access::ReadWrite);
         plans.push(plan("scan_delta_prep", prep, [n as u32, 1, 1], prep_slots)?);
         plans.extend(plan_scan_core(&spec, n, reset, run_index, &state)?);
-        let post = Push::new().u("vh", shape.v_heads).u("hk", shape.k_dim).u("hv", shape.v_dim).u("row0", row0).u("n", n).u("slots", slots).f("eps", shape.eps);
+        let post = Push::new().u("vh", shape.v_heads).u("hk", shape.k_dim).u("hv", shape.v_dim).u("row0", row0).u("n", n).u("slots", slots).f("eps", shape.eps).b("sigmoid_gate", shape.sigmoid_gate);
         let post_slots = Slots::new()
             .read("z")
             .read("norm")
