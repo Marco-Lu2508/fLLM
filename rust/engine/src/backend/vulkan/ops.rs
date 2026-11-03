@@ -761,6 +761,13 @@ pub fn format_tag(quant: crate::backend::QuantType) -> Option<(&'static str, usi
         Q::IQ4_NL => ("iq4_nl", 32),
         Q::Mxfp4 => ("mxfp4", 32),
         Q::Q2_0 => ("q2_0", 64),
+        Q::IQ2_XXS => ("iq2_xxs", 256),
+        Q::IQ2_XS => ("iq2_xs", 256),
+        Q::IQ2_S => ("iq2_s", 256),
+        Q::IQ3_XXS => ("iq3_xxs", 256),
+        Q::IQ3_S => ("iq3_s", 256),
+        Q::IQ1_S => ("iq1_s", 256),
+        Q::IQ1_M => ("iq1_m", 256),
         _ => return None,
     })
 }
@@ -784,6 +791,13 @@ fn embed_shader(tag: &str) -> Option<&'static str> {
         "iq4_nl" => "embed_iq4_nl",
         "mxfp4" => "embed_mxfp4",
         "q2_0" => "embed_q2_0",
+        "iq2_xxs" => "embed_iq2_xxs",
+        "iq2_xs" => "embed_iq2_xs",
+        "iq2_s" => "embed_iq2_s",
+        "iq3_xxs" => "embed_iq3_xxs",
+        "iq3_s" => "embed_iq3_s",
+        "iq1_s" => "embed_iq1_s",
+        "iq1_m" => "embed_iq1_m",
         _ => return None,
     })
 }

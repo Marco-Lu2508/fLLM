@@ -7,6 +7,7 @@
 //   WQ_W(i)     the 32-bit word i of the weight buffer (a macro, so the same decoders serve a bound buffer and a buffer reference)
 //   WQ_OFF1, WQ_OFF2, WQ_OFF3   word offsets of planes 1..3 (push constants)
 //   exactly one of FMT_Q4_0 FMT_Q4_1 FMT_Q5_0 FMT_Q5_1 FMT_Q8_0 FMT_Q2_K FMT_Q3_K FMT_Q4_K FMT_Q5_K FMT_Q6_K FMT_IQ4_NL FMT_MXFP4 FMT_Q2_0
+//   FMT_IQ2_XXS FMT_IQ2_XS FMT_IQ2_S FMT_IQ3_XXS FMT_IQ3_S FMT_IQ1_S FMT_IQ1_M (the IQ decoders use the pure helpers of _iq_common.glsl and the generated _iq_grid_*.glsl tables)
 // This file defines QK (weights per block), HAS_WM and
 //   void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm)
 // g = global block index (row * blocks_per_row + block), cin = chunk (8 consecutive weights) inside the block: eight small signed integers q[0..7] as
@@ -248,6 +249,144 @@ void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float 
     p1 = wq_sub8(wq_spread2(h >> 8), 1u);
     ws = wq_f16at(WQ_OFF1, g);
     wm = 0.0;
+}
+#elif defined(FMT_IQ2_XXS)
+// IQ2_XXS, device layout (INTERFACE_QUANT.md): plane 0 = qs (64 bytes per block, as in the file: per group of 32 values one word of four grid indices and
+// one word of four 7-bit sign fields with the 4-bit scale on top), plane 1 = d (binary16 per block).
+// chunk cin = 4 * group + l: grid entry l of the group (magnitudes 8 / 25 / 43), sign field l; weight = d * (0.5 + scale) * 0.25 * magnitude * sign.
+#define QK 256
+#include "_iq_common.glsl"
+#include "_iq_grid_iq2xxs.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint b = g * 16u + ((cin >> 2) << 1);
+    uint l = cin & 3u;
+    uint sw = WQ_W(b + 1u);
+    uint idx = (WQ_W(b) >> (l << 3)) & 255u;
+    uint e = iq_entry(IQ2XXS_GRID2[idx >> 1], idx);
+    uint s8 = iq_signs8((sw >> (7u * l)) & 127u);
+    p0 = iq_apply(iq_mag2(iq_spread2(e & 255u)), s8);
+    p1 = iq_apply(iq_mag2(iq_spread2(e >> 8)), s8 >> 4);
+    ws = wq_f16at(WQ_OFF1, g) * ((0.5 + float(sw >> 28)) * 0.25);
+    wm = 0.0;
+}
+#elif defined(FMT_IQ2_XS)
+// IQ2_XS, device layout: plane 0 = qs (64 bytes per block, as in the file: 32 x u16, 9 bits grid index + 7 bits sign field), plane 1 = scales (8 bytes,
+// two 4-bit scales per group of 32 values), plane 2 = d (binary16 per block).
+// chunk cin = 4 * group + l: u16 l of the group; weight = d * (0.5 + scale[l / 2]) * 0.25 * magnitude * sign.
+#define QK 256
+#include "_iq_common.glsl"
+#include "_iq_grid_iq2xs.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint grp = cin >> 2;
+    uint l = cin & 3u;
+    uint q = (WQ_W(g * 16u + (grp << 1) + (l >> 1)) >> ((l & 1u) << 4)) & 0xFFFFu;
+    uint idx = q & 511u;
+    uint e = iq_entry(IQ2XS_GRID2[idx >> 1], idx);
+    uint s8 = iq_signs8(q >> 9);
+    uint sc = (WQ_W(WQ_OFF1 + g * 2u + (grp >> 2)) >> ((grp & 3u) << 3)) >> ((l >> 1) << 2);
+    p0 = iq_apply(iq_mag2(iq_spread2(e & 255u)), s8);
+    p1 = iq_apply(iq_mag2(iq_spread2(e >> 8)), s8 >> 4);
+    ws = wq_f16at(WQ_OFF2, g) * ((0.5 + float(sc & 15u)) * 0.25);
+    wm = 0.0;
+}
+#elif defined(FMT_IQ2_S)
+// IQ2_S, device layout: plane 0 = qs (64 bytes per block, as in the file: 32 grid index bytes, then 32 sign bytes), plane 1 = 16 bytes (qh: 8 bytes with
+// two high index bits per entry, then the 8 scale bytes with two 4-bit scales), plane 2 = d (binary16 per block).
+// chunk cin = 4 * group + l: entry l of the group, index = qs | 2 bits of qh << 8; weight = d * (0.5 + scale[l / 2]) * 0.25 * magnitude * sign.
+#define QK 256
+#include "_iq_common.glsl"
+#include "_iq_grid_iq2s.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint grp = cin >> 2;
+    uint l = cin & 3u;
+    uint sh = (grp & 3u) << 3;
+    uint qh = (WQ_W(WQ_OFF1 + g * 4u + (grp >> 2)) >> sh) >> (l << 1);
+    uint idx = ((WQ_W(g * 16u + grp) >> (l << 3)) & 255u) | ((qh & 3u) << 8);
+    uint e = iq_entry(IQ2S_GRID2[idx >> 1], idx);
+    uint s8 = (WQ_W(g * 16u + 8u + grp) >> (l << 3)) & 255u;
+    uint sc = (WQ_W(WQ_OFF1 + g * 4u + 2u + (grp >> 2)) >> sh) >> ((l >> 1) << 2);
+    p0 = iq_apply(iq_mag2(iq_spread2(e & 255u)), s8);
+    p1 = iq_apply(iq_mag2(iq_spread2(e >> 8)), s8 >> 4);
+    ws = wq_f16at(WQ_OFF2, g) * ((0.5 + float(sc & 15u)) * 0.25);
+    wm = 0.0;
+}
+#elif defined(FMT_IQ3_XXS)
+// IQ3_XXS, device layout: plane 0 = qs (64 bytes per block, as in the file: grid indices, 8 per group of 32 values), plane 1 = 32 bytes (one word per group:
+// four 7-bit sign fields with the 4-bit scale on top), plane 2 = d (binary16 per block).
+// chunk cin = 4 * group + l: two grid entries (4 magnitudes each) and sign field l; weight = d * (0.5 + scale) * 0.5 * magnitude * sign.
+#define QK 256
+#include "_iq_common.glsl"
+#include "_iq_grid_iq3xxs.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint grp = cin >> 2;
+    uint l = cin & 3u;
+    uint h = (WQ_W(g * 16u + (grp << 1) + (l >> 1)) >> ((l & 1u) << 4)) & 0xFFFFu;
+    uint ss = WQ_W(WQ_OFF1 + g * 8u + grp);
+    uint s8 = iq_signs8((ss >> (7u * l)) & 127u);
+    p0 = iq_apply(IQ3XXS_GRID[h & 255u], s8);
+    p1 = iq_apply(IQ3XXS_GRID[h >> 8], s8 >> 4);
+    ws = wq_f16at(WQ_OFF2, g) * ((0.5 + float(ss >> 28)) * 0.5);
+    wm = 0.0;
+}
+#elif defined(FMT_IQ3_S)
+// IQ3_S, device layout: plane 0 = qs (64 bytes per block, as in the file: grid index low bytes, 8 per group of 32 values), plane 1 = signs (32 bytes, one
+// byte per 8 values), plane 2 = 16 bytes (qh: 8 bytes with one high index bit per entry; the 4 scale bytes with two 4-bit scales; d as binary16; 2 unused).
+// chunk cin = 4 * group + l: two grid entries (4 magnitudes each), sign byte l; weight = d * (1 + 2 * scale) * magnitude * sign, one scale nibble per group.
+#define QK 256
+#include "_iq_common.glsl"
+#include "_iq_grid_iq3s.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint grp = cin >> 2;
+    uint l = cin & 3u;
+    uint h = (WQ_W(g * 16u + (grp << 1) + (l >> 1)) >> ((l & 1u) << 4)) & 0xFFFFu;
+    uint qh = (WQ_W(WQ_OFF2 + g * 4u + (grp >> 2)) >> ((grp & 3u) << 3)) >> (l << 1);
+    uint s8 = (WQ_W(WQ_OFF1 + g * 8u + grp) >> (l << 3)) & 255u;
+    uint sc = (WQ_W(WQ_OFF2 + g * 4u + 2u) >> ((grp >> 1) << 3)) >> ((grp & 1u) << 2);
+    p0 = iq_apply(IQ3S_GRID[(h & 255u) | ((qh & 1u) << 8)], s8);
+    p1 = iq_apply(IQ3S_GRID[(h >> 8) | ((qh & 2u) << 7)], s8 >> 4);
+    ws = unpackHalf2x16(WQ_W(WQ_OFF2 + g * 4u + 3u)).x * float(1u + 2u * (sc & 15u));
+    wm = 0.0;
+}
+#elif defined(FMT_IQ1_S)
+// IQ1_S, device layout: plane 0 = qs (32 bytes per block, as in the file: grid index low bytes, 4 per group of 32 values), plane 1 = qh (16 bytes: one u16 per
+// group: 3 high index bits for each of the 4 entries, a 3-bit scale at bits 12..14, the sign of the shift at bit 15), plane 2 = d (binary16 per block).
+// chunk cin = 4 * group + l: entry l of the group (values -1, 0, 1); weight = d * (2 * scale + 1) * (value + delta), delta = +-0.125, i.e. ws * q + wm.
+#define QK 256
+#define HAS_WM 1
+#include "_iq_common.glsl"
+#include "_iq_grid_iq1s.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint grp = cin >> 2;
+    uint l = cin & 3u;
+    uint qh = (WQ_W(WQ_OFF1 + g * 4u + (grp >> 1)) >> ((grp & 1u) << 4)) & 0xFFFFu;
+    uint idx = ((WQ_W(g * 8u + grp) >> (l << 3)) & 255u) | (((qh >> (3u * l)) & 7u) << 8);
+    uint e = iq_entry(IQ1S_GRID2[idx >> 1], idx);
+    p0 = iq_dec1(iq_spread2(e & 255u));
+    p1 = iq_dec1(iq_spread2(e >> 8));
+    ws = wq_f16at(WQ_OFF2, g) * float(2u * ((qh >> 12) & 7u) + 1u);
+    wm = ws * (((qh & 0x8000u) != 0u) ? -0.125 : 0.125);
+}
+#elif defined(FMT_IQ1_M)
+// IQ1_M, device layout: plane 0 = qs (32 bytes per block, as in the file), plane 1 = qh (16 bytes: 2 bytes per group of 32 values, a nibble per entry: 3 high
+// index bits and the sign of the shift), plane 2 = the 8 scale bytes (four u16 with 3-bit scales, one per 16 values), plane 3 = d (binary16, assembled on the
+// host from the top nibbles of the four scale words).
+// chunk cin = 4 * group + l: entry l of the group (values -1, 0, 1); weight = d * (2 * scale + 1) * (value + delta), delta = +-0.125, i.e. ws * q + wm.
+#define QK 256
+#define HAS_WM 1
+#include "_iq_common.glsl"
+#include "_iq_grid_iq1s.glsl"
+void wchunk(uint g, uint cin, out uint p0, out uint p1, out float ws, out float wm) {
+    uint grp = cin >> 2;
+    uint l = cin & 3u;
+    uint hb = (grp << 1) + (l >> 1);
+    uint qh = (WQ_W(WQ_OFF1 + g * 4u + (hb >> 2)) >> ((hb & 3u) << 3)) >> ((l & 1u) << 2);
+    uint idx = ((WQ_W(g * 8u + grp) >> (l << 3)) & 255u) | ((qh & 7u) << 8);
+    uint e = iq_entry(IQ1S_GRID2[idx >> 1], idx);
+    uint sc = (WQ_W(WQ_OFF2 + g * 2u + (grp >> 2)) >> (((grp >> 1) & 1u) << 4)) >> (6u * (grp & 1u) + (l >> 1) * 3u);
+    p0 = iq_dec1(iq_spread2(e & 255u));
+    p1 = iq_dec1(iq_spread2(e >> 8));
+    ws = wq_f16at(WQ_OFF3, g) * float(2u * (sc & 7u) + 1u);
+    wm = ws * (((qh & 8u) != 0u) ? -0.125 : 0.125);
 }
 #else
 #error "define one FMT_* macro (see variants_ops.list)"

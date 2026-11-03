@@ -80,6 +80,63 @@ fn spread(qh: u32) -> (u32, u32) {
     )
 }
 
+/// The generated GLSL grids (`_iq_grid_*.glsl`), parsed from the shader text the shaders are compiled from: the mirror reads exactly what the GPU reads.
+mod iq_tables {
+    use std::sync::LazyLock;
+
+    /// The words of `const uint NAME[N] = uint[N](...)` in the text of a generated grid file.
+    pub fn parse(text: &str, name: &str) -> Vec<u32> {
+        let start = text.find(&format!("const uint {name}[")).unwrap_or_else(|| panic!("{name} missing"));
+        let body = &text[text[start..].find("uint[").map(|i| start + i).unwrap()..];
+        let open = body.find('(').unwrap();
+        let close = body.find(");").unwrap();
+        body[open + 1..close]
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| u32::from_str_radix(t.trim_start_matches("0x").trim_end_matches('u'), 16).unwrap())
+            .collect()
+    }
+
+    macro_rules! grid {
+        ($id:ident, $file:literal, $name:literal) => {
+            pub static $id: LazyLock<Vec<u32>> = LazyLock::new(|| parse(include_str!(concat!("../../../../shaders/vulkan/", $file)), $name));
+        };
+    }
+    grid!(IQ2XXS_GRID2, "_iq_grid_iq2xxs.glsl", "IQ2XXS_GRID2");
+    grid!(IQ2XS_GRID2, "_iq_grid_iq2xs.glsl", "IQ2XS_GRID2");
+    grid!(IQ2S_GRID2, "_iq_grid_iq2s.glsl", "IQ2S_GRID2");
+    grid!(IQ3XXS_GRID, "_iq_grid_iq3xxs.glsl", "IQ3XXS_GRID");
+    grid!(IQ3S_GRID, "_iq_grid_iq3s.glsl", "IQ3S_GRID");
+    grid!(IQ1S_GRID2, "_iq_grid_iq1s.glsl", "IQ1S_GRID2");
+}
+
+// the pure helpers of `_iq_common.glsl`
+fn iq_signs8(s7: u32) -> u32 {
+    s7 | ((s7.count_ones() & 1) << 7)
+}
+
+fn iq_apply(v: u32, s4: u32) -> u32 {
+    let m = (((s4 & 15).wrapping_mul(0x0020_4081)) & 0x0101_0101).wrapping_mul(255);
+    (v ^ m).wrapping_add(m & 0x0101_0101)
+}
+
+fn iq_spread2(x: u32) -> u32 {
+    (x | (x << 6) | (x << 12) | (x << 18)) & 0x0303_0303
+}
+
+fn iq_mag2(c: u32) -> u32 {
+    0x0808_0808u32.wrapping_add(c.wrapping_mul(17)).wrapping_add((c >> 1) & 0x0101_0101)
+}
+
+fn iq_dec1(c: u32) -> u32 {
+    ((c | 0x8080_8080).wrapping_sub(0x0101_0101)) ^ 0x8080_8080
+}
+
+fn iq_entry(table: &[u32], idx: usize) -> u32 {
+    (table[idx >> 1] >> ((idx & 1) << 4)) & 0xffff
+}
+
 /// `wchunk(g, cin)` of the format of `layout` on the device buffer `buf`.
 pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
     let off1 = layout.plane_word_offset[1];
@@ -152,6 +209,86 @@ pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
             p1 = sub8(spread(h >> 8), 1);
             ws = f16at(buf, off1, g);
             wm = 0.0;
+        }
+        "iq2_xxs" => {
+            let b = g * 16 + ((cin >> 2) << 1);
+            let l = (cin & 3) as u32;
+            let sw = w(b + 1);
+            let idx = ((w(b) >> (l << 3)) & 255) as usize;
+            let e = iq_entry(&iq_tables::IQ2XXS_GRID2, idx);
+            let s8 = iq_signs8((sw >> (7 * l)) & 127);
+            p0 = iq_apply(iq_mag2(iq_spread2(e & 255)), s8);
+            p1 = iq_apply(iq_mag2(iq_spread2(e >> 8)), s8 >> 4);
+            ws = f16at(buf, off1, g) * ((0.5 + (sw >> 28) as f32) * 0.25);
+            wm = 0.0;
+        }
+        "iq2_xs" => {
+            let (grp, l) = (cin >> 2, (cin & 3) as u32);
+            let q = (w(g * 16 + (grp << 1) + (l as usize >> 1)) >> ((l & 1) << 4)) & 0xffff;
+            let idx = (q & 511) as usize;
+            let e = iq_entry(&iq_tables::IQ2XS_GRID2, idx);
+            let s8 = iq_signs8(q >> 9);
+            let sc = (w(off1 as usize + g * 2 + (grp >> 2)) >> ((grp & 3) << 3)) >> ((l >> 1) << 2);
+            p0 = iq_apply(iq_mag2(iq_spread2(e & 255)), s8);
+            p1 = iq_apply(iq_mag2(iq_spread2(e >> 8)), s8 >> 4);
+            ws = f16at(buf, off2, g) * ((0.5 + (sc & 15) as f32) * 0.25);
+            wm = 0.0;
+        }
+        "iq2_s" => {
+            let (grp, l) = (cin >> 2, (cin & 3) as u32);
+            let sh = ((grp & 3) << 3) as u32;
+            let qh = (w(off1 as usize + g * 4 + (grp >> 2)) >> sh) >> (l << 1);
+            let idx = (((w(g * 16 + grp) >> (l << 3)) & 255) | ((qh & 3) << 8)) as usize;
+            let e = iq_entry(&iq_tables::IQ2S_GRID2, idx);
+            let s8 = (w(g * 16 + 8 + grp) >> (l << 3)) & 255;
+            let sc = (w(off1 as usize + g * 4 + 2 + (grp >> 2)) >> sh) >> ((l >> 1) << 2);
+            p0 = iq_apply(iq_mag2(iq_spread2(e & 255)), s8);
+            p1 = iq_apply(iq_mag2(iq_spread2(e >> 8)), s8 >> 4);
+            ws = f16at(buf, off2, g) * ((0.5 + (sc & 15) as f32) * 0.25);
+            wm = 0.0;
+        }
+        "iq3_xxs" => {
+            let (grp, l) = (cin >> 2, (cin & 3) as u32);
+            let h = (w(g * 16 + (grp << 1) + (l as usize >> 1)) >> ((l & 1) << 4)) & 0xffff;
+            let ss = w(off1 as usize + g * 8 + grp);
+            let s8 = iq_signs8((ss >> (7 * l)) & 127);
+            p0 = iq_apply(iq_tables::IQ3XXS_GRID[(h & 255) as usize], s8);
+            p1 = iq_apply(iq_tables::IQ3XXS_GRID[(h >> 8) as usize], s8 >> 4);
+            ws = f16at(buf, off2, g) * ((0.5 + (ss >> 28) as f32) * 0.5);
+            wm = 0.0;
+        }
+        "iq3_s" => {
+            let (grp, l) = (cin >> 2, (cin & 3) as u32);
+            let h = (w(g * 16 + (grp << 1) + (l as usize >> 1)) >> ((l & 1) << 4)) & 0xffff;
+            let qh = (w(off2 as usize + g * 4 + (grp >> 2)) >> ((grp & 3) << 3)) >> (l << 1);
+            let s8 = (w(off1 as usize + g * 8 + grp) >> (l << 3)) & 255;
+            let sc = (w(off2 as usize + g * 4 + 2) >> ((grp >> 1) << 3)) >> ((grp & 1) << 2);
+            p0 = iq_apply(iq_tables::IQ3S_GRID[((h & 255) | ((qh & 1) << 8)) as usize], s8);
+            p1 = iq_apply(iq_tables::IQ3S_GRID[((h >> 8) | ((qh & 2) << 7)) as usize], s8 >> 4);
+            ws = half2(w(off2 as usize + g * 4 + 3)).0 * (1 + 2 * (sc & 15)) as f32;
+            wm = 0.0;
+        }
+        "iq1_s" => {
+            let (grp, l) = (cin >> 2, (cin & 3) as u32);
+            let qh = (w(off1 as usize + g * 4 + (grp >> 1)) >> ((grp & 1) << 4)) & 0xffff;
+            let idx = (((w(g * 8 + grp) >> (l << 3)) & 255) | (((qh >> (3 * l)) & 7) << 8)) as usize;
+            let e = iq_entry(&iq_tables::IQ1S_GRID2, idx);
+            p0 = iq_dec1(iq_spread2(e & 255));
+            p1 = iq_dec1(iq_spread2(e >> 8));
+            ws = f16at(buf, off2, g) * (2 * ((qh >> 12) & 7) + 1) as f32;
+            wm = ws * if qh & 0x8000 != 0 { -0.125 } else { 0.125 };
+        }
+        "iq1_m" => {
+            let (grp, l) = (cin >> 2, (cin & 3) as u32);
+            let hb = (grp << 1) + (l as usize >> 1);
+            let qh = (w(off1 as usize + g * 4 + (hb >> 2)) >> ((hb & 3) << 3)) >> ((l & 1) << 2);
+            let idx = (((w(g * 8 + grp) >> (l << 3)) & 255) | ((qh & 7) << 8)) as usize;
+            let e = iq_entry(&iq_tables::IQ1S_GRID2, idx);
+            let sc = (w(off2 as usize + g * 2 + (grp >> 2)) >> (((grp >> 1) & 1) << 4)) >> (6 * (grp & 1) as u32 + (l >> 1) * 3);
+            p0 = iq_dec1(iq_spread2(e & 255));
+            p1 = iq_dec1(iq_spread2(e >> 8));
+            ws = f16at(buf, off3, g) * (2 * (sc & 7) + 1) as f32;
+            wm = ws * if qh & 8 != 0 { -0.125 } else { 0.125 };
         }
         "nvfp4" => {
             let s = cin >> 1;

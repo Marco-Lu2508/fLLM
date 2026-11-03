@@ -306,6 +306,18 @@ mod tests {
         assert_eq!(prepare("w", &mlx, QuantType::Other(m.type_id()), 4, 128, 1.0, u64::MAX).unwrap().quant, QuantType::Other(m.type_id()));
     }
 
+    /// The IQ1 / IQ2 / IQ3 families have shaders: the file bytes and the type stay as they are (no expansion to Q5_K or binary16).
+    #[test]
+    fn iq_weights_stay_packed_on_upload() {
+        let mut rng = crate::cpu_selftest::Lcg(9);
+        for quant in [QuantType::IQ2_XXS, QuantType::IQ2_XS, QuantType::IQ2_S, QuantType::IQ3_XXS, QuantType::IQ3_S, QuantType::IQ1_S, QuantType::IQ1_M] {
+            let raw = crate::cpu_selftest::random_weights(quant.to_gguf_type_id(), 3, 512, &mut rng);
+            let prepared = prepare("w", &raw, quant, 3, 512, 1.0, u64::MAX).unwrap();
+            assert_eq!(prepared.quant, quant);
+            assert_eq!(prepared.bytes.len(), raw.len());
+        }
+    }
+
     /// FP8M (codes and a binary16 scale per row) is block-wise FP8 with tiles of one row: the same weights, the scales widened to f32.
     #[test]
     fn per_row_scaled_fp8_is_converted_to_block_wise_fp8() {

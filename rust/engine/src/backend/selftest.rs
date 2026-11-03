@@ -1139,6 +1139,11 @@ impl<'a> Tester<'a> {
     }
 
     /// The members of `list` the filter lets through.
+    /// GGML types of the IQ1 / IQ2 / IQ3 families (IQ4_NL and IQ4_XS excluded).
+    fn is_iq_family(kind: u32) -> bool {
+        matches!(kind, 16..=19 | 21 | 22 | 29)
+    }
+
     fn kinds(&self, list: &[u32]) -> Vec<u32> {
         list.iter().copied().filter(|&k| self.filter.wants_kind(k)).collect()
     }
@@ -1859,11 +1864,15 @@ impl<'a> Tester<'a> {
             let r = self.moe_topk(3, 64, 8, normalize);
             self.record("moe top-k", &format!("3 rows 64 experts k8{}", if normalize { " norm" } else { "" }), r);
         }
-        for kind in self.kinds(&[12u32, 13, 14, 2, 8, 20, 39, 42]) {
-            let r = self.moe_linear(kind, 130, 512, 6, 3, kind == 39 || kind == 12);
+        for kind in self.kinds(&[12u32, 13, 14, 2, 8, 20, 39, 42, 16, 17, 18, 19, 21, 22, 29]) {
+            // the IQ1 / IQ2 / IQ3 expert products run on devices with a decoder for the format (the others re-quantize them at upload)
+            if Self::is_iq_family(kind) && !self.device.capabilities().supports_quant(QuantType::from_gguf_type_id(kind)) {
+                continue;
+            }
+            let r = self.moe_linear(kind, 130, 512, 6, 3, kind == 39 || kind == 12 || kind == 21);
             self.record(
                 &format!("moe linear {}", format_name(kind)),
-                &format!("6 experts 130x512, 6 slots{}", if kind == 39 || kind == 12 { " +bias" } else { "" }),
+                &format!("6 experts 130x512, 6 slots{}", if kind == 39 || kind == 12 || kind == 21 { " +bias" } else { "" }),
                 r,
             );
         }
@@ -2426,7 +2435,7 @@ impl<'a> Tester<'a> {
         }
         // Rows whose width is a multiple of 256 use the aligned device layouts of the legacy and Q8_0 formats
         // (and the tensor-core / int8 paths when they are not disabled by the exact-math switch).
-        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42]) {
+        for kind in self.kinds(&[2u32, 3, 6, 7, 8, 12, 13, 14, 20, 39, 42, 16, 17, 18, 19, 21, 22, 29]) {
             for batch in [1, 2, 5] {
                 let r = self.linear(kind, 13, 768, batch, batch == 5);
                 self.record(
@@ -2512,8 +2521,18 @@ impl<'a> Tester<'a> {
             (14, 256),
             (20, 96),
             (42, 128),
+            (16, 256),
+            (17, 768),
+            (18, 256),
+            (19, 768),
+            (21, 256),
+            (22, 768),
+            (29, 256),
         ] {
             if !self.filter.wants_kind(kind) {
+                continue;
+            }
+            if Self::is_iq_family(kind) && !self.device.capabilities().supports_quant(QuantType::from_gguf_type_id(kind)) {
                 continue;
             }
             let r = self.embedding(kind, 300, cols);

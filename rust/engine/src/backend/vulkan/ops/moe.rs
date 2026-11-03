@@ -92,7 +92,7 @@ fn moe_linear_shader(tag: &str, access: ExpertAccess) -> Option<&'static str> {
     }
     names!(
         "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "iq4_nl",
-        "mxfp4", "q2_0"
+        "mxfp4", "q2_0", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq1_s", "iq1_m"
     )
 }
 

@@ -324,7 +324,8 @@ fn layout_rejects_bad_shapes() {
     assert!(DeviceLayout::new(QuantType::Q4_K, 4, 200).is_err());
     assert!(DeviceLayout::new(QuantType::Q4_K, 0, 256).is_err());
     assert!(DeviceLayout::new(QuantType::F32, 4, 256).is_err());
-    assert!(DeviceLayout::new(QuantType::IQ2_XS, 4, 256).is_err());
+    assert!(DeviceLayout::new(QuantType::Q8_K, 4, 256).is_err());
+    assert!(DeviceLayout::new(QuantType::IQ2_XS, 4, 200).is_err());
     assert!(pack_weight(QuantType::Q4_0, &[0u8; 17], 1, 32).is_err());
 }
 

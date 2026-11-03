@@ -248,6 +248,13 @@ fn all_op_plans() -> Vec<OpPlan> {
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
         QuantType::Q2_0,
+        QuantType::IQ2_XXS,
+        QuantType::IQ2_XS,
+        QuantType::IQ2_S,
+        QuantType::IQ3_XXS,
+        QuantType::IQ3_S,
+        QuantType::IQ1_S,
+        QuantType::IQ1_M,
     ] {
         plans.push(
             plan_embedding(
@@ -426,6 +433,13 @@ fn all_op_plans() -> Vec<OpPlan> {
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
         QuantType::Q2_0,
+        QuantType::IQ2_XXS,
+        QuantType::IQ2_XS,
+        QuantType::IQ2_S,
+        QuantType::IQ3_XXS,
+        QuantType::IQ3_S,
+        QuantType::IQ1_S,
+        QuantType::IQ1_M,
     ] {
         for has_bias in [false, true] {
             let call = MoeLinear {
@@ -572,7 +586,8 @@ fn planned_formats() -> Vec<QuantType> {
 #[test]
 fn every_projection_plan_matches_its_compiled_module() {
     let mut seen = BTreeSet::new();
-    let always = |_: &str| true;
+    // every shader exists except the tiled prompt kernel of IQ1_M (its additive term changes inside a scale group: `mm_q.comp` rejects it)
+    let always = |name: &str| name != "mmq_iq1_m_i";
     let mut count = 0;
     for quant in planned_formats() {
         for caps in capability_profiles() {
@@ -696,7 +711,7 @@ fn no_shader_is_orphaned() {
     for plan in &all_op_plans() {
         seen.insert(plan.shader_name.to_owned());
     }
-    let always = |_: &str| true;
+    let always = |name: &str| name != "mmq_iq1_m_i"; // (no tiled prompt kernel for IQ1_M, see above)
     for quant in planned_formats() {
         for caps in capability_profiles() {
             for batch in [1usize, 4, 16, 64, 512] {

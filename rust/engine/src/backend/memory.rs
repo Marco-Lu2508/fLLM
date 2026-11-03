@@ -35,17 +35,17 @@ pub fn device_weight_bytes(tensors: &[fllm_gguf_probe::TensorInfo], backend: &st
     tensors.iter().map(|t| device_tensor_bytes(t, backend)).sum()
 }
 
-/// GGML types the Vulkan shaders have no decoder for: the IQ1 / IQ2 / IQ3 families, Q8_1 / Q8_K and the ternary and 1-bit formats (Q2_0 has
-/// shaders).
+/// GGML types the Vulkan shaders have no decoder for: Q8_1 / Q8_K and the ternary and 1-bit formats (the IQ1 / IQ2 / IQ3 families and Q2_0 have shaders).
 /// Their tensors are dequantized on the host and uploaded again (see `upload.rs` of the Vulkan backend), so they take more room on the
 /// device than in the file. Drop a type from this list when a shader reads it natively.
 fn vulkan_expands(type_id: u32) -> bool {
-    matches!(type_id, 9 | 15 | 16..=19 | 21 | 22 | 29 | 34 | 35 | 41)
+    matches!(type_id, 9 | 15 | 34 | 35 | 41)
 }
 
 /// Bytes one tensor occupies on the device of `backend` ("vulkan", "cuda", ...): the stored size, unless the backend expands the format at
 /// upload. A Vulkan tensor of a format without a shader is re-quantized to Q5_K when its rows are whole 256-value blocks (176 bytes per block)
-/// and stored as binary16 otherwise, so a 3-bit expert tensor takes 5.5 bits per weight there, and a 2-bit one with 640-value rows 16 bits.
+/// and stored as binary16 otherwise (the IQ1 / IQ2 / IQ3 families stay packed: their device layouts are the file blocks, except IQ3_S, whose 110-byte
+/// blocks take 112, and IQ1_M, whose 56-byte blocks take 58).
 pub fn device_tensor_bytes(t: &fllm_gguf_probe::TensorInfo, backend: &str) -> u64 {
     if backend == "hip" && (fllm_gguf_probe::fp8b_type(t.type_id) || fllm_gguf_probe::fp8m_type(t.type_id)) {
         return t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0).saturating_mul(2);
@@ -54,6 +54,10 @@ pub fn device_tensor_bytes(t: &fllm_gguf_probe::TensorInfo, backend: &str) -> u6
         let elems = t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0);
         let cols = t.dimensions.first().copied().unwrap_or(0);
         return if cols > 0 && cols % 256 == 0 { elems / 256 * 176 } else { elems.saturating_mul(2) };
+    }
+    if backend == "vulkan" && matches!(t.type_id, 21 | 29) {
+        let elems = t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0);
+        return elems.div_ceil(256) * if t.type_id == 21 { 112 } else { 58 };
     }
     tensor_bytes(t)
 }
@@ -651,13 +655,22 @@ mod tests {
             data_offset: 0,
             payload_len: 0,
         };
-        // IQ3_XXS with 256-wide blocks: 98 bytes per block in the file, a Q5_K block of 176 bytes on Vulkan
+        // Q8_K with 256-wide blocks: 292 bytes per block in the file, a Q5_K block of 176 bytes on Vulkan
+        let q8k = tensor(15, &[2560, 640, 512]);
+        assert_eq!(tensor_bytes(&q8k), 2560 * 640 * 512 / 256 * 292);
+        assert_eq!(device_tensor_bytes(&q8k, "vulkan"), 2560 * 640 * 512 / 256 * 176);
+        // rows that are not whole 256-value blocks are stored as binary16
+        let q8_1 = tensor(9, &[640, 2560, 512]);
+        assert_eq!(device_tensor_bytes(&q8_1, "vulkan"), 640 * 2560 * 512 * 2);
+        // the IQ1 / IQ2 / IQ3 families have Vulkan shaders: the stored size (98 bytes per 256 values for IQ3_XXS), plus the padding of IQ3_S and IQ1_M
         let iq3 = tensor(18, &[2560, 640, 512]);
         assert_eq!(tensor_bytes(&iq3), 2560 * 640 * 512 / 256 * 98);
-        assert_eq!(device_tensor_bytes(&iq3, "vulkan"), 2560 * 640 * 512 / 256 * 176);
-        // rows that are not whole 256-value blocks are stored as binary16
-        let iq2_xs = tensor(17, &[640, 2560, 512]);
-        assert_eq!(device_tensor_bytes(&iq2_xs, "vulkan"), 640 * 2560 * 512 * 2);
+        assert_eq!(device_tensor_bytes(&iq3, "vulkan"), tensor_bytes(&iq3));
+        for (id, file, device) in [(16u32, 66u64, 66u64), (17, 74, 74), (22, 82, 82), (19, 50, 50), (21, 110, 112), (29, 56, 58)] {
+            let t = tensor(id, &[2560, 640, 512]);
+            assert_eq!(tensor_bytes(&t), 2560 * 640 * 512 / 256 * file);
+            assert_eq!(device_tensor_bytes(&t, "vulkan"), 2560 * 640 * 512 / 256 * device, "type {id}");
+        }
         // Q2_0 has Vulkan shaders: the stored size (18 bytes per 64 values)
         let q2_0 = tensor(42, &[640, 2560, 512]);
         assert_eq!(device_tensor_bytes(&q2_0, "vulkan"), 640 * 2560 * 512 / 64 * 18);
@@ -665,6 +678,6 @@ mod tests {
         let q4k = tensor(12, &[2560, 640, 512]);
         assert_eq!(device_tensor_bytes(&q4k, "vulkan"), tensor_bytes(&q4k));
         assert_eq!(device_tensor_bytes(&iq3, "cuda"), tensor_bytes(&iq3));
-        assert_eq!(device_weight_bytes(&[iq3.clone(), q4k.clone()], "vulkan"), device_tensor_bytes(&iq3, "vulkan") + tensor_bytes(&q4k));
+        assert_eq!(device_weight_bytes(&[q8k.clone(), q4k.clone()], "vulkan"), device_tensor_bytes(&q8k, "vulkan") + tensor_bytes(&q4k));
     }
 }

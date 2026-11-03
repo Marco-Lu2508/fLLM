@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(WeightKind::of(QuantType::BF16), Some(WeightKind::Float { elem_bytes: 2 }));
         assert_eq!(WeightKind::of(QuantType::F32), Some(WeightKind::Float { elem_bytes: 4 }));
         assert_eq!(WeightKind::of(QuantType::Q4_K), Some(WeightKind::Quant(QuantType::Q4_K)));
-        assert_eq!(WeightKind::of(QuantType::IQ2_XXS), None);
+        assert_eq!(WeightKind::of(QuantType::IQ2_XXS), Some(WeightKind::Quant(QuantType::IQ2_XXS)));
         assert_eq!(WeightKind::of(QuantType::Q8_K), None);
     }
 }

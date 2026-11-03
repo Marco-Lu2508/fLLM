@@ -9,7 +9,7 @@
 //    product, which is what limits GPUs whose shared memory is slow next to their integer dot rate (integrated graphics);
 //  * one K step = KS blocks of 32 values (KS 1 or 2); the weight chunks and the activation words of the next step are fetched into registers before
 //    the current step is computed, then stored to the other half of a double-buffered tile: one barrier per K step;
-//  * the integer dot products of a scale group (32 values, or 16 for Q2_K / Q3_K / Q6_K / NVFP4: NG = 2 groups per block) are accumulated with the
+//  * the integer dot products of a scale group (32 values, or 16 for Q2_K / Q3_K / Q6_K / NVFP4 / IQ2_XS / IQ2_S: NG = 2 groups per block) are accumulated with the
 //    accumulating dot instruction and converted/scaled once per group: acc += float(isum) * (ws * d_act) [+ wm * d_act * sum(act)].
 //  * the sum of the activations of each half block (for the additive term wm of Q4_1, Q5_1, Q2_K, Q4_K, Q5_K) is computed once while the tile is staged.
 // The loaders loop when the workgroup has fewer invocations than weight chunks (4 * KS * BM) or activation vectors (2 * KS * BN). Neighbouring
@@ -29,13 +29,16 @@ layout(constant_id = 4) const uint KS = 1;
 #ifdef FLOAT_CHUNK
 #error "float-chunk formats (FP8, NF4, FP4) have only the f32 shaders"
 #endif
+#ifdef FMT_IQ1_M
+#error "IQ1_M changes the additive term every 8 values, not every scale group: it has no mm_q variant (mm_idot serves it)"
+#endif
 
 layout(std430, set = 0, binding = 1) readonly buffer XQBuf { uvec4 xq4[]; };
 layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float outv[]; };
 layout(std430, set = 0, binding = 3) readonly buffer BiasBuf { float biasv[]; };
 
 // scale groups per block: 1 = one weight scale per 32 values, 2 = one per 16 values
-#if defined(FMT_Q2_K) || defined(FMT_Q3_K) || defined(FMT_Q6_K) || defined(FMT_NVFP4)
+#if defined(FMT_Q2_K) || defined(FMT_Q3_K) || defined(FMT_Q6_K) || defined(FMT_NVFP4) || defined(FMT_IQ2_XS) || defined(FMT_IQ2_S)
 #define NG 2
 #else
 #define NG 1

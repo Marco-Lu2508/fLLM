@@ -5,7 +5,7 @@ use super::*;
 /// Scale groups per K step of `mm_q.comp` (`NG` of the shader): the formats whose weight scale changes every 16 values.
 fn mmq_scale_groups(quant: QuantType) -> usize {
     match quant {
-        QuantType::Q2_K | QuantType::Q3_K | QuantType::Q6_K | QuantType::NvFp4 => 2,
+        QuantType::Q2_K | QuantType::Q3_K | QuantType::Q6_K | QuantType::NvFp4 | QuantType::IQ2_XS | QuantType::IQ2_S => 2,
         _ => 1,
     }
 }
@@ -16,6 +16,9 @@ fn mmq_scale_groups(quant: QuantType) -> usize {
 #[test]
 fn group_arithmetic_matches_the_reference() {
     for &quant in supported_formats() {
+        if quant == QuantType::IQ1_M {
+            continue; // the additive term changes every 8 values: no mm_q variant (mm_idot serves it)
+        }
         let info = format_info(quant).unwrap();
         let (rows, cols) = (5usize, info.qk.max(256) * 2);
         let raw = sample(quant, rows, cols, 777);
