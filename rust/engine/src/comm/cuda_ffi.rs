@@ -19,8 +19,28 @@ extern "C" {
     pub fn fllm_comm_disable_peer_access(dev: c_int, peer: c_int) -> c_int;
     pub fn fllm_comm_peer_copy_async(dst: *mut c_void, dst_dev: c_int, src: *const c_void, src_dev: c_int, bytes: usize, stream: *mut c_void) -> c_int;
     pub fn fllm_comm_reduce_add_f32(dst: *mut f32, src: *const f32, n: usize, stream: *mut c_void) -> c_int;
-    pub fn fllm_comm_custom_all_reduce_f32(out: *mut f32, peer_ptrs: *const *const f32, num_peers: c_int, n: usize, stream: *mut c_void) -> c_int;
+    pub fn fllm_comm_ar_oneshot(
+        staging: *const *mut c_void,
+        flags: *const *mut u64,
+        rank: c_int,
+        world: c_int,
+        data: *mut c_void,
+        n: usize,
+        dtype: c_int,
+        epoch: u64,
+        half_off: usize,
+        stream: *mut c_void,
+    ) -> c_int;
+    pub fn fllm_comm_malloc_flags(ptr: *mut *mut c_void, bytes: usize) -> c_int;
+    pub fn fllm_comm_memset(ptr: *mut c_void, value: c_int, bytes: usize) -> c_int;
+    pub fn fllm_comm_device_sync() -> c_int;
 }
+
+/// Name of the GPU runtime in error texts: the HIP build drives AMD GPUs through the same code.
+#[cfg(feature = "hip")]
+pub const RUNTIME: &str = "HIP";
+#[cfg(not(feature = "hip"))]
+pub const RUNTIME: &str = "CUDA";
 
 /// `Ok` for status 0, else the CUDA error text.
 pub fn check(what: &str, code: c_int) -> Result<(), String> {
@@ -29,7 +49,7 @@ pub fn check(what: &str, code: c_int) -> Result<(), String> {
     }
     // SAFETY: fllm_comm_error_string returns a static NUL-terminated string.
     let text = unsafe { CStr::from_ptr(fllm_comm_error_string(code)) }.to_string_lossy().into_owned();
-    Err(format!("{what}: CUDA error {code} ({text})"))
+    Err(format!("{what}: {RUNTIME} error {code} ({text})"))
 }
 
 pub fn device_count() -> Result<usize, String> {
@@ -153,10 +173,33 @@ pub fn reduce_add_f32(dst: *mut f32, src: *const f32, n: usize, stream: *mut c_v
     check("reduce_add_f32", unsafe { fllm_comm_reduce_add_f32(dst, src, n, stream) })
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)] // thin wrapper; the callers hold valid device pointers
-pub fn custom_all_reduce_f32(out: *mut f32, peer_ptrs: &[*const f32], n: usize, stream: *mut c_void) -> Result<(), String> {
-    // SAFETY: peer_ptrs holds valid device pointers
-    check("custom_all_reduce_f32", unsafe {
-        fllm_comm_custom_all_reduce_f32(out, peer_ptrs.as_ptr(), peer_ptrs.len() as c_int, n, stream)
-    })
+impl DeviceMem {
+    /// Memory for the flags that peers poll (uncached device memory on AMD), zero-filled.
+    pub fn new_flags(device: usize, bytes: usize) -> Result<Self, String> {
+        set_device(device)?;
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        // SAFETY: valid out pointer.
+        check("allocate flag memory", unsafe { fllm_comm_malloc_flags(&mut ptr, bytes.max(8)) })?;
+        let mem = Self { ptr, bytes: bytes.max(8), device };
+        mem.zero()?;
+        Ok(mem)
+    }
+
+    pub fn zero(&self) -> Result<(), String> {
+        set_device(self.device)?;
+        // SAFETY: the buffer holds `bytes` bytes.
+        check("memset", unsafe { fllm_comm_memset(self.ptr, 0, self.bytes) })
+    }
+}
+
+/// Wait for the work on the legacy default stream (the synchronous `cudaMemcpy` of `upload` / `download` may return while the transfer is
+/// still in flight) without waiting for the other streams of the device.
+pub fn default_stream_sync() -> Result<(), String> {
+    // SAFETY: the null stream is the legacy default stream.
+    check("cudaStreamSynchronize(default)", unsafe { fllm_comm_stream_sync(std::ptr::null_mut()) })
+}
+
+pub fn device_sync() -> Result<(), String> {
+    // SAFETY: no pointers.
+    check("device synchronize", unsafe { fllm_comm_device_sync() })
 }

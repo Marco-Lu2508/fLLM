@@ -457,6 +457,14 @@ int fllm_cuda_stream_sync(FllmStream *st) {
     CHECK(cudaStreamSynchronize(st->s), "cudaStreamSynchronize");
     return 0;
 }
+// The native stream handle of an fLLM stream (cudaStream_t / hipStream_t) after the deferred work (fused add, norm, GLU) has been enqueued, so that
+// a collective of the communication layer (NCCL / RCCL, src/comm) can be ordered behind everything the stream has been given so far.
+void *fllm_cuda_stream_native(FllmStream *st) {
+    if (!st) return nullptr;
+    if (cudaSetDevice(st->dev) != cudaSuccess) return nullptr;
+    if (flush_glu(st)) return nullptr;
+    return (void *)st->s;
+}
 int fllm_cuda_stream_wait_stream(FllmStream *waiter, FllmStream *target) {
     if (!waiter || !target) return 0;
     if (waiter == target) return 0;

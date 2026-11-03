@@ -915,7 +915,7 @@ fn hip_kernels() {
     }
     // the architectures this binary carries code for: the runtime lists only devices it can run (src/backend/cuda.rs, list_devices)
     println!("cargo:rustc-env=FLLM_HIP_BUILT_ARCHS={}", archs.join(";"));
-    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu", "rwkv.cu", "kda.cu", "scan.cu"];
+    let sources = ["api.cu", "linear.cu", "gemv2.cu", "elementwise.cu", "attention.cu", "attention2.cu", "attention4.cu", "mmvq.cu", "tc_gemm.cu", "fused.cu", "deltanet.cu", "kv_quant.cu", "arch_ops.cu", "dsa.cu", "block_sparse.cu", "inkling.cu", "hc.cu", "qwen4.cu", "v4.cu", "mla.cu", "mamba1.cu", "mamba2.cu", "shortconv.cu", "hip_stubs.cu", "rwkv.cu", "kda.cu", "scan.cu", "comm_kernels.cu"];
     // kernels that exist only for AMD GPUs (matrix-core GEMM, skinny GEMM, Q4Z; they include ../cuda/*.cuh)
     let hip_sources = ["hip_device.cu", "hip_gemm.cu", "hip_skinny.cu", "hip_q4z.cu"];
     let mut objects = Vec::new();

@@ -1,5 +1,5 @@
-//! NCCL through `dlopen`: the library is looked up when a parallel group starts, so release binaries run on machines without NCCL and
-//! tell the user what to install. Symbols used: ncclGetVersion, ncclGetUniqueId, ncclCommInitRank, ncclCommDestroy, ncclAllReduce,
+//! NCCL (CUDA builds) and RCCL (HIP builds: the same API and symbol names, `librccl.so.1` / `rccl.dll`) through `dlopen`: the library is looked
+//! up when a parallel group starts, so release binaries run on machines without it and tell the user what to install. Symbols used: ncclGetVersion, ncclGetUniqueId, ncclCommInitRank, ncclCommDestroy, ncclAllReduce,
 //! ncclAllGather, ncclReduceScatter, ncclBroadcast, ncclSend, ncclRecv, ncclGroupStart, ncclGroupEnd, ncclGetErrorString.
 //! The ranks are threads of one process; every rank creates its communicator with `ncclCommInitRank` and the unique id travels over the
 //! host-memory control group (for several nodes that group runs over TCP).
@@ -48,8 +48,22 @@ pub struct NcclLib {
     error_string: ErrorString,
 }
 
-const INSTALL_HINT: &str = "install the NCCL runtime library (Debian/Ubuntu: `sudo apt install libnccl2`, other systems: the nccl package of your CUDA \
-                            repository), or point FLLM_NCCL_PATH at libnccl.so.2, or use --distributed-backend p2p";
+#[cfg(not(feature = "hip"))]
+const INSTALL_HINT: &str = "install the NCCL runtime library (Debian/Ubuntu: `sudo apt install libnccl2`, other systems: the nccl package of your CUDA repository), or point FLLM_NCCL_PATH at libnccl.so.2, or use --distributed-backend p2p";
+#[cfg(feature = "hip")]
+const INSTALL_HINT: &str = "install the RCCL runtime library (it ships with ROCm: package `rccl`), or point FLLM_NCCL_PATH (or FLLM_RCCL_PATH) at librccl.so.1, or use --distributed-backend p2p";
+
+/// Library names tried in order after `FLLM_NCCL_PATH` / `FLLM_RCCL_PATH`.
+#[cfg(not(feature = "hip"))]
+pub const LIBRARY_NAMES: &[&str] = &["libnccl.so.2", "libnccl.so"];
+#[cfg(feature = "hip")]
+pub const LIBRARY_NAMES: &[&str] = &["librccl.so.1", "librccl.so", "/opt/rocm/lib/librccl.so.1", "rccl.dll"];
+
+/// Name of the collective library in messages.
+#[cfg(not(feature = "hip"))]
+pub const LIB_LABEL: &str = "NCCL";
+#[cfg(feature = "hip")]
+pub const LIB_LABEL: &str = "RCCL";
 
 impl NcclLib {
     /// Load libnccl (once per process).
@@ -60,10 +74,12 @@ impl NcclLib {
 
     fn load() -> CommResult<Arc<NcclLib>> {
         let mut candidates: Vec<String> = Vec::new();
-        if let Ok(path) = std::env::var("FLLM_NCCL_PATH") {
-            candidates.push(path);
+        for var in ["FLLM_NCCL_PATH", "FLLM_RCCL_PATH"] {
+            if let Ok(path) = std::env::var(var) {
+                candidates.push(path);
+            }
         }
-        candidates.extend(["libnccl.so.2", "libnccl.so"].map(String::from));
+        candidates.extend(LIBRARY_NAMES.iter().map(|s| (*s).to_owned()));
         let mut last = String::new();
         let mut library = None;
         for name in &candidates {
@@ -76,13 +92,13 @@ impl NcclLib {
                 Err(e) => last = e.to_string(),
             }
         }
-        let library = library.ok_or_else(|| format!("libnccl could not be loaded ({last}); {INSTALL_HINT}"))?;
+        let library = library.ok_or_else(|| format!("the {LIB_LABEL} library could not be loaded ({last}); {INSTALL_HINT}"))?;
         // SAFETY (all symbol lookups): the signatures are those of nccl.h; the function pointers are copied out and `_library` keeps
         // the library mapped for as long as the struct lives.
         unsafe {
             macro_rules! sym {
                 ($name:literal, $ty:ty) => {
-                    *library.get::<$ty>($name).map_err(|e| format!("libnccl lacks {}: {e}; {INSTALL_HINT}", String::from_utf8_lossy(&$name[..$name.len() - 1])))?
+                    *library.get::<$ty>($name).map_err(|e| format!("the {LIB_LABEL} library lacks {}: {e}; {INSTALL_HINT}", String::from_utf8_lossy(&$name[..$name.len() - 1])))?
                 };
             }
             let get_version: GetVersion = sym!(b"ncclGetVersion\0", GetVersion);
@@ -113,7 +129,7 @@ impl NcclLib {
         }
         // SAFETY: ncclGetErrorString returns a static string.
         let text = unsafe { CStr::from_ptr((self.error_string)(code)) }.to_string_lossy().into_owned();
-        Err(format!("{what} failed: NCCL error {code} ({text})"))
+        Err(format!("{what} failed: {LIB_LABEL} error {code} ({text})"))
     }
 
     /// `2.18.3` style text of the loaded version.
@@ -138,6 +154,8 @@ pub struct NcclComm {
     /// Same ranks, host memory: control messages, unique ids, splits.
     host: Arc<dyn Communicator>,
     staging: Mutex<Option<DeviceMem>>,
+    /// One-shot kernel for small all-reduces (`FLLM_CUSTOM_ALLREDUCE=1`, peer access between all ranks), else NCCL / RCCL.
+    custom: Option<super::oneshot::CustomAllReduce>,
 }
 
 // SAFETY: the communicator handle is used by the rank's thread; NCCL calls on one communicator are serialized by the callers
@@ -169,7 +187,25 @@ impl NcclComm {
         lib.check(&format!("ncclCommInitRank (rank {rank} of {size}, device {device})"), unsafe {
             (lib.comm_init_rank)(&mut comm, size as c_int, id, rank as c_int)
         })?;
-        Ok(Arc::new(NcclComm { lib, comm, rank, size, device, stream: RankStream::new(device)?, host: host.clone(), staging: Mutex::new(None) }))
+        let custom = if size > 1 && super::oneshot::enabled_by_env() {
+            match super::oneshot::CustomAllReduce::connect(host, device, super::oneshot::max_bytes_from_env()) {
+                Ok(c) => {
+                    if rank == 0 {
+                        eprintln!("[fllm-rs] custom one-shot all-reduce on for messages up to {} KiB; larger ones use {LIB_LABEL}", c.max_bytes() / 1024);
+                    }
+                    Some(c)
+                }
+                Err(e) => {
+                    if rank == 0 {
+                        eprintln!("[fllm-rs] custom all-reduce not used ({e}); using {LIB_LABEL} only");
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Ok(Arc::new(NcclComm { lib, comm, rank, size, device, stream: RankStream::new(device)?, host: host.clone(), staging: Mutex::new(None), custom }))
     }
 
     pub fn device(&self) -> usize {
@@ -229,6 +265,9 @@ impl Drop for NcclComm {
 
 impl DeviceCollectives for NcclComm {
     fn all_reduce(&self, buf: DevPtr, count: usize, dtype: DType, stream: StreamHandle) -> CommResult<()> {
+        if let Some(custom) = self.custom.as_ref().filter(|c| c.handles(count, dtype)) {
+            return custom.all_reduce(buf, count, dtype, stream);
+        }
         set_device(self.device)?;
         // SAFETY: in-place reduction on the caller's device buffer.
         self.check("ncclAllReduce", unsafe {

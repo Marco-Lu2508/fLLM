@@ -139,7 +139,10 @@ impl ParallelConfig {
                 ));
             }
             let mut seen = std::collections::HashSet::new();
-            if let Some(dup) = self.devices.iter().find(|d| !seen.insert(**d)) {
+            // FLLM_ALLOW_SHARED_DEVICE=1 lets several ranks share one GPU: a diagnostic for testing the collectives and the sharded
+            // forward pass on a machine with a single GPU (the ranks then compete for its memory; never useful for speed)
+            let shared_ok = std::env::var("FLLM_ALLOW_SHARED_DEVICE").is_ok_and(|v| matches!(v.trim(), "1" | "on" | "true"));
+            if let Some(dup) = self.devices.iter().find(|d| !seen.insert(**d)).filter(|_| !shared_ok) {
                 return Err(format!("--devices lists device {dup} twice"));
             }
         }

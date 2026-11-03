@@ -1569,6 +1569,12 @@ pub trait Stream: Send {
         Ok(None)
     }
 
+    /// Sum `len` activation values of `buf` over the ranks of a tensor-parallel group with a device-pointer collective that is ordered on this
+    /// stream (no round trip through host memory). `Ok(false)`: this stream cannot do it and the caller uses the host path.
+    fn device_all_reduce(&mut self, _buf: &mut DeviceBuffer, _len: usize, _group: &dyn crate::comm::DeviceCollectives) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Raw backend pointer of the underlying stream, if any.
     fn raw_stream_ptr(&mut self) -> *mut std::ffi::c_void {
         std::ptr::null_mut()
