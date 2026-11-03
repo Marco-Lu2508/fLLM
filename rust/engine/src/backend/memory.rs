@@ -29,7 +29,23 @@ pub struct MemoryPlan {
     pub marlin_q4k_extra_bytes: u64,
 }
 
-fn tensor_bytes(t: &fllm_gguf_probe::TensorInfo) -> u64 {
+/// Bytes the weights of a model occupy on a device of `backend`: the stored sizes, except that block-wise and per-row FP8 tensors are expanded
+/// to F16 on the HIP backend (it has no FP8 kernel yet), which doubles them.
+pub fn device_weight_bytes(tensors: &[fllm_gguf_probe::TensorInfo], backend: &str) -> u64 {
+    tensors
+        .iter()
+        .map(|t| {
+            let expanded = backend == "hip" && (fllm_gguf_probe::fp8b_type(t.type_id) || fllm_gguf_probe::fp8m_type(t.type_id));
+            if expanded {
+                t.dimensions.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d)).unwrap_or(0).saturating_mul(2)
+            } else {
+                tensor_bytes(t)
+            }
+        })
+        .sum()
+}
+
+pub fn tensor_bytes(t: &fllm_gguf_probe::TensorInfo) -> u64 {
     let elem_count = t
         .dimensions
         .iter()

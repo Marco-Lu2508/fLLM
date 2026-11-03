@@ -149,6 +149,10 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             crate::comm::selftest::run(&args[1..])?;
             Ok(true)
         }
+        "plan-cluster" => {
+            crate::parallel::cluster_plan::run(&args[1..])?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -187,6 +191,7 @@ TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float 
         "selftest-cpu" => crate::cpu_selftest::HELP,
         "selftest-parallel" => crate::parallel::selftest::HELP,
         "selftest-comm" => crate::comm::selftest::HELP,
+        "plan-cluster" => crate::parallel::cluster_plan::HELP,
         _ => "",
     }
 }
@@ -1092,7 +1097,7 @@ fn completions(args: &[String]) -> Result<(), String> {
     let commands = [
         "serve", "run", "pull", "list", "rm", "ps", "show", "search", "convert", "quantize",
         "inspect", "formats", "chat", "bench", "bench-report", "devices", "completions",
-        "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu", "selftest-parallel", "selftest-comm",
+        "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu", "selftest-parallel", "selftest-comm", "plan-cluster",
     ];
     match shell {
         "bash" | "zsh" => {
