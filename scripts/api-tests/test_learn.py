@@ -109,3 +109,25 @@ def test_a_session_is_learned_from_in_the_background(studio):
     r = studio("POST", "/after-run", json={"session": "api-test", "outcome": "done", "messages": messages})
     assert r.status_code == 202
     assert "queued" in r.json()
+
+
+def test_learning_is_on_by_default_and_the_switches_work(studio):
+    before = studio("GET", "").json()
+    assert before["enabled"] in (True, False) and "ask_first" in before and before["notice"]
+    try:
+        assert studio("POST", "/settings", json={"enabled": False}).status_code == 200
+        assert studio("GET", "").json()["enabled"] is False
+        r = studio("POST", "/after-run", json={"session": "off", "messages": [{"role": "user", "content": "hello there"}]})
+        assert r.status_code == 202 and r.json()["queued"] is False and "off" in r.json()["reason"]
+        assert studio("POST", "/settings", json={"enabled": True, "ask_first": True}).status_code == 200
+        o = studio("GET", "").json()
+        assert o["enabled"] is True and o["ask_first"] is True
+    finally:
+        studio("POST", "/settings", json={"enabled": before["enabled_global"], "ask_first": before["ask_first"]})
+
+
+def test_the_log_of_automatic_changes_and_undo(studio):
+    assert studio("GET", "/log?limit=5").status_code == 200
+    assert isinstance(studio("GET", "/log").json()["log"], list)
+    r = studio("POST", "/undo", json={"id": "chg-00000000"})
+    assert r.status_code == 400 and "no change" in r.json()["error"]["message"]

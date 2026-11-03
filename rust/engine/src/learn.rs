@@ -1466,6 +1466,11 @@ pub fn take_notice(studio: &Path) -> bool {
     write_text(&marker, "shown\n").is_ok()
 }
 
+/// True until the first-run notice was shown (see [`take_notice`]).
+pub fn notice_pending(studio: &Path) -> bool {
+    !learn_dir(studio).join("notice-shown").exists()
+}
+
 pub const NOTICE: &str = "fLLM learns from your sessions by default: it saves skills, notes and profile lines on its own, keeps every change in a log you can undo (fllm-rs learn log), and stops with --no-learn or `fllm-rs learn off`.";
 
 // ---- who wrote a skill file ----------------------------------------------------------------------------------

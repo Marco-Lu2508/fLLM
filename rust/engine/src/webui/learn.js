@@ -79,10 +79,35 @@
       n(o.profile, 'profile line', 'profile lines');
       return parts.length ? `Waiting for a decision: ${parts.join(', ')}.` : 'Nothing waits for a decision.';
     }
+
+    /** A line for an entry of the log of automatic changes. */
+    function lnLogTitle(e) {
+      const name = e.name || '';
+      switch (e.kind) {
+        case 'skill_create': return `Wrote the skill "${name}"`;
+        case 'skill_revise': return `Revised the skill "${name}"`;
+        case 'skill_rollback': return `Put back the previous text of "${name}"`;
+        case 'memory_add': return `Remembered: ${e.text || ''}`;
+        case 'memory_remove': return `Forgot a repeated entry: ${e.text || ''}`;
+        case 'profile_add': return `Added to your profile: ${e.text || ''}`;
+        default: return String(e.kind || 'change');
+      }
+    }
+
+    /** The "What I learned" feed as HTML: every automatic change with time, session, reason, diff and an Undo button. */
+    function lnFeedHtml(entries, esc, when) {
+      if (!entries || !entries.length) return '<div class="app-item-desc">Nothing was learned automatically yet.</div>';
+      return entries.map((e) => `<div class="app-card-item column" data-ln-chg="${esc(e.id)}" style="border-bottom:1px solid var(--border);padding-bottom:6px;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><span class="app-item-title">${esc(lnLogTitle(e))}</span><span style="flex:1"></span>${e.undone ? '<span class="quant-chip">undone</span>' : '<button class="btn btn-xs btn-ghost" data-ln-undo>Undo</button>'}</div>
+        <div class="app-item-desc">${esc(when(e.t))}${e.session ? ` · session ${esc(e.session)}` : ''}${e.reason ? ` · ${esc(e.reason)}` : ''}</div>
+        ${e.diff ? `<details><summary class="app-item-desc" style="cursor:pointer;">Changes</summary><pre class="mono" style="max-height:220px;overflow:auto;font-size:11.5px;margin:4px 0;white-space:pre-wrap;">${lnDiffHtml(e.diff, esc)}</pre></details>` : ''}
+      </div>`).join('');
+    }
+
+    /** The sentence for the toast after a run: the server's summary of what was learned, or '' when nothing was. */
+    function lnToastText(lastRun) { return lastRun && lastRun.summary ? `Learned: ${lastRun.summary}` : ''; }
     // @pure-end
 
-    const LN_AUTO_KEY = 'fllm.studio.learnAuto.v1';
-    const lnAuto = () => localStorage.getItem(LN_AUTO_KEY) === '1';
     const lnWorkspace = () => { try { return (typeof code !== 'undefined' && code.workspace && code.workspace.root) || ''; } catch { return ''; } };
     const lnQuery = (o) => Object.entries(o).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
 
@@ -105,9 +130,9 @@
       window.fllmLearnLast = { session: session || 'studio', workspace: workspace || '', skills };
       try {
         const r = await lnRequest('POST', '/api/studio/learn/after-run', {
-          session: session || 'studio', workspace: workspace || '', outcome: failed ? 'failed' : 'done', skills, messages: run, auto_memory: lnAuto(),
+          session: session || 'studio', workspace: workspace || '', outcome: failed ? 'failed' : 'done', skills, messages: run,
         });
-        window.setTimeout(lnRefreshAll, 15000);
+        if (r && r.queued) lnWatchRun(Date.now() / 1000 - 2);
         return r;
       } catch { return { queued: false }; }
     };
@@ -118,13 +143,44 @@
       if (!last || !last.skills.length) { toast('No skill was used in the last run.'); return false; }
       try {
         const r = await lnRequest('POST', '/api/studio/learn/feedback', { value, skills: last.skills, session: last.session, workspace: last.workspace });
-        toast(value === 'up' ? `Noted: ${last.skills.join(', ')} worked.` : `Noted: ${last.skills.join(', ')} did not work. A revision will be drafted.`);
+        toast(value === 'up' ? `Noted: ${last.skills.join(', ')} worked.` : `Noted: ${last.skills.join(', ')} did not work. A revision is drafted on the next run${r.notes && r.notes.length ? `; ${r.notes.join(' ')}` : ''}.`);
         lnRefreshAll();
         return r.noted > 0;
       } catch (e) { toast(e.message); return false; }
     };
 
-    window.fllmLearnStatus = async () => { try { return await lnRequest('GET', '/api/studio/learn'); } catch { return null; } };
+    window.fllmLearnStatus = async () => { try { return await lnRequest('GET', `/api/studio/learn?${lnQuery({ workspace: lnWorkspace() })}`); } catch { return null; } };
+
+    /** The global switch of the toggle; a project's own setting is cleared so that the toggle and the setting agree. */
+    window.fllmLearnSetEnabled = async (on) => {
+      try { await lnRequest('POST', '/api/studio/learn/settings', { enabled: on, workspace: lnWorkspace(), project: null }); return true; } catch (e) { toast(e.message); return false; }
+    };
+
+    /** The one-sentence first-run notice (once), or ''. */
+    window.fllmLearnNotice = async () => {
+      const o = await window.fllmLearnStatus();
+      if (!o || !o.notice_pending) return '';
+      try { await lnRequest('POST', '/api/studio/learn/settings', { notice: true }); } catch { /* shown again next time */ }
+      return o.notice;
+    };
+
+    /** Waits (in the background) for the learning step that follows a run and shows a toast with what it learned. */
+    function lnWatchRun(since) {
+      let tries = 0;
+      const poll = async () => {
+        tries += 1;
+        const o = await window.fllmLearnStatus();
+        const done = o && !o.running && o.last_run && o.last_run.t >= since;
+        if (done) {
+          const text = lnToastText(o.last_run);
+          if (text) toast(text);
+          lnRefreshAll();
+          return;
+        }
+        if (tries < 60) window.setTimeout(poll, 5000);
+      };
+      window.setTimeout(poll, 4000);
+    }
 
     // ---- Settings > Skills: revisions ---------------------------------------------------------------------
     const lnWhen = (t) => (t ? new Date(t * 1000).toLocaleString() : '');
@@ -209,7 +265,23 @@
       for (const id of ['lnLastSkills', 'lnLastPersonal']) if ($(id)) $(id).textContent = last && last.length ? `Last learning step (${last.length}): ${last.slice(0, 4).join(' ')}` : '';
     }
 
-    function lnRefreshAll() { lnRefreshSkills(); lnRefreshProfile(); lnRefreshMemory(); }
+    async function lnRefreshFeed() {
+      if (!$('lnFeedPersonal')) return;
+      try {
+        const data = await lnRequest('GET', '/api/studio/learn/log?limit=40');
+        const all = data.log || [];
+        $('lnFeedPersonal').innerHTML = lnFeedHtml(all, escapeHtml, lnWhen);
+        if ($('lnFeedSkills')) $('lnFeedSkills').innerHTML = lnFeedHtml(all.filter((e) => String(e.kind).startsWith('skill')), escapeHtml, lnWhen);
+      } catch (e) { $('lnFeedPersonal').textContent = e.message; }
+      const o = await window.fllmLearnStatus();
+      if (o) {
+        if ($('lnEnabled')) $('lnEnabled').checked = o.enabled !== false;
+        if ($('lnAskFirst')) $('lnAskFirst').checked = Boolean(o.ask_first);
+        if ($('lnProjectNote')) $('lnProjectNote').textContent = o.project_override === false ? 'Learning is off for the open project (its .fllm/learn.json).' : o.project_override === true ? 'Learning is on for the open project (its .fllm/learn.json).' : '';
+      }
+    }
+
+    function lnRefreshAll() { lnRefreshSkills(); lnRefreshProfile(); lnRefreshMemory(); lnRefreshFeed(); }
 
     async function lnPost(path, body, done) {
       try { const r = await lnRequest('POST', path, body); if (done) toast(done); return r; } catch (e) { toast(e.message); return null; } finally { lnRefreshAll(); }
@@ -274,7 +346,26 @@
           lnPost('/api/studio/learn/memory', { action: 'forget', all_learned: true, text: '', workspace: lnWorkspace() }, 'Forgotten.');
         }
       });
-      $('lnAuto').checked = lnAuto();
-      $('lnAuto').addEventListener('change', (e) => { localStorage.setItem(LN_AUTO_KEY, e.target.checked ? '1' : '0'); });
+      $('lnEnabled').addEventListener('change', async (e) => {
+        if (await window.fllmLearnSetEnabled(e.target.checked)) {
+          toast(e.target.checked ? 'Learning is on.' : 'Learning is off. What was learned stays; nothing new is saved.');
+          if (typeof window.fllmLearnChanged === 'function') window.fllmLearnChanged(e.target.checked);
+        }
+        lnRefreshFeed();
+      });
+      $('lnAskFirst').addEventListener('change', async (e) => {
+        try { await lnRequest('POST', '/api/studio/learn/settings', { ask_first: e.target.checked }); toast(e.target.checked ? 'The agent now proposes and waits for your yes.' : 'The agent applies what it learns and logs it.'); } catch (err) { toast(err.message); }
+      });
+      const onFeed = async (e) => {
+        const btn = e.target.closest('[data-ln-undo]');
+        const row = e.target.closest('[data-ln-chg]');
+        if (!btn || !row) return;
+        const r = await lnPost('/api/studio/learn/undo', { id: row.dataset.lnChg });
+        if (r && r.message) toast(`Undone: ${r.message}`);
+        if (typeof window.fllmSkillsReload === 'function') window.fllmSkillsReload();
+      };
+      $('lnFeedPersonal').addEventListener('click', onFeed);
+      $('lnFeedSkills').addEventListener('click', onFeed);
+      lnRefreshFeed();
       lnRefreshCounters();
     }

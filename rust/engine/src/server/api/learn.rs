@@ -47,6 +47,7 @@ pub(in crate::server) async fn overview(Query(query): Query<HashMap<String, Stri
         o["project_override"] = json!(ws.as_deref().and_then(crate::learn::project_override));
         o["ask_first"] = json!(crate::learn::ask_first(&studio));
         o["notice"] = json!(crate::learn::NOTICE);
+        o["notice_pending"] = json!(crate::learn::notice_pending(&studio));
         o
     })
     .await

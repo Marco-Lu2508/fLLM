@@ -612,7 +612,7 @@
       modes: {}, // { build: { edit: 'ask' ... }, plan: {...} } overrides of DEFAULT_MODES
       autoCheck: false, // run diagnostics after every edit and append the first problems
       autoReview: false, // before a run counts as done: review the diff and the diagnostics, let the agent fix what is found
-      learn: false, // "Learn from this session": skill notes and revisions, memory and profile proposals (learn.js)
+      learn: true, // "Learn from my sessions": skills, notes and profile lines are saved on their own and logged (learn.js); on by default
       personality: 'default', // how the agent talks (PERSONALITIES in codeprompts.js)
       attachments: [], // images (data URLs) waiting for the next message
       queue: [], // messages typed while the agent was busy
@@ -636,7 +636,7 @@
       const saved = JSON.parse(localStorage.getItem(CODE_SETTINGS_KEY) || '{}');
       code.autoCheck = Boolean(saved.autoCheck);
       code.autoReview = Boolean(saved.autoReview);
-      code.learn = Boolean(saved.learn);
+      code.learn = saved.learn !== false;
       code.personality = typeof saved.personality === 'string' && PERSONALITIES[saved.personality] ? saved.personality : 'default';
       const modes = JSON.parse(localStorage.getItem(CODE_MODES_KEY) || '{}');
       if (modes && typeof modes === 'object') code.modes = modes;
@@ -893,6 +893,17 @@
         }
       } catch { /* an older server: no instructions, no memory */ }
       if (!code.memDraft) renderCodeSide();
+      // the switch of the server (also set by `fllm-rs learn off` or a project's .fllm/learn.json) is the truth; the first start explains learning once
+      if (typeof window.fllmLearnStatus === 'function') {
+        window.fllmLearnStatus().then(async (st) => {
+          if (!st) return;
+          if (st.enabled !== code.learn) { code.learn = st.enabled !== false; saveCodeSettings(); renderCodeSide(true); }
+          if (st.enabled !== false && typeof window.fllmLearnNotice === 'function') {
+            const notice = await window.fllmLearnNotice();
+            if (notice) codeNotice(notice);
+          }
+        });
+      }
     }
 
     /** One line about the working tree for the system prompt. */
@@ -1603,8 +1614,8 @@
           <p class="side-empty">After every edit the agent runs a quick syntax or build check (python, node, cargo check, tsc, go vet, JSON) and gets the first errors with the result. Slower, but it catches mistakes at once.</p>
           <label class="check-row"><input type="checkbox" data-auto-review${code.autoReview ? ' checked' : ''}> Review my work before it counts as done</label>
           <p class="side-empty">When a run changed files, the agent reads its own diff once more together with the findings of a fixed rule set and the diagnostics, and fixes what is wrong (two rounds at most). It costs one extra step per run. Switch it on with <span class="mono">/autoreview on</span>.</p>
-          <label class="check-row"><input type="checkbox" data-learn${code.learn ? ' checked' : ''}> Learn from this session</label>
-          <p class="side-empty">After each run, in the background: how the skills it used fared is noted (a failed skill gets a revision drafted), and a short reflective step proposes memory entries and lines for your profile. Nothing is saved until you say yes in Settings &gt; Skills and Settings &gt; Personalization. It uses the loaded model once or twice per run. <span class="mono">/learn on|off</span>; <span class="mono">/good</span> and <span class="mono">/bad</span> tell it whether the skills of the last run helped.</p>
+          <label class="check-row"><input type="checkbox" data-learn${code.learn ? ' checked' : ''}> Learn from my sessions</label>
+          <p class="side-empty">On by default. After each run, in the background, the agent saves what is worth keeping: it notes how the skills it used fared, revises a skill that failed (the old text is kept and comes back if the revision does not hold up), writes a skill after a complex task that went well, saves notes about the project and lines for your profile from your own messages. Everything is listed under <em>What I learned</em> in Settings &gt; Personalization with an Undo button. Switch it off here or with <span class="mono">/learn off</span>; <span class="mono">/learn project off</span> switches it off for this folder only. <span class="mono">/good</span> and <span class="mono">/bad</span> tell it whether the skills of the last run helped.</p>
           <div style="display:flex;gap:6px;margin:4px 0 8px;"><button class="btn btn-xs btn-ghost" data-learn-fb="up" title="The skills the agent used in the last run helped">Skills helped</button><button class="btn btn-xs btn-ghost" data-learn-fb="down" title="The skills the agent used in the last run did not help: a revision is drafted">Skills did not help</button></div>
           <label class="rules-label" for="codePersonality">Style of the agent</label>
           <select class="ui-select" id="codePersonality" data-personality>${Object.entries(PERSONALITIES).map(([k, p]) => `<option value="${k}"${code.personality === k ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}</select>
@@ -2386,7 +2397,7 @@
       ['rewind', 'Undo file changes back to a chosen point'], ['undo', 'Undo the last file change (/undo 3 for three)'],
       ['plan', 'Plan agent: read only'], ['build', 'Build agent'], ['ask', 'Build agent, ask before every change'], ['edit', 'Build agent, auto-edit'], ['agent', 'Switch between build and plan'], ['model', 'Pick the model'],
       ['skill', 'Turn this session into a reusable skill'], ['remember', 'Save a fact to memory (/remember global ...)'], ['memory', 'Show and edit the memory'], ['check', 'Check the code for errors (diagnostics)'],
-      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['search', 'Search earlier chats and code sessions (/search words)'], ['retry', 'Take the last message back, files included, and send it again'], ['stop', 'Stop the agent'], ['insights', 'What the agent did in your saved sessions of this folder'], ['personality', 'How the agent talks (/personality concise)'], ['autoreview', 'Review my work before it counts as done (/autoreview on|off)'], ['learn', 'Learn from this session: skills, memory, profile (/learn on|off)'], ['good', 'The skills of the last run helped'], ['bad', 'The skills of the last run did not help'], ['help', 'List the commands'],
+      ['diff', 'git diff'], ['status', 'git status'], ['worktree', 'Work in a separate git worktree (/worktree new <name>, leave, remove)'], ['batch', 'Run a task in its own worktree (/batch <name> <task>)'], ['cost', 'Tokens and cost counted in this browser'], ['sandbox', 'Show whether agent commands run sandboxed'], ['autoapprove', 'Harmless commands run without a question (/autoapprove on|off)'], ['turbo', 'No questions at all, sandbox off (/turbo on|off)'], ['sandbox', 'Show or set the sandbox mode (/sandbox off|workspace|strict)'], ['review', 'Review the changes: diff plus rule findings (/review staged)'], ['security-review', 'Security-only review of the changes'], ['cd', 'Open another folder'], ['allow', 'Add an allow rule, e.g. /allow bash: npm test*'], ['deny', 'Add a deny rule'], ['rules', 'Show the permission rules'], ['search', 'Search earlier chats and code sessions (/search words)'], ['retry', 'Take the last message back, files included, and send it again'], ['stop', 'Stop the agent'], ['insights', 'What the agent did in your saved sessions of this folder'], ['personality', 'How the agent talks (/personality concise)'], ['autoreview', 'Review my work before it counts as done (/autoreview on|off)'], ['learn', 'Learn from my sessions: on by default (/learn on|off, /learn project off|on|default)'], ['good', 'The skills of the last run helped'], ['bad', 'The skills of the last run did not help'], ['help', 'List the commands'],
     ];
 
     /** Rows for a pick list of the user messages of this session, newest first. */
@@ -2622,9 +2633,20 @@
           return true;
         }
         case 'learn': {
-          if (['on', 'off'].includes(argText.toLowerCase())) { code.learn = argText.toLowerCase() === 'on'; saveCodeSettings(); renderCodeSide(true); }
+          const [word, value] = argText.toLowerCase().split(/\s+/);
+          if (word === 'project') {
+            const root = code.workspace && code.workspace.root;
+            const project = { on: true, off: false, default: null }[value];
+            if (!root || project === undefined) { codeNotice('Usage: /learn project on|off|default (for the open folder; it is kept in .fllm/learn.json there)'); return true; }
+            await apiFetch('/api/studio/learn/settings', { method: 'POST', body: { workspace: root, project } });
+            const st = await window.fllmLearnStatus();
+            if (st) { code.learn = st.enabled; saveCodeSettings(); renderCodeSide(true); }
+            codeNotice(`Learning in this folder: ${project === null ? 'follows the global setting' : project ? 'on' : 'off'}.`);
+            return true;
+          }
+          if (['on', 'off'].includes(word)) { code.learn = word === 'on'; saveCodeSettings(); renderCodeSide(true); if (typeof window.fllmLearnSetEnabled === 'function') await window.fllmLearnSetEnabled(code.learn); }
           const st = typeof window.fllmLearnStatus === 'function' ? await window.fllmLearnStatus() : null;
-          codeNotice(`Learn from this session: ${code.learn ? 'on. After each run the skills used are noted, a revision may be drafted, and memory entries and profile lines are proposed; nothing is saved without your yes (Settings > Skills, Settings > Personalization).' : 'off.'}${st ? ` ${st.pending ? `${st.pending} proposal${st.pending === 1 ? '' : 's'} wait${st.pending === 1 ? 's' : ''} for a decision.` : 'Nothing waits for a decision.'}` : ''}`);
+          codeNotice(`Learning from my sessions: ${code.learn ? 'on. After each run the agent saves skills, notes and profile lines on its own and logs every change (Settings > Personalization > What I learned, with Undo).' : 'off.'}${st ? ` ${st.ask_first ? 'It proposes and waits for your yes.' : ''}${st.pending ? ` ${st.pending} proposal${st.pending === 1 ? '' : 's'} wait${st.pending === 1 ? 's' : ''} for a decision.` : ''}` : ''}`);
           return true;
         }
         case 'good': case 'bad': {
@@ -2925,7 +2947,7 @@
       }
       if (t.dataset.autoCheck !== undefined) { code.autoCheck = t.checked; saveCodeSettings(); }
       if (t.dataset.autoReview !== undefined) { code.autoReview = t.checked; saveCodeSettings(); }
-      if (t.dataset.learn !== undefined) { code.learn = t.checked; saveCodeSettings(); }
+      if (t.dataset.learn !== undefined) { code.learn = t.checked; saveCodeSettings(); if (typeof window.fllmLearnSetEnabled === 'function') window.fllmLearnSetEnabled(t.checked); }
       if (t.dataset.personality !== undefined && PERSONALITIES[t.value]) { code.personality = t.value; saveCodeSettings(); }
     });
     $('codeSide').addEventListener('click', async (e) => {

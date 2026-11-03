@@ -11,7 +11,7 @@ const src = read('learn.js');
 const begin = src.indexOf('// @pure-begin');
 const end = src.indexOf('// @pure-end');
 assert(begin >= 0 && end > begin, 'pure block markers not found in learn.js');
-const L = new Function(`${src.slice(begin, end)}\nreturn { lnSkillsRead, lnRunMessages, lnRunFailed, lnDiffHtml, lnStatText, lnSkillRelevant, lnProfileShape, lnPendingText };`)();
+const L = new Function(`${src.slice(begin, end)}\nreturn { lnSkillsRead, lnRunMessages, lnRunFailed, lnDiffHtml, lnStatText, lnSkillRelevant, lnProfileShape, lnPendingText, lnLogTitle, lnFeedHtml, lnToastText };`)();
 
 let n = 0;
 const test = (name, fn) => { fn(); n++; console.log(`ok - ${name}`); };
@@ -100,6 +100,32 @@ test('the Code page offers the toggle, the commands and the hook', () => {
   assert(/if \(code\.learn && typeof window\.fllmLearnAfterRun === 'function'\)/.test(code), 'learning only runs when the toggle is on');
   const html = read('shell.html');
   assert(html.includes('<option value="learn">'), 'the schedule offers the nightly consolidation');
+});
+
+test('the feed lists every automatic change with its reason and an undo button', () => {
+  const entries = [
+    { id: 'chg-1', t: 1793643870, kind: 'skill_revise', name: 'build', session: 's1', reason: 'make is missing', diff: '- 1. run make\n+ 1. run cargo build\n' },
+    { id: 'chg-2', t: 1793643871, kind: 'memory_add', text: 'Tests run with <b>cargo test</b>', session: 's1', reason: 'reflection', undone: true },
+  ];
+  const html = L.lnFeedHtml(entries, esc, () => 'when');
+  assert(html.includes('Revised the skill &quot;build&quot;') || html.includes('Revised the skill "build"'));
+  assert(html.includes('data-ln-chg="chg-1"') && html.includes('data-ln-undo') && html.includes('make is missing') && html.includes('run cargo build'));
+  assert(html.includes('undone') && html.includes('&lt;b>cargo test') && !html.includes('<b>cargo'), 'escaped, and an undone entry has no undo button');
+  assert.strictEqual((html.match(/data-ln-undo/g) || []).length, 1);
+  assert(L.lnFeedHtml([], esc, () => '').includes('Nothing was learned'));
+  assert.strictEqual(L.lnLogTitle({ kind: 'skill_create', name: 'x' }), 'Wrote the skill "x"');
+  assert.strictEqual(L.lnLogTitle({ kind: 'profile_add', text: 'Prefers tabs (2026-11-03)' }), 'Added to your profile: Prefers tabs (2026-11-03)');
+  assert.strictEqual(L.lnToastText({ summary: 'created skill "a", saved 2 notes.' }), 'Learned: created skill "a", saved 2 notes.');
+  assert.strictEqual(L.lnToastText({ summary: '' }), '');
+  assert.strictEqual(L.lnToastText(null), '');
+});
+
+test('learning is on by default in the Code page and kept in step with the server', () => {
+  const code = read('code.js');
+  assert(code.includes('learn: true,') && code.includes('saved.learn !== false'), 'on unless somebody switched it off');
+  assert(code.includes('Learn from my sessions') && code.includes('fllmLearnSetEnabled') && code.includes('fllmLearnNotice'));
+  assert(code.includes("case 'learn'") && code.includes('/learn project'), 'a per-project override');
+  assert(code.includes('data-learn-fb'), 'thumbs');
 });
 
 console.log(`${n} tests passed`);

@@ -807,12 +807,30 @@
                 </div>
               </div>
 
+              <div class="app-card" id="lnLearnCard">
+                <div class="app-card-title">Learning from my sessions</div>
+                <div class="app-card-item column">
+                  <div class="app-item-info">
+                    <div class="app-item-desc">fLLM learns from your coding sessions by default: after a run it saves skills, notes about the project and short lines about you on its own, each with its reason, and keeps a log you can undo from. Nothing is learned from the chat page, and no secret is ever stored.</div>
+                  </div>
+                  <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Learn from my sessions
+                    <span class="ui-switch"><input type="checkbox" id="lnEnabled" checked><span class="ui-switch-track"></span></span></label>
+                  <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Ask me first (the agent only proposes; you decide below)
+                    <span class="ui-switch"><input type="checkbox" id="lnAskFirst"><span class="ui-switch-track"></span></span></label>
+                  <div class="app-item-desc" id="lnProjectNote"></div>
+                  <div class="app-item-desc" id="lnPendingPersonal"></div>
+                  <div class="app-item-desc" id="lnLastPersonal"></div>
+                  <div class="app-item-title">What I learned</div>
+                  <div id="lnFeedPersonal"></div>
+                </div>
+              </div>
+
               <div class="app-card" id="lnProfileCard">
                 <div class="app-card-title">What the coding agent learned about you</div>
                 <div class="app-card-item column">
                   <div class="app-item-info">
                     <div class="app-item-title">Your profile</div>
-                    <div class="app-item-desc">A plain text file: preferences, skill level, languages, conventions, tool habits. With <strong>Learn from this session</strong> on, the agent proposes lines here; a line is added only when you say yes. Edit it freely: it is put (up to 1,200 characters) into the system prompt of the coding agent, nothing else is kept about you. Secrets are refused.</div>
+                    <div class="app-item-desc">A plain text file: preferences, skill level, languages, conventions, tool habits. The agent adds short dated lines on its own, only from what you wrote yourself (never from tool output); a line that rests on nothing you wrote is dropped. Edit it freely: up to 1,200 characters of it go into the system prompt of the coding agent, nothing else is kept about you. Secrets are refused.</div>
                   </div>
                   <textarea id="lnProfileText" class="ui-textarea mono" rows="9" style="width:100%;" spellcheck="false" placeholder="## Preferences&#10;- Short answers, no filler&#10;## Languages&#10;- Writes Rust and Python"></textarea>
                   <div style="display:flex;justify-content:space-between;align-items:center;width:100%;gap:8px;flex-wrap:wrap;">
@@ -825,7 +843,7 @@
                     <button class="btn btn-sm btn-secondary" id="lnProfileExport">Export</button>
                     <button class="btn btn-sm btn-destructive" id="lnProfileDelete">Delete</button>
                   </div>
-                  <div class="app-item-title">Lines that wait for your yes</div>
+                  <div class="app-item-title">Lines that wait for your yes (only when you chose to be asked first)</div>
                   <div id="lnProfileProposals"></div>
                 </div>
               </div>
@@ -834,13 +852,9 @@
                 <div class="app-card-title">Memory of the coding agent</div>
                 <div class="app-card-item column">
                   <div class="app-item-info">
-                    <div class="app-item-desc">Short notes the coding agent keeps for later sessions (<span class="mono">agent-memory.md</span> in the Studio folder, <span class="mono">.fllm/memory.md</span> in a project). With <strong>Learn from this session</strong> on, a short reflective step proposes entries after a run: project facts, your preferences, commands that worked, mistakes to avoid. Repeats are dropped, secrets are never stored, and an entry is written only after your yes. Each learned entry shows the session it came from.</div>
+                    <div class="app-item-desc">Short notes the coding agent keeps for later sessions (<span class="mono">agent-memory.md</span> in the Studio folder, <span class="mono">.fllm/memory.md</span> in a project). After a run it saves facts about the project, your preferences, commands that worked and mistakes to avoid; repeats are dropped, secrets are never stored, at most five per run. Each learned entry shows the session it came from; edit or delete any entry here, or undo it from the log above.</div>
                   </div>
-                  <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;">Save memory and profile lines without asking
-                    <span class="ui-switch"><input type="checkbox" id="lnAuto"><span class="ui-switch-track"></span></span></label>
-                  <div class="app-item-desc" id="lnPendingPersonal"></div>
-                  <div class="app-item-desc" id="lnLastPersonal"></div>
-                  <div class="app-item-title">Waiting for your yes</div>
+                  <div class="app-item-title">Waiting for your yes (only when you chose to be asked first)</div>
                   <div id="lnMemProposals"></div>
                   <div class="app-item-title">Entries</div>
                   <div class="mem-list" id="lnMemList"></div>
@@ -1408,11 +1422,14 @@
               </div>
               <div class="app-card" id="lnSkillCard">
                 <div class="app-card-title">Skill improvements</div>
-                <p class="app-item-desc" style="margin-bottom:8px;">With <strong>Learn from this session</strong> on (Code page), the agent notes how a skill fared each time it is used: finished or failed, whether the checks passed, retries, and your thumbs. After a failure, or after five uses, it drafts a revised version with the reason. A draft changes nothing until you approve it; every approved revision keeps the text it replaced, so you can roll back. The draft is written by the model that is loaded, so a small model drafts small changes.</p>
+                <p class="app-item-desc" style="margin-bottom:8px;">The coding agent learns from your Code sessions on its own (switch it off in Settings &gt; Personalization). When it reads a skill, how it went is noted: finished or failed, whether the checks passed, retries, and your thumbs. After a failure, a thumb down, many retries or five uses it revises the skill itself: the previous text is kept, and if one of the next two uses of the revised skill goes badly the previous text is put back. After a complex task that went well it writes a new skill. A skill you wrote or edited is never overwritten: the agent writes a copy named <span class="mono">NAME-agent</span> next to it. Every change is listed below and under <em>What I learned</em> with an Undo button. The model that is loaded writes the drafts, so a small model makes small changes.</p>
                 <div class="app-item-desc" id="lnPendingSkills"></div>
                 <div class="app-item-desc" id="lnLastSkills"></div>
+                <div class="app-item-title" style="margin-top:6px;">What I learned about skills</div>
+                <div id="lnFeedSkills"></div>
+                <div class="app-item-title" style="margin-top:10px;">Skills with a history</div>
                 <div id="lnSkillList"></div>
-                <div style="display:flex;gap:6px;margin-top:8px;"><button class="btn btn-sm btn-secondary" id="lnConsolidate" title="Draft the revisions that are due and propose to remove repeated memory entries, now">Consolidate now</button><span class="app-item-desc">The same job can run every night: add a task of the kind "Consolidate memory and skills" below.</span></div>
+                <div style="display:flex;gap:6px;margin-top:8px;"><button class="btn btn-sm btn-secondary" id="lnConsolidate" title="Revise the skills that are due and remove repeated memory entries, now">Consolidate now</button><span class="app-item-desc">The same job can run every night: add a task of the kind "Consolidate memory and skills" below.</span></div>
               </div>
               <div class="app-card">
                 <div class="app-card-title">Write a skill</div>
