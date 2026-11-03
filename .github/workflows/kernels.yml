@@ -52,7 +52,7 @@ jobs:
             echo
             echo '```'
             grep -E "cargo:warning=HIP" build.log | sed 's/.*cargo:warning=//' || true
-            ls -l target/release/fllm-rs | awk '{print "fllm-rs: " $5 " bytes"}'
+            echo "fllm-rs: $(stat -c %s target/release/fllm-rs) bytes"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -91,9 +91,11 @@ jobs:
 
       - name: Compile every source for every target of the family
         run: |
+          # the list of targets is meant to be split into words
+          # shellcheck disable=SC2086
           bash scripts/hip_arch_matrix.sh --opt O1 --jobs 4 --summary matrix.txt ${{ matrix.archs }} || status=$?
           { echo "### ${{ matrix.family }}"; echo '```'; cat matrix.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          exit ${status:-0}
+          exit "${status:-0}"
 
   cuda-build:
     name: CUDA build (no GPU needed to compile)
