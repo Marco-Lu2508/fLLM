@@ -33,7 +33,7 @@ pub const HELP: &str = "usage: fllm-rs agent -p \"TASK\" [--folder DIR] [--url h
                   [--session NAME] [--continue] [--resume NAME] [--profile NAME] [--ask] [--trajectory FILE] [--json] [--quiet]
                   [--output-format text|json|stream-json] [--plan] [--allow-rule RULE] [--deny-rule RULE] [--ask-rule RULE]
                   [--review] [--review-rounds N] [--verify COMMAND] [--propose-skills] [--auto-skills] [--image FILE]...
-                  [--learn] [--auto-memory] [--skills] [--nudge-every N]
+                  [--no-learn] [--ask-first] [--skills] [--nudge-every N]
 Runs the coding agent of the Studio without a browser against a running fllm-rs server on this machine.
 TASK: the text after -p; `-p -` reads it from standard input. Reading and searching files is always allowed.
 Everything else is refused unless you allow it: --allow-edit (write_file, edit_file, patch ...), --allow-command (bash),
@@ -54,10 +54,13 @@ Rules (allow / deny / ask, `bash: npm test*`, `edit: src/**`, or `Bash(npm test:
 fix what is found before the run counts as done (at most --review-rounds, default 2). --image FILE (repeatable) attaches a png/jpg/gif/webp picture to the task; the loaded model must be able to see.
 --propose-skills: after a long run the model may
 write a skill; it waits in skills-proposed/ (fllm-rs skills approve NAME), --auto-skills saves it at once.
---learn: the agent learns from the run. It can read your skills (the skill tool), notes how they fared, drafts a revised skill after a failure or
-several uses, and a short reflective step proposes memory entries and lines for your profile (also every N tool steps in a long run, default 12, 0 = only
-at the end); it implies --propose-skills. Nothing is written without your approval (fllm-rs learn review); --auto-memory writes memory entries and
-profile lines at once. --skills only lets the agent read your skills.
+Learning is ON by default: after the answer the agent learns from the run on its own. It reads your skills (the skill tool; the best match is put into
+the prompt), notes how they fared, revises a skill after a failure or several uses (the old text is kept; if the next uses of the revised skill go
+badly it is put back at once; a skill you wrote or edited is never overwritten, the revision is written as a sibling skill), writes a new skill after a
+complex successful run, saves notes about the project and lines for your profile (taken from your own messages), also every N tool steps of a long
+run (--nudge-every N, default 12, 0 = only at the end). Every change is logged and can be undone: fllm-rs learn log, fllm-rs learn undo ID.
+--no-learn (or FLLM_NO_LEARN=1, `fllm-rs learn off`, a project's .fllm/learn.json with {\"enabled\": false}) switches it off; --ask-first turns every
+change into a proposal that waits for your yes (fllm-rs learn review). --skills only lets the agent read your skills.
 The answer is printed on standard output. Exit codes: 0 finished, 1 error, 3 stopped at --max-steps (a report is still printed), 4 the --verify command still fails after the run.
 The agent tools only accept requests from the machine the server runs on, so --url must name this machine.";
 
@@ -89,10 +92,12 @@ pub struct Options {
     pub propose_skills: bool,
     pub auto_skills: bool,
     pub images: Vec<PathBuf>,
-    /// `--learn`: the self-improvement loop (skill usage notes and revisions, memory and profile reflection).
+    /// The self-improvement loop (skill usage notes, revisions and new skills, memory and profile reflection). On by default;
+    /// `--no-learn` switches it off for this run. Whether it runs also depends on `fllm-rs learn off` and the project's `.fllm/learn.json`.
     pub learn: bool,
-    pub auto_memory: bool,
-    /// `--skills` (also on with `--learn`): the agent can read the skills of the Studio folder and the project.
+    /// `--ask-first`: changes are proposals that wait for a yes instead of being applied.
+    pub ask_first: bool,
+    /// `--skills` (also on while learning): the agent can read the skills of the Studio folder and the project.
     pub skills: bool,
     pub nudge_every: usize,
 }
@@ -147,8 +152,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         propose_skills: false,
         auto_skills: false,
         images: Vec::new(),
-        learn: false,
-        auto_memory: false,
+        learn: true,
+        ask_first: false,
         skills: false,
         nudge_every: 12,
     };
@@ -239,14 +244,14 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--learn" => {
                 o.learn = true;
                 o.skills = true;
-                o.propose_skills = true;
             }
+            "--no-learn" => o.learn = false,
+            // learning writes by itself unless told to ask first; the old flag stays accepted
             "--auto-memory" => {
                 o.learn = true;
                 o.skills = true;
-                o.propose_skills = true;
-                o.auto_memory = true;
             }
+            "--ask-first" => o.ask_first = true,
             "--skills" => o.skills = true,
             "--nudge-every" => {
                 o.nudge_every = value(args, &mut i, flag)?.parse().ok().filter(|n| *n <= 500).ok_or("--nudge-every is a number from 0 to 500")?;
@@ -1087,15 +1092,20 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
     }
 
+    let studio = studio_folder();
+    let learn_on = options.learn && crate::learn::enabled(&studio, Some(&folder));
+    if learn_on && crate::learn::take_notice(&studio) {
+        eprintln!("[learn] {}", crate::learn::NOTICE);
+    }
     let mut lb = crate::learn_cli::LearnBackend::new(
         &mut http,
-        &studio_folder(),
+        &studio,
         &folder,
         &options.prompt,
         crate::learn_cli::LearnConfig {
-            learn: options.learn,
-            skills: options.skills,
-            auto_memory: options.auto_memory,
+            learn: learn_on,
+            skills: options.skills || learn_on,
+            auto: !(options.ask_first || crate::learn::ask_first(&studio)),
             nudge_every: options.nudge_every,
             quiet: options.quiet,
             secrets: options.api_key.iter().cloned().collect(),
@@ -1260,7 +1270,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     let outcome = outcome?;
 
     // a long run may leave a skill behind: proposed (waits for approval) or saved at once
-    if options.propose_skills && outcome.status == Status::Done && outcome.tool_calls.len() >= 8 {
+    if options.propose_skills && !learn_on && outcome.status == Status::Done && outcome.tool_calls.len() >= 8 {
         propose_skill(&mut lb, &cfg, &system, &outcome, &base, options.auto_skills, &mut progress);
     }
 
@@ -1301,7 +1311,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     }
     io::stdout().flush().ok();
     // the answer is out: now the agent learns from the run (skill notes and revisions, memory and profile proposals)
-    if options.learn {
+    if learn_on {
         let verify = if options.review { options.verify.as_ref().map(|_| !verify_failed) } else { None };
         for line in lb.finish(&outcome, &session_id, verify, run_from) {
             progress(&line);
@@ -1643,13 +1653,13 @@ mod tests {
     #[test]
     fn the_learning_flags_turn_the_loop_on_and_the_profile_and_skills_reach_the_prompt() {
         let o = parse_args(&s(&["-p", "x"])).unwrap();
-        assert!(!o.learn && !o.skills && !o.auto_memory && !o.propose_skills && o.nudge_every == 12, "off by default");
-        let o = parse_args(&s(&["-p", "x", "--learn"])).unwrap();
-        assert!(o.learn && o.skills && o.propose_skills && !o.auto_memory && !o.auto_skills, "proposals only");
-        let o = parse_args(&s(&["-p", "x", "--auto-memory", "--nudge-every", "0"])).unwrap();
-        assert!(o.learn && o.auto_memory && o.nudge_every == 0);
+        assert!(o.learn && !o.ask_first && !o.propose_skills && o.nudge_every == 12, "learning is on by default, nothing else changes");
+        assert!(!parse_args(&s(&["-p", "x", "--no-learn"])).unwrap().learn);
+        let o = parse_args(&s(&["-p", "x", "--ask-first", "--nudge-every", "0"])).unwrap();
+        assert!(o.learn && o.ask_first && o.nudge_every == 0);
+        assert!(parse_args(&s(&["-p", "x", "--no-learn", "--learn"])).unwrap().learn, "the last word wins");
+        assert!(parse_args(&s(&["-p", "x", "--auto-memory"])).unwrap().learn, "the old flag is accepted");
         assert!(parse_args(&s(&["-p", "x", "--skills"])).unwrap().skills);
-        assert!(!parse_args(&s(&["-p", "x", "--skills"])).unwrap().learn, "reading skills does not learn");
         assert!(parse_args(&s(&["-p", "x", "--nudge-every", "9999"])).is_err());
         let block = instructions_block(&json!({"profile": "- Languages: Rust", "skills": "- build: Build it"}));
         assert!(block.contains("# About the user (profile)") && block.contains("- Languages: Rust") && block.contains("# Skills\n- build: Build it"), "{block}");

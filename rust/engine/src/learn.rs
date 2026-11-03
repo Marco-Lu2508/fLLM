@@ -41,6 +41,10 @@ pub const PROFILE_PROMPT_CHARS: usize = 1_200;
 /// After this many uses of a skill since its last revision the agent drafts a revision.
 pub const IMPROVE_AFTER_USES: usize = 5;
 pub const USAGE_KEEP: usize = 200;
+/// A use with this many failed tool calls counts as a bad use of the skill.
+pub const RETRY_BAD: u32 = 3;
+/// After an automatic revision this many uses are watched; a bad one puts the previous text back.
+pub const WATCH_USES: u32 = 2;
 pub const VERSIONS_KEEP: usize = 20;
 const MAX_SKILL_BYTES: usize = 64 * 1024;
 /// Two memory entries whose BM25 score ratio reaches this are one and the same.
@@ -457,7 +461,7 @@ pub fn compute_stats(usage: &[Usage], after_n: u64) -> Stats {
     let mut s = Stats::default();
     for u in usage {
         let counts = u.outcome == "done" || u.outcome == "failed";
-        let bad = u.outcome == "failed" || u.feedback.as_deref() == Some("down") || u.verify == Some(false);
+        let bad = u.outcome == "failed" || u.feedback.as_deref() == Some("down") || u.verify == Some(false) || u.retries >= RETRY_BAD;
         if counts {
             s.uses += 1;
             if u.outcome == "done" && u.verify != Some(false) {
@@ -512,7 +516,7 @@ pub fn stats_of(studio: &Path, s: &SkillRef) -> Stats {
 
 /// Why a revision should be drafted now (`None`: not yet, or one is waiting already).
 pub fn improve_due(studio: &Path, s: &SkillRef) -> Option<String> {
-    if revision_file(studio, s).is_file() || !s.file(studio).is_file() {
+    if revision_file(studio, s).is_file() || !s.file(studio).is_file() || watch_of(studio, s).is_some() {
         return None;
     }
     let st = stats_of(studio, s);
@@ -652,6 +656,10 @@ pub fn reject_revision(studio: &Path, s: &SkillRef) -> Result<(), String> {
 /// Puts an older text back. `version` None: the newest kept version. The text that is replaced becomes a version too.
 pub fn rollback(studio: &Path, s: &SkillRef, version: Option<u32>) -> Result<u32, String> {
     let _g = lock();
+    rollback_inner(studio, s, version, "rollback", None)
+}
+
+fn rollback_inner(studio: &Path, s: &SkillRef, version: Option<u32>, action: &str, why: Option<&str>) -> Result<u32, String> {
     let target = match version {
         Some(v) => v,
         None => next_version(studio, s).saturating_sub(1),
@@ -661,7 +669,7 @@ pub fn rollback(studio: &Path, s: &SkillRef, version: Option<u32>) -> Result<u32
     }
     let old = std::fs::read_to_string(versions_dir(studio, s).join(format!("v{target:04}.md"))).map_err(|_| format!("'{}' has no version {target}", s.name))?;
     let current = s.read(studio)?;
-    let kept = snapshot(studio, s, &current, "rollback", &format!("rolled back to version {target}"))?;
+    let kept = snapshot(studio, s, &current, action, why.unwrap_or(&format!("rolled back to version {target}")))?;
     write_text(&s.file(studio), &old)?;
     Ok(kept)
 }
@@ -847,6 +855,8 @@ pub struct Ingest {
     pub proposed: Vec<String>,
     /// `(text, reason)` of what was dropped.
     pub skipped: Vec<(String, String)>,
+    /// One JSON object per written item (`kind` memory or profile, `scope`, `workspace`, `section`, `text`), for the change log.
+    pub meta: Vec<Value>,
 }
 
 fn short_id(prefix: &str, parts: &[&str]) -> String {
@@ -911,6 +921,7 @@ pub fn ingest_memory(studio: &Path, workspace: Option<&Path>, session: &str, can
                 continue;
             }
             let _ = set_source(studio, &text, session, "reflection");
+            result.meta.push(json!({"kind": "memory", "scope": scope, "workspace": if scope == "workspace" { ws.clone() } else { String::new() }, "text": text}));
             result.added.push(text);
         } else {
             if pending.len() >= MAX_PENDING_MEMORY {
@@ -944,9 +955,14 @@ pub fn ingest_memory(studio: &Path, workspace: Option<&Path>, session: &str, can
 
 /// Proposes the removal of entries that repeat an earlier entry of the same file (the nightly consolidation).
 pub fn propose_memory_cleanup(studio: &Path, workspace: Option<&Path>) -> Vec<String> {
+    propose_memory_cleanup_items(studio, workspace).into_iter().map(|p| p.text).collect()
+}
+
+/// Like [`propose_memory_cleanup`], returning the new proposals (so that they can be applied at once).
+pub fn propose_memory_cleanup_items(studio: &Path, workspace: Option<&Path>) -> Vec<MemoryProposal> {
     let _g = lock();
     let mut pending = memory_proposals(studio);
-    let mut out = Vec::new();
+    let mut out: Vec<MemoryProposal> = Vec::new();
     for scope in ["global", "workspace"] {
         if scope == "workspace" && workspace.is_none() {
             continue;
@@ -959,7 +975,7 @@ pub fn propose_memory_cleanup(studio: &Path, workspace: Option<&Path>) -> Vec<St
             if pending.iter().any(|p| p.id == id) || pending.len() >= MAX_PENDING_MEMORY {
                 continue;
             }
-            pending.push(MemoryProposal {
+            let proposal = MemoryProposal {
                 id,
                 action: "remove".into(),
                 scope: scope.to_owned(),
@@ -969,8 +985,9 @@ pub fn propose_memory_cleanup(studio: &Path, workspace: Option<&Path>) -> Vec<St
                 session: String::new(),
                 created: now(),
                 reason: format!("repeats: {}", clip_chars(&entries[j], 80)),
-            });
-            out.push(e.clone());
+            };
+            pending.push(proposal.clone());
+            out.push(proposal);
         }
     }
     if !out.is_empty() {
@@ -1162,7 +1179,31 @@ pub fn profile_bullets_count(text: &str) -> usize {
 }
 
 fn profile_bullets(text: &str) -> Vec<String> {
-    text.lines().filter_map(|l| l.trim().strip_prefix("- ").map(|e| e.trim().to_owned())).collect()
+    text.lines().filter_map(|l| l.trim().strip_prefix("- ").map(|e| strip_date(e.trim()))).collect()
+}
+
+/// `today` as `YYYY-MM-DD`.
+pub fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// A profile line with the day it was added, `text (2026-11-03)`.
+pub fn dated(item: &str) -> String {
+    format!("{} ({})", item.trim_end(), today())
+}
+
+/// `text (2026-11-03)` without the date.
+pub fn strip_date(line: &str) -> String {
+    let t = line.trim_end();
+    if t.len() > 13 && t.is_char_boundary(t.len() - 13) {
+        let (head, tail) = t.split_at(t.len() - 13);
+        if let Some(d) = tail.strip_prefix(" (").and_then(|x| x.strip_suffix(')')) {
+            if d.len() == 10 && d.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }) {
+                return head.trim_end().to_owned();
+            }
+        }
+    }
+    t.to_owned()
 }
 
 /// Adds `- item` under `## Title` of a profile text (the heading is created when missing). `Err` when the section is full.
@@ -1268,10 +1309,12 @@ pub fn ingest_profile(studio: &Path, session: &str, candidates: &[ProfileCandida
             continue;
         }
         if auto {
-            match profile_insert(&text, title, &item) {
+            let line = dated(&item);
+            match profile_insert(&text, title, &line) {
                 Ok(next) if next.chars().count() <= PROFILE_FILE_CHARS => {
                     text = next;
-                    result.added.push(item);
+                    result.meta.push(json!({"kind": "profile", "section": section, "text": line}));
+                    result.added.push(line);
                 }
                 Ok(_) => result.skipped.push((item, "the profile is full".into())),
                 Err(e) => result.skipped.push((item, e)),
@@ -1300,7 +1343,7 @@ pub fn decide_profile(studio: &Path, id: &str, accept: bool) -> Result<String, S
     let p = list.remove(at);
     let msg = if accept {
         let title = profile_title(&p.section).ok_or("unknown section")?;
-        let text = profile_insert(&read_profile(studio), title, &p.text)?;
+        let text = profile_insert(&read_profile(studio), title, &dated(&p.text))?;
         if text.chars().count() > PROFILE_FILE_CHARS {
             return Err("the profile is full".into());
         }
@@ -1352,6 +1395,376 @@ pub fn overview(studio: &Path) -> Value {
         "last_run": read_json(&learn_dir(studio).join("last-run.json")),
         "pending": revisions.len() + memory.len() + profile.len(),
     })
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// autonomous mode: the switches, who owns a skill file, the watch after a revision, the log of changes with undo
+// ---------------------------------------------------------------------------------------------------------------
+
+fn set_setting(studio: &Path, key: &str, value: Value) -> Result<(), String> {
+    let _g = lock();
+    let mut v = read_json(&settings_file(studio));
+    if !v.is_object() {
+        v = json!({});
+    }
+    v[key] = value;
+    write_json(&settings_file(studio), &v)
+}
+
+/// Learning from sessions is on unless somebody switched it off (`fllm-rs learn off`, the toggle in the Studio, `--no-learn`).
+pub fn learning_enabled_global(studio: &Path) -> bool {
+    read_json(&settings_file(studio))["enabled"].as_bool().unwrap_or(true)
+}
+
+pub fn set_learning_enabled(studio: &Path, on: bool) -> Result<(), String> {
+    set_setting(studio, "enabled", json!(on))
+}
+
+/// `true`: the agent proposes and waits for a yes instead of applying (`fllm-rs learn mode ask`). Default false.
+pub fn ask_first(studio: &Path) -> bool {
+    read_json(&settings_file(studio))["ask_first"].as_bool().unwrap_or(false)
+}
+
+pub fn set_ask_first(studio: &Path, on: bool) -> Result<(), String> {
+    set_setting(studio, "ask_first", json!(on))
+}
+
+fn project_file(workspace: &Path) -> PathBuf {
+    workspace.join(".fllm").join("learn.json")
+}
+
+/// `.fllm/learn.json` of a project: `{"enabled": false}` switches learning off there (or `true` on, when it is off globally).
+pub fn project_override(workspace: &Path) -> Option<bool> {
+    read_json(&project_file(workspace))["enabled"].as_bool()
+}
+
+pub fn set_project_override(workspace: &Path, value: Option<bool>) -> Result<(), String> {
+    match value {
+        Some(v) => write_json(&project_file(workspace), &json!({"enabled": v})),
+        None => {
+            let _ = std::fs::remove_file(project_file(workspace));
+            Ok(())
+        }
+    }
+}
+
+/// Whether the agent learns from a session in `workspace`: the environment variable `FLLM_NO_LEARN`, then the project's
+/// own setting, then the global one (on by default).
+pub fn enabled(studio: &Path, workspace: Option<&Path>) -> bool {
+    if std::env::var_os("FLLM_NO_LEARN").is_some_and(|v| !v.is_empty() && v != "0") {
+        return false;
+    }
+    workspace.and_then(project_override).unwrap_or_else(|| learning_enabled_global(studio))
+}
+
+/// `true` the first time it is asked (the one-sentence notice is shown then), `false` afterwards.
+pub fn take_notice(studio: &Path) -> bool {
+    let marker = learn_dir(studio).join("notice-shown");
+    if marker.exists() {
+        return false;
+    }
+    write_text(&marker, "shown\n").is_ok()
+}
+
+pub const NOTICE: &str = "fLLM learns from your sessions by default: it saves skills, notes and profile lines on its own, keeps every change in a log you can undo (fllm-rs learn log), and stops with --no-learn or `fllm-rs learn off`.";
+
+// ---- who wrote a skill file ----------------------------------------------------------------------------------
+
+fn agent_file(studio: &Path, s: &SkillRef) -> PathBuf {
+    s.meta_dir(studio).join("agent.json")
+}
+
+pub fn text_hash(text: &str) -> String {
+    format!("{:08x}", fnv(text.trim()))
+}
+
+pub fn mark_agent_written(studio: &Path, s: &SkillRef, text: &str) -> Result<(), String> {
+    write_json(&agent_file(studio, s), &json!({"hash": text_hash(text), "t": now()}))
+}
+
+/// True when the agent wrote the current text of the skill and nobody changed it since. A skill you wrote, imported or edited
+/// is not owned: the agent never overwrites it, it writes a sibling instead.
+pub fn is_agent_owned(studio: &Path, s: &SkillRef) -> bool {
+    let hash = read_json(&agent_file(studio, s))["hash"].as_str().map(str::to_owned);
+    match (hash, s.read(studio)) {
+        (Some(h), Ok(t)) => h == text_hash(&t),
+        _ => false,
+    }
+}
+
+/// The skill that carries the agent's revision of a skill it does not own.
+pub fn sibling_ref(s: &SkillRef) -> SkillRef {
+    let mut name = format!("{}-agent", s.name);
+    name.truncate(64);
+    SkillRef { name: name.trim_end_matches(['-', '_']).to_owned(), scope: s.scope.clone(), workspace: s.workspace.clone() }
+}
+
+// ---- the watch after an automatic revision --------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Watch {
+    /// The version that holds the text from before the revision.
+    pub version: u32,
+    pub remaining: u32,
+    pub reason: String,
+}
+
+fn watch_file(studio: &Path, s: &SkillRef) -> PathBuf {
+    s.meta_dir(studio).join("watch.json")
+}
+
+pub fn watch_of(studio: &Path, s: &SkillRef) -> Option<Watch> {
+    let v = read_json(&watch_file(studio, s));
+    Some(Watch { version: v["version"].as_u64()? as u32, remaining: v["remaining"].as_u64()? as u32, reason: v["reason"].as_str().unwrap_or_default().to_owned() })
+}
+
+fn set_watch(studio: &Path, s: &SkillRef, w: &Watch) -> Result<(), String> {
+    write_json(&watch_file(studio, s), &json!({"version": w.version, "remaining": w.remaining, "reason": w.reason}))
+}
+
+fn clear_watch(studio: &Path, s: &SkillRef) {
+    let _ = std::fs::remove_file(watch_file(studio, s));
+}
+
+fn use_is_bad(u: &Usage) -> bool {
+    u.outcome == "failed" || u.verify == Some(false) || u.feedback.as_deref() == Some("down") || u.retries >= RETRY_BAD
+}
+
+/// Called after every use or thumb of a skill. While an automatic revision is on watch, a bad use puts the previous text back;
+/// the second good use confirms the revision. Returns a line about it, if anything happened.
+pub fn judge_use(studio: &Path, s: &SkillRef, u: &Usage) -> Option<String> {
+    let _g = lock();
+    let w = watch_of(studio, s)?;
+    if use_is_bad(u) {
+        let why = format!("the revised skill had a bad use (session {}); the previous text was put back", u.session);
+        let current = s.read(studio).unwrap_or_default();
+        let result = rollback_inner(studio, s, Some(w.version), "auto-rollback", Some(&why));
+        clear_watch(studio, s);
+        return Some(match result {
+            Ok(_) => {
+                let restored = s.read(studio).unwrap_or_default();
+                let _ = mark_agent_written(studio, s, &restored);
+                log_change_inner(studio, "skill_rollback", json!({"name": s.name, "scope": s.scope, "workspace": s.workspace, "session": u.session, "reason": why}), Some(&current), Some(&restored));
+                format!("skill '{}': the revision did not hold up, the previous text is back", s.name)
+            }
+            Err(e) => format!("skill '{}': the revision did not hold up but could not be taken back ({e})", s.name),
+        });
+    }
+    if u.outcome == "done" {
+        if w.remaining <= 1 {
+            clear_watch(studio, s);
+        } else {
+            let _ = set_watch(studio, s, &Watch { remaining: w.remaining - 1, ..w });
+        }
+    }
+    None
+}
+
+// ---- automatic writes ------------------------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AutoApply {
+    /// Applied; the version number holds the previous text.
+    Applied(u32),
+    /// The file is not the agent's (written or edited by a person): nothing was written.
+    NotOwned,
+}
+
+fn check_text(old: Option<&str>, new_text: &str) -> Result<(), String> {
+    if new_text.trim().is_empty() || new_text.len() > MAX_SKILL_BYTES {
+        return Err("the skill text is empty or larger than 64 KB".into());
+    }
+    if has_secret(new_text) {
+        return Err("the skill text contains something that looks like a secret".into());
+    }
+    if old.is_some_and(|o| o.trim() == new_text.trim()) {
+        return Err("the revision does not change the skill".into());
+    }
+    Ok(())
+}
+
+/// Applies a revision at once when the agent owns the skill: the previous text is kept as a version, the revision is put on watch
+/// (see [`judge_use`]) and the change is logged with an undo.
+pub fn apply_revision_auto(studio: &Path, s: &SkillRef, new_text: &str, reason: &str, trigger: &str, session: &str) -> Result<AutoApply, String> {
+    let _g = lock();
+    let old = s.read(studio)?;
+    check_text(Some(&old), new_text)?;
+    if !is_agent_owned(studio, s) {
+        return Ok(AutoApply::NotOwned);
+    }
+    let reason = clip_chars(&one_line(&redact(reason)), 400);
+    let version = snapshot(studio, s, &old, "auto-revise", &reason)?;
+    write_text(&s.file(studio), new_text)?;
+    mark_agent_written(studio, s, new_text)?;
+    set_watch(studio, s, &Watch { version, remaining: WATCH_USES, reason: reason.clone() })?;
+    let _ = std::fs::remove_file(revision_file(studio, s));
+    log_change_inner(studio, "skill_revise", json!({"name": s.name, "scope": s.scope, "workspace": s.workspace, "session": session, "reason": reason, "trigger": trigger}), Some(&old), Some(new_text));
+    Ok(AutoApply::Applied(version))
+}
+
+/// Writes a new skill the agent made up. Never replaces a skill that exists.
+pub fn create_skill_file(studio: &Path, s: &SkillRef, text: &str, reason: &str, session: &str) -> Result<(), String> {
+    let _g = lock();
+    check_text(None, text)?;
+    if s.dir(studio).exists() {
+        return Err(format!("a skill named '{}' exists already", s.name));
+    }
+    if s.scope == "user" && list_skills(studio, None).len() >= 400 {
+        return Err("there are 400 skills already".into());
+    }
+    write_text(&s.file(studio), text)?;
+    mark_agent_written(studio, s, text)?;
+    let reason = clip_chars(&one_line(&redact(reason)), 400);
+    log_change_inner(studio, "skill_create", json!({"name": s.name, "scope": s.scope, "workspace": s.workspace, "session": session, "reason": reason}), None, Some(text));
+    Ok(())
+}
+
+/// Logs a batch of memory or profile lines that were written (the `meta` of an [`Ingest`]).
+pub fn log_ingest(studio: &Path, session: &str, reason: &str, meta: &[Value]) {
+    for m in meta {
+        let kind = if m["kind"] == "profile" { "profile_add" } else { "memory_add" };
+        let mut fields = m.clone();
+        fields["session"] = json!(session);
+        fields["reason"] = json!(reason);
+        log_change(studio, kind, fields, None, None);
+    }
+}
+
+// ---- the log of changes ------------------------------------------------------------------------------------------
+
+static CHANGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const LOG_KEEP: usize = 300;
+const LOG_BODIES_KEEP: usize = 100;
+
+fn log_file(studio: &Path) -> PathBuf {
+    learn_dir(studio).join("log.jsonl")
+}
+
+fn changes_dir(studio: &Path) -> PathBuf {
+    learn_dir(studio).join("changes")
+}
+
+fn log_change_inner(studio: &Path, kind: &str, fields: Value, before: Option<&str>, after: Option<&str>) -> String {
+    let t = now();
+    let seq = CHANGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let id = format!("chg-{:08x}", fnv(&format!("{t}-{seq}-{kind}-{}", fields)));
+    let mut entry = if fields.is_object() { fields } else { json!({}) };
+    entry["id"] = json!(id);
+    entry["t"] = json!(t);
+    entry["kind"] = json!(kind);
+    entry["undone"] = json!(false);
+    if kind.starts_with("skill") {
+        entry["diff"] = json!(clip_chars(&diff(before.unwrap_or(""), after.unwrap_or("")), 6000));
+    }
+    if let Some(b) = before {
+        let _ = write_text(&changes_dir(studio).join(&id).join("before.md"), b);
+    }
+    if let Some(a) = after {
+        let _ = write_text(&changes_dir(studio).join(&id).join("after.md"), a);
+    }
+    let mut all = read_lines(&log_file(studio));
+    all.push(entry);
+    if all.len() > LOG_KEEP {
+        all.drain(..all.len() - LOG_KEEP);
+    }
+    // the texts behind old entries go; the entries stay, without undo
+    for old in all.iter().rev().skip(LOG_BODIES_KEEP) {
+        if let Some(oid) = old["id"].as_str() {
+            let _ = std::fs::remove_dir_all(changes_dir(studio).join(oid));
+        }
+    }
+    let _ = write_lines(&log_file(studio), &all);
+    id
+}
+
+/// Appends one entry to the log of automatic changes (`before`/`after` are the texts of a skill, kept for the undo).
+pub fn log_change(studio: &Path, kind: &str, fields: Value, before: Option<&str>, after: Option<&str>) -> String {
+    let _g = lock();
+    log_change_inner(studio, kind, fields, before, after)
+}
+
+/// The newest `limit` entries of the log, newest first.
+pub fn read_log(studio: &Path, limit: usize) -> Vec<Value> {
+    let mut all = read_lines(&log_file(studio));
+    all.reverse();
+    all.truncate(limit);
+    all
+}
+
+fn entry_ws(e: &Value) -> Option<PathBuf> {
+    e["workspace"].as_str().filter(|w| !w.is_empty() && e["scope"] != "global" && e["scope"] != "user").map(PathBuf::from)
+}
+
+/// Takes one automatic change back. A skill that was edited after the change is not touched.
+pub fn undo(studio: &Path, id: &str) -> Result<String, String> {
+    let _g = lock();
+    let mut log = read_lines(&log_file(studio));
+    let at = log.iter().position(|e| e["id"] == id).ok_or_else(|| format!("no change '{id}' in the log"))?;
+    if log[at]["undone"] == true {
+        return Err("that change was undone already".into());
+    }
+    let e = log[at].clone();
+    let body = |name: &str| std::fs::read_to_string(changes_dir(studio).join(id).join(name)).ok();
+    let skill = || SkillRef::from_parts(e["name"].as_str().unwrap_or_default(), e["scope"].as_str().unwrap_or("user"), e["workspace"].as_str().unwrap_or_default());
+    let msg = match e["kind"].as_str().unwrap_or_default() {
+        "skill_create" => {
+            let s = skill()?;
+            let cur = s.read(studio)?;
+            if body("after.md").is_some_and(|a| a.trim() != cur.trim()) {
+                return Err(format!("'{}' was edited after the agent wrote it; delete it by hand if you want it gone", s.name));
+            }
+            std::fs::remove_dir_all(s.dir(studio)).map_err(|e| e.to_string())?;
+            clear_watch(studio, &s);
+            format!("skill '{}' removed", s.name)
+        }
+        "skill_revise" | "skill_rollback" => {
+            let s = skill()?;
+            let cur = s.read(studio)?;
+            if body("after.md").is_some_and(|a| a.trim() != cur.trim()) {
+                return Err(format!("'{}' changed after this entry; nothing was touched", s.name));
+            }
+            let before = body("before.md").ok_or("the old text is no longer kept for this entry")?;
+            snapshot(studio, &s, &cur, "undo", "undone by hand")?;
+            write_text(&s.file(studio), &before)?;
+            mark_agent_written(studio, &s, &before)?;
+            clear_watch(studio, &s);
+            format!("skill '{}' is back to its text before the change", s.name)
+        }
+        "memory_add" => {
+            let (scope, ws) = (e["scope"].as_str().unwrap_or("global"), entry_ws(&e));
+            let norm = normalize(e["text"].as_str().unwrap_or_default());
+            let mut entries = read_memory(studio, scope, ws.as_deref());
+            let i = entries.iter().rposition(|x| normalize(x) == norm).ok_or("the entry is not in the memory any more")?;
+            let gone = entries.remove(i);
+            write_memory(studio, scope, ws.as_deref(), &entries)?;
+            drop_source(studio, &gone);
+            format!("forgot: {}", clip_chars(&gone, 80))
+        }
+        "memory_remove" => {
+            let (scope, ws) = (e["scope"].as_str().unwrap_or("global"), entry_ws(&e));
+            let text = e["text"].as_str().unwrap_or_default().to_owned();
+            let mut entries = read_memory(studio, scope, ws.as_deref());
+            if !entries.contains(&text) {
+                entries.push(text.clone());
+                write_memory(studio, scope, ws.as_deref(), &entries)?;
+            }
+            format!("remembered again: {}", clip_chars(&text, 80))
+        }
+        "profile_add" => {
+            let line = format!("- {}", e["text"].as_str().unwrap_or_default().trim());
+            let text = read_profile(studio);
+            let lines: Vec<&str> = text.lines().collect();
+            let i = lines.iter().position(|l| l.trim() == line).ok_or("the line is not in the profile any more")?;
+            let mut keep = lines.clone();
+            keep.remove(i);
+            write_text(&profile_path(studio), &(keep.join("\n") + "\n"))?;
+            format!("removed from the profile: {}", clip_chars(&line, 80))
+        }
+        other => return Err(format!("cannot undo a change of kind '{other}'")),
+    };
+    log[at]["undone"] = json!(true);
+    write_lines(&log_file(studio), &log)?;
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -1675,7 +2088,7 @@ mod tests {
         let text = read_profile(&studio);
         assert!(text.contains("## Languages\n- Writes mostly Rust") && !text.contains("short answers"), "{text}");
         let block = profile_for_prompt(&studio);
-        assert_eq!(block, "- Languages: Writes mostly Rust and some Python");
+        assert!(block.starts_with("- Languages: Writes mostly Rust and some Python (") && block.ends_with(')') && block.contains(&today()), "{block}");
         // the same line again is a duplicate; auto mode appends under the heading; a hand edit survives
         let again = ingest_profile(&studio, "s2", &[c("languages", "writes mostly rust and some python")], true);
         assert!(again.added.is_empty());

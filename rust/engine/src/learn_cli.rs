@@ -12,7 +12,11 @@ use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-pub const HELP: &str = "usage: fllm-rs learn status [--json]
+pub const HELP: &str = "usage: fllm-rs learn log [--limit N] [--json]
+       fllm-rs learn undo ID...
+       fllm-rs learn on | off | default [--folder DIR]
+       fllm-rs learn mode [auto | ask]
+       fllm-rs learn status [--json]
        fllm-rs learn review [--folder DIR]
        fllm-rs learn accept ID... | --all [--skills|--memory|--profile]
        fllm-rs learn reject ID... | --all [--skills|--memory|--profile]
@@ -20,11 +24,13 @@ pub const HELP: &str = "usage: fllm-rs learn status [--json]
        fllm-rs learn profile [show | delete | export FILE | on | off]
        fllm-rs learn forget WORDS... [--all-learned] [--folder DIR]
        fllm-rs learn consolidate [--folder DIR] [--url http://127.0.0.1:8000] [--api-key KEY] [--model ID]
-What `fllm-rs agent --learn` (and the Studio's 'Learn from this session') found waits here until you decide: revised skills with a diff and the
-reason, memory entries with the session they came from, and lines for your profile. Nothing is applied before you accept it
-(--auto-memory on the agent writes memory entries and profile lines at once). `forget` removes memory entries, profile lines and proposals that
-contain the words; --all-learned removes everything the loop wrote itself. `consolidate` drafts the skill revisions that are due and proposes
-to remove repeated memory entries (needs a running server); schedule it in the Studio (Settings > Skills and schedules) to run nightly.";
+Learning is on by default. After a session the agent learns on its own: it writes a skill after a complex successful run, revises a skill that failed
+(the old text is kept; a bad use of the revised skill puts it back; a skill you wrote or edited gets a sibling instead), saves notes about the project
+and lines for your profile taken from your own messages. Every change is in the log (`log`) with its reason and a diff; `undo ID` takes one back.
+`off` switches learning off everywhere, `off --folder DIR` for one project (DIR/.fllm/learn.json), `default --folder DIR` removes that override.
+`mode ask` makes the agent propose instead of apply; `review`, `accept` and `reject` then decide on what waits. `forget` removes memory entries,
+profile lines and proposals that contain the words; --all-learned removes everything the loop wrote itself. `consolidate` revises the skills that
+are due and removes repeated memory entries (needs a running server); schedule it in the Studio to run nightly.";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -61,7 +67,8 @@ fn workspace_of(args: &[String]) -> Option<PathBuf> {
 pub struct LearnConfig {
     pub learn: bool,
     pub skills: bool,
-    pub auto_memory: bool,
+    /// Changes are applied (checked and logged) instead of proposed.
+    pub auto: bool,
     pub nudge_every: usize,
     pub quiet: bool,
     pub secrets: Vec<String>,
@@ -112,9 +119,10 @@ impl<'a> LearnBackend<'a> {
 
     fn options(&self) -> Options {
         Options {
-            auto_memory: self.cfg.auto_memory,
+            auto: self.cfg.auto,
             reflect: true,
             improve: true,
+            create: true,
             transcript_chars: if self.cfg.small_context { 3500 } else { 6000 },
             secrets: self.cfg.secrets.clone(),
         }
@@ -390,6 +398,27 @@ fn review(studio: &Path) -> Result<i32, String> {
     Ok(0)
 }
 
+/// One line of the log of automatic changes.
+pub fn log_line(e: &Value) -> String {
+    let what = match e["kind"].as_str().unwrap_or("?") {
+        "skill_create" => format!("created skill '{}'", e["name"].as_str().unwrap_or("?")),
+        "skill_revise" => format!("revised skill '{}'", e["name"].as_str().unwrap_or("?")),
+        "skill_rollback" => format!("put back the previous text of skill '{}'", e["name"].as_str().unwrap_or("?")),
+        "memory_add" => format!("remembered: {}", learn::clip_chars(e["text"].as_str().unwrap_or_default(), 90)),
+        "memory_remove" => format!("forgot a repeated entry: {}", learn::clip_chars(e["text"].as_str().unwrap_or_default(), 90)),
+        "profile_add" => format!("profile line: {}", learn::clip_chars(e["text"].as_str().unwrap_or_default(), 90)),
+        other => other.to_owned(),
+    };
+    format!(
+        "{}  {}  {what}  [{}; session {}]{}",
+        e["id"].as_str().unwrap_or("?"),
+        when(e["t"].as_i64().unwrap_or(0)),
+        learn::clip_chars(e["reason"].as_str().unwrap_or_default(), 100),
+        e["session"].as_str().unwrap_or("?"),
+        if e["undone"] == true { "  (undone)" } else { "" }
+    )
+}
+
 pub fn run(args: &[String]) -> Result<i32, String> {
     let studio = crate::agent_cli::studio_folder();
     let rest = &args[args.len().min(1)..];
@@ -400,6 +429,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             if has(rest, "--json") {
                 println!("{}", serde_json::to_string_pretty(&o).map_err(|e| e.to_string())?);
             } else {
+                println!(
+                    "learning is {} ({}); the agent {}\n",
+                    if learn::learning_enabled_global(&studio) { "on" } else { "off" },
+                    if std::env::var_os("FLLM_NO_LEARN").is_some_and(|v| !v.is_empty() && v != "0") { "FLLM_NO_LEARN is set" } else { "fllm-rs learn off switches it off" },
+                    if learn::ask_first(&studio) { "proposes and waits for your yes" } else { "applies what it learns and logs it" },
+                );
                 print_overview(&o);
                 let profile = learn::read_profile(&studio);
                 println!(
@@ -413,6 +448,64 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             Ok(0)
         }
         Some("review") => review(&studio),
+        Some(v @ ("on" | "off")) => {
+            if let Some(w) = ws.as_deref() {
+                learn::set_project_override(w, Some(v == "on"))?;
+                println!("learning is {v} in {}", w.display());
+            } else {
+                learn::set_learning_enabled(&studio, v == "on")?;
+                println!("learning is {v}{}", if v == "off" { " (fllm-rs learn on switches it back on)" } else { "" });
+            }
+            Ok(0)
+        }
+        Some("default") => {
+            let w = ws.as_deref().ok_or("give the project with --folder DIR")?;
+            learn::set_project_override(w, None)?;
+            println!("{} follows the global setting again", w.display());
+            Ok(0)
+        }
+        Some("mode") => {
+            match rest.first().map(String::as_str) {
+                Some("ask") => learn::set_ask_first(&studio, true)?,
+                Some("auto") => learn::set_ask_first(&studio, false)?,
+                Some(other) => return Err(format!("mode is auto or ask, not '{other}'")),
+                None => {}
+            }
+            println!("the agent {}", if learn::ask_first(&studio) { "proposes and waits for your yes (learn review)" } else { "applies what it learns and logs it (learn log)" });
+            Ok(0)
+        }
+        Some("log") => {
+            let limit = flag(rest, "--limit").and_then(|n| n.parse().ok()).unwrap_or(20);
+            let entries = learn::read_log(&studio, limit);
+            if has(rest, "--json") {
+                println!("{}", serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?);
+            } else if entries.is_empty() {
+                println!("nothing was learned automatically yet");
+            }
+            if !has(rest, "--json") {
+                for e in &entries {
+                    println!("{}", log_line(e));
+                }
+            }
+            Ok(0)
+        }
+        Some("undo") => {
+            let ids = positional(rest, &[]);
+            if ids.is_empty() {
+                return Err("give the ids to undo (see: fllm-rs learn log)".into());
+            }
+            let mut bad = 0;
+            for id in ids {
+                match learn::undo(&studio, &id) {
+                    Ok(m) => println!("{m}"),
+                    Err(e) => {
+                        bad += 1;
+                        eprintln!("{id}: {e}");
+                    }
+                }
+            }
+            Ok(i32::from(bad > 0))
+        }
         Some(verb @ ("accept" | "reject")) => {
             let accept = verb == "accept";
             let o = learn::overview(&studio);
@@ -487,7 +580,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             Ok(0)
         }
         Some("consolidate") => {
-            let lines = with_model(rest, |complete| learn_flow::consolidate(&studio, ws.as_deref(), complete))?;
+            let lines = with_model(rest, |complete| learn_flow::consolidate(&studio, ws.as_deref(), !learn::ask_first(&studio), complete))?;
             for l in lines {
                 println!("{l}");
             }
@@ -699,7 +792,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), "---\nname: build\ndescription: Build the project\nwhen: the user asks to build\n---\n1. run make\n").unwrap();
         std::fs::write(studio.join("user-profile.md"), "## Languages\n- Writes Rust\n").unwrap();
-        let reflection = json!({"memory": [{"text": "The project builds with cargo build, not make", "kind": "command", "scope": "workspace"}], "profile": [{"section": "tool_habits", "text": "Runs cargo test before committing"}]}).to_string();
+        let reflection = json!({"memory": [{"text": "The project builds with cargo build, not make", "kind": "command", "scope": "workspace"}], "profile": [{"section": "preferences", "text": "Asks to build the project"}]}).to_string();
         let r = reflection.clone();
         let (url, server) = serve(6, move |line, body| {
             if line.contains("/api/studio/agent/tools") {
@@ -713,7 +806,7 @@ mod tests {
             }
         });
         let mut http = HttpBackend::new(&url, None).unwrap();
-        let cfg = LearnConfig { learn: true, skills: true, auto_memory: false, nudge_every: 2, quiet: true, secrets: Vec::new(), small_context: false, model: Some("m".into()) };
+        let cfg = LearnConfig { learn: true, skills: true, auto: false, nudge_every: 2, quiet: true, secrets: Vec::new(), small_context: false, model: Some("m".into()) };
         let mut lb = LearnBackend::new(&mut http, &studio, &ws, "please build the project", cfg);
         // the skill tool is offered next to the server's tools
         let names: Vec<String> = lb.tools().unwrap().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
@@ -760,7 +853,7 @@ mod tests {
         assert_eq!(learn::profile_proposals(&studio).len(), 1);
         assert!(learn::read_memory(&studio, "workspace", Some(&ws)).is_empty(), "nothing is written without approval");
         // a run without --learn does nothing
-        let mut off = LearnBackend::new(&mut http, &studio, &ws, "", LearnConfig { learn: false, skills: false, auto_memory: false, nudge_every: 0, quiet: true, secrets: Vec::new(), small_context: false, model: None });
+        let mut off = LearnBackend::new(&mut http, &studio, &ws, "", LearnConfig { learn: false, skills: false, auto: true, nudge_every: 0, quiet: true, secrets: Vec::new(), small_context: false, model: None });
         assert!(off.finish(&outcome, "x", None, 0).is_empty());
         let _ = std::fs::remove_dir_all(&studio);
         let _ = std::fs::remove_dir_all(&ws);

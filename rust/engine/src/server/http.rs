@@ -898,7 +898,7 @@ mod studio_gate_tests {
             "/api/studio/skills", "/api/studio/skills/read", "/api/studio/sessions/index", "/api/studio/sessions/search",
             "/api/studio/schedule", "/api/studio/schedule/run", "/api/studio/schedule/results", "/api/studio/schedule/check",
             "/api/studio/learn", "/api/studio/learn/skills", "/api/studio/learn/memory", "/api/studio/learn/profile", "/api/studio/learn/after-run",
-            "/api/studio/learn/feedback", "/api/studio/learn/consolidate",
+            "/api/studio/learn/feedback", "/api/studio/learn/consolidate", "/api/studio/learn/settings", "/api/studio/learn/log", "/api/studio/learn/undo",
         ] {
             for method in [Method::GET, Method::POST, Method::DELETE] {
                 for auth in [false, true] {

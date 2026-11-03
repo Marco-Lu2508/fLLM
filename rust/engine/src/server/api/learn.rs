@@ -37,12 +37,71 @@ fn skill_of(body: &Value) -> Result<crate::learn::SkillRef, String> {
 }
 
 /// `GET /api/studio/learn`: what waits for a decision, the last background run, and whether one is running now.
-pub(in crate::server) async fn overview() -> Response {
-    match blocking(|| crate::learn::overview(&studio())).await {
+pub(in crate::server) async fn overview(Query(query): Query<HashMap<String, String>>) -> Response {
+    let ws = workspace_of(query.get("workspace").map(String::as_str));
+    match blocking(move || {
+        let studio = studio();
+        let mut o = crate::learn::overview(&studio);
+        o["enabled"] = json!(crate::learn::enabled(&studio, ws.as_deref()));
+        o["enabled_global"] = json!(crate::learn::learning_enabled_global(&studio));
+        o["project_override"] = json!(ws.as_deref().and_then(crate::learn::project_override));
+        o["ask_first"] = json!(crate::learn::ask_first(&studio));
+        o["notice"] = json!(crate::learn::NOTICE);
+        o
+    })
+    .await
+    {
         Ok(mut o) => {
             o["running"] = json!(BUSY.load(Ordering::SeqCst));
             Json(o).into_response()
         }
+        Err(r) => *r,
+    }
+}
+
+/// `POST /api/studio/learn/settings` `{enabled?, ask_first?, workspace?, project?}`: the switches. `project` (with `workspace`) is
+/// true, false or null (follow the global setting). `notice: true` marks the first-run notice as seen.
+pub(in crate::server) async fn settings(Json(body): Json<Value>) -> Response {
+    let ws = workspace_of(body["workspace"].as_str());
+    match blocking(move || -> Result<(), String> {
+        let studio = studio();
+        if let Some(on) = body["enabled"].as_bool() {
+            crate::learn::set_learning_enabled(&studio, on)?;
+        }
+        if let Some(on) = body["ask_first"].as_bool() {
+            crate::learn::set_ask_first(&studio, on)?;
+        }
+        if let (Some(w), Some(p)) = (ws.as_deref(), body.get("project")) {
+            crate::learn::set_project_override(w, p.as_bool())?;
+        }
+        if body["notice"].as_bool() == Some(true) {
+            let _ = crate::learn::take_notice(&studio);
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(Ok(())) => Json(json!({"ok": true})).into_response(),
+        Ok(Err(e)) => bad(&e),
+        Err(r) => *r,
+    }
+}
+
+/// `GET /api/studio/learn/log?limit=`: the automatic changes, newest first.
+pub(in crate::server) async fn log(Query(query): Query<HashMap<String, String>>) -> Response {
+    let limit = query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(50usize).min(300);
+    match blocking(move || crate::learn::read_log(&studio(), limit)).await {
+        Ok(list) => Json(json!({"log": list})).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// `POST /api/studio/learn/undo` `{id}`: takes one automatic change back.
+pub(in crate::server) async fn undo(Json(body): Json<Value>) -> Response {
+    let id = body["id"].as_str().unwrap_or_default().to_owned();
+    match blocking(move || crate::learn::undo(&studio(), &id)).await {
+        Ok(Ok(m)) => Json(json!({"ok": true, "message": m})).into_response(),
+        Ok(Err(e)) => bad(&e),
         Err(r) => *r,
     }
 }
@@ -112,8 +171,8 @@ pub(in crate::server) async fn feedback(Json(body): Json<Value>) -> Response {
     let value = body["value"].as_str().unwrap_or_default().to_owned();
     let session = body["session"].as_str().unwrap_or("studio").chars().take(80).collect::<String>();
     let ws = workspace_of(body["workspace"].as_str());
-    match blocking(move || crate::learn_flow::record_feedback(&studio(), ws.as_deref(), &session, &names, &value)).await {
-        Ok(Ok(n)) => Json(json!({"ok": true, "noted": n})).into_response(),
+    match blocking(move || crate::learn_flow::record_feedback_notes(&studio(), ws.as_deref(), &session, &names, &value)).await {
+        Ok(Ok((n, notes))) => Json(json!({"ok": true, "noted": n, "notes": notes})).into_response(),
         Ok(Err(e)) => bad(&e),
         Err(r) => *r,
     }
@@ -231,7 +290,7 @@ pub(in crate::server) async fn profile_action(Json(body): Json<Value>) -> Respon
 // ---------------------------------------------------------------------------------------------------------------
 
 enum Job {
-    AfterRun { info: crate::learn_flow::RunInfo, messages: Vec<Value>, auto_memory: bool },
+    AfterRun { info: crate::learn_flow::RunInfo, messages: Vec<Value> },
     Improve { skill: crate::learn::SkillRef },
     Consolidate { workspace: Option<PathBuf> },
 }
@@ -271,22 +330,34 @@ fn start_job(state: Arc<AppState>, job: Job) -> Result<(), String> {
         };
         let studio = studio();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
-            Job::AfterRun { info, messages, auto_memory } => {
-                let opts = crate::learn_flow::Options { auto_memory, ..crate::learn_flow::Options::default() };
+            Job::AfterRun { info, messages } => {
+                let opts = crate::learn_flow::Options { auto: !crate::learn::ask_first(&studio), ..crate::learn_flow::Options::default() };
                 let lines = crate::learn_flow::after_run(&studio, &info, &messages, &opts, &mut complete);
                 crate::learn_flow::save_last_run(&studio, &info.session, &lines);
             }
             Job::Improve { skill } => {
                 let trigger = crate::learn::improve_due(&studio, &skill).unwrap_or_else(|| "requested by hand".to_owned());
-                let line = match crate::learn_flow::improve_skill(&studio, &skill, &trigger, "", &mut complete) {
-                    Ok(true) => format!("drafted a revision of skill '{}' ({trigger})", skill.name),
-                    Ok(false) => format!("skill '{}' reviewed: the model found nothing to change", skill.name),
-                    Err(e) => format!("skill '{}': no revision ({e})", skill.name),
+                let line = if crate::learn::ask_first(&studio) {
+                    match crate::learn_flow::improve_skill(&studio, &skill, &trigger, "", &mut complete) {
+                        Ok(true) => format!("drafted a revision of skill '{}' ({trigger})", skill.name),
+                        Ok(false) => format!("skill '{}' reviewed: the model found nothing to change", skill.name),
+                        Err(e) => format!("skill '{}': no revision ({e})", skill.name),
+                    }
+                } else {
+                    use crate::learn_flow::AutoOutcome;
+                    match crate::learn_flow::improve_skill_auto(&studio, &skill, &trigger, "", "studio", &mut complete) {
+                        Ok(AutoOutcome::Applied) => format!("Learned: updated skill '{}'.", skill.name),
+                        Ok(AutoOutcome::Sibling(n)) => format!("Learned: '{}' is yours, so the revision was written as the skill '{n}'.", skill.name),
+                        Ok(AutoOutcome::NoChange) => format!("skill '{}' reviewed: the model found nothing to change", skill.name),
+                        Ok(AutoOutcome::Skipped(why)) => format!("skill '{}': revision not applied ({why})", skill.name),
+                        Err(e) => format!("skill '{}': no revision ({e})", skill.name),
+                    }
                 };
+                let line = if line.starts_with("Learned: ") { format!("[learn] {line}") } else { line };
                 crate::learn_flow::save_last_run(&studio, "improve", &[line]);
             }
             Job::Consolidate { workspace } => {
-                crate::learn_flow::consolidate(&studio, workspace.as_deref(), &mut complete);
+                crate::learn_flow::consolidate(&studio, workspace.as_deref(), !crate::learn::ask_first(&studio), &mut complete);
             }
         }));
         if result.is_err() {
@@ -327,7 +398,7 @@ fn clean_messages(raw: &Value) -> Vec<Value> {
     out
 }
 
-/// `POST /api/studio/learn/after-run` `{session, workspace?, outcome, messages, skills?, retries?, verify?, note?, auto_memory?}`:
+/// `POST /api/studio/learn/after-run` `{session, workspace?, outcome, messages, skills?, retries?, verify?, note?}` (ignored when learning is off for the project):
 /// returns at once (202); the skill notes, revision drafts and the memory and profile reflection run in the background.
 pub(in crate::server) async fn after_run(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
     let messages = clean_messages(&body["messages"]);
@@ -354,7 +425,9 @@ pub(in crate::server) async fn after_run(State(state): State<Arc<AppState>>, Jso
         matched: Vec::new(),
         feedback: body["feedback"].as_str().filter(|f| matches!(*f, "up" | "down")).map(str::to_owned),
     };
-    let auto_memory = body["auto_memory"].as_bool().unwrap_or(false);
+    if !crate::learn::enabled(&studio(), info.workspace.as_deref()) {
+        return (StatusCode::ACCEPTED, Json(json!({"queued": false, "reason": "learning is switched off"}))).into_response();
+    }
     // the usage of skills is written even when no model is loaded: that part needs none
     if state.model_name.is_empty() {
         let used = blocking({
@@ -365,7 +438,7 @@ pub(in crate::server) async fn after_run(State(state): State<Arc<AppState>>, Jso
         .unwrap_or(0);
         return (StatusCode::ACCEPTED, Json(json!({"queued": false, "reason": "no model is loaded", "skills_noted": used}))).into_response();
     }
-    match start_job(state, Job::AfterRun { info, messages, auto_memory }) {
+    match start_job(state, Job::AfterRun { info, messages }) {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response(),
         Err(e) => (StatusCode::ACCEPTED, Json(json!({"queued": false, "reason": e}))).into_response(),
     }

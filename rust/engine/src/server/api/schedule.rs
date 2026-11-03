@@ -551,7 +551,7 @@ fn run_learn(task: &Task, env: &Env) -> Result<String, String> {
     let studio = crate::agent_cli::studio_folder();
     let workspace = (!task.folder.is_empty()).then(|| PathBuf::from(&task.folder));
     let mut complete = |body: Value| (env.complete)(body);
-    Ok(crate::learn_flow::consolidate(&studio, workspace.as_deref(), &mut complete).join("
+    Ok(crate::learn_flow::consolidate(&studio, workspace.as_deref(), !crate::learn::ask_first(&studio), &mut complete).join("
 "))
 }
 

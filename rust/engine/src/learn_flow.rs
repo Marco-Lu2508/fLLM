@@ -16,6 +16,9 @@ pub type Complete<'a> = &'a mut dyn FnMut(Value) -> Result<Value, String>;
 /// Longest answer the reflective steps ask for.
 pub const REFLECT_TOKENS: usize = 700;
 pub const IMPROVE_TOKENS: usize = 1500;
+pub const CREATE_TOKENS: usize = 1200;
+/// A run with at least this many tool calls is complex enough to be worth a skill.
+pub const CREATE_MIN_CALLS: usize = 6;
 const MAX_SKILL_BODY_CHARS: usize = 12_000;
 const MAX_REVISIONS_PER_RUN: usize = 2;
 
@@ -107,7 +110,7 @@ pub fn transcript(messages: &[Value], max_chars: usize, secrets: &[String]) -> S
         match m["role"].as_str() {
             Some("user") => {
                 let t = learn::redact_with(&content_text(m), secrets);
-                if !t.trim().is_empty() && !t.starts_with("[Summary") {
+                if !t.trim().is_empty() && !is_injected(&t) {
                     lines.push(format!("USER: {}", flat(&t, 700)));
                 }
             }
@@ -171,7 +174,7 @@ pub fn reflect_schema() -> Value {
 
 const REFLECT_SYSTEM: &str = "You review a finished coding session and decide what is worth remembering for later sessions. You answer with one JSON object and nothing else.";
 
-pub fn reflect_body(transcript: &str, known_memory: &[String], profile: &str, max_tokens: usize) -> Value {
+pub fn reflect_body(transcript: &str, user_shown: &str, known_memory: &[String], profile: &str, max_tokens: usize) -> Value {
     let mut known = String::new();
     for e in known_memory.iter().rev().take(20) {
         let line = format!("- {}\n", learn::clip_chars(e, 100));
@@ -181,13 +184,13 @@ pub fn reflect_body(transcript: &str, known_memory: &[String], profile: &str, ma
         known.push_str(&line);
     }
     let user = format!(
-        "Session:\n{transcript}\n\nAlready remembered (do not repeat):\n{}\nProfile of the user so far:\n{}\n\n\
+        "Session:\n{transcript}\n\nMessages the user wrote (the only source for the profile):\n{user_shown}\n\nAlready remembered (do not repeat):\n{}\nProfile of the user so far:\n{}\n\n\
          Task: list what is worth keeping for FUTURE sessions in \"memory\": how to build, test and run this project (exact commands that worked), conventions of the project, \
          preferences the user stated, mistakes or traps that cost time here. Rules: at most {} entries, each one short sentence that is true and useful without this session; \
          no secrets, passwords or keys. Do NOT describe what files contain or what the code does, do not retell the task, and do not note general programming advice. \
          Good: \"Tests run with node test.js.\" Bad: \"math.js has two functions.\" \
          \"scope\" is \"workspace\" for facts about this project and \"global\" for facts about the user. \
-         In \"profile\" list durable facts about the USER, taken only from what the user wrote (lines starting with USER:), never from what the agent did: \
+         In \"profile\" list durable facts about the USER, taken only from the block of messages the user wrote, never from what the agent or the tools did: \
          a stated preference, skill level, language, convention or tool habit. A user who only gave a task has shown nothing: then \"profile\" is empty. \
          When there is nothing worth keeping, use empty lists; that is the usual case.\n\
          Answer as JSON: {{\"memory\":[{{\"text\":\"...\",\"kind\":\"project|preference|command|mistake|fact\",\"scope\":\"workspace|global\"}}],\"profile\":[{{\"section\":\"preferences|skill_level|languages|conventions|tool_habits\",\"text\":\"...\"}}]}}",
@@ -385,10 +388,13 @@ pub struct RunInfo {
 
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Memory entries and profile lines are written at once (still deduped, redacted and capped) instead of proposed.
-    pub auto_memory: bool,
+    /// Skills, memory entries and profile lines are written at once (checked, deduped, redacted, capped and logged with an undo).
+    /// `false`: they are proposals that wait for a yes.
+    pub auto: bool,
     pub reflect: bool,
     pub improve: bool,
+    /// Write a skill after a complex, successful run that used none.
+    pub create: bool,
     pub transcript_chars: usize,
     /// Literal secrets (the API key of this run) to cut out of everything the model reads.
     pub secrets: Vec<String>,
@@ -396,14 +402,15 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { auto_memory: false, reflect: true, improve: true, transcript_chars: 6000, secrets: Vec::new() }
+        Options { auto: true, reflect: true, improve: true, create: true, transcript_chars: 6000, secrets: Vec::new() }
     }
 }
 
-/// Writes the usage of the skills of a run. Returns the skills that were found.
-pub fn record_skill_use(studio: &Path, info: &RunInfo) -> Vec<SkillRef> {
+/// Writes the usage of the skills of a run and lets the watch after an automatic revision judge it. Returns the skills that were
+/// found and the lines about revisions that were taken back.
+pub fn record_skill_use_notes(studio: &Path, info: &RunInfo) -> (Vec<SkillRef>, Vec<String>) {
     let installed = learn::list_skills(studio, info.workspace.as_deref());
-    let mut found = Vec::new();
+    let (mut found, mut notes) = (Vec::new(), Vec::new());
     for name in &info.skills {
         let Some(s) = installed.iter().find(|s| &s.skill.name == name) else { continue };
         let u = Usage {
@@ -414,14 +421,46 @@ pub fn record_skill_use(studio: &Path, info: &RunInfo) -> Vec<SkillRef> {
             feedback: info.feedback.clone(),
             ..Usage::new(&info.session, &info.outcome)
         };
-        if learn::record_usage(studio, &s.skill, u).is_ok() {
+        if let Ok(rec) = learn::record_usage(studio, &s.skill, u) {
             found.push(s.skill.clone());
+            notes.extend(learn::judge_use(studio, &s.skill, &rec));
         }
     }
-    found
+    (found, notes)
 }
 
-/// The memory/profile reflection of one session: asks the model, validates, dedups, stores. `Err` means nothing was stored.
+pub fn record_skill_use(studio: &Path, info: &RunInfo) -> Vec<SkillRef> {
+    record_skill_use_notes(studio, info).0
+}
+
+/// What the user wrote in a session, word for word: no tool output, no text the loop injected (review feedback, nudges).
+pub fn user_text(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(content_text)
+        .filter(|t| !t.trim().is_empty() && !is_injected(t))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const INJECTED: [&str; 6] = ["[Summary", "Self-review before you finish", "You described the next step", "Your last tool call was refused", "The plan is approved", "Stop using tools now"];
+
+fn is_injected(text: &str) -> bool {
+    let t = text.trim_start();
+    INJECTED.iter().any(|p| t.starts_with(p))
+}
+
+/// Whether a profile line rests on the user's own words: at least two of its words, and 40 percent of them, appear in what the user wrote.
+pub fn grounded(candidate: &str, user: &str) -> bool {
+    let c = learn::tokens(candidate);
+    let u: std::collections::BTreeSet<String> = learn::tokens(user).into_iter().collect();
+    let hit = c.iter().filter(|w| u.contains(*w)).count();
+    c.len() >= 2 && hit >= 2 && hit * 10 >= c.len() * 4
+}
+
+/// The memory/profile reflection of one session: asks the model, validates, dedups, stores (or proposes, when `opts.auto` is off).
+/// Profile lines are kept only when they rest on what the user wrote. `Err` means nothing was stored.
 pub fn reflect(studio: &Path, workspace: Option<&Path>, session: &str, messages: &[Value], opts: &Options, complete: Complete) -> Result<(Ingest, Ingest), String> {
     if !worth_reflecting(messages) {
         return Err("the session is too short to learn from".into());
@@ -430,11 +469,22 @@ pub fn reflect(studio: &Path, workspace: Option<&Path>, session: &str, messages:
     if let Some(w) = workspace {
         known.extend(learn::read_memory(studio, "workspace", Some(w)));
     }
-    let body = reflect_body(&transcript(messages, opts.transcript_chars, &opts.secrets), &known, &learn::clip_chars(&learn::read_profile(studio), 800), REFLECT_TOKENS);
+    let user = user_text(messages);
+    let shown = learn::clip_chars(&learn::redact_with(&user, &opts.secrets), 1500);
+    let body = reflect_body(&transcript(messages, opts.transcript_chars, &opts.secrets), &shown, &known, &learn::clip_chars(&learn::read_profile(studio), 800), REFLECT_TOKENS);
     let answer = structured_call(complete, body)?;
-    let r = parse_reflection(&answer)?;
-    let memory = learn::ingest_memory(studio, workspace, session, &r.memory, opts.auto_memory);
-    let profile = learn::ingest_profile(studio, session, &r.profile, opts.auto_memory);
+    let mut r = parse_reflection(&answer)?;
+    let ungrounded: Vec<ProfileCandidate> = r.profile.iter().filter(|(_, t)| !grounded(t, &user)).cloned().collect();
+    r.profile.retain(|(_, t)| grounded(t, &user));
+    let memory = learn::ingest_memory(studio, workspace, session, &r.memory, opts.auto);
+    let mut profile = learn::ingest_profile(studio, session, &r.profile, opts.auto);
+    for (_, t) in ungrounded {
+        profile.skipped.push((t, "not taken from the user's own words".into()));
+    }
+    if opts.auto {
+        learn::log_ingest(studio, session, "reflection after the session", &memory.meta);
+        learn::log_ingest(studio, session, "taken from the user's own messages", &profile.meta);
+    }
     Ok((memory, profile))
 }
 
@@ -449,30 +499,240 @@ fn describe(what: &str, i: &Ingest) -> Vec<String> {
     out
 }
 
-/// Everything that follows a session: usage notes for the skills it used, drafts of skill revisions that are due, and the reflection
-/// on memory and profile. Failures of a step are reported as a line and never stop the others.
+/// The number of tool calls in a session.
+pub fn count_calls(messages: &[Value]) -> usize {
+    messages.iter().map(|m| m["tool_calls"].as_array().map_or(0, Vec::len)).sum()
+}
+
+/// A complex run that went well and used no skill is worth a skill of its own.
+pub fn should_create(info: &RunInfo, used: &[SkillRef], messages: &[Value]) -> bool {
+    info.outcome == "done" && info.verify != Some(false) && info.feedback.as_deref() != Some("down") && used.is_empty() && count_calls(messages) >= CREATE_MIN_CALLS
+}
+
+pub fn create_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "save": {"type": "boolean"},
+            "name": {"type": "string", "maxLength": 48},
+            "description": {"type": "string", "maxLength": 200},
+            "when": {"type": "string", "maxLength": 200},
+            "steps": {"type": "string", "maxLength": 4000},
+            "pitfalls": {"type": "string", "maxLength": 1000}
+        },
+        "required": ["save", "name", "description", "when", "steps", "pitfalls"],
+        "additionalProperties": false
+    })
+}
+
+const CREATE_SYSTEM: &str = "You turn a successful coding session into a reusable skill: a short step-by-step procedure that a coding agent can follow next time. You answer with one JSON object and nothing else.";
+
+pub fn create_body(transcript: &str, existing: &[String], max_tokens: usize) -> Value {
+    let user = format!(
+        "Session:\n{transcript}\n\nSkills that exist already (do not duplicate): {}\n\n\
+         Task: if the way this task was solved is a repeatable procedure that would save work next time (several steps, exact commands, a trap that was hit), set \"save\" to true and write the skill: \
+         \"name\" is a short slug (lowercase letters, digits, - and _), \"description\" one sentence on what it does, \"when\" one sentence on when to use it, \
+         \"steps\" a numbered list with exact commands that worked, \"pitfalls\" the traps found (may be empty). No secrets, no paths that exist only on one computer. \
+         If the task was a one-off, or it is covered by an existing skill, set \"save\" to false and leave the other fields empty.\n\
+         Answer as JSON: {{\"save\":true|false,\"name\":\"...\",\"description\":\"...\",\"when\":\"...\",\"steps\":\"...\",\"pitfalls\":\"...\"}}",
+        if existing.is_empty() { "(none)".to_owned() } else { existing.join(", ") },
+    );
+    request(CREATE_SYSTEM, &user, max_tokens, "skill_creation", create_schema())
+}
+
+/// Validates the answer and builds the SKILL.md. `Ok(None)`: the model found nothing worth a skill.
+pub fn parse_creation(text: &str, existing: &[String]) -> Result<Option<(String, String)>, String> {
+    let v = extract_json(text).ok_or("the model did not answer with a JSON object")?;
+    if v["save"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let name = crate::skills_cli::local_name(v["name"].as_str().unwrap_or_default());
+    if !crate::agent_cli::valid_session_name(&name) {
+        return Err("the skill has no usable name".into());
+    }
+    if existing.contains(&name) {
+        return Err(format!("a skill named '{name}' exists already"));
+    }
+    let one = |k: &str| v[k].as_str().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+    let (description, when) = (one("description"), one("when"));
+    if description.is_empty() || when.is_empty() {
+        return Err("the skill has no description or no 'when' line".into());
+    }
+    let steps = strip_fence(v["steps"].as_str().unwrap_or_default()).to_owned();
+    if steps.chars().count() < 20 || steps.lines().filter(|l| !l.trim().is_empty()).count() < 2 {
+        return Err("the steps are too short to be a procedure".into());
+    }
+    let mut file = format!("---\nname: {name}\ndescription: {description}\nwhen: {when}\n---\n{}\n", steps.trim_end());
+    let pitfalls = v["pitfalls"].as_str().unwrap_or_default().trim();
+    if !pitfalls.is_empty() {
+        file.push_str(&format!("\n## Pitfalls\n{pitfalls}\n"));
+    }
+    if file.chars().count() > MAX_SKILL_BODY_CHARS {
+        return Err("the skill is too long".into());
+    }
+    if learn::has_secret(&file) {
+        return Err("the skill contains something that looks like a secret".into());
+    }
+    Ok(Some((name, file)))
+}
+
+/// Asks the model for a skill after a complex run and writes it (`opts.auto`) or leaves it as a proposal. `Ok(None)`: nothing worth saving.
+pub fn create_skill(studio: &Path, workspace: Option<&Path>, session: &str, messages: &[Value], opts: &Options, complete: Complete) -> Result<Option<String>, String> {
+    let existing: Vec<String> = learn::list_skills(studio, workspace).iter().map(|s| s.skill.name.clone()).collect();
+    let body = create_body(&transcript(messages, opts.transcript_chars, &opts.secrets), &existing, CREATE_TOKENS);
+    let answer = structured_call(complete, body)?;
+    let Some((name, file)) = parse_creation(&answer, &existing)? else { return Ok(None) };
+    if opts.auto {
+        learn::create_skill_file(studio, &SkillRef::user(&name), &file, "written after a complex session that went well", session)?;
+    } else {
+        crate::agent_extras::save_skill(studio, &name, &file, false)?;
+    }
+    Ok(Some(name))
+}
+
+pub fn check_schema() -> Value {
+    json!({"type": "object", "properties": {"ok": {"type": "boolean"}, "problem": {"type": "string", "maxLength": 300}}, "required": ["ok", "problem"], "additionalProperties": false})
+}
+
+pub fn check_body(old: &str, new: &str, reason: &str) -> Value {
+    let user = format!(
+        "Old skill:\n{}\n\nNew skill:\n{}\n\nWhy it was changed: {reason}\n\n\
+         Task: answer ok=true only if the new skill still does the same job as the old one, keeps every command and step of the old one that still works, \
+         addresses the stated reason, and does not contradict itself. Otherwise ok=false and say the problem in one sentence.\n\
+         Answer as JSON: {{\"ok\":true|false,\"problem\":\"...\"}}",
+        learn::clip_chars(old, 3500),
+        learn::clip_chars(new, 3500),
+    );
+    request("You check a revised skill before it replaces the old one. You answer with one JSON object and nothing else.", &user, 200, "skill_check", check_schema())
+}
+
+/// `(ok, problem)`; an answer that is not the object is an error (and the revision is not applied).
+pub fn parse_check(text: &str) -> Result<(bool, String), String> {
+    let v = extract_json(text).ok_or("the model did not answer with a JSON object")?;
+    let ok = v["ok"].as_bool().ok_or("the check has no \"ok\"")?;
+    Ok((ok, v["problem"].as_str().unwrap_or_default().to_owned()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AutoOutcome {
+    Applied,
+    /// The skill is not the agent's; the revision was written as this sibling skill.
+    Sibling(String),
+    NoChange,
+    Skipped(String),
+}
+
+/// The text of `new_text` as the skill `name`, with a description that says where it came from.
+fn as_sibling(new_text: &str, original: &str, name: &str) -> String {
+    let Some((head, body)) = crate::skills_cli::split(new_text) else { return new_text.to_owned() };
+    let mut lines = Vec::new();
+    for l in head {
+        if l.starts_with("name:") {
+            lines.push(format!("name: {name}"));
+        } else if let Some(d) = l.strip_prefix("description:") {
+            lines.push(format!("description: Revised copy of '{original}' by the agent; your original is unchanged. {}", d.trim()));
+        } else {
+            lines.push(l);
+        }
+    }
+    format!("---\n{}\n---\n{}", lines.join("\n"), body)
+}
+
+/// Drafts a revision of a skill and applies it, after the checks: the text is valid (front matter, size, most of the old content kept,
+/// no secret), and a second call of the model confirms that it still does the same job. A skill that a person wrote or edited is not
+/// overwritten: the revision becomes a sibling skill. The revision is put on watch (see `learn::judge_use`).
+pub fn improve_skill_auto(studio: &Path, skill: &SkillRef, trigger: &str, session_text: &str, session: &str, complete: Complete) -> Result<AutoOutcome, String> {
+    let current = skill.read(studio)?;
+    let usage = learn::read_usage(studio, skill);
+    let body = improve_body(&current, &usage, session_text, trigger, IMPROVE_TOKENS);
+    let answer = structured_call(complete, body)?;
+    let Some(imp) = parse_improvement(&answer, &current)? else { return Ok(AutoOutcome::NoChange) };
+    match structured_call(complete, check_body(&current, &imp.text, &imp.reason)).and_then(|t| parse_check(&t)) {
+        Ok((true, _)) => {}
+        Ok((false, problem)) => return Ok(AutoOutcome::Skipped(format!("the self-check rejected the revision: {}", learn::clip_chars(&problem, 120)))),
+        Err(e) => return Ok(AutoOutcome::Skipped(format!("the self-check gave no usable answer ({e})"))),
+    }
+    match learn::apply_revision_auto(studio, skill, &imp.text, &imp.reason, trigger, session)? {
+        learn::AutoApply::Applied(_) => Ok(AutoOutcome::Applied),
+        learn::AutoApply::NotOwned => {
+            let sib = learn::sibling_ref(skill);
+            let text = as_sibling(&imp.text, &skill.name, &sib.name);
+            if sib.file(studio).is_file() {
+                match learn::apply_revision_auto(studio, &sib, &text, &imp.reason, trigger, session)? {
+                    learn::AutoApply::Applied(_) => Ok(AutoOutcome::Sibling(sib.name)),
+                    learn::AutoApply::NotOwned => Ok(AutoOutcome::Skipped(format!("'{}' was edited by hand; nothing was written", sib.name))),
+                }
+            } else {
+                learn::create_skill_file(studio, &sib, &text, &format!("revision of '{}' (not changed because it is yours): {}", skill.name, imp.reason), session)?;
+                Ok(AutoOutcome::Sibling(sib.name))
+            }
+        }
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Everything that follows a session: usage notes for the skills it used (and the watch over revised skills), revisions that are due,
+/// a new skill after a complex run, and the reflection on memory and profile. With `opts.auto` the results are written (and logged with
+/// an undo), else they wait as proposals. Failures of a step are reported as a line and never stop the others.
 pub fn after_run(studio: &Path, info: &RunInfo, messages: &[Value], opts: &Options, complete: Complete) -> Vec<String> {
     let mut lines = Vec::new();
-    let used = record_skill_use(studio, info);
+    let (used, notes) = record_skill_use_notes(studio, info);
+    let mut learned: Vec<String> = Vec::new();
     for s in &used {
         lines.push(format!("[learn] skill '{}' used ({})", s.name, info.outcome));
     }
+    for n in notes {
+        learned.push(n.clone());
+        lines.push(format!("[learn] {n}"));
+    }
+    let excerpt = transcript(messages, opts.transcript_chars, &opts.secrets);
     if opts.improve {
-        let excerpt = transcript(messages, opts.transcript_chars, &opts.secrets);
         let mut drafted = 0;
         for s in &used {
             if drafted >= MAX_REVISIONS_PER_RUN {
                 break;
             }
             let Some(trigger) = learn::improve_due(studio, s) else { continue };
-            match improve_skill(studio, s, &trigger, &excerpt, complete) {
-                Ok(true) => {
-                    drafted += 1;
-                    lines.push(format!("[learn] drafted a revision of skill '{}' ({trigger}); see: fllm-rs learn review", s.name));
+            if opts.auto {
+                match improve_skill_auto(studio, s, &trigger, &excerpt, &info.session, complete) {
+                    Ok(AutoOutcome::Applied) => {
+                        drafted += 1;
+                        learned.push(format!("updated skill '{}'", s.name));
+                        lines.push(format!("[learn] revised skill '{}' ({trigger}); the previous text is kept, `fllm-rs learn log` can undo it", s.name));
+                    }
+                    Ok(AutoOutcome::Sibling(name)) => {
+                        drafted += 1;
+                        learned.push(format!("wrote '{name}' as a revision of your skill '{}'", s.name));
+                        lines.push(format!("[learn] '{}' is yours, so the revision was written as the skill '{name}'", s.name));
+                    }
+                    Ok(AutoOutcome::NoChange) => lines.push(format!("[learn] skill '{}' reviewed ({trigger}): no change", s.name)),
+                    Ok(AutoOutcome::Skipped(why)) => lines.push(format!("[learn] skill '{}': revision not applied ({why})", s.name)),
+                    Err(e) => lines.push(format!("[learn] skill '{}': no revision ({e})", s.name)),
                 }
-                Ok(false) => lines.push(format!("[learn] skill '{}' reviewed ({trigger}): no change proposed", s.name)),
-                Err(e) => lines.push(format!("[learn] skill '{}': no revision ({e})", s.name)),
+            } else {
+                match improve_skill(studio, s, &trigger, &excerpt, complete) {
+                    Ok(true) => {
+                        drafted += 1;
+                        lines.push(format!("[learn] drafted a revision of skill '{}' ({trigger}); see: fllm-rs learn review", s.name));
+                    }
+                    Ok(false) => lines.push(format!("[learn] skill '{}' reviewed ({trigger}): no change proposed", s.name)),
+                    Err(e) => lines.push(format!("[learn] skill '{}': no revision ({e})", s.name)),
+                }
             }
+        }
+    }
+    if opts.create && should_create(info, &used, messages) {
+        match create_skill(studio, info.workspace.as_deref(), &info.session, messages, opts, complete) {
+            Ok(Some(name)) if opts.auto => {
+                learned.push(format!("created skill '{name}'"));
+                lines.push(format!("[learn] wrote the skill '{name}' after a complex session (fllm-rs learn log can undo it)"));
+            }
+            Ok(Some(name)) => lines.push(format!("[learn] proposed the skill '{name}' (fllm-rs skills approve {name})")),
+            Ok(None) => lines.push("[learn] no skill worth saving from this session".into()),
+            Err(e) => lines.push(format!("[learn] no skill written ({e})")),
         }
     }
     if opts.reflect {
@@ -480,9 +740,15 @@ pub fn after_run(studio: &Path, info: &RunInfo, messages: &[Value], opts: &Optio
             Ok((m, p)) => {
                 lines.extend(describe("memory", &m));
                 lines.extend(describe("profile", &p));
+                if !m.added.is_empty() {
+                    learned.push(format!("saved {}", plural(m.added.len(), "note", "notes")));
+                }
+                if !p.added.is_empty() {
+                    learned.push(format!("added {} to your profile", plural(p.added.len(), "line", "lines")));
+                }
                 let skipped = m.skipped.len() + p.skipped.len();
                 if skipped > 0 {
-                    lines.push(format!("[learn] {skipped} suggestion(s) dropped (duplicates, too short, secrets, caps)"));
+                    lines.push(format!("[learn] {skipped} suggestion(s) dropped (duplicates, too short, secrets, not from your words, caps)"));
                 }
                 if m.added.is_empty() && m.proposed.is_empty() && p.added.is_empty() && p.proposed.is_empty() {
                     lines.push("[learn] nothing new worth remembering".into());
@@ -491,6 +757,9 @@ pub fn after_run(studio: &Path, info: &RunInfo, messages: &[Value], opts: &Optio
             Err(e) => lines.push(format!("[learn] reflection skipped: {e}")),
         }
     }
+    if !learned.is_empty() {
+        lines.push(format!("[learn] Learned: {}.", learned.join(", ")));
+    }
     save_last_run(studio, &info.session, &lines);
     lines
 }
@@ -498,12 +767,13 @@ pub fn after_run(studio: &Path, info: &RunInfo, messages: &[Value], opts: &Optio
 pub fn save_last_run(studio: &Path, session: &str, lines: &[String]) {
     let file = learn::learn_dir(studio).join("last-run.json");
     let _ = std::fs::create_dir_all(learn::learn_dir(studio));
-    let _ = std::fs::write(file, json!({"t": learn::now(), "session": session, "lines": lines}).to_string());
+    let summary = lines.iter().find_map(|l| l.strip_prefix("[learn] Learned: ")).unwrap_or_default();
+    let _ = std::fs::write(file, json!({"t": learn::now(), "session": session, "lines": lines, "summary": summary}).to_string());
 }
 
-/// The nightly job: draft the skill revisions that are due and propose the removal of repeated memory entries. Never writes a
-/// skill or a memory entry itself.
-pub fn consolidate(studio: &Path, workspace: Option<&Path>, complete: Complete) -> Vec<String> {
+/// The nightly job: revise the skills that are due and remove memory entries that repeat an earlier one. With `auto` that is done and
+/// logged (undo from the log); without, drafts and proposals wait for a yes.
+pub fn consolidate(studio: &Path, workspace: Option<&Path>, auto: bool, complete: Complete) -> Vec<String> {
     let mut lines = Vec::new();
     let mut drafted = 0;
     for info in learn::list_skills(studio, workspace) {
@@ -511,18 +781,42 @@ pub fn consolidate(studio: &Path, workspace: Option<&Path>, complete: Complete) 
             break;
         }
         let Some(trigger) = learn::improve_due(studio, &info.skill) else { continue };
-        match improve_skill(studio, &info.skill, &trigger, "", complete) {
-            Ok(true) => {
-                drafted += 1;
-                lines.push(format!("drafted a revision of skill '{}' ({trigger})", info.skill.name));
+        let name = &info.skill.name;
+        if auto {
+            match improve_skill_auto(studio, &info.skill, &trigger, "", "consolidate", complete) {
+                Ok(AutoOutcome::Applied) => {
+                    drafted += 1;
+                    lines.push(format!("revised skill '{name}' ({trigger})"));
+                }
+                Ok(AutoOutcome::Sibling(sib)) => {
+                    drafted += 1;
+                    lines.push(format!("'{name}' is yours; wrote the revision as the skill '{sib}'"));
+                }
+                Ok(AutoOutcome::NoChange) => lines.push(format!("skill '{name}' reviewed ({trigger}): no change")),
+                Ok(AutoOutcome::Skipped(why)) => lines.push(format!("skill '{name}': revision not applied ({why})")),
+                Err(e) => lines.push(format!("skill '{name}': no revision ({e})")),
             }
-            Ok(false) => lines.push(format!("skill '{}' reviewed ({trigger}): no change", info.skill.name)),
-            Err(e) => lines.push(format!("skill '{}': no revision ({e})", info.skill.name)),
+        } else {
+            match improve_skill(studio, &info.skill, &trigger, "", complete) {
+                Ok(true) => {
+                    drafted += 1;
+                    lines.push(format!("drafted a revision of skill '{name}' ({trigger})"));
+                }
+                Ok(false) => lines.push(format!("skill '{name}' reviewed ({trigger}): no change")),
+                Err(e) => lines.push(format!("skill '{name}': no revision ({e})")),
+            }
         }
     }
-    let dups = learn::propose_memory_cleanup(studio, workspace);
+    let dups = learn::propose_memory_cleanup_items(studio, workspace);
     for d in &dups {
-        lines.push(format!("proposed to remove a repeated memory entry: {}", learn::clip_chars(d, 100)));
+        if auto {
+            if learn::decide_memory(studio, &d.id, true).is_ok() {
+                learn::log_change(studio, "memory_remove", json!({"scope": d.scope, "workspace": d.workspace, "text": d.text, "session": "consolidate", "reason": d.reason}), None, None);
+                lines.push(format!("removed a repeated memory entry: {}", learn::clip_chars(&d.text, 100)));
+            }
+        } else {
+            lines.push(format!("proposed to remove a repeated memory entry: {}", learn::clip_chars(&d.text, 100)));
+        }
     }
     if lines.is_empty() {
         lines.push("nothing to consolidate: no skill is due for review and the memory has no repeated entries".into());
@@ -533,18 +827,24 @@ pub fn consolidate(studio: &Path, workspace: Option<&Path>, complete: Complete) 
 
 /// A thumbs up or down for the skills used in a session. Returns how many skills were noted.
 pub fn record_feedback(studio: &Path, workspace: Option<&Path>, session: &str, names: &[String], value: &str) -> Result<usize, String> {
+    record_feedback_notes(studio, workspace, session, names, value).map(|r| r.0)
+}
+
+/// Like [`record_feedback`], and the lines about revisions that a thumb down took back.
+pub fn record_feedback_notes(studio: &Path, workspace: Option<&Path>, session: &str, names: &[String], value: &str) -> Result<(usize, Vec<String>), String> {
     if value != "up" && value != "down" {
         return Err("feedback is up or down".into());
     }
     let installed = learn::list_skills(studio, workspace);
-    let mut n = 0;
+    let (mut n, mut notes) = (0, Vec::new());
     for name in names {
         if let Some(s) = installed.iter().find(|s| &s.skill.name == name) {
-            learn::record_usage(studio, &s.skill, Usage { feedback: Some(value.to_owned()), ..Usage::new(session, "feedback") })?;
+            let rec = learn::record_usage(studio, &s.skill, Usage { feedback: Some(value.to_owned()), ..Usage::new(session, "feedback") })?;
+            notes.extend(learn::judge_use(studio, &s.skill, &rec));
             n += 1;
         }
     }
-    Ok(n)
+    Ok((n, notes))
 }
 
 /// Per skill: use counts, thumbs, pending revision, versions. For Settings > Skills and `fllm-rs skills usage`.
@@ -760,18 +1060,18 @@ mod tests {
     #[test]
     fn a_server_without_structured_output_is_asked_again_without_it() {
         let mut s = Script::new(vec![Err("/v1/chat/completions: HTTP 400 Bad Request: unknown field response_format".into()), Ok(reply("{\"memory\":[],\"profile\":[]}"))]);
-        let out = structured_call(&mut s.call(), reflect_body("x", &[], "", 100)).unwrap();
+        let out = structured_call(&mut s.call(), reflect_body("x", "", &[], "", 100)).unwrap();
         assert!(out.contains("memory"));
         assert!(s.seen[0].get("response_format").is_some() && s.seen[1].get("response_format").is_none());
         assert_eq!(s.seen[1]["chat_template_kwargs"]["enable_thinking"], false);
         // another error is not retried; an empty answer is an error
         let mut s = Script::new(vec![Err("cannot reach the server".into())]);
-        assert!(structured_call(&mut s.call(), reflect_body("x", &[], "", 100)).is_err());
+        assert!(structured_call(&mut s.call(), reflect_body("x", "", &[], "", 100)).is_err());
         assert_eq!(s.seen.len(), 1);
         let mut s = Script::new(vec![Ok(reply("  "))]);
-        assert!(structured_call(&mut s.call(), reflect_body("x", &[], "", 100)).is_err());
+        assert!(structured_call(&mut s.call(), reflect_body("x", "", &[], "", 100)).is_err());
         // the request carries the caps and the schema
-        let b = reflect_body("t", &["old fact".into()], "profile text", REFLECT_TOKENS);
+        let b = reflect_body("t", "u", &["old fact".into()], "profile text", REFLECT_TOKENS);
         assert_eq!(b["max_tokens"], REFLECT_TOKENS);
         assert_eq!(b["response_format"]["type"], "json_schema");
         assert!(b["messages"][1]["content"].as_str().unwrap().contains("old fact") && b["messages"][1]["content"].as_str().unwrap().contains("profile text"));
@@ -784,13 +1084,14 @@ mod tests {
         let skill = add_skill(&studio, "build", "1. run make\n2. read the output");
         let original = skill.read(&studio).unwrap();
         let reflection = json!({"memory": [{"text": "Use cargo, make is not installed on this machine", "kind": "mistake", "scope": "workspace"}, {"text": "Hunter key sk-abcdefghijklmnopqrstuvwx1234 for staging", "kind": "fact", "scope": "global"}],
-                                "profile": [{"section": "languages", "text": "Works in Rust projects"}]})
+                                "profile": [{"section": "preferences", "text": "Wants the project built and the tests run"}]})
         .to_string();
         let revision = json!({"change": "revise", "reason": "make is missing, cargo works", "description": "Build with cargo", "when": "", "steps": "1. run cargo build\n2. run cargo test"}).to_string();
         let info = RunInfo { session: "run-1".into(), workspace: Some(ws.clone()), outcome: "failed".into(), verify: Some(false), retries: 2, note: "make not installed".into(), skills: vec!["build".into(), "ghost".into()], matched: vec!["build".into()], feedback: None };
         // the failure makes the revision due at once; the model is called for the revision first, then for the reflection
         let mut s = Script::new(vec![Ok(reply(&revision)), Ok(reply(&reflection))]);
-        let lines = after_run(&studio, &info, &session(), &Options::default(), &mut s.call());
+        let ask = Options { auto: false, ..Options::default() };
+        let lines = after_run(&studio, &info, &session(), &ask, &mut s.call());
         assert_eq!(s.seen.len(), 2);
         assert!(lines.iter().any(|l| l.contains("skill 'build' used")) && lines.iter().any(|l| l.contains("drafted a revision")), "{lines:?}");
         assert_eq!(skill.read(&studio).unwrap(), original, "the skill file is not touched");
@@ -815,7 +1116,7 @@ mod tests {
         let info2 = RunInfo { session: "run-2".into(), skills: vec![], ..info.clone() };
         let other = json!({"memory": [{"text": "The release build lives in target/release", "kind": "project", "scope": "workspace"}], "profile": []}).to_string();
         let mut s = Script::new(vec![Ok(reply(&other))]);
-        after_run(&studio, &info2, &session(), &Options { auto_memory: true, ..Options::default() }, &mut s.call());
+        after_run(&studio, &info2, &session(), &Options { auto: true, ..Options::default() }, &mut s.call());
         assert!(learn::read_memory(&studio, "workspace", Some(&ws)).iter().any(|e| e.contains("target/release")));
         // a model that cannot answer is reported and nothing breaks
         let mut s = Script::new(vec![Ok(reply("I do not know"))]);
@@ -838,16 +1139,234 @@ mod tests {
         let skill = add_skill(&studio, "build", "1. run make\n2. read the output");
         std::fs::write(studio.join("agent-memory.md"), "# Memory\n\n- Alpha convention for naming things\n- Alpha convention for naming things!\n").unwrap();
         let mut s = Script::new(vec![]);
-        let lines = consolidate(&studio, None, &mut s.call());
+        let lines = consolidate(&studio, None, false, &mut s.call());
         assert!(s.seen.is_empty() && lines.iter().any(|l| l.contains("repeated memory entry")), "{lines:?}");
         learn::record_usage(&studio, &skill, Usage { feedback: Some("down".into()), ..Usage::new("x", "feedback") }).unwrap();
         let rev = json!({"change": "revise", "reason": "users said it failed", "description": "", "when": "", "steps": "1. run cargo build instead\n2. read the output"}).to_string();
         let mut s = Script::new(vec![Ok(reply(&rev))]);
-        let lines = consolidate(&studio, None, &mut s.call());
+        let lines = consolidate(&studio, None, false, &mut s.call());
         assert!(lines.iter().any(|l| l.contains("drafted a revision")), "{lines:?}");
         assert!(learn::pending_revision(&studio, &skill).is_some());
         assert_eq!(learn::read_memory(&studio, "global", None).len(), 2, "nothing was removed without approval");
         let _ = std::fs::remove_dir_all(&studio);
+    }
+
+    fn owned_skill(studio: &Path, name: &str, body: &str) -> SkillRef {
+        let s = add_skill(studio, name, body);
+        learn::mark_agent_written(studio, &s, &s.read(studio).unwrap()).unwrap();
+        s
+    }
+
+    fn revision_answer(steps: &str) -> Result<Value, String> {
+        Ok(reply(&json!({"change": "revise", "reason": "make is missing, cargo works", "description": "Build with cargo", "when": "", "steps": steps}).to_string()))
+    }
+
+    fn check_answer(ok: bool) -> Result<Value, String> {
+        Ok(reply(&json!({"ok": ok, "problem": if ok { "" } else { "it drops the test step" }}).to_string()))
+    }
+
+    #[test]
+    fn a_skill_of_the_agent_is_revised_on_its_own_watched_and_taken_back_when_the_next_use_fails() {
+        let studio = temp("auto");
+        let skill = owned_skill(&studio, "build", "1. run make\n2. read the output");
+        let original = skill.read(&studio).unwrap();
+        learn::record_usage(&studio, &skill, Usage::new("a", "failed")).unwrap();
+        let mut s = Script::new(vec![revision_answer("1. run cargo build\n2. run cargo test"), check_answer(true)]);
+        let out = improve_skill_auto(&studio, &skill, "a failure", "", "s1", &mut s.call()).unwrap();
+        assert_eq!(out, AutoOutcome::Applied);
+        assert_eq!(s.seen.len(), 2, "the draft, then the self-check");
+        assert!(skill.read(&studio).unwrap().contains("cargo build"));
+        assert_eq!(learn::read_version(&studio, &skill, 1).unwrap(), original, "the previous text is kept");
+        assert!(learn::is_agent_owned(&studio, &skill));
+        assert_eq!(learn::watch_of(&studio, &skill).unwrap().remaining, learn::WATCH_USES);
+        assert_eq!(learn::improve_due(&studio, &skill), None, "no second revision while the first is on watch");
+        let log = learn::read_log(&studio, 5);
+        assert_eq!(log[0]["kind"], "skill_revise");
+        assert!(log[0]["diff"].as_str().unwrap().contains("+ 1. run cargo build") && log[0]["session"] == "s1" && !log[0]["reason"].as_str().unwrap().is_empty());
+        // a good use counts down
+        let good = RunInfo { session: "s2".into(), outcome: "done".into(), verify: Some(true), skills: vec!["build".into()], ..RunInfo::default() };
+        let (_, notes) = record_skill_use_notes(&studio, &good);
+        assert!(notes.is_empty() && learn::watch_of(&studio, &skill).unwrap().remaining == 1);
+        // a bad use puts the previous text back, says why, and logs it
+        let bad = RunInfo { session: "s3".into(), outcome: "failed".into(), skills: vec!["build".into()], ..RunInfo::default() };
+        let (_, notes) = record_skill_use_notes(&studio, &bad);
+        assert!(notes[0].contains("did not hold up"), "{notes:?}");
+        assert_eq!(skill.read(&studio).unwrap(), original);
+        assert!(learn::watch_of(&studio, &skill).is_none() && learn::is_agent_owned(&studio, &skill));
+        let log = learn::read_log(&studio, 5);
+        assert_eq!(log[0]["kind"], "skill_rollback");
+        assert!(log[0]["reason"].as_str().unwrap().contains("s3"));
+        assert_eq!(learn::improve_due(&studio, &skill), None, "the failure that took the revision back does not trigger another one");
+        // a thumb down also takes a revision back; two good uses confirm it
+        learn::record_usage(&studio, &skill, Usage::new("a", "failed")).unwrap();
+        let mut s = Script::new(vec![revision_answer("1. run cargo build\n2. run cargo test"), check_answer(true)]);
+        improve_skill_auto(&studio, &skill, "a failure", "", "s4", &mut s.call()).unwrap();
+        let (_, notes) = record_feedback_notes(&studio, None, "s4", &["build".into()], "down").unwrap();
+        assert!(notes[0].contains("did not hold up") && skill.read(&studio).unwrap() == original);
+        let _ = std::fs::remove_dir_all(&studio);
+    }
+
+    #[test]
+    fn a_revision_needs_a_confirming_self_check_and_a_skill_of_a_person_gets_a_sibling() {
+        let studio = temp("sib");
+        let skill = add_skill(&studio, "build", "1. run make\n2. read the output");
+        let original = skill.read(&studio).unwrap();
+        learn::record_usage(&studio, &skill, Usage::new("a", "failed")).unwrap();
+        // the check says no, or says nothing usable: nothing is written
+        let mut s = Script::new(vec![revision_answer("1. run cargo build\n2. run cargo test"), check_answer(false)]);
+        assert!(matches!(improve_skill_auto(&studio, &skill, "t", "", "s", &mut s.call()).unwrap(), AutoOutcome::Skipped(w) if w.contains("self-check rejected")));
+        let mut s = Script::new(vec![revision_answer("1. run cargo build\n2. run cargo test"), Ok(reply("looks fine to me"))]);
+        assert!(matches!(improve_skill_auto(&studio, &skill, "t", "", "s", &mut s.call()).unwrap(), AutoOutcome::Skipped(_)));
+        let mut s = Script::new(vec![Ok(reply("no json at all"))]);
+        assert!(improve_skill_auto(&studio, &skill, "t", "", "s", &mut s.call()).is_err(), "an invalid draft writes nothing");
+        assert_eq!(skill.read(&studio).unwrap(), original);
+        assert!(learn::read_log(&studio, 5).is_empty() && learn::list_skills(&studio, None).len() == 1);
+        // the skill is not the agent's: the revision becomes a sibling, the original stays
+        let mut s = Script::new(vec![revision_answer("1. run cargo build\n2. run cargo test"), check_answer(true)]);
+        let out = improve_skill_auto(&studio, &skill, "t", "", "s", &mut s.call()).unwrap();
+        assert_eq!(out, AutoOutcome::Sibling("build-agent".into()));
+        assert_eq!(skill.read(&studio).unwrap(), original);
+        let sib = learn::sibling_ref(&skill);
+        let text = sib.read(&studio).unwrap();
+        assert!(text.contains("name: build-agent") && text.contains("Revised copy of 'build'") && text.contains("cargo build"), "{text}");
+        assert!(learn::is_agent_owned(&studio, &sib));
+        // a later revision goes into the sibling, with its history; a sibling that a person edited is left alone
+        let mut s = Script::new(vec![revision_answer("1. run cargo build --release\n2. run cargo test"), check_answer(true)]);
+        assert_eq!(improve_skill_auto(&studio, &skill, "t", "", "s", &mut s.call()).unwrap(), AutoOutcome::Sibling("build-agent".into()));
+        assert!(learn::read_version(&studio, &sib, 1).is_some());
+        std::fs::write(sib.file(&studio), format!("{}\nmy own line\n", sib.read(&studio).unwrap())).unwrap();
+        let mut s = Script::new(vec![revision_answer("1. run cargo build --locked\n2. run cargo test"), check_answer(true)]);
+        assert!(matches!(improve_skill_auto(&studio, &skill, "t", "", "s", &mut s.call()).unwrap(), AutoOutcome::Skipped(w) if w.contains("edited by hand")));
+        assert!(sib.read(&studio).unwrap().contains("my own line"));
+        let _ = std::fs::remove_dir_all(&studio);
+    }
+
+    fn complex_session(user: &str, calls: usize) -> Vec<Value> {
+        let mut m = vec![json!({"role": "user", "content": user})];
+        for i in 0..calls {
+            m.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": format!("c{i}"), "function": {"name": "bash", "arguments": format!("{{\"command\":\"step {i}\"}}")}}]}));
+            m.push(json!({"role": "tool", "tool_call_id": format!("c{i}"), "content": "ok"}));
+        }
+        m.push(json!({"role": "assistant", "content": "All done."}));
+        m
+    }
+
+    #[test]
+    fn a_complex_successful_run_gets_a_skill_that_is_logged_and_can_be_undone() {
+        let studio = temp("create");
+        let nothing = reply(&json!({"memory": [], "profile": []}).to_string());
+        let skill_json = json!({"save": true, "name": "Release Build", "description": "Build and test a release", "when": "the user asks for a release build", "steps": "1. run `cargo build --release`\n2. run `cargo test`", "pitfalls": "make is not installed"}).to_string();
+        let info = RunInfo { session: "s1".into(), outcome: "done".into(), verify: Some(true), ..RunInfo::default() };
+        let mut s = Script::new(vec![Ok(reply(&skill_json)), Ok(nothing.clone())]);
+        let lines = after_run(&studio, &info, &complex_session("make a release build", 7), &Options::default(), &mut s.call());
+        assert!(lines.iter().any(|l| l.contains("Learned: created skill 'release-build'")), "{lines:?}");
+        let made = SkillRef::user("release-build");
+        let text = made.read(&studio).unwrap();
+        assert!(text.contains("when: the user asks for a release build") && text.contains("## Pitfalls\nmake is not installed") && text.contains("2. run `cargo test`"), "{text}");
+        assert!(learn::is_agent_owned(&studio, &made));
+        assert!(std::fs::read_to_string(studio.join("learn/last-run.json")).unwrap().contains("created skill"));
+        let log = learn::read_log(&studio, 5);
+        assert_eq!(log[0]["kind"], "skill_create");
+        let id = log[0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(learn::undo(&studio, &id).unwrap(), "skill 'release-build' removed");
+        assert!(!made.file(&studio).exists() && learn::undo(&studio, &id).is_err());
+        // no skill: too few calls, a failed check, a skill was used, the model says no, an invalid or secret-bearing answer
+        let few = complex_session("make a release build", 2);
+        let mut s = Script::new(vec![Ok(nothing.clone())]);
+        after_run(&studio, &info, &few, &Options::default(), &mut s.call());
+        assert_eq!(s.seen.len(), 1, "only the reflection ran");
+        let failed = RunInfo { verify: Some(false), outcome: "failed".into(), ..info.clone() };
+        let mut s = Script::new(vec![Ok(nothing.clone())]);
+        after_run(&studio, &failed, &complex_session("x", 7), &Options::default(), &mut s.call());
+        assert_eq!(s.seen.len(), 1);
+        let mut s = Script::new(vec![Ok(reply(&json!({"save": false, "name": "", "description": "", "when": "", "steps": "", "pitfalls": ""}).to_string())), Ok(nothing.clone())]);
+        let lines = after_run(&studio, &info, &complex_session("x", 7), &Options::default(), &mut s.call());
+        assert!(lines.iter().any(|l| l.contains("no skill worth saving")) && learn::list_skills(&studio, None).is_empty());
+        let secret = json!({"save": true, "name": "deploy", "description": "d", "when": "w", "steps": "1. export TOKEN=abc\n2. password = hunter2hunter2", "pitfalls": ""}).to_string();
+        let mut s = Script::new(vec![Ok(reply(&secret)), Ok(nothing.clone())]);
+        let lines = after_run(&studio, &info, &complex_session("x", 7), &Options::default(), &mut s.call());
+        assert!(lines.iter().any(|l| l.contains("no skill written")) && learn::list_skills(&studio, None).is_empty(), "{lines:?}");
+        let mut s = Script::new(vec![Ok(reply("a skill would be nice")), Ok(nothing)]);
+        after_run(&studio, &info, &complex_session("x", 7), &Options::default(), &mut s.call());
+        assert!(learn::list_skills(&studio, None).is_empty());
+        // asking first: the skill waits as a proposal
+        let mut s = Script::new(vec![Ok(reply(&skill_json)), Ok(reply(&json!({"memory": [], "profile": []}).to_string()))]);
+        after_run(&studio, &info, &complex_session("make a release build", 7), &Options { auto: false, ..Options::default() }, &mut s.call());
+        assert!(learn::list_skills(&studio, None).is_empty() && studio.join("skills-proposed/release-build/SKILL.md").is_file());
+        assert!(parse_creation(&skill_json, &["release-build".to_owned()]).is_err(), "an existing name is not taken again");
+        let _ = std::fs::remove_dir_all(&studio);
+    }
+
+    #[test]
+    fn notes_and_profile_lines_are_saved_on_their_own_from_the_users_words_and_each_can_be_undone() {
+        let studio = temp("autonotes");
+        let ws = temp("autonotesws");
+        let messages = complex_session("I prefer short answers and I work in Rust. Run the tests.", 2);
+        let reflection = json!({
+            "memory": [{"text": "Tests run with cargo test in the rust folder", "kind": "command", "scope": "workspace"}],
+            "profile": [{"section": "preferences", "text": "Prefers short answers"}, {"section": "tool_habits", "text": "Uses bash and edit tools all the time"}]
+        })
+        .to_string();
+        let info = RunInfo { session: "s9".into(), workspace: Some(ws.clone()), outcome: "done".into(), ..RunInfo::default() };
+        let mut s = Script::new(vec![Ok(reply(&reflection))]);
+        let lines = after_run(&studio, &info, &messages, &Options::default(), &mut s.call());
+        assert!(lines.iter().any(|l| l.contains("Learned: saved 1 note, added 1 line to your profile")), "{lines:?}");
+        assert!(learn::read_memory(&studio, "workspace", Some(&ws))[0].contains("cargo test"));
+        let profile = learn::read_profile(&studio);
+        assert!(profile.contains(&format!("- Prefers short answers ({})", learn::today())) && !profile.contains("bash"), "{profile}");
+        assert!(lines.iter().any(|l| l.contains("dropped")));
+        // what the loop told the model as a "user" message is no source for the profile
+        let injected = vec![json!({"role": "user", "content": "do the thing"}), json!({"role": "user", "content": "Self-review before you finish: I prefer tabs and I always use vim"}), json!({"role": "assistant", "content": "ok"})];
+        assert_eq!(user_text(&injected), "do the thing");
+        assert!(grounded("Prefers short answers", "keep answers short please") && !grounded("Uses vim", "do the thing") && !grounded("x", "x"));
+        // the log has both, and each can be undone
+        let log = learn::read_log(&studio, 10);
+        assert_eq!(log.iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["profile_add", "memory_add"]);
+        assert!(log.iter().all(|e| e["session"] == "s9" && !e["reason"].as_str().unwrap().is_empty()));
+        learn::undo(&studio, log[0]["id"].as_str().unwrap()).unwrap();
+        learn::undo(&studio, log[1]["id"].as_str().unwrap()).unwrap();
+        assert!(!learn::read_profile(&studio).contains("short answers") && learn::read_memory(&studio, "workspace", Some(&ws)).is_empty());
+        assert!(learn::read_log(&studio, 2).iter().all(|e| e["undone"] == true));
+        let _ = std::fs::remove_dir_all(&studio);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn the_nightly_job_applies_its_changes_and_logs_them_in_auto_mode() {
+        let studio = temp("night");
+        let skill = owned_skill(&studio, "build", "1. run make\n2. read the output");
+        std::fs::write(studio.join("agent-memory.md"), "# Memory\n\n- Alpha convention for naming things\n- Alpha convention for naming things!\n").unwrap();
+        learn::record_usage(&studio, &skill, Usage::new("x", "failed")).unwrap();
+        let mut s = Script::new(vec![revision_answer("1. run cargo build\n2. read the output"), check_answer(true)]);
+        let lines = consolidate(&studio, None, true, &mut s.call());
+        assert!(lines.iter().any(|l| l.contains("revised skill 'build'")) && lines.iter().any(|l| l.contains("removed a repeated memory entry")), "{lines:?}");
+        assert_eq!(learn::read_memory(&studio, "global", None).len(), 1);
+        let log = learn::read_log(&studio, 5);
+        assert!(log.iter().any(|e| e["kind"] == "memory_remove") && log.iter().any(|e| e["kind"] == "skill_revise"));
+        let removed = log.iter().find(|e| e["kind"] == "memory_remove").unwrap();
+        learn::undo(&studio, removed["id"].as_str().unwrap()).unwrap();
+        assert_eq!(learn::read_memory(&studio, "global", None).len(), 2, "the removed entry is back");
+        let _ = std::fs::remove_dir_all(&studio);
+    }
+
+    #[test]
+    fn learning_can_be_switched_off_globally_per_project_and_by_environment_and_ask_mode_is_a_setting() {
+        let studio = temp("switch");
+        let ws = temp("switchws");
+        assert!(learn::enabled(&studio, Some(&ws)) && !learn::ask_first(&studio), "on by default, applying by itself");
+        learn::set_learning_enabled(&studio, false).unwrap();
+        assert!(!learn::enabled(&studio, Some(&ws)) && !learn::enabled(&studio, None));
+        learn::set_project_override(&ws, Some(true)).unwrap();
+        assert!(learn::enabled(&studio, Some(&ws)), "a project can switch it on again");
+        learn::set_project_override(&ws, None).unwrap();
+        learn::set_learning_enabled(&studio, true).unwrap();
+        learn::set_project_override(&ws, Some(false)).unwrap();
+        assert!(!learn::enabled(&studio, Some(&ws)) && learn::enabled(&studio, None));
+        learn::set_ask_first(&studio, true).unwrap();
+        assert!(learn::ask_first(&studio) && learn::profile_in_prompt(&studio), "settings do not overwrite each other");
+        assert!(learn::take_notice(&studio) && !learn::take_notice(&studio), "the notice is shown once");
+        let _ = std::fs::remove_dir_all(&studio);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

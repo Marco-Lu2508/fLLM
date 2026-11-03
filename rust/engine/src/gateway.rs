@@ -669,9 +669,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         &folder,
         "",
         crate::learn_cli::LearnConfig {
-            learn: parsed.learn,
-            skills: parsed.skills,
-            auto_memory: parsed.auto_memory,
+            learn: parsed.learn && crate::learn::enabled(&agent_cli::studio_folder(), Some(&folder)),
+            skills: parsed.skills || (parsed.learn && crate::learn::enabled(&agent_cli::studio_folder(), Some(&folder))),
+            auto: !(parsed.ask_first || crate::learn::ask_first(&agent_cli::studio_folder())),
             nudge_every: parsed.nudge_every,
             quiet: false,
             secrets: parsed.api_key.iter().cloned().collect(),
