@@ -254,6 +254,8 @@ pub struct DeltaShape {
     pub conv_kernel: usize,
     /// Value head `j` belongs to key head `j % k_heads` (llama.cpp files) instead of `j / (v_heads / k_heads)`.
     pub tiled_heads: bool,
+    /// The head output is gated by `sigmoid(z)` instead of `silu(z)` (Qwen3.8-Flash-Next).
+    pub sigmoid_gate: bool,
     pub beta_scale: f32,
     pub eps: f32,
 }

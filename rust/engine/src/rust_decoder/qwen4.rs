@@ -24,8 +24,8 @@ struct Gate {
 }
 
 struct Indexer {
-    qk: Linear,
-    /// The query rows and the key row of `qk` as two projections (the device keeps them apart).
+    /// The query projection (`heads x dim` rows) and the key projection (`dim` rows). fLLM's own files fuse them in
+    /// `indexer.qk`, llama.cpp's keep `indexer.q_proj` and `indexer.k_proj` apart.
     split: (Linear, Linear),
     q_norm: Vec<f32>,
     k_norm: Vec<f32>,
@@ -236,18 +236,22 @@ impl Qwen4Model {
                 Ok(l)
             };
             let indexer = match qc.indexer {
-                Some((heads, dim, _, _)) if has_tensor(mapping, &format!("{p}.indexer.qk.weight")) => {
-                    let name = format!("{p}.indexer.qk.weight");
-                    let adapted = model.adapted_projection(&name);
-                    let part = |first: usize, rows: usize| -> Result<Linear, String> {
-                        let mut l = Linear::load_rows(mapping, &name, None, first, rows, hidden)?;
-                        l.replace_weights(adapted.as_ref().map(|all| all[first * hidden..(first + rows) * hidden].to_vec()))?;
-                        l.enable_fast_cpu();
-                        Ok(l)
+                Some((heads, dim, _, _)) if has_tensor(mapping, &format!("{p}.indexer.qk.weight")) || has_tensor(mapping, &format!("{p}.indexer.q_proj.weight")) => {
+                    let split = if has_tensor(mapping, &format!("{p}.indexer.qk.weight")) {
+                        let name = format!("{p}.indexer.qk.weight");
+                        let adapted = model.adapted_projection(&name);
+                        let part = |first: usize, rows: usize| -> Result<Linear, String> {
+                            let mut l = Linear::load_rows(mapping, &name, None, first, rows, hidden)?;
+                            l.replace_weights(adapted.as_ref().map(|all| all[first * hidden..(first + rows) * hidden].to_vec()))?;
+                            l.enable_fast_cpu();
+                            Ok(l)
+                        };
+                        (part(0, heads * dim)?, part(heads * dim, dim)?)
+                    } else {
+                        (load("indexer.q_proj", heads * dim, hidden)?, load("indexer.k_proj", dim, hidden)?)
                     };
                     Some(Indexer {
-                        qk: load("indexer.qk", (heads + 1) * dim, hidden)?,
-                        split: (part(0, heads * dim)?, part(heads * dim, dim)?),
+                        split,
                         q_norm: vector(mapping, &format!("{p}.indexer.q_norm.weight"), dim)?,
                         k_norm: vector(mapping, &format!("{p}.indexer.k_norm.weight"), dim)?,
                     })
@@ -258,11 +262,26 @@ impl Qwen4Model {
                 let heads = (qc.ngram - 1) * qc.heads_per_ngram;
                 let head_dim = qc.ple_embed / heads;
                 let (mut sizes, mut offsets, mut total) = (Vec::with_capacity(heads), Vec::with_capacity(heads), 0u64);
-                for h in 0..heads as u64 {
-                    let size = nth_prime_after(qc.vocab_base - 1, ordinal * heads as u64 + h + 1);
-                    sizes.push(size);
-                    offsets.push(total);
-                    total += size;
+                let mut multipliers = None;
+                if let Some(tables) = &qc.tables {
+                    // llama.cpp files carry the hash constants of their single n-gram table
+                    if ordinal > 0 {
+                        return Err("the file carries the n-gram hash constants of one layer, but several layers have an n-gram embedding".into());
+                    }
+                    if tables.sizes.len() < heads || tables.offsets.len() < heads || tables.multipliers.len() < qc.ngram {
+                        return Err(format!("the n-gram hash constants are too short for {heads} heads of an n-gram of {}", qc.ngram));
+                    }
+                    sizes.extend_from_slice(&tables.sizes[..heads]);
+                    offsets.extend_from_slice(&tables.offsets[..heads]);
+                    total = (0..heads).map(|h| tables.offsets[h] + tables.sizes[h]).max().unwrap_or(0);
+                    multipliers = Some(tables.multipliers[..qc.ngram].to_vec());
+                } else {
+                    for h in 0..heads as u64 {
+                        let size = nth_prime_after(qc.vocab_base - 1, ordinal * heads as u64 + h + 1);
+                        sizes.push(size);
+                        offsets.push(total);
+                        total += size;
+                    }
                 }
                 let embedding = Embedding::load_with_cols(model, &format!("{p}.ple_embd.weight"), head_dim)?;
                 if (embedding.rows as u64) < total {
@@ -272,7 +291,7 @@ impl Qwen4Model {
                     embedding,
                     sizes,
                     offsets,
-                    multipliers: layer_multipliers(qc.vocab, qc.ngram, ordinal, qc.seed),
+                    multipliers: multipliers.unwrap_or_else(|| layer_multipliers(qc.vocab, qc.ngram, ordinal, qc.seed)),
                     key: load("ple_key", width, qc.ple_embed)?,
                     value: load("ple_value", hidden, qc.ple_embed)?,
                     norm_key: vector(mapping, &format!("{p}.ple_norm_key.weight"), width)?,
@@ -387,14 +406,22 @@ impl RustDecoder {
         let table = &self.rope[layer.rope_table];
         let mut qkv = Linear::forward_group(&[qp, kp, vp], normed)?.into_iter();
         let (mut q, mut k, v) = qkv.next().zip(qkv.next()).zip(qkv.next()).map(|((q, k), v)| (q, k, v)).ok_or("attention projection group")?;
-        // all queries of a token, then all gates (the converter regroups the checkpoint's per-head pairs)
+        // fLLM's converter writes all queries of a token, then all gates; llama.cpp's files keep each head's query and gate side by side
         let mut gate = Vec::new();
         if layer.output_gate {
             let width = heads * dk;
+            let per_head = cfg.arch.starts_with("qwen35");
             let (mut plain, mut gates) = (Vec::with_capacity(rows * width), Vec::with_capacity(rows * width));
             for row in q.chunks_exact(2 * width) {
-                plain.extend_from_slice(&row[..width]);
-                gates.extend_from_slice(&row[width..]);
+                if per_head {
+                    for h in 0..heads {
+                        plain.extend_from_slice(&row[h * 2 * dk..h * 2 * dk + dk]);
+                        gates.extend_from_slice(&row[h * 2 * dk + dk..(h + 1) * 2 * dk]);
+                    }
+                } else {
+                    plain.extend_from_slice(&row[..width]);
+                    gates.extend_from_slice(&row[width..]);
+                }
             }
             q = plain;
             gate = gates;
@@ -435,13 +462,8 @@ impl RustDecoder {
         let rows = positions.len();
         let rope_dims = cfg.layer_rope_dims(i);
         let table = &self.rope[layer.rope_table];
-        let projected = ix.qk.forward(normed)?;
-        let width = (heads + 1) * dim;
-        let (mut queries, mut raw) = (Vec::with_capacity(rows * heads * dim), Vec::with_capacity(rows * dim));
-        for row in projected.chunks_exact(width) {
-            queries.extend_from_slice(&row[..heads * dim]);
-            raw.extend_from_slice(&row[heads * dim..]);
-        }
+        let mut queries = ix.split.0.forward(normed)?;
+        let raw = ix.split.1.forward(normed)?;
         rms(&mut queries, &ix.q_norm, cfg.eps);
         apply_rope(&mut queries, heads, dim, rope_dims, cfg.rope.neox, positions, table);
         let topk = budget / ratio;

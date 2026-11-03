@@ -152,9 +152,13 @@ const UNSUPPORTED_ARCHITECTURES: &[(&str, &str)] = &[
     ),
 ];
 
-fn canonical_architecture(mapping: MappedGguf) -> MappedGguf {
+fn canonical_architecture(mapping: MappedGguf) -> Result<MappedGguf, String> {
     let arch = mapping.index().metadata.get("general.architecture").and_then(Value::as_str).unwrap_or_default();
-    match ARCHITECTURE_ALIASES.iter().find(|(from, _)| *from == arch) {
+    if arch == "qwen4exp" {
+        // Qwen3.8-Flash-Next as llama.cpp writes it: other metadata keys and tensor names than fLLM's own files
+        return crate::qwen4_gguf::view(mapping);
+    }
+    Ok(match ARCHITECTURE_ALIASES.iter().find(|(from, _)| *from == arch) {
         // the BitNet fork writes the query and key rows in the Hugging Face order (rotate-half pairs); mainline `bitnet` files
         // are permuted for interleaved pairs
         Some(("bitnet-b1.58", to)) => mapping.with_architecture_alias("bitnet-b1.58", to).with_metadata(&format!("{to}.rope.neox"), Value::Bool(true)),
@@ -169,7 +173,7 @@ fn canonical_architecture(mapping: MappedGguf) -> MappedGguf {
             }
         }
         None => mapping,
-    }
+    })
 }
 
 fn tensor<'a>(mapping: &'a MappedGguf, name: &str) -> Result<&'a TensorInfo, String> {
@@ -267,7 +271,7 @@ impl GgufModel {
         if max_context == 0 || max_sequences == 0 || threads <= 0 {
             return Err("context, sequence capacity, and thread count must be positive".into());
         }
-        let mapping = canonical_architecture(mapping);
+        let mapping = canonical_architecture(mapping)?;
         if let Some(arch) = mapping.index().metadata.get("general.architecture").and_then(Value::as_str) {
             if let Some((_, reason)) = UNSUPPORTED_ARCHITECTURES.iter().find(|(name, _)| *name == arch) {
                 return Err(format!("the GGUF architecture '{arch}' is not supported: {reason}"));

@@ -1585,7 +1585,8 @@ impl Stream for VulkanStream {
 
     fn supports_delta(&self, shape: &DeltaShape) -> bool {
         // delta_rec binds nine storage buffers
-        delta_supported(shape) && self.sh.caps().max_per_stage_storage_buffers >= 9
+        // the shaders gate the head output with silu(z); Qwen3.8-Flash-Next gates with sigmoid(z)
+        !shape.sigmoid_gate && delta_supported(shape) && self.sh.caps().max_per_stage_storage_buffers >= 9
     }
 
     fn delta_layer(

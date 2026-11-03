@@ -388,6 +388,7 @@ fn recurrent_kernels(c: &mut Collector) {
             v_dim: 64,
             conv_kernel: 4,
             tiled_heads: false,
+            sigmoid_gate: false,
             beta_scale: 1.0,
             eps: 1e-6,
         };

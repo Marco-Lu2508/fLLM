@@ -2071,6 +2071,7 @@ impl<'a> Tester<'a> {
                 v_dim: hv,
                 conv_kernel: 4,
                 tiled_heads: tiled,
+                sigmoid_gate: false,
                 beta_scale: 1.0,
                 eps: 1e-6,
             };
@@ -2239,6 +2240,7 @@ impl<'a> Tester<'a> {
             beta_scale: shape.beta_scale,
             eps: shape.eps,
             tiled_heads: shape.tiled_heads,
+            sigmoid_gate: shape.sigmoid_gate,
             conv: &conv,
             dt_bias: &dt_bias,
             decay: &decay,
