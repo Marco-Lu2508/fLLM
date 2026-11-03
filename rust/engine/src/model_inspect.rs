@@ -57,7 +57,7 @@ impl Inspection {
 
 /// Architectures with recurrent layers: rejected draft tokens would advance the recurrent state, so they cannot speculate.
 pub const STATEFUL_ARCHITECTURES: &[&str] = &[
-    "qwen3next", "qwen35", "qwen35moe", "olmo_hybrid", "mamba", "mamba2", "jamba", "granitehybrid", "bamba", "nemotron_h",
+    "qwen3next", "qwen35", "qwen35moe", "qwen4exp", "olmo_hybrid", "mamba", "mamba2", "jamba", "granitehybrid", "bamba", "nemotron_h",
     "nemotron_h_moe", "falcon-h1", "zamba2", "lfm2", "lfm2moe", "rwkv6", "rwkv7",
 ];
 

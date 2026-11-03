@@ -1523,6 +1523,7 @@ fn delta_net_matches_the_cpu_reference() {
             beta_scale: 1.0,
             eps: 1e-6,
             tiled_heads: tiled,
+            sigmoid_gate: false,
             conv: &conv,
             dt_bias: &dt_bias,
             decay: &decay,

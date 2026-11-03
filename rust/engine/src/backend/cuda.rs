@@ -5452,7 +5452,8 @@ impl Stream for CudaStream {
     }
 
     fn supports_delta(&self, s: &DeltaShape) -> bool {
-        if !ssm_enabled_on_build() {
+        // the kernels gate the head output with silu(z); Qwen3.8-Flash-Next gates with sigmoid(z)
+        if !ssm_enabled_on_build() || s.sigmoid_gate {
             return false;
         }
         let dims = [s.k_heads, s.v_heads, s.k_dim, s.v_dim, s.conv_kernel].map(|n| c_int::try_from(n).unwrap_or(0));

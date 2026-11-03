@@ -64,8 +64,8 @@ pub(crate) fn config(cfg: &Value) -> Result<Value, String> {
         out["intermediate_size"] = num(cfg, "shared_expert_intermediate_size").or_else(|| num(cfg, "moe_intermediate_size")).unwrap_or(1).into();
     }
     if let Some(kind) = cfg.get("output_gate_type").and_then(Value::as_str) {
-        if kind != "silu" {
-            return Err(format!("the output gate activation {kind:?} of the delta layers is unsupported (silu only)"));
+        if !matches!(kind, "silu" | "sigmoid") {
+            return Err(format!("the output gate activation {kind:?} of the delta layers is unsupported (silu or sigmoid)"));
         }
     }
     if let Some(act) = cfg.get("hidden_act").and_then(Value::as_str) {
@@ -87,6 +87,10 @@ pub(crate) fn plan(cfg: &Value) -> Result<Plan, String> {
     let hc = num(cfg, "hc_count").unwrap_or(4);
     if hc < 2 {
         return Err("qwen4_exp needs hc_count of at least 2".into());
+    }
+    // the gate of the delta output norm: `sigmoid(z)` when the checkpoint says so (the released model does), `silu(z)` otherwise
+    if cfg.get("output_gate_type").and_then(Value::as_str) == Some("sigmoid") {
+        plan.meta.push((format!("{arch}.delta.gate_sigmoid"), Meta::Bool(true)));
     }
     plan.meta.push(u("hc.count", hc));
     plan.meta.push(u("hc.lowrank", num(cfg, "hc_lowrank").unwrap_or(320)));
@@ -265,7 +269,18 @@ mod tests {
     #[test]
     fn unsupported_output_gate_is_refused() {
         let mut c = tiny();
-        c["output_gate_type"] = "sigmoid".into();
+        c["output_gate_type"] = "relu".into();
         assert!(config(&c).is_err());
+    }
+
+    #[test]
+    fn sigmoid_output_gate_is_recorded() {
+        let mut c = tiny();
+        let flag = |c: &Value| plan(c).unwrap().meta.iter().any(|(k, v)| k == "qwen3next.delta.gate_sigmoid" && matches!(v, Meta::Bool(true)));
+        assert!(!flag(&c), "the default stays silu");
+        c["output_gate_type"] = "sigmoid".into();
+        assert!(flag(&c));
+        c["output_gate_type"] = "silu".into();
+        assert!(!flag(&c));
     }
 }

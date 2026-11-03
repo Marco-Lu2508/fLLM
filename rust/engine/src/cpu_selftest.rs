@@ -577,6 +577,7 @@ fn delta_pass(
         beta_scale: 1.0,
         eps: 1e-6,
         tiled_heads: tiled,
+        sigmoid_gate: false,
         conv: &conv,
         dt_bias: &dt_bias,
         decay: &decay,
