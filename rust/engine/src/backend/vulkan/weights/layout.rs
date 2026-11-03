@@ -151,6 +151,7 @@ pub fn format_info(quant: QuantType) -> Option<FormatInfo> {
         QuantType::Q6_K => ("q6_k", 256, 210, [128, 64, 16, 4]),
         QuantType::IQ4_NL => ("iq4_nl", 32, 18, [16, 2, 0, 0]),
         QuantType::Mxfp4 => ("mxfp4", 32, 17, [16, 1, 0, 0]),
+        QuantType::Q2_0 => ("q2_0", 64, 18, [16, 2, 0, 0]),
         QuantType::NvFp4 => ("nvfp4", 64, 36, [32, 4, 0, 0]),
         QuantType::Q4Z32 | QuantType::Q4ZP32 => ("q4z32", 32, 19, [16, 4, 0, 0]),
         QuantType::Q4Z64 | QuantType::Q4ZP64 => ("q4z64", 64, 35, [32, 4, 0, 0]),
@@ -188,6 +189,7 @@ pub fn supported_formats() -> &'static [QuantType] {
         QuantType::Q6_K,
         QuantType::IQ4_NL,
         QuantType::Mxfp4,
+        QuantType::Q2_0,
         QuantType::NvFp4,
         QuantType::Q4Z32,
         QuantType::Q4Z64,
@@ -693,6 +695,10 @@ pub fn pack_weight(
             QuantType::Mxfp4 => {
                 put(&mut out, at(0, g), &b[1..17]);
                 out[at(1, g)] = b[0];
+            }
+            QuantType::Q2_0 => {
+                put(&mut out, at(0, g), &b[2..18]);
+                put(&mut out, at(1, g), &b[0..2]);
             }
             // bitsandbytes: `[f32 scale][codes]` into a plane of codes and a plane of scales
             QuantType::Nf4B64 | QuantType::Nf4B128 | QuantType::Fp4B64 | QuantType::Fp4B128 | QuantType::Int8Row => {

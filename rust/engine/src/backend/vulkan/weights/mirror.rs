@@ -145,6 +145,14 @@ pub fn chunk(layout: &DeviceLayout, buf: &[u8], g: usize, cin: usize) -> Chunk {
             ws = e8m0_half((w(off1 as usize + (g >> 2)) >> ((g & 3) << 3)) & 255);
             wm = 0.0;
         }
+        "q2_0" => {
+            let h = (w(g * 4 + (cin >> 1)) >> ((cin & 1) << 4)) & 0xffff;
+            let spread = |x: u32| (x | (x << 6) | (x << 12) | (x << 18)) & 0x0303_0303;
+            p0 = sub8(spread(h & 0xff), 1);
+            p1 = sub8(spread(h >> 8), 1);
+            ws = f16at(buf, off1, g);
+            wm = 0.0;
+        }
         "nvfp4" => {
             let s = cin >> 1;
             let b = g * 8 + (s << 1);

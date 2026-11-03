@@ -1,4 +1,4 @@
-//! Packed integer projections for Q4_0, Q4_1, Q5_0, Q5_1, Q2_K..Q6_K, IQ4_NL, IQ4_XS and MXFP4.
+//! Packed integer projections for Q4_0, Q4_1, Q5_0, Q5_1, Q2_0, Q2_K..Q6_K, IQ4_NL, IQ4_XS and MXFP4.
 //!
 //! `linear_mixed` packs the input once into 32-value 8-bit records (`X`): Q8_0-style records with
 //! an fp16 scale for the 32-value formats (plus the fp16 Q8_1 sum for Q4_1/Q5_1), Q8_K-style
@@ -204,7 +204,7 @@ enum Activation {
 
 fn activation(kind: u32) -> Option<Activation> {
     match kind {
-        2 | 6 | 20 | 39 => Some(Activation::Q8_0),
+        2 | 6 | 20 | 39 | 42 => Some(Activation::Q8_0),
         3 | 7 => Some(Activation::Q8_1),
         10..=14 | 23 => Some(Activation::Q8K),
         _ => None,
@@ -226,6 +226,9 @@ fn layout(kind: u32) -> Option<(usize, usize)> {
         20 => (32, 18),
         23 => (256, 136),
         39 => (32, 17),
+        // Q2_0: 64 values, an fp16 scale and 16 bytes of 2-bit codes; the activation records stay
+        // 32 values wide, so one block meets two consecutive records.
+        42 => (64, 18),
         _ => return None,
     })
 }
@@ -331,6 +334,10 @@ pub fn linear_mixed(
     if !groupable(kinds) || kinds.len() != projections.len() {
         return None;
     }
+    // A Q2_0 block spans two activation records: odd record counts cannot be paired.
+    if kinds.contains(&42) && !cols.is_multiple_of(64) {
+        return None;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         let isa = crate::cpu_kernels::isa();
@@ -343,7 +350,7 @@ pub fn linear_mixed(
         && kinds
             .iter()
             .all(|&kind| {
-                matches!(kind, 2 | 3 | 6 | 7 | 12..=14) || crate::cpu_arm::quant::handles(kind)
+                matches!(kind, 2 | 3 | 6 | 7 | 12..=14 | 42) || crate::cpu_arm::quant::handles(kind)
             })
     {
         return Some(linear_neon(projections, kinds, x, cols));
@@ -591,9 +598,11 @@ fn linear_x86(
         );
         return output;
     }
-    let width = cols / 32 * layout(kind).expect("validated").1;
+    let (block, block_bytes) = layout(kind).expect("validated");
+    let width = cols / block * block_bytes;
     if batch == 1 {
-        let size = if wide.is_some() { 8 } else { 4 };
+        // The Q2_0 decode kernels take at most four rows whatever the vector width.
+        let size = if wide.is_some() && kind != 42 { 8 } else { 4 };
         crate::cpu_schedule::row_panels(
             &mut output,
             &rows,
@@ -605,6 +614,11 @@ fn linear_x86(
                 // SAFETY: `validate` bounds the weight rows and activation records; the
                 // scheduler gives `out` these output columns exclusively.
                 unsafe {
+                    if kind == 42 {
+                        x86::gemv_q2(p.weights, &packed, first, out.row(0), wide, vnni);
+                        add_bias(out, p.bias, first, batch);
+                        return;
+                    }
                     match wide {
                         Some(Avx512::Vnni) => {
                             x86::gemv512_vnni(p.weights, kind, &packed, first, out.row(0))
@@ -661,7 +675,7 @@ fn linear_x86(
                     };
                 }
                 match kind {
-                    2 | 6 => run!(2),
+                    2 | 6 | 42 => run!(2),
                     3 | 7 => run!(3),
                     _ => unreachable!("W panels hold classic formats only"),
                 }
@@ -994,6 +1008,12 @@ unsafe fn k_stream_panel(
 ) {
     use crate::cpu_kernels::Avx512;
     use crate::cpu_kquant as k;
+    // A Q2_0 down projection of a mixed expert FFN (decode only: one token).
+    if kind == 42 {
+        debug_assert_eq!(batch, 1);
+        x86::gemv_q2(w, x, first, &mut out.row(0)[..valid], wide, vnni);
+        return;
+    }
     // Q2_K, Q3_K and IQ4_XS on 512-bit vectors (the `avx512` feature), ahead of the 256-bit AVX-VNNI
     // kernel they would otherwise take on CPUs that have both.
     #[cfg(feature = "avx512")]
@@ -1084,7 +1104,8 @@ fn expert_pass<'p, F>(
             let (p, kind) = member(m);
             let valid = (p.rows - first).min(size);
             let record = if distinct_inputs { m } else { 0 };
-            let row_bytes = nb / 8 * layout(kind).expect("validated").1;
+            let (block, block_bytes) = layout(kind).expect("validated");
+            let row_bytes = nb * 32 / block * block_bytes;
             prefetch_rows(p.weights, first + size, size, row_bytes);
             // SAFETY: `check_projection` bounded every weight row, `packed` holds `nb` records
             // for each record row used, and the scheduler gives `out` these columns exclusively.
@@ -1119,10 +1140,14 @@ fn experts_x86<'s>(
     let count = experts.len();
     let kinds = experts.first()?.kinds;
     let [gate_kind, up_kind, down_kind] = kinds;
+    // Gate and up are K formats; the down projection may also be Q2_0 (it reads its own Q8_0
+    // activation records, packed separately below).
     if experts.iter().any(|e| e.kinds != kinds)
-        || !kinds
+        || ![gate_kind, up_kind]
             .iter()
             .all(|&kind| activation(kind) == Some(Activation::Q8K))
+        || !(activation(down_kind) == Some(Activation::Q8K)
+            || (down_kind == 42 && experts[0].gate.rows.is_multiple_of(64)))
     {
         return None;
     }
@@ -1391,6 +1416,19 @@ mod x86 {
     #[inline]
     #[target_feature(enable = "avx2,f16c")]
     pub(super) unsafe fn unpack_avx2(raw: &[u8], kind: u32, groups: &mut [W]) {
+        if kind == 42 {
+            // One Q2_0 block fills two records; values -1..=2 plus 128, as every classic format.
+            let bias = _mm256_set1_epi8(127);
+            for (b, dst) in raw.as_chunks::<18>().0.iter().zip(groups.chunks_mut(2)) {
+                let (w0, w1, d) = decode_q2_block(b.as_ptr());
+                for (w, dst) in [w0, w1].into_iter().zip(dst) {
+                    _mm256_storeu_si256(dst.q.as_mut_ptr().cast(), _mm256_add_epi8(w, bias));
+                    dst.d = [d; 2];
+                    dst.m = [0.0; 2];
+                }
+            }
+            return;
+        }
         let width = match kind {
             2 => 18,
             3 => 20,
@@ -1583,6 +1621,119 @@ mod x86 {
             0.0
         };
         (q, d, m)
+    }
+
+    /// One Q2_0 block (`b` points at its 18 bytes) as two vectors of 2-bit codes 0..=3, values
+    /// 0..32 and 32..64 in order, and its scale. The weight is `(code - 1) * d`.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2/F16C and `b` must point at 18 readable bytes.
+    #[inline]
+    #[target_feature(enable = "avx2,f16c")]
+    unsafe fn decode_q2_block(b: *const u8) -> (__m256i, __m256i, f32) {
+        let packed = _mm_loadu_si128(b.add(2).cast());
+        let three = _mm_set1_epi8(3);
+        // Plane k holds crumb k (bits 2k..2k+2) of every byte; interleaving the four planes
+        // restores the value order (byte j / 4, crumb j % 4).
+        let c0 = _mm_and_si128(packed, three);
+        let c1 = _mm_and_si128(_mm_srli_epi16(packed, 2), three);
+        let c2 = _mm_and_si128(_mm_srli_epi16(packed, 4), three);
+        let c3 = _mm_and_si128(_mm_srli_epi16(packed, 6), three);
+        let (lo01, hi01) = (_mm_unpacklo_epi8(c0, c1), _mm_unpackhi_epi8(c0, c1));
+        let (lo23, hi23) = (_mm_unpacklo_epi8(c2, c3), _mm_unpackhi_epi8(c2, c3));
+        let first = _mm256_set_m128i(_mm_unpackhi_epi16(lo01, lo23), _mm_unpacklo_epi16(lo01, lo23));
+        let second = _mm256_set_m128i(_mm_unpackhi_epi16(hi01, hi23), _mm_unpacklo_epi16(hi01, hi23));
+        let d = crate::cpu_kernels::x86::half_to_float(std::ptr::read_unaligned(b.cast::<u16>()));
+        (first, second, d)
+    }
+
+    /// Q2_0 rows against Q8_0 activation records. A block pairs with two consecutive records
+    /// (codes 0..32 with the first, 32..64 with the second); the offset of the code (`-1`) enters
+    /// the dot as its initial value, the negated sum of the activations of each lane.
+    macro_rules! q2_gemv {
+        ($name:ident, $body:ident, $features:literal, $dot:ident) => {
+            /// `out.len()` (1..=4) Q2_0 rows from `first` for one decode token.
+            ///
+            /// # Safety
+            /// The CPU must support the enabled features; `w` holds complete rows of
+            /// `x.len() / 2` blocks through row `first + out.len()`; `x.len()` is even.
+            #[target_feature(enable = $features)]
+            unsafe fn $name(w: &[u8], x: &[X], first: usize, out: &mut [f32]) {
+                match out.len() {
+                    1 => $body::<1>(w, x, first, out),
+                    2 => $body::<2>(w, x, first, out),
+                    3 => $body::<3>(w, x, first, out),
+                    4 => $body::<4>(w, x, first, out),
+                    _ => unreachable!("panel has 1 to 4 rows"),
+                }
+            }
+            #[inline]
+            #[target_feature(enable = $features)]
+            unsafe fn $body<const ROWS: usize>(w: &[u8], x: &[X], first: usize, out: &mut [f32]) {
+                debug_assert!(x.len().is_multiple_of(2));
+                let blocks = x.len() / 2;
+                let stride = blocks * 18;
+                assert!(w.len() >= (first + ROWS) * stride);
+                let mut a = [_mm256_setzero_ps(); ROWS];
+                for (block, pair) in x.chunks_exact(2).enumerate() {
+                    let (x0, x1) = (&pair[0], &pair[1]);
+                    let q0 = _mm256_load_si256(x0.q.as_ptr().cast());
+                    let q1 = _mm256_load_si256(x1.q.as_ptr().cast());
+                    let (i0, i1) = (signed_lane_bias::<0>(q0), signed_lane_bias::<0>(q1));
+                    for (r, acc) in a.iter_mut().enumerate() {
+                        let b = w.as_ptr().add((first + r) * stride + block * 18);
+                        let (w0, w1, d) = decode_q2_block(b);
+                        let (dot0, dot1) = ($dot(i0, w0, q0), $dot(i1, w1, q1));
+                        *acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot0), _mm256_set1_ps(d * x0.d), *acc);
+                        *acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot1), _mm256_set1_ps(d * x1.d), *acc);
+                    }
+                }
+                for (y, acc) in out.iter_mut().zip(a) {
+                    *y = hsum(acc);
+                }
+            }
+        };
+    }
+    /// Codes below 4 by signed activations: nothing saturates `vpmaddubsw` (2 * 3 * 127).
+    #[inline]
+    #[target_feature(enable = "avx2,avx512vl,avx512vnni")]
+    unsafe fn dot_small_vnni512vl(init: __m256i, u: __m256i, s: __m256i) -> __m256i {
+        _mm256_dpbusd_epi32(init, u, s)
+    }
+    q2_gemv!(gemv_q2_avx2, gemv_q2_avx2_rows, "avx2,fma,f16c", dot_small_avx2);
+    q2_gemv!(
+        gemv_q2_vnni,
+        gemv_q2_vnni_rows,
+        "avx2,fma,f16c,avxvnni",
+        dot_small_vnni
+    );
+    q2_gemv!(
+        gemv_q2_vnni512,
+        gemv_q2_vnni512_rows,
+        "avx2,fma,f16c,avx512f,avx512vl,avx512vnni",
+        dot_small_vnni512vl
+    );
+
+    /// Q2_0 decode on the best kernel of the CPU: AVX-512 VNNI (`wide`, 256-bit vectors), AVX-VNNI
+    /// or AVX2.
+    ///
+    /// # Safety
+    /// As the kernels; `wide` and `vnni` come from the CPU detection.
+    #[inline]
+    pub(super) unsafe fn gemv_q2(
+        w: &[u8],
+        x: &[X],
+        first: usize,
+        out: &mut [f32],
+        wide: Option<crate::cpu_kernels::Avx512>,
+        vnni: bool,
+    ) {
+        use crate::cpu_kernels::Avx512;
+        match wide {
+            Some(Avx512::Vnni) => gemv_q2_vnni512(w, x, first, out),
+            None if vnni => gemv_q2_vnni(w, x, first, out),
+            _ => gemv_q2_avx2(w, x, first, out),
+        }
     }
 
     macro_rules! gemv {
@@ -2069,7 +2220,17 @@ mod neon {
             7 => 24,
             12 => 144,
             13 => 176,
+            42 => 18,
             _ => 210,
+        }
+    }
+
+    /// 32-value groups (activation records) per weight block.
+    const fn groups(kind: u32) -> usize {
+        match kind {
+            12..=14 => 8,
+            42 => 2,
+            _ => 1,
         }
     }
 
@@ -2188,6 +2349,29 @@ mod neon {
                     m: [-h.min * m as f32; 2],
                 }
             }
+            42 => {
+                // Q2_0: 64 two-bit codes (value j in byte j / 4, bits 2 * (j % 4)); group g is
+                // values 32 * g .. 32 * g + 32. Code planes interleaved back into value order.
+                let packed = vld1q_u8(p.add(2));
+                let three = vdupq_n_u8(3);
+                let c0 = vandq_u8(packed, three);
+                let c1 = vandq_u8(vshrq_n_u8::<2>(packed), three);
+                let c2 = vandq_u8(vshrq_n_u8::<4>(packed), three);
+                let c3 = vshrq_n_u8::<6>(packed);
+                let (p01, p23) = if g == 0 {
+                    (vzip1q_u8(c0, c1), vzip1q_u8(c2, c3))
+                } else {
+                    (vzip2q_u8(c0, c1), vzip2q_u8(c2, c3))
+                };
+                let (p01, p23) = (vreinterpretq_u16_u8(p01), vreinterpretq_u16_u8(p23));
+                let lo = vreinterpretq_u8_u16(vzip1q_u16(p01, p23));
+                let hi = vreinterpretq_u8_u16(vzip2q_u16(p01, p23));
+                Group {
+                    q: [signed(lo, 1), signed(hi, 1)],
+                    d: [h.d; 2],
+                    m: [0.0; 2],
+                }
+            }
             _ => {
                 let (n, sub) = (g / 4, g % 4);
                 let lp = p.add(n * 64 + (sub % 2) * 32);
@@ -2272,6 +2456,7 @@ mod neon {
                 12 => $run!(12),
                 13 => $run!(13),
                 14 => $run!(14),
+                42 => $run!(42),
                 _ => unreachable!(),
             }
         };
@@ -2296,7 +2481,7 @@ mod neon {
     #[inline]
     #[target_feature(enable = "neon")]
     unsafe fn unpack_kind<const KIND: u32>(raw: &[u8], out: &mut [W]) {
-        let groups = if KIND >= 12 { 8 } else { 1 };
+        let groups = groups(KIND);
         let flip = vdupq_n_u8(0x80);
         for (block, dst) in raw
             .chunks_exact(block_width(KIND))
@@ -2346,7 +2531,7 @@ mod neon {
         first: usize,
         out: &mut [f32],
     ) {
-        let groups = if KIND >= 12 { 8 } else { 1 };
+        let groups = groups(KIND);
         let width = block_width(KIND);
         let blocks = x.len() / groups;
         let stride = blocks * width;
@@ -2545,6 +2730,9 @@ mod tests {
             ([12, 14, 12], 768, 512, 100, true),
             ([14, 14, 14], 512, 1024, 63, true),
             ([13, 11, 10], 512, 256, 21, false),
+            // Q2_0 down projections (mixed expert FFN): their own Q8_0 activation records
+            ([12, 12, 42], 512, 768, 37, false),
+            ([14, 14, 42], 512, 1024, 63, true),
         ];
         for (kinds, cols, ff, out_rows, bias) in configs {
             let weights = (0..8)
@@ -2801,6 +2989,132 @@ mod tests {
                 }
             }
         }
+    }
+
+    // The 2-bit codes of a Q2_0 block, unpacked to W records, are the values of the format
+    // definition: element j = ((qs[j / 4] >> (2 * (j % 4))) & 3) - 1, scale d.
+    #[test]
+    fn q2_0_unpacks_to_the_defined_values() {
+        if crate::cpu_kernels::isa() == "scalar" {
+            return;
+        }
+        let mut rng = Lcg(42);
+        let weights = random_weights(42, 3, 128, &mut rng);
+        let mut records = vec![W::default(); 12];
+        // SAFETY: AVX2/F16C present (`isa` is not scalar); six blocks of 18 bytes, two records each.
+        unsafe { x86::unpack_avx2(&weights, 42, &mut records) };
+        for (b, block) in weights.as_chunks::<18>().0.iter().enumerate() {
+            let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+            for j in 0..64 {
+                let code = i32::from((block[2 + j / 4] >> (2 * (j % 4))) & 3);
+                let record = &records[2 * b + j / 32];
+                assert_eq!(i32::from(record.q[j % 32]) - 128, code - 1, "block {b} value {j}");
+                assert_eq!(record.d, [d; 2]);
+            }
+        }
+    }
+
+    // Q2_0 rows by Q8_0 records on every decode kernel the CPU has, at odd rows and block counts.
+    #[test]
+    fn q2_0_decode_kernels_match_the_scalar_reference() {
+        if crate::cpu_kernels::isa() == "scalar" {
+            return;
+        }
+        let mut rng = Lcg(4242);
+        for blocks in [1, 2, 3, 11] {
+            let cols = blocks * 64;
+            for rows in [1, 2, 3, 4, 7, 13] {
+                let weights = random_weights(42, rows, cols, &mut rng);
+                let x = rng.vector(cols, 3.0);
+                let packed = prepare(&x, cols, 42);
+                let (want, scale) = reference_packed(&weights, 42, rows, cols, &packed);
+                let mut runs: Vec<(&str, Vec<f32>)> = Vec::new();
+                for (name, wide, vnni) in [
+                    ("avx2", None, false),
+                    ("avx-vnni", None, std::arch::is_x86_feature_detected!("avxvnni")),
+                    (
+                        "avx512-vnni",
+                        crate::cpu_kernels::avx512()
+                            .filter(|w| matches!(w, crate::cpu_kernels::Avx512::Vnni)),
+                        false,
+                    ),
+                ] {
+                    if (name == "avx-vnni" && !vnni)
+                        || (name == "avx512-vnni" && wide.is_none())
+                    {
+                        continue;
+                    }
+                    let mut out = vec![0.0; rows];
+                    for first in (0..rows).step_by(4) {
+                        let valid = (rows - first).min(4);
+                        // SAFETY: the CPU features were checked above; `weights` holds `rows`
+                        // complete rows and `packed` the `cols / 32` records of the token.
+                        unsafe {
+                            x86::gemv_q2(&weights, &packed, first, &mut out[first..first + valid], wide, vnni)
+                        };
+                    }
+                    runs.push((name, out));
+                }
+                for (name, out) in runs {
+                    let (error, ok) = compare(&out, &want, &scale);
+                    assert!(ok, "{name} blocks {blocks} rows {rows}: {error:e}");
+                }
+            }
+        }
+    }
+
+    // Through the public entry points: decode, prompts (W-panel tiles), biases, row tails and
+    // several pool sizes; grouped siblings equal the single projections.
+    #[test]
+    fn q2_0_projections_match_the_scalar_reference_for_all_batches_and_threads() {
+        if crate::cpu_kernels::isa() == "scalar" {
+            return;
+        }
+        let mut rng = Lcg(2025);
+        let cols = 192;
+        let rows = [13, 1, 6];
+        let weights = rows
+            .iter()
+            .map(|&r| random_weights(42, r, cols, &mut rng))
+            .collect::<Vec<_>>();
+        let bias = rng.vector(rows[0], 1.0);
+        let members = weights
+            .iter()
+            .zip(rows)
+            .enumerate()
+            .map(|(i, (w, rows))| Projection {
+                weights: w,
+                rows,
+                bias: (i == 0).then_some(bias.as_slice()),
+            })
+            .collect::<Vec<_>>();
+        for threads in [1, 3, 10] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for batch in [1, 2, 3, 4, 5, 17, 33] {
+                let x = rng.vector(batch * cols, 3.0);
+                let packed = prepare(&x, cols, 42);
+                let grouped = pool.install(|| linear_group(&members, 42, &x, cols).unwrap());
+                for (i, (p, have)) in members.iter().zip(&grouped).enumerate() {
+                    let (mut want, scale) = reference_packed(p.weights, 42, p.rows, cols, &packed);
+                    if let Some(b) = p.bias {
+                        for (j, w) in want.iter_mut().enumerate() {
+                            *w += f64::from(b[j % p.rows]);
+                        }
+                    }
+                    let (error, ok) = compare(have, &want, &scale);
+                    assert!(ok, "member {i} batch {batch} threads {threads}: {error:e}");
+                    let single = pool.install(|| linear(p.weights, 42, &x, p.rows, cols, p.bias).unwrap());
+                    assert_eq!(*have, single, "member {i} batch {batch} threads {threads}");
+                }
+            }
+        }
+        // 32-value but not 64-value widths cannot pair records: no kernel, no panic.
+        let narrow = random_weights(42, 1, 64, &mut rng);
+        let p = Projection { weights: &narrow, rows: 1, bias: None };
+        assert!(linear_mixed(&[p], &[42], &[0.0; 96], 96).is_none());
     }
 
     // Mixed K members share one packing and each matches its own f64 reference.

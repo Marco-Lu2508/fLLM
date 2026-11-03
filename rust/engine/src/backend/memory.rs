@@ -35,11 +35,12 @@ pub fn device_weight_bytes(tensors: &[fllm_gguf_probe::TensorInfo], backend: &st
     tensors.iter().map(|t| device_tensor_bytes(t, backend)).sum()
 }
 
-/// GGML types the Vulkan shaders have no decoder for: the IQ1 / IQ2 / IQ3 families, Q8_1 / Q8_K, the ternary and 1-bit formats and Q2_0.
+/// GGML types the Vulkan shaders have no decoder for: the IQ1 / IQ2 / IQ3 families, Q8_1 / Q8_K and the ternary and 1-bit formats (Q2_0 has
+/// shaders).
 /// Their tensors are dequantized on the host and uploaded again (see `upload.rs` of the Vulkan backend), so they take more room on the
 /// device than in the file. Drop a type from this list when a shader reads it natively.
 fn vulkan_expands(type_id: u32) -> bool {
-    matches!(type_id, 9 | 15 | 16..=19 | 21 | 22 | 29 | 34 | 35 | 41 | 42)
+    matches!(type_id, 9 | 15 | 16..=19 | 21 | 22 | 29 | 34 | 35 | 41)
 }
 
 /// Bytes one tensor occupies on the device of `backend` ("vulkan", "cuda", ...): the stored size, unless the backend expands the format at
@@ -655,8 +656,11 @@ mod tests {
         assert_eq!(tensor_bytes(&iq3), 2560 * 640 * 512 / 256 * 98);
         assert_eq!(device_tensor_bytes(&iq3, "vulkan"), 2560 * 640 * 512 / 256 * 176);
         // rows that are not whole 256-value blocks are stored as binary16
+        let iq2_xs = tensor(17, &[640, 2560, 512]);
+        assert_eq!(device_tensor_bytes(&iq2_xs, "vulkan"), 640 * 2560 * 512 * 2);
+        // Q2_0 has Vulkan shaders: the stored size (18 bytes per 64 values)
         let q2_0 = tensor(42, &[640, 2560, 512]);
-        assert_eq!(device_tensor_bytes(&q2_0, "vulkan"), 640 * 2560 * 512 * 2);
+        assert_eq!(device_tensor_bytes(&q2_0, "vulkan"), 640 * 2560 * 512 / 64 * 18);
         // formats with a kernel, and every format on a backend that reads it, keep the stored size
         let q4k = tensor(12, &[2560, 640, 512]);
         assert_eq!(device_tensor_bytes(&q4k, "vulkan"), tensor_bytes(&q4k));

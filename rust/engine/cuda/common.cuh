@@ -49,6 +49,8 @@ enum FllmKind : uint32_t {
     KIND_Q2_K = 10, KIND_Q3_K = 11, KIND_IQ2_XXS = 16, KIND_IQ2_XS = 17, KIND_IQ3_XXS = 18, KIND_IQ1_S = 19,
     KIND_IQ3_S = 21, KIND_IQ2_S = 22, KIND_IQ1_M = 29,
     KIND_NVFP4 = 40,
+    // GGML Q2_0: blocks of 64 values [f16 d][16 bytes of 2-bit codes], value = (code - 1) * d (decode16 below)
+    KIND_Q2_0 = 42,
     KIND_Q4Z32 = 0x80000010, KIND_Q4Z64 = 0x80000011, KIND_Q4Z128 = 0x80000012,
     KIND_Q4ZP32 = 0x80000014, KIND_Q4ZP64 = 0x80000015, KIND_Q4ZP128 = 0x80000016,
     KIND_FP8M = 0x80000020, KIND_FP8B = 0x80000021,
@@ -74,7 +76,7 @@ __host__ __device__ constexpr int kind_block_elems(uint32_t kind) {
     return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_FP8M || kind == KIND_FP8B ? 1
            : kind == KIND_Q4Z64 || kind == KIND_Q4ZP64 ? 64
            : kind == KIND_Q4Z128 || kind == KIND_Q4ZP128 || kind == KIND_NF4B128 || kind == KIND_FP4B128 ? 128
-           : kind == KIND_NVFP4 || kind == KIND_NF4B64 || kind == KIND_FP4B64 || kind == KIND_INT8R ? 64
+           : kind == KIND_NVFP4 || kind == KIND_Q2_0 || kind == KIND_NF4B64 || kind == KIND_FP4B64 || kind == KIND_INT8R ? 64
            : kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind) ? 256 : 32;
 }
 __host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
@@ -86,6 +88,7 @@ __host__ __device__ constexpr int kind_block_bytes(uint32_t kind) {
         case KIND_Q4Z64: case KIND_Q4ZP64: return 35;
         case KIND_Q4Z128: case KIND_Q4ZP128: return 67;
         case KIND_NVFP4: return 36;
+        case KIND_Q2_0: return 18;
         case KIND_NF4B64: case KIND_FP4B64: return 36;
         case KIND_NF4B128: case KIND_FP4B128: case KIND_INT8R: return 68;
         case KIND_Q4_0: case KIND_IQ4_NL: case KIND_MXFP4: return 18;
@@ -108,7 +111,7 @@ __host__ __device__ constexpr size_t kind_row_bytes(uint32_t kind, int cols) {
 __host__ __device__ constexpr bool kind_supported(uint32_t kind) {
     return kind == KIND_F32 || kind == KIND_F16 || kind == KIND_BF16 || kind == KIND_Q4_0 || kind == KIND_IQ4_NL || kind == KIND_MXFP4 ||
            kind == KIND_Q4_1 || kind == KIND_Q5_0 || kind == KIND_Q5_1 || kind == KIND_Q8_0 ||
-           kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind_is_iq_or_kextra(kind) || kind_is_bnb(kind);
+           kind == KIND_Q4_K || kind == KIND_Q5_K || kind == KIND_Q6_K || kind == KIND_Q2_0 || kind_is_iq_or_kextra(kind) || kind_is_bnb(kind);
 }
 
 // 16-entry code books of bitsandbytes NF4 / FP4 (identical to NF4_CODE / FP4_CODE of fllm_gguf_probe::bnb, 9 significant digits round-trip
@@ -218,6 +221,16 @@ __device__ __forceinline__ void decode16(const uint8_t *rp, int run, int cols, f
     }
     if (kind_is_iq_or_kextra(KIND)) {
         decode16_iq<KIND>(rp, run, w);
+        return;
+    }
+    if (KIND == KIND_Q2_0) {
+        // blocks of 64 values, 18 bytes, rows stored back to back (even offsets): [f16 d][qs[16]], value j = ((qs[j / 4] >> 2 * (j % 4)) & 3) - 1, times d.
+        // A run of 16 values lies in one block: it is run % 4 of the block and uses 4 code bytes.
+        const uint8_t *b = rp + (size_t)(run >> 2) * 18;
+        const float d = h2f_bits(ld16(b));
+        const uint8_t *qs = b + 2 + (run & 3) * 4;
+#pragma unroll
+        for (int i = 0; i < 16; i++) w[i] = d * (float)((int)((qs[i >> 2] >> ((i & 3) * 2)) & 3u) - 1);
         return;
     }
     if (KIND == KIND_Q4_0 || FLLM_LUT_KIND(KIND) || KIND == KIND_Q4_1 || KIND == KIND_Q5_0 || KIND == KIND_Q5_1) {
@@ -440,6 +453,7 @@ __device__ __forceinline__ float weight_at(const uint8_t *w, uint32_t kind, size
         case KIND_IQ2_S: decode16<KIND_IQ2_S>(rp, (int)run, cols, v); break;
         case KIND_IQ1_M: decode16<KIND_IQ1_M>(rp, (int)run, cols, v); break;
         case KIND_NVFP4: decode16<KIND_NVFP4>(rp, (int)run, cols, v); break;
+        case KIND_Q2_0: decode16<KIND_Q2_0>(rp, (int)run, cols, v); break;
         case KIND_Q4Z32: decode16<KIND_Q4Z32>(rp, (int)run, cols, v); break;
         case KIND_Q4Z64: decode16<KIND_Q4Z64>(rp, (int)run, cols, v); break;
         case KIND_Q4Z128: decode16<KIND_Q4Z128>(rp, (int)run, cols, v); break;

@@ -45,6 +45,7 @@ embed_q5_k embed.comp -DFMT_Q5_K
 embed_q6_k embed.comp -DFMT_Q6_K
 embed_iq4_nl embed.comp -DFMT_IQ4_NL
 embed_mxfp4 embed.comp -DFMT_MXFP4
+embed_q2_0 embed.comp -DFMT_Q2_0
 
 # expert matrix-vector product: weights of all experts in one buffer (_arena) or reached through buffer device addresses (_bda)
 moe_linear_q4_0_arena moe_linear.comp -DMOE_ARENA -DFMT_Q4_0
@@ -59,6 +60,7 @@ moe_linear_q5_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q5_K
 moe_linear_q6_k_arena moe_linear.comp -DMOE_ARENA -DFMT_Q6_K
 moe_linear_iq4_nl_arena moe_linear.comp -DMOE_ARENA -DFMT_IQ4_NL
 moe_linear_mxfp4_arena moe_linear.comp -DMOE_ARENA -DFMT_MXFP4
+moe_linear_q2_0_arena moe_linear.comp -DMOE_ARENA -DFMT_Q2_0
 moe_linear_q4_0_bda moe_linear.comp -DMOE_BDA -DFMT_Q4_0
 moe_linear_q4_1_bda moe_linear.comp -DMOE_BDA -DFMT_Q4_1
 moe_linear_q5_0_bda moe_linear.comp -DMOE_BDA -DFMT_Q5_0
@@ -71,6 +73,7 @@ moe_linear_q5_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q5_K
 moe_linear_q6_k_bda moe_linear.comp -DMOE_BDA -DFMT_Q6_K
 moe_linear_iq4_nl_bda moe_linear.comp -DMOE_BDA -DFMT_IQ4_NL
 moe_linear_mxfp4_bda moe_linear.comp -DMOE_BDA -DFMT_MXFP4
+moe_linear_q2_0_bda moe_linear.comp -DMOE_BDA -DFMT_Q2_0
 
 # paged attention: decode / short batches with split-KV (KV_Q8 = cache format), prompt tiles (DVMAX = largest value width)
 attn_decode_f16 attn_decode.comp -DKV_Q8=0

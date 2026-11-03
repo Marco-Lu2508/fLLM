@@ -85,7 +85,7 @@ pub(super) fn moe_enabled() -> bool {
 pub(super) fn grouped_kind(kind: u32) -> bool {
     matches!(
         kind,
-        1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 0x8000_0010..=0x8000_0012 | 0x8000_0021
+        1 | 30 | 2 | 3 | 6 | 7 | 8 | 10..=14 | 16..=23 | 29 | 39 | 40 | 42 | 0x8000_0010..=0x8000_0012 | 0x8000_0021
     )
 }
 
@@ -96,7 +96,7 @@ pub(super) fn grouped_supported(cc: u32, quant_type: QuantType, cols: usize, blo
         256
     } else if matches!(kind, 1 | 30 | 0x8000_0021) {
         1
-    } else if kind == 40 {
+    } else if kind == 40 || kind == 42 {
         64
     } else {
         quant_type.q4z_group().unwrap_or(32)

@@ -390,6 +390,7 @@ int fllm_tc_gemm_try(cudaStream_t s, const void *W, int kind, const float *X, fl
         case KIND_Q5_K: return run<KIND_Q5_K>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_Q6_K: return run<KIND_Q6_K>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_Q2_K: return run<KIND_Q2_K>(s, w, X, Y, bias, rows, cols, batch);
+        case KIND_Q2_0: return run<KIND_Q2_0>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_Q3_K: return run<KIND_Q3_K>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_IQ2_XXS: return run<KIND_IQ2_XXS>(s, w, X, Y, bias, rows, cols, batch);
         case KIND_IQ2_XS: return run<KIND_IQ2_XS>(s, w, X, Y, bias, rows, cols, batch);
