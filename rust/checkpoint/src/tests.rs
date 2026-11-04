@@ -34,6 +34,9 @@ fn safetensors_checks_exact_shape_byte_count_and_reads_tensor() {
     let ts = safetensors::read_file(&p).unwrap();
     assert_eq!(ts[0].shape, vec![2]);
     assert_eq!(ts[0].payload.as_slice(), [1, 2, 3, 4]);
+    // The payload may map the file. Windows refuses to rewrite a mapped file (os error 1224),
+    // so release the mapping before the file is written again.
+    drop(ts);
     write_safe(
         &p,
         r#"{"weight":{"dtype":"F16","shape":[3],"data_offsets":[0,4]}}"#,
