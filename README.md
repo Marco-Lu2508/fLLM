@@ -118,17 +118,12 @@ with multi-head latent attention, gpt-oss, Llama 4, DBRX, PhiMoE and more), and 
 models (Mamba 1/2, Qwen3-Next, Qwen3.5/3.6 with gated DeltaNet in HF and llama.cpp GGUF layouts,
 Nemotron-H, Granite hybrid, LFM2, Kimi-Linear). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
 packed Hugging Face checkpoints), DeepSeek-V4 (hyper-connections, compressed attention and its per-sequence state on CUDA, HIP and Vulkan devices; the routers of its mixture-of-experts layers run on the host) and GLM-5-Next (hyper-connections; CPU), Hy4 (hyper-connections, latent attention and indexer on CUDA, HIP and Vulkan; feed-forward on the host), LongCat-Flash, Inkling and MiniMax-M3 (CUDA, HIP and Vulkan devices; experts of Inkling and, on HIP and Vulkan, of LongCat-Flash routed on the host), Ling-3.0 (Kimi delta layers with direct gates plus rotary latent attention), Qwen3.8-Flash-Next (residual streams, n-gram embeddings and a token indexer; fLLM's own GGUF and llama.cpp's `qwen4exp` layout, split files included; CPU, and on Vulkan devices completely, including the released model's sigmoid delta gate; the CUDA, HIP and Metal kernels have the sigmoid gate too but it is untested there; on the CPU the experts of a pass of several rows are read once for all rows and `FLLM_CPU_OPS=1` / `scripts/bench_cpu_moe.py` show where a step goes, see [docs/cpu-kernels.md](docs/cpu-kernels.md)), DeepSeek-V3.2 and GLM-5 (with the sparse lightning indexer, exact at any context length; on CUDA, HIP and Vulkan devices the
-indexer, its top-k selection and the sparse attention run on the device, see [docs/architectures.md](docs/architectures.md)), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear. BERT, RoBERTa/XLM-R and ModernBERT serve
-Nemotron-H, Granite hybrid, LFM2, Kimi-Linear, RWKV-6 and RWKV-7 on the CPU). Added in the 2026-10-30 audit: Ministral (8B), Helium, BitNet b1.58 (also the
-packed Hugging Face checkpoints), DeepSeek-V3.2 and GLM-5 (the lightning indexer and the sparse attention run on the device), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear; the per-head attention gate (Laguna, Step-3.5), the MiMo value scale and the BitNet sub-norms run on CUDA, HIP (not MiMo) and Vulkan devices. BERT, RoBERTa/XLM-R and ModernBERT serve
+indexer, its top-k selection and the sparse attention run on the device, see [docs/architectures.md](docs/architectures.md)), Step-3.5/3.7 text models, and a verified MiMo-V2-Flash and Kimi-Linear; the per-head attention gate (Laguna, Step-3.5), the MiMo value scale and the BitNet sub-norms run on CUDA, HIP (not MiMo) and Vulkan devices. BERT, RoBERTa/XLM-R and ModernBERT serve
 embeddings and rerank/classify (also BGE-M3, ColBERT, Qwen3-Embedding, EmbeddingGemma).
 The recurrent and linear-attention layers (RWKV-6/7, Kimi Delta Attention of Kimi-Linear and Ling-3.0, gated DeltaNet, Mamba 1/2, LFM2 ShortConv) run on CUDA, HIP and Vulkan devices with their state kept in device memory;
 Zamba2 and Falcon-H1 included. Prompts of 64 tokens and more can go through a chunk-parallel form of the recurrences (RWKV-7/6, Gated DeltaNet, Kimi Delta Attention, Mamba-2; the device times it
 against the serial kernels and keeps the faster one, `FLLM_CHUNKED_SCAN=0|1`), see [docs/gpu-backends.md](docs/gpu-backends.md) section 3a.
-The full list, with the families that are **not** supported (for example DeepSeek V4, Kimi K3, Ling-3.0, xLSTM), is in
-The full list, with the families that are **not** supported (for example Kimi K3, Ling-3.0, RWKV), is in
-The full list, with the families that are **not** supported (for example Kimi K3, RWKV), is in
-The full list, with the families that are **not** supported (for example RWKV), is in
+The full list, with the families that are **not** supported, is in
 [docs/architectures.md](docs/architectures.md); the per-architecture table with devices and verification levels is
 [docs/model-coverage.md](docs/model-coverage.md). Conversion refuses an unknown `model_type`.
 
@@ -325,7 +320,7 @@ ahead of vLLM and SGLang (decode 99.5 against 93.0 and 95.2 tok/s, prompt 5244 a
 llama.cpp's. On a Radeon 840M laptop the AMD NPU (FastFlowLM, 306 prompt / 31 decode tok/s) and llama.cpp's Vulkan and ROCm paths are faster for the
 prompt, and fLLM's native Vulkan is ahead of llama.cpp's decode (34 against 28.6 tok/s on 2026-10-31) with a prompt 7 % behind (270 against 290; Llama-3.1-8B 15 % behind), and fLLM's HIP path matches llama.cpp's ROCm prompt (307 against 303 tok/s). Where fLLM is behind: its Vulkan
 backend on the NVIDIA card (35 % behind llama.cpp's Vulkan decode), and its own NPU kernels (prompt only) are slower than FastFlowLM's.
-prompt, and fLLM's native Vulkan matches llama.cpp's decode (28.4 against 28.6 tok/s) with a prompt 25 % behind. Prompt lengths and 4 / 8 simultaneous requests
+Prompt lengths and 4 / 8 simultaneous requests
 (2026-10-30, same card): the aggregate of fLLM's CUDA path grows with the number of requests and is the highest of the GGUF engines (3B, short prompts: 400
 tok/s with 8 requests against 315 for llama.cpp and 128 for Ollama), four long Llama-3.1-8B prompts included (55 to 57 against 51 to 52 for Ollama and 53 for
 llama.cpp, the three measured one after the other on a quiet GPU; an earlier session's 61 for Ollama was not seen again). Third pass of 2026-10-31 (identical token

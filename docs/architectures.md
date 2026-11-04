@@ -132,13 +132,6 @@ Checks (all on the build host, CPU): `scripts/verify_qwen4exp_gguf.py` builds a 
 
 * Hy4 (hyper-connections, compressed/sparse caches), Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
   xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
-* Hy4 (hyper-connections), Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
-* Ling-3.0 and GLM-5-Next (KDA variants), Kimi K3, JetMoE, Inkling, ZAYA,
-* GLM-5-Next (KDA variant), Kimi K3, JetMoE, Inkling, ZAYA,
-* Kimi K3, JetMoE, Inkling, ZAYA,
-* Kimi K3, JetMoE, ZAYA,
-* JetMoE, ZAYA,
-  RWKV, xLSTM, RecurrentGemma, HRM-Text, Doge, DiffLlama. (MiMo-V2-Flash, Kimi-Linear, DeepSeek V3.2 and GLM-5 are supported, see above.)
 * LongCat-Flash-Lite (n-gram embeddings on top of the LongCat topology).
 * Step-3 (not 3.5/3.7): MFA attention.
 * A.X-K2: Gated RMSNorm wrapper (`AXK2GatedRMSNorm`) with internal `gate_mlp` projection.
