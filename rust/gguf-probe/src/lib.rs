@@ -1075,7 +1075,11 @@ mod tests {
         let view = mapped
             .with_row_slices(&[("a.weight".into(), "fused.weight".into(), 0, 2), ("b.weight".into(), "fused.weight".into(), 2, 3)])
             .unwrap();
-        let floats = |name: &str| -> Vec<f32> { view.tensor_bytes(name).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect() };
+        let floats = |name: &str| -> Vec<f32> {
+            let bytes = view.tensor_bytes(name).unwrap();
+            let (words, _) = bytes.as_chunks::<4>();
+            words.iter().map(|w| f32::from_le_bytes(*w)).collect()
+        };
         assert_eq!(floats("a.weight"), [0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
         assert_eq!(floats("b.weight"), [20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0]);
         let b = view.index().tensors.iter().find(|t| t.name == "b.weight").unwrap();

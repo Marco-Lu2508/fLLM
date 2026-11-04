@@ -763,6 +763,8 @@ mod tests {
                         return;
                     }
                     let n = request["max_tokens"].as_u64().unwrap_or(tokens as u64) as usize;
+                    // count before the first byte leaves: the client must not be able to finish first
+                    counter.fetch_add(1, Ordering::Relaxed);
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
                     for _ in 0..n {
                         std::thread::sleep(Duration::from_millis(20));
@@ -771,7 +773,6 @@ mod tests {
                     }
                     write!(stream, "data: {}\n\n", json!({"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":n}})).unwrap();
                     write!(stream, "data: [DONE]\n\n").unwrap();
-                    counter.fetch_add(1, Ordering::Relaxed);
                 }));
                 if workers.len() >= 64 {
                     break;

@@ -355,8 +355,7 @@ mod tests {
     fn glsl_words(text: &str, name: &str) -> Vec<u32> {
         let start = text.find(&format!("const uint {name}[")).unwrap_or_else(|| panic!("{name} is missing"));
         let body = &text[start..];
-        let open = body.find("(
-").expect("array body") + 1;
+        let open = body.find('(').expect("array body") + 1;
         let close = body.find(");").expect("end of array");
         body[open..close]
             .split(',')
