@@ -462,7 +462,9 @@ fn linear_x86(
     let nb = cols / 32;
     let kind = kinds[0];
     // Prompts through Q4_0 and Q5_0: repack each four-row panel into the Q8_0 tile layout.
-    if batch >= 2 && matches!(kind, 2 | 6) && crate::cpu_kernels::repack_enabled() {
+    // The classic Q8 tiles quantize the activations to 8 bits, so a batched call does not produce the bits a single
+    // token would get; a pass that must be exact (a verification pass) keeps the per-token kernel.
+    if batch >= 2 && matches!(kind, 2 | 6) && crate::cpu_kernels::repack_enabled() && !invariant {
         classic_q8_tiles(projections, kind, x, cols, vnni, &rows, batch, &mut output);
         return output;
     }
@@ -623,6 +625,44 @@ fn linear_x86(
     }
     let (block, block_bytes) = layout(kind).expect("validated");
     let width = cols / block * block_bytes;
+    // A pass that has to equal single-token decoding (the verification pass of speculative decoding) runs the batch-one
+    // kernel for every token: the tile kernels add the terms of four rows together in another order, which changes the last
+    // bits and can decide a near-tie between two tokens the other way.
+    if invariant && batch > 1 {
+        let size = if wide.is_some() && kind != 42 { 8 } else { 4 };
+        crate::cpu_schedule::row_panels(
+            &mut output,
+            &rows,
+            batch,
+            size,
+            || (),
+            |_, member, first, out| {
+                let p = &projections[member];
+                for token in 0..batch {
+                    // the activations of this token: the batch-one kernel reads one token's records from the start
+                    let x = &packed[token * nb..(token + 1) * nb];
+                    let mut view = out.token_view(token);
+                    // SAFETY: `validate` bounds the weight rows and activation records; the scheduler gives `out` these
+                    // output columns exclusively.
+                    unsafe {
+                        if kind == 42 {
+                            x86::gemv_q2(p.weights, x, first, view.row(0), wide, vnni);
+                        } else {
+                            match wide {
+                                Some(Avx512::Vnni) => x86::gemv512_vnni(p.weights, kind, x, first, view.row(0)),
+                                Some(Avx512::Bw) => x86::gemv512_bw(p.weights, kind, x, first, view.row(0)),
+                                None if vnni => x86::gemv_vnni(p.weights, kind, x, first, view.row(0)),
+                                None => x86::gemv_avx2(p.weights, kind, x, first, view.row(0)),
+                            }
+                        }
+                    }
+                }
+                add_bias(out, p.bias, first, batch);
+            },
+        );
+        return output;
+    }
+
     if batch == 1 {
         // The Q2_0 decode kernels take at most four rows whatever the vector width.
         let size = if wide.is_some() && kind != 42 { 8 } else { 4 };

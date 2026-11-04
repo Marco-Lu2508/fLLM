@@ -7842,7 +7842,10 @@ impl RustDecoder {
         // ascending expert order like the sequential accumulation, but spread over the pool.
         // Also for a handful of tokens (the verification pass of speculative decoding): the experts the tokens share are then read
         // once for all of them, in two joined work queues, instead of expert by expert.
-        let batched = !fused && tokens >= moe_batch_min_rows();
+        // A pass that has to equal single-token decoding (the verification pass of speculative decoding) must not
+        // take the cross-expert queues: they read an expert's panels once for several tokens, which adds the terms in
+        // another order.
+        let batched = !fused && tokens >= moe_batch_min_rows() && !crate::cpu_kernels::batch_invariant();
         let mut results: Vec<Vec<f32>> = Vec::new();
         let mut pending: Vec<Vec<(usize, usize, f32)>> = vec![Vec::new(); if batched { tokens } else { 0 }];
         // All experts at once when the batch qualifies; `done` then replaces the per-expert loop.
