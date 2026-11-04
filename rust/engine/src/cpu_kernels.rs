@@ -366,10 +366,12 @@ pub fn isa() -> &'static str {
     "scalar"
 }
 
-thread_local! {
-    /// Number of live [`BatchInvariant`] guards of this thread.
-    static BATCH_INVARIANT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+/// Number of live [`BatchInvariant`] guards in this process.
+///
+/// Process-wide on purpose: the guard is entered on the thread that starts a verification pass, but the projections of
+/// that pass are dispatched on the pool workers. A thread-local counter reads zero there — which is how a verification
+/// pass on a machine with AVX-512 or VNNI silently went back to the prompt kernels.
+static BATCH_INVARIANT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// While a guard lives, the CPU projection kernels pick, for a batch of any size, the variant that gives every token exactly the bits it
 /// gets when it is the only row of a call: no prompt panels (16-row float panels, predecoded or eight-row K-quant panels, AMX or
@@ -378,27 +380,26 @@ thread_local! {
 /// order, and 8-bit activation quantization turns that last-bit difference into a logit difference of up to a few percent. The variants
 /// are slower for large batches (a prompt), so the guard is held only for the passes that verify drafts.
 ///
-/// The guard belongs to the thread that created it, and so does the choice: the kernels read it where a projection is dispatched (the
-/// thread that calls `forward`), not on their pool workers.
+/// The counter is shared by every thread, because a projection is dispatched on a pool worker as often as on the calling thread.
 pub struct BatchInvariant(std::marker::PhantomData<*const ()>);
 
 impl BatchInvariant {
     pub fn enter() -> Self {
-        BATCH_INVARIANT.with(|c| c.set(c.get() + 1));
+        BATCH_INVARIANT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self(std::marker::PhantomData)
     }
 }
 
 impl Drop for BatchInvariant {
     fn drop(&mut self) {
-        BATCH_INVARIANT.with(|c| c.set(c.get() - 1));
+        BATCH_INVARIANT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 /// Is a [`BatchInvariant`] guard of this thread alive (or `FLLM_BATCH_INVARIANT=1` set, which keeps the invariant variants for every call)?
 pub fn batch_invariant() -> bool {
     static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    BATCH_INVARIANT.with(std::cell::Cell::get) > 0
+    BATCH_INVARIANT.load(std::sync::atomic::Ordering::Relaxed) > 0
         || *FORCED.get_or_init(|| std::env::var_os("FLLM_BATCH_INVARIANT").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
@@ -615,6 +616,16 @@ pub fn q8_linear(
     cols: usize,
     bias: Option<&[f32]>,
 ) -> Option<Vec<f32>> {
+    // A pass that has to equal single-token decoding: one token at a time, so no kernel can combine rows of several tokens.
+    let batch = x.len().checked_div(cols).unwrap_or(0);
+    if batch > 1 && batch_invariant() {
+        let mut out = vec![0.0f32; batch * rows];
+        for token in 0..batch {
+            let one = q8_linear(w, &x[token * cols..(token + 1) * cols], rows, cols, bias)?;
+            out[token * rows..(token + 1) * rows].copy_from_slice(&one);
+        }
+        return Some(out);
+    }
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     if neon_dotprod() {
         return q8_linear_prepared(w, &Q8Input::new(x, cols), rows, bias);
