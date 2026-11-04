@@ -443,6 +443,20 @@ fn linear_x86(
     // read here, on the calling thread: the kernels run on pool workers
     let invariant = crate::cpu_kernels::batch_invariant();
     let rows = projections.iter().map(|p| p.rows).collect::<Vec<_>>();
+    // A pass that has to equal single-token decoding (the verification pass of speculative decoding): every token goes
+    // through the batch-one path. Decided here, at the outermost call, so no branch below can pick a cross-token kernel —
+    // panels, tiles, VNNI prompt GEMMs or the AVX-512 wide kernels — whatever the host offers.
+    if invariant && batch > 1 {
+        let mut output = rows.iter().map(|&r| vec![0.0; batch * r]).collect::<Vec<_>>();
+        for token in 0..batch {
+            let one = linear_x86(projections, kinds, &x[token * cols..(token + 1) * cols], cols, vnni);
+            for (dst, src) in output.iter_mut().zip(one.iter()) {
+                let r = src.len();
+                dst[token * r..(token + 1) * r].copy_from_slice(src);
+            }
+        }
+        return output;
+    }
     let mut output = rows
         .iter()
         .map(|&r| vec![0.0; batch * r])
@@ -625,44 +639,6 @@ fn linear_x86(
     }
     let (block, block_bytes) = layout(kind).expect("validated");
     let width = cols / block * block_bytes;
-    // A pass that has to equal single-token decoding (the verification pass of speculative decoding) runs the batch-one
-    // kernel for every token: the tile kernels add the terms of four rows together in another order, which changes the last
-    // bits and can decide a near-tie between two tokens the other way.
-    if invariant && batch > 1 {
-        let size = if wide.is_some() && kind != 42 { 8 } else { 4 };
-        crate::cpu_schedule::row_panels(
-            &mut output,
-            &rows,
-            batch,
-            size,
-            || (),
-            |_, member, first, out| {
-                let p = &projections[member];
-                for token in 0..batch {
-                    // the activations of this token: the batch-one kernel reads one token's records from the start
-                    let x = &packed[token * nb..(token + 1) * nb];
-                    let mut view = out.token_view(token);
-                    // SAFETY: `validate` bounds the weight rows and activation records; the scheduler gives `out` these
-                    // output columns exclusively.
-                    unsafe {
-                        if kind == 42 {
-                            x86::gemv_q2(p.weights, x, first, view.row(0), wide, vnni);
-                        } else {
-                            match wide {
-                                Some(Avx512::Vnni) => x86::gemv512_vnni(p.weights, kind, x, first, view.row(0)),
-                                Some(Avx512::Bw) => x86::gemv512_bw(p.weights, kind, x, first, view.row(0)),
-                                None if vnni => x86::gemv_vnni(p.weights, kind, x, first, view.row(0)),
-                                None => x86::gemv_avx2(p.weights, kind, x, first, view.row(0)),
-                            }
-                        }
-                    }
-                }
-                add_bias(out, p.bias, first, batch);
-            },
-        );
-        return output;
-    }
-
     if batch == 1 {
         // The Q2_0 decode kernels take at most four rows whatever the vector width.
         let size = if wide.is_some() && kind != 42 { 8 } else { 4 };
