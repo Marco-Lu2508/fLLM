@@ -347,6 +347,9 @@ pub fn linear_mixed(
     // no NEON/i8mm kernel can combine the rows of several tokens.
     let batch = x.len().checked_div(cols).unwrap_or(0);
     if batch > 1 && crate::cpu_kernels::batch_invariant() {
+        if let Some(output) = exact_by_row_blocks(projections, kinds, x, cols, batch) {
+            return Some(output);
+        }
         let mut output: Option<Vec<Vec<f32>>> = None;
         for token in 0..batch {
             let one = linear_mixed(projections, kinds, &x[token * cols..(token + 1) * cols], cols)?;
@@ -379,6 +382,68 @@ pub fn linear_mixed(
     }
     let _ = (x, cols);
     None
+}
+
+/// Weight bytes one block of rows may span in the exact verification pass. Every token reads the same block before the next block
+/// starts, so tokens two to seven find it in the cache instead of fetching the weights from memory again.
+const EXACT_BLOCK_BYTES: usize = 4 << 20;
+
+/// The exact verification pass (every token through the batch-one path) with the loops swapped: block of rows outside, token inside.
+/// Each row is computed by the same kernel as before and rows do not depend on each other, so the bits do not change; the blocks
+/// start at multiples of eight rows, where the panels of the whole call start. `None` when blocking cannot help (small weights, a
+/// format without a known row size) and the caller runs token by token.
+fn exact_by_row_blocks(
+    projections: &[Projection<'_>],
+    kinds: &[u32],
+    x: &[f32],
+    cols: usize,
+    batch: usize,
+) -> Option<Vec<Vec<f32>>> {
+    let row_bytes = projections
+        .iter()
+        .zip(kinds)
+        .map(|(p, &kind)| {
+            let (block, block_bytes) = layout(kind)?;
+            cols.is_multiple_of(block).then_some(cols / block * block_bytes).filter(|&bytes| bytes * p.rows == p.weights.len())
+        })
+        .collect::<Option<Vec<usize>>>()?;
+    let total: usize = projections.iter().zip(&row_bytes).map(|(p, &bytes)| p.rows * bytes).sum();
+    if total < 2 * EXACT_BLOCK_BYTES {
+        return None;
+    }
+    let per_row: usize = row_bytes.iter().sum();
+    let block_rows = (EXACT_BLOCK_BYTES / per_row.max(1)).max(8) / 8 * 8;
+    let longest = projections.iter().map(|p| p.rows).max()?;
+    let mut output: Vec<Vec<f32>> = projections.iter().map(|p| vec![0.0; batch * p.rows]).collect();
+    let mut start = 0;
+    while start < longest {
+        // the members that still have rows in this block, keeping their order
+        let mut members = Vec::new();
+        let mut member_kinds = Vec::new();
+        let mut index = Vec::new();
+        for (m, p) in projections.iter().enumerate() {
+            if start >= p.rows {
+                continue;
+            }
+            let end = (start + block_rows).min(p.rows);
+            members.push(Projection {
+                weights: &p.weights[start * row_bytes[m]..end * row_bytes[m]],
+                rows: end - start,
+                bias: p.bias.map(|bias| &bias[start..end]),
+            });
+            member_kinds.push(kinds[m]);
+            index.push((m, start, end));
+        }
+        for token in 0..batch {
+            let part = linear_mixed(&members, &member_kinds, &x[token * cols..(token + 1) * cols], cols)?;
+            for ((m, from, to), rows) in index.iter().zip(&part) {
+                let total_rows = projections[*m].rows;
+                output[*m][token * total_rows + from..token * total_rows + to].copy_from_slice(rows);
+            }
+        }
+        start += block_rows;
+    }
+    Some(output)
 }
 
 /// The three projections of one gated expert FFN and their weight formats.

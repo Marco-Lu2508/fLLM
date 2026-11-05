@@ -366,12 +366,15 @@ pub fn isa() -> &'static str {
     "scalar"
 }
 
-/// Number of live [`BatchInvariant`] guards in this process.
-///
-/// Process-wide on purpose: the guard is entered on the thread that starts a verification pass, but the projections of
-/// that pass are dispatched on the pool workers. A thread-local counter reads zero there — which is how a verification
-/// pass on a machine with AVX-512 or VNNI silently went back to the prompt kernels.
-static BATCH_INVARIANT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Number of live [`BatchInvariant`] guards of this thread.
+    ///
+    /// Per thread on purpose. A process-wide counter would let one verification pass switch every other computation of the process
+    /// to the exact kernels — and take the guard away from a neighbour when it ends: two tests, or two requests, running side by
+    /// side would no longer see their own choice. The pool workers get the choice of the calling thread handed over where the work
+    /// is scheduled (`RustDecoder::forward_*`, which enters a guard inside `ThreadPool::install`).
+    static BATCH_INVARIANT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// While a guard lives, the CPU projection kernels pick, for a batch of any size, the variant that gives every token exactly the bits it
 /// gets when it is the only row of a call: no prompt panels (16-row float panels, predecoded or eight-row K-quant panels, AMX or
@@ -380,26 +383,27 @@ static BATCH_INVARIANT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 /// order, and 8-bit activation quantization turns that last-bit difference into a logit difference of up to a few percent. The variants
 /// are slower for large batches (a prompt), so the guard is held only for the passes that verify drafts.
 ///
-/// The counter is shared by every thread, because a projection is dispatched on a pool worker as often as on the calling thread.
+/// The guard belongs to the thread that created it, and so does the choice: the kernels read it where a projection is dispatched.
+/// A pass that hands work to the pool enters the same guard inside the pool (see `rust_decoder.rs`).
 pub struct BatchInvariant(std::marker::PhantomData<*const ()>);
 
 impl BatchInvariant {
     pub fn enter() -> Self {
-        BATCH_INVARIANT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        BATCH_INVARIANT.with(|c| c.set(c.get() + 1));
         Self(std::marker::PhantomData)
     }
 }
 
 impl Drop for BatchInvariant {
     fn drop(&mut self) {
-        BATCH_INVARIANT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        BATCH_INVARIANT.with(|c| c.set(c.get() - 1));
     }
 }
 
 /// Is a [`BatchInvariant`] guard of this thread alive (or `FLLM_BATCH_INVARIANT=1` set, which keeps the invariant variants for every call)?
 pub fn batch_invariant() -> bool {
     static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    BATCH_INVARIANT.load(std::sync::atomic::Ordering::Relaxed) > 0
+    BATCH_INVARIANT.with(std::cell::Cell::get) > 0
         || *FORCED.get_or_init(|| std::env::var_os("FLLM_BATCH_INVARIANT").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
