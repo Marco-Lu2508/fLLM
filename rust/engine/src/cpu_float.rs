@@ -105,6 +105,21 @@ pub fn linear_group(
     input: &[f32],
     cols: usize,
 ) -> Option<Vec<Vec<f32>>> {
+    // exact verification: one token at a time, before the architecture is chosen — the AVX-512 wide kernels, the 16-row
+    // panels and the NEON kernels all combine tokens
+    let batch = input.len().checked_div(cols).unwrap_or(0);
+    if batch > 1 && matches!(kind, 0 | 1 | 30) && crate::cpu_kernels::batch_invariant() {
+        let mut output: Option<Vec<Vec<f32>>> = None;
+        for token in 0..batch {
+            let one = linear_group(projections, kind, &input[token * cols..(token + 1) * cols], cols)?;
+            let out = output.get_or_insert_with(|| one.iter().map(|part| vec![0.0; batch * part.len()]).collect());
+            for (dst, src) in out.iter_mut().zip(one.iter()) {
+                let r = src.len();
+                dst[token * r..(token + 1) * r].copy_from_slice(src);
+            }
+        }
+        return output;
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::cpu_kernels::isa() != "scalar" && matches!(kind, 0 | 1 | 30) {
         assert!(cols > 0 && input.len().is_multiple_of(cols));
@@ -117,18 +132,6 @@ pub fn linear_group(
         let batch = input.len() / cols;
         if batch == 0 || projections.is_empty() {
             return Some(projections.iter().map(|_| Vec::new()).collect());
-        }
-        // exact verification: one token at a time, so the AVX-512 wide kernels and the panels stay out of it
-        if batch > 1 && crate::cpu_kernels::batch_invariant() {
-            let mut output = projections.iter().map(|p| vec![0.0f32; batch * p.rows]).collect::<Vec<_>>();
-            for token in 0..batch {
-                let one = linear_group(projections, kind, &input[token * cols..(token + 1) * cols], cols)?;
-                for (dst, src) in output.iter_mut().zip(one.iter()) {
-                    let r = src.len();
-                    dst[token * r..(token + 1) * r].copy_from_slice(src);
-                }
-            }
-            return Some(output);
         }
         let x: Cow<'_, [f32]> = if kind == 0 {
             Cow::Borrowed(input)

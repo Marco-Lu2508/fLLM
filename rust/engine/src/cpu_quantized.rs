@@ -342,6 +342,22 @@ pub fn linear_mixed(
     if kinds.contains(&42) && !cols.is_multiple_of(64) {
         return None;
     }
+    // A pass that has to equal single-token decoding (the verification pass of speculative decoding): every token goes through
+    // the batch-one path. Decided here, before the architecture is chosen, so that no x86 panel, tile, VNNI or AVX-512 kernel and
+    // no NEON/i8mm kernel can combine the rows of several tokens.
+    let batch = x.len().checked_div(cols).unwrap_or(0);
+    if batch > 1 && crate::cpu_kernels::batch_invariant() {
+        let mut output: Option<Vec<Vec<f32>>> = None;
+        for token in 0..batch {
+            let one = linear_mixed(projections, kinds, &x[token * cols..(token + 1) * cols], cols)?;
+            let out = output.get_or_insert_with(|| one.iter().map(|part| vec![0.0; batch * part.len()]).collect());
+            for (dst, src) in out.iter_mut().zip(one.iter()) {
+                let r = src.len();
+                dst[token * r..(token + 1) * r].copy_from_slice(src);
+            }
+        }
+        return output;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         let isa = crate::cpu_kernels::isa();
@@ -443,20 +459,6 @@ fn linear_x86(
     // read here, on the calling thread: the kernels run on pool workers
     let invariant = crate::cpu_kernels::batch_invariant();
     let rows = projections.iter().map(|p| p.rows).collect::<Vec<_>>();
-    // A pass that has to equal single-token decoding (the verification pass of speculative decoding): every token goes
-    // through the batch-one path. Decided here, at the outermost call, so no branch below can pick a cross-token kernel —
-    // panels, tiles, VNNI prompt GEMMs or the AVX-512 wide kernels — whatever the host offers.
-    if invariant && batch > 1 {
-        let mut output = rows.iter().map(|&r| vec![0.0; batch * r]).collect::<Vec<_>>();
-        for token in 0..batch {
-            let one = linear_x86(projections, kinds, &x[token * cols..(token + 1) * cols], cols, vnni);
-            for (dst, src) in output.iter_mut().zip(one.iter()) {
-                let r = src.len();
-                dst[token * r..(token + 1) * r].copy_from_slice(src);
-            }
-        }
-        return output;
-    }
     let mut output = rows
         .iter()
         .map(|&r| vec![0.0; batch * r])
