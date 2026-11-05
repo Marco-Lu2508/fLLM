@@ -23,7 +23,9 @@ jobs:
   llvm-cov:
     name: cargo llvm-cov (workspace)
     runs-on: ubuntu-26.04
-    # release: the same tests run in about two minutes in the regular CI, while the instrumented debug build did not finish in an hour
+    # Five tests (a benchmark and four multi-device / grouped-kernel self-tests) take over half of the instrumented run and are skipped
+    # here; they run in the regular jobs. Measured on the build host with instrumentation, per module: parallel 1245 s, backend 463 s,
+    # everything else together under three minutes.
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -49,7 +51,10 @@ jobs:
 
       - name: Run workspace tests under llvm-cov
         run: |
-          scripts/ci/annotate-failure.sh cargo llvm-cov --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe --lcov --output-path lcov.info
+          scripts/ci/annotate-failure.sh cargo llvm-cov --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe --lcov --output-path lcov.info -- \
+            --skip cost_of_the_invariant_kernels --skip device_stages_match_the_single_device_run \
+            --skip device_ranks_with_tensor_parallelism_match_the_single_device_run --skip nvfp4_matches \
+            --skip extra_groups_run_where_no_fast_pass_follows
           cargo llvm-cov report --summary-only
 
       - name: Upload coverage report
