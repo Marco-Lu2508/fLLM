@@ -23,7 +23,8 @@ jobs:
   llvm-cov:
     name: cargo llvm-cov (workspace)
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    # release: the same tests run in about two minutes in the regular CI, while the instrumented debug build did not finish in an hour
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -48,7 +49,7 @@ jobs:
 
       - name: Run workspace tests under llvm-cov
         run: |
-          scripts/ci/annotate-failure.sh cargo llvm-cov --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe --lcov --output-path lcov.info
+          scripts/ci/annotate-failure.sh cargo llvm-cov --release --locked -p fllm-engine -p fllm-checkpoint -p fllm-gguf-probe --lcov --output-path lcov.info
           cargo llvm-cov report --summary-only
 
       - name: Upload coverage report
