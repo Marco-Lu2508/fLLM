@@ -98,6 +98,48 @@ fn panel_disabled() -> bool {
     })
 }
 
+/// The exact verification pass with blocks of rows outside and the tokens inside (see `cpu_quantized::exact_by_row_blocks`): every
+/// row still goes through the batch-one kernel, so the bits stay, and tokens two to seven find the block of weights in the cache.
+/// `None` when the weights are too small for blocking to help; the caller then runs token by token.
+fn exact_by_row_blocks(projections: &[Projection<'_>], kind: u32, input: &[f32], cols: usize, batch: usize) -> Option<Vec<Vec<f32>>> {
+    let width = if kind == 0 { 4 } else { 2 };
+    let row_bytes = cols * width;
+    let total: usize = projections.iter().map(|p| p.rows * row_bytes).sum();
+    if total < 2 * crate::cpu_kernels::EXACT_BLOCK_BYTES || projections.iter().any(|p| p.weights.len() != p.rows * row_bytes) {
+        return None;
+    }
+    let per_row = projections.len() * row_bytes;
+    let block_rows = (crate::cpu_kernels::EXACT_BLOCK_BYTES / per_row.max(1)).max(8) / 8 * 8;
+    let longest = projections.iter().map(|p| p.rows).max()?;
+    let mut output: Vec<Vec<f32>> = projections.iter().map(|p| vec![0.0; batch * p.rows]).collect();
+    let mut start = 0;
+    while start < longest {
+        let mut members = Vec::new();
+        let mut index = Vec::new();
+        for (m, p) in projections.iter().enumerate() {
+            if start >= p.rows {
+                continue;
+            }
+            let end = (start + block_rows).min(p.rows);
+            members.push(Projection {
+                weights: &p.weights[start * row_bytes..end * row_bytes],
+                rows: end - start,
+                bias: p.bias.map(|bias| &bias[start..end]),
+            });
+            index.push((m, start, end));
+        }
+        for token in 0..batch {
+            let part = linear_group(&members, kind, &input[token * cols..(token + 1) * cols], cols)?;
+            for ((m, from, to), rows) in index.iter().zip(&part) {
+                let total_rows = projections[*m].rows;
+                output[*m][token * total_rows + from..token * total_rows + to].copy_from_slice(rows);
+            }
+        }
+        start += block_rows;
+    }
+    Some(output)
+}
+
 /// Round a shared input once and distribute all sibling rows in one queue.
 pub fn linear_group(
     projections: &[Projection<'_>],
@@ -109,6 +151,9 @@ pub fn linear_group(
     // panels and the NEON kernels all combine tokens
     let batch = input.len().checked_div(cols).unwrap_or(0);
     if batch > 1 && matches!(kind, 0 | 1 | 30) && crate::cpu_kernels::batch_invariant() {
+        if let Some(output) = exact_by_row_blocks(projections, kind, input, cols, batch) {
+            return Some(output);
+        }
         let mut output: Option<Vec<Vec<f32>>> = None;
         for token in 0..batch {
             let one = linear_group(projections, kind, &input[token * cols..(token + 1) * cols], cols)?;

@@ -157,6 +157,78 @@ fn the_exact_choice_belongs_to_the_pass_that_made_it() {
     assert!(!pool.install(batch_invariant), "the worker does not keep the guard after the pass");
 }
 
+/// The Q8_0 group projection in its exact pass walks blocks of rows too (`cpu_kernels::q8_linear_group_into`): three siblings of
+/// different heights, above the 8 MiB threshold, with a bias on one of them. Every token must get the bits it gets alone.
+#[test]
+fn the_q8_row_block_path_of_the_exact_pass_keeps_the_bits() {
+    let mut rng = Lcg(0x08c0);
+    let cols = 2048usize;
+    let heights = [9000usize, 4100, 5200];
+    let weights: Vec<Vec<u8>> = heights.iter().map(|&rows| random_weights(8, rows, cols, &mut rng)).collect();
+    let bias = rng.vector(heights[1], 1.0);
+    let projections: Vec<crate::cpu_kernels::Q8Projection<'_>> = heights
+        .iter()
+        .zip(&weights)
+        .enumerate()
+        .map(|(i, (&rows, w))| crate::cpu_kernels::Q8Projection { weights: w, rows, bias: (i == 1).then_some(bias.as_slice()) })
+        .collect();
+    let _guard = crate::cpu_kernels::BatchInvariant::enter();
+    for batch in [2usize, 7] {
+        let x = rng.vector(batch * cols, 3.0);
+        let all = crate::cpu_kernels::q8_linear_group(&projections, &crate::cpu_kernels::Q8Input::new(&x, cols)).expect("a Q8 kernel");
+        // the single projection (o_proj, down_proj) has its own loop
+        let single = crate::cpu_kernels::q8_linear(&weights[0], &x, heights[0], cols, None).expect("a Q8 kernel");
+        for t in 0..batch {
+            let one = crate::cpu_kernels::q8_linear(&weights[0], &x[t * cols..(t + 1) * cols], heights[0], cols, None).unwrap();
+            assert!(
+                single[t * heights[0]..(t + 1) * heights[0]].iter().zip(&one).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "single projection batch {batch} token {t} differs from the same token alone"
+            );
+        }
+        for t in 0..batch {
+            let one = crate::cpu_kernels::q8_linear_group(&projections, &crate::cpu_kernels::Q8Input::new(&x[t * cols..(t + 1) * cols], cols)).unwrap();
+            for (m, rows) in heights.iter().enumerate() {
+                assert!(
+                    all[m][t * rows..(t + 1) * rows].iter().zip(&one[m]).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "member {m} batch {batch} token {t} differs from the same token alone"
+                );
+            }
+        }
+    }
+}
+
+/// The float group projection (F32, BF16, F16) in its exact pass walks blocks of rows as well (`cpu_float::exact_by_row_blocks`).
+#[test]
+fn the_float_row_block_path_of_the_exact_pass_keeps_the_bits() {
+    let mut rng = Lcg(0xf10a);
+    let cols = 1024usize;
+    let heights = [4200usize, 1500, 2100];
+    for kind in [0u32, 1, 30] {
+        let weights: Vec<Vec<u8>> = heights.iter().map(|&rows| float_bytes(kind, rows * cols, &mut rng)).collect();
+        let bias = rng.vector(heights[1], 1.0);
+        let projections: Vec<crate::cpu_float::Projection<'_>> = heights
+            .iter()
+            .zip(&weights)
+            .enumerate()
+            .map(|(i, (&rows, w))| crate::cpu_float::Projection { weights: w, rows, bias: (i == 1).then_some(bias.as_slice()) })
+            .collect();
+        let _guard = crate::cpu_kernels::BatchInvariant::enter();
+        for batch in [2usize, 7] {
+            let x = rng.vector(batch * cols, 3.0);
+            let all = crate::cpu_float::linear_group(&projections, kind, &x, cols).expect("a float kernel");
+            for t in 0..batch {
+                let one = crate::cpu_float::linear_group(&projections, kind, &x[t * cols..(t + 1) * cols], cols).unwrap();
+                for (m, rows) in heights.iter().enumerate() {
+                    assert!(
+                        all[m][t * rows..(t + 1) * rows].iter().zip(&one[m]).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "kind {kind} member {m} batch {batch} token {t} differs from the same token alone"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// What the batch-invariant variants cost: the time of one projection for one token, and for the 7 rows of a verification pass (six draft
 /// tokens) with the default and the invariant kernels. Prints the figures; a verification pass is worth it while its cost stays well
 /// below 7 single-token steps.

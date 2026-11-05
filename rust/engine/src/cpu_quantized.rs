@@ -384,9 +384,7 @@ pub fn linear_mixed(
     None
 }
 
-/// Weight bytes one block of rows may span in the exact verification pass. Every token reads the same block before the next block
-/// starts, so tokens two to seven find it in the cache instead of fetching the weights from memory again.
-const EXACT_BLOCK_BYTES: usize = 4 << 20;
+use crate::cpu_kernels::EXACT_BLOCK_BYTES;
 
 /// The exact verification pass (every token through the batch-one path) with the loops swapped: block of rows outside, token inside.
 /// Each row is computed by the same kernel as before and rows do not depend on each other, so the bits do not change; the blocks

@@ -506,6 +506,10 @@ pub(crate) fn encode_q8_cache_group(src: &[f32], dst: &mut [u8], scale: &mut u16
 }
 
 /// Returns None on machines without AVX2/FMA; the caller keeps its portable path.
+/// Weight bytes one block of rows may span in the exact verification pass. Every token reads the same block before the next block
+/// starts, so tokens two to seven find it in the cache.
+pub(crate) const EXACT_BLOCK_BYTES: usize = 4 << 20;
+
 /// Packed activation rows shared by Q/K/V and gate/up projections.
 #[derive(Default)]
 pub struct Q8Input {
@@ -631,9 +635,24 @@ pub fn q8_linear(
     let batch = x.len().checked_div(cols).unwrap_or(0);
     if batch > 1 && batch_invariant() {
         let mut out = vec![0.0f32; batch * rows];
-        for token in 0..batch {
-            let one = q8_linear(w, &x[token * cols..(token + 1) * cols], rows, cols, bias)?;
-            out[token * rows..(token + 1) * rows].copy_from_slice(&one);
+        // Blocks of rows outside, tokens inside (see `q8_linear_group_into`): the same batch-one kernel per row, so the same bits,
+        // and tokens two to seven read the block from the cache.
+        let row_bytes = (cols / 32) * 34;
+        let block_rows = if rows * row_bytes >= 2 * EXACT_BLOCK_BYTES && w.len() == rows * row_bytes {
+            (EXACT_BLOCK_BYTES / row_bytes.max(1)).max(8) / 8 * 8
+        } else {
+            rows.max(1)
+        };
+        let mut start = 0;
+        while start < rows {
+            let end = (start + block_rows).min(rows);
+            let block = if block_rows >= rows { w } else { &w[start * row_bytes..end * row_bytes] };
+            let block_bias = if block_rows >= rows { bias } else { bias.map(|b| &b[start..end]) };
+            for token in 0..batch {
+                let one = q8_linear(block, &x[token * cols..(token + 1) * cols], end - start, cols, block_bias)?;
+                out[token * rows + start..token * rows + end].copy_from_slice(&one);
+            }
+            start = end;
         }
         return Some(out);
     }
@@ -807,14 +826,42 @@ pub(crate) fn q8_linear_group_into(
             out.clear();
             out.resize(projection.rows * input.batch, 0.0);
         }
-        let mut one = vec![Vec::new(); projections.len()];
-        for token in 0..input.batch {
-            let single = Q8Input::new(&input.raw[token * cols..(token + 1) * cols], cols);
-            q8_linear_group_into(projections, &single, &mut one)?;
-            for ((out, part), projection) in output.iter_mut().zip(&one).zip(projections) {
-                let rows = projection.rows;
-                out[token * rows..(token + 1) * rows].copy_from_slice(part);
+        // Blocks of rows outside, tokens inside: every token still goes through the batch-one kernel for each row, so the bits stay,
+        // and tokens two to seven find the block of weights in the cache instead of fetching it from memory again.
+        let row_bytes = (cols / 32) * 34;
+        let total: usize = projections.iter().map(|p| p.rows * row_bytes).sum();
+        let per_row = projections.len() * row_bytes;
+        let block_rows = if total >= 2 * EXACT_BLOCK_BYTES { (EXACT_BLOCK_BYTES / per_row.max(1)).max(8) / 8 * 8 } else { usize::MAX };
+        let singles: Vec<Q8Input> = (0..input.batch).map(|t| Q8Input::new(&input.raw[t * cols..(t + 1) * cols], cols)).collect();
+        let longest = projections.iter().map(|p| p.rows).max().unwrap_or(0);
+        let mut start = 0;
+        while start < longest {
+            let mut members = Vec::new();
+            let mut index = Vec::new();
+            for (m, p) in projections.iter().enumerate() {
+                if start >= p.rows {
+                    continue;
+                }
+                let end = start.saturating_add(block_rows).min(p.rows);
+                members.push(Q8Projection {
+                    weights: &p.weights[start * row_bytes..end * row_bytes],
+                    rows: end - start,
+                    bias: p.bias.map(|bias| &bias[start..end]),
+                });
+                index.push((m, start, end));
             }
+            let mut part: Vec<Vec<f32>> = vec![Vec::new(); members.len()];
+            for (token, single) in singles.iter().enumerate() {
+                q8_linear_group_into(&members, single, &mut part)?;
+                for ((m, from, to), rows) in index.iter().zip(&part) {
+                    let total_rows = projections[*m].rows;
+                    output[*m][token * total_rows + from..token * total_rows + to].copy_from_slice(rows);
+                }
+            }
+            if block_rows == usize::MAX {
+                break;
+            }
+            start += block_rows;
         }
         return Some(());
     }
