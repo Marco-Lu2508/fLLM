@@ -509,6 +509,9 @@ pub struct Q8Input {
     batch: usize,
     packed: Vec<XPair>,
     single: Vec<XSingle>,
+    /// The unpacked activations, kept only while an exactness guard is alive: a batch that must equal single-token
+    /// decoding is evaluated token by token, and the packed pairs of a batch cannot be taken apart again.
+    raw: Vec<f32>,
 }
 impl Q8Input {
     /// The activation pairs the Q8_0 prompt tiles consume (empty for a single token).
@@ -531,6 +534,10 @@ impl Q8Input {
         let nb = cols / 32;
         self.cols = cols;
         self.batch = batch;
+        self.raw.clear();
+        if batch > 1 && batch_invariant() {
+            self.raw.extend_from_slice(x);
+        }
         if batch == 1 {
             self.packed.clear();
             self.single.resize(nb, XSingle::default());
@@ -641,6 +648,16 @@ pub fn q8_linear_prepared(
     rows: usize,
     bias: Option<&[f32]>,
 ) -> Option<Vec<f32>> {
+    if input.batch > 1 && !input.raw.is_empty() {
+        // exact verification: every token through the batch-one kernel
+        let cols = input.cols;
+        let mut out = vec![0.0f32; input.batch * rows];
+        for token in 0..input.batch {
+            let one = q8_linear_prepared(w, &Q8Input::new(&input.raw[token * cols..(token + 1) * cols], cols), rows, bias)?;
+            out[token * rows..(token + 1) * rows].copy_from_slice(&one);
+        }
+        return Some(out);
+    }
     #[cfg(target_arch = "x86_64")]
     if isa() != "scalar" {
         let cols = input.cols;
@@ -779,6 +796,24 @@ pub(crate) fn q8_linear_group_into(
     input: &Q8Input,
     output: &mut [Vec<f32>],
 ) -> Option<()> {
+    if input.batch > 1 && !input.raw.is_empty() {
+        // exact verification: every token through the batch-one kernel, so no panel, tile or AMX GEMM can combine tokens
+        let cols = input.cols;
+        for (out, projection) in output.iter_mut().zip(projections) {
+            out.clear();
+            out.resize(projection.rows * input.batch, 0.0);
+        }
+        let mut one = vec![Vec::new(); projections.len()];
+        for token in 0..input.batch {
+            let single = Q8Input::new(&input.raw[token * cols..(token + 1) * cols], cols);
+            q8_linear_group_into(projections, &single, &mut one)?;
+            for ((out, part), projection) in output.iter_mut().zip(&one).zip(projections) {
+                let rows = projection.rows;
+                out[token * rows..(token + 1) * rows].copy_from_slice(part);
+            }
+        }
+        return Some(());
+    }
     #[cfg(target_arch = "x86_64")]
     if isa() != "scalar" {
         assert_eq!(output.len(), projections.len());

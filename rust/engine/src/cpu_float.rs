@@ -116,6 +116,8 @@ pub fn linear_group(
         }
         let batch = input.len() / cols;
         if batch == 0 || projections.is_empty() {
+            return Some(projections.iter().map(|_| Vec::new()).collect());
+        }
         // exact verification: one token at a time, so the AVX-512 wide kernels and the panels stay out of it
         if batch > 1 && crate::cpu_kernels::batch_invariant() {
             let mut output = projections.iter().map(|p| vec![0.0f32; batch * p.rows]).collect::<Vec<_>>();
@@ -127,8 +129,6 @@ pub fn linear_group(
                 }
             }
             return Some(output);
-        }
-            return Some(projections.iter().map(|_| Vec::new()).collect());
         }
         let x: Cow<'_, [f32]> = if kind == 0 {
             Cow::Borrowed(input)
