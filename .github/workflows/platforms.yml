@@ -118,6 +118,13 @@ jobs:
         shell: bash
         run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- metal_quant_kernels --nocapture --test-threads=1
 
+      # The exactness tests print one line per model (NOISE ...) and per comparison (BEFORE/AFTER ...); a failure is read from the check-run
+      # annotations, so they run once more with --nocapture and the annotation keeps those lines.
+      - name: Exact verification pass (diagnostic lines)
+        if: always() && matrix.runner == 'macos-26'
+        shell: bash
+        run: scripts/ci/annotate-failure.sh cargo test --release --locked -p fllm-engine --lib --features "$FEATURES" -- spec_exact_tests::noise_of_a_verification_pass spec_exact_tests::verification_with_prompt_kernels spec_exact_tests::projection_kernels --nocapture --test-threads=1
+
       - name: Clippy
         shell: bash
         run: cargo clippy --release --locked -p fllm-engine --lib --bins --features "$FEATURES" -- -D warnings
