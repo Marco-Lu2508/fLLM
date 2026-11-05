@@ -116,45 +116,45 @@ fn the_row_block_path_of_the_exact_pass_keeps_the_bits() {
     }
 }
 
-/// The guard is per thread, so it must reach the pool workers where a projection is dispatched, and it must not leak to a neighbour:
-/// a thread that holds no guard keeps the default kernels while another thread runs an exact pass. Both directions are measured here
-/// on one projection (Q4_0, where the default batch kernel differs from the batch-one one on every x86 host).
+/// The guard is per thread. A pass hands it to the pool workers that run its projections, and it must not reach a neighbour: another
+/// thread that holds no guard keeps the default kernels while this one runs an exact pass, and the other way round. The test asks
+/// `batch_invariant()` itself, so it does not depend on whether a kernel gives other bits on the host it runs on.
 #[test]
 fn the_exact_choice_belongs_to_the_pass_that_made_it() {
-    // Q4_0: its batch kernel (the classic Q8 tiles) differs from the batch-one kernel on every x86 host, with or without AVX-512
-    const KIND: u32 = 2;
-    let (rows, cols, batch) = (257usize, 768usize, 7usize);
-    let mut rng = Lcg(0x6a2d);
-    let weights = random_weights(KIND, rows, cols, &mut rng);
-    let x = rng.vector(batch * cols, 3.0);
-    let run = |x: &[f32]| crate::cpu_quantized::linear(&weights, KIND, x, rows, cols, None).unwrap();
-    let bits_differ = |all: &[f32]| {
-        (0..batch).any(|t| run(&x[t * cols..(t + 1) * cols]).iter().zip(&all[t * rows..(t + 1) * rows]).any(|(a, b)| a.to_bits() != b.to_bits()))
-    };
-    // 1. a plain batch differs from the single tokens (otherwise nothing below proves anything)
-    assert!(bits_differ(&run(&x)), "the default batch kernel must differ from the batch-one kernel for this test to mean something");
-    // 2. while another thread holds the guard, this thread still runs the default kernels
+    use crate::cpu_kernels::{batch_invariant, BatchInvariant};
+    if std::env::var_os("FLLM_BATCH_INVARIANT").is_some_and(|v| !v.is_empty() && v != "0") {
+        return; // the environment forces the exact kernels for every call: there is no choice to isolate
+    }
+    assert!(!batch_invariant(), "no guard is alive on this thread at the start");
+    // 1. a guard held by another thread does not reach this thread
     let (entered, entered_rx) = std::sync::mpsc::channel();
     let (release, release_rx) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
-        let _guard = crate::cpu_kernels::BatchInvariant::enter();
+        let _guard = BatchInvariant::enter();
+        let own = batch_invariant();
         entered.send(()).unwrap();
         release_rx.recv().unwrap();
+        own
     });
     entered_rx.recv().unwrap();
-    let neighbour = bits_differ(&run(&x));
+    let seen_here = batch_invariant();
     release.send(()).unwrap();
-    holder.join().unwrap();
-    assert!(neighbour, "a guard held by another thread must not switch this thread to the exact kernels");
-    // 3. a guard entered here is seen by the pool workers that run the projection
+    assert!(holder.join().unwrap(), "the thread that holds the guard sees it");
+    assert!(!seen_here, "a guard held by another thread must not switch this thread to the exact kernels");
+    // 2. a guard entered here does not reach a pool worker by itself ...
     let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
-    let _guard = crate::cpu_kernels::BatchInvariant::enter();
-    let exact = pool.install(|| {
-        let invariant = true;
-        let _inside = invariant.then(crate::cpu_kernels::BatchInvariant::enter);
-        run(&x)
+    let _guard = BatchInvariant::enter();
+    assert!(batch_invariant(), "this thread holds the guard");
+    assert!(!pool.install(batch_invariant), "a pool worker does not see this thread's guard unless the pass hands it over");
+    // ... and sees it where the pass hands it over (what `RustDecoder::forward_*` does inside `install`)
+    let invariant = batch_invariant();
+    let inside = pool.install(|| {
+        let _handed = invariant.then(BatchInvariant::enter);
+        batch_invariant()
     });
-    assert!(!bits_differ(&exact), "inside a pool that was handed the guard, every token must get the bits it gets alone");
+    assert!(inside, "inside a pool that was handed the guard, the workers choose the exact kernels");
+    // 3. and the hand-over ends with the pass: afterwards the worker is back to the default
+    assert!(!pool.install(batch_invariant), "the worker does not keep the guard after the pass");
 }
 
 /// What the batch-invariant variants cost: the time of one projection for one token, and for the 7 rows of a verification pass (six draft
