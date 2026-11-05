@@ -799,8 +799,18 @@ mod tests {
         let itl = sum.itl_ms.as_ref().unwrap().p50;
         assert!((15.0..150.0).contains(&itl), "itl {itl}");
         assert_eq!(served.load(Ordering::Relaxed), 8);
-        // four at a time: about two rounds of ~120 ms, far less than eight sequential requests
-        assert!(sum.duration_s < 1.5, "{}", sum.duration_s);
+        // four at a time must be clearly faster per request than one at a time. Both runs are measured here, on the same machine at the
+        // same moment, so a loaded runner slows them alike (a fixed bound on the wall time measured the runner, not the concurrency: one
+        // at a time takes only about a second here, which a slow macOS runner exceeded even with four at a time).
+        let mut alone_state = 5;
+        let alone = run_point(&client, &o, "mock", &Load::Concurrency(1), 4, &mut alone_state);
+        assert!(alone.iter().all(|r| r.ok), "{:?}", alone.iter().filter_map(|r| r.error.clone()).collect::<Vec<_>>());
+        let alone = summarize(&Load::Concurrency(1), &alone, &Slo::default());
+        let (together_per_request, alone_per_request) = (sum.duration_s / 8.0, alone.duration_s / 4.0);
+        assert!(
+            together_per_request < 0.7 * alone_per_request,
+            "four at a time {together_per_request:.3} s per request, one at a time {alone_per_request:.3} s"
+        );
     }
 
     #[test]
