@@ -237,10 +237,15 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   switch off prefix sharing), beam search (`use_beam_search`, CPU backend), `--multi-step N`
   (several decode rounds per scheduler round, off by default and CPU only until it is verified elsewhere) and
   jump-forward decoding for grammar-constrained requests (text identical to token-by-token decoding; large gains
-  only with compact JSON schemas). Optional: prompt blocks saved on disk (`FLLM_KV_DISK_DIR`) and an output cache
-  for repeated deterministic requests ([docs/output-cache.md](docs/output-cache.md)).
+  only with compact JSON schemas). The prefix cache grows while an answer is generated, so the next turn of a conversation finds the
+  previous answer in it (98 % of a five-turn prompt came from the cache in a measurement on a small model), and `cache_salt` /
+  `FLLM_PREFIX_SALT` keep the blocks of different callers apart. Optional: prompt blocks saved on disk (`FLLM_KV_DISK_DIR`; read back at
+  the start, so a restart serves a long prefix from the disk, and while the server runs for a prefix the cache dropped under memory
+  pressure, [docs/dev/kv-disk-tier.md](docs/dev/kv-disk-tier.md)) and an output cache for repeated deterministic requests, streamed ones
+  included ([docs/output-cache.md](docs/output-cache.md)). Not built: a cache that several servers share.
 - **Speculative decoding.** `--speculative off|ngram|suffix|draft|mtp`: conversation lookup (`suffix`, on by default on
-  the CPU and on Vulkan/DirectX; on CUDA, HIP and Metal it stays off until its kernels have been checked on hardware),
+  the CPU and on Vulkan/DirectX; on CUDA, HIP and Metal it stays off until its kernels have been checked on hardware; with
+  `FLLM_SUFFIX_DIR` its generations are kept across a restart),
   prompt lookup, a draft model of your own (`--speculative-model`, browse for it in the load dialog) and the
   multi-token-prediction heads of DeepSeek-V2/V3 and GLM-4 MoE (`--speculative mtp`, CPU only). Models with a recurrent
   state (Qwen3.5, Mamba, RWKV) speculate too with lookup or a draft model, by copying the state before each verification
@@ -281,7 +286,10 @@ the log folder when the engine does not start.
 - **Operation**: Docker images and Compose files, Kubernetes manifests and a Helm chart in [deploy/](deploy), and
   `fllm-router`, a prefix-aware router for several servers, which can also run disaggregated prefill / decode ([docs/router.md](docs/router.md),
   [docs/datacenter-gap.md](docs/datacenter-gap.md)), and `fllm-rs bench-serve`, a throughput benchmark with length distributions, request rate or
-  concurrency sweeps, TTFT / ITL / TPOT percentiles and goodput.
+  concurrency sweeps, TTFT / ITL / TPOT percentiles and goodput, and `fllm-rs bench-agent`, the load of chat front ends and agents
+  (conversations over several turns with a shared system prompt, every turn measured, cold and warm) that runs against fLLM, vLLM and
+  SGLang alike. `scripts/datacenter-day-one.sh` runs the checks of a multi-GPU node and the same load against each engine
+  ([docs/datacenter-gap.md](docs/datacenter-gap.md)); none of it has run on a GPU node yet.
 
 - **Coding tools**: Claude Code, Codex CLI, OpenCode and the OpenAI and Anthropic SDKs were run against the server (Messages and Responses APIs, streamed tool calls, `/infill` for autocomplete); `fllm-rs connect TOOL` and the Studio section *Connect a coding tool* give the exact settings, the output ceilings of the agents are cut to the context, and the conversation prefix is reused between turns (10th turn of a tool session: first token after 17 s instead of 174 s on a laptop processor). What was run, with versions, and what only has a config: [docs/user/coding.md](docs/user/coding.md).
 - **Without a browser**: `fllm-rs agent -p "task"` runs the coding agent in the terminal (reading is always allowed; edits, commands, network and memory only with `--allow-*` flags), `fllm-rs gateway telegram|matrix` puts it behind a chat with a required allowlist, and scheduled tasks can send their result to a webhook, a ntfy topic or a Telegram chat ([docs/user/agent-cli.md](docs/user/agent-cli.md)). The gateways (Telegram, Matrix, Discord, Slack) ran against stubs only, not against the real services. Around that: spec-driven planning (`fllm-rs spec`, a Specs block in the Studio), steering files with inclusion modes, eleven hook events and file-change hooks, an auto mode that lets the model judge risky actions, a gateway heartbeat (`HEARTBEAT.md`) and per-chat routes, a JSON-RPC mode with Python and TypeScript clients, `fllm-rs review --pr N` and plugins from git repositories ([docs/user/agent-workflows.md](docs/user/agent-workflows.md)); the parts were run with unit tests and stub servers, and the spec flow, the steering and the auto judge also with Qwen3-4B-Instruct-2507 (what ran and what did not: the same page). How the coding side compares with Hermes Agent, Claude Code, Codex CLI, Kiro, Pi and OpenClaw, feature by feature with what is missing and why: [docs/code-mode-gap.md](docs/code-mode-gap.md).
