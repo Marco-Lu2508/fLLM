@@ -312,21 +312,21 @@ pub fn attention_with(
                 };
                 if key.q8 {
                     score_q8_tile(&query_rows[..nr], kq, ks, &mut scores[j..], scale, path);
+                } else {
+                    // the f16 key row is converted once for every query of the tile (positions a row does not see are masked below)
+                    let mut half_rows = [&[][..]; 16];
+                    for (r, row) in half_rows.iter_mut().take(nr).enumerate() {
+                        let b = tile.first + r / g;
+                        let h = kh * g + r % g;
+                        *row = &q[(b * heads + h) * dim..][..dim];
+                    }
+                    score_half_tile(&half_rows[..nr], key.half_row(slot, kh), &mut scores[j..], 64, scale, path);
                 }
                 for r in 0..nr {
                     let b = tile.first + r / g;
-                    let h = kh * g + r % g;
-                    scores[r * 64 + j] = if t >= lengths[b] as usize || t < start_of(b) {
-                        f32::NEG_INFINITY
-                    } else if key.q8 {
-                        scores[r * 64 + j]
-                    } else {
-                        score_half(
-                            &q[(b * heads + h) * dim..][..dim],
-                            key.half_row(slot, kh),
-                            path,
-                        ) * scale
-                    };
+                    if t >= lengths[b] as usize || t < start_of(b) {
+                        scores[r * 64 + j] = f32::NEG_INFINITY;
+                    }
                 }
                 let dst = &mut values[j * dim..(j + 1) * dim];
                 if value.q8 {
@@ -490,6 +490,19 @@ fn score_half(q: &[f32], k: &[u16], path: Path) -> f32 {
             .zip(k)
             .map(|(&a, &b)| a * f16::from_bits(b).to_f32())
             .sum(),
+    }
+}
+/// `score_half` for several queries against one key row: the key row is converted from f16 once and every query keeps the
+/// accumulator and the order of additions of `score_half`, so a score is the same bit pattern as when the query runs alone.
+fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize, scale: f32, path: Path) {
+    #[cfg(target_arch = "x86_64")]
+    if matches!(path, Path::Avx2 | Path::AvxVnni) && k.len().is_multiple_of(8) && k.len() <= 256 && queries.len() <= 16 {
+        // SAFETY: `Path::detect` returned an AVX2 path, so AVX2, FMA and F16C are present; the lengths are checked above.
+        unsafe { x86::score_half_tile(queries, k, out, stride, scale) };
+        return;
+    }
+    for (r, q) in queries.iter().enumerate() {
+        out[r * stride] = score_half(q, k, path) * scale;
     }
 }
 fn decode_q8(v: &[i8], scales: &[u16], out: &mut [f32], path: Path) {
@@ -770,6 +783,22 @@ mod x86 {
                     _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q)), d),
                 );
             }
+        }
+    }
+    /// The key row is converted once (at most 256 values, 32 registers of 8) and kept in registers/stack; each query then runs the
+    /// loop of `score_half` over it: one accumulator, the same fused multiply-add per 8 values, the same horizontal sum.
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub(super) unsafe fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize, scale: f32) {
+        let mut key = [0.0f32; 256];
+        for j in (0..k.len()).step_by(8) {
+            _mm256_storeu_ps(key.as_mut_ptr().add(j), _mm256_cvtph_ps(_mm_loadu_si128(k.as_ptr().add(j).cast())));
+        }
+        for (r, q) in queries.iter().enumerate() {
+            let mut acc = _mm256_setzero_ps();
+            for j in (0..q.len()).step_by(8) {
+                acc = _mm256_fmadd_ps(_mm256_loadu_ps(q.as_ptr().add(j)), _mm256_loadu_ps(key.as_ptr().add(j)), acc);
+            }
+            out[r * stride] = hsum(acc) * scale;
         }
     }
     #[target_feature(enable = "avx2,fma,f16c")]
@@ -1198,5 +1227,79 @@ mod window_tests {
             let worst = have.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
             assert!(worst < 2e-3, "scale {scale:?} window {window:?}: max difference {worst}");
         }
+    }
+}
+
+#[cfg(test)]
+mod score_tile_tests {
+    use super::{score_half, score_half_tile, Path};
+    use half::f16;
+
+    /// The tile kernel converts the key row once for all queries. Each query must still get the bit pattern `score_half` gives it alone:
+    /// this compares them directly, for every head size the tile path takes and for one to sixteen queries.
+    #[test]
+    fn the_tile_score_has_the_bits_of_the_single_score() {
+        let mut state = 3u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let path = Path::detect();
+        for dim in [32usize, 64, 96, 128, 256] {
+            for queries in [1usize, 2, 7, 14, 16] {
+                let key: Vec<u16> = (0..dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+                let q: Vec<Vec<f32>> = (0..queries).map(|_| (0..dim).map(|_| rnd() * 3.0).collect()).collect();
+                let rows: Vec<&[f32]> = q.iter().map(Vec::as_slice).collect();
+                for scale in [0.125f32, 1.0, 0.3] {
+                    let mut out = vec![f32::NAN; queries * 64];
+                    score_half_tile(&rows, &key, &mut out, 64, scale, path);
+                    for (r, row) in rows.iter().enumerate() {
+                        let alone = score_half(row, &key, path) * scale;
+                        assert_eq!(out[r * 64].to_bits(), alone.to_bits(), "dim {dim}, {queries} queries, query {r}, scale {scale}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::{attention_with, Cache, Options};
+    use half::f16;
+
+    /// What the prefill attention costs: pairs of consecutive positions (what a prompt chunk hands over) at a context of about 3000 keys,
+    /// 14 heads over 2 KV heads of 64 values (Qwen2.5-0.5B). Prints the best of several runs; nothing is asserted about time.
+    #[test]
+    fn cost_of_the_prefill_attention() {
+        let (heads, kv_heads, dim, block_size) = (14usize, 2usize, 64usize, 16usize);
+        let slots = 4096;
+        let mut state = 5u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let key_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+        let value_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+        let stride = slots / block_size;
+        let rows = 64usize;
+        let lengths: Vec<i64> = (0..rows as i64).map(|b| 3000 + b).collect();
+        let table: Vec<i64> = (0..stride as i64).collect();
+        let tables: Vec<i64> = lengths.iter().flat_map(|_| table.clone()).collect();
+        let q: Vec<f32> = (0..rows * heads * dim).map(|_| rnd()).collect();
+        let key = Cache { data: &key_words, slots, kv_heads, dim, q8: false };
+        let value = Cache { data: &value_words, ..key };
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut best = f64::MAX;
+        pool.install(|| {
+            for _ in 0..9 {
+                let started = std::time::Instant::now();
+                let out = attention_with(&q, key, value, &tables, &lengths, heads, block_size, stride, &Options::default()).unwrap();
+                best = best.min(started.elapsed().as_secs_f64());
+                std::hint::black_box(out);
+            }
+        });
+        let flops: f64 = lengths.iter().map(|&n| 4.0 * heads as f64 * n as f64 * dim as f64).sum();
+        println!("COST attention: {rows} rows at ~3000 keys, {heads} heads: {:.1} ms = {:.1} GFLOP/s", best * 1000.0, flops / best / 1e9);
     }
 }
