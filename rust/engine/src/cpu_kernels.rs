@@ -624,6 +624,80 @@ fn pack_linear_block(src: &[f32], dst: &mut [i8; 32]) -> (f32, i32) {
         -16 * dst.iter().map(|&v| v as i32).sum::<i32>(),
     )
 }
+/// The exact verification pass of Q8_0 projections on x86: one dispatch for the whole call, every worker takes a panel of eight rows
+/// and runs it for all tokens one after the other. Panel boundaries and kernels are those of the batch-one decode (`q8_linear_prepared`
+/// with one token), so every token gets the bits it gets alone; the panel stays in the cache for tokens two to seven, and the
+/// workers are woken once instead of once per token. `None` when the host has no x86 vector kernel or the shapes do not fit.
+#[cfg(target_arch = "x86_64")]
+fn q8_exact_panels(projections: &[Q8Projection], raw: &[f32], cols: usize, batch: usize, output: &mut [Vec<f32>]) -> Option<()> {
+    if isa() == "scalar" || batch < 2 || cols == 0 || !cols.is_multiple_of(32) || raw.len() != batch * cols || output.len() != projections.len() {
+        return None;
+    }
+    let nb = cols / 32;
+    if projections.iter().any(|p| p.rows == 0 || p.weights.len() != p.rows * nb * 34 || p.bias.is_some_and(|b| b.len() != p.rows)) {
+        return None;
+    }
+    let singles: Vec<Vec<XSingle>> = (0..batch)
+        .map(|t| {
+            let mut records = vec![XSingle::default(); nb];
+            for (src, rec) in raw[t * cols..(t + 1) * cols].as_chunks::<32>().0.iter().zip(&mut records) {
+                (rec.d, rec.init) = pack_linear_block(src, &mut rec.q);
+            }
+            records
+        })
+        .collect();
+    for (out, p) in output.iter_mut().zip(projections) {
+        out.clear();
+        out.resize(p.rows * batch, 0.0);
+    }
+    let rows: Vec<usize> = projections.iter().map(|p| p.rows).collect();
+    let vnni = isa() == "avx-vnni";
+    let wide = avx512();
+    crate::cpu_schedule::row_panels(
+        output,
+        &rows,
+        batch,
+        8,
+        || (),
+        |_, member, first, out| {
+            let p = &projections[member];
+            let valid = (p.rows - first).min(8);
+            for (token, single) in singles.iter().enumerate() {
+                let dst = &mut out.row(token)[..valid];
+                // SAFETY: the shapes were checked above; `isa()` / `avx512()` confirmed the features of the kernels chosen below.
+                unsafe {
+                    if let Some(wide) = wide {
+                        match wide {
+                            Avx512::Vnni => x86::gemv512_vnni(p.weights, single, first, dst),
+                            Avx512::Bw => x86::gemv512_bw(p.weights, single, first, dst),
+                        }
+                    } else if vnni && valid == 8 {
+                        x86::gemv_vnni_zero8(p.weights, single, first, dst);
+                    } else {
+                        for (j, chunk) in dst.chunks_mut(4).enumerate() {
+                            if vnni {
+                                if chunk.len() == 4 {
+                                    x86::gemv_vnni_zero4(p.weights, single, first + j * 4, chunk);
+                                } else {
+                                    x86::gemv_vnni(p.weights, single, first + j * 4, chunk);
+                                }
+                            } else {
+                                x86::gemv_avx2(p.weights, single, first + j * 4, chunk);
+                            }
+                        }
+                    }
+                }
+                if let Some(bias) = p.bias {
+                    for (j, y) in dst.iter_mut().enumerate() {
+                        *y += bias[first + j];
+                    }
+                }
+            }
+        },
+    );
+    Some(())
+}
+
 pub fn q8_linear(
     w: &[u8],
     x: &[f32],
@@ -634,6 +708,14 @@ pub fn q8_linear(
     // A pass that has to equal single-token decoding: one token at a time, so no kernel can combine rows of several tokens.
     let batch = x.len().checked_div(cols).unwrap_or(0);
     if batch > 1 && batch_invariant() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let member = [Q8Projection { weights: w, rows, bias }];
+            let mut exact = vec![Vec::new()];
+            if q8_exact_panels(&member, x, cols, batch, &mut exact).is_some() {
+                return exact.pop();
+            }
+        }
         let mut out = vec![0.0f32; batch * rows];
         // Blocks of rows outside, tokens inside (see `q8_linear_group_into`): the same batch-one kernel per row, so the same bits,
         // and tokens two to seven read the block from the cache.
@@ -825,6 +907,10 @@ pub(crate) fn q8_linear_group_into(
         for (out, projection) in output.iter_mut().zip(projections) {
             out.clear();
             out.resize(projection.rows * input.batch, 0.0);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if q8_exact_panels(projections, &input.raw, cols, input.batch, output).is_some() {
+            return Some(());
         }
         // Blocks of rows outside, tokens inside: every token still goes through the batch-one kernel for each row, so the bits stay,
         // and tokens two to seven find the block of weights in the cache instead of fetching it from memory again.
