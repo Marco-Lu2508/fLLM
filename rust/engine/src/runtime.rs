@@ -59,6 +59,10 @@ struct BatchRow {
 /// Scheduler-driven inference over the memory-mapped GGUF model.
 /// One shared paged KV pool backs every active sequence; each scheduler step is
 /// evaluated as one ragged batch by the Rust decoder.
+/// Blocks the reload reads back per scheduling round while sequences run, and while none does.
+const RELOAD_BUSY_BLOCKS: usize = 256;
+const RELOAD_IDLE_BLOCKS: usize = 16_384;
+
 /// `(chain hash, tokens, block the prefix cache holds)` for each full block of a prompt.
 type PromptChain = Vec<(u64, Vec<i64>, Option<i64>)>;
 
@@ -1008,6 +1012,7 @@ impl InferenceRuntime {
             Some(pc) => serde_json::json!({
                 "enabled": self.scheduler.cfg.prefix_cache,
                 "entries": pc.len(),
+                "pinned": pc.pinned_len(),
                 "hits": hits,
                 "blocks": pc.entries_lru().iter().map(|entry| serde_json::json!({
                     "hash": format!("{:016x}", entry.chain_hash),
@@ -1597,7 +1602,14 @@ impl InferenceRuntime {
                 continue;
             }
             match self.scheduler.register_prefix_chain(&blocks) {
-                Ok(true) => registered += blocks.len(),
+                Ok(true) => {
+                    registered += blocks.len();
+                    // the cache took its own reference on every block it registered; give back the one from the allocation, or the cache
+                    // can neither evict these blocks nor clear them and the pool a restart warmed is lost for good
+                    for (_, _, bid) in &blocks {
+                        self.scheduler.free_block(*bid);
+                    }
+                }
                 _ => {
                     for (_, _, bid) in &blocks {
                         self.scheduler.free_block(*bid);
@@ -1702,12 +1714,14 @@ impl InferenceRuntime {
     /// on disk. At most 256 blocks a round, and never so many that the free pool is used up: a block the cache holds can be evicted again,
     /// one a running sequence needs cannot. The read happens on the worker thread, between two rounds.
     fn reload_for_waiting(&mut self) {
-        const PER_ROUND: usize = 256;
+        // While sequences run, a long read would hold up their next token; with nobody running there is nobody to hold up, and a
+        // long prefix (a whole codebase) should come back in one go.
+        let per_round = if self.scheduler.running.is_empty() { RELOAD_IDLE_BLOCKS } else { RELOAD_BUSY_BLOCKS };
         if !self.kv_tier.enabled() || !self.scheduler.cfg.prefix_cache || self.scheduler.waiting.is_empty() {
             return;
         }
         let waiting: Vec<i64> = self.scheduler.waiting.iter().copied().collect();
-        let mut budget = PER_ROUND;
+        let mut budget = per_round;
         for sid in waiting {
             if budget == 0 {
                 break;
@@ -1717,27 +1731,33 @@ impl InferenceRuntime {
     }
 
     /// Returns how many blocks of the prompt of `sid` were taken from the disk tier.
-    /// The chain of the full blocks of the prompt of `sid` as `try_admit` looks it up, each with the block the cache holds for it. `None`
-    /// for a request that is not on the disk tier at all (a `cache_salt`, media).
-    fn prompt_chain(&self, sid: i64) -> Option<PromptChain> {
+    /// The chain of the first `full` blocks of `tokens` as `try_admit` looks it up, each with the block the cache holds for it.
+    fn chain_of(&self, tokens: &[i64], full: usize) -> PromptChain {
         let size = self.scheduler.cfg.block_size;
-        let sequence = self.scheduler.sequences.get(&sid)?;
-        if sequence.prefix_salt != 0 || sequence.has_media {
-            return None;
-        }
-        let full = sequence.tokens.len().saturating_sub(1) / size;
         let mut prev = crate::scheduler::prefix_seed();
         let mut chain = Vec::with_capacity(full);
         for b in 0..full {
-            let segment = sequence.tokens[b * size..(b + 1) * size].to_vec();
+            let segment = tokens[b * size..(b + 1) * size].to_vec();
             prev = crate::mem::prefix_cache::PrefixCache::hash_chain(prev, &segment);
             chain.push((prev, segment, self.scheduler.prefix_block_of(prev)));
         }
-        Some(chain)
+        chain
     }
 
     fn reload_prompt(&mut self, sid: i64, budget: usize) -> usize {
-        let Some(mut chain) = self.prompt_chain(sid) else { return 0 };
+        let size = self.scheduler.cfg.block_size;
+        let Some(sequence) = self.scheduler.sequences.get(&sid) else { return 0 };
+        // a request that is not on the tier at all (a `cache_salt`, media) has nothing to read back
+        if sequence.prefix_salt != 0 || sequence.has_media {
+            return 0;
+        }
+        let tokens = sequence.tokens.clone();
+        self.reload_tokens(&tokens, tokens.len().saturating_sub(1) / size, budget)
+    }
+
+    /// Reads the blocks of the first `full` blocks of `tokens` that the prefix cache dropped back from the tiers. Returns how many.
+    fn reload_tokens(&mut self, tokens: &[i64], full: usize, budget: usize) -> usize {
+        let mut chain = self.chain_of(tokens, full);
         // the cache is a tree, so what is missing is the end of the chain; its first missing block has a cached parent
         let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) else { return 0 };
         // how many blocks from there the disk really has: a prompt the server has never seen has none, and then nothing may be touched
@@ -1753,10 +1773,7 @@ impl InferenceRuntime {
         let (first, chain) = if available < on_disk + reserve {
             self.scheduler.reclaim_cache(on_disk + reserve - available);
             // the blocks that were dropped may have been the start of this very chain
-            chain = match self.prompt_chain(sid) {
-                Some(chain) => chain,
-                None => return 0,
-            };
+            chain = self.chain_of(tokens, full);
             let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) else { return 0 };
             (first, chain)
         } else {
@@ -1794,6 +1811,34 @@ impl InferenceRuntime {
             }
             _ => 0,
         }
+    }
+
+    /// Keeps the prefix cache's blocks of the start of `tokens` out of eviction (`pin`), or lets them go. A pin first reads back what the
+    /// cache dropped from the tiers, so a prefix that was written to memory or disk before can be pinned again after a restart. Returns
+    /// `(blocks pinned or unpinned, full blocks of the prompt)`; the chain stops at the first block that is nowhere. Only requests
+    /// without a `cache_salt` can be pinned: their blocks are the ones that are shared.
+    pub fn pin_prefix(&mut self, tokens: &[i64], pin: bool) -> Result<(usize, usize), String> {
+        if !self.scheduler.cfg.prefix_cache {
+            return Err("this server runs without a prefix cache; there is nothing to pin".into());
+        }
+        let full = tokens.len() / self.scheduler.cfg.block_size;
+        if pin && self.kv_tier.enabled() {
+            let mut budget = RELOAD_IDLE_BLOCKS;
+            while budget > 0 {
+                let read = self.reload_tokens(tokens, full, budget);
+                if read == 0 {
+                    break;
+                }
+                budget = budget.saturating_sub(read);
+            }
+        }
+        let done = self.scheduler.pin_prompt(tokens, 0, pin);
+        Ok((done, full))
+    }
+
+    /// How many blocks of the prefix cache are pinned.
+    pub fn pinned_blocks(&self) -> usize {
+        self.scheduler.pinned_blocks()
     }
 
     /// Writes the blocks the scheduler just registered in the prefix cache to the disk tier, when one is configured.
@@ -1900,7 +1945,9 @@ impl InferenceRuntime {
         self.spill_pending();
         if !self.kv_warmed {
             self.kv_warmed = true;
-            match self.warm_prefix_cache(128) {
+            // a restart gives the whole chain back that the pool can hold (a fraction stays free for the first requests)
+            let limit = self.scheduler.bm.allocator.available().saturating_sub((self.model.pool_blocks() / 8).max(8));
+            match self.warm_prefix_cache(limit) {
                 Ok(0) => {}
                 Ok(count) => tracing::info!("warmed {count} prefix blocks from the disk tier"),
                 Err(error) => tracing::warn!("could not warm the prefix cache from disk: {error}"),

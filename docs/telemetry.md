@@ -32,14 +32,17 @@ and `fllm_otel_spans_sent_total`. One scrape answers "is this instance healthy, 
 
 ## Inspecting the prefix cache
 
-`GET /admin/prefix-cache` answers with `enabled`, `entries`, `hits`, the blocks (`hash`, `tokens`) and the radix `tree`.
+`GET /admin/prefix-cache` answers with `enabled`, `entries`, `pinned`, `hits`, the blocks (`hash`, `tokens`) and the radix `tree`.
 Live example from a tiny model after one request: four entries of 16 tokens, each with the chain hash that identifies it.
 This is what makes a "why was my prompt not reused" question answerable instead of guessed. `DELETE /admin/prefix-cache`
 empties it and gives the blocks back to the allocator — useful after a template change, when the old blocks are dead weight.
 
+`POST /admin/prefix-cache/pin` keeps the cached blocks of a prompt out of eviction (see [A codebase in the cache](dev/kv-disk-tier.md#a-codebase-in-the-cache)).
+
 ## The disk tier
 
-`GET /admin/kv-tier` reports `enabled`, `dir`, `max_bytes`, `used_bytes`, `spills`, `hits`, `misses` and `drops`;
+`GET /admin/kv-tier` reports `enabled`, `dir`, `max_bytes`, `used_bytes`, `spills`, `hits`, `misses`, `drops`, `reloaded_blocks` and, for the
+memory tier, `ram_max_bytes`, `ram_used_bytes`, `ram_blocks` and `ram_hits`;
 `DELETE /admin/kv-tier` removes every stored block. Both go through the inference worker, like the prefix cache.
 
 ## Rate limits already exist

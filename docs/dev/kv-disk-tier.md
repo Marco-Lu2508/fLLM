@@ -156,3 +156,46 @@ back in 0.66 s with 560 tokens cached (35 blocks read back, same text); the cont
 took 0.44 s because its files were in the page cache of this host; the difference between the two figures is noise of this machine, not an
 advantage of the disk. Not measured: the copy between GPU memory and host memory (this host has no GPU; the import goes through the same
 `kv_import_block` the disk read uses) and a busy server.
+
+## A codebase in the cache
+
+Developers who work on the same code send the same long start of a prompt: a system prompt, the tool list, the files of the project. The
+prefix cache serves exactly that, and only that: a block is found again when everything before it is byte-identical, so the shared part has
+to come first and in the same order for everybody, and what differs per user or per task comes after it. A date or an id in front of the
+shared part makes all of it a miss.
+
+What the cache does for such a prefix, and what was changed so that it holds for a very long one (a model with a 1M-token context, 62 500
+blocks of 16 tokens):
+
+* **It stays.** `POST /admin/prefix-cache/pin` with the same `messages`, `prompt` or `tokens` as the request keeps the cached blocks of that
+  prompt out of eviction (`"pin": false` lets them go; `GET /admin/prefix-cache` shows `pinned`). The prompt is rendered like a request's, so
+  the blocks that are pinned are the ones the next request looks for. A pin first reads back from the memory and disk tiers what the cache
+  dropped, so the same call after a restart brings the prefix back. The answer says how many blocks were pinned and whether that is the whole
+  prompt (`complete`). Pinned blocks are not free memory: a pool that is pinned full makes new requests wait, so pin the shared start and
+  not everything. Requests with a `cache_salt` have blocks of their own that this route does not name.
+* **It comes back whole.** The reload reads at most 256 blocks per round while sequences run (a long read would hold up their next token)
+  and up to 16 384 (262 144 tokens) per round when none runs; a longer prefix continues in the next round. The restart read is bounded by the
+  free pool (minus an eighth for the first requests) and no longer by 128 blocks.
+* **Making room is cheap.** The eviction used to walk the whole use order to find the oldest block without children: 6.3 s for 500
+  evictions at 64 000 cached blocks. It keeps the leaves in use order now: 1.2 ms for the same.
+* **Memory first.** `FLLM_KV_RAM_BYTES` holds the blocks in host memory in front of the disk. For a 1M-token prefix the size is the KV
+  cache of the model for 1M tokens (it depends on the model; a 70B Llama with f16 keys and values is about 330 GB, half of it with fp8), which
+  fits the host memory of a server and not the memory of one GPU.
+
+Measured on a real model (Qwen2.5-0.5B Q8_0, `--ctx 2048 --max-seqs 2`, a 568-token shared prompt, then twelve other documents, `scripts/kv-pin.py`):
+
+| | shared prompt afterwards | from the cache |
+| --- | --- | --- |
+| no pin, no tier (control) | 3.87 s | 0 of 568 |
+| pinned (34 blocks), no tier | 0.48 s | 544 of 568 |
+| after a restart, the pin as the first call (34 blocks read back from the disk by the pin), then the other documents | 0.59 s | 560 of 568 |
+| after a restart, no pin, disk tier | 0.55 s | 560 of 568 (the reload read 35 blocks) |
+
+The last two rows say what the pin is for and what it is not: with a disk or memory tier the reload brings a dropped prefix back on the
+next request anyway, so the pin buys only that it never has to be read back (no read, no wait). Without a tier it is the only thing that keeps
+the prefix. The first row is the case without either, where the cache has lost the prefix after twelve documents.
+
+What this does not do: a model that keeps a recurrent state besides its KV cache (Qwen3.5, Mamba and others) has no prefix cache here (the
+state of the middle of a prompt cannot be rebuilt from blocks), so none of the above applies to it. The prefix has to fit the model's
+context and the pool; `--ctx` defaults to at most 32 768 tokens on a GPU and has to be set for more. Tests use a tiny model; nothing of this
+was run with a 1M-token prompt, and the copy of 62 000 blocks between host and GPU memory is not measured.

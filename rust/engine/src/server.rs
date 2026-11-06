@@ -166,6 +166,12 @@ enum WorkerCommand {
         chain: Box<crate::kv_transfer::KvChain>,
         output: tokio::sync::oneshot::Sender<Result<(usize, usize), String>>,
     },
+    /// `POST /admin/prefix-cache/pin`: keep the cached blocks of a prompt out of eviction (or let them go).
+    PinPrefix {
+        tokens: Vec<i64>,
+        pin: bool,
+        output: tokio::sync::oneshot::Sender<Result<(usize, usize), String>>,
+    },
     /// `GET /admin/kv-tier`: the disk tier's counters.
     KvTierStats {
         output: tokio::sync::oneshot::Sender<Value>,
@@ -570,6 +576,7 @@ fn build(runtime: &InferenceRuntime, tokenizer: TokenizerBundle, config: ServerC
         .route("/admin/config", get(admin_config))
         .route("/admin/prefix-cache", get(admin_prefix_cache).delete(admin_prefix_cache_clear))
         .route("/admin/kv-tier", get(admin_kv_tier).delete(admin_kv_tier_clear))
+        .route("/admin/prefix-cache/pin", post(admin_prefix_pin))
         .route("/admin/disagg/export", post(admin_disagg_export))
         .route("/admin/disagg/import", post(admin_disagg_import).layer(DefaultBodyLimit::max(DISAGG_MAX_BODY.min(usize::MAX as u64) as usize)))
         .route("/version", get(api::vllm::version))
@@ -1173,6 +1180,11 @@ fn accept_command(
         WorkerCommand::ClearKvTier { output } => {
             let _ = output.send(runtime.clear_kv_tier());
         }
+        WorkerCommand::PinPrefix { tokens, pin, output } => {
+            let result = catch_unwind(AssertUnwindSafe(|| runtime.pin_prefix(&tokens, pin)))
+                .unwrap_or_else(|payload| Err(record_panic(metrics, "pinning a prefix", payload.as_ref())));
+            let _ = output.send(result);
+        }
         WorkerCommand::Submit {
             request_id,
             prompt,
@@ -1731,6 +1743,50 @@ async fn admin_disagg_import(State(state): State<Arc<AppState>>, body: axum::bod
     }
     match answer.await {
         Ok(Ok((imported, present))) => Json(json!({"imported": imported, "already_cached": present})).into_response(),
+        Ok(Err(error)) => api_error(StatusCode::CONFLICT, &error),
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
+    }
+}
+
+/// `POST /admin/prefix-cache/pin` `{"messages":[..]}` or `{"prompt":".."}` (or `{"tokens":[..]}`) `[, "pin": false]`: keeps the cached blocks of this
+/// prompt, the way the chat route would render it, out of eviction; with `"pin": false` they can go again. A pinned prefix is read back from
+/// the memory and disk tiers first when the cache dropped it, so after a restart the same call brings a codebase prefix back. The prompt is
+/// rendered exactly like a request's, so the pinned blocks are the ones the next request will look for. Only the default namespace can be
+/// pinned (a request with a `cache_salt` has its own blocks that this route does not name).
+async fn admin_prefix_pin(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let pin = body.get("pin").and_then(Value::as_bool).unwrap_or(true);
+    let tokens: Vec<i64> = if let Some(ids) = body.get("tokens").and_then(Value::as_array) {
+        let ids: Vec<i64> = ids.iter().filter_map(Value::as_i64).collect();
+        if ids.iter().any(|id| *id < 0 || (*id as usize) >= state.tokenizer.vocab_size()) {
+            return api_error(StatusCode::BAD_REQUEST, "tokens contain an id outside the vocabulary");
+        }
+        ids
+    } else {
+        let text = if let Some(messages) = body.get("messages") {
+            match render_messages(&state, messages.clone(), body.get("tools").cloned(), body.get("chat_template_kwargs").and_then(Value::as_object).cloned()) {
+                Ok(prompt) => prompt,
+                Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+            }
+        } else if let Some(prompt) = body.get("prompt").and_then(Value::as_str) {
+            prompt.to_owned()
+        } else {
+            return api_error(StatusCode::BAD_REQUEST, "messages, prompt or tokens is required");
+        };
+        match state.tokenizer.encode(&text) {
+            Ok(ids) => ids.into_iter().map(i64::from).collect(),
+            Err(error) => return api_error(StatusCode::BAD_REQUEST, &error),
+        }
+    };
+    if tokens.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "the prompt has no tokens");
+    }
+    let total = tokens.len();
+    let (output, answer) = tokio::sync::oneshot::channel();
+    if state.worker.send(WorkerCommand::PinPrefix { tokens, pin, output }).is_err() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker is not running");
+    }
+    match answer.await {
+        Ok(Ok((blocks, full))) => Json(json!({"pinned": pin, "blocks": blocks, "full_blocks": full, "prompt_tokens": total, "complete": blocks == full})).into_response(),
         Ok(Err(error)) => api_error(StatusCode::CONFLICT, &error),
         Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "the inference worker did not answer"),
     }

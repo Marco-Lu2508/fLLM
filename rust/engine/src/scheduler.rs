@@ -658,6 +658,30 @@ impl Scheduler {
         std::mem::take(&mut self.pending_spills)
     }
 
+    /// Keeps the cached blocks of the start of `tokens` out of eviction (the chain as `try_admit` looks it up, from `seed ^ salt`), or
+    /// lets them go again. Returns how many blocks of the chain the cache holds and that were pinned (or unpinned): the chain stops at the
+    /// first block the cache does not hold. Pinned blocks are not free memory: a pool that is pinned full makes new requests wait.
+    pub fn pin_prompt(&mut self, tokens: &[i64], salt: u64, pin: bool) -> usize {
+        let size = self.cfg.block_size;
+        let Some(pc) = self.pc.as_mut() else { return 0 };
+        let mut prev = prefix_seed() ^ salt;
+        let mut done = 0;
+        for b in 0..tokens.len() / size {
+            prev = PrefixCache::hash_chain(prev, &tokens[b * size..(b + 1) * size]);
+            let changed = if pin { pc.pin(prev) } else { pc.unpin(prev) };
+            if !changed && !(pin && pc.is_pinned(prev)) {
+                break;
+            }
+            done += 1;
+        }
+        done
+    }
+
+    /// How many blocks of the pool are pinned.
+    pub fn pinned_blocks(&self) -> usize {
+        self.pc.as_ref().map_or(0, PrefixCache::pinned_len)
+    }
+
     /// A free block, for a block that is read back from the disk tier.
     pub fn alloc_free_block(&mut self) -> Result<i64, SchedulerError> {
         Ok(self.bm.allocator.alloc()? as i64)

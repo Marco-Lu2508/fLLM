@@ -2551,3 +2551,29 @@ async fn beam_search_is_refused_when_the_slots_cannot_hold_the_beams() {
     assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text());
     assert!(reply.json()["error"]["message"].as_str().unwrap().contains("sequence slots"));
 }
+
+#[tokio::test]
+async fn a_prompt_can_be_pinned_over_http_and_the_pin_is_reported() {
+    let h = start(Settings::default());
+    let prompt = "pin this system prompt ".repeat(7);
+    // nothing cached yet: nothing to pin
+    let none = h.post("/admin/prefix-cache/pin", json!({"prompt": prompt})).await;
+    assert_eq!(none.status, StatusCode::OK, "{}", none.text());
+    assert_eq!(none.json()["blocks"], 0);
+    assert_eq!(none.json()["complete"], false);
+    // a request fills the cache with the same prompt, then the pin finds the blocks
+    let filled = h.post("/v1/completions", json!({"prompt": prompt, "max_tokens": 2, "temperature": 0, "ignore_eos": true})).await;
+    assert_eq!(filled.status, StatusCode::OK, "{}", filled.text());
+    let pinned = h.post("/admin/prefix-cache/pin", json!({"prompt": prompt})).await;
+    assert_eq!(pinned.status, StatusCode::OK, "{}", pinned.text());
+    let blocks = pinned.json()["blocks"].as_u64().unwrap();
+    assert!(blocks > 0, "{}", pinned.text());
+    assert_eq!(h.get("/admin/prefix-cache").await.json()["pinned"].as_u64().unwrap(), blocks);
+    let lifted = h.post("/admin/prefix-cache/pin", json!({"prompt": prompt, "pin": false})).await;
+    assert_eq!(lifted.json()["blocks"].as_u64().unwrap(), blocks);
+    assert_eq!(h.get("/admin/prefix-cache").await.json()["pinned"], 0);
+    // bad input is refused
+    assert_eq!(h.post("/admin/prefix-cache/pin", json!({})).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(h.post("/admin/prefix-cache/pin", json!({"tokens": []})).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(h.post("/admin/prefix-cache/pin", json!({"tokens": [4000000]})).await.status, StatusCode::BAD_REQUEST);
+}

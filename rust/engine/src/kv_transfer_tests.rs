@@ -591,3 +591,121 @@ fn the_blocks_of_a_salted_request_do_not_go_to_host_memory() {
     generate(&mut rt, "plain", &other, 2);
     wait_for_the_tier(&mut rt, 1);
 }
+
+/// A prefix that is pinned stays while other traffic pushes the pool through; the same prefix unpinned is gone.
+#[test]
+fn a_pinned_prefix_survives_traffic_that_drops_an_unpinned_one() {
+    let mut rt = runtime();
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let kept = prompt(4 * block + 3);
+    let lost = {
+        let mut p = prompt(4 * block + 3);
+        p[0] = 11;
+        p
+    };
+    generate(&mut rt, "kept", &kept, 2);
+    generate(&mut rt, "lost", &lost, 2);
+    let kept_first = rt.scheduler.cached_prompt_chain(&kept)[0].0;
+    let lost_first = rt.scheduler.cached_prompt_chain(&lost)[0].0;
+    let (done, full) = rt.pin_prefix(&kept, true).unwrap();
+    assert_eq!((done, full), (4, 4));
+    assert_eq!(rt.pinned_blocks(), 4);
+    // traffic: other prompts until the unpinned one is dropped
+    push_out_of_the_cache(&mut rt, lost_first, 4 * block + 3);
+    assert!(rt.scheduler.prefix_block_of(kept_first).is_some(), "the pinned prefix was dropped");
+    let (_, cached) = ask(&mut rt, "again", &kept, 2);
+    assert_eq!(cached, 4 * block, "the pinned prefix was not served");
+    // unpinned, it can go
+    assert_eq!(rt.pin_prefix(&kept, false).unwrap().0, 4);
+    assert_eq!(rt.pinned_blocks(), 0);
+}
+
+/// A prefix that was never cached cannot be pinned, and a pin asks for a prefix the tiers have: after the cache dropped it, pinning reads it back.
+#[test]
+fn pinning_reads_a_dropped_prefix_back_from_the_tiers() {
+    let mut rt = runtime_with_ram_tier(None, 64 << 20);
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 2);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_tier(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    let (done, full) = rt.pin_prefix(&a, true).unwrap();
+    assert_eq!((done, full), (4, 4), "the dropped prefix was not read back for the pin");
+    assert!(rt.scheduler.prefix_block_of(first).is_some());
+    let mut never = prompt(4 * block + 3);
+    never[0] = 97;
+    never[1] = 96;
+    let (done, full) = rt.pin_prefix(&never, true).unwrap();
+    assert_eq!((done, full), (0, 4), "a prefix nobody ever cached was pinned");
+}
+
+/// The pinned prefix does not make the pool unusable: a request that needs more than what is left waits or is served, it is not stuck for
+/// good once the pin is lifted.
+#[test]
+fn lifting_a_pin_gives_the_blocks_back() {
+    let mut rt = runtime();
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 2);
+    let free_pinned = {
+        rt.pin_prefix(&a, true).unwrap();
+        rt.clear_prefix_cache().unwrap();
+        rt.available_blocks()
+    };
+    // clearing the cache empties the pins as well (the blocks are given back), so the pool is whole again
+    assert_eq!(rt.pinned_blocks(), 0);
+    assert_eq!(free_pinned, rt.model.pool_blocks() - 1);
+}
+
+/// With nobody running, a prefix of many blocks comes back in one round; while others run, only a bounded part.
+#[test]
+fn a_long_prefix_is_read_back_in_one_go_when_nobody_runs() {
+    let mut rt = runtime_with_ram_tier(None, 64 << 20);
+    let block = rt.scheduler.cfg.block_size;
+    // the tiny model cannot decode more than four blocks in this configuration; the limits themselves are constants
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 2);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_tier(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    rt.submit_with_sampling("again".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    assert!(rt.scheduler.running.is_empty());
+    let before = rt.kv_reloaded;
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 4, "the chain was cut although nobody runs");
+    while rt.active_requests() > 0 {
+        rt.step().unwrap();
+    }
+}
+
+/// The blocks the restart read puts into the cache belong to the cache alone: they can be evicted when the pool needs room and they come
+/// back to the pool when the cache is cleared. (They used to keep the reference of their allocation as well, so the cache could neither
+/// evict nor clear them: the pool a restart warmed was lost for good.)
+#[test]
+fn the_blocks_the_restart_read_put_into_the_cache_can_be_evicted_and_cleared() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-warm-leak-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut first = runtime_with_disk_tier(&dir);
+    first.kv_warmed = true;
+    let block = first.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut first, "a", &a, 2);
+    wait_for_the_disk(&mut first, 4);
+    drop(first);
+
+    let mut second = runtime_with_disk_tier(&dir);
+    assert_eq!(second.warm_prefix_cache(128).unwrap(), 4);
+    second.kv_warmed = true;
+    let head = second.scheduler.cached_prompt_chain(&a)[0].0;
+    // other traffic pushes the oldest chain out, the warmed one is the oldest
+    push_out_of_the_cache(&mut second, head, 4 * block + 3);
+    assert!(second.scheduler.prefix_block_of(head).is_none());
+    // and clearing gives the whole pool back
+    second.clear_prefix_cache().unwrap();
+    assert_eq!(second.available_blocks(), second.model.pool_blocks() - 1, "blocks were lost");
+    drop(second);
+    let _ = std::fs::remove_dir_all(&dir);
+}
