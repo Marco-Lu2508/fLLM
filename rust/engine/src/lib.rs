@@ -33,6 +33,7 @@ pub mod telemetry;
 pub mod chat_template;
 pub mod bench;
 pub mod bench_serve;
+pub mod bench_agent;
 pub mod bench_kernel;
 pub mod comm;
 pub mod compute;

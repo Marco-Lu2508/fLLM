@@ -321,6 +321,9 @@ pub(crate) struct Sample {
     pub(crate) elapsed: f64,
     pub(crate) done: bool,
     pub(crate) error: Option<String>,
+    /// The visible text of the answer (the `content` deltas, `text` of completions), in order: the agent benchmark sends it back in the
+    /// next turn of a conversation. Reasoning text is not part of it.
+    pub(crate) text: String,
 }
 impl Sample {
     fn ttft(&self) -> Option<f64> {
@@ -416,6 +419,9 @@ fn consume(data: &str, at: f64, sample: &mut Sample) -> Result<(), String> {
                 .or(logprobs)
                 .filter(|a| !a.is_empty())
                 .map(|a| a.len() as u64);
+            if let Some(piece) = delta.get("content").or_else(|| choice.get("text")).and_then(Value::as_str) {
+                sample.text.push_str(piece);
+            }
             let content = [
                 delta.get("content"),
                 delta.get("reasoning_content"),

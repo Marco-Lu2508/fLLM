@@ -73,3 +73,38 @@ scores NVFP4 variants by perplexity against a reference (including vLLM).
 
 Include the JSON file from `--json` (or the matrix output), the exact commands and the information above in a hardware report issue
 ([CONTRIBUTING.md](../CONTRIBUTING.md)). The `streaming-benchmark` workflow can run the client on a self-hosted runner ([ci.md](ci.md)).
+
+## Agent load: `fllm-rs bench-agent`
+
+`bench-serve` sends independent requests. A chat front end or a coding agent sends *conversations*: one long system prompt (the tool list)
+that is the same for all users, and in every turn the whole history again, the earlier answers included. What a server can reuse between the
+turns decides how long a turn takes, and a benchmark of single prompts cannot show it. `bench-agent` measures every turn on its own, against
+any OpenAI-compatible server, so that fLLM, vLLM and SGLang can be run with the same command:
+
+```sh
+fllm-rs bench-agent --url http://HOST:8000 --users 32 --turns 8 --system-words 3000 --answer-tokens 128 \
+    --passes 2 --label "fLLM mi300x tp8" --json agent-fllm.json --markdown agent-fllm.md
+```
+
+Read the table by turn and by pass. Turn 1 of the cold pass has only the shared system prompt to reuse; turn 2 and later reuse the history;
+the warm pass repeats the same conversations and finds what the cold pass left in the caches.
+
+For a comparison that holds up:
+
+* **Answers.** `--answers fixed` (default) puts a text made from the seed into the history, the same for every server, so all of them see
+  byte-identical prompts and a difference in the time of a turn is the server's. `--answers server` sends back what the server really wrote;
+  then two servers see different prompts as soon as their answers differ, and the header of the run says so.
+* **Caches on.** Start vLLM with prefix caching (`--enable-prefix-caching`; on by default in recent versions) and SGLang with its radix cache
+  (default). A comparison against a server whose cache is off measures the cache, not the server. `cached` shows what each server reports;
+  a server that does not report it shows 0, which means unknown there.
+* **Same settings.** Same model and quantisation, same `--users`, `--turns`, `--seed`, the same context length and max-batch settings.
+  Pass `--seed` unchanged between servers; a different seed is a different set of texts.
+* **Cold means cold.** Restart the server before the cold pass. The warm pass is the second one of the same run.
+* **Output length.** Every turn asks for `--answer-tokens` tokens and ignores the end-of-sequence token (`min_tokens`, `ignore_eos`), so the
+  work per turn is the same on every server. A server that ignores these fields makes shorter turns; compare `e2e` with care then.
+
+Measured on this repository's CPU host (Qwen2.5-0.5B Q8_0, 3 users x 4 turns, 800-word system prompt, 24 tokens): turn 1 cold 11.4 s TTFT with
+38 % cached (the other users' system prompt), turn 2 1.8 s with 89 % cached, turns 3 and 4 1.3 s; the warm pass 0.3-0.5 s with 99-100 %
+cached. That shows the tool reads the cache effect; it says nothing about a GPU server or about another engine, and no number from vLLM or
+SGLang has been measured here.
+

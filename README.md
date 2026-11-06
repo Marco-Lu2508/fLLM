@@ -145,6 +145,7 @@ speech are not supported; for multimodal checkpoints only the text model is conv
 | `serve --model MODEL` | HTTP server (the word `serve` is optional) |
 | `pull`, `list`, `rm`, `ps`, `show`, `search` | model cache and catalog: download, list, remove, running servers, details, catalog names |
 | `chat`, `bench`, `bench-report`, `ppl` | terminal client for a running server, load benchmark and comparison, perplexity |
+| `bench-agent` | the load of chat front ends and coding agents against any OpenAI-compatible server (fLLM, vLLM, SGLang): users with a shared system prompt and conversations over several turns, each turn measured on its own, cold and warm pass, fixed answers so that every server sees byte-identical prompts ([docs/benchmarking.md](docs/benchmarking.md)) |
 | `bench-serve` | deployment sizing like `trtllm-bench` / `vllm bench serve`: input / output length distributions, Poisson request rate or concurrency sweep, TTFT / ITL / TPOT percentiles, goodput against objectives, JSON + Markdown, `--suggest` for `--max-seqs` / `--max-batched-tokens` ([docs/datacenter-gap.md](docs/datacenter-gap.md)) |
 | `plan-cluster` | how a model would be spread over a node of identical GPUs (TP x EP x PP x attention DP, memory per rank, roofline estimate; MI355X, B200, H200, H100 ...) |
 | `convert`, `quantize`, `inspect`, `formats` | checkpoint to GGUF, quantizer, file inspection, type list |

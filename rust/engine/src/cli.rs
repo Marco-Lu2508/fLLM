@@ -144,6 +144,10 @@ pub fn dispatch(args: &[String]) -> Result<bool, String> {
             crate::bench_serve::run(&args[1..])?;
             Ok(true)
         }
+        "bench-agent" => {
+            crate::bench_agent::run(&args[1..])?;
+            Ok(true)
+        }
         "selftest-cpu" => {
             crate::cpu_selftest::run(&args[1..])?;
             Ok(true)
@@ -199,6 +203,7 @@ TYPE: q4_0, q4_1, q5_0, q5_1, q8_0, q4_k_s, q4_k_m, q5_k_s, q5_k_m, q6_k. Float 
         "push" => "usage: fllm-rs push MODEL\nPush a model to an upstream registry.",
         "bench" => crate::bench::HELP,
         "bench-serve" => crate::bench_serve::HELP,
+        "bench-agent" => crate::bench_agent::HELP,
         "selftest-cpu" => crate::cpu_selftest::HELP,
         "selftest-parallel" => crate::parallel::selftest::HELP,
         "selftest-comm" => crate::comm::selftest::HELP,
@@ -1107,7 +1112,7 @@ fn completions(args: &[String]) -> Result<(), String> {
     let shell = args.first().map(String::as_str).unwrap_or("bash");
     let commands = [
         "serve", "run", "pull", "list", "rm", "ps", "show", "search", "convert", "quantize",
-        "inspect", "formats", "chat", "bench", "bench-serve", "bench-report", "devices", "completions",
+        "inspect", "formats", "chat", "bench", "bench-serve", "bench-agent", "bench-report", "devices", "completions",
         "merge-lora", "gguf-set", "gguf-split", "gguf-merge", "selftest-cpu", "selftest-gpu", "selftest-parallel", "selftest-comm", "plan-cluster",
     ];
     match shell {

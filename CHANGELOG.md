@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Added
+- **`fllm-rs bench-agent`: the load of an agent against any OpenAI-compatible server.** Users with one long shared system prompt and conversations over several turns; every turn is measured on its own (TTFT, end to end, the share the server reports as `cached_tokens`), in a cold and a warm pass. By default the earlier answers in the history are fixed texts, so fLLM, vLLM and SGLang see byte-identical prompts; `--answers server` sends back what the server wrote. On the CPU with a 0.5B model: turn 1 cold 11.4 s, turn 2 1.8 s (89 % cached), the same conversations warm 0.4 s.
 - **The suffix cache survives a restart (`FLLM_SUFFIX_DIR`).** The finished generations behind `--speculative suffix` are kept in one file per model (named after the model digest, so another model's token ids are never read), with their `cache_salt` namespaces. Same question in two processes: 2.17 -> 6.58 tokens per verification step, 3.00 s -> 1.63 s.
 - **Streamed requests read and fill the output cache.** A hit is replayed through the stream code (reasoning, tools, stop strings, usage chunk); a stream that is abandoned or fails stores nothing. 1559 ms -> 1 ms for the same stream next to a stored answer. Streams with `logprobs` stay out.
 - **The suffix cache keeps `cache_salt` namespaces apart.** What one caller generated no longer drafts for another.
