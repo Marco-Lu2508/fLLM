@@ -178,6 +178,8 @@ pub fn attention_with(
         while rows < 16 / g
             && first + rows < batch
             && lengths[first + rows] == lengths[first + rows - 1] + 1
+            // a window moves the first block of a row: rows that start their blocks elsewhere would sum in another order than alone
+            && start_of(first + rows) / 64 == start_of(first) / 64
         {
             let n = (lengths[first + rows] as usize).div_ceil(block_size);
             if tables[first * stride..first * stride + n]
@@ -244,11 +246,12 @@ pub fn attention_with(
         Vec::new()
     };
     let base = tiles.len() * kv_heads;
-    let max_len = tiles.iter().map(|t| t.length).max().unwrap_or(0);
-    let segments = (rayon::current_num_threads() * 4)
-        .div_ceil(base.max(1))
-        .max(1)
-        .min((max_len / 256).max(1));
+    // The key range of a row is cut at fixed positions (every SEGMENT keys from the first block), so a row sums its blocks and merges its
+    // segments in the same order whatever else is in the call and however many threads run: the verification pass of speculative
+    // decoding must give a row the bits plain decoding gives it. (The cut used to depend on the number of tiles, the thread count and the
+    // length of the last row of the tile.) Segments past the end of a row stay empty and cost nothing.
+    const SEGMENT: usize = 256;
+    let segments = tiles.iter().map(|t| (t.length - start_of(t.first) / 64 * 64).div_ceil(SEGMENT)).max().unwrap_or(1).max(1);
     let scale = options.scale.unwrap_or_else(|| (dim as f32).sqrt().recip());
     let parts = crate::cpu_spin::collect(base * segments, |it| {
         let ti = tiles.len() - 1 - it / (kv_heads * segments);
@@ -257,9 +260,13 @@ pub fn attention_with(
         let tile = &tiles[ti];
         // the rows of a tile are consecutive positions: the first one has the earliest window start
         let lo = start_of(tile.first) / 64 * 64;
-        let span = (tile.length - lo).div_ceil(segments).div_ceil(64) * 64;
+        let span = SEGMENT;
         let end = tile.length.min(lo + (seg + 1) * span);
         let nr = tile.rows * g;
+        if lo + seg * span >= end {
+            // nothing of this tile in this segment: no sum, no maximum (the merge skips it)
+            return Partial { max: vec![f32::NEG_INFINITY; nr], sum: vec![0.0; nr], acc: Vec::new() };
+        }
         let mut p = Partial {
             max: vec![f32::NEG_INFINITY; nr],
             sum: vec![0.0; nr],
@@ -1121,6 +1128,47 @@ mod window_tests {
             }
         }
         out
+    }
+
+    /// A row must get the same bits whatever else is in the call: alone (plain decoding), next to the rows of a verification pass or
+    /// next to other sequences. The split of the key range into segments used to depend on the number of tiles of the call.
+    #[test]
+    fn a_row_gets_the_same_bits_alone_and_next_to_other_rows() {
+        let (heads, kv_heads, dim, block_size) = (14, 2, 64, 16);
+        let slots = 2048;
+        let mut state = 11u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let key_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+        let value_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
+        let stride = slots / block_size;
+        let table: Vec<i64> = (0..stride as i64).collect();
+        let key = Cache { data: &key_words, slots, kv_heads, dim, q8: false };
+        let value = Cache { data: &value_words, ..key };
+        let run = |lengths: &[i64], q: &[f32]| {
+            let tables: Vec<i64> = lengths.iter().flat_map(|_| table.clone()).collect();
+            attention_with(q, key, value, &tables, lengths, heads, block_size, stride, &Options::default()).expect("the tiled path takes this shape")
+        };
+        let row = heads * dim;
+        for threads in [2usize, 3, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| {
+                // a verification pass: seven consecutive positions of one sequence; and three unrelated sequences
+                for lengths in [vec![1494i64, 1495, 1496, 1497, 1498, 1499, 1500], vec![1500, 900, 1200], vec![1500, 1501]] {
+                    let q: Vec<f32> = (0..lengths.len() * row).map(|_| rnd()).collect();
+                    let together = run(&lengths, &q);
+                    for (b, &length) in lengths.iter().enumerate() {
+                        let alone = run(&[length], &q[b * row..(b + 1) * row]);
+                        assert!(
+                            alone.iter().zip(&together[b * row..(b + 1) * row]).all(|(a, c)| a.to_bits() == c.to_bits()),
+                            "{threads} threads, lengths {lengths:?}: row {b} (length {length}) differs from the same row alone"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     #[test]
