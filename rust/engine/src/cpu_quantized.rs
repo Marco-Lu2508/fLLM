@@ -346,7 +346,12 @@ pub fn linear_mixed(
     // the batch-one path. Decided here, before the architecture is chosen, so that no x86 panel, tile, VNNI or AVX-512 kernel and
     // no NEON/i8mm kernel can combine the rows of several tokens.
     let batch = x.len().checked_div(cols).unwrap_or(0);
-    if batch > 1 && crate::cpu_kernels::batch_invariant() {
+    // The lattice IQ formats are the exception: their panel kernel decodes a block once and then runs every token by itself with the
+    // same order of sums, so a token gets its single-token bits whatever the batch (`projection_kernels_give_a_token_the_same_bits\
+    // _alone_and_in_a_batch` prints no DIFF line for them with the default kernels). Splitting them only re-decodes the lattice
+    // once per token.
+    let lattice_only = kinds.iter().all(|&kind| crate::cpu_iqgrid::handles(kind));
+    if batch > 1 && crate::cpu_kernels::batch_invariant() && !lattice_only {
         if let Some(output) = exact_by_row_blocks(projections, kinds, x, cols, batch) {
             return Some(output);
         }
