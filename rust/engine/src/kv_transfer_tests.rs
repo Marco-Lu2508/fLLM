@@ -168,8 +168,9 @@ fn a_restarted_runtime_serves_the_prefix_from_the_disk_tier_and_gives_the_same_t
     let mut first = runtime_with_disk_tier(&dir);
     let block = first.scheduler.cfg.block_size;
     let reference = generate(&mut first, "one", &long, 8);
-    // the spill writer is a thread behind a queue: wait for the blocks of the prompt
-    let want = long.len() / block;
+    // the spill writer is a thread behind a queue: wait for the blocks of the prompt and of the answer (a block that fills up while
+    // the answer is generated is registered too, so that the next turn of a conversation finds it)
+    let want = (long.len() + reference.len() - 1) / block;
     for _ in 0..200 {
         first.spill_pending();
         if first.kv_tier.entries().len() >= want {
@@ -211,4 +212,33 @@ fn a_restarted_runtime_serves_the_prefix_from_the_disk_tier_and_gives_the_same_t
     };
     drop(damaged);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A chat client sends the whole conversation again every turn, so the next prompt starts with the previous prompt *and the answer the
+/// model gave to it*. The blocks that fill up while the answer is generated must therefore be registered in the prefix cache too, not
+/// only the blocks of the prompt: otherwise every turn recomputes the previous answer. (The decode step used to commit its token
+/// without registering a block that had just become full; only prefill chunks and verified drafts did.)
+#[test]
+fn the_blocks_filled_while_generating_serve_the_next_turn() {
+    let mut rt = runtime();
+    let block = rt.scheduler.cfg.block_size;
+    let first = prompt(2 * block + 3);
+    let answer = generate(&mut rt, "turn1", &first, 5 * block);
+    assert_eq!(answer.len(), 5 * block);
+    // the next turn: the previous prompt, the answer, and a new question
+    let mut second = first.clone();
+    second.extend_from_slice(&answer);
+    second.extend_from_slice(&[11, 12, 13]);
+    let hits_before = rt.scheduler.prefix_cache_hits;
+    rt.submit_with_sampling("turn2".into(), second.clone(), 2, SamplingParams::default()).unwrap();
+    let mut cached = 0;
+    while rt.active_requests() > 0 {
+        for event in rt.step().unwrap() {
+            cached = cached.max(event.cached_prompt_tokens);
+        }
+    }
+    assert_eq!(rt.scheduler.prefix_cache_hits, hits_before + 1);
+    // all full blocks of prompt and answer may be reused, but the last token of the prompt is always computed
+    let reusable = (first.len() + answer.len()) / block * block;
+    assert_eq!(cached, reusable, "the second turn reused {cached} tokens of {reusable} that were computed in the first");
 }

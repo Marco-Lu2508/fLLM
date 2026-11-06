@@ -850,6 +850,12 @@ impl Scheduler {
             seq.blocks = self.bm.get_table(sid)?.blocks.clone();
         }
         self.bm.get_table_mut(sid)?.num_tokens = nt as i64;
+        // A block that has just become full holds what the model generated: register it, so the next turn of a conversation (the same
+        // prompt, this answer, a new question) finds the answer in the cache instead of computing it again. Only when a block was
+        // completed by this token: the registration walks the whole chain of the sequence.
+        if (nt - 1).is_multiple_of(self.cfg.block_size) && nt > 1 {
+            self.insert_full_blocks(sid)?;
+        }
         self.ngram_upto(sid);
         Ok(())
     }
