@@ -103,3 +103,21 @@ text equal: True      "warmed 88 prefix blocks from the disk tier"
 13 times faster for the first request after a restart, and the same text.
 
 Nothing in this document needs a GPU.
+
+## Reading back while the server runs
+
+A restart is not the only time the cache has lost a block: when the pool is full the prefix cache drops its oldest leaves, and a long
+conversation or a busy server drops prefixes it will be asked for again. The tier writes every block when it is registered, so a dropped
+block is still on disk as long as the byte budget keeps it. `Runtime::reload_for_waiting` runs before every scheduling round: for each
+request that waits it walks the chain of the prompt as `try_admit` looks it up, finds the first block the cache does not hold, and reads
+the following ones from the tier (`KvTier::load_for`, which also checks the tokens the file carries against the prompt, so a file under the
+right hash with other tokens is not taken), imports them and registers the path. The request is then admitted with the whole prefix cached.
+
+Limits, on purpose: at most 256 blocks a round; never more than the free pool minus the watermark and one block, because the request needs
+room for what it computes and blocks that a running sequence uses cannot be evicted; only chains without a `cache_salt` (a salted block is
+not written, since a restarted server cannot know the salt); media prompts are skipped. The read runs on the worker thread between two
+rounds, so a slow disk delays the round; the cost is a file read per block against a prefill of the same block.
+
+Tests (`kv_transfer_tests.rs`): a prefix the cache dropped under pressure is read back and the output equals a full prefill; a file with
+other tokens under the right hash is not taken; with two free blocks only one is taken. Not measured: the time saved on a real model with a
+real disk, and the effect on a busy server. `reloaded_blocks` in `GET /admin/kv-tier` (the tier statistics) counts what was taken.

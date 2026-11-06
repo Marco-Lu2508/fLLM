@@ -96,6 +96,8 @@ pub struct InferenceRuntime {
     decoder: Option<crate::rust_decoder::RustDecoder>,
     /// The disk tier for cached prefix blocks (off unless `FLLM_KV_DISK_DIR` is set).
     kv_tier: std::sync::Arc<crate::mem::kv_tier::KvTier>,
+    /// Blocks the disk tier gave back to a waiting request after the prefix cache had dropped them (`reload_for_waiting`).
+    kv_reloaded: u64,
     /// Writes for the disk tier, off the step path: file I/O must never delay a token.
     spill_tx: Option<std::sync::mpsc::SyncSender<SpillJob>>,
     kv_warmed: bool,
@@ -224,6 +226,7 @@ impl InferenceRuntime {
             spec_delta: Default::default(),
             decoder: None,
             kv_tier,
+            kv_reloaded: 0,
             spill_tx,
             kv_warmed: false,
             suffix_file: None,
@@ -1519,7 +1522,9 @@ impl InferenceRuntime {
 
     /// What the disk tier holds, for `GET /admin/kv-tier`.
     pub fn kv_tier_stats(&self) -> serde_json::Value {
-        self.kv_tier.stats()
+        let mut stats = self.kv_tier.stats();
+        stats["reloaded_blocks"] = serde_json::json!(self.kv_reloaded);
+        stats
     }
 
     /// Empties the disk tier; returns how many blocks were removed.
@@ -1688,6 +1693,78 @@ impl InferenceRuntime {
         Ok((taken.len(), present))
     }
 
+    /// The disk tier, pulled through while the server runs: a waiting request whose prompt starts with blocks that the prefix cache dropped
+    /// under memory pressure gets them back from disk before it is admitted, instead of computing them again. (The tier writes every block
+    /// when it is registered, so a dropped block is still there as long as the disk budget keeps it.) Only chains without a `cache_salt` are
+    /// on disk. At most 256 blocks a round, and never so many that the free pool is used up: a block the cache holds can be evicted again,
+    /// one a running sequence needs cannot. The read happens on the worker thread, between two rounds.
+    fn reload_for_waiting(&mut self) {
+        const PER_ROUND: usize = 256;
+        if !self.kv_tier.enabled() || !self.scheduler.cfg.prefix_cache || self.scheduler.waiting.is_empty() {
+            return;
+        }
+        let waiting: Vec<i64> = self.scheduler.waiting.iter().copied().collect();
+        let mut budget = PER_ROUND;
+        for sid in waiting {
+            if budget == 0 {
+                break;
+            }
+            budget -= self.reload_prompt(sid, budget);
+        }
+    }
+
+    /// Returns how many blocks of the prompt of `sid` were taken from the disk tier.
+    fn reload_prompt(&mut self, sid: i64, budget: usize) -> usize {
+        let size = self.scheduler.cfg.block_size;
+        let Some(sequence) = self.scheduler.sequences.get(&sid) else { return 0 };
+        if sequence.prefix_salt != 0 || sequence.has_media {
+            return 0;
+        }
+        // the chain as `try_admit` looks it up, and how much of it the cache holds
+        let full = sequence.tokens.len().saturating_sub(1) / size;
+        let mut prev = crate::scheduler::prefix_seed();
+        let mut chain: Vec<(u64, Vec<i64>, Option<i64>)> = Vec::with_capacity(full);
+        for b in 0..full {
+            let segment = sequence.tokens[b * size..(b + 1) * size].to_vec();
+            prev = crate::mem::prefix_cache::PrefixCache::hash_chain(prev, &segment);
+            chain.push((prev, segment, self.scheduler.prefix_block_of(prev)));
+        }
+        // the cache is a tree, so what is missing is the end of the chain; its first missing block has a cached parent
+        let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) else { return 0 };
+        let spare = self.scheduler.bm.allocator.available().saturating_sub(self.scheduler.cfg.watermark_blocks + 1);
+        let limit = budget.min(spare);
+        let mut taken: Vec<i64> = Vec::new();
+        for (hash, segment, cached) in &chain[first..] {
+            if taken.len() >= limit || cached.is_some() {
+                break;
+            }
+            let Some(bytes) = self.kv_tier.load_for(*hash, segment) else { break };
+            let Ok(fresh) = self.scheduler.alloc_free_block() else { break };
+            if self.kv_import_block(fresh as usize, &bytes).is_err() {
+                self.scheduler.free_block(fresh);
+                break;
+            }
+            taken.push(fresh);
+        }
+        if taken.is_empty() {
+            return 0;
+        }
+        let mut path: Vec<(u64, Vec<i64>, i64)> = chain[..first].iter().filter_map(|(h, s, b)| b.map(|b| (*h, s.clone(), b))).collect();
+        path.extend(taken.iter().zip(&chain[first..]).map(|(bid, (h, s, _))| (*h, s.clone(), *bid)));
+        let registered = self.scheduler.extend_prefix_chain(&path);
+        // the cache took its own reference on every block it registered; give back the one from the allocation
+        for bid in &taken {
+            self.scheduler.free_block(*bid);
+        }
+        match registered {
+            Ok(true) => {
+                self.kv_reloaded += taken.len() as u64;
+                taken.len()
+            }
+            _ => 0,
+        }
+    }
+
     /// Writes the blocks the scheduler just registered in the prefix cache to the disk tier, when one is configured.
     /// They are alive (the cache holds a reference), so their KV is still exactly what belongs to their hash.
     fn spill_pending(&mut self) {
@@ -1798,6 +1875,7 @@ impl InferenceRuntime {
                 Err(error) => tracing::warn!("could not warm the prefix cache from disk: {error}"),
             }
         }
+        self.reload_for_waiting();
         self.image_embeddings
             .retain(|sid, _| self.scheduler.sequences.contains_key(sid));
         self.draft_q.clear();

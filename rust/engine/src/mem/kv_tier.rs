@@ -146,6 +146,16 @@ impl KvTier {
 
     /// Reads one block back. A file that does not carry the expected header is ignored, not trusted.
     pub fn load(&self, hash: u64) -> Option<Vec<u8>> {
+        self.read(hash, None)
+    }
+
+    /// Like `load`, for a block whose tokens the caller knows: a file that carries other tokens under this hash (a collision of the 64-bit
+    /// chain hash, or a directory that was used by something else) is not the block that is meant. It is left alone and counts as a miss.
+    pub fn load_for(&self, hash: u64, tokens: &[i64]) -> Option<Vec<u8>> {
+        self.read(hash, Some(tokens))
+    }
+
+    fn read(&self, hash: u64, tokens: Option<&[i64]>) -> Option<Vec<u8>> {
         let path = self.file(hash)?;
         let mut buffer = Vec::new();
         if fs::File::open(&path).and_then(|mut file| file.read_to_end(&mut buffer)).is_err() {
@@ -157,10 +167,13 @@ impl KvTier {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         };
+        if tokens.is_some_and(|expected| expected != stored.tokens.as_slice()) {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         // touching the file is what keeps the LRU honest
         let _ = filetime_now(&path);
         self.hits.fetch_add(1, Ordering::Relaxed);
-        let _ = stored;
         Some(payload.to_vec())
     }
 

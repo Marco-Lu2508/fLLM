@@ -310,3 +310,125 @@ fn the_blocks_of_a_salted_request_do_not_go_to_the_disk_tier() {
     drop(rt);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Fills the prefix cache with other prompts until the first block of `first` has been dropped (the pool is small; the oldest leaves go
+/// first, so when the first block is gone the whole chain is).
+fn push_out_of_the_cache(rt: &mut InferenceRuntime, first: u64, length: usize) {
+    let mut other = 0usize;
+    while rt.scheduler.prefix_block_of(first).is_some() {
+        other += 1;
+        assert!(other < 400, "the cache never dropped the prompt; the test cannot say anything");
+        let mut p = prompt(length);
+        p[0] = 10 + (other % 90) as i64;
+        p[1] = 10 + (other / 90 % 90) as i64;
+        generate(rt, &format!("push{other}"), &p, 2);
+    }
+}
+
+fn wait_for_the_disk(rt: &mut InferenceRuntime, blocks: usize) {
+    for _ in 0..400 {
+        rt.spill_pending();
+        if rt.kv_tier.entries().len() >= blocks {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("{} of {blocks} blocks reached the disk", rt.kv_tier.entries().len());
+}
+
+fn ask(rt: &mut InferenceRuntime, id: &str, prompt: &[i64], max_tokens: usize) -> (Vec<i64>, usize) {
+    rt.submit_with_sampling(id.into(), prompt.to_vec(), max_tokens, SamplingParams::default()).unwrap();
+    let (mut tokens, mut cached) = (Vec::new(), 0);
+    while rt.active_requests() > 0 {
+        for event in rt.step().unwrap() {
+            tokens.push(event.token_id);
+            cached = cached.max(event.cached_prompt_tokens);
+        }
+    }
+    (tokens, cached)
+}
+
+/// The cache drops blocks when the pool is full; the disk tier still has them. A request for such a prompt gets them back from disk
+/// before it is admitted (no restart involved), and generates what a full prefill generates.
+#[test]
+fn a_prefix_the_cache_dropped_under_pressure_is_read_back_from_disk() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    rt.kv_warmed = true; // not the restart path: the server keeps running
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 4);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    assert!(rt.scheduler.prefix_block_of(first).is_none());
+    let before = rt.kv_reloaded;
+    let (tokens, cached) = ask(&mut rt, "again", &a, 4);
+    assert_eq!(tokens, reference, "generation from blocks read back from disk differs from a full prefill");
+    assert_eq!(cached, 4 * block, "the dropped blocks were not read back");
+    assert_eq!(rt.kv_reloaded - before, 4);
+    assert_eq!(rt.kv_tier_stats()["reloaded_blocks"], rt.kv_reloaded);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file under the right hash that carries other tokens is not the block that is meant: nothing is read back, the request is computed.
+#[test]
+fn a_block_file_with_other_tokens_is_not_read_back() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-reload-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 4);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    // the right KV under the right hash, with the wrong tokens
+    let stored = rt.kv_tier.peek(first).expect("the first block on disk");
+    let payload = rt.kv_tier.load(first).unwrap();
+    let mut wrong = stored.tokens.clone();
+    wrong[0] += 1;
+    assert!(rt.kv_tier.spill(first, stored.parent, &wrong, &payload));
+    let (tokens, cached) = ask(&mut rt, "again", &a, 4);
+    assert_eq!(tokens, reference);
+    assert_eq!(cached, 0, "a block file with other tokens was taken");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reading blocks back must not use up the free pool: the request that waits needs a block of its own for the part it computes, and
+/// blocks that a running sequence needs cannot be evicted. With two free blocks left only one is taken, whatever the chain is long.
+#[test]
+fn reading_blocks_back_leaves_room_for_the_request_that_waits() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-reload-room-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    generate(&mut rt, "a", &a, 4);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    // squeeze the pool: hold every free block but two
+    let mut held = Vec::new();
+    while rt.available_blocks() > 2 {
+        held.push(rt.scheduler.alloc_free_block().unwrap());
+    }
+    rt.submit_with_sampling("waits".into(), a.clone(), 2, SamplingParams::default()).unwrap();
+    let before = rt.kv_reloaded;
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 1, "two free blocks: one may be taken, one is left for the request");
+    assert_eq!(rt.available_blocks(), 1, "the pool was used up");
+    for block in held {
+        rt.scheduler.free_block(block);
+    }
+    while rt.active_requests() > 0 {
+        rt.step().unwrap();
+    }
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}

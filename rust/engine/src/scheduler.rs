@@ -701,7 +701,7 @@ impl Scheduler {
         let cell = std::cell::RefCell::new(&mut *bm);
         let mut claim = |bid: i64| cell.borrow_mut().allocator.inc_ref(bid).map_err(PrefixCacheError::from);
         let mut release = |bid: i64| cell.borrow_mut().allocator.dec_ref(bid).map_err(PrefixCacheError::from);
-        pc.insert_path(&entries, &mut claim, &mut release)?;
+        pc.insert_path_from(prefix_seed(), &entries, &mut claim, &mut release)?;
         Ok(true)
     }
 
