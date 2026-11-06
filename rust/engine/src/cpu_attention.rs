@@ -496,7 +496,7 @@ fn score_half(q: &[f32], k: &[u16], path: Path) -> f32 {
 /// accumulator and the order of additions of `score_half`, so a score is the same bit pattern as when the query runs alone.
 fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize, scale: f32, path: Path) {
     #[cfg(target_arch = "x86_64")]
-    if matches!(path, Path::Avx2 | Path::AvxVnni) && k.len().is_multiple_of(8) && k.len() <= 256 && queries.len() <= 16 {
+    if matches!(path, Path::Avx2 | Path::AvxVnni) && k.len().is_multiple_of(8) && k.len() <= 256 && queries.len() <= 16 && queries.iter().all(|q| q.len() == k.len()) {
         // SAFETY: `Path::detect` returned an AVX2 path, so AVX2, FMA and F16C are present; the lengths are checked above.
         unsafe { x86::score_half_tile(queries, k, out, stride, scale) };
         return;
@@ -789,16 +789,40 @@ mod x86 {
     /// loop of `score_half` over it: one accumulator, the same fused multiply-add per 8 values, the same horizontal sum.
     #[target_feature(enable = "avx2,fma,f16c")]
     pub(super) unsafe fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize, scale: f32) {
-        let mut key = [0.0f32; 256];
+        // The buffer is written for `k.len()` values before it is read, so it needs no zero fill (1 KB per key row otherwise).
+        let mut key = std::mem::MaybeUninit::<[f32; 256]>::uninit();
+        let key = key.as_mut_ptr().cast::<f32>();
         for j in (0..k.len()).step_by(8) {
-            _mm256_storeu_ps(key.as_mut_ptr().add(j), _mm256_cvtph_ps(_mm_loadu_si128(k.as_ptr().add(j).cast())));
+            _mm256_storeu_ps(key.add(j), _mm256_cvtph_ps(_mm_loadu_si128(k.as_ptr().add(j).cast())));
         }
-        for (r, q) in queries.iter().enumerate() {
-            let mut acc = _mm256_setzero_ps();
-            for j in (0..q.len()).step_by(8) {
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(q.as_ptr().add(j)), _mm256_loadu_ps(key.as_ptr().add(j)), acc);
+        let mut r = 0;
+        while r < queries.len() {
+            let left = queries.len() - r;
+            let n = if left >= 7 { 7 } else if left >= 4 { 4 } else if left >= 2 { 2 } else { 1 };
+            match n {
+                7 => score_block::<7>(&queries[r..], key, k.len(), &mut out[r * stride..], stride, scale),
+                4 => score_block::<4>(&queries[r..], key, k.len(), &mut out[r * stride..], stride, scale),
+                2 => score_block::<2>(&queries[r..], key, k.len(), &mut out[r * stride..], stride, scale),
+                _ => score_block::<1>(&queries[r..], key, k.len(), &mut out[r * stride..], stride, scale),
             }
-            out[r * stride] = hsum(acc) * scale;
+            r += n;
+        }
+    }
+
+    /// `N` queries against one converted key row: one load of the key values serves all `N` accumulators. Each query still has its own
+    /// accumulator and walks the values in the same order, so its sum is the sum of `score_half`.
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    unsafe fn score_block<const N: usize>(queries: &[&[f32]], key: *const f32, len: usize, out: &mut [f32], stride: usize, scale: f32) {
+        let mut acc = [_mm256_setzero_ps(); N];
+        for j in (0..len).step_by(8) {
+            let kv = _mm256_loadu_ps(key.add(j));
+            for i in 0..N {
+                acc[i] = _mm256_fmadd_ps(_mm256_loadu_ps(queries[i].as_ptr().add(j)), kv, acc[i]);
+            }
+        }
+        for i in 0..N {
+            out[i * stride] = hsum(acc[i]) * scale;
         }
     }
     #[target_feature(enable = "avx2,fma,f16c")]
@@ -1268,6 +1292,80 @@ mod cost_tests {
     use super::{attention_with, Cache, Options};
     use half::f16;
 
+    /// Where one 64-key block of one tile (14 queries, 64 values per head) spends its time, single thread: decoding the value rows, the
+    /// scores, the softmax and the accumulation. Prints ms per 1000 blocks and the share of each part.
+    #[test]
+    fn cost_of_the_parts_of_a_prefill_block() {
+        use super::{accumulate, decode_half, score_half_tile, Path};
+        let (nq, dim, keys) = (14usize, 64usize, 64usize);
+        let mut state = 9u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) - 1.0
+        };
+        let key_rows: Vec<Vec<u16>> = (0..keys).map(|_| (0..dim).map(|_| f16::from_f32(rnd()).to_bits()).collect()).collect();
+        let value_rows: Vec<Vec<u16>> = (0..keys).map(|_| (0..dim).map(|_| f16::from_f32(rnd()).to_bits()).collect()).collect();
+        let q: Vec<Vec<f32>> = (0..nq).map(|_| (0..dim).map(|_| rnd()).collect()).collect();
+        let queries: Vec<&[f32]> = q.iter().map(Vec::as_slice).collect();
+        let path = Path::detect();
+        let mut scores = vec![0.0f32; nq * 64];
+        let mut values = vec![0.0f32; keys * dim];
+        let mut acc = vec![0.0f32; nq * dim];
+        let blocks = 3000;
+        let time = |f: &mut dyn FnMut()| {
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                for _ in 0..blocks {
+                    f();
+                }
+                best = best.min(started.elapsed().as_secs_f64());
+            }
+            best * 1000.0 / blocks as f64 * 1000.0
+        };
+        let decode = time(&mut || {
+            for (j, row) in value_rows.iter().enumerate() {
+                decode_half(row, &mut values[j * dim..(j + 1) * dim], path);
+            }
+            std::hint::black_box(&values);
+        });
+        let score = time(&mut || {
+            for (j, row) in key_rows.iter().enumerate() {
+                score_half_tile(&queries, row, &mut scores[j..], 64, 0.125, path);
+            }
+            std::hint::black_box(&scores);
+        });
+        for v in scores.iter_mut() {
+            *v = rnd();
+        }
+        let saved = scores.clone();
+        let softmax = time(&mut || {
+            scores.copy_from_slice(&saved);
+            for r in 0..nq {
+                let row = &mut scores[r * 64..r * 64 + 64];
+                let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                std::hint::black_box(crate::cpu_elementwise::exp_shifted(row, m));
+            }
+        });
+        let accumulate_time = time(&mut || {
+            for r in 0..nq {
+                accumulate(&mut acc[r * dim..(r + 1) * dim], &saved[r * 64..r * 64 + keys], &values, path);
+            }
+            std::hint::black_box(&acc);
+        });
+        let total = decode + score + softmax + accumulate_time;
+        let flops = (2 * nq * keys * dim) as f64;
+        println!(
+            "PARTS us per block: decode {decode:.1} ({:.0} %) | score {score:.1} ({:.0} %, {:.1} GFLOP/s) | softmax {softmax:.1} ({:.0} %) | accumulate {accumulate_time:.1} ({:.0} %, {:.1} GFLOP/s) | total {total:.1}",
+            100.0 * decode / total,
+            100.0 * score / total,
+            flops / (score * 1e-6) / 1e9,
+            100.0 * softmax / total,
+            100.0 * accumulate_time / total,
+            flops / (accumulate_time * 1e-6) / 1e9
+        );
+    }
+
     /// What the prefill attention costs: pairs of consecutive positions (what a prompt chunk hands over) at a context of about 3000 keys,
     /// 14 heads over 2 KV heads of 64 values (Qwen2.5-0.5B). Prints the best of several runs; nothing is asserted about time.
     #[test]
@@ -1282,8 +1380,8 @@ mod cost_tests {
         let key_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
         let value_words: Vec<u16> = (0..slots * kv_heads * dim).map(|_| f16::from_f32(rnd()).to_bits()).collect();
         let stride = slots / block_size;
-        let rows = 64usize;
-        let lengths: Vec<i64> = (0..rows as i64).map(|b| 3000 + b).collect();
+        let rows = 512usize;
+        let lengths: Vec<i64> = (0..rows as i64).map(|b| 1500 + b).collect();
         let table: Vec<i64> = (0..stride as i64).collect();
         let tables: Vec<i64> = lengths.iter().flat_map(|_| table.clone()).collect();
         let q: Vec<f32> = (0..rows * heads * dim).map(|_| rnd()).collect();
@@ -1300,6 +1398,6 @@ mod cost_tests {
             }
         });
         let flops: f64 = lengths.iter().map(|&n| 4.0 * heads as f64 * n as f64 * dim as f64).sum();
-        println!("COST attention: {rows} rows at ~3000 keys, {heads} heads: {:.1} ms = {:.1} GFLOP/s", best * 1000.0, flops / best / 1e9);
+        println!("COST attention: {rows} rows at 1500..2011 keys, {heads} heads: {:.1} ms = {:.1} GFLOP/s", best * 1000.0, flops / best / 1e9);
     }
 }
