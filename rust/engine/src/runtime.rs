@@ -1790,14 +1790,14 @@ impl InferenceRuntime {
             self.scheduler.external_drafts.clear();
             for &sid in &self.scheduler.running {
                 let sequence = &self.scheduler.sequences[&sid];
-                suffix.observe(sid, &sequence.tokens);
+                suffix.observe_salted(sid, sequence.prefix_salt, &sequence.tokens);
                 if sequence.num_computed >= sequence.prefill_target
                     && sequence.can_speculate()
                     && !self.pending_logits.contains_key(&sid)
                 {
                     let limit = if adaptive { sequence.adaptive.length() } else { usize::MAX };
                     let count = self.spec_tokens.min(limit).min(sequence.remaining_max().saturating_sub(1));
-                    let tokens = suffix.propose(sid, &sequence.tokens, count);
+                    let tokens = suffix.propose_salted(sid, sequence.prefix_salt, &sequence.tokens, count);
                     if !tokens.is_empty() {
                         self.scheduler.external_drafts.insert(sid, tokens);
                     }

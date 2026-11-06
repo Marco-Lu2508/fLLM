@@ -419,6 +419,8 @@ struct Doc {
     tokens: Vec<i64>,
     indexed: usize,
     live: bool,
+    /// The caller's namespace (`cache_salt`): a document is only found by contexts of the same salt. 0 is the shared namespace.
+    salt: u64,
 }
 
 /// Index of every document (running sequence or archived generation) by the hash of each context of a few lengths. A lookup takes the
@@ -440,8 +442,8 @@ fn continues(old: &[i64], tokens: &[i64]) -> bool {
     tokens.len() >= n && tokens[n.saturating_sub(8)..n] == old[n.saturating_sub(8)..]
 }
 
-fn context_hash(tokens: &[i64]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
+fn context_hash(salt: u64, tokens: &[i64]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ salt.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     for &t in tokens {
         h ^= t as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -462,6 +464,11 @@ impl SuffixCache {
     /// Make the document of `owner` (a sequence id) equal to `tokens`, indexing what is new. A sequence that was rewound (a
     /// preemption or a different continuation) starts a new document.
     pub fn observe(&mut self, owner: i64, tokens: &[i64]) {
+        self.observe_salted(owner, 0, tokens);
+    }
+
+    /// [`observe`](Self::observe) in the namespace `salt`: what is generated under one salt never drafts for another.
+    pub fn observe_salted(&mut self, owner: i64, salt: u64, tokens: &[i64]) {
         let id = match self.by_owner.get(&owner) {
             Some(&id) if self.docs.get(&id).is_some_and(|d| continues(&d.tokens, tokens)) => id,
             _ => {
@@ -470,7 +477,7 @@ impl SuffixCache {
                 }
                 let id = self.next_doc;
                 self.next_doc += 1;
-                self.docs.insert(id, Doc { tokens: Vec::new(), indexed: 0, live: true });
+                self.docs.insert(id, Doc { tokens: Vec::new(), indexed: 0, live: true, salt });
                 self.by_owner.insert(owner, id);
                 id
             }
@@ -487,7 +494,7 @@ impl SuffixCache {
         for end in start..target {
             for (slot, &order) in CONTEXT_ORDERS.iter().enumerate() {
                 if end + 1 >= order {
-                    additions.push(((slot as u8, context_hash(&doc.tokens[end + 1 - order..=end])), end as u32));
+                    additions.push(((slot as u8, context_hash(doc.salt, &doc.tokens[end + 1 - order..=end])), end as u32));
                 }
             }
         }
@@ -543,6 +550,11 @@ impl SuffixCache {
     /// Up to `max_tokens` draft tokens that continue `context`, or an empty vector when no earlier occurrence of at least
     /// `min_match` tokens is known.
     pub fn propose(&self, owner: i64, context: &[i64], max_tokens: usize) -> Vec<i64> {
+        self.propose_salted(owner, 0, context, max_tokens)
+    }
+
+    /// [`propose`](Self::propose) among the documents of the namespace `salt` only.
+    pub fn propose_salted(&self, owner: i64, salt: u64, context: &[i64], max_tokens: usize) -> Vec<i64> {
         if max_tokens == 0 || context.len() < self.cfg.min_match {
             return Vec::new();
         }
@@ -551,12 +563,15 @@ impl SuffixCache {
             if order < self.cfg.min_match || context.len() < order {
                 continue;
             }
-            let key = (slot as u8, context_hash(&context[context.len() - order..]));
+            let key = (slot as u8, context_hash(salt, &context[context.len() - order..]));
             let Some(list) = self.index.get(&key) else { continue };
             // most recent occurrences first
             let mut continuations: Vec<&[i64]> = Vec::new();
             for &(doc_id, pos) in list.iter().rev() {
                 let Some(doc) = self.docs.get(&doc_id) else { continue };
+                if doc.salt != salt {
+                    continue;
+                }
                 let pos = pos as usize;
                 if pos + 1 > doc.tokens.len() || pos + 1 < order {
                     continue;
@@ -914,6 +929,57 @@ mod tests {
         assert!(cache.propose(2, &[13, 14], 4).is_empty());
         // no match
         assert!(cache.propose(2, &[40, 41, 42, 43], 4).is_empty());
+    }
+
+    /// What one caller generated must not draft for another: a cache shared by every request would hand the text of one tenant to the
+    /// next as a "draft" (the verification would reject what is wrong, but the accepted tokens and the speed would reveal the text).
+    /// Requests with the same salt still share, as they do in the prefix cache.
+    #[test]
+    fn suffix_cache_keeps_the_salts_apart() {
+        let mut cache = SuffixCache::new(SuffixConfig::default());
+        let secret: Vec<i64> = vec![10, 11, 12, 13, 14, 15, 16, 17];
+        cache.observe_salted(1, 7, &secret);
+        cache.finish(1);
+        let context = vec![5, 6, 12, 13, 14];
+        // another tenant (salt 8) sees nothing of it
+        cache.observe_salted(2, 8, &context);
+        assert!(cache.propose_salted(2, 8, &context, 3).is_empty(), "a draft was taken from another salt");
+        // the same tenant (salt 7) does
+        cache.observe_salted(3, 7, &context);
+        assert_eq!(cache.propose_salted(3, 7, &context, 3), vec![15, 16, 17]);
+        // requests without a salt share with each other, as before, and not with a salted tenant
+        cache.observe(4, &secret);
+        cache.finish(4);
+        cache.observe(5, &context);
+        assert_eq!(cache.propose(5, &context, 3), vec![15, 16, 17]);
+        cache.observe_salted(6, 9, &context);
+        assert!(cache.propose_salted(6, 9, &context, 3).is_empty());
+    }
+
+    /// The second layer of the separation: even if the context hashes of two salts collided, a document of another salt is skipped.
+    /// The collision is forced by writing the entry of a salt-7 document under the key a salt-8 context looks up.
+    #[test]
+    fn suffix_cache_skips_a_document_of_another_salt_even_when_the_hash_collides() {
+        let mut cache = SuffixCache::new(SuffixConfig::default());
+        let secret: Vec<i64> = vec![10, 11, 12, 13, 14, 15, 16, 17];
+        cache.observe_salted(1, 7, &secret);
+        cache.finish(1);
+        let context = vec![5, 6, 12, 13, 14];
+        // every entry of the salt-7 document is also reachable through the key of the same context under salt 8
+        for (slot, &order) in CONTEXT_ORDERS.iter().enumerate() {
+            if context.len() >= order {
+                let key8 = (slot as u8, context_hash(8, &context[context.len() - order..]));
+                let key7 = (slot as u8, context_hash(7, &context[context.len() - order..]));
+                if let Some(list) = cache.index.get(&key7).cloned() {
+                    cache.index.insert(key8, list);
+                }
+            }
+        }
+        cache.observe_salted(2, 8, &context);
+        assert!(cache.propose_salted(2, 8, &context, 3).is_empty(), "the salt check did not stop a colliding hash");
+        // the same entries do work for the owner's own salt
+        cache.observe_salted(3, 7, &context);
+        assert_eq!(cache.propose_salted(3, 7, &context, 3), vec![15, 16, 17]);
     }
 
     #[test]
