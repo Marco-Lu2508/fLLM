@@ -241,7 +241,7 @@ Details: [docs/quantization.md](docs/quantization.md), [docs/user/quants-and-for
   previous answer in it (98 % of a five-turn prompt came from the cache in a measurement on a small model), and `cache_salt` /
   `FLLM_PREFIX_SALT` keep the blocks of different callers apart. Optional: prompt blocks saved on disk (`FLLM_KV_DISK_DIR`; read back at
   the start, so a restart serves a long prefix from the disk, and while the server runs for a prefix the cache dropped under memory
-  pressure, [docs/dev/kv-disk-tier.md](docs/dev/kv-disk-tier.md)) and an output cache for repeated deterministic requests, streamed ones
+  pressure: 0.44 s instead of 4.18 s for a 568-token prompt on a small model, [docs/dev/kv-disk-tier.md](docs/dev/kv-disk-tier.md)) and an output cache for repeated deterministic requests, streamed ones
   included ([docs/output-cache.md](docs/output-cache.md)). Not built: a cache that several servers share.
 - **Speculative decoding.** `--speculative off|ngram|suffix|draft|mtp`: conversation lookup (`suffix`, on by default on
   the CPU and on Vulkan/DirectX; on CUDA, HIP and Metal it stays off until its kernels have been checked on hardware; with

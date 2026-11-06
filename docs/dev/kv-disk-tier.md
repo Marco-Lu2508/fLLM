@@ -113,11 +113,20 @@ request that waits it walks the chain of the prompt as `try_admit` looks it up, 
 the following ones from the tier (`KvTier::load_for`, which also checks the tokens the file carries against the prompt, so a file under the
 right hash with other tokens is not taken), imports them and registers the path. The request is then admitted with the whole prefix cached.
 
-Limits, on purpose: at most 256 blocks a round; never more than the free pool minus the watermark and one block, because the request needs
-room for what it computes and blocks that a running sequence uses cannot be evicted; only chains without a `cache_salt` (a salted block is
+Limits, on purpose: at most 256 blocks a round; the request keeps one free block (plus the watermark) for what it computes. The pool of a
+busy server is full of cached blocks nobody uses, so the free blocks alone allow almost nothing (the first real run read back 6 of 35
+blocks); the reload therefore drops the oldest unused cache blocks to make room (`Scheduler::reclaim_cache`, what admitting the request
+would do anyway), but only when the disk really has the blocks (`KvTier::has`), so a prompt the server has never seen costs the cache
+nothing. Blocks that a running sequence uses cannot be evicted. Only chains without a `cache_salt` (a salted block is
 not written, since a restarted server cannot know the salt); media prompts are skipped. The read runs on the worker thread between two
 rounds, so a slow disk delays the round; the cost is a file read per block against a prefill of the same block.
 
 Tests (`kv_transfer_tests.rs`): a prefix the cache dropped under pressure is read back and the output equals a full prefill; a file with
-other tokens under the right hash is not taken; with two free blocks only one is taken. Not measured: the time saved on a real model with a
-real disk, and the effect on a busy server. `reloaded_blocks` in `GET /admin/kv-tier` (the tier statistics) counts what was taken.
+other tokens under the right hash is not taken; with two free blocks only one is taken; a full cache makes room; a prompt the disk does not
+have drops nothing. `reloaded_blocks` in `GET /admin/kv-tier` (the tier statistics) counts what was taken.
+
+Measured on a real model (Qwen2.5-0.5B Q8_0, CPU, `--ctx 2048 --max-seqs 2`, a document of 568 prompt tokens, then twelve other documents
+of the same size; the cache then held 246 blocks and had dropped the first one; `scripts/kv-reload.py`): asked again, the server with a
+disk tier answered in 0.44 s with 560 of 568 prompt tokens from the cache (35 blocks read back, 0 misses, same text); the control without a
+tier needed 4.18 s with 0 cached (the cold request took 3.6-3.7 s). The disk was this host's SSD with the files in the page cache, so a
+slower disk reads more slowly. Not measured: a busy server with many requests at once, and a GPU (the KV import then copies to the device).

@@ -59,6 +59,9 @@ struct BatchRow {
 /// Scheduler-driven inference over the memory-mapped GGUF model.
 /// One shared paged KV pool backs every active sequence; each scheduler step is
 /// evaluated as one ragged batch by the Rust decoder.
+/// `(chain hash, tokens, block the prefix cache holds)` for each full block of a prompt.
+type PromptChain = Vec<(u64, Vec<i64>, Option<i64>)>;
+
 pub struct InferenceRuntime {
     pub model: GgufModel,
     scheduler: Scheduler,
@@ -1714,24 +1717,52 @@ impl InferenceRuntime {
     }
 
     /// Returns how many blocks of the prompt of `sid` were taken from the disk tier.
-    fn reload_prompt(&mut self, sid: i64, budget: usize) -> usize {
+    /// The chain of the full blocks of the prompt of `sid` as `try_admit` looks it up, each with the block the cache holds for it. `None`
+    /// for a request that is not on the disk tier at all (a `cache_salt`, media).
+    fn prompt_chain(&self, sid: i64) -> Option<PromptChain> {
         let size = self.scheduler.cfg.block_size;
-        let Some(sequence) = self.scheduler.sequences.get(&sid) else { return 0 };
+        let sequence = self.scheduler.sequences.get(&sid)?;
         if sequence.prefix_salt != 0 || sequence.has_media {
-            return 0;
+            return None;
         }
-        // the chain as `try_admit` looks it up, and how much of it the cache holds
         let full = sequence.tokens.len().saturating_sub(1) / size;
         let mut prev = crate::scheduler::prefix_seed();
-        let mut chain: Vec<(u64, Vec<i64>, Option<i64>)> = Vec::with_capacity(full);
+        let mut chain = Vec::with_capacity(full);
         for b in 0..full {
             let segment = sequence.tokens[b * size..(b + 1) * size].to_vec();
             prev = crate::mem::prefix_cache::PrefixCache::hash_chain(prev, &segment);
             chain.push((prev, segment, self.scheduler.prefix_block_of(prev)));
         }
+        Some(chain)
+    }
+
+    fn reload_prompt(&mut self, sid: i64, budget: usize) -> usize {
+        let Some(mut chain) = self.prompt_chain(sid) else { return 0 };
         // the cache is a tree, so what is missing is the end of the chain; its first missing block has a cached parent
         let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) else { return 0 };
-        let spare = self.scheduler.bm.allocator.available().saturating_sub(self.scheduler.cfg.watermark_blocks + 1);
+        // how many blocks from there the disk really has: a prompt the server has never seen has none, and then nothing may be touched
+        let on_disk = chain[first..].iter().take(budget).take_while(|(hash, _, _)| self.kv_tier.has(*hash)).count();
+        if on_disk == 0 {
+            return 0;
+        }
+        // The pool of a busy server is full of cached blocks nobody uses, so the free blocks alone would allow almost nothing (measured: 6
+        // of 35 blocks). Make room by dropping the oldest cached blocks no sequence holds, which is what admitting the request would do
+        // anyway, but keep the reserve: the request needs a block of its own for what it computes.
+        let reserve = self.scheduler.cfg.watermark_blocks + 1;
+        let available = self.scheduler.bm.allocator.available();
+        let (first, chain) = if available < on_disk + reserve {
+            self.scheduler.reclaim_cache(on_disk + reserve - available);
+            // the blocks that were dropped may have been the start of this very chain
+            chain = match self.prompt_chain(sid) {
+                Some(chain) => chain,
+                None => return 0,
+            };
+            let Some(first) = chain.iter().position(|(_, _, block)| block.is_none()) else { return 0 };
+            (first, chain)
+        } else {
+            (first, chain)
+        };
+        let spare = self.scheduler.bm.allocator.available().saturating_sub(reserve);
         let limit = budget.min(spare);
         let mut taken: Vec<i64> = Vec::new();
         for (hash, segment, cached) in &chain[first..] {

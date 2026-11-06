@@ -413,6 +413,8 @@ fn reading_blocks_back_leaves_room_for_the_request_that_waits() {
     let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
     wait_for_the_disk(&mut rt, 4);
     push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    // nothing evictable: the cache is empty, so only the free blocks count (the disk still has the chain)
+    rt.clear_prefix_cache().unwrap();
     // squeeze the pool: hold every free block but two
     let mut held = Vec::new();
     while rt.available_blocks() > 2 {
@@ -428,6 +430,80 @@ fn reading_blocks_back_leaves_room_for_the_request_that_waits() {
     }
     while rt.active_requests() > 0 {
         rt.step().unwrap();
+    }
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pool of a busy server is full of cached blocks nobody uses; the few free blocks alone would allow almost no reload (measured on a
+/// real model: 6 of 35 blocks). The reload makes room by dropping the oldest unused cache blocks, and keeps one block free.
+#[test]
+fn a_full_cache_makes_room_for_the_blocks_that_are_read_back() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-reload-full-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 4);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    // the cache holds blocks of other prompts that nobody uses; leave only one block free
+    let mut held = Vec::new();
+    while rt.available_blocks() > 1 {
+        held.push(rt.scheduler.alloc_free_block().unwrap());
+    }
+    assert!(rt.scheduler.pc.as_ref().unwrap().len() >= 4, "the cache must have something to give up");
+    rt.submit_with_sampling("again".into(), a.clone(), 4, SamplingParams::default()).unwrap();
+    let before = rt.kv_reloaded;
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded - before, 4, "the full cache did not make room");
+    assert!(rt.available_blocks() >= 1, "the reserve was used up");
+    for block in held {
+        rt.scheduler.free_block(block);
+    }
+    let mut tokens = Vec::new();
+    let mut cached = 0;
+    while rt.active_requests() > 0 {
+        for event in rt.step().unwrap() {
+            tokens.push(event.token_id);
+            cached = cached.max(event.cached_prompt_tokens);
+        }
+    }
+    assert_eq!(tokens, reference);
+    assert_eq!(cached, 4 * block);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A prompt the disk has never seen must not cost the cache anything: no block is dropped to make room for blocks that do not exist.
+#[test]
+fn a_prompt_the_disk_does_not_have_does_not_empty_the_cache() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-reload-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_disk_tier(&dir);
+    rt.kv_warmed = true;
+    let block = rt.scheduler.cfg.block_size;
+    for k in 0..6usize {
+        let mut p = prompt(4 * block + 3);
+        p[0] = 10 + k as i64;
+        generate(&mut rt, &format!("fill{k}"), &p, 2);
+    }
+    let mut held = Vec::new();
+    while rt.available_blocks() > 1 {
+        held.push(rt.scheduler.alloc_free_block().unwrap());
+    }
+    let cached_before = rt.scheduler.pc.as_ref().unwrap().len();
+    let mut new = prompt(4 * block + 3);
+    new[0] = 99;
+    new[1] = 98;
+    rt.submit_with_sampling("new".into(), new, 2, SamplingParams::default()).unwrap();
+    rt.reload_for_waiting();
+    assert_eq!(rt.kv_reloaded, 0);
+    assert_eq!(rt.scheduler.pc.as_ref().unwrap().len(), cached_before, "blocks were dropped for a prompt the disk does not have");
+    for block in held {
+        rt.scheduler.free_block(block);
     }
     drop(rt);
     let _ = std::fs::remove_dir_all(&dir);
