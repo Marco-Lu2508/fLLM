@@ -7,6 +7,7 @@ behaviour between versions).
 ## [Unreleased]
 
 ### Fixed
+- **Evicting from a long prefix is no longer a search through the whole cache.** The prefix cache found its next victim by walking every cached block in use order, which cost 1.1 s for 500 evictions at 16 000 cached blocks and 6.3 s at 64 000 (a 1M-token prefix is ~62 000 blocks); it keeps the leaves in use order now and the same 500 evictions take about 1 ms at both sizes. Reads, inserts and evictions keep that order up to date; a test checks the bookkeeping from scratch after every step. The cache can also keep blocks out of eviction (pins, used by the next change).
 - **`cache_salt` and `FLLM_PREFIX_SALT` now keep the KV blocks apart for real.** A request looked its prompt up under the chain `seed ^ salt`, but the blocks it left behind were registered under a chain that started at `0`, and the radix tree found a child by its tokens alone. A salted request therefore never found its own blocks (a salted conversation recomputed every turn), and an unsalted request with the same tokens was served the blocks of a salted one, which `docs/output-cache.md` promised not to happen. The chain is now registered where it is looked up, a child is found by tokens *and* chain hash, and evicting one block no longer removes a sibling with the same tokens. The blocks of salted requests stay out of the disk tier (a restarted server cannot know the salt).
 
 ### Added

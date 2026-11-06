@@ -1,6 +1,6 @@
 use crate::mem::block_allocator::AllocatorError;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +101,14 @@ pub struct PrefixCache {
     free_nodes: Vec<usize>,
     by_hash: HashMap<u64, usize>,
     blocks: HashMap<u64, PrefixEntry>,
-    lru_order: Vec<u64>,
+    /// Use counter of every block (`ticks`), the blocks by that counter (`order`, oldest first) and the ones among them that have no
+    /// children (`leaves`): only a leaf can be evicted, and a long chain would otherwise be searched through for its end on every eviction.
+    ticks: HashMap<u64, u64>,
+    order: BTreeMap<u64, u64>,
+    leaves: BTreeMap<u64, u64>,
+    next_tick: u64,
+    /// Blocks that eviction must skip (a prefix somebody asked to keep, `Scheduler::pin_chain`).
+    pinned: HashSet<u64>,
 }
 
 impl PrefixCache {
@@ -128,7 +135,11 @@ impl PrefixCache {
             free_nodes: Vec::new(),
             by_hash: HashMap::new(),
             blocks: HashMap::new(),
-            lru_order: Vec::new(),
+            ticks: HashMap::new(),
+            order: BTreeMap::new(),
+            leaves: BTreeMap::new(),
+            next_tick: 0,
+            pinned: HashSet::new(),
         })
     }
 
@@ -162,10 +173,53 @@ impl PrefixCache {
     }
 
     pub fn entries_lru(&self) -> Vec<PrefixEntry> {
-        self.lru_order
-            .iter()
+        self.order
+            .values()
             .filter_map(|chain_hash| self.blocks.get(chain_hash).cloned())
             .collect()
+    }
+
+    /// The bookkeeping of the eviction order, checked from scratch: every block has exactly one use counter, `order` and `ticks` agree,
+    /// and `leaves` holds exactly the blocks whose node has no children.
+    #[cfg(test)]
+    pub(crate) fn check_bookkeeping(&self) {
+        assert_eq!(self.ticks.len(), self.blocks.len(), "a block without a use counter or the other way round");
+        assert_eq!(self.order.len(), self.blocks.len());
+        for (hash, tick) in &self.ticks {
+            assert_eq!(self.order.get(tick), Some(hash), "order and ticks disagree");
+            assert!(self.blocks.contains_key(hash));
+        }
+        let mut expected = 0;
+        for (hash, tick) in &self.ticks {
+            let leaf = self.is_leaf_hash(*hash);
+            assert_eq!(self.leaves.get(tick) == Some(hash), leaf, "leaf set wrong for {hash:x}");
+            expected += usize::from(leaf);
+        }
+        assert_eq!(self.leaves.len(), expected, "a leaf without a block");
+        for hash in &self.pinned {
+            assert!(self.blocks.contains_key(hash), "a pin on a block that is gone");
+        }
+    }
+
+    /// Keeps a cached block out of eviction. `false` when the cache does not hold it.
+    pub fn pin(&mut self, chain_hash: u64) -> bool {
+        self.blocks.contains_key(&chain_hash) && {
+            self.pinned.insert(chain_hash);
+            true
+        }
+    }
+
+    /// Lets a block be evicted again. `false` when it was not pinned.
+    pub fn unpin(&mut self, chain_hash: u64) -> bool {
+        self.pinned.remove(&chain_hash)
+    }
+
+    pub fn is_pinned(&self, chain_hash: u64) -> bool {
+        self.pinned.contains(&chain_hash)
+    }
+
+    pub fn pinned_len(&self) -> usize {
+        self.pinned.len()
     }
 
     pub fn tree_snapshot(&self) -> Value {
@@ -213,23 +267,53 @@ impl PrefixCache {
     }
 
     fn touch(&mut self, chain_hash: u64) {
-        if let Some(index) = self.lru_order.iter().position(|hash| *hash == chain_hash) {
-            self.lru_order.remove(index);
-            self.lru_order.push(chain_hash);
+        let Some(old) = self.ticks.get(&chain_hash).copied() else { return };
+        self.next_tick += 1;
+        let tick = self.next_tick;
+        self.order.remove(&old);
+        self.order.insert(tick, chain_hash);
+        if self.leaves.remove(&old).is_some() {
+            self.leaves.insert(tick, chain_hash);
         }
+        self.ticks.insert(chain_hash, tick);
+    }
+
+    /// Whether the node of a hash has no children (the node has to be in the tree already).
+    fn is_leaf_hash(&self, chain_hash: u64) -> bool {
+        self.by_hash
+            .get(&chain_hash)
+            .and_then(|index| self.nodes[*index].as_ref())
+            .is_some_and(|node| node.children.is_empty())
     }
 
     fn put_block(&mut self, entry: PrefixEntry) {
-        if !self.blocks.contains_key(&entry.chain_hash) {
-            self.lru_order.push(entry.chain_hash);
+        let hash = entry.chain_hash;
+        if !self.blocks.contains_key(&hash) {
+            self.next_tick += 1;
+            let tick = self.next_tick;
+            self.ticks.insert(hash, tick);
+            self.order.insert(tick, hash);
+            if self.is_leaf_hash(hash) {
+                self.leaves.insert(tick, hash);
+            }
         }
-        self.blocks.insert(entry.chain_hash, entry);
+        self.blocks.insert(hash, entry);
     }
 
     fn remove_block(&mut self, chain_hash: u64) {
         self.blocks.remove(&chain_hash);
-        if let Some(index) = self.lru_order.iter().position(|hash| *hash == chain_hash) {
-            self.lru_order.remove(index);
+        if let Some(tick) = self.ticks.remove(&chain_hash) {
+            self.order.remove(&tick);
+            self.leaves.remove(&tick);
+        }
+        self.pinned.remove(&chain_hash);
+    }
+
+    /// A node that just got a child is no leaf any more.
+    fn no_longer_a_leaf(&mut self, node_index: usize) {
+        let hash = self.nodes[node_index].as_ref().and_then(|node| node.chain_hash);
+        if let Some(tick) = hash.and_then(|hash| self.ticks.get(&hash)) {
+            self.leaves.remove(tick);
         }
     }
 
@@ -306,6 +390,7 @@ impl PrefixCache {
                     .children
                     .push((entry.tokens.clone(), child));
                 self.by_hash.insert(entry.chain_hash, child);
+                self.no_longer_a_leaf(node_index);
                 if self.claim_refs {
                     claim_ref(entry.block_id)?;
                 }
@@ -401,6 +486,14 @@ impl PrefixCache {
         }
         self.nodes[node_index] = None;
         self.free_nodes.push(node_index);
+        // the parent may have lost its last child: it can be evicted now
+        if parent_index != 0 && self.nodes[parent_index].as_ref().is_some_and(|parent| parent.children.is_empty()) {
+            if let Some(hash) = self.nodes[parent_index].as_ref().and_then(|parent| parent.chain_hash) {
+                if let Some(tick) = self.ticks.get(&hash).copied() {
+                    self.leaves.insert(tick, hash);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -410,10 +503,14 @@ impl PrefixCache {
         release_cache_ref: bool,
         release_ref: &mut dyn FnMut(i64) -> Result<(), PrefixCacheError>,
     ) -> Result<usize, PrefixCacheError> {
-        let order = self.lru_order.clone();
         let mut claim_free = claim_free;
-        for chain_hash in order {
-            let Some(node_index) = self.by_hash.get(&chain_hash).copied() else {
+        let mut chosen = None;
+        // the leaves, oldest first: the first one that is not pinned and that nobody uses is the one to go
+        for chain_hash in self.leaves.values() {
+            if self.pinned.contains(chain_hash) {
+                continue;
+            }
+            let Some(node_index) = self.by_hash.get(chain_hash).copied() else {
                 continue;
             };
             let Some(node) = self.nodes[node_index].as_ref() else {
@@ -430,10 +527,12 @@ impl PrefixCache {
                     continue;
                 }
             }
-            self.remove_leaf(node_index, release_cache_ref, release_ref)?;
-            return Ok(1);
+            chosen = Some(node_index);
+            break;
         }
-        Ok(0)
+        let Some(node_index) = chosen else { return Ok(0) };
+        self.remove_leaf(node_index, release_cache_ref, release_ref)?;
+        Ok(1)
     }
 
     fn enforce_limit(
@@ -489,7 +588,10 @@ impl PrefixCache {
         self.nodes.push(Some(Node::root()));
         self.free_nodes.clear();
         self.blocks.clear();
-        self.lru_order.clear();
+        self.ticks.clear();
+        self.order.clear();
+        self.leaves.clear();
+        self.pinned.clear();
         self.by_hash.clear();
         Ok(())
     }
@@ -669,5 +771,144 @@ mod tests {
         assert_eq!(cache.len(), 1);
         let left = if cache.contains(a.chain_hash) { &a } else { &b };
         assert_eq!(cache.match_blocks(&[left.chain_hash], &page, &mut |_| Ok(())).unwrap(), 1, "the block that was not evicted is gone too");
+    }
+
+    fn chain(prev: u64, first_block: i64, pages: &[&[i64]]) -> Vec<PrefixEntry> {
+        let mut out = Vec::new();
+        let mut hash = prev;
+        for (i, page) in pages.iter().enumerate() {
+            let e = entry(hash, first_block + i as i64, page);
+            hash = e.chain_hash;
+            out.push(e);
+        }
+        out
+    }
+
+    type RefFn = Box<dyn FnMut(i64) -> Result<(), PrefixCacheError>>;
+
+    fn no_refs() -> (RefFn, RefFn) {
+        (Box::new(|_b: i64| Ok(())), Box::new(|_b: i64| Ok(())))
+    }
+
+    #[test]
+    fn the_leaf_set_follows_inserts_evictions_and_reads() {
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let (mut claim, mut release) = no_refs();
+        let a = chain(0, 0, &[&[1], &[2], &[3]]);
+        let b = chain(a[0].chain_hash, 10, &[&[1], &[9], &[9]]); // shares block a[0]... as parent: different tokens at the root, so this is a sibling chain
+        cache.insert_path(&a, &mut claim, &mut release).unwrap();
+        cache.check_bookkeeping();
+        assert_eq!(cache.leaves.len(), 1, "one chain has one leaf");
+        let c = chain(0, 20, &[&[1], &[2], &[7]]); // shares two blocks with `a`, ends in a sibling leaf
+        cache.insert_path(&c, &mut claim, &mut release).unwrap();
+        cache.check_bookkeeping();
+        assert_eq!(cache.leaves.len(), 2);
+        let _ = b;
+        // evicting leaves one by one walks the chains back to the root
+        let mut free = |_b: i64| Ok(true);
+        let mut seen = 0;
+        while !cache.is_empty() {
+            assert_eq!(cache.evict_oldest(&mut free).unwrap(), 1);
+            cache.check_bookkeeping();
+            seen += 1;
+            assert!(seen < 20, "never ends");
+        }
+        assert_eq!(seen, 4, "four distinct blocks: the shared two, and one leaf per chain");
+        assert!(cache.leaves.is_empty() && cache.order.is_empty());
+    }
+
+    #[test]
+    fn reading_a_block_moves_it_to_the_young_end_and_it_is_evicted_last() {
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let (mut claim, mut release) = no_refs();
+        let a = chain(0, 0, &[&[1]]);
+        let b = chain(0, 1, &[&[2]]);
+        let c = chain(0, 2, &[&[3]]);
+        for chain in [&a, &b, &c] {
+            cache.insert_path(chain, &mut claim, &mut release).unwrap();
+        }
+        // reading `a` makes it the youngest of the three
+        let pages = vec![vec![1]];
+        assert_eq!(cache.match_blocks(&[a[0].chain_hash], &pages, &mut |_| Ok(())).unwrap(), 1);
+        cache.check_bookkeeping();
+        let mut free = |_b: i64| Ok(true);
+        assert_eq!(cache.evict_oldest(&mut free).unwrap(), 1);
+        assert!(!cache.contains(b[0].chain_hash), "the oldest one went first");
+        assert_eq!(cache.evict_oldest(&mut free).unwrap(), 1);
+        assert!(!cache.contains(c[0].chain_hash));
+        assert!(cache.contains(a[0].chain_hash), "the block that was read lasts longest");
+    }
+
+    #[test]
+    fn a_pinned_chain_is_not_evicted_while_others_are() {
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let (mut claim, mut release) = no_refs();
+        let keep = chain(0, 0, &[&[1], &[2], &[3]]);
+        let other = chain(0, 10, &[&[5], &[6]]);
+        cache.insert_path(&keep, &mut claim, &mut release).unwrap();
+        cache.insert_path(&other, &mut claim, &mut release).unwrap();
+        for entry in &keep {
+            assert!(cache.pin(entry.chain_hash));
+        }
+        assert!(!cache.pin(0xdead), "a block the cache does not hold cannot be pinned");
+        assert_eq!(cache.pinned_len(), 3);
+        let mut free = |_b: i64| Ok(true);
+        // the pinned chain is the oldest, and still the other chain goes
+        assert_eq!(cache.evict_for(10, &mut free).unwrap(), 2);
+        cache.check_bookkeeping();
+        assert_eq!(cache.len(), 3);
+        assert!(keep.iter().all(|e| cache.contains(e.chain_hash)));
+        assert_eq!(cache.evict_for(1, &mut free).unwrap(), 0, "nothing else may go");
+        // unpinned, it is evictable again
+        for entry in &keep {
+            assert!(cache.unpin(entry.chain_hash));
+        }
+        assert!(!cache.unpin(keep[0].chain_hash));
+        assert_eq!(cache.evict_for(10, &mut free).unwrap(), 3);
+        cache.check_bookkeeping();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn clearing_forgets_the_pins_too() {
+        // a pin that survived `clear` would sit on a hash that comes back later (the same prompt, new block) and keep it from ever being evicted
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let (mut claim, mut release) = no_refs();
+        let a = chain(0, 0, &[&[1], &[2]]);
+        cache.insert_path(&a, &mut claim, &mut release).unwrap();
+        assert!(cache.pin(a[1].chain_hash));
+        cache.clear(&mut release).unwrap();
+        cache.check_bookkeeping();
+        assert_eq!(cache.pinned_len(), 0, "a pin outlived the cache it was set in");
+        cache.insert_path(&a, &mut claim, &mut release).unwrap();
+        let mut free = |_b: i64| Ok(true);
+        assert_eq!(cache.evict_for(5, &mut free).unwrap(), 2, "the old pin kept a new block from being evicted");
+    }
+
+    #[test]
+    fn eviction_cost_does_not_grow_with_the_length_of_the_chain() {
+        // Counted, not timed: the search for the next victim looks at leaves only. With one long chain there is one leaf, so every
+        // eviction inspects one block however long the chain is (it used to walk the whole use order, 6 s for 500 evictions of 64000).
+        let mut cache = PrefixCache::new(0, false, false).unwrap();
+        let (mut claim, mut release) = no_refs();
+        let n = 3000;
+        let mut hash = 0u64;
+        let mut entries = Vec::new();
+        for i in 0..n {
+            let e = entry(hash, i as i64, &[i as i64]);
+            hash = e.chain_hash;
+            entries.push(e);
+        }
+        cache.insert_path(&entries, &mut claim, &mut release).unwrap();
+        assert_eq!(cache.leaves.len(), 1);
+        let mut asked = 0usize;
+        let mut free = |_b: i64| {
+            asked += 1;
+            Ok(true)
+        };
+        assert_eq!(cache.evict_for(500, &mut free).unwrap(), 500);
+        assert_eq!(asked, 500, "one question per eviction: the only leaf");
+        cache.check_bookkeeping();
+        assert_eq!(cache.len(), n - 500);
     }
 }
