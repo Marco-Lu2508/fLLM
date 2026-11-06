@@ -5,7 +5,7 @@
 //! `FLLM_OUTPUT_CACHE=exact|off` (default `exact`), `FLLM_OUTPUT_CACHE_BYTES` (default 64 MiB),
 //! `FLLM_OUTPUT_CACHE_TTL` (seconds, default 3600), `FLLM_CACHE_SCOPE=global|tenant|off` (default `global`).
 //!
-//! Only requests whose answer is determined take part: `temperature = 0`, `n = 1`, no streaming, no tools, no images and no
+//! Only requests whose answer is determined take part: `temperature = 0`, `n = 1`, no tools, no images (a stream takes part, but not with `logprobs`) and no
 //! `best_of`. With `scope = tenant` a request without a `user` field is not cached at all — better no hit than a hit that
 //! belongs to somebody else.
 use super::*;
@@ -84,7 +84,12 @@ pub(crate) fn tenant(body: &Value, scope: &Scope) -> Option<String> {
 
 /// The fingerprint of a request, or `None` when the request takes no part in the cache.
 pub(crate) fn fingerprint(state: &AppState, body: &Value, is_chat: bool) -> Option<Fingerprint> {
-    if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+    // A streamed request takes part: its answer is the same text, delivered in pieces (`stream` is not part of the key, so a plain request
+    // reads what a stream stored and the other way round). The per-token numbers of a stream are not kept, so a stream that asks for
+    // logprobs stays out.
+    if body.get("stream").and_then(Value::as_bool).unwrap_or(false)
+        && (body.get("logprobs").is_some_and(|v| !v.is_null() && v != &Value::Bool(false)) || body.get("top_logprobs").is_some_and(|v| !v.is_null()))
+    {
         return None;
     }
     if is_chat && body.get("tools").is_some_and(|tools| tools.as_array().is_some_and(|a| !a.is_empty())) {
@@ -213,6 +218,40 @@ pub(crate) fn key_of(state: &AppState, body: &Value, prompt: &[i64], is_chat: bo
     let fingerprint = fingerprint(state, body, is_chat)?;
     let salt = tenant(body, state.cache.scope())?;
     Some(fingerprint.key(prompt, &salt))
+}
+
+/// The stored answer of a streamed request, as the events of a replay: one per generated token, the last one carrying the finish reason.
+/// `None` means: generate.
+pub(crate) fn replay(state: &AppState, body: &Value, prompt: &[i64]) -> Option<Vec<crate::runtime::TokenEvent>> {
+    if !state.cache.enabled() {
+        return None;
+    }
+    let fingerprint = fingerprint(state, body, true)?;
+    let salt = tenant(body, state.cache.scope())?;
+    let entry = state.cache.get(&fingerprint.key(prompt, &salt))?;
+    if entry.tokens.is_empty() {
+        return None;
+    }
+    let reason: &'static str = if entry.finish_reason == "length" { "length" } else { "stop" };
+    let last = entry.tokens.len() - 1;
+    Some(
+        entry
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(index, &token)| crate::runtime::TokenEvent {
+                request_id: String::new(),
+                sequence_id: 0,
+                token_id: i64::from(token),
+                finished: index == last,
+                finish_reason: (index == last).then_some(reason),
+                logprobs: None,
+                cached_prompt_tokens: 0,
+                choice_index: 0,
+                request_finished: index == last,
+            })
+            .collect(),
+    )
 }
 
 /// Looks up the answer for this request. `None` means: generate.

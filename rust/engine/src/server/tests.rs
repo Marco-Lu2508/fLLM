@@ -176,6 +176,33 @@ impl Harness {
         self.send(request.unwrap()).await
     }
 
+    /// A client that reads `chunks` pieces of the response body and then goes away (closes the connection): the body is dropped while
+    /// the server is still generating.
+    async fn post_dropping_after(&self, path: &str, body: Value, chunks: usize) -> Reply {
+        use axum::body::HttpBody;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:8000")
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(crate::server::http::ClientAddr("127.0.0.1:50000".parse().unwrap()))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let (parts, mut body) = response.into_parts();
+        let mut read = 0;
+        while read < chunks {
+            match std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await {
+                Some(Ok(_)) => read += 1,
+                _ => break,
+            }
+        }
+        drop(body);
+        // let the server notice that the client is gone before the caller looks at the cache
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Reply { status: parts.status, headers: parts.headers, body: Vec::new() }
+    }
+
     async fn get(&self, path: &str) -> Reply {
         self.call(Method::GET, path, None, &[]).await
     }
@@ -1431,7 +1458,11 @@ async fn metrics_expose_fllm_and_vllm_series() {
     let h = start(Settings::default());
     let reply = h.chat(json!({"max_tokens": 5, "ignore_eos": true})).await;
     assert_eq!(reply.status, StatusCode::OK);
-    let streamed = h.chat(json!({"max_tokens": 5, "ignore_eos": true, "stream": true})).await;
+    // a different prompt: the same request as a stream would be answered from the output cache and generate nothing, which is not
+    // what this test counts (it counts the tokens of two generations)
+    let streamed = h
+        .chat(json!({"max_tokens": 5, "ignore_eos": true, "stream": true, "messages": [{"role": "user", "content": "and now a stream"}]}))
+        .await;
     assert_eq!(streamed.status, StatusCode::OK);
     let metrics = h.get("/metrics").await;
     assert_eq!(metrics.status, StatusCode::OK);
@@ -2256,6 +2287,86 @@ async fn an_identical_deterministic_chat_request_is_answered_from_the_cache() {
     let stats = h.state.cache.stats();
     assert_eq!(stats["hits"], 1, "the second identical request is a hit");
     assert_eq!(second.json()["choices"][0]["message"]["content"], first.json()["choices"][0]["message"]["content"]);
+}
+
+/// The text a chat stream delivers: the contents of the deltas in order, and the finish reason of the last choice chunk.
+fn streamed_chat(reply: &Reply) -> (String, Option<String>, Option<Value>) {
+    let mut text = String::new();
+    let mut reason = None;
+    let mut usage = None;
+    for (_, data) in reply.events() {
+        if data == "[DONE]" {
+            continue;
+        }
+        let chunk: Value = serde_json::from_str(&data).unwrap();
+        if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str() {
+            text.push_str(content);
+        }
+        if let Some(finish) = chunk["choices"][0]["finish_reason"].as_str() {
+            reason = Some(finish.to_owned());
+        }
+        if !chunk["usage"].is_null() {
+            usage = Some(chunk["usage"].clone());
+        }
+    }
+    (text, reason, usage)
+}
+
+#[tokio::test]
+async fn a_streamed_answer_fills_the_output_cache_and_a_plain_request_reads_it() {
+    let h = start(Settings::default());
+    let body = json!({"messages": [{"role": "user", "content": "hello"}], "temperature": 0, "max_tokens": 6, "ignore_eos": true});
+    let streamed = h.post("/v1/chat/completions", merge_into(body.clone(), json!({"stream": true}))).await;
+    assert_eq!(streamed.status, StatusCode::OK);
+    let (streamed_text, streamed_reason, _) = streamed_chat(&streamed);
+    assert_eq!(h.state.cache.stats()["stored"], 1, "a finished stream has to be remembered like a plain answer");
+    // the plain request is a hit and returns the text the stream delivered
+    let plain = h.post("/v1/chat/completions", body).await;
+    assert_eq!(h.state.cache.stats()["hits"], 1);
+    assert_eq!(plain.json()["choices"][0]["message"]["content"], streamed_text);
+    assert_eq!(plain.json()["choices"][0]["finish_reason"].as_str(), streamed_reason.as_deref());
+}
+
+#[tokio::test]
+async fn a_stream_is_answered_from_the_cache_with_the_same_text_and_usage() {
+    let h = start(Settings::default());
+    let body = json!({"messages": [{"role": "user", "content": "hello"}], "temperature": 0, "max_tokens": 6, "ignore_eos": true});
+    let plain = h.post("/v1/chat/completions", body.clone()).await;
+    assert_eq!(h.state.cache.stats()["stored"], 1);
+    let streamed = h.post("/v1/chat/completions", merge_into(body, json!({"stream": true, "stream_options": {"include_usage": true}}))).await;
+    assert_eq!(streamed.status, StatusCode::OK);
+    assert_eq!(h.state.cache.stats()["hits"], 1, "the stream did not read the cache");
+    let (text, reason, usage) = streamed_chat(&streamed);
+    assert_eq!(text, plain.json()["choices"][0]["message"]["content"].as_str().unwrap());
+    assert_eq!(reason.as_deref(), plain.json()["choices"][0]["finish_reason"].as_str());
+    let usage = usage.expect("include_usage asks for a usage chunk");
+    assert_eq!(usage["completion_tokens"], plain.json()["usage"]["completion_tokens"]);
+    assert_eq!(usage["prompt_tokens"], plain.json()["usage"]["prompt_tokens"]);
+    // the replay is a stream of chunks, not one block, and ends the way a generated stream ends
+    let events = streamed.events();
+    assert!(events.len() > 3, "{} events", events.len());
+    assert_eq!(events.last().unwrap().1, "[DONE]");
+}
+
+#[tokio::test]
+async fn a_stream_that_the_client_abandons_is_not_remembered() {
+    let h = start(Settings::default());
+    let body = json!({"messages": [{"role": "user", "content": "hello"}], "temperature": 0, "max_tokens": 30, "ignore_eos": true, "stream": true});
+    let reply = h.post_dropping_after("/v1/chat/completions", body, 2).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(h.state.cache.stats()["stored"], 0, "half an answer must never be served as the answer");
+}
+
+#[tokio::test]
+async fn the_streams_of_two_tenants_stay_apart_in_the_cache() {
+    let h = start(Settings::default());
+    let body = |salt: &str| json!({"messages": [{"role": "user", "content": "hello"}], "temperature": 0, "max_tokens": 6, "ignore_eos": true, "stream": true, "cache_salt": salt});
+    h.post("/v1/chat/completions", body("a")).await;
+    assert_eq!(h.state.cache.stats()["stored"], 1);
+    h.post("/v1/chat/completions", body("b")).await;
+    let stats = h.state.cache.stats();
+    assert_eq!(stats["hits"], 0, "tenant b was served the answer stored for tenant a");
+    assert_eq!(stats["stored"], 2);
 }
 
 #[tokio::test]

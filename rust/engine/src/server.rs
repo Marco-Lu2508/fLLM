@@ -342,6 +342,11 @@ impl ReasoningRx {
         Self { rx: Some(rx), control, queue: Default::default(), resume: false, resumed: false, prompt_tokens }
     }
 
+    /// A reply that is not generated: the events of an answer from the output cache, delivered through the same code as a live generation.
+    fn replayed(events: Vec<crate::runtime::TokenEvent>) -> Self {
+        Self { rx: None, control: None, queue: events.into(), resume: false, resumed: false, prompt_tokens: 0 }
+    }
+
     fn timings(&self, prompt_tokens: usize) -> Value {
         self.rx.as_ref().map_or(Value::Null, |rx| rx.observation.timings(prompt_tokens))
     }
@@ -2963,7 +2968,10 @@ async fn openai_generate(
     let mut coal_lead: Option<crate::cache::coalescer::Leader> = None;
     // only a *budgeted* reasoning request changes the text; the parser alone is part of the model identity
     let reasoning_budgeted = reasoning.as_ref().is_some_and(|spec| spec.budget.is_some());
-    if !stream && n == 1 && best_of == 1 && images.is_empty() && !reasoning_budgeted {
+    let cache_eligible = n == 1 && best_of == 1 && images.is_empty() && !reasoning_budgeted;
+    // a streamed request is answered from the cache too: the stored tokens are replayed through the stream code below
+    let replay = if stream && cache_eligible && !logprobs_requested { cache_gate::replay(&state, &body, &prompt) } else { None };
+    if !stream && cache_eligible {
         if let Some(cached) = cache_gate::lookup(&state, &body, &prompt, is_chat, &request_id, created, &model) {
             let hit = cached.get("usage").and_then(|u| u.get("completion_tokens")).and_then(Value::as_i64).unwrap_or(0);
             state.tracer.record(span.text("cache", "hit").int("completion_tokens", hit).finish());
@@ -3033,22 +3041,30 @@ async fn openai_generate(
         }
         params
     });
-    let rx = match submit_request(
-        &state,
-        &request_id,
-        prompt.clone(),
-        max_tokens,
-        sampling,
-        constraint,
-        images,
-        cache_salt_of(&body),
-        beam,
-    ) {
-        Ok(rx) => rx,
-        Err(response) => return response,
+    let replayed = replay.is_some();
+    let mut rx = match replay {
+        Some(events) => ReasoningRx::replayed(events),
+        None => {
+            let rx = match submit_request(
+                &state,
+                &request_id,
+                prompt.clone(),
+                max_tokens,
+                sampling,
+                constraint,
+                images,
+                cache_salt_of(&body),
+                beam,
+            ) {
+                Ok(rx) => rx,
+                Err(response) => return response,
+            };
+            ReasoningRx::new(rx, budget_control)
+        }
     };
-    let mut rx = ReasoningRx::new(rx, budget_control);
     state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    // a finished stream of a deterministic request is remembered like a plain answer (not when it was itself a replay)
+    let stream_fill = stream && !replayed && cache_eligible && !logprobs_requested;
     if stream {
         let state2 = state.clone();
         let reasoning = reasoning.clone();
@@ -3072,7 +3088,9 @@ async fn openai_generate(
                         current.cached_tokens = current.cached_tokens.max(event.cached_prompt_tokens);
                         if logprobs_requested { current.probabilities.push(&state2, &event); }
                         current.ids.push(event.token_id as u32);
-                        state2.metrics.generated_tokens.fetch_add(1, Ordering::Relaxed);
+                        if !replayed {
+                            state2.metrics.generated_tokens.fetch_add(1, Ordering::Relaxed);
+                        }
                         let full = match decode_chat_text(&state2.tokenizer, &current.ids, reasoning.as_ref()) {
                             Ok(full) => full,
                             Err(error) => {
@@ -3135,7 +3153,14 @@ async fn openai_generate(
                             let final_obj = json!({"id":request_id,"object":if is_chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"service_tier":service_tier,"choices":[choice],"usage":null,"timings":rx.timings(prompt.len())});
                             yield Ok::<Event, Infallible>(Event::default().data(final_obj.to_string()));
                             current.done = true;
+                            current.reason = reason;
                             if choice_states.iter().all(|choice| choice.done) {
+                                if stream_fill {
+                                    let text: String = choice_states.iter().map(|c| c.filter.text()).collect();
+                                    let tokens: Vec<u32> = choice_states.iter().flat_map(|c| c.ids.iter().copied()).collect();
+                                    let finish = choice_states.first().map(|c| c.reason).unwrap_or("stop");
+                                    cache_gate::store(&state2, &body, &prompt, is_chat, cache_gate::Stored { text: &text, tokens, finish_reason: finish, logprobs: None });
+                                }
                                 if include_usage {
                                     let completion = choice_states.iter().map(|c| c.ids.len()).sum();
                                     let cached = choice_states.iter().map(|c| c.cached_tokens).max().unwrap_or(0);

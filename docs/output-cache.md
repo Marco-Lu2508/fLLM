@@ -1,7 +1,7 @@
 # The output cache
 
-A request whose answer is already determined — `temperature = 0`, one choice, no streaming, no tools, no images — does not
-have to be computed twice. The output cache keeps the answer and hands it out again, including a replay of the token stream
+A request whose answer is already determined — `temperature = 0`, one choice, no tools, no images — does not
+have to be computed twice. Streamed and plain requests share the entries. The output cache keeps the answer and hands it out again, including a replay of the token stream
 for streaming clients.
 
 ## What the key is
@@ -49,9 +49,12 @@ slower right one.
 
 ## Limits
 
-- Streaming requests can read from the cache but do not fill it: a streamed answer is stored only when the same prompt is
-  also requested without streaming. (Filling it from a stream means collecting the chunks in the stream path; that is the
-  next step.)
+- A streamed request reads the cache and fills it. A hit is replayed through the same code that delivers a generated stream
+  (the stored tokens are fed to it as events), so the chunks, the reasoning and tool handling, the stop strings and the usage
+  chunk are those of a live generation. A stream stores its answer only when every choice has finished: a client that goes away
+  half way, or an error, leaves nothing behind. A stream that asks for `logprobs` stays out (the numbers of a stream are not kept).
+  Streams that arrive while the same request is still being generated are not merged: each of them computes (merging them
+  needs a live feed from the generating request and is not built).
 - Tool calls are not stored (their answer has a different shape), which is why requests with `tools` never take part.
 - `logprobs` are stored with the answer and replayed with it, so those requests do take part — the numbers belong in the key
   and in the entry, otherwise a replayed answer would claim probabilities it never had.
