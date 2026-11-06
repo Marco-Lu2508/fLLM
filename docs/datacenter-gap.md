@@ -158,5 +158,24 @@ fllm-rs bench-serve --concurrency 1,4,16,64 --input-len 512 --output-len 128 --s
 FLLM_HOST_ALLREDUCE=1 fllm-rs serve ...             # the old host path, for comparison of bench-serve numbers
 ```
 
+**The same checklist as one script.** `scripts/datacenter-day-one.sh` runs the gates above in order and stops at the first one that fails (a
+benchmark on a node whose collectives are broken measures the breakage), then starts fLLM, and when `VLLM_CMD` / `SGLANG_CMD` are given vLLM and
+SGLang, one after the other and each fresh, and runs the same `bench-agent` and `bench-serve` load against each with the same seed, so that
+the prompts are byte-identical. It writes every output to a directory and a `SUMMARY.txt`; nothing is uploaded.
+
+```
+MODEL_GGUF=/models/Llama-3.1-70B-Instruct-Q4_K_M.gguf TP=8 \
+VLLM_CMD='vllm serve meta-llama/Llama-3.1-70B-Instruct --tensor-parallel-size 8 --port {PORT}' \
+SGLANG_CMD='python3 -m sglang.launch_server --model-path meta-llama/Llama-3.1-70B-Instruct --tp 8 --port {PORT}' \
+scripts/datacenter-day-one.sh          # DRY_RUN=1 prints every command and runs none
+```
+
+What was tested without a GPU: the logic, with a stand-in that reports eight healthy devices and serves on the CPU (a healthy node runs through
+and writes 26 files; a failing self test on one GPU and a failing one-shot all-reduce each stop the run before any measurement; a binary without
+the HIP backend stops with a message), and the benchmark phases on the CPU with `DEVICES=cpu`. What was not tested: every GPU command in it, the
+start of vLLM and SGLang (their command lines are yours to set), and how long a 70B model takes to load (`READY_SECONDS`, default 30 minutes).
+fLLM's output cache is switched off in the script (`OUTPUT_CACHE=on` keeps it): vLLM and SGLang have none, and with identical prompts in the
+warm pass it would make fLLM look faster for a reason that has nothing to do with the prefix cache.
+
 What to send back: the outputs above, `bench-serve` JSON files for the runs with and without `FLLM_CUSTOM_ALLREDUCE=1`, the startup log of the TP8
 run (it prints the layout and the traffic back end), and any line that starts with `[fllm-rs]` and mentions RCCL, peer access or a failed rank.
