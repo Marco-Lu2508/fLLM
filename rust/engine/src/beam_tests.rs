@@ -441,3 +441,75 @@ fn multi_step_is_off_by_default_and_validated() {
     let (_, stats) = run_batch(&mut rt, &[(&PROMPT[..], 10, None)]);
     assert_eq!(stats.replayed_rounds, 0);
 }
+
+/// The same claim on a real model, which needs a GGUF file and a tokenizer, so it only runs when `FLLM_REAL_MODEL` names one:
+///
+/// ```text
+/// FLLM_REAL_MODEL=/path/qwen2.5-0.5b-instruct-q8_0.gguf cargo test --release -p fllm-engine --lib beam_on_a_real_model -- --ignored --nocapture
+/// ```
+///
+/// For widths 1, 2, 4 and 8 the best hypothesis must not score below greedy decoding (the beam score is a sum of token
+/// log-probabilities with `length_penalty` 0, so a wider search can only find a hypothesis at least as good), width 1 must equal greedy,
+/// and the reported log-probabilities are recomputed by teacher forcing on a fresh runtime. The random model of the other tests cannot
+/// show a wrong score that is plausible for real text.
+#[test]
+#[ignore = "needs a real model: set FLLM_REAL_MODEL"]
+fn beam_on_a_real_model_never_scores_below_greedy_and_its_numbers_are_right() {
+    let Ok(path) = std::env::var("FLLM_REAL_MODEL") else {
+        eprintln!("FLLM_REAL_MODEL is not set; nothing to check");
+        return;
+    };
+    // prompts of ordinary token ids (common words of the Qwen vocabulary); `FLLM_REAL_PROMPTS` is a semicolon list of comma lists
+    let prompts: Vec<Vec<i64>> = std::env::var("FLLM_REAL_PROMPTS")
+        .map(|v| v.split(';').map(|p| p.split(',').filter_map(|t| t.trim().parse().ok()).collect()).collect())
+        .unwrap_or_else(|_| vec![vec![785, 2326, 7772, 33975, 315, 279, 12941, 1849, 525]]);
+    for prompt in prompts {
+        beam_matches_greedy_at_best(&path, &prompt, 16);
+    }
+}
+
+fn beam_matches_greedy_at_best(path: &str, prompt: &[i64], tokens: usize) {
+    let prompt = prompt.to_vec();
+    let load = || {
+        let model = GgufModel::load(path, 256, 8, 2).unwrap();
+        let mut rt = InferenceRuntime::with_speculative(model, 8, 256, Vec::new(), 0, 8).unwrap();
+        rt.attach_compute("cpu").unwrap();
+        rt
+    };
+    let params = |width: usize| BeamParams { length_penalty: 0.0, ..BeamParams::new(width, width) };
+    let mut rt = load();
+    let greedy_run = greedy(&mut rt, "g", &prompt, tokens);
+    let one = beam(&mut rt, "b1", &prompt, tokens, params(1));
+    assert_eq!(one[0].tokens, greedy_run.tokens, "width 1 must be greedy decoding");
+    let mut best_so_far = f64::NEG_INFINITY;
+    let mut all = vec![one[0].clone()];
+    for (n, width) in [2usize, 4, 8].into_iter().enumerate() {
+        let wide = beam(&mut rt, &format!("b{width}"), &prompt, tokens, params(width));
+        eprintln!("prompt {:?}: width {width}: greedy {:.4}, best {:.4}", &prompt[..prompt.len().min(4)], one[0].logprob, wide[0].logprob);
+        assert!(wide[0].logprob >= one[0].logprob - 1e-6, "width {width}: {} below greedy {}", wide[0].logprob, one[0].logprob);
+        assert!(wide[0].logprob >= best_so_far - 1e-6 || n == 0, "width {width} found a worse best hypothesis than a narrower search");
+        best_so_far = best_so_far.max(wide[0].logprob);
+        all.extend(wide.into_iter().take(2));
+    }
+    let mut fresh = load();
+    for (rank, hypothesis) in all.iter().enumerate() {
+        let mut total = 0.0;
+        for (index, &token) in hypothesis.tokens.iter().enumerate() {
+            let mut context = prompt.clone();
+            context.extend_from_slice(&hypothesis.tokens[..index]);
+            let sampling = SamplingParams { logprobs: Some(0), allowed_token_ids: vec![token as usize], ..Default::default() };
+            let id = format!("tf{rank}-{index}");
+            fresh.submit_with_sampling(id, context, 1, sampling).unwrap();
+            let mut seen = None;
+            while fresh.active_requests() > 0 {
+                for event in fresh.step().unwrap() {
+                    seen = event.logprobs.map(|l| l.logprob);
+                }
+            }
+            let forced = seen.expect("a log-probability");
+            assert!((forced - hypothesis.token_logprobs[index]).abs() < 2e-3, "hypothesis {rank}, token {index}: beam {}, forced {forced}", hypothesis.token_logprobs[index]);
+            total += forced;
+        }
+        assert!((total - hypothesis.logprob).abs() < 2e-2, "hypothesis {rank}: score {} against the forced sum {total}", hypothesis.logprob);
+    }
+}

@@ -277,6 +277,24 @@ refused; set `max_tokens`. When other beam searches hold the slots the answer is
 needs the same backend as `n > 1` (CPU, a stateless model, no draft/MTP engine); a width of 1 is plain greedy decoding.
 Beam requests never use the output cache.
 
+Checked on a real model (Qwen2.5-0.5B Q8_0, CPU, 16 generated tokens, `length_penalty` 0, six prompts; the test is
+`beam_on_a_real_model_never_scores_below_greedy_and_its_numbers_are_right`, which needs `FLLM_REAL_MODEL` and runs with
+`--ignored`). Width 1 gave the greedy tokens. The best hypothesis never scored below greedy and never got worse with a wider
+search, and every reported log-probability matched teacher forcing on a fresh runtime. Summed log-probability of the best
+hypothesis:
+
+| prompt | greedy | width 2 | width 4 | width 8 |
+| --- | --- | --- | --- | --- |
+| 1 | -12.46 | - | -6.75 | -6.75 |
+| 2 | -5.66 | -5.66 | -4.82 | -4.82 |
+| 3 | -24.52 | -23.11 | -17.44 | -16.46 |
+| 4 | -12.61 | -12.12 | -8.57 | -8.57 |
+| 5 | -13.12 | -13.11 | -13.11 | -12.96 |
+| 6 | -6.05 | -6.05 | -6.05 | -6.05 |
+
+The search finds a better hypothesis for five of six prompts; for the sixth greedy was already the best. Only the CPU path was
+run: no GPU backend has beam search checked this way.
+
 
 ## Encoder task compatibility
 
