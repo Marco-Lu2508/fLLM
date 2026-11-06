@@ -42,6 +42,7 @@
         '<div class="app-card" style="margin-top:12px;"><div class="app-card-title">Prompt blocks on disk</div>' +
         row('', 'Keep shared prompt blocks on disk', 'A folder where the work done for long shared prompts (system prompts, documents) is saved, so a restart does not have to redo it. Empty means off. Use a fast disk; the folder is never read from another program.', '<input type="text" id="engKvDir" class="ui-input mono" style="width:260px;" placeholder="off (type a full folder path)" autocomplete="off">') +
         row('', 'Disk space for them', 'The oldest blocks are removed when the folder is full.', number('engKvMb', 1) + ' <span class="app-item-desc">MB</span>') +
+        row('', 'Keep the most recent ones in memory', 'Blocks that were used lately are kept in the main memory as well; reading them is much faster than reading the disk. They are gone after a restart. 0 means off. Works without the folder above.', number('engKvRam', 0) + ' <span class="app-item-desc">MB</span>') +
         '<div class="app-item-desc mono" id="engKvStats" style="padding:8px 4px 0;font-size:11px;"></div>' +
         '<div style="display:flex;gap:8px;padding:8px 4px 0;"><button class="btn btn-ghost" id="engKvClear">Delete the blocks on disk</button><button class="btn btn-ghost" id="engPrefixClear">Forget the shared prompts in memory</button></div>' +
         '</div>' +
@@ -66,7 +67,7 @@
       const FIELDS = {
         output_cache: ['engOutputCache', 'value'], output_cache_mb: ['engCacheMb', 'value'], output_cache_ttl: ['engCacheTtl', 'value'],
         cache_scope: ['engCacheScope', 'value'], prefix_cache: ['engPrefixCache', 'checked'], prefix_salt: ['engPrefixSalt', 'value'],
-        preemption: ['engPreemption', 'value'], kv_disk_dir: ['engKvDir', 'value'], kv_disk_mb: ['engKvMb', 'value'], otel_endpoint: ['engOtelEndpoint', 'value'], otel_service: ['engOtelService', 'value'],
+        preemption: ['engPreemption', 'value'], kv_disk_dir: ['engKvDir', 'value'], kv_disk_mb: ['engKvMb', 'value'], kv_ram_mb: ['engKvRam', 'value'], otel_endpoint: ['engOtelEndpoint', 'value'], otel_service: ['engOtelService', 'value'],
       };
       let defaults = {};
       let saved = {};
@@ -108,7 +109,7 @@
           const res = await apiFetch('/admin/kv-tier');
           if (!res.ok) throw new Error(String(res.status));
           const t = await res.json();
-          el('engKvStats').textContent = t.enabled === false ? 'The disk copy is off.' : `now: ${formatBytes(t.used_bytes || 0)} of ${formatBytes(t.max_bytes || 0)} used · ${t.hits ?? 0} blocks read back, ${t.spills ?? 0} written, ${t.drops ?? 0} skipped`;
+          el('engKvStats').textContent = t.enabled === false ? 'The disk copy is off.' : `now: ${t.dir ? `${formatBytes(t.used_bytes || 0)} of ${formatBytes(t.max_bytes || 0)} on disk` : 'no folder'}${t.ram_max_bytes ? ` · ${formatBytes(t.ram_used_bytes || 0)} of ${formatBytes(t.ram_max_bytes)} in memory (${t.ram_blocks ?? 0} blocks, ${t.ram_hits ?? 0} read from there)` : ''} · ${t.hits ?? 0} blocks read back, ${t.spills ?? 0} written, ${t.drops ?? 0} skipped`;
           el('engKvClear').disabled = false;
           el('engPrefixClear').disabled = false;
         } catch {

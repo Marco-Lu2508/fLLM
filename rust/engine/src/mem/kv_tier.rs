@@ -1,9 +1,14 @@
 //! A disk tier for KV blocks: when the prefix cache drops a block, it can be written to a file and read back later instead
 //! of being computed again. This is what makes a restart cheap — the prompt's KV is on disk, not gone.
 //!
-//! Off unless `FLLM_KV_DISK_DIR` names a directory. `FLLM_KV_DISK_BYTES` sets the budget (default 8 GiB); the least
+//! Two tiers behind one door. Host memory (`FLLM_KV_RAM_BYTES`) is the fast one: every block that is written lands there first, the
+//! least recently used block goes when the budget is full, and a restart empties it. The disk is the one that survives. A read looks in
+//! memory, then on disk, and a block found on disk is put into memory again. Either tier can be off; the tier as a whole is off when both are.
+//!
+//! Disk: off unless `FLLM_KV_DISK_DIR` names a directory. `FLLM_KV_DISK_BYTES` sets the budget (default 8 GiB); the least
 //! recently used file goes first. Layout: one file per block, named after the block's chain hash, with a small header so a
 //! truncated or foreign file is recognised and ignored rather than read as garbage KV.
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,12 +27,33 @@ pub struct KvTier {
     hits: AtomicU64,
     misses: AtomicU64,
     drops: AtomicU64,
+    /// Budget of the memory tier in bytes (`0`: off).
+    ram_max: u64,
+    ram: Mutex<Ram>,
+    ram_hits: AtomicU64,
     /// Serialises writes and the budget check: two threads must not both believe there is room.
     guard: Mutex<()>,
 }
 
 impl KvTier {
-    /// Reads the environment; without `FLLM_KV_DISK_DIR` the tier is off and every call is a no-op.
+    fn new(dir: Option<PathBuf>, max_bytes: u64, used: u64, ram_max: u64) -> KvTier {
+        KvTier {
+            dir,
+            max_bytes,
+            used: AtomicU64::new(used),
+            spills: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+            ram_max,
+            ram: Mutex::new(Ram::default()),
+            ram_hits: AtomicU64::new(0),
+            guard: Mutex::new(()),
+        }
+    }
+
+    /// Reads the environment; without `FLLM_KV_DISK_DIR` the disk is off, without `FLLM_KV_RAM_BYTES` the memory tier is off, and with
+    /// neither every call is a no-op.
     pub fn from_env() -> KvTier {
         let dir = std::env::var("FLLM_KV_DISK_DIR").ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
         let max_bytes = std::env::var("FLLM_KV_DISK_BYTES")
@@ -35,40 +61,34 @@ impl KvTier {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(8 << 30);
+        let ram_max = std::env::var("FLLM_KV_RAM_BYTES").ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0);
         if let Some(path) = dir.as_ref() {
             let _ = fs::create_dir_all(path);
         }
         let used = dir.as_deref().map(|path| dir_size(Path::new(path))).unwrap_or(0);
-        KvTier {
-            dir: dir.map(PathBuf::from),
-            max_bytes,
-            used: AtomicU64::new(used),
-            spills: AtomicU64::new(0),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            drops: AtomicU64::new(0),
-            guard: Mutex::new(()),
-        }
+        KvTier::new(dir.map(PathBuf::from), max_bytes, used, ram_max)
     }
 
     /// A tier in a temporary directory, for tests.
     pub fn at(dir: impl AsRef<Path>, max_bytes: u64) -> KvTier {
         let path = dir.as_ref().to_path_buf();
         let _ = fs::create_dir_all(&path);
-        KvTier {
-            dir: Some(path),
-            max_bytes,
-            used: AtomicU64::new(0),
-            spills: AtomicU64::new(0),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            drops: AtomicU64::new(0),
-            guard: Mutex::new(()),
-        }
+        KvTier::new(Some(path), max_bytes, 0, 0)
+    }
+
+    /// Only the memory tier, `max_bytes` large (nothing survives a restart).
+    pub fn ram_only(max_bytes: u64) -> KvTier {
+        KvTier::new(None, 0, 0, max_bytes)
+    }
+
+    /// The same tier with a memory tier of `ram_max` bytes in front of it.
+    pub fn with_ram(mut self, ram_max: u64) -> KvTier {
+        self.ram_max = ram_max;
+        self
     }
 
     pub fn enabled(&self) -> bool {
-        self.dir.is_some()
+        self.dir.is_some() || self.ram_max > 0
     }
 
     fn file(&self, hash: u64) -> Option<PathBuf> {
@@ -105,6 +125,16 @@ impl KvTier {
 
     /// Writes one block. A block that does not fit into the budget is not written at all — half a block is worthless.
     pub fn spill(&self, hash: u64, parent: u64, tokens: &[i64], payload: &[u8]) -> bool {
+        let in_memory = self.ram_put(hash, parent, tokens, payload);
+        let on_disk = self.spill_disk(hash, parent, tokens, payload);
+        if in_memory && !on_disk {
+            // `spills` counts blocks written to either tier once; the disk path counted its own
+            self.spills.fetch_add(1, Ordering::Relaxed);
+        }
+        in_memory || on_disk
+    }
+
+    fn spill_disk(&self, hash: u64, parent: u64, tokens: &[i64], payload: &[u8]) -> bool {
         let Some(path) = self.file(hash) else { return false };
         let size = (HEADER + tokens.len() * 8 + payload.len()) as u64;
         if size > self.max_bytes {
@@ -156,6 +186,11 @@ impl KvTier {
     }
 
     fn read(&self, hash: u64, tokens: Option<&[i64]>) -> Option<Vec<u8>> {
+        if let Some(payload) = self.ram_get(hash, tokens) {
+            self.ram_hits.fetch_add(1, Ordering::Relaxed);
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(payload);
+        }
         let path = self.file(hash)?;
         let mut buffer = Vec::new();
         if fs::File::open(&path).and_then(|mut file| file.read_to_end(&mut buffer)).is_err() {
@@ -174,11 +209,13 @@ impl KvTier {
         // touching the file is what keeps the LRU honest
         let _ = filetime_now(&path);
         self.hits.fetch_add(1, Ordering::Relaxed);
+        // a block that had to come from the disk is wanted again soon: keep it in memory
+        self.ram_put(hash, stored.parent, &stored.tokens, payload);
         Some(payload.to_vec())
     }
 
     pub fn has(&self, hash: u64) -> bool {
-        self.file(hash).is_some_and(|path| path.exists())
+        self.ram_has(hash) || self.file(hash).is_some_and(|path| path.exists())
     }
 
     /// Drops the oldest files until `needed` bytes fit.
@@ -216,6 +253,11 @@ impl KvTier {
 
     /// Deletes every stored block; returns how many were removed.
     pub fn clear(&self) -> usize {
+        let in_memory = self.ram_clear();
+        self.clear_disk().max(in_memory)
+    }
+
+    fn clear_disk(&self) -> usize {
         let Some(dir) = self.dir.as_ref() else { return 0 };
         let Ok(read) = fs::read_dir(dir) else { return 0 };
         let mut removed = 0;
@@ -239,8 +281,109 @@ impl KvTier {
             "hits": self.hits.load(Ordering::Relaxed),
             "misses": self.misses.load(Ordering::Relaxed),
             "drops": self.drops.load(Ordering::Relaxed),
+            "ram_max_bytes": self.ram_max,
+            "ram_used_bytes": self.ram_used(),
+            "ram_blocks": self.ram_blocks(),
+            "ram_hits": self.ram_hits.load(Ordering::Relaxed),
         })
     }
+}
+
+impl KvTier {
+    fn ram_lock(&self) -> std::sync::MutexGuard<'_, Ram> {
+        self.ram.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Puts a block into memory, dropping the least recently used ones until it fits. A block larger than the whole budget is not kept.
+    fn ram_put(&self, hash: u64, parent: u64, tokens: &[i64], payload: &[u8]) -> bool {
+        let cost = ram_cost(tokens.len(), payload.len());
+        if self.ram_max == 0 || cost > self.ram_max {
+            return false;
+        }
+        let mut guard = self.ram_lock();
+        let Ram { used, tick, blocks, order } = &mut *guard;
+        if let Some(old) = blocks.remove(&hash) {
+            order.remove(&old.tick);
+            *used -= ram_cost(old.tokens.len(), old.payload.len());
+        }
+        while *used + cost > self.ram_max {
+            let Some((_, oldest)) = order.pop_first() else { break };
+            if let Some(gone) = blocks.remove(&oldest) {
+                *used -= ram_cost(gone.tokens.len(), gone.payload.len());
+            }
+        }
+        *tick += 1;
+        order.insert(*tick, hash);
+        *used += cost;
+        blocks.insert(hash, RamBlock { parent, tokens: tokens.to_vec(), payload: payload.to_vec(), tick: *tick });
+        true
+    }
+
+    /// A block from memory; reading it makes it the most recently used one. With `tokens` given, a block that carries other tokens under
+    /// this hash is not the one that is meant.
+    fn ram_get(&self, hash: u64, tokens: Option<&[i64]>) -> Option<Vec<u8>> {
+        if self.ram_max == 0 {
+            return None;
+        }
+        let mut guard = self.ram_lock();
+        let Ram { tick, blocks, order, .. } = &mut *guard;
+        let block = blocks.get_mut(&hash)?;
+        if tokens.is_some_and(|expected| expected != block.tokens.as_slice()) {
+            return None;
+        }
+        order.remove(&block.tick);
+        *tick += 1;
+        block.tick = *tick;
+        order.insert(*tick, hash);
+        Some(block.payload.clone())
+    }
+
+    fn ram_has(&self, hash: u64) -> bool {
+        self.ram_max > 0 && self.ram_lock().blocks.contains_key(&hash)
+    }
+
+    fn ram_clear(&self) -> usize {
+        let mut guard = self.ram_lock();
+        let count = guard.blocks.len();
+        *guard = Ram::default();
+        count
+    }
+
+    fn ram_used(&self) -> u64 {
+        self.ram_lock().used
+    }
+
+    fn ram_blocks(&self) -> usize {
+        self.ram_lock().blocks.len()
+    }
+
+    /// What a block in memory knows about its place in the chain, for the tests.
+    #[cfg(test)]
+    fn ram_parent(&self, hash: u64) -> Option<u64> {
+        self.ram_lock().blocks.get(&hash).map(|block| block.parent)
+    }
+}
+
+struct RamBlock {
+    /// Kept so that a block in memory carries what a file on disk carries.
+    #[cfg_attr(not(test), allow(dead_code))]
+    parent: u64,
+    tokens: Vec<i64>,
+    payload: Vec<u8>,
+    tick: u64,
+}
+
+/// The blocks in memory and, by use, the order in which they go: `order` maps a counter to the hash that was used at that count.
+#[derive(Default)]
+struct Ram {
+    used: u64,
+    tick: u64,
+    blocks: HashMap<u64, RamBlock>,
+    order: BTreeMap<u64, u64>,
+}
+
+fn ram_cost(tokens: usize, payload: usize) -> u64 {
+    (tokens * 8 + payload) as u64
 }
 
 /// A block on disk: its identity, where it belongs in the chain, and the tokens it covers.
@@ -391,5 +534,89 @@ mod tests {
             assert!(!tier.spill(1, 0, &[1], b"x"));
             assert!(tier.load(1).is_none());
         }
+    }
+
+    #[test]
+    fn a_block_in_memory_is_served_without_a_disk_and_remembers_its_place() {
+        let tier = KvTier::ram_only(1 << 20);
+        assert!(tier.enabled());
+        assert!(!tier.has(0x22));
+        assert!(tier.spill(0x22, 0x11, &[7, 8, 9], b"kv"));
+        assert!(tier.has(0x22));
+        assert_eq!(tier.load(0x22).as_deref(), Some(&b"kv"[..]));
+        assert_eq!(tier.ram_parent(0x22), Some(0x11));
+        assert_eq!(tier.stats()["ram_hits"], 1);
+        assert_eq!(tier.stats()["spills"], 1, "a block written to memory only counts as written"); 
+        assert_eq!(tier.stats()["ram_blocks"], 1);
+        // nothing is on a disk that is not there
+        assert!(tier.entries().is_empty());
+        assert!(tier.load_for(0x22, &[7, 8, 10]).is_none(), "a block with other tokens under this hash is not the one meant");
+        assert_eq!(tier.load_for(0x22, &[7, 8, 9]).as_deref(), Some(&b"kv"[..]));
+    }
+
+    #[test]
+    fn the_memory_budget_drops_the_block_used_least_recently() {
+        let cost = ram_cost(1, 4);
+        let tier = KvTier::ram_only(cost * 2);
+        assert!(tier.spill(1, 0, &[1], b"aaaa"));
+        assert!(tier.spill(2, 1, &[2], b"bbbb"));
+        // reading block 1 makes block 2 the oldest
+        assert!(tier.load(1).is_some());
+        assert!(tier.spill(3, 2, &[3], b"cccc"));
+        assert!(tier.has(1) && tier.has(3), "the block that was just read stayed");
+        assert!(!tier.has(2), "the least recently used block went");
+        assert_eq!(tier.stats()["ram_used_bytes"], cost * 2);
+        // a block larger than the whole budget is not kept, and nothing else is thrown out for it
+        assert!(!tier.spill(4, 3, &[4], &[0u8; 64]));
+        assert!(tier.has(1) && tier.has(3));
+        // writing a block again replaces it and does not count twice
+        assert!(tier.spill(1, 0, &[1], b"AAAA"));
+        assert_eq!(tier.stats()["ram_used_bytes"], cost * 2);
+        assert_eq!(tier.load(1).as_deref(), Some(&b"AAAA"[..]));
+    }
+
+    #[test]
+    fn memory_is_read_first_and_a_block_from_the_disk_comes_back_into_memory() {
+        let dir = temporary("two-tiers");
+        let tier = KvTier::at(&dir, 1 << 20).with_ram(1 << 20);
+        assert!(tier.spill(5, 0, &[5], b"both"));
+        // gone from the disk: memory still has it
+        let path = tier.file(5).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(tier.has(5));
+        assert_eq!(tier.load(5).as_deref(), Some(&b"both"[..]));
+        assert_eq!(tier.stats()["ram_hits"], 1);
+        // gone from memory: the disk still has it, and reading it puts it back into memory
+        assert!(tier.spill(6, 5, &[6], b"disk"));
+        assert_eq!(tier.ram_clear(), 2);
+        assert!(!tier.ram_has(6));
+        assert_eq!(tier.load(6).as_deref(), Some(&b"disk"[..]));
+        assert!(tier.ram_has(6), "a block read from the disk is kept in memory");
+        assert_eq!(tier.ram_parent(6), Some(5), "with the place in the chain the file carried");
+        assert_eq!(tier.stats()["ram_hits"], 1, "and the read from the disk is not counted as a memory hit");
+    }
+
+    #[test]
+    fn clearing_empties_both_tiers() {
+        let tier = KvTier::at(temporary("clear-both"), 1 << 20).with_ram(1 << 20);
+        assert!(tier.spill(1, 0, &[1], b"aa"));
+        assert!(tier.spill(2, 1, &[2], b"bb"));
+        assert_eq!(tier.clear(), 2);
+        assert!(!tier.has(1) && !tier.has(2));
+        assert_eq!(tier.stats()["ram_blocks"], 0);
+        assert_eq!(tier.stats()["ram_used_bytes"], 0);
+        let only = KvTier::ram_only(1 << 20);
+        assert!(only.spill(3, 0, &[3], b"cc"));
+        assert_eq!(only.clear(), 1);
+        assert!(!only.has(3));
+    }
+
+    #[test]
+    fn a_tier_without_a_directory_and_without_memory_is_off() {
+        let off = KvTier::new(None, 0, 0, 0);
+        assert!(!off.enabled());
+        assert!(!off.spill(1, 0, &[1], b"x"));
+        assert!(!off.has(1));
+        assert!(off.load(1).is_none());
     }
 }

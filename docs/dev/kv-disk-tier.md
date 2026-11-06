@@ -1,4 +1,4 @@
-# KV disk tiering: writes and reads both work
+# KV tiering: memory and disk, writes and reads both work
 
 `mem/kv_tier.rs` exists and is tested: one file per block, named after the block's chain hash, `FLLM_KV_DISK_DIR` /
 `FLLM_KV_DISK_BYTES`, an LRU budget, atomic writes (temporary name + rename, so a crash cannot leave a half block under a
@@ -130,3 +130,29 @@ of the same size; the cache then held 246 blocks and had dropped the first one; 
 disk tier answered in 0.44 s with 560 of 568 prompt tokens from the cache (35 blocks read back, 0 misses, same text); the control without a
 tier needed 4.18 s with 0 cached (the cold request took 3.6-3.7 s). The disk was this host's SSD with the files in the page cache, so a
 slower disk reads more slowly. Not measured: a busy server with many requests at once, and a GPU (the KV import then copies to the device).
+
+## A memory tier in front of the disk
+
+`FLLM_KV_RAM_BYTES` (Settings > Engine: *Keep the most recent ones in memory*) adds host memory in front of the disk, inside the same
+`KvTier`, so the restart read, the reload while running, the statistics and the Studio buttons all see both. Every block that is written
+lands in memory and, when a folder is set, on disk. The least recently used block leaves memory when the budget is full; reading a block
+makes it the most recent one. A read looks in memory first, then on disk, and a block that came from the disk is put into memory again.
+Either tier can be off: with a budget and no folder the tier works as a cache in memory only (nothing survives a restart), with a folder and
+no budget it is the disk tier of before. A block with other tokens under the same hash is refused in memory as on disk, a block larger than
+the whole budget is not kept, and `DELETE /admin/kv-tier` empties both. `GET /admin/kv-tier` adds `ram_max_bytes`, `ram_used_bytes`,
+`ram_blocks` and `ram_hits`.
+
+Why it matters on a server: host memory is read in microseconds where a disk takes milliseconds, and an 8-GPU server has hundreds of GB of it
+next to a few hundred GB of GPU memory per card, so a prefix the GPU pool had to drop is a memory read away instead of a recompute.
+
+Tests: memory alone serves and keeps the place in the chain, the budget drops the least recently used block (reading renews a block), memory
+is read before disk and a disk block returns into memory, clearing empties both, a tier with neither is off; at the runtime level a dropped
+prefix comes back from memory with no disk at all, a memory tier too small to hold the chain leaves the disk to do it, and salted requests
+stay out of memory too. Six mutations (reading does not renew, a disk block does not return, the token check missing, the budget not
+enforced, clear leaving memory, `has` blind to memory) each fail a test.
+
+Measured on a real model (`scripts/kv-ram.py`, the setup of the disk run above, memory tier only, no folder): the dropped 568-token prompt came
+back in 0.66 s with 560 tokens cached (35 blocks read back, same text); the control without a tier needed 3.90 s with 0 cached. The disk run
+took 0.44 s because its files were in the page cache of this host; the difference between the two figures is noise of this machine, not an
+advantage of the disk. Not measured: the copy between GPU memory and host memory (this host has no GPU; the import goes through the same
+`kv_import_block` the disk read uses) and a busy server.

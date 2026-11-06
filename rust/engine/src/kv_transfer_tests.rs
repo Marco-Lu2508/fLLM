@@ -508,3 +508,86 @@ fn a_prompt_the_disk_does_not_have_does_not_empty_the_cache() {
     drop(rt);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn runtime_with_ram_tier(dir: Option<&std::path::Path>, ram_bytes: u64) -> InferenceRuntime {
+    let mut rt = runtime();
+    let tier = match dir {
+        Some(dir) => crate::mem::kv_tier::KvTier::at(dir, 64 << 20).with_ram(ram_bytes),
+        None => crate::mem::kv_tier::KvTier::ram_only(ram_bytes),
+    };
+    let tier = std::sync::Arc::new(tier);
+    rt.spill_tx = spawn_spill_writer(std::sync::Arc::clone(&tier));
+    rt.kv_tier = tier;
+    rt.kv_warmed = true;
+    rt
+}
+
+fn wait_for_the_tier(rt: &mut InferenceRuntime, blocks: usize) {
+    for _ in 0..400 {
+        rt.spill_pending();
+        if rt.kv_tier.stats()["ram_blocks"].as_u64().unwrap_or(0) as usize >= blocks {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("{} of {blocks} blocks reached the memory tier", rt.kv_tier.stats()["ram_blocks"]);
+}
+
+/// A server without a disk folder but with host memory for blocks: the prefix the cache dropped under pressure comes back from memory.
+#[test]
+fn a_prefix_the_cache_dropped_is_read_back_from_host_memory_without_any_disk() {
+    let mut rt = runtime_with_ram_tier(None, 64 << 20);
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 4);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_tier(&mut rt, 4);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    assert!(rt.scheduler.prefix_block_of(first).is_none());
+    let before = rt.kv_reloaded;
+    let (tokens, cached) = ask(&mut rt, "again", &a, 4);
+    assert_eq!(tokens, reference, "generation from blocks read back from memory differs from a full prefill");
+    assert_eq!(cached, 4 * block);
+    assert_eq!(rt.kv_reloaded - before, 4);
+    assert!(rt.kv_tier.stats()["ram_hits"].as_u64().unwrap() >= 4, "the blocks did not come from memory");
+    assert!(rt.kv_tier.entries().is_empty(), "there is no disk");
+}
+
+/// Memory and disk together: when the memory tier is too small to hold the chain, the rest still comes from the disk.
+#[test]
+fn what_the_memory_tier_cannot_hold_still_comes_from_the_disk() {
+    let dir = std::env::temp_dir().join(format!("fllm-kvt-two-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rt = runtime_with_ram_tier(Some(&dir), 1); // 1 byte: nothing fits, the disk does it all
+    let block = rt.scheduler.cfg.block_size;
+    let a = prompt(4 * block + 3);
+    let reference = generate(&mut rt, "a", &a, 4);
+    let first = rt.scheduler.cached_prompt_chain(&a)[0].0;
+    wait_for_the_disk(&mut rt, 4);
+    assert_eq!(rt.kv_tier.stats()["ram_blocks"], 0);
+    push_out_of_the_cache(&mut rt, first, 4 * block + 3);
+    let (tokens, cached) = ask(&mut rt, "again", &a, 4);
+    assert_eq!(tokens, reference);
+    assert_eq!(cached, 4 * block);
+    assert_eq!(rt.kv_tier.stats()["ram_hits"], 0, "memory held nothing, so nothing can have come from it");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Salted requests stay out of the memory tier as well (the same spill queue feeds both).
+#[test]
+fn the_blocks_of_a_salted_request_do_not_go_to_host_memory() {
+    let mut rt = runtime_with_ram_tier(None, 64 << 20);
+    let block = rt.scheduler.cfg.block_size;
+    let long = prompt(3 * block + 3);
+    assert_eq!(cached_under_salt(&mut rt, "salted", &long, 5), 0);
+    for _ in 0..40 {
+        rt.spill_pending();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(rt.kv_tier.stats()["ram_blocks"], 0);
+    let mut other = prompt(3 * block + 3);
+    other[0] += 1;
+    generate(&mut rt, "plain", &other, 2);
+    wait_for_the_tier(&mut rt, 1);
+}

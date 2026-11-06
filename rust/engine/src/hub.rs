@@ -1784,7 +1784,7 @@ pub fn idle_unload_minutes() -> u64 {
 
 /// The engine options of the Studio page (`studio.json`, key `engine`) and the environment variable each one sets. The page writes
 /// them; they take effect when the server starts again.
-pub const ENGINE_OPTIONS: [(&str, &str); 11] = [
+pub const ENGINE_OPTIONS: [(&str, &str); 12] = [
     ("output_cache", "FLLM_OUTPUT_CACHE"),
     ("output_cache_mb", "FLLM_OUTPUT_CACHE_BYTES"),
     ("output_cache_ttl", "FLLM_OUTPUT_CACHE_TTL"),
@@ -1796,6 +1796,7 @@ pub const ENGINE_OPTIONS: [(&str, &str); 11] = [
     ("otel_service", "FLLM_OTEL_SERVICE"),
     ("kv_disk_dir", "FLLM_KV_DISK_DIR"),
     ("kv_disk_mb", "FLLM_KV_DISK_BYTES"),
+    ("kv_ram_mb", "FLLM_KV_RAM_BYTES"),
 ];
 
 /// The engine options saved by the page (empty when none).
@@ -1807,7 +1808,7 @@ pub fn engine_settings() -> serde_json::Map<String, Value> {
 fn engine_env_value(key: &str, value: &Value) -> Option<String> {
     let text = match value {
         Value::Bool(on) => if *on { "on" } else { "off" }.to_owned(),
-        Value::Number(n) if key == "output_cache_mb" || key == "kv_disk_mb" => (n.as_u64()? << 20).to_string(),
+        Value::Number(n) if key == "output_cache_mb" || key == "kv_disk_mb" || key == "kv_ram_mb" => (n.as_u64()? << 20).to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.trim().to_owned(),
         _ => return None,

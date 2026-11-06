@@ -603,7 +603,7 @@ fn engine_defaults() -> Value {
     json!({
         "output_cache": "exact", "output_cache_mb": 64, "output_cache_ttl": 3600, "cache_scope": "global",
         "prefix_cache": true, "prefix_salt": "", "preemption": "recompute", "otel_endpoint": "", "otel_service": "fllm",
-        "kv_disk_dir": "", "kv_disk_mb": 8192,
+        "kv_disk_dir": "", "kv_disk_mb": 8192, "kv_ram_mb": 0,
     })
 }
 
@@ -657,6 +657,7 @@ fn engine_changes(body: &Value) -> Result<Vec<(&'static str, Option<Value>)>, St
         ("output_cache_mb", engine_number(body, "output_cache_mb", 1, 65_536)),
         ("output_cache_ttl", engine_number(body, "output_cache_ttl", 1, 31_536_000)),
         ("kv_disk_mb", engine_number(body, "kv_disk_mb", 1, 4_194_304)),
+        ("kv_ram_mb", engine_number(body, "kv_ram_mb", 0, 4_194_304)),
         ("cache_scope", engine_choice(body, "cache_scope", &["global", "tenant", "off"])),
         ("preemption", engine_choice(body, "preemption", &["recompute", "swap"])),
     ] {
@@ -1164,10 +1165,12 @@ mod tests {
         assert!(ok.contains(&("output_cache_mb", Some(json!(128)))));
         assert!(ok.contains(&("prefix_cache", Some(json!(false)))));
         assert!(ok.contains(&("prefix_salt", Some(json!("a")))));
+        assert!(engine_changes(&json!({"kv_ram_mb": "2048"})).unwrap().contains(&("kv_ram_mb", Some(json!(2048)))));
+        assert!(engine_changes(&json!({"kv_ram_mb": 0})).unwrap().contains(&("kv_ram_mb", Some(json!(0)))), "0 switches the memory tier off");
         // an empty text takes an option back to its default
         assert_eq!(engine_changes(&json!({"otel_endpoint": "", "prefix_salt": ""})).unwrap(), vec![("prefix_salt", None), ("otel_endpoint", None)]);
         for bad in [json!({"output_cache": "maybe"}), json!({"output_cache_mb": 0}), json!({"cache_scope": "x"}), json!({"otel_endpoint": "ftp://x"}), json!({"prefix_salt": "a
-b"}), json!({"preemption": 3})] {
+b"}), json!({"preemption": 3}), json!({"kv_ram_mb": -1}), json!({"kv_ram_mb": 5_000_000})] {
             assert!(engine_changes(&bad).is_err(), "{bad}");
         }
     }
