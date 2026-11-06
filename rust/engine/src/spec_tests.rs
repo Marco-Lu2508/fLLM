@@ -90,6 +90,43 @@ fn every_speculation_source_reproduces_greedy_decoding() {
     assert!(stats.mean_emitted() > 2.0, "{stats:?}");
 }
 
+/// The suffix cache across a restart, through the runtime: the first run generates and the finished generation is written; a second
+/// runtime on the same directory restores it and, given the same prompt, drafts from the first run's answer from its very first step.
+/// The output stays what plain decoding gives; a file of another model digest is not used.
+#[test]
+fn the_suffix_cache_survives_a_restart_and_keeps_the_output() {
+    let dir = std::env::temp_dir().join(format!("fllm-suffix-rt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (plain, _) = generate(&mut runtime(0), "plain", 40, SamplingParams::default());
+
+    let mut first = runtime(0);
+    first.enable_suffix(5, SuffixConfig::default()).unwrap();
+    assert_eq!(first.persist_suffix_cache(&dir, "digest1"), 0, "nothing to restore on the first run");
+    let (tokens, _) = generate(&mut first, "first", 40, SamplingParams::default());
+    assert_eq!(tokens, plain);
+    // the generation has finished and no request is left: nothing schedules another round, as on an idle or stopping worker. A write
+    // with no age limit still has to find the finished generation.
+    assert_eq!(first.active_requests(), 0);
+    assert!(first.save_suffix_cache(std::time::Duration::ZERO), "the finished generation is written");
+    assert!(!first.save_suffix_cache(std::time::Duration::ZERO), "and nothing is rewritten when nothing changed");
+    drop(first);
+
+    let mut second = runtime(0);
+    second.enable_suffix(5, SuffixConfig::default()).unwrap();
+    assert_eq!(second.persist_suffix_cache(&dir, "digest1"), 1, "the earlier generation comes back");
+    let (tokens, _) = generate(&mut second, "second", 40, SamplingParams::default());
+    assert_eq!(tokens, plain, "restored drafts changed the output");
+    let stats = second.speculative_status().2;
+    assert!(stats.steps > 0 && stats.acceptance_rate() > 0.5, "the restored generation did not draft: {stats:?}");
+
+    // another model has its own file name and finds nothing of the first model's generations (a file that carries the wrong digest
+    // under the right name is covered in `mem::suffix_tier`)
+    let mut other = runtime(0);
+    other.enable_suffix(5, SuffixConfig::default()).unwrap();
+    assert_eq!(other.persist_suffix_cache(&dir, "digest2"), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn assert_close_logprobs(got: &[Option<TokenLogprobs>], want: &[Option<TokenLogprobs>], what: &str) {
     assert_eq!(got.len(), want.len());
     for (i, (g, w)) in got.iter().zip(want).enumerate() {

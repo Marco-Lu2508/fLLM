@@ -99,6 +99,8 @@ pub struct InferenceRuntime {
     /// Writes for the disk tier, off the step path: file I/O must never delay a token.
     spill_tx: Option<std::sync::mpsc::SyncSender<SpillJob>>,
     kv_warmed: bool,
+    /// The suffix cache on disk (`FLLM_SUFFIX_DIR`): the file of this model and the state of the last write.
+    suffix_file: Option<SuffixFile>,
     /// KV data of the sequences preempted by swap, one export per block in table order.
     swap_store: std::collections::HashMap<i64, Vec<Vec<u8>>>,
     /// n > 1 can fork sequences on this backend (host arrays, or device pools whose block copy passed its self check).
@@ -224,6 +226,7 @@ impl InferenceRuntime {
             kv_tier,
             spill_tx,
             kv_warmed: false,
+            suffix_file: None,
             swap_store: Default::default(),
             fork_ok: false,
             swap_out_blocks: 0,
@@ -1304,6 +1307,48 @@ impl InferenceRuntime {
         self.spec_method = crate::speculative::SpeculativeMethod::Suffix;
         self.spec_tokens = tokens;
         Ok(())
+    }
+
+    /// Keeps the suffix cache in `dir` across restarts, in the file of the model with this digest (`ModelFacts::digest`). The documents of
+    /// an earlier run are read now; `save_suffix_cache` writes the finished generations back. Without `--speculative suffix` there is
+    /// nothing to keep and the call is a no-op. Returns how many documents were restored.
+    pub fn persist_suffix_cache(&mut self, dir: &std::path::Path, digest: &str) -> usize {
+        let Some(suffix) = self.suffix.as_mut() else { return 0 };
+        let Some(path) = crate::mem::suffix_tier::path_for(dir, digest) else {
+            tracing::warn!("the model digest is not usable as a file name; the suffix cache is not kept on disk");
+            return 0;
+        };
+        let restored = suffix.restore(&crate::mem::suffix_tier::load(&path, digest));
+        self.suffix_file = Some(SuffixFile { path, digest: digest.to_owned(), saved_docs: restored, saved_at: Instant::now() });
+        restored
+    }
+
+    /// Writes the finished generations when there are new ones and the last write is older than `min_age` (a restart or a shutdown asks
+    /// with zero). The file is small (the budget of the cache bounds it) and written in one piece under a temporary name.
+    pub fn save_suffix_cache(&mut self, min_age: std::time::Duration) -> bool {
+        let (Some(suffix), Some(file)) = (self.suffix.as_mut(), self.suffix_file.as_mut()) else { return false };
+        if file.saved_at.elapsed() < min_age {
+            return false;
+        }
+        // A generation that has just ended is archived by the next scheduling round, and there is none once the last request is
+        // done (an idle worker, or one that is shutting down): archive what no longer runs before looking at the archive.
+        let live = self.scheduler.sequences.keys().copied().collect();
+        suffix.retain_live(&live);
+        let docs = suffix.archived_documents();
+        if docs.len() == file.saved_docs && file.saved_docs > 0 {
+            return false;
+        }
+        file.saved_at = Instant::now();
+        match crate::mem::suffix_tier::save(&file.path, &file.digest, &docs) {
+            Ok(()) => {
+                file.saved_docs = docs.len();
+                true
+            }
+            Err(error) => {
+                tracing::warn!("could not write the suffix cache: {error}");
+                false
+            }
+        }
     }
 
     pub fn enable_mtp(&mut self) -> Result<(), String> {
@@ -2861,6 +2906,14 @@ fn spawn_spill_writer(tier: std::sync::Arc<crate::mem::kv_tier::KvTier>) -> Opti
         })
         .ok()?;
     Some(tx)
+}
+
+/// The file of the suffix cache on disk and what was written last.
+struct SuffixFile {
+    path: std::path::PathBuf,
+    digest: String,
+    saved_docs: usize,
+    saved_at: Instant,
 }
 
 #[cfg(test)]

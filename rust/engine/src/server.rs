@@ -949,8 +949,15 @@ fn run_worker_loop(
             // wake once a second while idle so that /ready can tell an idle worker from a stuck one
             match rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(command) => { metrics.observability.dequeue(); accept_command(command, &mut runtime, &mut outputs, &metrics); },
-                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                    // idle: a good moment to keep the finished generations of the suffix cache (at most every five minutes)
+                    runtime.save_suffix_cache(std::time::Duration::from_secs(300));
+                    continue;
+                }
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                    runtime.save_suffix_cache(std::time::Duration::ZERO);
+                    break;
+                }
             }
         }
         while let Ok(command) = rx.try_recv() {

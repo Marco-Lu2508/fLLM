@@ -508,6 +508,41 @@ impl SuffixCache {
         self.evict();
     }
 
+    /// The finished generations, oldest first, for the disk tier. Running sequences are not included: only `archive_doc` puts a document
+    /// into `archive`, and it marks the document as no longer live in the same step. The `live` check below states that out loud, so
+    /// a later change to how documents are archived cannot start writing half-finished text to disk without a test noticing.
+    pub fn archived_documents(&self) -> Vec<crate::mem::suffix_tier::StoredDoc> {
+        self.archive
+            .iter()
+            .filter_map(|id| self.docs.get(id))
+            .filter(|doc| !doc.live && doc.tokens.len() >= self.cfg.min_match)
+            .map(|doc| crate::mem::suffix_tier::StoredDoc { salt: doc.salt, tokens: doc.tokens.clone() })
+            .collect()
+    }
+
+    /// Takes the documents of an earlier run (oldest first) into the archive, up to the token budget; the newest are kept when the
+    /// file holds more than the budget. Returns how many documents were taken.
+    pub fn restore(&mut self, docs: &[crate::mem::suffix_tier::StoredDoc]) -> usize {
+        // owners of restored documents are negative and never collide with a sequence id
+        let mut taken = 0;
+        let mut budget = self.cfg.token_budget.saturating_sub(self.total);
+        let mut start = docs.len();
+        for (index, doc) in docs.iter().enumerate().rev() {
+            if doc.tokens.len() > budget {
+                break;
+            }
+            budget -= doc.tokens.len();
+            start = index;
+        }
+        for (offset, doc) in docs[start..].iter().enumerate() {
+            let owner = -1 - (self.next_doc as i64) - offset as i64;
+            self.observe_salted(owner, doc.salt, &doc.tokens);
+            self.finish(owner);
+            taken += 1;
+        }
+        taken
+    }
+
     /// Archive the documents of every owner that is not in `live` (sequences that finished or were cancelled).
     pub fn retain_live(&mut self, live: &std::collections::HashSet<i64>) {
         let gone: Vec<i64> = self.by_owner.keys().filter(|o| !live.contains(o)).copied().collect();
@@ -980,6 +1015,53 @@ mod tests {
         // the same entries do work for the owner's own salt
         cache.observe_salted(3, 7, &context);
         assert_eq!(cache.propose_salted(3, 7, &context, 3), vec![15, 16, 17]);
+    }
+
+    /// A restart in miniature: the finished generations of one cache are written, read and restored into a new one, which then drafts from
+    /// them; the salts survive, so the separation between tenants survives the restart too.
+    #[test]
+    fn suffix_cache_restores_its_archive_after_a_restart_with_the_salts() {
+        let dir = std::env::temp_dir().join(format!("fllm-suffix-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = crate::mem::suffix_tier::path_for(&dir, "m1").unwrap();
+        let mut first = SuffixCache::new(SuffixConfig::default());
+        let secret: Vec<i64> = vec![10, 11, 12, 13, 14, 15, 16, 17];
+        first.observe_salted(1, 7, &secret);
+        first.finish(1);
+        first.observe(2, &[1, 2, 3, 4, 5, 6]); // still running: not saved
+        let archived = first.archived_documents();
+        assert_eq!(archived.len(), 1, "only the finished generation is handed to the disk tier");
+        assert_eq!(archived[0].tokens, secret);
+        // a document that is archived but shorter than the shortest context that can start a draft is of no use and stays out
+        first.observe(3, &[9, 9]);
+        first.finish(3);
+        assert_eq!(first.archived_documents().len(), 1, "a document too short to draft from is not written");
+        crate::mem::suffix_tier::save(&path, "m1", &archived).unwrap();
+
+        let mut second = SuffixCache::new(SuffixConfig::default());
+        assert_eq!(second.restore(&crate::mem::suffix_tier::load(&path, "m1")), 1, "only the finished generation came back");
+        let context = vec![5, 6, 12, 13, 14];
+        second.observe_salted(10, 7, &context);
+        assert_eq!(second.propose_salted(10, 7, &context, 3), vec![15, 16, 17], "the restored text drafts for its own salt");
+        second.observe_salted(11, 8, &context);
+        assert!(second.propose_salted(11, 8, &context, 3).is_empty(), "and for nobody else");
+        second.observe(12, &context);
+        assert!(second.propose(12, &context, 3).is_empty(), "not for the unsalted namespace either");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file larger than the budget keeps the newest generations.
+    #[test]
+    fn suffix_cache_restore_respects_the_token_budget_and_keeps_the_newest() {
+        let docs: Vec<crate::mem::suffix_tier::StoredDoc> =
+            (0..6).map(|i| crate::mem::suffix_tier::StoredDoc { salt: 0, tokens: (0..6).map(|t| i * 100 + t).collect() }).collect();
+        let mut cache = SuffixCache::new(SuffixConfig { min_match: 3, token_budget: 20 });
+        assert_eq!(cache.restore(&docs), 3, "20 tokens hold three documents of six");
+        assert_eq!(cache.tokens_cached(), 18);
+        cache.observe(99, &[500, 501, 502]);
+        assert_eq!(cache.propose(99, &[500, 501, 502], 2), vec![503, 504], "the newest document is there");
+        cache.observe(98, &[0, 1, 2]);
+        assert!(cache.propose(98, &[0, 1, 2], 2).is_empty(), "the oldest was left out");
     }
 
     #[test]

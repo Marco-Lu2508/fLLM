@@ -1628,6 +1628,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             fllm_engine::speculative::SuffixConfig { min_match: speculative_min_match, token_budget: speculative_cache_tokens },
         )?;
         eprintln!("[fllm-rs] Suffix speculation enabled: up to {tokens} tokens, matches of at least {speculative_min_match} tokens across the conversation and recent generations (cache {speculative_cache_tokens} tokens)");
+        // `FLLM_SUFFIX_DIR` keeps the finished generations across restarts, in one file per model (named by the model's digest)
+        if let Some(dir) = env::var("FLLM_SUFFIX_DIR").ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) {
+            let restored = runtime.persist_suffix_cache(std::path::Path::new(&dir), &facts.digest);
+            eprintln!("[fllm-rs] Suffix cache kept in {dir}: {restored} earlier generations restored");
+        }
     }
     if device != "cpu" && multi_devices.is_none() {
         let target_dev = plan_device.as_ref();

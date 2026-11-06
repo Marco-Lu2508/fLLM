@@ -22,6 +22,15 @@ its draft length between 1 and the configured maximum from its recent acceptance
 
 ## Models with recurrent layers
 
+**The suffix cache survives a restart.** With `FLLM_SUFFIX_DIR=<dir>` the finished generations are written to `<dir>/suffix-<model digest>.bin`
+(the digest of the model file, so the token ids of one tokenizer are never read by another model) and read back at the next start. The
+namespace (`cache_salt`) of every generation is kept, so a restart does not let one caller's text draft for another. The index is rebuilt
+from the tokens, not stored. Measured on Qwen2.5-0.5B Q8_0 with the same question asked in two processes: the first drafted 18 tokens and
+had 7 accepted (2.17 tokens per verification step, 3.00 s); the second, which restored the first one's answer, drafted 67 and had all 67
+accepted (6.58 tokens per step, 1.63 s); a third process without a directory behaved like the first (2.17, 2.88 s). The text was the same in
+all three. That is the best case (an identical question); a question that only resembles the first gains less, and that was not measured.
+A hard kill loses the generations since the last write; the answers stay correct, the cache is only faster.
+
 Prompt lookup (`ngram`), conversation lookup (`suffix`) and a draft model work with models that keep a recurrent state besides (or
 instead of) a KV cache: Gated DeltaNet (Qwen3.5, Qwen3-Next, Qwen3.8-Flash-Next), Mamba 1 and 2 (also inside Jamba, Falcon-H1,
 Nemotron-H, Granite-hybrid), Zamba2, LFM2 short convolutions, Kimi Delta Attention and RWKV 6 / 7. A rejected draft token has already
