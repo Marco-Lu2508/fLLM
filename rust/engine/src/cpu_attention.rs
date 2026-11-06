@@ -338,7 +338,7 @@ pub fn attention_with(
             }
             for r in 0..nr {
                 let row = &mut scores[r * 64..r * 64 + nk];
-                let bmax = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let bmax = row_max(row, path);
                 if bmax == f32::NEG_INFINITY {
                     row.fill(0.0);
                     continue;
@@ -504,6 +504,17 @@ fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize
     for (r, q) in queries.iter().enumerate() {
         out[r * stride] = score_half(q, k, path) * scale;
     }
+}
+/// Largest value of a row of scores (`f32::NEG_INFINITY` for an empty row). A maximum does not depend on the order of the comparisons, so
+/// the vector kernel gives the value of the scalar fold; scores are finite or minus infinity (masked positions), never NaN.
+fn row_max(row: &[f32], path: Path) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if matches!(path, Path::Avx2 | Path::AvxVnni | Path::Avx512Bw | Path::Avx512Vnni) {
+        // SAFETY: every x86 path other than `Scalar` implies AVX2.
+        return unsafe { x86::row_max(row) };
+    }
+    let _ = path;
+    row.iter().copied().fold(f32::NEG_INFINITY, f32::max)
 }
 fn decode_q8(v: &[i8], scales: &[u16], out: &mut [f32], path: Path) {
     match path {
@@ -787,6 +798,23 @@ mod x86 {
     }
     /// The key row is converted once (at most 256 values, 32 registers of 8) and kept in registers/stack; each query then runs the
     /// loop of `score_half` over it: one accumulator, the same fused multiply-add per 8 values, the same horizontal sum.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn row_max(row: &[f32]) -> f32 {
+        let mut m = _mm256_set1_ps(f32::NEG_INFINITY);
+        let mut i = 0;
+        while i + 8 <= row.len() {
+            m = _mm256_max_ps(m, _mm256_loadu_ps(row.as_ptr().add(i)));
+            i += 8;
+        }
+        let t = _mm_max_ps(_mm256_castps256_ps128(m), _mm256_extractf128_ps(m, 1));
+        let t = _mm_max_ps(t, _mm_movehl_ps(t, t));
+        let t = _mm_max_ss(t, _mm_shuffle_ps(t, t, 0x55));
+        let mut best = _mm_cvtss_f32(t);
+        for &v in &row[i..] {
+            best = best.max(v);
+        }
+        best
+    }
     #[target_feature(enable = "avx2,fma,f16c")]
     pub(super) unsafe fn score_half_tile(queries: &[&[f32]], k: &[u16], out: &mut [f32], stride: usize, scale: f32) {
         // The buffer is written for `k.len()` values before it is read, so it needs no zero fill (1 KB per key row otherwise).
@@ -1288,6 +1316,32 @@ mod score_tile_tests {
 }
 
 #[cfg(test)]
+mod row_max_tests {
+    use super::{row_max, Path};
+
+    /// The vector maximum must equal the scalar fold for every length, with masked positions (minus infinity) anywhere in the row.
+    #[test]
+    fn the_vector_maximum_is_the_scalar_maximum() {
+        let mut state = 21u32;
+        let mut rnd = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 9) as f32 / (1u32 << 23) as f32) * 40.0 - 20.0
+        };
+        let path = Path::detect();
+        for len in 0..=130usize {
+            for masked in [0usize, 1, len / 2, len] {
+                let mut row: Vec<f32> = (0..len).map(|_| rnd()).collect();
+                for i in 0..masked.min(len) {
+                    row[(i * 7 + 3) % len.max(1)] = f32::NEG_INFINITY;
+                }
+                let want = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                assert_eq!(row_max(&row, path).to_bits(), want.to_bits(), "length {len}, {masked} masked");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod cost_tests {
     use super::{attention_with, Cache, Options};
     use half::f16;
@@ -1343,7 +1397,7 @@ mod cost_tests {
             scores.copy_from_slice(&saved);
             for r in 0..nq {
                 let row = &mut scores[r * 64..r * 64 + 64];
-                let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let m = super::row_max(row, path);
                 std::hint::black_box(crate::cpu_elementwise::exp_shifted(row, m));
             }
         });
